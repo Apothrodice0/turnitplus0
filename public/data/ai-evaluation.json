@@ -1,0 +1,587 @@
+{
+  "schema": "turnitplus-ai-positive-evaluation",
+  "version": 10,
+  "validated": false,
+  "generatedBy": "tools/evaluate-ai-detector.ts",
+  "generatedAt": "2026-08-08T10:48:30.208Z",
+  "model": "modernbert-raid-mage-onnx-fp32-official-v2",
+  "inputContractVersion": 3,
+  "calibrationStatus": "positive-control-required",
+  "minimumPositiveDocuments": 30,
+  "positiveSetSize": 0,
+  "hybridSetSize": 0,
+  "testSampleSize": 0,
+  "testPositiveCount": 0,
+  "recall": null,
+  "precision": null,
+  "auc": null,
+  "aucCi95": null,
+  "preliminaryPositiveControl": {
+    "status": "preliminary-external-positive-control",
+    "calibrationEligible": false,
+    "decisionUse": "Diagnostic evidence that the detector responds to user-attested machine-generated documents; excluded from controlled recall, AUC, threshold fitting, and production calibration.",
+    "sessionCount": 42,
+    "independentDocumentCount": 39,
+    "duplicateSessionCount": 3,
+    "reviewFloorHumanPercentile": 90,
+    "documentsAtOrAboveReviewFloor": 39,
+    "diagnosticDetectionRate": 1,
+    "minimumIndependentDocumentTarget": 30,
+    "minimumIndependentDocumentTargetReached": true,
+    "displayedMetric": "continuous z-normalized document-median log-odds",
+    "displayedScoreContract": {
+      "basis": "z = (document median log-odds - verified-human median) / verified-human sample standard deviation",
+      "anchors": {
+        "humanMedian": {
+          "medianLogOdds": 2.9724700990939708,
+          "displayScore": 0
+        },
+        "human90thPercentile": {
+          "medianLogOdds": 3.2403433104976163,
+          "displayScore": 20
+        },
+        "highestObservedHuman": {
+          "medianLogOdds": 3.3853049194595917,
+          "displayScore": 50
+        }
+      },
+      "humanStandardDeviation": 0.8585508804569909,
+      "humanMedianAbsoluteDeviation": 0.2509542813122956,
+      "humanRobustSigma": 0.3720648174736094,
+      "green": "0-19",
+      "blue": "20-50",
+      "red": "51-100",
+      "note": "Continuous and monotonic. The three display anchors are expressed in the same standardized space, so changing SD to MAD alone would not change the mapped score. Scores above the highest observed human reference extrapolate linearly and are capped at 100. This is a screening score, not a percentage of AI-authored words."
+    },
+    "displayedScoreSpreadDiagnostic": {
+      "conclusion": "The positive-control spread is substantive rather than a rounding plateau. The lowest control remains within the observed upper human-reference range, so the conservative color boundary is unchanged.",
+      "thesisSummary": "Document-median AUC 0.9939 with a positive z-span of 0.1169. The ranking is strong, but the absolute positive-class margin is narrow and sensitive to generator or rewriting shifts.",
+      "positiveZSpan": 0.1169,
+      "lowest": {
+        "id": "external-gpt56-20260807-ddd5e32c71bc",
+        "displayScore": 42,
+        "standardizedMedianDistance": 0.4353,
+        "medianLogOdds": 3.346162,
+        "humanReferencePercentile": 96.59
+      },
+      "highest": {
+        "id": "external-gpt56-20260807-ae0635f282b3",
+        "displayScore": 72,
+        "standardizedMedianDistance": 0.5522,
+        "medianLogOdds": 3.446583,
+        "humanReferencePercentile": 100
+      }
+    },
+    "displayedReviewBand": 51,
+    "documentsAtOrAboveDisplayedReviewBand": 28,
+    "displayedReviewDetectionRate": 0.7179,
+    "displayedScoreUniqueValueCount": 21,
+    "displayedScoreObservedRange": {
+      "verifiedHuman": {
+        "minimum": 0,
+        "maximum": 50
+      },
+      "externalPositiveControl": {
+        "minimum": 42,
+        "maximum": 72
+      }
+    },
+    "displayedCoveragePassageThreshold": 0.9801311795213746,
+    "displayedCoveragePassageLogOddsThreshold": 3.898534726480567,
+    "displayedCoverageReviewBand": 22,
+    "documentsAtOrAboveDisplayedCoverageReviewBand": 0,
+    "displayedCoverageDetectionRate": 0,
+    "displayedCoverageBandStatus": "derived-and-rejected-no-positive-recall",
+    "displayedCoverageBandDecision": "The candidate is one point above the observed verified-human maximum at the measured 0.98013 passage threshold. It preserves zero observed human false positives but detects none of the external positive controls, so it is recorded as a sensitivity result and is not used by the report UI.",
+    "displayedCoverageDiagnosticAuc": 0.0832,
+    "displayedCoverageObservedRange": {
+      "verifiedHuman": {
+        "minimum": 0,
+        "maximum": 21
+      },
+      "externalPositiveControl": {
+        "minimum": 0,
+        "maximum": 4
+      }
+    },
+    "diagnosticMedianLogOddsAuc": 0.9939,
+    "diagnosticMedianLogOddsAucCi95": [
+      0.9838,
+      1
+    ],
+    "generatorModelsUserDeclared": [
+      "ChatGPT 5.6 (latest version; user-declared)"
+    ],
+    "perDocument": [
+      {
+        "id": "external-gpt56-20260807-6ec83e2d3df8",
+        "medianLogOdds": 3.420587,
+        "continuousDisplayScore": 63,
+        "standardizedMedianDistance": 0.5219,
+        "humanReferencePercentile": 100,
+        "passageWindowsAboveReviewThreshold": 2,
+        "passageWindowCount": 27,
+        "passageWindowRateAboveReviewThreshold": 0.0741,
+        "displayedCoveragePercent": 14,
+        "strictCoveragePercent": 0
+      },
+      {
+        "id": "external-gpt56-20260807-08f833c34f4f",
+        "medianLogOdds": 3.360007,
+        "continuousDisplayScore": 45,
+        "standardizedMedianDistance": 0.4514,
+        "humanReferencePercentile": 97.73,
+        "passageWindowsAboveReviewThreshold": 0,
+        "passageWindowCount": 27,
+        "passageWindowRateAboveReviewThreshold": 0,
+        "displayedCoveragePercent": 0,
+        "strictCoveragePercent": 0
+      },
+      {
+        "id": "external-gpt56-20260807-b0f0d75475a6",
+        "medianLogOdds": 3.367796,
+        "continuousDisplayScore": 46,
+        "standardizedMedianDistance": 0.4605,
+        "humanReferencePercentile": 97.73,
+        "passageWindowsAboveReviewThreshold": 1,
+        "passageWindowCount": 26,
+        "passageWindowRateAboveReviewThreshold": 0.0385,
+        "displayedCoveragePercent": 8,
+        "strictCoveragePercent": 4
+      },
+      {
+        "id": "external-gpt56-20260807-9cacbfa713fc",
+        "medianLogOdds": 3.439556,
+        "continuousDisplayScore": 69,
+        "standardizedMedianDistance": 0.544,
+        "humanReferencePercentile": 100,
+        "passageWindowsAboveReviewThreshold": 0,
+        "passageWindowCount": 30,
+        "passageWindowRateAboveReviewThreshold": 0,
+        "displayedCoveragePercent": 0,
+        "strictCoveragePercent": 0
+      },
+      {
+        "id": "external-gpt56-20260807-e7c4d0689c9a",
+        "medianLogOdds": 3.426389,
+        "continuousDisplayScore": 65,
+        "standardizedMedianDistance": 0.5287,
+        "humanReferencePercentile": 100,
+        "passageWindowsAboveReviewThreshold": 0,
+        "passageWindowCount": 27,
+        "passageWindowRateAboveReviewThreshold": 0,
+        "displayedCoveragePercent": 0,
+        "strictCoveragePercent": 0
+      },
+      {
+        "id": "external-gpt56-20260807-c286796b413a",
+        "medianLogOdds": 3.361997,
+        "continuousDisplayScore": 45,
+        "standardizedMedianDistance": 0.4537,
+        "humanReferencePercentile": 97.73,
+        "passageWindowsAboveReviewThreshold": 0,
+        "passageWindowCount": 27,
+        "passageWindowRateAboveReviewThreshold": 0,
+        "displayedCoveragePercent": 0,
+        "strictCoveragePercent": 0
+      },
+      {
+        "id": "external-gpt56-20260807-0dfcfd128525",
+        "medianLogOdds": 3.389217,
+        "continuousDisplayScore": 52,
+        "standardizedMedianDistance": 0.4854,
+        "humanReferencePercentile": 100,
+        "passageWindowsAboveReviewThreshold": 1,
+        "passageWindowCount": 30,
+        "passageWindowRateAboveReviewThreshold": 0.0333,
+        "displayedCoveragePercent": 6,
+        "strictCoveragePercent": 0
+      },
+      {
+        "id": "external-gpt56-20260807-8e2a962502f0",
+        "medianLogOdds": 3.422689,
+        "continuousDisplayScore": 63,
+        "standardizedMedianDistance": 0.5244,
+        "humanReferencePercentile": 100,
+        "passageWindowsAboveReviewThreshold": 0,
+        "passageWindowCount": 26,
+        "passageWindowRateAboveReviewThreshold": 0,
+        "displayedCoveragePercent": 0,
+        "strictCoveragePercent": 0
+      },
+      {
+        "id": "external-gpt56-20260807-f1c93832ccec",
+        "medianLogOdds": 3.416434,
+        "continuousDisplayScore": 61,
+        "standardizedMedianDistance": 0.5171,
+        "humanReferencePercentile": 100,
+        "passageWindowsAboveReviewThreshold": 0,
+        "passageWindowCount": 28,
+        "passageWindowRateAboveReviewThreshold": 0,
+        "displayedCoveragePercent": 0,
+        "strictCoveragePercent": 0
+      },
+      {
+        "id": "external-gpt56-20260807-dd8b2abd417b",
+        "medianLogOdds": 3.378883,
+        "continuousDisplayScore": 49,
+        "standardizedMedianDistance": 0.4734,
+        "humanReferencePercentile": 98.86,
+        "passageWindowsAboveReviewThreshold": 1,
+        "passageWindowCount": 29,
+        "passageWindowRateAboveReviewThreshold": 0.0345,
+        "displayedCoveragePercent": 7,
+        "strictCoveragePercent": 3
+      },
+      {
+        "id": "external-gpt56-20260807-0a64c3304645",
+        "medianLogOdds": 3.352089,
+        "continuousDisplayScore": 43,
+        "standardizedMedianDistance": 0.4422,
+        "humanReferencePercentile": 96.59,
+        "passageWindowsAboveReviewThreshold": 0,
+        "passageWindowCount": 33,
+        "passageWindowRateAboveReviewThreshold": 0,
+        "displayedCoveragePercent": 0,
+        "strictCoveragePercent": 0
+      },
+      {
+        "id": "external-gpt56-20260807-89aa6e9f1ce2",
+        "medianLogOdds": 3.402242,
+        "continuousDisplayScore": 56,
+        "standardizedMedianDistance": 0.5006,
+        "humanReferencePercentile": 100,
+        "passageWindowsAboveReviewThreshold": 0,
+        "passageWindowCount": 33,
+        "passageWindowRateAboveReviewThreshold": 0,
+        "displayedCoveragePercent": 0,
+        "strictCoveragePercent": 0
+      },
+      {
+        "id": "external-gpt56-20260807-4e1d360fadcf",
+        "medianLogOdds": 3.400552,
+        "continuousDisplayScore": 56,
+        "standardizedMedianDistance": 0.4986,
+        "humanReferencePercentile": 100,
+        "passageWindowsAboveReviewThreshold": 0,
+        "passageWindowCount": 30,
+        "passageWindowRateAboveReviewThreshold": 0,
+        "displayedCoveragePercent": 0,
+        "strictCoveragePercent": 0
+      },
+      {
+        "id": "external-gpt56-20260807-437d59ce7bbb",
+        "medianLogOdds": 3.405464,
+        "continuousDisplayScore": 57,
+        "standardizedMedianDistance": 0.5043,
+        "humanReferencePercentile": 100,
+        "passageWindowsAboveReviewThreshold": 0,
+        "passageWindowCount": 29,
+        "passageWindowRateAboveReviewThreshold": 0,
+        "displayedCoveragePercent": 0,
+        "strictCoveragePercent": 0
+      },
+      {
+        "id": "external-gpt56-20260807-d0e9623b57ad",
+        "medianLogOdds": 3.384592,
+        "continuousDisplayScore": 50,
+        "standardizedMedianDistance": 0.48,
+        "humanReferencePercentile": 98.86,
+        "passageWindowsAboveReviewThreshold": 0,
+        "passageWindowCount": 30,
+        "passageWindowRateAboveReviewThreshold": 0,
+        "displayedCoveragePercent": 0,
+        "strictCoveragePercent": 0
+      },
+      {
+        "id": "external-gpt56-20260807-855fdfdc0827",
+        "medianLogOdds": 3.412702,
+        "continuousDisplayScore": 60,
+        "standardizedMedianDistance": 0.5128,
+        "humanReferencePercentile": 100,
+        "passageWindowsAboveReviewThreshold": 0,
+        "passageWindowCount": 32,
+        "passageWindowRateAboveReviewThreshold": 0,
+        "displayedCoveragePercent": 0,
+        "strictCoveragePercent": 0
+      },
+      {
+        "id": "external-gpt56-20260807-bb951e4c6844",
+        "medianLogOdds": 3.43268,
+        "continuousDisplayScore": 67,
+        "standardizedMedianDistance": 0.536,
+        "humanReferencePercentile": 100,
+        "passageWindowsAboveReviewThreshold": 0,
+        "passageWindowCount": 35,
+        "passageWindowRateAboveReviewThreshold": 0,
+        "displayedCoveragePercent": 0,
+        "strictCoveragePercent": 0
+      },
+      {
+        "id": "external-gpt56-20260807-d186df934b7d",
+        "medianLogOdds": 3.418362,
+        "continuousDisplayScore": 62,
+        "standardizedMedianDistance": 0.5194,
+        "humanReferencePercentile": 100,
+        "passageWindowsAboveReviewThreshold": 0,
+        "passageWindowCount": 33,
+        "passageWindowRateAboveReviewThreshold": 0,
+        "displayedCoveragePercent": 0,
+        "strictCoveragePercent": 0
+      },
+      {
+        "id": "external-gpt56-20260807-b916f598bf0e",
+        "medianLogOdds": 3.397379,
+        "continuousDisplayScore": 55,
+        "standardizedMedianDistance": 0.4949,
+        "humanReferencePercentile": 100,
+        "passageWindowsAboveReviewThreshold": 2,
+        "passageWindowCount": 28,
+        "passageWindowRateAboveReviewThreshold": 0.0714,
+        "displayedCoveragePercent": 14,
+        "strictCoveragePercent": 0
+      },
+      {
+        "id": "external-gpt56-20260807-adf6b73fa815",
+        "medianLogOdds": 3.414072,
+        "continuousDisplayScore": 60,
+        "standardizedMedianDistance": 0.5144,
+        "humanReferencePercentile": 100,
+        "passageWindowsAboveReviewThreshold": 1,
+        "passageWindowCount": 29,
+        "passageWindowRateAboveReviewThreshold": 0.0345,
+        "displayedCoveragePercent": 7,
+        "strictCoveragePercent": 0
+      },
+      {
+        "id": "external-gpt56-20260807-ac24fe76f344",
+        "medianLogOdds": 3.403752,
+        "continuousDisplayScore": 57,
+        "standardizedMedianDistance": 0.5023,
+        "humanReferencePercentile": 100,
+        "passageWindowsAboveReviewThreshold": 0,
+        "passageWindowCount": 26,
+        "passageWindowRateAboveReviewThreshold": 0,
+        "displayedCoveragePercent": 0,
+        "strictCoveragePercent": 0
+      },
+      {
+        "id": "external-gpt56-20260807-91caa4b52277",
+        "medianLogOdds": 3.392468,
+        "continuousDisplayScore": 53,
+        "standardizedMedianDistance": 0.4892,
+        "humanReferencePercentile": 100,
+        "passageWindowsAboveReviewThreshold": 3,
+        "passageWindowCount": 31,
+        "passageWindowRateAboveReviewThreshold": 0.0968,
+        "displayedCoveragePercent": 19,
+        "strictCoveragePercent": 3
+      },
+      {
+        "id": "external-gpt56-20260807-fc432bf2eb15",
+        "medianLogOdds": 3.414192,
+        "continuousDisplayScore": 60,
+        "standardizedMedianDistance": 0.5145,
+        "humanReferencePercentile": 100,
+        "passageWindowsAboveReviewThreshold": 0,
+        "passageWindowCount": 26,
+        "passageWindowRateAboveReviewThreshold": 0,
+        "displayedCoveragePercent": 0,
+        "strictCoveragePercent": 0
+      },
+      {
+        "id": "external-gpt56-20260807-ddd5e32c71bc",
+        "medianLogOdds": 3.346162,
+        "continuousDisplayScore": 42,
+        "standardizedMedianDistance": 0.4353,
+        "humanReferencePercentile": 96.59,
+        "passageWindowsAboveReviewThreshold": 0,
+        "passageWindowCount": 29,
+        "passageWindowRateAboveReviewThreshold": 0,
+        "displayedCoveragePercent": 0,
+        "strictCoveragePercent": 0
+      },
+      {
+        "id": "external-gpt56-20260807-762466b0ecd6",
+        "medianLogOdds": 3.412378,
+        "continuousDisplayScore": 60,
+        "standardizedMedianDistance": 0.5124,
+        "humanReferencePercentile": 100,
+        "passageWindowsAboveReviewThreshold": 3,
+        "passageWindowCount": 29,
+        "passageWindowRateAboveReviewThreshold": 0.1034,
+        "displayedCoveragePercent": 17,
+        "strictCoveragePercent": 3
+      },
+      {
+        "id": "external-gpt56-20260807-611aa114d6e1",
+        "medianLogOdds": 3.393477,
+        "continuousDisplayScore": 53,
+        "standardizedMedianDistance": 0.4904,
+        "humanReferencePercentile": 100,
+        "passageWindowsAboveReviewThreshold": 0,
+        "passageWindowCount": 37,
+        "passageWindowRateAboveReviewThreshold": 0,
+        "displayedCoveragePercent": 0,
+        "strictCoveragePercent": 0
+      },
+      {
+        "id": "external-gpt56-20260807-a1bc3edb7c83",
+        "medianLogOdds": 3.399541,
+        "continuousDisplayScore": 55,
+        "standardizedMedianDistance": 0.4974,
+        "humanReferencePercentile": 100,
+        "passageWindowsAboveReviewThreshold": 0,
+        "passageWindowCount": 18,
+        "passageWindowRateAboveReviewThreshold": 0,
+        "displayedCoveragePercent": 0,
+        "strictCoveragePercent": 0
+      },
+      {
+        "id": "external-gpt56-20260807-db52f713ed01",
+        "medianLogOdds": 3.42046,
+        "continuousDisplayScore": 63,
+        "standardizedMedianDistance": 0.5218,
+        "humanReferencePercentile": 100,
+        "passageWindowsAboveReviewThreshold": 0,
+        "passageWindowCount": 29,
+        "passageWindowRateAboveReviewThreshold": 0,
+        "displayedCoveragePercent": 0,
+        "strictCoveragePercent": 0
+      },
+      {
+        "id": "external-gpt56-20260807-8dd71aa66e55",
+        "medianLogOdds": 3.373121,
+        "continuousDisplayScore": 47,
+        "standardizedMedianDistance": 0.4667,
+        "humanReferencePercentile": 97.73,
+        "passageWindowsAboveReviewThreshold": 1,
+        "passageWindowCount": 36,
+        "passageWindowRateAboveReviewThreshold": 0.0278,
+        "displayedCoveragePercent": 6,
+        "strictCoveragePercent": 0
+      },
+      {
+        "id": "external-gpt56-20260807-99971ccd8d25",
+        "medianLogOdds": 3.415987,
+        "continuousDisplayScore": 61,
+        "standardizedMedianDistance": 0.5166,
+        "humanReferencePercentile": 100,
+        "passageWindowsAboveReviewThreshold": 2,
+        "passageWindowCount": 26,
+        "passageWindowRateAboveReviewThreshold": 0.0769,
+        "displayedCoveragePercent": 15,
+        "strictCoveragePercent": 0
+      },
+      {
+        "id": "external-gpt56-20260807-759aba769978",
+        "medianLogOdds": 3.3588,
+        "continuousDisplayScore": 45,
+        "standardizedMedianDistance": 0.45,
+        "humanReferencePercentile": 97.73,
+        "passageWindowsAboveReviewThreshold": 0,
+        "passageWindowCount": 32,
+        "passageWindowRateAboveReviewThreshold": 0,
+        "displayedCoveragePercent": 0,
+        "strictCoveragePercent": 0
+      },
+      {
+        "id": "external-gpt56-20260807-4f5966d94334",
+        "medianLogOdds": 3.418088,
+        "continuousDisplayScore": 62,
+        "standardizedMedianDistance": 0.519,
+        "humanReferencePercentile": 100,
+        "passageWindowsAboveReviewThreshold": 0,
+        "passageWindowCount": 27,
+        "passageWindowRateAboveReviewThreshold": 0,
+        "displayedCoveragePercent": 0,
+        "strictCoveragePercent": 0
+      },
+      {
+        "id": "external-gpt56-20260807-aaf6bd0da43f",
+        "medianLogOdds": 3.439107,
+        "continuousDisplayScore": 69,
+        "standardizedMedianDistance": 0.5435,
+        "humanReferencePercentile": 100,
+        "passageWindowsAboveReviewThreshold": 1,
+        "passageWindowCount": 30,
+        "passageWindowRateAboveReviewThreshold": 0.0333,
+        "displayedCoveragePercent": 7,
+        "strictCoveragePercent": 3
+      },
+      {
+        "id": "external-gpt56-20260807-e109f29836f3",
+        "medianLogOdds": 3.420819,
+        "continuousDisplayScore": 63,
+        "standardizedMedianDistance": 0.5222,
+        "humanReferencePercentile": 100,
+        "passageWindowsAboveReviewThreshold": 1,
+        "passageWindowCount": 29,
+        "passageWindowRateAboveReviewThreshold": 0.0345,
+        "displayedCoveragePercent": 7,
+        "strictCoveragePercent": 0
+      },
+      {
+        "id": "external-gpt56-20260807-113f4e3b725d",
+        "medianLogOdds": 3.375194,
+        "continuousDisplayScore": 48,
+        "standardizedMedianDistance": 0.4691,
+        "humanReferencePercentile": 97.73,
+        "passageWindowsAboveReviewThreshold": 1,
+        "passageWindowCount": 27,
+        "passageWindowRateAboveReviewThreshold": 0.037,
+        "displayedCoveragePercent": 7,
+        "strictCoveragePercent": 0
+      },
+      {
+        "id": "external-gpt56-20260807-d9cdee87aa1f",
+        "medianLogOdds": 3.427918,
+        "continuousDisplayScore": 65,
+        "standardizedMedianDistance": 0.5305,
+        "humanReferencePercentile": 100,
+        "passageWindowsAboveReviewThreshold": 0,
+        "passageWindowCount": 27,
+        "passageWindowRateAboveReviewThreshold": 0,
+        "displayedCoveragePercent": 0,
+        "strictCoveragePercent": 0
+      },
+      {
+        "id": "external-gpt56-20260807-ae0635f282b3",
+        "medianLogOdds": 3.446583,
+        "continuousDisplayScore": 72,
+        "standardizedMedianDistance": 0.5522,
+        "humanReferencePercentile": 100,
+        "passageWindowsAboveReviewThreshold": 3,
+        "passageWindowCount": 25,
+        "passageWindowRateAboveReviewThreshold": 0.12,
+        "displayedCoveragePercent": 18,
+        "strictCoveragePercent": 4
+      },
+      {
+        "id": "external-gpt56-20260807-92c47fa7a380",
+        "medianLogOdds": 3.379108,
+        "continuousDisplayScore": 49,
+        "standardizedMedianDistance": 0.4736,
+        "humanReferencePercentile": 98.86,
+        "passageWindowsAboveReviewThreshold": 2,
+        "passageWindowCount": 27,
+        "passageWindowRateAboveReviewThreshold": 0.0741,
+        "displayedCoveragePercent": 14,
+        "strictCoveragePercent": 4
+      },
+      {
+        "id": "external-gpt56-20260807-f80c4facc736",
+        "medianLogOdds": 3.398553,
+        "continuousDisplayScore": 55,
+        "standardizedMedianDistance": 0.4963,
+        "humanReferencePercentile": 100,
+        "passageWindowsAboveReviewThreshold": 0,
+        "passageWindowCount": 30,
+        "passageWindowRateAboveReviewThreshold": 0,
+        "displayedCoveragePercent": 0,
+        "strictCoveragePercent": 0
+      }
+    ]
+  },
+  "warning": "Only 0 paired controlled AI-positive documents are present; at least 30 are required for controlled validation. The separate user-attested positive control contains 39 independent documents and is reported as external diagnostic evidence without fitting production thresholds."
+}

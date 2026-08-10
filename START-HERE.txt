@@ -1,0 +1,17 @@
+TURNITPLUS FOR WINDOWS
+
+1. Extract the complete ZIP file.
+2. Install the current Node.js LTS release from https://nodejs.org/ if needed.
+3. Double-click START-WINDOWS.bat.
+4. The first launch installs the required packages and may take several minutes.
+5. Open the Local address printed in the black window.
+
+Keep the black window open while using TurnitPlus. Press Ctrl+C to stop it.
+
+Archive Similarity measures passage overlap with the publications included in
+this release. It does not predict a percentage from an external database.
+Reports are saved locally in the browser using IndexedDB.
+
+The English AI report also runs on your computer. The first eligible AI check
+downloads a free model of about 600 MB and caches it in your browser. Keep
+an internet connection available for that first model download.

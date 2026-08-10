@@ -1,0 +1,45 @@
+{
+  "name": "turnitplus-windows",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "next build",
+    "validate:corpus": "node --import tsx tools/validate-corpus.ts && npm run validate:positive-benchmark",
+    "validate:positive-benchmark": "node --import tsx tools/validate-external-ai-benchmark.ts",
+    "detect:duplicates": "node --import tsx tools/detect-duplicates.ts",
+    "calibrate:similarity": "npm run validate:corpus && npm run detect:duplicates && node --import tsx tools/calibrate-similarity.ts",
+    "collect:openalex-calibration": "node --env-file-if-exists=.env --import tsx tools/calibrate-openalex-signal.ts",
+    "calibrate:ai": "npm run validate:corpus && npm run check:ai-model && node --import tsx tools/measure-ai-fpr.ts",
+    "check:ai-model": "node --import tsx tools/check-ai-model-contract.ts",
+    "evaluate:ai": "npm run validate:corpus && npm run check:ai-model && node --import tsx tools/evaluate-ai-detector.ts",
+    "start": "next start"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "4.2.0",
+    "@pdf-lib/fontkit": "^1.1.1",
+    "lucide-react": "^1.26.0",
+    "mammoth": "^1.12.0",
+    "next": "16.2.6",
+    "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "^6.1.200",
+    "react": "19.2.6",
+    "react-dom": "19.2.6",
+    "vinext": "0.0.50",
+    "vite": "8.0.13"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "4.2.1",
+    "@types/node": "22.19.19",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "tailwindcss": "4.2.1",
+    "tsx": "^4.23.9",
+    "typescript": "5.9.3"
+  },
+  "type": "module",
+  "displayName": "TurnitPlus"
+}

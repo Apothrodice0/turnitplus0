@@ -1,0 +1,28 @@
+{
+  "schema": "turnitplus-similarity-claim-boundary",
+  "version": 1,
+  "publishedAt": "2026-08-09T20:23:51.103Z",
+  "sourceArtifact": "corpus/audit/similarity-final-test-evaluation.json",
+  "sourceArtifactSha256": "3847b32b44ea180163ecde4527e1bf9e4347704e84e0f800f1a22d7e51877f09",
+  "cohortDesign": "Prospectively sealed one-time evaluation; no row was used to fit or tune the scorer.",
+  "sampleSize": 60,
+  "corpusVersion": "archive-v4-230-4553fba3a7",
+  "indexedDocumentCount": 230,
+  "evaluatedClaim": "Forecast an external Turnitin similarity score from TurnitPlus archive matching.",
+  "aggregateResults": {
+    "mae": 6.4,
+    "meanBias": -5.9333,
+    "rmse": 9.5289,
+    "calibrationSlope": 0.1745,
+    "aucAt15Percent": 0.6641,
+    "aucCi95": [0.481, 0.8322],
+    "predictedRange": [0, 13],
+    "actualRange": [0, 45]
+  },
+  "productDecision": {
+    "forecastClaim": "withdrawn",
+    "shippingMetric": "Archive overlap",
+    "definition": "Percentage of analyzed text matched within TurnitPlus's indexed archive.",
+    "externalScoreEstimate": false
+  }
+}
