@@ -57,6 +57,13 @@
       "when": 1786395400000,
       "tag": "0007_document_chunks_cascade",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1786395500000,
+      "tag": "0008_saved_reports",
+      "breakpoints": true
     }
   ]
 }

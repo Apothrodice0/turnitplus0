@@ -36,6 +36,7 @@ import type { FormEvent, ReactNode } from "react";
 import { createReceiptPdf } from "@/lib/receipt-pdf";
 import { extractPdfTextDocument } from "@/lib/pdf-text-extraction";
 import { clearStoredReports, loadStoredReports, storeReport } from "@/lib/report-store";
+import { deleteRemoteReport, fetchRemoteReport, listRemoteReportSummaries, saveReportRemote, type ReportSummary } from "@/lib/reports-remote";
 import { combineMatchedWordPositions } from "@/lib/similarity-enrichment";
 import type { WebCheckResult } from "@/lib/web-check-core";
 import {
@@ -281,6 +282,21 @@ function aiSignalDisplay(report: SimilarityReport): AiSignalDisplay {
     label: "Strong AI indicators",
     detail: scoreDetail,
     range: "Red · 51–100%",
+  };
+}
+
+function buildReportSummary(report: SimilarityReport): ReportSummary {
+  const aiSignal = aiSignalDisplay(report);
+  return {
+    id: String(report.id),
+    submissionId: report.submissionId,
+    title: report.title,
+    createdAt: report.created,
+    wordCount: report.wordCount,
+    archiveScore: archiveOverlapScore(report),
+    scoreBand: report.scoreBand,
+    aiScore: aiSignal.value,
+    aiTone: aiSignal.tone,
   };
 }
 
@@ -1099,7 +1115,27 @@ export default function Home() {
   const generationLockRef = useRef(false);
 
   useEffect(() => {
-    loadStoredReports<SimilarityReport>(11).then(setReports).catch(() => setReports([]));
+    loadStoredReports<SimilarityReport>(11)
+      .then(async (localReports) => {
+        setReports(localReports);
+        // Only fall back to the remote durability copy when local storage is
+        // genuinely empty (e.g. IndexedDB was cleared/evicted independently
+        // of localStorage) — never overrides reports that are already here.
+        if (localReports.length > 0) return;
+        const summaries = await listRemoteReportSummaries();
+        if (summaries.length === 0) return;
+        const restored: SimilarityReport[] = [];
+        for (const summary of summaries) {
+          const full = await fetchRemoteReport<SimilarityReport>(summary.id);
+          if (full) restored.push(full);
+        }
+        if (restored.length === 0) return;
+        setReports(restored);
+        for (const report of restored) {
+          await storeReport(report);
+        }
+      })
+      .catch(() => setReports([]));
     queueMicrotask(() => {
       setSidebarCollapsed(window.localStorage.getItem("tp_sidebar_collapsed") === "true");
       try {
@@ -1304,6 +1340,7 @@ export default function Home() {
   async function saveReport(report: SimilarityReport) {
     setReports((current) => [report, ...current.filter((item) => item.id !== report.id)].slice(0, 50));
     await storeReport(report);
+    await saveReportRemote(report, buildReportSummary(report));
   }
 
   async function generateReport() {
@@ -1426,6 +1463,7 @@ export default function Home() {
         setCurrentReport((current) => current?.id === enriched.id ? { ...current, ...enriched } : current);
         setReports((current) => current.map((item) => item.id === enriched.id ? { ...item, ...enriched } : item));
         await storeReport(enriched);
+        await saveReportRemote(enriched, buildReportSummary(enriched));
       });
       setResultTab("full");
       setReportMode("similarity");
@@ -1447,6 +1485,7 @@ export default function Home() {
       setCurrentReport(updated);
       setReports((current) => current.map((item) => item.id === updated.id ? updated : item));
       await storeReport(updated);
+      await saveReportRemote(updated, buildReportSummary(updated));
       notify(aiAnalysis.status === "complete" ? "AI report completed." : "This document is not eligible for English AI analysis.");
     } catch (error) {
       const failed: SimilarityReport = {
@@ -1468,6 +1507,7 @@ export default function Home() {
       setCurrentReport(failed);
       setReports((current) => current.map((item) => item.id === failed.id ? failed : item));
       await storeReport(failed);
+      await saveReportRemote(failed, buildReportSummary(failed));
     } finally {
       setIsRunningAiAnalysis(false);
     }
@@ -1505,8 +1545,10 @@ export default function Home() {
   }
 
   async function clearHistory() {
+    const idsToDelete = reports.map((report) => String(report.id));
     setReports([]);
     await clearStoredReports();
+    await Promise.all(idsToDelete.map((id) => deleteRemoteReport(id)));
     notify("Report history cleared.");
   }
 
@@ -2176,44 +2218,49 @@ export default function Home() {
               <div className="legal-document surface-card">
                 <section>
                   <span className="legal-section-number">01</span>
-                  <div><h3>What TurnitPlus processes</h3><p>When you choose a document, TurnitPlus reads its text to create AI-writing and similarity reports. The original file is used during the active check. The locally saved report may include the extracted text, highlighted passages, scores, sources, file name and document statistics.</p></div>
+                  <div><h3>What TurnitPlus processes</h3><p>When you choose a document, TurnitPlus reads its text to create AI-writing and similarity reports. The original file is used during the active check. The saved report may include the extracted text, highlighted passages, scores, sources, file name and document statistics.</p></div>
                 </section>
                 <section>
                   <span className="legal-section-number">02</span>
-                  <div><h3>Local processing and external requests</h3><p>Document extraction, AI analysis and archive comparison run in your browser. TurnitPlus does not upload the complete document to an account database. For background Wikipedia enrichment, up to 20 selected phrases may be sent to the English Wikipedia search service. Wikipedia receives those phrase queries—not the full document—and handles them under its own privacy practices. Ordinary network metadata may also be processed by the hosting infrastructure to deliver the site.</p></div>
+                  <div><h3>Local processing and external requests</h3><p>Document extraction, AI analysis and archive comparison run in your browser; the original file itself is never uploaded during the check. Once a check finishes, the completed report is saved both on this device (IndexedDB) and to TurnitPlus's database, so it can still be retrieved if this device's local storage is cleared or evicted. For background Wikipedia enrichment, up to 20 selected phrases may be sent to the English Wikipedia search service. Wikipedia receives those phrase queries—not the full document—and handles them under its own privacy practices. Ordinary network metadata may also be processed by the hosting infrastructure to deliver the site.</p></div>
                 </section>
                 <section>
                   <span className="legal-section-number">03</span>
                   <div><h3>Account information</h3><p>The current account experience is device-local. Your displayed name and email are kept in browser session storage. Password values are not stored by TurnitPlus. Signing out removes the active account display from the session.</p></div>
                 </section>
+                <section>
+                  <span className="legal-section-number">04</span>
+                  <div><h3>Report identification (no account required)</h3><p>Saving and retrieving reports does not require creating an account or signing in. Each browser is assigned a random identifier, stored locally, that TurnitPlus uses only to show you your own previously saved reports. This identifier is not a username or password and is not authentication — it behaves like an unlisted link: anyone who obtained the identifier or a specific report's address could retrieve that data. A future update may introduce real sign-in to replace it.</p></div>
+                </section>
 
                 <section className="legal-retention-section">
-                  <span className="legal-section-number">04</span>
+                  <span className="legal-section-number">05</span>
                   <div>
                     <h3>Retention rules</h3>
-                    <p>You control the locally stored information. TurnitPlus does not apply a hidden server-side retention period to document reports because report history is stored on your device.</p>
+                    <p>Reports are kept both on your device and in TurnitPlus's database until you remove them. TurnitPlus does not apply a separate hidden retention period beyond what the table below describes.</p>
                     <div className="retention-table" role="table" aria-label="TurnitPlus retention rules">
                       <div className="retention-row retention-heading" role="row"><strong role="columnheader">Information</strong><strong role="columnheader">Where it stays</strong><strong role="columnheader">When it is removed</strong></div>
                       <div className="retention-row" role="row"><span role="cell">Original uploaded file</span><span role="cell">Browser memory during the check</span><span role="cell">When replaced, the page closes or the session ends</span></div>
-                      <div className="retention-row" role="row"><span role="cell">Extracted text and reports</span><span role="cell">IndexedDB on this device</span><span role="cell">When you select Clear history or clear this site’s browser data</span></div>
+                      <div className="retention-row" role="row"><span role="cell">Extracted text and reports</span><span role="cell">IndexedDB on this device, and TurnitPlus's database (linked to this browser's random identifier, not your identity)</span><span role="cell">Clear history removes both copies. Clearing this site's browser data alone removes only the local copy and this browser's identifier — the saved copy remains until removed with Clear history</span></div>
+                      <div className="retention-row" role="row"><span role="cell">Random report identifier</span><span role="cell">Local browser storage</span><span role="cell">When you clear this site's browser data (after this, reports saved from this browser can no longer be retrieved or deleted through the interface)</span></div>
                       <div className="retention-row" role="row"><span role="cell">Displayed name and email</span><span role="cell">Browser session storage</span><span role="cell">When you sign out, close the browser session or clear site data</span></div>
                       <div className="retention-row" role="row"><span role="cell">Password</span><span role="cell">Not stored by TurnitPlus</span><span role="cell">Discarded after the local sign-in interaction</span></div>
-                      <div className="retention-row" role="row"><span role="cell">Sidebar preference</span><span role="cell">Local browser storage</span><span role="cell">When you clear this site’s browser data</span></div>
-                      <div className="retention-row" role="row"><span role="cell">Wikipedia phrase results</span><span role="cell">Saved locally with the report</span><span role="cell">When you clear report history or browser site data</span></div>
+                      <div className="retention-row" role="row"><span role="cell">Sidebar preference</span><span role="cell">Local browser storage</span><span role="cell">When you clear this site's browser data</span></div>
+                      <div className="retention-row" role="row"><span role="cell">Wikipedia phrase results</span><span role="cell">Saved locally and remotely with the report</span><span role="cell">When you clear report history or browser site data</span></div>
                     </div>
                   </div>
                 </section>
 
                 <section>
-                  <span className="legal-section-number">05</span>
-                  <div><h3>Your controls</h3><p>Use Clear history to remove saved reports from this browser. Use Sign out to remove the active account display. You can also use your browser’s site-data controls to remove all TurnitPlus storage at once. The interface displays up to 50 recent reports.</p></div>
-                </section>
-                <section>
                   <span className="legal-section-number">06</span>
-                  <div><h3>Tracking, sale and training use</h3><p>TurnitPlus does not sell document content or account information. The product does not use advertising trackers. Documents checked in the browser are not added to a TurnitPlus training database.</p></div>
+                  <div><h3>Your controls</h3><p>Use Clear history to remove saved reports from both this browser and TurnitPlus's database. Use Sign out to remove the active account display. You can also use your browser's site-data controls to remove all local TurnitPlus storage at once, though this does not reach reports already saved remotely — use Clear history first if you want both removed. The interface displays up to 50 recent reports.</p></div>
                 </section>
                 <section>
                   <span className="legal-section-number">07</span>
+                  <div><h3>Tracking, sale and training use</h3><p>TurnitPlus does not sell document content or account information. The product does not use advertising trackers. Documents checked in the browser are not added to a TurnitPlus training database.</p></div>
+                </section>
+                <section>
+                  <span className="legal-section-number">08</span>
                   <div><h3>Product stage and contact</h3><p>TurnitPlus is currently an independent university project. Paid subscriptions, server accounts and email verification are not active. A dedicated privacy contact and legal operator details will be published before public commercial billing begins.</p></div>
                 </section>
               </div>

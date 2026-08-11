@@ -64,3 +64,6 @@ next-env.d.ts
 
 # vinext build cache
 .vinext/
+
+.vercel
+.env*

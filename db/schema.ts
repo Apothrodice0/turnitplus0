@@ -7,6 +7,7 @@ import {
   blob,
   uniqueIndex,
   index,
+  primaryKey,
 } from "drizzle-orm/sqlite-core";
 
 // Documents table stores canonical metadata about indexed documents.
@@ -139,6 +140,35 @@ export const contributions = sqliteTable(
     contribution_policy_version: text("contribution_policy_version").notNull(),
     created_at: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   }
+);
+
+// Phase 1 persistent reports (saved_reports). Deliberately independent of the
+// corpus-contribution tables above — this stores a user's own completed
+// report for later retrieval, not corpus data, so it has no foreign keys
+// into that schema. device_key is a client-generated random identifier
+// (soft scoping; no authentication exists yet) and is part of the primary
+// key so two different browsers can never collide on the same report id.
+export const saved_reports = sqliteTable(
+  "saved_reports",
+  {
+    id: text("id").notNull(),
+    device_key: text("device_key").notNull(),
+    submission_id: text("submission_id").notNull(),
+    title: text("title").notNull(),
+    report_created_at: text("report_created_at").notNull(),
+    word_count: integer("word_count").notNull(),
+    archive_score: integer("archive_score").notNull(),
+    score_band: text("score_band").notNull(),
+    ai_score: integer("ai_score"),
+    ai_tone: text("ai_tone"),
+    payload_json: text("payload_json").notNull(),
+    saved_at: text("saved_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    updated_at: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    primaryKey({ columns: [table.device_key, table.id] }),
+    index("idx_saved_reports_device_key_created").on(table.device_key, table.report_created_at),
+  ],
 );
 
 // Export nothing else — Drizzle will consume these definitions for migrations.

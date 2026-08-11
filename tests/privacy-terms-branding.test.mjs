@@ -30,6 +30,17 @@ test("privacy and retention rules match the browser-local product", async () => 
   assert.match(page, /Documents checked in the browser are not added to a TurnitPlus training database/);
 });
 
+test("privacy copy discloses remote report storage and the device-key soft-scoping mechanism", async () => {
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+
+  assert.match(page, /Report identification \(no account required\)/);
+  assert.match(page, /is not a username or password and is not authentication/);
+  assert.match(page, /it behaves like an unlisted link/);
+  assert.match(page, /saved both on this device \(IndexedDB\) and to TurnitPlus's database/);
+  assert.match(page, /Clear history removes both copies/);
+  assert.match(page, /Use Clear history to remove saved reports from both this browser and TurnitPlus's database/);
+});
+
 test("terms cover responsible use and the subscription preview", async () => {
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
 
