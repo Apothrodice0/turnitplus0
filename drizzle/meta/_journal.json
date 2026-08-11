@@ -1,5 +1,34 @@
 {
   "version": "7",
   "dialect": "sqlite",
-  "entries": []
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1786393695446,
+      "tag": "0000_certain_menace",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1786394207866,
+      "tag": "0001_loud_thunderbolt",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1786394264435,
+      "tag": "0002_handy_forgotten_one",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1786394636254,
+      "tag": "0003_worried_sentry",
+      "breakpoints": true
+    }
+  ]
 }

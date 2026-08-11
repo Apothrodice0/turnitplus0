@@ -59,3 +59,8 @@ next-env.d.ts
 # Historical release artifacts
 /release/
 /turnitplus-site-v38.tar.gz
+# test databases
+*.db
+
+# vinext build cache
+.vinext/
