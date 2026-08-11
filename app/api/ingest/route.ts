@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import path from 'path';
 import { createHash } from 'node:crypto';
-import { ingestDocument } from '../../../lib/ingest';
+import { ingestDocument, ingestDocumentLibsql } from '../../../lib/ingest';
 import { checkRate } from '../../../lib/rate-limit';
 
 const MAX_BYTES = 200_000; // 200KB request size limit
@@ -45,11 +45,24 @@ export async function POST(request: Request) {
       return new NextResponse(JSON.stringify({ error: 'provenanceSha256 mismatch' }), { status: 400 });
     }
 
-    // DB path from env for flexibility in tests
-    const dbPath = process.env.INGEST_DB_PATH || path.join(process.cwd(), 'data', 'turnitplus.db');
-
-    // Call ingestDocument; do not pass any test-only options
-    const result = ingestDocument(dbPath, { id, title, text, contributionPolicyVersion });
+    // TURSO_DATABASE_URL selects the production libSQL path. When it is set,
+    // TURSO_AUTH_TOKEN must also be set — we never fall back to the local
+    // better-sqlite3 file in that case, since that file is not durable on
+    // Vercel and a silent fallback would look like ingestion is working while
+    // actually writing to a throwaway local database.
+    const tursoUrl = process.env.TURSO_DATABASE_URL;
+    let result;
+    if (tursoUrl) {
+      const tursoAuthToken = process.env.TURSO_AUTH_TOKEN;
+      if (!tursoAuthToken) {
+        throw new Error('TURSO_AUTH_TOKEN is required when TURSO_DATABASE_URL is set; refusing to fall back to local storage.');
+      }
+      result = await ingestDocumentLibsql({ url: tursoUrl, authToken: tursoAuthToken }, { id, title, text, contributionPolicyVersion });
+    } else {
+      // DB path from env for flexibility in tests
+      const dbPath = process.env.INGEST_DB_PATH || path.join(process.cwd(), 'data', 'turnitplus.db');
+      result = await ingestDocument(dbPath, { id, title, text, contributionPolicyVersion });
+    }
 
     const status = result.created ? 201 : 200;
     return new NextResponse(JSON.stringify(result), { status, headers: { 'Content-Type': 'application/json' } });

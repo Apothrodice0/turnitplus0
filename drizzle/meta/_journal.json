@@ -27,7 +27,21 @@
       "idx": 3,
       "version": "6",
       "when": 1786394636254,
-      "tag": "0003_worried_sentry",
+      "tag": "0003_indexes_and_uniques",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1786395100000,
+      "tag": "0004_phase2",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1786395200000,
+      "tag": "0005_restore_document_chunks_unique_index",
       "breakpoints": true
     }
   ]
