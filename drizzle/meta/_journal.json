@@ -43,6 +43,20 @@
       "when": 1786395200000,
       "tag": "0005_restore_document_chunks_unique_index",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1786395300000,
+      "tag": "0006_contributions_contribution_id_not_null",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1786395400000,
+      "tag": "0007_document_chunks_cascade",
+      "breakpoints": true
     }
   ]
 }

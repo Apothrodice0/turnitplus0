@@ -53,15 +53,23 @@ const stored = new Set(rows.map((r) => r.shingle_hash));
 assert([...stored].every((h) => expectedHashes.has(h)), 'stored fingerprints match gramHash outputs');
 
 // 5) Transaction rollback test
-// Simulate failure during ingestion by using simulate option
+// simulateFailureAfterChunkIndex: 0 throws inside ingestDocument's transaction
+// AFTER insertDocument.run(...) and insertChunk.run(...) for chunk 0 have
+// already executed — so this only proves rollback works if the assertions
+// below actually check that those specific earlier writes did not survive.
+// An explicit id lets us check for that exact row's absence, rather than a
+// coarse table-wide count that would not catch a leaked row.
+const rollbackUnitId = 'unit-rollback-doc';
+const rollbackUnitText = 'This unit-rollback-only text is never ingested successfully elsewhere in this file, so its provenance hash is unique.';
 try {
-  ingestDocument(dbPath, { text: manyWords, contributionPolicyVersion: 'policy-v1' }, { simulateFailureAfterChunkIndex: 0 });
+  ingestDocument(dbPath, { id: rollbackUnitId, text: rollbackUnitText, contributionPolicyVersion: 'policy-v1' }, { simulateFailureAfterChunkIndex: 0 });
   assert(false, 'simulate ingestion should have thrown');
 } catch (err) {
-  // verify zero partial rows for the last attempted document id
-  // the simulate function generates a random document id; ensure no partial rows exist for any document without contributions
-  const remainingDocs = db2.prepare(`SELECT COUNT(*) as cnt FROM documents`).get().cnt;
-  assert(remainingDocs >= 2, 'documents count should not include partial failed insertion');
+  assert.match(String(err.message), /Simulated failure after chunk insert/, 'threw the expected simulated error');
+  const documentRow = db2.prepare('SELECT id FROM documents WHERE id = ?').get(rollbackUnitId);
+  assert.equal(documentRow, undefined, 'the insertDocument write that ran before the throw must not survive');
+  const chunkCount = db2.prepare('SELECT COUNT(*) as cnt FROM document_chunks WHERE document_id = ?').get(rollbackUnitId).cnt;
+  assert.equal(chunkCount, 0, 'the insertChunk write that ran before the throw must not survive');
 }
 
 // cleanup

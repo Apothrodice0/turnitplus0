@@ -42,6 +42,24 @@ console.log('ingest result 2', res2);
 assert(res2.created === false, 'should detect duplicate and return existing');
 assert(res2.documentId === res1.documentId, 'same documentId returned for duplicate');
 
+// Test 3: transaction rollback. simulateFailureAfterChunkIndex: 0 throws
+// inside ingestDocument's transaction AFTER insertDocument.run(...) and
+// insertChunk.run(...) for chunk 0 have already executed, so this only
+// proves rollback works if the assertions below check that those specific
+// earlier writes did not survive (not just a coarse row count).
+const rollbackId = 'ingest-test-rollback-doc';
+const rollbackText = 'This rollback-only text is never ingested successfully elsewhere in this file, so its provenance hash is unique.';
+try {
+  ingestDocument(dbPath, { id: rollbackId, text: rollbackText, contributionPolicyVersion: 'policy-v1' }, { simulateFailureAfterChunkIndex: 0 });
+  assert(false, 'simulated ingestion failure should have thrown');
+} catch (err) {
+  assert.match(String(err.message), /Simulated failure after chunk insert/, 'threw the expected simulated error');
+}
+const documentRow = db2.prepare('SELECT id FROM documents WHERE id = ?').get(rollbackId);
+assert.equal(documentRow, undefined, 'the insertDocument write that ran before the throw must not survive');
+const rollbackChunkCount = db2.prepare('SELECT COUNT(*) as cnt FROM document_chunks WHERE document_id = ?').get(rollbackId).cnt;
+assert.equal(rollbackChunkCount, 0, 'the insertChunk write that ran before the throw must not survive');
+
 // Clean up
 try {
   fs.unlinkSync(dbPath);

@@ -7,15 +7,53 @@ import { applyMigrationsLibsql, ingestDocumentLibsql } from '../lib/ingest.js';
 const repo = path.resolve('.');
 const drizzleDir = path.join(repo, 'drizzle');
 const dbFile = path.join(repo, 'test_ingest_libsql.db');
-const dbUrl = `file:${dbFile}`;
 
-for (const suffix of ['', '-wal', '-shm']) {
-  const candidate = `${dbFile}${suffix}`;
-  if (fs.existsSync(candidate)) fs.unlinkSync(candidate);
+// Defaults to a local throwaway file, but honors TURSO_DATABASE_URL so this
+// file can also be pointed at the real turnitplus-dev database. Hard safety
+// guard: refuse to run against anything that isn't clearly turnitplus-dev —
+// this test performs real inserts, a deliberately-failing batch, and a
+// rollback probe, none of which should ever touch an unknown or production
+// database by accident (e.g. a mistyped env var, or turnitplus-prod being
+// set in the same shell for an unrelated reason).
+const envUrl = process.env.TURSO_DATABASE_URL;
+if (envUrl) {
+  const looksLikeDev = envUrl.includes('turnitplus-dev');
+  const looksLikeProd = envUrl.toLowerCase().includes('prod');
+  if (!looksLikeDev || looksLikeProd) {
+    throw new Error(
+      `Refusing to run tests/ingest-libsql.test.mjs against TURSO_DATABASE_URL="${envUrl}" — ` +
+      `it does not clearly identify turnitplus-dev. Unset TURSO_DATABASE_URL to run locally, ` +
+      `or point it at a URL containing "turnitplus-dev" and not "prod".`,
+    );
+  }
+}
+const dbUrl = envUrl ?? `file:${dbFile}`;
+const authToken = envUrl ? process.env.TURSO_AUTH_TOKEN : undefined;
+const remote = Boolean(envUrl);
+if (remote && !authToken) {
+  throw new Error('TURSO_AUTH_TOKEN is required when TURSO_DATABASE_URL is set.');
+}
+const connection = { url: dbUrl, authToken };
+
+if (!remote) {
+  for (const suffix of ['', '-wal', '-shm']) {
+    const candidate = `${dbFile}${suffix}`;
+    if (fs.existsSync(candidate)) fs.unlinkSync(candidate);
+  }
 }
 
-const setupClient = createClient({ url: dbUrl });
-await applyMigrationsLibsql(setupClient, drizzleDir);
+const setupClient = createClient(connection);
+if (remote) {
+  // turnitplus-dev is already migrated (0000-0005 applied in an earlier
+  // verification pass); applyMigrationsLibsql's CREATE TABLE statements
+  // are not idempotent, so only apply if the schema isn't there yet.
+  const existing = await setupClient.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='documents'");
+  if (existing.rows.length === 0) {
+    await applyMigrationsLibsql(setupClient, drizzleDir);
+  }
+} else {
+  await applyMigrationsLibsql(setupClient, drizzleDir);
+}
 setupClient.close();
 
 // 1) Raw atomicity proof for the installed @libsql/client version.
@@ -32,7 +70,7 @@ setupClient.close();
 // files (present for the better-sqlite3 path too) discovered while building
 // this test. Out of scope to fix here; flagged separately.
 {
-  const client = createClient({ url: dbUrl });
+  const client = createClient(connection);
   const rawId = 'raw-atomicity-doc';
   let batchError = null;
   try {
@@ -71,7 +109,7 @@ setupClient.close();
 
 // 2) Successful ingestion via ingestDocumentLibsql
 const text = `This is a short document used to test the libSQL ingestion pipeline. It contains several words and repeats some phrases. This is a short document used to test the libSQL ingestion pipeline.`;
-const res1 = await ingestDocumentLibsql({ url: dbUrl }, { text, contributionPolicyVersion: 'policy-v1' });
+const res1 = await ingestDocumentLibsql(connection, { text, contributionPolicyVersion: 'policy-v1' });
 console.log('libsql ingest result 1', res1);
 assert(res1.created === true, 'Document should be newly created');
 assert(typeof res1.documentId === 'string' && res1.documentId.length > 0, 'documentId set');
@@ -81,7 +119,7 @@ assert(typeof res1.provenanceSha256 === 'string' && res1.provenanceSha256.length
 assert(res1.uniqueShingleCount >= 0, 'unique shingles counted');
 
 // 3) Duplicate SHA-256 detection
-const res2 = await ingestDocumentLibsql({ url: dbUrl }, { text, contributionPolicyVersion: 'policy-v1' });
+const res2 = await ingestDocumentLibsql(connection, { text, contributionPolicyVersion: 'policy-v1' });
 console.log('libsql ingest result 2', res2);
 assert(res2.created === false, 'should detect duplicate and return existing');
 assert(res2.documentId === res1.documentId, 'same documentId returned for duplicate');
@@ -90,7 +128,7 @@ assert(res2.documentId === res1.documentId, 'same documentId returned for duplic
 // text/provenance so the provenance dedup check does not short-circuit; the
 // batch must fail on the documents.id PRIMARY KEY collision, and none of the
 // new attempt's chunk/fingerprint rows should be added on top of res1's.
-const verifyClient = createClient({ url: dbUrl });
+const verifyClient = createClient(connection);
 const chunkCountBefore = await verifyClient.execute({ sql: 'SELECT COUNT(*) as cnt FROM document_chunks WHERE document_id = ?', args: [res1.documentId] });
 const fingerprintCountBefore = await verifyClient.execute({
   sql: 'SELECT COUNT(*) as cnt FROM chunk_fingerprints cf JOIN document_chunks dc ON cf.chunk_id = dc.id WHERE dc.document_id = ?',
@@ -100,7 +138,7 @@ const fingerprintCountBefore = await verifyClient.execute({
 let rollbackError = null;
 try {
   await ingestDocumentLibsql(
-    { url: dbUrl },
+    connection,
     { id: res1.documentId, text: 'completely different text that produces a different provenance hash for this rollback check', contributionPolicyVersion: 'policy-v1' },
   );
   assert(false, 'ingesting a duplicate id with a new provenance should have thrown');
@@ -119,8 +157,21 @@ assert.equal(Number(fingerprintCountAfter.rows[0].cnt), Number(fingerprintCountB
 verifyClient.close();
 
 // cleanup
-for (const suffix of ['', '-wal', '-shm']) {
-  const candidate = `${dbFile}${suffix}`;
-  try { fs.unlinkSync(candidate); } catch (e) { /* ignore */ }
+if (remote) {
+  // Local mode discards the whole throwaway file; remote mode must not leave
+  // rows behind in the shared turnitplus-dev database.
+  const cleanupClient = createClient(connection);
+  for (const documentId of [res1.documentId, 'raw-atomicity-doc']) {
+    await cleanupClient.execute({ sql: 'DELETE FROM chunk_fingerprints WHERE chunk_id IN (SELECT id FROM document_chunks WHERE document_id = ?)', args: [documentId] });
+    await cleanupClient.execute({ sql: 'DELETE FROM document_chunks WHERE document_id = ?', args: [documentId] });
+    await cleanupClient.execute({ sql: 'DELETE FROM contributions WHERE document_id = ?', args: [documentId] });
+    await cleanupClient.execute({ sql: 'DELETE FROM documents WHERE id = ?', args: [documentId] });
+  }
+  cleanupClient.close();
+} else {
+  for (const suffix of ['', '-wal', '-shm']) {
+    const candidate = `${dbFile}${suffix}`;
+    try { fs.unlinkSync(candidate); } catch (e) { /* ignore */ }
+  }
 }
 console.log('libSQL ingestion tests passed');

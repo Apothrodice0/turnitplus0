@@ -31,7 +31,7 @@ function applyMigrationsExcluding(db, dir, excludeFiles) {
   }
 }
 
-// --- Section A: better-sqlite3, full fresh 0000-0005 sequence ------------
+// --- Section A: better-sqlite3, full fresh migration sequence ------------
 {
   const dbPath = path.join(repo, 'test_migration_integrity_sqlite.db');
   cleanupSqliteFile(dbPath);
@@ -76,10 +76,10 @@ function applyMigrationsExcluding(db, dir, excludeFiles) {
 
   db.close();
   cleanupSqliteFile(dbPath);
-  console.log('[sqlite] full 0000-0005 migration sequence: all three unique indexes present and enforced');
+  console.log('[sqlite] full migration sequence: all three unique indexes present and enforced');
 }
 
-// --- Section B: libSQL, full fresh 0000-0005 sequence ---------------------
+// --- Section B: libSQL, full fresh migration sequence ---------------------
 {
   const dbFile = path.join(repo, 'test_migration_integrity_libsql.db');
   cleanupSqliteFile(dbFile);
@@ -132,17 +132,21 @@ function applyMigrationsExcluding(db, dir, excludeFiles) {
 
   client.close();
   cleanupSqliteFile(dbFile);
-  console.log('[libsql] full 0000-0005 migration sequence: all three unique indexes present and enforced');
+  console.log('[libsql] full migration sequence: all three unique indexes present and enforced');
 }
 
 // --- Section C: upgrade path — 0005 layered onto an already-migrated,
-// pre-fix (0000-0004 only) database, proving the fix and its idempotency ---
+// pre-fix database, proving the fix and its idempotency. 0007's own table
+// rebuild also recreates this index defensively (so it isn't lost a second
+// time if 0005 were ever skipped), so 0007 must be excluded too here or the
+// "pre-fix" baseline would not actually reproduce the missing-index bug this
+// section is specifically testing for.
 {
   const dbPath = path.join(repo, 'test_migration_integrity_upgrade.db');
   cleanupSqliteFile(dbPath);
   const db = new Database(dbPath);
 
-  applyMigrationsExcluding(db, drizzleDir, ['0005_restore_document_chunks_unique_index.sql']);
+  applyMigrationsExcluding(db, drizzleDir, ['0005_restore_document_chunks_unique_index.sql', '0007_document_chunks_cascade.sql']);
 
   const beforeFix = db.prepare(`PRAGMA index_list('document_chunks')`).all();
   assert(
@@ -174,6 +178,56 @@ function applyMigrationsExcluding(db, dir, excludeFiles) {
   db.close();
   cleanupSqliteFile(dbPath);
   console.log('[upgrade path] 0005 correctly restores and enforces the index on a pre-fix database, and is idempotent');
+}
+
+// --- Section D: upgrade path — 0007 layered onto an already-migrated,
+// pre-fix (0000-0006, no cascade) database, proving the FK fix, the
+// behavioral cascade-delete, and that the index survives this second table
+// rebuild too. ---
+{
+  const dbPath = path.join(repo, 'test_migration_integrity_cascade.db');
+  cleanupSqliteFile(dbPath);
+  const db = new Database(dbPath);
+
+  applyMigrationsExcluding(db, drizzleDir, ['0007_document_chunks_cascade.sql']);
+
+  const beforeFix = db.prepare(`PRAGMA foreign_key_list('document_chunks')`).all();
+  const beforeFk = beforeFix.find((row) => row.table === 'documents');
+  assert.equal(beforeFk.on_delete, 'NO ACTION', 'pre-fix database should reproduce the missing-cascade regression');
+
+  const fixSql = fs.readFileSync(path.join(drizzleDir, '0007_document_chunks_cascade.sql'), 'utf8');
+  db.exec(fixSql);
+
+  const afterFix = db.prepare(`PRAGMA foreign_key_list('document_chunks')`).all();
+  const afterFk = afterFix.find((row) => row.table === 'documents');
+  assert.equal(afterFk.on_delete, 'CASCADE', '0007 must set document_chunks.document_id to ON DELETE CASCADE');
+
+  const indexList = db.prepare(`PRAGMA index_list('document_chunks')`).all();
+  const restoredIndex = indexList.find((row) => row.name === 'ux_document_chunks_document_chunk_idx');
+  assert(restoredIndex, '0007\'s table rebuild must not drop the unique index a second time');
+  assert.equal(restoredIndex.unique, 1, 'index must still be unique after 0007');
+
+  // Re-applying 0007 a second time must not error (IF NOT EXISTS on the index; CREATE TABLE IF NOT EXISTS on the rebuild target).
+  assert.doesNotThrow(() => db.exec(fixSql), '0007 must be safe to re-apply');
+
+  db.prepare(`INSERT INTO documents (id, title, provenance_sha256, source_type, word_count, unique_shingle_count) VALUES (?,?,?,?,?,?)`)
+    .run('cascade-doc-1', 'doc', 'cascade-prov-1', 'Publication', 5, 1);
+  db.prepare(`INSERT INTO document_chunks (document_id, chunk_index, token_count, token_start) VALUES (?,?,?,?)`)
+    .run('cascade-doc-1', 0, 5, 0);
+  const chunkId = db.prepare(`SELECT id FROM document_chunks WHERE document_id = ?`).get('cascade-doc-1').id;
+  db.prepare(`INSERT INTO chunk_fingerprints (chunk_id, shingle_hash, position) VALUES (?,?,?)`).run(chunkId, 'cascade-hash', 0);
+
+  db.pragma('foreign_keys = ON');
+  db.prepare(`DELETE FROM documents WHERE id = ?`).run('cascade-doc-1');
+
+  const chunkCountAfterDelete = db.prepare(`SELECT COUNT(*) as cnt FROM document_chunks WHERE document_id = ?`).get('cascade-doc-1').cnt;
+  const fingerprintCountAfterDelete = db.prepare(`SELECT COUNT(*) as cnt FROM chunk_fingerprints WHERE chunk_id = ?`).get(chunkId).cnt;
+  assert.equal(chunkCountAfterDelete, 0, 'deleting the document must cascade-delete its chunks');
+  assert.equal(fingerprintCountAfterDelete, 0, 'deleting the document must transitively cascade-delete its fingerprints via the chunk cascade');
+
+  db.close();
+  cleanupSqliteFile(dbPath);
+  console.log('[upgrade path] 0007 correctly restores CASCADE, preserves the unique index, and cascade-deletes chunks + fingerprints');
 }
 
 console.log('Migration schema integrity tests passed');
