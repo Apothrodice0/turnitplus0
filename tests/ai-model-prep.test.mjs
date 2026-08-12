@@ -242,13 +242,38 @@ test("existing analysis flow remains intact: worker still emits the untouched pe
   assert.match(worker, /passages: passages\.map/);
 });
 
-test("cancellation and retry: the AI report panel is wired with a real cancel handler and stage-aware progress", async () => {
+test("cancellation and retry: analyzeAiText's cancellation plumbing survives in page.tsx for the live-generation flow", async () => {
+  // The dedicated cancel/retry UI (cancelAiAnalysis, runAiAnalysis,
+  // aiPrepState) moved out with the old in-app result view when saved
+  // reports became a routable page (app/reports/[id]) that renders AI
+  // results read-only from the stored payload. The underlying worker
+  // cancellation mechanism analyzeAiText relies on stays in page.tsx,
+  // still exercised by the live report-generation flow.
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
-  assert.match(page, /function cancelAiAnalysis\(\)/);
-  assert.match(page, /aiDetectorWorker\.terminate\(\)/);
-  assert.match(page, /reject\(new AiAnalysisCancelledError\(\)\)/);
-  assert.match(page, /<AiReport[\s\S]*?prepState=\{aiPrepState\}[\s\S]*?onCancel=\{cancelAiAnalysis\}/);
-  assert.match(page, /onRetry=\{\(\) => void runAiAnalysis\(currentReport\)\}/);
+  assert.match(page, /let pendingAiReject: \(\(error: Error\) => void\) \| null = null;/);
+  assert.match(page, /pendingAiReject = reject;/);
+  assert.doesNotMatch(page, /function cancelAiAnalysis\(\)/);
+});
+
+test("cancellation and retry: the extracted AiReport/AiPreparationPanel components still accept isRunning/prepState/onRetry/onCancel", async () => {
+  // Verifies the capability itself (not just page.tsx wiring, which is
+  // intentionally absent for this read-only phase — see the saved-report
+  // detail page) is still present in the extracted component, ready for a
+  // future phase to wire up live re-analysis on /reports/[id].
+  const aiReport = await readFile(new URL("../components/report/ai-report.tsx", import.meta.url), "utf8");
+  assert.match(aiReport, /isRunning\?: boolean;/);
+  assert.match(aiReport, /prepState\?: AiPrepUpdate \| null;/);
+  assert.match(aiReport, /onRetry\?: \(\) => void;/);
+  assert.match(aiReport, /onCancel\?: \(\) => void;/);
+  assert.match(aiReport, /\{isRunning && <AiPreparationPanel prepState=\{prepState\} onCancel=\{onCancel\} \/>\}/);
+});
+
+test("cancellation and retry: the saved-report detail page renders AI results read-only, without live re-analysis wiring", async () => {
+  const shell = await readFile(new URL("../app/reports/[id]/report-detail-shell.tsx", import.meta.url), "utf8");
+  assert.match(shell, /<AiReport report=\{report\} \/>/);
+  assert.doesNotMatch(shell, /isRunning=/);
+  assert.doesNotMatch(shell, /onRetry=/);
+  assert.doesNotMatch(shell, /onCancel=/);
 });
 
 test("accessible and reduced-motion: the preparation panel's animations are disabled under prefers-reduced-motion", async () => {

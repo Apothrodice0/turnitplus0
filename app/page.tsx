@@ -1,7 +1,7 @@
 "use client";
 
+import Link from "next/link";
 import {
-  ArrowLeft,
   BookOpen,
   Check,
   ChevronRight,
@@ -22,7 +22,6 @@ import {
   PanelLeftOpen,
   Pencil,
   Printer,
-  Quote,
   Search,
   Save,
   ShieldCheck,
@@ -32,51 +31,43 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { FormEvent, ReactNode } from "react";
+import type { FormEvent } from "react";
 import { createReceiptPdf } from "@/lib/receipt-pdf";
 import { getDeviceKey } from "@/lib/device-key";
 import { extractPdfTextDocument } from "@/lib/pdf-text-extraction";
 import { clearStoredReports, loadStoredReports, storeReport } from "@/lib/report-store";
-import { deleteRemoteReport, fetchRemoteReport, listRemoteReportSummaries, saveReportRemote, type ReportSummary } from "@/lib/reports-remote";
+import { deleteRemoteReport, fetchRemoteReport, listRemoteReportSummaries, saveReportRemote } from "@/lib/reports-remote";
 import { combineMatchedWordPositions } from "@/lib/similarity-enrichment";
 import type { WebCheckResult } from "@/lib/web-check-core";
 import {
   AI_MODEL_VERSION,
   AI_PASSAGE_LOG_ODDS_THRESHOLD,
   AI_PASSAGE_THRESHOLD,
-  AI_REVIEW_PASSAGE_PERCENTILE,
-  AI_SCORING_VERSION,
-  calibratedAiDisplaySignal,
   similarityScoreBand,
-  shouldSuppressAiScore,
 } from "@/lib/ai-core";
 import {
-  AiAnalysisCancelledError,
-  aiFirstRunExplainer,
   aiPrepDetailLabel,
   aiPrepStageLabel,
   describeAiAnalysisError,
   type AiPrepStage,
   type AiPrepUpdate,
 } from "@/lib/ai-model-prep";
+import {
+  aiSignalDisplay,
+  archiveOverlapScore,
+  archiveScopeCount,
+  buildReportSummary,
+  type AiAnalysis,
+  type SimilarityReport,
+  type SourceMatch,
+} from "@/lib/report-types";
 
-type View = "home" | "dashboard" | "reports" | "about" | "account" | "welcome" | "legal" | "processing" | "result";
-type ResultTab = "full" | "overview" | "submission" | "sources";
-type ReportMode = "ai" | "similarity";
+type View = "home" | "dashboard" | "reports" | "about" | "account" | "welcome" | "legal" | "processing";
 type AuthMode = "login" | "signup";
 type LegalTab = "privacy" | "terms";
 type LocalAccount = { username: string; email: string };
-type SourceType = "Internet" | "Publication";
 
-const SIMILARITY_BAND_LABELS = {
-  low: "Low archive overlap",
-  review: "Moderate archive overlap",
-  high: "High archive overlap",
-} as const;
-
-const ARCHIVE_DOCUMENT_FALLBACK = 230;
-
-const VIEW_HASH: Record<Exclude<View, "processing" | "result">, string> = {
+const VIEW_HASH: Record<Exclude<View, "processing">, string> = {
   home: "#home",
   dashboard: "#dashboard",
   reports: "#reports",
@@ -86,263 +77,14 @@ const VIEW_HASH: Record<Exclude<View, "processing" | "result">, string> = {
   legal: "#privacy-terms",
 };
 
-function viewFromHash(hash: string, hasOpenReport: boolean): View {
+function viewFromHash(hash: string): View {
   if (hash === "#home") return "home";
   if (hash === "#reports") return "reports";
   if (hash === "#how-it-works") return "about";
   if (hash === "#account") return "account";
   if (hash === "#welcome") return "welcome";
   if (hash === "#privacy-terms") return "legal";
-  if (hash === "#report") return hasOpenReport ? "result" : "reports";
   return "home";
-}
-
-type SourceMatch = {
-  name: string;
-  type: SourceType;
-  percent: number;
-  matches: number;
-  matchedWords?: number;
-  phrases: string[];
-  color: string;
-};
-
-type AiPassage = {
-  start: number;
-  end: number;
-  wordStart: number;
-  wordEnd: number;
-  text: string;
-  wordCount: number;
-  probability: number;
-  logOdds?: number;
-  flagged?: boolean;
-  tokenStart?: number;
-  tokenEnd?: number;
-  tokenCount?: number;
-  wasTruncated?: boolean;
-};
-
-type AiAnalysis = {
-  status: "complete" | "unsupported" | "error";
-  score: number | null;
-  model: string;
-  engine: "WebGPU" | "CPU" | null;
-  threshold: number;
-  thresholdLogOdds?: number;
-  eligibleWordCount: number;
-  analyzedWordCount: number;
-  passages: AiPassage[];
-  meanProbability?: number;
-  maxProbability?: number;
-  top3MeanLogOdds?: number | null;
-  coveragePercent?: number;
-  medianLogOdds?: number | null;
-  flaggedWordCount?: number;
-  flaggedPassageCount?: number;
-  analyzedTokenCount?: number;
-  flaggedTokenCount?: number;
-  truncatedPassageCount?: number;
-  populationPercentile?: number | null;
-  scoringVersion?: 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10;
-  error?: string;
-};
-
-type AiSignalTone = "low" | "review" | "high" | "unavailable";
-type AiSignalDisplay = {
-  value: number | null;
-  tone: AiSignalTone;
-  label: string;
-  detail: string;
-  range: string;
-};
-
-type SimilarityReport = {
-  version: 11;
-  id: number;
-  submissionId: string;
-  title: string;
-  author: string;
-  assignment: string;
-  created: string;
-  score: number;
-  archiveScore?: number;
-  aiScore?: number | null;
-  aiAnalysis?: AiAnalysis;
-  webCheck?: WebCheckResult;
-  wordCount: number;
-  characterCount: number;
-  pageCount: number;
-  fileSize: string;
-  databaseSize: number;
-  corpusVersion: string;
-  scoreBand: "Low" | "Moderate" | "High";
-  riskStatus: "Elevated" | "Lower";
-  riskTarget: number;
-  riskCutoff: number;
-  riskCalibration: { auc: number; precision: number; recall: number; sampleSize: number };
-  features: {
-    maxSourceContainment: number;
-    longestMatchedSpan: number;
-    quotationDensity: number;
-    referenceListRatio: number;
-    highFrequencyShingleCount: number;
-    repeatedThreeGramCount: number;
-    detectedLanguage: "Arabic" | "French" | "English" | "Mixed";
-  };
-  excludedDocuments: number;
-  matchedWordCount: number;
-  archiveMatchedPositions?: number[];
-  wikipediaMatchedWordCount?: number;
-  sources: SourceMatch[];
-  repeats: [string, number][];
-  text: string;
-};
-
-function archiveDocumentCount(corpusVersion: string) {
-  const match = corpusVersion.match(/^archive-v\d+-(\d+)-/);
-  return match ? Number(match[1]) : null;
-}
-
-function archiveScopeCount(report: SimilarityReport) {
-  return archiveDocumentCount(report.corpusVersion) ?? report.databaseSize ?? ARCHIVE_DOCUMENT_FALLBACK;
-}
-
-function archiveOverlapScore(report: SimilarityReport) {
-  return report.archiveScore ?? report.score;
-}
-
-function archiveMatchedWordCount(report: SimilarityReport) {
-  return report.archiveMatchedPositions?.length
-    ?? Math.max(0, report.matchedWordCount - (report.wikipediaMatchedWordCount ?? 0));
-}
-
-function sourceMatchedWordCount(source: SourceMatch, report: SimilarityReport) {
-  return source.matchedWords ?? Math.round((source.percent / 100) * report.wordCount);
-}
-
-type HighlightRange = {
-  start: number;
-  end: number;
-  sourceIndex: number;
-  color: string;
-  label: string;
-  kind: "source" | "wikipedia";
-  url?: string;
-  wikipediaSources?: Array<{ pageId: number; title: string; url: string }>;
-};
-
-function aiSignalDisplay(report: SimilarityReport): AiSignalDisplay {
-  const analysis = report.aiAnalysis;
-  if (analysis?.status === "unsupported") {
-    return {
-      value: null,
-      tone: "unavailable",
-      label: "Not enough text",
-      detail: "Fewer than 300 eligible English words were available, so no AI percentage was calculated.",
-      range: "No AI result",
-    };
-  }
-  if (analysis?.status === "error") {
-    return {
-      value: null,
-      tone: "unavailable",
-      label: "Analysis unavailable",
-      detail: analysis.error ?? "The local AI analysis did not finish.",
-      range: "Try again",
-    };
-  }
-  const normalizedSignal = analysis?.status === "complete"
-    && analysis.scoringVersion === AI_SCORING_VERSION
-    && typeof analysis.medianLogOdds === "number"
-    ? calibratedAiDisplaySignal(analysis.medianLogOdds)
-    : null;
-  if (normalizedSignal === null) {
-    return {
-      value: null,
-      tone: "unavailable",
-      label: "AI report pending",
-      detail: "Run the AI analysis to calculate the document's AI writing score.",
-      range: "No result yet",
-    };
-  }
-  const value = normalizedSignal.score;
-  const scoreDetail = "The score is calculated from the language patterns found across the document's analyzed passages.";
-  if (value < 20) {
-    return {
-      value,
-      tone: "low",
-      label: "Low AI indicators",
-      detail: scoreDetail,
-      range: "Green · 0–19%",
-    };
-  }
-  if (value <= 50) {
-    return {
-      value,
-      tone: "review",
-      label: "Moderate AI indicators",
-      detail: scoreDetail,
-      range: "Blue · 20–50%",
-    };
-  }
-  return {
-    value,
-    tone: "high",
-    label: "Strong AI indicators",
-    detail: scoreDetail,
-    range: "Red · 51–100%",
-  };
-}
-
-function buildReportSummary(report: SimilarityReport): ReportSummary {
-  const aiSignal = aiSignalDisplay(report);
-  return {
-    id: String(report.id),
-    submissionId: report.submissionId,
-    title: report.title,
-    createdAt: report.created,
-    wordCount: report.wordCount,
-    archiveScore: archiveOverlapScore(report),
-    scoreBand: report.scoreBand,
-    aiScore: aiSignal.value,
-    aiTone: aiSignal.tone,
-  };
-}
-
-function AnimatedAiPercentage({
-  value,
-  animated = true,
-}: {
-  value: number | null;
-  animated?: boolean;
-}) {
-  const [displayValue, setDisplayValue] = useState(0);
-
-  useEffect(() => {
-    if (value === null) return;
-    if (!animated) {
-      setDisplayValue(value);
-      return;
-    }
-    let frame = 0;
-    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-      frame = window.requestAnimationFrame(() => setDisplayValue(value));
-      return () => window.cancelAnimationFrame(frame);
-    }
-    const startedAt = performance.now();
-    const duration = 850;
-    const tick = (now: number) => {
-      const progress = Math.min(1, (now - startedAt) / duration);
-      const eased = 1 - Math.pow(1 - progress, 3);
-      setDisplayValue(Math.round(value * eased));
-      if (progress < 1) frame = window.requestAnimationFrame(tick);
-    };
-    frame = window.requestAnimationFrame(tick);
-    return () => window.cancelAnimationFrame(frame);
-  }, [animated, value]);
-
-  return <>{value === null ? "—" : `${animated ? displayValue : value}%`}</>;
 }
 
 let similarityWorker: Worker | null = null;
@@ -473,21 +215,6 @@ async function analyzeAiText(
   });
 }
 
-// Real cancellation, not a UI-only affordance: terminating the worker drops
-// its in-flight fetches (transformers.js exposes no AbortSignal to hook into
-// directly). The next analysis request builds a fresh worker.
-function cancelAiAnalysis() {
-  if (aiDetectorWorker) {
-    aiDetectorWorker.terminate();
-    aiDetectorWorker = null;
-  }
-  if (pendingAiReject) {
-    const reject = pendingAiReject;
-    pendingAiReject = null;
-    reject(new AiAnalysisCancelledError());
-  }
-}
-
 async function analyzeWikipediaText(
   text: string,
   title: string,
@@ -537,12 +264,6 @@ async function extractFileText(file: File, onProgress: (progress: number, label:
   throw new Error("This file type is not supported.");
 }
 
-function sourceIcon(type: SourceType) {
-  if (type === "Internet") return <Globe2 aria-hidden="true" />;
-  if (type === "Publication") return <BookOpen aria-hidden="true" />;
-  return <GraduationCap aria-hidden="true" />;
-}
-
 async function downloadReceipt(report: SimilarityReport) {
   const blob = await createReceiptPdf(report);
   const url = URL.createObjectURL(blob);
@@ -554,14 +275,6 @@ async function downloadReceipt(report: SimilarityReport) {
   anchor.click();
   anchor.remove();
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-
-function phrasePattern(phrase: string) {
-  const words = phrase
-    .split(/\s+/)
-    .filter(Boolean)
-    .map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
-  return words.length ? `\\b${words.join("[\\s\\W]+")}\\b` : "";
 }
 
 function enrichReportWithWikipedia(report: SimilarityReport, webCheck: WebCheckResult): SimilarityReport {
@@ -583,628 +296,14 @@ function enrichReportWithWikipedia(report: SimilarityReport, webCheck: WebCheckR
   };
 }
 
-function findHighlightRanges(report: SimilarityReport) {
-  const candidates: HighlightRange[] = [];
-
-  report.sources.forEach((source, sourceIndex) => {
-    source.phrases.slice(0, 140).forEach((phrase) => {
-      const pattern = phrasePattern(phrase);
-      if (!pattern) return;
-      const expression = new RegExp(pattern, "gi");
-      let match = expression.exec(report.text);
-      while (match) {
-        candidates.push({
-          start: match.index,
-          end: match.index + match[0].length,
-          sourceIndex,
-          color: source.color,
-          label: source.name,
-          kind: "source",
-        });
-        if (expression.lastIndex === match.index) expression.lastIndex += 1;
-        match = expression.exec(report.text);
-      }
-    });
-  });
-
-  report.webCheck?.matches.filter((match) => match.matched).forEach((match) => {
-    const pattern = phrasePattern(match.phrase);
-    const source = match.sources[0];
-    if (!pattern || !source) return;
-    const expression = new RegExp(pattern, "gi");
-    let found = expression.exec(report.text);
-    while (found) {
-      candidates.push({
-        start: found.index,
-        end: found.index + found[0].length,
-        sourceIndex: -1,
-        color: "#0784b4",
-        label: source.title,
-        kind: "wikipedia",
-        url: source.url,
-        wikipediaSources: match.sources,
-      });
-      if (expression.lastIndex === found.index) expression.lastIndex += 1;
-      found = expression.exec(report.text);
-    }
-  });
-
-  const sourceCandidates = candidates
-    .filter((candidate) => candidate.kind === "source")
-    .sort((left, right) => left.sourceIndex - right.sourceIndex || left.start - right.start || right.end - left.end);
-  const mergedSources: HighlightRange[] = [];
-
-  sourceCandidates.forEach((candidate) => {
-    const previous = mergedSources[mergedSources.length - 1];
-    if (
-      previous &&
-      previous.sourceIndex === candidate.sourceIndex &&
-      candidate.start <= previous.end + 3
-    ) {
-      previous.end = Math.max(previous.end, candidate.end);
-      return;
-    }
-    mergedSources.push({ ...candidate });
-  });
-
-  const accepted: HighlightRange[] = [];
-  const wikipediaCandidates = candidates
-    .filter((candidate) => candidate.kind === "wikipedia")
-    .sort((left, right) => left.start - right.start || right.end - left.end);
-
-  [...wikipediaCandidates, ...mergedSources]
-    .forEach((candidate) => {
-      const overlaps = accepted.some(
-        (range) => candidate.start < range.end && candidate.end > range.start,
-      );
-      if (!overlaps) accepted.push(candidate);
-    });
-
-  return accepted.sort((left, right) => left.start - right.start);
-}
-
-function HighlightedDocument({ report }: { report: SimilarityReport }) {
-  const ranges = findHighlightRanges(report);
-  if (ranges.length === 0) {
-    return <div className="submission-rendered-text">{report.text}</div>;
-  }
-
-  const pieces: ReactNode[] = [];
-  let cursor = 0;
-
-  ranges.forEach((range, index) => {
-    if (range.start > cursor) {
-      pieces.push(report.text.slice(cursor, range.start));
-    }
-    pieces.push(
-      <mark
-        className={`submission-match ${range.kind === "wikipedia" ? "submission-wikipedia-match" : ""}`}
-        key={`${range.start}-${range.end}-${index}`}
-        style={{
-          backgroundColor: `${range.color}30`,
-          borderBottomColor: range.color,
-          boxShadow: `inset 3px 0 0 ${range.color}`,
-        }}
-        title={range.kind === "source" ? `Source ${range.sourceIndex + 1}: ${range.label}` : `Found on Wikipedia: ${range.label}`}
-      >
-        {report.text.slice(range.start, range.end)}
-        <span style={{ backgroundColor: range.color }}>
-          {range.kind === "source" ? range.sourceIndex + 1 : "W"}
-        </span>
-        {range.kind === "wikipedia" && range.wikipediaSources?.map((source) => (
-          <a className="wikipedia-source-link" key={source.pageId} href={source.url} target="_blank" rel="noreferrer">
-            <Globe2 aria-hidden="true" />
-            <b>{source.title}</b>
-            <small>Found on Wikipedia; shown as separate evidence and not included in Archive overlap.</small>
-          </a>
-        ))}
-      </mark>,
-    );
-    cursor = range.end;
-  });
-
-  if (cursor < report.text.length) {
-    pieces.push(report.text.slice(cursor));
-  }
-
-  return <div className="submission-rendered-text">{pieces}</div>;
-}
-
-function HighlightLegend({ report }: { report: SimilarityReport }) {
-  const wikipediaSources = [...new Map(
-    (report.webCheck?.matches ?? [])
-      .filter((match) => match.matched)
-      .flatMap((match) => match.sources)
-      .map((source) => [source.pageId, source]),
-  ).values()];
-  return (
-    <div className="highlight-legend">
-      <div>
-        <strong>{wikipediaSources.length > 0 ? "Matched passages" : "Red matched passages"}</strong>
-        <span>{wikipediaSources.length > 0 ? "Red marks the indexed archive; blue W marks separate Wikipedia evidence that does not change Archive overlap" : "Each number connects the matched phrase to an indexed source document"}</span>
-      </div>
-      <div className="highlight-legend-items">
-        {report.sources.map((source, index) => (
-          <span className="highlight-legend-item" key={source.name} title={source.name}>
-            <i style={{ backgroundColor: source.color }}>{index + 1}</i>
-            {source.name}
-          </span>
-        ))}
-        {wikipediaSources.map((source) => (
-          <a className="highlight-legend-item wikipedia-legend-item" key={`wiki-${source.pageId}`} href={source.url} target="_blank" rel="noreferrer">
-            <i>W</i>
-            {source.title}
-          </a>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function ReportPageHeader({
-  report,
-  page,
-  label,
-}: {
-  report: SimilarityReport;
-  page: number;
-  label: string;
-}) {
-  return (
-    <div className="paper-header">
-      <div className="paper-brand">
-        <span>T+</span>
-        <strong>integrity</strong>
-      </div>
-      <span>Page {page} · {label}</span>
-      <span className="paper-id">Submission ID&nbsp;&nbsp; {report.submissionId}</span>
-    </div>
-  );
-}
-
-function ReportPageFooter({
-  report,
-  page,
-  label,
-}: {
-  report: SimilarityReport;
-  page: number;
-  label: string;
-}) {
-  return (
-    <div className="paper-footer">
-      <div className="paper-brand">
-        <span>T+</span>
-        <strong>integrity</strong>
-      </div>
-      <span>Page {page} · {label}</span>
-      <span className="paper-id">Submission ID&nbsp;&nbsp; {report.submissionId}</span>
-    </div>
-  );
-}
-
-function CategorySummary({ report }: { report: SimilarityReport }) {
-  const categories = [
-    {
-      label: "Indexed publications",
-      type: "Publication" as SourceType,
-      icon: <BookOpen aria-hidden="true" />,
-    },
-  ];
-
-  return (
-    <div className="category-list">
-      {categories.map((category) => {
-        const percent = report.sources
-          .filter((source) => source.type === category.type)
-          .reduce((sum, source) => sum + source.percent, 0);
-        return (
-          <div className="category-row" key={category.type}>
-            <strong>{percent}%</strong>
-            {category.icon}
-            <span>{category.label}</span>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-function MatchGroups({ report }: { report: SimilarityReport }) {
-  const directMatches = report.sources.reduce((sum, source) => sum + source.matches, 0);
-  const directPercent = archiveOverlapScore(report);
-  const groups = [
-    {
-      className: "not-cited",
-      icon: <FileText aria-hidden="true" />,
-      title: `${directMatches} Not Cited or Quoted`,
-      percent: directPercent,
-      copy: "Matches with neither in-text citation nor quotation marks",
-    },
-    {
-      className: "missing-quotes",
-      icon: <Quote aria-hidden="true" />,
-      title: "Manual review required",
-      percent: 0,
-      copy: "The checker does not decide whether a match is properly quoted",
-    },
-    {
-      className: "missing-citation",
-      icon: <Search aria-hidden="true" />,
-      title: "0 Missing Citation",
-      percent: 0,
-      copy: "Matches with quotation marks, but no in-text citation",
-    },
-    {
-      className: "cited",
-      icon: <GraduationCap aria-hidden="true" />,
-      title: "0 Cited and Quoted",
-      percent: 0,
-      copy: "Matches with in-text citation present and quotation marks",
-    },
-  ];
-
-  return (
-    <div className="match-groups">
-      {groups.map((group) => (
-        <div className="match-group" key={group.className}>
-          <span className={`match-group-icon ${group.className}`}>{group.icon}</span>
-          <div>
-            <div className="match-group-title">
-              <strong>{group.title}</strong>
-              <span>{group.percent}%</span>
-            </div>
-            <p>{group.copy}</p>
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function SourceList({ report, detailed = false }: { report: SimilarityReport; detailed?: boolean }) {
-  if (report.sources.length === 0) {
-    return (
-      <div className="no-sources">
-        <ShieldCheck aria-hidden="true" />
-        <strong>No weighted source matches</strong>
-        <p>No distinctive five-word passage matched the private full-document database.</p>
-      </div>
-    );
-  }
-
-  return (
-    <div className={`ranked-sources ${detailed ? "detailed" : ""}`}>
-      {report.sources.map((source, index) => (
-        <article className="ranked-source" key={`${source.name}-${index}`}>
-          <div className="source-tags">
-            <span className="source-number" style={{ backgroundColor: source.color }}>
-              {index + 1}
-            </span>
-            <span className="source-type" style={{ backgroundColor: `${source.color}24` }}>
-              {sourceIcon(source.type)}
-              {source.type}
-            </span>
-          </div>
-          <div className="source-name-row">
-            <div>
-              <strong>{source.name}</strong>
-              <p>
-                {sourceMatchedWordCount(source, report).toLocaleString()} matched words across {source.matches} passage group{source.matches === 1 ? "" : "s"}
-              </p>
-            </div>
-            <b>{source.percent}%</b>
-          </div>
-          {detailed && (
-            <div className="source-progress" aria-label={`${source.percent}% match`}>
-              <span style={{ width: `${Math.max(4, source.percent * 5)}%`, backgroundColor: source.color }} />
-            </div>
-          )}
-        </article>
-      ))}
-    </div>
-  );
-}
-
-function OverviewReport({ report }: { report: SimilarityReport }) {
-  const overlapScore = archiveOverlapScore(report);
-  const similarityVerdict = similarityScoreBand(overlapScore);
-  const wikipediaMatches = report.webCheck?.phrasesMatched ?? 0;
-  const archiveCount = archiveScopeCount(report);
-  return (
-    <article className="report-paper overview-paper">
-      <ReportPageHeader report={report} page={2} label="Integrity Overview" />
-      <div className="paper-content">
-        <section className={`similarity-heading ${similarityVerdict ? `similarity-verdict-${similarityVerdict.key}` : ""}`}>
-          <h2>
-            <span>{overlapScore}%</span> Archive overlap
-            {similarityVerdict && <em>{SIMILARITY_BAND_LABELS[similarityVerdict.key]}</em>}
-          </h2>
-          <aside className="archive-scope-note">
-            Archive overlap: {overlapScore}% — matched against {archiveCount.toLocaleString()} indexed documents. This is not an estimate of a Turnitin score.
-          </aside>
-          <p>
-            TurnitPlus found {archiveMatchedWordCount(report).toLocaleString()} matched words within its indexed archive.
-            Review the highlighted passages and named sources to see exactly what produced the result.
-            {wikipediaMatches > 0 && <> {wikipediaMatches} exact Wikipedia phrase match{wikipediaMatches === 1 ? "" : "es"} are shown separately and do not change Archive overlap.</>}
-            {report.excludedDocuments > 0 && (
-              <> {report.excludedDocuments} content-identical archive document was excluded and recorded as a probable self-match.</>
-            )}
-          </p>
-        </section>
-
-        <section className="filtered-block">
-          <h3>Filtered from the Report</h3>
-          <p><ChevronRight aria-hidden="true" /> Bibliography</p>
-        </section>
-
-        <div className="overview-columns">
-          <section>
-            <h3>Match Groups</h3>
-            <MatchGroups report={report} />
-          </section>
-          <section>
-            <h3>Top Sources</h3>
-            <CategorySummary report={report} />
-          </section>
-        </div>
-
-        <section className="top-sources-section">
-          <h3>Top Sources</h3>
-          <p>The sources with the highest number of potential matches within this submission.</p>
-          <SourceList report={report} />
-        </section>
-      </div>
-      <ReportPageFooter report={report} page={2} label="Integrity Overview" />
-    </article>
-  );
-}
-
-function SubmissionReport({ report }: { report: SimilarityReport }) {
-  return (
-    <article className="report-paper submission-paper">
-      <ReportPageHeader report={report} page={3} label="Integrity Submission" />
-      <div className="paper-content">
-        <div className="submission-title">
-          <span>1</span>
-          <h2>{report.title.replace(/\.[^.]+$/, "")}</h2>
-        </div>
-        <HighlightLegend report={report} />
-        <div className="submission-copy">
-          <HighlightedDocument report={report} />
-        </div>
-      </div>
-      <ReportPageFooter report={report} page={3} label="Integrity Submission" />
-    </article>
-  );
-}
-
-function SourcesReport({ report }: { report: SimilarityReport }) {
-  return (
-    <article className="report-paper sources-paper">
-      <ReportPageHeader report={report} page={4} label="Source Details" />
-      <div className="paper-content">
-        <section className="source-detail-heading">
-          <p className="paper-kicker">SOURCE REVIEW</p>
-          <h2>Potential matching sources</h2>
-          <p>Review each source alongside the highlighted submission text before deciding whether a citation is needed.</p>
-        </section>
-        <SourceList report={report} detailed />
-      </div>
-      <ReportPageFooter report={report} page={4} label="Source Details" />
-    </article>
-  );
-}
-
-const AI_PREP_STAGE_ORDER: AiPrepStage[] = [
-  "preparing",
-  "downloading",
-  "preparing-detector",
-  "analyzing",
-  "generating-report",
-  "complete",
-];
-
-function AiPreparationPanel({
-  prepState,
-  onCancel,
-}: {
-  prepState: AiPrepUpdate | null;
-  onCancel?: () => void;
-}) {
-  const stage = prepState?.stage ?? "preparing";
-  const cached = prepState?.cached ?? false;
-  const progress = prepState?.progress ?? null;
-  const detail = prepState?.label ?? aiPrepDetailLabel({ stage, cached, progress });
-  const showFirstRunExplainer = !cached && (stage === "preparing" || stage === "downloading");
-  const showDownloadBar = !cached && stage === "downloading";
-  const percent = progress && progress.total > 0
-    ? Math.max(0, Math.min(100, Math.round((progress.loaded / progress.total) * 100)))
-    : null;
-  const stageIndex = AI_PREP_STAGE_ORDER.indexOf(stage);
-  const canCancel = Boolean(onCancel) && (stage === "preparing" || stage === "downloading");
-
-  return (
-    <section className="ai-prep-panel" aria-live="polite">
-      <div className="ai-analysis-loading">
-        <span aria-hidden="true" />
-        <div>
-          <strong>{aiPrepStageLabel(stage)}</strong>
-          <p>{detail}</p>
-        </div>
-      </div>
-
-      {showDownloadBar && (
-        percent !== null ? (
-          <div className="progress-track ai-prep-progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent} aria-label="Model download progress">
-            <span style={{ width: `${percent}%` }} />
-          </div>
-        ) : (
-          <div className="progress-track ai-prep-progress indeterminate" role="progressbar" aria-label="Downloading the AI model, progress unknown">
-            <span />
-          </div>
-        )
-      )}
-
-      {showFirstRunExplainer && (
-        <ul className="ai-prep-explainer">
-          {aiFirstRunExplainer().map((line) => <li key={line}>{line}</li>)}
-        </ul>
-      )}
-
-      <ol className="ai-prep-stage-list" aria-hidden="true">
-        {AI_PREP_STAGE_ORDER.map((step, index) => (
-          <li key={step} className={index < stageIndex ? "done" : index === stageIndex ? "active" : ""}>
-            {aiPrepStageLabel(step)}
-          </li>
-        ))}
-      </ol>
-
-      {canCancel && (
-        <button type="button" className="button secondary ai-prep-cancel" onClick={onCancel}>
-          Cancel
-        </button>
-      )}
-    </section>
-  );
-}
-
-function AiReport({
-  report,
-  isRunning = false,
-  prepState = null,
-  onRetry,
-  onCancel,
-  printMode = false,
-}: {
-  report: SimilarityReport;
-  isRunning?: boolean;
-  prepState?: AiPrepUpdate | null;
-  onRetry?: () => void;
-  onCancel?: () => void;
-  printMode?: boolean;
-}) {
-  const rawScore = typeof report.aiScore === "number" ? report.aiScore : null;
-  const isSuppressed = rawScore !== null && shouldSuppressAiScore(rawScore);
-  const analysis = report.aiAnalysis;
-  const signal = aiSignalDisplay(report);
-
-  return (
-    <article className={`report-paper ai-paper ${printMode ? "ai-report-print" : "ai-report-enter"} ai-signal-${signal.tone}`}>
-      <ReportPageHeader report={report} page={1} label="AI Writing Report" />
-      <div className="paper-content">
-        <section className="ai-report-heading">
-          <p className="paper-kicker">ENGLISH AI WRITING ANALYSIS</p>
-          {!isRunning && <h2>
-            <span><AnimatedAiPercentage value={signal.value} animated={!printMode} /></span>
-            {signal.value === null ? signal.label : "AI writing score"}
-          </h2>}
-          <p>
-            {signal.value !== null
-              ? signal.detail
-              : analysis?.status === "unsupported"
-                ? signal.detail
-                : "The AI analysis is ready to calculate this document's writing score."}
-          </p>
-        </section>
-        {!isRunning && !isSuppressed && analysis && analysis.status !== "error" && (
-          <section className={`ai-verdict-card ai-signal-card ai-signal-card-${signal.tone}`} aria-label={signal.label}>
-            <div className="ai-verdict-score">
-              <span>AI writing score</span>
-              <strong><AnimatedAiPercentage value={signal.value} animated={!printMode} /></strong>
-            </div>
-            <div className="ai-verdict-copy">
-              <span>Result band</span>
-              <strong>{signal.label}</strong>
-              <p>{signal.detail}</p>
-            </div>
-            <span className="ai-verdict-range">{signal.range}</span>
-            {signal.value !== null && <div className="ai-signal-meter" aria-hidden="true"><span style={{ width: `${signal.value}%` }} /></div>}
-          </section>
-        )}
-        {!isSuppressed && signal.value !== null && <section className="ai-report-metrics">
-          <div><strong>{signal.value}%</strong><span>AI writing score</span></div>
-          <div><strong>{analysis?.analyzedWordCount.toLocaleString() ?? "—"}</strong><span>words analyzed</span></div>
-          <div><strong>{analysis?.analyzedTokenCount?.toLocaleString() ?? "—"}</strong><span>tokens analyzed</span></div>
-          <div><strong>{analysis?.passages.length.toLocaleString() ?? "—"}</strong><span>passage windows</span></div>
-        </section>}
-
-        {isRunning && <AiPreparationPanel prepState={prepState} onCancel={onCancel} />}
-
-        {!isRunning && analysis?.status === "complete" && isSuppressed && (
-          <section className="ai-analysis-message">
-            <strong>—</strong>
-            <p>The document was analyzed, but it did not produce a complete AI writing score. Try the analysis again.</p>
-          </section>
-        )}
-
-        {!isRunning && analysis?.status === "complete" && !isSuppressed && (
-          <section className="ai-passage-review">
-            <div className="ai-passage-heading">
-              <div>
-                <p className="paper-kicker">PASSAGE REVIEW</p>
-                <h3>Highlighted passage analysis</h3>
-              </div>
-              <span>
-                {analysis.flaggedPassageCount ?? analysis.passages.filter((passage) => passage.flagged).length}
-                /{analysis.passages.length} passages · {AI_REVIEW_PASSAGE_PERCENTILE}th-percentile cutoff {(analysis.thresholdLogOdds ?? AI_PASSAGE_LOG_ODDS_THRESHOLD).toFixed(3)}
-              </span>
-            </div>
-            {analysis.passages.length > 0 ? (
-              <div className="ai-passage-list">
-                {analysis.passages.map((passage, index) => {
-                  const isAi = passage.flagged ?? (
-                    passage.logOdds != null
-                      ? passage.logOdds >= (analysis.thresholdLogOdds ?? AI_PASSAGE_LOG_ODDS_THRESHOLD)
-                      : passage.probability >= analysis.threshold
-                  );
-                  return <article className={isAi ? "ai-detected" : "human-detected"} key={`${passage.start}-${passage.end}`}>
-                    <div>
-                      <span>{index + 1}</span>
-                      {passage.logOdds != null && <strong>Signal {passage.logOdds.toFixed(3)}</strong>}
-                      <small>{passage.tokenCount ?? "—"} tokens · {passage.wasTruncated ? "truncated" : "complete window"}</small>
-                      <em>{isAi ? "Above review threshold" : "Below review threshold"}</em>
-                    </div>
-                    <p>{passage.text}</p>
-                  </article>;
-                })}
-              </div>
-            ) : (
-              <div className="ai-empty-passages">
-                <strong>0</strong>
-                <span>passages exceeded the human {AI_REVIEW_PASSAGE_PERCENTILE}th-percentile review threshold</span>
-              </div>
-            )}
-          </section>
-        )}
-
-        {!isRunning && (!analysis || analysis.status === "error") && (
-          <section className="ai-analysis-message">
-            <strong>—</strong>
-            <div>
-              <p>{analysis?.error ?? "This saved report has not completed local AI analysis yet."}</p>
-              {onRetry && <button className="button primary" type="button" onClick={onRetry}>Run AI analysis</button>}
-            </div>
-          </section>
-        )}
-      </div>
-      <ReportPageFooter report={report} page={1} label="AI Writing Report" />
-    </article>
-  );
-}
-
 export default function Home() {
   const [view, setView] = useState<View>("account");
-  const [resultTab, setResultTab] = useState<ResultTab>("full");
-  const [reportMode, setReportMode] = useState<ReportMode>("similarity");
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [file, setFile] = useState<File | null>(null);
   const [progress, setProgress] = useState(0);
   const [processingLabel, setProcessingLabel] = useState("Reading document content");
   const [isGeneratingReport, setIsGeneratingReport] = useState(false);
-  const [isRunningAiAnalysis, setIsRunningAiAnalysis] = useState(false);
-  const [aiPrepState, setAiPrepState] = useState<AiPrepUpdate | null>(null);
   const aiPrepStageRef = useRef<AiPrepStage | null>(null);
   const [currentReport, setCurrentReport] = useState<SimilarityReport | null>(null);
   const [reports, setReports] = useState<SimilarityReport[]>([]);
@@ -1221,21 +320,7 @@ export default function Home() {
   const [profileEditError, setProfileEditError] = useState<string | null>(null);
   const [legalTab, setLegalTab] = useState<LegalTab>("privacy");
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const currentReportRef = useRef<SimilarityReport | null>(null);
   const generationLockRef = useRef(false);
-
-  // "analyzing"/"generating-report"/"complete" updates don't carry a fresh
-  // `cached` determination (only the worker's preparing/downloading/
-  // preparing-detector messages do), so this preserves whatever the worker
-  // last reported instead of clobbering it with a placeholder.
-  function applyAiPrepUpdate(update: AiPrepUpdate) {
-    aiPrepStageRef.current = update.stage;
-    setAiPrepState((prev) => (
-      update.stage === "analyzing" || update.stage === "generating-report" || update.stage === "complete"
-        ? { ...update, cached: prev?.cached ?? update.cached }
-        : update
-    ));
-  }
 
   // Anonymous/device-scoped report loading (no authenticated session).
   // Unchanged from the pre-Phase-2A behavior: IndexedDB is the primary
@@ -1320,13 +405,9 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    currentReportRef.current = currentReport;
-  }, [currentReport]);
-
-  useEffect(() => {
     if (!accountLoaded) return;
     const syncViewFromLocation = () => {
-      const requestedView = viewFromHash(window.location.hash, Boolean(currentReportRef.current));
+      const requestedView = viewFromHash(window.location.hash);
       if (generationLockRef.current && requestedView === "dashboard") {
         window.history.replaceState({ turnitPlusView: "reports" }, "", VIEW_HASH.reports);
         setView("reports");
@@ -1352,26 +433,6 @@ export default function Home() {
       return next;
     });
   }
-
-  const reportDate = useMemo(
-    () =>
-      currentReport
-        ? new Date(currentReport.created).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" })
-        : "",
-    [currentReport],
-  );
-  const currentSimilarityVerdict = useMemo(
-    () => currentReport ? similarityScoreBand(archiveOverlapScore(currentReport)) : null,
-    [currentReport],
-  );
-  const currentArchiveOverlap = useMemo(
-    () => currentReport ? archiveOverlapScore(currentReport) : 0,
-    [currentReport],
-  );
-  const currentAiSignal = useMemo(
-    () => currentReport ? aiSignalDisplay(currentReport) : null,
-    [currentReport],
-  );
 
   function notify(message: string) {
     setToast(message);
@@ -1505,11 +566,9 @@ export default function Home() {
       notify("Your current report must finish before another document can be uploaded.");
       return;
     }
-    const nextHash = nextView === "result"
-      ? "#report"
-      : nextView === "processing"
-        ? "#reports"
-        : VIEW_HASH[nextView];
+    const nextHash = nextView === "processing"
+      ? "#reports"
+      : VIEW_HASH[nextView];
     if (window.location.hash !== nextHash) {
       window.history.pushState({ turnitPlusView: nextView }, "", nextHash);
     }
@@ -1702,77 +761,11 @@ export default function Home() {
         await storeReport(enriched);
         await saveReportRemote(enriched, buildReportSummary(enriched));
       });
-      setResultTab("full");
-      setReportMode("similarity");
       navigate("reports");
       notify("Your reports are ready. Choose AI or Archive overlap.");
     } finally {
       generationLockRef.current = false;
       setIsGeneratingReport(false);
-    }
-  }
-
-  async function runAiAnalysis(report: SimilarityReport) {
-    if (isRunningAiAnalysis) return;
-    setIsRunningAiAnalysis(true);
-    aiPrepStageRef.current = "preparing";
-    setAiPrepState({ stage: "preparing", label: aiPrepStageLabel("preparing"), cached: false, progress: null });
-    try {
-      const aiAnalysis = await analyzeAiText(report.text, report.features.detectedLanguage, applyAiPrepUpdate);
-      applyAiPrepUpdate({
-        stage: "generating-report",
-        label: aiPrepDetailLabel({ stage: "generating-report", cached: false, progress: null }),
-        cached: false,
-        progress: null,
-      });
-      const updated = { ...report, aiScore: aiAnalysis.score, aiAnalysis };
-      setCurrentReport(updated);
-      setReports((current) => current.map((item) => item.id === updated.id ? updated : item));
-      await storeReport(updated);
-      await saveReportRemote(updated, buildReportSummary(updated));
-      applyAiPrepUpdate({ stage: "complete", label: aiPrepStageLabel("complete"), cached: false, progress: null });
-      notify(aiAnalysis.status === "complete" ? "AI report completed." : "This document is not eligible for English AI analysis.");
-    } catch (error) {
-      const failed: SimilarityReport = {
-        ...report,
-        aiScore: null,
-        aiAnalysis: {
-          status: "error",
-          score: null,
-          model: AI_MODEL_VERSION,
-          engine: null,
-          threshold: AI_PASSAGE_THRESHOLD,
-          thresholdLogOdds: AI_PASSAGE_LOG_ODDS_THRESHOLD,
-          eligibleWordCount: 0,
-          analyzedWordCount: 0,
-          passages: [],
-          error: describeAiAnalysisError(error, aiPrepStageRef.current),
-        },
-      };
-      setCurrentReport(failed);
-      setReports((current) => current.map((item) => item.id === failed.id ? failed : item));
-      await storeReport(failed);
-      await saveReportRemote(failed, buildReportSummary(failed));
-    } finally {
-      setIsRunningAiAnalysis(false);
-    }
-  }
-
-  function openReport(report: SimilarityReport, mode: ReportMode) {
-    setCurrentReport(report);
-    setResultTab("full");
-    setReportMode(mode);
-    navigate("result");
-    if (
-      mode === "ai"
-      && (
-        !report.aiAnalysis
-        || report.aiAnalysis.status === "error"
-        || report.aiAnalysis.scoringVersion !== AI_SCORING_VERSION
-        || report.aiAnalysis.model !== AI_MODEL_VERSION
-      )
-    ) {
-      void runAiAnalysis(report);
     }
   }
 
@@ -1797,7 +790,7 @@ export default function Home() {
     notify("Report history cleared.");
   }
 
-  const activeNavView = view === "home" || view === "result" || view === "processing" || view === "welcome" ? "dashboard" : view;
+  const activeNavView = view === "home" || view === "processing" || view === "welcome" ? "dashboard" : view;
 
   return (
     <div className={`site-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
@@ -1893,8 +886,8 @@ export default function Home() {
         </div>
       </aside>
 
-      <main key={view} className={`${view === "result" ? "report-main" : ""} page-stage`}>
-        {view !== "result" && view !== "processing" && (
+      <main key={view} className="page-stage">
+        {view !== "processing" && (
           <header className="topbar">
             <div>
               <p className="eyebrow">{view === "legal" ? "TRUST CENTER" : view === "account" && !account ? "OPTIONAL ACCOUNT" : "AI & SIMILARITY CHECKER"}</p>
@@ -2385,7 +1378,7 @@ export default function Home() {
                       </p>
                     </div>
                     <div className="history-action-group" aria-label={`Actions for ${report.title}`}>
-                      <button className={`history-result history-ai-result history-ai-${aiSignal.tone}`} type="button" aria-label={`Open AI report for ${report.title}`} onClick={() => openReport(report, "ai")}>
+                      <Link href={`/reports/${report.id}?mode=ai`} className={`history-result history-ai-result history-ai-${aiSignal.tone}`} aria-label={`Open AI report for ${report.title}`}>
                         <span className="history-result-score">
                           <strong className="history-ai-value">
                             {aiSignal.value === null ? "—" : `${aiSignal.value}%`}
@@ -2393,14 +1386,14 @@ export default function Home() {
                           <span>{aiSignal.label}</span>
                         </span>
                         <span className="history-open-cue" aria-hidden="true"><ChevronRight /></span>
-                      </button>
-                      <button className={`history-result history-similarity-result ${similarityVerdict ? `history-similarity-${similarityVerdict.key}` : ""}`} type="button" aria-label={`Open Archive overlap report for ${report.title}`} onClick={() => openReport(report, "similarity")}>
+                      </Link>
+                      <Link href={`/reports/${report.id}`} className={`history-result history-similarity-result ${similarityVerdict ? `history-similarity-${similarityVerdict.key}` : ""}`} aria-label={`Open Archive overlap report for ${report.title}`}>
                         <span className="history-result-score">
                           <strong>{overlapScore}%</strong>
                           <span>Archive overlap · {archiveScopeCount(report)} docs</span>
                         </span>
                         <span className="history-open-cue" aria-hidden="true"><ChevronRight /></span>
-                      </button>
+                      </Link>
                       <button className="history-receipt" type="button" onClick={() => downloadReceipt(report)}>
                         <Download aria-hidden="true" />
                         <span>Receipt</span>
@@ -2555,132 +1548,7 @@ export default function Home() {
           </section>
         )}
 
-        {view === "result" && currentReport && (
-          <section className="result-view">
-            <header className="result-toolbar">
-              <button className="back-button" type="button" onClick={() => navigate("reports")}>
-                <ArrowLeft aria-hidden="true" />
-                Back to reports
-              </button>
-              <div className="result-document">
-                <FileText aria-hidden="true" />
-                <div>
-                  <h1>{currentReport.title}</h1>
-                  <p>Generated {reportDate} · Submission ID {currentReport.submissionId}</p>
-                </div>
-              </div>
-            </header>
-
-            <div className="report-summary-strip">
-              <div>
-                <strong className={`summary-chip summary-score-chip ${reportMode === "ai" ? `ai-summary-chip ai-summary-${currentAiSignal?.tone ?? "unavailable"}` : currentSimilarityVerdict ? `summary-verdict-${currentSimilarityVerdict.key}` : ""}`}>
-                  <span className={`score-dot ${reportMode === "ai" ? `ai-dot ai-dot-${currentAiSignal?.tone ?? "unavailable"}` : currentSimilarityVerdict ? `score-dot-${currentSimilarityVerdict.key}` : ""}`} />
-                  {reportMode === "ai"
-                    ? (currentAiSignal
-                      ? `${currentAiSignal.value === null ? "" : `${currentAiSignal.value}% · `}${currentAiSignal.label}`
-                      : "AI report unavailable")
-                    : `${currentArchiveOverlap}% Archive overlap`}
-                </strong>
-                {reportMode === "similarity" && <span className="summary-chip">Matched against {archiveScopeCount(currentReport).toLocaleString()} indexed documents</span>}
-                {reportMode === "similarity" && <span className="summary-chip">{currentReport.sources.length} archive sources</span>}
-                {reportMode === "similarity" && (currentReport.webCheck?.phrasesMatched ?? 0) > 0 && <span className="summary-chip wikipedia-evidence-chip"><Globe2 aria-hidden="true" /> Separate Wikipedia evidence</span>}
-                {reportMode === "ai" && <span className="summary-chip">English only</span>}
-              </div>
-              <div>
-                <span className="summary-chip">{currentReport.wordCount.toLocaleString()} words</span>
-                <span className="summary-chip">{currentReport.pageCount} pages</span>
-                <span className="summary-chip">{currentReport.characterCount.toLocaleString()} characters</span>
-                <span className="summary-chip">{currentReport.corpusVersion}</span>
-              </div>
-            </div>
-
-            <nav className="report-tabs" aria-label="Report sections">
-              {reportMode === "ai" ? (
-                <button className="active" type="button">AI report</button>
-              ) : (
-                <>
-                  <button className={resultTab === "full" ? "active" : ""} type="button" onClick={() => setResultTab("full")}>Full report</button>
-                  <button className={resultTab === "overview" ? "active" : ""} type="button" onClick={() => setResultTab("overview")}>Integrity overview</button>
-                  <button className={resultTab === "submission" ? "active" : ""} type="button" onClick={() => setResultTab("submission")}>Submission</button>
-                  <button className={resultTab === "sources" ? "active" : ""} type="button" onClick={() => setResultTab("sources")}>Source details</button>
-                </>
-              )}
-            </nav>
-
-            <div className="report-workspace">
-              {reportMode === "ai" ? (
-                <AiReport
-                  report={currentReport}
-                  isRunning={isRunningAiAnalysis}
-                  prepState={aiPrepState}
-                  onRetry={() => void runAiAnalysis(currentReport)}
-                  onCancel={cancelAiAnalysis}
-                />
-              ) : (
-                <>
-                  {resultTab === "full" && (
-                    <div className="full-report-preview">
-                      <OverviewReport report={currentReport} />
-                      <SubmissionReport report={currentReport} />
-                      <SourcesReport report={currentReport} />
-                    </div>
-                  )}
-                  {resultTab === "overview" && <OverviewReport report={currentReport} />}
-                  {resultTab === "submission" && <SubmissionReport report={currentReport} />}
-                  {resultTab === "sources" && <SourcesReport report={currentReport} />}
-                </>
-              )}
-
-              <aside className="report-inspector">
-                <div className={`inspector-score ${reportMode === "ai" && currentAiSignal ? `ai-signal-card-${currentAiSignal.tone}` : reportMode === "similarity" && currentSimilarityVerdict ? `similarity-verdict-${currentSimilarityVerdict.key}` : ""}`}>
-                  <span>{reportMode === "ai" ? "AI writing score" : `Archive overlap · ${archiveScopeCount(currentReport)} docs`}</span>
-                  <strong>{reportMode === "ai" ? (currentAiSignal?.value === null ? "—" : `${currentAiSignal?.value ?? 0}%`) : `${currentArchiveOverlap}%`}</strong>
-                  {reportMode === "ai" && currentAiSignal && <p className="inspector-writing-estimate">{currentAiSignal.label}</p>}
-                  {reportMode === "similarity" && currentSimilarityVerdict && <em>{SIMILARITY_BAND_LABELS[currentSimilarityVerdict.key]}</em>}
-                  {reportMode === "similarity" && <div><i style={{ width: `${currentArchiveOverlap * 5}%` }} /></div>}
-                </div>
-                {reportMode === "similarity" && <div className="inspector-section">
-                  <h3>Top source types</h3>
-                  <CategorySummary report={currentReport} />
-                </div>}
-                <div className="inspector-section">
-                  <h3>Report notes</h3>
-                  {reportMode === "ai" ? <p>
-                    English-only local analysis. {currentReport.aiAnalysis?.status === "complete"
-                      ? `${currentReport.aiAnalysis.analyzedWordCount.toLocaleString()} words analyzed. Review the AI writing score and highlighted passage breakdown.`
-                      : "A numeric result requires at least 300 eligible English words and a successful local model load."}
-                  </p> : <p>
-                    Archive overlap measures the percentage of this document found within TurnitPlus&apos;s {archiveScopeCount(currentReport).toLocaleString()} indexed documents. It is not an estimate of a Turnitin score.
-                    {" "}{archiveMatchedWordCount(currentReport).toLocaleString()} words were matched across {currentReport.sources.length} retained source{currentReport.sources.length === 1 ? "" : "s"}.
-                    {(currentReport.webCheck?.phrasesMatched ?? 0) > 0 && ` Wikipedia evidence is shown separately and does not change Archive overlap.`}
-                    {" "}Language detected: {currentReport.features.detectedLanguage}. Longest matched span: {currentReport.features.longestMatchedSpan} words. Archive: {currentReport.corpusVersion}.
-                  </p>}
-                </div>
-              </aside>
-            </div>
-
-            <div className="print-report-bundle">
-              {reportMode === "ai" ? <AiReport report={currentReport} printMode /> : <>
-                  <OverviewReport report={currentReport} />
-                  <SubmissionReport report={currentReport} />
-                  <SourcesReport report={currentReport} />
-                </>}
-            </div>
-
-            <div className="download-report-dock">
-              <div>
-                <strong>Full report</strong>
-                <span>Save a PDF copy</span>
-              </div>
-              <button className="download-report-fab" type="button" onClick={() => window.print()}>
-                <Printer aria-hidden="true" />
-                Download
-              </button>
-            </div>
-          </section>
-        )}
-
-        {view !== "result" && view !== "processing" && (
+        {view !== "processing" && (
           <footer className="site-legal-footer">
             <div><strong>TurnitPlus</strong><span>Private AI & similarity detection</span></div>
             <nav aria-label="Legal information">

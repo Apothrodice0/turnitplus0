@@ -2990,6 +2990,16 @@ main.report-main {
   background: #e9edef;
 }
 
+/* The old in-app result view lived inside a sidebar-offset <main>; the
+   routable /reports/[id] page has no sidebar/main chrome to inherit padding
+   from, so its loading/not-found sub-states (which don't otherwise bring
+   their own spacing the way .result-toolbar etc. do) need their own. */
+.report-not-found-wrap {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 64px 24px;
+}
+
 .result-toolbar {
   position: sticky;
   z-index: 10;

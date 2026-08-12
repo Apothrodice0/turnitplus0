@@ -5,12 +5,16 @@ import test from "node:test";
 test("product branding presents AI detection and scoped archive overlap clearly", async () => {
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
   const layout = await readFile(new URL("../app/layout.tsx", import.meta.url), "utf8");
+  // The AI report paper (and its "ENGLISH AI WRITING ANALYSIS"/"AI writing
+  // score" copy) moved to components/report/ai-report.tsx when saved reports
+  // became a routable page — see app/reports/[id].
+  const aiReport = await readFile(new URL("../components/report/ai-report.tsx", import.meta.url), "utf8");
 
   assert.match(page, /AI & similarity detection/);
   assert.match(page, /Check AI writing and similarity/);
   assert.match(page, /TurnitPlus checks AI-writing signals and measures text found in its indexed archive/);
-  assert.match(page, /ENGLISH AI WRITING ANALYSIS/);
-  assert.match(page, /AI writing score/);
+  assert.match(aiReport, /ENGLISH AI WRITING ANALYSIS/);
+  assert.match(aiReport, /AI writing score/);
   assert.doesNotMatch(page, /EXPERIMENTAL ENGLISH AI WRITING SIGNAL/);
   assert.doesNotMatch(page, /screening estimate, not proof of authorship/);
   assert.match(layout, /TurnitPlus - AI & Similarity Detection/);

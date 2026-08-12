@@ -15,10 +15,11 @@ test("existing local report persistence (IndexedDB) is still wired at every save
 
   // storeReport must still run at all of its existing sites: the anonymous
   // remote-restore loop, the authenticated account-report cache loop,
-  // saveReport, the Wikipedia-enrichment callback, and both the success and
-  // failure paths of runAiAnalysis.
+  // saveReport, and the Wikipedia-enrichment callback. (runAiAnalysis's two
+  // sites moved out along with the old in-app result view it powered — see
+  // app/reports/[id], which renders saved AI results read-only instead.)
   const storeReportCalls = page.match(/await storeReport\(/g) ?? [];
-  assert.equal(storeReportCalls.length, 6, "storeReport should still be called at exactly its 6 existing sites");
+  assert.equal(storeReportCalls.length, 4, "storeReport should still be called at exactly its 4 existing sites");
 
   assert.match(page, /await clearStoredReports\(\);/);
   assert.match(page, /loadStoredReports<SimilarityReport>\(11\)/);
@@ -29,7 +30,7 @@ test("remote report persistence (Turso) is layered alongside local storage, not 
 
   assert.match(
     page,
-    /import \{ deleteRemoteReport, fetchRemoteReport, listRemoteReportSummaries, saveReportRemote, type ReportSummary \} from "@\/lib\/reports-remote";/,
+    /import \{ deleteRemoteReport, fetchRemoteReport, listRemoteReportSummaries, saveReportRemote \} from "@\/lib\/reports-remote";/,
   );
 
   // Every storeReport call site must be immediately followed by the matching
@@ -37,8 +38,6 @@ test("remote report persistence (Turso) is layered alongside local storage, not 
   // local copy already having succeeded first.
   assert.match(page, /await storeReport\(report\);\s*\n\s*await saveReportRemote\(report, buildReportSummary\(report\)\);/);
   assert.match(page, /await storeReport\(enriched\);\s*\n\s*await saveReportRemote\(enriched, buildReportSummary\(enriched\)\);/);
-  assert.match(page, /await storeReport\(updated\);\s*\n\s*await saveReportRemote\(updated, buildReportSummary\(updated\)\);/);
-  assert.match(page, /await storeReport\(failed\);\s*\n\s*await saveReportRemote\(failed, buildReportSummary\(failed\)\);/);
 
   // clearHistory must clear local storage first, then best-effort delete the
   // remote copies — never the other way around.

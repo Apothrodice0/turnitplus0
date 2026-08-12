@@ -63,8 +63,11 @@ export async function destroySessionByToken(client: Client, token: string): Prom
   await client.execute({ sql: "DELETE FROM sessions WHERE token_hash = ?", args: [hashToken(token)] });
 }
 
-export async function getSessionUser(request: Request, client: Client): Promise<SessionUser | null> {
-  const token = parseCookie(request.headers.get("cookie"), SESSION_COOKIE_NAME);
+// Split out from getSessionUser so Server Components (which read cookies via
+// next/headers, not a Request object) can resolve a session without needing
+// to fabricate a fake Request. getSessionUser below is now a thin wrapper
+// kept for the existing Request-based route handlers/tests.
+export async function getSessionUserByToken(token: string | null, client: Client): Promise<SessionUser | null> {
   if (!token) return null;
   const tokenHash = hashToken(token);
   const result = await client.execute({
@@ -80,6 +83,10 @@ export async function getSessionUser(request: Request, client: Client): Promise<
     return null;
   }
   return { id: row.id, username: row.username, email: row.email };
+}
+
+export async function getSessionUser(request: Request, client: Client): Promise<SessionUser | null> {
+  return getSessionUserByToken(parseCookie(request.headers.get("cookie"), SESSION_COOKIE_NAME), client);
 }
 
 /** Sets the session cookie on an outgoing NextResponse. remember=false yields a browser-session-only cookie (no Max-Age). */

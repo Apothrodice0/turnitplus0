@@ -74,3 +74,20 @@ export async function deleteRemoteReport(id: string): Promise<void> {
     });
   }
 }
+
+// Unlike deleteRemoteReport (fail-soft, for best-effort bulk cleanup), this
+// reports success/failure instead of swallowing it — needed for a primary,
+// user-initiated single-report delete, where silently failing while the UI
+// navigates away as if it succeeded would leave a ghost row in the database.
+export async function deleteRemoteReportChecked(id: string): Promise<boolean> {
+  try {
+    const deviceKey = getDeviceKey();
+    const response = await fetch(`/api/reports/${encodeURIComponent(id)}?deviceKey=${encodeURIComponent(deviceKey)}`, { method: "DELETE" });
+    return response.ok;
+  } catch (error) {
+    console.debug("Remote report delete failed.", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return false;
+  }
+}
