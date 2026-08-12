@@ -34,6 +34,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { createReceiptPdf } from "@/lib/receipt-pdf";
+import { getDeviceKey } from "@/lib/device-key";
 import { extractPdfTextDocument } from "@/lib/pdf-text-extraction";
 import { clearStoredReports, loadStoredReports, storeReport } from "@/lib/report-store";
 import { deleteRemoteReport, fetchRemoteReport, listRemoteReportSummaries, saveReportRemote, type ReportSummary } from "@/lib/reports-remote";
@@ -1109,6 +1110,8 @@ export default function Home() {
   const [isAuthenticating, setIsAuthenticating] = useState(false);
   const [authProgress, setAuthProgress] = useState(0);
   const [authLoadingLabel, setAuthLoadingLabel] = useState("Preparing your sign-in");
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [profileEditError, setProfileEditError] = useState<string | null>(null);
   const [legalTab, setLegalTab] = useState<LegalTab>("privacy");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const currentReportRef = useRef<SimilarityReport | null>(null);
@@ -1138,15 +1141,15 @@ export default function Home() {
       .catch(() => setReports([]));
     queueMicrotask(() => {
       setSidebarCollapsed(window.localStorage.getItem("tp_sidebar_collapsed") === "true");
-      try {
-        const activeAccount = window.sessionStorage.getItem("tp_active_account_v1");
-        if (activeAccount) setAccount(JSON.parse(activeAccount) as LocalAccount);
-      } catch {
-        window.sessionStorage.removeItem("tp_active_account_v1");
-      } finally {
-        setAccountLoaded(true);
-      }
     });
+    fetch("/api/auth/me")
+      .then((response) => (response.ok ? response.json() : Promise.resolve({ user: null })))
+      .then((data) => {
+        const result = data as { user: LocalAccount | null };
+        if (result && result.user) setAccount(result.user);
+      })
+      .catch(() => {})
+      .finally(() => setAccountLoaded(true));
   }, []);
 
   useEffect(() => {
@@ -1212,13 +1215,14 @@ export default function Home() {
     event.preventDefault();
     if (isAuthenticating) return;
     const completedMode = authMode ?? "login";
-    const data = new FormData(event.currentTarget);
-    const email = String(data.get("email") ?? "").trim();
-    const password = String(data.get("password") ?? "");
-    const username = String(data.get("username") ?? "").trim();
+    const formData = new FormData(event.currentTarget);
+    const email = String(formData.get("email") ?? "").trim();
+    const password = String(formData.get("password") ?? "");
+    const username = String(formData.get("username") ?? "").trim();
+    const remember = formData.get("remember") === "on";
 
     if (completedMode === "signup") {
-      const confirmPassword = String(data.get("confirmPassword") ?? "");
+      const confirmPassword = String(formData.get("confirmPassword") ?? "");
       const confirmInput = event.currentTarget.elements.namedItem("confirmPassword") as HTMLInputElement | null;
       if (password !== confirmPassword) {
         confirmInput?.setCustomValidity("The passwords do not match.");
@@ -1228,44 +1232,92 @@ export default function Home() {
       confirmInput?.setCustomValidity("");
     }
 
-    const nextAccount = {
-      username: username || account?.username || email.split("@")[0] || "TurnitPlus user",
-      email,
-    };
-
-    const pause = (milliseconds: number) => new Promise<void>((resolve) => window.setTimeout(resolve, milliseconds));
+    setAuthError(null);
     setIsAuthenticating(true);
     setAuthProgress(10);
     setAuthLoadingLabel(completedMode === "login" ? "Preparing your sign-in" : "Creating your workspace");
-    await pause(1200);
-    setAuthProgress(36);
-    setAuthLoadingLabel("Preparing your private workspace");
-    await pause(1300);
-    setAuthProgress(63);
-    setAuthLoadingLabel("Loading your report history");
-    await pause(1300);
-    setAuthProgress(88);
+
+    // Real request, not a fixed timer: the progress bar animates toward a
+    // minimum display duration while the request is in flight, and pads out
+    // to that minimum if the response comes back faster, matching the
+    // real-work-plus-minimum-animation pattern used for report generation.
+    const minimumAuthMs = 1_800;
+    const animationStartedAt = Date.now();
+    const progressTimer = window.setInterval(() => {
+      const elapsed = Date.now() - animationStartedAt;
+      setAuthProgress(Math.min(90, 10 + Math.round((elapsed / minimumAuthMs) * 80)));
+    }, 150);
+    const labelTimers = [
+      window.setTimeout(() => setAuthLoadingLabel("Preparing your private workspace"), 500),
+      window.setTimeout(() => setAuthLoadingLabel("Loading your report history"), 1100),
+    ];
+    const stopAnimation = () => {
+      window.clearInterval(progressTimer);
+      labelTimers.forEach((timer) => window.clearTimeout(timer));
+    };
+
+    let response: Response;
+    try {
+      response = await fetch(completedMode === "login" ? "/api/auth/login" : "/api/auth/signup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password, username, deviceKey: getDeviceKey(), remember }),
+      });
+    } catch {
+      stopAnimation();
+      setIsAuthenticating(false);
+      setAuthError("Could not reach TurnitPlus. Check your connection and try again.");
+      return;
+    }
+
+    const data = (await response.json().catch(() => null)) as { user?: LocalAccount; error?: string } | null;
+    if (!response.ok || !data?.user) {
+      stopAnimation();
+      setIsAuthenticating(false);
+      setAuthError((data && typeof data.error === "string" && data.error) || "Something went wrong. Please try again.");
+      return;
+    }
+
     setAuthLoadingLabel("Almost ready");
-    await pause(1200);
+    const remainingMs = Math.max(0, minimumAuthMs - (Date.now() - animationStartedAt));
+    if (remainingMs > 0) await new Promise((resolve) => window.setTimeout(resolve, remainingMs));
+    stopAnimation();
     setAuthProgress(100);
 
-    setAccount(nextAccount);
-    window.sessionStorage.setItem("tp_active_account_v1", JSON.stringify(nextAccount));
+    setAccount(data.user as LocalAccount);
     setIsAuthenticating(false);
     setAuthMode(null);
     setWelcomeMode(completedMode);
     navigate("welcome");
   }
 
-  function submitProfileEdit(event: FormEvent<HTMLFormElement>) {
+  async function submitProfileEdit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!account) return;
     const data = new FormData(event.currentTarget);
     const username = String(data.get("profileUsername") ?? "").trim();
     const email = String(data.get("profileEmail") ?? "").trim();
-    const nextAccount = { username, email };
-    setAccount(nextAccount);
-    window.sessionStorage.setItem("tp_active_account_v1", JSON.stringify(nextAccount));
+
+    setProfileEditError(null);
+    let response: Response;
+    try {
+      response = await fetch("/api/auth/me", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, email }),
+      });
+    } catch {
+      setProfileEditError("Could not reach TurnitPlus. Check your connection and try again.");
+      return;
+    }
+
+    const result = (await response.json().catch(() => null)) as { user?: LocalAccount; error?: string } | null;
+    if (!response.ok || !result?.user) {
+      setProfileEditError((result && typeof result.error === "string" && result.error) || "Could not update your account information.");
+      return;
+    }
+
+    setAccount(result.user as LocalAccount);
     setIsEditingProfile(false);
     notify("Your account information has been updated.");
   }
@@ -1309,14 +1361,15 @@ export default function Home() {
   }
 
   function signOutAccount() {
+    // Best-effort: a network hiccup should never block the local sign-out.
+    fetch("/api/auth/logout", { method: "POST" }).catch(() => {});
     setAccount(null);
     setIsEditingProfile(false);
-    window.sessionStorage.removeItem("tp_active_account_v1");
     setAuthMode("login");
     setWelcomeMode(null);
     window.history.replaceState({ turnitPlusView: "account" }, "", VIEW_HASH.account);
     setView("account");
-    notify("You have signed out of the account preview.");
+    notify("You have signed out.");
   }
 
   function chooseFile(selected: File | undefined) {
@@ -1874,6 +1927,7 @@ export default function Home() {
                           <input name="profileEmail" type="email" defaultValue={account.email} autoComplete="email" required />
                         </label>
                       </div>
+                      {profileEditError && <p className="auth-form-error" role="alert">{profileEditError}</p>}
                       <div className="account-edit-actions">
                         <button className="button subtle" type="button" onClick={() => setIsEditingProfile(false)}>Cancel</button>
                         <button className="button primary" type="submit"><Save aria-hidden="true" /> Save changes</button>
@@ -1892,7 +1946,7 @@ export default function Home() {
                       <LogOut aria-hidden="true" /> Sign out
                     </button>
                   </div>
-                  <p className="auth-preview-note"><LockKeyhole aria-hidden="true" /> Documents and report history remain on this browser and are not uploaded to the account.</p>
+                  <p className="auth-preview-note"><LockKeyhole aria-hidden="true" /> Documents are analyzed in your browser and never uploaded. Your report history is saved securely so you can reach it from any device you sign in on.</p>
                 </div>
 
                 <section className="subscription-preview-card surface-card" aria-labelledby="unlimited-plan-title">
@@ -1929,8 +1983,8 @@ export default function Home() {
                     <div><strong>TurnitPlus</strong><span>AI & similarity detection</span></div>
                   </div>
                   <div className="auth-mode-tabs" aria-label="Account action">
-                    <button className={(authMode ?? "login") === "login" ? "active" : ""} type="button" disabled={isAuthenticating} onClick={() => setAuthMode("login")}>Log in</button>
-                    <button className={(authMode ?? "login") === "signup" ? "active" : ""} type="button" disabled={isAuthenticating} onClick={() => setAuthMode("signup")}>Create account</button>
+                    <button className={(authMode ?? "login") === "login" ? "active" : ""} type="button" disabled={isAuthenticating} onClick={() => { setAuthMode("login"); setAuthError(null); }}>Log in</button>
+                    <button className={(authMode ?? "login") === "signup" ? "active" : ""} type="button" disabled={isAuthenticating} onClick={() => { setAuthMode("signup"); setAuthError(null); }}>Create account</button>
                   </div>
                   <p className="section-label">{(authMode ?? "login") === "login" ? "WELCOME BACK" : "CREATE YOUR ACCOUNT"}</p>
                   <h2 id="account-page-title">{(authMode ?? "login") === "login" ? "Log in to TurnitPlus" : "Start using TurnitPlus"}</h2>
@@ -1954,6 +2008,7 @@ export default function Home() {
                         <small>{authProgress}%</small>
                       </div>
                     ) : <>
+                    {authError && <p className="auth-form-error" role="alert">{authError}</p>}
                     {(authMode ?? "login") === "signup" && (
                       <label>
                         <span>Username</span>
@@ -2002,11 +2057,11 @@ export default function Home() {
                   </form>
                   <p className="auth-switch">
                     {(authMode ?? "login") === "login" ? "New to TurnitPlus?" : "Already have an account?"}
-                    <button type="button" disabled={isAuthenticating} onClick={() => setAuthMode((authMode ?? "login") === "login" ? "signup" : "login")}>
+                    <button type="button" disabled={isAuthenticating} onClick={() => { setAuthMode((authMode ?? "login") === "login" ? "signup" : "login"); setAuthError(null); }}>
                       {(authMode ?? "login") === "login" ? "Create account" : "Log in"}
                     </button>
                   </p>
-                  <p className="auth-preview-note"><LockKeyhole aria-hidden="true" /> Account preview only. Passwords are never stored; the signed-in display lasts for this browser session.</p>
+                  <p className="auth-preview-note"><LockKeyhole aria-hidden="true" /> Your password is never stored — only a one-way cryptographic hash used to verify future sign-ins.</p>
                 </section>
 
                 <aside className="account-benefits surface-card">
@@ -2226,7 +2281,7 @@ export default function Home() {
                 </section>
                 <section>
                   <span className="legal-section-number">03</span>
-                  <div><h3>Account information</h3><p>The current account experience is device-local. Your displayed name and email are kept in browser session storage. Password values are not stored by TurnitPlus. Signing out removes the active account display from the session.</p></div>
+                  <div><h3>Account information</h3><p>Creating an account stores your email address, a display name and a securely hashed password on TurnitPlus's servers. Your password itself is never stored — only a one-way cryptographic hash used to verify future sign-ins. Signing in issues a session, held in a browser cookie, that keeps you signed in until you sign out or it expires. Signing out ends that session immediately. Using TurnitPlus without an account keeps your report history device-local, as described in the next section.</p></div>
                 </section>
                 <section>
                   <span className="legal-section-number">04</span>
@@ -2243,8 +2298,9 @@ export default function Home() {
                       <div className="retention-row" role="row"><span role="cell">Original uploaded file</span><span role="cell">Browser memory during the check</span><span role="cell">When replaced, the page closes or the session ends</span></div>
                       <div className="retention-row" role="row"><span role="cell">Extracted text and reports</span><span role="cell">IndexedDB on this device, and TurnitPlus's database (linked to this browser's random identifier, not your identity)</span><span role="cell">Clear history removes both copies. Clearing this site's browser data alone removes only the local copy and this browser's identifier — the saved copy remains until removed with Clear history</span></div>
                       <div className="retention-row" role="row"><span role="cell">Random report identifier</span><span role="cell">Local browser storage</span><span role="cell">When you clear this site's browser data (after this, reports saved from this browser can no longer be retrieved or deleted through the interface)</span></div>
-                      <div className="retention-row" role="row"><span role="cell">Displayed name and email</span><span role="cell">Browser session storage</span><span role="cell">When you sign out, close the browser session or clear site data</span></div>
-                      <div className="retention-row" role="row"><span role="cell">Password</span><span role="cell">Not stored by TurnitPlus</span><span role="cell">Discarded after the local sign-in interaction</span></div>
+                      <div className="retention-row" role="row"><span role="cell">Display name and email</span><span role="cell">TurnitPlus's account database</span><span role="cell">For as long as your account exists — self-service account deletion is not yet available</span></div>
+                      <div className="retention-row" role="row"><span role="cell">Password</span><span role="cell">A salted, irreversible hash is stored; the password itself is never stored or logged</span><span role="cell">For as long as your account exists</span></div>
+                      <div className="retention-row" role="row"><span role="cell">Session (sign-in cookie)</span><span role="cell">An httpOnly cookie on this browser, matched to a session record in TurnitPlus's database</span><span role="cell">When you sign out, or automatically after 30 days</span></div>
                       <div className="retention-row" role="row"><span role="cell">Sidebar preference</span><span role="cell">Local browser storage</span><span role="cell">When you clear this site's browser data</span></div>
                       <div className="retention-row" role="row"><span role="cell">Wikipedia phrase results</span><span role="cell">Saved locally and remotely with the report</span><span role="cell">When you clear report history or browser site data</span></div>
                     </div>
@@ -2253,7 +2309,7 @@ export default function Home() {
 
                 <section>
                   <span className="legal-section-number">06</span>
-                  <div><h3>Your controls</h3><p>Use Clear history to remove saved reports from both this browser and TurnitPlus's database. Use Sign out to remove the active account display. You can also use your browser's site-data controls to remove all local TurnitPlus storage at once, though this does not reach reports already saved remotely — use Clear history first if you want both removed. The interface displays up to 50 recent reports.</p></div>
+                  <div><h3>Your controls</h3><p>Use Clear history to remove saved reports from both this browser and TurnitPlus's database. Use Sign out to end your active session on this device. You can also use your browser's site-data controls to remove all local TurnitPlus storage at once, though this does not reach reports already saved remotely — use Clear history first if you want both removed. The interface displays up to 50 recent reports.</p></div>
                 </section>
                 <section>
                   <span className="legal-section-number">07</span>

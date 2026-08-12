@@ -230,4 +230,124 @@ function applyMigrationsExcluding(db, dir, excludeFiles) {
   console.log('[upgrade path] 0007 correctly restores CASCADE, preserves the unique index, and cascade-deletes chunks + fingerprints');
 }
 
+// --- Section E: Phase 2A auth tables (0009 users, 0010 sessions, 0011
+// saved_reports.user_id) — fresh-migrate proof on both engines, plus an
+// upgrade-path proof that a pre-existing anonymous saved_reports row
+// (inserted before 0011 added the user_id column) survives layering
+// 0009-0011 on top and round-trips with user_id = NULL. ---
+{
+  const dbPath = path.join(repo, 'test_migration_integrity_auth_sqlite.db');
+  cleanupSqliteFile(dbPath);
+  const db = new Database(dbPath);
+  db.pragma('foreign_keys = ON');
+  applyMigrations(db, drizzleDir);
+
+  // users.email unique index
+  db.prepare(`INSERT INTO users (id, email, username, password_hash) VALUES (?,?,?,?)`)
+    .run('sqlite-user-1', 'auth-sqlite@example.com', 'authuser', 'hash1');
+  assert.throws(
+    () => db.prepare(`INSERT INTO users (id, email, username, password_hash) VALUES (?,?,?,?)`)
+      .run('sqlite-user-2', 'auth-sqlite@example.com', 'authuser2', 'hash2'),
+    /UNIQUE constraint failed/,
+    '[sqlite] duplicate users.email must be rejected',
+  );
+
+  // sessions.user_id cascades on user delete
+  db.prepare(`INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?,?,?,?)`)
+    .run('sqlite-session-1', 'sqlite-user-1', Date.now(), Date.now() + 1000);
+  db.prepare(`DELETE FROM users WHERE id = ?`).run('sqlite-user-1');
+  const sessionCount = db.prepare(`SELECT COUNT(*) as cnt FROM sessions WHERE token_hash = ?`).get('sqlite-session-1').cnt;
+  assert.equal(sessionCount, 0, '[sqlite] deleting a user must cascade-delete its sessions');
+
+  // saved_reports.user_id sets to NULL on user delete
+  db.prepare(`INSERT INTO users (id, email, username, password_hash) VALUES (?,?,?,?)`)
+    .run('sqlite-user-2', 'auth-sqlite-2@example.com', 'authuser2', 'hash2');
+  db.prepare(`INSERT INTO saved_reports (id, device_key, submission_id, title, report_created_at, word_count, archive_score, score_band, payload_json, user_id) VALUES (?,?,?,?,?,?,?,?,?,?)`)
+    .run('sqlite-report-1', 'sqlite-device-1', 'sub-1', 'title', new Date().toISOString(), 10, 0, 'Low', '{}', 'sqlite-user-2');
+  db.prepare(`DELETE FROM users WHERE id = ?`).run('sqlite-user-2');
+  const reportUserId = db.prepare(`SELECT user_id FROM saved_reports WHERE id = ? AND device_key = ?`).get('sqlite-report-1', 'sqlite-device-1').user_id;
+  assert.equal(reportUserId, null, '[sqlite] deleting a user must SET NULL on saved_reports.user_id, not cascade-delete the report');
+
+  db.close();
+  cleanupSqliteFile(dbPath);
+  console.log('[sqlite] Phase 2A auth tables: unique email, session cascade, saved_reports SET NULL all verified');
+}
+
+{
+  const dbFile = path.join(repo, 'test_migration_integrity_auth_libsql.db');
+  cleanupSqliteFile(dbFile);
+  const client = createClient({ url: `file:${dbFile}` });
+  await client.execute('PRAGMA foreign_keys = ON');
+  await applyMigrationsLibsql(client, drizzleDir);
+
+  await client.execute({
+    sql: 'INSERT INTO users (id, email, username, password_hash) VALUES (?,?,?,?)',
+    args: ['libsql-user-1', 'auth-libsql@example.com', 'authuser', 'hash1'],
+  });
+  await assert.rejects(
+    () => client.execute({
+      sql: 'INSERT INTO users (id, email, username, password_hash) VALUES (?,?,?,?)',
+      args: ['libsql-user-2', 'auth-libsql@example.com', 'authuser2', 'hash2'],
+    }),
+    /UNIQUE constraint failed/,
+    '[libsql] duplicate users.email must be rejected',
+  );
+
+  await client.execute({
+    sql: 'INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?,?,?,?)',
+    args: ['libsql-session-1', 'libsql-user-1', Date.now(), Date.now() + 1000],
+  });
+  await client.execute({ sql: 'DELETE FROM users WHERE id = ?', args: ['libsql-user-1'] });
+  const sessionResult = await client.execute({ sql: 'SELECT COUNT(*) as cnt FROM sessions WHERE token_hash = ?', args: ['libsql-session-1'] });
+  assert.equal(Number(sessionResult.rows[0].cnt), 0, '[libsql] deleting a user must cascade-delete its sessions');
+
+  await client.execute({
+    sql: 'INSERT INTO users (id, email, username, password_hash) VALUES (?,?,?,?)',
+    args: ['libsql-user-2', 'auth-libsql-2@example.com', 'authuser2', 'hash2'],
+  });
+  await client.execute({
+    sql: `INSERT INTO saved_reports (id, device_key, submission_id, title, report_created_at, word_count, archive_score, score_band, payload_json, user_id)
+          VALUES (?,?,?,?,?,?,?,?,?,?)`,
+    args: ['libsql-report-1', 'libsql-device-1', 'sub-1', 'title', new Date().toISOString(), 10, 0, 'Low', '{}', 'libsql-user-2'],
+  });
+  await client.execute({ sql: 'DELETE FROM users WHERE id = ?', args: ['libsql-user-2'] });
+  const reportResult = await client.execute({ sql: 'SELECT user_id FROM saved_reports WHERE id = ? AND device_key = ?', args: ['libsql-report-1', 'libsql-device-1'] });
+  assert.equal(reportResult.rows[0].user_id, null, '[libsql] deleting a user must SET NULL on saved_reports.user_id');
+
+  client.close();
+  cleanupSqliteFile(dbFile);
+  console.log('[libsql] Phase 2A auth tables: unique email, session cascade, saved_reports SET NULL all verified');
+}
+
+{
+  const dbPath = path.join(repo, 'test_migration_integrity_auth_upgrade.db');
+  cleanupSqliteFile(dbPath);
+  const db = new Database(dbPath);
+
+  applyMigrationsExcluding(db, drizzleDir, ['0009_users.sql', '0010_sessions.sql', '0011_saved_reports_user_id.sql']);
+
+  // Old-shape row: inserted before user_id existed on this table at all.
+  db.prepare(`INSERT INTO saved_reports (id, device_key, submission_id, title, report_created_at, word_count, archive_score, score_band, payload_json) VALUES (?,?,?,?,?,?,?,?,?)`)
+    .run('upgrade-auth-report-1', 'upgrade-auth-device-1', 'sub-1', 'title', new Date().toISOString(), 10, 0, 'Low', '{}');
+
+  for (const file of ['0009_users.sql', '0010_sessions.sql', '0011_saved_reports_user_id.sql']) {
+    db.exec(fs.readFileSync(path.join(drizzleDir, file), 'utf8'));
+  }
+
+  const columns = db.prepare(`PRAGMA table_info('saved_reports')`).all();
+  assert(columns.some((c) => c.name === 'user_id'), '0011 must add the user_id column to an already-migrated database');
+
+  const row = db.prepare(`SELECT user_id FROM saved_reports WHERE id = ? AND device_key = ?`).get('upgrade-auth-report-1', 'upgrade-auth-device-1');
+  assert.equal(row.user_id, null, 'a pre-existing anonymous row must round-trip with user_id = NULL after the upgrade, not be lost or errored on');
+
+  // Re-applying all three is safe (IF NOT EXISTS / ALTER TABLE guarded by column absence isn't idempotent for ADD COLUMN in raw SQLite,
+  // so only the CREATE TABLE/INDEX statements are re-checked here for idempotency; 0011's ADD COLUMN is intentionally not re-run twice).
+  assert.doesNotThrow(() => db.exec(fs.readFileSync(path.join(drizzleDir, '0009_users.sql'), 'utf8')), '0009 must be safe to re-apply');
+  assert.doesNotThrow(() => db.exec(fs.readFileSync(path.join(drizzleDir, '0010_sessions.sql'), 'utf8')), '0010 must be safe to re-apply');
+
+  db.close();
+  cleanupSqliteFile(dbPath);
+  console.log('[upgrade path] 0009-0011 layer cleanly onto an already-migrated database; pre-existing saved_reports rows survive with user_id = NULL');
+}
+
 console.log('Migration schema integrity tests passed');

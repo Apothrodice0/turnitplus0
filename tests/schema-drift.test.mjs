@@ -160,7 +160,7 @@ if (!remote) {
 
 // Guards against the check silently comparing zero tables (e.g. a broken
 // filter that skips every export) and reporting a false "0 issues" pass.
-assert(tablesChecked >= 8, `expected to check at least 8 tables from db/schema.ts, only checked ${tablesChecked} — the comparison logic itself may be broken`);
+assert(tablesChecked >= 11, `expected to check at least 11 tables from db/schema.ts, only checked ${tablesChecked} — the comparison logic itself may be broken`);
 
 if (drift.length > 0) {
   console.error(`Schema drift detected (${drift.length} issue(s)):`);

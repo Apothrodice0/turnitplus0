@@ -164,10 +164,54 @@ export const saved_reports = sqliteTable(
     payload_json: text("payload_json").notNull(),
     saved_at: text("saved_at").notNull().default(sql`CURRENT_TIMESTAMP`),
     updated_at: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    // Phase 2A: optional account scoping, additive (0011). NULL means the
+    // report is still anonymous/device-key-only. Set once, the first time
+    // this device_key's owner signs up or logs in (see claimAnonymousReports
+    // in lib/auth-session.ts).
+    user_id: text("user_id").references(() => users.id, { onDelete: "set null" }),
   },
   (table) => [
     primaryKey({ columns: [table.device_key, table.id] }),
     index("idx_saved_reports_device_key_created").on(table.device_key, table.report_created_at),
+    index("idx_saved_reports_user_id_created").on(table.user_id, table.report_created_at),
+  ],
+);
+
+// Phase 2A: real accounts. email is normalized (trim + lowercase) by the
+// application before every insert/lookup, so a plain unique index gives
+// effective case-insensitive uniqueness without needing COLLATE NOCASE.
+export const users = sqliteTable(
+  "users",
+  {
+    id: text("id").primaryKey(),
+    email: text("email").notNull(),
+    username: text("username").notNull(),
+    password_hash: text("password_hash").notNull(),
+    created_at: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    updated_at: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("ux_users_email").on(table.email),
+  ],
+);
+
+// Phase 2A: server-side session store. token_hash is SHA-256 of the raw
+// session token carried in the httpOnly cookie — only the hash is ever
+// persisted. created_at/expires_at are epoch-millisecond integers (not the
+// TEXT CURRENT_TIMESTAMP convention used elsewhere) because expires_at is
+// range-compared on every request, and mixing SQLite's CURRENT_TIMESTAMP
+// string format with app-generated values in a comparison is a real
+// lexicographic-ordering bug that integers sidestep entirely.
+export const sessions = sqliteTable(
+  "sessions",
+  {
+    token_hash: text("token_hash").primaryKey(),
+    user_id: text("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    created_at: integer("created_at").notNull(),
+    expires_at: integer("expires_at").notNull(),
+  },
+  (table) => [
+    index("idx_sessions_user_id").on(table.user_id),
   ],
 );
 

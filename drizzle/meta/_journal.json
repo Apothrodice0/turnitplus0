@@ -64,6 +64,27 @@
       "when": 1786395500000,
       "tag": "0008_saved_reports",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1786480000000,
+      "tag": "0009_users",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1786480100000,
+      "tag": "0010_sessions",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1786480200000,
+      "tag": "0011_saved_reports_user_id",
+      "breakpoints": true
     }
   ]
 }

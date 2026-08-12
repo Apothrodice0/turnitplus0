@@ -23,8 +23,7 @@ test("privacy and retention rules match the browser-local product", async () => 
   assert.match(page, /Privacy & retention/);
   assert.match(page, /up to 20 selected phrases may be sent to the English Wikipedia search service/);
   assert.match(page, /IndexedDB on this device/);
-  assert.match(page, /Browser session storage/);
-  assert.match(page, /Password[\s\S]*Not stored by TurnitPlus/);
+  assert.match(page, /A salted, irreversible hash is stored; the password itself is never stored or logged/);
   assert.match(page, /Clear history/);
   assert.match(page, /The interface displays up to 50 recent reports/);
   assert.match(page, /Documents checked in the browser are not added to a TurnitPlus training database/);
@@ -39,6 +38,17 @@ test("privacy copy discloses remote report storage and the device-key soft-scopi
   assert.match(page, /saved both on this device \(IndexedDB\) and to TurnitPlus's database/);
   assert.match(page, /Clear history removes both copies/);
   assert.match(page, /Use Clear history to remove saved reports from both this browser and TurnitPlus's database/);
+});
+
+test("privacy copy accurately describes real account authentication (Phase 2A)", async () => {
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+
+  assert.match(page, /Your password itself is never stored — only a one-way cryptographic hash used to verify future sign-ins/);
+  assert.match(page, /Signing in issues a session, held in a browser cookie/);
+  assert.match(page, /TurnitPlus's account database/);
+  assert.match(page, /When you sign out, or automatically after 30 days/);
+  assert.doesNotMatch(page, /The current account experience is device-local/);
+  assert.doesNotMatch(page, /Password values are not stored by TurnitPlus/);
 });
 
 test("terms cover responsible use and the subscription preview", async () => {

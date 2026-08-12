@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getReportsDbClient } from '../../../lib/reports-db';
 import { checkRate } from '../../../lib/rate-limit';
+import { getSessionUser } from '../../../lib/auth-session';
 
 // Reports carry derived data (AI passages, matched phrases, extracted text)
 // on top of the ingest pipeline's raw text, so this cap is larger than
@@ -35,6 +36,10 @@ export async function POST(request: Request) {
 
     const { deviceKey, id, submissionId, title, createdAt, wordCount, archiveScore, scoreBand, aiScore, aiTone, payload } = body as Record<string, unknown>;
 
+    // device_key is part of saved_reports' composite primary key, so it is
+    // always required regardless of authentication state — unlike the list/
+    // get/delete endpoints below, where an authenticated session replaces
+    // the need for it entirely.
     if (!isNonEmptyString(deviceKey) || deviceKey.length > MAX_DEVICE_KEY_LENGTH) {
       return new NextResponse(JSON.stringify({ error: 'deviceKey is required' }), { status: 400 });
     }
@@ -54,11 +59,13 @@ export async function POST(request: Request) {
       return new NextResponse(JSON.stringify({ error: 'Payload too large' }), { status: 413 });
     }
 
-    const client = getReportsDbClient();
+    const client = await getReportsDbClient();
     try {
+      const sessionUser = await getSessionUser(request, client);
+      const userId = sessionUser ? sessionUser.id : null;
       await client.execute({
-        sql: `INSERT INTO saved_reports (id, device_key, submission_id, title, report_created_at, word_count, archive_score, score_band, ai_score, ai_tone, payload_json, updated_at)
-              VALUES (?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
+        sql: `INSERT INTO saved_reports (id, device_key, submission_id, title, report_created_at, word_count, archive_score, score_band, ai_score, ai_tone, payload_json, user_id, updated_at)
+              VALUES (?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
               ON CONFLICT(device_key, id) DO UPDATE SET
                 submission_id = excluded.submission_id,
                 title = excluded.title,
@@ -69,8 +76,9 @@ export async function POST(request: Request) {
                 ai_score = excluded.ai_score,
                 ai_tone = excluded.ai_tone,
                 payload_json = excluded.payload_json,
+                user_id = COALESCE(excluded.user_id, saved_reports.user_id),
                 updated_at = CURRENT_TIMESTAMP`,
-        args: [id, deviceKey, submissionId, title, createdAt, wordCount, archiveScore, scoreBand, aiScore ?? null, aiTone ?? null, payloadJson],
+        args: [id, deviceKey, submissionId, title, createdAt, wordCount, archiveScore, scoreBand, aiScore ?? null, aiTone ?? null, payloadJson, userId],
       });
     } finally {
       client.close();
@@ -89,21 +97,35 @@ export async function GET(request: Request) {
       return new NextResponse(JSON.stringify({ error: 'Too many requests' }), { status: 429, headers: { 'Retry-After': String(rate.retryAfter) } });
     }
 
-    const url = new URL(request.url);
-    const deviceKey = url.searchParams.get('deviceKey');
-    if (!isNonEmptyString(deviceKey) || deviceKey.length > MAX_DEVICE_KEY_LENGTH) {
-      return new NextResponse(JSON.stringify({ error: 'deviceKey is required' }), { status: 400 });
-    }
-
-    const client = getReportsDbClient();
+    const client = await getReportsDbClient();
     let rows;
     try {
-      const result = await client.execute({
-        sql: `SELECT id, submission_id, title, report_created_at, word_count, archive_score, score_band, ai_score, ai_tone
-              FROM saved_reports WHERE device_key = ? ORDER BY report_created_at DESC LIMIT ?`,
-        args: [deviceKey, MAX_LISTED_REPORTS],
-      });
-      rows = result.rows;
+      const sessionUser = await getSessionUser(request, client);
+      if (sessionUser) {
+        // Authenticated: cross-device list, scoped by account rather than
+        // by whichever browser happens to be asking.
+        const result = await client.execute({
+          sql: `SELECT id, submission_id, title, report_created_at, word_count, archive_score, score_band, ai_score, ai_tone
+                FROM saved_reports WHERE user_id = ? ORDER BY report_created_at DESC LIMIT ?`,
+          args: [sessionUser.id, MAX_LISTED_REPORTS],
+        });
+        rows = result.rows;
+      } else {
+        const url = new URL(request.url);
+        const deviceKey = url.searchParams.get('deviceKey');
+        if (!isNonEmptyString(deviceKey) || deviceKey.length > MAX_DEVICE_KEY_LENGTH) {
+          return new NextResponse(JSON.stringify({ error: 'deviceKey is required' }), { status: 400 });
+        }
+        // user_id IS NULL excludes reports already claimed by an account —
+        // without this, a report claimed while signed in would still be
+        // visible/deletable via the raw device_key on a shared computer.
+        const result = await client.execute({
+          sql: `SELECT id, submission_id, title, report_created_at, word_count, archive_score, score_band, ai_score, ai_tone
+                FROM saved_reports WHERE device_key = ? AND user_id IS NULL ORDER BY report_created_at DESC LIMIT ?`,
+          args: [deviceKey, MAX_LISTED_REPORTS],
+        });
+        rows = result.rows;
+      }
     } finally {
       client.close();
     }
