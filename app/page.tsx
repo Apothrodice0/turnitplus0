@@ -1117,38 +1117,85 @@ export default function Home() {
   const currentReportRef = useRef<SimilarityReport | null>(null);
   const generationLockRef = useRef(false);
 
+  // Anonymous/device-scoped report loading (no authenticated session).
+  // Unchanged from the pre-Phase-2A behavior: IndexedDB is the primary
+  // source, with a one-time remote (device_key-scoped) fallback only when
+  // local storage is genuinely empty.
+  async function loadAnonymousReports() {
+    try {
+      const localReports = await loadStoredReports<SimilarityReport>(11);
+      setReports(localReports);
+      if (localReports.length > 0) return;
+      const summaries = await listRemoteReportSummaries();
+      if (summaries.length === 0) return;
+      const restored: SimilarityReport[] = [];
+      for (const summary of summaries) {
+        const full = await fetchRemoteReport<SimilarityReport>(summary.id);
+        if (full) restored.push(full);
+      }
+      if (restored.length === 0) return;
+      setReports(restored);
+      for (const report of restored) {
+        await storeReport(report);
+      }
+    } catch {
+      setReports([]);
+    }
+  }
+
+  // Authenticated report loading. The set of report ids always comes from
+  // the session-scoped GET /api/reports — never from whatever happens to be
+  // sitting in the shared local IndexedDB cache — so a different account's
+  // (or an anonymous, never-claimed) report can never surface here. Local
+  // storage is only consulted to avoid re-fetching a report already cached
+  // under its own id from a previous hydration of this same account.
+  async function loadAccountReports() {
+    try {
+      const summaries = await listRemoteReportSummaries();
+      if (summaries.length === 0) {
+        setReports([]);
+        return;
+      }
+      const localReports = await loadStoredReports<SimilarityReport>(11);
+      const localById = new Map(localReports.map((report) => [String(report.id), report]));
+      const hydrated: SimilarityReport[] = [];
+      for (const summary of summaries) {
+        const cached = localById.get(summary.id);
+        if (cached) {
+          hydrated.push(cached);
+          continue;
+        }
+        const full = await fetchRemoteReport<SimilarityReport>(summary.id);
+        if (full) {
+          hydrated.push(full);
+          await storeReport(full);
+        }
+      }
+      setReports(hydrated);
+    } catch {
+      setReports([]);
+    }
+  }
+
   useEffect(() => {
-    loadStoredReports<SimilarityReport>(11)
-      .then(async (localReports) => {
-        setReports(localReports);
-        // Only fall back to the remote durability copy when local storage is
-        // genuinely empty (e.g. IndexedDB was cleared/evicted independently
-        // of localStorage) — never overrides reports that are already here.
-        if (localReports.length > 0) return;
-        const summaries = await listRemoteReportSummaries();
-        if (summaries.length === 0) return;
-        const restored: SimilarityReport[] = [];
-        for (const summary of summaries) {
-          const full = await fetchRemoteReport<SimilarityReport>(summary.id);
-          if (full) restored.push(full);
-        }
-        if (restored.length === 0) return;
-        setReports(restored);
-        for (const report of restored) {
-          await storeReport(report);
-        }
-      })
-      .catch(() => setReports([]));
     queueMicrotask(() => {
       setSidebarCollapsed(window.localStorage.getItem("tp_sidebar_collapsed") === "true");
     });
+    // Authentication state is resolved first, then exactly one of the two
+    // report sources is used — never both — so a previous session's
+    // reports can never linger into a different auth state at hydration.
     fetch("/api/auth/me")
       .then((response) => (response.ok ? response.json() : Promise.resolve({ user: null })))
-      .then((data) => {
+      .then(async (data) => {
         const result = data as { user: LocalAccount | null };
-        if (result && result.user) setAccount(result.user);
+        if (result && result.user) {
+          setAccount(result.user);
+          await loadAccountReports();
+        } else {
+          await loadAnonymousReports();
+        }
       })
-      .catch(() => {})
+      .catch(() => loadAnonymousReports())
       .finally(() => setAccountLoaded(true));
   }, []);
 
@@ -1278,13 +1325,19 @@ export default function Home() {
       return;
     }
 
+    setAccount(data.user as LocalAccount);
+    setAuthLoadingLabel("Loading your report history");
+    // Replaces (never merges with) whatever was previously displayed —
+    // signing in as a different account, or into an account after browsing
+    // anonymously, must not show the prior view's reports.
+    await loadAccountReports();
+
     setAuthLoadingLabel("Almost ready");
     const remainingMs = Math.max(0, minimumAuthMs - (Date.now() - animationStartedAt));
     if (remainingMs > 0) await new Promise((resolve) => window.setTimeout(resolve, remainingMs));
     stopAnimation();
     setAuthProgress(100);
 
-    setAccount(data.user as LocalAccount);
     setIsAuthenticating(false);
     setAuthMode(null);
     setWelcomeMode(completedMode);
@@ -1361,7 +1414,14 @@ export default function Home() {
   }
 
   function signOutAccount() {
-    // Best-effort: a network hiccup should never block the local sign-out.
+    // Cleared immediately, before the network call even resolves, so the
+    // sidebar badge and report list never keep showing the previous
+    // account's data during (or after a failure of) the logout request.
+    // This only clears in-memory state — it never deletes anything from
+    // IndexedDB or Turso; the account's remote reports and this device's
+    // local cache are both left exactly as they were.
+    setReports([]);
+    setCurrentReport(null);
     fetch("/api/auth/logout", { method: "POST" }).catch(() => {});
     setAccount(null);
     setIsEditingProfile(false);
