@@ -1,4 +1,4 @@
-import { AutoModelForSequenceClassification, AutoTokenizer } from "@huggingface/transformers";
+import { AutoModelForSequenceClassification, AutoTokenizer, env } from "@huggingface/transformers";
 import {
   AI_MINIMUM_WORDS,
   AI_MODEL_ID,
@@ -19,6 +19,14 @@ import {
   probabilityFromLogOdds,
   type AiScoredChunk,
 } from "@/lib/ai-core";
+import {
+  AiModelProgressTracker,
+  aiPrepDetailLabel,
+  isModelWeightsCached,
+  type AiDownloadProgress,
+  type AiPrepStage,
+  type RawModelProgressEvent,
+} from "@/lib/ai-model-prep";
 
 type WorkerRequest = {
   id: number;
@@ -32,25 +40,30 @@ type TextClassifier = (texts: string[]) => Promise<ModelSignal[]>;
 type Tokenizer = Awaited<ReturnType<typeof AutoTokenizer.from_pretrained>>;
 let classifierPromise: Promise<{ classify: TextClassifier; tokenizer: Tokenizer; engine: "WebGPU" | "CPU" }> | null = null;
 
-function modelProgress(progress: unknown) {
-  if (!progress || typeof progress !== "object") return;
-  const value = progress as { status?: string; progress?: number };
-  if (value.status === "progress") {
-    self.postMessage({
-      type: "progress",
-      label: `Downloading the free AI model${typeof value.progress === "number" ? ` · ${Math.round(value.progress)}%` : ""}`,
-    });
-  }
+function postPrep(stage: AiPrepStage, cached: boolean, progress: AiDownloadProgress) {
+  self.postMessage({
+    type: "prep",
+    stage,
+    label: aiPrepDetailLabel({ stage, cached, progress }),
+    cached,
+    progress,
+  });
 }
 
-async function loadClassifier(device: "webgpu" | "wasm") {
+async function loadClassifier(device: "webgpu" | "wasm", cached: boolean) {
+  const tracker = new AiModelProgressTracker();
+  const handleModelProgress = (rawProgress: unknown) => {
+    if (!rawProgress || typeof rawProgress !== "object") return;
+    const transition = tracker.handle(rawProgress as RawModelProgressEvent);
+    if (transition) postPrep(transition.stage, cached, transition.progress);
+  };
   const tokenizer = await AutoTokenizer.from_pretrained(AI_MODEL_ID, {
-    progress_callback: modelProgress,
+    progress_callback: handleModelProgress,
   });
   const model = await AutoModelForSequenceClassification.from_pretrained(AI_MODEL_ID, {
     device,
     dtype: AI_MODEL_DTYPE,
-    progress_callback: modelProgress,
+    progress_callback: handleModelProgress,
   });
   const classify: TextClassifier = async (texts) => {
     const inputs = tokenizer(texts, {
@@ -70,16 +83,26 @@ async function loadClassifier(device: "webgpu" | "wasm") {
   return { classify, tokenizer };
 }
 
+async function checkCached() {
+  return isModelWeightsCached(
+    typeof caches === "undefined" ? undefined : caches,
+    env.cacheKey,
+    AI_MODEL_ID,
+  );
+}
+
 async function createClassifier() {
+  postPrep("preparing", await checkCached(), null);
   if ("gpu" in self.navigator) {
     try {
-      self.postMessage({ type: "progress", label: "Starting local WebGPU AI analysis" });
-      return { ...(await loadClassifier("webgpu")), engine: "WebGPU" as const };
+      return { ...(await loadClassifier("webgpu", await checkCached())), engine: "WebGPU" as const };
     } catch {
-      self.postMessage({ type: "progress", label: "Using the local CPU AI engine" });
+      // Fall through to the CPU/WASM engine below. Re-check cache state: a
+      // WebGPU session failure after a successful download would otherwise
+      // report this retry as an uncached first-run download when it isn't.
     }
   }
-  return { ...(await loadClassifier("wasm")), engine: "CPU" as const };
+  return { ...(await loadClassifier("wasm", await checkCached())), engine: "CPU" as const };
 }
 
 function getClassifier() {

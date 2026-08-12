@@ -50,6 +50,15 @@ import {
   similarityScoreBand,
   shouldSuppressAiScore,
 } from "@/lib/ai-core";
+import {
+  AiAnalysisCancelledError,
+  aiFirstRunExplainer,
+  aiPrepDetailLabel,
+  aiPrepStageLabel,
+  describeAiAnalysisError,
+  type AiPrepStage,
+  type AiPrepUpdate,
+} from "@/lib/ai-model-prep";
 
 type View = "home" | "dashboard" | "reports" | "about" | "account" | "welcome" | "legal" | "processing" | "result";
 type ResultTab = "full" | "overview" | "submission" | "sources";
@@ -423,10 +432,12 @@ async function analyzeText(
   };
 }
 
+let pendingAiReject: ((error: Error) => void) | null = null;
+
 async function analyzeAiText(
   text: string,
   detectedLanguage: SimilarityReport["features"]["detectedLanguage"],
-  onProgress: (label: string) => void,
+  onProgress: (update: AiPrepUpdate) => void,
 ): Promise<AiAnalysis> {
   aiDetectorWorker ??= new Worker(
     new URL("./ai-detector-worker.ts", import.meta.url),
@@ -434,19 +445,47 @@ async function analyzeAiText(
   );
   const id = ++aiWorkerRequestId;
   return new Promise<AiAnalysis>((resolve, reject) => {
+    pendingAiReject = reject;
     const handleMessage = (event: MessageEvent) => {
+      if (event.data.type === "prep") {
+        onProgress({
+          stage: event.data.stage,
+          label: event.data.label,
+          cached: event.data.cached,
+          progress: event.data.progress ?? null,
+        });
+        return;
+      }
       if (event.data.type === "progress") {
-        if (event.data.id === undefined || event.data.id === id) onProgress(event.data.label);
+        if (event.data.id === id) {
+          onProgress({ stage: "analyzing", label: event.data.label, cached: false, progress: null });
+        }
         return;
       }
       if (event.data.id !== id) return;
       aiDetectorWorker?.removeEventListener("message", handleMessage);
+      if (pendingAiReject === reject) pendingAiReject = null;
       if (event.data.ok) resolve(event.data.result as AiAnalysis);
       else reject(new Error(event.data.error));
     };
     aiDetectorWorker?.addEventListener("message", handleMessage);
     aiDetectorWorker?.postMessage({ id, text, detectedLanguage });
   });
+}
+
+// Real cancellation, not a UI-only affordance: terminating the worker drops
+// its in-flight fetches (transformers.js exposes no AbortSignal to hook into
+// directly). The next analysis request builds a fresh worker.
+function cancelAiAnalysis() {
+  if (aiDetectorWorker) {
+    aiDetectorWorker.terminate();
+    aiDetectorWorker = null;
+  }
+  if (pendingAiReject) {
+    const reject = pendingAiReject;
+    pendingAiReject = null;
+    reject(new AiAnalysisCancelledError());
+  }
 }
 
 async function analyzeWikipediaText(
@@ -957,17 +996,92 @@ function SourcesReport({ report }: { report: SimilarityReport }) {
   );
 }
 
+const AI_PREP_STAGE_ORDER: AiPrepStage[] = [
+  "preparing",
+  "downloading",
+  "preparing-detector",
+  "analyzing",
+  "generating-report",
+  "complete",
+];
+
+function AiPreparationPanel({
+  prepState,
+  onCancel,
+}: {
+  prepState: AiPrepUpdate | null;
+  onCancel?: () => void;
+}) {
+  const stage = prepState?.stage ?? "preparing";
+  const cached = prepState?.cached ?? false;
+  const progress = prepState?.progress ?? null;
+  const detail = prepState?.label ?? aiPrepDetailLabel({ stage, cached, progress });
+  const showFirstRunExplainer = !cached && (stage === "preparing" || stage === "downloading");
+  const showDownloadBar = !cached && stage === "downloading";
+  const percent = progress && progress.total > 0
+    ? Math.max(0, Math.min(100, Math.round((progress.loaded / progress.total) * 100)))
+    : null;
+  const stageIndex = AI_PREP_STAGE_ORDER.indexOf(stage);
+  const canCancel = Boolean(onCancel) && (stage === "preparing" || stage === "downloading");
+
+  return (
+    <section className="ai-prep-panel" aria-live="polite">
+      <div className="ai-analysis-loading">
+        <span aria-hidden="true" />
+        <div>
+          <strong>{aiPrepStageLabel(stage)}</strong>
+          <p>{detail}</p>
+        </div>
+      </div>
+
+      {showDownloadBar && (
+        percent !== null ? (
+          <div className="progress-track ai-prep-progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent} aria-label="Model download progress">
+            <span style={{ width: `${percent}%` }} />
+          </div>
+        ) : (
+          <div className="progress-track ai-prep-progress indeterminate" role="progressbar" aria-label="Downloading the AI model, progress unknown">
+            <span />
+          </div>
+        )
+      )}
+
+      {showFirstRunExplainer && (
+        <ul className="ai-prep-explainer">
+          {aiFirstRunExplainer().map((line) => <li key={line}>{line}</li>)}
+        </ul>
+      )}
+
+      <ol className="ai-prep-stage-list" aria-hidden="true">
+        {AI_PREP_STAGE_ORDER.map((step, index) => (
+          <li key={step} className={index < stageIndex ? "done" : index === stageIndex ? "active" : ""}>
+            {aiPrepStageLabel(step)}
+          </li>
+        ))}
+      </ol>
+
+      {canCancel && (
+        <button type="button" className="button secondary ai-prep-cancel" onClick={onCancel}>
+          Cancel
+        </button>
+      )}
+    </section>
+  );
+}
+
 function AiReport({
   report,
   isRunning = false,
-  progressLabel = "Loading the local AI model",
+  prepState = null,
   onRetry,
+  onCancel,
   printMode = false,
 }: {
   report: SimilarityReport;
   isRunning?: boolean;
-  progressLabel?: string;
+  prepState?: AiPrepUpdate | null;
   onRetry?: () => void;
+  onCancel?: () => void;
   printMode?: boolean;
 }) {
   const rawScore = typeof report.aiScore === "number" ? report.aiScore : null;
@@ -1015,15 +1129,7 @@ function AiReport({
           <div><strong>{analysis?.passages.length.toLocaleString() ?? "—"}</strong><span>passage windows</span></div>
         </section>}
 
-        {isRunning && (
-          <section className="ai-analysis-loading" aria-live="polite">
-            <span />
-            <div>
-              <strong>Running AI analysis</strong>
-              <p>{progressLabel}…</p>
-            </div>
-          </section>
-        )}
+        {isRunning && <AiPreparationPanel prepState={prepState} onCancel={onCancel} />}
 
         {!isRunning && analysis?.status === "complete" && isSuppressed && (
           <section className="ai-analysis-message">
@@ -1098,7 +1204,8 @@ export default function Home() {
   const [processingLabel, setProcessingLabel] = useState("Reading document content");
   const [isGeneratingReport, setIsGeneratingReport] = useState(false);
   const [isRunningAiAnalysis, setIsRunningAiAnalysis] = useState(false);
-  const [aiProgressLabel, setAiProgressLabel] = useState("Loading the local AI model");
+  const [aiPrepState, setAiPrepState] = useState<AiPrepUpdate | null>(null);
+  const aiPrepStageRef = useRef<AiPrepStage | null>(null);
   const [currentReport, setCurrentReport] = useState<SimilarityReport | null>(null);
   const [reports, setReports] = useState<SimilarityReport[]>([]);
   const [toast, setToast] = useState("");
@@ -1116,6 +1223,19 @@ export default function Home() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const currentReportRef = useRef<SimilarityReport | null>(null);
   const generationLockRef = useRef(false);
+
+  // "analyzing"/"generating-report"/"complete" updates don't carry a fresh
+  // `cached` determination (only the worker's preparing/downloading/
+  // preparing-detector messages do), so this preserves whatever the worker
+  // last reported instead of clobbering it with a placeholder.
+  function applyAiPrepUpdate(update: AiPrepUpdate) {
+    aiPrepStageRef.current = update.stage;
+    setAiPrepState((prev) => (
+      update.stage === "analyzing" || update.stage === "generating-report" || update.stage === "complete"
+        ? { ...update, cached: prev?.cached ?? update.cached }
+        : update
+    ));
+  }
 
   // Anonymous/device-scoped report loading (no authenticated session).
   // Unchanged from the pre-Phase-2A behavior: IndexedDB is the primary
@@ -1532,9 +1652,13 @@ export default function Home() {
       return;
     }
 
-    setProcessingLabel("Preparing local English AI analysis");
+    aiPrepStageRef.current = "preparing";
+    setProcessingLabel(aiPrepStageLabel("preparing"));
     try {
-      const aiAnalysis = await analyzeAiText(text, report.features.detectedLanguage, setProcessingLabel);
+      const aiAnalysis = await analyzeAiText(text, report.features.detectedLanguage, (update) => {
+        aiPrepStageRef.current = update.stage;
+        setProcessingLabel(update.label);
+      });
       report = { ...report, aiScore: aiAnalysis.score, aiAnalysis };
     } catch (error) {
       report = {
@@ -1550,7 +1674,7 @@ export default function Home() {
           eligibleWordCount: 0,
           analyzedWordCount: 0,
           passages: [],
-          error: error instanceof Error ? error.message : "The local AI model could not be loaded.",
+          error: describeAiAnalysisError(error, aiPrepStageRef.current),
         },
       };
     }
@@ -1591,14 +1715,22 @@ export default function Home() {
   async function runAiAnalysis(report: SimilarityReport) {
     if (isRunningAiAnalysis) return;
     setIsRunningAiAnalysis(true);
-    setAiProgressLabel("Loading the local AI model");
+    aiPrepStageRef.current = "preparing";
+    setAiPrepState({ stage: "preparing", label: aiPrepStageLabel("preparing"), cached: false, progress: null });
     try {
-      const aiAnalysis = await analyzeAiText(report.text, report.features.detectedLanguage, setAiProgressLabel);
+      const aiAnalysis = await analyzeAiText(report.text, report.features.detectedLanguage, applyAiPrepUpdate);
+      applyAiPrepUpdate({
+        stage: "generating-report",
+        label: aiPrepDetailLabel({ stage: "generating-report", cached: false, progress: null }),
+        cached: false,
+        progress: null,
+      });
       const updated = { ...report, aiScore: aiAnalysis.score, aiAnalysis };
       setCurrentReport(updated);
       setReports((current) => current.map((item) => item.id === updated.id ? updated : item));
       await storeReport(updated);
       await saveReportRemote(updated, buildReportSummary(updated));
+      applyAiPrepUpdate({ stage: "complete", label: aiPrepStageLabel("complete"), cached: false, progress: null });
       notify(aiAnalysis.status === "complete" ? "AI report completed." : "This document is not eligible for English AI analysis.");
     } catch (error) {
       const failed: SimilarityReport = {
@@ -1614,7 +1746,7 @@ export default function Home() {
           eligibleWordCount: 0,
           analyzedWordCount: 0,
           passages: [],
-          error: error instanceof Error ? error.message : "The local AI model could not be loaded.",
+          error: describeAiAnalysisError(error, aiPrepStageRef.current),
         },
       };
       setCurrentReport(failed);
@@ -2480,8 +2612,9 @@ export default function Home() {
                 <AiReport
                   report={currentReport}
                   isRunning={isRunningAiAnalysis}
-                  progressLabel={aiProgressLabel}
+                  prepState={aiPrepState}
                   onRetry={() => void runAiAnalysis(currentReport)}
+                  onCancel={cancelAiAnalysis}
                 />
               ) : (
                 <>
