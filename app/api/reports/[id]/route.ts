@@ -3,6 +3,9 @@ import { getReportsDbClient } from '../../../../lib/reports-db';
 import { checkRate } from '../../../../lib/rate-limit';
 import { getSessionUser } from '../../../../lib/auth-session';
 import { findReportRowForDeviceKey, findReportRowForUser } from '../../../../lib/reports-repo';
+import { classifyReportMatches } from '../../../../lib/report-classification';
+import { getOrComputeHistoricalMatchSnapshot, deleteHistoricalMatchSnapshot } from '../../../../lib/report-historical-match';
+import type { SimilarityReport } from '../../../../lib/report-types';
 
 const MAX_DEVICE_KEY_LENGTH = 200;
 
@@ -27,8 +30,10 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
 
     const client = await getReportsDbClient();
     let row;
+    let payload: SimilarityReport | undefined;
     try {
       const sessionUser = await getSessionUser(request, client);
+      const accountId = sessionUser ? sessionUser.id : null;
       if (sessionUser) {
         row = await findReportRowForUser(client, id, sessionUser.id);
       } else {
@@ -39,15 +44,41 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
         }
         row = await findReportRowForDeviceKey(client, id, deviceKey);
       }
+
+      if (!row) {
+        return new NextResponse(JSON.stringify({ error: 'Report not found' }), { status: 404 });
+      }
+
+      payload = JSON.parse(String(row.payload_json)) as SimilarityReport;
+      // Phase D: read-time enrichment only — see app/reports/[id]/page.tsx's
+      // identical comment. Best-effort: never turns a successful fetch into
+      // an error response.
+      try {
+        payload.matchClassification = await classifyReportMatches(client, { rawText: payload.text, accountId });
+      } catch (err) {
+        console.error('classifyReportMatches failed (non-fatal):', err instanceof Error ? err.message : String(err));
+      }
+      // Phase E8C: same read-time-enrichment discipline as Phase D just
+      // above, and the same non-fatal guarantee — see
+      // lib/report-historical-match.ts's own header comment. This one is
+      // already internally best-effort (it persists a "FAILED" snapshot
+      // rather than throwing), so this try/catch is a second, outer safety
+      // net for anything unexpected (e.g. a database error on the snapshot
+      // read/write itself), not the primary error handling.
+      try {
+        payload.historicalSubmissionMatch = await getOrComputeHistoricalMatchSnapshot(client, {
+          reportDeviceKey: row.device_key,
+          reportId: id,
+          accountId,
+          rawText: payload.text,
+        });
+      } catch (err) {
+        console.error('getOrComputeHistoricalMatchSnapshot failed (non-fatal):', err instanceof Error ? err.message : String(err));
+      }
     } finally {
       client.close();
     }
 
-    if (!row) {
-      return new NextResponse(JSON.stringify({ error: 'Report not found' }), { status: 404 });
-    }
-
-    const payload = JSON.parse(String(row.payload_json));
     return new NextResponse(JSON.stringify({ payload }), { status: 200, headers: { 'Content-Type': 'application/json' } });
   } catch (err) {
     return new NextResponse(JSON.stringify({ error: err instanceof Error ? err.message : 'Internal error' }), { status: 500 });
@@ -68,6 +99,18 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ i
     try {
       const sessionUser = await getSessionUser(request, client);
       if (sessionUser) {
+        // Phase E8C: report_historical_match_snapshots has no DB-level
+        // FOREIGN KEY (see db/schema.ts's own comment on that table), so its
+        // cleanup is this explicit lookup-then-delete instead of an
+        // automatic CASCADE. deviceKey is looked up here rather than
+        // trusted from the client, matching this route's existing
+        // authorization discipline (id + user_id both required either way).
+        const owned = await client.execute({
+          sql: 'SELECT device_key FROM saved_reports WHERE id = ? AND user_id = ?',
+          args: [id, sessionUser.id],
+        });
+        const deviceKey = owned.rows[0]?.device_key;
+        if (deviceKey) await deleteHistoricalMatchSnapshot(client, { reportDeviceKey: String(deviceKey), reportId: id });
         await client.execute({
           sql: 'DELETE FROM saved_reports WHERE id = ? AND user_id = ?',
           args: [id, sessionUser.id],
@@ -78,6 +121,7 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ i
         if (!isNonEmptyString(deviceKey) || deviceKey.length > MAX_DEVICE_KEY_LENGTH) {
           return new NextResponse(JSON.stringify({ error: 'deviceKey is required' }), { status: 400 });
         }
+        await deleteHistoricalMatchSnapshot(client, { reportDeviceKey: deviceKey, reportId: id });
         await client.execute({
           sql: 'DELETE FROM saved_reports WHERE device_key = ? AND id = ? AND user_id IS NULL',
           args: [deviceKey, id],
