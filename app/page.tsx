@@ -843,18 +843,23 @@ export default function Home() {
         </button>
 
         <nav aria-label="Main navigation">
-          <div className={`account-nav ${account ? "has-account" : ""} ${activeNavView === "account" ? "current" : ""}`}>
+          <div className={`account-nav ${account ? "has-account" : ""} ${!accountLoaded ? "account-pending" : ""} ${activeNavView === "account" ? "current" : ""}`}>
             <button
               className="account-trigger"
               type="button"
               onClick={() => openAccountPage()}
+              aria-busy={!accountLoaded}
             >
               <span className={`account-avatar ${account ? "signed-in" : ""}`}>
-                {account ? account.username.slice(0, 1).toUpperCase() : <UserRound aria-hidden="true" />}
+                {!accountLoaded ? null : account ? account.username.slice(0, 1).toUpperCase() : <UserRound aria-hidden="true" />}
               </span>
               <span className="account-copy">
-                <strong>{account?.username ?? "Account"}</strong>
-                <span>{account ? "Signed in" : "Log in or create account"}</span>
+                <strong>{!accountLoaded ? "Account" : (account?.username ?? "Account")}</strong>
+                {/* Unresolved auth is its own state, never the signed-out
+                    copy — the session check hasn't answered yet, so "Log in
+                    or create account" would be an outright wrong claim for
+                    an already-authenticated user for as long as it's showing. */}
+                <span>{!accountLoaded ? "Checking session…" : (account ? "Signed in" : "Log in or create account")}</span>
               </span>
               <ChevronRight className="account-nav-chevron" aria-hidden="true" />
             </button>
@@ -909,12 +914,12 @@ export default function Home() {
         {view !== "processing" && (
           <header className="topbar">
             <div>
-              <p className="eyebrow">{view === "legal" ? "TRUST CENTER" : view === "account" && !account ? "OPTIONAL ACCOUNT" : "AI & SIMILARITY CHECKER"}</p>
+              <p className="eyebrow">{view === "legal" ? "TRUST CENTER" : view === "account" && accountLoaded && !account ? "OPTIONAL ACCOUNT" : "AI & SIMILARITY CHECKER"}</p>
               <h1>
                 {view === "dashboard" && "Check AI writing and similarity"}
                 {view === "reports" && "Your recent reports"}
                 {view === "about" && "How the checker works"}
-                {view === "account" && (account ? "Your account" : "Log in or create your account")}
+                {view === "account" && (!accountLoaded || account ? "Your account" : "Log in or create your account")}
                 {view === "welcome" && "Welcome to TurnitPlus"}
                 {view === "legal" && "Privacy, retention and terms"}
               </h1>
@@ -1099,7 +1104,27 @@ export default function Home() {
 
         {view === "account" && (
           <section className="account-page">
-            {account ? (
+            {!accountLoaded ? (
+              // Reachable directly (the sidebar trigger isn't disabled while
+              // pending) — must never show the login/signup form here before
+              // knowing whether there's already a session, for the same
+              // reason the sidebar/reports list can't assume signed-out.
+              <div className="account-page-grid">
+                <section className="auth-page-card surface-card" aria-labelledby="account-page-title">
+                  <div className="auth-dialog-brand">
+                    <div className="brand-mark">T+</div>
+                    <div><strong>TurnitPlus</strong><span>AI & similarity detection</span></div>
+                  </div>
+                  <div className="ai-analysis-loading" aria-live="polite" aria-busy="true">
+                    <span aria-hidden="true" />
+                    <div>
+                      <strong>Checking your session</strong>
+                      <p>Resolving your account status…</p>
+                    </div>
+                  </div>
+                </section>
+              </div>
+            ) : account ? (
               <div className="account-profile-layout">
                 <div className="account-profile-card surface-card">
                   <div className="account-profile-hero">
@@ -1358,7 +1383,17 @@ export default function Home() {
               </div>
             </div>
 
-            {reports.length === 0 && !isGeneratingReport ? (
+            {!accountLoaded ? (
+              // reports.length === 0 is also true before the account/device
+              // report list has loaded — without this branch, an
+              // authenticated user with existing reports would see "No
+              // reports yet" flash before their real list arrives.
+              <div className="empty-reports" aria-live="polite" aria-busy="true">
+                <FolderClock aria-hidden="true" />
+                <h3>Loading your reports…</h3>
+                <p>Checking this device and your account for saved reports.</p>
+              </div>
+            ) : reports.length === 0 && !isGeneratingReport ? (
               <div className="empty-reports">
                 <FolderClock aria-hidden="true" />
                 <h3>No reports yet</h3>

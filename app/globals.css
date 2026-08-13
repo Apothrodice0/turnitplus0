@@ -196,6 +196,13 @@ button {
   background: rgba(255, 255, 255, 0.035);
 }
 
+/* Session status not yet resolved — visually distinct from both the
+   signed-in and signed-out treatments so it never reads as a decided
+   "you are logged out" state. */
+.account-nav.account-pending .account-trigger {
+  opacity: 0.72;
+}
+
 .sidebar nav .account-trigger:hover,
 .account-nav.open .account-trigger,
 .account-nav.current .account-trigger {
