@@ -6,18 +6,6 @@ import { applyMigrations, ingestDocument } from '../lib/ingest.js';
 import * as route from '../app/api/ingest/route.ts';
 import { resetRateForTest } from '../lib/rate-limit.js';
 
-// app/api/ingest/route.ts checks TURSO_DATABASE_URL *before* INGEST_DB_PATH
-// and, if set, routes to the remote libSQL client instead. If this process
-// inherited a real TURSO_DATABASE_URL from the ambient shell environment
-// (e.g. a developer's .env.local sourced into their profile, or a
-// misconfigured CI step), this test would silently write its documents into
-// that shared database instead of the local file below. Every other test
-// file that exercises a TURSO_DATABASE_URL-sensitive route sets it itself
-// (see tests/database-isolation.test.mjs, which enforces this structurally
-// so this can't silently regress); this file must too.
-delete process.env.TURSO_DATABASE_URL;
-delete process.env.TURSO_AUTH_TOKEN;
-
 const repo = path.resolve('.');
 const drizzleDir = path.join(repo, 'drizzle');
 const dbPath = path.join(repo, 'test_ingest_api.db');

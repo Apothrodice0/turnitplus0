@@ -2,9 +2,6 @@ import { NextResponse } from 'next/server';
 import { getReportsDbClient } from '../../../lib/reports-db';
 import { checkRate } from '../../../lib/rate-limit';
 import { getSessionUser } from '../../../lib/auth-session';
-import { captureDocumentIdentityAndFamily } from '../../../lib/document-family';
-import { indexDocumentSubmissionIntoCorpus } from '../../../lib/user-submission-corpus';
-import { runAfterResponse } from '../../../lib/run-after-response';
 
 // Reports carry derived data (AI passages, matched phrases, extracted text)
 // on top of the ingest pipeline's raw text, so this cap is larger than
@@ -83,78 +80,6 @@ export async function POST(request: Request) {
                 updated_at = CURRENT_TIMESTAMP`,
         args: [id, deviceKey, submissionId, title, createdAt, wordCount, archiveScore, scoreBand, aiScore ?? null, aiTone ?? null, payloadJson, userId],
       });
-
-      // Document identity + fingerprint + family capture (Phase A/B/C):
-      // best-effort, non-fatal side effect of saving a report — this is
-      // currently the only point in the live product where a server ever
-      // sees the full submitted text. Capturing here (rather than adding a
-      // new call on every analysis, not just saved ones) keeps this
-      // additive: no new network call from the client, no UI change.
-      //
-      // Phase C activates fingerprinting and family resolution (Phase B's
-      // recordDocumentIdentityShingles/resolveFamilyForIdentity, previously
-      // built but never called from here) via runAfterResponse: the whole
-      // pipeline runs *after* this response is sent, on its own DB
-      // connection, so it can never add to this route's response latency —
-      // see lib/run-after-response.ts for why a plain non-awaited call isn't
-      // safe here and what the fallback does in contexts (tests) with no
-      // real Next.js request scope. author is intentionally never populated
-      // from `payload` — there is no real author input in the product yet.
-      const rawText = payload && typeof payload === 'object' && typeof (payload as Record<string, unknown>).text === 'string'
-        ? (payload as Record<string, unknown>).text as string
-        : null;
-      if (rawText) {
-        await runAfterResponse(async () => {
-          const deferredClient = await getReportsDbClient();
-          try {
-            const captured = await captureDocumentIdentityAndFamily(deferredClient, { accountId: userId, title, author: null, rawText });
-            // Phase E8D: activation. Reuses lib/user-submission-corpus.ts's
-            // indexDocumentSubmissionIntoCorpus exactly as E8A already
-            // defined it (no logic duplicated here) — the same
-            // account_id != null eligibility rule that function already
-            // enforces (SKIPPED_ANONYMOUS otherwise) means this call is
-            // technically safe to make unconditionally, but userId is
-            // checked here too so an anonymous save's log line never even
-            // mentions indexing, matching this route's own existing
-            // "no behavior for anonymous" discipline. Runs only after
-            // identity capture above succeeded (needs its documentIdentityId)
-            // and only inside this same deferred callback — see this
-            // route's own already-existing comment on why runAfterResponse
-            // keeps this off the response's critical path. A failure here
-            // is caught separately from identity-capture failures so the
-            // two are distinguishable in logs, and never re-thrown: the
-            // saved report and the identity/family capture above are
-            // already durable regardless of whether indexing succeeds.
-            // Retry/reconciliation (this phase's own task description,
-            // section 11): no queue is introduced; a document_identities
-            // row with no corresponding corpus_submission_references row
-            // is itself the recoverable "needs indexing" signal a future
-            // maintenance pass could query for — see the E8D report's own
-            // "unresolved decisions" for why that pass is not built here.
-            if (userId !== null) {
-              const indexStartedAt = Date.now();
-              try {
-                const indexResult = await indexDocumentSubmissionIntoCorpus(deferredClient, {
-                  documentIdentityId: captured.documentIdentityId,
-                  rawText,
-                });
-                console.log(
-                  `corpus indexing ${indexResult.status} for documentIdentity=${captured.documentIdentityId} (${Date.now() - indexStartedAt}ms)`,
-                );
-              } catch (err) {
-                console.error(
-                  `indexDocumentSubmissionIntoCorpus failed (non-fatal) for documentIdentity=${captured.documentIdentityId} (${Date.now() - indexStartedAt}ms):`,
-                  err instanceof Error ? err.message : String(err),
-                );
-              }
-            }
-          } catch (err) {
-            console.error('captureDocumentIdentityAndFamily failed (non-fatal):', err instanceof Error ? err.message : String(err));
-          } finally {
-            deferredClient.close();
-          }
-        });
-      }
     } finally {
       client.close();
     }

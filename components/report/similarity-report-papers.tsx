@@ -178,62 +178,6 @@ export function OverviewReport({ report }: { report: SimilarityReport }) {
           </p>
         </section>
 
-        {report.matchClassification && (report.matchClassification.selfMatchPercent !== null || report.matchClassification.priorSubmissionPercent !== null) && (
-          <section className="submission-history-block">
-            <h3>Submission history</h3>
-            {report.matchClassification.selfMatchPercent !== null && (
-              <p>
-                <strong>{report.matchClassification.selfMatchPercent}%</strong> of this submission matches your own previous TurnitPlus submission. This self-match is excluded from Archive overlap above.
-              </p>
-            )}
-            {report.matchClassification.priorSubmissionPercent !== null && (
-              <p>
-                <strong>{report.matchClassification.priorSubmissionPercent}%</strong> of this submission closely matches a previous TurnitPlus submission. This is not proof of plagiarism and does not change Archive overlap above.
-              </p>
-            )}
-          </section>
-        )}
-
-        {/* Phase E8C — a separate, more detailed evidence channel from the
-            "Submission history" block above: passage-level matches from
-            lib/user-submission-matching.ts's corpus/shingle matcher, not
-            lib/document-family.ts's family system. Deliberately never
-            combined with Archive overlap or Submission history's own
-            numbers — see lib/report-historical-match.ts's own comment. */}
-        {report.historicalSubmissionMatch?.status === "UNAVAILABLE" && (
-          <section className="historical-match-block">
-            <h3>Prior submission evidence</h3>
-            <p>Historical matching unavailable for this report.</p>
-          </section>
-        )}
-        {report.historicalSubmissionMatch?.status === "MATCHED" && (
-          <section className="historical-match-block">
-            <h3>Prior submission evidence</h3>
-            {report.historicalSubmissionMatch.matches?.slice(0, 5).map((match, index) => (
-              <div className="historical-match-entry" key={match.matchedRepresentationId ?? index}>
-                <p>
-                  {match.relationshipType === "SELF" && (
-                    <>This submission overlaps with your own prior submission (<strong>{Math.round(match.containment * 100)}%</strong> containment, {match.matchedWordCount} matched words). This self-match is not evidence of plagiarism and is not counted in Archive overlap above.</>
-                  )}
-                  {match.relationshipType === "PRIOR_SUBMISSION" && (
-                    <>Previously submitted content was found (<strong>{Math.round(match.containment * 100)}%</strong> containment, {match.matchedWordCount} matched words). This is not proof of plagiarism and does not change Archive overlap above.</>
-                  )}
-                  {match.relationshipType === "UNKNOWN_RELATIONSHIP" && (
-                    <>Related content was previously observed among TurnitPlus submissions (<strong>{Math.round(match.containment * 100)}%</strong> containment), but ownership could not be determined for this submission.</>
-                  )}
-                </p>
-                {match.passages.length > 0 && (
-                  <ul className="historical-match-passages">
-                    {match.passages.slice(0, 3).map((passage, passageIndex) => (
-                      <li key={passageIndex}>&ldquo;{passage.submittedText}&rdquo;</li>
-                    ))}
-                  </ul>
-                )}
-              </div>
-            ))}
-          </section>
-        )}
-
         <section className="filtered-block">
           <h3>Filtered from the Report</h3>
           <p><ChevronRight aria-hidden="true" /> Bibliography</p>

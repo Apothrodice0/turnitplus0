@@ -6,8 +6,6 @@ import { SESSION_COOKIE_NAME, getSessionUserByToken } from "@/lib/auth-session";
 import { checkRate } from "@/lib/rate-limit";
 import { getReportsDbClient } from "@/lib/reports-db";
 import { findReportRowForUser } from "@/lib/reports-repo";
-import { classifyReportMatches } from "@/lib/report-classification";
-import { getOrComputeHistoricalMatchSnapshot } from "@/lib/report-historical-match";
 import type { ReportMode, SimilarityReport } from "@/lib/report-types";
 import { ReportDetailShell } from "./report-detail-shell";
 
@@ -35,37 +33,7 @@ const loadOwnedReport = cache(async (id: string): Promise<OwnedReportResult> => 
     if (!sessionUser) return { status: "no-session" };
     const row = await findReportRowForUser(client, id, sessionUser.id);
     if (!row) return { status: "not-found-for-session" };
-    const payload = JSON.parse(row.payload_json) as SimilarityReport;
-    // Phase D: read-time enrichment only — never written back to
-    // saved_reports, so this can never fall out of sync with a family that
-    // gains new members after this report was saved. See
-    // lib/report-classification.ts for why this is safe to compute on every
-    // read (a handful of indexed point-queries, not a corpus scan) and never
-    // touches payload.score/archiveScore. Best-effort: a lookup failure here
-    // must never turn an otherwise-successful report load into a 404/500.
-    try {
-      payload.matchClassification = await classifyReportMatches(client, { rawText: payload.text, accountId: sessionUser.id });
-    } catch (err) {
-      console.error("classifyReportMatches failed (non-fatal):", err instanceof Error ? err.message : String(err));
-    }
-    // Phase E8C: same read-time-enrichment discipline as Phase D just
-    // above — see lib/report-historical-match.ts's own header comment.
-    // sessionUser.id is always a real account here (the no-session branch
-    // above already returned), so this is never the anonymous path; an
-    // anonymous report is only ever served through the client-side
-    // GET /api/reports/[id] fetch (requiresClientResolution below), which
-    // does its own equivalent enrichment with accountId possibly null.
-    try {
-      payload.historicalSubmissionMatch = await getOrComputeHistoricalMatchSnapshot(client, {
-        reportDeviceKey: row.device_key,
-        reportId: id,
-        accountId: sessionUser.id,
-        rawText: payload.text,
-      });
-    } catch (err) {
-      console.error("getOrComputeHistoricalMatchSnapshot failed (non-fatal):", err instanceof Error ? err.message : String(err));
-    }
-    return { status: "found", payload };
+    return { status: "found", payload: JSON.parse(row.payload_json) as SimilarityReport };
   } finally {
     client.close();
   }
