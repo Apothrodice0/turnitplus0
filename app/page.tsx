@@ -30,7 +30,7 @@ import {
   UserPlus,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { createReceiptPdf } from "@/lib/receipt-pdf";
 import { getDeviceKey } from "@/lib/device-key";
@@ -62,6 +62,14 @@ import {
   type SourceMatch,
 } from "@/lib/report-types";
 
+// This page is prerendered on the server (see the static "/" build output),
+// and useLayoutEffect warns there ("useLayoutEffect does nothing on the
+// server") since there's no DOM to schedule it against — harmless (React
+// already no-ops it server-side), but avoidable with the standard fallback:
+// useEffect during any server-side render pass, useLayoutEffect once a real
+// DOM exists on the client.
+const useIsomorphicLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
+
 type View = "home" | "dashboard" | "reports" | "about" | "account" | "welcome" | "legal" | "processing";
 type AuthMode = "login" | "signup";
 type LegalTab = "privacy" | "terms";
@@ -77,7 +85,7 @@ const VIEW_HASH: Record<Exclude<View, "processing">, string> = {
   legal: "#privacy-terms",
 };
 
-function viewFromHash(hash: string): View {
+export function viewFromHash(hash: string): View {
   if (hash === "#home") return "home";
   if (hash === "#reports") return "reports";
   if (hash === "#how-it-works") return "about";
@@ -404,8 +412,19 @@ export default function Home() {
       .finally(() => setAccountLoaded(true));
   }, []);
 
-  useEffect(() => {
-    if (!accountLoaded) return;
+  // Deliberately independent of account/accountLoaded: which view the URL
+  // hash requests (e.g. #reports) never depends on auth state — only the
+  // *content* within a view does, and that already renders its own loading
+  // state from `reports`/`account` directly. Gating this on accountLoaded
+  // used to mean every mount (including a client-side "Back to reports" nav
+  // from /reports/[id], which fully remounts this component) sat on the
+  // useState("account") default — the signed-out account/login page — for
+  // however long the session fetch below took, before ever reaching this
+  // effect. The isomorphic layout effect runs synchronously after the DOM
+  // commit but before the browser paints, so the correct view is what the
+  // user actually sees on the very first frame instead of a flash of the
+  // wrong one.
+  useIsomorphicLayoutEffect(() => {
     const syncViewFromLocation = () => {
       const requestedView = viewFromHash(window.location.hash);
       if (generationLockRef.current && requestedView === "dashboard") {
@@ -424,7 +443,7 @@ export default function Home() {
       window.removeEventListener("popstate", syncViewFromLocation);
       window.removeEventListener("hashchange", syncViewFromLocation);
     };
-  }, [account, accountLoaded]);
+  }, []);
 
   function toggleSidebar() {
     setSidebarCollapsed((collapsed) => {
