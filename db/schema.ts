@@ -215,6 +215,496 @@ export const sessions = sqliteTable(
   ],
 );
 
+// Phase A (document identity): server-side identity record for an analyzed
+// document, independent of both the corpus-contribution schema above
+// (documents/.../contributions — that's archive/corpus material) and
+// saved_reports (that's a user's saved report payload). This table only
+// answers "what was submitted, by whom (if known), and what are its two
+// hashes" — it does not drive similarity scoring, AI scoring, or the report
+// UI in any way yet. account_id is nullable (anonymous submissions are
+// expected) and mirrors saved_reports.user_id's ON DELETE SET NULL: losing
+// the account must not delete identity history. raw_sha256 and
+// canonical_sha256 are deliberately separate columns (see lib/document-
+// identity.ts) and neither is unique — the same document can legitimately
+// be submitted more than once, by the same account or different accounts;
+// that's the same-account/other-account distinction this table exists to
+// eventually support, not something to prevent at insert time.
+export const document_identities = sqliteTable(
+  "document_identities",
+  {
+    id: text("id").primaryKey(),
+    account_id: text("account_id").references(() => users.id, { onDelete: "set null" }),
+    title: text("title"),
+    author: text("author"),
+    raw_sha256: text("raw_sha256").notNull(),
+    canonical_sha256: text("canonical_sha256").notNull(),
+    // Phase B: count of distinct informative shingles recorded for this
+    // identity in document_identity_shingles below. NULL until fingerprinting
+    // has actually been run for this identity — createDocumentIdentity()
+    // (Phase A) does not set this; it is populated only by the separate,
+    // explicitly-called recordDocumentIdentityShingles() in
+    // lib/document-family.ts, which is not wired into the live save path.
+    unique_shingle_count: integer("unique_shingle_count"),
+    created_at: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    index("idx_document_identities_raw_sha256").on(table.raw_sha256),
+    index("idx_document_identities_canonical_sha256").on(table.canonical_sha256),
+    index("idx_document_identities_account_canonical").on(table.account_id, table.canonical_sha256),
+  ],
+);
+
+// Phase B (document families/versions): one row per distinct *informative*
+// shingle recorded for a document identity (not one row per occurrence —
+// family detection only needs set membership for containment, not positions
+// or highlighting). This is what makes "strong text similarity" between two
+// document_identities rows computable at all: document_identities itself
+// never stores submitted text (see its comment above), only hashes, so
+// without this table there would be no representation of a document's
+// content left to compare once its raw_text has been discarded by the
+// caller. Independent of chunk_fingerprints (the corpus-contribution
+// schema's equivalent) — that table has never been linked to
+// document_identities, and this one is not linked to it either.
+export const document_identity_shingles = sqliteTable(
+  "document_identity_shingles",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    document_identity_id: text("document_identity_id").notNull().references(() => document_identities.id, { onDelete: "cascade" }),
+    shingle_hash: text("shingle_hash").notNull(),
+    created_at: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("ux_document_identity_shingles_identity_hash").on(table.document_identity_id, table.shingle_hash),
+    index("idx_document_identity_shingles_hash").on(table.shingle_hash),
+  ],
+);
+
+// Phase B: a document family is just a group; every interesting fact about
+// *why* an identity is in one lives on document_family_members below, not
+// here. Deliberately minimal per the task's own suggested shape.
+export const document_families = sqliteTable(
+  "document_families",
+  {
+    id: text("id").primaryKey(),
+    created_at: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    updated_at: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+);
+
+// Phase B: membership of one document_identities row in one document_families
+// group. An identity belongs to at most one family (unique index on
+// document_identity_id) — Phase B does not attempt multi-family graph
+// resolution, only first-match attachment (see resolveFamilyForIdentity in
+// lib/document-family.ts). match_type records *why* this identity is here:
+// SEED (the founding member — no comparison was made), EXACT_CANONICAL_MATCH,
+// or STRONG_TEXT_MATCH (matched against matched_against_identity_id at
+// evidence_score, a 0..1 containment value). This is a document-relationship
+// record, not a plagiarism or provenance classification — nothing here is
+// SELF, PRIOR_SUBMISSION, or VERIFIED_SOURCE.
+export const document_family_members = sqliteTable(
+  "document_family_members",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    family_id: text("family_id").notNull().references(() => document_families.id, { onDelete: "cascade" }),
+    document_identity_id: text("document_identity_id").notNull().references(() => document_identities.id, { onDelete: "cascade" }),
+    match_type: text("match_type").notNull(),
+    matched_against_identity_id: text("matched_against_identity_id").references(() => document_identities.id, { onDelete: "set null" }),
+    evidence_score: real("evidence_score"),
+    created_at: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("ux_document_family_members_identity").on(table.document_identity_id),
+    index("idx_document_family_members_family_id").on(table.family_id),
+  ],
+);
+
+// Phase E1 (provenance infrastructure): a source's provenance state is
+// deliberately a separate concept from document_family_members.match_type
+// above (a text relationship) and from lib/document-relationship.ts's
+// SELF/PRIOR_SUBMISSION (an account relationship) — a row here can be
+// provenance_state = VERIFIED_SOURCE while a comparison against it is
+// independently relationship_type = PRIOR_SUBMISSION. Nothing in this table
+// is read by, or written from, the similarity-scoring path
+// (app/similarity-worker.ts, lib/report-types.ts, app/page.tsx,
+// lib/receipt-pdf.ts) — see lib/provenance-types.ts's header comment and
+// tests/provenance-scoring-invariance.test.mjs. document_identity_id is
+// nullable and only set when this row represents a TurnitPlus account's own
+// submission (OBSERVED_SUBMISSION) rather than an external candidate source;
+// it deliberately carries no account_id of its own — see
+// lib/provenance-registry.ts's createObservedSubmissionProvenance, which
+// never accepts one, so account identity cannot leak into a provenance
+// record through this table.
+export const provenance_sources = sqliteTable(
+  "provenance_sources",
+  {
+    id: text("id").primaryKey(),
+    provenance_state: text("provenance_state").notNull(),
+    source_type: text("source_type").notNull(),
+    canonical_url: text("canonical_url"),
+    external_identifier: text("external_identifier"),
+    title: text("title"),
+    author: text("author"),
+    publisher: text("publisher"),
+    publication_date: text("publication_date"),
+    retrieved_at: text("retrieved_at"),
+    content_hash: text("content_hash"),
+    verification_method: text("verification_method"),
+    verification_notes: text("verification_notes"),
+    document_identity_id: text("document_identity_id").references(() => document_identities.id, { onDelete: "set null" }),
+    created_at: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    updated_at: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    index("idx_provenance_sources_state").on(table.provenance_state),
+    index("idx_provenance_sources_document_identity_id").on(table.document_identity_id),
+  ],
+);
+
+// Append-only history of provenance_sources.provenance_state transitions.
+// previous_state is NULL only for a source's genesis event (its very first
+// row, written atomically with the source itself — see
+// lib/provenance-registry.ts's createProvenanceSource). Every subsequent
+// state change adds a new row here; existing rows are never updated or
+// deleted by the repository layer (ON DELETE CASCADE only fires if the
+// source itself is deleted, which is not a normal operation). This is what
+// lets a later reader answer "when did this become VERIFIED_SOURCE" from the
+// historical record instead of only the current state.
+export const provenance_events = sqliteTable(
+  "provenance_events",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    source_id: text("source_id").notNull().references(() => provenance_sources.id, { onDelete: "cascade" }),
+    previous_state: text("previous_state"),
+    new_state: text("new_state").notNull(),
+    reason: text("reason"),
+    evidence: text("evidence"),
+    created_at: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    index("idx_provenance_events_source_id").on(table.source_id),
+  ],
+);
+
+// Phase E4 (provenance evidence records): append-only, structured facts
+// gathered about a provenance_sources row — "what do we know, and what did
+// we know at what time." Deliberately a separate table from provenance_events
+// above, not an extension of it: provenance_events records *state
+// transitions* (UNKNOWN -> CANDIDATE_SOURCE -> ...), one row per change;
+// this table records *evidence* (a URL was reachable, a content hash
+// matched, a publisher was identified), one row per fact observed, and
+// several rows can exist for the same source between any two state
+// transitions, or none at all. Nothing here mutates provenance_sources or
+// provenance_events, and nothing in lib/provenance-verification-policy.ts
+// (the pure evaluator that reads this table's rows) writes back to either —
+// see that file's own header comment and
+// tests/provenance-scoring-invariance.test.mjs. payload_json holds the
+// evidence_type-specific structured facts (see
+// lib/provenance-evidence-types.ts for the controlled vocabulary and each
+// type's expected payload shape) as a single JSON column, matching this
+// schema's existing precedent for "structured data whose shape varies by row
+// kind" (saved_reports.payload_json, analysis_runs.result_json,
+// index_versions.assets_json) rather than a wide, mostly-NULL column set.
+// observed_at is the app-supplied fact time (e.g. when a URL was actually
+// fetched) and is independent of created_at (when this row was written to
+// the database) — the same "first-seen time is not authorship/publication
+// date" discipline provenance_sources already applies, extended to
+// individual pieces of evidence. There is no UPDATE path in
+// lib/provenance-evidence.ts: a changed fact (a URL that was reachable
+// becomes unreachable) is always a new row, never an edit to an old one.
+export const provenance_evidence = sqliteTable(
+  "provenance_evidence",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    source_id: text("source_id").notNull().references(() => provenance_sources.id, { onDelete: "cascade" }),
+    evidence_type: text("evidence_type").notNull(),
+    payload_json: text("payload_json").notNull(),
+    observed_at: text("observed_at").notNull(),
+    created_at: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    index("idx_provenance_evidence_source_id").on(table.source_id),
+    index("idx_provenance_evidence_type").on(table.evidence_type),
+  ],
+);
+
+// Phase E5 (controlled provenance verification workflow): one row per
+// explicit verification decision made about a provenance_sources row —
+// approve, reject, dispute, retract, or reaffirm. Append-only, structurally
+// parallel to provenance_events above (which this table's writes are always
+// bundled into the same atomic client.batch() as, via
+// lib/provenance-registry.ts's transitionProvenanceState extraStatements
+// parameter — see that function's own comment) but conceptually distinct:
+// provenance_events is the record of *what state a source moved to*;
+// this table is the record of *why a human/system decided it should*,
+// including the evidence evaluation that was consulted at the time. There
+// is deliberately no "verified = true" flag anywhere in this schema — the
+// current, authoritative answer to "is this source verified" is always
+// provenance_sources.provenance_state (or, more precisely,
+// isEligibleForVerifiedSimilarity(that state)); this table exists purely
+// for the audit trail behind how it got there, and is never read to
+// determine current eligibility.
+// requested_state/previous_state are equal only for a REAFFIRMED decision
+// (Phase E3 design section 7's "reviewed new evidence, remains VERIFIED"
+// case) — the one kind of decision that has NO corresponding
+// provenance_events row, since lib/provenance-types.ts's
+// isValidProvenanceTransition() rejects same-state "transitions" by design;
+// see lib/provenance-verification-workflow.ts's reaffirmVerification.
+// evaluation_json is the full evaluateVerificationEligibility() result
+// (Phase E4) at decision time — informational for every decision, but only
+// load-bearing (gates the decision) when approving; a REJECTED/DISPUTED/
+// RETRACTED decision is recorded with this same evaluation for audit
+// purposes even though it did not require the gate to pass (Phase E3
+// design's explicit "do not require the gate to pass before recording a
+// rejection" rule).
+export const provenance_verification_decisions = sqliteTable(
+  "provenance_verification_decisions",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    source_id: text("source_id").notNull().references(() => provenance_sources.id, { onDelete: "cascade" }),
+    previous_state: text("previous_state").notNull(),
+    requested_state: text("requested_state").notNull(),
+    decision: text("decision").notNull(),
+    evaluation_json: text("evaluation_json").notNull(),
+    evidence_ids_json: text("evidence_ids_json").notNull(),
+    reason: text("reason"),
+    method: text("method").notNull(),
+    decided_at: text("decided_at").notNull(),
+    created_at: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    index("idx_provenance_verification_decisions_source_id").on(table.source_id),
+  ],
+);
+
+// Phase E6A (source discovery architecture): one row per provider attempt
+// within a discovery run — never the final candidate alone (see
+// lib/discovery-repository.ts's own comment). request_id correlates every
+// provider attempt that belongs to the same in-memory DiscoveryRequest
+// (lib/discovery-types.ts) — that request itself is never persisted as its
+// own row (Phase E6A task description section 2: "do not copy entire
+// document text into every request record"), only its bounded, already-
+// extracted queries/signals and the outcome of asking each provider.
+// document_identity_id is nullable (a MANUAL_RESEARCH discovery attempt
+// need not be tied to any live submission) and deliberately the only
+// foreign key this table has: no reference to provenance_sources,
+// provenance_evidence, document_families, or document_family_members
+// exists here — discovery facts stay a separate concern from provenance
+// facts (this phase's own task description, section 12), even though
+// lib/discovery-provenance-bridge.ts can later read a completed discovery
+// candidate and use it to create those other rows through their own,
+// already-existing repositories. raw_results_json stores what each
+// provider actually returned for this attempt (post-sanitization,
+// pre-deduplication) — small and bounded, since discovery results are
+// inherently short candidate lists, never a document body.
+export const discovery_attempts = sqliteTable(
+  "discovery_attempts",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    request_id: text("request_id").notNull(),
+    document_identity_id: text("document_identity_id").references(() => document_identities.id, { onDelete: "set null" }),
+    purpose: text("purpose").notNull(),
+    provider_id: text("provider_id").notNull(),
+    provider_type: text("provider_type").notNull(),
+    queries_used_json: text("queries_used_json").notNull(),
+    status: text("status").notNull(),
+    result_count: integer("result_count").notNull().default(0),
+    raw_results_json: text("raw_results_json"),
+    error_message: text("error_message"),
+    requested_at: text("requested_at").notNull(),
+    responded_at: text("responded_at"),
+    created_at: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    index("idx_discovery_attempts_request_id").on(table.request_id),
+    index("idx_discovery_attempts_document_identity_id").on(table.document_identity_id),
+  ],
+);
+
+// Phase E6C (external source retrieval + content correspondence): one row
+// per attempt to retrieve a candidate source's actual content. Append-only,
+// structurally parallel to discovery_attempts (E6A) but a separate concern
+// — discovery_attempts records "did a provider find a candidate,"
+// source_retrievals records "did we actually fetch and read its content."
+// Deliberately has NO foreign key into provenance_evidence,
+// document_families, saved_reports, or document_identities — this table
+// answers "what did TurnitPlus retrieve, when, and what exactly did it
+// retrieve" for a candidate source, nothing about a TurnitPlus user's own
+// submission (external retrieved content is never treated as, or merged
+// into, a document_identities row — see this phase's own task description,
+// section 9). The only foreign key is source_id, into provenance_sources —
+// a retrieval is always about a specific candidate/source row. raw_html is
+// intentionally NOT a column: only hashes plus the bounded extracted text
+// are kept (extracted_text_excerpt, capped independently of the retriever's
+// own maxExtractedTextLength, purely so a reviewer can sanity-check what
+// was compared without this table ever becoming a mirror of the external
+// page). extractor_version lets a later reader tell whether two retrievals
+// of the same page used comparable extraction rules (see
+// lib/html-text-extraction.ts's HTML_EXTRACTOR_VERSION).
+export const source_retrievals = sqliteTable(
+  "source_retrievals",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    source_id: text("source_id").notNull().references(() => provenance_sources.id, { onDelete: "cascade" }),
+    original_url: text("original_url").notNull(),
+    final_url: text("final_url"),
+    http_status: integer("http_status"),
+    content_type: text("content_type"),
+    retrieved_at: text("retrieved_at").notNull(),
+    raw_sha256: text("raw_sha256"),
+    canonical_sha256: text("canonical_sha256"),
+    extracted_text_excerpt: text("extracted_text_excerpt"),
+    extractor_version: text("extractor_version"),
+    status: text("status").notNull(),
+    error_message: text("error_message"),
+    created_at: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    index("idx_source_retrievals_source_id").on(table.source_id),
+  ],
+);
+
+// Phase E8A (user submission history corpus — storage/indexing only, not yet
+// wired into live scoring or matching): the reusable, deduplicated content
+// layer document_identities never had. document_identities (Phase A) already
+// records one row per submission event with both hashes, but never the text
+// itself — nothing before E8A could ever compare two submissions at the
+// passage level. These three tables are purely additive; no existing table's
+// rows, columns, or constraints change. account ownership is deliberately
+// NOT duplicated here — corpus_submission_references only stores
+// document_identity_id, and every account-scoped query joins back through
+// document_identities.account_id, so there is exactly one place account
+// linkage lives.
+//
+// One row per distinct canonical_sha256 — many submissions (any account, any
+// number of times) that canonicalize to the same text share one row here,
+// never one copy per submission. canonical_text is stored so future passage-
+// level comparison is possible at all (hashes alone cannot support that).
+// canonicalization_version records which lib/canonical-text.ts behavior
+// produced canonical_text, independent of fingerprint_version below, which
+// records which shingling scheme produced this representation's
+// corpus_document_shingles rows — two different "this could change later"
+// axes, versioned separately on purpose (this phase's own task description,
+// section 8). extractor_version is nullable: the server never learns which
+// client-side extractor produced the text it receives, so this column exists
+// for forward compatibility but is not populated by anything in this phase.
+// first_seen_at is exactly that and nothing more — see this phase's own task
+// description, section 21: it is not authorship, ownership, or a publication
+// date.
+export const corpus_document_representations = sqliteTable(
+  "corpus_document_representations",
+  {
+    id: text("id").primaryKey(),
+    canonical_sha256: text("canonical_sha256").notNull(),
+    canonical_text: text("canonical_text").notNull(),
+    word_count: integer("word_count").notNull(),
+    language: text("language"),
+    canonicalization_version: text("canonicalization_version").notNull(),
+    extractor_version: text("extractor_version"),
+    first_seen_at: text("first_seen_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    created_at: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("ux_corpus_document_representations_canonical_sha256").on(table.canonical_sha256),
+  ],
+);
+
+// One row per submission event that has been indexed into the corpus —
+// document_identity_id is unique because a given submission maps to exactly
+// one representation. link_type records whether this submission introduced
+// a NEW_CONTENT_REPRESENTATION or matched an EXACT_CANONICAL_DUPLICATE
+// already on file (this phase's own task description, section 6 — revision
+// inference stays Phase B's job, not this table's). This is the only place
+// "who submitted this, and how many times" is answered for the corpus layer,
+// and it answers that by joining to document_identities, never by storing
+// account_id a second time.
+export const corpus_submission_references = sqliteTable(
+  "corpus_submission_references",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    representation_id: text("representation_id").notNull().references(() => corpus_document_representations.id, { onDelete: "cascade" }),
+    document_identity_id: text("document_identity_id").notNull().references(() => document_identities.id, { onDelete: "cascade" }),
+    link_type: text("link_type").notNull(),
+    created_at: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("ux_corpus_submission_references_document_identity_id").on(table.document_identity_id),
+    index("idx_corpus_submission_references_representation_id").on(table.representation_id),
+  ],
+);
+
+// One row per distinct informative shingle of a representation's own
+// canonical_text (not its submitters' raw text — deliberately different from
+// document_identity_shingles, which fingerprints raw text for Phase B family
+// matching; this table exists for a different purpose, future cross-
+// submission passage matching, and is never read by lib/document-family.ts
+// or lib/document-relationship.ts). fingerprint_version is part of the
+// unique key together with shingle_hash so a future re-fingerprinting pass
+// can add a new generation of shingles for the same representation without
+// deleting or colliding with the old ones.
+export const corpus_document_shingles = sqliteTable(
+  "corpus_document_shingles",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    representation_id: text("representation_id").notNull().references(() => corpus_document_representations.id, { onDelete: "cascade" }),
+    shingle_hash: text("shingle_hash").notNull(),
+    fingerprint_version: text("fingerprint_version").notNull(),
+    created_at: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("ux_corpus_document_shingles_representation_version_hash").on(table.representation_id, table.fingerprint_version, table.shingle_hash),
+    index("idx_corpus_document_shingles_hash").on(table.shingle_hash),
+  ],
+);
+
+// Phase E8C: per-saved-report historical-match snapshot cache — connects
+// lib/user-submission-matching.ts's (E8B) matcher to the saved-report
+// lifecycle without ever touching saved_reports itself. One row per report,
+// upserted (never appended) on recompute — see lib/report-historical-match.ts
+// for why "latest snapshot + its own version tags" is enough to detect
+// staleness without keeping a full audit history. report_device_key +
+// report_id mirror saved_reports' own composite primary key exactly (not
+// just id alone — saved_reports' id is only unique per device_key, a
+// client-generated, timestamp-based value, so keying on id alone could in
+// theory let two different devices' reports collide onto one snapshot row).
+// No DB-level FOREIGN KEY here on purpose: this project's existing
+// schema-drift tooling (tests/schema-drift.test.mjs) only recognizes
+// single-column references() declarations, not a table-level composite
+// foreign key, and this phase does not touch that shared tooling to add
+// support for one. Cleanup is instead explicit and application-level —
+// app/api/reports/[id]/route.ts's DELETE handler removes the matching
+// snapshot row in the same request, right after deleting the report itself.
+//
+// result_json is bounded, privacy-screened evidence only (relationship
+// type, containment, matched word count, passage count, longest match,
+// bounded passages reconstructed from the CURRENT report's own text, and a
+// historical-submission COUNT) — never full historical document text, never
+// another account's id or email. See lib/report-historical-match.ts's own
+// header comment for the exact shape, which mirrors
+// lib/user-submission-matching.ts's UserSubmissionMatch without importing
+// it here (this file never imports a feature module, matching every other
+// table's own convention).
+export const report_historical_match_snapshots = sqliteTable(
+  "report_historical_match_snapshots",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    report_device_key: text("report_device_key").notNull(),
+    report_id: text("report_id").notNull(),
+    status: text("status").notNull(),
+    matcher_version: text("matcher_version"),
+    fingerprint_version: text("fingerprint_version"),
+    canonicalization_version: text("canonicalization_version"),
+    result_json: text("result_json"),
+    candidate_count: integer("candidate_count"),
+    processing_duration_ms: integer("processing_duration_ms"),
+    error_message: text("error_message"),
+    computed_at: text("computed_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    created_at: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("ux_report_historical_match_snapshots_report").on(table.report_device_key, table.report_id),
+  ],
+);
+
 // Export nothing else — Drizzle will consume these definitions for migrations.
 export {};
 

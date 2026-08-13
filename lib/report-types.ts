@@ -66,6 +66,75 @@ export type AiSignalDisplay = {
   range: string;
 };
 
+// Phase D: account-based match classification (SELF vs PRIOR_SUBMISSION),
+// bridged in from the document-identity/family system (lib/document-family.ts,
+// lib/document-relationship.ts) by lib/report-classification.ts — kept out of
+// that system's own modules so they stay report-agnostic, per their own
+// header comments. Populated only when a saved report is *read back*
+// (app/reports/[id]/page.tsx, GET /api/reports/[id]); never present on a
+// freshly-analyzed, not-yet-saved report, since the underlying family
+// resolution runs only after a save (see lib/run-after-response.ts).
+// Deliberately independent of `score`/`archiveScore` below (the verified-
+// source/archive similarity percentage) — nothing here is ever added into,
+// subtracted from, or otherwise mixed with that calculation; see
+// lib/report-classification.ts's own comment for why and how.
+export type ReportMatchClassification = {
+  /** 0-100, or null if no SELF-classified match exists for this report. Never inflates `score`. */
+  selfMatchPercent: number | null;
+  /** 0-100, or null if no PRIOR_SUBMISSION-classified match exists for this report. Never inflates `score`, and never identifies the other account. */
+  priorSubmissionPercent: number | null;
+};
+
+/**
+ * Phase E8C. A standalone, hand-written mirror of
+ * lib/user-submission-matching.ts's UserSubmissionMatch/CorrespondencePassage
+ * shapes — deliberately NOT imported from that module, exactly like
+ * ReportMatchClassification above never imports lib/document-family.ts: this
+ * file never imports a feature module (see this file's own existing
+ * convention). externalWordStart is intentionally dropped (always null —
+ * see lib/document-correspondence.ts's own comment on why) and no per-entry
+ * version fields are kept, since every entry in one snapshot shares the
+ * top-level version fields on ReportHistoricalSubmissionMatch below.
+ */
+export type HistoricalMatchPassage = {
+  /** A bounded excerpt of the CURRENT report's own text — never the historical document's text. */
+  submittedText: string;
+  submittedWordStart: number;
+  submittedWordEnd: number;
+  matchedWordCount: number;
+};
+
+export type HistoricalSubmissionMatchEntry = {
+  relationshipType: "SELF" | "PRIOR_SUBMISSION" | "UNKNOWN_RELATIONSHIP";
+  matchedRepresentationId: string;
+  matchType: "EXACT_CANONICAL_MATCH" | "STRONG_TEXT_MATCH";
+  containment: number;
+  matchedWordCount: number;
+  passageCount: number;
+  longestMatchWords: number;
+  passages: HistoricalMatchPassage[];
+  /** How many OTHER accounts (never which ones) have also submitted this content. */
+  historicalSubmissionCount: number;
+};
+
+/**
+ * Phase E8C enrichment — a snapshot of lib/user-submission-matching.ts's
+ * matchAgainstUserSubmissionCorpus, cached in report_historical_match_snapshots
+ * and attached at read time (see lib/report-historical-match.ts). Completely
+ * independent of `score`/`archiveScore`/ReportMatchClassification above —
+ * three separate signals, never combined arithmetically. "UNAVAILABLE" means
+ * the computation itself failed (see lib/report-historical-match.ts) — the
+ * report must still render normally when this happens.
+ */
+export type ReportHistoricalSubmissionMatch = {
+  status: "MATCHED" | "NO_HISTORICAL_MATCH" | "UNAVAILABLE";
+  matches?: HistoricalSubmissionMatchEntry[];
+  computedAt: string;
+  matcherVersion: string;
+  fingerprintVersion: string;
+  canonicalizationVersion: string;
+};
+
 export type SimilarityReport = {
   version: 11;
   id: number;
@@ -76,6 +145,10 @@ export type SimilarityReport = {
   created: string;
   score: number;
   archiveScore?: number;
+  /** Phase D enrichment — see ReportMatchClassification's own comment. Absent on older/unsaved/not-yet-classified reports; the reporting layer must treat its absence as "nothing to show", not an error. */
+  matchClassification?: ReportMatchClassification;
+  /** Phase E8C enrichment — see ReportHistoricalSubmissionMatch's own comment. Absent on a freshly-analyzed, not-yet-saved report (the snapshot only exists once a saved_reports row does), or if computing it failed before even producing an UNAVAILABLE snapshot. */
+  historicalSubmissionMatch?: ReportHistoricalSubmissionMatch;
   aiScore?: number | null;
   aiAnalysis?: AiAnalysis;
   webCheck?: WebCheckResult;

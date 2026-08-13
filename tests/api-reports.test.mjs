@@ -105,7 +105,14 @@ async function deleteReport(deviceKey, id) {
   const getRes = await getReport(deviceKey, payload.id);
   assert.equal(getRes.status, 200);
   const getBody = await getRes.json();
-  assert.deepEqual(getBody.payload, payload, 'get must return the exact saved payload');
+  // Phase E8C attaches historicalSubmissionMatch as read-time enrichment
+  // (like Phase D's matchClassification elsewhere), deliberately always
+  // present (even for NO_HISTORICAL_MATCH) so its version/audit metadata
+  // stays inspectable — see tests/document-identity.test.mjs's identical
+  // adjustment for the full rationale.
+  const { historicalSubmissionMatch, ...getPayloadWithoutHistoricalMatch } = getBody.payload;
+  assert.equal(historicalSubmissionMatch?.status, 'NO_HISTORICAL_MATCH');
+  assert.deepEqual(getPayloadWithoutHistoricalMatch, payload, 'get must return the exact saved payload (aside from the new E8C enrichment field)');
 
   const deleteRes = await deleteReport(deviceKey, payload.id);
   assert.equal(deleteRes.status, 200);
