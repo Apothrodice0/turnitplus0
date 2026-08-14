@@ -76,18 +76,41 @@ test("the bridge module never imports or calls lib/similarity-core.ts, lib/repor
 
 // --- TRIGGERING / STALENESS / IDEMPOTENCY -------------------------------------
 
-test("TRIGGERING: first view computes and persists a snapshot; second view reuses it without recomputation (no new rows, same computedAt)", async () => {
+test("TRIGGERING: first view computes and persists a MATCHED snapshot; second view reuses it without recomputation (no new rows, same computedAt)", async () => {
+  // Phase E8E: this must be a genuinely MATCHED fixture, not an unmatched
+  // one — see the dedicated NO_HISTORICAL_MATCH test right below for why
+  // that status is deliberately excluded from this "reused as-is" guarantee.
+  const text = "Cartographers digitizing a nineteenth-century harbor survey identified a discrepancy between the charted shoreline and a modern satellite reference image at three distinct points, trigger fixture one.";
+  await indexSubmission("e8e-trigger-account-one", text);
+
   const deviceKey = "device-trigger-1";
   const reportId = "report-trigger-1";
-  await ensureSavedReport(deviceKey, reportId, null);
+  await ensureSavedReport(deviceKey, reportId, "e8e-trigger-viewer-one");
 
-  const first = await getOrComputeHistoricalMatchSnapshot(client, { reportDeviceKey: deviceKey, reportId, accountId: null, rawText: "A document with enough distinctive words to be a valid query for this fixture test case one." });
-  const second = await getOrComputeHistoricalMatchSnapshot(client, { reportDeviceKey: deviceKey, reportId, accountId: null, rawText: "A document with enough distinctive words to be a valid query for this fixture test case one." });
+  const first = await getOrComputeHistoricalMatchSnapshot(client, { reportDeviceKey: deviceKey, reportId, accountId: "e8e-trigger-viewer-one", rawText: text });
+  assert.equal(first.status, "MATCHED");
+  const second = await getOrComputeHistoricalMatchSnapshot(client, { reportDeviceKey: deviceKey, reportId, accountId: "e8e-trigger-viewer-one", rawText: text });
 
-  assert.equal(first.computedAt, second.computedAt, "a second view must reuse the exact same snapshot, not recompute");
+  assert.equal(first.computedAt, second.computedAt, "a second view of a MATCHED snapshot must reuse the exact same snapshot, not recompute");
 
   const rows = await client.execute({ sql: "SELECT COUNT(*) AS cnt FROM report_historical_match_snapshots WHERE report_device_key = ? AND report_id = ?", args: [deviceKey, reportId] });
   assert.equal(Number(rows.rows[0].cnt), 1, "exactly one snapshot row must exist, never appended");
+});
+
+test("TRIGGERING (E8E): a NO_HISTORICAL_MATCH snapshot is always recomputed on the next view, but still upserts in place (never appends a row)", async () => {
+  const deviceKey = "device-trigger-nomatch";
+  const reportId = "report-trigger-nomatch";
+  await ensureSavedReport(deviceKey, reportId, null);
+  const text = "A document with enough distinctive words to be a valid, permanently unmatched query for this specific fixture test case only.";
+
+  const first = await getOrComputeHistoricalMatchSnapshot(client, { reportDeviceKey: deviceKey, reportId, accountId: null, rawText: text });
+  assert.equal(first.status, "NO_HISTORICAL_MATCH");
+  const second = await getOrComputeHistoricalMatchSnapshot(client, { reportDeviceKey: deviceKey, reportId, accountId: null, rawText: text });
+  assert.equal(second.status, "NO_HISTORICAL_MATCH");
+  assert.notEqual(first.computedAt, second.computedAt, "a NO_HISTORICAL_MATCH snapshot must recompute on every view (see the E8E staleness fix below), not reuse a possibly-outdated cached row");
+
+  const rows = await client.execute({ sql: "SELECT COUNT(*) AS cnt FROM report_historical_match_snapshots WHERE report_device_key = ? AND report_id = ?", args: [deviceKey, reportId] });
+  assert.equal(Number(rows.rows[0].cnt), 1, "recomputation must still upsert in place, never append a second row");
 });
 
 test("TRIGGERING: a stale matcher version triggers recomputation, upserting (not duplicating) the snapshot row", async () => {
@@ -130,6 +153,45 @@ test("TRIGGERING: a failed computation persists as UNAVAILABLE and does not thro
   } else {
     assert.equal(result.status, "UNAVAILABLE");
   }
+});
+
+test("E8E: a NO_HISTORICAL_MATCH snapshot computed before matching corpus content existed must not permanently suppress a real match that gets indexed afterward", async () => {
+  // Phase E8D activates save-time indexing via runAfterResponse's after()
+  // mechanism, which in real production is genuinely deferred (not the
+  // synchronous test-mode fallback every other test in this file relies on
+  // implicitly by never separating "save" from "view" in time). This means
+  // a report can genuinely be viewed for the first time before another
+  // account's earlier upload has finished indexing. This test reproduces
+  // that ordering directly (view first, index second) rather than relying
+  // on real timing, so it is deterministic.
+  // Deliberately unrelated to every other fixture in this file (including
+  // the similarly-themed "very first-ever upload" fixture below) — see
+  // this file's other fixtures for why reusing even a lightly-modified
+  // paragraph causes cross-fixture shingle pollution in a shared-client
+  // test file like this one.
+  const text = "Speleologists mapping a previously unsurveyed limestone cave system documented an isolated subterranean pool hosting a translocated population of blind cavefish never before recorded at this specific depth.";
+
+  const deviceKey = "device-e8e-race";
+  const reportId = "report-e8e-race";
+  await ensureSavedReport(deviceKey, reportId, "e8e-account-b-race");
+
+  // B's report is viewed BEFORE account A's matching content is indexed —
+  // correctly NO_HISTORICAL_MATCH at this moment, and (by the existing
+  // caching design) persisted as a snapshot.
+  const beforeIndexing = await getOrComputeHistoricalMatchSnapshot(client, { reportDeviceKey: deviceKey, reportId, accountId: "e8e-account-b-race", rawText: text });
+  assert.equal(beforeIndexing.status, "NO_HISTORICAL_MATCH");
+
+  // Account A's upload finishes indexing shortly afterward (the deferred
+  // after() callback completing in real production).
+  await indexSubmission("e8e-account-a-race", text);
+
+  // B views the same report again. The version tags have not changed, but
+  // genuinely new corpus content now exists that the first computation
+  // could not have seen — this must be reflected, not silently suppressed
+  // by the earlier cached NO_HISTORICAL_MATCH snapshot.
+  const afterIndexing = await getOrComputeHistoricalMatchSnapshot(client, { reportDeviceKey: deviceKey, reportId, accountId: "e8e-account-b-race", rawText: text });
+  assert.equal(afterIndexing.status, "MATCHED", "a later view must pick up corpus content that did not exist yet at the time of the first, cached NO_HISTORICAL_MATCH computation");
+  assert.equal(afterIndexing.matches[0].relationshipType, "PRIOR_SUBMISSION");
 });
 
 // --- REALISTIC FIXTURES (section 25) — SELF / PRIOR_SUBMISSION -------------

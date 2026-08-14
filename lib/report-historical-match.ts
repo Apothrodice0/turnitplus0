@@ -34,6 +34,19 @@ import type { ReportHistoricalSubmissionMatch, HistoricalSubmissionMatchEntry } 
  * table. A computation failure is itself persisted as status "FAILED" (never
  * thrown past this function) so a permanently-failing document does not get
  * recomputed on every single report view.
+ *
+ * Phase E8E fix: a cached "NO_HISTORICAL_MATCH" row is the one exception —
+ * it is never reused, even with current version tags. Phase E8D activated
+ * save-time indexing via a genuinely deferred after() callback in
+ * production, so a report can legitimately be viewed for the first time
+ * before another account's earlier upload has finished indexing; the very
+ * first view would then compute and permanently cache NO_HISTORICAL_MATCH,
+ * silently hiding a real PRIOR_SUBMISSION/SELF match that only exists a
+ * moment later — version tags never change to invalidate it, since nothing
+ * about the matcher/fingerprint/canonicalization changed, only the corpus's
+ * contents did. A "MATCHED" result cannot go stale this same way (new
+ * corpus content cannot make an existing match disappear), so it is still
+ * cached as before; only the empty-result case is always recomputed.
  */
 
 const CURRENT_VERSIONS = {
@@ -129,7 +142,11 @@ export async function getOrComputeHistoricalMatchSnapshot(
     args: [params.reportDeviceKey, params.reportId],
   });
   const existingRow = existing.rows[0] as unknown as SnapshotRow | undefined;
-  if (existingRow && isCurrentVersion(existingRow)) {
+  // See this file's own header comment (Phase E8E fix): NO_HISTORICAL_MATCH
+  // is never treated as final, even with current version tags, because it
+  // can be invalidated by new corpus content arriving after it was cached —
+  // something version tags alone cannot detect.
+  if (existingRow && isCurrentVersion(existingRow) && existingRow.status !== "NO_HISTORICAL_MATCH") {
     return rowToResult(existingRow);
   }
 
