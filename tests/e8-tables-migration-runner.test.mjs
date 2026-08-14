@@ -21,7 +21,7 @@ import {
 import { loadEnvFile, hostnameLabel, parseArgs } from '../tools/apply-e8-tables-migration.ts';
 
 /**
- * Phase E8E-D.1: tests for the isolated 0012-0020 migration runner.
+ * Phase E8E-D.1: tests for the isolated 0012-0021 migration runner.
  * Everything here runs against local, disposable SQLite files created and
  * destroyed within this file — nothing here ever touches a real Turso
  * database, production or otherwise. See lib/e8-tables-migration-runner.ts's
@@ -101,7 +101,7 @@ test.after(() => {
 
 // --- A: explicit allowlist ------------------------------------------------
 
-test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0020, in order, never touching 0000-0011', () => {
+test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0021, in order, never touching 0000-0011', () => {
   assert.deepEqual(TARGET_MIGRATIONS, [
     '0012_document_identities.sql',
     '0013_document_families.sql',
@@ -112,8 +112,9 @@ test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0020, in ord
     '0018_source_retrievals.sql',
     '0019_user_submission_corpus.sql',
     '0020_report_historical_match_snapshots.sql',
+    '0021_historical_match_shadow_evaluations.sql',
   ]);
-  assert.equal(ALL_TARGET_TABLES.length, 14, 'expected exactly the 14 E1-E8 tables across all 9 migrations');
+  assert.equal(ALL_TARGET_TABLES.length, 15, 'expected exactly the 15 E1-E8P tables across all 10 migrations');
 });
 
 // --- F: no execution of 0000-0011 (structural) ----------------------------
@@ -134,7 +135,7 @@ test('F: the runner module never does an unfiltered directory scan — no readdi
 
 // --- G: destructive SQL detection -----------------------------------------
 
-test('G: scanForDestructiveStatements finds real destructive keywords and finds none in the actual 9 target migration files', () => {
+test('G: scanForDestructiveStatements finds real destructive keywords and finds none in the actual 10 target migration files', () => {
   assert.deepEqual(scanForDestructiveStatements('CREATE TABLE IF NOT EXISTS x (id TEXT);'), []);
   assert.ok(scanForDestructiveStatements('DROP TABLE document_chunks;').length > 0);
   assert.ok(scanForDestructiveStatements('DELETE FROM users WHERE 1=1;').length > 0);
@@ -156,13 +157,13 @@ test('splitStatements correctly splits a real multi-statement migration file int
   assert.ok(statements.length >= 8, 'expected at least 8 individual CREATE statements');
   for (const s of statements) {
     assert.doesNotMatch(s, /^--/, 'no statement should be a leftover comment line');
-    assert.ok(/^CREATE/i.test(s), 'every statement in these 9 files is a CREATE TABLE/INDEX');
+    assert.ok(/^CREATE/i.test(s), 'every statement in these 10 files is a CREATE TABLE/INDEX');
   }
 });
 
 // --- Section 9: disposable local DB — full happy-path run ------------------
 
-test('SECTION 9: fresh pre-0012 database — the runner applies all 9 migrations in order, creates all 14 tables, and preserves legacy rows exactly', async () => {
+test('SECTION 9: fresh pre-0012 database — the runner applies all 10 migrations in order, creates all 15 tables, and preserves legacy rows exactly', async () => {
   const dbFile = freshDbPath('happy');
   const client = await buildPreMigrationDb(dbFile);
   await seedRepresentativeLegacyRows(client);
@@ -324,14 +325,14 @@ test('K: the selectively-migrated database is structurally identical to a databa
   assert.equal(runResult.status, 'success');
 
   const referenceClient = createClient({ url: `file:${referenceDbFile}` });
-  await applyMigrationsLibsql(referenceClient, drizzleDir); // full 0000-0020 in one shot, the same mechanism every other test in this repo already trusts
+  await applyMigrationsLibsql(referenceClient, drizzleDir); // full 0000-0021 in one shot, the same mechanism every other test in this repo already trusts
 
   const schemaOf = async (client) => {
     const result = await client.execute("SELECT name, sql FROM sqlite_master WHERE type IN ('table','index') AND name != 'sqlite_sequence' ORDER BY name");
     return result.rows.map((r) => `${r.name}::${r.sql}`).sort();
   };
 
-  assert.deepEqual(await schemaOf(selectiveClient), await schemaOf(referenceClient), 'applying 0000-0011 then 0012-0020 via this runner must produce an identical schema to applying 0000-0020 all at once');
+  assert.deepEqual(await schemaOf(selectiveClient), await schemaOf(referenceClient), 'applying 0000-0011 then 0012-0021 via this runner must produce an identical schema to applying 0000-0021 all at once');
 
   selectiveClient.close();
   referenceClient.close();

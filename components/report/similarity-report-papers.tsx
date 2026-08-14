@@ -178,45 +178,37 @@ export function OverviewReport({ report }: { report: SimilarityReport }) {
           </p>
         </section>
 
-        {report.matchClassification && (report.matchClassification.selfMatchPercent !== null || report.matchClassification.priorSubmissionPercent !== null) && (
-          <section className="submission-history-block">
-            <h3>Submission history</h3>
-            {report.matchClassification.selfMatchPercent !== null && (
-              <p>
-                <strong>{report.matchClassification.selfMatchPercent}%</strong> of this submission matches your own previous TurnitPlus submission. This self-match is excluded from Archive overlap above.
-              </p>
-            )}
-            {report.matchClassification.priorSubmissionPercent !== null && (
-              <p>
-                <strong>{report.matchClassification.priorSubmissionPercent}%</strong> of this submission closely matches a previous TurnitPlus submission. This is not proof of plagiarism and does not change Archive overlap above.
-              </p>
-            )}
-          </section>
-        )}
-
-        {/* Phase E8C — a separate, more detailed evidence channel from the
-            "Submission history" block above: passage-level matches from
-            lib/user-submission-matching.ts's corpus/shingle matcher, not
-            lib/document-family.ts's family system. Deliberately never
-            combined with Archive overlap or Submission history's own
-            numbers — see lib/report-historical-match.ts's own comment. */}
+        {/* Phase E8G: consolidated historical-submission presentation.
+            Before this phase, Phase D's matchClassification (family-based)
+            and E8C/E8D's historicalSubmissionMatch (corpus/shingle-based,
+            passage-level) each rendered their own visible section, showing
+            the same underlying signal twice with different wording — see
+            this phase's own task description. matchClassification is still
+            computed and attached server-side (app/reports/[id]/page.tsx,
+            GET /api/reports/[id]) — untouched, since this phase is
+            presentation-only — it is simply no longer rendered here.
+            historicalSubmissionMatch is the richer of the two (passage
+            evidence, versioned snapshot) and is the only one shown.
+            Deliberately never combined with Archive overlap's own number —
+            see lib/report-historical-match.ts's own comment. */}
         {report.historicalSubmissionMatch?.status === "UNAVAILABLE" && (
           <section className="historical-match-block">
-            <h3>Prior submission evidence</h3>
+            <h3>Previously submitted content</h3>
             <p>Historical matching unavailable for this report.</p>
           </section>
         )}
         {report.historicalSubmissionMatch?.status === "MATCHED" && (
           <section className="historical-match-block">
-            <h3>Prior submission evidence</h3>
+            <h3>Previously submitted content</h3>
+            <p className="historical-match-archive-note">This historical submission match is not included in Archive overlap.</p>
             {report.historicalSubmissionMatch.matches?.slice(0, 5).map((match, index) => (
               <div className="historical-match-entry" key={match.matchedRepresentationId ?? index}>
                 <p>
                   {match.relationshipType === "SELF" && (
-                    <>This submission overlaps with your own prior submission (<strong>{Math.round(match.containment * 100)}%</strong> containment, {match.matchedWordCount} matched words). This self-match is not evidence of plagiarism and is not counted in Archive overlap above.</>
+                    <><strong>{Math.round(match.containment * 100)}%</strong> of this submission matches content you previously submitted to TurnitPlus ({match.matchedWordCount.toLocaleString()} matched words). This is not evidence of plagiarism.</>
                   )}
                   {match.relationshipType === "PRIOR_SUBMISSION" && (
-                    <>Previously submitted content was found (<strong>{Math.round(match.containment * 100)}%</strong> containment, {match.matchedWordCount} matched words). This is not proof of plagiarism and does not change Archive overlap above.</>
+                    <><strong>{Math.round(match.containment * 100)}%</strong> of this submission matches content previously submitted to TurnitPlus ({match.matchedWordCount.toLocaleString()} matched words). This is not proof of plagiarism.</>
                   )}
                   {match.relationshipType === "UNKNOWN_RELATIONSHIP" && (
                     <>Related content was previously observed among TurnitPlus submissions (<strong>{Math.round(match.containment * 100)}%</strong> containment), but ownership could not be determined for this submission.</>

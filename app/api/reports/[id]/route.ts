@@ -5,6 +5,8 @@ import { getSessionUser } from '../../../../lib/auth-session';
 import { findReportRowForDeviceKey, findReportRowForUser } from '../../../../lib/reports-repo';
 import { classifyReportMatches } from '../../../../lib/report-classification';
 import { getOrComputeHistoricalMatchSnapshot, deleteHistoricalMatchSnapshot } from '../../../../lib/report-historical-match';
+import { runHistoricalMatchShadowEvaluation } from '../../../../lib/e8p-shadow-evaluation';
+import { runAfterResponse } from '../../../../lib/run-after-response';
 import type { SimilarityReport } from '../../../../lib/report-types';
 
 const MAX_DEVICE_KEY_LENGTH = 200;
@@ -66,11 +68,38 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
       // net for anything unexpected (e.g. a database error on the snapshot
       // read/write itself), not the primary error handling.
       try {
-        payload.historicalSubmissionMatch = await getOrComputeHistoricalMatchSnapshot(client, {
+        const historicalSubmissionMatch = await getOrComputeHistoricalMatchSnapshot(client, {
           reportDeviceKey: row.device_key,
           reportId: id,
           accountId,
           rawText: payload.text,
+        });
+        payload.historicalSubmissionMatch = historicalSubmissionMatch;
+        // Phase E8P: production shadow evaluation — measurement only, never
+        // changes historicalSubmissionMatch above (already resolved and
+        // reused as-is, never recomputed). Deferred via runAfterResponse,
+        // same pattern as app/api/reports/route.ts's own corpus-indexing
+        // callback, with its own DB connection since `client` here is closed
+        // in `finally` before after() fires. Best-effort by construction
+        // (lib/e8p-shadow-evaluation.ts never throws), so no try/catch needed
+        // around this call itself. Plain local values (not `payload`) are
+        // captured into the closure to keep it independent of the outer
+        // request's own object.
+        const deviceKeyForShadow = row.device_key;
+        const rawTextForShadow = payload.text;
+        await runAfterResponse(async () => {
+          const deferredClient = await getReportsDbClient();
+          try {
+            await runHistoricalMatchShadowEvaluation(deferredClient, {
+              reportDeviceKey: deviceKeyForShadow,
+              reportId: id,
+              accountId,
+              rawText: rawTextForShadow,
+              productionResult: historicalSubmissionMatch,
+            });
+          } finally {
+            deferredClient.close();
+          }
         });
       } catch (err) {
         console.error('getOrComputeHistoricalMatchSnapshot failed (non-fatal):', err instanceof Error ? err.message : String(err));

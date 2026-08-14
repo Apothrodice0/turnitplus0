@@ -35,6 +35,7 @@ export const TARGET_MIGRATIONS = [
   "0018_source_retrievals.sql",
   "0019_user_submission_corpus.sql",
   "0020_report_historical_match_snapshots.sql",
+  "0021_historical_match_shadow_evaluations.sql",
 ] as const;
 
 export type TargetMigrationFile = (typeof TARGET_MIGRATIONS)[number];
@@ -58,6 +59,7 @@ export const EXPECTED_TABLES_BY_MIGRATION: Record<TargetMigrationFile, string[]>
   "0018_source_retrievals.sql": ["source_retrievals"],
   "0019_user_submission_corpus.sql": ["corpus_document_representations", "corpus_submission_references", "corpus_document_shingles"],
   "0020_report_historical_match_snapshots.sql": ["report_historical_match_snapshots"],
+  "0021_historical_match_shadow_evaluations.sql": ["historical_match_shadow_evaluations"],
 };
 
 export const ALL_TARGET_TABLES: string[] = TARGET_MIGRATIONS.flatMap((m) => EXPECTED_TABLES_BY_MIGRATION[m]);
@@ -93,6 +95,7 @@ export const EXPECTED_MIGRATION_SHA256: Record<TargetMigrationFile, string> = {
   "0018_source_retrievals.sql": "fb322f0a25fb692cfe512c333c85d0f238b11173033937941213cb578d077890",
   "0019_user_submission_corpus.sql": "99bc22489bddc0b16fb359ce84e0d56c4c1ed768fd5f89dc9d946efbf5aa6c8e",
   "0020_report_historical_match_snapshots.sql": "f915027d70eb1a8ffdd267abfa802eef8eddd8c2568eb1d97881df94df506d2e",
+  "0021_historical_match_shadow_evaluations.sql": "757a34bf6ca225a20ac0db9f5673d3f4e51556781b11d184e434bd55b4ab668f",
 };
 
 const DESTRUCTIVE_PATTERN = /\b(DROP\s+TABLE|DROP\s+INDEX|ALTER\s+TABLE\s+\S+\s+DROP|DELETE\s+FROM|TRUNCATE)\b/gi;

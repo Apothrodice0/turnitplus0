@@ -705,6 +705,46 @@ export const report_historical_match_snapshots = sqliteTable(
   ],
 );
 
+// Phase E8P: bounded shadow-evaluation telemetry comparing production's
+// real historical-match result against the proposed E8O policy
+// (lib/e8o-historical-match-policy.ts) — see
+// drizzle/0021_historical_match_shadow_evaluations.sql for the full
+// rationale. Never read by the production matching path; write-only from
+// lib/e8p-shadow-evaluation.ts. No document/passage text, no account id —
+// counts, enums, and timings only. Same "no DB-level FOREIGN KEY" reasoning
+// as report_historical_match_snapshots above.
+export const historical_match_shadow_evaluations = sqliteTable(
+  "historical_match_shadow_evaluations",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    report_device_key: text("report_device_key").notNull(),
+    report_id: text("report_id").notNull(),
+    production_status: text("production_status").notNull(),
+    production_relationship: text("production_relationship"),
+    proposed_status: text("proposed_status").notNull(),
+    proposed_relationship: text("proposed_relationship"),
+    proposed_evidence: text("proposed_evidence"),
+    agreement: text("agreement").notNull(),
+    candidate_count: integer("candidate_count").notNull().default(0),
+    passage_level_evaluated_count: integer("passage_level_evaluated_count").notNull().default(0),
+    freq_index_document_count: integer("freq_index_document_count").notNull().default(0),
+    submitted_word_count: integer("submitted_word_count").notNull().default(0),
+    e8m_runtime_ms: integer("e8m_runtime_ms"),
+    v2_runtime_ms: integer("v2_runtime_ms"),
+    total_runtime_ms: integer("total_runtime_ms").notNull(),
+    policy_version: text("policy_version").notNull(),
+    correspondence_version: text("correspondence_version").notNull(),
+    distinctiveness_version: text("distinctiveness_version").notNull(),
+    status: text("status").notNull(),
+    error_message: text("error_message"),
+    computed_at: text("computed_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    created_at: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("ux_historical_match_shadow_evaluations_report_policy").on(table.report_device_key, table.report_id, table.policy_version),
+  ],
+);
+
 // Export nothing else — Drizzle will consume these definitions for migrations.
 export {};
 

@@ -8,6 +8,8 @@ import { getReportsDbClient } from "@/lib/reports-db";
 import { findReportRowForUser } from "@/lib/reports-repo";
 import { classifyReportMatches } from "@/lib/report-classification";
 import { getOrComputeHistoricalMatchSnapshot } from "@/lib/report-historical-match";
+import { runHistoricalMatchShadowEvaluation } from "@/lib/e8p-shadow-evaluation";
+import { runAfterResponse } from "@/lib/run-after-response";
 import type { ReportMode, SimilarityReport } from "@/lib/report-types";
 import { ReportDetailShell } from "./report-detail-shell";
 
@@ -56,11 +58,37 @@ const loadOwnedReport = cache(async (id: string): Promise<OwnedReportResult> => 
     // GET /api/reports/[id] fetch (requiresClientResolution below), which
     // does its own equivalent enrichment with accountId possibly null.
     try {
-      payload.historicalSubmissionMatch = await getOrComputeHistoricalMatchSnapshot(client, {
+      const historicalSubmissionMatch = await getOrComputeHistoricalMatchSnapshot(client, {
         reportDeviceKey: row.device_key,
         reportId: id,
         accountId: sessionUser.id,
         rawText: payload.text,
+      });
+      payload.historicalSubmissionMatch = historicalSubmissionMatch;
+      // Phase E8P: production shadow evaluation — measurement only, never
+      // changes historicalSubmissionMatch above. Deferred via
+      // runAfterResponse (confirmed safe from Server Component render, not
+      // just Route Handlers — see lib/run-after-response.ts's own header
+      // comment), with its own DB connection since `client` here is closed
+      // in `finally` before after() fires. loadOwnedReport is cache()-wrapped
+      // (line 24), so this naturally fires once per request regardless of
+      // whether generateMetadata or the page body resolves it first.
+      const deviceKeyForShadow = row.device_key;
+      const rawTextForShadow = payload.text;
+      const accountIdForShadow = sessionUser.id;
+      await runAfterResponse(async () => {
+        const deferredClient = await getReportsDbClient();
+        try {
+          await runHistoricalMatchShadowEvaluation(deferredClient, {
+            reportDeviceKey: deviceKeyForShadow,
+            reportId: id,
+            accountId: accountIdForShadow,
+            rawText: rawTextForShadow,
+            productionResult: historicalSubmissionMatch,
+          });
+        } finally {
+          deferredClient.close();
+        }
       });
     } catch (err) {
       console.error("getOrComputeHistoricalMatchSnapshot failed (non-fatal):", err instanceof Error ? err.message : String(err));
