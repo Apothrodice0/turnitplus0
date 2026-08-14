@@ -66,6 +66,23 @@ export async function POST(request: Request) {
     try {
       const sessionUser = await getSessionUser(request, client);
       const userId = sessionUser ? sessionUser.id : null;
+
+      // Phase E8F: (device_key, id) is saved_reports' own composite primary
+      // key — already the stable identifier for "one upload," with no new
+      // UUID needed. app/page.tsx's generateReport() saves every report
+      // twice for the SAME id (once immediately, once again a few seconds
+      // later with Wikipedia-enrichment data merged in — see saveReport/
+      // saveReportRemote there); this checks, before the upsert below runs,
+      // whether this exact (device_key, id) has ever been saved before.
+      // That boundary — not elapsed time, not content equality — is what
+      // the runAfterResponse callback below uses to decide whether this
+      // save may create a document identity / corpus reference at all.
+      const existingReportRow = await client.execute({
+        sql: `SELECT 1 FROM saved_reports WHERE device_key = ? AND id = ?`,
+        args: [deviceKey, id],
+      });
+      const isFirstSaveOfThisReport = existingReportRow.rows.length === 0;
+
       await client.execute({
         sql: `INSERT INTO saved_reports (id, device_key, submission_id, title, report_created_at, word_count, archive_score, score_band, ai_score, ai_tone, payload_json, user_id, updated_at)
               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
@@ -103,7 +120,13 @@ export async function POST(request: Request) {
       const rawText = payload && typeof payload === 'object' && typeof (payload as Record<string, unknown>).text === 'string'
         ? (payload as Record<string, unknown>).text as string
         : null;
-      if (rawText) {
+      // Phase E8F: gated on isFirstSaveOfThisReport (see above) — an update
+      // to an already-saved report (id already existed) must not create a
+      // second document identity or a second corpus submission reference
+      // for what is, from the corpus's perspective, still the same single
+      // upload. A genuinely new upload always gets a new id from the
+      // client, so this never suppresses a real new submission.
+      if (rawText && isFirstSaveOfThisReport) {
         await runAfterResponse(async () => {
           const deferredClient = await getReportsDbClient();
           try {
