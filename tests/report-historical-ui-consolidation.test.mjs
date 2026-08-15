@@ -95,20 +95,51 @@ const PRIOR_SUBMISSION_MATCH = {
 
 test('A: SELF renders exactly one historical section, with SELF-specific wording', () => {
   const html = render(baseReport({ historicalSubmissionMatch: SELF_MATCH }));
-  const headingCount = (html.match(/Previously submitted content/g) || []).length;
-  assert.equal(headingCount, 1, 'exactly one occurrence of the consolidated heading text');
-  assert.match(html, /100%<\/strong> of this submission matches content you previously submitted to TurnitPlus/);
+  // The section-level "Previously submitted content" heading (h3) still
+  // appears once; the SELF sub-heading below is a *different* string
+  // ("... — your own work") that happens to start with the same substring,
+  // so it is checked separately, not folded into this count.
+  const headingCount = (html.match(/<h3>Previously submitted content<\/h3>/g) || []).length;
+  assert.equal(headingCount, 1, 'exactly one occurrence of the consolidated section heading');
+  assert.match(html, /Previously submitted content — your own work/, 'SELF sub-heading must say "your own work"');
+  assert.match(html, /your previous TurnitPlus submission/, 'SELF body must say "your previous TurnitPlus submission"');
+  assert.match(html, /self-match/, 'SELF body must explicitly say "self-match"');
+  assert.match(html, /100%<\/strong> of this submission matches your previous TurnitPlus submission/);
   assert.match(html, /1,463 matched words/);
+  assert.match(html, /not evidence of plagiarism/);
+  assert.doesNotMatch(html, /matches content you previously submitted to TurnitPlus/, 'old SELF wording must be gone');
   assert.doesNotMatch(html, /This submission overlaps with your own prior submission/, 'old SELF wording must be gone');
+  // Must not accidentally pick up PRIOR_SUBMISSION's own wording.
+  assert.doesNotMatch(html, /matches content previously submitted to TurnitPlus/, 'SELF must not render PRIOR_SUBMISSION wording');
+  assert.doesNotMatch(html, /not proof of plagiarism/, 'SELF must not render PRIOR_SUBMISSION\'s disclaimer wording');
 });
 
-test('B: PRIOR_SUBMISSION renders exactly one historical section, with PRIOR_SUBMISSION-specific wording', () => {
+test('A2: SELF dynamic values track containment/matchedWordCount exactly', () => {
+  const half = { ...SELF_MATCH, matches: [{ ...SELF_MATCH.matches[0], containment: 0.526, matchedWordCount: 1033 }] };
+  const html = render(baseReport({ historicalSubmissionMatch: half }));
+  assert.match(html, /<strong>53%<\/strong> of this submission matches your previous TurnitPlus submission/, 'containment must be rounded and rendered dynamically, not hardcoded');
+  assert.match(html, /1,033 matched words/, 'matchedWordCount must be rendered dynamically, not hardcoded');
+});
+
+test('B: PRIOR_SUBMISSION renders exactly one historical section, with PRIOR_SUBMISSION-specific wording, unchanged by the E8R-SELF-UI phase', () => {
   const html = render(baseReport({ historicalSubmissionMatch: PRIOR_SUBMISSION_MATCH }));
   const headingCount = (html.match(/Previously submitted content/g) || []).length;
   assert.equal(headingCount, 1);
   assert.match(html, /100%<\/strong> of this submission matches content previously submitted to TurnitPlus/);
   assert.doesNotMatch(html, /you previously submitted to TurnitPlus/, 'PRIOR_SUBMISSION wording must not claim the viewer submitted it');
   assert.doesNotMatch(html, /Previously submitted content was found/, 'old PRIOR_SUBMISSION wording must be gone');
+  assert.doesNotMatch(html, /your own work/i, 'PRIOR_SUBMISSION must never claim the content is the viewer\'s own work');
+  assert.doesNotMatch(html, /self-match/i, 'PRIOR_SUBMISSION must never be labeled a self-match');
+});
+
+test('B2: UNKNOWN_RELATIONSHIP makes no ownership/authorship claim', () => {
+  const UNKNOWN_MATCH = { ...SELF_MATCH, matches: [{ ...SELF_MATCH.matches[0], relationshipType: 'UNKNOWN_RELATIONSHIP', historicalSubmissionCount: 1 }] };
+  const html = render(baseReport({ historicalSubmissionMatch: UNKNOWN_MATCH }));
+  assert.match(html, /ownership could not be determined/);
+  assert.doesNotMatch(html, /your own work/i, 'UNKNOWN_RELATIONSHIP must never claim the content is the viewer\'s own work');
+  assert.doesNotMatch(html, /self-match/i, 'UNKNOWN_RELATIONSHIP must never be labeled a self-match');
+  assert.doesNotMatch(html, /you previously submitted/i, 'UNKNOWN_RELATIONSHIP must not claim the viewer submitted it');
+  assert.doesNotMatch(html, /matches content previously submitted to TurnitPlus/, 'UNKNOWN_RELATIONSHIP must not render PRIOR_SUBMISSION wording either');
 });
 
 // --- C: NO_HISTORICAL_MATCH / absent -> no section at all ------------------
@@ -186,8 +217,22 @@ test('H (structural): the component source no longer reads matchClassification o
   // partial-match block) that reuses this exact same heading text rather
   // than introducing a second section — see components/report/similarity-report-papers.tsx's
   // own E8P.3 comment and tests/e8p-visibility.test.mjs's own dedicated
-  // "reuses the existing heading" assertion.
-  assert.equal(headingOccurrences, 3, 'exactly the UNAVAILABLE, MATCHED, and E8P.3-experimental branches should reference the one consolidated heading');
+  // "reuses the existing heading" assertion. Phase E8R-SELF-UI added a
+  // fourth: the per-match SELF sub-heading ("... — your own work") is a
+  // deliberately different string that happens to start with the same
+  // substring, so it also matches this permissive regex.
+  assert.equal(headingOccurrences, 4, 'exactly the UNAVAILABLE, MATCHED, E8P.3-experimental, and E8R SELF sub-heading occurrences');
+});
+
+test('K: SELF-specific presentation change does not touch matcher/scoring/E8P/E8O code', () => {
+  const matcherSource = fs.readFileSync(path.join(repo, 'lib/user-submission-matching.ts'), 'utf8');
+  const e8mSource = fs.readFileSync(path.join(repo, 'lib/e8m-robust-correspondence.ts'), 'utf8');
+  const e8lSource = fs.readFileSync(path.join(repo, 'lib/e8l-distinctiveness-v2.ts'), 'utf8');
+  const e8pShadowSource = fs.readFileSync(path.join(repo, 'lib/e8p-shadow-evaluation.ts'), 'utf8');
+  const e8pVisibilitySource = fs.readFileSync(path.join(repo, 'lib/e8p-visibility.ts'), 'utf8');
+  for (const source of [matcherSource, e8mSource, e8lSource, e8pShadowSource, e8pVisibilitySource]) {
+    assert.doesNotMatch(source, /your own work|self-match/i, 'E8R-SELF-UI wording must live only in the report component, never in matcher/E8P source');
+  }
 });
 
 // --- I: receipt PDF unaffected -----------------------------------------------
@@ -198,6 +243,22 @@ test('I: lib/receipt-pdf.ts is untouched by this phase — no historical-match f
 });
 
 // --- J: responsive-safe structure (best-effort — no jsdom/viewport test infrastructure exists in this repo) ---
+
+test('I2: score/archiveScore/aiScore are unaffected by the SELF wording change, and the component never reads aiScore at all', () => {
+  const withoutMatch = render(baseReport({ score: 12, archiveScore: 9 }));
+  const withSelfMatch = render(baseReport({ score: 12, archiveScore: 9, historicalSubmissionMatch: SELF_MATCH }));
+  assert.match(withoutMatch, /<span>9%<\/span> Archive overlap/);
+  assert.match(withSelfMatch, /<span>9%<\/span> Archive overlap/);
+  const source = fs.readFileSync(path.join(repo, 'components/report/similarity-report-papers.tsx'), 'utf8');
+  assert.doesNotMatch(source, /\.aiScore\b/, 'OverviewReport must never read aiScore — AI scoring is rendered by a separate component, untouched by this phase');
+});
+
+test('I3: non-historical sections of the report render unchanged alongside a SELF match', () => {
+  const html = render(baseReport({ historicalSubmissionMatch: SELF_MATCH }));
+  assert.match(html, /Filtered from the Report/);
+  assert.match(html, /Match Groups/);
+  assert.match(html, /Archive overlap/);
+});
 
 test('J: the consolidated section uses plain semantic markup with no fixed-width inline styling that would break on mobile', () => {
   const html = render(baseReport({ historicalSubmissionMatch: SELF_MATCH }));
