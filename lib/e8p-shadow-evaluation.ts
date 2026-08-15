@@ -93,6 +93,30 @@ import type { ReportHistoricalSubmissionMatch } from "./report-types";
  * unchanged from classifyHistoricalMatch) already excludes from the
  * partial-match path — so omitting it here costs no real measurement
  * coverage.
+ *
+ * Phase E8P.2 fix: a confirmed production race showed a `NO_HISTORICAL_MATCH`
+ * + zero-candidate row can go permanently stale — it was cached the moment
+ * this report was first viewed, before some OTHER account's matching
+ * document had been indexed into the corpus yet, and this module's original
+ * "any row exists -> skip" idempotency check then reused that empty result
+ * forever, even after the corpus grew to contain a real candidate. This is
+ * the same class of problem lib/report-historical-match.ts's own E8E fix
+ * already solved for the real production snapshot (see that file's header
+ * comment) — but the fix here is deliberately NARROWER: only a
+ * `NO_HISTORICAL_MATCH` row whose `candidate_count` is exactly 0 is treated
+ * as stale and recomputed (see shouldReuseExistingShadowRow below). A row
+ * where a candidate WAS found and evaluated (candidate_count > 0) but still
+ * resolved to `NO_HISTORICAL_MATCH` is NOT recomputed just because the
+ * corpus grew further — that candidate's own evaluation is not invalidated
+ * by some unrelated OTHER representation appearing later. `MATCHED` and
+ * `FAILED` rows are unaffected by this fix, matching their existing
+ * (already-final) caching semantics exactly as before.
+ *
+ * No schema change was needed: candidate_count, production_status, and
+ * status already existed on this table, and computed_at already had UPDATE
+ * semantics available — see the upsertTelemetryRow's ON CONFLICT clause
+ * below, the same upsert pattern lib/report-historical-match.ts already
+ * uses for report_historical_match_snapshots.
  */
 
 const SHADOW_POLICY_VERSION = PROPOSED_ACCEPTANCE_POLICY_VERSION;
@@ -124,22 +148,73 @@ function truncatedErrorMessage(error: unknown): string {
   return message.slice(0, 500);
 }
 
-async function alreadyEvaluated(client: Client, reportDeviceKey: string, reportId: string): Promise<boolean> {
+type ExistingShadowRow = { production_status: string; candidate_count: number; status: string };
+
+async function existingShadowRow(client: Client, reportDeviceKey: string, reportId: string): Promise<ExistingShadowRow | null> {
   const result = await client.execute({
-    sql: `SELECT 1 FROM historical_match_shadow_evaluations WHERE report_device_key = ? AND report_id = ? AND policy_version = ?`,
+    sql: `SELECT production_status, candidate_count, status FROM historical_match_shadow_evaluations
+          WHERE report_device_key = ? AND report_id = ? AND policy_version = ?`,
     args: [reportDeviceKey, reportId, SHADOW_POLICY_VERSION],
   });
-  return result.rows.length > 0;
+  const row = result.rows[0] as unknown as ExistingShadowRow | undefined;
+  return row ?? null;
 }
 
-async function insertTelemetryRow(client: Client, row: TelemetryRow): Promise<void> {
+/**
+ * The exact, narrow reuse/recompute rule (Phase E8P.2 — see this file's own
+ * header comment for the production race that motivated it). Deliberately
+ * NOT elapsed-time-based, NOT a periodic recompute, and NOT keyed on
+ * anything but the row's own already-recorded, already-bounded fields:
+ *   - FAILED stays cached forever, unchanged from before this fix (same
+ *     "do not hammer a permanently-failing computation on every view"
+ *     reasoning lib/report-historical-match.ts already applies to its own
+ *     FAILED snapshots).
+ *   - MATCHED stays cached forever — steps 1-2 of classifyHistoricalMatch
+ *     are defined to reproduce production's own threshold exactly, so
+ *     nothing about a growing corpus can change that outcome.
+ *   - NO_HISTORICAL_MATCH with candidate_count > 0 stays cached — a real
+ *     candidate was found and genuinely evaluated; a different, unrelated
+ *     representation appearing later in the corpus does not invalidate that
+ *     evaluation.
+ *   - NO_HISTORICAL_MATCH with candidate_count === 0 is the ONLY case
+ *     treated as stale: zero candidates were found because none existed in
+ *     the corpus AT THAT MOMENT, and that is exactly the condition new
+ *     corpus content can change.
+ */
+function shouldReuseExistingShadowRow(row: ExistingShadowRow): boolean {
+  if (row.status === "FAILED") return true;
+  if (row.production_status === "MATCHED") return true;
+  if (Number(row.candidate_count) > 0) return true;
+  return false;
+}
+
+async function upsertTelemetryRow(client: Client, row: TelemetryRow): Promise<void> {
   await client.execute({
-    sql: `INSERT OR IGNORE INTO historical_match_shadow_evaluations
+    sql: `INSERT INTO historical_match_shadow_evaluations
           (report_device_key, report_id, production_status, production_relationship, proposed_status,
            proposed_relationship, proposed_evidence, agreement, candidate_count, passage_level_evaluated_count,
            freq_index_document_count, submitted_word_count, e8m_runtime_ms, v2_runtime_ms, total_runtime_ms,
            policy_version, correspondence_version, distinctiveness_version, status, error_message, computed_at, created_at)
-          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
+          ON CONFLICT(report_device_key, report_id, policy_version) DO UPDATE SET
+            production_status = excluded.production_status,
+            production_relationship = excluded.production_relationship,
+            proposed_status = excluded.proposed_status,
+            proposed_relationship = excluded.proposed_relationship,
+            proposed_evidence = excluded.proposed_evidence,
+            agreement = excluded.agreement,
+            candidate_count = excluded.candidate_count,
+            passage_level_evaluated_count = excluded.passage_level_evaluated_count,
+            freq_index_document_count = excluded.freq_index_document_count,
+            submitted_word_count = excluded.submitted_word_count,
+            e8m_runtime_ms = excluded.e8m_runtime_ms,
+            v2_runtime_ms = excluded.v2_runtime_ms,
+            total_runtime_ms = excluded.total_runtime_ms,
+            correspondence_version = excluded.correspondence_version,
+            distinctiveness_version = excluded.distinctiveness_version,
+            status = excluded.status,
+            error_message = excluded.error_message,
+            computed_at = excluded.computed_at`,
     args: [
       row.reportDeviceKey,
       row.reportId,
@@ -191,7 +266,8 @@ export async function runHistoricalMatchShadowEvaluation(
   if (params.productionResult.status === "UNAVAILABLE") return; // nothing to compare against yet
 
   try {
-    if (await alreadyEvaluated(client, params.reportDeviceKey, params.reportId)) return;
+    const existing = await existingShadowRow(client, params.reportDeviceKey, params.reportId);
+    if (existing && shouldReuseExistingShadowRow(existing)) return;
 
     if (params.productionResult.status === "MATCHED") {
       // Steps 1-2 of classifyHistoricalMatch are DEFINED to reproduce
@@ -201,7 +277,7 @@ export async function runHistoricalMatchShadowEvaluation(
       // production's own priority-sorted primary match (see
       // lib/user-submission-matching.ts's compareMatches).
       const primary = params.productionResult.matches?.[0];
-      await insertTelemetryRow(client, {
+      await upsertTelemetryRow(client, {
         reportDeviceKey: params.reportDeviceKey,
         reportId: params.reportId,
         productionStatus: "MATCHED",
@@ -336,7 +412,7 @@ export async function runHistoricalMatchShadowEvaluation(
           ? "AGREE"
           : "DISAGREE_OTHER";
 
-    await insertTelemetryRow(client, {
+    await upsertTelemetryRow(client, {
       reportDeviceKey: params.reportDeviceKey,
       reportId: params.reportId,
       productionStatus: "NO_HISTORICAL_MATCH",
@@ -358,7 +434,7 @@ export async function runHistoricalMatchShadowEvaluation(
   } catch (error) {
     console.error(`historical match shadow evaluation failed (non-fatal) for report=${params.reportId} (${Date.now() - startedAt}ms):`, truncatedErrorMessage(error));
     try {
-      await insertTelemetryRow(client, {
+      await upsertTelemetryRow(client, {
         reportDeviceKey: params.reportDeviceKey,
         reportId: params.reportId,
         productionStatus: params.productionResult.status === "MATCHED" ? "MATCHED" : "NO_HISTORICAL_MATCH",
