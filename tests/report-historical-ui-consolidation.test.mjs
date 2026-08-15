@@ -267,3 +267,170 @@ test('J: the consolidated section uses plain semantic markup with no fixed-width
   assert.doesNotMatch(sectionMatch[0], /style="[^"]*width:\s*\d+px/, 'no fixed pixel width should be hardcoded into the historical section markup');
   assert.match(sectionMatch[0], /<h3>/, 'heading hierarchy (h3, matching this paper\'s other sections) must be preserved');
 });
+
+// =============================================================================
+// Phase E8R-SELF-UI.2: consolidate multiple SELF matches into one block
+// (one heading, one entry per SELF match, one disclaimer) instead of
+// repeating the full heading/disclaimer per match. Letters below (L-U)
+// correspond to this phase's own task letters (A-J) — offset to avoid
+// colliding with the E8R-SELF-UI.1 tests already above.
+// =============================================================================
+
+function selfMatch(overrides = {}) {
+  return { ...SELF_MATCH.matches[0], ...overrides };
+}
+
+const TWO_SELF_MATCHES = {
+  ...SELF_MATCH,
+  matches: [
+    selfMatch({ matchedRepresentationId: 'rep-self-1', containment: 1, matchedWordCount: 1190, passages: [{ submittedText: 'self match one fixture passage', submittedWordStart: 0, submittedWordEnd: 5, matchedWordCount: 5 }] }),
+    selfMatch({ matchedRepresentationId: 'rep-self-2', containment: 1, matchedWordCount: 966, passages: [{ submittedText: 'self match two fixture passage', submittedWordStart: 20, submittedWordEnd: 25, matchedWordCount: 5 }] }),
+  ],
+};
+
+const THREE_SELF_MATCHES = {
+  ...SELF_MATCH,
+  matches: [
+    selfMatch({ matchedRepresentationId: 'rep-self-1', containment: 1, matchedWordCount: 1190 }),
+    selfMatch({ matchedRepresentationId: 'rep-self-2', containment: 0.9958, matchedWordCount: 966 }),
+    selfMatch({ matchedRepresentationId: 'rep-self-3', containment: 0.75, matchedWordCount: 500 }),
+  ],
+};
+
+// Count only genuine SELF sub-heading occurrences (not the shared section h3).
+function selfHeadingCount(html) {
+  return (html.match(/Previously submitted content — your own work/g) || []).length;
+}
+function selfDisclaimerCount(html) {
+  const singular = (html.match(/This is a self-match and is not evidence of plagiarism\./g) || []).length;
+  const plural = (html.match(/These are self-matches and are not evidence of plagiarism\./g) || []).length;
+  return singular + plural;
+}
+function selfEntryCount(html) {
+  return (html.match(/class="historical-match-self-item"/g) || []).length;
+}
+
+test('L (task A): one SELF match -> one SELF heading, one entry, one (singular) disclaimer', () => {
+  const html = render(baseReport({ historicalSubmissionMatch: SELF_MATCH }));
+  assert.equal(selfHeadingCount(html), 1);
+  assert.equal(selfEntryCount(html), 1);
+  assert.equal(selfDisclaimerCount(html), 1);
+  assert.match(html, /This is a self-match and is not evidence of plagiarism\./, 'a single SELF match keeps the singular disclaimer');
+  assert.doesNotMatch(html, /These are self-matches/, 'a single SELF match must not use the plural disclaimer');
+});
+
+test('M (task B): two SELF matches -> one heading, two entries, one (plural) disclaimer', () => {
+  const html = render(baseReport({ historicalSubmissionMatch: TWO_SELF_MATCHES }));
+  assert.equal(selfHeadingCount(html), 1, 'the SELF heading must be emitted exactly once, not once per match');
+  assert.equal(selfEntryCount(html), 2, 'each SELF match gets its own entry underneath the shared heading');
+  assert.equal(selfDisclaimerCount(html), 1, 'the disclaimer must be emitted exactly once, after all SELF entries');
+  assert.match(html, /These are self-matches and are not evidence of plagiarism\./);
+  assert.doesNotMatch(html, /This is a self-match and is not evidence of plagiarism\./, 'two matches must use the plural disclaimer, not the singular one');
+  assert.match(html, /<strong>100%<\/strong> of this submission matches your previous TurnitPlus submission \(1,190 matched words\)/);
+  assert.match(html, /<strong>100%<\/strong> of this submission matches another previous TurnitPlus submission \(966 matched words\)/);
+});
+
+test('N (task C): three+ SELF matches -> one heading, all entries preserved in order, one disclaimer', () => {
+  const html = render(baseReport({ historicalSubmissionMatch: THREE_SELF_MATCHES }));
+  assert.equal(selfHeadingCount(html), 1);
+  assert.equal(selfEntryCount(html), 3);
+  assert.equal(selfDisclaimerCount(html), 1);
+  const firstIdx = html.indexOf('1,190 matched words');
+  const secondIdx = html.indexOf('966 matched words');
+  const thirdIdx = html.indexOf('500 matched words');
+  assert.ok(firstIdx > -1 && secondIdx > -1 && thirdIdx > -1, 'all three matched-word counts must appear');
+  assert.ok(firstIdx < secondIdx && secondIdx < thirdIdx, 'entries must render in their original array order');
+  assert.match(html, /<strong>100%<\/strong> of this submission matches your previous TurnitPlus submission \(1,190 matched words\)/);
+  assert.match(html, /<strong>100%<\/strong> of this submission matches another previous TurnitPlus submission \(966 matched words\)/);
+  assert.match(html, /<strong>75%<\/strong> of this submission matches another previous TurnitPlus submission \(500 matched words\)/);
+});
+
+test('O (task D): mixed SELF + PRIOR_SUBMISSION -> one SELF block, PRIOR_SUBMISSION rendering unchanged', () => {
+  const mixed = { ...SELF_MATCH, matches: [selfMatch({ matchedRepresentationId: 'rep-self-1' }), { ...PRIOR_SUBMISSION_MATCH.matches[0], matchedRepresentationId: 'rep-prior-1' }] };
+  const html = render(baseReport({ historicalSubmissionMatch: mixed }));
+  assert.equal(selfHeadingCount(html), 1);
+  assert.equal(selfEntryCount(html), 1);
+  assert.equal(selfDisclaimerCount(html), 1);
+  assert.match(html, /100%<\/strong> of this submission matches content previously submitted to TurnitPlus/, 'PRIOR_SUBMISSION entry renders exactly as before');
+  assert.match(html, /not proof of plagiarism/);
+});
+
+test('P (task E): SELF + UNKNOWN_RELATIONSHIP -> one SELF block, UNKNOWN behavior unchanged', () => {
+  const mixed = { ...SELF_MATCH, matches: [selfMatch({ matchedRepresentationId: 'rep-self-1' }), { ...SELF_MATCH.matches[0], relationshipType: 'UNKNOWN_RELATIONSHIP', matchedRepresentationId: 'rep-unknown-1', historicalSubmissionCount: 1 }] };
+  const html = render(baseReport({ historicalSubmissionMatch: mixed }));
+  assert.equal(selfHeadingCount(html), 1);
+  assert.equal(selfEntryCount(html), 1);
+  assert.equal(selfDisclaimerCount(html), 1);
+  assert.match(html, /ownership could not be determined/);
+  assert.doesNotMatch(html, /UNKNOWN_RELATIONSHIP.*your own work|your own work.*UNKNOWN_RELATIONSHIP/is);
+});
+
+test('Q (task F): no SELF matches -> no SELF block at all', () => {
+  const html = render(baseReport({ historicalSubmissionMatch: PRIOR_SUBMISSION_MATCH }));
+  assert.equal(selfHeadingCount(html), 0);
+  assert.equal(selfEntryCount(html), 0);
+  assert.equal(selfDisclaimerCount(html), 0);
+  assert.doesNotMatch(html, /your own work/i);
+});
+
+test('R (task G): dynamic percentages/word counts are correct across multiple SELF entries, not hardcoded', () => {
+  const custom = {
+    ...SELF_MATCH,
+    matches: [
+      selfMatch({ matchedRepresentationId: 'rep-self-1', containment: 0.526, matchedWordCount: 1033 }),
+      selfMatch({ matchedRepresentationId: 'rep-self-2', containment: 0.333, matchedWordCount: 42 }),
+    ],
+  };
+  const html = render(baseReport({ historicalSubmissionMatch: custom }));
+  assert.match(html, /<strong>53%<\/strong> of this submission matches your previous TurnitPlus submission \(1,033 matched words\)/);
+  assert.match(html, /<strong>33%<\/strong> of this submission matches another previous TurnitPlus submission \(42 matched words\)/);
+});
+
+test('S (task H): no score/archiveScore/aiScore changes from multi-SELF consolidation', () => {
+  const withoutMatch = render(baseReport({ score: 12, archiveScore: 9 }));
+  const withMultiSelf = render(baseReport({ score: 12, archiveScore: 9, historicalSubmissionMatch: THREE_SELF_MATCHES }));
+  assert.match(withoutMatch, /<span>9%<\/span> Archive overlap/);
+  assert.match(withMultiSelf, /<span>9%<\/span> Archive overlap/);
+});
+
+test('T (task I): the existing E8P.3 experimental partial-match UI is unaffected by the SELF-consolidation change', () => {
+  const experimental = {
+    status: 'HISTORICAL_PARTIAL_MATCH',
+    relationship: 'SELF',
+    evidence: 'MULTIPLE_DISTINCTIVE_PASSAGES',
+    matchedWordCount: 320,
+    containment: 0.4,
+    passageCount: 2,
+    passages: [{ submittedText: 'experimental fixture passage', submittedWordStart: 0, submittedWordEnd: 4, matchedWordCount: 4 }],
+    disclaimer: 'This is historical submission evidence only, not a plagiarism verdict.',
+  };
+  const html = render(baseReport({
+    historicalSubmissionMatch: { status: 'NO_HISTORICAL_MATCH', computedAt: new Date().toISOString(), matcherVersion: 'v', fingerprintVersion: 'v', canonicalizationVersion: 'v' },
+    experimentalHistoricalMatch: experimental,
+  }));
+  assert.match(html, /Historical submission evidence \(experimental\)/);
+  assert.match(html, /You previously submitted this content\./);
+  assert.match(html, /320 matched words across 2 passages/);
+  // The E8R-SELF-UI.2 consolidated block/heading must never appear here —
+  // this is a completely separate code path (renderHistoricalMatchEntries
+  // is never called when historicalSubmissionMatch.matches is empty).
+  assert.equal(selfHeadingCount(html), 0);
+  assert.equal(selfEntryCount(html), 0);
+});
+
+test('U (task J, structural): matcher/scoring/E8P/E8O source is untouched by the multi-SELF consolidation', () => {
+  const matcherSource = fs.readFileSync(path.join(repo, 'lib/user-submission-matching.ts'), 'utf8');
+  const e8mSource = fs.readFileSync(path.join(repo, 'lib/e8m-robust-correspondence.ts'), 'utf8');
+  const e8lSource = fs.readFileSync(path.join(repo, 'lib/e8l-distinctiveness-v2.ts'), 'utf8');
+  const e8pShadowSource = fs.readFileSync(path.join(repo, 'lib/e8p-shadow-evaluation.ts'), 'utf8');
+  const e8pVisibilitySource = fs.readFileSync(path.join(repo, 'lib/e8p-visibility.ts'), 'utf8');
+  const e8oSource = fs.readFileSync(path.join(repo, 'lib/e8o-historical-match-policy.ts'), 'utf8');
+  const snapshotSource = fs.readFileSync(path.join(repo, 'lib/report-historical-match.ts'), 'utf8');
+  for (const source of [matcherSource, e8mSource, e8lSource, e8pShadowSource, e8pVisibilitySource, e8oSource, snapshotSource]) {
+    assert.doesNotMatch(source, /your own work|self-match|another previous TurnitPlus submission/i, 'E8R-SELF-UI.2 grouping/wording must live only in the report component');
+  }
+  // The grouping helper itself must exist only in the UI component, never
+  // duplicated into a matching/scoring module.
+  const uiSource = fs.readFileSync(path.join(repo, 'components/report/similarity-report-papers.tsx'), 'utf8');
+  assert.match(uiSource, /function renderHistoricalMatchEntries/, 'the consolidation helper must exist in the report component');
+});

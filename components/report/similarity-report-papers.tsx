@@ -17,10 +17,80 @@ import {
   archiveScopeCount,
   sourceMatchedWordCount,
   type HighlightRange,
+  type HistoricalSubmissionMatchEntry,
   type SimilarityReport,
   type SourceType,
 } from "@/lib/report-types";
 import { ReportPageFooter, ReportPageHeader } from "./report-page-chrome";
+
+/**
+ * Phase E8R-SELF-UI.2: groups every SELF-relationship entry in matches[]
+ * into ONE consolidated block (one heading, one entry per match, one
+ * disclaimer) instead of repeating the full heading/disclaimer per match —
+ * see this phase's own task description for the UX problem (a report with
+ * several prior SELF submissions rendered the same block over and over).
+ * PRIOR_SUBMISSION and UNKNOWN_RELATIONSHIP entries are untouched — this
+ * function only ever changes how SELF entries are grouped, never their
+ * content, and never touches matcher/scoring/threshold code (none of that
+ * lives in this file to begin with).
+ *
+ * Renders each non-SELF match in its original array position, and inserts
+ * the one consolidated SELF block at the position of the FIRST SELF match
+ * encountered — so relative ordering against PRIOR_SUBMISSION/UNKNOWN_RELATIONSHIP
+ * entries is preserved exactly as before, only the SELF entries themselves
+ * are pulled together. Subsequent SELF matches are folded into that same
+ * block rather than re-rendered at their own array position.
+ */
+function renderHistoricalMatchEntries(matches: HistoricalSubmissionMatchEntry[]): ReactNode[] {
+  const selfMatches = matches.filter((match) => match.relationshipType === "SELF");
+  let selfBlockRendered = false;
+
+  return matches.map((match, index) => {
+    if (match.relationshipType === "SELF") {
+      if (selfBlockRendered) return null;
+      selfBlockRendered = true;
+      return (
+        <div className="historical-match-entry historical-match-entry-self" key="self-consolidated">
+          <p className="historical-match-self-heading"><strong>Previously submitted content — your own work</strong></p>
+          {selfMatches.map((selfMatch, selfIndex) => (
+            <div className="historical-match-self-item" key={selfMatch.matchedRepresentationId ?? `self-${selfIndex}`}>
+              <p>
+                <strong>{Math.round(selfMatch.containment * 100)}%</strong> of this submission matches {selfIndex === 0 ? "your previous TurnitPlus submission" : "another previous TurnitPlus submission"} ({selfMatch.matchedWordCount.toLocaleString()} matched words).
+              </p>
+              {selfMatch.passages.length > 0 && (
+                <ul className="historical-match-passages">
+                  {selfMatch.passages.slice(0, 3).map((passage, passageIndex) => (
+                    <li key={passageIndex}>&ldquo;{passage.submittedText}&rdquo;</li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          ))}
+          <p>{selfMatches.length > 1 ? "These are self-matches and are not evidence of plagiarism." : "This is a self-match and is not evidence of plagiarism."}</p>
+        </div>
+      );
+    }
+    return (
+      <div className="historical-match-entry" key={match.matchedRepresentationId ?? index}>
+        <p>
+          {match.relationshipType === "PRIOR_SUBMISSION" && (
+            <><strong>{Math.round(match.containment * 100)}%</strong> of this submission matches content previously submitted to TurnitPlus ({match.matchedWordCount.toLocaleString()} matched words). This is not proof of plagiarism.</>
+          )}
+          {match.relationshipType === "UNKNOWN_RELATIONSHIP" && (
+            <>Related content was previously observed among TurnitPlus submissions (<strong>{Math.round(match.containment * 100)}%</strong> containment), but ownership could not be determined for this submission.</>
+          )}
+        </p>
+        {match.passages.length > 0 && (
+          <ul className="historical-match-passages">
+            {match.passages.slice(0, 3).map((passage, passageIndex) => (
+              <li key={passageIndex}>&ldquo;{passage.submittedText}&rdquo;</li>
+            ))}
+          </ul>
+        )}
+      </div>
+    );
+  });
+}
 
 /**
  * Phase E8P.3: deliberately a small, local, zero-dependency copy of
@@ -214,41 +284,7 @@ export function OverviewReport({ report }: { report: SimilarityReport }) {
           <section className="historical-match-block">
             <h3>Previously submitted content</h3>
             <p className="historical-match-archive-note">This historical submission match is not included in Archive overlap.</p>
-            {report.historicalSubmissionMatch.matches?.slice(0, 5).map((match, index) => (
-              <div className="historical-match-entry" key={match.matchedRepresentationId ?? index}>
-                {/* Phase E8R-SELF-UI: SELF gets its own heading/body/disclaimer
-                    structure so a viewer can't misread "100%" as a plagiarism
-                    verdict against someone else's work — see this phase's own
-                    task description. Rendered per-match (not as the shared
-                    section <h3> above) because matches[] can in principle mix
-                    relationship types across candidates; PRIOR_SUBMISSION and
-                    UNKNOWN_RELATIONSHIP keep their exact pre-existing markup
-                    and wording, untouched. */}
-                {match.relationshipType === "SELF" ? (
-                  <>
-                    <p className="historical-match-self-heading"><strong>Previously submitted content — your own work</strong></p>
-                    <p><strong>{Math.round(match.containment * 100)}%</strong> of this submission matches your previous TurnitPlus submission ({match.matchedWordCount.toLocaleString()} matched words).</p>
-                    <p>This is a self-match and is not evidence of plagiarism.</p>
-                  </>
-                ) : (
-                  <p>
-                    {match.relationshipType === "PRIOR_SUBMISSION" && (
-                      <><strong>{Math.round(match.containment * 100)}%</strong> of this submission matches content previously submitted to TurnitPlus ({match.matchedWordCount.toLocaleString()} matched words). This is not proof of plagiarism.</>
-                    )}
-                    {match.relationshipType === "UNKNOWN_RELATIONSHIP" && (
-                      <>Related content was previously observed among TurnitPlus submissions (<strong>{Math.round(match.containment * 100)}%</strong> containment), but ownership could not be determined for this submission.</>
-                    )}
-                  </p>
-                )}
-                {match.passages.length > 0 && (
-                  <ul className="historical-match-passages">
-                    {match.passages.slice(0, 3).map((passage, passageIndex) => (
-                      <li key={passageIndex}>&ldquo;{passage.submittedText}&rdquo;</li>
-                    ))}
-                  </ul>
-                )}
-              </div>
-            ))}
+            {renderHistoricalMatchEntries(report.historicalSubmissionMatch.matches?.slice(0, 5) ?? [])}
           </section>
         )}
 
