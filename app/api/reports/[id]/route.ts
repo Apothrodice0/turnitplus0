@@ -6,6 +6,7 @@ import { findReportRowForDeviceKey, findReportRowForUser } from '../../../../lib
 import { classifyReportMatches } from '../../../../lib/report-classification';
 import { getOrComputeHistoricalMatchSnapshot, deleteHistoricalMatchSnapshot } from '../../../../lib/report-historical-match';
 import { runHistoricalMatchShadowEvaluation } from '../../../../lib/e8p-shadow-evaluation';
+import { getExperimentalHistoricalMatchForDisplay } from '../../../../lib/e8p-visibility';
 import { runAfterResponse } from '../../../../lib/run-after-response';
 import type { SimilarityReport } from '../../../../lib/report-types';
 
@@ -75,6 +76,19 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
           rawText: payload.text,
         });
         payload.historicalSubmissionMatch = historicalSubmissionMatch;
+        // Phase E8P.3: the experimental, allowlist-gated display value — see
+        // lib/e8p-visibility.ts's own header comment. Synchronous (unlike the
+        // shadow telemetry write below) because it must be part of THIS
+        // response to render at all; isE8pVisibilityAllowlisted() is checked
+        // first inside that function and returns instantly for every
+        // non-allowlisted account, so this is a no-op for ordinary traffic.
+        // Never throws past this function; best-effort exactly like
+        // historicalSubmissionMatch's own read-time enrichment above.
+        payload.experimentalHistoricalMatch = await getExperimentalHistoricalMatchForDisplay(client, {
+          accountId,
+          rawText: payload.text,
+          productionResult: historicalSubmissionMatch,
+        }) ?? undefined;
         // Phase E8P: production shadow evaluation — measurement only, never
         // changes historicalSubmissionMatch above (already resolved and
         // reused as-is, never recomputed). Deferred via runAfterResponse,

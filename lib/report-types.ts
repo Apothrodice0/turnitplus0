@@ -135,6 +135,33 @@ export type ReportHistoricalSubmissionMatch = {
   canonicalizationVersion: string;
 };
 
+/**
+ * Phase E8P.3: the FIRST user-visible surface for the proposed experimental
+ * historical-match policy — deliberately a SEPARATE field from
+ * ReportHistoricalSubmissionMatch above, never merged into or read as a
+ * substitute for it. Only ever constructed by lib/e8p-visibility.ts, only
+ * ever for an explicitly allowlisted internal/test account (see that file's
+ * own header comment), and only ever when production's own
+ * historicalSubmissionMatch.status is NO_HISTORICAL_MATCH — this never
+ * appears alongside, competes with, or overrides a real production match.
+ * status is always the literal "HISTORICAL_PARTIAL_MATCH" (the one new case
+ * production can't see) — nothing else ever populates this field, so its
+ * mere presence is itself the display condition. passages are bounded
+ * excerpts of the CURRENT report's own text only, same privacy property as
+ * HistoricalMatchPassage above. disclaimer is reused verbatim from its own
+ * source, not re-authored here — see lib/e8p-visibility.ts.
+ */
+export type ExperimentalHistoricalMatchDisplay = {
+  status: "HISTORICAL_PARTIAL_MATCH";
+  relationship: "SELF" | "PRIOR_SUBMISSION" | "UNKNOWN_RELATIONSHIP";
+  evidence: string;
+  matchedWordCount: number;
+  containment: number;
+  passageCount: number;
+  passages: HistoricalMatchPassage[];
+  disclaimer: string;
+};
+
 export type SimilarityReport = {
   version: 11;
   id: number;
@@ -149,6 +176,8 @@ export type SimilarityReport = {
   matchClassification?: ReportMatchClassification;
   /** Phase E8C enrichment — see ReportHistoricalSubmissionMatch's own comment. Absent on a freshly-analyzed, not-yet-saved report (the snapshot only exists once a saved_reports row does), or if computing it failed before even producing an UNAVAILABLE snapshot. */
   historicalSubmissionMatch?: ReportHistoricalSubmissionMatch;
+  /** Phase E8P.3 enrichment — see ExperimentalHistoricalMatchDisplay's own comment. Absent for every account outside the explicit allowlist, and absent whenever historicalSubmissionMatch already has a real production match. */
+  experimentalHistoricalMatch?: ExperimentalHistoricalMatchDisplay;
   aiScore?: number | null;
   aiAnalysis?: AiAnalysis;
   webCheck?: WebCheckResult;

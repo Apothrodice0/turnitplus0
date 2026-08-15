@@ -22,6 +22,19 @@ import {
 } from "@/lib/report-types";
 import { ReportPageFooter, ReportPageHeader } from "./report-page-chrome";
 
+/**
+ * Phase E8P.3: deliberately a small, local, zero-dependency copy of
+ * lib/e8p-visibility.ts's own experimentalRelationshipCopy wording (kept
+ * textually identical there and here) rather than an import — importing
+ * that module here would pull the whole E8M/V2/candidate-search pipeline
+ * into this UI component's dependency graph for the sake of three strings.
+ */
+function experimentalRelationshipLabel(relationship: "SELF" | "PRIOR_SUBMISSION" | "UNKNOWN_RELATIONSHIP"): string {
+  if (relationship === "SELF") return "You previously submitted this content.";
+  if (relationship === "PRIOR_SUBMISSION") return "This content was previously submitted to TurnitPlus.";
+  return "Related content was previously submitted to TurnitPlus, but ownership could not be determined for this submission.";
+}
+
 function sourceIcon(type: SourceType) {
   if (type === "Internet") return <Globe2 aria-hidden="true" />;
   if (type === "Publication") return <BookOpen aria-hidden="true" />;
@@ -223,6 +236,36 @@ export function OverviewReport({ report }: { report: SimilarityReport }) {
                 )}
               </div>
             ))}
+          </section>
+        )}
+
+        {/* Phase E8P.3: the experimental E8O partial-match result — a
+            SEPARATE field from historicalSubmissionMatch above (see
+            lib/report-types.ts's own comment), only ever populated
+            server-side for an explicitly allowlisted internal/test account
+            (lib/e8p-visibility.ts) and only ever when historicalSubmissionMatch
+            itself is NOT already MATCHED, so this never appears alongside or
+            competes with a real production result. Reuses the existing
+            "Previously submitted content" heading/section — not a second
+            historical section — with its own clearly-labeled sub-block. */}
+        {!report.historicalSubmissionMatch?.matches?.length && report.experimentalHistoricalMatch && (
+          <section className="historical-match-block historical-match-block-experimental">
+            <h3>Previously submitted content</h3>
+            <div className="historical-match-entry historical-match-entry-experimental">
+              <p className="historical-match-experimental-label">Historical submission evidence (experimental)</p>
+              <p>
+                {experimentalRelationshipLabel(report.experimentalHistoricalMatch.relationship)}{" "}
+                ({report.experimentalHistoricalMatch.matchedWordCount.toLocaleString()} matched words across {report.experimentalHistoricalMatch.passageCount} passage{report.experimentalHistoricalMatch.passageCount === 1 ? "" : "s"}).
+              </p>
+              {report.experimentalHistoricalMatch.passages.length > 0 && (
+                <ul className="historical-match-passages">
+                  {report.experimentalHistoricalMatch.passages.slice(0, 3).map((passage, passageIndex) => (
+                    <li key={passageIndex}>&ldquo;{passage.submittedText}&rdquo;</li>
+                  ))}
+                </ul>
+              )}
+              <p className="historical-match-archive-note">{report.experimentalHistoricalMatch.disclaimer} This is not proof of plagiarism.</p>
+            </div>
           </section>
         )}
 

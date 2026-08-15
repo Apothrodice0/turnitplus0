@@ -9,6 +9,7 @@ import { findReportRowForUser } from "@/lib/reports-repo";
 import { classifyReportMatches } from "@/lib/report-classification";
 import { getOrComputeHistoricalMatchSnapshot } from "@/lib/report-historical-match";
 import { runHistoricalMatchShadowEvaluation } from "@/lib/e8p-shadow-evaluation";
+import { getExperimentalHistoricalMatchForDisplay } from "@/lib/e8p-visibility";
 import { runAfterResponse } from "@/lib/run-after-response";
 import type { ReportMode, SimilarityReport } from "@/lib/report-types";
 import { ReportDetailShell } from "./report-detail-shell";
@@ -65,6 +66,16 @@ const loadOwnedReport = cache(async (id: string): Promise<OwnedReportResult> => 
         rawText: payload.text,
       });
       payload.historicalSubmissionMatch = historicalSubmissionMatch;
+      // Phase E8P.3: the experimental, allowlist-gated display value — see
+      // lib/e8p-visibility.ts's own header comment and app/api/reports/[id]/route.ts's
+      // identical comment. Synchronous, but isE8pVisibilityAllowlisted() is
+      // checked first and returns instantly for every non-allowlisted
+      // account (sessionUser.id here is always a real account, never null).
+      payload.experimentalHistoricalMatch = await getExperimentalHistoricalMatchForDisplay(client, {
+        accountId: sessionUser.id,
+        rawText: payload.text,
+        productionResult: historicalSubmissionMatch,
+      }) ?? undefined;
       // Phase E8P: production shadow evaluation — measurement only, never
       // changes historicalSubmissionMatch above. Deferred via
       // runAfterResponse (confirmed safe from Server Component render, not

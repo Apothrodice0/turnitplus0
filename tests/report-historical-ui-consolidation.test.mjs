@@ -182,7 +182,12 @@ test('H (structural): the component source no longer reads matchClassification o
   assert.doesNotMatch(source, /matchClassification/, 'the component must not read matchClassification at all anymore');
   assert.doesNotMatch(source, /Submission history/, 'the old duplicate heading text must not exist in source');
   const headingOccurrences = (source.match(/Previously submitted content/g) || []).length;
-  assert.equal(headingOccurrences, 2, 'exactly the UNAVAILABLE and MATCHED branches should reference the one consolidated heading');
+  // Phase E8P.3 added a third branch (the allowlist-gated experimental
+  // partial-match block) that reuses this exact same heading text rather
+  // than introducing a second section — see components/report/similarity-report-papers.tsx's
+  // own E8P.3 comment and tests/e8p-visibility.test.mjs's own dedicated
+  // "reuses the existing heading" assertion.
+  assert.equal(headingOccurrences, 3, 'exactly the UNAVAILABLE, MATCHED, and E8P.3-experimental branches should reference the one consolidated heading');
 });
 
 // --- I: receipt PDF unaffected -----------------------------------------------
