@@ -5,7 +5,7 @@ import type { Client } from "@libsql/client";
 
 /**
  * Phase E8E-D.1: an isolated runner whose only job is applying migrations
- * 0012-0020 (the still-unapplied Phase A-E8 tables) to a database that is
+ * 0012-0022 (the still-unapplied Phase A-E8 tables) to a database that is
  * otherwise already at the pre-0012 baseline. Deliberately separate from
  * lib/ingest.ts's applyMigrationsLibsql(), which replays every migration
  * file in drizzleDir from 0000 onward with no applied-state tracking —
@@ -36,6 +36,7 @@ export const TARGET_MIGRATIONS = [
   "0019_user_submission_corpus.sql",
   "0020_report_historical_match_snapshots.sql",
   "0021_historical_match_shadow_evaluations.sql",
+  "0022_reuse_context_declarations.sql",
 ] as const;
 
 export type TargetMigrationFile = (typeof TARGET_MIGRATIONS)[number];
@@ -60,6 +61,7 @@ export const EXPECTED_TABLES_BY_MIGRATION: Record<TargetMigrationFile, string[]>
   "0019_user_submission_corpus.sql": ["corpus_document_representations", "corpus_submission_references", "corpus_document_shingles"],
   "0020_report_historical_match_snapshots.sql": ["report_historical_match_snapshots"],
   "0021_historical_match_shadow_evaluations.sql": ["historical_match_shadow_evaluations"],
+  "0022_reuse_context_declarations.sql": ["reuse_context_declarations"],
 };
 
 export const ALL_TARGET_TABLES: string[] = TARGET_MIGRATIONS.flatMap((m) => EXPECTED_TABLES_BY_MIGRATION[m]);
@@ -96,6 +98,7 @@ export const EXPECTED_MIGRATION_SHA256: Record<TargetMigrationFile, string> = {
   "0019_user_submission_corpus.sql": "99bc22489bddc0b16fb359ce84e0d56c4c1ed768fd5f89dc9d946efbf5aa6c8e",
   "0020_report_historical_match_snapshots.sql": "f915027d70eb1a8ffdd267abfa802eef8eddd8c2568eb1d97881df94df506d2e",
   "0021_historical_match_shadow_evaluations.sql": "757a34bf6ca225a20ac0db9f5673d3f4e51556781b11d184e434bd55b4ab668f",
+  "0022_reuse_context_declarations.sql": "80f2d9391a0bd9b89cde22218abcc1438f2c7810d09324bc6dc99e1bbdc03fde",
 };
 
 const DESTRUCTIVE_PATTERN = /\b(DROP\s+TABLE|DROP\s+INDEX|ALTER\s+TABLE\s+\S+\s+DROP|DELETE\s+FROM|TRUNCATE)\b/gi;

@@ -101,7 +101,7 @@ test.after(() => {
 
 // --- A: explicit allowlist ------------------------------------------------
 
-test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0021, in order, never touching 0000-0011', () => {
+test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0022, in order, never touching 0000-0011', () => {
   assert.deepEqual(TARGET_MIGRATIONS, [
     '0012_document_identities.sql',
     '0013_document_families.sql',
@@ -113,8 +113,12 @@ test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0021, in ord
     '0019_user_submission_corpus.sql',
     '0020_report_historical_match_snapshots.sql',
     '0021_historical_match_shadow_evaluations.sql',
+    '0022_reuse_context_declarations.sql',
   ]);
-  assert.equal(ALL_TARGET_TABLES.length, 15, 'expected exactly the 15 E1-E8P tables across all 10 migrations');
+  // Phase E8S Step 8: 0022_reuse_context_declarations.sql added
+  // reuse_context_declarations, bringing the 15 E1-E8P tables across the
+  // original 10 migrations to 16 across 11.
+  assert.equal(ALL_TARGET_TABLES.length, 16, 'expected exactly the 16 E1-E8S tables across all 11 migrations');
 });
 
 // --- F: no execution of 0000-0011 (structural) ----------------------------
@@ -324,8 +328,27 @@ test('K: the selectively-migrated database is structurally identical to a databa
   const runResult = await runTargetMigrations(selectiveClient, drizzleDir, { environmentLabel: 'local-test', expectedEnvironmentLabel: 'local-test' });
   assert.equal(runResult.status, 'success');
 
+  // Reference DB is built from exactly the migrations TARGET_MIGRATIONS
+  // currently covers (0000-0021), not "every .sql file in drizzleDir" —
+  // as of Phase E8S Step 4, drizzle/0022_reuse_context_declarations.sql
+  // exists on disk but is deliberately NOT in TARGET_MIGRATIONS yet (that
+  // allowlist is a pinned, reviewed, production-controlled-apply scope —
+  // see this runner's own header comment and EXPECTED_MIGRATION_SHA256;
+  // extending it is its own separate, deliberate decision, not an implicit
+  // side effect of adding a new migration file). Copying only the in-scope
+  // files into a temp dir keeps this test's actual invariant meaningful
+  // ("selective apply == full apply, for the migrations both mechanisms
+  // agree are in scope") without asserting anything about migrations
+  // TARGET_MIGRATIONS hasn't been extended to yet.
+  const maxTargetPrefix = TARGET_MIGRATIONS[TARGET_MIGRATIONS.length - 1].slice(0, 4);
+  const inScopeFiles = fs.readdirSync(drizzleDir).filter((f) => f.endsWith('.sql') && f.slice(0, 4) <= maxTargetPrefix).sort();
+  const tempReferenceDrizzleDir = fs.mkdtempSync(path.join(os.tmpdir(), 'e8-k-reference-'));
+  for (const file of inScopeFiles) {
+    fs.copyFileSync(path.join(drizzleDir, file), path.join(tempReferenceDrizzleDir, file));
+  }
+
   const referenceClient = createClient({ url: `file:${referenceDbFile}` });
-  await applyMigrationsLibsql(referenceClient, drizzleDir); // full 0000-0021 in one shot, the same mechanism every other test in this repo already trusts
+  await applyMigrationsLibsql(referenceClient, tempReferenceDrizzleDir); // full 0000-0021 in one shot, the same mechanism every other test in this repo already trusts
 
   const schemaOf = async (client) => {
     const result = await client.execute("SELECT name, sql FROM sqlite_master WHERE type IN ('table','index') AND name != 'sqlite_sequence' ORDER BY name");
@@ -337,6 +360,7 @@ test('K: the selectively-migrated database is structurally identical to a databa
   selectiveClient.close();
   referenceClient.close();
   cleanupDbFile(referenceDbFile);
+  fs.rmSync(tempReferenceDrizzleDir, { recursive: true, force: true });
 });
 
 // --- L: no credential logging -----------------------------------------------

@@ -745,6 +745,45 @@ export const historical_match_shadow_evaluations = sqliteTable(
   ],
 );
 
+// Phase E8S Step 4: reuse-context declarations — see
+// drizzle/0022_reuse_context_declarations.sql for the full rationale.
+// document_identity_id / matched_representation_id / matched_submission_
+// reference_id deliberately carry no DB-level FOREIGN KEY (same schema-
+// drift-tooling reason as report_historical_match_snapshots and
+// historical_match_shadow_evaluations above). declared_by_account_id /
+// confirmed_by_account_id / revoked_by_account_id DO reference users(id)
+// ON DELETE SET NULL, matching document_identities.account_id and
+// saved_reports.user_id — losing an account must not delete the audit
+// trail. The partial unique index enforces at most one ACTIVE (revoked_at
+// IS NULL) declaration per match pair; revoked rows are retained, never
+// deleted, and do not block a fresh declaration for the same pair.
+export const reuse_context_declarations = sqliteTable(
+  "reuse_context_declarations",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    document_identity_id: text("document_identity_id").notNull(),
+    matched_representation_id: text("matched_representation_id").notNull(),
+    matched_submission_reference_id: integer("matched_submission_reference_id"),
+    declared_context: text("declared_context").notNull(),
+    declared_by_account_id: text("declared_by_account_id").references(() => users.id, { onDelete: "set null" }),
+    declared_at: text("declared_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    confirmed_by_account_id: text("confirmed_by_account_id").references(() => users.id, { onDelete: "set null" }),
+    confirmed_at: text("confirmed_at"),
+    verification_state: text("verification_state").notNull().default("SELF_ASSERTED_UNVERIFIED"),
+    revoked_at: text("revoked_at"),
+    revoked_by_account_id: text("revoked_by_account_id").references(() => users.id, { onDelete: "set null" }),
+    created_at: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("ux_reuse_context_declarations_active_pair")
+      .on(table.document_identity_id, table.matched_representation_id)
+      .where(sql`revoked_at IS NULL`),
+    index("idx_reuse_context_declarations_document_identity").on(table.document_identity_id),
+    index("idx_reuse_context_declarations_matched_submission_reference").on(table.matched_submission_reference_id),
+    index("idx_reuse_context_declarations_declared_by").on(table.declared_by_account_id),
+  ],
+);
+
 // Export nothing else — Drizzle will consume these definitions for migrations.
 export {};
 
