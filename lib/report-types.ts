@@ -178,6 +178,8 @@ export type SimilarityReport = {
   historicalSubmissionMatch?: ReportHistoricalSubmissionMatch;
   /** Phase E8P.3 enrichment — see ExperimentalHistoricalMatchDisplay's own comment. Absent for every account outside the explicit allowlist, and absent whenever historicalSubmissionMatch already has a real production match. */
   experimentalHistoricalMatch?: ExperimentalHistoricalMatchDisplay;
+  /** Phase E8S Step 11 enrichment — see lib/e8s-report-integration.ts's own comment. Absent for every account outside E8S_REUSE_CONTEXT_ALLOWLIST, or if this report's own document identity can't be resolved. Never decides what renders by itself — only tells the client which ids to fetch fresh state for. */
+  reuseContext?: { documentIdentityId: string; representationId: string | null };
   aiScore?: number | null;
   aiAnalysis?: AiAnalysis;
   webCheck?: WebCheckResult;

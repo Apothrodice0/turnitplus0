@@ -10,6 +10,7 @@ import { classifyReportMatches } from "@/lib/report-classification";
 import { getOrComputeHistoricalMatchSnapshot } from "@/lib/report-historical-match";
 import { runHistoricalMatchShadowEvaluation } from "@/lib/e8p-shadow-evaluation";
 import { getExperimentalHistoricalMatchForDisplay } from "@/lib/e8p-visibility";
+import { getReuseContextEligibility } from "@/lib/e8s-report-integration";
 import { runAfterResponse } from "@/lib/run-after-response";
 import type { ReportMode, SimilarityReport } from "@/lib/report-types";
 import { ReportDetailShell } from "./report-detail-shell";
@@ -76,6 +77,14 @@ const loadOwnedReport = cache(async (id: string): Promise<OwnedReportResult> => 
         rawText: payload.text,
         productionResult: historicalSubmissionMatch,
       }) ?? undefined;
+      // Phase E8S Step 11: same read-time-enrichment/non-fatal discipline as
+      // experimentalHistoricalMatch just above — see
+      // lib/e8s-report-integration.ts's own header comment.
+      payload.reuseContext = await getReuseContextEligibility(client, {
+        accountId: sessionUser.id,
+        rawText: payload.text,
+        historicalSubmissionMatch,
+      });
       // Phase E8P: production shadow evaluation — measurement only, never
       // changes historicalSubmissionMatch above. Deferred via
       // runAfterResponse (confirmed safe from Server Component render, not

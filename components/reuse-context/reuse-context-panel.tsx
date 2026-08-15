@@ -72,15 +72,15 @@ export function AddContextForm({ onSubmit, onCancel }: { onSubmit: (context: Dec
         ))}
       </fieldset>
       <p className="reuse-context-form-note">
-        This is <strong>your own claim</strong> — the original submitter will be asked to confirm it. It will not change your score.
+        This is your own claim. The original submitter will be asked to confirm it. It will not change your score.
       </p>
-      <button type="submit" disabled={!selected}>Submit</button>
+      <button type="submit" disabled={!selected}>Add context</button>
       {onCancel && <button type="button" onClick={onCancel}>Cancel</button>}
     </form>
   );
 }
 
-export type ReuseContextOutcome = "REJECTED" | "REVOKED_AFTER_CONFIRMATION" | null;
+export type ReuseContextOutcome = "REJECTED" | "REVOKED" | null;
 
 export function ReuseContextPanel({
   affordance,
@@ -104,9 +104,8 @@ export function ReuseContextPanel({
   if (activeDeclaration && activeDeclaration.verificationState === "MUTUALLY_CONFIRMED") {
     return (
       <div className="reuse-context-block reuse-context-confirmed">
-        <p>
-          <strong>Confirmed:</strong> The original submitter has confirmed this is a {CONTEXT_LABELS[activeDeclaration.declaredContext]}.
-        </p>
+        <p><strong>Confirmed</strong></p>
+        <p>The original submitter has confirmed this reuse context.</p>
         {onWithdraw && <button type="button" onClick={onWithdraw}>Revoke</button>}
       </div>
     );
@@ -115,11 +114,12 @@ export function ReuseContextPanel({
   if (activeDeclaration && activeDeclaration.verificationState === "SELF_ASSERTED_UNVERIFIED") {
     return (
       <div className="reuse-context-block reuse-context-unverified">
+        <p><strong>Unverified</strong></p>
         <p>
-          <strong>Unverified:</strong> You&rsquo;ve indicated this is a {CONTEXT_LABELS[activeDeclaration.declaredContext]}.{" "}
+          You indicated this is a {CONTEXT_LABELS[activeDeclaration.declaredContext]}.{" "}
           {unresolvable
             ? "This can no longer be confirmed — the original submission is no longer available."
-            : "The original submitter has not confirmed this yet."}
+            : "The original submitter has not confirmed it yet."}
         </p>
         {onWithdraw && <button type="button" onClick={onWithdraw}>Withdraw</button>}
       </div>
@@ -130,8 +130,8 @@ export function ReuseContextPanel({
   // normal baseline/CTA/ambiguous rendering below takes over on next load.
   const outcomeNote = lastOutcome === "REJECTED"
     ? <p className="reuse-context-note reuse-context-outcome">This context was not confirmed by the original submitter.</p>
-    : lastOutcome === "REVOKED_AFTER_CONFIRMATION"
-      ? <p className="reuse-context-note reuse-context-outcome">This confirmed context was revoked.</p>
+    : lastOutcome === "REVOKED"
+      ? <p className="reuse-context-note reuse-context-outcome">This context is no longer active.</p>
       : null;
 
   if (affordance.canDeclare) {
@@ -142,8 +142,8 @@ export function ReuseContextPanel({
           ? <AddContextForm onSubmit={(context) => { setShowForm(false); onDeclare?.(context); }} onCancel={() => setShowForm(false)} />
           : (
             <p className="reuse-context-note">
+              Have a legitimate reason for this match?{" "}
               <button type="button" className="reuse-context-add-link" onClick={() => setShowForm(true)}>Add context</button>
-              {" "}— if this is a supervisor, coauthor, institutional, or otherwise authorized copy, you can say so.
             </p>
           )}
       </div>

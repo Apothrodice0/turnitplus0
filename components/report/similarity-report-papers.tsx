@@ -22,6 +22,7 @@ import {
   type SourceType,
 } from "@/lib/report-types";
 import { ReportPageFooter, ReportPageHeader } from "./report-page-chrome";
+import { ReuseContextContainer } from "@/components/reuse-context/reuse-context-container";
 
 /**
  * Phase E8R-SELF-UI.2: groups every SELF-relationship entry in matches[]
@@ -278,6 +279,9 @@ export function OverviewReport({ report }: { report: SimilarityReport }) {
           <section className="historical-match-block">
             <h3>Previously submitted content</h3>
             <p>Historical matching unavailable for this report.</p>
+            {report.reuseContext && (
+              <ReuseContextContainer documentIdentityId={report.reuseContext.documentIdentityId} representationId={null} />
+            )}
           </section>
         )}
         {report.historicalSubmissionMatch?.status === "MATCHED" && (
@@ -285,6 +289,17 @@ export function OverviewReport({ report }: { report: SimilarityReport }) {
             <h3>Previously submitted content</h3>
             <p className="historical-match-archive-note">This historical submission match is not included in Archive overlap.</p>
             {renderHistoricalMatchEntries(report.historicalSubmissionMatch.matches?.slice(0, 5) ?? [])}
+            {/* Phase E8S Step 11: additive only — representationId is null
+                unless lib/e8s-report-integration.ts already determined the
+                primary match is PRIOR_SUBMISSION, so this never appears for
+                a SELF match and never touches renderHistoricalMatchEntries
+                above (E8R-SELF-UI.2's own consolidated block, untouched). */}
+            {report.reuseContext && (
+              <ReuseContextContainer
+                documentIdentityId={report.reuseContext.documentIdentityId}
+                representationId={report.reuseContext.representationId}
+              />
+            )}
           </section>
         )}
 
@@ -316,6 +331,19 @@ export function OverviewReport({ report }: { report: SimilarityReport }) {
               <p className="historical-match-archive-note">{report.experimentalHistoricalMatch.disclaimer} This is not proof of plagiarism.</p>
             </div>
           </section>
+        )}
+
+        {/* Phase E8S Step 11: the original-submitter pending-declarations
+            panel can apply even when THIS report shows no historical match
+            of its own (production's own status here reflects only what
+            existed BEFORE this submission — a later, unrelated submission
+            can still reference this report's own identity). Never renders
+            a visible section unless there is actually something to show —
+            see ReuseContextContainer's own standalone-mode comment. Placed
+            after the E8P.3 block, never inside it, so it can never be
+            mistaken for part of that experimental result. */}
+        {report.historicalSubmissionMatch?.status !== "UNAVAILABLE" && report.historicalSubmissionMatch?.status !== "MATCHED" && report.reuseContext && (
+          <ReuseContextContainer documentIdentityId={report.reuseContext.documentIdentityId} representationId={null} standalone />
         )}
 
         <section className="filtered-block">

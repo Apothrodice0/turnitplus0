@@ -25,19 +25,25 @@ const CONTEXT_LABELS: Record<DeclaredContext, string> = {
   OTHER_AUTHORIZED_REUSE: "authorized reuse",
 };
 
+function capitalize(label: string): string {
+  return label.charAt(0).toUpperCase() + label.slice(1);
+}
+
 function PendingDeclarationRow({
   declaration,
+  justConfirmed,
   onConfirm,
   onReject,
 }: {
   declaration: ReuseContextDeclarationView;
+  justConfirmed: boolean;
   onConfirm?: (declarationId: number) => void;
   onReject?: (declarationId: number) => void;
 }) {
   if (declaration.verificationState === "MUTUALLY_CONFIRMED") {
     return (
       <li className="reuse-context-pending-item reuse-context-pending-confirmed">
-        You confirmed this is a {CONTEXT_LABELS[declaration.declaredContext]}.
+        {justConfirmed ? "Confirmed." : `You confirmed this is a ${CONTEXT_LABELS[declaration.declaredContext]}.`}
       </li>
     );
   }
@@ -48,7 +54,7 @@ function PendingDeclarationRow({
         <strong>Someone has indicated a reuse context for this submission.</strong>
       </p>
       <p>
-        Claimed context: <em>{CONTEXT_LABELS[declaration.declaredContext]}</em><br />
+        Claimed context: <em>{capitalize(CONTEXT_LABELS[declaration.declaredContext])}</em><br />
         Declared: {declaration.declaredAt}
       </p>
       <p>This claim has not been verified. You can confirm it if it&rsquo;s accurate, or reject it.</p>
@@ -58,21 +64,43 @@ function PendingDeclarationRow({
   );
 }
 
+export type PendingActionOutcome = { declarationId: number; outcome: "CONFIRMED" | "REJECTED" } | null;
+
 export function OriginalSubmitterConfirmationPanel({
   pending,
+  lastAction = null,
   onConfirm,
   onReject,
 }: {
   pending: ReuseContextDeclarationView[];
+  /** A one-time, transient outcome to display immediately after Confirm/Reject completes — re-fetched server state (requirement 9) already reflects the real, persistent state; this only softens the immediate UI response. Never stored, never re-derived from a column. */
+  lastAction?: PendingActionOutcome;
   onConfirm?: (declarationId: number) => void;
   onReject?: (declarationId: number) => void;
 }) {
-  if (pending.length === 0) return null;
+  // A rejected declaration is revoked server-side, so it no longer appears
+  // in `pending` at all on the next fetch (E8S Step 5's own default: no
+  // persistent trace) — the transient note below is the only place this
+  // outcome is ever shown, and only once.
+  const showRejectedNote = lastAction?.outcome === "REJECTED" && !pending.some((d) => d.id === lastAction.declarationId);
+
+  if (pending.length === 0 && !showRejectedNote) return null;
   return (
-    <ul className="reuse-context-pending-list">
-      {pending.map((declaration) => (
-        <PendingDeclarationRow key={declaration.id} declaration={declaration} onConfirm={onConfirm} onReject={onReject} />
-      ))}
-    </ul>
+    <>
+      {showRejectedNote && <p className="reuse-context-note reuse-context-outcome">You&rsquo;ve indicated this context is not confirmed.</p>}
+      {pending.length > 0 && (
+        <ul className="reuse-context-pending-list">
+          {pending.map((declaration) => (
+            <PendingDeclarationRow
+              key={declaration.id}
+              declaration={declaration}
+              justConfirmed={lastAction?.outcome === "CONFIRMED" && lastAction.declarationId === declaration.id}
+              onConfirm={onConfirm}
+              onReject={onReject}
+            />
+          ))}
+        </ul>
+      )}
+    </>
   );
 }
