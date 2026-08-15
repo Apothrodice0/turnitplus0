@@ -5376,6 +5376,18 @@ main.report-main {
     transform-origin: top left;
   }
 
+  /* The Integrity Overview page reflows instead of joining the fixed-width
+     scroll treatment above: .overview-columns' second column has a 230px
+     floor that, inside a 720px paper, lands past the edge of a phone
+     screen and is never reachable. */
+  .overview-paper {
+    width: 100%;
+  }
+
+  .overview-columns {
+    grid-template-columns: 1fr;
+  }
+
   .web-check-metrics {
     grid-template-columns: 1fr;
   }
