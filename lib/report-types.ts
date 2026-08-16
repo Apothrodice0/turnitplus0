@@ -1,5 +1,6 @@
 import type { WebCheckResult } from "@/lib/web-check-core";
 import type { ReportSummary } from "@/lib/reports-remote";
+import type { ExternalAcademicEvidence } from "@/lib/academic-search/types";
 import { AI_SCORING_VERSION, calibratedAiDisplaySignal } from "@/lib/ai-core";
 
 export type SourceType = "Internet" | "Publication";
@@ -183,6 +184,23 @@ export type SimilarityReport = {
   aiScore?: number | null;
   aiAnalysis?: AiAnalysis;
   webCheck?: WebCheckResult;
+  /**
+   * Phase 3 enrichment — external academic-source evidence from
+   * lib/academic-search/ (OpenAIRE + Europe PMC), attached the same way
+   * webCheck (Wikipedia) is above: computed asynchronously, in parallel
+   * with the main analysis, merged into an already-saved report once ready
+   * (see app/page.tsx's generateReport()), and re-saved. Deliberately never
+   * folded into score/archiveScore/matchedWordCount the way webCheck's
+   * matches are — see this phase's own PRIMARY PRODUCT RULE: TurnitPlus's
+   * own corpus similarity stays the single, unambiguous headline number,
+   * and external academic overlap is reported next to it, never combined
+   * with it. Absent/undefined means exactly what it says: no external
+   * academic evidence was found, was not yet computed for this report, or
+   * this report predates Phase 3 — the UI must render identically to
+   * before in every one of those cases, never distinguishing "not yet
+   * checked" from "checked, nothing found."
+   */
+  externalAcademicEvidence?: ExternalAcademicEvidence[];
   wordCount: number;
   characterCount: number;
   pageCount: number;

@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import {
   BookOpen,
   ChevronRight,
+  ExternalLink,
   FileText,
   GraduationCap,
   Globe2,
@@ -9,6 +10,7 @@ import {
   Search,
   ShieldCheck,
 } from "lucide-react";
+import type { ExternalAcademicEvidence } from "@/lib/academic-search/types";
 import { similarityScoreBand } from "@/lib/ai-core";
 import {
   SIMILARITY_BAND_LABELS,
@@ -235,6 +237,103 @@ export function SourceList({ report, detailed = false }: { report: SimilarityRep
   );
 }
 
+/**
+ * Phase 3 STEP 7: a defensive, UI-level re-application of the same
+ * DOI-first, then-canonical-URL, then-provider-id identity rule
+ * lib/academic-search/deduplicator.ts already applies before evidence is
+ * ever attached to a report (see lib/academic-evidence-integration.ts's own
+ * comment on why evidence[] should already be unique) — belt-and-suspenders
+ * at the last rendering boundary, not a re-implementation of different
+ * logic, so a report payload from a future/altered orchestrator version can
+ * never show the same paper twice here even if its own dedup step changes.
+ */
+export function dedupeExternalAcademicEvidence(evidence: ExternalAcademicEvidence[]): ExternalAcademicEvidence[] {
+  const seen = new Set<string>();
+  const deduped: ExternalAcademicEvidence[] = [];
+  for (const item of evidence) {
+    const key = item.doi
+      ? `doi:${item.doi.trim().toLowerCase()}`
+      : item.url
+        ? `url:${item.url.trim().toLowerCase()}`
+        : `provider:${item.provider}:${item.providerId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(item);
+  }
+  return deduped;
+}
+
+/** Joins only the metadata fields actually present — STEP 6: "If a field is unavailable, omit it gracefully. Do not invent metadata." */
+function academicEvidenceMetaLine(item: ExternalAcademicEvidence): string | null {
+  const parts: string[] = [];
+  if (item.authors && item.authors.length > 0) {
+    parts.push(item.authors.length > 3 ? `${item.authors.slice(0, 3).join(", ")}, et al.` : item.authors.join(", "));
+  }
+  if (item.publication) parts.push(item.publication);
+  if (parts.length === 0) return null;
+  return parts.join(" · ");
+}
+
+function AcademicEvidenceCard({ item }: { item: ExternalAcademicEvidence }) {
+  const meta = academicEvidenceMetaLine(item);
+  const bestPassage = item.matchedPassages[0];
+  return (
+    <article className="academic-evidence-card">
+      <div className="academic-evidence-card-head">
+        <span className="academic-evidence-tag">
+          <GraduationCap aria-hidden="true" />
+          Potential match
+        </span>
+        <span className="academic-evidence-overlap">{item.similarity}% passage overlap</span>
+      </div>
+      <h4>{item.title ?? "Untitled external source"}</h4>
+      {meta && <p className="academic-evidence-meta">{meta}{item.year ? ` (${item.year})` : ""}</p>}
+      {bestPassage && (
+        <blockquote className="academic-evidence-excerpt">&ldquo;{bestPassage.submittedText}&rdquo;</blockquote>
+      )}
+      <div className="academic-evidence-links">
+        <span>Source: {item.provider}</span>
+        {item.doi && <span>DOI: {item.doi}</span>}
+        {item.url && (
+          <a href={item.url} target="_blank" rel="noreferrer">
+            View source <ExternalLink aria-hidden="true" />
+          </a>
+        )}
+      </div>
+    </article>
+  );
+}
+
+/**
+ * Phase 3 STEP 5/8: a clearly separate section from Archive overlap — never
+ * styled as a score, never labeled "Plagiarism Score." Renders only when
+ * report.externalAcademicEvidence is present and non-empty (STEP 2: absent
+ * means exactly "no external academic evidence," including for every report
+ * saved before this phase existed); a report still being background-checked
+ * simply shows nothing here yet, the same way report.webCheck's own
+ * Wikipedia chip shows nothing until that background check resolves.
+ */
+export function AcademicEvidenceSection({ report }: { report: SimilarityReport }) {
+  if (!report.externalAcademicEvidence || report.externalAcademicEvidence.length === 0) return null;
+  const evidence = dedupeExternalAcademicEvidence(report.externalAcademicEvidence);
+  if (evidence.length === 0) return null;
+
+  return (
+    <section className="academic-evidence-block">
+      <h3>External Academic Sources</h3>
+      <p className="academic-evidence-intro">
+        {evidence.length} potential external academic {evidence.length === 1 ? "source" : "sources"} found outside TurnitPlus&apos;s own archive.
+        This is separate evidence and does not change Archive overlap.
+      </p>
+      <div className="academic-evidence-list">
+        {evidence.map((item, index) => (
+          <AcademicEvidenceCard item={item} key={item.doi ?? item.url ?? `${item.provider}-${item.providerId}-${index}`} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
 export function OverviewReport({ report }: { report: SimilarityReport }) {
   const overlapScore = archiveOverlapScore(report);
   const similarityVerdict = similarityScoreBand(overlapScore);
@@ -345,6 +444,16 @@ export function OverviewReport({ report }: { report: SimilarityReport }) {
         {report.historicalSubmissionMatch?.status !== "UNAVAILABLE" && report.historicalSubmissionMatch?.status !== "MATCHED" && report.reuseContext && (
           <ReuseContextContainer documentIdentityId={report.reuseContext.documentIdentityId} representationId={null} standalone />
         )}
+
+        {/* Phase 3: external academic-source evidence (OpenAIRE + Europe
+            PMC) — a completely separate signal from every historical-match
+            block above (TurnitPlus's own corpus/account history) and from
+            Archive overlap itself. Placed last among the "additional
+            evidence, not part of the score" blocks so it never reads as
+            more authoritative than TurnitPlus's own primary result above
+            it. Renders nothing at all when absent — see
+            AcademicEvidenceSection's own comment. */}
+        <AcademicEvidenceSection report={report} />
 
         <section className="filtered-block">
           <h3>Filtered from the Report</h3>

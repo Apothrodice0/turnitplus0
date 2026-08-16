@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ArrowLeft, FileText, Globe2, Printer } from "lucide-react";
+import { ArrowLeft, FileText, GraduationCap, Globe2, Printer } from "lucide-react";
 import { similarityScoreBand } from "@/lib/ai-core";
 import { deleteRemoteReportChecked, fetchRemoteReport } from "@/lib/reports-remote";
 import { deleteStoredReport, getStoredReportById } from "@/lib/report-store";
@@ -18,7 +18,7 @@ import {
   type SimilarityReport,
 } from "@/lib/report-types";
 import { AiReport } from "@/components/report/ai-report";
-import { CategorySummary, OverviewReport, SourcesReport, SubmissionReport } from "@/components/report/similarity-report-papers";
+import { CategorySummary, OverviewReport, SourcesReport, SubmissionReport, dedupeExternalAcademicEvidence } from "@/components/report/similarity-report-papers";
 import { ReportNotFoundPanel } from "@/components/report/report-not-found-panel";
 
 type LoadStatus = "loading" | "found" | "not-found";
@@ -121,6 +121,7 @@ export function ReportDetailShell({
   const overlapScore = archiveOverlapScore(report);
   const similarityVerdict = similarityScoreBand(overlapScore);
   const aiSignal = aiSignalDisplay(report);
+  const academicEvidenceCount = report.externalAcademicEvidence ? dedupeExternalAcademicEvidence(report.externalAcademicEvidence).length : 0;
   const reportDate = new Date(report.created).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" });
 
   return (
@@ -160,6 +161,11 @@ export function ReportDetailShell({
           {mode === "similarity" && <span className="summary-chip">Matched against {archiveScopeCount(report).toLocaleString()} indexed documents</span>}
           {mode === "similarity" && <span className="summary-chip">{report.sources.length} archive sources</span>}
           {mode === "similarity" && (report.webCheck?.phrasesMatched ?? 0) > 0 && <span className="summary-chip wikipedia-evidence-chip"><Globe2 aria-hidden="true" /> Separate Wikipedia evidence</span>}
+          {mode === "similarity" && academicEvidenceCount > 0 && (
+            <span className="summary-chip academic-evidence-chip">
+              <GraduationCap aria-hidden="true" /> {academicEvidenceCount} external academic {academicEvidenceCount === 1 ? "source" : "sources"}
+            </span>
+          )}
           {mode === "ai" && <span className="summary-chip">English only</span>}
         </div>
         <div>

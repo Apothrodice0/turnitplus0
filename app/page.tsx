@@ -39,6 +39,7 @@ import { clearStoredReports, loadStoredReports, storeReport } from "@/lib/report
 import { deleteRemoteReport, fetchRemoteReport, listRemoteReportSummaries, saveReportRemote } from "@/lib/reports-remote";
 import { combineMatchedWordPositions } from "@/lib/similarity-enrichment";
 import type { WebCheckResult } from "@/lib/web-check-core";
+import type { ExternalAcademicEvidence } from "@/lib/academic-search/types";
 import {
   AI_MODEL_VERSION,
   AI_PASSAGE_LOG_ODDS_THRESHOLD,
@@ -249,6 +250,24 @@ async function analyzeWikipediaText(
   });
 }
 
+// Phase 3: unlike analyzeWikipediaText above, this cannot run in a Worker —
+// lib/academic-search/'s HTTP-fallback text retrieval needs Node's
+// SSRF-validation module (node:dns/node:net), which does not exist in a
+// browser/Worker context. A server round-trip is the smallest safe
+// alternative the existing architecture already supports (the same
+// fetch-a-JSON-API shape every other client helper in this file uses) —
+// see app/api/academic-evidence/route.ts's own header comment.
+async function analyzeAcademicEvidence(text: string): Promise<ExternalAcademicEvidence[] | null> {
+  const response = await fetch("/api/academic-evidence", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+  });
+  if (!response.ok) throw new Error(`academic evidence request failed (${response.status})`);
+  const data = (await response.json()) as { evidence?: ExternalAcademicEvidence[] };
+  return Array.isArray(data.evidence) ? data.evidence : [];
+}
+
 async function extractFileText(file: File, onProgress: (progress: number, label: string) => void) {
   const extension = file.name.split(".").pop()?.toLowerCase();
   if (["txt", "md", "html", "csv"].includes(extension ?? "")) {
@@ -302,6 +321,14 @@ function enrichReportWithWikipedia(report: SimilarityReport, webCheck: WebCheckR
     wikipediaMatchedWordCount: combined.externalMatchedWordCount,
     webCheck,
   };
+}
+
+// Phase 3: unlike enrichReportWithWikipedia above, this never touches
+// score/archiveScore/matchedWordCount — the phase's own PRIMARY PRODUCT
+// RULE. TurnitPlus's own corpus similarity stays the single, unambiguous
+// headline number; external academic evidence is purely additive.
+function enrichReportWithAcademicEvidence(report: SimilarityReport, evidence: ExternalAcademicEvidence[]): SimilarityReport {
+  return { ...report, externalAcademicEvidence: evidence };
 }
 
 export default function Home() {
@@ -716,6 +743,22 @@ export default function Home() {
       return null;
     });
 
+    // Phase 3: kicked off in parallel with Wikipedia and the main analysis
+    // below (not awaited until after the report already exists) — the
+    // ~9-20s cold-latency academic-search subsystem overlaps with the
+    // similarity/AI analysis and the existing minimumProcessingMs animation
+    // window instead of adding to the user-visible wait. A failure here is
+    // swallowed exactly like Wikipedia's — external-evidence lookup is
+    // secondary and must never affect report generation (this phase's own
+    // STEP 3 requirement).
+    const academicEvidencePromise = analyzeAcademicEvidence(text).catch((error) => {
+      console.debug("Academic evidence background lookup failed.", {
+        outcome: "failed",
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return null;
+    });
+
     let report: SimilarityReport;
     try {
       report = await analyzeText(text, submittedFile.name, submittedFile.size, (_value, label) => {
@@ -766,15 +809,38 @@ export default function Home() {
     setProcessingLabel("Preparing your reports");
     try {
       await saveReport(report);
-      void wikipediaPromise.then(async (webCheck) => {
-        if (!webCheck) return;
-        console.debug("Wikipedia background enrichment completed.", {
-          reportId: report.id,
-          status: webCheck.status,
-          outcomes: webCheck.outcomes,
-          phrasesMatched: webCheck.phrasesMatched,
-        });
-        const enriched = enrichReportWithWikipedia(report, webCheck);
+      // Phase 3: both background enrichments are awaited together and
+      // merged into ONE save, rather than each independently saving its own
+      // partial copy of `report`. With two independent async enrichments
+      // racing to persist, whichever resolved second would previously have
+      // overwritten the other's saved fields (each built its own `enriched`
+      // from the same pre-enrichment `report` closure) — settling both
+      // first avoids that data loss regardless of which finishes first, at
+      // no user-visible cost since this entire block already runs after the
+      // report is shown and the user has moved on.
+      void Promise.allSettled([wikipediaPromise, academicEvidencePromise]).then(async ([webCheckOutcome, academicOutcome]) => {
+        const webCheck = webCheckOutcome.status === "fulfilled" ? webCheckOutcome.value : null;
+        const academicEvidence = academicOutcome.status === "fulfilled" ? academicOutcome.value : null;
+        if (!webCheck && (!academicEvidence || academicEvidence.length === 0)) return;
+
+        let enriched = report;
+        if (webCheck) {
+          console.debug("Wikipedia background enrichment completed.", {
+            reportId: report.id,
+            status: webCheck.status,
+            outcomes: webCheck.outcomes,
+            phrasesMatched: webCheck.phrasesMatched,
+          });
+          enriched = enrichReportWithWikipedia(enriched, webCheck);
+        }
+        if (academicEvidence && academicEvidence.length > 0) {
+          console.debug("Academic evidence background lookup completed.", {
+            reportId: report.id,
+            sourceCount: academicEvidence.length,
+          });
+          enriched = enrichReportWithAcademicEvidence(enriched, academicEvidence);
+        }
+
         setCurrentReport((current) => current?.id === enriched.id ? { ...current, ...enriched } : current);
         setReports((current) => current.map((item) => item.id === enriched.id ? { ...item, ...enriched } : item));
         await storeReport(enriched);
