@@ -39,6 +39,18 @@ export type AcademicSearchQuery = {
   rank: number;
   /** The submission passage this query was derived from, verbatim (for citing in evidence). Equal to queryText for whole-passage queries. */
   sourcePassage: string;
+  /**
+   * Phase 5 addition: "sentence" (the original whole-sentence-window
+   * strategy) or "keyword" (extractKeywordQueries — a short, function-word-
+   * free query engineered for relevance-search precision under heavy
+   * paraphrasing; see phrase-extractor.ts's own comment). Deliberately a
+   * discrete type tag, not reused as a numeric priority — a keyword query
+   * and a sentence query are scored by two different, non-comparable
+   * formulas, so ranking them on one shared numeric scale would be
+   * arbitrary. candidate-ranker.ts uses this directly (see its own
+   * comment), never AcademicSearchQuery.rank, for exactly that reason.
+   */
+  queryType: "sentence" | "keyword";
 };
 
 /**
@@ -67,6 +79,15 @@ export type AcademicSearchResult = {
   querySignalUsed: string;
   /** Provider's own relevance/confidence signal for this result, if any, normalized to 0..1 within a single query's result set. Never a probability of plagiarism — purely "how well did this match the search query." */
   providerRelevance: number | null;
+  /**
+   * Phase 5 addition: which AcademicSearchQuery.queryType produced this
+   * result — set by orchestrator.ts after provider.search() returns, never
+   * by a provider itself (a provider has no visibility into query type,
+   * only query text). Optional/absent-safe: a manually-constructed
+   * AcademicSearchResult (existing tests, fixtures) that omits it is
+   * treated as "type unknown" by candidate-ranker.ts, not an error.
+   */
+  queryType?: "sentence" | "keyword";
 };
 
 export type AcademicSearchProviderError = {

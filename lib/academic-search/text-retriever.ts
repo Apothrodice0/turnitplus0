@@ -4,6 +4,22 @@ import type { AcademicSearchProvider } from "./provider";
 import type { AcademicSearchCandidate } from "./types";
 
 /**
+ * Phase 5: academic-search's own retriever, distinct from
+ * createHttpContentRetriever()'s bare default — enables "application/pdf"
+ * alongside the shared default's "text/html". A deliberately scoped,
+ * per-caller opt-in rather than widening DEFAULT_HTTP_CONTENT_RETRIEVER_CONFIG
+ * itself, since that default is also used by lib/source-discovery-registries.ts
+ * and lib/retrieval-correspondence-bridge.ts, whose own PDF-handling
+ * decision this phase does not make for them. A real, confirmed cause of
+ * retrieval failure: many open-access repositories (arXiv, RePEc/MPRA,
+ * numerous institutional repositories) serve their canonical full text as
+ * PDF only, with no HTML alternative — see this phase's own final report.
+ */
+export function createAcademicSearchContentRetriever(): SourceContentRetriever {
+  return createHttpContentRetriever({ allowedContentTypes: ["text/html", "application/pdf"] });
+}
+
+/**
  * Stage 6 of the pipeline: obtains whatever text is available for a ranked
  * candidate. Tries the cheapest path first — asking the contributing
  * provider(s) directly via getText(), which for a provider like CORE can
@@ -33,7 +49,7 @@ export type TextRetrievalResult = {
 export async function retrieveCandidateText(
   candidate: AcademicSearchCandidate,
   providers: Record<string, AcademicSearchProvider>,
-  contentRetriever: SourceContentRetriever = createHttpContentRetriever(),
+  contentRetriever: SourceContentRetriever = createAcademicSearchContentRetriever(),
 ): Promise<TextRetrievalResult> {
   const start = Date.now();
 

@@ -1,4 +1,3 @@
-import { createHttpContentRetriever } from "../http-content-retriever";
 import type { SourceContentRetriever } from "../retrieval-types";
 import { DEFAULT_CANDIDATE_RANKING_WEIGHTS, rankAcademicCandidates, type CandidateRankingWeights } from "./candidate-ranker";
 import { compareSubmissionToExternalText } from "./comparator";
@@ -6,7 +5,7 @@ import { deduplicateAcademicResults } from "./deduplicator";
 import { DEFAULT_PHRASE_EXTRACTION_CONFIG, extractCandidatePhrases, type PhraseExtractionConfig } from "./phrase-extractor";
 import { classifyAcademicSearchError, sanitizeAcademicSearchResults, type AcademicSearchProvider } from "./provider";
 import { normalizeAcademicResults } from "./result-normalizer";
-import { retrieveCandidateText } from "./text-retriever";
+import { createAcademicSearchContentRetriever, retrieveCandidateText } from "./text-retriever";
 import type {
   AcademicSearchProviderError,
   AcademicSearchResult,
@@ -50,7 +49,7 @@ export async function runAcademicSearch(
   submissionText: string,
   providers: AcademicSearchProvider[],
   config: AcademicSearchRunConfig = DEFAULT_ACADEMIC_SEARCH_RUN_CONFIG,
-  contentRetriever: SourceContentRetriever = createHttpContentRetriever(),
+  contentRetriever: SourceContentRetriever = createAcademicSearchContentRetriever(),
 ): Promise<AcademicSearchRunResult> {
   const totalStart = Date.now();
   const providerErrors: AcademicSearchProviderError[] = [];
@@ -67,7 +66,11 @@ export async function runAcademicSearch(
     for (const provider of providers) {
       try {
         const results = await provider.search(query);
-        rawResults.push(...sanitizeAcademicSearchResults(results));
+        // Phase 5: tag with this query's own type here, not inside the
+        // provider — a provider only ever sees query text, never which
+        // strategy produced it (see types.ts's own comment on
+        // AcademicSearchResult.queryType).
+        rawResults.push(...sanitizeAcademicSearchResults(results).map((result) => ({ ...result, queryType: query.queryType })));
       } catch (error) {
         providerErrors.push(classifyAcademicSearchError(provider.id, error));
       }

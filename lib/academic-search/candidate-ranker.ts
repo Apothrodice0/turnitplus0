@@ -15,6 +15,22 @@ export type CandidateRankingWeights = {
   /** Per additional independent contributor beyond the first — rewards candidates multiple queries/providers agreed on. */
   additionalContributor: number;
   providerRelevance: number;
+  /**
+   * Phase 5 addition: awarded once if ANY contributor came from a
+   * queryType "keyword" query (lib/academic-search/phrase-extractor.ts's
+   * extractKeywordQueries) rather than only "sentence" queries. Real,
+   * confirmed gap this closes: a candidate found ONLY by one precision-
+   * engineered keyword query (queryType "keyword", 1 contributor) was
+   * previously tied in rankScore with several genuinely irrelevant
+   * candidates ALSO at 1 contributor with textAvailable/doi/url — and lost
+   * the tie to an arbitrary alphabetical candidateKey comparison, landing
+   * outside maxCandidatesToRetrieve despite being the real match (see this
+   * phase's own final report). A keyword query exists specifically because
+   * it is a higher-precision, lower-recall signal than a full sentence —
+   * this weight reflects that its contributors deserve real ranking credit,
+   * not just a tiebreak nudge.
+   */
+  foundByKeywordQuery: number;
 };
 
 /** A starting point for the POC, not a calibrated weighting — same disclaimer as lib/discovery-candidates.ts's own DEFAULT_CANDIDATE_RANKING_WEIGHTS. */
@@ -24,6 +40,7 @@ export const DEFAULT_CANDIDATE_RANKING_WEIGHTS: CandidateRankingWeights = {
   textAvailable: 4,
   additionalContributor: 2,
   providerRelevance: 1,
+  foundByKeywordQuery: 3,
 };
 
 function maxProviderRelevance(candidate: AcademicSearchCandidate): number {
@@ -39,6 +56,7 @@ function rankScore(candidate: AcademicSearchCandidate, weights: CandidateRanking
   if (candidate.textAvailable) score += weights.textAvailable;
   score += Math.max(0, candidate.contributors.length - 1) * weights.additionalContributor;
   score += maxProviderRelevance(candidate) * weights.providerRelevance;
+  if (candidate.contributors.some((c) => c.queryType === "keyword")) score += weights.foundByKeywordQuery;
   return score;
 }
 

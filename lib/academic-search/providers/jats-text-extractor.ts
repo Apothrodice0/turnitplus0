@@ -48,21 +48,74 @@ function decodeNumericEntities(text: string): string {
     .replace(/&#(\d+);/g, (_, dec) => String.fromCodePoint(parseInt(dec, 10)));
 }
 
+/**
+ * Phase 5 finding: real publisher JATS XML (confirmed live against a PLOS
+ * Digital Health article's own fullTextXML) can carry invisible Unicode
+ * formatting characters — zero-width non-joiner, zero-width joiner, etc. —
+ * literally inside a word, typically as a numeric character reference
+ * (`&#x200c;`) surviving from the publisher's own typesetting pipeline
+ * (soft-hyphenation/ligature control), not from any tag this extractor
+ * strips. lib/similarity-core.ts's normalize() treats any character outside
+ * \p{L}\p{N}\s as a word boundary — these invisible marks are Unicode
+ * category Cf ("Format"), not \p{L}, so one sitting inside "assessment"
+ * silently splits it into "assessme" + "nt", corrupting every shingle that
+ * crosses the break. Stripped here (removed entirely, not replaced with a
+ * space — unlike a real word boundary, these characters carry no separation
+ * meaning) so lib/similarity-core.ts's own tokenization — which this file
+ * has no authority to change (used by report scoring, archive matching, and
+ * every E8S/E8P consumer) — sees the word as the publisher actually wrote
+ * it. Explicit, fixed list rather than a broad Unicode-category strip,
+ * matching lib/retrieval-safety.ts's own "small, auditable, easy to test
+ * exhaustively" convention.
+ */
+// U+200B ZERO WIDTH SPACE, U+200C ZERO WIDTH NON-JOINER, U+200D ZERO WIDTH
+// JOINER, U+2060 WORD JOINER, U+FEFF ZERO WIDTH NO-BREAK SPACE (BOM),
+// U+00AD SOFT HYPHEN — the confirmed-live case was two consecutive U+200C
+// inside "assessment"; the rest are the same class of invisible
+// typesetting-control character and equally corrupting if encountered.
+const INVISIBLE_FORMAT_CHARACTERS = /[\u200B\u200C\u200D\u2060\uFEFF\u00AD]/g;
+
+function stripInvisibleFormatCharacters(text: string): string {
+  return text.replace(INVISIBLE_FORMAT_CHARACTERS, "");
+}
+
 function extractSection(xml: string, tag: string): string | null {
   const match = xml.match(new RegExp(`<${tag}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${tag}>`, "i"));
   return match ? match[1] : null;
 }
 
 /**
- * Converts a JATS fullTextXML document into clean prose text. Falls back to
- * the article's <abstract> when no <body> is present (e.g. some OA records
- * only ever carry an abstract). Returns "" for input with neither — never
- * throws on malformed/unexpected XML, matching this subsystem's "text
- * unavailability is a normal outcome" rule (types.ts/text-retriever.ts).
+ * Phase 5 finding: the original version of this function extracted <body>
+ * only, falling back to <abstract> exclusively when <body> was absent —
+ * confirmed live (Europe PMC fullTextXML for a real PLOS Digital Health
+ * article) that this silently drops the abstract's own prose whenever a
+ * body exists, which is nearly always. A real submission verbatim-copying a
+ * paper's ABSTRACT — plausibly the single most commonly copied section of
+ * any paper, being its most accessible, self-contained summary — was
+ * therefore being compared against text that structurally could never
+ * contain a match, independent of any comparator/threshold behavior. Both
+ * sections are now extracted and concatenated (abstract first, matching
+ * natural reading order) whenever present; a record with only one of the
+ * two behaves exactly as before.
+ */
+function extractSourceSections(xml: string): string | null {
+  const abstract = extractSection(xml, "abstract");
+  const body = extractSection(xml, "body");
+  const parts = [abstract, body].filter((part): part is string => Boolean(part && part.trim()));
+  return parts.length > 0 ? parts.join("\n") : null;
+}
+
+/**
+ * Converts a JATS fullTextXML document into clean prose text — <abstract>
+ * and <body>, concatenated when both are present (see extractSourceSections
+ * above), whichever exist when only one is. Returns "" for input with
+ * neither — never throws on malformed/unexpected XML, matching this
+ * subsystem's "text unavailability is a normal outcome" rule
+ * (types.ts/text-retriever.ts).
  */
 export function extractTextFromJatsXml(xml: string): string {
-  const source = extractSection(xml, "body") ?? extractSection(xml, "abstract");
-  if (!source || !source.trim()) return "";
+  const source = extractSourceSections(xml);
+  if (!source) return "";
 
   let text = source
     .replace(/<!--[\s\S]*?-->/g, " ")
@@ -77,6 +130,7 @@ export function extractTextFromJatsXml(xml: string): string {
   for (const [pattern, replacement] of NAMED_ENTITY_REPLACEMENTS) {
     text = text.replace(pattern, replacement);
   }
+  text = stripInvisibleFormatCharacters(text);
 
   return text
     .replace(/[^\S\n]+/g, " ")

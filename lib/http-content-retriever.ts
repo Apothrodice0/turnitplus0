@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { canonicalSha256 } from "./document-identity";
 import { extractTextFromHtml, HTML_EXTRACTOR_VERSION } from "./html-text-extraction";
+import { extractPdfTextDocument, PDF_EXTRACTOR_VERSION, type PdfTextDocument } from "./pdf-text-extraction";
 import {
   DEFAULT_RETRIEVAL_SAFETY_CONFIG,
   validateUrlForRetrieval,
@@ -37,21 +38,45 @@ export type HttpContentRetrieverConfig = {
   timeoutMs: number;
   maxResponseBytes: number;
   maxExtractedTextLength: number;
-  /** Matched against the response's Content-Type media type only (parameters like charset are ignored). */
+  /** Matched against the response's Content-Type media type only (parameters like charset are ignored). Callers opt into "application/pdf" explicitly — see extractPdf below and this file's own header comment. */
   allowedContentTypes: string[];
+  /** Phase 5 addition: bounds PDF page extraction independently of maxResponseBytes — an untrusted candidate URL's PDF could be small in bytes but pathologically page-dense. Ignored entirely unless "application/pdf" is in allowedContentTypes. */
+  maxPdfPages: number;
   safety: RetrievalSafetyConfig;
   /** Injectable for tests — never defaults to a live call in a test context. */
   fetcher?: typeof fetch;
   lookup?: DnsLookupFn;
+  /** Injectable for tests — defaults to the real pdfjs-dist loader, never invoked when "application/pdf" is not an allowed content type. */
+  loadPdfDocument?: (bytes: Uint8Array) => Promise<PdfTextDocument>;
 };
 
 export const DEFAULT_HTTP_CONTENT_RETRIEVER_CONFIG: HttpContentRetrieverConfig = {
   timeoutMs: 10_000,
   maxResponseBytes: 2_000_000,
   maxExtractedTextLength: 200_000,
+  // Deliberately text/html only by default — this retriever is shared beyond
+  // academic-search (lib/source-discovery-registries.ts,
+  // lib/retrieval-correspondence-bridge.ts), and enabling PDF is an
+  // opt-in per-caller decision (see lib/academic-search/text-retriever.ts),
+  // not a blanket default-behavior change for every existing consumer.
   allowedContentTypes: ["text/html"],
+  maxPdfPages: 60,
   safety: DEFAULT_RETRIEVAL_SAFETY_CONFIG,
 };
+
+/**
+ * Phase 5: reuses the exact same pdfjs-dist wiring lib/e7-asjp-client.ts's
+ * own extractTextFromPdfBytes already established as this project's one
+ * safe server-side PDF text-layer path (lib/pdf-text-extraction.ts's
+ * extractPdfTextDocument) — not a second PDF extraction implementation.
+ * Only ever called after the SAME safety validation and maxResponseBytes
+ * cap already applied to every other content type by retrieve() below.
+ */
+async function loadPdfjsDocument(bytes: Uint8Array): Promise<PdfTextDocument> {
+  const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+  const document = await pdfjs.getDocument({ data: bytes }).promise;
+  return document as unknown as PdfTextDocument;
+}
 
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
@@ -197,12 +222,36 @@ export function createHttpContentRetriever(config: Partial<HttpContentRetrieverC
           return makeResult(url, "NO_CONTENT", { finalUrl: currentUrl, httpStatus: response.status, contentType });
         }
 
-        const decoded = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
-        if (!decoded.includes("<")) {
-          return makeResult(url, "MALFORMED_CONTENT", { finalUrl: currentUrl, httpStatus: response.status, contentType, errorMessage: "response claimed text/html but contained no markup" });
+        let extracted: string;
+        let extractorVersion: string;
+
+        if (contentType === "application/pdf") {
+          // Phase 5: no markup/decode precondition analogous to HTML's
+          // "must contain a '<'" check applies to a binary PDF — pdfjs
+          // itself is what validates the bytes are a real PDF, and a
+          // malformed file surfaces as a thrown error, handled below.
+          try {
+            const loadPdf = resolved.loadPdfDocument ?? loadPdfjsDocument;
+            const document = await loadPdf(bytes);
+            extracted = await extractPdfTextDocument(document, undefined, resolved.maxPdfPages);
+          } catch (error) {
+            return makeResult(url, "MALFORMED_CONTENT", {
+              finalUrl: currentUrl,
+              httpStatus: response.status,
+              contentType,
+              errorMessage: `PDF parsing failed: ${error instanceof Error ? error.message : String(error)}`,
+            });
+          }
+          extractorVersion = PDF_EXTRACTOR_VERSION;
+        } else {
+          const decoded = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+          if (!decoded.includes("<")) {
+            return makeResult(url, "MALFORMED_CONTENT", { finalUrl: currentUrl, httpStatus: response.status, contentType, errorMessage: "response claimed text/html but contained no markup" });
+          }
+          extracted = extractTextFromHtml(decoded);
+          extractorVersion = HTML_EXTRACTOR_VERSION;
         }
 
-        const extracted = extractTextFromHtml(decoded);
         if (!extracted.trim()) {
           return makeResult(url, "EXTRACTION_FAILED", { finalUrl: currentUrl, httpStatus: response.status, contentType, errorMessage: "no extractable text content found" });
         }
@@ -215,7 +264,7 @@ export function createHttpContentRetriever(config: Partial<HttpContentRetrieverC
           rawSha256: createHash("sha256").update(bytes).digest("hex"),
           extractedText: bounded,
           canonicalSha256: canonicalSha256(bounded),
-          extractorVersion: HTML_EXTRACTOR_VERSION,
+          extractorVersion,
         });
       }
     },

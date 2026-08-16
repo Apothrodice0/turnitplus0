@@ -46,6 +46,46 @@ test("falls back to <abstract> when there is no <body>", () => {
   assert.equal(text, "Abstract-only record text.");
 });
 
+// --- Phase 5 fix: <abstract> and <body> are both extracted when both are present ---
+
+test("Phase 5: when BOTH <abstract> and <body> are present, both are extracted and concatenated, abstract first — not just <body> as before", () => {
+  const xml = `<article>
+    <front><article-meta><abstract><p>This is the paper's own abstract summary text.</p></abstract></article-meta></front>
+    <body><sec><title>Introduction</title><p>This is the paper's separate introduction prose.</p></sec></body>
+  </article>`;
+  const text = extractTextFromJatsXml(xml);
+  assert.ok(text.includes("abstract summary text"), "abstract prose must be present");
+  assert.ok(text.includes("introduction prose"), "body prose must still be present too");
+  assert.ok(text.indexOf("abstract summary") < text.indexOf("introduction prose"), "abstract must come first, matching natural reading order");
+});
+
+test("Phase 5 regression: a submission verbatim-matching ONLY the abstract (not the body) now has real overlapping text to compare against", () => {
+  const xml = `<article>
+    <front><article-meta><abstract><p>Distinctive biochemical pathway analysis reveals unexpected metabolic divergence across independent cellular lineages.</p></abstract></article-meta></front>
+    <body><sec><p>A completely different, unrelated paragraph about the study's broader background and unrelated context, sharing no wording with the abstract at all here.</p></sec></body>
+  </article>`;
+  const text = extractTextFromJatsXml(xml);
+  assert.ok(text.includes("Distinctive biochemical pathway analysis reveals unexpected metabolic divergence"), "the old body-only extractor would have silently dropped this exact-match passage");
+});
+
+// --- Phase 5 fix: invisible Unicode formatting characters no longer split words ---
+
+test("Phase 5: a zero-width non-joiner (U+200C) embedded mid-word by the publisher's own numeric character reference is stripped, not treated as a word boundary", () => {
+  const xml = `<article><body><p>Pain assessme&#x200c;&#x200c;nt remains challenging.</p></body></article>`;
+  const text = extractTextFromJatsXml(xml);
+  assert.ok(text.includes("assessment"), "the word must be reassembled, not split into 'assessme' + 'nt'");
+  assert.ok(!text.includes("assessme "), "no stray space should remain where the invisible characters were");
+});
+
+test("Phase 5: other invisible-format characters (ZWSP, ZWJ, word joiner, BOM, soft hyphen) are also stripped", () => {
+  const xml = `<article><body><p>al&#x200b;go&#x200d;rithm and trans&#x2060;former and pre&#xfeff;fix and soft&#xad;hyphen.</p></body></article>`;
+  const text = extractTextFromJatsXml(xml);
+  assert.ok(text.includes("algorithm"));
+  assert.ok(text.includes("transformer"));
+  assert.ok(text.includes("prefix"));
+  assert.ok(text.includes("softhyphen"));
+});
+
 test("returns an empty string, never throws, for XML with neither body nor abstract", () => {
   const xml = `<article><front><article-meta><title-group><article-title>Just a title</article-title></title-group></article-meta></front></article>`;
   assert.equal(extractTextFromJatsXml(xml), "");

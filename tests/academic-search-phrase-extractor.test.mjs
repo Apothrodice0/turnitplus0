@@ -27,13 +27,16 @@ test("includes a long, lexically distinctive sentence", () => {
   assert.ok(queries.some((q) => q.queryText.includes("Photosynthetic efficiency")));
 });
 
-test("caps output at maxQueries even for a document with many distinctive sentences", () => {
+test("caps output at maxQueries plus keywordQueryCount even for a document with many distinctive sentences", () => {
   const sentences = Array.from(
     { length: 40 },
     (_, i) => `Distinctive terminology cluster number ${i} exhibits unusually specific vocabulary combinations rarely observed elsewhere.`,
   );
   const queries = extractCandidatePhrases(sentences.join(" "));
-  assert.ok(queries.length <= DEFAULT_PHRASE_EXTRACTION_CONFIG.maxQueries);
+  // Phase 5: total bound is now maxQueries sentence-based queries PLUS up to
+  // keywordQueryCount companion keyword queries (see extractKeywordQueries) —
+  // still a small, fixed, deterministic bound, never proportional to document length.
+  assert.ok(queries.length <= DEFAULT_PHRASE_EXTRACTION_CONFIG.maxQueries + DEFAULT_PHRASE_EXTRACTION_CONFIG.keywordQueryCount);
   assert.ok(queries.length >= DEFAULT_PHRASE_EXTRACTION_CONFIG.minQueries, "a long, uniformly distinctive document should reach the target minimum");
 });
 
@@ -67,11 +70,11 @@ test("assigns rank 0 to the highest-scoring candidate", () => {
   assert.equal(queries[0]?.rank, 0);
 });
 
-test("never exceeds ~20 queries for a very large document (no full-document leakage)", () => {
+test("never exceeds ~20 sentence queries plus a small fixed keyword-query addition for a very large document (no full-document leakage)", () => {
   const paragraph = Array.from(
     { length: 300 },
     (_, i) => `Sentence ${i} contains reasonably unique technical vocabulary about biochemistry synthesis pathways.`,
   ).join(" ");
   const queries = extractCandidatePhrases(paragraph);
-  assert.ok(queries.length <= 20);
+  assert.ok(queries.length <= 20 + DEFAULT_PHRASE_EXTRACTION_CONFIG.keywordQueryCount);
 });
