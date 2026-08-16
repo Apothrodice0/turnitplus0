@@ -4596,11 +4596,56 @@ main.report-main {
 .similarity-heading p,
 .filtered-block p,
 .top-sources-section > p,
-.source-detail-heading > p:not(.paper-kicker) {
+.source-detail-heading > p:not(.paper-kicker),
+.unified-similarity-block > p {
   margin: 7px 0 0;
   color: #6c7174;
   font-size: 10px;
   line-height: 1.55;
+}
+
+.unified-similarity-block {
+  padding: 20px 0 23px;
+  border-bottom: 1px solid #ccd1d3;
+}
+
+.unified-similarity-block h2 {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: baseline;
+  margin: 0;
+  font-size: 22px;
+  letter-spacing: -0.02em;
+  color: var(--blue-dark);
+}
+
+.unified-similarity-block h2 span {
+  font-size: 27px;
+  color: var(--blue);
+}
+
+.unified-similarity-block h2 em {
+  padding: 6px 9px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 8px;
+  font-style: normal;
+  font-weight: 850;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.unified-similarity-note {
+  margin-top: 10px;
+  padding: 9px 11px;
+  border: 1px solid #bfe0f0;
+  border-radius: 8px;
+  background: var(--blue-soft);
+  color: #0a4f6e;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1.5;
 }
 
 .filtered-block {

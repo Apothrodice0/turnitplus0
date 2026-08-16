@@ -9,6 +9,7 @@ import { runHistoricalMatchShadowEvaluation } from '../../../../lib/e8p-shadow-e
 import { getExperimentalHistoricalMatchForDisplay } from '../../../../lib/e8p-visibility';
 import { getReuseContextEligibility } from '../../../../lib/e8s-report-integration';
 import { runAfterResponse } from '../../../../lib/run-after-response';
+import { computeUnifiedSimilarity } from '../../../../lib/unified-similarity';
 import type { SimilarityReport } from '../../../../lib/report-types';
 
 const MAX_DEVICE_KEY_LENGTH = 200;
@@ -77,6 +78,26 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
           rawText: payload.text,
         });
         payload.historicalSubmissionMatch = historicalSubmissionMatch;
+        // Phase 6: the unified-similarity read-time attachment — same
+        // read-time-enrichment discipline as every block in this handler
+        // (never written back to saved_reports, recomputed fresh on every
+        // GET from data already resolved above). computeUnifiedSimilarity
+        // is a pure, synchronous function that never throws by its own
+        // contract (lib/unified-similarity.ts's own header comment); the
+        // try/catch here is only the same second, outer safety net every
+        // other read-time enrichment in this handler already has. Never
+        // touches payload.score/archiveScore/aiScore/E8S/E8P — see that
+        // file's own DECISION 3.
+        try {
+          payload.unifiedSimilarity = computeUnifiedSimilarity({
+            wordCount: payload.wordCount,
+            archiveMatchedPositions: payload.archiveMatchedPositions,
+            externalAcademicEvidence: payload.externalAcademicEvidence,
+            historicalSubmissionMatch,
+          });
+        } catch (err) {
+          console.error('computeUnifiedSimilarity failed (non-fatal):', err instanceof Error ? err.message : String(err));
+        }
         // Phase E8P.3: the experimental, allowlist-gated display value — see
         // lib/e8p-visibility.ts's own header comment. Synchronous (unlike the
         // shadow telemetry write below) because it must be part of THIS

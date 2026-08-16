@@ -109,10 +109,16 @@ async function deleteReport(deviceKey, id) {
   // (like Phase D's matchClassification elsewhere), deliberately always
   // present (even for NO_HISTORICAL_MATCH) so its version/audit metadata
   // stays inspectable — see tests/document-identity.test.mjs's identical
-  // adjustment for the full rationale.
-  const { historicalSubmissionMatch, ...getPayloadWithoutHistoricalMatch } = getBody.payload;
+  // adjustment for the full rationale. Phase 6 adds unifiedSimilarity as the
+  // same kind of read-time enrichment (lib/unified-similarity.ts, computed
+  // from historicalSubmissionMatch plus this payload's own
+  // archiveMatchedPositions/externalAcademicEvidence — see
+  // tests/unified-similarity-report-integration.test.mjs for its own
+  // dedicated coverage), so it gets the same exclusion here.
+  const { historicalSubmissionMatch, unifiedSimilarity, ...getPayloadWithoutHistoricalMatch } = getBody.payload;
   assert.equal(historicalSubmissionMatch?.status, 'NO_HISTORICAL_MATCH');
-  assert.deepEqual(getPayloadWithoutHistoricalMatch, payload, 'get must return the exact saved payload (aside from the new E8C enrichment field)');
+  assert.ok(unifiedSimilarity, 'unifiedSimilarity must also be attached as read-time enrichment');
+  assert.deepEqual(getPayloadWithoutHistoricalMatch, payload, 'get must return the exact saved payload (aside from the new E8C/Phase 6 enrichment fields)');
 
   const deleteRes = await deleteReport(deviceKey, payload.id);
   assert.equal(deleteRes.status, 200);

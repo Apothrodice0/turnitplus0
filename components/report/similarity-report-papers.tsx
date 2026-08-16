@@ -334,6 +334,69 @@ export function AcademicEvidenceSection({ report }: { report: SimilarityReport }
   );
 }
 
+/**
+ * Phase 6: the unified-similarity read-time result (lib/unified-similarity.ts,
+ * computed at read time in app/api/reports/[id]/route.ts and
+ * app/reports/[id]/page.tsx) rendered as its own additive section — never
+ * replaces or restyles the existing "Archive overlap" heading above it,
+ * matching the same "clearly separate, never a competing score" discipline
+ * AcademicEvidenceSection already established for external evidence.
+ * Renders nothing for a report that predates this phase, or when the
+ * read-time computation itself failed (both leave report.unifiedSimilarity
+ * undefined) — the existing Archive overlap section still renders normally
+ * either way.
+ */
+function unifiedEvidenceBreakdown(report: SimilarityReport): string[] {
+  const unified = report.unifiedSimilarity;
+  if (!unified) return [];
+  const parts: string[] = [];
+  if (unified.archiveOnlyWords > 0) {
+    parts.push(`${unified.archiveOnlyWords.toLocaleString()} word${unified.archiveOnlyWords === 1 ? "" : "s"} from TurnitPlus's own archive`);
+  }
+  if (unified.liveAcademicOnlyWords > 0) {
+    parts.push(`${unified.liveAcademicOnlyWords.toLocaleString()} word${unified.liveAcademicOnlyWords === 1 ? "" : "s"} from verified external academic sources`);
+  }
+  if (unified.previousUploadOnlyWords > 0) {
+    parts.push(`${unified.previousUploadOnlyWords.toLocaleString()} word${unified.previousUploadOnlyWords === 1 ? "" : "s"} from an eligible previous TurnitPlus submission`);
+  }
+  if (unified.overlapWords > 0) {
+    parts.push(`${unified.overlapWords.toLocaleString()} word${unified.overlapWords === 1 ? "" : "s"} identified by more than one source, counted once`);
+  }
+  return parts;
+}
+
+export function UnifiedSimilaritySection({ report }: { report: SimilarityReport }) {
+  const unified = report.unifiedSimilarity;
+  if (!unified) return null;
+  const verdict = similarityScoreBand(unified.unifiedScore);
+  const breakdown = unifiedEvidenceBreakdown(report);
+  const excludedSelf = unified.selfExcludedWords;
+  const excludedUnknown = unified.unknownExcludedWords;
+
+  return (
+    <section className={`unified-similarity-block ${verdict ? `unified-verdict-${verdict.key}` : ""}`}>
+      <h2>
+        <span>{unified.unifiedScore}%</span> TurnitPlus Similarity
+        {verdict && <em>{verdict.label}</em>}
+      </h2>
+      <p>
+        Combines TurnitPlus&apos;s own archive matches, verified external academic sources, and eligible previous
+        TurnitPlus submissions into one result. The same submitted passage found by more than one source counts once,
+        never added twice.
+      </p>
+      {breakdown.length > 0 && (
+        <p className="unified-similarity-note">{breakdown.join(" · ")}.</p>
+      )}
+      {(excludedSelf > 0 || excludedUnknown > 0) && (
+        <p>
+          {excludedSelf > 0 && `${excludedSelf.toLocaleString()} matched word${excludedSelf === 1 ? "" : "s"} came from your own earlier TurnitPlus submission and were excluded. `}
+          {excludedUnknown > 0 && `${excludedUnknown.toLocaleString()} matched word${excludedUnknown === 1 ? "" : "s"} came from content whose ownership could not be determined and were excluded.`}
+        </p>
+      )}
+    </section>
+  );
+}
+
 export function OverviewReport({ report }: { report: SimilarityReport }) {
   const overlapScore = archiveOverlapScore(report);
   const similarityVerdict = similarityScoreBand(overlapScore);
@@ -360,6 +423,14 @@ export function OverviewReport({ report }: { report: SimilarityReport }) {
             )}
           </p>
         </section>
+
+        {/* Phase 6: the combined unified-similarity result — placed directly
+            after Archive overlap (unchanged above) and before every
+            individual supporting-evidence block below, so a reader sees the
+            one combined number first, then the archive/live/prior-submission
+            breakdown that produced it. Renders nothing when unavailable —
+            see UnifiedSimilaritySection's own comment. */}
+        <UnifiedSimilaritySection report={report} />
 
         {/* Phase E8G: consolidated historical-submission presentation.
             Before this phase, Phase D's matchClassification (family-based)

@@ -1,6 +1,7 @@
 import type { WebCheckResult } from "@/lib/web-check-core";
 import type { ReportSummary } from "@/lib/reports-remote";
 import type { ExternalAcademicEvidence } from "@/lib/academic-search/types";
+import type { UnifiedSimilarityResult } from "@/lib/unified-similarity";
 import { AI_SCORING_VERSION, calibratedAiDisplaySignal } from "@/lib/ai-core";
 
 export type SourceType = "Internet" | "Publication";
@@ -201,6 +202,18 @@ export type SimilarityReport = {
    * checked" from "checked, nothing found."
    */
   externalAcademicEvidence?: ExternalAcademicEvidence[];
+  /**
+   * Phase 4A — EXPERIMENTAL, additive only. Output of
+   * lib/unified-similarity.ts's computeUnifiedSimilarity(), which is NOT
+   * called anywhere in report generation yet (see that file's own header
+   * comment) — this field only ever gets populated by whatever future
+   * phase decides to wire it in, and by test/benchmark code in the
+   * meantime. Never read by, or written into, score/archiveScore/aiScore/
+   * verifiedSimilarity/E8S/E8P, and never required: every consumer of
+   * SimilarityReport must keep working identically whether this field is
+   * present, absent, or from a report saved before Phase 4A existed.
+   */
+  unifiedSimilarity?: UnifiedSimilarityResult;
   wordCount: number;
   characterCount: number;
   pageCount: number;

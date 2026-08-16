@@ -12,6 +12,7 @@ import { runHistoricalMatchShadowEvaluation } from "@/lib/e8p-shadow-evaluation"
 import { getExperimentalHistoricalMatchForDisplay } from "@/lib/e8p-visibility";
 import { getReuseContextEligibility } from "@/lib/e8s-report-integration";
 import { runAfterResponse } from "@/lib/run-after-response";
+import { computeUnifiedSimilarity } from "@/lib/unified-similarity";
 import type { ReportMode, SimilarityReport } from "@/lib/report-types";
 import { ReportDetailShell } from "./report-detail-shell";
 
@@ -67,6 +68,20 @@ const loadOwnedReport = cache(async (id: string): Promise<OwnedReportResult> => 
         rawText: payload.text,
       });
       payload.historicalSubmissionMatch = historicalSubmissionMatch;
+      // Phase 6: same read-time unified-similarity attachment as
+      // GET /api/reports/[id] — see that route's identical comment for why
+      // this is safe (pure, synchronous, never touches score/archiveScore/
+      // aiScore/E8S/E8P) and why it needs no persistence of its own.
+      try {
+        payload.unifiedSimilarity = computeUnifiedSimilarity({
+          wordCount: payload.wordCount,
+          archiveMatchedPositions: payload.archiveMatchedPositions,
+          externalAcademicEvidence: payload.externalAcademicEvidence,
+          historicalSubmissionMatch,
+        });
+      } catch (err) {
+        console.error("computeUnifiedSimilarity failed (non-fatal):", err instanceof Error ? err.message : String(err));
+      }
       // Phase E8P.3: the experimental, allowlist-gated display value — see
       // lib/e8p-visibility.ts's own header comment and app/api/reports/[id]/route.ts's
       // identical comment. Synchronous, but isE8pVisibilityAllowlisted() is
