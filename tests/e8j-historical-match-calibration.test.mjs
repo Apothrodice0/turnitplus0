@@ -132,28 +132,30 @@ test("E: HEAVY_EDIT (~44% modified) -> still MATCHED under current thresholds, b
 
 // --- F: partial copy ----------------------------------------------------------------
 
-test("F: PARTIAL_COPY (~36% verbatim-copied, rest new) -> documented finding: NO_HISTORICAL_MATCH under current production thresholds, even though the copied passage is locally present and correctly localized at a lower threshold", async () => {
+test("F: PARTIAL_COPY (~36% verbatim-copied, rest new) -> MATCHED via distinctivePassageMatch (Phase 6.6 PART 2 fix; formerly a documented NO_HISTORICAL_MATCH limitation)", async () => {
   const f = fixture("PARTIAL_COPY");
   // f.actualModifiedPercent holds PARTIAL_COPY_PERCENT_COPIED (the COPIED
   // fraction) for this fixture specifically — see lib/e8j-calibration-fixtures.ts.
   assert.ok(f.actualModifiedPercent >= 0.30 && f.actualModifiedPercent <= 0.40, `expected 30-40% verbatim-copied by construction, measured ${f.actualModifiedPercent}`);
 
   const result = await match(ACCOUNT_B, f.text);
-  assert.equal(result.status, "NO_HISTORICAL_MATCH", "CURRENT BEHAVIOR (not a bug fix target): whole-document containment dilution means a ~36%-copied document does not surface as a historical match today");
+  assert.equal(result.status, "MATCHED", "Phase 6.6 PART 2: a substantial (400+ word) contiguous verbatim passage is now detected via distinctivePassageMatch even though whole-document containment dilution still keeps it below strongCorrespondence — see lib/document-correspondence.ts's own comment");
+  assert.equal(result.matches[0].matchType, "STRONG_TEXT_MATCH");
 
-  // Diagnostic: the copied passage IS locally detectable — computeDocumentCorrespondence
+  // Diagnostic: confirms WHICH gate accepted it — computeDocumentCorrespondence
   // is a pure function, so calling it directly here does not touch the real
   // thresholds constant or any production code path.
   const diag = computeDocumentCorrespondence(f.text, BASE_DOCUMENT, USER_SUBMISSION_MATCH_THRESHOLDS.correspondence);
   assert.ok(diag.containment > 0.30 && diag.containment < 0.40, `expected whole-document containment in (0.30, 0.40), got ${diag.containment}`);
-  assert.equal(diag.strongCorrespondence, false, "confirms containment falls below the current 0.5 threshold — this is why status is NO_HISTORICAL_MATCH");
+  assert.equal(diag.strongCorrespondence, false, "confirms containment still falls below the unchanged 0.5 whole-document threshold — strongCorrespondence itself is untouched by this fix");
+  assert.equal(diag.distinctivePassageMatch, true, "confirms it is distinctivePassageMatch, not strongCorrespondence, that now accepts this case");
 
   // J: passage correctness — the one diagnostic passage must fall entirely
   // within the known-copied zone (the first 4 paragraphs of the fixture),
   // never inside the deliberately-unrelated filler content appended after it.
   const copiedZoneText = PARTIAL_COPY_DOCUMENT.split("\n\n").slice(0, 4).join("\n\n");
   const copiedZoneWordCount = tokens(copiedZoneText).length;
-  assert.ok(diag.passages.length >= 1, "the copied passage must be found locally even though it doesn't clear the whole-document threshold");
+  assert.ok(diag.passages.length >= 1, "the copied passage must be found and localized");
   for (const p of diag.passages) {
     assert.ok(p.submittedWordEnd < copiedZoneWordCount, `passage [${p.submittedWordStart}-${p.submittedWordEnd}] must fall within the copied zone (0-${copiedZoneWordCount - 1}) — a passage outside it would mean generic/unrelated text was incorrectly selected`);
   }

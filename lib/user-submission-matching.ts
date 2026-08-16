@@ -88,6 +88,46 @@ export const USER_SUBMISSION_MATCH_THRESHOLDS: UserSubmissionMatchConfig = {
     minimumPassageLengthWords: 8,
     maxPassages: 10,
     maxPassageWords: 60,
+    /**
+     * Phase 6.6 PART 2: opts this production matcher into
+     * lib/document-correspondence.ts's distinctivePassageMatch signal (see
+     * that file's own comment for the mechanism, including the generic-
+     * academic-register density guardrail) — a confirmed real case (40
+     * exact copied words inside a 156-word source, ~25% document-level
+     * containment) was silently rejected by strongContainmentThreshold's
+     * whole-document gate alone despite being unambiguous verbatim reuse.
+     * 30 is chosen to sit with real margin on both sides of the two
+     * boundary cases this phase's own task explicitly names: comfortably
+     * above "common 10-20 word academic boilerplate" (which must NOT
+     * become a match) and comfortably below the real 40-word case that
+     * MUST be detected (measured longestMatchWords for that real fixture
+     * is 42, not 40 — the shingle-matched span, once informativeGram-
+     * filtered edges are included, ran slightly longer than the raw
+     * excerpt).
+     *
+     * Length alone was tried first and found insufficient: a real
+     * calibration fixture (tests/e8p-shadow-evaluation.test.mjs's own
+     * MANY_SHORT_COMMON_OVERLAPS vs HIST_GENERIC_DOCUMENT case) showed
+     * THREE independent short generic academic sentences (14-19 words
+     * each) can sit adjacent with no other text between them and merge
+     * into one 43-word contiguous span — a length comfortably inside the
+     * real 40-42 word case that must pass, so raising the length floor
+     * alone cannot separate them. lib/document-correspondence.ts's own
+     * GENERIC_ACADEMIC_REGISTER_WORDS density check (a corpus-independent,
+     * word-frequency-derived signal, not the corpus-frequency-based
+     * distinctiveness model other experimental modules in this codebase
+     * use — that model's own length bias and small-corpus reliability
+     * concerns are documented on its own source) resolves this: measured
+     * density is 0.098-0.125 on every genuine passage available for
+     * testing (the real 40-42 word case, several longer real fixtures) vs
+     * 0.565-0.625 on generic/concatenated-generic text, comfortable margin
+     * on both sides of the 0.4 cutoff. Verified against Phase 6.5's own
+     * real false-positive controls (topical similarity, generic
+     * boilerplate, genuine paraphrase) plus new boilerplate-length-
+     * specific regression cases — see
+     * tests/user-submission-matching.test.mjs's own PART 2 section.
+     */
+    minimumDistinctivePassageWords: 30,
   },
   candidateShingleThreshold: 3,
   maxCandidates: 10,
@@ -215,7 +255,16 @@ export async function matchAgainstUserSubmissionCorpus(
     const correspondence = computeDocumentCorrespondence(params.canonicalText, representation.canonicalText, config.correspondence);
     // Section 19/20: textual evidence is required — title/author alone,
     // and weak/common-phrase overlap alone, never produce a match here.
-    if (!correspondence.exactCanonicalMatch && !correspondence.strongCorrespondence) continue;
+    // Phase 6.6 PART 2: distinctivePassageMatch is a THIRD, independent
+    // acceptance path alongside the pre-existing two — a single
+    // sufficiently long, contiguous, exact/near-exact passage is now
+    // reportable evidence on its own even when the source document's
+    // overall containment ratio is low (see USER_SUBMISSION_MATCH_THRESHOLDS's
+    // own minimumDistinctivePassageWords comment). Fragmented evidence
+    // (several short spans that never individually reach the threshold) is
+    // still rejected here exactly as before — distinctivePassageMatch is
+    // computed from the SINGLE longest span, never a sum across spans.
+    if (!correspondence.exactCanonicalMatch && !correspondence.strongCorrespondence && !correspondence.distinctivePassageMatch) continue;
 
     const ownership = await summarizeSubmissionOwnership(client, representation.id, {
       accountId: params.accountId,

@@ -146,7 +146,24 @@ test("D: OFF switch — clearing E8P_VISIBILITY_ALLOWLIST hides the experimental
 
 // --- B/F: test-account partial visibility (PRIOR_SUBMISSION) ---------------
 
-test("B/F: test account + ~40% partial copy from a DIFFERENT account -> experimental HISTORICAL_PARTIAL_MATCH, PRIOR_SUBMISSION", async () => {
+// PHASE 6.7 UPDATE: this fixture (PARTIAL_COPY_SUBMITTED_TEXT, built around
+// e8k-calibration-fixtures.ts's LONG_BLOCK) no longer escapes production.
+// Phase 6.6 PART 2 added lib/document-correspondence.ts's distinctivePassageMatch
+// — a single sufficiently long, sufficiently non-generic contiguous passage
+// is now real production evidence on its own, independent of whole-document
+// containment dilution. LONG_BLOCK's ~377 words clear it comfortably, so
+// getOrComputeHistoricalMatchSnapshot now returns MATCHED here, and
+// getExperimentalHistoricalMatchForDisplay's own first gate
+// (lib/e8p-visibility.ts: "never runs, and never returns non-null, when
+// production already found a real match") correctly, unchangedly returns
+// null — exactly the same contract test A already established for an exact
+// copy, now also verified for this distinctive-passage case. See
+// tests/e8p-shadow-evaluation.test.mjs's own updated "partial-copy
+// discovery" comment for the fuller architectural note on why a realistic
+// single-passage fixture that production misses but the experimental
+// policy would uniquely catch is no longer constructible from this
+// codebase's existing calibration fixtures.
+test("B/F: test account + ~40% partial copy from a DIFFERENT account -> production now finds it directly (Phase 6.6 PART 2); the experimental path correctly stays silent, exactly as it already does for an exact match (test A)", async () => {
   await indexSubmission("e8p-vis-other-account", HIST_DISTINCTIVE_DOCUMENT);
   await indexSubmission("e8p-vis-noise-account", PARTIAL_COPY_NOISE_DOCUMENT);
 
@@ -156,27 +173,27 @@ test("B/F: test account + ~40% partial copy from a DIFFERENT account -> experime
   await ensureSavedReport(deviceKey, reportId, TEST_ACCOUNT);
 
   const productionResult = await getOrComputeHistoricalMatchSnapshot(client, { reportDeviceKey: deviceKey, reportId, accountId: TEST_ACCOUNT, rawText: PARTIAL_COPY_SUBMITTED_TEXT });
-  assert.equal(productionResult.status, "NO_HISTORICAL_MATCH", "precondition: production must not already show a match");
+  assert.equal(productionResult.status, "MATCHED", "Phase 6.7: production now finds this fixture directly via distinctivePassageMatch — see this test's own updated header comment");
+  assert.equal(productionResult.matches[0].relationshipType, "PRIOR_SUBMISSION");
 
   const result = await getExperimentalHistoricalMatchForDisplay(client, { accountId: TEST_ACCOUNT, rawText: PARTIAL_COPY_SUBMITTED_TEXT, productionResult });
-  assert.ok(result, "expected an experimental result for the allowlisted account");
-  assert.equal(result.status, "HISTORICAL_PARTIAL_MATCH");
-  assert.equal(result.relationship, "PRIOR_SUBMISSION");
-  assert.ok(result.matchedWordCount >= 50);
-  assert.ok(result.passages.length >= 1);
-  assert.match(result.disclaimer, /not a plagiarism verdict/i);
+  assert.equal(result, null, "the experimental path must never activate when production already found a real match — same contract as test A, now also true for this fixture");
 
   // L: telemetry is unaffected by this call — this module never writes to it.
   assert.equal(await shadowCount(deviceKey, reportId), 0, "getExperimentalHistoricalMatchForDisplay must never write shadow telemetry itself");
-  // K: production snapshot is unaffected.
+  // K: production snapshot reflects the real, now-MATCHED result, and is unaffected by the (no-op) experimental call.
   const snapshot = await snapshotRow(deviceKey, reportId);
   assert.ok(snapshot);
-  assert.equal(snapshot.status, "NO_HISTORICAL_MATCH");
+  assert.equal(snapshot.status, "MATCHED");
 });
 
 // --- E: SELF ----------------------------------------------------------------
 
-test("E: test account viewing their OWN previously-submitted content (diluted) -> experimental result shows SELF", async () => {
+// PHASE 6.7 UPDATE: same root cause as B/F above — see that test's own
+// header comment. Production now correctly classifies this as a real SELF
+// match directly (via distinctivePassageMatch), so the experimental path
+// correctly stays silent.
+test("E: test account viewing their OWN previously-submitted content (diluted) -> production now classifies it SELF directly (Phase 6.6 PART 2); the experimental path correctly stays silent", async () => {
   await indexSubmission(TEST_ACCOUNT, HIST_DISTINCTIVE_DOCUMENT); // the account's own earlier upload
   await indexSubmission("e8p-vis-self-noise-account", PARTIAL_COPY_NOISE_DOCUMENT);
 
@@ -186,16 +203,29 @@ test("E: test account viewing their OWN previously-submitted content (diluted) -
   await ensureSavedReport(deviceKey, reportId, TEST_ACCOUNT);
 
   const productionResult = await getOrComputeHistoricalMatchSnapshot(client, { reportDeviceKey: deviceKey, reportId, accountId: TEST_ACCOUNT, rawText: PARTIAL_COPY_SUBMITTED_TEXT });
-  assert.equal(productionResult.status, "NO_HISTORICAL_MATCH");
+  assert.equal(productionResult.status, "MATCHED", "Phase 6.7: production now finds this directly — see this test's own updated header comment");
+  assert.equal(productionResult.matches[0].relationshipType, "SELF", "correctly classified SELF, not PRIOR_SUBMISSION, since this account is its own earlier submitter");
 
   const result = await getExperimentalHistoricalMatchForDisplay(client, { accountId: TEST_ACCOUNT, rawText: PARTIAL_COPY_SUBMITTED_TEXT, productionResult });
-  assert.ok(result);
-  assert.equal(result.relationship, "SELF");
+  assert.equal(result, null, "the experimental path must never activate when production already found a real match");
 });
 
 // --- C: non-test account unchanged ------------------------------------------
 
-test("C: non-allowlisted account sees no experimental result for the exact same partial-copy scenario", async () => {
+// PHASE 6.7 UPDATE: same root cause as B/F and E above. With the REAL
+// production flow, PARTIAL_COPY_SUBMITTED_TEXT now resolves MATCHED for any
+// account (allowlisted or not — distinctivePassageMatch does not care who
+// is asking), so this fixture can no longer isolate "the allowlist itself
+// is what's gating display" from "production already matched it" using the
+// real flow alone — both would independently return null now. This test's
+// own specific purpose (prove the allowlist, not production's own state, is
+// the thing gating a non-allowlisted account) is preserved instead by
+// reusing the exact synthetic-productionResult technique test D already
+// established in this same file (a hand-constructed NO_HISTORICAL_MATCH
+// object, bypassing getOrComputeHistoricalMatchSnapshot's real, now-MATCHED
+// result) — this exercises getExperimentalHistoricalMatchForDisplay's own
+// allowlist check in isolation, exactly as before.
+test("C: non-allowlisted account sees no experimental result even when production's own gate would otherwise be open (isolates the allowlist check, same technique as test D)", async () => {
   await indexSubmission("e8p-vis-other-account-2", HIST_DISTINCTIVE_DOCUMENT);
   await indexSubmission("e8p-vis-noise-account-2", PARTIAL_COPY_NOISE_DOCUMENT);
 
@@ -204,11 +234,9 @@ test("C: non-allowlisted account sees no experimental result for the exact same 
   const reportId = "report-e8p-vis-nontest";
   await ensureSavedReport(deviceKey, reportId, NON_TEST_ACCOUNT);
 
-  const productionResult = await getOrComputeHistoricalMatchSnapshot(client, { reportDeviceKey: deviceKey, reportId, accountId: NON_TEST_ACCOUNT, rawText: PARTIAL_COPY_SUBMITTED_TEXT });
-  assert.equal(productionResult.status, "NO_HISTORICAL_MATCH");
-
-  const result = await getExperimentalHistoricalMatchForDisplay(client, { accountId: NON_TEST_ACCOUNT, rawText: PARTIAL_COPY_SUBMITTED_TEXT, productionResult });
-  assert.equal(result, null, "a non-allowlisted account must never receive an experimental result, even in the exact scenario that produces one for the test account");
+  const syntheticNoMatch = { status: "NO_HISTORICAL_MATCH", computedAt: new Date().toISOString(), matcherVersion: "v", fingerprintVersion: "v", canonicalizationVersion: "v" };
+  const result = await getExperimentalHistoricalMatchForDisplay(client, { accountId: NON_TEST_ACCOUNT, rawText: PARTIAL_COPY_SUBMITTED_TEXT, productionResult: syntheticNoMatch });
+  assert.equal(result, null, "a non-allowlisted account must never receive an experimental result, even when production's own real-match gate is bypassed and the underlying corpus content would otherwise qualify for the test account");
 });
 
 // --- G: NO_HISTORICAL_MATCH (nothing at all) --------------------------------
@@ -247,6 +275,21 @@ test("A: test account + exact copy -> production's own MATCHED result is untouch
 
 // --- H/I/J: invariance and privacy, verified via the real deferred+display paths together ---
 
+// PHASE 6.7 UPDATE: this test's own purpose is different from B/F/E/C above
+// — those prove WHEN the experimental path does/doesn't activate; this one
+// verifies WHAT the experimental result itself looks like once it exists
+// (score invariance, no identity leakage, current-document-only passages).
+// With the REAL production flow, PARTIAL_COPY_SUBMITTED_TEXT now resolves
+// MATCHED (Phase 6.6 PART 2 — see B/F's own header comment), which would
+// make getExperimentalHistoricalMatchForDisplay correctly return null
+// before ever reaching the content this test needs to inspect. Reuses the
+// same synthetic-productionResult technique as test C/D (a hand-constructed
+// NO_HISTORICAL_MATCH object) to genuinely drive the experimental path's
+// own internal computation for this check — lib/e8p-visibility.ts computes
+// its own per-candidate whole-document signal fresh from
+// computeDocumentCorrespondence regardless of the caller-supplied
+// productionResult, so this still exercises its real passage/privacy logic
+// end to end, only bypassing the outer gate this test is not about.
 test("H/I/J: score/archiveScore invariant, no identity leakage, passages are current-document-only", async () => {
   await indexSubmission("e8p-vis-hij-other-account", HIST_DISTINCTIVE_DOCUMENT);
   await indexSubmission("e8p-vis-hij-noise-account", PARTIAL_COPY_NOISE_DOCUMENT);
@@ -262,9 +305,9 @@ test("H/I/J: score/archiveScore invariant, no identity leakage, passages are cur
     args: [reportId, deviceKey, "sub-" + reportId, "Fixture Report", new Date().toISOString(), 100, 5, "Low", JSON.stringify(payload), TEST_ACCOUNT],
   });
 
-  const productionResult = await getOrComputeHistoricalMatchSnapshot(client, { reportDeviceKey: deviceKey, reportId, accountId: TEST_ACCOUNT, rawText: PARTIAL_COPY_SUBMITTED_TEXT });
-  const result = await getExperimentalHistoricalMatchForDisplay(client, { accountId: TEST_ACCOUNT, rawText: PARTIAL_COPY_SUBMITTED_TEXT, productionResult });
-  assert.ok(result);
+  const syntheticNoMatch = { status: "NO_HISTORICAL_MATCH", computedAt: new Date().toISOString(), matcherVersion: "v", fingerprintVersion: "v", canonicalizationVersion: "v" };
+  const result = await getExperimentalHistoricalMatchForDisplay(client, { accountId: TEST_ACCOUNT, rawText: PARTIAL_COPY_SUBMITTED_TEXT, productionResult: syntheticNoMatch });
+  assert.ok(result, "the experimental path's own internal candidate search must still genuinely find and classify this content when its outer gate is bypassed");
 
   // H: score/archiveScore on the underlying report row are untouched.
   const reportRow = await client.execute({ sql: "SELECT archive_score, payload_json FROM saved_reports WHERE device_key = ? AND id = ?", args: [deviceKey, reportId] });

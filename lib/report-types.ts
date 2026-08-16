@@ -260,6 +260,13 @@ export const SIMILARITY_BAND_LABELS = {
   high: "High archive overlap",
 } as const;
 
+/** Phase 7: same band keys/thresholds as SIMILARITY_BAND_LABELS (both are fed by the same similarityScoreBand()) — only the wording differs, for the headline built from primarySimilarityScore() rather than archiveOverlapScore() alone. */
+export const PRIMARY_SIMILARITY_BAND_LABELS = {
+  low: "Low similarity",
+  review: "Moderate similarity",
+  high: "High similarity",
+} as const;
+
 export const ARCHIVE_DOCUMENT_FALLBACK = 230;
 
 export function archiveDocumentCount(corpusVersion: string) {
@@ -273,6 +280,46 @@ export function archiveScopeCount(report: SimilarityReport) {
 
 export function archiveOverlapScore(report: SimilarityReport) {
   return report.archiveScore ?? report.score;
+}
+
+/**
+ * Phase 7: the customer-facing headline number — "TurnitPlus Similarity."
+ * Prefers the unified result (archive + verified live academic evidence +
+ * eligible previous-submission evidence, deduplicated into one set of
+ * matched positions — see lib/unified-similarity.ts) whenever it has been
+ * computed for this report; falls back to the existing archive-only score
+ * for a report where it hasn't (a legacy report saved before Phase 6, or
+ * the rare case where the read-time computation itself failed). Never
+ * reads or derives from report.score/archiveScore directly beyond that
+ * fallback — this is a DISPLAY selection, not a new scoring computation,
+ * and report.score/archiveScore themselves are untouched by its existence.
+ */
+export function primarySimilarityScore(report: SimilarityReport) {
+  return report.unifiedSimilarity?.unifiedScore ?? archiveOverlapScore(report);
+}
+
+/** True when primarySimilarityScore(report) reflects the full unified result rather than the archive-only fallback. */
+export function hasUnifiedSimilarity(report: SimilarityReport): boolean {
+  return report.unifiedSimilarity !== undefined;
+}
+
+/**
+ * Phase 7 PRIORITY 6: a short, plain-language list of which evidence
+ * channels contributed matched words to the unified score — for surfaces
+ * (the receipt PDF) that show one summary line rather than the full
+ * per-source breakdown UnifiedSimilaritySection already renders. Reads
+ * only the *OnlyWords/overlapWords counts, never contributions (those stay
+ * internal-only per UnifiedEvidenceContribution's own comment). Returns
+ * "no matched sources" rather than an empty string so the PDF never prints
+ * a blank value.
+ */
+export function unifiedEvidenceSummary(unified: UnifiedSimilarityResult): string {
+  const parts: string[] = [];
+  if (unified.archiveOnlyWords > 0 || unified.overlapWords > 0) parts.push("archive");
+  if (unified.liveAcademicOnlyWords > 0) parts.push("live academic sources");
+  if (unified.previousUploadOnlyWords > 0) parts.push("a prior submission");
+  if (parts.length === 0) return "no matched sources";
+  return parts.join(", ");
 }
 
 export function archiveMatchedWordCount(report: SimilarityReport) {

@@ -1,6 +1,75 @@
 import { canonicalSha256 } from "./document-identity";
 import { documentShingleHashes } from "./document-family";
-import { acceptedSimilaritySpans, containment, grams, gramHash, informativeGram, tokens } from "./similarity-core";
+import { acceptedSimilaritySpans, containment, grams, gramHash, informativeGram, tokens, type SimilaritySpan } from "./similarity-core";
+
+/**
+ * Phase 6.6 PART 2, second finding: distinctivePassageMatch's own initial
+ * length-only design (see that field's comment) was found — via a real E8N/
+ * E8K/E8P calibration fixture (MANY_SHORT_COMMON_OVERLAPS vs
+ * HIST_GENERIC_DOCUMENT, tests/e8p-shadow-evaluation.test.mjs) — to
+ * incorrectly accept THREE INDEPENDENT short generic academic sentences
+ * that happened to sit adjacent with no other text between them (43
+ * contiguous shared words, none individually near 30, but merged by
+ * acceptedSimilaritySpans's own adjacency rule since informativeGram
+ * already accepts ordinary academic verbs/nouns like "findings," "review,"
+ * "material" as individually "informative"). Two false-positive-risk
+ * concatenated generic sentences (14-19 words each) and one genuine 40-42
+ * word distinctive passage sit in an OVERLAPPING length range (28-46
+ * words), so raising minimumDistinctivePassageWords alone cannot separate
+ * them without also rejecting the real case this phase exists to detect.
+ *
+ * This word list is a SEPARATE, LOCALLY-SCOPED addition — it is NOT a
+ * change to lib/similarity-core.ts's own COMMON_WORDS/informativeGram
+ * (which every other consumer, including archive scoring and live-search
+ * comparison, depends on staying exactly as calibrated) — only
+ * distinctivePassageMatch's own acceptance decision reads it.
+ *
+ * Derived empirically, not hand-guessed: every word appearing 5+ times
+ * across this codebase's own existing, already-validated "this is what
+ * generic academic boilerplate looks like" reference text —
+ * lib/e8l-calibration-corpus.ts's MASTER_GENERIC_DOCUMENT (80 sentences)
+ * plus lib/e8k-calibration-fixtures.ts's GENERIC_BOILERPLATE_POOL and
+ * SHORT_COMMON_SNIPPETS (the exact fixtures the failing test above uses) —
+ * a combined ~1,600-word reference sample. Copied as a static list here
+ * (not imported from those files) because both are documented test/
+ * calibration fixture modules with no I/O and are not meant to become a
+ * production runtime dependency; this file's own value was generated once
+ * offline and is reviewed as plain data, the same as COMMON_WORDS itself.
+ *
+ * Verified (this phase's own probe) to cleanly separate every available
+ * real case: LONG_BLOCK (genuine, should pass) scores 0.098; the real
+ * distinctive 42-word vent-ecology passage scores 0.125; a real Kernza
+ * abstract excerpt scores 0.036; GENERIC_100 (pure boilerplate) scores
+ * 0.565; the failing concatenated-short-sentences passage scores 0.625.
+ * 0.4 sits with wide margin (>0.27) on both sides of every measured case.
+ */
+const GENERIC_ACADEMIC_REGISTER_WORDS = new Set([
+  "above", "additional", "analysis", "appropriate", "assignment", "below", "broader", "consideration",
+  "consistent", "course", "described", "discussion", "document", "during", "every", "findings",
+  "following", "follows", "from", "further", "general", "here", "material", "more", "noted",
+  "observations", "paper", "present", "presented", "prior", "procedure", "process", "question",
+  "related", "reported", "research", "results", "review", "scope", "section", "sections", "should",
+  "standard", "study", "taken", "terms", "that", "these", "this", "throughout", "topic", "treatment",
+  "used", "using", "with", "within", "work",
+]);
+const GENERIC_ACADEMIC_REGISTER_DENSITY_LIMIT = 0.4;
+
+/**
+ * Fraction of the passage's own words (length >= 4, the same floor
+ * informativeGram already uses) drawn from GENERIC_ACADEMIC_REGISTER_WORDS.
+ * A genuine distinctive passage naturally uses a handful of ordinary
+ * academic words too (e.g. "research team interpreted") — this measures
+ * DENSITY across the whole passage, not the presence of any single word,
+ * which is what gives it real separation margin (see this constant's own
+ * comment for the measured numbers) rather than being a second, stricter
+ * per-word blocklist layered on top of informativeGram.
+ */
+function genericAcademicRegisterDensity(words: string[]): number {
+  const longWords = words.filter((word) => word.length >= 4);
+  if (longWords.length === 0) return 1; // no real content at all -> treat as maximally generic, never distinctive
+  const genericCount = longWords.filter((word) => GENERIC_ACADEMIC_REGISTER_WORDS.has(word)).length;
+  return genericCount / longWords.length;
+}
 
 /**
  * Phase E6C: the pure provenance-correspondence engine — deliberately
@@ -43,6 +112,20 @@ export type DocumentCorrespondenceThresholds = {
   minimumPassageLengthWords: number;
   maxPassages: number;
   maxPassageWords: number;
+  /**
+   * Phase 6.6 PART 2 addition, OPTIONAL and additive — undefined here (and
+   * in every existing caller of DEFAULT_DOCUMENT_CORRESPONDENCE_THRESHOLDS
+   * that does not explicitly set it) reproduces today's exact behavior with
+   * zero change: distinctivePassageMatch is only ever computed as true when
+   * a caller opts in. See DocumentCorrespondenceResult.distinctivePassageMatch
+   * for what it measures and why it exists as a SEPARATE signal from
+   * strongCorrespondence rather than folded into it — strongCorrespondence's
+   * own value/meaning is deliberately never changed by this addition, since
+   * other experimental modules in this codebase already depend on it
+   * meaning exactly what it always has, and redefining it here would be an
+   * unreviewed change to their own input contract, not just to this file.
+   */
+  minimumDistinctivePassageWords?: number;
 };
 
 /**
@@ -89,6 +172,24 @@ export type DocumentCorrespondenceResult = {
   thresholdsVersion: string;
   exactCanonicalMatch: boolean;
   strongCorrespondence: boolean;
+  /**
+   * Phase 6.6 PART 2: true when a SINGLE contiguous accepted span (already
+   * informativeGram-filtered — see the shingle-matching loop below; this
+   * reuses that existing filter, it does not add a second one) reaches
+   * thresholds.minimumDistinctivePassageWords, independent of
+   * strongCorrespondence's whole-document containment ratio. Exists because
+   * containment (shared/min(submitted,external) shingle count) rejects a
+   * short verbatim passage embedded in a much longer source document even
+   * when the passage itself is unambiguous, real, exact textual reuse — a
+   * confirmed real case (40 exact words inside a 156-word source, ~25%
+   * containment) that strongCorrespondence's document-level gate alone
+   * cannot express. Deliberately a SEPARATE field, never merged into
+   * strongCorrespondence itself — see minimumDistinctivePassageWords's own
+   * comment for why. Always false when the threshold is left unset
+   * (default), or on the exactCanonicalMatch/empty-input short-circuits
+   * (both already return a definitive answer through their own fields).
+   */
+  distinctivePassageMatch: boolean;
 };
 
 function emptyResult(
@@ -112,6 +213,7 @@ function emptyResult(
     thresholdsVersion: DOCUMENT_CORRESPONDENCE_THRESHOLDS_VERSION,
     exactCanonicalMatch: false,
     strongCorrespondence: false,
+    distinctivePassageMatch: false,
     ...overrides,
   };
 }
@@ -191,11 +293,27 @@ export function computeDocumentCorrespondence(
     .sort((a, b) => b.matchedWordCount - a.matchedWordCount)
     .slice(0, thresholds.maxPassages);
 
-  const longestMatchWords = acceptedGlobalSpans.reduce((max, [start, end]) => Math.max(max, end - start + 1), 0);
+  let longestSpan: SimilaritySpan | null = null;
+  const longestMatchWords = acceptedGlobalSpans.reduce((max, span) => {
+    const length = span[1] - span[0] + 1;
+    if (length > max) longestSpan = span;
+    return Math.max(max, length);
+  }, 0);
   const overallContainment = containment(sharedCount, submittedShingles.size, externalShingles.size);
   const sourceConcentration = sharedCount / Math.max(1, externalShingles.size);
   const strongCorrespondence = overallContainment >= thresholds.strongContainmentThreshold
     && acceptedPositions.size >= thresholds.minimumMatchedWords;
+  // See GENERIC_ACADEMIC_REGISTER_WORDS's own header comment: a long
+  // contiguous shared span alone is not sufficient — several independent
+  // short generic sentences can merge into one long span via
+  // acceptedSimilaritySpans's adjacency rule. Measured on the actual
+  // longest span's own words, not the whole submission, so a genuinely
+  // distinctive passage elsewhere in a mostly-generic document is judged
+  // on its own content.
+  const longestSpanWords = longestSpan ? submittedWords.slice(longestSpan[0], longestSpan[1] + 1) : [];
+  const distinctivePassageMatch = thresholds.minimumDistinctivePassageWords !== undefined
+    && longestMatchWords >= thresholds.minimumDistinctivePassageWords
+    && genericAcademicRegisterDensity(longestSpanWords) < GENERIC_ACADEMIC_REGISTER_DENSITY_LIMIT;
 
   return {
     method: "shingle_containment",
@@ -211,5 +329,6 @@ export function computeDocumentCorrespondence(
     thresholdsVersion: DOCUMENT_CORRESPONDENCE_THRESHOLDS_VERSION,
     exactCanonicalMatch: false,
     strongCorrespondence,
+    distinctivePassageMatch,
   };
 }

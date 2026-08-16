@@ -12,7 +12,11 @@ test("product branding presents AI detection and scoped archive overlap clearly"
 
   assert.match(page, /AI & similarity detection/);
   assert.match(page, /Check AI writing and similarity/);
-  assert.match(page, /TurnitPlus checks AI-writing signals and measures text found in its indexed archive/);
+  // Phase 7 PRIORITY 2: this paragraph was updated to also describe live
+  // academic sources (lib/academic-search/'s OpenAIRE + Europe PMC) rather
+  // than implying the archive is the only thing checked, without removing
+  // the archive-overlap disclosure itself.
+  assert.match(page, /TurnitPlus checks AI-writing signals and measures similarity against its indexed archive/);
   assert.match(aiReport, /ENGLISH AI WRITING ANALYSIS/);
   assert.match(aiReport, /AI writing score/);
   assert.doesNotMatch(page, /EXPERIMENTAL ENGLISH AI WRITING SIGNAL/);

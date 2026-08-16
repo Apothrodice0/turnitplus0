@@ -1,0 +1,1738 @@
+{
+  "archiveMeta": {
+    "corpusVersion": "archive-v4-230-4553fba3a7",
+    "documentCount": 230,
+    "riskCutoff": 7
+  },
+  "generatedAt": "2026-08-16T17:06:08.944Z",
+  "results": [
+    {
+      "caseId": "A",
+      "description": "ORIGINAL — no meaningful source overlap",
+      "realArchiveMatchedWordCount": 0,
+      "realArchiveScore": 0,
+      "realLiveEvidenceCount": 0,
+      "realLiveStats": {
+        "queryCount": 17,
+        "searchLatencyMs": 14845,
+        "candidateCountBeforeDedup": 58,
+        "candidateCountAfterDedup": 56,
+        "deduplicationRate": 0.034482758620689655,
+        "candidatesTextRetrieved": 5,
+        "textRetrievalLatencyMs": 1456,
+        "comparisonLatencyMs": 95,
+        "totalLatencyMs": 16410,
+        "providerErrors": []
+      },
+      "wordCount": 291,
+      "oldScore": 0,
+      "unifiedSimilarity": {
+        "version": "unified-similarity-v1",
+        "wordCount": 291,
+        "unifiedScore": 0,
+        "uniqueMatchedWords": 0,
+        "archiveOnlyWords": 0,
+        "liveAcademicOnlyWords": 0,
+        "previousUploadOnlyWords": 0,
+        "overlapWords": 0,
+        "selfExcludedWords": 0,
+        "unknownExcludedWords": 0,
+        "contributions": []
+      }
+    },
+    {
+      "caseId": "B",
+      "description": "EXACT SMALL — small exact copied passage",
+      "excerptWordCount": 40,
+      "wordCount": 156,
+      "realArchiveMatchedWordCount": 0,
+      "historicalSubmissionMatch": {
+        "computedAt": "2026-08-16T17:05:33.319Z",
+        "matcherVersion": "user-submission-match-v1",
+        "fingerprintVersion": "corpus-shingle-v1",
+        "canonicalizationVersion": "canonical-text-v1",
+        "status": "NO_HISTORICAL_MATCH"
+      },
+      "oldScore": 0,
+      "unifiedSimilarity": {
+        "version": "unified-similarity-v1",
+        "wordCount": 156,
+        "unifiedScore": 0,
+        "uniqueMatchedWords": 0,
+        "archiveOnlyWords": 0,
+        "liveAcademicOnlyWords": 0,
+        "previousUploadOnlyWords": 0,
+        "overlapWords": 0,
+        "selfExcludedWords": 0,
+        "unknownExcludedWords": 0,
+        "contributions": []
+      }
+    },
+    {
+      "caseId": "C",
+      "description": "EXACT MEDIUM — medium copied passage",
+      "excerptWordCount": 200,
+      "wordCount": 319,
+      "realArchiveMatchedWordCount": 0,
+      "historicalSubmissionMatch": {
+        "computedAt": "2026-08-16T17:05:33.468Z",
+        "matcherVersion": "user-submission-match-v1",
+        "fingerprintVersion": "corpus-shingle-v1",
+        "canonicalizationVersion": "canonical-text-v1",
+        "status": "MATCHED",
+        "matches": [
+          {
+            "relationshipType": "PRIOR_SUBMISSION",
+            "matchedRepresentationId": "8c868076-94e0-4866-9025-74f6ea289426",
+            "matchType": "STRONG_TEXT_MATCH",
+            "containment": 0.9403973509933775,
+            "matchedWordCount": 155,
+            "passageCount": 3,
+            "longestMatchWords": 64,
+            "passages": [
+              {
+                "submittedText": "a separate line of independent original commentary precedes the borrowed material below written specifically to surround the embedded excerpt with clearly unrelated freshly composed sentences about an entirely different subject so that the matcher s shingle windows have unambiguous non matching context on both sides this paragraph exists purely as structural padding for a validation exercise and describes nothing about",
+                "submittedWordStart": 1,
+                "submittedWordEnd": 64,
+                "matchedWordCount": 64
+              },
+              {
+                "submittedText": "separately and again entirely unrelated to the passage above this closing paragraph discusses an unrelated logistics topic shipping container scheduling variance at a regional freight terminal over a six month observation period included here only to give the submitted document realistic surrounding length and additional non matching padding text",
+                "submittedWordStart": 270,
+                "submittedWordEnd": 318,
+                "matchedWordCount": 49
+              },
+              {
+                "submittedText": "mat forming taxa paired fluid chemistry samples supported this interpretation hydrogen sulfide concentrations measured immediately adjacent to dense tubeworm bushes were consistently lower than concentrations measured at open mat dominated patches sampled during the same visit despite both sample types being drawn",
+                "submittedWordStart": 106,
+                "submittedWordEnd": 147,
+                "matchedWordCount": 42
+              }
+            ],
+            "historicalSubmissionCount": 1
+          },
+          {
+            "relationshipType": "PRIOR_SUBMISSION",
+            "matchedRepresentationId": "25bac6f5-4b06-4958-8726-4c9af17b5a91",
+            "matchType": "STRONG_TEXT_MATCH",
+            "containment": 0.6401273885350318,
+            "matchedWordCount": 205,
+            "passageCount": 1,
+            "longestMatchWords": 205,
+            "passages": [
+              {
+                "submittedText": "tubeworm bushes altered local fluid flow and substrate availability the research team interpreted this decline as evidence of active ecosystem engineering by the tubeworms themselves rather than a simple consequence of diffuse flow chemistry drifting away from conditions favorable to the mat forming taxa paired fluid chemistry samples supported this interpretation hydrogen sulfide concentrations measured immediately adjacent to dense tubeworm",
+                "submittedWordStart": 65,
+                "submittedWordEnd": 269,
+                "matchedWordCount": 205
+              }
+            ],
+            "historicalSubmissionCount": 1
+          }
+        ]
+      },
+      "oldScore": 0,
+      "unifiedSimilarity": {
+        "version": "unified-similarity-v1",
+        "wordCount": 319,
+        "unifiedScore": 100,
+        "uniqueMatchedWords": 318,
+        "archiveOnlyWords": 0,
+        "liveAcademicOnlyWords": 0,
+        "previousUploadOnlyWords": 318,
+        "overlapWords": 0,
+        "selfExcludedWords": 0,
+        "unknownExcludedWords": 0,
+        "contributions": [
+          {
+            "sourceType": "previous_upload",
+            "sourceId": "8c868076-94e0-4866-9025-74f6ea289426",
+            "submittedWordStart": 1,
+            "submittedWordEnd": 64,
+            "matchedWordCount": 64,
+            "relationship": "PRIOR_SUBMISSION",
+            "evidenceStatus": "included"
+          },
+          {
+            "sourceType": "previous_upload",
+            "sourceId": "8c868076-94e0-4866-9025-74f6ea289426",
+            "submittedWordStart": 270,
+            "submittedWordEnd": 318,
+            "matchedWordCount": 49,
+            "relationship": "PRIOR_SUBMISSION",
+            "evidenceStatus": "included"
+          },
+          {
+            "sourceType": "previous_upload",
+            "sourceId": "8c868076-94e0-4866-9025-74f6ea289426",
+            "submittedWordStart": 106,
+            "submittedWordEnd": 147,
+            "matchedWordCount": 42,
+            "relationship": "PRIOR_SUBMISSION",
+            "evidenceStatus": "included"
+          },
+          {
+            "sourceType": "previous_upload",
+            "sourceId": "25bac6f5-4b06-4958-8726-4c9af17b5a91",
+            "submittedWordStart": 65,
+            "submittedWordEnd": 269,
+            "matchedWordCount": 205,
+            "relationship": "PRIOR_SUBMISSION",
+            "evidenceStatus": "included"
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "D",
+      "description": "EXACT LARGE — large copied portion",
+      "excerptWordCount": 483,
+      "wordCount": 613,
+      "realArchiveMatchedWordCount": 5,
+      "historicalSubmissionMatch": {
+        "computedAt": "2026-08-16T17:05:33.647Z",
+        "matcherVersion": "user-submission-match-v1",
+        "fingerprintVersion": "corpus-shingle-v1",
+        "canonicalizationVersion": "canonical-text-v1",
+        "status": "MATCHED",
+        "matches": [
+          {
+            "relationshipType": "PRIOR_SUBMISSION",
+            "matchedRepresentationId": "4d1c5211-d8ea-4949-ab5a-6261c1232e99",
+            "matchType": "STRONG_TEXT_MATCH",
+            "containment": 0.9713375796178344,
+            "matchedWordCount": 318,
+            "passageCount": 3,
+            "longestMatchWords": 205,
+            "passages": [
+              {
+                "submittedText": "tubeworm bushes altered local fluid flow and substrate availability the research team interpreted this decline as evidence of active ecosystem engineering by the tubeworms themselves rather than a simple consequence of diffuse flow chemistry drifting away from conditions favorable to the mat forming taxa paired fluid chemistry samples supported this interpretation hydrogen sulfide concentrations measured immediately adjacent to dense tubeworm",
+                "submittedWordStart": 159,
+                "submittedWordEnd": 363,
+                "matchedWordCount": 205
+              },
+              {
+                "submittedText": "a separate line of independent original commentary precedes the borrowed material below written specifically to surround the embedded excerpt with clearly unrelated freshly composed sentences about an entirely different subject so that the matcher s shingle windows have unambiguous non matching context on both sides this paragraph exists purely as structural padding for a validation exercise and describes nothing about",
+                "submittedWordStart": 1,
+                "submittedWordEnd": 64,
+                "matchedWordCount": 64
+              },
+              {
+                "submittedText": "separately and again entirely unrelated to the passage above this closing paragraph discusses an unrelated logistics topic shipping container scheduling variance at a regional freight terminal over a six month observation period included here only to give the submitted document realistic surrounding length and additional non matching padding text",
+                "submittedWordStart": 564,
+                "submittedWordEnd": 612,
+                "matchedWordCount": 49
+              }
+            ],
+            "historicalSubmissionCount": 1
+          },
+          {
+            "relationshipType": "PRIOR_SUBMISSION",
+            "matchedRepresentationId": "8c868076-94e0-4866-9025-74f6ea289426",
+            "matchType": "STRONG_TEXT_MATCH",
+            "containment": 0.9403973509933775,
+            "matchedWordCount": 155,
+            "passageCount": 3,
+            "longestMatchWords": 64,
+            "passages": [
+              {
+                "submittedText": "a separate line of independent original commentary precedes the borrowed material below written specifically to surround the embedded excerpt with clearly unrelated freshly composed sentences about an entirely different subject so that the matcher s shingle windows have unambiguous non matching context on both sides this paragraph exists purely as structural padding for a validation exercise and describes nothing about",
+                "submittedWordStart": 1,
+                "submittedWordEnd": 64,
+                "matchedWordCount": 64
+              },
+              {
+                "submittedText": "separately and again entirely unrelated to the passage above this closing paragraph discusses an unrelated logistics topic shipping container scheduling variance at a regional freight terminal over a six month observation period included here only to give the submitted document realistic surrounding length and additional non matching padding text",
+                "submittedWordStart": 564,
+                "submittedWordEnd": 612,
+                "matchedWordCount": 49
+              },
+              {
+                "submittedText": "mat forming taxa paired fluid chemistry samples supported this interpretation hydrogen sulfide concentrations measured immediately adjacent to dense tubeworm bushes were consistently lower than concentrations measured at open mat dominated patches sampled during the same visit despite both sample types being drawn",
+                "submittedWordStart": 200,
+                "submittedWordEnd": 241,
+                "matchedWordCount": 42
+              }
+            ],
+            "historicalSubmissionCount": 1
+          },
+          {
+            "relationshipType": "PRIOR_SUBMISSION",
+            "matchedRepresentationId": "25bac6f5-4b06-4958-8726-4c9af17b5a91",
+            "matchType": "STRONG_TEXT_MATCH",
+            "containment": 0.8870967741935484,
+            "matchedWordCount": 499,
+            "passageCount": 1,
+            "longestMatchWords": 499,
+            "passages": [
+              {
+                "submittedText": "to characterize the physical envelope surrounding each colonized structure tubeworm aggregations at the freshly resurfaced orifices were absent during the first post eruption survey but had reached near maximal areal coverage by the third revisit a recovery trajectory considerably faster than comparable observations reported from other slow spreading ridge segments microbial mat coverage followed a distinct and reproducible successional pattern",
+                "submittedWordStart": 65,
+                "submittedWordEnd": 563,
+                "matchedWordCount": 499
+              }
+            ],
+            "historicalSubmissionCount": 1
+          }
+        ]
+      },
+      "oldScore": 1,
+      "unifiedSimilarity": {
+        "version": "unified-similarity-v1",
+        "wordCount": 613,
+        "unifiedScore": 100,
+        "uniqueMatchedWords": 612,
+        "archiveOnlyWords": 0,
+        "liveAcademicOnlyWords": 0,
+        "previousUploadOnlyWords": 607,
+        "overlapWords": 5,
+        "selfExcludedWords": 0,
+        "unknownExcludedWords": 0,
+        "contributions": [
+          {
+            "sourceType": "previous_upload",
+            "sourceId": "4d1c5211-d8ea-4949-ab5a-6261c1232e99",
+            "submittedWordStart": 159,
+            "submittedWordEnd": 363,
+            "matchedWordCount": 205,
+            "relationship": "PRIOR_SUBMISSION",
+            "evidenceStatus": "included"
+          },
+          {
+            "sourceType": "previous_upload",
+            "sourceId": "4d1c5211-d8ea-4949-ab5a-6261c1232e99",
+            "submittedWordStart": 1,
+            "submittedWordEnd": 64,
+            "matchedWordCount": 64,
+            "relationship": "PRIOR_SUBMISSION",
+            "evidenceStatus": "included"
+          },
+          {
+            "sourceType": "previous_upload",
+            "sourceId": "4d1c5211-d8ea-4949-ab5a-6261c1232e99",
+            "submittedWordStart": 564,
+            "submittedWordEnd": 612,
+            "matchedWordCount": 49,
+            "relationship": "PRIOR_SUBMISSION",
+            "evidenceStatus": "included"
+          },
+          {
+            "sourceType": "previous_upload",
+            "sourceId": "8c868076-94e0-4866-9025-74f6ea289426",
+            "submittedWordStart": 1,
+            "submittedWordEnd": 64,
+            "matchedWordCount": 64,
+            "relationship": "PRIOR_SUBMISSION",
+            "evidenceStatus": "included"
+          },
+          {
+            "sourceType": "previous_upload",
+            "sourceId": "8c868076-94e0-4866-9025-74f6ea289426",
+            "submittedWordStart": 564,
+            "submittedWordEnd": 612,
+            "matchedWordCount": 49,
+            "relationship": "PRIOR_SUBMISSION",
+            "evidenceStatus": "included"
+          },
+          {
+            "sourceType": "previous_upload",
+            "sourceId": "8c868076-94e0-4866-9025-74f6ea289426",
+            "submittedWordStart": 200,
+            "submittedWordEnd": 241,
+            "matchedWordCount": 42,
+            "relationship": "PRIOR_SUBMISSION",
+            "evidenceStatus": "included"
+          },
+          {
+            "sourceType": "previous_upload",
+            "sourceId": "25bac6f5-4b06-4958-8726-4c9af17b5a91",
+            "submittedWordStart": 65,
+            "submittedWordEnd": 563,
+            "matchedWordCount": 499,
+            "relationship": "PRIOR_SUBMISSION",
+            "evidenceStatus": "included"
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "E",
+      "description": "EXACT FULL — essentially complete source reuse",
+      "wordCount": 562,
+      "historicalSubmissionMatch": {
+        "computedAt": "2026-08-16T17:05:33.790Z",
+        "matcherVersion": "user-submission-match-v1",
+        "fingerprintVersion": "corpus-shingle-v1",
+        "canonicalizationVersion": "canonical-text-v1",
+        "status": "MATCHED",
+        "matches": [
+          {
+            "relationshipType": "PRIOR_SUBMISSION",
+            "matchedRepresentationId": "25bac6f5-4b06-4958-8726-4c9af17b5a91",
+            "matchType": "EXACT_CANONICAL_MATCH",
+            "containment": 1,
+            "matchedWordCount": 562,
+            "passageCount": 0,
+            "longestMatchWords": 562,
+            "passages": [],
+            "historicalSubmissionCount": 1
+          },
+          {
+            "relationshipType": "PRIOR_SUBMISSION",
+            "matchedRepresentationId": "7e055f4d-3fd2-4a1d-a48f-68235f345e41",
+            "matchType": "STRONG_TEXT_MATCH",
+            "containment": 0.8870967741935484,
+            "matchedWordCount": 499,
+            "passageCount": 1,
+            "longestMatchWords": 499,
+            "passages": [
+              {
+                "submittedText": "to characterize the physical envelope surrounding each colonized structure tubeworm aggregations at the freshly resurfaced orifices were absent during the first post eruption survey but had reached near maximal areal coverage by the third revisit a recovery trajectory considerably faster than comparable observations reported from other slow spreading ridge segments microbial mat coverage followed a distinct and reproducible successional pattern",
+                "submittedWordStart": 63,
+                "submittedWordEnd": 561,
+                "matchedWordCount": 499
+              }
+            ],
+            "historicalSubmissionCount": 1
+          },
+          {
+            "relationshipType": "PRIOR_SUBMISSION",
+            "matchedRepresentationId": "4d1c5211-d8ea-4949-ab5a-6261c1232e99",
+            "matchType": "STRONG_TEXT_MATCH",
+            "containment": 0.6401273885350318,
+            "matchedWordCount": 205,
+            "passageCount": 1,
+            "longestMatchWords": 205,
+            "passages": [
+              {
+                "submittedText": "tubeworm bushes altered local fluid flow and substrate availability the research team interpreted this decline as evidence of active ecosystem engineering by the tubeworms themselves rather than a simple consequence of diffuse flow chemistry drifting away from conditions favorable to the mat forming taxa paired fluid chemistry samples supported this interpretation hydrogen sulfide concentrations measured immediately adjacent to dense tubeworm",
+                "submittedWordStart": 157,
+                "submittedWordEnd": 361,
+                "matchedWordCount": 205
+              }
+            ],
+            "historicalSubmissionCount": 1
+          }
+        ]
+      },
+      "oldScore": 1,
+      "unifiedSimilarity": {
+        "version": "unified-similarity-v1",
+        "wordCount": 562,
+        "unifiedScore": 100,
+        "uniqueMatchedWords": 562,
+        "archiveOnlyWords": 0,
+        "liveAcademicOnlyWords": 0,
+        "previousUploadOnlyWords": 557,
+        "overlapWords": 5,
+        "selfExcludedWords": 0,
+        "unknownExcludedWords": 0,
+        "contributions": [
+          {
+            "sourceType": "previous_upload",
+            "sourceId": "25bac6f5-4b06-4958-8726-4c9af17b5a91",
+            "submittedWordStart": 0,
+            "submittedWordEnd": 561,
+            "matchedWordCount": 562,
+            "relationship": "PRIOR_SUBMISSION",
+            "evidenceStatus": "included"
+          },
+          {
+            "sourceType": "previous_upload",
+            "sourceId": "7e055f4d-3fd2-4a1d-a48f-68235f345e41",
+            "submittedWordStart": 63,
+            "submittedWordEnd": 561,
+            "matchedWordCount": 499,
+            "relationship": "PRIOR_SUBMISSION",
+            "evidenceStatus": "included"
+          },
+          {
+            "sourceType": "previous_upload",
+            "sourceId": "4d1c5211-d8ea-4949-ab5a-6261c1232e99",
+            "submittedWordStart": 157,
+            "submittedWordEnd": 361,
+            "matchedWordCount": 205,
+            "relationship": "PRIOR_SUBMISSION",
+            "evidenceStatus": "included"
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "F",
+      "description": "MULTI-SOURCE — two genuinely different sources, different submitted positions",
+      "wordCount": 775,
+      "inSituLiveEvidenceCount": 0,
+      "inSituLiveStats": {
+        "queryCount": 23,
+        "searchLatencyMs": 13845,
+        "candidateCountBeforeDedup": 45,
+        "candidateCountAfterDedup": 22,
+        "deduplicationRate": 0.5111111111111111,
+        "candidatesTextRetrieved": 4,
+        "textRetrievalLatencyMs": 648,
+        "comparisonLatencyMs": 13,
+        "totalLatencyMs": 14507,
+        "providerErrors": []
+      },
+      "note": "live evidence for this case reuses the real Clathrin evidence object captured standalone (case H's own source) and remapped to this document's own disjoint word positions — see the budget-exhaustion finding in the comment above",
+      "historicalSubmissionMatch": {
+        "computedAt": "2026-08-16T17:05:55.542Z",
+        "matcherVersion": "user-submission-match-v1",
+        "fingerprintVersion": "corpus-shingle-v1",
+        "canonicalizationVersion": "canonical-text-v1",
+        "status": "MATCHED",
+        "matches": [
+          {
+            "relationshipType": "PRIOR_SUBMISSION",
+            "matchedRepresentationId": "25bac6f5-4b06-4958-8726-4c9af17b5a91",
+            "matchType": "STRONG_TEXT_MATCH",
+            "containment": 0.8870967741935484,
+            "matchedWordCount": 499,
+            "passageCount": 1,
+            "longestMatchWords": 499,
+            "passages": [
+              {
+                "submittedText": "to characterize the physical envelope surrounding each colonized structure tubeworm aggregations at the freshly resurfaced orifices were absent during the first post eruption survey but had reached near maximal areal coverage by the third revisit a recovery trajectory considerably faster than comparable observations reported from other slow spreading ridge segments microbial mat coverage followed a distinct and reproducible successional pattern",
+                "submittedWordStart": 0,
+                "submittedWordEnd": 498,
+                "matchedWordCount": 499
+              }
+            ],
+            "historicalSubmissionCount": 2
+          },
+          {
+            "relationshipType": "PRIOR_SUBMISSION",
+            "matchedRepresentationId": "7e055f4d-3fd2-4a1d-a48f-68235f345e41",
+            "matchType": "STRONG_TEXT_MATCH",
+            "containment": 0.8154859967051071,
+            "matchedWordCount": 499,
+            "passageCount": 1,
+            "longestMatchWords": 499,
+            "passages": [
+              {
+                "submittedText": "to characterize the physical envelope surrounding each colonized structure tubeworm aggregations at the freshly resurfaced orifices were absent during the first post eruption survey but had reached near maximal areal coverage by the third revisit a recovery trajectory considerably faster than comparable observations reported from other slow spreading ridge segments microbial mat coverage followed a distinct and reproducible successional pattern",
+                "submittedWordStart": 0,
+                "submittedWordEnd": 498,
+                "matchedWordCount": 499
+              }
+            ],
+            "historicalSubmissionCount": 1
+          },
+          {
+            "relationshipType": "PRIOR_SUBMISSION",
+            "matchedRepresentationId": "4d1c5211-d8ea-4949-ab5a-6261c1232e99",
+            "matchType": "STRONG_TEXT_MATCH",
+            "containment": 0.6401273885350318,
+            "matchedWordCount": 205,
+            "passageCount": 1,
+            "longestMatchWords": 205,
+            "passages": [
+              {
+                "submittedText": "tubeworm bushes altered local fluid flow and substrate availability the research team interpreted this decline as evidence of active ecosystem engineering by the tubeworms themselves rather than a simple consequence of diffuse flow chemistry drifting away from conditions favorable to the mat forming taxa paired fluid chemistry samples supported this interpretation hydrogen sulfide concentrations measured immediately adjacent to dense tubeworm",
+                "submittedWordStart": 94,
+                "submittedWordEnd": 298,
+                "matchedWordCount": 205
+              }
+            ],
+            "historicalSubmissionCount": 1
+          }
+        ]
+      },
+      "oldScore": 1,
+      "unifiedSimilarity": {
+        "version": "unified-similarity-v1",
+        "wordCount": 775,
+        "unifiedScore": 98,
+        "uniqueMatchedWords": 760,
+        "archiveOnlyWords": 0,
+        "liveAcademicOnlyWords": 256,
+        "previousUploadOnlyWords": 479,
+        "overlapWords": 25,
+        "selfExcludedWords": 0,
+        "unknownExcludedWords": 0,
+        "contributions": [
+          {
+            "sourceType": "europe_pmc",
+            "sourceId": "doi:10.1111/tra.70038",
+            "submittedWordStart": 484,
+            "submittedWordEnd": 759,
+            "matchedWordCount": 276,
+            "evidenceStatus": "included"
+          },
+          {
+            "sourceType": "previous_upload",
+            "sourceId": "25bac6f5-4b06-4958-8726-4c9af17b5a91",
+            "submittedWordStart": 0,
+            "submittedWordEnd": 498,
+            "matchedWordCount": 499,
+            "relationship": "PRIOR_SUBMISSION",
+            "evidenceStatus": "included"
+          },
+          {
+            "sourceType": "previous_upload",
+            "sourceId": "7e055f4d-3fd2-4a1d-a48f-68235f345e41",
+            "submittedWordStart": 0,
+            "submittedWordEnd": 498,
+            "matchedWordCount": 499,
+            "relationship": "PRIOR_SUBMISSION",
+            "evidenceStatus": "included"
+          },
+          {
+            "sourceType": "previous_upload",
+            "sourceId": "4d1c5211-d8ea-4949-ab5a-6261c1232e99",
+            "submittedWordStart": 94,
+            "submittedWordEnd": 298,
+            "matchedWordCount": 205,
+            "relationship": "PRIOR_SUBMISSION",
+            "evidenceStatus": "included"
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "G",
+      "description": "SAME-PASSAGE MULTI-SOURCE — real prior-submission + real live evidence on (nearly) the same passage",
+      "wordCount": 277,
+      "realLiveEvidenceCount": 1,
+      "liveMatchedPassages": [
+        {
+          "submittedText": "kernza intermediate wheatgrass thinopyrum intermedium host barkworth d r dewey is a novel dual use perennial grain and forage crop with environmental and economic benefits for farmers perennial crop byproducts such as kernza straw have been suggested as an alternative forage source in livestock systems however there is limited information on cattle performance offered kernza straw therefore our study assessed",
+          "submittedWordStart": 0,
+          "submittedWordEnd": 169,
+          "matchedWordCount": 170
+        },
+        {
+          "submittedText": "01 there were no changes in body condition among cows fed different diets in both trials p 0 05 therefore 50 kernza straw can be successfully used in beef cow diets at least for 60 days without negative impacts on animal performance and potential economic and environmental benefits",
+          "submittedWordStart": 229,
+          "submittedWordEnd": 276,
+          "matchedWordCount": 48
+        },
+        {
+          "submittedText": "with no differences in trial 2 p 0 13 daily dry matter intake did not change in trial 1 p",
+          "submittedWordStart": 181,
+          "submittedWordEnd": 200,
+          "matchedWordCount": 20
+        },
+        {
+          "submittedText": "08 while for the cows offered kernza straw it was reduced from",
+          "submittedWordStart": 202,
+          "submittedWordEnd": 213,
+          "matchedWordCount": 12
+        }
+      ],
+      "historicalSubmissionMatch": {
+        "computedAt": "2026-08-16T17:06:07.258Z",
+        "matcherVersion": "user-submission-match-v1",
+        "fingerprintVersion": "corpus-shingle-v1",
+        "canonicalizationVersion": "canonical-text-v1",
+        "status": "MATCHED",
+        "matches": [
+          {
+            "relationshipType": "PRIOR_SUBMISSION",
+            "matchedRepresentationId": "309d7181-e613-4e70-89bc-9de3be7e366c",
+            "matchType": "EXACT_CANONICAL_MATCH",
+            "containment": 1,
+            "matchedWordCount": 277,
+            "passageCount": 0,
+            "longestMatchWords": 277,
+            "passages": [],
+            "historicalSubmissionCount": 1
+          }
+        ]
+      },
+      "oldScore": 0,
+      "unifiedSimilarity": {
+        "version": "unified-similarity-v1",
+        "wordCount": 277,
+        "unifiedScore": 100,
+        "uniqueMatchedWords": 277,
+        "archiveOnlyWords": 0,
+        "liveAcademicOnlyWords": 0,
+        "previousUploadOnlyWords": 27,
+        "overlapWords": 250,
+        "selfExcludedWords": 0,
+        "unknownExcludedWords": 0,
+        "contributions": [
+          {
+            "sourceType": "europe_pmc",
+            "sourceId": "doi:10.1093/tas/txaf131",
+            "submittedWordStart": 0,
+            "submittedWordEnd": 169,
+            "matchedWordCount": 170,
+            "evidenceStatus": "included"
+          },
+          {
+            "sourceType": "europe_pmc",
+            "sourceId": "doi:10.1093/tas/txaf131",
+            "submittedWordStart": 229,
+            "submittedWordEnd": 276,
+            "matchedWordCount": 48,
+            "evidenceStatus": "included"
+          },
+          {
+            "sourceType": "europe_pmc",
+            "sourceId": "doi:10.1093/tas/txaf131",
+            "submittedWordStart": 181,
+            "submittedWordEnd": 200,
+            "matchedWordCount": 20,
+            "evidenceStatus": "included"
+          },
+          {
+            "sourceType": "europe_pmc",
+            "sourceId": "doi:10.1093/tas/txaf131",
+            "submittedWordStart": 202,
+            "submittedWordEnd": 213,
+            "matchedWordCount": 12,
+            "evidenceStatus": "included"
+          },
+          {
+            "sourceType": "previous_upload",
+            "sourceId": "309d7181-e613-4e70-89bc-9de3be7e366c",
+            "submittedWordStart": 0,
+            "submittedWordEnd": 276,
+            "matchedWordCount": 277,
+            "relationship": "PRIOR_SUBMISSION",
+            "evidenceStatus": "included"
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "H",
+      "description": "LIVE-ONLY — archive misses source, live academic search finds it",
+      "wordCount": 276,
+      "realLiveEvidenceCount": 1,
+      "realLiveEvidence": [
+        {
+          "provider": "europe-pmc",
+          "doi": "10.1111/tra.70038",
+          "similarity": 100,
+          "matchedPassages": [
+            {
+              "submittedText": "clathrin mediated endocytosis cme relies on the dynamic assembly and remodeling of clathrin coats to drive membrane curvature and vesicle formation at the plasma membrane although live cell fluorescence microscopy has provided critical insights into the timing and molecular composition of endocytic events directly linking the nanoscale lateral organization of clathrin coats to their three dimensional progression in real time",
+              "submittedWordStart": 0,
+              "submittedWordEnd": 275,
+              "matchedWordCount": 276
+            }
+          ]
+        }
+      ],
+      "realArchiveMatchedWordCount": 5,
+      "historicalSubmissionMatch": {
+        "computedAt": "2026-08-16T17:06:07.638Z",
+        "matcherVersion": "user-submission-match-v1",
+        "fingerprintVersion": "corpus-shingle-v1",
+        "canonicalizationVersion": "canonical-text-v1",
+        "status": "MATCHED",
+        "matches": [
+          {
+            "relationshipType": "UNKNOWN_RELATIONSHIP",
+            "matchedRepresentationId": "4f2308a2-c4f1-427f-946d-fd64a5dc2918",
+            "matchType": "STRONG_TEXT_MATCH",
+            "containment": 1,
+            "matchedWordCount": 276,
+            "passageCount": 1,
+            "longestMatchWords": 276,
+            "passages": [
+              {
+                "submittedText": "clathrin mediated endocytosis cme relies on the dynamic assembly and remodeling of clathrin coats to drive membrane curvature and vesicle formation at the plasma membrane although live cell fluorescence microscopy has provided critical insights into the timing and molecular composition of endocytic events directly linking the nanoscale lateral organization of clathrin coats to their three dimensional progression in real time",
+                "submittedWordStart": 0,
+                "submittedWordEnd": 275,
+                "matchedWordCount": 276
+              }
+            ],
+            "historicalSubmissionCount": 1
+          }
+        ]
+      },
+      "oldScore": 2,
+      "unifiedSimilarity": {
+        "version": "unified-similarity-v1",
+        "wordCount": 276,
+        "unifiedScore": 100,
+        "uniqueMatchedWords": 276,
+        "archiveOnlyWords": 0,
+        "liveAcademicOnlyWords": 271,
+        "previousUploadOnlyWords": 0,
+        "overlapWords": 5,
+        "selfExcludedWords": 0,
+        "unknownExcludedWords": 276,
+        "contributions": [
+          {
+            "sourceType": "europe_pmc",
+            "sourceId": "doi:10.1111/tra.70038",
+            "submittedWordStart": 0,
+            "submittedWordEnd": 275,
+            "matchedWordCount": 276,
+            "evidenceStatus": "included"
+          },
+          {
+            "sourceType": "previous_upload",
+            "sourceId": "4f2308a2-c4f1-427f-946d-fd64a5dc2918",
+            "submittedWordStart": 0,
+            "submittedWordEnd": 275,
+            "matchedWordCount": 276,
+            "relationship": "UNKNOWN_RELATIONSHIP",
+            "evidenceStatus": "excluded_unknown"
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "I",
+      "description": "ARCHIVE-ONLY (substituted with prior-submission-only — see disclosed limitation)",
+      "wordCount": 319,
+      "realArchiveMatchedWordCount": 0,
+      "historicalSubmissionMatch": {
+        "computedAt": "2026-08-16T17:06:07.893Z",
+        "matcherVersion": "user-submission-match-v1",
+        "fingerprintVersion": "corpus-shingle-v1",
+        "canonicalizationVersion": "canonical-text-v1",
+        "status": "MATCHED",
+        "matches": [
+          {
+            "relationshipType": "PRIOR_SUBMISSION",
+            "matchedRepresentationId": "4d1c5211-d8ea-4949-ab5a-6261c1232e99",
+            "matchType": "STRONG_TEXT_MATCH",
+            "containment": 0.9968152866242038,
+            "matchedWordCount": 318,
+            "passageCount": 1,
+            "longestMatchWords": 318,
+            "passages": [
+              {
+                "submittedText": "a separate line of independent original commentary precedes the borrowed material below written specifically to surround the embedded excerpt with clearly unrelated freshly composed sentences about an entirely different subject so that the matcher s shingle windows have unambiguous non matching context on both sides this paragraph exists purely as structural padding for a validation exercise and describes nothing about",
+                "submittedWordStart": 1,
+                "submittedWordEnd": 318,
+                "matchedWordCount": 318
+              }
+            ],
+            "historicalSubmissionCount": 1
+          },
+          {
+            "relationshipType": "PRIOR_SUBMISSION",
+            "matchedRepresentationId": "7e055f4d-3fd2-4a1d-a48f-68235f345e41",
+            "matchType": "STRONG_TEXT_MATCH",
+            "containment": 0.9713375796178344,
+            "matchedWordCount": 318,
+            "passageCount": 1,
+            "longestMatchWords": 318,
+            "passages": [
+              {
+                "submittedText": "a separate line of independent original commentary precedes the borrowed material below written specifically to surround the embedded excerpt with clearly unrelated freshly composed sentences about an entirely different subject so that the matcher s shingle windows have unambiguous non matching context on both sides this paragraph exists purely as structural padding for a validation exercise and describes nothing about",
+                "submittedWordStart": 1,
+                "submittedWordEnd": 318,
+                "matchedWordCount": 318
+              }
+            ],
+            "historicalSubmissionCount": 1
+          },
+          {
+            "relationshipType": "PRIOR_SUBMISSION",
+            "matchedRepresentationId": "8c868076-94e0-4866-9025-74f6ea289426",
+            "matchType": "STRONG_TEXT_MATCH",
+            "containment": 0.9403973509933775,
+            "matchedWordCount": 155,
+            "passageCount": 3,
+            "longestMatchWords": 64,
+            "passages": [
+              {
+                "submittedText": "a separate line of independent original commentary precedes the borrowed material below written specifically to surround the embedded excerpt with clearly unrelated freshly composed sentences about an entirely different subject so that the matcher s shingle windows have unambiguous non matching context on both sides this paragraph exists purely as structural padding for a validation exercise and describes nothing about",
+                "submittedWordStart": 1,
+                "submittedWordEnd": 64,
+                "matchedWordCount": 64
+              },
+              {
+                "submittedText": "separately and again entirely unrelated to the passage above this closing paragraph discusses an unrelated logistics topic shipping container scheduling variance at a regional freight terminal over a six month observation period included here only to give the submitted document realistic surrounding length and additional non matching padding text",
+                "submittedWordStart": 270,
+                "submittedWordEnd": 318,
+                "matchedWordCount": 49
+              },
+              {
+                "submittedText": "mat forming taxa paired fluid chemistry samples supported this interpretation hydrogen sulfide concentrations measured immediately adjacent to dense tubeworm bushes were consistently lower than concentrations measured at open mat dominated patches sampled during the same visit despite both sample types being drawn",
+                "submittedWordStart": 106,
+                "submittedWordEnd": 147,
+                "matchedWordCount": 42
+              }
+            ],
+            "historicalSubmissionCount": 1
+          },
+          {
+            "relationshipType": "PRIOR_SUBMISSION",
+            "matchedRepresentationId": "25bac6f5-4b06-4958-8726-4c9af17b5a91",
+            "matchType": "STRONG_TEXT_MATCH",
+            "containment": 0.6401273885350318,
+            "matchedWordCount": 205,
+            "passageCount": 1,
+            "longestMatchWords": 205,
+            "passages": [
+              {
+                "submittedText": "tubeworm bushes altered local fluid flow and substrate availability the research team interpreted this decline as evidence of active ecosystem engineering by the tubeworms themselves rather than a simple consequence of diffuse flow chemistry drifting away from conditions favorable to the mat forming taxa paired fluid chemistry samples supported this interpretation hydrogen sulfide concentrations measured immediately adjacent to dense tubeworm",
+                "submittedWordStart": 65,
+                "submittedWordEnd": 269,
+                "matchedWordCount": 205
+              }
+            ],
+            "historicalSubmissionCount": 3
+          },
+          {
+            "relationshipType": "PRIOR_SUBMISSION",
+            "matchedRepresentationId": "4f2308a2-c4f1-427f-946d-fd64a5dc2918",
+            "matchType": "STRONG_TEXT_MATCH",
+            "containment": 0.6401273885350318,
+            "matchedWordCount": 205,
+            "passageCount": 1,
+            "longestMatchWords": 205,
+            "passages": [
+              {
+                "submittedText": "tubeworm bushes altered local fluid flow and substrate availability the research team interpreted this decline as evidence of active ecosystem engineering by the tubeworms themselves rather than a simple consequence of diffuse flow chemistry drifting away from conditions favorable to the mat forming taxa paired fluid chemistry samples supported this interpretation hydrogen sulfide concentrations measured immediately adjacent to dense tubeworm",
+                "submittedWordStart": 65,
+                "submittedWordEnd": 269,
+                "matchedWordCount": 205
+              }
+            ],
+            "historicalSubmissionCount": 1
+          }
+        ]
+      },
+      "oldScore": 0,
+      "unifiedSimilarity": {
+        "version": "unified-similarity-v1",
+        "wordCount": 319,
+        "unifiedScore": 100,
+        "uniqueMatchedWords": 318,
+        "archiveOnlyWords": 0,
+        "liveAcademicOnlyWords": 0,
+        "previousUploadOnlyWords": 318,
+        "overlapWords": 0,
+        "selfExcludedWords": 0,
+        "unknownExcludedWords": 0,
+        "contributions": [
+          {
+            "sourceType": "previous_upload",
+            "sourceId": "4d1c5211-d8ea-4949-ab5a-6261c1232e99",
+            "submittedWordStart": 1,
+            "submittedWordEnd": 318,
+            "matchedWordCount": 318,
+            "relationship": "PRIOR_SUBMISSION",
+            "evidenceStatus": "included"
+          },
+          {
+            "sourceType": "previous_upload",
+            "sourceId": "7e055f4d-3fd2-4a1d-a48f-68235f345e41",
+            "submittedWordStart": 1,
+            "submittedWordEnd": 318,
+            "matchedWordCount": 318,
+            "relationship": "PRIOR_SUBMISSION",
+            "evidenceStatus": "included"
+          },
+          {
+            "sourceType": "previous_upload",
+            "sourceId": "8c868076-94e0-4866-9025-74f6ea289426",
+            "submittedWordStart": 1,
+            "submittedWordEnd": 64,
+            "matchedWordCount": 64,
+            "relationship": "PRIOR_SUBMISSION",
+            "evidenceStatus": "included"
+          },
+          {
+            "sourceType": "previous_upload",
+            "sourceId": "8c868076-94e0-4866-9025-74f6ea289426",
+            "submittedWordStart": 270,
+            "submittedWordEnd": 318,
+            "matchedWordCount": 49,
+            "relationship": "PRIOR_SUBMISSION",
+            "evidenceStatus": "included"
+          },
+          {
+            "sourceType": "previous_upload",
+            "sourceId": "8c868076-94e0-4866-9025-74f6ea289426",
+            "submittedWordStart": 106,
+            "submittedWordEnd": 147,
+            "matchedWordCount": 42,
+            "relationship": "PRIOR_SUBMISSION",
+            "evidenceStatus": "included"
+          },
+          {
+            "sourceType": "previous_upload",
+            "sourceId": "25bac6f5-4b06-4958-8726-4c9af17b5a91",
+            "submittedWordStart": 65,
+            "submittedWordEnd": 269,
+            "matchedWordCount": 205,
+            "relationship": "PRIOR_SUBMISSION",
+            "evidenceStatus": "included"
+          },
+          {
+            "sourceType": "previous_upload",
+            "sourceId": "4f2308a2-c4f1-427f-946d-fd64a5dc2918",
+            "submittedWordStart": 65,
+            "submittedWordEnd": 269,
+            "matchedWordCount": 205,
+            "relationship": "PRIOR_SUBMISSION",
+            "evidenceStatus": "included"
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "J",
+      "description": "SELF — same user's previous submission",
+      "wordCount": 568,
+      "historicalSubmissionMatch": {
+        "computedAt": "2026-08-16T17:06:08.150Z",
+        "matcherVersion": "user-submission-match-v1",
+        "fingerprintVersion": "corpus-shingle-v1",
+        "canonicalizationVersion": "canonical-text-v1",
+        "status": "MATCHED",
+        "matches": [
+          {
+            "relationshipType": "SELF",
+            "matchedRepresentationId": "c8b2954a-b8ab-46d1-a19c-720adbec89f9",
+            "matchType": "EXACT_CANONICAL_MATCH",
+            "containment": 1,
+            "matchedWordCount": 568,
+            "passageCount": 0,
+            "longestMatchWords": 568,
+            "passages": [],
+            "historicalSubmissionCount": 0
+          },
+          {
+            "relationshipType": "PRIOR_SUBMISSION",
+            "matchedRepresentationId": "25bac6f5-4b06-4958-8726-4c9af17b5a91",
+            "matchType": "STRONG_TEXT_MATCH",
+            "containment": 1,
+            "matchedWordCount": 562,
+            "passageCount": 1,
+            "longestMatchWords": 562,
+            "passages": [
+              {
+                "submittedText": "hydrothermal vent communities along the fictitious kelmar ridge spreading center have provided an unusually clear natural experiment in chemosynthetic succession following a documented eruptive event in the study region researchers returned to six previously mapped vent orifices at eighteen month intervals across a five year survey window using a remotely operated vehicle equipped with a precision manipulator arm and paired",
+                "submittedWordStart": 6,
+                "submittedWordEnd": 567,
+                "matchedWordCount": 562
+              }
+            ],
+            "historicalSubmissionCount": 3
+          },
+          {
+            "relationshipType": "PRIOR_SUBMISSION",
+            "matchedRepresentationId": "4f2308a2-c4f1-427f-946d-fd64a5dc2918",
+            "matchType": "STRONG_TEXT_MATCH",
+            "containment": 0.8776595744680851,
+            "matchedWordCount": 499,
+            "passageCount": 1,
+            "longestMatchWords": 499,
+            "passages": [
+              {
+                "submittedText": "to characterize the physical envelope surrounding each colonized structure tubeworm aggregations at the freshly resurfaced orifices were absent during the first post eruption survey but had reached near maximal areal coverage by the third revisit a recovery trajectory considerably faster than comparable observations reported from other slow spreading ridge segments microbial mat coverage followed a distinct and reproducible successional pattern",
+                "submittedWordStart": 69,
+                "submittedWordEnd": 567,
+                "matchedWordCount": 499
+              }
+            ],
+            "historicalSubmissionCount": 1
+          },
+          {
+            "relationshipType": "PRIOR_SUBMISSION",
+            "matchedRepresentationId": "7e055f4d-3fd2-4a1d-a48f-68235f345e41",
+            "matchType": "STRONG_TEXT_MATCH",
+            "containment": 0.8776595744680851,
+            "matchedWordCount": 499,
+            "passageCount": 1,
+            "longestMatchWords": 499,
+            "passages": [
+              {
+                "submittedText": "to characterize the physical envelope surrounding each colonized structure tubeworm aggregations at the freshly resurfaced orifices were absent during the first post eruption survey but had reached near maximal areal coverage by the third revisit a recovery trajectory considerably faster than comparable observations reported from other slow spreading ridge segments microbial mat coverage followed a distinct and reproducible successional pattern",
+                "submittedWordStart": 69,
+                "submittedWordEnd": 567,
+                "matchedWordCount": 499
+              }
+            ],
+            "historicalSubmissionCount": 1
+          },
+          {
+            "relationshipType": "PRIOR_SUBMISSION",
+            "matchedRepresentationId": "4d1c5211-d8ea-4949-ab5a-6261c1232e99",
+            "matchType": "STRONG_TEXT_MATCH",
+            "containment": 0.6401273885350318,
+            "matchedWordCount": 205,
+            "passageCount": 1,
+            "longestMatchWords": 205,
+            "passages": [
+              {
+                "submittedText": "tubeworm bushes altered local fluid flow and substrate availability the research team interpreted this decline as evidence of active ecosystem engineering by the tubeworms themselves rather than a simple consequence of diffuse flow chemistry drifting away from conditions favorable to the mat forming taxa paired fluid chemistry samples supported this interpretation hydrogen sulfide concentrations measured immediately adjacent to dense tubeworm",
+                "submittedWordStart": 163,
+                "submittedWordEnd": 367,
+                "matchedWordCount": 205
+              }
+            ],
+            "historicalSubmissionCount": 1
+          },
+          {
+            "relationshipType": "PRIOR_SUBMISSION",
+            "matchedRepresentationId": "8e487476-0a12-4eae-910b-714a2eee5c2c",
+            "matchType": "STRONG_TEXT_MATCH",
+            "containment": 0.6401273885350318,
+            "matchedWordCount": 205,
+            "passageCount": 1,
+            "longestMatchWords": 205,
+            "passages": [
+              {
+                "submittedText": "tubeworm bushes altered local fluid flow and substrate availability the research team interpreted this decline as evidence of active ecosystem engineering by the tubeworms themselves rather than a simple consequence of diffuse flow chemistry drifting away from conditions favorable to the mat forming taxa paired fluid chemistry samples supported this interpretation hydrogen sulfide concentrations measured immediately adjacent to dense tubeworm",
+                "submittedWordStart": 163,
+                "submittedWordEnd": 367,
+                "matchedWordCount": 205
+              }
+            ],
+            "historicalSubmissionCount": 1
+          }
+        ]
+      },
+      "oldScore": 0,
+      "unifiedSimilarity": {
+        "version": "unified-similarity-v1",
+        "wordCount": 568,
+        "unifiedScore": 99,
+        "uniqueMatchedWords": 562,
+        "archiveOnlyWords": 0,
+        "liveAcademicOnlyWords": 0,
+        "previousUploadOnlyWords": 562,
+        "overlapWords": 0,
+        "selfExcludedWords": 568,
+        "unknownExcludedWords": 0,
+        "contributions": [
+          {
+            "sourceType": "previous_upload",
+            "sourceId": "c8b2954a-b8ab-46d1-a19c-720adbec89f9",
+            "submittedWordStart": 0,
+            "submittedWordEnd": 567,
+            "matchedWordCount": 568,
+            "relationship": "SELF",
+            "evidenceStatus": "excluded_self"
+          },
+          {
+            "sourceType": "previous_upload",
+            "sourceId": "25bac6f5-4b06-4958-8726-4c9af17b5a91",
+            "submittedWordStart": 6,
+            "submittedWordEnd": 567,
+            "matchedWordCount": 562,
+            "relationship": "PRIOR_SUBMISSION",
+            "evidenceStatus": "included"
+          },
+          {
+            "sourceType": "previous_upload",
+            "sourceId": "4f2308a2-c4f1-427f-946d-fd64a5dc2918",
+            "submittedWordStart": 69,
+            "submittedWordEnd": 567,
+            "matchedWordCount": 499,
+            "relationship": "PRIOR_SUBMISSION",
+            "evidenceStatus": "included"
+          },
+          {
+            "sourceType": "previous_upload",
+            "sourceId": "7e055f4d-3fd2-4a1d-a48f-68235f345e41",
+            "submittedWordStart": 69,
+            "submittedWordEnd": 567,
+            "matchedWordCount": 499,
+            "relationship": "PRIOR_SUBMISSION",
+            "evidenceStatus": "included"
+          },
+          {
+            "sourceType": "previous_upload",
+            "sourceId": "4d1c5211-d8ea-4949-ab5a-6261c1232e99",
+            "submittedWordStart": 163,
+            "submittedWordEnd": 367,
+            "matchedWordCount": 205,
+            "relationship": "PRIOR_SUBMISSION",
+            "evidenceStatus": "included"
+          },
+          {
+            "sourceType": "previous_upload",
+            "sourceId": "8e487476-0a12-4eae-910b-714a2eee5c2c",
+            "submittedWordStart": 163,
+            "submittedWordEnd": 367,
+            "matchedWordCount": 205,
+            "relationship": "PRIOR_SUBMISSION",
+            "evidenceStatus": "included"
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "K",
+      "description": "UNKNOWN — unknown historical relationship (anonymous viewer)",
+      "wordCount": 568,
+      "historicalSubmissionMatch": {
+        "computedAt": "2026-08-16T17:06:08.407Z",
+        "matcherVersion": "user-submission-match-v1",
+        "fingerprintVersion": "corpus-shingle-v1",
+        "canonicalizationVersion": "canonical-text-v1",
+        "status": "MATCHED",
+        "matches": [
+          {
+            "relationshipType": "UNKNOWN_RELATIONSHIP",
+            "matchedRepresentationId": "2138a071-b791-4056-82c1-fc910925e5a4",
+            "matchType": "EXACT_CANONICAL_MATCH",
+            "containment": 1,
+            "matchedWordCount": 568,
+            "passageCount": 0,
+            "longestMatchWords": 568,
+            "passages": [],
+            "historicalSubmissionCount": 1
+          },
+          {
+            "relationshipType": "UNKNOWN_RELATIONSHIP",
+            "matchedRepresentationId": "25bac6f5-4b06-4958-8726-4c9af17b5a91",
+            "matchType": "STRONG_TEXT_MATCH",
+            "containment": 1,
+            "matchedWordCount": 562,
+            "passageCount": 1,
+            "longestMatchWords": 562,
+            "passages": [
+              {
+                "submittedText": "hydrothermal vent communities along the fictitious kelmar ridge spreading center have provided an unusually clear natural experiment in chemosynthetic succession following a documented eruptive event in the study region researchers returned to six previously mapped vent orifices at eighteen month intervals across a five year survey window using a remotely operated vehicle equipped with a precision manipulator arm and paired",
+                "submittedWordStart": 6,
+                "submittedWordEnd": 567,
+                "matchedWordCount": 562
+              }
+            ],
+            "historicalSubmissionCount": 3
+          },
+          {
+            "relationshipType": "UNKNOWN_RELATIONSHIP",
+            "matchedRepresentationId": "c8b2954a-b8ab-46d1-a19c-720adbec89f9",
+            "matchType": "STRONG_TEXT_MATCH",
+            "containment": 0.9911347517730497,
+            "matchedWordCount": 563,
+            "passageCount": 1,
+            "longestMatchWords": 563,
+            "passages": [
+              {
+                "submittedText": "case hydrothermal vent communities along the fictitious kelmar ridge spreading center have provided an unusually clear natural experiment in chemosynthetic succession following a documented eruptive event in the study region researchers returned to six previously mapped vent orifices at eighteen month intervals across a five year survey window using a remotely operated vehicle equipped with a precision manipulator arm and",
+                "submittedWordStart": 5,
+                "submittedWordEnd": 567,
+                "matchedWordCount": 563
+              }
+            ],
+            "historicalSubmissionCount": 1
+          },
+          {
+            "relationshipType": "UNKNOWN_RELATIONSHIP",
+            "matchedRepresentationId": "4f2308a2-c4f1-427f-946d-fd64a5dc2918",
+            "matchType": "STRONG_TEXT_MATCH",
+            "containment": 0.8776595744680851,
+            "matchedWordCount": 499,
+            "passageCount": 1,
+            "longestMatchWords": 499,
+            "passages": [
+              {
+                "submittedText": "to characterize the physical envelope surrounding each colonized structure tubeworm aggregations at the freshly resurfaced orifices were absent during the first post eruption survey but had reached near maximal areal coverage by the third revisit a recovery trajectory considerably faster than comparable observations reported from other slow spreading ridge segments microbial mat coverage followed a distinct and reproducible successional pattern",
+                "submittedWordStart": 69,
+                "submittedWordEnd": 567,
+                "matchedWordCount": 499
+              }
+            ],
+            "historicalSubmissionCount": 1
+          },
+          {
+            "relationshipType": "UNKNOWN_RELATIONSHIP",
+            "matchedRepresentationId": "7e055f4d-3fd2-4a1d-a48f-68235f345e41",
+            "matchType": "STRONG_TEXT_MATCH",
+            "containment": 0.8776595744680851,
+            "matchedWordCount": 499,
+            "passageCount": 1,
+            "longestMatchWords": 499,
+            "passages": [
+              {
+                "submittedText": "to characterize the physical envelope surrounding each colonized structure tubeworm aggregations at the freshly resurfaced orifices were absent during the first post eruption survey but had reached near maximal areal coverage by the third revisit a recovery trajectory considerably faster than comparable observations reported from other slow spreading ridge segments microbial mat coverage followed a distinct and reproducible successional pattern",
+                "submittedWordStart": 69,
+                "submittedWordEnd": 567,
+                "matchedWordCount": 499
+              }
+            ],
+            "historicalSubmissionCount": 1
+          },
+          {
+            "relationshipType": "UNKNOWN_RELATIONSHIP",
+            "matchedRepresentationId": "4d1c5211-d8ea-4949-ab5a-6261c1232e99",
+            "matchType": "STRONG_TEXT_MATCH",
+            "containment": 0.6401273885350318,
+            "matchedWordCount": 205,
+            "passageCount": 1,
+            "longestMatchWords": 205,
+            "passages": [
+              {
+                "submittedText": "tubeworm bushes altered local fluid flow and substrate availability the research team interpreted this decline as evidence of active ecosystem engineering by the tubeworms themselves rather than a simple consequence of diffuse flow chemistry drifting away from conditions favorable to the mat forming taxa paired fluid chemistry samples supported this interpretation hydrogen sulfide concentrations measured immediately adjacent to dense tubeworm",
+                "submittedWordStart": 163,
+                "submittedWordEnd": 367,
+                "matchedWordCount": 205
+              }
+            ],
+            "historicalSubmissionCount": 1
+          },
+          {
+            "relationshipType": "UNKNOWN_RELATIONSHIP",
+            "matchedRepresentationId": "8e487476-0a12-4eae-910b-714a2eee5c2c",
+            "matchType": "STRONG_TEXT_MATCH",
+            "containment": 0.6401273885350318,
+            "matchedWordCount": 205,
+            "passageCount": 1,
+            "longestMatchWords": 205,
+            "passages": [
+              {
+                "submittedText": "tubeworm bushes altered local fluid flow and substrate availability the research team interpreted this decline as evidence of active ecosystem engineering by the tubeworms themselves rather than a simple consequence of diffuse flow chemistry drifting away from conditions favorable to the mat forming taxa paired fluid chemistry samples supported this interpretation hydrogen sulfide concentrations measured immediately adjacent to dense tubeworm",
+                "submittedWordStart": 163,
+                "submittedWordEnd": 367,
+                "matchedWordCount": 205
+              }
+            ],
+            "historicalSubmissionCount": 1
+          }
+        ]
+      },
+      "oldScore": 0,
+      "unifiedSimilarity": {
+        "version": "unified-similarity-v1",
+        "wordCount": 568,
+        "unifiedScore": 0,
+        "uniqueMatchedWords": 0,
+        "archiveOnlyWords": 0,
+        "liveAcademicOnlyWords": 0,
+        "previousUploadOnlyWords": 0,
+        "overlapWords": 0,
+        "selfExcludedWords": 0,
+        "unknownExcludedWords": 3101,
+        "contributions": [
+          {
+            "sourceType": "previous_upload",
+            "sourceId": "2138a071-b791-4056-82c1-fc910925e5a4",
+            "submittedWordStart": 0,
+            "submittedWordEnd": 567,
+            "matchedWordCount": 568,
+            "relationship": "UNKNOWN_RELATIONSHIP",
+            "evidenceStatus": "excluded_unknown"
+          },
+          {
+            "sourceType": "previous_upload",
+            "sourceId": "25bac6f5-4b06-4958-8726-4c9af17b5a91",
+            "submittedWordStart": 6,
+            "submittedWordEnd": 567,
+            "matchedWordCount": 562,
+            "relationship": "UNKNOWN_RELATIONSHIP",
+            "evidenceStatus": "excluded_unknown"
+          },
+          {
+            "sourceType": "previous_upload",
+            "sourceId": "c8b2954a-b8ab-46d1-a19c-720adbec89f9",
+            "submittedWordStart": 5,
+            "submittedWordEnd": 567,
+            "matchedWordCount": 563,
+            "relationship": "UNKNOWN_RELATIONSHIP",
+            "evidenceStatus": "excluded_unknown"
+          },
+          {
+            "sourceType": "previous_upload",
+            "sourceId": "4f2308a2-c4f1-427f-946d-fd64a5dc2918",
+            "submittedWordStart": 69,
+            "submittedWordEnd": 567,
+            "matchedWordCount": 499,
+            "relationship": "UNKNOWN_RELATIONSHIP",
+            "evidenceStatus": "excluded_unknown"
+          },
+          {
+            "sourceType": "previous_upload",
+            "sourceId": "7e055f4d-3fd2-4a1d-a48f-68235f345e41",
+            "submittedWordStart": 69,
+            "submittedWordEnd": 567,
+            "matchedWordCount": 499,
+            "relationship": "UNKNOWN_RELATIONSHIP",
+            "evidenceStatus": "excluded_unknown"
+          },
+          {
+            "sourceType": "previous_upload",
+            "sourceId": "4d1c5211-d8ea-4949-ab5a-6261c1232e99",
+            "submittedWordStart": 163,
+            "submittedWordEnd": 367,
+            "matchedWordCount": 205,
+            "relationship": "UNKNOWN_RELATIONSHIP",
+            "evidenceStatus": "excluded_unknown"
+          },
+          {
+            "sourceType": "previous_upload",
+            "sourceId": "8e487476-0a12-4eae-910b-714a2eee5c2c",
+            "submittedWordStart": 163,
+            "submittedWordEnd": 367,
+            "matchedWordCount": 205,
+            "relationship": "UNKNOWN_RELATIONSHIP",
+            "evidenceStatus": "excluded_unknown"
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "L",
+      "description": "PRIOR_SUBMISSION — see cases B, C, D, E, G, I above (all real PRIOR_SUBMISSION matches that contribute > 0)",
+      "seeAlso": [
+        "B",
+        "C",
+        "D",
+        "E",
+        "G",
+        "I"
+      ]
+    },
+    {
+      "caseId": "M",
+      "description": "DUPLICATE SOURCE — same paper via both OpenAIRE and Europe PMC (constructed from real evidence, see note)",
+      "wordCount": 277,
+      "realEntryFoundNaturally": true,
+      "duplicatedEvidenceInputCount": 2,
+      "unifiedSimilarity": {
+        "version": "unified-similarity-v1",
+        "wordCount": 277,
+        "unifiedScore": 90,
+        "uniqueMatchedWords": 250,
+        "archiveOnlyWords": 0,
+        "liveAcademicOnlyWords": 250,
+        "previousUploadOnlyWords": 0,
+        "overlapWords": 0,
+        "selfExcludedWords": 0,
+        "unknownExcludedWords": 277,
+        "contributions": [
+          {
+            "sourceType": "europe_pmc",
+            "sourceId": "doi:10.1093/tas/txaf131",
+            "submittedWordStart": 0,
+            "submittedWordEnd": 169,
+            "matchedWordCount": 170,
+            "evidenceStatus": "included"
+          },
+          {
+            "sourceType": "europe_pmc",
+            "sourceId": "doi:10.1093/tas/txaf131",
+            "submittedWordStart": 229,
+            "submittedWordEnd": 276,
+            "matchedWordCount": 48,
+            "evidenceStatus": "included"
+          },
+          {
+            "sourceType": "europe_pmc",
+            "sourceId": "doi:10.1093/tas/txaf131",
+            "submittedWordStart": 181,
+            "submittedWordEnd": 200,
+            "matchedWordCount": 20,
+            "evidenceStatus": "included"
+          },
+          {
+            "sourceType": "europe_pmc",
+            "sourceId": "doi:10.1093/tas/txaf131",
+            "submittedWordStart": 202,
+            "submittedWordEnd": 213,
+            "matchedWordCount": 12,
+            "evidenceStatus": "included"
+          },
+          {
+            "sourceType": "openaire",
+            "sourceId": "doi:10.1093/tas/txaf131",
+            "submittedWordStart": 0,
+            "submittedWordEnd": 169,
+            "matchedWordCount": 170,
+            "evidenceStatus": "included"
+          },
+          {
+            "sourceType": "openaire",
+            "sourceId": "doi:10.1093/tas/txaf131",
+            "submittedWordStart": 229,
+            "submittedWordEnd": 276,
+            "matchedWordCount": 48,
+            "evidenceStatus": "included"
+          },
+          {
+            "sourceType": "openaire",
+            "sourceId": "doi:10.1093/tas/txaf131",
+            "submittedWordStart": 181,
+            "submittedWordEnd": 200,
+            "matchedWordCount": 20,
+            "evidenceStatus": "included"
+          },
+          {
+            "sourceType": "openaire",
+            "sourceId": "doi:10.1093/tas/txaf131",
+            "submittedWordStart": 202,
+            "submittedWordEnd": 213,
+            "matchedWordCount": 12,
+            "evidenceStatus": "included"
+          },
+          {
+            "sourceType": "previous_upload",
+            "sourceId": "309d7181-e613-4e70-89bc-9de3be7e366c",
+            "submittedWordStart": 0,
+            "submittedWordEnd": 276,
+            "matchedWordCount": 277,
+            "relationship": "UNKNOWN_RELATIONSHIP",
+            "evidenceStatus": "excluded_unknown"
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "N",
+      "description": "PROVIDER FAILURE — live provider throws; report still completes and existing (prior-submission) evidence remains valid",
+      "getExternalAcademicEvidenceDidNotThrow": true,
+      "failureResultEvidenceCount": 0,
+      "reportGetStatus": 200,
+      "wordCount": 578,
+      "historicalSubmissionMatch": {
+        "computedAt": "2026-08-16T17:06:08.872Z",
+        "matcherVersion": "user-submission-match-v1",
+        "fingerprintVersion": "corpus-shingle-v1",
+        "canonicalizationVersion": "canonical-text-v1",
+        "status": "MATCHED",
+        "matches": [
+          {
+            "relationshipType": "PRIOR_SUBMISSION",
+            "matchedRepresentationId": "cf59a4f6-e71a-403e-ad81-de7e508b3f4e",
+            "matchType": "EXACT_CANONICAL_MATCH",
+            "containment": 1,
+            "matchedWordCount": 578,
+            "passageCount": 0,
+            "longestMatchWords": 578,
+            "passages": [],
+            "historicalSubmissionCount": 1
+          },
+          {
+            "relationshipType": "PRIOR_SUBMISSION",
+            "matchedRepresentationId": "25bac6f5-4b06-4958-8726-4c9af17b5a91",
+            "matchType": "STRONG_TEXT_MATCH",
+            "containment": 1,
+            "matchedWordCount": 562,
+            "passageCount": 1,
+            "longestMatchWords": 562,
+            "passages": [
+              {
+                "submittedText": "hydrothermal vent communities along the fictitious kelmar ridge spreading center have provided an unusually clear natural experiment in chemosynthetic succession following a documented eruptive event in the study region researchers returned to six previously mapped vent orifices at eighteen month intervals across a five year survey window using a remotely operated vehicle equipped with a precision manipulator arm and paired",
+                "submittedWordStart": 16,
+                "submittedWordEnd": 577,
+                "matchedWordCount": 562
+              }
+            ],
+            "historicalSubmissionCount": 3
+          },
+          {
+            "relationshipType": "PRIOR_SUBMISSION",
+            "matchedRepresentationId": "2138a071-b791-4056-82c1-fc910925e5a4",
+            "matchType": "STRONG_TEXT_MATCH",
+            "containment": 0.9893617021276596,
+            "matchedWordCount": 562,
+            "passageCount": 1,
+            "longestMatchWords": 562,
+            "passages": [
+              {
+                "submittedText": "hydrothermal vent communities along the fictitious kelmar ridge spreading center have provided an unusually clear natural experiment in chemosynthetic succession following a documented eruptive event in the study region researchers returned to six previously mapped vent orifices at eighteen month intervals across a five year survey window using a remotely operated vehicle equipped with a precision manipulator arm and paired",
+                "submittedWordStart": 16,
+                "submittedWordEnd": 577,
+                "matchedWordCount": 562
+              }
+            ],
+            "historicalSubmissionCount": 1
+          },
+          {
+            "relationshipType": "PRIOR_SUBMISSION",
+            "matchedRepresentationId": "c8b2954a-b8ab-46d1-a19c-720adbec89f9",
+            "matchType": "STRONG_TEXT_MATCH",
+            "containment": 0.9893617021276596,
+            "matchedWordCount": 562,
+            "passageCount": 1,
+            "longestMatchWords": 562,
+            "passages": [
+              {
+                "submittedText": "hydrothermal vent communities along the fictitious kelmar ridge spreading center have provided an unusually clear natural experiment in chemosynthetic succession following a documented eruptive event in the study region researchers returned to six previously mapped vent orifices at eighteen month intervals across a five year survey window using a remotely operated vehicle equipped with a precision manipulator arm and paired",
+                "submittedWordStart": 16,
+                "submittedWordEnd": 577,
+                "matchedWordCount": 562
+              }
+            ],
+            "historicalSubmissionCount": 1
+          },
+          {
+            "relationshipType": "PRIOR_SUBMISSION",
+            "matchedRepresentationId": "4f2308a2-c4f1-427f-946d-fd64a5dc2918",
+            "matchType": "STRONG_TEXT_MATCH",
+            "containment": 0.8623693379790941,
+            "matchedWordCount": 499,
+            "passageCount": 1,
+            "longestMatchWords": 499,
+            "passages": [
+              {
+                "submittedText": "to characterize the physical envelope surrounding each colonized structure tubeworm aggregations at the freshly resurfaced orifices were absent during the first post eruption survey but had reached near maximal areal coverage by the third revisit a recovery trajectory considerably faster than comparable observations reported from other slow spreading ridge segments microbial mat coverage followed a distinct and reproducible successional pattern",
+                "submittedWordStart": 79,
+                "submittedWordEnd": 577,
+                "matchedWordCount": 499
+              }
+            ],
+            "historicalSubmissionCount": 1
+          },
+          {
+            "relationshipType": "PRIOR_SUBMISSION",
+            "matchedRepresentationId": "7e055f4d-3fd2-4a1d-a48f-68235f345e41",
+            "matchType": "STRONG_TEXT_MATCH",
+            "containment": 0.8623693379790941,
+            "matchedWordCount": 499,
+            "passageCount": 1,
+            "longestMatchWords": 499,
+            "passages": [
+              {
+                "submittedText": "to characterize the physical envelope surrounding each colonized structure tubeworm aggregations at the freshly resurfaced orifices were absent during the first post eruption survey but had reached near maximal areal coverage by the third revisit a recovery trajectory considerably faster than comparable observations reported from other slow spreading ridge segments microbial mat coverage followed a distinct and reproducible successional pattern",
+                "submittedWordStart": 79,
+                "submittedWordEnd": 577,
+                "matchedWordCount": 499
+              }
+            ],
+            "historicalSubmissionCount": 1
+          },
+          {
+            "relationshipType": "PRIOR_SUBMISSION",
+            "matchedRepresentationId": "4d1c5211-d8ea-4949-ab5a-6261c1232e99",
+            "matchType": "STRONG_TEXT_MATCH",
+            "containment": 0.6401273885350318,
+            "matchedWordCount": 205,
+            "passageCount": 1,
+            "longestMatchWords": 205,
+            "passages": [
+              {
+                "submittedText": "tubeworm bushes altered local fluid flow and substrate availability the research team interpreted this decline as evidence of active ecosystem engineering by the tubeworms themselves rather than a simple consequence of diffuse flow chemistry drifting away from conditions favorable to the mat forming taxa paired fluid chemistry samples supported this interpretation hydrogen sulfide concentrations measured immediately adjacent to dense tubeworm",
+                "submittedWordStart": 173,
+                "submittedWordEnd": 377,
+                "matchedWordCount": 205
+              }
+            ],
+            "historicalSubmissionCount": 1
+          },
+          {
+            "relationshipType": "PRIOR_SUBMISSION",
+            "matchedRepresentationId": "8e487476-0a12-4eae-910b-714a2eee5c2c",
+            "matchType": "STRONG_TEXT_MATCH",
+            "containment": 0.6401273885350318,
+            "matchedWordCount": 205,
+            "passageCount": 1,
+            "longestMatchWords": 205,
+            "passages": [
+              {
+                "submittedText": "tubeworm bushes altered local fluid flow and substrate availability the research team interpreted this decline as evidence of active ecosystem engineering by the tubeworms themselves rather than a simple consequence of diffuse flow chemistry drifting away from conditions favorable to the mat forming taxa paired fluid chemistry samples supported this interpretation hydrogen sulfide concentrations measured immediately adjacent to dense tubeworm",
+                "submittedWordStart": 173,
+                "submittedWordEnd": 377,
+                "matchedWordCount": 205
+              }
+            ],
+            "historicalSubmissionCount": 1
+          }
+        ]
+      },
+      "unifiedSimilarity": {
+        "version": "unified-similarity-v1",
+        "wordCount": 578,
+        "unifiedScore": 100,
+        "uniqueMatchedWords": 578,
+        "archiveOnlyWords": 0,
+        "liveAcademicOnlyWords": 0,
+        "previousUploadOnlyWords": 573,
+        "overlapWords": 5,
+        "selfExcludedWords": 0,
+        "unknownExcludedWords": 0,
+        "contributions": [
+          {
+            "sourceType": "previous_upload",
+            "sourceId": "cf59a4f6-e71a-403e-ad81-de7e508b3f4e",
+            "submittedWordStart": 0,
+            "submittedWordEnd": 577,
+            "matchedWordCount": 578,
+            "relationship": "PRIOR_SUBMISSION",
+            "evidenceStatus": "included"
+          },
+          {
+            "sourceType": "previous_upload",
+            "sourceId": "25bac6f5-4b06-4958-8726-4c9af17b5a91",
+            "submittedWordStart": 16,
+            "submittedWordEnd": 577,
+            "matchedWordCount": 562,
+            "relationship": "PRIOR_SUBMISSION",
+            "evidenceStatus": "included"
+          },
+          {
+            "sourceType": "previous_upload",
+            "sourceId": "2138a071-b791-4056-82c1-fc910925e5a4",
+            "submittedWordStart": 16,
+            "submittedWordEnd": 577,
+            "matchedWordCount": 562,
+            "relationship": "PRIOR_SUBMISSION",
+            "evidenceStatus": "included"
+          },
+          {
+            "sourceType": "previous_upload",
+            "sourceId": "c8b2954a-b8ab-46d1-a19c-720adbec89f9",
+            "submittedWordStart": 16,
+            "submittedWordEnd": 577,
+            "matchedWordCount": 562,
+            "relationship": "PRIOR_SUBMISSION",
+            "evidenceStatus": "included"
+          },
+          {
+            "sourceType": "previous_upload",
+            "sourceId": "4f2308a2-c4f1-427f-946d-fd64a5dc2918",
+            "submittedWordStart": 79,
+            "submittedWordEnd": 577,
+            "matchedWordCount": 499,
+            "relationship": "PRIOR_SUBMISSION",
+            "evidenceStatus": "included"
+          },
+          {
+            "sourceType": "previous_upload",
+            "sourceId": "7e055f4d-3fd2-4a1d-a48f-68235f345e41",
+            "submittedWordStart": 79,
+            "submittedWordEnd": 577,
+            "matchedWordCount": 499,
+            "relationship": "PRIOR_SUBMISSION",
+            "evidenceStatus": "included"
+          },
+          {
+            "sourceType": "previous_upload",
+            "sourceId": "4d1c5211-d8ea-4949-ab5a-6261c1232e99",
+            "submittedWordStart": 173,
+            "submittedWordEnd": 377,
+            "matchedWordCount": 205,
+            "relationship": "PRIOR_SUBMISSION",
+            "evidenceStatus": "included"
+          },
+          {
+            "sourceType": "previous_upload",
+            "sourceId": "8e487476-0a12-4eae-910b-714a2eee5c2c",
+            "submittedWordStart": 173,
+            "submittedWordEnd": 377,
+            "matchedWordCount": 205,
+            "relationship": "PRIOR_SUBMISSION",
+            "evidenceStatus": "included"
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "O",
+      "description": "LEGACY REPORT — old report with no unified evidence renders normally",
+      "wordCount": 291,
+      "oldScore": 3,
+      "unifiedSimilarity": {
+        "version": "unified-similarity-v1",
+        "wordCount": 291,
+        "unifiedScore": 0,
+        "uniqueMatchedWords": 0,
+        "archiveOnlyWords": 0,
+        "liveAcademicOnlyWords": 0,
+        "previousUploadOnlyWords": 0,
+        "overlapWords": 0,
+        "selfExcludedWords": 0,
+        "unknownExcludedWords": 0,
+        "contributions": []
+      }
+    }
+  ]
+}

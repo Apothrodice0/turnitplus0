@@ -144,13 +144,17 @@ export function createInMemoryAcademicSearchCache(
 }
 
 /**
- * Hard cap on total provider calls for one report run, shared across every
- * wrapped provider passed the same budget instance. STEP 5's "enforce a
- * per-report search budget" — belt-and-suspenders alongside
- * phrase-extractor.ts's own 5-20 query cap: that cap bounds queries per
- * document, this bounds total *provider calls* (queries x providers +
- * metadata/text lookups), which is the number that actually determines
- * external request volume.
+ * Hard cap on total provider calls of whatever kind(s) are routed through
+ * ONE instance, shared across every wrapped provider passed that same
+ * instance. STEP 5's "enforce a per-report search budget" — belt-and-
+ * suspenders alongside phrase-extractor.ts's own 5-20 query cap: that cap
+ * bounds queries per document, this bounds total *provider calls*, which
+ * is the number that actually determines external request volume.
+ *
+ * This type itself is unchanged by the Phase 6.6 discovery/retrieval split
+ * below — it was always just a generic counter. What changed is that
+ * production now constructs TWO instances (one per stage) instead of one
+ * shared between stages — see withRequestControl's own header comment.
  */
 export type AcademicSearchBudget = {
   tryConsume(kind: "search" | "metadata" | "text"): boolean;
@@ -175,9 +179,35 @@ export function createAcademicSearchBudget(limit: number): AcademicSearchBudget 
 
 export const DEFAULT_ACADEMIC_SEARCH_BUDGET_LIMIT = 60;
 
+/**
+ * Phase 6.6 PART 1 fix: `discoveryBudget` and `retrievalBudget` are two
+ * INDEPENDENT AcademicSearchBudget instances, not two fields sharing one
+ * counter. Root cause of the bug this replaces: a single shared budget let
+ * the search() stage (which scales with query count — a longer or
+ * multi-topic submission legitimately produces more distinct queries)
+ * exhaust the SAME pool that getText()/getMetadata() draw from, so a
+ * candidate the search stage genuinely found could still never get its
+ * full text retrieved/confirmed — a silent recall loss, confirmed
+ * reproducible in real live-search runs against real submissions (see
+ * lib/academic-evidence-integration.ts's own header comment for the
+ * measured before/after). Retrieval's own real need is small and bounded
+ * (DEFAULT_ACADEMIC_SEARCH_RUN_CONFIG.maxCandidatesToRetrieve candidates,
+ * each trying at most a couple of contributing providers' getText() before
+ * falling back to the unbudgeted HTTP retriever — see
+ * text-retriever.ts's own retrieveCandidateText), so giving it its own
+ * small, GUARANTEED allocation — one discovery can never spend into —
+ * fixes the starvation without loosening any existing safeguard (SSRF
+ * protection, timeouts, response-size limits, PDF page limits, provider
+ * failure handling, candidate ranking, and every existing threshold are
+ * all untouched; only which counter search() vs getMetadata()/getText()
+ * decrement changed).
+ */
 export type RequestControlOptions = {
   cache?: AcademicSearchCache;
-  budget?: AcademicSearchBudget;
+  /** Consumed only by search() — the discovery/query stage. */
+  discoveryBudget?: AcademicSearchBudget;
+  /** Consumed only by getMetadata()/getText() — the retrieval stage. Kept as a separate counter specifically so discovery can never spend it. */
+  retrievalBudget?: AcademicSearchBudget;
 };
 
 /**
@@ -195,7 +225,7 @@ export function withRequestControl(
   provider: AcademicSearchProvider,
   options: RequestControlOptions = {},
 ): AcademicSearchProvider {
-  const { cache, budget } = options;
+  const { cache, discoveryBudget, retrievalBudget } = options;
 
   const wrapped: AcademicSearchProvider = {
     id: provider.id,
@@ -204,7 +234,7 @@ export function withRequestControl(
       const cached = cache?.getQueryResults(provider.id, query.queryText);
       if (cached) return cached;
 
-      if (budget && !budget.tryConsume("search")) return [];
+      if (discoveryBudget && !discoveryBudget.tryConsume("search")) return [];
 
       const results = await provider.search(query);
       cache?.setQueryResults(provider.id, query.queryText, results);
@@ -217,7 +247,7 @@ export function withRequestControl(
       const cached = cache?.getMetadata(provider.id, externalId);
       if (cached !== undefined) return cached;
 
-      if (budget && !budget.tryConsume("metadata")) return null;
+      if (retrievalBudget && !retrievalBudget.tryConsume("metadata")) return null;
 
       const metadata = await provider.getMetadata!(externalId);
       cache?.setMetadata(provider.id, externalId, metadata);
@@ -230,7 +260,7 @@ export function withRequestControl(
       const cached = cache?.getText(provider.id, externalId);
       if (cached !== undefined) return cached;
 
-      if (budget && !budget.tryConsume("text")) return null;
+      if (retrievalBudget && !retrievalBudget.tryConsume("text")) return null;
 
       const text = await provider.getText!(externalId);
       cache?.setText(provider.id, externalId, text);

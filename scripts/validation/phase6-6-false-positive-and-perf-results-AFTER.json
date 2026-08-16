@@ -1,0 +1,58 @@
+{
+  "falsePositiveControls": [
+    {
+      "label": "Control 1: topical similarity (same subject, fully independent wording)",
+      "wordCount": 219,
+      "realArchiveMatchedWordCount": 0,
+      "realLiveEvidenceCount": 0,
+      "unifiedScore": 0,
+      "expectation": "near-zero — same TOPIC as REFERENCE_TEXT but no shared 5-word shingles/live confirmation, since the matcher is textual, not semantic"
+    },
+    {
+      "label": "Control 2: generic academic boilerplate only, no distinctive content",
+      "wordCount": 118,
+      "realArchiveMatchedWordCount": 5,
+      "realLiveEvidenceCount": 0,
+      "unifiedScore": 4,
+      "expectation": "near-zero — common phrasing alone must not accumulate into a meaningful match"
+    },
+    {
+      "label": "Control 3: genuine paraphrase of a real prior document (own-style rewrite, not a copy)",
+      "wordCount": 102,
+      "realArchiveMatchedWordCount": 0,
+      "realLiveEvidenceCount": 0,
+      "unifiedScore": 0,
+      "note": "prior-submission-corpus matching against REFERENCE_TEXT is intentionally not exercised here (requires the DB-backed matcher) — this control isolates the archive+live layers only, both of which are textual/shingle-based, not semantic",
+      "expectation": "near-zero on archive/live — paraphrasing in the author's own words/structure is acceptable per product philosophy and should not trigger textual-reuse evidence"
+    }
+  ],
+  "performance": {
+    "realArchiveAnalyzeMs": [
+      2.2633999999998196,
+      0.8194999999977881,
+      0.42840000000069267
+    ],
+    "computeUnifiedSimilarityMs_10kWordDoc": [
+      2.5377000000007683,
+      1.6136999999980617,
+      1.5601000000024214,
+      1.4523000000008324,
+      1.4639999999999418,
+      1.5138000000006286,
+      3.956400000002759,
+      1.4773999999997613,
+      1.4253000000026077,
+      1.4161999999996624,
+      1.3940000000002328,
+      1.4156000000002678,
+      1.4312000000027183,
+      1.4192000000002736,
+      1.445899999998801,
+      1.5280000000020664,
+      1.4421000000002095,
+      1.445899999998801,
+      1.7008999999998196,
+      1.2436999999990803
+    ]
+  }
+}

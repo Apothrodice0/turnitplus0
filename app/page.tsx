@@ -38,6 +38,7 @@ import { extractPdfTextDocument } from "@/lib/pdf-text-extraction";
 import { clearStoredReports, loadStoredReports, storeReport } from "@/lib/report-store";
 import { deleteRemoteReport, fetchRemoteReport, listRemoteReportSummaries, saveReportRemote } from "@/lib/reports-remote";
 import { combineMatchedWordPositions } from "@/lib/similarity-enrichment";
+import { computeUnifiedSimilarity } from "@/lib/unified-similarity";
 import type { WebCheckResult } from "@/lib/web-check-core";
 import type { ExternalAcademicEvidence } from "@/lib/academic-search/types";
 import {
@@ -55,9 +56,12 @@ import {
 } from "@/lib/ai-model-prep";
 import {
   aiSignalDisplay,
-  archiveOverlapScore,
   archiveScopeCount,
   buildReportSummary,
+  hasUnifiedSimilarity,
+  PRIMARY_SIMILARITY_BAND_LABELS,
+  primarySimilarityScore,
+  unifiedEvidenceSummary,
   type AiAnalysis,
   type SimilarityReport,
   type SourceMatch,
@@ -292,7 +296,16 @@ async function extractFileText(file: File, onProgress: (progress: number, label:
 }
 
 async function downloadReceipt(report: SimilarityReport) {
-  const blob = await createReceiptPdf(report);
+  const primaryScore = primarySimilarityScore(report);
+  const verdict = similarityScoreBand(primaryScore);
+  const unified = hasUnifiedSimilarity(report) && report.unifiedSimilarity && verdict
+    ? {
+      score: primaryScore,
+      label: PRIMARY_SIMILARITY_BAND_LABELS[verdict.key],
+      evidenceSummary: unifiedEvidenceSummary(report.unifiedSimilarity),
+    }
+    : undefined;
+  const blob = await createReceiptPdf({ ...report, unified });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   const baseName = report.title.replace(/\.[^.]+$/, "").replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "");
@@ -329,6 +342,42 @@ function enrichReportWithWikipedia(report: SimilarityReport, webCheck: WebCheckR
 // headline number; external academic evidence is purely additive.
 function enrichReportWithAcademicEvidence(report: SimilarityReport, evidence: ExternalAcademicEvidence[]): SimilarityReport {
   return { ...report, externalAcademicEvidence: evidence };
+}
+
+/**
+ * Phase 7.1 TASK 1: computeUnifiedSimilarity() is a pure, synchronous,
+ * network-free function (lib/unified-similarity.ts's own header comment) —
+ * safe to run here, in the browser, at save time, using exactly the archive
+ * + live-academic evidence this client already has in memory. Attaching the
+ * result to the report BEFORE storeReport()/saveReportRemote() means it
+ * rides along in payload_json and IndexedDB for free, with no new server
+ * round-trip and no dashboard-side recomputation — see this task's own
+ * "the dashboard should simply read the persisted unified result."
+ *
+ * Deliberately omits historicalSubmissionMatch: that axis is server-only
+ * (lib/report-historical-match.ts) and, by design, must stay read-time-
+ * recomputed rather than frozen at save time — the growing corpus can gain
+ * a match for this exact content after this report was saved (see
+ * tests/report-historical-match.test.mjs's own E8E case), so freezing it
+ * here would risk permanently under- OR over-counting it. The one accepted
+ * consequence: a report with genuine eligible prior-submission evidence can
+ * show a slightly higher score on its own detail page (still recomputed
+ * fully server-side on every GET) than in this persisted dashboard/receipt
+ * value. Never touches score/archiveScore/aiScore.
+ */
+function attachUnifiedSimilarity(report: SimilarityReport): SimilarityReport {
+  try {
+    return {
+      ...report,
+      unifiedSimilarity: computeUnifiedSimilarity({
+        wordCount: report.wordCount,
+        archiveMatchedPositions: report.archiveMatchedPositions,
+        externalAcademicEvidence: report.externalAcademicEvidence,
+      }),
+    };
+  } catch {
+    return report;
+  }
 }
 
 export default function Home() {
@@ -799,6 +848,7 @@ export default function Home() {
         },
       };
     }
+    report = attachUnifiedSimilarity(report);
     setCurrentReport(report);
     const remainingAnimationMs = Math.max(0, minimumProcessingMs - (Date.now() - animationStartedAt));
     if (remainingAnimationMs > 0) {
@@ -840,6 +890,7 @@ export default function Home() {
           });
           enriched = enrichReportWithAcademicEvidence(enriched, academicEvidence);
         }
+        enriched = attachUnifiedSimilarity(enriched);
 
         setCurrentReport((current) => current?.id === enriched.id ? { ...current, ...enriched } : current);
         setReports((current) => current.map((item) => item.id === enriched.id ? { ...item, ...enriched } : item));
@@ -1008,7 +1059,7 @@ export default function Home() {
               <div className="landing-hero-copy">
                 <span className="landing-badge"><ShieldCheck aria-hidden="true" /> Private by design</span>
                 <h2 id="landing-title">Understand what is in your document—without sending the document away.</h2>
-                <p className="landing-lede">TurnitPlus checks AI-writing signals and archive overlap in your browser, then gives you the passages and sources behind the result.</p>
+                <p className="landing-lede">TurnitPlus checks AI-writing signals and similarity in your browser — against its indexed archive and, when available, live academic sources — then gives you the passages and sources behind the result.</p>
                 <div className="landing-actions">
                   <button className="button primary landing-cta" type="button" onClick={() => navigate("dashboard")}><UploadCloud aria-hidden="true" /> Check a document free</button>
                   <button className="button secondary" type="button" onClick={() => navigate("about")}><BookOpen aria-hidden="true" /> See how it works</button>
@@ -1026,7 +1077,7 @@ export default function Home() {
                 </div>
                 <div className="landing-score-grid">
                   <div><span>AI-writing signal</span><strong>Review</strong><small>Passages highlighted for inspection</small></div>
-                  <div><span>Archive overlap</span><strong>19%</strong><small>Matched phrases linked to sources</small></div>
+                  <div><span>Similarity</span><strong>19%</strong><small>Matched phrases linked to sources</small></div>
                 </div>
                 <div className="landing-match-preview">
                   <div className="landing-line wide" /><div className="landing-line" /><div className="landing-line match" /><div className="landing-line wide" /><div className="landing-line match short" />
@@ -1137,8 +1188,8 @@ export default function Home() {
             <section className="dashboard-aside">
               <article className="surface-card report-preview-card">
                 <p className="section-label">TWO REPORTS · ONE CHECK</p>
-                <h2>AI detection and archive overlap with clear evidence</h2>
-                <p>TurnitPlus checks AI-writing signals and measures text found in its indexed archive, then shows the passages behind each result.</p>
+                <h2>AI detection and similarity with clear evidence</h2>
+                <p>TurnitPlus checks AI-writing signals and measures similarity against its indexed archive and, when available, live academic sources — then shows the passages behind each result.</p>
                 <div className="mini-report">
                   <div>
                     <span>Archive overlap</span>
@@ -1486,8 +1537,16 @@ export default function Home() {
                 )}
                 {reports.map((report) => {
                   const aiSignal = aiSignalDisplay(report);
-                  const overlapScore = archiveOverlapScore(report);
-                  const similarityVerdict = similarityScoreBand(overlapScore);
+                  // Phase 7.1 TASK 2: reads report.unifiedSimilarity directly
+                  // off the already-loaded report object (persisted at save
+                  // time by attachUnifiedSimilarity(), or fetched whole for a
+                  // signed-in/first-load hydration) — no recomputation, no
+                  // network call per row. Falls back to the archive-only
+                  // score for a report saved before this fix, exactly like
+                  // every other primarySimilarityScore() consumer.
+                  const primaryScore = primarySimilarityScore(report);
+                  const isUnified = hasUnifiedSimilarity(report);
+                  const similarityVerdict = similarityScoreBand(primaryScore);
                   return (
                   <article key={report.id}>
                     <div className="history-file-icon"><FileText aria-hidden="true" /></div>
@@ -1507,10 +1566,10 @@ export default function Home() {
                         </span>
                         <span className="history-open-cue" aria-hidden="true"><ChevronRight /></span>
                       </Link>
-                      <Link href={`/reports/${report.id}`} className={`history-result history-similarity-result ${similarityVerdict ? `history-similarity-${similarityVerdict.key}` : ""}`} aria-label={`Open Archive overlap report for ${report.title}`}>
+                      <Link href={`/reports/${report.id}`} className={`history-result history-similarity-result ${similarityVerdict ? `history-similarity-${similarityVerdict.key}` : ""}`} aria-label={`Open similarity report for ${report.title}`}>
                         <span className="history-result-score">
-                          <strong>{overlapScore}%</strong>
-                          <span>Archive overlap · {archiveScopeCount(report)} docs</span>
+                          <strong>{primaryScore}%</strong>
+                          <span>{isUnified ? "TurnitPlus Similarity" : "Archive overlap"} · {archiveScopeCount(report)} docs</span>
                         </span>
                         <span className="history-open-cue" aria-hidden="true"><ChevronRight /></span>
                       </Link>
@@ -1629,7 +1688,7 @@ export default function Home() {
               <div className="legal-document surface-card">
                 <section>
                   <span className="legal-section-number">01</span>
-                  <div><h3>The service</h3><p>TurnitPlus provides automated AI-writing detection, Archive overlap measurement, highlighted passage evidence, source information, downloadable reports and device-local report history. Archive overlap is the percentage of submitted text matched within TurnitPlus&apos;s indexed archive; it is not an estimate of a Turnitin score or another provider&apos;s result.</p></div>
+                  <div><h3>The service</h3><p>TurnitPlus provides automated AI-writing detection, similarity measurement against TurnitPlus&apos;s indexed archive and, when available, live academic sources and your own prior submissions, highlighted passage evidence, source information, downloadable reports and device-local report history. This similarity result — including its Archive overlap component, the percentage of submitted text matched within TurnitPlus&apos;s indexed archive — is not an estimate of a Turnitin score or another provider&apos;s result.</p></div>
                 </section>
                 <section>
                   <span className="legal-section-number">02</span>

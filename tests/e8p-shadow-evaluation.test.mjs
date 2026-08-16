@@ -203,7 +203,8 @@ test("ownership-drop replication: a first-ever upload (production NO_HISTORICAL_
   assert.equal(row.agreement, "AGREE", "must not be reported as DISAGREE_NEW_FULL — this is the known, already-handled self-reference edge case, not real signal");
 });
 
-// --- BEHAVIORAL: partial-copy discovery (the core E8P measurement) ----------
+// --- BEHAVIORAL: partial-copy discovery (Phase 6.7: see this fixture's own
+// updated note below — production now finds this case directly) ----------
 
 // Deliberately NOT one of e8k-calibration-fixtures.ts's own ready-made
 // PARTIAL_COPY pairs (e.g. ONE_LONG_DISTINCTIVE_OVERLAP/HIST_DISTINCTIVE_DOCUMENT):
@@ -216,14 +217,38 @@ test("ownership-drop replication: a first-ever upload (production NO_HISTORICAL_
 // instead reuses e8k-calibration-fixtures.ts's own LONG_BLOCK excerpt (a
 // genuinely distinctive ~377-word passage) diluted with substantially more
 // surrounding unrelated filler than lib/e8k-calibration-fixtures.ts's own
-// withFiller() adds, specifically to push containment just under
-// PRODUCTION's real 0.5 threshold. A second, independent "noise" document
-// sharing a small amount of the same filler is also indexed — needed so the
-// freqIndex this module builds (bounded to the candidates actually found
-// for this query, per this module's own documented "corpus-scarce"
-// limitation) has more than a single document to compare against; with only
-// the one true historical candidate in the corpus, V2 distinctiveness for
-// this exact fixture empirically comes out to 0.60, under the 0.7 gate.
+// withFiller() adds, specifically to push whole-document CONTAINMENT just
+// under production's 0.5 strongContainmentThreshold. A second, independent
+// "noise" document sharing a small amount of the same filler is also
+// indexed — needed so the freqIndex this module builds (bounded to the
+// candidates actually found for this query, per this module's own
+// documented "corpus-scarce" limitation) has more than a single document to
+// compare against.
+//
+// PHASE 6.7 UPDATE — this fixture no longer escapes PRODUCTION overall.
+// Phase 6.6 PART 2 added a SECOND, independent production acceptance path,
+// lib/document-correspondence.ts's distinctivePassageMatch: a single
+// contiguous, sufficiently long (>=30 words), sufficiently non-generic
+// (density-gated) passage is now real production evidence on its own,
+// regardless of whole-document containment. LONG_BLOCK's ~377 words clear
+// this comfortably (containment dilution was only ever a whole-document
+// metric — distinctivePassageMatch was specifically designed to be immune
+// to it), so getOrComputeHistoricalMatchSnapshot now returns MATCHED for
+// this fixture, not NO_HISTORICAL_MATCH. The test below is updated to
+// assert that real, verified outcome directly, rather than the no-longer-
+// true "production misses this" precondition it originally documented.
+//
+// This also surfaces a genuine, worth-recording architectural finding: for
+// any SINGLE substantial passage, distinctivePassageMatch's acceptance
+// region is now a superset of what lib/e8o-historical-match-policy.ts's own
+// proposed decision tree requires (that policy's hasSubstantialSinglePassage
+// guardrail itself requires >=40 words in one passage before
+// HISTORICAL_PARTIAL_MATCH can ever be reached — already above this
+// production fix's own 30-word floor). A realistic single-passage fixture
+// that production now misses but the proposed E8O policy would uniquely
+// catch is therefore no longer constructible from this codebase's existing
+// calibration fixtures — not a gap in this test, a real consequence of the
+// production fix having covered that ground first.
 const UNRELATED_FILLER = [
   "Urban planners reviewing decades of transit ridership data across a mid-sized metropolitan region identified a consistent pattern in which bus routes serving mixed-use commercial corridors retained significantly higher weekday ridership than comparable routes serving primarily single-family residential zones, even after controlling for route length and service frequency.",
   "The planners attributed part of the difference to walkability, noting that corridors with continuous sidewalk coverage and shorter average block lengths saw riders willing to walk considerably farther to reach a stop than riders in areas with frequent sidewalk gaps or unusually long blocks.",
@@ -290,9 +315,23 @@ test("RACE regression (E8P.2): a stale NO_HISTORICAL_MATCH+candidate_count=0 row
   assert.ok(secondRow);
   // Step 8: candidate_count now becomes >0.
   assert.ok(Number(secondRow.candidate_count) >= 1, "the newly-indexed candidate must now be found");
-  // Step 9: E8O acceptance criteria are met for this exact fixture (already validated by the partial-copy-discovery test below) -> HISTORICAL_PARTIAL_MATCH.
-  assert.equal(secondRow.proposed_status, "HISTORICAL_PARTIAL_MATCH");
-  assert.equal(secondRow.agreement, "DISAGREE_NEW_PARTIAL");
+  // Step 9 (Phase 6.7 update): production itself now finds this candidate
+  // directly. lib/document-correspondence.ts's distinctivePassageMatch
+  // (Phase 6.6 PART 2) accepts a sufficiently long, sufficiently
+  // distinctive single contiguous passage independent of whole-document
+  // containment — LONG_BLOCK (~377 genuinely distinctive words) clears it
+  // comfortably. getOrComputeHistoricalMatchSnapshot therefore now returns
+  // MATCHED for productionResultAfter, so runHistoricalMatchShadowEvaluation
+  // takes its own documented MATCHED fast path (lib/e8p-shadow-evaluation.ts
+  // — never recomputes E8M/V2 when production's real status is already
+  // MATCHED) rather than reaching the passage-level path this test
+  // originally exercised. This still fully proves E8P.2's own subject
+  // (a stale zero-candidate row is correctly recomputed once the corpus
+  // grows) — only the downstream classification the recompute lands on
+  // has changed, from a proposed-only partial match to a real, direct
+  // production full match that shadow correctly agrees with.
+  assert.equal(secondRow.proposed_status, "HISTORICAL_FULL_MATCH");
+  assert.equal(secondRow.agreement, "AGREE");
   // Step 11: proof that a real recompute happened, not a coincidental re-insert
   // of the same content. NOT proven via computed_at inequality — SQLite's
   // CURRENT_TIMESTAMP only has whole-second resolution, so two real,
@@ -315,7 +354,7 @@ test("RACE regression (E8P.2): a stale NO_HISTORICAL_MATCH+candidate_count=0 row
   assert.ok(["NO_HISTORICAL_MATCH", "MATCHED", "UNAVAILABLE"].includes(productionResultAfter.status));
 });
 
-test("partial-copy discovery: a genuine partial copy that escapes whole-document acceptance is proposed as HISTORICAL_PARTIAL_MATCH", async () => {
+test("partial-copy discovery: Phase 6.6's distinctivePassageMatch fix now makes production find this directly; shadow evaluation correctly agrees via the MATCHED fast path (E8M/V2 is no longer needed for this fixture — see the fixture comment above)", async () => {
   await indexSubmission("e8p-partial-owner", HIST_DISTINCTIVE_DOCUMENT);
   await indexSubmission("e8p-partial-noise-owner", PARTIAL_COPY_NOISE_DOCUMENT);
 
@@ -324,18 +363,20 @@ test("partial-copy discovery: a genuine partial copy that escapes whole-document
   await ensureSavedReport(deviceKey, reportId, "e8p-partial-viewer");
 
   const productionResult = await getOrComputeHistoricalMatchSnapshot(client, { reportDeviceKey: deviceKey, reportId, accountId: "e8p-partial-viewer", rawText: PARTIAL_COPY_SUBMITTED_TEXT });
-  assert.equal(productionResult.status, "NO_HISTORICAL_MATCH", "test precondition: this fixture is constructed to escape today's whole-document acceptance (see this file's own comment above for the empirical verification)");
+  assert.equal(productionResult.status, "MATCHED", "Phase 6.7: production now finds this fixture directly via distinctivePassageMatch (Phase 6.6 PART 2) — see the fixture comment above for why this is a real, verified change, not a weakened test");
+  assert.equal(productionResult.matches[0].relationshipType, "PRIOR_SUBMISSION");
+  assert.equal(productionResult.matches[0].matchType, "STRONG_TEXT_MATCH", "accepted via distinctivePassageMatch, not the unchanged exact-canonical-hash short-circuit");
 
   await runHistoricalMatchShadowEvaluation(client, { reportDeviceKey: deviceKey, reportId, accountId: "e8p-partial-viewer", rawText: PARTIAL_COPY_SUBMITTED_TEXT, productionResult });
 
   const row = await shadowRow(deviceKey, reportId);
   assert.ok(row, "expected a telemetry row to be persisted");
   assert.equal(row.status, "OK");
-  assert.equal(row.proposed_status, "HISTORICAL_PARTIAL_MATCH", "the proposed E8O policy is expected to surface this as a partial-copy opportunity production currently misses");
-  assert.equal(row.agreement, "DISAGREE_NEW_PARTIAL");
-  assert.ok(Number(row.passage_level_evaluated_count) >= 1, "E8M/V2 must have actually run for at least one candidate");
+  assert.equal(row.proposed_status, "HISTORICAL_FULL_MATCH", "production's own real MATCHED result is reproduced through the MATCHED fast path (lib/e8p-shadow-evaluation.ts), not proposed independently");
+  assert.equal(row.agreement, "AGREE", "shadow correctly agrees with production now that production finds this case directly — no disagreement remains to report");
+  assert.equal(Number(row.passage_level_evaluated_count), 0, "the MATCHED fast path never spends an E8M/V2 pass — production's own result already settles it");
   assert.ok(Number(row.candidate_count) >= 1);
-  assert.ok(Number(row.freq_index_document_count) >= 1, "the noise document must have been available as freqIndex context");
+  assert.equal(Number(row.freq_index_document_count), 0, "freqIndex is only ever built on the passage-level path, which the fast path does not reach");
 });
 
 test("generic boilerplate: a real E8N COMMON_BOILERPLATE fixture is correctly rejected (no false partial match)", async () => {

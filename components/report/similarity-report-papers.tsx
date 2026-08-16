@@ -365,6 +365,23 @@ function unifiedEvidenceBreakdown(report: SimilarityReport): string[] {
   return parts;
 }
 
+/**
+ * Phase 7 PRIORITY 3: live academic search runs in the background after a
+ * report is first generated (app/page.tsx's own generateReport() saves the
+ * report, then navigates away, before the OpenAIRE/Europe PMC lookup and
+ * its re-save land — typically well under a minute, per Phase 6.5/6.6's own
+ * measured latencies). A report opened inside that short window would
+ * otherwise show a lower unified result with no explanation for why it
+ * might climb on a later refresh. 5 minutes is a deliberately generous
+ * margin over that measured latency, not a claim about exactly when
+ * verification finishes.
+ */
+function isRecentlyGenerated(report: SimilarityReport): boolean {
+  const createdAt = new Date(report.created).getTime();
+  if (Number.isNaN(createdAt)) return false;
+  return Date.now() - createdAt < 5 * 60_000;
+}
+
 export function UnifiedSimilaritySection({ report }: { report: SimilarityReport }) {
   const unified = report.unifiedSimilarity;
   if (!unified) return null;
@@ -384,6 +401,13 @@ export function UnifiedSimilaritySection({ report }: { report: SimilarityReport 
         TurnitPlus submissions into one result. The same submitted passage found by more than one source counts once,
         never added twice.
       </p>
+      {isRecentlyGenerated(report) && (
+        <p className="unified-similarity-note">
+          This report was generated recently — external academic sources are checked in the background and can add
+          to this result for a short time afterward. Reopen or refresh this report in a minute for the complete
+          picture.
+        </p>
+      )}
       {breakdown.length > 0 && (
         <p className="unified-similarity-note">{breakdown.join(" · ")}.</p>
       )}

@@ -43,7 +43,41 @@ import type { AcademicSearchRunStats, ExternalAcademicEvidence } from "./academi
 
 const sharedCache = createInMemoryAcademicSearchCache();
 
-const PER_REPORT_BUDGET = 40;
+/**
+ * Phase 6.6 PART 1 fix: two independent budgets, not one shared
+ * PER_REPORT_BUDGET — see lib/academic-search/cache.ts's own header
+ * comment on withRequestControl's discoveryBudget/retrievalBudget split
+ * for the root-cause explanation (discovery's query count scales with
+ * submission length/topic count and could exhaust a shared pool before
+ * retrieval ever got its turn, silently dropping candidates the search
+ * stage had already found).
+ *
+ * DISCOVERY_BUDGET_LIMIT stays at the exact same 40 this file's own
+ * PER_REPORT_BUDGET already used — not raised, since single-topic
+ * submissions were already succeeding at this level (real measured
+ * queryCount ~16-17 for a single topic x 2 providers ~= 32-34 search
+ * calls, comfortably under 40); the fix is giving retrieval a separate
+ * pool, not giving discovery a bigger one.
+ *
+ * RETRIEVAL_BUDGET_LIMIT is sized to retrieval's own real, bounded need:
+ * DEFAULT_ACADEMIC_SEARCH_RUN_CONFIG.maxCandidatesToRetrieve (5) candidates,
+ * each trying at most its ~2 contributing providers' getText() (see
+ * text-retriever.ts's retrieveCandidateText — it stops at the first
+ * contributor that returns real text) before falling back to the
+ * unbudgeted HTTP retriever — a theoretical worst case of 10 "text"
+ * consumptions, so 15 leaves real margin without being unbounded.
+ * getMetadata() is defined on the wrapped providers but not currently
+ * called anywhere in the pipeline (see orchestrator.ts/text-retriever.ts)
+ * — this budget covers it defensively in case a future stage starts
+ * calling it, at negligible cost given the small limit.
+ *
+ * Total worst-case external requests per report: 40 + 15 = 55, up from
+ * today's single 40-unit pool — a small, deliberately-sized increase
+ * matched to retrieval's own measured need, not an across-the-board bump;
+ * still a hard, bounded cap, nowhere near "uncontrolled."
+ */
+const DISCOVERY_BUDGET_LIMIT = 40;
+const RETRIEVAL_BUDGET_LIMIT = 15;
 const PROVIDER_TIMEOUT_MS = 9_000;
 const PROVIDER_MAX_RESULTS_PER_QUERY = 5;
 
@@ -53,15 +87,16 @@ export type AcademicEvidenceResult = {
 };
 
 function buildProviders() {
-  const budget = createAcademicSearchBudget(PER_REPORT_BUDGET);
+  const discoveryBudget = createAcademicSearchBudget(DISCOVERY_BUDGET_LIMIT);
+  const retrievalBudget = createAcademicSearchBudget(RETRIEVAL_BUDGET_LIMIT);
   return [
     withRequestControl(
       createOpenAireAcademicSearchProvider({ maxResultsPerRequest: PROVIDER_MAX_RESULTS_PER_QUERY, timeoutMs: PROVIDER_TIMEOUT_MS }),
-      { cache: sharedCache, budget },
+      { cache: sharedCache, discoveryBudget, retrievalBudget },
     ),
     withRequestControl(
       createEuropePmcAcademicSearchProvider({ maxResultsPerRequest: PROVIDER_MAX_RESULTS_PER_QUERY, timeoutMs: PROVIDER_TIMEOUT_MS }),
-      { cache: sharedCache, budget },
+      { cache: sharedCache, discoveryBudget, retrievalBudget },
     ),
   ];
 }

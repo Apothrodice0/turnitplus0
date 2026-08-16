@@ -270,12 +270,15 @@ test("POST /api/reports still returns the same success response and saved_report
   // unlike matchClassification, it is deliberately always attached (even
   // for NO_HISTORICAL_MATCH) so the persisted snapshot's version/audit
   // metadata stays inspectable regardless of match status (this phase's
-  // own task description, section 3). Assert its shape separately, then
-  // compare the rest of the payload unchanged.
-  const { historicalSubmissionMatch, ...getBodyWithoutHistoricalMatch } = getBody.payload;
+  // own task description, section 3). Phase 6 adds unifiedSimilarity as
+  // the same kind of read-time enrichment (lib/unified-similarity.ts) —
+  // see tests/api-reports.test.mjs's identical adjustment. Assert both
+  // shapes separately, then compare the rest of the payload unchanged.
+  const { historicalSubmissionMatch, unifiedSimilarity, ...getBodyWithoutHistoricalMatch } = getBody.payload;
   assert.equal(historicalSubmissionMatch?.status, "NO_HISTORICAL_MATCH");
   assert.equal(typeof historicalSubmissionMatch?.matcherVersion, "string");
-  assert.deepEqual(getBodyWithoutHistoricalMatch, payload, "the saved report must still round-trip exactly (aside from the new E8C enrichment field), unaffected by identity capture");
+  assert.ok(unifiedSimilarity, "unifiedSimilarity must also be attached as read-time enrichment");
+  assert.deepEqual(getBodyWithoutHistoricalMatch, payload, "the saved report must still round-trip exactly (aside from the new E8C/Phase 6 enrichment fields), unaffected by identity capture");
 
   // Side effect: a document_identities row was created for this save, scoped
   // to the anonymous submission (no session cookie was sent).

@@ -290,3 +290,121 @@ test("querying against an empty corpus (fresh account, nothing indexed yet) retu
   const result = await match("account-never-seen-before", "A completely novel document nobody has ever submitted before, fixture-novel-marker, with enough distinctive words to be indexable in principle.");
   assert.equal(result.status, "NO_HISTORICAL_MATCH");
 });
+
+// =============================================================================
+// PHASE 6.6 PART 2 — distinctivePassageMatch: a short but genuinely distinctive
+// exact/near-exact passage must be detectable even when it is a minority of the
+// source document; common short academic boilerplate and fragmented weak
+// evidence must still be rejected. See lib/document-correspondence.ts's own
+// header comment on distinctivePassageMatch and USER_SUBMISSION_MATCH_THRESHOLDS's
+// own comment on why minimumDistinctivePassageWords is set to 30.
+// =============================================================================
+
+// A long (~560-word), distinctive real-shaped source document — long enough
+// that a 40-word excerpt of it sits at roughly 25-30% document-level
+// containment against a short submission, mirroring the real case this
+// phase's own task description names (40 words in a 156-word source).
+const LONG_DISTINCTIVE_SOURCE_PARAGRAPHS = [
+  "Hydrothermal vent communities along a remote spreading ridge segment have provided researchers with an unusually clear natural experiment in chemosynthetic succession following a documented eruptive event in the surveyed region.",
+  "The research team interpreted the observed decline in bacterial mat coverage as evidence of active ecosystem engineering by the tubeworm colonies themselves, rather than a simple consequence of diffuse-flow chemistry drifting away from conditions favorable to the mat-forming microbial taxa.",
+  "Paired fluid-chemistry samples supported this interpretation: hydrogen sulfide concentrations measured immediately adjacent to dense tubeworm bushes were consistently lower than concentrations measured at open, mat-dominated patches sampled during the same visit to the site.",
+  "Genetic sampling of the dominant tubeworm population revealed limited differentiation among the surveyed vent orifices despite considerable separation along the ridge axis, consistent with a larval dispersal regime capable of maintaining regional connectivity at this spreading rate.",
+  "Grazer densities within the tubeworm bushes rose steadily across the multi-year survey window, tracking the increasing structural complexity of the aggregations rather than tracking elapsed time since the eruption directly.",
+  "The authors conclude that the observed successional sequence may represent a general template applicable to other slow-spreading vent systems recovering from a comparable discrete disturbance event, pending confirmation from additional survey series conducted elsewhere.",
+].join(" ");
+
+function distinctiveExcerptWords(count, offset = 0) {
+  return LONG_DISTINCTIVE_SOURCE_PARAGRAPHS.split(/\s+/).slice(offset, offset + count).join(" ");
+}
+
+function shortHostFor(excerpt, marker) {
+  return `Independent original commentary of real length precedes the borrowed material below, discussing an entirely unrelated logistics topic so the excerpt has unambiguous non-matching context on both sides. ${excerpt} A closing paragraph, again unrelated, discusses freight scheduling variance at a regional terminal, included only to give this short submission a realistic surrounding length. ${marker}`;
+}
+
+test("PART 2 / A: a 40-word exact passage inside a much longer (~156-word submission over a ~560-word source) is now detected via distinctivePassageMatch", async () => {
+  await indexSubmission("account-p2a-author", "Doc P2A", LONG_DISTINCTIVE_SOURCE_PARAGRAPHS);
+
+  const excerpt = distinctiveExcerptWords(40, 28); // "The research team interpreted..." — the same real sentence Phase 6.5's own validation found rejected
+  const shortSubmission = shortHostFor(excerpt, "fixture-p2a-marker");
+
+  const result = await match("account-p2a-reader", shortSubmission);
+  assert.equal(result.status, "MATCHED", "a real 40-word exact passage must now be reportable evidence even at low document-level containment");
+  assert.equal(result.matches[0].relationshipType, "PRIOR_SUBMISSION");
+  assert.equal(result.matches[0].matchType, "STRONG_TEXT_MATCH");
+  assert.ok(result.matches[0].containment < USER_SUBMISSION_MATCH_THRESHOLDS.correspondence.strongContainmentThreshold, "the fixture must genuinely have low whole-document containment for this test to prove distinctivePassageMatch, not strongCorrespondence, is what accepted it");
+  assert.ok(result.matches[0].longestMatchWords >= 30, "the accepted passage must be the long contiguous span, not scattered fragments");
+});
+
+test("PART 2 / B: a 20-word generic/common academic phrase at the same low containment scale is still rejected", async () => {
+  const genericPhrase = "The purpose of this study is to examine the research problem in question using a combination of established analytical";
+  const longGenericSource = `${genericPhrase} methods applied consistently across every stage of the investigation described in the remainder of this document. ` + UNRELATED_PARAGRAPHS.join(" ");
+  await indexSubmission("account-p2b-author", "Doc P2B", longGenericSource);
+
+  const shortSubmission = shortHostFor(genericPhrase, "fixture-p2b-marker");
+  const result = await match("account-p2b-reader", shortSubmission);
+  assert.equal(result.status, "NO_HISTORICAL_MATCH", "a 20-word generic academic phrase must not become a match just because distinctivePassageMatch now exists");
+});
+
+test("PART 2 / C: a second, independent 40-word distinctive exact passage (different excerpt of the same source) is also detected", async () => {
+  await indexSubmission("account-p2c-author", "Doc P2C", LONG_DISTINCTIVE_SOURCE_PARAGRAPHS);
+
+  const excerpt = distinctiveExcerptWords(40, 0); // a different 40-word span from the start of the source
+  const shortSubmission = shortHostFor(excerpt, "fixture-p2c-marker");
+
+  const result = await match("account-p2c-reader", shortSubmission);
+  assert.equal(result.status, "MATCHED");
+  assert.equal(result.matches[0].relationshipType, "PRIOR_SUBMISSION");
+});
+
+test("PART 2 / D: fragmented, individually-short unrelated phrases (none reaching 30 contiguous words) are rejected even though their aggregate exceeds minimumMatchedWords", async () => {
+  const frag1 = "the results suggest that further work remains";
+  const frag2 = "additional analysis would benefit the wider field";
+  const frag3 = "more research is needed going forward here";
+  const longFragmentSource = `${frag1}, entirely surrounded by substantial unrelated original material of real length discussing an unconnected subject at length. ${frag2}, again surrounded by more unrelated original material of real substance and length. ${frag3}, with yet more surrounding unrelated original material to close out this source document.`;
+  await indexSubmission("account-p2d-author", "Doc P2D", longFragmentSource);
+
+  const fragmentedSubmission = `Opening original material of real length with no relation whatsoever to what follows. ${frag1}. Bridging original material of real length separating the fragments clearly from one another. ${frag2}. More original bridging material once again, entirely unrelated in content. ${frag3}. Closing original material. fixture-p2d-marker`;
+  const result = await match("account-p2d-reader", fragmentedSubmission);
+  assert.equal(result.status, "NO_HISTORICAL_MATCH", "fragmented weak evidence — no single span reaching minimumDistinctivePassageWords — must stay rejected");
+});
+
+test("PART 2 / E: exact full source copying is still detected via EXACT_CANONICAL_MATCH, unaffected by the new gate", async () => {
+  const text = LONG_DISTINCTIVE_SOURCE_PARAGRAPHS + " fixture-p2e-marker";
+  await indexSubmission("account-p2e-author", "Doc P2E", text);
+
+  const result = await match("account-p2e-reader", text);
+  assert.equal(result.status, "MATCHED");
+  assert.equal(result.matches[0].matchType, "EXACT_CANONICAL_MATCH");
+  assert.equal(result.matches[0].containment, 1);
+});
+
+test("PART 2 / F: exact large-portion (majority) copying is still detected via strongCorrespondence, unaffected by the new gate", async () => {
+  await indexSubmission("account-p2f-author", "Doc P2F", LONG_DISTINCTIVE_SOURCE_PARAGRAPHS);
+
+  const words = LONG_DISTINCTIVE_SOURCE_PARAGRAPHS.split(/\s+/);
+  const majorityPortion = words.slice(0, Math.floor(words.length * 0.8)).join(" ");
+  const submission = `${majorityPortion} A short original closing sentence added by this submitter. fixture-p2f-marker`;
+
+  const result = await match("account-p2f-reader", submission);
+  assert.equal(result.status, "MATCHED");
+  assert.equal(result.matches[0].relationshipType, "PRIOR_SUBMISSION");
+  assert.ok(result.matches[0].containment >= USER_SUBMISSION_MATCH_THRESHOLDS.correspondence.strongContainmentThreshold, "an 80% copy must clear strongCorrespondence on its own");
+});
+
+test("PART 2 / G: distinctivePassageMatch is opt-in only — a caller-supplied config without minimumDistinctivePassageWords reproduces pre-fix behavior exactly (the real 40-word case stays rejected)", async () => {
+  await indexSubmission("account-p2g-author", "Doc P2G", LONG_DISTINCTIVE_SOURCE_PARAGRAPHS);
+
+  const excerpt = distinctiveExcerptWords(40, 28);
+  const shortSubmission = shortHostFor(excerpt, "fixture-p2g-marker");
+
+  const configWithoutNewGate = {
+    ...USER_SUBMISSION_MATCH_THRESHOLDS,
+    correspondence: { ...USER_SUBMISSION_MATCH_THRESHOLDS.correspondence, minimumDistinctivePassageWords: undefined },
+  };
+  const result = await matchAgainstUserSubmissionCorpus(client, {
+    accountId: "account-p2g-reader",
+    canonicalText: shortSubmission,
+    config: configWithoutNewGate,
+  });
+  assert.equal(result.status, "NO_HISTORICAL_MATCH", "with the new gate explicitly disabled, behavior must exactly match the pre-fix state");
+});

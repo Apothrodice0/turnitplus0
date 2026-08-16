@@ -174,3 +174,63 @@ test("two completely empty/whitespace-only texts do not throw and are not a stro
   const result = computeDocumentCorrespondence("   ", "   ");
   assert.equal(result.strongCorrespondence, false);
 });
+
+// =============================================================================
+// PHASE 6.6 PART 2 — distinctivePassageMatch (unit level; see
+// tests/user-submission-matching.test.mjs for the real production-matcher
+// integration tests this same fix is validated against end to end)
+// =============================================================================
+
+test("distinctivePassageMatch: BACKWARD COMPATIBILITY — DEFAULT_DOCUMENT_CORRESPONDENCE_THRESHOLDS leaves minimumDistinctivePassageWords unset, so the field is always false regardless of passage length, reproducing every pre-Phase-6.6 caller's exact behavior", () => {
+  const longVerbatimPassage = Array.from({ length: 60 }, (_, i) => `distinctivewordforpassage${i}`).join(" ");
+  const hostA = `${UNRELATED_DOCUMENT} ${longVerbatimPassage} ${UNRELATED_DOCUMENT}`;
+  const hostB = `${BASE_DOCUMENT} ${longVerbatimPassage} ${BASE_DOCUMENT}`;
+  const result = computeDocumentCorrespondence(hostA, hostB, DEFAULT_DOCUMENT_CORRESPONDENCE_THRESHOLDS);
+  assert.ok(result.longestMatchWords >= 50, "sanity: the fixture must contain a long enough passage that an opted-in caller WOULD accept it");
+  assert.equal(result.distinctivePassageMatch, false, "an unset threshold must never be silently treated as some default cutoff");
+});
+
+test("distinctivePassageMatch: true once a caller opts in and the longest contiguous span reaches the configured threshold", () => {
+  const longVerbatimPassage = Array.from({ length: 35 }, (_, i) => `distinctivewordforpassage${i}`).join(" ");
+  const hostA = `${UNRELATED_DOCUMENT} ${longVerbatimPassage} ${UNRELATED_DOCUMENT}`;
+  const hostB = `${BASE_DOCUMENT} ${longVerbatimPassage} ${BASE_DOCUMENT}`;
+  const optedIn = { ...DEFAULT_DOCUMENT_CORRESPONDENCE_THRESHOLDS, minimumDistinctivePassageWords: 30 };
+  const result = computeDocumentCorrespondence(hostA, hostB, optedIn);
+  assert.ok(result.containment < optedIn.strongContainmentThreshold, "the fixture must have low overall containment for this test to isolate distinctivePassageMatch from strongCorrespondence");
+  assert.equal(result.strongCorrespondence, false);
+  assert.equal(result.distinctivePassageMatch, true);
+});
+
+test("distinctivePassageMatch: false when the longest contiguous span falls short of the configured threshold, even if opted in", () => {
+  const shortVerbatimPassage = Array.from({ length: 18 }, (_, i) => `distinctivewordforpassage${i}`).join(" ");
+  const hostA = `${UNRELATED_DOCUMENT} ${shortVerbatimPassage} ${UNRELATED_DOCUMENT}`;
+  const hostB = `${BASE_DOCUMENT} ${shortVerbatimPassage} ${BASE_DOCUMENT}`;
+  const optedIn = { ...DEFAULT_DOCUMENT_CORRESPONDENCE_THRESHOLDS, minimumDistinctivePassageWords: 30 };
+  const result = computeDocumentCorrespondence(hostA, hostB, optedIn);
+  assert.equal(result.distinctivePassageMatch, false);
+});
+
+test("distinctivePassageMatch: never true on the exact-canonical-match or empty-input short-circuits (those already answer definitively through their own fields)", () => {
+  const optedIn = { ...DEFAULT_DOCUMENT_CORRESPONDENCE_THRESHOLDS, minimumDistinctivePassageWords: 5 };
+  const exact = computeDocumentCorrespondence(BASE_DOCUMENT, BASE_DOCUMENT, optedIn);
+  assert.equal(exact.exactCanonicalMatch, true);
+  assert.equal(exact.distinctivePassageMatch, false);
+
+  const empty = computeDocumentCorrespondence("   ", "   ", optedIn);
+  assert.equal(empty.distinctivePassageMatch, false);
+});
+
+test("distinctivePassageMatch: fragmented short spans (several, none individually reaching the threshold) never combine to satisfy it — it reads the SINGLE longest span, not an aggregate", () => {
+  const words = (prefix, count) => Array.from({ length: count }, (_, i) => `${prefix}${i}`).join(" ");
+  const fragmentOne = words("fragmentonetoken", 12);
+  const fragmentTwo = words("fragmenttwotoken", 12);
+  const fragmentThree = words("fragmentthreetoken", 12);
+  const hostA = `${words("onlyinhostafillera", 15)} ${fragmentOne} ${words("onlyinhostafillerb", 15)} ${fragmentTwo} ${words("onlyinhostafillerc", 15)} ${fragmentThree}`;
+  const hostB = `${words("onlyinhostbfillera", 15)} ${fragmentOne} ${words("onlyinhostbfillerb", 15)} ${fragmentTwo} ${words("onlyinhostbfillerc", 15)} ${fragmentThree}`;
+
+  const optedIn = { ...DEFAULT_DOCUMENT_CORRESPONDENCE_THRESHOLDS, minimumDistinctivePassageWords: 30 };
+  const result = computeDocumentCorrespondence(hostA, hostB, optedIn);
+  assert.ok(result.matchedWordCount >= 30, "sanity: the aggregate across all three fragments must exceed the threshold, to prove this is genuinely testing single-span vs aggregate behavior");
+  assert.ok(result.passages.length >= 2, "sanity: the fragments must actually register as separate passages");
+  assert.equal(result.distinctivePassageMatch, false, "no single fragment reaches the threshold, so the aggregate must not silently satisfy it");
+});
