@@ -7,7 +7,7 @@ import { DEFAULT_ACADEMIC_SEARCH_RUN_CONFIG, runAcademicSearch } from "./academi
 import type { AcademicSearchProvider } from "./academic-search/provider";
 import { createEuropePmcAcademicSearchProvider } from "./academic-search/providers/europe-pmc";
 import { createOpenAireAcademicSearchProvider } from "./academic-search/providers/openaire";
-import type { AcademicSearchRunStats, ExternalAcademicEvidence } from "./academic-search/types";
+import type { AcademicSearchRunStats, AcademicSearchStatus, ExternalAcademicEvidence } from "./academic-search/types";
 
 /**
  * Phase 3 bridge layer: the only module that knows about both "reports" and
@@ -84,6 +84,16 @@ const PROVIDER_MAX_RESULTS_PER_QUERY = 5;
 export type AcademicEvidenceResult = {
   evidence: ExternalAcademicEvidence[];
   stats: AcademicSearchRunStats | null;
+  /**
+   * "start the two fixes now" TASK 2: mirrors runAcademicSearch's own
+   * status exactly on success. FAILED here covers both that function's own
+   * FAILED outcome (a total provider outage it still completed measuring)
+   * and this function's own outer catch (something broke before a status
+   * could even be computed, e.g. budget/cache construction) — a caller only
+   * needs one signal to know "do not treat this as a confirmed zero-match
+   * result."
+   */
+  status: AcademicSearchStatus;
 };
 
 function buildProviders() {
@@ -130,9 +140,12 @@ export async function getExternalAcademicEvidence(
   try {
     const providers = providersOverride ?? buildProviders();
     const result = await runAcademicSearch(rawText, providers, DEFAULT_ACADEMIC_SEARCH_RUN_CONFIG);
-    return { evidence: result.evidence, stats: result.stats };
+    return { evidence: result.evidence, stats: result.stats, status: result.status };
   } catch (error) {
+    // Never logs rawText itself (this codebase's own existing discipline —
+    // see e.g. lib/user-submission-corpus.ts's identical rule) — only the
+    // error message, which describes the failure, not the document.
     console.error("getExternalAcademicEvidence failed (non-fatal):", error instanceof Error ? error.message : String(error));
-    return { evidence: [], stats: null };
+    return { evidence: [], stats: null, status: "FAILED" };
   }
 }

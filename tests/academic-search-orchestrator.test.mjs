@@ -98,6 +98,52 @@ test("no-result handling: a provider that finds nothing produces a valid, empty 
   assert.equal(result.stats.candidateCountBeforeDedup, 0);
   assert.equal(result.stats.candidateCountAfterDedup, 0);
   assert.equal(result.stats.deduplicationRate, 0);
+  // "start the two fixes now" TASK 2: a real, successful search that
+  // genuinely found nothing must be labeled COMPLETE_NO_MATCHES, not FAILED
+  // — the provider actually answered every query, it just had no matches.
+  assert.equal(result.status, "COMPLETE_NO_MATCHES");
+  assert.ok(result.stats.searchAttempts > 0, "queries were genuinely attempted against the provider");
+});
+
+test("STATUS: a total provider outage (every search attempt errors) is FAILED, never silently COMPLETE_NO_MATCHES", async () => {
+  const totallyBrokenProvider = {
+    id: "totally-broken",
+    async search() {
+      throw new Error("network unreachable");
+    },
+  };
+
+  const result = await runAcademicSearch(MULTI_SENTENCE_SUBMISSION, [totallyBrokenProvider], DEFAULT_ACADEMIC_SEARCH_RUN_CONFIG, stubContentRetriever);
+
+  assert.equal(result.evidence.length, 0);
+  assert.equal(result.status, "FAILED", "every single search attempt failed — this must never be reported the same way as a real zero-match search");
+  assert.ok(result.stats.searchAttempts > 0);
+  assert.equal(result.stats.providerErrors.length, result.stats.searchAttempts, "every attempt that was made must be recorded as an error");
+});
+
+test("STATUS: one provider failing while another succeeds (even with zero matches) is COMPLETE_NO_MATCHES, not FAILED", async () => {
+  const brokenProvider = { id: "broken-partial", async search() { throw new Error("timeout"); } };
+  const workingButEmptyProvider = { id: "working-empty", async search() { return []; } };
+
+  const result = await runAcademicSearch(
+    MULTI_SENTENCE_SUBMISSION,
+    [brokenProvider, workingButEmptyProvider],
+    DEFAULT_ACADEMIC_SEARCH_RUN_CONFIG,
+    stubContentRetriever,
+  );
+
+  assert.ok(result.stats.providerErrors.length > 0, "the broken provider's failures are still recorded");
+  assert.ok(result.stats.providerErrors.length < result.stats.searchAttempts, "not every attempt failed — the working provider answered its share");
+  assert.equal(result.status, "COMPLETE_NO_MATCHES", "a real answer came back from at least one provider, so this is a genuine (if partial) completed search, not a failure");
+});
+
+test("STATUS: searchAttempts equals queryCount x provider count, exactly", async () => {
+  const providerA = { id: "count-a", async search() { return []; } };
+  const providerB = { id: "count-b", async search() { return []; } };
+
+  const result = await runAcademicSearch(MULTI_SENTENCE_SUBMISSION, [providerA, providerB], DEFAULT_ACADEMIC_SEARCH_RUN_CONFIG, stubContentRetriever);
+
+  assert.equal(result.stats.searchAttempts, result.stats.queryCount * 2);
 });
 
 test("unavailable full text: a discovered candidate with no retrievable text is ranked but produces no evidence", async () => {
@@ -166,6 +212,7 @@ test("end-to-end POC: the mock provider finds and locally confirms a near-duplic
   assert.ok(top, "expected the near-duplicate source (mock-006) to be found and reported as evidence");
   assert.ok(top.matchedPassages.length > 0);
   assert.ok(top.similarity > 0);
+  assert.equal(result.status, "COMPLETE_WITH_MATCHES");
 
   // Printed (not asserted) so this run's shape can be captured for the final report's "example POC result".
   console.log("\n--- Academic Search POC example result ---");

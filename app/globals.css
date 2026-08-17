@@ -4648,6 +4648,15 @@ main.report-main {
   line-height: 1.5;
 }
 
+/* "start the two fixes now" TASK 3: matches .academic-evidence-unavailable's
+   warning tone — a failed external check must read differently from the
+   default informational note above. */
+.unified-similarity-note-warning {
+  border-color: #f0d4a0;
+  background: #fdf3e2;
+  color: #7a5210;
+}
+
 .filtered-block {
   padding: 23px 0;
   border-bottom: 1px solid #ccd1d3;
@@ -5095,6 +5104,17 @@ main.report-main {
   color: var(--muted);
   font-size: 9px;
   line-height: 1.55;
+}
+
+/* "start the two fixes now" TASK 3: a failed check must look visibly
+   different from "checked, nothing found" — never the same silent absence. */
+.academic-evidence-unavailable .academic-evidence-intro {
+  padding: 9px 11px;
+  border: 1px solid #f0d4a0;
+  border-radius: 8px;
+  background: #fdf3e2;
+  color: #7a5210;
+  font-weight: 600;
 }
 
 .academic-evidence-list {

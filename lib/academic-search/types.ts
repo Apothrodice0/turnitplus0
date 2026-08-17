@@ -159,10 +159,36 @@ export type AcademicSearchRunStats = {
   comparisonLatencyMs: number;
   totalLatencyMs: number;
   providerErrors: AcademicSearchProviderError[];
+  /** Every (query, provider) pair orchestrator.ts actually attempted in Stage 2 — searchAttempts - providerErrors.length is how many came back with a real (possibly empty) result. Exists so status below is auditable from the raw numbers, not just trusted as a label. */
+  searchAttempts: number;
 };
+
+/**
+ * "start the two fixes now" TASK 2: makes a successful, evidence-free search
+ * distinguishable from a search that could not run at all — see this
+ * file's own header comment on why that distinction previously did not
+ * exist as a first-class value (a caller had to separately notice
+ * `stats === null` vs `stats.providerErrors.length > 0` vs empty evidence).
+ * Computed once, in orchestrator.ts, from the real attempt/failure counts
+ * above — never guessed downstream from evidence.length alone, since an
+ * empty evidence array is produced by both COMPLETE_NO_MATCHES and (via the
+ * caller's own outer catch) a genuine FAILED run.
+ *
+ *  - COMPLETE_WITH_MATCHES: at least one candidate cleared minEvidenceSimilarity.
+ *  - COMPLETE_NO_MATCHES: either at least one (query, provider) attempt
+ *    returned a real result (even zero results is a real answer) and
+ *    nothing matched, or there was nothing distinctive enough in the
+ *    submission to even query for (searchAttempts === 0) — a property of
+ *    the input text, not a provider outage, so it is not FAILED.
+ *  - FAILED: at least one search attempt was actually made and every single
+ *    one of them errored (a total provider outage) — the search subsystem
+ *    never got one real answer back from any provider.
+ */
+export type AcademicSearchStatus = "COMPLETE_WITH_MATCHES" | "COMPLETE_NO_MATCHES" | "FAILED";
 
 export type AcademicSearchRunResult = {
   evidence: ExternalAcademicEvidence[];
   candidates: AcademicSearchCandidate[];
   stats: AcademicSearchRunStats;
+  status: AcademicSearchStatus;
 };

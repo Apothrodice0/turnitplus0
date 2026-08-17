@@ -309,29 +309,63 @@ function AcademicEvidenceCard({ item }: { item: ExternalAcademicEvidence }) {
  * styled as a score, never labeled "Plagiarism Score." Renders only when
  * report.externalAcademicEvidence is present and non-empty (STEP 2: absent
  * means exactly "no external academic evidence," including for every report
- * saved before this phase existed); a report still being background-checked
- * simply shows nothing here yet, the same way report.webCheck's own
- * Wikipedia chip shows nothing until that background check resolves.
+ * saved before this phase existed).
+ *
+ * "start the two fixes now" TASK 2/3: for a report saved after that task,
+ * report.academicEvidenceStatus is always one of COMPLETE_WITH_MATCHES/
+ * COMPLETE_NO_MATCHES/FAILED (the check is now awaited before the report is
+ * ever shown — see app/page.tsx's generateReport()), so this section now
+ * renders something honest in all three cases instead of going silent for
+ * two of them: FAILED gets an explicit "unavailable" notice (never
+ * presented as "no matches"), COMPLETE_NO_MATCHES gets a brief confirmation
+ * that the check actually ran, and COMPLETE_WITH_MATCHES keeps the existing
+ * evidence list. A report with no academicEvidenceStatus at all (saved
+ * before this task) renders nothing here, exactly as before.
  */
 export function AcademicEvidenceSection({ report }: { report: SimilarityReport }) {
-  if (!report.externalAcademicEvidence || report.externalAcademicEvidence.length === 0) return null;
-  const evidence = dedupeExternalAcademicEvidence(report.externalAcademicEvidence);
-  if (evidence.length === 0) return null;
+  const evidence = report.externalAcademicEvidence ? dedupeExternalAcademicEvidence(report.externalAcademicEvidence) : [];
+  if (evidence.length > 0) {
+    return (
+      <section className="academic-evidence-block">
+        <h3>External Academic Sources</h3>
+        <p className="academic-evidence-intro">
+          {evidence.length} potential external academic {evidence.length === 1 ? "source" : "sources"} found outside TurnitPlus&apos;s own archive.
+          This is separate evidence and does not change Archive overlap.
+        </p>
+        <div className="academic-evidence-list">
+          {evidence.map((item, index) => (
+            <AcademicEvidenceCard item={item} key={item.doi ?? item.url ?? `${item.provider}-${item.providerId}-${index}`} />
+          ))}
+        </div>
+      </section>
+    );
+  }
 
-  return (
-    <section className="academic-evidence-block">
-      <h3>External Academic Sources</h3>
-      <p className="academic-evidence-intro">
-        {evidence.length} potential external academic {evidence.length === 1 ? "source" : "sources"} found outside TurnitPlus&apos;s own archive.
-        This is separate evidence and does not change Archive overlap.
-      </p>
-      <div className="academic-evidence-list">
-        {evidence.map((item, index) => (
-          <AcademicEvidenceCard item={item} key={item.doi ?? item.url ?? `${item.provider}-${item.providerId}-${index}`} />
-        ))}
-      </div>
-    </section>
-  );
+  if (report.academicEvidenceStatus === "FAILED") {
+    return (
+      <section className="academic-evidence-block academic-evidence-unavailable">
+        <h3>External Academic Sources</h3>
+        <p className="academic-evidence-intro">
+          External academic verification was unavailable for this report — OpenAIRE and Europe PMC could not be
+          reached, or every request failed. This is not the same as "no matches found"; it means the check itself
+          did not complete.
+        </p>
+      </section>
+    );
+  }
+
+  if (report.academicEvidenceStatus === "COMPLETE_NO_MATCHES") {
+    return (
+      <section className="academic-evidence-block">
+        <h3>External Academic Sources</h3>
+        <p className="academic-evidence-intro">
+          Checked OpenAIRE and Europe PMC — no matching external academic sources were found.
+        </p>
+      </section>
+    );
+  }
+
+  return null;
 }
 
 /**
@@ -365,23 +399,6 @@ function unifiedEvidenceBreakdown(report: SimilarityReport): string[] {
   return parts;
 }
 
-/**
- * Phase 7 PRIORITY 3: live academic search runs in the background after a
- * report is first generated (app/page.tsx's own generateReport() saves the
- * report, then navigates away, before the OpenAIRE/Europe PMC lookup and
- * its re-save land — typically well under a minute, per Phase 6.5/6.6's own
- * measured latencies). A report opened inside that short window would
- * otherwise show a lower unified result with no explanation for why it
- * might climb on a later refresh. 5 minutes is a deliberately generous
- * margin over that measured latency, not a claim about exactly when
- * verification finishes.
- */
-function isRecentlyGenerated(report: SimilarityReport): boolean {
-  const createdAt = new Date(report.created).getTime();
-  if (Number.isNaN(createdAt)) return false;
-  return Date.now() - createdAt < 5 * 60_000;
-}
-
 export function UnifiedSimilaritySection({ report }: { report: SimilarityReport }) {
   const unified = report.unifiedSimilarity;
   if (!unified) return null;
@@ -401,11 +418,10 @@ export function UnifiedSimilaritySection({ report }: { report: SimilarityReport 
         TurnitPlus submissions into one result. The same submitted passage found by more than one source counts once,
         never added twice.
       </p>
-      {isRecentlyGenerated(report) && (
-        <p className="unified-similarity-note">
-          This report was generated recently — external academic sources are checked in the background and can add
-          to this result for a short time afterward. Reopen or refresh this report in a minute for the complete
-          picture.
+      {report.academicEvidenceStatus === "FAILED" && (
+        <p className="unified-similarity-note unified-similarity-note-warning">
+          External academic verification (OpenAIRE, Europe PMC) was unavailable when this report was generated, so
+          this result reflects TurnitPlus&apos;s own archive{report.historicalSubmissionMatch ? " and previous submissions" : ""} only. See External Academic Sources below for details.
         </p>
       )}
       {breakdown.length > 0 && (

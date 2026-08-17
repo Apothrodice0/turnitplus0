@@ -40,7 +40,7 @@ import { deleteRemoteReport, fetchRemoteReport, listRemoteReportSummaries, saveR
 import { combineMatchedWordPositions } from "@/lib/similarity-enrichment";
 import { computeUnifiedSimilarity } from "@/lib/unified-similarity";
 import type { WebCheckResult } from "@/lib/web-check-core";
-import type { ExternalAcademicEvidence } from "@/lib/academic-search/types";
+import type { AcademicSearchStatus, ExternalAcademicEvidence } from "@/lib/academic-search/types";
 import {
   AI_MODEL_VERSION,
   AI_PASSAGE_LOG_ODDS_THRESHOLD,
@@ -49,7 +49,6 @@ import {
 } from "@/lib/ai-core";
 import {
   aiPrepDetailLabel,
-  aiPrepStageLabel,
   describeAiAnalysisError,
   type AiPrepStage,
   type AiPrepUpdate,
@@ -254,6 +253,11 @@ async function analyzeWikipediaText(
   });
 }
 
+export type AcademicEvidenceCheckResult = {
+  evidence: ExternalAcademicEvidence[];
+  status: AcademicSearchStatus;
+};
+
 // Phase 3: unlike analyzeWikipediaText above, this cannot run in a Worker —
 // lib/academic-search/'s HTTP-fallback text retrieval needs Node's
 // SSRF-validation module (node:dns/node:net), which does not exist in a
@@ -261,15 +265,33 @@ async function analyzeWikipediaText(
 // alternative the existing architecture already supports (the same
 // fetch-a-JSON-API shape every other client helper in this file uses) —
 // see app/api/academic-evidence/route.ts's own header comment.
-async function analyzeAcademicEvidence(text: string): Promise<ExternalAcademicEvidence[] | null> {
-  const response = await fetch("/api/academic-evidence", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text }),
-  });
-  if (!response.ok) throw new Error(`academic evidence request failed (${response.status})`);
-  const data = (await response.json()) as { evidence?: ExternalAcademicEvidence[] };
-  return Array.isArray(data.evidence) ? data.evidence : [];
+//
+// "start the two fixes now" TASK 1/2: generateReport() now awaits this
+// before showing/saving a report (no more silent background re-save), so
+// this function must never throw — every failure path (network error,
+// non-2xx response, malformed body) resolves to a well-formed FAILED
+// result instead, exactly like getExternalAcademicEvidence's own
+// never-throws contract on the server side.
+async function analyzeAcademicEvidence(text: string): Promise<AcademicEvidenceCheckResult> {
+  try {
+    const response = await fetch("/api/academic-evidence", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    if (!response.ok) throw new Error(`academic evidence request failed (${response.status})`);
+    const data = (await response.json()) as { evidence?: ExternalAcademicEvidence[]; status?: AcademicSearchStatus };
+    return {
+      evidence: Array.isArray(data.evidence) ? data.evidence : [],
+      status: data.status ?? "FAILED",
+    };
+  } catch (error) {
+    console.debug("Academic evidence check failed.", {
+      outcome: "failed",
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return { evidence: [], status: "FAILED" };
+  }
 }
 
 async function extractFileText(file: File, onProgress: (progress: number, label: string) => void) {
@@ -339,9 +361,12 @@ function enrichReportWithWikipedia(report: SimilarityReport, webCheck: WebCheckR
 // Phase 3: unlike enrichReportWithWikipedia above, this never touches
 // score/archiveScore/matchedWordCount — the phase's own PRIMARY PRODUCT
 // RULE. TurnitPlus's own corpus similarity stays the single, unambiguous
-// headline number; external academic evidence is purely additive.
-function enrichReportWithAcademicEvidence(report: SimilarityReport, evidence: ExternalAcademicEvidence[]): SimilarityReport {
-  return { ...report, externalAcademicEvidence: evidence };
+// headline number; external academic evidence is purely additive. Always
+// carries the check's status alongside the evidence array itself ("start
+// the two fixes now" TASK 2) so a FAILED check is never rendered
+// identically to a genuine zero-result COMPLETE_NO_MATCHES.
+function enrichReportWithAcademicEvidence(report: SimilarityReport, result: AcademicEvidenceCheckResult): SimilarityReport {
+  return { ...report, externalAcademicEvidence: result.evidence, academicEvidenceStatus: result.status };
 }
 
 /**
@@ -780,33 +805,31 @@ export default function Home() {
       return;
     }
 
+    // "start the two fixes now" TASK 1: extract -> archive analysis +
+    // academic search + Wikipedia -> wait for the required checks ->
+    // dedupe -> compute unified similarity -> save the FINAL report -> show
+    // it. Wikipedia and academic search are kicked off here (both only need
+    // `text`) and AWAITED below, alongside archive analysis, before the
+    // report is ever shown or saved — no more silent later re-save that
+    // changes the similarity score after the user has already seen it.
+    // Both stay best-effort (a Wikipedia/provider failure never aborts the
+    // report, matching this subsystem's existing non-fatal discipline) but
+    // "best-effort" no longer means "invisible": analyzeAcademicEvidence
+    // resolves to an explicit COMPLETE_WITH_MATCHES/COMPLETE_NO_MATCHES/
+    // FAILED status (TASK 2) that rides along with the report instead of
+    // being silently swallowed.
     const wikipediaPromise = analyzeWikipediaText(
       text,
       submittedFile.name,
       () => undefined,
     ).catch((error) => {
-      console.debug("Wikipedia background enrichment failed.", {
+      console.debug("Wikipedia check failed.", {
         outcome: "failed",
         error: error instanceof Error ? error.message : String(error),
       });
       return null;
     });
-
-    // Phase 3: kicked off in parallel with Wikipedia and the main analysis
-    // below (not awaited until after the report already exists) — the
-    // ~9-20s cold-latency academic-search subsystem overlaps with the
-    // similarity/AI analysis and the existing minimumProcessingMs animation
-    // window instead of adding to the user-visible wait. A failure here is
-    // swallowed exactly like Wikipedia's — external-evidence lookup is
-    // secondary and must never affect report generation (this phase's own
-    // STEP 3 requirement).
-    const academicEvidencePromise = analyzeAcademicEvidence(text).catch((error) => {
-      console.debug("Academic evidence background lookup failed.", {
-        outcome: "failed",
-        error: error instanceof Error ? error.message : String(error),
-      });
-      return null;
-    });
+    const academicEvidencePromise = analyzeAcademicEvidence(text);
 
     let report: SimilarityReport;
     try {
@@ -822,20 +845,26 @@ export default function Home() {
       return;
     }
 
+    // "start the two fixes now" TASK 4: the AI-writing model (fp16, ~286MB —
+    // see lib/ai-core.ts's AI_MODEL_DTYPE) is kicked off now (it needs
+    // report.features.detectedLanguage, only known once archive analysis
+    // above resolves) but deliberately NOT awaited here — similarity
+    // generation and academic verification stay independent of it, so a
+    // cold model download can never delay the similarity report below. A
+    // local (not component-ref) prep-stage variable is used for the error
+    // label so a second, overlapping report generation can never corrupt
+    // this one's — see aiPrepStageRef's own remaining use for why a shared
+    // ref was no longer safe once this became a longer-lived background op.
+    let aiPrepStage: AiPrepStage | null = "preparing";
     aiPrepStageRef.current = "preparing";
-    setProcessingLabel(aiPrepStageLabel("preparing"));
-    try {
-      const aiAnalysis = await analyzeAiText(text, report.features.detectedLanguage, (update) => {
-        aiPrepStageRef.current = update.stage;
-        setProcessingLabel(update.label);
-      });
-      report = { ...report, aiScore: aiAnalysis.score, aiAnalysis };
-    } catch (error) {
-      report = {
-        ...report,
+    const aiAnalysisPromise = analyzeAiText(text, report.features.detectedLanguage, (update) => {
+      aiPrepStage = update.stage;
+      aiPrepStageRef.current = update.stage;
+    }).then((aiAnalysis) => ({ aiScore: aiAnalysis.score, aiAnalysis }))
+      .catch((error) => ({
         aiScore: null,
         aiAnalysis: {
-          status: "error",
+          status: "error" as const,
           score: null,
           model: AI_MODEL_VERSION,
           engine: null,
@@ -844,11 +873,32 @@ export default function Home() {
           eligibleWordCount: 0,
           analyzedWordCount: 0,
           passages: [],
-          error: describeAiAnalysisError(error, aiPrepStageRef.current),
+          error: describeAiAnalysisError(error, aiPrepStage),
         },
-      };
+      }));
+
+    setProcessingLabel("Checking external academic sources");
+    const [webCheck, academicResult] = await Promise.all([wikipediaPromise, academicEvidencePromise]);
+    if (webCheck) {
+      console.debug("Wikipedia check completed.", {
+        reportId: report.id,
+        status: webCheck.status,
+        outcomes: webCheck.outcomes,
+        phrasesMatched: webCheck.phrasesMatched,
+      });
+      report = enrichReportWithWikipedia(report, webCheck);
     }
+    console.debug("Academic evidence check completed.", {
+      reportId: report.id,
+      status: academicResult.status,
+      sourceCount: academicResult.evidence.length,
+    });
+    report = enrichReportWithAcademicEvidence(report, academicResult);
+    // TASK 1: computed once the required checks above have both resolved —
+    // this is the FINAL unified similarity result, not a provisional one to
+    // be silently revised by a later save.
     report = attachUnifiedSimilarity(report);
+
     setCurrentReport(report);
     const remainingAnimationMs = Math.max(0, minimumProcessingMs - (Date.now() - animationStartedAt));
     if (remainingAnimationMs > 0) {
@@ -856,49 +906,31 @@ export default function Home() {
     }
     window.clearInterval(progressTimer);
     setProgress(100);
-    setProcessingLabel("Preparing your reports");
+    setProcessingLabel("Saving your report");
     try {
       await saveReport(report);
-      // Phase 3: both background enrichments are awaited together and
-      // merged into ONE save, rather than each independently saving its own
-      // partial copy of `report`. With two independent async enrichments
-      // racing to persist, whichever resolved second would previously have
-      // overwritten the other's saved fields (each built its own `enriched`
-      // from the same pre-enrichment `report` closure) — settling both
-      // first avoids that data loss regardless of which finishes first, at
-      // no user-visible cost since this entire block already runs after the
-      // report is shown and the user has moved on.
-      void Promise.allSettled([wikipediaPromise, academicEvidencePromise]).then(async ([webCheckOutcome, academicOutcome]) => {
-        const webCheck = webCheckOutcome.status === "fulfilled" ? webCheckOutcome.value : null;
-        const academicEvidence = academicOutcome.status === "fulfilled" ? academicOutcome.value : null;
-        if (!webCheck && (!academicEvidence || academicEvidence.length === 0)) return;
+      navigate("reports");
+      notify(
+        academicResult.status === "FAILED"
+          ? "Your report is ready. External academic verification was unavailable this time."
+          : "Your report is ready. Choose AI or TurnitPlus Similarity.",
+      );
 
-        let enriched = report;
-        if (webCheck) {
-          console.debug("Wikipedia background enrichment completed.", {
-            reportId: report.id,
-            status: webCheck.status,
-            outcomes: webCheck.outcomes,
-            phrasesMatched: webCheck.phrasesMatched,
-          });
-          enriched = enrichReportWithWikipedia(enriched, webCheck);
-        }
-        if (academicEvidence && academicEvidence.length > 0) {
-          console.debug("Academic evidence background lookup completed.", {
-            reportId: report.id,
-            sourceCount: academicEvidence.length,
-          });
-          enriched = enrichReportWithAcademicEvidence(enriched, academicEvidence);
-        }
-        enriched = attachUnifiedSimilarity(enriched);
-
-        setCurrentReport((current) => current?.id === enriched.id ? { ...current, ...enriched } : current);
-        setReports((current) => current.map((item) => item.id === enriched.id ? { ...item, ...enriched } : item));
+      // TASK 4: the AI-writing score merges into the ALREADY-shown,
+      // ALREADY-saved report whenever it finishes — a separate axis
+      // (mode: "ai"), never touching score/archiveScore/unifiedSimilarity/
+      // academicEvidenceStatus, and never gating the similarity report
+      // above. Deliberately not awaited (mirrors the previous background-
+      // enrichment pattern) so the generation lock releases as soon as the
+      // similarity report is final, letting the user start a new check
+      // immediately instead of waiting on a still-downloading AI model.
+      void aiAnalysisPromise.then(async (aiResult) => {
+        const enriched = { ...report, ...aiResult };
+        setCurrentReport((current) => current?.id === enriched.id ? { ...current, ...aiResult } : current);
+        setReports((current) => current.map((item) => item.id === enriched.id ? { ...item, ...aiResult } : item));
         await storeReport(enriched);
         await saveReportRemote(enriched, buildReportSummary(enriched));
       });
-      navigate("reports");
-      notify("Your reports are ready. Choose AI or Archive overlap.");
     } finally {
       generationLockRef.current = false;
       setIsGeneratingReport(false);
@@ -1641,7 +1673,7 @@ export default function Home() {
                 </section>
                 <section>
                   <span className="legal-section-number">02</span>
-                  <div><h3>Local processing and external requests</h3><p>Document extraction, AI analysis and archive comparison run in your browser; the original file itself is never uploaded during the check. Once a check finishes, the completed report is saved both on this device (IndexedDB) and to TurnitPlus's database, so it can still be retrieved if this device's local storage is cleared or evicted. For background Wikipedia enrichment, up to 20 selected phrases may be sent to the English Wikipedia search service. Wikipedia receives those phrase queries—not the full document—and handles them under its own privacy practices. Ordinary network metadata may also be processed by the hosting infrastructure to deliver the site.</p></div>
+                  <div><h3>Local processing and external requests</h3><p>Document extraction, AI analysis and archive comparison run in your browser; the original file itself is never uploaded during the check. Once a check finishes, the completed report is saved both on this device (IndexedDB) and to TurnitPlus's database, so it can still be retrieved if this device's local storage is cleared or evicted. As part of generating a report, up to 20 selected phrases may be sent to the English Wikipedia search service. Wikipedia receives those phrase queries—not the full document—and handles them under its own privacy practices. Ordinary network metadata may also be processed by the hosting infrastructure to deliver the site.</p></div>
                 </section>
                 <section>
                   <span className="legal-section-number">03</span>

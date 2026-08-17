@@ -11,6 +11,7 @@ import type {
   AcademicSearchResult,
   AcademicSearchRunResult,
   AcademicSearchRunStats,
+  AcademicSearchStatus,
   ExternalAcademicEvidence,
 } from "./types";
 
@@ -124,6 +125,7 @@ export async function runAcademicSearch(
     });
   }
 
+  const searchAttempts = queries.length * providers.length;
   const stats: AcademicSearchRunStats = {
     queryCount: queries.length,
     searchLatencyMs,
@@ -135,7 +137,17 @@ export async function runAcademicSearch(
     comparisonLatencyMs,
     totalLatencyMs: Date.now() - totalStart,
     providerErrors,
+    searchAttempts,
   };
 
-  return { evidence, candidates: ranked, stats };
+  // "start the two fixes now" TASK 2 — see AcademicSearchStatus's own
+  // header comment for the exact rule. A total outage (every attempted
+  // (query, provider) call errored) must never look identical to a
+  // legitimate zero-evidence result to a downstream caller.
+  const status: AcademicSearchStatus =
+    evidence.length > 0 ? "COMPLETE_WITH_MATCHES"
+    : searchAttempts > 0 && providerErrors.length >= searchAttempts ? "FAILED"
+    : "COMPLETE_NO_MATCHES";
+
+  return { evidence, candidates: ranked, stats, status };
 }

@@ -48,6 +48,10 @@ const tokenizer = await AutoTokenizer.from_pretrained(AI_MODEL_ID);
 const model = await AutoModelForSequenceClassification.from_pretrained(AI_MODEL_ID, {
   device: "cpu",
   dtype: AI_MODEL_DTYPE,
+  // See app/ai-detector-worker.ts's identical option for why: the fp16
+  // graph fails to initialize under onnxruntime-node's CPU backend with
+  // graph optimization enabled (tools/validate-ai-fp16.ts).
+  session_options: { graphOptimizationLevel: "disabled" },
 });
 
 async function score(text: string) {

@@ -49,9 +49,14 @@ test("STEP 9.5: one provider failing does not stop the other from producing evid
   assert.equal(Array.isArray(result.evidence), true);
   assert.ok(result.stats, "stats should still be populated when at least one provider ran");
   assert.ok(result.stats.providerErrors.some((e) => e.providerId === "broken"));
+  // "start the two fixes now" TASK 2: one provider down does not make this
+  // a FAILED check — the working provider genuinely answered (even though,
+  // with no getText() on this fixture, nothing was ever confirmed as
+  // evidence, so the correct status is COMPLETE_NO_MATCHES, not FAILED).
+  assert.equal(result.status, "COMPLETE_NO_MATCHES");
 });
 
-test("STEP 9.6: both providers failing still resolves (never rejects) with empty evidence", async () => {
+test("STEP 9.6: both providers failing still resolves (never rejects) with empty evidence and status FAILED", async () => {
   const brokenA = { id: "broken-a", async search() { throw new Error("timeout"); } };
   const brokenB = { id: "broken-b", async search() { throw new Error("rate limited"); } };
 
@@ -60,9 +65,12 @@ test("STEP 9.6: both providers failing still resolves (never rejects) with empty
   assert.deepEqual(result.evidence, []);
   assert.ok(result.stats);
   assert.equal(result.stats.providerErrors.length > 0, true);
+  // "start the two fixes now" TASK 2: a total outage must never be
+  // indistinguishable from "checked, found nothing."
+  assert.equal(result.status, "FAILED");
 });
 
-test("STEP 9.6b: a provider list that throws synchronously during construction still resolves via the outer try/catch", async () => {
+test("STEP 9.6b: a provider list that throws synchronously during construction still resolves via the outer try/catch, with status FAILED", async () => {
   // Simulates something going wrong before runAcademicSearch is even reached.
   const providers = new Proxy([], {
     get() {
@@ -73,6 +81,7 @@ test("STEP 9.6b: a provider list that throws synchronously during construction s
   const result = await getExternalAcademicEvidence(MULTI_SENTENCE_TEXT, providers);
   assert.deepEqual(result.evidence, []);
   assert.equal(result.stats, null);
+  assert.equal(result.status, "FAILED");
 });
 
 test("evidence produced by working providers already carries publication/year for report UI display", async () => {
@@ -100,4 +109,14 @@ test("evidence produced by working providers already carries publication/year fo
   assert.ok(top, "expected the working provider's candidate to produce evidence");
   assert.equal(top.publication, "Journal of Examples");
   assert.equal(top.year, 2021);
+  assert.equal(result.status, "COMPLETE_WITH_MATCHES");
+});
+
+test("STATUS: a provider that runs cleanly and finds nothing is COMPLETE_NO_MATCHES, not FAILED", async () => {
+  const emptyButWorkingProvider = { id: "empty-working", async search() { return []; } };
+
+  const result = await getExternalAcademicEvidence(MULTI_SENTENCE_TEXT, [emptyButWorkingProvider]);
+
+  assert.deepEqual(result.evidence, []);
+  assert.equal(result.status, "COMPLETE_NO_MATCHES");
 });

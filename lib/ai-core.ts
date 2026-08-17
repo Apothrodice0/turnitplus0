@@ -49,7 +49,30 @@ const REFERENCE_HEADING = /(?:^|\n)\s*(?:references|bibliography|works cited)\s*
 
 export const AI_MINIMUM_WORDS = 300;
 export const AI_MODEL_ID = "onnx-community/modernbert-ai-detection-raid-mage-ONNX";
-export const AI_MODEL_DTYPE = "fp32" as const;
+/**
+ * "start the two fixes now" TASK 4: fp32 (571MB, onnx/model.onnx) replaced
+ * with fp16 (286MB, onnx/model_fp16.onnx) — half the download the AI-writing
+ * worker must fetch before it can score anything, decoupled from the
+ * similarity/academic-search pipeline either way (see app/ai-detector-worker.ts).
+ * Validated empirically (tools/validate-ai-fp16.ts) on the exact same live
+ * RAID human/machine fixture tools/check-ai-model-contract.ts already uses
+ * as its own production sanity control, on both dtypes back to back:
+ * mean |logOdds delta| 0.0063, max 0.0408, 0/20 threshold-flag
+ * disagreements, and the production contract (>=8/10 machine flagged,
+ * <=4/10 human flagged, >=0.20 mean separation) passes near-identically
+ * under fp16 (separation 0.533 vs fp32's own 0.531 on that run). Not
+ * aggressive quantization (int8/q4/etc., not attempted) — fp16 keeps the
+ * same floating-point representation shape, just fewer mantissa bits.
+ * AI_MODEL_VERSION below is intentionally left unchanged: it exists only
+ * to gate whether the calibration/evaluation JSON artifacts in
+ * public/data/ still apply to this model's *output distribution*, and the
+ * measurement above shows that distribution is effectively unchanged — a
+ * cosmetic dtype rename here would instead silently disable
+ * AI_HUMAN_CALIBRATION_READY/AI_POSITIVE_VALIDATION_READY for every user
+ * (the calibration JSON's own "model" field would no longer match), which
+ * is a real break, not a correctness improvement.
+ */
+export const AI_MODEL_DTYPE = "fp16" as const;
 export const AI_MODEL_MAX_TOKENS = 256;
 export const AI_CONTENT_TOKENS = 240;
 export const AI_TOKEN_STRIDE = 120;

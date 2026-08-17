@@ -47,15 +47,18 @@ export async function POST(request: Request) {
     const { text } = body as Record<string, unknown>;
     if (!isNonEmptyString(text)) return new NextResponse(JSON.stringify({ error: 'text is required' }), { status: 400 });
     if (text.length < MIN_TEXT_LENGTH) {
-      return new NextResponse(JSON.stringify({ evidence: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      // Nothing worth querying for — a property of the input, not a
+      // provider outage, so this is COMPLETE_NO_MATCHES, not FAILED. See
+      // AcademicSearchStatus's own header comment.
+      return new NextResponse(JSON.stringify({ evidence: [], stats: null, status: 'COMPLETE_NO_MATCHES' }), { status: 200, headers: { 'Content-Type': 'application/json' } });
     }
     if (text.length > MAX_TEXT_LENGTH) {
       return new NextResponse(JSON.stringify({ error: 'text is too long' }), { status: 413 });
     }
 
-    const { evidence, stats } = await getExternalAcademicEvidence(text);
+    const { evidence, stats, status } = await getExternalAcademicEvidence(text);
 
-    return new NextResponse(JSON.stringify({ evidence, stats }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    return new NextResponse(JSON.stringify({ evidence, stats, status }), { status: 200, headers: { 'Content-Type': 'application/json' } });
   } catch (err) {
     // getExternalAcademicEvidence is itself non-throwing (best-effort) — this
     // catch only guards request parsing/rate-limiting above it. Even here,

@@ -64,6 +64,18 @@ async function loadClassifier(device: "webgpu" | "wasm", cached: boolean) {
     device,
     dtype: AI_MODEL_DTYPE,
     progress_callback: handleModelProgress,
+    // "start the two fixes now" TASK 4: the fp16 ONNX graph for this model
+    // fails to initialize under onnxruntime-node's CPU backend with the
+    // default graph-optimization pass enabled (a SimplifiedLayerNormFusion
+    // graph_utils error, confirmed via tools/validate-ai-fp16.ts before this
+    // option was added). Disabling graph optimization is the standard fix
+    // for that class of fp16 fusion bug and was confirmed to load and score
+    // correctly there; applied here for both device paths defensively,
+    // since the equivalent WebGPU/WASM backends could not be verified
+    // directly in this environment (no headless-browser tooling available)
+    // and this option can only make loading more conservative, never less
+    // correct.
+    session_options: { graphOptimizationLevel: "disabled" },
   });
   const classify: TextClassifier = async (texts) => {
     const inputs = tokenizer(texts, {

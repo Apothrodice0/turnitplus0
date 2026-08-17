@@ -1,6 +1,6 @@
 import type { WebCheckResult } from "@/lib/web-check-core";
 import type { ReportSummary } from "@/lib/reports-remote";
-import type { ExternalAcademicEvidence } from "@/lib/academic-search/types";
+import type { AcademicSearchStatus, ExternalAcademicEvidence } from "@/lib/academic-search/types";
 import type { UnifiedSimilarityResult } from "@/lib/unified-similarity";
 import { AI_SCORING_VERSION, calibratedAiDisplaySignal } from "@/lib/ai-core";
 
@@ -186,22 +186,34 @@ export type SimilarityReport = {
   aiAnalysis?: AiAnalysis;
   webCheck?: WebCheckResult;
   /**
-   * Phase 3 enrichment — external academic-source evidence from
-   * lib/academic-search/ (OpenAIRE + Europe PMC), attached the same way
-   * webCheck (Wikipedia) is above: computed asynchronously, in parallel
-   * with the main analysis, merged into an already-saved report once ready
-   * (see app/page.tsx's generateReport()), and re-saved. Deliberately never
-   * folded into score/archiveScore/matchedWordCount the way webCheck's
-   * matches are — see this phase's own PRIMARY PRODUCT RULE: TurnitPlus's
-   * own corpus similarity stays the single, unambiguous headline number,
-   * and external academic overlap is reported next to it, never combined
-   * with it. Absent/undefined means exactly what it says: no external
-   * academic evidence was found, was not yet computed for this report, or
-   * this report predates Phase 3 — the UI must render identically to
-   * before in every one of those cases, never distinguishing "not yet
-   * checked" from "checked, nothing found."
+   * Phase 3 enrichment, external academic-source evidence from
+   * lib/academic-search/ (OpenAIRE + Europe PMC). "start the two fixes now"
+   * TASK 1 changed WHEN this is computed: app/page.tsx's generateReport()
+   * now awaits the academic search alongside archive analysis, before the
+   * report is ever shown or saved, rather than backgrounding it and
+   * silently re-saving a changed score later — this field (and
+   * academicEvidenceStatus below) are therefore final by the time a new
+   * report is first saved, not a placeholder to be topped up. Still never
+   * folded into score/archiveScore/matchedWordCount — see this phase's own
+   * PRIMARY PRODUCT RULE: TurnitPlus's own corpus similarity stays the
+   * single, unambiguous headline number, and external academic overlap is
+   * reported next to it, never combined with it directly (only through
+   * unifiedSimilarity's own explicit dedup — see lib/unified-similarity.ts).
+   * Absent/undefined means this report predates Phase 3.
    */
   externalAcademicEvidence?: ExternalAcademicEvidence[];
+  /**
+   * "start the two fixes now" TASK 2: the outcome of the academic search
+   * that produced externalAcademicEvidence above — see
+   * lib/academic-search/types.ts's own AcademicSearchStatus comment for the
+   * exact three-way rule. Read this before treating an empty/absent
+   * externalAcademicEvidence as "nothing found": COMPLETE_NO_MATCHES means
+   * that; FAILED means the check itself could not get a real answer from
+   * either provider and must be shown as unavailable, never as a silent
+   * zero. Absent/undefined means this report predates this field (Phase 3
+   * without it, or any report saved before this task).
+   */
+  academicEvidenceStatus?: AcademicSearchStatus;
   /**
    * Phase 4A — EXPERIMENTAL, additive only. Output of
    * lib/unified-similarity.ts's computeUnifiedSimilarity(), which is NOT
