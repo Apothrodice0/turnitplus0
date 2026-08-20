@@ -1,6 +1,7 @@
 import type { SourceContentRetriever } from "../retrieval-types";
 import { DEFAULT_CANDIDATE_RANKING_WEIGHTS, rankAcademicCandidates, type CandidateRankingWeights } from "./candidate-ranker";
 import { compareSubmissionToExternalText } from "./comparator";
+import { mapWithConcurrency } from "./concurrency";
 import { deduplicateAcademicResults } from "./deduplicator";
 import { DEFAULT_PHRASE_EXTRACTION_CONFIG, extractCandidatePhrases, type PhraseExtractionConfig } from "./phrase-extractor";
 import { classifyAcademicSearchError, sanitizeAcademicSearchResults, type AcademicSearchProvider } from "./provider";
@@ -46,6 +47,19 @@ export const DEFAULT_ACADEMIC_SEARCH_RUN_CONFIG: AcademicSearchRunConfig = {
   minEvidenceSimilarity: 15,
 };
 
+/**
+ * Stage 2's worker-pool width. Measured production latency (real DOCX
+ * upload, 24 queries x 2 providers = 48 sequential attempts) was ~68s of
+ * pure search latency; bounded concurrency in the 4-6 range keeps every
+ * existing per-call safeguard (each provider's own AbortController timeout,
+ * its own bounded retry, the shared discoveryBudget) exactly as-is while
+ * cutting worst-case wall time by roughly this factor. Not higher: staying
+ * in single digits keeps simultaneous load against free public APIs
+ * (OpenAIRE, Europe PMC) modest, matching this subsystem's existing "stay
+ * free, stay polite" discipline (see cache.ts's own header comment).
+ */
+const STAGE_TWO_CONCURRENCY = 5;
+
 export async function runAcademicSearch(
   submissionText: string,
   providers: AcademicSearchProvider[],
@@ -60,22 +74,50 @@ export async function runAcademicSearch(
   const queries = extractCandidatePhrases(submissionText, config.phraseExtraction);
 
   // Stage 2: AcademicSearchProvider — every (query, provider) pair is
-  // attempted independently; one failing never stops the others.
+  // attempted independently; one failing never stops the others. Run with
+  // STAGE_TWO_CONCURRENCY in-flight attempts at once (a worker pool pulling
+  // from a shared cursor — see concurrency.ts) instead of one at a time:
+  // this was the sole cause of ~70s report-generation latency (24 queries x
+  // 2 providers = 48 fully sequential round-trips). Each attempt's outcome
+  // is written into a slot pre-assigned by its position in the flattened
+  // (query, provider) task list, then flattened back in that original
+  // order below — so a slow/reordered completion can change *when* a task
+  // finishes but never *where* its result lands, and rawResults/
+  // providerErrors end up byte-identical to what the old sequential loop
+  // produced for the same provider responses. This matters concretely:
+  // deduplicator.ts's dedupKey-first-seen grouping and its firstNonNull()
+  // metadata picks are order-sensitive (see its own header comment), so
+  // preserving exact task order is what keeps Stage 4/5's output unchanged.
   const searchStart = Date.now();
-  const rawResults: AcademicSearchResult[] = [];
+  const searchTasks: { query: (typeof queries)[number]; provider: AcademicSearchProvider }[] = [];
   for (const query of queries) {
     for (const provider of providers) {
-      try {
-        const results = await provider.search(query);
-        // Phase 5: tag with this query's own type here, not inside the
-        // provider — a provider only ever sees query text, never which
-        // strategy produced it (see types.ts's own comment on
-        // AcademicSearchResult.queryType).
-        rawResults.push(...sanitizeAcademicSearchResults(results).map((result) => ({ ...result, queryType: query.queryType })));
-      } catch (error) {
-        providerErrors.push(classifyAcademicSearchError(provider.id, error));
-      }
+      searchTasks.push({ query, provider });
     }
+  }
+
+  const resultsByTask: (AcademicSearchResult[] | undefined)[] = new Array(searchTasks.length);
+  const errorByTask: (AcademicSearchProviderError | undefined)[] = new Array(searchTasks.length);
+
+  await mapWithConcurrency(searchTasks, STAGE_TWO_CONCURRENCY, async ({ query, provider }, index) => {
+    try {
+      const results = await provider.search(query);
+      // Phase 5: tag with this query's own type here, not inside the
+      // provider — a provider only ever sees query text, never which
+      // strategy produced it (see types.ts's own comment on
+      // AcademicSearchResult.queryType).
+      resultsByTask[index] = sanitizeAcademicSearchResults(results).map((result) => ({ ...result, queryType: query.queryType }));
+    } catch (error) {
+      errorByTask[index] = classifyAcademicSearchError(provider.id, error);
+    }
+  });
+
+  const rawResults: AcademicSearchResult[] = [];
+  for (const results of resultsByTask) {
+    if (results) rawResults.push(...results);
+  }
+  for (const error of errorByTask) {
+    if (error) providerErrors.push(error);
   }
   const searchLatencyMs = Date.now() - searchStart;
 
