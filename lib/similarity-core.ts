@@ -1,3 +1,5 @@
+import { stripReferenceSection } from "./reference-section";
+
 export const COMMON_WORDS = new Set([
   "a", "an", "and", "are", "as", "at", "be", "by", "de", "des", "du", "en",
   "et", "for", "from", "in", "is", "la", "le", "les", "of", "on", "or", "the",
@@ -12,8 +14,14 @@ export function normalize(value: string) {
     .replace(/[^\p{L}\p{N}\s]/gu, " ").replace(/\s+/g, " ").trim();
 }
 
+/**
+ * "Investigate two real detection issues" ISSUE 1: delegates to
+ * lib/reference-section.ts's shared, format-agnostic detector — see that
+ * file's own header comment for why the previous newline-anchored regex
+ * here silently never fired for PDF-extracted text.
+ */
 export function comparisonText(value: string) {
-  return value.split(/\n\s*(?:references|bibliography|works cited)\s*:?\s*\n/i)[0];
+  return stripReferenceSection(value);
 }
 
 export function tokens(value: string) {

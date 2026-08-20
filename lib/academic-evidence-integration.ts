@@ -4,6 +4,7 @@ import {
   withRequestControl,
 } from "./academic-search/cache";
 import { DEFAULT_ACADEMIC_SEARCH_RUN_CONFIG, runAcademicSearch } from "./academic-search/orchestrator";
+import { DEFAULT_PHRASE_EXTRACTION_CONFIG } from "./academic-search/phrase-extractor";
 import type { AcademicSearchProvider } from "./academic-search/provider";
 import { createEuropePmcAcademicSearchProvider } from "./academic-search/providers/europe-pmc";
 import { createOpenAireAcademicSearchProvider } from "./academic-search/providers/openaire";
@@ -52,12 +53,34 @@ const sharedCache = createInMemoryAcademicSearchCache();
  * retrieval ever got its turn, silently dropping candidates the search
  * stage had already found).
  *
- * DISCOVERY_BUDGET_LIMIT stays at the exact same 40 this file's own
- * PER_REPORT_BUDGET already used — not raised, since single-topic
- * submissions were already succeeding at this level (real measured
- * queryCount ~16-17 for a single topic x 2 providers ~= 32-34 search
- * calls, comfortably under 40); the fix is giving retrieval a separate
- * pool, not giving discovery a bigger one.
+ * "Investigate two real detection issues" ISSUE 2: DISCOVERY_BUDGET_LIMIT
+ * was previously hardcoded to 40, sized against "real measured queryCount
+ * ~16-17 for a single topic" rather than this pipeline's own documented
+ * ceiling — DEFAULT_PHRASE_EXTRACTION_CONFIG.maxQueries (20 sentence
+ * queries) PLUS keywordQueryCount (3 keyword queries, "a bounded, separate
+ * addition to maxQueries, not a replacement" — see that file's own
+ * comment) is 23 queries, and withRequestControl's discoveryBudget is
+ * shared across BOTH providers (lib/academic-evidence-integration.ts's own
+ * buildProviders() passes one discoveryBudget object into both wrappers),
+ * so the real worst case is 23 * 2 = 46 discovery attempts — six more than
+ * the old 40-unit budget covered.
+ *
+ * Confirmed via a real reproduction (tests/academic-evidence-integration-
+ * budget-sizing.test.mjs, and a real downloaded bioRxiv paper during this
+ * investigation): the
+ * orchestrator always processes queries in the same order it received them
+ * (sentence queries first, keyword queries last — see orchestrator.ts's
+ * Stage 2 loop), so when the budget runs out partway through, it is always
+ * the keyword queries that silently never reach the network — via
+ * lib/academic-search/cache.ts's own documented behavior, a budget-
+ * exhausted search() call returns [] exactly like a real "provider found
+ * nothing," with no error recorded. For the real reproduction paper, EVERY
+ * one of the 20 sentence-window queries returned zero OpenAIRE matches, and
+ * only a keyword query actually found it — meaning a starved keyword query
+ * was not a minor recall loss but the entire difference between finding
+ * the source and reporting 0% for a document that genuinely is on
+ * OpenAIRE. Computed here (not re-hardcoded to 46) so it can never
+ * silently drift out of sync with the phrase extractor's own limits again.
  *
  * RETRIEVAL_BUDGET_LIMIT is sized to retrieval's own real, bounded need:
  * DEFAULT_ACADEMIC_SEARCH_RUN_CONFIG.maxCandidatesToRetrieve (5) candidates,
@@ -70,13 +93,10 @@ const sharedCache = createInMemoryAcademicSearchCache();
  * called anywhere in the pipeline (see orchestrator.ts/text-retriever.ts)
  * — this budget covers it defensively in case a future stage starts
  * calling it, at negligible cost given the small limit.
- *
- * Total worst-case external requests per report: 40 + 15 = 55, up from
- * today's single 40-unit pool — a small, deliberately-sized increase
- * matched to retrieval's own measured need, not an across-the-board bump;
- * still a hard, bounded cap, nowhere near "uncontrolled."
  */
-const DISCOVERY_BUDGET_LIMIT = 40;
+const ACADEMIC_SEARCH_PROVIDER_COUNT = 2; // OpenAIRE + Europe PMC — see buildProviders() below.
+/** Exported for tests/academic-evidence-integration-budget-sizing.test.mjs — asserts this stays derived from the phrase extractor's own documented limits rather than drifting back into an independently-guessed constant. */
+export const DISCOVERY_BUDGET_LIMIT = (DEFAULT_PHRASE_EXTRACTION_CONFIG.maxQueries + DEFAULT_PHRASE_EXTRACTION_CONFIG.keywordQueryCount) * ACADEMIC_SEARCH_PROVIDER_COUNT;
 const RETRIEVAL_BUDGET_LIMIT = 15;
 const PROVIDER_TIMEOUT_MS = 9_000;
 const PROVIDER_MAX_RESULTS_PER_QUERY = 5;

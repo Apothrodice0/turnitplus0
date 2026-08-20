@@ -31,6 +31,28 @@ export type CandidateRankingWeights = {
    * not just a tiebreak nudge.
    */
   foundByKeywordQuery: number;
+  /**
+   * "Investigate two real detection issues" ISSUE 2: awarded once when a
+   * candidate was independently returned by 2+ DISTINCT providers (not
+   * merely 2+ queries against the SAME provider — additionalContributor
+   * above already rewards that, generically). Real, confirmed gap this
+   * closes: additionalContributor treated "the same Europe PMC record
+   * matched three different sentence-window queries" (one provider,
+   * loosely relevant, three coincidental keyword overlaps) identically to
+   * "OpenAIRE and Europe PMC, searched independently, both returned this
+   * exact DOI" — the second case is real cross-database corroboration, the
+   * single strongest correctness signal this pipeline has without doing a
+   * full-text comparison, and it was being outweighed by textAvailable
+   * (OpenAIRE's provider never reports textAvailable at all — see
+   * providers/openaire.ts's own header comment — so a real OpenAIRE-
+   * confirmed match starts every ranking 4 points behind an unrelated
+   * Europe PMC record purely on that account). Reproduced live against a
+   * real OpenAIRE-indexed paper (tests/academic-search-candidate-ranker.test.mjs
+   * and the ISSUE 2 investigation's own report): eight topically-unrelated
+   * candidates, each matched by only one provider, outranked the genuine
+   * source purely on textAvailable + a shared generic keyword-query hit.
+   */
+  multiProviderCorroboration: number;
 };
 
 /** A starting point for the POC, not a calibrated weighting — same disclaimer as lib/discovery-candidates.ts's own DEFAULT_CANDIDATE_RANKING_WEIGHTS. */
@@ -41,12 +63,17 @@ export const DEFAULT_CANDIDATE_RANKING_WEIGHTS: CandidateRankingWeights = {
   additionalContributor: 2,
   providerRelevance: 1,
   foundByKeywordQuery: 3,
+  multiProviderCorroboration: 5,
 };
 
 function maxProviderRelevance(candidate: AcademicSearchCandidate): number {
   const values = candidate.contributors.map((c) => c.providerRelevance).filter((v): v is number => typeof v === "number");
   if (values.length === 0) return 0;
   return Math.max(0, Math.min(1, Math.max(...values)));
+}
+
+function distinctContributingProviderCount(candidate: AcademicSearchCandidate): number {
+  return new Set(candidate.contributors.map((c) => c.providerId)).size;
 }
 
 function rankScore(candidate: AcademicSearchCandidate, weights: CandidateRankingWeights): number {
@@ -57,6 +84,7 @@ function rankScore(candidate: AcademicSearchCandidate, weights: CandidateRanking
   score += Math.max(0, candidate.contributors.length - 1) * weights.additionalContributor;
   score += maxProviderRelevance(candidate) * weights.providerRelevance;
   if (candidate.contributors.some((c) => c.queryType === "keyword")) score += weights.foundByKeywordQuery;
+  if (distinctContributingProviderCount(candidate) >= 2) score += weights.multiProviderCorroboration;
   return score;
 }
 

@@ -99,3 +99,54 @@ test("Phase 5: a candidate with no queryType on any contributor (legacy/manually
   const legacy = candidate("legacy", { doi: "10.1/legacy" }); // contributors default has no queryType field at all
   assert.doesNotThrow(() => rankAcademicCandidates([legacy]));
 });
+
+// --- ISSUE 2: cross-provider corroboration (real bug this fixes — see candidate-ranker.ts's own comment on multiProviderCorroboration) ---
+
+test("ISSUE 2: a candidate confirmed by 2 DISTINCT providers outranks several topically-unrelated candidates each matched by only one provider plus textAvailable", () => {
+  // Reproduces the real production bug: OpenAIRE's provider never reports
+  // textAvailable (see providers/openaire.ts's own header comment), so a
+  // real OpenAIRE-confirmed match started every ranking behind an unrelated
+  // Europe PMC record purely on that one signal. Eight single-provider,
+  // textAvailable "noise" candidates should not beat one candidate
+  // genuinely corroborated by two independent providers.
+  const commonShape = {
+    doi: "10.1007/noise",
+    url: "https://example.com/x",
+    textAvailable: true,
+    contributors: [{ providerId: "europe-pmc", providerRelevance: null, queryType: "sentence" }],
+  };
+  const noise = Array.from({ length: 8 }, (_, index) =>
+    candidate(`10.1007/noise-${index}`, { ...commonShape, doi: `10.1007/noise-${index}` }));
+  const corroborated = candidate("10.1371/corroborated", {
+    doi: "10.1371/corroborated",
+    url: null,
+    textAvailable: false,
+    contributors: [
+      { providerId: "openaire", providerRelevance: null, queryType: "sentence" },
+      { providerId: "europe-pmc", providerRelevance: null, queryType: "sentence" },
+    ],
+  });
+
+  const ranked = rankAcademicCandidates([...noise, corroborated]);
+  assert.equal(ranked[0].candidateKey, "10.1371/corroborated", "genuine cross-provider corroboration must outrank single-provider noise");
+});
+
+test("ISSUE 2: 2+ contributors from the SAME provider (e.g. three sentence-query hits on one Europe PMC record) do not receive the multi-provider bonus", () => {
+  const sameProviderOnly = candidate("same-provider", {
+    doi: "10.1/same-provider",
+    contributors: [
+      { providerId: "europe-pmc", providerRelevance: null, queryType: "sentence" },
+      { providerId: "europe-pmc", providerRelevance: null, queryType: "sentence" },
+      { providerId: "europe-pmc", providerRelevance: null, queryType: "sentence" },
+    ],
+  });
+  const crossProvider = candidate("cross-provider", {
+    doi: "10.1/cross-provider",
+    contributors: [
+      { providerId: "openaire", providerRelevance: null, queryType: "sentence" },
+      { providerId: "europe-pmc", providerRelevance: null, queryType: "sentence" },
+    ],
+  });
+  const ranked = rankAcademicCandidates([sameProviderOnly, crossProvider]);
+  assert.equal(ranked[0].candidateKey, "cross-provider", "distinct-provider corroboration must outrank same-provider repetition despite fewer total contributors");
+});

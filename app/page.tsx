@@ -39,6 +39,7 @@ import { clearStoredReports, loadStoredReports, storeReport } from "@/lib/report
 import { deleteRemoteReport, fetchRemoteReport, listRemoteReportSummaries, saveReportRemote } from "@/lib/reports-remote";
 import { combineMatchedWordPositions } from "@/lib/similarity-enrichment";
 import { computeUnifiedSimilarity } from "@/lib/unified-similarity";
+import { normalizeExtractedText } from "@/lib/extracted-text-normalization";
 import type { WebCheckResult } from "@/lib/web-check-core";
 import type { AcademicSearchStatus, ExternalAcademicEvidence } from "@/lib/academic-search/types";
 import {
@@ -780,13 +781,9 @@ export default function Home() {
 
     let text = "";
     try {
-      text = (await extractFileText(submittedFile, (_value, label) => {
+      text = normalizeExtractedText(await extractFileText(submittedFile, (_value, label) => {
         setProcessingLabel(label);
-      }))
-        .replace(/<[^>]*>/g, " ")
-        .replace(/[ \t]+/g, " ")
-        .replace(/\n{3,}/g, "\n\n")
-        .trim();
+      }));
     } catch {
       navigate("dashboard");
       notify("I could not read that document. Try another file.");

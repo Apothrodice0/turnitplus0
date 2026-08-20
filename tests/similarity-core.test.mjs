@@ -18,7 +18,17 @@ test("normalizes punctuation and accents consistently", () => {
 });
 
 test("removes a trailing references section", () => {
-  assert.deepEqual(tokens("Useful article text.\n\nReferences\nHidden source title"), ["useful", "article", "text"]);
+  // lib/reference-section.ts's shared detector requires the content after a
+  // "References" heading to actually look like a reference list (a
+  // numbered marker, or a cluster of publication years plus citation
+  // vocabulary) before treating it as a real section boundary — a bare
+  // "Hidden source title" with no such markers no longer qualifies, which
+  // is the intended fix for the PDF/DOCX parity investigation (an ordinary
+  // prose sentence mentioning "references" must never be stripped either).
+  assert.deepEqual(
+    tokens("Useful article text.\n\nReferences\n[1] Hidden, S. Source title. Journal, 2020."),
+    ["useful", "article", "text"],
+  );
 });
 
 test("creates consecutive five-word grams", () => {

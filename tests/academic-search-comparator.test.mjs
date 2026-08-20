@@ -14,6 +14,26 @@ test("exact phrase matching: identical whole-document text is an exact canonical
   assert.equal(result.strongMatch, true);
 });
 
+test("REGRESSION (ISSUE 2): an exact canonical match still reports at least one matched passage, not an empty array", () => {
+  // computeDocumentCorrespondence's canonical-hash short-circuit (see
+  // lib/document-correspondence.ts's own emptyResult() helper) returns the
+  // full matchedWordCount but an empty passages array by design — the same
+  // gap lib/unified-similarity.ts's previousUploadPassageRanges() already
+  // had to work around for its own caller. Since computeUnifiedSimilarity()
+  // only ever reads matchedPassages (never the standalone similarity
+  // percentage), an unpatched empty array here means a perfectly confirmed
+  // 100%-similarity academic match would silently contribute nothing to the
+  // unified score. Reproduced live against a real bioRxiv preprint whose
+  // own retrieved full text matched itself exactly.
+  const text =
+    "Researchers observed unusual migratory behavior patterns among arctic tern populations during the summer breeding season near the coastal wetlands.";
+  const result = compareSubmissionToExternalText(text, text);
+  assert.equal(result.exactMatch, true);
+  assert.ok(result.matchedPassages.length > 0, "an exact canonical match must synthesize a passage instead of returning []");
+  const totalMatchedWords = result.matchedPassages.reduce((sum, passage) => sum + passage.matchedWordCount, 0);
+  assert.ok(totalMatchedWords > 0, "the synthesized passage must carry the real matched word count, not zero");
+});
+
 test("near-match handling: a long shared passage embedded in otherwise different surrounding text is detected", () => {
   const submitted = `${SHARED_PASSAGE} in my own analysis this extends further.`;
   const external = `${SHARED_PASSAGE} however the mechanism remains unclear today.`;

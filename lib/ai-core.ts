@@ -1,5 +1,6 @@
 import calibration from "@/public/data/ai-calibration.json";
 import evaluation from "@/public/data/ai-evaluation.json";
+import { findReferenceSectionStart } from "./reference-section";
 
 export type AiChunk = {
   start: number;
@@ -45,7 +46,6 @@ export type AiTokenizerAdapter = {
 };
 
 const WORD_PATTERN = /[A-Za-z]+(?:['’\-][A-Za-z]+)*/g;
-const REFERENCE_HEADING = /(?:^|\n)\s*(?:references|bibliography|works cited)\s*(?:\n|$)/i;
 
 export const AI_MINIMUM_WORDS = 300;
 export const AI_MODEL_ID = "onnx-community/modernbert-ai-detection-raid-mage-ONNX";
@@ -265,7 +265,7 @@ export function buildAiChunks(
   maximumChunks = Number.POSITIVE_INFINITY,
   strideWords = Math.max(1, Math.floor(chunkWords / 2)),
 ): AiChunk[] {
-  const referenceStart = text.search(REFERENCE_HEADING);
+  const referenceStart = findReferenceSectionStart(text);
   const eligibleText = referenceStart >= 0 ? text.slice(0, referenceStart) : text;
   const words = [...eligibleText.matchAll(WORD_PATTERN)].map((match) => ({
     start: match.index ?? 0,
@@ -302,7 +302,7 @@ export function buildAiChunks(
 }
 
 export function eligibleAiText(text: string) {
-  const referenceStart = text.search(REFERENCE_HEADING);
+  const referenceStart = findReferenceSectionStart(text);
   return referenceStart >= 0 ? text.slice(0, referenceStart) : text;
 }
 

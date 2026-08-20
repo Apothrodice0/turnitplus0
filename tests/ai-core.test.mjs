@@ -60,8 +60,13 @@ test("maps continuous median log-odds into the requested display score colors", 
 });
 
 test("builds bounded English chunks and excludes the bibliography", () => {
+  // lib/reference-section.ts's shared detector requires the content after
+  // a "References" heading to actually look like a reference list (see
+  // tests/similarity-core.test.mjs's identical comment) — a numbered
+  // marker here corroborates the heading the same way a real paper's
+  // reference list would.
   const body = Array.from({ length: 620 }, (_, index) => `word${index}`).join(" ");
-  const chunks = buildAiChunks(`${body}\n\nReferences\nHidden source material`, 260, 24);
+  const chunks = buildAiChunks(`${body}\n\nReferences\n[1] Hidden, S. Source material. 2020.`, 260, 24);
   assert.equal(chunks.length, 4);
   assert.equal(chunks[1].wordStart, 130);
   assert.equal(chunks[0].wordEnd - chunks[1].wordStart, 130);
@@ -82,8 +87,11 @@ test("builds overlapping 240-token windows without model truncation", () => {
       return ids.map((id) => dictionary[id]).join(" ");
     },
   };
+  // See "builds bounded English chunks and excludes the bibliography"
+  // above for why a bare heading with no reference-list-shaped content no
+  // longer counts as a real section boundary.
   const body = Array.from({ length: 500 }, (_, index) => `token${index}`).join(" ");
-  const chunks = buildAiTokenChunks(`${body}\n\nReferences\nHidden source material`, tokenizer);
+  const chunks = buildAiTokenChunks(`${body}\n\nReferences\n[1] Hidden, S. Source material. 2020.`, tokenizer);
   assert.deepEqual(chunks.map((chunk) => chunk.tokenStart), [0, 120, 240, 260]);
   assert.equal(chunks.every((chunk) => chunk.tokenCount <= 240), true);
   assert.equal(chunks.every((chunk) => chunk.wasTruncated === false), true);
