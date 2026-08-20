@@ -23,7 +23,7 @@ import {
 import { loadEnvFile, hostnameLabel, parseArgs } from '../tools/apply-e8-tables-migration.ts';
 
 /**
- * Phase E8E-D.1: tests for the isolated 0012-0023 migration runner.
+ * Phase E8E-D.1: tests for the isolated 0012-0024 migration runner.
  * Everything here runs against local, disposable SQLite files created and
  * destroyed within this file — nothing here ever touches a real Turso
  * database, production or otherwise. See lib/e8-tables-migration-runner.ts's
@@ -103,7 +103,7 @@ test.after(() => {
 
 // --- A: explicit allowlist ------------------------------------------------
 
-test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0023, in order, never touching 0000-0011', () => {
+test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0024, in order, never touching 0000-0011', () => {
   assert.deepEqual(TARGET_MIGRATIONS, [
     '0012_document_identities.sql',
     '0013_document_families.sql',
@@ -117,15 +117,19 @@ test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0023, in ord
     '0021_historical_match_shadow_evaluations.sql',
     '0022_reuse_context_declarations.sql',
     '0023_privacy_consent_and_report_identity_link.sql',
+    '0024_rate_limit_buckets.sql',
   ]);
   // Phase E8S Step 8: 0022_reuse_context_declarations.sql added
   // reuse_context_declarations, bringing the 15 E1-E8P tables across the
   // original 10 migrations to 16 across 11. Privacy hardening's
   // 0023_privacy_consent_and_report_identity_link.sql adds zero new tables
   // (it only adds columns to the already-existing saved_reports/users
-  // tables — see EXPECTED_COLUMNS_BY_MIGRATION), so this stays 16 across
-  // all 12 target migrations, not 17.
-  assert.equal(ALL_TARGET_TABLES.length, 16, 'expected exactly the 16 E1-E8S tables across all 12 target migrations');
+  // tables — see EXPECTED_COLUMNS_BY_MIGRATION), so that stayed 16. Durable
+  // rate limiting's 0024_rate_limit_buckets.sql creates one genuinely new
+  // table (rate_limit_buckets), using plain EXPECTED_TABLES_BY_MIGRATION
+  // tracking like every migration before 0023 — bringing this to 17 across
+  // all 13 target migrations.
+  assert.equal(ALL_TARGET_TABLES.length, 17, 'expected exactly 17 tables across all 13 target migrations');
   assert.deepEqual(
     EXPECTED_TABLES_BY_MIGRATION['0023_privacy_consent_and_report_identity_link.sql'],
     [],
@@ -138,6 +142,16 @@ test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0023, in ord
       { table: 'users', column: 'corpus_reuse_consented_at' },
     ],
     '0023 must be declared as adding exactly these two columns',
+  );
+  assert.deepEqual(
+    EXPECTED_TABLES_BY_MIGRATION['0024_rate_limit_buckets.sql'],
+    ['rate_limit_buckets'],
+    '0024 must be declared as creating exactly one new table, tracked via the table-state mechanism',
+  );
+  assert.equal(
+    EXPECTED_COLUMNS_BY_MIGRATION['0024_rate_limit_buckets.sql'],
+    undefined,
+    '0024 must NOT use the column-state mechanism — it creates a table, not columns on an existing one',
   );
 });
 
@@ -159,7 +173,7 @@ test('F: the runner module never does an unfiltered directory scan — no readdi
 
 // --- G: destructive SQL detection -----------------------------------------
 
-test('G: scanForDestructiveStatements finds real destructive keywords and finds none in the actual 12 target migration files', () => {
+test('G: scanForDestructiveStatements finds real destructive keywords and finds none in the actual 13 target migration files', () => {
   assert.deepEqual(scanForDestructiveStatements('CREATE TABLE IF NOT EXISTS x (id TEXT);'), []);
   assert.ok(scanForDestructiveStatements('DROP TABLE document_chunks;').length > 0);
   assert.ok(scanForDestructiveStatements('DELETE FROM users WHERE 1=1;').length > 0);
@@ -197,7 +211,7 @@ test('splitStatements correctly splits 0023 (the first target migration to use A
 
 // --- Section 9: disposable local DB — full happy-path run ------------------
 
-test('SECTION 9: fresh pre-0012 database — the runner applies all 12 migrations in order, creates all 16 tables, adds 0023\'s columns, and preserves legacy row VALUES exactly', async () => {
+test('SECTION 9: fresh pre-0012 database — the runner applies all 13 migrations in order, creates all 17 tables, adds 0023\'s columns, and preserves legacy row VALUES exactly', async () => {
   const dbFile = freshDbPath('happy');
   const client = await buildPreMigrationDb(dbFile);
   await seedRepresentativeLegacyRows(client);
@@ -302,13 +316,15 @@ test('B2: refuses when 0023\'s columns exist in a mixed state (one of the two ad
   const dbFile = freshDbPath('b2');
   const client = await buildPreMigrationDb(dbFile);
 
-  // Apply exactly 0012-0022 for real (via a temp dir excluding 0023), then
-  // hand-add only ONE of 0023's two columns — an "unexpected" partial state
-  // no legitimate prior run of this runner could produce (0023 applies as a
-  // single client.migrate() transaction, same as every other target
-  // migration).
+  // Apply exactly 0012-0022 for real (via a temp dir excluding 0023 and
+  // anything after it — filtered explicitly by filename prefix, not by
+  // position, so this stays correct as later migrations get appended to
+  // TARGET_MIGRATIONS), then hand-add only ONE of 0023's two columns — an
+  // "unexpected" partial state no legitimate prior run of this runner
+  // could produce (0023 applies as a single client.migrate() transaction,
+  // same as every other target migration).
   const only0012to0022 = fs.mkdtempSync(path.join(os.tmpdir(), 'e8-b2-'));
-  for (const file of TARGET_MIGRATIONS.slice(0, -1)) {
+  for (const file of TARGET_MIGRATIONS.filter((f) => f.slice(0, 4) <= '0022')) {
     fs.copyFileSync(path.join(drizzleDir, file), path.join(only0012to0022, file));
   }
   await applyMigrationsLibsql(client, only0012to0022);

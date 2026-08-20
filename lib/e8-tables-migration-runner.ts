@@ -5,9 +5,10 @@ import type { Client } from "@libsql/client";
 
 /**
  * Phase E8E-D.1: an isolated runner whose only job is applying migrations
- * 0012-0023 (the still-unapplied Phase A-E8 tables, plus the privacy/data-
- * lifecycle hardening columns 0023 adds) to a database that is otherwise
- * already at the pre-0012 baseline. Deliberately separate from
+ * 0012-0024 (the still-unapplied Phase A-E8 tables, the privacy/data-
+ * lifecycle hardening columns 0023 adds, and the durable rate-limiting
+ * table 0024 adds) to a database that is otherwise already at the pre-0012
+ * baseline. Deliberately separate from
  * lib/ingest.ts's applyMigrationsLibsql(), which replays every migration
  * file in drizzleDir from 0000 onward with no applied-state tracking —
  * correct only against an empty/fresh database (every existing test in
@@ -39,6 +40,7 @@ export const TARGET_MIGRATIONS = [
   "0021_historical_match_shadow_evaluations.sql",
   "0022_reuse_context_declarations.sql",
   "0023_privacy_consent_and_report_identity_link.sql",
+  "0024_rate_limit_buckets.sql",
 ] as const;
 
 export type TargetMigrationFile = (typeof TARGET_MIGRATIONS)[number];
@@ -69,6 +71,11 @@ export const EXPECTED_TABLES_BY_MIGRATION: Record<TargetMigrationFile, string[]>
   // below, which is what runTargetMigrations() actually checks applied-state
   // against for this file instead).
   "0023_privacy_consent_and_report_identity_link.sql": [],
+  // Unlike 0023, 0024 creates a genuinely new table (durable rate limiting
+  // — see drizzle/0024_rate_limit_buckets.sql), so it uses the same plain
+  // table-existence tracking as every migration before 0023, not
+  // EXPECTED_COLUMNS_BY_MIGRATION.
+  "0024_rate_limit_buckets.sql": ["rate_limit_buckets"],
 };
 
 export const ALL_TARGET_TABLES: string[] = TARGET_MIGRATIONS.flatMap((m) => EXPECTED_TABLES_BY_MIGRATION[m]);
@@ -126,6 +133,7 @@ export const EXPECTED_MIGRATION_SHA256: Record<TargetMigrationFile, string> = {
   "0021_historical_match_shadow_evaluations.sql": "757a34bf6ca225a20ac0db9f5673d3f4e51556781b11d184e434bd55b4ab668f",
   "0022_reuse_context_declarations.sql": "80f2d9391a0bd9b89cde22218abcc1438f2c7810d09324bc6dc99e1bbdc03fde",
   "0023_privacy_consent_and_report_identity_link.sql": "ac9fbfb9bfe0e341a6bc9c07ca3fb2db7f38bf382c4e974be65e637466f6d970",
+  "0024_rate_limit_buckets.sql": "ab2338f23d689340dcb21d18a6eb75785f20e977082af5957f317617937a34da",
 };
 
 const DESTRUCTIVE_PATTERN = /\b(DROP\s+TABLE|DROP\s+INDEX|ALTER\s+TABLE\s+\S+\s+DROP|DELETE\s+FROM|TRUNCATE)\b/gi;

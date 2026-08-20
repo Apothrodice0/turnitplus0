@@ -805,6 +805,24 @@ export const reuse_context_declarations = sqliteTable(
   ],
 );
 
+// Durable rate limiting (production audit fix): see
+// drizzle/0024_rate_limit_buckets.sql for the full rationale. bucket_key is
+// namespaced ("general:<clientId>" vs "auth:<clientId>") so lib/rate-limit.ts's
+// checkRate and checkAuthRate never share a bucket for the same client,
+// matching the pre-migration two-separate-in-memory-Maps behavior exactly.
+export const rate_limit_buckets = sqliteTable(
+  "rate_limit_buckets",
+  {
+    bucket_key: text("bucket_key").primaryKey(),
+    tokens: real("tokens").notNull(),
+    last_refill: integer("last_refill").notNull(),
+    last_allowed: integer("last_allowed").notNull(),
+  },
+  (table) => [
+    index("idx_rate_limit_buckets_last_refill").on(table.last_refill),
+  ],
+);
+
 // Export nothing else — Drizzle will consume these definitions for migrations.
 export {};
 
