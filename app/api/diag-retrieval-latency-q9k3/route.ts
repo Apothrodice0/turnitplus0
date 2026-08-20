@@ -257,7 +257,7 @@ export async function POST(request: Request) {
     if (mode === 'lookup') {
       const since = typeof (body as Record<string, unknown>).since === 'string' ? (body as Record<string, unknown>).since as string : '2026-08-20';
       const result = await client.execute({
-        sql: 'SELECT id, device_key, title, word_count, created_at FROM saved_reports WHERE created_at >= ? ORDER BY created_at DESC LIMIT 40',
+        sql: 'SELECT id, device_key, title, word_count, saved_at, report_created_at FROM saved_reports WHERE saved_at >= ? ORDER BY saved_at DESC LIMIT 40',
         args: [since],
       });
       return NextResponse.json({ rows: result.rows });
