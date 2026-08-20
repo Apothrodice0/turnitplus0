@@ -37,8 +37,8 @@ export async function POST(request: Request) {
 
     const client = await getReportsDbClient();
     try {
-      const result = await client.execute({ sql: 'SELECT id, username, password_hash FROM users WHERE email = ?', args: [normalizedEmail] });
-      const row = result.rows[0] as unknown as { id: string; username: string; password_hash: string } | undefined;
+      const result = await client.execute({ sql: 'SELECT id, username, password_hash, corpus_reuse_consented_at FROM users WHERE email = ?', args: [normalizedEmail] });
+      const row = result.rows[0] as unknown as { id: string; username: string; password_hash: string; corpus_reuse_consented_at: string | null } | undefined;
 
       if (!row) {
         // Run a dummy derivation so response timing doesn't reveal whether
@@ -57,7 +57,7 @@ export async function POST(request: Request) {
 
       const token = await createSession(client, row.id);
       const response = new NextResponse(
-        JSON.stringify({ user: { username: row.username, email: normalizedEmail } }),
+        JSON.stringify({ user: { username: row.username, email: normalizedEmail, corpusReuseConsent: row.corpus_reuse_consented_at !== null } }),
         { status: 200, headers: { 'Content-Type': 'application/json' } },
       );
       setSessionCookie(response, token, remember === true);

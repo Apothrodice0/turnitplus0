@@ -35,7 +35,7 @@ export async function GET(request: Request) {
       return new NextResponse(JSON.stringify({ user: null }), { status: 200, headers: { 'Content-Type': 'application/json' } });
     }
     return new NextResponse(
-      JSON.stringify({ user: { username: sessionUser.username, email: sessionUser.email } }),
+      JSON.stringify({ user: { username: sessionUser.username, email: sessionUser.email, corpusReuseConsent: sessionUser.corpusReuseConsented } }),
       { status: 200, headers: { 'Content-Type': 'application/json' } },
     );
   } catch (err) {
@@ -53,13 +53,20 @@ export async function PATCH(request: Request) {
     const body = await request.json().catch(() => null);
     if (!body || typeof body !== 'object') return new NextResponse(JSON.stringify({ error: 'Invalid JSON' }), { status: 400 });
 
-    const { username, email } = body as Record<string, unknown>;
+    const { username, email, corpusReuseConsent } = body as Record<string, unknown>;
 
     if (!isNonEmptyString(username) || username.trim().length < MIN_USERNAME_LENGTH || username.trim().length > MAX_USERNAME_LENGTH) {
       return new NextResponse(JSON.stringify({ error: `Username must be ${MIN_USERNAME_LENGTH}-${MAX_USERNAME_LENGTH} characters.` }), { status: 400 });
     }
     if (!isNonEmptyString(email) || email.length > MAX_EMAIL_LENGTH || !EMAIL_PATTERN.test(email)) {
       return new NextResponse(JSON.stringify({ error: 'A valid email address is required.' }), { status: 400 });
+    }
+    // Privacy hardening: optional — omitting the field leaves existing
+    // consent state untouched (a plain profile-only update never silently
+    // revokes or grants it). When present it must be a real boolean; this
+    // is the only place users.corpus_reuse_consented_at is ever written.
+    if (corpusReuseConsent !== undefined && typeof corpusReuseConsent !== 'boolean') {
+      return new NextResponse(JSON.stringify({ error: 'corpusReuseConsent must be a boolean.' }), { status: 400 });
     }
 
     const trimmedUsername = username.trim();
@@ -79,13 +86,21 @@ export async function PATCH(request: Request) {
         }
       }
 
-      await client.execute({
-        sql: 'UPDATE users SET username = ?, email = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
-        args: [trimmedUsername, normalizedEmail, sessionUser.id],
-      });
+      if (corpusReuseConsent !== undefined) {
+        await client.execute({
+          sql: 'UPDATE users SET username = ?, email = ?, corpus_reuse_consented_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+          args: [trimmedUsername, normalizedEmail, corpusReuseConsent ? new Date().toISOString() : null, sessionUser.id],
+        });
+      } else {
+        await client.execute({
+          sql: 'UPDATE users SET username = ?, email = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+          args: [trimmedUsername, normalizedEmail, sessionUser.id],
+        });
+      }
 
+      const resolvedConsent = corpusReuseConsent !== undefined ? corpusReuseConsent : sessionUser.corpusReuseConsented;
       return new NextResponse(
-        JSON.stringify({ user: { username: trimmedUsername, email: normalizedEmail } }),
+        JSON.stringify({ user: { username: trimmedUsername, email: normalizedEmail, corpusReuseConsent: resolvedConsent } }),
         { status: 200, headers: { 'Content-Type': 'application/json' } },
       );
     } finally {

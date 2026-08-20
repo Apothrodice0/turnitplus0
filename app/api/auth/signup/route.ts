@@ -63,8 +63,11 @@ export async function POST(request: Request) {
       await claimAnonymousReports(client, userId, deviceKey);
 
       const token = await createSession(client, userId);
+      // corpusReuseConsent is always false for a brand-new account — the
+      // column this reflects (users.corpus_reuse_consented_at) has no
+      // default other than NULL, and there is no signup-time consent input.
       const response = new NextResponse(
-        JSON.stringify({ user: { username: trimmedUsername, email: normalizedEmail } }),
+        JSON.stringify({ user: { username: trimmedUsername, email: normalizedEmail, corpusReuseConsent: false } }),
         { status: 201, headers: { 'Content-Type': 'application/json' } },
       );
       setSessionCookie(response, token, remember === true);

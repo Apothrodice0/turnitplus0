@@ -72,7 +72,7 @@ async function logout(cookieValue, ip = 'auth-test-logout') {
   const res = await signup({ email: 'Alice@Example.com', password: 'correct-horse-1', username: 'alice', deviceKey: 'device-signup-1' });
   assert.equal(res.status, 201, 'signup should succeed');
   const body = await res.json();
-  assert.deepEqual(body, { user: { username: 'alice', email: 'alice@example.com' } }, 'response must only contain username/email, never a password or token');
+  assert.deepEqual(body, { user: { username: 'alice', email: 'alice@example.com', corpusReuseConsent: false } }, 'response must only contain username/email/corpusReuseConsent, never a password or token');
   const cookie = extractCookie(res);
   assert.ok(cookie && cookie.length > 20, 'a session cookie must be set');
 
@@ -86,7 +86,7 @@ async function logout(cookieValue, ip = 'auth-test-logout') {
 
   const meRes = await me(cookie);
   const meBody = await meRes.json();
-  assert.deepEqual(meBody, { user: { username: 'alice', email: 'alice@example.com' } }, '/api/auth/me must reflect the new session');
+  assert.deepEqual(meBody, { user: { username: 'alice', email: 'alice@example.com', corpusReuseConsent: false } }, '/api/auth/me must reflect the new session');
   console.log('signup happy path passed');
 }
 
@@ -102,7 +102,7 @@ async function logout(cookieValue, ip = 'auth-test-logout') {
   const good = await login({ email: 'alice@example.com', password: 'correct-horse-1', deviceKey: 'device-login-1' });
   assert.equal(good.status, 200);
   const goodBody = await good.json();
-  assert.deepEqual(goodBody, { user: { username: 'alice', email: 'alice@example.com' } });
+  assert.deepEqual(goodBody, { user: { username: 'alice', email: 'alice@example.com', corpusReuseConsent: false } });
   const goodCookie = extractCookie(good);
   assert.ok(goodCookie, 'login must set a session cookie');
 

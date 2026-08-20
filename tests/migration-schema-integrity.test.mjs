@@ -324,7 +324,16 @@ function applyMigrationsExcluding(db, dir, excludeFiles) {
   cleanupSqliteFile(dbPath);
   const db = new Database(dbPath);
 
-  applyMigrationsExcluding(db, drizzleDir, ['0009_users.sql', '0010_sessions.sql', '0011_saved_reports_user_id.sql']);
+  // 0023 also excluded here: unlike every migration from 0012-0022 (which
+  // only ever *reference* users(id) declaratively inside a new CREATE TABLE
+  // — never checked by SQLite until an actual insert, so those are fine
+  // without users existing yet), 0023 does `ALTER TABLE users ADD COLUMN`,
+  // which requires the users table to already physically exist. In any real
+  // migration run this is a non-issue (files always apply in filename order,
+  // so 0009 always runs before 0023) — this exclusion only matters for this
+  // test's own artificial "simulate a pre-Phase-2A database" scenario, which
+  // 0023 has no bearing on and is not what this block is verifying.
+  applyMigrationsExcluding(db, drizzleDir, ['0009_users.sql', '0010_sessions.sql', '0011_saved_reports_user_id.sql', '0023_privacy_consent_and_report_identity_link.sql']);
 
   // Old-shape row: inserted before user_id existed on this table at all.
   db.prepare(`INSERT INTO saved_reports (id, device_key, submission_id, title, report_created_at, word_count, archive_score, score_band, payload_json) VALUES (?,?,?,?,?,?,?,?,?)`)

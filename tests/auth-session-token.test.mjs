@@ -48,7 +48,7 @@ test('getSessionUserByToken returns null for a garbage/unknown token', async () 
 test('getSessionUserByToken resolves a real session to its user', async () => {
   const token = await createSession(client, 'token-user-1');
   const user = await getSessionUserByToken(token, client);
-  assert.deepEqual(user, { id: 'token-user-1', username: 'tokenuser', email: 'token-test@example.com' });
+  assert.deepEqual(user, { id: 'token-user-1', username: 'tokenuser', email: 'token-test@example.com', corpusReuseConsented: false });
 });
 
 test('getSessionUserByToken rejects and deletes an expired session', async () => {

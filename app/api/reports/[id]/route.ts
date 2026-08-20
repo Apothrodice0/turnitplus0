@@ -5,6 +5,7 @@ import { getSessionUser } from '../../../../lib/auth-session';
 import { findReportRowForDeviceKey, findReportRowForUser } from '../../../../lib/reports-repo';
 import { classifyReportMatches } from '../../../../lib/report-classification';
 import { getOrComputeHistoricalMatchSnapshot, deleteHistoricalMatchSnapshot } from '../../../../lib/report-historical-match';
+import { deleteReportDocumentData } from '../../../../lib/report-deletion';
 import { runHistoricalMatchShadowEvaluation } from '../../../../lib/e8p-shadow-evaluation';
 import { getExperimentalHistoricalMatchForDisplay } from '../../../../lib/e8p-visibility';
 import { getReuseContextEligibility } from '../../../../lib/e8s-report-integration';
@@ -180,27 +181,39 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ i
         // automatic CASCADE. deviceKey is looked up here rather than
         // trusted from the client, matching this route's existing
         // authorization discipline (id + user_id both required either way).
+        // document_identity_id is looked up the same way, for the same
+        // ownership-verified reason, so a report's own identity/shingle/
+        // family/corpus data (see lib/report-deletion.ts) can be cleaned up
+        // too, not just its saved_reports row and match snapshot.
         const owned = await client.execute({
-          sql: 'SELECT device_key FROM saved_reports WHERE id = ? AND user_id = ?',
+          sql: 'SELECT device_key, document_identity_id FROM saved_reports WHERE id = ? AND user_id = ?',
           args: [id, sessionUser.id],
         });
         const deviceKey = owned.rows[0]?.device_key;
+        const documentIdentityId = owned.rows[0]?.document_identity_id;
         if (deviceKey) await deleteHistoricalMatchSnapshot(client, { reportDeviceKey: String(deviceKey), reportId: id });
         await client.execute({
           sql: 'DELETE FROM saved_reports WHERE id = ? AND user_id = ?',
           args: [id, sessionUser.id],
         });
+        if (documentIdentityId) await deleteReportDocumentData(client, String(documentIdentityId));
       } else {
         const url = new URL(request.url);
         const deviceKey = url.searchParams.get('deviceKey');
         if (!isNonEmptyString(deviceKey) || deviceKey.length > MAX_DEVICE_KEY_LENGTH) {
           return new NextResponse(JSON.stringify({ error: 'deviceKey is required' }), { status: 400 });
         }
+        const owned = await client.execute({
+          sql: 'SELECT document_identity_id FROM saved_reports WHERE device_key = ? AND id = ? AND user_id IS NULL',
+          args: [deviceKey, id],
+        });
+        const documentIdentityId = owned.rows[0]?.document_identity_id;
         await deleteHistoricalMatchSnapshot(client, { reportDeviceKey: deviceKey, reportId: id });
         await client.execute({
           sql: 'DELETE FROM saved_reports WHERE device_key = ? AND id = ? AND user_id IS NULL',
           args: [deviceKey, id],
         });
+        if (documentIdentityId) await deleteReportDocumentData(client, String(documentIdentityId));
       }
     } finally {
       client.close();

@@ -169,11 +169,24 @@ export const saved_reports = sqliteTable(
     // this device_key's owner signs up or logs in (see claimAnonymousReports
     // in lib/auth-session.ts).
     user_id: text("user_id").references(() => users.id, { onDelete: "set null" }),
+    // Privacy hardening (0023): the exact document_identities row this
+    // report's identity/shingle/family/corpus data lives under, set once by
+    // the same deferred callback that creates that row (see
+    // app/api/reports/route.ts). Populated for both anonymous and signed-in
+    // reports (an identity row is captured for either — see that route's
+    // own comment), NULL only when no identity was captured at all or for
+    // every report saved before this column existed. ON DELETE SET NULL:
+    // losing the identity row must not delete the report. See
+    // lib/report-deletion.ts for how DELETE /api/reports/[id] uses this to
+    // cascade-clean the identity's own rows without risking a different
+    // report's shared data.
+    document_identity_id: text("document_identity_id").references(() => document_identities.id, { onDelete: "set null" }),
   },
   (table) => [
     primaryKey({ columns: [table.device_key, table.id] }),
     index("idx_saved_reports_device_key_created").on(table.device_key, table.report_created_at),
     index("idx_saved_reports_user_id_created").on(table.user_id, table.report_created_at),
+    index("idx_saved_reports_document_identity_id").on(table.document_identity_id),
   ],
 );
 
@@ -189,6 +202,14 @@ export const users = sqliteTable(
     password_hash: text("password_hash").notNull(),
     created_at: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
     updated_at: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    // Privacy hardening (0023): explicit opt-in for the cross-account
+    // matching corpus (lib/user-submission-corpus.ts). NULL (the default for
+    // every existing and new account) means indexDocumentSubmissionIntoCorpus
+    // is never called for this account's uploads — see
+    // app/api/reports/route.ts. Non-NULL records *when* consent was granted,
+    // matching this schema's existing declared_at/confirmed_at/revoked_at
+    // convention (reuse_context_declarations) rather than a plain boolean.
+    corpus_reuse_consented_at: text("corpus_reuse_consented_at"),
   },
   (table) => [
     uniqueIndex("ux_users_email").on(table.email),

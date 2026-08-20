@@ -78,7 +78,7 @@ const useIsomorphicLayoutEffect = typeof window === "undefined" ? useEffect : us
 type View = "home" | "dashboard" | "reports" | "about" | "account" | "welcome" | "legal" | "processing";
 type AuthMode = "login" | "signup";
 type LegalTab = "privacy" | "terms";
-type LocalAccount = { username: string; email: string };
+type LocalAccount = { username: string; email: string; corpusReuseConsent: boolean };
 
 const VIEW_HASH: Record<Exclude<View, "processing">, string> = {
   home: "#home",
@@ -651,6 +651,7 @@ export default function Home() {
     const data = new FormData(event.currentTarget);
     const username = String(data.get("profileUsername") ?? "").trim();
     const email = String(data.get("profileEmail") ?? "").trim();
+    const corpusReuseConsent = data.get("corpusReuseConsent") === "on";
 
     setProfileEditError(null);
     let response: Response;
@@ -658,7 +659,7 @@ export default function Home() {
       response = await fetch("/api/auth/me", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username, email }),
+        body: JSON.stringify({ username, email, corpusReuseConsent }),
       });
     } catch {
       setProfileEditError("Could not reach TurnitPlus. Check your connection and try again.");
@@ -1301,6 +1302,13 @@ export default function Home() {
                           <input name="profileEmail" type="email" defaultValue={account.email} autoComplete="email" required />
                         </label>
                       </div>
+                      <label className="account-consent-toggle">
+                        <input name="corpusReuseConsent" type="checkbox" defaultChecked={account.corpusReuseConsent} />
+                        <span>
+                          <strong>Check my uploads against other TurnitPlus users&apos; submissions</strong>
+                          <small>Off by default. When on, future uploads you save may be compared against documents other signed-in users have submitted, and vice versa, to flag prior submissions. Your document text is never shown to another account &mdash; only that a prior submission exists. Turning this off stops future uploads from being added; it does not remove documents already indexed while it was on (delete the report to remove those).</small>
+                        </span>
+                      </label>
                       {profileEditError && <p className="auth-form-error" role="alert">{profileEditError}</p>}
                       <div className="account-edit-actions">
                         <button className="button subtle" type="button" onClick={() => setIsEditingProfile(false)}>Cancel</button>
@@ -1309,6 +1317,11 @@ export default function Home() {
                     </form>
                   )}
                   <div className="account-profile-status"><Check aria-hidden="true" /> Your account session is active on this device.</div>
+                  <div className="account-profile-status">
+                    {account.corpusReuseConsent
+                      ? "Cross-account prior-submission checking is ON for your uploads."
+                      : "Cross-account prior-submission checking is OFF for your uploads (default)."}
+                  </div>
                   <div className="account-profile-actions">
                     <button className="button primary" type="button" disabled={isGeneratingReport} onClick={startNewCheck}>
                       <UploadCloud aria-hidden="true" /> Start a new check

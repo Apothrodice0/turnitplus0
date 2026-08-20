@@ -72,6 +72,13 @@ async function signup(email, deviceKey) {
     body: JSON.stringify({ email, password: "classification-password-1", username: email.split("@")[0], deviceKey }),
   });
   const res = await signupRoute.POST(req);
+  // Privacy hardening: grants cross-account corpus-reuse consent immediately
+  // so this file's existing scenarios (written before consent-gating
+  // existed) continue to exercise the real indexDocumentSubmissionIntoCorpus
+  // path via the live route, unchanged — see
+  // tests/report-privacy-consent.test.mjs for the dedicated consent on/off
+  // behavior this gate itself needs.
+  await setupClient.execute({ sql: "UPDATE users SET corpus_reuse_consented_at = CURRENT_TIMESTAMP WHERE email = ?", args: [email] });
   return { res, cookie: extractCookie(res) };
 }
 

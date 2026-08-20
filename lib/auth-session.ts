@@ -47,7 +47,19 @@ function bytesToHex(bytes: Uint8Array): string {
   return hex;
 }
 
-export type SessionUser = { id: string; username: string; email: string };
+export type SessionUser = {
+  id: string;
+  username: string;
+  email: string;
+  /**
+   * Privacy hardening: true only when users.corpus_reuse_consented_at is
+   * non-NULL — see db/schema.ts's own comment on that column. Read here
+   * (rather than a second query at each call site) so every session lookup
+   * carries it for free; app/api/reports/route.ts gates
+   * indexDocumentSubmissionIntoCorpus on this being true.
+   */
+  corpusReuseConsented: boolean;
+};
 
 export async function createSession(client: Client, userId: string): Promise<string> {
   const token = bytesToHex(randomBytes(32));
@@ -71,18 +83,20 @@ export async function getSessionUserByToken(token: string | null, client: Client
   if (!token) return null;
   const tokenHash = hashToken(token);
   const result = await client.execute({
-    sql: `SELECT sessions.expires_at as expires_at, users.id as id, users.username as username, users.email as email
+    sql: `SELECT sessions.expires_at as expires_at, users.id as id, users.username as username, users.email as email, users.corpus_reuse_consented_at as corpus_reuse_consented_at
           FROM sessions JOIN users ON users.id = sessions.user_id
           WHERE sessions.token_hash = ?`,
     args: [tokenHash],
   });
-  const row = result.rows[0] as unknown as { expires_at: number | bigint; id: string; username: string; email: string } | undefined;
+  const row = result.rows[0] as unknown as
+    | { expires_at: number | bigint; id: string; username: string; email: string; corpus_reuse_consented_at: string | null }
+    | undefined;
   if (!row) return null;
   if (Number(row.expires_at) <= Date.now()) {
     await client.execute({ sql: "DELETE FROM sessions WHERE token_hash = ?", args: [tokenHash] });
     return null;
   }
-  return { id: row.id, username: row.username, email: row.email };
+  return { id: row.id, username: row.username, email: row.email, corpusReuseConsented: row.corpus_reuse_consented_at !== null };
 }
 
 export async function getSessionUser(request: Request, client: Client): Promise<SessionUser | null> {

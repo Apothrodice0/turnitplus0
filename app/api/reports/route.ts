@@ -127,10 +127,33 @@ export async function POST(request: Request) {
       // upload. A genuinely new upload always gets a new id from the
       // client, so this never suppresses a real new submission.
       if (rawText && isFirstSaveOfThisReport) {
+        // Privacy hardening: captured as a plain local (not `sessionUser`)
+        // for the same reason app/api/reports/[id]/route.ts's own
+        // runAfterResponse callback captures plain locals — keeps the
+        // deferred closure independent of the outer request's object.
+        // Indexing consent defaults to false (no consent row = not opted
+        // in) for a signed-in user and is always false for anonymous saves,
+        // matching indexDocumentSubmissionIntoCorpus's own existing
+        // SKIPPED_ANONYMOUS eligibility rule.
+        const hasCorpusReuseConsent = sessionUser?.corpusReuseConsented === true;
+        const reportDeviceKey = deviceKey;
+        const reportId = id;
         await runAfterResponse(async () => {
           const deferredClient = await getReportsDbClient();
           try {
             const captured = await captureDocumentIdentityAndFamily(deferredClient, { accountId: userId, title, author: null, rawText });
+            // Privacy hardening: records the exact link this report's
+            // identity/shingle/family/corpus data lives under — see
+            // db/schema.ts's saved_reports.document_identity_id comment and
+            // lib/report-deletion.ts, which is what actually uses this link
+            // when the report is later deleted. Written in the same
+            // deferred callback, right after the identity row is created,
+            // so it can never point at an identity that failed to be
+            // created (the catch below still fires first in that case).
+            await deferredClient.execute({
+              sql: 'UPDATE saved_reports SET document_identity_id = ? WHERE device_key = ? AND id = ?',
+              args: [captured.documentIdentityId, reportDeviceKey, reportId],
+            });
             // Phase E8D: activation. Reuses lib/user-submission-corpus.ts's
             // indexDocumentSubmissionIntoCorpus exactly as E8A already
             // defined it (no logic duplicated here) — the same
@@ -154,7 +177,16 @@ export async function POST(request: Request) {
             // is itself the recoverable "needs indexing" signal a future
             // maintenance pass could query for — see the E8D report's own
             // "unresolved decisions" for why that pass is not built here.
-            if (userId !== null) {
+            //
+            // Privacy hardening: additionally requires hasCorpusReuseConsent
+            // — a signed-in user whose account has not explicitly opted in
+            // (users.corpus_reuse_consented_at IS NULL, the default) is
+            // never indexed into the cross-account matching corpus, exactly
+            // like an anonymous submission is not. This does not change
+            // indexDocumentSubmissionIntoCorpus, findCandidateCorpusRepresentations,
+            // or matchAgainstUserSubmissionCorpus themselves — only whether
+            // this route ever calls the entry point at all.
+            if (userId !== null && hasCorpusReuseConsent) {
               const indexStartedAt = Date.now();
               try {
                 const indexResult = await indexDocumentSubmissionIntoCorpus(deferredClient, {
