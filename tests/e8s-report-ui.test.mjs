@@ -317,10 +317,10 @@ test('P: the pending panel and CTA panel never render an account id, email, or u
 
 // --- Q: score/archiveScore/aiScore unchanged ----------------------------------
 
-test('Q: Archive overlap heading is byte-identical with and without report.reuseContext present', () => {
+test('Q: Similarity result heading is byte-identical with and without report.reuseContext present', () => {
   const withoutReuseContext = renderReport(baseReport({ archiveScore: 42, historicalSubmissionMatch: PRIOR_SUBMISSION_MATCH }));
   const withReuseContext = renderReport(baseReport({ archiveScore: 42, historicalSubmissionMatch: PRIOR_SUBMISSION_MATCH, reuseContext: { documentIdentityId: 'doc-1', representationId: 'rep-self-1' } }));
-  const archiveLine = (html) => html.match(/<span>42%<\/span> Archive overlap/)?.[0];
+  const archiveLine = (html) => html.match(/<span>42%<\/span> Similarity result/)?.[0];
   assert.ok(archiveLine(withoutReuseContext));
   assert.equal(archiveLine(withoutReuseContext), archiveLine(withReuseContext));
 });
@@ -376,7 +376,7 @@ test('T2: the report layout structure (existing sections) is unaffected by the n
   const html = renderReport(baseReport({ historicalSubmissionMatch: PRIOR_SUBMISSION_MATCH, reuseContext: { documentIdentityId: 'doc-1', representationId: 'rep-self-1' } }));
   assert.match(html, /Filtered from the Report/);
   assert.match(html, /Match Groups/);
-  assert.match(html, /Archive overlap/);
+  assert.match(html, /Similarity result/);
 });
 
 // --- U: no account/email/document-text leakage --------------------------------

@@ -98,17 +98,17 @@ test("SCORE ISOLATION: primarySimilarityScore never mutates or reads back into s
 
 test("EVIDENCE SUMMARY: archive-only contribution", () => {
   const summary = unifiedEvidenceSummary(unified({ archiveOnlyWords: 100, liveAcademicOnlyWords: 0, previousUploadOnlyWords: 0, overlapWords: 0 }));
-  assert.equal(summary, "archive");
+  assert.equal(summary, "own reference material");
 });
 
 test("EVIDENCE SUMMARY: archive plus live academic sources", () => {
   const summary = unifiedEvidenceSummary(unified({ archiveOnlyWords: 100, liveAcademicOnlyWords: 40, previousUploadOnlyWords: 0, overlapWords: 0 }));
-  assert.equal(summary, "archive, live academic sources");
+  assert.equal(summary, "own reference material, live academic sources");
 });
 
 test("EVIDENCE SUMMARY: all three sources plus overlap still lists archive once", () => {
   const summary = unifiedEvidenceSummary(unified({ archiveOnlyWords: 10, liveAcademicOnlyWords: 10, previousUploadOnlyWords: 10, overlapWords: 5 }));
-  assert.equal(summary, "archive, live academic sources, a prior submission");
+  assert.equal(summary, "own reference material, live academic sources, a prior submission");
 });
 
 test("EVIDENCE SUMMARY: no matched words at all never renders a blank string", () => {

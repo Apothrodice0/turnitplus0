@@ -266,13 +266,6 @@ export type HighlightRange = {
   wikipediaSources?: Array<{ pageId: number; title: string; url: string }>;
 };
 
-export const SIMILARITY_BAND_LABELS = {
-  low: "Low archive overlap",
-  review: "Moderate archive overlap",
-  high: "High archive overlap",
-} as const;
-
-/** Phase 7: same band keys/thresholds as SIMILARITY_BAND_LABELS (both are fed by the same similarityScoreBand()) — only the wording differs, for the headline built from primarySimilarityScore() rather than archiveOverlapScore() alone. */
 export const PRIMARY_SIMILARITY_BAND_LABELS = {
   low: "Low similarity",
   review: "Moderate similarity",
@@ -327,7 +320,7 @@ export function hasUnifiedSimilarity(report: SimilarityReport): boolean {
  */
 export function unifiedEvidenceSummary(unified: UnifiedSimilarityResult): string {
   const parts: string[] = [];
-  if (unified.archiveOnlyWords > 0 || unified.overlapWords > 0) parts.push("archive");
+  if (unified.archiveOnlyWords > 0 || unified.overlapWords > 0) parts.push("own reference material");
   if (unified.liveAcademicOnlyWords > 0) parts.push("live academic sources");
   if (unified.previousUploadOnlyWords > 0) parts.push("a prior submission");
   if (parts.length === 0) return "no matched sources";

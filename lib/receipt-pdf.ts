@@ -97,7 +97,7 @@ export async function createReceiptPdf(report: ReceiptData, suppliedFonts?: Rece
 
   page.drawRectangle({ x: 36, y: 36, width: 540, height: 720, color: colors.frame });
   page.drawRectangle({ x: 48, y: 52, width: 516, height: 696, color: colors.white });
-  page.drawText(isUnified ? "TurnitPlus Similarity Report" : "TurnitPlus Archive Overlap Report", {
+  page.drawText(isUnified ? "TurnitPlus Similarity Report" : "TurnitPlus Source Overlap Report", {
     x: 72,
     y: 716,
     size: 15,
@@ -109,8 +109,6 @@ export async function createReceiptPdf(report: ReceiptData, suppliedFonts?: Rece
   page.drawText("Receipt", { x: 72, y: 620, size: 26, font: regular, color: colors.heading });
 
   const date = new Date(report.created);
-  const archiveCountMatch = report.corpusVersion.match(/^archive-v\d+-(\d+)-/);
-  const archiveCount = archiveCountMatch ? Number(archiveCountMatch[1]) : report.databaseSize;
   const rows: Array<[string, string]> = [
     ["Submission author", report.author],
     ["Assignment title", report.assignment],
@@ -125,14 +123,12 @@ export async function createReceiptPdf(report: ReceiptData, suppliedFonts?: Rece
   if (report.unified) {
     rows.push(["TurnitPlus Similarity", `${report.unified.score}% - ${report.unified.label}`]);
     rows.push(["Evidence sources", report.unified.evidenceSummary]);
-    rows.push(["Archive overlap (component)", `${report.archiveScore ?? report.score}% - ${report.scoreBand}`]);
+    rows.push(["Similarity result (component)", `${report.archiveScore ?? report.score}% - ${report.scoreBand}`]);
   } else {
-    rows.push(["Archive overlap", `${report.archiveScore ?? report.score}% - ${report.scoreBand} archive overlap`]);
+    rows.push(["Similarity result", `${report.archiveScore ?? report.score}% - ${report.scoreBand} similarity`]);
   }
 
   rows.push(
-    ["Archive scope", `${archiveCount ?? 230} indexed documents`],
-    ["Archive version", report.corpusVersion],
     ["Submission date", date.toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" })],
     ["Submission ID", report.submissionId],
   );
@@ -147,8 +143,8 @@ export async function createReceiptPdf(report: ReceiptData, suppliedFonts?: Rece
   const disclaimerY = 590 - rows.length * rowSpacing - 5;
   page.drawText(
     isUnified
-      ? "TurnitPlus Similarity combines archive matches, live academic sources, and eligible prior submissions."
-      : "Archive overlap measures text found in TurnitPlus's indexed archive.",
+      ? "TurnitPlus Similarity combines identified overlapping passages, live academic sources, and eligible prior submissions."
+      : "The similarity result is based on identified overlapping passages.",
     {
       x: 72,
       y: disclaimerY,
@@ -157,7 +153,7 @@ export async function createReceiptPdf(report: ReceiptData, suppliedFonts?: Rece
       color: colors.text,
     },
   );
-  page.drawText("It is not an estimate of a Turnitin score.", {
+  page.drawText("Based on identified overlapping passages and verified academic sources.", {
     x: 72,
     y: disclaimerY - 13,
     size: 8,

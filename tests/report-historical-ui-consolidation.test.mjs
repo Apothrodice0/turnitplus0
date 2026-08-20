@@ -161,19 +161,19 @@ test('UNAVAILABLE still renders its own single section, distinct from MATCHED', 
   assert.match(html, /Historical matching unavailable for this report\./);
 });
 
-// --- D/E: archive overlap and score unaffected ------------------------------
+// --- D/E: similarity result and score unaffected ------------------------------
 
-test('D: Archive overlap value is unaffected by historicalSubmissionMatch presence or relationship type', () => {
+test('D: Similarity result value is unaffected by historicalSubmissionMatch presence or relationship type', () => {
   const withoutMatch = render(baseReport({ archiveScore: 42 }));
   const withSelfMatch = render(baseReport({ archiveScore: 42, historicalSubmissionMatch: SELF_MATCH }));
-  const archiveLine = (html) => html.match(/<span>42%<\/span> Archive overlap/)?.[0];
+  const archiveLine = (html) => html.match(/<span>42%<\/span> Similarity result/)?.[0];
   assert.ok(archiveLine(withoutMatch));
-  assert.equal(archiveLine(withoutMatch), archiveLine(withSelfMatch), 'the Archive overlap heading must render identically regardless of historicalSubmissionMatch');
+  assert.equal(archiveLine(withoutMatch), archiveLine(withSelfMatch), 'the Similarity result heading must render identically regardless of historicalSubmissionMatch');
 });
 
-test('E: the rendered archive overlap figure equals report.archiveScore exactly (score fields untouched by this phase)', () => {
+test('E: the rendered similarity result figure equals report.archiveScore exactly (score fields untouched by this phase)', () => {
   const html = render(baseReport({ score: 12, archiveScore: 31, historicalSubmissionMatch: PRIOR_SUBMISSION_MATCH }));
-  assert.match(html, /<span>31%<\/span> Archive overlap/, 'must reflect archiveScore, not score, and must be exactly the saved value');
+  assert.match(html, /<span>31%<\/span> Similarity result/, 'must reflect archiveScore, not score, and must be exactly the saved value');
 });
 
 // --- F: no account identity leakage -----------------------------------------
@@ -247,8 +247,8 @@ test('I: lib/receipt-pdf.ts is untouched by this phase — no historical-match f
 test('I2: score/archiveScore/aiScore are unaffected by the SELF wording change, and the component never reads aiScore at all', () => {
   const withoutMatch = render(baseReport({ score: 12, archiveScore: 9 }));
   const withSelfMatch = render(baseReport({ score: 12, archiveScore: 9, historicalSubmissionMatch: SELF_MATCH }));
-  assert.match(withoutMatch, /<span>9%<\/span> Archive overlap/);
-  assert.match(withSelfMatch, /<span>9%<\/span> Archive overlap/);
+  assert.match(withoutMatch, /<span>9%<\/span> Similarity result/);
+  assert.match(withSelfMatch, /<span>9%<\/span> Similarity result/);
   const source = fs.readFileSync(path.join(repo, 'components/report/similarity-report-papers.tsx'), 'utf8');
   assert.doesNotMatch(source, /\.aiScore\b/, 'OverviewReport must never read aiScore — AI scoring is rendered by a separate component, untouched by this phase');
 });
@@ -257,7 +257,7 @@ test('I3: non-historical sections of the report render unchanged alongside a SEL
   const html = render(baseReport({ historicalSubmissionMatch: SELF_MATCH }));
   assert.match(html, /Filtered from the Report/);
   assert.match(html, /Match Groups/);
-  assert.match(html, /Archive overlap/);
+  assert.match(html, /Similarity result/);
 });
 
 test('J: the consolidated section uses plain semantic markup with no fixed-width inline styling that would break on mobile', () => {
@@ -389,8 +389,8 @@ test('R (task G): dynamic percentages/word counts are correct across multiple SE
 test('S (task H): no score/archiveScore/aiScore changes from multi-SELF consolidation', () => {
   const withoutMatch = render(baseReport({ score: 12, archiveScore: 9 }));
   const withMultiSelf = render(baseReport({ score: 12, archiveScore: 9, historicalSubmissionMatch: THREE_SELF_MATCHES }));
-  assert.match(withoutMatch, /<span>9%<\/span> Archive overlap/);
-  assert.match(withMultiSelf, /<span>9%<\/span> Archive overlap/);
+  assert.match(withoutMatch, /<span>9%<\/span> Similarity result/);
+  assert.match(withMultiSelf, /<span>9%<\/span> Similarity result/);
 });
 
 test('T (task I): the existing E8P.3 experimental partial-match UI is unaffected by the SELF-consolidation change', () => {

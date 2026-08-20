@@ -11,7 +11,6 @@ import {
   PRIMARY_SIMILARITY_BAND_LABELS,
   aiSignalDisplay,
   archiveMatchedWordCount,
-  archiveScopeCount,
   hasUnifiedSimilarity,
   primarySimilarityScore,
   type ReportMode,
@@ -140,12 +139,12 @@ export function ReportDetailShell({
   // lib/unified-similarity.ts) whenever it has been computed for this report,
   // never report.score/archiveScore directly and never a second, separately
   // "added" percentage. Falls back to the existing archive-only score,
-  // labeled honestly as "Archive overlap" rather than "TurnitPlus Similarity",
+  // labeled honestly as "Similarity result" rather than "TurnitPlus Similarity",
   // for a report that predates Phase 6 or where the read-time computation
   // itself failed — see primarySimilarityScore's own comment.
   const primaryScore = primarySimilarityScore(report);
   const isUnified = hasUnifiedSimilarity(report);
-  const primaryLabel = isUnified ? "TurnitPlus Similarity" : "Archive overlap";
+  const primaryLabel = isUnified ? "TurnitPlus Similarity" : "Similarity result";
   const similarityVerdict = similarityScoreBand(primaryScore);
   const aiSignal = aiSignalDisplay(report);
   const academicEvidenceCount = report.externalAcademicEvidence ? dedupeExternalAcademicEvidence(report.externalAcademicEvidence).length : 0;
@@ -185,8 +184,7 @@ export function ReportDetailShell({
               ? `${aiSignal.value === null ? "" : `${aiSignal.value}% · `}${aiSignal.label}`
               : `${primaryScore}% ${primaryLabel}`}
           </strong>
-          {mode === "similarity" && <span className="summary-chip">Matched against {archiveScopeCount(report).toLocaleString()} indexed documents</span>}
-          {mode === "similarity" && <span className="summary-chip">{report.sources.length} archive sources</span>}
+          {mode === "similarity" && <span className="summary-chip">{report.sources.length} matched source{report.sources.length === 1 ? "" : "s"}</span>}
           {mode === "similarity" && (report.webCheck?.phrasesMatched ?? 0) > 0 && <span className="summary-chip wikipedia-evidence-chip"><Globe2 aria-hidden="true" /> Separate Wikipedia evidence</span>}
           {mode === "similarity" && academicEvidenceCount > 0 && (
             <span className="summary-chip academic-evidence-chip">
@@ -199,7 +197,6 @@ export function ReportDetailShell({
           <span className="summary-chip">{report.wordCount.toLocaleString()} words</span>
           <span className="summary-chip">{report.pageCount} pages</span>
           <span className="summary-chip">{report.characterCount.toLocaleString()} characters</span>
-          <span className="summary-chip">{report.corpusVersion}</span>
         </div>
       </div>
 
@@ -254,11 +251,11 @@ export function ReportDetailShell({
                 : "A numeric result requires at least 300 eligible English words and a successful local model load."}
             </p> : <p>
               {isUnified
-                ? <>TurnitPlus Similarity combines text found in TurnitPlus&apos;s {archiveScopeCount(report).toLocaleString()}-document archive, verified external academic sources, and eligible previous TurnitPlus submissions into one result — the same submitted passage found by more than one source counts once. It is not an estimate of a Turnitin score.</>
-                : <>Archive overlap measures the percentage of this document found within TurnitPlus&apos;s {archiveScopeCount(report).toLocaleString()} indexed documents. It is not an estimate of a Turnitin score.</>}
+                ? <>TurnitPlus Similarity combines text found through TurnitPlus&apos;s own checks, verified external academic sources, and eligible previous TurnitPlus submissions into one result — the same submitted passage found by more than one source counts once.</>
+                : <>The similarity result is based on identified overlapping passages and verified academic sources.</>}
               {" "}{archiveMatchedWordCount(report).toLocaleString()} words were matched across {report.sources.length} retained source{report.sources.length === 1 ? "" : "s"}.
               {(report.webCheck?.phrasesMatched ?? 0) > 0 && ` Wikipedia evidence is shown separately and does not change this result.`}
-              {" "}Language detected: {report.features.detectedLanguage}. Longest matched span: {report.features.longestMatchedSpan} words. Archive: {report.corpusVersion}.
+              {" "}Language detected: {report.features.detectedLanguage}. Longest matched span: {report.features.longestMatchedSpan} words.
             </p>}
           </div>
         </aside>

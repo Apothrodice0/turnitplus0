@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-test("product branding presents AI detection and scoped archive overlap clearly", async () => {
+test("product branding presents AI detection and similarity results clearly, without naming Turnitin or the internal archive", async () => {
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
   const layout = await readFile(new URL("../app/layout.tsx", import.meta.url), "utf8");
   // The AI report paper (and its "ENGLISH AI WRITING ANALYSIS"/"AI writing
@@ -12,11 +12,13 @@ test("product branding presents AI detection and scoped archive overlap clearly"
 
   assert.match(page, /AI & similarity detection/);
   assert.match(page, /Check AI writing and similarity/);
-  // Phase 7 PRIORITY 2: this paragraph was updated to also describe live
-  // academic sources (lib/academic-search/'s OpenAIRE + Europe PMC) rather
-  // than implying the archive is the only thing checked, without removing
-  // the archive-overlap disclosure itself.
-  assert.match(page, /TurnitPlus checks AI-writing signals and measures similarity against its indexed archive/);
+  // "Remove all user-facing references to Turnitin..." — public copy now
+  // describes coverage via provider scale (millions of scholarly records
+  // across major academic indexes) rather than naming or sizing the
+  // internal archive.
+  assert.match(page, /searching millions of scholarly records across major academic indexes/);
+  assert.doesNotMatch(page, /Turnitin(?!Plus)/, "public copy must not name Turnitin");
+  assert.doesNotMatch(page, /indexed archive|indexed documents/i, "public copy must not describe the internal archive/indexing mechanism");
   assert.match(aiReport, /ENGLISH AI WRITING ANALYSIS/);
   assert.match(aiReport, /AI writing score/);
   assert.doesNotMatch(page, /EXPERIMENTAL ENGLISH AI WRITING SIGNAL/);

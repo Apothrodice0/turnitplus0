@@ -57,7 +57,6 @@ import {
 } from "@/lib/ai-model-prep";
 import {
   aiSignalDisplay,
-  archiveScopeCount,
   buildReportSummary,
   hasUnifiedSimilarity,
   PRIMARY_SIMILARITY_BAND_LABELS,
@@ -1088,7 +1087,7 @@ export default function Home() {
               <div className="landing-hero-copy">
                 <span className="landing-badge"><ShieldCheck aria-hidden="true" /> Private by design</span>
                 <h2 id="landing-title">Understand what is in your document—without sending the document away.</h2>
-                <p className="landing-lede">TurnitPlus checks AI-writing signals and similarity in your browser — against its indexed archive and, when available, live academic sources — then gives you the passages and sources behind the result.</p>
+                <p className="landing-lede">TurnitPlus checks AI-writing signals and similarity in your browser — searching millions of scholarly records across major academic indexes — then gives you the passages and sources behind the result.</p>
                 <div className="landing-actions">
                   <button className="button primary landing-cta" type="button" onClick={() => navigate("dashboard")}><UploadCloud aria-hidden="true" /> Check a document free</button>
                   <button className="button secondary" type="button" onClick={() => navigate("about")}><BookOpen aria-hidden="true" /> See how it works</button>
@@ -1111,7 +1110,7 @@ export default function Home() {
                 <div className="landing-match-preview">
                   <div className="landing-line wide" /><div className="landing-line" /><div className="landing-line match" /><div className="landing-line wide" /><div className="landing-line match short" />
                 </div>
-                <div className="landing-source-row"><span><FileCheck2 aria-hidden="true" /> Evidence attached</span><span>230 indexed documents</span></div>
+                <div className="landing-source-row"><span><FileCheck2 aria-hidden="true" /> Evidence attached</span><span>Verified academic sources</span></div>
               </div>
             </div>
 
@@ -1121,7 +1120,7 @@ export default function Home() {
               <p>Keep the result useful, inspectable and honest about what the system can actually prove.</p>
             </div>
             <div className="landing-feature-grid">
-              <article className="surface-card landing-feature-card"><span className="landing-feature-icon"><Search aria-hidden="true" /></span><h3>Find meaningful overlap</h3><p>Measure text found inside the indexed archive and show the exact passages that matched.</p></article>
+              <article className="surface-card landing-feature-card"><span className="landing-feature-icon"><Search aria-hidden="true" /></span><h3>Find meaningful overlap</h3><p>Measure overlapping text and show the exact passages that matched.</p></article>
               <article className="surface-card landing-feature-card"><span className="landing-feature-icon"><GraduationCap aria-hidden="true" /></span><h3>Review AI-writing signals</h3><p>Surface calibrated signals and highlighted passages instead of pretending a score is proof of authorship.</p></article>
               <article className="surface-card landing-feature-card"><span className="landing-feature-icon"><ShieldCheck aria-hidden="true" /></span><h3>Keep documents local</h3><p>Extraction and analysis happen in your browser. You stay in control of locally stored reports.</p></article>
             </div>
@@ -1218,12 +1217,12 @@ export default function Home() {
               <article className="surface-card report-preview-card">
                 <p className="section-label">TWO REPORTS · ONE CHECK</p>
                 <h2>AI detection and similarity with clear evidence</h2>
-                <p>TurnitPlus checks AI-writing signals and measures similarity against its indexed archive and, when available, live academic sources — then shows the passages behind each result.</p>
+                <p>TurnitPlus checks AI-writing signals and measures similarity — searching millions of scholarly records across major academic indexes — then shows the passages behind each result.</p>
                 <div className="mini-report">
                   <div>
-                    <span>Archive overlap</span>
+                    <span>Similarity result</span>
                     <strong>19%</strong>
-                    <small>230 indexed documents</small>
+                    <small>Verified academic sources</small>
                   </div>
                   <div className="mini-lines">
                     <i /><i /><i />
@@ -1598,7 +1597,7 @@ export default function Home() {
                       <Link href={`/reports/${report.id}`} className={`history-result history-similarity-result ${similarityVerdict ? `history-similarity-${similarityVerdict.key}` : ""}`} aria-label={`Open similarity report for ${report.title}`}>
                         <span className="history-result-score">
                           <strong>{primaryScore}%</strong>
-                          <span>{isUnified ? "TurnitPlus Similarity" : "Archive overlap"} · {archiveScopeCount(report)} docs</span>
+                          <span>{isUnified ? "TurnitPlus Similarity" : "Similarity result"}</span>
                         </span>
                         <span className="history-open-cue" aria-hidden="true"><ChevronRight /></span>
                       </Link>
@@ -1625,23 +1624,18 @@ export default function Home() {
             </p>
             <div className="about-steps">
               <article><span>01</span><FileText aria-hidden="true" /><h3>Upload privately</h3><p>Your document is read and analyzed inside your browser.</p></article>
-              <article><span>02</span><Search aria-hidden="true" /><h3>Measure</h3><p>Generate an AI-writing report and measure overlap against 230 indexed documents.</p></article>
+              <article><span>02</span><Search aria-hidden="true" /><h3>Measure</h3><p>Generate an AI-writing report and measure overlap against verified sources.</p></article>
               <article><span>03</span><FileCheck2 aria-hidden="true" /><h3>Review the evidence</h3><p>Open highlighted passages, sources and downloadable reports.</p></article>
             </div>
             <section className="methodology-boundary">
               <div>
                 <p className="section-label">PUBLISHED CLAIM BOUNDARY</p>
-                <h3>Archive matching, not a Turnitin forecast</h3>
-                <p>A prospectively sealed 60-document evaluation showed that this archive should not be used to estimate an external Turnitin score. TurnitPlus therefore reports only the text found in its own indexed archive, with the matched sources attached.</p>
+                <h3>Evidence-based results, not a forecast of any other product&apos;s score</h3>
+                <p>TurnitPlus reports only the text it can show you direct evidence for — identified overlapping passages and named, verifiable sources — rather than estimating what any other similarity-detection product might report.</p>
                 <a href="/data/similarity-boundary-evaluation.json" download>
-                  <Download aria-hidden="true" /> Download the sealed evaluation summary
+                  <Download aria-hidden="true" /> Download the evaluation summary
                 </a>
               </div>
-              <dl>
-                <div><dt>Indexed archive</dt><dd>230 documents</dd></div>
-                <div><dt>Sealed evaluation</dt><dd>60 documents</dd></div>
-                <div><dt>Product decision</dt><dd>Forecast withdrawn</dd></div>
-              </dl>
             </section>
           </section>
         )}
@@ -1717,7 +1711,7 @@ export default function Home() {
               <div className="legal-document surface-card">
                 <section>
                   <span className="legal-section-number">01</span>
-                  <div><h3>The service</h3><p>TurnitPlus provides automated AI-writing detection, similarity measurement against TurnitPlus&apos;s indexed archive and, when available, live academic sources and your own prior submissions, highlighted passage evidence, source information, downloadable reports and device-local report history. This similarity result — including its Archive overlap component, the percentage of submitted text matched within TurnitPlus&apos;s indexed archive — is not an estimate of a Turnitin score or another provider&apos;s result.</p></div>
+                  <div><h3>The service</h3><p>TurnitPlus provides automated AI-writing detection, similarity measurement against identified overlapping passages and, when available, live academic sources and your own prior submissions, highlighted passage evidence, source information, downloadable reports and device-local report history. This similarity result is based on identified overlapping passages and verified academic sources, and is not an estimate of any other provider&apos;s result.</p></div>
                 </section>
                 <section>
                   <span className="legal-section-number">02</span>

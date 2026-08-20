@@ -63,14 +63,14 @@ let riskPromise: Promise<RiskCalibration> | null = null;
 
 function loadIndex() {
   if (!indexPromise) {
-    self.postMessage({ type: "progress", progress: 36, label: "Loading the private archive" });
+    self.postMessage({ type: "progress", progress: 36, label: "Loading comparison data" });
     indexPromise = fetch("/data/document-index.meta.json", { cache: "no-store" }).then(async (response) => {
       if (!response.ok) throw new Error("The document index metadata could not be loaded.");
       const metadata = await response.json() as SearchIndexMetadata;
       if (metadata.schema !== "tplus-packed-search-index" || metadata.version !== 1) {
         throw new Error("The document index uses an unsupported schema.");
       }
-      self.postMessage({ type: "progress", progress: 45, label: "Loading the packed archive" });
+      self.postMessage({ type: "progress", progress: 45, label: "Loading reference data" });
       const assetResponses = await Promise.all(
         [metadata.assets.hashes, metadata.assets.offsets, metadata.assets.postings]
           .map((asset) => fetch(`/data/${asset}`)),
@@ -92,7 +92,7 @@ function loadIndex() {
       ) {
         throw new Error("The packed document index is incomplete.");
       }
-      self.postMessage({ type: "progress", progress: 58, label: "Archive ready" });
+      self.postMessage({ type: "progress", progress: 58, label: "Reference data ready" });
       return { ...metadata, hashes, offsets, postings };
     });
   }
@@ -266,7 +266,7 @@ async function analyze(text: string) {
     .sort((left, right) => right[1] - left[1])
     .slice(0, 6);
 
-  self.postMessage({ type: "progress", progress: 88, label: "Calculating archive overlap" });
+  self.postMessage({ type: "progress", progress: 88, label: "Calculating similarity result" });
   const score = aggregation.score;
   const scoreBand = search.scoreBands.find(
     (candidate) => score >= candidate.minimum && score <= candidate.maximum,

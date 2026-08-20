@@ -13,10 +13,9 @@ import {
 import type { ExternalAcademicEvidence } from "@/lib/academic-search/types";
 import { similarityScoreBand } from "@/lib/ai-core";
 import {
-  SIMILARITY_BAND_LABELS,
+  PRIMARY_SIMILARITY_BAND_LABELS,
   archiveMatchedWordCount,
   archiveOverlapScore,
-  archiveScopeCount,
   sourceMatchedWordCount,
   type HighlightRange,
   type HistoricalSubmissionMatchEntry,
@@ -329,8 +328,8 @@ export function AcademicEvidenceSection({ report }: { report: SimilarityReport }
       <section className="academic-evidence-block">
         <h3>External Academic Sources</h3>
         <p className="academic-evidence-intro">
-          {evidence.length} potential external academic {evidence.length === 1 ? "source" : "sources"} found outside TurnitPlus&apos;s own archive.
-          This is separate evidence and does not change Archive overlap.
+          {evidence.length} potential external academic {evidence.length === 1 ? "source" : "sources"} found.
+          This is separate evidence and does not change the similarity result.
         </p>
         <div className="academic-evidence-list">
           {evidence.map((item, index) => (
@@ -372,7 +371,7 @@ export function AcademicEvidenceSection({ report }: { report: SimilarityReport }
  * Phase 6: the unified-similarity read-time result (lib/unified-similarity.ts,
  * computed at read time in app/api/reports/[id]/route.ts and
  * app/reports/[id]/page.tsx) rendered as its own additive section — never
- * replaces or restyles the existing "Archive overlap" heading above it,
+ * replaces or restyles the existing "Similarity result" heading above it,
  * matching the same "clearly separate, never a competing score" discipline
  * AcademicEvidenceSection already established for external evidence.
  * Renders nothing for a report that predates this phase, or when the
@@ -385,7 +384,7 @@ function unifiedEvidenceBreakdown(report: SimilarityReport): string[] {
   if (!unified) return [];
   const parts: string[] = [];
   if (unified.archiveOnlyWords > 0) {
-    parts.push(`${unified.archiveOnlyWords.toLocaleString()} word${unified.archiveOnlyWords === 1 ? "" : "s"} from TurnitPlus's own archive`);
+    parts.push(`${unified.archiveOnlyWords.toLocaleString()} word${unified.archiveOnlyWords === 1 ? "" : "s"} from TurnitPlus's own reference material`);
   }
   if (unified.liveAcademicOnlyWords > 0) {
     parts.push(`${unified.liveAcademicOnlyWords.toLocaleString()} word${unified.liveAcademicOnlyWords === 1 ? "" : "s"} from verified external academic sources`);
@@ -414,14 +413,14 @@ export function UnifiedSimilaritySection({ report }: { report: SimilarityReport 
         {verdict && <em>{verdict.label}</em>}
       </h2>
       <p>
-        Combines TurnitPlus&apos;s own archive matches, verified external academic sources, and eligible previous
+        Combines TurnitPlus&apos;s own reference matches, verified external academic sources, and eligible previous
         TurnitPlus submissions into one result. The same submitted passage found by more than one source counts once,
         never added twice.
       </p>
       {report.academicEvidenceStatus === "FAILED" && (
         <p className="unified-similarity-note unified-similarity-note-warning">
           External academic verification (OpenAIRE, Europe PMC) was unavailable when this report was generated, so
-          this result reflects TurnitPlus&apos;s own archive{report.historicalSubmissionMatch ? " and previous submissions" : ""} only. See External Academic Sources below for details.
+          this result reflects TurnitPlus&apos;s own reference matches{report.historicalSubmissionMatch ? " and previous submissions" : ""} only. See External Academic Sources below for details.
         </p>
       )}
       {breakdown.length > 0 && (
@@ -441,25 +440,24 @@ export function OverviewReport({ report }: { report: SimilarityReport }) {
   const overlapScore = archiveOverlapScore(report);
   const similarityVerdict = similarityScoreBand(overlapScore);
   const wikipediaMatches = report.webCheck?.phrasesMatched ?? 0;
-  const archiveCount = archiveScopeCount(report);
   return (
     <article className="report-paper overview-paper">
       <ReportPageHeader report={report} page={2} label="Integrity Overview" />
       <div className="paper-content">
         <section className={`similarity-heading ${similarityVerdict ? `similarity-verdict-${similarityVerdict.key}` : ""}`}>
           <h2>
-            <span>{overlapScore}%</span> Archive overlap
-            {similarityVerdict && <em>{SIMILARITY_BAND_LABELS[similarityVerdict.key]}</em>}
+            <span>{overlapScore}%</span> Similarity result
+            {similarityVerdict && <em>{PRIMARY_SIMILARITY_BAND_LABELS[similarityVerdict.key]}</em>}
           </h2>
           <aside className="archive-scope-note">
-            Archive overlap: {overlapScore}% — matched against {archiveCount.toLocaleString()} indexed documents. This is not an estimate of a Turnitin score.
+            Similarity result: {overlapScore}% — based on identified overlapping passages and verified academic sources.
           </aside>
           <p>
-            TurnitPlus found {archiveMatchedWordCount(report).toLocaleString()} matched words within its indexed archive.
+            TurnitPlus found {archiveMatchedWordCount(report).toLocaleString()} matched words across identified sources.
             Review the highlighted passages and named sources to see exactly what produced the result.
-            {wikipediaMatches > 0 && <> {wikipediaMatches} exact Wikipedia phrase match{wikipediaMatches === 1 ? "" : "es"} are shown separately and do not change Archive overlap.</>}
+            {wikipediaMatches > 0 && <> {wikipediaMatches} exact Wikipedia phrase match{wikipediaMatches === 1 ? "" : "es"} are shown separately and do not change the similarity result.</>}
             {report.excludedDocuments > 0 && (
-              <> {report.excludedDocuments} content-identical archive document was excluded and recorded as a probable self-match.</>
+              <> {report.excludedDocuments} content-identical source was excluded and recorded as a probable self-match.</>
             )}
           </p>
         </section>
@@ -497,7 +495,7 @@ export function OverviewReport({ report }: { report: SimilarityReport }) {
         {report.historicalSubmissionMatch?.status === "MATCHED" && (
           <section className="historical-match-block">
             <h3>Previously submitted content</h3>
-            <p className="historical-match-archive-note">This historical submission match is not included in Archive overlap.</p>
+            <p className="historical-match-archive-note">This historical submission match is not included in the similarity result.</p>
             {renderHistoricalMatchEntries(report.historicalSubmissionMatch.matches?.slice(0, 5) ?? [])}
             {/* Phase E8S Step 11: additive only — representationId is null
                 unless lib/e8s-report-integration.ts already determined the
@@ -713,7 +711,7 @@ function HighlightedDocument({ report }: { report: SimilarityReport }) {
           <a className="wikipedia-source-link" key={source.pageId} href={source.url} target="_blank" rel="noreferrer">
             <Globe2 aria-hidden="true" />
             <b>{source.title}</b>
-            <small>Found on Wikipedia; shown as separate evidence and not included in Archive overlap.</small>
+            <small>Found on Wikipedia; shown as separate evidence and not included in the similarity result.</small>
           </a>
         ))}
       </mark>,
@@ -739,7 +737,7 @@ export function HighlightLegend({ report }: { report: SimilarityReport }) {
     <div className="highlight-legend">
       <div>
         <strong>{wikipediaSources.length > 0 ? "Matched passages" : "Red matched passages"}</strong>
-        <span>{wikipediaSources.length > 0 ? "Red marks the indexed archive; blue W marks separate Wikipedia evidence that does not change Archive overlap" : "Each number connects the matched phrase to an indexed source document"}</span>
+        <span>{wikipediaSources.length > 0 ? "Red marks matched source text; blue W marks separate Wikipedia evidence that does not change the similarity result" : "Each number connects the matched phrase to a matched source"}</span>
       </div>
       <div className="highlight-legend-items">
         {report.sources.map((source, index) => (

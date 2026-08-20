@@ -2,28 +2,48 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-test("the product reports scoped archive overlap instead of a Turnitin forecast", async () => {
+/**
+ * "Remove all user-facing references to Turnitin..." — this product no
+ * longer names Turnitin, exposes its internal archive size, or renders the
+ * word "archive" as a scoring label anywhere in normal user-facing UI,
+ * reports, or receipts. Internal benchmark/calibration material (tools/,
+ * corpus/) is explicitly exempt and untouched by this test.
+ *
+ * Supersedes this file's own earlier version, which asserted the OPPOSITE
+ * (that "Archive overlap" / "not an estimate of a Turnitin score" text was
+ * present) — that was the deliberately-changed behavior, not a regression.
+ */
+
+test("no user-facing Turnitin brand references remain in the report UI or receipt", async () => {
   const page = await readFile("app/page.tsx", "utf8");
-  // OverviewReport (and its "matched against {archiveCount} indexed
-  // documents" copy) moved to components/report/similarity-report-papers.tsx
-  // when saved reports became a routable page — see app/reports/[id].
+  const reportDetailShell = await readFile("app/reports/[id]/report-detail-shell.tsx", "utf8");
   const overviewReport = await readFile("components/report/similarity-report-papers.tsx", "utf8");
   const receipt = await readFile("lib/receipt-pdf.ts", "utf8");
-  const boundary = JSON.parse(await readFile("public/data/similarity-boundary-evaluation.json", "utf8"));
 
-  assert.match(page, /Archive overlap/);
-  assert.match(overviewReport, /matched against \{archiveCount\.toLocaleString\(\)\} indexed documents/);
-  assert.match(page, /not an estimate of a Turnitin score/i);
-  assert.doesNotMatch(page, /\$\{currentReport\.score\}% Similarity/);
-  assert.doesNotMatch(page, /Review is recommended from \{currentReport\.riskCutoff\}/);
+  for (const [label, source] of [["app/page.tsx", page], ["report-detail-shell.tsx", reportDetailShell], ["similarity-report-papers.tsx", overviewReport], ["receipt-pdf.ts", receipt]]) {
+    assert.doesNotMatch(source, /Turnitin(?!Plus)/, `${label} must not mention Turnitin by name`);
+  }
+});
 
-  assert.match(receipt, /Archive overlap/);
-  assert.match(receipt, /Archive scope/);
-  assert.match(receipt, /not an estimate of a Turnitin score/i);
-  assert.doesNotMatch(receipt, /\["Review threshold"/);
+test("no user-facing 'Archive overlap' label or exact indexed-document count remains in the report UI or receipt", async () => {
+  const page = await readFile("app/page.tsx", "utf8");
+  const reportDetailShell = await readFile("app/reports/[id]/report-detail-shell.tsx", "utf8");
+  const overviewReport = await readFile("components/report/similarity-report-papers.tsx", "utf8");
+  const receipt = await readFile("lib/receipt-pdf.ts", "utf8");
 
-  assert.equal(boundary.sampleSize, 60);
-  assert.equal(boundary.indexedDocumentCount, 230);
-  assert.equal(boundary.productDecision.forecastClaim, "withdrawn");
-  assert.equal(boundary.productDecision.externalScoreEstimate, false);
+  for (const [label, source] of [["app/page.tsx", page], ["report-detail-shell.tsx", reportDetailShell], ["similarity-report-papers.tsx", overviewReport], ["receipt-pdf.ts", receipt]]) {
+    assert.doesNotMatch(source, />Archive overlap<|"Archive overlap"|Archive overlap:/, `${label} must not render the "Archive overlap" label`);
+    assert.doesNotMatch(source, /\b230\b/, `${label} must not render the exact indexed-document count`);
+    assert.doesNotMatch(source, /indexed documents|indexed archive/i, `${label} must not describe the internal archive/indexing mechanism`);
+  }
+});
+
+test("the report card renders the neutral 'Similarity result' banner instead of the old archive-scope disclaimer", async () => {
+  const overviewReport = await readFile("components/report/similarity-report-papers.tsx", "utf8");
+  assert.match(overviewReport, /Similarity result: \{overlapScore\}% — based on identified overlapping passages and verified academic sources\./);
+});
+
+test("external coverage messaging uses the approved 'millions of scholarly records' wording, never a specific unverified count", async () => {
+  const page = await readFile("app/page.tsx", "utf8");
+  assert.match(page, /Searches millions of scholarly records across major academic indexes|searching millions of scholarly records across major academic indexes/);
 });
