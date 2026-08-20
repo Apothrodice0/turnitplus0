@@ -1,7 +1,9 @@
 import { NextResponse } from 'next/server';
 import { getReportsDbClient } from '../../../../lib/reports-db';
-import { checkRate } from '../../../../lib/rate-limit';
-import { getSessionUser } from '../../../../lib/auth-session';
+import { checkRate, checkAuthRate } from '../../../../lib/rate-limit';
+import { getSessionUser, clearSessionCookie } from '../../../../lib/auth-session';
+import { verifyPassword } from '../../../../lib/auth-crypto';
+import { deleteAccountData, invalidateSessionsAndDeleteUser, ACCOUNT_DELETION_CONFIRMATION_PHRASE } from '../../../../lib/account-deletion';
 
 export const dynamic = 'force-dynamic';
 
@@ -103,6 +105,78 @@ export async function PATCH(request: Request) {
         JSON.stringify({ user: { username: trimmedUsername, email: normalizedEmail, corpusReuseConsent: resolvedConsent } }),
         { status: 200, headers: { 'Content-Type': 'application/json' } },
       );
+    } finally {
+      client.close();
+    }
+  } catch (err) {
+    return new NextResponse(JSON.stringify({ error: err instanceof Error ? err.message : 'Internal error' }), { status: 500 });
+  }
+}
+
+// Account deletion (production audit fix — no such endpoint existed before
+// this). checkAuthRate (the stricter, 5/min bucket), not checkRate: this
+// endpoint verifies a password like login/signup do, making it the same
+// class of brute-force/enumeration target — see lib/rate-limit.ts's own
+// comment on why those two get the tighter limit.
+export async function DELETE(request: Request) {
+  try {
+    const rate = await checkAuthRate(clientIpFrom(request));
+    if (!rate.allowed) {
+      return new NextResponse(JSON.stringify({ error: 'Too many requests' }), { status: 429, headers: { 'Retry-After': String(rate.retryAfter) } });
+    }
+
+    const body = await request.json().catch(() => null);
+    if (!body || typeof body !== 'object') return new NextResponse(JSON.stringify({ error: 'Invalid JSON' }), { status: 400 });
+
+    const { password, confirm } = body as Record<string, unknown>;
+
+    // Explicit confirmation, checked server-side regardless of what the UI
+    // already enforced — a second, deliberate signal alongside the password
+    // itself (see lib/account-deletion.ts's own comment on why this exists
+    // as a literal phrase rather than a bare boolean, which a buggy client
+    // could send unintentionally as `true`).
+    if (confirm !== ACCOUNT_DELETION_CONFIRMATION_PHRASE) {
+      return new NextResponse(JSON.stringify({ error: `Confirmation phrase must be exactly "${ACCOUNT_DELETION_CONFIRMATION_PHRASE}".` }), { status: 400 });
+    }
+    if (!isNonEmptyString(password)) {
+      return new NextResponse(JSON.stringify({ error: 'Password is required.' }), { status: 400 });
+    }
+
+    const client = await getReportsDbClient();
+    try {
+      const sessionUser = await getSessionUser(request, client);
+      if (!sessionUser) {
+        return new NextResponse(JSON.stringify({ error: 'Not signed in.' }), { status: 401 });
+      }
+
+      // Password re-entry: every account in this product is password-
+      // authenticated today (no OAuth/SSO exists), so this check always
+      // applies. Re-fetched here rather than trusted from the session,
+      // exactly like login's own verifyPassword call — SessionUser never
+      // carries password_hash.
+      const userRow = await client.execute({ sql: 'SELECT password_hash FROM users WHERE id = ?', args: [sessionUser.id] });
+      const passwordHash = (userRow.rows[0] as unknown as { password_hash: string } | undefined)?.password_hash;
+      if (!passwordHash || !(await verifyPassword(password, passwordHash))) {
+        return new NextResponse(JSON.stringify({ error: 'Incorrect password.' }), { status: 401 });
+      }
+
+      // Dependent cleanup first (this user's own reports + document
+      // identity/shingle/family/corpus data, preserving anything still
+      // referenced by another account — see lib/account-deletion.ts's own
+      // header comment), THEN the account itself, only once that succeeds.
+      // Both steps are independently safe to retry (see that file's own
+      // comment) — a request that fails partway and is retried with the
+      // same still-valid session simply resumes and completes.
+      await deleteAccountData(client, sessionUser.id);
+      await invalidateSessionsAndDeleteUser(client, sessionUser.id);
+
+      // Deliberately just {ok:true} — no counts, no per-item results. This
+      // account's own data is gone either way; returning e.g. "N documents
+      // were kept because another account still references them" would leak
+      // a cross-account signal (see this route's own requirement docs).
+      const response = new NextResponse(JSON.stringify({ ok: true }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      clearSessionCookie(response);
+      return response;
     } finally {
       client.close();
     }

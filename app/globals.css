@@ -1329,6 +1329,68 @@ main.report-main {
   color: #934454;
 }
 
+.account-danger-zone {
+  margin-top: 26px;
+  padding-top: 22px;
+  border-top: 1px solid var(--line);
+}
+
+.account-danger-zone-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.account-danger-zone-header > div {
+  display: grid;
+  gap: 4px;
+  margin-right: auto;
+}
+
+.account-danger-zone-header strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.account-danger-zone-header span {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.account-delete-toggle {
+  white-space: nowrap;
+  color: #934454;
+}
+
+.account-delete-form {
+  display: grid;
+  gap: 16px;
+  margin-top: 18px;
+  padding: 20px;
+  border: 1px solid rgba(232, 79, 99, 0.3);
+  border-radius: 15px;
+  background: rgba(232, 79, 99, 0.04);
+  animation: account-editor-in 220ms ease-out both;
+}
+
+.account-delete-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 0;
+  color: #934454;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.6;
+}
+
+.account-delete-warning svg {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  margin-top: 1px;
+}
+
 .subscription-preview-card {
   display: grid;
   grid-template-columns: minmax(0, 1.25fr) minmax(250px, 0.75fr);
@@ -1830,6 +1892,16 @@ main.report-main {
   background: #f7f9fa;
   color: #43525a;
   box-shadow: none;
+}
+
+.button.danger {
+  background: linear-gradient(135deg, #e15468, #c5384c);
+  color: white;
+  box-shadow: 0 9px 20px rgba(200, 56, 76, 0.22);
+}
+
+.button.danger:hover {
+  box-shadow: 0 12px 24px rgba(200, 56, 76, 0.28);
 }
 
 .button.full {
@@ -5714,6 +5786,14 @@ main.report-main {
   .account-edit-actions {
     display: grid;
     grid-template-columns: 1fr 1fr;
+  }
+
+  .account-danger-zone-header {
+    flex-wrap: wrap;
+  }
+
+  .account-delete-toggle {
+    width: 100%;
   }
 
   .account-page-grid {

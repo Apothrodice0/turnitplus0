@@ -25,6 +25,8 @@ import {
   Search,
   Save,
   ShieldCheck,
+  TriangleAlert,
+  Trash2,
   UploadCloud,
   UserRound,
   UserPlus,
@@ -77,6 +79,12 @@ const useIsomorphicLayoutEffect = typeof window === "undefined" ? useEffect : us
 
 type View = "home" | "dashboard" | "reports" | "about" | "account" | "welcome" | "legal" | "processing";
 type AuthMode = "login" | "signup";
+
+// Must match lib/account-deletion.ts's ACCOUNT_DELETION_CONFIRMATION_PHRASE
+// exactly. Duplicated here rather than imported: that file pulls in
+// @libsql/client, a Node-only dependency that must never reach this
+// client-side bundle.
+const ACCOUNT_DELETION_CONFIRMATION_PHRASE = "DELETE MY ACCOUNT";
 type LegalTab = "privacy" | "terms";
 type LocalAccount = { username: string; email: string; corpusReuseConsent: boolean };
 
@@ -422,6 +430,9 @@ export default function Home() {
   const [account, setAccount] = useState<LocalAccount | null>(null);
   const [accountLoaded, setAccountLoaded] = useState(false);
   const [isEditingProfile, setIsEditingProfile] = useState(false);
+  const [isDeletingAccount, setIsDeletingAccount] = useState(false);
+  const [isSubmittingDeletion, setIsSubmittingDeletion] = useState(false);
+  const [deleteAccountError, setDeleteAccountError] = useState<string | null>(null);
   const [isAuthenticating, setIsAuthenticating] = useState(false);
   const [authProgress, setAuthProgress] = useState(0);
   const [authLoadingLabel, setAuthLoadingLabel] = useState("Preparing your sign-in");
@@ -675,6 +686,67 @@ export default function Home() {
     setAccount(result.user as LocalAccount);
     setIsEditingProfile(false);
     notify("Your account information has been updated.");
+  }
+
+  // The account and every one of its sessions are already gone server-side
+  // by the time this runs (DELETE /api/auth/me only returns 200 after both
+  // succeed), so this just clears local state and returns to the logged-out
+  // account view — unlike signOutAccount, there is no separate logout call
+  // to make and nothing remote left to keep in sync with.
+  function completeAccountDeletion() {
+    setReports([]);
+    setCurrentReport(null);
+    setAccount(null);
+    setIsEditingProfile(false);
+    setIsDeletingAccount(false);
+    setDeleteAccountError(null);
+    setIsSubmittingDeletion(false);
+    setAuthMode("login");
+    setWelcomeMode(null);
+    window.history.replaceState({ turnitPlusView: "account" }, "", VIEW_HASH.account);
+    setView("account");
+    notify("Your account has been permanently deleted.");
+  }
+
+  async function submitAccountDeletion(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!account || isSubmittingDeletion) return;
+    const data = new FormData(event.currentTarget);
+    const password = String(data.get("deletePassword") ?? "");
+    const confirm = String(data.get("deleteConfirm") ?? "");
+
+    if (confirm !== ACCOUNT_DELETION_CONFIRMATION_PHRASE) {
+      setDeleteAccountError(`Type "${ACCOUNT_DELETION_CONFIRMATION_PHRASE}" exactly to confirm.`);
+      return;
+    }
+    if (!password) {
+      setDeleteAccountError("Enter your password to confirm.");
+      return;
+    }
+
+    setDeleteAccountError(null);
+    setIsSubmittingDeletion(true);
+    let response: Response;
+    try {
+      response = await fetch("/api/auth/me", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password, confirm }),
+      });
+    } catch {
+      setDeleteAccountError("Could not reach TurnitPlus. Check your connection and try again.");
+      setIsSubmittingDeletion(false);
+      return;
+    }
+
+    if (!response.ok) {
+      const result = (await response.json().catch(() => null)) as { error?: string } | null;
+      setDeleteAccountError((result && typeof result.error === "string" && result.error) || "Could not delete your account. Try again.");
+      setIsSubmittingDeletion(false);
+      return;
+    }
+
+    completeAccountDeletion();
   }
 
   function navigate(nextView: View) {
@@ -1334,6 +1406,60 @@ export default function Home() {
                     </button>
                   </div>
                   <p className="auth-preview-note"><LockKeyhole aria-hidden="true" /> Documents are analyzed in your browser and never uploaded. Your report history is saved securely so you can reach it from any device you sign in on.</p>
+
+                  <div className="account-danger-zone">
+                    <div className="account-danger-zone-header">
+                      <div>
+                        <strong>Delete account</strong>
+                        <span>Permanently delete your account and your saved reports. This cannot be undone.</span>
+                      </div>
+                      <button
+                        className="button subtle account-delete-toggle"
+                        type="button"
+                        onClick={() => {
+                          setIsDeletingAccount((open) => !open);
+                          setDeleteAccountError(null);
+                        }}
+                      >
+                        <Trash2 aria-hidden="true" /> {isDeletingAccount ? "Cancel" : "Delete account"}
+                      </button>
+                    </div>
+                    {isDeletingAccount && (
+                      <form className="account-delete-form" onSubmit={submitAccountDeletion}>
+                        <p className="account-delete-warning">
+                          <TriangleAlert aria-hidden="true" />
+                          This will permanently delete your account, sign you out of every device, and remove your saved reports. This action cannot be undone.
+                        </p>
+                        <div className="account-edit-fields">
+                          <label>
+                            <span>Confirm your password</span>
+                            <input name="deletePassword" type="password" autoComplete="current-password" required disabled={isSubmittingDeletion} />
+                          </label>
+                          <label>
+                            <span>Type &ldquo;{ACCOUNT_DELETION_CONFIRMATION_PHRASE}&rdquo; to confirm</span>
+                            <input name="deleteConfirm" type="text" autoComplete="off" required disabled={isSubmittingDeletion} />
+                          </label>
+                        </div>
+                        {deleteAccountError && <p className="auth-form-error" role="alert">{deleteAccountError}</p>}
+                        <div className="account-edit-actions">
+                          <button
+                            className="button subtle"
+                            type="button"
+                            disabled={isSubmittingDeletion}
+                            onClick={() => {
+                              setIsDeletingAccount(false);
+                              setDeleteAccountError(null);
+                            }}
+                          >
+                            Cancel
+                          </button>
+                          <button className="button danger" type="submit" disabled={isSubmittingDeletion}>
+                            <Trash2 aria-hidden="true" /> {isSubmittingDeletion ? "Deleting account…" : "Permanently delete my account"}
+                          </button>
+                        </div>
+                      </form>
+                    )}
+                  </div>
                 </div>
 
                 <section className="subscription-preview-card surface-card" aria-labelledby="unlimited-plan-title">
