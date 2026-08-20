@@ -29,7 +29,7 @@ const pdfPath = process.argv[3];
 
 if (withPolyfill) {
   const { ensurePdfjsNodePolyfills } = await import("../../lib/pdfjs-node-polyfill.ts");
-  ensurePdfjsNodePolyfills();
+  await ensurePdfjsNodePolyfills();
 }
 
 try {

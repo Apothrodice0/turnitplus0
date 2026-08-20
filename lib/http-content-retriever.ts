@@ -74,7 +74,7 @@ export const DEFAULT_HTTP_CONTENT_RETRIEVER_CONFIG: HttpContentRetrieverConfig =
  * cap already applied to every other content type by retrieve() below.
  */
 async function loadPdfjsDocument(bytes: Uint8Array): Promise<PdfTextDocument> {
-  ensurePdfjsNodePolyfills();
+  await ensurePdfjsNodePolyfills();
   const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
   const document = await pdfjs.getDocument({ data: bytes }).promise;
   return document as unknown as PdfTextDocument;

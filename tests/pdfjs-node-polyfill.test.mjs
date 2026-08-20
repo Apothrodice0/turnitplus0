@@ -17,12 +17,12 @@ const execFileAsync = promisify(execFile);
  * failing with MALFORMED_CONTENT / "DOMMatrix is not defined".
  */
 
-test("UNIT: ensurePdfjsNodePolyfills defines globalThis.DOMMatrix when absent", () => {
+test("UNIT: ensurePdfjsNodePolyfills defines globalThis.DOMMatrix when absent", async () => {
   const original = globalThis.DOMMatrix;
   // @ts-expect-error deliberately removing a global for the test
   delete globalThis.DOMMatrix;
   try {
-    ensurePdfjsNodePolyfills();
+    await ensurePdfjsNodePolyfills();
     assert.notEqual(typeof globalThis.DOMMatrix, "undefined");
   } finally {
     if (original === undefined) {
@@ -34,13 +34,13 @@ test("UNIT: ensurePdfjsNodePolyfills defines globalThis.DOMMatrix when absent", 
   }
 });
 
-test("UNIT: ensurePdfjsNodePolyfills never overwrites an existing DOMMatrix (e.g. a real browser global)", () => {
+test("UNIT: ensurePdfjsNodePolyfills never overwrites an existing DOMMatrix (e.g. a real browser global)", async () => {
   const original = globalThis.DOMMatrix;
   function SentinelDOMMatrix() {}
   // @ts-expect-error assigning a test sentinel, not a real DOMMatrix
   globalThis.DOMMatrix = SentinelDOMMatrix;
   try {
-    ensurePdfjsNodePolyfills();
+    await ensurePdfjsNodePolyfills();
     assert.equal(globalThis.DOMMatrix, SentinelDOMMatrix);
   } finally {
     if (original === undefined) {

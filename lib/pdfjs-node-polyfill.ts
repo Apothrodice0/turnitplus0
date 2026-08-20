@@ -57,9 +57,62 @@ import DOMMatrixPolyfill from "dommatrix";
  * (currently lib/http-content-retriever.ts and lib/e7-asjp-client.ts) —
  * a single shared function rather than duplicating this polyfill logic
  * (or, worse, forgetting it) at each new call site.
+ *
+ * SECOND, SEPARATE fix bundled into this same shared function ("proceed
+ * with the corrected globalThis.pdfjsWorker fix" investigation): a real,
+ * confirmed-live Vercel production crash distinct from the DOMMatrix one
+ * above — candidate PDF retrieval failed with MALFORMED_CONTENT /
+ * "Setting up fake worker failed: Cannot find module '.../pdf.worker.mjs'"
+ * for real academic-search candidates, discovered via a temporary
+ * production diagnostic probe (removed once this investigation concluded).
+ *
+ * ROOT CAUSE, confirmed by reading pdfjs-dist's own source
+ * (pdf.mjs's PDFWorker class): in Node.js, PDFWorker unconditionally takes
+ * its "fake worker" path (never attempts a real Worker at all), and that
+ * path's loader does `await import(this.workerSrc)` — a RUNTIME,
+ * string-path dynamic import for "./pdf.worker.mjs" — UNLESS
+ * `globalThis.pdfjsWorker?.WorkerMessageHandler` is already set, in which
+ * case that dynamic import is never reached. `useWorkerFetch`/
+ * `isEvalSupported` getDocument() options do NOT affect this path at all
+ * (they only configure font/CMap/wasm fetching inside an already-running
+ * worker) — disproven empirically by
+ * tests/pdfjs-missing-worker-regression.test.mjs before this fix was
+ * written, not assumed.
+ *
+ * FIX: statically import pdf.worker.mjs's own WorkerMessageHandler export
+ * ourselves and assign it to globalThis.pdfjsWorker before pdfjs-dist's
+ * main module is ever imported. This has two effects: (1) pdfjs's own
+ * #mainThreadWorkerMessageHandler check short-circuits before the broken
+ * dynamic import ever runs; (2) because this is a STATIC import in our own
+ * application code (not a runtime string-path import inside a third-party
+ * bundle), Vercel's serverless file tracer can see it and includes
+ * pdf.worker.mjs in the deployed bundle — the actual reason it was missing
+ * in the first place. Confirmed live: reproduced the exact Vercel failure
+ * against an isolated copy of pdf.mjs with no pdf.worker.mjs alongside it,
+ * and confirmed this fix alone (no useWorkerFetch/isEvalSupported) is
+ * sufficient for real PDF text extraction to succeed even then.
+ *
+ * Deliberately async (the caller now awaits ensurePdfjsNodePolyfills()) —
+ * the worker module import must complete before pdfjs-dist's own main
+ * module is imported, or the #mainThreadWorkerMessageHandler check would
+ * run before globalThis.pdfjsWorker is set.
  */
-export function ensurePdfjsNodePolyfills(): void {
+declare global {
+  // eslint-disable-next-line no-var
+  var pdfjsWorker: { WorkerMessageHandler: unknown } | undefined;
+}
+
+let workerHandlerReady: Promise<void> | null = null;
+
+export async function ensurePdfjsNodePolyfills(): Promise<void> {
   if (typeof globalThis.DOMMatrix === "undefined") {
     globalThis.DOMMatrix = DOMMatrixPolyfill as unknown as typeof DOMMatrix;
+  }
+
+  if (!globalThis.pdfjsWorker) {
+    workerHandlerReady ??= import("pdfjs-dist/legacy/build/pdf.worker.mjs").then(({ WorkerMessageHandler }) => {
+      globalThis.pdfjsWorker = { WorkerMessageHandler };
+    });
+    await workerHandlerReady;
   }
 }

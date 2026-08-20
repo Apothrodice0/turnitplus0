@@ -128,7 +128,7 @@ export function createLiveAsjpTransport(): AsjpTransport {
 
 /** Reuses lib/pdf-text-extraction.ts's shared contract — the same one tools/reextract-ai-negatives-pdfjs.ts already uses. */
 export async function extractTextFromPdfBytes(bytes: Uint8Array): Promise<string> {
-  ensurePdfjsNodePolyfills();
+  await ensurePdfjsNodePolyfills();
   const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
   const document = await pdfjs.getDocument({ data: bytes }).promise;
   return extractPdfTextDocument(document);
