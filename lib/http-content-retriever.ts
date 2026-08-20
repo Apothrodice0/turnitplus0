@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { canonicalSha256 } from "./document-identity";
 import { extractCitationPdfUrl, extractTextFromHtml, HTML_EXTRACTOR_VERSION } from "./html-text-extraction";
 import { extractPdfTextDocument, PDF_EXTRACTOR_VERSION, type PdfTextDocument } from "./pdf-text-extraction";
+import { ensurePdfjsNodePolyfills } from "./pdfjs-node-polyfill";
 import {
   DEFAULT_RETRIEVAL_SAFETY_CONFIG,
   validateUrlForRetrieval,
@@ -73,6 +74,7 @@ export const DEFAULT_HTTP_CONTENT_RETRIEVER_CONFIG: HttpContentRetrieverConfig =
  * cap already applied to every other content type by retrieve() below.
  */
 async function loadPdfjsDocument(bytes: Uint8Array): Promise<PdfTextDocument> {
+  ensurePdfjsNodePolyfills();
   const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
   const document = await pdfjs.getDocument({ data: bytes }).promise;
   return document as unknown as PdfTextDocument;

@@ -25,6 +25,7 @@
  * structural checks (mirroring every prior E7 phase's own convention).
  */
 import { extractPdfTextDocument } from "./pdf-text-extraction";
+import { ensurePdfjsNodePolyfills } from "./pdfjs-node-polyfill";
 import { computeDocumentCorrespondence, DEFAULT_DOCUMENT_CORRESPONDENCE_THRESHOLDS, type DocumentCorrespondenceResult } from "./document-correspondence";
 import {
   ASJP_ADVANCED_SEARCH_ACTION_URL,
@@ -127,6 +128,7 @@ export function createLiveAsjpTransport(): AsjpTransport {
 
 /** Reuses lib/pdf-text-extraction.ts's shared contract — the same one tools/reextract-ai-negatives-pdfjs.ts already uses. */
 export async function extractTextFromPdfBytes(bytes: Uint8Array): Promise<string> {
+  ensurePdfjsNodePolyfills();
   const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
   const document = await pdfjs.getDocument({ data: bytes }).promise;
   return extractPdfTextDocument(document);
