@@ -19,12 +19,22 @@ import { withRequestControl, createInMemoryAcademicSearchCache, createAcademicSe
  * ever recorded for it). tests/pdf-docx-extraction-parity.test.mjs-style
  * real-fixture coverage for this exact scenario lives in
  * tests/academic-search-live-regression.test.mjs (opt-in, real network).
+ *
+ * "Investigate two production issues" ISSUE 1: phrase-extractor.ts gained
+ * one more query type since the above was written — topicOnlyQueryCount
+ * (1 by default, appended last, after the keyword queries — see
+ * extractCandidatePhrases's own ordering). The worst-case query count is
+ * now 20 + 3 + 1 = 24, not 23; the numbers below are updated accordingly
+ * so this test keeps proving the real, current worst case rather than a
+ * stale one.
  */
 
 test("DISCOVERY_BUDGET_LIMIT covers the phrase extractor's own documented worst-case query count against both providers", () => {
-  const maxPossibleQueries = DEFAULT_PHRASE_EXTRACTION_CONFIG.maxQueries + DEFAULT_PHRASE_EXTRACTION_CONFIG.keywordQueryCount;
+  const maxPossibleQueries = DEFAULT_PHRASE_EXTRACTION_CONFIG.maxQueries
+    + DEFAULT_PHRASE_EXTRACTION_CONFIG.keywordQueryCount
+    + DEFAULT_PHRASE_EXTRACTION_CONFIG.topicOnlyQueryCount;
   const maxPossibleAttempts = maxPossibleQueries * 2; // OpenAIRE + Europe PMC
-  assert.equal(maxPossibleAttempts, 46, "sanity: documents the exact real-world number this investigation found (23 queries x 2 providers)");
+  assert.equal(maxPossibleAttempts, 48, "sanity: documents the exact real-world number this investigation found (24 queries x 2 providers)");
   assert.equal(DISCOVERY_BUDGET_LIMIT, maxPossibleAttempts, "the budget must be derived from, and cover, the documented maximum — not a smaller independently-guessed number");
 });
 
@@ -50,15 +60,15 @@ async function driveSearchAttempts(queryCount, providerCount, budgetLimit) {
     // layer, which is a SEPARATE mechanism from the budget and would
     // otherwise mask starvation by serving a cached (empty) result instead
     // of ever calling search() again — exactly what a real submission's
-    // distinct sentence/keyword queries already guarantee.
-    const query = { queryText: `distinct query text number ${queryIndex}`, rank: queryIndex, sourcePassage: "", queryType: queryIndex >= queryCount - 3 ? "keyword" : "sentence" };
+    // distinct sentence/keyword/topic-only queries already guarantee.
+    const query = { queryText: `distinct query text number ${queryIndex}`, rank: queryIndex, sourcePassage: "", queryType: queryIndex >= queryCount - 4 ? "keyword" : "sentence" };
     for (const provider of providers) await provider.search(query);
   }
   return seenByProvider;
 }
 
 test("REGRESSION: a budget sized to (queries x providers) lets every attempt reach every provider — none silently starved", async () => {
-  const queryCount = 23;
+  const queryCount = 24;
   const providerCount = 2;
   const seen = await driveSearchAttempts(queryCount, providerCount, queryCount * providerCount);
   for (const providerSeen of seen) {
@@ -66,15 +76,15 @@ test("REGRESSION: a budget sized to (queries x providers) lets every attempt rea
   }
 });
 
-test("DEMONSTRATION: the OLD 40-unit budget silently starved the tail queries (queued last — the keyword-type ones in the real pipeline) for this exact 23-query x 2-provider load", async () => {
-  const queryCount = 23;
+test("DEMONSTRATION: the OLD 40-unit budget silently starved the tail queries (queued last — the keyword and topic-only queries in the real pipeline) for this exact 24-query x 2-provider load", async () => {
+  const queryCount = 24;
   const providerCount = 2;
   const OLD_BUDGET_VALUE = 40;
   const seen = await driveSearchAttempts(queryCount, providerCount, OLD_BUDGET_VALUE);
 
   const totalSeen = seen.reduce((sum, providerSeen) => sum + providerSeen.length, 0);
   const totalAttempted = queryCount * providerCount;
-  assert.equal(totalAttempted, 46);
+  assert.equal(totalAttempted, 48);
   assert.ok(totalSeen < totalAttempted, `documents the exact regression: only ${totalSeen} of ${totalAttempted} attempts reached a provider under the old budget`);
-  assert.equal(totalAttempted - totalSeen, 6, "exactly the 3 keyword queries x 2 providers that this investigation found silently missing");
+  assert.equal(totalAttempted - totalSeen, 8, "exactly the 3 keyword queries + 1 topic-only query x 2 providers that this investigation found silently missing");
 });

@@ -5,6 +5,7 @@ import mammoth from "mammoth";
 import { comparisonText, tokens } from "../lib/similarity-core.ts";
 import { eligibleAiText, eligibleAiWordCount } from "../lib/ai-core.ts";
 import { extractPdfTextDocument } from "../lib/pdf-text-extraction.ts";
+import { extractDocxTextDocument } from "../lib/docx-text-extraction.ts";
 import { normalizeExtractedText } from "../lib/extracted-text-normalization.ts";
 
 /**
@@ -51,8 +52,12 @@ async function extractRealPdfText() {
 
 async function extractRealDocxText() {
   const buffer = await readFile(DOCX_PATH);
-  const result = await mammoth.extractRawText({ buffer });
-  return normalizeExtractedText(result.value);
+  // "Investigate two production issues" ISSUE 2: convertToHtml (via
+  // extractDocxTextDocument), not extractRawText — see lib/docx-text-
+  // extraction.ts's own header comment for why extractRawText() silently
+  // drops any real Word footnote/endnote content.
+  const text = await extractDocxTextDocument(mammoth.convertToHtml, { buffer });
+  return normalizeExtractedText(text);
 }
 
 test("REAL FIXTURES: both the real PDF and the real-content DOCX of the same article successfully extract non-trivial text", async () => {

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { canonicalSha256 } from "./document-identity";
-import { extractTextFromHtml, HTML_EXTRACTOR_VERSION } from "./html-text-extraction";
+import { extractCitationPdfUrl, extractTextFromHtml, HTML_EXTRACTOR_VERSION } from "./html-text-extraction";
 import { extractPdfTextDocument, PDF_EXTRACTOR_VERSION, type PdfTextDocument } from "./pdf-text-extraction";
 import {
   DEFAULT_RETRIEVAL_SAFETY_CONFIG,
@@ -155,6 +155,7 @@ export function createHttpContentRetriever(config: Partial<HttpContentRetrieverC
     async retrieve({ url }) {
       let currentUrl = url;
       let redirectCount = 0;
+      let citationPdfFollowed = false;
 
       while (true) {
         const safety = await validateUrlForRetrieval(currentUrl, resolved.safety, resolved.lookup);
@@ -248,6 +249,31 @@ export function createHttpContentRetriever(config: Partial<HttpContentRetrieverC
           if (!decoded.includes("<")) {
             return makeResult(url, "MALFORMED_CONTENT", { finalUrl: currentUrl, httpStatus: response.status, contentType, errorMessage: "response claimed text/html but contained no markup" });
           }
+
+          // "Investigate two production issues" ISSUE 1: an HTML page that
+          // itself advertises a citation_pdf_url meta tag (see
+          // extractCitationPdfUrl's own comment) is, by definition, not the
+          // full article itself — it is a landing page pointing at one. Only
+          // attempted for a caller that already opted into PDF handling
+          // (allowedContentTypes includes "application/pdf" — today, only
+          // academic-search's own retriever, see text-retriever.ts's own
+          // header comment on why PDF support is a scoped opt-in, not a
+          // change to every existing HTML-only caller of this shared
+          // retriever), and at most once per retrieve() call — reuses the
+          // SAME redirect loop/safety validation as an HTTP redirect, since
+          // it is the same kind of "the real content lives at this other
+          // URL" signal, just discovered from page content instead of a
+          // response header.
+          if (resolved.allowedContentTypes.includes("application/pdf") && !citationPdfFollowed) {
+            const pdfUrl = extractCitationPdfUrl(decoded);
+            const pdfTarget = pdfUrl ? resolveRedirectTarget(pdfUrl, currentUrl) : null;
+            if (pdfTarget && pdfTarget !== currentUrl) {
+              citationPdfFollowed = true;
+              currentUrl = pdfTarget;
+              continue;
+            }
+          }
+
           extracted = extractTextFromHtml(decoded);
           extractorVersion = HTML_EXTRACTOR_VERSION;
         }

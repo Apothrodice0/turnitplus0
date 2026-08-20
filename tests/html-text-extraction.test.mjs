@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { extractTextFromHtml, HTML_EXTRACTOR_VERSION } from "../lib/html-text-extraction.ts";
+import { extractCitationPdfUrl, extractTextFromHtml, HTML_EXTRACTOR_VERSION } from "../lib/html-text-extraction.ts";
 
 test("extracts plain visible text from simple HTML", () => {
   const html = "<html><body><h1>Title</h1><p>Some visible paragraph text.</p></body></html>";
@@ -91,4 +91,34 @@ test("empty input produces empty output without throwing", () => {
 test("HTML_EXTRACTOR_VERSION is a stable, non-empty identifier", () => {
   assert.equal(typeof HTML_EXTRACTOR_VERSION, "string");
   assert.ok(HTML_EXTRACTOR_VERSION.length > 0);
+});
+
+// --- "Investigate two production issues" ISSUE 1: extractCitationPdfUrl ---
+
+test("extractCitationPdfUrl finds a real, name-before-content citation_pdf_url meta tag", () => {
+  // Exact attribute order captured live from a real episciences.org landing
+  // page during this investigation (see http-content-retriever.ts's own
+  // comment on why this matters): name="citation_pdf_url" content="...".
+  const html = '<html><head><meta name="citation_pdf_url" content="https://example.org/articles/15337/pdf" ></head><body>Abstract text.</body></html>';
+  assert.equal(extractCitationPdfUrl(html), "https://example.org/articles/15337/pdf");
+});
+
+test("extractCitationPdfUrl also finds a content-before-name ordering", () => {
+  const html = '<meta content="https://example.org/paper.pdf" name="citation_pdf_url">';
+  assert.equal(extractCitationPdfUrl(html), "https://example.org/paper.pdf");
+});
+
+test("extractCitationPdfUrl returns null when the tag is absent", () => {
+  const html = '<html><head><meta name="citation_title" content="A Paper"></head><body>Text</body></html>';
+  assert.equal(extractCitationPdfUrl(html), null);
+});
+
+test("extractCitationPdfUrl returns null for empty/malformed input without throwing", () => {
+  assert.equal(extractCitationPdfUrl(""), null);
+  assert.doesNotThrow(() => extractCitationPdfUrl("<meta name=citation_pdf_url>"));
+});
+
+test("extractCitationPdfUrl does not match an unrelated citation_ meta tag with a similar name", () => {
+  const html = '<meta name="citation_pdf_url_alternate" content="https://example.org/should-not-match">';
+  assert.equal(extractCitationPdfUrl(html), null);
 });

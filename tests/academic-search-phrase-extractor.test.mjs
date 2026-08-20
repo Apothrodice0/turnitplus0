@@ -34,9 +34,10 @@ test("caps output at maxQueries plus keywordQueryCount even for a document with 
   );
   const queries = extractCandidatePhrases(sentences.join(" "));
   // Phase 5: total bound is now maxQueries sentence-based queries PLUS up to
-  // keywordQueryCount companion keyword queries (see extractKeywordQueries) —
-  // still a small, fixed, deterministic bound, never proportional to document length.
-  assert.ok(queries.length <= DEFAULT_PHRASE_EXTRACTION_CONFIG.maxQueries + DEFAULT_PHRASE_EXTRACTION_CONFIG.keywordQueryCount);
+  // keywordQueryCount companion keyword queries (see extractKeywordQueries)
+  // PLUS up to topicOnlyQueryCount topic-only queries (ISSUE 1) — still a
+  // small, fixed, deterministic bound, never proportional to document length.
+  assert.ok(queries.length <= DEFAULT_PHRASE_EXTRACTION_CONFIG.maxQueries + DEFAULT_PHRASE_EXTRACTION_CONFIG.keywordQueryCount + DEFAULT_PHRASE_EXTRACTION_CONFIG.topicOnlyQueryCount);
   assert.ok(queries.length >= DEFAULT_PHRASE_EXTRACTION_CONFIG.minQueries, "a long, uniformly distinctive document should reach the target minimum");
 });
 
@@ -76,5 +77,5 @@ test("never exceeds ~20 sentence queries plus a small fixed keyword-query additi
     (_, i) => `Sentence ${i} contains reasonably unique technical vocabulary about biochemistry synthesis pathways.`,
   ).join(" ");
   const queries = extractCandidatePhrases(paragraph);
-  assert.ok(queries.length <= 20 + DEFAULT_PHRASE_EXTRACTION_CONFIG.keywordQueryCount);
+  assert.ok(queries.length <= 20 + DEFAULT_PHRASE_EXTRACTION_CONFIG.keywordQueryCount + DEFAULT_PHRASE_EXTRACTION_CONFIG.topicOnlyQueryCount);
 });

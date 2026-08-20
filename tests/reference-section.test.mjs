@@ -70,3 +70,25 @@ test("empty input never throws", () => {
   assert.equal(findReferenceSectionStart(""), -1);
   assert.equal(stripReferenceSection(""), "");
 });
+
+// --- "Investigate two production issues" ISSUE 2 ---
+
+test("LETTERED CATEGORIES: a reference list grouped by type (\"A. Books\", \"B. Theses\", ...) with semicolon-delimited years is detected", () => {
+  // Modeled on a real production case (categorized bibliography, non-
+  // parenthetical "Author, Title, Publisher; Year." citation style) that
+  // slipped past both the numbered-marker and the parenthetical-year
+  // checks — see looksLikeReferenceListStart's own comment.
+  const text = "This concludes the discussion.\n\nREFERENCES\n\nA. Books\n\nSmith, J. General Studies, Example Press, City; 2014.\n\nB. Theses\n\nDoe, A. A Comparative Analysis, PhD Thesis, State University; 2023.";
+  const body = stripReferenceSection(text);
+  assert.equal(body.trim(), "This concludes the discussion.");
+});
+
+test("LETTERED CATEGORIES: a lowercase letter or a longer word is NOT mistaken for a category marker", () => {
+  const text = "This concludes the discussion.\n\nReferences\n\na lowercase word is not a real list marker at all, just prose continuing normally.";
+  assert.equal(findReferenceSectionStart(text), -1);
+});
+
+test("DELIMITED YEAR: an ordinary in-prose year mention (not tightly delimited on both sides) does NOT trigger the weaker signal alone", () => {
+  const text = "This concludes the discussion.\n\nReferences\n\nSome prose here mentions the year 2014 in passing and again references 2020 without ever forming a real citation list at all.";
+  assert.equal(findReferenceSectionStart(text), -1);
+});

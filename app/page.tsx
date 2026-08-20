@@ -39,6 +39,7 @@ import { clearStoredReports, loadStoredReports, storeReport } from "@/lib/report
 import { deleteRemoteReport, fetchRemoteReport, listRemoteReportSummaries, saveReportRemote } from "@/lib/reports-remote";
 import { combineMatchedWordPositions } from "@/lib/similarity-enrichment";
 import { computeUnifiedSimilarity } from "@/lib/unified-similarity";
+import { extractDocxTextDocument } from "@/lib/docx-text-extraction";
 import { normalizeExtractedText } from "@/lib/extracted-text-normalization";
 import type { WebCheckResult } from "@/lib/web-check-core";
 import type { AcademicSearchStatus, ExternalAcademicEvidence } from "@/lib/academic-search/types";
@@ -304,8 +305,7 @@ async function extractFileText(file: File, onProgress: (progress: number, label:
   if (extension === "docx") {
     onProgress(18, "Reading document content");
     const mammoth = await import("mammoth/mammoth.browser");
-    const result = await mammoth.extractRawText({ arrayBuffer: await file.arrayBuffer() });
-    return result.value;
+    return extractDocxTextDocument(mammoth.convertToHtml, { arrayBuffer: await file.arrayBuffer() });
   }
   if (extension === "pdf") {
     const pdfjs = await import("pdfjs-dist");

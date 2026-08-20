@@ -96,13 +96,37 @@ function extractDoi(pids: OpenAirePid[] | null | undefined): string | null {
   return doi?.trim() || null;
 }
 
+const DOI_RESOLVER_URL_PATTERN = /^https?:\/\/(dx\.)?doi\.org\//i;
+
+/**
+ * "Investigate two production issues" ISSUE 1: within one instance's own
+ * `urls` array, prefer an entry that is NOT a bare DOI-resolver link over
+ * one that is. Confirmed live (real Graph API v3 response for a genuine
+ * OpenAIRE-indexed article, jodakiss:15337): an instance's urls array can
+ * contain BOTH `https://doi.org/10.xxxx/...` AND the actual repository
+ * page (`https://<journal-host>/<id>`) side by side — this function
+ * previously always took `urls[0]` unconditionally, and for that real
+ * record `urls[0]` was the DOI resolver in both of the record's own
+ * instances. A DOI resolver is never itself the article — it is exactly
+ * one more HTTP redirect hop that lands on whatever page the publisher
+ * chose, most often the SAME landing page already reachable via the other
+ * URL already sitting right next to it in this same array — so preferring
+ * a non-resolver URL when one exists costs nothing and, for the confirmed
+ * live case, is why text-retriever.ts's HTTP fallback landed on a plain
+ * DOI-resolver redirect instead of the article's own host at all.
+ */
+function preferNonResolverUrl(urls: string[]): string | null {
+  const nonResolver = urls.find((url) => !DOI_RESOLVER_URL_PATTERN.test(url));
+  return nonResolver ?? urls[0] ?? null;
+}
+
 /** Prefers a URL from an OPEN-access instance (more likely to actually be fetchable text, not a paywall) over any other instance, but never claims this URL is guaranteed to yield full text — see this file's header comment. */
 function resultUrl(item: OpenAireResult, doi: string | null): string | null {
   const instances = item.instances ?? [];
   const openInstance = instances.find((instance) => instance.accessRight?.label?.toUpperCase() === "OPEN" && instance.urls?.[0]);
-  if (openInstance?.urls?.[0]) return openInstance.urls[0];
+  if (openInstance?.urls?.length) return preferNonResolverUrl(openInstance.urls);
   const anyInstance = instances.find((instance) => instance.urls?.[0]);
-  if (anyInstance?.urls?.[0]) return anyInstance.urls[0];
+  if (anyInstance?.urls?.length) return preferNonResolverUrl(anyInstance.urls);
   if (doi) return `https://doi.org/${doi}`;
   return null;
 }

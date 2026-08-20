@@ -46,6 +46,22 @@ function looksLikeReferenceListStart(lookahead: string): boolean {
   // papers open their reference list.
   if (/^[[(]?\d{1,3}[\])]?[.\s]/.test(trimmed)) return true;
 
+  // "Investigate two production issues" ISSUE 2: a second strong signal —
+  // a single-letter CATEGORY marker ("A. Books", "B) Theses", "C: Journal
+  // Articles"), the same structural role as a numbered marker (the very
+  // next thing after the heading is a list marker, not prose) but grouping
+  // the bibliography by source type instead of numbering every entry.
+  // Confirmed live: a real reference section (categorized A-E, non-
+  // parenthetical "Author, Title, Publisher; Year." citation style) was
+  // found to slip past both the numbered-marker check above and the
+  // weaker year-based checks below, leaving ~1,650 words of bibliography +
+  // footnote text in scope for word counts/similarity/AI analysis in a
+  // real production report. Same bounded risk profile as the existing
+  // numbered-marker check: only evaluated against the text immediately
+  // following an already-matched "references/bibliography/works cited"
+  // heading, never scanned for on its own.
+  if (/^[A-Z][.):]\s/.test(trimmed)) return true;
+
   // Weaker signals, required together: author-year reference lists don't
   // open with a number, but a real reference list is unmistakably dense
   // with publication years and citation vocabulary within a few entries —
@@ -54,7 +70,15 @@ function looksLikeReferenceListStart(lookahead: string): boolean {
   if (yearMatches.length < 2) return false;
   const hasCitationVocabulary = /\b(arxiv preprint|corr,?\s*abs|proceedings of|doi:|et al\.|vol\.|pp\.)\b/i.test(lookahead);
   const hasParentheticalYear = /\(\d{4}[a-z]?\)/.test(lookahead);
-  return hasCitationVocabulary || hasParentheticalYear;
+  // "Investigate two production issues" ISSUE 2: a third weak signal — a
+  // year immediately delimited by a semicolon or comma on one side and a
+  // period/comma on the other ("...Dar Al-Houda, Algeria; 2014."), the
+  // real citation style found alongside the lettered-category headings
+  // above. A common bibliographic convention outside strict APA-style
+  // parenthetical years, distinct from an ordinary in-prose year mention
+  // (which is rarely delimited this tightly on both sides).
+  const hasDelimitedYear = /[;,]\s*(19|20)\d{2}[a-z]?\s*[.,]/.test(lookahead);
+  return hasCitationVocabulary || hasParentheticalYear || hasDelimitedYear;
 }
 
 /**

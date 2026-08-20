@@ -204,6 +204,85 @@ test("CASE O: the retrieval request contains only the candidate URL and standard
   assert.doesNotMatch(JSON.stringify(call.init), /account|email|session|cookie|token/i);
 });
 
+// --- "Investigate two production issues" ISSUE 1: citation_pdf_url following ---
+
+function pdfResponse(bytes) {
+  return new Response(bytes, { status: 200, headers: { "content-type": "application/pdf" } });
+}
+
+test("citation_pdf_url: a landing page's own citation_pdf_url is followed once when the caller has opted into application/pdf, and the PDF's own extracted text is returned", async () => {
+  const landingHtml = '<html><head><meta name="citation_pdf_url" content="https://example.org/paper/pdf"></head><body><p>Abstract only, nowhere near the real article.</p></body></html>';
+  const fetcher = createMockFetch([
+    { response: htmlResponse(landingHtml) },
+    { response: pdfResponse(new TextEncoder().encode("%PDF-1.4 fake bytes")) },
+  ]);
+  const loadPdfDocument = async () => ({
+    numPages: 1,
+    getPage: async () => ({ getTextContent: async () => ({ items: [{ str: "The full article text lives here." }] }) }),
+  });
+  const retriever = createHttpContentRetriever({
+    fetcher, lookup: publicLookup(), loadPdfDocument,
+    allowedContentTypes: ["text/html", "application/pdf"],
+    ...FAST_CONFIG,
+  });
+  const result = await retriever.retrieve({ url: "https://example.org/paper" });
+
+  assert.equal(result.status, "SUCCESS");
+  assert.equal(result.finalUrl, "https://example.org/paper/pdf");
+  assert.equal(result.contentType, "application/pdf");
+  assert.match(result.extractedText, /The full article text lives here\./);
+  assert.equal(fetcher.calls.length, 2, "exactly one extra hop: the landing page, then the PDF it points at");
+});
+
+test("citation_pdf_url: a caller that has NOT opted into application/pdf never follows it — landing-page HTML is returned as-is", async () => {
+  const landingHtml = '<html><head><meta name="citation_pdf_url" content="https://example.org/paper/pdf"></head><body><p>Abstract text.</p></body></html>';
+  const fetcher = createMockFetch([{ response: htmlResponse(landingHtml) }]);
+  const retriever = createHttpContentRetriever({ fetcher, lookup: publicLookup(), ...FAST_CONFIG });
+  const result = await retriever.retrieve({ url: "https://example.org/paper" });
+
+  assert.equal(result.status, "SUCCESS");
+  assert.equal(result.contentType, "text/html");
+  assert.match(result.extractedText, /Abstract text\./);
+  assert.equal(fetcher.calls.length, 1, "no citation_pdf_url hop for a caller that never enabled application/pdf");
+});
+
+test("citation_pdf_url: a page with no citation_pdf_url meta tag is unaffected — no extra request is ever made", async () => {
+  const fetcher = createMockFetch([{ response: htmlResponse("<p>Ordinary page, no citation metadata.</p>") }]);
+  const retriever = createHttpContentRetriever({ fetcher, lookup: publicLookup(), allowedContentTypes: ["text/html", "application/pdf"], ...FAST_CONFIG });
+  const result = await retriever.retrieve({ url: "https://example.org/plain" });
+
+  assert.equal(result.status, "SUCCESS");
+  assert.match(result.extractedText, /Ordinary page/);
+  assert.equal(fetcher.calls.length, 1);
+});
+
+test("citation_pdf_url: is only ever followed once, even if the linked PDF URL somehow also resolves to HTML with its own citation_pdf_url", async () => {
+  const firstLanding = '<meta name="citation_pdf_url" content="https://example.org/hop-2">';
+  const secondLanding = '<meta name="citation_pdf_url" content="https://example.org/hop-3"><p>Second landing page body text.</p>';
+  const fetcher = createMockFetch([
+    { response: htmlResponse(firstLanding) },
+    { response: htmlResponse(secondLanding) },
+  ]);
+  const retriever = createHttpContentRetriever({ fetcher, lookup: publicLookup(), allowedContentTypes: ["text/html", "application/pdf"], ...FAST_CONFIG });
+  const result = await retriever.retrieve({ url: "https://example.org/hop-1" });
+
+  assert.equal(result.status, "SUCCESS");
+  assert.equal(result.finalUrl, "https://example.org/hop-2", "the second page's own citation_pdf_url must not be followed — the mechanism is capped at one hop");
+  assert.match(result.extractedText, /Second landing page body text\./);
+  assert.equal(fetcher.calls.length, 2);
+});
+
+test("citation_pdf_url: an SSRF-unsafe target is blocked exactly like an HTTP redirect to the same address would be", async () => {
+  const landingHtml = '<meta name="citation_pdf_url" content="http://internal.example.org/secret.pdf">';
+  const fetcher = createMockFetch([{ response: htmlResponse(landingHtml) }]);
+  const lookup = publicLookup({ "public.example.org": [{ address: "93.184.216.34", family: 4 }], "internal.example.org": [{ address: "10.0.0.5", family: 4 }] });
+  const retriever = createHttpContentRetriever({ fetcher, lookup, allowedContentTypes: ["text/html", "application/pdf"], ...FAST_CONFIG });
+  const result = await retriever.retrieve({ url: "https://public.example.org/paper" });
+
+  assert.equal(result.status, "REDIRECT_BLOCKED", "the citation_pdf_url hop is re-validated by the same safety check as any other target URL");
+  assert.equal(fetcher.calls.length, 1, "the blocked internal target must never actually be fetched");
+});
+
 test("DEFAULT_HTTP_CONTENT_RETRIEVER_CONFIG bounds are conservative", () => {
   assert.ok(DEFAULT_HTTP_CONTENT_RETRIEVER_CONFIG.maxResponseBytes <= 10_000_000);
   assert.ok(DEFAULT_HTTP_CONTENT_RETRIEVER_CONFIG.timeoutMs <= 30_000);

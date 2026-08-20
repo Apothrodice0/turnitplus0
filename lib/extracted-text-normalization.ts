@@ -1,3 +1,5 @@
+import { stripRepeatedPageFurniture } from "./pdf-page-furniture";
+
 /**
  * "Investigate two real detection issues" ISSUE 1: the shared post-
  * extraction cleanup step every uploaded document's text passes through in
@@ -38,9 +40,21 @@
  */
 const HTML_TAG_PATTERN = /<\/?[a-zA-Z][a-zA-Z0-9]*(?:\s[^<>]{0,150})?\/?>/g;
 
-/** Every uploaded document's text passes through this exact chain before any downstream analysis sees it — see this file's own header comment. */
+/**
+ * "Investigate two production issues" ISSUE 2: strips a repeated running
+ * page header/footer (see lib/pdf-page-furniture.ts's own header comment
+ * for the full root-cause account and algorithm) BEFORE anything else in
+ * this chain touches whitespace — the detector depends on the "\n\n"
+ * page/paragraph boundaries exactly as extractPdfTextDocument() and
+ * extractDocxTextDocument() produce them, which the later steps below
+ * would otherwise be free to collapse or shift. Runs for every format, not
+ * just PDF: a document with no repeated-boundary pattern (DOCX, plain
+ * text, a short PDF) simply produces no match and passes through
+ * unchanged — see that module's own false-positive guards — so this is
+ * one shared step, not a second, format-specific pipeline.
+ */
 export function normalizeExtractedText(raw: string): string {
-  return raw
+  return stripRepeatedPageFurniture(raw)
     .replace(HTML_TAG_PATTERN, " ")
     .replace(/[ \t]+/g, " ")
     .replace(/\n{3,}/g, "\n\n")

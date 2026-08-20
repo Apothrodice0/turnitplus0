@@ -38,6 +38,34 @@ export type PhraseExtractionConfig = {
   keywordTopicTermCount: number;
   /** Caps how many of a single candidate sentence's own informative words feed a keyword query (longest-first, after excluding likely verbs/adverbs) — live testing found an uncapped/longer bag reliably diluted relevance rather than improving it. */
   keywordMaxSentenceWords: number;
+  /**
+   * "Investigate two production issues" ISSUE 1: how many additional
+   * queries (0 or 1) are built from ONLY the whole-document topic terms —
+   * no per-sentence words mixed in at all, unlike every other keyword
+   * query above. Root cause this exists to address, confirmed live against
+   * OpenAIRE's real Graph API v3 `search` endpoint (api.openaire.eu): it is
+   * NOT a relevance-ranked full-text search — it behaves conjunctively
+   * (effectively AND) over METADATA ONLY (title/abstract/authors; see
+   * providers/openaire.ts's own header comment — the API has no full-text
+   * index at all), so a query built from body-text sentence words, or even
+   * the existing per-sentence keyword bags above, routinely includes a
+   * word absent from the paper's own title/abstract and silently returns
+   * zero results. Confirmed with real numbers against a genuine
+   * OpenAIRE-indexed paper: "bayesvalidrox surrogate model documentation
+   * repository stuttgart" (an existing per-sentence keyword query) ->
+   * numFound 0; the SAME topic terms alone, "bayesvalidrox surrogate
+   * model" -> numFound 3, the real record among them. A pure topic-terms
+   * query is the shortest, least-noisy signal this pipeline already
+   * computes (extractTopicTerms) — reusing it standalone, rather than
+   * inventing a second "what is this document about" heuristic, gives a
+   * conjunctive-metadata-only search engine the best realistic chance of
+   * matching without dragging in body-specific vocabulary the paper's own
+   * abstract never uses. Additive only — every existing sentence/keyword
+   * query above is unchanged; see this file's own header comment on why a
+   * short summary query is a natural complement, not a replacement, for
+   * the sentence-anchored strategy those queries already use.
+   */
+  topicOnlyQueryCount: number;
 };
 
 export const DEFAULT_PHRASE_EXTRACTION_CONFIG: PhraseExtractionConfig = {
@@ -50,6 +78,7 @@ export const DEFAULT_PHRASE_EXTRACTION_CONFIG: PhraseExtractionConfig = {
   keywordQueryCount: 3,
   keywordTopicTermCount: 3,
   keywordMaxSentenceWords: 6,
+  topicOnlyQueryCount: 1,
 };
 
 function splitSentences(canonical: string): string[] {
@@ -177,6 +206,35 @@ function extractKeywordQueries(
 }
 
 /**
+ * "Investigate two production issues" ISSUE 1: see topicOnlyQueryCount's
+ * own comment for the full root-cause account. Returns at most one query
+ * (topicOnlyQueryCount is 0 or 1) built from nothing but the whole
+ * document's own recurring topic terms — reuses the exact same
+ * extractTopicTerms this file already computes for extractKeywordQueries,
+ * not a second "what is this document about" pass. Tagged queryType
+ * "keyword" (not a new type): it is the same kind of short, high-precision
+ * signal candidate-ranker.ts's foundByKeywordQuery bonus already exists to
+ * reward, and every other caller that switches on queryType only
+ * distinguishes "sentence" from "keyword" today — introducing a third
+ * value would be a wider, unrelated change for no behavioral benefit.
+ */
+function extractTopicOnlyQuery(canonical: string, config: PhraseExtractionConfig): AcademicSearchQuery[] {
+  if (config.topicOnlyQueryCount <= 0) return [];
+  const topicTerms = extractTopicTerms(canonical, config.keywordTopicTermCount);
+  // NOT config.minInformativeWords: that floor is calibrated for a MIXED
+  // bag (topic terms + per-sentence words, see extractKeywordQueries)
+  // reaching real signal together, and topicTerms alone is capped at
+  // keywordTopicTermCount (3 by default) — strictly less than
+  // minInformativeWords (4), which would make this branch unreachable by
+  // construction for every document, defeating the whole query. Any
+  // recurring topic term at all is real signal on its own; only truly
+  // empty input has nothing worth querying.
+  if (topicTerms.length === 0) return [];
+  const queryText = topicTerms.join(" ");
+  return [{ queryText, rank: 0, sourcePassage: queryText, queryType: "keyword" }];
+}
+
+/**
  * Extracts approximately minQueries-maxQueries distinctive, search-worthy
  * phrases from submission text, prioritizing longer meaningful phrases,
  * uncommon word combinations, and lexically unique/academic-sounding
@@ -186,7 +244,8 @@ function extractKeywordQueries(
  * Returns the existing sentence-based queries first, then up to
  * config.keywordQueryCount companion keyword queries (Phase 5) — a bounded,
  * additive supplement for candidate discovery under heavy paraphrasing, see
- * extractKeywordQueries above.
+ * extractKeywordQueries above — then at most one more topic-only query (see
+ * topicOnlyQueryCount's own comment).
  */
 export function extractCandidatePhrases(
   rawText: string,
@@ -226,6 +285,9 @@ export function extractCandidatePhrases(
     queryType: "sentence" as const,
   }));
   const keywordQueries = extractKeywordQueries(canonical, candidates, config);
+  const seenKeywordBags = new Set(keywordQueries.map((query) => query.queryText.toLowerCase()));
+  const topicOnlyQueries = extractTopicOnlyQuery(canonical, config)
+    .filter((query) => !seenKeywordBags.has(query.queryText.toLowerCase())); // e.g. a short document whose only keyword bag already IS the topic terms alone
 
-  return [...sentenceQueries, ...keywordQueries].map((query, index) => ({ ...query, rank: index }));
+  return [...sentenceQueries, ...keywordQueries, ...topicOnlyQueries].map((query, index) => ({ ...query, rank: index }));
 }

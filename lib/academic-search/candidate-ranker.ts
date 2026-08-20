@@ -29,6 +29,24 @@ export type CandidateRankingWeights = {
    * it is a higher-precision, lower-recall signal than a full sentence —
    * this weight reflects that its contributors deserve real ranking credit,
    * not just a tiebreak nudge.
+   *
+   * "Investigate two production issues" ISSUE 1: value raised from 3 to 5
+   * (see DEFAULT_CANDIDATE_RANKING_WEIGHTS) after a real, measured gap:
+   * OpenAIRE never reports textAvailable (providers/openaire.ts's own
+   * header comment — no full-text field exists in that API's response
+   * shape at all), so a genuine OpenAIRE-only match — found via this exact
+   * signal, phrase-extractor.ts's topicOnlyQueryCount included, since that
+   * query is also tagged queryType "keyword" — starts 4 points behind an
+   * unrelated Europe PMC record on textAvailable alone. Measured live
+   * against a real OpenAIRE-indexed paper: the genuine source scored
+   * hasDoi(3) + hasUrl(1) + foundByKeywordQuery(3) = 7, while 42 entirely
+   * unrelated Europe PMC candidates — found ONLY by generic sentence
+   * queries, none of them keyword-matched — sat at hasDoi(3) + hasUrl(1) +
+   * textAvailable(4) = 8, one point ahead, pushing the real match to rank
+   * 45 and out of maxCandidatesToRetrieve. Confirmed the raise is targeted,
+   * not a blunt across-the-board lift: none of those 42 noise candidates
+   * carry a keyword-type contributor, so their own score is unaffected by
+   * this change; only a genuinely precision-matched candidate benefits.
    */
   foundByKeywordQuery: number;
   /**
@@ -62,7 +80,7 @@ export const DEFAULT_CANDIDATE_RANKING_WEIGHTS: CandidateRankingWeights = {
   textAvailable: 4,
   additionalContributor: 2,
   providerRelevance: 1,
-  foundByKeywordQuery: 3,
+  foundByKeywordQuery: 5,
   multiProviderCorroboration: 5,
 };
 

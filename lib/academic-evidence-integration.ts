@@ -82,6 +82,14 @@ const sharedCache = createInMemoryAcademicSearchCache();
  * OpenAIRE. Computed here (not re-hardcoded to 46) so it can never
  * silently drift out of sync with the phrase extractor's own limits again.
  *
+ * "Investigate two production issues" ISSUE 1: phrase-extractor.ts's
+ * topicOnlyQueryCount (1 by default) adds one more query per run — the
+ * formula below now includes it for the same reason keywordQueryCount is
+ * included: any query the phrase extractor can produce must be covered by
+ * this budget, or it silently starves exactly like the keyword queries
+ * already did once before.
+ *
+
  * RETRIEVAL_BUDGET_LIMIT is sized to retrieval's own real, bounded need:
  * DEFAULT_ACADEMIC_SEARCH_RUN_CONFIG.maxCandidatesToRetrieve (5) candidates,
  * each trying at most its ~2 contributing providers' getText() (see
@@ -96,7 +104,7 @@ const sharedCache = createInMemoryAcademicSearchCache();
  */
 const ACADEMIC_SEARCH_PROVIDER_COUNT = 2; // OpenAIRE + Europe PMC — see buildProviders() below.
 /** Exported for tests/academic-evidence-integration-budget-sizing.test.mjs — asserts this stays derived from the phrase extractor's own documented limits rather than drifting back into an independently-guessed constant. */
-export const DISCOVERY_BUDGET_LIMIT = (DEFAULT_PHRASE_EXTRACTION_CONFIG.maxQueries + DEFAULT_PHRASE_EXTRACTION_CONFIG.keywordQueryCount) * ACADEMIC_SEARCH_PROVIDER_COUNT;
+export const DISCOVERY_BUDGET_LIMIT = (DEFAULT_PHRASE_EXTRACTION_CONFIG.maxQueries + DEFAULT_PHRASE_EXTRACTION_CONFIG.keywordQueryCount + DEFAULT_PHRASE_EXTRACTION_CONFIG.topicOnlyQueryCount) * ACADEMIC_SEARCH_PROVIDER_COUNT;
 const RETRIEVAL_BUDGET_LIMIT = 15;
 const PROVIDER_TIMEOUT_MS = 9_000;
 const PROVIDER_MAX_RESULTS_PER_QUERY = 5;

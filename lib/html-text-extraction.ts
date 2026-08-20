@@ -48,3 +48,28 @@ export function extractTextFromHtml(html: string): string {
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
+
+/**
+ * "Investigate two production issues" ISSUE 1: extracts the
+ * `citation_pdf_url` meta tag, if present — the de facto Highwire
+ * Press/Google Scholar convention (`<meta name="citation_pdf_url"
+ * content="...">`) used by most scholarly repositories and journal
+ * platforms (arXiv, institutional repositories, and — confirmed live —
+ * episciences.org) to point an HTML landing page at the actual full-text
+ * PDF. Real, confirmed root cause this exists to address: an academic
+ * search candidate's own URL is frequently a landing page whose own body
+ * text is just an abstract plus navigation chrome (confirmed live: ~289
+ * words total, only ~55 of them the real abstract) — nowhere near the
+ * genuine article. Regex-based like extractTextFromHtml above, for the
+ * same reason (no HTML-parsing dependency in this project); attribute
+ * order is not assumed (`name` before `content` is the overwhelmingly
+ * common real-world order, confirmed live, but the second alternative
+ * handles the reverse order defensively). Returns null when absent or
+ * malformed — never guessed from the page's other content.
+ */
+export function extractCitationPdfUrl(html: string): string | null {
+  const nameFirst = html.match(/<meta[^>]*\bname\s*=\s*["']citation_pdf_url["'][^>]*\bcontent\s*=\s*["']([^"']+)["'][^>]*>/i);
+  const contentFirst = nameFirst ? null : html.match(/<meta[^>]*\bcontent\s*=\s*["']([^"']+)["'][^>]*\bname\s*=\s*["']citation_pdf_url["'][^>]*>/i);
+  const url = (nameFirst ?? contentFirst)?.[1]?.trim();
+  return url || null;
+}
