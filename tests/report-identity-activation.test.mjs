@@ -53,7 +53,7 @@ function nextId() {
 }
 
 async function signup(email, deviceKey) {
-  resetAuthRateForTest(`activation-signup-${email}`);
+  await resetAuthRateForTest(`activation-signup-${email}`);
   const req = new Request("http://localhost/api/auth/signup", {
     method: "POST",
     headers: { "content-type": "application/json", "x-forwarded-for": `activation-signup-${email}` },
@@ -72,7 +72,7 @@ async function signup(email, deviceKey) {
 
 async function postReport({ deviceKey, id, title = "activation.pdf", text, cookie }) {
   const rateKey = `activation-post-${id}`;
-  resetRateForTest(rateKey);
+  await resetRateForTest(rateKey);
   const headers = { "content-type": "application/json", "x-forwarded-for": rateKey };
   if (cookie) headers.cookie = `tp_session_v1=${cookie}`;
   const req = new Request("http://localhost/api/reports", {
@@ -116,7 +116,7 @@ test("saving a report still returns { ok: true }/200, and now also creates docum
 test("a report with no text field still saves successfully and creates no identity row (unchanged from Phase A)", async () => {
   const id = nextId();
   const rateKey = `activation-post-${id}`;
-  resetRateForTest(rateKey);
+  await resetRateForTest(rateKey);
   const req = new Request("http://localhost/api/reports", {
     method: "POST",
     headers: { "content-type": "application/json", "x-forwarded-for": rateKey },

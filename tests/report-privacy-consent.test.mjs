@@ -58,7 +58,7 @@ function nextId() {
 }
 
 async function signup(email, deviceKey) {
-  resetAuthRateForTest('consent-signup-' + email);
+  await resetAuthRateForTest('consent-signup-' + email);
   const req = new Request('http://localhost/api/auth/signup', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-forwarded-for': 'consent-signup-' + email },
@@ -70,7 +70,7 @@ async function signup(email, deviceKey) {
 }
 
 async function login(email, deviceKey) {
-  resetAuthRateForTest('consent-login-' + email);
+  await resetAuthRateForTest('consent-login-' + email);
   const req = new Request('http://localhost/api/auth/login', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-forwarded-for': 'consent-login-' + email },
@@ -82,14 +82,14 @@ async function login(email, deviceKey) {
 }
 
 async function getMe(cookie) {
-  resetRateForTest('consent-me-get');
+  await resetRateForTest('consent-me-get');
   const req = new Request('http://localhost/api/auth/me', { headers: { cookie: `tp_session_v1=${cookie}` } });
   const res = await meRoute.GET(req);
   return { res, body: await res.json() };
 }
 
 async function patchMe(cookie, { username, email, corpusReuseConsent }) {
-  resetRateForTest('consent-me-patch');
+  await resetRateForTest('consent-me-patch');
   const req = new Request('http://localhost/api/auth/me', {
     method: 'PATCH',
     headers: { 'content-type': 'application/json', cookie: `tp_session_v1=${cookie}` },
@@ -100,7 +100,7 @@ async function patchMe(cookie, { username, email, corpusReuseConsent }) {
 }
 
 async function postReport(deviceKey, { cookie, id, title = 'consent.pdf', text } = {}) {
-  resetRateForTest('consent-post');
+  await resetRateForTest('consent-post');
   const reportId = id ?? nextId();
   const headers = { 'content-type': 'application/json', 'x-forwarded-for': 'consent-post' };
   if (cookie) headers['cookie'] = `tp_session_v1=${cookie}`;
@@ -126,7 +126,7 @@ async function postReport(deviceKey, { cookie, id, title = 'consent.pdf', text }
 }
 
 async function getReport(id, { deviceKey, cookie } = {}) {
-  resetRateForTest('consent-get');
+  await resetRateForTest('consent-get');
   const headers = { 'x-forwarded-for': 'consent-get' };
   if (cookie) headers['cookie'] = `tp_session_v1=${cookie}`;
   const url = deviceKey ? `http://localhost/api/reports/${id}?deviceKey=${encodeURIComponent(deviceKey)}` : `http://localhost/api/reports/${id}`;

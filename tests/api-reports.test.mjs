@@ -36,7 +36,7 @@ function samplePayload(overrides = {}) {
 }
 
 async function postReport(deviceKey, { id, title = 'sample.pdf', payloadOverrides = {}, extra = {} } = {}) {
-  resetRateForTest('test-client-post');
+  await resetRateForTest('test-client-post');
   const payload = samplePayload({ id: id ?? Date.now(), title, ...payloadOverrides });
   const req = new Request('http://localhost/api/reports', {
     method: 'POST',
@@ -61,7 +61,7 @@ async function postReport(deviceKey, { id, title = 'sample.pdf', payloadOverride
 }
 
 async function listReports(deviceKey) {
-  resetRateForTest('test-client-list');
+  await resetRateForTest('test-client-list');
   const req = new Request(`http://localhost/api/reports?deviceKey=${encodeURIComponent(deviceKey)}`, {
     headers: { 'x-forwarded-for': 'test-client-list' },
   });
@@ -69,7 +69,7 @@ async function listReports(deviceKey) {
 }
 
 async function getReport(deviceKey, id) {
-  resetRateForTest('test-client-get');
+  await resetRateForTest('test-client-get');
   const req = new Request(`http://localhost/api/reports/${id}?deviceKey=${encodeURIComponent(deviceKey)}`, {
     headers: { 'x-forwarded-for': 'test-client-get' },
   });
@@ -77,7 +77,7 @@ async function getReport(deviceKey, id) {
 }
 
 async function deleteReport(deviceKey, id) {
-  resetRateForTest('test-client-delete');
+  await resetRateForTest('test-client-delete');
   const req = new Request(`http://localhost/api/reports/${id}?deviceKey=${encodeURIComponent(deviceKey)}`, {
     method: 'DELETE',
     headers: { 'x-forwarded-for': 'test-client-delete' },
@@ -179,7 +179,7 @@ async function deleteReport(deviceKey, id) {
 // 5) Required-field validation
 {
   const deviceKey = 'device-validation';
-  resetRateForTest('test-client-validation');
+  await resetRateForTest('test-client-validation');
   const req = new Request('http://localhost/api/reports', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-forwarded-for': 'test-client-validation' },
@@ -188,7 +188,7 @@ async function deleteReport(deviceKey, id) {
   const res = await reportsRoute.POST(req);
   assert.equal(res.status, 400, 'missing required fields must be rejected');
 
-  resetRateForTest('test-client-validation2');
+  await resetRateForTest('test-client-validation2');
   const noDeviceKeyReq = new Request('http://localhost/api/reports?deviceKey=', { headers: { 'x-forwarded-for': 'test-client-validation2' } });
   const noDeviceKeyRes = await reportsRoute.GET(noDeviceKeyReq);
   assert.equal(noDeviceKeyRes.status, 400, 'listing without a deviceKey must be rejected');

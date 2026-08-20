@@ -65,7 +65,7 @@ function nextId() {
 }
 
 async function signup(email, deviceKey) {
-  resetAuthRateForTest(`classify-signup-${email}`);
+  await resetAuthRateForTest(`classify-signup-${email}`);
   const req = new Request("http://localhost/api/auth/signup", {
     method: "POST",
     headers: { "content-type": "application/json", "x-forwarded-for": `classify-signup-${email}` },
@@ -126,7 +126,7 @@ function buildPayload({ id, title, text, archiveScore = 0, sources = [] }) {
 
 async function postReport({ deviceKey, id, title, text, cookie, archiveScore, sources }) {
   const rateKey = `classify-post-${id}`;
-  resetRateForTest(rateKey);
+  await resetRateForTest(rateKey);
   const payload = buildPayload({ id, title, text, archiveScore, sources });
   const headers = { "content-type": "application/json", "x-forwarded-for": rateKey };
   if (cookie) headers.cookie = `tp_session_v1=${cookie}`;
@@ -154,7 +154,7 @@ async function postReport({ deviceKey, id, title, text, cookie, archiveScore, so
 
 async function getReport({ deviceKey, id, cookie }) {
   const rateKey = `classify-get-${id}`;
-  resetRateForTest(rateKey);
+  await resetRateForTest(rateKey);
   const headers = { "x-forwarded-for": rateKey };
   if (cookie) headers.cookie = `tp_session_v1=${cookie}`;
   const url = deviceKey ? `http://localhost/api/reports/${id}?deviceKey=${encodeURIComponent(deviceKey)}` : `http://localhost/api/reports/${id}`;

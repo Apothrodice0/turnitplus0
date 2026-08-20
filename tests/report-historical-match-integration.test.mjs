@@ -43,7 +43,7 @@ function nextId() {
 }
 
 async function postReport(deviceKey, { cookie, id, title = 'ehist.pdf', text = 'sample fixture text', score = 12, archiveScore = 9 } = {}) {
-  resetRateForTest('ehist-post');
+  await resetRateForTest('ehist-post');
   const reportId = id ?? nextId();
   const headers = { 'content-type': 'application/json', 'x-forwarded-for': 'ehist-post' };
   if (cookie) headers['cookie'] = `tp_session_v1=${cookie}`;
@@ -69,7 +69,7 @@ async function postReport(deviceKey, { cookie, id, title = 'ehist.pdf', text = '
 }
 
 async function getReport(id, { deviceKey, cookie } = {}) {
-  resetRateForTest('ehist-get');
+  await resetRateForTest('ehist-get');
   const headers = { 'x-forwarded-for': 'ehist-get' };
   if (cookie) headers['cookie'] = `tp_session_v1=${cookie}`;
   const url = deviceKey ? `http://localhost/api/reports/${id}?deviceKey=${encodeURIComponent(deviceKey)}` : `http://localhost/api/reports/${id}`;
@@ -78,7 +78,7 @@ async function getReport(id, { deviceKey, cookie } = {}) {
 }
 
 async function deleteReport(id, { deviceKey, cookie } = {}) {
-  resetRateForTest('ehist-delete');
+  await resetRateForTest('ehist-delete');
   const headers = { 'x-forwarded-for': 'ehist-delete' };
   if (cookie) headers['cookie'] = `tp_session_v1=${cookie}`;
   const url = deviceKey ? `http://localhost/api/reports/${id}?deviceKey=${encodeURIComponent(deviceKey)}` : `http://localhost/api/reports/${id}`;
@@ -87,7 +87,7 @@ async function deleteReport(id, { deviceKey, cookie } = {}) {
 }
 
 async function signup(email, deviceKey) {
-  resetAuthRateForTest('ehist-signup-' + email);
+  await resetAuthRateForTest('ehist-signup-' + email);
   const req = new Request('http://localhost/api/auth/signup', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-forwarded-for': 'ehist-signup-' + email },

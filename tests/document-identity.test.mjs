@@ -221,7 +221,7 @@ test("a brand-new document produces no prior submissions for an account that has
 // also produces a document_identities row as a side effect ---
 
 test("POST /api/reports still returns the same success response and saved_reports still round-trips (existing behavior unchanged)", async () => {
-  resetRateForTest("identity-integration-post");
+  await resetRateForTest("identity-integration-post");
   const deviceKey = "identity-integration-device";
   const reportId = "identity-integration-report-1";
   const text = "Full report text flowing through the save-report endpoint.";
@@ -258,7 +258,7 @@ test("POST /api/reports still returns the same success response and saved_report
   const body = await res.json();
   assert.deepEqual(body, { ok: true }, "the save response shape must be unchanged");
 
-  resetRateForTest("identity-integration-get");
+  await resetRateForTest("identity-integration-get");
   const getReq = new Request(`http://localhost/api/reports/${reportId}?deviceKey=${encodeURIComponent(deviceKey)}`, {
     headers: { "x-forwarded-for": "identity-integration-get" },
   });
@@ -287,7 +287,7 @@ test("POST /api/reports still returns the same success response and saved_report
 });
 
 test("a report payload without a text field saves successfully and does not throw (identity capture is best-effort)", async () => {
-  resetRateForTest("identity-integration-no-text");
+  await resetRateForTest("identity-integration-no-text");
   const deviceKey = "identity-integration-device-no-text";
   const reportId = "identity-integration-report-no-text";
   const payload = {

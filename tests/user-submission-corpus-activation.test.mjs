@@ -58,7 +58,7 @@ function nextId() {
 }
 
 async function signup(email, deviceKey) {
-  resetAuthRateForTest('activation-signup-' + email);
+  await resetAuthRateForTest('activation-signup-' + email);
   const req = new Request('http://localhost/api/auth/signup', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-forwarded-for': 'activation-signup-' + email },
@@ -76,7 +76,7 @@ async function signup(email, deviceKey) {
 }
 
 async function postReport(deviceKey, { cookie, id, title = 'activation.pdf', text, score = 12, archiveScore = 9 } = {}) {
-  resetRateForTest('activation-post');
+  await resetRateForTest('activation-post');
   const reportId = id ?? nextId();
   const headers = { 'content-type': 'application/json', 'x-forwarded-for': 'activation-post' };
   if (cookie) headers['cookie'] = `tp_session_v1=${cookie}`;
@@ -102,7 +102,7 @@ async function postReport(deviceKey, { cookie, id, title = 'activation.pdf', tex
 }
 
 async function getReport(id, { deviceKey, cookie } = {}) {
-  resetRateForTest('activation-get');
+  await resetRateForTest('activation-get');
   const headers = { 'x-forwarded-for': 'activation-get' };
   if (cookie) headers['cookie'] = `tp_session_v1=${cookie}`;
   const url = deviceKey ? `http://localhost/api/reports/${id}?deviceKey=${encodeURIComponent(deviceKey)}` : `http://localhost/api/reports/${id}`;
@@ -111,7 +111,7 @@ async function getReport(id, { deviceKey, cookie } = {}) {
 }
 
 async function deleteReport(id, { deviceKey, cookie } = {}) {
-  resetRateForTest('activation-delete');
+  await resetRateForTest('activation-delete');
   const headers = { 'x-forwarded-for': 'activation-delete' };
   if (cookie) headers['cookie'] = `tp_session_v1=${cookie}`;
   const url = deviceKey ? `http://localhost/api/reports/${id}?deviceKey=${encodeURIComponent(deviceKey)}` : `http://localhost/api/reports/${id}`;

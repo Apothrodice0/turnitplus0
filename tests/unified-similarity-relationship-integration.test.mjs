@@ -69,7 +69,7 @@ function nextId() {
 }
 
 async function postReport(deviceKey, { cookie, id, title = 'urel.pdf', text, score = 10, archiveScore = 5 } = {}) {
-  resetRateForTest('urel-post-' + deviceKey);
+  await resetRateForTest('urel-post-' + deviceKey);
   const reportId = id ?? nextId();
   const headers = { 'content-type': 'application/json', 'x-forwarded-for': 'urel-post-' + deviceKey };
   if (cookie) headers['cookie'] = `tp_session_v1=${cookie}`;
@@ -95,7 +95,7 @@ async function postReport(deviceKey, { cookie, id, title = 'urel.pdf', text, sco
 }
 
 async function getReport(id, { deviceKey, cookie } = {}) {
-  resetRateForTest('urel-get-' + (deviceKey ?? cookie ?? 'x'));
+  await resetRateForTest('urel-get-' + (deviceKey ?? cookie ?? 'x'));
   const headers = { 'x-forwarded-for': 'urel-get-' + (deviceKey ?? cookie ?? 'x') };
   if (cookie) headers['cookie'] = `tp_session_v1=${cookie}`;
   const url = deviceKey ? `http://localhost/api/reports/${id}?deviceKey=${encodeURIComponent(deviceKey)}` : `http://localhost/api/reports/${id}`;
@@ -104,7 +104,7 @@ async function getReport(id, { deviceKey, cookie } = {}) {
 }
 
 async function signup(email, deviceKey) {
-  resetAuthRateForTest('urel-signup-' + email);
+  await resetAuthRateForTest('urel-signup-' + email);
   const req = new Request('http://localhost/api/auth/signup', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-forwarded-for': 'urel-signup-' + email },

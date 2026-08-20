@@ -45,7 +45,7 @@ function extractCookie(response) {
 }
 
 async function postReport(deviceKey, { cookie, id, title = 'lifecycle.pdf' } = {}) {
-  resetRateForTest('lifecycle-post');
+  await resetRateForTest('lifecycle-post');
   const reportId = id ?? nextId();
   const headers = { 'content-type': 'application/json', 'x-forwarded-for': 'lifecycle-post' };
   if (cookie) headers['cookie'] = `tp_session_v1=${cookie}`;
@@ -71,7 +71,7 @@ async function postReport(deviceKey, { cookie, id, title = 'lifecycle.pdf' } = {
 }
 
 async function listReports({ deviceKey, cookie } = {}) {
-  resetRateForTest('lifecycle-list');
+  await resetRateForTest('lifecycle-list');
   const headers = { 'x-forwarded-for': 'lifecycle-list' };
   if (cookie) headers['cookie'] = `tp_session_v1=${cookie}`;
   const url = deviceKey ? `http://localhost/api/reports?deviceKey=${encodeURIComponent(deviceKey)}` : 'http://localhost/api/reports';
@@ -80,7 +80,7 @@ async function listReports({ deviceKey, cookie } = {}) {
 }
 
 async function signup(email, deviceKey) {
-  resetAuthRateForTest('lifecycle-signup-' + email);
+  await resetAuthRateForTest('lifecycle-signup-' + email);
   const req = new Request('http://localhost/api/auth/signup', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-forwarded-for': 'lifecycle-signup-' + email },
@@ -91,7 +91,7 @@ async function signup(email, deviceKey) {
 }
 
 async function login(email, deviceKey) {
-  resetAuthRateForTest('lifecycle-login-' + email);
+  await resetAuthRateForTest('lifecycle-login-' + email);
   const req = new Request('http://localhost/api/auth/login', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-forwarded-for': 'lifecycle-login-' + email },
@@ -102,7 +102,7 @@ async function login(email, deviceKey) {
 }
 
 async function logout(cookie) {
-  resetRateForTest('lifecycle-logout');
+  await resetRateForTest('lifecycle-logout');
   const headers = { 'x-forwarded-for': 'lifecycle-logout' };
   if (cookie) headers['cookie'] = `tp_session_v1=${cookie}`;
   const req = new Request('http://localhost/api/auth/logout', { method: 'POST', headers });

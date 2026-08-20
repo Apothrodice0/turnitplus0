@@ -31,7 +31,7 @@ const loadOwnedReport = cache(async (id: string): Promise<OwnedReportResult> => 
   if (!token) return { status: "no-session" };
 
   const clientIp = (await headers()).get("x-forwarded-for")?.split(",")[0]?.trim() ?? "unknown";
-  const rate = checkRate(clientIp);
+  const rate = await checkRate(clientIp);
   if (!rate.allowed) return { status: "no-session" };
 
   const client = await getReportsDbClient();

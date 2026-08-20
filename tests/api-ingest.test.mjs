@@ -26,8 +26,16 @@ const db = new Database(dbPath);
 applyMigrations(db, drizzleDir);
 db.close();
 process.env.INGEST_DB_PATH = dbPath;
+// The rate limiter (lib/rate-limit.ts) resolves its DB via TURSO_DATABASE_URL
+// same as every other route, which this file deliberately deletes above to
+// exercise /api/ingest's own separate local-file fallback path. Point the
+// rate limiter's own test-only escape hatch at the same already-migrated
+// file instead (it has rate_limit_buckets from the same applyMigrations()
+// call above) — this must never be set outside tests; see
+// lib/rate-limit.ts's own comment on RATE_LIMIT_TEST_DB_URL.
+process.env.RATE_LIMIT_TEST_DB_URL = `file:${dbPath}`;
 
-resetRateForTest('test-client');
+await resetRateForTest('test-client');
 
 async function callRoute(body, headers = {}) {
   const req = new Request('http://localhost/api/ingest', { method: 'POST', body: JSON.stringify(body), headers: { 'content-type': 'application/json', ...headers } });
@@ -69,7 +77,7 @@ res = await callRoute({ text, contributionPolicyVersion: 'policy-v1', provenance
 assert(res.status === 400, 'mismatched provenance rejected');
 
 // rate limiting: make MAX_TOKENS+1 calls quickly
-resetRateForTest('test-client');
+await resetRateForTest('test-client');
 for (let i = 0; i < 11; i++) {
   res = await callRoute({ text: `call ${i}`, contributionPolicyVersion: 'policy-v1' });
   if (i < 10) {

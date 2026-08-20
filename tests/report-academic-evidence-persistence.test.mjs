@@ -64,7 +64,7 @@ function samplePayload(overrides = {}) {
 }
 
 async function postReport(deviceKey, clientTag, { payloadOverrides = {} } = {}) {
-  resetRateForTest(clientTag);
+  await resetRateForTest(clientTag);
   const payload = samplePayload(payloadOverrides);
   const req = new Request('http://localhost/api/reports', {
     method: 'POST',
@@ -88,7 +88,7 @@ async function postReport(deviceKey, clientTag, { payloadOverrides = {} } = {}) 
 }
 
 async function getReport(deviceKey, id, clientTag) {
-  resetRateForTest(clientTag);
+  await resetRateForTest(clientTag);
   const req = new Request(`http://localhost/api/reports/${id}?deviceKey=${encodeURIComponent(deviceKey)}`, {
     headers: { 'x-forwarded-for': clientTag },
   });

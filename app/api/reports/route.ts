@@ -24,7 +24,7 @@ function clientIpFrom(request: Request) {
 
 export async function POST(request: Request) {
   try {
-    const rate = checkRate(clientIpFrom(request));
+    const rate = await checkRate(clientIpFrom(request));
     if (!rate.allowed) {
       return new NextResponse(JSON.stringify({ error: 'Too many requests' }), { status: 429, headers: { 'Retry-After': String(rate.retryAfter) } });
     }
@@ -222,7 +222,7 @@ export async function POST(request: Request) {
 
 export async function GET(request: Request) {
   try {
-    const rate = checkRate(clientIpFrom(request));
+    const rate = await checkRate(clientIpFrom(request));
     if (!rate.allowed) {
       return new NextResponse(JSON.stringify({ error: 'Too many requests' }), { status: 429, headers: { 'Retry-After': String(rate.retryAfter) } });
     }

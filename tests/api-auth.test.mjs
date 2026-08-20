@@ -32,7 +32,7 @@ function extractCookie(response) {
 }
 
 async function signup(body, ip = 'auth-test-signup') {
-  resetAuthRateForTest(ip);
+  await resetAuthRateForTest(ip);
   const req = new Request('http://localhost/api/auth/signup', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-forwarded-for': ip },
@@ -42,7 +42,7 @@ async function signup(body, ip = 'auth-test-signup') {
 }
 
 async function login(body, ip = 'auth-test-login') {
-  resetAuthRateForTest(ip);
+  await resetAuthRateForTest(ip);
   const req = new Request('http://localhost/api/auth/login', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-forwarded-for': ip },
@@ -52,7 +52,7 @@ async function login(body, ip = 'auth-test-login') {
 }
 
 async function me(cookieValue, ip = 'auth-test-me') {
-  resetRateForTest(ip);
+  await resetRateForTest(ip);
   const headers = { 'x-forwarded-for': ip };
   if (cookieValue) headers['cookie'] = `tp_session_v1=${cookieValue}`;
   const req = new Request('http://localhost/api/auth/me', { headers });
@@ -60,7 +60,7 @@ async function me(cookieValue, ip = 'auth-test-me') {
 }
 
 async function logout(cookieValue, ip = 'auth-test-logout') {
-  resetRateForTest(ip);
+  await resetRateForTest(ip);
   const headers = { 'x-forwarded-for': ip };
   if (cookieValue) headers['cookie'] = `tp_session_v1=${cookieValue}`;
   const req = new Request('http://localhost/api/auth/logout', { method: 'POST', headers });
@@ -184,7 +184,7 @@ async function logout(cookieValue, ip = 'auth-test-logout') {
 // independent) so attempts actually accumulate against the same bucket.
 {
   const ip = 'auth-rate-limit-test';
-  resetAuthRateForTest(ip);
+  await resetAuthRateForTest(ip);
   let sawLimit = false;
   for (let i = 0; i < 10; i++) {
     const req = new Request('http://localhost/api/auth/login', {

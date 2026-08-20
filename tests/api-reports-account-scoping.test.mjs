@@ -37,7 +37,7 @@ function extractCookie(response) {
 }
 
 async function postReport(deviceKey, { cookie, id, title = 'scoping.pdf' } = {}) {
-  resetRateForTest('scoping-post');
+  await resetRateForTest('scoping-post');
   const reportId = id ?? nextId();
   const headers = { 'content-type': 'application/json', 'x-forwarded-for': 'scoping-post' };
   if (cookie) headers['cookie'] = `tp_session_v1=${cookie}`;
@@ -63,7 +63,7 @@ async function postReport(deviceKey, { cookie, id, title = 'scoping.pdf' } = {})
 }
 
 async function listReports({ deviceKey, cookie } = {}) {
-  resetRateForTest('scoping-list');
+  await resetRateForTest('scoping-list');
   const headers = { 'x-forwarded-for': 'scoping-list' };
   if (cookie) headers['cookie'] = `tp_session_v1=${cookie}`;
   const url = deviceKey ? `http://localhost/api/reports?deviceKey=${encodeURIComponent(deviceKey)}` : 'http://localhost/api/reports';
@@ -72,7 +72,7 @@ async function listReports({ deviceKey, cookie } = {}) {
 }
 
 async function getReport(id, { deviceKey, cookie } = {}) {
-  resetRateForTest('scoping-get');
+  await resetRateForTest('scoping-get');
   const headers = { 'x-forwarded-for': 'scoping-get' };
   if (cookie) headers['cookie'] = `tp_session_v1=${cookie}`;
   const url = deviceKey ? `http://localhost/api/reports/${id}?deviceKey=${encodeURIComponent(deviceKey)}` : `http://localhost/api/reports/${id}`;
@@ -81,7 +81,7 @@ async function getReport(id, { deviceKey, cookie } = {}) {
 }
 
 async function signup(email, deviceKey) {
-  resetAuthRateForTest('scoping-signup');
+  await resetAuthRateForTest('scoping-signup');
   const req = new Request('http://localhost/api/auth/signup', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-forwarded-for': 'scoping-signup' },
@@ -92,7 +92,7 @@ async function signup(email, deviceKey) {
 }
 
 async function login(email, deviceKey) {
-  resetAuthRateForTest('scoping-login');
+  await resetAuthRateForTest('scoping-login');
   const req = new Request('http://localhost/api/auth/login', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-forwarded-for': 'scoping-login' },

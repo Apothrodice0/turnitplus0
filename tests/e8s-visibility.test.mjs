@@ -77,7 +77,7 @@ function nextIp(label) {
 
 async function callGet(routeModule, url, token) {
   const ip = nextIp("get");
-  resetRateForTest(ip);
+  await resetRateForTest(ip);
   const headers = { "x-forwarded-for": ip };
   if (token) headers["cookie"] = `tp_session_v1=${token}`;
   const req = new Request(url, { headers });
@@ -86,7 +86,7 @@ async function callGet(routeModule, url, token) {
 
 async function callPost(routeModule, url, token, body) {
   const ip = nextIp("post");
-  resetRateForTest(ip);
+  await resetRateForTest(ip);
   const headers = { "content-type": "application/json", "x-forwarded-for": ip };
   if (token) headers["cookie"] = `tp_session_v1=${token}`;
   const req = new Request(url, { method: "POST", headers, body: JSON.stringify(body) });

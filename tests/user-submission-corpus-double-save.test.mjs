@@ -59,7 +59,7 @@ function nextId() {
 }
 
 async function signup(email, deviceKey) {
-  resetAuthRateForTest('e8f-signup-' + email);
+  await resetAuthRateForTest('e8f-signup-' + email);
   const req = new Request('http://localhost/api/auth/signup', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-forwarded-for': 'e8f-signup-' + email },
@@ -77,7 +77,7 @@ async function signup(email, deviceKey) {
 }
 
 async function postReport(deviceKey, { cookie, id, title = 'e8f.pdf', text, score = 12, archiveScore = 9, extraPayload = {} } = {}) {
-  resetRateForTest('e8f-post');
+  await resetRateForTest('e8f-post');
   const reportId = id ?? nextId();
   const headers = { 'content-type': 'application/json', 'x-forwarded-for': 'e8f-post' };
   if (cookie) headers['cookie'] = `tp_session_v1=${cookie}`;
@@ -103,7 +103,7 @@ async function postReport(deviceKey, { cookie, id, title = 'e8f.pdf', text, scor
 }
 
 async function getReport(id, { deviceKey, cookie } = {}) {
-  resetRateForTest('e8f-get');
+  await resetRateForTest('e8f-get');
   const headers = { 'x-forwarded-for': 'e8f-get' };
   if (cookie) headers['cookie'] = `tp_session_v1=${cookie}`;
   const url = deviceKey ? `http://localhost/api/reports/${id}?deviceKey=${encodeURIComponent(deviceKey)}` : `http://localhost/api/reports/${id}`;

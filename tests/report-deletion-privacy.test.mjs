@@ -55,7 +55,7 @@ function nextId() {
 }
 
 async function signup(email, deviceKey) {
-  resetAuthRateForTest('deletion-signup-' + email);
+  await resetAuthRateForTest('deletion-signup-' + email);
   const req = new Request('http://localhost/api/auth/signup', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-forwarded-for': 'deletion-signup-' + email },
@@ -70,7 +70,7 @@ async function signup(email, deviceKey) {
 }
 
 async function postReport(deviceKey, { cookie, id, title = 'deletion.pdf', text } = {}) {
-  resetRateForTest('deletion-post');
+  await resetRateForTest('deletion-post');
   const reportId = id ?? nextId();
   const headers = { 'content-type': 'application/json', 'x-forwarded-for': 'deletion-post' };
   if (cookie) headers['cookie'] = `tp_session_v1=${cookie}`;
@@ -96,7 +96,7 @@ async function postReport(deviceKey, { cookie, id, title = 'deletion.pdf', text 
 }
 
 async function deleteReport(id, { deviceKey, cookie } = {}) {
-  resetRateForTest('deletion-delete');
+  await resetRateForTest('deletion-delete');
   const headers = { 'x-forwarded-for': 'deletion-delete' };
   if (cookie) headers['cookie'] = `tp_session_v1=${cookie}`;
   const url = deviceKey ? `http://localhost/api/reports/${id}?deviceKey=${encodeURIComponent(deviceKey)}` : `http://localhost/api/reports/${id}`;

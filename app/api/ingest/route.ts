@@ -15,7 +15,7 @@ export async function POST(request: Request) {
     // Rate limiting
     const forwarded = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || 'unknown';
     const clientIp = forwarded.split(',')[0].trim();
-    const rate = checkRate(clientIp);
+    const rate = await checkRate(clientIp);
     if (!rate.allowed) {
       return new NextResponse(JSON.stringify({ error: 'Too many requests' }), { status: 429, headers: { 'Retry-After': String(rate.retryAfter) } });
     }
