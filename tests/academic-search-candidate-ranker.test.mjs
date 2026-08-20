@@ -52,51 +52,52 @@ test("is deterministic across repeated calls", () => {
   assert.deepEqual(first, second);
 });
 
-// --- Phase 5: queryType-based ranking (real bug this fixes — see candidate-ranker.ts's own comment) ---
+// --- specificity-based ranking (real bug this fixes — see candidate-ranker.ts's own comment) ---
 
-test("Phase 5: a candidate found ONLY by a keyword query outranks several otherwise-tied candidates found only by sentence queries", () => {
+test("a candidate found by a highly specific query (near-zero queryTotalResults) outranks several otherwise-tied candidates found only by generic queries", () => {
   // Reproduces the real production bug: several candidates identically
   // scored on every existing signal (doi, url, textAvailable, single
   // contributor) used to fall back to an alphabetical candidateKey
   // tiebreak with zero relevance to the actual match — meaning a real
-  // candidate discovered specifically because of the higher-precision
-  // keyword-query strategy could still lose to arbitrary noise.
-  const commonShape = { doi: "10.1007/noise", url: "https://example.com/x", textAvailable: true, contributors: [{ providerId: "p", providerRelevance: null, queryType: "sentence" }] };
+  // candidate discovered specifically because its query matched almost
+  // nothing else in the provider's index could still lose to arbitrary
+  // noise found via a broad, generic query.
+  const commonShape = { doi: "10.1007/noise", url: "https://example.com/x", textAvailable: true, contributors: [{ providerId: "p", providerRelevance: null, queryType: "sentence", queryTotalResults: 5000 }] };
   const noiseA = candidate("10.1007/noise-a", { ...commonShape, doi: "10.1007/noise-a" });
   const noiseB = candidate("10.1007/noise-b", { ...commonShape, doi: "10.1007/noise-b" });
   const realMatch = candidate("10.1371/real-match", {
     doi: "10.1371/real-match", url: "https://example.com/y", textAvailable: true,
-    contributors: [{ providerId: "europe-pmc", providerRelevance: null, queryType: "keyword" }],
+    contributors: [{ providerId: "europe-pmc", providerRelevance: null, queryType: "keyword", queryTotalResults: 2 }],
   });
 
   const ranked = rankAcademicCandidates([noiseA, noiseB, realMatch]);
-  assert.equal(ranked[0].candidateKey, "10.1371/real-match", "the keyword-discovered real match must not lose an otherwise-arbitrary tie");
+  assert.equal(ranked[0].candidateKey, "10.1371/real-match", "the highly-specific real match must not lose an otherwise-arbitrary tie");
 });
 
-test("Phase 5: a candidate found by BOTH a sentence and a keyword-type contributor still only receives the bonus once (not doubled)", () => {
-  const mixed = candidate("mixed", {
-    doi: "10.1/mixed",
+test("a candidate with TWO highly-specific contributors receives the specificity bonus once (max, not summed)", () => {
+  const doubleSpecific = candidate("double-specific", {
+    doi: "10.1/double-specific",
     contributors: [
-      { providerId: "a", providerRelevance: null, queryType: "sentence" },
-      { providerId: "b", providerRelevance: null, queryType: "keyword" },
+      { providerId: "a", providerRelevance: null, queryType: "sentence", queryTotalResults: 2 },
+      { providerId: "b", providerRelevance: null, queryType: "keyword", queryTotalResults: 3 },
     ],
   });
-  const keywordOnly = candidate("keyword-only", {
-    doi: "10.1/keyword-only",
-    contributors: [{ providerId: "c", providerRelevance: null, queryType: "keyword" }],
+  const singleSpecific = candidate("single-specific", {
+    doi: "10.1/single-specific",
+    contributors: [{ providerId: "c", providerRelevance: null, queryType: "keyword", queryTotalResults: 2 }],
   });
-  const ranked = rankAcademicCandidates([keywordOnly, mixed]);
-  // mixed has an extra contributor (additionalContributor bonus) so it
-  // should rank first — but the keyword bonus itself must not multiply per
-  // matching contributor, or this assertion would still pass for the wrong
-  // reason; the real check is that the score gap equals exactly one
-  // additionalContributor weight, not one additionalContributor PLUS an
-  // extra keyword bonus.
-  assert.equal(ranked[0].candidateKey, "mixed");
+  const ranked = rankAcademicCandidates([singleSpecific, doubleSpecific]);
+  // doubleSpecific has an extra contributor (additionalContributor bonus)
+  // so it should rank first — but the specificity bonus itself must not
+  // sum across contributors (2 + 3 both near-maximally specific), or this
+  // assertion would still pass for the wrong reason; the real check is
+  // that the score gap equals exactly one additionalContributor weight,
+  // not one additionalContributor PLUS a second specificity bonus.
+  assert.equal(ranked[0].candidateKey, "double-specific");
 });
 
-test("Phase 5: a candidate with no queryType on any contributor (legacy/manually-built fixture) is treated as no bonus, not an error", () => {
-  const legacy = candidate("legacy", { doi: "10.1/legacy" }); // contributors default has no queryType field at all
+test("a candidate with no queryTotalResults on any contributor (legacy/manually-built fixture, or a provider that doesn't report one) is treated as no specificity bonus, not an error", () => {
+  const legacy = candidate("legacy", { doi: "10.1/legacy" }); // contributors default has no queryTotalResults field at all
   assert.doesNotThrow(() => rankAcademicCandidates([legacy]));
 });
 

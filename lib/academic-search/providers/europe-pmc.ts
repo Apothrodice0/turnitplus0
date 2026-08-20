@@ -97,7 +97,7 @@ function isFullTextEligible(item: EuropePmcSearchResult): boolean {
   return Boolean(item.pmcid) && item.isOpenAccess === "Y";
 }
 
-function mapEuropePmcResult(item: EuropePmcSearchResult, queryText: string): AcademicSearchResult {
+function mapEuropePmcResult(item: EuropePmcSearchResult, queryText: string, queryTotalResults: number | null): AcademicSearchResult {
   return {
     providerId: "europe-pmc",
     externalId: item.pmcid ?? item.id,
@@ -111,6 +111,7 @@ function mapEuropePmcResult(item: EuropePmcSearchResult, queryText: string): Aca
     querySignalUsed: queryText,
     // Europe PMC's search response carries no per-result relevance/score field (results are simply returned in relevance order when no sort param is given) — left null rather than invented.
     providerRelevance: null,
+    queryTotalResults,
   };
 }
 
@@ -194,7 +195,8 @@ export function createEuropePmcAcademicSearchProvider(config: Partial<EuropePmcP
     async search(query: AcademicSearchQuery): Promise<AcademicSearchResult[]> {
       const payload = await europePmcRequest<EuropePmcSearchResponse>(buildSearchUrl(query, resolved), resolved);
       const items = payload?.resultList?.result ?? [];
-      return items.map((item) => mapEuropePmcResult(item, query.queryText));
+      const queryTotalResults = typeof payload?.hitCount === "number" ? payload.hitCount : null;
+      return items.map((item) => mapEuropePmcResult(item, query.queryText, queryTotalResults));
     },
 
     async getMetadata(externalId: string): Promise<Partial<AcademicSearchResult> | null> {
@@ -203,7 +205,7 @@ export function createEuropePmcAcademicSearchProvider(config: Partial<EuropePmcP
       try {
         const payload = await europePmcRequest<EuropePmcSearchResponse>(`${baseUrl}/search?${params.toString()}`, resolved);
         const item = payload?.resultList?.result?.[0];
-        return item ? mapEuropePmcResult(item, "") : null;
+        return item ? mapEuropePmcResult(item, "", null) : null;
       } catch {
         return null;
       }

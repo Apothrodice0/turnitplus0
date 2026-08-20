@@ -52,9 +52,16 @@ import { tokens } from "../lib/similarity-core.ts";
  *  2. http-content-retriever.ts's citation_pdf_url following: an HTML
  *     landing page's own citation_pdf_url meta tag is followed once to
  *     reach the real article instead of stopping at an abstract.
- *  3. candidate-ranker.ts's foundByKeywordQuery weight (3 -> 5): without
- *     this raise, the real candidate (score 7) still loses to unrelated
- *     noise (score 8, from hasDoi+hasUrl+textAvailable alone) and never
+ *  3. candidate-ranker.ts's specificity-based bonus (queryTotalResults):
+ *     the real candidate is the ONLY record in this synthetic corpus whose
+ *     title/abstract vocabulary satisfies a conjunctive-metadata query
+ *     (numFound 1 — mirrors the real live "bayesvalidrox surrogate model"
+ *     -> numFound 3 case), while the noise batch below stands in for a
+ *     broad, non-specific hit (numFound 5000, mirroring the generic-query
+ *     numFound this investigation measured against real unrelated
+ *     candidates) — without a real specificity signal, the real candidate
+ *     (score 4: hasDoi+hasUrl only, one contributor, textAvailable false)
+ *     loses to the noise (score 8: hasDoi+hasUrl+textAvailable) and never
  *     reaches text retrieval — see this test's own NOISE_CANDIDATE_COUNT
  *     comment for the exact arithmetic this fixture is built to prove.
  *
@@ -110,10 +117,12 @@ function queryWords(queryText) {
  * count or, if repeated identically every call, inflate their own score
  * via additionalContributor) — each with hasDoi + hasUrl +
  * textAvailable=true and exactly one contributor, precisely matching the
- * real live pattern (score 8, one contributor). At the OLD
- * foundByKeywordQuery weight of 3, all 8 would outrank the real candidate
- * (score 8 vs 7) and push it outside maxCandidatesToRetrieve (5); at the
- * fixed weight of 5, the real candidate (score 9) outranks all 8. This is
+ * real live pattern (score 8, one contributor), and a generic
+ * (non-specific) queryTotalResults standing in for a broad sentence-query
+ * hit. Without the specificity signal, all 8 would outrank the real
+ * candidate (score 8 vs 4) and push it outside maxCandidatesToRetrieve
+ * (5); with it, the real candidate (score 4 + up to 8 specificity = up to
+ * 12) outranks all 8 (score 8, numFound 5000 -> specificity 0). This is
  * what makes the final COMPLETE_WITH_MATCHES assertion below a genuine
  * regression guard for the ranking fix, not just a happy-path check.
  */
@@ -139,6 +148,10 @@ function mockOpenAireProvider() {
           textAvailable: false, // OpenAIRE's real Graph API never reports this true — see providers/openaire.ts.
           querySignalUsed: query.queryText,
           providerRelevance: null,
+          // This synthetic corpus has exactly one record whose title/abstract
+          // vocabulary satisfies a conjunctive query — mirrors the real live
+          // "bayesvalidrox surrogate model" -> numFound 3 case.
+          queryTotalResults: 1,
         });
       }
       if (!noiseEmitted) {
@@ -156,6 +169,10 @@ function mockOpenAireProvider() {
             textAvailable: true,
             querySignalUsed: query.queryText,
             providerRelevance: null,
+            // Stands in for a broad, non-specific sentence-query hit — well
+            // into "generic" territory, matching the numFound this
+            // investigation measured against real unrelated candidates.
+            queryTotalResults: 5000,
           });
         }
       }

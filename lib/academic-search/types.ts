@@ -88,6 +88,18 @@ export type AcademicSearchResult = {
    * treated as "type unknown" by candidate-ranker.ts, not an error.
    */
   queryType?: "sentence" | "keyword";
+  /**
+   * The provider's own reported total-match count for the query that
+   * produced this result (OpenAIRE's header.numFound, Europe PMC's
+   * hitCount) — never the number of items actually returned (that's
+   * bounded by page size). candidate-ranker.ts uses this as a specificity
+   * signal: a query that matched almost nothing in a provider's whole
+   * index is strong evidence the result is a genuine, narrow match rather
+   * than a coincidental phrase overlap. Optional/absent-safe: a provider
+   * that does not expose this (or a manually-built fixture) is treated as
+   * "specificity unknown," not an error.
+   */
+  queryTotalResults?: number | null;
 };
 
 export type AcademicSearchProviderError = {

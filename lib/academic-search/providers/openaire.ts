@@ -131,7 +131,7 @@ function resultUrl(item: OpenAireResult, doi: string | null): string | null {
   return null;
 }
 
-function mapOpenAireResult(item: OpenAireResult, queryText: string): AcademicSearchResult {
+function mapOpenAireResult(item: OpenAireResult, queryText: string, queryTotalResults: number | null): AcademicSearchResult {
   const authors = Array.isArray(item.authors)
     ? item.authors.map((a) => a.fullName?.trim()).filter((name): name is string => Boolean(name))
     : null;
@@ -150,6 +150,7 @@ function mapOpenAireResult(item: OpenAireResult, queryText: string): AcademicSea
     querySignalUsed: queryText,
     // No documented per-result relevance/score field (only header.maxScore for the whole page) — left null rather than invented, matching providers/core.ts's own convention.
     providerRelevance: null,
+    queryTotalResults,
   };
 }
 
@@ -251,14 +252,15 @@ export function createOpenAireAcademicSearchProvider(config: Partial<OpenAirePro
     async search(query: AcademicSearchQuery): Promise<AcademicSearchResult[]> {
       const payload = await openAireRequest<OpenAireSearchResponse>(buildSearchUrl(query, resolved), resolved);
       const items = Array.isArray(payload.results) ? payload.results : [];
-      return items.map((item) => mapOpenAireResult(item, query.queryText));
+      const queryTotalResults = typeof payload.header?.numFound === "number" ? payload.header.numFound : null;
+      return items.map((item) => mapOpenAireResult(item, query.queryText, queryTotalResults));
     },
 
     async getMetadata(externalId: string): Promise<Partial<AcademicSearchResult> | null> {
       const baseUrl = resolved.baseUrl ?? "https://api.openaire.eu/graph/v3/research-products";
       try {
         const item = await openAireRequest<OpenAireResult>(`${baseUrl}/${encodeURIComponent(externalId)}`, resolved);
-        return mapOpenAireResult(item, "");
+        return mapOpenAireResult(item, "", null);
       } catch {
         return null;
       }

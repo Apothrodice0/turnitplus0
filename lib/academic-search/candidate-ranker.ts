@@ -16,39 +16,31 @@ export type CandidateRankingWeights = {
   additionalContributor: number;
   providerRelevance: number;
   /**
-   * Phase 5 addition: awarded once if ANY contributor came from a
-   * queryType "keyword" query (lib/academic-search/phrase-extractor.ts's
-   * extractKeywordQueries) rather than only "sentence" queries. Real,
-   * confirmed gap this closes: a candidate found ONLY by one precision-
-   * engineered keyword query (queryType "keyword", 1 contributor) was
-   * previously tied in rankScore with several genuinely irrelevant
-   * candidates ALSO at 1 contributor with textAvailable/doi/url — and lost
-   * the tie to an arbitrary alphabetical candidateKey comparison, landing
-   * outside maxCandidatesToRetrieve despite being the real match (see this
-   * phase's own final report). A keyword query exists specifically because
-   * it is a higher-precision, lower-recall signal than a full sentence —
-   * this weight reflects that its contributors deserve real ranking credit,
-   * not just a tiebreak nudge.
+   * Full weight awarded when a candidate's most specific contributor came
+   * from a query that matched almost nothing else in its provider's index
+   * (queryTotalResults near 0); scaled down (via specificityScore below)
+   * toward 0 as that count grows toward a "generic query" ceiling, and 0
+   * when no contributor reports a count at all.
    *
-   * "Investigate two production issues" ISSUE 1: value raised from 3 to 5
-   * (see DEFAULT_CANDIDATE_RANKING_WEIGHTS) after a real, measured gap:
-   * OpenAIRE never reports textAvailable (providers/openaire.ts's own
-   * header comment — no full-text field exists in that API's response
-   * shape at all), so a genuine OpenAIRE-only match — found via this exact
-   * signal, phrase-extractor.ts's topicOnlyQueryCount included, since that
-   * query is also tagged queryType "keyword" — starts 4 points behind an
-   * unrelated Europe PMC record on textAvailable alone. Measured live
-   * against a real OpenAIRE-indexed paper: the genuine source scored
-   * hasDoi(3) + hasUrl(1) + foundByKeywordQuery(3) = 7, while 42 entirely
-   * unrelated Europe PMC candidates — found ONLY by generic sentence
-   * queries, none of them keyword-matched — sat at hasDoi(3) + hasUrl(1) +
-   * textAvailable(4) = 8, one point ahead, pushing the real match to rank
-   * 45 and out of maxCandidatesToRetrieve. Confirmed the raise is targeted,
-   * not a blunt across-the-board lift: none of those 42 noise candidates
-   * carry a keyword-type contributor, so their own score is unaffected by
-   * this change; only a genuinely precision-matched candidate benefits.
+   * Replaces the earlier flat `foundByKeywordQuery` bonus (awarded once for
+   * ANY keyword-type contributor, regardless of how many other results that
+   * exact query also matched). That flat version closed a real gap — see
+   * git history on this field for the original measured case — but a later
+   * differential test against two more real documents ("Approved to
+   * implement the ranking fix" round) proved it both too coarse AND, when a
+   * first attempt replaced it with raw specificity, exploitable: a large
+   * multi-topic aggregator PDF (Europe PMC's "Full GSA Abstract Book",
+   * hundreds of unrelated abstracts in one record) coincidentally matched
+   * several sentence-window queries from BOTH unrelated real test documents
+   * at low-looking hitCount values (2-95), because Europe PMC's hitCount is
+   * a full-text search over a large heterogeneous corpus — a low count
+   * there is much weaker evidence of genuine specificity than the same
+   * count from OpenAIRE's metadata-only conjunctive search. See
+   * PROVIDER_SPECIFICITY_TRUST below, and the offline ranking experiment
+   * (_ranking_experiment.mjs, run against real captured candidate sets for
+   * both documents) that measured this before it was implemented here.
    */
-  foundByKeywordQuery: number;
+  specificityBonus: number;
   /**
    * "Investigate two real detection issues" ISSUE 2: awarded once when a
    * candidate was independently returned by 2+ DISTINCT providers (not
@@ -80,9 +72,47 @@ export const DEFAULT_CANDIDATE_RANKING_WEIGHTS: CandidateRankingWeights = {
   textAvailable: 4,
   additionalContributor: 2,
   providerRelevance: 1,
-  foundByKeywordQuery: 5,
+  specificityBonus: 8,
   multiProviderCorroboration: 5,
 };
+
+/** A query returning this many results or fewer from a provider is treated as maximally specific (specificityScore 1). */
+const HIGHLY_SPECIFIC_MAX_RESULTS = 5;
+/** A query returning this many results or more is treated as generic (specificityScore 0) — chosen from the real gap observed between genuine matches (single digits) and topically-unrelated noise (hundreds+) in the differential test documents. */
+const GENERIC_MIN_RESULTS = 500;
+
+/**
+ * How much a provider's own reported result count should be trusted as a
+ * specificity signal, 0..1. OpenAIRE searches metadata only (title/
+ * abstract/authors) with conjunctive (AND) term matching, so a low
+ * numFound is strong evidence of a narrow, specific match. Europe PMC
+ * full-text-searches a much larger, more heterogeneous corpus — measured
+ * live, a single large multi-topic aggregator record ("Full GSA Abstract
+ * Book PDF", hundreds of unrelated abstracts) scored hitCount as low as 2
+ * purely by coincidental phrase overlap, so the same raw count there is
+ * weaker evidence. A provider not listed here defaults to full trust
+ * rather than being silently zeroed out.
+ */
+const PROVIDER_SPECIFICITY_TRUST: Record<string, number> = {
+  openaire: 1,
+  "europe-pmc": 0.25,
+};
+
+/** Log-interpolated specificity in [0,1]; 0 when the provider reported no count at all (never guessed). */
+function specificityScore(queryTotalResults: number | null | undefined, providerId: string): number {
+  if (typeof queryTotalResults !== "number" || queryTotalResults <= 0) return 0;
+  const trust = PROVIDER_SPECIFICITY_TRUST[providerId] ?? 1;
+  if (queryTotalResults <= HIGHLY_SPECIFIC_MAX_RESULTS) return trust;
+  if (queryTotalResults >= GENERIC_MIN_RESULTS) return 0;
+  const raw = 1 - (Math.log(queryTotalResults) - Math.log(HIGHLY_SPECIFIC_MAX_RESULTS)) / (Math.log(GENERIC_MIN_RESULTS) - Math.log(HIGHLY_SPECIFIC_MAX_RESULTS));
+  return Math.max(0, Math.min(1, raw)) * trust;
+}
+
+/** The single most specific contributor determines the bonus — one genuinely narrow hit is real evidence even if every other contributor on the same candidate is generic noise. */
+function maxSpecificity(candidate: AcademicSearchCandidate): number {
+  const values = candidate.contributors.map((c) => specificityScore(c.queryTotalResults, c.providerId));
+  return values.length === 0 ? 0 : Math.max(...values);
+}
 
 function maxProviderRelevance(candidate: AcademicSearchCandidate): number {
   const values = candidate.contributors.map((c) => c.providerRelevance).filter((v): v is number => typeof v === "number");
@@ -101,7 +131,7 @@ function rankScore(candidate: AcademicSearchCandidate, weights: CandidateRanking
   if (candidate.textAvailable) score += weights.textAvailable;
   score += Math.max(0, candidate.contributors.length - 1) * weights.additionalContributor;
   score += maxProviderRelevance(candidate) * weights.providerRelevance;
-  if (candidate.contributors.some((c) => c.queryType === "keyword")) score += weights.foundByKeywordQuery;
+  score += maxSpecificity(candidate) * weights.specificityBonus;
   if (distinctContributingProviderCount(candidate) >= 2) score += weights.multiProviderCorroboration;
   return score;
 }
