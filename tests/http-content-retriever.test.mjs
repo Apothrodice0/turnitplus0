@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { createHttpContentRetriever, DEFAULT_HTTP_CONTENT_RETRIEVER_CONFIG } from "../lib/http-content-retriever.ts";
 import { DEFAULT_RETRIEVAL_SAFETY_CONFIG } from "../lib/retrieval-safety.ts";
@@ -281,6 +282,56 @@ test("citation_pdf_url: an SSRF-unsafe target is blocked exactly like an HTTP re
 
   assert.equal(result.status, "REDIRECT_BLOCKED", "the citation_pdf_url hop is re-validated by the same safety check as any other target URL");
   assert.equal(fetcher.calls.length, 1, "the blocked internal target must never actually be fetched");
+});
+
+// --- "Confirmed production discrepancy" investigation: real (unbundled) PDF parsing ---
+
+function pdfBytesResponse(bytes) {
+  return new Response(bytes, { status: 200, headers: { "content-type": "application/pdf" } });
+}
+
+test("REAL PDFJS: a genuine PDF is parsed through the actual (non-mocked) loadPdfjsDocument default, not just a stubbed one", async () => {
+  // Root-cause context (see next.config.ts's own comment): production
+  // retrieval of a real candidate PDF failed with "Setting up fake worker
+  // failed: Cannot find module '.../.next/server/chunks/pdf.worker.mjs'"
+  // — a failure specific to pdf.mjs running inside Next.js's Turbopack-
+  // bundled server chunks, where pdf.worker.mjs is not carried along to
+  // the relative path pdf.mjs computes at runtime. This test exercises
+  // the REAL pdfjs-dist code path (no loadPdfDocument override, unlike
+  // every other PDF test in this file) to guard the retrieval <-> PDF-
+  // parsing wiring itself.
+  //
+  // IMPORTANT LIMITATION, stated plainly: this test runs the same code
+  // unbundled (via tsx/plain Node), exactly like the passing standalone
+  // reproduction that never caught the real bug — it CANNOT reproduce a
+  // Turbopack/webpack bundling defect, only Next.js's own real
+  // `next build` + a served request can. next.config.ts's own
+  // serverExternalPackages test below is this suite's actual regression
+  // guard for the real fix; this test's job is narrower: prove the
+  // retrieval-to-pdfjs wiring is otherwise correct.
+  const pdfBuffer = await readFile(new URL("./fixtures/attention-is-all-you-need.pdf", import.meta.url));
+  const fetcher = createMockFetch([{ response: pdfBytesResponse(pdfBuffer) }]);
+  const retriever = createHttpContentRetriever({
+    fetcher, lookup: publicLookup(),
+    allowedContentTypes: ["text/html", "application/pdf"],
+    timeoutMs: 15_000,
+    maxResponseBytes: pdfBuffer.length + 1_000, // the real fixture (2.2MB) exceeds the default 2MB cap; this test is about PDF parsing, not the byte-limit case already covered by CASE J above
+  });
+  const result = await retriever.retrieve({ url: "https://example.org/paper.pdf" });
+
+  assert.equal(result.status, "SUCCESS");
+  assert.equal(result.contentType, "application/pdf");
+  assert.match(result.extractedText, /Attention Is All You Need/);
+});
+
+// --- next.config.ts's own fix for the Turbopack bundling defect above ---
+
+test("CONFIG REGRESSION: next.config.ts excludes pdfjs-dist from server bundling", async () => {
+  const config = (await import("../next.config.ts")).default;
+  assert.ok(
+    Array.isArray(config.serverExternalPackages) && config.serverExternalPackages.includes("pdfjs-dist"),
+    "removing this makes Turbopack bundle pdf.mjs without its co-located pdf.worker.mjs again — the exact real production failure this investigation found (\"Setting up fake worker failed\")",
+  );
 });
 
 test("DEFAULT_HTTP_CONTENT_RETRIEVER_CONFIG bounds are conservative", () => {
