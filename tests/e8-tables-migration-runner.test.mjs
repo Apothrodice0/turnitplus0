@@ -8,6 +8,7 @@ import { applyMigrationsLibsql } from '../lib/ingest.js';
 import {
   TARGET_MIGRATIONS,
   EXPECTED_TABLES_BY_MIGRATION,
+  EXPECTED_COLUMNS_BY_MIGRATION,
   ALL_TARGET_TABLES,
   EXPECTED_LEGACY_TABLES,
   EXPECTED_MIGRATION_SHA256,
@@ -16,12 +17,13 @@ import {
   sha256,
   checkPreflight,
   tableSetState,
+  columnSetState,
   runTargetMigrations,
 } from '../lib/e8-tables-migration-runner.ts';
 import { loadEnvFile, hostnameLabel, parseArgs } from '../tools/apply-e8-tables-migration.ts';
 
 /**
- * Phase E8E-D.1: tests for the isolated 0012-0021 migration runner.
+ * Phase E8E-D.1: tests for the isolated 0012-0023 migration runner.
  * Everything here runs against local, disposable SQLite files created and
  * destroyed within this file — nothing here ever touches a real Turso
  * database, production or otherwise. See lib/e8-tables-migration-runner.ts's
@@ -94,14 +96,14 @@ async function snapshotLegacyRows(client) {
 }
 
 test.after(() => {
-  for (const name of ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'happy', 'idempotent']) {
+  for (const name of ['a', 'b', 'b2', 'c', 'd', 'e', 'e2', 'f', 'g', 'h', 'i', 'j', 'k', 'happy', 'idempotent']) {
     cleanupDbFile(freshDbPath(name));
   }
 });
 
 // --- A: explicit allowlist ------------------------------------------------
 
-test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0022, in order, never touching 0000-0011', () => {
+test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0023, in order, never touching 0000-0011', () => {
   assert.deepEqual(TARGET_MIGRATIONS, [
     '0012_document_identities.sql',
     '0013_document_families.sql',
@@ -114,11 +116,29 @@ test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0022, in ord
     '0020_report_historical_match_snapshots.sql',
     '0021_historical_match_shadow_evaluations.sql',
     '0022_reuse_context_declarations.sql',
+    '0023_privacy_consent_and_report_identity_link.sql',
   ]);
   // Phase E8S Step 8: 0022_reuse_context_declarations.sql added
   // reuse_context_declarations, bringing the 15 E1-E8P tables across the
-  // original 10 migrations to 16 across 11.
-  assert.equal(ALL_TARGET_TABLES.length, 16, 'expected exactly the 16 E1-E8S tables across all 11 migrations');
+  // original 10 migrations to 16 across 11. Privacy hardening's
+  // 0023_privacy_consent_and_report_identity_link.sql adds zero new tables
+  // (it only adds columns to the already-existing saved_reports/users
+  // tables — see EXPECTED_COLUMNS_BY_MIGRATION), so this stays 16 across
+  // all 12 target migrations, not 17.
+  assert.equal(ALL_TARGET_TABLES.length, 16, 'expected exactly the 16 E1-E8S tables across all 12 target migrations');
+  assert.deepEqual(
+    EXPECTED_TABLES_BY_MIGRATION['0023_privacy_consent_and_report_identity_link.sql'],
+    [],
+    '0023 must be declared as creating zero new tables',
+  );
+  assert.deepEqual(
+    EXPECTED_COLUMNS_BY_MIGRATION['0023_privacy_consent_and_report_identity_link.sql'],
+    [
+      { table: 'saved_reports', column: 'document_identity_id' },
+      { table: 'users', column: 'corpus_reuse_consented_at' },
+    ],
+    '0023 must be declared as adding exactly these two columns',
+  );
 });
 
 // --- F: no execution of 0000-0011 (structural) ----------------------------
@@ -139,7 +159,7 @@ test('F: the runner module never does an unfiltered directory scan — no readdi
 
 // --- G: destructive SQL detection -----------------------------------------
 
-test('G: scanForDestructiveStatements finds real destructive keywords and finds none in the actual 10 target migration files', () => {
+test('G: scanForDestructiveStatements finds real destructive keywords and finds none in the actual 12 target migration files', () => {
   assert.deepEqual(scanForDestructiveStatements('CREATE TABLE IF NOT EXISTS x (id TEXT);'), []);
   assert.ok(scanForDestructiveStatements('DROP TABLE document_chunks;').length > 0);
   assert.ok(scanForDestructiveStatements('DELETE FROM users WHERE 1=1;').length > 0);
@@ -165,9 +185,19 @@ test('splitStatements correctly splits a real multi-statement migration file int
   }
 });
 
+test('splitStatements correctly splits 0023 (the first target migration to use ALTER TABLE, not just CREATE)', () => {
+  const content = fs.readFileSync(path.join(drizzleDir, '0023_privacy_consent_and_report_identity_link.sql'), 'utf8');
+  const statements = splitStatements(content);
+  assert.equal(statements.length, 3, 'expected exactly 2 ALTER TABLE statements + 1 CREATE INDEX');
+  for (const s of statements) assert.doesNotMatch(s, /^--/, 'no statement should be a leftover comment line');
+  assert.ok(/^ALTER TABLE saved_reports ADD COLUMN document_identity_id/i.test(statements[0]));
+  assert.ok(/^ALTER TABLE users ADD COLUMN corpus_reuse_consented_at/i.test(statements[1]));
+  assert.ok(/^CREATE INDEX/i.test(statements[2]));
+});
+
 // --- Section 9: disposable local DB — full happy-path run ------------------
 
-test('SECTION 9: fresh pre-0012 database — the runner applies all 10 migrations in order, creates all 15 tables, and preserves legacy rows exactly', async () => {
+test('SECTION 9: fresh pre-0012 database — the runner applies all 12 migrations in order, creates all 16 tables, adds 0023\'s columns, and preserves legacy row VALUES exactly', async () => {
   const dbFile = freshDbPath('happy');
   const client = await buildPreMigrationDb(dbFile);
   await seedRepresentativeLegacyRows(client);
@@ -184,9 +214,29 @@ test('SECTION 9: fresh pre-0012 database — the runner applies all 10 migration
   for (const t of ALL_TARGET_TABLES) assert.ok(tableNames.has(t), `expected table ${t} to exist after migration`);
   for (const t of EXPECTED_LEGACY_TABLES) assert.ok(tableNames.has(t), `legacy table ${t} must still exist`);
 
-  // J: legacy row preservation — byte-identical before/after
+  // J: legacy row preservation. Unlike every other target migration
+  // (0012-0022, which only ever create brand-new tables), 0023 additively
+  // alters the pre-existing legacy tables saved_reports/users themselves —
+  // so a bare deepEqual(after, before) on `SELECT *` rows would now fail on
+  // shape alone (two new nullable columns appear) even though nothing about
+  // the ORIGINAL data changed. Assert what actually matters instead: every
+  // column/value present before migration is byte-identical after, and the
+  // two newly-added columns exist and are NULL (a migration must never
+  // populate them — only application code does, on its own separate write
+  // path).
   const after = await snapshotLegacyRows(client);
-  assert.deepEqual(after, before, 'legacy rows must be exactly unchanged by a migration that only creates new tables');
+  for (const table of Object.keys(before)) {
+    assert.equal(after[table].length, before[table].length, `${table} row count must be unchanged by migration`);
+    for (let i = 0; i < before[table].length; i++) {
+      for (const [column, value] of Object.entries(before[table][i])) {
+        assert.equal(after[table][i][column], value, `${table}.${column} (row ${i}) must be unchanged by migration`);
+      }
+    }
+  }
+  const savedReportRow = after.saved_reports.find((r) => r.id === 'legacy-report-1');
+  assert.equal(savedReportRow.document_identity_id, null, "0023 must add document_identity_id as NULL to a pre-existing row, never populate it");
+  const userRow = after.users.find((r) => r.id === 'legacy-user-1');
+  assert.equal(userRow.corpus_reuse_consented_at, null, "0023 must add corpus_reuse_consented_at as NULL to a pre-existing row, never populate it");
 
   client.close();
 });
@@ -244,6 +294,37 @@ test('B: refuses when a target migration\'s tables exist in a mixed state (some 
   assert.ok(result.steps.some((s) => s.file === '0012_document_identities.sql' && s.status === 'applied'));
 
   client.close();
+});
+
+// --- B2: refusal when 0023's columns exist in a mixed state ----------------
+
+test('B2: refuses when 0023\'s columns exist in a mixed state (one of the two added columns present, not both)', async () => {
+  const dbFile = freshDbPath('b2');
+  const client = await buildPreMigrationDb(dbFile);
+
+  // Apply exactly 0012-0022 for real (via a temp dir excluding 0023), then
+  // hand-add only ONE of 0023's two columns — an "unexpected" partial state
+  // no legitimate prior run of this runner could produce (0023 applies as a
+  // single client.migrate() transaction, same as every other target
+  // migration).
+  const only0012to0022 = fs.mkdtempSync(path.join(os.tmpdir(), 'e8-b2-'));
+  for (const file of TARGET_MIGRATIONS.slice(0, -1)) {
+    fs.copyFileSync(path.join(drizzleDir, file), path.join(only0012to0022, file));
+  }
+  await applyMigrationsLibsql(client, only0012to0022);
+  await client.execute('ALTER TABLE users ADD COLUMN corpus_reuse_consented_at TEXT');
+  // Deliberately omit saved_reports.document_identity_id — the partial state.
+
+  const result = await runTargetMigrations(client, drizzleDir, { environmentLabel: 'local-test', expectedEnvironmentLabel: 'local-test' });
+  assert.equal(result.status, 'failed');
+  assert.equal(result.failedMigration, '0023_privacy_consent_and_report_identity_link.sql');
+  assert.match(result.error, /partially applied/);
+  assert.match(result.error, /saved_reports\.document_identity_id/);
+  // every migration before 0023 (unrelated, unaffected) must still have succeeded
+  assert.ok(result.steps.some((s) => s.file === '0022_reuse_context_declarations.sql' && s.status === 'already-applied'));
+
+  client.close();
+  fs.rmSync(only0012to0022, { recursive: true, force: true });
 });
 
 // --- D: refusal when migration content differs from the pinned version -----
@@ -411,5 +492,21 @@ test('tableSetState correctly distinguishes none/all/partial', async () => {
   await client.execute('CREATE TABLE document_identities (id TEXT PRIMARY KEY)');
   assert.equal(await tableSetState(client, ['document_identities']), 'all');
   assert.equal(await tableSetState(client, ['document_identities', 'document_families']), 'partial');
+  client.close();
+});
+
+test('columnSetState correctly distinguishes none/all/partial, and treats an empty column list as vacuously "all"', async () => {
+  const dbFile = freshDbPath('e2');
+  const client = await buildPreMigrationDb(dbFile);
+  const columns = [
+    { table: 'saved_reports', column: 'document_identity_id' },
+    { table: 'users', column: 'corpus_reuse_consented_at' },
+  ];
+  assert.equal(await columnSetState(client, columns), 'none');
+  await client.execute('ALTER TABLE saved_reports ADD COLUMN document_identity_id TEXT');
+  assert.equal(await columnSetState(client, columns), 'partial');
+  await client.execute('ALTER TABLE users ADD COLUMN corpus_reuse_consented_at TEXT');
+  assert.equal(await columnSetState(client, columns), 'all');
+  assert.equal(await columnSetState(client, []), 'all', 'a migration declaring zero columns has nothing left to apply');
   client.close();
 });

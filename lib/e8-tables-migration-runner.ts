@@ -5,8 +5,9 @@ import type { Client } from "@libsql/client";
 
 /**
  * Phase E8E-D.1: an isolated runner whose only job is applying migrations
- * 0012-0022 (the still-unapplied Phase A-E8 tables) to a database that is
- * otherwise already at the pre-0012 baseline. Deliberately separate from
+ * 0012-0023 (the still-unapplied Phase A-E8 tables, plus the privacy/data-
+ * lifecycle hardening columns 0023 adds) to a database that is otherwise
+ * already at the pre-0012 baseline. Deliberately separate from
  * lib/ingest.ts's applyMigrationsLibsql(), which replays every migration
  * file in drizzleDir from 0000 onward with no applied-state tracking —
  * correct only against an empty/fresh database (every existing test in
@@ -37,6 +38,7 @@ export const TARGET_MIGRATIONS = [
   "0020_report_historical_match_snapshots.sql",
   "0021_historical_match_shadow_evaluations.sql",
   "0022_reuse_context_declarations.sql",
+  "0023_privacy_consent_and_report_identity_link.sql",
 ] as const;
 
 export type TargetMigrationFile = (typeof TARGET_MIGRATIONS)[number];
@@ -62,9 +64,33 @@ export const EXPECTED_TABLES_BY_MIGRATION: Record<TargetMigrationFile, string[]>
   "0020_report_historical_match_snapshots.sql": ["report_historical_match_snapshots"],
   "0021_historical_match_shadow_evaluations.sql": ["historical_match_shadow_evaluations"],
   "0022_reuse_context_declarations.sql": ["reuse_context_declarations"],
+  // 0023 creates no new tables — it only adds columns to the already-
+  // existing saved_reports/users tables (see EXPECTED_COLUMNS_BY_MIGRATION
+  // below, which is what runTargetMigrations() actually checks applied-state
+  // against for this file instead).
+  "0023_privacy_consent_and_report_identity_link.sql": [],
 };
 
 export const ALL_TARGET_TABLES: string[] = TARGET_MIGRATIONS.flatMap((m) => EXPECTED_TABLES_BY_MIGRATION[m]);
+
+export type ExpectedColumn = { table: string; column: string };
+
+/**
+ * The column-adding counterpart to EXPECTED_TABLES_BY_MIGRATION, for a
+ * target migration (0023 is the first) that alters already-existing tables
+ * instead of creating new ones — tableSetState()'s table-existence check has
+ * nothing to observe for a migration with zero new tables, so
+ * runTargetMigrations() below checks columnSetState() instead whenever a
+ * file's EXPECTED_TABLES_BY_MIGRATION entry is empty. Every migration not
+ * listed here creates only new tables and is unaffected by this map's
+ * existence.
+ */
+export const EXPECTED_COLUMNS_BY_MIGRATION: Partial<Record<TargetMigrationFile, ExpectedColumn[]>> = {
+  "0023_privacy_consent_and_report_identity_link.sql": [
+    { table: "saved_reports", column: "document_identity_id" },
+    { table: "users", column: "corpus_reuse_consented_at" },
+  ],
+};
 
 /**
  * The tables this runner requires to already exist before it does anything
@@ -99,6 +125,7 @@ export const EXPECTED_MIGRATION_SHA256: Record<TargetMigrationFile, string> = {
   "0020_report_historical_match_snapshots.sql": "f915027d70eb1a8ffdd267abfa802eef8eddd8c2568eb1d97881df94df506d2e",
   "0021_historical_match_shadow_evaluations.sql": "757a34bf6ca225a20ac0db9f5673d3f4e51556781b11d184e434bd55b4ab668f",
   "0022_reuse_context_declarations.sql": "80f2d9391a0bd9b89cde22218abcc1438f2c7810d09324bc6dc99e1bbdc03fde",
+  "0023_privacy_consent_and_report_identity_link.sql": "ac9fbfb9bfe0e341a6bc9c07ca3fb2db7f38bf382c4e974be65e637466f6d970",
 };
 
 const DESTRUCTIVE_PATTERN = /\b(DROP\s+TABLE|DROP\s+INDEX|ALTER\s+TABLE\s+\S+\s+DROP|DELETE\s+FROM|TRUNCATE)\b/gi;
@@ -213,6 +240,28 @@ export async function tableSetState(client: Client, tables: string[]): Promise<T
   return "partial";
 }
 
+/**
+ * tableSetState()'s counterpart for a migration that adds columns to
+ * already-existing tables instead of creating new ones (see
+ * EXPECTED_COLUMNS_BY_MIGRATION's own comment) — same none/all/partial
+ * semantics, checked via PRAGMA table_info() per table instead of
+ * sqlite_master table existence. An empty `columns` list (a migration with
+ * neither new tables nor new columns — not a real case today, but a
+ * degenerate input this should still answer sensibly for) is vacuously
+ * "all": there is nothing left for such a migration to apply.
+ */
+export async function columnSetState(client: Client, columns: ExpectedColumn[]): Promise<TableSetState> {
+  if (columns.length === 0) return "all";
+  let present = 0;
+  for (const { table, column } of columns) {
+    const info = await client.execute(`PRAGMA table_info('${table}')`);
+    if (info.rows.some((r) => String(r.name) === column)) present += 1;
+  }
+  if (present === 0) return "none";
+  if (present === columns.length) return "all";
+  return "partial";
+}
+
 export type MigrationStepResult = {
   file: TargetMigrationFile;
   status: "applied" | "already-applied" | "would-apply";
@@ -259,14 +308,23 @@ export async function runTargetMigrations(
 
   for (const file of TARGET_MIGRATIONS) {
     const tables = EXPECTED_TABLES_BY_MIGRATION[file];
-    const state = await tableSetState(client, tables);
+    const columns = EXPECTED_COLUMNS_BY_MIGRATION[file];
+    // A migration with new tables is checked by table existence; one with
+    // none (0023) is checked by column existence instead — see
+    // columnSetState()'s own comment.
+    const state = tables.length > 0
+      ? await tableSetState(client, tables)
+      : await columnSetState(client, columns ?? []);
 
     if (state === "partial") {
+      const what = tables.length > 0
+        ? `some but not all of its tables exist (${tables.join(", ")})`
+        : `some but not all of its columns exist (${(columns ?? []).map((c) => `${c.table}.${c.column}`).join(", ")})`;
       return {
         status: "failed",
         steps,
         failedMigration: file,
-        error: `${file} appears partially applied — some but not all of its tables exist (${tables.join(", ")}). Refusing to guess; this needs manual inspection, not an automatic continuation.`,
+        error: `${file} appears partially applied — ${what}. Refusing to guess; this needs manual inspection, not an automatic continuation.`,
       };
     }
 
