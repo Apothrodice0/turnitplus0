@@ -43,11 +43,24 @@ export function ReportDetailShell({
   const [isDeleting, setIsDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
-  // Anonymous/device-key reports can only ever be resolved client-side (the
-  // device key lives in localStorage, never available during SSR) — mirrors
-  // the existing anonymous report-loading order elsewhere: local IndexedDB
-  // copy first, remote fetch only as a fallback.
+  // The server now sends the saved payload without waiting for expensive
+  // read-time historical/family enrichment. Render that payload immediately
+  // and hydrate richer fields in the background.
   useEffect(() => {
+    if (initialReport && !requiresClientResolution) {
+      let cancelled = false;
+      void fetchRemoteReport<SimilarityReport>(id, true).then((enriched) => {
+        if (!cancelled && enriched) setReport((current) => (current ? { ...current, ...enriched } : enriched));
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    // Anonymous/device-key reports can only ever be resolved client-side.
+    // Prefer the instant IndexedDB copy, then fetch the complete remote room
+    // in the background if the local copy exists; otherwise use the remote
+    // room as the primary source.
     if (!requiresClientResolution || initialReport) return;
     let cancelled = false;
     (async () => {
@@ -56,24 +69,13 @@ export function ReportDetailShell({
       if (local) {
         setReport(local);
         setStatus("found");
-        // Phase 7: the local IndexedDB copy is written once at generation
-        // time and never carries the server's own read-time enrichment
-        // (unifiedSimilarity, historicalSubmissionMatch, matchClassification,
-        // reuseContext — see lib/report-types.ts's primarySimilarityScore
-        // and app/api/reports/[id]/route.ts's own GET handler). Shown
-        // instantly above for speed, then quietly topped up here so an
-        // anonymous viewer — most of this product's traffic, since no
-        // account is required — still sees the real TurnitPlus Similarity
-        // headline rather than a silent archive-only fallback. Merged, not
-        // replaced, so nothing the local copy already had is ever lost if
-        // this fetch fails or returns something older.
-        const enriched = await fetchRemoteReport<SimilarityReport>(id);
+        const enriched = await fetchRemoteReport<SimilarityReport>(id, true);
         if (!cancelled && enriched) {
-          setReport((current) => (current ? { ...current, ...enriched } : current));
+          setReport((current) => (current ? { ...current, ...enriched } : enriched));
         }
         return;
       }
-      const remote = await fetchRemoteReport<SimilarityReport>(id);
+      const remote = await fetchRemoteReport<SimilarityReport>(id, true);
       if (cancelled) return;
       if (remote) {
         setReport(remote);
@@ -114,8 +116,8 @@ export function ReportDetailShell({
           <section className="ai-analysis-loading" aria-live="polite">
             <span aria-hidden="true" />
             <div>
-              <strong>Looking for this report</strong>
-              <p>Checking this device for a saved copy…</p>
+              <strong>Opening report…</strong>
+              <p>Checking this device for a saved copy.</p>
             </div>
           </section>
         </div>
@@ -133,15 +135,6 @@ export function ReportDetailShell({
     );
   }
 
-  // Phase 7 PRIORITY 1: the customer-facing headline is the unified result
-  // (archive + verified live academic evidence + eligible previous-submission
-  // evidence, already deduplicated into one score — see
-  // lib/unified-similarity.ts) whenever it has been computed for this report,
-  // never report.score/archiveScore directly and never a second, separately
-  // "added" percentage. Falls back to the existing archive-only score,
-  // labeled honestly as "Similarity result" rather than "TurnitPlus Similarity",
-  // for a report that predates Phase 6 or where the read-time computation
-  // itself failed — see primarySimilarityScore's own comment.
   const primaryScore = primarySimilarityScore(report);
   const isUnified = hasUnifiedSimilarity(report);
   const primaryLabel = isUnified ? "TurnitPlus Similarity" : "Similarity result";
@@ -195,8 +188,8 @@ export function ReportDetailShell({
         </div>
         <div>
           <span className="summary-chip">{report.wordCount.toLocaleString()} words</span>
-          <span className="summary-chip">{report.pageCount} pages</span>
-          <span className="summary-chip">{report.characterCount.toLocaleString()} characters</span>
+          <span className="summary-chip">{report.pageCount || Math.max(1, Math.ceil(report.wordCount / 450))} pages</span>
+          <span className="summary-chip">{report.characterCount ? report.characterCount.toLocaleString() : "—"} characters</span>
         </div>
       </div>
 
