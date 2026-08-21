@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { compareSubmissionToExternalText } from "../lib/academic-search/comparator.ts";
+import { computeDocumentCorrespondence, DEFAULT_DOCUMENT_CORRESPONDENCE_THRESHOLDS } from "../lib/document-correspondence.ts";
 
 const SHARED_PASSAGE =
   "deep sea plankton colonies exhibit synchronized bioluminescent flashing that propagates across a colony far faster than any individual organisms own reaction time would allow observations collected across multiple expeditions suggest";
@@ -59,6 +60,43 @@ test("handles empty text without throwing", () => {
   const result = compareSubmissionToExternalText("", "some external text that is otherwise perfectly normal");
   assert.equal(result.similarity, 0);
   assert.deepEqual(result.matchedPassages, []);
+});
+
+test("REGRESSION (Accuracy & Coverage Benchmark, 2026-08-21): a match fragmented into more than maxPassages spans is not undercounted", () => {
+  // Confirmed live: a genuine full-text exact copy scored comparisonSimilarity
+  // 100 but only 59/100 in the unified report, because
+  // lib/document-correspondence.ts's `passages` field (thresholds.maxPassages
+  // = 10) was the SOLE source this comparator drew matched word positions
+  // from — any span beyond the 10 longest was silently dropped from
+  // matchedPassages, even though computeDocumentCorrespondence's own
+  // matchedWordCount (acceptedPositions.size) already counted it correctly.
+  // Reproduce the fragmentation directly: 14 distinct, individually
+  // distinctive passages (each far more than the 8-word minimum passage
+  // length), separated in the SUBMITTED text by unique unshared filler so
+  // acceptedSimilaritySpans never merges them into fewer, larger spans.
+  const PHRASE_COUNT = 14;
+  const phrases = Array.from({ length: PHRASE_COUNT }, (_, i) => (
+    `phrase${i} concerning distinctive polymer crystallization dynamics under cryogenic pressure gradient conditions observed independently`
+  ));
+  const submitted = phrases
+    .map((phrase, i) => `${phrase} unrelatedfillerword${i}a unrelatedfillerword${i}b unrelatedfillerword${i}c`)
+    .join(" ");
+  const external = phrases.join(" and, separately, elsewhere in the source document, ");
+
+  const correspondence = computeDocumentCorrespondence(submitted, external, DEFAULT_DOCUMENT_CORRESPONDENCE_THRESHOLDS);
+  assert.ok(
+    correspondence.allMatchedPassages.length > DEFAULT_DOCUMENT_CORRESPONDENCE_THRESHOLDS.maxPassages,
+    `fixture must exceed maxPassages to reproduce the bug — got ${correspondence.allMatchedPassages.length} spans`,
+  );
+
+  const result = compareSubmissionToExternalText(submitted, external);
+  const totalMatchedWords = result.matchedPassages.reduce((sum, passage) => sum + passage.matchedWordCount, 0);
+  assert.equal(
+    totalMatchedWords,
+    correspondence.matchedWordCount,
+    "every accepted span's words must reach the comparator's matchedPassages, not just the top maxPassages(10)",
+  );
+  assert.ok(result.matchedPassages.length > DEFAULT_DOCUMENT_CORRESPONDENCE_THRESHOLDS.maxPassages, "matchedPassages must not be truncated to maxPassages");
 });
 
 test("a shared phrase shorter than the minimum passage length never becomes a reportable matched passage", () => {

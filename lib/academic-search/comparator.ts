@@ -64,8 +64,18 @@ export function compareSubmissionToExternalText(
   thresholds: DocumentCorrespondenceThresholds = DEFAULT_DOCUMENT_CORRESPONDENCE_THRESHOLDS,
 ): ComparisonResult {
   const result = computeDocumentCorrespondence(submittedText, externalText, thresholds);
-  const matchedPassages: MatchedPassage[] = result.passages.length > 0
-    ? result.passages.map((passage) => ({
+  // Accuracy & Coverage Benchmark finding (2026-08-21): must read
+  // result.allMatchedPassages here, NOT result.passages — the latter is
+  // truncated to thresholds.maxPassages (a display-preview bound) and
+  // silently dropped every word covered by the 11th+ matched span once a
+  // long match fragmented into more spans than that, undercounting a
+  // confirmed genuine 100%-similarity match down to as little as 59/100 in
+  // the unified score. See DocumentCorrespondenceResult.allMatchedPassages's
+  // own comment. `allMatchedPassages.length === 0` exactly when
+  // `passages.length === 0` too (same underlying spans, only truncation
+  // differs), so the exactCanonicalMatch fallback below is unaffected.
+  const matchedPassages: MatchedPassage[] = result.allMatchedPassages.length > 0
+    ? result.allMatchedPassages.map((passage) => ({
       submittedText: passage.submittedText,
       submittedWordStart: passage.submittedWordStart,
       submittedWordEnd: passage.submittedWordEnd,

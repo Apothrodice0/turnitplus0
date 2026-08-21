@@ -168,6 +168,28 @@ export type DocumentCorrespondenceResult = {
   externalWordCount: number;
   longestMatchWords: number;
   passages: CorrespondencePassage[];
+  /**
+   * Accuracy & Coverage Benchmark finding (2026-08-21): the SAME accepted
+   * spans `passages` is built from, before that field's own
+   * `.slice(0, thresholds.maxPassages)` truncation — additive, exposed for
+   * scoring consumers only. `passages` exists to bound how many passage
+   * PREVIEWS are worth carrying around (display concern; unchanged by this
+   * field, still capped at maxPassages exactly as before), but
+   * lib/academic-search/comparator.ts was using that same truncated array as
+   * its only source of matched WORD POSITIONS for scoring — silently
+   * dropping every word covered by the 11th+ span once a match fragmented
+   * into more spans than maxPassages (confirmed live: a genuine full-text
+   * exact copy, comparisonSimilarity 100, scored only 59/100 in the unified
+   * report because 10 of its ~15 accepted spans were discarded here).
+   * `matchedWordCount` above was never affected by this bug (`acceptedPositions.size`
+   * is independent of the passages slice) — only the SPAN-level breakdown
+   * matchedPassages is built from was undercounting. Costs nothing extra to
+   * compute: `passages` was always `allMatchedPassages.slice(0, maxPassages)`
+   * of this same already-built array. `passages.length <= maxPassages`, so
+   * every existing caller of `passages` keeps its exact current behavior —
+   * this field is additive only.
+   */
+  allMatchedPassages: CorrespondencePassage[];
   thresholds: DocumentCorrespondenceThresholds;
   thresholdsVersion: string;
   exactCanonicalMatch: boolean;
@@ -209,6 +231,7 @@ function emptyResult(
     externalWordCount,
     longestMatchWords: 0,
     passages: [],
+    allMatchedPassages: [],
     thresholds,
     thresholdsVersion: DOCUMENT_CORRESPONDENCE_THRESHOLDS_VERSION,
     exactCanonicalMatch: false,
@@ -279,7 +302,7 @@ export function computeDocumentCorrespondence(
     thresholds.minimumPassageLengthWords,
   );
 
-  const passages: CorrespondencePassage[] = acceptedGlobalSpans
+  const allMatchedPassages: CorrespondencePassage[] = acceptedGlobalSpans
     .map(([start, end]): CorrespondencePassage => {
       const words = submittedWords.slice(start, Math.min(end + 1, start + thresholds.maxPassageWords));
       return {
@@ -290,8 +313,11 @@ export function computeDocumentCorrespondence(
         matchedWordCount: end - start + 1,
       };
     })
-    .sort((a, b) => b.matchedWordCount - a.matchedWordCount)
-    .slice(0, thresholds.maxPassages);
+    .sort((a, b) => b.matchedWordCount - a.matchedWordCount);
+  // See DocumentCorrespondenceResult.allMatchedPassages's own comment: this
+  // truncation is a display-preview bound only — every existing consumer of
+  // `passages` keeps its exact prior behavior (still capped at maxPassages).
+  const passages = allMatchedPassages.slice(0, thresholds.maxPassages);
 
   let longestSpan: SimilaritySpan | null = null;
   const longestMatchWords = acceptedGlobalSpans.reduce((max, span) => {
@@ -325,6 +351,7 @@ export function computeDocumentCorrespondence(
     externalWordCount,
     longestMatchWords,
     passages,
+    allMatchedPassages,
     thresholds,
     thresholdsVersion: DOCUMENT_CORRESPONDENCE_THRESHOLDS_VERSION,
     exactCanonicalMatch: false,
