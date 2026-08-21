@@ -12,6 +12,14 @@ export type ReportSummary = {
   aiTone: string | null;
 };
 
+// Authenticated report lists are deliberately summary-only. The old client
+// hydrated every report immediately after fetching the list, which turned a
+// 40-report history page into 40 sequential full-payload requests. The cache
+// below lets that existing caller keep its shape without fetching any report
+// body; a report room asks for the full payload explicitly via forceFull.
+const summaryCache = new Map<string, ReportSummary>();
+let summaryCacheMode: "authenticated" | "anonymous" | null = null;
+
 // Every function here is fail-soft by design: a network or database problem
 // must never interrupt analysis or block the existing local (IndexedDB)
 // flow. Failures are logged at debug level and otherwise swallowed.
@@ -48,11 +56,6 @@ export async function saveReportRemote<T>(report: T, summary: ReportSummary, aca
     if (!response.ok) {
       console.debug("Remote report save was rejected (local copy is unaffected).", { status: response.status });
       const body = (await response.json().catch(() => null)) as { error?: string; resetsAt?: string } | null;
-      // Distinguished from the IP rate limiter's own 429 (checkRate in
-      // app/api/reports/route.ts, `{ error: 'Too many requests' }`, no
-      // resetsAt) by the presence of resetsAt — only the daily upload quota
-      // response includes it. The rate limiter's 429 stays in the existing
-      // silent/fail-soft category; only a real quota-exceeded is surfaced.
       const quotaExceeded = response.status === 429 && typeof body?.resetsAt === "string";
       return { ok: false, status: response.status, quotaExceeded, error: body?.error, resetsAt: body?.resetsAt };
     }
@@ -70,7 +73,6 @@ export type UploadLimitStatus =
   | { authenticated: true; unlimited: true }
   | { authenticated: true; unlimited: false; uploadsToday: number; limit: number };
 
-/** Display-only — see app/api/upload-limit/route.ts's own header comment for why this is a separate endpoint from /api/auth/me. */
 export async function fetchUploadLimitStatus(): Promise<UploadLimitStatus> {
   try {
     const response = await fetch("/api/upload-limit");
@@ -90,8 +92,12 @@ export async function listRemoteReportSummaries(): Promise<ReportSummary[]> {
     const deviceKey = getDeviceKey();
     const response = await fetch(`/api/reports?deviceKey=${encodeURIComponent(deviceKey)}`);
     if (!response.ok) return [];
-    const data = (await response.json()) as { reports?: ReportSummary[] };
-    return Array.isArray(data.reports) ? data.reports : [];
+    const data = (await response.json()) as { reports?: ReportSummary[]; authenticated?: boolean };
+    const summaries = Array.isArray(data.reports) ? data.reports : [];
+    summaryCacheMode = data.authenticated === true ? "authenticated" : "anonymous";
+    summaryCache.clear();
+    for (const summary of summaries) summaryCache.set(summary.id, summary);
+    return summaries;
   } catch (error) {
     console.debug("Remote report list fetch failed.", {
       error: error instanceof Error ? error.message : String(error),
@@ -100,7 +106,18 @@ export async function listRemoteReportSummaries(): Promise<ReportSummary[]> {
   }
 }
 
-export async function fetchRemoteReport<T>(id: string): Promise<T | null> {
+/**
+ * Fetch one report room payload. During authenticated report-history
+ * hydration, the summary already in summaryCache is returned immediately;
+ * this removes the old N sequential full-payload fetches. Pass forceFull=true
+ * from a report room (or another surface that genuinely needs the document
+ * payload).
+ */
+export async function fetchRemoteReport<T>(id: string, forceFull = false): Promise<T | null> {
+  if (!forceFull && summaryCacheMode === "authenticated") {
+    const summary = summaryCache.get(id);
+    if (summary) return summary as T;
+  }
   try {
     const deviceKey = getDeviceKey();
     const response = await fetch(`/api/reports/${encodeURIComponent(id)}?deviceKey=${encodeURIComponent(deviceKey)}`);
@@ -126,10 +143,6 @@ export async function deleteRemoteReport(id: string): Promise<void> {
   }
 }
 
-// Unlike deleteRemoteReport (fail-soft, for best-effort bulk cleanup), this
-// reports success/failure instead of swallowing it — needed for a primary,
-// user-initiated single-report delete, where silently failing while the UI
-// navigates away as if it succeeded would leave a ghost row in the database.
 export async function deleteRemoteReportChecked(id: string): Promise<boolean> {
   try {
     const deviceKey = getDeviceKey();
