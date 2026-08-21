@@ -17,6 +17,94 @@ export type ReportSummary = {
 // waterfall of /api/reports/:id requests for every saved report.
 const summaryCache = new Map<string, ReportSummary>();
 
+type LightweightReport = {
+  __summaryOnly: true;
+  version: 11;
+  id: number;
+  submissionId: string;
+  title: string;
+  author: string;
+  assignment: string;
+  created: string;
+  score: number;
+  archiveScore: number;
+  aiScore: number | null;
+  wordCount: number;
+  characterCount: number;
+  pageCount: number;
+  fileSize: string;
+  databaseSize: number;
+  corpusVersion: string;
+  scoreBand: "Low" | "Moderate" | "High";
+  riskStatus: "Elevated" | "Lower";
+  riskTarget: number;
+  riskCutoff: number;
+  riskCalibration: { auc: number; precision: number; recall: number; sampleSize: number };
+  features: {
+    maxSourceContainment: number;
+    longestMatchedSpan: number;
+    quotationDensity: number;
+    referenceListRatio: number;
+    highFrequencyShingleCount: number;
+    repeatedThreeGramCount: number;
+    detectedLanguage: "Arabic" | "French" | "English" | "Mixed";
+  };
+  excludedDocuments: number;
+  matchedWordCount: number;
+  sources: [];
+  repeats: [];
+  text: string;
+};
+
+function scoreBand(value: number): "Low" | "Moderate" | "High" {
+  if (value >= 50) return "High";
+  if (value >= 20) return "Moderate";
+  return "Low";
+}
+
+function summaryToLightweightReport(summary: ReportSummary): LightweightReport {
+  const archiveScore = Number.isFinite(summary.archiveScore) ? summary.archiveScore : 0;
+  const id = Number(summary.id);
+  return {
+    __summaryOnly: true,
+    version: 11,
+    id: Number.isFinite(id) ? id : 0,
+    submissionId: summary.submissionId,
+    title: summary.title,
+    author: "",
+    assignment: "",
+    created: summary.createdAt,
+    score: archiveScore,
+    archiveScore,
+    aiScore: summary.aiScore,
+    wordCount: summary.wordCount,
+    characterCount: 0,
+    pageCount: 0,
+    fileSize: "—",
+    databaseSize: 0,
+    corpusVersion: "",
+    scoreBand: scoreBand(archiveScore),
+    riskStatus: archiveScore >= 50 ? "Elevated" : "Lower",
+    riskTarget: 0,
+    riskCutoff: 0,
+    riskCalibration: { auc: 0, precision: 0, recall: 0, sampleSize: 0 },
+    features: {
+      maxSourceContainment: 0,
+      longestMatchedSpan: 0,
+      quotationDensity: 0,
+      referenceListRatio: 0,
+      highFrequencyShingleCount: 0,
+      repeatedThreeGramCount: 0,
+      detectedLanguage: "English",
+    },
+    excludedDocuments: 0,
+    matchedWordCount: 0,
+    sources: [],
+    repeats: [],
+    text: "",
+  };
+}
+
 // Every function here is fail-soft by design: a network or database problem
 // must never interrupt analysis or block the existing local (IndexedDB) flow.
 
@@ -70,7 +158,7 @@ export async function fetchUploadLimitStatus(): Promise<UploadLimitStatus> {
 export async function listRemoteReportSummaries(): Promise<ReportSummary[]> {
   try {
     const deviceKey = getDeviceKey();
-    const response = await fetch(`/api/reports?deviceKey=${encodeURIComponent(deviceKey)}`);
+    const response = await fetch(`/api/reports?deviceKey=${encodeURIComponent(deviceKey)}`, { cache: "no-store" });
     if (!response.ok) return [];
     const data = (await response.json()) as { reports?: ReportSummary[] };
     const summaries = Array.isArray(data.reports) ? data.reports : [];
@@ -86,14 +174,14 @@ export async function listRemoteReportSummaries(): Promise<ReportSummary[]> {
 }
 
 /**
- * `forceFull=true` is used only by report-room/detail consumers. History
- * callers can omit it and receive the already-fetched lightweight summary,
- * avoiding a full payload request entirely.
+ * Full payloads are reserved for report-room/detail consumers. History callers
+ * get a tiny in-memory report-shaped summary so existing list rendering and
+ * receipt generation do not trigger one request per row.
  */
 export async function fetchRemoteReport<T>(id: string, forceFull = false): Promise<T | null> {
   if (!forceFull) {
     const summary = summaryCache.get(id);
-    if (summary) return summary as T;
+    if (summary) return summaryToLightweightReport(summary) as T;
   }
   try {
     const deviceKey = getDeviceKey();
