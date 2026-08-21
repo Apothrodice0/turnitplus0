@@ -66,6 +66,28 @@ export type PhraseExtractionConfig = {
    * the sentence-anchored strategy those queries already use.
    */
   topicOnlyQueryCount: number;
+  /**
+   * Accuracy & Coverage Benchmark finding (2026-08-21, Social Sciences/
+   * Humanities discovery-loss investigation): how many words from the very
+   * start of the (sanitized, canonicalized) document are treated as the
+   * document's own "title region" — a submitted document conventionally
+   * opens with its own title, so this is a general, position-based proxy
+   * for "the paper's own most identifying vocabulary," not a paper-specific
+   * heuristic. See extractTitleTerms's own comment.
+   *
+   * Deliberately generous, not "first line": confirmed live on a real
+   * HAL-hosted paper (a large, common French open-access repository, one
+   * of many that do this — arXiv/SSRN/institutional repositories follow
+   * the same convention) that the actual title can sit ~90-100 words in,
+   * behind a repository deposit banner duplicated in two languages plus a
+   * license line. A narrow window (originally 20) never reaches the real
+   * title at all on a document shaped like this — it only ever picks up
+   * fragments of the banner itself (e.g. "multi[-disciplinary]"). Low risk
+   * either way: extractTopicTerms still makes a title-region word win a
+   * fair tie-break against body-frequency terms before it is ever used, so
+   * a wider net costs nothing on a document with no such preamble.
+   */
+  titleWindowWords: number;
 };
 
 export const DEFAULT_PHRASE_EXTRACTION_CONFIG: PhraseExtractionConfig = {
@@ -79,7 +101,67 @@ export const DEFAULT_PHRASE_EXTRACTION_CONFIG: PhraseExtractionConfig = {
   keywordTopicTermCount: 3,
   keywordMaxSentenceWords: 6,
   topicOnlyQueryCount: 1,
+  titleWindowWords: 150,
 };
+
+/**
+ * Discovery-loss investigation finding (2026-08-21): a submission whose own
+ * source text legitimately contains markup examples or bare URLs (confirmed
+ * live on a real Humanities/digital-humanities paper about TEI/XML text
+ * encoding) lets raw tag syntax and URL substrings reach phrase-extraction
+ * as if they were ordinary prose. Once ordinary punctuation-stripping
+ * normalization runs, a tag's own attribute value (e.g. the XML identifier
+ * `scripturalNote` inside `type="scripturalNote"`) or a URL's domain label
+ * (e.g. `sourceschretiennes` inside `sourceschretiennes.mom.fr`) surfaces as
+ * a plausible-looking standalone "word" — high-scoring by every existing
+ * signal (long, unique, not a common word) despite carrying zero real
+ * search value, since it can never appear in any paper's own title/abstract
+ * metadata. Stripped here, structurally (matching real tag/URL syntax, not
+ * any particular document's content), before anything else in this file
+ * ever sees the text — general-purpose text hygiene, not a per-paper patch.
+ *
+ * Tag pattern requires the character after "<" (or "</") to be a letter, so
+ * a STEM document's own inequality expressions ("x < 5 and y > 3") are never
+ * mistaken for markup — confirmed the naive `<[^>]+>` alternative does not
+ * have this guard. Bounded to 120 chars with no embedded "<"/">"/newline so
+ * one unmatched "<" can't consume an unrelated, arbitrarily long span of
+ * real prose.
+ */
+const MARKUP_TAG_PATTERN = /<\/?[a-zA-Z][^<>\n]{0,120}>/g;
+const URL_PATTERN = /\bhttps?:\/\/[^\s<>"']+/gi;
+const BARE_WWW_PATTERN = /\bwww\.[^\s<>"']+/gi;
+/**
+ * A bare "http"/"https" immediately followed by digits, with no "://" —
+ * confirmed live (same Humanities paper): numbered inline hyperlink
+ * markers like "[http7]" survive extraction as plain bracketed text
+ * (the bracket itself is stripped later by ordinary punctuation
+ * normalization, leaving "http7" as a standalone token). Not a real URL
+ * (URL_PATTERN already requires "://" precisely so it never fires on
+ * ordinary prose), and no genuine English/French/Arabic word takes this
+ * shape, so this is safe to strip unconditionally.
+ */
+const NUMBERED_LINK_MARKER_PATTERN = /\bhttps?\d+\b/gi;
+
+export function sanitizeExtractionArtifacts(rawText: string): string {
+  return rawText
+    .replace(MARKUP_TAG_PATTERN, " ")
+    .replace(URL_PATTERN, " ")
+    .replace(BARE_WWW_PATTERN, " ")
+    .replace(NUMBERED_LINK_MARKER_PATTERN, " ");
+}
+
+/**
+ * Discovery-loss investigation finding: a token this long is far more
+ * likely to be an extraction artifact (words glued together with no space,
+ * a URL fragment or identifier that survived sanitizeExtractionArtifacts,
+ * a stray hash/id) than a genuine single word in any of this file's
+ * supported languages — even a notably long real academic term
+ * ("antidisestablishmentarianism", "electroencephalography") stays well
+ * under this bound. A structural backstop for extraction noise
+ * sanitizeExtractionArtifacts's own targeted patterns don't happen to
+ * catch, never a claim about what a "real word" looks like beyond length.
+ */
+const MAX_PLAUSIBLE_WORD_LENGTH = 30;
 
 function splitSentences(canonical: string): string[] {
   const sentences: string[] = [];
@@ -107,10 +189,14 @@ function windowSentence(sentence: string, maxWords: number): string[] {
 
 type ScoredCandidate = { text: string; position: number; score: number };
 
+function isInformativeWord(word: string): boolean {
+  return word.length >= 4 && word.length <= MAX_PLAUSIBLE_WORD_LENGTH && !COMMON_WORDS.has(word);
+}
+
 function scoreCandidate(text: string, config: PhraseExtractionConfig): number | null {
   const words = tokens(text);
   if (words.length === 0) return null;
-  const informativeWords = words.filter((word) => word.length >= 4 && !COMMON_WORDS.has(word));
+  const informativeWords = words.filter(isInformativeWord);
   if (informativeWords.length < config.minInformativeWords) return null;
 
   const uniqueRatio = new Set(words).size / words.length;
@@ -118,8 +204,49 @@ function scoreCandidate(text: string, config: PhraseExtractionConfig): number | 
   return informativeWords.length + uniqueRatio * 3 + longWordCount * 1.5;
 }
 
-function isInformativeWord(word: string): boolean {
-  return word.length >= 4 && !COMMON_WORDS.has(word);
+/**
+ * Discovery-loss investigation finding (2026-08-21): a submitted document
+ * conventionally opens with its own title — a general, position-based
+ * signal (never a lookup of any specific paper's actual title) for which
+ * words are most likely to be this document's own identifying vocabulary.
+ * Pure body-frequency ranking (extractTopicTerms's original, still-primary
+ * signal) can miss a paper's own title term entirely on a long document
+ * whose body happens to repeat OTHER related vocabulary more often —
+ * confirmed live: a real paper's title term never appeared in any of its
+ * own generated queries because three other body-frequent words outranked
+ * it. `terms` is returned in first-appearance order (informative words only,
+ * deduped); extractTopicTerms decides how much weight, if any, to give them.
+ *
+ * HAL-banner discovery-loss follow-up (2026-08-21): a repository deposit
+ * banner (HAL, and the same front-matter convention on arXiv/SSRN/
+ * institutional repositories) sits INSIDE this same window, ahead of the
+ * paper's real title — confirmed live (soc-openaire, DOI
+ * 10.1057/s41253-026-00314-w): "HAL is a multi-disciplinary open access
+ * archive..." occupies the first ~105 tokens, before "Infoxicated Feelings?
+ * How Affective Polarization and Misinformation..." ever begins. `occurrences`
+ * counts each informative word's occurrences WITHIN this same window (not
+ * the whole document) — extractTopicTerms uses this alongside the word's
+ * whole-document frequency to tell a genuinely reprinted title term (a
+ * repository conventionally restates the title itself more than once in its
+ * own front matter — a deposit heading, then again in a "To cite this
+ * version" line) apart from an incidental banner word that happens to
+ * qualify by other measures; see that function's own comment for the full
+ * mechanism. Used only as an added, higher-priority tie-break ahead of the
+ * existing whole-document-rarity signal, never a replacement for it.
+ */
+type TitleWindowTerms = { terms: string[]; occurrences: Map<string, number> };
+
+function extractTitleTerms(canonical: string, config: PhraseExtractionConfig): TitleWindowTerms {
+  const openingWords = tokens(canonical).slice(0, config.titleWindowWords);
+  const occurrences = new Map<string, number>();
+  const terms: string[] = [];
+  for (const word of openingWords) {
+    if (!isInformativeWord(word)) continue;
+    const priorCount = occurrences.get(word) ?? 0;
+    if (priorCount === 0) terms.push(word);
+    occurrences.set(word, priorCount + 1);
+  }
+  return { terms, occurrences };
 }
 
 /**
@@ -128,18 +255,125 @@ function isInformativeWord(word: string): boolean {
  * (ties broken by length, then alphabetically, for determinism). Cheap,
  * corpus-free proxy for "what this document is actually about," reused as
  * the anchor for every keyword query below (see extractKeywordQueries).
+ *
+ * Discovery-loss investigation addition: reserves exactly one of the
+ * `count` slots for the strongest qualifying candidate from `titleWindow.terms`
+ * (see extractTitleTerms) that pure frequency ranking would NOT otherwise
+ * have included — never more than one, and never at all when every
+ * title-region candidate was already going to be included anyway, so a
+ * document where frequency ranking already works well (the common case;
+ * every domain but the ones the benchmark actually caught) sees zero change.
+ *
+ * Tie-break direction (2026-08-21 revision): among qualifying candidates,
+ * prefer the LOWEST body frequency, not the highest — confirmed live on two
+ * independent real papers that the ORIGINAL "prefer highest frequency"
+ * direction reliably picks the wrong word. A title word recurring
+ * constantly throughout the body (e.g. "affective" in a paper about
+ * affective polarization, "text" in a paper about text reuse) is a
+ * generic, shared-with-hundreds-of-other-papers core concept — real OpenAIRE
+ * numbers confirmed such a term alone returns 1,000+ results with the
+ * target nowhere in the top 5. A title word used sparingly (e.g. a paper's
+ * own coined term, or its own project name) is precisely the word that
+ * narrows a search to a handful of results with the target at rank 0 —
+ * standard rare-term-is-more-discriminative intuition, applied here to
+ * which of several already-qualifying title candidates gets the one
+ * reserved slot. Still requires recurrence (>=2, the SAME floor
+ * frequencyRanked itself already applies) so a genuine one-off mention
+ * (a co-author's surname on the title page, an incidental word) is never
+ * preferred purely for being rare — it must be both title-region AND
+ * recurring, only then does rarity between qualifying candidates decide.
+ * Still just one slot, same word/query budget; length remains the final,
+ * lowest-priority tie-break (this file's own existing "longer -> more
+ * likely genuinely distinctive" convention, see longWordThreshold), fully
+ * deterministic, never paper-specific.
+ *
+ * HAL-banner discovery-loss follow-up (2026-08-21): the rarity tie-break
+ * above, alone, still picks a repository deposit-banner word over the
+ * paper's real title — confirmed live (soc-openaire, DOI
+ * 10.1057/s41253-026-00314-w): "disciplinary" (from HAL's own "multi-
+ * disciplinary open access archive" banner line) occurs exactly twice
+ * document-wide, while "infoxicated" (the paper's own coined title term,
+ * reprinted in HAL's front matter) occurs four times — MORE often, not
+ * less, precisely because the front matter reprints it. Ascending-rarity
+ * alone therefore prefers the rarer banner word every time a genuine,
+ * reprinted title term's own repetition pushes its raw count above a
+ * banner word's incidental count.
+ *
+ * A single "is this word ever used outside the window" gate is NOT enough
+ * to fix this: confirmed live that "disciplinary" itself has a real,
+ * unrelated body mention 7,400+ words later ("moving beyond disciplinary
+ * silos to inform both theory and...") — the exact kind of genuine
+ * occurrence this fix must NOT discard, per its own scope. Preferring
+ * whichever candidate has the highest RAW body frequency is equally wrong
+ * the other way: it just re-derives "most frequent word overall," which is
+ * exactly the generic, low-precision signal the rarity tie-break above
+ * exists to overrule (confirmed live: it picks "affective," the single
+ * most generic word in this exact paper's own title).
+ *
+ * The signal that actually separates them: "infoxicated" is BOTH reprinted
+ * *within* the title window itself (2 occurrences among its first 150
+ * tokens, from the deposit heading and the "To cite this version" line —
+ * see extractTitleTerms) AND still recurs *beyond* the window (2 more
+ * occurrences in the actual abstract/body — the SAME >=2 "recurring" floor
+ * frequencyRanked and the qualifying-candidate filter below already both
+ * use, not a new threshold). "disciplinary" has only ONE occurrence within
+ * the window (never reprinted) despite also having one genuine body use
+ * elsewhere — a title is, by construction, restated multiple times in a
+ * repository's front matter AND is what the body goes on to discuss at
+ * length; an incidental word satisfies at most one of those two conditions.
+ *
+ * The same >=2 body-recurrence floor also turned out to matter for a THIRD
+ * confound, confirmed live on the very same paper: an author's own byline
+ * ("Mickael Temporão") is conventionally reprinted in front matter for a
+ * completely unrelated reason (once near the title, again in the "To cite
+ * this version" line) and can satisfy a laxer ">= 1 body use" gate too (a
+ * single passing "corresponding author" mention) while still being rarer,
+ * document-wide, than the real title term — requiring >=2 body
+ * occurrences, not just one, excludes this without any name-detection logic
+ * at all.
+ *
+ * So: among qualifying candidates, first narrow to whichever satisfy BOTH
+ * (window-local repetition >= 2 AND body recurrence >= 2) — the signature
+ * of a genuinely reprinted, genuinely body-relevant title term — and only
+ * among THAT narrower set does the original whole-document-rarity tie-break
+ * above decide. If nothing satisfies both (the common case: a plain
+ * document with no repeated front-matter title, or a short document where
+ * the whole thing IS the window), this step changes nothing and the
+ * original, unchanged pool and sort apply exactly as before.
  */
-function extractTopicTerms(canonical: string, count: number): string[] {
+function extractTopicTerms(
+  canonical: string,
+  count: number,
+  titleWindow: TitleWindowTerms = { terms: [], occurrences: new Map() },
+): string[] {
   const freq = new Map<string, number>();
   for (const word of tokens(canonical)) {
     if (!isInformativeWord(word)) continue;
     freq.set(word, (freq.get(word) ?? 0) + 1);
   }
-  return [...freq.entries()]
+  const frequencyRanked = [...freq.entries()]
     .filter(([, n]) => n >= 2)
     .sort((a, b) => b[1] - a[1] || b[0].length - a[0].length || a[0].localeCompare(b[0]))
-    .slice(0, count)
     .map(([word]) => word);
+
+  if (count <= 0 || titleWindow.terms.length === 0) return frequencyRanked.slice(0, count);
+
+  const guaranteedByFrequencyAlone = new Set(frequencyRanked.slice(0, count - 1));
+  const qualifying = titleWindow.terms.filter(
+    (word) => !guaranteedByFrequencyAlone.has(word) && (freq.get(word) ?? 0) >= 2,
+  );
+  const reprintedAndBodyRelevant = qualifying.filter((word) => {
+    const windowOccurrences = titleWindow.occurrences.get(word) ?? 0;
+    const bodyOccurrences = (freq.get(word) ?? 0) - windowOccurrences;
+    return windowOccurrences >= 2 && bodyOccurrences >= 2;
+  });
+  const candidatePool = reprintedAndBodyRelevant.length > 0 ? reprintedAndBodyRelevant : qualifying;
+  const bestTitleTerm = [...candidatePool].sort(
+    (a, b) => (freq.get(a) ?? 0) - (freq.get(b) ?? 0) || b.length - a.length,
+  )[0];
+  if (!bestTitleTerm) return frequencyRanked.slice(0, count);
+
+  return [bestTitleTerm, ...frequencyRanked.filter((word) => word !== bestTitleTerm)].slice(0, count);
 }
 
 // Verb/adverb/past-participle suffixes — cheap, POS-tagger-free proxy for
@@ -178,9 +412,10 @@ function extractKeywordQueries(
   canonical: string,
   sentenceCandidates: ScoredCandidate[],
   config: PhraseExtractionConfig,
+  titleWindow: TitleWindowTerms,
 ): AcademicSearchQuery[] {
   if (config.keywordQueryCount <= 0) return [];
-  const topicTerms = extractTopicTerms(canonical, config.keywordTopicTermCount);
+  const topicTerms = extractTopicTerms(canonical, config.keywordTopicTermCount, titleWindow);
 
   const queries: AcademicSearchQuery[] = [];
   const seenBags = new Set<string>();
@@ -218,9 +453,9 @@ function extractKeywordQueries(
  * distinguishes "sentence" from "keyword" today — introducing a third
  * value would be a wider, unrelated change for no behavioral benefit.
  */
-function extractTopicOnlyQuery(canonical: string, config: PhraseExtractionConfig): AcademicSearchQuery[] {
+function extractTopicOnlyQuery(canonical: string, config: PhraseExtractionConfig, titleWindow: TitleWindowTerms): AcademicSearchQuery[] {
   if (config.topicOnlyQueryCount <= 0) return [];
-  const topicTerms = extractTopicTerms(canonical, config.keywordTopicTermCount);
+  const topicTerms = extractTopicTerms(canonical, config.keywordTopicTermCount, titleWindow);
   // NOT config.minInformativeWords: that floor is calibrated for a MIXED
   // bag (topic terms + per-sentence words, see extractKeywordQueries)
   // reaching real signal together, and topicTerms alone is capped at
@@ -251,7 +486,7 @@ export function extractCandidatePhrases(
   rawText: string,
   config: PhraseExtractionConfig = DEFAULT_PHRASE_EXTRACTION_CONFIG,
 ): AcademicSearchQuery[] {
-  const canonical = canonicalizeText(rawText);
+  const canonical = canonicalizeText(sanitizeExtractionArtifacts(rawText));
   if (!canonical) return [];
 
   const candidates: ScoredCandidate[] = [];
@@ -284,9 +519,10 @@ export function extractCandidatePhrases(
     sourcePassage: candidate.text,
     queryType: "sentence" as const,
   }));
-  const keywordQueries = extractKeywordQueries(canonical, candidates, config);
+  const titleWindow = extractTitleTerms(canonical, config);
+  const keywordQueries = extractKeywordQueries(canonical, candidates, config, titleWindow);
   const seenKeywordBags = new Set(keywordQueries.map((query) => query.queryText.toLowerCase()));
-  const topicOnlyQueries = extractTopicOnlyQuery(canonical, config)
+  const topicOnlyQueries = extractTopicOnlyQuery(canonical, config, titleWindow)
     .filter((query) => !seenKeywordBags.has(query.queryText.toLowerCase())); // e.g. a short document whose only keyword bag already IS the topic terms alone
 
   return [...sentenceQueries, ...keywordQueries, ...topicOnlyQueries].map((query, index) => ({ ...query, rank: index }));
