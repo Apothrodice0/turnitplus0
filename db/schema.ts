@@ -210,6 +210,16 @@ export const users = sqliteTable(
     // matching this schema's existing declared_at/confirmed_at/revoked_at
     // convention (reuse_context_declarations) rather than a plain boolean.
     corpus_reuse_consented_at: text("corpus_reuse_consented_at"),
+    // Developer/admin authorization (0025). "user" for every existing and
+    // new account by default — the only way a row ever becomes "admin" is
+    // lib/admin-role.ts's maybePromoteToAdmin(), called from login/signup,
+    // which compares the account's own normalized email against the single
+    // ADMIN_EMAIL environment variable. That variable is never hardcoded
+    // into source and is not read anywhere else, so the designated address
+    // itself lives in exactly one place (deployment config), not in this
+    // codebase. A plain text enum (not a boolean) so a future intermediate
+    // role does not require a second migration.
+    role: text("role").notNull().default("user"),
   },
   (table) => [
     uniqueIndex("ux_users_email").on(table.email),
@@ -820,6 +830,55 @@ export const rate_limit_buckets = sqliteTable(
   },
   (table) => [
     index("idx_rate_limit_buckets_last_refill").on(table.last_refill),
+  ],
+);
+
+// Developer-diagnostics addition (0026): one row per live /api/academic-
+// evidence run (lib/academic-evidence-integration.ts), captured additively
+// in app/api/reports/route.ts's existing deferred runAfterResponse callback
+// — the same one that already creates a document_identities row on first
+// save. Before this table existed, runAcademicSearch's own per-run
+// diagnostics (generated queries, ranked candidates, per-candidate
+// retrieval/comparison outcome, provider errors, stage timings — see
+// lib/academic-search/types.ts's AcademicSearchRunStats/
+// AcademicSearchRetrievalDiagnostic) were computed on every real submission
+// and then discarded; nothing captured them for later inspection. This is
+// pure instrumentation: nothing in lib/academic-search/ changes what it
+// ranks, retrieves, or reports as evidence because this table exists — it
+// only stores values that pipeline already produced.
+//
+// document_identity_id is nullable and set the same best-effort way
+// saved_reports.document_identity_id is (identity capture can fail
+// independently of this capture). report_device_key/report_id mirror
+// saved_reports' own composite primary key, giving a second, independent
+// lookup path if identity capture failed but this still succeeded — same
+// "no DB-level FOREIGN KEY on a composite key" reasoning as
+// report_historical_match_snapshots above (this project's schema-drift
+// tooling only recognizes single-column references()). Variable-shape
+// pipeline data (stats, queries, candidates, retrieval diagnostics) is kept
+// as JSON columns rather than exploded into a wide, mostly-duplicative
+// column set — matching this schema's own existing convention for that
+// (see provenance_evidence.payload_json's header comment). total_latency_ms
+// is pulled out as its own column since it's the one field a developer
+// dashboard needs to sort/filter runs by without parsing stats_json.
+export const academic_search_run_diagnostics = sqliteTable(
+  "academic_search_run_diagnostics",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    document_identity_id: text("document_identity_id").references(() => document_identities.id, { onDelete: "set null" }),
+    report_device_key: text("report_device_key"),
+    report_id: text("report_id"),
+    status: text("status").notNull(),
+    total_latency_ms: integer("total_latency_ms").notNull(),
+    stats_json: text("stats_json").notNull(),
+    queries_json: text("queries_json"),
+    candidates_json: text("candidates_json"),
+    retrieval_diagnostics_json: text("retrieval_diagnostics_json"),
+    created_at: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    index("idx_academic_search_run_diagnostics_document_identity_id").on(table.document_identity_id),
+    index("idx_academic_search_run_diagnostics_report").on(table.report_device_key, table.report_id),
   ],
 );
 

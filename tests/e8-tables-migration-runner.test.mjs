@@ -103,7 +103,7 @@ test.after(() => {
 
 // --- A: explicit allowlist ------------------------------------------------
 
-test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0024, in order, never touching 0000-0011', () => {
+test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0026, in order, never touching 0000-0011', () => {
   assert.deepEqual(TARGET_MIGRATIONS, [
     '0012_document_identities.sql',
     '0013_document_families.sql',
@@ -118,6 +118,8 @@ test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0024, in ord
     '0022_reuse_context_declarations.sql',
     '0023_privacy_consent_and_report_identity_link.sql',
     '0024_rate_limit_buckets.sql',
+    '0025_users_role.sql',
+    '0026_academic_search_run_diagnostics.sql',
   ]);
   // Phase E8S Step 8: 0022_reuse_context_declarations.sql added
   // reuse_context_declarations, bringing the 15 E1-E8P tables across the
@@ -127,9 +129,14 @@ test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0024, in ord
   // tables — see EXPECTED_COLUMNS_BY_MIGRATION), so that stayed 16. Durable
   // rate limiting's 0024_rate_limit_buckets.sql creates one genuinely new
   // table (rate_limit_buckets), using plain EXPECTED_TABLES_BY_MIGRATION
-  // tracking like every migration before 0023 — bringing this to 17 across
-  // all 13 target migrations.
-  assert.equal(ALL_TARGET_TABLES.length, 17, 'expected exactly 17 tables across all 13 target migrations');
+  // tracking like every migration before 0023 — bringing this to 17.
+  // Developer/admin authorization's 0025_users_role.sql adds zero new
+  // tables (only users.role — same column-state mechanism as 0023), so that
+  // stayed 17. Developer-diagnostics capture's
+  // 0026_academic_search_run_diagnostics.sql creates one genuinely new table
+  // (academic_search_run_diagnostics) — bringing this to 18 across all 15
+  // target migrations.
+  assert.equal(ALL_TARGET_TABLES.length, 18, 'expected exactly 18 tables across all 15 target migrations');
   assert.deepEqual(
     EXPECTED_TABLES_BY_MIGRATION['0023_privacy_consent_and_report_identity_link.sql'],
     [],
@@ -153,6 +160,26 @@ test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0024, in ord
     undefined,
     '0024 must NOT use the column-state mechanism — it creates a table, not columns on an existing one',
   );
+  assert.deepEqual(
+    EXPECTED_TABLES_BY_MIGRATION['0025_users_role.sql'],
+    [],
+    '0025 must be declared as creating zero new tables',
+  );
+  assert.deepEqual(
+    EXPECTED_COLUMNS_BY_MIGRATION['0025_users_role.sql'],
+    [{ table: 'users', column: 'role' }],
+    '0025 must be declared as adding exactly this one column',
+  );
+  assert.deepEqual(
+    EXPECTED_TABLES_BY_MIGRATION['0026_academic_search_run_diagnostics.sql'],
+    ['academic_search_run_diagnostics'],
+    '0026 must be declared as creating exactly one new table, tracked via the table-state mechanism',
+  );
+  assert.equal(
+    EXPECTED_COLUMNS_BY_MIGRATION['0026_academic_search_run_diagnostics.sql'],
+    undefined,
+    '0026 must NOT use the column-state mechanism — it creates a table, not columns on an existing one',
+  );
 });
 
 // --- F: no execution of 0000-0011 (structural) ----------------------------
@@ -173,7 +200,7 @@ test('F: the runner module never does an unfiltered directory scan — no readdi
 
 // --- G: destructive SQL detection -----------------------------------------
 
-test('G: scanForDestructiveStatements finds real destructive keywords and finds none in the actual 13 target migration files', () => {
+test('G: scanForDestructiveStatements finds real destructive keywords and finds none in the actual 15 target migration files', () => {
   assert.deepEqual(scanForDestructiveStatements('CREATE TABLE IF NOT EXISTS x (id TEXT);'), []);
   assert.ok(scanForDestructiveStatements('DROP TABLE document_chunks;').length > 0);
   assert.ok(scanForDestructiveStatements('DELETE FROM users WHERE 1=1;').length > 0);
@@ -209,9 +236,27 @@ test('splitStatements correctly splits 0023 (the first target migration to use A
   assert.ok(/^CREATE INDEX/i.test(statements[2]));
 });
 
+test('splitStatements correctly splits 0025 (a single ALTER TABLE, like 0023 but only one column)', () => {
+  const content = fs.readFileSync(path.join(drizzleDir, '0025_users_role.sql'), 'utf8');
+  const statements = splitStatements(content);
+  assert.equal(statements.length, 1, 'expected exactly 1 ALTER TABLE statement');
+  assert.doesNotMatch(statements[0], /^--/, 'no statement should be a leftover comment line');
+  assert.ok(/^ALTER TABLE users ADD COLUMN role/i.test(statements[0]));
+});
+
+test('splitStatements correctly splits 0026 (one CREATE TABLE plus two CREATE INDEX statements)', () => {
+  const content = fs.readFileSync(path.join(drizzleDir, '0026_academic_search_run_diagnostics.sql'), 'utf8');
+  const statements = splitStatements(content);
+  assert.equal(statements.length, 3, 'expected exactly 1 CREATE TABLE + 2 CREATE INDEX statements');
+  for (const s of statements) assert.doesNotMatch(s, /^--/, 'no statement should be a leftover comment line');
+  assert.ok(/^CREATE TABLE IF NOT EXISTS academic_search_run_diagnostics/i.test(statements[0]));
+  assert.ok(/^CREATE INDEX/i.test(statements[1]));
+  assert.ok(/^CREATE INDEX/i.test(statements[2]));
+});
+
 // --- Section 9: disposable local DB — full happy-path run ------------------
 
-test('SECTION 9: fresh pre-0012 database — the runner applies all 13 migrations in order, creates all 17 tables, adds 0023\'s columns, and preserves legacy row VALUES exactly', async () => {
+test('SECTION 9: fresh pre-0012 database — the runner applies all 15 migrations in order, creates all 18 tables, adds 0023\'s and 0025\'s columns, and preserves legacy row VALUES exactly', async () => {
   const dbFile = freshDbPath('happy');
   const client = await buildPreMigrationDb(dbFile);
   await seedRepresentativeLegacyRows(client);
@@ -251,6 +296,11 @@ test('SECTION 9: fresh pre-0012 database — the runner applies all 13 migration
   assert.equal(savedReportRow.document_identity_id, null, "0023 must add document_identity_id as NULL to a pre-existing row, never populate it");
   const userRow = after.users.find((r) => r.id === 'legacy-user-1');
   assert.equal(userRow.corpus_reuse_consented_at, null, "0023 must add corpus_reuse_consented_at as NULL to a pre-existing row, never populate it");
+  // 0025's column differs from 0023's: `role` has NOT NULL DEFAULT 'user',
+  // so a pre-existing row gets backfilled to the same default value a
+  // brand-new signup would get (see db/schema.ts's own comment on this
+  // column) — the correct behavior here is the default, not NULL.
+  assert.equal(userRow.role, 'user', "0025 must backfill role to the column's own default ('user') on a pre-existing row, never leave it unset or grant admin");
 
   client.close();
 });
@@ -426,17 +476,19 @@ test('K: the selectively-migrated database is structurally identical to a databa
   assert.equal(runResult.status, 'success');
 
   // Reference DB is built from exactly the migrations TARGET_MIGRATIONS
-  // currently covers (0000-0021), not "every .sql file in drizzleDir" —
-  // as of Phase E8S Step 4, drizzle/0022_reuse_context_declarations.sql
-  // exists on disk but is deliberately NOT in TARGET_MIGRATIONS yet (that
-  // allowlist is a pinned, reviewed, production-controlled-apply scope —
-  // see this runner's own header comment and EXPECTED_MIGRATION_SHA256;
-  // extending it is its own separate, deliberate decision, not an implicit
-  // side effect of adding a new migration file). Copying only the in-scope
-  // files into a temp dir keeps this test's actual invariant meaningful
-  // ("selective apply == full apply, for the migrations both mechanisms
-  // agree are in scope") without asserting anything about migrations
-  // TARGET_MIGRATIONS hasn't been extended to yet.
+  // currently covers, not "every .sql file in drizzleDir" — drizzleDir can
+  // (and, over this project's history, repeatedly has) contained newer
+  // migration files that exist on disk but are deliberately NOT yet in
+  // TARGET_MIGRATIONS (that allowlist is a pinned, reviewed, production-
+  // controlled-apply scope — see this runner's own header comment and
+  // EXPECTED_MIGRATION_SHA256; extending it is its own separate, deliberate
+  // decision, not an implicit side effect of adding a new migration file).
+  // Deriving the boundary from TARGET_MIGRATIONS itself (maxTargetPrefix
+  // below), rather than hardcoding a specific migration number here, keeps
+  // this test's actual invariant meaningful ("selective apply == full apply,
+  // for the migrations both mechanisms agree are in scope") permanently —
+  // it never needs updating just because TARGET_MIGRATIONS grows, and never
+  // asserts anything about migrations it hasn't been extended to yet.
   const maxTargetPrefix = TARGET_MIGRATIONS[TARGET_MIGRATIONS.length - 1].slice(0, 4);
   const inScopeFiles = fs.readdirSync(drizzleDir).filter((f) => f.endsWith('.sql') && f.slice(0, 4) <= maxTargetPrefix).sort();
   const tempReferenceDrizzleDir = fs.mkdtempSync(path.join(os.tmpdir(), 'e8-k-reference-'));

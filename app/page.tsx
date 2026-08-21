@@ -265,6 +265,17 @@ async function analyzeWikipediaText(
 export type AcademicEvidenceCheckResult = {
   evidence: ExternalAcademicEvidence[];
   status: AcademicSearchStatus;
+  /**
+   * Developer-diagnostics addition: a bare correlation id for the
+   * server-side-only diagnostics row /api/academic-evidence already
+   * persisted (see that route's own header comment for why the raw
+   * diagnostic content itself — candidates, queries, provider errors —
+   * never round-trips through this client at all, only this id). Forwarded
+   * to saveReport()/saveReportRemote() below so app/api/reports/route.ts can
+   * link it to the saved report. null whenever no diagnostics row exists
+   * (a network failure before the check ran, or text under MIN_TEXT_LENGTH).
+   */
+  academicSearchDiagnosticsId: number | null;
 };
 
 // Phase 3: unlike analyzeWikipediaText above, this cannot run in a Worker —
@@ -289,17 +300,22 @@ async function analyzeAcademicEvidence(text: string): Promise<AcademicEvidenceCh
       body: JSON.stringify({ text }),
     });
     if (!response.ok) throw new Error(`academic evidence request failed (${response.status})`);
-    const data = (await response.json()) as { evidence?: ExternalAcademicEvidence[]; status?: AcademicSearchStatus };
+    const data = (await response.json()) as {
+      evidence?: ExternalAcademicEvidence[];
+      status?: AcademicSearchStatus;
+      academicSearchDiagnosticsId?: number | null;
+    };
     return {
       evidence: Array.isArray(data.evidence) ? data.evidence : [],
       status: data.status ?? "FAILED",
+      academicSearchDiagnosticsId: data.academicSearchDiagnosticsId ?? null,
     };
   } catch (error) {
     console.debug("Academic evidence check failed.", {
       outcome: "failed",
       error: error instanceof Error ? error.message : String(error),
     });
-    return { evidence: [], status: "FAILED" };
+    return { evidence: [], status: "FAILED", academicSearchDiagnosticsId: null };
   }
 }
 
@@ -822,10 +838,10 @@ export default function Home() {
     setFile(selected);
   }
 
-  async function saveReport(report: SimilarityReport) {
+  async function saveReport(report: SimilarityReport, academicSearchDiagnosticsId?: number | null) {
     setReports((current) => [report, ...current.filter((item) => item.id !== report.id)].slice(0, 50));
     await storeReport(report);
-    await saveReportRemote(report, buildReportSummary(report));
+    await saveReportRemote(report, buildReportSummary(report), academicSearchDiagnosticsId);
   }
 
   async function generateReport() {
@@ -977,7 +993,7 @@ export default function Home() {
     setProgress(100);
     setProcessingLabel("Saving your report");
     try {
-      await saveReport(report);
+      await saveReport(report, academicResult.academicSearchDiagnosticsId);
       navigate("reports");
       notify(
         academicResult.status === "FAILED"

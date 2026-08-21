@@ -21,7 +21,7 @@ test("PIPELINE ORDERING: academic + Wikipedia checks are awaited before unified 
 
   const waitIndex = page.indexOf("const [webCheck, academicResult] = await Promise.all([wikipediaPromise, academicEvidencePromise]);");
   const unifiedIndex = page.indexOf("report = attachUnifiedSimilarity(report);");
-  const saveIndex = page.indexOf("await saveReport(report);");
+  const saveIndex = page.indexOf("await saveReport(report, academicResult.academicSearchDiagnosticsId);");
 
   assert.ok(waitIndex > -1, "generateReport must await both the academic and Wikipedia checks together before proceeding");
   assert.ok(unifiedIndex > -1, "generateReport must compute the unified similarity result");
@@ -36,7 +36,7 @@ test("PIPELINE ORDERING: the enrichment call sites (Wikipedia, academic evidence
   const waitIndex = page.indexOf("const [webCheck, academicResult] = await Promise.all([wikipediaPromise, academicEvidencePromise]);");
   const wikipediaEnrichIndex = page.indexOf("report = enrichReportWithWikipedia(report, webCheck);");
   const academicEnrichIndex = page.indexOf("report = enrichReportWithAcademicEvidence(report, academicResult);");
-  const saveIndex = page.indexOf("await saveReport(report);");
+  const saveIndex = page.indexOf("await saveReport(report, academicResult.academicSearchDiagnosticsId);");
 
   assert.ok(wikipediaEnrichIndex > waitIndex, "Wikipedia evidence must be merged after the wait, not before");
   assert.ok(academicEnrichIndex > waitIndex, "academic evidence must be merged after the wait, not before");
@@ -46,7 +46,7 @@ test("PIPELINE ORDERING: the enrichment call sites (Wikipedia, academic evidence
 test("NO PROVISIONAL SCORE: saveReport(report) — the call that persists and displays the similarity result — occurs exactly once in generateReport's flow", async () => {
   const page = await readFile("app/page.tsx", "utf8");
 
-  const occurrences = page.split("await saveReport(report);").length - 1;
+  const occurrences = page.split("await saveReport(report, academicResult.academicSearchDiagnosticsId);").length - 1;
   assert.equal(occurrences, 1, "a report must be saved exactly once for its similarity result — a second occurrence would mean a provisional score is shown and later silently replaced");
 });
 
@@ -68,7 +68,7 @@ test("AI DECOUPLING: the AI-writing analysis promise is created before the acade
 
   const aiPromiseIndex = page.indexOf("const aiAnalysisPromise = analyzeAiText(");
   const waitIndex = page.indexOf("const [webCheck, academicResult] = await Promise.all([wikipediaPromise, academicEvidencePromise]);");
-  const saveIndex = page.indexOf("await saveReport(report);");
+  const saveIndex = page.indexOf("await saveReport(report, academicResult.academicSearchDiagnosticsId);");
   const navigateAfterSaveIndex = page.indexOf('navigate("reports");', saveIndex);
 
   assert.ok(aiPromiseIndex > -1, "expected the AI-writing analysis to be kicked off");

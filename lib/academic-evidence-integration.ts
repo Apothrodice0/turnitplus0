@@ -8,7 +8,14 @@ import { DEFAULT_PHRASE_EXTRACTION_CONFIG } from "./academic-search/phrase-extra
 import type { AcademicSearchProvider } from "./academic-search/provider";
 import { createEuropePmcAcademicSearchProvider } from "./academic-search/providers/europe-pmc";
 import { createOpenAireAcademicSearchProvider } from "./academic-search/providers/openaire";
-import type { AcademicSearchRunStats, AcademicSearchStatus, ExternalAcademicEvidence } from "./academic-search/types";
+import type {
+  AcademicSearchCandidate,
+  AcademicSearchQuery,
+  AcademicSearchRetrievalDiagnostic,
+  AcademicSearchRunStats,
+  AcademicSearchStatus,
+  ExternalAcademicEvidence,
+} from "./academic-search/types";
 
 /**
  * Phase 3 bridge layer: the only module that knows about both "reports" and
@@ -122,6 +129,17 @@ export type AcademicEvidenceResult = {
    * result."
    */
   status: AcademicSearchStatus;
+  /**
+   * Developer-diagnostics addition: the full ranked candidate list, every
+   * generated query, and per-candidate retrieval/comparison detail —
+   * previously computed by runAcademicSearch and discarded here. Never read
+   * by the live report/scoring path; carried through only so a caller can
+   * persist it for later inspection (see app/api/reports/route.ts). null
+   * only when this function's own outer catch fired (mirrors stats above).
+   */
+  candidates: AcademicSearchCandidate[] | null;
+  queries: AcademicSearchQuery[] | null;
+  retrievalDiagnostics: AcademicSearchRetrievalDiagnostic[] | null;
 };
 
 function buildProviders() {
@@ -168,12 +186,19 @@ export async function getExternalAcademicEvidence(
   try {
     const providers = providersOverride ?? buildProviders();
     const result = await runAcademicSearch(rawText, providers, DEFAULT_ACADEMIC_SEARCH_RUN_CONFIG);
-    return { evidence: result.evidence, stats: result.stats, status: result.status };
+    return {
+      evidence: result.evidence,
+      stats: result.stats,
+      status: result.status,
+      candidates: result.candidates,
+      queries: result.queries,
+      retrievalDiagnostics: result.retrievalDiagnostics,
+    };
   } catch (error) {
     // Never logs rawText itself (this codebase's own existing discipline —
     // see e.g. lib/user-submission-corpus.ts's identical rule) — only the
     // error message, which describes the failure, not the document.
     console.error("getExternalAcademicEvidence failed (non-fatal):", error instanceof Error ? error.message : String(error));
-    return { evidence: [], stats: null, status: "FAILED" };
+    return { evidence: [], stats: null, status: "FAILED", candidates: null, queries: null, retrievalDiagnostics: null };
   }
 }

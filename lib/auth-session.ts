@@ -47,6 +47,8 @@ function bytesToHex(bytes: Uint8Array): string {
   return hex;
 }
 
+export type UserRole = "user" | "admin";
+
 export type SessionUser = {
   id: string;
   username: string;
@@ -59,7 +61,19 @@ export type SessionUser = {
    * indexDocumentSubmissionIntoCorpus on this being true.
    */
   corpusReuseConsented: boolean;
+  /**
+   * Developer/admin authorization: read fresh from users.role on every
+   * session lookup, never cached in the session token/cookie itself — a
+   * revoked admin loses developer-dashboard access on their very next
+   * request, not just their next login. See lib/admin-role.ts for the only
+   * place a row's role is ever changed.
+   */
+  role: UserRole;
 };
+
+function toUserRole(value: string): UserRole {
+  return value === "admin" ? "admin" : "user";
+}
 
 export async function createSession(client: Client, userId: string): Promise<string> {
   const token = bytesToHex(randomBytes(32));
@@ -83,24 +97,48 @@ export async function getSessionUserByToken(token: string | null, client: Client
   if (!token) return null;
   const tokenHash = hashToken(token);
   const result = await client.execute({
-    sql: `SELECT sessions.expires_at as expires_at, users.id as id, users.username as username, users.email as email, users.corpus_reuse_consented_at as corpus_reuse_consented_at
+    sql: `SELECT sessions.expires_at as expires_at, users.id as id, users.username as username, users.email as email, users.corpus_reuse_consented_at as corpus_reuse_consented_at, users.role as role
           FROM sessions JOIN users ON users.id = sessions.user_id
           WHERE sessions.token_hash = ?`,
     args: [tokenHash],
   });
   const row = result.rows[0] as unknown as
-    | { expires_at: number | bigint; id: string; username: string; email: string; corpus_reuse_consented_at: string | null }
+    | { expires_at: number | bigint; id: string; username: string; email: string; corpus_reuse_consented_at: string | null; role: string }
     | undefined;
   if (!row) return null;
   if (Number(row.expires_at) <= Date.now()) {
     await client.execute({ sql: "DELETE FROM sessions WHERE token_hash = ?", args: [tokenHash] });
     return null;
   }
-  return { id: row.id, username: row.username, email: row.email, corpusReuseConsented: row.corpus_reuse_consented_at !== null };
+  return {
+    id: row.id,
+    username: row.username,
+    email: row.email,
+    corpusReuseConsented: row.corpus_reuse_consented_at !== null,
+    role: toUserRole(row.role),
+  };
 }
 
 export async function getSessionUser(request: Request, client: Client): Promise<SessionUser | null> {
   return getSessionUserByToken(parseCookie(request.headers.get("cookie"), SESSION_COOKIE_NAME), client);
+}
+
+/**
+ * Developer/admin authorization gate for Route Handlers. Returns null for
+ * both "not signed in" and "signed in but not an admin" — every
+ * /api/developer/* route treats those two cases identically (a plain 404,
+ * never a 401/403 that would confirm the route exists to a non-admin
+ * caller), so callers never need to branch on which one happened.
+ */
+export async function getAdminSessionUser(request: Request, client: Client): Promise<SessionUser | null> {
+  const user = await getSessionUser(request, client);
+  return user?.role === "admin" ? user : null;
+}
+
+/** Same gate as getAdminSessionUser, for Server Components resolving a session from a raw cookie token (see getSessionUserByToken's own comment). */
+export async function getAdminSessionUserByToken(token: string | null, client: Client): Promise<SessionUser | null> {
+  const user = await getSessionUserByToken(token, client);
+  return user?.role === "admin" ? user : null;
 }
 
 /** Sets the session cookie on an outgoing NextResponse. remember=false yields a browser-session-only cookie (no Max-Age). */

@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server';
 import { checkRate } from '../../../lib/rate-limit';
 import { getExternalAcademicEvidence } from '../../../lib/academic-evidence-integration';
+import { getReportsDbClient } from '../../../lib/reports-db';
+import { recordAcademicSearchRunDiagnostics } from '../../../lib/academic-search-diagnostics-repo';
 
 /**
  * Phase 3: the one server endpoint the academic-search subsystem is reached
@@ -12,14 +14,30 @@ import { getExternalAcademicEvidence } from '../../../lib/academic-evidence-inte
  *
  * Deliberately minimal: no auth requirement (this never touches a user's
  * saved-report data, only the raw text the client already has), no
- * persistence (the caller — app/page.tsx's generateReport() — is
- * responsible for merging the response into a report and re-saving it, the
- * same place Wikipedia enrichment is already merged and saved). A request
- * here can take several seconds (real network calls to two external APIs);
- * that cost is why this is called asynchronously and never awaited on the
- * main report-generation path — see lib/academic-evidence-integration.ts's
- * own header comment for the non-blocking, non-fatal contract every call
- * into lib/academic-search/ from this route already carries.
+ * persistence of the report itself (the caller — app/page.tsx's
+ * generateReport() — is responsible for merging the evidence into a report
+ * and re-saving it, the same place Wikipedia enrichment is already merged
+ * and saved). A request here can take several seconds (real network calls
+ * to two external APIs); that cost is why this is called asynchronously and
+ * never awaited on the main report-generation path — see
+ * lib/academic-evidence-integration.ts's own header comment for the
+ * non-blocking, non-fatal contract every call into lib/academic-search/ from
+ * this route already carries.
+ *
+ * Developer-diagnostics addition: this route has no auth requirement and is
+ * reachable by any caller, authenticated or not — so the raw diagnostic
+ * bundle runAcademicSearch() computes (candidates, generated queries,
+ * provider errors, per-candidate retrieval/comparison outcome) is persisted
+ * SERVER-SIDE, directly here, and never included in the HTTP response body.
+ * Only a bare numeric row id crosses the network (academicSearchDiagnosticsId
+ * below) — the response shape is otherwise unchanged from before this
+ * feature existed (`{evidence, stats, status}` minus `stats`, which was
+ * itself never rendered by any client code and is dropped here for the same
+ * reason). app/api/reports/route.ts's deferred save callback later links
+ * that id to the actual report/document identity once both exist — see
+ * lib/academic-search-diagnostics-repo.ts's own header comment for why this
+ * is a two-step record-then-link design rather than persisting everything
+ * in one place.
  */
 
 const MAX_TEXT_LENGTH = 1_000_000;
@@ -49,16 +67,32 @@ export async function POST(request: Request) {
     if (text.length < MIN_TEXT_LENGTH) {
       // Nothing worth querying for — a property of the input, not a
       // provider outage, so this is COMPLETE_NO_MATCHES, not FAILED. See
-      // AcademicSearchStatus's own header comment.
-      return new NextResponse(JSON.stringify({ evidence: [], stats: null, status: 'COMPLETE_NO_MATCHES' }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      // AcademicSearchStatus's own header comment. Nothing to persist
+      // either — the pipeline never ran.
+      return new NextResponse(JSON.stringify({ evidence: [], status: 'COMPLETE_NO_MATCHES', academicSearchDiagnosticsId: null }), { status: 200, headers: { 'Content-Type': 'application/json' } });
     }
     if (text.length > MAX_TEXT_LENGTH) {
       return new NextResponse(JSON.stringify({ error: 'text is too long' }), { status: 413 });
     }
 
-    const { evidence, stats, status } = await getExternalAcademicEvidence(text);
+    const { evidence, stats, status, candidates, queries, retrievalDiagnostics } = await getExternalAcademicEvidence(text);
 
-    return new NextResponse(JSON.stringify({ evidence, stats, status }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    // Best-effort, non-fatal: a diagnostics-persistence failure must never
+    // turn an otherwise-successful academic-evidence check into an error —
+    // the user's report generation does not depend on this succeeding.
+    let academicSearchDiagnosticsId: number | null = null;
+    if (stats) {
+      const client = await getReportsDbClient();
+      try {
+        academicSearchDiagnosticsId = await recordAcademicSearchRunDiagnostics(client, { status, stats, queries, candidates, retrievalDiagnostics });
+      } catch (err) {
+        console.error('recordAcademicSearchRunDiagnostics failed (non-fatal):', err instanceof Error ? err.message : String(err));
+      } finally {
+        client.close();
+      }
+    }
+
+    return new NextResponse(JSON.stringify({ evidence, status, academicSearchDiagnosticsId }), { status: 200, headers: { 'Content-Type': 'application/json' } });
   } catch (err) {
     // getExternalAcademicEvidence is itself non-throwing (best-effort) — this
     // catch only guards request parsing/rate-limiting above it. Even here,

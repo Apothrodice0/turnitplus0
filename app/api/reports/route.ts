@@ -4,6 +4,7 @@ import { checkRate } from '../../../lib/rate-limit';
 import { getSessionUser } from '../../../lib/auth-session';
 import { captureDocumentIdentityAndFamily } from '../../../lib/document-family';
 import { indexDocumentSubmissionIntoCorpus } from '../../../lib/user-submission-corpus';
+import { linkAcademicSearchRunDiagnosticsToReport } from '../../../lib/academic-search-diagnostics-repo';
 import { runAfterResponse } from '../../../lib/run-after-response';
 
 // Reports carry derived data (AI passages, matched phrases, extracted text)
@@ -37,7 +38,7 @@ export async function POST(request: Request) {
     const body = await request.json().catch(() => null);
     if (!body || typeof body !== 'object') return new NextResponse(JSON.stringify({ error: 'Invalid JSON' }), { status: 400 });
 
-    const { deviceKey, id, submissionId, title, createdAt, wordCount, archiveScore, scoreBand, aiScore, aiTone, payload } = body as Record<string, unknown>;
+    const { deviceKey, id, submissionId, title, createdAt, wordCount, archiveScore, scoreBand, aiScore, aiTone, payload, academicSearchDiagnosticsId } = body as Record<string, unknown>;
 
     // device_key is part of saved_reports' composite primary key, so it is
     // always required regardless of authentication state — unlike the list/
@@ -56,6 +57,16 @@ export async function POST(request: Request) {
     if (aiScore !== null && aiScore !== undefined && typeof aiScore !== 'number') return new NextResponse(JSON.stringify({ error: 'aiScore must be a number or null' }), { status: 400 });
     if (aiTone !== null && aiTone !== undefined && typeof aiTone !== 'string') return new NextResponse(JSON.stringify({ error: 'aiTone must be a string or null' }), { status: 400 });
     if (payload === undefined) return new NextResponse(JSON.stringify({ error: 'payload is required' }), { status: 400 });
+    // Developer-diagnostics addition: optional, never required — an older
+    // client build, or a run where /api/academic-evidence never produced a
+    // diagnostics row (network failure, short text), simply omits or nulls
+    // this. Only ever a bare row id — see
+    // app/api/academic-evidence/route.ts's own header comment for why the
+    // raw diagnostic content never reaches this route (or this client) at
+    // all.
+    const academicDiagnosticsId = typeof academicSearchDiagnosticsId === 'number' && Number.isFinite(academicSearchDiagnosticsId)
+      ? academicSearchDiagnosticsId
+      : null;
 
     const payloadJson = JSON.stringify(payload);
     if (payloadJson.length > MAX_BYTES) {
@@ -138,6 +149,7 @@ export async function POST(request: Request) {
         const hasCorpusReuseConsent = sessionUser?.corpusReuseConsented === true;
         const reportDeviceKey = deviceKey;
         const reportId = id;
+        const capturedAcademicDiagnosticsId = academicDiagnosticsId;
         await runAfterResponse(async () => {
           const deferredClient = await getReportsDbClient();
           try {
@@ -154,6 +166,29 @@ export async function POST(request: Request) {
               sql: 'UPDATE saved_reports SET document_identity_id = ? WHERE device_key = ? AND id = ?',
               args: [captured.documentIdentityId, reportDeviceKey, reportId],
             });
+            // Developer-diagnostics addition: links the diagnostics row
+            // /api/academic-evidence/route.ts already persisted (queries,
+            // ranked candidates, per-candidate retrieval/comparison outcome,
+            // provider errors, stage timings) to this document identity and
+            // report, for later inspection via /api/developer/*. This route
+            // never sees the raw diagnostic content itself — only the id —
+            // see that route's own header comment. Independent of userId/
+            // corpus-reuse-consent (unlike corpus indexing below): it is not
+            // the cross-account matching corpus, only a record of what this
+            // one run saw. A failure here is caught on its own, distinct
+            // from identity-capture and corpus-indexing failures, and never
+            // re-thrown.
+            if (capturedAcademicDiagnosticsId !== null) {
+              try {
+                await linkAcademicSearchRunDiagnosticsToReport(deferredClient, capturedAcademicDiagnosticsId, {
+                  documentIdentityId: captured.documentIdentityId,
+                  reportDeviceKey,
+                  reportId,
+                });
+              } catch (err) {
+                console.error('linkAcademicSearchRunDiagnosticsToReport failed (non-fatal):', err instanceof Error ? err.message : String(err));
+              }
+            }
             // Phase E8D: activation. Reuses lib/user-submission-corpus.ts's
             // indexDocumentSubmissionIntoCorpus exactly as E8A already
             // defined it (no logic duplicated here) — the same

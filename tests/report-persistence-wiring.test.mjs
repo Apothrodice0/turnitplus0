@@ -36,7 +36,7 @@ test("remote report persistence (Turso) is layered alongside local storage, not 
   // Every storeReport call site must be immediately followed by the matching
   // saveReportRemote call, so a remote failure can never happen without the
   // local copy already having succeeded first.
-  assert.match(page, /await storeReport\(report\);\s*\n\s*await saveReportRemote\(report, buildReportSummary\(report\)\);/);
+  assert.match(page, /await storeReport\(report\);\s*\n\s*await saveReportRemote\(report, buildReportSummary\(report\), academicSearchDiagnosticsId\);/);
   assert.match(page, /await storeReport\(enriched\);\s*\n\s*await saveReportRemote\(enriched, buildReportSummary\(enriched\)\);/);
 
   // clearHistory must clear local storage first, then best-effort delete the

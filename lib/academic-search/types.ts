@@ -213,9 +213,50 @@ export type AcademicSearchRunStats = {
  */
 export type AcademicSearchStatus = "COMPLETE_WITH_MATCHES" | "COMPLETE_NO_MATCHES" | "FAILED";
 
+/**
+ * Developer-diagnostics addition: one entry per candidate orchestrator.ts
+ * actually attempted text retrieval for (config.maxCandidatesToRetrieve of
+ * them, in rank order) — recorded regardless of outcome, unlike `evidence`
+ * above, which only ever contains candidates that both got usable text AND
+ * cleared minEvidenceSimilarity. Exists purely to answer "why didn't this
+ * candidate become evidence" (no text available vs. text available but not
+ * similar enough) without changing which candidates are retrieved, compared,
+ * or reported as evidence — every value here is read from
+ * TextRetrievalResult/compareSubmissionToExternalText's own existing return
+ * values, never a new computation.
+ */
+export type AcademicSearchRetrievalDiagnostic = {
+  candidateKey: string;
+  rank: number;
+  doi: string | null;
+  url: string | null;
+  title: string | null;
+  retrievalSource: "provider" | "http-fallback" | "unavailable";
+  retrievalProviderId: string | null;
+  /** Only set when the HTTP fallback path was attempted — mirrors TextRetrievalResult.httpRetrievalStatus. */
+  httpRetrievalStatus?: string;
+  retrievalLatencyMs: number;
+  /** Character length of the retrieved text, or null if none was retrieved. */
+  retrievedTextLength: number | null;
+  /** compareSubmissionToExternalText's similarity, or null if no text was retrieved to compare. */
+  comparisonSimilarity: number | null;
+  /** True only for a candidate that made it into `evidence` above. */
+  includedAsEvidence: boolean;
+};
+
 export type AcademicSearchRunResult = {
   evidence: ExternalAcademicEvidence[];
   candidates: AcademicSearchCandidate[];
   stats: AcademicSearchRunStats;
   status: AcademicSearchStatus;
+  /**
+   * Developer-diagnostics addition: every query Stage 1's phrase extractor
+   * generated for this run, including ones that produced zero results for
+   * every provider — stats.queryCount above is only the count; this is the
+   * actual query text/rank/type/sourcePassage. Never read by ranking,
+   * dedup, or comparison — purely carried through for observability.
+   */
+  queries: AcademicSearchQuery[];
+  /** Developer-diagnostics addition — see AcademicSearchRetrievalDiagnostic's own comment. */
+  retrievalDiagnostics: AcademicSearchRetrievalDiagnostic[];
 };

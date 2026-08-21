@@ -4,20 +4,24 @@ import path from "node:path";
 import type { Client } from "@libsql/client";
 
 /**
- * Phase E8E-D.1: an isolated runner whose only job is applying migrations
- * 0012-0024 (the still-unapplied Phase A-E8 tables, the privacy/data-
- * lifecycle hardening columns 0023 adds, and the durable rate-limiting
- * table 0024 adds) to a database that is otherwise already at the pre-0012
- * baseline. Deliberately separate from
- * lib/ingest.ts's applyMigrationsLibsql(), which replays every migration
- * file in drizzleDir from 0000 onward with no applied-state tracking —
- * correct only against an empty/fresh database (every existing test in
- * this repo uses it exactly that way). Running that function against a
- * non-empty database would replay drizzle/0007_document_chunks_cascade.sql,
- * which contains a real `DROP TABLE document_chunks` as part of a
- * rebuild-for-CASCADE pattern — destructive against a table that already
- * holds real rows. This module never reads or executes 0000-0011, and
- * never imports applyMigrationsLibsql.
+ * Phase E8E-D.1: an isolated runner whose job is applying every pending
+ * migration beyond the pre-0012 baseline (originally 0012-0024 — the Phase
+ * A-E8 tables, the privacy/data-lifecycle hardening columns 0023 adds, and
+ * the durable rate-limiting table 0024 adds; extended to include 0025-0026
+ * — the developer/admin role column and academic-search diagnostics table
+ * — as a deliberate, reviewed decision, not an automatic side effect of
+ * adding those migration files; see this file's own EXPECTED_MIGRATION_SHA256
+ * for how future extensions are meant to be reviewed the same way) to a
+ * database that is otherwise already at the pre-0012 baseline. Deliberately
+ * separate from lib/ingest.ts's applyMigrationsLibsql(), which replays every
+ * migration file in drizzleDir from 0000 onward with no applied-state
+ * tracking — correct only against an empty/fresh database (every existing
+ * test in this repo uses it exactly that way). Running that function
+ * against a non-empty database would replay
+ * drizzle/0007_document_chunks_cascade.sql, which contains a real
+ * `DROP TABLE document_chunks` as part of a rebuild-for-CASCADE pattern —
+ * destructive against a table that already holds real rows. This module
+ * never reads or executes 0000-0011, and never imports applyMigrationsLibsql.
  *
  * This module has no knowledge of "production" as a concept — it only ever
  * receives an already-constructed Client and an environmentLabel string
@@ -41,6 +45,8 @@ export const TARGET_MIGRATIONS = [
   "0022_reuse_context_declarations.sql",
   "0023_privacy_consent_and_report_identity_link.sql",
   "0024_rate_limit_buckets.sql",
+  "0025_users_role.sql",
+  "0026_academic_search_run_diagnostics.sql",
 ] as const;
 
 export type TargetMigrationFile = (typeof TARGET_MIGRATIONS)[number];
@@ -76,6 +82,13 @@ export const EXPECTED_TABLES_BY_MIGRATION: Record<TargetMigrationFile, string[]>
   // table-existence tracking as every migration before 0023, not
   // EXPECTED_COLUMNS_BY_MIGRATION.
   "0024_rate_limit_buckets.sql": ["rate_limit_buckets"],
+  // Like 0023, 0025 creates no new tables — it only adds a column to the
+  // already-existing users table (see EXPECTED_COLUMNS_BY_MIGRATION below).
+  "0025_users_role.sql": [],
+  // Like 0024, 0026 creates a genuinely new table (developer-diagnostics
+  // capture — see drizzle/0026_academic_search_run_diagnostics.sql), tracked
+  // via plain table-existence, not EXPECTED_COLUMNS_BY_MIGRATION.
+  "0026_academic_search_run_diagnostics.sql": ["academic_search_run_diagnostics"],
 };
 
 export const ALL_TARGET_TABLES: string[] = TARGET_MIGRATIONS.flatMap((m) => EXPECTED_TABLES_BY_MIGRATION[m]);
@@ -96,6 +109,9 @@ export const EXPECTED_COLUMNS_BY_MIGRATION: Partial<Record<TargetMigrationFile, 
   "0023_privacy_consent_and_report_identity_link.sql": [
     { table: "saved_reports", column: "document_identity_id" },
     { table: "users", column: "corpus_reuse_consented_at" },
+  ],
+  "0025_users_role.sql": [
+    { table: "users", column: "role" },
   ],
 };
 
@@ -134,6 +150,8 @@ export const EXPECTED_MIGRATION_SHA256: Record<TargetMigrationFile, string> = {
   "0022_reuse_context_declarations.sql": "80f2d9391a0bd9b89cde22218abcc1438f2c7810d09324bc6dc99e1bbdc03fde",
   "0023_privacy_consent_and_report_identity_link.sql": "ac9fbfb9bfe0e341a6bc9c07ca3fb2db7f38bf382c4e974be65e637466f6d970",
   "0024_rate_limit_buckets.sql": "ab2338f23d689340dcb21d18a6eb75785f20e977082af5957f317617937a34da",
+  "0025_users_role.sql": "77856c89d05da4973ef95a52d31062a10f3b3b53fc176965fecc024f6004da94",
+  "0026_academic_search_run_diagnostics.sql": "f0ebebb4cd0a9b2e4f36560dc9990fb439a1bc4d8146842a932870934838269b",
 };
 
 const DESTRUCTIVE_PATTERN = /\b(DROP\s+TABLE|DROP\s+INDEX|ALTER\s+TABLE\s+\S+\s+DROP|DELETE\s+FROM|TRUNCATE)\b/gi;

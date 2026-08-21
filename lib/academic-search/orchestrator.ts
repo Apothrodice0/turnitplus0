@@ -11,6 +11,7 @@ import { createAcademicSearchContentRetriever, retrieveCandidateText } from "./t
 import type {
   AcademicSearchProviderError,
   AcademicSearchResult,
+  AcademicSearchRetrievalDiagnostic,
   AcademicSearchRunResult,
   AcademicSearchRunStats,
   AcademicSearchStatus,
@@ -148,18 +149,51 @@ export async function runAcademicSearch(
   let comparisonLatencyMs = 0;
   let candidatesTextRetrieved = 0;
   const evidence: ExternalAcademicEvidence[] = [];
+  const retrievalDiagnostics: AcademicSearchRetrievalDiagnostic[] = [];
 
   for (const candidate of toRetrieve) {
     const retrieval = await retrieveCandidateText(candidate, providersById, contentRetriever);
     textRetrievalLatencyMs += retrieval.latencyMs;
-    if (!retrieval.text) continue;
+    if (!retrieval.text) {
+      retrievalDiagnostics.push({
+        candidateKey: candidate.candidateKey,
+        rank: candidate.rank,
+        doi: candidate.doi,
+        url: candidate.url,
+        title: candidate.title,
+        retrievalSource: retrieval.source,
+        retrievalProviderId: retrieval.providerId,
+        httpRetrievalStatus: retrieval.httpRetrievalStatus,
+        retrievalLatencyMs: retrieval.latencyMs,
+        retrievedTextLength: null,
+        comparisonSimilarity: null,
+        includedAsEvidence: false,
+      });
+      continue;
+    }
     candidatesTextRetrieved += 1;
 
     const comparisonStart = Date.now();
     const comparison = compareSubmissionToExternalText(submissionText, retrieval.text);
     comparisonLatencyMs += Date.now() - comparisonStart;
 
-    if (comparison.similarity < config.minEvidenceSimilarity) continue;
+    const includedAsEvidence = comparison.similarity >= config.minEvidenceSimilarity;
+    retrievalDiagnostics.push({
+      candidateKey: candidate.candidateKey,
+      rank: candidate.rank,
+      doi: candidate.doi,
+      url: candidate.url,
+      title: candidate.title,
+      retrievalSource: retrieval.source,
+      retrievalProviderId: retrieval.providerId,
+      httpRetrievalStatus: retrieval.httpRetrievalStatus,
+      retrievalLatencyMs: retrieval.latencyMs,
+      retrievedTextLength: retrieval.text.length,
+      comparisonSimilarity: comparison.similarity,
+      includedAsEvidence,
+    });
+
+    if (!includedAsEvidence) continue;
 
     const attributedProviderId = retrieval.providerId ?? candidate.contributors[0]?.providerId ?? null;
     const attributedContributor = candidate.contributors.find((c) => c.providerId === attributedProviderId) ?? candidate.contributors[0];
@@ -202,5 +236,5 @@ export async function runAcademicSearch(
     : searchAttempts > 0 && providerErrors.length >= searchAttempts ? "FAILED"
     : "COMPLETE_NO_MATCHES";
 
-  return { evidence, candidates: ranked, stats, status };
+  return { evidence, candidates: ranked, stats, status, queries, retrievalDiagnostics };
 }

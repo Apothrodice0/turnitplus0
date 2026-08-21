@@ -16,13 +16,22 @@ export type ReportSummary = {
 // must never interrupt analysis or block the existing local (IndexedDB)
 // flow. Failures are logged at debug level and otherwise swallowed.
 
-export async function saveReportRemote<T>(report: T, summary: ReportSummary): Promise<void> {
+/**
+ * `academicSearchDiagnosticsId` is sent as a sibling of `payload`, never
+ * nested inside it — it must never become part of SimilarityReport/
+ * saved_reports.payload_json. It is only ever a bare row id (see
+ * app/api/academic-evidence/route.ts's own header comment for why the raw
+ * diagnostic content itself is persisted server-side and never sent to this
+ * client at all) — app/api/reports/route.ts uses it to link that
+ * already-persisted row to this report, once both exist.
+ */
+export async function saveReportRemote<T>(report: T, summary: ReportSummary, academicSearchDiagnosticsId?: number | null): Promise<void> {
   try {
     const deviceKey = getDeviceKey();
     const response = await fetch("/api/reports", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ deviceKey, ...summary, payload: report }),
+      body: JSON.stringify({ deviceKey, ...summary, payload: report, academicSearchDiagnosticsId: academicSearchDiagnosticsId ?? null }),
     });
     if (!response.ok) {
       console.debug("Remote report save was rejected (local copy is unaffected).", { status: response.status });

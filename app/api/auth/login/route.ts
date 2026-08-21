@@ -3,6 +3,7 @@ import { getReportsDbClient } from '../../../../lib/reports-db';
 import { checkAuthRate } from '../../../../lib/rate-limit';
 import { verifyPassword, verifyAgainstDummy } from '../../../../lib/auth-crypto';
 import { createSession, setSessionCookie, claimAnonymousReports } from '../../../../lib/auth-session';
+import { maybePromoteToAdmin } from '../../../../lib/admin-role';
 
 const MAX_EMAIL_LENGTH = 254;
 const MAX_PASSWORD_LENGTH = 200;
@@ -54,6 +55,7 @@ export async function POST(request: Request) {
       }
 
       await claimAnonymousReports(client, row.id, deviceKey);
+      await maybePromoteToAdmin(client, row.id, normalizedEmail);
 
       const token = await createSession(client, row.id);
       const response = new NextResponse(

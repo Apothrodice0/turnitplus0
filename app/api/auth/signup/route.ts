@@ -4,6 +4,7 @@ import { getReportsDbClient } from '../../../../lib/reports-db';
 import { checkAuthRate } from '../../../../lib/rate-limit';
 import { hashPassword } from '../../../../lib/auth-crypto';
 import { createSession, setSessionCookie, claimAnonymousReports } from '../../../../lib/auth-session';
+import { maybePromoteToAdmin } from '../../../../lib/admin-role';
 
 const MAX_EMAIL_LENGTH = 254;
 const MIN_PASSWORD_LENGTH = 8;
@@ -61,6 +62,7 @@ export async function POST(request: Request) {
       });
 
       await claimAnonymousReports(client, userId, deviceKey);
+      await maybePromoteToAdmin(client, userId, normalizedEmail);
 
       const token = await createSession(client, userId);
       // corpusReuseConsent is always false for a brand-new account — the
