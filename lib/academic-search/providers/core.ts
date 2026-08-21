@@ -107,6 +107,10 @@ function mapCoreWorkItem(item: CoreWorkItem, queryText: string): AcademicSearchR
     doi: item.doi?.trim() || null,
     url: resultUrl(item),
     textAvailable: typeof item.fullText === "string" && item.fullText.trim().length > 0,
+    // Out of scope for the metadata-relevance investigation (this provider
+    // is not wired into buildProviders() / production use) — left null
+    // rather than invented, same convention as providerRelevance above.
+    abstract: null,
     querySignalUsed: queryText,
     // CORE v3 does not document a normalized per-result relevance/confidence
     // field in either source consulted (see this file's header comment) —

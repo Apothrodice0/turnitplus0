@@ -182,6 +182,7 @@ export function createMockAcademicSearchProvider(config: MockAcademicSearchProvi
       doi: fixture.doi,
       url: fixture.url,
       textAvailable: fixture.fullText !== null,
+      abstract: null,
       querySignalUsed: queryText,
       providerRelevance: relevance,
     };

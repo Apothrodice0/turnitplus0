@@ -3,6 +3,7 @@ import { DEFAULT_CANDIDATE_RANKING_WEIGHTS, rankAcademicCandidates, type Candida
 import { compareSubmissionToExternalText } from "./comparator";
 import { mapWithConcurrency } from "./concurrency";
 import { deduplicateAcademicResults } from "./deduplicator";
+import { buildSubmissionTermProfile, computeMetadataRelevanceBonus } from "./metadata-relevance";
 import { DEFAULT_PHRASE_EXTRACTION_CONFIG, extractCandidatePhrases, type PhraseExtractionConfig } from "./phrase-extractor";
 import { classifyAcademicSearchError, sanitizeAcademicSearchResults, type AcademicSearchProvider } from "./provider";
 import { normalizeAcademicResults } from "./result-normalizer";
@@ -129,7 +130,17 @@ export async function runAcademicSearch(
   const deduped = deduplicateAcademicResults(normalized);
 
   // Stage 5: CandidateRanker
-  const ranked = rankAcademicCandidates(deduped, config.rankingWeights);
+  // Metadata-relevance investigation: computed entirely from data Stage 2's
+  // own search() calls already returned (title/abstract — see
+  // providers/openaire.ts and providers/europe-pmc.ts's own header
+  // comments) and the submission text passed into this function, so this
+  // never costs an extra network call and always runs before Stage 6-8's
+  // retrieval budget is touched. See metadata-relevance.ts's own header
+  // comment for the full account, including why the submission's own
+  // administrative boilerplate is stripped first.
+  const submissionProfile = buildSubmissionTermProfile(submissionText);
+  const metadataRelevanceBonus = computeMetadataRelevanceBonus(deduped, submissionProfile);
+  const ranked = rankAcademicCandidates(deduped, config.rankingWeights, metadataRelevanceBonus);
 
   // Stages 6-8: TextRetriever -> SimilarityComparator -> ExternalAcademicEvidence[]
   const toRetrieve = ranked.slice(0, config.maxCandidatesToRetrieve);

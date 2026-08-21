@@ -34,6 +34,7 @@ export function deduplicateAcademicResults(results: NormalizedAcademicResult[]):
       publication: firstNonNull(contributors.map((c) => c.publication)),
       year: firstNonNull(contributors.map((c) => c.year)),
       textAvailable: contributors.some((c) => c.textAvailable),
+      abstract: firstNonNull(contributors.map((c) => c.abstract)),
       contributors,
       rank: 0, // assigned by candidate-ranker.ts
     };

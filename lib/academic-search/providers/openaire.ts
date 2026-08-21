@@ -75,6 +75,8 @@ type OpenAireResult = {
   bestAccessRight?: OpenAireAccessRight | null;
   pids?: OpenAirePid[] | null;
   instances?: OpenAireInstance[] | null;
+  /** Already present in the default (non-heavier) search response — confirmed live. Often carries embedded JATS-ish tags (e.g. "<jats:p>...") — extractDescription strips them. */
+  descriptions?: string[] | null;
 };
 
 type OpenAireSearchResponse = {
@@ -94,6 +96,14 @@ function extractYear(publicationDate: string | null | undefined): number | null 
 function extractDoi(pids: OpenAirePid[] | null | undefined): string | null {
   const doi = pids?.find((pid) => pid.scheme?.toLowerCase() === "doi")?.value;
   return doi?.trim() || null;
+}
+
+/** Strips the embedded markup tags (e.g. "<jats:p xml:lang=\"en\">...") a real response's descriptions[0] commonly carries — confirmed live, not guessed. */
+function extractDescription(descriptions: string[] | null | undefined): string | null {
+  const first = descriptions?.[0];
+  if (!first) return null;
+  const cleaned = first.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  return cleaned || null;
 }
 
 const DOI_RESOLVER_URL_PATTERN = /^https?:\/\/(dx\.)?doi\.org\//i;
@@ -147,6 +157,7 @@ function mapOpenAireResult(item: OpenAireResult, queryText: string, queryTotalRe
     url: resultUrl(item, doi),
     // No fullText field exists anywhere in this API's response shape — see header comment.
     textAvailable: false,
+    abstract: extractDescription(item.descriptions),
     querySignalUsed: queryText,
     // No documented per-result relevance/score field (only header.maxScore for the whole page) — left null rather than invented, matching providers/core.ts's own convention.
     providerRelevance: null,

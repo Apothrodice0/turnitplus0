@@ -75,6 +75,19 @@ export type AcademicSearchResult = {
   url: string | null;
   /** True only when the provider claims it can hand back usable full (or near-full) text for this result without further user action — a claim TextRetriever still verifies, never taken on faith for ranking alone. */
   textAvailable: boolean;
+  /**
+   * Metadata-relevance investigation: the abstract/description text a
+   * provider's own SEARCH response already carries, distinct from
+   * textAvailable/full-text retrieval — this is metadata, always cheap,
+   * never the article body. OpenAIRE's default search response already
+   * includes `descriptions` (mapped directly, no extra request);
+   * Europe PMC's default (lite) response omits it, so its provider passes
+   * `resultType=core` on the SAME search request rather than making a
+   * second call. Null whenever the provider's response has none for this
+   * result — never guessed. See candidate-ranker.ts's own header comment
+   * for how this feeds the bounded metadata-relevance bonus.
+   */
+  abstract: string | null;
   /** The query that produced this raw result — before normalization/dedup, so the orchestrator can report which of the 5-20 queries were productive. */
   querySignalUsed: string;
   /** Provider's own relevance/confidence signal for this result, if any, normalized to 0..1 within a single query's result set. Never a probability of plagiarism — purely "how well did this match the search query." */
@@ -123,6 +136,8 @@ export type AcademicSearchCandidate = {
   publication: string | null;
   year: number | null;
   textAvailable: boolean;
+  /** Merged the same way title/authors/etc. are (first non-null contributor, input order — see deduplicator.ts). Feeds the metadata-relevance bonus alongside title; never the retrieved article body. */
+  abstract: string | null;
   /** Every normalized result that collapsed into this candidate — always >= 1; length > 1 is the "multiple providers/queries returned the same work" case. */
   contributors: NormalizedAcademicResult[];
   /** Assigned by candidate-ranker.ts; 0 = highest priority. */

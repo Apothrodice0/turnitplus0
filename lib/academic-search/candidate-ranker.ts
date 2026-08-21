@@ -42,6 +42,13 @@ import type { AcademicSearchCandidate } from "./types";
  * currently hardcode it to null, so it has never contributed any
  * information — see types.ts's own field comment for what it is meant to
  * become if a provider ever populates it.
+ *
+ * Metadata-relevance bonus (same investigation, follow-up): orchestrator.ts
+ * now also passes rankAcademicCandidates a bounded, externally-computed
+ * per-candidate bonus (see metadata-relevance.ts) — a title+abstract
+ * term-overlap signal, computed before any retrieval, added on top of the
+ * relevance score above rather than replacing any of it. hasDoi, hasUrl,
+ * specificityBonus, and multiProviderCorroboration are untouched by it.
  */
 
 export type CandidateRankingWeights = {
@@ -206,10 +213,24 @@ function relevanceScore(candidate: AcademicSearchCandidate, weights: CandidateRa
 export function rankAcademicCandidates(
   candidates: AcademicSearchCandidate[],
   weights: CandidateRankingWeights = DEFAULT_CANDIDATE_RANKING_WEIGHTS,
+  /**
+   * Metadata-relevance investigation: an optional, externally-computed
+   * per-candidate bonus (see metadata-relevance.ts's own
+   * computeMetadataRelevanceBonus, already bounded to [0, cap] there — this
+   * function does not re-clamp it) added on top of relevanceScore, never
+   * replacing hasDoi/hasUrl/specificityBonus/multiProviderCorroboration
+   * above. Omitted (the default) for every existing caller/test that
+   * predates this signal — identical output to before, since a missing
+   * entry contributes 0.
+   */
+  metadataRelevanceBonus?: Map<string, number>,
 ): AcademicSearchCandidate[] {
+  const combinedScore = (candidate: AcademicSearchCandidate) =>
+    relevanceScore(candidate, weights) + (metadataRelevanceBonus?.get(candidate.candidateKey) ?? 0);
+
   return [...candidates]
     .sort((a, b) => {
-      const relevanceDiff = relevanceScore(b, weights) - relevanceScore(a, weights);
+      const relevanceDiff = combinedScore(b) - combinedScore(a);
       if (relevanceDiff !== 0) return relevanceDiff;
       // Secondary tie-breaker, applied only once relevance is equal: a
       // retrievable candidate is marginally more useful to spend a

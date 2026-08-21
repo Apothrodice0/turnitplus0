@@ -69,6 +69,8 @@ type EuropePmcSearchResult = {
   pubYear?: string;
   isOpenAccess?: "Y" | "N";
   inEPMC?: "Y" | "N";
+  /** Only present when the request uses resultType=core (see buildSearchUrl's own comment) — the default "lite" response omits it. */
+  abstractText?: string;
 };
 
 type EuropePmcSearchResponse = {
@@ -108,6 +110,7 @@ function mapEuropePmcResult(item: EuropePmcSearchResult, queryText: string, quer
     doi: item.doi?.trim() || null,
     url: resultUrl(item),
     textAvailable: isFullTextEligible(item),
+    abstract: item.abstractText?.trim() || null,
     querySignalUsed: queryText,
     // Europe PMC's search response carries no per-result relevance/score field (results are simply returned in relevance order when no sort param is given) — left null rather than invented.
     providerRelevance: null,
@@ -180,7 +183,12 @@ function buildSearchUrl(query: AcademicSearchQuery, config: EuropePmcProviderCon
     query: queryString,
     format: "json",
     pageSize: String(config.maxResultsPerRequest),
-    resultType: "lite",
+    // Metadata-relevance investigation: "core" (not the former "lite")
+    // adds abstractText to this SAME request — confirmed live, no second
+    // request — measured live: payload grows from 4,171 to 26,789 bytes
+    // at pageSize=5 (~6.4x), title/authorString/doi/etc. all still present
+    // unchanged. resultType=lite carries no abstract at all.
+    resultType: "core",
   });
   return `${baseUrl}/search?${params.toString()}`;
 }
