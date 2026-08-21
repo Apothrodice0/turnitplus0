@@ -12,39 +12,18 @@ export type ReportSummary = {
   aiTone: string | null;
 };
 
-// Authenticated report lists are deliberately summary-only. The old client
-// hydrated every report immediately after fetching the list, which turned a
-// 40-report history page into 40 sequential full-payload requests. The cache
-// below lets that existing caller keep its shape without fetching any report
-// body; a report room asks for the full payload explicitly via forceFull.
+// Report history is a summary index. Full payloads are fetched only when a
+// report room is opened. This prevents the history screen from doing an N+1
+// waterfall of /api/reports/:id requests for every saved report.
 const summaryCache = new Map<string, ReportSummary>();
-let summaryCacheMode: "authenticated" | "anonymous" | null = null;
 
 // Every function here is fail-soft by design: a network or database problem
-// must never interrupt analysis or block the existing local (IndexedDB)
-// flow. Failures are logged at debug level and otherwise swallowed.
+// must never interrupt analysis or block the existing local (IndexedDB) flow.
 
 export type SaveReportRemoteResult =
   | { ok: true }
-  /**
-   * status 0 means the request never completed (network/DB error) — the
-   * existing fail-soft case, where the local copy is the only signal that
-   * matters and the caller has never needed to react to a value. status 429
-   * with quotaExceeded is new and different: it is not transient, so
-   * generateReport() surfaces it to the user instead of treating it like
-   * every other silent remote-save failure.
-   */
   | { ok: false; status: number; quotaExceeded: boolean; error?: string; resetsAt?: string };
 
-/**
- * `academicSearchDiagnosticsId` is sent as a sibling of `payload`, never
- * nested inside it — it must never become part of SimilarityReport/
- * saved_reports.payload_json. It is only ever a bare row id (see
- * app/api/academic-evidence/route.ts's own header comment for why the raw
- * diagnostic content itself is persisted server-side and never sent to this
- * client at all) — app/api/reports/route.ts uses it to link that
- * already-persisted row to this report, once both exist.
- */
 export async function saveReportRemote<T>(report: T, summary: ReportSummary, academicSearchDiagnosticsId?: number | null): Promise<SaveReportRemoteResult> {
   try {
     const deviceKey = getDeviceKey();
@@ -59,6 +38,7 @@ export async function saveReportRemote<T>(report: T, summary: ReportSummary, aca
       const quotaExceeded = response.status === 429 && typeof body?.resetsAt === "string";
       return { ok: false, status: response.status, quotaExceeded, error: body?.error, resetsAt: body?.resetsAt };
     }
+    summaryCache.set(summary.id, summary);
     return { ok: true };
   } catch (error) {
     console.debug("Remote report save failed (local copy is unaffected).", {
@@ -92,9 +72,8 @@ export async function listRemoteReportSummaries(): Promise<ReportSummary[]> {
     const deviceKey = getDeviceKey();
     const response = await fetch(`/api/reports?deviceKey=${encodeURIComponent(deviceKey)}`);
     if (!response.ok) return [];
-    const data = (await response.json()) as { reports?: ReportSummary[]; authenticated?: boolean };
+    const data = (await response.json()) as { reports?: ReportSummary[] };
     const summaries = Array.isArray(data.reports) ? data.reports : [];
-    summaryCacheMode = data.authenticated === true ? "authenticated" : "anonymous";
     summaryCache.clear();
     for (const summary of summaries) summaryCache.set(summary.id, summary);
     return summaries;
@@ -107,20 +86,20 @@ export async function listRemoteReportSummaries(): Promise<ReportSummary[]> {
 }
 
 /**
- * Fetch one report room payload. During authenticated report-history
- * hydration, the summary already in summaryCache is returned immediately;
- * this removes the old N sequential full-payload fetches. Pass forceFull=true
- * from a report room (or another surface that genuinely needs the document
- * payload).
+ * `forceFull=true` is used only by report-room/detail consumers. History
+ * callers can omit it and receive the already-fetched lightweight summary,
+ * avoiding a full payload request entirely.
  */
 export async function fetchRemoteReport<T>(id: string, forceFull = false): Promise<T | null> {
-  if (!forceFull && summaryCacheMode === "authenticated") {
+  if (!forceFull) {
     const summary = summaryCache.get(id);
     if (summary) return summary as T;
   }
   try {
     const deviceKey = getDeviceKey();
-    const response = await fetch(`/api/reports/${encodeURIComponent(id)}?deviceKey=${encodeURIComponent(deviceKey)}`);
+    const response = await fetch(`/api/reports/${encodeURIComponent(id)}?deviceKey=${encodeURIComponent(deviceKey)}`, {
+      cache: "no-store",
+    });
     if (!response.ok) return null;
     const data = (await response.json()) as { payload?: T };
     return (data.payload ?? null) as T | null;
@@ -136,6 +115,7 @@ export async function deleteRemoteReport(id: string): Promise<void> {
   try {
     const deviceKey = getDeviceKey();
     await fetch(`/api/reports/${encodeURIComponent(id)}?deviceKey=${encodeURIComponent(deviceKey)}`, { method: "DELETE" });
+    summaryCache.delete(id);
   } catch (error) {
     console.debug("Remote report delete failed.", {
       error: error instanceof Error ? error.message : String(error),
@@ -147,6 +127,7 @@ export async function deleteRemoteReportChecked(id: string): Promise<boolean> {
   try {
     const deviceKey = getDeviceKey();
     const response = await fetch(`/api/reports/${encodeURIComponent(id)}?deviceKey=${encodeURIComponent(deviceKey)}`, { method: "DELETE" });
+    if (response.ok) summaryCache.delete(id);
     return response.ok;
   } catch (error) {
     console.debug("Remote report delete failed.", {
