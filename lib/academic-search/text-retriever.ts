@@ -14,9 +14,27 @@ import type { AcademicSearchCandidate } from "./types";
  * retrieval failure: many open-access repositories (arXiv, RePEc/MPRA,
  * numerous institutional repositories) serve their canonical full text as
  * PDF only, with no HTML alternative — see this phase's own final report.
+ *
+ * Coverage benchmark (2026-08-21): the shared default's 2,000,000-byte
+ * maxResponseBytes rejected the real, ordinary "Attention Is All You Need"
+ * arXiv PDF (2,215,244 bytes — nothing unusual for a paper with figures) as
+ * CONTENT_TOO_LARGE, confirmed live via retrieveCandidateText() on the real
+ * ranked-#1 candidate — see tests/http-content-retriever.test.mjs's own
+ * "REAL PDFJS" test, which already had to work around this exact 2.2MB
+ * fixture exceeding the 2MB default. Raised here, scoped to this retriever
+ * only — the shared DEFAULT_HTTP_CONTENT_RETRIEVER_CONFIG (and every other
+ * caller of createHttpContentRetriever()) is untouched. 10,000,000 bytes is
+ * a bounded, not-unlimited step: comfortably above ordinary academic PDFs
+ * (this fixture's 2.2MB is typical; even a longer, heavily-figured paper
+ * rarely exceeds a few MB) while remaining well inside the range this
+ * codebase's own test suite already asserts as "conservative" for the
+ * shared default's own upper bound (see http-content-retriever.test.mjs's
+ * "DEFAULT_HTTP_CONTENT_RETRIEVER_CONFIG bounds are conservative" test,
+ * <= 10_000_000). maxPdfPages (unchanged, still 60) independently bounds a
+ * pathologically page-dense PDF regardless of this byte cap.
  */
 export function createAcademicSearchContentRetriever(): SourceContentRetriever {
-  return createHttpContentRetriever({ allowedContentTypes: ["text/html", "application/pdf"] });
+  return createHttpContentRetriever({ allowedContentTypes: ["text/html", "application/pdf"], maxResponseBytes: 10_000_000 });
 }
 
 /**
