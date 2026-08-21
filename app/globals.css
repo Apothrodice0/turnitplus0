@@ -2687,6 +2687,113 @@ main.report-main {
   font-size: 12px;
 }
 
+/* 10-room architecture (components/reports/report-rooms.tsx) */
+
+.report-rooms-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 12px;
+  margin-top: 25px;
+}
+
+.report-room-tile {
+  display: grid;
+  gap: 4px;
+  padding: 16px 14px;
+  border: 1px solid var(--soft-line);
+  border-radius: 12px;
+  background: var(--surface);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 150ms ease, background 150ms ease;
+}
+
+.report-room-tile:hover:not(:disabled) {
+  border-color: #c7dbe3;
+  background: #fbfdfe;
+}
+
+.report-room-tile:disabled {
+  cursor: default;
+  color: var(--muted);
+  opacity: 0.6;
+}
+
+.report-room-tile strong {
+  font-size: 14px;
+  color: var(--ink);
+}
+
+.report-room-tile span {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.report-room-tile small {
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.report-rooms-view {
+  margin-top: 20px;
+}
+
+.report-room-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+
+.report-room-heading {
+  margin: 0 0 12px;
+  font-size: 15px;
+  color: var(--ink);
+}
+
+/* Loading skeletons — a plain pulse, no external animation library. */
+
+.skeleton-line {
+  display: block;
+  height: 10px;
+  border-radius: 6px;
+  background: var(--soft-line);
+  animation: skeleton-pulse 1.4s ease-in-out infinite;
+}
+
+.skeleton-line-title {
+  width: 60%;
+  height: 12px;
+  margin-bottom: 8px;
+}
+
+.skeleton-line-meta {
+  width: 40%;
+}
+
+.report-room-tile-skeleton {
+  cursor: default;
+}
+
+.history-skeleton-row {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  gap: 14px;
+  align-items: center;
+  padding: 13px 12px;
+  border: 1px solid var(--soft-line);
+  border-radius: 12px;
+}
+
+@keyframes skeleton-pulse {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton-line { animation: none; }
+}
+
 .about-card {
   max-width: 1050px;
 }

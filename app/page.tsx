@@ -38,7 +38,10 @@ import { createReceiptPdf } from "@/lib/receipt-pdf";
 import { getDeviceKey } from "@/lib/device-key";
 import { extractPdfTextDocument } from "@/lib/pdf-text-extraction";
 import { clearStoredReports, loadStoredReports, storeReport } from "@/lib/report-store";
-import { deleteRemoteReport, fetchRemoteReport, fetchUploadLimitStatus, listRemoteReportSummaries, saveReportRemote, type UploadLimitStatus } from "@/lib/reports-remote";
+import { deleteRemoteReport, fetchAllReportSummariesAcrossRooms, fetchRemoteReport, fetchUploadLimitStatus, listRemoteReportSummaries, saveReportRemote, type ReportSummary, type UploadLimitStatus } from "@/lib/reports-remote";
+import { clearAllReportRoomCaches } from "@/lib/report-rooms-cache";
+import { ReportRoomsBrowser } from "@/components/reports/report-rooms";
+import { ReportHistoryRow } from "@/components/reports/report-history-row";
 import { combineMatchedWordPositions } from "@/lib/similarity-enrichment";
 import { computeUnifiedSimilarity } from "@/lib/unified-similarity";
 import { extractDocxTextDocument } from "@/lib/docx-text-extraction";
@@ -58,7 +61,6 @@ import {
   type AiPrepUpdate,
 } from "@/lib/ai-model-prep";
 import {
-  aiSignalDisplay,
   buildReportSummary,
   hasUnifiedSimilarity,
   PRIMARY_SIMILARITY_BAND_LABELS,
@@ -439,7 +441,26 @@ export default function Home() {
   const [isGeneratingReport, setIsGeneratingReport] = useState(false);
   const aiPrepStageRef = useRef<AiPrepStage | null>(null);
   const [currentReport, setCurrentReport] = useState<SimilarityReport | null>(null);
-  const [reports, setReports] = useState<SimilarityReport[]>([]);
+  // Anonymous (device-scoped) report list only, from here on — lightweight
+  // summaries, never full report bodies (see loadAnonymousReports). An
+  // authenticated account's list is owned entirely by ReportRoomsBrowser
+  // (the 10-room architecture) below, not this state.
+  const [reports, setReports] = useState<ReportSummary[]>([]);
+  // Mirrors ReportRoomsBrowser's own total-report count (summed across all
+  // 10 rooms) up to this component, for the sidebar badge and "Clear
+  // history" visibility — see onTotalCountChange.
+  const [accountReportCount, setAccountReportCount] = useState(0);
+  // Set once per successful save so ReportRoomsBrowser can reconcile a
+  // just-created report against its own (possibly still-fresh-within-24h)
+  // cache without waiting for that cache to expire — see that component's
+  // own header comment.
+  const [newlySavedReportSummary, setNewlySavedReportSummary] = useState<ReportSummary | null>(null);
+  // Bumped to force ReportRoomsBrowser to fully remount (discarding its own
+  // in-memory room index/contents) after "Clear history" — that action
+  // already invalidates its localStorage caches, but the currently-mounted
+  // instance's React state wouldn't otherwise notice until the user
+  // navigated away and back.
+  const [roomsBrowserKey, setRoomsBrowserKey] = useState(0);
   const [toast, setToast] = useState("");
   const [authMode, setAuthMode] = useState<AuthMode | null>(null);
   const [welcomeMode, setWelcomeMode] = useState<AuthMode | null>(null);
@@ -462,11 +483,15 @@ export default function Home() {
   // Anonymous/device-scoped report loading (no authenticated session).
   // Unchanged from the pre-Phase-2A behavior: IndexedDB is the primary
   // source, with a one-time remote (device_key-scoped) fallback only when
-  // local storage is genuinely empty.
+  // local storage is genuinely empty. The 10-room architecture (see
+  // ReportRoomsBrowser) is an authenticated-account concern only — an
+  // anonymous device's history is already local-first and typically far
+  // smaller, so this keeps loading the full local objects as before, only
+  // converting to lightweight summaries at the very end for display.
   async function loadAnonymousReports() {
     try {
       const localReports = await loadStoredReports<SimilarityReport>(11);
-      setReports(localReports);
+      setReports(localReports.map(buildReportSummary));
       if (localReports.length > 0) return;
       const summaries = await listRemoteReportSummaries();
       if (summaries.length === 0) return;
@@ -476,7 +501,7 @@ export default function Home() {
         if (full) restored.push(full);
       }
       if (restored.length === 0) return;
-      setReports(restored);
+      setReports(restored.map(buildReportSummary));
       for (const report of restored) {
         await storeReport(report);
       }
@@ -485,43 +510,20 @@ export default function Home() {
     }
   }
 
-  // Authenticated report loading. The set of report ids always comes from
-  // the session-scoped GET /api/reports — never from whatever happens to be
-  // sitting in the shared local IndexedDB cache — so a different account's
-  // (or an anonymous, never-claimed) report can never surface here. Local
-  // storage is only consulted to avoid re-fetching a report already cached
-  // under its own id from a previous hydration of this same account.
+  // Authenticated report loading. 10-room architecture: this account's own
+  // report list is no longer eagerly hydrated here at all — ReportRoomsBrowser
+  // (rendered only when `account` is set — see the "reports" view below)
+  // owns fetching/caching its own room index and room contents directly
+  // from the session-scoped, account-scoped API routes, lazily, only as the
+  // user actually opens a room or a report. This function's only remaining
+  // job is account-scoped state that ISN'T report-list data: the upload
+  // quota, and clearing any stale cross-context leftovers from a previous
+  // auth state (the flat anonymous `reports` list, and a "just saved"
+  // reference that could otherwise belong to a different session).
   async function loadAccountReports() {
-    // Non-blocking and independent of the reports fetch below (its own
-    // fail-soft contract never throws) — fired here so every existing call
-    // site of loadAccountReports (mount, login, signup) refreshes this for
-    // free, with no new call site needed.
+    setReports([]);
+    setNewlySavedReportSummary(null);
     void fetchUploadLimitStatus().then(setUploadLimitStatus);
-    try {
-      const summaries = await listRemoteReportSummaries();
-      if (summaries.length === 0) {
-        setReports([]);
-        return;
-      }
-      const localReports = await loadStoredReports<SimilarityReport>(11);
-      const localById = new Map(localReports.map((report) => [String(report.id), report]));
-      const hydrated: SimilarityReport[] = [];
-      for (const summary of summaries) {
-        const cached = localById.get(summary.id);
-        if (cached) {
-          hydrated.push(cached);
-          continue;
-        }
-        const full = await fetchRemoteReport<SimilarityReport>(summary.id);
-        if (full) {
-          hydrated.push(full);
-          await storeReport(full);
-        }
-      }
-      setReports(hydrated);
-    } catch {
-      setReports([]);
-    }
   }
 
   useEffect(() => {
@@ -716,10 +718,13 @@ export default function Home() {
   // account view — unlike signOutAccount, there is no separate logout call
   // to make and nothing remote left to keep in sync with.
   function completeAccountDeletion() {
+    if (account) clearAllReportRoomCaches(account.email);
     setReports([]);
     setCurrentReport(null);
     setAccount(null);
     setUploadLimitStatus(null);
+    setAccountReportCount(0);
+    setNewlySavedReportSummary(null);
     setIsEditingProfile(false);
     setIsDeletingAccount(false);
     setDeleteAccountError(null);
@@ -820,6 +825,12 @@ export default function Home() {
     fetch("/api/auth/logout", { method: "POST" }).catch(() => {});
     setAccount(null);
     setUploadLimitStatus(null);
+    // Only the in-memory display state, matching this function's own
+    // existing discipline above — the room cache in localStorage (like
+    // IndexedDB) is deliberately left alone, so the same account signing
+    // back in on this device still benefits from it.
+    setAccountReportCount(0);
+    setNewlySavedReportSummary(null);
     setIsEditingProfile(false);
     setAuthMode("login");
     setWelcomeMode(null);
@@ -847,9 +858,14 @@ export default function Home() {
   }
 
   async function saveReport(report: SimilarityReport, academicSearchDiagnosticsId?: number | null) {
-    setReports((current) => [report, ...current.filter((item) => item.id !== report.id)].slice(0, 50));
+    const summary = buildReportSummary(report);
+    setReports((current) => [summary, ...current.filter((item) => item.id !== summary.id)].slice(0, 50));
+    // Consumed by ReportRoomsBrowser (a no-op when signed out, since that
+    // component isn't rendered at all in that case) — see its own header
+    // comment for why this exists alongside the 24h room cache.
+    setNewlySavedReportSummary(summary);
     await storeReport(report);
-    return await saveReportRemote(report, buildReportSummary(report), academicSearchDiagnosticsId);
+    return await saveReportRemote(report, summary, academicSearchDiagnosticsId);
   }
 
   async function generateReport() {
@@ -1032,10 +1048,16 @@ export default function Home() {
       // immediately instead of waiting on a still-downloading AI model.
       void aiAnalysisPromise.then(async (aiResult) => {
         const enriched = { ...report, ...aiResult };
+        const enrichedSummary = buildReportSummary(enriched);
         setCurrentReport((current) => current?.id === enriched.id ? { ...current, ...aiResult } : current);
-        setReports((current) => current.map((item) => item.id === enriched.id ? { ...item, ...aiResult } : item));
+        setReports((current) => current.map((item) => item.id === enrichedSummary.id ? enrichedSummary : item));
+        // A new object identity (not a mutation of the previous one) so
+        // ReportRoomsBrowser's own reconciliation effect — which compares
+        // by reference to distinguish "already handled" from "something
+        // changed" — re-fires and picks up the updated AI score/tone too.
+        setNewlySavedReportSummary(enrichedSummary);
         await storeReport(enriched);
-        await saveReportRemote(enriched, buildReportSummary(enriched));
+        await saveReportRemote(enriched, enrichedSummary);
       });
     } finally {
       generationLockRef.current = false;
@@ -1057,8 +1079,24 @@ export default function Home() {
   }
 
   async function clearHistory() {
-    const idsToDelete = reports.map((report) => String(report.id));
+    // Authenticated accounts: the visible state here is only ever whichever
+    // one room ReportRoomsBrowser currently has open (the 10-room
+    // architecture's whole point), never the account's full history — so a
+    // full wipe needs its own explicit, full enumeration across every room.
+    // This is the one deliberate exception to "never fetch across all rooms
+    // at once": clearing history is a rare, explicit, destructive action,
+    // not the browsing behavior this feature's lazy-loading requirement is
+    // about. Still lightweight summaries, never full report bodies.
+    const idsToDelete = account
+      ? (await fetchAllReportSummariesAcrossRooms()).map((report) => report.id)
+      : reports.map((report) => report.id);
     setReports([]);
+    setAccountReportCount(0);
+    setNewlySavedReportSummary(null);
+    if (account) {
+      clearAllReportRoomCaches(account.email);
+      setRoomsBrowserKey((key) => key + 1);
+    }
     await clearStoredReports();
     await Promise.all(idsToDelete.map((id) => deleteRemoteReport(id)));
     notify("Report history cleared.");
@@ -1144,7 +1182,9 @@ export default function Home() {
             >
               <FolderClock aria-hidden="true" />
               <span className="nav-label">My reports</span>
-              {reports.length > 0 && <span className="nav-count">{reports.length}</span>}
+              {(account ? accountReportCount : reports.length) > 0 && (
+                <span className="nav-count">{account ? accountReportCount : reports.length}</span>
+              )}
             </button>
             <button
               className={activeNavView === "about" ? "active" : ""}
@@ -1690,7 +1730,7 @@ export default function Home() {
           <section className="reports-card surface-card">
             <div className="card-heading">
               <div>
-                <p className="section-label">ON THIS DEVICE</p>
+                <p className="section-label">{account ? "YOUR ACCOUNT" : "ON THIS DEVICE"}</p>
                 <h2>Recent reports</h2>
                 <span>Open earlier checks or download their processing receipts.</span>
               </div>
@@ -1704,22 +1744,55 @@ export default function Home() {
                   <button className="button primary" type="button" onClick={startNewCheck}>
                     <UploadCloud aria-hidden="true" /> New check
                   </button>
-                  {reports.length > 0 && (
+                  {(account ? accountReportCount : reports.length) > 0 && (
                     <button className="button subtle" type="button" onClick={clearHistory}>Clear history</button>
                   )}
                 </>}
               </div>
             </div>
 
-            {!accountLoaded ? (
-              // reports.length === 0 is also true before the account/device
-              // report list has loaded — without this branch, an
-              // authenticated user with existing reports would see "No
-              // reports yet" flash before their real list arrives.
+            {isGeneratingReport && file && (
+              <article className="history-processing" aria-live="polite">
+                <div className="history-file-icon"><FileText aria-hidden="true" /></div>
+                <div className="history-copy">
+                  <strong>{file.name}</strong>
+                  <p>{processingLabel}…</p>
+                  <div className="history-progress" aria-label={`${progress}% complete`}>
+                    <span style={{ width: `${progress}%` }} />
+                  </div>
+                </div>
+                <div className="history-processing-value">
+                  <strong>{progress}%</strong>
+                  <span>Processing</span>
+                </div>
+              </article>
+            )}
+
+            {/* 10-room architecture (see components/reports/report-rooms.tsx):
+                an authenticated account's list is owned entirely by
+                ReportRoomsBrowser, which fetches only the lightweight room
+                index up front, and only one room's summaries when the user
+                opens it — never the account's full history, never full
+                report bodies. The anonymous, device-scoped flat list below
+                is unchanged in spirit from before rooms existed. */}
+            {account ? (
+              <ReportRoomsBrowser
+                key={roomsBrowserKey}
+                accountEmail={account.email}
+                newlySavedReportSummary={newlySavedReportSummary}
+                onConsumedNewlySavedReport={() => setNewlySavedReportSummary(null)}
+                onTotalCountChange={setAccountReportCount}
+                onDownloadReceipt={downloadReceipt}
+              />
+            ) : !accountLoaded ? (
+              // reports.length === 0 is also true before the device report
+              // list has loaded — without this branch, a device with
+              // existing reports would see "No reports yet" flash before
+              // its real list arrives.
               <div className="empty-reports" aria-live="polite" aria-busy="true">
                 <FolderClock aria-hidden="true" />
                 <h3>Loading your reports…</h3>
-                <p>Checking this device and your account for saved reports.</p>
+                <p>Checking this device for saved reports.</p>
               </div>
             ) : reports.length === 0 && !isGeneratingReport ? (
               <div className="empty-reports">
@@ -1730,68 +1803,9 @@ export default function Home() {
               </div>
             ) : (
               <div className="report-history">
-                {isGeneratingReport && file && (
-                  <article className="history-processing" aria-live="polite">
-                    <div className="history-file-icon"><FileText aria-hidden="true" /></div>
-                    <div className="history-copy">
-                      <strong>{file.name}</strong>
-                      <p>{processingLabel}…</p>
-                      <div className="history-progress" aria-label={`${progress}% complete`}>
-                        <span style={{ width: `${progress}%` }} />
-                      </div>
-                    </div>
-                    <div className="history-processing-value">
-                      <strong>{progress}%</strong>
-                      <span>Processing</span>
-                    </div>
-                  </article>
-                )}
-                {reports.map((report) => {
-                  const aiSignal = aiSignalDisplay(report);
-                  // Phase 7.1 TASK 2: reads report.unifiedSimilarity directly
-                  // off the already-loaded report object (persisted at save
-                  // time by attachUnifiedSimilarity(), or fetched whole for a
-                  // signed-in/first-load hydration) — no recomputation, no
-                  // network call per row. Falls back to the archive-only
-                  // score for a report saved before this fix, exactly like
-                  // every other primarySimilarityScore() consumer.
-                  const primaryScore = primarySimilarityScore(report);
-                  const isUnified = hasUnifiedSimilarity(report);
-                  const similarityVerdict = similarityScoreBand(primaryScore);
-                  return (
-                  <article key={report.id}>
-                    <div className="history-file-icon"><FileText aria-hidden="true" /></div>
-                    <div className="history-copy">
-                      <strong>{report.title}</strong>
-                      <p>
-                        {new Date(report.created).toLocaleDateString("en-GB")} · {report.wordCount.toLocaleString()} words
-                      </p>
-                    </div>
-                    <div className="history-action-group" aria-label={`Actions for ${report.title}`}>
-                      <Link href={`/reports/${report.id}?mode=ai`} className={`history-result history-ai-result history-ai-${aiSignal.tone}`} aria-label={`Open AI report for ${report.title}`}>
-                        <span className="history-result-score">
-                          <strong className="history-ai-value">
-                            {aiSignal.value === null ? "—" : `${aiSignal.value}%`}
-                          </strong>
-                          <span>{aiSignal.label}</span>
-                        </span>
-                        <span className="history-open-cue" aria-hidden="true"><ChevronRight /></span>
-                      </Link>
-                      <Link href={`/reports/${report.id}`} className={`history-result history-similarity-result ${similarityVerdict ? `history-similarity-${similarityVerdict.key}` : ""}`} aria-label={`Open similarity report for ${report.title}`}>
-                        <span className="history-result-score">
-                          <strong>{primaryScore}%</strong>
-                          <span>{isUnified ? "TurnitPlus Similarity" : "Similarity result"}</span>
-                        </span>
-                        <span className="history-open-cue" aria-hidden="true"><ChevronRight /></span>
-                      </Link>
-                      <button className="history-receipt" type="button" onClick={() => downloadReceipt(report)}>
-                        <Download aria-hidden="true" />
-                        <span>Receipt</span>
-                      </button>
-                    </div>
-                  </article>
-                  );
-                })}
+                {reports.map((report) => (
+                  <ReportHistoryRow key={report.id} report={report} onDownloadReceipt={downloadReceipt} />
+                ))}
               </div>
             )}
           </section>

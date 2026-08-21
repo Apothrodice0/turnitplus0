@@ -9,12 +9,20 @@ import test from "node:test";
 // tests/report-persistence-wiring.test.mjs.
 
 test("the reports list links to the routable detail page instead of calling openReport", async () => {
+  // 10-room architecture: the actual report row (and its two <Link>s) moved
+  // into components/reports/report-history-row.tsx, shared by both the
+  // anonymous flat list and ReportRoomsBrowser's per-room list — see that
+  // component's own header comment. app/page.tsx itself never had, and
+  // still doesn't have, an openReport() function.
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
-  assert.match(page, /import Link from "next\/link";/);
-  assert.match(page, /<Link href=\{`\/reports\/\$\{report\.id\}\?mode=ai`\}[\s\S]*?>/);
-  assert.match(page, /<Link href=\{`\/reports\/\$\{report\.id\}`\}[\s\S]*?>/);
   assert.doesNotMatch(page, /openReport\(/);
   assert.doesNotMatch(page, /function openReport/);
+
+  const row = await readFile(new URL("../components/reports/report-history-row.tsx", import.meta.url), "utf8");
+  assert.match(row, /import Link from "next\/link";/);
+  assert.match(row, /<Link href=\{`\/reports\/\$\{report\.id\}\?mode=ai`\}[\s\S]*?>/);
+  assert.match(row, /<Link href=\{`\/reports\/\$\{report\.id\}`\}[\s\S]*?>/);
+  assert.doesNotMatch(row, /openReport\(/);
 });
 
 test("the page-level data loader only calls notFound() when a session definitively does not own the report", async () => {

@@ -6,6 +6,7 @@ import { captureDocumentIdentityAndFamily } from '../../../lib/document-family';
 import { indexDocumentSubmissionIntoCorpus } from '../../../lib/user-submission-corpus';
 import { linkAcademicSearchRunDiagnosticsToReport } from '../../../lib/academic-search-diagnostics-repo';
 import { checkUploadLimit } from '../../../lib/upload-limit';
+import { REPORT_ROOM_COUNT } from '../../../lib/report-rooms';
 import { runAfterResponse } from '../../../lib/run-after-response';
 
 // Reports carry derived data (AI passages, matched phrases, extracted text)
@@ -293,12 +294,39 @@ export async function GET(request: Request) {
       if (sessionUser) {
         // Authenticated: cross-device list, scoped by account rather than
         // by whichever browser happens to be asking.
-        const result = await client.execute({
-          sql: `SELECT id, submission_id, title, report_created_at, word_count, archive_score, score_band, ai_score, ai_tone
-                FROM saved_reports WHERE user_id = ? ORDER BY report_created_at DESC LIMIT ?`,
-          args: [sessionUser.id, MAX_LISTED_REPORTS],
-        });
-        rows = result.rows;
+        //
+        // 10-room architecture: `room` (0-9) scopes this query to one
+        // partition of the account's own reports instead of the account's
+        // whole history — see lib/report-rooms.ts's own header comment for
+        // why CAST(id AS INTEGER) % 10 is the room boundary (a pure
+        // function of the existing id, not a stored/migrated column). The
+        // idx_saved_reports_user_id_created index already narrows to this
+        // one account's rows first; the modulo filter then runs over just
+        // that (small, tens-to-low-hundreds) row set, not a full scan.
+        // Absent `room` preserves the original, pre-rooms behavior (top 50
+        // across the whole account) for any other existing caller.
+        const url = new URL(request.url);
+        const roomParam = url.searchParams.get('room');
+        if (roomParam !== null) {
+          const room = Number(roomParam);
+          if (!Number.isInteger(room) || room < 0 || room >= REPORT_ROOM_COUNT) {
+            return new NextResponse(JSON.stringify({ error: `room must be an integer 0-${REPORT_ROOM_COUNT - 1}` }), { status: 400 });
+          }
+          const result = await client.execute({
+            sql: `SELECT id, submission_id, title, report_created_at, word_count, archive_score, score_band, ai_score, ai_tone
+                  FROM saved_reports WHERE user_id = ? AND CAST(id AS INTEGER) % ${REPORT_ROOM_COUNT} = ?
+                  ORDER BY report_created_at DESC LIMIT ?`,
+            args: [sessionUser.id, room, MAX_LISTED_REPORTS],
+          });
+          rows = result.rows;
+        } else {
+          const result = await client.execute({
+            sql: `SELECT id, submission_id, title, report_created_at, word_count, archive_score, score_band, ai_score, ai_tone
+                  FROM saved_reports WHERE user_id = ? ORDER BY report_created_at DESC LIMIT ?`,
+            args: [sessionUser.id, MAX_LISTED_REPORTS],
+          });
+          rows = result.rows;
+        }
       } else {
         const url = new URL(request.url);
         const deviceKey = url.searchParams.get('deviceKey');
