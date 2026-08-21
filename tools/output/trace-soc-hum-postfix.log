@@ -1,0 +1,32 @@
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+
+==========================================================================================
+TRACE: soc-openaire — "“Infoxicated” feelings? How affective polarization and misinformation reinforce each other in the US and France"
+==========================================================================================
+24 queries (4 keyword/topic-only)
+  [keyword] "affective polarization political amplification dissemination algorithmic traditional contribute visibility"
+  [keyword] "affective polarization political contradictory information deliberate phenomenon themselves sometimes"
+  [keyword] "affective polarization political vulnerabilities psychological amplification necessitates environments individuals"
+  [keyword] "affective polarization political"
+  miss [openaire, keyword] numFound=0 returned=0 top="(none)" query="affective polarization political amplification dissemination algorithmic traditional contr"
+  miss [openaire, keyword] numFound=0 returned=0 top="(none)" query="affective polarization political contradictory information deliberate phenomenon themselve"
+  ERROR [europe-pmc] Europe PMC API request timed out after 8000 ms query="affective polarization political contradictory information d"
+  miss [openaire, keyword] numFound=0 returned=0 top="(none)" query="affective polarization political vulnerabilities psychological amplification necessitates "
+  miss [openaire, keyword] numFound=1267 returned=5 top="Enhancing National Identity Reduces Affective Polarization and Increases Political Tolerance" query="affective polarization political"
+
+==========================================================================================
+TRACE: hum-openaire — "TEI-encoding of text reuses in the BIBLINDEX Project"
+==========================================================================================
+24 queries (4 keyword/topic-only)
+  [keyword] "journal text biblical identifiers screenshot expression references meaningful canonical"
+  [keyword] "journal text biblical corruptionis occurrence sollicitas necessitas perturbat"
+  [keyword] "journal text biblical searchable athanasius chrysostom theodoret procopius database"
+  [keyword] "journal text biblical"
+  miss [openaire, keyword] numFound=0 returned=0 top="(none)" query="journal text biblical identifiers screenshot expression references meaningful canonical"
+  miss [openaire, keyword] numFound=0 returned=0 top="(none)" query="journal text biblical corruptionis occurrence sollicitas necessitas perturbat"
+  miss [openaire, keyword] numFound=0 returned=0 top="(none)" query="journal text biblical searchable athanasius chrysostom theodoret procopius database"
+  miss [openaire, keyword] numFound=543 returned=5 top="Fishbane, Michael: Biblical text and texture" query="journal text biblical"

@@ -20,6 +20,33 @@ npm install
 npm run dev
 ```
 
+`npm run dev` runs the Cloudflare Workers-emulated Vite dev server. It serves
+the static UI, but every DB-backed route (`/api/auth/*`, `/api/reports`,
+`/api/ingest`, `/api/academic-evidence`) will 500 under it: with
+`TURSO_DATABASE_URL` unset, `lib/reports-db.ts` falls back to a local SQLite
+file via a `file:` URL, and the Workers-runtime libsql client rejects `file:`
+URLs outright (only `libsql:`/`https:`/`http:`/`ws:`/`wss:` are supported in
+that runtime). To exercise those routes locally, run the real Next.js dev
+server instead:
+
+```sh
+npx next dev
+```
+
+The first request against a fresh or older local database will also 500 with
+`SQLITE_ERROR: no such table: rate_limit_buckets` (or similar) until the
+Phase A-E8/privacy/rate-limiting/developer-role/diagnostics migrations
+(0012-0026) are applied. Apply them once, against the exact file
+`lib/reports-db.ts` falls back to:
+
+```sh
+node --import tsx tools/apply-e8-tables-migration.ts --env=local --db-file=./data/reports-dev.db --execute
+```
+
+This is safe to re-run — it dry-runs by default without `--execute`, skips
+migrations already applied, and refuses any migration file containing a
+destructive statement or one that doesn't match its reviewed checksum.
+
 ## Archive Similarity
 
 Archive Similarity is the percentage of eligible submission words assigned to

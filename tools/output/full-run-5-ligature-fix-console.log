@@ -1,0 +1,377 @@
+[2026-08-21T10:09:20.480Z] Sourcing 6 domain ground-truth papers...
+[2026-08-21T10:09:20.481Z] Sourcing CS/AI/ML: Attention Is All You Need (local fixture)...
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+[2026-08-21T10:09:22.071Z] Sourcing Medicine: Why Most Published Research Findings Are False (Europe PMC)...
+[2026-08-21T10:09:23.361Z] Sourcing Social Sciences via OpenAIRE...
+[2026-08-21T10:09:29.746Z] Sourcing Business/Marketing via OpenAIRE...
+Warning: TT: undefined function: 22
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: TT: undefined function: 23
+Warning: TT: undefined function: 22
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+[2026-08-21T10:09:32.033Z] Sourcing Engineering via OpenAIRE (needs fresh sourcing — no full text in prior runs)...
+[2026-08-21T10:09:34.465Z] Sourcing Humanities via OpenAIRE (needs fresh sourcing — no full text in prior runs)...
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+[2026-08-21T10:09:37.282Z]   sourced cs-attention (Computer Science / AI / ML): "Attention Is All You Need" doi=(none) fullText=41478 chars
+[2026-08-21T10:09:37.283Z]   sourced med-ioannidis (Medicine / Biomedical): "Why Most Published Research Findings Are False" doi=10.1371/journal.pmed.0020124 fullText=27559 chars
+[2026-08-21T10:09:37.283Z]   sourced soc-openaire (Social Sciences): "“Infoxicated” feelings? How affective polarization and misinformation reinforce each other in the US and France" doi=10.1057/s41253-026-00314-w fullText=79330 chars
+[2026-08-21T10:09:37.283Z]   sourced biz-openaire (Business / Marketing): "The Influence of Good Corporate Governance and Corporate Social Responsibility towards the Financial Performance that has Implications for Firm Value of Banking Companies Listed in Indonesia Stock Exchange" doi=10.6007/ijarbss/v8-i4/4005 fullText=35330 chars
+[2026-08-21T10:09:37.283Z]   sourced eng-openaire (Engineering): "A review on configuration optimization of hybrid energy system based on renewable energy" doi=10.3389/fenrg.2022.977925 fullText=83030 chars
+[2026-08-21T10:09:37.283Z]   sourced hum-openaire (Humanities): "TEI-encoding of text reuses in the BIBLINDEX Project" doi=10.46298/jdmdh.3989 fullText=59190 chars
+[2026-08-21T10:09:37.284Z] Building in-memory synthetic archive index from the 6 domain papers (no files written to public/data/)...
+[2026-08-21T10:09:37.366Z] Built 60 test cases. Running full pipeline for each...
+[2026-08-21T10:09:37.366Z] [1/60] running cs-attention-exact-docx-natural...
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+[2026-08-21T10:09:46.428Z]   [case] cs-attention-exact-docx-natural -> expected~100% target=rank 0 retrieval=true evidence=true unified=92 archiveProd=0 archiveSynth=0 => correct (8374ms)
+[2026-08-21T10:09:46.429Z] [2/60] running cs-attention-fifty-docx-medium...
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+[2026-08-21T10:09:53.995Z]   [case] cs-attention-fifty-docx-medium -> expected~50% target=rank 0 retrieval=true evidence=true unified=51 archiveProd=1 archiveSynth=0 => correct (6950ms)
+[2026-08-21T10:09:53.996Z] [3/60] running cs-attention-twentyfive-docx-medium...
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+[2026-08-21T10:10:00.459Z]   [case] cs-attention-twentyfive-docx-medium -> expected~25% target=rank 0 retrieval=true evidence=true unified=27 archiveProd=2 archiveSynth=25 => correct (5869ms)
+[2026-08-21T10:10:00.459Z] [4/60] running cs-attention-ten-docx-medium...
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+[2026-08-21T10:10:17.445Z]   [case] cs-attention-ten-docx-medium -> expected~10% target=rank 0 retrieval=true evidence=true unified=13 archiveProd=2 archiveSynth=10 => correct (16363ms)
+[2026-08-21T10:10:17.445Z] [5/60] running cs-attention-fewSentences-docx-medium...
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+[2026-08-21T10:10:28.881Z]   [case] cs-attention-fewSentences-docx-medium -> expected~4% target=rank 3 retrieval=true evidence=true unified=7 archiveProd=3 archiveSynth=4 => correct (10793ms)
+[2026-08-21T10:10:28.881Z] [6/60] running cs-attention-original-docx-medium...
+[2026-08-21T10:10:46.525Z]   [case] cs-attention-original-docx-medium -> expected~0% target=not found retrieval=null evidence=false unified=3 archiveProd=3 archiveSynth=0 => correct (17629ms)
+[2026-08-21T10:10:46.526Z] [7/60] running med-ioannidis-exact-docx-natural...
+[2026-08-21T10:10:56.066Z]   [case] med-ioannidis-exact-docx-natural -> expected~100% target=rank 0 retrieval=true evidence=true unified=98 archiveProd=0 archiveSynth=0 => correct (9343ms)
+[2026-08-21T10:10:56.067Z] [8/60] running med-ioannidis-fifty-docx-medium...
+[2026-08-21T10:11:04.035Z]   [case] med-ioannidis-fifty-docx-medium -> expected~51% target=rank 0 retrieval=true evidence=true unified=49 archiveProd=0 archiveSynth=0 => correct (7775ms)
+[2026-08-21T10:11:04.035Z] [9/60] running med-ioannidis-twentyfive-docx-medium...
+[2026-08-21T10:11:12.038Z]   [case] med-ioannidis-twentyfive-docx-medium -> expected~25% target=rank 0 retrieval=true evidence=true unified=25 archiveProd=0 archiveSynth=25 => correct (7857ms)
+[2026-08-21T10:11:12.039Z] [10/60] running med-ioannidis-ten-docx-medium...
+[2026-08-21T10:11:19.845Z]   [case] med-ioannidis-ten-docx-medium -> expected~11% target=rank 0 retrieval=true evidence=true unified=11 archiveProd=0 archiveSynth=11 => correct (7613ms)
+[2026-08-21T10:11:19.845Z] [11/60] running med-ioannidis-fewSentences-docx-medium...
+[2026-08-21T10:11:32.181Z]   [case] med-ioannidis-fewSentences-docx-medium -> expected~5% target=rank 0 retrieval=true evidence=true unified=5 archiveProd=0 archiveSynth=5 => correct (10519ms)
+[2026-08-21T10:11:32.181Z] [12/60] running med-ioannidis-original-docx-medium...
+[2026-08-21T10:11:48.817Z]   [case] med-ioannidis-original-docx-medium -> expected~0% target=not found retrieval=null evidence=false unified=0 archiveProd=0 archiveSynth=0 => correct (16623ms)
+[2026-08-21T10:11:48.817Z] [13/60] running soc-openaire-exact-docx-natural...
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+[2026-08-21T10:12:04.196Z]   [case] soc-openaire-exact-docx-natural -> expected~100% target=not found retrieval=null evidence=false unified=0 archiveProd=0 archiveSynth=0 => discovery (15356ms)
+[2026-08-21T10:12:04.197Z] [14/60] running soc-openaire-fifty-docx-medium...
+[2026-08-21T10:12:10.906Z]   [case] soc-openaire-fifty-docx-medium -> expected~51% target=rank 0 retrieval=true evidence=true unified=51 archiveProd=0 archiveSynth=0 => correct (5973ms)
+[2026-08-21T10:12:10.906Z] [15/60] running soc-openaire-twentyfive-docx-medium...
+[2026-08-21T10:12:19.826Z]   [case] soc-openaire-twentyfive-docx-medium -> expected~25% target=rank 0 retrieval=true evidence=true unified=25 archiveProd=0 archiveSynth=25 => correct (6999ms)
+[2026-08-21T10:12:19.827Z] [16/60] running soc-openaire-ten-docx-medium...
+[2026-08-21T10:12:26.976Z]   [case] soc-openaire-ten-docx-medium -> expected~10% target=rank 0 retrieval=true evidence=true unified=10 archiveProd=0 archiveSynth=10 => correct (6496ms)
+[2026-08-21T10:12:26.976Z] [17/60] running soc-openaire-fewSentences-docx-medium...
+[2026-08-21T10:12:36.055Z]   [case] soc-openaire-fewSentences-docx-medium -> expected~4% target=not found retrieval=null evidence=false unified=0 archiveProd=0 archiveSynth=4 => discovery (9065ms)
+[2026-08-21T10:12:36.055Z] [18/60] running soc-openaire-original-docx-medium...
+Warning: TT: undefined function: 32
+Warning: TT: undefined function: 32
+Warning: TT: undefined function: 32
+[2026-08-21T10:12:50.623Z]   [case] soc-openaire-original-docx-medium -> expected~0% target=not found retrieval=null evidence=false unified=0 archiveProd=0 archiveSynth=0 => correct (14559ms)
+[2026-08-21T10:12:50.624Z] [19/60] running biz-openaire-exact-docx-natural...
+Warning: TT: undefined function: 22
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: TT: undefined function: 23
+Warning: TT: undefined function: 22
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: TT: undefined function: 22
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: TT: undefined function: 23
+Warning: TT: undefined function: 22
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+[2026-08-21T10:13:06.159Z]   [case] biz-openaire-exact-docx-natural -> expected~100% target=rank 0 retrieval=true evidence=true unified=98 archiveProd=6 archiveSynth=0 => correct (13664ms)
+[2026-08-21T10:13:06.160Z] [20/60] running biz-openaire-fifty-docx-medium...
+Warning: TT: undefined function: 22
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: TT: undefined function: 23
+Warning: TT: undefined function: 22
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: TT: undefined function: 32
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: TT: undefined function: 32
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: TT: undefined function: 32
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: TT: undefined function: 22
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: TT: undefined function: 23
+Warning: TT: undefined function: 22
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+[2026-08-21T10:13:26.571Z]   [case] biz-openaire-fifty-docx-medium -> expected~50% target=rank 0 retrieval=true evidence=true unified=52 archiveProd=4 archiveSynth=0 => correct (18722ms)
+[2026-08-21T10:13:26.571Z] [21/60] running biz-openaire-twentyfive-docx-medium...
+Warning: TT: undefined function: 22
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: TT: undefined function: 23
+Warning: TT: undefined function: 22
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: TT: undefined function: 32
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: TT: undefined function: 32
+Warning: TT: undefined function: 32
+Warning: TT: undefined function: 32
+Warning: TT: undefined function: 22
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: TT: undefined function: 23
+Warning: TT: undefined function: 22
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+[2026-08-21T10:13:51.563Z]   [case] biz-openaire-twentyfive-docx-medium -> expected~25% target=rank 0 retrieval=true evidence=true unified=28 archiveProd=4 archiveSynth=25 => correct (23406ms)
+[2026-08-21T10:13:51.564Z] [22/60] running biz-openaire-ten-docx-medium...
+Warning: TT: undefined function: 22
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: TT: undefined function: 23
+Warning: TT: undefined function: 22
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: TT: undefined function: 32
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: TT: undefined function: 32
+Warning: TT: undefined function: 22
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: TT: undefined function: 23
+Warning: TT: undefined function: 22
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+[2026-08-21T10:14:05.052Z]   [case] biz-openaire-ten-docx-medium -> expected~13% target=rank 0 retrieval=true evidence=true unified=16 archiveProd=4 archiveSynth=13 => correct (12511ms)
+[2026-08-21T10:14:05.053Z] [23/60] running biz-openaire-fewSentences-docx-medium...
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: TT: undefined function: 22
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: TT: undefined function: 23
+Warning: TT: undefined function: 22
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+[2026-08-21T10:14:39.376Z]   [case] biz-openaire-fewSentences-docx-medium -> expected~5% target=rank 0 retrieval=true evidence=false unified=4 archiveProd=4 archiveSynth=5 => comparison (32390ms)
+[2026-08-21T10:14:39.377Z] [24/60] running biz-openaire-original-docx-medium...
+[2026-08-21T10:14:52.501Z]   [case] biz-openaire-original-docx-medium -> expected~0% target=not found retrieval=null evidence=false unified=4 archiveProd=4 archiveSynth=0 => correct (13115ms)
+[2026-08-21T10:14:52.502Z] [25/60] running eng-openaire-exact-docx-natural...
+[uncaughtException — continuing] AssertionError [ERR_ASSERTION]: false == true
+    at Parser.finish (node:internal/deps/undici/undici:7380:9)
+    at TLSSocket.onHttpSocketEnd (node:internal/deps/undici/undici:7819:34)
+    at TLSSocket.emit (node:events:521:24)
+    at endReadableNT (node:internal/streams/readable:1729:12)
+    at process.processTicksAndRejections (node:internal/process/task_queues:90:21)
+Warning: TT: undefined function: 3
+[2026-08-21T10:15:04.473Z]   [case] eng-openaire-exact-docx-natural -> expected~100% target=rank 0 retrieval=true evidence=true unified=100 archiveProd=0 archiveSynth=0 => correct (10680ms)
+[2026-08-21T10:15:04.473Z] [26/60] running eng-openaire-fifty-docx-medium...
+[2026-08-21T10:15:20.580Z]   [case] eng-openaire-fifty-docx-medium -> expected~49% target=rank 0 retrieval=true evidence=true unified=49 archiveProd=0 archiveSynth=0 => correct (14685ms)
+[2026-08-21T10:15:20.581Z] [27/60] running eng-openaire-twentyfive-docx-medium...
+[2026-08-21T10:15:32.316Z]   [case] eng-openaire-twentyfive-docx-medium -> expected~25% target=rank 0 retrieval=true evidence=true unified=25 archiveProd=0 archiveSynth=25 => correct (10728ms)
+[2026-08-21T10:15:32.317Z] [28/60] running eng-openaire-ten-docx-medium...
+[2026-08-21T10:15:56.532Z]   [case] eng-openaire-ten-docx-medium -> expected~10% target=rank 0 retrieval=true evidence=true unified=10 archiveProd=0 archiveSynth=10 => correct (22135ms)
+[2026-08-21T10:15:56.532Z] [29/60] running eng-openaire-fewSentences-docx-medium...
+[2026-08-21T10:16:08.926Z]   [case] eng-openaire-fewSentences-docx-medium -> expected~4% target=rank 0 retrieval=true evidence=true unified=4 archiveProd=0 archiveSynth=4 => correct (10620ms)
+[2026-08-21T10:16:08.927Z] [30/60] running eng-openaire-original-docx-medium...
+Warning: TT: undefined function: 32
+[2026-08-21T10:16:17.117Z]   [case] eng-openaire-original-docx-medium -> expected~0% target=not found retrieval=null evidence=false unified=0 archiveProd=0 archiveSynth=0 => correct (8179ms)
+[2026-08-21T10:16:17.118Z] [31/60] running hum-openaire-exact-docx-natural...
+[2026-08-21T10:16:24.536Z]   [case] hum-openaire-exact-docx-natural -> expected~100% target=not found retrieval=null evidence=false unified=0 archiveProd=0 archiveSynth=0 => discovery (7402ms)
+[2026-08-21T10:16:24.537Z] [32/60] running hum-openaire-fifty-docx-medium...
+[2026-08-21T10:16:43.358Z]   [case] hum-openaire-fifty-docx-medium -> expected~50% target=not found retrieval=null evidence=false unified=0 archiveProd=0 archiveSynth=0 => discovery (18790ms)
+[2026-08-21T10:16:43.359Z] [33/60] running hum-openaire-twentyfive-docx-medium...
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+[2026-08-21T10:16:55.927Z]   [case] hum-openaire-twentyfive-docx-medium -> expected~28% target=rank 0 retrieval=true evidence=true unified=28 archiveProd=0 archiveSynth=28 => correct (11005ms)
+[2026-08-21T10:16:55.928Z] [34/60] running hum-openaire-ten-docx-medium...
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+[2026-08-21T10:17:17.185Z]   [case] hum-openaire-ten-docx-medium -> expected~11% target=rank 0 retrieval=true evidence=false unified=0 archiveProd=0 archiveSynth=11 => comparison (19754ms)
+[2026-08-21T10:17:17.186Z] [35/60] running hum-openaire-fewSentences-docx-medium...
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+[2026-08-21T10:17:30.112Z]   [case] hum-openaire-fewSentences-docx-medium -> expected~9% target=rank 0 retrieval=true evidence=true unified=9 archiveProd=0 archiveSynth=9 => correct (11766ms)
+[2026-08-21T10:17:30.112Z] [36/60] running hum-openaire-original-docx-medium...
+[2026-08-21T10:17:37.832Z]   [case] hum-openaire-original-docx-medium -> expected~0% target=not found retrieval=null evidence=false unified=0 archiveProd=0 archiveSynth=0 => correct (7698ms)
+[2026-08-21T10:17:37.833Z] [37/60] running cs-attention-twentyfive-docx-short...
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+[2026-08-21T10:17:46.466Z]   [case] cs-attention-twentyfive-docx-short -> expected~30% target=rank 0 retrieval=true evidence=true unified=32 archiveProd=1 archiveSynth=30 => correct (8007ms)
+[2026-08-21T10:17:46.466Z] [38/60] running cs-attention-twentyfive-docx-long...
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: TT: undefined function: 32
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+[2026-08-21T10:17:54.245Z]   [case] cs-attention-twentyfive-docx-long -> expected~25% target=rank 0 retrieval=true evidence=true unified=26 archiveProd=2 archiveSynth=0 => correct (7123ms)
+[2026-08-21T10:17:54.245Z] [39/60] running med-ioannidis-twentyfive-docx-short...
+[2026-08-21T10:18:02.778Z]   [case] med-ioannidis-twentyfive-docx-short -> expected~24% target=rank 0 retrieval=true evidence=true unified=24 archiveProd=0 archiveSynth=24 => correct (8388ms)
+[2026-08-21T10:18:02.779Z] [40/60] running med-ioannidis-twentyfive-docx-long...
+[2026-08-21T10:18:09.429Z]   [case] med-ioannidis-twentyfive-docx-long -> expected~25% target=rank 0 retrieval=true evidence=true unified=24 archiveProd=0 archiveSynth=0 => correct (6440ms)
+[2026-08-21T10:18:09.430Z] [41/60] running soc-openaire-twentyfive-docx-short...
+Warning: TT: undefined function: 32
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+[2026-08-21T10:18:22.568Z]   [case] soc-openaire-twentyfive-docx-short -> expected~28% target=rank 0 retrieval=true evidence=true unified=28 archiveProd=1 archiveSynth=28 => correct (12311ms)
+[2026-08-21T10:18:22.569Z] [42/60] running soc-openaire-twentyfive-docx-long...
+[2026-08-21T10:18:36.176Z]   [case] soc-openaire-twentyfive-docx-long -> expected~25% target=rank 0 retrieval=true evidence=true unified=25 archiveProd=0 archiveSynth=0 => correct (12690ms)
+[2026-08-21T10:18:36.177Z] [43/60] running biz-openaire-twentyfive-docx-short...
+Warning: TT: undefined function: 22
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: TT: undefined function: 23
+Warning: TT: undefined function: 22
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: TT: undefined function: 32
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: TT: undefined function: 32
+Warning: TT: undefined function: 22
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: TT: undefined function: 23
+Warning: TT: undefined function: 22
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+[2026-08-21T10:19:09.704Z]   [case] biz-openaire-twentyfive-docx-short -> expected~26% target=rank 0 retrieval=true evidence=true unified=28 archiveProd=3 archiveSynth=26 => correct (32155ms)
+[2026-08-21T10:19:09.705Z] [44/60] running biz-openaire-twentyfive-docx-long...
+Warning: TT: undefined function: 22
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: TT: undefined function: 23
+Warning: TT: undefined function: 22
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: TT: undefined function: 32
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: TT: undefined function: 32
+Warning: TT: undefined function: 22
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: TT: undefined function: 23
+Warning: TT: undefined function: 22
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+[2026-08-21T10:19:21.568Z]   [case] biz-openaire-twentyfive-docx-long -> expected~25% target=rank 0 retrieval=true evidence=true unified=28 archiveProd=3 archiveSynth=0 => correct (10698ms)
+[2026-08-21T10:19:21.569Z] [45/60] running eng-openaire-twentyfive-docx-short...
+[2026-08-21T10:19:37.413Z]   [case] eng-openaire-twentyfive-docx-short -> expected~25% target=rank 0 retrieval=true evidence=true unified=25 archiveProd=0 archiveSynth=25 => correct (14461ms)
+[2026-08-21T10:19:37.414Z] [46/60] running eng-openaire-twentyfive-docx-long...
+[2026-08-21T10:19:51.938Z]   [case] eng-openaire-twentyfive-docx-long -> expected~25% target=rank 0 retrieval=true evidence=true unified=25 archiveProd=0 archiveSynth=0 => correct (13407ms)
+[2026-08-21T10:19:51.939Z] [47/60] running hum-openaire-twentyfive-docx-short...
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+[2026-08-21T10:20:14.791Z]   [case] hum-openaire-twentyfive-docx-short -> expected~29% target=rank 0 retrieval=true evidence=false unified=1 archiveProd=1 archiveSynth=29 => comparison (21191ms)
+[2026-08-21T10:20:14.792Z] [48/60] running hum-openaire-twentyfive-docx-long...
+[2026-08-21T10:20:19.635Z]   [case] hum-openaire-twentyfive-docx-long -> expected~25% target=not found retrieval=null evidence=false unified=0 archiveProd=0 archiveSynth=0 => discovery (4789ms)
+[2026-08-21T10:20:19.637Z] [49/60] running cs-attention-exact-pdf-natural...
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: TT: undefined function: 32
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+[2026-08-21T10:20:35.192Z]   [case] cs-attention-exact-pdf-natural -> expected~100% target=rank 0 retrieval=true evidence=true unified=92 archiveProd=0 archiveSynth=0 => correct (13215ms)
+[2026-08-21T10:20:35.193Z] [50/60] running cs-attention-twentyfive-pdf-medium...
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+[2026-08-21T10:20:49.767Z]   [case] cs-attention-twentyfive-pdf-medium -> expected~25% target=rank 0 retrieval=true evidence=true unified=27 archiveProd=2 archiveSynth=25 => correct (13195ms)
+[2026-08-21T10:20:49.768Z] [51/60] running med-ioannidis-exact-pdf-natural...
+[2026-08-21T10:20:59.305Z]   [case] med-ioannidis-exact-pdf-natural -> expected~100% target=rank 0 retrieval=true evidence=true unified=98 archiveProd=0 archiveSynth=0 => correct (8277ms)
+[2026-08-21T10:20:59.306Z] [52/60] running med-ioannidis-twentyfive-pdf-medium...
+[2026-08-21T10:21:06.226Z]   [case] med-ioannidis-twentyfive-pdf-medium -> expected~25% target=rank 0 retrieval=true evidence=true unified=25 archiveProd=0 archiveSynth=25 => correct (6025ms)
+[2026-08-21T10:21:06.227Z] [53/60] running soc-openaire-exact-pdf-natural...
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+[2026-08-21T10:21:18.582Z]   [case] soc-openaire-exact-pdf-natural -> expected~100% target=not found retrieval=null evidence=false unified=0 archiveProd=0 archiveSynth=0 => discovery (9595ms)
+[2026-08-21T10:21:18.584Z] [54/60] running soc-openaire-twentyfive-pdf-medium...
+[2026-08-21T10:21:33.762Z]   [case] soc-openaire-twentyfive-pdf-medium -> expected~25% target=rank 0 retrieval=true evidence=true unified=25 archiveProd=0 archiveSynth=25 => correct (13771ms)
+[2026-08-21T10:21:33.763Z] [55/60] running biz-openaire-exact-pdf-natural...
+Warning: TT: undefined function: 22
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: TT: undefined function: 23
+Warning: TT: undefined function: 22
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: TT: undefined function: 22
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: TT: undefined function: 23
+Warning: TT: undefined function: 22
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+[2026-08-21T10:21:48.419Z]   [case] biz-openaire-exact-pdf-natural -> expected~100% target=rank 0 retrieval=true evidence=true unified=98 archiveProd=6 archiveSynth=0 => correct (11715ms)
+[2026-08-21T10:21:48.420Z] [56/60] running biz-openaire-twentyfive-pdf-medium...
+Warning: TT: undefined function: 22
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: TT: undefined function: 23
+Warning: TT: undefined function: 22
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: TT: undefined function: 32
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: TT: undefined function: 32
+[uncaughtException — continuing] AssertionError [ERR_ASSERTION]: false == true
+    at Parser.finish (node:internal/deps/undici/undici:7380:9)
+    at TLSSocket.onHttpSocketEnd (node:internal/deps/undici/undici:7819:34)
+    at TLSSocket.emit (node:events:521:24)
+    at endReadableNT (node:internal/streams/readable:1729:12)
+    at process.processTicksAndRejections (node:internal/process/task_queues:90:21)
+Warning: TT: undefined function: 22
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: TT: undefined function: 23
+Warning: TT: undefined function: 22
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+[2026-08-21T10:22:14.640Z]   [case] biz-openaire-twentyfive-pdf-medium -> expected~25% target=rank 0 retrieval=true evidence=true unified=28 archiveProd=4 archiveSynth=25 => correct (23900ms)
+[2026-08-21T10:22:14.641Z] [57/60] running eng-openaire-exact-pdf-natural...
+Warning: TT: undefined function: 3
+[2026-08-21T10:22:31.224Z]   [case] eng-openaire-exact-pdf-natural -> expected~100% target=rank 0 retrieval=true evidence=true unified=100 archiveProd=0 archiveSynth=0 => correct (11779ms)
+[2026-08-21T10:22:31.225Z] [58/60] running eng-openaire-twentyfive-pdf-medium...
+[2026-08-21T10:22:46.269Z]   [case] eng-openaire-twentyfive-pdf-medium -> expected~25% target=rank 0 retrieval=true evidence=true unified=25 archiveProd=0 archiveSynth=25 => correct (13500ms)
+[2026-08-21T10:22:46.270Z] [59/60] running hum-openaire-exact-pdf-natural...
+[2026-08-21T10:22:53.910Z]   [case] hum-openaire-exact-pdf-natural -> expected~100% target=not found retrieval=null evidence=false unified=0 archiveProd=0 archiveSynth=0 => discovery (5583ms)
+[2026-08-21T10:22:53.911Z] [60/60] running hum-openaire-twentyfive-pdf-medium...
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+[2026-08-21T10:23:11.712Z]   [case] hum-openaire-twentyfive-pdf-medium -> expected~28% target=rank 0 retrieval=true evidence=true unified=28 archiveProd=0 archiveSynth=28 => correct (15435ms)
+[2026-08-21T10:23:11.713Z] Done. 60/60 cases completed. Results: tools/output/2026-08-21T10-09-20-479Z-accuracy-results.json
+[2026-08-21T10:23:11.715Z] Summary written to tools/output/2026-08-21T10-09-20-479Z-accuracy-summary.md

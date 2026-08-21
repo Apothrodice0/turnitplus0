@@ -1,0 +1,141 @@
+Discovery-loss diagnostic — 2026-08-21T14-43-53-779Z
+Sourcing the 4 papers needed for this trace (2 failing + 2 comparison cases)...
+
+
+==========================================================================================
+TRACE: soc-openaire — "“Infoxicated” feelings? How affective polarization and misinformation reinforce each other in the US and France"
+  domain=Social Sciences doi=10.1057/s41253-026-00314-w fullTextChars=79330
+==========================================================================================
+
+--- STAGE 0: is the paper reachable via its own title/DOI at all? ---
+  [openaire] search(own title) -> 1 results, target found: true (title in response: "“Infoxicated” feelings? How affective polarization and misinformation reinforce each other in the US and France")
+  [openaire] search(DOI:10.1057/s41253-026-00314-w) -> 0 results, target found: false
+  [europe-pmc] search(own title) -> 0 results, target found: false
+  [europe-pmc] search(DOI:10.1057/s41253-026-00314-w) -> 0 results, target found: false
+
+--- STAGE 1: phrase extraction (what queries get generated) ---
+  24 queries generated (sentence=20, keyword=4)
+    [keyword] "affective polarization political amplification dissemination algorithmic traditional contribute visibility"
+    [keyword] "affective polarization political contradictory information deliberate phenomenon themselves sometimes"
+    [keyword] "affective polarization political vulnerabilities psychological amplification necessitates environments individuals"
+    [keyword] "affective polarization political"
+  first 3 sentence queries (highest-scored):
+    [sentence] "Algorithmic amplification ensures wide dissemination, while traditional media, often inadvertently, contribute further visibility and legiti..."
+    [sentence] "Echo chambers, while sometimes conflated with filter bubbles, represent a more deliberate phenomenon where social groups actively demarcate ..."
+    [sentence] "It necessitates addressing the underlying psychological vulnerabilities that make individuals susceptible to false narratives, reforming soc..."
+
+--- STAGE 2: does ANY of our own generated queries surface the target, on either provider? ---
+  total (query x provider) attempts: 48; target surfaced in: 0
+  NO query (of our own 24, across both providers) ever surfaced the target paper in its raw response.
+  openaire: 0/24 queries returned numFound=0 (zero metadata overlap).
+  openaire: 1 queries returned nonzero numFound, average numFound=1267 (paper not in top-5 of those).
+
+--- STAGE 3: full runAcademicSearch() pipeline (production, unmodified) ---
+  status=COMPLETE_NO_MATCHES candidates=46 queryCount=24 searchAttempts=48 providerErrors=[]
+  target present in final candidate pool: false
+
+==========================================================================================
+TRACE: hum-openaire — "TEI-encoding of text reuses in the BIBLINDEX Project"
+  domain=Humanities doi=10.46298/jdmdh.3989 fullTextChars=59190
+==========================================================================================
+
+--- STAGE 0: is the paper reachable via its own title/DOI at all? ---
+  [openaire] search(own title) -> 1 results, target found: true (title in response: "TEI-encoding of text reuses in the BIBLINDEX Project")
+  [openaire] search(DOI:10.46298/jdmdh.3989) -> 0 results, target found: false
+  [europe-pmc] search(own title) -> 0 results, target found: false
+  [europe-pmc] search(DOI:10.46298/jdmdh.3989) -> 0 results, target found: false
+
+--- STAGE 1: phrase extraction (what queries get generated) ---
+  24 queries generated (sentence=20, keyword=4)
+    [keyword] "journal text biblical identifiers screenshot expression references meaningful canonical"
+    [keyword] "journal text biblical corruptionis occurrence sollicitas necessitas perturbat"
+    [keyword] "journal text biblical searchable athanasius chrysostom theodoret procopius database"
+    [keyword] "journal text biblical"
+  first 3 sentence queries (highest-scored):
+    [sentence] "Figure 1: Screenshot of The detailed expression of these canonical references for more complex cases is being developed using semantically m..."
+    [sentence] "biblical_occurrence biblical_occurrence SEG TAGS perturbat diei malitia corpus mortis aggravat sollicitas carnis necessitas defectus corrupt..."
+    [sentence] "The searchable database and website also give access to around 100,000 further unpublished entries for authors including Athanasius, John Ch..."
+
+--- STAGE 2: does ANY of our own generated queries surface the target, on either provider? ---
+  total (query x provider) attempts: 48; target surfaced in: 0
+  NO query (of our own 24, across both providers) ever surfaced the target paper in its raw response.
+  openaire: 0/24 queries returned numFound=0 (zero metadata overlap).
+  openaire: 1 queries returned nonzero numFound, average numFound=543 (paper not in top-5 of those).
+
+--- STAGE 3: full runAcademicSearch() pipeline (production, unmodified) ---
+  status=COMPLETE_NO_MATCHES candidates=20 queryCount=24 searchAttempts=48 providerErrors=[]
+  target present in final candidate pool: false
+
+==========================================================================================
+TRACE: eng-openaire — "A review on configuration optimization of hybrid energy system based on renewable energy"
+  domain=Engineering doi=10.3389/fenrg.2022.977925 fullTextChars=83030
+==========================================================================================
+
+--- STAGE 0: is the paper reachable via its own title/DOI at all? ---
+  [openaire] search(own title) -> 5 results, target found: true (title in response: "A review on configuration optimization of hybrid energy system based on renewable energy")
+  [openaire] search(DOI:10.3389/fenrg.2022.977925) -> 0 results, target found: false
+  [europe-pmc] search(own title) -> 5 results, target found: false
+      top result instead: "Techno-economic-environmental evaluation of a solar-hydrogen-battery hybrid system: a real-time case study." (doi: 10.1038/s41598-026-54814-4)
+  [europe-pmc] search(DOI:10.3389/fenrg.2022.977925) -> 0 results, target found: false
+
+--- STAGE 1: phrase extraction (what queries get generated) ---
+  24 queries generated (sentence=20, keyword=4)
+    [keyword] "optimization energy system international mechatronics conference technology automation"
+    [keyword] "optimization energy system diversification superstructure consideration performance uncertainty intelligent"
+    [keyword] "optimization energy system international hierarchical proceedings objective algorithm"
+    [keyword] "optimization energy system"
+  first 3 sentence queries (highest-scored):
+    [sentence] "Conference on Measuring Technology and Mechatronics Automation, ICMTMA 2022 14th International Conference on Measuring Technology and Mechat..."
+    [sentence] "Current review highlights the diversification of performance evaluation index, consideration of uncertainty and dynamic properties, superstr..."
+    [sentence] "“ Hierarchical optimal scheduling of regional integrated energy power system based on multi-objective particle swarm optimization algorithm,..."
+
+--- STAGE 2: does ANY of our own generated queries surface the target, on either provider? ---
+  total (query x provider) attempts: 48; target surfaced in: 3
+    HIT: [openaire, sentence] rank-within-response=0 numFound=1 query="Current review highlights the diversification of performance evaluation index, consideration of unce"
+    HIT: [openaire, sentence] rank-within-response=0 numFound=1 query="However, its achievable benefits need to be realized through an integrated optimization that conside"
+    HIT: [openaire, keyword] rank-within-response=0 numFound=1 query="optimization energy system diversification superstructure consideration performance uncertainty inte"
+
+--- STAGE 3: full runAcademicSearch() pipeline (production, unmodified) ---
+  status=COMPLETE_WITH_MATCHES candidates=96 queryCount=24 searchAttempts=48 providerErrors=[]
+  target present in final candidate pool: true at rank 0
+
+==========================================================================================
+TRACE: med-ioannidis — "Why Most Published Research Findings Are False"
+  domain=Medicine / Biomedical doi=10.1371/journal.pmed.0020124 fullTextChars=27559
+==========================================================================================
+
+--- STAGE 0: is the paper reachable via its own title/DOI at all? ---
+  [openaire] search(own title) -> 5 results, target found: true (title in response: "Significance of findings in Biostatistics. Discussion of J.P.A Ioannidis' article "Why Most Published Research Findings Are False"")
+  [openaire] search(DOI:10.1371/journal.pmed.0020124) -> 5 results, target found: false
+  [europe-pmc] search(own title) -> 5 results, target found: true (title in response: "Correction: Why Most Published Research Findings Are False.")
+  [europe-pmc] search(DOI:10.1371/journal.pmed.0020124) -> 1 results, target found: true
+
+--- STAGE 1: phrase extraction (what queries get generated) ---
+  24 queries generated (sentence=20, keyword=4)
+    [keyword] "findings research true qualifications independent researchers university physicians otherwise"
+    [keyword] "findings research true informative information microarrays throughput discovery creative"
+    [keyword] "findings research true interventions relationship significance associations statistical informative"
+    [keyword] "findings research true"
+  first 3 sentence queries (highest-scored):
+    [sentence] "Many otherwise seemingly independent, university-based studies may be conducted for no other reason than to give physicians and researchers ..."
+    [sentence] "Fields considered highly informative and creative given the wealth of the assembled and tested information, such as microarrays and other hi..."
+    [sentence] "Research findings are defined here as any relationship reaching formal statistical significance, e.g., effective interventions, informative ..."
+
+--- STAGE 2: does ANY of our own generated queries surface the target, on either provider? ---
+  total (query x provider) attempts: 48; target surfaced in: 4
+    HIT: [europe-pmc, sentence] rank-within-response=2 numFound=20 query="Fields considered highly informative and creative given the wealth of the assembled and tested infor"
+    HIT: [europe-pmc, sentence] rank-within-response=3 numFound=11 query="Unfortunately, in some areas, the prevailing mentality until now has been to focus on isolated disco"
+    HIT: [europe-pmc, sentence] rank-within-response=3 numFound=4 query="Prestigious investigators may suppress via the peer review process the appearance and dissemination "
+    HIT: [openaire, keyword] rank-within-response=2 numFound=28398 query="findings research true"
+
+--- STAGE 3: full runAcademicSearch() pipeline (production, unmodified) ---
+  status=COMPLETE_WITH_MATCHES candidates=113 queryCount=24 searchAttempts=48 providerErrors=[]
+  target present in final candidate pool: true at rank 0
+
+==========================================================================================
+SUMMARY
+==========================================================================================
+soc-openaire     domain=Social Sciences              chars=79330   ownQueryEverHit=false finalCandidateFound=false
+hum-openaire     domain=Humanities                   chars=59190   ownQueryEverHit=false finalCandidateFound=false
+eng-openaire     domain=Engineering                  chars=83030   ownQueryEverHit=true finalCandidateFound=true
+med-ioannidis    domain=Medicine / Biomedical        chars=27559   ownQueryEverHit=true finalCandidateFound=true

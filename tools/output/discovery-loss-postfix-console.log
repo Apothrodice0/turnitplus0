@@ -1,0 +1,11 @@
+Discovery-loss diagnostic — 2026-08-21T09-10-19-788Z
+Sourcing the 4 papers needed for this trace (2 failing + 2 comparison cases)...
+
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+DIAGNOSTIC FAILED: Error: Sourcing failed: soc=true hum=true eng=true med=false
+    at main (D:\Github\Turnitin\tools\diagnose-discovery-loss.ts:162:11)
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)

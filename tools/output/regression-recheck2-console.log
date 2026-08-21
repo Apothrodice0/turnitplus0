@@ -1,0 +1,43 @@
+[2026-08-21T15:52:15.821Z] Sourcing 6 domain ground-truth papers...
+[2026-08-21T15:52:15.822Z] Sourcing CS/AI/ML: Attention Is All You Need (local fixture)...
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+[2026-08-21T15:52:17.426Z] Sourcing Medicine: Why Most Published Research Findings Are False (Europe PMC)...
+[2026-08-21T15:52:18.745Z] Sourcing Social Sciences via OpenAIRE...
+[2026-08-21T15:52:23.997Z] Sourcing Business/Marketing via OpenAIRE...
+Warning: TT: undefined function: 22
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: TT: undefined function: 23
+Warning: TT: undefined function: 22
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+[2026-08-21T15:52:26.002Z] Sourcing Engineering via OpenAIRE (needs fresh sourcing — no full text in prior runs)...
+[2026-08-21T15:52:28.810Z] Sourcing Humanities via OpenAIRE (needs fresh sourcing — no full text in prior runs)...
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+[2026-08-21T15:52:31.559Z]   sourced cs-attention (Computer Science / AI / ML): "Attention Is All You Need" doi=(none) fullText=40070 chars
+[2026-08-21T15:52:31.559Z]   sourced med-ioannidis (Medicine / Biomedical): "Why Most Published Research Findings Are False" doi=10.1371/journal.pmed.0020124 fullText=27559 chars
+[2026-08-21T15:52:31.560Z]   sourced soc-openaire (Social Sciences): "“Infoxicated” feelings? How affective polarization and misinformation reinforce each other in the US and France" doi=10.1057/s41253-026-00314-w fullText=77282 chars
+[2026-08-21T15:52:31.560Z]   sourced biz-openaire (Business / Marketing): "The Influence of Good Corporate Governance and Corporate Social Responsibility towards the Financial Performance that has Implications for Firm Value of Banking Companies Listed in Indonesia Stock Exchange" doi=10.6007/ijarbss/v8-i4/4005 fullText=34580 chars
+[2026-08-21T15:52:31.560Z]   sourced eng-openaire (Engineering): "A review on configuration optimization of hybrid energy system based on renewable energy" doi=10.3389/fenrg.2022.977925 fullText=81305 chars
+[2026-08-21T15:52:31.560Z]   sourced hum-openaire (Humanities): "TEI-encoding of text reuses in the BIBLINDEX Project" doi=10.46298/jdmdh.3989 fullText=57554 chars
+[2026-08-21T15:52:31.560Z] Building in-memory synthetic archive index from the 6 domain papers (no files written to public/data/)...
+[2026-08-21T15:52:31.641Z] ACCURACY_BENCHMARK_ONLY_CASE_IDS set — restricting run to: hum-openaire-twentyfive-docx-medium, eng-openaire-twentyfive-docx-short
+[2026-08-21T15:52:31.641Z] Built 2 test cases. Running full pipeline for each...
+[2026-08-21T15:52:31.641Z] [1/2] running hum-openaire-twentyfive-docx-medium...
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+Warning: UnknownErrorException: Ensure that the `standardFontDataUrl` API parameter is provided.
+[2026-08-21T15:52:45.359Z]   [case] hum-openaire-twentyfive-docx-medium -> expected~27% target=rank 0 retrieval=true evidence=true unified=27 archiveProd=0 archiveSynth=27 => correct (12478ms)
+[2026-08-21T15:52:45.359Z] [2/2] running eng-openaire-twentyfive-docx-short...
+[2026-08-21T15:52:56.443Z]   [case] eng-openaire-twentyfive-docx-short -> expected~25% target=rank 0 retrieval=true evidence=true unified=25 archiveProd=0 archiveSynth=25 => correct (10048ms)
+[2026-08-21T15:52:56.443Z] Done. 2/2 cases completed. Results: tools/output/2026-08-21T15-52-15-821Z-accuracy-results.json
+[2026-08-21T15:52:56.444Z] Summary written to tools/output/2026-08-21T15-52-15-821Z-accuracy-summary.md

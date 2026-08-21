@@ -1,0 +1,44 @@
+[
+  {
+    "id": "cs-attention",
+    "domain": "Computer Science / AI / ML",
+    "title": "Attention Is All You Need",
+    "doi": null,
+    "fullText": "40070 chars (omitted from this file)"
+  },
+  {
+    "id": "med-ioannidis",
+    "domain": "Medicine / Biomedical",
+    "title": "Why Most Published Research Findings Are False",
+    "doi": "10.1371/journal.pmed.0020124",
+    "fullText": "27559 chars (omitted from this file)"
+  },
+  {
+    "id": "soc-openaire",
+    "domain": "Social Sciences",
+    "title": "“Infoxicated” feelings? How affective polarization and misinformation reinforce each other in the US and France",
+    "doi": "10.1057/s41253-026-00314-w",
+    "fullText": "77282 chars (omitted from this file)"
+  },
+  {
+    "id": "biz-openaire",
+    "domain": "Business / Marketing",
+    "title": "The Influence of Good Corporate Governance and Corporate Social Responsibility towards the Financial Performance that has Implications for Firm Value of Banking Companies Listed in Indonesia Stock Exchange",
+    "doi": "10.6007/ijarbss/v8-i4/4005",
+    "fullText": "34580 chars (omitted from this file)"
+  },
+  {
+    "id": "eng-openaire",
+    "domain": "Engineering",
+    "title": "Wireless sensor network for structural health monitoring: A contemporary review of technologies, challenges, and future direction",
+    "doi": "10.1177/1475921719854528",
+    "fullText": "2231 chars (omitted from this file)"
+  },
+  {
+    "id": "hum-openaire",
+    "domain": "Humanities",
+    "title": "TEI-encoding of text reuses in the BIBLINDEX Project",
+    "doi": "10.46298/jdmdh.3989",
+    "fullText": "57554 chars (omitted from this file)"
+  }
+]

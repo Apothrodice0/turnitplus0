@@ -1,0 +1,1028 @@
+[
+  {
+    "paperId": "cs-attention",
+    "domain": "Computer Science / AI / ML",
+    "inputMode": "full",
+    "title": "Attention Is All You Need",
+    "doi": null,
+    "baseline": {
+      "candidatePoolSize": 11,
+      "targetFound": true,
+      "targetRank": 0,
+      "targetOpenaireFound": true,
+      "targetEuropePmcFound": false,
+      "matchProduced": true,
+      "totalLatencyMs": 89360
+    },
+    "withOpenAlex": {
+      "candidatePoolSize": 143,
+      "targetFound": true,
+      "targetRank": 0,
+      "targetOpenAlexFound": false,
+      "targetOpenAlexHasBetterAbstract": false,
+      "targetOpenAlexDoiMatches": null,
+      "targetOpenAlexOaUrl": null,
+      "matchProduced": true,
+      "totalLatencyMs": 56589
+    },
+    "incrementalCandidates": [
+      {
+        "title": "Transformer-Based MUM-T Situation Awareness: Agent Status Prediction",
+        "doi": "10.7746/jkros.2023.18.4.436",
+        "rank": 1,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": true,
+        "retrievedChars": 66914,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Attention Is All You Need",
+        "doi": "10.65215/2q58a426",
+        "rank": 2,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": false,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Improving neural machine translation: data centric approaches",
+        "doi": "10.32657/10356/170533",
+        "rank": 3,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": false,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Exploring the Limits of Transfer Learning with a Unified Text-to-Text\\n Transformer",
+        "doi": "10.48550/arxiv.1910.10683",
+        "rank": 4,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": true,
+        "retrievedChars": 200000,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Designing and Implementing Conversational Intelligent Chat-bot Using Natural Language Processing",
+        "doi": "10.32628/cseit217351",
+        "rank": 5,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Bimodal emotion recognition through audio-visual cues",
+        "doi": "10.26481/dis.20210708eg",
+        "rank": 6,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "TTT",
+        "doi": "10.65215/34vgv392",
+        "rank": 7,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Test files",
+        "doi": "10.65215/zmj6cy40",
+        "rank": 8,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Syllable-Based Sequence-to-Sequence Speech Recognition with the Transformer in Mandarin Chinese",
+        "doi": "10.48550/arxiv.1804.10752",
+        "rank": 9,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Scale in Acoustic Modelling",
+        "doi": null,
+        "rank": 10,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      }
+    ]
+  },
+  {
+    "paperId": "cs-attention",
+    "domain": "Computer Science / AI / ML",
+    "inputMode": "abstract",
+    "title": "Attention Is All You Need",
+    "doi": null,
+    "baseline": {
+      "candidatePoolSize": 38,
+      "targetFound": true,
+      "targetRank": 0,
+      "targetOpenaireFound": true,
+      "targetEuropePmcFound": false,
+      "matchProduced": true,
+      "totalLatencyMs": 16616
+    },
+    "withOpenAlex": {
+      "candidatePoolSize": 89,
+      "targetFound": true,
+      "targetRank": 0,
+      "targetOpenAlexFound": false,
+      "targetOpenAlexHasBetterAbstract": false,
+      "targetOpenAlexDoiMatches": null,
+      "targetOpenAlexOaUrl": null,
+      "matchProduced": true,
+      "totalLatencyMs": 13242
+    },
+    "incrementalCandidates": [
+      {
+        "title": "Attention Is All You Need",
+        "doi": "10.65215/2q58a426",
+        "rank": 1,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": false,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "The Survey: Advances in Natural Language Processing using Deep Learning*",
+        "doi": "10.17762/turcomat.v12i4.611",
+        "rank": 2,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": false,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Follow the Wisdom of the Crowd: Effective Text Generation via Minimum Bayes Risk Decoding",
+        "doi": "10.48550/arxiv.2211.07634",
+        "rank": 6,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Follow the Wisdom of the Crowd: Effective Text Generation via Minimum Bayes Risk Decoding",
+        "doi": "10.18653/v1/2023.findings-acl.262",
+        "rank": 7,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "mSLAM: Massively multilingual joint pre-training for speech and text",
+        "doi": "10.48550/arxiv.2202.01374",
+        "rank": 8,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "THE USE OF DISTRACTION",
+        "doi": "10.13023/etd.2021.149",
+        "rank": 9,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Methods for Evaluating Engineering Occupational Exposure to Artificial Intelligence",
+        "doi": "10.24908/pceea.2025.19642",
+        "rank": 10,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Quantifying Cross-lingual Semantic Similarity for Natural Language Processing Applications",
+        "doi": "10.11588/heidok.00019046",
+        "rank": 11,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Using Memory Forensics to Analyze Programming Language Runtimes",
+        "doi": "10.31390/gradschool_dissertations.5737",
+        "rank": 12,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Automating Ambiguity: Challenges and Pitfalls of Artificial Intelligence",
+        "doi": "10.48550/arxiv.2206.04179",
+        "rank": 13,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      }
+    ]
+  },
+  {
+    "paperId": "cs-openaire-gnn",
+    "domain": "Computer Science / AI / ML",
+    "inputMode": "abstract",
+    "title": "Attributed Network Representation Learning Based on Graph Neural Network: A Comprehensive Survey",
+    "doi": "10.1002/cpe.70494",
+    "baseline": {
+      "candidatePoolSize": 63,
+      "targetFound": true,
+      "targetRank": 0,
+      "targetOpenaireFound": true,
+      "targetEuropePmcFound": false,
+      "matchProduced": false,
+      "totalLatencyMs": 9837
+    },
+    "withOpenAlex": {
+      "candidatePoolSize": 118,
+      "targetFound": true,
+      "targetRank": 0,
+      "targetOpenAlexFound": true,
+      "targetOpenAlexHasBetterAbstract": false,
+      "targetOpenAlexDoiMatches": true,
+      "targetOpenAlexOaUrl": null,
+      "matchProduced": false,
+      "totalLatencyMs": 18951
+    },
+    "incrementalCandidates": [
+      {
+        "title": "Network and Cascade Representation Learning: Algorithms based on Information Diffusion Events",
+        "doi": "10.15168/11572_369013",
+        "rank": 2,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": false,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "A Comprehensive Survey on Deep Clustering: Taxonomy, Challenges, and Future Directions",
+        "doi": "10.1145/3689036",
+        "rank": 6,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Reinforced Neighborhood Selection Guided Multi-Relational Graph Neural Networks",
+        "doi": "10.1145/3490181",
+        "rank": 7,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Reinforced Neighborhood Selection Guided Multi-Relational Graph Neural Networks",
+        "doi": "10.48550/arxiv.2104.07886",
+        "rank": 8,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Self-Supervised Learning of Graph Neural Networks: A Unified Review",
+        "doi": "10.48550/arxiv.2102.10757",
+        "rank": 9,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Hyperbolic Deep Neural Networks: A Survey",
+        "doi": "10.1109/tpami.2021.3136921",
+        "rank": 10,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "A Survey of Graph Neural Networks for Recommender Systems: Challenges, Methods, and Directions",
+        "doi": "10.1145/3568022",
+        "rank": 12,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Graph Neural Networks in Recommender Systems: A Survey",
+        "doi": "10.48550/arxiv.2011.02260",
+        "rank": 13,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "BrainGB: A Benchmark for Brain Network Analysis With Graph Neural Networks",
+        "doi": "10.1109/tmi.2022.3218745",
+        "rank": 14,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Graph Neural Networks: A Review of Methods and Applications",
+        "doi": "10.48550/arxiv.1812.08434",
+        "rank": 15,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      }
+    ]
+  },
+  {
+    "paperId": "med-ioannidis",
+    "domain": "Medicine / Biomedical",
+    "inputMode": "full",
+    "title": "Why Most Published Research Findings Are False",
+    "doi": "10.1371/journal.pmed.0020124",
+    "baseline": {
+      "candidatePoolSize": 113,
+      "targetFound": true,
+      "targetRank": 0,
+      "targetOpenaireFound": false,
+      "targetEuropePmcFound": true,
+      "matchProduced": true,
+      "totalLatencyMs": 27815
+    },
+    "withOpenAlex": {
+      "candidatePoolSize": 143,
+      "targetFound": true,
+      "targetRank": 0,
+      "targetOpenAlexFound": true,
+      "targetOpenAlexHasBetterAbstract": false,
+      "targetOpenAlexDoiMatches": true,
+      "targetOpenAlexOaUrl": null,
+      "matchProduced": true,
+      "totalLatencyMs": 17368
+    },
+    "incrementalCandidates": [
+      {
+        "title": "Why Most Published Research Findings Are False",
+        "doi": "10.1080/09332480.2005.10722754",
+        "rank": 1,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": false,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Quo Vadis, Artificial Intelligence?",
+        "doi": "10.1155/2010/629869",
+        "rank": 4,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": false,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Surface-enhanced spectroscopy technology based on metamaterials",
+        "doi": "10.1038/s41378-025-00905-7",
+        "rank": 6,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Contact interfaces in anodes with large volume strain for high-performance lithium-ion storage",
+        "doi": "10.1039/d6ee01264g",
+        "rank": 7,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Improving natural product research translation: From source to clinical trial",
+        "doi": "10.1096/fj.201902143r",
+        "rank": 8,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Promoting novelty, rigor, and style in energy social science: Towards codes of practice for appropriate methods and research design",
+        "doi": "10.1016/j.erss.2018.07.007",
+        "rank": 9,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Point estimation for adaptive trial designs I: A methodological review",
+        "doi": "10.1002/sim.9605",
+        "rank": 10,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "A framework for the development of effective anti-metastatic agents",
+        "doi": "10.1038/s41571-018-0134-8",
+        "rank": 12,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Crowdsourcing hypothesis tests: Making transparent how design choices shape research results.",
+        "doi": "10.1037/bul0000220",
+        "rank": 14,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Intelligence and Personality as Predictors of Illness and Death",
+        "doi": "10.1177/1529100610387081",
+        "rank": 16,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      }
+    ]
+  },
+  {
+    "paperId": "med-ioannidis",
+    "domain": "Medicine / Biomedical",
+    "inputMode": "abstract",
+    "title": "Why Most Published Research Findings Are False",
+    "doi": "10.1371/journal.pmed.0020124",
+    "baseline": {
+      "candidatePoolSize": 84,
+      "targetFound": true,
+      "targetRank": 0,
+      "targetOpenaireFound": true,
+      "targetEuropePmcFound": false,
+      "matchProduced": true,
+      "totalLatencyMs": 14023
+    },
+    "withOpenAlex": {
+      "candidatePoolSize": 48,
+      "targetFound": true,
+      "targetRank": 0,
+      "targetOpenAlexFound": false,
+      "targetOpenAlexHasBetterAbstract": false,
+      "targetOpenAlexDoiMatches": null,
+      "targetOpenAlexOaUrl": null,
+      "matchProduced": true,
+      "totalLatencyMs": 53781
+    },
+    "incrementalCandidates": []
+  },
+  {
+    "paperId": "med-europepmc-crispr",
+    "domain": "Medicine / Biomedical",
+    "inputMode": "full",
+    "title": "CRISPR-Cas9-Mediated Gene Editing in Hematological Disorders: Advancing Translational and Clinical Applications.",
+    "doi": "10.7759/cureus.108691",
+    "baseline": {
+      "candidatePoolSize": 37,
+      "targetFound": true,
+      "targetRank": 2,
+      "targetOpenaireFound": false,
+      "targetEuropePmcFound": true,
+      "matchProduced": true,
+      "totalLatencyMs": 98055
+    },
+    "withOpenAlex": {
+      "candidatePoolSize": 95,
+      "targetFound": true,
+      "targetRank": 0,
+      "targetOpenAlexFound": false,
+      "targetOpenAlexHasBetterAbstract": false,
+      "targetOpenAlexDoiMatches": null,
+      "targetOpenAlexOaUrl": null,
+      "matchProduced": true,
+      "totalLatencyMs": 24566
+    },
+    "incrementalCandidates": [
+      {
+        "title": "CRISPR/Cas9 in cancer therapy: clinical translation, mechanistic strategies, and therapeutic directions.",
+        "doi": "10.3389/fonc.2026.1888734",
+        "rank": 7,
+        "openAlexOnly": false,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Engineering the next generation of CAR T- cells: precision modifications, logic gates and universal strategies to overcome exhaustion and tumor resistance.",
+        "doi": "10.3389/fonc.2025.1698442",
+        "rank": 10,
+        "openAlexOnly": false,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "The Journey of Gene Therapy in Sickle Cell Disease: How Molecular Advances Meet Clinical Care.",
+        "doi": "10.3390/cells15100939",
+        "rank": 11,
+        "openAlexOnly": false,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "CRISPR and Fanzor in sickle cell disease: current progress and future prospects.",
+        "doi": "10.3389/fgeed.2026.1774014",
+        "rank": 13,
+        "openAlexOnly": false,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Advancing gene editing therapeutics: Clinical trials and innovative delivery systems across diverse diseases.",
+        "doi": "10.1016/j.omtn.2025.102666",
+        "rank": 14,
+        "openAlexOnly": false,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Knowledge mapping and bibliometric insights into gene therapy for rare inherited hematologic pathologies: focus on sickle cell disease, hemophilia, and thalassemia.",
+        "doi": "10.1186/s13023-025-03957-0",
+        "rank": 15,
+        "openAlexOnly": false,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Harnessing CAR-Extracellular Vesicles for Next-Generation Cancer Immunotherapy.",
+        "doi": "10.3390/ijms27052163",
+        "rank": 16,
+        "openAlexOnly": false,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "CAR-NK cell therapy for hematologic malignancies: advances, challenges and optimization strategies.",
+        "doi": "10.1186/s12943-026-02648-z",
+        "rank": 17,
+        "openAlexOnly": false,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Regulatory T cell therapies: biological foundations, engineering strategies, and clinical translation.",
+        "doi": "10.3389/fimmu.2026.1797186",
+        "rank": 19,
+        "openAlexOnly": false,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Biomarker implications of gene editing in hematologic diseases: latest updates from ASH 2025.",
+        "doi": "10.1186/s40364-026-00977-1",
+        "rank": 20,
+        "openAlexOnly": false,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      }
+    ]
+  },
+  {
+    "paperId": "med-europepmc-crispr",
+    "domain": "Medicine / Biomedical",
+    "inputMode": "abstract",
+    "title": "CRISPR-Cas9-Mediated Gene Editing in Hematological Disorders: Advancing Translational and Clinical Applications.",
+    "doi": "10.7759/cureus.108691",
+    "baseline": {
+      "candidatePoolSize": 81,
+      "targetFound": true,
+      "targetRank": 0,
+      "targetOpenaireFound": true,
+      "targetEuropePmcFound": true,
+      "matchProduced": true,
+      "totalLatencyMs": 19710
+    },
+    "withOpenAlex": {
+      "candidatePoolSize": 81,
+      "targetFound": true,
+      "targetRank": 0,
+      "targetOpenAlexFound": false,
+      "targetOpenAlexHasBetterAbstract": false,
+      "targetOpenAlexDoiMatches": null,
+      "targetOpenAlexOaUrl": null,
+      "matchProduced": true,
+      "totalLatencyMs": 7365
+    },
+    "incrementalCandidates": []
+  },
+  {
+    "paperId": "soc-openaire-misinfo",
+    "domain": "Social Sciences",
+    "inputMode": "abstract",
+    "title": "Affective Polarization and Misinformation Belief",
+    "doi": "10.1007/s11109-022-09851-w",
+    "baseline": {
+      "candidatePoolSize": 70,
+      "targetFound": true,
+      "targetRank": 0,
+      "targetOpenaireFound": true,
+      "targetEuropePmcFound": true,
+      "matchProduced": true,
+      "totalLatencyMs": 18883
+    },
+    "withOpenAlex": {
+      "candidatePoolSize": 70,
+      "targetFound": true,
+      "targetRank": 0,
+      "targetOpenAlexFound": false,
+      "targetOpenAlexHasBetterAbstract": false,
+      "targetOpenAlexDoiMatches": null,
+      "targetOpenAlexOaUrl": null,
+      "matchProduced": true,
+      "totalLatencyMs": 17035
+    },
+    "incrementalCandidates": []
+  },
+  {
+    "paperId": "soc-europepmc-covidmh",
+    "domain": "Social Sciences",
+    "inputMode": "abstract",
+    "title": "Mobility Patterns and Mental Health During the COVID-19 Pandemic: Longitudinal Observational Study Using Smartphone Mobility Data.",
+    "doi": "10.2196/79711",
+    "baseline": {
+      "candidatePoolSize": 69,
+      "targetFound": true,
+      "targetRank": 0,
+      "targetOpenaireFound": false,
+      "targetEuropePmcFound": true,
+      "matchProduced": false,
+      "totalLatencyMs": 14908
+    },
+    "withOpenAlex": {
+      "candidatePoolSize": 67,
+      "targetFound": true,
+      "targetRank": 0,
+      "targetOpenAlexFound": false,
+      "targetOpenAlexHasBetterAbstract": false,
+      "targetOpenAlexDoiMatches": null,
+      "targetOpenAlexOaUrl": null,
+      "matchProduced": false,
+      "totalLatencyMs": 33173
+    },
+    "incrementalCandidates": []
+  },
+  {
+    "paperId": "biz-openaire-brand",
+    "domain": "Business / Marketing",
+    "inputMode": "abstract",
+    "title": "The Influence of Social Media Marketing and Brand Image on Brand Loyalty and its Impact on Consumer Purchase Decision with Store Atmosphere as A Moderation Variable (Case Study of XYZ Mall)",
+    "doi": "10.21512/becossjournal.v6i1.11018",
+    "baseline": {
+      "candidatePoolSize": 76,
+      "targetFound": true,
+      "targetRank": 0,
+      "targetOpenaireFound": true,
+      "targetEuropePmcFound": false,
+      "matchProduced": true,
+      "totalLatencyMs": 25546
+    },
+    "withOpenAlex": {
+      "candidatePoolSize": 57,
+      "targetFound": true,
+      "targetRank": 0,
+      "targetOpenAlexFound": false,
+      "targetOpenAlexHasBetterAbstract": false,
+      "targetOpenAlexDoiMatches": null,
+      "targetOpenAlexOaUrl": null,
+      "matchProduced": true,
+      "totalLatencyMs": 54775
+    },
+    "incrementalCandidates": []
+  },
+  {
+    "paperId": "biz-openaire-csr",
+    "domain": "Business / Marketing",
+    "inputMode": "full",
+    "title": "The Influence of Good Corporate Governance and Corporate Social Responsibility towards the Financial Performance that has Implications for Firm Value of Banking Companies Listed in Indonesia Stock Exchange",
+    "doi": "10.6007/ijarbss/v8-i4/4005",
+    "baseline": {
+      "candidatePoolSize": 46,
+      "targetFound": true,
+      "targetRank": 0,
+      "targetOpenaireFound": true,
+      "targetEuropePmcFound": false,
+      "matchProduced": true,
+      "totalLatencyMs": 80875
+    },
+    "withOpenAlex": {
+      "candidatePoolSize": 87,
+      "targetFound": true,
+      "targetRank": 0,
+      "targetOpenAlexFound": false,
+      "targetOpenAlexHasBetterAbstract": false,
+      "targetOpenAlexDoiMatches": null,
+      "targetOpenAlexOaUrl": null,
+      "matchProduced": true,
+      "totalLatencyMs": 17896
+    },
+    "incrementalCandidates": [
+      {
+        "title": "Financial Stability Amidst the Pandemic Crisis: On Top of the Wave",
+        "doi": "10.2139/ssrn.3877946",
+        "rank": 15,
+        "openAlexOnly": false,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Role of corporate governance in thriving green innovation practices: A case of emerging economy.",
+        "doi": "10.1371/journal.pone.0342897",
+        "rank": 18,
+        "openAlexOnly": false,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Does environmental, social, and governance news coverage affect the cost of equity? A textual analysis of media coverage.",
+        "doi": "10.3389/fpubh.2025.1509167",
+        "rank": 20,
+        "openAlexOnly": false,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Digital Futures in Mind: Reflecting on Technological Experiments in Mental Health & Crisis Support",
+        "doi": "10.2139/ssrn.4215994",
+        "rank": 22,
+        "openAlexOnly": false,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Environmental social and governance determinants of mental health in Italian regions from 2004 to 2023.",
+        "doi": "10.1007/s44192-025-00357-5",
+        "rank": 24,
+        "openAlexOnly": false,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "COVID-19 and Comparative Corporate Governance",
+        "doi": "10.2139/ssrn.3772965",
+        "rank": 25,
+        "openAlexOnly": false,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Does Law Matter in Asia? Comparing Corporate Governance Regimes in Indonesia and Malaysia",
+        "doi": "10.2139/ssrn.3973180",
+        "rank": 27,
+        "openAlexOnly": false,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "The impact of performance feedback on corporate ESG performance: Mediating role of environmental strategy.",
+        "doi": "10.1371/journal.pone.0298471",
+        "rank": 28,
+        "openAlexOnly": false,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Food's future: sustainability and agricultural robotics.",
+        "doi": "10.3389/frobt.2025.1696483",
+        "rank": 29,
+        "openAlexOnly": false,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Enhancing audit quality and reducing costs: the impact of AI in banking and financial services.",
+        "doi": "10.3389/frai.2025.1718854",
+        "rank": 33,
+        "openAlexOnly": false,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      }
+    ]
+  },
+  {
+    "paperId": "biz-openaire-csr",
+    "domain": "Business / Marketing",
+    "inputMode": "abstract",
+    "title": "The Influence of Good Corporate Governance and Corporate Social Responsibility towards the Financial Performance that has Implications for Firm Value of Banking Companies Listed in Indonesia Stock Exchange",
+    "doi": "10.6007/ijarbss/v8-i4/4005",
+    "baseline": {
+      "candidatePoolSize": 69,
+      "targetFound": true,
+      "targetRank": 0,
+      "targetOpenaireFound": true,
+      "targetEuropePmcFound": false,
+      "matchProduced": true,
+      "totalLatencyMs": 9561
+    },
+    "withOpenAlex": {
+      "candidatePoolSize": 69,
+      "targetFound": true,
+      "targetRank": 0,
+      "targetOpenAlexFound": false,
+      "targetOpenAlexHasBetterAbstract": false,
+      "targetOpenAlexDoiMatches": null,
+      "targetOpenAlexOaUrl": null,
+      "matchProduced": true,
+      "totalLatencyMs": 18894
+    },
+    "incrementalCandidates": []
+  },
+  {
+    "paperId": "eng-openaire-solar",
+    "domain": "Engineering",
+    "inputMode": "abstract",
+    "title": "Solar‐to‐Hydrogen Conversion Efficiency for Photovoltaic Water Electrolysis to Produce Green Hydrogen",
+    "doi": "10.1002/smll.202502342",
+    "baseline": {
+      "candidatePoolSize": 60,
+      "targetFound": true,
+      "targetRank": 0,
+      "targetOpenaireFound": true,
+      "targetEuropePmcFound": true,
+      "matchProduced": false,
+      "totalLatencyMs": 17591
+    },
+    "withOpenAlex": {
+      "candidatePoolSize": 60,
+      "targetFound": true,
+      "targetRank": 0,
+      "targetOpenAlexFound": false,
+      "targetOpenAlexHasBetterAbstract": false,
+      "targetOpenAlexDoiMatches": null,
+      "targetOpenAlexOaUrl": null,
+      "matchProduced": false,
+      "totalLatencyMs": 17818
+    },
+    "incrementalCandidates": []
+  },
+  {
+    "paperId": "hum-openaire-dh",
+    "domain": "Humanities",
+    "inputMode": "abstract",
+    "title": "Customising geoparsing and georeferencing for historical texts",
+    "doi": "10.1109/bigdata.2013.6691671",
+    "baseline": {
+      "candidatePoolSize": 75,
+      "targetFound": true,
+      "targetRank": 0,
+      "targetOpenaireFound": true,
+      "targetEuropePmcFound": false,
+      "matchProduced": false,
+      "totalLatencyMs": 6998
+    },
+    "withOpenAlex": {
+      "candidatePoolSize": 75,
+      "targetFound": true,
+      "targetRank": 0,
+      "targetOpenAlexFound": false,
+      "targetOpenAlexHasBetterAbstract": false,
+      "targetOpenAlexDoiMatches": null,
+      "targetOpenAlexOaUrl": null,
+      "matchProduced": false,
+      "totalLatencyMs": 14381
+    },
+    "incrementalCandidates": []
+  },
+  {
+    "paperId": "hum-openaire-heritage",
+    "domain": "Humanities",
+    "inputMode": "abstract",
+    "title": "Digital Preservation of Cultural Heritage for Small Institutions",
+    "doi": "10.1007/978-3-030-15200-0_8",
+    "baseline": {
+      "candidatePoolSize": 91,
+      "targetFound": true,
+      "targetRank": 0,
+      "targetOpenaireFound": true,
+      "targetEuropePmcFound": false,
+      "matchProduced": false,
+      "totalLatencyMs": 8750
+    },
+    "withOpenAlex": {
+      "candidatePoolSize": 91,
+      "targetFound": true,
+      "targetRank": 0,
+      "targetOpenAlexFound": false,
+      "targetOpenAlexHasBetterAbstract": false,
+      "targetOpenAlexDoiMatches": null,
+      "targetOpenAlexOaUrl": null,
+      "matchProduced": false,
+      "totalLatencyMs": 7542
+    },
+    "incrementalCandidates": []
+  }
+]

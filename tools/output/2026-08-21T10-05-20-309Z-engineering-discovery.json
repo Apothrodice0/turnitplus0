@@ -1,0 +1,4181 @@
+{
+  "paper": {
+    "id": "eng-openaire",
+    "domain": "Engineering",
+    "title": "A review on configuration optimization of hybrid energy system based on renewable energy",
+    "doi": "10.3389/fenrg.2022.977925",
+    "fullText": "83030 chars omitted"
+  },
+  "targetAbstract": "Hybrid energy system based on renewable energy is an important way to solve current energy and environmental problems. However, its achievable benefits need to be realized through an integrated optimization that considers optimization objectives, optimization models, and optimization algorithms. In this paper, the integrated structure and configuration optimization techniques of the hybrid energy system based on renewable energy (RE-HES) is summarized. The performance indicators, system characteristics, model construction, and solutions of RE-HES optimized configuration are comprehensively reviewed. Current review highlights the diversification of performance evaluation index, consideration of uncertainty and dynamic properties, superstructure approaches and intelligent algorithms.",
+  "results": [
+    {
+      "caseId": "eng-openaire-fifty-docx-medium",
+      "condition": "fifty",
+      "submissionWordCount": 3010,
+      "composedTotalWords": 3010,
+      "copiedWordCount": 1502,
+      "generatedQueryCount": 24,
+      "queryDiagnostics": [
+        {
+          "index": 0,
+          "queryType": "sentence",
+          "queryText": "Current review highlights the diversification of performance evaluation index, consideration of uncertainty and dynamic properties, superstructure approaches and intelligent algorithms.",
+          "numFound": 1,
+          "returned": 1,
+          "targetFound": true,
+          "targetRankInResponse": 0,
+          "titleOverlapCount": 1,
+          "titleOverlapTerms": [
+            "review"
+          ],
+          "abstractOverlapCount": 15,
+          "abstractOverlapTerms": [
+            "current",
+            "review",
+            "highlights",
+            "diversification",
+            "performance",
+            "evaluation",
+            "index",
+            "consideration",
+            "uncertainty",
+            "dynamic",
+            "properties",
+            "superstructure",
+            "approaches",
+            "intelligent",
+            "algorithms"
+          ],
+          "error": null
+        },
+        {
+          "index": 1,
+          "queryType": "sentence",
+          "queryText": "Many solving algorithms have been proposed, including classical algorithms (Yunfei et al., 2020), intelligent algorithms (Paliwal et al., 2014) and hybrid algorithms (Askarzadeh, 2013).",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 1,
+          "titleOverlapTerms": [
+            "hybrid"
+          ],
+          "abstractOverlapCount": 3,
+          "abstractOverlapTerms": [
+            "algorithms",
+            "intelligent",
+            "hybrid"
+          ],
+          "error": null
+        },
+        {
+          "index": 2,
+          "queryType": "sentence",
+          "queryText": "KEYWORDS hybrid energy system (HES), configuration optimization, renewable energy, dynamic, uncertainty, integrated structure 1 Introduction The hybrid energy system based on renewable energy (RE-HES)",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 7,
+          "titleOverlapTerms": [
+            "hybrid",
+            "energy",
+            "system",
+            "configuration",
+            "optimization",
+            "renewable",
+            "based"
+          ],
+          "abstractOverlapCount": 11,
+          "abstractOverlapTerms": [
+            "hybrid",
+            "energy",
+            "system",
+            "configuration",
+            "optimization",
+            "renewable",
+            "dynamic",
+            "uncertainty",
+            "integrated",
+            "structure",
+            "based"
+          ],
+          "error": null
+        },
+        {
+          "index": 3,
+          "queryType": "sentence",
+          "queryText": "Maintenance procedures were documented in sufficient detail that staff unfamiliar with the specific installation could still carry out a routine check without additional supervision.",
+          "numFound": 1,
+          "returned": 1,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 1,
+          "abstractOverlapTerms": [
+            "that"
+          ],
+          "error": null
+        },
+        {
+          "index": 4,
+          "queryType": "sentence",
+          "queryText": "However, its achievable benefits need to be realized through an integrated optimization that considers optimization objectives, optimization models, and optimization algorithms.",
+          "numFound": 1,
+          "returned": 1,
+          "targetFound": true,
+          "targetRankInResponse": 0,
+          "titleOverlapCount": 1,
+          "titleOverlapTerms": [
+            "optimization"
+          ],
+          "abstractOverlapCount": 13,
+          "abstractOverlapTerms": [
+            "however",
+            "achievable",
+            "benefits",
+            "need",
+            "realized",
+            "through",
+            "integrated",
+            "optimization",
+            "that",
+            "considers",
+            "objectives",
+            "models",
+            "algorithms"
+          ],
+          "error": null
+        },
+        {
+          "index": 5,
+          "queryType": "sentence",
+          "queryText": "Structural components were inspected according to a schedule agreed upon with the relevant regulatory body, with each inspection documented and filed for future reference.",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 0,
+          "abstractOverlapTerms": [],
+          "error": null
+        },
+        {
+          "index": 6,
+          "queryType": "sentence",
+          "queryText": "Safety margins applied throughout the design were consistent with the relevant published standards, with additional margin applied in areas where operating conditions were judged",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 0,
+          "abstractOverlapTerms": [],
+          "error": null
+        },
+        {
+          "index": 7,
+          "queryType": "sentence",
+          "queryText": "Frontiers in Energy Research frontiersin.org 01 TYPE Review PUBLISHED 24 August 2022 DOI 10.3389/fenrg.2022.977925 large amount of waste heat generated by the data center",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 2,
+          "titleOverlapTerms": [
+            "energy",
+            "review"
+          ],
+          "abstractOverlapCount": 2,
+          "abstractOverlapTerms": [
+            "energy",
+            "review"
+          ],
+          "error": null
+        },
+        {
+          "index": 8,
+          "queryType": "sentence",
+          "queryText": "This scheme actually goes beyond the Frontiers in Energy Research frontiersin.org 02 Zhang and Wei 10.3389/fenrg.2022.977925 FIGURE 1 Series-integrated multi-energy complementary system.",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 2,
+          "titleOverlapTerms": [
+            "energy",
+            "system"
+          ],
+          "abstractOverlapCount": 4,
+          "abstractOverlapTerms": [
+            "this",
+            "energy",
+            "integrated",
+            "system"
+          ],
+          "error": null
+        },
+        {
+          "index": 9,
+          "queryType": "sentence",
+          "queryText": "Generation Control and Safety, School of Energy and Environment, Southeast University, Nanjing, China Hybrid energy system based on renewable energy is an important way",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 5,
+          "titleOverlapTerms": [
+            "energy",
+            "hybrid",
+            "system",
+            "based",
+            "renewable"
+          ],
+          "abstractOverlapCount": 6,
+          "abstractOverlapTerms": [
+            "energy",
+            "hybrid",
+            "system",
+            "based",
+            "renewable",
+            "important"
+          ],
+          "error": null
+        },
+        {
+          "index": 10,
+          "queryType": "sentence",
+          "queryText": "The paper is structured as follows: Section 2 presents the integrated structure of RE-HES; Section 3 summarizes performance evaluation indexes of RE-HES; Subsequently, uncertainty",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 6,
+          "abstractOverlapTerms": [
+            "paper",
+            "integrated",
+            "structure",
+            "performance",
+            "evaluation",
+            "uncertainty"
+          ],
+          "error": null
+        },
+        {
+          "index": 11,
+          "queryType": "sentence",
+          "queryText": "China Electric Power University, China *CORRESPONDENCE Junli Zhang, zjli@seu.edu.cn SPECIALTY SECTION This article was submitted to Process and Energy Systems Engineering, a section of",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 1,
+          "titleOverlapTerms": [
+            "energy"
+          ],
+          "abstractOverlapCount": 2,
+          "abstractOverlapTerms": [
+            "this",
+            "energy"
+          ],
+          "error": null
+        },
+        {
+          "index": 12,
+          "queryType": "sentence",
+          "queryText": "Field testing was not applicable here; instead, site visits were conducted at key milestones to confirm that installed conditions matched what had been specified",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 1,
+          "abstractOverlapTerms": [
+            "that"
+          ],
+          "error": null
+        },
+        {
+          "index": 13,
+          "queryType": "sentence",
+          "queryText": "Coordination with other trades on site required careful sequencing, and a shared schedule was maintained to reduce the likelihood of conflicting work occurring in",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 0,
+          "abstractOverlapTerms": [],
+          "error": null
+        },
+        {
+          "index": 14,
+          "queryType": "sentence",
+          "queryText": "strategy is determined to make the final configured production system more economical, energy- efficient, and environmentally friendly (Seyed et al., 2022).",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 2,
+          "titleOverlapTerms": [
+            "system",
+            "energy"
+          ],
+          "abstractOverlapCount": 2,
+          "abstractOverlapTerms": [
+            "system",
+            "energy"
+          ],
+          "error": null
+        },
+        {
+          "index": 15,
+          "queryType": "sentence",
+          "queryText": "RE- HES has numerous devices, diverse structures, and flexible operation strategies, which bring great challenges to the configuration optimization of the hybrid energy system.",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 5,
+          "titleOverlapTerms": [
+            "configuration",
+            "optimization",
+            "hybrid",
+            "energy",
+            "system"
+          ],
+          "abstractOverlapCount": 5,
+          "abstractOverlapTerms": [
+            "configuration",
+            "optimization",
+            "hybrid",
+            "energy",
+            "system"
+          ],
+          "error": null
+        },
+        {
+          "index": 16,
+          "queryType": "sentence",
+          "queryText": "Material selection for the project balanced cost against expected service life, taking into account the specific environmental conditions the components would be exposed to",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 1,
+          "abstractOverlapTerms": [
+            "environmental"
+          ],
+          "error": null
+        },
+        {
+          "index": 17,
+          "queryType": "sentence",
+          "queryText": "RE-HES has many application scenarios, such as residential communities, office buildings, commercial areas, campuses, hospitals, and airports.",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 0,
+          "abstractOverlapTerms": [],
+          "error": null
+        },
+        {
+          "index": 18,
+          "queryType": "sentence",
+          "queryText": "In this paper, the integrated structure and configuration optimization techniques of the hybrid energy system based on renewable energy (RE-HES) is summarized.",
+          "numFound": 1,
+          "returned": 1,
+          "targetFound": true,
+          "targetRankInResponse": 0,
+          "titleOverlapCount": 7,
+          "titleOverlapTerms": [
+            "configuration",
+            "optimization",
+            "hybrid",
+            "energy",
+            "system",
+            "based",
+            "renewable"
+          ],
+          "abstractOverlapCount": 13,
+          "abstractOverlapTerms": [
+            "this",
+            "paper",
+            "integrated",
+            "structure",
+            "configuration",
+            "optimization",
+            "techniques",
+            "hybrid",
+            "energy",
+            "system",
+            "based",
+            "renewable",
+            "summarized"
+          ],
+          "error": null
+        },
+        {
+          "index": 19,
+          "queryType": "sentence",
+          "queryText": "The performance indicators, system characteristics, model construction, and solutions of RE-HES optimized configuration are comprehensively reviewed.",
+          "numFound": 1,
+          "returned": 1,
+          "targetFound": true,
+          "targetRankInResponse": 0,
+          "titleOverlapCount": 2,
+          "titleOverlapTerms": [
+            "system",
+            "configuration"
+          ],
+          "abstractOverlapCount": 11,
+          "abstractOverlapTerms": [
+            "performance",
+            "indicators",
+            "system",
+            "characteristics",
+            "model",
+            "construction",
+            "solutions",
+            "optimized",
+            "configuration",
+            "comprehensively",
+            "reviewed"
+          ],
+          "error": null
+        },
+        {
+          "index": 20,
+          "queryType": "keyword",
+          "queryText": "conditions energy project diversification superstructure consideration performance uncertainty intelligent",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 1,
+          "titleOverlapTerms": [
+            "energy"
+          ],
+          "abstractOverlapCount": 7,
+          "abstractOverlapTerms": [
+            "energy",
+            "diversification",
+            "superstructure",
+            "consideration",
+            "performance",
+            "uncertainty",
+            "intelligent"
+          ],
+          "error": null
+        },
+        {
+          "index": 21,
+          "queryType": "keyword",
+          "queryText": "conditions energy project intelligent algorithms askarzadeh",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 1,
+          "titleOverlapTerms": [
+            "energy"
+          ],
+          "abstractOverlapCount": 3,
+          "abstractOverlapTerms": [
+            "energy",
+            "intelligent",
+            "algorithms"
+          ],
+          "error": null
+        },
+        {
+          "index": 22,
+          "queryType": "keyword",
+          "queryText": "conditions energy project configuration optimization introduction uncertainty renewable structure",
+          "numFound": 1,
+          "returned": 1,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 4,
+          "titleOverlapTerms": [
+            "energy",
+            "configuration",
+            "optimization",
+            "renewable"
+          ],
+          "abstractOverlapCount": 6,
+          "abstractOverlapTerms": [
+            "energy",
+            "configuration",
+            "optimization",
+            "uncertainty",
+            "renewable",
+            "structure"
+          ],
+          "error": null
+        },
+        {
+          "index": 23,
+          "queryType": "keyword",
+          "queryText": "conditions energy project",
+          "numFound": 28399,
+          "returned": 5,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 1,
+          "titleOverlapTerms": [
+            "energy"
+          ],
+          "abstractOverlapCount": 1,
+          "abstractOverlapTerms": [
+            "energy"
+          ],
+          "error": null
+        }
+      ],
+      "pipelineStatus": "COMPLETE_WITH_MATCHES",
+      "pipelineCandidateCount": 80,
+      "pipelineTargetRank": 0,
+      "firstLossStage": "none — target reached the candidate pool within retrieval budget"
+    },
+    {
+      "caseId": "eng-openaire-twentyfive-docx-medium",
+      "condition": "twentyfive",
+      "submissionWordCount": 3028,
+      "composedTotalWords": 3028,
+      "copiedWordCount": 755,
+      "generatedQueryCount": 24,
+      "queryDiagnostics": [
+        {
+          "index": 0,
+          "queryType": "sentence",
+          "queryText": "Current review highlights the diversification of performance evaluation index, consideration of uncertainty and dynamic properties, superstructure approaches and intelligent algorithms.",
+          "numFound": 1,
+          "returned": 1,
+          "targetFound": true,
+          "targetRankInResponse": 0,
+          "titleOverlapCount": 1,
+          "titleOverlapTerms": [
+            "review"
+          ],
+          "abstractOverlapCount": 15,
+          "abstractOverlapTerms": [
+            "current",
+            "review",
+            "highlights",
+            "diversification",
+            "performance",
+            "evaluation",
+            "index",
+            "consideration",
+            "uncertainty",
+            "dynamic",
+            "properties",
+            "superstructure",
+            "approaches",
+            "intelligent",
+            "algorithms"
+          ],
+          "error": null
+        },
+        {
+          "index": 1,
+          "queryType": "sentence",
+          "queryText": "KEYWORDS hybrid energy system (HES), configuration optimization, renewable energy, dynamic, uncertainty, integrated structure 1 Introduction The hybrid energy system based on renewable energy (RE-HES)",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 7,
+          "titleOverlapTerms": [
+            "hybrid",
+            "energy",
+            "system",
+            "configuration",
+            "optimization",
+            "renewable",
+            "based"
+          ],
+          "abstractOverlapCount": 11,
+          "abstractOverlapTerms": [
+            "hybrid",
+            "energy",
+            "system",
+            "configuration",
+            "optimization",
+            "renewable",
+            "dynamic",
+            "uncertainty",
+            "integrated",
+            "structure",
+            "based"
+          ],
+          "error": null
+        },
+        {
+          "index": 2,
+          "queryType": "sentence",
+          "queryText": "Maintenance procedures were documented in sufficient detail that staff unfamiliar with the specific installation could still carry out a routine check without additional supervision.",
+          "numFound": 1,
+          "returned": 1,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 1,
+          "abstractOverlapTerms": [
+            "that"
+          ],
+          "error": null
+        },
+        {
+          "index": 3,
+          "queryType": "sentence",
+          "queryText": "However, its achievable benefits need to be realized through an integrated optimization that considers optimization objectives, optimization models, and optimization algorithms.",
+          "numFound": 1,
+          "returned": 1,
+          "targetFound": true,
+          "targetRankInResponse": 0,
+          "titleOverlapCount": 1,
+          "titleOverlapTerms": [
+            "optimization"
+          ],
+          "abstractOverlapCount": 13,
+          "abstractOverlapTerms": [
+            "however",
+            "achievable",
+            "benefits",
+            "need",
+            "realized",
+            "through",
+            "integrated",
+            "optimization",
+            "that",
+            "considers",
+            "objectives",
+            "models",
+            "algorithms"
+          ],
+          "error": null
+        },
+        {
+          "index": 4,
+          "queryType": "sentence",
+          "queryText": "Structural components were inspected according to a schedule agreed upon with the relevant regulatory body, with each inspection documented and filed for future reference.",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 0,
+          "abstractOverlapTerms": [],
+          "error": null
+        },
+        {
+          "index": 5,
+          "queryType": "sentence",
+          "queryText": "Safety margins applied throughout the design were consistent with the relevant published standards, with additional margin applied in areas where operating conditions were judged",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 0,
+          "abstractOverlapTerms": [],
+          "error": null
+        },
+        {
+          "index": 6,
+          "queryType": "sentence",
+          "queryText": "Frontiers in Energy Research frontiersin.org 01 TYPE Review PUBLISHED 24 August 2022 DOI 10.3389/fenrg.2022.977925 large amount of waste heat generated by the data center",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 2,
+          "titleOverlapTerms": [
+            "energy",
+            "review"
+          ],
+          "abstractOverlapCount": 2,
+          "abstractOverlapTerms": [
+            "energy",
+            "review"
+          ],
+          "error": null
+        },
+        {
+          "index": 7,
+          "queryType": "sentence",
+          "queryText": "Generation Control and Safety, School of Energy and Environment, Southeast University, Nanjing, China Hybrid energy system based on renewable energy is an important way",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 5,
+          "titleOverlapTerms": [
+            "energy",
+            "hybrid",
+            "system",
+            "based",
+            "renewable"
+          ],
+          "abstractOverlapCount": 6,
+          "abstractOverlapTerms": [
+            "energy",
+            "hybrid",
+            "system",
+            "based",
+            "renewable",
+            "important"
+          ],
+          "error": null
+        },
+        {
+          "index": 8,
+          "queryType": "sentence",
+          "queryText": "China Electric Power University, China *CORRESPONDENCE Junli Zhang, zjli@seu.edu.cn SPECIALTY SECTION This article was submitted to Process and Energy Systems Engineering, a section of",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 1,
+          "titleOverlapTerms": [
+            "energy"
+          ],
+          "abstractOverlapCount": 2,
+          "abstractOverlapTerms": [
+            "this",
+            "energy"
+          ],
+          "error": null
+        },
+        {
+          "index": 9,
+          "queryType": "sentence",
+          "queryText": "Field testing was not applicable here; instead, site visits were conducted at key milestones to confirm that installed conditions matched what had been specified",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 1,
+          "abstractOverlapTerms": [
+            "that"
+          ],
+          "error": null
+        },
+        {
+          "index": 10,
+          "queryType": "sentence",
+          "queryText": "Coordination with other trades on site required careful sequencing, and a shared schedule was maintained to reduce the likelihood of conflicting work occurring in",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 0,
+          "abstractOverlapTerms": [],
+          "error": null
+        },
+        {
+          "index": 11,
+          "queryType": "sentence",
+          "queryText": "strategy is determined to make the final configured production system more economical, energy- efficient, and environmentally friendly (Seyed et al., 2022).",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 2,
+          "titleOverlapTerms": [
+            "system",
+            "energy"
+          ],
+          "abstractOverlapCount": 2,
+          "abstractOverlapTerms": [
+            "system",
+            "energy"
+          ],
+          "error": null
+        },
+        {
+          "index": 12,
+          "queryType": "sentence",
+          "queryText": "RE- HES has numerous devices, diverse structures, and flexible operation strategies, which bring great challenges to the configuration optimization of the hybrid energy system.",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 5,
+          "titleOverlapTerms": [
+            "configuration",
+            "optimization",
+            "hybrid",
+            "energy",
+            "system"
+          ],
+          "abstractOverlapCount": 5,
+          "abstractOverlapTerms": [
+            "configuration",
+            "optimization",
+            "hybrid",
+            "energy",
+            "system"
+          ],
+          "error": null
+        },
+        {
+          "index": 13,
+          "queryType": "sentence",
+          "queryText": "Material selection for the project balanced cost against expected service life, taking into account the specific environmental conditions the components would be exposed to",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 1,
+          "abstractOverlapTerms": [
+            "environmental"
+          ],
+          "error": null
+        },
+        {
+          "index": 14,
+          "queryType": "sentence",
+          "queryText": "RE-HES has many application scenarios, such as residential communities, office buildings, commercial areas, campuses, hospitals, and airports.",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 0,
+          "abstractOverlapTerms": [],
+          "error": null
+        },
+        {
+          "index": 15,
+          "queryType": "sentence",
+          "queryText": "In this paper, the integrated structure and configuration optimization techniques of the hybrid energy system based on renewable energy (RE-HES) is summarized.",
+          "numFound": 1,
+          "returned": 1,
+          "targetFound": true,
+          "targetRankInResponse": 0,
+          "titleOverlapCount": 7,
+          "titleOverlapTerms": [
+            "configuration",
+            "optimization",
+            "hybrid",
+            "energy",
+            "system",
+            "based",
+            "renewable"
+          ],
+          "abstractOverlapCount": 13,
+          "abstractOverlapTerms": [
+            "this",
+            "paper",
+            "integrated",
+            "structure",
+            "configuration",
+            "optimization",
+            "techniques",
+            "hybrid",
+            "energy",
+            "system",
+            "based",
+            "renewable",
+            "summarized"
+          ],
+          "error": null
+        },
+        {
+          "index": 16,
+          "queryType": "sentence",
+          "queryText": "The performance indicators, system characteristics, model construction, and solutions of RE-HES optimized configuration are comprehensively reviewed.",
+          "numFound": 1,
+          "returned": 1,
+          "targetFound": true,
+          "targetRankInResponse": 0,
+          "titleOverlapCount": 2,
+          "titleOverlapTerms": [
+            "system",
+            "configuration"
+          ],
+          "abstractOverlapCount": 11,
+          "abstractOverlapTerms": [
+            "performance",
+            "indicators",
+            "system",
+            "characteristics",
+            "model",
+            "construction",
+            "solutions",
+            "optimized",
+            "configuration",
+            "comprehensively",
+            "reviewed"
+          ],
+          "error": null
+        },
+        {
+          "index": 17,
+          "queryType": "sentence",
+          "queryText": "A review on configuration optimization of hybrid energy system based on renewable energy Junli Zhang* and Huashuai Wei National Engineering Research Center of Power",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 8,
+          "titleOverlapTerms": [
+            "review",
+            "configuration",
+            "optimization",
+            "hybrid",
+            "energy",
+            "system",
+            "based",
+            "renewable"
+          ],
+          "abstractOverlapCount": 8,
+          "abstractOverlapTerms": [
+            "review",
+            "configuration",
+            "optimization",
+            "hybrid",
+            "energy",
+            "system",
+            "based",
+            "renewable"
+          ],
+          "error": null
+        },
+        {
+          "index": 18,
+          "queryType": "sentence",
+          "queryText": "2020), including the complementarity of continuous energy and intermittent energy (Merei et al., 2013), the complementarity of high-carbon energy and low- carbon energy (Yongpin",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 1,
+          "titleOverlapTerms": [
+            "energy"
+          ],
+          "abstractOverlapCount": 1,
+          "abstractOverlapTerms": [
+            "energy"
+          ],
+          "error": null
+        },
+        {
+          "index": 19,
+          "queryType": "sentence",
+          "queryText": "Instrumentation installed as part of the project allowed ongoing monitoring of key parameters, with alerts configured to notify staff if a reading fell outside",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 0,
+          "abstractOverlapTerms": [],
+          "error": null
+        },
+        {
+          "index": 20,
+          "queryType": "keyword",
+          "queryText": "conditions project energy diversification superstructure consideration performance uncertainty intelligent",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 1,
+          "titleOverlapTerms": [
+            "energy"
+          ],
+          "abstractOverlapCount": 7,
+          "abstractOverlapTerms": [
+            "energy",
+            "diversification",
+            "superstructure",
+            "consideration",
+            "performance",
+            "uncertainty",
+            "intelligent"
+          ],
+          "error": null
+        },
+        {
+          "index": 21,
+          "queryType": "keyword",
+          "queryText": "conditions project energy configuration optimization introduction uncertainty renewable structure",
+          "numFound": 1,
+          "returned": 1,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 4,
+          "titleOverlapTerms": [
+            "energy",
+            "configuration",
+            "optimization",
+            "renewable"
+          ],
+          "abstractOverlapCount": 6,
+          "abstractOverlapTerms": [
+            "energy",
+            "configuration",
+            "optimization",
+            "uncertainty",
+            "renewable",
+            "structure"
+          ],
+          "error": null
+        },
+        {
+          "index": 22,
+          "queryType": "keyword",
+          "queryText": "conditions project energy installation maintenance supervision procedures sufficient unfamiliar",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 1,
+          "titleOverlapTerms": [
+            "energy"
+          ],
+          "abstractOverlapCount": 1,
+          "abstractOverlapTerms": [
+            "energy"
+          ],
+          "error": null
+        },
+        {
+          "index": 23,
+          "queryType": "keyword",
+          "queryText": "conditions project energy",
+          "numFound": 28399,
+          "returned": 5,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 1,
+          "titleOverlapTerms": [
+            "energy"
+          ],
+          "abstractOverlapCount": 1,
+          "abstractOverlapTerms": [
+            "energy"
+          ],
+          "error": null
+        }
+      ],
+      "pipelineStatus": "COMPLETE_WITH_MATCHES",
+      "pipelineCandidateCount": 83,
+      "pipelineTargetRank": 0,
+      "firstLossStage": "none — target reached the candidate pool within retrieval budget"
+    },
+    {
+      "caseId": "eng-openaire-ten-docx-medium",
+      "condition": "ten",
+      "submissionWordCount": 3031,
+      "composedTotalWords": 3031,
+      "copiedWordCount": 311,
+      "generatedQueryCount": 24,
+      "queryDiagnostics": [
+        {
+          "index": 0,
+          "queryType": "sentence",
+          "queryText": "Current review highlights the diversification of performance evaluation index, consideration of uncertainty and dynamic properties, superstructure approaches and intelligent algorithms.",
+          "numFound": 1,
+          "returned": 1,
+          "targetFound": true,
+          "targetRankInResponse": 0,
+          "titleOverlapCount": 1,
+          "titleOverlapTerms": [
+            "review"
+          ],
+          "abstractOverlapCount": 15,
+          "abstractOverlapTerms": [
+            "current",
+            "review",
+            "highlights",
+            "diversification",
+            "performance",
+            "evaluation",
+            "index",
+            "consideration",
+            "uncertainty",
+            "dynamic",
+            "properties",
+            "superstructure",
+            "approaches",
+            "intelligent",
+            "algorithms"
+          ],
+          "error": null
+        },
+        {
+          "index": 1,
+          "queryType": "sentence",
+          "queryText": "KEYWORDS hybrid energy system (HES), configuration optimization, renewable energy, dynamic, uncertainty, integrated structure 1 Introduction The hybrid energy system based on renewable energy (RE-HES)",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 7,
+          "titleOverlapTerms": [
+            "hybrid",
+            "energy",
+            "system",
+            "configuration",
+            "optimization",
+            "renewable",
+            "based"
+          ],
+          "abstractOverlapCount": 11,
+          "abstractOverlapTerms": [
+            "hybrid",
+            "energy",
+            "system",
+            "configuration",
+            "optimization",
+            "renewable",
+            "dynamic",
+            "uncertainty",
+            "integrated",
+            "structure",
+            "based"
+          ],
+          "error": null
+        },
+        {
+          "index": 2,
+          "queryType": "sentence",
+          "queryText": "Maintenance procedures were documented in sufficient detail that staff unfamiliar with the specific installation could still carry out a routine check without additional supervision.",
+          "numFound": 1,
+          "returned": 1,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 1,
+          "abstractOverlapTerms": [
+            "that"
+          ],
+          "error": null
+        },
+        {
+          "index": 3,
+          "queryType": "sentence",
+          "queryText": "However, its achievable benefits need to be realized through an integrated optimization that considers optimization objectives, optimization models, and optimization algorithms.",
+          "numFound": 1,
+          "returned": 1,
+          "targetFound": true,
+          "targetRankInResponse": 0,
+          "titleOverlapCount": 1,
+          "titleOverlapTerms": [
+            "optimization"
+          ],
+          "abstractOverlapCount": 13,
+          "abstractOverlapTerms": [
+            "however",
+            "achievable",
+            "benefits",
+            "need",
+            "realized",
+            "through",
+            "integrated",
+            "optimization",
+            "that",
+            "considers",
+            "objectives",
+            "models",
+            "algorithms"
+          ],
+          "error": null
+        },
+        {
+          "index": 4,
+          "queryType": "sentence",
+          "queryText": "Structural components were inspected according to a schedule agreed upon with the relevant regulatory body, with each inspection documented and filed for future reference.",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 0,
+          "abstractOverlapTerms": [],
+          "error": null
+        },
+        {
+          "index": 5,
+          "queryType": "sentence",
+          "queryText": "Safety margins applied throughout the design were consistent with the relevant published standards, with additional margin applied in areas where operating conditions were judged",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 0,
+          "abstractOverlapTerms": [],
+          "error": null
+        },
+        {
+          "index": 6,
+          "queryType": "sentence",
+          "queryText": "Generation Control and Safety, School of Energy and Environment, Southeast University, Nanjing, China Hybrid energy system based on renewable energy is an important way",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 5,
+          "titleOverlapTerms": [
+            "energy",
+            "hybrid",
+            "system",
+            "based",
+            "renewable"
+          ],
+          "abstractOverlapCount": 6,
+          "abstractOverlapTerms": [
+            "energy",
+            "hybrid",
+            "system",
+            "based",
+            "renewable",
+            "important"
+          ],
+          "error": null
+        },
+        {
+          "index": 7,
+          "queryType": "sentence",
+          "queryText": "Field testing was not applicable here; instead, site visits were conducted at key milestones to confirm that installed conditions matched what had been specified",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 1,
+          "abstractOverlapTerms": [
+            "that"
+          ],
+          "error": null
+        },
+        {
+          "index": 8,
+          "queryType": "sentence",
+          "queryText": "Coordination with other trades on site required careful sequencing, and a shared schedule was maintained to reduce the likelihood of conflicting work occurring in",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 0,
+          "abstractOverlapTerms": [],
+          "error": null
+        },
+        {
+          "index": 9,
+          "queryType": "sentence",
+          "queryText": "Material selection for the project balanced cost against expected service life, taking into account the specific environmental conditions the components would be exposed to",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 1,
+          "abstractOverlapTerms": [
+            "environmental"
+          ],
+          "error": null
+        },
+        {
+          "index": 10,
+          "queryType": "sentence",
+          "queryText": "RE-HES has many application scenarios, such as residential communities, office buildings, commercial areas, campuses, hospitals, and airports.",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 0,
+          "abstractOverlapTerms": [],
+          "error": null
+        },
+        {
+          "index": 11,
+          "queryType": "sentence",
+          "queryText": "In this paper, the integrated structure and configuration optimization techniques of the hybrid energy system based on renewable energy (RE-HES) is summarized.",
+          "numFound": 1,
+          "returned": 1,
+          "targetFound": true,
+          "targetRankInResponse": 0,
+          "titleOverlapCount": 7,
+          "titleOverlapTerms": [
+            "configuration",
+            "optimization",
+            "hybrid",
+            "energy",
+            "system",
+            "based",
+            "renewable"
+          ],
+          "abstractOverlapCount": 13,
+          "abstractOverlapTerms": [
+            "this",
+            "paper",
+            "integrated",
+            "structure",
+            "configuration",
+            "optimization",
+            "techniques",
+            "hybrid",
+            "energy",
+            "system",
+            "based",
+            "renewable",
+            "summarized"
+          ],
+          "error": null
+        },
+        {
+          "index": 12,
+          "queryType": "sentence",
+          "queryText": "The performance indicators, system characteristics, model construction, and solutions of RE-HES optimized configuration are comprehensively reviewed.",
+          "numFound": 1,
+          "returned": 1,
+          "targetFound": true,
+          "targetRankInResponse": 0,
+          "titleOverlapCount": 2,
+          "titleOverlapTerms": [
+            "system",
+            "configuration"
+          ],
+          "abstractOverlapCount": 11,
+          "abstractOverlapTerms": [
+            "performance",
+            "indicators",
+            "system",
+            "characteristics",
+            "model",
+            "construction",
+            "solutions",
+            "optimized",
+            "configuration",
+            "comprehensively",
+            "reviewed"
+          ],
+          "error": null
+        },
+        {
+          "index": 13,
+          "queryType": "sentence",
+          "queryText": "A review on configuration optimization of hybrid energy system based on renewable energy Junli Zhang* and Huashuai Wei National Engineering Research Center of Power",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 8,
+          "titleOverlapTerms": [
+            "review",
+            "configuration",
+            "optimization",
+            "hybrid",
+            "energy",
+            "system",
+            "based",
+            "renewable"
+          ],
+          "abstractOverlapCount": 8,
+          "abstractOverlapTerms": [
+            "review",
+            "configuration",
+            "optimization",
+            "hybrid",
+            "energy",
+            "system",
+            "based",
+            "renewable"
+          ],
+          "error": null
+        },
+        {
+          "index": 14,
+          "queryType": "sentence",
+          "queryText": "2020), including the complementarity of continuous energy and intermittent energy (Merei et al., 2013), the complementarity of high-carbon energy and low- carbon energy (Yongpin",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 1,
+          "titleOverlapTerms": [
+            "energy"
+          ],
+          "abstractOverlapCount": 1,
+          "abstractOverlapTerms": [
+            "energy"
+          ],
+          "error": null
+        },
+        {
+          "index": 15,
+          "queryType": "sentence",
+          "queryText": "Instrumentation installed as part of the project allowed ongoing monitoring of key parameters, with alerts configured to notify staff if a reading fell outside",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 0,
+          "abstractOverlapTerms": [],
+          "error": null
+        },
+        {
+          "index": 16,
+          "queryType": "sentence",
+          "queryText": "RE-HES has high degree of flexibility and diversity, it provides a good platform for the comprehensive utilization of various energy sources (Mala and Rajeshwer,",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 1,
+          "titleOverlapTerms": [
+            "energy"
+          ],
+          "abstractOverlapCount": 1,
+          "abstractOverlapTerms": [
+            "energy"
+          ],
+          "error": null
+        },
+        {
+          "index": 17,
+          "queryType": "sentence",
+          "queryText": "A closeout review was conducted once the project was substantially complete, summarizing what had worked well and what would be handled differently on a",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 1,
+          "titleOverlapTerms": [
+            "review"
+          ],
+          "abstractOverlapCount": 1,
+          "abstractOverlapTerms": [
+            "review"
+          ],
+          "error": null
+        },
+        {
+          "index": 18,
+          "queryType": "sentence",
+          "queryText": "Load calculations were reviewed independently by a second engineer before the design was finalized, a step intended to catch errors that a single reviewer",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 2,
+          "abstractOverlapTerms": [
+            "reviewed",
+            "that"
+          ],
+          "error": null
+        },
+        {
+          "index": 19,
+          "queryType": "sentence",
+          "queryText": "Cost overruns during the project were tracked against the original estimate, and the reasons for any significant deviation were documented for use in future",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 0,
+          "abstractOverlapTerms": [],
+          "error": null
+        },
+        {
+          "index": 20,
+          "queryType": "keyword",
+          "queryText": "design project conditions diversification superstructure consideration performance uncertainty intelligent",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 6,
+          "abstractOverlapTerms": [
+            "diversification",
+            "superstructure",
+            "consideration",
+            "performance",
+            "uncertainty",
+            "intelligent"
+          ],
+          "error": null
+        },
+        {
+          "index": 21,
+          "queryType": "keyword",
+          "queryText": "design project conditions configuration optimization introduction uncertainty renewable structure",
+          "numFound": 1,
+          "returned": 1,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 3,
+          "titleOverlapTerms": [
+            "configuration",
+            "optimization",
+            "renewable"
+          ],
+          "abstractOverlapCount": 5,
+          "abstractOverlapTerms": [
+            "configuration",
+            "optimization",
+            "uncertainty",
+            "renewable",
+            "structure"
+          ],
+          "error": null
+        },
+        {
+          "index": 22,
+          "queryType": "keyword",
+          "queryText": "design project conditions installation maintenance supervision procedures sufficient unfamiliar",
+          "numFound": 1,
+          "returned": 1,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 0,
+          "abstractOverlapTerms": [],
+          "error": null
+        },
+        {
+          "index": 23,
+          "queryType": "keyword",
+          "queryText": "design project conditions",
+          "numFound": 50108,
+          "returned": 5,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 0,
+          "abstractOverlapTerms": [],
+          "error": null
+        }
+      ],
+      "pipelineStatus": "COMPLETE_WITH_MATCHES",
+      "pipelineCandidateCount": 88,
+      "pipelineTargetRank": 0,
+      "firstLossStage": "none — target reached the candidate pool within retrieval budget"
+    },
+    {
+      "caseId": "eng-openaire-twentyfive-docx-long",
+      "condition": "twentyfive",
+      "submissionWordCount": 8026,
+      "composedTotalWords": 8026,
+      "copiedWordCount": 2007,
+      "generatedQueryCount": 24,
+      "queryDiagnostics": [
+        {
+          "index": 0,
+          "queryType": "sentence",
+          "queryText": "Current review highlights the diversification of performance evaluation index, consideration of uncertainty and dynamic properties, superstructure approaches and intelligent algorithms.",
+          "numFound": 1,
+          "returned": 1,
+          "targetFound": true,
+          "targetRankInResponse": 0,
+          "titleOverlapCount": 1,
+          "titleOverlapTerms": [
+            "review"
+          ],
+          "abstractOverlapCount": 15,
+          "abstractOverlapTerms": [
+            "current",
+            "review",
+            "highlights",
+            "diversification",
+            "performance",
+            "evaluation",
+            "index",
+            "consideration",
+            "uncertainty",
+            "dynamic",
+            "properties",
+            "superstructure",
+            "approaches",
+            "intelligent",
+            "algorithms"
+          ],
+          "error": null
+        },
+        {
+          "index": 1,
+          "queryType": "sentence",
+          "queryText": "Many solving algorithms have been proposed, including classical algorithms (Yunfei et al., 2020), intelligent algorithms (Paliwal et al., 2014) and hybrid algorithms (Askarzadeh, 2013).",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 1,
+          "titleOverlapTerms": [
+            "hybrid"
+          ],
+          "abstractOverlapCount": 3,
+          "abstractOverlapTerms": [
+            "algorithms",
+            "intelligent",
+            "hybrid"
+          ],
+          "error": null
+        },
+        {
+          "index": 2,
+          "queryType": "sentence",
+          "queryText": "KEYWORDS hybrid energy system (HES), configuration optimization, renewable energy, dynamic, uncertainty, integrated structure 1 Introduction The hybrid energy system based on renewable energy (RE-HES)",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 7,
+          "titleOverlapTerms": [
+            "hybrid",
+            "energy",
+            "system",
+            "configuration",
+            "optimization",
+            "renewable",
+            "based"
+          ],
+          "abstractOverlapCount": 11,
+          "abstractOverlapTerms": [
+            "hybrid",
+            "energy",
+            "system",
+            "configuration",
+            "optimization",
+            "renewable",
+            "dynamic",
+            "uncertainty",
+            "integrated",
+            "structure",
+            "based"
+          ],
+          "error": null
+        },
+        {
+          "index": 3,
+          "queryType": "sentence",
+          "queryText": "Maintenance procedures were documented in sufficient detail that staff unfamiliar with the specific installation could still carry out a routine check without additional supervision.",
+          "numFound": 1,
+          "returned": 1,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 1,
+          "abstractOverlapTerms": [
+            "that"
+          ],
+          "error": null
+        },
+        {
+          "index": 4,
+          "queryType": "sentence",
+          "queryText": "However, its achievable benefits need to be realized through an integrated optimization that considers optimization objectives, optimization models, and optimization algorithms.",
+          "numFound": 1,
+          "returned": 1,
+          "targetFound": true,
+          "targetRankInResponse": 0,
+          "titleOverlapCount": 1,
+          "titleOverlapTerms": [
+            "optimization"
+          ],
+          "abstractOverlapCount": 13,
+          "abstractOverlapTerms": [
+            "however",
+            "achievable",
+            "benefits",
+            "need",
+            "realized",
+            "through",
+            "integrated",
+            "optimization",
+            "that",
+            "considers",
+            "objectives",
+            "models",
+            "algorithms"
+          ],
+          "error": null
+        },
+        {
+          "index": 5,
+          "queryType": "sentence",
+          "queryText": "Structural components were inspected according to a schedule agreed upon with the relevant regulatory body, with each inspection documented and filed for future reference.",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 0,
+          "abstractOverlapTerms": [],
+          "error": null
+        },
+        {
+          "index": 6,
+          "queryType": "sentence",
+          "queryText": "Safety margins applied throughout the design were consistent with the relevant published standards, with additional margin applied in areas where operating conditions were judged",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 0,
+          "abstractOverlapTerms": [],
+          "error": null
+        },
+        {
+          "index": 7,
+          "queryType": "sentence",
+          "queryText": "Frontiers in Energy Research frontiersin.org 01 TYPE Review PUBLISHED 24 August 2022 DOI 10.3389/fenrg.2022.977925 large amount of waste heat generated by the data center",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 2,
+          "titleOverlapTerms": [
+            "energy",
+            "review"
+          ],
+          "abstractOverlapCount": 2,
+          "abstractOverlapTerms": [
+            "energy",
+            "review"
+          ],
+          "error": null
+        },
+        {
+          "index": 8,
+          "queryType": "sentence",
+          "queryText": "This scheme actually goes beyond the Frontiers in Energy Research frontiersin.org 02 Zhang and Wei 10.3389/fenrg.2022.977925 FIGURE 1 Series-integrated multi-energy complementary system.",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 2,
+          "titleOverlapTerms": [
+            "energy",
+            "system"
+          ],
+          "abstractOverlapCount": 4,
+          "abstractOverlapTerms": [
+            "this",
+            "energy",
+            "integrated",
+            "system"
+          ],
+          "error": null
+        },
+        {
+          "index": 9,
+          "queryType": "sentence",
+          "queryText": "Generation Control and Safety, School of Energy and Environment, Southeast University, Nanjing, China Hybrid energy system based on renewable energy is an important way",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 5,
+          "titleOverlapTerms": [
+            "energy",
+            "hybrid",
+            "system",
+            "based",
+            "renewable"
+          ],
+          "abstractOverlapCount": 6,
+          "abstractOverlapTerms": [
+            "energy",
+            "hybrid",
+            "system",
+            "based",
+            "renewable",
+            "important"
+          ],
+          "error": null
+        },
+        {
+          "index": 10,
+          "queryType": "sentence",
+          "queryText": "The paper is structured as follows: Section 2 presents the integrated structure of RE-HES; Section 3 summarizes performance evaluation indexes of RE-HES; Subsequently, uncertainty",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 6,
+          "abstractOverlapTerms": [
+            "paper",
+            "integrated",
+            "structure",
+            "performance",
+            "evaluation",
+            "uncertainty"
+          ],
+          "error": null
+        },
+        {
+          "index": 11,
+          "queryType": "sentence",
+          "queryText": "China Electric Power University, China *CORRESPONDENCE Junli Zhang, zjli@seu.edu.cn SPECIALTY SECTION This article was submitted to Process and Energy Systems Engineering, a section of",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 1,
+          "titleOverlapTerms": [
+            "energy"
+          ],
+          "abstractOverlapCount": 2,
+          "abstractOverlapTerms": [
+            "this",
+            "energy"
+          ],
+          "error": null
+        },
+        {
+          "index": 12,
+          "queryType": "sentence",
+          "queryText": "Field testing was not applicable here; instead, site visits were conducted at key milestones to confirm that installed conditions matched what had been specified",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 1,
+          "abstractOverlapTerms": [
+            "that"
+          ],
+          "error": null
+        },
+        {
+          "index": 13,
+          "queryType": "sentence",
+          "queryText": "Coordination with other trades on site required careful sequencing, and a shared schedule was maintained to reduce the likelihood of conflicting work occurring in",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 0,
+          "abstractOverlapTerms": [],
+          "error": null
+        },
+        {
+          "index": 14,
+          "queryType": "sentence",
+          "queryText": "strategy is determined to make the final configured production system more economical, energy- efficient, and environmentally friendly (Seyed et al., 2022).",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 2,
+          "titleOverlapTerms": [
+            "system",
+            "energy"
+          ],
+          "abstractOverlapCount": 2,
+          "abstractOverlapTerms": [
+            "system",
+            "energy"
+          ],
+          "error": null
+        },
+        {
+          "index": 15,
+          "queryType": "sentence",
+          "queryText": "RE- HES has numerous devices, diverse structures, and flexible operation strategies, which bring great challenges to the configuration optimization of the hybrid energy system.",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 5,
+          "titleOverlapTerms": [
+            "configuration",
+            "optimization",
+            "hybrid",
+            "energy",
+            "system"
+          ],
+          "abstractOverlapCount": 5,
+          "abstractOverlapTerms": [
+            "configuration",
+            "optimization",
+            "hybrid",
+            "energy",
+            "system"
+          ],
+          "error": null
+        },
+        {
+          "index": 16,
+          "queryType": "sentence",
+          "queryText": "Material selection for the project balanced cost against expected service life, taking into account the specific environmental conditions the components would be exposed to",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 1,
+          "abstractOverlapTerms": [
+            "environmental"
+          ],
+          "error": null
+        },
+        {
+          "index": 17,
+          "queryType": "sentence",
+          "queryText": "RE-HES has many application scenarios, such as residential communities, office buildings, commercial areas, campuses, hospitals, and airports.",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 0,
+          "abstractOverlapTerms": [],
+          "error": null
+        },
+        {
+          "index": 18,
+          "queryType": "sentence",
+          "queryText": "In this paper, the integrated structure and configuration optimization techniques of the hybrid energy system based on renewable energy (RE-HES) is summarized.",
+          "numFound": 1,
+          "returned": 1,
+          "targetFound": true,
+          "targetRankInResponse": 0,
+          "titleOverlapCount": 7,
+          "titleOverlapTerms": [
+            "configuration",
+            "optimization",
+            "hybrid",
+            "energy",
+            "system",
+            "based",
+            "renewable"
+          ],
+          "abstractOverlapCount": 13,
+          "abstractOverlapTerms": [
+            "this",
+            "paper",
+            "integrated",
+            "structure",
+            "configuration",
+            "optimization",
+            "techniques",
+            "hybrid",
+            "energy",
+            "system",
+            "based",
+            "renewable",
+            "summarized"
+          ],
+          "error": null
+        },
+        {
+          "index": 19,
+          "queryType": "sentence",
+          "queryText": "The performance indicators, system characteristics, model construction, and solutions of RE-HES optimized configuration are comprehensively reviewed.",
+          "numFound": 1,
+          "returned": 1,
+          "targetFound": true,
+          "targetRankInResponse": 0,
+          "titleOverlapCount": 2,
+          "titleOverlapTerms": [
+            "system",
+            "configuration"
+          ],
+          "abstractOverlapCount": 11,
+          "abstractOverlapTerms": [
+            "performance",
+            "indicators",
+            "system",
+            "characteristics",
+            "model",
+            "construction",
+            "solutions",
+            "optimized",
+            "configuration",
+            "comprehensively",
+            "reviewed"
+          ],
+          "error": null
+        },
+        {
+          "index": 20,
+          "queryType": "keyword",
+          "queryText": "design project conditions diversification superstructure consideration performance uncertainty intelligent",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 6,
+          "abstractOverlapTerms": [
+            "diversification",
+            "superstructure",
+            "consideration",
+            "performance",
+            "uncertainty",
+            "intelligent"
+          ],
+          "error": null
+        },
+        {
+          "index": 21,
+          "queryType": "keyword",
+          "queryText": "design project conditions intelligent algorithms askarzadeh",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 2,
+          "abstractOverlapTerms": [
+            "intelligent",
+            "algorithms"
+          ],
+          "error": null
+        },
+        {
+          "index": 22,
+          "queryType": "keyword",
+          "queryText": "design project conditions configuration optimization introduction uncertainty renewable structure",
+          "numFound": 1,
+          "returned": 1,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 3,
+          "titleOverlapTerms": [
+            "configuration",
+            "optimization",
+            "renewable"
+          ],
+          "abstractOverlapCount": 5,
+          "abstractOverlapTerms": [
+            "configuration",
+            "optimization",
+            "uncertainty",
+            "renewable",
+            "structure"
+          ],
+          "error": null
+        },
+        {
+          "index": 23,
+          "queryType": "keyword",
+          "queryText": "design project conditions",
+          "numFound": 50108,
+          "returned": 5,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 0,
+          "abstractOverlapTerms": [],
+          "error": null
+        }
+      ],
+      "pipelineStatus": "COMPLETE_WITH_MATCHES",
+      "pipelineCandidateCount": 80,
+      "pipelineTargetRank": 0,
+      "firstLossStage": "none — target reached the candidate pool within retrieval budget"
+    },
+    {
+      "caseId": "eng-openaire-twentyfive-pdf-medium",
+      "condition": "twentyfive",
+      "submissionWordCount": 3028,
+      "composedTotalWords": 3028,
+      "copiedWordCount": 755,
+      "generatedQueryCount": 24,
+      "queryDiagnostics": [
+        {
+          "index": 0,
+          "queryType": "sentence",
+          "queryText": "Current review highlights the diversification of performance evaluation index, consideration of uncertainty and dynamic properties, superstructure approaches and intelligent algorithms.",
+          "numFound": 1,
+          "returned": 1,
+          "targetFound": true,
+          "targetRankInResponse": 0,
+          "titleOverlapCount": 1,
+          "titleOverlapTerms": [
+            "review"
+          ],
+          "abstractOverlapCount": 15,
+          "abstractOverlapTerms": [
+            "current",
+            "review",
+            "highlights",
+            "diversification",
+            "performance",
+            "evaluation",
+            "index",
+            "consideration",
+            "uncertainty",
+            "dynamic",
+            "properties",
+            "superstructure",
+            "approaches",
+            "intelligent",
+            "algorithms"
+          ],
+          "error": null
+        },
+        {
+          "index": 1,
+          "queryType": "sentence",
+          "queryText": "KEYWORDS hybrid energy system (HES), configuration optimization, renewable energy, dynamic, uncertainty, integrated structure 1 Introduction The hybrid energy system based on renewable energy (RE-HES)",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 7,
+          "titleOverlapTerms": [
+            "hybrid",
+            "energy",
+            "system",
+            "configuration",
+            "optimization",
+            "renewable",
+            "based"
+          ],
+          "abstractOverlapCount": 11,
+          "abstractOverlapTerms": [
+            "hybrid",
+            "energy",
+            "system",
+            "configuration",
+            "optimization",
+            "renewable",
+            "dynamic",
+            "uncertainty",
+            "integrated",
+            "structure",
+            "based"
+          ],
+          "error": null
+        },
+        {
+          "index": 2,
+          "queryType": "sentence",
+          "queryText": "Maintenance procedures were documented in sufficient detail that staff unfamiliar with the specific installation could still carry out a routine check without additional supervision.",
+          "numFound": 1,
+          "returned": 1,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 1,
+          "abstractOverlapTerms": [
+            "that"
+          ],
+          "error": null
+        },
+        {
+          "index": 3,
+          "queryType": "sentence",
+          "queryText": "However, its achievable benefits need to be realized through an integrated optimization that considers optimization objectives, optimization models, and optimization algorithms.",
+          "numFound": 1,
+          "returned": 1,
+          "targetFound": true,
+          "targetRankInResponse": 0,
+          "titleOverlapCount": 1,
+          "titleOverlapTerms": [
+            "optimization"
+          ],
+          "abstractOverlapCount": 13,
+          "abstractOverlapTerms": [
+            "however",
+            "achievable",
+            "benefits",
+            "need",
+            "realized",
+            "through",
+            "integrated",
+            "optimization",
+            "that",
+            "considers",
+            "objectives",
+            "models",
+            "algorithms"
+          ],
+          "error": null
+        },
+        {
+          "index": 4,
+          "queryType": "sentence",
+          "queryText": "Structural components were inspected according to a schedule agreed upon with the relevant regulatory body, with each inspection documented and filed for future reference.",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 0,
+          "abstractOverlapTerms": [],
+          "error": null
+        },
+        {
+          "index": 5,
+          "queryType": "sentence",
+          "queryText": "Safety margins applied throughout the design were consistent with the relevant published standards, with additional margin applied in areas where operating conditions were judged",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 0,
+          "abstractOverlapTerms": [],
+          "error": null
+        },
+        {
+          "index": 6,
+          "queryType": "sentence",
+          "queryText": "Frontiers in Energy Research frontiersin.org 01 TYPE Review PUBLISHED 24 August 2022 DOI 10.3389/fenrg.2022.977925 large amount of waste heat generated by the data center",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 2,
+          "titleOverlapTerms": [
+            "energy",
+            "review"
+          ],
+          "abstractOverlapCount": 2,
+          "abstractOverlapTerms": [
+            "energy",
+            "review"
+          ],
+          "error": null
+        },
+        {
+          "index": 7,
+          "queryType": "sentence",
+          "queryText": "Generation Control and Safety, School of Energy and Environment, Southeast University, Nanjing, China Hybrid energy system based on renewable energy is an important way",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 5,
+          "titleOverlapTerms": [
+            "energy",
+            "hybrid",
+            "system",
+            "based",
+            "renewable"
+          ],
+          "abstractOverlapCount": 6,
+          "abstractOverlapTerms": [
+            "energy",
+            "hybrid",
+            "system",
+            "based",
+            "renewable",
+            "important"
+          ],
+          "error": null
+        },
+        {
+          "index": 8,
+          "queryType": "sentence",
+          "queryText": "China Electric Power University, China *CORRESPONDENCE Junli Zhang, zjli@seu.edu.cn SPECIALTY SECTION This article was submitted to Process and Energy Systems Engineering, a section of",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 1,
+          "titleOverlapTerms": [
+            "energy"
+          ],
+          "abstractOverlapCount": 2,
+          "abstractOverlapTerms": [
+            "this",
+            "energy"
+          ],
+          "error": null
+        },
+        {
+          "index": 9,
+          "queryType": "sentence",
+          "queryText": "Field testing was not applicable here; instead, site visits were conducted at key milestones to confirm that installed conditions matched what had been specified",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 1,
+          "abstractOverlapTerms": [
+            "that"
+          ],
+          "error": null
+        },
+        {
+          "index": 10,
+          "queryType": "sentence",
+          "queryText": "Coordination with other trades on site required careful sequencing, and a shared schedule was maintained to reduce the likelihood of conflicting work occurring in",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 0,
+          "abstractOverlapTerms": [],
+          "error": null
+        },
+        {
+          "index": 11,
+          "queryType": "sentence",
+          "queryText": "strategy is determined to make the final configured production system more economical, energy- efficient, and environmentally friendly (Seyed et al., 2022).",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 2,
+          "titleOverlapTerms": [
+            "system",
+            "energy"
+          ],
+          "abstractOverlapCount": 2,
+          "abstractOverlapTerms": [
+            "system",
+            "energy"
+          ],
+          "error": null
+        },
+        {
+          "index": 12,
+          "queryType": "sentence",
+          "queryText": "RE- HES has numerous devices, diverse structures, and flexible operation strategies, which bring great challenges to the configuration optimization of the hybrid energy system.",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 5,
+          "titleOverlapTerms": [
+            "configuration",
+            "optimization",
+            "hybrid",
+            "energy",
+            "system"
+          ],
+          "abstractOverlapCount": 5,
+          "abstractOverlapTerms": [
+            "configuration",
+            "optimization",
+            "hybrid",
+            "energy",
+            "system"
+          ],
+          "error": null
+        },
+        {
+          "index": 13,
+          "queryType": "sentence",
+          "queryText": "Material selection for the project balanced cost against expected service life, taking into account the specific environmental conditions the components would be exposed to",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 1,
+          "abstractOverlapTerms": [
+            "environmental"
+          ],
+          "error": null
+        },
+        {
+          "index": 14,
+          "queryType": "sentence",
+          "queryText": "RE-HES has many application scenarios, such as residential communities, office buildings, commercial areas, campuses, hospitals, and airports.",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 0,
+          "abstractOverlapTerms": [],
+          "error": null
+        },
+        {
+          "index": 15,
+          "queryType": "sentence",
+          "queryText": "In this paper, the integrated structure and configuration optimization techniques of the hybrid energy system based on renewable energy (RE-HES) is summarized.",
+          "numFound": 1,
+          "returned": 1,
+          "targetFound": true,
+          "targetRankInResponse": 0,
+          "titleOverlapCount": 7,
+          "titleOverlapTerms": [
+            "configuration",
+            "optimization",
+            "hybrid",
+            "energy",
+            "system",
+            "based",
+            "renewable"
+          ],
+          "abstractOverlapCount": 13,
+          "abstractOverlapTerms": [
+            "this",
+            "paper",
+            "integrated",
+            "structure",
+            "configuration",
+            "optimization",
+            "techniques",
+            "hybrid",
+            "energy",
+            "system",
+            "based",
+            "renewable",
+            "summarized"
+          ],
+          "error": null
+        },
+        {
+          "index": 16,
+          "queryType": "sentence",
+          "queryText": "The performance indicators, system characteristics, model construction, and solutions of RE-HES optimized configuration are comprehensively reviewed.",
+          "numFound": 1,
+          "returned": 1,
+          "targetFound": true,
+          "targetRankInResponse": 0,
+          "titleOverlapCount": 2,
+          "titleOverlapTerms": [
+            "system",
+            "configuration"
+          ],
+          "abstractOverlapCount": 11,
+          "abstractOverlapTerms": [
+            "performance",
+            "indicators",
+            "system",
+            "characteristics",
+            "model",
+            "construction",
+            "solutions",
+            "optimized",
+            "configuration",
+            "comprehensively",
+            "reviewed"
+          ],
+          "error": null
+        },
+        {
+          "index": 17,
+          "queryType": "sentence",
+          "queryText": "A review on configuration optimization of hybrid energy system based on renewable energy Junli Zhang* and Huashuai Wei National Engineering Research Center of Power",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 8,
+          "titleOverlapTerms": [
+            "review",
+            "configuration",
+            "optimization",
+            "hybrid",
+            "energy",
+            "system",
+            "based",
+            "renewable"
+          ],
+          "abstractOverlapCount": 8,
+          "abstractOverlapTerms": [
+            "review",
+            "configuration",
+            "optimization",
+            "hybrid",
+            "energy",
+            "system",
+            "based",
+            "renewable"
+          ],
+          "error": null
+        },
+        {
+          "index": 18,
+          "queryType": "sentence",
+          "queryText": "2020), including the complementarity of continuous energy and intermittent energy (Merei et al., 2013), the complementarity of high-carbon energy and low- carbon energy (Yongpin",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 1,
+          "titleOverlapTerms": [
+            "energy"
+          ],
+          "abstractOverlapCount": 1,
+          "abstractOverlapTerms": [
+            "energy"
+          ],
+          "error": null
+        },
+        {
+          "index": 19,
+          "queryType": "sentence",
+          "queryText": "Instrumentation installed as part of the project allowed ongoing monitoring of key parameters, with alerts configured to notify staff if a reading fell outside",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 0,
+          "abstractOverlapTerms": [],
+          "error": null
+        },
+        {
+          "index": 20,
+          "queryType": "keyword",
+          "queryText": "conditions project energy diversification superstructure consideration performance uncertainty intelligent",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 1,
+          "titleOverlapTerms": [
+            "energy"
+          ],
+          "abstractOverlapCount": 7,
+          "abstractOverlapTerms": [
+            "energy",
+            "diversification",
+            "superstructure",
+            "consideration",
+            "performance",
+            "uncertainty",
+            "intelligent"
+          ],
+          "error": null
+        },
+        {
+          "index": 21,
+          "queryType": "keyword",
+          "queryText": "conditions project energy configuration optimization introduction uncertainty renewable structure",
+          "numFound": 1,
+          "returned": 1,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 4,
+          "titleOverlapTerms": [
+            "energy",
+            "configuration",
+            "optimization",
+            "renewable"
+          ],
+          "abstractOverlapCount": 6,
+          "abstractOverlapTerms": [
+            "energy",
+            "configuration",
+            "optimization",
+            "uncertainty",
+            "renewable",
+            "structure"
+          ],
+          "error": null
+        },
+        {
+          "index": 22,
+          "queryType": "keyword",
+          "queryText": "conditions project energy installation maintenance supervision procedures sufficient unfamiliar",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 1,
+          "titleOverlapTerms": [
+            "energy"
+          ],
+          "abstractOverlapCount": 1,
+          "abstractOverlapTerms": [
+            "energy"
+          ],
+          "error": null
+        },
+        {
+          "index": 23,
+          "queryType": "keyword",
+          "queryText": "conditions project energy",
+          "numFound": 28399,
+          "returned": 5,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 1,
+          "titleOverlapTerms": [
+            "energy"
+          ],
+          "abstractOverlapCount": 1,
+          "abstractOverlapTerms": [
+            "energy"
+          ],
+          "error": null
+        }
+      ],
+      "pipelineStatus": "COMPLETE_NO_MATCHES",
+      "pipelineCandidateCount": 83,
+      "pipelineTargetRank": 0,
+      "firstLossStage": "none — target reached the candidate pool within retrieval budget"
+    },
+    {
+      "caseId": "eng-openaire-exact-docx-natural",
+      "condition": "exact",
+      "submissionWordCount": 7586,
+      "composedTotalWords": 7586,
+      "copiedWordCount": 7586,
+      "generatedQueryCount": 24,
+      "queryDiagnostics": [
+        {
+          "index": 0,
+          "queryType": "sentence",
+          "queryText": "Conference on Measuring Technology and Mechatronics Automation, ICMTMA 2022 14th International Conference on Measuring Technology and Mechatronics Automation, Changsha, China (Changsha, China: IEEE), 2022",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 0,
+          "abstractOverlapTerms": [],
+          "error": null
+        },
+        {
+          "index": 1,
+          "queryType": "sentence",
+          "queryText": "Current review highlights the diversification of performance evaluation index, consideration of uncertainty and dynamic properties, superstructure approaches and intelligent algorithms.",
+          "numFound": 1,
+          "returned": 1,
+          "targetFound": true,
+          "targetRankInResponse": 0,
+          "titleOverlapCount": 1,
+          "titleOverlapTerms": [
+            "review"
+          ],
+          "abstractOverlapCount": 15,
+          "abstractOverlapTerms": [
+            "current",
+            "review",
+            "highlights",
+            "diversification",
+            "performance",
+            "evaluation",
+            "index",
+            "consideration",
+            "uncertainty",
+            "dynamic",
+            "properties",
+            "superstructure",
+            "approaches",
+            "intelligent",
+            "algorithms"
+          ],
+          "error": null
+        },
+        {
+          "index": 2,
+          "queryType": "sentence",
+          "queryText": "“ Hierarchical optimal scheduling of regional integrated energy power system based on multi-objective particle swarm optimization algorithm, ” in Proceedings - 2022 14th International",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 4,
+          "titleOverlapTerms": [
+            "energy",
+            "system",
+            "based",
+            "optimization"
+          ],
+          "abstractOverlapCount": 5,
+          "abstractOverlapTerms": [
+            "integrated",
+            "energy",
+            "system",
+            "based",
+            "optimization"
+          ],
+          "error": null
+        },
+        {
+          "index": 3,
+          "queryType": "sentence",
+          "queryText": "Many solving algorithms have been proposed, including classical algorithms (Yunfei et al., 2020), intelligent algorithms (Paliwal et al., 2014) and hybrid algorithms (Askarzadeh, 2013).",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 1,
+          "titleOverlapTerms": [
+            "hybrid"
+          ],
+          "abstractOverlapCount": 3,
+          "abstractOverlapTerms": [
+            "algorithms",
+            "intelligent",
+            "hybrid"
+          ],
+          "error": null
+        },
+        {
+          "index": 4,
+          "queryType": "sentence",
+          "queryText": "KEYWORDS hybrid energy system (HES), configuration optimization, renewable energy, dynamic, uncertainty, integrated structure 1 Introduction The hybrid energy system based on renewable energy (RE-HES)",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 7,
+          "titleOverlapTerms": [
+            "hybrid",
+            "energy",
+            "system",
+            "configuration",
+            "optimization",
+            "renewable",
+            "based"
+          ],
+          "abstractOverlapCount": 11,
+          "abstractOverlapTerms": [
+            "hybrid",
+            "energy",
+            "system",
+            "configuration",
+            "optimization",
+            "renewable",
+            "dynamic",
+            "uncertainty",
+            "integrated",
+            "structure",
+            "based"
+          ],
+          "error": null
+        },
+        {
+          "index": 5,
+          "queryType": "sentence",
+          "queryText": "5.2 Intelligent optimization techniques The rapid development of intelligent optimization techniques in recent years has been clearly reflected in the comprehensive optimization of hybrid",
+          "numFound": 1,
+          "returned": 1,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 2,
+          "titleOverlapTerms": [
+            "optimization",
+            "hybrid"
+          ],
+          "abstractOverlapCount": 4,
+          "abstractOverlapTerms": [
+            "intelligent",
+            "optimization",
+            "techniques",
+            "hybrid"
+          ],
+          "error": null
+        },
+        {
+          "index": 6,
+          "queryType": "sentence",
+          "queryText": "In practical applications, for the convenience of solving, nonlinear programming (or mixed integer nonlinear programming) problems are often transformed into linear programming (Peng et",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 1,
+          "abstractOverlapTerms": [
+            "problems"
+          ],
+          "error": null
+        },
+        {
+          "index": 7,
+          "queryType": "sentence",
+          "queryText": "Optimal design of data center cooling systems concerning multi-chiller system configuration and component selection for energy-efficient operation and maximized free-cooling.",
+          "numFound": 1,
+          "returned": 1,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 3,
+          "titleOverlapTerms": [
+            "system",
+            "configuration",
+            "energy"
+          ],
+          "abstractOverlapCount": 3,
+          "abstractOverlapTerms": [
+            "system",
+            "configuration",
+            "energy"
+          ],
+          "error": null
+        },
+        {
+          "index": 8,
+          "queryType": "sentence",
+          "queryText": "4.3.1.2 Robust optimization methods Unlike stochastic optimization methods, which have higher requirements on historical data, robust optimization methods have much lower requirements on it.",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 1,
+          "titleOverlapTerms": [
+            "optimization"
+          ],
+          "abstractOverlapCount": 1,
+          "abstractOverlapTerms": [
+            "optimization"
+          ],
+          "error": null
+        },
+        {
+          "index": 9,
+          "queryType": "sentence",
+          "queryText": "Based on the configuration optimization problem processing framework, existing optimization techniques can be divided into holistic frameworks and hierarchical frameworks.",
+          "numFound": 1,
+          "returned": 1,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 3,
+          "titleOverlapTerms": [
+            "based",
+            "configuration",
+            "optimization"
+          ],
+          "abstractOverlapCount": 4,
+          "abstractOverlapTerms": [
+            "based",
+            "configuration",
+            "optimization",
+            "techniques"
+          ],
+          "error": null
+        },
+        {
+          "index": 10,
+          "queryType": "sentence",
+          "queryText": "However, its achievable benefits need to be realized through an integrated optimization that considers optimization objectives, optimization models, and optimization algorithms.",
+          "numFound": 1,
+          "returned": 1,
+          "targetFound": true,
+          "targetRankInResponse": 0,
+          "titleOverlapCount": 1,
+          "titleOverlapTerms": [
+            "optimization"
+          ],
+          "abstractOverlapCount": 13,
+          "abstractOverlapTerms": [
+            "however",
+            "achievable",
+            "benefits",
+            "need",
+            "realized",
+            "through",
+            "integrated",
+            "optimization",
+            "that",
+            "considers",
+            "objectives",
+            "models",
+            "algorithms"
+          ],
+          "error": null
+        },
+        {
+          "index": 11,
+          "queryType": "sentence",
+          "queryText": "4.3 Considering uncertainty and dynamic characteristics in optimization The system characterization has a significant impact on the configuration optimization model and its optimization results.",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 3,
+          "titleOverlapTerms": [
+            "optimization",
+            "system",
+            "configuration"
+          ],
+          "abstractOverlapCount": 7,
+          "abstractOverlapTerms": [
+            "uncertainty",
+            "dynamic",
+            "characteristics",
+            "optimization",
+            "system",
+            "configuration",
+            "model"
+          ],
+          "error": null
+        },
+        {
+          "index": 12,
+          "queryType": "sentence",
+          "queryText": "(2021) uses box uncertainty sets, ellipsoid uncertainty sets, and convex uncertainty sets to describe the distribution of uncertain factors and establishes a two-stage robust",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 1,
+          "abstractOverlapTerms": [
+            "uncertainty"
+          ],
+          "error": null
+        },
+        {
+          "index": 13,
+          "queryType": "sentence",
+          "queryText": "For scheduling optimization problems, some studies have considered the influence of dynamic characteristics, mainly the influence of thermal network and thermal inertia of buildings",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 1,
+          "titleOverlapTerms": [
+            "optimization"
+          ],
+          "abstractOverlapCount": 4,
+          "abstractOverlapTerms": [
+            "optimization",
+            "problems",
+            "dynamic",
+            "characteristics"
+          ],
+          "error": null
+        },
+        {
+          "index": 14,
+          "queryType": "sentence",
+          "queryText": "(2017) considers the multi-energy flow characteristics of the integrated energy system and the influence of renewable energy access, and proposes a comprehensive energy utilization",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 3,
+          "titleOverlapTerms": [
+            "energy",
+            "system",
+            "renewable"
+          ],
+          "abstractOverlapCount": 6,
+          "abstractOverlapTerms": [
+            "considers",
+            "energy",
+            "characteristics",
+            "integrated",
+            "system",
+            "renewable"
+          ],
+          "error": null
+        },
+        {
+          "index": 15,
+          "queryType": "sentence",
+          "queryText": "Aiming at an isolated grid energy system composed of hydropower stations, hydrogen production equipment, hydrogen storage devices and fuel cells, a configuration optimization model",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 4,
+          "titleOverlapTerms": [
+            "energy",
+            "system",
+            "configuration",
+            "optimization"
+          ],
+          "abstractOverlapCount": 5,
+          "abstractOverlapTerms": [
+            "energy",
+            "system",
+            "configuration",
+            "optimization",
+            "model"
+          ],
+          "error": null
+        },
+        {
+          "index": 16,
+          "queryType": "sentence",
+          "queryText": "Improving operational flexibility of integrated energy system with uncertain renewable generations considering thermal inertia of buildings.",
+          "numFound": 1,
+          "returned": 1,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 3,
+          "titleOverlapTerms": [
+            "energy",
+            "system",
+            "renewable"
+          ],
+          "abstractOverlapCount": 4,
+          "abstractOverlapTerms": [
+            "integrated",
+            "energy",
+            "system",
+            "renewable"
+          ],
+          "error": null
+        },
+        {
+          "index": 17,
+          "queryType": "sentence",
+          "queryText": "(2013) studies the integrated optimization problem of the heating ventilation system (HVAC) powered by wind-solar storage and uses the genetic algorithm (GA)-based two-point estimation",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 3,
+          "titleOverlapTerms": [
+            "optimization",
+            "system",
+            "based"
+          ],
+          "abstractOverlapCount": 4,
+          "abstractOverlapTerms": [
+            "integrated",
+            "optimization",
+            "system",
+            "based"
+          ],
+          "error": null
+        },
+        {
+          "index": 18,
+          "queryType": "sentence",
+          "queryText": "Therefore, with the support of efficient solving algorithms, the Centralized architecture is more likely to obtain theoretical optimal values than the layered architecture.",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 1,
+          "abstractOverlapTerms": [
+            "algorithms"
+          ],
+          "error": null
+        },
+        {
+          "index": 19,
+          "queryType": "sentence",
+          "queryText": "Compared with the traditional method, the intelligent method does have better generality, but the excessive pursuit of generality will inevitably lead to the difficulty",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 1,
+          "abstractOverlapTerms": [
+            "intelligent"
+          ],
+          "error": null
+        },
+        {
+          "index": 20,
+          "queryType": "keyword",
+          "queryText": "optimization energy system international mechatronics conference technology automation",
+          "numFound": 7,
+          "returned": 5,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 3,
+          "titleOverlapTerms": [
+            "optimization",
+            "energy",
+            "system"
+          ],
+          "abstractOverlapCount": 3,
+          "abstractOverlapTerms": [
+            "optimization",
+            "energy",
+            "system"
+          ],
+          "error": null
+        },
+        {
+          "index": 21,
+          "queryType": "keyword",
+          "queryText": "optimization energy system diversification superstructure consideration performance uncertainty intelligent",
+          "numFound": 1,
+          "returned": 1,
+          "targetFound": true,
+          "targetRankInResponse": 0,
+          "titleOverlapCount": 3,
+          "titleOverlapTerms": [
+            "optimization",
+            "energy",
+            "system"
+          ],
+          "abstractOverlapCount": 9,
+          "abstractOverlapTerms": [
+            "optimization",
+            "energy",
+            "system",
+            "diversification",
+            "superstructure",
+            "consideration",
+            "performance",
+            "uncertainty",
+            "intelligent"
+          ],
+          "error": null
+        },
+        {
+          "index": 22,
+          "queryType": "keyword",
+          "queryText": "optimization energy system international hierarchical proceedings objective algorithm",
+          "numFound": 2,
+          "returned": 2,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 3,
+          "titleOverlapTerms": [
+            "optimization",
+            "energy",
+            "system"
+          ],
+          "abstractOverlapCount": 3,
+          "abstractOverlapTerms": [
+            "optimization",
+            "energy",
+            "system"
+          ],
+          "error": null
+        },
+        {
+          "index": 23,
+          "queryType": "keyword",
+          "queryText": "optimization energy system",
+          "numFound": 123772,
+          "returned": 5,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 3,
+          "titleOverlapTerms": [
+            "optimization",
+            "energy",
+            "system"
+          ],
+          "abstractOverlapCount": 3,
+          "abstractOverlapTerms": [
+            "optimization",
+            "energy",
+            "system"
+          ],
+          "error": null
+        }
+      ],
+      "pipelineStatus": "COMPLETE_WITH_MATCHES",
+      "pipelineCandidateCount": 96,
+      "pipelineTargetRank": 0,
+      "firstLossStage": "none — target reached the candidate pool within retrieval budget"
+    },
+    {
+      "caseId": "eng-openaire-fewSentences-docx-medium",
+      "condition": "fewSentences",
+      "submissionWordCount": 3020,
+      "composedTotalWords": 3020,
+      "copiedWordCount": 116,
+      "generatedQueryCount": 21,
+      "queryDiagnostics": [
+        {
+          "index": 0,
+          "queryType": "sentence",
+          "queryText": "Maintenance procedures were documented in sufficient detail that staff unfamiliar with the specific installation could still carry out a routine check without additional supervision.",
+          "numFound": 1,
+          "returned": 1,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 1,
+          "abstractOverlapTerms": [
+            "that"
+          ],
+          "error": null
+        },
+        {
+          "index": 1,
+          "queryType": "sentence",
+          "queryText": "However, its achievable benefits need to be realized through an integrated optimization that considers optimization objectives, optimization models, and optimization algorithms.",
+          "numFound": 1,
+          "returned": 1,
+          "targetFound": true,
+          "targetRankInResponse": 0,
+          "titleOverlapCount": 1,
+          "titleOverlapTerms": [
+            "optimization"
+          ],
+          "abstractOverlapCount": 13,
+          "abstractOverlapTerms": [
+            "however",
+            "achievable",
+            "benefits",
+            "need",
+            "realized",
+            "through",
+            "integrated",
+            "optimization",
+            "that",
+            "considers",
+            "objectives",
+            "models",
+            "algorithms"
+          ],
+          "error": null
+        },
+        {
+          "index": 2,
+          "queryType": "sentence",
+          "queryText": "Structural components were inspected according to a schedule agreed upon with the relevant regulatory body, with each inspection documented and filed for future reference.",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 0,
+          "abstractOverlapTerms": [],
+          "error": null
+        },
+        {
+          "index": 3,
+          "queryType": "sentence",
+          "queryText": "Safety margins applied throughout the design were consistent with the relevant published standards, with additional margin applied in areas where operating conditions were judged",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 0,
+          "abstractOverlapTerms": [],
+          "error": null
+        },
+        {
+          "index": 4,
+          "queryType": "sentence",
+          "queryText": "Generation Control and Safety, School of Energy and Environment, Southeast University, Nanjing, China Hybrid energy system based on renewable energy is an important way",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 5,
+          "titleOverlapTerms": [
+            "energy",
+            "hybrid",
+            "system",
+            "based",
+            "renewable"
+          ],
+          "abstractOverlapCount": 6,
+          "abstractOverlapTerms": [
+            "energy",
+            "hybrid",
+            "system",
+            "based",
+            "renewable",
+            "important"
+          ],
+          "error": null
+        },
+        {
+          "index": 5,
+          "queryType": "sentence",
+          "queryText": "Field testing was not applicable here; instead, site visits were conducted at key milestones to confirm that installed conditions matched what had been specified",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 1,
+          "abstractOverlapTerms": [
+            "that"
+          ],
+          "error": null
+        },
+        {
+          "index": 6,
+          "queryType": "sentence",
+          "queryText": "Coordination with other trades on site required careful sequencing, and a shared schedule was maintained to reduce the likelihood of conflicting work occurring in",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 0,
+          "abstractOverlapTerms": [],
+          "error": null
+        },
+        {
+          "index": 7,
+          "queryType": "sentence",
+          "queryText": "Material selection for the project balanced cost against expected service life, taking into account the specific environmental conditions the components would be exposed to",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 1,
+          "abstractOverlapTerms": [
+            "environmental"
+          ],
+          "error": null
+        },
+        {
+          "index": 8,
+          "queryType": "sentence",
+          "queryText": "In this paper, the integrated structure and configuration optimization techniques of the hybrid energy system based on renewable energy (RE-HES) is summarized.",
+          "numFound": 1,
+          "returned": 1,
+          "targetFound": true,
+          "targetRankInResponse": 0,
+          "titleOverlapCount": 7,
+          "titleOverlapTerms": [
+            "configuration",
+            "optimization",
+            "hybrid",
+            "energy",
+            "system",
+            "based",
+            "renewable"
+          ],
+          "abstractOverlapCount": 13,
+          "abstractOverlapTerms": [
+            "this",
+            "paper",
+            "integrated",
+            "structure",
+            "configuration",
+            "optimization",
+            "techniques",
+            "hybrid",
+            "energy",
+            "system",
+            "based",
+            "renewable",
+            "summarized"
+          ],
+          "error": null
+        },
+        {
+          "index": 9,
+          "queryType": "sentence",
+          "queryText": "The performance indicators, system characteristics, model construction, and solutions of RE-HES optimized configuration are comprehensively reviewed.",
+          "numFound": 1,
+          "returned": 1,
+          "targetFound": true,
+          "targetRankInResponse": 0,
+          "titleOverlapCount": 2,
+          "titleOverlapTerms": [
+            "system",
+            "configuration"
+          ],
+          "abstractOverlapCount": 11,
+          "abstractOverlapTerms": [
+            "performance",
+            "indicators",
+            "system",
+            "characteristics",
+            "model",
+            "construction",
+            "solutions",
+            "optimized",
+            "configuration",
+            "comprehensively",
+            "reviewed"
+          ],
+          "error": null
+        },
+        {
+          "index": 10,
+          "queryType": "sentence",
+          "queryText": "A review on configuration optimization of hybrid energy system based on renewable energy Junli Zhang* and Huashuai Wei National Engineering Research Center of Power",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 8,
+          "titleOverlapTerms": [
+            "review",
+            "configuration",
+            "optimization",
+            "hybrid",
+            "energy",
+            "system",
+            "based",
+            "renewable"
+          ],
+          "abstractOverlapCount": 8,
+          "abstractOverlapTerms": [
+            "review",
+            "configuration",
+            "optimization",
+            "hybrid",
+            "energy",
+            "system",
+            "based",
+            "renewable"
+          ],
+          "error": null
+        },
+        {
+          "index": 11,
+          "queryType": "sentence",
+          "queryText": "Instrumentation installed as part of the project allowed ongoing monitoring of key parameters, with alerts configured to notify staff if a reading fell outside",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 0,
+          "abstractOverlapTerms": [],
+          "error": null
+        },
+        {
+          "index": 12,
+          "queryType": "sentence",
+          "queryText": "A closeout review was conducted once the project was substantially complete, summarizing what had worked well and what would be handled differently on a",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 1,
+          "titleOverlapTerms": [
+            "review"
+          ],
+          "abstractOverlapCount": 1,
+          "abstractOverlapTerms": [
+            "review"
+          ],
+          "error": null
+        },
+        {
+          "index": 13,
+          "queryType": "sentence",
+          "queryText": "Load calculations were reviewed independently by a second engineer before the design was finalized, a step intended to catch errors that a single reviewer",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 2,
+          "abstractOverlapTerms": [
+            "reviewed",
+            "that"
+          ],
+          "error": null
+        },
+        {
+          "index": 14,
+          "queryType": "sentence",
+          "queryText": "Cost overruns during the project were tracked against the original estimate, and the reasons for any significant deviation were documented for use in future",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 0,
+          "abstractOverlapTerms": [],
+          "error": null
+        },
+        {
+          "index": 15,
+          "queryType": "sentence",
+          "queryText": "to solve current energy and environmental problems.",
+          "numFound": 922,
+          "returned": 5,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 1,
+          "titleOverlapTerms": [
+            "energy"
+          ],
+          "abstractOverlapCount": 5,
+          "abstractOverlapTerms": [
+            "solve",
+            "current",
+            "energy",
+            "environmental",
+            "problems"
+          ],
+          "error": null
+        },
+        {
+          "index": 16,
+          "queryType": "sentence",
+          "queryText": "the same area at the same time.",
+          "numFound": 138835,
+          "returned": 5,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 0,
+          "abstractOverlapTerms": [],
+          "error": null
+        },
+        {
+          "index": 17,
+          "queryType": "keyword",
+          "queryText": "documented project future installation maintenance supervision procedures sufficient unfamiliar",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 0,
+          "abstractOverlapTerms": [],
+          "error": null
+        },
+        {
+          "index": 18,
+          "queryType": "keyword",
+          "queryText": "documented project future optimization achievable objectives",
+          "numFound": 2,
+          "returned": 2,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 1,
+          "titleOverlapTerms": [
+            "optimization"
+          ],
+          "abstractOverlapCount": 3,
+          "abstractOverlapTerms": [
+            "optimization",
+            "achievable",
+            "objectives"
+          ],
+          "error": null
+        },
+        {
+          "index": 19,
+          "queryType": "keyword",
+          "queryText": "documented project future structural components regulatory inspection reference schedule",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 0,
+          "abstractOverlapTerms": [],
+          "error": null
+        },
+        {
+          "index": 20,
+          "queryType": "keyword",
+          "queryText": "documented project future",
+          "numFound": 4954,
+          "returned": 5,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 0,
+          "abstractOverlapTerms": [],
+          "error": null
+        }
+      ],
+      "pipelineStatus": "COMPLETE_WITH_MATCHES",
+      "pipelineCandidateCount": 106,
+      "pipelineTargetRank": 0,
+      "firstLossStage": "none — target reached the candidate pool within retrieval budget"
+    },
+    {
+      "caseId": "eng-openaire-twentyfive-docx-short",
+      "condition": "twentyfive",
+      "submissionWordCount": 809,
+      "composedTotalWords": 809,
+      "copiedWordCount": 201,
+      "generatedQueryCount": 24,
+      "queryDiagnostics": [
+        {
+          "index": 0,
+          "queryType": "sentence",
+          "queryText": "Current review highlights the diversification of performance evaluation index, consideration of uncertainty and dynamic properties, superstructure approaches and intelligent algorithms.",
+          "numFound": 1,
+          "returned": 1,
+          "targetFound": true,
+          "targetRankInResponse": 0,
+          "titleOverlapCount": 1,
+          "titleOverlapTerms": [
+            "review"
+          ],
+          "abstractOverlapCount": 15,
+          "abstractOverlapTerms": [
+            "current",
+            "review",
+            "highlights",
+            "diversification",
+            "performance",
+            "evaluation",
+            "index",
+            "consideration",
+            "uncertainty",
+            "dynamic",
+            "properties",
+            "superstructure",
+            "approaches",
+            "intelligent",
+            "algorithms"
+          ],
+          "error": null
+        },
+        {
+          "index": 1,
+          "queryType": "sentence",
+          "queryText": "KEYWORDS hybrid energy system (HES), configuration optimization, renewable energy, dynamic, uncertainty, integrated structure 1 Introduction The hybrid energy system based on renewable energy (RE-HES)",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 7,
+          "titleOverlapTerms": [
+            "hybrid",
+            "energy",
+            "system",
+            "configuration",
+            "optimization",
+            "renewable",
+            "based"
+          ],
+          "abstractOverlapCount": 11,
+          "abstractOverlapTerms": [
+            "hybrid",
+            "energy",
+            "system",
+            "configuration",
+            "optimization",
+            "renewable",
+            "dynamic",
+            "uncertainty",
+            "integrated",
+            "structure",
+            "based"
+          ],
+          "error": null
+        },
+        {
+          "index": 2,
+          "queryType": "sentence",
+          "queryText": "Maintenance procedures were documented in sufficient detail that staff unfamiliar with the specific installation could still carry out a routine check without additional supervision.",
+          "numFound": 1,
+          "returned": 1,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 1,
+          "abstractOverlapTerms": [
+            "that"
+          ],
+          "error": null
+        },
+        {
+          "index": 3,
+          "queryType": "sentence",
+          "queryText": "However, its achievable benefits need to be realized through an integrated optimization that considers optimization objectives, optimization models, and optimization algorithms.",
+          "numFound": 1,
+          "returned": 1,
+          "targetFound": true,
+          "targetRankInResponse": 0,
+          "titleOverlapCount": 1,
+          "titleOverlapTerms": [
+            "optimization"
+          ],
+          "abstractOverlapCount": 13,
+          "abstractOverlapTerms": [
+            "however",
+            "achievable",
+            "benefits",
+            "need",
+            "realized",
+            "through",
+            "integrated",
+            "optimization",
+            "that",
+            "considers",
+            "objectives",
+            "models",
+            "algorithms"
+          ],
+          "error": null
+        },
+        {
+          "index": 4,
+          "queryType": "sentence",
+          "queryText": "Structural components were inspected according to a schedule agreed upon with the relevant regulatory body, with each inspection documented and filed for future reference.",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 0,
+          "abstractOverlapTerms": [],
+          "error": null
+        },
+        {
+          "index": 5,
+          "queryType": "sentence",
+          "queryText": "Safety margins applied throughout the design were consistent with the relevant published standards, with additional margin applied in areas where operating conditions were judged",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 0,
+          "abstractOverlapTerms": [],
+          "error": null
+        },
+        {
+          "index": 6,
+          "queryType": "sentence",
+          "queryText": "Generation Control and Safety, School of Energy and Environment, Southeast University, Nanjing, China Hybrid energy system based on renewable energy is an important way",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 5,
+          "titleOverlapTerms": [
+            "energy",
+            "hybrid",
+            "system",
+            "based",
+            "renewable"
+          ],
+          "abstractOverlapCount": 6,
+          "abstractOverlapTerms": [
+            "energy",
+            "hybrid",
+            "system",
+            "based",
+            "renewable",
+            "important"
+          ],
+          "error": null
+        },
+        {
+          "index": 7,
+          "queryType": "sentence",
+          "queryText": "Field testing was not applicable here; instead, site visits were conducted at key milestones to confirm that installed conditions matched what had been specified",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 1,
+          "abstractOverlapTerms": [
+            "that"
+          ],
+          "error": null
+        },
+        {
+          "index": 8,
+          "queryType": "sentence",
+          "queryText": "Coordination with other trades on site required careful sequencing, and a shared schedule was maintained to reduce the likelihood of conflicting work occurring in",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 0,
+          "abstractOverlapTerms": [],
+          "error": null
+        },
+        {
+          "index": 9,
+          "queryType": "sentence",
+          "queryText": "Material selection for the project balanced cost against expected service life, taking into account the specific environmental conditions the components would be exposed to",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 1,
+          "abstractOverlapTerms": [
+            "environmental"
+          ],
+          "error": null
+        },
+        {
+          "index": 10,
+          "queryType": "sentence",
+          "queryText": "In this paper, the integrated structure and configuration optimization techniques of the hybrid energy system based on renewable energy (RE-HES) is summarized.",
+          "numFound": 1,
+          "returned": 1,
+          "targetFound": true,
+          "targetRankInResponse": 0,
+          "titleOverlapCount": 7,
+          "titleOverlapTerms": [
+            "configuration",
+            "optimization",
+            "hybrid",
+            "energy",
+            "system",
+            "based",
+            "renewable"
+          ],
+          "abstractOverlapCount": 13,
+          "abstractOverlapTerms": [
+            "this",
+            "paper",
+            "integrated",
+            "structure",
+            "configuration",
+            "optimization",
+            "techniques",
+            "hybrid",
+            "energy",
+            "system",
+            "based",
+            "renewable",
+            "summarized"
+          ],
+          "error": null
+        },
+        {
+          "index": 11,
+          "queryType": "sentence",
+          "queryText": "The performance indicators, system characteristics, model construction, and solutions of RE-HES optimized configuration are comprehensively reviewed.",
+          "numFound": 1,
+          "returned": 1,
+          "targetFound": true,
+          "targetRankInResponse": 0,
+          "titleOverlapCount": 2,
+          "titleOverlapTerms": [
+            "system",
+            "configuration"
+          ],
+          "abstractOverlapCount": 11,
+          "abstractOverlapTerms": [
+            "performance",
+            "indicators",
+            "system",
+            "characteristics",
+            "model",
+            "construction",
+            "solutions",
+            "optimized",
+            "configuration",
+            "comprehensively",
+            "reviewed"
+          ],
+          "error": null
+        },
+        {
+          "index": 12,
+          "queryType": "sentence",
+          "queryText": "A review on configuration optimization of hybrid energy system based on renewable energy Junli Zhang* and Huashuai Wei National Engineering Research Center of Power",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 8,
+          "titleOverlapTerms": [
+            "review",
+            "configuration",
+            "optimization",
+            "hybrid",
+            "energy",
+            "system",
+            "based",
+            "renewable"
+          ],
+          "abstractOverlapCount": 8,
+          "abstractOverlapTerms": [
+            "review",
+            "configuration",
+            "optimization",
+            "hybrid",
+            "energy",
+            "system",
+            "based",
+            "renewable"
+          ],
+          "error": null
+        },
+        {
+          "index": 13,
+          "queryType": "sentence",
+          "queryText": "Instrumentation installed as part of the project allowed ongoing monitoring of key parameters, with alerts configured to notify staff if a reading fell outside",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 0,
+          "abstractOverlapTerms": [],
+          "error": null
+        },
+        {
+          "index": 14,
+          "queryType": "sentence",
+          "queryText": "A closeout review was conducted once the project was substantially complete, summarizing what had worked well and what would be handled differently on a",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 1,
+          "titleOverlapTerms": [
+            "review"
+          ],
+          "abstractOverlapCount": 1,
+          "abstractOverlapTerms": [
+            "review"
+          ],
+          "error": null
+        },
+        {
+          "index": 15,
+          "queryType": "sentence",
+          "queryText": "Load calculations were reviewed independently by a second engineer before the design was finalized, a step intended to catch errors that a single reviewer",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 2,
+          "abstractOverlapTerms": [
+            "reviewed",
+            "that"
+          ],
+          "error": null
+        },
+        {
+          "index": 16,
+          "queryType": "sentence",
+          "queryText": "Cost overruns during the project were tracked against the original estimate, and the reasons for any significant deviation were documented for use in future",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 0,
+          "abstractOverlapTerms": [],
+          "error": null
+        },
+        {
+          "index": 17,
+          "queryType": "sentence",
+          "queryText": "has advantages of high efficiency, economy and low carbon emission, and is considered to be one of the effective ways to solve problems of",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 0,
+          "titleOverlapTerms": [],
+          "abstractOverlapCount": 2,
+          "abstractOverlapTerms": [
+            "solve",
+            "problems"
+          ],
+          "error": null
+        },
+        {
+          "index": 18,
+          "queryType": "sentence",
+          "queryText": "energy shortage, environmental pollution and greenhouse gas emissions (Abba and Chee, 2019; Yi et al., 2021).",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 1,
+          "titleOverlapTerms": [
+            "energy"
+          ],
+          "abstractOverlapCount": 2,
+          "abstractOverlapTerms": [
+            "energy",
+            "environmental"
+          ],
+          "error": null
+        },
+        {
+          "index": 19,
+          "queryType": "sentence",
+          "queryText": "to solve current energy and environmental problems.",
+          "numFound": 922,
+          "returned": 5,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 1,
+          "titleOverlapTerms": [
+            "energy"
+          ],
+          "abstractOverlapCount": 5,
+          "abstractOverlapTerms": [
+            "solve",
+            "current",
+            "energy",
+            "environmental",
+            "problems"
+          ],
+          "error": null
+        },
+        {
+          "index": 20,
+          "queryType": "keyword",
+          "queryText": "conditions energy project diversification superstructure consideration performance uncertainty intelligent",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 1,
+          "titleOverlapTerms": [
+            "energy"
+          ],
+          "abstractOverlapCount": 7,
+          "abstractOverlapTerms": [
+            "energy",
+            "diversification",
+            "superstructure",
+            "consideration",
+            "performance",
+            "uncertainty",
+            "intelligent"
+          ],
+          "error": null
+        },
+        {
+          "index": 21,
+          "queryType": "keyword",
+          "queryText": "conditions energy project configuration optimization introduction uncertainty renewable structure",
+          "numFound": 1,
+          "returned": 1,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 4,
+          "titleOverlapTerms": [
+            "energy",
+            "configuration",
+            "optimization",
+            "renewable"
+          ],
+          "abstractOverlapCount": 6,
+          "abstractOverlapTerms": [
+            "energy",
+            "configuration",
+            "optimization",
+            "uncertainty",
+            "renewable",
+            "structure"
+          ],
+          "error": null
+        },
+        {
+          "index": 22,
+          "queryType": "keyword",
+          "queryText": "conditions energy project installation maintenance supervision procedures sufficient unfamiliar",
+          "numFound": 0,
+          "returned": 0,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 1,
+          "titleOverlapTerms": [
+            "energy"
+          ],
+          "abstractOverlapCount": 1,
+          "abstractOverlapTerms": [
+            "energy"
+          ],
+          "error": null
+        },
+        {
+          "index": 23,
+          "queryType": "keyword",
+          "queryText": "conditions energy project",
+          "numFound": 28399,
+          "returned": 5,
+          "targetFound": false,
+          "targetRankInResponse": null,
+          "titleOverlapCount": 1,
+          "titleOverlapTerms": [
+            "energy"
+          ],
+          "abstractOverlapCount": 1,
+          "abstractOverlapTerms": [
+            "energy"
+          ],
+          "error": null
+        }
+      ],
+      "pipelineStatus": "COMPLETE_WITH_MATCHES",
+      "pipelineCandidateCount": 101,
+      "pipelineTargetRank": 0,
+      "firstLossStage": "none — target reached the candidate pool within retrieval budget"
+    }
+  ]
+}

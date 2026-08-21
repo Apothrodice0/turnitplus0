@@ -1,0 +1,26 @@
+[2026-08-21T05:08:35.162Z] Sourcing paper set...
+[2026-08-21T05:08:36.168Z]   [sourcing] cs-attention: knownDoiHint 10.48550/arXiv.1706.03762 did not verify (not found on Crossref) — reporting unconfirmed rather than risking a fuzzy-search false positive.
+[2026-08-21T05:08:36.169Z]   [sourcing] cs-attention Crossref-confirmed doi=(NOT FOUND ON CROSSREF) title="Attention Is All You Need"
+[2026-08-21T05:08:37.303Z]   [sourcing] cs-attention: abstract=1500 chars fullText=41478 chars via local-fixture:attention-is-all-you-need.pdf
+[2026-08-21T05:08:38.537Z]   [sourcing] cs-openaire-gnn: "Attributed Network Representation Learning Based on Graph Neural Network: A Comprehensive Survey" doi=10.1002/cpe.70494 fullText=unavailable
+[2026-08-21T05:08:38.705Z]   [sourcing] med-ioannidis Crossref-confirmed doi=10.1371/journal.pmed.0020124 title="Why Most Published Research Findings Are False"
+[2026-08-21T05:08:39.568Z]   [sourcing] med-ioannidis: abstract=1169 chars fullText=27559 chars via europe-pmc:getText
+[2026-08-21T05:08:40.455Z]   [sourcing] med-europepmc-crispr: "CRISPR-Cas9-Mediated Gene Editing in Hematological Disorders: Advancing Translational and Clinical Applications." doi=10.7759/cureus.108691 fullText=62990 chars via europe-pmc:getText
+[2026-08-21T05:08:41.943Z]   [sourcing] soc-openaire-misinfo: "Affective Polarization and Misinformation Belief" doi=10.1007/s11109-022-09851-w fullText=unavailable
+[2026-08-21T05:08:42.766Z]   [sourcing] soc-europepmc-covidmh: "Mobility Patterns and Mental Health During the COVID-19 Pandemic: Longitudinal Observational Study Using Smartphone Mobility Data." doi=10.2196/79711 fullText=146 chars via http-fallback:https://europepmc.org/article/MED/42507999
+[2026-08-21T05:08:49.736Z]   [sourcing] biz-openaire-brand: "The Influence of Social Media Marketing and Brand Image on Brand Loyalty and its Impact on Consumer Purchase Decision with Store Atmosphere as A Moderation Variable (Case Study of XYZ Mall)" doi=10.21512/becossjournal.v6i1.11018 fullText=38713 chars via http-fallback:https://doi.org/10.21512/becossjournal.v6i1.11018
+[2026-08-21T05:08:52.078Z]   [sourcing] biz-openaire-csr: "The Influence of Good Corporate Governance and Corporate Social Responsibility towards the Financial Performance that has Implications for Firm Value of Banking Companies Listed in Indonesia Stock Exchange" doi=10.6007/ijarbss/v8-i4/4005 fullText=35330 chars via http-fallback:https://doi.org/10.6007/ijarbss/v8-i4/4005
+[2026-08-21T05:08:52.760Z]   [sourcing] eng-openaire-solar: "Solar‐to‐Hydrogen Conversion Efficiency for Photovoltaic Water Electrolysis to Produce Green Hydrogen" doi=10.1002/smll.202502342 fullText=unavailable
+[2026-08-21T05:08:53.460Z]   [crossref] title search for "Detection of bridge deterioration by Weigh in motion and wireless sensor network structural health monitoring of orthotropic steel deck in Rama IX Bridge" found no confidently-matching result (top candidate: "Virtual Monitoring of orthotropic steel deck using bridge weigh-in-motion algorithm: Case study") — treating as unconfirmed, not guessing.
+[2026-08-21T05:08:53.460Z]   [sourcing] eng-openaire-shm: "Detection of bridge deterioration by Weigh in motion and wireless sensor network structural health monitoring of orthotropic steel deck in Rama IX Bridge" doi=(none) fullText=unavailable
+[2026-08-21T05:08:54.447Z]   [sourcing] hum-openaire-dh: "Customising geoparsing and georeferencing for historical texts" doi=10.1109/bigdata.2013.6691671 fullText=unavailable
+[2026-08-21T05:08:56.384Z]   [sourcing] hum-openaire-heritage: "Digital Preservation of Cultural Heritage for Small Institutions" doi=10.1007/978-3-030-15200-0_8 fullText=unavailable
+[2026-08-21T05:08:56.386Z] BENCHMARK_ONLY_PAPER_IDS set — restricting benchmark loop to: cs-attention, cs-openaire-gnn
+[2026-08-21T05:08:56.386Z] Sourced 2 papers. Running benchmark (full + abstract for each)...
+[2026-08-21T05:08:56.386Z]   [benchmark] cs-attention [full] running (41478 chars submitted)...
+[2026-08-21T05:09:49.917Z]   [benchmark] cs-attention [full] -> openaire=true europePmc=false rank=0 retrieval=true match=true (COMPLETE_WITH_MATCHES, 52692ms)
+[2026-08-21T05:09:49.918Z]   [benchmark] cs-attention [abstract] running (1500 chars submitted)...
+[2026-08-21T05:10:11.226Z]   [benchmark] cs-attention [abstract] -> openaire=true europePmc=false rank=0 retrieval=true match=true (COMPLETE_WITH_MATCHES, 20667ms)
+[2026-08-21T05:10:11.226Z]   [benchmark] cs-openaire-gnn [abstract] running (1176 chars submitted)...
+[2026-08-21T05:10:18.710Z]   [benchmark] cs-openaire-gnn [abstract] -> openaire=true europePmc=false rank=0 retrieval=false match=false (COMPLETE_NO_MATCHES, 7306ms)
+[2026-08-21T05:10:18.711Z] Done. Results written to tools/output/2026-08-21T05-08-35-161Z-results.json

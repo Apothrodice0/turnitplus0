@@ -1,0 +1,260 @@
+[
+  {
+    "paperId": "cs-attention",
+    "domain": "Computer Science / AI / ML",
+    "inputMode": "full",
+    "title": "Attention Is All You Need",
+    "doi": null,
+    "baseline": {
+      "candidatePoolSize": 83,
+      "targetFound": true,
+      "targetRank": 0,
+      "targetOpenaireFound": true,
+      "targetEuropePmcFound": false,
+      "matchProduced": true,
+      "totalLatencyMs": 13925
+    },
+    "withOpenAlex": {
+      "candidatePoolSize": 167,
+      "targetFound": true,
+      "targetRank": 0,
+      "targetOpenAlexFound": false,
+      "targetOpenAlexHasBetterAbstract": false,
+      "targetOpenAlexDoiMatches": null,
+      "targetOpenAlexOaUrl": null,
+      "matchProduced": true,
+      "totalLatencyMs": 20470
+    },
+    "incrementalCandidates": [
+      {
+        "title": "Transformer-Based MUM-T Situation Awareness: Agent Status Prediction",
+        "doi": "10.7746/jkros.2023.18.4.436",
+        "rank": 1,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": true,
+        "retrievedChars": 66914,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Attention Is All You Need",
+        "doi": "10.65215/2q58a426",
+        "rank": 2,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": false,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Improving neural machine translation: data centric approaches",
+        "doi": "10.32657/10356/170533",
+        "rank": 3,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": false,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Exploring the Limits of Transfer Learning with a Unified Text-to-Text\\n Transformer",
+        "doi": "10.48550/arxiv.1910.10683",
+        "rank": 4,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": true,
+        "retrievedChars": 200000,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Designing and Implementing Conversational Intelligent Chat-bot Using Natural Language Processing",
+        "doi": "10.32628/cseit217351",
+        "rank": 5,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Bimodal emotion recognition through audio-visual cues",
+        "doi": "10.26481/dis.20210708eg",
+        "rank": 6,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "TTT",
+        "doi": "10.65215/34vgv392",
+        "rank": 7,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Test files",
+        "doi": "10.65215/zmj6cy40",
+        "rank": 8,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Syllable-Based Sequence-to-Sequence Speech Recognition with the Transformer in Mandarin Chinese",
+        "doi": "10.48550/arxiv.1804.10752",
+        "rank": 9,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Scale in Acoustic Modelling",
+        "doi": null,
+        "rank": 10,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      }
+    ]
+  },
+  {
+    "paperId": "cs-attention",
+    "domain": "Computer Science / AI / ML",
+    "inputMode": "abstract",
+    "title": "Attention Is All You Need",
+    "doi": null,
+    "baseline": {
+      "candidatePoolSize": 38,
+      "targetFound": true,
+      "targetRank": 0,
+      "targetOpenaireFound": true,
+      "targetEuropePmcFound": false,
+      "matchProduced": true,
+      "totalLatencyMs": 13264
+    },
+    "withOpenAlex": {
+      "candidatePoolSize": 89,
+      "targetFound": true,
+      "targetRank": 0,
+      "targetOpenAlexFound": false,
+      "targetOpenAlexHasBetterAbstract": false,
+      "targetOpenAlexDoiMatches": null,
+      "targetOpenAlexOaUrl": null,
+      "matchProduced": true,
+      "totalLatencyMs": 9253
+    },
+    "incrementalCandidates": [
+      {
+        "title": "Attention Is All You Need",
+        "doi": "10.65215/2q58a426",
+        "rank": 1,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": false,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "The Survey: Advances in Natural Language Processing using Deep Learning*",
+        "doi": "10.17762/turcomat.v12i4.611",
+        "rank": 2,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": false,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Follow the Wisdom of the Crowd: Effective Text Generation via Minimum Bayes Risk Decoding",
+        "doi": "10.48550/arxiv.2211.07634",
+        "rank": 6,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Follow the Wisdom of the Crowd: Effective Text Generation via Minimum Bayes Risk Decoding",
+        "doi": "10.18653/v1/2023.findings-acl.262",
+        "rank": 7,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "mSLAM: Massively multilingual joint pre-training for speech and text",
+        "doi": "10.48550/arxiv.2202.01374",
+        "rank": 8,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "THE USE OF DISTRACTION",
+        "doi": "10.13023/etd.2021.149",
+        "rank": 9,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Methods for Evaluating Engineering Occupational Exposure to Artificial Intelligence",
+        "doi": "10.24908/pceea.2025.19642",
+        "rank": 10,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Quantifying Cross-lingual Semantic Similarity for Natural Language Processing Applications",
+        "doi": "10.11588/heidok.00019046",
+        "rank": 11,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Using Memory Forensics to Analyze Programming Language Runtimes",
+        "doi": "10.31390/gradschool_dissertations.5737",
+        "rank": 12,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      },
+      {
+        "title": "Automating Ambiguity: Challenges and Pitfalls of Artificial Intelligence",
+        "doi": "10.48550/arxiv.2206.04179",
+        "rank": 13,
+        "openAlexOnly": true,
+        "hasOaUrl": true,
+        "textRetrieved": null,
+        "retrievedChars": null,
+        "looksRelevant": "uncertain"
+      }
+    ]
+  }
+]
