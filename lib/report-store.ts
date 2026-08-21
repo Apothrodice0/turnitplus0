@@ -57,6 +57,13 @@ export async function deleteStoredReport(id: string) {
 }
 
 export async function storeReport<T>(report: T) {
+  // Report history now uses a remote summary index. Do not put those tiny
+  // summary placeholders into IndexedDB as if they were full reports: doing
+  // so would overwrite a real local report with an empty payload and would
+  // make future report-room loads lose their instant local copy.
+  if (report && typeof report === "object" && "__summaryOnly" in report && (report as { __summaryOnly?: unknown }).__summaryOnly === true) {
+    return;
+  }
   const database = await openDatabase();
   return new Promise<void>((resolve, reject) => {
     const request = database.transaction(STORE, "readwrite").objectStore(STORE).put(report);
