@@ -90,6 +90,44 @@ const ACCOUNT_DELETION_CONFIRMATION_PHRASE = "DELETE MY ACCOUNT";
 type LegalTab = "privacy" | "terms";
 type LocalAccount = { username: string; email: string; corpusReuseConsent: boolean };
 
+// The shape lib/report-store.ts's loadStoredReports() actually returns since
+// it started reading from IndexedDB's own lightweight summary store rather
+// than full report bodies — a subset of SimilarityReport's fields, not the
+// real thing (text/sources/aiAnalysis/etc. are never present here).
+type LocalReportHistoryEntry = {
+  id: number;
+  submissionId: string;
+  title: string;
+  created: string;
+  score: number;
+  archiveScore?: number;
+  aiScore: number | null;
+  wordCount: number;
+  scoreBand: "Low" | "Moderate" | "High";
+};
+
+/** Mirrors aiSignalDisplay's own value->tone thresholds (lib/report-types.ts) so a local-only summary's tone label matches exactly what the full computation would have produced, without needing the full report just to derive it. */
+function aiToneForScore(aiScore: number | null): string | null {
+  if (aiScore === null) return null;
+  if (aiScore < 20) return "low";
+  if (aiScore <= 50) return "review";
+  return "high";
+}
+
+function localHistoryEntryToSummary(entry: LocalReportHistoryEntry): ReportSummary {
+  return {
+    id: String(entry.id),
+    submissionId: entry.submissionId,
+    title: entry.title,
+    createdAt: entry.created,
+    wordCount: entry.wordCount,
+    archiveScore: entry.archiveScore ?? entry.score,
+    scoreBand: entry.scoreBand,
+    aiScore: entry.aiScore,
+    aiTone: aiToneForScore(entry.aiScore),
+  };
+}
+
 const VIEW_HASH: Record<Exclude<View, "processing">, string> = {
   home: "#home",
   dashboard: "#dashboard",
@@ -490,9 +528,16 @@ export default function Home() {
   // converting to lightweight summaries at the very end for display.
   async function loadAnonymousReports() {
     try {
-      const localReports = await loadStoredReports<SimilarityReport>(11);
-      setReports(localReports.map(buildReportSummary));
-      if (localReports.length > 0) return;
+      // loadStoredReports now reads from IndexedDB's own lightweight summary
+      // store (see lib/report-store.ts), not full report bodies — it
+      // returns fields shaped like LocalReportHistoryEntry below, not a real
+      // SimilarityReport, so this converts directly rather than calling
+      // buildReportSummary() (which would read report.aiAnalysis — absent
+      // here — and silently produce the wrong AI label despite a perfectly
+      // good aiScore already being available).
+      const localEntries = await loadStoredReports<LocalReportHistoryEntry>(11);
+      setReports(localEntries.map(localHistoryEntryToSummary));
+      if (localEntries.length > 0) return;
       const summaries = await listRemoteReportSummaries();
       if (summaries.length === 0) return;
       const restored: SimilarityReport[] = [];

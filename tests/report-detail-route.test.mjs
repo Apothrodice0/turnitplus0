@@ -38,7 +38,7 @@ test("the page-level data loader only calls notFound() when a session definitive
   // browser's own device key (never available during SSR).
   const bodyMatch = route.match(/export default async function ReportDetailPage[\s\S]*$/);
   assert.ok(bodyMatch, "ReportDetailPage function body must be found");
-  assert.match(bodyMatch[0], /if \(result\.status === "not-found-for-session"\) \{\s*\n\s*notFound\(\);/);
+  assert.match(bodyMatch[0], /if \(result\.status === "not-found-for-session"\) notFound\(\);/);
 });
 
 test("report metadata is generic and excludes the page from search indexing", async () => {

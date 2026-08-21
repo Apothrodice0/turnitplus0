@@ -49,7 +49,7 @@ export function ReportDetailShell({
   useEffect(() => {
     if (initialReport && !requiresClientResolution) {
       let cancelled = false;
-      void fetchRemoteReport<SimilarityReport>(id, true).then((enriched) => {
+      void fetchRemoteReport<SimilarityReport>(id).then((enriched) => {
         if (!cancelled && enriched) setReport((current) => (current ? { ...current, ...enriched } : enriched));
       });
       return () => {
@@ -69,13 +69,13 @@ export function ReportDetailShell({
       if (local) {
         setReport(local);
         setStatus("found");
-        const enriched = await fetchRemoteReport<SimilarityReport>(id, true);
+        const enriched = await fetchRemoteReport<SimilarityReport>(id);
         if (!cancelled && enriched) {
           setReport((current) => (current ? { ...current, ...enriched } : enriched));
         }
         return;
       }
-      const remote = await fetchRemoteReport<SimilarityReport>(id, true);
+      const remote = await fetchRemoteReport<SimilarityReport>(id);
       if (cancelled) return;
       if (remote) {
         setReport(remote);

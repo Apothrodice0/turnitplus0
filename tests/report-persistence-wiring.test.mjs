@@ -26,7 +26,11 @@ test("existing local report persistence (IndexedDB) is still wired at every save
   assert.equal(storeReportCalls.length, 3, "storeReport should still be called at exactly its 3 remaining sites");
 
   assert.match(page, /await clearStoredReports\(\);/);
-  assert.match(page, /loadStoredReports<SimilarityReport>\(11\)/);
+  // loadStoredReports now reads IndexedDB's lightweight summary store (see
+  // lib/report-store.ts), not full SimilarityReport bodies — the caller
+  // reads it as LocalReportHistoryEntry and converts via
+  // localHistoryEntryToSummary rather than buildReportSummary().
+  assert.match(page, /loadStoredReports<LocalReportHistoryEntry>\(11\)/);
 });
 
 test("remote report persistence (Turso) is layered alongside local storage, not in place of it", async () => {
@@ -57,7 +61,7 @@ test("remote report persistence (Turso) is layered alongside local storage, not 
   // Mount-time hydration must only reach for the remote copy when local
   // storage is genuinely empty, and must never leave `reports` populated
   // with anything less than full SimilarityReport objects.
-  assert.match(page, /if \(localReports\.length > 0\) return;/);
+  assert.match(page, /if \(localEntries\.length > 0\) return;/);
   assert.match(page, /const summaries = await listRemoteReportSummaries\(\);/);
   assert.match(page, /const full = await fetchRemoteReport<SimilarityReport>\(summary\.id\);/);
 });
