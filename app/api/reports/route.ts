@@ -5,6 +5,7 @@ import { getSessionUser } from '../../../lib/auth-session';
 import { captureDocumentIdentityAndFamily } from '../../../lib/document-family';
 import { indexDocumentSubmissionIntoCorpus } from '../../../lib/user-submission-corpus';
 import { linkAcademicSearchRunDiagnosticsToReport } from '../../../lib/academic-search-diagnostics-repo';
+import { checkUploadLimit } from '../../../lib/upload-limit';
 import { runAfterResponse } from '../../../lib/run-after-response';
 
 // Reports carry derived data (AI passages, matched phrases, extracted text)
@@ -93,6 +94,29 @@ export async function POST(request: Request) {
         args: [deviceKey, id],
       });
       const isFirstSaveOfThisReport = existingReportRow.rows.length === 0;
+
+      // Daily upload quota (separate abuse-control layer from the IP rate
+      // limiter above): applies only to authenticated, non-admin accounts,
+      // and only to a genuinely new upload — never a resave of an
+      // already-saved report (see lib/upload-limit.ts's own header comment
+      // for why isFirstSaveOfThisReport is the right gate, and why
+      // saved_reports.saved_at is what "genuinely new" means). Anonymous
+      // requests (sessionUser === null) are entirely unaffected — they have
+      // no account to meter and remain governed only by checkRate above.
+      if (sessionUser && sessionUser.role !== 'admin' && isFirstSaveOfThisReport) {
+        const limitCheck = await checkUploadLimit(client, sessionUser.id);
+        if (!limitCheck.allowed) {
+          return new NextResponse(
+            JSON.stringify({
+              error: `Daily upload limit reached (${limitCheck.uploadsToday}/${limitCheck.limit}). Try again after the limit resets.`,
+              limit: limitCheck.limit,
+              uploadsToday: limitCheck.uploadsToday,
+              resetsAt: limitCheck.resetsAt,
+            }),
+            { status: 429, headers: { 'Content-Type': 'application/json', 'Retry-After': String(limitCheck.retryAfterSeconds) } },
+          );
+        }
+      }
 
       await client.execute({
         sql: `INSERT INTO saved_reports (id, device_key, submission_id, title, report_created_at, word_count, archive_score, score_band, ai_score, ai_tone, payload_json, user_id, updated_at)

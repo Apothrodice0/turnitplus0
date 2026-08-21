@@ -38,7 +38,7 @@ import { createReceiptPdf } from "@/lib/receipt-pdf";
 import { getDeviceKey } from "@/lib/device-key";
 import { extractPdfTextDocument } from "@/lib/pdf-text-extraction";
 import { clearStoredReports, loadStoredReports, storeReport } from "@/lib/report-store";
-import { deleteRemoteReport, fetchRemoteReport, listRemoteReportSummaries, saveReportRemote } from "@/lib/reports-remote";
+import { deleteRemoteReport, fetchRemoteReport, fetchUploadLimitStatus, listRemoteReportSummaries, saveReportRemote, type UploadLimitStatus } from "@/lib/reports-remote";
 import { combineMatchedWordPositions } from "@/lib/similarity-enrichment";
 import { computeUnifiedSimilarity } from "@/lib/unified-similarity";
 import { extractDocxTextDocument } from "@/lib/docx-text-extraction";
@@ -445,6 +445,7 @@ export default function Home() {
   const [welcomeMode, setWelcomeMode] = useState<AuthMode | null>(null);
   const [account, setAccount] = useState<LocalAccount | null>(null);
   const [accountLoaded, setAccountLoaded] = useState(false);
+  const [uploadLimitStatus, setUploadLimitStatus] = useState<UploadLimitStatus | null>(null);
   const [isEditingProfile, setIsEditingProfile] = useState(false);
   const [isDeletingAccount, setIsDeletingAccount] = useState(false);
   const [isSubmittingDeletion, setIsSubmittingDeletion] = useState(false);
@@ -491,6 +492,11 @@ export default function Home() {
   // storage is only consulted to avoid re-fetching a report already cached
   // under its own id from a previous hydration of this same account.
   async function loadAccountReports() {
+    // Non-blocking and independent of the reports fetch below (its own
+    // fail-soft contract never throws) — fired here so every existing call
+    // site of loadAccountReports (mount, login, signup) refreshes this for
+    // free, with no new call site needed.
+    void fetchUploadLimitStatus().then(setUploadLimitStatus);
     try {
       const summaries = await listRemoteReportSummaries();
       if (summaries.length === 0) {
@@ -713,6 +719,7 @@ export default function Home() {
     setReports([]);
     setCurrentReport(null);
     setAccount(null);
+    setUploadLimitStatus(null);
     setIsEditingProfile(false);
     setIsDeletingAccount(false);
     setDeleteAccountError(null);
@@ -812,6 +819,7 @@ export default function Home() {
     setCurrentReport(null);
     fetch("/api/auth/logout", { method: "POST" }).catch(() => {});
     setAccount(null);
+    setUploadLimitStatus(null);
     setIsEditingProfile(false);
     setAuthMode("login");
     setWelcomeMode(null);
@@ -841,7 +849,7 @@ export default function Home() {
   async function saveReport(report: SimilarityReport, academicSearchDiagnosticsId?: number | null) {
     setReports((current) => [report, ...current.filter((item) => item.id !== report.id)].slice(0, 50));
     await storeReport(report);
-    await saveReportRemote(report, buildReportSummary(report), academicSearchDiagnosticsId);
+    return await saveReportRemote(report, buildReportSummary(report), academicSearchDiagnosticsId);
   }
 
   async function generateReport() {
@@ -993,13 +1001,26 @@ export default function Home() {
     setProgress(100);
     setProcessingLabel("Saving your report");
     try {
-      await saveReport(report, academicResult.academicSearchDiagnosticsId);
+      const saveResult = await saveReport(report, academicResult.academicSearchDiagnosticsId);
       navigate("reports");
-      notify(
-        academicResult.status === "FAILED"
-          ? "Your report is ready. External academic verification was unavailable this time."
-          : "Your report is ready. Choose AI or TurnitPlus Similarity.",
-      );
+      // Unlike every other saveReportRemote failure (network/DB hiccups,
+      // silently tolerated since the local copy already succeeded — see
+      // saveReport/saveReportRemote's own comments), a daily-upload-quota
+      // rejection is not transient: the report is still visible locally on
+      // this device, but was never persisted to the account, so the user is
+      // told plainly rather than shown the normal success toast.
+      if (!saveResult.ok && saveResult.quotaExceeded) {
+        const resetLabel = saveResult.resetsAt
+          ? new Date(saveResult.resetsAt).toLocaleString(undefined, { hour: "numeric", minute: "2-digit", hour12: true })
+          : "midnight UTC";
+        notify(saveResult.error ?? `Daily upload limit reached. This report is saved on this device only until the limit resets at ${resetLabel}.`);
+      } else {
+        notify(
+          academicResult.status === "FAILED"
+            ? "Your report is ready. External academic verification was unavailable this time."
+            : "Your report is ready. Choose AI or TurnitPlus Similarity.",
+        );
+      }
 
       // TASK 4: the AI-writing score merges into the ALREADY-shown,
       // ALREADY-saved report whenever it finishes — a separate axis
@@ -1410,6 +1431,13 @@ export default function Home() {
                       ? "Cross-account prior-submission checking is ON for your uploads."
                       : "Cross-account prior-submission checking is OFF for your uploads (default)."}
                   </div>
+                  {uploadLimitStatus && uploadLimitStatus.authenticated && (
+                    <div className="account-profile-status">
+                      {uploadLimitStatus.unlimited
+                        ? "Unlimited uploads (developer account)."
+                        : `${uploadLimitStatus.uploadsToday}/${uploadLimitStatus.limit} uploads today.`}
+                    </div>
+                  )}
                   <div className="account-profile-actions">
                     <button className="button primary" type="button" disabled={isGeneratingReport} onClick={startNewCheck}>
                       <UploadCloud aria-hidden="true" /> Start a new check

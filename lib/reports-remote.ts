@@ -16,6 +16,18 @@ export type ReportSummary = {
 // must never interrupt analysis or block the existing local (IndexedDB)
 // flow. Failures are logged at debug level and otherwise swallowed.
 
+export type SaveReportRemoteResult =
+  | { ok: true }
+  /**
+   * status 0 means the request never completed (network/DB error) — the
+   * existing fail-soft case, where the local copy is the only signal that
+   * matters and the caller has never needed to react to a value. status 429
+   * with quotaExceeded is new and different: it is not transient, so
+   * generateReport() surfaces it to the user instead of treating it like
+   * every other silent remote-save failure.
+   */
+  | { ok: false; status: number; quotaExceeded: boolean; error?: string; resetsAt?: string };
+
 /**
  * `academicSearchDiagnosticsId` is sent as a sibling of `payload`, never
  * nested inside it — it must never become part of SimilarityReport/
@@ -25,7 +37,7 @@ export type ReportSummary = {
  * client at all) — app/api/reports/route.ts uses it to link that
  * already-persisted row to this report, once both exist.
  */
-export async function saveReportRemote<T>(report: T, summary: ReportSummary, academicSearchDiagnosticsId?: number | null): Promise<void> {
+export async function saveReportRemote<T>(report: T, summary: ReportSummary, academicSearchDiagnosticsId?: number | null): Promise<SaveReportRemoteResult> {
   try {
     const deviceKey = getDeviceKey();
     const response = await fetch("/api/reports", {
@@ -35,11 +47,41 @@ export async function saveReportRemote<T>(report: T, summary: ReportSummary, aca
     });
     if (!response.ok) {
       console.debug("Remote report save was rejected (local copy is unaffected).", { status: response.status });
+      const body = (await response.json().catch(() => null)) as { error?: string; resetsAt?: string } | null;
+      // Distinguished from the IP rate limiter's own 429 (checkRate in
+      // app/api/reports/route.ts, `{ error: 'Too many requests' }`, no
+      // resetsAt) by the presence of resetsAt — only the daily upload quota
+      // response includes it. The rate limiter's 429 stays in the existing
+      // silent/fail-soft category; only a real quota-exceeded is surfaced.
+      const quotaExceeded = response.status === 429 && typeof body?.resetsAt === "string";
+      return { ok: false, status: response.status, quotaExceeded, error: body?.error, resetsAt: body?.resetsAt };
     }
+    return { ok: true };
   } catch (error) {
     console.debug("Remote report save failed (local copy is unaffected).", {
       error: error instanceof Error ? error.message : String(error),
     });
+    return { ok: false, status: 0, quotaExceeded: false };
+  }
+}
+
+export type UploadLimitStatus =
+  | { authenticated: false }
+  | { authenticated: true; unlimited: true }
+  | { authenticated: true; unlimited: false; uploadsToday: number; limit: number };
+
+/** Display-only — see app/api/upload-limit/route.ts's own header comment for why this is a separate endpoint from /api/auth/me. */
+export async function fetchUploadLimitStatus(): Promise<UploadLimitStatus> {
+  try {
+    const response = await fetch("/api/upload-limit");
+    if (!response.ok) return { authenticated: false };
+    const data = (await response.json()) as UploadLimitStatus;
+    return data.authenticated ? data : { authenticated: false };
+  } catch (error) {
+    console.debug("Upload limit status fetch failed.", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return { authenticated: false };
   }
 }
 
