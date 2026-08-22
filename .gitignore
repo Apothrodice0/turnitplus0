@@ -67,3 +67,6 @@ next-env.d.ts
 
 .vercel
 .env*
+
+# Generated Graphify knowledge graph (rebuild locally with `graphify update .`)
+/graphify-out/
