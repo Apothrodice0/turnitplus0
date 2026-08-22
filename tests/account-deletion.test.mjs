@@ -12,6 +12,7 @@ import * as meRoute from '../app/api/auth/me/route.ts';
 import { resetRateForTest, resetAuthRateForTest } from '../lib/rate-limit.js';
 import { canonicalSha256 } from '../lib/document-identity.ts';
 import { ACCOUNT_DELETION_CONFIRMATION_PHRASE } from '../lib/account-deletion.ts';
+import { indexDocumentSubmissionIntoCorpus } from '../lib/user-submission-corpus.ts';
 
 /**
  * Account deletion (production audit fix — no such endpoint existed
@@ -168,6 +169,23 @@ async function representationForText(text) {
   return result.rows[0] ? String(result.rows[0].id) : null;
 }
 
+/**
+ * Corpus-admission hardening (requirement 3): the live route no longer
+ * calls indexDocumentSubmissionIntoCorpus itself, so a report saved via
+ * postReport() no longer gets a corpus representation "for free." The
+ * corpus-cleanup-on-account-deletion property under test here is
+ * orthogonal to HOW a report came to be indexed — this seeds it directly
+ * via the real, unmodified indexDocumentSubmissionIntoCorpus against a
+ * report's own (already route-captured) document_identity_id, so these
+ * tests keep exercising real corpus rows.
+ */
+async function seedCorpusIndexForReport(deviceKey, reportId, text) {
+  const identityRow = await setupClient.execute({ sql: 'SELECT document_identity_id FROM saved_reports WHERE device_key = ? AND id = ?', args: [deviceKey, reportId] });
+  const documentIdentityId = identityRow.rows[0]?.document_identity_id ? String(identityRow.rows[0].document_identity_id) : null;
+  if (!documentIdentityId) throw new Error(`seedCorpusIndexForReport: no document_identity_id captured yet for ${deviceKey}/${reportId}`);
+  await indexDocumentSubmissionIntoCorpus(setupClient, { documentIdentityId, rawText: text });
+}
+
 // --- AUTHENTICATED DELETION SUCCEEDS ----------------------------------------
 
 test('SUCCESS: an authenticated user can delete their own account with correct password and confirmation', async () => {
@@ -284,6 +302,7 @@ test("DOCUMENT TEXT: the user's own (non-shared) document text is removed from t
 
   const identityRow = await setupClient.execute({ sql: 'SELECT document_identity_id FROM saved_reports WHERE device_key = ? AND id = ?', args: ['delete-device-text', reportId] });
   const identityId = String(identityRow.rows[0].document_identity_id);
+  await seedCorpusIndexForReport('delete-device-text', reportId, text);
   assert.ok(await representationForText(text), 'sanity: representation exists before deletion');
 
   const del = await deleteAccount(cookie);
@@ -304,8 +323,10 @@ test('SHARED EVIDENCE: a document representation shared with another account sur
   await grantConsent(emailA);
   await grantConsent(emailB);
 
-  await postReport('delete-device-shared-a', { cookie: cookieA, text });
+  const { id: reportAId } = await postReport('delete-device-shared-a', { cookie: cookieA, text });
   const { id: reportBId } = await postReport('delete-device-shared-b', { cookie: cookieB, text, title: 'shared-b.pdf' });
+  await seedCorpusIndexForReport('delete-device-shared-a', reportAId, text);
+  await seedCorpusIndexForReport('delete-device-shared-b', reportBId, text);
 
   const representationId = await representationForText(text);
   assert.ok(representationId, 'sanity: one shared representation exists');

@@ -10,6 +10,7 @@ import * as signupRoute from '../app/api/auth/signup/route.ts';
 import { resetRateForTest, resetAuthRateForTest } from '../lib/rate-limit.js';
 import { tokens } from '../lib/similarity-core.ts';
 import { computeUnifiedSimilarity } from '../lib/unified-similarity.ts';
+import { indexDocumentSubmissionIntoCorpus } from '../lib/user-submission-corpus.ts';
 
 /**
  * Phase 4B, Part A: end-to-end proof that computeUnifiedSimilarity()'s
@@ -23,10 +24,15 @@ import { computeUnifiedSimilarity } from '../lib/unified-similarity.ts';
  * step further, into computeUnifiedSimilarity(), which that file never
  * touches (it predates Phase 4A).
  *
- * Pipeline exercised, unmodified, for every scenario:
+ * Pipeline exercised for every scenario:
  *   POST /api/reports (first save of an account's text)
  *     -> captureDocumentIdentityAndFamily (lib/document-family.ts)
- *     -> indexDocumentSubmissionIntoCorpus (lib/user-submission-corpus.ts)
+ *   (corpus-admission hardening, requirement 3: the live route no longer
+ *   calls indexDocumentSubmissionIntoCorpus itself — this file's own
+ *   seedCorpusIndexForReport() calls it directly, against the same
+ *   route-captured document_identity_id, so "historical" content used by
+ *   later scenario steps is real, indexed-the-same-way-production-always-did
+ *   corpus data, not a stand-in)
  *   GET /api/reports/[id]
  *     -> getOrComputeHistoricalMatchSnapshot (lib/report-historical-match.ts)
  *     -> matchAgainstUserSubmissionCorpus (lib/user-submission-matching.ts)
@@ -135,6 +141,25 @@ async function signup(email, deviceKey) {
   return { res, cookie: extractCookie(res) };
 }
 
+/**
+ * Corpus-admission hardening (requirement 3): the live route no longer
+ * calls indexDocumentSubmissionIntoCorpus itself, so a report saved via
+ * postReport() no longer becomes discoverable "historical" content for a
+ * later submission the way this file's scenarios rely on. What these
+ * scenarios actually test — real SELF/PRIOR_SUBMISSION/UNKNOWN_RELATIONSHIP
+ * classification and computeUnifiedSimilarity()'s consumption of it — is
+ * orthogonal to HOW content entered the corpus. This seeds it directly via
+ * the real, unmodified indexDocumentSubmissionIntoCorpus against a report's
+ * own (already route-captured) document_identity_id, so every scenario
+ * keeps exercising the real matcher against real corpus rows.
+ */
+async function seedCorpusIndexForReport(deviceKey, reportId, text) {
+  const identityRow = await setupClient.execute({ sql: 'SELECT document_identity_id FROM saved_reports WHERE device_key = ? AND id = ?', args: [deviceKey, reportId] });
+  const documentIdentityId = identityRow.rows[0]?.document_identity_id ? String(identityRow.rows[0].document_identity_id) : null;
+  if (!documentIdentityId) throw new Error(`seedCorpusIndexForReport: no document_identity_id captured yet for ${deviceKey}/${reportId}`);
+  await indexDocumentSubmissionIntoCorpus(setupClient, { documentIdentityId, rawText: text });
+}
+
 /** Fetches the real historicalSubmissionMatch for a saved report via the real GET route, waiting briefly for the save route's deferred after-response indexing to land (mirrors production's own eventual-consistency window, documented in lib/report-historical-match.ts's own header comment). */
 async function fetchRealHistoricalMatch(id, viewOpts) {
   const res = await getReport(id, viewOpts);
@@ -155,6 +180,7 @@ test('SCENARIO A (SELF): a real second upload of identical text by the same acco
   const { id: firstId } = await postReport('urel-device-a', { cookie, text, title: 'seismo-first.pdf' });
   const firstMatch = await fetchRealHistoricalMatch(firstId, { cookie });
   assert.equal(firstMatch.status, 'NO_HISTORICAL_MATCH', 'a first-ever indexed upload cannot match against nothing but itself');
+  await seedCorpusIndexForReport('urel-device-a', firstId, text);
 
   // The real second upload event — same account, same browser flow, same route.
   const { id: secondId } = await postReport('urel-device-a', { cookie, text, title: 'seismo-second.pdf' });
@@ -186,6 +212,7 @@ test('SCENARIO B (EDITED SELF): a real lightly-edited re-upload by the same acco
   const { id: firstId } = await postReport('urel-device-b', { cookie, text: original, title: 'glacier-original.pdf' });
   const firstMatch = await fetchRealHistoricalMatch(firstId, { cookie });
   assert.equal(firstMatch.status, 'NO_HISTORICAL_MATCH');
+  await seedCorpusIndexForReport('urel-device-b', firstId, original);
 
   const { id: secondId } = await postReport('urel-device-b', { cookie, text: edited, title: 'glacier-edited.pdf' });
   const secondMatch = await fetchRealHistoricalMatch(secondId, { cookie });
@@ -214,6 +241,7 @@ test('SCENARIO C (DIFFERENT ACCOUNT): a real second account submitting matching 
   const { id: idA } = await postReport('urel-device-c-a', { cookie: cookieA, text, title: 'bees-account-a.pdf' });
   const matchA = await fetchRealHistoricalMatch(idA, { cookie: cookieA });
   assert.equal(matchA.status, 'NO_HISTORICAL_MATCH', 'account A is the first-ever submitter of this content');
+  await seedCorpusIndexForReport('urel-device-c-a', idA, text);
 
   const { id: idB } = await postReport('urel-device-c-b', { cookie: cookieB, text, title: 'bees-account-b.pdf' });
   const matchB = await fetchRealHistoricalMatch(idB, { cookie: cookieB });
@@ -241,6 +269,7 @@ test('SCENARIO C (contrast case): the SAME matching content, viewed anonymously 
 
   const { id: ownerReportId } = await postReport('urel-device-c-anon-owner', { cookie: cookieOwner, text, title: 'lakes-owner.pdf' });
   await fetchRealHistoricalMatch(ownerReportId, { cookie: cookieOwner });
+  await seedCorpusIndexForReport('urel-device-c-anon-owner', ownerReportId, text);
 
   // A genuinely anonymous device — no cookie, no account — submits matching content.
   const { id: anonId } = await postReport('urel-device-c-anon-viewer', { text, title: 'lakes-anonymous.pdf' });
@@ -270,10 +299,12 @@ test('SCENARIO D (SELF + ELIGIBLE): a submission with both a real SELF match and
   // Account A's own earlier upload of part one alone.
   const { id: aFirstId } = await postReport('urel-device-d-a', { cookie: cookieA, text: partOne, title: 'paleoclimate-alone.pdf' });
   await fetchRealHistoricalMatch(aFirstId, { cookie: cookieA });
+  await seedCorpusIndexForReport('urel-device-d-a', aFirstId, partOne);
 
   // A different account (C)'s earlier upload of part two alone.
   const { id: cFirstId } = await postReport('urel-device-d-c', { cookie: cookieC, text: partTwo, title: 'hydrogeology-alone.pdf' });
   await fetchRealHistoricalMatch(cFirstId, { cookie: cookieC });
+  await seedCorpusIndexForReport('urel-device-d-c', cFirstId, partTwo);
 
   // Account A now submits a NEW document combining both — its own part one
   // (a real SELF match) plus account C's part two (a real eligible match).
@@ -343,8 +374,10 @@ test('SCENARIO E part 2: two genuinely distinct (non-identical) representations 
 
   const { id: pId } = await postReport('urel-device-e-p', { cookie: cookieP, text: base, title: 'coop-breeding-p.pdf' });
   await fetchRealHistoricalMatch(pId, { cookie: cookieP });
+  await seedCorpusIndexForReport('urel-device-e-p', pId, base);
   const { id: qId } = await postReport('urel-device-e-q', { cookie: cookieQ, text: nearDuplicate, title: 'coop-breeding-q.pdf' });
   await fetchRealHistoricalMatch(qId, { cookie: cookieQ });
+  await seedCorpusIndexForReport('urel-device-e-q', qId, nearDuplicate);
 
   // Confirm at the storage layer these really are two distinct representations.
   const client = createClient({ url: `file:${dbFile}` });

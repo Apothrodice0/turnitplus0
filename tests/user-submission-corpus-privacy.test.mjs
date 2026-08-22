@@ -42,15 +42,19 @@ function stripComments(source) {
 
 const CORPUS_MODULE = "lib/user-submission-corpus.ts";
 
-test("C: the corpus repository is reachable from exactly one app/ file (the save route, for write-only indexing) — no other route can reach it, directly or for reads", () => {
-  // Phase E8D updates this invariant deliberately: it activates
-  // indexDocumentSubmissionIntoCorpus from app/api/reports/route.ts by
-  // design (this phase's own core goal), so "never imported by any app/
-  // file" is no longer the property being protected. The property that
-  // still must hold, and is still enforced here, is narrower and just as
-  // important: no OTHER app/ file gains access, and even the one
-  // authorized file only ever writes (see the route-specific test below
-  // for the write-only restriction).
+test("C: the corpus repository is reachable from NO app/ file — corpus-admission hardening removed the save route's former direct write access", () => {
+  // Superseded invariant: Phase E8D once activated
+  // indexDocumentSubmissionIntoCorpus from app/api/reports/route.ts
+  // directly, and this test used to assert that route was the sole
+  // authorized importer. The corpus-admission gate revision removes that
+  // direct call entirely (app/api/reports/route.ts no longer imports
+  // lib/user-submission-corpus.ts at all) — automatic reusable-corpus
+  // indexing now requires passing lib/corpus-admission-gate.ts's English-
+  // only/3000-word/quality/retention/family-duplicate gate, which no app/
+  // file wires up live yet (see tests/corpus-admission-privacy.test.mjs for
+  // the corpus-admission-gate-specific structural proof of the same
+  // property). So the property enforced here is now the strict, simple
+  // one: zero app/ files import the corpus repository, full stop.
   const appDir = path.join(repoRoot, "app");
   const offenders = [];
   function walk(dir) {
@@ -64,15 +68,13 @@ test("C: the corpus repository is reachable from exactly one app/ file (the save
     }
   }
   walk(appDir);
-  assert.deepEqual(offenders, ["app/api/reports/route.ts"], `only app/api/reports/route.ts may import the corpus repository (Phase E8D's authorized write-only activation) — any other app/ file here is a new, unreviewed exposure: ${offenders.join(", ")}`);
+  assert.deepEqual(offenders, [], `no app/ file may import the corpus repository any more — found: ${offenders.join(", ")}`);
 });
 
-test("app/api/reports/route.ts (POST /api/reports) imports only the write-only indexDocumentSubmissionIntoCorpus entry point — Phase E8D's authorized activation, never a read/matching/candidate-search function", () => {
+test("app/api/reports/route.ts (POST /api/reports) no longer imports or mentions indexDocumentSubmissionIntoCorpus — corpus indexing is no longer reachable directly from normal report creation", () => {
   const source = fs.readFileSync(path.join(repoRoot, "app/api/reports/route.ts"), "utf8");
-  const importLine = importLines(source).split("\n").find((l) => /user-submission-corpus/.test(l));
-  assert.ok(importLine, "Phase E8D activates indexing from this route, so an import is now expected");
-  assert.match(importLine, /^\s*import\s*\{\s*indexDocumentSubmissionIntoCorpus\s*\}\s*from\s*['"]\.\.\/\.\.\/\.\.\/lib\/user-submission-corpus['"];?\s*$/, "the save route may only import the single write-only indexing function, exactly like this, never anything broader");
-  assert.doesNotMatch(stripComments(source), /findCandidateCorpusRepresentations|matchAgainstUserSubmissionCorpus|findSubmissionReferencesForAccount|corpusShingleHashes|canonical_text|canonicalText/, "the save route must never perform corpus matching/reads or touch representation text — write-only indexing only");
+  assert.doesNotMatch(importLines(source), /user-submission-corpus/, "the save route must not import lib/user-submission-corpus.ts at all any more");
+  assert.doesNotMatch(stripComments(source), /indexDocumentSubmissionIntoCorpus|findCandidateCorpusRepresentations|matchAgainstUserSubmissionCorpus|findSubmissionReferencesForAccount|corpusShingleHashes/, "the save route must never call or even reference a corpus repository function");
 });
 
 const SCORING_PATH_FILES = [

@@ -4,7 +4,6 @@ import { checkRate, checkPollRate, checkReadRate } from '../../../lib/rate-limit
 import { clientIpFrom } from '../../../lib/client-ip';
 import { getSessionUser } from '../../../lib/auth-session';
 import { captureDocumentIdentityAndFamily } from '../../../lib/document-family';
-import { indexDocumentSubmissionIntoCorpus } from '../../../lib/user-submission-corpus';
 import { linkAcademicSearchRunDiagnosticsToReport } from '../../../lib/academic-search-diagnostics-repo';
 import { checkUploadLimit } from '../../../lib/upload-limit';
 import { getRoomCountForRole, isWithinActiveCycle, roomCycleEndsAt } from '../../../lib/report-rooms';
@@ -287,11 +286,6 @@ export async function POST(request: Request) {
         // for the same reason app/api/reports/[id]/route.ts's own
         // runAfterResponse callback captures plain locals — keeps the
         // deferred closure independent of the outer request's object.
-        // Indexing consent defaults to false (no consent row = not opted
-        // in) for a signed-in user and is always false for anonymous saves,
-        // matching indexDocumentSubmissionIntoCorpus's own existing
-        // SKIPPED_ANONYMOUS eligibility rule.
-        const hasCorpusReuseConsent = sessionUser?.corpusReuseConsented === true;
         const reportDeviceKey = deviceKey;
         const reportId = id;
         const capturedAcademicDiagnosticsId = academicDiagnosticsId;
@@ -334,55 +328,22 @@ export async function POST(request: Request) {
                 console.error('linkAcademicSearchRunDiagnosticsToReport failed (non-fatal):', err instanceof Error ? err.message : String(err));
               }
             }
-            // Phase E8D: activation. Reuses lib/user-submission-corpus.ts's
-            // indexDocumentSubmissionIntoCorpus exactly as E8A already
-            // defined it (no logic duplicated here) — the same
-            // account_id != null eligibility rule that function already
-            // enforces (SKIPPED_ANONYMOUS otherwise) means this call is
-            // technically safe to make unconditionally, but userId is
-            // checked here too so an anonymous save's log line never even
-            // mentions indexing, matching this route's own existing
-            // "no behavior for anonymous" discipline. Runs only after
-            // identity capture above succeeded (needs its documentIdentityId)
-            // and only inside this same deferred callback — see this
-            // route's own already-existing comment on why runAfterResponse
-            // keeps this off the response's critical path. A failure here
-            // is caught separately from identity-capture failures so the
-            // two are distinguishable in logs, and never re-thrown: the
-            // saved report and the identity/family capture above are
-            // already durable regardless of whether indexing succeeds.
-            // Retry/reconciliation (this phase's own task description,
-            // section 11): no queue is introduced; a document_identities
-            // row with no corresponding corpus_submission_references row
-            // is itself the recoverable "needs indexing" signal a future
-            // maintenance pass could query for — see the E8D report's own
-            // "unresolved decisions" for why that pass is not built here.
-            //
-            // Privacy hardening: additionally requires hasCorpusReuseConsent
-            // — a signed-in user whose account has not explicitly opted in
-            // (users.corpus_reuse_consented_at IS NULL, the default) is
-            // never indexed into the cross-account matching corpus, exactly
-            // like an anonymous submission is not. This does not change
-            // indexDocumentSubmissionIntoCorpus, findCandidateCorpusRepresentations,
-            // or matchAgainstUserSubmissionCorpus themselves — only whether
-            // this route ever calls the entry point at all.
-            if (userId !== null && hasCorpusReuseConsent) {
-              const indexStartedAt = Date.now();
-              try {
-                const indexResult = await indexDocumentSubmissionIntoCorpus(deferredClient, {
-                  documentIdentityId: captured.documentIdentityId,
-                  rawText,
-                });
-                console.log(
-                  `corpus indexing ${indexResult.status} for documentIdentity=${captured.documentIdentityId} (${Date.now() - indexStartedAt}ms)`,
-                );
-              } catch (err) {
-                console.error(
-                  `indexDocumentSubmissionIntoCorpus failed (non-fatal) for documentIdentity=${captured.documentIdentityId} (${Date.now() - indexStartedAt}ms):`,
-                  err instanceof Error ? err.message : String(err),
-                );
-              }
-            }
+            // Corpus-admission hardening: this route no longer calls
+            // lib/user-submission-corpus.ts's indexDocumentSubmissionIntoCorpus
+            // directly (Phase E8D's original activation, removed). Automatic
+            // reusable-corpus indexing now requires passing the
+            // corpus-admission gate (lib/corpus-admission-gate.ts) — English-
+            // only, 3000-word minimum, quality scoring, retention/consent,
+            // and "first accepted sample wins" family-duplicate checks — none
+            // of which a bare users.corpus_reuse_consented_at flag alone ever
+            // satisfied. Wiring live report uploads through that gate is
+            // explicitly future work, not built in this phase; consent
+            // remains a necessary but no longer sufficient precondition, and
+            // users.corpus_reuse_consented_at / SessionUser.corpusReuseConsented
+            // / PATCH /api/auth/me's toggle are all left intact for that
+            // future phase to reconnect. See tests/corpus-admission-privacy.test.mjs
+            // for the structural proof that no file under app/ can reach
+            // indexDocumentSubmissionIntoCorpus any more.
           } catch (err) {
             console.error('captureDocumentIdentityAndFamily failed (non-fatal):', err instanceof Error ? err.message : String(err));
           } finally {

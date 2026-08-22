@@ -904,6 +904,126 @@ export const academic_search_run_diagnostics = sqliteTable(
   ],
 );
 
+// Corpus admission / quality gate (v1, drizzle/0029): audit-trail decision
+// records for candidates being evaluated for admission into the reusable
+// corpus (corpus_document_representations et al. above) — never wired to
+// write those tables itself (lib/corpus-admission-gate.ts never imports
+// lib/user-submission-corpus.ts's write functions; see
+// tests/corpus-admission-privacy.test.mjs). One row per EVALUATION, not per
+// candidate: canonical_sha256 is deliberately not unique here (unlike
+// corpus_document_representations.canonical_sha256) so the same candidate
+// can be re-evaluated under a new policy_version without colliding — the
+// calibrate/refreeze/rerun-all-770 workflow depends on this. No
+// canonical_text column exists on this table at all — see
+// corpus_admission_content_store below for the one place raw text may ever
+// be persisted, and lib/corpus-admission-gate.ts's own header comment for
+// why the split exists.
+export const corpus_admission_decisions = sqliteTable(
+  "corpus_admission_decisions",
+  {
+    id: text("id").primaryKey(),
+    run_id: text("run_id"),
+    source_ref: text("source_ref").notNull(),
+    policy_version: text("policy_version").notNull(),
+    decision: text("decision").notNull(),
+    reason_codes: text("reason_codes").notNull(),
+    hard_gate_passed: integer("hard_gate_passed").notNull(),
+    hard_gate_failure_codes: text("hard_gate_failure_codes").notNull(),
+    detected_format: text("detected_format"),
+    extracted_word_count: integer("extracted_word_count"),
+    detected_language: text("detected_language"),
+    language_confidence: real("language_confidence"),
+    canonical_sha256: text("canonical_sha256"),
+    extractor_version: text("extractor_version"),
+    // Deliberately not a references() FK — see this table's twin column
+    // comment in drizzle/0029_corpus_admission_decisions.sql for why
+    // (avoids a circular same-migration FK; the enforced direction lives on
+    // corpus_admission_content_store.decision_id below).
+    content_store_id: text("content_store_id"),
+    quality_score: real("quality_score"),
+    quality_model_version: text("quality_model_version"),
+    component_scores: text("component_scores"),
+    feature_vector: text("feature_vector"),
+    feature_vector_version: text("feature_vector_version"),
+    corpus_value_score: real("corpus_value_score"),
+    corpus_value_model_version: text("corpus_value_model_version"),
+    family_relation: text("family_relation"),
+    family_matched_source_ref: text("family_matched_source_ref"),
+    family_containment: real("family_containment"),
+    consent_metadata: text("consent_metadata"),
+    dry_run: integer("dry_run").notNull(),
+    created_at: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    index("idx_corpus_admission_decisions_source_ref").on(table.source_ref),
+    index("idx_corpus_admission_decisions_decision").on(table.decision),
+    index("idx_corpus_admission_decisions_run_id").on(table.run_id),
+  ],
+);
+
+// The ONLY place full extracted text may ever be persisted for a
+// corpus-admission candidate (requirement 2/4) — written only when
+// dry_run=false AND the decision is ACCEPT AND retention rights were
+// resolved; never during a dry run, never for a candidate whose
+// retention/consent hard gate failed. See lib/corpus-admission-gate.ts.
+export const corpus_admission_content_store = sqliteTable(
+  "corpus_admission_content_store",
+  {
+    id: text("id").primaryKey(),
+    decision_id: text("decision_id").notNull().references(() => corpus_admission_decisions.id, { onDelete: "cascade" }),
+    canonical_sha256: text("canonical_sha256").notNull(),
+    canonical_text: text("canonical_text").notNull(),
+    extractor_version: text("extractor_version"),
+    retention_basis: text("retention_basis").notNull(),
+    stored_at: text("stored_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("ux_corpus_admission_content_store_decision_id").on(table.decision_id),
+    index("idx_corpus_admission_content_store_canonical_sha256").on(table.canonical_sha256),
+  ],
+);
+
+// Corpus admission / quality gate (drizzle/0030): durable, cross-process
+// "first accepted sample wins" enforcement — fixes the confirmed
+// concurrency/idempotency defect where family resolution only ever checked
+// the real corpus tables (never written to by a real ACCEPT here). Holds
+// ONLY the derived fingerprint needed for staging dedup — canonical_sha256
+// (UNIQUE — the actual atomicity primitive; see the migration file's own
+// comment), word_count, and shingle hashes — never raw text.
+// lib/corpus-admission-gate.ts is the only writer, always inside a real
+// SQLite write transaction paired with a re-check immediately before
+// insert, not a JavaScript mutex.
+export const corpus_admission_accepted_representations = sqliteTable(
+  "corpus_admission_accepted_representations",
+  {
+    id: text("id").primaryKey(),
+    decision_id: text("decision_id").notNull().references(() => corpus_admission_decisions.id, { onDelete: "cascade" }),
+    canonical_sha256: text("canonical_sha256").notNull(),
+    word_count: integer("word_count").notNull(),
+    fingerprint_version: text("fingerprint_version").notNull(),
+    created_at: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("ux_corpus_admission_accepted_representations_canonical_sha256").on(table.canonical_sha256),
+    uniqueIndex("ux_corpus_admission_accepted_representations_decision_id").on(table.decision_id),
+  ],
+);
+
+export const corpus_admission_accepted_shingles = sqliteTable(
+  "corpus_admission_accepted_shingles",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    accepted_representation_id: text("accepted_representation_id").notNull().references(() => corpus_admission_accepted_representations.id, { onDelete: "cascade" }),
+    shingle_hash: text("shingle_hash").notNull(),
+    fingerprint_version: text("fingerprint_version").notNull(),
+    created_at: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("ux_corpus_admission_accepted_shingles_rep_version_hash").on(table.accepted_representation_id, table.fingerprint_version, table.shingle_hash),
+    index("idx_corpus_admission_accepted_shingles_hash").on(table.shingle_hash),
+  ],
+);
+
 // Export nothing else — Drizzle will consume these definitions for migrations.
 export {};
 

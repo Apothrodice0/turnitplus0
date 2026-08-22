@@ -12,15 +12,33 @@ import { canonicalSha256, createDocumentIdentity } from '../lib/document-identit
 import { indexDocumentSubmissionIntoCorpus } from '../lib/user-submission-corpus.ts';
 
 /**
- * Phase E8D: activation tests. E8A/E8B/E8C already had their own test
- * files proving the corpus/matcher/report-bridge work correctly in
- * isolation — this file is the one that proves the real, live save path
- * (app/api/reports/route.ts's POST handler) now actually calls
- * indexDocumentSubmissionIntoCorpus for signed-in submissions, with no
- * mocking (this repo's tests never mock — see every other tests/*.test.mjs
- * file), only real route calls + direct table/row inspection. Every fixture
- * below uses its own wholly distinct base paragraph (not a shared paragraph
- * with a trailing marker) to avoid the shingle cross-fixture pollution bug
+ * Phase E8D originally activated indexDocumentSubmissionIntoCorpus from the
+ * real, live save path (app/api/reports/route.ts's POST handler) for
+ * signed-in submissions — this file's tests were written to prove that.
+ *
+ * Corpus-admission hardening (requirement 3) REMOVES that direct call: a
+ * bare users.corpus_reuse_consented_at flag alone is no longer sufficient
+ * to index anything, because it never passed English-only, 3000-word,
+ * quality, retention, or "first accepted sample wins" family-duplicate
+ * screening. Automatic indexing now requires the corpus-admission gate
+ * (lib/corpus-admission-gate.ts), which no live route calls yet — wiring
+ * that up is explicitly future work. A direct, real consequence: the
+ * historical-submission-match feature (matchAgainstUserSubmissionCorpus)
+ * can no longer find anything for NEW content either, since nothing new is
+ * indexed via the live path any more — see the REPORT end-to-end test
+ * below, rewritten to assert exactly that.
+ *
+ * This file's tests are split by what they actually exercise: tests that
+ * called indexDocumentSubmissionIntoCorpus DIRECTLY (not through the route)
+ * are unaffected by this change and remain valid library-level tests of
+ * that still-unchanged function. Tests that relied on the LIVE ROUTE
+ * performing indexing as a side effect are rewritten below to assert the
+ * new reality — no representation/reference is ever created via the route
+ * any more, for any account, under any scenario. No mocking (this repo's
+ * tests never mock — see every other tests/*.test.mjs file), only real
+ * route calls + direct table/row inspection. Every fixture below uses its
+ * own wholly distinct base paragraph (not a shared paragraph with a
+ * trailing marker) to avoid the shingle cross-fixture pollution bug
  * documented in E7D/E8A/E8B/E8C's own reports.
  */
 
@@ -137,20 +155,6 @@ function stripComments(source) {
   return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
 }
 
-/** Returns the source slice of a brace-delimited block starting at the `{` found at or after fromIndex, matching braces so a literal `}` inside a template-literal interpolation (e.g. `${x}`) can't truncate it early. */
-function balancedBraceBlock(source, fromIndex) {
-  const openIndex = source.indexOf('{', fromIndex);
-  let depth = 0;
-  for (let i = openIndex; i < source.length; i++) {
-    if (source[i] === '{') depth++;
-    else if (source[i] === '}') {
-      depth--;
-      if (depth === 0) return source.slice(openIndex, i + 1);
-    }
-  }
-  throw new Error('balancedBraceBlock: no matching close brace found');
-}
-
 async function representationForText(client, text) {
   const hash = canonicalSha256(text);
   const result = await client.execute({
@@ -170,48 +174,32 @@ async function referencesForRepresentation(client, representationId) {
 
 // --- SCENARIOS A-C / ACTIVATION + DEDUPLICATION -------------------------------
 
-test('SCENARIO A-C / ACTIVATION + DEDUPLICATION: signed-in save indexes new content; repeat by same account adds a reference not a representation; a different account reuses the same representation', async () => {
+test('SCENARIO A-C / NO LIVE-ROUTE INDEXING (corpus-admission hardening): signed-in saves — new content, a same-account repeat, and a cross-account duplicate — never create a corpus representation or reference via the live route any more', async () => {
   const text = 'Marine biologists tracking a migratory pod of humpback whales along the continental shelf documented an unusual deviation in acoustic call patterns during this observation cycle, prompting a targeted hydrophone deployment across three subsequent field seasons with satellite telemetry data supporting every recorded surfacing event.';
 
   const { cookie: cookieA } = await signup('activation-a@example.test', 'activation-device-a');
   const { cookie: cookieB } = await signup('activation-b@example.test', 'activation-device-b');
 
-  // Scenario A: A uploads X -> a representation now exists, one reference.
   const { res: firstRes } = await postReport('activation-device-a', { cookie: cookieA, text });
-  assert.equal(firstRes.status, 200, 'save must succeed');
+  assert.equal(firstRes.status, 200, 'save must succeed even though indexing no longer happens');
 
   const client = createClient({ url: `file:${dbFile}` });
-  const representation = await representationForText(client, text);
-  assert.ok(representation, 'SCENARIO A: a corpus representation must exist after a signed-in save of new content');
-  let refs = await referencesForRepresentation(client, representation.id);
-  assert.equal(refs.length, 1, 'SCENARIO A: exactly one submission reference after the first indexed save');
+  assert.equal(await representationForText(client, text), null, 'SCENARIO A: a signed-in save of new content must NOT create a corpus representation via the live route any more');
 
-  // Scenario B: A uploads X again (a second, distinct submission event) ->
-  // same representation, a second reference — this is the corpus tracking
-  // submission events, not report rows, matching Scenario B's own framing.
   const { res: secondRes } = await postReport('activation-device-a', { cookie: cookieA, text, title: 'activation-again.pdf' });
   assert.equal(secondRes.status, 200);
-  const representationAfterRepeat = await representationForText(client, text);
-  assert.equal(representationAfterRepeat.id, representation.id, 'SCENARIO B: repeating the same content must not create a second representation');
-  refs = await referencesForRepresentation(client, representation.id);
-  assert.equal(refs.length, 2, 'SCENARIO B: a second submission reference must be recorded for the repeat');
-  assert.equal(new Set(refs.map((r) => r.document_identity_id)).size, 2, 'the two references must point at two distinct document identities');
+  assert.equal(await representationForText(client, text), null, 'SCENARIO B: a same-account repeat must still not create a representation');
 
-  // Scenario C: B (a different account) uploads X -> still the same
-  // representation, a third, cross-account reference.
   const { res: thirdRes } = await postReport('activation-device-b', { cookie: cookieB, text, title: 'activation-b.pdf' });
   assert.equal(thirdRes.status, 200);
-  const representationAfterCrossAccount = await representationForText(client, text);
-  assert.equal(representationAfterCrossAccount.id, representation.id, 'SCENARIO C: a different account submitting identical content must reuse the same representation, not create a new one');
-  refs = await referencesForRepresentation(client, representation.id);
-  assert.equal(refs.length, 3, 'SCENARIO C: a third submission reference must be recorded, this one cross-account');
+  assert.equal(await representationForText(client, text), null, 'SCENARIO C: a different account submitting identical content must still not create a representation');
 
   client.close();
 });
 
 // --- SCENARIO D / REVISIONS ----------------------------------------------------
 
-test('SCENARIO D / REVISIONS: a signed-in account uploading materially revised content creates a new, distinct representation', async () => {
+test('SCENARIO D / NO LIVE-ROUTE INDEXING: a signed-in account uploading original then revised content creates no corpus representation for either version', async () => {
   const original = 'Paleoclimatologists drilling a lakebed sediment core in a formerly glaciated valley identified alternating varve bands that preserve an annual record of meltwater discharge across the early Holocene transition.';
   const revised = original + ' A supplementary appendix revises the original discharge-rate table after a reviewer identified a transcription error affecting the third sampled interval.';
 
@@ -220,17 +208,14 @@ test('SCENARIO D / REVISIONS: a signed-in account uploading materially revised c
   await postReport('activation-device-d', { cookie, text: revised, title: 'activation-d-revised.pdf' });
 
   const client = createClient({ url: `file:${dbFile}` });
-  const originalRepresentation = await representationForText(client, original);
-  const revisedRepresentation = await representationForText(client, revised);
-  assert.ok(originalRepresentation, 'the original content must still have its own representation');
-  assert.ok(revisedRepresentation, 'the revised content must have been indexed into its own representation');
-  assert.notEqual(revisedRepresentation.id, originalRepresentation.id, 'REVISIONS: materially different content must not collapse into the original representation');
+  assert.equal(await representationForText(client, original), null, 'the original content must not have been indexed via the live route');
+  assert.equal(await representationForText(client, revised), null, 'the revised content must not have been indexed via the live route either');
   client.close();
 });
 
 // --- SCENARIO E / ANONYMOUS -----------------------------------------------------
 
-test('SCENARIO E / ACTIVATION (anonymous skip): an anonymous submission is never indexed into the corpus', async () => {
+test('SCENARIO E: an anonymous submission is never indexed into the corpus (true both before and after corpus-admission hardening — signed-in submissions are now equally never indexed via the live route, see SCENARIO A-C/D above)', async () => {
   const text = 'Glaciologists surveying an alpine ice core extracted a two hundred meter sample revealing distinct annual layering that correlates with regional temperature reconstructions spanning several centuries of overlapping instrumental and proxy record.';
 
   const { res } = await postReport('activation-device-anonymous', { text });
@@ -265,23 +250,15 @@ test('SCENARIO F / FAILURE (lib-level): indexDocumentSubmissionIntoCorpus really
   client.close();
 });
 
-test('SCENARIO F / FAILURE (structural): the route only ever calls indexDocumentSubmissionIntoCorpus inside its own non-rethrowing try/catch, inside the deferred callback', () => {
-  const source = fs.readFileSync(path.join(repo, 'app/api/reports/route.ts'), 'utf8');
-  const callIndex = source.indexOf('await indexDocumentSubmissionIntoCorpus(');
-  assert.ok(callIndex > -1, 'the route must call indexDocumentSubmissionIntoCorpus');
+// SCENARIO F / FAILURE (structural) — REMOVED. Its property (the route
+// calls indexDocumentSubmissionIntoCorpus inside a non-rethrowing
+// try/catch) is obsolete: the route no longer calls that function at all
+// (requirement 3). The superseding property — the route neither imports
+// nor mentions indexDocumentSubmissionIntoCorpus — is proven in
+// tests/user-submission-corpus-privacy.test.mjs's "C" and route-specific
+// tests, so it is not duplicated here.
 
-  const deferredOpen = source.indexOf('runAfterResponse(async () => {');
-  assert.ok(deferredOpen > -1);
-  assert.ok(callIndex > deferredOpen, 'indexing must happen inside the deferred runAfterResponse callback, not before it');
-
-  const tryIndex = source.lastIndexOf('try {', callIndex);
-  const catchIndex = source.indexOf('} catch (err) {', callIndex);
-  assert.ok(tryIndex > -1 && catchIndex > tryIndex && catchIndex < callIndex + 2000, 'the indexing call must be wrapped in its own try/catch');
-  const catchBody = balancedBraceBlock(source, catchIndex);
-  assert.doesNotMatch(catchBody, /\bthrow\b/, 'the indexing failure catch block must never rethrow — a failure here must not fail the save');
-});
-
-test('SCENARIO F / FAILURE (behavioral, concurrent real load): two concurrent first-time saves of identical brand-new content both succeed regardless of any internal indexing race', async () => {
+test('SCENARIO F / FAILURE (behavioral, concurrent real load): two concurrent first-time saves of identical brand-new content both succeed', async () => {
   const text = 'Seismologists deploying a temporary array of broadband sensors near a dormant caldera detected a swarm of low magnitude tremors clustered at unusually shallow depth over a single reporting week.';
   const { cookie: cookieA } = await signup('activation-race-a@example.test', 'activation-device-race-a');
   const { cookie: cookieB } = await signup('activation-race-b@example.test', 'activation-device-race-b');
@@ -315,31 +292,35 @@ test('SCENARIO G / IDEMPOTENCY: invoking indexDocumentSubmissionIntoCorpus twice
 
 // --- PERFORMANCE ------------------------------------------------------------
 
-test('PERFORMANCE (structural): indexDocumentSubmissionIntoCorpus is never awaited on the POST handler\'s synchronous critical path outside the deferred callback', () => {
-  const source = fs.readFileSync(path.join(repo, 'app/api/reports/route.ts'), 'utf8');
-  const deferredOpen = source.indexOf('await runAfterResponse(async () => {');
-  const deferredCloseMarker = source.indexOf('});', source.indexOf('deferredClient.close();'));
-  const callIndex = source.indexOf('await indexDocumentSubmissionIntoCorpus(');
-  assert.ok(deferredOpen > -1 && deferredCloseMarker > -1 && callIndex > -1);
-  assert.ok(callIndex > deferredOpen && callIndex < deferredCloseMarker, 'the only call site must sit inside the runAfterResponse callback body');
+// PERFORMANCE (structural) — REMOVED, same reason as SCENARIO F / FAILURE
+// (structural) above: the route no longer calls indexDocumentSubmissionIntoCorpus
+// at all, so "it's called exactly once, inside the deferred callback" is an
+// obsolete property. The superseding property (zero mentions anywhere in
+// the route) is proven in tests/user-submission-corpus-privacy.test.mjs.
 
-  const occurrences = source.split('indexDocumentSubmissionIntoCorpus(').length - 1;
-  assert.equal(occurrences, 1, 'indexDocumentSubmissionIntoCorpus must be called exactly once in the route, from inside the deferred callback');
-});
-
-test('PERFORMANCE (smoke): a signed-in save with indexing completes within a generous bound', async () => {
+test('PERFORMANCE (smoke): a signed-in save completes within a generous bound', async () => {
   const text = 'Hydrologists monitoring a regulated river reach below a mid-sized dam recorded a measurable shift in downstream sediment transport following a scheduled high-flow release event this operating year.';
   const { cookie } = await signup('activation-perf@example.test', 'activation-device-perf');
   const startedAt = Date.now();
   const { res } = await postReport('activation-device-perf', { cookie, text });
   const elapsedMs = Date.now() - startedAt;
   assert.equal(res.status, 200);
-  assert.ok(elapsedMs < 5000, `save (including inline-fallback indexing under the test harness) took ${elapsedMs}ms, expected under 5000ms`);
+  assert.ok(elapsedMs < 5000, `save took ${elapsedMs}ms, expected under 5000ms`);
 });
 
 // --- REPORT (end-to-end) ---------------------------------------------------
 
-test('REPORT end-to-end: B sees PRIOR_SUBMISSION after A and B both upload the same content; A sees SELF on repeat; verified score is unaffected throughout', async () => {
+test('REPORT end-to-end: corpus-admission hardening means B no longer sees a historical match after A and B both upload the same content, since nothing is indexed via the live route any more; verified score is unaffected', async () => {
+  // Before corpus-admission hardening this scenario asserted B saw a
+  // PRIOR_SUBMISSION match against A's already-indexed content, and A
+  // repeating its own upload saw SELF. Both outcomes required
+  // indexDocumentSubmissionIntoCorpus to have actually run from the live
+  // route, which requirement 3 removes — so NO_HISTORICAL_MATCH is now the
+  // only possible outcome for both, until a future phase wires live
+  // uploads through lib/corpus-admission-gate.ts. What's still verified
+  // here: saves succeed, scores are unaffected, and no cross-account
+  // identity ever leaks into the response — the same privacy guarantees
+  // this test always covered, just without a match to find.
   const text = 'Entomologists cataloguing a previously undescribed beetle population in a lowland rainforest reserve recorded distinctive elytra patterning consistent with a proposed new subspecies pending further genomic barcoding confirmation across multiple collection sites.';
 
   const { cookie: cookieA } = await signup('activation-report-a@example.test', 'activation-device-report-a');
@@ -351,10 +332,8 @@ test('REPORT end-to-end: B sees PRIOR_SUBMISSION after A and B both upload the s
   const bGet = await getReport(bId, { cookie: cookieB });
   assert.equal(bGet.status, 200);
   const bBody = await bGet.json();
-  assert.equal(bBody.payload.historicalSubmissionMatch?.status, 'MATCHED', 'B\'s report must show a historical match now that A already indexed the same content');
-  const bMatch = bBody.payload.historicalSubmissionMatch.matches[0];
-  assert.equal(bMatch.relationshipType, 'PRIOR_SUBMISSION', 'B is not the same account as the prior uploader, so this must be PRIOR_SUBMISSION, not SELF');
-  assert.equal(bBody.payload.score, 21, 'verified score must remain exactly what B saved, unaffected by the historical match');
+  assert.equal(bBody.payload.historicalSubmissionMatch?.status, 'NO_HISTORICAL_MATCH', 'B must see no historical match now that live-route indexing no longer runs for A\'s upload');
+  assert.equal(bBody.payload.score, 21, 'verified score must remain exactly what B saved');
   assert.equal(bBody.payload.archiveScore, 11, 'archive overlap must remain exactly what B saved');
 
   const bBodyText = JSON.stringify(bBody);
@@ -364,9 +343,8 @@ test('REPORT end-to-end: B sees PRIOR_SUBMISSION after A and B both upload the s
   const { id: aSecondId } = await postReport('activation-device-report-a', { cookie: cookieA, text, score: 15, archiveScore: 8, title: 'a-repeat.pdf' });
   const aGet = await getReport(aSecondId, { cookie: cookieA });
   const aBody = await aGet.json();
-  assert.equal(aBody.payload.historicalSubmissionMatch?.status, 'MATCHED');
-  assert.equal(aBody.payload.historicalSubmissionMatch.matches[0].relationshipType, 'SELF', 'A repeating its own prior upload must be classified SELF');
-  assert.equal(aBody.payload.score, 15, 'verified score must remain exactly what was saved even for a SELF match');
+  assert.equal(aBody.payload.historicalSubmissionMatch?.status, 'NO_HISTORICAL_MATCH', 'A repeating its own prior upload must also see no historical match now');
+  assert.equal(aBody.payload.score, 15, 'verified score must remain exactly what was saved');
 
   void aFirstId;
 });

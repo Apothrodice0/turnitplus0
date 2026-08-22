@@ -176,10 +176,14 @@ test('A/B: one upload saved twice (simulating the Wikipedia-enrichment re-save) 
   const identityCount = await countIdentities(client, accountId, text);
   assert.equal(identityCount, 1, 'B: three saves of the same report id must still produce exactly one document identity');
 
+  // Corpus-admission hardening (requirement 3): the live route no longer
+  // calls indexDocumentSubmissionIntoCorpus at all, so no representation is
+  // ever created any more — document-identity dedup (above) is unaffected
+  // since that capture is unrelated to corpus indexing.
   const representationId = await representationForText(client, text);
-  assert.ok(representationId);
+  assert.equal(representationId, null, 'A: no corpus representation is created via the live route any more, regardless of how many times the same report id is saved');
   const referenceCount = await countReferences(client, representationId);
-  assert.equal(referenceCount, 1, 'A: three saves of the same report id must still produce exactly one corpus submission reference');
+  assert.equal(referenceCount, 0);
 
   // Only one saved_reports row exists — the upserts updated it, they never appended.
   const savedReportsCount = await client.execute({ sql: 'SELECT COUNT(*) AS cnt FROM saved_reports WHERE id = ?', args: [reportId] });
@@ -211,13 +215,15 @@ test('C/E: a genuinely new upload (new report id) of the same content produces a
   await postReport('e8f-device-c', { cookie, id: secondReportId, title: 'e8f-repeat.pdf', text, extraPayload: { webCheck: { phrasesMatched: 0 } } });
 
   assert.equal(await countIdentities(client, accountId, text), 2, 'a genuine new upload must still create its own new identity');
+  // Corpus-admission hardening (requirement 3): no representation is ever
+  // created via the live route any more.
   const representationId = await representationForText(client, text);
-  assert.equal(await countReferences(client, representationId), 2, 'a genuine new upload must still create its own new reference, on the same reusable representation');
+  assert.equal(representationId, null);
+  assert.equal(await countReferences(client, representationId), 0);
 
   const secondGet = await getReport(secondReportId, { cookie });
   const secondBody = await secondGet.json();
-  assert.equal(secondBody.payload.historicalSubmissionMatch?.status, 'MATCHED');
-  assert.equal(secondBody.payload.historicalSubmissionMatch.matches[0].relationshipType, 'SELF', 'a genuine second upload of the same content must still classify as SELF');
+  assert.equal(secondBody.payload.historicalSubmissionMatch?.status, 'NO_HISTORICAL_MATCH', 'no historical match is possible any more since nothing is indexed via the live route');
 
   client.close();
 });
@@ -239,14 +245,16 @@ test('D: a different account\'s genuinely new upload of the same content produce
   await postReport('e8f-device-d-b', { cookie: cookieB, id: bReportId, title: 'e8f-cross.pdf', text, extraPayload: { webCheck: { phrasesMatched: 0 } } });
 
   const client = createClient({ url: `file:${dbFile}` });
+  // Corpus-admission hardening (requirement 3): no representation is ever
+  // created via the live route any more, for either account.
   const representationId = await representationForText(client, text);
-  assert.equal(await countReferences(client, representationId), 2, 'exactly one reference from A and one from B, no double-save duplicates from either');
+  assert.equal(representationId, null);
+  assert.equal(await countReferences(client, representationId), 0);
   client.close();
 
   const bGet = await getReport(bReportId, { cookie: cookieB });
   const bBody = await bGet.json();
-  assert.equal(bBody.payload.historicalSubmissionMatch?.status, 'MATCHED');
-  assert.equal(bBody.payload.historicalSubmissionMatch.matches[0].relationshipType, 'PRIOR_SUBMISSION');
+  assert.equal(bBody.payload.historicalSubmissionMatch?.status, 'NO_HISTORICAL_MATCH', 'no historical match is possible any more since nothing is indexed via the live route');
 
   const serialized = JSON.stringify(bBody);
   assert.doesNotMatch(serialized, /e8f-d-a@example\.test/, 'account A\'s email must never appear in B\'s report response');

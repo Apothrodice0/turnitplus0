@@ -12,16 +12,28 @@ import * as meRoute from '../app/api/auth/me/route.ts';
 import { resetRateForTest, resetAuthRateForTest } from '../lib/rate-limit.js';
 
 /**
- * Privacy hardening (production audit fix, item 2): proves the explicit
- * opt-in consent gate on indexDocumentSubmissionIntoCorpus — a signed-in
- * user's uploads are never added to the cross-account matching corpus
- * (corpus_document_representations/corpus_submission_references) unless
- * their account has explicitly consented (users.corpus_reuse_consented_at
- * IS NOT NULL). The underlying matching mechanism itself
- * (indexDocumentSubmissionIntoCorpus, findCandidateCorpusRepresentations,
- * matchAgainstUserSubmissionCorpus) is not modified — only whether
- * app/api/reports/route.ts ever calls the entry point. Real route calls
- * only, no mocking, matching this repo's existing test convention.
+ * Privacy hardening (production audit fix, item 2): originally proved the
+ * explicit opt-in consent gate on indexDocumentSubmissionIntoCorpus — a
+ * signed-in user's uploads were never added to the cross-account matching
+ * corpus unless their account had explicitly consented
+ * (users.corpus_reuse_consented_at IS NOT NULL), and WERE added once they
+ * did.
+ *
+ * Corpus-admission hardening (requirement 3) changes the second half of
+ * that story: app/api/reports/route.ts no longer calls
+ * indexDocumentSubmissionIntoCorpus at all, for any account, consenting or
+ * not — consent is a necessary but no longer sufficient precondition
+ * (automatic indexing now additionally requires the corpus-admission gate,
+ * which no live route wires up yet). So this file's tests now prove: (a)
+ * consent's own state machine (grant/revoke/PATCH semantics,
+ * users.corpus_reuse_consented_at) still works exactly as before — that
+ * primitive is untouched — and (b) no consent state, or transition between
+ * states, ever causes a live-route corpus write any more. The underlying
+ * matching mechanism itself (indexDocumentSubmissionIntoCorpus,
+ * findCandidateCorpusRepresentations, matchAgainstUserSubmissionCorpus) is
+ * still not modified — only that the live route never reaches it. Real
+ * route calls only, no mocking, matching this repo's existing test
+ * convention.
  */
 
 const repo = path.resolve('.');
@@ -183,9 +195,9 @@ test('GATE: a signed-in save with NO consent creates a document identity but nev
   assert.equal(Number(identityCount.rows[0].cnt), 1, 'the identity row itself (Phase A/B, unaffected by consent) must still be captured');
 });
 
-// --- GATE: consent granted -> indexing resumes exactly as before -----------
+// --- GATE: consent granted -> still no live-route indexing (requirement 3) ---
 
-test('GATE: granting consent via PATCH /api/auth/me causes a SUBSEQUENT save to index into the corpus', async () => {
+test('GATE: granting consent via PATCH /api/auth/me does NOT cause a subsequent save to index into the corpus any more — consent alone is no longer sufficient', async () => {
   const text = 'Volcanologists monitoring a persistently degassing stratovolcano deployed a network of low-cost gas sensors to track sulfur dioxide flux variability across the eruptive cycle.';
   const email = 'consent-grant@example.test';
   const { cookie } = await signup(email, 'consent-device-grant');
@@ -195,24 +207,22 @@ test('GATE: granting consent via PATCH /api/auth/me causes a SUBSEQUENT save to 
 
   const patchResult = await patchMe(cookie, { username: 'consent-grant', email, corpusReuseConsent: true });
   assert.equal(patchResult.res.status, 200);
-  assert.equal(patchResult.body.user.corpusReuseConsent, true, 'PATCH response must reflect the newly granted consent');
+  assert.equal(patchResult.body.user.corpusReuseConsent, true, 'PATCH response must still reflect the newly granted consent — the consent primitive itself is untouched');
 
   const userRow = await setupClient.execute({ sql: 'SELECT corpus_reuse_consented_at FROM users WHERE email = ?', args: [email] });
-  assert.ok(userRow.rows[0].corpus_reuse_consented_at, 'the DB column itself must be set to a non-null timestamp');
+  assert.ok(userRow.rows[0].corpus_reuse_consented_at, 'the DB column itself must still be set to a non-null timestamp');
 
-  // A NEW report (distinct id, since indexing is gated on isFirstSaveOfThisReport per report id) with the SAME text now indexes.
+  // A NEW report (distinct id) with the SAME text, saved AFTER consent was
+  // granted — still must not index, since the live route no longer calls
+  // indexDocumentSubmissionIntoCorpus regardless of consent state.
   const after = await postReport('consent-device-grant', { cookie, text, title: 'consent-grant-2.pdf' });
   assert.equal(after.res.status, 200);
-  const representationId = await representationForText(text);
-  assert.ok(representationId, 'a corpus representation must now exist after consent was granted');
-
-  const refs = await setupClient.execute({ sql: 'SELECT document_identity_id FROM corpus_submission_references WHERE representation_id = ?', args: [representationId] });
-  assert.equal(refs.rows.length, 1, 'exactly the post-consent report should be indexed, not the earlier pre-consent one');
+  assert.equal(await representationForText(text), null, 'no corpus representation may exist even after consent was granted — automatic indexing now requires the corpus-admission gate, which the live route does not call');
 });
 
-// --- GATE: revoking stops future indexing but does not retroactively un-index ---
+// --- GATE: consent transitions never cause live-route indexing (requirement 3) ---
 
-test('GATE: revoking consent stops future indexing but does not remove already-indexed data', async () => {
+test('GATE: neither granting nor revoking consent ever causes live-route indexing any more — the consent state machine itself (grant/revoke/DB column) is otherwise unaffected', async () => {
   const email = 'consent-revoke@example.test';
   const firstText = 'Soil scientists comparing tillage regimes across a decade-long field trial measured consistently higher aggregate stability under the no-till treatment plots.';
   const secondText = 'Limnologists sampling a dimictic lake through two full seasonal turnover cycles documented a persistent hypolimnetic oxygen deficit unrelated to nutrient loading.';
@@ -221,19 +231,15 @@ test('GATE: revoking consent stops future indexing but does not remove already-i
   await patchMe(cookie, { username: 'consent-revoke', email, corpusReuseConsent: true });
 
   await postReport('consent-device-revoke', { cookie, text: firstText });
-  const firstRepresentationId = await representationForText(firstText);
-  assert.ok(firstRepresentationId, 'must be indexed while consent is on');
+  assert.equal(await representationForText(firstText), null, 'a save made while consent is on must not be indexed via the live route any more');
 
   const revoked = await patchMe(cookie, { username: 'consent-revoke', email, corpusReuseConsent: false });
   assert.equal(revoked.body.user.corpusReuseConsent, false);
   const userRow = await setupClient.execute({ sql: 'SELECT corpus_reuse_consented_at FROM users WHERE email = ?', args: [email] });
-  assert.equal(userRow.rows[0].corpus_reuse_consented_at, null, 'revoking must clear the DB column back to NULL');
+  assert.equal(userRow.rows[0].corpus_reuse_consented_at, null, 'revoking must still clear the DB column back to NULL — the consent primitive itself is untouched');
 
   await postReport('consent-device-revoke', { cookie, text: secondText, title: 'consent-revoke-2.pdf' });
-  assert.equal(await representationForText(secondText), null, 'a save made after revocation must not be indexed');
-
-  // The FIRST text's representation, indexed while consent was on, is untouched by revocation.
-  assert.ok(await representationForText(firstText), 'revocation must not retroactively remove text indexed while consent was granted');
+  assert.equal(await representationForText(secondText), null, 'a save made after revocation must not be indexed either');
 });
 
 // --- PATCH omitting the field leaves existing state untouched --------------
@@ -253,7 +259,7 @@ test('PATCH /api/auth/me without corpusReuseConsent leaves existing consent stat
 
 // --- CROSS-ACCOUNT VISIBILITY: the real, user-facing effect of the gate ----
 
-test('CROSS-ACCOUNT VISIBILITY: B never sees A as a PRIOR_SUBMISSION while A has not consented, and does once A consents', async () => {
+test('CROSS-ACCOUNT VISIBILITY: B never sees A as a PRIOR_SUBMISSION, whether or not A has consented — live-route indexing no longer happens either way (requirement 3)', async () => {
   const text = 'Aerospace engineers wind-tunnel testing a scaled winglet retrofit measured a modest but statistically significant reduction in induced drag across the tested angle-of-attack range.';
 
   const { cookie: cookieA } = await signup('consent-vis-a@example.test', 'consent-device-vis-a');
@@ -272,21 +278,20 @@ test('CROSS-ACCOUNT VISIBILITY: B never sees A as a PRIOR_SUBMISSION while A has
     'B must not see a match against A while A has not consented to cross-account matching',
   );
 
-  // Now A grants consent and uploads again (a new report, same content).
+  // Now A grants consent and uploads again (a new report, same content) —
+  // this no longer causes indexing at all (requirement 3), so B still must
+  // never see a match, unlike before corpus-admission hardening.
   await patchMe(cookieA, { username: 'consent-vis-a', email: 'consent-vis-a@example.test', corpusReuseConsent: true });
   await postReport('consent-device-vis-a', { cookie: cookieA, text, title: 'consent-vis-a-2.pdf' });
 
-  // B's SECOND upload of the same content should now surface a PRIOR_SUBMISSION.
   const { id: bReportId2 } = await postReport('consent-device-vis-b', { cookie: cookieB, text, title: 'consent-vis-b-2.pdf' });
   const bGetAfter = await getReport(bReportId2, { cookie: cookieB });
   const bBodyAfter = await bGetAfter.json();
   assert.equal(
     bBodyAfter.payload.historicalSubmissionMatch?.status,
-    'MATCHED',
-    'once A consents and re-indexes, B must be able to see the PRIOR_SUBMISSION match — the underlying matcher is unchanged, only reachability changed',
+    'NO_HISTORICAL_MATCH',
+    'B must still see no match even after A consents — granting consent no longer causes live-route indexing at all',
   );
-  const matchTypes = bBodyAfter.payload.historicalSubmissionMatch.matches.map((m) => m.relationshipType);
-  assert.ok(matchTypes.includes('PRIOR_SUBMISSION'), 'the surfaced relationship must be PRIOR_SUBMISSION, exactly as the pre-existing (unmodified) matcher already classifies it');
 });
 
 // --- ANONYMOUS: never eligible for consent, always skipped -----------------

@@ -9,6 +9,7 @@ import * as reportIdRoute from '../app/api/reports/[id]/route.ts';
 import * as signupRoute from '../app/api/auth/signup/route.ts';
 import { resetRateForTest, resetAuthRateForTest } from '../lib/rate-limit.js';
 import { canonicalSha256 } from '../lib/document-identity.ts';
+import { indexDocumentSubmissionIntoCorpus } from '../lib/user-submission-corpus.ts';
 
 /**
  * Privacy hardening (production audit fix, item 1): proves DELETE
@@ -123,6 +124,26 @@ async function documentIdentityIdForReport(deviceKey, id) {
   return result.rows[0]?.document_identity_id ? String(result.rows[0].document_identity_id) : null;
 }
 
+/**
+ * Corpus-admission hardening (requirement 3): the live route no longer
+ * calls indexDocumentSubmissionIntoCorpus itself, so a report saved via
+ * postReport() no longer gets a corpus representation "for free" the way
+ * these cascade-deletion tests originally relied on. The cascade-delete
+ * property under test here (lib/report-deletion.ts's cleanup of
+ * corpus_submission_references/corpus_document_representations) is
+ * orthogonal to HOW a report came to be indexed — it must hold for ANY
+ * indexed report, however that indexing happened. This helper calls the
+ * real, unmodified indexDocumentSubmissionIntoCorpus directly against a
+ * report's own (already-captured, route-created) document_identity_id, so
+ * these tests keep exercising the real cascade-delete code path against
+ * real corpus rows, rather than silently losing coverage of it.
+ */
+async function seedCorpusIndexForReport(deviceKey, reportId, text) {
+  const documentIdentityId = await documentIdentityIdForReport(deviceKey, reportId);
+  if (!documentIdentityId) throw new Error(`seedCorpusIndexForReport: no document_identity_id captured yet for ${deviceKey}/${reportId}`);
+  await indexDocumentSubmissionIntoCorpus(setupClient, { documentIdentityId, rawText: text });
+}
+
 async function rowExists(table, column, value) {
   const result = await setupClient.execute({ sql: `SELECT 1 FROM ${table} WHERE ${column} = ?`, args: [value] });
   return result.rows.length > 0;
@@ -163,8 +184,12 @@ test('CASCADE: deleting a report removes its document_identities, document_ident
   assert.ok(identityId, 'sanity: identity must exist before deletion');
   assert.ok(await rowExists('document_identities', 'id', identityId), 'sanity: identity row present before delete');
   assert.ok(await countRows('document_identity_shingles', 'document_identity_id', identityId) > 0, 'sanity: shingles present before delete');
+  // Corpus-admission hardening: the live route no longer indexes on its
+  // own — seed it directly (see seedCorpusIndexForReport's own comment)
+  // so this test still exercises the real cascade-delete path.
+  await seedCorpusIndexForReport('deletion-device-cascade-a', reportId, text);
   const representationId = await representationForText(text);
-  assert.ok(representationId, 'sanity: representation present before delete (consent was granted)');
+  assert.ok(representationId, 'sanity: representation present before delete');
 
   const del = await deleteReport(reportId, { cookie });
   assert.equal(del.status, 200);
@@ -189,6 +214,12 @@ test('SHARED: deleting one of two reports sharing identical (consented) text pre
 
   const { id: reportA } = await postReport('deletion-device-shared-a', { cookie: cookieA, text });
   const { id: reportB } = await postReport('deletion-device-shared-b', { cookie: cookieB, text, title: 'deletion-shared-b.pdf' });
+
+  // Corpus-admission hardening: seed both accounts' indexing directly (see
+  // seedCorpusIndexForReport's own comment) — the live route no longer
+  // does this on its own.
+  await seedCorpusIndexForReport('deletion-device-shared-a', reportA, text);
+  await seedCorpusIndexForReport('deletion-device-shared-b', reportB, text);
 
   const representationId = await representationForText(text);
   assert.ok(representationId, 'sanity: one shared representation must exist');
