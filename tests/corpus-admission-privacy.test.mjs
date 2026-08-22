@@ -47,8 +47,16 @@ const EXPECTED_APP_FILES_USING_THE_DOOR = [
   "app/api/auth/me/route.ts",
   "app/api/internal/corpus-admission-sweep/route.ts",
 ];
+// The admin-only corpus dashboard (below) is a second, deliberately separate
+// door into a different slice of the corpus-admission-* namespace — its own
+// read/mutate layer over decisions/jobs/accepted-representations/audit-log,
+// never the report-integration flow. Both doors are closed allowlists in
+// their own right; this generic "no direct import of the raw gate or its
+// siblings" check must recognize both by name rather than treat the admin
+// door as a bypass of the report-integration one.
+const ADMIN_DASHBOARD_DOOR_MODULES = ["corpus-admission-admin-repo", "corpus-admission-admin-actions"];
 
-test("no app/ file imports lib/corpus-admission-gate.ts or any of its pure sibling modules directly — only lib/corpus-admission-report-integration.ts is an allowed door", () => {
+test("no app/ file imports lib/corpus-admission-gate.ts or any of its pure sibling modules directly — only lib/corpus-admission-report-integration.ts and the admin-dashboard repo/actions modules are allowed doors", () => {
   const appDir = path.join(repoRoot, "app");
   const offenders = [];
   function walk(dir) {
@@ -58,13 +66,15 @@ test("no app/ file imports lib/corpus-admission-gate.ts or any of its pure sibli
       else if (/\.(ts|tsx)$/.test(entry.name)) {
         const imports = importLines(fs.readFileSync(full, "utf8"));
         const corpusAdmissionImportLines = imports.split("\n").filter((l) => /corpus-admission-/.test(l));
-        const bypassesTheDoor = corpusAdmissionImportLines.some((l) => !l.includes(ALLOWED_CORPUS_ADMISSION_DOOR));
+        const bypassesTheDoor = corpusAdmissionImportLines.some(
+          (l) => !l.includes(ALLOWED_CORPUS_ADMISSION_DOOR) && !ADMIN_DASHBOARD_DOOR_MODULES.some((m) => l.includes(m)),
+        );
         if (bypassesTheDoor) offenders.push(path.relative(repoRoot, full).split(path.sep).join("/"));
       }
     }
   }
   walk(appDir);
-  assert.deepEqual(offenders, [], `these app/ files import a corpus-admission-* module other than ${ALLOWED_CORPUS_ADMISSION_DOOR}: ${offenders.join(", ")}`);
+  assert.deepEqual(offenders, [], `these app/ files import a corpus-admission-* module other than the two allowed doors: ${offenders.join(", ")}`);
 });
 
 test("exactly the expected app/ files use the corpus-admission-report-integration door — no unreviewed new caller", () => {
@@ -130,5 +140,104 @@ test("lib/corpus-admission-policy.ts and lib/corpus-hard-gates.ts stay free of @
   for (const file of ["lib/corpus-admission-policy.ts", "lib/corpus-hard-gates.ts", "lib/corpus-admission-family.ts"]) {
     const source = fs.readFileSync(path.join(repoRoot, file), "utf8");
     assert.doesNotMatch(importLines(source), /@libsql\/client/, `${file} must stay I/O-free`);
+  }
+});
+
+// ============================================================================
+// Admin-only corpus dashboard (app/admin/corpus/*, app/api/admin/corpus/*):
+// zero user-facing exposure. lib/corpus-admission-admin-repo.ts and
+// lib/corpus-admission-admin-actions.ts perform NO authorization check of
+// their own (see both modules' own header comments) — every caller MUST be
+// independently admin-gated, so the set of files allowed to import them at
+// all must be closed and explicit, exactly like the report-integration
+// door above. A normal (non-admin) user must never be able to reach these
+// modules through any import path, and the two admin pages'
+// generateMetadata() must never leak a page-identifying title before the
+// same admin check the page body itself performs — the exact historical bug
+// already fixed once for lib/developer-gate.ts (see lib/admin-gate.ts's own
+// comment).
+// ============================================================================
+
+const ADMIN_DASHBOARD_MODULES = ["corpus-admission-admin-repo", "corpus-admission-admin-actions"];
+// The two app/admin/corpus/*.tsx pages never import these modules directly —
+// they render the "use client" components (components/admin/corpus-search.tsx,
+// components/admin/corpus-detail.tsx), which fetch these 5 API routes over
+// HTTP instead. Only the routes touch the repo/actions modules themselves.
+const EXPECTED_ADMIN_DASHBOARD_IMPORTERS = [
+  "app/api/admin/corpus/route.ts",
+  "app/api/admin/corpus/[id]/route.ts",
+  "app/api/admin/corpus/[id]/preview/route.ts",
+  "app/api/admin/corpus/[id]/deactivate/route.ts",
+  "app/api/admin/corpus/[id]/reactivate/route.ts",
+];
+
+function walkSourceFiles(rootDir, visit) {
+  function walk(dir) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (/\.(ts|tsx)$/.test(entry.name)) visit(full);
+    }
+  }
+  walk(rootDir);
+}
+
+test("only the expected admin-dashboard files import lib/corpus-admission-admin-repo.ts or lib/corpus-admission-admin-actions.ts — no unreviewed new caller, and no bypass from outside app/admin or app/api/admin/corpus", () => {
+  const importers = [];
+  for (const rootDir of [path.join(repoRoot, "app"), path.join(repoRoot, "components"), path.join(repoRoot, "lib")]) {
+    walkSourceFiles(rootDir, (full) => {
+      const imports = importLines(fs.readFileSync(full, "utf8"));
+      if (ADMIN_DASHBOARD_MODULES.some((m) => imports.includes(m))) {
+        importers.push(path.relative(repoRoot, full).split(path.sep).join("/"));
+      }
+    });
+  }
+  assert.deepEqual(importers.sort(), [...EXPECTED_ADMIN_DASHBOARD_IMPORTERS].sort());
+});
+
+test("no file outside app/admin/* or app/api/admin/corpus/* imports lib/admin-gate.ts — the admin-gate check itself is never reachable from ordinary user-facing pages", () => {
+  const offenders = [];
+  for (const rootDir of [path.join(repoRoot, "app"), path.join(repoRoot, "components")]) {
+    walkSourceFiles(rootDir, (full) => {
+      const relative = path.relative(repoRoot, full).split(path.sep).join("/");
+      if (relative.startsWith("app/admin/") || relative.startsWith("app/api/admin/corpus/")) return;
+      const imports = importLines(fs.readFileSync(full, "utf8"));
+      if (imports.includes("admin-gate")) offenders.push(relative);
+    });
+  }
+  assert.deepEqual(offenders, [], `these files import lib/admin-gate.ts from outside the admin surface: ${offenders.join(", ")}`);
+});
+
+test("both app/admin/corpus pages' generateMetadata() calls loadAdminGate() and returns {} before ever constructing a page-identifying title — no title leak to a non-admin", () => {
+  for (const relativePath of ["app/admin/corpus/page.tsx", "app/admin/corpus/[id]/page.tsx"]) {
+    const source = fs.readFileSync(path.join(repoRoot, relativePath), "utf8");
+    const metadataFnMatch = source.match(/export async function generateMetadata\([^)]*\)[^{]*\{([\s\S]*?)\n\}/);
+    assert.ok(metadataFnMatch, `expected to find generateMetadata() in ${relativePath}`);
+    const body = metadataFnMatch[1];
+
+    const gateCallIndex = body.search(/loadAdminGate\(\)/);
+    assert.notEqual(gateCallIndex, -1, `${relativePath}'s generateMetadata() must call loadAdminGate()`);
+
+    const earlyReturnMatch = body.match(/if\s*\(\s*!\s*\w+\s*\)\s*return\s*\{\s*\}\s*;/);
+    assert.ok(earlyReturnMatch, `${relativePath}'s generateMetadata() must return {} (no title) when loadAdminGate() resolves null`);
+    assert.ok(earlyReturnMatch.index > gateCallIndex, `${relativePath}'s null-check-and-empty-return must come AFTER the loadAdminGate() call, not before`);
+
+    const titleIndex = body.search(/title\s*:/);
+    assert.ok(titleIndex === -1 || titleIndex > earlyReturnMatch.index, `${relativePath} must never construct a title before the admin check's early return`);
+  }
+});
+
+test("both app/admin/corpus pages' default export calls loadAdminGate() and calls notFound() (never returns page content) when it resolves null", () => {
+  for (const relativePath of ["app/admin/corpus/page.tsx", "app/admin/corpus/[id]/page.tsx"]) {
+    const source = fs.readFileSync(path.join(repoRoot, relativePath), "utf8");
+    assert.match(importLines(source), /notFound/, `${relativePath} must import notFound from next/navigation`);
+    const bodyMatch = source.match(/export default async function \w+\([^)]*\)[^{]*\{([\s\S]*)\}\s*$/);
+    assert.ok(bodyMatch, `expected to find the default-exported page component in ${relativePath}`);
+    const body = bodyMatch[1];
+    const gateCallIndex = body.search(/loadAdminGate\(\)/);
+    assert.notEqual(gateCallIndex, -1, `${relativePath}'s page body must call loadAdminGate()`);
+    const notFoundMatch = body.match(/if\s*\(\s*!\s*\w+\s*\)\s*notFound\(\)\s*;/);
+    assert.ok(notFoundMatch, `${relativePath}'s page body must call notFound() when loadAdminGate() resolves null`);
+    assert.ok(notFoundMatch.index > gateCallIndex, `${relativePath}'s notFound() call must come AFTER the loadAdminGate() call`);
   }
 });

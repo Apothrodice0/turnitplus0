@@ -1074,6 +1074,26 @@ export const corpus_admission_report_jobs = sqliteTable(
   ],
 );
 
+// Audit trail for the admin-only corpus-admission dashboard (drizzle/0033)
+// — see that migration file's own header comment for why there is
+// deliberately no FOREIGN KEY here.
+export const corpus_admission_admin_audit_log = sqliteTable(
+  "corpus_admission_admin_audit_log",
+  {
+    id: text("id").primaryKey(),
+    admin_user_id: text("admin_user_id").notNull(),
+    action: text("action").notNull(),
+    decision_id: text("decision_id").notNull(),
+    accepted_representation_id: text("accepted_representation_id"),
+    reason: text("reason"),
+    created_at: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    index("idx_corpus_admission_admin_audit_log_decision_id").on(table.decision_id),
+    index("idx_corpus_admission_admin_audit_log_admin_user_id").on(table.admin_user_id),
+  ],
+);
+
 // Export nothing else — Drizzle will consume these definitions for migrations.
 export {};
 

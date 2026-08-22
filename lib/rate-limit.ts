@@ -258,3 +258,24 @@ export async function checkReadRate(clientId: string): Promise<RateCheckResult> 
 export async function resetReadRateForTest(clientId: string): Promise<void> {
   await resetBucketForTest(`read:${clientId}`);
 }
+
+// Dedicated bucket for /api/admin/corpus/* (the corpus-admission admin
+// dashboard) — every route there is already admin-gated (getAdminSessionUser,
+// 404 for anyone else), so this is not abuse-prevention for the general
+// public the way checkAuthRate is; it bounds a compromised/misbehaving admin
+// session or a runaway dashboard client, sized generously enough that real
+// review work (browsing pages, opening several detail views, occasionally
+// deactivating/reactivating or revealing a preview) never trips it. Kept as
+// its own bucket rather than sharing checkReadRate/checkRate — those are
+// sized and reasoned about for ordinary-user traffic patterns, a
+// semantically different population from admin oversight traffic.
+const ADMIN_MAX_TOKENS = 30;
+const ADMIN_INTERVAL_MS = 60_000;
+
+export async function checkAdminRate(clientId: string): Promise<RateCheckResult> {
+  return checkBucket(`admin:${clientId}`, ADMIN_MAX_TOKENS, ADMIN_INTERVAL_MS);
+}
+
+export async function resetAdminRateForTest(clientId: string): Promise<void> {
+  await resetBucketForTest(`admin:${clientId}`);
+}
