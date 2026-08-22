@@ -28,12 +28,17 @@ export function ReportDetailShell({
   initialReport,
   requiresClientResolution,
   mode,
+  backRoom,
 }: {
   id: string;
   initialReport: SimilarityReport | null;
   requiresClientResolution: boolean;
   mode: ReportMode;
+  /** The room this report was opened from (see app/reports/[id]/page.tsx's own comment) — null when opened any other way (the anonymous flat list, a bookmark, etc.), in which case the back button falls back to the generic My Reports directory. */
+  backRoom: number | null;
 }) {
+  const backHref = backRoom !== null ? `/reports/rooms/${backRoom}` : "/#reports";
+  const backLabel = backRoom !== null ? `Back to Room ${backRoom + 1}` : "Back to reports";
   const router = useRouter();
   const [report, setReport] = useState<SimilarityReport | null>(initialReport);
   const [status, setStatus] = useState<LoadStatus>(
@@ -102,7 +107,7 @@ export function ReportDetailShell({
         setIsDeleting(false);
         return;
       }
-      router.push("/#reports");
+      router.push(backHref);
     } catch {
       setDeleteError("This report could not be deleted. Please try again.");
       setIsDeleting(false);
@@ -146,9 +151,9 @@ export function ReportDetailShell({
   return (
     <section className="result-view report-detail-page">
       <header className="result-toolbar">
-        <Link href="/#reports" className="back-button">
+        <Link href={backHref} className="back-button">
           <ArrowLeft aria-hidden="true" />
-          Back to reports
+          {backLabel}
         </Link>
         <div className="result-document">
           <FileText aria-hidden="true" />

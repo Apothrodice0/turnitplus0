@@ -55,11 +55,16 @@ test("the initial view sync runs in a layout effect, unconditionally on mount, n
   assert.match(page, /await loadAnonymousReports\(\);/);
 });
 
-test("the report detail page's back-to-reports control uses client-side Next navigation, not a full page reload", async () => {
+test("the report detail page's back control uses client-side Next navigation, not a full page reload", async () => {
   const shell = await readFile(new URL("../app/reports/[id]/report-detail-shell.tsx", import.meta.url), "utf8");
   assert.match(shell, /import Link from "next\/link";/);
-  assert.match(shell, /<Link href="\/#reports" className="back-button">/);
-  // A plain <a> here would force a full browser navigation, discarding the
-  // whole app bundle and defeating any client-side fix to the mount flash.
+  // The destination is context-aware (see backRoom's own comment: returns to
+  // the specific room a report was opened from, falling back to "/#reports"
+  // otherwise) but must always still be a <Link>, never a plain <a> — that
+  // would force a full browser navigation, discarding the whole app bundle
+  // and defeating any client-side fix to the mount flash.
+  assert.match(shell, /const backHref = backRoom !== null \? `\/reports\/rooms\/\$\{backRoom\}` : "\/#reports";/);
+  assert.match(shell, /<Link href=\{backHref\} className="back-button">/);
+  assert.doesNotMatch(shell, /<a href=\{backHref\}/);
   assert.doesNotMatch(shell, /<a href="\/#reports"/);
 });

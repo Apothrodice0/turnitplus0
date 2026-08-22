@@ -2766,30 +2766,201 @@ main.report-main {
   background: var(--surface);
 }
 
+/* The dedicated room page (app/reports/rooms/[room]): a compact, centered
+   workspace — deliberately its own layout, not the full-width
+   .result-view/.report-detail-page chrome that /reports/[id] uses (that
+   page needs the room for tabs/sources/etc.; this one is a single small
+   card and should never stretch edge-to-edge). Reuses .result-toolbar/
+   .back-button as-is (already a generic "toolbar with a back link"). */
+.room-page {
+  min-height: 100vh;
+  background: #e9edef;
+}
+
+.room-page-container {
+  max-width: 1150px;
+  margin: 0 auto;
+  padding: 32px 24px 64px;
+}
+
+.room-page-heading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 22px;
+}
+
+.room-page-heading > svg {
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  color: var(--blue);
+}
+
+.room-page-heading h1 {
+  margin: 0;
+  font-size: 19px;
+  color: var(--ink);
+}
+
+.room-page-status {
+  margin: 3px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
 .room-empty-slot {
   display: grid;
   gap: 14px;
+  max-width: 560px;
+  margin: 0 auto;
 }
 
-.room-processing-panel {
+.room-report-card {
   display: grid;
-  gap: 10px;
-  padding: 18px 0;
+  gap: 20px;
+  padding: 24px 28px;
+  border: 1px solid var(--soft-line);
+  border-radius: 16px;
+  background: var(--surface);
+  box-shadow: 0 1px 3px rgba(21, 54, 67, 0.05);
 }
 
-.room-status-label {
-  margin: 0;
+.room-report-card-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--soft-line);
+}
+
+.room-report-card-header > svg {
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  color: var(--blue);
+}
+
+.room-report-card-header strong {
+  display: block;
+  font-size: 15px;
+  color: var(--ink);
+}
+
+.room-report-card-header span {
+  display: block;
+  margin-top: 3px;
   font-size: 12px;
-  font-weight: 600;
+  color: var(--muted);
+}
+
+.room-report-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 14px;
+}
+
+.room-metric {
+  display: grid;
+  gap: 5px;
+  padding: 16px 14px;
+  border: 1px solid var(--soft-line);
+  border-radius: 12px;
+  background: #fbfdfe;
+  text-align: center;
+  text-decoration: none;
+  cursor: pointer;
+  font: inherit;
+  transition: border-color 150ms ease, transform 150ms ease;
+}
+
+.room-metric:hover:not(:disabled) {
+  border-color: #c7dbe3;
+  transform: translateY(-1px);
+}
+
+.room-metric:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.room-metric-label {
+  font-size: 10px;
+  font-weight: 700;
   color: var(--muted);
   text-transform: uppercase;
-  letter-spacing: 0.03em;
+  letter-spacing: 0.04em;
+}
+
+.room-metric-value {
+  font-size: 26px;
+  font-weight: 700;
+  color: var(--ink);
+  line-height: 1.2;
+}
+
+.room-metric-sub {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.room-metric-icon {
+  width: 20px;
+  height: 20px;
+  margin: 2px auto;
+  color: var(--ink);
+}
+
+.room-metric-pending .room-metric-value {
+  color: var(--muted);
+  letter-spacing: 2px;
+}
+
+/* Reuses the same low/review/high tone colors as .history-ai-result /
+   .history-similarity-result (components/reports/report-history-row.tsx)
+   so a report's color-coding stays consistent wherever it's shown. */
+.room-metric-low {
+  box-shadow: inset 0 0 0 1px #cfe6f0;
+}
+
+.room-metric-low .room-metric-value {
+  color: #0877a6;
+}
+
+.room-metric-review {
+  box-shadow: inset 0 0 0 1px #f5e3b0;
+}
+
+.room-metric-review .room-metric-value {
+  color: #a96f00;
+}
+
+.room-metric-high {
+  box-shadow: inset 0 0 0 1px #f6c3d4;
+}
+
+.room-metric-high .room-metric-value {
+  color: #d10f50;
+}
+
+.room-metric-unavailable .room-metric-value {
+  color: var(--muted);
+}
+
+.room-open-full {
+  justify-self: start;
 }
 
 .room-cycle-note {
-  margin: 10px 0 0;
+  margin: 0;
   font-size: 12px;
   color: var(--muted);
+}
+
+@media (max-width: 640px) {
+  .room-report-metrics {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* Loading skeletons — a plain pulse, no external animation library. */

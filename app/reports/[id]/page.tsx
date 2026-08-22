@@ -56,10 +56,19 @@ export default async function ReportDetailPage({
   searchParams,
 }: {
   params: Promise<{ id: string }>;
-  searchParams: Promise<{ mode?: string | string[] }>;
+  searchParams: Promise<{ mode?: string | string[]; room?: string | string[] }>;
 }) {
   const { id } = await params;
-  const mode = (await searchParams).mode === "ai" ? "ai" : "similarity";
+  const sp = await searchParams;
+  const mode = sp.mode === "ai" ? "ai" : "similarity";
+  // Navigation context only — never a security/ownership check (that's
+  // already handled by loadOwnedReport above). A report opened from its
+  // room (see app/reports/rooms/[room]/room-page-shell.tsx's own links)
+  // carries ?room=N so this page's back button can return the user there
+  // instead of the generic My Reports directory. A malformed/absent value
+  // just falls back to that generic destination — never a hard failure.
+  const roomParam = Array.isArray(sp.room) ? sp.room[0] : sp.room;
+  const backRoom = roomParam !== undefined && /^\d+$/.test(roomParam) ? Number(roomParam) : null;
   const result = await loadOwnedReport(id);
 
   if (result.status === "not-found-for-session") notFound();
@@ -70,6 +79,7 @@ export default async function ReportDetailPage({
       mode={mode}
       initialReport={result.status === "found" ? result.payload : null}
       requiresClientResolution={result.status === "no-session"}
+      backRoom={backRoom}
     />
   );
 }

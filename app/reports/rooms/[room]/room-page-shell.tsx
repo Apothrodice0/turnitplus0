@@ -2,12 +2,13 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { ChevronLeft, FileText, LockKeyhole } from "lucide-react";
+import { ChevronLeft, Download, FileText } from "lucide-react";
 import { fetchReportRoomContents, fetchRemoteReport, saveReportRemote, type RoomContents } from "@/lib/reports-remote";
 import { invalidateRoomCache } from "@/lib/report-rooms-cache";
 import { ROOM_CYCLE_MS } from "@/lib/report-rooms";
-import { storeReport } from "@/lib/report-store";
+import { storeReport, getStoredReportById } from "@/lib/report-store";
 import { buildReportSummary, type AiAnalysis, type SimilarityReport } from "@/lib/report-types";
+import { similarityScoreBand } from "@/lib/ai-core";
 import {
   analyzeAcademicEvidence,
   analyzeText,
@@ -21,7 +22,6 @@ import {
 import { normalizeExtractedText } from "@/lib/extracted-text-normalization";
 import { AI_MODEL_VERSION, AI_PASSAGE_LOG_ODDS_THRESHOLD, AI_PASSAGE_THRESHOLD } from "@/lib/ai-core";
 import { describeAiAnalysisError, type AiPrepStage } from "@/lib/ai-model-prep";
-import { ReportHistoryRow } from "@/components/reports/report-history-row";
 import { DocumentUploadPanel } from "@/components/reports/document-upload-panel";
 
 /**
@@ -86,8 +86,21 @@ async function analyzeAiText(
 const POLL_INTERVAL_MS = 3000;
 const MAX_POLL_ATTEMPTS = 10;
 
+function formatDate(iso: string): string {
+  return new Date(iso).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
+}
+
 function formatDateTime(iso: string): string {
   return new Date(iso).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" });
+}
+
+/** Mirrors components/reports/report-history-row.tsx's own labeling, kept local here since this page builds its own compact metric cards rather than reusing that component's row layout. */
+function aiToneLabel(aiScore: number | null, aiTone: string | null): string {
+  if (aiScore === null) return "Pending";
+  if (aiTone === "low") return "Low AI indicators";
+  if (aiTone === "review") return "Moderate AI indicators";
+  if (aiTone === "high") return "Strong AI indicators";
+  return "Pending";
 }
 
 type Props = {
@@ -104,6 +117,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
   const [progress, setProgress] = useState(0);
   const [processingLabel, setProcessingLabel] = useState("Reading document content");
   const [isGeneratingReport, setIsGeneratingReport] = useState(false);
+  const [downloadingReceipt, setDownloadingReceipt] = useState(false);
   const [toast, setToast] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const generationLockRef = useRef(false);
@@ -111,6 +125,17 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
   function notify(message: string) {
     setToast(message);
     window.setTimeout(() => setToast(""), 3200);
+  }
+
+  async function handleDownloadReceipt(reportId: string) {
+    setDownloadingReceipt(true);
+    try {
+      const local = await getStoredReportById<SimilarityReport>(reportId).catch(() => null);
+      const full = local ?? (await fetchRemoteReport<SimilarityReport>(reportId));
+      if (full) await downloadReceipt(full);
+    } finally {
+      setDownloadingReceipt(false);
+    }
   }
 
   // Poll for genuine AI completion when this room is "processing" and this
@@ -321,71 +346,128 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
     }
   }
 
+  const statusLine =
+    occupant.status === "ready" && occupant.report ? `Report ready · Last checked ${formatDate(occupant.report.createdAt)}`
+    : occupant.status === "processing" ? "Report ready · finishing AI analysis"
+    : "Ready for a new check";
+
   return (
-    <section className="result-view report-detail-page room-page">
+    <div className="room-page">
       <header className="result-toolbar">
         <Link href="/#reports" className="back-button">
           <ChevronLeft aria-hidden="true" />
           Back to My Reports
         </Link>
-        <div className="result-document">
+      </header>
+
+      <div className="room-page-container">
+        <div className="room-page-heading">
           <FileText aria-hidden="true" />
           <div>
             <h1>Room {room + 1}</h1>
+            <p className="room-page-status">{statusLine}</p>
           </div>
         </div>
-      </header>
 
-      {toast && <div className="ai-analysis-message" role="status"><p>{toast}</p></div>}
+        {toast && <div className="ai-analysis-message" role="status"><p>{toast}</p></div>}
 
-      {occupant.status === "empty" && (
-        <div className="room-empty-slot">
-          <p className="room-status-label">Ready for a new check</p>
-          <DocumentUploadPanel
-            file={file}
-            isGeneratingReport={isGeneratingReport}
-            progress={progress}
-            processingLabel={processingLabel}
-            fileInputRef={fileInputRef}
-            onChooseFile={chooseFile}
-            onGenerate={runCheck}
-          />
-        </div>
-      )}
+        {occupant.status === "empty" && (
+          <div className="room-empty-slot">
+            <DocumentUploadPanel
+              file={file}
+              isGeneratingReport={isGeneratingReport}
+              progress={progress}
+              processingLabel={processingLabel}
+              fileInputRef={fileInputRef}
+              onChooseFile={chooseFile}
+              onGenerate={runCheck}
+            />
+          </div>
+        )}
 
-      {occupant.status === "processing" && occupant.report && (
-        <div className="room-processing-panel">
-          <p className="room-status-label">Report ready · similarity result complete</p>
-          <h2>{occupant.report.title}</h2>
-          <p>{occupant.report.wordCount.toLocaleString()} words · {occupant.report.archiveScore}% similarity</p>
-          {aiUnavailable ? (
-            <p className="room-cycle-note">AI-writing analysis was unavailable for this document. The similarity result above is complete.</p>
-          ) : pollExhausted ? (
-            <div className="ai-analysis-message" role="status">
-              <p>AI analysis is taking longer than usual.</p>
-              <button className="button subtle" type="button" onClick={checkAgain}>Check again</button>
-            </div>
-          ) : (
-            <div className="ai-analysis-loading" role="status" aria-live="polite">
-              <span aria-hidden="true" />
+        {occupant.status === "processing" && occupant.report && (
+          <div className="room-report-card">
+            <div className="room-report-card-header">
+              <FileText aria-hidden="true" />
               <div>
-                <strong>Finishing AI-writing analysis…</strong>
-                <p>This document's similarity result is ready; the AI-writing score is still being computed.</p>
+                <strong>{occupant.report.title}</strong>
+                <span>{formatDate(occupant.report.createdAt)} · {occupant.report.wordCount.toLocaleString()} words</span>
               </div>
             </div>
-          )}
-          <Link href={`/reports/${occupant.report.id}`} className="button secondary">Open full report</Link>
-        </div>
-      )}
 
-      {occupant.status === "ready" && occupant.report && (
-        <div className="report-history">
-          <ReportHistoryRow report={occupant.report} onDownloadReceipt={downloadReceipt} />
-          <p className="room-cycle-note">
-            This room becomes available again: {formatDateTime(occupant.cycleEndsAt)}.
-          </p>
-        </div>
-      )}
-    </section>
+            <div className="room-report-metrics">
+              <div className="room-metric room-metric-pending">
+                <span className="room-metric-label">AI Detection</span>
+                <strong className="room-metric-value">···</strong>
+                <span className="room-metric-sub">Analyzing…</span>
+              </div>
+              <Link href={`/reports/${occupant.report.id}?room=${room}`} className={`room-metric room-metric-${similarityScoreBand(occupant.report.archiveScore)?.key ?? "low"}`}>
+                <span className="room-metric-label">Similarity</span>
+                <strong className="room-metric-value">{occupant.report.archiveScore}%</strong>
+                <span className="room-metric-sub">{similarityScoreBand(occupant.report.archiveScore)?.label ?? "Result"}</span>
+              </Link>
+              <button className="room-metric" type="button" onClick={() => handleDownloadReceipt(occupant.report!.id)} disabled={downloadingReceipt}>
+                <span className="room-metric-label">Receipt</span>
+                <Download aria-hidden="true" className="room-metric-icon" />
+                <span className="room-metric-sub">{downloadingReceipt ? "Preparing…" : "Download"}</span>
+              </button>
+            </div>
+
+            {aiUnavailable ? (
+              <p className="room-cycle-note">AI-writing analysis was unavailable for this document. The similarity result above is complete.</p>
+            ) : pollExhausted ? (
+              <div className="ai-analysis-message" role="status">
+                <p>AI analysis is taking longer than usual.</p>
+                <button className="button subtle" type="button" onClick={checkAgain}>Check again</button>
+              </div>
+            ) : (
+              <div className="ai-analysis-loading" role="status" aria-live="polite">
+                <span aria-hidden="true" />
+                <div>
+                  <strong>Finishing AI-writing analysis…</strong>
+                  <p>The AI-writing score will appear here as soon as it's ready.</p>
+                </div>
+              </div>
+            )}
+
+            <Link href={`/reports/${occupant.report.id}?room=${room}`} className="button secondary room-open-full">Open full report</Link>
+          </div>
+        )}
+
+        {occupant.status === "ready" && occupant.report && (
+          <div className="room-report-card">
+            <div className="room-report-card-header">
+              <FileText aria-hidden="true" />
+              <div>
+                <strong>{occupant.report.title}</strong>
+                <span>{formatDate(occupant.report.createdAt)} · {occupant.report.wordCount.toLocaleString()} words</span>
+              </div>
+            </div>
+
+            <div className="room-report-metrics">
+              <Link href={`/reports/${occupant.report.id}?mode=ai&room=${room}`} className={`room-metric room-metric-${occupant.report.aiTone ?? "unavailable"}`}>
+                <span className="room-metric-label">AI Detection</span>
+                <strong className="room-metric-value">{occupant.report.aiScore ?? "—"}%</strong>
+                <span className="room-metric-sub">{aiToneLabel(occupant.report.aiScore, occupant.report.aiTone)}</span>
+              </Link>
+              <Link href={`/reports/${occupant.report.id}?room=${room}`} className={`room-metric room-metric-${similarityScoreBand(occupant.report.archiveScore)?.key ?? "low"}`}>
+                <span className="room-metric-label">Similarity</span>
+                <strong className="room-metric-value">{occupant.report.archiveScore}%</strong>
+                <span className="room-metric-sub">{similarityScoreBand(occupant.report.archiveScore)?.label ?? "Result"}</span>
+              </Link>
+              <button className="room-metric" type="button" onClick={() => handleDownloadReceipt(occupant.report!.id)} disabled={downloadingReceipt}>
+                <span className="room-metric-label">Receipt</span>
+                <Download aria-hidden="true" className="room-metric-icon" />
+                <span className="room-metric-sub">{downloadingReceipt ? "Preparing…" : "Download"}</span>
+              </button>
+            </div>
+
+            <p className="room-cycle-note">
+              This room becomes available again: {formatDateTime(occupant.cycleEndsAt)}.
+            </p>
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
