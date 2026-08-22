@@ -9,6 +9,7 @@ import { checkUploadLimit } from '../../../lib/upload-limit';
 import { getRoomCountForRole, isWithinActiveCycle, roomCycleEndsAt } from '../../../lib/report-rooms';
 import { findRoomOccupant } from '../../../lib/reports-repo';
 import { runAfterResponse } from '../../../lib/run-after-response';
+import { createPendingReportAdmissionJob, processReportAdmissionJob } from '../../../lib/corpus-admission-report-integration';
 
 // Reports carry derived data (AI passages, matched phrases, extracted text)
 // on top of the ingest pipeline's raw text, so this cap is larger than
@@ -275,6 +276,25 @@ export async function POST(request: Request) {
       const rawText = payload && typeof payload === 'object' && typeof (payload as Record<string, unknown>).text === 'string'
         ? (payload as Record<string, unknown>).text as string
         : null;
+
+      // Corpus-admission job scaffolding: created SYNCHRONOUSLY, here,
+      // still inside this request — never only inside the runAfterResponse
+      // callback below. If the process crashes or is recycled after the
+      // response is sent but before that deferred work ever starts, a
+      // deferred-only creation would leave no trace at all that admission
+      // was ever supposed to happen; this durable 'pending' row is what a
+      // later corpus-admission retry sweep (lib/corpus-admission-report-
+      // integration.ts's runReportAdmissionRetrySweep) can find and
+      // process instead. Gated on sessionUser.corpusReuseConsented (the
+      // request-time snapshot) purely to avoid creating a pointless row for
+      // every non-consenting upload — the actual admission work, run
+      // below, always re-checks consent fresh regardless of this snapshot.
+      let pendingAdmissionJobId: string | null = null;
+      if (rawText && isFirstSaveOfThisReport && userId !== null && sessionUser?.corpusReuseConsented) {
+        const created = await createPendingReportAdmissionJob(client, { accountId: userId, deviceKey, reportId: id });
+        pendingAdmissionJobId = created?.jobId ?? null;
+      }
+
       // Phase E8F: gated on isFirstSaveOfThisReport (see above) — an update
       // to an already-saved report (id already existed) must not create a
       // second document identity or a second corpus submission reference
@@ -289,6 +309,7 @@ export async function POST(request: Request) {
         const reportDeviceKey = deviceKey;
         const reportId = id;
         const capturedAcademicDiagnosticsId = academicDiagnosticsId;
+        const capturedPendingAdmissionJobId = pendingAdmissionJobId;
         await runAfterResponse(async () => {
           const deferredClient = await getReportsDbClient();
           try {
@@ -331,19 +352,42 @@ export async function POST(request: Request) {
             // Corpus-admission hardening: this route no longer calls
             // lib/user-submission-corpus.ts's indexDocumentSubmissionIntoCorpus
             // directly (Phase E8D's original activation, removed). Automatic
-            // reusable-corpus indexing now requires passing the
-            // corpus-admission gate (lib/corpus-admission-gate.ts) — English-
-            // only, 3000-word minimum, quality scoring, retention/consent,
-            // and "first accepted sample wins" family-duplicate checks — none
-            // of which a bare users.corpus_reuse_consented_at flag alone ever
-            // satisfied. Wiring live report uploads through that gate is
-            // explicitly future work, not built in this phase; consent
-            // remains a necessary but no longer sufficient precondition, and
-            // users.corpus_reuse_consented_at / SessionUser.corpusReuseConsented
-            // / PATCH /api/auth/me's toggle are all left intact for that
-            // future phase to reconnect. See tests/corpus-admission-privacy.test.mjs
-            // for the structural proof that no file under app/ can reach
-            // indexDocumentSubmissionIntoCorpus any more.
+            // reusable-corpus INDEXING (making content live-searchable via
+            // corpus_document_representations et al) still requires a
+            // separate, later, explicitly out-of-scope phase — see
+            // tests/corpus-admission-privacy.test.mjs's structural proof that
+            // no file under app/ can reach indexDocumentSubmissionIntoCorpus.
+            //
+            // Controlled ADMISSION (not indexing) is wired below:
+            // processReportAdmissionJob runs the full corpus-admission gate
+            // (lib/corpus-admission-gate.ts — English-only, 3000-word
+            // minimum, quality scoring, retention/consent, "first accepted
+            // sample wins" family-duplicate checks) against the job row
+            // already created SYNCHRONOUSLY above (before this deferred
+            // callback ever started — see that call site's own comment for
+            // why), and records its own audit trail, entirely behind
+            // CORPUS_ADMISSION_ENABLED (off by default) and a fresh,
+            // request-time-independent re-check of
+            // users.corpus_reuse_consented_at — see
+            // lib/corpus-admission-report-integration.ts's own header
+            // comment for why sessionUser.corpusReuseConsented (captured
+            // earlier in this same request) is deliberately never trusted
+            // for the actual admission decision.
+            if (capturedPendingAdmissionJobId !== null) {
+              try {
+                await processReportAdmissionJob(deferredClient, {
+                  jobId: capturedPendingAdmissionJobId,
+                  openConnection: () => getReportsDbClient(),
+                });
+              } catch (err) {
+                // processReportAdmissionJob's own contract is "never
+                // throws" (every real outcome, including a gate failure, is
+                // persisted to corpus_admission_report_jobs and returned as
+                // a value) — this catch is only a defensive second layer,
+                // matching every other best-effort step in this callback.
+                console.error('processReportAdmissionJob failed unexpectedly (non-fatal):', err instanceof Error ? err.message : String(err));
+              }
+            }
           } catch (err) {
             console.error('captureDocumentIdentityAndFamily failed (non-fatal):', err instanceof Error ? err.message : String(err));
           } finally {

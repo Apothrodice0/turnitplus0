@@ -30,7 +30,25 @@ test("lib/corpus-admission-gate.ts only imports the two READ functions from lib/
   assert.doesNotMatch(importLine, /indexDocumentSubmissionIntoCorpus|createReusableDocumentRepresentation|recordCorpusShingles|recordSubmissionReference/);
 });
 
-test("no app/ file imports any new corpus-admission-* module", () => {
+// Controlled live-report integration (see lib/corpus-admission-report-integration.ts):
+// exactly one narrow, flagged door from app/ into the corpus-admission
+// feature is now intentional. These two tests together preserve the same
+// bypass-proofing spirit the single "no app/ file imports any new
+// corpus-admission-* module" assertion used to provide, adapted for that
+// deliberate architecture change: (1) the raw gate and its pure sibling
+// modules must still never be reachable directly from app/, only through
+// the integration layer's own consent/flag/idempotency/deletion
+// guarantees; (2) the set of app/ files using that one door is closed and
+// explicit, not open-ended.
+const ALLOWED_CORPUS_ADMISSION_DOOR = "corpus-admission-report-integration";
+const EXPECTED_APP_FILES_USING_THE_DOOR = [
+  "app/api/reports/route.ts",
+  "app/api/reports/[id]/route.ts",
+  "app/api/auth/me/route.ts",
+  "app/api/internal/corpus-admission-sweep/route.ts",
+];
+
+test("no app/ file imports lib/corpus-admission-gate.ts or any of its pure sibling modules directly — only lib/corpus-admission-report-integration.ts is an allowed door", () => {
   const appDir = path.join(repoRoot, "app");
   const offenders = [];
   function walk(dir) {
@@ -39,12 +57,31 @@ test("no app/ file imports any new corpus-admission-* module", () => {
       if (entry.isDirectory()) walk(full);
       else if (/\.(ts|tsx)$/.test(entry.name)) {
         const imports = importLines(fs.readFileSync(full, "utf8"));
-        if (/corpus-admission-/.test(imports)) offenders.push(path.relative(repoRoot, full).split(path.sep).join("/"));
+        const corpusAdmissionImportLines = imports.split("\n").filter((l) => /corpus-admission-/.test(l));
+        const bypassesTheDoor = corpusAdmissionImportLines.some((l) => !l.includes(ALLOWED_CORPUS_ADMISSION_DOOR));
+        if (bypassesTheDoor) offenders.push(path.relative(repoRoot, full).split(path.sep).join("/"));
       }
     }
   }
   walk(appDir);
-  assert.deepEqual(offenders, [], `no app/ file may import a corpus-admission-* module yet (live wiring is future work): ${offenders.join(", ")}`);
+  assert.deepEqual(offenders, [], `these app/ files import a corpus-admission-* module other than ${ALLOWED_CORPUS_ADMISSION_DOOR}: ${offenders.join(", ")}`);
+});
+
+test("exactly the expected app/ files use the corpus-admission-report-integration door — no unreviewed new caller", () => {
+  const appDir = path.join(repoRoot, "app");
+  const callers = [];
+  function walk(dir) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (/\.(ts|tsx)$/.test(entry.name)) {
+        const imports = importLines(fs.readFileSync(full, "utf8"));
+        if (imports.includes(ALLOWED_CORPUS_ADMISSION_DOOR)) callers.push(path.relative(repoRoot, full).split(path.sep).join("/"));
+      }
+    }
+  }
+  walk(appDir);
+  assert.deepEqual(callers.sort(), [...EXPECTED_APP_FILES_USING_THE_DOOR].sort());
 });
 
 test("no app/ file imports indexDocumentSubmissionIntoCorpus — normal report creation has no reachable path to a reusable-corpus write that skips the admission gate", () => {

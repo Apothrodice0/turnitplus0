@@ -7,6 +7,7 @@ import { findReportRowForDeviceKey, findReportRowForUser } from '../../../../lib
 import { classifyReportMatches } from '../../../../lib/report-classification';
 import { getOrComputeHistoricalMatchSnapshot, deleteHistoricalMatchSnapshot } from '../../../../lib/report-historical-match';
 import { deleteReportDocumentData } from '../../../../lib/report-deletion';
+import { deleteReportCorpusAdmissionData } from '../../../../lib/corpus-admission-report-integration';
 import { runHistoricalMatchShadowEvaluation } from '../../../../lib/e8p-shadow-evaluation';
 import { getExperimentalHistoricalMatchForDisplay } from '../../../../lib/e8p-visibility';
 import { getReuseContextEligibility } from '../../../../lib/e8s-report-integration';
@@ -193,6 +194,17 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ i
           args: [id, sessionUser.id],
         });
         if (documentIdentityId) await deleteReportDocumentData(client, String(documentIdentityId));
+        // Corpus-admission cleanup: scoped directly to (account, deviceKey,
+        // report id) — see lib/corpus-admission-report-integration.ts's own
+        // comment for why this is deliberately independent of
+        // documentIdentityId, so it can never reach a different report's
+        // retained admission data, including another report owned by this
+        // same account. Runs even when deviceKey/documentIdentityId above
+        // were never set (e.g. this report predates that column) — the
+        // corpus-admission source_ref is deterministic from (id, user_id)
+        // alone once deviceKey is known, and a report deleted here always
+        // has its own device_key from the SELECT above by construction.
+        if (deviceKey) await deleteReportCorpusAdmissionData(client, { accountId: sessionUser.id, deviceKey: String(deviceKey), reportId: id });
       } else {
         const url = new URL(request.url);
         const deviceKey = url.searchParams.get('deviceKey');

@@ -44,6 +44,21 @@ import { DEFAULT_CORPUS_ADMISSION_LIMITS } from "./corpus-admission-types";
  * concurrency defect) hold ONLY the derived fingerprint (hash, word count,
  * shingle hashes) — never raw text either.
  *
+ * corpus_admission_accepted_representations.revoked_at (drizzle/0032):
+ * findAcceptedFamilyCandidates and findAcceptedRepresentationByHash both
+ * filter WHERE revoked_at IS NULL, and the table's own UNIQUE index on
+ * canonical_sha256 is a PARTIAL index over the same condition — so once a
+ * row is marked revoked, it stops participating in "first accepted sample
+ * wins" matching AND stops occupying its canonical_sha256's uniqueness
+ * slot, letting a later, independently authorized submission of the same
+ * or overlapping content be evaluated fresh and become canonical in its
+ * place. This module never sets revoked_at itself — it only ever reads it.
+ * Nothing in this codebase sets it yet: accepted corpus content is durable
+ * by policy (a consent change or report/account deletion never sets it —
+ * see lib/corpus-admission-report-integration.ts's own header comment),
+ * and this column is reserved for a future, explicitly admin-triggered
+ * removal flow that has not been built.
+ *
  * CONCURRENCY / IDEMPOTENCY STRATEGY (fixes the confirmed defect: family
  * resolution previously only checked the real corpus tables, which a real
  * ACCEPT never writes into, so two independent evaluations of the same new
@@ -217,6 +232,7 @@ async function findAcceptedFamilyCandidates(
           JOIN corpus_admission_decisions d ON d.id = r.decision_id
           WHERE s.fingerprint_version = ? AND s.shingle_hash IN (${placeholders})
             AND (? IS NULL OR s.accepted_representation_id != ?)
+            AND r.revoked_at IS NULL
           GROUP BY s.accepted_representation_id
           HAVING COUNT(*) >= 1`,
     args: [CORPUS_ADMISSION_FINGERPRINT_VERSION, ...hashList, excludeAcceptedRepresentationId, excludeAcceptedRepresentationId],
@@ -257,7 +273,7 @@ async function findAcceptedRepresentationByHash(exec: SqlExecutor, canonicalSha2
     sql: `SELECT r.id AS id, r.decision_id AS decision_id, d.source_ref AS source_ref
           FROM corpus_admission_accepted_representations r
           JOIN corpus_admission_decisions d ON d.id = r.decision_id
-          WHERE r.canonical_sha256 = ?`,
+          WHERE r.canonical_sha256 = ? AND r.revoked_at IS NULL`,
     args: [canonicalSha256],
   });
   const row = result.rows[0] as unknown as { id: string; decision_id: string; source_ref: string } | undefined;

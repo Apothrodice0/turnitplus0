@@ -1,6 +1,7 @@
 import type { Client } from "@libsql/client";
 import { deleteReportDocumentData } from "./report-deletion";
 import { deleteHistoricalMatchSnapshot } from "./report-historical-match";
+import { deleteReportCorpusAdmissionData } from "./corpus-admission-report-integration";
 
 /**
  * Account deletion (production audit fix — no such endpoint existed).
@@ -67,6 +68,12 @@ export async function deleteAccountData(client: Client, accountId: string): Prom
       sql: "DELETE FROM saved_reports WHERE device_key = ? AND id = ?",
       args: [report.device_key, report.id],
     });
+    // Corpus-admission cleanup, scoped to this exact (account, deviceKey,
+    // report id) — see lib/corpus-admission-report-integration.ts's own
+    // comment for why source_ref is built this way, never from
+    // document_identity_id, so this can never remove a different report's
+    // (this account's or any other account's) retained admission data.
+    await deleteReportCorpusAdmissionData(client, { accountId, deviceKey: report.device_key, reportId: report.id });
   }
 
   const identitiesResult = await client.execute({

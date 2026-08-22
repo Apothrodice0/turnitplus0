@@ -1,0 +1,8 @@
+{
+  "crons": [
+    {
+      "path": "/api/internal/corpus-admission-sweep",
+      "schedule": "0 3 * * *"
+    }
+  ]
+}

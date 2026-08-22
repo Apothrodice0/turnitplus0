@@ -5,6 +5,7 @@ import { clientIpFrom } from '../../../../lib/client-ip';
 import { getSessionUser, clearSessionCookie } from '../../../../lib/auth-session';
 import { verifyPassword } from '../../../../lib/auth-crypto';
 import { deleteAccountData, invalidateSessionsAndDeleteUser, ACCOUNT_DELETION_CONFIRMATION_PHRASE } from '../../../../lib/account-deletion';
+import { revokeConsentAndCancelPendingAdmissionJobs } from '../../../../lib/corpus-admission-report-integration';
 
 export const dynamic = 'force-dynamic';
 
@@ -85,10 +86,35 @@ export async function PATCH(request: Request) {
       }
 
       if (corpusReuseConsent !== undefined) {
-        await client.execute({
-          sql: 'UPDATE users SET username = ?, email = ?, corpus_reuse_consented_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
-          args: [trimmedUsername, normalizedEmail, corpusReuseConsent ? new Date().toISOString() : null, sessionUser.id],
-        });
+        // Corpus-admission consent revocation (production audit fix):
+        // synchronous, in this same request — not deferred, for the same
+        // durability reason app/api/reports/route.ts's job creation is not
+        // deferred (see lib/corpus-admission-report-integration.ts's own
+        // header comment). Only fires on an actual true->false transition;
+        // granting consent, or a no-op PATCH that leaves it unchanged, never
+        // triggers this and takes the plain single-statement path below.
+        //
+        // On a real revocation, the profile-fields UPDATE deliberately does
+        // NOT touch corpus_reuse_consented_at at all — that write happens
+        // atomically, together with cancelling this account's still-
+        // pending/failed admission jobs, inside
+        // revokeConsentAndCancelPendingAdmissionJobs's own transaction, so
+        // there is never a window where consent has been flipped but
+        // cancellation has not (or vice versa). Already-accepted corpus
+        // content is untouched either way — see that function's own header
+        // comment.
+        if (corpusReuseConsent === false && sessionUser.corpusReuseConsented === true) {
+          await client.execute({
+            sql: 'UPDATE users SET username = ?, email = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+            args: [trimmedUsername, normalizedEmail, sessionUser.id],
+          });
+          await revokeConsentAndCancelPendingAdmissionJobs(sessionUser.id, () => getReportsDbClient());
+        } else {
+          await client.execute({
+            sql: 'UPDATE users SET username = ?, email = ?, corpus_reuse_consented_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+            args: [trimmedUsername, normalizedEmail, corpusReuseConsent ? new Date().toISOString() : null, sessionUser.id],
+          });
+        }
       } else {
         await client.execute({
           sql: 'UPDATE users SET username = ?, email = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',

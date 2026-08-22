@@ -993,6 +993,18 @@ export const corpus_admission_content_store = sqliteTable(
 // lib/corpus-admission-gate.ts is the only writer, always inside a real
 // SQLite write transaction paired with a re-check immediately before
 // insert, not a JavaScript mutex.
+// revoked_at (drizzle/0032): reserved for a future, explicitly
+// admin-triggered removal flow (e.g. a legal takedown) — nothing in this
+// codebase sets it yet. Accepted corpus content is durable by policy (see
+// lib/corpus-admission-report-integration.ts's own header comment): a
+// consent change or a report/account deletion never sets this column.
+// lib/corpus-admission-gate.ts only ever reads it (filters WHERE
+// revoked_at IS NULL in its family-matching queries), so whenever that
+// future flow does ship, it is excluded from matching immediately, with no
+// further gate changes needed. The canonical_sha256 uniqueness constraint
+// below is a PARTIAL index over the same condition — see that migration
+// file's own header comment for why a revoked fingerprint must stop
+// occupying its hash's uniqueness slot, not just stop matching.
 export const corpus_admission_accepted_representations = sqliteTable(
   "corpus_admission_accepted_representations",
   {
@@ -1001,11 +1013,13 @@ export const corpus_admission_accepted_representations = sqliteTable(
     canonical_sha256: text("canonical_sha256").notNull(),
     word_count: integer("word_count").notNull(),
     fingerprint_version: text("fingerprint_version").notNull(),
+    revoked_at: text("revoked_at"),
     created_at: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   },
   (table) => [
-    uniqueIndex("ux_corpus_admission_accepted_representations_canonical_sha256").on(table.canonical_sha256),
+    uniqueIndex("ux_corpus_admission_accepted_representations_canonical_sha256_active").on(table.canonical_sha256).where(sql`revoked_at IS NULL`),
     uniqueIndex("ux_corpus_admission_accepted_representations_decision_id").on(table.decision_id),
+    index("idx_corpus_admission_accepted_representations_revoked_at").on(table.revoked_at),
   ],
 );
 
@@ -1021,6 +1035,42 @@ export const corpus_admission_accepted_shingles = sqliteTable(
   (table) => [
     uniqueIndex("ux_corpus_admission_accepted_shingles_rep_version_hash").on(table.accepted_representation_id, table.fingerprint_version, table.shingle_hash),
     index("idx_corpus_admission_accepted_shingles_hash").on(table.shingle_hash),
+  ],
+);
+
+// Controlled live-report integration (drizzle/0031): a durable job/status
+// record per report so a failed admission attempt is visible and retryable,
+// not only ever a console.error line. source_ref is built from
+// (account_id, device_key, report_id) directly — see
+// lib/corpus-admission-report-integration.ts and the migration file's own
+// header comment for why this is deliberately NOT a bare
+// document_identity_id (report/account-scoped deletion, and consent-
+// revocation cleanup, must never be able to reach a different report's
+// retained source). Created SYNCHRONOUSLY (same request that inserts the
+// report), never only inside a deferred after() callback — see the
+// migration file's own header comment for why, and status/claimed_at's own
+// comments for the full pending/succeeded/failed/cancelled/revoked
+// lifecycle and the sweep's atomic-claim mechanism.
+export const corpus_admission_report_jobs = sqliteTable(
+  "corpus_admission_report_jobs",
+  {
+    id: text("id").primaryKey(),
+    source_ref: text("source_ref").notNull(),
+    account_id: text("account_id").notNull(),
+    device_key: text("device_key").notNull(),
+    report_id: text("report_id").notNull(),
+    status: text("status").notNull(),
+    decision_id: text("decision_id").references(() => corpus_admission_decisions.id, { onDelete: "set null" }),
+    claimed_at: text("claimed_at"),
+    attempt_count: integer("attempt_count").notNull().default(0),
+    last_error: text("last_error"),
+    created_at: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    updated_at: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("ux_corpus_admission_report_jobs_source_ref").on(table.source_ref),
+    index("idx_corpus_admission_report_jobs_account_id").on(table.account_id),
+    index("idx_corpus_admission_report_jobs_sweep_candidates").on(table.status, table.claimed_at),
   ],
 );
 
