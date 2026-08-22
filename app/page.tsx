@@ -864,7 +864,11 @@ export default function Home() {
     notify("Report history cleared.");
   }
 
-  const activeNavView = view === "home" || view === "processing" || view === "welcome" ? "dashboard" : view;
+  // "home" is deliberately excluded here: that view has its own nav button
+  // ("Overview", highlighted via a direct view === "home" check below) — folding
+  // it into "dashboard" too meant both "Overview" and "Dashboard" lit up
+  // simultaneously while viewing the Overview page.
+  const activeNavView = view === "processing" || view === "welcome" ? "dashboard" : view;
 
   return (
     <div className={`site-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
@@ -927,8 +931,16 @@ export default function Home() {
             <ShieldCheck aria-hidden="true" />
             <span className="nav-label">Overview</span>
           </button>
-          <button
-            className={activeNavView === "dashboard" ? "active" : ""}
+          {/* Signed-in accounts have no distinct Dashboard destination left
+              to go to — a new check only ever starts inside a room (see
+              goToNewCheck's own comment), so for them this button would
+              route to exactly the page "My reports" already does, doing
+              nothing visible whenever that's already the current view.
+              Anonymous visitors are unaffected: the standalone Dashboard is
+              still their entire upload flow. */}
+          {!account && (
+            <button
+              className={activeNavView === "dashboard" ? "active" : ""}
               type="button"
               disabled={isGeneratingReport}
               aria-label={isGeneratingReport ? "Dashboard unavailable while a report is processing" : "Dashboard"}
@@ -937,6 +949,7 @@ export default function Home() {
               <LayoutDashboard aria-hidden="true" />
               <span className="nav-label">Dashboard</span>
             </button>
+          )}
             <button
               className={activeNavView === "reports" ? "active" : ""}
               type="button"
