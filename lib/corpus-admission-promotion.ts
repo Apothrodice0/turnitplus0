@@ -9,6 +9,7 @@ import {
   CORPUS_FINGERPRINT_VERSION,
   type LinkType,
 } from "./user-submission-corpus";
+import { bumpCorpusMatchGeneration } from "./report-historical-match";
 
 /**
  * Promotes an ACCEPTed corpus-admission decision's retained text into the
@@ -214,6 +215,15 @@ async function indexPromotionAtomically(
               WHERE id = ?`,
         args: [representationId, linkType, CORPUS_FINGERPRINT_VERSION, params.promotionId],
       });
+
+      // Cache invalidation, same transaction — a GLOBAL generation bump,
+      // deliberately not a targeted per-representation delete: newly
+      // eligible content (this is exactly that, new or reused
+      // representation alike) can match a report whose cached snapshot
+      // doesn't reference this representation AT ALL yet, which a search
+      // over stored rows could never discover. See
+      // lib/report-historical-match.ts's own header comment.
+      await bumpCorpusMatchGeneration(tx);
 
       await tx.commit();
       return { representationId, linkType, fingerprintVersion: CORPUS_FINGERPRINT_VERSION };

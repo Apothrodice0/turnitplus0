@@ -752,11 +752,28 @@ export const report_historical_match_snapshots = sqliteTable(
     error_message: text("error_message"),
     computed_at: text("computed_at").notNull().default(sql`CURRENT_TIMESTAMP`),
     created_at: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    // drizzle/0035: see that migration's own comment. Never final — treated
+    // like NO_HISTORICAL_MATCH's own "always recompute" rule.
+    is_partial: integer("is_partial").notNull().default(0),
+    // drizzle/0036: the corpus_match_generation value this row was computed
+    // at — stale (and recomputed) once corpus_match_generation.generation
+    // advances past it. See that migration's own comment.
+    corpus_generation: integer("corpus_generation").notNull().default(0),
   },
   (table) => [
     uniqueIndex("ux_report_historical_match_snapshots_report").on(table.report_device_key, table.report_id),
   ],
 );
+
+// drizzle/0036: single-row global epoch for "corpus eligibility was ADDED"
+// events — see that migration's own comment for the full argument
+// (targeted, per-representation snapshot invalidation cannot discover a
+// report that should gain a match to content it doesn't reference yet).
+export const corpus_match_generation = sqliteTable("corpus_match_generation", {
+  id: integer("id").primaryKey(),
+  generation: integer("generation").notNull().default(0),
+  updated_at: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
 
 // Phase E8P: bounded shadow-evaluation telemetry comparing production's
 // real historical-match result against the proposed E8O policy

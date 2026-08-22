@@ -2,6 +2,8 @@ import { notFound } from "next/navigation";
 import type { Metadata } from "next";
 import { loadAdminGate } from "@/lib/admin-gate";
 import { AdminCorpusSearch } from "@/components/admin/corpus-search";
+import { isCorpusPromotionEnabled } from "@/lib/corpus-admission-promotion";
+import { isCorpusSourceMatchingEnabled } from "@/lib/corpus-source-matching-flag";
 
 export const dynamic = "force-dynamic";
 
@@ -24,6 +26,11 @@ export default async function AdminCorpusPage() {
       <header className="developer-header">
         <h1>Corpus admission</h1>
         <p>Every admission attempt — accepted, review, rejected, failed, pending, or cancelled — across every account. Not visible to ordinary accounts.</p>
+        <p>
+          Promotion into matching index: <strong>{isCorpusPromotionEnabled() ? "enabled" : "disabled"}</strong>
+          {" · "}
+          Corpus-source matching in reports: <strong>{isCorpusSourceMatchingEnabled() ? "enabled" : "disabled"}</strong>
+        </p>
       </header>
       <AdminCorpusSearch />
     </main>

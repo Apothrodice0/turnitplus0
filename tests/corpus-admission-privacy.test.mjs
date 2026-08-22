@@ -62,7 +62,12 @@ const ADMIN_DASHBOARD_DOOR_MODULES = ["corpus-admission-admin-repo", "corpus-adm
 // reads decisions/accepted-representations/content-store directly and never
 // touches saved_reports, consent, or deletion at all.
 const PROMOTION_DOOR_MODULE = "corpus-admission-promotion";
-const EXPECTED_APP_FILES_USING_THE_PROMOTION_DOOR = ["app/api/internal/corpus-admission-promotion-sweep/route.ts"];
+const EXPECTED_APP_FILES_USING_THE_PROMOTION_DOOR = [
+  "app/api/internal/corpus-admission-promotion-sweep/route.ts",
+  // Admin-only, read-only status line (isCorpusPromotionEnabled() flag
+  // state) — see app/admin/corpus/page.tsx's own header.
+  "app/admin/corpus/page.tsx",
+];
 
 test("no app/ file imports lib/corpus-admission-gate.ts or any of its pure sibling modules directly — only lib/corpus-admission-report-integration.ts, the admin-dashboard repo/actions modules, and lib/corpus-admission-promotion.ts are allowed doors", () => {
   const appDir = path.join(repoRoot, "app");

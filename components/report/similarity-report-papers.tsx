@@ -81,6 +81,9 @@ function renderHistoricalMatchEntries(matches: HistoricalSubmissionMatchEntry[])
           {match.relationshipType === "UNKNOWN_RELATIONSHIP" && (
             <>Related content was previously observed among TurnitPlus submissions (<strong>{Math.round(match.containment * 100)}%</strong> containment), but ownership could not be determined for this submission.</>
           )}
+          {match.relationshipType === "TURNITPLUS_CORPUS_SOURCE" && (
+            <><strong>{Math.round(match.containment * 100)}%</strong> of this submission matches a TurnitPlus corpus reference source ({match.matchedWordCount.toLocaleString()} matched words). This is not another user&apos;s submission — no account or report is associated with this match.</>
+          )}
         </p>
         {match.passages.length > 0 && (
           <ul className="historical-match-passages">

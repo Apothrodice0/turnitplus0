@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Client, Transaction, InStatement } from "@libsql/client";
 import type { CorpusAdmissionConnectionFactory } from "./corpus-admission-gate";
+import { invalidateHistoricalMatchSnapshotsForRepresentation, bumpCorpusMatchGeneration } from "./report-historical-match";
 
 /**
  * Mutating actions for the admin-only corpus-admission dashboard
@@ -144,12 +145,60 @@ export type DeactivateParams = {
 };
 
 /**
+ * Looks up the shared-matching-index representation this decision's
+ * promotion (if any) resolved to — used only to know WHICH cached
+ * historical-match snapshots need invalidating after a deactivate/
+ * reactivate, never returned to any caller outside this module. null when
+ * this decision was never promoted (nothing to invalidate) or its
+ * promotion has not reached 'indexed' yet.
+ */
+async function findIndexedPromotionRepresentationId(tx: Transaction, decisionId: string): Promise<string | null> {
+  const result = await tx.execute({
+    sql: "SELECT representation_id FROM corpus_admission_promotions WHERE decision_id = ? AND status = 'indexed'",
+    args: [decisionId],
+  });
+  const row = result.rows[0] as unknown as { representation_id: string | null } | undefined;
+  return row?.representation_id ?? null;
+}
+
+/**
  * Sets accepted_representations.revoked_at for the fingerprint belonging to
  * this decision — excluding it from lib/corpus-admission-gate.ts's active
  * family matching, per that column's own reserved purpose. Idempotent: a
  * second deactivate on an already-inactive row is a safe no-op (no second
  * audit row) rather than an error, so two concurrent admin actions (or a
  * double-click) can never produce a misleading double audit trail.
+ *
+ * If this decision has an 'indexed' promotion, the same transaction does
+ * TWO things to keep cached historical-match snapshots correct — this
+ * file's own review corrected an earlier version of this comment that
+ * claimed targeted deletion alone was "sound and sufficient" here, which
+ * is wrong:
+ *   1. Targeted, per-representation deletion (unchanged) — an immediate-
+ *      effect OPTIMIZATION for the common, non-racing case: a report
+ *      already holding a cached match against this representation has it
+ *      removed in the SAME commit, not lazily on next view.
+ *   2. A GLOBAL generation bump (drizzle/0036) — the actual correctness
+ *      backstop, required because targeted deletion has a real race: a
+ *      concurrent getOrComputeHistoricalMatchSnapshot call can READ this
+ *      representation while it is still eligible (before this transaction
+ *      commits), then not WRITE its snapshot until AFTER this transaction
+ *      (and its targeted DELETE) has already committed — the DELETE runs
+ *      against a row that does not exist yet, finds nothing, and the
+ *      concurrent write lands moments later already stale, with nothing
+ *      left to ever invalidate it. The generation bump closes this: that
+ *      concurrent computation captured the OLD generation value before it
+ *      started (see lib/report-historical-match.ts's own header comment),
+ *      so its stale write is stamped with a generation this bump has
+ *      already moved past — correctly rejected as stale the very next time
+ *      anyone views that report, regardless of exactly when its write
+ *      landed relative to this commit.
+ * Unconditional whenever a promotion exists, regardless of whether OTHER
+ * active sources still back that representation (see
+ * lib/user-submission-corpus.ts's own multi-source eligibility comment) —
+ * determining in advance whether eligibility actually flipped would
+ * duplicate that query's own logic for no real benefit; an unnecessary
+ * recompute is harmless, a missed one is not.
  */
 export async function deactivateAcceptedRepresentation(params: DeactivateParams): Promise<DeactivateOutcome> {
   return runAdminActionTransaction(params.openConnection, async (tx) => {
@@ -165,6 +214,11 @@ export async function deactivateAcceptedRepresentation(params: DeactivateParams)
       sql: "UPDATE corpus_admission_accepted_representations SET revoked_at = CURRENT_TIMESTAMP WHERE id = ?",
       args: [rep.id],
     });
+    const representationId = await findIndexedPromotionRepresentationId(tx, params.decisionId);
+    if (representationId) {
+      await invalidateHistoricalMatchSnapshotsForRepresentation(tx, representationId);
+      await bumpCorpusMatchGeneration(tx);
+    }
     await insertAuditRow(tx, { adminUserId: params.adminUserId, action: "deactivate", decisionId: params.decisionId, acceptedRepresentationId: rep.id, reason: params.reason });
     return { outcome: "deactivated" as const, acceptedRepresentationId: rep.id };
   });
@@ -195,6 +249,19 @@ export type ReactivateParams = DeactivateParams;
  * same way lib/corpus-admission-gate.ts treats its own accepted-hash
  * UNIQUE violation as an expected, typed outcome rather than an internal
  * error.
+ *
+ * If this decision has an 'indexed' promotion, the same transaction also
+ * bumps the GLOBAL corpus-match generation (drizzle/0036) — no targeted,
+ * per-representation invalidation here at all (unlike
+ * deactivateAcceptedRepresentation, which does the bump AND a targeted
+ * delete as an immediate-effect optimization): reactivation ADDS
+ * eligibility back, and a report whose cached snapshot never referenced
+ * this representation at all (because it wasn't eligible the last time
+ * that report was viewed) could still textually match it now — a search
+ * over stored snapshot rows can never discover a report that's missing the
+ * very thing it should gain, so there is no useful targeted delete to run
+ * in this direction. See lib/report-historical-match.ts's own header
+ * comment for the full argument.
  */
 export async function reactivateAcceptedRepresentation(params: ReactivateParams): Promise<ReactivateOutcome> {
   return runAdminActionTransaction(params.openConnection, async (tx) => {
@@ -234,6 +301,14 @@ export async function reactivateAcceptedRepresentation(params: ReactivateParams)
       throw err;
     }
 
+    // Global generation bump — see this function's own header comment for
+    // why this must NOT be the same targeted invalidation deactivate uses.
+    // Gated on an indexed promotion actually existing (same lookup
+    // deactivate uses) purely to skip a pointless global bump when
+    // reactivating a decision that was never promoted into the shared
+    // index at all — reactivation itself always proceeds either way.
+    const representationId = await findIndexedPromotionRepresentationId(tx, params.decisionId);
+    if (representationId) await bumpCorpusMatchGeneration(tx);
     await insertAuditRow(tx, { adminUserId: params.adminUserId, action: "reactivate", decisionId: params.decisionId, acceptedRepresentationId: rep.id, reason: params.reason });
     return { outcome: "reactivated" as const, acceptedRepresentationId: rep.id };
   });

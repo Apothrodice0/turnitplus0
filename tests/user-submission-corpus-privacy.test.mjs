@@ -145,7 +145,13 @@ test("A/B: representation and candidate-search results never carry an account id
   assert.ok(!serialized.includes(accountA), "Account A's id must never appear in a candidate-search result");
   assert.ok(!serialized.includes(accountB), "Account B's id must never appear in a candidate-search result");
   for (const candidate of candidates) {
-    assert.deepEqual(Object.keys(candidate).sort(), ["canonicalSha256", "containment", "representationId", "sharedShingleCount", "wordCount"].sort());
+    // isActivelyPromoted (lib/corpus-admission-promotion.ts's own
+    // eligibility signal) added to this shape — still just a boolean, never
+    // an identity-shaped field. Asserted explicitly, not just permitted by
+    // omission, so a future field addition here still has to touch this
+    // test deliberately.
+    assert.deepEqual(Object.keys(candidate).sort(), ["canonicalSha256", "containment", "isActivelyPromoted", "representationId", "sharedShingleCount", "wordCount"].sort());
+    assert.equal(typeof candidate.isActivelyPromoted, "boolean");
   }
 });
 

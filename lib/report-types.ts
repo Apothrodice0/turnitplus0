@@ -107,7 +107,8 @@ export type HistoricalMatchPassage = {
 };
 
 export type HistoricalSubmissionMatchEntry = {
-  relationshipType: "SELF" | "PRIOR_SUBMISSION" | "UNKNOWN_RELATIONSHIP";
+  /** TURNITPLUS_CORPUS_SOURCE: matched an actively promoted corpus-admission source, not any account's own submission — see lib/user-submission-matching.ts's own RelationshipType comment. Gated by CORPUS_SOURCE_MATCHING_ENABLED; stripped at read time when that flag is off, regardless of what a cached snapshot contains — see lib/report-historical-match.ts. */
+  relationshipType: "SELF" | "PRIOR_SUBMISSION" | "UNKNOWN_RELATIONSHIP" | "TURNITPLUS_CORPUS_SOURCE";
   matchedRepresentationId: string;
   matchType: "EXACT_CANONICAL_MATCH" | "STRONG_TEXT_MATCH";
   containment: number;
@@ -135,6 +136,8 @@ export type ReportHistoricalSubmissionMatch = {
   matcherVersion: string;
   fingerprintVersion: string;
   canonicalizationVersion: string;
+  /** True when the underlying matchAgainstUserSubmissionCorpus call hit its soft time budget before finishing every candidate — see that function's own TIMEOUT HONESTY comment. A partial result is treated as never-final (see lib/report-historical-match.ts's own isCurrentVersion caller) — always recomputed on next view, the same "never cache the incomplete case as settled" rule NO_HISTORICAL_MATCH already gets. Absent/undefined means the computation ran to completion. */
+  partial?: boolean;
 };
 
 /**

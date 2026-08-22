@@ -330,6 +330,8 @@ export type CandidateCorpusRepresentation = {
   wordCount: number;
   sharedShingleCount: number;
   containment: number;
+  /** True iff an 'indexed' corpus_admission_promotions row exists for this representation whose own accepted_representation is not revoked — same EXISTS check this query's own eligibility filter already runs, exposed as a column so lib/user-submission-matching.ts can distinguish this from a real submission reference without a second query. See lib/corpus-admission-promotion.ts's own header comment. */
+  isActivelyPromoted: boolean;
 };
 
 /**
@@ -381,7 +383,12 @@ export async function findCandidateCorpusRepresentations(
   const hashList = [...shingleHashes];
   const placeholders = hashList.map(() => "?").join(",");
   const sharedResult = await client.execute({
-    sql: `SELECT s.representation_id AS representation_id, COUNT(*) AS shared, r.canonical_sha256 AS canonical_sha256, r.word_count AS word_count
+    sql: `SELECT s.representation_id AS representation_id, COUNT(*) AS shared, r.canonical_sha256 AS canonical_sha256, r.word_count AS word_count,
+            CASE WHEN EXISTS (
+              SELECT 1 FROM corpus_admission_promotions p
+              JOIN corpus_admission_accepted_representations ar ON ar.id = p.accepted_representation_id
+              WHERE p.representation_id = r.id AND p.status = 'indexed' AND ar.revoked_at IS NULL
+            ) THEN 1 ELSE 0 END AS is_actively_promoted
           FROM corpus_document_shingles s
           JOIN corpus_document_representations r ON r.id = s.representation_id
           WHERE s.fingerprint_version = ? AND s.shingle_hash IN (${placeholders})
@@ -403,7 +410,7 @@ export async function findCandidateCorpusRepresentations(
           LIMIT ?`,
     args: [fingerprintVersion, ...hashList, minSharedShingles, limit],
   });
-  type RawSharedRow = { representation_id: string; shared: number | bigint; canonical_sha256: string; word_count: number };
+  type RawSharedRow = { representation_id: string; shared: number | bigint; canonical_sha256: string; word_count: number; is_actively_promoted: number | bigint };
   const sharedRows = sharedResult.rows as unknown as RawSharedRow[];
   if (sharedRows.length === 0) return [];
 
@@ -434,8 +441,33 @@ export async function findCandidateCorpusRepresentations(
       wordCount: Number(row.word_count),
       sharedShingleCount: shared,
       containment: containment(shared, targetCount, candidateTotal),
+      isActivelyPromoted: Number(row.is_actively_promoted) === 1,
     };
   });
+}
+
+/**
+ * Standalone single-representation form of the same EXISTS check
+ * findCandidateCorpusRepresentations' own query already runs inline — for
+ * lib/user-submission-matching.ts's defensive exact-canonical-hash addition,
+ * which builds a CandidateCorpusRepresentation from
+ * findReusableRepresentationByCanonicalHash (a different, simpler lookup
+ * with no promotion-awareness of its own) rather than from this file's own
+ * candidate-search query. Boolean-only, same discipline as
+ * summarizeSubmissionOwnership — never returns decision_id, source_ref, or
+ * any other corpus-admission-domain identifier.
+ */
+export async function isRepresentationActivelyPromoted(client: Client, representationId: string): Promise<boolean> {
+  const result = await client.execute({
+    sql: `SELECT EXISTS (
+            SELECT 1 FROM corpus_admission_promotions p
+            JOIN corpus_admission_accepted_representations ar ON ar.id = p.accepted_representation_id
+            WHERE p.representation_id = ? AND p.status = 'indexed' AND ar.revoked_at IS NULL
+          ) AS is_actively_promoted`,
+    args: [representationId],
+  });
+  const row = result.rows[0] as unknown as { is_actively_promoted: number | bigint } | undefined;
+  return row !== undefined && Number(row.is_actively_promoted) === 1;
 }
 
 /** Idempotent (INSERT OR IGNORE) — safe to call more than once for the same representation/version, matching lib/document-family.ts's recordDocumentIdentityShingles convention. */
