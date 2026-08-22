@@ -41,6 +41,8 @@ export type CorpusAdmissionAdminListRow = {
   lastError: string | null;
   createdAt: string;
   updatedAt: string;
+  /** null when this decision was never ACCEPTed (or has no job/decision at all) — promotion never applies. See lib/corpus-admission-promotion.ts. */
+  promotionStatus: "staged" | "indexed" | "failed" | "skipped" | null;
 };
 
 type RawCombinedRow = {
@@ -56,6 +58,7 @@ type RawCombinedRow = {
   last_error: string | null;
   created_at: string;
   updated_at: string;
+  promotion_status: string | null;
 };
 
 function deriveStatus(decision: string | null, jobStatus: string | null): CorpusAdmissionAdminStatus {
@@ -85,27 +88,34 @@ function toListRow(row: RawCombinedRow): CorpusAdmissionAdminListRow {
     lastError: row.last_error,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    promotionStatus: row.promotion_status as CorpusAdmissionAdminListRow["promotionStatus"],
   };
 }
 
 // Shared CTE: every corpus-admission "attempt" the admin dashboard should
 // ever show, decision-driven rows first (job LEFT JOINed in, absent if
 // deleted), then job-only rows that never reached a decision at all.
+// promotion_status is read-only, admin-dashboard-only visibility into
+// lib/corpus-admission-promotion.ts's own table — never joined by anything
+// outside this admin surface.
 const COMBINED_CTE = `
   WITH combined AS (
     SELECT
       d.id AS decision_id, j.id AS job_id, d.decision AS decision, j.status AS job_status,
       d.detected_language, d.extracted_word_count, d.quality_score,
       j.account_id, j.attempt_count, j.last_error,
-      d.created_at AS created_at, COALESCE(j.updated_at, d.created_at) AS updated_at
+      d.created_at AS created_at, COALESCE(j.updated_at, d.created_at) AS updated_at,
+      p.status AS promotion_status
     FROM corpus_admission_decisions d
     LEFT JOIN corpus_admission_report_jobs j ON j.decision_id = d.id
+    LEFT JOIN corpus_admission_promotions p ON p.decision_id = d.id
     UNION ALL
     SELECT
       NULL, j.id, NULL, j.status,
       NULL, NULL, NULL,
       j.account_id, j.attempt_count, j.last_error,
-      j.created_at, j.updated_at
+      j.created_at, j.updated_at,
+      NULL
     FROM corpus_admission_report_jobs j
     WHERE j.decision_id IS NULL
   )
@@ -228,6 +238,11 @@ export type CorpusAdmissionAdminDetail = {
   revokedAt: string | null;
   // Never the text itself — see lib/corpus-admission-admin-actions.ts's revealRetainedTextPreview.
   hasRetainedText: boolean;
+  // Promotion into the shared matching index (lib/corpus-admission-promotion.ts) — all null when this decision was never ACCEPTed.
+  promotionStatus: "staged" | "indexed" | "failed" | "skipped" | null;
+  promotionAttemptCount: number | null;
+  promotionLastError: string | null;
+  promotionRepresentationId: string | null;
 };
 
 type RawDetailRow = {
@@ -263,6 +278,10 @@ type RawDetailRow = {
   accepted_representation_id: string | null;
   revoked_at: string | null;
   content_store_id: string | null;
+  promotion_status: string | null;
+  promotion_attempt_count: number | bigint | null;
+  promotion_last_error: string | null;
+  promotion_representation_id: string | null;
 };
 
 const DETAIL_SELECT_BY_DECISION = `
@@ -277,11 +296,13 @@ const DETAIL_SELECT_BY_DECISION = `
     j.created_at AS job_created_at, j.updated_at AS job_updated_at,
     j.account_id, j.device_key, j.report_id,
     ar.id AS accepted_representation_id, ar.revoked_at,
-    cs.id AS content_store_id
+    cs.id AS content_store_id,
+    p.status AS promotion_status, p.attempt_count AS promotion_attempt_count, p.last_error AS promotion_last_error, p.representation_id AS promotion_representation_id
   FROM corpus_admission_decisions d
   LEFT JOIN corpus_admission_report_jobs j ON j.decision_id = d.id
   LEFT JOIN corpus_admission_accepted_representations ar ON ar.decision_id = d.id
   LEFT JOIN corpus_admission_content_store cs ON cs.decision_id = d.id
+  LEFT JOIN corpus_admission_promotions p ON p.decision_id = d.id
   WHERE d.id = ?
 `;
 
@@ -297,7 +318,8 @@ const DETAIL_SELECT_BY_JOB_ONLY = `
     j.created_at AS job_created_at, j.updated_at AS job_updated_at,
     j.account_id, j.device_key, j.report_id,
     NULL AS accepted_representation_id, NULL AS revoked_at,
-    NULL AS content_store_id
+    NULL AS content_store_id,
+    NULL AS promotion_status, NULL AS promotion_attempt_count, NULL AS promotion_last_error, NULL AS promotion_representation_id
   FROM corpus_admission_report_jobs j
   WHERE j.id = ? AND j.decision_id IS NULL
 `;
@@ -418,5 +440,9 @@ export async function getCorpusAdmissionDecisionDetail(client: Client, rowId: st
     acceptedRepresentationActive: raw.accepted_representation_id === null ? null : raw.revoked_at === null,
     revokedAt: raw.revoked_at,
     hasRetainedText: raw.content_store_id !== null,
+    promotionStatus: raw.promotion_status as CorpusAdmissionAdminDetail["promotionStatus"],
+    promotionAttemptCount: raw.promotion_attempt_count === null ? null : Number(raw.promotion_attempt_count),
+    promotionLastError: raw.promotion_last_error,
+    promotionRepresentationId: raw.promotion_representation_id,
   };
 }

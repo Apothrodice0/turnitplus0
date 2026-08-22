@@ -40,6 +40,10 @@ type Detail = {
   acceptedRepresentationActive: boolean | null;
   revokedAt: string | null;
   hasRetainedText: boolean;
+  promotionStatus: "staged" | "indexed" | "failed" | "skipped" | null;
+  promotionAttemptCount: number | null;
+  promotionLastError: string | null;
+  promotionRepresentationId: string | null;
 };
 
 /** Client-side detail view for /admin/corpus/[id] — hits GET /api/admin/corpus/[id], and POST .../preview | .../deactivate | .../reactivate, all independently gated by getAdminSessionUser. */
@@ -210,6 +214,18 @@ export function AdminCorpusDetail({ rowId }: { rowId: string }) {
             <button type="button" onClick={() => runAction("reactivate")} disabled={actionLoading}>Reactivate</button>
           )}
           {actionError && <p role="alert">{actionError}</p>}
+        </section>
+      )}
+
+      {detail.acceptedRepresentationId && (
+        <section>
+          <h2>Promotion (matching index)</h2>
+          <ul>
+            <li>Status: {detail.promotionStatus ?? "not yet staged"}</li>
+            <li>Attempts: {detail.promotionAttemptCount ?? "—"}</li>
+            <li>Last error: {detail.promotionLastError ?? "none"}</li>
+            <li>Representation id: {detail.promotionRepresentationId ?? "—"}</li>
+          </ul>
         </section>
       )}
     </>

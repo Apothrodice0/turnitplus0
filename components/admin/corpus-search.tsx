@@ -15,6 +15,7 @@ type ListRow = {
   lastError: string | null;
   createdAt: string;
   updatedAt: string;
+  promotionStatus: "staged" | "indexed" | "failed" | "skipped" | null;
 };
 
 type ListResponse = { rows: ListRow[]; page: number; pageSize: number; totalCount: number };
@@ -98,6 +99,7 @@ export function AdminCorpusSearch() {
                   <th>Account</th>
                   <th>Attempts</th>
                   <th>Created</th>
+                  <th>Promotion</th>
                   <th></th>
                 </tr>
               </thead>
@@ -111,6 +113,7 @@ export function AdminCorpusSearch() {
                     <td>{row.accountId ?? "unknown"}</td>
                     <td>{row.attemptCount ?? "—"}</td>
                     <td>{row.createdAt}</td>
+                    <td>{row.promotionStatus ?? "—"}</td>
                     <td>
                       <Link href={`/admin/corpus/${encodeURIComponent(row.rowId)}`}>Inspect</Link>
                     </td>
@@ -118,7 +121,7 @@ export function AdminCorpusSearch() {
                 ))}
                 {result.rows.length === 0 && (
                   <tr>
-                    <td colSpan={8}>No matching rows.</td>
+                    <td colSpan={9}>No matching rows.</td>
                   </tr>
                 )}
               </tbody>

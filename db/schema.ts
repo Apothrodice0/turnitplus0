@@ -1094,6 +1094,35 @@ export const corpus_admission_admin_audit_log = sqliteTable(
   ],
 );
 
+// Promotion of an ACCEPTed corpus-admission decision's retained text into
+// the shared plagiarism-matching index (corpus_document_representations /
+// corpus_document_shingles, drizzle/0034) — see
+// lib/corpus-admission-promotion.ts's own header comment. No account/report-
+// shaped column on purpose: decision_id/accepted_representation_id both
+// resolve only through the admin-only corpus_admission_* tables.
+export const corpus_admission_promotions = sqliteTable(
+  "corpus_admission_promotions",
+  {
+    id: text("id").primaryKey(),
+    decision_id: text("decision_id").notNull().references(() => corpus_admission_decisions.id),
+    accepted_representation_id: text("accepted_representation_id").notNull().references(() => corpus_admission_accepted_representations.id),
+    representation_id: text("representation_id").references(() => corpus_document_representations.id),
+    link_type: text("link_type"),
+    fingerprint_version: text("fingerprint_version"),
+    status: text("status").notNull().default("staged"),
+    claimed_at: text("claimed_at"),
+    attempt_count: integer("attempt_count").notNull().default(0),
+    last_error: text("last_error"),
+    created_at: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    updated_at: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("ux_corpus_admission_promotions_decision_id").on(table.decision_id),
+    index("idx_corpus_admission_promotions_sweep_candidates").on(table.status, table.claimed_at),
+    index("idx_corpus_admission_promotions_representation_id").on(table.representation_id),
+  ],
+);
+
 // Export nothing else — Drizzle will consume these definitions for migrations.
 export {};
 

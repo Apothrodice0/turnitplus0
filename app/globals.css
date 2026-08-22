@@ -6587,7 +6587,7 @@ main.report-main {
 .developer-page pre { background: var(--sidebar); color: #d7e6ea; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 11px; line-height: 1.5; max-height: 480px; overflow-y: auto; }
 .developer-page code { font-size: 12px; }
 .developer-table-scroll { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
-.developer-table { width: 100%; min-width: 760px; border-collapse: collapse; font-size: 12px; }
+.developer-table { width: 100%; min-width: 860px; border-collapse: collapse; font-size: 12px; }
 .developer-table th, .developer-table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--soft-line); white-space: nowrap; }
 .developer-table th { color: var(--muted); font-weight: 600; }
 .developer-lookup form { display: flex; gap: 8px; margin: 14px 0 22px; }

@@ -336,12 +336,37 @@ export type CandidateCorpusRepresentation = {
  * "Which historical reusable document representations have matching
  * passages with this submission?" (this phase's own task description,
  * section 11) — representation-level only. This query never joins to
- * document_identities, corpus_submission_references, or users, so it
- * structurally cannot return an account id or email; a future E8B
- * relationship classifier (SELF / PRIOR_SUBMISSION / CROSS_ACCOUNT) would
- * resolve ownership separately, only for representations this function
- * already identified as candidates. No live comparison happens here — this
- * only reads the already-recorded shingle index.
+ * document_identities, corpus_submission_references (beyond the existence
+ * check below), or users, so it structurally cannot return an account id or
+ * email; a future E8B relationship classifier (SELF / PRIOR_SUBMISSION /
+ * CROSS_ACCOUNT) would resolve ownership separately, only for
+ * representations this function already identified as candidates. No live
+ * comparison happens here — this only reads the already-recorded shingle
+ * index.
+ *
+ * Eligibility is source-aware (lib/corpus-admission-promotion.ts's own
+ * header comment has the full argument) — a representation is a candidate
+ * if ANY of:
+ *   1. a real submission reference exists (corpus_submission_references —
+ *      always eligible, there is no revocation concept for those), OR
+ *   2. an 'indexed' promotion exists whose own
+ *      corpus_admission_accepted_representations row is not revoked
+ *      (deliberately NOT "does THIS promotion say active" — a
+ *      representation can be promoted by more than one decision, an exact
+ *      canonical duplicate, so deactivating any single decision's
+ *      fingerprint must never hide a representation another still-active
+ *      source also backs), OR
+ *   3. no promotion with link_type = 'NEW_CONTENT_REPRESENTATION' exists
+ *      for it at all — i.e. this representation was never CREATED by the
+ *      promotion pipeline in the first place (a legacy/pre-existing/
+ *      built-in corpus row seeded some other way). Condition 3 is what
+ *      keeps such rows permanently eligible: nothing in this system has
+ *      ever "deactivated" them, so nothing should ever be able to hide
+ *      them. It does NOT rescue a representation the promotion pipeline
+ *      genuinely created and fully deactivated — for that row, condition 3
+ *      is false precisely because its own NEW_CONTENT_REPRESENTATION
+ *      promotion row does exist (durable, never deleted), which is exactly
+ *      why conditions 1/2 are the ones deciding its fate instead.
  */
 export async function findCandidateCorpusRepresentations(
   client: Client,
@@ -360,6 +385,18 @@ export async function findCandidateCorpusRepresentations(
           FROM corpus_document_shingles s
           JOIN corpus_document_representations r ON r.id = s.representation_id
           WHERE s.fingerprint_version = ? AND s.shingle_hash IN (${placeholders})
+            AND (
+              EXISTS (SELECT 1 FROM corpus_submission_references sr WHERE sr.representation_id = r.id)
+              OR EXISTS (
+                SELECT 1 FROM corpus_admission_promotions p
+                JOIN corpus_admission_accepted_representations ar ON ar.id = p.accepted_representation_id
+                WHERE p.representation_id = r.id AND p.status = 'indexed' AND ar.revoked_at IS NULL
+              )
+              OR NOT EXISTS (
+                SELECT 1 FROM corpus_admission_promotions p2
+                WHERE p2.representation_id = r.id AND p2.link_type = 'NEW_CONTENT_REPRESENTATION'
+              )
+            )
           GROUP BY s.representation_id
           HAVING COUNT(*) >= ?
           ORDER BY shared DESC

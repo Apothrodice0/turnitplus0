@@ -3,6 +3,10 @@
     {
       "path": "/api/internal/corpus-admission-sweep",
       "schedule": "0 3 * * *"
+    },
+    {
+      "path": "/api/internal/corpus-admission-promotion-sweep",
+      "schedule": "0 4 * * *"
     }
   ]
 }
