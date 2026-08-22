@@ -1,12 +1,8 @@
 import { NextResponse } from 'next/server';
 import { getReportsDbClient } from '../../../../lib/reports-db';
 import { checkRate } from '../../../../lib/rate-limit';
+import { clientIpFrom } from '../../../../lib/client-ip';
 import { SESSION_COOKIE_NAME, parseCookie, destroySessionByToken, clearSessionCookie } from '../../../../lib/auth-session';
-
-function clientIpFrom(request: Request) {
-  const forwarded = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || 'unknown';
-  return forwarded.split(',')[0].trim();
-}
 
 // Best-effort/idempotent, matching this codebase's fail-soft ethos: a
 // missing or already-invalid cookie is still treated as a successful

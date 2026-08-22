@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getReportsDbClient } from '../../../../lib/reports-db';
 import { checkRate } from '../../../../lib/rate-limit';
+import { clientIpFrom } from '../../../../lib/client-ip';
 import { getSessionUser } from '../../../../lib/auth-session';
 import { isE8sReuseContextAllowlisted } from '../../../../lib/e8s-visibility';
 import { declareReuseContext, type DeclaredContext } from '../../../../lib/reuse-context-declarations';
@@ -27,11 +28,6 @@ const DECLARED_CONTEXTS: readonly DeclaredContext[] = [
   'AUTHORIZED_ARCHIVAL_COPY',
   'OTHER_AUTHORIZED_REUSE',
 ];
-
-function clientIpFrom(request: Request) {
-  const forwarded = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || 'unknown';
-  return forwarded.split(',')[0].trim();
-}
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0;

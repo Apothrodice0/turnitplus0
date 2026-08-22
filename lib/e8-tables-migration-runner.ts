@@ -9,10 +9,12 @@ import type { Client } from "@libsql/client";
  * A-E8 tables, the privacy/data-lifecycle hardening columns 0023 adds, and
  * the durable rate-limiting table 0024 adds; extended to include 0025-0026
  * — the developer/admin role column and academic-search diagnostics table
- * — and further extended to include 0027, the room/slot ownership column
- * that replaces the old id%10 visual grouping — as a deliberate, reviewed
- * decision, not an automatic side effect of adding those migration files;
- * see this file's own EXPECTED_MIGRATION_SHA256 for how future extensions
+ * — and further extended to include 0027 (the room/slot ownership column
+ * that replaces the old id%10 visual grouping) and 0028 (the genuine
+ * AI-lifecycle status column that distinguishes a permanently failed check
+ * from one still in flight — production audit fix) — as a deliberate,
+ * reviewed decision, not an automatic side effect of adding those migration
+ * files; see this file's own EXPECTED_MIGRATION_SHA256 for how future extensions
  * are meant to be reviewed the same way) to a
  * database that is otherwise already at the pre-0012 baseline. Deliberately
  * separate from lib/ingest.ts's applyMigrationsLibsql(), which replays every
@@ -50,6 +52,7 @@ export const TARGET_MIGRATIONS = [
   "0025_users_role.sql",
   "0026_academic_search_run_diagnostics.sql",
   "0027_saved_reports_room_number.sql",
+  "0028_saved_reports_ai_status.sql",
 ] as const;
 
 export type TargetMigrationFile = (typeof TARGET_MIGRATIONS)[number];
@@ -96,6 +99,10 @@ export const EXPECTED_TABLES_BY_MIGRATION: Record<TargetMigrationFile, string[]>
   // (plus a backfill UPDATE and an index) to the already-existing
   // saved_reports table (see EXPECTED_COLUMNS_BY_MIGRATION below).
   "0027_saved_reports_room_number.sql": [],
+  // Like 0023/0025/0027, 0028 creates no new tables — it only adds one
+  // column (saved_reports.ai_status) to the already-existing saved_reports
+  // table (see EXPECTED_COLUMNS_BY_MIGRATION below).
+  "0028_saved_reports_ai_status.sql": [],
 };
 
 export const ALL_TARGET_TABLES: string[] = TARGET_MIGRATIONS.flatMap((m) => EXPECTED_TABLES_BY_MIGRATION[m]);
@@ -122,6 +129,9 @@ export const EXPECTED_COLUMNS_BY_MIGRATION: Partial<Record<TargetMigrationFile, 
   ],
   "0027_saved_reports_room_number.sql": [
     { table: "saved_reports", column: "room_number" },
+  ],
+  "0028_saved_reports_ai_status.sql": [
+    { table: "saved_reports", column: "ai_status" },
   ],
 };
 
@@ -163,6 +173,7 @@ export const EXPECTED_MIGRATION_SHA256: Record<TargetMigrationFile, string> = {
   "0025_users_role.sql": "77856c89d05da4973ef95a52d31062a10f3b3b53fc176965fecc024f6004da94",
   "0026_academic_search_run_diagnostics.sql": "f0ebebb4cd0a9b2e4f36560dc9990fb439a1bc4d8146842a932870934838269b",
   "0027_saved_reports_room_number.sql": "14caa98beb8b566372af7f6b21b24f9cb9d4a7c3db84396b4cd59b360947910d",
+  "0028_saved_reports_ai_status.sql": "4b9f5c2bb57a156be7ff8273763b2d516fbde0d87b9e9298e12578fdc0a23d21",
 };
 
 const DESTRUCTIVE_PATTERN = /\b(DROP\s+TABLE|DROP\s+INDEX|ALTER\s+TABLE\s+\S+\s+DROP|DELETE\s+FROM|TRUNCATE)\b/gi;

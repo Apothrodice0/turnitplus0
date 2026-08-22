@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getReportsDbClient } from '../../../../lib/reports-db';
 import { checkRate } from '../../../../lib/rate-limit';
+import { clientIpFrom } from '../../../../lib/client-ip';
 import { getSessionUser } from '../../../../lib/auth-session';
 import { isE8sReuseContextAllowlisted } from '../../../../lib/e8s-visibility';
 import { confirmReuseContext } from '../../../../lib/reuse-context-declarations';
@@ -20,11 +21,6 @@ import { confirmReuseContext } from '../../../../lib/reuse-context-declarations'
  */
 
 export const dynamic = 'force-dynamic';
-
-function clientIpFrom(request: Request) {
-  const forwarded = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || 'unknown';
-  return forwarded.split(',')[0].trim();
-}
 
 export async function POST(request: Request) {
   try {

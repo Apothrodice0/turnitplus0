@@ -28,6 +28,7 @@ type Props = {
 function statusLabel(status: RoomStatus): string {
   if (status === "ready") return "Report ready";
   if (status === "processing") return "Processing…";
+  if (status === "failed") return "AI check failed — tap to retry";
   return "Ready for a new check";
 }
 
@@ -80,11 +81,18 @@ export function ReportRoomsBrowser({ accountEmail, onTotalCountChange }: Props) 
 
   return (
     <div className="report-rooms-list">
+      {/* prefetch=false: every room row renders at once (up to 40 for an
+          admin account), and each is a force-dynamic page that does a real
+          rate-limited DB read (see app/reports/rooms/[room]/page.tsx). Next's
+          default viewport prefetching would fire all of those the instant
+          this list is visible, burning the account's own rate-limit budget
+          before any room is actually opened. */}
       {roomIndex.map((entry) => (
         <Link
           key={entry.room}
           href={`/reports/rooms/${entry.room}`}
           className={`report-room-row report-room-row-${entry.status}`}
+          prefetch={false}
         >
           <span className="report-room-row-label">
             <strong>Room {entry.room + 1}</strong>

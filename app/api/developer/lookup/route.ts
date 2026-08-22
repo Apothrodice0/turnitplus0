@@ -1,17 +1,13 @@
 import { NextResponse } from 'next/server';
 import { getReportsDbClient } from '../../../../lib/reports-db';
 import { checkRate } from '../../../../lib/rate-limit';
+import { clientIpFrom } from '../../../../lib/client-ip';
 import { getAdminSessionUser } from '../../../../lib/auth-session';
 import { searchArticleHistory } from '../../../../lib/developer-repo';
 
 /** Article History / Lookup — search by title, DOI, URL, hash/fingerprint, author, or document/report id. See lib/developer-repo.ts's searchArticleHistory for the exact matching rules. */
 
 const MAX_QUERY_LENGTH = 500;
-
-function clientIpFrom(request: Request) {
-  const forwarded = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || 'unknown';
-  return forwarded.split(',')[0].trim();
-}
 
 export async function GET(request: Request) {
   try {

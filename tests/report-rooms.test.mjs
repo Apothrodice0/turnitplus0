@@ -86,7 +86,7 @@ function samplePayload(id, overrides = {}) {
  * window, so a genuinely complete report is the right default — pass
  * `aiScore: null` explicitly (see scenario 8) to exercise "processing".
  */
-async function postReport(deviceKey, id, { cookie, room, payloadOverrides = {}, createdAt, aiScore = 12, aiTone = 'low' } = {}) {
+async function postReport(deviceKey, id, { cookie, room, payloadOverrides = {}, createdAt, aiScore = 12, aiTone = 'low', aiStatus } = {}) {
   const ip = `report-rooms-post-${++ipCounter}`;
   await resetRateForTest(ip);
   const payload = samplePayload(id, payloadOverrides);
@@ -106,6 +106,7 @@ async function postReport(deviceKey, id, { cookie, room, payloadOverrides = {}, 
       scoreBand: 'Low',
       aiScore,
       aiTone,
+      aiStatus,
       room,
       payload,
     }),
@@ -404,6 +405,115 @@ async function getRoom(cookie, room) {
   assert.equal(readyRoom9.status, 'ready');
 
   console.log('a room mid-AI-analysis reports itself as processing (never a fake ready), still counts as occupied, and flips to ready once ai_score lands');
+}
+
+// 9. Production audit fix: a genuinely FAILED AI check (ai_status='failed',
+// ai_score still null) is its own distinct status — never "processing"
+// (which would leave it stuck-looking for the rest of the room's 24h
+// cycle) and never silently "ready" with a blank score. This is a real,
+// terminal outcome, distinguishable from "still running" (aiScore null,
+// aiStatus 'processing' or unset) purely from the persisted columns — see
+// lib/report-rooms.ts's deriveRoomStatus.
+{
+  const signupRes = await signup({ email: 'rooms-ai-failed@example.com', password: 'correct-horse-9', username: 'roomsaifailed', deviceKey: 'device-failed-1' });
+  const cookie = extractCookie(signupRes);
+
+  // The similarity-only first save: genuinely still processing.
+  const id = 1100000000001;
+  const first = await postReport('device-failed-1', id, { cookie, room: 1, aiScore: null, aiTone: null, aiStatus: 'processing' });
+  assert.equal(first.status, 200);
+
+  const processingRoomRes = await getRoom(cookie, 1);
+  const processingRoomBody = await processingRoomRes.json();
+  assert.equal(processingRoomBody.status, 'processing', 'an explicit aiStatus of "processing" must still read as processing, exactly like the legacy (unset) case');
+
+  // The AI-enriched resave lands, but the AI check itself genuinely failed
+  // (worker error / unsupported document) — ai_score stays null, but
+  // ai_status now says so explicitly.
+  const resave = await postReport('device-failed-1', id, { cookie, room: 1, aiScore: null, aiTone: 'unavailable', aiStatus: 'failed', payloadOverrides: { title: 'ai-failed.pdf' } });
+  assert.equal(resave.status, 200);
+
+  const failedRoomRes = await getRoom(cookie, 1);
+  const failedRoomBody = await failedRoomRes.json();
+  assert.equal(failedRoomBody.status, 'failed', 'a genuinely failed AI check must read as "failed", never "processing" or a fake "ready"');
+  assert.equal(failedRoomBody.report.id, String(id));
+  assert.equal(failedRoomBody.report.aiScore, null, 'a failed AI check must never carry a fabricated score');
+  assert.equal(failedRoomBody.report.title, 'ai-failed.pdf', 'the similarity result itself must remain intact and unaffected by the AI failure');
+
+  const failedIndexRes = await getRoomIndex(cookie);
+  const failedIndexBody = await failedIndexRes.json();
+  const failedRoom1 = failedIndexBody.rooms.find((r) => r.room === 1);
+  assert.equal(failedRoom1.status, 'failed', 'the lightweight room index must also report "failed", not "processing", without needing to open the room');
+
+  // A "failed" room still counts as occupied for 409 purposes — it is not
+  // a free slot just because the AI half didn't produce a score.
+  const secondUpload = await postReport('device-failed-1', 1100000000002, { cookie, room: 1 });
+  assert.equal(secondUpload.status, 409, 'a room whose AI check failed must still refuse a second upload — the similarity result is a real, current occupant');
+
+  // Retry: the AI check is re-run and this time succeeds — the room must
+  // flip cleanly from "failed" to "ready", the same one-room-one-slot row
+  // updated in place (never a duplicate).
+  const retrySuccess = await postReport('device-failed-1', id, { cookie, room: 1, aiScore: 41, aiTone: 'review', aiStatus: 'ready', payloadOverrides: { title: 'ai-failed.pdf' } });
+  assert.equal(retrySuccess.status, 200);
+
+  const recoveredRoomRes = await getRoom(cookie, 1);
+  const recoveredRoomBody = await recoveredRoomRes.json();
+  assert.equal(recoveredRoomBody.status, 'ready', 'a retried AI check that succeeds must flip the room to ready');
+  assert.equal(recoveredRoomBody.report.aiScore, 41);
+
+  // Legacy/unset aiStatus (every pre-0028 row, and any client that never
+  // sends the field) must still fall back to the original binary
+  // ai_score-null-or-not derivation, completely unaffected by this feature.
+  const legacyId = 1100000000009;
+  const legacyProcessing = await postReport('device-failed-1', legacyId, { cookie, room: 2, aiScore: null, aiTone: null, aiStatus: undefined });
+  assert.equal(legacyProcessing.status, 200);
+  const legacyRoomRes = await getRoom(cookie, 2);
+  const legacyRoomBody = await legacyRoomRes.json();
+  assert.equal(legacyRoomBody.status, 'processing', 'a row with no aiStatus at all (legacy) must still resolve via the pre-existing ai_score-only fallback');
+
+  console.log('a genuinely failed AI check is its own distinct "failed" status (never a stuck "processing" or a fake "ready"), stays occupied for 409 purposes, can recover to "ready" via retry, and legacy rows with no aiStatus fall back unchanged');
+}
+
+// 10. Production audit fix: two genuinely CONCURRENT new uploads targeting
+// the SAME empty room (the same account open in two tabs, both starting a
+// check within the same window) must never both succeed — the occupancy
+// check and the insert are now one atomic transaction (see
+// app/api/reports/route.ts's own comment), so exactly one wins and the
+// other gets a real 409, instead of the room silently ending up with
+// whichever row happened to be written last while the "loser" believes its
+// own upload succeeded.
+{
+  const signupRes = await signup({ email: 'rooms-concurrent@example.com', password: 'correct-horse-10', username: 'roomsconcurrent', deviceKey: 'device-concurrent-1' });
+  const cookie = extractCookie(signupRes);
+
+  const idA = 1200000000001;
+  const idB = 1200000000002;
+  const [resA, resB] = await Promise.all([
+    postReport('device-concurrent-1', idA, { cookie, room: 7, payloadOverrides: { title: 'concurrent-a.pdf' } }),
+    postReport('device-concurrent-1', idB, { cookie, room: 7, payloadOverrides: { title: 'concurrent-b.pdf' } }),
+  ]);
+
+  const statuses = [resA.status, resB.status].sort();
+  assert.deepEqual(statuses, [200, 409], 'exactly one concurrent upload into the same empty room must succeed and the other must be refused — never both 200');
+
+  const roomRes = await getRoom(cookie, 7);
+  const roomBody = await roomRes.json();
+  assert.equal(roomBody.status, 'ready');
+  const winnerId = resA.status === 200 ? String(idA) : String(idB);
+  assert.equal(roomBody.report.id, winnerId, 'the room must hold exactly the winning upload, not the loser and not both');
+
+  // The loser's row must never have been silently inserted into this room
+  // either — confirm the DB itself holds only one row with room_number = 7
+  // for this account, not two.
+  const client = createClient({ url: `file:${dbFile}` });
+  const roomRows = await client.execute({
+    sql: 'SELECT id FROM saved_reports WHERE user_id = (SELECT id FROM users WHERE email = ?) AND room_number = 7',
+    args: ['rooms-concurrent@example.com'],
+  });
+  client.close();
+  assert.equal(roomRows.rows.length, 1, 'exactly one row may ever occupy room_number=7 for this account — the loser must never have been inserted at all');
+
+  console.log('two genuinely concurrent uploads into the same empty room never both succeed — exactly one wins, the other gets a real 409, and only the winner is ever persisted');
 }
 
 for (const suffix of ['', '-wal', '-shm']) {

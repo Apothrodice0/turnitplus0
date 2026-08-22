@@ -6,6 +6,7 @@ import Link from "next/link";
 import { LogIn } from "lucide-react";
 import { SESSION_COOKIE_NAME, getSessionUserByToken } from "@/lib/auth-session";
 import { checkRate } from "@/lib/rate-limit";
+import { clientIpFromHeaders } from "@/lib/client-ip";
 import { getReportsDbClient } from "@/lib/reports-db";
 import { findRoomOccupant, type RoomOccupantResult } from "@/lib/reports-repo";
 import { getRoomCountForRole } from "@/lib/report-rooms";
@@ -28,15 +29,21 @@ export const dynamic = "force-dynamic";
 type RoomPageResult =
   | { status: "found"; room: number; accountEmail: string; occupant: RoomOccupantResult }
   | { status: "invalid-room" }
-  | { status: "no-session" };
+  | { status: "no-session" }
+  | { status: "rate-limited"; retryAfterSeconds: number };
 
 const loadRoom = cache(async (roomParam: string): Promise<RoomPageResult> => {
   const token = (await cookies()).get(SESSION_COOKIE_NAME)?.value ?? null;
   if (!token) return { status: "no-session" };
 
-  const clientIp = (await headers()).get("x-forwarded-for")?.split(",")[0]?.trim() ?? "unknown";
+  // A session cookie is already present at this point, so a rejection here
+  // is never "not signed in" — it's this account's own general rate-limit
+  // bucket (lib/rate-limit.ts) being briefly exhausted. Must stay a distinct
+  // status, not "no-session": collapsing the two used to render "Sign in to
+  // view this room" to an already-signed-in user (production audit finding).
+  const clientIp = clientIpFromHeaders(await headers());
   const rate = await checkRate(clientIp);
-  if (!rate.allowed) return { status: "no-session" };
+  if (!rate.allowed) return { status: "rate-limited", retryAfterSeconds: rate.retryAfter };
 
   const client = await getReportsDbClient();
   try {
@@ -84,6 +91,22 @@ export default async function RoomPage({ params }: { params: Promise<{ room: str
               <LogIn aria-hidden="true" /> Go to login
             </Link>
           </div>
+        </div>
+      </section>
+    );
+  }
+
+  if (result.status === "rate-limited") {
+    return (
+      <section className="result-view report-detail-page">
+        <div className="report-not-found-wrap">
+          <section className="ai-analysis-message">
+            <strong>—</strong>
+            <div>
+              <p>You&apos;re signed in, but this device has made a lot of requests in a short time. Try this room again in about {result.retryAfterSeconds}s.</p>
+              <Link href="/#reports" className="button primary">Back to my reports</Link>
+            </div>
+          </section>
         </div>
       </section>
     );

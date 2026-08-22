@@ -192,6 +192,16 @@ export const saved_reports = sqliteTable(
     // lists this column, so a resave (the existing save-then-re-save-with-
     // enrichment pattern) can never move a report to a different room.
     room_number: integer("room_number"),
+    // AI-lifecycle status (0028): NULL for every report saved before this
+    // column existed — those fall back to the pre-existing binary
+    // ai_score-null-or-not derivation unchanged (see
+    // lib/report-rooms.ts's deriveRoomStatus). Going forward, one of
+    // 'processing' | 'ready' | 'failed', set explicitly by the client at
+    // each save (see app/reports/rooms/[room]/room-page-shell.tsx) — never
+    // reuses ai_tone, which is already 'unavailable' from the very first
+    // save onward and so cannot distinguish "still running" from
+    // "permanently failed" on its own.
+    ai_status: text("ai_status"),
   },
   (table) => [
     primaryKey({ columns: [table.device_key, table.id] }),

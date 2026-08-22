@@ -2733,6 +2733,10 @@ main.report-main {
   border-left: 3px solid #c98a2b;
 }
 
+.report-room-row-failed {
+  border-left: 3px solid #c0392b;
+}
+
 .report-room-row-empty {
   border-left: 3px solid var(--soft-line);
 }

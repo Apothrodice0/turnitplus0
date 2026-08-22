@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { ChevronLeft, Download, FileText } from "lucide-react";
-import { fetchReportRoomContents, fetchRemoteReport, saveReportRemote, type RoomContents } from "@/lib/reports-remote";
+import { fetchReportRoomContents, fetchRemoteReport, saveReportRemote, type ReportSummary, type RoomContents } from "@/lib/reports-remote";
 import { invalidateRoomCache } from "@/lib/report-rooms-cache";
 import { ROOM_CYCLE_MS } from "@/lib/report-rooms";
 import { storeReport, getStoredReportById } from "@/lib/report-store";
@@ -30,19 +30,26 @@ import { DocumentUploadPanel } from "@/components/reports/document-upload-panel"
  * completion" polling (when a report exists but analysis hasn't finished).
  *
  * "Ready" must actually mean ready: this component never presents a report
- * as complete while report.aiScore is still null. A room whose occupant's
- * AI-enriched resave hasn't landed yet (status "processing" — see
- * lib/report-rooms.ts's own header comment for why this is a real,
- * expected window, not a bug) shows an explicit "still analyzing" state
- * instead, and:
+ * as complete while report.aiScore is still null, and (production audit
+ * fix) never presents a genuinely failed AI check as either "still
+ * processing" or silently "ready" with a blank score — see
+ * saveEnrichedAiResult and lib/report-rooms.ts's deriveRoomStatus, the
+ * single place that decides "processing" vs "ready" vs "failed" from the
+ * persisted ai_score/ai_status columns. A room whose occupant's AI-enriched
+ * resave hasn't landed yet (status "processing" — see lib/report-rooms.ts's
+ * own header comment for why this is a real, expected window, not a bug)
+ * shows an explicit "still analyzing" state instead, and:
  *  - if THIS session is the one that just uploaded the document, the
  *    in-flight AI promise below updates local state directly the moment it
  *    resolves (no polling needed — we already have the answer in memory);
  *  - otherwise (a fresh page load / a different tab / a reload mid-analysis)
- *    it polls the lightweight room endpoint on a bounded interval until the
- *    status flips to "ready", then falls back to one full-report fetch to
- *    tell a genuine AI failure ("error") apart from still-in-flight, rather
- *    than polling forever.
+ *    it polls the lightweight room endpoint on a bounded interval — a
+ *    genuine AI failure arrives as its own "failed" status through this
+ *    same poll, no special-casing needed; a room still "processing" once
+ *    the poll is exhausted offers a manual recheck instead of polling
+ *    forever. A "failed" room offers its own manual retry (retryAiCheck)
+ *    that re-runs AI analysis from the already-extracted text, no
+ *    re-upload required.
  *
  * Duplicates the small AI-worker/cancellation plumbing
  * (analyzeAiText/pendingAiReject) that tests/ai-model-prep.test.mjs pins to
@@ -83,6 +90,43 @@ async function analyzeAiText(
   });
 }
 
+/**
+ * analyzeAiText, but never rejects — a worker crash/timeout becomes a real
+ * AiAnalysis with status "error" instead of an unhandled rejection, exactly
+ * matching how a genuinely "unsupported" (too little eligible text) result
+ * already looks structurally. Shared by both the automatic post-upload AI
+ * pass (runCheck below) and the manual retry (retryAiCheck) so the two can
+ * never drift into different failure-shape handling.
+ */
+async function runAiAnalysis(
+  text: string,
+  detectedLanguage: SimilarityReport["features"]["detectedLanguage"],
+): Promise<{ aiScore: number | null; aiAnalysis: AiAnalysis }> {
+  let aiPrepStage: AiPrepStage | null = "preparing";
+  try {
+    const aiAnalysis = await analyzeAiText(text, detectedLanguage, (stage) => {
+      aiPrepStage = stage;
+    });
+    return { aiScore: aiAnalysis.score, aiAnalysis };
+  } catch (error) {
+    return {
+      aiScore: null,
+      aiAnalysis: {
+        status: "error",
+        score: null,
+        model: AI_MODEL_VERSION,
+        engine: null,
+        threshold: AI_PASSAGE_THRESHOLD,
+        thresholdLogOdds: AI_PASSAGE_LOG_ODDS_THRESHOLD,
+        eligibleWordCount: 0,
+        analyzedWordCount: 0,
+        passages: [],
+        error: describeAiAnalysisError(error, aiPrepStage),
+      },
+    };
+  }
+}
+
 const POLL_INTERVAL_MS = 3000;
 const MAX_POLL_ATTEMPTS = 10;
 
@@ -111,13 +155,13 @@ type Props = {
 
 export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
   const [occupant, setOccupant] = useState<RoomContents>(initialOccupant);
-  const [aiUnavailable, setAiUnavailable] = useState(false);
   const [pollExhausted, setPollExhausted] = useState(false);
   const [file, setFile] = useState<File | null>(null);
   const [progress, setProgress] = useState(0);
   const [processingLabel, setProcessingLabel] = useState("Reading document content");
   const [isGeneratingReport, setIsGeneratingReport] = useState(false);
   const [downloadingReceipt, setDownloadingReceipt] = useState(false);
+  const [retryingAi, setRetryingAi] = useState(false);
   const [toast, setToast] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const generationLockRef = useRef(false);
@@ -130,11 +174,77 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
   async function handleDownloadReceipt(reportId: string) {
     setDownloadingReceipt(true);
     try {
+      // Production audit fix: both the "report not found anywhere" and the
+      // "downloadReceipt itself threw" cases (e.g. its own font-loading
+      // fetch failed) used to be entirely silent — the button just flipped
+      // back to "Receipt" with no indication anything went wrong.
       const local = await getStoredReportById<SimilarityReport>(reportId).catch(() => null);
       const full = local ?? (await fetchRemoteReport<SimilarityReport>(reportId));
-      if (full) await downloadReceipt(full);
+      if (full) {
+        await downloadReceipt(full);
+      } else {
+        notify("Couldn't find this report to generate a receipt. Please try again.");
+      }
+    } catch {
+      notify("Couldn't generate the receipt. Please try again.");
     } finally {
       setDownloadingReceipt(false);
+    }
+  }
+
+  /**
+   * Persists an AI result (success or genuine failure) onto an already-saved
+   * report and updates this room's occupant to match — the one place that
+   * ever marks a room "ready" or "failed", used by both the automatic
+   * post-upload pass (runCheck below) and the manual retry (retryAiCheck).
+   * Returns whether the save itself succeeded; the caller decides what to
+   * tell the user.
+   */
+  async function saveEnrichedAiResult(report: SimilarityReport, aiResult: { aiScore: number | null; aiAnalysis: AiAnalysis }): Promise<boolean> {
+    const enriched = { ...report, ...aiResult };
+    const enrichedSummary: ReportSummary = {
+      ...buildReportSummary(enriched),
+      aiStatus: aiResult.aiAnalysis.status === "complete" ? "ready" : "failed",
+    };
+    await storeReport(enriched);
+    const enrichedSaveResult = await saveReportRemote(enriched, enrichedSummary, undefined, room);
+    if (!enrichedSaveResult.ok) return false;
+    invalidateRoomCache(accountEmail, room);
+    setOccupant({
+      status: enrichedSummary.aiStatus === "ready" ? "ready" : "failed",
+      report: enrichedSummary,
+      cycleEndsAt: new Date(Date.parse(enrichedSummary.createdAt) + ROOM_CYCLE_MS).toISOString(),
+    });
+    return true;
+  }
+
+  /**
+   * Manual re-run for a room whose AI check genuinely failed (occupant.status
+   * === "failed") — the similarity result is already saved and unaffected;
+   * this only re-attempts the AI half, using the full report's own already-
+   * extracted text (no re-upload needed).
+   */
+  async function retryAiCheck(reportId: string) {
+    if (retryingAi) return;
+    setRetryingAi(true);
+    try {
+      const local = await getStoredReportById<SimilarityReport>(reportId).catch(() => null);
+      const full = local ?? (await fetchRemoteReport<SimilarityReport>(reportId));
+      if (!full) {
+        notify("Could not load this report to retry AI analysis. Please try again.");
+        return;
+      }
+      const aiResult = await runAiAnalysis(full.text, full.features.detectedLanguage);
+      const saved = await saveEnrichedAiResult(full, aiResult);
+      notify(
+        !saved
+          ? "Could not save the updated AI result. Please try again."
+          : aiResult.aiAnalysis.status === "complete"
+            ? "AI analysis complete."
+            : "AI analysis is still unavailable for this document.",
+      );
+    } finally {
+      setRetryingAi(false);
     }
   }
 
@@ -158,16 +268,13 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
         return;
       }
       if (attempts >= MAX_POLL_ATTEMPTS) {
-        // Bounded: fall back to one real check of the full payload to tell
-        // a genuine AI failure apart from still-in-flight, rather than
-        // polling forever — see this file's own header comment.
-        const full = occupant.report ? await fetchRemoteReport<SimilarityReport>(occupant.report.id) : null;
-        if (cancelled) return;
-        if (full?.aiAnalysis?.status === "error") {
-          setAiUnavailable(true);
-        } else {
-          setPollExhausted(true);
-        }
+        // Bounded: a genuine AI failure now arrives as its own "failed"
+        // status via the normal branch above (production audit fix), so
+        // reaching this cap means genuinely still unresolved — most likely
+        // the tab that started the check is gone (closed/crashed) before
+        // its save landed. Offer a manual recheck rather than polling
+        // forever.
+        setPollExhausted(true);
         return;
       }
       timer = window.setTimeout(poll, POLL_INTERVAL_MS);
@@ -181,7 +288,6 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
 
   function checkAgain() {
     setPollExhausted(false);
-    setAiUnavailable(false);
   }
 
   function chooseFile(selected: File | undefined) {
@@ -260,25 +366,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
       return;
     }
 
-    let aiPrepStage: AiPrepStage | null = "preparing";
-    const aiAnalysisPromise = analyzeAiText(text, report.features.detectedLanguage, (stage) => {
-      aiPrepStage = stage;
-    }).then((aiAnalysis) => ({ aiScore: aiAnalysis.score, aiAnalysis }))
-      .catch((error) => ({
-        aiScore: null,
-        aiAnalysis: {
-          status: "error" as const,
-          score: null,
-          model: AI_MODEL_VERSION,
-          engine: null,
-          threshold: AI_PASSAGE_THRESHOLD,
-          thresholdLogOdds: AI_PASSAGE_LOG_ODDS_THRESHOLD,
-          eligibleWordCount: 0,
-          analyzedWordCount: 0,
-          passages: [],
-          error: describeAiAnalysisError(error, aiPrepStage),
-        },
-      }));
+    const aiAnalysisPromise = runAiAnalysis(text, report.features.detectedLanguage);
 
     setProcessingLabel("Checking external academic sources");
     const [webCheck, academicResult] = await Promise.all([wikipediaPromise, academicEvidencePromise]);
@@ -293,7 +381,10 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
     setProcessingLabel("Saving your report");
 
     try {
-      const summary = buildReportSummary(report);
+      // Explicitly "processing" (not left implicit as "no aiStatus yet") so
+      // a legacy-vs-fresh row is never ambiguous — see
+      // lib/report-rooms.ts's deriveRoomStatus.
+      const summary: ReportSummary = { ...buildReportSummary(report), aiStatus: "processing" };
       await storeReport(report);
       // The upload request always names its room explicitly — the server
       // re-validates occupancy itself (409 if this room filled in the
@@ -329,17 +420,10 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
       // — the generation lock releases as soon as the similarity result is
       // saved, so the user isn't blocked on a possibly-slow AI model
       // download. Whenever it resolves, this is the ONE place that ever
-      // marks this room "ready" — never optimistically, never before this.
-      void aiAnalysisPromise.then(async (aiResult) => {
-        const enriched = { ...report, ...aiResult };
-        const enrichedSummary = buildReportSummary(enriched);
-        await storeReport(enriched);
-        const enrichedSaveResult = await saveReportRemote(enriched, enrichedSummary, undefined, room);
-        if (enrichedSaveResult.ok) {
-          invalidateRoomCache(accountEmail, room);
-          setOccupant({ status: "ready", report: enrichedSummary, cycleEndsAt: new Date(Date.parse(enrichedSummary.createdAt) + ROOM_CYCLE_MS).toISOString() });
-        }
-      });
+      // marks this room "ready" or "failed" — never optimistically, never
+      // before this, and never silently defaulting to "ready" regardless of
+      // outcome (production audit fix — see saveEnrichedAiResult above).
+      void aiAnalysisPromise.then((aiResult) => saveEnrichedAiResult(report, aiResult));
     } finally {
       generationLockRef.current = false;
       setIsGeneratingReport(false);
@@ -349,6 +433,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
   const statusLine =
     occupant.status === "ready" && occupant.report ? `Report ready · Last checked ${formatDate(occupant.report.createdAt)}`
     : occupant.status === "processing" ? "Report ready · finishing AI analysis"
+    : occupant.status === "failed" ? "Report ready · AI analysis unavailable"
     : "Ready for a new check";
 
   return (
@@ -411,9 +496,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
               </button>
             </div>
 
-            {aiUnavailable ? (
-              <p className="room-cycle-note">AI-writing analysis was unavailable for this document. The similarity result above is complete.</p>
-            ) : pollExhausted ? (
+            {pollExhausted ? (
               <div className="ai-analysis-message" role="status">
                 <p>AI analysis is taking longer than usual.</p>
                 <button className="button subtle" type="button" onClick={checkAgain}>Check again</button>
@@ -463,6 +546,45 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
             <p className="room-cycle-note">
               This room becomes available again: {formatDateTime(occupant.cycleEndsAt)}.
             </p>
+          </div>
+        )}
+
+        {occupant.status === "failed" && occupant.report && (
+          <div className="room-report-card">
+            <div className="room-report-card-header">
+              <FileText aria-hidden="true" />
+              <div>
+                <strong>{occupant.report.title}</strong>
+                <span>{formatDate(occupant.report.createdAt)} · {occupant.report.wordCount.toLocaleString()} words</span>
+              </div>
+            </div>
+
+            <div className="room-report-metrics">
+              <div className="room-metric room-metric-unavailable">
+                <span className="room-metric-label">AI Detection</span>
+                <strong className="room-metric-value">—</strong>
+                <span className="room-metric-sub">Unavailable</span>
+              </div>
+              <Link href={`/reports/${occupant.report.id}?room=${room}`} className={`room-metric room-metric-${similarityScoreBand(occupant.report.archiveScore)?.key ?? "low"}`}>
+                <span className="room-metric-label">Similarity</span>
+                <strong className="room-metric-value">{occupant.report.archiveScore}%</strong>
+                <span className="room-metric-sub">{similarityScoreBand(occupant.report.archiveScore)?.label ?? "Result"}</span>
+              </Link>
+              <button className="room-metric" type="button" onClick={() => handleDownloadReceipt(occupant.report!.id)} disabled={downloadingReceipt}>
+                <span className="room-metric-label">Receipt</span>
+                <Download aria-hidden="true" className="room-metric-icon" />
+                <span className="room-metric-sub">{downloadingReceipt ? "Preparing…" : "Download"}</span>
+              </button>
+            </div>
+
+            <div className="ai-analysis-message" role="status">
+              <p>AI-writing analysis was unavailable for this document. The similarity result above is complete and unaffected.</p>
+              <button className="button subtle" type="button" onClick={() => retryAiCheck(occupant.report!.id)} disabled={retryingAi}>
+                {retryingAi ? "Checking…" : "Retry AI check"}
+              </button>
+            </div>
+
+            <Link href={`/reports/${occupant.report.id}?room=${room}`} className="button secondary room-open-full">Open full report</Link>
           </div>
         )}
       </div>

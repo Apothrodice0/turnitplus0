@@ -61,6 +61,23 @@ test("the anonymous client-side resolution path tries the local IndexedDB copy b
   assert.ok(localCallIndex < remoteCallIndex, "the local IndexedDB lookup must be attempted before the remote fetch fallback");
 });
 
+test("the local IndexedDB lookup is never left unhandled — a rejection must fall through to the remote fetch, not strand the view on 'Opening report…' forever (production audit fix)", async () => {
+  const shell = await readFile(new URL("../app/reports/[id]/report-detail-shell.tsx", import.meta.url), "utf8");
+  // getStoredReportById can genuinely reject (storage disabled,
+  // private-browsing restrictions, quota/corruption) — unlike the same call
+  // at components/reports/report-history-row.tsx and
+  // app/reports/rooms/[room]/room-page-shell.tsx (both already wrapped),
+  // this call site had no .catch() at all, so a rejection threw out of the
+  // effect's IIFE, setStatus was never called, and status stayed "loading"
+  // (rendered as "Opening report…") indefinitely, with no error and no way
+  // forward.
+  assert.match(
+    shell,
+    /const local = await getStoredReportById<SimilarityReport>\(id\)\.catch\(\(\) => null\);/,
+    "getStoredReportById must be wrapped in the same .catch(() => null) used at every other call site of this function",
+  );
+});
+
 test("delete uses the checked remote-delete variant, not the fail-soft one used by bulk history clearing", async () => {
   const shell = await readFile(new URL("../app/reports/[id]/report-detail-shell.tsx", import.meta.url), "utf8");
   assert.match(shell, /import \{ deleteRemoteReportChecked, fetchRemoteReport \} from "@\/lib\/reports-remote";/);
@@ -77,6 +94,53 @@ test("lib/reports-remote.ts keeps the fail-soft delete for its existing bulk-cle
   assert.match(remote, /export async function deleteRemoteReport\(id: string\): Promise<void> \{/);
   assert.match(remote, /export async function deleteRemoteReportChecked\(id: string\): Promise<boolean> \{/);
   assert.match(remote, /return response\.ok;/);
+});
+
+test("the report-list links never prefetch — each renders in a loop against a rate-limited, force-dynamic route", async () => {
+  // Production audit fix: viewport prefetching every row's links the moment
+  // the list is visible (10-40 rooms, or every saved report in the
+  // anonymous flat list) burned the account's own rate-limit budget before
+  // any room/report was actually opened. See report-rooms.tsx's and this
+  // file's own header comments for the full mechanism.
+  const row = await readFile(new URL("../components/reports/report-history-row.tsx", import.meta.url), "utf8");
+  assert.match(row, /<Link href=\{`\/reports\/\$\{report\.id\}\?mode=ai`\} prefetch=\{false\}/);
+  assert.match(row, /<Link href=\{`\/reports\/\$\{report\.id\}`\} prefetch=\{false\}/);
+
+  const rooms = await readFile(new URL("../components/reports/report-rooms.tsx", import.meta.url), "utf8");
+  const linkMatch = rooms.match(/<Link[\s\S]*?<\/Link>/);
+  assert.ok(linkMatch, "the room row Link must be found");
+  assert.match(linkMatch[0], /prefetch=\{false\}/);
+});
+
+test("a rate-limited request is never conflated with no-session — an already signed-in owner never sees a false negative", async () => {
+  // Production audit fix: the general rate-limit bucket (lib/rate-limit.ts)
+  // is keyed by IP, not by session, so it can trip for an account that is
+  // genuinely signed in. Before this fix, that case was folded into
+  // "no-session", which this page treats as "try the anonymous device-key
+  // lookup" (requiresClientResolution below) — an account-owned report can
+  // never be found that way, so the owner saw "This report could not be
+  // found" for their own report.
+  const route = await readFile(new URL("../app/reports/[id]/page.tsx", import.meta.url), "utf8");
+
+  assert.doesNotMatch(
+    route,
+    /if \(!rate\.allowed\) return \{ status: "no-session" \};/,
+    "a rate-limit rejection must never be reported as no-session",
+  );
+  assert.match(
+    route,
+    /if \(!rate\.allowed\) return \{ status: "rate-limited", retryAfterSeconds: rate\.retryAfter \};/,
+  );
+
+  // The rate-limited branch must return its own response BEFORE
+  // ReportDetailShell is ever reached, so requiresClientResolution (and the
+  // anonymous fallback it triggers) can never fire for this case.
+  const bodyMatch = route.match(/export default async function ReportDetailPage[\s\S]*$/);
+  assert.ok(bodyMatch, "ReportDetailPage function body must be found");
+  const rateLimitedBranchIndex = bodyMatch[0].indexOf('if (result.status === "rate-limited")');
+  const shellRenderIndex = bodyMatch[0].indexOf("<ReportDetailShell");
+  assert.ok(rateLimitedBranchIndex >= 0, "a dedicated rate-limited branch must exist");
+  assert.ok(rateLimitedBranchIndex < shellRenderIndex, "the rate-limited branch must return before ReportDetailShell renders");
 });
 
 test("no loading.tsx exists for this route segment, so notFound() can still produce a real HTTP 404", () => {

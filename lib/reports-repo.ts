@@ -1,5 +1,5 @@
 import type { Client } from "@libsql/client";
-import { isWithinActiveCycle, roomCycleEndsAt } from "./report-rooms";
+import { deriveRoomStatus, isWithinActiveCycle, roomCycleEndsAt } from "./report-rooms";
 import type { ReportSummary } from "./reports-remote";
 
 // device_key added in Phase E8C, additively — every existing caller that
@@ -34,31 +34,32 @@ export async function findReportRowForDeviceKey(client: Client, id: string, devi
 
 export type RoomOccupantResult =
   | { status: "empty"; report: null; cycleEndsAt: null }
-  | { status: "processing" | "ready"; report: ReportSummary; cycleEndsAt: string };
+  | { status: "processing" | "ready" | "failed"; report: ReportSummary; cycleEndsAt: string };
 
 /**
  * The single source of truth for "what does room N currently hold," shared
  * by app/api/reports/route.ts's GET ?room=N handler and
  * app/reports/rooms/[room]/page.tsx's Server Component — both need the
- * exact same empty/processing/ready derivation (see lib/report-rooms.ts's
- * own header comment for what each status means), so it lives here once
- * rather than as two hand-kept-in-sync copies of the same SQL.
+ * exact same empty/processing/ready/failed derivation (see
+ * lib/report-rooms.ts's own header comment for what each status means), so
+ * it lives here once rather than as two hand-kept-in-sync copies of the
+ * same SQL.
  */
 export async function findRoomOccupant(client: Client, userId: string, room: number): Promise<RoomOccupantResult> {
   const result = await client.execute({
-    sql: `SELECT id, submission_id, title, report_created_at, word_count, archive_score, score_band, ai_score, ai_tone
+    sql: `SELECT id, submission_id, title, report_created_at, word_count, archive_score, score_band, ai_score, ai_tone, ai_status
           FROM saved_reports WHERE user_id = ? AND room_number = ?
           ORDER BY report_created_at DESC LIMIT 1`,
     args: [userId, room],
   });
   const occupant = result.rows[0] as unknown as
-    | { id: string | number; submission_id: string; title: string; report_created_at: string; word_count: number; archive_score: number; score_band: string; ai_score: number | null; ai_tone: string | null }
+    | { id: string | number; submission_id: string; title: string; report_created_at: string; word_count: number; archive_score: number; score_band: string; ai_score: number | null; ai_tone: string | null; ai_status: string | null }
     | undefined;
   if (!occupant || !isWithinActiveCycle(occupant.report_created_at)) {
     return { status: "empty", report: null, cycleEndsAt: null };
   }
   return {
-    status: occupant.ai_score === null ? "processing" : "ready",
+    status: deriveRoomStatus(occupant.ai_score === null ? null : Number(occupant.ai_score), occupant.ai_status === null ? null : String(occupant.ai_status)),
     cycleEndsAt: roomCycleEndsAt(occupant.report_created_at),
     report: {
       id: String(occupant.id),

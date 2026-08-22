@@ -12,6 +12,16 @@ import { createClient } from '@libsql/client';
  * default it on the way better-sqlite3's ingest path already does (see
  * lib/ingest.ts), and without it the ON DELETE CASCADE/SET NULL foreign keys
  * on sessions/saved_reports.user_id would silently not fire.
+ *
+ * Deliberately does NOT set PRAGMA busy_timeout: measured directly (this
+ * codebase's own concurrent-write race — see app/api/reports/route.ts's
+ * insertReportWithRoomCheck), it added no real protection against
+ * SQLITE_BUSY on this local-file libSQL driver (a losing concurrent write
+ * transaction still failed immediately, busy_timeout set or not — only
+ * retrying with a fresh connection actually recovers it) while measurably
+ * slowing down every sequential connection open under real test load
+ * (roughly 4x on tests/upload-limit.test.mjs, ~4s -> ~17s). The real fix for
+ * that race lives entirely in insertReportWithRoomCheck's own retry loop.
  */
 export async function getReportsDbClient() {
   const url = process.env.TURSO_DATABASE_URL ?? `file:${path.join(process.cwd(), 'data', 'reports-dev.db')}`;

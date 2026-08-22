@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { NextResponse } from 'next/server';
 import { getReportsDbClient } from '../../../../lib/reports-db';
 import { checkAuthRate } from '../../../../lib/rate-limit';
+import { clientIpFrom } from '../../../../lib/client-ip';
 import { hashPassword } from '../../../../lib/auth-crypto';
 import { createSession, setSessionCookie, claimAnonymousReports } from '../../../../lib/auth-session';
 import { maybePromoteToAdmin } from '../../../../lib/admin-role';
@@ -15,11 +16,6 @@ const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0;
-}
-
-function clientIpFrom(request: Request) {
-  const forwarded = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || 'unknown';
-  return forwarded.split(',')[0].trim();
 }
 
 export async function POST(request: Request) {

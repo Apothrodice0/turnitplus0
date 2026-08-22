@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { checkRate } from '../../../lib/rate-limit';
+import { clientIpFrom } from '../../../lib/client-ip';
 import { getExternalAcademicEvidence } from '../../../lib/academic-evidence-integration';
 import { getReportsDbClient } from '../../../lib/reports-db';
 import { recordAcademicSearchRunDiagnostics } from '../../../lib/academic-search-diagnostics-repo';
@@ -45,11 +46,6 @@ const MIN_TEXT_LENGTH = 80;
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0;
-}
-
-function clientIpFrom(request: Request) {
-  const forwarded = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || 'unknown';
-  return forwarded.split(',')[0].trim();
 }
 
 export async function POST(request: Request) {

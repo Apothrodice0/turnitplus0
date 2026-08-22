@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getReportsDbClient } from '../../../../lib/reports-db';
 import { checkRate } from '../../../../lib/rate-limit';
+import { clientIpFrom } from '../../../../lib/client-ip';
 import { getAdminSessionUser } from '../../../../lib/auth-session';
 import { listRecentReportsForDeveloper } from '../../../../lib/developer-repo';
 
@@ -15,11 +16,6 @@ import { listRecentReportsForDeveloper } from '../../../../lib/developer-repo';
 
 const MAX_LIMIT = 200;
 const DEFAULT_LIMIT = 50;
-
-function clientIpFrom(request: Request) {
-  const forwarded = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || 'unknown';
-  return forwarded.split(',')[0].trim();
-}
 
 export async function GET(request: Request) {
   try {

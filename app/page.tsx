@@ -85,6 +85,12 @@ type AuthMode = "login" | "signup";
 // @libsql/client, a Node-only dependency that must never reach this
 // client-side bundle.
 const ACCOUNT_DELETION_CONFIRMATION_PHRASE = "DELETE MY ACCOUNT";
+// Production audit fix: a same-origin localStorage write under this key
+// broadcasts sign-out to every OTHER open tab via the browser's "storage"
+// event (see signOutAccount/the storage listener below) — without it, a
+// second tab kept showing the previous account's name/room list until
+// manually refreshed, even though the session cookie was already cleared.
+const SIGNED_OUT_BROADCAST_KEY = "tp_signed_out_broadcast";
 type LegalTab = "privacy" | "terms";
 type LocalAccount = { username: string; email: string; corpusReuseConsent: boolean };
 
@@ -305,6 +311,26 @@ export default function Home() {
       })
       .catch(() => loadAnonymousReports())
       .finally(() => setAccountLoaded(true));
+  }, []);
+
+  // Cross-tab sign-out (production audit fix): the "storage" event fires in
+  // every OTHER same-origin tab (never the one that made the write) the
+  // moment signOutAccount() writes SIGNED_OUT_BROADCAST_KEY — this is the
+  // only way a tab that did NOT initiate the sign-out learns about it.
+  // Deliberately does not repeat the /api/auth/logout network call (the
+  // initiating tab's own call already cleared the session cookie for real)
+  // and does not touch IndexedDB/Turso, matching clearAccountDisplayState's
+  // own scope.
+  useEffect(() => {
+    function handleStorage(event: StorageEvent) {
+      if (event.key !== SIGNED_OUT_BROADCAST_KEY || event.newValue === null) return;
+      clearAccountDisplayState();
+      window.history.replaceState({ turnitPlusView: "account" }, "", VIEW_HASH.account);
+      setView("account");
+      notify("You were signed out in another tab.");
+    }
+    window.addEventListener("storage", handleStorage);
+    return () => window.removeEventListener("storage", handleStorage);
   }, []);
 
   // Deliberately independent of account/accountLoaded: which view the URL
@@ -571,26 +597,38 @@ export default function Home() {
     navigate("legal");
   }
 
-  function signOutAccount() {
-    // Cleared immediately, before the network call even resolves, so the
-    // sidebar badge and report list never keep showing the previous
-    // account's data during (or after a failure of) the logout request.
-    // This only clears in-memory state — it never deletes anything from
-    // IndexedDB or Turso; the account's remote reports and this device's
-    // local cache are both left exactly as they were.
+  // Shared by signOutAccount (this tab) and the cross-tab storage listener
+  // below (production audit fix) — only the in-memory display state, never
+  // IndexedDB/Turso; the account's remote reports and this device's local
+  // cache are both left exactly as they were, so the same account signing
+  // back in on this device still benefits from them.
+  function clearAccountDisplayState() {
     setReports([]);
     setCurrentReport(null);
-    fetch("/api/auth/logout", { method: "POST" }).catch(() => {});
     setAccount(null);
     setUploadLimitStatus(null);
-    // Only the in-memory display state, matching this function's own
-    // existing discipline above — the room cache in localStorage (like
-    // IndexedDB) is deliberately left alone, so the same account signing
-    // back in on this device still benefits from it.
     setAccountReportCount(0);
     setIsEditingProfile(false);
     setAuthMode("login");
     setWelcomeMode(null);
+  }
+
+  function signOutAccount() {
+    // Cleared immediately, before the network call even resolves, so the
+    // sidebar badge and report list never keep showing the previous
+    // account's data during (or after a failure of) the logout request.
+    clearAccountDisplayState();
+    fetch("/api/auth/logout", { method: "POST" }).catch(() => {});
+    // A same-origin localStorage write fires the "storage" event in every
+    // OTHER open tab (never this one) — see the listener below. The value
+    // itself carries no meaning beyond "changed"; only the key and the
+    // fact of the write matter.
+    try {
+      window.localStorage.setItem(SIGNED_OUT_BROADCAST_KEY, String(Date.now()));
+    } catch {
+      // Storage unavailable/private-mode — this tab's own sign-out above is
+      // already complete; only the cross-tab broadcast is lost.
+    }
     window.history.replaceState({ turnitPlusView: "account" }, "", VIEW_HASH.account);
     setView("account");
     notify("You have signed out.");
@@ -986,6 +1024,7 @@ export default function Home() {
             <div>
               <p className="eyebrow">{view === "legal" ? "TRUST CENTER" : view === "account" && accountLoaded && !account ? "OPTIONAL ACCOUNT" : "AI & SIMILARITY CHECKER"}</p>
               <h1>
+                {view === "home" && "Overview"}
                 {view === "dashboard" && "Check AI writing and similarity"}
                 {view === "reports" && "Your recent reports"}
                 {view === "about" && "How the checker works"}

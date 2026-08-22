@@ -69,7 +69,15 @@ export function ReportDetailShell({
     if (!requiresClientResolution || initialReport) return;
     let cancelled = false;
     (async () => {
-      const local = await getStoredReportById<SimilarityReport>(id);
+      // .catch(() => null): production audit fix — unlike this same call at
+      // report-history-row.tsx and room-page-shell.tsx, this site had no
+      // error handling at all. getStoredReportById can genuinely reject
+      // (storage disabled, private-browsing restrictions, quota/corruption
+      // errors), which threw here, left setStatus uncalled, and stranded
+      // this view on "Opening report…" forever with no error and no way
+      // forward. A rejection now falls through to the same remote-fetch
+      // fallback a local miss already takes, below.
+      const local = await getStoredReportById<SimilarityReport>(id).catch(() => null);
       if (cancelled) return;
       if (local) {
         setReport(local);

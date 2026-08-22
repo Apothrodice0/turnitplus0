@@ -67,39 +67,51 @@ test("remote report persistence (Turso) is layered alongside local storage, not 
   assert.match(page, /const full = await fetchRemoteReport<SimilarityReport>\(summary\.id\);/);
 });
 
-test("the room page's occupant state is only ever set to processing/ready once the remote save is confirmed to have actually succeeded", async () => {
+test("the room page's occupant state is only ever set to processing/ready/failed once the remote save is confirmed to have actually succeeded", async () => {
   const shell = await readFile(new URL("../app/reports/rooms/[room]/room-page-shell.tsx", import.meta.url), "utf8");
 
   // This is the fix for the production 404 regression: a report that
   // appeared in a room but was never actually persisted server-side (a
   // rejected save — quota, room already occupied, or any other failure)
   // would 404 when opened at /reports/[id]. setOccupant(...) marking this
-  // room processing/ready must never run unconditionally after a save —
-  // only inside a check against that save's own result, and it must return
-  // (never fall through to setOccupant) on failure.
+  // room processing/ready/failed must never run unconditionally after a
+  // save — only inside a check against that save's own result, and it must
+  // return (never fall through to setOccupant) on failure.
   const runCheckBody = shell.match(/async function runCheck\(\) \{[\s\S]*?\n {2}\}/)?.[0] ?? "";
   assert.ok(runCheckBody.length > 0, "runCheck function body must be found");
   assert.match(runCheckBody, /if \(!saveResult\.ok\) \{[\s\S]*?\n\s*return;\s*\n\s*\}/);
   assert.match(runCheckBody, /setOccupant\(\{ status: "processing", report: summary, cycleEndsAt:/);
 
-  const aiMergeBlockStart = shell.indexOf("void aiAnalysisPromise.then(async (aiResult) => {");
-  assert.ok(aiMergeBlockStart > -1, "expected the decoupled AI-writing merge block to exist");
-  const aiMergeBlockEnd = shell.indexOf("} finally {", aiMergeBlockStart);
-  assert.ok(aiMergeBlockEnd > aiMergeBlockStart, "expected to find runCheck()'s finally block after the AI merge block");
-  const aiMergeBlock = shell.slice(aiMergeBlockStart, aiMergeBlockEnd);
-  assert.match(aiMergeBlock, /if \(enrichedSaveResult\.ok\) \{\s*\n\s*invalidateRoomCache\(accountEmail, room\);\s*\n\s*setOccupant\(\{ status: "ready", report: enrichedSummary, cycleEndsAt:/);
+  // The AI-enriched resave's setOccupant("ready"/"failed") now lives in the
+  // shared saveEnrichedAiResult helper (production audit fix — used by both
+  // this automatic post-upload pass and the manual retryAiCheck, so the two
+  // can never disagree on when a room is allowed to claim "ready"), not
+  // inlined in runCheck() itself — runCheck only ever hands its result to it.
+  assert.match(runCheckBody, /void aiAnalysisPromise\.then\(\(aiResult\) => saveEnrichedAiResult\(report, aiResult\)\);/);
+
+  const helperBody = shell.match(/async function saveEnrichedAiResult\([\s\S]*?\n {2}\}/)?.[0] ?? "";
+  assert.ok(helperBody.length > 0, "saveEnrichedAiResult function body must be found");
+  assert.match(helperBody, /if \(!enrichedSaveResult\.ok\) return false;/, "a failed remote save must never reach setOccupant");
+  assert.match(helperBody, /setOccupant\(\{\s*\n\s*status: enrichedSummary\.aiStatus === "ready" \? "ready" : "failed",\s*\n\s*report: enrichedSummary,/);
 });
 
 test("logout clears account-scoped report state immediately, and never touches IndexedDB or Turso", async () => {
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
 
-  // setReports([])/setCurrentReport(null) must run before the (best-effort)
-  // network call, so the sidebar badge and report list can never keep
-  // showing the previous account's data during or after a failed logout.
+  // clearAccountDisplayState() (shared with the cross-tab storage listener
+  // — see the next test) must run before the (best-effort) network call, so
+  // the sidebar badge and report list can never keep showing the previous
+  // account's data during or after a failed logout.
   assert.match(
     page,
-    /function signOutAccount\(\) \{\s*\n(?:\s*\/\/.*\r?\n)*\s*setReports\(\[\]\);\s*\n\s*setCurrentReport\(null\);\s*\n\s*fetch\("\/api\/auth\/logout"/,
+    /function signOutAccount\(\) \{\s*\n(?:\s*\/\/.*\r?\n)*\s*clearAccountDisplayState\(\);\s*\n\s*fetch\("\/api\/auth\/logout"/,
   );
+
+  const displayStateBody = page.match(/function clearAccountDisplayState\(\) \{[\s\S]*?\n {2}\}/)?.[0] ?? "";
+  assert.ok(displayStateBody.length > 0, "clearAccountDisplayState function body must be found");
+  assert.match(displayStateBody, /setReports\(\[\]\);/);
+  assert.match(displayStateBody, /setCurrentReport\(null\);/);
+
   // signOutAccount must never call clearStoredReports or deleteRemoteReport
   // — those belong only to the explicit "Clear history" action, not to
   // signing out. Extract just this function's body to check that in
@@ -108,6 +120,35 @@ test("logout clears account-scoped report state immediately, and never touches I
   const signOutBody = page.match(/function signOutAccount\(\) \{[\s\S]*?\n {2}\}/)?.[0] ?? "";
   assert.ok(signOutBody.length > 0, "signOutAccount function body must be found");
   assert.doesNotMatch(signOutBody, /clearStoredReports|deleteRemoteReport/);
+});
+
+test("signing out broadcasts to other open tabs via a real storage-event listener, without repeating the network call there (production audit fix)", async () => {
+  // Before this fix, a second open tab kept showing the previous account's
+  // name/room list until manually refreshed — the session cookie was
+  // cleared server-side, but nothing told any OTHER tab's React state. The
+  // "storage" event is the browser's own same-origin cross-tab broadcast
+  // primitive: it fires in every tab EXCEPT the one that wrote the key, so
+  // signOutAccount's write and this listener are the two required halves.
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+
+  const signOutBody = page.match(/function signOutAccount\(\) \{[\s\S]*?\n {2}\}/)?.[0] ?? "";
+  assert.match(signOutBody, /window\.localStorage\.setItem\(SIGNED_OUT_BROADCAST_KEY, String\(Date\.now\(\)\)\);/, "signOutAccount must write the broadcast key so other tabs' storage listeners fire");
+
+  const listenerMatch = page.match(/function handleStorage\(event: StorageEvent\) \{[\s\S]*?\n {4}\}/);
+  assert.ok(listenerMatch, "a storage-event handler must be found");
+  const listenerBody = listenerMatch[0];
+  assert.match(listenerBody, /if \(event\.key !== SIGNED_OUT_BROADCAST_KEY \|\| event\.newValue === null\) return;/, "the handler must ignore every other localStorage key — it must not react to unrelated writes (e.g. the room cache, the sidebar-collapsed flag)");
+  assert.match(listenerBody, /clearAccountDisplayState\(\);/, "the handler must clear this tab's own account display state");
+
+  // The listener's own tab must NEVER repeat the /api/auth/logout call or
+  // the localStorage write — the initiating tab already did both; doing
+  // either again here would be redundant at best and could re-trigger an
+  // infinite loop of storage events at worst.
+  assert.doesNotMatch(listenerBody, /fetch\("\/api\/auth\/logout"/);
+  assert.doesNotMatch(listenerBody, /window\.localStorage\.setItem\(SIGNED_OUT_BROADCAST_KEY/);
+
+  assert.match(page, /window\.addEventListener\("storage", handleStorage\);/);
+  assert.match(page, /window\.removeEventListener\("storage", handleStorage\);/, "the listener must be cleaned up on unmount, not leaked");
 });
 
 test("authentication state is resolved before choosing anonymous vs. account-scoped report loading", async () => {

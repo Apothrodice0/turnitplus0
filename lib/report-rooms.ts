@@ -32,6 +32,19 @@
  *                   room still counts as occupied for occupancy/409 purposes
  *                   regardless of this status — see isWithinActiveCycle,
  *                   which this is layered on top of, not a replacement for.
+ *  - "failed"     — a report exists and is within its active 24h cycle, but
+ *                   its AI-enriched resave landed with a genuine,
+ *                   non-transient outcome other than a real score (the
+ *                   local model worker threw, or the document had too
+ *                   little eligible English text — see
+ *                   lib/report-types.ts's AiAnalysis.status). Distinct from
+ *                   "processing" (production audit fix): before ai_status
+ *                   existed, a failed check had no way to record that
+ *                   outcome, so it stayed indistinguishable from "still
+ *                   running" for the rest of the room's 24h cycle. The
+ *                   similarity result is unaffected and still shown — only
+ *                   the AI signal is unavailable, with a retry offered (see
+ *                   room-page-shell.tsx's retryAiCheck).
  *  - "empty"      — no report has ever been assigned to this room, OR the
  *                   most recent one's 24h cycle has ended. Either way the
  *                   room is available for a new upload. An expired report
@@ -80,14 +93,30 @@ export function roomCycleEndsAt(reportCreatedAtIso: string): string {
   return new Date(Date.parse(reportCreatedAtIso) + ROOM_CYCLE_MS).toISOString();
 }
 
-export type RoomStatus = "empty" | "processing" | "ready";
+export type RoomStatus = "empty" | "processing" | "ready" | "failed";
+
+/**
+ * One occupant's ai_score/ai_status columns -> which of "processing" |
+ * "ready" | "failed" its room currently shows. The single place both
+ * app/api/reports/rooms/route.ts (the index) and lib/reports-repo.ts's
+ * findRoomOccupant (a single room's own occupant, shared with the SSR room
+ * page) derive this — kept here, not duplicated, so the two can never
+ * disagree. `aiStatus` is whatever the client last wrote at save time (see
+ * this file's own header comment); NULL means either a legacy pre-0028 row
+ * or a report still mid-analysis, and `aiScore` alone (the pre-existing
+ * signal) still correctly resolves that case to "processing".
+ */
+export function deriveRoomStatus(aiScore: number | null, aiStatus: string | null): "processing" | "ready" | "failed" {
+  if (aiStatus === "failed") return "failed";
+  return aiScore === null ? "processing" : "ready";
+}
 
 /** One row of the lightweight room index — never the report itself, just enough to render one room row. */
 export type RoomIndexEntry = {
   room: number;
   status: RoomStatus;
-  /** The current occupant's creation time — present whenever status is "ready" or "processing". */
+  /** The current occupant's creation time — present whenever status is not "empty". */
   mostRecentAt: string | null;
-  /** When this room next becomes available for a new upload — present whenever status is "ready" or "processing" (occupancy, not AI completion, decides this). */
+  /** When this room next becomes available for a new upload — present whenever status is not "empty" (occupancy, not AI completion, decides this). */
   cycleEndsAt: string | null;
 };

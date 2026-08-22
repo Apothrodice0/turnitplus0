@@ -11,6 +11,17 @@ export type ReportSummary = {
   scoreBand: string;
   aiScore: number | null;
   aiTone: string | null;
+  /**
+   * The room/slot architecture's genuine AI-lifecycle signal (production
+   * audit fix) — 'processing' | 'ready' | 'failed', set explicitly by
+   * app/reports/rooms/[room]/room-page-shell.tsx at each save. Optional:
+   * absent for the anonymous flat-list flow (app/page.tsx's own
+   * generateReport, which has no room concept and never sets this) and for
+   * any report saved before this field existed. See
+   * lib/report-rooms.ts's deriveRoomStatus for how a room's overall status
+   * falls back cleanly when this is absent.
+   */
+  aiStatus?: "processing" | "ready" | "failed";
 };
 
 // Every function here is fail-soft by design: a network or database problem
@@ -146,11 +157,20 @@ export type RoomContents =
    * lib/report-rooms.ts's own header comment) — the report itself
    * (title/similarity/etc.) is real and complete; only report.aiScore/
    * aiTone are still null. app/reports/rooms/[room]/room-page-shell.tsx
-   * polls this endpoint until status flips to "ready" rather than ever
-   * presenting this as "ready" — see that file's own header comment.
+   * polls this endpoint until status flips to "ready" or "failed" rather
+   * than ever presenting this as "ready" — see that file's own header
+   * comment.
    */
   | { status: "processing"; report: ReportSummary; cycleEndsAt: string }
-  | { status: "ready"; report: ReportSummary; cycleEndsAt: string };
+  | { status: "ready"; report: ReportSummary; cycleEndsAt: string }
+  /**
+   * The AI-enriched resave landed, but with a genuine non-transient outcome
+   * other than a real score (production audit fix — see
+   * lib/report-rooms.ts's own header comment on "failed"). The similarity
+   * result is unaffected and still shown; only the AI signal is missing,
+   * with a retry offered.
+   */
+  | { status: "failed"; report: ReportSummary; cycleEndsAt: string };
 
 const EMPTY_ROOM_CONTENTS: RoomContents = { status: "empty", report: null, cycleEndsAt: null };
 
@@ -160,7 +180,7 @@ export async function fetchReportRoomContents(room: number): Promise<RoomContent
     const response = await fetch(`/api/reports?room=${room}`);
     if (!response.ok) return EMPTY_ROOM_CONTENTS;
     const data = (await response.json()) as Partial<RoomContents>;
-    if ((data.status === "ready" || data.status === "processing") && data.report) {
+    if ((data.status === "ready" || data.status === "processing" || data.status === "failed") && data.report) {
       return { status: data.status, report: data.report, cycleEndsAt: data.cycleEndsAt ?? new Date().toISOString() };
     }
     return EMPTY_ROOM_CONTENTS;
@@ -180,13 +200,13 @@ export async function fetchReportRoomContents(room: number): Promise<RoomContent
  * about. Still only ever fetches the tiny index first, then each room's
  * single lightweight summary — never a full report body, and never more
  * network calls than this account actually has rooms. Includes
- * "processing" rooms too — a report mid-AI-analysis is still a real,
+ * "processing" and "failed" rooms too — either way it's still a real,
  * deletable row that a full wipe must not skip.
  */
 export async function fetchAllReportSummariesAcrossRooms(): Promise<ReportSummary[]> {
   const index = await fetchReportRoomIndex();
   const contents = await Promise.all(index.map((entry) => fetchReportRoomContents(entry.room)));
-  return contents.flatMap((c) => (c.status === "ready" || c.status === "processing" ? [c.report] : []));
+  return contents.flatMap((c) => (c.status !== "empty" ? [c.report] : []));
 }
 
 /**

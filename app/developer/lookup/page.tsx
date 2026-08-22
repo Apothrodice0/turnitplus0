@@ -1,27 +1,21 @@
-import { cookies } from "next/headers";
 import { notFound } from "next/navigation";
 import type { Metadata } from "next";
-import { SESSION_COOKIE_NAME, getAdminSessionUserByToken } from "@/lib/auth-session";
-import { getReportsDbClient } from "@/lib/reports-db";
+import { loadDeveloperGate } from "@/lib/developer-gate";
 import { DeveloperLookupSearch } from "@/components/developer/lookup-search";
 
 export const dynamic = "force-dynamic";
 
+// See lib/developer-gate.ts's own comment: a non-admin must never see a
+// page-identifying title either, not just a 404 body.
 export async function generateMetadata(): Promise<Metadata> {
+  const admin = await loadDeveloperGate();
+  if (!admin) return {};
   return { title: "Article lookup · Developer · TurnitPlus", robots: { index: false, follow: false, nocache: true, googleBot: { index: false, follow: false } } };
 }
 
 export default async function DeveloperLookupPage() {
-  const token = (await cookies()).get(SESSION_COOKIE_NAME)?.value ?? null;
-  if (!token) notFound();
-
-  const client = await getReportsDbClient();
-  try {
-    const admin = await getAdminSessionUserByToken(token, client);
-    if (!admin) notFound();
-  } finally {
-    client.close();
-  }
+  const admin = await loadDeveloperGate();
+  if (!admin) notFound();
 
   return (
     <main className="developer-page">

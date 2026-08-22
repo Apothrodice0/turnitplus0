@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getReportsDbClient } from '../../../lib/reports-db';
 import { checkRate } from '../../../lib/rate-limit';
+import { clientIpFrom } from '../../../lib/client-ip';
 import { getSessionUser } from '../../../lib/auth-session';
 import { captureDocumentIdentityAndFamily } from '../../../lib/document-family';
 import { indexDocumentSubmissionIntoCorpus } from '../../../lib/user-submission-corpus';
@@ -21,9 +22,95 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0;
 }
 
-function clientIpFrom(request: Request) {
-  const forwarded = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || 'unknown';
-  return forwarded.split(',')[0].trim();
+const SAVE_REPORT_SQL = `INSERT INTO saved_reports (id, device_key, submission_id, title, report_created_at, word_count, archive_score, score_band, ai_score, ai_tone, ai_status, payload_json, user_id, room_number, updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
+      ON CONFLICT(device_key, id) DO UPDATE SET
+        submission_id = excluded.submission_id,
+        title = excluded.title,
+        report_created_at = excluded.report_created_at,
+        word_count = excluded.word_count,
+        archive_score = excluded.archive_score,
+        score_band = excluded.score_band,
+        ai_score = excluded.ai_score,
+        ai_tone = excluded.ai_tone,
+        ai_status = excluded.ai_status,
+        payload_json = excluded.payload_json,
+        user_id = COALESCE(excluded.user_id, saved_reports.user_id),
+        updated_at = CURRENT_TIMESTAMP`;
+
+const MAX_ROOM_INSERT_BUSY_RETRIES = 5;
+
+function isSqliteBusyError(err: unknown): boolean {
+  return err instanceof Error && /SQLITE_BUSY/i.test(err.message);
+}
+
+/**
+ * The room-occupancy check and the insert as one atomic write transaction,
+ * retried on SQLITE_BUSY with a genuinely fresh connection each attempt
+ * (production audit fix for the concurrent-upload race — two different new
+ * uploads racing for the same empty room). Verified directly against a real
+ * two-tab race in tests/report-rooms.test.mjs: two connections both opening
+ * a write transaction against the same database at once reliably raises
+ * SQLITE_BUSY on the loser, and simply retrying on the SAME connection does
+ * not recover it — only a fresh connection per attempt does, which is also
+ * exactly what a real concurrent HTTP request already gets (its own
+ * getReportsDbClient() call), so this mirrors real request-level retry
+ * rather than working around a test-only quirk. Each attempt re-reads
+ * occupancy fresh, so a retry can never act on stale data from an earlier
+ * attempt — either it observes the winner's row and returns a real
+ * conflict, or it becomes the winner itself.
+ */
+async function insertReportWithRoomCheck(params: {
+  id: string; deviceKey: string; submissionId: string; title: string; createdAt: string;
+  wordCount: number; archiveScore: number; scoreBand: string;
+  aiScore: number | null; aiTone: string | null; aiStatus: string | null;
+  payloadJson: string; userId: string | null;
+  roomNumberForInsert: number | null; roomOwnerId: string | null;
+}): Promise<{ conflict: { mostRecent: string } | null }> {
+  for (let attempt = 1; attempt <= MAX_ROOM_INSERT_BUSY_RETRIES; attempt++) {
+    const txClient = await getReportsDbClient();
+    try {
+      const tx = await txClient.transaction('write');
+      try {
+        let conflict: { mostRecent: string } | null = null;
+        if (params.roomNumberForInsert !== null && params.roomOwnerId !== null) {
+          const occupant = await tx.execute({
+            sql: `SELECT report_created_at FROM saved_reports WHERE user_id = ? AND room_number = ? ORDER BY report_created_at DESC LIMIT 1`,
+            args: [params.roomOwnerId, params.roomNumberForInsert],
+          });
+          const mostRecent = occupant.rows[0]?.report_created_at as string | undefined;
+          if (mostRecent && isWithinActiveCycle(mostRecent)) {
+            conflict = { mostRecent };
+          }
+        }
+        if (!conflict) {
+          await tx.execute({
+            sql: SAVE_REPORT_SQL,
+            args: [
+              params.id, params.deviceKey, params.submissionId, params.title, params.createdAt,
+              params.wordCount, params.archiveScore, params.scoreBand,
+              params.aiScore, params.aiTone, params.aiStatus,
+              params.payloadJson, params.userId, params.roomNumberForInsert,
+            ],
+          });
+        }
+        await tx.commit();
+        return { conflict };
+      } catch (err) {
+        await tx.rollback().catch(() => {});
+        throw err;
+      } finally {
+        tx.close();
+      }
+    } catch (err) {
+      if (!isSqliteBusyError(err) || attempt === MAX_ROOM_INSERT_BUSY_RETRIES) throw err;
+      await new Promise((resolve) => setTimeout(resolve, 30 * attempt + Math.floor(Math.random() * 30)));
+    } finally {
+      txClient.close();
+    }
+  }
+  // Unreachable — the loop above always either returns or throws on its final iteration.
+  throw new Error('insertReportWithRoomCheck: exhausted retries without resolving');
 }
 
 export async function POST(request: Request) {
@@ -41,7 +128,7 @@ export async function POST(request: Request) {
     const body = await request.json().catch(() => null);
     if (!body || typeof body !== 'object') return new NextResponse(JSON.stringify({ error: 'Invalid JSON' }), { status: 400 });
 
-    const { deviceKey, id, submissionId, title, createdAt, wordCount, archiveScore, scoreBand, aiScore, aiTone, payload, academicSearchDiagnosticsId, room } = body as Record<string, unknown>;
+    const { deviceKey, id, submissionId, title, createdAt, wordCount, archiveScore, scoreBand, aiScore, aiTone, aiStatus, payload, academicSearchDiagnosticsId, room } = body as Record<string, unknown>;
 
     // device_key is part of saved_reports' composite primary key, so it is
     // always required regardless of authentication state — unlike the list/
@@ -59,6 +146,9 @@ export async function POST(request: Request) {
     if (!isNonEmptyString(scoreBand)) return new NextResponse(JSON.stringify({ error: 'scoreBand is required' }), { status: 400 });
     if (aiScore !== null && aiScore !== undefined && typeof aiScore !== 'number') return new NextResponse(JSON.stringify({ error: 'aiScore must be a number or null' }), { status: 400 });
     if (aiTone !== null && aiTone !== undefined && typeof aiTone !== 'string') return new NextResponse(JSON.stringify({ error: 'aiTone must be a string or null' }), { status: 400 });
+    if (aiStatus !== null && aiStatus !== undefined && aiStatus !== 'processing' && aiStatus !== 'ready' && aiStatus !== 'failed') {
+      return new NextResponse(JSON.stringify({ error: "aiStatus must be 'processing', 'ready', 'failed', or null" }), { status: 400 });
+    }
     if (payload === undefined) return new NextResponse(JSON.stringify({ error: 'payload is required' }), { status: 400 });
     // Developer-diagnostics addition: optional, never required — an older
     // client build, or a run where /api/academic-evidence never produced a
@@ -131,45 +221,41 @@ export async function POST(request: Request) {
       // (room_number is immutable after the first insert — see below) or to
       // an anonymous save (rooms are an authenticated-account concept only).
       let roomNumberForInsert: number | null = null;
+      let roomOwnerId: string | null = null;
       if (sessionUser && isFirstSaveOfThisReport) {
         const roomCount = getRoomCountForRole(sessionUser.role);
         if (!Number.isInteger(room) || (room as number) < 0 || (room as number) >= roomCount) {
           return new NextResponse(JSON.stringify({ error: `room must be an integer 0-${roomCount - 1}` }), { status: 400 });
         }
-        const occupant = await client.execute({
-          sql: `SELECT report_created_at FROM saved_reports WHERE user_id = ? AND room_number = ? ORDER BY report_created_at DESC LIMIT 1`,
-          args: [sessionUser.id, room as number],
-        });
-        const mostRecent = occupant.rows[0]?.report_created_at as string | undefined;
-        if (mostRecent && isWithinActiveCycle(mostRecent)) {
-          return new NextResponse(
-            JSON.stringify({
-              error: `Room ${(room as number) + 1} already has an active report. It will be available again at ${roomCycleEndsAt(mostRecent)}.`,
-              cycleEndsAt: roomCycleEndsAt(mostRecent),
-            }),
-            { status: 409, headers: { 'Content-Type': 'application/json' } },
-          );
-        }
         roomNumberForInsert = room as number;
+        roomOwnerId = sessionUser.id;
       }
 
-      await client.execute({
-        sql: `INSERT INTO saved_reports (id, device_key, submission_id, title, report_created_at, word_count, archive_score, score_band, ai_score, ai_tone, payload_json, user_id, room_number, updated_at)
-              VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
-              ON CONFLICT(device_key, id) DO UPDATE SET
-                submission_id = excluded.submission_id,
-                title = excluded.title,
-                report_created_at = excluded.report_created_at,
-                word_count = excluded.word_count,
-                archive_score = excluded.archive_score,
-                score_band = excluded.score_band,
-                ai_score = excluded.ai_score,
-                ai_tone = excluded.ai_tone,
-                payload_json = excluded.payload_json,
-                user_id = COALESCE(excluded.user_id, saved_reports.user_id),
-                updated_at = CURRENT_TIMESTAMP`,
-        args: [id, deviceKey, submissionId, title, createdAt, wordCount, archiveScore, scoreBand, aiScore ?? null, aiTone ?? null, payloadJson, userId, roomNumberForInsert],
+      // Concurrency (production audit fix): the occupancy check and the
+      // insert must be one atomic unit relative to any OTHER concurrent
+      // request touching the same room slot — otherwise two different new
+      // uploads (e.g. the same account open in two tabs, both starting a
+      // check on the same empty room within the same few-second analysis
+      // window) can each observe "this room is free" before either has
+      // inserted, and both succeed — silently violating "a room holds AT
+      // MOST one current report" (see lib/report-rooms.ts's own header
+      // comment). See insertReportWithRoomCheck's own comment for why this
+      // needs a real busy-retry loop, not just a transaction.
+      const { conflict: roomConflict } = await insertReportWithRoomCheck({
+        id, deviceKey, submissionId, title, createdAt, wordCount, archiveScore, scoreBand,
+        aiScore: aiScore ?? null, aiTone: aiTone ?? null, aiStatus: aiStatus ?? null,
+        payloadJson, userId, roomNumberForInsert, roomOwnerId,
       });
+
+      if (roomConflict) {
+        return new NextResponse(
+          JSON.stringify({
+            error: `Room ${(roomNumberForInsert as number) + 1} already has an active report. It will be available again at ${roomCycleEndsAt(roomConflict.mostRecent)}.`,
+            cycleEndsAt: roomCycleEndsAt(roomConflict.mostRecent),
+          }),
+          { status: 409, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
 
       // Document identity + fingerprint + family capture (Phase A/B/C):
       // best-effort, non-fatal side effect of saving a report — this is

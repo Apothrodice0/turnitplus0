@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getReportsDbClient } from '../../../lib/reports-db';
 import { checkRate } from '../../../lib/rate-limit';
+import { clientIpFrom } from '../../../lib/client-ip';
 import { getSessionUser } from '../../../lib/auth-session';
 import { getUploadLimitStatus } from '../../../lib/upload-limit';
 
@@ -17,11 +18,6 @@ import { getUploadLimitStatus } from '../../../lib/upload-limit';
  * authenticated: false rather than 401/404, since this route's existence
  * is not a secret the way /api/developer/* is.
  */
-
-function clientIpFrom(request: Request) {
-  const forwarded = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || 'unknown';
-  return forwarded.split(',')[0].trim();
-}
 
 export async function GET(request: Request) {
   try {

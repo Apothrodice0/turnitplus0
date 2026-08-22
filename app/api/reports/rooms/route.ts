@@ -1,27 +1,26 @@
 import { NextResponse } from 'next/server';
 import { getReportsDbClient } from '../../../../lib/reports-db';
 import { checkRate } from '../../../../lib/rate-limit';
+import { clientIpFrom } from '../../../../lib/client-ip';
 import { getSessionUser } from '../../../../lib/auth-session';
-import { getRoomCountForRole, isWithinActiveCycle, roomCycleEndsAt, type RoomIndexEntry } from '../../../../lib/report-rooms';
+import { deriveRoomStatus, getRoomCountForRole, isWithinActiveCycle, roomCycleEndsAt, type RoomIndexEntry } from '../../../../lib/report-rooms';
 
 /**
  * The room/slot architecture's index: ONE lightweight query returning each
- * room's status (empty/processing/ready) and, when occupied, its occupant's
- * timestamps — never the report itself. This is the only thing "opening My
- * Reports" fetches from the network (client-side cached for 24h — see
- * lib/report-rooms-cache.ts); a specific room's actual current report is
- * only ever requested by GET /api/reports?room=N, and only when the user
- * opens that room.
+ * room's status (empty/processing/ready/failed) and, when occupied, its
+ * occupant's timestamps — never the report itself. This is the only thing
+ * "opening My Reports" fetches from the network (client-side cached for
+ * 24h — see lib/report-rooms-cache.ts); a specific room's actual current
+ * report is only ever requested by GET /api/reports?room=N, and only when
+ * the user opens that room.
  *
- * "processing" (occupied, but ai_score not yet recorded — see
- * lib/report-rooms.ts's own header comment for why this genuinely happens)
- * is derived here from the ai_score column alone, without parsing
- * payload_json — cheap enough to keep this index a single, lightweight
- * query. This can't distinguish "AI analysis still in flight" from "AI
- * analysis permanently failed" (both leave ai_score NULL) — that finer
- * distinction only matters once a room is actually opened, and belongs to
- * app/reports/rooms/[room]/room-page-shell.tsx, which has the full
- * payload to check.
+ * Status is derived here from the bare ai_score/ai_status columns alone
+ * (lib/report-rooms.ts's deriveRoomStatus), without parsing payload_json —
+ * cheap enough to keep this index a single, lightweight query. "processing"
+ * vs "failed" (production audit fix) is a real, persisted distinction as
+ * of ai_status, not something this index has to infer — a genuinely failed
+ * AI check shows as "failed" here directly, the same as it does once the
+ * room is actually opened.
  *
  * The number of rooms returned depends on the account's role
  * (getRoomCountForRole) but "role" itself is never sent to the client here —
@@ -32,11 +31,6 @@ import { getRoomCountForRole, isWithinActiveCycle, roomCycleEndsAt, type RoomInd
  * empty index rather than an error, since this route's existence is not a
  * secret the way /api/developer/* is.
  */
-
-function clientIpFrom(request: Request) {
-  const forwarded = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || 'unknown';
-  return forwarded.split(',')[0].trim();
-}
 
 export async function GET(request: Request) {
   try {
@@ -66,21 +60,21 @@ export async function GET(request: Request) {
       // takes it from the SAME row that produced the max, i.e. the current
       // occupant's own ai_score, not an arbitrary row in the group.
       const result = await client.execute({
-        sql: `SELECT room_number, MAX(report_created_at) as most_recent, ai_score
+        sql: `SELECT room_number, MAX(report_created_at) as most_recent, ai_score, ai_status
               FROM saved_reports WHERE user_id = ? AND room_number IS NOT NULL
               GROUP BY room_number`,
         args: [sessionUser.id],
       });
 
-      const occupantByRoom = new Map<number, { mostRecent: string; aiScore: number | bigint | null }>();
-      for (const row of result.rows as unknown as { room_number: number | bigint; most_recent: string; ai_score: number | bigint | null }[]) {
-        occupantByRoom.set(Number(row.room_number), { mostRecent: row.most_recent, aiScore: row.ai_score });
+      const occupantByRoom = new Map<number, { mostRecent: string; aiScore: number | bigint | null; aiStatus: string | null }>();
+      for (const row of result.rows as unknown as { room_number: number | bigint; most_recent: string; ai_score: number | bigint | null; ai_status: string | null }[]) {
+        occupantByRoom.set(Number(row.room_number), { mostRecent: row.most_recent, aiScore: row.ai_score, aiStatus: row.ai_status });
       }
 
       const rooms: RoomIndexEntry[] = Array.from({ length: roomCount }, (_, room) => {
         const occupant = occupantByRoom.get(room);
         if (occupant && isWithinActiveCycle(occupant.mostRecent)) {
-          const status = occupant.aiScore === null ? 'processing' : 'ready';
+          const status = deriveRoomStatus(occupant.aiScore === null ? null : Number(occupant.aiScore), occupant.aiStatus);
           return { room, status, mostRecentAt: occupant.mostRecent, cycleEndsAt: roomCycleEndsAt(occupant.mostRecent) };
         }
         return { room, status: 'empty', mostRecentAt: null, cycleEndsAt: null };

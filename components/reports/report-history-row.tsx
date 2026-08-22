@@ -39,17 +39,30 @@ export function ReportHistoryRow({
   onDownloadReceipt: (report: SimilarityReport) => Promise<void>;
 }) {
   const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState(false);
   const similarityVerdict = similarityScoreBand(report.archiveScore);
 
   async function handleDownloadReceipt() {
     setDownloading(true);
+    setDownloadError(false);
     try {
+      // Production audit fix: both "the report couldn't be found anywhere"
+      // and "onDownloadReceipt itself threw" (e.g. its own font-loading
+      // fetch failed) used to be entirely silent — the button just flipped
+      // back to "Receipt" with no indication anything went wrong.
       const local = await getStoredReportById<SimilarityReport>(report.id).catch(() => null);
       const full = local ?? (await fetchRemoteReport<SimilarityReport>(report.id));
-      if (full) await onDownloadReceipt(full);
+      if (full) {
+        await onDownloadReceipt(full);
+      } else {
+        setDownloadError(true);
+      }
+    } catch {
+      setDownloadError(true);
     } finally {
       setDownloading(false);
     }
+    window.setTimeout(() => setDownloadError(false), 4000);
   }
 
   return (
@@ -61,24 +74,37 @@ export function ReportHistoryRow({
           {new Date(report.createdAt).toLocaleDateString("en-GB")} · {report.wordCount.toLocaleString()} words
         </p>
       </div>
+      {/* prefetch=false on both links: this row renders in a loop (every
+          saved report at once), and each link points at a force-dynamic,
+          rate-limited page (app/reports/[id]/page.tsx). Viewport prefetching
+          every row's two links the moment the list is visible would burn the
+          account's rate-limit budget before any report is actually opened —
+          see components/reports/report-rooms.tsx's own room-link comment for
+          the same fix applied to the room directory. */}
       <div className="history-action-group" aria-label={`Actions for ${report.title}`}>
-        <Link href={`/reports/${report.id}?mode=ai`} className={`history-result history-ai-result history-ai-${report.aiTone ?? "unavailable"}`} aria-label={`Open AI report for ${report.title}`}>
+        <Link href={`/reports/${report.id}?mode=ai`} prefetch={false} className={`history-result history-ai-result history-ai-${report.aiTone ?? "unavailable"}`} aria-label={`Open AI report for ${report.title}`}>
           <span className="history-result-score">
             <strong className="history-ai-value">{report.aiScore === null ? "—" : `${report.aiScore}%`}</strong>
             <span>{aiToneLabel(report.aiScore, report.aiTone)}</span>
           </span>
           <span className="history-open-cue" aria-hidden="true"><ChevronRight /></span>
         </Link>
-        <Link href={`/reports/${report.id}`} className={`history-result history-similarity-result ${similarityVerdict ? `history-similarity-${similarityVerdict.key}` : ""}`} aria-label={`Open similarity report for ${report.title}`}>
+        <Link href={`/reports/${report.id}`} prefetch={false} className={`history-result history-similarity-result ${similarityVerdict ? `history-similarity-${similarityVerdict.key}` : ""}`} aria-label={`Open similarity report for ${report.title}`}>
           <span className="history-result-score">
             <strong>{report.archiveScore}%</strong>
             <span>Similarity result</span>
           </span>
           <span className="history-open-cue" aria-hidden="true"><ChevronRight /></span>
         </Link>
-        <button className="history-receipt" type="button" disabled={downloading} onClick={handleDownloadReceipt}>
+        <button
+          className="history-receipt"
+          type="button"
+          disabled={downloading}
+          onClick={handleDownloadReceipt}
+          title={downloadError ? "Couldn't generate the receipt. Click to try again." : undefined}
+        >
           <Download aria-hidden="true" />
-          <span>{downloading ? "Preparing…" : "Receipt"}</span>
+          <span aria-live="polite">{downloading ? "Preparing…" : downloadError ? "Failed — retry" : "Receipt"}</span>
         </button>
       </div>
     </article>

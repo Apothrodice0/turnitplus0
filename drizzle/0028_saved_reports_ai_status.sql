@@ -1,0 +1,15 @@
+-- Genuine AI-lifecycle status (production audit fix): additive and nullable.
+-- NULL for every row saved before this migration — those fall back to the
+-- pre-existing binary "ai_score IS NULL means processing" derivation
+-- unchanged (see lib/report-rooms.ts's deriveRoomStatus). Going forward, the
+-- client explicitly writes 'processing' on the similarity-only first save,
+-- then 'ready' or 'failed' on the AI-enriched resave depending on whether
+-- lib/report-types.ts's AiAnalysis.status came back "complete" or not
+-- ("unsupported"/"error") — see
+-- app/reports/rooms/[room]/room-page-shell.tsx.
+--
+-- Deliberately NOT reusing ai_tone for this: aiSignalDisplay's own "no
+-- result yet" branch already writes ai_tone = 'unavailable' on the very
+-- first save, before AI analysis has even started, so ai_tone alone cannot
+-- distinguish "still running" from "permanently failed" — this column can.
+ALTER TABLE saved_reports ADD COLUMN ai_status TEXT;

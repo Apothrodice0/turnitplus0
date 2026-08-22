@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getReportsDbClient } from '../../../../../lib/reports-db';
 import { checkRate } from '../../../../../lib/rate-limit';
+import { clientIpFrom } from '../../../../../lib/client-ip';
 import { getAdminSessionUser } from '../../../../../lib/auth-session';
 import { getReportDeepDiveForDeveloper } from '../../../../../lib/developer-repo';
 
@@ -13,11 +14,6 @@ import { getReportDeepDiveForDeveloper } from '../../../../../lib/developer-repo
  * here exactly like the ordinary GET /api/reports/[id] route already
  * requires it for an anonymous lookup.
  */
-
-function clientIpFrom(request: Request) {
-  const forwarded = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || 'unknown';
-  return forwarded.split(',')[0].trim();
-}
 
 export async function GET(request: Request, { params }: { params: Promise<{ id: string }> }) {
   try {

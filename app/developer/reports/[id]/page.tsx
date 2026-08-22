@@ -1,13 +1,16 @@
-import { cookies } from "next/headers";
 import { notFound } from "next/navigation";
 import type { Metadata } from "next";
-import { SESSION_COOKIE_NAME, getAdminSessionUserByToken } from "@/lib/auth-session";
+import { loadDeveloperGate } from "@/lib/developer-gate";
 import { getReportsDbClient } from "@/lib/reports-db";
 import { getReportDeepDiveForDeveloper } from "@/lib/developer-repo";
 
 export const dynamic = "force-dynamic";
 
+// See lib/developer-gate.ts's own comment: a non-admin must never see a
+// page-identifying title either, not just a 404 body.
 export async function generateMetadata(): Promise<Metadata> {
+  const admin = await loadDeveloperGate();
+  if (!admin) return {};
   return { title: "Report inspection · Developer · TurnitPlus", robots: { index: false, follow: false, nocache: true, googleBot: { index: false, follow: false } } };
 }
 
@@ -18,8 +21,8 @@ export default async function DeveloperReportInspectPage({
   params: Promise<{ id: string }>;
   searchParams: Promise<{ deviceKey?: string }>;
 }) {
-  const token = (await cookies()).get(SESSION_COOKIE_NAME)?.value ?? null;
-  if (!token) notFound();
+  const admin = await loadDeveloperGate();
+  if (!admin) notFound();
 
   const { id } = await params;
   const { deviceKey } = await searchParams;
@@ -37,8 +40,6 @@ export default async function DeveloperReportInspectPage({
     email: string | null;
   }> = [];
   try {
-    const admin = await getAdminSessionUserByToken(token, client);
-    if (!admin) notFound();
     deepDive = await getReportDeepDiveForDeveloper(client, deviceKey, id);
 
     // Developer/admin view: answer the practical question directly — has

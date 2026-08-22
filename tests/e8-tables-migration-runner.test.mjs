@@ -111,7 +111,7 @@ test.after(() => {
 
 // --- A: explicit allowlist ------------------------------------------------
 
-test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0027, in order, never touching 0000-0011', () => {
+test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0028, in order, never touching 0000-0011', () => {
   assert.deepEqual(TARGET_MIGRATIONS, [
     '0012_document_identities.sql',
     '0013_document_families.sql',
@@ -129,6 +129,7 @@ test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0027, in ord
     '0025_users_role.sql',
     '0026_academic_search_run_diagnostics.sql',
     '0027_saved_reports_room_number.sql',
+    '0028_saved_reports_ai_status.sql',
   ]);
   // Phase E8S Step 8: 0022_reuse_context_declarations.sql added
   // reuse_context_declarations, bringing the 15 E1-E8P tables across the
@@ -146,8 +147,11 @@ test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0027, in ord
   // (academic_search_run_diagnostics) — bringing this to 18. Room/slot
   // ownership's 0027_saved_reports_room_number.sql adds zero new tables
   // (only saved_reports.room_number — same column-state mechanism as 0023/
-  // 0025), so that stays 18 across all 16 target migrations.
-  assert.equal(ALL_TARGET_TABLES.length, 18, 'expected exactly 18 tables across all 16 target migrations');
+  // 0025), so that stays 18. The genuine AI-lifecycle status column's
+  // 0028_saved_reports_ai_status.sql (production audit fix) likewise adds
+  // zero new tables (only saved_reports.ai_status), so that stays 18 across
+  // all 17 target migrations.
+  assert.equal(ALL_TARGET_TABLES.length, 18, 'expected exactly 18 tables across all 17 target migrations');
   assert.deepEqual(
     EXPECTED_TABLES_BY_MIGRATION['0023_privacy_consent_and_report_identity_link.sql'],
     [],
@@ -201,6 +205,16 @@ test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0027, in ord
     [{ table: 'saved_reports', column: 'room_number' }],
     '0027 must be declared as adding exactly this one column',
   );
+  assert.deepEqual(
+    EXPECTED_TABLES_BY_MIGRATION['0028_saved_reports_ai_status.sql'],
+    [],
+    '0028 must be declared as creating zero new tables',
+  );
+  assert.deepEqual(
+    EXPECTED_COLUMNS_BY_MIGRATION['0028_saved_reports_ai_status.sql'],
+    [{ table: 'saved_reports', column: 'ai_status' }],
+    '0028 must be declared as adding exactly this one column',
+  );
 });
 
 // --- F: no execution of 0000-0011 (structural) ----------------------------
@@ -221,7 +235,7 @@ test('F: the runner module never does an unfiltered directory scan — no readdi
 
 // --- G: destructive SQL detection -----------------------------------------
 
-test('G: scanForDestructiveStatements finds real destructive keywords and finds none in the actual 16 target migration files', () => {
+test('G: scanForDestructiveStatements finds real destructive keywords and finds none in the actual 17 target migration files', () => {
   assert.deepEqual(scanForDestructiveStatements('CREATE TABLE IF NOT EXISTS x (id TEXT);'), []);
   assert.ok(scanForDestructiveStatements('DROP TABLE document_chunks;').length > 0);
   assert.ok(scanForDestructiveStatements('DELETE FROM users WHERE 1=1;').length > 0);
@@ -285,9 +299,17 @@ test('splitStatements correctly splits 0027 (one ALTER TABLE, one backfill UPDAT
   assert.ok(/^CREATE INDEX/i.test(statements[2]));
 });
 
+test('splitStatements correctly splits 0028 (a single ALTER TABLE, like 0025 but on saved_reports)', () => {
+  const content = fs.readFileSync(path.join(drizzleDir, '0028_saved_reports_ai_status.sql'), 'utf8');
+  const statements = splitStatements(content);
+  assert.equal(statements.length, 1, 'expected exactly 1 ALTER TABLE statement');
+  assert.doesNotMatch(statements[0], /^--/, 'no statement should be a leftover comment line');
+  assert.ok(/^ALTER TABLE saved_reports ADD COLUMN ai_status/i.test(statements[0]));
+});
+
 // --- Section 9: disposable local DB — full happy-path run ------------------
 
-test('SECTION 9: fresh pre-0012 database — the runner applies all 16 migrations in order, creates all 18 tables, adds 0023\'s/0025\'s/0027\'s columns, and preserves legacy row VALUES exactly', async () => {
+test('SECTION 9: fresh pre-0012 database — the runner applies all 17 migrations in order, creates all 18 tables, adds 0023\'s/0025\'s/0027\'s/0028\'s columns, and preserves legacy row VALUES exactly', async () => {
   const dbFile = freshDbPath('happy');
   const client = await buildPreMigrationDb(dbFile);
   await seedRepresentativeLegacyRows(client);
@@ -341,6 +363,12 @@ test('SECTION 9: fresh pre-0012 database — the runner applies all 16 migration
   assert.equal(savedReportRow.room_number, 0, "0027 must backfill room_number to CAST(id AS INTEGER) % 10 for a pre-existing authenticated row");
   const anonymousReportRow = after.saved_reports.find((r) => r.id === 'legacy-report-2');
   assert.equal(anonymousReportRow.room_number, null, "0027 must leave room_number NULL for a pre-existing anonymous (user_id IS NULL) row");
+  // 0028 (production audit fix) is a plain additive column with no backfill
+  // at all — every pre-existing row, authenticated or anonymous, must get
+  // NULL, deferring entirely to deriveRoomStatus's own ai_score-based
+  // fallback for legacy rows (see lib/report-rooms.ts).
+  assert.equal(savedReportRow.ai_status, null, "0028 must add ai_status as NULL to a pre-existing row, never populate it");
+  assert.equal(anonymousReportRow.ai_status, null, "0028 must add ai_status as NULL to a pre-existing anonymous row too");
 
   client.close();
 });
