@@ -66,6 +66,7 @@ export function AdminCorpusSearch() {
   return (
     <div className="developer-lookup">
       <form
+        className="admin-corpus-filters"
         onSubmit={(event) => {
           event.preventDefault();
           setPage(1);
