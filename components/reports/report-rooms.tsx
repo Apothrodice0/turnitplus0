@@ -44,6 +44,14 @@ function RoomRowSkeleton() {
 export function ReportRoomsBrowser({ accountEmail, onTotalCountChange }: Props) {
   const [roomIndex, setRoomIndex] = useState<RoomIndexEntry[] | null>(null);
   const [indexLoading, setIndexLoading] = useState(true);
+  // Production bug fix: a failed index fetch (429/500/timeout/network
+  // error) must render as its own honest retry state — never as an empty
+  // room directory (which would look identical to "you have zero rooms,"
+  // impossible for a real account) and never anything that touches or
+  // implies the account's own signed-in state, which lives entirely in the
+  // parent (app/page.tsx) and this component never sees, let alone clears.
+  const [indexError, setIndexError] = useState(false);
+  const [retryToken, setRetryToken] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -52,24 +60,42 @@ export function ReportRoomsBrowser({ accountEmail, onTotalCountChange }: Props) 
       if (cached) {
         setRoomIndex(cached);
         setIndexLoading(false);
+        setIndexError(false);
         return;
       }
       setIndexLoading(true);
-      const fresh = await fetchReportRoomIndex();
+      setIndexError(false);
+      const result = await fetchReportRoomIndex();
       if (cancelled) return;
-      setCachedRoomIndex(accountEmail, fresh);
-      setRoomIndex(fresh);
+      if (result.ok) {
+        setCachedRoomIndex(accountEmail, result.rooms);
+        setRoomIndex(result.rooms);
+      } else {
+        setIndexError(true);
+      }
       setIndexLoading(false);
     }
     loadIndex();
     return () => {
       cancelled = true;
     };
-  }, [accountEmail]);
+  }, [accountEmail, retryToken]);
 
   useEffect(() => {
     if (roomIndex) onTotalCountChange(roomIndex.filter((entry) => entry.status !== "empty").length);
   }, [roomIndex, onTotalCountChange]);
+
+  if (indexError) {
+    return (
+      <section className="ai-analysis-message" role="status">
+        <strong>—</strong>
+        <div>
+          <p>Couldn&apos;t load your rooms right now. You&apos;re still signed in — this is just a temporary connection issue.</p>
+          <button className="button secondary" type="button" onClick={() => setRetryToken((token) => token + 1)}>Try again</button>
+        </div>
+      </section>
+    );
+  }
 
   if (indexLoading || !roomIndex) {
     return (

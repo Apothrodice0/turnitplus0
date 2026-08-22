@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getReportsDbClient } from '../../../lib/reports-db';
-import { checkRate } from '../../../lib/rate-limit';
+import { checkRate, checkPollRate } from '../../../lib/rate-limit';
 import { clientIpFrom } from '../../../lib/client-ip';
 import { getSessionUser } from '../../../lib/auth-session';
 import { captureDocumentIdentityAndFamily } from '../../../lib/document-family';
@@ -402,7 +402,16 @@ export async function POST(request: Request) {
 
 export async function GET(request: Request) {
   try {
-    const rate = await checkRate(clientIpFrom(request));
+    // Room-status polling (app/reports/rooms/[room]/room-page-shell.tsx's
+    // own 3-second interval while a check is "processing") gets its own,
+    // more generous bucket — production bug fix. Sharing the general
+    // bucket meant a normal poll window alone could exhaust the SAME
+    // budget "Open full report" and every other ordinary browsing/upload/
+    // auth action on this account also draws from. The room param is
+    // parsed once here, up front, purely to pick the right bucket; the
+    // authenticated/room-scoped branch below re-validates it for real.
+    const isRoomScopedPoll = new URL(request.url).searchParams.get('room') !== null;
+    const rate = isRoomScopedPoll ? await checkPollRate(clientIpFrom(request)) : await checkRate(clientIpFrom(request));
     if (!rate.allowed) {
       return new NextResponse(JSON.stringify({ error: 'Too many requests' }), { status: 429, headers: { 'Retry-After': String(rate.retryAfter) } });
     }

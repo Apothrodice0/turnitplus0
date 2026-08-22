@@ -135,18 +135,34 @@ export async function listRemoteReportSummaries(): Promise<ReportSummary[]> {
  * (10 normal, more for admin — see lib/report-rooms.ts's getRoomCountForRole)
  * — the client never needs to know the account's role to render the right
  * number of tiles.
+ *
+ * Production bug fix: a failed request (429/500/timeout/network error) used
+ * to silently become `[]` — indistinguishable from "this account genuinely
+ * has zero rooms," which can't actually happen for a real authenticated
+ * account (every account gets 10-40 room entries, even if all are
+ * "empty"). Rendered as a real, empty-looking room directory instead of the
+ * transient failure it actually was, and callers had no way to tell "the
+ * request failed" apart from "you're signed out" or "there's nothing here"
+ * — both of which are separate, distinct facts a failed HTTP request can
+ * never actually prove. This now returns a discriminated result instead, so
+ * a caller can render an honest retry state and keep the account's
+ * signed-in UI intact.
  */
-export async function fetchReportRoomIndex(): Promise<RoomIndexEntry[]> {
+export type RoomIndexFetchResult =
+  | { ok: true; rooms: RoomIndexEntry[] }
+  | { ok: false; status: number | null };
+
+export async function fetchReportRoomIndex(): Promise<RoomIndexFetchResult> {
   try {
     const response = await fetch("/api/reports/rooms");
-    if (!response.ok) return [];
+    if (!response.ok) return { ok: false, status: response.status };
     const data = (await response.json()) as { rooms?: RoomIndexEntry[] };
-    return Array.isArray(data.rooms) ? data.rooms : [];
+    return { ok: true, rooms: Array.isArray(data.rooms) ? data.rooms : [] };
   } catch (error) {
     console.debug("Report room index fetch failed.", {
       error: error instanceof Error ? error.message : String(error),
     });
-    return [];
+    return { ok: false, status: null };
   }
 }
 
@@ -174,21 +190,34 @@ export type RoomContents =
 
 const EMPTY_ROOM_CONTENTS: RoomContents = { status: "empty", report: null, cycleEndsAt: null };
 
+/**
+ * Production bug fix — see fetchReportRoomIndex's own comment for the full
+ * rationale, which applies identically here: a failed request used to
+ * silently become EMPTY_ROOM_CONTENTS, indistinguishable from "this room is
+ * genuinely empty." For app/reports/rooms/[room]/room-page-shell.tsx's own
+ * polling loop specifically, that meant a single transient failure mid-poll
+ * could look like the room's occupant vanished. Callers now get a real
+ * ok:false and decide for themselves (retry, keep polling, show an error).
+ */
+export type RoomContentsFetchResult =
+  | { ok: true; contents: RoomContents }
+  | { ok: false; status: number | null };
+
 /** One room's current occupant (at most one report) — fetched only when the user actually opens that room, never all rooms up front. */
-export async function fetchReportRoomContents(room: number): Promise<RoomContents> {
+export async function fetchReportRoomContents(room: number): Promise<RoomContentsFetchResult> {
   try {
     const response = await fetch(`/api/reports?room=${room}`);
-    if (!response.ok) return EMPTY_ROOM_CONTENTS;
+    if (!response.ok) return { ok: false, status: response.status };
     const data = (await response.json()) as Partial<RoomContents>;
     if ((data.status === "ready" || data.status === "processing" || data.status === "failed") && data.report) {
-      return { status: data.status, report: data.report, cycleEndsAt: data.cycleEndsAt ?? new Date().toISOString() };
+      return { ok: true, contents: { status: data.status, report: data.report, cycleEndsAt: data.cycleEndsAt ?? new Date().toISOString() } };
     }
-    return EMPTY_ROOM_CONTENTS;
+    return { ok: true, contents: EMPTY_ROOM_CONTENTS };
   } catch (error) {
     console.debug("Report room fetch failed.", {
       error: error instanceof Error ? error.message : String(error),
     });
-    return EMPTY_ROOM_CONTENTS;
+    return { ok: false, status: null };
   }
 }
 
@@ -204,9 +233,10 @@ export async function fetchReportRoomContents(room: number): Promise<RoomContent
  * deletable row that a full wipe must not skip.
  */
 export async function fetchAllReportSummariesAcrossRooms(): Promise<ReportSummary[]> {
-  const index = await fetchReportRoomIndex();
-  const contents = await Promise.all(index.map((entry) => fetchReportRoomContents(entry.room)));
-  return contents.flatMap((c) => (c.status !== "empty" ? [c.report] : []));
+  const indexResult = await fetchReportRoomIndex();
+  if (!indexResult.ok) return [];
+  const contentsResults = await Promise.all(indexResult.rooms.map((entry) => fetchReportRoomContents(entry.room)));
+  return contentsResults.flatMap((r) => (r.ok && r.contents.status !== "empty" ? [r.contents.report] : []));
 }
 
 /**

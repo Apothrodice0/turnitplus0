@@ -51,5 +51,6 @@ test("a corrupt payload_json row is treated as not-found-for-session (reusing th
   assert.ok(loaderMatch, "loadOwnedReport must be found");
   const loader = loaderMatch[0];
 
-  assert.match(loader, /try \{\s*\n\s*return \{ status: "found", payload: JSON\.parse\(row\.payload_json\) as SimilarityReport \};\s*\n\s*\} catch \{\s*\n\s*return \{ status: "not-found-for-session" \};\s*\n\s*\}/, "JSON.parse must be wrapped, and a failure must resolve to the same not-found-for-session status a missing row already uses — not a new, untested state");
+  const tryBlockMatch = loader.match(/try \{\s*\n\s*const payload = JSON\.parse\(row\.payload_json\) as SimilarityReport;[\s\S]*?\} catch \{\s*\n\s*return \{ status: "not-found-for-session" \};\s*\n\s*\}/);
+  assert.ok(tryBlockMatch, "JSON.parse must be wrapped, and a failure must resolve to the same not-found-for-session status a missing row already uses — not a new, untested state");
 });

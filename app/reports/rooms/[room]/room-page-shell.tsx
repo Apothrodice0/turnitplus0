@@ -261,10 +261,15 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
 
     async function poll() {
       attempts += 1;
-      const fresh = await fetchReportRoomContents(room);
+      const result = await fetchReportRoomContents(room);
       if (cancelled) return;
-      if (fresh.status !== "processing") {
-        setOccupant(fresh);
+      // A failed poll request (429/500/timeout/network error) must never be
+      // treated as "the room is now empty" or as confirmation of anything —
+      // production bug fix. It's simply inconclusive, exactly like a
+      // still-"processing" result: keep polling until a genuine non-
+      // processing status arrives or the attempt budget runs out.
+      if (result.ok && result.contents.status !== "processing") {
+        setOccupant(result.contents);
         return;
       }
       if (attempts >= MAX_POLL_ATTEMPTS) {
@@ -272,8 +277,8 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
         // status via the normal branch above (production audit fix), so
         // reaching this cap means genuinely still unresolved — most likely
         // the tab that started the check is gone (closed/crashed) before
-        // its save landed. Offer a manual recheck rather than polling
-        // forever.
+        // its save landed, or this device has had persistent connectivity
+        // trouble. Offer a manual recheck rather than polling forever.
         setPollExhausted(true);
         return;
       }
@@ -478,21 +483,29 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
               </div>
             </div>
 
+            {/* Production bug fix: while genuinely processing, nothing here
+                may present as finished. Similarity is technically computed
+                first server-side, but surfacing its real number (or a link
+                into the full report) here let a user open /reports/[id]
+                before the room itself is ready — neither metric is a link,
+                neither shows a number, and there is no "Open full report"
+                escape hatch at all until this room reaches "ready" or
+                "failed" below. */}
             <div className="room-report-metrics">
               <div className="room-metric room-metric-pending">
                 <span className="room-metric-label">AI Detection</span>
                 <strong className="room-metric-value">···</strong>
                 <span className="room-metric-sub">Analyzing…</span>
               </div>
-              <Link href={`/reports/${occupant.report.id}?room=${room}`} className={`room-metric room-metric-${similarityScoreBand(occupant.report.archiveScore)?.key ?? "low"}`}>
+              <div className="room-metric room-metric-pending">
                 <span className="room-metric-label">Similarity</span>
-                <strong className="room-metric-value">{occupant.report.archiveScore}%</strong>
-                <span className="room-metric-sub">{similarityScoreBand(occupant.report.archiveScore)?.label ?? "Result"}</span>
-              </Link>
-              <button className="room-metric" type="button" onClick={() => handleDownloadReceipt(occupant.report!.id)} disabled={downloadingReceipt}>
+                <strong className="room-metric-value">···</strong>
+                <span className="room-metric-sub">Analyzing…</span>
+              </div>
+              <button className="room-metric" type="button" disabled>
                 <span className="room-metric-label">Receipt</span>
                 <Download aria-hidden="true" className="room-metric-icon" />
-                <span className="room-metric-sub">{downloadingReceipt ? "Preparing…" : "Download"}</span>
+                <span className="room-metric-sub">Preparing…</span>
               </button>
             </div>
 
@@ -510,8 +523,6 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
                 </div>
               </div>
             )}
-
-            <Link href={`/reports/${occupant.report.id}?room=${room}`} className="button secondary room-open-full">Open full report</Link>
           </div>
         )}
 

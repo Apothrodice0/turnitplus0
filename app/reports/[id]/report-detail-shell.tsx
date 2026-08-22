@@ -26,12 +26,23 @@ type LoadStatus = "loading" | "found" | "not-found";
 export function ReportDetailShell({
   id,
   initialReport,
+  initialAiStatus,
   requiresClientResolution,
   mode,
   backRoom,
 }: {
   id: string;
   initialReport: SimilarityReport | null;
+  /**
+   * Production bug fix: the report's real AI-lifecycle status (see
+   * app/reports/[id]/page.tsx's own comment), so a direct visit to this
+   * URL while AI analysis is still running shows an explicit "in
+   * progress" state instead of presenting the page as if everything were
+   * finished. null for the anonymous/device-key path (requiresClientResolution),
+   * which has no server-computed status to hand over — that path's own
+   * empty/found result already renders correctly without this.
+   */
+  initialAiStatus: "processing" | "ready" | "failed" | null;
   requiresClientResolution: boolean;
   mode: ReportMode;
   /** The room this report was opened from (see app/reports/[id]/page.tsx's own comment) — null when opened any other way (the anonymous flat list, a bookmark, etc.), in which case the back button falls back to the generic My Reports directory. */
@@ -41,6 +52,7 @@ export function ReportDetailShell({
   const backLabel = backRoom !== null ? `Back to Room ${backRoom + 1}` : "Back to reports";
   const router = useRouter();
   const [report, setReport] = useState<SimilarityReport | null>(initialReport);
+  const [aiStatus, setAiStatus] = useState<"processing" | "ready" | "failed" | null>(initialAiStatus);
   const [status, setStatus] = useState<LoadStatus>(
     initialReport ? "found" : requiresClientResolution ? "loading" : "not-found",
   );
@@ -55,7 +67,14 @@ export function ReportDetailShell({
     if (initialReport && !requiresClientResolution) {
       let cancelled = false;
       void fetchRemoteReport<SimilarityReport>(id).then((enriched) => {
-        if (!cancelled && enriched) setReport((current) => (current ? { ...current, ...enriched } : enriched));
+        if (cancelled || !enriched) return;
+        setReport((current) => (current ? { ...current, ...enriched } : enriched));
+        // Piggybacks on this same one-shot fetch (no new request) to
+        // correct aiStatus if AI analysis resolved in the moment between
+        // this page's server render and this effect firing — production
+        // bug fix, kept minimal rather than adding a dedicated poll loop.
+        if (enriched.aiAnalysis?.status === "complete") setAiStatus("ready");
+        else if (enriched.aiAnalysis?.status === "error" || enriched.aiAnalysis?.status === "unsupported") setAiStatus("failed");
       });
       return () => {
         cancelled = true;
@@ -180,6 +199,32 @@ export function ReportDetailShell({
           <strong>—</strong>
           <p>{deleteError}</p>
         </div>
+      )}
+
+      {/* Production bug fix: a report reached directly by URL (bookmark,
+          typed link) while its AI check is still running or has genuinely
+          failed must say so plainly, regardless of which tab is open —
+          similarity results are real and shown normally below either way
+          (they finish before AI does), this is only about not letting the
+          page feel "fully done" when it isn't yet. */}
+      {aiStatus === "processing" && (
+        <section className="ai-analysis-message" role="status">
+          <strong>—</strong>
+          <div>
+            <p>AI-writing analysis is still in progress for this report. The similarity results below are complete; the AI score will appear once analysis finishes.</p>
+            <Link href={backHref} className="button secondary">{backLabel}</Link>
+          </div>
+        </section>
+      )}
+
+      {aiStatus === "failed" && (
+        <section className="ai-analysis-message" role="status">
+          <strong>—</strong>
+          <div>
+            <p>AI-writing analysis was unavailable for this document. The similarity results below are complete and unaffected.</p>
+            <Link href={backHref} className="button secondary">{backLabel}</Link>
+          </div>
+        </section>
       )}
 
       <div className="report-summary-strip">

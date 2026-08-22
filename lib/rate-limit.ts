@@ -194,3 +194,25 @@ export async function checkAuthRate(clientId: string): Promise<RateCheckResult> 
 export async function resetAuthRateForTest(clientId: string): Promise<void> {
   await resetBucketForTest(`auth:${clientId}`);
 }
+
+// Separate, more generous bucket specifically for read-only room/report
+// STATUS polling (app/reports/rooms/[room]/room-page-shell.tsx's own
+// 3-second interval while a check is "processing" — production bug fix).
+// Sharing the general bucket meant a normal poll window (up to
+// MAX_POLL_ATTEMPTS requests) could exhaust the SAME budget "Open full
+// report" and every other ordinary browsing/upload/auth action on this
+// account also draws from, blocking unrelated requests purely as a side
+// effect of watching one room finish. 30/min comfortably covers a full poll
+// window with real headroom, while still bounding a runaway/misbehaving
+// client — this is not "no rate limit," just one sized for its own traffic
+// pattern instead of sharing a budget meant for something else.
+const POLL_MAX_TOKENS = 30;
+const POLL_INTERVAL_MS = 60_000;
+
+export async function checkPollRate(clientId: string): Promise<RateCheckResult> {
+  return checkBucket(`poll:${clientId}`, POLL_MAX_TOKENS, POLL_INTERVAL_MS);
+}
+
+export async function resetPollRateForTest(clientId: string): Promise<void> {
+  await resetBucketForTest(`poll:${clientId}`);
+}

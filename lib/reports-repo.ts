@@ -8,18 +8,46 @@ import type { ReportSummary } from "./reports-remote";
 // snapshot on saved_reports' own composite primary key (device_key, id)
 // rather than id alone (see db/schema.ts's own comment on
 // report_historical_match_snapshots for why id alone is not safe to key on).
+//
 type ReportRow = { payload_json: string; device_key: string };
+
+/**
+ * Adds the three flattened AI-lifecycle columns to ReportRow (production
+ * bug fix): a direct visit to a report's own URL
+ * (app/reports/[id]/page.tsx) while its AI check is still "processing" had
+ * no way to know that — the saved payload_json itself has no top-level
+ * AI-lifecycle status field (only the lightweight room-summary shape
+ * does), so the page could only infer "pending" from an absent
+ * aiAnalysis, indistinguishable from a report that will simply never be
+ * analyzed. These three columns let the page derive the same real status
+ * (lib/report-rooms.ts's deriveRoomStatus) the room page already uses,
+ * instead of guessing. Scoped to findReportRowForUser only (the
+ * authenticated, room-owning path this fix is about) rather than widening
+ * ReportRow itself — findReportRowForDeviceKey's anonymous callers don't
+ * need it and its own query doesn't select these columns.
+ */
+type ReportRowWithAiStatus = ReportRow & { ai_score: number | null; ai_tone: string | null; ai_status: string | null };
 
 // id is only unique per device_key at the schema level (composite PK), not
 // globally, so an account with two devices could in theory produce the same
 // client-generated (timestamp-based) id twice. ORDER BY updated_at DESC
 // resolves that deterministically instead of returning an arbitrary row.
-export async function findReportRowForUser(client: Client, id: string, userId: string): Promise<ReportRow | undefined> {
+export async function findReportRowForUser(client: Client, id: string, userId: string): Promise<ReportRowWithAiStatus | undefined> {
   const result = await client.execute({
-    sql: "SELECT payload_json, device_key FROM saved_reports WHERE id = ? AND user_id = ? ORDER BY updated_at DESC LIMIT 1",
+    sql: "SELECT payload_json, device_key, ai_score, ai_tone, ai_status FROM saved_reports WHERE id = ? AND user_id = ? ORDER BY updated_at DESC LIMIT 1",
     args: [id, userId],
   });
-  return result.rows[0] as unknown as ReportRow | undefined;
+  const row = result.rows[0] as unknown as
+    | { payload_json: string; device_key: string; ai_score: number | bigint | null; ai_tone: string | null; ai_status: string | null }
+    | undefined;
+  if (!row) return undefined;
+  return {
+    payload_json: row.payload_json,
+    device_key: row.device_key,
+    ai_score: row.ai_score === null ? null : Number(row.ai_score),
+    ai_tone: row.ai_tone,
+    ai_status: row.ai_status,
+  };
 }
 
 // A report already claimed by an account (user_id set) is permanently

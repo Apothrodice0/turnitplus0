@@ -8,13 +8,23 @@ import { checkRate } from "@/lib/rate-limit";
 import { clientIpFromHeaders } from "@/lib/client-ip";
 import { getReportsDbClient } from "@/lib/reports-db";
 import { findReportRowForUser } from "@/lib/reports-repo";
+import { deriveRoomStatus } from "@/lib/report-rooms";
 import type { SimilarityReport } from "@/lib/report-types";
 import { ReportDetailShell } from "./report-detail-shell";
 
 export const dynamic = "force-dynamic";
 
 type OwnedReportResult =
-  | { status: "found"; payload: SimilarityReport }
+  // aiStatus (production bug fix): the report's real AI-lifecycle status,
+  // derived the same way the room page already does (see
+  // lib/report-rooms.ts's deriveRoomStatus) from the row's own ai_score/
+  // ai_status columns — lets a direct visit to this URL show an honest "AI
+  // analysis in progress" state instead of either pretending the report is
+  // fully done or leaving the AI tab looking permanently, ambiguously
+  // "pending." Always defined (never null): a legacy report predating
+  // ai_status falls back to deriveRoomStatus's own ai_score-only rule,
+  // exactly like the room page already does for the same case.
+  | { status: "found"; payload: SimilarityReport; aiStatus: "processing" | "ready" | "failed" }
   | { status: "not-found-for-session" }
   | { status: "no-session" }
   | { status: "rate-limited"; retryAfterSeconds: number };
@@ -52,7 +62,9 @@ const loadOwnedReport = cache(async (id: string): Promise<OwnedReportResult> => 
     // fail identically on every retry for genuinely corrupt data) is both
     // more honest and avoids a dead-end retry loop. Production audit fix.
     try {
-      return { status: "found", payload: JSON.parse(row.payload_json) as SimilarityReport };
+      const payload = JSON.parse(row.payload_json) as SimilarityReport;
+      const aiStatus = deriveRoomStatus(row.ai_score, row.ai_status);
+      return { status: "found", payload, aiStatus };
     } catch {
       return { status: "not-found-for-session" };
     }
@@ -116,6 +128,7 @@ export default async function ReportDetailPage({
       id={id}
       mode={mode}
       initialReport={result.status === "found" ? result.payload : null}
+      initialAiStatus={result.status === "found" ? result.aiStatus : null}
       requiresClientResolution={result.status === "no-session"}
       backRoom={backRoom}
     />
