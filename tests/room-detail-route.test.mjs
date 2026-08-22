@@ -19,6 +19,22 @@ test("the room page stays force-dynamic and only calls notFound() for a genuinel
   assert.match(bodyMatch[0], /if \(result\.status === "invalid-room"\) notFound\(\);/);
 });
 
+test("rate-limit architecture fix: the room page's own SSR gate uses the read/navigation bucket, never the strict write/auth bucket", async () => {
+  // Production bug fix: this gate used to call checkRate (the same
+  // strict/abuse-sensitive bucket uploads, login, and destructive
+  // operations depend on) — clicking between a handful of rooms as part of
+  // ordinary browsing could exhaust that shared budget. checkReadRate is a
+  // separate, much more generous bucket sized for exactly this traffic
+  // (see lib/rate-limit.ts's own header comment and
+  // tests/read-rate-limit-bucket.test.mjs for the integration-level proof,
+  // including the exact "My Reports -> Room 1 -> Back -> Room 4 -> Back ->
+  // Room 2" reproduction from the bug report).
+  const route = await readFile(new URL("../app/reports/rooms/[room]/page.tsx", import.meta.url), "utf8");
+  assert.match(route, /import \{ checkReadRate \} from "@\/lib\/rate-limit";/);
+  assert.match(route, /const rate = await checkReadRate\(clientIp\);/);
+  assert.doesNotMatch(route, /\bcheckRate\(/, "the strict bucket's checkRate must never be called from this page's own gate");
+});
+
 test("a rate-limited request is never conflated with no-session — an already signed-in owner never sees a false sign-in prompt", async () => {
   // Production audit fix: this account's own general rate-limit bucket
   // (lib/rate-limit.ts, IP-keyed) can trip even though a session cookie is

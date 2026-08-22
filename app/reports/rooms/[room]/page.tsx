@@ -5,7 +5,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { LogIn } from "lucide-react";
 import { SESSION_COOKIE_NAME, getSessionUserByToken } from "@/lib/auth-session";
-import { checkRate } from "@/lib/rate-limit";
+import { checkReadRate } from "@/lib/rate-limit";
 import { clientIpFromHeaders } from "@/lib/client-ip";
 import { getReportsDbClient } from "@/lib/reports-db";
 import { findRoomOccupant, type RoomOccupantResult } from "@/lib/reports-repo";
@@ -37,12 +37,13 @@ const loadRoom = cache(async (roomParam: string): Promise<RoomPageResult> => {
   if (!token) return { status: "no-session" };
 
   // A session cookie is already present at this point, so a rejection here
-  // is never "not signed in" — it's this account's own general rate-limit
-  // bucket (lib/rate-limit.ts) being briefly exhausted. Must stay a distinct
-  // status, not "no-session": collapsing the two used to render "Sign in to
-  // view this room" to an already-signed-in user (production audit finding).
+  // is never "not signed in" — it's this account's own read/navigation rate-
+  // limit bucket (lib/rate-limit.ts's checkReadRate) being briefly exhausted.
+  // Must stay a distinct status, not "no-session": collapsing the two used
+  // to render "Sign in to view this room" to an already-signed-in user
+  // (production audit finding).
   const clientIp = clientIpFromHeaders(await headers());
-  const rate = await checkRate(clientIp);
+  const rate = await checkReadRate(clientIp);
   if (!rate.allowed) return { status: "rate-limited", retryAfterSeconds: rate.retryAfter };
 
   const client = await getReportsDbClient();

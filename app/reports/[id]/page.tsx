@@ -4,7 +4,7 @@ import { notFound } from "next/navigation";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { SESSION_COOKIE_NAME, getSessionUserByToken } from "@/lib/auth-session";
-import { checkRate } from "@/lib/rate-limit";
+import { checkReadRate } from "@/lib/rate-limit";
 import { clientIpFromHeaders } from "@/lib/client-ip";
 import { getReportsDbClient } from "@/lib/reports-db";
 import { findReportRowForUser } from "@/lib/reports-repo";
@@ -39,14 +39,14 @@ const loadOwnedReport = cache(async (id: string): Promise<OwnedReportResult> => 
   if (!token) return { status: "no-session" };
 
   // A session cookie is already present, so a rejection here is this
-  // account's own rate-limit bucket, never "not signed in" — must stay
-  // distinct from "no-session", which ReportDetailShell treats as "try the
-  // anonymous device-key lookup" (see requiresClientResolution below). An
-  // account-owned report can never be found that way, so collapsing the two
-  // used to render "This report could not be found" to its own owner
-  // (production audit finding).
+  // account's own read/navigation rate-limit bucket (checkReadRate), never
+  // "not signed in" — must stay distinct from "no-session", which
+  // ReportDetailShell treats as "try the anonymous device-key lookup" (see
+  // requiresClientResolution below). An account-owned report can never be
+  // found that way, so collapsing the two used to render "This report could
+  // not be found" to its own owner (production audit finding).
   const clientIp = clientIpFromHeaders(await headers());
-  const rate = await checkRate(clientIp);
+  const rate = await checkReadRate(clientIp);
   if (!rate.allowed) return { status: "rate-limited", retryAfterSeconds: rate.retryAfter };
 
   const client = await getReportsDbClient();

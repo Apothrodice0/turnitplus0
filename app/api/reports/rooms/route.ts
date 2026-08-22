@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getReportsDbClient } from '../../../../lib/reports-db';
-import { checkRate } from '../../../../lib/rate-limit';
+import { checkReadRate } from '../../../../lib/rate-limit';
 import { clientIpFrom } from '../../../../lib/client-ip';
 import { getSessionUser } from '../../../../lib/auth-session';
 import { deriveRoomStatus, getRoomCountForRole, isWithinActiveCycle, roomCycleEndsAt, type RoomIndexEntry } from '../../../../lib/report-rooms';
@@ -34,7 +34,7 @@ import { deriveRoomStatus, getRoomCountForRole, isWithinActiveCycle, roomCycleEn
 
 export async function GET(request: Request) {
   try {
-    const rate = await checkRate(clientIpFrom(request));
+    const rate = await checkReadRate(clientIpFrom(request));
     if (!rate.allowed) {
       return new NextResponse(JSON.stringify({ error: 'Too many requests' }), { status: 429, headers: { 'Retry-After': String(rate.retryAfter) } });
     }

@@ -41,6 +41,20 @@ test("the page-level data loader only calls notFound() when a session definitive
   assert.match(bodyMatch[0], /if \(result\.status === "not-found-for-session"\) notFound\(\);/);
 });
 
+test("rate-limit architecture fix: the page's own SSR gate uses the read/navigation bucket, never the strict write/auth bucket", async () => {
+  // Production bug fix: this gate used to call checkRate (the same
+  // strict/abuse-sensitive bucket uploads, login, and destructive
+  // operations depend on) — a session opening this page as part of
+  // ordinary browsing could exhaust that shared budget. checkReadRate is a
+  // separate, much more generous bucket sized for exactly this traffic
+  // (see lib/rate-limit.ts's own header comment and
+  // tests/read-rate-limit-bucket.test.mjs for the integration-level proof).
+  const route = await readFile(new URL("../app/reports/[id]/page.tsx", import.meta.url), "utf8");
+  assert.match(route, /import \{ checkReadRate \} from "@\/lib\/rate-limit";/);
+  assert.match(route, /const rate = await checkReadRate\(clientIp\);/);
+  assert.doesNotMatch(route, /\bcheckRate\(/, "the strict bucket's checkRate must never be called from this page's own gate");
+});
+
 test("report metadata is generic and excludes the page from search indexing", async () => {
   const route = await readFile(new URL("../app/reports/[id]/page.tsx", import.meta.url), "utf8");
   assert.match(route, /robots: \{ index: false, follow: false, nocache: true, googleBot: \{ index: false, follow: false \} \}/);

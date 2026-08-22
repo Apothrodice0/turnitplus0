@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getReportsDbClient } from '../../../../lib/reports-db';
-import { checkRate } from '../../../../lib/rate-limit';
+import { checkRate, checkReadRate } from '../../../../lib/rate-limit';
 import { clientIpFrom } from '../../../../lib/client-ip';
 import { getSessionUser } from '../../../../lib/auth-session';
 import { findReportRowForDeviceKey, findReportRowForUser } from '../../../../lib/reports-repo';
@@ -22,7 +22,7 @@ function isNonEmptyString(value: unknown): value is string {
 
 export async function GET(request: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
-    const rate = await checkRate(clientIpFrom(request));
+    const rate = await checkReadRate(clientIpFrom(request));
     if (!rate.allowed) {
       return new NextResponse(JSON.stringify({ error: 'Too many requests' }), { status: 429, headers: { 'Retry-After': String(rate.retryAfter) } });
     }

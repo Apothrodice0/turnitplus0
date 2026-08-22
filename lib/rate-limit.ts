@@ -20,6 +20,23 @@ import { getReportsDbClient } from "./reports-db";
  * both functions are now async (a durable check requires a network round
  * trip; there is no way to make cross-instance state durable without one).
  *
+ * Rate-limit architecture (production bug fix): checkRate ("general") is
+ * now scoped specifically to strict/abuse-sensitive traffic — uploads,
+ * account mutations, destructive operations — never to ordinary
+ * authenticated browsing. It used to also gate every room/report page
+ * load and My Reports' own supporting reads (session check, upload-quota
+ * display, the room index), so a completely normal browsing session
+ * (open My Reports, click into a few rooms, go back, open another) could
+ * exhaust the SAME 10-token budget an upload or a destructive action
+ * depends on — a real user doing nothing abusive would see "you've made a
+ * lot of requests" from simply clicking around. checkReadRate exists
+ * specifically for that traffic: a much more generous, separate bucket for
+ * read-only, session-scoped navigation (see its own comment below for the
+ * exact routes). checkPollRate (see its own comment) remains its own third,
+ * separate bucket for the room page's AI-status polling specifically.
+ * These three buckets are never shared, by construction (three distinct
+ * bucket-key namespaces) — draining any one has no effect on the others.
+ *
  * Atomicity: the entire refill-then-maybe-consume decision happens in ONE
  * SQL statement (an INSERT ... ON CONFLICT DO UPDATE), so two concurrent
  * requests for the same bucket_key can never both observe "1 token left"
@@ -215,4 +232,29 @@ export async function checkPollRate(clientId: string): Promise<RateCheckResult> 
 
 export async function resetPollRateForTest(clientId: string): Promise<void> {
   await resetBucketForTest(`poll:${clientId}`);
+}
+
+// Separate, generous bucket for ordinary authenticated read/navigation
+// traffic — the room index, a single room's contents, a full report page
+// load, session/account checks, upload-quota display (production bug fix).
+// These are not polling (see checkPollRate above) and not abuse-sensitive
+// writes (see checkRate/checkAuthRate) — they're what a normal user
+// generates just by clicking around: My Reports -> a room -> back -> a
+// different room -> back -> another room. Sharing the general bucket meant
+// that ordinary sequence alone (session check + upload-quota + room index +
+// one page-load token per room click) could exhaust the SAME 10-token/min
+// budget an upload or a destructive action depends on, producing a false
+// "you've made a lot of requests" for a user who did nothing abusive. 60/min
+// comfortably covers realistic browsing with real headroom, while still
+// bounding a genuinely runaway client — sized for read/navigation traffic's
+// own pattern, not borrowed from a budget meant for writes.
+const READ_MAX_TOKENS = 60;
+const READ_INTERVAL_MS = 60_000;
+
+export async function checkReadRate(clientId: string): Promise<RateCheckResult> {
+  return checkBucket(`read:${clientId}`, READ_MAX_TOKENS, READ_INTERVAL_MS);
+}
+
+export async function resetReadRateForTest(clientId: string): Promise<void> {
+  await resetBucketForTest(`read:${clientId}`);
 }
