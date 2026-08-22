@@ -2783,6 +2783,14 @@ main.report-main {
   padding: 32px 24px 64px;
 }
 
+/* Lives inside .room-page-container (not the shared, full-width
+   .result-toolbar /reports/[id] uses) so it lines up with the same left
+   edge as the room heading/card below it, instead of sitting flush against
+   the browser edge while the rest of the page is centered. */
+.room-back-button {
+  margin: -8px 0 20px -10px;
+}
+
 .room-page-heading {
   display: flex;
   align-items: center;

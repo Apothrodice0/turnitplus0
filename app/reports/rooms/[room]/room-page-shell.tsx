@@ -353,14 +353,12 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
 
   return (
     <div className="room-page">
-      <header className="result-toolbar">
-        <Link href="/#reports" className="back-button">
+      <div className="room-page-container">
+        <Link href="/#reports" className="back-button room-back-button">
           <ChevronLeft aria-hidden="true" />
           Back to My Reports
         </Link>
-      </header>
 
-      <div className="room-page-container">
         <div className="room-page-heading">
           <FileText aria-hidden="true" />
           <div>
