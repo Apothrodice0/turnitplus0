@@ -6,7 +6,7 @@ import { captureDocumentIdentityAndFamily } from '../../../lib/document-family';
 import { indexDocumentSubmissionIntoCorpus } from '../../../lib/user-submission-corpus';
 import { linkAcademicSearchRunDiagnosticsToReport } from '../../../lib/academic-search-diagnostics-repo';
 import { checkUploadLimit } from '../../../lib/upload-limit';
-import { REPORT_ROOM_COUNT } from '../../../lib/report-rooms';
+import { getRoomCountForRole, isWithinActiveCycle, roomCycleEndsAt } from '../../../lib/report-rooms';
 import { runAfterResponse } from '../../../lib/run-after-response';
 
 // Reports carry derived data (AI passages, matched phrases, extracted text)
@@ -40,7 +40,7 @@ export async function POST(request: Request) {
     const body = await request.json().catch(() => null);
     if (!body || typeof body !== 'object') return new NextResponse(JSON.stringify({ error: 'Invalid JSON' }), { status: 400 });
 
-    const { deviceKey, id, submissionId, title, createdAt, wordCount, archiveScore, scoreBand, aiScore, aiTone, payload, academicSearchDiagnosticsId } = body as Record<string, unknown>;
+    const { deviceKey, id, submissionId, title, createdAt, wordCount, archiveScore, scoreBand, aiScore, aiTone, payload, academicSearchDiagnosticsId, room } = body as Record<string, unknown>;
 
     // device_key is part of saved_reports' composite primary key, so it is
     // always required regardless of authentication state — unlike the list/
@@ -119,9 +119,42 @@ export async function POST(request: Request) {
         }
       }
 
+      // Room/slot ownership: a genuinely new, authenticated upload must name
+      // which of the account's room slots it belongs to (the room the user
+      // had open — see components/reports/report-rooms.tsx), and the server
+      // re-validates that slot is actually available RIGHT NOW rather than
+      // trusting the client's own (possibly stale) view of room status —
+      // this is the real enforcement of "one upload per room per 24h cycle";
+      // the client-side UI gate (an empty room shows the upload panel) is
+      // only ever a convenience on top of this. Never applies to a resave
+      // (room_number is immutable after the first insert — see below) or to
+      // an anonymous save (rooms are an authenticated-account concept only).
+      let roomNumberForInsert: number | null = null;
+      if (sessionUser && isFirstSaveOfThisReport) {
+        const roomCount = getRoomCountForRole(sessionUser.role);
+        if (!Number.isInteger(room) || (room as number) < 0 || (room as number) >= roomCount) {
+          return new NextResponse(JSON.stringify({ error: `room must be an integer 0-${roomCount - 1}` }), { status: 400 });
+        }
+        const occupant = await client.execute({
+          sql: `SELECT report_created_at FROM saved_reports WHERE user_id = ? AND room_number = ? ORDER BY report_created_at DESC LIMIT 1`,
+          args: [sessionUser.id, room as number],
+        });
+        const mostRecent = occupant.rows[0]?.report_created_at as string | undefined;
+        if (mostRecent && isWithinActiveCycle(mostRecent)) {
+          return new NextResponse(
+            JSON.stringify({
+              error: `Room ${(room as number) + 1} already has an active report. It will be available again at ${roomCycleEndsAt(mostRecent)}.`,
+              cycleEndsAt: roomCycleEndsAt(mostRecent),
+            }),
+            { status: 409, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        roomNumberForInsert = room as number;
+      }
+
       await client.execute({
-        sql: `INSERT INTO saved_reports (id, device_key, submission_id, title, report_created_at, word_count, archive_score, score_band, ai_score, ai_tone, payload_json, user_id, updated_at)
-              VALUES (?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
+        sql: `INSERT INTO saved_reports (id, device_key, submission_id, title, report_created_at, word_count, archive_score, score_band, ai_score, ai_tone, payload_json, user_id, room_number, updated_at)
+              VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
               ON CONFLICT(device_key, id) DO UPDATE SET
                 submission_id = excluded.submission_id,
                 title = excluded.title,
@@ -134,7 +167,7 @@ export async function POST(request: Request) {
                 payload_json = excluded.payload_json,
                 user_id = COALESCE(excluded.user_id, saved_reports.user_id),
                 updated_at = CURRENT_TIMESTAMP`,
-        args: [id, deviceKey, submissionId, title, createdAt, wordCount, archiveScore, scoreBand, aiScore ?? null, aiTone ?? null, payloadJson, userId],
+        args: [id, deviceKey, submissionId, title, createdAt, wordCount, archiveScore, scoreBand, aiScore ?? null, aiTone ?? null, payloadJson, userId, roomNumberForInsert],
       });
 
       // Document identity + fingerprint + family capture (Phase A/B/C):
@@ -292,41 +325,67 @@ export async function GET(request: Request) {
     try {
       const sessionUser = await getSessionUser(request, client);
       if (sessionUser) {
-        // Authenticated: cross-device list, scoped by account rather than
-        // by whichever browser happens to be asking.
+        // Authenticated: cross-device, scoped by account rather than by
+        // whichever browser happens to be asking.
         //
-        // 10-room architecture: `room` (0-9) scopes this query to one
-        // partition of the account's own reports instead of the account's
-        // whole history — see lib/report-rooms.ts's own header comment for
-        // why CAST(id AS INTEGER) % 10 is the room boundary (a pure
-        // function of the existing id, not a stored/migrated column). The
-        // idx_saved_reports_user_id_created index already narrows to this
-        // one account's rows first; the modulo filter then runs over just
-        // that (small, tens-to-low-hundreds) row set, not a full scan.
-        // Absent `room` preserves the original, pre-rooms behavior (top 50
-        // across the whole account) for any other existing caller.
+        // Room/slot architecture: `room` scopes this query to one specific
+        // slot, which holds AT MOST one CURRENT report — see
+        // lib/report-rooms.ts's own header comment. Unlike the old id%10
+        // grouping, room_number is a stored, explicit fact (set once at
+        // upload time), so this is a plain equality lookup, not a modulo
+        // scan — idx_saved_reports_user_room covers it directly. Absent
+        // `room` preserves the original, pre-rooms behavior (top 50 across
+        // the whole account) for any other existing caller.
         const url = new URL(request.url);
         const roomParam = url.searchParams.get('room');
         if (roomParam !== null) {
+          const roomCount = getRoomCountForRole(sessionUser.role);
           const room = Number(roomParam);
-          if (!Number.isInteger(room) || room < 0 || room >= REPORT_ROOM_COUNT) {
-            return new NextResponse(JSON.stringify({ error: `room must be an integer 0-${REPORT_ROOM_COUNT - 1}` }), { status: 400 });
+          if (!Number.isInteger(room) || room < 0 || room >= roomCount) {
+            return new NextResponse(JSON.stringify({ error: `room must be an integer 0-${roomCount - 1}` }), { status: 400 });
           }
           const result = await client.execute({
             sql: `SELECT id, submission_id, title, report_created_at, word_count, archive_score, score_band, ai_score, ai_tone
-                  FROM saved_reports WHERE user_id = ? AND CAST(id AS INTEGER) % ${REPORT_ROOM_COUNT} = ?
-                  ORDER BY report_created_at DESC LIMIT ?`,
-            args: [sessionUser.id, room, MAX_LISTED_REPORTS],
+                  FROM saved_reports WHERE user_id = ? AND room_number = ?
+                  ORDER BY report_created_at DESC LIMIT 1`,
+            args: [sessionUser.id, room],
           });
-          rows = result.rows;
-        } else {
-          const result = await client.execute({
-            sql: `SELECT id, submission_id, title, report_created_at, word_count, archive_score, score_band, ai_score, ai_tone
-                  FROM saved_reports WHERE user_id = ? ORDER BY report_created_at DESC LIMIT ?`,
-            args: [sessionUser.id, MAX_LISTED_REPORTS],
-          });
-          rows = result.rows;
+          const occupant = result.rows[0] as unknown as
+            | { id: string | number; submission_id: string; title: string; report_created_at: string; word_count: number; archive_score: number; score_band: string; ai_score: number | null; ai_tone: string | null }
+            | undefined;
+          // A room whose only occupant's cycle has ended reports itself as
+          // "empty" here too, exactly like the index (app/api/reports/rooms/
+          // route.ts) — the expired report is never deleted, only no longer
+          // this room's CURRENT occupant; see lib/report-rooms.ts's own
+          // header comment.
+          if (!occupant || !isWithinActiveCycle(occupant.report_created_at)) {
+            return new NextResponse(JSON.stringify({ status: 'empty', report: null, cycleEndsAt: null }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+          }
+          return new NextResponse(
+            JSON.stringify({
+              status: 'ready',
+              cycleEndsAt: roomCycleEndsAt(occupant.report_created_at),
+              report: {
+                id: String(occupant.id),
+                submissionId: String(occupant.submission_id),
+                title: String(occupant.title),
+                createdAt: String(occupant.report_created_at),
+                wordCount: Number(occupant.word_count),
+                archiveScore: Number(occupant.archive_score),
+                scoreBand: String(occupant.score_band),
+                aiScore: occupant.ai_score === null ? null : Number(occupant.ai_score),
+                aiTone: occupant.ai_tone === null ? null : String(occupant.ai_tone),
+              },
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
         }
+        const result = await client.execute({
+          sql: `SELECT id, submission_id, title, report_created_at, word_count, archive_score, score_band, ai_score, ai_tone
+                FROM saved_reports WHERE user_id = ? ORDER BY report_created_at DESC LIMIT ?`,
+          args: [sessionUser.id, MAX_LISTED_REPORTS],
+        });
+        rows = result.rows;
       } else {
         const url = new URL(request.url);
         const deviceKey = url.searchParams.get('deviceKey');

@@ -1,81 +1,96 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronLeft, FileText, FolderClock } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import type { ReportSummary } from "@/lib/reports-remote";
-import { fetchReportRoom, fetchReportRoomIndex } from "@/lib/reports-remote";
+import { fetchReportRoomContents, fetchReportRoomIndex, type RoomContents } from "@/lib/reports-remote";
 import { getCachedRoom, getCachedRoomIndex, invalidateRoomCache, setCachedRoom, setCachedRoomIndex } from "@/lib/report-rooms-cache";
-import { REPORT_ROOM_COUNT, reportRoomForId, type RoomIndexEntry } from "@/lib/report-rooms";
+import type { RoomIndexEntry } from "@/lib/report-rooms";
 import { ReportHistoryRow } from "./report-history-row";
 import type { SimilarityReport } from "@/lib/report-types";
 
 /**
- * The 10-room architecture's UI: opening "My Reports" shows only the room
- * index (10 tiles, each just a count + most-recent date — one lightweight
- * query, 24h client-cached). Entering a room fetches only that room's
- * lightweight summaries (also 24h cached). Opening an actual report is a
- * plain <Link> to the existing /reports/[id] route (inside ReportHistoryRow),
- * which does its own, already-lazy, per-report server fetch — this
- * component never fetches a full report body itself.
+ * The room/slot architecture's UI: opening "My Reports" shows only the room
+ * index (however many rows this account has, each just a status + last-used
+ * date — one lightweight query, 24h client-cached), rendered as a single
+ * vertical list — every room is always visible as its own row, never a
+ * grid of cards. Opening a room (clicking its row) fetches only that one
+ * room's single current occupant, if any (also 24h cached), and expands
+ * that row in place — every other row stays exactly as it was, collapsed,
+ * with no data fetched for it.
  *
- * Deliberately does not preload the other 9 rooms, and does not eagerly
- * fetch a room's contents until the user opens it.
+ * Each room is a real upload SLOT, not a browsable list: it holds at most
+ * one current report. An empty row shows "Ready for a new check" and a
+ * "New check" action that expands to the upload panel — this is the ONLY
+ * place an authenticated account can start a new check; there is
+ * deliberately no standalone "New check" action on My Reports itself (see
+ * app/page.tsx, which no longer renders one when `account` is set). A row
+ * with a report shows a "View report" action that expands to that report's
+ * information via the same ReportHistoryRow used by the anonymous flat
+ * list.
+ *
+ * Deliberately does not preload the other rooms, and does not eagerly fetch
+ * a room's contents until the user opens it. Only one row is expanded at a
+ * time (opening a different room collapses whichever was open).
  *
  * newlySavedReportSummary exists to counter one specific gap the 24h cache
  * would otherwise have: if this account's room-index/room-contents cache is
  * still within its own TTL from earlier today, it was necessarily written
  * BEFORE a report the user just created in *this* session — a plain cache
- * read would silently omit it until the cache naturally expires. The fixups
- * below are a best-effort, self-correcting nudge (an accepted, cosmetic-only
- * imprecision: if the index happened to be freshly fetched rather than
- * cache-served, a room tile's count can read one-too-many until the next
- * real fetch) — never a source of truth. The server's own room-scoped
- * queries remain the actual source of truth for both counts and contents.
+ * read would silently omit it until the cache naturally expires. app/page.tsx
+ * only ever sets this AFTER confirming the remote save actually succeeded
+ * (never optimistically on a save that is still in flight or that failed) —
+ * showing a report here that the server doesn't actually have is exactly
+ * the bug that made /reports/[id] 404 for reports still visible in a room.
  */
+
+type NewlySavedReport = ReportSummary & { room: number };
 
 type Props = {
   accountEmail: string;
-  /** The just-saved report's lightweight summary; null once there is nothing new to reconcile. Identity (object reference) matters: pass a NEW object each time a save completes, even for the same id, so the effect below re-fires on an AI-score update too. */
-  newlySavedReportSummary: ReportSummary | null;
-  /** Called once this component has applied newlySavedReportSummary, so the parent can clear it back to null. Without this, an unrelated remount later (e.g. navigating away from "reports" and back) would see the same stale value and incorrectly re-apply it — re-auto-opening an old report's room and double-counting it. */
+  newlySavedReportSummary: NewlySavedReport | null;
   onConsumedNewlySavedReport: () => void;
   onTotalCountChange: (total: number) => void;
   onDownloadReceipt: (report: SimilarityReport) => Promise<void>;
+  renderUploadPanel: (room: number) => React.ReactNode;
+  /** Fired every time a room is opened (cache hit or fresh fetch), with its resolved status — lets app/page.tsx know which room a new check should be tagged to. */
+  onRoomOpened: (room: number, status: "empty" | "ready") => void;
 };
 
-function upsertById(list: ReportSummary[], incoming: ReportSummary): ReportSummary[] {
-  return [incoming, ...list.filter((item) => item.id !== incoming.id)];
-}
-
-function RoomSkeletonRows({ count }: { count: number }) {
+function RoomRowSkeleton() {
   return (
-    <div className="report-history" aria-busy="true" aria-live="polite">
-      {Array.from({ length: count }, (_, i) => (
-        <article key={i} className="history-skeleton-row">
-          <div className="history-file-icon"><FileText aria-hidden="true" /></div>
-          <div className="history-copy">
-            <span className="skeleton-line skeleton-line-title" />
-            <span className="skeleton-line skeleton-line-meta" />
-          </div>
-        </article>
-      ))}
+    <div className="report-room-row report-room-row-skeleton" aria-busy="true" aria-live="polite">
+      <span className="skeleton-line skeleton-line-title" />
+      <span className="skeleton-line skeleton-line-meta" />
     </div>
   );
 }
 
-export function ReportRoomsBrowser({ accountEmail, newlySavedReportSummary, onConsumedNewlySavedReport, onTotalCountChange, onDownloadReceipt }: Props) {
+function DetailSkeleton() {
+  return (
+    <div className="report-history" aria-busy="true" aria-live="polite">
+      <article className="history-skeleton-row">
+        <div className="history-file-icon" />
+        <div className="history-copy">
+          <span className="skeleton-line skeleton-line-title" />
+          <span className="skeleton-line skeleton-line-meta" />
+        </div>
+      </article>
+    </div>
+  );
+}
+
+export function ReportRoomsBrowser({ accountEmail, newlySavedReportSummary, onConsumedNewlySavedReport, onTotalCountChange, onDownloadReceipt, renderUploadPanel, onRoomOpened }: Props) {
   // A newly-saved report is only ever present at the moment generateReport()
-  // just navigated here (view "reports" only mounts this component fresh) —
-  // auto-opening its own room immediately reproduces the pre-rooms UX of
-  // seeing the just-created report at the top of the list, without
-  // requiring the user to first land on the bare room index and guess which
-  // tile to click.
-  const initialRoom = useRef(newlySavedReportSummary ? reportRoomForId(newlySavedReportSummary.id) : null).current;
+  // just confirmed the remote save succeeded (view "reports" only mounts
+  // this component fresh) — auto-expanding its own row immediately
+  // reproduces the pre-rooms UX of seeing the just-created report right
+  // away, without requiring the user to first scan the list for it.
+  const initialRoom = useRef(newlySavedReportSummary ? newlySavedReportSummary.room : null).current;
 
   const [roomIndex, setRoomIndex] = useState<RoomIndexEntry[] | null>(null);
   const [indexLoading, setIndexLoading] = useState(true);
   const [selectedRoom, setSelectedRoom] = useState<number | null>(initialRoom);
-  const [roomContents, setRoomContents] = useState<ReportSummary[] | null>(null);
+  const [roomContents, setRoomContents] = useState<RoomContents | null>(null);
   const [roomLoading, setRoomLoading] = useState(initialRoom !== null);
   const appliedSummaryRef = useRef<ReportSummary | null>(null);
 
@@ -85,14 +100,25 @@ export function ReportRoomsBrowser({ accountEmail, newlySavedReportSummary, onCo
     if (cached) {
       setRoomContents(cached);
       setRoomLoading(false);
+      onRoomOpened(room, cached.status);
       return;
     }
     setRoomContents(null);
     setRoomLoading(true);
-    const fresh = await fetchReportRoom(room);
+    const fresh = await fetchReportRoomContents(room);
     setCachedRoom(accountEmail, room, fresh);
     setRoomContents(fresh);
     setRoomLoading(false);
+    onRoomOpened(room, fresh.status);
+  }
+
+  function toggleRoom(room: number) {
+    if (selectedRoom === room) {
+      setSelectedRoom(null);
+      setRoomContents(null);
+      return;
+    }
+    openRoom(room);
   }
 
   useEffect(() => {
@@ -126,15 +152,14 @@ export function ReportRoomsBrowser({ accountEmail, newlySavedReportSummary, onCo
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const totalCount = useMemo(() => roomIndex?.reduce((sum, entry) => sum + entry.count, 0) ?? 0, [roomIndex]);
   useEffect(() => {
-    if (roomIndex) onTotalCountChange(totalCount);
+    if (roomIndex) onTotalCountChange(roomIndex.filter((entry) => entry.status === "ready").length);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [roomIndex, totalCount]);
+  }, [roomIndex]);
 
   useEffect(() => {
     if (!newlySavedReportSummary || newlySavedReportSummary === appliedSummaryRef.current) return;
-    const room = reportRoomForId(newlySavedReportSummary.id);
+    const room = newlySavedReportSummary.room;
     const isFirstTimeSeeingThisId = appliedSummaryRef.current?.id !== newlySavedReportSummary.id;
 
     // A cache hit (see openRoom/the index-loading effect) resolves
@@ -150,77 +175,69 @@ export function ReportRoomsBrowser({ accountEmail, newlySavedReportSummary, onCo
 
     appliedSummaryRef.current = newlySavedReportSummary;
 
-    if (needsRoomContents && roomContents) {
-      setRoomContents(upsertById(roomContents, newlySavedReportSummary));
+    const cycleEndsAt = new Date(Date.parse(newlySavedReportSummary.createdAt) + 24 * 60 * 60 * 1000).toISOString();
+    if (needsRoomContents) {
+      const fresh: RoomContents = { status: "ready", report: newlySavedReportSummary, cycleEndsAt };
+      setRoomContents(fresh);
+      setCachedRoom(accountEmail, room, fresh);
     }
     if (needsIndexBump && roomIndex) {
       invalidateRoomCache(accountEmail, room);
-      setRoomIndex(roomIndex.map((entry) => (entry.room === room ? { ...entry, count: entry.count + 1, mostRecentAt: newlySavedReportSummary.createdAt } : entry)));
+      setRoomIndex(roomIndex.map((entry) => (entry.room === room ? { ...entry, status: "ready" as const, mostRecentAt: newlySavedReportSummary.createdAt, cycleEndsAt } : entry)));
     }
     onConsumedNewlySavedReport();
   }, [newlySavedReportSummary, roomContents, roomIndex, selectedRoom, accountEmail, onConsumedNewlySavedReport]);
 
-  if (selectedRoom !== null) {
-    const roomEntry = roomIndex?.find((entry) => entry.room === selectedRoom);
-    return (
-      <div className="report-rooms-view">
-        <button className="button subtle report-room-back" type="button" onClick={() => { setSelectedRoom(null); setRoomContents(null); }}>
-          <ChevronLeft aria-hidden="true" /> Back to rooms
-        </button>
-        <h3 className="report-room-heading">
-          Room {selectedRoom + 1}
-          {roomContents ? ` · ${roomContents.length} report${roomContents.length === 1 ? "" : "s"}` : roomEntry ? ` · ${roomEntry.count} report${roomEntry.count === 1 ? "" : "s"}` : ""}
-        </h3>
-        {roomLoading || roomContents === null ? (
-          <RoomSkeletonRows count={Math.min(6, roomEntry?.count || 3)} />
-        ) : roomContents.length === 0 ? (
-          <div className="empty-reports">
-            <FolderClock aria-hidden="true" />
-            <h3>No reports in this room</h3>
-          </div>
-        ) : (
-          <div className="report-history">
-            {roomContents.map((report) => (
-              <ReportHistoryRow key={report.id} report={report} onDownloadReceipt={onDownloadReceipt} />
-            ))}
-          </div>
-        )}
-      </div>
-    );
-  }
-
   if (indexLoading || !roomIndex) {
     return (
-      <div className="report-rooms-grid" aria-busy="true" aria-live="polite">
-        {Array.from({ length: REPORT_ROOM_COUNT }, (_, room) => (
-          <div key={room} className="report-room-tile report-room-tile-skeleton">
-            <span className="skeleton-line skeleton-line-title" />
-            <span className="skeleton-line skeleton-line-meta" />
-          </div>
-        ))}
-      </div>
-    );
-  }
-
-  if (totalCount === 0) {
-    return (
-      <div className="empty-reports">
-        <FolderClock aria-hidden="true" />
-        <h3>No reports yet</h3>
-        <p>Your reports will appear here after you check a document.</p>
+      <div className="report-rooms-list" aria-busy="true" aria-live="polite">
+        {Array.from({ length: 10 }, (_, room) => <RoomRowSkeleton key={room} />)}
       </div>
     );
   }
 
   return (
-    <div className="report-rooms-grid">
-      {roomIndex.map((entry) => (
-        <button key={entry.room} type="button" className="report-room-tile" onClick={() => openRoom(entry.room)} disabled={entry.count === 0}>
-          <strong>Room {entry.room + 1}</strong>
-          <span>{entry.count} report{entry.count === 1 ? "" : "s"}</span>
-          {entry.mostRecentAt && <small>Most recent {new Date(entry.mostRecentAt).toLocaleDateString("en-GB")}</small>}
-        </button>
-      ))}
+    <div className="report-rooms-list">
+      {roomIndex.map((entry) => {
+        const isOpen = selectedRoom === entry.room;
+        return (
+          <div key={entry.room} className={`report-room-row ${entry.status === "ready" ? "report-room-row-ready" : "report-room-row-empty"} ${isOpen ? "report-room-row-open" : ""}`}>
+            <button type="button" className="report-room-row-header" onClick={() => toggleRoom(entry.room)} aria-expanded={isOpen}>
+              <span className="report-room-row-label">
+                <strong>Room {entry.room + 1}</strong>
+                <span className="report-room-row-status">
+                  {entry.status === "ready" ? "Report ready" : "Ready for a new check"}
+                  {entry.mostRecentAt && ` · Last checked ${new Date(entry.mostRecentAt).toLocaleDateString("en-GB")}`}
+                </span>
+              </span>
+              <span className="button subtle report-room-row-action">
+                {entry.status === "ready" ? "View report" : "New check"}
+              </span>
+            </button>
+            {isOpen && (
+              <div className="report-room-row-detail">
+                {roomLoading || roomContents === null ? (
+                  <DetailSkeleton />
+                ) : roomContents.status === "empty" ? (
+                  <div className="room-empty-slot">
+                    {entry.status === "ready" && (
+                      <p className="room-cycle-note">This slot's previous check has expired and is ready for a new one.</p>
+                    )}
+                    {renderUploadPanel(entry.room)}
+                  </div>
+                ) : (
+                  <div className="report-history">
+                    <ReportHistoryRow report={roomContents.report} onDownloadReceipt={onDownloadReceipt} />
+                    <p className="room-cycle-note">
+                      This room can accept a new check after {new Date(roomContents.cycleEndsAt).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" })}.
+                    </p>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }

@@ -44,7 +44,7 @@ function extractCookie(response) {
   return match ? match[1] : null;
 }
 
-async function postReport(deviceKey, { cookie, id, title = 'lifecycle.pdf' } = {}) {
+async function postReport(deviceKey, { cookie, id, title = 'lifecycle.pdf', room = 0 } = {}) {
   await resetRateForTest('lifecycle-post');
   const reportId = id ?? nextId();
   const headers = { 'content-type': 'application/json', 'x-forwarded-for': 'lifecycle-post' };
@@ -63,6 +63,9 @@ async function postReport(deviceKey, { cookie, id, title = 'lifecycle.pdf' } = {
       scoreBand: 'Low',
       aiScore: null,
       aiTone: null,
+      // Room/slot architecture: required for an authenticated first save —
+      // see app/api/reports/route.ts. Ignored for anonymous requests.
+      room,
       payload: { note: title },
     }),
   });
@@ -113,8 +116,8 @@ async function logout(cookie) {
 // server-side reports, and logging back in restores them exactly.
 {
   const { cookie: cookieA1 } = await signup('lifecycle-a@example.com', 'lifecycle-device-a');
-  const { id: reportA1 } = await postReport('lifecycle-device-a', { cookie: cookieA1, title: 'first.pdf' });
-  const { id: reportA2 } = await postReport('lifecycle-device-a', { cookie: cookieA1, title: 'second.pdf' });
+  const { id: reportA1 } = await postReport('lifecycle-device-a', { cookie: cookieA1, title: 'first.pdf', room: 0 });
+  const { id: reportA2 } = await postReport('lifecycle-device-a', { cookie: cookieA1, title: 'second.pdf', room: 1 });
 
   const beforeLogout = await listReports({ cookie: cookieA1 });
   const beforeLogoutBody = await beforeLogout.json();

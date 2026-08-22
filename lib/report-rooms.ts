@@ -1,35 +1,76 @@
 /**
- * The 10-room report architecture: a stable, deterministic partition of one
- * account's saved_reports rows into 10 buckets, computed from the report's
- * own id (a client-generated timestamp string — see app/page.tsx's
- * analyzeText()) rather than a stored column. This is deliberate: a report's
- * room membership never changes and needs no migration or backfill for
- * existing reports — "room" is a pure function of data that already exists,
- * not a new fact recorded about it.
+ * The room/slot architecture: each authenticated account gets a fixed set of
+ * numbered rooms (10 for a normal account, more for admin — see
+ * getRoomCountForRole), and each room is a real upload SLOT, not a visual
+ * grouping. A room holds AT MOST one *current* report at a time — which room
+ * a report belongs to is an explicit fact recorded at upload time
+ * (saved_reports.room_number, set once and never changed — see
+ * db/schema.ts's own comment on that column), never derived from the
+ * report's id. This deliberately replaces an earlier design where "room" was
+ * computed as `id % 10`: that let unlimited reports silently accumulate in
+ * the same room tile (two different reports can share the same id%10 by
+ * pure chance), which is exactly the bug this file's rewrite fixes.
+ *
+ * A room's status is a pure function of its most recent report (if any):
+ *  - "ready"  — a report exists and is still within its active 24h cycle.
+ *               The room shows that report; a new upload into this room is
+ *               refused (both client- and server-side — see
+ *               app/api/reports/route.ts) until the cycle ends.
+ *  - "empty"  — no report has ever been assigned to this room, OR the most
+ *               recent one's 24h cycle has ended. Either way the room is
+ *               available for a new upload. An expired report is never
+ *               deleted — it stays in saved_reports and is still reachable
+ *               at its own /reports/[id] permalink and via developer/admin
+ *               lookup — it is simply no longer the room's *current*
+ *               occupant once superseded by a new upload.
  *
  * Isomorphic on purpose (no @libsql/client, no window/localStorage): both
- * app/api/reports/route.ts (server, SQL) and lib/reports-remote.ts /
- * components/reports/report-rooms.tsx (client, cache invalidation) need the
- * exact same room number for the exact same id — see reportRoomForId's own
- * comment for why the two computations must agree.
+ * the server (app/api/reports/route.ts, app/api/reports/rooms/route.ts) and
+ * the client (components/reports/report-rooms.tsx) need to agree on the
+ * exact same cycle boundary.
  */
-export const REPORT_ROOM_COUNT = 10;
+
+import type { UserRole } from "./auth-session";
+
+export const NORMAL_ROOM_COUNT = 10;
 
 /**
- * Must compute IDENTICALLY to the server's own `CAST(id AS INTEGER) % 10`
- * (see app/api/reports/route.ts's GET handler) — this is what lets the
- * client, after saving a brand-new report, know which single room's cache
- * to invalidate without asking the server. Report ids are always positive
- * (Date.now()-based), so plain `%` never needs a sign correction here.
+ * Admin/developer accounts generate far more test reports than the normal
+ * daily-use pattern the 10-room limit is designed around, so they get a
+ * much larger room space (this task's own explicit requirement: "the
+ * developer acc should still have infinite rooms or at least 40") rather
+ * than being squeezed by the same slot count as a normal account. This is
+ * intentionally still a fixed, finite number (not literally unlimited) —
+ * the same one-room-one-slot invariant applies, just with more slots.
  */
-export function reportRoomForId(id: string): number {
-  const numeric = Number(id);
-  return Number.isFinite(numeric) ? Math.trunc(numeric) % REPORT_ROOM_COUNT : 0;
+export const ADMIN_ROOM_COUNT = 40;
+
+export function getRoomCountForRole(role: UserRole): number {
+  return role === "admin" ? ADMIN_ROOM_COUNT : NORMAL_ROOM_COUNT;
 }
 
-/** One row of the lightweight room index — never the reports themselves, just enough to render 10 room tiles and decide which one to open. */
+export const ROOM_CYCLE_MS = 24 * 60 * 60 * 1000;
+
+/** Whether a report saved at `reportCreatedAtIso` still holds its room's active slot. */
+export function isWithinActiveCycle(reportCreatedAtIso: string, now: number = Date.now()): boolean {
+  const createdAt = Date.parse(reportCreatedAtIso);
+  if (!Number.isFinite(createdAt)) return false;
+  return now - createdAt < ROOM_CYCLE_MS;
+}
+
+/** The moment a room next becomes available for a new upload, given its current occupant's creation time. */
+export function roomCycleEndsAt(reportCreatedAtIso: string): string {
+  return new Date(Date.parse(reportCreatedAtIso) + ROOM_CYCLE_MS).toISOString();
+}
+
+export type RoomStatus = "empty" | "ready";
+
+/** One row of the lightweight room index — never the report itself, just enough to render one room tile. */
 export type RoomIndexEntry = {
   room: number;
-  count: number;
+  status: RoomStatus;
+  /** The current occupant's creation time — only present when status is "ready". */
   mostRecentAt: string | null;
+  /** When this room next becomes available for a new upload — only present when status is "ready". */
+  cycleEndsAt: string | null;
 };

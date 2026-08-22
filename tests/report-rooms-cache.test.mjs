@@ -44,8 +44,12 @@ function withFakeNow(ms, fn) {
   }
 }
 
-const sampleIndex = [{ room: 0, count: 3, mostRecentAt: '2026-08-20T00:00:00.000Z' }];
-const sampleRoomSummaries = [{ id: '1', submissionId: 's1', title: 't', createdAt: '2026-08-20T00:00:00.000Z', wordCount: 10, archiveScore: 1, scoreBand: 'Low', aiScore: null, aiTone: null }];
+const sampleIndex = [{ room: 0, status: 'ready', mostRecentAt: '2026-08-20T00:00:00.000Z', cycleEndsAt: '2026-08-21T00:00:00.000Z' }];
+const sampleRoomContents = {
+  status: 'ready',
+  report: { id: '1', submissionId: 's1', title: 't', createdAt: '2026-08-20T00:00:00.000Z', wordCount: 10, archiveScore: 1, scoreBand: 'Low', aiScore: null, aiTone: null },
+  cycleEndsAt: '2026-08-21T00:00:00.000Z',
+};
 
 test('a freshly-written room index is served from cache immediately', () => {
   withFakeNow(1_000_000, () => setCachedRoomIndex('a@example.com', sampleIndex));
@@ -71,15 +75,15 @@ test('a room index cached more than 24h ago is treated as a miss (null), not sta
 
 test('room contents follow the same 24h TTL, independently of the index', () => {
   const writeAt = 2_000_000;
-  withFakeNow(writeAt, () => setCachedRoom('d@example.com', 4, sampleRoomSummaries));
-  assert.deepEqual(withFakeNow(writeAt + 1000, () => getCachedRoom('d@example.com', 4)), sampleRoomSummaries);
+  withFakeNow(writeAt, () => setCachedRoom('d@example.com', 4, sampleRoomContents));
+  assert.deepEqual(withFakeNow(writeAt + 1000, () => getCachedRoom('d@example.com', 4)), sampleRoomContents);
   assert.equal(withFakeNow(writeAt + 24 * 60 * 60 * 1000 + 1, () => getCachedRoom('d@example.com', 4)), null);
 });
 
 test('different accounts never share a cache entry, even for the same room number', () => {
   withFakeNow(3_000_000, () => {
     setCachedRoomIndex('account-one@example.com', sampleIndex);
-    setCachedRoom('account-one@example.com', 2, sampleRoomSummaries);
+    setCachedRoom('account-one@example.com', 2, sampleRoomContents);
   });
   const otherIndex = withFakeNow(3_000_000, () => getCachedRoomIndex('account-two@example.com'));
   const otherRoom = withFakeNow(3_000_000, () => getCachedRoom('account-two@example.com', 2));
@@ -90,20 +94,20 @@ test('different accounts never share a cache entry, even for the same room numbe
 test('invalidateRoomCache clears only the targeted room plus the index — every other room is untouched', () => {
   withFakeNow(4_000_000, () => {
     setCachedRoomIndex('e@example.com', sampleIndex);
-    setCachedRoom('e@example.com', 1, sampleRoomSummaries);
-    setCachedRoom('e@example.com', 2, sampleRoomSummaries);
+    setCachedRoom('e@example.com', 1, sampleRoomContents);
+    setCachedRoom('e@example.com', 2, sampleRoomContents);
   });
   withFakeNow(4_000_000, () => invalidateRoomCache('e@example.com', 1));
 
   assert.equal(withFakeNow(4_000_000, () => getCachedRoomIndex('e@example.com')), null, 'the index must be invalidated so the next view refetches authoritative counts');
   assert.equal(withFakeNow(4_000_000, () => getCachedRoom('e@example.com', 1)), null, 'room 1 (the affected room) must be invalidated');
-  assert.deepEqual(withFakeNow(4_000_000, () => getCachedRoom('e@example.com', 2)), sampleRoomSummaries, 'room 2 (unrelated) must be left completely untouched — this feature must never force reloading every room');
+  assert.deepEqual(withFakeNow(4_000_000, () => getCachedRoom('e@example.com', 2)), sampleRoomContents, 'room 2 (unrelated) must be left completely untouched — this feature must never force reloading every room');
 });
 
 test('clearAllReportRoomCaches wipes the index and every one of the 10 rooms for that account', () => {
   withFakeNow(5_000_000, () => {
     setCachedRoomIndex('f@example.com', sampleIndex);
-    for (let room = 0; room < 10; room++) setCachedRoom('f@example.com', room, sampleRoomSummaries);
+    for (let room = 0; room < 10; room++) setCachedRoom('f@example.com', room, sampleRoomContents);
   });
   clearAllReportRoomCaches('f@example.com');
   assert.equal(withFakeNow(5_000_000, () => getCachedRoomIndex('f@example.com')), null);

@@ -68,7 +68,20 @@ function nextId() {
   return `urel-report-${counter}`;
 }
 
-async function postReport(deviceKey, { cookie, id, title = 'urel.pdf', text, score = 10, archiveScore = 5 } = {}) {
+// Room/slot architecture: required for an authenticated first save (see
+// app/api/reports/route.ts); ignored for anonymous requests and for
+// resaves. A fresh, auto-incrementing default (rather than a fixed room)
+// so a scenario that posts more than one genuinely new report for the same
+// account never collides with itself — this file's scenarios are about
+// historical-match relationships, not room occupancy.
+let roomCounter = 0;
+function nextRoom() {
+  const room = roomCounter % 10;
+  roomCounter += 1;
+  return room;
+}
+
+async function postReport(deviceKey, { cookie, id, title = 'urel.pdf', text, score = 10, archiveScore = 5, room = nextRoom() } = {}) {
   await resetRateForTest('urel-post-' + deviceKey);
   const reportId = id ?? nextId();
   const headers = { 'content-type': 'application/json', 'x-forwarded-for': 'urel-post-' + deviceKey };
@@ -87,6 +100,7 @@ async function postReport(deviceKey, { cookie, id, title = 'urel.pdf', text, sco
       scoreBand: 'Low',
       aiScore: null,
       aiTone: null,
+      room,
       payload: { version: 11, id: Date.now(), submissionId: 'sub-' + reportId, title, author: '', assignment: '', created: new Date().toISOString(), score, archiveScore, text, wordCount: tokens(text).length, characterCount: text.length, pageCount: 1, fileSize: '1 KB', databaseSize: 230, corpusVersion: 'test', scoreBand: 'Low' },
     }),
   });

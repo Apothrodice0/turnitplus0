@@ -324,17 +324,19 @@ function applyMigrationsExcluding(db, dir, excludeFiles) {
   cleanupSqliteFile(dbPath);
   const db = new Database(dbPath);
 
-  // 0023 and 0025 also excluded here: unlike every migration from 0012-0022
-  // (which only ever *reference* users(id) declaratively inside a new
-  // CREATE TABLE — never checked by SQLite until an actual insert, so those
-  // are fine without users existing yet), 0023 and 0025 both do
-  // `ALTER TABLE users ADD COLUMN`, which requires the users table to
-  // already physically exist. In any real migration run this is a non-issue
-  // (files always apply in filename order, so 0009 always runs before both)
-  // — this exclusion only matters for this test's own artificial "simulate
-  // a pre-Phase-2A database" scenario, which neither has any bearing on and
-  // is not what this block is verifying.
-  applyMigrationsExcluding(db, drizzleDir, ['0009_users.sql', '0010_sessions.sql', '0011_saved_reports_user_id.sql', '0023_privacy_consent_and_report_identity_link.sql', '0025_users_role.sql']);
+  // 0023, 0025, and 0027 also excluded here: unlike every migration from
+  // 0012-0022 (which only ever *reference* users(id) declaratively inside a
+  // new CREATE TABLE — never checked by SQLite until an actual insert, so
+  // those are fine without users existing yet), 0023/0025 both do
+  // `ALTER TABLE users ADD COLUMN`, and 0027 both alters saved_reports AND
+  // reads its own user_id column in its backfill UPDATE — all three require
+  // users/saved_reports.user_id to already physically exist. In any real
+  // migration run this is a non-issue (files always apply in filename
+  // order, so 0009-0011 always run before any of them) — this exclusion
+  // only matters for this test's own artificial "simulate a pre-Phase-2A
+  // database" scenario, which none of them have any bearing on and is not
+  // what this block is verifying.
+  applyMigrationsExcluding(db, drizzleDir, ['0009_users.sql', '0010_sessions.sql', '0011_saved_reports_user_id.sql', '0023_privacy_consent_and_report_identity_link.sql', '0025_users_role.sql', '0027_saved_reports_room_number.sql']);
 
   // Old-shape row: inserted before user_id existed on this table at all.
   db.prepare(`INSERT INTO saved_reports (id, device_key, submission_id, title, report_created_at, word_count, archive_score, score_band, payload_json) VALUES (?,?,?,?,?,?,?,?,?)`)

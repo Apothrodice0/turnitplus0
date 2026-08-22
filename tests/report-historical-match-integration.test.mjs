@@ -42,7 +42,20 @@ function nextId() {
   return `ehist-report-${counter}`;
 }
 
-async function postReport(deviceKey, { cookie, id, title = 'ehist.pdf', text = 'sample fixture text', score = 12, archiveScore = 9 } = {}) {
+// Room/slot architecture: required for an authenticated first save (see
+// app/api/reports/route.ts); ignored for anonymous requests and resaves. A
+// fresh, auto-incrementing default so a scenario posting more than one
+// genuinely new report for the same account never collides with itself —
+// this file's scenarios are about historical-match snapshots, not room
+// occupancy.
+let roomCounter = 0;
+function nextRoom() {
+  const room = roomCounter % 10;
+  roomCounter += 1;
+  return room;
+}
+
+async function postReport(deviceKey, { cookie, id, title = 'ehist.pdf', text = 'sample fixture text', score = 12, archiveScore = 9, room = nextRoom() } = {}) {
   await resetRateForTest('ehist-post');
   const reportId = id ?? nextId();
   const headers = { 'content-type': 'application/json', 'x-forwarded-for': 'ehist-post' };
@@ -61,6 +74,7 @@ async function postReport(deviceKey, { cookie, id, title = 'ehist.pdf', text = '
       scoreBand: 'Low',
       aiScore: null,
       aiTone: null,
+      room,
       payload: { version: 11, id: Date.now(), submissionId: 'sub-' + reportId, title, author: '', assignment: '', created: new Date().toISOString(), score, archiveScore, text, wordCount: 100, characterCount: 500, pageCount: 1, fileSize: '1 KB', databaseSize: 230, corpusVersion: 'test', scoreBand: 'Low' },
     }),
   });

@@ -42,14 +42,16 @@ test("remote report persistence (Turso) is layered alongside local storage, not 
   );
 
   // Every storeReport call site must be immediately followed by the matching
-  // saveReportRemote call, so a remote failure can never happen without the
+  // saveReportRemote call (room/slot architecture: with a `room` argument
+  // threaded through, so a genuinely new authenticated save is tagged to
+  // the correct room), so a remote failure can never happen without the
   // local copy already having succeeded first. Both sites now build the
   // ReportSummary once into a local (`summary`/`enrichedSummary`) — reused
   // for the flat anonymous list AND newlySavedReportSummary (see
   // ReportRoomsBrowser) — rather than calling buildReportSummary() inline
   // a second time.
-  assert.match(page, /await storeReport\(report\);\s*\n\s*return await saveReportRemote\(report, summary, academicSearchDiagnosticsId\);/);
-  assert.match(page, /await storeReport\(enriched\);\s*\n\s*await saveReportRemote\(enriched, enrichedSummary\);/);
+  assert.match(page, /await storeReport\(report\);\s*\n\s*const room = uploadRoomTargetRef\.current;\s*\n\s*const saveResult = await saveReportRemote\(report, summary, academicSearchDiagnosticsId, account && room !== null \? room : undefined\);/);
+  assert.match(page, /await storeReport\(enriched\);\s*\n\s*const enrichedSaveResult = await saveReportRemote\(enriched, enrichedSummary, undefined, account && targetRoom !== null \? targetRoom : undefined\);/);
 
   // clearHistory must clear local storage first, then best-effort delete the
   // remote copies — never the other way around.
@@ -64,6 +66,27 @@ test("remote report persistence (Turso) is layered alongside local storage, not 
   assert.match(page, /if \(localEntries\.length > 0\) return;/);
   assert.match(page, /const summaries = await listRemoteReportSummaries\(\);/);
   assert.match(page, /const full = await fetchRemoteReport<SimilarityReport>\(summary\.id\);/);
+});
+
+test("newlySavedReportSummary (the signal that tells a room it has a new report) is only ever set once the remote save is confirmed to have actually succeeded", async () => {
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+
+  // This is the fix for the production 404 regression: a report that
+  // appeared in a room's list but was never actually persisted server-side
+  // (a rejected save — quota, room already occupied, or any other failure)
+  // would 404 when opened at /reports/[id]. setNewlySavedReportSummary must
+  // never run unconditionally after a save — only inside a check against
+  // that save's own result.
+  const saveReportBody = page.match(/async function saveReport\(report: SimilarityReport, academicSearchDiagnosticsId\?: number \| null\) \{[\s\S]*?\n {2}\}/)?.[0] ?? "";
+  assert.ok(saveReportBody.length > 0, "saveReport function body must be found");
+  assert.match(saveReportBody, /if \(account && room !== null && saveResult\.ok\) \{\s*\n\s*setNewlySavedReportSummary\(\{ \.\.\.summary, room \}\);\s*\n\s*\}/);
+
+  const aiMergeBlockStart = page.indexOf("void aiAnalysisPromise.then(async (aiResult) => {");
+  assert.ok(aiMergeBlockStart > -1, "expected the decoupled AI-writing merge block to exist");
+  const aiMergeBlockEnd = page.indexOf("} finally {", aiMergeBlockStart);
+  assert.ok(aiMergeBlockEnd > aiMergeBlockStart, "expected to find generateReport()'s finally block after the AI merge block");
+  const aiMergeBlock = page.slice(aiMergeBlockStart, aiMergeBlockEnd);
+  assert.match(aiMergeBlock, /if \(account && targetRoom !== null && enrichedSaveResult\.ok\) \{\s*\n\s*setNewlySavedReportSummary\(\{ \.\.\.enrichedSummary, room: targetRoom \}\);\s*\n\s*\}/);
 });
 
 test("logout clears account-scoped report state immediately, and never touches IndexedDB or Turso", async () => {

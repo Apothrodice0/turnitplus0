@@ -58,6 +58,19 @@ function nextId() {
   return `e8f-report-${counter}`;
 }
 
+// Room/slot architecture: several tests here post more than one genuinely
+// new report to the SAME account (to prove double-save dedup doesn't affect
+// a real second upload) — a fixed default room would make the second post
+// collide with the first (still occupying that room within its 24h cycle).
+// This is unrelated to what these tests are actually about, so each call
+// that doesn't care about room occupancy gets its own fresh default.
+let roomCounter = 0;
+function nextRoom() {
+  const room = roomCounter % 10;
+  roomCounter += 1;
+  return room;
+}
+
 async function signup(email, deviceKey) {
   await resetAuthRateForTest('e8f-signup-' + email);
   const req = new Request('http://localhost/api/auth/signup', {
@@ -76,7 +89,7 @@ async function signup(email, deviceKey) {
   return { res, cookie: extractCookie(res) };
 }
 
-async function postReport(deviceKey, { cookie, id, title = 'e8f.pdf', text, score = 12, archiveScore = 9, extraPayload = {} } = {}) {
+async function postReport(deviceKey, { cookie, id, title = 'e8f.pdf', text, score = 12, archiveScore = 9, extraPayload = {}, room = nextRoom() } = {}) {
   await resetRateForTest('e8f-post');
   const reportId = id ?? nextId();
   const headers = { 'content-type': 'application/json', 'x-forwarded-for': 'e8f-post' };
@@ -95,6 +108,12 @@ async function postReport(deviceKey, { cookie, id, title = 'e8f.pdf', text, scor
       scoreBand: 'Low',
       aiScore: null,
       aiTone: null,
+      // Room/slot architecture: required for an authenticated first save
+      // (ignored for anonymous requests and for resaves of an existing
+      // report) — see app/api/reports/route.ts. Every caller in this file
+      // reuses room 0 by default since these tests are about corpus
+      // indexing/double-save behavior, not room occupancy itself.
+      room,
       payload: { version: 11, id: Date.now(), submissionId: 'sub-' + reportId, title, author: '', assignment: '', created: new Date().toISOString(), score, archiveScore, text, wordCount: 100, characterCount: 500, pageCount: 1, fileSize: '1 KB', databaseSize: 230, corpusVersion: 'test', scoreBand: 'Low', ...extraPayload },
     }),
   });

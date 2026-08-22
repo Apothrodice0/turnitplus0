@@ -181,12 +181,24 @@ export const saved_reports = sqliteTable(
     // cascade-clean the identity's own rows without risking a different
     // report's shared data.
     document_identity_id: text("document_identity_id").references(() => document_identities.id, { onDelete: "set null" }),
+    // Room/slot architecture (0027): which of the account's room slots this
+    // report occupies, an explicit fact recorded at upload time (the room
+    // the user had open when they uploaded), never derived from `id`. NULL
+    // for anonymous reports and for every report saved before this column
+    // existed and then never re-saved (see drizzle/0027's own backfill,
+    // which fills legacy authenticated rows with the old id%10 value so
+    // their room-tile placement doesn't visibly jump). Immutable after the
+    // first insert — app/api/reports/route.ts's ON CONFLICT DO UPDATE never
+    // lists this column, so a resave (the existing save-then-re-save-with-
+    // enrichment pattern) can never move a report to a different room.
+    room_number: integer("room_number"),
   },
   (table) => [
     primaryKey({ columns: [table.device_key, table.id] }),
     index("idx_saved_reports_device_key_created").on(table.device_key, table.report_created_at),
     index("idx_saved_reports_user_id_created").on(table.user_id, table.report_created_at),
     index("idx_saved_reports_document_identity_id").on(table.document_identity_id),
+    index("idx_saved_reports_user_room").on(table.user_id, table.room_number),
   ],
 );
 

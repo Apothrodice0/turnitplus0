@@ -1,4 +1,4 @@
-import type { ReportSummary } from "./reports-remote";
+import type { RoomContents } from "./reports-remote";
 import type { RoomIndexEntry } from "./report-rooms";
 
 /**
@@ -11,11 +11,13 @@ import type { RoomIndexEntry } from "./report-rooms";
  * browser can never show a stale/wrong account's room data.
  *
  * "24 hours before its data needs refreshing" (this feature's own
- * requirement) is intentionally coarse: room membership is a pure function
- * of a report's own id (see lib/report-rooms.ts) and never changes, so a
- * cached room's CONTENTS only go stale when a genuinely new report is
- * saved into it — which invalidateRoomCache() below handles immediately,
- * targeted at just that one room, rather than waiting on the TTL.
+ * requirement) is intentionally coarse: a room's CONTENTS only go stale
+ * when a genuinely new report is saved into it (room_number is an explicit,
+ * immutable fact set once at upload time — see db/schema.ts's own comment —
+ * not something that changes on its own) or when its active 24h cycle
+ * itself ends — both handled immediately by invalidateRoomCache() below,
+ * targeted at just that one room, rather than waiting on this cache's own
+ * TTL.
  */
 
 const CACHE_VERSION = 1;
@@ -81,12 +83,12 @@ export function setCachedRoomIndex(accountEmail: string, rooms: RoomIndexEntry[]
   write(indexKey(accountEmail), rooms);
 }
 
-export function getCachedRoom(accountEmail: string, room: number): ReportSummary[] | null {
-  return read<ReportSummary[]>(roomKey(accountEmail, room));
+export function getCachedRoom(accountEmail: string, room: number): RoomContents | null {
+  return read<RoomContents>(roomKey(accountEmail, room));
 }
 
-export function setCachedRoom(accountEmail: string, room: number, summaries: ReportSummary[]): void {
-  write(roomKey(accountEmail, room), summaries);
+export function setCachedRoom(accountEmail: string, room: number, contents: RoomContents): void {
+  write(roomKey(accountEmail, room), contents);
 }
 
 /**

@@ -70,7 +70,20 @@ async function signup(email, deviceKey) {
   return { res, cookie: extractCookie(res) };
 }
 
-async function postReport({ deviceKey, id, title = "activation.pdf", text, cookie }) {
+// Room/slot architecture: required for an authenticated first save (see
+// app/api/reports/route.ts); ignored for anonymous requests and resaves. A
+// fresh, auto-incrementing default so a scenario posting more than one
+// genuinely new report for the same account never collides with itself —
+// this file's scenarios are about document-identity capture, not room
+// occupancy.
+let roomCounter = 0;
+function nextRoom() {
+  const room = roomCounter % 10;
+  roomCounter += 1;
+  return room;
+}
+
+async function postReport({ deviceKey, id, title = "activation.pdf", text, cookie, room = nextRoom() }) {
   const rateKey = `activation-post-${id}`;
   await resetRateForTest(rateKey);
   const headers = { "content-type": "application/json", "x-forwarded-for": rateKey };
@@ -89,6 +102,7 @@ async function postReport({ deviceKey, id, title = "activation.pdf", text, cooki
       scoreBand: "Low",
       aiScore: null,
       aiTone: null,
+      room,
       payload: { id, title, text },
     }),
   });

@@ -66,7 +66,15 @@ function samplePayload(overrides = {}) {
   };
 }
 
-async function postReport(deviceKey, { id, cookie, payloadOverrides = {} } = {}) {
+// Room/slot architecture: an authenticated first save must name an
+// available room (see app/api/reports/route.ts) — a resave (same id again)
+// or an anonymous save ignores this entirely, so `room` only matters for
+// the genuinely-new-upload cases below, which pass explicit, distinct room
+// numbers so a sequence of new uploads to the same account never collides
+// with itself (a fixed default would make the 2nd+ genuinely new upload in
+// a loop fail with "room already occupied" instead of exercising the quota
+// this file is actually about).
+async function postReport(deviceKey, { id, cookie, payloadOverrides = {}, room = 0 } = {}) {
   const ip = `upload-limit-post-${++ipCounter}`;
   await resetRateForTest(ip);
   const payload = samplePayload({ id: id ?? Date.now(), ...payloadOverrides });
@@ -86,6 +94,7 @@ async function postReport(deviceKey, { id, cookie, payloadOverrides = {} } = {})
       scoreBand: 'Low',
       aiScore: null,
       aiTone: null,
+      room,
       payload,
     }),
   });
@@ -131,11 +140,11 @@ async function getUploadLimit(cookie) {
   assert.ok(cookie);
 
   for (let i = 1; i <= DAILY_UPLOAD_LIMIT; i++) {
-    const { res } = await postReport('device-ten-1', { id: `ten-quota-${i}`, cookie });
+    const { res } = await postReport('device-ten-1', { id: `ten-quota-${i}`, cookie, room: i - 1 });
     assert.equal(res.status, 200, `upload ${i}/${DAILY_UPLOAD_LIMIT} should succeed`);
   }
 
-  const { res: eleventh } = await postReport('device-ten-1', { id: 'ten-quota-11', cookie });
+  const { res: eleventh } = await postReport('device-ten-1', { id: 'ten-quota-11', cookie, room: 0 });
   assert.equal(eleventh.status, 429, 'the 11th genuinely new upload must be rejected');
   const body = await eleventh.json();
   assert.equal(body.limit, DAILY_UPLOAD_LIMIT);
@@ -162,7 +171,10 @@ async function getUploadLimit(cookie) {
   client.close();
 
   for (let i = 1; i <= DAILY_UPLOAD_LIMIT + 3; i++) {
-    const { res } = await postReport('device-admin-1', { id: `admin-quota-${i}`, cookie });
+    // room: i - 1 gives 13 distinct rooms (0-12) — well within the admin
+    // account's much larger room space (see lib/report-rooms.ts's
+    // ADMIN_ROOM_COUNT), so none of these collide with each other.
+    const { res } = await postReport('device-admin-1', { id: `admin-quota-${i}`, cookie, room: i - 1 });
     assert.equal(res.status, 200, `admin upload ${i} (beyond the normal limit of ${DAILY_UPLOAD_LIMIT}) must still succeed`);
   }
 
@@ -179,7 +191,7 @@ async function getUploadLimit(cookie) {
   const cookie = extractCookie(signupRes);
   assert.ok(cookie);
 
-  const { res: firstSave } = await postReport('device-resave-1', { id: 'resave-report-1', cookie, payloadOverrides: { title: 'first-version.pdf' } });
+  const { res: firstSave } = await postReport('device-resave-1', { id: 'resave-report-1', cookie, room: 0, payloadOverrides: { title: 'first-version.pdf' } });
   assert.equal(firstSave.status, 200);
   const { res: resave } = await postReport('device-resave-1', { id: 'resave-report-1', cookie, payloadOverrides: { title: 'first-version.pdf (Wikipedia-enriched)' } });
   assert.equal(resave.status, 200, 'resaving the identical (device_key, id) must succeed and not be treated as a new upload');
@@ -193,10 +205,10 @@ async function getUploadLimit(cookie) {
   // Fill up to the limit with genuinely new uploads, then confirm the
   // already-at-limit account can still resave its existing report.
   for (let i = 2; i <= DAILY_UPLOAD_LIMIT; i++) {
-    const { res } = await postReport('device-resave-1', { id: `resave-quota-new-${i}`, cookie });
+    const { res } = await postReport('device-resave-1', { id: `resave-quota-new-${i}`, cookie, room: i - 1 });
     assert.equal(res.status, 200);
   }
-  const { res: blockedNew } = await postReport('device-resave-1', { id: 'resave-quota-new-11', cookie });
+  const { res: blockedNew } = await postReport('device-resave-1', { id: 'resave-quota-new-11', cookie, room: 0 });
   assert.equal(blockedNew.status, 429, 'a genuinely new upload must now be blocked');
 
   const { res: resaveAtLimit } = await postReport('device-resave-1', { id: 'resave-report-1', cookie, payloadOverrides: { title: 'first-version.pdf (updated again)' } });

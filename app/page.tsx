@@ -42,6 +42,7 @@ import { deleteRemoteReport, fetchAllReportSummariesAcrossRooms, fetchRemoteRepo
 import { clearAllReportRoomCaches } from "@/lib/report-rooms-cache";
 import { ReportRoomsBrowser } from "@/components/reports/report-rooms";
 import { ReportHistoryRow } from "@/components/reports/report-history-row";
+import { DocumentUploadPanel } from "@/components/reports/document-upload-panel";
 import { combineMatchedWordPositions } from "@/lib/similarity-enrichment";
 import { computeUnifiedSimilarity } from "@/lib/unified-similarity";
 import { extractDocxTextDocument } from "@/lib/docx-text-extraction";
@@ -492,7 +493,7 @@ export default function Home() {
   // just-created report against its own (possibly still-fresh-within-24h)
   // cache without waiting for that cache to expire — see that component's
   // own header comment.
-  const [newlySavedReportSummary, setNewlySavedReportSummary] = useState<ReportSummary | null>(null);
+  const [newlySavedReportSummary, setNewlySavedReportSummary] = useState<(ReportSummary & { room: number }) | null>(null);
   // Bumped to force ReportRoomsBrowser to fully remount (discarding its own
   // in-memory room index/contents) after "Clear history" — that action
   // already invalidates its localStorage caches, but the currently-mounted
@@ -517,6 +518,15 @@ export default function Home() {
   const [legalTab, setLegalTab] = useState<LegalTab>("privacy");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const generationLockRef = useRef(false);
+  // Room/slot architecture: which of an authenticated account's rooms the
+  // report currently being generated belongs to — set by handleRoomOpened
+  // whenever the user opens an empty room, read once at the point
+  // saveReport() actually posts to the server, then cleared. Null for the
+  // anonymous flow (rooms don't apply) and, defensively, for any
+  // authenticated generation that somehow started without a room selected
+  // (the server rejects a roomless authenticated first-save rather than
+  // silently accepting one — see app/api/reports/route.ts).
+  const uploadRoomTargetRef = useRef<number | null>(null);
 
   // Anonymous/device-scoped report loading (no authenticated session).
   // Unchanged from the pre-Phase-2A behavior: IndexedDB is the primary
@@ -905,12 +915,20 @@ export default function Home() {
   async function saveReport(report: SimilarityReport, academicSearchDiagnosticsId?: number | null) {
     const summary = buildReportSummary(report);
     setReports((current) => [summary, ...current.filter((item) => item.id !== summary.id)].slice(0, 50));
+    await storeReport(report);
+    const room = uploadRoomTargetRef.current;
+    const saveResult = await saveReportRemote(report, summary, academicSearchDiagnosticsId, account && room !== null ? room : undefined);
     // Consumed by ReportRoomsBrowser (a no-op when signed out, since that
     // component isn't rendered at all in that case) — see its own header
-    // comment for why this exists alongside the 24h room cache.
-    setNewlySavedReportSummary(summary);
-    await storeReport(report);
-    return await saveReportRemote(report, summary, academicSearchDiagnosticsId);
+    // comment for why this exists alongside the 24h room cache. Gated on
+    // saveResult.ok: setting this on a save that was rejected (quota, room
+    // already occupied, or any other failure) would show a report in the
+    // room UI that the server never actually persisted — exactly the bug
+    // that made a report visible in a room 404 when opened at /reports/[id].
+    if (account && room !== null && saveResult.ok) {
+      setNewlySavedReportSummary({ ...summary, room });
+    }
+    return saveResult;
   }
 
   async function generateReport() {
@@ -1061,20 +1079,31 @@ export default function Home() {
     window.clearInterval(progressTimer);
     setProgress(100);
     setProcessingLabel("Saving your report");
+    // Captured before the ref is cleared below — the deferred AI-enrichment
+    // resave further down needs the same room number (it's a resave of the
+    // same report, never a different room), even after this generation's
+    // own room target has been reset for the next check.
+    const targetRoom = uploadRoomTargetRef.current;
     try {
       const saveResult = await saveReport(report, academicResult.academicSearchDiagnosticsId);
+      uploadRoomTargetRef.current = null;
       navigate("reports");
-      // Unlike every other saveReportRemote failure (network/DB hiccups,
-      // silently tolerated since the local copy already succeeded — see
-      // saveReport/saveReportRemote's own comments), a daily-upload-quota
-      // rejection is not transient: the report is still visible locally on
-      // this device, but was never persisted to the account, so the user is
-      // told plainly rather than shown the normal success toast.
+      // Unlike a plain network/DB hiccup (silently tolerated since the
+      // local copy already succeeded — see saveReport/saveReportRemote's own
+      // comments), a daily-upload-quota rejection, a room already occupied,
+      // or any other explicit rejection is not transient: the report is
+      // still visible locally on this device, but was never persisted to
+      // the account/room, so the user is told plainly rather than shown the
+      // normal success toast.
       if (!saveResult.ok && saveResult.quotaExceeded) {
         const resetLabel = saveResult.resetsAt
           ? new Date(saveResult.resetsAt).toLocaleString(undefined, { hour: "numeric", minute: "2-digit", hour12: true })
           : "midnight UTC";
         notify(saveResult.error ?? `Daily upload limit reached. This report is saved on this device only until the limit resets at ${resetLabel}.`);
+      } else if (!saveResult.ok && saveResult.roomOccupied) {
+        notify(saveResult.error ?? "This room already has an active check. Choose a different room, or wait for it to reset.");
+      } else if (!saveResult.ok) {
+        notify("Your report was generated but could not be saved to your account. Please try again.");
       } else {
         notify(
           academicResult.status === "FAILED"
@@ -1096,13 +1125,18 @@ export default function Home() {
         const enrichedSummary = buildReportSummary(enriched);
         setCurrentReport((current) => current?.id === enriched.id ? { ...current, ...aiResult } : current);
         setReports((current) => current.map((item) => item.id === enrichedSummary.id ? enrichedSummary : item));
-        // A new object identity (not a mutation of the previous one) so
-        // ReportRoomsBrowser's own reconciliation effect — which compares
-        // by reference to distinguish "already handled" from "something
-        // changed" — re-fires and picks up the updated AI score/tone too.
-        setNewlySavedReportSummary(enrichedSummary);
         await storeReport(enriched);
-        await saveReportRemote(enriched, enrichedSummary);
+        const enrichedSaveResult = await saveReportRemote(enriched, enrichedSummary, undefined, account && targetRoom !== null ? targetRoom : undefined);
+        // Same gating as the primary save above, and for the same reason:
+        // only tell ReportRoomsBrowser about this report once the server
+        // has actually confirmed it, never optimistically. A new object
+        // identity (not a mutation of the previous one) so that
+        // component's own reconciliation effect — which compares by
+        // reference to distinguish "already handled" from "something
+        // changed" — re-fires and picks up the updated AI score/tone too.
+        if (account && targetRoom !== null && enrichedSaveResult.ok) {
+          setNewlySavedReportSummary({ ...enrichedSummary, room: targetRoom });
+        }
       });
     } finally {
       generationLockRef.current = false;
@@ -1116,11 +1150,51 @@ export default function Home() {
       notify("Please wait for the current report to finish before starting another check.");
       return;
     }
+    uploadRoomTargetRef.current = null;
     setFile(null);
     setProgress(0);
     setCurrentReport(null);
     if (fileInputRef.current) fileInputRef.current.value = "";
     navigate("dashboard");
+  }
+
+  /**
+   * Room/slot architecture: every "start a new check" entry point shared
+   * between anonymous and signed-in visitors (nav Dashboard button, Home
+   * hero/bottom CTAs) must route an authenticated account into My Reports
+   * instead of the standalone Dashboard — that page has no room context,
+   * and a new check always belongs to a specific room now (see
+   * app/api/reports/route.ts, which rejects an authenticated first-save
+   * with no room). Pure navigation only, exactly like the plain
+   * navigate("dashboard") this replaces — anonymous visitors see no
+   * behavior change at all.
+   */
+  function goToNewCheck() {
+    navigate(account ? "reports" : "dashboard");
+  }
+
+  /**
+   * Room/slot architecture: fired by ReportRoomsBrowser every time the user
+   * opens a room (see that component's own onRoomOpened prop) — this is how
+   * app/page.tsx (which owns the actual upload pipeline: file/generateReport)
+   * knows which room a new check should be tagged to, without either side
+   * needing to duplicate the other's state. Entering a fresh empty room
+   * resets any stale file/progress left over from a different room the user
+   * may have opened and abandoned earlier in the same session — "When the
+   * user enters an empty room, show the upload/check UI there" means a
+   * clean slate, not a leftover preview from elsewhere.
+   */
+  function handleRoomOpened(room: number, status: "empty" | "ready") {
+    if (status !== "empty") {
+      uploadRoomTargetRef.current = null;
+      return;
+    }
+    if (generationLockRef.current) return;
+    uploadRoomTargetRef.current = room;
+    setFile(null);
+    setProgress(0);
+    setCurrentReport(null);
+    if (fileInputRef.current) fileInputRef.current.value = "";
   }
 
   async function clearHistory() {
@@ -1215,7 +1289,7 @@ export default function Home() {
               type="button"
               disabled={isGeneratingReport}
               aria-label={isGeneratingReport ? "Dashboard unavailable while a report is processing" : "Dashboard"}
-              onClick={() => navigate("dashboard")}
+              onClick={goToNewCheck}
             >
               <LayoutDashboard aria-hidden="true" />
               <span className="nav-label">Dashboard</span>
@@ -1284,7 +1358,7 @@ export default function Home() {
                 <h2 id="landing-title">Understand what is in your document—without sending the document away.</h2>
                 <p className="landing-lede">TurnitPlus checks AI-writing signals and similarity in your browser — searching millions of scholarly records across major academic indexes — then gives you the passages and sources behind the result.</p>
                 <div className="landing-actions">
-                  <button className="button primary landing-cta" type="button" onClick={() => navigate("dashboard")}><UploadCloud aria-hidden="true" /> Check a document free</button>
+                  <button className="button primary landing-cta" type="button" onClick={goToNewCheck}><UploadCloud aria-hidden="true" /> Check a document free</button>
                   <button className="button secondary" type="button" onClick={() => navigate("about")}><BookOpen aria-hidden="true" /> See how it works</button>
                 </div>
                 <div className="landing-proof">
@@ -1331,7 +1405,7 @@ export default function Home() {
 
             <div className="landing-bottom-cta">
               <div><p className="section-label">READY WHEN YOU ARE</p><h2>Start with one document.</h2><p>No account is required for the local checking workflow.</p></div>
-              <button className="button primary" type="button" onClick={() => navigate("dashboard")}><UploadCloud aria-hidden="true" /> Check a document</button>
+              <button className="button primary" type="button" onClick={goToNewCheck}><UploadCloud aria-hidden="true" /> Check a document</button>
             </div>
           </section>
         )}
@@ -1348,64 +1422,15 @@ export default function Home() {
                 <span className="free-badge">FREE</span>
               </div>
 
-              {isGeneratingReport ? (
-                <div className="upload-locked-panel" role="status" aria-live="polite">
-                  <span className="upload-locked-icon"><LockKeyhole aria-hidden="true" /></span>
-                  <p className="section-label">CURRENT CHECK IN PROGRESS</p>
-                  <h3>{file?.name ?? "Your document"}</h3>
-                  <p>{processingLabel}…</p>
-                  <div className="progress-track" aria-label={`${progress}% complete`}>
-                    <span style={{ width: `${progress}%` }} />
-                  </div>
-                  <strong>{progress}%</strong>
-                  <span>Uploading another document is available when this report is finished.</span>
-                </div>
-              ) : <>
-              <label
-                className={`drop-zone ${file ? "uploaded" : ""} ${isGeneratingReport ? "processing" : ""}`}
-                aria-busy={isGeneratingReport}
-                aria-disabled={isGeneratingReport}
-                onDragOver={(event) => {
-                  event.preventDefault();
-                  if (isGeneratingReport) event.dataTransfer.dropEffect = "none";
-                }}
-                onDrop={(event) => {
-                  event.preventDefault();
-                  chooseFile(event.dataTransfer.files[0]);
-                }}
-              >
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept=".pdf,.docx,.txt,.md,.html,.csv"
-                  hidden
-                  disabled={isGeneratingReport}
-                  onChange={(event) => chooseFile(event.target.files?.[0])}
-                />
-                {file ? (
-                  <>
-                    <span className="upload-icon upload-success-icon"><Check aria-hidden="true" /></span>
-                    <strong>Document uploaded</strong>
-                    <p className="uploaded-file-name">{file.name}</p>
-                    <span className="uploaded-file-meta">{formatBytes(file.size)} · {isGeneratingReport ? "Analysis in progress" : "Ready to generate"}</span>
-                    <span className="button secondary">{isGeneratingReport ? "File locked while processing" : "Replace file"}</span>
-                  </>
-                ) : (
-                  <>
-                    <span className="upload-icon"><UploadCloud aria-hidden="true" /></span>
-                    <strong>Drop your document here</strong>
-                    <p>or choose a file from your computer</p>
-                    <span className="button secondary">Choose file</span>
-                  </>
-                )}
-              </label>
-
-              <button className="button primary full" type="button" disabled={isGeneratingReport} aria-busy={isGeneratingReport} onClick={generateReport}>
-                <UploadCloud aria-hidden="true" />
-                {isGeneratingReport ? `Analyzing ${progress}%` : "Generate free report"}
-              </button>
-              </>}
-              <p className="privacy-note"><LockKeyhole aria-hidden="true" /> Documents are processed in your browser.</p>
+              <DocumentUploadPanel
+                file={file}
+                isGeneratingReport={isGeneratingReport}
+                progress={progress}
+                processingLabel={processingLabel}
+                fileInputRef={fileInputRef}
+                onChooseFile={chooseFile}
+                onGenerate={generateReport}
+              />
             </section>
 
             <section className="dashboard-aside">
@@ -1524,7 +1549,12 @@ export default function Home() {
                     </div>
                   )}
                   <div className="account-profile-actions">
-                    <button className="button primary" type="button" disabled={isGeneratingReport} onClick={startNewCheck}>
+                    {/* Room/slot architecture: a signed-in account's new check
+                        always starts from inside a room — see
+                        components/reports/report-rooms.tsx's own header
+                        comment — so this routes to My Reports rather than
+                        the standalone (room-less) Dashboard. */}
+                    <button className="button primary" type="button" disabled={isGeneratingReport} onClick={() => navigate("reports")}>
                       <UploadCloud aria-hidden="true" /> Start a new check
                     </button>
                     <button className="button secondary" type="button" onClick={() => navigate("reports")}>
@@ -1737,7 +1767,7 @@ export default function Home() {
               <article><span>3</span><div className="welcome-step-icon"><FolderClock aria-hidden="true" /></div><div><strong>Return anytime</strong><p>Your report history stays available on this device.</p></div></article>
             </div>
             <div className="welcome-actions">
-              <button className="button primary" type="button" disabled={isGeneratingReport} onClick={startNewCheck}><UploadCloud aria-hidden="true" /> Start a new check</button>
+              <button className="button primary" type="button" disabled={isGeneratingReport} onClick={() => navigate("reports")}><UploadCloud aria-hidden="true" /> Start a new check</button>
               <button className="button secondary" type="button" onClick={() => navigate("reports")}><FolderClock aria-hidden="true" /> View my reports</button>
             </div>
             <p className="welcome-privacy"><LockKeyhole aria-hidden="true" /> No document is uploaded to an account or cloud workspace.</p>
@@ -1780,23 +1810,34 @@ export default function Home() {
                 <span>Open earlier checks or download their processing receipts.</span>
               </div>
               <div className="report-header-actions">
-                {isGeneratingReport ? (
+                {/* Room/slot architecture: "New check" is deliberately gone
+                    from this page for a signed-in account — a new check
+                    only ever starts inside an empty room (see
+                    components/reports/report-rooms.tsx). Anonymous/local
+                    history is unaffected — it has no room concept, so its
+                    "New check" action (and the processing lock it shows
+                    while a check runs) stays exactly as it was. */}
+                {!account && (isGeneratingReport ? (
                   <div className="report-job-lock" role="status">
                     <LockKeyhole aria-hidden="true" />
                     <span><strong>Current report running</strong><small>{progress}% complete · one document at a time</small></span>
                   </div>
-                ) : <>
+                ) : (
                   <button className="button primary" type="button" onClick={startNewCheck}>
                     <UploadCloud aria-hidden="true" /> New check
                   </button>
-                  {(account ? accountReportCount : reports.length) > 0 && (
-                    <button className="button subtle" type="button" onClick={clearHistory}>Clear history</button>
-                  )}
-                </>}
+                ))}
+                {!isGeneratingReport && (account ? accountReportCount : reports.length) > 0 && (
+                  <button className="button subtle" type="button" onClick={clearHistory}>Clear history</button>
+                )}
               </div>
             </div>
 
-            {isGeneratingReport && file && (
+            {/* Anonymous/local history only — an authenticated account's
+                processing state is shown inline inside the specific room
+                being uploaded to (DocumentUploadPanel via renderUploadPanel),
+                not floated above the room grid. */}
+            {!account && isGeneratingReport && file && (
               <article className="history-processing" aria-live="polite">
                 <div className="history-file-icon"><FileText aria-hidden="true" /></div>
                 <div className="history-copy">
@@ -1813,11 +1854,11 @@ export default function Home() {
               </article>
             )}
 
-            {/* 10-room architecture (see components/reports/report-rooms.tsx):
+            {/* Room/slot architecture (see components/reports/report-rooms.tsx):
                 an authenticated account's list is owned entirely by
                 ReportRoomsBrowser, which fetches only the lightweight room
-                index up front, and only one room's summaries when the user
-                opens it — never the account's full history, never full
+                index up front, and only one room's current occupant when the
+                user opens it — never the account's full history, never full
                 report bodies. The anonymous, device-scoped flat list below
                 is unchanged in spirit from before rooms existed. */}
             {account ? (
@@ -1828,6 +1869,21 @@ export default function Home() {
                 onConsumedNewlySavedReport={() => setNewlySavedReportSummary(null)}
                 onTotalCountChange={setAccountReportCount}
                 onDownloadReceipt={downloadReceipt}
+                onRoomOpened={handleRoomOpened}
+                renderUploadPanel={(room) => (
+                  <DocumentUploadPanel
+                    file={file}
+                    isGeneratingReport={isGeneratingReport}
+                    progress={progress}
+                    processingLabel={processingLabel}
+                    fileInputRef={fileInputRef}
+                    onChooseFile={chooseFile}
+                    onGenerate={() => {
+                      uploadRoomTargetRef.current = room;
+                      void generateReport();
+                    }}
+                  />
+                )}
               />
             ) : !accountLoaded ? (
               // reports.length === 0 is also true before the device report

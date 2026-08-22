@@ -75,6 +75,14 @@ async function seedRepresentativeLegacyRows(client) {
           VALUES (?,?,?,?,?,?,?,?,?,?)`,
     args: ['legacy-report-1', 'legacy-device-1', 'legacy-sub-1', 'legacy.pdf', new Date().toISOString(), 100, 5, 'Low', '{}', 'legacy-user-1'],
   });
+  // An anonymous (never-claimed) legacy report — 0027's room_number backfill
+  // is scoped to `user_id IS NOT NULL` only (rooms are an authenticated-
+  // account concept), so this row's room_number must stay NULL.
+  await client.execute({
+    sql: `INSERT INTO saved_reports (id, device_key, submission_id, title, report_created_at, word_count, archive_score, score_band, payload_json, user_id)
+          VALUES (?,?,?,?,?,?,?,?,?,?)`,
+    args: ['legacy-report-2', 'legacy-device-2', 'legacy-sub-2', 'legacy2.pdf', new Date().toISOString(), 100, 5, 'Low', '{}', null],
+  });
   await client.execute({
     sql: "INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?,?,?,?)",
     args: ['legacy-session-hash-1', 'legacy-user-1', Date.now(), Date.now() + 86400000],
@@ -103,7 +111,7 @@ test.after(() => {
 
 // --- A: explicit allowlist ------------------------------------------------
 
-test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0026, in order, never touching 0000-0011', () => {
+test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0027, in order, never touching 0000-0011', () => {
   assert.deepEqual(TARGET_MIGRATIONS, [
     '0012_document_identities.sql',
     '0013_document_families.sql',
@@ -120,6 +128,7 @@ test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0026, in ord
     '0024_rate_limit_buckets.sql',
     '0025_users_role.sql',
     '0026_academic_search_run_diagnostics.sql',
+    '0027_saved_reports_room_number.sql',
   ]);
   // Phase E8S Step 8: 0022_reuse_context_declarations.sql added
   // reuse_context_declarations, bringing the 15 E1-E8P tables across the
@@ -134,9 +143,11 @@ test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0026, in ord
   // tables (only users.role — same column-state mechanism as 0023), so that
   // stayed 17. Developer-diagnostics capture's
   // 0026_academic_search_run_diagnostics.sql creates one genuinely new table
-  // (academic_search_run_diagnostics) — bringing this to 18 across all 15
-  // target migrations.
-  assert.equal(ALL_TARGET_TABLES.length, 18, 'expected exactly 18 tables across all 15 target migrations');
+  // (academic_search_run_diagnostics) — bringing this to 18. Room/slot
+  // ownership's 0027_saved_reports_room_number.sql adds zero new tables
+  // (only saved_reports.room_number — same column-state mechanism as 0023/
+  // 0025), so that stays 18 across all 16 target migrations.
+  assert.equal(ALL_TARGET_TABLES.length, 18, 'expected exactly 18 tables across all 16 target migrations');
   assert.deepEqual(
     EXPECTED_TABLES_BY_MIGRATION['0023_privacy_consent_and_report_identity_link.sql'],
     [],
@@ -180,6 +191,16 @@ test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0026, in ord
     undefined,
     '0026 must NOT use the column-state mechanism — it creates a table, not columns on an existing one',
   );
+  assert.deepEqual(
+    EXPECTED_TABLES_BY_MIGRATION['0027_saved_reports_room_number.sql'],
+    [],
+    '0027 must be declared as creating zero new tables',
+  );
+  assert.deepEqual(
+    EXPECTED_COLUMNS_BY_MIGRATION['0027_saved_reports_room_number.sql'],
+    [{ table: 'saved_reports', column: 'room_number' }],
+    '0027 must be declared as adding exactly this one column',
+  );
 });
 
 // --- F: no execution of 0000-0011 (structural) ----------------------------
@@ -200,7 +221,7 @@ test('F: the runner module never does an unfiltered directory scan — no readdi
 
 // --- G: destructive SQL detection -----------------------------------------
 
-test('G: scanForDestructiveStatements finds real destructive keywords and finds none in the actual 15 target migration files', () => {
+test('G: scanForDestructiveStatements finds real destructive keywords and finds none in the actual 16 target migration files', () => {
   assert.deepEqual(scanForDestructiveStatements('CREATE TABLE IF NOT EXISTS x (id TEXT);'), []);
   assert.ok(scanForDestructiveStatements('DROP TABLE document_chunks;').length > 0);
   assert.ok(scanForDestructiveStatements('DELETE FROM users WHERE 1=1;').length > 0);
@@ -254,9 +275,19 @@ test('splitStatements correctly splits 0026 (one CREATE TABLE plus two CREATE IN
   assert.ok(/^CREATE INDEX/i.test(statements[2]));
 });
 
+test('splitStatements correctly splits 0027 (one ALTER TABLE, one backfill UPDATE, one CREATE INDEX)', () => {
+  const content = fs.readFileSync(path.join(drizzleDir, '0027_saved_reports_room_number.sql'), 'utf8');
+  const statements = splitStatements(content);
+  assert.equal(statements.length, 3, 'expected exactly 1 ALTER TABLE + 1 UPDATE + 1 CREATE INDEX');
+  for (const s of statements) assert.doesNotMatch(s, /^--/, 'no statement should be a leftover comment line');
+  assert.ok(/^ALTER TABLE saved_reports ADD COLUMN room_number/i.test(statements[0]));
+  assert.ok(/^UPDATE saved_reports/i.test(statements[1]));
+  assert.ok(/^CREATE INDEX/i.test(statements[2]));
+});
+
 // --- Section 9: disposable local DB — full happy-path run ------------------
 
-test('SECTION 9: fresh pre-0012 database — the runner applies all 15 migrations in order, creates all 18 tables, adds 0023\'s and 0025\'s columns, and preserves legacy row VALUES exactly', async () => {
+test('SECTION 9: fresh pre-0012 database — the runner applies all 16 migrations in order, creates all 18 tables, adds 0023\'s/0025\'s/0027\'s columns, and preserves legacy row VALUES exactly', async () => {
   const dbFile = freshDbPath('happy');
   const client = await buildPreMigrationDb(dbFile);
   await seedRepresentativeLegacyRows(client);
@@ -301,6 +332,15 @@ test('SECTION 9: fresh pre-0012 database — the runner applies all 15 migration
   // brand-new signup would get (see db/schema.ts's own comment on this
   // column) — the correct behavior here is the default, not NULL.
   assert.equal(userRow.role, 'user', "0025 must backfill role to the column's own default ('user') on a pre-existing row, never leave it unset or grant admin");
+  // 0027's column differs from both: it backfills a *computed* value
+  // (CAST(id AS INTEGER) % 10), and only for rows with a non-NULL user_id —
+  // legacy-report-1 (id: 'legacy-report-1', user_id set) casts to 0 (SQLite
+  // CASTs a non-numeric TEXT to INTEGER as 0), so 0 % 10 = 0. legacy-report-2
+  // (user_id NULL, anonymous) must be left NULL — rooms are an
+  // authenticated-account concept only.
+  assert.equal(savedReportRow.room_number, 0, "0027 must backfill room_number to CAST(id AS INTEGER) % 10 for a pre-existing authenticated row");
+  const anonymousReportRow = after.saved_reports.find((r) => r.id === 'legacy-report-2');
+  assert.equal(anonymousReportRow.room_number, null, "0027 must leave room_number NULL for a pre-existing anonymous (user_id IS NULL) row");
 
   client.close();
 });

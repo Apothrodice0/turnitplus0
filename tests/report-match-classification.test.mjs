@@ -124,7 +124,19 @@ function buildPayload({ id, title, text, archiveScore = 0, sources = [] }) {
   };
 }
 
-async function postReport({ deviceKey, id, title, text, cookie, archiveScore, sources }) {
+// Room/slot architecture: required for an authenticated first save (see
+// app/api/reports/route.ts); ignored for anonymous requests and resaves. A
+// fresh, auto-incrementing default so a scenario posting more than one
+// genuinely new report for the same account never collides with itself —
+// this file's scenarios are about match classification, not room occupancy.
+let roomCounter = 0;
+function nextRoom() {
+  const room = roomCounter % 10;
+  roomCounter += 1;
+  return room;
+}
+
+async function postReport({ deviceKey, id, title, text, cookie, archiveScore, sources, room = nextRoom() }) {
   const rateKey = `classify-post-${id}`;
   await resetRateForTest(rateKey);
   const payload = buildPayload({ id, title, text, archiveScore, sources });
@@ -144,6 +156,7 @@ async function postReport({ deviceKey, id, title, text, cookie, archiveScore, so
       scoreBand: payload.scoreBand,
       aiScore: null,
       aiTone: null,
+      room,
       payload,
     }),
   });

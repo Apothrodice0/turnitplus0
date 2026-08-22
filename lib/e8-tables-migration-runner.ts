@@ -9,9 +9,11 @@ import type { Client } from "@libsql/client";
  * A-E8 tables, the privacy/data-lifecycle hardening columns 0023 adds, and
  * the durable rate-limiting table 0024 adds; extended to include 0025-0026
  * — the developer/admin role column and academic-search diagnostics table
- * — as a deliberate, reviewed decision, not an automatic side effect of
- * adding those migration files; see this file's own EXPECTED_MIGRATION_SHA256
- * for how future extensions are meant to be reviewed the same way) to a
+ * — and further extended to include 0027, the room/slot ownership column
+ * that replaces the old id%10 visual grouping — as a deliberate, reviewed
+ * decision, not an automatic side effect of adding those migration files;
+ * see this file's own EXPECTED_MIGRATION_SHA256 for how future extensions
+ * are meant to be reviewed the same way) to a
  * database that is otherwise already at the pre-0012 baseline. Deliberately
  * separate from lib/ingest.ts's applyMigrationsLibsql(), which replays every
  * migration file in drizzleDir from 0000 onward with no applied-state
@@ -47,6 +49,7 @@ export const TARGET_MIGRATIONS = [
   "0024_rate_limit_buckets.sql",
   "0025_users_role.sql",
   "0026_academic_search_run_diagnostics.sql",
+  "0027_saved_reports_room_number.sql",
 ] as const;
 
 export type TargetMigrationFile = (typeof TARGET_MIGRATIONS)[number];
@@ -89,6 +92,10 @@ export const EXPECTED_TABLES_BY_MIGRATION: Record<TargetMigrationFile, string[]>
   // capture — see drizzle/0026_academic_search_run_diagnostics.sql), tracked
   // via plain table-existence, not EXPECTED_COLUMNS_BY_MIGRATION.
   "0026_academic_search_run_diagnostics.sql": ["academic_search_run_diagnostics"],
+  // Like 0023/0025, 0027 creates no new tables — it only adds a column
+  // (plus a backfill UPDATE and an index) to the already-existing
+  // saved_reports table (see EXPECTED_COLUMNS_BY_MIGRATION below).
+  "0027_saved_reports_room_number.sql": [],
 };
 
 export const ALL_TARGET_TABLES: string[] = TARGET_MIGRATIONS.flatMap((m) => EXPECTED_TABLES_BY_MIGRATION[m]);
@@ -112,6 +119,9 @@ export const EXPECTED_COLUMNS_BY_MIGRATION: Partial<Record<TargetMigrationFile, 
   ],
   "0025_users_role.sql": [
     { table: "users", column: "role" },
+  ],
+  "0027_saved_reports_room_number.sql": [
+    { table: "saved_reports", column: "room_number" },
   ],
 };
 
@@ -152,6 +162,7 @@ export const EXPECTED_MIGRATION_SHA256: Record<TargetMigrationFile, string> = {
   "0024_rate_limit_buckets.sql": "ab2338f23d689340dcb21d18a6eb75785f20e977082af5957f317617937a34da",
   "0025_users_role.sql": "77856c89d05da4973ef95a52d31062a10f3b3b53fc176965fecc024f6004da94",
   "0026_academic_search_run_diagnostics.sql": "f0ebebb4cd0a9b2e4f36560dc9990fb439a1bc4d8146842a932870934838269b",
+  "0027_saved_reports_room_number.sql": "14caa98beb8b566372af7f6b21b24f9cb9d4a7c3db84396b4cd59b360947910d",
 };
 
 const DESTRUCTIVE_PATTERN = /\b(DROP\s+TABLE|DROP\s+INDEX|ALTER\s+TABLE\s+\S+\s+DROP|DELETE\s+FROM|TRUNCATE)\b/gi;

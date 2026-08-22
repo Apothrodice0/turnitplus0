@@ -2689,66 +2689,103 @@ main.report-main {
 
 /* 10-room architecture (components/reports/report-rooms.tsx) */
 
-.report-rooms-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-  gap: 12px;
+/* Room/slot architecture: every room is always visible as its own row,
+   stacked vertically — never a grid of cards, and never fully replaced by
+   a separate "room view" screen. Opening a room expands its row in place;
+   every other row stays collapsed, with no data fetched for it. */
+.report-rooms-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
   margin-top: 25px;
 }
 
-.report-room-tile {
-  display: grid;
-  gap: 4px;
-  padding: 16px 14px;
+.report-room-row {
   border: 1px solid var(--soft-line);
   border-radius: 12px;
   background: var(--surface);
-  text-align: left;
-  cursor: pointer;
-  transition: border-color 150ms ease, background 150ms ease;
+  overflow: hidden;
+  transition: border-color 150ms ease;
 }
 
-.report-room-tile:hover:not(:disabled) {
+/* A room is always clickable (never disabled — an empty room is exactly
+   where a new check starts), so status is communicated with a left accent
+   instead. */
+.report-room-row-ready {
+  border-left: 3px solid #2f8f6f;
+}
+
+.report-room-row-empty {
+  border-left: 3px solid var(--soft-line);
+}
+
+.report-room-row-open {
   border-color: #c7dbe3;
+}
+
+.report-room-row-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+  padding: 16px 18px;
+  background: none;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+}
+
+.report-room-row-header:hover {
   background: #fbfdfe;
 }
 
-.report-room-tile:disabled {
-  cursor: default;
-  color: var(--muted);
-  opacity: 0.6;
+.report-room-row-label {
+  display: grid;
+  gap: 4px;
 }
 
-.report-room-tile strong {
+.report-room-row-label strong {
   font-size: 14px;
   color: var(--ink);
 }
 
-.report-room-tile span {
+.report-room-row-status {
   font-size: 12px;
   color: var(--muted);
 }
 
-.report-room-tile small {
-  font-size: 10px;
+.report-room-row-action {
+  flex-shrink: 0;
+}
+
+.report-room-row-detail {
+  padding: 0 18px 18px;
+  border-top: 1px solid var(--soft-line);
+}
+
+.report-room-row-detail > * {
+  margin-top: 16px;
+}
+
+.report-room-row-skeleton {
+  display: grid;
+  gap: 8px;
+  padding: 16px 18px;
+  border: 1px solid var(--soft-line);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.room-empty-slot {
+  display: grid;
+  gap: 14px;
+}
+
+.room-cycle-note {
+  margin: 10px 0 0;
+  font-size: 12px;
   color: var(--muted);
-}
-
-.report-rooms-view {
-  margin-top: 20px;
-}
-
-.report-room-back {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 14px;
-}
-
-.report-room-heading {
-  margin: 0 0 12px;
-  font-size: 15px;
-  color: var(--ink);
 }
 
 /* Loading skeletons — a plain pulse, no external animation library. */
@@ -2769,10 +2806,6 @@ main.report-main {
 
 .skeleton-line-meta {
   width: 40%;
-}
-
-.report-room-tile-skeleton {
-  cursor: default;
 }
 
 .history-skeleton-row {

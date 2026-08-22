@@ -98,7 +98,19 @@ async function deleteAccount(cookie, { password = PASSWORD, confirm = ACCOUNT_DE
   return meRoute.DELETE(req);
 }
 
-async function postReport(deviceKey, { cookie, id, title = 'account-deletion.pdf', text } = {}) {
+// Room/slot architecture: required for an authenticated first save (see
+// app/api/reports/route.ts); ignored for anonymous requests and resaves. A
+// fresh, auto-incrementing default so a scenario posting more than one
+// genuinely new report for the same account never collides with itself —
+// this file's scenarios are about account deletion, not room occupancy.
+let roomCounter = 0;
+function nextRoom() {
+  const room = roomCounter % 10;
+  roomCounter += 1;
+  return room;
+}
+
+async function postReport(deviceKey, { cookie, id, title = 'account-deletion.pdf', text, room = nextRoom() } = {}) {
   await resetRateForTest('acct-del-post');
   const reportId = id ?? nextId();
   const headers = { 'content-type': 'application/json', 'x-forwarded-for': 'acct-del-post' };
@@ -117,6 +129,7 @@ async function postReport(deviceKey, { cookie, id, title = 'account-deletion.pdf
       scoreBand: 'Low',
       aiScore: null,
       aiTone: null,
+      room,
       payload: { version: 11, id: Date.now(), submissionId: 'sub-' + reportId, title, author: '', assignment: '', created: new Date().toISOString(), score: 5, archiveScore: 5, text, wordCount: 100, characterCount: 500, pageCount: 1, fileSize: '1 KB', databaseSize: 230, corpusVersion: 'test', scoreBand: 'Low' },
     }),
   });
