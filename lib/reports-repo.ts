@@ -1,4 +1,6 @@
 import type { Client } from "@libsql/client";
+import { isWithinActiveCycle, roomCycleEndsAt } from "./report-rooms";
+import type { ReportSummary } from "./reports-remote";
 
 // device_key added in Phase E8C, additively — every existing caller that
 // only read payload_json is unaffected; lib/report-historical-match.ts is
@@ -28,4 +30,46 @@ export async function findReportRowForDeviceKey(client: Client, id: string, devi
     args: [deviceKey, id],
   });
   return result.rows[0] as unknown as ReportRow | undefined;
+}
+
+export type RoomOccupantResult =
+  | { status: "empty"; report: null; cycleEndsAt: null }
+  | { status: "processing" | "ready"; report: ReportSummary; cycleEndsAt: string };
+
+/**
+ * The single source of truth for "what does room N currently hold," shared
+ * by app/api/reports/route.ts's GET ?room=N handler and
+ * app/reports/rooms/[room]/page.tsx's Server Component — both need the
+ * exact same empty/processing/ready derivation (see lib/report-rooms.ts's
+ * own header comment for what each status means), so it lives here once
+ * rather than as two hand-kept-in-sync copies of the same SQL.
+ */
+export async function findRoomOccupant(client: Client, userId: string, room: number): Promise<RoomOccupantResult> {
+  const result = await client.execute({
+    sql: `SELECT id, submission_id, title, report_created_at, word_count, archive_score, score_band, ai_score, ai_tone
+          FROM saved_reports WHERE user_id = ? AND room_number = ?
+          ORDER BY report_created_at DESC LIMIT 1`,
+    args: [userId, room],
+  });
+  const occupant = result.rows[0] as unknown as
+    | { id: string | number; submission_id: string; title: string; report_created_at: string; word_count: number; archive_score: number; score_band: string; ai_score: number | null; ai_tone: string | null }
+    | undefined;
+  if (!occupant || !isWithinActiveCycle(occupant.report_created_at)) {
+    return { status: "empty", report: null, cycleEndsAt: null };
+  }
+  return {
+    status: occupant.ai_score === null ? "processing" : "ready",
+    cycleEndsAt: roomCycleEndsAt(occupant.report_created_at),
+    report: {
+      id: String(occupant.id),
+      submissionId: String(occupant.submission_id),
+      title: String(occupant.title),
+      createdAt: String(occupant.report_created_at),
+      wordCount: Number(occupant.word_count),
+      archiveScore: Number(occupant.archive_score),
+      scoreBand: String(occupant.score_band),
+      aiScore: occupant.ai_score === null ? null : Number(occupant.ai_score),
+      aiTone: occupant.ai_tone === null ? null : String(occupant.ai_tone),
+    },
+  };
 }

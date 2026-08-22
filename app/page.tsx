@@ -34,26 +34,28 @@ import {
 } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
-import { createReceiptPdf } from "@/lib/receipt-pdf";
 import { getDeviceKey } from "@/lib/device-key";
-import { extractPdfTextDocument } from "@/lib/pdf-text-extraction";
 import { clearStoredReports, loadStoredReports, storeReport } from "@/lib/report-store";
 import { deleteRemoteReport, fetchAllReportSummariesAcrossRooms, fetchRemoteReport, fetchUploadLimitStatus, listRemoteReportSummaries, saveReportRemote, type ReportSummary, type UploadLimitStatus } from "@/lib/reports-remote";
 import { clearAllReportRoomCaches } from "@/lib/report-rooms-cache";
 import { ReportRoomsBrowser } from "@/components/reports/report-rooms";
 import { ReportHistoryRow } from "@/components/reports/report-history-row";
 import { DocumentUploadPanel } from "@/components/reports/document-upload-panel";
-import { combineMatchedWordPositions } from "@/lib/similarity-enrichment";
-import { computeUnifiedSimilarity } from "@/lib/unified-similarity";
-import { extractDocxTextDocument } from "@/lib/docx-text-extraction";
+import {
+  analyzeAcademicEvidence,
+  analyzeText,
+  analyzeWikipediaText,
+  attachUnifiedSimilarity,
+  downloadReceipt,
+  enrichReportWithAcademicEvidence,
+  enrichReportWithWikipedia,
+  extractFileText,
+} from "@/lib/document-check-pipeline";
 import { normalizeExtractedText } from "@/lib/extracted-text-normalization";
-import type { WebCheckResult } from "@/lib/web-check-core";
-import type { AcademicSearchStatus, ExternalAcademicEvidence } from "@/lib/academic-search/types";
 import {
   AI_MODEL_VERSION,
   AI_PASSAGE_LOG_ODDS_THRESHOLD,
   AI_PASSAGE_THRESHOLD,
-  similarityScoreBand,
 } from "@/lib/ai-core";
 import {
   aiPrepDetailLabel,
@@ -63,13 +65,8 @@ import {
 } from "@/lib/ai-model-prep";
 import {
   buildReportSummary,
-  hasUnifiedSimilarity,
-  PRIMARY_SIMILARITY_BAND_LABELS,
-  primarySimilarityScore,
-  unifiedEvidenceSummary,
   type AiAnalysis,
   type SimilarityReport,
-  type SourceMatch,
 } from "@/lib/report-types";
 
 // This page is prerendered on the server (see the static "/" build output),
@@ -149,92 +146,8 @@ export function viewFromHash(hash: string): View {
   return "home";
 }
 
-let similarityWorker: Worker | null = null;
-let workerRequestId = 0;
 let aiDetectorWorker: Worker | null = null;
 let aiWorkerRequestId = 0;
-let webCheckWorker: Worker | null = null;
-let webCheckRequestId = 0;
-
-function formatBytes(bytes: number) {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-async function analyzeText(
-  text: string,
-  fileName: string,
-  fileSize: number,
-  onProgress: (progress: number, label: string) => void,
-): Promise<SimilarityReport> {
-  similarityWorker ??= new Worker(
-    new URL("./similarity-worker.ts", import.meta.url),
-    { type: "module" },
-  );
-  const id = ++workerRequestId;
-  const result = await new Promise<{
-    score: number;
-    wordCount: number;
-    databaseSize: number;
-    corpusVersion: string;
-    scoreBand: "Low" | "Moderate" | "High";
-    riskStatus: "Elevated" | "Lower";
-    riskTarget: number;
-    riskCutoff: number;
-    riskCalibration: SimilarityReport["riskCalibration"];
-    features: SimilarityReport["features"];
-    excludedDocuments: number;
-    matchedWordCount: number;
-    archiveMatchedPositions: number[];
-    sources: SourceMatch[];
-    repeats: [string, number][];
-  }>((resolve, reject) => {
-    const handleMessage = (event: MessageEvent) => {
-      if (event.data.type === "progress") {
-        onProgress(event.data.progress, event.data.label);
-        return;
-      }
-      if (event.data.id !== id) return;
-      similarityWorker?.removeEventListener("message", handleMessage);
-      if (event.data.ok) resolve(event.data.result);
-      else reject(new Error(event.data.error));
-    };
-    similarityWorker?.addEventListener("message", handleMessage);
-    similarityWorker?.postMessage({ id, text, fileName });
-  });
-  const now = new Date();
-
-  return {
-    version: 11,
-    id: Date.now(),
-    submissionId: String(Date.now()).slice(-10),
-    title: fileName,
-    author: "Guest submission",
-    assignment: "Personal similarity check",
-    created: now.toISOString(),
-    score: result.score,
-    archiveScore: result.score,
-    wordCount: result.wordCount,
-    characterCount: text.length,
-    pageCount: Math.max(1, Math.ceil(result.wordCount / 450)),
-    fileSize: fileSize ? formatBytes(fileSize) : `${new Blob([text]).size} B`,
-    databaseSize: result.databaseSize,
-    corpusVersion: result.corpusVersion,
-    scoreBand: result.scoreBand,
-    riskStatus: result.riskStatus,
-    riskTarget: result.riskTarget,
-    riskCutoff: result.riskCutoff,
-    riskCalibration: result.riskCalibration,
-    features: result.features,
-    excludedDocuments: result.excludedDocuments,
-    matchedWordCount: result.matchedWordCount,
-    archiveMatchedPositions: result.archiveMatchedPositions,
-    sources: result.sources,
-    repeats: result.repeats,
-    text,
-  };
-}
 
 let pendingAiReject: ((error: Error) => void) | null = null;
 
@@ -277,199 +190,6 @@ async function analyzeAiText(
   });
 }
 
-async function analyzeWikipediaText(
-  text: string,
-  title: string,
-  onProgress: (current: number, total: number, label: string) => void,
-): Promise<WebCheckResult> {
-  webCheckWorker ??= new Worker(
-    new URL("./web-check-worker.ts", import.meta.url),
-    { type: "module" },
-  );
-  const id = ++webCheckRequestId;
-  return new Promise<WebCheckResult>((resolve, reject) => {
-    const handleMessage = (event: MessageEvent) => {
-      if (event.data.id !== id) return;
-      if (event.data.type === "progress") {
-        onProgress(event.data.current, event.data.total, event.data.label);
-        return;
-      }
-      webCheckWorker?.removeEventListener("message", handleMessage);
-      if (event.data.ok) resolve(event.data.result as WebCheckResult);
-      else reject(new Error(event.data.error));
-    };
-    webCheckWorker?.addEventListener("message", handleMessage);
-    webCheckWorker?.postMessage({ id, text, title, count: 20 });
-  });
-}
-
-export type AcademicEvidenceCheckResult = {
-  evidence: ExternalAcademicEvidence[];
-  status: AcademicSearchStatus;
-  /**
-   * Developer-diagnostics addition: a bare correlation id for the
-   * server-side-only diagnostics row /api/academic-evidence already
-   * persisted (see that route's own header comment for why the raw
-   * diagnostic content itself — candidates, queries, provider errors —
-   * never round-trips through this client at all, only this id). Forwarded
-   * to saveReport()/saveReportRemote() below so app/api/reports/route.ts can
-   * link it to the saved report. null whenever no diagnostics row exists
-   * (a network failure before the check ran, or text under MIN_TEXT_LENGTH).
-   */
-  academicSearchDiagnosticsId: number | null;
-};
-
-// Phase 3: unlike analyzeWikipediaText above, this cannot run in a Worker —
-// lib/academic-search/'s HTTP-fallback text retrieval needs Node's
-// SSRF-validation module (node:dns/node:net), which does not exist in a
-// browser/Worker context. A server round-trip is the smallest safe
-// alternative the existing architecture already supports (the same
-// fetch-a-JSON-API shape every other client helper in this file uses) —
-// see app/api/academic-evidence/route.ts's own header comment.
-//
-// "start the two fixes now" TASK 1/2: generateReport() now awaits this
-// before showing/saving a report (no more silent background re-save), so
-// this function must never throw — every failure path (network error,
-// non-2xx response, malformed body) resolves to a well-formed FAILED
-// result instead, exactly like getExternalAcademicEvidence's own
-// never-throws contract on the server side.
-async function analyzeAcademicEvidence(text: string): Promise<AcademicEvidenceCheckResult> {
-  try {
-    const response = await fetch("/api/academic-evidence", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text }),
-    });
-    if (!response.ok) throw new Error(`academic evidence request failed (${response.status})`);
-    const data = (await response.json()) as {
-      evidence?: ExternalAcademicEvidence[];
-      status?: AcademicSearchStatus;
-      academicSearchDiagnosticsId?: number | null;
-    };
-    return {
-      evidence: Array.isArray(data.evidence) ? data.evidence : [],
-      status: data.status ?? "FAILED",
-      academicSearchDiagnosticsId: data.academicSearchDiagnosticsId ?? null,
-    };
-  } catch (error) {
-    console.debug("Academic evidence check failed.", {
-      outcome: "failed",
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return { evidence: [], status: "FAILED", academicSearchDiagnosticsId: null };
-  }
-}
-
-async function extractFileText(file: File, onProgress: (progress: number, label: string) => void) {
-  const extension = file.name.split(".").pop()?.toLowerCase();
-  if (["txt", "md", "html", "csv"].includes(extension ?? "")) {
-    onProgress(18, "Reading document content");
-    return file.text();
-  }
-  if (extension === "docx") {
-    onProgress(18, "Reading document content");
-    const mammoth = await import("mammoth/mammoth.browser");
-    return extractDocxTextDocument(mammoth.convertToHtml, { arrayBuffer: await file.arrayBuffer() });
-  }
-  if (extension === "pdf") {
-    const pdfjs = await import("pdfjs-dist");
-    pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
-    const document = await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise;
-    return extractPdfTextDocument(document, (pageNumber, pageCount) => {
-      onProgress(8 + Math.round((pageNumber / pageCount) * 20), `Reading page ${pageNumber} of ${pageCount}`);
-    });
-  }
-  throw new Error("This file type is not supported.");
-}
-
-async function downloadReceipt(report: SimilarityReport) {
-  const primaryScore = primarySimilarityScore(report);
-  const verdict = similarityScoreBand(primaryScore);
-  const unified = hasUnifiedSimilarity(report) && report.unifiedSimilarity && verdict
-    ? {
-      score: primaryScore,
-      label: PRIMARY_SIMILARITY_BAND_LABELS[verdict.key],
-      evidenceSummary: unifiedEvidenceSummary(report.unifiedSimilarity),
-    }
-    : undefined;
-  const blob = await createReceiptPdf({ ...report, unified });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  const baseName = report.title.replace(/\.[^.]+$/, "").replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "");
-  anchor.href = url;
-  anchor.download = `${baseName || "submission"}-receipt.pdf`;
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-
-function enrichReportWithWikipedia(report: SimilarityReport, webCheck: WebCheckResult): SimilarityReport {
-  const archiveScore = report.archiveScore ?? report.score;
-  const combined = report.archiveMatchedPositions
-    ? combineMatchedWordPositions(
-      report.archiveMatchedPositions,
-      webCheck.matches.filter((match) => match.matched),
-      report.wordCount,
-    )
-    : { matchedWordCount: report.matchedWordCount, externalMatchedWordCount: 0, score: archiveScore };
-  return {
-    ...report,
-    archiveScore,
-    score: combined.score,
-    matchedWordCount: combined.matchedWordCount,
-    wikipediaMatchedWordCount: combined.externalMatchedWordCount,
-    webCheck,
-  };
-}
-
-// Phase 3: unlike enrichReportWithWikipedia above, this never touches
-// score/archiveScore/matchedWordCount — the phase's own PRIMARY PRODUCT
-// RULE. TurnitPlus's own corpus similarity stays the single, unambiguous
-// headline number; external academic evidence is purely additive. Always
-// carries the check's status alongside the evidence array itself ("start
-// the two fixes now" TASK 2) so a FAILED check is never rendered
-// identically to a genuine zero-result COMPLETE_NO_MATCHES.
-function enrichReportWithAcademicEvidence(report: SimilarityReport, result: AcademicEvidenceCheckResult): SimilarityReport {
-  return { ...report, externalAcademicEvidence: result.evidence, academicEvidenceStatus: result.status };
-}
-
-/**
- * Phase 7.1 TASK 1: computeUnifiedSimilarity() is a pure, synchronous,
- * network-free function (lib/unified-similarity.ts's own header comment) —
- * safe to run here, in the browser, at save time, using exactly the archive
- * + live-academic evidence this client already has in memory. Attaching the
- * result to the report BEFORE storeReport()/saveReportRemote() means it
- * rides along in payload_json and IndexedDB for free, with no new server
- * round-trip and no dashboard-side recomputation — see this task's own
- * "the dashboard should simply read the persisted unified result."
- *
- * Deliberately omits historicalSubmissionMatch: that axis is server-only
- * (lib/report-historical-match.ts) and, by design, must stay read-time-
- * recomputed rather than frozen at save time — the growing corpus can gain
- * a match for this exact content after this report was saved (see
- * tests/report-historical-match.test.mjs's own E8E case), so freezing it
- * here would risk permanently under- OR over-counting it. The one accepted
- * consequence: a report with genuine eligible prior-submission evidence can
- * show a slightly higher score on its own detail page (still recomputed
- * fully server-side on every GET) than in this persisted dashboard/receipt
- * value. Never touches score/archiveScore/aiScore.
- */
-function attachUnifiedSimilarity(report: SimilarityReport): SimilarityReport {
-  try {
-    return {
-      ...report,
-      unifiedSimilarity: computeUnifiedSimilarity({
-        wordCount: report.wordCount,
-        archiveMatchedPositions: report.archiveMatchedPositions,
-        externalAcademicEvidence: report.externalAcademicEvidence,
-      }),
-    };
-  } catch {
-    return report;
-  }
-}
-
 export default function Home() {
   const [view, setView] = useState<View>("account");
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
@@ -486,14 +206,9 @@ export default function Home() {
   // (the 10-room architecture) below, not this state.
   const [reports, setReports] = useState<ReportSummary[]>([]);
   // Mirrors ReportRoomsBrowser's own total-report count (summed across all
-  // 10 rooms) up to this component, for the sidebar badge and "Clear
-  // history" visibility — see onTotalCountChange.
+  // rooms) up to this component, for the sidebar badge and "Clear history"
+  // visibility — see onTotalCountChange.
   const [accountReportCount, setAccountReportCount] = useState(0);
-  // Set once per successful save so ReportRoomsBrowser can reconcile a
-  // just-created report against its own (possibly still-fresh-within-24h)
-  // cache without waiting for that cache to expire — see that component's
-  // own header comment.
-  const [newlySavedReportSummary, setNewlySavedReportSummary] = useState<(ReportSummary & { room: number }) | null>(null);
   // Bumped to force ReportRoomsBrowser to fully remount (discarding its own
   // in-memory room index/contents) after "Clear history" — that action
   // already invalidates its localStorage caches, but the currently-mounted
@@ -518,15 +233,6 @@ export default function Home() {
   const [legalTab, setLegalTab] = useState<LegalTab>("privacy");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const generationLockRef = useRef(false);
-  // Room/slot architecture: which of an authenticated account's rooms the
-  // report currently being generated belongs to — set by handleRoomOpened
-  // whenever the user opens an empty room, read once at the point
-  // saveReport() actually posts to the server, then cleared. Null for the
-  // anonymous flow (rooms don't apply) and, defensively, for any
-  // authenticated generation that somehow started without a room selected
-  // (the server rejects a roomless authenticated first-save rather than
-  // silently accepting one — see app/api/reports/route.ts).
-  const uploadRoomTargetRef = useRef<number | null>(null);
 
   // Anonymous/device-scoped report loading (no authenticated session).
   // Unchanged from the pre-Phase-2A behavior: IndexedDB is the primary
@@ -565,19 +271,17 @@ export default function Home() {
     }
   }
 
-  // Authenticated report loading. 10-room architecture: this account's own
-  // report list is no longer eagerly hydrated here at all — ReportRoomsBrowser
+  // Authenticated report loading. Room architecture: this account's own
+  // report list is never eagerly hydrated here at all — ReportRoomsBrowser
   // (rendered only when `account` is set — see the "reports" view below)
-  // owns fetching/caching its own room index and room contents directly
-  // from the session-scoped, account-scoped API routes, lazily, only as the
-  // user actually opens a room or a report. This function's only remaining
-  // job is account-scoped state that ISN'T report-list data: the upload
-  // quota, and clearing any stale cross-context leftovers from a previous
-  // auth state (the flat anonymous `reports` list, and a "just saved"
-  // reference that could otherwise belong to a different session).
+  // owns fetching/caching its own room index directly from the
+  // session-scoped, account-scoped API route, and each room's own page
+  // (app/reports/rooms/[room]) owns fetching that one room's data when the
+  // user opens it. This function's only remaining job is account-scoped
+  // state that ISN'T report-list data: the upload quota, and clearing the
+  // stale anonymous `reports` list left over from a previous auth state.
   async function loadAccountReports() {
     setReports([]);
-    setNewlySavedReportSummary(null);
     void fetchUploadLimitStatus().then(setUploadLimitStatus);
   }
 
@@ -779,7 +483,6 @@ export default function Home() {
     setAccount(null);
     setUploadLimitStatus(null);
     setAccountReportCount(0);
-    setNewlySavedReportSummary(null);
     setIsEditingProfile(false);
     setIsDeletingAccount(false);
     setDeleteAccountError(null);
@@ -885,7 +588,6 @@ export default function Home() {
     // IndexedDB) is deliberately left alone, so the same account signing
     // back in on this device still benefits from it.
     setAccountReportCount(0);
-    setNewlySavedReportSummary(null);
     setIsEditingProfile(false);
     setAuthMode("login");
     setWelcomeMode(null);
@@ -912,23 +614,19 @@ export default function Home() {
     setFile(selected);
   }
 
+  // Anonymous-only from here on: an authenticated account's new check
+  // always happens on its own dedicated room page
+  // (app/reports/rooms/[room]/room-page-shell.tsx), which owns its own
+  // save/room-threading logic — see that file's own header comment. The
+  // Dashboard/generateReport() flow below is never reachable by a signed-in
+  // account in normal use (goToNewCheck() routes them into My Reports
+  // instead — see below), so it stays exactly as simple as a roomless,
+  // account-less save actually is.
   async function saveReport(report: SimilarityReport, academicSearchDiagnosticsId?: number | null) {
     const summary = buildReportSummary(report);
     setReports((current) => [summary, ...current.filter((item) => item.id !== summary.id)].slice(0, 50));
     await storeReport(report);
-    const room = uploadRoomTargetRef.current;
-    const saveResult = await saveReportRemote(report, summary, academicSearchDiagnosticsId, account && room !== null ? room : undefined);
-    // Consumed by ReportRoomsBrowser (a no-op when signed out, since that
-    // component isn't rendered at all in that case) — see its own header
-    // comment for why this exists alongside the 24h room cache. Gated on
-    // saveResult.ok: setting this on a save that was rejected (quota, room
-    // already occupied, or any other failure) would show a report in the
-    // room UI that the server never actually persisted — exactly the bug
-    // that made a report visible in a room 404 when opened at /reports/[id].
-    if (account && room !== null && saveResult.ok) {
-      setNewlySavedReportSummary({ ...summary, room });
-    }
-    return saveResult;
+    return await saveReportRemote(report, summary, academicSearchDiagnosticsId);
   }
 
   async function generateReport() {
@@ -1079,38 +777,19 @@ export default function Home() {
     window.clearInterval(progressTimer);
     setProgress(100);
     setProcessingLabel("Saving your report");
-    // Captured before the ref is cleared below — the deferred AI-enrichment
-    // resave further down needs the same room number (it's a resave of the
-    // same report, never a different room), even after this generation's
-    // own room target has been reset for the next check.
-    const targetRoom = uploadRoomTargetRef.current;
     try {
       const saveResult = await saveReport(report, academicResult.academicSearchDiagnosticsId);
-      uploadRoomTargetRef.current = null;
       navigate("reports");
-      // Unlike a plain network/DB hiccup (silently tolerated since the
-      // local copy already succeeded — see saveReport/saveReportRemote's own
-      // comments), a daily-upload-quota rejection, a room already occupied,
-      // or any other explicit rejection is not transient: the report is
-      // still visible locally on this device, but was never persisted to
-      // the account/room, so the user is told plainly rather than shown the
-      // normal success toast.
-      if (!saveResult.ok && saveResult.quotaExceeded) {
-        const resetLabel = saveResult.resetsAt
-          ? new Date(saveResult.resetsAt).toLocaleString(undefined, { hour: "numeric", minute: "2-digit", hour12: true })
-          : "midnight UTC";
-        notify(saveResult.error ?? `Daily upload limit reached. This report is saved on this device only until the limit resets at ${resetLabel}.`);
-      } else if (!saveResult.ok && saveResult.roomOccupied) {
-        notify(saveResult.error ?? "This room already has an active check. Choose a different room, or wait for it to reset.");
-      } else if (!saveResult.ok) {
-        notify("Your report was generated but could not be saved to your account. Please try again.");
-      } else {
-        notify(
-          academicResult.status === "FAILED"
+      // A network/DB hiccup here is silently tolerated since the local copy
+      // already succeeded (see saveReport/saveReportRemote's own comments) —
+      // there is no quota or room concept on this anonymous-only path.
+      notify(
+        !saveResult.ok
+          ? "Your report is ready. It's saved on this device; syncing to the server will retry automatically."
+          : academicResult.status === "FAILED"
             ? "Your report is ready. External academic verification was unavailable this time."
             : "Your report is ready. Choose AI or TurnitPlus Similarity.",
-        );
-      }
+      );
 
       // TASK 4: the AI-writing score merges into the ALREADY-shown,
       // ALREADY-saved report whenever it finishes — a separate axis
@@ -1126,17 +805,7 @@ export default function Home() {
         setCurrentReport((current) => current?.id === enriched.id ? { ...current, ...aiResult } : current);
         setReports((current) => current.map((item) => item.id === enrichedSummary.id ? enrichedSummary : item));
         await storeReport(enriched);
-        const enrichedSaveResult = await saveReportRemote(enriched, enrichedSummary, undefined, account && targetRoom !== null ? targetRoom : undefined);
-        // Same gating as the primary save above, and for the same reason:
-        // only tell ReportRoomsBrowser about this report once the server
-        // has actually confirmed it, never optimistically. A new object
-        // identity (not a mutation of the previous one) so that
-        // component's own reconciliation effect — which compares by
-        // reference to distinguish "already handled" from "something
-        // changed" — re-fires and picks up the updated AI score/tone too.
-        if (account && targetRoom !== null && enrichedSaveResult.ok) {
-          setNewlySavedReportSummary({ ...enrichedSummary, room: targetRoom });
-        }
+        await saveReportRemote(enriched, enrichedSummary);
       });
     } finally {
       generationLockRef.current = false;
@@ -1150,7 +819,6 @@ export default function Home() {
       notify("Please wait for the current report to finish before starting another check.");
       return;
     }
-    uploadRoomTargetRef.current = null;
     setFile(null);
     setProgress(0);
     setCurrentReport(null);
@@ -1173,45 +841,20 @@ export default function Home() {
     navigate(account ? "reports" : "dashboard");
   }
 
-  /**
-   * Room/slot architecture: fired by ReportRoomsBrowser every time the user
-   * opens a room (see that component's own onRoomOpened prop) — this is how
-   * app/page.tsx (which owns the actual upload pipeline: file/generateReport)
-   * knows which room a new check should be tagged to, without either side
-   * needing to duplicate the other's state. Entering a fresh empty room
-   * resets any stale file/progress left over from a different room the user
-   * may have opened and abandoned earlier in the same session — "When the
-   * user enters an empty room, show the upload/check UI there" means a
-   * clean slate, not a leftover preview from elsewhere.
-   */
-  function handleRoomOpened(room: number, status: "empty" | "ready") {
-    if (status !== "empty") {
-      uploadRoomTargetRef.current = null;
-      return;
-    }
-    if (generationLockRef.current) return;
-    uploadRoomTargetRef.current = room;
-    setFile(null);
-    setProgress(0);
-    setCurrentReport(null);
-    if (fileInputRef.current) fileInputRef.current.value = "";
-  }
-
   async function clearHistory() {
-    // Authenticated accounts: the visible state here is only ever whichever
-    // one room ReportRoomsBrowser currently has open (the 10-room
-    // architecture's whole point), never the account's full history — so a
-    // full wipe needs its own explicit, full enumeration across every room.
-    // This is the one deliberate exception to "never fetch across all rooms
-    // at once": clearing history is a rare, explicit, destructive action,
-    // not the browsing behavior this feature's lazy-loading requirement is
-    // about. Still lightweight summaries, never full report bodies.
+    // Authenticated accounts: the visible state here is only ever the room
+    // directory's own lightweight index, never the account's full history —
+    // so a full wipe needs its own explicit, full enumeration across every
+    // room. This is the one deliberate exception to "never fetch across all
+    // rooms at once": clearing history is a rare, explicit, destructive
+    // action, not the browsing behavior this feature's lazy-loading
+    // requirement is about. Still lightweight summaries, never full report
+    // bodies.
     const idsToDelete = account
       ? (await fetchAllReportSummariesAcrossRooms()).map((report) => report.id)
       : reports.map((report) => report.id);
     setReports([]);
     setAccountReportCount(0);
-    setNewlySavedReportSummary(null);
     if (account) {
       clearAllReportRoomCaches(account.email);
       setRoomsBrowserKey((key) => key + 1);
@@ -1834,9 +1477,8 @@ export default function Home() {
             </div>
 
             {/* Anonymous/local history only — an authenticated account's
-                processing state is shown inline inside the specific room
-                being uploaded to (DocumentUploadPanel via renderUploadPanel),
-                not floated above the room grid. */}
+                new-check flow (and its own processing state) lives entirely
+                on its room's own dedicated page, never here. */}
             {!account && isGeneratingReport && file && (
               <article className="history-processing" aria-live="polite">
                 <div className="history-file-icon"><FileText aria-hidden="true" /></div>
@@ -1854,36 +1496,21 @@ export default function Home() {
               </article>
             )}
 
-            {/* Room/slot architecture (see components/reports/report-rooms.tsx):
-                an authenticated account's list is owned entirely by
+            {/* Room directory (see components/reports/report-rooms.tsx): an
+                authenticated account's list is owned entirely by
                 ReportRoomsBrowser, which fetches only the lightweight room
-                index up front, and only one room's current occupant when the
-                user opens it — never the account's full history, never full
-                report bodies. The anonymous, device-scoped flat list below
+                index — status per room, never report content. Clicking a
+                room navigates to its own dedicated page
+                (app/reports/rooms/[room]), which fetches and owns that one
+                room's data (and the upload flow, for an empty room) —
+                nothing about a report, or the upload panel, is ever
+                rendered here. The anonymous, device-scoped flat list below
                 is unchanged in spirit from before rooms existed. */}
             {account ? (
               <ReportRoomsBrowser
                 key={roomsBrowserKey}
                 accountEmail={account.email}
-                newlySavedReportSummary={newlySavedReportSummary}
-                onConsumedNewlySavedReport={() => setNewlySavedReportSummary(null)}
                 onTotalCountChange={setAccountReportCount}
-                onDownloadReceipt={downloadReceipt}
-                onRoomOpened={handleRoomOpened}
-                renderUploadPanel={(room) => (
-                  <DocumentUploadPanel
-                    file={file}
-                    isGeneratingReport={isGeneratingReport}
-                    progress={progress}
-                    processingLabel={processingLabel}
-                    fileInputRef={fileInputRef}
-                    onChooseFile={chooseFile}
-                    onGenerate={() => {
-                      uploadRoomTargetRef.current = room;
-                      void generateReport();
-                    }}
-                  />
-                )}
               />
             ) : !accountLoaded ? (
               // reports.length === 0 is also true before the device report

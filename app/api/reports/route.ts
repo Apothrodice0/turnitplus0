@@ -7,6 +7,7 @@ import { indexDocumentSubmissionIntoCorpus } from '../../../lib/user-submission-
 import { linkAcademicSearchRunDiagnosticsToReport } from '../../../lib/academic-search-diagnostics-repo';
 import { checkUploadLimit } from '../../../lib/upload-limit';
 import { getRoomCountForRole, isWithinActiveCycle, roomCycleEndsAt } from '../../../lib/report-rooms';
+import { findRoomOccupant } from '../../../lib/reports-repo';
 import { runAfterResponse } from '../../../lib/run-after-response';
 
 // Reports carry derived data (AI passages, matched phrases, extracted text)
@@ -344,41 +345,16 @@ export async function GET(request: Request) {
           if (!Number.isInteger(room) || room < 0 || room >= roomCount) {
             return new NextResponse(JSON.stringify({ error: `room must be an integer 0-${roomCount - 1}` }), { status: 400 });
           }
-          const result = await client.execute({
-            sql: `SELECT id, submission_id, title, report_created_at, word_count, archive_score, score_band, ai_score, ai_tone
-                  FROM saved_reports WHERE user_id = ? AND room_number = ?
-                  ORDER BY report_created_at DESC LIMIT 1`,
-            args: [sessionUser.id, room],
-          });
-          const occupant = result.rows[0] as unknown as
-            | { id: string | number; submission_id: string; title: string; report_created_at: string; word_count: number; archive_score: number; score_band: string; ai_score: number | null; ai_tone: string | null }
-            | undefined;
           // A room whose only occupant's cycle has ended reports itself as
           // "empty" here too, exactly like the index (app/api/reports/rooms/
           // route.ts) — the expired report is never deleted, only no longer
-          // this room's CURRENT occupant; see lib/report-rooms.ts's own
-          // header comment.
-          if (!occupant || !isWithinActiveCycle(occupant.report_created_at)) {
-            return new NextResponse(JSON.stringify({ status: 'empty', report: null, cycleEndsAt: null }), { status: 200, headers: { 'Content-Type': 'application/json' } });
-          }
-          return new NextResponse(
-            JSON.stringify({
-              status: 'ready',
-              cycleEndsAt: roomCycleEndsAt(occupant.report_created_at),
-              report: {
-                id: String(occupant.id),
-                submissionId: String(occupant.submission_id),
-                title: String(occupant.title),
-                createdAt: String(occupant.report_created_at),
-                wordCount: Number(occupant.word_count),
-                archiveScore: Number(occupant.archive_score),
-                scoreBand: String(occupant.score_band),
-                aiScore: occupant.ai_score === null ? null : Number(occupant.ai_score),
-                aiTone: occupant.ai_tone === null ? null : String(occupant.ai_tone),
-              },
-            }),
-            { status: 200, headers: { 'Content-Type': 'application/json' } },
-          );
+          // this room's CURRENT occupant. "processing" (occupied, ai_score
+          // not recorded yet) is a real, expected window, not a bug — see
+          // lib/report-rooms.ts's own header comment. findRoomOccupant is
+          // the same lookup app/reports/rooms/[room]/page.tsx's Server
+          // Component uses, so both agree by construction.
+          const occupant = await findRoomOccupant(client, sessionUser.id, room);
+          return new NextResponse(JSON.stringify(occupant), { status: 200, headers: { 'Content-Type': 'application/json' } });
         }
         const result = await client.execute({
           sql: `SELECT id, submission_id, title, report_created_at, word_count, archive_score, score_band, ai_score, ai_tone

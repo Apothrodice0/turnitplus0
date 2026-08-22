@@ -78,8 +78,15 @@ function samplePayload(id, overrides = {}) {
   };
 }
 
-/** `id` is a caller-chosen numeric string so tests can identify a specific report deterministically — room is now an explicit parameter, never derived from id. */
-async function postReport(deviceKey, id, { cookie, room, payloadOverrides = {}, createdAt } = {}) {
+/**
+ * `id` is a caller-chosen numeric string so tests can identify a specific
+ * report deterministically — room is now an explicit parameter, never
+ * derived from id. Defaults to a real, non-null aiScore/aiTone: most of
+ * these scenarios are about room occupancy/isolation, not the AI-pending
+ * window, so a genuinely complete report is the right default — pass
+ * `aiScore: null` explicitly (see scenario 8) to exercise "processing".
+ */
+async function postReport(deviceKey, id, { cookie, room, payloadOverrides = {}, createdAt, aiScore = 12, aiTone = 'low' } = {}) {
   const ip = `report-rooms-post-${++ipCounter}`;
   await resetRateForTest(ip);
   const payload = samplePayload(id, payloadOverrides);
@@ -97,8 +104,8 @@ async function postReport(deviceKey, id, { cookie, room, payloadOverrides = {}, 
       wordCount: payload.wordCount,
       archiveScore: payload.score,
       scoreBand: 'Low',
-      aiScore: null,
-      aiTone: null,
+      aiScore,
+      aiTone,
       room,
       payload,
     }),
@@ -349,6 +356,54 @@ async function getRoom(cookie, room) {
   client.close();
 
   console.log('a report past its 24h cycle frees its room for a new upload without ever being deleted');
+}
+
+// 8. "Processing": a room occupied by a report whose ai_score isn't
+// recorded yet (the similarity-only first save has landed, the
+// AI-enriched resave hasn't) reports itself as "processing" — never
+// prematurely "ready" — in both the index and the room-scoped fetch, but
+// still counts as occupied for 409 purposes. Once the enriched resave
+// lands (a real aiScore), the same room flips to "ready".
+{
+  const signupRes = await signup({ email: 'rooms-processing@example.com', password: 'correct-horse-8', username: 'roomsprocessing', deviceKey: 'device-processing-1' });
+  const cookie = extractCookie(signupRes);
+  const id = 9000000000009;
+
+  const first = await postReport('device-processing-1', id, { cookie, room: 9, aiScore: null, aiTone: null });
+  assert.equal(first.status, 200);
+
+  const roomRes = await getRoom(cookie, 9);
+  const roomBody = await roomRes.json();
+  assert.equal(roomBody.status, 'processing', 'a report with no ai_score yet must show as processing, never ready');
+  assert.equal(roomBody.report.id, String(id), 'the report itself (similarity result) must still be returned while processing');
+  assert.equal(roomBody.report.aiScore, null);
+  assert.ok(typeof roomBody.cycleEndsAt === 'string', 'occupancy/cycle information must still be present while processing');
+
+  const indexRes = await getRoomIndex(cookie);
+  const indexBody = await indexRes.json();
+  const room9 = indexBody.rooms.find((r) => r.room === 9);
+  assert.equal(room9.status, 'processing');
+
+  // Still occupied for 409 purposes — a second upload must still be refused.
+  const second = await postReport('device-processing-1', 9000000000019, { cookie, room: 9, aiScore: null, aiTone: null });
+  assert.equal(second.status, 409, 'a room mid-AI-analysis must still refuse a second upload — it is occupied, just not fully analyzed yet');
+
+  // The AI-enriched resave lands (same id, same room, now a real aiScore) — the room flips to "ready".
+  const resave = await postReport('device-processing-1', id, { cookie, room: 9, aiScore: 34, aiTone: 'review', payloadOverrides: { title: 'ai-enriched.pdf' } });
+  assert.equal(resave.status, 200);
+
+  const readyRoomRes = await getRoom(cookie, 9);
+  const readyRoomBody = await readyRoomRes.json();
+  assert.equal(readyRoomBody.status, 'ready', 'once ai_score is recorded, the room must flip to ready');
+  assert.equal(readyRoomBody.report.aiScore, 34);
+  assert.equal(readyRoomBody.report.aiTone, 'review');
+
+  const readyIndexRes = await getRoomIndex(cookie);
+  const readyIndexBody = await readyIndexRes.json();
+  const readyRoom9 = readyIndexBody.rooms.find((r) => r.room === 9);
+  assert.equal(readyRoom9.status, 'ready');
+
+  console.log('a room mid-AI-analysis reports itself as processing (never a fake ready), still counts as occupied, and flips to ready once ai_score lands');
 }
 
 for (const suffix of ['', '-wal', '-shm']) {

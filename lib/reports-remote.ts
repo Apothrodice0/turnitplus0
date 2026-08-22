@@ -141,6 +141,15 @@ export async function fetchReportRoomIndex(): Promise<RoomIndexEntry[]> {
 
 export type RoomContents =
   | { status: "empty"; report: null; cycleEndsAt: null }
+  /**
+   * Occupied, but the AI-enriched resave hasn't landed yet (see
+   * lib/report-rooms.ts's own header comment) — the report itself
+   * (title/similarity/etc.) is real and complete; only report.aiScore/
+   * aiTone are still null. app/reports/rooms/[room]/room-page-shell.tsx
+   * polls this endpoint until status flips to "ready" rather than ever
+   * presenting this as "ready" — see that file's own header comment.
+   */
+  | { status: "processing"; report: ReportSummary; cycleEndsAt: string }
   | { status: "ready"; report: ReportSummary; cycleEndsAt: string };
 
 const EMPTY_ROOM_CONTENTS: RoomContents = { status: "empty", report: null, cycleEndsAt: null };
@@ -151,7 +160,9 @@ export async function fetchReportRoomContents(room: number): Promise<RoomContent
     const response = await fetch(`/api/reports?room=${room}`);
     if (!response.ok) return EMPTY_ROOM_CONTENTS;
     const data = (await response.json()) as Partial<RoomContents>;
-    if (data.status === "ready" && data.report) return { status: "ready", report: data.report, cycleEndsAt: data.cycleEndsAt ?? new Date().toISOString() };
+    if ((data.status === "ready" || data.status === "processing") && data.report) {
+      return { status: data.status, report: data.report, cycleEndsAt: data.cycleEndsAt ?? new Date().toISOString() };
+    }
     return EMPTY_ROOM_CONTENTS;
   } catch (error) {
     console.debug("Report room fetch failed.", {
@@ -168,12 +179,14 @@ export async function fetchReportRoomContents(room: number): Promise<RoomContent
  * not a browsing operation this feature's lazy-loading requirement is
  * about. Still only ever fetches the tiny index first, then each room's
  * single lightweight summary — never a full report body, and never more
- * network calls than this account actually has rooms.
+ * network calls than this account actually has rooms. Includes
+ * "processing" rooms too — a report mid-AI-analysis is still a real,
+ * deletable row that a full wipe must not skip.
  */
 export async function fetchAllReportSummariesAcrossRooms(): Promise<ReportSummary[]> {
   const index = await fetchReportRoomIndex();
   const contents = await Promise.all(index.map((entry) => fetchReportRoomContents(entry.room)));
-  return contents.flatMap((c) => (c.status === "ready" ? [c.report] : []));
+  return contents.flatMap((c) => (c.status === "ready" || c.status === "processing" ? [c.report] : []));
 }
 
 /**

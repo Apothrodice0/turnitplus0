@@ -2700,44 +2700,41 @@ main.report-main {
   margin-top: 25px;
 }
 
+/* My Reports is a plain room directory: each row is itself a <Link> to
+   that room's own dedicated page (/reports/rooms/[room]) — there is no
+   expand/accordion state here at all, and no report content is ever
+   rendered on this page. */
 .report-room-row {
-  border: 1px solid var(--soft-line);
-  border-radius: 12px;
-  background: var(--surface);
-  overflow: hidden;
-  transition: border-color 150ms ease;
-}
-
-/* A room is always clickable (never disabled — an empty room is exactly
-   where a new check starts), so status is communicated with a left accent
-   instead. */
-.report-room-row-ready {
-  border-left: 3px solid #2f8f6f;
-}
-
-.report-room-row-empty {
-  border-left: 3px solid var(--soft-line);
-}
-
-.report-room-row-open {
-  border-color: #c7dbe3;
-}
-
-.report-room-row-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  width: 100%;
   padding: 16px 18px;
-  background: none;
-  border: none;
-  text-align: left;
-  cursor: pointer;
+  border: 1px solid var(--soft-line);
+  border-radius: 12px;
+  background: var(--surface);
+  text-decoration: none;
+  transition: border-color 150ms ease, background 150ms ease;
 }
 
-.report-room-row-header:hover {
+.report-room-row:hover {
+  border-color: #c7dbe3;
   background: #fbfdfe;
+}
+
+/* Status is communicated with a left accent — every room is equally
+   clickable regardless of status (an empty room is exactly where a new
+   check starts). */
+.report-room-row-ready {
+  border-left: 3px solid #2f8f6f;
+}
+
+.report-room-row-processing {
+  border-left: 3px solid #c98a2b;
+}
+
+.report-room-row-empty {
+  border-left: 3px solid var(--soft-line);
 }
 
 .report-room-row-label {
@@ -2755,17 +2752,9 @@ main.report-main {
   color: var(--muted);
 }
 
-.report-room-row-action {
+.report-room-row-chevron {
   flex-shrink: 0;
-}
-
-.report-room-row-detail {
-  padding: 0 18px 18px;
-  border-top: 1px solid var(--soft-line);
-}
-
-.report-room-row-detail > * {
-  margin-top: 16px;
+  color: var(--muted);
 }
 
 .report-room-row-skeleton {
@@ -2780,6 +2769,21 @@ main.report-main {
 .room-empty-slot {
   display: grid;
   gap: 14px;
+}
+
+.room-processing-panel {
+  display: grid;
+  gap: 10px;
+  padding: 18px 0;
+}
+
+.room-status-label {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
 }
 
 .room-cycle-note {

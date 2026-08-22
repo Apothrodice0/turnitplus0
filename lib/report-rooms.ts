@@ -12,17 +12,34 @@
  * pure chance), which is exactly the bug this file's rewrite fixes.
  *
  * A room's status is a pure function of its most recent report (if any):
- *  - "ready"  — a report exists and is still within its active 24h cycle.
- *               The room shows that report; a new upload into this room is
- *               refused (both client- and server-side — see
- *               app/api/reports/route.ts) until the cycle ends.
- *  - "empty"  — no report has ever been assigned to this room, OR the most
- *               recent one's 24h cycle has ended. Either way the room is
- *               available for a new upload. An expired report is never
- *               deleted — it stays in saved_reports and is still reachable
- *               at its own /reports/[id] permalink and via developer/admin
- *               lookup — it is simply no longer the room's *current*
- *               occupant once superseded by a new upload.
+ *  - "ready"      — a report exists, is still within its active 24h cycle,
+ *                   AND its AI analysis has actually finished (ai_score is
+ *                   recorded). The room shows that report; a new upload into
+ *                   this room is refused (both client- and server-side —
+ *                   see app/api/reports/route.ts) until the cycle ends.
+ *  - "processing" — a report exists and is within its active 24h cycle, but
+ *                   ai_score is still NULL: app/page.tsx's generateReport()
+ *                   deliberately saves the similarity result first and
+ *                   merges the AI score in via a second save once analysis
+ *                   finishes (see that file's own TASK 4 comment — this is
+ *                   what lets the user start a new check immediately rather
+ *                   than waiting on a possibly-slow AI model download), so
+ *                   there is a real, short window where the report exists
+ *                   but isn't fully analyzed yet. The room MUST NOT claim
+ *                   "ready" during this window — see
+ *                   app/reports/rooms/[room]/room-page-shell.tsx, which
+ *                   polls for genuine completion rather than faking it. The
+ *                   room still counts as occupied for occupancy/409 purposes
+ *                   regardless of this status — see isWithinActiveCycle,
+ *                   which this is layered on top of, not a replacement for.
+ *  - "empty"      — no report has ever been assigned to this room, OR the
+ *                   most recent one's 24h cycle has ended. Either way the
+ *                   room is available for a new upload. An expired report
+ *                   is never deleted — it stays in saved_reports and is
+ *                   still reachable at its own /reports/[id] permalink and
+ *                   via developer/admin lookup — it is simply no longer the
+ *                   room's *current* occupant once superseded by a new
+ *                   upload.
  *
  * Isomorphic on purpose (no @libsql/client, no window/localStorage): both
  * the server (app/api/reports/route.ts, app/api/reports/rooms/route.ts) and
@@ -63,14 +80,14 @@ export function roomCycleEndsAt(reportCreatedAtIso: string): string {
   return new Date(Date.parse(reportCreatedAtIso) + ROOM_CYCLE_MS).toISOString();
 }
 
-export type RoomStatus = "empty" | "ready";
+export type RoomStatus = "empty" | "processing" | "ready";
 
-/** One row of the lightweight room index — never the report itself, just enough to render one room tile. */
+/** One row of the lightweight room index — never the report itself, just enough to render one room row. */
 export type RoomIndexEntry = {
   room: number;
   status: RoomStatus;
-  /** The current occupant's creation time — only present when status is "ready". */
+  /** The current occupant's creation time — present whenever status is "ready" or "processing". */
   mostRecentAt: string | null;
-  /** When this room next becomes available for a new upload — only present when status is "ready". */
+  /** When this room next becomes available for a new upload — present whenever status is "ready" or "processing" (occupancy, not AI completion, decides this). */
   cycleEndsAt: string | null;
 };

@@ -42,16 +42,15 @@ test("remote report persistence (Turso) is layered alongside local storage, not 
   );
 
   // Every storeReport call site must be immediately followed by the matching
-  // saveReportRemote call (room/slot architecture: with a `room` argument
-  // threaded through, so a genuinely new authenticated save is tagged to
-  // the correct room), so a remote failure can never happen without the
-  // local copy already having succeeded first. Both sites now build the
-  // ReportSummary once into a local (`summary`/`enrichedSummary`) — reused
-  // for the flat anonymous list AND newlySavedReportSummary (see
-  // ReportRoomsBrowser) — rather than calling buildReportSummary() inline
-  // a second time.
-  assert.match(page, /await storeReport\(report\);\s*\n\s*const room = uploadRoomTargetRef\.current;\s*\n\s*const saveResult = await saveReportRemote\(report, summary, academicSearchDiagnosticsId, account && room !== null \? room : undefined\);/);
-  assert.match(page, /await storeReport\(enriched\);\s*\n\s*const enrichedSaveResult = await saveReportRemote\(enriched, enrichedSummary, undefined, account && targetRoom !== null \? targetRoom : undefined\);/);
+  // saveReportRemote call, so a remote failure can never happen without the
+  // local copy already having succeeded first. app/page.tsx's own save flow
+  // is anonymous-only now (an authenticated account's new check happens
+  // entirely on its own room page — see
+  // app/reports/rooms/[room]/room-page-shell.tsx, which has the equivalent,
+  // room-aware version of this same pairing), so neither call site here
+  // threads a room through.
+  assert.match(page, /await storeReport\(report\);\s*\n\s*return await saveReportRemote\(report, summary, academicSearchDiagnosticsId\);/);
+  assert.match(page, /await storeReport\(enriched\);\s*\n\s*await saveReportRemote\(enriched, enrichedSummary\);/);
 
   // clearHistory must clear local storage first, then best-effort delete the
   // remote copies — never the other way around.
@@ -68,25 +67,27 @@ test("remote report persistence (Turso) is layered alongside local storage, not 
   assert.match(page, /const full = await fetchRemoteReport<SimilarityReport>\(summary\.id\);/);
 });
 
-test("newlySavedReportSummary (the signal that tells a room it has a new report) is only ever set once the remote save is confirmed to have actually succeeded", async () => {
-  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+test("the room page's occupant state is only ever set to processing/ready once the remote save is confirmed to have actually succeeded", async () => {
+  const shell = await readFile(new URL("../app/reports/rooms/[room]/room-page-shell.tsx", import.meta.url), "utf8");
 
   // This is the fix for the production 404 regression: a report that
-  // appeared in a room's list but was never actually persisted server-side
-  // (a rejected save — quota, room already occupied, or any other failure)
-  // would 404 when opened at /reports/[id]. setNewlySavedReportSummary must
-  // never run unconditionally after a save — only inside a check against
-  // that save's own result.
-  const saveReportBody = page.match(/async function saveReport\(report: SimilarityReport, academicSearchDiagnosticsId\?: number \| null\) \{[\s\S]*?\n {2}\}/)?.[0] ?? "";
-  assert.ok(saveReportBody.length > 0, "saveReport function body must be found");
-  assert.match(saveReportBody, /if \(account && room !== null && saveResult\.ok\) \{\s*\n\s*setNewlySavedReportSummary\(\{ \.\.\.summary, room \}\);\s*\n\s*\}/);
+  // appeared in a room but was never actually persisted server-side (a
+  // rejected save — quota, room already occupied, or any other failure)
+  // would 404 when opened at /reports/[id]. setOccupant(...) marking this
+  // room processing/ready must never run unconditionally after a save —
+  // only inside a check against that save's own result, and it must return
+  // (never fall through to setOccupant) on failure.
+  const runCheckBody = shell.match(/async function runCheck\(\) \{[\s\S]*?\n {2}\}/)?.[0] ?? "";
+  assert.ok(runCheckBody.length > 0, "runCheck function body must be found");
+  assert.match(runCheckBody, /if \(!saveResult\.ok\) \{[\s\S]*?\n\s*return;\s*\n\s*\}/);
+  assert.match(runCheckBody, /setOccupant\(\{ status: "processing", report: summary, cycleEndsAt:/);
 
-  const aiMergeBlockStart = page.indexOf("void aiAnalysisPromise.then(async (aiResult) => {");
+  const aiMergeBlockStart = shell.indexOf("void aiAnalysisPromise.then(async (aiResult) => {");
   assert.ok(aiMergeBlockStart > -1, "expected the decoupled AI-writing merge block to exist");
-  const aiMergeBlockEnd = page.indexOf("} finally {", aiMergeBlockStart);
-  assert.ok(aiMergeBlockEnd > aiMergeBlockStart, "expected to find generateReport()'s finally block after the AI merge block");
-  const aiMergeBlock = page.slice(aiMergeBlockStart, aiMergeBlockEnd);
-  assert.match(aiMergeBlock, /if \(account && targetRoom !== null && enrichedSaveResult\.ok\) \{\s*\n\s*setNewlySavedReportSummary\(\{ \.\.\.enrichedSummary, room: targetRoom \}\);\s*\n\s*\}/);
+  const aiMergeBlockEnd = shell.indexOf("} finally {", aiMergeBlockStart);
+  assert.ok(aiMergeBlockEnd > aiMergeBlockStart, "expected to find runCheck()'s finally block after the AI merge block");
+  const aiMergeBlock = shell.slice(aiMergeBlockStart, aiMergeBlockEnd);
+  assert.match(aiMergeBlock, /if \(enrichedSaveResult\.ok\) \{\s*\n\s*invalidateRoomCache\(accountEmail, room\);\s*\n\s*setOccupant\(\{ status: "ready", report: enrichedSummary, cycleEndsAt:/);
 });
 
 test("logout clears account-scoped report state immediately, and never touches IndexedDB or Turso", async () => {
@@ -115,18 +116,18 @@ test("authentication state is resolved before choosing anonymous vs. account-sco
   assert.match(page, /async function loadAnonymousReports\(\)/);
   assert.match(page, /async function loadAccountReports\(\)/);
 
-  // 10-room architecture: loadAccountReports no longer hydrates the report
-  // list itself at all — ReportRoomsBrowser (rendered only when `account`
-  // is set, further down) owns fetching its own account-scoped room index/
-  // contents directly from the session-scoped API routes. This function's
-  // remaining job is clearing stale cross-context state and refreshing the
+  // Room directory architecture: loadAccountReports no longer hydrates the
+  // report list itself at all — ReportRoomsBrowser (rendered only when
+  // `account` is set, further down) owns fetching its own account-scoped
+  // room index directly from the session-scoped API route, and each room's
+  // own dedicated page owns fetching that one room's data. This function's
+  // remaining job is clearing the stale anonymous list and refreshing the
   // upload quota — it must NOT loop over a summaries array itself anymore
   // (that would mean the old full-hydration behavior crept back in).
   const accountLoaderBody = page.match(/async function loadAccountReports\(\) \{[\s\S]*?\n {2}\}/)?.[0] ?? "";
   assert.ok(accountLoaderBody.length > 0, "loadAccountReports function body must be found");
   assert.doesNotMatch(accountLoaderBody, /for \(const summary of summaries\)/, "loadAccountReports must not loop over reports itself — that responsibility now belongs entirely to ReportRoomsBrowser");
   assert.match(accountLoaderBody, /setReports\(\[\]\);/);
-  assert.match(accountLoaderBody, /setNewlySavedReportSummary\(null\);/);
   assert.match(accountLoaderBody, /fetchUploadLimitStatus\(\)/);
 
   // The mount effect must check the session first, then call exactly one of
