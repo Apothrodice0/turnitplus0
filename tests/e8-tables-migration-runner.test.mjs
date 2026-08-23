@@ -12,7 +12,9 @@ import {
   ALL_TARGET_TABLES,
   EXPECTED_LEGACY_TABLES,
   EXPECTED_MIGRATION_SHA256,
+  APPROVED_DESTRUCTIVE_STATEMENTS,
   scanForDestructiveStatements,
+  stripSqlLineComments,
   splitStatements,
   sha256,
   checkPreflight,
@@ -104,14 +106,18 @@ async function snapshotLegacyRows(client) {
 }
 
 test.after(() => {
-  for (const name of ['a', 'b', 'b2', 'c', 'd', 'e', 'e2', 'f', 'g', 'h', 'i', 'j', 'k', 'happy', 'idempotent']) {
+  for (const name of [
+    'a', 'b', 'b2', 'c', 'd', 'e', 'e2', 'f', 'g', 'h', 'i', 'j', 'k', 'happy', 'idempotent',
+    'g2-real', 'g2-extra', 'g2-wrong-file', 'g2-near-miss', 'g2-unrelated',
+    'upgrade-0028', 'interrupted', 'schema-0032',
+  ]) {
     cleanupDbFile(freshDbPath(name));
   }
 });
 
 // --- A: explicit allowlist ------------------------------------------------
 
-test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0028, in order, never touching 0000-0011', () => {
+test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0036, in order, never touching 0000-0011', () => {
   assert.deepEqual(TARGET_MIGRATIONS, [
     '0012_document_identities.sql',
     '0013_document_families.sql',
@@ -130,6 +136,14 @@ test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0028, in ord
     '0026_academic_search_run_diagnostics.sql',
     '0027_saved_reports_room_number.sql',
     '0028_saved_reports_ai_status.sql',
+    '0029_corpus_admission_decisions.sql',
+    '0030_corpus_admission_accepted_representations.sql',
+    '0031_corpus_admission_report_jobs.sql',
+    '0032_corpus_admission_accepted_representations_revocation.sql',
+    '0033_corpus_admission_admin_audit_log.sql',
+    '0034_corpus_admission_promotions.sql',
+    '0035_report_historical_match_snapshots_partial.sql',
+    '0036_corpus_match_generation.sql',
   ]);
   // Phase E8S Step 8: 0022_reuse_context_declarations.sql added
   // reuse_context_declarations, bringing the 15 E1-E8P tables across the
@@ -150,8 +164,19 @@ test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0028, in ord
   // 0025), so that stays 18. The genuine AI-lifecycle status column's
   // 0028_saved_reports_ai_status.sql (production audit fix) likewise adds
   // zero new tables (only saved_reports.ai_status), so that stays 18 across
-  // all 17 target migrations.
-  assert.equal(ALL_TARGET_TABLES.length, 18, 'expected exactly 18 tables across all 17 target migrations');
+  // all 17 target migrations. The corpus-admission release then adds 8 more
+  // migrations (0029-0036): 0029 creates 2 tables (decisions, content
+  // store) — 20; 0030 creates 2 (accepted representations, accepted
+  // shingles) — 22; 0031 creates 1 (report jobs) — 23; 0032 creates zero
+  // (index swap + one column on an already-in-this-batch table — see
+  // EXPECTED_COLUMNS_BY_MIGRATION) — stays 23; 0033 creates 1 (admin audit
+  // log) — 24; 0034 creates 1 (promotions) — 25; 0035 creates zero (one
+  // column on report_historical_match_snapshots) — stays 25; 0036 creates 1
+  // (corpus_match_generation, plus a column on the same snapshots table —
+  // see EXPECTED_TABLES_BY_MIGRATION's own comment on why table-existence
+  // alone is sufficient for that hybrid case) — 26, across 25 target
+  // migrations total.
+  assert.equal(ALL_TARGET_TABLES.length, 26, 'expected exactly 26 tables across all 25 target migrations');
   assert.deepEqual(
     EXPECTED_TABLES_BY_MIGRATION['0023_privacy_consent_and_report_identity_link.sql'],
     [],
@@ -215,6 +240,56 @@ test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0028, in ord
     [{ table: 'saved_reports', column: 'ai_status' }],
     '0028 must be declared as adding exactly this one column',
   );
+  assert.deepEqual(
+    EXPECTED_TABLES_BY_MIGRATION['0029_corpus_admission_decisions.sql'],
+    ['corpus_admission_decisions', 'corpus_admission_content_store'],
+    '0029 must be declared as creating exactly these two new tables',
+  );
+  assert.deepEqual(
+    EXPECTED_TABLES_BY_MIGRATION['0030_corpus_admission_accepted_representations.sql'],
+    ['corpus_admission_accepted_representations', 'corpus_admission_accepted_shingles'],
+    '0030 must be declared as creating exactly these two new tables',
+  );
+  assert.deepEqual(
+    EXPECTED_TABLES_BY_MIGRATION['0031_corpus_admission_report_jobs.sql'],
+    ['corpus_admission_report_jobs'],
+    '0031 must be declared as creating exactly one new table',
+  );
+  assert.deepEqual(
+    EXPECTED_TABLES_BY_MIGRATION['0032_corpus_admission_accepted_representations_revocation.sql'],
+    [],
+    '0032 must be declared as creating zero new tables',
+  );
+  assert.deepEqual(
+    EXPECTED_COLUMNS_BY_MIGRATION['0032_corpus_admission_accepted_representations_revocation.sql'],
+    [{ table: 'corpus_admission_accepted_representations', column: 'revoked_at' }],
+    '0032 must be declared as adding exactly this one column',
+  );
+  assert.deepEqual(
+    EXPECTED_TABLES_BY_MIGRATION['0033_corpus_admission_admin_audit_log.sql'],
+    ['corpus_admission_admin_audit_log'],
+    '0033 must be declared as creating exactly one new table',
+  );
+  assert.deepEqual(
+    EXPECTED_TABLES_BY_MIGRATION['0034_corpus_admission_promotions.sql'],
+    ['corpus_admission_promotions'],
+    '0034 must be declared as creating exactly one new table',
+  );
+  assert.deepEqual(
+    EXPECTED_TABLES_BY_MIGRATION['0035_report_historical_match_snapshots_partial.sql'],
+    [],
+    '0035 must be declared as creating zero new tables',
+  );
+  assert.deepEqual(
+    EXPECTED_COLUMNS_BY_MIGRATION['0035_report_historical_match_snapshots_partial.sql'],
+    [{ table: 'report_historical_match_snapshots', column: 'is_partial' }],
+    '0035 must be declared as adding exactly this one column',
+  );
+  assert.deepEqual(
+    EXPECTED_TABLES_BY_MIGRATION['0036_corpus_match_generation.sql'],
+    ['corpus_match_generation'],
+    '0036 must be declared as creating exactly one new table (its report_historical_match_snapshots.corpus_generation column is tracked implicitly — see that entry\'s own comment)',
+  );
 });
 
 // --- F: no execution of 0000-0011 (structural) ----------------------------
@@ -235,7 +310,7 @@ test('F: the runner module never does an unfiltered directory scan — no readdi
 
 // --- G: destructive SQL detection -----------------------------------------
 
-test('G: scanForDestructiveStatements finds real destructive keywords and finds none in the actual 17 target migration files', () => {
+test('G: scanForDestructiveStatements finds real destructive statements and finds none, or exactly the one approved exception, in the actual 25 target migration files', () => {
   assert.deepEqual(scanForDestructiveStatements('CREATE TABLE IF NOT EXISTS x (id TEXT);'), []);
   assert.ok(scanForDestructiveStatements('DROP TABLE document_chunks;').length > 0);
   assert.ok(scanForDestructiveStatements('DELETE FROM users WHERE 1=1;').length > 0);
@@ -244,11 +319,160 @@ test('G: scanForDestructiveStatements finds real destructive keywords and finds 
   // a comment merely mentioning the word must not trigger a false positive
   assert.deepEqual(scanForDestructiveStatements('-- this migration never uses DROP TABLE or DELETE FROM\nCREATE TABLE IF NOT EXISTS x (id TEXT);'), []);
 
+  const approvedException = '0032_corpus_admission_accepted_representations_revocation.sql';
   for (const file of TARGET_MIGRATIONS) {
     const content = fs.readFileSync(path.join(drizzleDir, file), 'utf8');
-    assert.deepEqual(scanForDestructiveStatements(content), [], `${file} must contain zero destructive statements`);
+    const destructive = scanForDestructiveStatements(content);
+    if (file === approvedException) {
+      // The one deliberate, reviewed exception (requirement 2 of this
+      // hardening pass): 0032 must contain EXACTLY the approved DROP INDEX
+      // statement and nothing else destructive — proving the exception is
+      // as narrow as APPROVED_DESTRUCTIVE_STATEMENTS' own header comment
+      // claims, not a blanket pass for this file.
+      assert.deepEqual(
+        destructive,
+        APPROVED_DESTRUCTIVE_STATEMENTS[approvedException],
+        `${file} must contain exactly its one approved destructive statement, and nothing else destructive`,
+      );
+    } else {
+      assert.deepEqual(destructive, [], `${file} must contain zero destructive statements`);
+    }
     assert.equal(sha256(content), EXPECTED_MIGRATION_SHA256[file], `${file}'s pinned hash must match its current content`);
   }
+});
+
+// --- G2: the destructive-statement exception is narrow, per-file, per-exact-statement ---
+
+test('G2: checkPreflight accepts the real 0032 file (its one destructive statement is the approved exception)', async () => {
+  const dbFile = freshDbPath('g2-real');
+  const client = await buildPreMigrationDb(dbFile);
+
+  const result = await checkPreflight(client, drizzleDir, { environmentLabel: 'local-test', expectedEnvironmentLabel: 'local-test' });
+  assert.equal(result.ok, true, 'the real, unmodified migration set (including 0032\'s approved DROP INDEX) must pass preflight');
+
+  client.close();
+});
+
+test('G2: checkPreflight refuses an unapproved destructive statement in 0032 even when the approved statement is ALSO present', async () => {
+  const dbFile = freshDbPath('g2-extra');
+  const client = await buildPreMigrationDb(dbFile);
+
+  const tempDrizzleDir = fs.mkdtempSync(path.join(os.tmpdir(), 'e8-g2-extra-'));
+  const manifest = {};
+  for (const file of TARGET_MIGRATIONS) {
+    let content = fs.readFileSync(path.join(drizzleDir, file), 'utf8');
+    if (file === '0032_corpus_admission_accepted_representations_revocation.sql') {
+      // Smuggle in a second, unreviewed destructive statement alongside the
+      // approved one — the allowlist must not treat "this file has an
+      // approved exception" as "this file's destructive scanning is off."
+      content += '\nDELETE FROM corpus_admission_accepted_representations WHERE 1=1;\n';
+    }
+    fs.writeFileSync(path.join(tempDrizzleDir, file), content);
+    manifest[file] = sha256(content);
+  }
+
+  const result = await checkPreflight(client, tempDrizzleDir, {
+    environmentLabel: 'local-test',
+    expectedEnvironmentLabel: 'local-test',
+    migrationShaManifest: manifest,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'DESTRUCTIVE_STATEMENT_DETECTED');
+  assert.match(result.message, /DELETE FROM corpus_admission_accepted_representations/);
+  // The approved statement itself must not be re-flagged alongside the real violation.
+  assert.doesNotMatch(result.message, /DROP INDEX IF EXISTS ux_corpus_admission_accepted_representations_canonical_sha256/);
+
+  client.close();
+  fs.rmSync(tempDrizzleDir, { recursive: true, force: true });
+});
+
+test('G2: checkPreflight refuses 0032\'s approved statement text if it appears, unapproved, in a DIFFERENT file', async () => {
+  const dbFile = freshDbPath('g2-wrong-file');
+  const client = await buildPreMigrationDb(dbFile);
+
+  const tempDrizzleDir = fs.mkdtempSync(path.join(os.tmpdir(), 'e8-g2-wrong-file-'));
+  const manifest = {};
+  for (const file of TARGET_MIGRATIONS) {
+    let content = fs.readFileSync(path.join(drizzleDir, file), 'utf8');
+    if (file === '0033_corpus_admission_admin_audit_log.sql') {
+      // The exact text approved for 0032, verbatim, but in 0033 instead —
+      // the allowlist is keyed by filename, so this must still be refused.
+      content += '\nDROP INDEX IF EXISTS ux_corpus_admission_accepted_representations_canonical_sha256;\n';
+    }
+    fs.writeFileSync(path.join(tempDrizzleDir, file), content);
+    manifest[file] = sha256(content);
+  }
+
+  const result = await checkPreflight(client, tempDrizzleDir, {
+    environmentLabel: 'local-test',
+    expectedEnvironmentLabel: 'local-test',
+    migrationShaManifest: manifest,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'DESTRUCTIVE_STATEMENT_DETECTED');
+  assert.equal(result.details.file, '0033_corpus_admission_admin_audit_log.sql');
+
+  client.close();
+  fs.rmSync(tempDrizzleDir, { recursive: true, force: true });
+});
+
+test('G2: checkPreflight refuses a near-miss variant of 0032\'s approved statement (different index name)', async () => {
+  const dbFile = freshDbPath('g2-near-miss');
+  const client = await buildPreMigrationDb(dbFile);
+
+  const tempDrizzleDir = fs.mkdtempSync(path.join(os.tmpdir(), 'e8-g2-near-miss-'));
+  const manifest = {};
+  for (const file of TARGET_MIGRATIONS) {
+    let content = fs.readFileSync(path.join(drizzleDir, file), 'utf8');
+    if (file === '0032_corpus_admission_accepted_representations_revocation.sql') {
+      content = content.replace(
+        'DROP INDEX IF EXISTS ux_corpus_admission_accepted_representations_canonical_sha256;',
+        'DROP INDEX IF EXISTS some_other_index_entirely;',
+      );
+    }
+    fs.writeFileSync(path.join(tempDrizzleDir, file), content);
+    manifest[file] = sha256(content);
+  }
+
+  const result = await checkPreflight(client, tempDrizzleDir, {
+    environmentLabel: 'local-test',
+    expectedEnvironmentLabel: 'local-test',
+    migrationShaManifest: manifest,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'DESTRUCTIVE_STATEMENT_DETECTED');
+  assert.match(result.message, /DROP INDEX IF EXISTS some_other_index_entirely/);
+
+  client.close();
+  fs.rmSync(tempDrizzleDir, { recursive: true, force: true });
+});
+
+test('G2: checkPreflight still refuses unrelated destructive statements in unrelated files (0032\'s exception grants nothing globally)', async () => {
+  const dbFile = freshDbPath('g2-unrelated');
+  const client = await buildPreMigrationDb(dbFile);
+
+  const tempDrizzleDir = fs.mkdtempSync(path.join(os.tmpdir(), 'e8-g2-unrelated-'));
+  const manifest = {};
+  for (const file of TARGET_MIGRATIONS) {
+    let content = fs.readFileSync(path.join(drizzleDir, file), 'utf8');
+    if (file === '0029_corpus_admission_decisions.sql') {
+      content += '\nDROP TABLE corpus_admission_decisions;\n';
+    }
+    fs.writeFileSync(path.join(tempDrizzleDir, file), content);
+    manifest[file] = sha256(content);
+  }
+
+  const result = await checkPreflight(client, tempDrizzleDir, {
+    environmentLabel: 'local-test',
+    expectedEnvironmentLabel: 'local-test',
+    migrationShaManifest: manifest,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'DESTRUCTIVE_STATEMENT_DETECTED');
+  assert.equal(result.details.file, '0029_corpus_admission_decisions.sql');
+
+  client.close();
+  fs.rmSync(tempDrizzleDir, { recursive: true, force: true });
 });
 
 test('splitStatements correctly splits a real multi-statement migration file into individually executable statements', () => {
@@ -309,7 +533,7 @@ test('splitStatements correctly splits 0028 (a single ALTER TABLE, like 0025 but
 
 // --- Section 9: disposable local DB — full happy-path run ------------------
 
-test('SECTION 9: fresh pre-0012 database — the runner applies all 17 migrations in order, creates all 18 tables, adds 0023\'s/0025\'s/0027\'s/0028\'s columns, and preserves legacy row VALUES exactly', async () => {
+test('SECTION 9: fresh pre-0012 database — the runner applies all 25 migrations in order, creates all 26 tables, adds every column-only migration\'s columns, and preserves legacy row VALUES exactly', async () => {
   const dbFile = freshDbPath('happy');
   const client = await buildPreMigrationDb(dbFile);
   await seedRepresentativeLegacyRows(client);
@@ -390,6 +614,188 @@ test('I: re-running the runner against an already-fully-migrated database is a s
 
   const after = await snapshotLegacyRows(client);
   assert.deepEqual(after, before, 'a safe no-op re-run must not touch legacy rows either');
+
+  client.close();
+});
+
+// --- UPGRADE: the real release path — a populated 0028 database, not fresh ---
+
+test('UPGRADE: a populated database already at 0028 upgrades cleanly through 0036, preserving existing 0012-0028 corpus/report data exactly', async () => {
+  const dbFile = freshDbPath('upgrade-0028');
+  const client = await buildPreMigrationDb(dbFile);
+  await seedRepresentativeLegacyRows(client);
+
+  // Simulate "this is where production actually is today": apply only
+  // 0012-0028 (via a filtered temp copy, same technique as test K's own
+  // inScopeFiles), never touching 0029-0036 yet.
+  const only0028Dir = fs.mkdtempSync(path.join(os.tmpdir(), 'e8-upgrade-0028-'));
+  // buildPreMigrationDb already applied 0000-0011 — only copy 0012-0028
+  // here, or applyMigrationsLibsql would try to recreate 0000-0011's
+  // tables and fail on "already exists."
+  const filesThrough0028 = fs.readdirSync(drizzleDir).filter((f) => f.endsWith('.sql') && f.slice(0, 4) >= '0012' && f.slice(0, 4) <= '0028').sort();
+  for (const f of filesThrough0028) fs.copyFileSync(path.join(drizzleDir, f), path.join(only0028Dir, f));
+  await applyMigrationsLibsql(client, only0028Dir);
+  fs.rmSync(only0028Dir, { recursive: true, force: true });
+
+  // Seed representative REAL usage data in the exact tables 0029-0036 sit
+  // next to / reference (corpus_admission_promotions FK-references
+  // corpus_document_representations; the snapshot cache is what 0035/0036
+  // add columns to) — this is what a real upgrade must never disturb.
+  const repId = 'upgrade-test-representation-1';
+  await client.execute({
+    sql: `INSERT INTO corpus_document_representations (id, canonical_sha256, canonical_text, word_count, language, canonicalization_version, extractor_version)
+          VALUES (?,?,?,?,?,?,?)`,
+    args: [repId, 'b'.repeat(64), 'some pre-existing canonical corpus text', 250, 'en', 'v1', 'v1'],
+  });
+  await client.execute({
+    sql: `INSERT INTO report_historical_match_snapshots (report_device_key, report_id, status, matcher_version, fingerprint_version, canonicalization_version, result_json, candidate_count, processing_duration_ms)
+          VALUES (?,?,?,?,?,?,?,?,?)`,
+    args: ['upgrade-test-device-1', 'upgrade-test-report-1', 'NO_HISTORICAL_MATCH', 'v1', 'v1', 'v1', '{}', 0, 5],
+  });
+
+  const before = {
+    representation: { ...(await client.execute({ sql: 'SELECT * FROM corpus_document_representations WHERE id = ?', args: [repId] })).rows[0] },
+    snapshot: { ...(await client.execute({ sql: 'SELECT * FROM report_historical_match_snapshots WHERE report_device_key = ? AND report_id = ?', args: ['upgrade-test-device-1', 'upgrade-test-report-1'] })).rows[0] },
+  };
+
+  const result = await runTargetMigrations(client, drizzleDir, { environmentLabel: 'local-test', expectedEnvironmentLabel: 'local-test' });
+
+  assert.equal(result.status, 'success', 'a populated 0028 database must upgrade successfully, not refuse or fail');
+  const stepsByFile = Object.fromEntries(result.steps.map((s) => [s.file, s.status]));
+  for (const file of TARGET_MIGRATIONS.filter((f) => f.slice(0, 4) <= '0028')) {
+    assert.equal(stepsByFile[file], 'already-applied', `${file} was already applied before this run and must be recognized as such, not reapplied`);
+  }
+  for (const file of TARGET_MIGRATIONS.filter((f) => f.slice(0, 4) >= '0029')) {
+    assert.equal(stepsByFile[file], 'applied', `${file} must be newly applied by this upgrade run`);
+  }
+
+  const tables = await client.execute("SELECT name FROM sqlite_master WHERE type='table'");
+  const tableNames = new Set(tables.rows.map((r) => String(r.name)));
+  for (const t of [
+    'corpus_admission_decisions', 'corpus_admission_content_store',
+    'corpus_admission_accepted_representations', 'corpus_admission_accepted_shingles',
+    'corpus_admission_report_jobs', 'corpus_admission_admin_audit_log',
+    'corpus_admission_promotions', 'corpus_match_generation',
+  ]) {
+    assert.ok(tableNames.has(t), `expected new table ${t} to exist after upgrade`);
+  }
+
+  const after = {
+    representation: { ...(await client.execute({ sql: 'SELECT * FROM corpus_document_representations WHERE id = ?', args: [repId] })).rows[0] },
+    snapshot: { ...(await client.execute({ sql: 'SELECT * FROM report_historical_match_snapshots WHERE report_device_key = ? AND report_id = ?', args: ['upgrade-test-device-1', 'upgrade-test-report-1'] })).rows[0] },
+  };
+  for (const [column, value] of Object.entries(before.representation)) {
+    assert.equal(after.representation[column], value, `corpus_document_representations.${column} must be unchanged by the 0029-0036 upgrade`);
+  }
+  for (const [column, value] of Object.entries(before.snapshot)) {
+    assert.equal(after.snapshot[column], value, `report_historical_match_snapshots.${column} must be unchanged by the 0029-0036 upgrade`);
+  }
+  // 0035/0036 add is_partial/corpus_generation as NOT NULL DEFAULT 0 columns
+  // — a pre-existing row must be backfilled to that default, not left NULL
+  // or unset, matching each migration's own "common case for every existing
+  // row" header comment.
+  assert.equal(after.snapshot.is_partial, 0, '0035 must backfill is_partial to 0 for a pre-existing snapshot row');
+  assert.equal(after.snapshot.corpus_generation, 0, '0036 must backfill corpus_generation to 0 for a pre-existing snapshot row');
+
+  const repInfo = await client.execute("PRAGMA table_info('corpus_admission_accepted_representations')");
+  assert.ok(repInfo.rows.some((r) => String(r.name) === 'revoked_at'), '0032 must add revoked_at to corpus_admission_accepted_representations');
+
+  const generationRow = await client.execute('SELECT id, generation FROM corpus_match_generation WHERE id = 1');
+  assert.equal(generationRow.rows.length, 1, '0036 must seed exactly one corpus_match_generation row');
+  assert.equal(generationRow.rows[0].generation, 0, '0036 must seed the initial generation at 0');
+
+  client.close();
+});
+
+// --- INTERRUPTED: recovery from a run that failed partway through --------
+
+test('INTERRUPTED: a run that fails partway through the 0029-0036 range can be safely resumed to completion', async () => {
+  const dbFile = freshDbPath('interrupted');
+  const client = await buildPreMigrationDb(dbFile);
+
+  const brokenDir = fs.mkdtempSync(path.join(os.tmpdir(), 'e8-interrupted-'));
+  const manifest = {};
+  for (const file of TARGET_MIGRATIONS) {
+    let content = fs.readFileSync(path.join(drizzleDir, file), 'utf8');
+    if (file === '0034_corpus_admission_promotions.sql') {
+      // Genuinely invalid SQL (real syntax error, not a mocked failure) —
+      // client.migrate() must reject this for real, same technique as
+      // test H's own simulated failure.
+      content = content.replace('CREATE TABLE IF NOT EXISTS', 'CREATE TABLEX IF NOT EXISTS');
+    }
+    fs.writeFileSync(path.join(brokenDir, file), content);
+    manifest[file] = sha256(content);
+  }
+
+  const interrupted = await runTargetMigrations(client, brokenDir, {
+    environmentLabel: 'local-test',
+    expectedEnvironmentLabel: 'local-test',
+    migrationShaManifest: manifest,
+  });
+  assert.equal(interrupted.status, 'failed');
+  assert.equal(interrupted.failedMigration, '0034_corpus_admission_promotions.sql');
+  const appliedBeforeInterruption = interrupted.steps.filter((s) => s.status === 'applied').map((s) => s.file);
+  assert.deepEqual(
+    appliedBeforeInterruption,
+    TARGET_MIGRATIONS.filter((f) => f.slice(0, 4) <= '0033'),
+    'every migration before the simulated interruption at 0034 must have succeeded',
+  );
+  fs.rmSync(brokenDir, { recursive: true, force: true });
+
+  // Recovery: rerun against the REAL, uncorrupted migration set, reusing
+  // the SAME client/database the interrupted run left behind — nothing
+  // rolled back or reset by hand, exactly what an operator would do after
+  // fixing whatever caused the interruption (a real bug, a network drop
+  // mid-run, a killed process — this runner cannot tell those apart from
+  // "some migrations already succeeded," and does not need to).
+  const recovered = await runTargetMigrations(client, drizzleDir, { environmentLabel: 'local-test', expectedEnvironmentLabel: 'local-test' });
+  assert.equal(recovered.status, 'success', 'resuming after an interruption must complete successfully');
+  const recoveredByFile = Object.fromEntries(recovered.steps.map((s) => [s.file, s.status]));
+  for (const file of TARGET_MIGRATIONS.filter((f) => f.slice(0, 4) <= '0033')) {
+    assert.equal(recoveredByFile[file], 'already-applied', `${file} succeeded before the interruption and must be recognized as already-applied on resume`);
+  }
+  for (const file of TARGET_MIGRATIONS.filter((f) => f.slice(0, 4) >= '0034')) {
+    assert.equal(recoveredByFile[file], 'applied', `${file} must be applied during the resumed run`);
+  }
+
+  const tables = await client.execute("SELECT name FROM sqlite_master WHERE type='table'");
+  const tableNames = new Set(tables.rows.map((r) => String(r.name)));
+  assert.ok(tableNames.has('corpus_admission_promotions'), '0034 must have succeeded on the resumed run');
+  assert.ok(tableNames.has('corpus_match_generation'), '0036 must have succeeded on the resumed run');
+
+  client.close();
+});
+
+// --- SCHEMA: 0032's exact index-swap outcome ------------------------------
+
+test('SCHEMA: after full migration, 0032\'s old plain unique index is gone and its replacement partial index has the exact expected definition', async () => {
+  const dbFile = freshDbPath('schema-0032');
+  const client = await buildPreMigrationDb(dbFile);
+
+  const result = await runTargetMigrations(client, drizzleDir, { environmentLabel: 'local-test', expectedEnvironmentLabel: 'local-test' });
+  assert.equal(result.status, 'success');
+
+  const indexes = await client.execute("SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'corpus_admission_accepted_representations'");
+  const byName = Object.fromEntries(indexes.rows.map((r) => [String(r.name), r.sql === null ? null : String(r.sql)]));
+
+  assert.equal(
+    byName['ux_corpus_admission_accepted_representations_canonical_sha256'],
+    undefined,
+    '0032 must have dropped the original plain unique index — it must not exist in the final schema',
+  );
+  assert.ok(
+    byName['ux_corpus_admission_accepted_representations_canonical_sha256_active'],
+    "0032's replacement partial unique index must exist",
+  );
+  assert.match(
+    byName['ux_corpus_admission_accepted_representations_canonical_sha256_active'],
+    /WHERE revoked_at IS NULL/i,
+    'the replacement index must be scoped to active (non-revoked) rows only, not a plain unique index',
+  );
+  assert.ok(
+    byName['idx_corpus_admission_accepted_representations_revoked_at'],
+    "0032's plain index on revoked_at must also exist",
+  );
 
   client.close();
 });
@@ -567,12 +973,26 @@ test('K: the selectively-migrated database is structurally identical to a databa
   const referenceClient = createClient({ url: `file:${referenceDbFile}` });
   await applyMigrationsLibsql(referenceClient, tempReferenceDrizzleDir); // full 0000-0021 in one shot, the same mechanism every other test in this repo already trusts
 
+  // Structural equivalence, not incidental-text equivalence: runTargetMigrations()
+  // submits each statement via splitStatements(), which strips `--` comments
+  // (including ones embedded mid-CREATE-TABLE, between column definitions —
+  // several of the corpus-admission migrations use this style heavily)
+  // before calling client.migrate(); applyMigrationsLibsql() instead submits
+  // each file's raw, unmodified text via client.executeMultiple(), so SQLite
+  // stores the ORIGINAL comment text verbatim in sqlite_master.sql for the
+  // reference DB. Both are equally valid SQL — the actual columns,
+  // constraints, and index definitions are identical either way — so
+  // stripSqlLineComments() is applied here to both sides before comparing,
+  // normalizing away exactly (and only) that incidental difference. A real
+  // structural drift (a missing column, a changed type, a different
+  // constraint) still fails this comparison, since only comment TEXT is
+  // stripped, nothing else.
   const schemaOf = async (client) => {
     const result = await client.execute("SELECT name, sql FROM sqlite_master WHERE type IN ('table','index') AND name != 'sqlite_sequence' ORDER BY name");
-    return result.rows.map((r) => `${r.name}::${r.sql}`).sort();
+    return result.rows.map((r) => `${r.name}::${stripSqlLineComments(String(r.sql))}`).sort();
   };
 
-  assert.deepEqual(await schemaOf(selectiveClient), await schemaOf(referenceClient), 'applying 0000-0011 then 0012-0021 via this runner must produce an identical schema to applying 0000-0021 all at once');
+  assert.deepEqual(await schemaOf(selectiveClient), await schemaOf(referenceClient), 'applying 0000-0011 then 0012-0036 via this runner must produce a structurally identical schema to applying 0000-0036 all at once');
 
   selectiveClient.close();
   referenceClient.close();

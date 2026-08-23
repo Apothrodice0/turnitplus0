@@ -12,7 +12,12 @@ import type { Client } from "@libsql/client";
  * — and further extended to include 0027 (the room/slot ownership column
  * that replaces the old id%10 visual grouping) and 0028 (the genuine
  * AI-lifecycle status column that distinguishes a permanently failed check
- * from one still in flight — production audit fix) — as a deliberate,
+ * from one still in flight — production audit fix) — and, for the corpus-
+ * admission release, extended once more through 0029-0036 (the admission-
+ * decision/content-store tables, the accepted-representations dedup table
+ * and its revocation follow-through, the report-integration and promotion
+ * job tables, the admin audit log, and the partial-snapshot/global-
+ * generation cache-invalidation columns) — as a deliberate,
  * reviewed decision, not an automatic side effect of adding those migration
  * files; see this file's own EXPECTED_MIGRATION_SHA256 for how future extensions
  * are meant to be reviewed the same way) to a
@@ -53,6 +58,14 @@ export const TARGET_MIGRATIONS = [
   "0026_academic_search_run_diagnostics.sql",
   "0027_saved_reports_room_number.sql",
   "0028_saved_reports_ai_status.sql",
+  "0029_corpus_admission_decisions.sql",
+  "0030_corpus_admission_accepted_representations.sql",
+  "0031_corpus_admission_report_jobs.sql",
+  "0032_corpus_admission_accepted_representations_revocation.sql",
+  "0033_corpus_admission_admin_audit_log.sql",
+  "0034_corpus_admission_promotions.sql",
+  "0035_report_historical_match_snapshots_partial.sql",
+  "0036_corpus_match_generation.sql",
 ] as const;
 
 export type TargetMigrationFile = (typeof TARGET_MIGRATIONS)[number];
@@ -103,6 +116,33 @@ export const EXPECTED_TABLES_BY_MIGRATION: Record<TargetMigrationFile, string[]>
   // column (saved_reports.ai_status) to the already-existing saved_reports
   // table (see EXPECTED_COLUMNS_BY_MIGRATION below).
   "0028_saved_reports_ai_status.sql": [],
+  "0029_corpus_admission_decisions.sql": ["corpus_admission_decisions", "corpus_admission_content_store"],
+  "0030_corpus_admission_accepted_representations.sql": ["corpus_admission_accepted_representations", "corpus_admission_accepted_shingles"],
+  "0031_corpus_admission_report_jobs.sql": ["corpus_admission_report_jobs"],
+  // Like 0023/0025/0027/0028, 0032 creates no new tables — it drops and
+  // recreates one index (see APPROVED_DESTRUCTIVE_STATEMENTS below) and adds
+  // one column (revoked_at) to the already-existing
+  // corpus_admission_accepted_representations table (see
+  // EXPECTED_COLUMNS_BY_MIGRATION below).
+  "0032_corpus_admission_accepted_representations_revocation.sql": [],
+  "0033_corpus_admission_admin_audit_log.sql": ["corpus_admission_admin_audit_log"],
+  "0034_corpus_admission_promotions.sql": ["corpus_admission_promotions"],
+  // Like 0023/0025/0027/0028/0032, 0035 creates no new tables — it only adds
+  // one column (is_partial) to the already-existing
+  // report_historical_match_snapshots table (see
+  // EXPECTED_COLUMNS_BY_MIGRATION below).
+  "0035_report_historical_match_snapshots_partial.sql": [],
+  // 0036 is a hybrid: it creates one genuinely new table
+  // (corpus_match_generation) AND adds a column (corpus_generation) to the
+  // already-existing report_historical_match_snapshots table, both inside
+  // the same file. Tracked here via plain table-existence rather than
+  // EXPECTED_COLUMNS_BY_MIGRATION, which is sound only because
+  // runTargetMigrations() applies every statement in a target migration
+  // file as one client.migrate() transaction (see this file's own header
+  // comment) — corpus_match_generation cannot exist without
+  // report_historical_match_snapshots.corpus_generation also existing, so
+  // checking the table alone correctly implies the column too.
+  "0036_corpus_match_generation.sql": ["corpus_match_generation"],
 };
 
 export const ALL_TARGET_TABLES: string[] = TARGET_MIGRATIONS.flatMap((m) => EXPECTED_TABLES_BY_MIGRATION[m]);
@@ -132,6 +172,12 @@ export const EXPECTED_COLUMNS_BY_MIGRATION: Partial<Record<TargetMigrationFile, 
   ],
   "0028_saved_reports_ai_status.sql": [
     { table: "saved_reports", column: "ai_status" },
+  ],
+  "0032_corpus_admission_accepted_representations_revocation.sql": [
+    { table: "corpus_admission_accepted_representations", column: "revoked_at" },
+  ],
+  "0035_report_historical_match_snapshots_partial.sql": [
+    { table: "report_historical_match_snapshots", column: "is_partial" },
   ],
 };
 
@@ -174,29 +220,86 @@ export const EXPECTED_MIGRATION_SHA256: Record<TargetMigrationFile, string> = {
   "0026_academic_search_run_diagnostics.sql": "f0ebebb4cd0a9b2e4f36560dc9990fb439a1bc4d8146842a932870934838269b",
   "0027_saved_reports_room_number.sql": "14caa98beb8b566372af7f6b21b24f9cb9d4a7c3db84396b4cd59b360947910d",
   "0028_saved_reports_ai_status.sql": "4b9f5c2bb57a156be7ff8273763b2d516fbde0d87b9e9298e12578fdc0a23d21",
+  "0029_corpus_admission_decisions.sql": "d0d57d89bc0e57673856146362cd98c01408cde10d0ef47d1bd0670661de9084",
+  "0030_corpus_admission_accepted_representations.sql": "837743eb56367b46f56fbc23f690e192ce134f3af123ad53f1bb6fa3ed6ad65f",
+  "0031_corpus_admission_report_jobs.sql": "558cda4a1497544b5eb5fc44eb48ac649fd379155495710f583a9b5d6dae98a8",
+  "0032_corpus_admission_accepted_representations_revocation.sql": "75d30525f8931a8154155aac85d745225f4ea326f7a4b878a65bf8f60f04f9c3",
+  "0033_corpus_admission_admin_audit_log.sql": "1e8c3be63c04ecf0759c075378258abbe1ae170308c3c597987fc736a531d4b2",
+  "0034_corpus_admission_promotions.sql": "db367f756e6ed366d8794440107dda19fb1c8c10dd477888633b167efd580f5f",
+  "0035_report_historical_match_snapshots_partial.sql": "242384eaafaec10cdd2a2735ad4e7863e850da7cbedec57670aec7c8ba33c8e8",
+  "0036_corpus_match_generation.sql": "15bb6904337f2502640cc04d5ed88b9e0f3616042852779fd681439c83667b38",
 };
 
 const DESTRUCTIVE_PATTERN = /\b(DROP\s+TABLE|DROP\s+INDEX|ALTER\s+TABLE\s+\S+\s+DROP|DELETE\s+FROM|TRUNCATE)\b/gi;
 
-/** Strips `--` line comments only — none of these 9 files use block comments — so a comment mentioning a keyword by name can't be mistaken for a real statement. */
+/** Strips `--` line comments only — none of these 25 files use block comments — so a comment mentioning a keyword by name can't be mistaken for a real statement. */
 export function stripSqlLineComments(sql: string): string {
   return sql.replace(/--.*$/gm, "");
 }
 
-/** Returns every destructive-statement keyword phrase found, or an empty array. Used both at review time and re-checked by checkPreflight() on every single run — see this file's own header comment on why this can never be assumed true from a prior review alone. */
-export function scanForDestructiveStatements(sql: string): string[] {
-  const stripped = stripSqlLineComments(sql);
-  const matches = stripped.match(DESTRUCTIVE_PATTERN);
-  return matches ? [...new Set(matches.map((m) => m.replace(/\s+/g, " ").trim().toUpperCase()))] : [];
-}
-
-/** Splits one migration file into individual statements for client.migrate()/client.batch(), which take an array of statements rather than one multi-statement string. Safe for these 9 files specifically (verified: no embedded semicolons in string literals, no drizzle-kit `--> statement-breakpoint` markers) — not a general-purpose SQL parser. */
+/** Splits one migration file into individual statements for client.migrate()/client.batch(), which take an array of statements rather than one multi-statement string. Safe for these 25 files specifically (verified: no embedded semicolons in string literals, no drizzle-kit `--> statement-breakpoint` markers) — not a general-purpose SQL parser. */
 export function splitStatements(sql: string): string[] {
   return stripSqlLineComments(sql)
     .split(";")
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
 }
+
+/**
+ * Returns every individual destructive STATEMENT found (not just the bare
+ * keyword phrase — the full statement, whitespace-collapsed and trimmed,
+ * case preserved exactly as written), one entry per matching statement in
+ * `sql`. Operates statement-by-statement via splitStatements() rather than
+ * scanning the raw text as one blob, so a single file containing one
+ * destructive statement and nine safe ones is reported as exactly one
+ * finding, not conflated. Case is deliberately preserved (not
+ * uppercased) — see APPROVED_DESTRUCTIVE_STATEMENTS below, which compares
+ * against this exact output and needs the comparison to be meaningful
+ * against the reviewed text, not a case-blind match. Used both at review
+ * time and re-checked by checkPreflight() on every single run — see this
+ * file's own header comment on why this can never be assumed true from a
+ * prior review alone. This function reports every destructive statement it
+ * finds, with no exceptions — checkPreflight() below is the only place an
+ * approved exception is ever applied, and only for the one file/statement
+ * pair APPROVED_DESTRUCTIVE_STATEMENTS lists.
+ */
+export function scanForDestructiveStatements(sql: string): string[] {
+  const flagged: string[] = [];
+  for (const statement of splitStatements(sql)) {
+    if (statement.match(DESTRUCTIVE_PATTERN)) {
+      flagged.push(statement.replace(/\s+/g, " ").trim());
+    }
+  }
+  return flagged;
+}
+
+/**
+ * A closed, per-file allowlist of individually reviewed destructive
+ * statements — the ONLY exception this runner's destructive-statement
+ * refusal ever grants, and it is narrow by construction: an entry
+ * exempts one exact statement TEXT in one exact FILE, nothing broader.
+ * A destructive statement matching this allowlist's text but appearing in
+ * a DIFFERENT file is still refused (the key is the filename). Any OTHER
+ * destructive statement in the SAME file — even one differing from the
+ * approved text by a single character, e.g. a different index name or a
+ * missing "IF EXISTS" — is also still refused (checkPreflight() below
+ * filters scanForDestructiveStatements()'s findings against this list by
+ * exact string equality, not by keyword or prefix). This is a statement-
+ * identity allowlist, not a per-file "destructive scanning off" switch.
+ *
+ * 0032_corpus_admission_accepted_representations_revocation.sql's DROP
+ * INDEX is reviewed-safe: it drops a plain UNIQUE index and the very next
+ * statement in the same file (applied inside the same client.migrate()
+ * transaction — see this file's own header comment on runTargetMigrations)
+ * recreates equivalent uniqueness as a partial index
+ * (WHERE revoked_at IS NULL). No table, row, or column is ever destroyed by
+ * this statement — only a soon-replaced index definition, atomically.
+ */
+export const APPROVED_DESTRUCTIVE_STATEMENTS: Partial<Record<TargetMigrationFile, string[]>> = {
+  "0032_corpus_admission_accepted_representations_revocation.sql": [
+    "DROP INDEX IF EXISTS ux_corpus_admission_accepted_representations_canonical_sha256",
+  ],
+};
 
 export function sha256(content: string): string {
   return createHash("sha256").update(content, "utf8").digest("hex");
@@ -264,12 +367,14 @@ export async function checkPreflight(
       };
     }
     const destructive = scanForDestructiveStatements(content);
-    if (destructive.length > 0) {
+    const approved = new Set(APPROVED_DESTRUCTIVE_STATEMENTS[file] ?? []);
+    const unapproved = destructive.filter((statement) => !approved.has(statement));
+    if (unapproved.length > 0) {
       return {
         ok: false,
         code: "DESTRUCTIVE_STATEMENT_DETECTED",
-        message: `${file} contains statement(s) this runner refuses to execute: ${destructive.join(", ")}`,
-        details: { file, destructive },
+        message: `${file} contains statement(s) this runner refuses to execute: ${unapproved.join(", ")}`,
+        details: { file, destructive: unapproved },
       };
     }
   }
