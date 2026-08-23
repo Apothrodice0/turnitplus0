@@ -13,6 +13,7 @@ import {
   buildReportAdmissionSourceRef,
   isCorpusAdmissionEnabled,
 } from "../lib/corpus-admission-report-integration.ts";
+import { _getActiveExtractionWorkerCountForTesting } from "../lib/corpus-text-extraction.ts";
 
 /**
  * Controlled live-report integration: covers the flag default, durable
@@ -98,6 +99,10 @@ async function jobRowById(jobId) {
 async function decisionCountFor(sourceRef) {
   const result = await client.execute({ sql: "SELECT COUNT(*) AS c FROM corpus_admission_decisions WHERE source_ref = ?", args: [sourceRef] });
   return Number(result.rows[0].c);
+}
+async function decisionRowFor(sourceRef) {
+  const result = await client.execute({ sql: "SELECT * FROM corpus_admission_decisions WHERE source_ref = ?", args: [sourceRef] });
+  return result.rows[0] ?? null;
 }
 async function contentStoreCountFor(sourceRef) {
   const result = await client.execute({
@@ -238,6 +243,55 @@ test("a consented, ACCEPT-quality submission succeeds: job status=succeeded, one
   assert.equal(Number(job.attempt_count), 1);
   assert.equal(await decisionCountFor(sourceRef), 1);
   assert.equal(await contentStoreCountFor(sourceRef), 1);
+});
+
+// --- WORKER-01: live report integration must never hit EXTRACTION_WORKER_TERMINATED ---
+// This is the exact call site the production bug came from: this function
+// wraps a saved report's already-extracted text as filename:
+// "live-submission.txt" and feeds it through evaluateCorpusAdmissionCandidate
+// (see this file's own "the underlying report ... has no retained text"
+// branch just above). Before the fix, that always routed through the
+// isolated worker — which cannot load in a deployed Vercel serverless
+// function — so this job failed identically to the real production
+// decision (44e51035-261b-41f1-85e3-a93060222cdb) every time. The .txt
+// bypass added to lib/corpus-text-extraction.ts's extractCorpusCandidateText
+// closes it. This test still runs under `node --import tsx`, same as every
+// other test in this file — it proves the JOB PIPELINE'S OWN behavior
+// (word count/language/hash/quality end to end, zero worker slots), not the
+// "does this survive a tsx-less runtime" property, which
+// tests/corpus-text-extraction.test.mjs and the separate plain-node/
+// production-build verification cover directly.
+test("WORKER-01: live report integration produces a real decision (word count, language, hash, quality) instead of EXTRACTION_WORKER_TERMINATED, and never spawns a worker", async () => {
+  process.env.CORPUS_ADMISSION_ENABLED = "true";
+  assert.equal(_getActiveExtractionWorkerCountForTesting(), 0, "sanity: no worker active before this test runs");
+
+  const accountId = await ensureUser(true);
+  // seed 3: every other single-digit seed in this file (1, 2, 4, 5, 6, 7) is
+  // already used by another test sharing this same database — a collision
+  // would make this text resolve as an EXACT_DUPLICATE family match against
+  // an unrelated test's own content, corrupting both.
+  const text = plausibleArticleText(3);
+  const { deviceKey, reportId } = await seedSavedReport(accountId, text);
+  const sourceRef = buildReportAdmissionSourceRef({ accountId, deviceKey, reportId });
+
+  const created = await createPendingReportAdmissionJob(client, { accountId, deviceKey, reportId });
+  const outcome = await processReportAdmissionJob(client, { jobId: created.jobId, openConnection });
+
+  assert.equal(outcome.outcome, "succeeded", outcome.outcome === "failed" ? `job failed: ${outcome.error}` : undefined);
+  assert.equal(outcome.decision, "ACCEPT");
+
+  const decisionRow = await decisionRowFor(sourceRef);
+  assert.ok(decisionRow, "a decision row must exist");
+  assert.equal(decisionRow.detected_format, "txt", "the synthetic live-submission.txt wrapper must be classified as txt");
+  assert.ok(Number(decisionRow.extracted_word_count) > 0, `expected a real word count, got ${decisionRow.extracted_word_count}`);
+  assert.equal(typeof decisionRow.detected_language, "string");
+  assert.ok(decisionRow.detected_language.length > 0);
+  assert.equal(typeof decisionRow.canonical_sha256, "string");
+  assert.equal(decisionRow.canonical_sha256.length, 64);
+  assert.equal(typeof decisionRow.quality_score, "number");
+  assert.doesNotMatch(String(decisionRow.hard_gate_failure_codes ?? ""), /EXTRACTION_WORKER_TERMINATED/, "the exact production bug this fix closes must never reappear here");
+
+  assert.equal(_getActiveExtractionWorkerCountForTesting(), 0, "the live-report-integration path must never acquire a worker slot for its synthetic txt candidate");
 });
 
 // --- double-save idempotency ---------------------------------------------

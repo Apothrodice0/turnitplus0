@@ -54,6 +54,66 @@ test("txt is decoded as plain UTF-8", async () => {
   assert.equal(result.rawText, "plain text content");
 });
 
+// --- WORKER-01: validated txt bypasses the isolated worker entirely --------
+// lib/corpus-extraction-worker.ts cannot load in a deployed Vercel
+// serverless function (confirmed live in Preview runtime logs: "Failed to
+// load the ES module: .../corpus-extraction-worker.<hash>.ts" — Next.js
+// copies the file into the build as a raw, untranspiled asset, which a bare
+// Node runtime with no tsx loader cannot parse). Plain-text decoding needs
+// no untrusted-parser isolation at all, so lib/corpus-text-extraction.ts's
+// extractCorpusCandidateText now decodes txt inline instead of routing it
+// through the worker — these tests prove that bypass is real, not just
+// that txt still "works" (which it already did before this fix, since
+// every test file here runs under `node --import tsx`, which papers over
+// the exact defect that broke it in production).
+
+test("validated txt bypasses the worker entirely: never acquires a worker slot, resolves near-instantly", async () => {
+  assert.equal(_getActiveExtractionWorkerCountForTesting(), 0, "sanity: no worker active before this test runs");
+  const startedAt = Date.now();
+  const result = await extractCorpusCandidateText("txt", Buffer.from("a plausible plain-text corpus candidate", "utf8"));
+  const elapsedMs = Date.now() - startedAt;
+  assert.equal(result.ok, true);
+  assert.equal(_getActiveExtractionWorkerCountForTesting(), 0, "a txt extraction must never acquire a worker slot at any point");
+  assert.ok(elapsedMs < 50, `txt extraction took ${elapsedMs}ms — a real Worker spawn+postMessage round trip takes far longer than this; this must be a synchronous in-process decode, not a worker hop`);
+});
+
+test("the txt bypass's extractorVersion is byte-identical to the worker's own txt branch, so a decision can never distinguish which path produced it", async () => {
+  const result = await extractCorpusCandidateText("txt", Buffer.from("consistent extractor version across both code paths", "utf8"));
+  assert.equal(result.ok, true);
+  assert.equal(result.extractorVersion, "plain-text-decode-v1");
+});
+
+test("PDF extraction still spawns a real isolated worker — active worker count is observably non-zero mid-extraction, unaffected by the txt bypass", async () => {
+  const pdfBytes = fs.readFileSync(path.join(repoRoot, "tests/fixtures/attention-is-all-you-need.pdf"));
+  const extractionPromise = extractCorpusCandidateText("pdf", pdfBytes);
+  // Real PDF parsing takes real wall-clock time (unlike the synchronous txt
+  // bypass above) — a short poll after kicking it off reliably observes the
+  // worker slot having been acquired before extraction completes.
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const observedDuringExtraction = _getActiveExtractionWorkerCountForTesting();
+  const result = await extractionPromise;
+  assert.equal(result.ok, true);
+  assert.ok(observedDuringExtraction >= 1, `PDF extraction must still acquire a real worker slot — observed ${observedDuringExtraction} active workers mid-extraction`);
+});
+
+test("HTML extraction still spawns a real isolated worker — active worker count is observably non-zero mid-extraction, unaffected by the txt bypass", async () => {
+  // A plain, ordinary-sized HTML fixture is enough here: the margin the
+  // 10ms poll below relies on comes from real Worker startup (a genuine new
+  // OS thread + V8 isolate, reliably tens of milliseconds), not from making
+  // the HTML itself slow to strip — extractTextFromHtml's own regex passes
+  // are cheap regardless of size, so there is no need to inflate the
+  // fixture (a large repeated string here was found to add real memory
+  // pressure under concurrent multi-file worker-thread load and is not
+  // needed for the assertion to be meaningful).
+  const html = "<html><body><p>Real paragraph text used to prove this format still routes through the isolated worker.</p></body></html>";
+  const extractionPromise = extractCorpusCandidateText("html", Buffer.from(html, "utf8"));
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const observedDuringExtraction = _getActiveExtractionWorkerCountForTesting();
+  const result = await extractionPromise;
+  assert.equal(result.ok, true);
+  assert.ok(observedDuringExtraction >= 1, `HTML extraction must still acquire a real worker slot — observed ${observedDuringExtraction} active workers mid-extraction`);
+});
+
 test("html is extracted via lib/html-text-extraction.ts, matching what direct extractTextFromHtml produces", async () => {
   const html = "<html><body><p>Real paragraph text.</p></body></html>";
   const result = await extractCorpusCandidateText("html", Buffer.from(html, "utf8"));
@@ -97,6 +157,11 @@ test("malformed/invalid UTF-8 byte sequences in a txt candidate are handled with
   assert.equal(typeof result.ok, "boolean");
 });
 
+// WORKER-01: this and the maxExtractedChars test below now exercise the new
+// inline txt bypass (format "txt" no longer reaches runExtractionWorker at
+// all — see extractCorpusCandidateText) rather than the worker's own txt
+// branch, via the exact same shared finalizeExtractedText tail — same
+// reason codes, same result shape, on purpose.
 test("an empty extraction result is reported as EXTRACTION_EMPTY_RESULT", async () => {
   const result = await extractCorpusCandidateText("txt", Buffer.from("   \n\n  ", "utf8"));
   assert.equal(result.ok, false);

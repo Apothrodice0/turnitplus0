@@ -6,6 +6,7 @@ import { extractDocxTextDocument } from "./docx-text-extraction";
 import { extractTextFromHtml, HTML_EXTRACTOR_VERSION } from "./html-text-extraction";
 import { validateDocxStructure } from "./corpus-docx-validation";
 import type { CorpusAdmissionLimits, CorpusHardGateCode, CorpusSupportedFormat } from "./corpus-admission-types";
+import { finalizeExtractedText, PLAIN_TEXT_EXTRACTOR_VERSION } from "./corpus-extraction-finalize";
 
 /**
  * The isolated unit of work for corpus-admission extraction (requirement
@@ -24,7 +25,7 @@ import type { CorpusAdmissionLimits, CorpusHardGateCode, CorpusSupportedFormat }
  */
 
 export const DOCX_MAMMOTH_EXTRACTOR_VERSION = "docx-mammoth-html-v1";
-export const PLAIN_TEXT_EXTRACTOR_VERSION = "plain-text-decode-v1";
+export { PLAIN_TEXT_EXTRACTOR_VERSION };
 
 export type CorpusExtractionWorkerRequest = {
   format: CorpusSupportedFormat;
@@ -32,6 +33,10 @@ export type CorpusExtractionWorkerRequest = {
   limits: CorpusAdmissionLimits;
 };
 
+// Structurally identical to lib/corpus-extraction-finalize.ts's own
+// CorpusExtractionFinalizeResult — kept as this module's canonical exported
+// name (existing callers/tests already depend on it) rather than churning
+// every call site to the neutral module's type name.
 export type CorpusExtractionWorkerResult =
   | { ok: true; rawText: string; extractorVersion: string }
   | { ok: false; reasonCode: CorpusHardGateCode; detail: string };
@@ -99,14 +104,7 @@ export async function runCorpusExtraction(request: CorpusExtractionWorkerRequest
     return { ok: false, reasonCode: "EXTRACTION_FAILED", detail: err instanceof Error ? err.message : String(err) };
   }
 
-  if (rawText.trim().length === 0) {
-    return { ok: false, reasonCode: "EXTRACTION_EMPTY_RESULT", detail: "Extraction produced no text." };
-  }
-  if (rawText.length > limits.maxExtractedChars.value) {
-    return { ok: false, reasonCode: "EXTRACTED_CONTENT_TOO_LARGE", detail: `Extracted text is ${rawText.length} characters, exceeding the ${limits.maxExtractedChars.value}-character cap.` };
-  }
-
-  return { ok: true, rawText, extractorVersion };
+  return finalizeExtractedText(rawText, extractorVersion, limits);
 }
 
 // Only runs when this module is actually loaded as a Worker entry point

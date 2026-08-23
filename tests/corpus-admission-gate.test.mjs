@@ -7,6 +7,8 @@ import { applyMigrationsLibsql } from "../lib/ingest.js";
 import { createDocumentIdentity } from "../lib/document-identity.ts";
 import { indexDocumentSubmissionIntoCorpus } from "../lib/user-submission-corpus.ts";
 import { evaluateCorpusAdmissionCandidate, reEvaluateCorpusAdmissionCandidate } from "../lib/corpus-admission-gate.ts";
+import { _getActiveExtractionWorkerCountForTesting } from "../lib/corpus-text-extraction.ts";
+import { DEFAULT_CORPUS_ADMISSION_LIMITS } from "../lib/corpus-admission-types.ts";
 
 const repoRoot = path.resolve(".");
 const drizzleDir = path.join(repoRoot, "drizzle");
@@ -301,4 +303,118 @@ test("openConnection is required whenever dryRun is not true, and the failure ha
     () => reEvaluateCorpusAdmissionCandidate(client, { decisionId: accepted.id /* openConnection omitted */ }),
     /openConnection is required/,
   );
+});
+
+// ============================================================================
+// Release-hardening audit finding WORKER-01: lib/corpus-extraction-worker.ts
+// cannot load in a deployed Vercel serverless function (confirmed live in
+// Preview runtime logs — Next.js copies the file into the build as a raw,
+// untranspiled asset, unparseable by a bare Node runtime with no tsx
+// loader). Every format shares that one worker script, so every corpus-
+// admission extraction attempt failed identically in production, reported
+// as EXTRACTION_WORKER_TERMINATED — including the trivially-safe txt case
+// (bytes.toString('utf8'), no third-party parser). Fix: extractCorpusCandidateText
+// now decodes a VALIDATED txt candidate inline, never touching the worker.
+// These tests exercise the full evaluateCorpusAdmissionCandidate pipeline —
+// file validation, extraction, hard gates, quality/hashing — end to end,
+// proving the bypass is gated on the validator's own classification (never
+// a raw claimed filename) and that PDF/DOCX still require the worker.
+// ============================================================================
+
+test("WORKER-01: a validated txt candidate produces a complete decision (word count, language, hash, quality) without ever spawning a worker", async () => {
+  assert.equal(_getActiveExtractionWorkerCountForTesting(), 0, "sanity: no worker active before this test runs");
+  const text = plausibleArticleText(31001);
+  const decision = await evaluateCorpusAdmissionCandidate(client, {
+    sourceRef: "worker01-valid-txt",
+    filename: "live-submission.txt",
+    bytes: Buffer.from(text, "utf8"),
+    consent: RESOLVED_PROVENANCE("https://example.test/worker01-valid-txt"),
+    dryRun: true,
+  });
+
+  assert.equal(decision.detectedFormat, "txt");
+  assert.equal(decision.extractorVersion, "plain-text-decode-v1");
+  assert.ok(decision.hardGatePassed, `expected hard gates to pass, got failure codes: ${decision.hardGateFailureCodes.join(",")}`);
+  assert.ok(Number.isInteger(decision.extractedWordCount) && decision.extractedWordCount > 0, `expected a real word count, got ${decision.extractedWordCount}`);
+  assert.equal(typeof decision.detectedLanguage, "string");
+  assert.ok(decision.detectedLanguage.length > 0);
+  assert.equal(typeof decision.canonicalSha256, "string");
+  assert.equal(decision.canonicalSha256.length, 64, "a real sha256 hex digest");
+  assert.equal(typeof decision.qualityScore, "number");
+  assert.notEqual(decision.decision, undefined);
+  assert.notDeepEqual(decision.reasonCodes, ["EXTRACTION_WORKER_TERMINATED"]);
+  assert.ok(!decision.reasonCodes.includes("EXTRACTION_WORKER_TERMINATED"), "the exact production bug this fix closes must never reappear");
+
+  assert.equal(_getActiveExtractionWorkerCountForTesting(), 0, "no worker slot should ever have been acquired for this txt candidate");
+});
+
+test("WORKER-01: a dangerous Windows PE executable claiming a .txt filename is rejected by file validation — never reaches the txt bypass, never produces a decision claiming real content", async () => {
+  const peBytes = Buffer.concat([Buffer.from([0x4d, 0x5a]), Buffer.from("this is not really text, it is a renamed executable payload", "utf8")]);
+  const decision = await evaluateCorpusAdmissionCandidate(client, {
+    sourceRef: "worker01-dangerous-pe-as-txt",
+    filename: "malware.txt",
+    bytes: peBytes,
+    consent: RESOLVED_PROVENANCE("https://example.test/worker01-dangerous-pe"),
+    dryRun: true,
+  });
+
+  assert.equal(decision.decision, "REJECT");
+  assert.equal(decision.hardGatePassed, false);
+  assert.ok(decision.hardGateFailureCodes.includes("DANGEROUS_FILE_SIGNATURE"), `expected DANGEROUS_FILE_SIGNATURE, got ${decision.hardGateFailureCodes.join(",")}`);
+  assert.equal(decision.extractedWordCount, null, "a rejected-at-validation candidate must never report a word count as if real text had been decoded");
+  assert.equal(decision.canonicalSha256, null);
+});
+
+test("WORKER-01: a ZIP archive (e.g. a mislabeled DOCX) claiming a .txt filename is rejected by file validation, not silently decoded as garbage text", async () => {
+  const zipBytes = Buffer.concat([Buffer.from([0x50, 0x4b, 0x03, 0x04]), Buffer.from("fake zip local file header content here", "utf8")]);
+  const decision = await evaluateCorpusAdmissionCandidate(client, {
+    sourceRef: "worker01-zip-as-txt",
+    filename: "disguised.txt",
+    bytes: zipBytes,
+    consent: RESOLVED_PROVENANCE("https://example.test/worker01-zip-as-txt"),
+    dryRun: true,
+  });
+
+  assert.equal(decision.decision, "REJECT");
+  assert.ok(decision.hardGateFailureCodes.includes("DANGEROUS_FILE_SIGNATURE"), `expected DANGEROUS_FILE_SIGNATURE, got ${decision.hardGateFailureCodes.join(",")}`);
+});
+
+test("WORKER-01: empty and oversized txt candidates still fail with the existing reason codes end-to-end through the full gate, not just the raw extraction function", async () => {
+  const emptyDecision = await evaluateCorpusAdmissionCandidate(client, {
+    sourceRef: "worker01-empty-txt",
+    filename: "empty.txt",
+    bytes: Buffer.from("   \n\n  ", "utf8"),
+    consent: RESOLVED_PROVENANCE("https://example.test/worker01-empty-txt"),
+    dryRun: true,
+  });
+  assert.equal(emptyDecision.decision, "REJECT");
+  assert.ok(emptyDecision.hardGateFailureCodes.includes("EXTRACTION_EMPTY_RESULT"), `expected EXTRACTION_EMPTY_RESULT, got ${emptyDecision.hardGateFailureCodes.join(",")}`);
+
+  const oversizedText = "x ".repeat(50_000);
+  const oversizedDecision = await evaluateCorpusAdmissionCandidate(client, {
+    sourceRef: "worker01-oversized-txt",
+    filename: "oversized.txt",
+    bytes: Buffer.from(oversizedText, "utf8"),
+    consent: RESOLVED_PROVENANCE("https://example.test/worker01-oversized-txt"),
+    limits: { ...DEFAULT_CORPUS_ADMISSION_LIMITS, maxExtractedChars: { value: 100, status: "ENGINEERING_DEFAULT", rationale: "test" } },
+    dryRun: true,
+  });
+  assert.equal(oversizedDecision.decision, "REJECT");
+  assert.ok(oversizedDecision.hardGateFailureCodes.includes("EXTRACTED_CONTENT_TOO_LARGE"), `expected EXTRACTED_CONTENT_TOO_LARGE, got ${oversizedDecision.hardGateFailureCodes.join(",")}`);
+});
+
+test("WORKER-01: PDF and DOCX candidates still route through the real isolated worker, unaffected by the txt bypass", async () => {
+  const pdfBytes = fs.readFileSync(path.join(repoRoot, "tests/fixtures/attention-is-all-you-need.pdf"));
+  const pdfPromise = evaluateCorpusAdmissionCandidate(client, {
+    sourceRef: "worker01-pdf-still-uses-worker",
+    filename: "real.pdf",
+    bytes: pdfBytes,
+    consent: RESOLVED_PROVENANCE("https://example.test/worker01-pdf"),
+    dryRun: true,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const observedDuringPdf = _getActiveExtractionWorkerCountForTesting();
+  const pdfDecision = await pdfPromise;
+  assert.equal(pdfDecision.detectedFormat, "pdf");
+  assert.ok(observedDuringPdf >= 1, `PDF must still acquire a real worker slot — observed ${observedDuringPdf}`);
 });
