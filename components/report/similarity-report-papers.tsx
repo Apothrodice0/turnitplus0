@@ -454,8 +454,29 @@ export function UnifiedSimilaritySection({ report }: { report: SimilarityReport 
  * used correctly by app/reports/[id]/report-detail-shell.tsx's sidebar score
  * card — this component was simply never wired to them. Both now share the
  * exact same selection, so every surface derived from this report agrees.
+ *
+ * Release-hardening audit finding SIM-02: `pending` — true only while the
+ * caller (app/reports/[id]/report-detail-shell.tsx) has not yet resolved
+ * the report's real combined similarity result. Defaults to false so every
+ * existing call site (the print bundle, every test fixture in this
+ * codebase) keeps rendering exactly as before; only the live detail page
+ * ever passes true, and only while its own resolution effect is in flight.
+ * Renders a plain "Calculating similarity…" placeholder in place of the
+ * score/band/banner instead of primarySimilarityScore's own archive-only
+ * fallback value — the fallback is only ever the right thing to show once
+ * resolution has genuinely settled (see primaryMatchingPending's own
+ * comment in report-detail-shell.tsx), never while it is still pending.
+ * Every matching-derived section below the headline (UnifiedSimilaritySection,
+ * the historical-match blocks, the admin-only matchClassification block) is
+ * ALSO gated on `!pending` — see that guard's own comment for why this is
+ * defensive rather than redundant. MatchGroups/CategorySummary/SourceList
+ * and AcademicEvidenceSection are untouched: both read data that is already
+ * correct before `pending` ever becomes true (report.sources is archive
+ * data attached at save time; externalAcademicEvidence is resolved before
+ * a report is ever first saved — see AcademicEvidenceSection's own call
+ * site comment below).
  */
-export function OverviewReport({ report }: { report: SimilarityReport }) {
+export function OverviewReport({ report, pending = false }: { report: SimilarityReport; pending?: boolean }) {
   const primaryScore = primarySimilarityScore(report);
   const primaryLabel = primaryResultLabel(report);
   const isUnified = hasUnifiedSimilarity(report);
@@ -465,29 +486,55 @@ export function OverviewReport({ report }: { report: SimilarityReport }) {
     <article className="report-paper overview-paper">
       <ReportPageHeader report={report} page={2} label="Integrity Overview" />
       <div className="paper-content">
-        <section
-          className={`similarity-heading ${similarityVerdict ? `similarity-verdict-${similarityVerdict.key}` : ""}`}
-          aria-label={`${primaryScore}% ${primaryLabel}${similarityVerdict ? `, ${PRIMARY_SIMILARITY_BAND_LABELS[similarityVerdict.key]}` : ""}`}
-        >
-          <h2>
-            <span>{primaryScore}%</span> {primaryLabel}
-            {similarityVerdict && <em>{PRIMARY_SIMILARITY_BAND_LABELS[similarityVerdict.key]}</em>}
-          </h2>
-          <aside className="archive-scope-note">
-            {isUnified
-              ? <>TurnitPlus Similarity combines text found through TurnitPlus&apos;s own checks, verified external academic sources, and eligible previous TurnitPlus submissions into one result — the same submitted passage found by more than one source counts once.</>
-              : <>Similarity result: {primaryScore}% — based on identified overlapping passages and verified academic sources.</>}
-          </aside>
-          <p>
-            TurnitPlus found {primaryMatchedWordCount(report).toLocaleString()} matched words across identified sources.
-            Review the highlighted passages and named sources to see exactly what produced the result.
-            {wikipediaMatches > 0 && <> {wikipediaMatches} exact Wikipedia phrase match{wikipediaMatches === 1 ? "" : "es"} are shown separately and do not change the similarity result.</>}
-            {report.excludedDocuments > 0 && (
-              <> {report.excludedDocuments} content-identical source was excluded and recorded as a probable self-match.</>
-            )}
-          </p>
-        </section>
+        {pending ? (
+          <section className="similarity-heading similarity-heading-pending" aria-live="polite" aria-busy="true" aria-label="Calculating similarity">
+            <h2>
+              <span className="similarity-skeleton" aria-hidden="true" />
+              Calculating similarity…
+            </h2>
+            <p>TurnitPlus is still checking this submission against every reference source, including previously submitted content. This can take a few seconds.</p>
+          </section>
+        ) : (
+          <section
+            className={`similarity-heading ${similarityVerdict ? `similarity-verdict-${similarityVerdict.key}` : ""}`}
+            aria-label={`${primaryScore}% ${primaryLabel}${similarityVerdict ? `, ${PRIMARY_SIMILARITY_BAND_LABELS[similarityVerdict.key]}` : ""}`}
+          >
+            <h2>
+              <span>{primaryScore}%</span> {primaryLabel}
+              {similarityVerdict && <em>{PRIMARY_SIMILARITY_BAND_LABELS[similarityVerdict.key]}</em>}
+            </h2>
+            <aside className="archive-scope-note">
+              {isUnified
+                ? <>TurnitPlus Similarity combines text found through TurnitPlus&apos;s own checks, verified external academic sources, and eligible previous TurnitPlus submissions into one result — the same submitted passage found by more than one source counts once.</>
+                : <>Similarity result: {primaryScore}% — based on identified overlapping passages and verified academic sources.</>}
+            </aside>
+            <p>
+              TurnitPlus found {primaryMatchedWordCount(report).toLocaleString()} matched words across identified sources.
+              Review the highlighted passages and named sources to see exactly what produced the result.
+              {wikipediaMatches > 0 && <> {wikipediaMatches} exact Wikipedia phrase match{wikipediaMatches === 1 ? "" : "es"} are shown separately and do not change the similarity result.</>}
+              {report.excludedDocuments > 0 && (
+                <> {report.excludedDocuments} content-identical source was excluded and recorded as a probable self-match.</>
+              )}
+            </p>
+          </section>
+        )}
 
+        {/* Release-hardening audit finding SIM-02: every block in this run,
+            through the standalone ReuseContextContainer just before the
+            academic-evidence section, is derived from
+            report.unifiedSimilarity/historicalSubmissionMatch/
+            matchClassification — the exact fields that are genuinely absent
+            during `pending` (they only arrive via the same read-time
+            enrichment fetch that clears it). Gating the whole run, not just
+            the headline above, is defensive: it holds even if a future
+            change ever let `report` carry that data while `pending` is
+            still asserted true (this component has no way to know why a
+            caller says pending — it must simply not draw any matching-
+            derived conclusion while told not to). AcademicEvidenceSection
+            below is NOT gated — externalAcademicEvidence is populated
+            before a report is ever first saved (Phase 3), so it is already
+            correct on initialReport, unlike the fields above. */}
+        {!pending && (<>
         {/* Phase 6: the combined unified-similarity result — placed directly
             after Archive overlap (unchanged above) and before every
             individual supporting-evidence block below, so a reader sees the
@@ -626,6 +673,7 @@ export function OverviewReport({ report }: { report: SimilarityReport }) {
         {report.historicalSubmissionMatch?.status !== "UNAVAILABLE" && report.historicalSubmissionMatch?.status !== "MATCHED" && report.reuseContext && (
           <ReuseContextContainer documentIdentityId={report.reuseContext.documentIdentityId} representationId={null} standalone />
         )}
+        </>)}
 
         {/* Phase 3: external academic-source evidence (OpenAIRE + Europe
             PMC) — a completely separate signal from every historical-match

@@ -1,6 +1,8 @@
 import type { Client } from "@libsql/client";
 import { deriveRoomStatus, isWithinActiveCycle, roomCycleEndsAt } from "./report-rooms";
+import { resolvePrimarySimilaritySummary } from "./report-primary-similarity";
 import type { ReportSummary } from "./reports-remote";
+import type { SimilarityReport } from "./report-types";
 
 // device_key added in Phase E8C, additively — every existing caller that
 // only read payload_json is unaffected; lib/report-historical-match.ts is
@@ -73,21 +75,65 @@ export type RoomOccupantResult =
  * it lives here once rather than as two hand-kept-in-sync copies of the
  * same SQL.
  */
+/**
+ * Release-hardening audit finding SIM-02: payload_json and device_key are
+ * only ever read (and only ever parsed) when this room's status is "ready"
+ * or "failed" — a "processing" occupant shows no numeric similarity at all
+ * (see app/reports/rooms/[room]/room-page-shell.tsx's own PROCESSING
+ * branch), so there is nothing to resolve yet, and doing so anyway would
+ * waste work on this function's own hot path: app/api/reports/route.ts's
+ * GET ?room=N handler is polled every few seconds while a room is
+ * "processing" (see that room-page-shell.tsx comment on its own polling
+ * loop).
+ */
 export async function findRoomOccupant(client: Client, userId: string, room: number): Promise<RoomOccupantResult> {
   const result = await client.execute({
-    sql: `SELECT id, submission_id, title, report_created_at, word_count, archive_score, score_band, ai_score, ai_tone, ai_status
+    sql: `SELECT id, submission_id, title, report_created_at, word_count, archive_score, score_band, ai_score, ai_tone, ai_status, device_key, payload_json
           FROM saved_reports WHERE user_id = ? AND room_number = ?
           ORDER BY report_created_at DESC LIMIT 1`,
     args: [userId, room],
   });
   const occupant = result.rows[0] as unknown as
-    | { id: string | number; submission_id: string; title: string; report_created_at: string; word_count: number; archive_score: number; score_band: string; ai_score: number | null; ai_tone: string | null; ai_status: string | null }
+    | { id: string | number; submission_id: string; title: string; report_created_at: string; word_count: number; archive_score: number; score_band: string; ai_score: number | null; ai_tone: string | null; ai_status: string | null; device_key: string; payload_json: string }
     | undefined;
   if (!occupant || !isWithinActiveCycle(occupant.report_created_at)) {
     return { status: "empty", report: null, cycleEndsAt: null };
   }
+
+  const status = deriveRoomStatus(occupant.ai_score === null ? null : Number(occupant.ai_score), occupant.ai_status === null ? null : String(occupant.ai_status));
+  const archiveScore = Number(occupant.archive_score);
+  let primaryScore = archiveScore;
+  let isUnified = false;
+
+  if (status === "ready" || status === "failed") {
+    try {
+      const payload = JSON.parse(occupant.payload_json) as SimilarityReport;
+      // Release-hardening audit finding SIM-02: the room card's own
+      // resolved score — the same lib/report-primary-similarity.ts call
+      // app/api/reports/[id]/route.ts makes for the detail page, so the
+      // two surfaces can never disagree, and so an already-cached snapshot
+      // (the common case: the detail page or an earlier poll already
+      // computed it) costs only the cheap cache-hit read, never a second
+      // real matcher search — see that module's own header comment.
+      const resolution = await resolvePrimarySimilaritySummary(client, {
+        reportDeviceKey: occupant.device_key,
+        reportId: String(occupant.id),
+        accountId: userId,
+        rawText: payload.text,
+        wordCount: payload.wordCount,
+        archiveMatchedPositions: payload.archiveMatchedPositions,
+        externalAcademicEvidence: payload.externalAcademicEvidence,
+        archiveScore,
+      });
+      primaryScore = resolution.primaryScore;
+      isUnified = resolution.isUnified;
+    } catch (err) {
+      console.error("findRoomOccupant: primary-similarity resolution failed (non-fatal), falling back to archive_score:", err instanceof Error ? err.message : String(err));
+    }
+  }
+
   return {
-    status: deriveRoomStatus(occupant.ai_score === null ? null : Number(occupant.ai_score), occupant.ai_status === null ? null : String(occupant.ai_status)),
+    status,
     cycleEndsAt: roomCycleEndsAt(occupant.report_created_at),
     report: {
       id: String(occupant.id),
@@ -95,7 +141,9 @@ export async function findRoomOccupant(client: Client, userId: string, room: num
       title: String(occupant.title),
       createdAt: String(occupant.report_created_at),
       wordCount: Number(occupant.word_count),
-      archiveScore: Number(occupant.archive_score),
+      archiveScore,
+      primaryScore,
+      isUnified,
       scoreBand: String(occupant.score_band),
       aiScore: occupant.ai_score === null ? null : Number(occupant.ai_score),
       aiTone: occupant.ai_tone === null ? null : String(occupant.ai_tone),

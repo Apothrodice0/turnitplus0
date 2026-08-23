@@ -57,6 +57,19 @@ export function ReportDetailShell({
   const [status, setStatus] = useState<LoadStatus>(
     initialReport ? "found" : requiresClientResolution ? "loading" : "not-found",
   );
+  // Release-hardening audit finding SIM-02: the server-rendered initialReport
+  // is deliberately a fast, unenriched read (see app/reports/[id]/page.tsx's
+  // own "one report = one room" comment) — it never carries
+  // unifiedSimilarity/historicalSubmissionMatch, so primarySimilarityScore
+  // would fall back to the archive-only figure on first paint every time,
+  // even for a report whose real combined result is completely different.
+  // This flag tracks that gap explicitly (never inferred from
+  // hasUnifiedSimilarity(report), which can't distinguish "genuinely
+  // archive-only" from "not resolved yet") and starts true only for
+  // similarity mode — the score-bearing effect below always sets it false
+  // once resolution has genuinely settled, success or failure alike, so the
+  // UI can never spin forever waiting on it.
+  const [primaryMatchingPending, setPrimaryMatchingPending] = useState(mode === "similarity");
   const [resultTab, setResultTab] = useState<ResultTab>("full");
   const [isDeleting, setIsDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
@@ -68,7 +81,9 @@ export function ReportDetailShell({
     if (initialReport && !requiresClientResolution) {
       let cancelled = false;
       void fetchRemoteReport<SimilarityReport>(id).then((enriched) => {
-        if (cancelled || !enriched) return;
+        if (cancelled) return;
+        setPrimaryMatchingPending(false);
+        if (!enriched) return;
         setReport((current) => (current ? { ...current, ...enriched } : enriched));
         // Piggybacks on this same one-shot fetch (no new request) to
         // correct aiStatus if AI analysis resolved in the moment between
@@ -102,14 +117,22 @@ export function ReportDetailShell({
       if (local) {
         setReport(local);
         setStatus("found");
+        // local carries at most attachUnifiedSimilarity's own archive+
+        // academic-only computation (see lib/document-check-pipeline.ts) —
+        // never historicalSubmissionMatch, which can't exist before this
+        // report has ever been saved. Still pending until the fetch below
+        // settles, exactly like the owned-report branch above.
         const enriched = await fetchRemoteReport<SimilarityReport>(id);
-        if (!cancelled && enriched) {
+        if (cancelled) return;
+        setPrimaryMatchingPending(false);
+        if (enriched) {
           setReport((current) => (current ? { ...current, ...enriched } : enriched));
         }
         return;
       }
       const remote = await fetchRemoteReport<SimilarityReport>(id);
       if (cancelled) return;
+      setPrimaryMatchingPending(false);
       if (remote) {
         setReport(remote);
         setStatus("found");
@@ -172,6 +195,12 @@ export function ReportDetailShell({
   const isUnified = hasUnifiedSimilarity(report);
   const primaryLabel = primaryResultLabel(report);
   const similarityVerdict = similarityScoreBand(primaryScore);
+  // Release-hardening audit finding SIM-02: gates every similarity-score
+  // surface below (summary strip, sidebar score card, sidebar notes, and
+  // OverviewReport's own headline) so none of them can ever render
+  // primaryScore's archive-only fallback value while the real resolution is
+  // still in flight — see primaryMatchingPending's own comment above.
+  const similarityPending = mode === "similarity" && primaryMatchingPending;
   const aiSignal = aiSignalDisplay(report);
   const academicEvidenceCount = report.externalAcademicEvidence ? dedupeExternalAcademicEvidence(report.externalAcademicEvidence).length : 0;
   const reportDate = new Date(report.created).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" });
@@ -230,11 +259,11 @@ export function ReportDetailShell({
 
       <div className="report-summary-strip">
         <div>
-          <strong className={`summary-chip summary-score-chip ${mode === "ai" ? `ai-summary-chip ai-summary-${aiSignal.tone}` : similarityVerdict ? `summary-verdict-${similarityVerdict.key}` : ""}`}>
-            <span className={`score-dot ${mode === "ai" ? `ai-dot ai-dot-${aiSignal.tone}` : similarityVerdict ? `score-dot-${similarityVerdict.key}` : ""}`} />
+          <strong className={`summary-chip summary-score-chip ${mode === "ai" ? `ai-summary-chip ai-summary-${aiSignal.tone}` : similarityPending ? "summary-verdict-pending" : similarityVerdict ? `summary-verdict-${similarityVerdict.key}` : ""}`}>
+            <span className={`score-dot ${mode === "ai" ? `ai-dot ai-dot-${aiSignal.tone}` : similarityPending ? "score-dot-pending" : similarityVerdict ? `score-dot-${similarityVerdict.key}` : ""}`} />
             {mode === "ai"
               ? `${aiSignal.value === null ? "" : `${aiSignal.value}% · `}${aiSignal.label}`
-              : `${primaryScore}% ${primaryLabel}`}
+              : similarityPending ? "Calculating similarity…" : `${primaryScore}% ${primaryLabel}`}
           </strong>
           {mode === "similarity" && <span className="summary-chip">{report.sources.length} matched source{report.sources.length === 1 ? "" : "s"}</span>}
           {mode === "similarity" && (report.webCheck?.phrasesMatched ?? 0) > 0 && <span className="summary-chip wikipedia-evidence-chip"><Globe2 aria-hidden="true" /> Separate Wikipedia evidence</span>}
@@ -272,12 +301,12 @@ export function ReportDetailShell({
           <>
             {resultTab === "full" && (
               <div className="full-report-preview">
-                <OverviewReport report={report} />
+                <OverviewReport report={report} pending={similarityPending} />
                 <SubmissionReport report={report} />
                 <SourcesReport report={report} />
               </div>
             )}
-            {resultTab === "overview" && <OverviewReport report={report} />}
+            {resultTab === "overview" && <OverviewReport report={report} pending={similarityPending} />}
             {resultTab === "submission" && <SubmissionReport report={report} />}
             {resultTab === "sources" && <SourcesReport report={report} />}
           </>
@@ -285,16 +314,18 @@ export function ReportDetailShell({
 
         <aside className="report-inspector">
           <div
-            className={`inspector-score ${mode === "ai" ? `ai-signal-card-${aiSignal.tone}` : similarityVerdict ? `similarity-verdict-${similarityVerdict.key}` : ""}`}
+            className={`inspector-score ${mode === "ai" ? `ai-signal-card-${aiSignal.tone}` : similarityPending ? "similarity-verdict-pending" : similarityVerdict ? `similarity-verdict-${similarityVerdict.key}` : ""}`}
+            aria-busy={similarityPending ? "true" : undefined}
             aria-label={mode === "ai"
               ? `${aiSignal.value === null ? "no result" : `${aiSignal.value}%`} AI writing score`
-              : `${primaryScore}% ${primaryLabel}${similarityVerdict ? `, ${PRIMARY_SIMILARITY_BAND_LABELS[similarityVerdict.key]}` : ""}`}
+              : similarityPending ? "Calculating similarity" : `${primaryScore}% ${primaryLabel}${similarityVerdict ? `, ${PRIMARY_SIMILARITY_BAND_LABELS[similarityVerdict.key]}` : ""}`}
           >
-            <span>{mode === "ai" ? "AI writing score" : primaryLabel}</span>
-            <strong>{mode === "ai" ? (aiSignal.value === null ? "—" : `${aiSignal.value}%`) : `${primaryScore}%`}</strong>
+            <span>{mode === "ai" ? "AI writing score" : similarityPending ? "Similarity" : primaryLabel}</span>
+            <strong>{mode === "ai" ? (aiSignal.value === null ? "—" : `${aiSignal.value}%`) : similarityPending ? "…" : `${primaryScore}%`}</strong>
             {mode === "ai" && <p className="inspector-writing-estimate">{aiSignal.label}</p>}
-            {mode === "similarity" && similarityVerdict && <em>{PRIMARY_SIMILARITY_BAND_LABELS[similarityVerdict.key]}</em>}
-            {mode === "similarity" && <div><i style={{ width: `${primaryScore * 5}%` }} /></div>}
+            {mode === "similarity" && similarityPending && <p className="inspector-writing-estimate">Calculating similarity…</p>}
+            {mode === "similarity" && !similarityPending && similarityVerdict && <em>{PRIMARY_SIMILARITY_BAND_LABELS[similarityVerdict.key]}</em>}
+            {mode === "similarity" && !similarityPending && <div><i style={{ width: `${primaryScore * 5}%` }} /></div>}
           </div>
           {mode === "similarity" && <div className="inspector-section">
             <h3>Top source types</h3>
@@ -306,6 +337,8 @@ export function ReportDetailShell({
               English-only local analysis. {report.aiAnalysis?.status === "complete"
                 ? `${report.aiAnalysis.analyzedWordCount.toLocaleString()} words analyzed. Review the AI writing score and highlighted passage breakdown.`
                 : "A numeric result requires at least 300 eligible English words and a successful local model load."}
+            </p> : similarityPending ? <p>
+              TurnitPlus is still checking this submission against every reference source, including previously submitted content. The final similarity result will appear here once matching finishes.
             </p> : <p>
               {isUnified
                 ? <>TurnitPlus Similarity combines text found through TurnitPlus&apos;s own checks, verified external academic sources, and eligible previous TurnitPlus submissions into one result — the same submitted passage found by more than one source counts once.</>
@@ -320,7 +353,7 @@ export function ReportDetailShell({
 
       <div className="print-report-bundle">
         {mode === "ai" ? <AiReport report={report} printMode /> : <>
-          <OverviewReport report={report} />
+          <OverviewReport report={report} pending={similarityPending} />
           <SubmissionReport report={report} />
           <SourcesReport report={report} />
         </>}

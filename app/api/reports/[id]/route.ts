@@ -5,14 +5,14 @@ import { clientIpFrom } from '../../../../lib/client-ip';
 import { getSessionUser } from '../../../../lib/auth-session';
 import { findReportRowForDeviceKey, findReportRowForUser } from '../../../../lib/reports-repo';
 import { classifyReportMatches } from '../../../../lib/report-classification';
-import { getOrComputeHistoricalMatchSnapshot, deleteHistoricalMatchSnapshot } from '../../../../lib/report-historical-match';
+import { deleteHistoricalMatchSnapshot } from '../../../../lib/report-historical-match';
+import { resolvePrimarySimilaritySummary } from '../../../../lib/report-primary-similarity';
 import { deleteReportDocumentData } from '../../../../lib/report-deletion';
 import { deleteReportCorpusAdmissionData } from '../../../../lib/corpus-admission-report-integration';
 import { runHistoricalMatchShadowEvaluation } from '../../../../lib/e8p-shadow-evaluation';
 import { getExperimentalHistoricalMatchForDisplay } from '../../../../lib/e8p-visibility';
 import { getReuseContextEligibility } from '../../../../lib/e8s-report-integration';
 import { runAfterResponse } from '../../../../lib/run-after-response';
-import { computeUnifiedSimilarity } from '../../../../lib/unified-similarity';
 import type { SimilarityReport } from '../../../../lib/report-types';
 
 const MAX_DEVICE_KEY_LENGTH = 200;
@@ -89,33 +89,26 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
       // net for anything unexpected (e.g. a database error on the snapshot
       // read/write itself), not the primary error handling.
       try {
-        const historicalSubmissionMatch = await getOrComputeHistoricalMatchSnapshot(client, {
+        // Release-hardening audit finding SIM-02: getOrComputeHistoricalMatchSnapshot
+        // + computeUnifiedSimilarity now run through the ONE shared
+        // lib/report-primary-similarity.ts helper — the same call
+        // lib/reports-repo.ts's findRoomOccupant makes for the room card, so
+        // the two surfaces can never disagree. Never touches
+        // payload.score/archiveScore/aiScore/E8S/E8P — see
+        // lib/unified-similarity.ts's own DECISION 3.
+        const resolution = await resolvePrimarySimilaritySummary(client, {
           reportDeviceKey: row.device_key,
           reportId: id,
           accountId,
           rawText: payload.text,
+          wordCount: payload.wordCount,
+          archiveMatchedPositions: payload.archiveMatchedPositions,
+          externalAcademicEvidence: payload.externalAcademicEvidence,
+          archiveScore: payload.archiveScore ?? payload.score,
         });
+        const historicalSubmissionMatch = resolution.historicalSubmissionMatch;
         payload.historicalSubmissionMatch = historicalSubmissionMatch;
-        // Phase 6: the unified-similarity read-time attachment — same
-        // read-time-enrichment discipline as every block in this handler
-        // (never written back to saved_reports, recomputed fresh on every
-        // GET from data already resolved above). computeUnifiedSimilarity
-        // is a pure, synchronous function that never throws by its own
-        // contract (lib/unified-similarity.ts's own header comment); the
-        // try/catch here is only the same second, outer safety net every
-        // other read-time enrichment in this handler already has. Never
-        // touches payload.score/archiveScore/aiScore/E8S/E8P — see that
-        // file's own DECISION 3.
-        try {
-          payload.unifiedSimilarity = computeUnifiedSimilarity({
-            wordCount: payload.wordCount,
-            archiveMatchedPositions: payload.archiveMatchedPositions,
-            externalAcademicEvidence: payload.externalAcademicEvidence,
-            historicalSubmissionMatch,
-          });
-        } catch (err) {
-          console.error('computeUnifiedSimilarity failed (non-fatal):', err instanceof Error ? err.message : String(err));
-        }
+        if (resolution.unifiedSimilarity) payload.unifiedSimilarity = resolution.unifiedSimilarity;
         // Phase E8P.3: the experimental, allowlist-gated display value — see
         // lib/e8p-visibility.ts's own header comment. Synchronous (unlike the
         // shadow telemetry write below) because it must be part of THIS
@@ -166,7 +159,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
           }
         });
       } catch (err) {
-        console.error('getOrComputeHistoricalMatchSnapshot failed (non-fatal):', err instanceof Error ? err.message : String(err));
+        console.error('resolvePrimarySimilaritySummary failed (non-fatal):', err instanceof Error ? err.message : String(err));
       }
     } finally {
       client.close();

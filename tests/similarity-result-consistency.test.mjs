@@ -288,3 +288,93 @@ test('SIM-01 RECEIPT (structural): downloadReceipt passes primarySimilarityScore
   assert.match(receipt, /rows\.push\(\["TurnitPlus Similarity", `\$\{report\.unified\.score\}% - \$\{report\.unified\.label\}`\]\);/, 'the receipt\'s headline row must be the unified/combined result when present');
   assert.match(receipt, /rows\.push\(\["Similarity result \(component\)", `\$\{report\.archiveScore \?\? report\.score\}% - \$\{report\.scoreBand\}`\]\);/, 'the archive score must appear only as a row explicitly labeled "(component)" — never presented as the overall result, per requirement 3');
 });
+
+// --- SIM-02: never a transient archive-only number while resolution is pending ---
+// Regression coverage for a second, related production bug: a room card
+// permanently showed 0% (lib/reports-repo.ts's findRoomOccupant had no
+// access to the combined result at all — covered directly against a real DB
+// in tests/report-primary-similarity.test.mjs), and opening a report first
+// flashed 0% before settling on the real 100% once background enrichment
+// resolved. OverviewReport's own `pending` prop (default false, so every
+// existing call site/test above is unaffected) is the mechanism
+// app/reports/[id]/report-detail-shell.tsx now uses to suppress that flash.
+
+function renderPending(report, pending) {
+  return renderToStaticMarkup(React.createElement(OverviewReport, { report, pending }));
+}
+
+test('SIM-02 (2): while pending, OverviewReport never renders the archive-only score, even when it is a plausible-looking 0%', () => {
+  const html = renderPending(baseReport({ archiveScore: 0, matchedWordCount: 0 }), true);
+  const headingSection = html.match(/<section class="similarity-heading[^>]*>[\s\S]*?<\/section>/)?.[0] ?? '';
+  assert.ok(headingSection, 'the similarity-heading section must be found');
+  assert.doesNotMatch(headingSection, /%/, 'no percentage of any kind may render in the headline section while pending');
+  assert.doesNotMatch(html, /Similarity result|TurnitPlus Similarity/, 'neither the archive-only label nor the unified label may render anywhere while pending — only the pending state itself');
+  assert.match(html, /Calculating similarity…/);
+});
+
+test('SIM-02 (2): while pending, OverviewReport never renders the archive-only score even when the real (not-yet-known) unified result would be 100%', () => {
+  // The report already HAS a real, correct unifiedSimilarity attached in
+  // this fixture (simulating "the server actually finished, but the caller
+  // hasn\'t updated its own pending flag yet") — pending must still win:
+  // the caller is the one asserting resolution is not final yet, and
+  // OverviewReport must not second-guess that by reading report fields.
+  const html = renderPending(baseReport({
+    archiveScore: 0,
+    historicalSubmissionMatch: CORPUS_SOURCE_MATCH,
+    unifiedSimilarity: unified(),
+  }), true);
+  assert.match(html, /Calculating similarity…/);
+  // Everything derived from unifiedSimilarity/historicalSubmissionMatch —
+  // UnifiedSimilaritySection's own "TurnitPlus Similarity" heading and the
+  // "Previously submitted content" historical-match block — must be
+  // entirely absent while pending, not merely unlabeled. (MatchGroups and
+  // CategorySummary further down the page legitimately render their own
+  // unrelated archive-scoped "0%" figures regardless of pending — this
+  // assertion is scoped to only the matching-derived sections, not the
+  // whole page, for exactly that reason.)
+  assert.doesNotMatch(html, /TurnitPlus Similarity|Previously submitted content|corpus reference source/);
+});
+
+test('SIM-02 (3): once settled, a genuine unified 0% still renders as a real 0% — pending never masks a truthful zero', () => {
+  const html = renderPending(baseReport({
+    archiveScore: 0,
+    unifiedSimilarity: unified({ unifiedScore: 0, uniqueMatchedWords: 0, archiveOnlyWords: 0, liveAcademicOnlyWords: 0, previousUploadOnlyWords: 0, overlapWords: 0 }),
+  }), false);
+  assert.match(html, /<span>0%<\/span> TurnitPlus Similarity/, 'a genuinely settled 0% (unified computed, nothing matched) must render exactly as 0%, not be hidden or blocked');
+  assert.doesNotMatch(html, /Calculating similarity…/);
+});
+
+test('SIM-02 (3): once settled, the real resolved 100% renders normally — pending=false is the only thing that unblocks it', () => {
+  const html = renderPending(baseReport({
+    archiveScore: 0,
+    historicalSubmissionMatch: CORPUS_SOURCE_MATCH,
+    unifiedSimilarity: unified(),
+  }), false);
+  assert.match(html, /<span>100%<\/span> TurnitPlus Similarity/);
+  assert.doesNotMatch(html, /Calculating similarity…/);
+});
+
+test('SIM-02: pending defaults to false — every pre-existing caller of OverviewReport (print bundle, every other test fixture in this codebase) renders exactly as before', () => {
+  const html = renderToStaticMarkup(React.createElement(OverviewReport, { report: baseReport({ archiveScore: 42 }) }));
+  assert.match(html, /<span>42%<\/span> Similarity result/);
+  assert.doesNotMatch(html, /Calculating similarity…/);
+});
+
+test('SIM-02 SIDEBAR/WIRING (structural): report-detail-shell.tsx tracks primaryMatchingPending explicitly, starts it true only for similarity mode, and always clears it once resolution settles — success or failure alike', async () => {
+  const shell = await fs.promises.readFile(path.join(repo, 'app/reports/[id]/report-detail-shell.tsx'), 'utf8');
+  assert.match(shell, /const \[primaryMatchingPending, setPrimaryMatchingPending\] = useState\(mode === "similarity"\);/, 'must not default to true for AI-mode views, which never show a similarity score at all');
+  assert.match(shell, /const similarityPending = mode === "similarity" && primaryMatchingPending;/);
+  // Every exit point of the resolution effect must clear the flag — not
+  // only the "we got real data" branch, matching requirement 5 (an
+  // explicit archive fallback, never endless loading).
+  const setFalseCount = (shell.match(/setPrimaryMatchingPending\(false\)/g) ?? []).length;
+  assert.ok(setFalseCount >= 3, `expected at least 3 call sites clearing the pending flag (authenticated fetch settle, anonymous local+remote settle, anonymous remote-only settle) — found ${setFalseCount}`);
+});
+
+test('SIM-02 SIDEBAR/WIRING (structural): every OverviewReport call site in report-detail-shell.tsx passes the same pending flag, and the sidebar score card is gated by it too', async () => {
+  const shell = await fs.promises.readFile(path.join(repo, 'app/reports/[id]/report-detail-shell.tsx'), 'utf8');
+  const overviewReportCalls = (shell.match(/<OverviewReport report=\{report\} pending=\{similarityPending\} \/>/g) ?? []).length;
+  assert.equal(overviewReportCalls, 3, 'expected 3 call sites: full-report-preview, the standalone overview tab, and the print bundle');
+  assert.match(shell, /similarityPending \? "Calculating similarity…" : `\$\{primaryScore\}% \$\{primaryLabel\}`/, 'the summary-strip score chip must also be gated');
+  assert.match(shell, /similarityPending \? "…" : `\$\{primaryScore\}%`/, 'the sidebar score card\'s own value must also be gated');
+});
