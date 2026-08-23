@@ -68,7 +68,13 @@ test("PROCESSING: the Similarity tile is not a link (or any other clickable navi
 test("READY: both the real AI score and the real similarity score are shown, each as a working link into the full report", async () => {
   const branch = extractBranch(await readRoomShell(), "ready");
   assert.match(branch, /<strong className="room-metric-value">\{occupant\.report\.aiScore \?\? "—"\}%<\/strong>/, "the ready branch must reveal the real AI score");
-  assert.match(branch, /<strong className="room-metric-value">\{occupant\.report\.archiveScore\}%<\/strong>/, "the ready branch must reveal the real similarity score");
+  // Release-hardening audit finding SIM-01: prefers occupant.report.primaryScore
+  // (the combined result, set by buildReportSummary whenever the caller
+  // already had a full report in hand — see ReportSummary's own comment)
+  // and falls back to archiveScore only when primaryScore is absent (the
+  // lightweight, DB-only room fetch path) — still always the real value
+  // either way, never a fabricated one.
+  assert.match(branch, /<strong className="room-metric-value">\{occupant\.report\.primaryScore \?\? occupant\.report\.archiveScore\}%<\/strong>/, "the ready branch must reveal the real similarity score");
   assert.match(branch, /<Link href=\{`\/reports\/\$\{occupant\.report\.id\}\?mode=ai&room=\$\{room\}`\}/, "the AI tile must link into the full AI report");
   assert.match(branch, /<Link href=\{`\/reports\/\$\{occupant\.report\.id\}\?room=\$\{room\}`\}/, "the Similarity tile must link into the full report");
 });
@@ -80,8 +86,9 @@ test("FAILED: shows 'AI analysis unavailable' framing and a real retry action, n
   assert.match(branch, /onClick=\{\(\) => retryAiCheck\(occupant\.report!\.id\)\}/, "a real retry action, wired to retryAiCheck, must be present");
   assert.match(branch, /\{retryingAi \? "Checking…" : "Retry AI check"\}/);
   // The similarity result is real and unaffected by an AI failure — this
-  // branch's own real archiveScore must still render.
-  assert.match(branch, /<strong className="room-metric-value">\{occupant\.report\.archiveScore\}%<\/strong>/);
+  // branch's own real primaryScore (or archiveScore fallback — see SIM-01)
+  // must still render.
+  assert.match(branch, /<strong className="room-metric-value">\{occupant\.report\.primaryScore \?\? occupant\.report\.archiveScore\}%<\/strong>/);
 });
 
 test("DIRECT REPORT URL: the report page derives its own real AI-lifecycle status server-side and shows an explicit in-progress/unavailable state instead of pretending the page is fully done", async () => {

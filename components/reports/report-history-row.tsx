@@ -40,7 +40,15 @@ export function ReportHistoryRow({
 }) {
   const [downloading, setDownloading] = useState(false);
   const [downloadError, setDownloadError] = useState(false);
-  const similarityVerdict = similarityScoreBand(report.archiveScore);
+  // Release-hardening audit finding SIM-01: prefer the combined result when
+  // this summary happens to carry one (see ReportSummary.primaryScore's own
+  // comment) — falls back to the archive-only value with the same
+  // "Similarity result" label the detail page itself uses for exactly the
+  // same fallback case, so this row can never contradict what opening the
+  // report would show.
+  const displayScore = report.primaryScore ?? report.archiveScore;
+  const displayLabel = report.isUnified ? "TurnitPlus Similarity" : "Similarity result";
+  const similarityVerdict = similarityScoreBand(displayScore);
 
   async function handleDownloadReceipt() {
     setDownloading(true);
@@ -89,10 +97,10 @@ export function ReportHistoryRow({
           </span>
           <span className="history-open-cue" aria-hidden="true"><ChevronRight /></span>
         </Link>
-        <Link href={`/reports/${report.id}`} prefetch={false} className={`history-result history-similarity-result ${similarityVerdict ? `history-similarity-${similarityVerdict.key}` : ""}`} aria-label={`Open similarity report for ${report.title}`}>
+        <Link href={`/reports/${report.id}`} prefetch={false} className={`history-result history-similarity-result ${similarityVerdict ? `history-similarity-${similarityVerdict.key}` : ""}`} aria-label={`Open similarity report for ${report.title} — ${displayScore}% ${displayLabel}`}>
           <span className="history-result-score">
-            <strong>{report.archiveScore}%</strong>
-            <span>Similarity result</span>
+            <strong>{displayScore}%</strong>
+            <span>{displayLabel}</span>
           </span>
           <span className="history-open-cue" aria-hidden="true"><ChevronRight /></span>
         </Link>

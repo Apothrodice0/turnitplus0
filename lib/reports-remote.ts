@@ -22,6 +22,27 @@ export type ReportSummary = {
    * falls back cleanly when this is absent.
    */
   aiStatus?: "processing" | "ready" | "failed";
+  /**
+   * Release-hardening audit finding SIM-01: lib/report-types.ts's
+   * buildReportSummary() sets this from primarySimilarityScore(report) — the
+   * SAME combined-result selection the detail page's headline/sidebar use —
+   * whenever the caller already had a full SimilarityReport in hand (a
+   * just-generated or just-AI-completed report). Deliberately never set by
+   * the lightweight, DB-only room/history endpoints
+   * (lib/reports-repo.ts's findRoomOccupant, app/api/reports/route.ts's GET
+   * list handler): those only ever read the persisted archive_score column
+   * and have no cheap way to know the combined result without recomputing it
+   * per row (report_historical_match_snapshots + externalAcademicEvidence),
+   * which would make a room/history list expensive or require a new
+   * persisted column — out of scope for this fix. `archiveScore` itself is
+   * NEVER changed by this field's existence (still the pure archive-only
+   * value other readers of the persisted column, e.g. lib/developer-repo.ts,
+   * depend on) — this is purely an additive, optional display hint. Absent
+   * means "unknown here — fall back to archiveScore," never "zero."
+   */
+  primaryScore?: number;
+  /** True when primaryScore reflects the full unified result rather than the archive-only fallback — see primaryScore's own comment. Absent/false with primaryScore also absent means the same thing: nothing more precise than archiveScore is known at this call site. */
+  isUnified?: boolean;
 };
 
 // Every function here is fail-soft by design: a network or database problem

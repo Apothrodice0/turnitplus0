@@ -625,10 +625,10 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
                 <strong className="room-metric-value">{occupant.report.aiScore ?? "—"}%</strong>
                 <span className="room-metric-sub">{aiToneLabel(occupant.report.aiScore, occupant.report.aiTone)}</span>
               </Link>
-              <Link href={`/reports/${occupant.report.id}?room=${room}`} className={`room-metric room-metric-${similarityScoreBand(occupant.report.archiveScore)?.key ?? "low"}`}>
+              <Link href={`/reports/${occupant.report.id}?room=${room}`} className={`room-metric room-metric-${similarityScoreBand(occupant.report.primaryScore ?? occupant.report.archiveScore)?.key ?? "low"}`}>
                 <span className="room-metric-label">Similarity</span>
-                <strong className="room-metric-value">{occupant.report.archiveScore}%</strong>
-                <span className="room-metric-sub">{similarityScoreBand(occupant.report.archiveScore)?.label ?? "Result"}</span>
+                <strong className="room-metric-value">{occupant.report.primaryScore ?? occupant.report.archiveScore}%</strong>
+                <span className="room-metric-sub">{similarityScoreBand(occupant.report.primaryScore ?? occupant.report.archiveScore)?.label ?? "Result"}</span>
               </Link>
               <button className="room-metric" type="button" onClick={() => handleDownloadReceipt(occupant.report!.id)} disabled={downloadingReceipt}>
                 <span className="room-metric-label">Receipt</span>
@@ -659,10 +659,10 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
                 <strong className="room-metric-value">—</strong>
                 <span className="room-metric-sub">Unavailable</span>
               </div>
-              <Link href={`/reports/${occupant.report.id}?room=${room}`} className={`room-metric room-metric-${similarityScoreBand(occupant.report.archiveScore)?.key ?? "low"}`}>
+              <Link href={`/reports/${occupant.report.id}?room=${room}`} className={`room-metric room-metric-${similarityScoreBand(occupant.report.primaryScore ?? occupant.report.archiveScore)?.key ?? "low"}`}>
                 <span className="room-metric-label">Similarity</span>
-                <strong className="room-metric-value">{occupant.report.archiveScore}%</strong>
-                <span className="room-metric-sub">{similarityScoreBand(occupant.report.archiveScore)?.label ?? "Result"}</span>
+                <strong className="room-metric-value">{occupant.report.primaryScore ?? occupant.report.archiveScore}%</strong>
+                <span className="room-metric-sub">{similarityScoreBand(occupant.report.primaryScore ?? occupant.report.archiveScore)?.label ?? "Result"}</span>
               </Link>
               <button className="room-metric" type="button" onClick={() => handleDownloadReceipt(occupant.report!.id)} disabled={downloadingReceipt}>
                 <span className="room-metric-label">Receipt</span>
