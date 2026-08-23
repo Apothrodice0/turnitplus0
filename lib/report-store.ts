@@ -171,6 +171,31 @@ export async function storeReport<T>(report: T) {
   });
 }
 
+/**
+ * storeReport, but never rejects. The local IndexedDB copy is a best-effort
+ * cache — the authoritative record is the remote (Turso) save that always
+ * runs alongside it (see lib/reports-remote.ts's own "fail-soft by design"
+ * comment for the same philosophy applied to the remote side). Before this
+ * wrapper existed, an IndexedDB failure (quota exceeded, private-browsing
+ * restrictions, a blocked/corrupted database) thrown from an unguarded
+ * `await storeReport(...)` could abort the whole save pipeline it was
+ * called from — including, at the AI-enrichment resave site, permanently
+ * stranding a report at ai_status='processing' with no code path left that
+ * would ever mark it ready or failed. Matches this codebase's existing
+ * "a best-effort side effect must never block the primary action" pattern
+ * (e.g. claimAnonymousReports, maybePromoteToAdmin in lib/admin-role.ts).
+ *
+ * `store` is injectable (defaults to the real storeReport) purely so tests
+ * can supply a deterministic stub without needing a real/fake IndexedDB.
+ */
+export async function storeReportBestEffort<T>(report: T, store: (report: T) => Promise<void> = storeReport): Promise<void> {
+  try {
+    await store(report);
+  } catch (error) {
+    console.error("Local IndexedDB report save failed (non-fatal — the remote save is authoritative):", error instanceof Error ? error.message : String(error));
+  }
+}
+
 export async function clearStoredReports() {
   const database = await openDatabase();
   return new Promise<void>((resolve, reject) => {

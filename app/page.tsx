@@ -35,8 +35,9 @@ import {
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { getDeviceKey } from "@/lib/device-key";
-import { clearStoredReports, loadStoredReports, storeReport } from "@/lib/report-store";
+import { clearStoredReports, loadStoredReports, storeReport, storeReportBestEffort } from "@/lib/report-store";
 import { deleteRemoteReport, fetchAllReportSummariesAcrossRooms, fetchRemoteReport, fetchUploadLimitStatus, listRemoteReportSummaries, saveReportRemote, type ReportSummary, type UploadLimitStatus } from "@/lib/reports-remote";
+import { persistAiCompletion } from "@/lib/report-ai-completion";
 import { clearAllReportRoomCaches } from "@/lib/report-rooms-cache";
 import { ReportRoomsBrowser } from "@/components/reports/report-rooms";
 import { ReportHistoryRow } from "@/components/reports/report-history-row";
@@ -663,7 +664,7 @@ export default function Home() {
   async function saveReport(report: SimilarityReport, academicSearchDiagnosticsId?: number | null) {
     const summary = buildReportSummary(report);
     setReports((current) => [summary, ...current.filter((item) => item.id !== summary.id)].slice(0, 50));
-    await storeReport(report);
+    await storeReportBestEffort(report);
     return await saveReportRemote(report, summary, academicSearchDiagnosticsId);
   }
 
@@ -837,14 +838,25 @@ export default function Home() {
       // enrichment pattern) so the generation lock releases as soon as the
       // similarity report is final, letting the user start a new check
       // immediately instead of waiting on a still-downloading AI model.
-      void aiAnalysisPromise.then(async (aiResult) => {
-        const enriched = { ...report, ...aiResult };
-        const enrichedSummary = buildReportSummary(enriched);
-        setCurrentReport((current) => current?.id === enriched.id ? { ...current, ...aiResult } : current);
-        setReports((current) => current.map((item) => item.id === enrichedSummary.id ? enrichedSummary : item));
-        await storeReport(enriched);
-        await saveReportRemote(enriched, enrichedSummary);
-      });
+      // Release-hardening audit finding LIFECYCLE-01: this used to call
+      // storeReport/saveReportRemote directly with no .catch() anywhere in
+      // the chain, so an IndexedDB rejection here became an unhandled
+      // promise rejection — see lib/report-ai-completion.ts's own header
+      // comment (this is the anonymous-flow twin of room-page-shell.tsx's
+      // saveEnrichedAiResult bug). This flow has no room/aiStatus concept
+      // to strand, but the same "no unhandled rejection" guarantee applies
+      // here too.
+      void aiAnalysisPromise
+        .then(async (aiResult) => {
+          const enriched = { ...report, ...aiResult };
+          const enrichedSummary = buildReportSummary(enriched);
+          setCurrentReport((current) => current?.id === enriched.id ? { ...current, ...aiResult } : current);
+          setReports((current) => current.map((item) => item.id === enrichedSummary.id ? enrichedSummary : item));
+          await persistAiCompletion(enriched, enrichedSummary);
+        })
+        .catch((error) => {
+          console.error("Unexpected failure finishing AI analysis (non-fatal):", error instanceof Error ? error.message : String(error));
+        });
     } finally {
       generationLockRef.current = false;
       setIsGeneratingReport(false);

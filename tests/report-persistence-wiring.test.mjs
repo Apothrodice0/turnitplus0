@@ -11,19 +11,20 @@ import test from "node:test";
 test("existing local report persistence (IndexedDB) is still wired at every save/clear site", async () => {
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
 
-  assert.match(page, /import \{ clearStoredReports, loadStoredReports, storeReport \} from "@\/lib\/report-store";/);
+  assert.match(page, /import \{ clearStoredReports, loadStoredReports, storeReport, storeReportBestEffort \} from "@\/lib\/report-store";/);
 
-  // storeReport must still run at all of its existing sites: the anonymous
-  // remote-restore loop, saveReport, and the Wikipedia-enrichment callback.
-  // (runAiAnalysis's two sites moved out along with the old in-app result
-  // view it powered — see app/reports/[id], which renders saved AI results
-  // read-only instead. The authenticated account-report cache loop that
-  // used to be loadAccountReports' own 4th site is gone entirely under the
-  // 10-room architecture — see components/reports/report-rooms.tsx — an
-  // authenticated account's list is no longer hydrated into full report
-  // objects up front at all.)
+  // Release-hardening audit finding LIFECYCLE-01: saveReport and the
+  // Wikipedia-enrichment callback now go through storeReportBestEffort (an
+  // IndexedDB failure must never block the authoritative remote save, or
+  // become an unhandled rejection — see lib/report-ai-completion.ts and
+  // lib/report-store.ts's own header comments). The anonymous remote-restore
+  // loop is unchanged: it's already inside its own try/catch, so a failure
+  // there was never able to escape as an unhandled rejection in the first
+  // place, and stays on the raw storeReport.
   const storeReportCalls = page.match(/await storeReport\(/g) ?? [];
-  assert.equal(storeReportCalls.length, 3, "storeReport should still be called at exactly its 3 remaining sites");
+  assert.equal(storeReportCalls.length, 1, "the remote-restore loop should still be storeReport's one remaining direct call site");
+  const storeReportBestEffortCalls = page.match(/await storeReportBestEffort\(/g) ?? [];
+  assert.equal(storeReportBestEffortCalls.length, 1, "saveReport's own local cache write should go through storeReportBestEffort");
 
   assert.match(page, /await clearStoredReports\(\);/);
   // loadStoredReports now reads IndexedDB's lightweight summary store (see
@@ -41,16 +42,19 @@ test("remote report persistence (Turso) is layered alongside local storage, not 
     /import \{ deleteRemoteReport, fetchAllReportSummariesAcrossRooms, fetchRemoteReport, fetchUploadLimitStatus, listRemoteReportSummaries, saveReportRemote, type ReportSummary, type UploadLimitStatus \} from "@\/lib\/reports-remote";/,
   );
 
-  // Every storeReport call site must be immediately followed by the matching
-  // saveReportRemote call, so a remote failure can never happen without the
-  // local copy already having succeeded first. app/page.tsx's own save flow
-  // is anonymous-only now (an authenticated account's new check happens
-  // entirely on its own room page — see
+  // Release-hardening audit finding LIFECYCLE-01: the local cache write no
+  // longer gates the remote save with an unguarded await — saveReport uses
+  // storeReportBestEffort (local failure is swallowed, remote save still
+  // runs), and the AI-enrichment callback uses persistAiCompletion (same
+  // local-best-effort-then-remote pairing, bundled into one call so the two
+  // can never drift apart — see lib/report-ai-completion.ts). app/page.tsx's
+  // own save flow is anonymous-only now (an authenticated account's new
+  // check happens entirely on its own room page — see
   // app/reports/rooms/[room]/room-page-shell.tsx, which has the equivalent,
   // room-aware version of this same pairing), so neither call site here
   // threads a room through.
-  assert.match(page, /await storeReport\(report\);\s*\n\s*return await saveReportRemote\(report, summary, academicSearchDiagnosticsId\);/);
-  assert.match(page, /await storeReport\(enriched\);\s*\n\s*await saveReportRemote\(enriched, enrichedSummary\);/);
+  assert.match(page, /await storeReportBestEffort\(report\);\s*\n\s*return await saveReportRemote\(report, summary, academicSearchDiagnosticsId\);/);
+  assert.match(page, /await persistAiCompletion\(enriched, enrichedSummary\);/);
 
   // clearHistory must clear local storage first, then best-effort delete the
   // remote copies — never the other way around.
@@ -87,10 +91,17 @@ test("the room page's occupant state is only ever set to processing/ready/failed
   // this automatic post-upload pass and the manual retryAiCheck, so the two
   // can never disagree on when a room is allowed to claim "ready"), not
   // inlined in runCheck() itself — runCheck only ever hands its result to it.
-  assert.match(runCheckBody, /void aiAnalysisPromise\.then\(\(aiResult\) => saveEnrichedAiResult\(report, aiResult\)\);/);
+  // Release-hardening audit finding LIFECYCLE-01: the automatic pass now
+  // goes through completeAiAnalysisWithRecovery, which still ATTEMPTS to
+  // persist a real "failed" terminal state even if aiAnalysisPromise itself
+  // were to reject (a bare .catch() would skip saveEnrichedAiResult
+  // entirely and leave the room stuck at "processing") — see
+  // tests/report-ai-completion.test.mjs for the dynamic proof.
+  assert.match(runCheckBody, /void completeAiAnalysisWithRecovery\(aiAnalysisPromise, \(aiResult\) => saveEnrichedAiResult\(report, aiResult\)\)\.then\(\(saved\) => \{\s*\n\s*if \(!saved\) notify\(/);
 
   const helperBody = shell.match(/async function saveEnrichedAiResult\([\s\S]*?\n {2}\}/)?.[0] ?? "";
   assert.ok(helperBody.length > 0, "saveEnrichedAiResult function body must be found");
+  assert.match(helperBody, /await persistAiCompletion\(enriched, enrichedSummary, room\)/, "the local IndexedDB write and the remote save must both go through persistAiCompletion, not a raw unguarded storeReport/saveReportRemote pair");
   assert.match(helperBody, /if \(!enrichedSaveResult\.ok\) return false;/, "a failed remote save must never reach setOccupant");
   assert.match(helperBody, /setOccupant\(\{\s*\n\s*status: enrichedSummary\.aiStatus === "ready" \? "ready" : "failed",\s*\n\s*report: enrichedSummary,/);
 });

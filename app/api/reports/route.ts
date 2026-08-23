@@ -22,6 +22,24 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0;
 }
 
+// Release-hardening audit finding LIFECYCLE-02: two AI-completion resaves
+// for the same report can race (the automatic post-upload pass in one tab
+// still finishing while a different tab/device's manual "Retry AI check"
+// also completes — both target the same (device_key, id), see
+// app/reports/rooms/[room]/room-page-shell.tsx's saveEnrichedAiResult). A
+// plain unconditional UPSERT is last-write-wins: whichever request's
+// transaction commits last would silently overwrite a genuine, already-
+// persisted "ready" result (a real ai_score) with a later-arriving "failed"
+// one, discarding real data. The three CASE guards below make "ready" a
+// one-way, sticky terminal state with respect to a "failed" write
+// specifically: once ai_status is already 'ready', an incoming 'failed'
+// write leaves ai_score/ai_tone/ai_status/payload_json exactly as they
+// were (every other column — title, word_count, etc. — still updates
+// normally, since both a 'ready' and a 'failed' resave carry the same
+// underlying similarity data). Every other transition is untouched: ready
+// can still be reached from processing or failed (a late genuine success
+// is exactly what a retry is for), and processing/failed/failed all behave
+// exactly as before.
 const SAVE_REPORT_SQL = `INSERT INTO saved_reports (id, device_key, submission_id, title, report_created_at, word_count, archive_score, score_band, ai_score, ai_tone, ai_status, payload_json, user_id, room_number, updated_at)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
       ON CONFLICT(device_key, id) DO UPDATE SET
@@ -31,10 +49,10 @@ const SAVE_REPORT_SQL = `INSERT INTO saved_reports (id, device_key, submission_i
         word_count = excluded.word_count,
         archive_score = excluded.archive_score,
         score_band = excluded.score_band,
-        ai_score = excluded.ai_score,
-        ai_tone = excluded.ai_tone,
-        ai_status = excluded.ai_status,
-        payload_json = excluded.payload_json,
+        ai_score = CASE WHEN saved_reports.ai_status = 'ready' AND excluded.ai_status = 'failed' THEN saved_reports.ai_score ELSE excluded.ai_score END,
+        ai_tone = CASE WHEN saved_reports.ai_status = 'ready' AND excluded.ai_status = 'failed' THEN saved_reports.ai_tone ELSE excluded.ai_tone END,
+        ai_status = CASE WHEN saved_reports.ai_status = 'ready' AND excluded.ai_status = 'failed' THEN saved_reports.ai_status ELSE excluded.ai_status END,
+        payload_json = CASE WHEN saved_reports.ai_status = 'ready' AND excluded.ai_status = 'failed' THEN saved_reports.payload_json ELSE excluded.payload_json END,
         user_id = COALESCE(excluded.user_id, saved_reports.user_id),
         updated_at = CURRENT_TIMESTAMP`;
 

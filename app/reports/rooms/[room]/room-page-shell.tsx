@@ -6,7 +6,8 @@ import { ChevronLeft, Download, FileText } from "lucide-react";
 import { fetchReportRoomContents, fetchRemoteReport, saveReportRemote, type ReportSummary, type RoomContents } from "@/lib/reports-remote";
 import { invalidateRoomCache } from "@/lib/report-rooms-cache";
 import { ROOM_CYCLE_MS } from "@/lib/report-rooms";
-import { storeReport, getStoredReportById } from "@/lib/report-store";
+import { storeReportBestEffort, getStoredReportById } from "@/lib/report-store";
+import { persistAiCompletion } from "@/lib/report-ai-completion";
 import { buildReportSummary, type AiAnalysis, type SimilarityReport } from "@/lib/report-types";
 import { similarityScoreBand } from "@/lib/ai-core";
 import {
@@ -91,6 +92,30 @@ async function analyzeAiText(
 }
 
 /**
+ * The structured "AI analysis genuinely failed" result shape — extracted so
+ * runAiAnalysis's own catch and the outer recovery catch in runCheck (for
+ * the case where aiAnalysisPromise itself somehow rejects rather than
+ * resolving through runAiAnalysis's own try/catch) can never drift apart.
+ */
+export function aiAnalysisErrorResult(error: unknown, stage: AiPrepStage | null): { aiScore: number | null; aiAnalysis: AiAnalysis } {
+  return {
+    aiScore: null,
+    aiAnalysis: {
+      status: "error",
+      score: null,
+      model: AI_MODEL_VERSION,
+      engine: null,
+      threshold: AI_PASSAGE_THRESHOLD,
+      thresholdLogOdds: AI_PASSAGE_LOG_ODDS_THRESHOLD,
+      eligibleWordCount: 0,
+      analyzedWordCount: 0,
+      passages: [],
+      error: describeAiAnalysisError(error, stage),
+    },
+  };
+}
+
+/**
  * analyzeAiText, but never rejects — a worker crash/timeout becomes a real
  * AiAnalysis with status "error" instead of an unhandled rejection, exactly
  * matching how a genuinely "unsupported" (too little eligible text) result
@@ -98,7 +123,7 @@ async function analyzeAiText(
  * pass (runCheck below) and the manual retry (retryAiCheck) so the two can
  * never drift into different failure-shape handling.
  */
-async function runAiAnalysis(
+export async function runAiAnalysis(
   text: string,
   detectedLanguage: SimilarityReport["features"]["detectedLanguage"],
 ): Promise<{ aiScore: number | null; aiAnalysis: AiAnalysis }> {
@@ -109,21 +134,41 @@ async function runAiAnalysis(
     });
     return { aiScore: aiAnalysis.score, aiAnalysis };
   } catch (error) {
-    return {
-      aiScore: null,
-      aiAnalysis: {
-        status: "error",
-        score: null,
-        model: AI_MODEL_VERSION,
-        engine: null,
-        threshold: AI_PASSAGE_THRESHOLD,
-        thresholdLogOdds: AI_PASSAGE_LOG_ODDS_THRESHOLD,
-        eligibleWordCount: 0,
-        analyzedWordCount: 0,
-        passages: [],
-        error: describeAiAnalysisError(error, aiPrepStage),
-      },
-    };
+    return aiAnalysisErrorResult(error, aiPrepStage);
+  }
+}
+
+/**
+ * Awaits the AI-analysis promise and persists it via `save` (in practice,
+ * saveEnrichedAiResult), the ONE place that ever moves a room off
+ * "processing". runAiAnalysis already guarantees its own promise never
+ * rejects, and saveEnrichedAiResult's own I/O is contained by
+ * persistAiCompletion — but this boundary must hold even if either
+ * invariant is ever violated by a future change. A bare `.catch()` here
+ * would be enough to avoid an unhandled rejection, but it would also skip
+ * `save` entirely on a genuine rejection, leaving the room stuck at
+ * "processing" with no attempt ever made to move it — exactly the bug this
+ * whole fix exists to close. So on any rejection, this still ATTEMPTS to
+ * persist a real "failed" terminal state (aiAnalysisErrorResult), with that
+ * recovery attempt itself guarded so it can never throw a second time.
+ * Extracted (rather than inlined in runCheck) so it's directly testable
+ * without a React render — see tests/report-ai-completion.test.mjs.
+ */
+export async function completeAiAnalysisWithRecovery(
+  aiAnalysisPromise: Promise<{ aiScore: number | null; aiAnalysis: AiAnalysis }>,
+  save: (aiResult: { aiScore: number | null; aiAnalysis: AiAnalysis }) => Promise<boolean>,
+): Promise<boolean> {
+  try {
+    const aiResult = await aiAnalysisPromise;
+    return await save(aiResult);
+  } catch (error) {
+    console.error("Unexpected failure finishing AI analysis — attempting to persist a terminal failed state:", error instanceof Error ? error.message : String(error));
+    try {
+      return await save(aiAnalysisErrorResult(error, null));
+    } catch (persistError) {
+      console.error("Could not persist the terminal failed state either (non-fatal — recoverable via Retry AI check):", persistError instanceof Error ? persistError.message : String(persistError));
+      return false;
+    }
   }
 }
 
@@ -206,8 +251,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
       ...buildReportSummary(enriched),
       aiStatus: aiResult.aiAnalysis.status === "complete" ? "ready" : "failed",
     };
-    await storeReport(enriched);
-    const enrichedSaveResult = await saveReportRemote(enriched, enrichedSummary, undefined, room);
+    const enrichedSaveResult = await persistAiCompletion(enriched, enrichedSummary, room);
     if (!enrichedSaveResult.ok) return false;
     invalidateRoomCache(accountEmail, room);
     setOccupant({
@@ -390,7 +434,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
       // a legacy-vs-fresh row is never ambiguous — see
       // lib/report-rooms.ts's deriveRoomStatus.
       const summary: ReportSummary = { ...buildReportSummary(report), aiStatus: "processing" };
-      await storeReport(report);
+      await storeReportBestEffort(report);
       // The upload request always names its room explicitly — the server
       // re-validates occupancy itself (409 if this room filled in the
       // meantime) rather than trusting this client's own view of it.
@@ -428,7 +472,26 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
       // marks this room "ready" or "failed" — never optimistically, never
       // before this, and never silently defaulting to "ready" regardless of
       // outcome (production audit fix — see saveEnrichedAiResult above).
-      void aiAnalysisPromise.then((aiResult) => saveEnrichedAiResult(report, aiResult));
+      //
+      // Release-hardening audit finding LIFECYCLE-01: saveEnrichedAiResult
+      // itself can no longer throw (its own I/O is contained by
+      // persistAiCompletion) and runAiAnalysis guarantees aiAnalysisPromise
+      // never rejects either — but this boundary must hold even if either
+      // invariant is ever violated by a future change, so the recovery
+      // branch below still ATTEMPTS to persist a genuine "failed" terminal
+      // state (not just log and swallow) if aiAnalysisPromise itself were to
+      // reject: skipping straight to a bare .catch() would skip
+      // saveEnrichedAiResult entirely, leaving the room stuck at
+      // "processing" with no attempt ever made to move it — exactly the bug
+      // this whole fix exists to close. The recovery attempt is itself
+      // guarded so it can never throw a second time. The genuine recovery
+      // path — reachable from ANY tab, on refresh, indefinitely into the
+      // future, regardless of whether this attempt lands — is the
+      // "processing" branch's own "Retry AI check" action below; the
+      // notify() calls here are only a same-tab courtesy.
+      void completeAiAnalysisWithRecovery(aiAnalysisPromise, (aiResult) => saveEnrichedAiResult(report, aiResult)).then((saved) => {
+        if (!saved) notify("AI analysis finished but could not be saved. Retry AI check once analysis settles, or reopen this room.");
+      });
     } finally {
       generationLockRef.current = false;
       setIsGeneratingReport(false);
@@ -513,6 +576,26 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
               <div className="ai-analysis-message" role="status">
                 <p>AI analysis is taking longer than usual.</p>
                 <button className="button subtle" type="button" onClick={checkAgain}>Check again</button>
+                {/* Release-hardening audit finding LIFECYCLE-01: a room can
+                    reach this exhausted-poll state either because analysis
+                    is genuinely still running elsewhere (another tab/device
+                    — "Check again" alone is correct there) or because the
+                    session that started it closed/crashed/failed to save
+                    before ever writing "ready" or "failed" — permanently
+                    stranding this room at "processing" with no other code
+                    path that will ever move it. retryAiCheck is idempotent
+                    (re-runs analysis from the already-persisted text and
+                    resaves via the same UPSERT saveEnrichedAiResult uses),
+                    so offering it here too is always safe, and is the one
+                    thing that can recover a genuinely stuck room — the
+                    same action already trusted for the "failed" branch
+                    below, now also reachable before a "failed" status ever
+                    gets written, which is exactly the gap that let a room
+                    get permanently stuck without ever reaching "failed" in
+                    the first place. */}
+                <button className="button subtle" type="button" onClick={() => retryAiCheck(occupant.report!.id)} disabled={retryingAi}>
+                  {retryingAi ? "Checking…" : "Retry AI check"}
+                </button>
               </div>
             ) : (
               <div className="ai-analysis-loading" role="status" aria-live="polite">

@@ -50,16 +50,21 @@ test("NO PROVISIONAL SCORE: saveReport(report) — the call that persists and di
   assert.equal(occurrences, 1, "a report must be saved exactly once for its similarity result — a second occurrence would mean a provisional score is shown and later silently replaced");
 });
 
-test("NO PROVISIONAL SCORE: the AI-writing merge uses storeReport/saveReportRemote directly, never a second saveReport(report) call, keeping the similarity axis untouched after its one save", async () => {
+test("NO PROVISIONAL SCORE: the AI-writing merge persists through persistAiCompletion, never a second saveReport(report) call, keeping the similarity axis untouched after its one save", async () => {
   const page = await readFile("app/page.tsx", "utf8");
 
-  const aiMergeBlockStart = page.indexOf("void aiAnalysisPromise.then(async (aiResult) => {");
+  // Release-hardening audit finding LIFECYCLE-01: storeReport/saveReportRemote
+  // are no longer called directly here — both the local best-effort cache
+  // write and the authoritative remote save are bundled into one call
+  // (persistAiCompletion) that can never throw, ending the chain in a real
+  // .catch() so this can never become an unhandled rejection either.
+  const aiMergeBlockStart = page.indexOf("void aiAnalysisPromise");
   assert.ok(aiMergeBlockStart > -1, "expected the decoupled AI-writing merge block to exist");
   const aiMergeBlockEnd = page.indexOf("});", aiMergeBlockStart);
-  const aiMergeBlock = page.slice(aiMergeBlockStart, aiMergeBlockEnd);
+  const aiMergeBlock = page.slice(aiMergeBlockStart, aiMergeBlockEnd + 3);
 
-  assert.match(aiMergeBlock, /storeReport\(enriched\)/);
-  assert.match(aiMergeBlock, /saveReportRemote\(enriched/);
+  assert.match(aiMergeBlock, /await persistAiCompletion\(enriched, enrichedSummary\);/);
+  assert.match(aiMergeBlock, /\.catch\(\(error\) => \{/, "the chain must end in a real .catch(), never leaving a rejection unhandled");
   assert.doesNotMatch(aiMergeBlock, /\bsaveReport\(/, "the AI merge must never call saveReport() again — that would re-run the similarity/academic/unified-score save path for an axis that has nothing to do with it");
 });
 
@@ -78,5 +83,5 @@ test("AI DECOUPLING: the AI-writing analysis promise is created before the acade
     /await aiAnalysisPromise/,
     "the AI-writing promise must not be awaited before the similarity report is saved — it is optional and independent",
   );
-  assert.ok(navigateAfterSaveIndex > -1 && navigateAfterSaveIndex < page.indexOf("void aiAnalysisPromise.then"), "the report is navigated to/shown before the AI result is ever merged in");
+  assert.ok(navigateAfterSaveIndex > -1 && navigateAfterSaveIndex < page.indexOf("void aiAnalysisPromise"), "the report is navigated to/shown before the AI result is ever merged in");
 });
