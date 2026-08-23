@@ -2,8 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   primarySimilarityScore,
+  primaryMatchedWordCount,
+  primaryResultLabel,
   hasUnifiedSimilarity,
   unifiedEvidenceSummary,
+  buildReportSummary,
 } from "../lib/report-types.ts";
 
 /**
@@ -114,4 +117,100 @@ test("EVIDENCE SUMMARY: all three sources plus overlap still lists archive once"
 test("EVIDENCE SUMMARY: no matched words at all never renders a blank string", () => {
   const summary = unifiedEvidenceSummary(unified({ archiveOnlyWords: 0, liveAcademicOnlyWords: 0, previousUploadOnlyWords: 0, overlapWords: 0 }));
   assert.equal(summary, "no matched sources");
+});
+
+/**
+ * Release-hardening audit finding SIM-01: regression coverage for the
+ * archive-only headline/matched-word-count bug — a real production report
+ * showed 100% via corpus-source match (unifiedSimilarity.unifiedScore) on
+ * every surface EXCEPT the main "Similarity result" headline and its
+ * matched-word-count sentence, which read archiveOverlapScore/
+ * archiveMatchedWordCount directly (0% and 30 words) instead of
+ * primarySimilarityScore/primaryMatchedWordCount. These tests cover the two
+ * new selectors this fix adds; tests/similarity-result-consistency.test.mjs
+ * covers the rendered components that now use them.
+ */
+
+test("SIM-01 archive 0% + corpus source 100%: primarySimilarityScore reflects the unified corpus-source result, never the archive-only 0%", () => {
+  const report = baseReport({
+    score: 0,
+    archiveScore: 0,
+    matchedWordCount: 0,
+    unifiedSimilarity: unified({
+      unifiedScore: 100,
+      uniqueMatchedWords: 1000,
+      archiveOnlyWords: 0,
+      liveAcademicOnlyWords: 0,
+      previousUploadOnlyWords: 1000,
+      overlapWords: 0,
+    }),
+  });
+  assert.equal(primarySimilarityScore(report), 100);
+  assert.notEqual(primarySimilarityScore(report), report.archiveScore);
+});
+
+test("SIM-01 MATCHED-WORD COUNT: primaryMatchedWordCount falls back to archiveMatchedWordCount when no unifiedSimilarity is present", () => {
+  const report = baseReport({ matchedWordCount: 30 });
+  assert.equal(hasUnifiedSimilarity(report), false);
+  assert.equal(primaryMatchedWordCount(report), 30);
+});
+
+test("SIM-01 MATCHED-WORD COUNT: primaryMatchedWordCount reflects the unified, already-deduplicated total, not the tiny archive-only figure", () => {
+  // Mirrors the real observed case: archive alone only matched 30 words, but
+  // the combined/deduplicated result (archive + a corpus-source match) is
+  // 9,895 — the number a matched-word sentence next to a 100% headline must
+  // cite, not 30.
+  const report = baseReport({
+    matchedWordCount: 30,
+    unifiedSimilarity: unified({ unifiedScore: 100, uniqueMatchedWords: 9895, archiveOnlyWords: 30, previousUploadOnlyWords: 9865, liveAcademicOnlyWords: 0, overlapWords: 0 }),
+  });
+  assert.equal(primaryMatchedWordCount(report), 9895);
+});
+
+test("SIM-01 DEDUPLICATED TOTAL: archive overlap plus corpus overlap at the same positions counts once in primaryMatchedWordCount, never double-counted", () => {
+  // overlapWords > 0 here means computeUnifiedSimilarity already found the
+  // same submitted passage via more than one source and counted it once —
+  // uniqueMatchedWords (200) is deliberately less than the naive sum of
+  // every bucket (archiveOnlyWords 50 + previousUploadOnlyWords 50 +
+  // overlapWords 100 = 200, vs. a wrong double-count of 300 if overlap were
+  // added twice). This proves the display layer surfaces the already-
+  // deduplicated figure rather than re-summing the per-source breakdown.
+  const report = baseReport({
+    unifiedSimilarity: unified({
+      unifiedScore: 20,
+      uniqueMatchedWords: 200,
+      archiveOnlyWords: 50,
+      previousUploadOnlyWords: 50,
+      liveAcademicOnlyWords: 0,
+      overlapWords: 100,
+    }),
+  });
+  assert.equal(primaryMatchedWordCount(report), 200);
+});
+
+test("SIM-01 LABEL: primaryResultLabel is 'Similarity result' for the archive-only fallback and 'TurnitPlus Similarity' once unified is computed", () => {
+  const legacy = baseReport();
+  const withUnified = baseReport({ unifiedSimilarity: unified() });
+  assert.equal(primaryResultLabel(legacy), "Similarity result");
+  assert.equal(primaryResultLabel(withUnified), "TurnitPlus Similarity");
+});
+
+test("SIM-01 ROOM/HISTORY SUMMARY: buildReportSummary carries the combined result additively — primaryScore/isUnified reflect corpus-source evidence, archiveScore stays the pure archive value untouched", () => {
+  const report = baseReport({
+    score: 0,
+    archiveScore: 0,
+    unifiedSimilarity: unified({ unifiedScore: 100, uniqueMatchedWords: 1000, previousUploadOnlyWords: 1000, archiveOnlyWords: 0, liveAcademicOnlyWords: 0, overlapWords: 0 }),
+  });
+  const summary = buildReportSummary(report);
+  assert.equal(summary.archiveScore, 0, "the persisted archive_score column must keep receiving the pure archive value — other readers (lib/developer-repo.ts) depend on this");
+  assert.equal(summary.primaryScore, 100);
+  assert.equal(summary.isUnified, true);
+});
+
+test("SIM-01 ROOM/HISTORY SUMMARY: a legacy/archive-only report gets primaryScore equal to archiveScore and isUnified false, never a contradicting value", () => {
+  const report = baseReport({ archiveScore: 18 });
+  const summary = buildReportSummary(report);
+  assert.equal(summary.archiveScore, 18);
+  assert.equal(summary.primaryScore, 18);
+  assert.equal(summary.isUnified, false);
 });

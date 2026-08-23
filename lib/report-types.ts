@@ -312,6 +312,34 @@ export function hasUnifiedSimilarity(report: SimilarityReport): boolean {
 }
 
 /**
+ * Release-hardening audit finding SIM-01: the word-count partner to
+ * primarySimilarityScore — same fallback rule (unified when computed,
+ * archive-only otherwise), so a matched-word-count sentence displayed next
+ * to primarySimilarityScore's percentage can never cite a different,
+ * contradicting source's word count. Before this existed, several surfaces
+ * paired primarySimilarityScore (correctly preferring unifiedSimilarity)
+ * with archiveMatchedWordCount (never preferring it) — a report whose
+ * unified result came primarily from live-academic or prior-submission
+ * evidence, not the archive, showed a headline percentage next to a matched-
+ * word count that described a mostly-unrelated, much smaller figure.
+ */
+export function primaryMatchedWordCount(report: SimilarityReport): number {
+  return report.unifiedSimilarity?.uniqueMatchedWords ?? archiveMatchedWordCount(report);
+}
+
+/**
+ * The customer-facing label paired with primarySimilarityScore —
+ * "TurnitPlus Similarity" whenever the unified result is what's being
+ * shown, "Similarity result" for the archive-only fallback. Single source
+ * for wording that was previously duplicated inline (and could drift) in
+ * app/reports/[id]/report-detail-shell.tsx and, after this fix,
+ * components/report/similarity-report-papers.tsx's OverviewReport.
+ */
+export function primaryResultLabel(report: SimilarityReport): string {
+  return hasUnifiedSimilarity(report) ? "TurnitPlus Similarity" : "Similarity result";
+}
+
+/**
  * Phase 7 PRIORITY 6: a short, plain-language list of which evidence
  * channels contributed matched words to the unified score — for surfaces
  * (the receipt PDF) that show one summary line rather than the full
@@ -411,6 +439,17 @@ export function buildReportSummary(report: SimilarityReport): ReportSummary {
     createdAt: report.created,
     wordCount: report.wordCount,
     archiveScore: archiveOverlapScore(report),
+    // Release-hardening audit finding SIM-01: additive only — archiveScore
+    // above is untouched, still the pure archive-only value. Whenever this
+    // function is called, the caller already holds the full report (see
+    // ReportSummary's own comment on primaryScore for why the lightweight,
+    // DB-only room/history endpoints never go through this function at
+    // all), so surfacing primarySimilarityScore/hasUnifiedSimilarity here
+    // costs nothing extra and lets any room/history card display the same
+    // combined result the detail page would show, instead of only ever
+    // the archive component.
+    primaryScore: primarySimilarityScore(report),
+    isUnified: hasUnifiedSimilarity(report),
     scoreBand: report.scoreBand,
     aiScore: aiSignal.value,
     aiTone: aiSignal.tone,

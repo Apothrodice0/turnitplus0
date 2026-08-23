@@ -14,8 +14,11 @@ import type { ExternalAcademicEvidence } from "@/lib/academic-search/types";
 import { similarityScoreBand } from "@/lib/ai-core";
 import {
   PRIMARY_SIMILARITY_BAND_LABELS,
-  archiveMatchedWordCount,
   archiveOverlapScore,
+  hasUnifiedSimilarity,
+  primaryMatchedWordCount,
+  primaryResultLabel,
+  primarySimilarityScore,
   sourceMatchedWordCount,
   type HighlightRange,
   type HistoricalSubmissionMatchEntry,
@@ -439,24 +442,44 @@ export function UnifiedSimilaritySection({ report }: { report: SimilarityReport 
   );
 }
 
+/**
+ * Release-hardening audit finding SIM-01: this headline previously read
+ * archiveOverlapScore/archiveMatchedWordCount directly — the archive-only
+ * component score — even for a report whose authoritative combined result
+ * (report.unifiedSimilarity, rendered immediately below by
+ * UnifiedSimilaritySection) differed, sometimes dramatically (observed:
+ * corpus-source match 100%, sidebar 100%, TurnitPlus Similarity section
+ * 100%, this headline 0%). primarySimilarityScore/primaryMatchedWordCount/
+ * primaryResultLabel (lib/report-types.ts) already existed and were already
+ * used correctly by app/reports/[id]/report-detail-shell.tsx's sidebar score
+ * card — this component was simply never wired to them. Both now share the
+ * exact same selection, so every surface derived from this report agrees.
+ */
 export function OverviewReport({ report }: { report: SimilarityReport }) {
-  const overlapScore = archiveOverlapScore(report);
-  const similarityVerdict = similarityScoreBand(overlapScore);
+  const primaryScore = primarySimilarityScore(report);
+  const primaryLabel = primaryResultLabel(report);
+  const isUnified = hasUnifiedSimilarity(report);
+  const similarityVerdict = similarityScoreBand(primaryScore);
   const wikipediaMatches = report.webCheck?.phrasesMatched ?? 0;
   return (
     <article className="report-paper overview-paper">
       <ReportPageHeader report={report} page={2} label="Integrity Overview" />
       <div className="paper-content">
-        <section className={`similarity-heading ${similarityVerdict ? `similarity-verdict-${similarityVerdict.key}` : ""}`}>
+        <section
+          className={`similarity-heading ${similarityVerdict ? `similarity-verdict-${similarityVerdict.key}` : ""}`}
+          aria-label={`${primaryScore}% ${primaryLabel}${similarityVerdict ? `, ${PRIMARY_SIMILARITY_BAND_LABELS[similarityVerdict.key]}` : ""}`}
+        >
           <h2>
-            <span>{overlapScore}%</span> Similarity result
+            <span>{primaryScore}%</span> {primaryLabel}
             {similarityVerdict && <em>{PRIMARY_SIMILARITY_BAND_LABELS[similarityVerdict.key]}</em>}
           </h2>
           <aside className="archive-scope-note">
-            Similarity result: {overlapScore}% — based on identified overlapping passages and verified academic sources.
+            {isUnified
+              ? <>TurnitPlus Similarity combines text found through TurnitPlus&apos;s own checks, verified external academic sources, and eligible previous TurnitPlus submissions into one result — the same submitted passage found by more than one source counts once.</>
+              : <>Similarity result: {primaryScore}% — based on identified overlapping passages and verified academic sources.</>}
           </aside>
           <p>
-            TurnitPlus found {archiveMatchedWordCount(report).toLocaleString()} matched words across identified sources.
+            TurnitPlus found {primaryMatchedWordCount(report).toLocaleString()} matched words across identified sources.
             Review the highlighted passages and named sources to see exactly what produced the result.
             {wikipediaMatches > 0 && <> {wikipediaMatches} exact Wikipedia phrase match{wikipediaMatches === 1 ? "" : "es"} are shown separately and do not change the similarity result.</>}
             {report.excludedDocuments > 0 && (

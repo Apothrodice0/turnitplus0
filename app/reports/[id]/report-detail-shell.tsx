@@ -10,8 +10,9 @@ import { deleteStoredReport, getStoredReportById } from "@/lib/report-store";
 import {
   PRIMARY_SIMILARITY_BAND_LABELS,
   aiSignalDisplay,
-  archiveMatchedWordCount,
   hasUnifiedSimilarity,
+  primaryMatchedWordCount,
+  primaryResultLabel,
   primarySimilarityScore,
   type ReportMode,
   type ResultTab,
@@ -169,7 +170,7 @@ export function ReportDetailShell({
 
   const primaryScore = primarySimilarityScore(report);
   const isUnified = hasUnifiedSimilarity(report);
-  const primaryLabel = isUnified ? "TurnitPlus Similarity" : "Similarity result";
+  const primaryLabel = primaryResultLabel(report);
   const similarityVerdict = similarityScoreBand(primaryScore);
   const aiSignal = aiSignalDisplay(report);
   const academicEvidenceCount = report.externalAcademicEvidence ? dedupeExternalAcademicEvidence(report.externalAcademicEvidence).length : 0;
@@ -283,7 +284,12 @@ export function ReportDetailShell({
         )}
 
         <aside className="report-inspector">
-          <div className={`inspector-score ${mode === "ai" ? `ai-signal-card-${aiSignal.tone}` : similarityVerdict ? `similarity-verdict-${similarityVerdict.key}` : ""}`}>
+          <div
+            className={`inspector-score ${mode === "ai" ? `ai-signal-card-${aiSignal.tone}` : similarityVerdict ? `similarity-verdict-${similarityVerdict.key}` : ""}`}
+            aria-label={mode === "ai"
+              ? `${aiSignal.value === null ? "no result" : `${aiSignal.value}%`} AI writing score`
+              : `${primaryScore}% ${primaryLabel}${similarityVerdict ? `, ${PRIMARY_SIMILARITY_BAND_LABELS[similarityVerdict.key]}` : ""}`}
+          >
             <span>{mode === "ai" ? "AI writing score" : primaryLabel}</span>
             <strong>{mode === "ai" ? (aiSignal.value === null ? "—" : `${aiSignal.value}%`) : `${primaryScore}%`}</strong>
             {mode === "ai" && <p className="inspector-writing-estimate">{aiSignal.label}</p>}
@@ -304,7 +310,7 @@ export function ReportDetailShell({
               {isUnified
                 ? <>TurnitPlus Similarity combines text found through TurnitPlus&apos;s own checks, verified external academic sources, and eligible previous TurnitPlus submissions into one result — the same submitted passage found by more than one source counts once.</>
                 : <>The similarity result is based on identified overlapping passages and verified academic sources.</>}
-              {" "}{archiveMatchedWordCount(report).toLocaleString()} words were matched across {report.sources.length} retained source{report.sources.length === 1 ? "" : "s"}.
+              {" "}{primaryMatchedWordCount(report).toLocaleString()} words were matched across {report.sources.length} retained source{report.sources.length === 1 ? "" : "s"}.
               {(report.webCheck?.phrasesMatched ?? 0) > 0 && ` Wikipedia evidence is shown separately and does not change this result.`}
               {" "}Language detected: {report.features.detectedLanguage}. Longest matched span: {report.features.longestMatchedSpan} words.
             </p>}
