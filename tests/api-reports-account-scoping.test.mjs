@@ -132,18 +132,97 @@ const { id: reportA } = await postReport(deviceA);
 
   console.log('scenario A (signup claim + leak-fix regression) passed');
 
-  // Scenario D: an anonymous re-save of an already-claimed report must not
-  // un-claim it (COALESCE(excluded.user_id, saved_reports.user_id)).
-  const { res: reSaveRes } = await postReport(deviceA, { id: reportA, title: 'scoping-updated.pdf' });
-  assert.equal(reSaveRes.status, 200);
-  const authedListAfterResave = await listReports({ cookie: cookieA });
-  const authedListAfterResaveBody = await authedListAfterResave.json();
-  assert.equal(authedListAfterResaveBody.reports.length, 1, 'an anonymous re-save must not unclaim the report');
-  assert.equal(authedListAfterResaveBody.reports[0].title, 'scoping-updated.pdf', 'the anonymous re-save should still update the report content');
-  const anonListAfterResave = await listReports({ deviceKey: deviceA });
-  const anonListAfterResaveBody = await anonListAfterResave.json();
-  assert.equal(anonListAfterResaveBody.reports.length, 0, 'the report must remain invisible via the anonymous path after the re-save');
-  console.log('scenario D (upsert preserves an existing claim) passed');
+  // Release-hardening audit finding AUTHZ-01 (corrected), scenario D: an
+  // ANONYMOUS re-save of an already-claimed (owned) report must now be
+  // REJECTED outright, never silently accepted. An earlier version of this
+  // fix permitted this specific case (to preserve a since-recognized-as-
+  // wrong assumption about the Wikipedia-enrichment double-save), which
+  // still let an unauthenticated caller overwrite an account-owned
+  // report's content without ever claiming it — not acceptable. The
+  // legitimate double-save flow carries the SAME session as the first save
+  // (same-origin fetch, cookies included by default) and is covered
+  // separately below; if a user genuinely signs out between the two saves,
+  // rejecting the second one is the correct, safe behavior, not a bug.
+  const beforeAnonResave = await getReport(reportA, { cookie: cookieA });
+  const beforeAnonResaveBody = await beforeAnonResave.json();
+
+  const { res: anonResaveRes } = await postReport(deviceA, { id: reportA, title: 'ANON-OVERWRITE-ATTEMPT' });
+  assert.equal(anonResaveRes.status, 404, 'an anonymous resave of an account-owned report must be rejected, not silently accepted');
+  const anonResaveBody = await anonResaveRes.json();
+  assert.equal(anonResaveBody.error, 'Report not found', 'the rejection must not reveal that this report belongs to someone else');
+
+  const afterAnonResave = await getReport(reportA, { cookie: cookieA });
+  const afterAnonResaveBody = await afterAnonResave.json();
+  assert.deepEqual(afterAnonResaveBody, beforeAnonResaveBody, 'the report must be byte-for-byte unchanged after the rejected anonymous resave attempt');
+  assert.notEqual(JSON.stringify(afterAnonResaveBody).includes('ANON-OVERWRITE'), true, 'the malicious title must never have been written');
+
+  const authedListAfterAnonResave = await listReports({ cookie: cookieA });
+  const authedListAfterAnonResaveBody = await authedListAfterAnonResave.json();
+  assert.equal(authedListAfterAnonResaveBody.reports.length, 1, 'the report must still belong to its real owner, unaffected by the rejected attempt');
+  assert.equal(authedListAfterAnonResaveBody.reports[0].id, reportA);
+
+  const anonListAfterAnonResave = await listReports({ deviceKey: deviceA });
+  const anonListAfterAnonResaveBody = await anonListAfterAnonResave.json();
+  assert.equal(anonListAfterAnonResaveBody.reports.length, 0, 'the report must remain invisible via the anonymous device-key path — ownership was never transferred either direction');
+  console.log('scenario D (an anonymous resave of an account-owned report is rejected, ownership never transferred) passed');
+
+  // Release-hardening audit finding AUTHZ-01, scenario E: a DIFFERENT
+  // signed-in account that knows reportA's exact (device_key, id) — the
+  // real identifiers, not guessed — must be rejected outright on resave,
+  // and must never modify or claim the row, even though it IS a real,
+  // authenticated session (same generic 404 as scenario D's anonymous
+  // case — see app/api/reports/route.ts's own comment on this policy).
+  const { cookie: cookieIntruder } = await signup('scope-intruder@example.com', 'scoping-device-intruder');
+  assert.ok(cookieIntruder, 'the intruder account must have its own real, valid session');
+
+  const beforeIntrusion = await getReport(reportA, { cookie: cookieA });
+  const beforeIntrusionBody = await beforeIntrusion.json();
+
+  const { res: intrusionRes } = await postReport(deviceA, {
+    id: reportA,
+    title: 'HIJACKED-BY-ACCOUNT-B',
+    cookie: cookieIntruder,
+  });
+  assert.equal(intrusionRes.status, 404, 'a different authenticated account resaving another account\'s exact (device_key, id) must be rejected, not silently accepted');
+  const intrusionBody = await intrusionRes.json();
+  assert.equal(intrusionBody.error, 'Report not found', 'the rejection must not reveal that this report belongs to someone else');
+
+  const afterIntrusion = await getReport(reportA, { cookie: cookieA });
+  const afterIntrusionBody = await afterIntrusion.json();
+  assert.deepEqual(afterIntrusionBody, beforeIntrusionBody, 'the report must be byte-for-byte unchanged after the rejected hijack attempt');
+  assert.notEqual(JSON.stringify(afterIntrusionBody).includes('HIJACKED'), true, 'the malicious title must never have been written');
+
+  const intruderList = await listReports({ cookie: cookieIntruder });
+  const intruderListBody = await intruderList.json();
+  assert.equal(intruderListBody.reports.length, 0, 'the intruder account must not gain visibility into a report it failed to hijack');
+
+  const ownerListAfterIntrusion = await listReports({ cookie: cookieA });
+  const ownerListAfterIntrusionBody = await ownerListAfterIntrusion.json();
+  assert.equal(ownerListAfterIntrusionBody.reports.length, 1, 'the real owner must still see exactly their own report');
+  assert.equal(ownerListAfterIntrusionBody.reports[0].id, reportA);
+
+  console.log('scenario E (a different authenticated account cannot hijack another account\'s report, even knowing the exact identifiers) passed');
+
+  // Release-hardening audit finding AUTHZ-01, scenario F: the SAME
+  // authenticated owner resaving their own report must keep working
+  // exactly as before — this is both the ordinary "edit and resave" flow
+  // and the real shape of the Wikipedia-enrichment double-save (both
+  // fetches carry the same session, since it's the same signed-in browser
+  // saving the same report id twice in a row).
+  const { res: ownerResaveRes } = await postReport(deviceA, {
+    id: reportA,
+    title: 'scoping-updated-by-real-owner.pdf',
+    cookie: cookieA,
+  });
+  assert.equal(ownerResaveRes.status, 200, 'the real, authenticated owner must still be able to resave their own report');
+
+  const ownerListAfterOwnerResave = await listReports({ cookie: cookieA });
+  const ownerListAfterOwnerResaveBody = await ownerListAfterOwnerResave.json();
+  assert.equal(ownerListAfterOwnerResaveBody.reports.length, 1, 'ownership must be completely unaffected by a same-owner resave');
+  assert.equal(ownerListAfterOwnerResaveBody.reports[0].id, reportA);
+  assert.equal(ownerListAfterOwnerResaveBody.reports[0].title, 'scoping-updated-by-real-owner.pdf');
+
+  console.log('scenario F (the same authenticated owner can still resave their own report — the real double-save shape) passed');
 
   // Scenario B: a second device belonging to the same account, claimed via
   // login rather than signup, and the resulting cross-device list.
@@ -177,6 +256,20 @@ const { id: reportA } = await postReport(deviceA);
   assert.equal(bodyC.reports.length, 1);
   assert.equal(bodyC.reports[0].id, reportC);
   console.log('scenario C (never-authenticated device unaffected) passed');
+
+  // Release-hardening audit finding AUTHZ-01, scenario G: a report whose
+  // existing owner is genuinely NULL (never claimed by anyone) must keep
+  // following its existing, legitimate anonymous device-key resave flow —
+  // the ownership guard only ever applies once an owner exists.
+  const { res: anonResaveOwnResRes } = await postReport(deviceC, { id: reportC, title: 'scoping-c-updated.pdf' });
+  assert.equal(anonResaveOwnResRes.status, 200, 'an anonymous resave of a never-claimed (user_id IS NULL) report must still succeed');
+
+  const listCAfterResave = await listReports({ deviceKey: deviceC });
+  const bodyCAfterResave = await listCAfterResave.json();
+  assert.equal(bodyCAfterResave.reports.length, 1, 'still exactly one report, updated in place, not duplicated');
+  assert.equal(bodyCAfterResave.reports[0].id, reportC);
+  assert.equal(bodyCAfterResave.reports[0].title, 'scoping-c-updated.pdf', 'the anonymous resave of an unclaimed report must actually update the content');
+  console.log('scenario G (an anonymous resave of a never-claimed report still follows the existing legitimate flow) passed');
 }
 
 for (const suffix of ['', '-wal', '-shm']) {

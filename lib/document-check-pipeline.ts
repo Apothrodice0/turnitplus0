@@ -208,6 +208,13 @@ export async function extractFileText(file: File, onProgress: (progress: number,
   if (extension === "pdf") {
     const pdfjs = await import("pdfjs-dist");
     pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
+    // Release-hardening audit (DEP-01): enableScripting is NOT a
+    // getDocument() option in this pdfjs-dist version (belongs only to
+    // AnnotationLayerBuilder/PDFViewer, never imported here) — see
+    // lib/corpus-extraction-worker.ts's own comment on the same finding.
+    // The real fix is the pdfjs-dist version pin (>=6.2.108, patches
+    // GHSA-hq66-cqwq-w95j); text-extraction-only usage like this never
+    // reaches the scripting-capable rendering subsystem regardless.
     const document = await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise;
     return extractPdfTextDocument(document, (pageNumber, pageCount) => {
       onProgress(8 + Math.round((pageNumber / pageCount) * 20), `Reading page ${pageNumber} of ${pageCount}`);

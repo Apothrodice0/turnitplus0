@@ -61,6 +61,17 @@ export async function runCorpusExtraction(request: CorpusExtractionWorkerRequest
         // pdfjs-dist explicitly rejects a Node Buffer here ("Please provide
         // binary data as Uint8Array, rather than Buffer") even though
         // Buffer is a Uint8Array subclass — it must be a genuine Uint8Array.
+        // Release-hardening audit (DEP-01): enableScripting is NOT a
+        // getDocument()/DocumentInitParameters option in this pdfjs-dist
+        // version — TypeScript itself rejects it there. It exists only on
+        // AnnotationLayerBuilder/PDFViewer (web/annotation_layer_builder.d.ts,
+        // web/pdf_viewer.d.ts), pdfjs's interactive-rendering subsystem,
+        // which this file never imports — see
+        // tests/pdfjs-scripting-disabled.test.mjs's structural proof that
+        // no code path in this app ever does. Embedded-PDF-JS execution is
+        // therefore unreachable here regardless of any flag; the real fix
+        // is the pdfjs-dist version pin itself (>=6.2.108, patches
+        // GHSA-hq66-cqwq-w95j).
         document = await pdfjs.getDocument({ data: new Uint8Array(bytes) }).promise;
       } catch (err) {
         if (isPasswordException(err)) {

@@ -76,6 +76,9 @@ export const DEFAULT_HTTP_CONTENT_RETRIEVER_CONFIG: HttpContentRetrieverConfig =
 async function loadPdfjsDocument(bytes: Uint8Array): Promise<PdfTextDocument> {
   await ensurePdfjsNodePolyfills();
   const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+  // Release-hardening audit (DEP-01): enableScripting is NOT a
+  // getDocument() option in this pdfjs-dist version — see
+  // lib/corpus-extraction-worker.ts's own comment on the same finding.
   const document = await pdfjs.getDocument({ data: bytes }).promise;
   return document as unknown as PdfTextDocument;
 }

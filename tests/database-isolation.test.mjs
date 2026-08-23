@@ -40,7 +40,6 @@ const TURSO_SENSITIVE_ROUTE_IMPORTS = [
   "app/api/auth/login/route",
   "app/api/auth/logout/route",
   "app/api/auth/me/route",
-  "app/api/ingest/route",
 ];
 
 // schema-drift.test.mjs deliberately does something different: it allows
@@ -108,13 +107,22 @@ test("schema-drift.test.mjs's separate, deliberate remote-access guard is still 
   );
 });
 
-test("tests/api-ingest.test.mjs neutralizes TURSO_DATABASE_URL before its first route call, not just somewhere in the file", () => {
-  const source = fs.readFileSync(path.join(testsDir, "api-ingest.test.mjs"), "utf8");
-  const overrideIndex = source.search(/delete\s+process\.env\.TURSO_DATABASE_URL/);
-  const firstRouteCallIndex = source.indexOf("route.POST(");
-  assert.ok(overrideIndex >= 0, "the TURSO_DATABASE_URL override must exist");
-  assert.ok(firstRouteCallIndex >= 0, "the route must actually be called somewhere, or this file no longer tests what it claims to");
-  assert.ok(overrideIndex < firstRouteCallIndex, "TURSO_DATABASE_URL must be cleared before the route is ever called, not after");
+// Release-hardening audit finding INGEST-01: app/api/ingest/route.ts was
+// closed (no legitimate runtime caller existed) and no longer imports
+// anything DB-related at all, so it dropped out of TURSO_SENSITIVE_ROUTE_IMPORTS
+// above — the override-before-first-call test that used to guard this file
+// is replaced with a stronger, more durable property: the closed route must
+// never reference TURSO_DATABASE_URL again, so there is nothing left to
+// neutralize. tests/api-ingest.test.mjs's own structural test independently
+// re-checks this same file for any DB-touching import at all, not just this
+// one variable name.
+test("the closed app/api/ingest/route.ts never references TURSO_DATABASE_URL", () => {
+  const source = fs.readFileSync(path.join(process.cwd(), "app/api/ingest/route.ts"), "utf8");
+  assert.doesNotMatch(
+    source,
+    /TURSO_DATABASE_URL/,
+    "the closed ingest route must not reference TURSO_DATABASE_URL — it should be fully DB-agnostic, not merely isolation-safe",
+  );
 });
 
 test("process.env.TURSO_DATABASE_URL is not left set in this test process by the time module-level setup finishes", () => {

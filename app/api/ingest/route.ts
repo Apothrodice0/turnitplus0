@@ -1,72 +1,33 @@
 import { NextResponse } from 'next/server';
-import path from 'path';
-import { createHash } from 'node:crypto';
-import { ingestDocument, ingestDocumentLibsql } from '../../../lib/ingest';
-import { checkRate } from '../../../lib/rate-limit';
 
-const MAX_BYTES = 200_000; // 200KB request size limit
-
-function sha256Hex(value: string) {
-  return createHash('sha256').update(value, 'utf8').digest('hex');
+/**
+ * Closed (release-hardening audit finding INGEST-01): this endpoint had no
+ * authentication, no real schema validation (`body as any`), and a
+ * rate limiter that read the attacker-controlled first X-Forwarded-For hop
+ * instead of lib/client-ip.ts's hardened resolver — while being reachable
+ * by any anonymous caller to write into the production database.
+ *
+ * No legitimate runtime caller was found anywhere in this codebase before
+ * this change: a Graphify call-graph query and an exhaustive grep for any
+ * fetch to "/api/ingest" both returned nothing beyond this route's own test
+ * file, README documentation, and unrelated comments. The corpus-
+ * contribution library this route wrapped (lib/ingest.ts —
+ * applyMigrations/ingestDocument/ingestDocumentLibsql) is untouched and
+ * remains fully usable directly by offline tooling (tools/build-index.ts
+ * and friends); only the public HTTP surface is closed.
+ *
+ * Every method returns a bare 404 with no body — matching this codebase's
+ * own "don't reveal this endpoint exists" convention already used for a
+ * failed cron-secret check (see app/api/internal/*-sweep/route.ts) — and
+ * this file imports nothing DB-related, so a request here can never reach
+ * a database regardless of method, body, or headers.
+ */
+function closed(): Response {
+  return new NextResponse(null, { status: 404 });
 }
 
-export async function POST(request: Request) {
-  try {
-    // Rate limiting
-    const forwarded = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || 'unknown';
-    const clientIp = forwarded.split(',')[0].trim();
-    const rate = await checkRate(clientIp);
-    if (!rate.allowed) {
-      return new NextResponse(JSON.stringify({ error: 'Too many requests' }), { status: 429, headers: { 'Retry-After': String(rate.retryAfter) } });
-    }
-
-    // Reject large payloads using Content-Length if present
-    const contentLength = request.headers.get('content-length');
-    if (contentLength && Number(contentLength) > MAX_BYTES) {
-      return new NextResponse(JSON.stringify({ error: 'Payload too large' }), { status: 413 });
-    }
-
-    const body = await request.json().catch(() => null);
-    if (!body || typeof body !== 'object') return new NextResponse(JSON.stringify({ error: 'Invalid JSON' }), { status: 400 });
-    const { text, contributionPolicyVersion, provenanceSha256, id, title } = body as any;
-    if (!contributionPolicyVersion || typeof contributionPolicyVersion !== 'string') {
-      return new NextResponse(JSON.stringify({ error: 'contributionPolicyVersion is required' }), { status: 400 });
-    }
-    if (!text || typeof text !== 'string' || text.trim().length === 0) {
-      return new NextResponse(JSON.stringify({ error: 'text is required' }), { status: 400 });
-    }
-    if (text.length > MAX_BYTES) {
-      return new NextResponse(JSON.stringify({ error: 'Payload too large' }), { status: 413 });
-    }
-
-    // Validate optional provenanceSha256
-    const computed = sha256Hex(text);
-    if (provenanceSha256 && provenanceSha256 !== computed) {
-      return new NextResponse(JSON.stringify({ error: 'provenanceSha256 mismatch' }), { status: 400 });
-    }
-
-    // TURSO_DATABASE_URL selects the production libSQL path. When it is set,
-    // TURSO_AUTH_TOKEN must also be set — we never fall back to the local
-    // better-sqlite3 file in that case, since that file is not durable on
-    // Vercel and a silent fallback would look like ingestion is working while
-    // actually writing to a throwaway local database.
-    const tursoUrl = process.env.TURSO_DATABASE_URL;
-    let result;
-    if (tursoUrl) {
-      const tursoAuthToken = process.env.TURSO_AUTH_TOKEN;
-      if (!tursoAuthToken) {
-        throw new Error('TURSO_AUTH_TOKEN is required when TURSO_DATABASE_URL is set; refusing to fall back to local storage.');
-      }
-      result = await ingestDocumentLibsql({ url: tursoUrl, authToken: tursoAuthToken }, { id, title, text, contributionPolicyVersion });
-    } else {
-      // DB path from env for flexibility in tests
-      const dbPath = process.env.INGEST_DB_PATH || path.join(process.cwd(), 'data', 'turnitplus.db');
-      result = await ingestDocument(dbPath, { id, title, text, contributionPolicyVersion });
-    }
-
-    const status = result.created ? 201 : 200;
-    return new NextResponse(JSON.stringify(result), { status, headers: { 'Content-Type': 'application/json' } });
-  } catch (err) {
-    return new NextResponse(JSON.stringify({ error: err instanceof Error ? err.message : 'Internal error' }), { status: 500 });
-  }
-}
+export async function GET() { return closed(); }
+export async function POST() { return closed(); }
+export async function PUT() { return closed(); }
+export async function PATCH() { return closed(); }
+export async function DELETE() { return closed(); }

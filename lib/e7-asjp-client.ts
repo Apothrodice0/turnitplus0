@@ -130,6 +130,9 @@ export function createLiveAsjpTransport(): AsjpTransport {
 export async function extractTextFromPdfBytes(bytes: Uint8Array): Promise<string> {
   await ensurePdfjsNodePolyfills();
   const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+  // Release-hardening audit (DEP-01): enableScripting is NOT a
+  // getDocument() option in this pdfjs-dist version — see
+  // lib/corpus-extraction-worker.ts's own comment on the same finding.
   const document = await pdfjs.getDocument({ data: bytes }).promise;
   return extractPdfTextDocument(document);
 }

@@ -4,19 +4,19 @@ import path from 'path';
 import Database from 'better-sqlite3';
 import { applyMigrations, ingestDocument } from '../lib/ingest.js';
 import * as route from '../app/api/ingest/route.ts';
-import { resetRateForTest } from '../lib/rate-limit.js';
 
-// app/api/ingest/route.ts checks TURSO_DATABASE_URL *before* INGEST_DB_PATH
-// and, if set, routes to the remote libSQL client instead. If this process
-// inherited a real TURSO_DATABASE_URL from the ambient shell environment
-// (e.g. a developer's .env.local sourced into their profile, or a
-// misconfigured CI step), this test would silently write its documents into
-// that shared database instead of the local file below. Every other test
-// file that exercises a TURSO_DATABASE_URL-sensitive route sets it itself
-// (see tests/database-isolation.test.mjs, which enforces this structurally
-// so this can't silently regress); this file must too.
-delete process.env.TURSO_DATABASE_URL;
-delete process.env.TURSO_AUTH_TOKEN;
+/**
+ * Release-hardening audit finding INGEST-01: app/api/ingest/route.ts was
+ * closed — no legitimate runtime caller existed anywhere in this codebase
+ * (verified via Graphify and an exhaustive grep before this change) — see
+ * that file's own header comment. This suite proves the CLOSED contract:
+ * every method returns a bare 404 with no body, and — since the route file
+ * no longer imports anything DB-related at all — a request can never reach
+ * a database regardless of method, body, or headers. The underlying
+ * reusable library (lib/ingest.ts's applyMigrations/ingestDocument) is
+ * untouched and still exercised directly below, since offline tooling
+ * (tools/build-index.ts and friends) still depends on it.
+ */
 
 const repo = path.resolve('.');
 const drizzleDir = path.join(repo, 'drizzle');
@@ -25,69 +25,75 @@ if (fs.existsSync(dbPath)) fs.unlinkSync(dbPath);
 const db = new Database(dbPath);
 applyMigrations(db, drizzleDir);
 db.close();
-process.env.INGEST_DB_PATH = dbPath;
-// The rate limiter (lib/rate-limit.ts) resolves its DB via TURSO_DATABASE_URL
-// same as every other route, which this file deliberately deletes above to
-// exercise /api/ingest's own separate local-file fallback path. Point the
-// rate limiter's own test-only escape hatch at the same already-migrated
-// file instead (it has rate_limit_buckets from the same applyMigrations()
-// call above) — this must never be set outside tests; see
-// lib/rate-limit.ts's own comment on RATE_LIMIT_TEST_DB_URL.
-process.env.RATE_LIMIT_TEST_DB_URL = `file:${dbPath}`;
 
-await resetRateForTest('test-client');
-
-async function callRoute(body, headers = {}) {
-  const req = new Request('http://localhost/api/ingest', { method: 'POST', body: JSON.stringify(body), headers: { 'content-type': 'application/json', ...headers } });
-  // spoof ip header
-  req.headers.set('x-forwarded-for', 'test-client');
-  const res = await route.POST(req);
-  return res;
-}
-
-// valid ingestion
-const text = 'Hello this is an api test document.';
-let res = await callRoute({ text, contributionPolicyVersion: 'policy-v1' });
-assert(res.status === 201 || res.status === 200, 'status is 201 or 200');
-const json = await res.json();
-assert(json.contributionId, 'contributionId present');
-assert(!json.text, 'response does not expose text');
-
-// invalid payload
-res = await callRoute({}, {});
-assert(res.status === 400, 'invalid payload rejected');
-
-// empty text
-res = await callRoute({ text: '', contributionPolicyVersion: 'policy-v1' });
-assert(res.status === 400, 'empty text rejected');
-
-// oversized payload
-const big = 'a'.repeat(250000);
-res = await callRoute({ text: big, contributionPolicyVersion: 'policy-v1' });
-assert(res.status === 413, 'oversized payload rejected');
-
-// duplicate document
-res = await callRoute({ text, contributionPolicyVersion: 'policy-v1' });
-assert(res.status === 200 || res.status === 201, 'duplicate returns OK');
-const json2 = await res.json();
-assert(json2.documentId, 'documentId present');
-
-// mismatched supplied SHA-256
-res = await callRoute({ text, contributionPolicyVersion: 'policy-v1', provenanceSha256: 'deadbeef' });
-assert(res.status === 400, 'mismatched provenance rejected');
-
-// rate limiting: make MAX_TOKENS+1 calls quickly
-await resetRateForTest('test-client');
-for (let i = 0; i < 11; i++) {
-  res = await callRoute({ text: `call ${i}`, contributionPolicyVersion: 'policy-v1' });
-  if (i < 10) {
-    assert(res.status === 201 || res.status === 200, 'within rate limit ok');
-  } else {
-    assert(res.status === 429, 'rate limited after threshold');
+function countRows(table) {
+  const d = new Database(dbPath);
+  try {
+    return d.prepare(`SELECT COUNT(*) as cnt FROM ${table}`).get().cnt;
+  } finally {
+    d.close();
   }
 }
 
-// transaction rollback test
+async function callRoute(method, body) {
+  const init = { method };
+  if (body !== undefined) {
+    init.body = JSON.stringify(body);
+    init.headers = { 'content-type': 'application/json' };
+  }
+  const req = new Request('http://localhost/api/ingest', init);
+  const handler = route[method];
+  assert.ok(handler, `route must export a ${method} handler`);
+  return handler(req);
+}
+
+// --- the route is closed: every method returns a bare 404, no DB access ---
+
+for (const method of ['GET', 'POST', 'PUT', 'PATCH', 'DELETE']) {
+  const before = countRows('documents');
+  const body = method === 'GET' || method === 'DELETE' ? undefined : { text: 'anonymous write attempt', contributionPolicyVersion: 'policy-v1' };
+  const res = await callRoute(method, body);
+  assert.equal(res.status, 404, `${method} must return 404`);
+  const bodyText = await res.text();
+  assert.equal(bodyText, '', `${method} response body must be empty — reveals no implementation detail`);
+  const after = countRows('documents');
+  assert.equal(after, before, `${method} must never write a document row`);
+  console.log(`${method} /api/ingest: 404, empty body, zero writes — verified`);
+}
+
+// A well-formed, legitimate-looking payload must ALSO be rejected outright —
+// proves this isn't malformed-input rejection, the route is unconditionally closed.
+{
+  const before = countRows('documents');
+  const res = await callRoute('POST', {
+    text: 'looks like a totally valid ingest payload',
+    contributionPolicyVersion: 'policy-v1',
+    id: 'would-be-real-id',
+  });
+  assert.equal(res.status, 404);
+  assert.equal(await res.text(), '');
+  assert.equal(countRows('documents'), before, 'a well-formed payload must still write nothing');
+  console.log('well-formed payload still rejected outright — route is unconditionally closed');
+}
+
+// --- structural: the closed route file imports nothing DB-related ---------
+
+{
+  const source = fs.readFileSync(path.join(repo, 'app/api/ingest/route.ts'), 'utf8');
+  // Strip block/line comments first — this file's own header comment
+  // legitimately narrates the old, now-removed DB-touching imports by name
+  // as history; only the executable code must be free of them.
+  const withoutComments = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+  assert.doesNotMatch(
+    withoutComments,
+    /ingestDocument|checkRate|reports-db|createClient|process\.env\.TURSO/,
+    'the closed route\'s executable code must not import or reference any DB-touching code — a request here structurally cannot reach a database',
+  );
+  console.log('closed route file structurally has no DB-touching imports');
+}
+
+// --- the underlying reusable library is untouched and still works ----------
+
 const rollbackText = 'rollback '.repeat(2000);
 const rollbackId = 'rollback-doc';
 try {
@@ -111,6 +117,16 @@ try {
   dbAfterRollback.close();
 }
 
+// A normal, successful library-level ingest — proves the LIBRARY itself
+// (unlike the closed route) still works end to end for offline tooling.
+{
+  const text = 'Hello this is a library-level ingest test document.';
+  const result = ingestDocument(dbPath, { text, contributionPolicyVersion: 'policy-v1' });
+  assert.ok(result.documentId, 'documentId present');
+  assert.ok(result.contributionId, 'contributionId present');
+  console.log('lib/ingest.ts library-level ingestion still works end to end');
+}
+
 // cleanup
 try { fs.unlinkSync(dbPath); } catch (e) {}
-console.log('API ingestion tests passed');
+console.log('API ingestion tests passed (route closed, library intact)');
