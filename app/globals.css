@@ -2764,6 +2764,59 @@ main.report-main {
   color: var(--muted);
 }
 
+/* Production bug fix: the one room a click is currently navigating to. */
+.report-room-row-pending {
+  border-color: var(--blue);
+  cursor: default;
+}
+
+/* Every OTHER room while one is pending — inert, not just visually muted:
+   handleRoomActivate's gate refuses the click regardless, this just makes
+   that state legible instead of the row looking normally clickable. */
+.report-room-row-blocked {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.report-room-row-spinner {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  border: 2px solid #c6e8f2;
+  border-top-color: var(--blue);
+  border-radius: 50%;
+  animation: ai-spin 800ms linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .report-room-row-spinner { animation: none; }
+}
+
+/* A "pending" room whose 30s safety-net timeout fired — still the same
+   navigation, never re-enabled for a different room (see roomNavReducer's
+   own comment for why). Rendered as a plain div, not a Link: the only way
+   out is the explicit Retry button below, not a click on the row itself. */
+.report-room-row-stuck {
+  border-color: var(--blue);
+  cursor: default;
+}
+
+.report-room-row-retry {
+  flex-shrink: 0;
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--blue);
+  background: #fff;
+  border: 1px solid var(--blue);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.report-room-row-retry:hover {
+  background: #f2f9fc;
+}
+
 .report-room-row-skeleton {
   display: grid;
   gap: 8px;
