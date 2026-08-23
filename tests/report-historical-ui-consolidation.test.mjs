@@ -7,16 +7,32 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { OverviewReport } from '../components/report/similarity-report-papers.tsx';
 
 /**
- * Phase E8G: the report previously rendered TWO overlapping historical-
- * submission sections — Phase D's "Submission history" (matchClassification)
- * and E8C/E8D's "Prior submission evidence" (historicalSubmissionMatch).
- * This phase consolidates them into one section ("Previously submitted
- * content"), sourced only from historicalSubmissionMatch — matchClassification
- * is still computed server-side (untouched, see app/reports/[id]/page.tsx)
- * but is no longer read by this component at all. These tests render
- * components/report/similarity-report-papers.tsx's OverviewReport via
- * react-dom/server (no jsdom needed — static markup only) and assert on
- * the resulting HTML.
+ * Phase E8G (2026-08-15, commit de00705): the report previously rendered
+ * TWO overlapping historical-submission sections — Phase D's "Submission
+ * history" (matchClassification) and E8C/E8D's "Prior submission evidence"
+ * (historicalSubmissionMatch). That phase consolidated them into one
+ * section ("Previously submitted content"), sourced only from
+ * historicalSubmissionMatch, and stopped this component from reading
+ * matchClassification at all.
+ *
+ * Release-hardening audit finding UI-01 (2026-08-23) restored
+ * matchClassification's rendering, as its own independent "Submission
+ * history" section: E8G's consolidation assumed the two signals were
+ * always redundant, but historicalSubmissionMatch's own corpus is only
+ * populated for an account that has granted corpus-reuse consent, while
+ * matchClassification has no such gate — a non-consenting account's
+ * same-account reupload (including across file formats, e.g. a DOCX
+ * followed by a PDF of the same document) had a fully correct SELF/
+ * PRIOR_SUBMISSION answer computed server-side with nothing on screen to
+ * show it. See tests/report-self-prior-submission-visibility.test.mjs for
+ * the dedicated coverage of that restoration; the tests below (originally
+ * written to prove matchClassification was gone) are updated in place
+ * where UI-01 changes their premise, and otherwise still describe
+ * historicalSubmissionMatch's own presentation exactly as before.
+ *
+ * These tests render components/report/similarity-report-papers.tsx's
+ * OverviewReport via react-dom/server (no jsdom needed — static markup
+ * only) and assert on the resulting HTML.
  */
 
 const repo = path.resolve('.');
@@ -178,15 +194,18 @@ test('E: the rendered similarity result figure equals report.archiveScore exactl
 
 // --- F: no account identity leakage -----------------------------------------
 
-test('F: no account identifier, email, or matchClassification content ever appears in the rendered output', () => {
+test('F: no account identifier, email, filename, or report id ever appears in the rendered output, even with both historical signals present', () => {
+  // Release-hardening audit finding UI-01 superseded this test's original
+  // premise (matchClassification must never render at all) — see this
+  // file's own updated header comment and tests/report-self-prior-submission-visibility.test.mjs
+  // for the full restoration. What must still hold, unconditionally: no
+  // email, account id, representation id, or filename ever appears, no
+  // matter which historical signal(s) are present.
   const html = render(baseReport({
     historicalSubmissionMatch: PRIOR_SUBMISSION_MATCH,
-    // A canary in matchClassification — if this component still read/rendered
-    // matchClassification in any form, this would leak into the output.
     matchClassification: { selfMatchPercent: null, priorSubmissionPercent: 77 },
   }));
-  assert.doesNotMatch(html, /Submission history/, 'the old Phase D section heading must never render');
-  assert.doesNotMatch(html, /77/, 'matchClassification.priorSubmissionPercent must never be read by this component anymore');
+  assert.match(html, /77/, 'matchClassification.priorSubmissionPercent is now expected to render — see UI-01');
   assert.doesNotMatch(html, /@/, 'no email-shaped string should ever appear in a report render');
   assert.doesNotMatch(html, /accountId|account_id/i);
 });
@@ -204,23 +223,26 @@ function stripComments(source) {
   return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
 }
 
-test('H (structural): the component source no longer reads matchClassification or renders a "Submission history" heading', () => {
-  // stripComments avoids the recurring self-referential false positive:
-  // this component's own E8G explanatory comment mentions
-  // "matchClassification" by name to describe why it's no longer read —
-  // see every prior E7/E8 phase report for the same pattern.
+test('H (structural): the component reads matchClassification again (release-hardening UI-01), rendered as its own independent "Submission history" section', () => {
+  // Release-hardening audit finding UI-01 restored matchClassification's
+  // rendering — see tests/report-self-prior-submission-visibility.test.mjs
+  // for the full dynamic coverage. This structural check now confirms the
+  // opposite of its original assertion: the field IS read, and the
+  // restored section is NOT nested inside any historicalSubmissionMatch
+  // status branch (must render independently of it, including when
+  // historicalSubmissionMatch is NO_HISTORICAL_MATCH or absent).
   const source = stripComments(fs.readFileSync(path.join(repo, 'components/report/similarity-report-papers.tsx'), 'utf8'));
-  assert.doesNotMatch(source, /matchClassification/, 'the component must not read matchClassification at all anymore');
-  assert.doesNotMatch(source, /Submission history/, 'the old duplicate heading text must not exist in source');
+  assert.match(source, /report\.matchClassification/, 'the component must read matchClassification again');
+  assert.match(source, /Submission history/, 'the restored section heading must exist in source');
+  const submissionHistoryBlockStart = source.indexOf('submission-history-block');
+  const firstHistoricalMatchBlockStart = source.indexOf('historicalSubmissionMatch?.status');
+  assert.ok(submissionHistoryBlockStart > -1 && firstHistoricalMatchBlockStart > -1);
+  assert.ok(submissionHistoryBlockStart < firstHistoricalMatchBlockStart, 'the submission-history-block must be a sibling BEFORE the historicalSubmissionMatch branches, never nested inside one of them');
   const headingOccurrences = (source.match(/Previously submitted content/g) || []).length;
-  // Phase E8P.3 added a third branch (the allowlist-gated experimental
-  // partial-match block) that reuses this exact same heading text rather
-  // than introducing a second section — see components/report/similarity-report-papers.tsx's
-  // own E8P.3 comment and tests/e8p-visibility.test.mjs's own dedicated
-  // "reuses the existing heading" assertion. Phase E8R-SELF-UI added a
-  // fourth: the per-match SELF sub-heading ("... — your own work") is a
-  // deliberately different string that happens to start with the same
-  // substring, so it also matches this permissive regex.
+  // Unchanged by UI-01: "Submission history" is its own distinct heading
+  // string, so it never contributes to this count. See the pre-existing
+  // comment below for why this stays 4 (UNAVAILABLE, MATCHED,
+  // E8P.3-experimental, E8R SELF sub-heading).
   assert.equal(headingOccurrences, 4, 'exactly the UNAVAILABLE, MATCHED, E8P.3-experimental, and E8R SELF sub-heading occurrences');
 });
 
