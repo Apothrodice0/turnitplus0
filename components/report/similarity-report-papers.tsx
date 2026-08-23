@@ -509,7 +509,7 @@ export function OverviewReport({ report }: { report: SimilarityReport }) {
         {report.matchClassification && (report.matchClassification.selfMatchPercent !== null || report.matchClassification.priorSubmissionPercent !== null) && (
           <section className="submission-history-block admin-debug-block">
             <h3>Submission history <span className="admin-debug-label">— internal debug information, admin only</span></h3>
-            <p className="admin-debug-note">Not shown to the report&apos;s own viewer. Visible here only because your session has the admin role.</p>
+            <p className="admin-debug-note">Internal diagnostic information. Ordinary users never receive this classification data; it is visible only to authenticated administrators.</p>
             {report.matchClassification.selfMatchPercent !== null && (
               <p>
                 <strong>{report.matchClassification.selfMatchPercent}%</strong> of this submission matches the account&apos;s own previous TurnitPlus submission. This self-match is not included in the similarity result above.

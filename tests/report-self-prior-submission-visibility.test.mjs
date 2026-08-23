@@ -214,7 +214,7 @@ test("SCENARIO 3a: matchClassification renders even when historicalSubmissionMat
 test("REQUIREMENT 6: the section is clearly labeled as internal/admin-only debug information", () => {
   const html = render(baseReport({ matchClassification: { selfMatchPercent: 100, priorSubmissionPercent: null } }));
   assert.match(html, /internal debug information, admin only/i);
-  assert.match(html, /Not shown to the report&#x27;s own viewer|Not shown to the report's own viewer/i);
+  assert.match(html, /Internal diagnostic information\. Ordinary users never receive this classification data; it is visible only to authenticated administrators\./);
 });
 
 test("SCENARIO 3b: matchClassification renders when historicalSubmissionMatch is entirely absent (report predates E8C, or the snapshot failed to attach)", () => {
