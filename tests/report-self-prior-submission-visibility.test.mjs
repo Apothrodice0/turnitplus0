@@ -9,6 +9,10 @@ import { applyMigrationsLibsql } from "../lib/ingest.js";
 import { captureDocumentIdentityAndFamily } from "../lib/document-family.ts";
 import { classifyReportMatches } from "../lib/report-classification.ts";
 import { OverviewReport } from "../components/report/similarity-report-papers.tsx";
+import * as reportsRoute from "../app/api/reports/route.ts";
+import * as reportIdRoute from "../app/api/reports/[id]/route.ts";
+import * as signupRoute from "../app/api/auth/signup/route.ts";
+import { resetRateForTest, resetAuthRateForTest } from "../lib/rate-limit.js";
 
 /**
  * Release-hardening audit finding UI-01: a signed-in account with no
@@ -24,13 +28,29 @@ import { OverviewReport } from "../components/report/similarity-report-papers.ts
  * indexed into the consent-gated corpus. The UI (components/report/
  * similarity-report-papers.tsx) simply never rendered matchClassification
  * at all — removed by Phase E8G (commit de00705) on the assumption that
- * historicalSubmissionMatch was a strict superset. This file proves the
- * fix end to end: the real family-matching pipeline (Part 1, against a
- * real local database, no corpus/consent tables touched) produces a
- * non-null classification for a same-account cross-format resubmission,
- * and the restored UI (Part 2, real React SSR via react-dom/server —
- * matching tests/report-historical-ui-consolidation.test.mjs's own
- * convention) renders it correctly and safely in every required case.
+ * historicalSubmissionMatch was a strict superset.
+ *
+ * UI-01 correction: the first version of this fix showed matchClassification
+ * to every viewer of their own report — too broad, since it reveals that a
+ * real prior submission exists (possibly under a different account), which
+ * this product had never otherwise surfaced to an ordinary user. Corrected
+ * to admin-only, gated server-side in app/api/reports/[id]/route.ts's GET
+ * handler on the AUTHENTICATED session's own `role === 'admin'` column —
+ * never ADMIN_EMAIL, a query parameter, or any other client-controlled
+ * value — and stripped from the response entirely (never computed at all)
+ * for anyone else, so there is nothing for a non-admin to find in the JSON
+ * response, HTML, or React payload.
+ *
+ * This file proves the fix end to end in three parts: Part 1, the real
+ * family-matching pipeline (against a real local database, no corpus/
+ * consent tables touched) produces a non-null classification for a
+ * same-account cross-format resubmission; Part 2, the restored UI (real
+ * React SSR via react-dom/server) renders it correctly and safely
+ * whenever given it; Part 3, the real GET /api/reports/[id] route only
+ * ever attaches matchClassification to an admin session's own response,
+ * proving the requirement Part 2 alone cannot: that ordinary/anonymous/
+ * cross-account/client-spoofed viewers never receive the field in the
+ * first place.
  */
 
 // --- Part 1: real backend pipeline, no UI involved --------------------------
@@ -187,8 +207,14 @@ test("SCENARIO 3a: matchClassification renders even when historicalSubmissionMat
     matchClassification: { selfMatchPercent: 100, priorSubmissionPercent: null },
   }));
   assert.match(html, /Submission history/, "the restored section must render regardless of historicalSubmissionMatch's own status");
-  assert.match(html, /<strong>100%<\/strong> of this submission matches your own previous TurnitPlus submission/);
+  assert.match(html, /<strong>100%<\/strong> of this submission matches the account&#x27;s own previous TurnitPlus submission/);
   assert.doesNotMatch(html, /Historical matching unavailable/, "NO_HISTORICAL_MATCH must not render the UNAVAILABLE branch's own copy");
+});
+
+test("REQUIREMENT 6: the section is clearly labeled as internal/admin-only debug information", () => {
+  const html = render(baseReport({ matchClassification: { selfMatchPercent: 100, priorSubmissionPercent: null } }));
+  assert.match(html, /internal debug information, admin only/i);
+  assert.match(html, /Not shown to the report&#x27;s own viewer|Not shown to the report's own viewer/i);
 });
 
 test("SCENARIO 3b: matchClassification renders when historicalSubmissionMatch is entirely absent (report predates E8C, or the snapshot failed to attach)", () => {
@@ -211,7 +237,7 @@ test("SCENARIO 4a: null/zero classification renders no section and no misleading
 test("SCENARIO 4b: a genuine 0% classification still renders honestly (0 is a real value, not the same as null)", () => {
   const html = render(baseReport({ matchClassification: { selfMatchPercent: 0, priorSubmissionPercent: null } }));
   assert.match(html, /Submission history/, "0 !== null — a real zero-percent self-match must still render, not be treated as absent");
-  assert.match(html, /<strong>0%<\/strong> of this submission matches your own previous TurnitPlus submission/);
+  assert.match(html, /<strong>0%<\/strong> of this submission matches the account&#x27;s own previous TurnitPlus submission/);
 });
 
 test("SCENARIO 5: the main similarity result is byte-identical with and without matchClassification present", () => {
@@ -289,6 +315,227 @@ test("both restored and pre-existing historical sections can render simultaneous
   assert.match(html, /Previously submitted content/);
   const submissionHeadingCount = (html.match(/Submission history/g) || []).length;
   assert.equal(submissionHeadingCount, 1);
+});
+
+// --- Part 3: real GET /api/reports/[id] route, real sessions ---------------
+// The only part of this fix that actually PROVES the security property: not
+// "does the UI render this correctly if handed it" (Part 2), but "does an
+// ordinary/anonymous/cross-account/client-spoofed viewer ever receive the
+// field from the server at all." process.env.TURSO_DATABASE_URL is pointed
+// at this same test database so the route handlers below (which read it
+// internally via getReportsDbClient()) see the same data `client` set up.
+
+process.env.TURSO_DATABASE_URL = `file:${dbFile}`;
+process.env.ADMIN_EMAIL = "ui01-admin@example.com";
+
+function extractCookie(response) {
+  const setCookie = response.headers.get("set-cookie");
+  if (!setCookie) return null;
+  const match = setCookie.match(/tp_session_v1=([^;]*)/);
+  return match ? match[1] : null;
+}
+
+async function signup(email, deviceKey, tag) {
+  await resetAuthRateForTest(tag);
+  const req = new Request("http://localhost/api/auth/signup", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-forwarded-for": tag },
+    body: JSON.stringify({ email, password: "ui01-password-1", username: tag.replace(/[^a-z0-9]/gi, ""), deviceKey }),
+  });
+  const res = await signupRoute.POST(req);
+  return { res, cookie: extractCookie(res) };
+}
+
+// A minimal but fully-shaped SimilarityReport payload — MatchGroups and the
+// rest of OverviewReport read several array/object fields unconditionally
+// (sources, repeats, features, riskCalibration, ...), so the JSON stored in
+// payload_json needs all of them present, not just `text`, or rendering the
+// real fetched report throws. archiveScore in particular must live INSIDE
+// this object: the route's top-level `archiveScore` request field only ever
+// populates the separate saved_reports.archive_score DB column (used for
+// room/list views) — GET returns payload_json verbatim, so a test that
+// wants payload.archiveScore on the fetched report must put it here too.
+function similarityReportPayload(title, rawText) {
+  return {
+    version: 11,
+    id: "sub-" + title,
+    submissionId: "sub-" + title,
+    title,
+    author: "",
+    assignment: "",
+    created: new Date().toISOString(),
+    score: 7,
+    archiveScore: 7,
+    wordCount: 200,
+    characterCount: 1000,
+    pageCount: 1,
+    fileSize: "1 KB",
+    databaseSize: 230,
+    corpusVersion: "archive-v1-230-test",
+    scoreBand: "Moderate",
+    riskStatus: "Lower",
+    riskTarget: 0.5,
+    riskCutoff: 0.5,
+    riskCalibration: { auc: 0.9, precision: 0.9, recall: 0.9, sampleSize: 100 },
+    features: {
+      maxSourceContainment: 0,
+      longestMatchedSpan: 0,
+      quotationDensity: 0,
+      referenceListRatio: 0,
+      highFrequencyShingleCount: 0,
+      repeatedThreeGramCount: 0,
+      detectedLanguage: "English",
+    },
+    excludedDocuments: 0,
+    matchedWordCount: 0,
+    sources: [],
+    repeats: [],
+    text: rawText,
+  };
+}
+
+async function postReport(deviceKey, { cookie, id, title, rawText, room, tag }) {
+  await resetRateForTest(tag);
+  const headers = { "content-type": "application/json", "x-forwarded-for": tag };
+  if (cookie) headers["cookie"] = `tp_session_v1=${cookie}`;
+  const req = new Request("http://localhost/api/reports", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      deviceKey,
+      id,
+      submissionId: "sub-" + id,
+      title,
+      createdAt: new Date().toISOString(),
+      wordCount: 200,
+      archiveScore: 7,
+      scoreBand: "Moderate",
+      aiScore: null,
+      aiTone: null,
+      payload: similarityReportPayload(title, rawText),
+      ...(cookie ? { room } : {}),
+    }),
+  });
+  return reportsRoute.POST(req);
+}
+
+async function getReport(id, { deviceKey, cookie, tag }) {
+  await resetRateForTest(tag);
+  const headers = { "x-forwarded-for": tag };
+  if (cookie) headers["cookie"] = `tp_session_v1=${cookie}`;
+  const url = deviceKey ? `http://localhost/api/reports/${id}?deviceKey=${encodeURIComponent(deviceKey)}` : `http://localhost/api/reports/${id}`;
+  const req = new Request(url, { headers });
+  const res = await reportIdRoute.GET(req, { params: Promise.resolve({ id }) });
+  const body = await res.json();
+  return { res, body };
+}
+
+const adminSignup = await signup("ui01-admin@example.com", "ui01-admin-device", "ui01-admin-signup");
+const adminCookie = adminSignup.cookie;
+const ordinarySignup = await signup("ui01-ordinary@example.com", "ui01-ordinary-device", "ui01-ordinary-signup");
+const ordinaryCookie = ordinarySignup.cookie;
+const intruderSignup = await signup("ui01-intruder@example.com", "ui01-intruder-device", "ui01-intruder-signup");
+const intruderCookie = intruderSignup.cookie;
+
+// Two reports under the admin's own account, textually overlapping enough
+// (same fixture as Part 1/2) to produce a real, non-null classification —
+// this reproduces the exact production shape: the account that sees the
+// debug signal is the SAME account that owns both reports, viewing its own
+// report as an admin, not viewing anyone else's.
+await postReport("ui01-admin-device", { cookie: adminCookie, id: "ui01-admin-report-1", title: "admin-first.docx", rawText: docxLikeText, room: 0, tag: "ui01-admin-post-1" });
+const adminSecondSave = await postReport("ui01-admin-device", { cookie: adminCookie, id: "ui01-admin-report-2", title: "admin-second.pdf", rawText: pdfLikeText, room: 1, tag: "ui01-admin-post-2" });
+assert.equal(adminSecondSave.status, 200);
+
+// One ordinary (non-admin) account's own report, same textual overlap
+// against the admin's own content, so a non-null classification would
+// exist to strip if the gate were missing.
+const ordinaryFirstSave = await postReport("ui01-ordinary-device", { cookie: ordinaryCookie, id: "ui01-ordinary-report-1", title: "ordinary.pdf", rawText: pdfLikeText, room: 0, tag: "ui01-ordinary-post-1" });
+assert.equal(ordinaryFirstSave.status, 200);
+
+test("REQUIREMENT: admin session receives and would render the debug signal", async () => {
+  const { res, body } = await getReport("ui01-admin-report-2", { cookie: adminCookie, tag: "ui01-get-admin" });
+  assert.equal(res.status, 200);
+  assert.ok(body.payload.matchClassification, "an admin viewing their own report must receive matchClassification");
+  assert.notEqual(body.payload.matchClassification.selfMatchPercent, null, "the two admin-owned reports overlap enough to produce a real self-match");
+  const html = renderToStaticMarkup(React.createElement(OverviewReport, { report: body.payload }));
+  assert.match(html, /Submission history/);
+  assert.match(html, /internal debug information, admin only/i);
+});
+
+test("REQUIREMENT: ordinary authenticated report owner never receives matchClassification, selfMatchPercent, or priorSubmissionPercent", async () => {
+  const { res, body } = await getReport("ui01-ordinary-report-1", { cookie: ordinaryCookie, tag: "ui01-get-ordinary" });
+  assert.equal(res.status, 200);
+  assert.equal(body.payload.matchClassification, undefined, "the field must not exist on the response at all, not merely be null");
+  const rawJson = JSON.stringify(body);
+  assert.doesNotMatch(rawJson, /matchClassification/, "the key itself must never appear in the serialized JSON response");
+  assert.doesNotMatch(rawJson, /selfMatchPercent|priorSubmissionPercent/, "neither field name may leak anywhere in the response, even nested");
+  const html = renderToStaticMarkup(React.createElement(OverviewReport, { report: body.payload }));
+  assert.doesNotMatch(html, /Submission history/, "with the field absent, the UI has nothing to render — not a CSS-hidden section");
+});
+
+test("REQUIREMENT: anonymous and cross-account access remain protected (pre-existing ownership check, untouched by this fix)", async () => {
+  const anonResult = await getReport("ui01-ordinary-report-1", { deviceKey: "some-anonymous-device-key-not-owner", tag: "ui01-get-anon" });
+  assert.equal(anonResult.res.status, 404, "an anonymous request for an account-owned report must get the same generic 404 as before");
+
+  const crossAccountResult = await getReport("ui01-ordinary-report-1", { cookie: intruderCookie, tag: "ui01-get-cross" });
+  assert.equal(crossAccountResult.res.status, 404, "a different authenticated account must never be able to fetch someone else's report, admin-gate or not");
+});
+
+test("REQUIREMENT: client-controlled inputs cannot enable the admin view", async () => {
+  // A request cannot supply its own role — there is no field for it in this
+  // route's request shape at all (GET takes only an id path param and an
+  // optional deviceKey query param for the anonymous path) — but this
+  // proves the negative directly: neither a spoofed header nor a spoofed
+  // query parameter claiming admin-ness has any effect on an ordinary
+  // account's own session.
+  await resetRateForTest("ui01-get-spoof");
+  const req = new Request(
+    `http://localhost/api/reports/ui01-ordinary-report-1?role=admin&admin=true&isAdmin=1`,
+    {
+      headers: {
+        "x-forwarded-for": "ui01-get-spoof",
+        cookie: `tp_session_v1=${ordinaryCookie}`,
+        "x-role": "admin",
+        "x-admin": "true",
+        "x-user-role": "admin",
+      },
+    },
+  );
+  const res = await reportIdRoute.GET(req, { params: Promise.resolve({ id: "ui01-ordinary-report-1" }) });
+  const body = await res.json();
+  assert.equal(res.status, 200);
+  assert.equal(body.payload.matchClassification, undefined, "spoofed query params/headers must have zero effect — only the authenticated session's own role column decides this");
+});
+
+test("REQUIREMENT: public similarity output remains unchanged for both admin and ordinary viewers", async () => {
+  const adminView = await getReport("ui01-admin-report-2", { cookie: adminCookie, tag: "ui01-get-admin-score" });
+  const ordinaryView = await getReport("ui01-ordinary-report-1", { cookie: ordinaryCookie, tag: "ui01-get-ordinary-score" });
+  assert.equal(typeof adminView.body.payload.archiveScore, "number");
+  assert.equal(adminView.body.payload.archiveScore, 7, "archiveScore must be exactly what was saved, regardless of viewer role");
+  assert.equal(ordinaryView.body.payload.archiveScore, 7, "archiveScore for the ordinary viewer's own report must be equally unaffected by the admin gate added to a completely different field");
+});
+
+test("REQUIREMENT: internal classification remains computed/available server-side for later corpus-enhanced-similarity use, even though it is never serialized to an ordinary viewer", async () => {
+  // Calling the underlying function directly (as a future corpus-enhanced-
+  // similarity phase would, server-side, never through this admin-gated
+  // HTTP response) still works and still sees the real family relationship
+  // — proving the gate added in app/api/reports/[id]/route.ts only concerns
+  // what one HTTP response contains, never the underlying capability.
+  const ordinaryUserRow = await client.execute({ sql: "SELECT id FROM users WHERE email = ?", args: ["ui01-ordinary@example.com"] });
+  const ordinaryAccountId = ordinaryUserRow.rows[0].id;
+  const classification = await classifyReportMatches(client, { rawText: pdfLikeText, accountId: ordinaryAccountId });
+  assert.ok(classification);
+  // pdfLikeText was also submitted by the admin's OWN account above, so
+  // from the ordinary account's perspective this is a different account's
+  // prior submission (PRIOR_SUBMISSION), not a self-match.
+  assert.notEqual(classification.priorSubmissionPercent, null);
+
+  // Save-time identity/family capture (the durable part of the signal) is
+  // completely untouched by this route-level response gate — confirmed by
+  // the ordinary account's own two rows already existing in document_identities
+  // and document_family_members from the postReport calls above.
+  const identityCount = await client.execute({ sql: "SELECT COUNT(*) AS n FROM document_identities WHERE account_id = (SELECT id FROM users WHERE email = ?)", args: ["ui01-ordinary@example.com"] });
+  assert.ok(Number(identityCount.rows[0].n) >= 1, "identity capture must still have run for the ordinary account's own upload");
 });
 
 test.after(() => {

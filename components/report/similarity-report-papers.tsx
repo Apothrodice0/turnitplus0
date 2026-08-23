@@ -473,53 +473,51 @@ export function OverviewReport({ report }: { report: SimilarityReport }) {
             see UnifiedSimilaritySection's own comment. */}
         <UnifiedSimilaritySection report={report} />
 
-        {/* Release-hardening audit finding UI-01: Phase E8G (see the comment
-            this replaces, still in git history at commit de00705) stopped
-            rendering Phase D's matchClassification (family-based) because
-            E8C/E8D's historicalSubmissionMatch (corpus/shingle-based,
-            passage-level) usually shows the same underlying signal with
-            richer evidence. But historicalSubmissionMatch's own corpus is
-            only ever populated for an account that has granted corpus-reuse
-            consent (app/api/reports/route.ts's createPendingReportAdmissionJob
-            gate) — matchClassification has no such gate, since document
-            identity/family capture is unconditional (lib/document-family.ts's
-            captureDocumentIdentityAndFamily runs for every save regardless
-            of consent). A same-account reupload (or a same document
-            submitted in a different file format — DOCX vs PDF extract to
-            different bytes but the same underlying family via shingle
-            containment) by a non-consenting account therefore had a fully
-            correct SELF/PRIOR_SUBMISSION answer computed and attached
-            server-side every single time, with nothing on screen to show
-            it: E8G's consolidation assumed the two signals were merely
-            redundant, not that one could be the only signal available.
-            Restored here as its own section, independent of
-            historicalSubmissionMatch's own status — this must render
-            identically whether historicalSubmissionMatch is MATCHED,
-            UNAVAILABLE, or NO_HISTORICAL_MATCH (the case with no consent
-            and no corpus entry, exactly the gap above). Wording/markup
-            restored from the pre-E8G version (commit de00705's own diff),
-            not reinvented — same "excluded from / not included in" framing
-            already used by the historicalSubmissionMatch section below, so
-            the two never read as contradictory when both happen to render.
-            Never adds either percentage into overlapScore or any other
-            similarity number above — report.matchClassification carries
-            only two 0-100 percentages, both already excluded by
-            construction from score/archiveScore (see
-            lib/report-classification.ts's own header comment) — and never
-            reveals which other account, report, or document is involved
-            (ReportMatchClassification's own comment: "never identifies the
-            other account"). */}
+        {/* Release-hardening audit finding UI-01 (corrected): the first
+            version of this fix restored matchClassification for every
+            viewer of their own report — too broad. report.matchClassification
+            is now ONLY ever present on the payload this component receives
+            at all when app/api/reports/[id]/route.ts's GET handler already
+            decided, server-side, from the authenticated session's real
+            `role === 'admin'` column (never ADMIN_EMAIL, a query param, or
+            any client-controlled value), that the current viewer is an
+            admin — see that route's own comment for the gate itself. For
+            every other viewer (the report's own ordinary owner included,
+            anonymous, or cross-account) the field is never attached to the
+            JSON response at all, so there is nothing here to strip or hide:
+            `report.matchClassification` is simply `undefined` for them, and
+            this whole block is dead code on their payload — not a
+            CSS-hidden secret sitting in the page's HTML/React payload.
+            Labeled explicitly as internal debug information (never shown to
+            an ordinary user, even the report's own owner) because it
+            exposes cross-account existence (a real prior submission by
+            someone else) that this product has never otherwise surfaced to
+            end users — see ReportMatchClassification's own comment: the
+            percentage itself still never identifies the OTHER account, only
+            that one exists. Independent of historicalSubmissionMatch's own
+            status, for the same reason as before correction: that signal is
+            gated on corpus-reuse consent, this one is not (see
+            lib/document-family.ts's captureDocumentIdentityAndFamily,
+            unconditional at save time regardless of consent — capture
+            itself is untouched by this admin-only gate, only whether an
+            admin's own view of it is ever serialized to a response).
+            Backend capture/classification stays fully available for a later
+            corpus-enhanced-similarity phase to consume directly — this gate
+            only concerns what a browser response ever contains, never what
+            the server computes or stores. Never adds either percentage into
+            overlapScore or any other similarity number above. */}
         {report.matchClassification && (report.matchClassification.selfMatchPercent !== null || report.matchClassification.priorSubmissionPercent !== null) && (
-          <section className="submission-history-block">
-            <h3>Submission history</h3>
+          <section className="submission-history-block admin-debug-block">
+            <h3>Submission history <span className="admin-debug-label">— internal debug information, admin only</span></h3>
+            <p className="admin-debug-note">Not shown to the report&apos;s own viewer. Visible here only because your session has the admin role.</p>
             {report.matchClassification.selfMatchPercent !== null && (
               <p>
-                <strong>{report.matchClassification.selfMatchPercent}%</strong> of this submission matches your own previous TurnitPlus submission. This self-match is not included in the similarity result above.
+                <strong>{report.matchClassification.selfMatchPercent}%</strong> of this submission matches the account&apos;s own previous TurnitPlus submission. This self-match is not included in the similarity result above.
               </p>
             )}
             {report.matchClassification.priorSubmissionPercent !== null && (
               <p>
-                <strong>{report.matchClassification.priorSubmissionPercent}%</strong> of this submission closely matches a previous TurnitPlus submission. This is not proof of plagiarism and is not included in the similarity result above.
+                <strong>{report.matchClassification.priorSubmissionPercent}%</strong> of this submission closely matches a previous TurnitPlus submission from a different account. This is not proof of plagiarism and is not included in the similarity result above.
               </p>
             )}
           </section>

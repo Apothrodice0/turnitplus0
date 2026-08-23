@@ -53,13 +53,33 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
       }
 
       payload = JSON.parse(String(row.payload_json)) as SimilarityReport;
-      // Phase D: read-time enrichment only — see app/reports/[id]/page.tsx's
-      // identical comment. Best-effort: never turns a successful fetch into
-      // an error response.
-      try {
-        payload.matchClassification = await classifyReportMatches(client, { rawText: payload.text, accountId });
-      } catch (err) {
-        console.error('classifyReportMatches failed (non-fatal):', err instanceof Error ? err.message : String(err));
+      // Release-hardening audit finding UI-01 (corrected): matchClassification
+      // reveals that a real prior submission exists (possibly under a
+      // different account) — information this product has never otherwise
+      // surfaced to an ordinary user, even the report's own owner. Gated
+      // strictly on the AUTHENTICATED session's own `role` column
+      // (sessionUser, resolved server-side above from the session cookie —
+      // never ADMIN_EMAIL, a query/header value, or anything else a client
+      // could set) so only a real admin session ever receives this field in
+      // the response at all. For every other viewer this block never runs,
+      // so payload.matchClassification is simply never assigned —
+      // JSON.stringify drops an unset key entirely (see
+      // ReportMatchClassification's own comment), so there is nothing for a
+      // non-admin to find in the response body, HTML, or React payload; this
+      // is not a client-side hide. Deliberately does not gate
+      // lib/document-family.ts's captureDocumentIdentityAndFamily (save-time
+      // capture, unconditional, untouched by this file) or
+      // classifyReportMatches itself (still fully callable/correct — see
+      // this route's own tests) — only whether THIS response ever calls it
+      // for a non-admin viewer, so the underlying signal stays available for
+      // a later corpus-enhanced-similarity phase to consume directly from
+      // the database rather than through this admin-only debug view.
+      if (sessionUser?.role === 'admin') {
+        try {
+          payload.matchClassification = await classifyReportMatches(client, { rawText: payload.text, accountId });
+        } catch (err) {
+          console.error('classifyReportMatches failed (non-fatal):', err instanceof Error ? err.message : String(err));
+        }
       }
       // Phase E8C: same read-time-enrichment discipline as Phase D just
       // above, and the same non-fatal guarantee — see

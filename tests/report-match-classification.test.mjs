@@ -78,7 +78,18 @@ async function signup(email, deviceKey) {
   // path via the live route, unchanged — see
   // tests/report-privacy-consent.test.mjs for the dedicated consent on/off
   // behavior this gate itself needs.
-  await setupClient.execute({ sql: "UPDATE users SET corpus_reuse_consented_at = CURRENT_TIMESTAMP WHERE email = ?", args: [email] });
+  //
+  // Release-hardening audit finding UI-01 (corrected): matchClassification
+  // is now admin-only (app/api/reports/[id]/route.ts's GET handler gates it
+  // on sessionUser.role === 'admin'), so every account this file signs up is
+  // promoted here too — this file's own purpose is verifying the
+  // SELF/PRIOR_SUBMISSION classification LOGIC end-to-end (percentages,
+  // byte-for-byte round-tripping, cross-account privacy), which is
+  // completely untouched by the visibility gate; admin-only VISIBILITY
+  // itself is covered separately by tests/report-self-prior-submission-visibility.test.mjs,
+  // including the case this file cannot: an ordinary (non-admin) account
+  // must receive nothing at all.
+  await setupClient.execute({ sql: "UPDATE users SET corpus_reuse_consented_at = CURRENT_TIMESTAMP, role = 'admin' WHERE email = ?", args: [email] });
   return { res, cookie: extractCookie(res) };
 }
 
