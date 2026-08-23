@@ -64,6 +64,7 @@ export async function POST(request: Request) {
       client.close();
     }
   } catch (err) {
-    return new NextResponse(JSON.stringify({ error: err instanceof Error ? err.message : 'Internal error' }), { status: 500 });
+    console.error('login failed:', err instanceof Error ? err.message : String(err));
+    return new NextResponse(JSON.stringify({ error: 'Something went wrong. Please try again.' }), { status: 500 });
   }
 }

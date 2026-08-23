@@ -1,5 +1,6 @@
 import assert from 'node:assert';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { createHash } from 'node:crypto';
 import { createClient } from '@libsql/client';
@@ -201,6 +202,71 @@ async function logout(cookieValue, ip = 'auth-test-logout') {
   }
   assert.ok(sawLimit, 'repeated login attempts from the same client must eventually be rate limited');
   console.log('auth rate limiting verified');
+}
+
+// 8. login/signup 500 path: a genuine DB connection failure must never leak
+// its raw message (file paths, driver internals) to the client, but the
+// detail must still reach server-side logs. Forces a REAL failure (an
+// unopenable file: URL under a directory that doesn't exist) rather than
+// mocking getReportsDbClient — this is exactly the shape of the actual
+// production incident (Preview deployment falling back to an unwritable
+// local path), not a synthetic stand-in for it.
+{
+  const loginIp = 'auth-test-db-down-login';
+  const signupIp = 'auth-test-db-down-signup';
+  // Reset both rate buckets on the REAL (working) database first —
+  // resetAuthRateForTest itself needs a live connection, so it must happen
+  // before TURSO_DATABASE_URL is pointed at the unopenable path below.
+  await resetAuthRateForTest(loginIp);
+  await resetAuthRateForTest(signupIp);
+
+  const originalUrl = process.env.TURSO_DATABASE_URL;
+  const unopenablePath = path.join(os.tmpdir(), `api-auth-unopenable-${Date.now()}`, 'nested', 'bad.db');
+  process.env.TURSO_DATABASE_URL = `file:${unopenablePath}`;
+
+  const originalError = console.error;
+  const captured = [];
+  console.error = (...args) => { captured.push(args.map(String).join(' ')); };
+  let loginRes;
+  let signupRes;
+  try {
+    // Built directly (not via the login()/signup() helpers, which call
+    // resetAuthRateForTest internally and would themselves need the now-
+    // broken connection) — same technique section 7 already uses.
+    loginRes = await loginRoute.POST(new Request('http://localhost/api/auth/login', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-forwarded-for': loginIp },
+      body: JSON.stringify({ email: 'db-down@example.com', password: 'whatever-1', deviceKey: 'device-db-down-1' }),
+    }));
+    signupRes = await signupRoute.POST(new Request('http://localhost/api/auth/signup', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-forwarded-for': signupIp },
+      body: JSON.stringify({ email: 'db-down-2@example.com', password: 'whatever-1', username: 'dbdown', deviceKey: 'device-db-down-2' }),
+    }));
+  } finally {
+    console.error = originalError;
+    process.env.TURSO_DATABASE_URL = originalUrl;
+  }
+
+  assert.equal(loginRes.status, 500, 'a real DB connection failure must surface as a 500, not crash the handler');
+  assert.equal(signupRes.status, 500, 'a real DB connection failure must surface as a 500, not crash the handler');
+
+  const loginBody = await loginRes.json();
+  const signupBody = await signupRes.json();
+  assert.deepEqual(loginBody, { error: 'Something went wrong. Please try again.' }, 'login must return the generic message, not the raw driver error');
+  assert.deepEqual(signupBody, { error: 'Something went wrong. Please try again.' }, 'signup must return the generic message, not the raw driver error');
+
+  const bodies = [loginBody, signupBody];
+  for (const body of bodies) {
+    assert.doesNotMatch(body.error, /unopenable|nested|bad\.db|SQLITE|ConnectionFailed|ENOENT/i, 'the client-facing error must never contain a file path or driver-internal detail');
+  }
+
+  const joined = captured.join('\n');
+  assert.match(joined, /login failed:/, 'the login failure detail must still be logged server-side');
+  assert.match(joined, /signup failed:/, 'the signup failure detail must still be logged server-side');
+  assert.match(joined, /unopenable|nested|bad\.db/i, 'the server-side log must retain the actual diagnostic detail the client response no longer carries');
+
+  console.log('login/signup 500 path: generic client message + preserved server-side diagnostics verified');
 }
 
 for (const suffix of ['', '-wal', '-shm']) {
