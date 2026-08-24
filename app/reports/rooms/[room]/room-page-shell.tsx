@@ -315,8 +315,26 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
       // "downloadReceipt itself threw" cases (e.g. its own font-loading
       // fetch failed) used to be entirely silent — the button just flipped
       // back to "Receipt" with no indication anything went wrong.
-      const local = await getStoredReportById<SimilarityReport>(reportId).catch(() => null);
-      const full = local ?? (await fetchRemoteReport<SimilarityReport>(reportId));
+      //
+      // Preview receipt regression: this used to prefer the local IndexedDB
+      // copy over a fresh server fetch. That copy is `report` from runCheck
+      // (a few hundred lines below), stored once via storeReportBestEffort
+      // at upload time with attachUnifiedSimilarity's own client-side,
+      // corpus-blind unifiedSimilarity already attached (see that call
+      // site's own comment) — it is never refreshed once write-time
+      // finalization persists the real, corpus-aware result server-side. A
+      // promoted-corpus-only match (the exact LIFECYCLE-06 scenario this
+      // room already guards against for the room card/poll path) therefore
+      // downloaded a receipt showing the client's own partial 0% instead of
+      // the server-confirmed 100% the room and report detail page both
+      // already display. Fetching the server-confirmed copy first — same
+      // "never trust a client-computed result as server-confirmed"
+      // discipline as saveEnrichedAiResult's own similarityStatus fix above
+      // — makes the receipt agree with what this room already shows; the
+      // local copy is used only as an offline fallback when the network
+      // fetch itself fails.
+      const remote = await fetchRemoteReport<SimilarityReport>(reportId);
+      const full = remote ?? (await getStoredReportById<SimilarityReport>(reportId).catch(() => null));
       if (full) {
         await downloadReceipt(full);
       } else {

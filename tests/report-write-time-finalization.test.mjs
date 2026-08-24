@@ -14,8 +14,20 @@ import { runCorpusAdmissionPromotionSweep } from '../lib/corpus-admission-promot
 import { findRoomOccupant, findReportRowForUser } from '../lib/reports-repo.ts';
 import { deriveRoomStatus } from '../lib/report-rooms.ts';
 import { resolvePersistedSimilarityDisplay } from '../lib/report-primary-similarity.ts';
-import { archiveOverlapScore, buildReportSummary, hasUnifiedSimilarity } from '../lib/report-types.ts';
+import {
+  archiveOverlapScore,
+  buildReportSummary,
+  hasUnifiedSimilarity,
+  PRIMARY_SIMILARITY_BAND_LABELS,
+  primarySimilarityScore,
+  unifiedEvidenceSummary,
+} from '../lib/report-types.ts';
 import { attachUnifiedSimilarity } from '../lib/document-check-pipeline.ts';
+import { tokens } from '../lib/similarity-core.ts';
+import { similarityScoreBand } from '../lib/ai-core.ts';
+import { createReceiptPdf } from '../lib/receipt-pdf.ts';
+import { ensurePdfjsNodePolyfills } from '../lib/pdfjs-node-polyfill.ts';
+import { extractPdfTextDocument } from '../lib/pdf-text-extraction.ts';
 // Release-hardening audit finding LIFECYCLE-06 (Preview regression): the
 // REAL, exported isFullyRevealed — not this file's own long-standing local
 // mirror further down (kept as-is for the existing LIFECYCLE-03/05 tests) —
@@ -186,6 +198,47 @@ async function savedReportRow(deviceKey, id) {
   const result = await client.execute({ sql: 'SELECT archive_score, payload_json FROM saved_reports WHERE device_key = ? AND id = ?', args: [deviceKey, id] });
   const row = result.rows[0];
   return { archiveScore: Number(row.archive_score), payload: JSON.parse(row.payload_json) };
+}
+
+// Preview receipt regression: real font bytes, read once, so createReceiptPdf
+// never needs its own fetch("/receipt-font.ttf") — that call requires a real
+// browser origin and cannot run in this Node test environment.
+const receiptFonts = {
+  regular: fs.readFileSync(path.join(repo, 'public/receipt-font.ttf')),
+  bold: fs.readFileSync(path.join(repo, 'public/receipt-font-bold.ttf')),
+};
+
+/**
+ * Mirrors lib/document-check-pipeline.ts's downloadReceipt exactly — same
+ * selectors (primarySimilarityScore, similarityScoreBand, hasUnifiedSimilarity,
+ * unifiedEvidenceSummary), same order, same shape handed to createReceiptPdf
+ * — stopping short only of downloadReceipt's own trailing browser-only file-
+ * download side effects (document.createElement/URL.createObjectURL/
+ * window.setTimeout), which are pure plumbing with no score/evidence-
+ * selection logic of their own and cannot run here. This is the real
+ * "receipt data-building path," not a synthetic ReceiptData object handed
+ * straight to createReceiptPdf.
+ */
+async function buildReceiptPdfForReport(report) {
+  const primaryScore = primarySimilarityScore(report);
+  const verdict = similarityScoreBand(primaryScore);
+  const unified = hasUnifiedSimilarity(report) && report.unifiedSimilarity && verdict
+    ? {
+      score: primaryScore,
+      label: PRIMARY_SIMILARITY_BAND_LABELS[verdict.key],
+      evidenceSummary: unifiedEvidenceSummary(report.unifiedSimilarity),
+    }
+    : undefined;
+  return createReceiptPdf({ ...report, unified }, receiptFonts);
+}
+
+/** Real PDF text extraction (this codebase's own Node-compatible path, already proven in tests/corpus-text-extraction.test.mjs) — proves the actual rendered receipt, not just the input model handed to createReceiptPdf. */
+async function extractReceiptPdfText(blob) {
+  await ensurePdfjsNodePolyfills();
+  const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  const document = await pdfjs.getDocument({ data: bytes }).promise;
+  return extractPdfTextDocument(document, () => {});
 }
 
 function withEnv(name, value, fn) {
@@ -837,4 +890,177 @@ test('LIFECYCLE-06 PREVIEW REGRESSION: a fresh upload matching an already-promot
     assert.equal(occupant.report.aiScore, 3);
     assert.equal(isFullyRevealedReal(occupant), true, 'REQUIRED: once the poll observes this genuinely resolved state, the room reveals AI + correct similarity + receipt together — atomically, automatically, with no browser refresh and no detail-page visit required');
   });
+});
+
+const RECEIPT_REGRESSION_TEXT =
+  'Marine biologists studying deep-reef fish populations documented a previously unrecorded diel vertical migration pattern synchronized with lunar illumination cycles, ' +
+  'indicating that ambient moonlight rather than water temperature alone structures the timing of this nightly foraging behavior across the entire studied reef system.';
+const RECEIPT_REGRESSION_WORD_COUNT = tokens(RECEIPT_REGRESSION_TEXT).length;
+
+/**
+ * Preview receipt regression: Preview commit 276cc8d passed the room and
+ * report-page checks (both already server-confirmed, per the LIFECYCLE-06
+ * fix above) but the downloaded receipt still showed 0% / "own reference
+ * material" for a real promoted-corpus-only 100% match.
+ *
+ * ROOT CAUSE, traced through the real code — a THIRD, previously-unguarded
+ * call site of the exact LIFECYCLE-06 pattern: app/reports/rooms/[room]/
+ * room-page-shell.tsx's handleDownloadReceipt (and components/reports/
+ * report-history-row.tsx's own identical handler, shared by app/page.tsx's
+ * anonymous list and the room browser's per-room list) resolved the report
+ * to hand to downloadReceipt as `local ?? (await fetchRemoteReport(...))` —
+ * PREFERRING the local IndexedDB copy whenever one existed. That local copy
+ * is `report` from runCheck (or saveEnrichedAiResult's `enriched`, which
+ * spreads the same object), stored via storeReportBestEffort with
+ * attachUnifiedSimilarity's own client-side, corpus-blind unifiedSimilarity
+ * already attached — the identical stale object the room-card and
+ * write-time-finalization fixes above were built specifically to stop
+ * treating as trustworthy. Unlike the room card (fixed by forcing
+ * similarityStatus to "pending" so only a fresh server poll can resolve it)
+ * and the report detail page (which always reads through GET /api/reports/
+ * [id]), the receipt download path had no equivalent guard at all: `local`
+ * was always truthy once any local copy existed, so the remote fallback
+ * never even ran, and downloadReceipt's own primarySimilarityScore/
+ * unifiedEvidenceSummary calls (both already correct) faithfully rendered
+ * whatever the stale object contained — 0% and, since the client's own
+ * archive check can independently find a small unrelated overlap, "own
+ * reference material" instead of "TurnitPlus reference sources".
+ *
+ * FIX (app/reports/rooms/[room]/room-page-shell.tsx and components/reports/
+ * report-history-row.tsx, both receipt-download entry points): flipped to
+ * `remote ?? (await getStoredReportById(...).catch(() => null))` — the
+ * server-confirmed copy first, local IndexedDB only as an offline fallback
+ * when the network fetch itself fails. No change to scoring, matching,
+ * corpus admission/promotion, room lifecycle, or the report-detail page —
+ * this is the same "never trust a client-computed result as server-
+ * confirmed" principle already applied elsewhere, extended to the one
+ * remaining call site that still violated it.
+ */
+test('RECEIPT PREVIEW REGRESSION: the downloaded receipt must show the server-finalized 100%, matching the room and report detail page exactly — never the client-side corpus-blind preview', async (t) => {
+  await promoteDocumentIntoCorpus(RECEIPT_REGRESSION_TEXT);
+  const account = await signUpConsentingAccount();
+  const reportId = 'receipt-preview-regression-report';
+
+  // Mirrors runCheck()'s own construction exactly (same as the LIFECYCLE-06
+  // room-card regression above): the client analyzes entirely locally, then
+  // calls the REAL attachUnifiedSimilarity, which has no corpus access —
+  // this is exactly what storeReportBestEffort would have written into
+  // IndexedDB at upload time.
+  const clientPreviewReport = attachUnifiedSimilarity({
+    version: 11, id: reportId, submissionId: 'sub-' + reportId, title: 'Receipt regression fixture',
+    author: '', assignment: '', created: new Date().toISOString(),
+    score: 0, archiveScore: 0, wordCount: RECEIPT_REGRESSION_WORD_COUNT,
+    scoreBand: 'Low', matchedWordCount: 0, sources: [], repeats: [], text: RECEIPT_REGRESSION_TEXT,
+    archiveMatchedPositions: [], externalAcademicEvidence: [],
+  });
+  assert.equal(clientPreviewReport.unifiedSimilarity.unifiedScore, 0, 'test setup sanity: the client-only preview must genuinely be blind to the promoted corpus match — this is the real attachUnifiedSimilarity output, not a fabricated fixture');
+
+  const saveRes = await postReport(account, {
+    id: reportId, room: 1, aiStatus: 'ready', aiScore: 2, text: RECEIPT_REGRESSION_TEXT, wordCount: RECEIPT_REGRESSION_WORD_COUNT,
+    payloadOverrides: { unifiedSimilarity: clientPreviewReport.unifiedSimilarity },
+  });
+  assert.equal(saveRes.status, 200, 'test setup sanity: save must succeed, submitting the client\'s own stale preview exactly as a real resave would');
+
+  await t.test('REQUIRED (documents the exact bug mechanism): a receipt built from the client\'s own stale local preview shows 0%, not 100% — proving this scenario genuinely reproduces the reported bug, not a trivial always-correct fixture', async () => {
+    const blob = await buildReceiptPdfForReport(clientPreviewReport);
+    const text = await extractReceiptPdfText(blob);
+    assert.match(text, /TurnitPlus Similarity:\s*0%/, 'documents the exact root cause: the client-side preview genuinely produces the same 0% Preview reported');
+  });
+
+  await t.test('REQUIRED (proves the fix): a receipt built from the real, server-finalized report shows 100%, with evidence-source wording matching the report page\'s own privacy-safe terminology', async () => {
+    const detailRes = await getReportDetail(account, reportId);
+    assert.equal(detailRes.status, 200);
+    const detailBody = await detailRes.json();
+    const serverReport = detailBody.payload;
+    assert.ok(serverReport.unifiedSimilarity, 'REQUIRED: the server must return a real, finalized unifiedSimilarity — this is exactly what the fixed remote-first fetch now hands to the receipt, instead of the stale local preview');
+    assert.equal(serverReport.unifiedSimilarity.unifiedScore, 100, 'test setup sanity: write-time finalization must have already persisted the true 100% server-side, before this receipt is ever requested');
+    assert.equal(serverReport.unifiedSimilarity.previousUploadOnlyWords, serverReport.unifiedSimilarity.uniqueMatchedWords, 'test setup sanity: this report\'s only similarity evidence is the promoted corpus source');
+
+    const blob = await buildReceiptPdfForReport(serverReport);
+    const text = await extractReceiptPdfText(blob);
+    assert.match(text, /TurnitPlus Similarity:\s*100%/, 'REQUIRED: the receipt must show the real, server-confirmed 100% — the same figure the room and report detail page already show');
+    assert.match(text, /Evidence sources:\s*TurnitPlus reference sources/, 'REQUIRED: a TURNITPLUS_CORPUS_SOURCE contribution must use the same privacy-safe generic terminology as the report page, never "own reference material" (which is true only for a genuine archive overlap, not present here)');
+    assert.doesNotMatch(text, /own reference material/, 'the receipt must never claim archive evidence that does not exist for a match that is genuinely 100% promoted-corpus-only');
+    assert.doesNotMatch(text, /\bcorpus\b|\bprior submission|\bprevious submission|retained source|\brepresentation\b|\badmission\b|\bpromotion\b/i, 'the receipt must never expose corpus relationship types, prior-submission terminology, or admission/promotion internals to an ordinary viewer');
+    // Inspected per this turn's own request: the archive-only sub-score row
+    // is genuinely labeled "Similarity result (component)" — not
+    // "(composite)" — already a clearly component/archive-specific label
+    // distinguishing it from the combined "TurnitPlus Similarity" row above
+    // it, so lib/receipt-pdf.ts is intentionally left unchanged (see this
+    // test's own outer comment). archiveScore itself (0% here, since this
+    // report's only evidence is the promoted corpus source) is correct and
+    // untouched — this asserts only the label, never the underlying score.
+    assert.match(text, /Similarity result \(component\):\s*0%/, 'REQUIRED: the archive-only sub-score row must render under its real, already-component-specific label');
+    assert.doesNotMatch(text, /Similarity result \(composite\)/, 'the label must never read "(composite)" — that would misleadingly imply this row is itself a combined result, not one component of it');
+  });
+
+  await t.test('REQUIRED (structural): both receipt-download entry points fetch the server-confirmed report first, using the local IndexedDB copy only as an offline fallback when the remote fetch itself fails', () => {
+    // Scoped to handleDownloadReceipt's own function body specifically —
+    // room-page-shell.tsx also has retryAiCheck, which legitimately still
+    // resolves local-first (it only needs the report's own text to re-run
+    // AI analysis, never a server-confirmed similarity figure, and is out
+    // of scope for this receipt-specific fix) — a file-wide check would
+    // false-positive on that unrelated, correct function.
+    for (const file of ['app/reports/rooms/[room]/room-page-shell.tsx', 'components/reports/report-history-row.tsx']) {
+      const source = fs.readFileSync(path.join(repo, file), 'utf8');
+      const handlerStart = source.indexOf('async function handleDownloadReceipt');
+      assert.ok(handlerStart > -1, `${file} must still define handleDownloadReceipt`);
+      // Brace-matched, not a fixed-length slice — the function's own
+      // explanatory comment is long enough that a short fixed window could
+      // cut off before reaching its actual code.
+      let depth = 0;
+      let handlerEnd = handlerStart;
+      for (let i = source.indexOf('{', handlerStart); i < source.length; i += 1) {
+        if (source[i] === '{') depth += 1;
+        else if (source[i] === '}') {
+          depth -= 1;
+          if (depth === 0) { handlerEnd = i + 1; break; }
+        }
+      }
+      const handlerBody = source.slice(handlerStart, handlerEnd);
+      assert.match(
+        handlerBody,
+        /const remote = await fetchRemoteReport[\s\S]{0,40}\n\s*const full = remote \?\? \(await getStoredReportById/,
+        `${file}'s handleDownloadReceipt must resolve the receipt's report as remote-first, local-fallback`,
+      );
+      assert.doesNotMatch(
+        handlerBody,
+        /const local = await getStoredReportById[\s\S]{0,200}const full = local \?\?/,
+        `${file}'s handleDownloadReceipt must no longer prefer the local IndexedDB copy over a fresh server fetch`,
+      );
+    }
+  });
+});
+
+test('RECEIPT: archive-only and live-academic contributions keep their own correct, distinct evidence-source labels — never relabeled as TurnitPlus reference sources', async () => {
+  const baseFixture = {
+    version: 11, id: 'receipt-archive-only-fixture', submissionId: 'sub-receipt-archive-only-fixture', title: 'Archive-only fixture',
+    author: '', assignment: '', created: new Date().toISOString(),
+    score: 40, archiveScore: 40, wordCount: 1000, scoreBand: 'Moderate', matchedWordCount: 400, sources: [], repeats: [], text: 'fixture text not used by receipt generation directly',
+  };
+
+  const archiveOnlyReport = {
+    ...baseFixture,
+    unifiedSimilarity: {
+      version: 'unified-similarity-v1', wordCount: 1000, unifiedScore: 40, uniqueMatchedWords: 400,
+      archiveOnlyWords: 400, liveAcademicOnlyWords: 0, previousUploadOnlyWords: 0, overlapWords: 0,
+      selfExcludedWords: 0, unknownExcludedWords: 0, contributions: [],
+    },
+  };
+  const archiveText = await extractReceiptPdfText(await buildReceiptPdfForReport(archiveOnlyReport));
+  assert.match(archiveText, /Evidence sources:\s*own reference material/, 'a genuine archive-only contribution must keep saying "own reference material" — true and intentionally exposed, unlike a corpus-source contribution');
+  assert.doesNotMatch(archiveText, /TurnitPlus reference sources/, 'must never claim an internal-corpus contribution that does not exist for this report');
+
+  const academicOnlyReport = {
+    ...baseFixture,
+    id: 'receipt-academic-only-fixture', submissionId: 'sub-receipt-academic-only-fixture', title: 'Academic-only fixture',
+    unifiedSimilarity: {
+      version: 'unified-similarity-v1', wordCount: 1000, unifiedScore: 40, uniqueMatchedWords: 400,
+      archiveOnlyWords: 0, liveAcademicOnlyWords: 400, previousUploadOnlyWords: 0, overlapWords: 0,
+      selfExcludedWords: 0, unknownExcludedWords: 0, contributions: [],
+    },
+  };
+  const academicText = await extractReceiptPdfText(await buildReceiptPdfForReport(academicOnlyReport));
+  assert.match(academicText, /Evidence sources:\s*live academic sources/, 'a genuine external-academic-only contribution must keep saying "live academic sources"');
+  assert.doesNotMatch(academicText, /own reference material|TurnitPlus reference sources/, 'must never claim archive or internal-corpus evidence that does not exist for this report');
 });

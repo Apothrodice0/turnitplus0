@@ -19,8 +19,19 @@ import type { SimilarityReport } from "@/lib/report-types";
  * opened, at /reports/[id]).
  *
  * "Receipt" is the one action here that genuinely needs the full report
- * body — resolved on demand, only on click: local IndexedDB first (already
- * present for most anonymous reports), then a remote fetch, never eagerly.
+ * body — resolved on demand, only on click.
+ *
+ * Preview receipt regression: the receipt must show the same server-
+ * finalized primary/unified similarity result the room card and report
+ * detail page already show — never a locally-cached snapshot. The local
+ * IndexedDB copy is written once, at upload time, from
+ * attachUnifiedSimilarity's own client-side, corpus-blind computation (see
+ * that call site's own comment) and is never refreshed once write-time
+ * finalization persists the real, corpus-aware result server-side — so for
+ * any report whose similarity depends on corpus-source matching, the local
+ * copy can permanently disagree with what the room/detail page show. Fetches
+ * the server-confirmed copy first; the local copy is used only as an
+ * offline fallback when the network fetch itself fails.
  */
 
 function aiToneLabel(aiScore: number | null, aiTone: string | null): string {
@@ -58,8 +69,8 @@ export function ReportHistoryRow({
       // and "onDownloadReceipt itself threw" (e.g. its own font-loading
       // fetch failed) used to be entirely silent — the button just flipped
       // back to "Receipt" with no indication anything went wrong.
-      const local = await getStoredReportById<SimilarityReport>(report.id).catch(() => null);
-      const full = local ?? (await fetchRemoteReport<SimilarityReport>(report.id));
+      const remote = await fetchRemoteReport<SimilarityReport>(report.id);
+      const full = remote ?? (await getStoredReportById<SimilarityReport>(report.id).catch(() => null));
       if (full) {
         await onDownloadReceipt(full);
       } else {
