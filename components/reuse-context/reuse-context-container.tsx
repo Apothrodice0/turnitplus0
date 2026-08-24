@@ -49,7 +49,7 @@ const JSON_HEADERS = { "Content-Type": "application/json" };
 export function ReuseContextContainer({
   documentIdentityId,
   representationId,
-  /** true when nothing else in the report already renders the "Previously submitted content" section (E8S Step 11 requirement 10) — this component then supplies its own section wrapper, but ONLY once it actually has something to show, never an empty shell. */
+  /** true when nothing else in the report already renders the "Additional context" section (E8S Step 11 requirement 10) — this component then supplies its own section wrapper, but ONLY once it actually has something to show, never an empty shell. Reachable by ordinary users (report.reuseContext is not admin-gated), so the wrapper heading and every string this standalone mode can show must stay privacy-safe — see the report-source presentation correction's own notes. */
   standalone = false,
 }: {
   documentIdentityId: string;
@@ -153,7 +153,7 @@ export function ReuseContextContainer({
   if (!standalone) return inner;
   return (
     <section className="historical-match-block">
-      <h3>Previously submitted content</h3>
+      <h3>Additional context</h3>
       {inner}
     </section>
   );

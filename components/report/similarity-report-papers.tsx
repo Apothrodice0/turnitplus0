@@ -19,6 +19,7 @@ import {
   primaryMatchedWordCount,
   primaryResultLabel,
   primarySimilarityScore,
+  referenceSourceContributionPercent,
   sourceMatchedWordCount,
   type HighlightRange,
   type HistoricalSubmissionMatchEntry,
@@ -142,6 +143,28 @@ export function CategorySummary({ report }: { report: SimilarityReport }) {
           </div>
         );
       })}
+      {/* Report-source presentation correction: report.sources above is
+          archive-only and has no awareness of report.unifiedSimilarity, so
+          a corpus/internal-only match previously left every category here
+          at 0% even at 100% TurnitPlus Similarity. previousUploadOnlyWords
+          (via referenceSourceContributionPercent) is that missing
+          contribution, shown under a generic label — never "corpus" or
+          "prior submission" — and only when a unified result exists at
+          all, since archive-only reports have no such bucket to show.
+          Rendered unconditionally whenever it applies, even at a genuine
+          0% — matching Indexed publications above, which this list has
+          always shown at 0% too. This list documents every category
+          TurnitPlus searched, not only the ones that contributed; hiding
+          this one specifically below some threshold would break that
+          existing convention and would itself leak a signal (a report
+          missing the row vs. one showing 0% for it). */}
+      {hasUnifiedSimilarity(report) && (
+        <div className="category-row" key="turnitplus-reference-sources">
+          <strong>{referenceSourceContributionPercent(report)}%</strong>
+          <ShieldCheck aria-hidden="true" />
+          <span>TurnitPlus reference sources</span>
+        </div>
+      )}
     </div>
   );
 }
@@ -408,7 +431,6 @@ export function UnifiedSimilaritySection({ report }: { report: SimilarityReport 
   const unified = report.unifiedSimilarity;
   if (!unified) return null;
   const verdict = similarityScoreBand(unified.unifiedScore);
-  const breakdown = unifiedEvidenceBreakdown(report);
   const excludedSelf = unified.selfExcludedWords;
   const excludedUnknown = unified.unknownExcludedWords;
   // Release-hardening audit finding UI-02: the per-source-type breakdown
@@ -426,8 +448,17 @@ export function UnifiedSimilaritySection({ report }: { report: SimilarityReport 
   // decided server-side, admin-only — rather than a new, separately-
   // maintained "isAdmin" signal that could drift out of sync with it: there
   // is exactly one place (that route's own role check) that decides who
-  // sees this class of detail, not two.
+  // sees this class of detail, not two. Report-source presentation
+  // correction: left unchanged deliberately — this admin-only breakdown is
+  // the same surface tests/report-historical-match-visibility.test.mjs
+  // protects with an explicit "all-or-nothing gate" regression test, and
+  // the ordinary-user requirement it might look related to ("account for
+  // the 100%") is already met by CategorySummary's own always-visible
+  // "TurnitPlus reference sources" row above, which needs no admin gate
+  // because it exposes only a percentage, never a raw word count alongside
+  // archive/academic breakdown detail.
   const canSeeSourceBreakdown = Boolean(report.historicalSubmissionMatch);
+  const breakdown = unifiedEvidenceBreakdown(report);
 
   return (
     <section className={`unified-similarity-block ${verdict ? `unified-verdict-${verdict.key}` : ""}`}>
@@ -540,7 +571,7 @@ export function OverviewReport({ report, similarityStatus = "resolved" }: { repo
                 ? "TurnitPlus's reference sources changed since this result was last computed. Refreshing now — this can take a few seconds."
                 : similarityStatus === "failed"
                   ? "TurnitPlus could not complete a similarity check for this submission."
-                  : "TurnitPlus is still checking this submission against every reference source, including previously submitted content. This can take a few seconds."}
+                  : "TurnitPlus is still checking this submission against every reference source. This can take a few seconds."}
             </p>
           </section>
         ) : (

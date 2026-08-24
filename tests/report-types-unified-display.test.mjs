@@ -6,6 +6,7 @@ import {
   primaryResultLabel,
   hasUnifiedSimilarity,
   unifiedEvidenceSummary,
+  referenceSourceContributionPercent,
   buildReportSummary,
 } from "../lib/report-types.ts";
 
@@ -111,12 +112,54 @@ test("EVIDENCE SUMMARY: archive plus live academic sources", () => {
 
 test("EVIDENCE SUMMARY: all three sources plus overlap still lists archive once", () => {
   const summary = unifiedEvidenceSummary(unified({ archiveOnlyWords: 10, liveAcademicOnlyWords: 10, previousUploadOnlyWords: 10, overlapWords: 5 }));
-  assert.equal(summary, "own reference material, live academic sources, a prior submission");
+  assert.equal(summary, "own reference material, live academic sources, TurnitPlus reference sources");
 });
 
 test("EVIDENCE SUMMARY: no matched words at all never renders a blank string", () => {
   const summary = unifiedEvidenceSummary(unified({ archiveOnlyWords: 0, liveAcademicOnlyWords: 0, previousUploadOnlyWords: 0, overlapWords: 0 }));
   assert.equal(summary, "no matched sources");
+});
+
+/**
+ * Report-source presentation correction: internal/corpus-only contribution
+ * (previousUploadOnlyWords) must never surface "a prior submission" — the
+ * receipt has no admin/ordinary distinction, so this generic wording is
+ * unconditional, not role-gated like the on-screen breakdown.
+ */
+test("PRIVACY: an internal-only contribution is described as 'TurnitPlus reference sources', never 'a prior submission'", () => {
+  const summary = unifiedEvidenceSummary(unified({ archiveOnlyWords: 0, liveAcademicOnlyWords: 0, previousUploadOnlyWords: 500, overlapWords: 0 }));
+  assert.equal(summary, "TurnitPlus reference sources");
+  assert.doesNotMatch(summary, /prior submission/i);
+});
+
+/**
+ * Report-source presentation correction: referenceSourceContributionPercent
+ * is the generic, ordinary-user-safe percentage CategorySummary renders for
+ * the internal/corpus contribution. A 100% internal-only match must report
+ * 100% here — never leave the figure at 0% the way report.sources-derived
+ * categories (which have no awareness of unifiedSimilarity) previously did.
+ */
+test("REFERENCE SOURCE PERCENT: a 100% internal-only match reports 100%, matching unifiedScore", () => {
+  const report = baseReport({
+    score: 0,
+    archiveScore: 0,
+    unifiedSimilarity: unified({ unifiedScore: 100, uniqueMatchedWords: 9925, wordCount: 9925, archiveOnlyWords: 0, liveAcademicOnlyWords: 0, previousUploadOnlyWords: 9925, overlapWords: 0 }),
+  });
+  assert.equal(referenceSourceContributionPercent(report), 100);
+  assert.equal(referenceSourceContributionPercent(report), primarySimilarityScore(report));
+});
+
+test("REFERENCE SOURCE PERCENT: archive-only and live-academic-only words are never folded into this figure", () => {
+  const report = baseReport({
+    unifiedSimilarity: unified({ unifiedScore: 40, uniqueMatchedWords: 400, wordCount: 1000, archiveOnlyWords: 200, liveAcademicOnlyWords: 200, previousUploadOnlyWords: 0, overlapWords: 0 }),
+  });
+  assert.equal(referenceSourceContributionPercent(report), 0);
+});
+
+test("REFERENCE SOURCE PERCENT: a legacy report with no unifiedSimilarity reports 0, not a crash", () => {
+  const report = baseReport();
+  assert.equal(hasUnifiedSimilarity(report), false);
+  assert.equal(referenceSourceContributionPercent(report), 0);
 });
 
 /**

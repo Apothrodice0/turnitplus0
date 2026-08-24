@@ -358,6 +358,15 @@ export function ReportDetailShell({
 
   const primaryScore = primarySimilarityScore(report);
   const isUnified = hasUnifiedSimilarity(report);
+  // Report-source presentation correction: this sidebar paragraph, unlike
+  // its equivalents in components/report/similarity-report-papers.tsx, was
+  // never gated by anything narrower than isUnified — every viewer,
+  // ordinary users included, saw "eligible previous TurnitPlus submissions"
+  // whenever the result was unified. Reuses the same admin signal
+  // (historicalSubmissionMatch's own server-side, admin-only presence) that
+  // gates the equivalent text elsewhere, so there is exactly one place that
+  // decides who sees this class of detail.
+  const canSeeSourceBreakdown = Boolean(report.historicalSubmissionMatch);
   const primaryLabel = primaryResultLabel(report);
   const similarityVerdict = similarityScoreBand(primaryScore);
   const aiSignal = aiSignalDisplay(report);
@@ -502,9 +511,10 @@ export function ReportDetailShell({
               Similarity analysis could not be completed for this submission.
             </p> : <p>
               {isUnified
-                ? <>TurnitPlus Similarity combines text found through TurnitPlus&apos;s own checks, verified external academic sources, and eligible previous TurnitPlus submissions into one result — the same submitted passage found by more than one source counts once.</>
+                ? <>TurnitPlus Similarity combines text found through TurnitPlus&apos;s own checks, verified external academic sources, and {canSeeSourceBreakdown ? "eligible previous TurnitPlus submissions" : "TurnitPlus reference sources"} into one result — the same submitted passage found by more than one source counts once.</>
                 : <>The similarity result is based on identified overlapping passages and verified academic sources.</>}
-              {" "}{primaryMatchedWordCount(report).toLocaleString()} words were matched across {report.sources.length} retained source{report.sources.length === 1 ? "" : "s"}.
+              {" "}{primaryMatchedWordCount(report).toLocaleString()} words were matched
+              {isUnified ? "." : ` across ${report.sources.length} matched source${report.sources.length === 1 ? "" : "s"}.`}
               {(report.webCheck?.phrasesMatched ?? 0) > 0 && ` Wikipedia evidence is shown separately and does not change this result.`}
               {" "}Language detected: {report.features.detectedLanguage}. Longest matched span: {report.features.longestMatchedSpan} words.
             </p>}

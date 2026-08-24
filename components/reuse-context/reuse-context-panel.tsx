@@ -155,7 +155,7 @@ export function ReuseContextPanel({
       <div className="reuse-context-block">
         {outcomeNote}
         <p className="reuse-context-note reuse-context-ambiguous">
-          This content matches multiple prior submissions, so a specific context can&rsquo;t be added yet.
+          This content matches more than one TurnitPlus reference source, so a specific context can&rsquo;t be added yet.
         </p>
       </div>
     );

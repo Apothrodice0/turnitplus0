@@ -376,14 +376,36 @@ export function primaryResultLabel(report: SimilarityReport): string {
  * internal-only per UnifiedEvidenceContribution's own comment). Returns
  * "no matched sources" rather than an empty string so the PDF never prints
  * a blank value.
+ *
+ * Report-source presentation correction: the receipt has no admin/ordinary
+ * distinction (same PDF for every downloader), so previousUploadOnlyWords
+ * — the corpus/internal-only contribution — is described with the same
+ * generic "TurnitPlus reference sources" wording used everywhere else an
+ * ordinary user can see this figure, never "a prior submission."
  */
 export function unifiedEvidenceSummary(unified: UnifiedSimilarityResult): string {
   const parts: string[] = [];
   if (unified.archiveOnlyWords > 0 || unified.overlapWords > 0) parts.push("own reference material");
   if (unified.liveAcademicOnlyWords > 0) parts.push("live academic sources");
-  if (unified.previousUploadOnlyWords > 0) parts.push("a prior submission");
+  if (unified.previousUploadOnlyWords > 0) parts.push("TurnitPlus reference sources");
   if (parts.length === 0) return "no matched sources";
   return parts.join(", ");
+}
+
+/**
+ * Report-source presentation correction: the generic, ordinary-user-safe
+ * percentage for the internal/corpus contribution (previousUploadOnlyWords)
+ * — the same wordCount-based formula combineMatchedWordPositions already
+ * uses for unifiedScore itself, so a 100% internal-only match reports 100%
+ * here too rather than leaving every source category at 0%. Archive-only
+ * and live-academic-only words are deliberately excluded: those stay
+ * correctly labeled under their own categories and must never be folded
+ * into this figure.
+ */
+export function referenceSourceContributionPercent(report: SimilarityReport): number {
+  const unified = report.unifiedSimilarity;
+  if (!unified) return 0;
+  return Math.min(100, Math.round((unified.previousUploadOnlyWords / Math.max(1, unified.wordCount)) * 100));
 }
 
 export function archiveMatchedWordCount(report: SimilarityReport) {

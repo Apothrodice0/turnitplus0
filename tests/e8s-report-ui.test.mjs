@@ -228,8 +228,13 @@ test('never shows who rejected/revoked, no account ids, no emails', () => {
 
 test('L: ambiguous pair shows the explanatory note but never an actionable Add context control', () => {
   const html = renderPanel(React.createElement(ReuseContextPanel, { affordance: { canDeclare: false, reason: 'AMBIGUOUS' }, activeDeclaration: null }));
-  assert.match(html, /This content matches multiple prior submissions/);
+  assert.match(html, /This content matches more than one TurnitPlus reference source/);
   assert.doesNotMatch(html, /<button[^>]*>Add context/);
+});
+
+test('PRIVACY: the ambiguous note never uses "prior submission"/"corpus" wording — this panel is reachable by ordinary users (report.reuseContext is not admin-gated)', () => {
+  const html = renderPanel(React.createElement(ReuseContextPanel, { affordance: { canDeclare: false, reason: 'AMBIGUOUS' }, activeDeclaration: null }));
+  assert.doesNotMatch(html, /prior submission|previous submission|\bcorpus\b/i);
 });
 
 // --- M: SELF -> no CTA ---------------------------------------------------------
