@@ -392,7 +392,7 @@ test('SIM-01/receipt cleanup RECEIPT (structural): downloadReceipt passes primar
   assert.match(pipeline, /hasUnifiedSimilarity\(report\)/);
 
   const receipt = await fs.promises.readFile(path.join(repo, 'lib/receipt-pdf.ts'), 'utf8');
-  assert.match(receipt, /rows\.push\(\["TurnitPlus Similarity", `\$\{report\.unified\.score\}% - \$\{report\.unified\.label\}`\]\);/, 'the receipt\'s headline row must be the unified/combined result when present');
+  assert.match(receipt, /rows\.push\(\{ label: "TurnitPlus Similarity", value: `\$\{report\.unified\.score\}% - \$\{report\.unified\.label\}` \}\);/, 'the receipt\'s headline row must be the unified/combined result when present');
   // Receipt presentation fix: a second "Similarity result (component)" row
   // — the archive-only score, individually correct but presented directly
   // beneath the real TurnitPlus Similarity headline — read as the system

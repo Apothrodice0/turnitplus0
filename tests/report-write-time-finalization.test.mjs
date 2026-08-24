@@ -984,9 +984,16 @@ test('RECEIPT PREVIEW REGRESSION: the downloaded receipt must show the server-fi
     const blob = await buildReceiptPdfForReport(serverReport);
     const text = await extractReceiptPdfText(blob);
     assert.match(text, /TurnitPlus Similarity:\s*100%/, 'REQUIRED: the receipt must show the real, server-confirmed 100% — the same figure the room and report detail page already show');
-    assert.match(text, /Evidence sources:\s*TurnitPlus reference sources/, 'REQUIRED: a TURNITPLUS_CORPUS_SOURCE contribution must use the same privacy-safe generic terminology as the report page, never "own reference material" (which is true only for a genuine archive overlap, not present here)');
-    assert.doesNotMatch(text, /own reference material/, 'the receipt must never claim archive evidence that does not exist for a match that is genuinely 100% promoted-corpus-only');
-    assert.doesNotMatch(text, /\bcorpus\b|\bprior submission|\bprevious submission|retained source|\brepresentation\b|\badmission\b|\bpromotion\b/i, 'the receipt must never expose corpus relationship types, prior-submission terminology, or admission/promotion internals to an ordinary viewer');
+    // Ordinary-user simplification (latest turn): the "Evidence sources"
+    // row is removed entirely — a TURNITPLUS_CORPUS_SOURCE contribution no
+    // longer gets even the generic "TurnitPlus reference sources" label on
+    // the receipt; no matching channel/method is named at all any more.
+    assert.doesNotMatch(text, /Evidence sources/i, 'REQUIRED: no "Evidence sources" row on the receipt at all');
+    assert.doesNotMatch(text, /own reference material/i, 'the receipt must never claim archive evidence that does not exist for a match that is genuinely 100% promoted-corpus-only');
+    assert.doesNotMatch(text, /TurnitPlus reference sources/i, 'REQUIRED: never names this channel on the ordinary-user receipt, even for a genuine corpus-source match');
+    assert.doesNotMatch(text, /live academic sources/i, 'REQUIRED: never names this channel on the ordinary-user receipt');
+    assert.doesNotMatch(text, /\bcorpus\b|\bprovider\b|\bprior submission|\bprevious submission|retained source|\brepresentation\b|\badmission\b|\bpromotion\b/i, 'the receipt must never expose corpus relationship types, prior-submission terminology, or admission/promotion internals to an ordinary viewer');
+    assert.match(text, /TurnitPlus Similarity reflects matched text identified across the sources checked for this submission\./, 'REQUIRED: the neutral disclaimer wording must be present');
     // Receipt presentation fix (final receipt cleanup): a second
     // "Similarity result (component)" row directly beneath the real 100%
     // headline — technically correct (this report's archive-only score
@@ -1043,37 +1050,54 @@ test('RECEIPT PREVIEW REGRESSION: the downloaded receipt must show the server-fi
   });
 });
 
-test('RECEIPT: archive-only and live-academic contributions keep their own correct, distinct evidence-source labels — never relabeled as TurnitPlus reference sources', async () => {
+/**
+ * Ordinary-user simplification (Task A, final receipt polish, latest turn):
+ * this test previously verified the "Evidence sources" row showed the
+ * correct, distinct label per contribution channel (own reference
+ * material / live academic sources / TurnitPlus reference sources). That
+ * row is now removed entirely, and none of those channel names may appear
+ * anywhere on the receipt regardless of which channel(s) actually
+ * contributed — verified here through the REAL buildReceiptPdfForReport
+ * pipeline (primarySimilarityScore/unifiedEvidenceSummary and friends),
+ * not just a synthetic createReceiptPdf call.
+ */
+test('RECEIPT (ordinary-user simplification): archive-only, academic-only, and corpus-only contributions all produce a receipt with no Evidence sources row and no channel-naming wording, regardless of which channel actually contributed', async () => {
+  // Deliberately neutral id/submissionId/title (never containing the words
+  // "archive"/"corpus"/"provider" themselves) — those words ARE expected
+  // to legitimately appear on the receipt as real, ordinary user-supplied
+  // content (a submission title, a submission ID) completely independent
+  // of this test's own forbidden-internal-wording check; using them here
+  // would make the assertions below fail for the wrong reason.
   const baseFixture = {
-    version: 11, id: 'receipt-archive-only-fixture', submissionId: 'sub-receipt-archive-only-fixture', title: 'Archive-only fixture',
+    version: 11, id: 'receipt-channel-fixture', submissionId: 'sub-receipt-channel-fixture', title: 'Channel fixture',
     author: '', assignment: '', created: new Date().toISOString(),
     score: 40, archiveScore: 40, wordCount: 1000, scoreBand: 'Moderate', matchedWordCount: 400, sources: [], repeats: [], text: 'fixture text not used by receipt generation directly',
   };
 
-  const archiveOnlyReport = {
-    ...baseFixture,
-    unifiedSimilarity: {
-      version: 'unified-similarity-v1', wordCount: 1000, unifiedScore: 40, uniqueMatchedWords: 400,
-      archiveOnlyWords: 400, liveAcademicOnlyWords: 0, previousUploadOnlyWords: 0, overlapWords: 0,
-      selfExcludedWords: 0, unknownExcludedWords: 0, contributions: [],
-    },
-  };
-  const archiveText = await extractReceiptPdfText(await buildReceiptPdfForReport(archiveOnlyReport));
-  assert.match(archiveText, /Evidence sources:\s*own reference material/, 'a genuine archive-only contribution must keep saying "own reference material" — true and intentionally exposed, unlike a corpus-source contribution');
-  assert.doesNotMatch(archiveText, /TurnitPlus reference sources/, 'must never claim an internal-corpus contribution that does not exist for this report');
-
-  const academicOnlyReport = {
-    ...baseFixture,
-    id: 'receipt-academic-only-fixture', submissionId: 'sub-receipt-academic-only-fixture', title: 'Academic-only fixture',
-    unifiedSimilarity: {
-      version: 'unified-similarity-v1', wordCount: 1000, unifiedScore: 40, uniqueMatchedWords: 400,
-      archiveOnlyWords: 0, liveAcademicOnlyWords: 400, previousUploadOnlyWords: 0, overlapWords: 0,
-      selfExcludedWords: 0, unknownExcludedWords: 0, contributions: [],
-    },
-  };
-  const academicText = await extractReceiptPdfText(await buildReceiptPdfForReport(academicOnlyReport));
-  assert.match(academicText, /Evidence sources:\s*live academic sources/, 'a genuine external-academic-only contribution must keep saying "live academic sources"');
-  assert.doesNotMatch(academicText, /own reference material|TurnitPlus reference sources/, 'must never claim archive or internal-corpus evidence that does not exist for this report');
+  const scenarios = [
+    { label: 'channel-a', overrides: { archiveOnlyWords: 400, liveAcademicOnlyWords: 0, previousUploadOnlyWords: 0 } },
+    { label: 'channel-b', overrides: { archiveOnlyWords: 0, liveAcademicOnlyWords: 400, previousUploadOnlyWords: 0 } },
+    { label: 'channel-c', overrides: { archiveOnlyWords: 0, liveAcademicOnlyWords: 0, previousUploadOnlyWords: 400 } },
+  ];
+  for (const scenario of scenarios) {
+    const report = {
+      ...baseFixture,
+      id: `receipt-${scenario.label}-fixture`, submissionId: `sub-receipt-${scenario.label}-fixture`, title: `${scenario.label} fixture`,
+      unifiedSimilarity: {
+        version: 'unified-similarity-v1', wordCount: 1000, unifiedScore: 40, uniqueMatchedWords: 400,
+        overlapWords: 0, selfExcludedWords: 0, unknownExcludedWords: 0, contributions: [],
+        ...scenario.overrides,
+      },
+    };
+    const text = await extractReceiptPdfText(await buildReceiptPdfForReport(report));
+    assert.doesNotMatch(text, /Evidence sources/i, `${scenario.label}: REQUIRED no "Evidence sources" row`);
+    assert.doesNotMatch(text, /own reference material/i, `${scenario.label}: REQUIRED never names this channel`);
+    assert.doesNotMatch(text, /live academic sources/i, `${scenario.label}: REQUIRED never names this channel`);
+    assert.doesNotMatch(text, /TurnitPlus reference sources/i, `${scenario.label}: REQUIRED never names this channel`);
+    assert.doesNotMatch(text, /\barchive\b|\bcorpus\b|\bprovider\b/i, `${scenario.label}: REQUIRED never names archive/corpus/provider internals`);
+    assert.match(text, /TurnitPlus Similarity:\s*40%/, `${scenario.label}: the one authoritative score must still render correctly regardless of which channel produced it`);
+    assert.match(text, /TurnitPlus Similarity reflects matched text identified across the sources checked for this submission\./, `${scenario.label}: REQUIRED the neutral disclaimer wording is present`);
+  }
 });
 
 /**
