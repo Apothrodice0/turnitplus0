@@ -66,8 +66,17 @@ export async function createReceiptPdf(report: ReceiptData, suppliedFonts?: Rece
   page.drawRectangle({ x: 36, y: 36, width: 540, height: 720, color: colors.frame });
   page.drawRectangle({ x: 48, y: 52, width: 516, height: 696, color: colors.white });
   page.drawText(isUnified ? "TurnitPlus Similarity Report" : "TurnitPlus Source Overlap Report", { x: 72, y: 716, size: 15, font: bold, color: colors.brand });
-  page.drawRectangle({ x: 72, y: 664, width: 244, height: 28, color: colors.warning });
-  page.drawText("PROCESSING RECEIPT", { x: 84, y: 673, size: 11, font: bold, color: colors.heading });
+  // Receipt presentation fix: a receipt can only ever be generated for a
+  // report that is already fully finalized — both entry points
+  // (app/reports/rooms/[room]/room-page-shell.tsx's handleDownloadReceipt,
+  // components/reports/report-history-row.tsx's own handler) gate the
+  // Receipt control itself behind isFullyRevealed (room) / a saved history
+  // entry (already-completed by construction), so this function never runs
+  // against a report that is still processing. "PROCESSING RECEIPT" was
+  // therefore never an accurate label for any report this function could
+  // actually be called with — always a finalized result, never mid-check.
+  page.drawRectangle({ x: 72, y: 664, width: 120, height: 28, color: colors.warning });
+  page.drawText("FINAL RECEIPT", { x: 84, y: 673, size: 11, font: bold, color: colors.heading });
   page.drawText("Receipt", { x: 72, y: 620, size: 26, font: regular, color: colors.heading });
 
   const rows: Array<[string, string]> = [
@@ -81,11 +90,33 @@ export async function createReceiptPdf(report: ReceiptData, suppliedFonts?: Rece
     ["Character count", report.characterCount?.toLocaleString("en-US") ?? "—"],
   ];
   if (report.unified) {
+    // Receipt presentation fix: report.archiveScore (the archive-only
+    // component) used to also be printed here as "Similarity result
+    // (component)" — a second, lower number directly beneath the real,
+    // authoritative TurnitPlus Similarity figure just above. Both were
+    // individually correct, but presenting two different "similarity
+    // result"-labeled percentages on one ordinary-user receipt reads as the
+    // system contradicting itself. The archive component is not dropped
+    // from the product — it stays available exactly where it already was
+    // (UnifiedSimilaritySection's own admin-gated breakdown) — only this
+    // receipt's second competing headline is removed. Exactly one
+    // authoritative similarity result is shown on the receipt, same as the
+    // room card and report detail page already show.
     rows.push(["TurnitPlus Similarity", `${report.unified.score}% - ${report.unified.label}`]);
     rows.push(["Evidence sources", report.unified.evidenceSummary]);
-    rows.push(["Similarity result (component)", `${report.archiveScore ?? report.score}% - ${report.scoreBand}`]);
   } else {
-    rows.push(["Similarity result", `${report.archiveScore ?? report.score}% - ${report.scoreBand} similarity`]);
+    // No unified result exists for this report (a legacy/archive-only
+    // report predating unified similarity) — archiveScore/score IS the
+    // authoritative primary result here (primarySimilarityScore's own
+    // fallback rule, mirrored directly since ReceiptData carries the flat
+    // fields, not the full selector call). Labeled identically to the
+    // unified branch above — "TurnitPlus Similarity," never "Similarity
+    // result" — so every receipt shows exactly one similarity row under
+    // exactly one label, regardless of which path produced the value. The
+    // one and only similarity line either way; never a second "(component)"
+    // line, since there is no separate authoritative figure to compete
+    // with it.
+    rows.push(["TurnitPlus Similarity", `${report.archiveScore ?? report.score}% - ${report.scoreBand} similarity`]);
   }
   rows.push(
     ["Submission date", created.toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" })],

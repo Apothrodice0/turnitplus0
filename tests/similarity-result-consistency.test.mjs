@@ -386,14 +386,21 @@ test('SIM-04/LIFECYCLE-05 ROOM CARD (structural): only the fully-revealed "ready
   assert.doesNotMatch(shell, /occupant\.report\.primaryScore \?\? occupant\.report\.archiveScore/, 'the raw fallback expression must no longer appear inline at any call site');
 });
 
-test('SIM-01 RECEIPT (structural): downloadReceipt passes primarySimilarityScore/hasUnifiedSimilarity into the receipt, and receipt-pdf.ts labels the archive component as a clearly separate breakdown row, never the overall result', async () => {
+test('SIM-01/receipt cleanup RECEIPT (structural): downloadReceipt passes primarySimilarityScore/hasUnifiedSimilarity into the receipt, and receipt-pdf.ts shows exactly ONE authoritative similarity row — never a second, competing archive-component figure', async () => {
   const pipeline = await fs.promises.readFile(path.join(repo, 'lib/document-check-pipeline.ts'), 'utf8');
   assert.match(pipeline, /const primaryScore = primarySimilarityScore\(report\);/);
   assert.match(pipeline, /hasUnifiedSimilarity\(report\)/);
 
   const receipt = await fs.promises.readFile(path.join(repo, 'lib/receipt-pdf.ts'), 'utf8');
   assert.match(receipt, /rows\.push\(\["TurnitPlus Similarity", `\$\{report\.unified\.score\}% - \$\{report\.unified\.label\}`\]\);/, 'the receipt\'s headline row must be the unified/combined result when present');
-  assert.match(receipt, /rows\.push\(\["Similarity result \(component\)", `\$\{report\.archiveScore \?\? report\.score\}% - \$\{report\.scoreBand\}`\]\);/, 'the archive score must appear only as a row explicitly labeled "(component)" — never presented as the overall result, per requirement 3');
+  // Receipt presentation fix: a second "Similarity result (component)" row
+  // — the archive-only score, individually correct but presented directly
+  // beneath the real TurnitPlus Similarity headline — read as the system
+  // contradicting itself on an ordinary-user receipt. Removed entirely when
+  // the unified result exists; the archive component remains available
+  // elsewhere (UnifiedSimilaritySection's own admin-gated breakdown), just
+  // never as a second headline-shaped row on the receipt.
+  assert.doesNotMatch(receipt, /Similarity result \(component\)/, 'REQUIRED: no second, competing "similarity result" row may exist on the receipt once the authoritative unified result is available');
 });
 
 // --- SIM-02, refined by SIM-04: never a transient archive-only number while

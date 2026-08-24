@@ -987,16 +987,22 @@ test('RECEIPT PREVIEW REGRESSION: the downloaded receipt must show the server-fi
     assert.match(text, /Evidence sources:\s*TurnitPlus reference sources/, 'REQUIRED: a TURNITPLUS_CORPUS_SOURCE contribution must use the same privacy-safe generic terminology as the report page, never "own reference material" (which is true only for a genuine archive overlap, not present here)');
     assert.doesNotMatch(text, /own reference material/, 'the receipt must never claim archive evidence that does not exist for a match that is genuinely 100% promoted-corpus-only');
     assert.doesNotMatch(text, /\bcorpus\b|\bprior submission|\bprevious submission|retained source|\brepresentation\b|\badmission\b|\bpromotion\b/i, 'the receipt must never expose corpus relationship types, prior-submission terminology, or admission/promotion internals to an ordinary viewer');
-    // Inspected per this turn's own request: the archive-only sub-score row
-    // is genuinely labeled "Similarity result (component)" — not
-    // "(composite)" — already a clearly component/archive-specific label
-    // distinguishing it from the combined "TurnitPlus Similarity" row above
-    // it, so lib/receipt-pdf.ts is intentionally left unchanged (see this
-    // test's own outer comment). archiveScore itself (0% here, since this
-    // report's only evidence is the promoted corpus source) is correct and
-    // untouched — this asserts only the label, never the underlying score.
-    assert.match(text, /Similarity result \(component\):\s*0%/, 'REQUIRED: the archive-only sub-score row must render under its real, already-component-specific label');
-    assert.doesNotMatch(text, /Similarity result \(composite\)/, 'the label must never read "(composite)" — that would misleadingly imply this row is itself a combined result, not one component of it');
+    // Receipt presentation fix (final receipt cleanup): a second
+    // "Similarity result (component)" row directly beneath the real 100%
+    // headline — technically correct (this report's archive-only score
+    // genuinely is 0%) but reads as the system contradicting itself on an
+    // ordinary-user receipt. Removed entirely once the authoritative
+    // unified result is shown; the archive component stays available
+    // elsewhere (UnifiedSimilaritySection's own admin-gated breakdown), not
+    // duplicated here as a second competing "similarity result."
+    assert.doesNotMatch(text, /Similarity result \(component\)/, 'REQUIRED: no second, competing "similarity result" row may appear once the authoritative TurnitPlus Similarity is shown');
+    // Required per this fix: exactly one authoritative headline, and the
+    // receipt must no longer claim to be mid-processing — this report is
+    // completely finalized (write-time finalization + the LEGACY ROOM
+    // BUG/backward-compatibility fixes above already guarantee that by the
+    // time a receipt is ever requested).
+    assert.doesNotMatch(text, /PROCESSING RECEIPT/, 'REQUIRED: a finalized report\'s receipt must never claim to be a processing receipt');
+    assert.match(text, /FINAL RECEIPT/, 'REQUIRED: a finalized report\'s receipt must carry a clear, finalized label');
   });
 
   await t.test('REQUIRED (structural): both receipt-download entry points fetch the server-confirmed report first, using the local IndexedDB copy only as an offline fallback when the remote fetch itself fails', () => {
@@ -1068,6 +1074,57 @@ test('RECEIPT: archive-only and live-academic contributions keep their own corre
   const academicText = await extractReceiptPdfText(await buildReceiptPdfForReport(academicOnlyReport));
   assert.match(academicText, /Evidence sources:\s*live academic sources/, 'a genuine external-academic-only contribution must keep saying "live academic sources"');
   assert.doesNotMatch(academicText, /own reference material|TurnitPlus reference sources/, 'must never claim archive or internal-corpus evidence that does not exist for this report');
+});
+
+/**
+ * Task A, final receipt cleanup: two ordinary-user-visible presentation bugs
+ * on the receipt PDF, unrelated to score computation, highlighting, or room
+ * lifecycle (none of which this fix touches):
+ *  1. Every receipt was unconditionally labeled "PROCESSING RECEIPT," even
+ *     though a receipt can only ever be generated for an already-finalized
+ *     report — both real entry points (room-page-shell.tsx's
+ *     handleDownloadReceipt, report-history-row.tsx's own handler) gate the
+ *     Receipt control behind a fully-revealed/already-saved report. Fixed
+ *     to an unconditional "FINAL RECEIPT" label — not a new "is this
+ *     finalized" check, since one was never reachable from the real UI.
+ *  2. Once a unified result exists, the receipt showed BOTH the real
+ *     authoritative "TurnitPlus Similarity" headline AND a second
+ *     "Similarity result (component)" row (the archive-only score)
+ *     directly beneath it — two different, individually-correct
+ *     percentages both shaped like an overall "similarity result," reading
+ *     as the system contradicting itself. The component row is removed
+ *     entirely when the unified result is shown; the archive-only/legacy
+ *     fallback path (no unified result at all) is untouched and still
+ *     shows its one "Similarity result" row exactly as before.
+ */
+test('RECEIPT PRESENTATION FIX: a finalized receipt never says PROCESSING RECEIPT, always carries the chosen finalized label, and shows exactly one authoritative similarity result even at a genuine 0%', async () => {
+  const zeroScoreReport = {
+    version: 11, id: 'receipt-zero-score-fixture', submissionId: 'sub-receipt-zero-score-fixture', title: 'Zero-score unified fixture',
+    author: '', assignment: '', created: new Date().toISOString(),
+    score: 0, archiveScore: 0, wordCount: 500, scoreBand: 'Low', matchedWordCount: 0, sources: [], repeats: [], text: 'fixture text not used by receipt generation directly',
+    unifiedSimilarity: {
+      version: 'unified-similarity-v1', wordCount: 500, unifiedScore: 0, uniqueMatchedWords: 0,
+      archiveOnlyWords: 0, liveAcademicOnlyWords: 0, previousUploadOnlyWords: 0, overlapWords: 0,
+      selfExcludedWords: 0, unknownExcludedWords: 0, contributions: [],
+    },
+  };
+  const zeroText = await extractReceiptPdfText(await buildReceiptPdfForReport(zeroScoreReport));
+  assert.doesNotMatch(zeroText, /PROCESSING RECEIPT/, 'REQUIRED: never claim to be a processing receipt — this report is fully finalized');
+  assert.match(zeroText, /FINAL RECEIPT/, 'REQUIRED: a clear, finalized label must be present');
+  assert.match(zeroText, /TurnitPlus Similarity:\s*0%/, 'REQUIRED: an authoritative, genuine 0% unified result must still display correctly as the one headline figure');
+  assert.doesNotMatch(zeroText, /Similarity result \(component\)/, 'REQUIRED: no second competing "similarity result" row, even when the archive component and the unified result happen to be the same 0% value');
+
+  const legacyArchiveOnlyReport = {
+    version: 11, id: 'receipt-legacy-archive-only-fixture', submissionId: 'sub-receipt-legacy-archive-only-fixture', title: 'Legacy archive-only fixture',
+    author: '', assignment: '', created: new Date().toISOString(),
+    score: 62, archiveScore: 62, wordCount: 500, scoreBand: 'High', matchedWordCount: 310, sources: [], repeats: [], text: 'fixture text not used by receipt generation directly',
+    // No unifiedSimilarity at all — a genuine legacy/archive-only report.
+  };
+  const legacyText = await extractReceiptPdfText(await buildReceiptPdfForReport(legacyArchiveOnlyReport));
+  assert.doesNotMatch(legacyText, /PROCESSING RECEIPT/, 'REQUIRED: the finalized label applies regardless of whether a unified result exists');
+  assert.match(legacyText, /FINAL RECEIPT/);
+  assert.match(legacyText, /TurnitPlus Similarity:\s*62%/, 'REQUIRED: a legacy/archive-only report shows its one authoritative value under the SAME "TurnitPlus Similarity" label the unified path uses (the same value primarySimilarityScore(report) would fall back to) — never a distinct "Similarity result" label, and never a second "(component)" line, since there is no separate authoritative figure to compete with it');
+  assert.doesNotMatch(legacyText, /Similarity result/, 'REQUIRED: the archive-only path must never use the old "Similarity result" label at all — every receipt shows exactly one row, always labeled "TurnitPlus Similarity"');
 });
 
 /**
