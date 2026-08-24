@@ -240,9 +240,14 @@ test("INTEGRATION: referenceSourceContributionPercent(report) on the REAL persis
   assert.equal(percent, body.payload.unifiedSimilarity.unifiedScore, "the two must agree exactly for a report whose only evidence is the promoted corpus source");
 });
 
-test("INTEGRATION: CategorySummary rendered from the REAL persisted report shows the 100% TurnitPlus reference-source row an ordinary viewer would actually see", async () => {
+test("INTEGRATION: CategorySummary itself (rendered in isolation from the REAL persisted report) still computes the 100% TurnitPlus reference-source row correctly — the component's own logic, independent of whether any call site chooses to render it", async () => {
   const { body } = await uispcGetReport("uispc-ordinary-report", { cookie: uispcOrdinary.cookie, tag: "uispc-get-render" });
   assert.equal(body.payload.historicalSubmissionMatch, undefined, "test setup sanity: this is the ordinary (non-admin) viewer's own response — the admin-only field must be absent");
+  // Task A, final report simplification: an ordinary viewer's OverviewReport/
+  // report-detail-shell.tsx sidebar no longer CALLS CategorySummary at all
+  // (see the PRIVACY test below) — this test only proves the component's own
+  // percentage math is still correct when something does render it (admin
+  // call sites).
   const html = renderToStaticMarkup(React.createElement(CategorySummary, { report: body.payload }));
   assert.match(html, /<strong>100%<\/strong>[\s\S]*?TurnitPlus reference sources/);
   assert.match(html, /<strong>0%<\/strong>[\s\S]*?Indexed publications/, "no archive source exists here, so Indexed publications must honestly stay 0% alongside the real 100% reference-source figure");
@@ -363,7 +368,14 @@ const FORBIDDEN_ORDINARY_TERMS = /\bcorpus\b|\bprior submission|\bprevious submi
 test("PRIVACY: an ordinary viewer's full OverviewReport render (no historicalSubmissionMatch) for an internal-only 100% match contains none of the forbidden internal terms", () => {
   const html = renderOverview(INTERNAL_ONLY_100);
   assert.doesNotMatch(html, FORBIDDEN_ORDINARY_TERMS);
-  assert.match(html, /TurnitPlus reference sources/, "the generic category must still be present and visible");
+  // Task A, final report simplification (supersedes this test's earlier
+  // expectation): "TurnitPlus reference sources" is itself now an
+  // internal-system label hidden from ordinary viewers — the per-source-type
+  // CategorySummary block is admin-only (see report-detail-shell.tsx and
+  // OverviewReport's own canSeeSourceBreakdown gate on that section). The
+  // ordinary viewer still gets the one authoritative score below.
+  assert.doesNotMatch(html, /TurnitPlus reference sources/, "REQUIRED: an ordinary viewer must never see this internal-system label");
+  assert.doesNotMatch(html, /Indexed publications/, "REQUIRED: the source-type percentage breakdown must not render for an ordinary viewer");
   assert.match(html, /<span>100%<\/span> TurnitPlus Similarity/);
 });
 
@@ -377,6 +389,10 @@ test("PRIVACY: no email/account/filename/report identifier appears in an ordinar
 
 test("REGRESSION: an admin-visible internal-only match still shows the unchanged, richer admin wording in UnifiedSimilaritySection — this fix must never touch that gate", () => {
   const html = renderOverview(baseReport({
+    // Task A correction: viewerIsAdmin is the explicit authorization
+    // signal now — historicalSubmissionMatch's own presence below is real
+    // match data, not itself an authorization check.
+    viewerIsAdmin: true,
     unifiedSimilarity: unified(),
     historicalSubmissionMatch: {
       status: "MATCHED",
@@ -394,7 +410,9 @@ test("REGRESSION: an admin-visible internal-only match still shows the unchanged
   }));
   assert.match(html, /9,925 words? from an eligible previous TurnitPlus submission/, "the admin-only breakdown wording must be completely unaffected by this presentation fix");
   assert.match(html, /matches a TurnitPlus corpus reference source/, "the admin-only historical-match entry wording must be completely unaffected");
-  // The new ordinary-user category still renders for an admin too (it is not admin-gated — a percentage alone carries no diagnostic detail).
+  // Task A, final report simplification (+ authorization correction):
+  // CategorySummary's own call site is gated on viewerIsAdmin — this
+  // fixture sets it true, so the category still renders here.
   assert.match(html, /TurnitPlus reference sources/);
 });
 
@@ -416,11 +434,27 @@ test("RECEIPT (structural): lib/receipt-pdf.ts's disclaimer line no longer names
 // established convention (tests/similarity-result-consistency.test.mjs) for this
 // stateful "use client" component, which cannot be safely rendered via renderToStaticMarkup.
 
-test("REPORT NOTES (structural): report-detail-shell.tsx's sidebar paragraph no longer unconditionally names 'eligible previous TurnitPlus submissions' or 'retained source'", () => {
+test("REPORT NOTES (structural): report-detail-shell.tsx's sidebar paragraph no longer unconditionally names 'eligible previous TurnitPlus submissions', 'TurnitPlus reference sources', or 'retained source'", () => {
   const shell = fs.readFileSync(path.join(repo, "app/reports/[id]/report-detail-shell.tsx"), "utf8");
   assert.doesNotMatch(shell, /retained source/, "the forbidden term must be gone entirely, not merely conditional");
-  assert.match(shell, /canSeeSourceBreakdown \? "eligible previous TurnitPlus submissions" : "TurnitPlus reference sources"/, "the ordinary-user branch must use the generic wording; the admin branch keeps the existing wording, matching the established canSeeSourceBreakdown convention elsewhere");
-  assert.match(shell, /const canSeeSourceBreakdown = Boolean\(report\.historicalSubmissionMatch\);/, "must reuse the same server-decided admin signal historicalSubmissionMatch already is, not a new client-side one");
+  // Task A, final report simplification (supersedes this test's earlier
+  // expectation): the ordinary-user branch no longer names "TurnitPlus
+  // reference sources" either — it now uses fully neutral wording that
+  // names no matching channel at all.
+  assert.match(shell, /isUnified && canSeeSourceBreakdown\s*\n\s*\? <>TurnitPlus Similarity combines text found through TurnitPlus&apos;s own checks, verified external academic sources, and eligible previous TurnitPlus submissions/, "the admin branch keeps the existing detailed wording, gated on isUnified && canSeeSourceBreakdown");
+  assert.match(shell, /TurnitPlus Similarity reflects matched text identified across the sources checked for this submission\. Highlighted passages show the text contributing to the result\./, "the ordinary-user (and non-unified) branch must use the fully neutral wording, matching the receipt's own established phrasing");
+  // Task A correction: canSeeSourceBreakdown must derive from the explicit
+  // viewerIsAdmin signal, never from historicalSubmissionMatch's own
+  // presence — see SimilarityReport.viewerIsAdmin's own comment for why
+  // that proxy is wrong (a real admin's own no-match report would read as
+  // ordinary).
+  assert.match(shell, /const canSeeSourceBreakdown = Boolean\(report\.viewerIsAdmin\);/, "must reuse the explicit, server-decided viewerIsAdmin signal, not a data-presence proxy");
+  assert.doesNotMatch(shell, /canSeeSourceBreakdown = Boolean\(report\.historicalSubmissionMatch\)/, "REQUIRED: the old data-presence proxy must be gone");
+});
+
+test("REPORT NOTES (structural): report-detail-shell.tsx's 'Top source types' CategorySummary block is admin-only", () => {
+  const shell = fs.readFileSync(path.join(repo, "app/reports/[id]/report-detail-shell.tsx"), "utf8");
+  assert.match(shell, /mode === "similarity" && canSeeSourceBreakdown && <div className="inspector-section">\s*\n\s*<h3>Top source types<\/h3>/, "the source-type percentage breakdown must only render for an admin viewer");
 });
 
 test("PENDING MESSAGE (structural): OverviewReport's pending-state copy no longer names 'previously submitted content'", () => {

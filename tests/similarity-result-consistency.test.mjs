@@ -201,6 +201,8 @@ test('SIM-01 (d): the archive-only Match Groups breakdown still reflects the arc
 
 test('SIM-01 (d): UnifiedSimilaritySection\'s own evidence breakdown clearly attributes words to their source, never presenting the corpus-source contribution as an unlabeled archive figure', () => {
   const html = render(baseReport({
+    // Task A correction: viewerIsAdmin is the explicit authorization signal.
+    viewerIsAdmin: true,
     historicalSubmissionMatch: CORPUS_SOURCE_MATCH,
     unifiedSimilarity: unified(),
   }));

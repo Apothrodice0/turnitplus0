@@ -295,6 +295,13 @@ function ReferenceSourceEntry({ report, detailed }: { report: SimilarityReport; 
 }
 
 export function SourceList({ report, detailed = false }: { report: SimilarityReport; detailed?: boolean }) {
+  // Task A correction: an explicit, server-decided authorization signal
+  // (see SimilarityReport.viewerIsAdmin's own comment), never inferred from
+  // whether report.historicalSubmissionMatch happens to be present — that
+  // field's presence conflates "this report has a match to show" with "this
+  // viewer is authorized," and would read a real admin's own no-match
+  // report as ordinary.
+  const canSeeSourceBreakdown = Boolean(report.viewerIsAdmin);
   const hasReferenceSources = referenceSourceMatchedPositions(report).length > 0;
   if (report.sources.length === 0 && !hasReferenceSources) {
     return (
@@ -302,6 +309,21 @@ export function SourceList({ report, detailed = false }: { report: SimilarityRep
         <ShieldCheck aria-hidden="true" />
         <strong>No weighted source matches</strong>
         <p>No distinctive five-word passage matched the private full-document database.</p>
+      </div>
+    );
+  }
+
+  // Ordinary-user simplification: an internal-only match has nothing
+  // nameable to list here, but real matches DO exist and are highlighted in
+  // the submission text — never claim "no matches", which would contradict
+  // a nonzero headline score. Admins keep the detailed ReferenceSourceEntry
+  // below instead.
+  if (report.sources.length === 0 && hasReferenceSources && !canSeeSourceBreakdown) {
+    return (
+      <div className="no-sources">
+        <ShieldCheck aria-hidden="true" />
+        <strong>Matched passages found</strong>
+        <p>Review the highlighted submission text for the matched passages contributing to this result.</p>
       </div>
     );
   }
@@ -335,7 +357,7 @@ export function SourceList({ report, detailed = false }: { report: SimilarityRep
           )}
         </article>
       ))}
-      <ReferenceSourceEntry report={report} detailed={detailed} />
+      {canSeeSourceBreakdown && <ReferenceSourceEntry report={report} detailed={detailed} />}
     </div>
   );
 }
@@ -377,7 +399,7 @@ function academicEvidenceMetaLine(item: ExternalAcademicEvidence): string | null
   return parts.join(" · ");
 }
 
-function AcademicEvidenceCard({ item }: { item: ExternalAcademicEvidence }) {
+function AcademicEvidenceCard({ item, canSeeSourceBreakdown }: { item: ExternalAcademicEvidence; canSeeSourceBreakdown: boolean }) {
   const meta = academicEvidenceMetaLine(item);
   const bestPassage = item.matchedPassages[0];
   return (
@@ -395,7 +417,11 @@ function AcademicEvidenceCard({ item }: { item: ExternalAcademicEvidence }) {
         <blockquote className="academic-evidence-excerpt">&ldquo;{bestPassage.submittedText}&rdquo;</blockquote>
       )}
       <div className="academic-evidence-links">
-        <span>Source: {item.provider}</span>
+        {/* Ordinary-user simplification: "Source: {provider}" (e.g. "openaire",
+            "europe-pmc") names the fetching provider channel, not the cited
+            work itself — admin-only. The title/DOI/URL above/below (the
+            actual publicly verifiable citation) are unaffected. */}
+        {canSeeSourceBreakdown && <span>Source: {item.provider}</span>}
         {item.doi && <span>DOI: {item.doi}</span>}
         {item.url && (
           <a href={item.url} target="_blank" rel="noreferrer">
@@ -426,6 +452,18 @@ function AcademicEvidenceCard({ item }: { item: ExternalAcademicEvidence }) {
  * before this task) renders nothing here, exactly as before.
  */
 export function AcademicEvidenceSection({ report }: { report: SimilarityReport }) {
+  // Ordinary-user simplification (Task A, final report simplification):
+  // "OpenAIRE"/"Europe PMC" are provider-channel names, not part of the
+  // cited work itself — admin-only, same signal as everywhere else in this
+  // file. The evidence itself (title/authors/DOI/URL, a real publicly
+  // verifiable citation) is unaffected.
+  // Task A correction: an explicit, server-decided authorization signal
+  // (see SimilarityReport.viewerIsAdmin's own comment), never inferred from
+  // whether report.historicalSubmissionMatch happens to be present — that
+  // field's presence conflates "this report has a match to show" with "this
+  // viewer is authorized," and would read a real admin's own no-match
+  // report as ordinary.
+  const canSeeSourceBreakdown = Boolean(report.viewerIsAdmin);
   const evidence = report.externalAcademicEvidence ? dedupeExternalAcademicEvidence(report.externalAcademicEvidence) : [];
   if (evidence.length > 0) {
     return (
@@ -437,7 +475,7 @@ export function AcademicEvidenceSection({ report }: { report: SimilarityReport }
         </p>
         <div className="academic-evidence-list">
           {evidence.map((item, index) => (
-            <AcademicEvidenceCard item={item} key={item.doi ?? item.url ?? `${item.provider}-${item.providerId}-${index}`} />
+            <AcademicEvidenceCard item={item} canSeeSourceBreakdown={canSeeSourceBreakdown} key={item.doi ?? item.url ?? `${item.provider}-${item.providerId}-${index}`} />
           ))}
         </div>
       </section>
@@ -449,9 +487,11 @@ export function AcademicEvidenceSection({ report }: { report: SimilarityReport }
       <section className="academic-evidence-block academic-evidence-unavailable">
         <h3>External Academic Sources</h3>
         <p className="academic-evidence-intro">
-          External academic verification was unavailable for this report — OpenAIRE and Europe PMC could not be
-          reached, or every request failed. This is not the same as "no matches found"; it means the check itself
-          did not complete.
+          {canSeeSourceBreakdown
+            ? <>External academic verification was unavailable for this report — OpenAIRE and Europe PMC could not be
+                reached, or every request failed. This is not the same as &quot;no matches found&quot;; it means the check
+                itself did not complete.</>
+            : <>External academic verification was unavailable for this report. This is not the same as &quot;no matches found&quot;; it means the check itself did not complete.</>}
         </p>
       </section>
     );
@@ -462,7 +502,9 @@ export function AcademicEvidenceSection({ report }: { report: SimilarityReport }
       <section className="academic-evidence-block">
         <h3>External Academic Sources</h3>
         <p className="academic-evidence-intro">
-          Checked OpenAIRE and Europe PMC — no matching external academic sources were found.
+          {canSeeSourceBreakdown
+            ? <>Checked OpenAIRE and Europe PMC — no matching external academic sources were found.</>
+            : <>No matching external academic sources were found.</>}
         </p>
       </section>
     );
@@ -526,13 +568,19 @@ export function UnifiedSimilaritySection({ report }: { report: SimilarityReport 
   // sees this class of detail, not two. Report-source presentation
   // correction: left unchanged deliberately — this admin-only breakdown is
   // the same surface tests/report-historical-match-visibility.test.mjs
-  // protects with an explicit "all-or-nothing gate" regression test, and
-  // the ordinary-user requirement it might look related to ("account for
-  // the 100%") is already met by CategorySummary's own always-visible
-  // "TurnitPlus reference sources" row above, which needs no admin gate
-  // because it exposes only a percentage, never a raw word count alongside
-  // archive/academic breakdown detail.
-  const canSeeSourceBreakdown = Boolean(report.historicalSubmissionMatch);
+  // protects with an explicit "all-or-nothing gate" regression test.
+  // Ordinary-user simplification (Task A, final report simplification):
+  // CategorySummary's own per-source-type percentage row is now ALSO gated
+  // behind this same signal (see OverviewReport/report-detail-shell.tsx's
+  // own call sites) — an ordinary viewer no longer sees a source-type
+  // breakdown anywhere, only the single authoritative unifiedScore.
+  // Task A correction: an explicit, server-decided authorization signal
+  // (see SimilarityReport.viewerIsAdmin's own comment), never inferred from
+  // whether report.historicalSubmissionMatch happens to be present — that
+  // field's presence conflates "this report has a match to show" with "this
+  // viewer is authorized," and would read a real admin's own no-match
+  // report as ordinary.
+  const canSeeSourceBreakdown = Boolean(report.viewerIsAdmin);
   const breakdown = unifiedEvidenceBreakdown(report);
 
   return (
@@ -551,8 +599,10 @@ export function UnifiedSimilaritySection({ report }: { report: SimilarityReport 
       </p>
       {report.academicEvidenceStatus === "FAILED" && (
         <p className="unified-similarity-note unified-similarity-note-warning">
-          External academic verification (OpenAIRE, Europe PMC) was unavailable when this report was generated, so
-          this result reflects TurnitPlus&apos;s own reference matches{report.historicalSubmissionMatch ? " and previous submissions" : ""} only. See External Academic Sources below for details.
+          {canSeeSourceBreakdown
+            ? <>External academic verification (OpenAIRE, Europe PMC) was unavailable when this report was generated, so
+                this result reflects TurnitPlus&apos;s own reference matches{report.historicalSubmissionMatch ? " and previous submissions" : ""} only. See External Academic Sources below for details.</>
+            : <>Some external verification was unavailable when this report was generated, so this result may not reflect every source TurnitPlus checks. See External Academic Sources below for details.</>}
         </p>
       )}
       {canSeeSourceBreakdown && breakdown.length > 0 && (
@@ -625,7 +675,13 @@ export function OverviewReport({ report, similarityStatus = "resolved" }: { repo
   // source type UnifiedSimilaritySection's own breakdown does — a second
   // place carrying that wording this fix would otherwise have missed. Same
   // gate, same reasoning: see that component's own comment.
-  const canSeeSourceBreakdown = Boolean(report.historicalSubmissionMatch);
+  // Task A correction: an explicit, server-decided authorization signal
+  // (see SimilarityReport.viewerIsAdmin's own comment), never inferred from
+  // whether report.historicalSubmissionMatch happens to be present — that
+  // field's presence conflates "this report has a match to show" with "this
+  // viewer is authorized," and would read a real admin's own no-match
+  // report as ordinary.
+  const canSeeSourceBreakdown = Boolean(report.viewerIsAdmin);
   return (
     <article className="report-paper overview-paper">
       <ReportPageHeader report={report} page={2} label="Integrity Overview" />
@@ -663,12 +719,25 @@ export function OverviewReport({ report, similarityStatus = "resolved" }: { repo
                 ? (canSeeSourceBreakdown
                   ? <>TurnitPlus Similarity combines text found through TurnitPlus&apos;s own checks, verified external academic sources, and eligible previous TurnitPlus submissions into one result — the same submitted passage found by more than one source counts once.</>
                   : <>TurnitPlus Similarity combines text found across every reference source TurnitPlus checks into one result — the same submitted passage found by more than one source counts once.</>)
-                : <>Similarity result: {primaryScore}% — based on identified overlapping passages and verified academic sources.</>}
+                // SIM-01/SIM-04 (regression guard: tests/similarity-result-
+                // consistency.test.mjs): the archive-only fallback must
+                // never say "TurnitPlus Similarity" anywhere on the page —
+                // that label is reserved for a genuinely computed unified
+                // result. Ordinary-user simplification: no longer names
+                // "verified academic sources" specifically.
+                : <>Similarity result: {primaryScore}% — based on matched passages identified across the sources checked for this submission.</>}
             </aside>
             <p>
               TurnitPlus found {primaryMatchedWordCount(report).toLocaleString()} matched words across identified sources.
               Review the highlighted passages and named sources to see exactly what produced the result.
-              {wikipediaMatches > 0 && <> {wikipediaMatches} exact Wikipedia phrase match{wikipediaMatches === 1 ? "" : "es"} are shown separately and do not change the similarity result.</>}
+              {/* Task A correction: only mentioned when the viewer is
+                  actually authorized to see the Wikipedia highlight/legend
+                  entries this sentence refers to — an ordinary viewer never
+                  gets Wikipedia body highlighting (see HighlightedDocument's
+                  own findHighlightRanges(report, { includeWikipedia }) call),
+                  so claiming it is "shown separately" would be false for
+                  them. */}
+              {canSeeSourceBreakdown && wikipediaMatches > 0 && <> {wikipediaMatches} exact Wikipedia phrase match{wikipediaMatches === 1 ? "" : "es"} are shown separately and do not change the similarity result.</>}
               {report.excludedDocuments > 0 && (
                 <> {report.excludedDocuments} content-identical source was excluded and recorded as a probable self-match.</>
               )}
@@ -854,10 +923,17 @@ export function OverviewReport({ report, similarityStatus = "resolved" }: { repo
             <h3>Match Groups</h3>
             <MatchGroups report={report} />
           </section>
-          <section>
-            <h3>Top Sources</h3>
-            <CategorySummary report={report} />
-          </section>
+          {/* Ordinary-user simplification: the per-source-type percentage
+              breakdown is a matching-mechanism detail ("Indexed publications",
+              "TurnitPlus reference sources") — admin-only diagnostics, gated
+              on the same historicalSubmissionMatch signal used everywhere
+              else in this file. */}
+          {canSeeSourceBreakdown && (
+            <section>
+              <h3>Top Sources</h3>
+              <CategorySummary report={report} />
+            </section>
+          )}
         </div>
 
         <section className="top-sources-section">
@@ -879,10 +955,22 @@ function phrasePattern(phrase: string) {
   return words.length ? `\\b${words.join("[\\s\\W]+")}\\b` : "";
 }
 
-/** Distinct from archive (#d7263d) and Wikipedia (#0784b4) — a real, named external academic source (OpenAIRE/Europe PMC), individually attributable. */
+/** Distinct from archive (#d7263d) and Wikipedia (#0784b4) — a real, named external academic source (OpenAIRE/Europe PMC), individually attributable. Used only in the admin-only detailed legend/Source Details view — see HighlightLegend's canSeeSourceBreakdown branch. */
 const ACADEMIC_HIGHLIGHT_COLOR = "#7b3fe4";
-/** The one shared color for the generic "TurnitPlus reference sources" bucket — matches the ShieldCheck "verified internal" visual language CategorySummary already uses for the same bucket. Deliberately a single color regardless of how many distinct corpus documents contributed — never per-item, unlike the three kinds above. */
+/** The one shared color for the generic "TurnitPlus reference sources" bucket, admin-only detailed view. Deliberately a single color regardless of how many distinct corpus documents contributed — never per-item, unlike the archive/academic kinds above. */
 const REFERENCE_SOURCE_HIGHLIGHT_COLOR = "#0f9d58";
+/**
+ * Ordinary-user simplification (Task A, final report simplification): the
+ * single red/magenta highlight treatment for every matched position that
+ * feeds the authoritative unified score (archive/academic/reference-source
+ * alike) — reused from the archive color so the document body's dominant
+ * highlight color does not change. Wikipedia (separate evidence, never part
+ * of the score) is the only kind that stays visually distinct. This is a
+ * render-layer-only unification: findHighlightRanges's own per-kind color/
+ * label/kind fields are untouched (still used for internal precedence and by
+ * the admin-only detailed legend/Source Details views).
+ */
+const MATCHED_PASSAGE_COLOR = "#d7263d";
 
 /**
  * Highlighting fix (Task A, final correctness bug): the report body
@@ -919,7 +1007,23 @@ const REFERENCE_SOURCE_HIGHLIGHT_COLOR = "#0f9d58";
  *    highlights correctly in both the common partial-match case and the
  *    exact-full-document case alike.
  */
-export function findHighlightRanges(report: SimilarityReport) {
+/**
+ * Task A correction: `includeWikipedia` (default true, so every existing
+ * caller/test keeps its current behavior) lets a caller exclude Wikipedia
+ * candidates from the precedence/acceptance pass entirely — not merely
+ * filter them out of the returned list afterward. Wikipedia is auxiliary
+ * evidence that never contributes to unifiedScore/matchedPositions, but it
+ * previously took FIRST precedence below, so a real scoring position
+ * (archive/academic/reference-source) that happened to overlap a Wikipedia
+ * phrase match would lose that position to Wikipedia and render with no
+ * highlight at all — a real violation of "highlighted positions === positions
+ * contributing to the result" for a viewer who should never see Wikipedia
+ * highlighting. Excluding Wikipedia from the candidate pool before
+ * precedence runs, rather than post-filtering `accepted`, lets the
+ * underlying scoring position claim its rightful highlight instead.
+ */
+export function findHighlightRanges(report: SimilarityReport, options: { includeWikipedia?: boolean } = {}) {
+  const includeWikipedia = options.includeWikipedia ?? true;
   const candidates: HighlightRange[] = [];
 
   report.sources.forEach((source, sourceIndex) => {
@@ -943,27 +1047,29 @@ export function findHighlightRanges(report: SimilarityReport) {
     });
   });
 
-  report.webCheck?.matches.filter((match) => match.matched).forEach((match) => {
-    const pattern = phrasePattern(match.phrase);
-    const source = match.sources[0];
-    if (!pattern || !source) return;
-    const expression = new RegExp(pattern, "gi");
-    let found = expression.exec(report.text);
-    while (found) {
-      candidates.push({
-        start: found.index,
-        end: found.index + found[0].length,
-        sourceIndex: -1,
-        color: "#0784b4",
-        label: source.title,
-        kind: "wikipedia",
-        url: source.url,
-        wikipediaSources: match.sources,
-      });
-      if (expression.lastIndex === found.index) expression.lastIndex += 1;
-      found = expression.exec(report.text);
-    }
-  });
+  if (includeWikipedia) {
+    report.webCheck?.matches.filter((match) => match.matched).forEach((match) => {
+      const pattern = phrasePattern(match.phrase);
+      const source = match.sources[0];
+      if (!pattern || !source) return;
+      const expression = new RegExp(pattern, "gi");
+      let found = expression.exec(report.text);
+      while (found) {
+        candidates.push({
+          start: found.index,
+          end: found.index + found[0].length,
+          sourceIndex: -1,
+          color: "#0784b4",
+          label: source.title,
+          kind: "wikipedia",
+          url: source.url,
+          wikipediaSources: match.sources,
+        });
+        if (expression.lastIndex === found.index) expression.lastIndex += 1;
+        found = expression.exec(report.text);
+      }
+    });
+  }
 
   (report.externalAcademicEvidence ?? []).forEach((evidence, evidenceIndex) => {
     (evidence.matchedPassages ?? []).forEach((passage) => {
@@ -1054,7 +1160,15 @@ export function findHighlightRanges(report: SimilarityReport) {
 }
 
 function HighlightedDocument({ report }: { report: SimilarityReport }) {
-  const ranges = findHighlightRanges(report);
+  // Task A correction: Wikipedia is auxiliary evidence that never
+  // contributes to unifiedScore/matchedPositions — the ordinary-user body
+  // highlight layer must represent only the canonical positions that
+  // contribute to the authoritative similarity result, so Wikipedia is
+  // excluded from the candidate pool entirely (not merely hidden after the
+  // fact) unless the viewer is explicitly authorized for admin/debug
+  // presentation. See findHighlightRanges's own header comment.
+  const canSeeSourceBreakdown = Boolean(report.viewerIsAdmin);
+  const ranges = findHighlightRanges(report, { includeWikipedia: canSeeSourceBreakdown });
   if (ranges.length === 0) {
     return <div className="submission-rendered-text">{report.text}</div>;
   }
@@ -1066,30 +1180,37 @@ function HighlightedDocument({ report }: { report: SimilarityReport }) {
     if (range.start > cursor) {
       pieces.push(report.text.slice(cursor, range.start));
     }
+    const isWikipedia = range.kind === "wikipedia";
+    // Ordinary-user simplification: every kind that feeds the authoritative
+    // unified score (source/academic/reference-source) renders with ONE
+    // consistent red/magenta treatment — no color/badge difference based on
+    // how or where TurnitPlus found the match. A real public name (archive/
+    // academic) stays available on hover, since that remains genuinely
+    // useful for reviewing a match; the internal reference-source bucket
+    // never gets a name at all. Only Wikipedia (separate evidence, never
+    // part of the score) keeps its own distinct color/badge.
+    const displayColor = isWikipedia ? range.color : MATCHED_PASSAGE_COLOR;
+    const title = isWikipedia
+      ? `Found on Wikipedia: ${range.label}`
+      : range.kind === "source" || range.kind === "academic"
+        ? `Matched passage: ${range.label}`
+        : "Matched passage";
     pieces.push(
       <mark
-        className={`submission-match ${range.kind === "wikipedia" ? "submission-wikipedia-match" : ""}`}
+        className={`submission-match ${isWikipedia ? "submission-wikipedia-match" : ""}`}
         key={`${range.start}-${range.end}-${index}`}
         style={{
-          backgroundColor: `${range.color}30`,
-          borderBottomColor: range.color,
-          boxShadow: `inset 3px 0 0 ${range.color}`,
+          backgroundColor: `${displayColor}30`,
+          borderBottomColor: displayColor,
+          boxShadow: `inset 3px 0 0 ${displayColor}`,
         }}
-        title={
-          range.kind === "source" ? `Source ${range.sourceIndex + 1}: ${range.label}`
-          : range.kind === "wikipedia" ? `Found on Wikipedia: ${range.label}`
-          : range.kind === "academic" ? `External academic source: ${range.label}`
-          : "TurnitPlus reference sources"
-        }
+        title={title}
       >
         {report.text.slice(range.start, range.end)}
-        <span style={{ backgroundColor: range.color }}>
-          {range.kind === "source" ? range.sourceIndex + 1
-            : range.kind === "wikipedia" ? "W"
-            : range.kind === "academic" ? "A"
-            : "T"}
+        <span style={{ backgroundColor: displayColor }}>
+          {isWikipedia ? "W" : ""}
         </span>
-        {range.kind === "wikipedia" && range.wikipediaSources?.map((source) => (
+        {isWikipedia && range.wikipediaSources?.map((source) => (
           <a className="wikipedia-source-link" key={source.pageId} href={source.url} target="_blank" rel="noreferrer">
             <Globe2 aria-hidden="true" />
             <b>{source.title}</b>
@@ -1109,42 +1230,72 @@ function HighlightedDocument({ report }: { report: SimilarityReport }) {
 }
 
 export function HighlightLegend({ report }: { report: SimilarityReport }) {
+  // Ordinary-user simplification: an ordinary viewer's legend collapses
+  // every matching-channel distinction into one "Matched passages" item,
+  // matching HighlightedDocument's own unified render above. Admins keep
+  // the existing detailed, per-source/per-academic-item/reference-source
+  // breakdown — same signal used everywhere else in this file.
+  // Task A correction: an explicit, server-decided authorization signal
+  // (see SimilarityReport.viewerIsAdmin's own comment), never inferred from
+  // whether report.historicalSubmissionMatch happens to be present — that
+  // field's presence conflates "this report has a match to show" with "this
+  // viewer is authorized," and would read a real admin's own no-match
+  // report as ordinary.
+  const canSeeSourceBreakdown = Boolean(report.viewerIsAdmin);
   const wikipediaSources = [...new Map(
     (report.webCheck?.matches ?? [])
       .filter((match) => match.matched)
       .flatMap((match) => match.sources)
       .map((source) => [source.pageId, source]),
   ).values()];
+  // Task A correction: Wikipedia never contributes to the score, so an
+  // ordinary viewer's legend never mentions it either — matching
+  // HighlightedDocument's own findHighlightRanges(report, { includeWikipedia:
+  // canSeeSourceBreakdown }) call, so the legend is never left describing a
+  // blue "W" treatment that does not actually appear anywhere in the body.
+  const visibleWikipediaSources = canSeeSourceBreakdown ? wikipediaSources : [];
   const academicEvidence = report.externalAcademicEvidence
     ? dedupeExternalAcademicEvidence(report.externalAcademicEvidence).filter((item) => (item.matchedPassages ?? []).length > 0)
     : [];
   const hasReferenceSources = referenceSourceMatchedPositions(report).length > 0;
+  const hasMatchedPassages = report.sources.length > 0 || academicEvidence.length > 0 || hasReferenceSources;
   return (
     <div className="highlight-legend">
       <div>
-        <strong>{wikipediaSources.length > 0 ? "Matched passages" : "Red matched passages"}</strong>
-        <span>{wikipediaSources.length > 0 ? "Red marks matched source text; blue W marks separate Wikipedia evidence that does not change the similarity result" : "Each number connects the matched phrase to a matched source"}</span>
+        <strong>{visibleWikipediaSources.length > 0 ? "Matched passages" : "Red matched passages"}</strong>
+        <span>{visibleWikipediaSources.length > 0 ? "Red marks matched passages; blue W marks separate Wikipedia evidence that does not change the similarity result" : "Red marks the text contributing to the similarity result"}</span>
       </div>
       <div className="highlight-legend-items">
-        {report.sources.map((source, index) => (
-          <span className="highlight-legend-item" key={source.name} title={source.name}>
-            <i style={{ backgroundColor: source.color }}>{index + 1}</i>
-            {source.name}
-          </span>
-        ))}
-        {academicEvidence.map((item, index) => (
-          <span className="highlight-legend-item" key={item.doi ?? item.url ?? `academic-${index}`} title={item.title ?? "External academic source"}>
-            <i style={{ backgroundColor: ACADEMIC_HIGHLIGHT_COLOR }}>A</i>
-            {item.title ?? "External academic source"}
-          </span>
-        ))}
-        {hasReferenceSources && (
-          <span className="highlight-legend-item" key="reference-source-legend" title="TurnitPlus reference sources">
-            <i style={{ backgroundColor: REFERENCE_SOURCE_HIGHLIGHT_COLOR }}>T</i>
-            TurnitPlus reference sources
-          </span>
+        {canSeeSourceBreakdown ? (
+          <>
+            {report.sources.map((source, index) => (
+              <span className="highlight-legend-item" key={source.name} title={source.name}>
+                <i style={{ backgroundColor: source.color }}>{index + 1}</i>
+                {source.name}
+              </span>
+            ))}
+            {academicEvidence.map((item, index) => (
+              <span className="highlight-legend-item" key={item.doi ?? item.url ?? `academic-${index}`} title={item.title ?? "External academic source"}>
+                <i style={{ backgroundColor: ACADEMIC_HIGHLIGHT_COLOR }}>A</i>
+                {item.title ?? "External academic source"}
+              </span>
+            ))}
+            {hasReferenceSources && (
+              <span className="highlight-legend-item" key="reference-source-legend" title="TurnitPlus reference sources">
+                <i style={{ backgroundColor: REFERENCE_SOURCE_HIGHLIGHT_COLOR }}>T</i>
+                TurnitPlus reference sources
+              </span>
+            )}
+          </>
+        ) : (
+          hasMatchedPassages && (
+            <span className="highlight-legend-item" key="matched-passages-legend" title="Matched passages">
+              <i style={{ backgroundColor: MATCHED_PASSAGE_COLOR }} />
+              Matched passages
+            </span>
+          )
         )}
-        {wikipediaSources.map((source) => (
+        {visibleWikipediaSources.map((source) => (
           <a className="highlight-legend-item wikipedia-legend-item" key={`wiki-${source.pageId}`} href={source.url} target="_blank" rel="noreferrer">
             <i>W</i>
             {source.title}

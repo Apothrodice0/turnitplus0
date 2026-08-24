@@ -200,12 +200,21 @@ test("INTEGRATION (REQUIRED): unique highlighted positions equal the authoritati
   assert.equal(uniqueHighlightedWordCount(body.payload), unifiedMatchedPositions(body.payload).length, "REQUIRED: rendered highlight coverage must equal the authoritative matched-position count exactly");
 });
 
-test("INTEGRATION (PRIVACY, REQUIRED): ordinary-user Source Details render a generic 'TurnitPlus reference sources' entry, never a fake publication, never internal identity", async () => {
+test("INTEGRATION (PRIVACY, REQUIRED): ordinary-user Source Details never name 'TurnitPlus reference sources' (an internal-system label), never a fake publication, never internal identity — but never falsely claim no matches exist either", async () => {
   const { body } = await getReport("uwh-ordinary-report", { cookie: ordinary.cookie, tag: "uwh-get-3" });
   const html = renderToStaticMarkup(React.createElement(SourcesReport, { report: body.payload }));
 
-  assert.match(html, /TurnitPlus reference sources/, "REQUIRED: the generic entry must render");
+  // Task A, final report simplification (supersedes this test's earlier
+  // expectation): "TurnitPlus reference sources" is itself now a forbidden
+  // internal-system label for an ordinary viewer (see SourceList's
+  // canSeeSourceBreakdown gate) — but Source Details must still be honest
+  // that real matches exist (never "No weighted source matches") when the
+  // entire result came from this internal-only channel; it just points the
+  // ordinary viewer at the highlighted submission text instead of naming
+  // the channel.
+  assert.doesNotMatch(html, /TurnitPlus reference sources/, "REQUIRED: an ordinary viewer must never see this internal-system label");
   assert.doesNotMatch(html, /No weighted source matches/, "REQUIRED: Source Details must not claim no matches exist when the corpus contribution is the entire result");
+  assert.match(html, /Matched passages found/, "REQUIRED: an honest, generic notice must still appear, pointing to the highlighted body");
 
   // Never the report's OWN id/submissionId — its own owner is entitled to
   // see those (they appear in the page header/footer by design). The
@@ -221,10 +230,16 @@ test("INTEGRATION (PRIVACY, REQUIRED): ordinary-user Source Details render a gen
   }
 });
 
-test("INTEGRATION (PRIVACY, REQUIRED): the highlighted submission body renders no internal corpus identity either", async () => {
+test("INTEGRATION (PRIVACY, REQUIRED): the highlighted submission body renders no internal corpus identity, and no channel label, either", async () => {
   const { body } = await getReport("uwh-ordinary-report", { cookie: ordinary.cookie, tag: "uwh-get-4" });
   const html = renderToStaticMarkup(React.createElement(SubmissionReport, { report: body.payload }));
-  assert.match(html, /TurnitPlus reference sources/, "the highlight's own title attribute must still use the generic label");
+  // Task A, final report simplification (supersedes this test's earlier
+  // expectation): the highlight's own title attribute is now fully generic
+  // ("Matched passage") — it never names "TurnitPlus reference sources" or
+  // any other internal-system label, matching the "no color/label
+  // difference based on how or where TurnitPlus found the match" requirement.
+  assert.doesNotMatch(html, /TurnitPlus reference sources/, "REQUIRED: the highlight's own title attribute must never leak this internal-system label");
+  assert.match(html, /Matched passage/, "the highlight's own title attribute must still render, generically");
   const forbidden = ["TURNITPLUS_CORPUS_SOURCE", "PRIOR_SUBMISSION", "representation", "decision_id", "@example.com"];
   for (const term of forbidden) {
     assert.doesNotMatch(html, new RegExp(term, "i"), `REQUIRED: the highlighted body must never leak "${term}"`);

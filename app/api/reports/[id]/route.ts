@@ -53,6 +53,15 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
       }
 
       payload = JSON.parse(String(row.payload_json)) as SimilarityReport;
+      // Task A correction: an explicit, unconditional authorization signal —
+      // set here, once, directly from the authenticated session's own real
+      // `role` column, independent of whether any admin-only DATA field
+      // below (matchClassification, historicalSubmissionMatch) actually
+      // ends up populated. Detailed source-channel/debug UI must gate on
+      // THIS field, never on the presence of a data field that could be
+      // absent for an admin too (e.g. a report with no historical match at
+      // all) — see SimilarityReport's own comment.
+      payload.viewerIsAdmin = sessionUser?.role === 'admin';
       // Release-hardening audit finding UI-01 (corrected): matchClassification
       // reveals that a real prior submission exists (possibly under a
       // different account) — information this product has never otherwise

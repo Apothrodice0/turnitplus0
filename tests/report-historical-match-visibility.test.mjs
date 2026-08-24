@@ -341,7 +341,10 @@ function render(report) {
 }
 
 test("RENDER (admin visibility): with historicalSubmissionMatch present, OverviewReport shows the full breakdown and the historical-match section", () => {
-  const html = render(baseReport({ historicalSubmissionMatch: CORPUS_SOURCE_MATCH, unifiedSimilarity: unified() }));
+  // Task A correction: viewerIsAdmin is the explicit authorization signal —
+  // historicalSubmissionMatch's own presence no longer doubles as one (see
+  // tests below proving the two are independent).
+  const html = render(baseReport({ viewerIsAdmin: true, historicalSubmissionMatch: CORPUS_SOURCE_MATCH, unifiedSimilarity: unified() }));
   assert.match(html, /<span>100%<\/span> TurnitPlus Similarity/, "the aggregate score must render");
   assert.match(html, /9,865 words? from an eligible previous TurnitPlus submission/, "the admin-visible breakdown must name the source type");
   assert.match(html, /Previously submitted content/);
@@ -358,8 +361,9 @@ test("RENDER (ordinary-user omission from HTML): with historicalSubmissionMatch 
   assert.doesNotMatch(html, /rep-hmvis-should-not-leak/, "no internal representation id may appear when this field is absent");
 });
 
-test("RENDER: the SELF/UNKNOWN exclusion note is also admin-only — present with historicalSubmissionMatch, absent without it, even though the excluded-word counts themselves live on unifiedSimilarity", () => {
+test("RENDER: the SELF/UNKNOWN exclusion note is also admin-only — present when authorized, absent otherwise, even though the excluded-word counts themselves live on unifiedSimilarity", () => {
   const withMatch = render(baseReport({
+    viewerIsAdmin: true,
     historicalSubmissionMatch: CORPUS_SOURCE_MATCH,
     unifiedSimilarity: unified({ selfExcludedWords: 40, previousUploadOnlyWords: 0 }),
   }));
@@ -387,10 +391,40 @@ test("RENDER: archive-only and live-academic breakdown items are ALSO withheld f
 });
 
 test("RENDER: UnifiedSimilaritySection rendered directly (not just via OverviewReport) shows the same admin/non-admin split", () => {
-  const withMatch = renderToStaticMarkup(React.createElement(UnifiedSimilaritySection, { report: baseReport({ historicalSubmissionMatch: CORPUS_SOURCE_MATCH, unifiedSimilarity: unified() }) }));
+  const withMatch = renderToStaticMarkup(React.createElement(UnifiedSimilaritySection, { report: baseReport({ viewerIsAdmin: true, historicalSubmissionMatch: CORPUS_SOURCE_MATCH, unifiedSimilarity: unified() }) }));
   assert.match(withMatch, /eligible previous TurnitPlus submission/);
 
   const withoutMatch = renderToStaticMarkup(React.createElement(UnifiedSimilaritySection, { report: baseReport({ unifiedSimilarity: unified() }) }));
   assert.doesNotMatch(withoutMatch, /eligible previous TurnitPlus submission/);
   assert.match(withoutMatch, /<span>100%<\/span> TurnitPlus Similarity/, "the section itself still renders its own aggregate headline unconditionally");
+});
+
+test("AUTHORIZATION (Task A correction): an ordinary user (viewerIsAdmin false/absent) with a real historicalSubmissionMatch present still does not receive the detailed source-breakdown UI", () => {
+  // historicalSubmissionMatch itself is only ever attached server-side for
+  // an admin session (see app/api/reports/[id]/route.ts's own gate) — but
+  // the RENDER layer must not use its mere presence as a second, implicit
+  // authorization check. This fixture simulates a hypothetical/legacy
+  // payload shape where the two have drifted apart, proving the render
+  // layer genuinely reads viewerIsAdmin and nothing else.
+  const html = render(baseReport({ historicalSubmissionMatch: CORPUS_SOURCE_MATCH, unifiedSimilarity: unified() }));
+  assert.doesNotMatch(html, /eligible previous TurnitPlus submission/, "REQUIRED: detailed breakdown wording must not leak just because historicalSubmissionMatch is present");
+  assert.doesNotMatch(html, /TurnitPlus&#x27;s own reference material/);
+  assert.match(html, /<span>100%<\/span> TurnitPlus Similarity/, "the aggregate score is unaffected");
+});
+
+test("AUTHORIZATION (Task A correction): an authorized admin (viewerIsAdmin true) WITHOUT any historicalSubmissionMatch still receives the detailed source-breakdown UI — authorization does not depend on a match existing", () => {
+  const html = render(baseReport({ viewerIsAdmin: true, unifiedSimilarity: unified({ archiveOnlyWords: 50, previousUploadOnlyWords: 0, liveAcademicOnlyWords: 0, uniqueMatchedWords: 50 }) }));
+  assert.match(html, /TurnitPlus&#x27;s own reference material/, "REQUIRED: an authorized admin sees the detailed breakdown even for a report with no historical match at all");
+});
+
+test("AUTHORIZATION (Task A correction): changing historicalSubmissionMatch presence, with viewerIsAdmin held constant, never changes whether the detailed breakdown renders", () => {
+  const adminNoMatch = render(baseReport({ viewerIsAdmin: true, unifiedSimilarity: unified({ archiveOnlyWords: 50, previousUploadOnlyWords: 0, liveAcademicOnlyWords: 0, uniqueMatchedWords: 50 }) }));
+  const adminWithMatch = render(baseReport({ viewerIsAdmin: true, historicalSubmissionMatch: CORPUS_SOURCE_MATCH, unifiedSimilarity: unified({ archiveOnlyWords: 50, previousUploadOnlyWords: 0, liveAcademicOnlyWords: 0, uniqueMatchedWords: 50 }) }));
+  assert.match(adminNoMatch, /TurnitPlus&#x27;s own reference material/, "authorized admin, no match: breakdown still renders");
+  assert.match(adminWithMatch, /TurnitPlus&#x27;s own reference material/, "authorized admin, with match: breakdown still renders identically");
+
+  const ordinaryNoMatch = render(baseReport({ unifiedSimilarity: unified({ archiveOnlyWords: 50, previousUploadOnlyWords: 0, liveAcademicOnlyWords: 0, uniqueMatchedWords: 50 }) }));
+  const ordinaryWithMatch = render(baseReport({ historicalSubmissionMatch: CORPUS_SOURCE_MATCH, unifiedSimilarity: unified({ archiveOnlyWords: 50, previousUploadOnlyWords: 0, liveAcademicOnlyWords: 0, uniqueMatchedWords: 50 }) }));
+  assert.doesNotMatch(ordinaryNoMatch, /TurnitPlus&#x27;s own reference material/, "ordinary, no match: breakdown absent");
+  assert.doesNotMatch(ordinaryWithMatch, /TurnitPlus&#x27;s own reference material/, "ordinary, with match: breakdown STILL absent — historicalSubmissionMatch presence alone never grants authorization");
 });

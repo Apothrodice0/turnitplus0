@@ -177,6 +177,21 @@ export type SimilarityReport = {
   created: string;
   score: number;
   archiveScore?: number;
+  /**
+   * Explicit, server-decided viewer authorization for detailed source-
+   * channel/debug UI (per-source-type percentages, provider labels,
+   * internal matching-channel legend/highlight detail, admin-only report
+   * notes). Set unconditionally by app/api/reports/[id]/route.ts's GET
+   * handler from the authenticated session's real `role === 'admin'`
+   * column — always present as a real boolean on every response, never
+   * inferred from whether some OTHER admin-only field (historicalSubmissionMatch,
+   * matchClassification) happens to be present, which conflates "this
+   * report has a match to show" with "this viewer is authorized": a report
+   * with no historical match at all would otherwise read as ordinary even
+   * for a real admin. Use this field directly wherever detailed-source-UI
+   * visibility is decided; never `Boolean(report.historicalSubmissionMatch)`.
+   */
+  viewerIsAdmin?: boolean;
   /** Phase D enrichment — see ReportMatchClassification's own comment. Absent on older/unsaved/not-yet-classified reports; the reporting layer must treat its absence as "nothing to show", not an error. */
   matchClassification?: ReportMatchClassification;
   /** Phase E8C enrichment — see ReportHistoricalSubmissionMatch's own comment. Absent on a freshly-analyzed, not-yet-saved report (the snapshot only exists once a saved_reports row does), or if computing it failed before even producing an UNAVAILABLE snapshot. */

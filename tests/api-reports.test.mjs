@@ -133,13 +133,18 @@ async function deleteReport(deviceKey, id) {
   // write time and by the GET route's own self-heal), so it too is excluded
   // from the round-trip diff rather than compared against the payload
   // literal, which never declares it.
-  const { historicalSubmissionMatch, unifiedSimilarity, corpusSourceMatchingEnabledAtComputation, unifiedSimilarityGeneration, unifiedSimilarityFailed, ...getPayloadWithoutHistoricalMatch } = getBody.payload;
+  // Task A correction: viewerIsAdmin is a new, explicit, unconditional
+  // authorization signal the GET handler now sets on every response (see
+  // SimilarityReport.viewerIsAdmin's own comment) — likewise excluded from
+  // the round-trip diff and checked separately below.
+  const { historicalSubmissionMatch, unifiedSimilarity, corpusSourceMatchingEnabledAtComputation, unifiedSimilarityGeneration, unifiedSimilarityFailed, viewerIsAdmin, ...getPayloadWithoutHistoricalMatch } = getBody.payload;
   assert.equal(historicalSubmissionMatch, undefined, 'REQUIRED (UI-02): historicalSubmissionMatch is admin-only — an anonymous/non-admin GET must never receive it, not even a NO_HISTORICAL_MATCH shape');
   assert.ok(unifiedSimilarity, 'unifiedSimilarity must still be attached as read-time enrichment — never gated, only historicalSubmissionMatch is');
   assert.equal(corpusSourceMatchingEnabledAtComputation, false, 'the live flag snapshot must be recorded (default off in this test env)');
   assert.equal(typeof unifiedSimilarityGeneration, 'number', 'the generation snapshot must be recorded');
   assert.equal(unifiedSimilarityFailed, false, 'a genuine success must explicitly clear/set unifiedSimilarityFailed to false, never leave it ambiguous');
-  assert.deepEqual(getPayloadWithoutHistoricalMatch, payload, 'get must return the exact saved payload (aside from the new E8C/Phase 6/SIM-04/LIFECYCLE-06 enrichment fields)');
+  assert.equal(viewerIsAdmin, false, 'REQUIRED: an anonymous/non-admin GET must always get an explicit false, never undefined/omitted — this is a real authorization signal, not optional enrichment');
+  assert.deepEqual(getPayloadWithoutHistoricalMatch, payload, 'get must return the exact saved payload (aside from the new E8C/Phase 6/SIM-04/LIFECYCLE-06/viewerIsAdmin enrichment fields)');
 
   const deleteRes = await deleteReport(deviceKey, payload.id);
   assert.equal(deleteRes.status, 200);

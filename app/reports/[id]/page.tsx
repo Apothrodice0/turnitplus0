@@ -81,6 +81,15 @@ const loadOwnedReport = cache(async (id: string): Promise<OwnedReportResult> => 
     // more honest and avoids a dead-end retry loop. Production audit fix.
     try {
       const payload = JSON.parse(row.payload_json) as SimilarityReport;
+      // Task A correction: the same explicit, unconditional authorization
+      // signal app/api/reports/[id]/route.ts's GET handler sets for the
+      // client-side background re-fetch — this is the server-rendered FIRST
+      // PAINT path, so it must set the identical field the identical way
+      // (the authenticated session's own real `role` column) or the very
+      // first render would show/hide detailed source-channel UI differently
+      // from every subsequent client re-render. See SimilarityReport's own
+      // comment on this field.
+      payload.viewerIsAdmin = sessionUser.role === "admin";
       const aiStatus = deriveRoomStatus(row.ai_score, row.ai_status);
       const display = await resolvePersistedSimilarityDisplay(client, {
         reportDeviceKey: row.device_key,

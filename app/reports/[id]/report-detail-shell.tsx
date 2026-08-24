@@ -358,15 +358,19 @@ export function ReportDetailShell({
 
   const primaryScore = primarySimilarityScore(report);
   const isUnified = hasUnifiedSimilarity(report);
-  // Report-source presentation correction: this sidebar paragraph, unlike
-  // its equivalents in components/report/similarity-report-papers.tsx, was
-  // never gated by anything narrower than isUnified — every viewer,
-  // ordinary users included, saw "eligible previous TurnitPlus submissions"
-  // whenever the result was unified. Reuses the same admin signal
-  // (historicalSubmissionMatch's own server-side, admin-only presence) that
-  // gates the equivalent text elsewhere, so there is exactly one place that
-  // decides who sees this class of detail.
-  const canSeeSourceBreakdown = Boolean(report.historicalSubmissionMatch);
+  // Report-source presentation correction, extended by Task A's final
+  // report simplification and Task A's authorization correction: this
+  // sidebar paragraph AND the "Top source types" CategorySummary block
+  // below it both gate on the SAME explicit, server-decided authorization
+  // signal (report.viewerIsAdmin — see SimilarityReport's own comment) that
+  // gates the equivalent surfaces in components/report/
+  // similarity-report-papers.tsx — never on whether report.historicalSubmissionMatch
+  // happens to be present, since a real admin's own no-match report would
+  // otherwise read as ordinary. An ordinary viewer sees one neutral
+  // "TurnitPlus Similarity reflects matched text..." note and no per-source-
+  // type percentage breakdown at all; only the authoritative score/word
+  // count remain.
+  const canSeeSourceBreakdown = Boolean(report.viewerIsAdmin);
   const primaryLabel = primaryResultLabel(report);
   const similarityVerdict = similarityScoreBand(primaryScore);
   const aiSignal = aiSignalDisplay(report);
@@ -497,7 +501,12 @@ export function ReportDetailShell({
             {mode === "similarity" && !revealState.similarityUnavailable && similarityVerdict && <em>{PRIMARY_SIMILARITY_BAND_LABELS[similarityVerdict.key]}</em>}
             {mode === "similarity" && !revealState.similarityUnavailable && <div><i style={{ width: `${primaryScore * 5}%` }} /></div>}
           </div>
-          {mode === "similarity" && <div className="inspector-section">
+          {/* Ordinary-user simplification (Task A, final report simplification):
+              the per-source-type percentage breakdown is a matching-mechanism
+              detail, admin-only diagnostics, gated on the same explicit
+              viewerIsAdmin-derived signal used everywhere else in this file
+              — see the canSeeSourceBreakdown comment above. */}
+          {mode === "similarity" && canSeeSourceBreakdown && <div className="inspector-section">
             <h3>Top source types</h3>
             <CategorySummary report={report} />
           </div>}
@@ -510,12 +519,21 @@ export function ReportDetailShell({
             </p> : revealState.similarityUnavailable ? <p>
               Similarity analysis could not be completed for this submission.
             </p> : <p>
-              {isUnified
-                ? <>TurnitPlus Similarity combines text found through TurnitPlus&apos;s own checks, verified external academic sources, and {canSeeSourceBreakdown ? "eligible previous TurnitPlus submissions" : "TurnitPlus reference sources"} into one result — the same submitted passage found by more than one source counts once.</>
-                : <>The similarity result is based on identified overlapping passages and verified academic sources.</>}
+              {isUnified && canSeeSourceBreakdown
+                ? <>TurnitPlus Similarity combines text found through TurnitPlus&apos;s own checks, verified external academic sources, and eligible previous TurnitPlus submissions into one result — the same submitted passage found by more than one source counts once.</>
+                : isUnified
+                  ? <>TurnitPlus Similarity reflects matched text identified across the sources checked for this submission. Highlighted passages show the text contributing to the result.</>
+                  // Matches components/report/similarity-report-papers.tsx's
+                  // own OverviewReport guard: the archive-only fallback must
+                  // never say "TurnitPlus Similarity" — reserved for a
+                  // genuinely computed unified result.
+                  : <>This result reflects matched text identified across the sources checked for this submission. Highlighted passages show the text contributing to the result.</>}
               {" "}{primaryMatchedWordCount(report).toLocaleString()} words were matched
               {isUnified ? "." : ` across ${report.sources.length} matched source${report.sources.length === 1 ? "" : "s"}.`}
-              {(report.webCheck?.phrasesMatched ?? 0) > 0 && ` Wikipedia evidence is shown separately and does not change this result.`}
+              {/* Task A correction: only mentioned when authorized — an
+                  ordinary viewer never gets Wikipedia body highlighting, so
+                  "shown separately" would be false for them. */}
+              {canSeeSourceBreakdown && (report.webCheck?.phrasesMatched ?? 0) > 0 && ` Wikipedia evidence is shown separately and does not change this result.`}
               {" "}Language detected: {report.features.detectedLanguage}. Longest matched span: {report.features.longestMatchedSpan} words.
             </p>}
           </div>
