@@ -13,7 +13,7 @@ import { canonicalSha256 } from '../lib/document-identity.ts';
 import { runCorpusAdmissionPromotionSweep } from '../lib/corpus-admission-promotion.ts';
 import { findRoomOccupant, findReportRowForUser } from '../lib/reports-repo.ts';
 import { deriveRoomStatus } from '../lib/report-rooms.ts';
-import { resolvePersistedSimilarityDisplay } from '../lib/report-primary-similarity.ts';
+import { resolvePersistedSimilarityDisplay, selfHealMissingUnifiedSimilarity } from '../lib/report-primary-similarity.ts';
 import {
   archiveOverlapScore,
   buildReportSummary,
@@ -513,7 +513,7 @@ test('SIM-04: live flag rollback — a persisted corpus-enabled result immediate
   });
 });
 
-test('SIM-04: a report saved with no text at all (finalization never even attempted) still saves successfully and reads as "pending" with the real archive score — never a false 0%', async () => {
+test('SIM-04: a report saved with no text at all (finalization never even attempted at write time) still saves successfully; the legacy-room self-heal then resolves it to an honest, real 0% on first room read — see this file\'s own LEGACY ROOM BUG section for why text presence must not gate whether that self-heal is even attempted', async () => {
   const account = await signUpConsentingAccount();
   const reportId = 'sim04-no-text-report';
   await resetRateForTest(account.tag + '-post');
@@ -540,12 +540,23 @@ test('SIM-04: a report saved with no text at all (finalization never even attemp
 
   const { archiveScore, payload } = await savedReportRow(account.deviceKey, reportId);
   assert.equal(archiveScore, 42);
-  assert.equal(payload.unifiedSimilarity, undefined, 'finalization must never have run — no text to finalize');
+  assert.equal(payload.unifiedSimilarity, undefined, 'write-time finalization must never have run — no text to finalize (this part is completely unaffected by the legacy-room self-heal, which is a READ-time concern in findRoomOccupant only)');
 
+  // Legacy-room bug fix: this report has real, terminal ai_status but no
+  // unifiedSimilarity/unifiedSimilarityFailed at all — the same ambiguous
+  // combination the legacy-room self-heal resolves for ANY row in that
+  // state. Deliberately not special-cased on text presence (see this
+  // file's own LEGACY ROOM BUG section for why: text presence cannot
+  // reliably distinguish "genuinely legacy" from "modern transient skip",
+  // so it must not gate whether the self-heal attempt itself even runs).
+  // computeUnifiedSimilarity does not require rawText — with no
+  // archiveMatchedPositions, no externalAcademicEvidence, and no
+  // historical match against an empty canonical text, it converges to an
+  // honest, real 0%, not the old indefinite "pending".
   const occupant = await findRoomOccupant(client, account.userId, 4);
-  assert.equal(occupant.report.similarityStatus, 'pending', 'must show a neutral pending state, never a resolved value it never actually computed');
-  assert.equal(occupant.report.primaryScore, 42, 'REQUIRED: must be the real archive score — never a false 0%, even though it was never unified');
-  assert.equal(occupant.report.isUnified, false);
+  assert.equal(occupant.report.similarityStatus, 'resolved', 'the legacy-room self-heal now resolves this too, rather than leaving it "pending" forever');
+  assert.equal(occupant.report.primaryScore, 0, 'a real, honestly-computed 0% — there is genuinely nothing to match without text — never the OLD archive score masquerading as the unified result');
+  assert.equal(occupant.report.isUnified, true, 'a real unifiedSimilarity WAS computed (all-zero) — this is a genuine resolution, not an inferred archive-only fallback');
 });
 
 test('SIM-04: SAVE_REPORT_SQL\'s generation guard never lets an older-generation resave overwrite a newer-generation one, regardless of which write commits last', async () => {
@@ -1063,4 +1074,296 @@ test('RECEIPT: archive-only and live-academic contributions keep their own corre
   const academicText = await extractReceiptPdfText(await buildReceiptPdfForReport(academicOnlyReport));
   assert.match(academicText, /Evidence sources:\s*live academic sources/, 'a genuine external-academic-only contribution must keep saying "live academic sources"');
   assert.doesNotMatch(academicText, /own reference material|TurnitPlus reference sources/, 'must never claim archive or internal-corpus evidence that does not exist for this report');
+});
+
+/**
+ * LEGACY ROOM BUG (Preview reproduction): rooms 1–2, older saved reports
+ * already completed/reported as ready elsewhere, opened to AI = Analyzing,
+ * Similarity = Analyzing, Receipt = Preparing — indefinitely. Logout/login
+ * did not fix it. Rooms 3–6 (newer reports) loaded their saved terminal
+ * results normally. Vercel logs showed no new POST /api/reports when
+ * reopening rooms 1–2, only repeated GET polling — the app was not
+ * re-analyzing them, it was misclassifying already-complete legacy reports
+ * as pending.
+ *
+ * ROOT CAUSE, traced through the requested chain (room page loader ->
+ * findRoomOccupant -> resolvePersistedSimilarityDisplay -> isFullyRevealed
+ * -> /api/reports polling): lib/report-primary-similarity.ts's
+ * resolvePersistedSimilarityDisplay had exactly one branch for "no
+ * unifiedSimilarity has ever been persisted" — return "pending",
+ * unconditionally. lib/reports-repo.ts's findRoomOccupant (the room card's
+ * read path, polled every few seconds) never self-heals by design — a cheap
+ * json_extract read, never the matcher — so a legacy row (real text, real
+ * terminal ai_status, real archive_score, but payload_json predating
+ * unifiedSimilarity/unifiedSimilarityFailed entirely) stayed "pending"
+ * forever: isFullyRevealed's own gate never passed, so the room never
+ * revealed, and (this codebase's own established, tested behavior — see
+ * "NOT REVEALED: no separate 'Open full report' escape hatch" elsewhere in
+ * this suite) there is no way into the report-detail page — the ONE path
+ * that self-heals — while a room is not yet revealed. Structurally unable
+ * to ever recover on its own: exactly "logout/login does not fix it."
+ *
+ * REJECTED FIRST FIX: reading "no unifiedSimilarity + no failure marker +
+ * real text present" as "resolved, archive-only" turned out to be unsound.
+ * That same combination can ALSO mean a genuinely modern report whose
+ * write-time finalization hit the rare transient-infra skip in
+ * app/api/reports/route.ts's own outer catch — text presence alone cannot
+ * distinguish "legacy" from "transiently incomplete." Resolving either one
+ * to archiveScore can show a false terminal 0% for what a fresh resolution
+ * would actually report as 100% (a promoted TurnitPlus corpus-source match)
+ * — reintroducing the exact class of bug the unified-similarity work
+ * eliminated. Never shipped past a local patch.
+ *
+ * ACCEPTED FIX (lib/report-primary-similarity.ts's new
+ * selfHealMissingUnifiedSimilarity, called from lib/reports-repo.ts's
+ * findRoomOccupant): stop guessing a fallback value entirely. When
+ * hasUnifiedSimilarity is false and unifiedSimilarityFailed is not set,
+ * findRoomOccupant now invokes the SAME authoritative resolver every other
+ * finalization path already uses (resolvePrimarySimilaritySummary — write-
+ * time finalization and the detail page's own self-heal) exactly once, and
+ * persists whatever it returns (a real unifiedSimilarity, or an explicit
+ * unifiedSimilarityFailed marker) using the same generation-guarded write
+ * those paths already use. Once persisted, every subsequent read of this
+ * row — a reload, a logout/login, a later poll — sees an already-resolved
+ * (or already-failed) row through the ordinary cheap
+ * resolvePersistedSimilarityDisplay path (itself completely unchanged) and
+ * never re-enters the self-heal branch again: compatibility self-heal, not
+ * repeated analysis. Never touches ai_score/ai_status — the AI pipeline is
+ * completely independent and is never rerun or restarted. A genuine
+ * transient infrastructure failure DURING the self-heal attempt itself is
+ * caught and treated as attempted:false: the row is left exactly as
+ * ambiguous as before (still "pending" on read), never a fabricated
+ * resolved-archive-only or failed state.
+ */
+
+let legacyRoomCounter = 0;
+/** Directly INSERTs a saved_reports row via the real production SAVE_REPORT_SQL, with a payload_json shape that predates unifiedSimilarity/unifiedSimilarityFailed/corpusSourceMatchingEnabledAtComputation/unifiedSimilarityGeneration entirely — the real shape of a report saved before that feature existed, never merely a report with those fields set to null/false. Bypasses app/api/reports/route.ts's POST handler on purpose: a POST through that handler always attempts write-time finalization for text-bearing payloads, so it could never produce a genuinely legacy row on its own. */
+async function insertLegacyRow(account, { id, room, aiStatus, aiScore, archiveScore, text, createdAt = new Date().toISOString() }) {
+  legacyRoomCounter += 1;
+  const payload = {
+    version: 8, id, submissionId: 'sub-' + id, title: 'Legacy fixture ' + legacyRoomCounter,
+    author: '', assignment: '', created: createdAt,
+    score: archiveScore, archiveScore, wordCount: DOCUMENT_A_WORD_COUNT, scoreBand: 'Low',
+    matchedWordCount: 0, sources: [], repeats: [], text,
+    // Deliberately absent: unifiedSimilarity, unifiedSimilarityFailed,
+    // corpusSourceMatchingEnabledAtComputation, unifiedSimilarityGeneration
+    // — this IS the point of the fixture.
+  };
+  await client.execute({
+    sql: reportsRoute.SAVE_REPORT_SQL,
+    args: [id, account.deviceKey, 'sub-' + id, 'Legacy fixture ' + legacyRoomCounter, createdAt, DOCUMENT_A_WORD_COUNT, archiveScore, 'Low', aiScore ?? null, aiScore !== undefined ? 'low' : null, aiStatus, JSON.stringify(payload), account.userId, room],
+  });
+}
+
+const LEGACY_SELF_HEAL_TEXT =
+  'Entomologists cataloguing a remote montane cloud forest documented an undescribed weevil lineage whose wing-case ridging pattern diverges sharply from every previously known genus in the region, ' +
+  'suggesting an extended period of geographic isolation shaped this population long before the surrounding lowland habitat began fragmenting under modern land use.';
+const LEGACY_SELF_HEAL_WORD_COUNT = tokens(LEGACY_SELF_HEAL_TEXT).length;
+
+test('LEGACY ROOM BUG: a legacy report whose original archive score is 0% but whose current promoted TurnitPlus reference-source match is 100% self-heals to the same 100% a fresh resolution/the detail page would return — never stuck at archive 0%', async (t) => {
+  await promoteDocumentIntoCorpus(LEGACY_SELF_HEAL_TEXT);
+  const account = await signUpConsentingAccount();
+  const id = 'legacy-self-heal-100-report';
+  // Genuinely legacy shape: real text (an EXACT match for the promoted
+  // source), terminal AI, archive_score 0 (no archive overlap at all — the
+  // ENTIRE 100% similarity lives in the corpus-source match this legacy
+  // row's own payload_json predates and has never seen), no unifiedSimilarity/
+  // unifiedSimilarityFailed field at all.
+  await insertLegacyRow(account, { id, room: 6, aiStatus: 'ready', aiScore: 4, archiveScore: 0, text: LEGACY_SELF_HEAL_TEXT });
+
+  await t.test('before any room read: no unifiedSimilarity has ever been persisted for this row', async () => {
+    const row = await client.execute({ sql: 'SELECT payload_json FROM saved_reports WHERE device_key = ? AND id = ?', args: [account.deviceKey, id] });
+    const payload = JSON.parse(row.rows[0].payload_json);
+    assert.equal(payload.unifiedSimilarity, undefined, 'test setup sanity: genuinely no unifiedSimilarity persisted yet — this is the legacy shape, not a fixture that already has the answer');
+  });
+
+  let firstRead;
+  await t.test('REQUIRED: the first compatibility read performs one authoritative similarity finalization and the room self-heals to 100%, matching what a fresh resolvePrimarySimilaritySummary/the detail page would return', async () => {
+    firstRead = await findRoomOccupant(client, account.userId, 6);
+    assert.equal(firstRead.status, 'ready', 'test setup sanity: AI is genuinely terminal for this legacy row');
+    assert.equal(firstRead.report.similarityStatus, 'resolved', 'REQUIRED: the room must self-heal to a real resolved result, never stay stuck "pending"');
+    assert.equal(firstRead.report.primaryScore, 100, 'REQUIRED: must converge to the true 100% promoted-corpus-source match, never the stale archive-only 0%');
+    assert.equal(firstRead.report.isUnified, true, 'the self-healed result is the real corpus-aware unified result, not an archive-only fallback');
+
+    const row = await client.execute({ sql: 'SELECT payload_json FROM saved_reports WHERE device_key = ? AND id = ?', args: [account.deviceKey, id] });
+    const payload = JSON.parse(row.rows[0].payload_json);
+    assert.equal(payload.unifiedSimilarity.unifiedScore, 100, 'REQUIRED: the self-heal must actually PERSIST the resolved result, using the same generation-guarded write write-time finalization already uses');
+    assert.equal(payload.archiveScore, 0, 'the original archive score itself is untouched — self-heal only ever adds the unified result alongside it, never rewrites the archive component');
+  });
+
+  await t.test('REQUIRED: AI is not rerun — ai_score/ai_status are byte-identical before and after the self-heal', async () => {
+    const row = await client.execute({ sql: 'SELECT ai_score, ai_status FROM saved_reports WHERE device_key = ? AND id = ?', args: [account.deviceKey, id] });
+    assert.equal(Number(row.rows[0].ai_score), 4);
+    assert.equal(row.rows[0].ai_status, 'ready');
+    assert.equal(firstRead.report.aiScore, 4, 'the room summary itself still reports the original, untouched AI score');
+  });
+
+  await t.test('REQUIRED: the room is fully revealed — reproduces the exact reported fix (AI/Similarity/Receipt no longer stuck on "Analyzing…"/"Preparing…")', () => {
+    assert.equal(isFullyRevealedReal(firstRead), true);
+  });
+
+  await t.test('REQUIRED: a second (and third) room read uses the persisted result and performs no recomputation — no new matcher/snapshot call, identical result, no further write', async () => {
+    const snapshotAfterFirstRead = await snapshotRow(account.deviceKey, id);
+    assert.ok(snapshotAfterFirstRead, 'test setup sanity: the first read\'s own self-heal must have created a real historical-match snapshot');
+
+    const rowBefore = await client.execute({ sql: 'SELECT payload_json, updated_at FROM saved_reports WHERE device_key = ? AND id = ?', args: [account.deviceKey, id] });
+
+    const secondRead = await findRoomOccupant(client, account.userId, 6);
+    const thirdRead = await findRoomOccupant(client, account.userId, 6);
+    assert.deepEqual(secondRead, firstRead, 'REQUIRED: repeated reads must return the identical, already-persisted result');
+    assert.deepEqual(thirdRead, secondRead, 'REQUIRED: repeated reads must return the identical, already-persisted result');
+    assert.equal(secondRead.report.primaryScore, 100);
+
+    const snapshotAfterRepeatedReads = await snapshotRow(account.deviceKey, id);
+    assert.equal(snapshotAfterRepeatedReads.computed_at, snapshotAfterFirstRead.computed_at, 'REQUIRED: no new matcher call — the historical-match snapshot must not have been recomputed by the second/third read');
+
+    const rowAfter = await client.execute({ sql: 'SELECT payload_json, updated_at FROM saved_reports WHERE device_key = ? AND id = ?', args: [account.deviceKey, id] });
+    assert.deepEqual(rowBefore.rows[0], rowAfter.rows[0], 'REQUIRED: repeated reads must never write anything further — the persisted row, including updated_at, is byte-identical before and after');
+  });
+});
+
+test('LEGACY ROOM BUG: a modern report whose AI check is genuinely still processing stays "processing" — the fix never touches the AI pipeline or reveals a room too early', async () => {
+  const account = await signUpConsentingAccount();
+  const res = await postReport(account, { id: 'legacy-room-modern-processing-report', room: 6, aiStatus: 'processing', text: DOCUMENT_A_TEXT, wordCount: DOCUMENT_A_WORD_COUNT });
+  assert.equal(res.status, 200, 'test setup sanity: a real save must succeed');
+
+  const occupant = await findRoomOccupant(client, account.userId, 6);
+  assert.equal(occupant.status, 'processing', 'REQUIRED: a genuinely still-processing modern report must remain "processing" — this fix only concerns the similarity branch that had no unifiedSimilarity AND no failure marker, never the independent AI pipeline');
+  assert.equal(isFullyRevealedReal(occupant), false, 'REQUIRED: must not reveal a room whose AI check has not actually finished');
+});
+
+test('LEGACY ROOM BUG: a genuine transient infrastructure failure DURING the self-heal attempt itself is never falsely resolved to archiveScore — the row is left exactly as ambiguous as before, eligible for another attempt on the next read', async () => {
+  const account = await signUpConsentingAccount();
+  const id = 'legacy-self-heal-transient-failure-report';
+  // This row is, at the data level, INDISTINGUISHABLE from a genuinely
+  // legacy row (see this file's own REJECTED FIRST FIX comment above) —
+  // the point of this test is exactly that: regardless of WHY
+  // hasUnifiedSimilarity/unifiedSimilarityFailed are both absent, if the
+  // self-heal ATTEMPT itself cannot complete, it must never fabricate a
+  // result from either state.
+  await insertLegacyRow(account, { id, room: 6, aiStatus: 'ready', aiScore: 7, archiveScore: 61, text: DOCUMENT_A_TEXT });
+
+  // A genuinely broken connection reproduces the same class of failure
+  // resolvePrimarySimilaritySummary's own "not unconditionally safe" tests
+  // already exercise (tests/report-primary-similarity.test.mjs's SIM-04 (3))
+  // — a real infra failure (DB connectivity) propagating out of the
+  // resolution attempt, never a synthetic error label.
+  const brokenClient = createClient({ url: `file:${dbFile}` });
+  await brokenClient.close();
+
+  const healed = await selfHealMissingUnifiedSimilarity(brokenClient, { reportDeviceKey: account.deviceKey, reportId: id, accountId: account.userId });
+  assert.equal(healed.attempted, false, 'REQUIRED: a genuine infrastructure failure during the attempt must be reported as attempted:false, never thrown out to the caller');
+
+  const row = await client.execute({ sql: 'SELECT payload_json, ai_score, ai_status FROM saved_reports WHERE device_key = ? AND id = ?', args: [account.deviceKey, id] });
+  const payload = JSON.parse(row.rows[0].payload_json);
+  assert.equal(payload.unifiedSimilarity, undefined, 'REQUIRED: must never persist a fabricated resolved (archive-only or otherwise) result when the attempt itself failed');
+  assert.equal(payload.unifiedSimilarityFailed, undefined, 'REQUIRED: must never persist a false terminal failure marker either — this is not a reproducible computation failure, only a transient one, and must remain eligible for retry');
+  assert.equal(Number(row.rows[0].ai_score), 7, 'AI fields must be completely untouched by a failed self-heal attempt');
+  assert.equal(row.rows[0].ai_status, 'ready');
+
+  // A subsequent read, with a real working client, still correctly resolves
+  // it (a genuine transient failure — the underlying data was always fine)
+  // — proving the row was left retry-eligible, never permanently stuck by
+  // the failed attempt itself. DOCUMENT_A_TEXT has no promoted corpus match
+  // and this fixture never set archiveMatchedPositions, so the real,
+  // honestly-computed unified result is 0 — the point being it is now a
+  // REAL persisted result (isUnified: true), not the earlier failed
+  // attempt's absence, and not a fabricated echo of archiveScore either.
+  const occupant = await findRoomOccupant(client, account.userId, 6);
+  assert.equal(occupant.report.similarityStatus, 'resolved', 'a later read with a working connection must still be able to self-heal — the earlier failure must not have poisoned the row');
+  assert.equal(occupant.report.isUnified, true, 'the recovered result is a real, freshly-computed unified result, not an inferred archive-only fallback');
+});
+
+test('LEGACY ROOM BUG: a modern report with an explicit, persisted unifiedSimilarityFailed marker stays a genuine terminal failure — never reinterpreted as a resolved archive-only result', async () => {
+  const account = await signUpConsentingAccount();
+  const id = 'legacy-room-modern-failure-report';
+  const payload = {
+    version: 11, id, submissionId: 'sub-' + id, title: 'Modern failure fixture',
+    author: '', assignment: '', created: new Date().toISOString(),
+    score: 9, archiveScore: 9, wordCount: DOCUMENT_A_WORD_COUNT, scoreBand: 'Low',
+    matchedWordCount: 0, sources: [], repeats: [], text: DOCUMENT_A_TEXT,
+    unifiedSimilarityFailed: true, corpusSourceMatchingEnabledAtComputation: true, unifiedSimilarityGeneration: 1,
+  };
+  await client.execute({
+    sql: reportsRoute.SAVE_REPORT_SQL,
+    args: [id, account.deviceKey, 'sub-' + id, 'Modern failure fixture', new Date().toISOString(), DOCUMENT_A_WORD_COUNT, 9, 'Low', 4, 'low', 'ready', JSON.stringify(payload), account.userId, 6],
+  });
+
+  const occupant = await findRoomOccupant(client, account.userId, 6);
+  assert.equal(occupant.report.similarityStatus, 'failed', 'REQUIRED: an explicit unifiedSimilarityFailed marker must always win — this row is a genuine, reproducible modern failure, never a legacy row to infer archive-only status for');
+  assert.equal(isFullyRevealedReal(occupant), true, 'a genuine terminal failure still reveals the room (shows "Unavailable"), matching the existing LIFECYCLE-06 behavior — never left polling forever either');
+});
+
+const LEGACY_REVISIT_TEXT =
+  'Glaciologists resurveying a receding alpine ice tongue measured a basal sliding rate roughly triple the value recorded a decade earlier, indicating meltwater lubrication now dominates the flow regime, ' +
+  'a mechanism the original monitoring program was never instrumented to detect at the depth where it turns out to matter most.';
+
+test('LEGACY ROOM BUG: revisiting/reloading an already-resolved legacy room returns the identical persisted result every time, with no write of any kind — never a re-save, never re-analysis', async () => {
+  // Promoted (unlike the transient-failure fixture above): lib/report-
+  // historical-match.ts's own isSnapshotRowCurrent deliberately never
+  // treats a NO_HISTORICAL_MATCH snapshot as "current" on a later read —
+  // by design, a corpus source that would match could always appear later
+  // (see that function's own header comment) — so an archive-only
+  // resolution's OWN historical-match snapshot legitimately reads "stale"
+  // again on every subsequent check, independent of this fix entirely. A
+  // REAL, persistent MATCHED snapshot is what this test needs to exercise
+  // "an already-resolved row stays resolved on repeat reads."
+  await promoteDocumentIntoCorpus(LEGACY_REVISIT_TEXT);
+  const account = await signUpConsentingAccount();
+  const id = 'legacy-room-revisit-report';
+  await insertLegacyRow(account, { id, room: 6, aiStatus: 'ready', aiScore: 3, archiveScore: 0, text: LEGACY_REVISIT_TEXT });
+
+  // The FIRST read is the one-time compatibility self-heal itself (already
+  // covered end to end by the "self-heals to 100%" test above) — this test
+  // is specifically about what happens AFTER a row is already resolved, so
+  // `before` is captured only once that first, write-triggering read has
+  // already landed.
+  const first = await findRoomOccupant(client, account.userId, 6);
+  assert.equal(first.report.similarityStatus, 'resolved', 'test setup sanity: the row must already be self-healed before this test\'s own "no further writes" assertions begin');
+
+  const before = await client.execute({ sql: 'SELECT payload_json, updated_at FROM saved_reports WHERE device_key = ? AND id = ?', args: [account.deviceKey, id] });
+
+  // Simulates entering the room again, then reloading, then logging back in
+  // and entering it again — three independent reads of the exact same,
+  // already-resolved room.
+  const second = await findRoomOccupant(client, account.userId, 6);
+  const third = await findRoomOccupant(client, account.userId, 6);
+  const fourth = await findRoomOccupant(client, account.userId, 6);
+  assert.deepEqual(second, first, 'REQUIRED: reloading must show the identical result, never a fresh computation');
+  assert.deepEqual(third, second, 'REQUIRED: logging back in and reopening must show the identical result again');
+  assert.deepEqual(fourth, third, 'REQUIRED: a third revisit must still show the identical result');
+
+  const after = await client.execute({ sql: 'SELECT payload_json, updated_at FROM saved_reports WHERE device_key = ? AND id = ?', args: [account.deviceKey, id] });
+  assert.deepEqual(before.rows[0], after.rows[0], 'REQUIRED: three room reads must never write anything — the persisted row, including updated_at, must be byte-identical before and after');
+});
+
+test('LEGACY ROOM BUG: an explicit new upload to a room whose prior (legacy) occupant has cycled out replaces the occupant, and the prior legacy report/history row is preserved, never deleted', async () => {
+  const account = await signUpConsentingAccount();
+  const legacyId = 'legacy-room-history-report';
+  // A room holds AT MOST one CURRENT report at a time (lib/report-rooms.ts's
+  // own "at most one active report per room" design, enforced by
+  // insertReportWithRoomCheck's own occupancy check) — a genuinely new
+  // upload can only ever claim a room once its prior occupant's own
+  // ROOM_CYCLE_MS (24h) has elapsed, exactly like rooms 3-6 in the real
+  // Preview reproduction eventually would. This is the real mechanism
+  // behind "only an explicit new upload replaces the room's occupant": not
+  // "immediately, on demand," but "once legitimately available, never via
+  // reload/relogin alone" — see the room-revisit test above for that half.
+  const expiredCreatedAt = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
+  await insertLegacyRow(account, { id: legacyId, room: 6, aiStatus: 'ready', aiScore: 6, archiveScore: 44, text: DOCUMENT_A_TEXT, createdAt: expiredCreatedAt });
+
+  const beforeUpload = await findRoomOccupant(client, account.userId, 6);
+  assert.equal(beforeUpload.status, 'empty', 'test setup sanity: a report whose own cycle has elapsed is no longer the room\'s CURRENT occupant, freeing the room for a new upload — it is not deleted, only no longer current (see the history assertion below)');
+
+  // An explicit new upload — the ONLY thing that should ever replace a
+  // room's occupant.
+  const newId = 'legacy-room-history-report-new';
+  const res = await postReport(account, { id: newId, room: 6, aiStatus: 'processing', text: DOCUMENT_A_TEXT, wordCount: DOCUMENT_A_WORD_COUNT });
+  assert.equal(res.status, 200);
+
+  const afterUpload = await findRoomOccupant(client, account.userId, 6);
+  assert.equal(afterUpload.report.id, newId, 'REQUIRED: only an explicit new upload replaces the room\'s current occupant');
+
+  const legacyRowStillExists = await client.execute({ sql: 'SELECT id FROM saved_reports WHERE device_key = ? AND id = ?', args: [account.deviceKey, legacyId] });
+  assert.equal(legacyRowStillExists.rows.length, 1, 'REQUIRED: the previous saved report/history must not be accidentally deleted by a new upload to the same room');
 });

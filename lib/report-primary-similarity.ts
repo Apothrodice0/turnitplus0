@@ -2,7 +2,7 @@ import type { Client } from "@libsql/client";
 import { getOrComputeHistoricalMatchSnapshot, getCurrentCorpusMatchGeneration, isHistoricalMatchSnapshotCurrent } from "./report-historical-match";
 import { isCorpusSourceMatchingEnabled } from "./corpus-source-matching-flag";
 import { computeUnifiedSimilarity, type UnifiedSimilarityResult } from "./unified-similarity";
-import type { ReportHistoricalSubmissionMatch } from "./report-types";
+import type { ReportHistoricalSubmissionMatch, SimilarityReport } from "./report-types";
 import type { ExternalAcademicEvidence } from "./academic-search/types";
 
 /**
@@ -157,13 +157,15 @@ export async function resolvePrimarySimilaritySummary(
  *    running the matcher again). The caller must show "Updating
  *    similarity…" — there is no number here to render even by accident.
  *  - "pending": no unifiedSimilarity has ever been persisted for this
- *    report AND no terminal failure has been recorded either — finalization
- *    genuinely has not been attempted, or has not yet SETTLED (an attempt
- *    could still be in flight, or the last one hit a transient
- *    infrastructure error outside resolvePrimarySimilaritySummary's own
- *    try/catch — see that function's own comment). Always eligible for a
- *    future automatic retry. The caller must show neutral loading — again,
- *    no number to render.
+ *    report AND no terminal failure has been recorded either — this
+ *    resolver itself never recomputes to find out why (see this function's
+ *    own header comment: no DB-touching calls, no matcher). A caller that
+ *    can reach the row directly (lib/reports-repo.ts's findRoomOccupant) is
+ *    expected to attempt selfHealMissingUnifiedSimilarity below exactly
+ *    once before ever calling this function with a still-missing result —
+ *    see that function's own header comment for why "pending" alone must
+ *    never be read as "archive-only is close enough." The caller must show
+ *    neutral loading — again, no number to render.
  *  - "failed" (release-hardening audit finding LIFECYCLE-06, corrected):
  *    the last write-time/self-heal attempt genuinely, reproducibly failed
  *    — resolvePrimarySimilaritySummary's own computeUnifiedSimilarity
@@ -246,4 +248,117 @@ export async function resolvePersistedSimilarityDisplay(
     return { status: "stale" };
   }
   return { status: "resolved", primaryScore: params.unifiedScore ?? params.archiveScore, isUnified: true };
+}
+
+export type SelfHealResult =
+  | { attempted: true; outcome: "resolved"; unifiedSimilarity: UnifiedSimilarityResult; corpusSourceMatchingEnabled: boolean }
+  | { attempted: true; outcome: "failed" }
+  | { attempted: false };
+
+/**
+ * Legacy-room bug fix (revised — the read-time "text present -> archive-only
+ * resolved" normalization this replaces was rejected: !hasUnifiedSimilarity
+ * && !unifiedSimilarityFailed can genuinely mean either a legacy row OR a
+ * modern row whose write-time finalization hit the rare transient-infra
+ * skip in app/api/reports/route.ts's own outer catch — text presence alone
+ * cannot tell those apart, and inferring archiveScore as final for either
+ * one can show a false terminal 0% for what is actually a 100% promoted-
+ * corpus-source match, reintroducing the exact bug the corpus-aware
+ * unifiedSimilarity work eliminated).
+ *
+ * The correct fix is not a smarter guess — it is to stop guessing and
+ * invoke the SAME authoritative resolver every other finalization path
+ * already uses (resolvePrimarySimilaritySummary — write-time finalization
+ * in app/api/reports/route.ts, and the detail page's own self-heal in
+ * app/api/reports/[id]/route.ts), then persist whatever it returns with the
+ * SAME generation-guarded write those paths already use. Called from
+ * lib/reports-repo.ts's findRoomOccupant exactly once per ambiguous read:
+ * on success, hasUnifiedSimilarity/unifiedSimilarityFailed are updated in
+ * the DB, so every subsequent findRoomOccupant call for this row (reload,
+ * logout/login, a later poll) sees an already-resolved or already-failed
+ * row through resolvePersistedSimilarityDisplay's own ordinary cheap path
+ * above and never re-enters this function again. This is compatibility
+ * self-heal, not repeated analysis — it never touches ai_score/ai_status
+ * (the AI pipeline is untouched, never rerun, never restarted) and never
+ * re-extracts or re-reads the source document beyond the rawText already
+ * sitting in payload_json.
+ *
+ * Deliberately does not special-case missing/empty text as a reason to
+ * skip the attempt: resolvePrimarySimilaritySummary's own
+ * computeUnifiedSimilarity is unconditional and does not require text (it
+ * consumes wordCount/archiveMatchedPositions/externalAcademicEvidence/
+ * historicalSubmissionMatch), so a text-less legacy row still converges to
+ * an honest, real "resolved" result (a genuine 0%, since there is nothing
+ * to match) rather than an indefinitely stuck "pending" — the same
+ * "text presence as a discriminator" pattern this fix was told not to use
+ * for the fallback value must not be reintroduced here as a gate on
+ * whether to even attempt resolution. A genuine infrastructure failure
+ * during the attempt itself (DB connectivity, etc. — the same class
+ * resolvePrimarySimilaritySummary's own callers already guard against, see
+ * tests/report-primary-similarity.test.mjs's "not unconditionally safe"
+ * coverage) is caught here and reported as attempted:false, leaving the row
+ * exactly as ambiguous as before — eligible for another attempt on the next
+ * view, never persisted as a false resolved/failed state.
+ */
+export async function selfHealMissingUnifiedSimilarity(
+  client: Client,
+  params: { reportDeviceKey: string; reportId: string; accountId: string | null },
+): Promise<SelfHealResult> {
+  try {
+    const row = await client.execute({
+      sql: "SELECT payload_json, archive_score FROM saved_reports WHERE device_key = ? AND id = ?",
+      args: [params.reportDeviceKey, params.reportId],
+    });
+    const raw = row.rows[0] as unknown as { payload_json: string; archive_score: number | bigint } | undefined;
+    if (!raw) return { attempted: false };
+    const payload = JSON.parse(String(raw.payload_json)) as SimilarityReport;
+
+    const resolution = await resolvePrimarySimilaritySummary(client, {
+      reportDeviceKey: params.reportDeviceKey,
+      reportId: params.reportId,
+      accountId: params.accountId,
+      rawText: payload.text,
+      wordCount: payload.wordCount,
+      archiveMatchedPositions: payload.archiveMatchedPositions,
+      externalAcademicEvidence: payload.externalAcademicEvidence,
+      archiveScore: payload.archiveScore ?? payload.score ?? Number(raw.archive_score),
+    });
+
+    if (resolution.unifiedSimilarity) {
+      const persistedPayload = {
+        ...payload,
+        unifiedSimilarity: resolution.unifiedSimilarity,
+        corpusSourceMatchingEnabledAtComputation: resolution.corpusSourceMatchingEnabled,
+        unifiedSimilarityGeneration: resolution.corpusGeneration,
+        unifiedSimilarityFailed: false,
+      };
+      await client.execute({
+        sql: `UPDATE saved_reports SET payload_json = ?
+              WHERE device_key = ? AND id = ?
+                AND COALESCE(json_extract(payload_json, '$.unifiedSimilarityGeneration'), -1) <= ?`,
+        args: [JSON.stringify(persistedPayload), params.reportDeviceKey, params.reportId, resolution.corpusGeneration],
+      });
+      return { attempted: true, outcome: "resolved", unifiedSimilarity: resolution.unifiedSimilarity, corpusSourceMatchingEnabled: resolution.corpusSourceMatchingEnabled };
+    }
+    if (resolution.failed) {
+      const persistedPayload = {
+        ...payload,
+        unifiedSimilarity: undefined,
+        unifiedSimilarityFailed: true,
+        corpusSourceMatchingEnabledAtComputation: resolution.corpusSourceMatchingEnabled,
+        unifiedSimilarityGeneration: resolution.corpusGeneration,
+      };
+      await client.execute({
+        sql: `UPDATE saved_reports SET payload_json = ?
+              WHERE device_key = ? AND id = ?
+                AND COALESCE(json_extract(payload_json, '$.unifiedSimilarityGeneration'), -1) <= ?`,
+        args: [JSON.stringify(persistedPayload), params.reportDeviceKey, params.reportId, resolution.corpusGeneration],
+      });
+      return { attempted: true, outcome: "failed" };
+    }
+    return { attempted: false };
+  } catch (err) {
+    console.error("selfHealMissingUnifiedSimilarity failed (non-fatal — row remains eligible for another attempt on the next room read):", err instanceof Error ? err.message : String(err));
+    return { attempted: false };
+  }
 }

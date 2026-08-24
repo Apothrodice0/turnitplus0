@@ -1,6 +1,6 @@
 import type { Client } from "@libsql/client";
 import { deriveRoomStatus, isWithinActiveCycle, roomCycleEndsAt } from "./report-rooms";
-import { resolvePersistedSimilarityDisplay } from "./report-primary-similarity";
+import { resolvePersistedSimilarityDisplay, selfHealMissingUnifiedSimilarity } from "./report-primary-similarity";
 import type { ReportSummary } from "./reports-remote";
 
 // device_key added in Phase E8C, additively — every existing caller that
@@ -131,10 +131,51 @@ export async function findRoomOccupant(client: Client, userId: string, room: num
 
   const status = deriveRoomStatus(occupant.ai_score === null ? null : Number(occupant.ai_score), occupant.ai_status === null ? null : String(occupant.ai_status));
   const archiveScore = Number(occupant.archive_score);
-  const hasUnifiedSimilarity = Number(occupant.has_unified) === 1;
+  let hasUnifiedSimilarity = Number(occupant.has_unified) === 1;
+  let unifiedScore = occupant.unified_score === null ? null : Number(occupant.unified_score);
+  let corpusFlagAtComputation = occupant.corpus_flag_at_computation === null ? null : Number(occupant.corpus_flag_at_computation) === 1;
+  let unifiedSimilarityFailed = Number(occupant.unified_failed) === 1;
   let primaryScore = archiveScore;
   let isUnified = false;
   let similarityStatus: "resolved" | "stale" | "pending" | "failed" = "pending";
+
+  // Legacy-room bug fix: neither a real unifiedSimilarity nor an explicit
+  // failure marker has ever been persisted for this row. Per write-time
+  // finalization's own synchronous guarantee (app/api/reports/route.ts —
+  // every save that reaches the DB has already either succeeded, explicitly
+  // failed, or hit the rare transient-infra skip in that route's own outer
+  // catch), this combination can only mean finalization was never even
+  // reachable for this row: a genuinely legacy row saved before write-time
+  // finalization existed, or that rare transient skip. Never inferred from
+  // room number, report age, a timeout, or text presence — see
+  // selfHealMissingUnifiedSimilarity's own header comment for the full
+  // reasoning. Attempted at most once per still-ambiguous read: on success
+  // it persists a real result (or an explicit failure marker) using the
+  // same generation-guarded write write-time finalization and the detail
+  // page's own self-heal already use, so every subsequent findRoomOccupant
+  // call for this row — a reload, a logout/login, a later poll — sees an
+  // already-resolved (or already-failed) row through the ordinary cheap
+  // path below and never re-enters this branch again. Never touches
+  // ai_score/ai_status: the AI pipeline is completely independent and is
+  // never rerun or restarted by this.
+  if (!hasUnifiedSimilarity && !unifiedSimilarityFailed) {
+    const healed = await selfHealMissingUnifiedSimilarity(client, {
+      reportDeviceKey: occupant.device_key,
+      reportId: String(occupant.id),
+      accountId: userId,
+    });
+    if (healed.attempted && healed.outcome === "resolved") {
+      hasUnifiedSimilarity = true;
+      unifiedScore = healed.unifiedSimilarity.unifiedScore;
+      corpusFlagAtComputation = healed.corpusSourceMatchingEnabled;
+    } else if (healed.attempted && healed.outcome === "failed") {
+      unifiedSimilarityFailed = true;
+    }
+    // attempted:false (nothing to heal, or a genuine transient infra error
+    // during the attempt itself): falls through to resolvePersistedSimilarityDisplay
+    // below exactly as before — "pending," eligible for another attempt on
+    // the next room read, never a fabricated resolved/failed state.
+  }
 
   // Release-hardening audit finding LIFECYCLE-03: previously scoped to only
   // "ready"/"failed" — the reasoning was "a processing occupant shows no
@@ -154,10 +195,10 @@ export async function findRoomOccupant(client: Client, userId: string, room: num
       reportDeviceKey: occupant.device_key,
       reportId: String(occupant.id),
       archiveScore,
-      unifiedScore: occupant.unified_score === null ? null : Number(occupant.unified_score),
+      unifiedScore,
       hasUnifiedSimilarity,
-      corpusSourceMatchingEnabledAtComputation: occupant.corpus_flag_at_computation === null ? null : Number(occupant.corpus_flag_at_computation) === 1,
-      unifiedSimilarityFailed: Number(occupant.unified_failed) === 1,
+      corpusSourceMatchingEnabledAtComputation: corpusFlagAtComputation,
+      unifiedSimilarityFailed,
     });
     similarityStatus = display.status;
     // display.primaryScore/isUnified do not exist outside this branch — the
