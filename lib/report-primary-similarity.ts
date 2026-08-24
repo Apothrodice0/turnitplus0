@@ -229,6 +229,20 @@ export async function resolvePersistedSimilarityDisplay(
     corpusSourceMatchingEnabledAtComputation: boolean | null | undefined;
     /** payload.unifiedSimilarityFailed (or its json_extract equivalent) — see PersistedSimilarityDisplay's own "failed" branch. Checked only when hasUnifiedSimilarity is false: a REAL persisted result always wins over a stale failure marker left behind by an earlier attempt (a later successful resave clears unifiedSimilarityFailed explicitly — see app/api/reports/route.ts's own write). */
     unifiedSimilarityFailed: boolean;
+    /**
+     * Backward-compatibility fix: whether payload.unifiedSimilarity.matchedPositions
+     * was ever persisted for this report — true from
+     * `json_extract(payload_json, '$.unifiedSimilarity.matchedPositions') IS NOT NULL`
+     * (or the equivalent `!== undefined` check on an already-parsed payload),
+     * NOT from `.length > 0`. A real, current 0% match legitimately persists
+     * matchedPositions: [] — present but empty — and must stay "resolved",
+     * never mistaken for "field never existed." Only reports saved before
+     * lib/unified-similarity.ts's computeUnifiedSimilarity started returning
+     * matchedPositions/previousUploadPositions (see that type's own comment)
+     * have this false while hasUnifiedSimilarity is true — a genuinely
+     * resolved score with no position evidence to render highlighting from.
+     */
+    hasPositionEvidence: boolean;
   },
 ): Promise<PersistedSimilarityDisplay> {
   if (!params.hasUnifiedSimilarity) {
@@ -254,6 +268,20 @@ export async function resolvePersistedSimilarityDisplay(
   }
   const current = await isHistoricalMatchSnapshotCurrent(client, { reportDeviceKey: params.reportDeviceKey, reportId: params.reportId });
   if (!current) {
+    return { status: "stale" };
+  }
+  // Backward-compatibility fix: current per generation/flag/snapshot is not
+  // the same as PRESENTATION-complete. A report self-healed before
+  // matchedPositions/previousUploadPositions existed can be fully current
+  // by every check above yet still have nothing for the renderer to
+  // highlight from — required invariant: "a resolved unified report must
+  // not be considered presentation-complete when it lacks the canonical
+  // position evidence required to explain its score." Reusing "stale" here
+  // (rather than a new status) is deliberate: it is already exactly the
+  // "not an authoritative answer right now, self-heal once" signal every
+  // caller (lib/reports-repo.ts's findRoomOccupant) already acts on — no
+  // second actionable-state concept, no duplicated self-heal wiring.
+  if (!params.hasPositionEvidence) {
     return { status: "stale" };
   }
   return { status: "resolved", primaryScore: params.unifiedScore ?? params.archiveScore, isUnified: true };

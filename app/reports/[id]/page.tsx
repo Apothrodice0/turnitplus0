@@ -90,6 +90,17 @@ const loadOwnedReport = cache(async (id: string): Promise<OwnedReportResult> => 
         hasUnifiedSimilarity: hasUnifiedSimilarity(payload),
         corpusSourceMatchingEnabledAtComputation: payload.corpusSourceMatchingEnabledAtComputation ?? null,
         unifiedSimilarityFailed: payload.unifiedSimilarityFailed ?? false,
+        // Backward-compatibility fix: a report self-healed before
+        // matchedPositions existed (see lib/unified-similarity.ts's own
+        // comment) must not render as "resolved" here with nothing for the
+        // renderer to highlight from. `!== undefined`, not `.length`, so a
+        // real, current 0% match (matchedPositions: []) still counts as
+        // present. This page never self-heals itself (see this function's
+        // own header comment on staying fast/unenriched) — a "stale" result
+        // here is picked up by the client's own fetch to
+        // app/api/reports/[id]/route.ts's GET handler, which always
+        // resolves fresh and therefore always persists the new fields.
+        hasPositionEvidence: payload.unifiedSimilarity?.matchedPositions !== undefined,
       });
       // Release-hardening audit finding SIM-04: "resolved" + isUnified
       // false means the live flag rollback path — payload.unifiedSimilarity

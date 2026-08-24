@@ -112,7 +112,8 @@ export async function findRoomOccupant(client: Client, userId: string, room: num
                  json_extract(payload_json, '$.unifiedSimilarity.unifiedScore') AS unified_score,
                  json_extract(payload_json, '$.unifiedSimilarity') IS NOT NULL AS has_unified,
                  json_extract(payload_json, '$.corpusSourceMatchingEnabledAtComputation') AS corpus_flag_at_computation,
-                 json_extract(payload_json, '$.unifiedSimilarityFailed') AS unified_failed
+                 json_extract(payload_json, '$.unifiedSimilarityFailed') AS unified_failed,
+                 json_extract(payload_json, '$.unifiedSimilarity.matchedPositions') IS NOT NULL AS has_position_evidence
           FROM saved_reports WHERE user_id = ? AND room_number = ?
           ORDER BY report_created_at DESC LIMIT 1`,
     args: [userId, room],
@@ -122,7 +123,7 @@ export async function findRoomOccupant(client: Client, userId: string, room: num
       id: string | number; submission_id: string; title: string; report_created_at: string; word_count: number; archive_score: number;
       score_band: string; ai_score: number | null; ai_tone: string | null; ai_status: string | null; device_key: string;
       unified_score: number | bigint | null; has_unified: number | bigint; corpus_flag_at_computation: number | bigint | null;
-      unified_failed: number | bigint | null;
+      unified_failed: number | bigint | null; has_position_evidence: number | bigint;
     }
     | undefined;
   if (!occupant || !isWithinActiveCycle(occupant.report_created_at)) {
@@ -135,6 +136,7 @@ export async function findRoomOccupant(client: Client, userId: string, room: num
   let unifiedScore = occupant.unified_score === null ? null : Number(occupant.unified_score);
   let corpusFlagAtComputation = occupant.corpus_flag_at_computation === null ? null : Number(occupant.corpus_flag_at_computation) === 1;
   let unifiedSimilarityFailed = Number(occupant.unified_failed) === 1;
+  let hasPositionEvidence = Number(occupant.has_position_evidence) === 1;
   let primaryScore = archiveScore;
   let isUnified = false;
 
@@ -155,6 +157,7 @@ export async function findRoomOccupant(client: Client, userId: string, room: num
       hasUnifiedSimilarity,
       corpusSourceMatchingEnabledAtComputation: corpusFlagAtComputation,
       unifiedSimilarityFailed,
+      hasPositionEvidence,
     });
 
   // Legacy-room bug fix (Preview regression, corrected): the self-heal
@@ -190,6 +193,15 @@ export async function findRoomOccupant(client: Client, userId: string, room: num
   // re-enters this branch again. Never touches ai_score/ai_status: the AI
   // pipeline is completely independent and is never rerun or restarted by
   // this.
+  //
+  // Backward-compatibility fix: resolvePersistedSimilarityDisplay's own
+  // "resolved" branch now ALSO requires hasPositionEvidence — a row
+  // self-healed before matchedPositions/previousUploadPositions existed
+  // (e.g. by the earlier legacy-room fix, commit 5225b83) can be fully
+  // current by generation/flag/snapshot and still return "stale" here for
+  // exactly that reason. This branch treats it identically to any other
+  // "stale" — the row above simply falls through to the same self-heal
+  // call, no separate trigger needed.
   let display = await readDisplay();
   if (display.status === "pending" || display.status === "stale") {
     const healed = await selfHealUnifiedSimilarity(client, {
@@ -202,6 +214,12 @@ export async function findRoomOccupant(client: Client, userId: string, room: num
       unifiedSimilarityFailed = false;
       unifiedScore = healed.unifiedSimilarity.unifiedScore;
       corpusFlagAtComputation = healed.corpusSourceMatchingEnabled;
+      // computeUnifiedSimilarity always returns matchedPositions (see that
+      // function's own return shape) — a fresh resolution is therefore
+      // always presentation-complete, whether this row's OWN read reached
+      // here via missing metadata, a generation/flag change, or a missing
+      // matchedPositions field on an otherwise-current legacy result.
+      hasPositionEvidence = true;
     } else if (healed.attempted && healed.outcome === "failed") {
       hasUnifiedSimilarity = false;
       unifiedSimilarityFailed = true;

@@ -28,6 +28,62 @@ export function tokens(value: string) {
   return normalize(comparisonText(value)).split(" ").filter(Boolean);
 }
 
+export type TokenSpan = { word: string; start: number; end: number };
+
+/**
+ * Unified-similarity highlighting fix: the same word sequence tokens(value)
+ * produces, but each entry additionally carries its character [start, end)
+ * offset into comparisonText(value) — and therefore into `value` itself
+ * too, since stripReferenceSection only ever removes a trailing suffix (see
+ * lib/reference-section.ts's own stripReferenceSection: `text.slice(0,
+ * start)`), never reorders or edits the prefix any of these offsets fall
+ * within.
+ *
+ * Scans the ORIGINAL (comparison) text directly with a maximal-run-of-
+ * letters-or-digits regex, rather than re-deriving offsets from
+ * normalize()'s destructively-transformed string. This produces the exact
+ * same word sequence as tokens() because normalize()'s only
+ * boundary-relevant step is `replace(/[^\p{L}\p{N}\s]/gu, " ")` — every
+ * non-letter/non-digit/non-whitespace character becomes a boundary, exactly
+ * what \p{L}\p{N}+ already treats as a boundary when matched directly
+ * against the original text. NFKD decomposition and \p{M} (combining mark)
+ * stripping change a letter's internal representation, never whether it
+ * counts as a letter, so they never shift a word boundary either. Verified
+ * empirically (word sequence equality against tokens()) across this
+ * codebase's own realistic fixture texts — see
+ * tests/unified-similarity-highlighting.test.mjs.
+ */
+export function tokenSpans(value: string): TokenSpan[] {
+  const text = comparisonText(value);
+  const spans: TokenSpan[] = [];
+  const pattern = /[\p{L}\p{N}]+/gu;
+  let match = pattern.exec(text);
+  while (match) {
+    spans.push({ word: match[0], start: match.index, end: match.index + match[0].length });
+    match = pattern.exec(text);
+  }
+  return spans;
+}
+
+/**
+ * Merges a set of word-index positions into contiguous [start, end]
+ * (inclusive) ranges — the same "adjacent positions form one span" rule
+ * lib/similarity-core.ts's own acceptedSimilaritySpans already applies
+ * internally, reused here as a small, independent, presentation-layer
+ * geometry helper (no matching/scoring judgment involved — purely turning
+ * a position set into spans for rendering).
+ */
+export function mergeAdjacentPositions(positions: Iterable<number>): Array<[number, number]> {
+  const sorted = [...positions].sort((left, right) => left - right);
+  const ranges: Array<[number, number]> = [];
+  for (const position of sorted) {
+    const previous = ranges[ranges.length - 1];
+    if (previous && position <= previous[1] + 1) previous[1] = position;
+    else ranges.push([position, position]);
+  }
+  return ranges;
+}
+
 export function grams(words: string[], size: number) {
   const values: string[] = [];
   for (let index = 0; index <= words.length - size; index += 1) {

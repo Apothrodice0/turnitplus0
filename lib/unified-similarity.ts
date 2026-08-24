@@ -68,6 +68,36 @@ export type UnifiedSimilarityResult = {
   unknownExcludedWords: number;
   /** Full per-passage attribution, including excluded entries (see evidenceStatus) — internal use (debugging, calibration, a future admin view), never rendered to an end user as-is. */
   contributions: UnifiedEvidenceContribution[];
+  /**
+   * Highlighting fix: the deduplicated union of every word position that
+   * contributed to unifiedScore/uniqueMatchedWords — previously computed
+   * internally (as allEligiblePositions, just below) purely to derive the
+   * *OnlyWords/overlapWords counts, then discarded. Persisting it here is
+   * the ONE canonical, presentation-safe position set the render layer
+   * must read (never independently recompute or infer from a percentage)
+   * to visually account for the full matched-word result — see
+   * lib/report-types.ts's unifiedMatchedPositions() and this codebase's
+   * own LEGACY ROOM BUG precedent for why "throws away the position union,
+   * persists only counts" is exactly the class of gap that produces a
+   * correct number with an incomplete presentation. Word indices only —
+   * carries no source identity, so it needs no privacy gating.
+   */
+  matchedPositions: number[];
+  /**
+   * The exclusive subset of matchedPositions attributable ONLY to the
+   * previous-upload/corpus-source channel (both PRIOR_SUBMISSION and
+   * TURNITPLUS_CORPUS_SOURCE relationship types alike — the same
+   * "included" set previousUploadOnlyWords already counts, just as
+   * positions instead of a count). Deliberately carries no
+   * matchedRepresentationId, no relationshipType, no account/report
+   * identity of any kind — privacy-safe by construction, needed so the
+   * render layer can draw ONE generic "TurnitPlus reference sources"
+   * highlight/Source Details entry without ever touching per-contribution
+   * sourceId data (which stays admin-only — see UnifiedEvidenceContribution's
+   * own comment and app/reports/[id]/page.tsx's contributions stripping for
+   * non-admins).
+   */
+  previousUploadPositions: number[];
 };
 
 export type ComputeUnifiedSimilarityParams = {
@@ -244,13 +274,14 @@ export function computeUnifiedSimilarity(params: ComputeUnifiedSimilarityParams)
   let liveAcademicOnlyWords = 0;
   let previousUploadOnlyWords = 0;
   let overlapWords = 0;
+  const previousUploadPositions: number[] = [];
   const allEligiblePositions = new Set<number>([...archiveSet, ...liveSet, ...priorSet]);
   for (const position of allEligiblePositions) {
     const sourcesHere = (archiveSet.has(position) ? 1 : 0) + (liveSet.has(position) ? 1 : 0) + (priorSet.has(position) ? 1 : 0);
     if (sourcesHere > 1) { overlapWords += 1; continue; }
     if (archiveSet.has(position)) archiveOnlyWords += 1;
     else if (liveSet.has(position)) liveAcademicOnlyWords += 1;
-    else previousUploadOnlyWords += 1;
+    else { previousUploadOnlyWords += 1; previousUploadPositions.push(position); }
   }
 
   return {
@@ -265,5 +296,7 @@ export function computeUnifiedSimilarity(params: ComputeUnifiedSimilarityParams)
     selfExcludedWords,
     unknownExcludedWords,
     contributions,
+    matchedPositions: [...allEligiblePositions].sort((left, right) => left - right),
+    previousUploadPositions: previousUploadPositions.sort((left, right) => left - right),
   };
 }

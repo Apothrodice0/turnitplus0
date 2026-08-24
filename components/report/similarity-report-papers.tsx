@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import type { ExternalAcademicEvidence } from "@/lib/academic-search/types";
 import { similarityScoreBand } from "@/lib/ai-core";
+import { mergeAdjacentPositions, tokenSpans } from "@/lib/similarity-core";
 import {
   PRIMARY_SIMILARITY_BAND_LABELS,
   archiveOverlapScore,
@@ -20,6 +21,7 @@ import {
   primaryResultLabel,
   primarySimilarityScore,
   referenceSourceContributionPercent,
+  referenceSourceMatchedPositions,
   sourceMatchedWordCount,
   type HighlightRange,
   type HistoricalSubmissionMatchEntry,
@@ -169,6 +171,33 @@ export function CategorySummary({ report }: { report: SimilarityReport }) {
   );
 }
 
+/**
+ * Highlighting fix — investigated, deliberately left UNCHANGED: "Not Cited
+ * or Quoted" is the only one of these four groups with any real
+ * classification behind it (the other three — "Manual review required",
+ * "Missing Citation", "Cited and Quoted" — are permanent 0%/hardcoded
+ * placeholders; no in-text-citation or quotation-mark classifier exists
+ * anywhere in this codebase to run over any span, unified or otherwise —
+ * searched for one specifically for this fix, there is genuinely nothing to
+ * wire in, not an oversight). Documented per this fix's own requirement to
+ * never claim highlighted passages explain more of the result than they
+ * actually do.
+ *
+ * "Not Cited or Quoted" itself is INTENTIONALLY archive-scoped, not a gap
+ * this fix should close: tests/similarity-result-consistency.test.mjs's own
+ * "SIM-01 (d)" test (pre-existing, unrelated to this fix) explicitly
+ * requires archiveOverlapScore here, with its own comment stating this
+ * tile "must keep doing so... never silently switched to the unified
+ * [score] (which would make an archive-specific classification breakdown
+ * lie about what it actually measures)." Match Groups is a real,
+ * archive-specific classification surface (distinguishing which archive
+ * matches lack citation/quotation), not a second rendering of the unified
+ * headline — UnifiedSimilaritySection above already covers the full
+ * unified breakdown by source type. Switching this to
+ * primarySimilarityScore/unified spans would not close a real gap; it
+ * would duplicate the headline under a misleading citation-classification
+ * label. Left exactly as before.
+ */
 export function MatchGroups({ report }: { report: SimilarityReport }) {
   const directMatches = report.sources.reduce((sum, source) => sum + source.matches, 0);
   const directPercent = archiveOverlapScore(report);
@@ -221,8 +250,53 @@ export function MatchGroups({ report }: { report: SimilarityReport }) {
   );
 }
 
+/**
+ * Highlighting fix: report.sources is archive-only and has no awareness of
+ * report.unifiedSimilarity — the same gap CategorySummary's own
+ * "TurnitPlus reference sources" row already closes for the category
+ * breakdown (see that function's own comment). "Source Details" (this
+ * component's real render target — see SourcesReport's page label) had the
+ * identical gap: a report whose entire unified result came from the
+ * previous-upload/corpus channel showed "No weighted source matches" here,
+ * even at a genuine 100%. Never invents a fake publication — one generic,
+ * privacy-safe entry, matching CategorySummary's own wording exactly, using
+ * referenceSourceMatchedPositions(report).length (the canonical position
+ * count) rather than re-deriving anything from a percentage.
+ */
+function ReferenceSourceEntry({ report, detailed }: { report: SimilarityReport; detailed: boolean }) {
+  const matchedWords = referenceSourceMatchedPositions(report).length;
+  if (matchedWords === 0) return null;
+  const percent = referenceSourceContributionPercent(report);
+  return (
+    <article className="ranked-source ranked-source-reference" key="turnitplus-reference-sources">
+      <div className="source-tags">
+        <span className="source-number" style={{ backgroundColor: REFERENCE_SOURCE_HIGHLIGHT_COLOR }}>
+          <ShieldCheck aria-hidden="true" />
+        </span>
+        <span className="source-type" style={{ backgroundColor: `${REFERENCE_SOURCE_HIGHLIGHT_COLOR}24` }}>
+          <ShieldCheck aria-hidden="true" />
+          TurnitPlus corpus
+        </span>
+      </div>
+      <div className="source-name-row">
+        <div>
+          <strong>TurnitPlus reference sources</strong>
+          <p>{matchedWords.toLocaleString()} matched word{matchedWords === 1 ? "" : "s"} — no account or report is associated with this match</p>
+        </div>
+        <b>{percent}%</b>
+      </div>
+      {detailed && (
+        <div className="source-progress" aria-label={`${percent}% match`}>
+          <span style={{ width: `${Math.max(4, percent * 5)}%`, backgroundColor: REFERENCE_SOURCE_HIGHLIGHT_COLOR }} />
+        </div>
+      )}
+    </article>
+  );
+}
+
 export function SourceList({ report, detailed = false }: { report: SimilarityReport; detailed?: boolean }) {
-  if (report.sources.length === 0) {
+  const hasReferenceSources = referenceSourceMatchedPositions(report).length > 0;
+  if (report.sources.length === 0 && !hasReferenceSources) {
     return (
       <div className="no-sources">
         <ShieldCheck aria-hidden="true" />
@@ -261,6 +335,7 @@ export function SourceList({ report, detailed = false }: { report: SimilarityRep
           )}
         </article>
       ))}
+      <ReferenceSourceEntry report={report} detailed={detailed} />
     </div>
   );
 }
@@ -804,7 +879,47 @@ function phrasePattern(phrase: string) {
   return words.length ? `\\b${words.join("[\\s\\W]+")}\\b` : "";
 }
 
-function findHighlightRanges(report: SimilarityReport) {
+/** Distinct from archive (#d7263d) and Wikipedia (#0784b4) — a real, named external academic source (OpenAIRE/Europe PMC), individually attributable. */
+const ACADEMIC_HIGHLIGHT_COLOR = "#7b3fe4";
+/** The one shared color for the generic "TurnitPlus reference sources" bucket — matches the ShieldCheck "verified internal" visual language CategorySummary already uses for the same bucket. Deliberately a single color regardless of how many distinct corpus documents contributed — never per-item, unlike the three kinds above. */
+const REFERENCE_SOURCE_HIGHLIGHT_COLOR = "#0f9d58";
+
+/**
+ * Highlighting fix (Task A, final correctness bug): the report body
+ * previously highlighted ONLY report.sources (the archive) and
+ * report.webCheck (Wikipedia) — real evidence channels that already fed
+ * unifiedScore/uniqueMatchedWords (live academic evidence, and especially
+ * the previous-upload/TurnitPlus-corpus channel) were never visually
+ * accounted for at all, even when they were the entire unified result (a
+ * genuine Preview case: 100% / 9,925 matched words, all from a promoted
+ * corpus source, zero archive overlap — the body highlighted nothing).
+ *
+ * Two additions below, each reusing an ALREADY-established mechanism
+ * rather than inventing a new one:
+ *  - Live academic evidence (OpenAIRE/Europe PMC): real, named,
+ *    individually attributable sources — the exact same phrase-regex
+ *    search already used for report.sources/webCheck, just reading
+ *    matchedPassages[].submittedText instead of source.phrases/a wiki
+ *    phrase. "Existing real indexed-publication sources should remain
+ *    separately identifiable" — this keeps that property for academic
+ *    evidence too, which report.sources never covered.
+ *  - Previous-upload/TurnitPlus-corpus channel: privacy requires this
+ *    NEVER be individually attributable (no representation id, no
+ *    relationship type, no account identity — see this file's own header
+ *    comment and lib/unified-similarity.ts's own previousUploadPositions
+ *    comment), so it cannot reuse phrase-regex search against per-entry
+ *    text the way the other three kinds do. It is also the one channel
+ *    whose passages can legitimately be EMPTY even at a real, full-
+ *    document 100% match (lib/unified-similarity.ts's own
+ *    previousUploadPassageRanges comment — the exact-canonical-match
+ *    short-circuit). referenceSourceMatchedPositions(report) — the
+ *    canonical, already-deduplicated, already-privacy-safe WORD-INDEX set
+ *    — is read directly and converted to character ranges via
+ *    tokenSpans()/mergeAdjacentPositions(), never phrase search, so it
+ *    highlights correctly in both the common partial-match case and the
+ *    exact-full-document case alike.
+ */
+export function findHighlightRanges(report: SimilarityReport) {
   const candidates: HighlightRange[] = [];
 
   report.sources.forEach((source, sourceIndex) => {
@@ -850,6 +965,46 @@ function findHighlightRanges(report: SimilarityReport) {
     }
   });
 
+  (report.externalAcademicEvidence ?? []).forEach((evidence, evidenceIndex) => {
+    (evidence.matchedPassages ?? []).forEach((passage) => {
+      const pattern = phrasePattern(passage.submittedText);
+      if (!pattern) return;
+      const expression = new RegExp(pattern, "gi");
+      let found = expression.exec(report.text);
+      while (found) {
+        candidates.push({
+          start: found.index,
+          end: found.index + found[0].length,
+          // Never collides with an archive sourceIndex (>=0) or Wikipedia's
+          // fixed -1 — only used here to give each academic evidence item
+          // a stable identity for its own highlight color/label.
+          sourceIndex: -2 - evidenceIndex,
+          color: ACADEMIC_HIGHLIGHT_COLOR,
+          label: evidence.title ?? `External academic source (${evidence.provider})`,
+          kind: "academic",
+        });
+        if (expression.lastIndex === found.index) expression.lastIndex += 1;
+        found = expression.exec(report.text);
+      }
+    });
+  });
+
+  const referenceSourcePositions = referenceSourceMatchedPositions(report);
+  if (referenceSourcePositions.length > 0) {
+    const spans = tokenSpans(report.text);
+    mergeAdjacentPositions(referenceSourcePositions).forEach(([wordStart, wordEnd]) => {
+      if (wordStart < 0 || wordEnd >= spans.length) return;
+      candidates.push({
+        start: spans[wordStart].start,
+        end: spans[wordEnd].end,
+        sourceIndex: -100,
+        color: REFERENCE_SOURCE_HIGHLIGHT_COLOR,
+        label: "TurnitPlus reference sources",
+        kind: "reference-source",
+      });
+    });
+  }
+
   const sourceCandidates = candidates
     .filter((candidate) => candidate.kind === "source")
     .sort((left, right) => left.sourceIndex - right.sourceIndex || left.start - right.start || right.end - left.end);
@@ -872,8 +1027,22 @@ function findHighlightRanges(report: SimilarityReport) {
   const wikipediaCandidates = candidates
     .filter((candidate) => candidate.kind === "wikipedia")
     .sort((left, right) => left.start - right.start || right.end - left.end);
+  const academicCandidates = candidates
+    .filter((candidate) => candidate.kind === "academic")
+    .sort((left, right) => left.start - right.start || right.end - left.end);
+  const referenceSourceCandidates = candidates
+    .filter((candidate) => candidate.kind === "reference-source")
+    .sort((left, right) => left.start - right.start || right.end - left.end);
 
-  [...wikipediaCandidates, ...mergedSources]
+  // Precedence order: Wikipedia and archive (unchanged from before this
+  // fix) win first, then real named academic sources, and the generic
+  // "TurnitPlus reference sources" bucket last — it only ever fills
+  // positions no more specific, individually-identifiable highlight
+  // already claimed. This is what "if the same word position is matched by
+  // multiple source types, highlight/count it once" means at the render
+  // layer: one visible highlight per position, attributed to whichever
+  // eligible source is most specific.
+  [...wikipediaCandidates, ...mergedSources, ...academicCandidates, ...referenceSourceCandidates]
     .forEach((candidate) => {
       const overlaps = accepted.some(
         (range) => candidate.start < range.end && candidate.end > range.start,
@@ -906,11 +1075,19 @@ function HighlightedDocument({ report }: { report: SimilarityReport }) {
           borderBottomColor: range.color,
           boxShadow: `inset 3px 0 0 ${range.color}`,
         }}
-        title={range.kind === "source" ? `Source ${range.sourceIndex + 1}: ${range.label}` : `Found on Wikipedia: ${range.label}`}
+        title={
+          range.kind === "source" ? `Source ${range.sourceIndex + 1}: ${range.label}`
+          : range.kind === "wikipedia" ? `Found on Wikipedia: ${range.label}`
+          : range.kind === "academic" ? `External academic source: ${range.label}`
+          : "TurnitPlus reference sources"
+        }
       >
         {report.text.slice(range.start, range.end)}
         <span style={{ backgroundColor: range.color }}>
-          {range.kind === "source" ? range.sourceIndex + 1 : "W"}
+          {range.kind === "source" ? range.sourceIndex + 1
+            : range.kind === "wikipedia" ? "W"
+            : range.kind === "academic" ? "A"
+            : "T"}
         </span>
         {range.kind === "wikipedia" && range.wikipediaSources?.map((source) => (
           <a className="wikipedia-source-link" key={source.pageId} href={source.url} target="_blank" rel="noreferrer">
@@ -938,6 +1115,10 @@ export function HighlightLegend({ report }: { report: SimilarityReport }) {
       .flatMap((match) => match.sources)
       .map((source) => [source.pageId, source]),
   ).values()];
+  const academicEvidence = report.externalAcademicEvidence
+    ? dedupeExternalAcademicEvidence(report.externalAcademicEvidence).filter((item) => (item.matchedPassages ?? []).length > 0)
+    : [];
+  const hasReferenceSources = referenceSourceMatchedPositions(report).length > 0;
   return (
     <div className="highlight-legend">
       <div>
@@ -951,6 +1132,18 @@ export function HighlightLegend({ report }: { report: SimilarityReport }) {
             {source.name}
           </span>
         ))}
+        {academicEvidence.map((item, index) => (
+          <span className="highlight-legend-item" key={item.doi ?? item.url ?? `academic-${index}`} title={item.title ?? "External academic source"}>
+            <i style={{ backgroundColor: ACADEMIC_HIGHLIGHT_COLOR }}>A</i>
+            {item.title ?? "External academic source"}
+          </span>
+        ))}
+        {hasReferenceSources && (
+          <span className="highlight-legend-item" key="reference-source-legend" title="TurnitPlus reference sources">
+            <i style={{ backgroundColor: REFERENCE_SOURCE_HIGHLIGHT_COLOR }}>T</i>
+            TurnitPlus reference sources
+          </span>
+        )}
         {wikipediaSources.map((source) => (
           <a className="highlight-legend-item wikipedia-legend-item" key={`wiki-${source.pageId}`} href={source.url} target="_blank" rel="noreferrer">
             <i>W</i>

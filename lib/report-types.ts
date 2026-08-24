@@ -292,7 +292,18 @@ export type HighlightRange = {
   sourceIndex: number;
   color: string;
   label: string;
-  kind: "source" | "wikipedia";
+  /**
+   * Highlighting fix: "academic" (a real, named external academic source —
+   * OpenAIRE/Europe PMC, individually attributable, same treatment as
+   * "source") and "reference-source" (the generic, privacy-safe
+   * "TurnitPlus reference sources" bucket — the previous-upload/corpus
+   * channel, deliberately never individually attributable) added alongside
+   * the existing "source" (archive) and "wikipedia" kinds — see
+   * findHighlightRanges's own comment for why the report body previously
+   * never highlighted these two evidence channels at all, even when they
+   * were the majority (or entirety) of the unified similarity result.
+   */
+  kind: "source" | "wikipedia" | "academic" | "reference-source";
   url?: string;
   wikipediaSources?: Array<{ pageId: number; title: string; url: string }>;
 };
@@ -406,6 +417,32 @@ export function referenceSourceContributionPercent(report: SimilarityReport): nu
   const unified = report.unifiedSimilarity;
   if (!unified) return 0;
   return Math.min(100, Math.round((unified.previousUploadOnlyWords / Math.max(1, unified.wordCount)) * 100));
+}
+
+/**
+ * Highlighting fix: the ONE canonical, presentation-safe position set a
+ * renderer must read to visually account for the full unified matched-word
+ * result — never independently recomputed, never inferred from a
+ * percentage. Directly mirrors report.unifiedSimilarity.matchedPositions
+ * (see that field's own comment in lib/unified-similarity.ts for why it now
+ * exists — it used to be computed and discarded). Empty array (not
+ * undefined) when unifiedSimilarity itself is absent, so callers can
+ * `.length`/spread this unconditionally.
+ */
+export function unifiedMatchedPositions(report: SimilarityReport): number[] {
+  return report.unifiedSimilarity?.matchedPositions ?? [];
+}
+
+/**
+ * The privacy-safe position subset behind the generic "TurnitPlus reference
+ * sources" bucket (previousUploadOnlyWords) — word indices only, no
+ * representation id, no relationship type, no account identity, needing no
+ * privacy gating of its own. Used to render ONE generic highlight/Source
+ * Details entry for the previous-upload/corpus-source channel, distinct
+ * from named archive/academic sources.
+ */
+export function referenceSourceMatchedPositions(report: SimilarityReport): number[] {
+  return report.unifiedSimilarity?.previousUploadPositions ?? [];
 }
 
 export function archiveMatchedWordCount(report: SimilarityReport) {

@@ -12,6 +12,7 @@ import { resetRateForTest, resetAuthRateForTest, resetReadRateForTest } from '..
 import { canonicalSha256 } from '../lib/document-identity.ts';
 import { runCorpusAdmissionPromotionSweep } from '../lib/corpus-admission-promotion.ts';
 import { getCurrentCorpusMatchGeneration } from '../lib/report-historical-match.ts';
+import { indexDocumentSubmissionIntoCorpus } from '../lib/user-submission-corpus.ts';
 import { findRoomOccupant, findReportRowForUser } from '../lib/reports-repo.ts';
 import { deriveRoomStatus } from '../lib/report-rooms.ts';
 import { resolvePersistedSimilarityDisplay, selfHealUnifiedSimilarity } from '../lib/report-primary-similarity.ts';
@@ -694,6 +695,7 @@ async function computeInitialDetailState(userId, reportId) {
     hasUnifiedSimilarity: hasUnifiedSimilarity(payload),
     corpusSourceMatchingEnabledAtComputation: payload.corpusSourceMatchingEnabledAtComputation ?? null,
     unifiedSimilarityFailed: payload.unifiedSimilarityFailed ?? false,
+    hasPositionEvidence: payload.unifiedSimilarity?.matchedPositions !== undefined,
   });
   return { aiStatus, similarityStatus: display.status };
 }
@@ -1343,6 +1345,217 @@ test('LEGACY ROOM BUG (Preview regression, exact real Room 1 shape): a row with 
     const rowAfter = await client.execute({ sql: 'SELECT payload_json, updated_at FROM saved_reports WHERE device_key = ? AND id = ?', args: [account.deviceKey, id] });
     assert.deepEqual(rowBefore.rows[0], rowAfter.rows[0], 'REQUIRED: repeated reads must never write anything further');
   });
+});
+
+/**
+ * BACKWARD-COMPATIBILITY FIX (highlighting migration gap): Rooms self-healed
+ * by the earlier legacy-room fix (commit 5225b83) landed BEFORE
+ * lib/unified-similarity.ts's computeUnifiedSimilarity started returning
+ * matchedPositions/previousUploadPositions (see that type's own comment).
+ * Such a row is fully CURRENT by every generation/flag/snapshot check —
+ * resolvePersistedSimilarityDisplay's own freshness logic alone would call
+ * it "resolved" — yet its persisted unifiedSimilarity has no position
+ * evidence at all for the new renderer to highlight from. Required
+ * invariant: "a resolved unified report must not be considered
+ * presentation-complete when it lacks the canonical position evidence
+ * required to explain its score."
+ *
+ * FIX: resolvePersistedSimilarityDisplay's own final "resolved" branch (the
+ * one reached only after generation/flag/snapshot all already agree) now
+ * ALSO requires hasPositionEvidence — computed from
+ * `json_extract(payload_json, '$.unifiedSimilarity.matchedPositions') IS
+ * NOT NULL` (lib/reports-repo.ts's findRoomOccupant) or
+ * `payload.unifiedSimilarity?.matchedPositions !== undefined`
+ * (app/reports/[id]/page.tsx) — deliberately `!== undefined`, not
+ * `.length`, so a real, current 0% match (matchedPositions: [], present but
+ * empty) is never mistaken for "field never existed." When absent, this
+ * branch returns "stale" instead of "resolved" — reusing the EXACT SAME
+ * actionable-state findRoomOccupant already self-heals on, so no new
+ * trigger or duplicated freshness rule was added anywhere. No inference
+ * from the percentage, no faked full-document highlighting from 100%, and
+ * the scoring formula is completely untouched — selfHealUnifiedSimilarity's
+ * own body is unchanged; it already always calls the real
+ * resolvePrimarySimilaritySummary and persists whatever it returns, which
+ * now always includes matchedPositions by construction.
+ */
+const LEGACY_MATCHED_POSITIONS_TEXT =
+  'Structural engineers reviewing a retrofit of a century-old truss bridge measured strain redistribution patterns the original 1920s design calculations never accounted for, ' +
+  'revealing that decades of incremental deck resurfacing had quietly shifted load paths onto members never sized for that share of the traffic.';
+const LEGACY_MATCHED_POSITIONS_WORD_COUNT = tokens(LEGACY_MATCHED_POSITIONS_TEXT).length;
+
+/** Inserts a row shaped exactly like a row self-healed by commit 5225b83 BEFORE matchedPositions/previousUploadPositions existed: unifiedScore/uniqueMatchedWords/generation/flag are all already correct and current, but the position-evidence fields are entirely absent from the persisted JSON — not present-and-empty, genuinely never written. */
+async function insertPreMatchedPositionsRow(account, { id, room, aiScore, wordCount, text, unifiedScore, uniqueMatchedWords, previousUploadOnlyWords, generation, corpusFlag }) {
+  const payload = {
+    version: 11, id, submissionId: 'sub-' + id, title: 'Pre-matchedPositions fixture',
+    author: '', assignment: '', created: new Date().toISOString(),
+    score: 0, archiveScore: 0, wordCount, scoreBand: 'Low',
+    matchedWordCount: 0, sources: [], repeats: [], text,
+    unifiedSimilarity: {
+      version: 'unified-similarity-v1', wordCount, unifiedScore, uniqueMatchedWords,
+      archiveOnlyWords: 0, liveAcademicOnlyWords: 0, previousUploadOnlyWords, overlapWords: 0,
+      selfExcludedWords: 0, unknownExcludedWords: 0, contributions: [],
+      // Deliberately absent: matchedPositions, previousUploadPositions —
+      // this IS the exact legacy shape this fix targets.
+    },
+    unifiedSimilarityGeneration: generation,
+    corpusSourceMatchingEnabledAtComputation: corpusFlag,
+  };
+  await client.execute({
+    sql: reportsRoute.SAVE_REPORT_SQL,
+    args: [id, account.deviceKey, 'sub-' + id, 'Pre-matchedPositions fixture', new Date().toISOString(), wordCount, 0, 'Low', aiScore, 'low', 'ready', JSON.stringify(payload), account.userId, room],
+  });
+  return payload;
+}
+
+test('BACKWARD COMPATIBILITY: a legacy-shaped resolved unifiedSimilarity (current generation/flag, real 100% score, but matchedPositions never persisted) is recognized as needing a one-time presentation-evidence upgrade and self-heals to the full position-aware result — never a faked full-document highlight, never a rescored percentage', async (t) => {
+  await promoteDocumentIntoCorpus(LEGACY_MATCHED_POSITIONS_TEXT);
+  const account = await signUpConsentingAccount();
+  const id = 'pre-matched-positions-100-report';
+  const currentGeneration = await getCurrentCorpusMatchGeneration(client);
+
+  await insertPreMatchedPositionsRow(account, {
+    id, room: 6, aiScore: 8, wordCount: LEGACY_MATCHED_POSITIONS_WORD_COUNT, text: LEGACY_MATCHED_POSITIONS_TEXT,
+    unifiedScore: 100, uniqueMatchedWords: LEGACY_MATCHED_POSITIONS_WORD_COUNT, previousUploadOnlyWords: LEGACY_MATCHED_POSITIONS_WORD_COUNT,
+    generation: currentGeneration, corpusFlag: true,
+  });
+
+  await t.test('test setup sanity: resolvePersistedSimilarityDisplay recognizes this exact legacy shape as "stale" (needs a one-time upgrade), even though generation/flag/snapshot are all already current', async () => {
+    const display = await resolvePersistedSimilarityDisplay(client, {
+      reportDeviceKey: account.deviceKey, reportId: id, archiveScore: 0, unifiedScore: 100,
+      hasUnifiedSimilarity: true, corpusSourceMatchingEnabledAtComputation: true, unifiedSimilarityFailed: false,
+      hasPositionEvidence: false,
+    });
+    assert.equal(display.status, 'stale', 'REQUIRED: missing position evidence alone must be enough to mark an otherwise-current resolved result as needing self-heal');
+  });
+
+  let firstRead;
+  await t.test('REQUIRED: the first room read self-heals the legacy row — authoritative recomputation produces the identical 100% score (never rescored) and persists matchedPositions', async () => {
+    firstRead = await findRoomOccupant(client, account.userId, 6);
+    assert.equal(firstRead.report.similarityStatus, 'resolved');
+    assert.equal(firstRead.report.primaryScore, 100, 'REQUIRED: the score must not change — this is a presentation upgrade, never a rescore');
+    assert.equal(firstRead.report.isUnified, true);
+
+    const row = await client.execute({ sql: 'SELECT payload_json FROM saved_reports WHERE device_key = ? AND id = ?', args: [account.deviceKey, id] });
+    const healedPayload = JSON.parse(row.rows[0].payload_json);
+    assert.notEqual(healedPayload.unifiedSimilarity.matchedPositions, undefined, 'REQUIRED: matchedPositions must now be persisted');
+    assert.equal(healedPayload.unifiedSimilarity.matchedPositions.length, healedPayload.unifiedSimilarity.uniqueMatchedWords, 'REQUIRED: the exact full matched-position count must equal the authoritative matched-word count');
+    assert.equal(healedPayload.unifiedSimilarity.matchedPositions.length, LEGACY_MATCHED_POSITIONS_WORD_COUNT, 'the full document matched, per the real promoted corpus source');
+    assert.equal(healedPayload.unifiedSimilarity.unifiedScore, 100, 'REQUIRED: the score is untouched by this upgrade');
+  });
+
+  await t.test('REQUIRED: the room is fully revealed — this is a real presentation fix, not merely a silent data upgrade with no user-visible effect', () => {
+    assert.equal(isFullyRevealedReal(firstRead), true);
+  });
+
+  await t.test('REQUIRED: a second and third room read perform no recomputation — the upgrade is truly one-time, room lifecycle does not regress into endless polling', async () => {
+    const snapshotAfterFirstRead = await snapshotRow(account.deviceKey, id);
+    const rowBefore = await client.execute({ sql: 'SELECT payload_json, updated_at FROM saved_reports WHERE device_key = ? AND id = ?', args: [account.deviceKey, id] });
+
+    const secondRead = await findRoomOccupant(client, account.userId, 6);
+    const thirdRead = await findRoomOccupant(client, account.userId, 6);
+    assert.deepEqual(secondRead, firstRead, 'REQUIRED: repeated reads must return the identical, already-upgraded result');
+    assert.deepEqual(thirdRead, secondRead);
+
+    const snapshotAfterRepeatedReads = await snapshotRow(account.deviceKey, id);
+    assert.equal(snapshotAfterRepeatedReads.computed_at, snapshotAfterFirstRead.computed_at, 'REQUIRED: no new matcher call on repeated reads');
+
+    const rowAfter = await client.execute({ sql: 'SELECT payload_json, updated_at FROM saved_reports WHERE device_key = ? AND id = ?', args: [account.deviceKey, id] });
+    assert.deepEqual(rowBefore.rows[0], rowAfter.rows[0], 'REQUIRED: repeated reads must never write anything further');
+  });
+});
+
+test('BACKWARD COMPATIBILITY: a current, genuinely 0% result (a real SELF-match) with matchedPositions present-but-empty stays resolved and does not loop — "field absent" and "field present but empty" remain distinguishable', async () => {
+  // A real SELF match (not a hand-typed fixture): isHistoricalMatchSnapshotCurrent's
+  // own currency rule requires a genuinely MATCHED (never NO_HISTORICAL_MATCH
+  // — see lib/report-historical-match.ts's own isSnapshotRowCurrent comment)
+  // snapshot to ever be "current" on a repeat read. The one real, easy-to-
+  // construct way to get a genuinely MATCHED-status snapshot whose
+  // CONTRIBUTION is still exactly zero is a SELF match — the same real
+  // mechanism tests/unified-similarity-relationship-integration.test.mjs's
+  // own "SCENARIO A (SELF)" proves end to end: SELF is always excluded from
+  // unifiedScore/previousUploadOnlyWords/matchedPositions (DECISION 1, no
+  // override), but the underlying match/snapshot is real and current.
+  const account = await signUpConsentingAccount();
+  const selfMatchText =
+    'A distinctive passage about lichen colonization rates on recently deglaciated rock faces, submitted twice by the same account to produce a real, current SELF match with zero net contribution.';
+  const selfMatchWordCount = tokens(selfMatchText).length;
+
+  const firstRes = await postReport(account, { id: 'self-match-zero-first', room: 8, aiStatus: 'ready', aiScore: 5, text: selfMatchText, wordCount: selfMatchWordCount });
+  assert.equal(firstRes.status, 200, 'test setup sanity: the first (prior-content) save must succeed');
+
+  // Corpus indexing for a "does this match my own earlier work" lookup is a
+  // genuinely eventual-consistency step in production (see
+  // lib/user-submission-corpus.ts's own header comment) — not automatic on
+  // save. Seeded explicitly here, the same way
+  // tests/unified-similarity-relationship-integration.test.mjs's own
+  // seedCorpusIndexForReport does for its real SELF-match scenarios, so the
+  // second submission's matcher has something real to find.
+  const firstIdentity = await client.execute({ sql: 'SELECT document_identity_id FROM saved_reports WHERE device_key = ? AND id = ?', args: [account.deviceKey, 'self-match-zero-first'] });
+  const firstDocumentIdentityId = String(firstIdentity.rows[0]?.document_identity_id ?? '');
+  assert.ok(firstDocumentIdentityId, 'test setup sanity: the first save must have captured a document_identity_id');
+  await indexDocumentSubmissionIntoCorpus(client, { documentIdentityId: firstDocumentIdentityId, rawText: selfMatchText });
+
+  const secondRes = await postReport(account, { id: 'self-match-zero-second', room: 9, aiStatus: 'ready', aiScore: 5, text: selfMatchText, wordCount: selfMatchWordCount });
+  assert.equal(secondRes.status, 200, 'test setup sanity: the second (SELF-matching) save must succeed');
+
+  // The FIRST room read is the one that may itself still land a real
+  // recompute (write-time finalization's own snapshot cache can predate
+  // indexDocumentSubmissionIntoCorpus's own effect, exactly the same
+  // "before is captured only once the first, write-triggering read has
+  // already landed" lesson the earlier "revisiting/reloading" test above
+  // already established) — this test's own "no further writes" claim is
+  // about repeat reads AFTER that point, not about write-time finalization
+  // itself.
+  const first = await findRoomOccupant(client, account.userId, 9);
+  assert.equal(first.report.similarityStatus, 'resolved', 'REQUIRED: matchedPositions: [] (present, empty) must read as current, never as "needs upgrade"');
+  assert.equal(first.report.primaryScore, 0, 'a genuine, honest 0% — never fabricated');
+  assert.equal(first.report.isUnified, true);
+
+  const stableRow = await client.execute({ sql: 'SELECT payload_json, updated_at FROM saved_reports WHERE device_key = ? AND id = ?', args: [account.deviceKey, 'self-match-zero-second'] });
+  const stablePayload = JSON.parse(stableRow.rows[0].payload_json);
+  assert.notEqual(stablePayload.unifiedSimilarity.matchedPositions, undefined, 'test setup sanity: matchedPositions must be persisted by this point');
+  assert.equal(stablePayload.unifiedSimilarity.uniqueMatchedWords, 0, 'test setup sanity: a SELF match contributes zero — a genuine 0%, not an upgrade gap');
+  assert.deepEqual(stablePayload.unifiedSimilarity.matchedPositions, [], 'test setup sanity: present, genuinely empty, never absent');
+
+  const rowBefore = await client.execute({ sql: 'SELECT payload_json, updated_at FROM saved_reports WHERE device_key = ? AND id = ?', args: [account.deviceKey, 'self-match-zero-second'] });
+  const second = await findRoomOccupant(client, account.userId, 9);
+  const third = await findRoomOccupant(client, account.userId, 9);
+  assert.deepEqual(second, first, 'REQUIRED: repeated reads must return the identical, already-current result');
+  assert.deepEqual(third, second);
+
+  const rowAfter = await client.execute({ sql: 'SELECT payload_json, updated_at FROM saved_reports WHERE device_key = ? AND id = ?', args: [account.deviceKey, 'self-match-zero-second'] });
+  assert.deepEqual(rowBefore.rows[0], rowAfter.rows[0], 'REQUIRED: a genuinely current 0% result must never be rewritten or looped on once stable');
+});
+
+test('BACKWARD COMPATIBILITY: the real detail/report route (app/api/reports/[id]/route.ts), not only findRoomOccupant, upgrades a legacy pre-matchedPositions row before rendering', async () => {
+  // LEGACY_MATCHED_POSITIONS_TEXT was already promoted by the earlier
+  // "one-time presentation-evidence upgrade" test above, in this same
+  // shared DB — canonical_sha256 is UNIQUE, so it must not be promoted
+  // twice; reusing the same already-promoted source is deliberate here, not
+  // an oversight.
+  const account = await signUpConsentingAccount();
+  const id = 'pre-matched-positions-detail-report';
+  const currentGeneration = await getCurrentCorpusMatchGeneration(client);
+
+  await insertPreMatchedPositionsRow(account, {
+    id, room: 7, aiScore: 3, wordCount: LEGACY_MATCHED_POSITIONS_WORD_COUNT, text: LEGACY_MATCHED_POSITIONS_TEXT,
+    unifiedScore: 100, uniqueMatchedWords: LEGACY_MATCHED_POSITIONS_WORD_COUNT, previousUploadOnlyWords: LEGACY_MATCHED_POSITIONS_WORD_COUNT,
+    generation: currentGeneration, corpusFlag: true,
+  });
+
+  const beforeRow = await client.execute({ sql: 'SELECT payload_json FROM saved_reports WHERE device_key = ? AND id = ?', args: [account.deviceKey, id] });
+  assert.equal(JSON.parse(beforeRow.rows[0].payload_json).unifiedSimilarity.matchedPositions, undefined, 'test setup sanity: genuinely absent before this route is ever hit');
+
+  const res = await getReportDetail(account, id);
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.payload.unifiedSimilarity.unifiedScore, 100, 'the real GET route must still report the correct, unchanged score');
+  assert.notEqual(body.payload.unifiedSimilarity.matchedPositions, undefined, 'REQUIRED: the real detail route response itself must carry the upgraded position evidence, not just an internal DB row');
+  assert.equal(body.payload.unifiedSimilarity.matchedPositions.length, LEGACY_MATCHED_POSITIONS_WORD_COUNT);
+
+  const afterRow = await client.execute({ sql: 'SELECT payload_json FROM saved_reports WHERE device_key = ? AND id = ?', args: [account.deviceKey, id] });
+  const afterPayload = JSON.parse(afterRow.rows[0].payload_json);
+  assert.notEqual(afterPayload.unifiedSimilarity.matchedPositions, undefined, 'REQUIRED: the real detail route must persist the upgrade too, not only return it in the response');
 });
 
 const LEGACY_STALE_GENERATION_TEXT =
