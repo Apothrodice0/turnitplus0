@@ -265,19 +265,27 @@ test("POST /api/reports still returns the same success response and saved_report
   const getRes = await reportIdRoute.GET(getReq, { params: Promise.resolve({ id: reportId }) });
   assert.equal(getRes.status, 200);
   const getBody = await getRes.json();
-  // Phase E8C adds historicalSubmissionMatch as read-time enrichment,
-  // exactly like Phase D's matchClassification already does elsewhere —
-  // unlike matchClassification, it is deliberately always attached (even
-  // for NO_HISTORICAL_MATCH) so the persisted snapshot's version/audit
-  // metadata stays inspectable regardless of match status (this phase's
-  // own task description, section 3). Phase 6 adds unifiedSimilarity as
-  // the same kind of read-time enrichment (lib/unified-similarity.ts) —
-  // see tests/api-reports.test.mjs's identical adjustment. Assert both
-  // shapes separately, then compare the rest of the payload unchanged.
-  const { historicalSubmissionMatch, unifiedSimilarity, ...getBodyWithoutHistoricalMatch } = getBody.payload;
-  assert.equal(historicalSubmissionMatch?.status, "NO_HISTORICAL_MATCH");
-  assert.equal(typeof historicalSubmissionMatch?.matcherVersion, "string");
-  assert.ok(unifiedSimilarity, "unifiedSimilarity must also be attached as read-time enrichment");
+  // Phase E8C originally added historicalSubmissionMatch as read-time
+  // enrichment, unconditionally, exactly like Phase D's matchClassification
+  // already does elsewhere. Release-hardening audit finding UI-02 gated it
+  // admin-only (app/api/reports/[id]/route.ts's GET handler, matching
+  // matchClassification's own pre-existing gate) — see tests/report-
+  // historical-match-visibility.test.mjs for dedicated admin-vs-ordinary
+  // coverage. This save/fetch is anonymous (no session at all), so it must
+  // be entirely absent here. Phase 6 adds unifiedSimilarity as its own kind
+  // of read-time enrichment (lib/unified-similarity.ts) — unlike
+  // historicalSubmissionMatch, that one stays present for every viewer (see
+  // tests/api-reports.test.mjs's identical adjustment). unifiedSimilarityFailed
+  // (release-hardening audit finding LIFECYCLE-06) is explicitly written as
+  // `false` on every successful resolution, alongside unifiedSimilarity —
+  // see app/api/reports/route.ts's own write-time finalization — so it is
+  // also destructured out here rather than compared against the plain
+  // payload literal above. Assert all shapes separately, then compare the
+  // rest of the payload unchanged.
+  const { historicalSubmissionMatch, unifiedSimilarity, corpusSourceMatchingEnabledAtComputation, unifiedSimilarityGeneration, unifiedSimilarityFailed, ...getBodyWithoutHistoricalMatch } = getBody.payload;
+  assert.equal(historicalSubmissionMatch, undefined, "REQUIRED (UI-02): an anonymous viewer must never receive historicalSubmissionMatch");
+  assert.ok(unifiedSimilarity, "unifiedSimilarity must still be attached as read-time enrichment — never gated, only historicalSubmissionMatch is");
+  assert.equal(unifiedSimilarityFailed, false, "a genuine success must explicitly clear/set unifiedSimilarityFailed to false, never leave it ambiguous");
   assert.deepEqual(getBodyWithoutHistoricalMatch, payload, "the saved report must still round-trip exactly (aside from the new E8C/Phase 6 enrichment fields), unaffected by identity capture");
 
   // Side effect: a document_identities row was created for this save, scoped

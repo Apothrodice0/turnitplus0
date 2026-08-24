@@ -105,29 +105,41 @@ async function deleteReport(deviceKey, id) {
   const getRes = await getReport(deviceKey, payload.id);
   assert.equal(getRes.status, 200);
   const getBody = await getRes.json();
-  // Phase E8C attaches historicalSubmissionMatch as read-time enrichment
-  // (like Phase D's matchClassification elsewhere), deliberately always
-  // present (even for NO_HISTORICAL_MATCH) so its version/audit metadata
-  // stays inspectable — see tests/document-identity.test.mjs's identical
-  // adjustment for the full rationale. Phase 6 adds unifiedSimilarity as the
-  // same kind of read-time enrichment (lib/unified-similarity.ts, computed
-  // from historicalSubmissionMatch plus this payload's own
-  // archiveMatchedPositions/externalAcademicEvidence — see
-  // tests/unified-similarity-report-integration.test.mjs for its own
-  // dedicated coverage), so it gets the same exclusion here.
+  // Phase E8C originally attached historicalSubmissionMatch as read-time
+  // enrichment (like Phase D's matchClassification elsewhere) unconditionally
+  // for every viewer. Release-hardening audit finding UI-02 gated it
+  // admin-only (app/api/reports/[id]/route.ts's GET handler, matching
+  // matchClassification's own pre-existing gate) — see
+  // tests/report-historical-match-visibility.test.mjs for the dedicated
+  // admin-vs-ordinary coverage. This save/fetch is anonymous (no session at
+  // all), so historicalSubmissionMatch must be entirely absent here, not a
+  // NO_HISTORICAL_MATCH shape. Phase 6 adds unifiedSimilarity as its own
+  // kind of read-time enrichment (lib/unified-similarity.ts, computed from
+  // historicalSubmissionMatch plus this payload's own archiveMatchedPositions/
+  // externalAcademicEvidence — see tests/unified-similarity-report-integration.test.mjs
+  // for its own dedicated coverage) — unlike historicalSubmissionMatch,
+  // this one stays present for every viewer (the finalized aggregate score
+  // itself is never gated), so it gets the same exclusion-from-the-diff
+  // treatment here for a different reason: it's still not part of the
+  // original saved payload.
   // Release-hardening audit finding SIM-04: corpusSourceMatchingEnabledAtComputation
   // and unifiedSimilarityGeneration are persisted alongside unifiedSimilarity
   // (both at write time and by the GET route's own self-heal write-back —
   // see lib/report-primary-similarity.ts's own header comment) as the flag/
   // generation snapshot a later read uses to detect staleness — the same
-  // kind of enrichment as the two fields above, so they get the same
-  // exclusion here.
-  const { historicalSubmissionMatch, unifiedSimilarity, corpusSourceMatchingEnabledAtComputation, unifiedSimilarityGeneration, ...getPayloadWithoutHistoricalMatch } = getBody.payload;
-  assert.equal(historicalSubmissionMatch?.status, 'NO_HISTORICAL_MATCH');
-  assert.ok(unifiedSimilarity, 'unifiedSimilarity must also be attached as read-time enrichment');
+  // kind of enrichment as unifiedSimilarity, so they get the same exclusion here.
+  // Release-hardening audit finding LIFECYCLE-06: unifiedSimilarityFailed is
+  // explicitly written as `false` on every successful resolution (both at
+  // write time and by the GET route's own self-heal), so it too is excluded
+  // from the round-trip diff rather than compared against the payload
+  // literal, which never declares it.
+  const { historicalSubmissionMatch, unifiedSimilarity, corpusSourceMatchingEnabledAtComputation, unifiedSimilarityGeneration, unifiedSimilarityFailed, ...getPayloadWithoutHistoricalMatch } = getBody.payload;
+  assert.equal(historicalSubmissionMatch, undefined, 'REQUIRED (UI-02): historicalSubmissionMatch is admin-only — an anonymous/non-admin GET must never receive it, not even a NO_HISTORICAL_MATCH shape');
+  assert.ok(unifiedSimilarity, 'unifiedSimilarity must still be attached as read-time enrichment — never gated, only historicalSubmissionMatch is');
   assert.equal(corpusSourceMatchingEnabledAtComputation, false, 'the live flag snapshot must be recorded (default off in this test env)');
   assert.equal(typeof unifiedSimilarityGeneration, 'number', 'the generation snapshot must be recorded');
-  assert.deepEqual(getPayloadWithoutHistoricalMatch, payload, 'get must return the exact saved payload (aside from the new E8C/Phase 6/SIM-04 enrichment fields)');
+  assert.equal(unifiedSimilarityFailed, false, 'a genuine success must explicitly clear/set unifiedSimilarityFailed to false, never leave it ambiguous');
+  assert.deepEqual(getPayloadWithoutHistoricalMatch, payload, 'get must return the exact saved payload (aside from the new E8C/Phase 6/SIM-04/LIFECYCLE-06 enrichment fields)');
 
   const deleteRes = await deleteReport(deviceKey, payload.id);
   assert.equal(deleteRes.status, 200);

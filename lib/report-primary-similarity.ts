@@ -64,6 +64,24 @@ export type PrimarySimilarityResolution = {
    * app/api/reports/route.ts's own SAVE_REPORT_SQL generation guard.
    */
   corpusGeneration: number;
+  /**
+   * Release-hardening audit finding LIFECYCLE-06 (corrected): true only
+   * when computeUnifiedSimilarity itself threw for THIS report's own data
+   * — a genuine, reproducible overall-computation failure, distinct from a
+   * fail-soft individual-source issue. Investigated before adding this:
+   * historicalSubmissionMatch reaching a real, persisted terminal
+   * "UNAVAILABLE" status (lib/report-historical-match.ts's
+   * getOrComputeHistoricalMatchSnapshot, itself never throwing) does NOT
+   * set this — lib/unified-similarity.ts's computeUnifiedSimilarity only
+   * ever special-cases historicalSubmissionMatch.status === "MATCHED" (see
+   * its own sole status check); any other status, "UNAVAILABLE" included,
+   * simply contributes zero historical words to an otherwise still-
+   * successful computation from whatever archive/academic evidence IS
+   * available. So a historical-match failure alone can never set `failed`
+   * true here — only computeUnifiedSimilarity's own try/catch below can.
+   * Always false on the success path.
+   */
+  failed: boolean;
 };
 
 export async function resolvePrimarySimilaritySummary(
@@ -105,10 +123,10 @@ export async function resolvePrimarySimilaritySummary(
       externalAcademicEvidence: params.externalAcademicEvidence,
       historicalSubmissionMatch,
     });
-    return { historicalSubmissionMatch, unifiedSimilarity, primaryScore: unifiedSimilarity.unifiedScore, isUnified: true, corpusSourceMatchingEnabled, corpusGeneration };
+    return { historicalSubmissionMatch, unifiedSimilarity, primaryScore: unifiedSimilarity.unifiedScore, isUnified: true, corpusSourceMatchingEnabled, corpusGeneration, failed: false };
   } catch (err) {
-    console.error("resolvePrimarySimilaritySummary: computeUnifiedSimilarity failed (non-fatal), falling back to the archive-only result:", err instanceof Error ? err.message : String(err));
-    return { historicalSubmissionMatch, unifiedSimilarity: undefined, primaryScore: params.archiveScore, isUnified: false, corpusSourceMatchingEnabled, corpusGeneration };
+    console.error("resolvePrimarySimilaritySummary: computeUnifiedSimilarity failed (genuine overall-computation failure — persisted as a terminal 'failed' state by the caller, see this function's own failed field):", err instanceof Error ? err.message : String(err));
+    return { historicalSubmissionMatch, unifiedSimilarity: undefined, primaryScore: params.archiveScore, isUnified: false, corpusSourceMatchingEnabled, corpusGeneration, failed: true };
   }
 }
 
@@ -139,20 +157,36 @@ export async function resolvePrimarySimilaritySummary(
  *    running the matcher again). The caller must show "Updating
  *    similarity…" — there is no number here to render even by accident.
  *  - "pending": no unifiedSimilarity has ever been persisted for this
- *    report (finalization has not completed yet — a legacy report, or a
- *    write-time finalization that genuinely failed/timed out and left no
- *    trace, see app/api/reports/route.ts's own finalization try/catch). The
- *    caller must show neutral loading — again, no number to render.
- * A caller that wants an archive-only number to show for "stale"/"pending"
- * (there usually isn't one — see OverviewReport/room-page-shell.tsx, which
- * both show neutral text instead) must fetch archiveScore itself from
- * wherever it already had it and decide that explicitly; it is deliberately
- * not handed out here.
+ *    report AND no terminal failure has been recorded either — finalization
+ *    genuinely has not been attempted, or has not yet SETTLED (an attempt
+ *    could still be in flight, or the last one hit a transient
+ *    infrastructure error outside resolvePrimarySimilaritySummary's own
+ *    try/catch — see that function's own comment). Always eligible for a
+ *    future automatic retry. The caller must show neutral loading — again,
+ *    no number to render.
+ *  - "failed" (release-hardening audit finding LIFECYCLE-06, corrected):
+ *    the last write-time/self-heal attempt genuinely, reproducibly failed
+ *    — resolvePrimarySimilaritySummary's own computeUnifiedSimilarity
+ *    threw for this report's own data (see that function's own `failed`
+ *    field and its own investigation of what does/doesn't set it — a
+ *    fail-soft individual-source issue like an UNAVAILABLE historical
+ *    match never reaches this branch). Terminal: the caller must show
+ *    "Unavailable," never keep the user waiting on a result that will not
+ *    arrive from further passive polling. Distinct from "pending" so a
+ *    caller can tell "still might resolve" apart from "this specific
+ *    attempt is known to have failed" — never inferred from elapsed
+ *    client-side polling time, only from this genuine, persisted signal.
+ * A caller that wants an archive-only number to show for "stale"/"pending"/
+ * "failed" (there usually isn't one — see OverviewReport/room-page-shell.tsx,
+ * which all show neutral/unavailable text instead) must fetch archiveScore
+ * itself from wherever it already had it and decide that explicitly; it is
+ * deliberately not handed out here.
  */
 export type PersistedSimilarityDisplay =
   | { status: "resolved"; primaryScore: number; isUnified: boolean }
   | { status: "stale" }
-  | { status: "pending" };
+  | { status: "pending" }
+  | { status: "failed" };
 
 /**
  * Release-hardening audit finding SIM-04: the READ-side counterpart to
@@ -182,10 +216,12 @@ export async function resolvePersistedSimilarityDisplay(
     hasUnifiedSimilarity: boolean;
     /** payload.corpusSourceMatchingEnabledAtComputation (or its json_extract equivalent) — the flag snapshot resolvePrimarySimilaritySummary recorded at write time. null/undefined is treated as "never recorded" (a report saved before this fix existed), which is always a mismatch against the live flag, forcing one honest re-resolution rather than silently trusting an unlabeled legacy value. */
     corpusSourceMatchingEnabledAtComputation: boolean | null | undefined;
+    /** payload.unifiedSimilarityFailed (or its json_extract equivalent) — see PersistedSimilarityDisplay's own "failed" branch. Checked only when hasUnifiedSimilarity is false: a REAL persisted result always wins over a stale failure marker left behind by an earlier attempt (a later successful resave clears unifiedSimilarityFailed explicitly — see app/api/reports/route.ts's own write). */
+    unifiedSimilarityFailed: boolean;
   },
 ): Promise<PersistedSimilarityDisplay> {
   if (!params.hasUnifiedSimilarity) {
-    return { status: "pending" };
+    return params.unifiedSimilarityFailed ? { status: "failed" } : { status: "pending" };
   }
   const liveFlag = isCorpusSourceMatchingEnabled();
   const computedWithFlag = Boolean(params.corpusSourceMatchingEnabledAtComputation);

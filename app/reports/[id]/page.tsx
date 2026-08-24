@@ -33,13 +33,16 @@ type OwnedReportResult =
   // no writes); it only tells ReportDetailShell whether payload's own
   // primarySimilarityScore is already trustworthy ("resolved"), known
   // outdated by generation/live-flag change ("stale" — show "Updating
-  // similarity…" instead), or never computed at all ("pending" — show
-  // "Calculating similarity…"). See loadOwnedReport's own comment for why
+  // similarity…" instead), never computed at all ("pending" — show
+  // "Calculating similarity…"), or genuinely, reproducibly failed
+  // ("failed" — release-hardening audit finding LIFECYCLE-06, corrected —
+  // show "Unavailable," never inferred from client poll timing). See
+  // loadOwnedReport's own comment for why
   // payload.unifiedSimilarity is stripped in the one "resolved but
   // archive-only" case (a live CORPUS_SOURCE_MATCHING_ENABLED rollback) so
   // primarySimilarityScore(payload) itself agrees with this status, not
   // just the label around it.
-  | { status: "found"; payload: SimilarityReport; aiStatus: "processing" | "ready" | "failed"; similarityStatus: "resolved" | "stale" | "pending" }
+  | { status: "found"; payload: SimilarityReport; aiStatus: "processing" | "ready" | "failed"; similarityStatus: "resolved" | "stale" | "pending" | "failed" }
   | { status: "not-found-for-session" }
   | { status: "no-session" }
   | { status: "rate-limited"; retryAfterSeconds: number };
@@ -86,6 +89,7 @@ const loadOwnedReport = cache(async (id: string): Promise<OwnedReportResult> => 
         unifiedScore: payload.unifiedSimilarity?.unifiedScore ?? null,
         hasUnifiedSimilarity: hasUnifiedSimilarity(payload),
         corpusSourceMatchingEnabledAtComputation: payload.corpusSourceMatchingEnabledAtComputation ?? null,
+        unifiedSimilarityFailed: payload.unifiedSimilarityFailed ?? false,
       });
       // Release-hardening audit finding SIM-04: "resolved" + isUnified
       // false means the live flag rollback path — payload.unifiedSimilarity
@@ -98,6 +102,17 @@ const loadOwnedReport = cache(async (id: string): Promise<OwnedReportResult> => 
       // corpus-inflated) number.
       if (display.status === "resolved" && !display.isUnified) {
         delete payload.unifiedSimilarity;
+      }
+      // Release-hardening audit finding UI-02: payload.unifiedSimilarity is
+      // read straight from durable storage here, so a non-admin's very
+      // first server render would otherwise carry the same
+      // contributions[].sourceId (an internal representation id) that
+      // app/api/reports/[id]/route.ts's GET handler now strips for the
+      // background-fetch response — see that route's own comment for why
+      // this is safe (contributions is never rendered by any production UI)
+      // and why unifiedScore itself is never touched.
+      if (payload.unifiedSimilarity && sessionUser.role !== "admin") {
+        payload.unifiedSimilarity = { ...payload.unifiedSimilarity, contributions: [] };
       }
       return { status: "found", payload, aiStatus, similarityStatus: display.status };
     } catch {

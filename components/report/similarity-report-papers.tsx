@@ -411,6 +411,23 @@ export function UnifiedSimilaritySection({ report }: { report: SimilarityReport 
   const breakdown = unifiedEvidenceBreakdown(report);
   const excludedSelf = unified.selfExcludedWords;
   const excludedUnknown = unified.unknownExcludedWords;
+  // Release-hardening audit finding UI-02: the per-source-type breakdown
+  // ("X words from Y · Z words from an eligible previous TurnitPlus
+  // submission"), the SELF/UNKNOWN exclusion note, and the explanatory
+  // headline paragraph all name the exact same "previous submission"/
+  // "corpus reference" concepts historicalSubmissionMatch itself is now
+  // admin-gated for (see app/api/reports/[id]/route.ts's own comment) —
+  // unifiedSimilarity's aggregate unifiedScore stays visible to every
+  // viewer unconditionally (below), but these three more granular pieces
+  // are additive detail, not the result itself, so they follow the
+  // identical gate; a non-admin instead gets a fully generic version of the
+  // explanatory paragraph that names no source type at all. Deliberately
+  // reuses historicalSubmissionMatch's own presence on `report` — already
+  // decided server-side, admin-only — rather than a new, separately-
+  // maintained "isAdmin" signal that could drift out of sync with it: there
+  // is exactly one place (that route's own role check) that decides who
+  // sees this class of detail, not two.
+  const canSeeSourceBreakdown = Boolean(report.historicalSubmissionMatch);
 
   return (
     <section className={`unified-similarity-block ${verdict ? `unified-verdict-${verdict.key}` : ""}`}>
@@ -419,9 +436,12 @@ export function UnifiedSimilaritySection({ report }: { report: SimilarityReport 
         {verdict && <em>{verdict.label}</em>}
       </h2>
       <p>
-        Combines TurnitPlus&apos;s own reference matches, verified external academic sources, and eligible previous
-        TurnitPlus submissions into one result. The same submitted passage found by more than one source counts once,
-        never added twice.
+        {canSeeSourceBreakdown
+          ? <>Combines TurnitPlus&apos;s own reference matches, verified external academic sources, and eligible
+              previous TurnitPlus submissions into one result. The same submitted passage found by more than one
+              source counts once, never added twice.</>
+          : <>Combines matches identified across every reference source TurnitPlus checks into one result. The same
+              submitted passage found by more than one source counts once, never added twice.</>}
       </p>
       {report.academicEvidenceStatus === "FAILED" && (
         <p className="unified-similarity-note unified-similarity-note-warning">
@@ -429,10 +449,10 @@ export function UnifiedSimilaritySection({ report }: { report: SimilarityReport 
           this result reflects TurnitPlus&apos;s own reference matches{report.historicalSubmissionMatch ? " and previous submissions" : ""} only. See External Academic Sources below for details.
         </p>
       )}
-      {breakdown.length > 0 && (
+      {canSeeSourceBreakdown && breakdown.length > 0 && (
         <p className="unified-similarity-note">{breakdown.join(" · ")}.</p>
       )}
-      {(excludedSelf > 0 || excludedUnknown > 0) && (
+      {canSeeSourceBreakdown && (excludedSelf > 0 || excludedUnknown > 0) && (
         <p>
           {excludedSelf > 0 && `${excludedSelf.toLocaleString()} matched word${excludedSelf === 1 ? "" : "s"} came from your own earlier TurnitPlus submission and were excluded. `}
           {excludedUnknown > 0 && `${excludedUnknown.toLocaleString()} matched word${excludedUnknown === 1 ? "" : "s"} came from content whose ownership could not be determined and were excluded.`}
@@ -455,21 +475,29 @@ export function UnifiedSimilaritySection({ report }: { report: SimilarityReport 
  * card — this component was simply never wired to them. Both now share the
  * exact same selection, so every surface derived from this report agrees.
  *
- * Release-hardening audit finding SIM-02, refined by SIM-04: `similarityStatus`
- * — "resolved" (default, so every existing call site: the print bundle,
- * every test fixture in this codebase, renders exactly as before),
- * "pending" (nothing persisted yet — app/reports/[id]/report-detail-shell.tsx
- * has not yet resolved the report's real combined result), or "stale" (a
- * real combined result WAS persisted, but the server says it no longer
- * reflects the current corpus generation/CORPUS_SOURCE_MATCHING_ENABLED
- * state — see lib/report-primary-similarity.ts's
- * resolvePersistedSimilarityDisplay). "pending" and "stale" BOTH render a
- * neutral placeholder instead of the score/band/banner rather than
- * primarySimilarityScore's own archive-only fallback value — requirement
- * SIM-04's own explicit rule for "stale": show "Updating similarity…"
- * RATHER THAN the persisted score, never alongside it, since that
- * persisted number may itself be exactly what is about to change. Every
- * matching-derived section below the headline (UnifiedSimilaritySection,
+ * Release-hardening audit finding SIM-02, refined by SIM-04, widened by
+ * LIFECYCLE-06 (corrected): `similarityStatus` — "resolved" (default, so
+ * every existing call site: the print bundle, every test fixture in this
+ * codebase, renders exactly as before), "pending" (nothing persisted yet —
+ * app/reports/[id]/report-detail-shell.tsx has not yet resolved the
+ * report's real combined result), "stale" (a real combined result WAS
+ * persisted, but the server says it no longer reflects the current corpus
+ * generation/CORPUS_SOURCE_MATCHING_ENABLED state — see
+ * lib/report-primary-similarity.ts's resolvePersistedSimilarityDisplay),
+ * or "failed" (a genuine, persisted, reproducible overall-computation
+ * failure — resolvePrimarySimilaritySummary's own computeUnifiedSimilarity
+ * threw for this report's own data; see that function's own comment for
+ * why a fail-soft individual-source issue, like an UNAVAILABLE historical
+ * match, never reaches this status). "pending" and "stale" render a
+ * neutral, still-working placeholder instead of the score/band/banner
+ * rather than primarySimilarityScore's own archive-only fallback value —
+ * requirement SIM-04's own explicit rule for "stale": show "Updating
+ * similarity…" RATHER THAN the persisted score, never alongside it, since
+ * that persisted number may itself be exactly what is about to change.
+ * "failed" renders its own distinct, non-busy placeholder ("Similarity
+ * unavailable") — a terminal outcome, not something still in progress, so
+ * it deliberately does not share "pending"/"stale"'s spinner treatment.
+ * Every matching-derived section below the headline (UnifiedSimilaritySection,
  * the historical-match blocks, the admin-only matchClassification block) is
  * ALSO gated on `similarityStatus === "resolved"` — see that guard's own
  * comment for why this is defensive rather than redundant.
@@ -479,13 +507,19 @@ export function UnifiedSimilaritySection({ report }: { report: SimilarityReport 
  * externalAcademicEvidence is resolved before a report is ever first
  * saved — see AcademicEvidenceSection's own call site comment below).
  */
-export function OverviewReport({ report, similarityStatus = "resolved" }: { report: SimilarityReport; similarityStatus?: "resolved" | "stale" | "pending" }) {
+export function OverviewReport({ report, similarityStatus = "resolved" }: { report: SimilarityReport; similarityStatus?: "resolved" | "stale" | "pending" | "failed" }) {
   const primaryScore = primarySimilarityScore(report);
   const primaryLabel = primaryResultLabel(report);
   const isUnified = hasUnifiedSimilarity(report);
   const similarityVerdict = similarityScoreBand(primaryScore);
   const wikipediaMatches = report.webCheck?.phrasesMatched ?? 0;
   const notResolved = similarityStatus !== "resolved";
+  // Release-hardening audit finding UI-02: this headline's own "combines...
+  // eligible previous TurnitPlus submissions" note named the exact same
+  // source type UnifiedSimilaritySection's own breakdown does — a second
+  // place carrying that wording this fix would otherwise have missed. Same
+  // gate, same reasoning: see that component's own comment.
+  const canSeeSourceBreakdown = Boolean(report.historicalSubmissionMatch);
   return (
     <article className="report-paper overview-paper">
       <ReportPageHeader report={report} page={2} label="Integrity Overview" />
@@ -494,17 +528,19 @@ export function OverviewReport({ report, similarityStatus = "resolved" }: { repo
           <section
             className={`similarity-heading similarity-heading-pending similarity-heading-${similarityStatus}`}
             aria-live="polite"
-            aria-busy="true"
-            aria-label={similarityStatus === "stale" ? "Updating similarity" : "Calculating similarity"}
+            aria-busy={similarityStatus !== "failed"}
+            aria-label={similarityStatus === "stale" ? "Updating similarity" : similarityStatus === "failed" ? "Similarity unavailable" : "Calculating similarity"}
           >
             <h2>
-              <span className="similarity-skeleton" aria-hidden="true" />
-              {similarityStatus === "stale" ? "Updating similarity…" : "Calculating similarity…"}
+              {similarityStatus !== "failed" && <span className="similarity-skeleton" aria-hidden="true" />}
+              {similarityStatus === "stale" ? "Updating similarity…" : similarityStatus === "failed" ? "Similarity unavailable" : "Calculating similarity…"}
             </h2>
             <p>
               {similarityStatus === "stale"
                 ? "TurnitPlus's reference sources changed since this result was last computed. Refreshing now — this can take a few seconds."
-                : "TurnitPlus is still checking this submission against every reference source, including previously submitted content. This can take a few seconds."}
+                : similarityStatus === "failed"
+                  ? "TurnitPlus could not complete a similarity check for this submission."
+                  : "TurnitPlus is still checking this submission against every reference source, including previously submitted content. This can take a few seconds."}
             </p>
           </section>
         ) : (
@@ -518,7 +554,9 @@ export function OverviewReport({ report, similarityStatus = "resolved" }: { repo
             </h2>
             <aside className="archive-scope-note">
               {isUnified
-                ? <>TurnitPlus Similarity combines text found through TurnitPlus&apos;s own checks, verified external academic sources, and eligible previous TurnitPlus submissions into one result — the same submitted passage found by more than one source counts once.</>
+                ? (canSeeSourceBreakdown
+                  ? <>TurnitPlus Similarity combines text found through TurnitPlus&apos;s own checks, verified external academic sources, and eligible previous TurnitPlus submissions into one result — the same submitted passage found by more than one source counts once.</>
+                  : <>TurnitPlus Similarity combines text found across every reference source TurnitPlus checks into one result — the same submitted passage found by more than one source counts once.</>)
                 : <>Similarity result: {primaryScore}% — based on identified overlapping passages and verified academic sources.</>}
             </aside>
             <p>

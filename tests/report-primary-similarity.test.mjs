@@ -223,7 +223,7 @@ test("SIM-03 (4): flag-off mode finalizes and persists archive-only values, even
   assert.equal(resolutionFlagOn.primaryScore, 100, "sanity: with the flag on, the same real corpus match resolves to 100 — confirms the flag-off 0 above was not just a fixture accident");
 });
 
-test("SIM-02 (5): a genuine computeUnifiedSimilarity failure produces an explicit archive fallback, never an undefined/thrown result", async () => {
+test("SIM-02 (5), extended by LIFECYCLE-06: a genuine computeUnifiedSimilarity failure produces an explicit archive fallback, never an undefined/thrown result, AND is reported via resolution.failed as a genuine, reproducible overall-computation failure", async () => {
   const { id, deviceKey } = await insertSavedReport({
     userId: "sim02-failure-user-1", room: 0, archiveScore: 12, aiStatus: "ready", text: "Plain unrelated fixture text with no corpus match of any kind.", wordCount: 50,
   });
@@ -238,10 +238,196 @@ test("SIM-02 (5): a genuine computeUnifiedSimilarity failure produces an explici
   assert.equal(resolution.primaryScore, 12, "must fall back to the exact archive-only value, not 0 or undefined");
   assert.equal(resolution.isUnified, false);
   assert.equal(resolution.unifiedSimilarity, undefined);
+  // Release-hardening audit finding LIFECYCLE-06 (corrected): this exact
+  // scenario — computeUnifiedSimilarity itself throwing — is the ONE real,
+  // reproducible overall-computation failure this codebase has. Callers
+  // (app/api/reports/route.ts, app/api/reports/[id]/route.ts) persist this
+  // explicitly as unifiedSimilarityFailed: true rather than silently
+  // leaving the report indistinguishable from "never attempted."
+  assert.equal(resolution.failed, true, "REQUIRED: a genuine computeUnifiedSimilarity throw must be reported as failed, not silently absorbed as if nothing happened");
   // historicalSubmissionMatch is still resolved normally — only the
   // unified-arithmetic step failed, not the (separate, already-defensive)
   // snapshot lookup.
   assert.ok(resolution.historicalSubmissionMatch);
+});
+
+test("LIFECYCLE-06: resolution.failed stays false on the success path — sanity companion to the failure case above, proving the field is a genuine discriminator, not always true/false regardless of outcome", async () => {
+  const { id, deviceKey } = await insertSavedReport({
+    userId: "lifecycle06-success-user-1", room: 0, archiveScore: 7, aiStatus: "ready", text: "An entirely unrelated fixture about glacial hydrology for this specific success-path sanity check.", wordCount: 40,
+  });
+  const resolution = await resolvePrimarySimilaritySummary(client, {
+    reportDeviceKey: deviceKey, reportId: id, accountId: "lifecycle06-success-user-1", rawText: "An entirely unrelated fixture about glacial hydrology for this specific success-path sanity check.",
+    wordCount: 40, archiveMatchedPositions: null, externalAcademicEvidence: null, archiveScore: 7,
+  });
+  assert.equal(resolution.failed, false);
+  assert.ok(resolution.unifiedSimilarity, "a genuine success must still produce a real unifiedSimilarity object");
+});
+
+test("LIFECYCLE-06: a historicalSubmissionMatch reaching its own real, persisted UNAVAILABLE status is a fail-soft individual-source issue — computeUnifiedSimilarity still resolves normally from the archive/academic evidence that IS available, never throwing, never turning into an overall similarity failure", () => {
+  // Investigated before implementing (per this turn's own requirement):
+  // lib/unified-similarity.ts's computeUnifiedSimilarity only ever
+  // special-cases historicalSubmissionMatch.status === "MATCHED" (see its
+  // own sole status check) — any other status, "UNAVAILABLE" included,
+  // simply contributes zero historical words. Proven here directly against
+  // the real function, no DB needed: a manually-constructed UNAVAILABLE
+  // historicalSubmissionMatch (matching exactly what
+  // lib/report-historical-match.ts's getOrComputeHistoricalMatchSnapshot
+  // itself returns on a genuine, internally-caught matcher failure) must
+  // never make this call throw, and the resulting score must still reflect
+  // the archive contribution that WAS available.
+  const unavailableHistoricalMatch = {
+    status: "UNAVAILABLE",
+    computedAt: new Date().toISOString(),
+    matcherVersion: "v-test",
+    fingerprintVersion: "v-test",
+    canonicalizationVersion: "v-test",
+  };
+  const result = computeUnifiedSimilarity({
+    wordCount: 100,
+    archiveMatchedPositions: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+    externalAcademicEvidence: null,
+    historicalSubmissionMatch: unavailableHistoricalMatch,
+  });
+  assert.equal(result.uniqueMatchedWords, 10, "the archive contribution must still be reflected — a fail-soft historical-match issue must never zero out signal that IS available");
+  assert.ok(result.unifiedScore > 0, "REQUIRED: a genuine, resolvable unified score must still be produced — 'one contributing source unavailable' must never be escalated to 'nothing could be computed'");
+});
+
+/**
+ * Mirrors app/api/reports/[id]/route.ts's own self-heal persistence for the
+ * failure branch — see this file's own finalizeAndPersist for the success
+ * mirror. Distinct helper (rather than widening finalizeAndPersist) because
+ * production itself has two distinct branches (if/else if) with distinct
+ * persisted shapes; this keeps the test's own mirror equally explicit about
+ * which branch it exercises.
+ */
+async function finalizeAndPersistFailure({ deviceKey, id, userId, text, wordCount, archiveScore }) {
+  const throwingCompute = () => { throw new Error("simulated deterministic terminal similarity failure"); };
+  const resolution = await resolvePrimarySimilaritySummary(client, {
+    reportDeviceKey: deviceKey, reportId: id, accountId: userId, rawText: text,
+    wordCount, archiveMatchedPositions: null, externalAcademicEvidence: null, archiveScore,
+    testOnlyComputeUnifiedSimilarity: throwingCompute,
+  });
+  assert.equal(resolution.failed, true, "test setup sanity: the forced throw must actually reach resolution.failed");
+  const existing = await client.execute({ sql: "SELECT payload_json FROM saved_reports WHERE device_key = ? AND id = ?", args: [deviceKey, id] });
+  const payload = JSON.parse(existing.rows[0].payload_json);
+  // Release-hardening audit finding LIFECYCLE-06 (approval-pass fix):
+  // explicitly clears any unifiedSimilarity this row might already carry
+  // from an earlier successful save — mirrors app/api/reports/route.ts's
+  // and app/api/reports/[id]/route.ts's own failure-branch writes exactly.
+  // Without this, a stale success left over from a PRIOR save would
+  // silently outrank this fresh failure (resolvePersistedSimilarityDisplay
+  // checks hasUnifiedSimilarity before unifiedSimilarityFailed) — see the
+  // dedicated regression test below, which exercises exactly that
+  // sequence.
+  payload.unifiedSimilarity = undefined;
+  payload.unifiedSimilarityFailed = true;
+  payload.corpusSourceMatchingEnabledAtComputation = resolution.corpusSourceMatchingEnabled;
+  payload.unifiedSimilarityGeneration = resolution.corpusGeneration;
+  await client.execute({ sql: "UPDATE saved_reports SET payload_json = ? WHERE device_key = ? AND id = ?", args: [JSON.stringify(payload), deviceKey, id] });
+  return resolution;
+}
+
+test("LIFECYCLE-06 END-TO-END: a genuine terminal similarity failure persists as unifiedSimilarityFailed, and BOTH resolvePersistedSimilarityDisplay AND findRoomOccupant (the room card's own read path) surface it as 'failed' — never a false 'pending' that would poll forever with no way for the user to ever see an honest answer", async () => {
+  const text = "A completely unrelated fixture about deep-sea hydrothermal vent ecosystems, used only for this LIFECYCLE-06 terminal-failure end-to-end test.";
+  const { id, deviceKey } = await insertSavedReport({
+    userId: "lifecycle06-failure-user-1", room: 0, archiveScore: 33, aiStatus: "ready", text, wordCount: 60,
+  });
+
+  await finalizeAndPersistFailure({ deviceKey, id, userId: "lifecycle06-failure-user-1", text, wordCount: 60, archiveScore: 33 });
+
+  // Real DB row, real json_extract read — the exact call
+  // app/reports/[id]/page.tsx's loadOwnedReport makes.
+  const display = await resolvePersistedSimilarityDisplay(client, {
+    reportDeviceKey: deviceKey, reportId: id, archiveScore: 33, unifiedScore: null,
+    hasUnifiedSimilarity: false, corpusSourceMatchingEnabledAtComputation: null,
+    unifiedSimilarityFailed: true,
+  });
+  assert.deepEqual(display, { status: "failed" }, "REQUIRED: a persisted failure marker must read back as the 'failed' status, not 'pending'");
+
+  // The room card's own read path — never calls the resolver, pure SQL —
+  // must agree exactly, matching SIM-03/SIM-04's own "room and detail can
+  // never disagree" guarantee, now extended to the failure case.
+  const occupant = await findRoomOccupant(client, "lifecycle06-failure-user-1", 0);
+  assert.equal(occupant.status, "ready");
+  assert.equal(occupant.report.similarityStatus, "failed", "REQUIRED: the room card must read the same terminal failure, not stay stuck showing a neutral 'Calculating…' placeholder forever");
+  assert.equal(occupant.report.isUnified, false, "a failed resolution must never claim a false combined result");
+  assert.equal(occupant.report.primaryScore, occupant.report.archiveScore, "with no trustworthy combined score, primaryScore must stay the archive-only fallback, never a stale/invented number");
+});
+
+test("LIFECYCLE-06 REGRESSION (approval-pass finding): a fresh terminal failure following an EARLIER successful save must never be masked by that stale unifiedSimilarity — the room card and resolvePersistedSimilarityDisplay must both show 'failed', not silently fall back to the old 'resolved' score", async () => {
+  // A genuine MATCHED source is seeded (mirroring SIM-03 (1)'s own
+  // pattern) so the FIRST save genuinely succeeds with a real, non-zero
+  // unified result to leave stale — this is exactly the shape a client
+  // resave's own reportPayload.unifiedSimilarity would carry forward from
+  // a locally-cached copy (see saveEnrichedAiResult's own {...report,
+  // ...aiResult} spread in app/reports/rooms/[room]/room-page-shell.tsx).
+  const text = "Volcanologists monitoring gas emissions at a restless caldera detected a sustained shift in sulfur dioxide flux preceding the eventual eruption.";
+  await seedActivePromotedSource(text);
+  const { id, deviceKey } = await insertSavedReport({
+    userId: "lifecycle06-stale-mask-user-1", room: 0, archiveScore: 5, aiStatus: "ready", text, wordCount: 30,
+  });
+
+  await withEnv("CORPUS_SOURCE_MATCHING_ENABLED", "true", async () => {
+    // Step 1: a genuine success persists a real unifiedSimilarity.
+    await finalizeAndPersist({ deviceKey, id, userId: "lifecycle06-stale-mask-user-1", text, wordCount: 30, archiveScore: 5 });
+    const afterSuccess = await findRoomOccupant(client, "lifecycle06-stale-mask-user-1", 0);
+    assert.equal(afterSuccess.report.similarityStatus, "resolved", "sanity: the first save must genuinely succeed and be readable as resolved");
+
+    // Step 2: a later attempt (e.g. a retry resave whose own submitted
+    // payload still carries the OLD unifiedSimilarity from step 1) fails
+    // deterministically. finalizeAndPersistFailure re-reads the CURRENT
+    // row (which already has unifiedSimilarity set from step 1) before
+    // writing — exactly reproducing the "stale success already present"
+    // precondition this regression covers.
+    await finalizeAndPersistFailure({ deviceKey, id, userId: "lifecycle06-stale-mask-user-1", text, wordCount: 30, archiveScore: 5 });
+
+    const rawRow = await client.execute({ sql: "SELECT payload_json FROM saved_reports WHERE device_key = ? AND id = ?", args: [deviceKey, id] });
+    const rawPersisted = JSON.parse(rawRow.rows[0].payload_json);
+    assert.equal(rawPersisted.unifiedSimilarity, undefined, "REQUIRED: the fresh failure write must have cleared the stale unifiedSimilarity, not merely added unifiedSimilarityFailed alongside it");
+    assert.equal(rawPersisted.unifiedSimilarityFailed, true);
+
+    const afterFailure = await findRoomOccupant(client, "lifecycle06-stale-mask-user-1", 0);
+    assert.equal(afterFailure.report.similarityStatus, "failed", "REQUIRED: the room card must show the FRESH failure, never fall back to masking it behind the stale successful score from step 1");
+
+    const display = await resolvePersistedSimilarityDisplay(client, {
+      reportDeviceKey: deviceKey, reportId: id, archiveScore: 5,
+      unifiedScore: rawPersisted.unifiedSimilarity?.unifiedScore ?? null,
+      hasUnifiedSimilarity: rawPersisted.unifiedSimilarity !== undefined,
+      corpusSourceMatchingEnabledAtComputation: rawPersisted.corpusSourceMatchingEnabledAtComputation ?? null,
+      unifiedSimilarityFailed: rawPersisted.unifiedSimilarityFailed ?? false,
+    });
+    assert.deepEqual(display, { status: "failed" }, "REQUIRED: resolvePersistedSimilarityDisplay must also report the fresh failure, not the stale resolved result");
+  });
+});
+
+test("LIFECYCLE-06: a later successful resave clears a prior terminal failure marker — 'failed' is sticky only until a genuinely successful attempt overwrites it, exactly mirroring how a later AI retry overwrites ai_status 'failed' with 'ready'", async () => {
+  // A genuine MATCHED source is seeded (mirroring SIM-03 (1)'s own
+  // pattern) so the retry's own resolution reaches "resolved" rather than
+  // "stale" — a NO_HISTORICAL_MATCH snapshot is, by design (see this
+  // file's own Phase E8E comment via lib/report-historical-match.ts),
+  // NEVER treated as current, always eligible for a recheck; using a bare
+  // unrelated fixture here would make even a genuinely successful retry
+  // read back as "stale" for a reason unrelated to what this test is
+  // actually proving (clearing the failure marker specifically).
+  const text = "Entomologists surveying pollinator diversity along an urban-to-rural gradient documented a marked decline in wild bee species richness near dense development.";
+  await seedActivePromotedSource(text);
+  const { id, deviceKey } = await insertSavedReport({
+    userId: "lifecycle06-clear-user-1", room: 0, archiveScore: 18, aiStatus: "ready", text, wordCount: 45,
+  });
+
+  await withEnv("CORPUS_SOURCE_MATCHING_ENABLED", "true", async () => {
+    await finalizeAndPersistFailure({ deviceKey, id, userId: "lifecycle06-clear-user-1", text, wordCount: 45, archiveScore: 18 });
+    const beforeRetry = await findRoomOccupant(client, "lifecycle06-clear-user-1", 0);
+    assert.equal(beforeRetry.report.similarityStatus, "failed", "sanity: the failure must be persisted and readable before the retry");
+
+    // A genuine retry — the SAME finalizeAndPersist helper every
+    // success-path test in this file already uses, with the REAL
+    // (non-throwing) compute function this time.
+    await finalizeAndPersist({ deviceKey, id, userId: "lifecycle06-clear-user-1", text, wordCount: 45, archiveScore: 18 });
+    const afterRetry = await findRoomOccupant(client, "lifecycle06-clear-user-1", 0);
+    assert.equal(afterRetry.report.similarityStatus, "resolved", "REQUIRED: a genuinely successful resave must clear the earlier failure marker, not leave it stuck showing Unavailable forever");
+    assert.equal(afterRetry.report.isUnified, true);
+  });
 });
 
 test("SIM-03 (6): room and detail agree — both read the SAME write-time-persisted result, before and after a stale-generation re-finalization", async () => {

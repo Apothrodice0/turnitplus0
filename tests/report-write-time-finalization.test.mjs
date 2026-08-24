@@ -11,7 +11,10 @@ import * as signupRoute from '../app/api/auth/signup/route.ts';
 import { resetRateForTest, resetAuthRateForTest, resetReadRateForTest } from '../lib/rate-limit.ts';
 import { canonicalSha256 } from '../lib/document-identity.ts';
 import { runCorpusAdmissionPromotionSweep } from '../lib/corpus-admission-promotion.ts';
-import { findRoomOccupant } from '../lib/reports-repo.ts';
+import { findRoomOccupant, findReportRowForUser } from '../lib/reports-repo.ts';
+import { deriveRoomStatus } from '../lib/report-rooms.ts';
+import { resolvePersistedSimilarityDisplay } from '../lib/report-primary-similarity.ts';
+import { archiveOverlapScore, hasUnifiedSimilarity } from '../lib/report-types.ts';
 
 /**
  * Release-hardening audit finding SIM-03: the required end-to-end
@@ -510,4 +513,196 @@ test('SIM-04: SAVE_REPORT_SQL\'s generation guard never lets an older-generation
   const { payload: latest } = await savedReportRow(account.deviceKey, reportId);
   assert.equal(latest.unifiedSimilarityGeneration, 9500, 'a genuinely newer generation must still be accepted normally');
   assert.equal(latest.unifiedSimilarity.unifiedScore, 55);
+});
+
+const DOCUMENT_D_TEXT =
+  'Marine biologists tagging juvenile reef sharks along a nursery lagoon recorded consistent site fidelity across two consecutive monitoring seasons, ' +
+  'with individual tag-recapture intervals showing minimal home-range drift even during the seasonal thermal stratification event that disrupted several neighboring habitats.';
+const DOCUMENT_D_WORD_COUNT = 55;
+
+// Release-hardening audit finding LIFECYCLE-05 (superseding this test's own
+// original framing): "the room page shows the real 100%" below is a claim
+// about the DATA LAYER (findRoomOccupant/the GET route), proving similarity
+// finalizes and is retrievable independently of ai_status — it is NOT a
+// claim about what app/reports/rooms/[room]/room-page-shell.tsx actually
+// RENDERS. That client-side component now deliberately withholds the
+// number until BOTH pipelines are terminal ("reveal AI score, unified
+// similarity score, and receipt together" — see room-page-shell.tsx's own
+// isFullyRevealed and tests/room-processing-navigation.test.mjs for that
+// UI-level gate). This test still matters: isFullyRevealed can only ever
+// say "yes" once the data it reads is actually correct, and that is
+// exactly what write-time finalization (proven here) guarantees. See the
+// LIFECYCLE-05 END-TO-END test below for the combined-reveal gate itself,
+// exercised against this same real data.
+test('LIFECYCLE-03 END-TO-END (data layer): similarity and AI-writing detection finalize as independent pipelines — the data is already the real 100% while ai_status is still "processing" (proving room-page-shell.tsx\'s isFullyRevealed CAN reveal it the moment AI catches up), the very first detail render already carries it (no matcher re-run), and the later AI-completion resave never changes it', async (t) => {
+  await promoteDocumentIntoCorpus(DOCUMENT_D_TEXT);
+  const account = await signUpConsentingAccount();
+  const reportId = 'lifecycle-03-report-1';
+
+  await t.test('a different, consenting account uploads the matching text — the first save (aiStatus "processing") already finalizes and persists the combined 100% result', async () => {
+    const res = await postReport(account, { id: reportId, room: 0, aiStatus: 'processing', text: DOCUMENT_D_TEXT, wordCount: DOCUMENT_D_WORD_COUNT });
+    assert.equal(res.status, 200, 'test setup sanity: first save must succeed');
+    const { archiveScore, payload } = await savedReportRow(account.deviceKey, reportId);
+    assert.equal(archiveScore, 0, 'archive_score must be exactly the archive-only value submitted — never overwritten');
+    assert.ok(payload.unifiedSimilarity, 'unifiedSimilarity must already be persisted after the very first save, before AI has even started');
+    assert.equal(payload.unifiedSimilarity.unifiedScore, 100, 'the promoted TURNITPLUS_CORPUS_SOURCE match must already be reflected');
+  });
+
+  const snapshotAfterFirstSave = await snapshotRow(account.deviceKey, reportId);
+  assert.ok(snapshotAfterFirstSave, 'the historical-match snapshot must be written as a real side effect of the first save');
+
+  await t.test('REQUIRED (data layer): findRoomOccupant already has the real 100% while ai_status is STILL "processing" — similarity finalization is never coupled to AI completion, even though the room card\'s own UI now deliberately waits for both (see LIFECYCLE-05 END-TO-END below)', async () => {
+    const occupant = await findRoomOccupant(client, account.userId, 0);
+    assert.equal(occupant.status, 'processing', 'test setup sanity: AI analysis must genuinely still be in progress at this point — this is the exact case the fix is about');
+    assert.equal(occupant.report.primaryScore, 100, 'REQUIRED: the underlying data must carry the real, finalized 100% even though AI has not finished — this is what lets isFullyRevealed say yes the instant AI also catches up');
+    assert.equal(occupant.report.isUnified, true);
+    assert.equal(occupant.report.similarityStatus, 'resolved', 'similarity itself is fully resolved, independent of ai_status');
+    assert.equal(occupant.report.archiveScore, 0, 'archive_score must remain untouched');
+    assert.equal(occupant.report.aiScore, null, 'AI Detection has genuinely not produced a score yet — the two pipelines are independent, not one waiting for the other');
+  });
+
+  await t.test('REQUIRED: the very first detail render already shows 100%, straight from the saved row, before any client fetch — no different from a fully "ready" report', async () => {
+    const { payload } = await savedReportRow(account.deviceKey, reportId);
+    assert.equal(payload.unifiedSimilarity.unifiedScore, 100, "REQUIRED: the report detail's first server render must already be 100%");
+  });
+
+  await t.test('REQUIRED: opening the detail report while still "processing" does not trigger matching, recomputation, or any later score change — a real GET, twice, is a pure cache hit both times', async () => {
+    const before = await snapshotRow(account.deviceKey, reportId);
+    const res = await getReportDetail(account, reportId);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.payload.unifiedSimilarity.unifiedScore, 100, 'the GET route must still return the real 100% while AI is still processing');
+    const after = await snapshotRow(account.deviceKey, reportId);
+    assert.equal(after.computed_at, before.computed_at, 'REQUIRED: opening the detail report must not invoke the matcher again — the snapshot must not be recomputed');
+
+    const res2 = await getReportDetail(account, reportId);
+    const body2 = await res2.json();
+    assert.equal(body2.payload.unifiedSimilarity.unifiedScore, 100, 'REQUIRED: no later request may ever change the score — it must already be 100% and stay 100%');
+    const after2 = await snapshotRow(account.deviceKey, reportId);
+    assert.equal(after2.computed_at, before.computed_at, 'a second open must still be a pure cache hit');
+  });
+
+  await t.test('REQUIRED: the later AI-completion resave preserves the finalized unified similarity exactly — archive_score, unifiedScore, and the snapshot itself are all untouched by AI finishing', async () => {
+    const beforeResave = await snapshotRow(account.deviceKey, reportId);
+    const res = await postReport(account, { id: reportId, room: 0, aiStatus: 'ready', aiScore: 4, text: DOCUMENT_D_TEXT, wordCount: DOCUMENT_D_WORD_COUNT });
+    assert.equal(res.status, 200);
+
+    const { archiveScore, payload } = await savedReportRow(account.deviceKey, reportId);
+    assert.equal(archiveScore, 0, 'archive_score must still be exactly 0 after the AI-completion resave');
+    assert.equal(payload.unifiedSimilarity.unifiedScore, 100, 'REQUIRED: the AI-completion resave must not regress or otherwise change the already-finalized 100%');
+
+    const afterResave = await snapshotRow(account.deviceKey, reportId);
+    assert.equal(afterResave.computed_at, beforeResave.computed_at, "the AI-completion resave's own finalization call must be a cache hit — no second real matcher search");
+
+    const occupant = await findRoomOccupant(client, account.userId, 0);
+    assert.equal(occupant.status, 'ready', 'AI has now genuinely finished');
+    assert.equal(occupant.report.primaryScore, 100, 'the room card must still show 100% now that both pipelines have completed');
+    assert.equal(occupant.report.aiScore, 4, 'AI Detection now shows its own real, independently-arrived score');
+  });
+});
+
+/**
+ * Mirrors app/reports/[id]/page.tsx's loadOwnedReport exactly for the two
+ * fields ReportDetailShell actually needs to compute its own bothReady gate
+ * — deriveRoomStatus(row.ai_score, row.ai_status) for aiStatus, and
+ * resolvePersistedSimilarityDisplay for similarityStatus — without needing
+ * a real Next.js request scope to render the page component itself. Same
+ * "mirrors the real handler's own logic, not a second implementation of
+ * different logic" discipline this file's own postReport/getReportDetail
+ * helpers already follow for the routes they call.
+ */
+async function computeInitialDetailState(userId, reportId) {
+  const row = await findReportRowForUser(client, reportId, userId);
+  assert.ok(row, 'test setup sanity: the report row must exist');
+  const aiStatus = deriveRoomStatus(row.ai_score, row.ai_status);
+  const payload = JSON.parse(row.payload_json);
+  const display = await resolvePersistedSimilarityDisplay(client, {
+    reportDeviceKey: row.device_key,
+    reportId,
+    archiveScore: archiveOverlapScore(payload),
+    unifiedScore: payload.unifiedSimilarity?.unifiedScore ?? null,
+    hasUnifiedSimilarity: hasUnifiedSimilarity(payload),
+    corpusSourceMatchingEnabledAtComputation: payload.corpusSourceMatchingEnabledAtComputation ?? null,
+    unifiedSimilarityFailed: payload.unifiedSimilarityFailed ?? false,
+  });
+  return { aiStatus, similarityStatus: display.status };
+}
+
+/** Mirrors ReportDetailShell's own bothReady formula exactly (mode "similarity" — the room's own links always open this mode). Release-hardening audit finding LIFECYCLE-06 (extended): similarityTerminal now also covers a genuine, persisted "failed" status — see lib/report-detail-poll.ts's own isSimilarityTerminal. */
+function isBothReady({ aiStatus, similarityStatus }) {
+  const aiTerminal = aiStatus === null || aiStatus === 'ready' || aiStatus === 'failed';
+  const similarityTerminal = similarityStatus === 'resolved' || similarityStatus === 'failed';
+  return aiTerminal && similarityTerminal;
+}
+
+/** Mirrors room-page-shell.tsx's own isFullyRevealed formula exactly. */
+function isFullyRevealed(occupant) {
+  if (occupant.status !== 'ready' && occupant.status !== 'failed') return false;
+  const similarityStatus = occupant.report?.similarityStatus;
+  return similarityStatus !== 'stale' && similarityStatus !== 'pending';
+}
+
+const DOCUMENT_E_TEXT =
+  'Volcanologists installing a dense tiltmeter array around an active stratovolcano detected a gradual inflation signal consistent with magma accumulation at shallow depth, ' +
+  'with the deformation pattern closely matching precursory signals documented before a smaller eruptive episode at the same edifice several decades earlier.';
+const DOCUMENT_E_WORD_COUNT = 50;
+
+test('LIFECYCLE-05 END-TO-END: the room and detail pages both withhold every result until AI-writing detection AND unified similarity are BOTH terminal, then reveal everything together — an AI failure still counts as terminal and does not hold back the completed similarity result', async (t) => {
+  await promoteDocumentIntoCorpus(DOCUMENT_E_TEXT);
+  const readyAccount = await signUpConsentingAccount();
+  const failedAccount = await signUpConsentingAccount();
+  const readyReportId = 'lifecycle-05-ready-report';
+  const failedReportId = 'lifecycle-05-failed-report';
+
+  await t.test('first save (aiStatus "processing"): neither the room nor the detail page is fully revealed, even though similarity already has the real 100% underneath', async () => {
+    const res = await postReport(readyAccount, { id: readyReportId, room: 0, aiStatus: 'processing', text: DOCUMENT_E_TEXT, wordCount: DOCUMENT_E_WORD_COUNT });
+    assert.equal(res.status, 200, 'test setup sanity: first save must succeed');
+
+    const occupant = await findRoomOccupant(client, readyAccount.userId, 0);
+    assert.equal(occupant.status, 'processing');
+    assert.equal(occupant.report.primaryScore, 100, 'test setup sanity: similarity data is already the real 100%');
+    assert.equal(isFullyRevealed(occupant), false, 'REQUIRED: the room must NOT be fully revealed while AI is still processing, regardless of what similarity already knows');
+
+    const detailState = await computeInitialDetailState(readyAccount.userId, readyReportId);
+    assert.equal(detailState.aiStatus, 'processing');
+    assert.equal(detailState.similarityStatus, 'resolved', 'test setup sanity: similarity is already resolved server-side too');
+    assert.equal(isBothReady(detailState), false, 'REQUIRED: the detail page must NOT be bothReady either — one stable loading screen, not a partial reveal of the already-known 100%');
+  });
+
+  await t.test('AI-completion resave (aiStatus "ready"): the room and detail pages both become fully revealed, and the score is exactly what was already finalized — never recomputed, never changed', async () => {
+    const res = await postReport(readyAccount, { id: readyReportId, room: 0, aiStatus: 'ready', aiScore: 6, text: DOCUMENT_E_TEXT, wordCount: DOCUMENT_E_WORD_COUNT });
+    assert.equal(res.status, 200);
+
+    const occupant = await findRoomOccupant(client, readyAccount.userId, 0);
+    assert.equal(occupant.status, 'ready');
+    assert.equal(occupant.report.primaryScore, 100, 'REQUIRED: revealing must never change the already-finalized score');
+    assert.equal(occupant.report.aiScore, 6);
+    assert.equal(isFullyRevealed(occupant), true, 'REQUIRED: now that both pipelines are terminal, the room must reveal everything together');
+
+    const detailState = await computeInitialDetailState(readyAccount.userId, readyReportId);
+    assert.equal(detailState.aiStatus, 'ready');
+    assert.equal(detailState.similarityStatus, 'resolved');
+    assert.equal(isBothReady(detailState), true, 'REQUIRED: the detail page must now replace its loading screen with the complete report');
+
+    const { payload } = await savedReportRow(readyAccount.deviceKey, readyReportId);
+    assert.equal(payload.unifiedSimilarity.unifiedScore, 100, 'the score itself must be byte-identical to what was persisted before AI ever finished');
+  });
+
+  await t.test('REQUIRED: an AI failure still counts as terminal — the room and detail pages reveal the completed similarity result (and an "Unavailable" AI signal) rather than waiting forever', async () => {
+    await postReport(failedAccount, { id: failedReportId, room: 0, aiStatus: 'processing', text: DOCUMENT_E_TEXT, wordCount: DOCUMENT_E_WORD_COUNT });
+    let occupant = await findRoomOccupant(client, failedAccount.userId, 0);
+    assert.equal(isFullyRevealed(occupant), false, 'test setup sanity: not yet revealed while genuinely processing');
+
+    const res = await postReport(failedAccount, { id: failedReportId, room: 0, aiStatus: 'failed', text: DOCUMENT_E_TEXT, wordCount: DOCUMENT_E_WORD_COUNT });
+    assert.equal(res.status, 200);
+
+    occupant = await findRoomOccupant(client, failedAccount.userId, 0);
+    assert.equal(occupant.status, 'failed');
+    assert.equal(occupant.report.primaryScore, 100, 'the completed similarity result must still be there, unaffected by the AI failure sitting next to it');
+    assert.equal(isFullyRevealed(occupant), true, 'REQUIRED: an AI failure is itself a terminal, final answer — never a reason to keep the room stuck on "Analysis in progress" forever');
+
+    const detailState = await computeInitialDetailState(failedAccount.userId, failedReportId);
+    assert.equal(detailState.aiStatus, 'failed');
+    assert.equal(isBothReady(detailState), true, 'REQUIRED: the detail page must also reveal — showing "Unavailable" for AI while still showing the real similarity result, never staying on the loading screen because of a failure');
+  });
 });

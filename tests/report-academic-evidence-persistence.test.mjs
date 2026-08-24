@@ -109,12 +109,15 @@ test('STEP 9.15/7: a report saved WITHOUT externalAcademicEvidence round-trips w
   assert.equal('externalAcademicEvidence' in body.payload, false, 'the field must be entirely absent, not null/[]');
   // Phase D/E8C enrichments must still run normally — proves this phase's
   // change did not interfere with the existing read-time enrichment chain.
-  // (matchClassification itself is undefined for an anonymous device-key
-  // report — no owning account to classify family membership against —
-  // and JSON.stringify drops undefined keys entirely, so its absence here
-  // is expected, not a regression; historicalSubmissionMatch has no such
-  // anonymous-only gap and is always attached.)
-  assert.equal(body.payload.historicalSubmissionMatch?.status, 'NO_HISTORICAL_MATCH');
+  // matchClassification is undefined for an anonymous device-key report —
+  // no owning account to classify family membership against. Release-
+  // hardening audit finding UI-02: historicalSubmissionMatch is now
+  // admin-only (app/api/reports/[id]/route.ts's GET handler) — this
+  // anonymous request has no session at all, so it is undefined here too,
+  // for the same reason matchClassification already was, not a regression.
+  // See tests/report-historical-match-visibility.test.mjs for dedicated
+  // admin-vs-ordinary coverage.
+  assert.equal(body.payload.historicalSubmissionMatch, undefined, 'REQUIRED (UI-02): an anonymous viewer must never receive historicalSubmissionMatch');
 });
 
 test('STEP 9.7: a report saved WITH externalAcademicEvidence round-trips with the SAME score/archiveScore as an equivalent report without it', async () => {

@@ -11,6 +11,7 @@ import { resetRateForTest, resetAuthRateForTest } from '../lib/rate-limit.js';
 import { tokens } from '../lib/similarity-core.ts';
 import { computeUnifiedSimilarity } from '../lib/unified-similarity.ts';
 import { indexDocumentSubmissionIntoCorpus } from '../lib/user-submission-corpus.ts';
+import { getOrComputeHistoricalMatchSnapshot } from '../lib/report-historical-match.ts';
 
 /**
  * Phase 4B, Part A: end-to-end proof that computeUnifiedSimilarity()'s
@@ -137,7 +138,20 @@ async function signup(email, deviceKey) {
   // path via the live route, unchanged — see
   // tests/report-privacy-consent.test.mjs for the dedicated consent on/off
   // behavior this gate itself needs.
-  await setupClient.execute({ sql: 'UPDATE users SET corpus_reuse_consented_at = CURRENT_TIMESTAMP WHERE email = ?', args: [email] });
+  //
+  // Release-hardening audit finding UI-02: historicalSubmissionMatch is now
+  // admin-only on the GET response (app/api/reports/[id]/route.ts) — this
+  // file's entire purpose is feeding the REAL matcher output into
+  // computeUnifiedSimilarity() end-to-end (see this file's own header
+  // comment), which requires actually receiving it, not fetchRealHistoricalMatch's
+  // own {status: 'NO_HISTORICAL_MATCH'} fallback for an absent field. Every
+  // account this file signs up is promoted here too, exactly matching
+  // tests/report-match-classification.test.mjs's own precedent for the same
+  // situation: this file tests the underlying matching LOGIC, completely
+  // orthogonal to admin-only VISIBILITY, which is covered on its own in
+  // tests/report-historical-match-visibility.test.mjs — including the case
+  // this file cannot: a non-admin account must receive nothing at all.
+  await setupClient.execute({ sql: "UPDATE users SET corpus_reuse_consented_at = CURRENT_TIMESTAMP, role = 'admin' WHERE email = ?", args: [email] });
   return { res, cookie: extractCookie(res) };
 }
 
@@ -273,7 +287,30 @@ test('SCENARIO C (contrast case): the SAME matching content, viewed anonymously 
 
   // A genuinely anonymous device — no cookie, no account — submits matching content.
   const { id: anonId } = await postReport('urel-device-c-anon-viewer', { text, title: 'lakes-anonymous.pdf' });
-  const anonMatch = await fetchRealHistoricalMatch(anonId, { deviceKey: 'urel-device-c-anon-viewer' });
+  // Release-hardening audit finding UI-02: historicalSubmissionMatch is
+  // admin-only on the GET response, and there is no session at all here to
+  // promote to admin — an anonymous device-key viewer correctly, and
+  // permanently, cannot receive it via HTTP (see
+  // tests/report-historical-match-visibility.test.mjs's own role-spoof
+  // coverage). This scenario's own purpose is the real matcher's
+  // UNKNOWN_RELATIONSHIP classification, not the HTTP-layer gate, so it
+  // reaches the same underlying computation the GET route itself calls
+  // (lib/report-historical-match.ts), directly, server-side — exactly the
+  // "still fully available server-side, never through the gated HTTP
+  // response" pattern tests/report-self-prior-submission-visibility.test.mjs's
+  // own final requirement already established for matchClassification.
+  const setupReadClient = createClient({ url: `file:${dbFile}` });
+  let anonMatch;
+  try {
+    anonMatch = await getOrComputeHistoricalMatchSnapshot(setupReadClient, {
+      reportDeviceKey: 'urel-device-c-anon-viewer',
+      reportId: anonId,
+      accountId: null,
+      rawText: text,
+    });
+  } finally {
+    setupReadClient.close();
+  }
 
   assert.equal(anonMatch.status, 'MATCHED');
   assert.equal(anonMatch.matches[0].relationshipType, 'UNKNOWN_RELATIONSHIP');

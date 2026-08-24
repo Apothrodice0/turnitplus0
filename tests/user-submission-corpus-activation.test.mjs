@@ -89,7 +89,14 @@ async function signup(email, deviceKey) {
   // path via the live route, unchanged — see
   // tests/report-privacy-consent.test.mjs for the dedicated consent on/off
   // behavior this gate itself needs.
-  await setupClient.execute({ sql: 'UPDATE users SET corpus_reuse_consented_at = CURRENT_TIMESTAMP WHERE email = ?', args: [email] });
+  //
+  // Release-hardening audit finding UI-02: historicalSubmissionMatch is now
+  // admin-only on the GET response — this file's own scenarios read its
+  // `.status` to verify indexing/activation behavior, orthogonal to
+  // admin-only VISIBILITY. Promoted here too, matching tests/report-match-
+  // classification.test.mjs's own precedent; visibility itself is covered
+  // separately in tests/report-historical-match-visibility.test.mjs.
+  await setupClient.execute({ sql: "UPDATE users SET corpus_reuse_consented_at = CURRENT_TIMESTAMP, role = 'admin' WHERE email = ?", args: [email] });
   return { res, cookie: extractCookie(res) };
 }
 

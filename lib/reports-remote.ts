@@ -42,22 +42,27 @@ export type ReportSummary = {
   /** True when primaryScore reflects the full unified result rather than the archive-only fallback — see primaryScore's own comment. Absent/false with primaryScore also absent means the same thing: nothing more precise than archiveScore is known at this call site. */
   isUnified?: boolean;
   /**
-   * Release-hardening audit finding SIM-04: the SAME three-way status
+   * Release-hardening audit finding SIM-04, widened by LIFECYCLE-06
+   * (corrected): the SAME four-way status
    * lib/report-primary-similarity.ts's resolvePersistedSimilarityDisplay
    * returns — "resolved" (primaryScore is trustworthy, whether combined or
    * a definitive archive-only answer), "stale" (a real combined result IS
    * persisted, but corpus_match_generation has moved on, or
    * CORPUS_SOURCE_MATCHING_ENABLED was rolled back ON since computation —
-   * show "Updating similarity…" rather than primaryScore), or "pending"
-   * (unifiedSimilarity has never been persisted for this report at all —
-   * show neutral loading, never primaryScore as if it were final). Absent
-   * only for a caller that predates this field (client-built summaries via
-   * buildReportSummary always set it); a "processing" room occupant never
-   * gets this far (see findRoomOccupant's own scoping comment), so it is
-   * simply omitted there — the UI already shows "Analyzing…" for that case
-   * regardless.
+   * show "Updating similarity…" rather than primaryScore), "pending"
+   * (unifiedSimilarity has never been persisted for this report at all,
+   * and no terminal failure recorded either — show neutral loading, never
+   * primaryScore as if it were final), or "failed" (a genuine, persisted,
+   * reproducible computation failure — see resolvePrimarySimilaritySummary's
+   * own `failed` field's investigation of what does/doesn't set it — show
+   * "Unavailable," never a number, never inferred from client poll timing).
+   * Absent only for a caller that predates this field (client-built
+   * summaries via buildReportSummary always set it); a "processing" room
+   * occupant never gets this far (see findRoomOccupant's own scoping
+   * comment), so it is simply omitted there — the UI already shows
+   * "Analyzing…" for that case regardless.
    */
-  similarityStatus?: "resolved" | "stale" | "pending";
+  similarityStatus?: "resolved" | "stale" | "pending" | "failed";
 };
 
 // Every function here is fail-soft by design: a network or database problem

@@ -322,6 +322,21 @@ test('SIM-04 ROOM TILE: a pending result (finalization never completed, e.g. a w
   assert.doesNotMatch(html, /100%/);
 });
 
+test('LIFECYCLE-06 ROOM TILE: a genuine, persisted terminal similarity failure shows "Unavailable" — a real completed state, distinct from the still-in-progress "···" pending/stale placeholder, and never a number even when a stale primaryScore/archiveScore is also present on the summary', () => {
+  // Mirrors the "generation-stale" test above's own discipline: this
+  // fixture ALSO carries what a leftover/stale primaryScore/archiveScore
+  // might look like, to prove the tile never reads them once
+  // similarityStatus is "failed" (the discriminated union backing this
+  // means it structurally cannot; this is the rendered proof).
+  const html = renderSimilarityTile(baseRoomSummary({ archiveScore: 0, primaryScore: 100, isUnified: true, similarityStatus: 'failed' }));
+  assert.match(html, /<div class="room-metric room-metric-unavailable">/, 'REQUIRED: must render the same non-link "Unavailable" treatment the AI tile already uses for its own genuine failure state');
+  assert.match(html, /<strong class="room-metric-value">—<\/strong>/);
+  assert.match(html, /<span class="room-metric-sub">Unavailable<\/span>/);
+  assert.doesNotMatch(html, /···|Calculating…|Updating…/, 'must not be confused with the still-in-progress placeholder — this is a terminal, completed state');
+  assert.doesNotMatch(html, /0%|100%/, 'must never show a number, stale or otherwise');
+  assert.doesNotMatch(html, /<a\b|href=/, 'REQUIRED: unlike the pending/stale tile, the failed tile must not be a link — matches the AI-unavailable tile\'s own non-link treatment, since there is no further detail to click through to');
+});
+
 test('SIM-04 ROOM TILE: an absent similarityStatus (a caller predating this field) is treated as resolved, not neutral — legacy summaries keep rendering exactly as before', () => {
   const html = renderSimilarityTile(baseRoomSummary({ archiveScore: 42 }));
   assert.match(html, /<strong class="room-metric-value">42%<\/strong>/);
@@ -352,15 +367,23 @@ test('SIM-01 SIDEBAR (structural): the score card and the Report notes paragraph
   assert.match(shell, /const primaryLabel = primaryResultLabel\(report\);/);
 });
 
-test('SIM-04 ROOM CARD (structural): both the "ready" and "failed" occupant states render Similarity through the SAME SimilarityMetricTile component — never a second, independently-driftable copy of the fallback/gating logic', async () => {
+test('SIM-04/LIFECYCLE-05 ROOM CARD (structural): only the fully-revealed "ready" and "failed" occupant states render Similarity through SimilarityMetricTile — the not-yet-revealed branch hardcodes its own neutral tile instead', async () => {
   const shell = await fs.promises.readFile(path.join(repo, 'app/reports/rooms/[room]/room-page-shell.tsx'), 'utf8');
   const occurrences = shell.match(/<SimilarityMetricTile report=\{occupant\.report\} room=\{room\} \/>/g) ?? [];
-  assert.equal(occurrences.length, 2, 'expected exactly 2 call sites: the "ready" and "failed" occupant states');
+  // Release-hardening audit finding LIFECYCLE-05 (superseding LIFECYCLE-03):
+  // "reveal AI score, unified similarity score, and receipt together" —
+  // SimilarityMetricTile's own real percentage/link must never render until
+  // isFullyRevealed(occupant) is true, so it is back to exactly 2 call
+  // sites (the "ready" and "failed" branches, both now additionally gated
+  // on isFullyRevealed) — see tests/room-processing-navigation.test.mjs for
+  // the dedicated coverage of the not-revealed branch's own hardcoded,
+  // non-clickable placeholder.
+  assert.equal(occurrences.length, 2, 'expected exactly 2 call sites: the fully-revealed "ready" and "failed" occupant states');
   // The old inline `primaryScore ?? archiveScore` pattern must be gone from
   // the occupant-status blocks entirely — SimilarityMetricTile's own gating
   // on similarityStatus is now the ONLY place that decision is made (see the
   // SIM-04 ROOM TILE render tests above for its actual behavior).
-  assert.doesNotMatch(shell, /occupant\.report\.primaryScore \?\? occupant\.report\.archiveScore/, 'the raw fallback expression must no longer appear inline at either call site');
+  assert.doesNotMatch(shell, /occupant\.report\.primaryScore \?\? occupant\.report\.archiveScore/, 'the raw fallback expression must no longer appear inline at any call site');
 });
 
 test('SIM-01 RECEIPT (structural): downloadReceipt passes primarySimilarityScore/hasUnifiedSimilarity into the receipt, and receipt-pdf.ts labels the archive component as a clearly separate breakdown row, never the overall result', async () => {
@@ -437,6 +460,24 @@ test('SIM-04: while stale, OverviewReport shows "Updating similarity…" — nev
   assert.doesNotMatch(html, /TurnitPlus Similarity|Previously submitted content|corpus reference source/, 'the old, now-untrusted unifiedSimilarity/historicalSubmissionMatch content must not render either');
 });
 
+test('LIFECYCLE-06: while failed, OverviewReport shows "Similarity unavailable" — a distinct, non-busy terminal placeholder, never the pending/stale wording, never a score, and never the matching-derived sections', () => {
+  const html = renderPending(baseReport({
+    archiveScore: 0,
+    historicalSubmissionMatch: CORPUS_SOURCE_MATCH,
+    unifiedSimilarity: unified(),
+  }), 'failed');
+  const headingSection = html.match(/<section class="similarity-heading[^>]*>[\s\S]*?<\/section>/)?.[0] ?? '';
+  assert.ok(headingSection, 'the similarity-heading section must be found');
+  assert.doesNotMatch(headingSection, /%/, 'no percentage may render in the headline section while failed');
+  assert.match(html, /Similarity unavailable/, 'failed must use its own distinct wording, not pending/stale');
+  assert.doesNotMatch(html, /Calculating similarity…|Updating similarity…/, 'failed and pending/stale must never share wording — the user needs to know this will not resolve on its own');
+  // Terminal, not still-working: aria-busy must be false and no skeleton
+  // spinner rendered, unlike the pending/stale placeholder.
+  assert.doesNotMatch(headingSection, /aria-busy="true"/, 'REQUIRED: a terminal failure is not "still working" — aria-busy must not claim otherwise');
+  assert.doesNotMatch(headingSection, /similarity-skeleton/, 'REQUIRED: no loading spinner for a terminal, completed-but-unavailable state');
+  assert.doesNotMatch(html, /TurnitPlus Similarity|Previously submitted content|corpus reference source/, 'the old, now-untrusted unifiedSimilarity/historicalSubmissionMatch content must not render either');
+});
+
 test('SIM-02 (3): once settled, a genuine unified 0% still renders as a real 0% — pending never masks a truthful zero', () => {
   const html = renderPending(baseReport({
     archiveScore: 0,
@@ -474,37 +515,65 @@ test('SIM-02: similarityStatus defaults to "resolved" — every pre-existing cal
   assert.doesNotMatch(html, /Calculating similarity…/);
 });
 
-test('SIM-04 SIDEBAR/WIRING (structural): report-detail-shell.tsx tracks a single similarityStatus tri-state explicitly, starts it "pending" only for similarity mode with no already-finalized result (deferring to the server-computed initialSimilarityStatus when present), and always resolves it once the background fetch settles — success or failure alike', async () => {
+test('SIM-04/LIFECYCLE-04 SIDEBAR/WIRING (structural): report-detail-shell.tsx still tracks the similarityStatus tri-state, seeded from the server-computed initialSimilarityStatus, and every exit point of both background effects resolves it — but the tri-state itself now only ever feeds a single combined reveal gate (lib/report-detail-poll.ts\'s computeDetailRevealState), not scattered per-surface pending/stale ternaries', async () => {
   const shell = await fs.promises.readFile(path.join(repo, 'app/reports/[id]/report-detail-shell.tsx'), 'utf8');
-  // Release-hardening audit finding SIM-04: the two-boolean SIM-03 design
-  // (primaryMatchingPending/similarityUpdating) collapsed into one
-  // "resolved"/"stale"/"pending" state, seeded from the server-computed
-  // initialSimilarityStatus (see app/reports/[id]/page.tsx) when available,
-  // falling back to the old initialReport-based heuristic only for the
-  // anonymous/device-key path, which has no server-computed status at all.
   assert.match(
     shell,
-    /const \[similarityStatus, setSimilarityStatus\] = useState<SimilarityDisplayStatus>\(\s*mode !== "similarity"\s*\?\s*"resolved"\s*:\s*\(initialSimilarityStatus \?\? \(initialReport !== null && hasUnifiedSimilarity\(initialReport\) \? "resolved" : "pending"\)\),\s*\);/,
+    /const \[similarityStatus, setSimilarityStatus\] = useState<DetailSimilarityStatus>\(\s*mode !== "similarity"\s*\?\s*"resolved"\s*:\s*\(initialSimilarityStatus \?\? \(initialReport !== null && hasUnifiedSimilarity\(initialReport\) \? "resolved" : "pending"\)\),\s*\);/,
     'must start from the server-computed initialSimilarityStatus when present, never unconditionally "pending" for similarity mode',
   );
-  assert.match(shell, /const effectiveSimilarityStatus: SimilarityDisplayStatus = mode === "similarity" \? similarityStatus : "resolved";/);
-  assert.match(shell, /const similarityPending = effectiveSimilarityStatus === "pending";/);
-  assert.match(shell, /const similarityStale = effectiveSimilarityStatus === "stale";/);
-  assert.match(shell, /const similarityNotResolved = similarityPending \|\| similarityStale;/);
-  // Every exit point of the background-fetch effect must resolve the
-  // status — not only the "we got real data" branch, matching requirement 5
-  // (an explicit archive fallback, never endless loading/staleness).
+  // Release-hardening audit finding LIFECYCLE-04: the OLD design derived
+  // similarityPending/similarityStale/similarityNotResolved from this same
+  // tri-state and threaded them through the summary strip, sidebar, AND
+  // OverviewReport individually — three independently-gated surfaces that
+  // could in principle drift apart. The NEW design collapses all of that
+  // into ONE combined reveal gate (lib/report-detail-poll.ts's
+  // computeDetailRevealState) guarding the entire report render as a
+  // single unit — see the "one stable loading screen" structural test
+  // below for that gate itself.
+  assert.doesNotMatch(shell, /const similarityPending = /, 'the old scattered per-surface pending flag must be gone — the shared reveal gate is the only one now');
+  assert.doesNotMatch(shell, /const similarityNotResolved = /, 'the old scattered per-surface not-resolved flag must be gone');
+  // Every exit point of both background effects must still resolve the
+  // status — not only the "we got real data" branch (an explicit archive
+  // fallback, never endless loading/staleness). The anonymous path's two
+  // settle points still call setSimilarityStatus("resolved") literally (no
+  // failure concept for that client-only-generated path — see this
+  // component's own comment on why); the authenticated poll's own settle
+  // point now computes the real status (resolved/failed/pending) into
+  // resolvedSimilarityStatus first — see the dedicated LIFECYCLE-06 test
+  // below for that specific call site.
   const setResolvedCount = (shell.match(/setSimilarityStatus\("resolved"\)/g) ?? []).length;
-  assert.ok(setResolvedCount >= 3, `expected at least 3 call sites resolving the status (authenticated fetch settle, anonymous local+remote settle, anonymous remote-only settle) — found ${setResolvedCount}`);
+  assert.ok(setResolvedCount >= 2, `expected at least 2 literal call sites resolving the status for the anonymous path (local+remote settle, remote-only settle) — found ${setResolvedCount}`);
+  assert.match(shell, /setSimilarityStatus\(resolvedSimilarityStatus\);/, 'the authenticated poll path must resolve the REAL status (resolved/failed/pending), not hardcode "resolved" — see this file\'s own LIFECYCLE-06 tests for what resolvedSimilarityStatus is derived from');
 });
 
-test('SIM-04 SIDEBAR/WIRING (structural): every OverviewReport call site in report-detail-shell.tsx passes the same effective status, and the sidebar score card is gated by it too — never showing a number during "stale", not just "pending"', async () => {
+test('LIFECYCLE-04/06 SIDEBAR/WIRING (structural): the ENTIRE report render — summary strip, tabs, OverviewReport, sidebar, print bundle — is gated behind the ONE shared reveal decision (computeDetailRevealState, imported from lib/report-detail-poll.ts); nothing downstream needs its own per-surface pending/stale ternary, and there is no local reimplementation of the terminal/exhaustion logic', async () => {
   const shell = await fs.promises.readFile(path.join(repo, 'app/reports/[id]/report-detail-shell.tsx'), 'utf8');
+  assert.match(shell, /import \{\s*\n\s*computeDetailRevealState,\s*\n\s*startBoundedPoll,\s*\n\s*type DetailAiStatus,\s*\n\s*type DetailSimilarityStatus,\s*\n\s*\} from "@\/lib\/report-detail-poll";/, 'REQUIRED: the reveal/poll logic must be imported from the shared, independently-tested module, not reimplemented inline');
+  assert.match(shell, /const revealState = computeDetailRevealState\(\{ aiStatus, similarityStatus: effectiveSimilarityStatus, pollExhausted \}\);/);
+  assert.match(shell, /const bothReady = revealState\.screen === "revealed";/, 'REQUIRED: reveal AI score, unified similarity score, and receipt together — one combined gate, not two independent ones');
+  assert.match(shell, /if \(revealState\.screen === "still-processing"\) \{/);
+  assert.match(shell, /if \(revealState\.screen === "loading"\) \{/, 'the entire render must return a loading/still-processing screen unless revealState.screen is "revealed", before any score/section renders at all');
+
+  // Release-hardening audit finding LIFECYCLE-06 (corrected, then
+  // extended): an earlier version of this fix let poll exhaustion
+  // synthesize a fake "similarity unavailable" terminal state and unblock
+  // a partial reveal — that specific bug is gone (see
+  // tests/report-detail-poll.test.mjs's own proof that pollExhausted alone
+  // can never produce "revealed"). But a REAL terminal-failure signal now
+  // exists (lib/report-primary-similarity.ts's resolvePrimarySimilaritySummary
+  // itself failing, propagated as DetailSimilarityStatus "failed"), so
+  // "revealed" no longer strictly implies "resolved" the way it did right
+  // after the correction — OverviewReport must be told the real status
+  // explicitly again, this time backed by genuine pipeline state rather
+  // than poll timing.
   const overviewReportCalls = (shell.match(/<OverviewReport report=\{report\} similarityStatus=\{effectiveSimilarityStatus\} \/>/g) ?? []).length;
-  assert.equal(overviewReportCalls, 3, 'expected 3 call sites: full-report-preview, the standalone overview tab, and the print bundle');
-  assert.match(shell, /similarityNotResolved \? similarityStatusLabel : `\$\{primaryScore\}% \$\{primaryLabel\}`/, 'the summary-strip score chip must also be gated, by both pending AND stale');
-  assert.match(shell, /similarityNotResolved \? "…" : `\$\{primaryScore\}%`/, 'the sidebar score card\'s own value must also be gated, by both pending AND stale — never a stale number');
-  assert.match(shell, /const similarityStatusLabel = similarityStale \? "Updating similarity…" : "Calculating similarity…";/, 'stale and pending must render distinct wording');
+  assert.equal(overviewReportCalls, 3, 'expected 3 call sites: full-report-preview, the standalone overview tab, and the print bundle, each passing the real status explicitly');
+  // The summary-strip chip and sidebar score render primaryScore only once
+  // revealState.similarityUnavailable is ruled out — never a guessed
+  // number for a similarity that genuinely, terminally failed.
+  assert.match(shell, /revealState\.similarityUnavailable \? "Unavailable" : `\$\{primaryScore\}% \$\{primaryLabel\}`/, 'the summary-strip score chip must show literal Unavailable text, never a number, when similarity genuinely, terminally failed');
+  assert.doesNotMatch(shell, /similarityStatusLabel/, 'the old pending/stale label variable must be gone entirely — revealState.similarityUnavailable is the only gate now');
 });
 
 // --- SIM-04 NO-FLASH: the detail page's own two-frame transition -------------
@@ -544,13 +613,22 @@ test('SIM-04 NO-FLASH: first paint while stale shows no percentage in the simila
   assert.doesNotMatch(afterHeadline, /(?<!\d)0%/, 'the settled headline must never show a standalone 0% either — the fixture\'s own archiveScore is 0, so this catches any code path that fell back to it instead of the real unified result');
 });
 
-test('SIM-04 NO-FLASH (structural): setSimilarityStatus("resolved") and setReport(...) are synchronous, adjacent statements in the same background-fetch .then() callback — no await between them, so React batches both into one commit and a "resolved but still showing the old report" frame cannot occur', async () => {
+test('LIFECYCLE-04/06 NO-FLASH (structural): setSimilarityStatus(resolvedSimilarityStatus) and setReport(...) are still synchronous, adjacent statements inside checkOnce — no await between them, so React batches both into one commit and a "resolved/failed but still showing the old report" frame cannot occur, even now that checkOnce is called repeatedly by the poll loop and resolves a genuine failed state too', async () => {
   const shell = await fs.promises.readFile(path.join(repo, 'app/reports/[id]/report-detail-shell.tsx'), 'utf8');
-  const fetchCallback = shell.match(/void fetchRemoteReport<SimilarityReport>\(id\)\.then\(\(enriched\) => \{[\s\S]*?\n {6}\}\);/)?.[0] ?? '';
-  assert.ok(fetchCallback, 'the authenticated background-fetch .then() callback must be found');
+  const checkOnceFn = shell.match(/async function checkOnce\(\): Promise<boolean> \{[\s\S]*?\n {4}\}/)?.[0] ?? '';
+  assert.ok(checkOnceFn, 'the authenticated poll loop\'s checkOnce function must be found');
+  // resolvedSimilarityStatus itself must be computed BEFORE these two
+  // adjacent statements (so its own derivation — a plain ternary, never a
+  // promise — cannot introduce an await boundary), and the two setState
+  // calls must remain adjacent with nothing async between them.
+  assert.match(checkOnceFn, /const resolvedSimilarityStatus: DetailSimilarityStatus = enriched\.unifiedSimilarityFailed\s*\?\s*"failed"\s*:\s*hasUnifiedSimilarity\(enriched\)\s*\?\s*"resolved"\s*:\s*"pending";/, 'resolvedSimilarityStatus must be derived from the real, persisted unifiedSimilarityFailed/hasUnifiedSimilarity signals, never hardcoded');
   assert.match(
-    fetchCallback,
-    /setSimilarityStatus\("resolved"\);\s*if \(!enriched\) return;\s*setReport\(/,
-    'setSimilarityStatus and setReport must be adjacent synchronous statements — any await/promise boundary inserted between them would let React commit "resolved" on its own frame first',
+    checkOnceFn,
+    /setSimilarityStatus\(resolvedSimilarityStatus\);\s*setReport\(/,
+    'setSimilarityStatus and setReport must be adjacent synchronous statements — any await/promise boundary inserted between them would let React commit the new status on its own frame first',
   );
+  // REQUIRED (LIFECYCLE-04): a genuinely failed poll response must never be
+  // treated as a resolution — checkOnce must return before touching either
+  // piece of state at all, not just skip the ai_status branches.
+  assert.match(checkOnceFn, /if \(!enriched\) return false;/, 'a failed/inconclusive poll must bail out before setSimilarityStatus is ever called');
 });

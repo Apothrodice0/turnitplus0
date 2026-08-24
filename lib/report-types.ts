@@ -243,6 +243,20 @@ export type SimilarityReport = {
   corpusSourceMatchingEnabledAtComputation?: boolean;
   /** See corpusSourceMatchingEnabledAtComputation's own comment — the corpus_match_generation value historicalSubmissionMatch was computed against. */
   unifiedSimilarityGeneration?: number;
+  /**
+   * Release-hardening audit finding LIFECYCLE-06 (corrected): true only
+   * when the last write-time/self-heal finalization attempt genuinely,
+   * reproducibly failed (lib/report-primary-similarity.ts's
+   * resolvePrimarySimilaritySummary's own `failed` field — computeUnifiedSimilarity
+   * itself threw for this report's own data, never a fail-soft individual-
+   * source issue). Mutually exclusive with unifiedSimilarity in practice: a
+   * later successful resave persists a real unifiedSimilarity and
+   * explicitly clears this back to false, exactly mirroring how a later
+   * successful AI retry overwrites ai_status "failed" with "ready". Only
+   * ever read by resolvePersistedSimilarityDisplay's own "failed" branch —
+   * never by any scoring logic.
+   */
+  unifiedSimilarityFailed?: boolean;
   wordCount: number;
   characterCount: number;
   pageCount: number;
@@ -468,11 +482,13 @@ export function buildReportSummary(report: SimilarityReport): ReportSummary {
     // no cheap way to know generation/flag staleness (that needs a DB
     // read — see lib/report-primary-similarity.ts's
     // resolvePersistedSimilarityDisplay, the server-side counterpart) —
-    // "resolved" vs "pending" is the full range available here, matching
+    // "resolved"/"pending"/"failed" (LIFECYCLE-06: report.unifiedSimilarityFailed
+    // is a real field on the same report object, so this is a genuine
+    // signal, not a guess) is the full range available here, matching
     // this function's own existing archive-only-vs-combined fallback rule
     // exactly: a report with no unifiedSimilarity yet is pending, not a
     // settled archive-only answer.
-    similarityStatus: hasUnifiedSimilarity(report) ? "resolved" : "pending",
+    similarityStatus: report.unifiedSimilarityFailed ? "failed" : hasUnifiedSimilarity(report) ? "resolved" : "pending",
     scoreBand: report.scoreBand,
     aiScore: aiSignal.value,
     aiTone: aiSignal.tone,

@@ -148,9 +148,14 @@ test("similarity remaining available when AI fails: runCheck saves the similarit
 test("refresh/reopen after failure, and pre-existing stranded reports: the room's 'processing' branch offers a real retry action once polling is exhausted, not just re-polling the same frozen state — this is also the backward-compatible recovery for any report already stuck at ai_status='processing' before this fix, since deriveRoomStatus treats every processing row identically regardless of age", async () => {
   const shell = await readFile(new URL("../app/reports/rooms/[room]/room-page-shell.tsx", import.meta.url), "utf8");
 
-  const processingBranchStart = shell.indexOf('{occupant.status === "processing" && occupant.report && (');
-  const readyBranchStart = shell.indexOf('{occupant.status === "ready" && occupant.report && (');
-  assert.ok(processingBranchStart > -1 && readyBranchStart > processingBranchStart, "the processing branch must be found, before the ready branch");
+  // Release-hardening audit finding LIFECYCLE-05: the room card no longer
+  // branches on occupant.status === "processing" directly — it branches on
+  // !isFullyRevealed(occupant), which also covers an AI/similarity-terminal
+  // occupant still waiting on the other pipeline (see room-processing-navigation.test.mjs's
+  // own NOT_REVEALED_NEEDLE/READY_NEEDLE constants for the same needles).
+  const processingBranchStart = shell.indexOf('{!isFullyRevealed(occupant) && occupant.report && (');
+  const readyBranchStart = shell.indexOf('{occupant.status === "ready" && isFullyRevealed(occupant) && occupant.report && (');
+  assert.ok(processingBranchStart > -1 && readyBranchStart > processingBranchStart, "the not-revealed branch must be found, before the ready branch");
   const processingBranch = shell.slice(processingBranchStart, readyBranchStart);
 
   assert.match(processingBranch, /pollExhausted \?/, "the exhausted-poll state must still be distinguished from genuinely still-in-flight");
@@ -250,7 +255,7 @@ test("directly rejected aiAnalysisPromise: the happy path is unaffected — a re
 /**
  * Release-hardening audit finding LIFECYCLE-02: two AI-completion resaves
  * for the same report can race (the automatic post-upload pass in one tab
- * still finishing while a different tab/device's "Retry AI check" also
+ * still finishing while a different tab/device's "Retry analysis" also
  * completes). Proven here against the REAL POST /api/reports route and a
  * real on-disk database — not a unit-level stand-in — because the guarantee
  * this test exists to prove ("ready" is a sticky terminal state with

@@ -18,12 +18,17 @@ import {
   type ResultTab,
   type SimilarityReport,
 } from "@/lib/report-types";
+import {
+  computeDetailRevealState,
+  startBoundedPoll,
+  type DetailAiStatus,
+  type DetailSimilarityStatus,
+} from "@/lib/report-detail-poll";
 import { AiReport } from "@/components/report/ai-report";
 import { CategorySummary, OverviewReport, SourcesReport, SubmissionReport, dedupeExternalAcademicEvidence } from "@/components/report/similarity-report-papers";
 import { ReportNotFoundPanel } from "@/components/report/report-not-found-panel";
 
 type LoadStatus = "loading" | "found" | "not-found";
-type SimilarityDisplayStatus = "resolved" | "stale" | "pending";
 
 export function ReportDetailShell({
   id,
@@ -43,9 +48,11 @@ export function ReportDetailShell({
    * progress" state instead of presenting the page as if everything were
    * finished. null for the anonymous/device-key path (requiresClientResolution),
    * which has no server-computed status to hand over — that path's own
-   * empty/found result already renders correctly without this.
+   * empty/found result already renders correctly without this, and in
+   * practice never has a real "still processing" window at all (see
+   * isAiTerminal's own comment in lib/report-detail-poll.ts).
    */
-  initialAiStatus: "processing" | "ready" | "failed" | null;
+  initialAiStatus: DetailAiStatus;
   /**
    * Release-hardening audit finding SIM-04: the SAME "resolved"/"stale"/
    * "pending" status lib/report-primary-similarity.ts's
@@ -55,16 +62,14 @@ export function ReportDetailShell({
    * as-is (whether a real combined result or a definitive archive-only
    * answer forced by a live CORPUS_SOURCE_MATCHING_ENABLED rollback);
    * "stale" means a persisted combined result exists but no longer
-   * reflects the current corpus generation/flag state, so it must NOT be
-   * shown at all — only "Updating similarity…" — until the background
-   * fetch below refreshes it; "pending" means nothing has ever been
-   * persisted (write-time finalization has not completed for this report
-   * yet). null only for the anonymous/device-key path, which resolves
-   * client-side only, from scratch, on every visit — there is no
-   * server-computed status to hand over there, matching initialAiStatus's
-   * own null convention.
+   * reflects the current corpus generation/flag state; "pending" means
+   * nothing has ever been persisted (write-time finalization has not
+   * completed for this report yet). null only for the anonymous/device-key
+   * path, which resolves client-side only, from scratch, on every visit —
+   * there is no server-computed status to hand over there, matching
+   * initialAiStatus's own null convention.
    */
-  initialSimilarityStatus: SimilarityDisplayStatus | null;
+  initialSimilarityStatus: DetailSimilarityStatus | null;
   requiresClientResolution: boolean;
   mode: ReportMode;
   /** The room this report was opened from (see app/reports/[id]/page.tsx's own comment) — null when opened any other way (the anonymous flat list, a bookmark, etc.), in which case the back button falls back to the generic My Reports directory. */
@@ -74,7 +79,7 @@ export function ReportDetailShell({
   const backLabel = backRoom !== null ? `Back to Room ${backRoom + 1}` : "Back to reports";
   const router = useRouter();
   const [report, setReport] = useState<SimilarityReport | null>(initialReport);
-  const [aiStatus, setAiStatus] = useState<"processing" | "ready" | "failed" | null>(initialAiStatus);
+  const [aiStatus, setAiStatus] = useState<DetailAiStatus>(initialAiStatus);
   const [status, setStatus] = useState<LoadStatus>(
     initialReport ? "found" : requiresClientResolution ? "loading" : "not-found",
   );
@@ -82,17 +87,15 @@ export function ReportDetailShell({
   // POST handler finalizes unifiedSimilarity at WRITE time, before a save's
   // own response is ever sent, so app/reports/[id]/page.tsx's server render
   // already knows whether initialReport's own primarySimilarityScore is
-  // trustworthy ("resolved"), knowably outdated ("stale" — a live
-  // generation/flag change since computation), or simply never computed yet
-  // ("pending" — a legacy report, or a write-time finalization that
-  // genuinely failed and left no trace). Read once, at mount, into this
-  // state (never re-derived from report on every render) — the background
-  // fetch effect below is the only thing allowed to change it afterward, so
-  // a later resave/refresh within the same mount can't silently regress it.
-  // Anonymous/device-key reports (requiresClientResolution) have no
-  // server-computed signal at all — mode === "similarity" alone decides
-  // whether to start "pending" there, exactly like the pre-SIM-04 design.
-  const [similarityStatus, setSimilarityStatus] = useState<SimilarityDisplayStatus>(
+  // trustworthy ("resolved"), knowably outdated ("stale"), or simply never
+  // computed yet ("pending"). Read once, at mount, into this state (never
+  // re-derived from report on every render) — the poll effect below is the
+  // only thing allowed to change it afterward, so a later resave/refresh
+  // within the same mount can't silently regress it. Anonymous/device-key
+  // reports (requiresClientResolution) have no server-computed signal at
+  // all — mode === "similarity" alone decides whether to start "pending"
+  // there.
+  const [similarityStatus, setSimilarityStatus] = useState<DetailSimilarityStatus>(
     mode !== "similarity"
       ? "resolved"
       : (initialSimilarityStatus ?? (initialReport !== null && hasUnifiedSimilarity(initialReport) ? "resolved" : "pending")),
@@ -100,42 +103,128 @@ export function ReportDetailShell({
   const [resultTab, setResultTab] = useState<ResultTab>("full");
   const [isDeleting, setIsDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  // Release-hardening audit finding LIFECYCLE-06: true once the bounded
+  // poll budget below is exhausted without either pipeline reaching a real
+  // terminal state. This is purely a "stop asking automatically, offer a
+  // manual retry" signal — see lib/report-detail-poll.ts's own header
+  // comment for why it must never be treated as evidence that either
+  // pipeline itself failed. Reset to false by retryAnalysis(), which
+  // starts a genuinely fresh bounded cycle from zero, never an unbounded
+  // retry.
+  const [pollExhausted, setPollExhausted] = useState(false);
+
+  // effectiveSimilarityStatus/mode "ai" always reads as resolved for this
+  // gate's purposes — the AI-only tab has no similarity result to wait on
+  // in the first place. Computed here, before any hook — React's rules of
+  // hooks require every hook to run unconditionally, before any early
+  // return, so the poll effect below (which depends on the reveal state)
+  // needs it available this early, rather than alongside the other
+  // JSX-prep consts further down.
+  const effectiveSimilarityStatus: DetailSimilarityStatus = mode === "similarity" ? similarityStatus : "resolved";
+  const revealState = computeDetailRevealState({ aiStatus, similarityStatus: effectiveSimilarityStatus, pollExhausted });
+  const bothReady = revealState.screen === "revealed";
 
   // The server now sends the saved payload without waiting for expensive
   // read-time historical/family enrichment. Render that payload immediately
-  // and hydrate richer fields in the background.
+  // (once revealed — see above) and hydrate richer fields in the
+  // background.
   useEffect(() => {
-    if (initialReport && !requiresClientResolution) {
-      let cancelled = false;
-      void fetchRemoteReport<SimilarityReport>(id).then((enriched) => {
-        if (cancelled) return;
-        // Release-hardening audit finding SIM-04: the GET route this fetch
-        // hits (app/api/reports/[id]/route.ts) always resolves and persists
-        // a fully current, live-flag-correct result before responding — so
-        // by the time this promise settles, whatever it returns (or even a
-        // failure, which simply leaves `report` as the last-known value) is
-        // the freshest answer this client can get without another request.
-        // "resolved" is therefore always the right status to land on here,
-        // regardless of which status this mount started in.
-        setSimilarityStatus("resolved");
-        if (!enriched) return;
-        setReport((current) => (current ? { ...current, ...enriched } : enriched));
-        // Piggybacks on this same one-shot fetch (no new request) to
-        // correct aiStatus if AI analysis resolved in the moment between
-        // this page's server render and this effect firing — production
-        // bug fix, kept minimal rather than adding a dedicated poll loop.
-        if (enriched.aiAnalysis?.status === "complete") setAiStatus("ready");
-        else if (enriched.aiAnalysis?.status === "error" || enriched.aiAnalysis?.status === "unsupported") setAiStatus("failed");
-      });
-      return () => {
-        cancelled = true;
-      };
+    if (!initialReport || requiresClientResolution || bothReady || pollExhausted) return;
+    let cancelled = false;
+
+    // Release-hardening audit finding LIFECYCLE-04: a single settle of this
+    // fetch is enough to trust similarity forever — the GET route it hits
+    // (app/api/reports/[id]/route.ts) always resolves and persists a fully
+    // current, live-flag-correct result before responding, so whatever it
+    // returns is the freshest answer this client can get without another
+    // request. AI-writing analysis is different: it is a genuinely
+    // still-running background job the FIRST read here can easily catch
+    // mid-flight, so this same fetch is repeated — "poll/revalidate in the
+    // background" — until it reports a real terminal status (ready or
+    // failed), not merely accepted once and left stale.
+    async function checkOnce(): Promise<boolean> {
+      const enriched = await fetchRemoteReport<SimilarityReport>(id);
+      if (cancelled) return true;
+      // A failed poll request (429/500/timeout/network error) is
+      // inconclusive, not a resolution — matching room-page-shell.tsx's own
+      // poll discipline, this must never be treated as "similarity is now
+      // resolved" or "AI is now done." Leave every piece of state exactly
+      // as it was and simply try again.
+      if (!enriched) return false;
+      // Release-hardening audit finding LIFECYCLE-06 (extended): a
+      // successful GET no longer always means "similarity is now
+      // resolved" — enriched.unifiedSimilarityFailed is a real, persisted
+      // signal (lib/report-primary-similarity.ts's own resolution.failed,
+      // written by both write-time finalization and this same GET route's
+      // own self-heal) distinguishing a genuine, reproducible
+      // overall-computation failure from "genuinely still processing, try
+      // again." hasUnifiedSimilarity(enriched) being false with
+      // unifiedSimilarityFailed also false/absent means this exact attempt
+      // was inconclusive (e.g. a transient DB error one layer up from
+      // computeUnifiedSimilarity's own try/catch) — stays "pending", kept
+      // eligible for the next bounded-poll attempt, never silently
+      // promoted to "resolved".
+      const resolvedSimilarityStatus: DetailSimilarityStatus = enriched.unifiedSimilarityFailed
+        ? "failed"
+        : hasUnifiedSimilarity(enriched)
+          ? "resolved"
+          : "pending";
+      // These two updates stay adjacent, synchronous statements — no await
+      // between them — so React batches both into one commit; see the
+      // structural test covering this exact ordering for why that matters
+      // (a "resolved"/"failed" status must never be painted alongside a
+      // still-old report).
+      setSimilarityStatus(resolvedSimilarityStatus);
+      setReport((current) => (current ? { ...current, ...enriched } : enriched));
+      // Derived fresh from THIS response, never from the outer aiStatus
+      // closure — if an earlier poll within this same cycle had already
+      // resolved AI to a terminal value, similarity would have settled
+      // (resolved, failed, OR still pending — see resolvedSimilarityStatus
+      // above) together with it from that SAME earlier call, so bothReady
+      // would already have been evaluated then; this effect only reaches
+      // a later attempt at all when the prior one was not yet terminal on
+      // both sides. The only value that can ever reach here is
+      // "processing".
+      let resolvedAiStatus: DetailAiStatus = "processing";
+      if (enriched.aiAnalysis?.status === "complete") {
+        resolvedAiStatus = "ready";
+      } else if (enriched.aiAnalysis?.status === "error" || enriched.aiAnalysis?.status === "unsupported") {
+        resolvedAiStatus = "failed";
+      }
+      if (resolvedAiStatus !== "processing") setAiStatus(resolvedAiStatus);
+      return computeDetailRevealState({ aiStatus: resolvedAiStatus, similarityStatus: resolvedSimilarityStatus, pollExhausted: false }).screen === "revealed";
     }
 
+    const handle = startBoundedPoll({
+      attempt: checkOnce,
+      onExhausted: () => setPollExhausted(true),
+    });
+    return () => {
+      cancelled = true;
+      handle.cancel();
+    };
+  }, [id, requiresClientResolution, initialReport, bothReady, pollExhausted]);
+
+  /**
+   * Release-hardening audit finding LIFECYCLE-06: starts a genuinely fresh
+   * bounded cycle — resetting pollExhausted re-triggers the effect above
+   * (it is one of that effect's own dependencies), and startBoundedPoll's
+   * own `attempts` counter is scoped to that new call, never resuming a
+   * stale count. Mirrors room-page-shell.tsx's own checkAgain().
+   */
+  function retryAnalysis() {
+    setPollExhausted(false);
+  }
+
+  useEffect(() => {
     // Anonymous/device-key reports can only ever be resolved client-side.
     // Prefer the instant IndexedDB copy, then fetch the complete remote room
     // in the background if the local copy exists; otherwise use the remote
-    // room as the primary source.
+    // room as the primary source. In practice this path never has a genuine
+    // "still processing" window (see isAiTerminal's own comment in
+    // lib/report-detail-poll.ts) — the whole report, AI-writing analysis
+    // included, is already generated client-side before it is ever saved
+    // or shown — so a single settle here (not a poll loop) is enough.
     if (!requiresClientResolution || initialReport) return;
     let cancelled = false;
     (async () => {
@@ -156,7 +245,9 @@ export function ReportDetailShell({
         // academic-only computation (see lib/document-check-pipeline.ts) —
         // never historicalSubmissionMatch, which can't exist before this
         // report has ever been saved. Still pending until the fetch below
-        // settles, exactly like the owned-report branch above.
+        // settles — the reveal gate above keeps the loading screen up for
+        // exactly this window, rather than flashing this partial local
+        // copy.
         const enriched = await fetchRemoteReport<SimilarityReport>(id);
         if (cancelled) return;
         setSimilarityStatus("resolved");
@@ -226,23 +317,52 @@ export function ReportDetailShell({
     );
   }
 
+  if (revealState.screen === "still-processing") {
+    // Release-hardening audit finding LIFECYCLE-06: the bounded poll budget
+    // ran out and at least one pipeline is still genuinely non-terminal —
+    // never revealed here, never mutated into "Unavailable." "Back to Room"
+    // stays available exactly like the actively-polling screen below, and
+    // a manual "Retry analysis" starts a fresh bounded cycle.
+    return (
+      <div className="result-view report-detail-page">
+        <div className="report-not-found-wrap">
+          <section className="ai-analysis-message" role="status">
+            <strong>—</strong>
+            <div>
+              <p>Still processing. This report is taking longer than usual to analyze.</p>
+              <button className="button subtle" type="button" onClick={retryAnalysis}>Retry analysis</button>
+              <Link href={backHref} className="button secondary">{backLabel}</Link>
+            </div>
+          </section>
+        </div>
+      </div>
+    );
+  }
+
+  if (revealState.screen === "loading") {
+    return (
+      <div className="result-view report-detail-page">
+        <div className="report-not-found-wrap">
+          <section className="ai-analysis-loading" aria-live="polite" aria-busy="true">
+            <span aria-hidden="true" />
+            <div>
+              <strong>Analysis in progress</strong>
+              <p>This report is still being analyzed. It will appear here automatically as soon as everything is ready — no need to refresh.</p>
+              <Link href={backHref} className="button secondary">{backLabel}</Link>
+            </div>
+          </section>
+        </div>
+      </div>
+    );
+  }
+
   const primaryScore = primarySimilarityScore(report);
   const isUnified = hasUnifiedSimilarity(report);
   const primaryLabel = primaryResultLabel(report);
   const similarityVerdict = similarityScoreBand(primaryScore);
-  // Release-hardening audit finding SIM-02/SIM-04: gates every similarity-
-  // score surface below (summary strip, sidebar score card, sidebar notes,
-  // and OverviewReport's own headline) so none of them can ever render
-  // primaryScore while the real resolution is still in flight or known
-  // outdated — see similarityStatus's own comment above.
-  const effectiveSimilarityStatus: SimilarityDisplayStatus = mode === "similarity" ? similarityStatus : "resolved";
-  const similarityPending = effectiveSimilarityStatus === "pending";
-  const similarityStale = effectiveSimilarityStatus === "stale";
-  const similarityNotResolved = similarityPending || similarityStale;
   const aiSignal = aiSignalDisplay(report);
   const academicEvidenceCount = report.externalAcademicEvidence ? dedupeExternalAcademicEvidence(report.externalAcademicEvidence).length : 0;
   const reportDate = new Date(report.created).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" });
-  const similarityStatusLabel = similarityStale ? "Updating similarity…" : "Calculating similarity…";
 
   return (
     <section className="result-view report-detail-page">
@@ -271,26 +391,29 @@ export function ReportDetailShell({
       )}
 
       {/* Production bug fix: a report reached directly by URL (bookmark,
-          typed link) while its AI check is still running or has genuinely
-          failed must say so plainly, regardless of which tab is open —
-          similarity results are real and shown normally below either way
-          (they finish before AI does), this is only about not letting the
-          page feel "fully done" when it isn't yet. */}
-      {aiStatus === "processing" && (
+          typed link) whose AI check genuinely failed must say so plainly,
+          regardless of which tab is open — a real, persisted ai_status
+          "failed", never inferred from poll timing (see revealState's own
+          aiUnavailable, computed in lib/report-detail-poll.ts). */}
+      {revealState.aiUnavailable && (
         <section className="ai-analysis-message" role="status">
           <strong>—</strong>
           <div>
-            <p>AI-writing analysis is still in progress for this report. The similarity results below are complete; the AI score will appear once analysis finishes.</p>
+            <p>AI-writing analysis was unavailable for this document.{!revealState.similarityUnavailable ? " The similarity results below are complete and unaffected." : ""}</p>
             <Link href={backHref} className="button secondary">{backLabel}</Link>
           </div>
         </section>
       )}
 
-      {aiStatus === "failed" && (
+      {/* Release-hardening audit finding LIFECYCLE-06 (extended): the
+          mirror image of the AI banner above — a real, persisted
+          unifiedSimilarityFailed signal (lib/report-primary-similarity.ts's
+          own resolution.failed), never inferred from poll timing. */}
+      {revealState.similarityUnavailable && (
         <section className="ai-analysis-message" role="status">
           <strong>—</strong>
           <div>
-            <p>AI-writing analysis was unavailable for this document. The similarity results below are complete and unaffected.</p>
+            <p>Similarity analysis is currently unavailable for this document.{!revealState.aiUnavailable ? " The AI-writing result above is complete and unaffected." : ""}</p>
             <Link href={backHref} className="button secondary">{backLabel}</Link>
           </div>
         </section>
@@ -298,11 +421,11 @@ export function ReportDetailShell({
 
       <div className="report-summary-strip">
         <div>
-          <strong className={`summary-chip summary-score-chip ${mode === "ai" ? `ai-summary-chip ai-summary-${aiSignal.tone}` : similarityNotResolved ? "summary-verdict-pending" : similarityVerdict ? `summary-verdict-${similarityVerdict.key}` : ""}`}>
-            <span className={`score-dot ${mode === "ai" ? `ai-dot ai-dot-${aiSignal.tone}` : similarityNotResolved ? "score-dot-pending" : similarityVerdict ? `score-dot-${similarityVerdict.key}` : ""}`} />
+          <strong className={`summary-chip summary-score-chip ${mode === "ai" ? `ai-summary-chip ai-summary-${aiSignal.tone}` : revealState.similarityUnavailable ? "summary-verdict-pending" : similarityVerdict ? `summary-verdict-${similarityVerdict.key}` : ""}`}>
+            <span className={`score-dot ${mode === "ai" ? `ai-dot ai-dot-${aiSignal.tone}` : revealState.similarityUnavailable ? "score-dot-pending" : similarityVerdict ? `score-dot-${similarityVerdict.key}` : ""}`} />
             {mode === "ai"
               ? `${aiSignal.value === null ? "" : `${aiSignal.value}% · `}${aiSignal.label}`
-              : similarityNotResolved ? similarityStatusLabel : `${primaryScore}% ${primaryLabel}`}
+              : revealState.similarityUnavailable ? "Unavailable" : `${primaryScore}% ${primaryLabel}`}
           </strong>
           {mode === "similarity" && <span className="summary-chip">{report.sources.length} matched source{report.sources.length === 1 ? "" : "s"}</span>}
           {mode === "similarity" && (report.webCheck?.phrasesMatched ?? 0) > 0 && <span className="summary-chip wikipedia-evidence-chip"><Globe2 aria-hidden="true" /> Separate Wikipedia evidence</span>}
@@ -353,18 +476,17 @@ export function ReportDetailShell({
 
         <aside className="report-inspector">
           <div
-            className={`inspector-score ${mode === "ai" ? `ai-signal-card-${aiSignal.tone}` : similarityNotResolved ? "similarity-verdict-pending" : similarityVerdict ? `similarity-verdict-${similarityVerdict.key}` : ""}`}
-            aria-busy={similarityNotResolved ? "true" : undefined}
+            className={`inspector-score ${mode === "ai" ? `ai-signal-card-${aiSignal.tone}` : revealState.similarityUnavailable ? "similarity-verdict-pending" : similarityVerdict ? `similarity-verdict-${similarityVerdict.key}` : ""}`}
             aria-label={mode === "ai"
               ? `${aiSignal.value === null ? "no result" : `${aiSignal.value}%`} AI writing score`
-              : similarityNotResolved ? similarityStatusLabel.replace("…", "") : `${primaryScore}% ${primaryLabel}${similarityVerdict ? `, ${PRIMARY_SIMILARITY_BAND_LABELS[similarityVerdict.key]}` : ""}`}
+              : revealState.similarityUnavailable ? "similarity unavailable" : `${primaryScore}% ${primaryLabel}${similarityVerdict ? `, ${PRIMARY_SIMILARITY_BAND_LABELS[similarityVerdict.key]}` : ""}`}
           >
-            <span>{mode === "ai" ? "AI writing score" : similarityNotResolved ? "Similarity" : primaryLabel}</span>
-            <strong>{mode === "ai" ? (aiSignal.value === null ? "—" : `${aiSignal.value}%`) : similarityNotResolved ? "…" : `${primaryScore}%`}</strong>
+            <span>{mode === "ai" ? "AI writing score" : revealState.similarityUnavailable ? "Similarity" : primaryLabel}</span>
+            <strong>{mode === "ai" ? (aiSignal.value === null ? "—" : `${aiSignal.value}%`) : revealState.similarityUnavailable ? "—" : `${primaryScore}%`}</strong>
             {mode === "ai" && <p className="inspector-writing-estimate">{aiSignal.label}</p>}
-            {mode === "similarity" && similarityNotResolved && <p className="inspector-writing-estimate">{similarityStatusLabel}</p>}
-            {mode === "similarity" && !similarityNotResolved && similarityVerdict && <em>{PRIMARY_SIMILARITY_BAND_LABELS[similarityVerdict.key]}</em>}
-            {mode === "similarity" && !similarityNotResolved && <div><i style={{ width: `${primaryScore * 5}%` }} /></div>}
+            {mode === "similarity" && revealState.similarityUnavailable && <p className="inspector-writing-estimate">Unavailable</p>}
+            {mode === "similarity" && !revealState.similarityUnavailable && similarityVerdict && <em>{PRIMARY_SIMILARITY_BAND_LABELS[similarityVerdict.key]}</em>}
+            {mode === "similarity" && !revealState.similarityUnavailable && <div><i style={{ width: `${primaryScore * 5}%` }} /></div>}
           </div>
           {mode === "similarity" && <div className="inspector-section">
             <h3>Top source types</h3>
@@ -376,10 +498,8 @@ export function ReportDetailShell({
               English-only local analysis. {report.aiAnalysis?.status === "complete"
                 ? `${report.aiAnalysis.analyzedWordCount.toLocaleString()} words analyzed. Review the AI writing score and highlighted passage breakdown.`
                 : "A numeric result requires at least 300 eligible English words and a successful local model load."}
-            </p> : similarityStale ? <p>
-              TurnitPlus's reference sources changed since this result was last computed. Refreshing now — this can take a few seconds.
-            </p> : similarityPending ? <p>
-              TurnitPlus is still checking this submission against every reference source, including previously submitted content. The final similarity result will appear here once matching finishes.
+            </p> : revealState.similarityUnavailable ? <p>
+              Similarity analysis could not be completed for this submission.
             </p> : <p>
               {isUnified
                 ? <>TurnitPlus Similarity combines text found through TurnitPlus&apos;s own checks, verified external academic sources, and eligible previous TurnitPlus submissions into one result — the same submitted passage found by more than one source counts once.</>

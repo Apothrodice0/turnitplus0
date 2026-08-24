@@ -264,6 +264,15 @@ test('CROSS-ACCOUNT VISIBILITY: B never sees A as a PRIOR_SUBMISSION, whether or
 
   const { cookie: cookieA } = await signup('consent-vis-a@example.test', 'consent-device-vis-a');
   const { cookie: cookieB } = await signup('consent-vis-b@example.test', 'consent-device-vis-b');
+  // Release-hardening audit finding UI-02: historicalSubmissionMatch is now
+  // admin-only on the GET response — B's own account is promoted here so
+  // this test can still inspect its `.status` directly; the consent gate
+  // this test actually proves (whether A's content is eligible to match at
+  // all) is orthogonal to admin-only VISIBILITY of the result. See
+  // tests/report-match-classification.test.mjs for the same precedent, and
+  // tests/report-historical-match-visibility.test.mjs for dedicated
+  // visibility coverage.
+  await setupClient.execute({ sql: "UPDATE users SET role = 'admin' WHERE email = ?", args: ['consent-vis-b@example.test'] });
 
   // A uploads WITHOUT consent.
   await postReport('consent-device-vis-a', { cookie: cookieA, text });

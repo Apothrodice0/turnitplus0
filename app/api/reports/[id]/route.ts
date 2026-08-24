@@ -107,11 +107,31 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
           archiveScore: payload.archiveScore ?? payload.score,
         });
         const historicalSubmissionMatch = resolution.historicalSubmissionMatch;
-        payload.historicalSubmissionMatch = historicalSubmissionMatch;
+        // Release-hardening audit finding UI-02: historicalSubmissionMatch
+        // carries the same class of internal diagnostic information as
+        // matchClassification just above (relationshipType,
+        // matchedRepresentationId, matcher/fingerprint/canonicalization
+        // versions, raw passage text) — never previously gated at all, so
+        // every viewer of their own report, ordinary or not, received it in
+        // the raw JSON response. Gated here the identical way: the
+        // AUTHENTICATED session's own `role` column, decided server-side,
+        // before this field is ever assigned onto `payload` — for every
+        // other viewer it is simply never set, so there is nothing on the
+        // response to strip or hide, matching matchClassification's own
+        // comment above. The local `historicalSubmissionMatch` variable
+        // itself stays fully populated regardless of role — it is still the
+        // required input to computeUnifiedSimilarity above (already run,
+        // via resolution) and to experimentalHistoricalMatch/reuseContext/
+        // the shadow-evaluation callback below; only whether it is ever
+        // SERIALIZED onto `payload` for THIS response is role-gated.
+        if (sessionUser?.role === 'admin') {
+          payload.historicalSubmissionMatch = historicalSubmissionMatch;
+        }
         if (resolution.unifiedSimilarity) {
           payload.unifiedSimilarity = resolution.unifiedSimilarity;
           payload.corpusSourceMatchingEnabledAtComputation = resolution.corpusSourceMatchingEnabled;
           payload.unifiedSimilarityGeneration = resolution.corpusGeneration;
+          payload.unifiedSimilarityFailed = false;
           // Release-hardening audit finding SIM-04: "after the resolver
           // recomputes, persist the refreshed result so room and detail
           // agree." resolvePrimarySimilaritySummary above is cache-first —
@@ -137,14 +157,15 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
           // will go on to carry experimentalHistoricalMatch/reuseContext
           // (read-time-only display fields, never meant to be durable
           // either). This keeps the persisted row's shape identical to
-          // what a normal save already writes, plus only the three
-          // similarity fields this fix adds.
+          // what a normal save already writes, plus only the similarity
+          // fields this fix and LIFECYCLE-06 add.
           try {
             const persistedPayload = {
               ...(JSON.parse(String(row.payload_json)) as SimilarityReport),
               unifiedSimilarity: resolution.unifiedSimilarity,
               corpusSourceMatchingEnabledAtComputation: resolution.corpusSourceMatchingEnabled,
               unifiedSimilarityGeneration: resolution.corpusGeneration,
+              unifiedSimilarityFailed: false,
             };
             await client.execute({
               sql: `UPDATE saved_reports SET payload_json = ?
@@ -155,6 +176,74 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
           } catch (err) {
             console.error('persisting the refreshed similarity result failed (non-fatal, this response still reflects it):', err instanceof Error ? err.message : String(err));
           }
+        } else if (resolution.failed) {
+          // Release-hardening audit finding LIFECYCLE-06 (corrected): the
+          // GET-side mirror of app/api/reports/route.ts's own POST-time
+          // failure persistence — a genuine, reproducible
+          // computeUnifiedSimilarity failure for this report's own data
+          // (resolution.failed's own comment), persisted here too so a
+          // report that was never resaved (only ever viewed) still gets an
+          // honest, actionable terminal state instead of polling forever.
+          // Same generation-guard discipline as the success branch above,
+          // for the same reason.
+          //
+          // Release-hardening audit finding LIFECYCLE-06 (approval-pass
+          // fix): unifiedSimilarity is explicitly cleared on BOTH the
+          // in-memory `payload` (built from row.payload_json at the top of
+          // this handler — already carries a PREVIOUS successful result if
+          // one was ever persisted) and the re-read `persistedPayload`
+          // below, for the identical reason app/api/reports/route.ts's own
+          // POST-time failure branch does — without this, a stale success
+          // would silently linger alongside the fresh failure marker, and
+          // resolvePersistedSimilarityDisplay's own hasUnifiedSimilarity
+          // check (deliberately prioritized so a REAL result always wins
+          // over a stale failure marker) would then mask this genuinely
+          // fresh failure behind that stale "resolved" score.
+          payload.unifiedSimilarity = undefined;
+          payload.unifiedSimilarityFailed = true;
+          payload.corpusSourceMatchingEnabledAtComputation = resolution.corpusSourceMatchingEnabled;
+          payload.unifiedSimilarityGeneration = resolution.corpusGeneration;
+          try {
+            const persistedPayload = {
+              ...(JSON.parse(String(row.payload_json)) as SimilarityReport),
+              unifiedSimilarity: undefined,
+              unifiedSimilarityFailed: true,
+              corpusSourceMatchingEnabledAtComputation: resolution.corpusSourceMatchingEnabled,
+              unifiedSimilarityGeneration: resolution.corpusGeneration,
+            };
+            await client.execute({
+              sql: `UPDATE saved_reports SET payload_json = ?
+                    WHERE device_key = ? AND id = ?
+                      AND COALESCE(json_extract(payload_json, '$.unifiedSimilarityGeneration'), -1) <= ?`,
+              args: [JSON.stringify(persistedPayload), row.device_key, id, resolution.corpusGeneration],
+            });
+          } catch (err) {
+            console.error('persisting the terminal similarity failure marker failed (non-fatal, this response still reflects it):', err instanceof Error ? err.message : String(err));
+          }
+        }
+        // Release-hardening audit finding UI-02 (continued): unlike
+        // historicalSubmissionMatch above, unifiedSimilarity itself is NEVER
+        // gated — it is the finalized aggregate result (score, word counts,
+        // pass/fail evidence totals) every viewer must keep seeing
+        // immediately, admin or not. But contributions[] — a per-passage
+        // breakdown carrying the same internal representation id
+        // (sourceId) and relationshipType-shaped label
+        // (contributions[].relationship) as historicalSubmissionMatch's own
+        // matches[] — is not rendered by any production UI (see
+        // components/report/similarity-report-papers.tsx's own
+        // unifiedEvidenceBreakdown, which reads the flat archiveOnlyWords/
+        // liveAcademicOnlyWords/previousUploadOnlyWords/overlapWords
+        // counters, never contributions) and exists purely for internal/
+        // shadow-evaluation use. Stripped here for the same non-admin
+        // audience and the same reason as historicalSubmissionMatch — an
+        // ordinary viewer must never receive the internal id even nested
+        // inside the object this fix otherwise preserves untouched. Handles
+        // both the freshly-resolved case just above AND the passthrough
+        // case (resolution.unifiedSimilarity was falsy this request, so
+        // payload.unifiedSimilarity is whatever an earlier successful save
+        // already persisted).
+        if (payload.unifiedSimilarity && sessionUser?.role !== 'admin') {
+          payload.unifiedSimilarity = { ...payload.unifiedSimilarity, contributions: [] };
         }
         // Phase E8P.3: the experimental, allowlist-gated display value — see
         // lib/e8p-visibility.ts's own header comment. Synchronous (unlike the

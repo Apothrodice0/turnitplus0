@@ -98,13 +98,21 @@ export type RoomOccupantResult =
  * cheaply obtain — isHistoricalMatchSnapshotCurrent's own two SELECTs, no
  * different in kind from the ones this function's SQL already runs, and
  * still no matcher call of any kind.
+ *
+ * LIFECYCLE-03 correction: this display resolution now runs for every
+ * non-empty occupant, not only "ready"/"failed" — see the inline comment at
+ * its own call site for why "processing" (AI-wise) is not a reason to skip
+ * it. Similarity and AI-writing detection are independent pipelines; a room
+ * still mid-AI-analysis can have a fully finalized, immediately displayable
+ * similarity result.
  */
 export async function findRoomOccupant(client: Client, userId: string, room: number): Promise<RoomOccupantResult> {
   const result = await client.execute({
     sql: `SELECT id, submission_id, title, report_created_at, word_count, archive_score, score_band, ai_score, ai_tone, ai_status, device_key,
                  json_extract(payload_json, '$.unifiedSimilarity.unifiedScore') AS unified_score,
                  json_extract(payload_json, '$.unifiedSimilarity') IS NOT NULL AS has_unified,
-                 json_extract(payload_json, '$.corpusSourceMatchingEnabledAtComputation') AS corpus_flag_at_computation
+                 json_extract(payload_json, '$.corpusSourceMatchingEnabledAtComputation') AS corpus_flag_at_computation,
+                 json_extract(payload_json, '$.unifiedSimilarityFailed') AS unified_failed
           FROM saved_reports WHERE user_id = ? AND room_number = ?
           ORDER BY report_created_at DESC LIMIT 1`,
     args: [userId, room],
@@ -114,6 +122,7 @@ export async function findRoomOccupant(client: Client, userId: string, room: num
       id: string | number; submission_id: string; title: string; report_created_at: string; word_count: number; archive_score: number;
       score_band: string; ai_score: number | null; ai_tone: string | null; ai_status: string | null; device_key: string;
       unified_score: number | bigint | null; has_unified: number | bigint; corpus_flag_at_computation: number | bigint | null;
+      unified_failed: number | bigint | null;
     }
     | undefined;
   if (!occupant || !isWithinActiveCycle(occupant.report_created_at)) {
@@ -125,13 +134,22 @@ export async function findRoomOccupant(client: Client, userId: string, room: num
   const hasUnifiedSimilarity = Number(occupant.has_unified) === 1;
   let primaryScore = archiveScore;
   let isUnified = false;
-  let similarityStatus: "resolved" | "stale" | "pending" = "pending";
+  let similarityStatus: "resolved" | "stale" | "pending" | "failed" = "pending";
 
-  // Same "only for a room whose score is actually about to be displayed"
-  // scoping as before — a "processing" occupant shows no numeric
-  // similarity at all, so isHistoricalMatchSnapshotCurrent's own two
-  // SELECTs would be pure waste on this hot, polled path.
-  if (status === "ready" || status === "failed") {
+  // Release-hardening audit finding LIFECYCLE-03: previously scoped to only
+  // "ready"/"failed" — the reasoning was "a processing occupant shows no
+  // numeric similarity at all," which was true under the OLD room-page-
+  // shell.tsx design (the entire processing tile set, AI and Similarity
+  // alike, was gated on ai_status). That coupling was itself the bug: write-
+  // time finalization (app/api/reports/route.ts) can persist a fully
+  // resolved unifiedSimilarity well before AI analysis finishes — AI and
+  // similarity are genuinely independent pipelines — so a "processing"
+  // occupant (AI-wise) can very much have a real, immediate similarity
+  // result to show. resolvePersistedSimilarityDisplay is still the same
+  // cheap json_extract-plus-two-SELECTs read no matter which status calls
+  // it — there is no "processing-only" cost to avoid, only a
+  // "empty" (no report at all) case, already returned above.
+  {
     const display = await resolvePersistedSimilarityDisplay(client, {
       reportDeviceKey: occupant.device_key,
       reportId: String(occupant.id),
@@ -139,6 +157,7 @@ export async function findRoomOccupant(client: Client, userId: string, room: num
       unifiedScore: occupant.unified_score === null ? null : Number(occupant.unified_score),
       hasUnifiedSimilarity,
       corpusSourceMatchingEnabledAtComputation: occupant.corpus_flag_at_computation === null ? null : Number(occupant.corpus_flag_at_computation) === 1,
+      unifiedSimilarityFailed: Number(occupant.unified_failed) === 1,
     });
     similarityStatus = display.status;
     // display.primaryScore/isUnified do not exist outside this branch — the

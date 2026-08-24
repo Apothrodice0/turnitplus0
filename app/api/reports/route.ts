@@ -26,7 +26,7 @@ function isNonEmptyString(value: unknown): value is string {
 
 // Release-hardening audit finding LIFECYCLE-02: two AI-completion resaves
 // for the same report can race (the automatic post-upload pass in one tab
-// still finishing while a different tab/device's manual "Retry AI check"
+// still finishing while a different tab/device's manual "Retry analysis"
 // also completes — both target the same (device_key, id), see
 // app/reports/rooms/[room]/room-page-shell.tsx's saveEnrichedAiResult). A
 // plain unconditional UPSERT is last-write-wins: whichever request's
@@ -350,19 +350,24 @@ export async function POST(request: Request) {
       // lib/unified-similarity.ts's own DECISION 3).
       //
       // Release-hardening audit finding SIM-04: wrapped in its own
-      // try/catch — resolvePrimarySimilaritySummary is already internally
-      // defensive (never throws by its own documented contract), but this
-      // is the same "belt and suspenders" second layer every other
-      // read-time enrichment in this codebase already has (see
-      // app/api/reports/[id]/route.ts's own historicalSubmissionMatch
-      // try/catch). A genuine timeout/failure here must never fail the
-      // report save itself: on catch, payloadJsonToPersist stays the
-      // client's own submitted payloadJson — no unifiedSimilarity
-      // attached, which is exactly the "pending" state
-      // resolvePersistedSimilarityDisplay already defines (neutral
-      // loading, never a false 0%) — and SAVE_REPORT_SQL's own generation
-      // guard above ensures this unenriched payload can never regress an
-      // already-good persisted result from an earlier successful save.
+      // try/catch — this OUTER catch is for anything unexpected bubbling
+      // out of resolvePrimarySimilaritySummary itself (e.g. a DB
+      // connectivity error in getCurrentCorpusMatchGeneration or the
+      // historical-match snapshot's own initial read, both outside that
+      // function's own try/catch) — likely transient infrastructure
+      // trouble, not a permanent, reproducible computation failure, so it
+      // is deliberately left as "pending" (payloadJsonToPersist stays the
+      // client's own submitted payloadJson, unchanged), eligible for an
+      // automatic retry on the next view. This is distinct from
+      // resolution.failed below (LIFECYCLE-06, corrected): THAT is
+      // resolvePrimarySimilaritySummary's own INNER catch — computeUnifiedSimilarity
+      // itself threw for this report's own data, a genuine, reproducible
+      // overall-computation failure — persisted explicitly as
+      // unifiedSimilarityFailed: true rather than silently staying
+      // "pending" forever. SAVE_REPORT_SQL's own generation guard protects
+      // both branches identically: an unenriched or failed-and-persisted
+      // payload can never regress an already-good persisted result from an
+      // earlier successful save.
       let payloadJsonToPersist = payloadJson;
       const reportPayload = payload as SimilarityReport;
       if (isNonEmptyString(reportPayload?.text)) {
@@ -381,6 +386,54 @@ export async function POST(request: Request) {
             payloadJsonToPersist = JSON.stringify({
               ...reportPayload,
               unifiedSimilarity: resolution.unifiedSimilarity,
+              corpusSourceMatchingEnabledAtComputation: resolution.corpusSourceMatchingEnabled,
+              unifiedSimilarityGeneration: resolution.corpusGeneration,
+              // Explicit false, never omitted: a resave following an
+              // earlier genuine failure must clear that marker, not let it
+              // survive via reportPayload's own spread (which, for a retry
+              // resave built by re-reading the previously stored report,
+              // could otherwise still carry it forward).
+              unifiedSimilarityFailed: false,
+            });
+            if (payloadJsonToPersist.length > MAX_BYTES) {
+              return new NextResponse(JSON.stringify({ error: 'Payload too large' }), { status: 413 });
+            }
+          } else if (resolution.failed) {
+            // Release-hardening audit finding LIFECYCLE-06 (corrected): a
+            // genuine, reproducible overall-computation failure (see
+            // resolution.failed's own comment) — persisted explicitly
+            // instead of silently leaving this report indistinguishable
+            // from "never attempted" (which stays "pending" forever,
+            // auto-retried on every view, but never gives the user an
+            // honest, actionable "Unavailable" the atomic reveal can work
+            // with). unifiedSimilarityGeneration is still recorded so this
+            // write participates correctly in SAVE_REPORT_SQL's own
+            // generation guard below — omitting it would let COALESCE(...,
+            // -1) make this failure write always lose to ANY already-
+            // persisted generation, including a much older one, and never
+            // actually land.
+            //
+            // Release-hardening audit finding LIFECYCLE-06 (approval-pass
+            // fix): unifiedSimilarity: undefined is REQUIRED here, not
+            // decorative. reportPayload is the client's own submitted
+            // payload — for a resave built from a locally-cached copy of a
+            // PREVIOUSLY successful result (e.g. saveEnrichedAiResult's
+            // {...report, ...aiResult} spread), reportPayload.unifiedSimilarity
+            // can already be set. Without this explicit clear, the spread
+            // below would silently carry that stale success forward
+            // alongside the fresh unifiedSimilarityFailed marker —
+            // resolvePersistedSimilarityDisplay checks hasUnifiedSimilarity
+            // BEFORE unifiedSimilarityFailed (a real result is meant to
+            // always win over a stale failure marker — see that function's
+            // own comment), so a lingering stale success would silently
+            // mask this genuinely fresh failure, showing "resolved" with an
+            // outdated score instead of "Unavailable". JSON.stringify drops
+            // an `undefined`-valued key entirely, so this genuinely deletes
+            // the field rather than persisting a literal null.
+            payloadJsonToPersist = JSON.stringify({
+              ...reportPayload,
+              unifiedSimilarity: undefined,
+              unifiedSimilarityFailed: true,
               corpusSourceMatchingEnabledAtComputation: resolution.corpusSourceMatchingEnabled,
               unifiedSimilarityGeneration: resolution.corpusGeneration,
             });

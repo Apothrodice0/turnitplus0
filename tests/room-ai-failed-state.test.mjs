@@ -41,11 +41,16 @@ test("My Reports room-list label distinguishes 'failed' from 'processing' and 'r
 test("the room page has a dedicated 'failed' render branch — never reuses the 'ready' branch with a blank score", async () => {
   const shell = await readFile(new URL("../app/reports/rooms/[room]/room-page-shell.tsx", import.meta.url), "utf8");
 
-  assert.match(shell, /\{occupant\.status === "failed" && occupant\.report && \(/, "a dedicated failed-status render branch must exist");
+  // Release-hardening audit finding LIFECYCLE-05: both branches additionally
+  // require isFullyRevealed(occupant) now — an AI failure alone still gets
+  // its own dedicated branch (never reuses "ready" with a blank score), but
+  // only once similarity has also resolved; see room-processing-navigation.test.mjs
+  // for the dedicated coverage of that combined gate itself.
+  assert.match(shell, /\{occupant\.status === "failed" && isFullyRevealed\(occupant\) && occupant\.report && \(/, "a dedicated failed-status render branch must exist");
 
-  const failedBranchStart = shell.indexOf('{occupant.status === "failed" && occupant.report && (');
+  const failedBranchStart = shell.indexOf('{occupant.status === "failed" && isFullyRevealed(occupant) && occupant.report && (');
   assert.ok(failedBranchStart > -1);
-  const readyBranchStart = shell.indexOf('{occupant.status === "ready" && occupant.report && (');
+  const readyBranchStart = shell.indexOf('{occupant.status === "ready" && isFullyRevealed(occupant) && occupant.report && (');
   assert.ok(readyBranchStart > -1 && readyBranchStart < failedBranchStart, "the failed branch must be a sibling of, not nested inside, the ready branch");
 
   const failedBranch = shell.slice(failedBranchStart);

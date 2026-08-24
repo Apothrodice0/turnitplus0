@@ -8,6 +8,7 @@ import * as reportsRoute from '../app/api/reports/route.ts';
 import * as reportIdRoute from '../app/api/reports/[id]/route.ts';
 import * as signupRoute from '../app/api/auth/signup/route.ts';
 import { resetRateForTest, resetAuthRateForTest } from '../lib/rate-limit.js';
+import { getOrComputeHistoricalMatchSnapshot } from '../lib/report-historical-match.ts';
 
 const repo = path.resolve('.');
 const drizzleDir = path.join(repo, 'drizzle');
@@ -114,7 +115,17 @@ async function signup(email, deviceKey) {
   // path via the live route, unchanged — see
   // tests/report-privacy-consent.test.mjs for the dedicated consent on/off
   // behavior this gate itself needs.
-  await setupClient.execute({ sql: 'UPDATE users SET corpus_reuse_consented_at = CURRENT_TIMESTAMP WHERE email = ?', args: [email] });
+  //
+  // Release-hardening audit finding UI-02: historicalSubmissionMatch is now
+  // admin-only on the GET response — this file's own scenarios read its
+  // `.status`/`.matches` to verify the underlying snapshot/matcher
+  // behavior, orthogonal to admin-only VISIBILITY. Promoted here too,
+  // matching tests/report-match-classification.test.mjs's own precedent;
+  // visibility itself is covered separately in tests/report-historical-
+  // match-visibility.test.mjs. The file's own ANONYMOUS scenario has no
+  // session to promote at all — it calls the underlying snapshot function
+  // directly instead, matching this same file's other real-matcher tests.
+  await setupClient.execute({ sql: "UPDATE users SET corpus_reuse_consented_at = CURRENT_TIMESTAMP, role = 'admin' WHERE email = ?", args: [email] });
   return { res, cookie: extractCookie(res) };
 }
 
@@ -250,6 +261,22 @@ test('ANONYMOUS: an anonymous report still loads normally and, if a match exists
   const getRes = await getReport(id, { deviceKey });
   assert.equal(getRes.status, 200, 'an anonymous report must still load normally');
   const body = await getRes.json();
-  assert.equal(body.payload.historicalSubmissionMatch?.status, 'MATCHED');
-  assert.equal(body.payload.historicalSubmissionMatch.matches[0].relationshipType, 'UNKNOWN_RELATIONSHIP', 'an anonymous viewer must never be classified SELF');
+  // Release-hardening audit finding UI-02: historicalSubmissionMatch is
+  // admin-only on the GET response, and there is no session at all here to
+  // promote to admin — this is exactly the case that field's own gate
+  // exists to protect (see tests/report-historical-match-visibility.test.mjs's
+  // role-spoof coverage), so the response itself correctly carries nothing.
+  // This scenario's own purpose is the real matcher's UNKNOWN_RELATIONSHIP
+  // classification, so it reaches the same underlying computation the GET
+  // route itself calls, directly, server-side.
+  assert.equal(body.payload.historicalSubmissionMatch, undefined, 'REQUIRED (UI-02): an anonymous viewer must never receive historicalSubmissionMatch via the response');
+  const readClient = createClient({ url: `file:${dbFile}` });
+  let anonMatch;
+  try {
+    anonMatch = await getOrComputeHistoricalMatchSnapshot(readClient, { reportDeviceKey: deviceKey, reportId: id, accountId: null, rawText: text });
+  } finally {
+    readClient.close();
+  }
+  assert.equal(anonMatch.status, 'MATCHED');
+  assert.equal(anonMatch.matches[0].relationshipType, 'UNKNOWN_RELATIONSHIP', 'an anonymous viewer must never be classified SELF');
 });
