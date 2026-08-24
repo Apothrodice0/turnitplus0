@@ -1,6 +1,6 @@
 import type { Client } from "@libsql/client";
 import { deriveRoomStatus, isWithinActiveCycle, roomCycleEndsAt } from "./report-rooms";
-import { resolvePersistedSimilarityDisplay, selfHealMissingUnifiedSimilarity } from "./report-primary-similarity";
+import { resolvePersistedSimilarityDisplay, selfHealUnifiedSimilarity } from "./report-primary-similarity";
 import type { ReportSummary } from "./reports-remote";
 
 // device_key added in Phase E8C, additively — every existing caller that
@@ -137,61 +137,17 @@ export async function findRoomOccupant(client: Client, userId: string, room: num
   let unifiedSimilarityFailed = Number(occupant.unified_failed) === 1;
   let primaryScore = archiveScore;
   let isUnified = false;
-  let similarityStatus: "resolved" | "stale" | "pending" | "failed" = "pending";
 
-  // Legacy-room bug fix: neither a real unifiedSimilarity nor an explicit
-  // failure marker has ever been persisted for this row. Per write-time
-  // finalization's own synchronous guarantee (app/api/reports/route.ts —
-  // every save that reaches the DB has already either succeeded, explicitly
-  // failed, or hit the rare transient-infra skip in that route's own outer
-  // catch), this combination can only mean finalization was never even
-  // reachable for this row: a genuinely legacy row saved before write-time
-  // finalization existed, or that rare transient skip. Never inferred from
-  // room number, report age, a timeout, or text presence — see
-  // selfHealMissingUnifiedSimilarity's own header comment for the full
-  // reasoning. Attempted at most once per still-ambiguous read: on success
-  // it persists a real result (or an explicit failure marker) using the
-  // same generation-guarded write write-time finalization and the detail
-  // page's own self-heal already use, so every subsequent findRoomOccupant
-  // call for this row — a reload, a logout/login, a later poll — sees an
-  // already-resolved (or already-failed) row through the ordinary cheap
-  // path below and never re-enters this branch again. Never touches
-  // ai_score/ai_status: the AI pipeline is completely independent and is
-  // never rerun or restarted by this.
-  if (!hasUnifiedSimilarity && !unifiedSimilarityFailed) {
-    const healed = await selfHealMissingUnifiedSimilarity(client, {
-      reportDeviceKey: occupant.device_key,
-      reportId: String(occupant.id),
-      accountId: userId,
-    });
-    if (healed.attempted && healed.outcome === "resolved") {
-      hasUnifiedSimilarity = true;
-      unifiedScore = healed.unifiedSimilarity.unifiedScore;
-      corpusFlagAtComputation = healed.corpusSourceMatchingEnabled;
-    } else if (healed.attempted && healed.outcome === "failed") {
-      unifiedSimilarityFailed = true;
-    }
-    // attempted:false (nothing to heal, or a genuine transient infra error
-    // during the attempt itself): falls through to resolvePersistedSimilarityDisplay
-    // below exactly as before — "pending," eligible for another attempt on
-    // the next room read, never a fabricated resolved/failed state.
-  }
-
-  // Release-hardening audit finding LIFECYCLE-03: previously scoped to only
-  // "ready"/"failed" — the reasoning was "a processing occupant shows no
-  // numeric similarity at all," which was true under the OLD room-page-
-  // shell.tsx design (the entire processing tile set, AI and Similarity
-  // alike, was gated on ai_status). That coupling was itself the bug: write-
+  // Release-hardening audit finding LIFECYCLE-03: this display resolution
+  // runs for every non-empty occupant, not only "ready"/"failed" — write-
   // time finalization (app/api/reports/route.ts) can persist a fully
-  // resolved unifiedSimilarity well before AI analysis finishes — AI and
-  // similarity are genuinely independent pipelines — so a "processing"
+  // resolved unifiedSimilarity well before AI analysis finishes (AI and
+  // similarity are genuinely independent pipelines), so a "processing"
   // occupant (AI-wise) can very much have a real, immediate similarity
-  // result to show. resolvePersistedSimilarityDisplay is still the same
-  // cheap json_extract-plus-two-SELECTs read no matter which status calls
-  // it — there is no "processing-only" cost to avoid, only a
-  // "empty" (no report at all) case, already returned above.
-  {
-    const display = await resolvePersistedSimilarityDisplay(client, {
+  // result to show. resolvePersistedSimilarityDisplay is a cheap
+  // json_extract-plus-two-SELECTs read no matter which status calls it.
+  const readDisplay = () =>
+    resolvePersistedSimilarityDisplay(client, {
       reportDeviceKey: occupant.device_key,
       reportId: String(occupant.id),
       archiveScore,
@@ -200,17 +156,74 @@ export async function findRoomOccupant(client: Client, userId: string, room: num
       corpusSourceMatchingEnabledAtComputation: corpusFlagAtComputation,
       unifiedSimilarityFailed,
     });
-    similarityStatus = display.status;
-    // display.primaryScore/isUnified do not exist outside this branch — the
-    // discriminated union itself is what prevents this call site from ever
-    // reading a fallback number out of "stale"/"pending" and rendering it as
-    // final; primaryScore/isUnified above simply keep their archive-only/
-    // false defaults in that case, chosen explicitly right here, not
-    // smuggled out of the resolver.
-    if (display.status === "resolved") {
-      primaryScore = display.primaryScore;
-      isUnified = display.isUnified;
+
+  // Legacy-room bug fix (Preview regression, corrected): the self-heal
+  // trigger must never duplicate resolvePersistedSimilarityDisplay's own
+  // freshness rules (generation comparison, live-flag comparison,
+  // snapshot-currency check) as a second, parallel gate here. An earlier
+  // version of this fix gated self-heal on the RAW hasUnifiedSimilarity /
+  // unifiedSimilarityFailed flags (!hasUnifiedSimilarity &&
+  // !unifiedSimilarityFailed), which only ever covers "nothing was ever
+  // persisted." A real Preview row had an ALREADY-persisted unifiedSimilarity
+  // (a genuine, previously-computed 0%) that simply predated
+  // unifiedSimilarityGeneration/corpusSourceMatchingEnabledAtComputation
+  // existing at all: hasUnifiedSimilarity was true, so that gate never
+  // fired; resolvePersistedSimilarityDisplay correctly, honestly classified
+  // it "stale," but nothing ever acted on "stale" at the room layer, so the
+  // room polled it forever.
+  //
+  // The fix: ask the canonical resolver for its verdict FIRST, and treat
+  // "pending" and "stale" identically as actionable, since both mean "the
+  // persisted state is not an authoritative answer right now" - whether
+  // because nothing was ever persisted, or because what was persisted no
+  // longer reflects current freshness metadata. "resolved" and "failed"
+  // are both already terminal and need no action ("failed" is a genuine,
+  // reproducible computation failure and must never be retried on every
+  // room read). Never inferred from room number, report age, a timeout, or
+  // text presence - see selfHealUnifiedSimilarity's own header comment for
+  // the full reasoning. Attempted at most once per still-non-terminal read:
+  // on success it persists a real result (or an explicit failure marker)
+  // using the same generation-guarded write write-time finalization and the
+  // detail page's own self-heal already use, so every subsequent
+  // findRoomOccupant call for this row - a reload, a logout/login, a later
+  // poll - sees an already-resolved (or already-failed) row and never
+  // re-enters this branch again. Never touches ai_score/ai_status: the AI
+  // pipeline is completely independent and is never rerun or restarted by
+  // this.
+  let display = await readDisplay();
+  if (display.status === "pending" || display.status === "stale") {
+    const healed = await selfHealUnifiedSimilarity(client, {
+      reportDeviceKey: occupant.device_key,
+      reportId: String(occupant.id),
+      accountId: userId,
+    });
+    if (healed.attempted && healed.outcome === "resolved") {
+      hasUnifiedSimilarity = true;
+      unifiedSimilarityFailed = false;
+      unifiedScore = healed.unifiedSimilarity.unifiedScore;
+      corpusFlagAtComputation = healed.corpusSourceMatchingEnabled;
+    } else if (healed.attempted && healed.outcome === "failed") {
+      hasUnifiedSimilarity = false;
+      unifiedSimilarityFailed = true;
     }
+    // attempted:false (nothing to heal after all, or a genuine transient
+    // infra error during the attempt itself): local fields are left
+    // unchanged, so the re-read below returns the identical pending/stale
+    // verdict `display` already held - eligible for another attempt on the
+    // next room read, never a fabricated resolved/failed state.
+    display = await readDisplay();
+  }
+
+  // display.primaryScore/isUnified do not exist outside the "resolved"
+  // branch - the discriminated union itself is what prevents this call
+  // site from ever reading a fallback number out of "stale"/"pending" and
+  // rendering it as final; primaryScore/isUnified above simply keep their
+  // archive-only/false defaults otherwise, chosen explicitly right here,
+  // not smuggled out of the resolver.
+  const similarityStatus = display.status;
+  if (display.status === "resolved") {
+    primaryScore = display.primaryScore;
+    isUnified = display.isUnified;
   }
 
   return {

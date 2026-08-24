@@ -154,18 +154,27 @@ export async function resolvePrimarySimilaritySummary(
  *    since this report's own result was computed with it off (the opposite
  *    flag transition from "resolved" above — NOT deterministic: a
  *    newly-eligible corpus source cannot be ruled out without actually
- *    running the matcher again). The caller must show "Updating
- *    similarity…" — there is no number here to render even by accident.
+ *    running the matcher again), OR the persisted result predates
+ *    unifiedSimilarityGeneration/corpusSourceMatchingEnabledAtComputation
+ *    existing at all (a genuinely legacy row — see selfHealUnifiedSimilarity's
+ *    own header comment for the Preview regression this specific case
+ *    caused: a caller that only re-resolves the "pending" case below and
+ *    leaves "stale" as a dead end leaves such a row polling forever). The
+ *    caller must show "Updating similarity…" — there is no number here to
+ *    render even by accident — UNLESS it can reach the row directly, in
+ *    which case (see "pending" below) it is expected to self-heal this too.
  *  - "pending": no unifiedSimilarity has ever been persisted for this
  *    report AND no terminal failure has been recorded either — this
  *    resolver itself never recomputes to find out why (see this function's
  *    own header comment: no DB-touching calls, no matcher). A caller that
  *    can reach the row directly (lib/reports-repo.ts's findRoomOccupant) is
- *    expected to attempt selfHealMissingUnifiedSimilarity below exactly
- *    once before ever calling this function with a still-missing result —
- *    see that function's own header comment for why "pending" alone must
- *    never be read as "archive-only is close enough." The caller must show
- *    neutral loading — again, no number to render.
+ *    expected to treat this identically to "stale" above — attempt
+ *    selfHealUnifiedSimilarity below exactly once, then re-ask this same
+ *    resolver for the terminal verdict — before ever surfacing a
+ *    still-non-terminal result to the user. See that function's own header
+ *    comment for why "pending" alone must never be read as "archive-only is
+ *    close enough." The caller must show neutral loading — again, no
+ *    number to render.
  *  - "failed" (release-hardening audit finding LIFECYCLE-06, corrected):
  *    the last write-time/self-heal attempt genuinely, reproducibly failed
  *    — resolvePrimarySimilaritySummary's own computeUnifiedSimilarity
@@ -256,32 +265,56 @@ export type SelfHealResult =
   | { attempted: false };
 
 /**
- * Legacy-room bug fix (revised — the read-time "text present -> archive-only
- * resolved" normalization this replaces was rejected: !hasUnifiedSimilarity
- * && !unifiedSimilarityFailed can genuinely mean either a legacy row OR a
+ * Legacy-room bug fix, twice-revised.
+ *
+ * REJECTED FIRST FIX: reading "no unifiedSimilarity + no failure marker +
+ * real text present" as "resolved, archive-only" — !hasUnifiedSimilarity &&
+ * !unifiedSimilarityFailed can genuinely mean either a legacy row OR a
  * modern row whose write-time finalization hit the rare transient-infra
- * skip in app/api/reports/route.ts's own outer catch — text presence alone
+ * skip in app/api/reports/route.ts's own outer catch; text presence alone
  * cannot tell those apart, and inferring archiveScore as final for either
  * one can show a false terminal 0% for what is actually a 100% promoted-
- * corpus-source match, reintroducing the exact bug the corpus-aware
- * unifiedSimilarity work eliminated).
+ * corpus-source match.
  *
- * The correct fix is not a smarter guess — it is to stop guessing and
- * invoke the SAME authoritative resolver every other finalization path
- * already uses (resolvePrimarySimilaritySummary — write-time finalization
- * in app/api/reports/route.ts, and the detail page's own self-heal in
- * app/api/reports/[id]/route.ts), then persist whatever it returns with the
- * SAME generation-guarded write those paths already use. Called from
- * lib/reports-repo.ts's findRoomOccupant exactly once per ambiguous read:
- * on success, hasUnifiedSimilarity/unifiedSimilarityFailed are updated in
- * the DB, so every subsequent findRoomOccupant call for this row (reload,
- * logout/login, a later poll) sees an already-resolved or already-failed
- * row through resolvePersistedSimilarityDisplay's own ordinary cheap path
- * above and never re-enters this function again. This is compatibility
- * self-heal, not repeated analysis — it never touches ai_score/ai_status
- * (the AI pipeline is untouched, never rerun, never restarted) and never
- * re-extracts or re-reads the source document beyond the rawText already
- * sitting in payload_json.
+ * PREVIEW REGRESSION (ca89842): the second fix gated this function's own
+ * invocation on the RAW hasUnifiedSimilarity/unifiedSimilarityFailed flags
+ * — !hasUnifiedSimilarity && !unifiedSimilarityFailed — which only ever
+ * covers "no unifiedSimilarity has ever been persisted." A real legacy row
+ * observed in Preview had a real, ALREADY-persisted unifiedSimilarity (a
+ * genuine, previously-computed 0%) that simply predates
+ * unifiedSimilarityGeneration/corpusSourceMatchingEnabledAtComputation
+ * existing at all — hasUnifiedSimilarity was true, so this function was
+ * never called; resolvePersistedSimilarityDisplay correctly, honestly
+ * classified it "stale" (a live-flag roll-forward since computation, per
+ * that function's own comment) — but nothing at the room layer ever acted
+ * on "stale," so the room polled it forever.
+ *
+ * ACCEPTED FIX: this function's own body does not change — it already
+ * re-resolves from scratch and persists unconditionally, regardless of
+ * whether a unifiedSimilarity value previously existed. What changes is the
+ * CALLER's own trigger condition (lib/reports-repo.ts's findRoomOccupant):
+ * instead of duplicating resolvePersistedSimilarityDisplay's own freshness
+ * rules (generation, live-flag comparison, snapshot currency) as a second,
+ * parallel gate, the caller asks that SAME canonical resolver for its
+ * verdict FIRST, and treats "pending" and "stale" alike as actionable —
+ * both mean "the persisted state is not an authoritative answer right
+ * now," whether because nothing was ever persisted or because what was
+ * persisted no longer reflects current freshness metadata. Renamed from
+ * selfHealMissingUnifiedSimilarity to reflect that it is no longer only
+ * for the missing case.
+ *
+ * Called from findRoomOccupant exactly once per non-terminal read: on
+ * success, hasUnifiedSimilarity/unifiedSimilarityFailed are updated in the
+ * DB (via the SAME generation-guarded write write-time finalization and
+ * the detail page's own self-heal already use), so every subsequent
+ * findRoomOccupant call for this row (reload, logout/login, a later poll)
+ * sees an already-resolved or already-failed row through
+ * resolvePersistedSimilarityDisplay's own ordinary cheap path and never
+ * re-enters this function again. This is compatibility self-heal, not
+ * repeated analysis — it never touches ai_score/ai_status (the AI pipeline
+ * is untouched, never rerun, never restarted) and never re-extracts or
+ * re-reads the source document beyond the rawText already sitting in
+ * payload_json.
  *
  * Deliberately does not special-case missing/empty text as a reason to
  * skip the attempt: resolvePrimarySimilaritySummary's own
@@ -300,7 +333,7 @@ export type SelfHealResult =
  * exactly as ambiguous as before — eligible for another attempt on the next
  * view, never persisted as a false resolved/failed state.
  */
-export async function selfHealMissingUnifiedSimilarity(
+export async function selfHealUnifiedSimilarity(
   client: Client,
   params: { reportDeviceKey: string; reportId: string; accountId: string | null },
 ): Promise<SelfHealResult> {
@@ -358,7 +391,7 @@ export async function selfHealMissingUnifiedSimilarity(
     }
     return { attempted: false };
   } catch (err) {
-    console.error("selfHealMissingUnifiedSimilarity failed (non-fatal — row remains eligible for another attempt on the next room read):", err instanceof Error ? err.message : String(err));
+    console.error("selfHealUnifiedSimilarity failed (non-fatal — row remains eligible for another attempt on the next room read):", err instanceof Error ? err.message : String(err));
     return { attempted: false };
   }
 }
