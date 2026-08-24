@@ -455,44 +455,57 @@ export function UnifiedSimilaritySection({ report }: { report: SimilarityReport 
  * card — this component was simply never wired to them. Both now share the
  * exact same selection, so every surface derived from this report agrees.
  *
- * Release-hardening audit finding SIM-02: `pending` — true only while the
- * caller (app/reports/[id]/report-detail-shell.tsx) has not yet resolved
- * the report's real combined similarity result. Defaults to false so every
- * existing call site (the print bundle, every test fixture in this
- * codebase) keeps rendering exactly as before; only the live detail page
- * ever passes true, and only while its own resolution effect is in flight.
- * Renders a plain "Calculating similarity…" placeholder in place of the
- * score/band/banner instead of primarySimilarityScore's own archive-only
- * fallback value — the fallback is only ever the right thing to show once
- * resolution has genuinely settled (see primaryMatchingPending's own
- * comment in report-detail-shell.tsx), never while it is still pending.
- * Every matching-derived section below the headline (UnifiedSimilaritySection,
+ * Release-hardening audit finding SIM-02, refined by SIM-04: `similarityStatus`
+ * — "resolved" (default, so every existing call site: the print bundle,
+ * every test fixture in this codebase, renders exactly as before),
+ * "pending" (nothing persisted yet — app/reports/[id]/report-detail-shell.tsx
+ * has not yet resolved the report's real combined result), or "stale" (a
+ * real combined result WAS persisted, but the server says it no longer
+ * reflects the current corpus generation/CORPUS_SOURCE_MATCHING_ENABLED
+ * state — see lib/report-primary-similarity.ts's
+ * resolvePersistedSimilarityDisplay). "pending" and "stale" BOTH render a
+ * neutral placeholder instead of the score/band/banner rather than
+ * primarySimilarityScore's own archive-only fallback value — requirement
+ * SIM-04's own explicit rule for "stale": show "Updating similarity…"
+ * RATHER THAN the persisted score, never alongside it, since that
+ * persisted number may itself be exactly what is about to change. Every
+ * matching-derived section below the headline (UnifiedSimilaritySection,
  * the historical-match blocks, the admin-only matchClassification block) is
- * ALSO gated on `!pending` — see that guard's own comment for why this is
- * defensive rather than redundant. MatchGroups/CategorySummary/SourceList
- * and AcademicEvidenceSection are untouched: both read data that is already
- * correct before `pending` ever becomes true (report.sources is archive
- * data attached at save time; externalAcademicEvidence is resolved before
- * a report is ever first saved — see AcademicEvidenceSection's own call
- * site comment below).
+ * ALSO gated on `similarityStatus === "resolved"` — see that guard's own
+ * comment for why this is defensive rather than redundant.
+ * MatchGroups/CategorySummary/SourceList and AcademicEvidenceSection are
+ * untouched: both read data that is already correct regardless of this
+ * status (report.sources is archive data attached at save time;
+ * externalAcademicEvidence is resolved before a report is ever first
+ * saved — see AcademicEvidenceSection's own call site comment below).
  */
-export function OverviewReport({ report, pending = false }: { report: SimilarityReport; pending?: boolean }) {
+export function OverviewReport({ report, similarityStatus = "resolved" }: { report: SimilarityReport; similarityStatus?: "resolved" | "stale" | "pending" }) {
   const primaryScore = primarySimilarityScore(report);
   const primaryLabel = primaryResultLabel(report);
   const isUnified = hasUnifiedSimilarity(report);
   const similarityVerdict = similarityScoreBand(primaryScore);
   const wikipediaMatches = report.webCheck?.phrasesMatched ?? 0;
+  const notResolved = similarityStatus !== "resolved";
   return (
     <article className="report-paper overview-paper">
       <ReportPageHeader report={report} page={2} label="Integrity Overview" />
       <div className="paper-content">
-        {pending ? (
-          <section className="similarity-heading similarity-heading-pending" aria-live="polite" aria-busy="true" aria-label="Calculating similarity">
+        {notResolved ? (
+          <section
+            className={`similarity-heading similarity-heading-pending similarity-heading-${similarityStatus}`}
+            aria-live="polite"
+            aria-busy="true"
+            aria-label={similarityStatus === "stale" ? "Updating similarity" : "Calculating similarity"}
+          >
             <h2>
               <span className="similarity-skeleton" aria-hidden="true" />
-              Calculating similarity…
+              {similarityStatus === "stale" ? "Updating similarity…" : "Calculating similarity…"}
             </h2>
-            <p>TurnitPlus is still checking this submission against every reference source, including previously submitted content. This can take a few seconds.</p>
+            <p>
+              {similarityStatus === "stale"
+                ? "TurnitPlus's reference sources changed since this result was last computed. Refreshing now — this can take a few seconds."
+                : "TurnitPlus is still checking this submission against every reference source, including previously submitted content. This can take a few seconds."}
+            </p>
           </section>
         ) : (
           <section
@@ -519,22 +532,24 @@ export function OverviewReport({ report, pending = false }: { report: Similarity
           </section>
         )}
 
-        {/* Release-hardening audit finding SIM-02: every block in this run,
-            through the standalone ReuseContextContainer just before the
-            academic-evidence section, is derived from
+        {/* Release-hardening audit finding SIM-02, SIM-04: every block in
+            this run, through the standalone ReuseContextContainer just
+            before the academic-evidence section, is derived from
             report.unifiedSimilarity/historicalSubmissionMatch/
-            matchClassification — the exact fields that are genuinely absent
-            during `pending` (they only arrive via the same read-time
-            enrichment fetch that clears it). Gating the whole run, not just
-            the headline above, is defensive: it holds even if a future
-            change ever let `report` carry that data while `pending` is
-            still asserted true (this component has no way to know why a
-            caller says pending — it must simply not draw any matching-
-            derived conclusion while told not to). AcademicEvidenceSection
-            below is NOT gated — externalAcademicEvidence is populated
-            before a report is ever first saved (Phase 3), so it is already
-            correct on initialReport, unlike the fields above. */}
-        {!pending && (<>
+            matchClassification — fields that are genuinely absent, or no
+            longer trustworthy, whenever similarityStatus is not "resolved"
+            (they only arrive/refresh via the same read-time enrichment
+            fetch that eventually clears it). Gating the whole run, not
+            just the headline above, is defensive: it holds even if a
+            future change ever let `report` carry that data while the
+            caller still says "stale"/"pending" (this component has no way
+            to know why a caller says that — it must simply not draw any
+            matching-derived conclusion while told not to).
+            AcademicEvidenceSection below is NOT gated —
+            externalAcademicEvidence is populated before a report is ever
+            first saved (Phase 3), so it is already correct on
+            initialReport, unlike the fields above. */}
+        {!notResolved && (<>
         {/* Phase 6: the combined unified-similarity result — placed directly
             after Archive overlap (unchanged above) and before every
             individual supporting-evidence block below, so a reader sees the

@@ -192,6 +192,48 @@ function aiToneLabel(aiScore: number | null, aiTone: string | null): string {
   return "Pending";
 }
 
+/**
+ * Release-hardening audit finding SIM-04 (acceptance-check hardening): the
+ * room card's own Similarity tile — for both the "ready" and "failed"
+ * occupant states below — previously rendered the occupant's own
+ * primaryScore, falling back to its archiveScore, completely
+ * unconditionally, with no regard for `similarityStatus` at all. That was
+ * the actual, real UI gap: lib/reports-repo.ts's findRoomOccupant already
+ * fell back to archiveScore correctly whenever a result was stale/pending
+ * (see resolvePersistedSimilarityDisplay), but this component then showed
+ * that fallback number as if it were a final, trustworthy result — exactly
+ * the "0% flash" / "wrong number during a flag rollback" failure mode the
+ * data layer was built to prevent. Extracted into its own component (shared
+ * by both call sites below) so the gate can never again be forgotten at one
+ * of the two: `similarityStatus` not "resolved" always renders neutral
+ * text, never a number, matching components/report/similarity-report-
+ * papers.tsx's OverviewReport treatment of the same tri-state on the detail
+ * page. `room-metric-pending` reuses the same class the fully-"processing"
+ * tile above already uses (see the JSX below) — same neutral visual
+ * treatment, not a new style.
+ */
+export function SimilarityMetricTile({ report, room }: { report: ReportSummary; room: number }) {
+  const notResolved = report.similarityStatus === "stale" || report.similarityStatus === "pending";
+  if (notResolved) {
+    return (
+      <Link href={`/reports/${report.id}?room=${room}`} className="room-metric room-metric-pending">
+        <span className="room-metric-label">Similarity</span>
+        <strong className="room-metric-value">···</strong>
+        <span className="room-metric-sub">{report.similarityStatus === "stale" ? "Updating…" : "Calculating…"}</span>
+      </Link>
+    );
+  }
+  const score = report.primaryScore ?? report.archiveScore;
+  const band = similarityScoreBand(score);
+  return (
+    <Link href={`/reports/${report.id}?room=${room}`} className={`room-metric room-metric-${band?.key ?? "low"}`}>
+      <span className="room-metric-label">Similarity</span>
+      <strong className="room-metric-value">{score}%</strong>
+      <span className="room-metric-sub">{band?.label ?? "Result"}</span>
+    </Link>
+  );
+}
+
 type Props = {
   room: number;
   accountEmail: string;
@@ -625,11 +667,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
                 <strong className="room-metric-value">{occupant.report.aiScore ?? "—"}%</strong>
                 <span className="room-metric-sub">{aiToneLabel(occupant.report.aiScore, occupant.report.aiTone)}</span>
               </Link>
-              <Link href={`/reports/${occupant.report.id}?room=${room}`} className={`room-metric room-metric-${similarityScoreBand(occupant.report.primaryScore ?? occupant.report.archiveScore)?.key ?? "low"}`}>
-                <span className="room-metric-label">Similarity</span>
-                <strong className="room-metric-value">{occupant.report.primaryScore ?? occupant.report.archiveScore}%</strong>
-                <span className="room-metric-sub">{similarityScoreBand(occupant.report.primaryScore ?? occupant.report.archiveScore)?.label ?? "Result"}</span>
-              </Link>
+              <SimilarityMetricTile report={occupant.report} room={room} />
               <button className="room-metric" type="button" onClick={() => handleDownloadReceipt(occupant.report!.id)} disabled={downloadingReceipt}>
                 <span className="room-metric-label">Receipt</span>
                 <Download aria-hidden="true" className="room-metric-icon" />
@@ -659,11 +697,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
                 <strong className="room-metric-value">—</strong>
                 <span className="room-metric-sub">Unavailable</span>
               </div>
-              <Link href={`/reports/${occupant.report.id}?room=${room}`} className={`room-metric room-metric-${similarityScoreBand(occupant.report.primaryScore ?? occupant.report.archiveScore)?.key ?? "low"}`}>
-                <span className="room-metric-label">Similarity</span>
-                <strong className="room-metric-value">{occupant.report.primaryScore ?? occupant.report.archiveScore}%</strong>
-                <span className="room-metric-sub">{similarityScoreBand(occupant.report.primaryScore ?? occupant.report.archiveScore)?.label ?? "Result"}</span>
-              </Link>
+              <SimilarityMetricTile report={occupant.report} room={room} />
               <button className="room-metric" type="button" onClick={() => handleDownloadReceipt(occupant.report!.id)} disabled={downloadingReceipt}>
                 <span className="room-metric-label">Receipt</span>
                 <Download aria-hidden="true" className="room-metric-icon" />

@@ -10,6 +10,8 @@ import { getRoomCountForRole, isWithinActiveCycle, roomCycleEndsAt } from '../..
 import { findRoomOccupant } from '../../../lib/reports-repo';
 import { runAfterResponse } from '../../../lib/run-after-response';
 import { createPendingReportAdmissionJob, processReportAdmissionJob } from '../../../lib/corpus-admission-report-integration';
+import { resolvePrimarySimilaritySummary } from '../../../lib/report-primary-similarity';
+import type { SimilarityReport } from '../../../lib/report-types';
 
 // Reports carry derived data (AI passages, matched phrases, extracted text)
 // on top of the ingest pipeline's raw text, so this cap is larger than
@@ -40,7 +42,27 @@ function isNonEmptyString(value: unknown): value is string {
 // can still be reached from processing or failed (a late genuine success
 // is exactly what a retry is for), and processing/failed/failed all behave
 // exactly as before.
-const SAVE_REPORT_SQL = `INSERT INTO saved_reports (id, device_key, submission_id, title, report_created_at, word_count, archive_score, score_band, ai_score, ai_tone, ai_status, payload_json, user_id, room_number, updated_at)
+//
+// Release-hardening audit finding SIM-04: payload_json's own CASE gained a
+// SECOND, independent guard — concurrent resaves of the SAME report can
+// each finalize (lib/report-primary-similarity.ts) against a DIFFERENT
+// corpus_match_generation snapshot; whichever transaction happens to COMMIT
+// last must not be allowed to overwrite an already-persisted result that
+// reflects a NEWER generation with one reflecting an OLDER one, regardless
+// of commit order. json_extract on excluded/saved_reports.payload_json
+// compares the unifiedSimilarityGeneration each side's own payload embeds
+// (see lib/report-types.ts's own comment on that field) — COALESCE(...,-1)
+// treats "never persisted a generation at all" (a legacy payload, or a
+// finalization attempt that genuinely failed and left unifiedSimilarity
+// unset — see this route's own POST handler try/catch) as lower than any
+// real generation, so a first-ever write, or a failed finalization's
+// unenriched payload, can never regress an already-good persisted value —
+// it simply keeps what was already there instead.
+// Exported so tests/report-write-time-finalization.test.mjs's own SIM-04
+// concurrency-guard test can exercise this EXACT SQL text directly — never a
+// hand-copied duplicate that could silently drift from what production
+// actually runs.
+export const SAVE_REPORT_SQL = `INSERT INTO saved_reports (id, device_key, submission_id, title, report_created_at, word_count, archive_score, score_band, ai_score, ai_tone, ai_status, payload_json, user_id, room_number, updated_at)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
       ON CONFLICT(device_key, id) DO UPDATE SET
         submission_id = excluded.submission_id,
@@ -52,7 +74,11 @@ const SAVE_REPORT_SQL = `INSERT INTO saved_reports (id, device_key, submission_i
         ai_score = CASE WHEN saved_reports.ai_status = 'ready' AND excluded.ai_status = 'failed' THEN saved_reports.ai_score ELSE excluded.ai_score END,
         ai_tone = CASE WHEN saved_reports.ai_status = 'ready' AND excluded.ai_status = 'failed' THEN saved_reports.ai_tone ELSE excluded.ai_tone END,
         ai_status = CASE WHEN saved_reports.ai_status = 'ready' AND excluded.ai_status = 'failed' THEN saved_reports.ai_status ELSE excluded.ai_status END,
-        payload_json = CASE WHEN saved_reports.ai_status = 'ready' AND excluded.ai_status = 'failed' THEN saved_reports.payload_json ELSE excluded.payload_json END,
+        payload_json = CASE
+          WHEN saved_reports.ai_status = 'ready' AND excluded.ai_status = 'failed' THEN saved_reports.payload_json
+          WHEN COALESCE(json_extract(saved_reports.payload_json, '$.unifiedSimilarityGeneration'), -1) > COALESCE(json_extract(excluded.payload_json, '$.unifiedSimilarityGeneration'), -1) THEN saved_reports.payload_json
+          ELSE excluded.payload_json
+        END,
         user_id = COALESCE(excluded.user_id, saved_reports.user_id),
         updated_at = CURRENT_TIMESTAMP`;
 
@@ -292,6 +318,81 @@ export async function POST(request: Request) {
         roomOwnerId = sessionUser.id;
       }
 
+      // Release-hardening audit finding SIM-03: write-time finalization —
+      // the report-generation pipeline's own authoritative unified-
+      // similarity computation, persisted here (inside payload_json, via
+      // payloadJson below) BEFORE this save's response is ever sent, never
+      // deferred via runAfterResponse. That distinction matters: after()
+      // gives no ordering guarantee relative to this same client's very
+      // next request (see lib/run-after-response.ts's own header comment
+      // and lib/report-historical-match.ts's own documented E8D race for a
+      // concrete precedent) — a deferred finalization could still be
+      // in-flight when the client turns around and opens the report or
+      // polls its room, reproducing exactly the "still matching after the
+      // user opens it" bug this fix exists to close.
+      //
+      // Runs on EVERY save with real text, not only the first: a resave's
+      // own payload only ever carries the CLIENT's own partial (archive +
+      // live-academic only — see lib/document-check-pipeline.ts's
+      // attachUnifiedSimilarity, which has no way to reach the corpus at
+      // all) computation, and the UPSERT below replaces payload_json
+      // unconditionally; skipping this on a resave would silently regress
+      // an already-finalized report back to that partial value.
+      // getOrComputeHistoricalMatchSnapshot's own snapshot cache (reused
+      // as-is, never a second matching implementation) makes every call
+      // after the first genuine one for this exact (deviceKey, id) a cheap
+      // cache hit, never a second real matcher search — see
+      // tests/report-primary-similarity.test.mjs's own dedup coverage.
+      //
+      // Never touches archiveScore/score/scoreBand — only
+      // payload.unifiedSimilarity, exactly like every other read-time
+      // enrichment in this codebase already respects (see
+      // lib/unified-similarity.ts's own DECISION 3).
+      //
+      // Release-hardening audit finding SIM-04: wrapped in its own
+      // try/catch — resolvePrimarySimilaritySummary is already internally
+      // defensive (never throws by its own documented contract), but this
+      // is the same "belt and suspenders" second layer every other
+      // read-time enrichment in this codebase already has (see
+      // app/api/reports/[id]/route.ts's own historicalSubmissionMatch
+      // try/catch). A genuine timeout/failure here must never fail the
+      // report save itself: on catch, payloadJsonToPersist stays the
+      // client's own submitted payloadJson — no unifiedSimilarity
+      // attached, which is exactly the "pending" state
+      // resolvePersistedSimilarityDisplay already defines (neutral
+      // loading, never a false 0%) — and SAVE_REPORT_SQL's own generation
+      // guard above ensures this unenriched payload can never regress an
+      // already-good persisted result from an earlier successful save.
+      let payloadJsonToPersist = payloadJson;
+      const reportPayload = payload as SimilarityReport;
+      if (isNonEmptyString(reportPayload?.text)) {
+        try {
+          const resolution = await resolvePrimarySimilaritySummary(client, {
+            reportDeviceKey: deviceKey,
+            reportId: id,
+            accountId: userId,
+            rawText: reportPayload.text,
+            wordCount: reportPayload.wordCount,
+            archiveMatchedPositions: reportPayload.archiveMatchedPositions,
+            externalAcademicEvidence: reportPayload.externalAcademicEvidence,
+            archiveScore: reportPayload.archiveScore ?? reportPayload.score,
+          });
+          if (resolution.unifiedSimilarity) {
+            payloadJsonToPersist = JSON.stringify({
+              ...reportPayload,
+              unifiedSimilarity: resolution.unifiedSimilarity,
+              corpusSourceMatchingEnabledAtComputation: resolution.corpusSourceMatchingEnabled,
+              unifiedSimilarityGeneration: resolution.corpusGeneration,
+            });
+            if (payloadJsonToPersist.length > MAX_BYTES) {
+              return new NextResponse(JSON.stringify({ error: 'Payload too large' }), { status: 413 });
+            }
+          }
+        } catch (err) {
+          console.error('write-time similarity finalization failed unexpectedly (non-fatal, report save proceeds without it):', err instanceof Error ? err.message : String(err));
+        }
+      }
+
       // Concurrency (production audit fix): the occupancy check and the
       // insert must be one atomic unit relative to any OTHER concurrent
       // request touching the same room slot — otherwise two different new
@@ -305,7 +406,7 @@ export async function POST(request: Request) {
       const { conflict: roomConflict } = await insertReportWithRoomCheck({
         id, deviceKey, submissionId, title, createdAt, wordCount, archiveScore, scoreBand,
         aiScore: aiScore ?? null, aiTone: aiTone ?? null, aiStatus: aiStatus ?? null,
-        payloadJson, userId, roomNumberForInsert, roomOwnerId,
+        payloadJson: payloadJsonToPersist, userId, roomNumberForInsert, roomOwnerId,
       });
 
       if (roomConflict) {

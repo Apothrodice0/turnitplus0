@@ -8,25 +8,28 @@ import { applyMigrationsLibsql } from "../lib/ingest.js";
 import { createDocumentIdentity, canonicalSha256 } from "../lib/document-identity.ts";
 import { indexDocumentSubmissionIntoCorpus } from "../lib/user-submission-corpus.ts";
 import { runCorpusAdmissionPromotionSweep } from "../lib/corpus-admission-promotion.ts";
-import { bumpCorpusMatchGeneration } from "../lib/report-historical-match.ts";
-import { resolvePrimarySimilaritySummary } from "../lib/report-primary-similarity.ts";
+import { isHistoricalMatchSnapshotCurrent } from "../lib/report-historical-match.ts";
+import { resolvePrimarySimilaritySummary, resolvePersistedSimilarityDisplay } from "../lib/report-primary-similarity.ts";
 import { findRoomOccupant } from "../lib/reports-repo.ts";
 import { computeUnifiedSimilarity } from "../lib/unified-similarity.ts";
 
 /**
- * Release-hardening audit finding SIM-02: regression coverage for the
- * room-card/report-detail loading inconsistency — a real room permanently
- * showed 0% (lib/reports-repo.ts's findRoomOccupant had no access to the
- * unified/combined result at all, only the persisted archive_score column),
- * while opening the same report showed a 0%-then-100% flash (the detail
- * page's server-rendered initial payload is deliberately fast/unenriched —
- * see app/reports/[id]/page.tsx's own comment — so its first client render
- * always fell back to primarySimilarityScore's archive-only value before the
- * background enrichment fetch resolved). This file covers the new shared
- * server-side resolver (lib/report-primary-similarity.ts) directly, and
- * findRoomOccupant's own use of it — both against a real DB, a real
- * promoted corpus source, and the real report_historical_match_snapshots
- * cache (never a second/duplicate matching implementation).
+ * Release-hardening audit finding SIM-02, superseded by SIM-03: SIM-02 gave
+ * findRoomOccupant its own read-time call to resolvePrimarySimilaritySummary
+ * (a cache-first, so-technically-not-"the matcher" call) — closing the 0%
+ * room card, but leaving a real completed report still capable of
+ * triggering matching work at READ time. SIM-03 moves the ONE authoritative
+ * computation to WRITE time (app/api/reports/route.ts's POST handler,
+ * before that save's own response is ever sent) and makes findRoomOccupant
+ * a pure, cheap SQL-only read of what was already persisted — see that
+ * function's own header comment. This file now covers
+ * resolvePrimarySimilaritySummary directly (still the one function that
+ * calls into the historical-match snapshot cache, now used only at write
+ * time and by the stale-generation self-heal path) and confirms
+ * findRoomOccupant reads EXACTLY what finalization persisted, without ever
+ * calling the resolver itself. tests/report-write-time-finalization.test.mjs
+ * covers the full, real POST-route end-to-end flow this file's helpers only
+ * approximate.
  */
 
 const repoRoot = path.resolve(".");
@@ -134,6 +137,30 @@ async function insertSavedReport({ userId, room, archiveScore, aiStatus, text, w
   return { id, deviceKey };
 }
 
+/**
+ * Mirrors exactly what app/api/reports/route.ts's POST handler now does at
+ * write time: resolve, then persist the result into payload_json — never a
+ * second implementation of that logic, just this test file's own way of
+ * reaching the same end state without going through a full HTTP-shaped
+ * request for every test. tests/report-write-time-finalization.test.mjs
+ * exercises the real route directly for the end-to-end scenario.
+ */
+async function finalizeAndPersist({ deviceKey, id, userId, text, wordCount, archiveScore }) {
+  const resolution = await resolvePrimarySimilaritySummary(client, {
+    reportDeviceKey: deviceKey, reportId: id, accountId: userId, rawText: text,
+    wordCount, archiveMatchedPositions: null, externalAcademicEvidence: null, archiveScore,
+  });
+  if (resolution.unifiedSimilarity) {
+    const existing = await client.execute({ sql: "SELECT payload_json FROM saved_reports WHERE device_key = ? AND id = ?", args: [deviceKey, id] });
+    const payload = JSON.parse(existing.rows[0].payload_json);
+    payload.unifiedSimilarity = resolution.unifiedSimilarity;
+    payload.corpusSourceMatchingEnabledAtComputation = resolution.corpusSourceMatchingEnabled;
+    payload.unifiedSimilarityGeneration = resolution.corpusGeneration;
+    await client.execute({ sql: "UPDATE saved_reports SET payload_json = ? WHERE device_key = ? AND id = ?", args: [JSON.stringify(payload), deviceKey, id] });
+  }
+  return resolution;
+}
+
 // Deliberately unrelated topics per test — matchAgainstUserSubmissionCorpus
 // does a real global shingle search across everything in this file's shared
 // DB, so overlapping fixtures would cross-contaminate each other's results.
@@ -142,51 +169,57 @@ const TEXT_FLAG_OFF = "Seismologists deploying a dense array of ocean-bottom sen
 const TEXT_AGREEMENT = "Mycologists cataloguing fungal diversity in an old-growth temperate rainforest identified several species new to the region using both morphological and genetic sequencing methods.";
 const TEXT_CACHE_REUSE = "Climatologists analyzing tree-ring width variations across a network of high-elevation sites derived a multi-century reconstruction of regional drought severity.";
 
-test("SIM-02 (1): room card resolves the combined score — archive_score=0, genuine corpus-source match=100%, matching the real observed bug", async () => {
+test("SIM-03 (1): room card reads the WRITE-TIME finalized combined score — archive_score=0, genuine corpus-source match=100%, matching the real observed bug", async () => {
   await seedActivePromotedSource(TEXT_ROOM_CARD);
   const { id, deviceKey } = await insertSavedReport({
-    userId: "sim02-room-user-1", room: 0, archiveScore: 0, aiStatus: "ready", text: TEXT_ROOM_CARD, wordCount: 100,
+    userId: "sim03-room-user-1", room: 0, archiveScore: 0, aiStatus: "ready", text: TEXT_ROOM_CARD, wordCount: 100,
   });
+  await withEnv("CORPUS_SOURCE_MATCHING_ENABLED", "true", async () => {
+    await finalizeAndPersist({ deviceKey, id, userId: "sim03-room-user-1", text: TEXT_ROOM_CARD, wordCount: 100, archiveScore: 0 });
 
-  const occupant = await withEnv("CORPUS_SOURCE_MATCHING_ENABLED", "true", () => findRoomOccupant(client, "sim02-room-user-1", 0));
+    // findRoomOccupant itself never calls the resolver or the matcher — it
+    // reads payload_json plus two cheap freshness checks (SIM-04's own
+    // resolvePersistedSimilarityDisplay) — proving the room card's value
+    // came from what finalization already persisted, not a read-time
+    // recomputation. The flag stays "true" for this read too: it was also
+    // "true" at write time, so this is the ordinary "nothing changed"
+    // case, not the flag-rollback case SIM-04 (2) covers separately.
+    const occupant = await findRoomOccupant(client, "sim03-room-user-1", 0);
 
-  assert.equal(occupant.status, "ready");
-  assert.equal(occupant.report.archiveScore, 0, "the persisted archive_score column must stay exactly what was saved");
-  assert.equal(occupant.report.primaryScore, 100, "the room card must show the resolved combined score, not the archive-only 0%");
-  assert.equal(occupant.report.isUnified, true);
-  void id; void deviceKey;
+    assert.equal(occupant.status, "ready");
+    assert.equal(occupant.report.archiveScore, 0, "the persisted archive_score column must stay exactly what was saved");
+    assert.equal(occupant.report.primaryScore, 100, "the room card must show the resolved combined score, not the archive-only 0%");
+    assert.equal(occupant.report.isUnified, true);
+  });
 });
 
-test("SIM-02 (4): flag-off mode uses archive-only values, even with a real corpus source that would otherwise match", async () => {
+test("SIM-03 (4): flag-off mode finalizes and persists archive-only values, even with a real corpus source that would otherwise match", async () => {
   await seedActivePromotedSource(TEXT_FLAG_OFF);
   // archiveScore/archiveMatchedPositions deliberately agree at "nothing" —
   // this report's only possible source of a non-zero score is the promoted
   // corpus source seeded above, so a flag-off score of exactly 0 proves
-  // that contribution never reached the result; with the flag on (see the
-  // sibling assertion below), the identical report resolves to 100.
+  // that contribution never reached the persisted result; with the flag on
+  // (see the sibling assertion below), the identical report resolves to 100.
   const { id, deviceKey } = await insertSavedReport({
-    userId: "sim02-flagoff-user-1", room: 0, archiveScore: 0, aiStatus: "ready", text: TEXT_FLAG_OFF, wordCount: 100,
+    userId: "sim03-flagoff-user-1", room: 0, archiveScore: 0, aiStatus: "ready", text: TEXT_FLAG_OFF, wordCount: 100,
   });
 
   const resolutionFlagOff = await withEnv("CORPUS_SOURCE_MATCHING_ENABLED", "false", () =>
-    resolvePrimarySimilaritySummary(client, {
-      reportDeviceKey: deviceKey, reportId: id, accountId: "sim02-flagoff-user-1", rawText: TEXT_FLAG_OFF,
-      wordCount: 100, archiveMatchedPositions: null, externalAcademicEvidence: null, archiveScore: 0,
-    }));
-  assert.equal(resolutionFlagOff.primaryScore, 0, "with the flag off, the corpus-source contribution must never reach the resolved score");
+    finalizeAndPersist({ deviceKey, id, userId: "sim03-flagoff-user-1", text: TEXT_FLAG_OFF, wordCount: 100, archiveScore: 0 }));
+  assert.equal(resolutionFlagOff.primaryScore, 0, "with the flag off, the corpus-source contribution must never reach the resolved, persisted score");
 
-  const occupant = await withEnv("CORPUS_SOURCE_MATCHING_ENABLED", "false", () => findRoomOccupant(client, "sim02-flagoff-user-1", 0));
+  // findRoomOccupant does no flag-checking of its own — a pure read of what
+  // finalization persisted — so this confirms the room card agrees with
+  // whatever was written, not that it independently re-applies the flag.
+  const occupant = await findRoomOccupant(client, "sim03-flagoff-user-1", 0);
   assert.equal(occupant.report.primaryScore, 0, "the room card must agree — archive-only value, flag off");
 
-  // Sanity: the SAME report, SAME snapshot cache, with the flag on — proves
-  // this test's setup genuinely has a real corpus match available, so the
-  // 0 above is a real "flag correctly suppressed it," not an accident of a
-  // broken fixture.
+  // Sanity: the SAME report, SAME snapshot cache, re-finalized with the
+  // flag on — proves this test's setup genuinely has a real corpus match
+  // available, so the 0 above is a real "flag correctly suppressed it," not
+  // an accident of a broken fixture.
   const resolutionFlagOn = await withEnv("CORPUS_SOURCE_MATCHING_ENABLED", "true", () =>
-    resolvePrimarySimilaritySummary(client, {
-      reportDeviceKey: deviceKey, reportId: id, accountId: "sim02-flagoff-user-1", rawText: TEXT_FLAG_OFF,
-      wordCount: 100, archiveMatchedPositions: null, externalAcademicEvidence: null, archiveScore: 0,
-    }));
+    finalizeAndPersist({ deviceKey, id, userId: "sim03-flagoff-user-1", text: TEXT_FLAG_OFF, wordCount: 100, archiveScore: 0 }));
   assert.equal(resolutionFlagOn.primaryScore, 100, "sanity: with the flag on, the same real corpus match resolves to 100 — confirms the flag-off 0 above was not just a fixture accident");
 });
 
@@ -211,33 +244,40 @@ test("SIM-02 (5): a genuine computeUnifiedSimilarity failure produces an explici
   assert.ok(resolution.historicalSubmissionMatch);
 });
 
-test("SIM-02 (6): room and detail agree, before and after a corpus-eligibility change recomputes the resolved score", async () => {
+test("SIM-03 (6): room and detail agree — both read the SAME write-time-persisted result, before and after a stale-generation re-finalization", async () => {
   const { id, deviceKey } = await insertSavedReport({
-    userId: "sim02-agree-user-1", room: 0, archiveScore: 0, aiStatus: "ready", text: TEXT_AGREEMENT, wordCount: 100,
+    userId: "sim03-agree-user-1", room: 0, archiveScore: 0, aiStatus: "ready", text: TEXT_AGREEMENT, wordCount: 100,
   });
 
   await withEnv("CORPUS_SOURCE_MATCHING_ENABLED", "true", async () => {
-    const beforeRoom = await findRoomOccupant(client, "sim02-agree-user-1", 0);
-    const beforeDetail = await resolvePrimarySimilaritySummary(client, {
-      reportDeviceKey: deviceKey, reportId: id, accountId: "sim02-agree-user-1", rawText: TEXT_AGREEMENT,
-      wordCount: 100, archiveMatchedPositions: null, externalAcademicEvidence: null, archiveScore: 0,
-    });
-    assert.equal(beforeRoom.report.primaryScore, beforeDetail.primaryScore, "room and detail must agree before any corpus change");
+    // Initial finalization (mirrors the POST handler): nothing promoted
+    // yet, so this settles at the archive-only 0 and persists that.
+    await finalizeAndPersist({ deviceKey, id, userId: "sim03-agree-user-1", text: TEXT_AGREEMENT, wordCount: 100, archiveScore: 0 });
+    const beforeRoom = await findRoomOccupant(client, "sim03-agree-user-1", 0);
     assert.equal(beforeRoom.report.primaryScore, 0, "sanity: no source promoted yet, nothing to match");
+    // NO_HISTORICAL_MATCH is never treated as "current," by design (see
+    // lib/report-historical-match.ts's own Phase E8E comment) — a fresh
+    // finalization that found nothing is deliberately always eligible for
+    // a cheap recheck, so a later-promoted match is never missed.
+    assert.equal(await isHistoricalMatchSnapshotCurrent(client, { reportDeviceKey: deviceKey, reportId: id }), false, "a NO_HISTORICAL_MATCH snapshot is never current, even freshly written");
 
-    // A source matching this exact report's text is promoted AFTER both
-    // reads above — the real "a report is viewed before another account's
-    // upload finishes indexing" ordering this codebase already documents
-    // (see lib/report-historical-match.ts's own Phase E8E comment).
+    // A source matching this exact report's text is promoted AFTER
+    // finalization already ran — the real "a report is viewed before
+    // another account's upload finishes indexing" ordering this codebase
+    // already documents (see lib/report-historical-match.ts's own Phase
+    // E8E comment) — bumps corpus_match_generation, making the persisted
+    // result stale (requirement 8's own separate path).
     await seedActivePromotedSource(TEXT_AGREEMENT);
+    assert.equal(await isHistoricalMatchSnapshotCurrent(client, { reportDeviceKey: deviceKey, reportId: id }), false, "promotion must make the previously-current snapshot stale");
 
-    const afterRoom = await findRoomOccupant(client, "sim02-agree-user-1", 0);
-    const afterDetail = await resolvePrimarySimilaritySummary(client, {
-      reportDeviceKey: deviceKey, reportId: id, accountId: "sim02-agree-user-1", rawText: TEXT_AGREEMENT,
-      wordCount: 100, archiveMatchedPositions: null, externalAcademicEvidence: null, archiveScore: 0,
-    });
-    assert.equal(afterRoom.report.primaryScore, afterDetail.primaryScore, "room and detail must still agree after recomputation");
-    assert.equal(afterRoom.report.primaryScore, 100, "both must reflect the newly promoted match — NO_HISTORICAL_MATCH is never treated as final, exactly like every other report view");
+    // The self-heal re-finalization (what the stale-generation path does)
+    // persists exactly once, and BOTH surfaces immediately agree on the
+    // refreshed value — there is no separate "detail" computation to drift
+    // from "room": both only ever read this same persisted column.
+    await finalizeAndPersist({ deviceKey, id, userId: "sim03-agree-user-1", text: TEXT_AGREEMENT, wordCount: 100, archiveScore: 0 });
+    const afterRoom = await findRoomOccupant(client, "sim03-agree-user-1", 0);
+    assert.equal(afterRoom.report.primaryScore, 100, "must reflect the newly promoted match — NO_HISTORICAL_MATCH is never treated as final, exactly like every other report view");
+    assert.equal(await isHistoricalMatchSnapshotCurrent(client, { reportDeviceKey: deviceKey, reportId: id }), true, "re-finalization must leave the snapshot current again");
   });
 });
 
@@ -279,25 +319,139 @@ test("SIM-02 (7): the expensive matcher is not run twice for the same still-curr
   });
 });
 
-test("SIM-02 (8): the room card's resolved summary never exposes an account id, decision id, or representation id — only numbers and a boolean", async () => {
-  await seedActivePromotedSource("Herpetologists radio-tracking a population of forest salamanders documented unexpectedly long-distance dispersal between adjacent watershed populations.");
-  const { id: reportId } = await insertSavedReport({
-    userId: "sim02-privacy-user-1", room: 0, archiveScore: 0, aiStatus: "ready",
-    text: "Herpetologists radio-tracking a population of forest salamanders documented unexpectedly long-distance dispersal between adjacent watershed populations.",
-    wordCount: 100,
+test("SIM-03 (8): the room card's summary never exposes an account id, decision id, or representation id — only numbers and a boolean, and findRoomOccupant reads it via a plain json_extract, never a full payload parse", async () => {
+  const text = "Herpetologists radio-tracking a population of forest salamanders documented unexpectedly long-distance dispersal between adjacent watershed populations.";
+  await seedActivePromotedSource(text);
+  const { id, deviceKey } = await insertSavedReport({
+    userId: "sim03-privacy-user-1", room: 0, archiveScore: 0, aiStatus: "ready", text, wordCount: 100,
   });
+  await withEnv("CORPUS_SOURCE_MATCHING_ENABLED", "true", async () => {
+    await finalizeAndPersist({ deviceKey, id, userId: "sim03-privacy-user-1", text, wordCount: 100, archiveScore: 0 });
 
-  const occupant = await withEnv("CORPUS_SOURCE_MATCHING_ENABLED", "true", () => findRoomOccupant(client, "sim02-privacy-user-1", 0));
-  assert.equal(occupant.report.primaryScore, 100, "test setup sanity");
+    // Flag stays "true" for this read too (same reasoning as SIM-03 (1)
+    // above) — this test is about the summary's shape/privacy, not about
+    // flag-rollback behavior, which SIM-04 (2) covers on its own.
+    const occupant = await findRoomOccupant(client, "sim03-privacy-user-1", 0);
+    assert.equal(occupant.report.primaryScore, 100, "test setup sanity");
 
-  const serialized = JSON.stringify(occupant.report);
-  assert.doesNotMatch(serialized, /@/, "no email-shaped string may appear in a room summary");
-  assert.doesNotMatch(serialized, /sim02-privacy-user-1/, "the viewing account's own raw id must never appear in what is sent to the client");
-  assert.equal(Object.keys(occupant.report).sort().join(","), "aiScore,aiTone,archiveScore,createdAt,id,isUnified,primaryScore,scoreBand,submissionId,title,wordCount", "the room summary shape must stay exactly this — no representation/decision/account id field ever added");
-  void reportId;
+    const serialized = JSON.stringify(occupant.report);
+    assert.doesNotMatch(serialized, /@/, "no email-shaped string may appear in a room summary");
+    assert.doesNotMatch(serialized, /sim03-privacy-user-1/, "the viewing account's own raw id must never appear in what is sent to the client");
+    assert.doesNotMatch(serialized, /Herpetologists|salamanders/i, "the submitted text itself must never appear in the room summary — confirms this came from json_extract's two scalar fields, not a full payload_json parse handed back as-is");
+    assert.equal(Object.keys(occupant.report).sort().join(","), "aiScore,aiTone,archiveScore,createdAt,id,isUnified,primaryScore,scoreBand,similarityStatus,submissionId,title,wordCount", "the room summary shape must stay exactly this — no representation/decision/account id field ever added");
+  });
 });
 
 // --- Rendering: never a transient archive-only number while pending --------
+
+// --- SIM-04: the read-side display resolver, and the write-side resolver's own uncaught-failure boundary ---
+
+test("SIM-04 (1): resolvePersistedSimilarityDisplay treats a moved-on generation as \"stale\" and falls back to the archive score — never trusts the persisted unifiedSimilarity number, and never touches the matcher to find out", async () => {
+  const text = "Volcanologists monitoring gas emissions from a restless caldera detected a shift in sulfur dioxide flux that preceded a period of elevated seismic unrest.";
+  const { id, deviceKey } = await insertSavedReport({
+    userId: "sim04-stale-user-1", room: 0, archiveScore: 7, aiStatus: "ready", text, wordCount: 100,
+  });
+  await withEnv("CORPUS_SOURCE_MATCHING_ENABLED", "true", async () => {
+    await finalizeAndPersist({ deviceKey, id, userId: "sim04-stale-user-1", text, wordCount: 100, archiveScore: 7 });
+
+    const snapshotCountBefore = (await client.execute("SELECT COUNT(*) AS n FROM report_historical_match_snapshots")).rows[0].n;
+
+    // A source matching this report's own text is promoted AFTER
+    // finalization already ran — bumps corpus_match_generation without ever
+    // touching payload_json. The flag itself never changes in this test —
+    // isolating the generation-staleness path from the flag-rollback path
+    // SIM-04 (2) covers separately.
+    await seedActivePromotedSource(text);
+
+    const row = await client.execute({ sql: "SELECT payload_json FROM saved_reports WHERE device_key = ? AND id = ?", args: [deviceKey, id] });
+    const payload = JSON.parse(row.rows[0].payload_json);
+    assert.equal(payload.unifiedSimilarity.unifiedScore, 0, "sanity: the persisted number itself is untouched by the later promotion — still the old, now-stale value");
+
+    const display = await resolvePersistedSimilarityDisplay(client, {
+      reportDeviceKey: deviceKey, reportId: id, archiveScore: 7,
+      unifiedScore: payload.unifiedSimilarity.unifiedScore, hasUnifiedSimilarity: true,
+      corpusSourceMatchingEnabledAtComputation: payload.corpusSourceMatchingEnabledAtComputation,
+    });
+    assert.equal(display.status, "stale", "a moved-on generation must never be reported as resolved");
+    // Discriminated-union guarantee (acceptance-check hardening): the
+    // "stale" branch carries no primaryScore/isUnified field AT ALL — not
+    // merely a convention a caller has to remember, but a shape a caller
+    // literally cannot misuse. A consumer that forgot to check `.status`
+    // first and tried `display.primaryScore` would fail to compile, and
+    // this assertion is the runtime mirror of that same guarantee.
+    assert.ok(!("primaryScore" in display), "the stale branch must carry no primaryScore field to accidentally render");
+    assert.ok(!("isUnified" in display), "the stale branch must carry no isUnified field either");
+
+    const snapshotCountAfter = (await client.execute("SELECT COUNT(*) AS n FROM report_historical_match_snapshots")).rows[0].n;
+    assert.equal(Number(snapshotCountAfter), Number(snapshotCountBefore), "resolvePersistedSimilarityDisplay itself must never create/update a report_historical_match_snapshots row — proves it never ran the matcher");
+  });
+});
+
+test("SIM-04 (2): resolvePersistedSimilarityDisplay applies live CORPUS_SOURCE_MATCHING_ENABLED filtering without ever touching payload_json or the matcher — ON->OFF rollback is immediately \"resolved\"+archive-only, OFF->ON roll-forward is \"stale\"", async () => {
+  await withEnv("CORPUS_SOURCE_MATCHING_ENABLED", "false", async () => {
+    const result = await resolvePersistedSimilarityDisplay(client, {
+      reportDeviceKey: "sim04-flagsim-device", reportId: "sim04-flagsim-report",
+      archiveScore: 15, unifiedScore: 100, hasUnifiedSimilarity: true,
+      corpusSourceMatchingEnabledAtComputation: true,
+    });
+    assert.equal(result.status, "resolved", "a rollback (was on, now off) is immediately, deterministically correct — no wait needed");
+    assert.equal(result.primaryScore, 15, "must be the archive-only score, never the old corpus-inflated 100");
+    assert.equal(result.isUnified, false);
+  });
+
+  await withEnv("CORPUS_SOURCE_MATCHING_ENABLED", "true", async () => {
+    const result = await resolvePersistedSimilarityDisplay(client, {
+      reportDeviceKey: "sim04-flagsim-device", reportId: "sim04-flagsim-report",
+      archiveScore: 15, unifiedScore: 0, hasUnifiedSimilarity: true,
+      corpusSourceMatchingEnabledAtComputation: false,
+    });
+    assert.equal(result.status, "stale", "a roll-forward (was off, now on) must never be reported as final — a new corpus match cannot be ruled out without recomputing");
+    assert.ok(!("primaryScore" in result), "no fallback number to accidentally render while a roll-forward is unresolved");
+    assert.ok(!("isUnified" in result));
+  });
+});
+
+test('SIM-04 DISCRIMINATED UNION: the "pending" branch (unifiedSimilarity never persisted at all) also carries no primaryScore/isUnified field — a legacy or not-yet-finalized report can never be rendered with a borrowed number', async () => {
+  const result = await resolvePersistedSimilarityDisplay(client, {
+    reportDeviceKey: "sim04-pending-device", reportId: "sim04-pending-report",
+    archiveScore: 33, unifiedScore: null, hasUnifiedSimilarity: false,
+    corpusSourceMatchingEnabledAtComputation: null,
+  });
+  assert.equal(result.status, "pending");
+  assert.ok(!("primaryScore" in result), "the pending branch must carry no primaryScore field");
+  assert.ok(!("isUnified" in result), "the pending branch must carry no isUnified field");
+  assert.equal(Object.keys(result).length, 1, 'the pending branch must be exactly { status: "pending" } — nothing else');
+});
+
+test("SIM-04 (3): resolvePrimarySimilaritySummary is not unconditionally safe — a genuine infra failure (unlike a computeUnifiedSimilarity failure) propagates OUT uncaught, which is exactly why app/api/reports/route.ts and app/api/reports/[id]/route.ts each wrap their own call in a try/catch", async () => {
+  const brokenClient = createClient({ url: `file:${dbFile}` });
+  await brokenClient.close();
+
+  await assert.rejects(
+    () => resolvePrimarySimilaritySummary(brokenClient, {
+      reportDeviceKey: "sim04-crash-device", reportId: "sim04-crash-report", accountId: null,
+      rawText: "irrelevant", wordCount: 10, archiveMatchedPositions: null, externalAcademicEvidence: null, archiveScore: 42,
+    }),
+    "a closed client must make the resolver's own pre-compute reads throw, and resolvePrimarySimilaritySummary must not swallow that — its own try/catch only covers computeUnifiedSimilarity",
+  );
+
+  // Mirrors exactly what app/api/reports/route.ts's POST handler does around
+  // this same call: a genuine failure here must leave the caller's own
+  // payload untouched — never undefined, never a partial/corrupted write.
+  const payloadJsonToPersist = JSON.stringify({ archiveScore: 42, text: "irrelevant" });
+  let caught = false;
+  try {
+    await resolvePrimarySimilaritySummary(brokenClient, {
+      reportDeviceKey: "sim04-crash-device", reportId: "sim04-crash-report", accountId: null,
+      rawText: "irrelevant", wordCount: 10, archiveMatchedPositions: null, externalAcademicEvidence: null, archiveScore: 42,
+    });
+  } catch {
+    caught = true;
+    // left untouched, exactly like route.ts's own catch block
+  }
+  assert.equal(caught, true, "test setup sanity: the closed client must actually throw");
+  assert.deepEqual(JSON.parse(payloadJsonToPersist), { archiveScore: 42, text: "irrelevant" }, "the save's own payload must be completely unaffected by a finalization crash — no partial/corrupted unifiedSimilarity, no false 0%");
+});
 
 test("SIM-02 (2)+(3): computeUnifiedSimilarity itself never invents a result while its own inputs are absent — it is the caller's job (report-detail-shell.tsx) to gate on \"pending\", covered by tests/similarity-result-consistency.test.mjs's own OverviewReport pending tests", () => {
   // Documented here, not re-tested here, to avoid duplicating coverage

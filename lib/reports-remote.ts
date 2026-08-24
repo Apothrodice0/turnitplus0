@@ -23,26 +23,41 @@ export type ReportSummary = {
    */
   aiStatus?: "processing" | "ready" | "failed";
   /**
-   * Release-hardening audit finding SIM-01: lib/report-types.ts's
-   * buildReportSummary() sets this from primarySimilarityScore(report) — the
-   * SAME combined-result selection the detail page's headline/sidebar use —
-   * whenever the caller already had a full SimilarityReport in hand (a
-   * just-generated or just-AI-completed report). Deliberately never set by
-   * the lightweight, DB-only room/history endpoints
-   * (lib/reports-repo.ts's findRoomOccupant, app/api/reports/route.ts's GET
-   * list handler): those only ever read the persisted archive_score column
-   * and have no cheap way to know the combined result without recomputing it
-   * per row (report_historical_match_snapshots + externalAcademicEvidence),
-   * which would make a room/history list expensive or require a new
-   * persisted column — out of scope for this fix. `archiveScore` itself is
-   * NEVER changed by this field's existence (still the pure archive-only
-   * value other readers of the persisted column, e.g. lib/developer-repo.ts,
-   * depend on) — this is purely an additive, optional display hint. Absent
-   * means "unknown here — fall back to archiveScore," never "zero."
+   * Release-hardening audit finding SIM-01, SIM-03: lib/report-types.ts's
+   * buildReportSummary() sets this from primarySimilarityScore(report) —
+   * the SAME combined-result selection the detail page's headline/sidebar
+   * use — whenever the caller already had a full SimilarityReport in hand
+   * (a just-generated or just-AI-completed report). lib/reports-repo.ts's
+   * findRoomOccupant ALSO sets it (as of SIM-03/SIM-04) — cheaply, via
+   * json_extract against the write-time-finalized payload_json (see
+   * app/api/reports/route.ts's POST handler), never by recomputing
+   * anything. `archiveScore` itself is NEVER changed by this field's
+   * existence (still the pure archive-only value other readers of the
+   * persisted column, e.g. lib/developer-repo.ts, depend on) — this is
+   * purely an additive display hint. Absent, or similarityStatus below not
+   * "resolved", means "do not trust this as final — fall back to
+   * archiveScore," never "zero."
    */
   primaryScore?: number;
   /** True when primaryScore reflects the full unified result rather than the archive-only fallback — see primaryScore's own comment. Absent/false with primaryScore also absent means the same thing: nothing more precise than archiveScore is known at this call site. */
   isUnified?: boolean;
+  /**
+   * Release-hardening audit finding SIM-04: the SAME three-way status
+   * lib/report-primary-similarity.ts's resolvePersistedSimilarityDisplay
+   * returns — "resolved" (primaryScore is trustworthy, whether combined or
+   * a definitive archive-only answer), "stale" (a real combined result IS
+   * persisted, but corpus_match_generation has moved on, or
+   * CORPUS_SOURCE_MATCHING_ENABLED was rolled back ON since computation —
+   * show "Updating similarity…" rather than primaryScore), or "pending"
+   * (unifiedSimilarity has never been persisted for this report at all —
+   * show neutral loading, never primaryScore as if it were final). Absent
+   * only for a caller that predates this field (client-built summaries via
+   * buildReportSummary always set it); a "processing" room occupant never
+   * gets this far (see findRoomOccupant's own scoping comment), so it is
+   * simply omitted there — the UI already shows "Analyzing…" for that case
+   * regardless.
+   */
+  similarityStatus?: "resolved" | "stale" | "pending";
 };
 
 // Every function here is fail-soft by design: a network or database problem

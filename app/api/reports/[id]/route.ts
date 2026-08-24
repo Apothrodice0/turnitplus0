@@ -108,7 +108,54 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
         });
         const historicalSubmissionMatch = resolution.historicalSubmissionMatch;
         payload.historicalSubmissionMatch = historicalSubmissionMatch;
-        if (resolution.unifiedSimilarity) payload.unifiedSimilarity = resolution.unifiedSimilarity;
+        if (resolution.unifiedSimilarity) {
+          payload.unifiedSimilarity = resolution.unifiedSimilarity;
+          payload.corpusSourceMatchingEnabledAtComputation = resolution.corpusSourceMatchingEnabled;
+          payload.unifiedSimilarityGeneration = resolution.corpusGeneration;
+          // Release-hardening audit finding SIM-04: "after the resolver
+          // recomputes, persist the refreshed result so room and detail
+          // agree." resolvePrimarySimilaritySummary above is cache-first —
+          // this write is therefore cheap on the common case (the freshly
+          // resolved generation already equals what is stored, so the
+          // WHERE clause's own comparison skips the write entirely) and
+          // only actually lands a new row when something genuinely
+          // changed. Guarded the identical way SAVE_REPORT_SQL's own
+          // generation CASE is (app/api/reports/route.ts) — never let an
+          // older-generation result stored here regress a newer one a
+          // concurrent request already persisted; COALESCE(...,-1) treats
+          // "never persisted a generation" as lower than any real one, so
+          // the very first successful resolution always writes. Deferred
+          // outside this response's own critical path would reintroduce
+          // exactly the ordering gap SIM-03's own header comment already
+          // rejected runAfterResponse for — so, like write-time
+          // finalization itself, this stays synchronous and awaited.
+          // Built from the ORIGINAL stored JSON string, re-parsed fresh —
+          // never from the in-memory `payload` object this response is
+          // building, which may already carry matchClassification
+          // (admin-only, see the block above — must never be persisted;
+          // it is recomputed fresh on every admin read by design) and
+          // will go on to carry experimentalHistoricalMatch/reuseContext
+          // (read-time-only display fields, never meant to be durable
+          // either). This keeps the persisted row's shape identical to
+          // what a normal save already writes, plus only the three
+          // similarity fields this fix adds.
+          try {
+            const persistedPayload = {
+              ...(JSON.parse(String(row.payload_json)) as SimilarityReport),
+              unifiedSimilarity: resolution.unifiedSimilarity,
+              corpusSourceMatchingEnabledAtComputation: resolution.corpusSourceMatchingEnabled,
+              unifiedSimilarityGeneration: resolution.corpusGeneration,
+            };
+            await client.execute({
+              sql: `UPDATE saved_reports SET payload_json = ?
+                    WHERE device_key = ? AND id = ?
+                      AND COALESCE(json_extract(payload_json, '$.unifiedSimilarityGeneration'), -1) <= ?`,
+              args: [JSON.stringify(persistedPayload), row.device_key, id, resolution.corpusGeneration],
+            });
+          } catch (err) {
+            console.error('persisting the refreshed similarity result failed (non-fatal, this response still reflects it):', err instanceof Error ? err.message : String(err));
+          }
+        }
         // Phase E8P.3: the experimental, allowlist-gated display value — see
         // lib/e8p-visibility.ts's own header comment. Synchronous (unlike the
         // shadow telemetry write below) because it must be part of THIS

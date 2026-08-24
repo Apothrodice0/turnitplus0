@@ -115,10 +115,19 @@ async function deleteReport(deviceKey, id) {
   // archiveMatchedPositions/externalAcademicEvidence — see
   // tests/unified-similarity-report-integration.test.mjs for its own
   // dedicated coverage), so it gets the same exclusion here.
-  const { historicalSubmissionMatch, unifiedSimilarity, ...getPayloadWithoutHistoricalMatch } = getBody.payload;
+  // Release-hardening audit finding SIM-04: corpusSourceMatchingEnabledAtComputation
+  // and unifiedSimilarityGeneration are persisted alongside unifiedSimilarity
+  // (both at write time and by the GET route's own self-heal write-back —
+  // see lib/report-primary-similarity.ts's own header comment) as the flag/
+  // generation snapshot a later read uses to detect staleness — the same
+  // kind of enrichment as the two fields above, so they get the same
+  // exclusion here.
+  const { historicalSubmissionMatch, unifiedSimilarity, corpusSourceMatchingEnabledAtComputation, unifiedSimilarityGeneration, ...getPayloadWithoutHistoricalMatch } = getBody.payload;
   assert.equal(historicalSubmissionMatch?.status, 'NO_HISTORICAL_MATCH');
   assert.ok(unifiedSimilarity, 'unifiedSimilarity must also be attached as read-time enrichment');
-  assert.deepEqual(getPayloadWithoutHistoricalMatch, payload, 'get must return the exact saved payload (aside from the new E8C/Phase 6 enrichment fields)');
+  assert.equal(corpusSourceMatchingEnabledAtComputation, false, 'the live flag snapshot must be recorded (default off in this test env)');
+  assert.equal(typeof unifiedSimilarityGeneration, 'number', 'the generation snapshot must be recorded');
+  assert.deepEqual(getPayloadWithoutHistoricalMatch, payload, 'get must return the exact saved payload (aside from the new E8C/Phase 6/SIM-04 enrichment fields)');
 
   const deleteRes = await deleteReport(deviceKey, payload.id);
   assert.equal(deleteRes.status, 200);

@@ -23,11 +23,13 @@ import { CategorySummary, OverviewReport, SourcesReport, SubmissionReport, dedup
 import { ReportNotFoundPanel } from "@/components/report/report-not-found-panel";
 
 type LoadStatus = "loading" | "found" | "not-found";
+type SimilarityDisplayStatus = "resolved" | "stale" | "pending";
 
 export function ReportDetailShell({
   id,
   initialReport,
   initialAiStatus,
+  initialSimilarityStatus,
   requiresClientResolution,
   mode,
   backRoom,
@@ -44,6 +46,25 @@ export function ReportDetailShell({
    * empty/found result already renders correctly without this.
    */
   initialAiStatus: "processing" | "ready" | "failed" | null;
+  /**
+   * Release-hardening audit finding SIM-04: the SAME "resolved"/"stale"/
+   * "pending" status lib/report-primary-similarity.ts's
+   * resolvePersistedSimilarityDisplay computes server-side (see
+   * app/reports/[id]/page.tsx's own comment) — "resolved" means
+   * initialReport's own primarySimilarityScore is already trustworthy
+   * as-is (whether a real combined result or a definitive archive-only
+   * answer forced by a live CORPUS_SOURCE_MATCHING_ENABLED rollback);
+   * "stale" means a persisted combined result exists but no longer
+   * reflects the current corpus generation/flag state, so it must NOT be
+   * shown at all — only "Updating similarity…" — until the background
+   * fetch below refreshes it; "pending" means nothing has ever been
+   * persisted (write-time finalization has not completed for this report
+   * yet). null only for the anonymous/device-key path, which resolves
+   * client-side only, from scratch, on every visit — there is no
+   * server-computed status to hand over there, matching initialAiStatus's
+   * own null convention.
+   */
+  initialSimilarityStatus: SimilarityDisplayStatus | null;
   requiresClientResolution: boolean;
   mode: ReportMode;
   /** The room this report was opened from (see app/reports/[id]/page.tsx's own comment) — null when opened any other way (the anonymous flat list, a bookmark, etc.), in which case the back button falls back to the generic My Reports directory. */
@@ -57,19 +78,25 @@ export function ReportDetailShell({
   const [status, setStatus] = useState<LoadStatus>(
     initialReport ? "found" : requiresClientResolution ? "loading" : "not-found",
   );
-  // Release-hardening audit finding SIM-02: the server-rendered initialReport
-  // is deliberately a fast, unenriched read (see app/reports/[id]/page.tsx's
-  // own "one report = one room" comment) — it never carries
-  // unifiedSimilarity/historicalSubmissionMatch, so primarySimilarityScore
-  // would fall back to the archive-only figure on first paint every time,
-  // even for a report whose real combined result is completely different.
-  // This flag tracks that gap explicitly (never inferred from
-  // hasUnifiedSimilarity(report), which can't distinguish "genuinely
-  // archive-only" from "not resolved yet") and starts true only for
-  // similarity mode — the score-bearing effect below always sets it false
-  // once resolution has genuinely settled, success or failure alike, so the
-  // UI can never spin forever waiting on it.
-  const [primaryMatchingPending, setPrimaryMatchingPending] = useState(mode === "similarity");
+  // Release-hardening audit finding SIM-03, SIM-04: app/api/reports/route.ts's
+  // POST handler finalizes unifiedSimilarity at WRITE time, before a save's
+  // own response is ever sent, so app/reports/[id]/page.tsx's server render
+  // already knows whether initialReport's own primarySimilarityScore is
+  // trustworthy ("resolved"), knowably outdated ("stale" — a live
+  // generation/flag change since computation), or simply never computed yet
+  // ("pending" — a legacy report, or a write-time finalization that
+  // genuinely failed and left no trace). Read once, at mount, into this
+  // state (never re-derived from report on every render) — the background
+  // fetch effect below is the only thing allowed to change it afterward, so
+  // a later resave/refresh within the same mount can't silently regress it.
+  // Anonymous/device-key reports (requiresClientResolution) have no
+  // server-computed signal at all — mode === "similarity" alone decides
+  // whether to start "pending" there, exactly like the pre-SIM-04 design.
+  const [similarityStatus, setSimilarityStatus] = useState<SimilarityDisplayStatus>(
+    mode !== "similarity"
+      ? "resolved"
+      : (initialSimilarityStatus ?? (initialReport !== null && hasUnifiedSimilarity(initialReport) ? "resolved" : "pending")),
+  );
   const [resultTab, setResultTab] = useState<ResultTab>("full");
   const [isDeleting, setIsDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
@@ -82,7 +109,15 @@ export function ReportDetailShell({
       let cancelled = false;
       void fetchRemoteReport<SimilarityReport>(id).then((enriched) => {
         if (cancelled) return;
-        setPrimaryMatchingPending(false);
+        // Release-hardening audit finding SIM-04: the GET route this fetch
+        // hits (app/api/reports/[id]/route.ts) always resolves and persists
+        // a fully current, live-flag-correct result before responding — so
+        // by the time this promise settles, whatever it returns (or even a
+        // failure, which simply leaves `report` as the last-known value) is
+        // the freshest answer this client can get without another request.
+        // "resolved" is therefore always the right status to land on here,
+        // regardless of which status this mount started in.
+        setSimilarityStatus("resolved");
         if (!enriched) return;
         setReport((current) => (current ? { ...current, ...enriched } : enriched));
         // Piggybacks on this same one-shot fetch (no new request) to
@@ -124,7 +159,7 @@ export function ReportDetailShell({
         // settles, exactly like the owned-report branch above.
         const enriched = await fetchRemoteReport<SimilarityReport>(id);
         if (cancelled) return;
-        setPrimaryMatchingPending(false);
+        setSimilarityStatus("resolved");
         if (enriched) {
           setReport((current) => (current ? { ...current, ...enriched } : enriched));
         }
@@ -132,7 +167,7 @@ export function ReportDetailShell({
       }
       const remote = await fetchRemoteReport<SimilarityReport>(id);
       if (cancelled) return;
-      setPrimaryMatchingPending(false);
+      setSimilarityStatus("resolved");
       if (remote) {
         setReport(remote);
         setStatus("found");
@@ -195,15 +230,19 @@ export function ReportDetailShell({
   const isUnified = hasUnifiedSimilarity(report);
   const primaryLabel = primaryResultLabel(report);
   const similarityVerdict = similarityScoreBand(primaryScore);
-  // Release-hardening audit finding SIM-02: gates every similarity-score
-  // surface below (summary strip, sidebar score card, sidebar notes, and
-  // OverviewReport's own headline) so none of them can ever render
-  // primaryScore's archive-only fallback value while the real resolution is
-  // still in flight — see primaryMatchingPending's own comment above.
-  const similarityPending = mode === "similarity" && primaryMatchingPending;
+  // Release-hardening audit finding SIM-02/SIM-04: gates every similarity-
+  // score surface below (summary strip, sidebar score card, sidebar notes,
+  // and OverviewReport's own headline) so none of them can ever render
+  // primaryScore while the real resolution is still in flight or known
+  // outdated — see similarityStatus's own comment above.
+  const effectiveSimilarityStatus: SimilarityDisplayStatus = mode === "similarity" ? similarityStatus : "resolved";
+  const similarityPending = effectiveSimilarityStatus === "pending";
+  const similarityStale = effectiveSimilarityStatus === "stale";
+  const similarityNotResolved = similarityPending || similarityStale;
   const aiSignal = aiSignalDisplay(report);
   const academicEvidenceCount = report.externalAcademicEvidence ? dedupeExternalAcademicEvidence(report.externalAcademicEvidence).length : 0;
   const reportDate = new Date(report.created).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" });
+  const similarityStatusLabel = similarityStale ? "Updating similarity…" : "Calculating similarity…";
 
   return (
     <section className="result-view report-detail-page">
@@ -259,11 +298,11 @@ export function ReportDetailShell({
 
       <div className="report-summary-strip">
         <div>
-          <strong className={`summary-chip summary-score-chip ${mode === "ai" ? `ai-summary-chip ai-summary-${aiSignal.tone}` : similarityPending ? "summary-verdict-pending" : similarityVerdict ? `summary-verdict-${similarityVerdict.key}` : ""}`}>
-            <span className={`score-dot ${mode === "ai" ? `ai-dot ai-dot-${aiSignal.tone}` : similarityPending ? "score-dot-pending" : similarityVerdict ? `score-dot-${similarityVerdict.key}` : ""}`} />
+          <strong className={`summary-chip summary-score-chip ${mode === "ai" ? `ai-summary-chip ai-summary-${aiSignal.tone}` : similarityNotResolved ? "summary-verdict-pending" : similarityVerdict ? `summary-verdict-${similarityVerdict.key}` : ""}`}>
+            <span className={`score-dot ${mode === "ai" ? `ai-dot ai-dot-${aiSignal.tone}` : similarityNotResolved ? "score-dot-pending" : similarityVerdict ? `score-dot-${similarityVerdict.key}` : ""}`} />
             {mode === "ai"
               ? `${aiSignal.value === null ? "" : `${aiSignal.value}% · `}${aiSignal.label}`
-              : similarityPending ? "Calculating similarity…" : `${primaryScore}% ${primaryLabel}`}
+              : similarityNotResolved ? similarityStatusLabel : `${primaryScore}% ${primaryLabel}`}
           </strong>
           {mode === "similarity" && <span className="summary-chip">{report.sources.length} matched source{report.sources.length === 1 ? "" : "s"}</span>}
           {mode === "similarity" && (report.webCheck?.phrasesMatched ?? 0) > 0 && <span className="summary-chip wikipedia-evidence-chip"><Globe2 aria-hidden="true" /> Separate Wikipedia evidence</span>}
@@ -301,12 +340,12 @@ export function ReportDetailShell({
           <>
             {resultTab === "full" && (
               <div className="full-report-preview">
-                <OverviewReport report={report} pending={similarityPending} />
+                <OverviewReport report={report} similarityStatus={effectiveSimilarityStatus} />
                 <SubmissionReport report={report} />
                 <SourcesReport report={report} />
               </div>
             )}
-            {resultTab === "overview" && <OverviewReport report={report} pending={similarityPending} />}
+            {resultTab === "overview" && <OverviewReport report={report} similarityStatus={effectiveSimilarityStatus} />}
             {resultTab === "submission" && <SubmissionReport report={report} />}
             {resultTab === "sources" && <SourcesReport report={report} />}
           </>
@@ -314,18 +353,18 @@ export function ReportDetailShell({
 
         <aside className="report-inspector">
           <div
-            className={`inspector-score ${mode === "ai" ? `ai-signal-card-${aiSignal.tone}` : similarityPending ? "similarity-verdict-pending" : similarityVerdict ? `similarity-verdict-${similarityVerdict.key}` : ""}`}
-            aria-busy={similarityPending ? "true" : undefined}
+            className={`inspector-score ${mode === "ai" ? `ai-signal-card-${aiSignal.tone}` : similarityNotResolved ? "similarity-verdict-pending" : similarityVerdict ? `similarity-verdict-${similarityVerdict.key}` : ""}`}
+            aria-busy={similarityNotResolved ? "true" : undefined}
             aria-label={mode === "ai"
               ? `${aiSignal.value === null ? "no result" : `${aiSignal.value}%`} AI writing score`
-              : similarityPending ? "Calculating similarity" : `${primaryScore}% ${primaryLabel}${similarityVerdict ? `, ${PRIMARY_SIMILARITY_BAND_LABELS[similarityVerdict.key]}` : ""}`}
+              : similarityNotResolved ? similarityStatusLabel.replace("…", "") : `${primaryScore}% ${primaryLabel}${similarityVerdict ? `, ${PRIMARY_SIMILARITY_BAND_LABELS[similarityVerdict.key]}` : ""}`}
           >
-            <span>{mode === "ai" ? "AI writing score" : similarityPending ? "Similarity" : primaryLabel}</span>
-            <strong>{mode === "ai" ? (aiSignal.value === null ? "—" : `${aiSignal.value}%`) : similarityPending ? "…" : `${primaryScore}%`}</strong>
+            <span>{mode === "ai" ? "AI writing score" : similarityNotResolved ? "Similarity" : primaryLabel}</span>
+            <strong>{mode === "ai" ? (aiSignal.value === null ? "—" : `${aiSignal.value}%`) : similarityNotResolved ? "…" : `${primaryScore}%`}</strong>
             {mode === "ai" && <p className="inspector-writing-estimate">{aiSignal.label}</p>}
-            {mode === "similarity" && similarityPending && <p className="inspector-writing-estimate">Calculating similarity…</p>}
-            {mode === "similarity" && !similarityPending && similarityVerdict && <em>{PRIMARY_SIMILARITY_BAND_LABELS[similarityVerdict.key]}</em>}
-            {mode === "similarity" && !similarityPending && <div><i style={{ width: `${primaryScore * 5}%` }} /></div>}
+            {mode === "similarity" && similarityNotResolved && <p className="inspector-writing-estimate">{similarityStatusLabel}</p>}
+            {mode === "similarity" && !similarityNotResolved && similarityVerdict && <em>{PRIMARY_SIMILARITY_BAND_LABELS[similarityVerdict.key]}</em>}
+            {mode === "similarity" && !similarityNotResolved && <div><i style={{ width: `${primaryScore * 5}%` }} /></div>}
           </div>
           {mode === "similarity" && <div className="inspector-section">
             <h3>Top source types</h3>
@@ -337,6 +376,8 @@ export function ReportDetailShell({
               English-only local analysis. {report.aiAnalysis?.status === "complete"
                 ? `${report.aiAnalysis.analyzedWordCount.toLocaleString()} words analyzed. Review the AI writing score and highlighted passage breakdown.`
                 : "A numeric result requires at least 300 eligible English words and a successful local model load."}
+            </p> : similarityStale ? <p>
+              TurnitPlus's reference sources changed since this result was last computed. Refreshing now — this can take a few seconds.
             </p> : similarityPending ? <p>
               TurnitPlus is still checking this submission against every reference source, including previously submitted content. The final similarity result will appear here once matching finishes.
             </p> : <p>
@@ -353,7 +394,7 @@ export function ReportDetailShell({
 
       <div className="print-report-bundle">
         {mode === "ai" ? <AiReport report={report} printMode /> : <>
-          <OverviewReport report={report} pending={similarityPending} />
+          <OverviewReport report={report} similarityStatus={effectiveSimilarityStatus} />
           <SubmissionReport report={report} />
           <SourcesReport report={report} />
         </>}

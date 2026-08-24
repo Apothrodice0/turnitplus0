@@ -1,8 +1,7 @@
 import type { Client } from "@libsql/client";
 import { deriveRoomStatus, isWithinActiveCycle, roomCycleEndsAt } from "./report-rooms";
-import { resolvePrimarySimilaritySummary } from "./report-primary-similarity";
+import { resolvePersistedSimilarityDisplay } from "./report-primary-similarity";
 import type { ReportSummary } from "./reports-remote";
-import type { SimilarityReport } from "./report-types";
 
 // device_key added in Phase E8C, additively — every existing caller that
 // only read payload_json is unaffected; lib/report-historical-match.ts is
@@ -76,25 +75,46 @@ export type RoomOccupantResult =
  * same SQL.
  */
 /**
- * Release-hardening audit finding SIM-02: payload_json and device_key are
- * only ever read (and only ever parsed) when this room's status is "ready"
- * or "failed" — a "processing" occupant shows no numeric similarity at all
- * (see app/reports/rooms/[room]/room-page-shell.tsx's own PROCESSING
- * branch), so there is nothing to resolve yet, and doing so anyway would
- * waste work on this function's own hot path: app/api/reports/route.ts's
- * GET ?room=N handler is polled every few seconds while a room is
- * "processing" (see that room-page-shell.tsx comment on its own polling
- * loop).
+ * Release-hardening audit finding SIM-03, corrected by SIM-04: a cheap
+ * read — never calls getOrComputeHistoricalMatchSnapshot, never risks
+ * running the expensive matcher. json_extract pulls the persisted result's
+ * three scalars straight out of payload_json without the application ever
+ * parsing (or transferring) the rest of that blob — the genuinely cheap
+ * read this function's own callers require: app/api/reports/route.ts's GET
+ * ?room=N handler is polled every few seconds while a room is "processing",
+ * and app/reports/rooms/[room]/page.tsx calls this for the same reason
+ * app/reports/[id]/page.tsx's own comment gives for staying fast/unenriched.
+ *
+ * SIM-04 correction: the FIRST version of this read trusted
+ * payload_json.unifiedSimilarity verbatim — a real gap, caught before
+ * commit, not a shipped regression: a stale corpus_match_generation (a
+ * later promotion/deactivation) or a CORPUS_SOURCE_MATCHING_ENABLED
+ * rollback since this report's own write-time finalization would never be
+ * reflected here, permanently, since nothing about a json_extract read
+ * could ever notice. resolvePersistedSimilarityDisplay (lib/report-primary-
+ * similarity.ts) is "equivalent live filtering" to
+ * lib/report-historical-match.ts's own applyCorpusSourceMatchingFlag,
+ * reproduced at the display-decision level from only what a cheap read can
+ * cheaply obtain — isHistoricalMatchSnapshotCurrent's own two SELECTs, no
+ * different in kind from the ones this function's SQL already runs, and
+ * still no matcher call of any kind.
  */
 export async function findRoomOccupant(client: Client, userId: string, room: number): Promise<RoomOccupantResult> {
   const result = await client.execute({
-    sql: `SELECT id, submission_id, title, report_created_at, word_count, archive_score, score_band, ai_score, ai_tone, ai_status, device_key, payload_json
+    sql: `SELECT id, submission_id, title, report_created_at, word_count, archive_score, score_band, ai_score, ai_tone, ai_status, device_key,
+                 json_extract(payload_json, '$.unifiedSimilarity.unifiedScore') AS unified_score,
+                 json_extract(payload_json, '$.unifiedSimilarity') IS NOT NULL AS has_unified,
+                 json_extract(payload_json, '$.corpusSourceMatchingEnabledAtComputation') AS corpus_flag_at_computation
           FROM saved_reports WHERE user_id = ? AND room_number = ?
           ORDER BY report_created_at DESC LIMIT 1`,
     args: [userId, room],
   });
   const occupant = result.rows[0] as unknown as
-    | { id: string | number; submission_id: string; title: string; report_created_at: string; word_count: number; archive_score: number; score_band: string; ai_score: number | null; ai_tone: string | null; ai_status: string | null; device_key: string; payload_json: string }
+    | {
+      id: string | number; submission_id: string; title: string; report_created_at: string; word_count: number; archive_score: number;
+      score_band: string; ai_score: number | null; ai_tone: string | null; ai_status: string | null; device_key: string;
+      unified_score: number | bigint | null; has_unified: number | bigint; corpus_flag_at_computation: number | bigint | null;
+    }
     | undefined;
   if (!occupant || !isWithinActiveCycle(occupant.report_created_at)) {
     return { status: "empty", report: null, cycleEndsAt: null };
@@ -102,33 +122,34 @@ export async function findRoomOccupant(client: Client, userId: string, room: num
 
   const status = deriveRoomStatus(occupant.ai_score === null ? null : Number(occupant.ai_score), occupant.ai_status === null ? null : String(occupant.ai_status));
   const archiveScore = Number(occupant.archive_score);
+  const hasUnifiedSimilarity = Number(occupant.has_unified) === 1;
   let primaryScore = archiveScore;
   let isUnified = false;
+  let similarityStatus: "resolved" | "stale" | "pending" = "pending";
 
+  // Same "only for a room whose score is actually about to be displayed"
+  // scoping as before — a "processing" occupant shows no numeric
+  // similarity at all, so isHistoricalMatchSnapshotCurrent's own two
+  // SELECTs would be pure waste on this hot, polled path.
   if (status === "ready" || status === "failed") {
-    try {
-      const payload = JSON.parse(occupant.payload_json) as SimilarityReport;
-      // Release-hardening audit finding SIM-02: the room card's own
-      // resolved score — the same lib/report-primary-similarity.ts call
-      // app/api/reports/[id]/route.ts makes for the detail page, so the
-      // two surfaces can never disagree, and so an already-cached snapshot
-      // (the common case: the detail page or an earlier poll already
-      // computed it) costs only the cheap cache-hit read, never a second
-      // real matcher search — see that module's own header comment.
-      const resolution = await resolvePrimarySimilaritySummary(client, {
-        reportDeviceKey: occupant.device_key,
-        reportId: String(occupant.id),
-        accountId: userId,
-        rawText: payload.text,
-        wordCount: payload.wordCount,
-        archiveMatchedPositions: payload.archiveMatchedPositions,
-        externalAcademicEvidence: payload.externalAcademicEvidence,
-        archiveScore,
-      });
-      primaryScore = resolution.primaryScore;
-      isUnified = resolution.isUnified;
-    } catch (err) {
-      console.error("findRoomOccupant: primary-similarity resolution failed (non-fatal), falling back to archive_score:", err instanceof Error ? err.message : String(err));
+    const display = await resolvePersistedSimilarityDisplay(client, {
+      reportDeviceKey: occupant.device_key,
+      reportId: String(occupant.id),
+      archiveScore,
+      unifiedScore: occupant.unified_score === null ? null : Number(occupant.unified_score),
+      hasUnifiedSimilarity,
+      corpusSourceMatchingEnabledAtComputation: occupant.corpus_flag_at_computation === null ? null : Number(occupant.corpus_flag_at_computation) === 1,
+    });
+    similarityStatus = display.status;
+    // display.primaryScore/isUnified do not exist outside this branch — the
+    // discriminated union itself is what prevents this call site from ever
+    // reading a fallback number out of "stale"/"pending" and rendering it as
+    // final; primaryScore/isUnified above simply keep their archive-only/
+    // false defaults in that case, chosen explicitly right here, not
+    // smuggled out of the resolver.
+    if (display.status === "resolved") {
+      primaryScore = display.primaryScore;
+      isUnified = display.isUnified;
     }
   }
 
@@ -144,6 +165,7 @@ export async function findRoomOccupant(client: Client, userId: string, room: num
       archiveScore,
       primaryScore,
       isUnified,
+      similarityStatus,
       scoreBand: String(occupant.score_band),
       aiScore: occupant.ai_score === null ? null : Number(occupant.ai_score),
       aiTone: occupant.ai_tone === null ? null : String(occupant.ai_tone),

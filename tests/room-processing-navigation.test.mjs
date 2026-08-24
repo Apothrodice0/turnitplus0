@@ -65,37 +65,36 @@ test("PROCESSING: the Similarity tile is not a link (or any other clickable navi
   assert.match(branch, /<span className="room-metric-sub">Preparing…<\/span>/);
 });
 
-test("READY: both the real AI score and the real similarity score are shown, each as a working link into the full report", async () => {
+test("READY: both the real AI score and the real similarity score are shown, the AI tile as a working link into the full report", async () => {
   const branch = extractBranch(await readRoomShell(), "ready");
   assert.match(branch, /<strong className="room-metric-value">\{occupant\.report\.aiScore \?\? "—"\}%<\/strong>/, "the ready branch must reveal the real AI score");
-  // Release-hardening audit finding SIM-01: prefers occupant.report.primaryScore
-  // (the combined result, set by buildReportSummary whenever the caller
-  // already had a full report in hand — see ReportSummary's own comment)
-  // and falls back to archiveScore only when primaryScore is absent (the
-  // lightweight, DB-only room fetch path) — still always the real value
-  // either way, never a fabricated one.
-  assert.match(branch, /<strong className="room-metric-value">\{occupant\.report\.primaryScore \?\? occupant\.report\.archiveScore\}%<\/strong>/, "the ready branch must reveal the real similarity score");
+  // Release-hardening audit finding SIM-01, extracted into its own component
+  // by SIM-04 (acceptance-check hardening — see room-page-shell.tsx's own
+  // SimilarityMetricTile comment for why): the ready branch delegates its
+  // Similarity tile entirely to that shared component, rather than inlining
+  // the score/link/gating logic here — SimilarityMetricTile's OWN render
+  // tests (tests/similarity-result-consistency.test.mjs) cover the actual
+  // score/link/neutral-text behavior across every similarityStatus.
+  assert.match(branch, /<SimilarityMetricTile report=\{occupant\.report\} room=\{room\} \/>/, "the ready branch must render its Similarity tile through the shared SimilarityMetricTile component");
   assert.match(branch, /<Link href=\{`\/reports\/\$\{occupant\.report\.id\}\?mode=ai&room=\$\{room\}`\}/, "the AI tile must link into the full AI report");
-  assert.match(branch, /<Link href=\{`\/reports\/\$\{occupant\.report\.id\}\?room=\$\{room\}`\}/, "the Similarity tile must link into the full report");
 });
 
-test("FAILED: shows 'AI analysis unavailable' framing and a real retry action, never a fabricated score", async () => {
+test("FAILED: shows 'AI analysis unavailable' framing and a real retry action, never a fabricated AI score", async () => {
   const branch = extractBranch(await readRoomShell(), "failed");
   assert.doesNotMatch(branch, /\{occupant\.report\.aiScore/, "a failed check must never render occupant.report.aiScore, fabricated or otherwise");
   assert.match(branch, /AI-writing analysis was unavailable for this document\./);
   assert.match(branch, /onClick=\{\(\) => retryAiCheck\(occupant\.report!\.id\)\}/, "a real retry action, wired to retryAiCheck, must be present");
   assert.match(branch, /\{retryingAi \? "Checking…" : "Retry AI check"\}/);
   // The similarity result is real and unaffected by an AI failure — this
-  // branch's own real primaryScore (or archiveScore fallback — see SIM-01)
-  // must still render.
-  assert.match(branch, /<strong className="room-metric-value">\{occupant\.report\.primaryScore \?\? occupant\.report\.archiveScore\}%<\/strong>/);
+  // branch, like "ready" above, delegates to the same shared component.
+  assert.match(branch, /<SimilarityMetricTile report=\{occupant\.report\} room=\{room\} \/>/);
 });
 
 test("DIRECT REPORT URL: the report page derives its own real AI-lifecycle status server-side and shows an explicit in-progress/unavailable state instead of pretending the page is fully done", async () => {
   const page = await readFile(new URL("../app/reports/[id]/page.tsx", import.meta.url), "utf8");
   assert.match(page, /import \{ deriveRoomStatus \} from "@\/lib\/report-rooms";/);
   assert.match(page, /const aiStatus = deriveRoomStatus\(row\.ai_score, row\.ai_status\);/);
-  assert.match(page, /return \{ status: "found", payload, aiStatus \};/);
+  assert.match(page, /return \{ status: "found", payload, aiStatus, similarityStatus: display\.status \};/);
   assert.match(page, /initialAiStatus=\{result\.status === "found" \? result\.aiStatus : null\}/);
 
   const shell = await readFile(new URL("../app/reports/[id]/report-detail-shell.tsx", import.meta.url), "utf8");

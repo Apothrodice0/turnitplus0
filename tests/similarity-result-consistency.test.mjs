@@ -6,6 +6,7 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { OverviewReport } from '../components/report/similarity-report-papers.tsx';
 import { ReportHistoryRow } from '../components/reports/report-history-row.tsx';
+import { SimilarityMetricTile } from '../app/reports/rooms/[room]/room-page-shell.tsx';
 
 /**
  * Release-hardening audit finding SIM-01: regression coverage for a real
@@ -252,12 +253,90 @@ test('SIM-01 ROOM CARD: ReportHistoryRow falls back honestly to archiveScore + "
   assert.doesNotMatch(html, /TurnitPlus Similarity/, 'must never claim the unified label when no unified data was ever attached to this summary');
 });
 
+// --- SIM-04 (acceptance-check hardening): room tile render-level coverage ----
+// Release-hardening audit finding SIM-04 (acceptance-check hardening): the
+// room card's Similarity tile previously rendered
+// `occupant.report.primaryScore ?? occupant.report.archiveScore`
+// unconditionally, with no regard for similarityStatus at all — a real gap
+// (findRoomOccupant already fell back to archiveScore correctly while
+// stale/pending, but this tile then showed that fallback as if it were
+// final). Extracted into SimilarityMetricTile (app/reports/rooms/[room]/
+// room-page-shell.tsx) specifically so it could be covered by a real render
+// test instead of the weaker structural source-count assertion this section
+// used to have — SimilarityMetricTile itself takes no hooks (it's a plain
+// presentational function despite living in a "use client" file), so
+// renderToStaticMarkup exercises the exact same component RoomPageShell
+// renders in production, at both its "ready" and "failed" call sites.
+
+function renderSimilarityTile(summary) {
+  return renderToStaticMarkup(React.createElement(SimilarityMetricTile, { report: summary, room: 0 }));
+}
+
+function baseRoomSummary(overrides = {}) {
+  return {
+    id: 'room-tile-fixture-1', submissionId: 'sub-room-tile-fixture-1', title: 'room-tile-fixture.pdf',
+    createdAt: new Date().toISOString(), wordCount: 500, archiveScore: 0,
+    scoreBand: 'Low', aiScore: null, aiTone: null,
+    ...overrides,
+  };
+}
+
+test('SIM-04 ROOM TILE: a current, resolved unified result shows 100% immediately, as a working link into the full report — no neutral placeholder once resolution is genuinely current', () => {
+  const summary = baseRoomSummary({ archiveScore: 0, primaryScore: 100, isUnified: true, similarityStatus: 'resolved' });
+  const html = renderSimilarityTile(summary);
+  assert.match(html, /<strong class="room-metric-value">100%<\/strong>/);
+  assert.doesNotMatch(html, /Updating…|Calculating…/);
+  assert.match(html, new RegExp(`href="/reports/${summary.id}\\?room=0"`), 'the ready-state tile must always link into the full report');
+});
+
+test('SIM-04 ROOM TILE: a deterministic flag-off archive-only result shows 0% immediately — "resolved" does not mean "must be nonzero," a genuine 0% is allowed to render right away', () => {
+  const html = renderSimilarityTile(baseRoomSummary({ archiveScore: 0, primaryScore: 0, isUnified: false, similarityStatus: 'resolved' }));
+  assert.match(html, /<strong class="room-metric-value">0%<\/strong>/);
+  assert.doesNotMatch(html, /Updating…|Calculating…/);
+});
+
+test('SIM-04 ROOM TILE: a generation-stale result shows neutral "Updating…" text — neither the old persisted 100% nor the archive-only 0% ever renders', () => {
+  // archiveScore=0, and this fixture also carries what the OLD persisted
+  // number would have been (primaryScore=100, isUnified=true) — simulating
+  // a caller that forgot to re-derive them for a stale status — to prove
+  // the tile itself never reads primaryScore/isUnified at all once
+  // similarityStatus isn't "resolved" (the discriminated union backing this
+  // means it structurally cannot, but this is the rendered proof of that).
+  const html = renderSimilarityTile(baseRoomSummary({ archiveScore: 0, primaryScore: 100, isUnified: true, similarityStatus: 'stale' }));
+  assert.match(html, /Updating…/);
+  assert.doesNotMatch(html, /0%/, 'must never show the archive-only fallback while stale');
+  assert.doesNotMatch(html, /100%/, 'must never show the old persisted number while stale');
+});
+
+test('SIM-04 ROOM TILE: a flag-roll-forward stale result (CORPUS_SOURCE_MATCHING_ENABLED just turned back on) renders identically to a generation-stale one — every "stale" origin gets the same neutral treatment, never leaking which kind it was', () => {
+  const html = renderSimilarityTile(baseRoomSummary({ archiveScore: 0, primaryScore: 0, isUnified: false, similarityStatus: 'stale' }));
+  assert.match(html, /Updating…/);
+  assert.doesNotMatch(html, /0%/);
+  assert.doesNotMatch(html, /100%/);
+});
+
+test('SIM-04 ROOM TILE: a pending result (finalization never completed, e.g. a write-time timeout/failure) shows neutral "Calculating…" text — the save still succeeded, but nothing here pretends a number was ever computed', () => {
+  const html = renderSimilarityTile(baseRoomSummary({ archiveScore: 0, similarityStatus: 'pending' }));
+  assert.match(html, /Calculating…/);
+  assert.doesNotMatch(html, /0%/);
+  assert.doesNotMatch(html, /100%/);
+});
+
+test('SIM-04 ROOM TILE: an absent similarityStatus (a caller predating this field) is treated as resolved, not neutral — legacy summaries keep rendering exactly as before', () => {
+  const html = renderSimilarityTile(baseRoomSummary({ archiveScore: 42 }));
+  assert.match(html, /<strong class="room-metric-value">42%<\/strong>/);
+  assert.doesNotMatch(html, /Updating…|Calculating…/);
+});
+
 // --- Structural coverage for surfaces that cannot be rendered directly --------
 // app/reports/[id]/report-detail-shell.tsx and
-// app/reports/rooms/[room]/room-page-shell.tsx are stateful "use client"
-// components (useState/useEffect/useRouter) not safely renderable via
-// renderToStaticMarkup — matching tests/report-detail-route.test.mjs's own
-// established convention, these assert on the source text directly.
+// app/reports/rooms/[room]/room-page-shell.tsx's own top-level exported
+// components are stateful "use client" components (useState/useEffect/
+// useRouter) not safely renderable via renderToStaticMarkup — matching
+// tests/report-detail-route.test.mjs's own established convention, these
+// assert on the source text directly. SimilarityMetricTile above is the one
+// piece of room-page-shell.tsx that IS safely renderable (no hooks of its
+// own), which is exactly why it was extracted.
 
 test('SIM-01 SIDEBAR (structural): report-detail-shell.tsx\'s Report notes paragraph cites primaryMatchedWordCount, not archiveMatchedWordCount', async () => {
   const shell = await fs.promises.readFile(path.join(repo, 'app/reports/[id]/report-detail-shell.tsx'), 'utf8');
@@ -273,10 +352,15 @@ test('SIM-01 SIDEBAR (structural): the score card and the Report notes paragraph
   assert.match(shell, /const primaryLabel = primaryResultLabel\(report\);/);
 });
 
-test('SIM-01 ROOM CARD (structural): room-page-shell.tsx\'s own inline Similarity tile prefers primaryScore over the archive-only value, in both the ready and failed states', async () => {
+test('SIM-04 ROOM CARD (structural): both the "ready" and "failed" occupant states render Similarity through the SAME SimilarityMetricTile component — never a second, independently-driftable copy of the fallback/gating logic', async () => {
   const shell = await fs.promises.readFile(path.join(repo, 'app/reports/rooms/[room]/room-page-shell.tsx'), 'utf8');
-  const occurrences = shell.match(/occupant\.report\.primaryScore \?\? occupant\.report\.archiveScore/g) ?? [];
-  assert.equal(occurrences.length, 6, 'expected three uses (verdict class, value, verdict label) inside the shared Similarity tile markup, present in both the "ready" and "failed" occupant states (3 x 2 = 6)');
+  const occurrences = shell.match(/<SimilarityMetricTile report=\{occupant\.report\} room=\{room\} \/>/g) ?? [];
+  assert.equal(occurrences.length, 2, 'expected exactly 2 call sites: the "ready" and "failed" occupant states');
+  // The old inline `primaryScore ?? archiveScore` pattern must be gone from
+  // the occupant-status blocks entirely — SimilarityMetricTile's own gating
+  // on similarityStatus is now the ONLY place that decision is made (see the
+  // SIM-04 ROOM TILE render tests above for its actual behavior).
+  assert.doesNotMatch(shell, /occupant\.report\.primaryScore \?\? occupant\.report\.archiveScore/, 'the raw fallback expression must no longer appear inline at either call site');
 });
 
 test('SIM-01 RECEIPT (structural): downloadReceipt passes primarySimilarityScore/hasUnifiedSimilarity into the receipt, and receipt-pdf.ts labels the archive component as a clearly separate breakdown row, never the overall result', async () => {
@@ -289,22 +373,26 @@ test('SIM-01 RECEIPT (structural): downloadReceipt passes primarySimilarityScore
   assert.match(receipt, /rows\.push\(\["Similarity result \(component\)", `\$\{report\.archiveScore \?\? report\.score\}% - \$\{report\.scoreBand\}`\]\);/, 'the archive score must appear only as a row explicitly labeled "(component)" — never presented as the overall result, per requirement 3');
 });
 
-// --- SIM-02: never a transient archive-only number while resolution is pending ---
+// --- SIM-02, refined by SIM-04: never a transient archive-only number while
+// resolution is pending, and never the stale persisted number while it is
+// known outdated ---
 // Regression coverage for a second, related production bug: a room card
 // permanently showed 0% (lib/reports-repo.ts's findRoomOccupant had no
 // access to the combined result at all — covered directly against a real DB
 // in tests/report-primary-similarity.test.mjs), and opening a report first
 // flashed 0% before settling on the real 100% once background enrichment
-// resolved. OverviewReport's own `pending` prop (default false, so every
-// existing call site/test above is unaffected) is the mechanism
-// app/reports/[id]/report-detail-shell.tsx now uses to suppress that flash.
+// resolved. OverviewReport's own `similarityStatus` prop (default
+// "resolved", so every existing call site/test above is unaffected) is the
+// mechanism app/reports/[id]/report-detail-shell.tsx now uses to suppress
+// that flash, and — since SIM-04 — to suppress a known-outdated persisted
+// score too, showing "Updating similarity…" in its place instead.
 
-function renderPending(report, pending) {
-  return renderToStaticMarkup(React.createElement(OverviewReport, { report, pending }));
+function renderPending(report, similarityStatus) {
+  return renderToStaticMarkup(React.createElement(OverviewReport, { report, similarityStatus }));
 }
 
 test('SIM-02 (2): while pending, OverviewReport never renders the archive-only score, even when it is a plausible-looking 0%', () => {
-  const html = renderPending(baseReport({ archiveScore: 0, matchedWordCount: 0 }), true);
+  const html = renderPending(baseReport({ archiveScore: 0, matchedWordCount: 0 }), 'pending');
   const headingSection = html.match(/<section class="similarity-heading[^>]*>[\s\S]*?<\/section>/)?.[0] ?? '';
   assert.ok(headingSection, 'the similarity-heading section must be found');
   assert.doesNotMatch(headingSection, /%/, 'no percentage of any kind may render in the headline section while pending');
@@ -315,14 +403,14 @@ test('SIM-02 (2): while pending, OverviewReport never renders the archive-only s
 test('SIM-02 (2): while pending, OverviewReport never renders the archive-only score even when the real (not-yet-known) unified result would be 100%', () => {
   // The report already HAS a real, correct unifiedSimilarity attached in
   // this fixture (simulating "the server actually finished, but the caller
-  // hasn\'t updated its own pending flag yet") — pending must still win:
-  // the caller is the one asserting resolution is not final yet, and
+  // hasn\'t updated its own status yet") — pending must still win: the
+  // caller is the one asserting resolution is not final yet, and
   // OverviewReport must not second-guess that by reading report fields.
   const html = renderPending(baseReport({
     archiveScore: 0,
     historicalSubmissionMatch: CORPUS_SOURCE_MATCH,
     unifiedSimilarity: unified(),
-  }), true);
+  }), 'pending');
   assert.match(html, /Calculating similarity…/);
   // Everything derived from unifiedSimilarity/historicalSubmissionMatch —
   // UnifiedSimilaritySection's own "TurnitPlus Similarity" heading and the
@@ -335,46 +423,134 @@ test('SIM-02 (2): while pending, OverviewReport never renders the archive-only s
   assert.doesNotMatch(html, /TurnitPlus Similarity|Previously submitted content|corpus reference source/);
 });
 
-test('SIM-02 (3): once settled, a genuine unified 0% still renders as a real 0% — pending never masks a truthful zero', () => {
-  const html = renderPending(baseReport({
-    archiveScore: 0,
-    unifiedSimilarity: unified({ unifiedScore: 0, uniqueMatchedWords: 0, archiveOnlyWords: 0, liveAcademicOnlyWords: 0, previousUploadOnlyWords: 0, overlapWords: 0 }),
-  }), false);
-  assert.match(html, /<span>0%<\/span> TurnitPlus Similarity/, 'a genuinely settled 0% (unified computed, nothing matched) must render exactly as 0%, not be hidden or blocked');
-  assert.doesNotMatch(html, /Calculating similarity…/);
-});
-
-test('SIM-02 (3): once settled, the real resolved 100% renders normally — pending=false is the only thing that unblocks it', () => {
+test('SIM-04: while stale, OverviewReport shows "Updating similarity…" — never the old persisted score alongside it, and never the pending wording', () => {
   const html = renderPending(baseReport({
     archiveScore: 0,
     historicalSubmissionMatch: CORPUS_SOURCE_MATCH,
     unifiedSimilarity: unified(),
-  }), false);
+  }), 'stale');
+  const headingSection = html.match(/<section class="similarity-heading[^>]*>[\s\S]*?<\/section>/)?.[0] ?? '';
+  assert.ok(headingSection, 'the similarity-heading section must be found');
+  assert.doesNotMatch(headingSection, /%/, 'no percentage — old or new — may render in the headline section while stale');
+  assert.match(html, /Updating similarity…/, 'stale must use its own distinct wording, not the pending one');
+  assert.doesNotMatch(html, /Calculating similarity…/, 'stale and pending must never share wording — the user needs to know a real result already exists and is only being refreshed');
+  assert.doesNotMatch(html, /TurnitPlus Similarity|Previously submitted content|corpus reference source/, 'the old, now-untrusted unifiedSimilarity/historicalSubmissionMatch content must not render either');
+});
+
+test('SIM-02 (3): once settled, a genuine unified 0% still renders as a real 0% — pending never masks a truthful zero', () => {
+  const html = renderPending(baseReport({
+    archiveScore: 0,
+    unifiedSimilarity: unified({ unifiedScore: 0, uniqueMatchedWords: 0, archiveOnlyWords: 0, liveAcademicOnlyWords: 0, previousUploadOnlyWords: 0, overlapWords: 0 }),
+  }), 'resolved');
+  assert.match(html, /<span>0%<\/span> TurnitPlus Similarity/, 'a genuinely settled 0% (unified computed, nothing matched) must render exactly as 0%, not be hidden or blocked');
+  assert.doesNotMatch(html, /Calculating similarity…/);
+});
+
+test('SIM-02 (3): once settled, the real resolved 100% renders normally — "resolved" is the only status that unblocks it', () => {
+  const html = renderPending(baseReport({
+    archiveScore: 0,
+    historicalSubmissionMatch: CORPUS_SOURCE_MATCH,
+    unifiedSimilarity: unified(),
+  }), 'resolved');
   assert.match(html, /<span>100%<\/span> TurnitPlus Similarity/);
   assert.doesNotMatch(html, /Calculating similarity…/);
 });
 
-test('SIM-02: pending defaults to false — every pre-existing caller of OverviewReport (print bundle, every other test fixture in this codebase) renders exactly as before', () => {
+test('SIM-04: a live flag-off rollback renders the archive-only 0% immediately as "Similarity result," never "TurnitPlus Similarity" and never a neutral placeholder — matching what app/reports/[id]/page.tsx actually hands OverviewReport (unifiedSimilarity stripped, status "resolved")', () => {
+  // Mirrors loadOwnedReport's own documented behavior exactly: a "resolved"
+  // + archive-only display.status deletes payload.unifiedSimilarity before
+  // this component ever sees the report (see app/reports/[id]/page.tsx's
+  // own comment) — so the fixture here has NO unifiedSimilarity at all,
+  // just like the real report object would.
+  const html = renderPending(baseReport({ archiveScore: 0, matchedWordCount: 0 }), 'resolved');
+  assert.match(html, /<span>0%<\/span> Similarity result/, 'the archive-only 0% must render immediately and honestly — "resolved" never means "wait," even at 0%');
+  assert.doesNotMatch(html, /TurnitPlus Similarity/, 'must never claim the unified label — this report never had a trustworthy unified result once the flag rolled back');
+  assert.doesNotMatch(html, /Calculating similarity…|Updating similarity…/);
+});
+
+test('SIM-02: similarityStatus defaults to "resolved" — every pre-existing caller of OverviewReport (print bundle, every other test fixture in this codebase) renders exactly as before', () => {
   const html = renderToStaticMarkup(React.createElement(OverviewReport, { report: baseReport({ archiveScore: 42 }) }));
   assert.match(html, /<span>42%<\/span> Similarity result/);
   assert.doesNotMatch(html, /Calculating similarity…/);
 });
 
-test('SIM-02 SIDEBAR/WIRING (structural): report-detail-shell.tsx tracks primaryMatchingPending explicitly, starts it true only for similarity mode, and always clears it once resolution settles — success or failure alike', async () => {
+test('SIM-04 SIDEBAR/WIRING (structural): report-detail-shell.tsx tracks a single similarityStatus tri-state explicitly, starts it "pending" only for similarity mode with no already-finalized result (deferring to the server-computed initialSimilarityStatus when present), and always resolves it once the background fetch settles — success or failure alike', async () => {
   const shell = await fs.promises.readFile(path.join(repo, 'app/reports/[id]/report-detail-shell.tsx'), 'utf8');
-  assert.match(shell, /const \[primaryMatchingPending, setPrimaryMatchingPending\] = useState\(mode === "similarity"\);/, 'must not default to true for AI-mode views, which never show a similarity score at all');
-  assert.match(shell, /const similarityPending = mode === "similarity" && primaryMatchingPending;/);
-  // Every exit point of the resolution effect must clear the flag — not
-  // only the "we got real data" branch, matching requirement 5 (an
-  // explicit archive fallback, never endless loading).
-  const setFalseCount = (shell.match(/setPrimaryMatchingPending\(false\)/g) ?? []).length;
-  assert.ok(setFalseCount >= 3, `expected at least 3 call sites clearing the pending flag (authenticated fetch settle, anonymous local+remote settle, anonymous remote-only settle) — found ${setFalseCount}`);
+  // Release-hardening audit finding SIM-04: the two-boolean SIM-03 design
+  // (primaryMatchingPending/similarityUpdating) collapsed into one
+  // "resolved"/"stale"/"pending" state, seeded from the server-computed
+  // initialSimilarityStatus (see app/reports/[id]/page.tsx) when available,
+  // falling back to the old initialReport-based heuristic only for the
+  // anonymous/device-key path, which has no server-computed status at all.
+  assert.match(
+    shell,
+    /const \[similarityStatus, setSimilarityStatus\] = useState<SimilarityDisplayStatus>\(\s*mode !== "similarity"\s*\?\s*"resolved"\s*:\s*\(initialSimilarityStatus \?\? \(initialReport !== null && hasUnifiedSimilarity\(initialReport\) \? "resolved" : "pending"\)\),\s*\);/,
+    'must start from the server-computed initialSimilarityStatus when present, never unconditionally "pending" for similarity mode',
+  );
+  assert.match(shell, /const effectiveSimilarityStatus: SimilarityDisplayStatus = mode === "similarity" \? similarityStatus : "resolved";/);
+  assert.match(shell, /const similarityPending = effectiveSimilarityStatus === "pending";/);
+  assert.match(shell, /const similarityStale = effectiveSimilarityStatus === "stale";/);
+  assert.match(shell, /const similarityNotResolved = similarityPending \|\| similarityStale;/);
+  // Every exit point of the background-fetch effect must resolve the
+  // status — not only the "we got real data" branch, matching requirement 5
+  // (an explicit archive fallback, never endless loading/staleness).
+  const setResolvedCount = (shell.match(/setSimilarityStatus\("resolved"\)/g) ?? []).length;
+  assert.ok(setResolvedCount >= 3, `expected at least 3 call sites resolving the status (authenticated fetch settle, anonymous local+remote settle, anonymous remote-only settle) — found ${setResolvedCount}`);
 });
 
-test('SIM-02 SIDEBAR/WIRING (structural): every OverviewReport call site in report-detail-shell.tsx passes the same pending flag, and the sidebar score card is gated by it too', async () => {
+test('SIM-04 SIDEBAR/WIRING (structural): every OverviewReport call site in report-detail-shell.tsx passes the same effective status, and the sidebar score card is gated by it too — never showing a number during "stale", not just "pending"', async () => {
   const shell = await fs.promises.readFile(path.join(repo, 'app/reports/[id]/report-detail-shell.tsx'), 'utf8');
-  const overviewReportCalls = (shell.match(/<OverviewReport report=\{report\} pending=\{similarityPending\} \/>/g) ?? []).length;
+  const overviewReportCalls = (shell.match(/<OverviewReport report=\{report\} similarityStatus=\{effectiveSimilarityStatus\} \/>/g) ?? []).length;
   assert.equal(overviewReportCalls, 3, 'expected 3 call sites: full-report-preview, the standalone overview tab, and the print bundle');
-  assert.match(shell, /similarityPending \? "Calculating similarity…" : `\$\{primaryScore\}% \$\{primaryLabel\}`/, 'the summary-strip score chip must also be gated');
-  assert.match(shell, /similarityPending \? "…" : `\$\{primaryScore\}%`/, 'the sidebar score card\'s own value must also be gated');
+  assert.match(shell, /similarityNotResolved \? similarityStatusLabel : `\$\{primaryScore\}% \$\{primaryLabel\}`/, 'the summary-strip score chip must also be gated, by both pending AND stale');
+  assert.match(shell, /similarityNotResolved \? "…" : `\$\{primaryScore\}%`/, 'the sidebar score card\'s own value must also be gated, by both pending AND stale — never a stale number');
+  assert.match(shell, /const similarityStatusLabel = similarityStale \? "Updating similarity…" : "Calculating similarity…";/, 'stale and pending must render distinct wording');
+});
+
+// --- SIM-04 NO-FLASH: the detail page's own two-frame transition -------------
+// "The report detail must also avoid briefly flashing 0% before changing to
+// 100%." report-detail-shell.tsx itself can't be mounted/re-rendered here
+// (no hooks lifecycle in this test environment — see the structural-coverage
+// note above), so this is proven two ways: (1) a render-level check of the
+// exact TWO frames the shell can ever produce — its first paint (seeded
+// from the server-computed initialSimilarityStatus) and its settled paint
+// (after the background fetch resolves) — each rendered through the SAME
+// OverviewReport component the shell itself calls, confirming neither frame
+// individually shows a stray percentage; and (2) a structural check that the
+// two state updates driving that transition (setSimilarityStatus("resolved")
+// and setReport(...)) are synchronous, adjacent statements in the same
+// .then() callback with no await between them, which is what makes React
+// batch them into ONE commit — ruling out a THIRD, intermediate frame where
+// status has already flipped to "resolved" but the report still carries the
+// old (or absent) unifiedSimilarity.
+
+test('SIM-04 NO-FLASH: first paint while stale shows no percentage in the similarity headline at all, and the settled paint after the background fetch lands directly on the real 100% — never an intermediate 0%', () => {
+  const before = renderPending(baseReport({ archiveScore: 0, matchedWordCount: 0 }), 'stale');
+  const beforeHeadline = before.match(/<section class="similarity-heading[^>]*>[\s\S]*?<\/section>/)?.[0] ?? '';
+  assert.ok(beforeHeadline, 'the similarity-heading section must be found');
+  assert.doesNotMatch(beforeHeadline, /%/, 'REQUIRED: no percentage — old or new, 0% or otherwise — may appear in the headline on first paint while stale');
+  assert.match(beforeHeadline, /Updating similarity…/);
+
+  const after = renderPending(baseReport({
+    archiveScore: 0,
+    historicalSubmissionMatch: CORPUS_SOURCE_MATCH,
+    unifiedSimilarity: unified(),
+  }), 'resolved');
+  const afterHeadline = after.match(/<section class="similarity-heading[^>]*>[\s\S]*?<\/section>/)?.[0] ?? '';
+  assert.ok(afterHeadline);
+  assert.match(afterHeadline, /<span>100%<\/span> TurnitPlus Similarity/, 'REQUIRED: the settled paint must be the real 100%');
+  // (?<!\d)0% — a bare "0%" not preceded by another digit, so this does not
+  // false-positive on the trailing "0%" inside the real "100%" above.
+  assert.doesNotMatch(afterHeadline, /(?<!\d)0%/, 'the settled headline must never show a standalone 0% either — the fixture\'s own archiveScore is 0, so this catches any code path that fell back to it instead of the real unified result');
+});
+
+test('SIM-04 NO-FLASH (structural): setSimilarityStatus("resolved") and setReport(...) are synchronous, adjacent statements in the same background-fetch .then() callback — no await between them, so React batches both into one commit and a "resolved but still showing the old report" frame cannot occur', async () => {
+  const shell = await fs.promises.readFile(path.join(repo, 'app/reports/[id]/report-detail-shell.tsx'), 'utf8');
+  const fetchCallback = shell.match(/void fetchRemoteReport<SimilarityReport>\(id\)\.then\(\(enriched\) => \{[\s\S]*?\n {6}\}\);/)?.[0] ?? '';
+  assert.ok(fetchCallback, 'the authenticated background-fetch .then() callback must be found');
+  assert.match(
+    fetchCallback,
+    /setSimilarityStatus\("resolved"\);\s*if \(!enriched\) return;\s*setReport\(/,
+    'setSimilarityStatus and setReport must be adjacent synchronous statements — any await/promise boundary inserted between them would let React commit "resolved" on its own frame first',
+  );
 });

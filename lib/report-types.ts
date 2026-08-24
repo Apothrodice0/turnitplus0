@@ -229,6 +229,20 @@ export type SimilarityReport = {
    * present, absent, or from a report saved before Phase 4A existed.
    */
   unifiedSimilarity?: UnifiedSimilarityResult;
+  /**
+   * Release-hardening audit finding SIM-04: the flag/generation snapshot
+   * lib/report-primary-similarity.ts's resolvePrimarySimilaritySummary
+   * captured at the moment unifiedSimilarity above was computed — never
+   * read by any scoring logic, only by resolvePersistedSimilarityDisplay's
+   * own freshness/flag-mismatch check (lib/reports-repo.ts's
+   * findRoomOccupant, app/reports/[id]/page.tsx), which is the ONLY thing
+   * that may ever read them. Both absent together means unifiedSimilarity
+   * itself is also absent (finalization never completed) — never set
+   * independently of it.
+   */
+  corpusSourceMatchingEnabledAtComputation?: boolean;
+  /** See corpusSourceMatchingEnabledAtComputation's own comment — the corpus_match_generation value historicalSubmissionMatch was computed against. */
+  unifiedSimilarityGeneration?: number;
   wordCount: number;
   characterCount: number;
   pageCount: number;
@@ -450,6 +464,15 @@ export function buildReportSummary(report: SimilarityReport): ReportSummary {
     // the archive component.
     primaryScore: primarySimilarityScore(report),
     isUnified: hasUnifiedSimilarity(report),
+    // Release-hardening audit finding SIM-04: client-built summaries have
+    // no cheap way to know generation/flag staleness (that needs a DB
+    // read — see lib/report-primary-similarity.ts's
+    // resolvePersistedSimilarityDisplay, the server-side counterpart) —
+    // "resolved" vs "pending" is the full range available here, matching
+    // this function's own existing archive-only-vs-combined fallback rule
+    // exactly: a report with no unifiedSimilarity yet is pending, not a
+    // settled archive-only answer.
+    similarityStatus: hasUnifiedSimilarity(report) ? "resolved" : "pending",
     scoreBand: report.scoreBand,
     aiScore: aiSignal.value,
     aiTone: aiSignal.tone,

@@ -173,6 +173,27 @@ function isCurrentVersion(row: SnapshotRow): boolean {
   );
 }
 
+/**
+ * Release-hardening audit finding SIM-03: the exact "is this existing row
+ * still cache-worthy" condition getOrComputeHistoricalMatchSnapshot already
+ * used inline — factored out so a caller that only needs to know "would a
+ * call right now be a cache hit or a real recompute" (lib/report-primary-
+ * similarity.ts's write-time finalization, and any future stale-generation
+ * check) can ask without duplicating this exact rule, and can never drift
+ * out of sync with what getOrComputeHistoricalMatchSnapshot itself actually
+ * does. See this file's own header comment (Phase E8E fix, corpus-source
+ * matching addendum point 1) for why every one of these conditions exists.
+ */
+function isSnapshotRowCurrent(row: SnapshotRow | undefined, currentGeneration: number): boolean {
+  return Boolean(
+    row &&
+    isCurrentVersion(row) &&
+    row.status !== "NO_HISTORICAL_MATCH" &&
+    Number(row.is_partial) !== 1 &&
+    Number(row.corpus_generation) >= currentGeneration,
+  );
+}
+
 function rowToResult(row: SnapshotRow): ReportHistoricalSubmissionMatch {
   const base = {
     computedAt: row.computed_at,
@@ -302,14 +323,8 @@ export async function getOrComputeHistoricalMatchSnapshot(
   // the case those alone cannot: eligibility newly ADDED, which a targeted,
   // per-representation search could never discover for a report that
   // doesn't reference the new content yet.
-  if (
-    existingRow &&
-    isCurrentVersion(existingRow) &&
-    existingRow.status !== "NO_HISTORICAL_MATCH" &&
-    Number(existingRow.is_partial) !== 1 &&
-    Number(existingRow.corpus_generation) >= currentGeneration
-  ) {
-    return applyCorpusSourceMatchingFlag(rowToResult(existingRow));
+  if (isSnapshotRowCurrent(existingRow, currentGeneration)) {
+    return applyCorpusSourceMatchingFlag(rowToResult(existingRow as SnapshotRow));
   }
 
   const startedAt = Date.now();
@@ -418,6 +433,33 @@ export async function getOrComputeHistoricalMatchSnapshot(
     error_message: errorMessage,
     computed_at: computedAt,
   }));
+}
+
+/**
+ * Release-hardening audit finding SIM-03: a pure freshness check — no
+ * candidate search, no write, not even rowToResult's own JSON.parse of
+ * result_json (this SELECT never reads that column at all). Lets a caller
+ * that already has a persisted SimilarityReport.unifiedSimilarity in hand
+ * (lib/report-primary-similarity.ts's write-time finalization, and
+ * app/reports/[id]/page.tsx's own read-time staleness signal) ask "is that
+ * value still trustworthy right now" without paying for — or risking —
+ * getOrComputeHistoricalMatchSnapshot's own recompute path. Exactly the
+ * same two cheap, indexed reads (corpus_match_generation, then this table)
+ * that function's own cache-hit path already does; true here if and only if
+ * a call to that function right now would also be a cache hit.
+ */
+export async function isHistoricalMatchSnapshotCurrent(
+  client: Client,
+  params: { reportDeviceKey: string; reportId: string },
+): Promise<boolean> {
+  const currentGeneration = await getCurrentCorpusMatchGeneration(client);
+  const existing = await client.execute({
+    sql: `SELECT status, matcher_version, fingerprint_version, canonicalization_version, candidate_count, processing_duration_ms, error_message, computed_at, is_partial, corpus_generation
+          FROM report_historical_match_snapshots WHERE report_device_key = ? AND report_id = ?`,
+    args: [params.reportDeviceKey, params.reportId],
+  });
+  const existingRow = existing.rows[0] as unknown as SnapshotRow | undefined;
+  return isSnapshotRowCurrent(existingRow, currentGeneration);
 }
 
 /** Deletes a report's historical-match snapshot, if any — see db/schema.ts's own comment on why this is an explicit application-level cascade rather than a DB-level FOREIGN KEY ... ON DELETE CASCADE. Called from app/api/reports/[id]/route.ts's DELETE handler, in the same request that deletes the report itself. */

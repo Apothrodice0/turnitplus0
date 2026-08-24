@@ -9,7 +9,8 @@ import { clientIpFromHeaders } from "@/lib/client-ip";
 import { getReportsDbClient } from "@/lib/reports-db";
 import { findReportRowForUser } from "@/lib/reports-repo";
 import { deriveRoomStatus } from "@/lib/report-rooms";
-import type { SimilarityReport } from "@/lib/report-types";
+import { resolvePersistedSimilarityDisplay } from "@/lib/report-primary-similarity";
+import { archiveOverlapScore, hasUnifiedSimilarity, type SimilarityReport } from "@/lib/report-types";
 import { ReportDetailShell } from "./report-detail-shell";
 
 export const dynamic = "force-dynamic";
@@ -24,7 +25,21 @@ type OwnedReportResult =
   // "pending." Always defined (never null): a legacy report predating
   // ai_status falls back to deriveRoomStatus's own ai_score-only rule,
   // exactly like the room page already does for the same case.
-  | { status: "found"; payload: SimilarityReport; aiStatus: "processing" | "ready" | "failed" }
+  // Release-hardening audit finding SIM-04: similarityStatus is a cheap,
+  // read-only signal — computed via lib/report-primary-similarity.ts's
+  // resolvePersistedSimilarityDisplay, the SAME function
+  // lib/reports-repo.ts's findRoomOccupant uses, so room and detail can
+  // never disagree. Never triggers recomputation itself (no matcher calls,
+  // no writes); it only tells ReportDetailShell whether payload's own
+  // primarySimilarityScore is already trustworthy ("resolved"), known
+  // outdated by generation/live-flag change ("stale" — show "Updating
+  // similarity…" instead), or never computed at all ("pending" — show
+  // "Calculating similarity…"). See loadOwnedReport's own comment for why
+  // payload.unifiedSimilarity is stripped in the one "resolved but
+  // archive-only" case (a live CORPUS_SOURCE_MATCHING_ENABLED rollback) so
+  // primarySimilarityScore(payload) itself agrees with this status, not
+  // just the label around it.
+  | { status: "found"; payload: SimilarityReport; aiStatus: "processing" | "ready" | "failed"; similarityStatus: "resolved" | "stale" | "pending" }
   | { status: "not-found-for-session" }
   | { status: "no-session" }
   | { status: "rate-limited"; retryAfterSeconds: number };
@@ -64,7 +79,27 @@ const loadOwnedReport = cache(async (id: string): Promise<OwnedReportResult> => 
     try {
       const payload = JSON.parse(row.payload_json) as SimilarityReport;
       const aiStatus = deriveRoomStatus(row.ai_score, row.ai_status);
-      return { status: "found", payload, aiStatus };
+      const display = await resolvePersistedSimilarityDisplay(client, {
+        reportDeviceKey: row.device_key,
+        reportId: id,
+        archiveScore: archiveOverlapScore(payload),
+        unifiedScore: payload.unifiedSimilarity?.unifiedScore ?? null,
+        hasUnifiedSimilarity: hasUnifiedSimilarity(payload),
+        corpusSourceMatchingEnabledAtComputation: payload.corpusSourceMatchingEnabledAtComputation ?? null,
+      });
+      // Release-hardening audit finding SIM-04: "resolved" + isUnified
+      // false means the live flag rollback path — payload.unifiedSimilarity
+      // itself still holds the OLD, flag-computed value (it is never
+      // mutated in storage just by a read), so it must be stripped here,
+      // not just labeled around: primarySimilarityScore(payload) on the
+      // client reads report.unifiedSimilarity directly and has no
+      // knowledge of the live flag at all — without this, the client would
+      // render the correct "resolved" status next to the WRONG (stale,
+      // corpus-inflated) number.
+      if (display.status === "resolved" && !display.isUnified) {
+        delete payload.unifiedSimilarity;
+      }
+      return { status: "found", payload, aiStatus, similarityStatus: display.status };
     } catch {
       return { status: "not-found-for-session" };
     }
@@ -129,6 +164,7 @@ export default async function ReportDetailPage({
       mode={mode}
       initialReport={result.status === "found" ? result.payload : null}
       initialAiStatus={result.status === "found" ? result.aiStatus : null}
+      initialSimilarityStatus={result.status === "found" ? result.similarityStatus : null}
       requiresClientResolution={result.status === "no-session"}
       backRoom={backRoom}
     />
