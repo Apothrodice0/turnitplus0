@@ -14,7 +14,14 @@ import { runCorpusAdmissionPromotionSweep } from '../lib/corpus-admission-promot
 import { findRoomOccupant, findReportRowForUser } from '../lib/reports-repo.ts';
 import { deriveRoomStatus } from '../lib/report-rooms.ts';
 import { resolvePersistedSimilarityDisplay } from '../lib/report-primary-similarity.ts';
-import { archiveOverlapScore, hasUnifiedSimilarity } from '../lib/report-types.ts';
+import { archiveOverlapScore, buildReportSummary, hasUnifiedSimilarity } from '../lib/report-types.ts';
+import { attachUnifiedSimilarity } from '../lib/document-check-pipeline.ts';
+// Release-hardening audit finding LIFECYCLE-06 (Preview regression): the
+// REAL, exported isFullyRevealed — not this file's own long-standing local
+// mirror further down (kept as-is for the existing LIFECYCLE-03/05 tests) —
+// aliased so the new regression test below proves the actual deployed
+// function's behavior, not a parallel description of it.
+import { isFullyRevealed as isFullyRevealedReal } from '../app/reports/rooms/[room]/room-page-shell.tsx';
 
 /**
  * Release-hardening audit finding SIM-03: the required end-to-end
@@ -123,7 +130,7 @@ async function signUpConsentingAccount() {
   return { userId, deviceKey: `write-time-finalization-device-${userCounter}`, cookie, tag: `write-time-finalization-${userCounter}` };
 }
 
-async function postReport(account, { id, room, aiStatus, aiScore, text = DOCUMENT_A_TEXT, wordCount = DOCUMENT_A_WORD_COUNT, archiveScore = 0 }) {
+async function postReport(account, { id, room, aiStatus, aiScore, text = DOCUMENT_A_TEXT, wordCount = DOCUMENT_A_WORD_COUNT, archiveScore = 0, payloadOverrides = {} }) {
   await resetRateForTest(account.tag + '-post');
   const req = new Request('http://localhost/api/reports', {
     method: 'POST',
@@ -146,6 +153,13 @@ async function postReport(account, { id, room, aiStatus, aiScore, text = DOCUMEN
         author: '', assignment: '', created: new Date().toISOString(),
         score: archiveScore, archiveScore, wordCount,
         scoreBand: 'Low', matchedWordCount: 0, sources: [], repeats: [], text,
+        // Release-hardening audit finding LIFECYCLE-06 (Preview regression):
+        // lets a caller submit exactly what a real client resave would —
+        // e.g. a stale, client-computed unifiedSimilarity — so a test can
+        // prove the SERVER correctly overwrites it via write-time
+        // finalization, rather than only ever submitting the archive-only
+        // default shape every other caller of this helper already uses.
+        ...payloadOverrides,
       },
     }),
   });
@@ -704,5 +718,123 @@ test('LIFECYCLE-05 END-TO-END: the room and detail pages both withhold every res
     const detailState = await computeInitialDetailState(failedAccount.userId, failedReportId);
     assert.equal(detailState.aiStatus, 'failed');
     assert.equal(isBothReady(detailState), true, 'REQUIRED: the detail page must also reveal — showing "Unavailable" for AI while still showing the real similarity result, never staying on the loading screen because of a failure');
+  });
+});
+
+const DOCUMENT_F_TEXT =
+  'Paleoclimatologists analyzing a newly extracted ice core from a high-altitude glacier identified a distinctive dust layer whose isotopic signature matches a documented volcanic ' +
+  'eruption several centuries earlier, allowing the entire core to be independently dated with a precision the existing annual-layer count alone could not achieve.';
+const DOCUMENT_F_WORD_COUNT = 45;
+
+/**
+ * Release-hardening audit finding LIFECYCLE-06 (Preview regression, proven
+ * root cause): reproduces the exact sequence Vercel Preview surfaced —
+ * fresh upload of content matching an already-promoted corpus source
+ * revealed AI + a false 0% similarity together, permanently, until a full
+ * page reload (a fresh server read) showed the true 100%.
+ *
+ * Root cause traced through the real code: app/reports/rooms/[room]/room-page-shell.tsx's
+ * runCheck() calls the REAL attachUnifiedSimilarity (lib/document-check-pipeline.ts)
+ * on the client's own locally-generated report BEFORE it is ever saved —
+ * that function never passes historicalSubmissionMatch to computeUnifiedSimilarity
+ * (see its own single call site), so it has no way to see the corpus and
+ * correctly-for-its-own-inputs computes 0 for a promoted-corpus-only match.
+ * The SERVER side was never wrong: write-time finalization (resolvePrimarySimilaritySummary,
+ * invoked from app/api/reports/route.ts's POST handler on every save with
+ * text) already, correctly persists the true 100% on the very first save,
+ * before AI even starts — proven directly below, and already established
+ * by the LIFECYCLE-03/05 END-TO-END tests above. The client, however,
+ * never learns this: the save response is {ok:true}, not the enriched
+ * payload, so the client's own in-memory `report` object keeps its stale,
+ * corpus-blind unifiedSimilarity for the rest of this session. When AI
+ * finishes, saveEnrichedAiResult spread that SAME stale object into
+ * `enriched` and fed it through buildReportSummary (lib/report-types.ts),
+ * whose own similarityStatus heuristic — hasUnifiedSimilarity(report) ?
+ * "resolved" : "pending" — could not distinguish a present-but-corpus-blind
+ * client computation from a genuinely server-confirmed one. That false
+ * "resolved" was sufficient on its own for isFullyRevealed
+ * (room-page-shell.tsx) to declare the room fully revealed and, via
+ * setOccupant, permanently stop the room's own poll effect — the ONE thing
+ * that would have read the server's already-correct persisted value.
+ *
+ * The fix (this same file's own room-page-shell.tsx, both call sites that
+ * build a ReportSummary from a client-only report object) forces
+ * similarityStatus to "pending" unconditionally at those two construction
+ * points, so only a genuine server read (via this room's own poll effect)
+ * can ever promote it to "resolved". Proven below using the REAL, exported
+ * attachUnifiedSimilarity, buildReportSummary, and isFullyRevealed
+ * (aliased isFullyRevealedReal) — never source-string assertions, and
+ * never a second, parallel implementation of any of them.
+ */
+test('LIFECYCLE-06 PREVIEW REGRESSION: a fresh upload matching an already-promoted corpus source must not reveal the client\'s own corpus-blind 0% as a false "resolved" similarity — the room stays not-revealed until a real server read confirms the already-finalized 100%, and the very next poll-equivalent read adopts it with no page reload', async (t) => {
+  await promoteDocumentIntoCorpus(DOCUMENT_F_TEXT);
+  const account = await signUpConsentingAccount();
+  const reportId = 'lifecycle-06-preview-regression-report';
+
+  // Mirrors runCheck()'s own construction exactly: the client analyzes the
+  // document entirely locally, then calls the REAL attachUnifiedSimilarity
+  // — which never has corpus access — before ever saving anything.
+  const clientReport = attachUnifiedSimilarity({
+    version: 11, id: reportId, submissionId: 'sub-' + reportId, title: 'Client-side fixture',
+    author: '', assignment: '', created: new Date().toISOString(),
+    score: 0, archiveScore: 0, wordCount: DOCUMENT_F_WORD_COUNT,
+    scoreBand: 'Low', matchedWordCount: 0, sources: [], repeats: [], text: DOCUMENT_F_TEXT,
+    archiveMatchedPositions: [], externalAcademicEvidence: [],
+  });
+  assert.equal(clientReport.unifiedSimilarity.unifiedScore, 0, 'test setup sanity: the client-only computation must genuinely be blind to the promoted corpus match — this is the real attachUnifiedSimilarity output, not a fabricated fixture');
+
+  await t.test('initial upload POST (aiStatus "processing"), submitting the client\'s own blind unifiedSimilarity exactly as saveReportRemote really does — write-time finalization already overwrites it with the true 100%, proving the corpus/unified result never required the detail page to be opened', async () => {
+    const res = await postReport(account, {
+      id: reportId, room: 0, aiStatus: 'processing', text: DOCUMENT_F_TEXT, wordCount: DOCUMENT_F_WORD_COUNT,
+      payloadOverrides: { unifiedSimilarity: clientReport.unifiedSimilarity },
+    });
+    assert.equal(res.status, 200, 'test setup sanity: first save must succeed');
+
+    const occupant = await findRoomOccupant(client, account.userId, 0);
+    assert.equal(occupant.status, 'processing', 'test setup sanity: AI genuinely still in progress');
+    assert.equal(occupant.report.similarityStatus, 'resolved', 'REQUIRED: the server already has the true, current unified result — proves the corpus/unified result never needed the detail page to be opened');
+    assert.equal(occupant.report.primaryScore, 100, 'REQUIRED: the true 100% is already persisted server-side, overwriting the client\'s own submitted 0%, before AI has even started');
+  });
+
+  // Mirrors saveEnrichedAiResult's own construction exactly: `enriched`
+  // spreads the SAME clientReport object from above — never updated with
+  // the server's own confirmed 100%, since the save response above was
+  // only {ok:true}.
+  const aiResult = { aiScore: 3, aiAnalysis: { status: 'complete', analyzedWordCount: DOCUMENT_F_WORD_COUNT } };
+  const enriched = { ...clientReport, ...aiResult };
+
+  t.test('REQUIRED (proves the exact root cause): building the room summary from the client\'s own stale, corpus-blind report the OLD way reports a false "resolved" 0%, and the real isFullyRevealed accepts it as fully revealed', () => {
+    const buggyOldSummary = { ...buildReportSummary(enriched), aiStatus: 'ready' };
+    assert.equal(buggyOldSummary.similarityStatus, 'resolved', 'documents the exact root cause: buildReportSummary treats the mere presence of a client-only unifiedSimilarity as sufficient evidence of "resolved"');
+    assert.equal(buggyOldSummary.primaryScore, 0, 'documents the exact root cause: the reported score is the client\'s own blind 0%, not the server\'s real 100%');
+    const buggyOccupant = { status: 'ready', report: buggyOldSummary, cycleEndsAt: new Date().toISOString() };
+    assert.equal(isFullyRevealedReal(buggyOccupant), true, 'documents the exact root cause: this false "resolved" status alone is enough for the real isFullyRevealed to declare the room fully revealed, permanently stopping the poll effect that would otherwise correct it');
+  });
+
+  t.test('REQUIRED (proves the fix): the actual, currently-deployed saveEnrichedAiResult construction forces similarityStatus to "pending" regardless of buildReportSummary\'s own output — the room correctly stays NOT revealed, so its own poll effect keeps running instead of stopping on the false 0%', () => {
+    // Mirrors room-page-shell.tsx's saveEnrichedAiResult exactly, including
+    // the fix: similarityStatus: "pending" overrides whatever
+    // buildReportSummary(enriched) itself computed.
+    const fixedSummary = { ...buildReportSummary(enriched), aiStatus: 'ready', similarityStatus: 'pending' };
+    assert.equal(fixedSummary.similarityStatus, 'pending');
+    const fixedOccupant = { status: 'ready', report: fixedSummary, cycleEndsAt: new Date().toISOString() };
+    assert.equal(isFullyRevealedReal(fixedOccupant), false, 'REQUIRED: the room must not declare itself fully revealed from the client\'s own unconfirmed similarity — it must remain "Analysis in progress," never a temporary 0%. This is also the proof that a poll observing this pending state continues rather than treating the fallback score as resolved: isFullyRevealed is the poll effect\'s own stop condition, and it says no here.');
+  });
+
+  await t.test('REQUIRED: the AI-completion resave (the real POST, submitting the client\'s own stale unifiedSimilarity in the body, exactly as saveEnrichedAiResult really sends it) still results in the server persisting the TRUE 100% — the server was never the problem — and the room\'s own next poll-equivalent read adopts it, revealing AI + correct similarity + receipt together, atomically, with no page reload and no detail-page visit', async () => {
+    const res = await postReport(account, {
+      id: reportId, room: 0, aiStatus: 'ready', aiScore: 3, text: DOCUMENT_F_TEXT, wordCount: DOCUMENT_F_WORD_COUNT,
+      payloadOverrides: { unifiedSimilarity: clientReport.unifiedSimilarity },
+    });
+    assert.equal(res.status, 200);
+
+    // "next room poll" — the SAME findRoomOccupant call the room's own poll
+    // effect reaches via fetchReportRoomContents -> GET /api/reports?room=N.
+    const occupant = await findRoomOccupant(client, account.userId, 0);
+    assert.equal(occupant.status, 'ready');
+    assert.equal(occupant.report.similarityStatus, 'resolved', 'REQUIRED: the next poll must observe the true, current result, never the client\'s stale submitted value');
+    assert.equal(occupant.report.primaryScore, 100, 'REQUIRED: the room must adopt the real 100% — never the client\'s own blind 0% it submitted in the resave body');
+    assert.equal(occupant.report.aiScore, 3);
+    assert.equal(isFullyRevealedReal(occupant), true, 'REQUIRED: once the poll observes this genuinely resolved state, the room reveals AI + correct similarity + receipt together — atomically, automatically, with no browser refresh and no detail-page visit required');
   });
 });

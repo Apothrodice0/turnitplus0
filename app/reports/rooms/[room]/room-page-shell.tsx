@@ -336,12 +336,41 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
    * post-upload pass (runCheck below) and the manual retry (retryAiCheck).
    * Returns whether the save itself succeeded; the caller decides what to
    * tell the user.
+   *
+   * Release-hardening audit finding LIFECYCLE-06 (Preview regression fix):
+   * `report` here is the SAME client-generated SimilarityReport object
+   * runCheck built before ever saving — its own `unifiedSimilarity` field
+   * (set by attachUnifiedSimilarity, called once during upload) was computed
+   * CLIENT-SIDE, from archive/academic evidence only (see that function's
+   * own call — it never passes historicalSubmissionMatch, so it has no way
+   * to see the corpus at all). This same object is spread into `enriched`
+   * below and NEVER refreshed with the server's own write-time-finalized,
+   * corpus-aware result — the save response is just {ok:true}, not the
+   * enriched payload. buildReportSummary(enriched)'s own similarityStatus
+   * heuristic (hasUnifiedSimilarity ? "resolved" : "pending") could not
+   * tell the difference: a present-but-corpus-blind unifiedSimilarity
+   * looks identical to a genuinely server-confirmed one, so a promoted-
+   * corpus-only match (no archive/academic overlap) reported "resolved"
+   * at whatever partial score the client alone could see — 0% in the
+   * observed Preview reproduction, even though write-time finalization had
+   * already persisted the real 100% server-side by the time this save
+   * resolved. Because isFullyRevealed only checks similarityStatus (never
+   * primaryScore), that false "resolved" made the room reveal immediately
+   * and permanently stop polling — the ONE thing that would have picked up
+   * the already-correct persisted value. Forced to "pending" here,
+   * unconditionally: this room's own poll effect (a few lines below) is
+   * the ONLY thing ever allowed to promote similarity to "resolved", and
+   * it does so exclusively from a fresh server read (fetchReportRoomContents
+   * -> findRoomOccupant -> resolvePersistedSimilarityDisplay), which is
+   * generation/flag-aware and reads whatever write-time finalization
+   * already, actually persisted — never a locally-computed guess.
    */
   async function saveEnrichedAiResult(report: SimilarityReport, aiResult: { aiScore: number | null; aiAnalysis: AiAnalysis }): Promise<boolean> {
     const enriched = { ...report, ...aiResult };
     const enrichedSummary: ReportSummary = {
       ...buildReportSummary(enriched),
       aiStatus: aiResult.aiAnalysis.status === "complete" ? "ready" : "failed",
+      similarityStatus: "pending",
     };
     const enrichedSaveResult = await persistAiCompletion(enriched, enrichedSummary, room);
     if (!enrichedSaveResult.ok) return false;
@@ -535,7 +564,18 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
       // Explicitly "processing" (not left implicit as "no aiStatus yet") so
       // a legacy-vs-fresh row is never ambiguous — see
       // lib/report-rooms.ts's deriveRoomStatus.
-      const summary: ReportSummary = { ...buildReportSummary(report), aiStatus: "processing" };
+      //
+      // Release-hardening audit finding LIFECYCLE-06 (Preview regression
+      // fix): similarityStatus forced to "pending" for the identical reason
+      // saveEnrichedAiResult's own enrichedSummary is below — report.unifiedSimilarity
+      // here is attachUnifiedSimilarity's own client-side, corpus-blind
+      // computation (just set two lines above), never a server-confirmed
+      // result. Harmless today only because occupant.status is "processing"
+      // here (isFullyRevealed already requires "ready"/"failed" first) —
+      // forced explicitly anyway so this optimistic summary can never
+      // become a false "resolved" source if it is ever read before AI
+      // finishes, or if isFullyRevealed's own condition ever changes.
+      const summary: ReportSummary = { ...buildReportSummary(report), aiStatus: "processing", similarityStatus: "pending" };
       await storeReportBestEffort(report);
       // The upload request always names its room explicitly — the server
       // re-validates occupancy itself (409 if this room filled in the
