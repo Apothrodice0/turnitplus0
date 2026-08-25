@@ -76,9 +76,32 @@ const EXPECTED_APP_FILES_USING_THE_PROMOTION_DOOR = [
 // that door's own module — retention has no consent/idempotency-job
 // relationship to report-integration at all, just a shared HTTP trigger.
 const RETENTION_DOOR_MODULE = "corpus-admission-retention-sweep";
-const EXPECTED_APP_FILES_USING_THE_RETENTION_DOOR = ["app/api/internal/corpus-admission-sweep/route.ts"];
+const EXPECTED_APP_FILES_USING_THE_RETENTION_DOOR = [
+  "app/api/internal/corpus-admission-sweep/route.ts",
+  // Admin-only, read-only status line (isCorpusRetentionEnabled() flag
+  // state) — same precedent as the promotion door's own entry for this
+  // exact page, added for the B1C-adjacent operational status strip.
+  "app/admin/corpus/page.tsx",
+];
+// Fifth door: lib/corpus-admission-sweep-state.ts, its own closed surface —
+// read/write access to corpus_admission_sweep_runs (drizzle/0037), the
+// admin status strip's operational-history table. Named WITH the
+// "corpus-admission-" prefix deliberately, specifically so it is a real,
+// reviewed door here rather than an attempt to sit outside this guard by
+// naming around it — see that module's own header comment. Written by
+// both cron routes directly (recordSweepRun); read by
+// lib/corpus-admission-admin-repo.ts's own getCorpusAdmissionOperationalSummary
+// (an ADMIN_DASHBOARD_DOOR_MODULES caller, not this door — lib-to-lib
+// imports aren't in scope for this app/-only walk), which
+// app/admin/corpus/page.tsx calls directly, server-side (see that page's
+// own header comment on why no dedicated API route exists for this).
+const SWEEP_STATE_DOOR_MODULE = "corpus-admission-sweep-state";
+const EXPECTED_APP_FILES_USING_THE_SWEEP_STATE_DOOR = [
+  "app/api/internal/corpus-admission-sweep/route.ts",
+  "app/api/internal/corpus-admission-promotion-sweep/route.ts",
+];
 
-test("no app/ file imports lib/corpus-admission-gate.ts or any of its pure sibling modules directly — only lib/corpus-admission-report-integration.ts, the admin-dashboard repo/actions modules, lib/corpus-admission-promotion.ts, and lib/corpus-admission-retention-sweep.ts are allowed doors", () => {
+test("no app/ file imports lib/corpus-admission-gate.ts or any of its pure sibling modules directly — only lib/corpus-admission-report-integration.ts, the admin-dashboard repo/actions modules, lib/corpus-admission-promotion.ts, lib/corpus-admission-retention-sweep.ts, and lib/corpus-admission-sweep-state.ts are allowed doors", () => {
   const appDir = path.join(repoRoot, "app");
   const offenders = [];
   function walk(dir) {
@@ -93,14 +116,32 @@ test("no app/ file imports lib/corpus-admission-gate.ts or any of its pure sibli
             !l.includes(ALLOWED_CORPUS_ADMISSION_DOOR) &&
             !ADMIN_DASHBOARD_DOOR_MODULES.some((m) => l.includes(m)) &&
             !l.includes(PROMOTION_DOOR_MODULE) &&
-            !l.includes(RETENTION_DOOR_MODULE),
+            !l.includes(RETENTION_DOOR_MODULE) &&
+            !l.includes(SWEEP_STATE_DOOR_MODULE),
         );
         if (bypassesTheDoor) offenders.push(path.relative(repoRoot, full).split(path.sep).join("/"));
       }
     }
   }
   walk(appDir);
-  assert.deepEqual(offenders, [], `these app/ files import a corpus-admission-* module other than the four allowed doors: ${offenders.join(", ")}`);
+  assert.deepEqual(offenders, [], `these app/ files import a corpus-admission-* module other than the five allowed doors: ${offenders.join(", ")}`);
+});
+
+test("exactly the expected app/ files use the corpus-admission-sweep-state door — no unreviewed new caller", () => {
+  const appDir = path.join(repoRoot, "app");
+  const callers = [];
+  function walk(dir) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (/\.(ts|tsx)$/.test(entry.name)) {
+        const imports = importLines(fs.readFileSync(full, "utf8"));
+        if (imports.includes(SWEEP_STATE_DOOR_MODULE)) callers.push(path.relative(repoRoot, full).split(path.sep).join("/"));
+      }
+    }
+  }
+  walk(appDir);
+  assert.deepEqual(callers.sort(), [...EXPECTED_APP_FILES_USING_THE_SWEEP_STATE_DOOR].sort());
 });
 
 test("exactly the expected app/ files use the corpus-admission-retention-sweep door — no unreviewed new caller", () => {
@@ -251,16 +292,26 @@ test("lib/corpus-admission-policy.ts and lib/corpus-hard-gates.ts stay free of @
 // ============================================================================
 
 const ADMIN_DASHBOARD_MODULES = ["corpus-admission-admin-repo", "corpus-admission-admin-actions"];
-// The two app/admin/corpus/*.tsx pages never import these modules directly —
-// they render the "use client" components (components/admin/corpus-search.tsx,
-// components/admin/corpus-detail.tsx), which fetch these 5 API routes over
-// HTTP instead. Only the routes touch the repo/actions modules themselves.
+// app/admin/corpus/[id]/page.tsx (the detail page) never imports these
+// modules directly — it renders the "use client" component
+// (components/admin/corpus-detail.tsx), which fetches its own API route
+// over HTTP instead. app/admin/corpus/page.tsx (the LIST page) is a
+// deliberate exception: it calls getCorpusAdmissionOperationalSummary
+// directly, server-side, for the operational status strip — that page is
+// already authenticated (loadAdminGate) and force-dynamic, so a dedicated
+// API route would be indirection with no purpose (see
+// app/admin/corpus/page.tsx's own header comment; a route existed for
+// this earlier and was removed once that became clear). Every OTHER
+// caller here is a route.
 const EXPECTED_ADMIN_DASHBOARD_IMPORTERS = [
   "app/api/admin/corpus/route.ts",
   "app/api/admin/corpus/[id]/route.ts",
   "app/api/admin/corpus/[id]/preview/route.ts",
   "app/api/admin/corpus/[id]/deactivate/route.ts",
   "app/api/admin/corpus/[id]/reactivate/route.ts",
+  // Operational status strip's own data source — getCorpusAdmissionOperationalSummary,
+  // called directly server-side (see the comment above).
+  "app/admin/corpus/page.tsx",
 ];
 
 function walkSourceFiles(rootDir, visit) {

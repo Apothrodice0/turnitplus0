@@ -5,6 +5,7 @@ import { checkAuthRate } from '../../../../lib/rate-limit';
 import { clientIpFrom } from '../../../../lib/client-ip';
 import { isCorpusAdmissionEnabled, runReportAdmissionRetrySweep } from '../../../../lib/corpus-admission-report-integration';
 import { isCorpusRetentionEnabled, runCorpusAdmissionRetentionSweep } from '../../../../lib/corpus-admission-retention-sweep';
+import { recordSweepRun } from '../../../../lib/corpus-admission-sweep-state';
 
 /**
  * Protected scheduled/internal trigger for
@@ -52,6 +53,16 @@ import { isCorpusRetentionEnabled, runCorpusAdmissionRetentionSweep } from '../.
  * live intake is paused), and vice versa. Only when BOTH flags are off does
  * this route skip opening a database connection at all, exactly like it
  * already did for CORPUS_ADMISSION_ENABLED alone before this change.
+ *
+ * Admin status-strip support: each operation records its OWN outcome into
+ * corpus_admission_sweep_runs (lib/corpus-admission-sweep-state.ts) under its own
+ * sweep_kind ('report_admission' / 'retention') — never a shared row,
+ * precisely because the two operations above are already independent of
+ * each other's flag and can independently succeed or fail. A disabled
+ * flag's own `if` block is never entered, so it never writes a fake
+ * successful run or overwrites real prior history for that kind. A
+ * telemetry-write failure is logged and swallowed, never allowed to change
+ * this route's own response or control flow.
  */
 
 function isAuthorizedSweepRequest(request: Request): boolean {
@@ -101,7 +112,21 @@ async function handleSweepRequest(request: Request): Promise<Response> {
       };
 
       if (admissionEnabled) {
-        const sweep = await runReportAdmissionRetrySweep(client, { openConnection: () => getReportsDbClient() });
+        let sweep;
+        try {
+          sweep = await runReportAdmissionRetrySweep(client, { openConnection: () => getReportsDbClient() });
+        } catch (err) {
+          // Operational telemetry only — see lib/corpus-admission-sweep-state.ts's
+          // own header comment. Swallowed, never re-thrown from here; the
+          // real `err` below propagates completely unchanged, preserving
+          // today's exact behavior (a report-admission failure here still
+          // aborts this request before retention ever runs, exactly as
+          // before this change — only what gets PERSISTED is new).
+          await recordSweepRun(client, 'report_admission', { status: 'failed' }).catch((telemetryErr) => {
+            console.error('corpus-admission-sweep: recordSweepRun(report_admission, failed) itself threw (non-fatal):', telemetryErr instanceof Error ? telemetryErr.message : String(telemetryErr));
+          });
+          throw err;
+        }
         body.claimedCount = sweep.claimedJobIds.length;
         body.outcomeSummary = sweep.results.reduce(
           (acc, r) => {
@@ -110,11 +135,36 @@ async function handleSweepRequest(request: Request): Promise<Response> {
           },
           {} as Record<string, number>,
         );
+        await recordSweepRun(client, 'report_admission', { status: 'success', summary: { claimedCount: sweep.claimedJobIds.length, ...body.outcomeSummary } }).catch((telemetryErr) => {
+          console.error('corpus-admission-sweep: recordSweepRun(report_admission, success) itself threw (non-fatal):', telemetryErr instanceof Error ? telemetryErr.message : String(telemetryErr));
+        });
       }
 
       if (retentionEnabled) {
-        const retention = await runCorpusAdmissionRetentionSweep(client, { openConnection: () => getReportsDbClient() });
+        let retention;
+        try {
+          retention = await runCorpusAdmissionRetentionSweep(client, { openConnection: () => getReportsDbClient() });
+        } catch (err) {
+          // Independent of the report-admission telemetry above — this is
+          // exactly why retention gets its OWN sweep_kind row: it can
+          // succeed or fail on its own, regardless of what happened above.
+          await recordSweepRun(client, 'retention', { status: 'failed' }).catch((telemetryErr) => {
+            console.error('corpus-admission-sweep: recordSweepRun(retention, failed) itself threw (non-fatal):', telemetryErr instanceof Error ? telemetryErr.message : String(telemetryErr));
+          });
+          throw err;
+        }
         body.retention = { enabled: true, ...retention };
+        await recordSweepRun(client, 'retention', {
+          status: 'success',
+          summary: {
+            decisionsDeleted: retention.decisionsDeleted,
+            jobsDeleted: retention.jobsDeleted,
+            skippedProtected: retention.skippedProtected,
+            failedPromotionsRetryable: retention.failedPromotionsRetryable,
+          },
+        }).catch((telemetryErr) => {
+          console.error('corpus-admission-sweep: recordSweepRun(retention, success) itself threw (non-fatal):', telemetryErr instanceof Error ? telemetryErr.message : String(telemetryErr));
+        });
       }
 
       return new NextResponse(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });

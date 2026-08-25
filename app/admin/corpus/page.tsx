@@ -1,9 +1,13 @@
 import { notFound } from "next/navigation";
 import type { Metadata } from "next";
 import { loadAdminGate } from "@/lib/admin-gate";
+import { getReportsDbClient } from "@/lib/reports-db";
 import { AdminCorpusSearch } from "@/components/admin/corpus-search";
+import { AdminCorpusStatusStrip } from "@/components/admin/corpus-status-strip";
 import { isCorpusPromotionEnabled } from "@/lib/corpus-admission-promotion";
+import { isCorpusRetentionEnabled } from "@/lib/corpus-admission-retention-sweep";
 import { isCorpusSourceMatchingEnabled } from "@/lib/corpus-source-matching-flag";
+import { getCorpusAdmissionOperationalSummary } from "@/lib/corpus-admission-admin-repo";
 
 export const dynamic = "force-dynamic";
 
@@ -21,6 +25,23 @@ export default async function AdminCorpusPage() {
   const admin = await loadAdminGate();
   if (!admin) notFound();
 
+  // Loaded directly, server-side — this page is already authenticated
+  // (loadAdminGate above) and force-dynamic, so there is no reason to
+  // round-trip through a dedicated API route just to display these values;
+  // see components/admin/corpus-status-strip.tsx's own header comment.
+  // A failure here is logged and treated as "unavailable," never allowed
+  // to fail this whole page — the rest of the dashboard (the row list
+  // below) has nothing to do with this summary and must still render.
+  let operationalSummary: Awaited<ReturnType<typeof getCorpusAdmissionOperationalSummary>> | null = null;
+  const dbClient = await getReportsDbClient();
+  try {
+    operationalSummary = await getCorpusAdmissionOperationalSummary(dbClient);
+  } catch (err) {
+    console.error("AdminCorpusPage: getCorpusAdmissionOperationalSummary failed (non-fatal):", err instanceof Error ? err.message : String(err));
+  } finally {
+    dbClient.close();
+  }
+
   return (
     <main className="developer-page">
       <header className="developer-header">
@@ -31,6 +52,12 @@ export default async function AdminCorpusPage() {
           {" · "}
           Corpus-source matching in reports: <strong>{isCorpusSourceMatchingEnabled() ? "enabled" : "disabled"}</strong>
         </p>
+        <AdminCorpusStatusStrip
+          vercelEnv={process.env.VERCEL_ENV}
+          promotionEnabled={isCorpusPromotionEnabled()}
+          retentionEnabled={isCorpusRetentionEnabled()}
+          summary={operationalSummary}
+        />
       </header>
       <AdminCorpusSearch />
     </main>

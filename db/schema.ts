@@ -1140,6 +1140,22 @@ export const corpus_admission_promotions = sqliteTable(
   ],
 );
 
+// drizzle/0037: durable SINGLETON operational-state table for the admin
+// corpus dashboard's status strip — one row per logical sweep kind
+// ('promotion' | 'report_admission' | 'retention'), upserted in place, not
+// a history log. See that migration's own header comment for the full
+// rationale (mirrors corpus_match_generation's own singleton pattern) and
+// lib/corpus-admission-sweep-state.ts for the sole writer/reader discipline. No
+// account/report/decision/representation-shaped column; last_summary_json
+// is a bounded, numeric-only JSON blob.
+export const corpus_admission_sweep_runs = sqliteTable("corpus_admission_sweep_runs", {
+  sweep_kind: text("sweep_kind").primaryKey(),
+  last_run_at: text("last_run_at").notNull(),
+  last_status: text("last_status").notNull(),
+  last_summary_json: text("last_summary_json"),
+  updated_at: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
 // Export nothing else — Drizzle will consume these definitions for migrations.
 export {};
 

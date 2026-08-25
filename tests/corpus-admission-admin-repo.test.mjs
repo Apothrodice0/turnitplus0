@@ -5,7 +5,8 @@ import path from "path";
 import { randomUUID } from "node:crypto";
 import { createClient } from "@libsql/client";
 import { applyMigrationsLibsql } from "../lib/ingest.js";
-import { listCorpusAdmissionDecisions, getCorpusAdmissionDecisionDetail } from "../lib/corpus-admission-admin-repo.ts";
+import { listCorpusAdmissionDecisions, getCorpusAdmissionDecisionDetail, getCorpusAdmissionOperationalSummary } from "../lib/corpus-admission-admin-repo.ts";
+import { recordSweepRun } from "../lib/corpus-admission-sweep-state.ts";
 
 /**
  * lib/corpus-admission-admin-repo.ts: list filtering/pagination (incl. the
@@ -297,4 +298,77 @@ test("PAGINATION-LIMIT: a non-positive or missing page/pageSize falls back to a 
   const result = await listCorpusAdmissionDecisions(client, { page: -5, pageSize: -5 });
   assert.ok(result.page >= 1);
   assert.ok(result.pageSize >= 1);
+});
+
+// --- getCorpusAdmissionOperationalSummary (admin corpus status strip) ----
+
+async function insertPromotionRaw(status, attemptCount) {
+  const decisionId = await insertDecision({ decision: "ACCEPT", sourceRef: `operational-summary-fixture-${randomUUID()}` });
+  const hash = randomUUID();
+  await insertContentStore(decisionId, hash, "operational-summary fixture text");
+  const acceptedRepId = await insertAcceptedRepresentation(decisionId, hash);
+  const id = randomUUID();
+  await client.execute({
+    sql: `INSERT INTO corpus_admission_promotions (id, decision_id, accepted_representation_id, status, attempt_count, created_at, updated_at)
+          VALUES (?,?,?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
+    args: [id, decisionId, acceptedRepId, status, attemptCount],
+  });
+  return id;
+}
+
+test("getCorpusAdmissionOperationalSummary: retryable ('failed') and dead-lettered counts reflect only those two statuses, never 'staged'/'indexed'/'skipped'", async () => {
+  const before = await getCorpusAdmissionOperationalSummary(client);
+
+  await insertPromotionRaw("failed", 2);
+  await insertPromotionRaw("failed", 3);
+  await insertPromotionRaw("dead_lettered", 5);
+  await insertPromotionRaw("staged", 0);
+  await insertPromotionRaw("indexed", 1);
+  await insertPromotionRaw("skipped", 1);
+
+  const after = await getCorpusAdmissionOperationalSummary(client);
+  assert.equal(after.retryablePromotionCount, before.retryablePromotionCount + 2, "REQUIRED: only the 2 new 'failed' rows must be counted as retryable");
+  assert.equal(after.deadLetteredPromotionCount, before.deadLetteredPromotionCount + 1, "REQUIRED: only the 1 new 'dead_lettered' row must be counted");
+});
+
+test("getCorpusAdmissionOperationalSummary: sweeps is always keyed by all 3 known kinds; a kind with no recorded run is null ('never')", async () => {
+  const dbFile2 = path.join(repoRoot, "test_corpus_admission_admin_repo_summary_empty.db");
+  for (const suffix of ["", "-wal", "-shm"]) {
+    const candidate = `${dbFile2}${suffix}`;
+    if (fs.existsSync(candidate)) fs.unlinkSync(candidate);
+  }
+  const freshClient = createClient({ url: `file:${dbFile2}` });
+  await freshClient.execute("PRAGMA foreign_keys = ON");
+  await applyMigrationsLibsql(freshClient, drizzleDir);
+  try {
+    const summary = await getCorpusAdmissionOperationalSummary(freshClient);
+    assert.deepEqual(Object.keys(summary.sweeps).sort(), ["promotion", "report_admission", "retention"].sort());
+    assert.equal(summary.sweeps.promotion, null, "REQUIRED: a never-run kind must be null, not a fabricated row");
+    assert.equal(summary.sweeps.report_admission, null);
+    assert.equal(summary.sweeps.retention, null);
+    assert.equal(summary.retryablePromotionCount, 0);
+    assert.equal(summary.deadLetteredPromotionCount, 0);
+  } finally {
+    freshClient.close();
+    for (const suffix of ["", "-wal", "-shm"]) {
+      const candidate = `${dbFile2}${suffix}`;
+      try { fs.unlinkSync(candidate); } catch { /* ignore */ }
+    }
+  }
+});
+
+test("getCorpusAdmissionOperationalSummary: a recorded sweep run surfaces its own status/summary under the right kind, and updating it again overwrites rather than duplicating", async () => {
+  await recordSweepRun(client, "promotion", { status: "success", summary: { claimedCount: 4, indexed: 3, failed: 1 } });
+  const first = await getCorpusAdmissionOperationalSummary(client);
+  assert.equal(first.sweeps.promotion.lastStatus, "success");
+  assert.deepEqual(first.sweeps.promotion.summary, { claimedCount: 4, indexed: 3, failed: 1 });
+  assert.equal(first.sweeps.report_admission, null, "REQUIRED: recording one kind must never affect another kind's own null state");
+
+  await recordSweepRun(client, "promotion", { status: "failed" });
+  const second = await getCorpusAdmissionOperationalSummary(client);
+  assert.equal(second.sweeps.promotion.lastStatus, "failed");
+  assert.equal(second.sweeps.promotion.summary, null, "REQUIRED: a later run with no summary must not keep the previous run's stale summary");
+
+  const rowCount = await client.execute("SELECT COUNT(*) AS c FROM corpus_admission_sweep_runs WHERE sweep_kind = 'promotion'");
+  assert.equal(Number(rowCount.rows[0].c), 1, "REQUIRED: this is a singleton row per kind, never an appended history");
 });

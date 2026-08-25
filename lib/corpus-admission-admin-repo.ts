@@ -1,4 +1,5 @@
 import type { Client } from "@libsql/client";
+import { getSweepRunRecords, type SweepKind, type SweepRunStatus } from "./corpus-admission-sweep-state";
 
 /**
  * Data-access layer for the admin-only corpus-admission dashboard
@@ -465,4 +466,44 @@ export async function getCorpusAdmissionDecisionDetail(client: Client, rowId: st
     promotionLastError: raw.promotion_last_error,
     promotionRepresentationId: raw.promotion_representation_id,
   };
+}
+
+export type CorpusAdmissionOperationalSummary = {
+  /** COUNT(*) of corpus_admission_promotions rows with status='failed' — still retryable by the promotion sweep. */
+  retryablePromotionCount: number;
+  /** COUNT(*) of corpus_admission_promotions rows with status='dead_lettered' — exhausted MAX_PROMOTION_ATTEMPTS, terminal (see lib/corpus-admission-promotion.ts). */
+  deadLetteredPromotionCount: number;
+  /** One entry per known SweepKind, always present as a key — null when that kind has never recorded a run at all (the admin strip's own "Last sweep: never"). */
+  sweeps: Record<SweepKind, { lastRunAt: string; lastStatus: SweepRunStatus; summary: Record<string, number> | null } | null>;
+};
+
+/**
+ * The admin corpus dashboard's status-strip data source — everything it
+ * needs in one cheap call: two indexed COUNT(*) queries against
+ * corpus_admission_promotions (idx_corpus_admission_promotions_sweep_candidates
+ * covers both, leading on status) plus a read of every
+ * corpus_admission_sweep_runs row (lib/corpus-admission-sweep-state.ts, at most 3
+ * rows, no filter needed). Never touches decision_id, representation_id,
+ * account/report identifiers, or last_error text — only counts and the
+ * already-numeric-only sweep summaries. Same "no authorization of its own"
+ * contract as every other function in this file.
+ */
+export async function getCorpusAdmissionOperationalSummary(client: Client): Promise<CorpusAdmissionOperationalSummary> {
+  const countsResult = await client.execute(
+    "SELECT status, COUNT(*) AS c FROM corpus_admission_promotions WHERE status IN ('failed','dead_lettered') GROUP BY status",
+  );
+  let retryablePromotionCount = 0;
+  let deadLetteredPromotionCount = 0;
+  for (const row of countsResult.rows as unknown as { status: string; c: number | bigint }[]) {
+    if (row.status === "failed") retryablePromotionCount = Number(row.c);
+    else if (row.status === "dead_lettered") deadLetteredPromotionCount = Number(row.c);
+  }
+
+  const records = await getSweepRunRecords(client);
+  const sweeps: CorpusAdmissionOperationalSummary["sweeps"] = { promotion: null, report_admission: null, retention: null };
+  for (const record of records) {
+    sweeps[record.sweepKind] = { lastRunAt: record.lastRunAt, lastStatus: record.lastStatus, summary: record.summary };
+  }
+
+  return { retryablePromotionCount, deadLetteredPromotionCount, sweeps };
 }

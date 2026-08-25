@@ -150,3 +150,107 @@ for (const method of ['GET', 'POST']) {
     assert.notEqual(jobAfter.rows[0].status, 'pending', `the sweep triggered through this authorized ${method} request must have actually processed the job`);
   });
 }
+
+// --- B1C-adjacent: independent sweep-state persistence (report_admission vs retention) ---
+
+async function sweepRunRow(kind) {
+  const result = await setupClient.execute({ sql: 'SELECT last_status, last_summary_json FROM corpus_admission_sweep_runs WHERE sweep_kind = ?', args: [kind] });
+  return result.rows[0] ?? null;
+}
+
+test('SWEEP-STATE: with only CORPUS_ADMISSION_ENABLED on (retention off), only the report_admission row is written — retention stays absent', async () => {
+  const originalRetentionFlag = process.env.CORPUS_RETENTION_ENABLED;
+  delete process.env.CORPUS_RETENTION_ENABLED;
+  process.env.CRON_SECRET = REAL_SECRET;
+  process.env.CORPUS_ADMISSION_ENABLED = 'true';
+
+  const retentionBefore = await sweepRunRow('retention');
+
+  const res = await callSweep('GET', { authorization: `Bearer ${REAL_SECRET}` });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.retention.enabled, false, 'test setup sanity: retention must genuinely be off for this test');
+
+  const reportAdmissionRow = await sweepRunRow('report_admission');
+  assert.ok(reportAdmissionRow, 'REQUIRED: report_admission must record its own row when its own flag is on and it actually ran');
+  assert.equal(reportAdmissionRow.last_status, 'success');
+
+  const retentionAfter = await sweepRunRow('retention');
+  assert.deepEqual(retentionAfter, retentionBefore, 'REQUIRED: retention being disabled must mean its own row is completely untouched — no fake run, no overwrite');
+
+  if (originalRetentionFlag === undefined) delete process.env.CORPUS_RETENTION_ENABLED;
+  else process.env.CORPUS_RETENTION_ENABLED = originalRetentionFlag;
+});
+
+test('SWEEP-STATE: with only CORPUS_RETENTION_ENABLED on (admission off), only the retention row is written — report_admission stays untouched by this call', async () => {
+  const originalAdmissionFlag = process.env.CORPUS_ADMISSION_ENABLED;
+  delete process.env.CORPUS_ADMISSION_ENABLED;
+  process.env.CRON_SECRET = REAL_SECRET;
+  process.env.CORPUS_RETENTION_ENABLED = 'true';
+
+  const reportAdmissionBefore = await sweepRunRow('report_admission');
+
+  const res = await callSweep('GET', { authorization: `Bearer ${REAL_SECRET}` });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.enabled, false, 'test setup sanity: admission must genuinely be off for this test');
+  assert.equal(body.retention.enabled, true);
+
+  const retentionRow = await sweepRunRow('retention');
+  assert.ok(retentionRow, 'REQUIRED: retention must record its own row when its own flag is on and it actually ran');
+  assert.equal(retentionRow.last_status, 'success');
+
+  const reportAdmissionAfter = await sweepRunRow('report_admission');
+  assert.deepEqual(reportAdmissionAfter, reportAdmissionBefore, 'REQUIRED: this call must never touch report_admission\'s own row while its flag is off');
+
+  if (originalAdmissionFlag === undefined) delete process.env.CORPUS_ADMISSION_ENABLED;
+  else process.env.CORPUS_ADMISSION_ENABLED = originalAdmissionFlag;
+});
+
+test('SWEEP-STATE: with BOTH flags on, both report_admission and retention record their own independent rows in the same invocation, each as a singleton (never appended)', async () => {
+  process.env.CRON_SECRET = REAL_SECRET;
+  process.env.CORPUS_ADMISSION_ENABLED = 'true';
+  process.env.CORPUS_RETENTION_ENABLED = 'true';
+
+  const res = await callSweep('GET', { authorization: `Bearer ${REAL_SECRET}` });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.enabled, true);
+  assert.equal(body.retention.enabled, true);
+
+  const reportAdmissionRow = await sweepRunRow('report_admission');
+  const retentionRow = await sweepRunRow('retention');
+  assert.equal(reportAdmissionRow.last_status, 'success');
+  assert.equal(retentionRow.last_status, 'success');
+
+  for (const kind of ['report_admission', 'retention']) {
+    const rowCount = await setupClient.execute({ sql: 'SELECT COUNT(*) AS c FROM corpus_admission_sweep_runs WHERE sweep_kind = ?', args: [kind] });
+    assert.equal(Number(rowCount.rows[0].c), 1, `REQUIRED: '${kind}' must remain a singleton row across every prior call in this file, never appended`);
+  }
+});
+
+test('PRIVACY: the persisted report_admission sweep-run row never contains the swept job/account/report/device identifiers', async () => {
+  process.env.CRON_SECRET = REAL_SECRET;
+  process.env.CORPUS_ADMISSION_ENABLED = 'true';
+
+  const accountId = await ensureUser();
+  const deviceKey = 'privacy-sweep-state-device';
+  const reportId = 'privacy-sweep-state-report';
+  const text = Array.from({ length: 3300 }, (_, i) => `pw${i % 50}`).join(' ');
+  await setupClient.execute({
+    sql: `INSERT INTO saved_reports (id, device_key, submission_id, title, report_created_at, word_count, archive_score, score_band, payload_json, user_id, updated_at)
+          VALUES (?,?,?,?,CURRENT_TIMESTAMP,?,?,?,?,?,CURRENT_TIMESTAMP)`,
+    args: [reportId, deviceKey, 'sub-privacy-sweep-state', 'T', 3300, 10, 'low', JSON.stringify({ text }), accountId],
+  });
+  const created = await createPendingReportAdmissionJob(setupClient, { accountId, deviceKey, reportId });
+  assert.ok(created?.jobId);
+
+  await callSweep('GET', { authorization: `Bearer ${REAL_SECRET}` });
+
+  const row = await sweepRunRow('report_admission');
+  assert.ok(row);
+  const serialized = JSON.stringify(row);
+  for (const secret of [accountId, deviceKey, reportId, created.jobId]) {
+    assert.ok(!serialized.includes(secret), `the persisted sweep-run row must never contain ${secret}`);
+  }
+});
