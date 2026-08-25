@@ -11,6 +11,7 @@ import {
   revealRetainedTextPreview,
   validateAdminReason,
 } from "../lib/corpus-admission-admin-actions.ts";
+import { evaluateCorpusAdmissionCandidate } from "../lib/corpus-admission-gate.ts";
 
 /**
  * lib/corpus-admission-admin-actions.ts: atomic deactivate/reactivate (incl.
@@ -293,4 +294,95 @@ test("AUDIT-FAILURE: if the audit write fails, the text is withheld entirely —
 
   const audit = await auditRowsFor(decisionId);
   assert.equal(audit.length, 0, "no audit row exists — consistent with the text also never having been revealed");
+});
+
+// --- REGRESSION (Task B1B): re-admission after Remove -----------------------
+// "Remove" (deactivate) takes away ONE accepted backing, not a permanent ban
+// on the canonical document itself. See lib/corpus-admission-gate.ts's own
+// findAcceptedFamilyCandidates / findAcceptedRepresentationByHash (both
+// filter WHERE revoked_at IS NULL) and drizzle/0032's own header comment —
+// this proves it end-to-end through the REAL admission gate, not just a
+// direct-SQL simulation of the resulting row shape.
+
+const WORD_BANK = [
+  "research", "analysis", "population", "sample", "variable", "hypothesis", "method", "outcome", "region",
+  "temperature", "pressure", "reaction", "material", "structure", "process", "signal", "pattern", "network",
+  "significant", "distinct", "gradual", "consistent", "notable", "substantial", "minor", "extensive", "localized",
+  "documented", "identified", "recorded", "analyzed", "examined", "compared", "measured", "observed", "reported",
+];
+function seededRandom(seed) {
+  let state = seed >>> 0 || 1;
+  return () => {
+    state ^= state << 13; state >>>= 0;
+    state ^= state >>> 17;
+    state ^= state << 5; state >>>= 0;
+    return state / 0xffffffff;
+  };
+}
+function plausibleArticleText(seed, targetWords = 3300) {
+  const rng = seededRandom(seed);
+  const paragraphs = [];
+  let wordCount = 0;
+  while (wordCount < targetWords) {
+    const sentences = Array.from({ length: 5 + Math.floor(rng() * 4) }, () => {
+      const length = 10 + Math.floor(rng() * 18);
+      const words = Array.from({ length }, () => WORD_BANK[Math.floor(rng() * WORD_BANK.length)]);
+      return `The ${words.join(" ")}.`;
+    });
+    const paragraph = sentences.join(" ");
+    paragraphs.push(paragraph);
+    wordCount += paragraph.split(/\s+/).length;
+  }
+  return paragraphs.join("\n\n");
+}
+const RESOLVED_PROVENANCE = (sourceUrl) => ({
+  kind: "BULK_IMPORT_PROVENANCE",
+  provenance: { sourceUrl, acquisitionMethod: "BULK_IMPORT_DOWNLOAD", licenseOrPermission: "CC-BY-4.0", retentionBasis: "LICENSED_REUSE", retentionRightsResolved: true, notes: null },
+});
+
+test("REGRESSION: after Remove takes the last active backing for a canonical document, the SAME document can be admitted again through the real gate if it otherwise still passes admission", async () => {
+  const admin = await ensureUser("readmission");
+  const text = plausibleArticleText(90210);
+
+  const original = await evaluateCorpusAdmissionCandidate(client, {
+    sourceRef: `readmission-original-${randomUUID()}`,
+    filename: "original.txt",
+    bytes: Buffer.from(text, "utf8"),
+    consent: RESOLVED_PROVENANCE("https://example.test/readmission-original"),
+    dryRun: false,
+    openConnection,
+  });
+  assert.equal(original.decision, "ACCEPT", "sanity: the fixture must actually be accept-worthy for this regression to mean anything");
+  assert.ok(original.acceptedRepresentationId);
+
+  const removeResult = await deactivateAcceptedRepresentation({
+    decisionId: original.id,
+    adminUserId: admin,
+    reason: "regression test: removing the only active backing",
+    openConnection,
+  });
+  assert.equal(removeResult.outcome, "deactivated");
+
+  // Fresh evaluation of the identical text, as if independently resubmitted
+  // later — the real gate's own pre-check AND its in-transaction re-check
+  // must both see this content as having NO active accepted backing anymore.
+  const resubmitted = await evaluateCorpusAdmissionCandidate(client, {
+    sourceRef: `readmission-resubmit-${randomUUID()}`,
+    filename: "resubmit.txt",
+    bytes: Buffer.from(text, "utf8"),
+    consent: RESOLVED_PROVENANCE("https://example.test/readmission-resubmit"),
+    dryRun: false,
+    openConnection,
+  });
+
+  assert.equal(resubmitted.decision, "ACCEPT", "the same canonical document must be admissible again once its only backing was removed");
+  assert.notEqual(resubmitted.id, original.id, "re-admission must be a new decision, not a mutation of the removed one");
+  assert.equal(resubmitted.canonicalSha256, original.canonicalSha256, "it is genuinely the same canonical document being re-admitted");
+  assert.ok(resubmitted.acceptedRepresentationId);
+  assert.notEqual(resubmitted.acceptedRepresentationId, original.acceptedRepresentationId);
+
+  const oldRow = await client.execute({ sql: "SELECT revoked_at FROM corpus_admission_accepted_representations WHERE id = ?", args: [original.acceptedRepresentationId] });
+  assert.notEqual(oldRow.rows[0].revoked_at, null, "the original (removed) fingerprint stays revoked — it is not reactivated by this");
+  const newRow = await client.execute({ sql: "SELECT revoked_at FROM corpus_admission_accepted_representations WHERE id = ?", args: [resubmitted.acceptedRepresentationId] });
+  assert.equal(newRow.rows[0].revoked_at, null, "the new fingerprint is freshly active");
 });

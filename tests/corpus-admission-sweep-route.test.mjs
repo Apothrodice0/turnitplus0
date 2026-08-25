@@ -108,7 +108,12 @@ for (const method of ['GET', 'POST']) {
     const res = await callSweep(method, { authorization: `Bearer ${REAL_SECRET}` });
     assert.equal(res.status, 200);
     const body = await res.json();
-    assert.deepEqual(body, { ok: true, enabled: false, claimedCount: 0 });
+    assert.deepEqual(body, {
+      ok: true,
+      enabled: false,
+      claimedCount: 0,
+      retention: { enabled: false, decisionsDeleted: 0, jobsDeleted: 0, skippedProtected: 0, failedPromotionsRetryable: 0 },
+    });
   });
 }
 

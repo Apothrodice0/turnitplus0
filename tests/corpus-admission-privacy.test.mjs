@@ -68,8 +68,17 @@ const EXPECTED_APP_FILES_USING_THE_PROMOTION_DOOR = [
   // state) — see app/admin/corpus/page.tsx's own header.
   "app/admin/corpus/page.tsx",
 ];
+// Fourth door (Task B1B): lib/corpus-admission-retention-sweep.ts, its own
+// closed surface — deletes stale REJECT/REVIEW decisions and failed/
+// cancelled report jobs after the retention window, never anything ACCEPT-
+// shaped. Deliberately invoked from the SAME route as the report-admission
+// retry sweep (no third Vercel Hobby cron slot) rather than folded into
+// that door's own module — retention has no consent/idempotency-job
+// relationship to report-integration at all, just a shared HTTP trigger.
+const RETENTION_DOOR_MODULE = "corpus-admission-retention-sweep";
+const EXPECTED_APP_FILES_USING_THE_RETENTION_DOOR = ["app/api/internal/corpus-admission-sweep/route.ts"];
 
-test("no app/ file imports lib/corpus-admission-gate.ts or any of its pure sibling modules directly — only lib/corpus-admission-report-integration.ts, the admin-dashboard repo/actions modules, and lib/corpus-admission-promotion.ts are allowed doors", () => {
+test("no app/ file imports lib/corpus-admission-gate.ts or any of its pure sibling modules directly — only lib/corpus-admission-report-integration.ts, the admin-dashboard repo/actions modules, lib/corpus-admission-promotion.ts, and lib/corpus-admission-retention-sweep.ts are allowed doors", () => {
   const appDir = path.join(repoRoot, "app");
   const offenders = [];
   function walk(dir) {
@@ -83,14 +92,32 @@ test("no app/ file imports lib/corpus-admission-gate.ts or any of its pure sibli
           (l) =>
             !l.includes(ALLOWED_CORPUS_ADMISSION_DOOR) &&
             !ADMIN_DASHBOARD_DOOR_MODULES.some((m) => l.includes(m)) &&
-            !l.includes(PROMOTION_DOOR_MODULE),
+            !l.includes(PROMOTION_DOOR_MODULE) &&
+            !l.includes(RETENTION_DOOR_MODULE),
         );
         if (bypassesTheDoor) offenders.push(path.relative(repoRoot, full).split(path.sep).join("/"));
       }
     }
   }
   walk(appDir);
-  assert.deepEqual(offenders, [], `these app/ files import a corpus-admission-* module other than the three allowed doors: ${offenders.join(", ")}`);
+  assert.deepEqual(offenders, [], `these app/ files import a corpus-admission-* module other than the four allowed doors: ${offenders.join(", ")}`);
+});
+
+test("exactly the expected app/ files use the corpus-admission-retention-sweep door — no unreviewed new caller", () => {
+  const appDir = path.join(repoRoot, "app");
+  const callers = [];
+  function walk(dir) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (/\.(ts|tsx)$/.test(entry.name)) {
+        const imports = importLines(fs.readFileSync(full, "utf8"));
+        if (imports.includes(RETENTION_DOOR_MODULE)) callers.push(path.relative(repoRoot, full).split(path.sep).join("/"));
+      }
+    }
+  }
+  walk(appDir);
+  assert.deepEqual(callers.sort(), [...EXPECTED_APP_FILES_USING_THE_RETENTION_DOOR].sort());
 });
 
 test("exactly the expected app/ files use the corpus-admission-report-integration door — no unreviewed new caller", () => {

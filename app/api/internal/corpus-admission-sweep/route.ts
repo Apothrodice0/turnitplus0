@@ -4,6 +4,7 @@ import { getReportsDbClient } from '../../../../lib/reports-db';
 import { checkAuthRate } from '../../../../lib/rate-limit';
 import { clientIpFrom } from '../../../../lib/client-ip';
 import { isCorpusAdmissionEnabled, runReportAdmissionRetrySweep } from '../../../../lib/corpus-admission-report-integration';
+import { isCorpusRetentionEnabled, runCorpusAdmissionRetentionSweep } from '../../../../lib/corpus-admission-retention-sweep';
 
 /**
  * Protected scheduled/internal trigger for
@@ -39,6 +40,18 @@ import { isCorpusAdmissionEnabled, runReportAdmissionRetrySweep } from '../../..
  * credential, not a password a legitimate user mistypes, so guarding
  * against timing side-channels is warranted the way it would not be for,
  * say, an email-uniqueness check elsewhere in this codebase.
+ *
+ * Task B1B also runs lib/corpus-admission-retention-sweep.ts's daily
+ * retention cleanup from this SAME invocation, behind its own independent
+ * CORPUS_RETENTION_ENABLED flag — deliberately not a third cron entry (the
+ * Vercel Hobby plan's 2 cron slots are already spent by this route and
+ * app/api/internal/corpus-admission-promotion-sweep/route.ts; see
+ * vercel.json). The two operations are otherwise unrelated and run
+ * independently of each other's flag: retention cleanup proceeds even when
+ * CORPUS_ADMISSION_ENABLED is off (old rows can still need aging out after
+ * live intake is paused), and vice versa. Only when BOTH flags are off does
+ * this route skip opening a database connection at all, exactly like it
+ * already did for CORPUS_ADMISSION_ENABLED alone before this change.
  */
 
 function isAuthorizedSweepRequest(request: Request): boolean {
@@ -67,27 +80,44 @@ async function handleSweepRequest(request: Request): Promise<Response> {
       return new NextResponse(null, { status: 404 });
     }
 
-    if (!isCorpusAdmissionEnabled()) {
+    const admissionEnabled = isCorpusAdmissionEnabled();
+    const retentionEnabled = isCorpusRetentionEnabled();
+    const disabledRetention = { enabled: false, decisionsDeleted: 0, jobsDeleted: 0, skippedProtected: 0, failedPromotionsRetryable: 0 };
+
+    if (!admissionEnabled && !retentionEnabled) {
       return new NextResponse(
-        JSON.stringify({ ok: true, enabled: false, claimedCount: 0 }),
+        JSON.stringify({ ok: true, enabled: false, claimedCount: 0, retention: disabledRetention }),
         { status: 200, headers: { 'Content-Type': 'application/json' } },
       );
     }
 
     const client = await getReportsDbClient();
     try {
-      const sweep = await runReportAdmissionRetrySweep(client, { openConnection: () => getReportsDbClient() });
-      const summary = sweep.results.reduce(
-        (acc, r) => {
-          acc[r.outcome] = (acc[r.outcome] ?? 0) + 1;
-          return acc;
-        },
-        {} as Record<string, number>,
-      );
-      return new NextResponse(
-        JSON.stringify({ ok: true, enabled: true, claimedCount: sweep.claimedJobIds.length, outcomeSummary: summary }),
-        { status: 200, headers: { 'Content-Type': 'application/json' } },
-      );
+      const body: { ok: true; enabled: boolean; claimedCount: number; outcomeSummary?: Record<string, number>; retention: typeof disabledRetention & { enabled: boolean } } = {
+        ok: true,
+        enabled: admissionEnabled,
+        claimedCount: 0,
+        retention: disabledRetention,
+      };
+
+      if (admissionEnabled) {
+        const sweep = await runReportAdmissionRetrySweep(client, { openConnection: () => getReportsDbClient() });
+        body.claimedCount = sweep.claimedJobIds.length;
+        body.outcomeSummary = sweep.results.reduce(
+          (acc, r) => {
+            acc[r.outcome] = (acc[r.outcome] ?? 0) + 1;
+            return acc;
+          },
+          {} as Record<string, number>,
+        );
+      }
+
+      if (retentionEnabled) {
+        const retention = await runCorpusAdmissionRetentionSweep(client, { openConnection: () => getReportsDbClient() });
+        body.retention = { enabled: true, ...retention };
+      }
+
+      return new NextResponse(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
     } finally {
       client.close();
     }
