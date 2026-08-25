@@ -8,6 +8,7 @@ import {
   findRepresentationById,
   summarizeSubmissionOwnership,
   isRepresentationActivelyPromoted,
+  isRepresentationEligibleForMatching,
   CORPUS_FINGERPRINT_VERSION,
   type CandidateCorpusRepresentation,
 } from "./user-submission-corpus";
@@ -311,6 +312,22 @@ export async function matchAgainstUserSubmissionCorpus(
     documentIdentityId?: string | null;
     canonicalText: string;
     config?: Partial<UserSubmissionMatchConfig>;
+    /**
+     * Self-match fix: the exact canonical source_ref (buildReportAdmissionSourceRef,
+     * lib/corpus-admission-report-integration.ts) of the report currently
+     * being evaluated, when it has one — i.e. an authenticated report whose
+     * own admission could, in principle, have already promoted a
+     * representation of its own content. Threaded through to
+     * findCandidateCorpusRepresentations and the exact-hash fallback below
+     * so a representation backed ONLY by this exact report's own admission
+     * is never offered as a candidate against itself, while remaining
+     * fully matchable against every other report. Server-internal only —
+     * never returned in any match result, never derived from anything this
+     * function itself looks up. Optional and undefined for every existing
+     * caller that does not pass it, which reproduces the prior, unexcluded
+     * behavior exactly.
+     */
+    excludeSourceReport?: string;
   },
 ): Promise<UserSubmissionMatchResult> {
   const config = mergeConfig(params.config);
@@ -329,6 +346,7 @@ export async function matchAgainstUserSubmissionCorpus(
         fingerprintVersion: config.fingerprintVersion,
         minSharedShingles: config.candidateShingleThreshold,
         limit: config.maxCandidates,
+        excludeSourceReport: params.excludeSourceReport,
       }),
       config.dbQueryTimeoutMs,
       "findCandidateCorpusRepresentations",
@@ -356,14 +374,27 @@ export async function matchAgainstUserSubmissionCorpus(
     const exactHash = canonicalSha256(params.canonicalText);
     const exactRepresentation = await findReusableRepresentationByCanonicalHash(client, exactHash);
     if (exactRepresentation && !candidateById.has(exactRepresentation.id)) {
-      candidateById.set(exactRepresentation.id, {
-        representationId: exactRepresentation.id,
-        canonicalSha256: exactRepresentation.canonicalSha256,
-        wordCount: exactRepresentation.wordCount,
-        sharedShingleCount: queryShingles.size,
-        containment: 1,
-        isActivelyPromoted: await isRepresentationActivelyPromoted(client, exactRepresentation.id),
-      });
+      // Self-match fix: findReusableRepresentationByCanonicalHash is a
+      // plain hash lookup with no eligibility awareness of its own (it is
+      // also used by lib/corpus-admission-promotion.ts's own find-or-create
+      // dedup logic, where eligibility is irrelevant) — this fallback must
+      // apply the SAME eligibility rule findCandidateCorpusRepresentations'
+      // own WHERE clause already enforces for its shingle-based candidates.
+      // A byte-identical self-upload of a just-promoted document is exactly
+      // an exact-hash match, so leaving this fallback ungated would make
+      // excludeSourceReport above a no-op for the precise scenario it
+      // exists to close.
+      const eligible = await isRepresentationEligibleForMatching(client, exactRepresentation.id, { excludeSourceReport: params.excludeSourceReport });
+      if (eligible) {
+        candidateById.set(exactRepresentation.id, {
+          representationId: exactRepresentation.id,
+          canonicalSha256: exactRepresentation.canonicalSha256,
+          wordCount: exactRepresentation.wordCount,
+          sharedShingleCount: queryShingles.size,
+          containment: 1,
+          isActivelyPromoted: await isRepresentationActivelyPromoted(client, exactRepresentation.id),
+        });
+      }
     }
   }
 

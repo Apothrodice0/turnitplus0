@@ -1,6 +1,7 @@
 import type { Client } from "@libsql/client";
 import { getOrComputeHistoricalMatchSnapshot, getCurrentCorpusMatchGeneration, isHistoricalMatchSnapshotCurrent } from "./report-historical-match";
 import { isCorpusSourceMatchingEnabled } from "./corpus-source-matching-flag";
+import { buildReportAdmissionSourceRef } from "./corpus-admission-source-ref";
 import { USER_SUBMISSION_MATCHER_VERSION } from "./user-submission-matching";
 import { CORPUS_FINGERPRINT_VERSION, CANONICALIZATION_VERSION } from "./user-submission-corpus";
 import { computeUnifiedSimilarity, type UnifiedSimilarityResult } from "./unified-similarity";
@@ -104,11 +105,28 @@ export async function resolvePrimarySimilaritySummary(
 ): Promise<PrimarySimilarityResolution> {
   const corpusSourceMatchingEnabled = isCorpusSourceMatchingEnabled();
   const corpusGeneration = await getCurrentCorpusMatchGeneration(client);
+  // Self-match fix: the exact same canonical source_ref format
+  // processReportAdmissionJob uses to record this report's own admission
+  // decision (never a second encoding) — an anonymous report (accountId
+  // null) can never itself be an admission source_ref, since admission
+  // jobs only exist for authenticated, consenting accounts, so there is
+  // nothing to exclude and this stays undefined. Passed straight through
+  // to getOrComputeHistoricalMatchSnapshot -> matchAgainstUserSubmissionCorpus
+  // -> findCandidateCorpusRepresentations, so a representation backed ONLY
+  // by THIS report's own admission is never offered as a candidate against
+  // itself — see lib/user-submission-corpus.ts's admissionEligibilitySql
+  // for the exact predicate. Server-internal only: this string is used
+  // solely as a SQL comparison value and never appears in anything this
+  // function (or any of its callers) returns.
+  const excludeSourceReport = params.accountId !== null
+    ? buildReportAdmissionSourceRef({ accountId: params.accountId, deviceKey: params.reportDeviceKey, reportId: params.reportId })
+    : undefined;
   const historicalSubmissionMatch = await getOrComputeHistoricalMatchSnapshot(client, {
     reportDeviceKey: params.reportDeviceKey,
     reportId: params.reportId,
     accountId: params.accountId,
     rawText: params.rawText,
+    excludeSourceReport,
   });
 
   // Mirrors the exact try/catch boundary app/api/reports/[id]/route.ts

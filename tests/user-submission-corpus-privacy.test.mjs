@@ -9,8 +9,10 @@ import {
   indexDocumentSubmissionIntoCorpus,
   findCandidateCorpusRepresentations,
   findSubmissionReferencesForAccount,
+  isRepresentationEligibleForMatching,
   corpusShingleHashes,
 } from "../lib/user-submission-corpus.ts";
+import { buildReportAdmissionSourceRef } from "../lib/corpus-admission-report-integration.ts";
 
 const repoRoot = path.resolve(".");
 const drizzleDir = path.join(repoRoot, "drizzle");
@@ -153,6 +155,32 @@ test("A/B: representation and candidate-search results never carry an account id
     assert.deepEqual(Object.keys(candidate).sort(), ["canonicalSha256", "containment", "isActivelyPromoted", "representationId", "sharedShingleCount", "wordCount"].sort());
     assert.equal(typeof candidate.isActivelyPromoted, "boolean");
   }
+});
+
+test("SELF-MATCH-FIX PRIVACY: excludeSourceReport never appears in findCandidateCorpusRepresentations' own results, and isRepresentationEligibleForMatching returns a plain boolean carrying no identifiers at all", async () => {
+  const accountA = "privacy-exclude-corpus-account-a";
+  await ensureUser(accountA, "exclude-corpus-a@example.test");
+  const text = SHARED_TEXT_ALPHA + " exclude-corpus-marker";
+  const identityA = await createDocumentIdentity(client, { accountId: accountA, title: "T", author: null, rawText: text });
+  const indexed = await indexDocumentSubmissionIntoCorpus(client, { documentIdentityId: identityA.id, rawText: text });
+
+  const secretAccountId = "corpus-secret-account-id-should-never-leak";
+  const secretDeviceKey = "corpus-secret-device-key-should-never-leak";
+  const secretReportId = "corpus-secret-report-id-should-never-leak";
+  const excludeSourceReport = buildReportAdmissionSourceRef({ accountId: secretAccountId, deviceKey: secretDeviceKey, reportId: secretReportId });
+
+  const candidates = await findCandidateCorpusRepresentations(client, corpusShingleHashes(text, 5), { excludeSourceReport });
+  assert.ok(candidates.length >= 1, "test setup sanity: an unrelated exclusion value must not suppress a genuine submission-reference-backed candidate");
+  const serialized = JSON.stringify(candidates);
+  assert.ok(!serialized.includes(secretAccountId), "the exclusion context's own account id must never appear in candidate results");
+  assert.ok(!serialized.includes(secretDeviceKey), "the exclusion context's own device key must never appear in candidate results");
+  assert.ok(!serialized.includes(secretReportId), "the exclusion context's own report id must never appear in candidate results");
+  assert.ok(!serialized.includes(excludeSourceReport), "the raw source_ref string itself must never appear in candidate results");
+
+  // isRepresentationEligibleForMatching: boolean-only, same discipline as
+  // isRepresentationActivelyPromoted/summarizeSubmissionOwnership.
+  const eligible = await isRepresentationEligibleForMatching(client, indexed.representationId, { excludeSourceReport });
+  assert.equal(typeof eligible, "boolean");
 });
 
 test("D: SELF (same-account) queries are correctly scoped to the querying account and do not return another account's submissions", async () => {

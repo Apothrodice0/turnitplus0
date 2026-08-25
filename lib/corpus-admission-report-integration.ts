@@ -2,6 +2,15 @@ import { randomUUID } from "node:crypto";
 import type { Client, InStatement } from "@libsql/client";
 import { evaluateCorpusAdmissionCandidate, type CorpusAdmissionConnectionFactory, type CorpusAdmissionDecisionRecord } from "./corpus-admission-gate";
 import { isCorpusPromotionEnabled, stageAndClaimCorpusAdmissionPromotionForDecision, processCorpusAdmissionPromotion } from "./corpus-admission-promotion";
+// Imported (and re-exported below, unchanged, for every existing importer
+// of this file) rather than defined here — the function itself now lives
+// in its own tiny, dependency-free module so a caller that needs only the
+// source_ref format (lib/report-primary-similarity.ts) never has to pull
+// in this file's own heavier admission-gate/text-extraction import chain.
+// See that module's own header comment for the real `next build` failure
+// this split fixes.
+import { buildReportAdmissionSourceRef } from "./corpus-admission-source-ref";
+export { buildReportAdmissionSourceRef };
 
 /**
  * Controlled integration between the live report-upload path
@@ -84,10 +93,6 @@ import { isCorpusPromotionEnabled, stageAndClaimCorpusAdmissionPromotionForDecis
 
 export function isCorpusAdmissionEnabled(): boolean {
   return process.env.CORPUS_ADMISSION_ENABLED === "true";
-}
-
-export function buildReportAdmissionSourceRef(params: { accountId: string; deviceKey: string; reportId: string }): string {
-  return `report-upload:account=${params.accountId}:device=${params.deviceKey}:report=${params.reportId}`;
 }
 
 type ReportAdmissionJobStatus = "pending" | "succeeded" | "failed" | "cancelled";

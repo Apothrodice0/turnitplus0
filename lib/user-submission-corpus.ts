@@ -357,7 +357,14 @@ export type CandidateCorpusRepresentation = {
  *      representation can be promoted by more than one decision, an exact
  *      canonical duplicate, so deactivating any single decision's
  *      fingerprint must never hide a representation another still-active
- *      source also backs), OR
+ *      source also backs) — self-match fix: when the caller supplies
+ *      excludeSourceReport (options.excludeSourceReport below), this
+ *      condition additionally requires that backing's own decision
+ *      source_ref differ from it, so a representation backed ONLY by the
+ *      report currently being evaluated cannot satisfy this condition
+ *      through its own admission, while a second, independent backing from
+ *      any OTHER report still can — see admissionEligibilitySql's own
+ *      comment for the full argument, OR
  *   3. no promotion with link_type = 'NEW_CONTENT_REPRESENTATION' exists
  *      for it at all — i.e. this representation was never CREATED by the
  *      promotion pipeline in the first place (a legacy/pre-existing/
@@ -370,14 +377,68 @@ export type CandidateCorpusRepresentation = {
  *      promotion row does exist (durable, never deleted), which is exactly
  *      why conditions 1/2 are the ones deciding its fate instead.
  */
+/**
+ * The exact admission-side eligibility predicate for ONE representation
+ * (correlated on `r.id` — every caller of this fragment must alias
+ * corpus_document_representations as `r`) — the single source of truth for
+ * "does this representation have an active, eligible backing," shared by
+ * findCandidateCorpusRepresentations' own batch WHERE clause and
+ * isRepresentationEligibleForMatching's single-row check below, so the two
+ * can never diverge. Three conditions, unchanged in substance from the
+ * pre-existing rule (see this file's own header comment above
+ * findCandidateCorpusRepresentations) — only condition 2 gained a fourth,
+ * optional refinement (the self-match fix):
+ *   1. a real submission reference exists — always eligible, untouched by
+ *      excludeSourceReport. A completely separate identity system from
+ *      admission-promotion (see lib/report-historical-match.ts's own
+ *      SELF/PRIOR_SUBMISSION path, which already has its own, unrelated
+ *      self-exclusion via documentIdentityId) — this fix does not touch it.
+ *   2. an 'indexed' promotion exists whose own accepted_representation is
+ *      not revoked, AND — when excludeSourceReport is supplied — whose own
+ *      decision's source_ref is not the caller's own. A representation
+ *      backed ONLY by the report currently being evaluated is therefore
+ *      NOT eligible through this condition; a second, independent active
+ *      backing from any OTHER report still is (this is exactly why the
+ *      check lives inside this EXISTS, correlated per-backing, rather than
+ *      as an outer filter on the representation as a whole — a
+ *      representation with two backings, one self and one not, must still
+ *      satisfy this condition via the non-self one).
+ *   3. no promotion with link_type = 'NEW_CONTENT_REPRESENTATION' exists
+ *      for it at all (a legacy/pre-existing row) — untouched; no self-match
+ *      is possible for a row nothing in this pipeline ever created.
+ * excludeSourceReport is always the exact canonical source_ref string
+ * (buildReportAdmissionSourceRef, lib/corpus-admission-report-
+ * integration.ts) — never a canonical hash, never a bare representation id
+ * — so this can only ever exclude the ONE specific report currently being
+ * scored, never a broader class of content or every backing of a shared
+ * representation.
+ */
+function admissionEligibilitySql(): string {
+  return `(
+    EXISTS (SELECT 1 FROM corpus_submission_references sr WHERE sr.representation_id = r.id)
+    OR EXISTS (
+      SELECT 1 FROM corpus_admission_promotions p
+      JOIN corpus_admission_accepted_representations ar ON ar.id = p.accepted_representation_id
+      JOIN corpus_admission_decisions d ON d.id = ar.decision_id
+      WHERE p.representation_id = r.id AND p.status = 'indexed' AND ar.revoked_at IS NULL
+        AND (? IS NULL OR d.source_ref != ?)
+    )
+    OR NOT EXISTS (
+      SELECT 1 FROM corpus_admission_promotions p2
+      WHERE p2.representation_id = r.id AND p2.link_type = 'NEW_CONTENT_REPRESENTATION'
+    )
+  )`;
+}
+
 export async function findCandidateCorpusRepresentations(
   client: Client,
   shingleHashes: Set<string>,
-  options: { fingerprintVersion?: string; minSharedShingles?: number; limit?: number } = {},
+  options: { fingerprintVersion?: string; minSharedShingles?: number; limit?: number; excludeSourceReport?: string } = {},
 ): Promise<CandidateCorpusRepresentation[]> {
   const fingerprintVersion = options.fingerprintVersion ?? CORPUS_FINGERPRINT_VERSION;
   const minSharedShingles = options.minSharedShingles ?? 1;
   const limit = options.limit ?? 50;
+  const excludeSourceReport = options.excludeSourceReport ?? null;
   if (shingleHashes.size === 0) return [];
 
   const hashList = [...shingleHashes];
@@ -392,23 +453,12 @@ export async function findCandidateCorpusRepresentations(
           FROM corpus_document_shingles s
           JOIN corpus_document_representations r ON r.id = s.representation_id
           WHERE s.fingerprint_version = ? AND s.shingle_hash IN (${placeholders})
-            AND (
-              EXISTS (SELECT 1 FROM corpus_submission_references sr WHERE sr.representation_id = r.id)
-              OR EXISTS (
-                SELECT 1 FROM corpus_admission_promotions p
-                JOIN corpus_admission_accepted_representations ar ON ar.id = p.accepted_representation_id
-                WHERE p.representation_id = r.id AND p.status = 'indexed' AND ar.revoked_at IS NULL
-              )
-              OR NOT EXISTS (
-                SELECT 1 FROM corpus_admission_promotions p2
-                WHERE p2.representation_id = r.id AND p2.link_type = 'NEW_CONTENT_REPRESENTATION'
-              )
-            )
+            AND ${admissionEligibilitySql()}
           GROUP BY s.representation_id
           HAVING COUNT(*) >= ?
           ORDER BY shared DESC
           LIMIT ?`,
-    args: [fingerprintVersion, ...hashList, minSharedShingles, limit],
+    args: [fingerprintVersion, ...hashList, excludeSourceReport, excludeSourceReport, minSharedShingles, limit],
   });
   type RawSharedRow = { representation_id: string; shared: number | bigint; canonical_sha256: string; word_count: number; is_actively_promoted: number | bigint };
   const sharedRows = sharedResult.rows as unknown as RawSharedRow[];
@@ -468,6 +518,37 @@ export async function isRepresentationActivelyPromoted(client: Client, represent
   });
   const row = result.rows[0] as unknown as { is_actively_promoted: number | bigint } | undefined;
   return row !== undefined && Number(row.is_actively_promoted) === 1;
+}
+
+/**
+ * Self-match fix: standalone single-representation form of
+ * admissionEligibilitySql (shared, never a second implementation) — for
+ * lib/user-submission-matching.ts's own defensive exact-canonical-hash
+ * fallback. That fallback builds a candidate from
+ * findReusableRepresentationByCanonicalHash directly — a plain hash lookup
+ * with NO eligibility awareness of its own (it is also used by lib/corpus-
+ * admission-promotion.ts's own find-or-create dedup logic, where
+ * eligibility is irrelevant) — completely bypassing
+ * findCandidateCorpusRepresentations' own WHERE clause. A byte-identical
+ * self-upload of a just-promoted document is exactly an exact-hash match,
+ * so leaving that fallback ungated would make excludeSourceReport a no-op
+ * for the precise scenario it exists to close. Boolean-only, same
+ * discipline as summarizeSubmissionOwnership/isRepresentationActivelyPromoted
+ * — never returns decision_id, source_ref, or any other corpus-admission-
+ * domain identifier.
+ */
+export async function isRepresentationEligibleForMatching(
+  client: Client,
+  representationId: string,
+  options: { excludeSourceReport?: string } = {},
+): Promise<boolean> {
+  const excludeSourceReport = options.excludeSourceReport ?? null;
+  const result = await client.execute({
+    sql: `SELECT ${admissionEligibilitySql()} AS eligible FROM corpus_document_representations r WHERE r.id = ?`,
+    args: [excludeSourceReport, excludeSourceReport, representationId],
+  });
+  const row = result.rows[0] as unknown as { eligible: number | bigint } | undefined;
+  return row !== undefined && Number(row.eligible) === 1;
 }
 
 /** Idempotent (INSERT OR IGNORE) — safe to call more than once for the same representation/version, matching lib/document-family.ts's recordDocumentIdentityShingles convention. */
