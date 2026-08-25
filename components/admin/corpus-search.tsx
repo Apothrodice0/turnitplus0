@@ -15,7 +15,9 @@ type ListRow = {
   lastError: string | null;
   createdAt: string;
   updatedAt: string;
-  promotionStatus: "staged" | "indexed" | "failed" | "skipped" | null;
+  promotionStatus: "staged" | "indexed" | "failed" | "skipped" | "dead_lettered" | null;
+  /** B1C: the promotion row's own completed-attempt count — distinguishes a retryable 'failed' row from one that has exhausted MAX_PROMOTION_ATTEMPTS (5, lib/corpus-admission-promotion.ts). */
+  promotionAttemptCount: number | null;
   /** null = never ACCEPTed (or ACCEPTed with no fingerprint at all) — no Remove/Removed affordance for this row. */
   acceptedRepresentationId: string | null;
   /** true = active (show Remove); false = already deactivated (show Removed); null when acceptedRepresentationId is null. */
@@ -34,6 +36,20 @@ const STATUS_OPTIONS = ["", "pending", "failed", "cancelled", "accepted", "revie
 // for what a 500 body can otherwise contain (err.message, unsanitized).
 const REMOVE_SAFE_ERROR_STATUSES = new Set([400, 404, 429]);
 const REMOVE_GENERIC_ERROR = "Could not remove this item from the corpus. Please try again.";
+
+// B1C: 5 mirrors MAX_PROMOTION_ATTEMPTS in lib/corpus-admission-promotion.ts
+// — a literal, not an import, since that module pulls in node:crypto and
+// cannot be imported from a "use client" component (see lib/corpus-
+// admission-source-ref.ts's own header comment for the exact class of
+// `next build` failure that guards against).
+const MAX_PROMOTION_ATTEMPTS_DISPLAY = 5;
+
+function promotionStatusLabel(status: ListRow["promotionStatus"], attemptCount: number | null): string {
+  if (status === null) return "—";
+  if (status === "failed") return `failed — retrying (attempt ${attemptCount ?? "?"}/${MAX_PROMOTION_ATTEMPTS_DISPLAY})`;
+  if (status === "dead_lettered") return `dead-lettered — exhausted ${MAX_PROMOTION_ATTEMPTS_DISPLAY}/${MAX_PROMOTION_ATTEMPTS_DISPLAY}, retries stopped`;
+  return status;
+}
 
 /** Client-side list/search/filter/pagination for /admin/corpus — hits GET /api/admin/corpus, itself independently gated by getAdminSessionUser. Renders no data of its own on first paint; every result comes from that authorized fetch. */
 export function AdminCorpusSearch() {
@@ -181,7 +197,7 @@ export function AdminCorpusSearch() {
                     <td>{row.accountId ?? "unknown"}</td>
                     <td>{row.attemptCount ?? "—"}</td>
                     <td>{row.createdAt}</td>
-                    <td>{row.promotionStatus ?? "—"}</td>
+                    <td>{promotionStatusLabel(row.promotionStatus, row.promotionAttemptCount)}</td>
                     <td>
                       <Link href={`/admin/corpus/${encodeURIComponent(row.rowId)}`}>Inspect</Link>
                       {row.acceptedRepresentationId && (

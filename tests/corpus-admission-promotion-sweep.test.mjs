@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import { createClient } from "@libsql/client";
 import { applyMigrationsLibsql } from "../lib/ingest.js";
 import { canonicalSha256 } from "../lib/document-identity.ts";
-import { runCorpusAdmissionPromotionSweep, processCorpusAdmissionPromotion } from "../lib/corpus-admission-promotion.ts";
+import { runCorpusAdmissionPromotionSweep, processCorpusAdmissionPromotion, MAX_PROMOTION_ATTEMPTS } from "../lib/corpus-admission-promotion.ts";
 import { findCandidateCorpusRepresentations, corpusShingleHashes } from "../lib/user-submission-corpus.ts";
 import { deactivateAcceptedRepresentation, reactivateAcceptedRepresentation } from "../lib/corpus-admission-admin-actions.ts";
 
@@ -98,6 +98,17 @@ async function seedAcceptedDecision(text) {
 async function countRows(sql, args = []) {
   const result = await client.execute({ sql, args });
   return Number(result.rows[0].c);
+}
+
+/** B1C: a raw promotion-row fixture with an arbitrary status/attempt_count/claimed_at/last_error — used only for the legacy-over-cap and race scenarios below, which need to construct a shape the real pipeline itself would never produce directly (a 'failed' row already at or past MAX_PROMOTION_ATTEMPTS, or a specific pre-set attempt_count to race the deciding attempt against). */
+async function insertPromotionRaw(decisionId, acceptedRepresentationId, { status, attemptCount, claimedAt = null, lastError = null }) {
+  const id = randomUUID();
+  await client.execute({
+    sql: `INSERT INTO corpus_admission_promotions (id, decision_id, accepted_representation_id, status, attempt_count, claimed_at, last_error, created_at, updated_at)
+          VALUES (?,?,?,?,?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
+    args: [id, decisionId, acceptedRepresentationId, status, attemptCount, claimedAt, lastError],
+  });
+  return id;
 }
 
 test("CONCURRENT PROMOTION: two decisions racing on the same canonical hash both end up 'indexed', sharing exactly one representation and one full set of shingles — no orphaned or duplicate row from the loser (proves the race is handled; see the injected-failure test below for late-stage rollback specifically)", async () => {
@@ -322,4 +333,90 @@ test("a representation backed by a real user submission stays eligible even when
     candidates.some((c) => c.canonicalSha256 === hash),
     "a real submission reference must keep the representation eligible regardless of the promoted source's own state",
   );
+});
+
+// --- B1C: legacy over-cap normalization, dead-letter permanence, and the boundary race ---
+
+test("B1C NORMALIZATION: a legacy 'failed' row already at attempt_count === MAX_PROMOTION_ATTEMPTS normalizes to 'dead_lettered' on the next sweep — no reprocessing, no attempt_count change, last_error preserved", async () => {
+  const { decisionId, acceptedRepresentationId } = await seedAcceptedDecision("Legacy over-cap fixture at exactly the cap.");
+  const promotionId = await insertPromotionRaw(decisionId, acceptedRepresentationId, { status: "failed", attemptCount: MAX_PROMOTION_ATTEMPTS, lastError: "legacy pre-cap error" });
+
+  const sweep = await runCorpusAdmissionPromotionSweep(client, { openConnection, batchSize: 20 });
+  assert.ok(!sweep.claimedPromotionIds.includes(promotionId), "REQUIRED: a normalized row must transition directly, never through the claim/process pipeline");
+  assert.ok(!sweep.results.some((r) => r.promotionId === promotionId), "REQUIRED: no processing outcome must be produced for a normalized row");
+
+  const row = await client.execute({ sql: "SELECT status, attempt_count, claimed_at, last_error FROM corpus_admission_promotions WHERE id = ?", args: [promotionId] });
+  assert.equal(row.rows[0].status, "dead_lettered");
+  assert.equal(Number(row.rows[0].attempt_count), MAX_PROMOTION_ATTEMPTS, "REQUIRED: normalization must not increment attempt_count");
+  assert.equal(row.rows[0].claimed_at, null);
+  assert.equal(row.rows[0].last_error, "legacy pre-cap error", "REQUIRED: normalization must preserve the existing final error, never overwrite it");
+});
+
+test("B1C NORMALIZATION: a legacy 'failed' row ABOVE MAX_PROMOTION_ATTEMPTS (from before this cap existed) also normalizes, preserving its own count exactly rather than resetting it", async () => {
+  const { decisionId, acceptedRepresentationId } = await seedAcceptedDecision("Legacy over-cap fixture above the cap.");
+  const promotionId = await insertPromotionRaw(decisionId, acceptedRepresentationId, { status: "failed", attemptCount: MAX_PROMOTION_ATTEMPTS + 2, lastError: "legacy error, well above the cap" });
+
+  await runCorpusAdmissionPromotionSweep(client, { openConnection, batchSize: 20 });
+
+  const row = await client.execute({ sql: "SELECT status, attempt_count FROM corpus_admission_promotions WHERE id = ?", args: [promotionId] });
+  assert.equal(row.rows[0].status, "dead_lettered");
+  assert.equal(Number(row.rows[0].attempt_count), MAX_PROMOTION_ATTEMPTS + 2, "REQUIRED: normalization must not reset or clamp an above-cap count — it stays exactly as found");
+});
+
+test("B1C NORMALIZATION vs claim-safety: a FRESHLY claimed over-cap row is not stolen/normalized out from under its own claimant; once that claim goes stale, it becomes normalizable", async () => {
+  const { decisionId, acceptedRepresentationId } = await seedAcceptedDecision("Fresh-vs-stale over-cap claim fixture.");
+  const promotionId = await insertPromotionRaw(decisionId, acceptedRepresentationId, { status: "failed", attemptCount: MAX_PROMOTION_ATTEMPTS });
+  // Simulate an in-flight worker: claimed right now, same as a real claim would leave it.
+  await client.execute({ sql: "UPDATE corpus_admission_promotions SET claimed_at = CURRENT_TIMESTAMP WHERE id = ?", args: [promotionId] });
+
+  const sweepWhileFresh = await runCorpusAdmissionPromotionSweep(client, { openConnection, batchSize: 20, staleClaimMs: 5 * 60 * 1000 });
+  assert.ok(!sweepWhileFresh.claimedPromotionIds.includes(promotionId));
+  const rowWhileFresh = await client.execute({ sql: "SELECT status, claimed_at FROM corpus_admission_promotions WHERE id = ?", args: [promotionId] });
+  assert.equal(rowWhileFresh.rows[0].status, "failed", "REQUIRED: a freshly claimed over-cap row must not be normalized while its claim is still fresh");
+  assert.ok(rowWhileFresh.rows[0].claimed_at !== null, "REQUIRED: the fresh claim marker itself must be left untouched");
+
+  // The claim goes stale (the simulated worker never finished/crashed).
+  await client.execute({ sql: "UPDATE corpus_admission_promotions SET claimed_at = datetime('now', '-10 minutes') WHERE id = ?", args: [promotionId] });
+
+  await runCorpusAdmissionPromotionSweep(client, { openConnection, batchSize: 20, staleClaimMs: 5 * 60 * 1000 });
+  const rowAfterStale = await client.execute({ sql: "SELECT status, claimed_at FROM corpus_admission_promotions WHERE id = ?", args: [promotionId] });
+  assert.equal(rowAfterStale.rows[0].status, "dead_lettered", "REQUIRED: once the claim is stale (unchanged 5-minute timeout), the same over-cap row must normalize");
+  assert.equal(rowAfterStale.rows[0].claimed_at, null);
+});
+
+test("B1C: a dead_lettered row is never selected/claimed by any later sweep, and neither its attempt_count nor its status ever changes again", async () => {
+  const { decisionId, acceptedRepresentationId } = await seedAcceptedDecision("Never-reclaimed dead-letter fixture.");
+  const promotionId = await insertPromotionRaw(decisionId, acceptedRepresentationId, { status: "dead_lettered", attemptCount: MAX_PROMOTION_ATTEMPTS, lastError: "already terminal" });
+
+  for (let i = 0; i < 3; i += 1) {
+    const sweep = await runCorpusAdmissionPromotionSweep(client, { openConnection, batchSize: 20 });
+    assert.ok(!sweep.claimedPromotionIds.includes(promotionId), `sweep tick #${i} must never claim an already-dead_lettered row`);
+  }
+  const row = await client.execute({ sql: "SELECT status, attempt_count, claimed_at, last_error FROM corpus_admission_promotions WHERE id = ?", args: [promotionId] });
+  assert.equal(row.rows[0].status, "dead_lettered");
+  assert.equal(Number(row.rows[0].attempt_count), MAX_PROMOTION_ATTEMPTS);
+  assert.equal(row.rows[0].claimed_at, null);
+  assert.equal(row.rows[0].last_error, "already terminal");
+});
+
+test("B1C RACE: two concurrent sweeps racing on a promotion sitting at attempt_count = MAX_PROMOTION_ATTEMPTS-1 ('failed', unclaimed) let exactly one of them make the deciding 5th attempt", async () => {
+  const storedHash = canonicalSha256("Race-at-the-boundary fixture stored hash.");
+  const actualText = "Race-at-the-boundary fixture: deliberately mismatched text so the deciding attempt fails deterministically, isolating the race itself from indexing success/failure timing.";
+  const decisionId = await insertDecision({ decision: "ACCEPT", canonicalSha256: storedHash });
+  const acceptedRepresentationId = await insertAcceptedRepresentation(decisionId, storedHash);
+  await insertContentStore(decisionId, storedHash, actualText);
+  const promotionId = await insertPromotionRaw(decisionId, acceptedRepresentationId, { status: "failed", attemptCount: MAX_PROMOTION_ATTEMPTS - 1 });
+
+  const [sweepA, sweepB] = await Promise.all([
+    runCorpusAdmissionPromotionSweep(client, { openConnection, batchSize: 20 }),
+    runCorpusAdmissionPromotionSweep(client, { openConnection, batchSize: 20 }),
+  ]);
+
+  const claimedByA = sweepA.claimedPromotionIds.includes(promotionId);
+  const claimedByB = sweepB.claimedPromotionIds.includes(promotionId);
+  assert.notEqual(claimedByA, claimedByB, "REQUIRED: exactly one of the two racing sweeps must claim/process the deciding 5th attempt — never both, never neither");
+
+  const row = await client.execute({ sql: "SELECT status, attempt_count FROM corpus_admission_promotions WHERE id = ?", args: [promotionId] });
+  assert.equal(Number(row.rows[0].attempt_count), MAX_PROMOTION_ATTEMPTS, "REQUIRED: exactly one 5th attempt must ever be recorded — never zero (lost claim), never two (double-processed)");
+  assert.equal(row.rows[0].status, "dead_lettered", "the deciding 5th attempt fails deterministically by this fixture's own construction, so the row must dead-letter, not remain 'failed'");
 });

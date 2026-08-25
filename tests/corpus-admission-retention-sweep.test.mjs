@@ -444,3 +444,31 @@ test("RESPONSE SHAPE: failedPromotionsRetryable reports failed promotions withou
   assert.equal(stillThere.rows.length, 1);
   assert.equal(stillThere.rows[0].status, "failed", "a failed promotion must remain exactly as-is — retryable by the existing promotion sweep, never expired here");
 });
+
+test("B1C: a dead_lettered promotion is never deleted or modified by the retention sweep, and is not counted as retryable", async () => {
+  process.env.CRON_SECRET = REAL_SECRET;
+  process.env.CORPUS_RETENTION_ENABLED = "true";
+
+  // Baseline BEFORE inserting this test's own dead_lettered fixture — other
+  // tests in this same file share this DB and may have already left genuine
+  // 'failed' rows behind (correctly protected, never deleted), so the
+  // meaningful assertion is "this dead_lettered row adds nothing to the
+  // count," not "the count is globally zero."
+  const before = await runCorpusAdmissionRetentionSweep(client, { openConnection });
+
+  const decisionId = await insertDecision({ decision: "ACCEPT" });
+  const hash = randomUUID();
+  await insertContentStore(decisionId, hash);
+  const acceptedRepId = await insertAcceptedRepresentation(decisionId, hash);
+  const promotionId = await insertPromotion(decisionId, acceptedRepId, "dead_lettered");
+  await client.execute({ sql: "UPDATE corpus_admission_promotions SET attempt_count = 5, last_error = 'terminal fixture error' WHERE id = ?", args: [promotionId] });
+
+  const result = await runCorpusAdmissionRetentionSweep(client, { openConnection });
+
+  const stillThere = await client.execute({ sql: "SELECT status, attempt_count, last_error FROM corpus_admission_promotions WHERE id = ?", args: [promotionId] });
+  assert.equal(stillThere.rows.length, 1, "a dead_lettered promotion row must never be deleted by retention");
+  assert.equal(stillThere.rows[0].status, "dead_lettered", "retention must never modify a dead_lettered promotion's status");
+  assert.equal(Number(stillThere.rows[0].attempt_count), 5, "retention must never change attempt_count");
+  assert.equal(stillThere.rows[0].last_error, "terminal fixture error", "retention must never touch the preserved final error");
+  assert.equal(result.failedPromotionsRetryable, before.failedPromotionsRetryable, "REQUIRED: a dead_lettered promotion is terminal, not retryable — it must add nothing to the retryable-failed count");
+});

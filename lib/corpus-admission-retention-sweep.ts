@@ -76,7 +76,12 @@ import type { CorpusAdmissionConnectionFactory } from "./corpus-admission-gate";
  *  - corpus_admission_promotions (ACCEPT-only decisions; same reasoning).
  *    'failed' promotions are deliberately left alone — see
  *    countRetryableFailedPromotions's own comment for why purging one is
- *    never provably safe within what this sweep is allowed to touch.
+ *    never provably safe within what this sweep is allowed to touch. B1C:
+ *    'dead_lettered' promotions (lib/corpus-admission-promotion.ts's own
+ *    bounded-retry terminal state, reached once a 'failed' row completes
+ *    MAX_PROMOTION_ATTEMPTS attempts) are equally untouched — this sweep's
+ *    decision query still can only ever select REJECT/REVIEW, so it never
+ *    reaches corpus_admission_promotions at all, for any status.
  *  - corpus_admission_admin_audit_log — never referenced by this module.
  *  - users, saved_reports, sessions, document_identities, or anything
  *    outside the corpus_admission_* namespace.
@@ -202,20 +207,36 @@ async function sweepStaleJobs(openConnection: CorpusAdmissionConnectionFactory, 
  * decision that WAS ACCEPTed (promotions only ever exist for ACCEPT
  * decisions — see drizzle/0034's own header comment; this sweep's decision
  * cleanup above is scoped to REJECT/REVIEW and can never touch one).
- * lib/corpus-admission-promotion.ts's own daily sweep
- * (runCorpusAdmissionPromotionSweep, the OTHER existing cron route) already
- * retries every 'failed' promotion indefinitely, with no expiry of its own.
+ *
+ * B1C revision: this count's own name/history used to assert that
+ * lib/corpus-admission-promotion.ts's daily sweep
+ * (runCorpusAdmissionPromotionSweep, the OTHER existing cron route) retries
+ * every 'failed' promotion indefinitely, with no expiry of its own — that
+ * claim is no longer true. A 'failed' promotion is now retryable only while
+ * its own attempt_count remains below MAX_PROMOTION_ATTEMPTS (5); once it
+ * reaches that count, the SAME promotion sweep's own normalization step
+ * transitions it to a terminal 'dead_lettered' status instead, which this
+ * count (still scoped to status='failed' only) correctly stops counting.
+ * This function's own name and this count's own meaning are otherwise
+ * unchanged: "failed promotions currently eligible for another retry
+ * attempt" — it just no longer implies "forever."
+ *
  * As long as this module leaves every ACCEPT decision and everything it
  * owns alone — which it always does; its decision query can never select
- * one — the accepted content a 'failed' promotion would index is still
- * there, so purging the promotion row would only cause that sweep's own
- * discovery query (`INSERT OR IGNORE ... WHERE d.decision='ACCEPT' AND NOT
- * EXISTS (a promotions row)`) to recreate an equivalent 'staged' row on its
- * very next run — pure churn, not a real cleanup, and would touch
- * "promotion eligibility" bookkeeping this task explicitly puts off limits.
- * Conclusion: failed promotions should remain retryable indefinitely, not
- * expire. This count exists so that conclusion is visible in the sweep's
- * own response rather than asserted only in a comment.
+ * one — the accepted content a 'failed' (or now 'dead_lettered') promotion
+ * would index is still there, so purging the promotion row would only
+ * cause that sweep's own discovery query (`INSERT OR IGNORE ... WHERE
+ * d.decision='ACCEPT' AND NOT EXISTS (a promotions row)`) to recreate an
+ * equivalent 'staged' row on its very next run — pure churn, not a real
+ * cleanup, and would touch "promotion eligibility" bookkeeping this task
+ * explicitly puts off limits. Conclusion, updated for B1C: neither
+ * 'failed' nor 'dead_lettered' promotions are ever purged here — the
+ * bounded-retry cap that now exists lives entirely in
+ * lib/corpus-admission-promotion.ts's own claim/normalization logic, not in
+ * this retention sweep, which stays deliberately unaware of it beyond this
+ * one read-only count. This count exists so retryable-failed visibility
+ * stays available in the sweep's own response rather than asserted only in
+ * a comment.
  */
 async function countRetryableFailedPromotions(client: Client): Promise<number> {
   const result = await client.execute("SELECT COUNT(*) AS c FROM corpus_admission_promotions WHERE status = 'failed'");
