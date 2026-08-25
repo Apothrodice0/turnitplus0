@@ -1,5 +1,6 @@
 import type { SourceClass } from "./source-class";
 import type { DiscoveryType } from "./provenance-evidence-types";
+import type { DetectedLanguage } from "./similarity-core";
 
 /**
  * Phase E6A: source discovery architecture — shared vocabulary and shapes.
@@ -119,7 +120,7 @@ export type DiscoverySignals = {
   /** Bounded list of short, distinctive (non-generic) passages — see lib/discovery-signals.ts for the extraction/bounding rules. */
   distinctivePassages: string[];
   canonicalHash: string | null;
-  language: "Arabic" | "French" | "English" | "Mixed" | null;
+  language: DetectedLanguage | null;
 };
 
 /** What a query was built from. TITLE and AUTHOR only ever appear together — see lib/discovery-query-generation.ts's header comment for why title-alone/author-alone queries are never generated. */

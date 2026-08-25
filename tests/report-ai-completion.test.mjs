@@ -82,6 +82,43 @@ test("AI worker/model rejection: room-page-shell.tsx's runAiAnalysis never rejec
   assert.ok(result.aiAnalysis.error.length > 0, "a genuine AI failure must carry a useful, non-empty error message, not a blank one");
 });
 
+/**
+ * Mixed-language misclassification bug, retry-recovery half: retryAiCheck
+ * used to call runAiAnalysis(full.text, full.features.detectedLanguage) —
+ * reusing whatever language was persisted at the ORIGINAL upload time. A
+ * report misclassified by the old detector (e.g. "French" for a document
+ * that is actually English) could never recover via retry, since the stale
+ * persisted value never changed. retryAiAnalysisWithFreshLanguage recomputes
+ * language from the report's own text via the CURRENT detectLanguage() on
+ * every call, so a report affected by the old detector self-heals the
+ * moment this fix ships, with no database mutation and no re-upload.
+ */
+test("mixed-language retry recovery: retryAiAnalysisWithFreshLanguage recomputes language from the report's own text via the current detector, rather than trusting a persisted value", async () => {
+  const { retryAiAnalysisWithFreshLanguage } = await import("../app/reports/rooms/[room]/room-page-shell.tsx");
+  const { detectLanguage } = await import("../lib/similarity-core.ts");
+
+  const englishBody = "The study examined population samples and the results were compared with previous findings in this research which was conducted across several institutions. ".repeat(30);
+  assert.equal(detectLanguage(englishBody), "English", "fixture sanity check: the current detector must call this text English");
+
+  // No Worker global in Node, so the real AI analysis genuinely fails here —
+  // matching this file's own established convention (see the runAiAnalysis
+  // test above). The point of this test is that retryAiAnalysisWithFreshLanguage
+  // never throws and never needs a caller-supplied language at all: it derives
+  // language itself, fresh, from the text — there is no stale value to reuse.
+  const result = await retryAiAnalysisWithFreshLanguage(englishBody);
+  assert.equal(result.aiScore, null);
+  assert.equal(result.aiAnalysis.status, "error");
+});
+
+test("mixed-language retry recovery: retryAiCheck calls retryAiAnalysisWithFreshLanguage, not runAiAnalysis(full.text, full.features.detectedLanguage) with the stale persisted value", async () => {
+  const shell = await readFile(new URL("../app/reports/rooms/[room]/room-page-shell.tsx", import.meta.url), "utf8");
+
+  const retryBody = shell.match(/async function retryAiCheck\([\s\S]*?\n {2}\}/)?.[0] ?? "";
+  assert.ok(retryBody.length > 0, "retryAiCheck function body must be found");
+  assert.match(retryBody, /await retryAiAnalysisWithFreshLanguage\(full\.text\)/, "retry must recompute language fresh from the report's own text, not reuse full.features.detectedLanguage");
+  assert.doesNotMatch(retryBody, /runAiAnalysis\(full\.text, full\.features\.detectedLanguage\)/, "retry must no longer trust the persisted (potentially stale) detectedLanguage value");
+});
+
 test("report-save/network rejection: persistAiCompletion resolves {ok:false} when the remote save reports a normal, documented failure, never throwing", async () => {
   const failRemote = async () => ({ ok: false, status: 0, quotaExceeded: false, roomOccupied: false });
   const result = await persistAiCompletion(fakeReport, fakeSummary, 3, failRemote);

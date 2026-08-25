@@ -63,7 +63,12 @@ test("retryAiCheck re-runs AI analysis from the already-extracted text and never
   const fnMatch = shell.match(/async function retryAiCheck\([\s\S]*?\n {2}\}/);
   assert.ok(fnMatch, "retryAiCheck function must be found");
   const body = fnMatch[0];
-  assert.match(body, /runAiAnalysis\(full\.text, full\.features\.detectedLanguage\)/, "retry must reuse the already-extracted text/language from the full stored report, not prompt for a new file");
+  // Mixed-language misclassification fix: retry no longer reuses
+  // full.features.detectedLanguage (which could be a stale, wrong value
+  // persisted before this fix shipped) — it recomputes language fresh from
+  // the same already-extracted full.text via retryAiAnalysisWithFreshLanguage.
+  // Still reuses the already-extracted text, never a freshly chosen file.
+  assert.match(body, /retryAiAnalysisWithFreshLanguage\(full\.text\)/, "retry must reuse the already-extracted text from the full stored report, recomputing language fresh rather than trusting a persisted value");
   assert.doesNotMatch(body, /extractFileText\(/, "retry must never re-extract from a freshly chosen file — that's the upload flow, not a retry");
   assert.match(body, /saveEnrichedAiResult\(full, aiResult\)/, "retry must persist through the same save path as the automatic post-upload pass, so the two can never disagree on when a room is 'ready'");
 });

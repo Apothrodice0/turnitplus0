@@ -21,6 +21,7 @@ import {
   extractFileText,
 } from "@/lib/document-check-pipeline";
 import { normalizeExtractedText } from "@/lib/extracted-text-normalization";
+import { detectLanguage } from "@/lib/similarity-core";
 import { AI_MODEL_VERSION, AI_PASSAGE_LOG_ODDS_THRESHOLD, AI_PASSAGE_THRESHOLD } from "@/lib/ai-core";
 import { describeAiAnalysisError, type AiPrepStage } from "@/lib/ai-model-prep";
 import { DocumentUploadPanel } from "@/components/reports/document-upload-panel";
@@ -120,8 +121,9 @@ export function aiAnalysisErrorResult(error: unknown, stage: AiPrepStage | null)
  * AiAnalysis with status "error" instead of an unhandled rejection, exactly
  * matching how a genuinely "unsupported" (too little eligible text) result
  * already looks structurally. Shared by both the automatic post-upload AI
- * pass (runCheck below) and the manual retry (retryAiCheck) so the two can
- * never drift into different failure-shape handling.
+ * pass (runCheck below) and the manual retry (retryAiCheck, via
+ * retryAiAnalysisWithFreshLanguage) so the two can never drift into
+ * different failure-shape handling.
  */
 export async function runAiAnalysis(
   text: string,
@@ -136,6 +138,30 @@ export async function runAiAnalysis(
   } catch (error) {
     return aiAnalysisErrorResult(error, aiPrepStage);
   }
+}
+
+/**
+ * The fix for the "language-misclassification stranded reports forever"
+ * bug: Retry analysis must NEVER trust a report's own persisted
+ * features.detectedLanguage — that value was computed once, at whatever
+ * moment the report was originally saved, by whatever version of
+ * lib/similarity-core.ts's detectLanguage() existed then. A report
+ * genuinely misclassified by an old, less accurate detector (or one that
+ * will be fixed again in the future) would otherwise retry forever with
+ * the exact same wrong input and the exact same "unsupported" outcome —
+ * runAiAnalysis's own language-eligibility gate (app/ai-detector-worker.ts)
+ * has no way to know the stored value might be stale.
+ *
+ * This always re-derives the language FRESH from the report's own already-
+ * extracted text, using whatever the CURRENT detectLanguage() is — so a
+ * report that was wrongly classified under an older detector recovers
+ * automatically on the next manual retry, once a fix ships, with no
+ * re-upload and no direct database repair needed. Extracted from
+ * retryAiCheck so it's directly testable without a React render — same
+ * reasoning as runAiAnalysis's own header comment.
+ */
+export async function retryAiAnalysisWithFreshLanguage(text: string): Promise<{ aiScore: number | null; aiAnalysis: AiAnalysis }> {
+  return runAiAnalysis(text, detectLanguage(text));
 }
 
 /**
@@ -514,7 +540,9 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
    * Manual re-run for a room whose AI check genuinely failed (occupant.status
    * === "failed") — the similarity result is already saved and unaffected;
    * this only re-attempts the AI half, using the full report's own already-
-   * extracted text (no re-upload needed).
+   * extracted text (no re-upload needed). Language is always recomputed
+   * fresh (retryAiAnalysisWithFreshLanguage), never taken from
+   * full.features.detectedLanguage — see that function's own comment.
    */
   async function retryAiCheck(reportId: string) {
     if (retryingAi) return;
@@ -526,7 +554,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
         notify("Could not load this report to retry AI analysis. Please try again.");
         return;
       }
-      const aiResult = await runAiAnalysis(full.text, full.features.detectedLanguage);
+      const aiResult = await retryAiAnalysisWithFreshLanguage(full.text);
       const saved = await saveEnrichedAiResult(full, aiResult);
       notify(
         !saved

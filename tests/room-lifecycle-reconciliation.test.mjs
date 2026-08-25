@@ -331,6 +331,13 @@ test("Scope check: this fix adds no new import of any scoring/corpus-admission/r
     "@/lib/report-store",
     "@/lib/report-types",
     "@/lib/reports-remote",
+    // Mixed-language misclassification fix: retryAiAnalysisWithFreshLanguage
+    // needs detectLanguage to recompute language fresh from the report's own
+    // text, rather than trusting a persisted (possibly stale) value. This is
+    // the pure label/confidence detector itself — not scoring, corpus
+    // admission, retention, or PDF extraction — so it does not violate this
+    // scope check's actual boundary (the forbidden-substring list above).
+    "@/lib/similarity-core",
     "lucide-react",
     "next/link",
     "react",

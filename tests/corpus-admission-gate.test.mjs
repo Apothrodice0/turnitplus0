@@ -249,6 +249,66 @@ test("REJECT (too-short) and REVIEW candidates leave the real corpus tables at z
   assert.deepEqual(after, before, "no REJECT/REVIEW candidate may ever create a row in the real corpus tables");
 });
 
+// --- mixed-language misclassification regression (bug reproduction) --------
+// A real document ("...Maghrebi Family Firm") is predominantly English with
+// a short Spanish-translated abstract on page 1-2. The old whole-document,
+// presence-only detector counted the Spanish abstract's la/le/les as French
+// stopword evidence and misclassified the whole document "French" at
+// confidence 0.5, capping it to REVIEW via LANGUAGE_UNCERTAIN. The new
+// windowed, weighted, dominant-language detector must not repeat this.
+
+const SPANISH_WORDS = [
+  "el", "estudio", "examina", "la", "filantropia", "y", "la", "riqueza",
+  "en", "las", "empresas", "familiares", "con", "una", "metodologia",
+  "para", "estos", "resultados", "muestran", "que", "es", "un", "factor",
+  "determinante", "del", "comportamiento", "al", "comprender", "este",
+  "fenomeno", "tambien", "desde", "hacia",
+];
+
+function repeatSpanishWords(count) {
+  const out = [];
+  for (let i = 0; i < count; i += 1) out.push(SPANISH_WORDS[i % SPANISH_WORDS.length]);
+  return out.join(" ");
+}
+
+const REAL_SPANISH_ABSTRACT =
+  "Resumen: Este articulo examina la filantropia y la riqueza socioemocional en las empresas familiares del Magreb. " +
+  "El estudio analiza como la cultura influye en las decisiones filantropicas de estas empresas. Los resultados " +
+  "muestran que la incrustacion cultural es un factor determinante para entender el comportamiento filantropico de " +
+  "las familias empresarias en la region.";
+
+test("bug reproduction: an English article with a short Spanish abstract is ACCEPTed as CONFIDENT_ENGLISH, never capped to REVIEW via LANGUAGE_UNCERTAIN", async () => {
+  const text = `${REAL_SPANISH_ABSTRACT}\n\n${plausibleArticleText(301)}`;
+
+  const decision = await evaluateCorpusAdmissionCandidate(client, {
+    sourceRef: "candidate-english-with-spanish-abstract",
+    filename: "candidate.txt",
+    bytes: Buffer.from(text, "utf8"),
+    consent: RESOLVED_PROVENANCE("https://example.test/spanish-abstract"),
+    dryRun: true,
+  });
+
+  assert.equal(decision.decision, "ACCEPT", `expected ACCEPT, got ${decision.decision} (${decision.reasonCodes.join(",")})`);
+  assert.ok(!decision.reasonCodes.includes("LANGUAGE_UNCERTAIN"), `must not be capped to REVIEW by language uncertainty: ${decision.reasonCodes.join(",")}`);
+});
+
+test("a genuinely balanced English/Spanish document (not a short embedded abstract) is capped to REVIEW via LANGUAGE_UNCERTAIN, not silently ACCEPTed as English", async () => {
+  const englishText = plausibleArticleText(302);
+  const spanishText = repeatSpanishWords(englishText.split(/\s+/).length);
+  const text = `${englishText}\n\n${spanishText}`;
+
+  const decision = await evaluateCorpusAdmissionCandidate(client, {
+    sourceRef: "candidate-balanced-bilingual",
+    filename: "candidate.txt",
+    bytes: Buffer.from(text, "utf8"),
+    consent: RESOLVED_PROVENANCE("https://example.test/balanced-bilingual"),
+    dryRun: true,
+  });
+
+  assert.ok(decision.reasonCodes.includes("LANGUAGE_UNCERTAIN"), `expected LANGUAGE_UNCERTAIN, got ${decision.reasonCodes.join(",")}`);
+  assert.notEqual(decision.decision, "ACCEPT");
+});
+
 // --- openConnection: mandatory for every non-dry admission, fail fast -------
 
 test("openConnection is required whenever dryRun is not true, and the failure happens before any extraction or write is attempted — but a dry run never requires it at all", async () => {

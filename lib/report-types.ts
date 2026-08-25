@@ -3,6 +3,7 @@ import type { ReportSummary } from "@/lib/reports-remote";
 import type { AcademicSearchStatus, ExternalAcademicEvidence } from "@/lib/academic-search/types";
 import type { UnifiedSimilarityResult } from "@/lib/unified-similarity";
 import { AI_SCORING_VERSION, calibratedAiDisplaySignal } from "@/lib/ai-core";
+import type { DetectedLanguage } from "@/lib/similarity-core";
 
 export type SourceType = "Internet" | "Publication";
 export type ReportMode = "ai" | "similarity";
@@ -290,7 +291,7 @@ export type SimilarityReport = {
     referenceListRatio: number;
     highFrequencyShingleCount: number;
     repeatedThreeGramCount: number;
-    detectedLanguage: "Arabic" | "French" | "English" | "Mixed";
+    detectedLanguage: DetectedLanguage;
   };
   excludedDocuments: number;
   matchedWordCount: number;

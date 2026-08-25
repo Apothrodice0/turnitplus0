@@ -108,3 +108,44 @@ test("word count is language-agnostic (Arabic script counted correctly)", () => 
   assert.ok(vector.linguisticQuality.wordCount > 0);
   assert.equal(vector.linguisticQuality.detectedLanguage, "Arabic");
 });
+
+/**
+ * Regression for the mixed-language misclassification bug: a predominantly
+ * English document with a short Spanish abstract must resolve to English
+ * with a confidence at/above the corpus-admission floor (0.65), via the
+ * same detectDominantLanguage() the hard gates consume — not a second,
+ * separately-computed confidence (see this file's own removal of the old
+ * languageConfidenceFor).
+ */
+function repeatWords(bank, count) {
+  const out = [];
+  for (let i = 0; i < count; i += 1) out.push(bank[i % bank.length]);
+  return out.join(" ");
+}
+
+const ENGLISH_WORDS = [
+  "the", "study", "examined", "population", "sample", "and", "the", "results",
+  "were", "compared", "with", "previous", "findings", "in", "this", "research",
+  "which", "was", "conducted", "across", "several", "institutions", "over",
+  "a", "period", "of", "years", "before", "publication",
+];
+const SPANISH_WORDS = [
+  "el", "estudio", "examina", "la", "filantropia", "y", "la", "riqueza",
+  "en", "las", "empresas", "familiares", "con", "una", "metodologia",
+  "para", "estos", "resultados", "muestran", "que", "es", "un", "factor",
+  "determinante", "del", "comportamiento", "al", "comprender", "este",
+  "fenomeno", "tambien", "desde", "hacia",
+];
+
+test("computeCorpusFeatureVector: an English body with a short Spanish abstract reports English with confidence at/above the admission floor", () => {
+  const text = `${repeatWords(SPANISH_WORDS, 60)} ${repeatWords(ENGLISH_WORDS, 3000)}`;
+  const vector = computeCorpusFeatureVector(text);
+  assert.equal(vector.linguisticQuality.detectedLanguage, "English");
+  assert.ok(vector.linguisticQuality.languageConfidence >= 0.65, `expected languageConfidence >= 0.65, got ${vector.linguisticQuality.languageConfidence}`);
+});
+
+test("computeCorpusFeatureVector: a genuinely balanced English/Spanish document reports Mixed, not a confident single language", () => {
+  const text = `${repeatWords(ENGLISH_WORDS, 1500)} ${repeatWords(SPANISH_WORDS, 1500)}`;
+  const vector = computeCorpusFeatureVector(text);
+  assert.equal(vector.linguisticQuality.detectedLanguage, "Mixed");
+});
