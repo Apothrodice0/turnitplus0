@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { ChevronLeft, Download, FileText } from "lucide-react";
-import { fetchReportRoomContents, fetchRemoteReport, saveReportRemote, type ReportSummary, type RoomContents } from "@/lib/reports-remote";
+import { fetchReportRoomContents, fetchRemoteReport, saveReportRemote, type ReportSummary, type RoomContents, type RoomContentsFetchResult } from "@/lib/reports-remote";
 import { invalidateRoomCache } from "@/lib/report-rooms-cache";
 import { ROOM_CYCLE_MS } from "@/lib/report-rooms";
 import { storeReportBestEffort, getStoredReportById } from "@/lib/report-store";
@@ -172,8 +172,11 @@ export async function completeAiAnalysisWithRecovery(
   }
 }
 
-const POLL_INTERVAL_MS = 3000;
-const MAX_POLL_ATTEMPTS = 10;
+// Exported (visibility-only change, values unchanged) so tests can assert
+// exhaustion happens at exactly the real, current policy rather than a
+// magic literal that could silently drift from it.
+export const POLL_INTERVAL_MS = 3000;
+export const MAX_POLL_ATTEMPTS = 10;
 
 function formatDate(iso: string): string {
   return new Date(iso).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
@@ -224,6 +227,88 @@ export function isFullyRevealed(occupant: RoomContents): boolean {
   if (occupant.status !== "ready" && occupant.status !== "failed") return false;
   const similarityStatus = occupant.report?.similarityStatus;
   return similarityStatus !== "stale" && similarityStatus !== "pending";
+}
+
+export type PollTickResult =
+  | { outcome: "revealed"; occupant: RoomContents }
+  | { outcome: "exhausted"; occupant?: RoomContents }
+  | { outcome: "continue"; occupant?: RoomContents };
+
+/**
+ * Defect #2 fix: the completion-poll effect's per-tick decision, extracted
+ * into a pure function so the attempt-budget behavior is directly testable
+ * without a React render — the same reason completeAiAnalysisWithRecovery
+ * below is extracted rather than inlined in runCheck. Behavior-preserving
+ * extraction of exactly what the poll effect's own body used to do inline;
+ * see tests/room-page-shell.test.mjs for the regression this exists to
+ * prove: a sequence of fresh, distinct, non-terminal responses must still
+ * reach "exhausted" after exactly maxAttempts, which requires the CALLER to
+ * hold `attemptsSoFar` in something that survives across ticks (a ref) —
+ * this function itself is stateless and trusts whatever count it's given.
+ *
+ * `attemptsSoFar` must already include the current tick (the caller
+ * increments its own counter before calling this). occupant is carried on
+ * "exhausted" too, matching the original inline behavior: even the tick that
+ * exhausts the budget still surfaces the freshest known non-terminal state
+ * before falling back to the manual "Check again" UI.
+ */
+export function evaluatePollTick(result: RoomContentsFetchResult, attemptsSoFar: number, maxAttempts: number): PollTickResult {
+  // A failed poll request (429/500/timeout/network error) must never be
+  // treated as "the room is now empty" or as confirmation of anything —
+  // production bug fix. It's simply inconclusive, exactly like a still-
+  // "processing" result: keep polling until a genuine non-processing status
+  // arrives or the attempt budget runs out.
+  if (result.ok && result.contents.status !== "processing") {
+    if (isFullyRevealed(result.contents)) return { outcome: "revealed", occupant: result.contents };
+    if (attemptsSoFar >= maxAttempts) return { outcome: "exhausted", occupant: result.contents };
+    return { outcome: "continue", occupant: result.contents };
+  }
+  if (attemptsSoFar >= maxAttempts) return { outcome: "exhausted" };
+  return { outcome: "continue" };
+}
+
+export type ReconciliationDecision = { action: "adopt"; occupant: RoomContents } | { action: "wait" };
+
+/**
+ * Defect #3's own pure decision, extracted for the same testability reason
+ * as evaluatePollTick above. Given the server's current, already-terminal
+ * (isFullyRevealed) view of a room and the id of the report THIS session's
+ * own in-flight check is for, decides whether that server result must win
+ * over local "still generating" state:
+ *  - the server's report IS the one this session's own check is for (same
+ *    id) -> "adopt" (this session's own detached AI-completion landed);
+ *  - the server's report is any OTHER id -> "wait" (never cancel an active
+ *    run for a report this session did not itself create — see below for
+ *    why this is deliberately conservative);
+ *  - not ok, or not yet fully revealed at all -> "wait" (never manufacture
+ *    a terminal result from an inconclusive or non-terminal read).
+ *
+ * Deliberately does NOT attempt to recognize a genuinely NEWER, independent
+ * report (a different session/tab/device racing ahead and completing a
+ * check for this same room while this one is still stuck) as adoptable —
+ * an earlier version of this function compared the candidate's own
+ * server-persisted createdAt against a LOCAL Date.now() snapshot
+ * (checkStartedAtRef), which is unsafe: it compares a server timestamp
+ * against this browser's own clock, and two different clients' clocks
+ * (or a client's clock against the server's) can disagree by an amount
+ * this code has no way to bound or detect. A skewed clock could make an
+ * OLDER, unrelated report look newer than it really is — the exact failure
+ * this function exists to prevent (an unrelated report cancelling an
+ * active run) — so the comparison was removed rather than kept as an
+ * unreliable heuristic. There is currently no server-generated revision/
+ * version number exposed on ReportSummary/RoomContents that could replace
+ * it safely; adding one is a real, valid future improvement (a monotonic,
+ * server-issued counter this function could compare instead of a
+ * timestamp) but is out of scope for this patch — cross-session
+ * supersession (a different tab/device's check completing first) is left
+ * unhandled here, correctly conservative in the meantime: the affected
+ * session simply keeps waiting/polling rather than being torn down.
+ */
+export function evaluateReconciliation(result: RoomContentsFetchResult, trackedReportId: string | null): ReconciliationDecision {
+  if (!result.ok || !isFullyRevealed(result.contents) || !result.contents.report) return { action: "wait" };
+  const serverReport = result.contents.report;
+  const isOwnReport = trackedReportId !== null && serverReport.id === trackedReportId;
+  return isOwnReport ? { action: "adopt", occupant: result.contents } : { action: "wait" };
 }
 
 /**
@@ -302,6 +387,30 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
   const [toast, setToast] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const generationLockRef = useRef(false);
+  // Defect #2 fix: the poll-for-completion effect's own attempt count, moved
+  // out of the effect's per-instance closure into a ref so it survives the
+  // effect being torn down and re-run by React whenever `occupant` changes
+  // (including from the SAME poll's own setOccupant call) — see the poll
+  // effect's own comment for why a closure-local counter there is defeated
+  // by exactly that. A ref is stable across re-renders for the life of this
+  // component instance; explicitly reset to 0 only at the specific,
+  // intentional "new polling lifecycle" points called out below (never
+  // implicitly, never by occupant churn alone).
+  const pollAttemptsRef = useRef(0);
+  // Defect #3: identity of the report THIS session's own in-flight
+  // runCheck() is for — the one fact the reconciliation watchdog effect
+  // needs to tell "the terminal report the server just showed me is MY OWN
+  // check landing" apart from any other report (see evaluateReconciliation's
+  // own comment for why cross-session/cross-device supersession is
+  // deliberately NOT attempted here — no safe, clock-independent way to
+  // order two different reports exists yet). Reset to null at the start of
+  // every runCheck() invocation; filled in once analyzeText() produces a
+  // real report object (its id is stable from that point on).
+  const currentCheckReportIdRef = useRef<string | null>(null);
+  // The upload-progress animation interval — lifted from a runCheck()-local
+  // const into a ref so the reconciliation watchdog (a separate effect, with
+  // no access to runCheck()'s own local variables) can tear it down too.
+  const progressTimerRef = useRef(0);
 
   function notify(message: string) {
     setToast(message);
@@ -446,32 +555,49 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
   // response either way, so the room card reflects the freshest known
   // state even while waiting, but polling itself only stops once BOTH are
   // ready to reveal together.
+  //
+  // Defect #2 fix: the attempt count lives in pollAttemptsRef (component-
+  // level, see its own comment), never in a variable local to this effect.
+  // fetchReportRoomContents always returns a freshly-constructed object
+  // (lib/reports-remote.ts's own fetchReportRoomContents), so every
+  // non-"processing", not-yet-fully-revealed response's own setOccupant call
+  // below is a genuine reference change — React re-runs this effect on the
+  // very next render because `occupant` is one of its dependencies. A
+  // closure-local counter would be silently recreated at 0 on every one of
+  // those re-runs, permanently defeating MAX_POLL_ATTEMPTS the instant a
+  // room ever entered the (normal, expected — LIFECYCLE-05 above) window
+  // where AI and similarity finish at different times — this was a real,
+  // confirmed-live Preview regression (indefinite polling despite an
+  // already-terminal server row), not a hypothetical. The ref is deliberately
+  // NOT reset here on every effect run; it is reset only at the specific
+  // "new polling lifecycle" points this file's other functions own:
+  // runCheck() (a genuinely new report/check generation), checkAgain() (the
+  // user explicitly asking for a fresh attempt budget), and this effect's
+  // own terminal-reveal branch below (hygiene, so a later, unrelated polling
+  // lifecycle for this same mounted instance never inherits a stale count).
   useEffect(() => {
     if (isFullyRevealed(occupant) || isGeneratingReport || pollExhausted) return;
     let cancelled = false;
-    let attempts = 0;
     let timer = 0;
 
     async function poll() {
-      attempts += 1;
+      pollAttemptsRef.current += 1;
       const result = await fetchReportRoomContents(room);
       if (cancelled) return;
-      // A failed poll request (429/500/timeout/network error) must never be
-      // treated as "the room is now empty" or as confirmation of anything —
-      // production bug fix. It's simply inconclusive, exactly like a
-      // still-"processing" result: keep polling until a genuine non-
-      // processing status arrives or the attempt budget runs out.
-      if (result.ok && result.contents.status !== "processing") {
-        setOccupant(result.contents);
-        if (isFullyRevealed(result.contents)) return;
+      const tick = evaluatePollTick(result, pollAttemptsRef.current, MAX_POLL_ATTEMPTS);
+      if (tick.occupant) setOccupant(tick.occupant);
+      if (tick.outcome === "revealed") {
+        pollAttemptsRef.current = 0;
+        return;
       }
-      if (attempts >= MAX_POLL_ATTEMPTS) {
+      if (tick.outcome === "exhausted") {
         // Bounded: a genuine AI failure now arrives as its own "failed"
-        // status via the normal branch above (production audit fix), so
-        // reaching this cap means genuinely still unresolved — most likely
-        // the tab that started the check is gone (closed/crashed) before
-        // its save landed, or this device has had persistent connectivity
-        // trouble. Offer a manual recheck rather than polling forever.
+        // status via evaluatePollTick's own "revealed" branch (production
+        // audit fix), so reaching this cap means genuinely still unresolved
+        // — most likely the tab that started the check is gone (closed/
+        // crashed) before its save landed, or this device has had
+        // persistent connectivity trouble. Offer a manual recheck rather
+        // than polling forever.
         setPollExhausted(true);
         return;
       }
@@ -484,7 +610,88 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
     };
   }, [occupant, room, isGeneratingReport, pollExhausted]);
 
+  /**
+   * Defect #3: authoritative-server-wins reconciliation for the in-flight
+   * upload overlay. The completion-poll effect above is deliberately guarded
+   * OUT while isGeneratingReport is true (its own comment: "this session did
+   * NOT just start that check itself") — by design, since runCheck() itself
+   * updates `occupant` directly the moment its own work resolves. That
+   * design assumes runCheck() always eventually reaches that point. If it
+   * doesn't (hangs before ever calling saveReportRemote, or the tab that
+   * started it is otherwise never going to finish), isGeneratingReport/
+   * generationLockRef/the progress overlay have no OTHER path back to a
+   * correct state — nothing previously reconciled them against what the
+   * server actually knows about this room while a check is believed to
+   * still be running locally.
+   *
+   * This effect is that reconciliation path. It runs ONLY while
+   * isGeneratingReport is true (the exact window the completion poll
+   * excludes), periodically re-confirming that belief against the server's
+   * own authoritative view of this room — never manufacturing a terminal
+   * result client-side, only ever adopting one the server itself already
+   * produced and that resolvePersistedSimilarityDisplay/findRoomOccupant
+   * already confirmed is genuinely terminal (isFullyRevealed).
+   *
+   * Report-aware by design (the safe rule this effect exists to implement)
+   * — deliberately conservative, see evaluateReconciliation's own comment
+   * for why a "different but genuinely newer report" case is NOT handled
+   * here (it would require comparing a server timestamp against this
+   * browser's own clock, which is unsafe across tabs/devices with
+   * potentially skewed clocks — a stale/wrong comparison there could let an
+   * unrelated report wrongly cancel an active run, the opposite of this
+   * effect's own purpose):
+   *  - The terminal report IS the one this session's own runCheck() is for
+   *    (same id, tracked in currentCheckReportIdRef since analyzeText()
+   *    produced it) — this session's own detached AI-completion (Call B)
+   *    already landed; the local "still generating" belief is simply stale
+   *    and must be torn down.
+   *  - The terminal report is ANY other id — could be an older, unrelated
+   *    report already sitting in this room, or a genuinely newer one from a
+   *    different tab/device racing ahead; this effect cannot safely tell
+   *    those apart without a server-issued, clock-independent ordering key,
+   *    which does not exist yet (see evaluateReconciliation's own comment —
+   *    a real future improvement, out of scope here). Correctly
+   *    conservative in the meantime: never adopt, keep waiting. The only
+   *    other recovery path in THAT scenario — a different tab/device's
+   *    check having already completed for this room — is a manual reload,
+   *    which SSR (findRoomOccupant, the same resolver) already handles
+   *    correctly and immediately.
+   */
+  useEffect(() => {
+    if (!isGeneratingReport) return;
+    let cancelled = false;
+    let timer = 0;
+
+    async function reconcile() {
+      const result = await fetchReportRoomContents(room);
+      if (cancelled) return;
+      const decision = evaluateReconciliation(result, currentCheckReportIdRef.current);
+      if (decision.action === "adopt") {
+        window.clearInterval(progressTimerRef.current);
+        generationLockRef.current = false;
+        setIsGeneratingReport(false);
+        setProgress(0);
+        setProcessingLabel("Reading document content");
+        pollAttemptsRef.current = 0;
+        setOccupant(decision.occupant);
+        return;
+      }
+      timer = window.setTimeout(reconcile, POLL_INTERVAL_MS);
+    }
+    timer = window.setTimeout(reconcile, POLL_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [isGeneratingReport, room]);
+
   function checkAgain() {
+    // A genuinely new polling lifecycle for the SAME report — see
+    // pollAttemptsRef's own comment. Without this, the very next poll would
+    // immediately see the count still at MAX_POLL_ATTEMPTS from the
+    // exhausted run and re-exhaust after a single attempt, making "Check
+    // again" a no-op.
+    pollAttemptsRef.current = 0;
     setPollExhausted(false);
   }
 
@@ -519,11 +726,15 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
     const submittedFile = file;
     generationLockRef.current = true;
     setIsGeneratingReport(true);
+    // Defect #3: marks the start of a new check generation for the
+    // reconciliation watchdog below — reset to null here, filled in once
+    // analyzeText() below produces a real report object with a stable id.
+    currentCheckReportIdRef.current = null;
     setProgress(4);
     setProcessingLabel("Reading document content");
     const minimumProcessingMs = 8_000 + Math.floor(Math.random() * 7_001);
     const animationStartedAt = Date.now();
-    const progressTimer = window.setInterval(() => {
+    progressTimerRef.current = window.setInterval(() => {
       const elapsed = Date.now() - animationStartedAt;
       setProgress(Math.min(95, 4 + Math.round((elapsed / minimumProcessingMs) * 91)));
     }, 250);
@@ -533,7 +744,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
       text = normalizeExtractedText(await extractFileText(submittedFile, (_value, label) => setProcessingLabel(label)));
     } catch {
       notify("I could not read that document. Try another file.");
-      window.clearInterval(progressTimer);
+      window.clearInterval(progressTimerRef.current);
       generationLockRef.current = false;
       setIsGeneratingReport(false);
       return;
@@ -541,7 +752,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
 
     if (text.length < 80) {
       notify("Add at least 80 characters to create a useful report.");
-      window.clearInterval(progressTimer);
+      window.clearInterval(progressTimerRef.current);
       generationLockRef.current = false;
       setIsGeneratingReport(false);
       return;
@@ -558,11 +769,16 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
       report = await analyzeText(text, submittedFile.name, submittedFile.size, (_value, label) => setProcessingLabel(label));
     } catch {
       notify("The private document corpus could not be loaded. Please try again.");
-      window.clearInterval(progressTimer);
+      window.clearInterval(progressTimerRef.current);
       generationLockRef.current = false;
       setIsGeneratingReport(false);
       return;
     }
+    // ReportSummary.id (what the server/poll ever hands back) is always
+    // String(SimilarityReport.id) — see buildReportSummary in
+    // lib/report-types.ts — so the tracked id is normalized the same way
+    // here for a same-type comparison in the watchdog effect below.
+    currentCheckReportIdRef.current = String(report.id);
 
     const aiAnalysisPromise = runAiAnalysis(text, report.features.detectedLanguage);
 
@@ -574,7 +790,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
 
     const remainingAnimationMs = Math.max(0, minimumProcessingMs - (Date.now() - animationStartedAt));
     if (remainingAnimationMs > 0) await new Promise((resolve) => window.setTimeout(resolve, remainingAnimationMs));
-    window.clearInterval(progressTimer);
+    window.clearInterval(progressTimerRef.current);
     setProgress(100);
     setProcessingLabel("Saving your report");
 
@@ -614,6 +830,14 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
       }
 
       invalidateRoomCache(accountEmail, room);
+      // Defect #2: a new report/check generation has just started for this
+      // room — give the completion poll a fresh attempt budget rather than
+      // inheriting whatever pollAttemptsRef/pollExhausted happened to be
+      // left over from a PRIOR occupant of this same mounted instance (a
+      // report that expired and the room emptied, then a new upload
+      // followed, all without a remount).
+      pollAttemptsRef.current = 0;
+      setPollExhausted(false);
       // We know the true state directly — no need to fetch it back. AI is
       // genuinely not done yet (the promise below is still in flight), so
       // this is "processing", never "ready", regardless of how the save

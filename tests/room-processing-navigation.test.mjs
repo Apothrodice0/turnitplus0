@@ -107,10 +107,14 @@ test("isFullyRevealed (BEHAVIORAL): AI ready + similarity stale -> NOT revealed 
   assert.equal(isFullyRevealed(roomFixture("ready", "stale")), false);
 });
 
-test("isFullyRevealed (BEHAVIORAL, proves the poll-exhaustion case — item 6): similarity pending after the poll budget exhausts remains NOT revealed — pollExhausted is a purely client-side flag that never touches occupant.status/similarityStatus (see checkAgain's own one-line body below), so exhaustion can only ever route to the 'Retry analysis' sub-view within the SAME not-revealed branch, never to Unavailable or a reveal", async () => {
+test("isFullyRevealed (BEHAVIORAL, proves the poll-exhaustion case — item 6): similarity pending after the poll budget exhausts remains NOT revealed — pollExhausted is a purely client-side flag that never touches occupant.status/similarityStatus (see checkAgain's own body below), so exhaustion can only ever route to the 'Retry analysis' sub-view within the SAME not-revealed branch, never to Unavailable or a reveal", async () => {
   assert.equal(isFullyRevealed(roomFixture("ready", "pending")), false, "exhaustion never changes the underlying occupant data — this fixture is identical whether or not pollExhausted is true");
   const shell = await readRoomShell();
-  assert.match(shell, /function checkAgain\(\) \{\s*\n\s*setPollExhausted\(false\);\s*\n\s*\}/, "REQUIRED: checkAgain/pollExhausted must touch nothing except the local poll-exhaustion flag itself — never occupant, never similarityStatus");
+  // Defect #2 fix: checkAgain also resets pollAttemptsRef.current so the
+  // poll effect gets a genuinely fresh attempt budget (see that ref's own
+  // comment) — still touches neither occupant nor similarityStatus, which
+  // is the actual invariant this test proves.
+  assert.match(shell, /function checkAgain\(\) \{[\s\S]*?pollAttemptsRef\.current = 0;\s*\n\s*setPollExhausted\(false\);\s*\n\s*\}/, "REQUIRED: checkAgain must reset the poll-attempt budget and the poll-exhaustion flag — and touch nothing else, never occupant, never similarityStatus");
   // The two poll-exhaustion sub-views (the "Check again"/"Retry analysis"
   // message vs. the plain "Analysis in progress" message) live INSIDE the
   // same not-revealed branch, as siblings of the SAME two hardcoded neutral
