@@ -73,6 +73,10 @@ type PromotionRow = {
   decisionId: string;
   acceptedRepresentationId: string;
   status: CorpusAdmissionPromotionStatus;
+  /** Set only once status='indexed' — see the migration's own schema comment. Read here so processCorpusAdmissionPromotion's own terminal-idempotency guard can reconstruct an already-'indexed' outcome without a second query. */
+  representationId: string | null;
+  linkType: LinkType | null;
+  lastError: string | null;
 };
 
 type RawPromotionRow = {
@@ -80,14 +84,28 @@ type RawPromotionRow = {
   decision_id: string;
   accepted_representation_id: string;
   status: string;
+  representation_id: string | null;
+  link_type: string | null;
+  last_error: string | null;
 };
 
 function toPromotionRow(row: RawPromotionRow): PromotionRow {
-  return { id: row.id, decisionId: row.decision_id, acceptedRepresentationId: row.accepted_representation_id, status: row.status as CorpusAdmissionPromotionStatus };
+  return {
+    id: row.id,
+    decisionId: row.decision_id,
+    acceptedRepresentationId: row.accepted_representation_id,
+    status: row.status as CorpusAdmissionPromotionStatus,
+    representationId: row.representation_id,
+    linkType: row.link_type as LinkType | null,
+    lastError: row.last_error,
+  };
 }
 
 async function fetchPromotionById(client: Client, promotionId: string): Promise<PromotionRow | null> {
-  const result = await client.execute({ sql: "SELECT id, decision_id, accepted_representation_id, status FROM corpus_admission_promotions WHERE id = ?", args: [promotionId] });
+  const result = await client.execute({
+    sql: "SELECT id, decision_id, accepted_representation_id, status, representation_id, link_type, last_error FROM corpus_admission_promotions WHERE id = ?",
+    args: [promotionId],
+  });
   const row = result.rows[0] as unknown as RawPromotionRow | undefined;
   return row ? toPromotionRow(row) : null;
 }
@@ -123,6 +141,161 @@ async function executePromotionWriteWithRetry(openConnection: CorpusAdmissionCon
       attemptClient.close();
     }
   }
+}
+
+/**
+ * The exact staging INSERT — the one place "what does a freshly-staged
+ * corpus_admission_promotions row look like" is defined. Shared by
+ * stageCorpusAdmissionPromotionForDecision (below) and
+ * runCorpusAdmissionPromotionSweep's own batch discovery step, so the
+ * immediate post-ACCEPT path and the sweep's own recovery path can never
+ * define "staged" differently. ux_corpus_admission_promotions_decision_id
+ * (drizzle/0034) is a real unique index, not merely the NOT EXISTS the
+ * sweep's own discovery SELECT also happens to use — OR IGNORE here relies
+ * on that index directly, so two concurrent staging attempts for the same
+ * decision (this function called twice at once, a caller racing the
+ * sweep's own discovery, or two sweep ticks racing each other) converge on
+ * exactly one row.
+ */
+function buildStagePromotionInsertStatement(decisionId: string, acceptedRepresentationId: string): InStatement {
+  return {
+    sql: `INSERT OR IGNORE INTO corpus_admission_promotions (id, decision_id, accepted_representation_id, status, attempt_count, created_at, updated_at)
+          VALUES (?,?,?,'staged',0,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
+    args: [randomUUID(), decisionId, acceptedRepresentationId],
+  };
+}
+
+/**
+ * Idempotently ensures exactly one corpus_admission_promotions row exists
+ * for this ACCEPT decision, staging it if none exists yet — the
+ * single-decision analogue of runCorpusAdmissionPromotionSweep's own batch
+ * discovery, sharing the exact same INSERT (buildStagePromotionInsertStatement)
+ * so the two can never drift into staging different shapes.
+ *
+ * The fix for "ACCEPT relies exclusively on the scheduled sweep": called
+ * synchronously, immediately after an ACCEPT decision's accepted
+ * representation/content has committed
+ * (lib/corpus-admission-report-integration.ts's processReportAdmissionJob),
+ * so a decision no longer has to wait for the next scheduled sweep tick to
+ * even be discovered. The sweep's own discovery step is intentionally left
+ * as-is (still one batched multi-row INSERT inside its own transaction,
+ * sharing only the statement shape, not this function's own extra
+ * roundtrips) — it remains the recovery/retry path for anything this
+ * synchronous call missed or failed to stage (a transient error here, a
+ * request that crashed before reaching this point, CORPUS_PROMOTION_ENABLED
+ * having been off at ACCEPT time and flipped on later).
+ *
+ * Returns the existing OR newly-created promotion id — a caller never needs
+ * to distinguish "was already staged" from "just staged it," matching
+ * createPendingReportAdmissionJob's own "ensure the row exists" idiom.
+ * Returns null (never throws for this reason) when decisionId does not
+ * currently resolve to an eligible ACCEPT with a committed accepted
+ * representation — defensive: a caller that just confirmed ACCEPT status
+ * itself should never actually observe this, but this function does not
+ * assume that and re-derives eligibility from the database itself rather
+ * than trusting a caller-supplied flag.
+ */
+export async function stageCorpusAdmissionPromotionForDecision(client: Client, decisionId: string): Promise<string | null> {
+  const existing = await client.execute({ sql: "SELECT id FROM corpus_admission_promotions WHERE decision_id = ?", args: [decisionId] });
+  const existingRow = existing.rows[0] as unknown as { id: string } | undefined;
+  if (existingRow) return existingRow.id;
+
+  const acceptedRepResult = await client.execute({
+    sql: `SELECT ar.id AS accepted_representation_id
+          FROM corpus_admission_decisions d
+          JOIN corpus_admission_accepted_representations ar ON ar.decision_id = d.id
+          WHERE d.decision = 'ACCEPT' AND d.id = ?`,
+    args: [decisionId],
+  });
+  const acceptedRep = acceptedRepResult.rows[0] as unknown as { accepted_representation_id: string } | undefined;
+  if (!acceptedRep) return null;
+
+  await client.execute(buildStagePromotionInsertStatement(decisionId, acceptedRep.accepted_representation_id));
+
+  // Re-read rather than trust the id just generated: OR IGNORE means a
+  // concurrent staging attempt for the same decision may have won the
+  // unique-index race instead — this returns whichever row actually exists
+  // now, exactly like createPendingReportAdmissionJob's own re-fetch after
+  // its own ON CONFLICT DO NOTHING insert.
+  const finalRow = await client.execute({ sql: "SELECT id FROM corpus_admission_promotions WHERE decision_id = ?", args: [decisionId] });
+  const row = finalRow.rows[0] as unknown as { id: string } | undefined;
+  return row ? row.id : null;
+}
+
+export type StageAndClaimPromotionResult =
+  | { staged: false; claimed: false; promotionId: null }
+  | { staged: true; promotionId: string; claimed: boolean };
+
+const DEFAULT_STALE_CLAIM_MS = 5 * 60 * 1000;
+
+/**
+ * The claim-safety fix: single-owner claim semantics for the immediate,
+ * automatic-promotion path — the exact same predicate
+ * runCorpusAdmissionPromotionSweep's own claim step already uses (status IN
+ * ('staged','failed') AND (claimed_at IS NULL OR claimed_at < stale
+ * threshold)), applied to one specific row instead of a batch.
+ *
+ * Stages first (via stageCorpusAdmissionPromotionForDecision — idempotent,
+ * unchanged), then attempts to claim that SAME row with a single
+ * conditional UPDATE. A single UPDATE statement is its own atomic unit in
+ * SQLite (no explicit transaction needed for this one check-and-set): if a
+ * concurrent claimant (a racing sweep tick, or another immediate-promotion
+ * call for the same decision) already claimed it first, this UPDATE's own
+ * WHERE clause no longer matches (claimed_at is now fresh, non-stale) and
+ * affects zero rows — `claimed` comes back false, telling the caller not to
+ * process. Whichever caller's UPDATE actually lands first wins; the loser
+ * never processes, so the same promotion can never be indexed twice
+ * concurrently by two different callers.
+ *
+ * A promotion already 'indexed' or 'skipped' can never be claimed here
+ * (status IN ('staged','failed') excludes both) — `claimed` comes back
+ * false for those too, which is exactly "already terminal, do not process
+ * again," the other half of this fix (see processCorpusAdmissionPromotion's
+ * own defensive terminal-idempotency guard for the second layer of this
+ * same guarantee).
+ *
+ * Takes openConnection, not a plain client, and retries with a genuinely
+ * fresh connection on SQLITE_BUSY (the same MAX_PROMOTION_BUSY_RETRIES/
+ * promotionBackoff every other write in this module already uses) —
+ * confirmed necessary by this fix's own regression test, not merely
+ * consistent-for-its-own-sake: this function is EXPECTED to genuinely race
+ * the sweep's own claim transaction under real concurrent load (that IS the
+ * scenario this fix exists for), and retrying on the SAME connection does
+ * not reliably recover from SQLITE_BUSY once a transaction elsewhere is
+ * actually holding the write lock — this codebase's own established,
+ * empirically-confirmed finding (see e.g. acceptWithAtomicDedupCriticalSection's
+ * own header comment in lib/corpus-admission-gate.ts).
+ */
+export async function stageAndClaimCorpusAdmissionPromotionForDecision(
+  openConnection: CorpusAdmissionConnectionFactory,
+  decisionId: string,
+  staleClaimMs: number = DEFAULT_STALE_CLAIM_MS,
+): Promise<StageAndClaimPromotionResult> {
+  const staleClaimSeconds = Math.max(1, Math.floor(staleClaimMs / 1000));
+  for (let attempt = 1; attempt <= MAX_PROMOTION_BUSY_RETRIES; attempt += 1) {
+    const attemptClient = await openConnection();
+    try {
+      const promotionId = await stageCorpusAdmissionPromotionForDecision(attemptClient, decisionId);
+      if (!promotionId) return { staged: false, claimed: false, promotionId: null };
+
+      const claimResult = await attemptClient.execute({
+        sql: `UPDATE corpus_admission_promotions
+              SET claimed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+              WHERE id = ? AND status IN ('staged','failed') AND (claimed_at IS NULL OR claimed_at < datetime('now', ?))`,
+        args: [promotionId, `-${staleClaimSeconds} seconds`],
+      });
+      return { staged: true, promotionId, claimed: Number(claimResult.rowsAffected) > 0 };
+    } catch (err) {
+      if (isSqliteBusyError(err) && attempt < MAX_PROMOTION_BUSY_RETRIES) {
+        await promotionBackoff(attempt);
+        continue;
+      }
+      throw err;
+    } finally {
+      attemptClient.close();
+    }
+  }
+  throw new Error("stageAndClaimCorpusAdmissionPromotionForDecision: exhausted retries without resolving");
 }
 
 type IndexedResult = { representationId: string; linkType: LinkType; fingerprintVersion: string };
@@ -272,6 +445,26 @@ export async function processCorpusAdmissionPromotion(client: Client, params: Pr
     throw new Error(`processCorpusAdmissionPromotion: no corpus_admission_promotions row for id ${params.promotionId}`);
   }
 
+  // Defensive terminal-idempotency (claim-safety fix): the PRIMARY defense
+  // against double-processing is the claim itself
+  // (stageAndClaimCorpusAdmissionPromotionForDecision / the sweep's own
+  // claim query) — a caller that does not own the claim should never reach
+  // this function with an id that is already terminal. This is a SECOND,
+  // independent layer that makes the function itself safe even when called
+  // directly (every existing sweep/test call site still does, unclaimed),
+  // so that re-processing an already-'indexed' or already-'skipped' row —
+  // however it happened — can never re-run indexPromotionAtomically, which
+  // would otherwise double-increment attempt_count and double-bump
+  // corpus_match_generation for what is logically a single completed
+  // attempt. 'staged' and 'failed' are the only retryable statuses and fall
+  // through to the normal processing below, unchanged.
+  if (promotion.status === "indexed" && promotion.representationId && promotion.linkType) {
+    return { outcome: "indexed", promotionId: promotion.id, decisionId: promotion.decisionId, representationId: promotion.representationId, linkType: promotion.linkType };
+  }
+  if (promotion.status === "skipped") {
+    return { outcome: "skipped", promotionId: promotion.id, decisionId: promotion.decisionId, reason: promotion.lastError ?? "previously skipped (no error message recorded)" };
+  }
+
   const decisionResult = await client.execute({ sql: "SELECT decision FROM corpus_admission_decisions WHERE id = ?", args: [promotion.decisionId] });
   const decisionRow = decisionResult.rows[0] as unknown as { decision: string } | undefined;
   if (!decisionRow || decisionRow.decision !== "ACCEPT") {
@@ -387,11 +580,11 @@ export async function runCorpusAdmissionPromotionSweep(client: Client, params: R
         });
         const newRows = discovered.rows as unknown as { decision_id: string; accepted_representation_id: string }[];
         if (newRows.length > 0) {
-          const statements = newRows.map((row) => ({
-            sql: `INSERT OR IGNORE INTO corpus_admission_promotions (id, decision_id, accepted_representation_id, status, attempt_count, created_at, updated_at)
-                  VALUES (?,?,?,'staged',0,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
-            args: [randomUUID(), row.decision_id, row.accepted_representation_id],
-          }));
+          // Same staging INSERT stageCorpusAdmissionPromotionForDecision's
+          // own single-row path uses (buildStagePromotionInsertStatement) —
+          // reused here as a batch via tx.batch, not a loop, so this step's
+          // existing roundtrip/performance characteristics are unchanged.
+          const statements = newRows.map((row) => buildStagePromotionInsertStatement(row.decision_id, row.accepted_representation_id));
           await tx.batch(statements);
         }
 

@@ -1,18 +1,27 @@
 import { randomUUID } from "node:crypto";
 import type { Client, InStatement } from "@libsql/client";
 import { evaluateCorpusAdmissionCandidate, type CorpusAdmissionConnectionFactory, type CorpusAdmissionDecisionRecord } from "./corpus-admission-gate";
+import { isCorpusPromotionEnabled, stageAndClaimCorpusAdmissionPromotionForDecision, processCorpusAdmissionPromotion } from "./corpus-admission-promotion";
 
 /**
  * Controlled integration between the live report-upload path
  * (app/api/reports/route.ts) and the corpus-admission gate
  * (lib/corpus-admission-gate.ts). This module admits content into the
  * admission gate's own audit trail (corpus_admission_decisions /
- * corpus_admission_content_store) — it does NOT index anything into the
- * real reusable corpus (corpus_document_representations et al). Wiring
- * accepted admission decisions into the real corpus is a separate, later,
- * explicitly out-of-scope phase — see lib/corpus-admission-gate.ts's own
- * structural self-check (tests/corpus-admission-privacy.test.mjs) for why
- * that boundary is enforced, not just documented.
+ * corpus_admission_content_store) via lib/corpus-admission-gate.ts, and —
+ * as of the automatic-promotion fix — also stages and immediately attempts
+ * to index a fresh ACCEPT into the real reusable corpus
+ * (corpus_document_representations et al), by calling through
+ * lib/corpus-admission-promotion.ts's own closed door (see this module's
+ * own processReportAdmissionJob for exactly where). It still never calls
+ * lib/user-submission-corpus.ts's write functions directly, and still never
+ * links a promoted representation to a document_identity_id/account — see
+ * lib/corpus-admission-promotion.ts's own header comment for that
+ * boundary, which this module does not change. tests/corpus-admission-
+ * privacy.test.mjs's structural checks (the "third door") still enforce
+ * that lib/corpus-admission-promotion.ts is reachable only from this
+ * module and the sweep/admin-dashboard routes, never directly from
+ * arbitrary app/ code.
  *
  * Design properties:
  *  - Feature-flagged: isCorpusAdmissionEnabled() reads
@@ -302,6 +311,77 @@ export async function processReportAdmissionJob(client: Client, params: ProcessR
       sql: "UPDATE corpus_admission_report_jobs SET status = 'succeeded', decision_id = ?, claimed_at = NULL, last_error = NULL, attempt_count = attempt_count + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
       args: [decision.id, job.id],
     });
+
+    // Automatic promotion fix: ACCEPT previously relied exclusively on the
+    // scheduled sweep to ever get staged/indexed — a decision could sit
+    // ACCEPTed, with active fingerprint and retained content, for up to a
+    // full day (or forever, if CORPUS_PROMOTION_ENABLED happened to be off
+    // at the time) before becoming matchable. This runs the SAME real
+    // pipeline the sweep uses (stageCorpusAdmissionPromotionForDecision,
+    // then processCorpusAdmissionPromotion — no second shingle/indexing
+    // implementation) immediately, at this exact async job boundary, which
+    // every real trigger (the deferred post-save callback, a manual retry,
+    // the report-admission sweep) already awaits — never fire-and-forget.
+    //
+    // Also the fix for re-ACCEPT after an admin deactivation: when a
+    // deactivated representation's canonical hash is re-uploaded,
+    // evaluateCorpusAdmissionCandidate's own pre-check (revoked_at IS NULL)
+    // does not see the old, revoked accepted_representations row, so this
+    // is a genuinely NEW ACCEPT with its own new acceptedRepresentationId —
+    // staged and promoted here exactly like a first-ever ACCEPT. Its own
+    // indexPromotionAtomically may legitimately reuse the same underlying
+    // corpus_document_representations row (EXACT_CANONICAL_DUPLICATE), but
+    // this promotion's own 'indexed' row, backed by the NEW, non-revoked
+    // accepted_representation, is what restores
+    // findCandidateCorpusRepresentations' own eligibility join (lib/user-
+    // submission-corpus.ts: "at least one 'indexed' promotion whose own
+    // accepted_representation is not revoked") — matching becomes active
+    // again without this module needing to know anything about matching
+    // eligibility itself.
+    //
+    // Deliberately gated the same way the sweep already gates itself
+    // (isCorpusPromotionEnabled()) — preserves existing disabled behavior:
+    // while off, nothing is staged here either, so a decision accepted
+    // while disabled is discovered fresh by the sweep's own batch discovery
+    // once the flag is later turned on, exactly as before this fix existed.
+    //
+    // Failure isolation: this decision is ALREADY committed as ACCEPT and
+    // the job is ALREADY marked 'succeeded' above — nothing below this
+    // point can roll either back. processCorpusAdmissionPromotion already
+    // isolates a genuine indexing failure internally (persists
+    // status='failed', returns a value, never throws for that case); the
+    // try/catch here exists only for a failure in staging/claiming/processing
+    // itself never reaching that internal write (e.g. a connection-level
+    // error) — either way, the row is left 'staged' or 'failed' with
+    // claimed_at NULL (a failed claim attempt never sets claimed_at at
+    // all), exactly the shape runCorpusAdmissionPromotionSweep's own claim
+    // query (status IN ('staged','failed')) already discovers and retries,
+    // so nothing extra is needed to keep it recoverable.
+    //
+    // Claim-safety fix: this path does not process a promotion it has not
+    // won the claim on. stageAndClaimCorpusAdmissionPromotionForDecision
+    // stages (idempotent, unchanged) and then attempts the SAME
+    // single-owner claim the sweep's own claim query uses (status IN
+    // ('staged','failed') AND unclaimed-or-stale) — a racing sweep tick
+    // that claims this exact row first makes this call's own claim a
+    // no-op (claimed:false), and this path correctly does not process it a
+    // second time. A promotion that is already 'indexed' or 'skipped' can
+    // never be claimed either (excluded by the same status filter), so an
+    // id returned by staging that turns out to already be terminal is
+    // never re-processed here — processCorpusAdmissionPromotion's own
+    // defensive terminal-idempotency guard is the second, independent
+    // layer of that same guarantee.
+    if (decision.decision === "ACCEPT" && isCorpusPromotionEnabled()) {
+      try {
+        const staged = await stageAndClaimCorpusAdmissionPromotionForDecision(params.openConnection, decision.id);
+        if (staged.staged && staged.claimed) {
+          await processCorpusAdmissionPromotion(client, { promotionId: staged.promotionId, openConnection: params.openConnection });
+        }
+      } catch (err) {
+        console.error("processReportAdmissionJob: immediate promotion attempt failed (non-fatal — admission remains ACCEPT, and the row stays discoverable/retryable by the existing promotion sweep):", err instanceof Error ? err.message : String(err));
+      }
+    }
+
     return { outcome: "succeeded", jobId: job.id, decisionId: decision.id, decision: decision.decision };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

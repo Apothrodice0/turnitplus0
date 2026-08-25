@@ -566,28 +566,33 @@ export async function POST(request: Request) {
             }
             // Corpus-admission hardening: this route no longer calls
             // lib/user-submission-corpus.ts's indexDocumentSubmissionIntoCorpus
-            // directly (Phase E8D's original activation, removed). Automatic
-            // reusable-corpus INDEXING (making content live-searchable via
-            // corpus_document_representations et al) still requires a
-            // separate, later, explicitly out-of-scope phase — see
-            // tests/corpus-admission-privacy.test.mjs's structural proof that
-            // no file under app/ can reach indexDocumentSubmissionIntoCorpus.
+            // directly (Phase E8D's original activation, removed) — that
+            // specific, account-linked live-indexing path stays out of scope
+            // here, still enforced by tests/corpus-admission-privacy.test.mjs's
+            // structural proof that no file under app/ can reach it.
             //
-            // Controlled ADMISSION (not indexing) is wired below:
-            // processReportAdmissionJob runs the full corpus-admission gate
-            // (lib/corpus-admission-gate.ts — English-only, 3000-word
-            // minimum, quality scoring, retention/consent, "first accepted
-            // sample wins" family-duplicate checks) against the job row
-            // already created SYNCHRONOUSLY above (before this deferred
-            // callback ever started — see that call site's own comment for
-            // why), and records its own audit trail, entirely behind
+            // Controlled ADMISSION is wired below: processReportAdmissionJob
+            // runs the full corpus-admission gate (lib/corpus-admission-
+            // gate.ts — English-only, 3000-word minimum, quality scoring,
+            // retention/consent, "first accepted sample wins" family-
+            // duplicate checks) against the job row already created
+            // SYNCHRONOUSLY above (before this deferred callback ever
+            // started — see that call site's own comment for why), and
+            // records its own audit trail, entirely behind
             // CORPUS_ADMISSION_ENABLED (off by default) and a fresh,
             // request-time-independent re-check of
             // users.corpus_reuse_consented_at — see
             // lib/corpus-admission-report-integration.ts's own header
             // comment for why sessionUser.corpusReuseConsented (captured
             // earlier in this same request) is deliberately never trusted
-            // for the actual admission decision.
+            // for the actual admission decision. As of the automatic-
+            // promotion fix, processReportAdmissionJob also immediately
+            // stages and attempts to promote a fresh ACCEPT into the real
+            // reusable corpus (never the account-linked
+            // indexDocumentSubmissionIntoCorpus path above — a separate,
+            // narrower mechanism via lib/corpus-admission-promotion.ts, see
+            // that module's own header comment), behind its own
+            // CORPUS_PROMOTION_ENABLED flag.
             if (capturedPendingAdmissionJobId !== null) {
               try {
                 await processReportAdmissionJob(deferredClient, {
