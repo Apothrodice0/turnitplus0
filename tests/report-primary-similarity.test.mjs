@@ -8,10 +8,12 @@ import { applyMigrationsLibsql } from "../lib/ingest.js";
 import { createDocumentIdentity, canonicalSha256 } from "../lib/document-identity.ts";
 import { indexDocumentSubmissionIntoCorpus } from "../lib/user-submission-corpus.ts";
 import { runCorpusAdmissionPromotionSweep } from "../lib/corpus-admission-promotion.ts";
-import { isHistoricalMatchSnapshotCurrent } from "../lib/report-historical-match.ts";
-import { resolvePrimarySimilaritySummary, resolvePersistedSimilarityDisplay } from "../lib/report-primary-similarity.ts";
+import { isHistoricalMatchSnapshotCurrent, bumpCorpusMatchGeneration } from "../lib/report-historical-match.ts";
+import { resolvePrimarySimilaritySummary, resolvePersistedSimilarityDisplay, selfHealUnifiedSimilarity, isFreshCurrentNoHistoricalMatch } from "../lib/report-primary-similarity.ts";
 import { findRoomOccupant } from "../lib/reports-repo.ts";
 import { computeUnifiedSimilarity } from "../lib/unified-similarity.ts";
+import { USER_SUBMISSION_MATCHER_VERSION } from "../lib/user-submission-matching.ts";
+import { CORPUS_FINGERPRINT_VERSION, CANONICALIZATION_VERSION } from "../lib/user-submission-corpus.ts";
 
 /**
  * Release-hardening audit finding SIM-02, superseded by SIM-03: SIM-02 gave
@@ -647,4 +649,206 @@ test("SIM-02 (2)+(3): computeUnifiedSimilarity itself never invents a result whi
   // check.
   const result = computeUnifiedSimilarity({ wordCount: 100, archiveMatchedPositions: [], externalAcademicEvidence: [], historicalSubmissionMatch: undefined });
   assert.equal(result.unifiedScore, 0, "sanity: with genuinely no evidence, computeUnifiedSimilarity settles at a real 0, exactly like tests/similarity-result-consistency.test.mjs's own genuine-0% coverage expects");
+});
+
+// --- Non-converging NO_HISTORICAL_MATCH presentation-resolution fix --------
+//
+// findRoomOccupant's self-heal path previously could never converge for a
+// report whose true, correct historical-match answer is NO_HISTORICAL_MATCH:
+// lib/report-historical-match.ts's own isSnapshotRowCurrent unconditionally
+// excludes that status from being a cache hit (Phase E8E fix, deliberately
+// unchanged — a same-moment concurrent upload's later-finished indexing must
+// never be permanently hidden), so every read recomputed, rewrote
+// computed_at, and re-read "stale" again, forever. isFreshCurrentNoHistoricalMatch
+// plus selfHealUnifiedSimilarity's own presentationResolved field (see that
+// type's own comment) let findRoomOccupant treat THIS RESPONSE as resolved
+// without ever making the underlying snapshot cacheable for the next one.
+
+function freshNoMatchFixture(overrides = {}) {
+  return {
+    status: "NO_HISTORICAL_MATCH",
+    computedAt: new Date().toISOString(),
+    matcherVersion: USER_SUBMISSION_MATCHER_VERSION,
+    fingerprintVersion: CORPUS_FINGERPRINT_VERSION,
+    canonicalizationVersion: CANONICALIZATION_VERSION,
+    ...overrides,
+  };
+}
+
+test("isFreshCurrentNoHistoricalMatch: a genuinely fresh, current, non-partial NO_HISTORICAL_MATCH at the same generation is presentation-eligible", () => {
+  assert.equal(isFreshCurrentNoHistoricalMatch(freshNoMatchFixture(), 5, 5), true);
+});
+
+test("isFreshCurrentNoHistoricalMatch: a MATCHED result is never presentation-eligible — this signal exists only for NO_HISTORICAL_MATCH, MATCHED already works through the ordinary current-cache path", () => {
+  const matched = freshNoMatchFixture({ status: "MATCHED", matches: [] });
+  assert.equal(isFreshCurrentNoHistoricalMatch(matched, 5, 5), false);
+});
+
+test("isFreshCurrentNoHistoricalMatch: an UNAVAILABLE (failed computation) result is never presentation-eligible", () => {
+  assert.equal(isFreshCurrentNoHistoricalMatch(freshNoMatchFixture({ status: "UNAVAILABLE" }), 5, 5), false);
+});
+
+test("REQUIRED: a partial no-match never presentation-resolves", () => {
+  assert.equal(isFreshCurrentNoHistoricalMatch(freshNoMatchFixture({ partial: true }), 5, 5), false);
+});
+
+test("REQUIRED: a version-mismatched no-match never presentation-resolves (matcher, fingerprint, and canonicalization each checked independently)", () => {
+  assert.equal(isFreshCurrentNoHistoricalMatch(freshNoMatchFixture({ matcherVersion: "stale-matcher-v0" }), 5, 5), false);
+  assert.equal(isFreshCurrentNoHistoricalMatch(freshNoMatchFixture({ fingerprintVersion: "stale-fingerprint-v0" }), 5, 5), false);
+  assert.equal(isFreshCurrentNoHistoricalMatch(freshNoMatchFixture({ canonicalizationVersion: "stale-canonicalization-v0" }), 5, 5), false);
+});
+
+test("REQUIRED: a generation-behind no-match never presentation-resolves — the stamped generation must be >= the live generation re-read after the write", () => {
+  assert.equal(isFreshCurrentNoHistoricalMatch(freshNoMatchFixture(), 4, 5), false, "generationAtComputation (4) behind liveGenerationAfterWrite (5) must not presentation-resolve");
+  assert.equal(isFreshCurrentNoHistoricalMatch(freshNoMatchFixture(), 5, 5), true, "sanity: equal generations must presentation-resolve");
+  assert.equal(isFreshCurrentNoHistoricalMatch(freshNoMatchFixture(), 6, 5), true, "sanity: stamped generation ahead of a stale re-read must still presentation-resolve");
+});
+
+test("REQUIRED: current-version/current-generation NO_HISTORICAL_MATCH remains non-cacheable through isHistoricalMatchSnapshotCurrent() — isSnapshotRowCurrent itself is untouched by this fix", async () => {
+  const deviceKey = "device-nomatch-noncacheable";
+  const reportId = "report-nomatch-noncacheable";
+  await client.execute({
+    sql: `INSERT INTO saved_reports (id, device_key, submission_id, title, report_created_at, word_count, archive_score, score_band, payload_json, user_id)
+          VALUES (?,?,?,?,?,?,?,?,?,?)`,
+    args: [reportId, deviceKey, "sub-" + reportId, "Fixture", new Date().toISOString(), 50, 0, "Low", "{}", null],
+  });
+  await resolvePrimarySimilaritySummary(client, {
+    reportDeviceKey: deviceKey, reportId, accountId: null,
+    rawText: "A distinctive fixture sentence about non-cacheable historical match status used only for this specific isSnapshotRowCurrent regression test case.",
+    wordCount: 20, archiveMatchedPositions: null, externalAcademicEvidence: null, archiveScore: 0,
+  });
+  assert.equal(
+    await isHistoricalMatchSnapshotCurrent(client, { reportDeviceKey: deviceKey, reportId }),
+    false,
+    "REQUIRED: even immediately after a fresh, current-version, current-generation NO_HISTORICAL_MATCH write, the ongoing cache-currency check must still say false — this fix must never weaken it",
+  );
+});
+
+test("REQUIRED: findRoomOccupant performs one recomputation and returns similarityStatus='resolved' for that same response when the freshly computed result is a valid no-match, and does not immediately classify it as stale again", async () => {
+  const text = "Glaciologists measuring subglacial meltwater discharge at an isolated outlet glacier recorded a seasonal pulse pattern unlike any previously documented catchment nearby, presentation resolution fixture one.";
+  const { id, deviceKey } = await insertSavedReport({
+    userId: "nomatch-basic-user-1", room: 0, archiveScore: 0, aiStatus: "ready", text, wordCount: 40,
+  });
+
+  await withEnv("CORPUS_SOURCE_MATCHING_ENABLED", "true", async () => {
+    // Write-time finalization equivalent: persists a genuine, freshly
+    // computed NO_HISTORICAL_MATCH — no source was ever promoted for this
+    // text — exactly mirroring the real Room 4 shape (a report whose
+    // similarity finalization already ran and genuinely found nothing).
+    await finalizeAndPersist({ deviceKey, id, userId: "nomatch-basic-user-1", text, wordCount: 40, archiveScore: 0 });
+
+    // Sanity: WITHOUT this fix's own override, the freshly-persisted result
+    // reads as stale — proves this scenario genuinely exercises the gap.
+    assert.equal(await isHistoricalMatchSnapshotCurrent(client, { reportDeviceKey: deviceKey, reportId: id }), false, "test setup sanity: a fresh NO_HISTORICAL_MATCH must not be a cache hit yet");
+
+    const occupant = await findRoomOccupant(client, "nomatch-basic-user-1", 0);
+    assert.equal(occupant.status, "ready", "ai_score=0 (a real, non-null score) — deriveRoomStatus must say ready, matching the real Room 4 shape");
+    assert.equal(occupant.report.similarityStatus, "resolved", "REQUIRED: the request-scoped override must reveal a freshly recomputed, genuine no-match — never left stuck at stale");
+    assert.equal(occupant.report.isUnified, true);
+    assert.equal(occupant.report.primaryScore, 0, "a genuine no-match's own primaryScore is the archive/academic-only contribution — here 0, since neither exists in this fixture");
+  });
+});
+
+test("REQUIRED: a second, independent findRoomOccupant call still genuinely recomputes (never becomes a cache hit) yet still presentation-resolves — 'safe to display now' is never mistaken for 'safe to cache for later'", async () => {
+  const text = "Paleoclimatologists analyzing a sediment core from a remote alpine lake reconstructed a multi-millennial record of dust deposition tied to shifting regional wind patterns, presentation resolution fixture two.";
+  const { id, deviceKey } = await insertSavedReport({
+    userId: "nomatch-repeat-user-1", room: 0, archiveScore: 0, aiStatus: "ready", text, wordCount: 40,
+  });
+
+  await withEnv("CORPUS_SOURCE_MATCHING_ENABLED", "true", async () => {
+    await finalizeAndPersist({ deviceKey, id, userId: "nomatch-repeat-user-1", text, wordCount: 40, archiveScore: 0 });
+
+    const firstOccupant = await findRoomOccupant(client, "nomatch-repeat-user-1", 0);
+    assert.equal(firstOccupant.report.similarityStatus, "resolved");
+    const snapshotAfterFirst = await client.execute({ sql: "SELECT computed_at FROM report_historical_match_snapshots WHERE report_device_key = ? AND report_id = ?", args: [deviceKey, id] });
+    assert.ok(snapshotAfterFirst.rows[0], "test setup sanity");
+
+    assert.equal(await isHistoricalMatchSnapshotCurrent(client, { reportDeviceKey: deviceKey, reportId: id }), false, "REQUIRED: presentation-resolving one response must never make the underlying snapshot a cache hit for the next request — preserves the original concurrent-indexing protection");
+
+    const secondOccupant = await findRoomOccupant(client, "nomatch-repeat-user-1", 0);
+    assert.equal(secondOccupant.report.similarityStatus, "resolved", "REQUIRED: a second, wholly independent request must ALSO presentation-resolve, not merely the first");
+    const snapshotAfterSecond = await client.execute({ sql: "SELECT computed_at FROM report_historical_match_snapshots WHERE report_device_key = ? AND report_id = ?", args: [deviceKey, id] });
+    assert.notEqual(snapshotAfterSecond.rows[0].computed_at, snapshotAfterFirst.rows[0].computed_at, "REQUIRED: the second call must have genuinely recomputed (a real, different computed_at) — never cached, exactly preserving the pre-existing E8E protection");
+  });
+});
+
+test("REQUIRED: a MATCHED (ordinary cacheable) result retains its existing behavior — selfHealUnifiedSimilarity's own presentationResolved stays false, since MATCHED already works through the normal isHistoricalMatchSnapshotCurrent cache path and never needs this one-shot signal", async () => {
+  const text = "Structural engineers retrofitting a century-old masonry bridge documented an unusual load-redistribution pattern following the installation of external post-tensioning cables, presentation resolution fixture three.";
+  await seedActivePromotedSource(text);
+
+  const deviceKey = "device-matched-presentation";
+  const reportId = "report-matched-presentation";
+  await ensureUser("nomatch-matched-user-1");
+  await client.execute({
+    sql: `INSERT INTO saved_reports (id, device_key, submission_id, title, report_created_at, word_count, archive_score, score_band, payload_json, user_id, room_number, ai_status)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+    args: [reportId, deviceKey, "sub-" + reportId, "Fixture", new Date().toISOString(), 40, 0, "Low", JSON.stringify({ version: 11, id: reportId, text, wordCount: 40, archiveScore: 0, score: 0 }), "nomatch-matched-user-1", 1, "ready"],
+  });
+
+  await withEnv("CORPUS_SOURCE_MATCHING_ENABLED", "true", async () => {
+    // No unifiedSimilarity persisted yet (payload_json above has none) —
+    // findRoomOccupant's own "pending" branch triggers self-heal directly,
+    // giving a real MATCHED outcome from selfHealUnifiedSimilarity to check.
+    const healed = await selfHealUnifiedSimilarity(client, { reportDeviceKey: deviceKey, reportId, accountId: "nomatch-matched-user-1" });
+    assert.equal(healed.attempted, true);
+    assert.equal(healed.outcome, "resolved");
+    assert.equal(healed.unifiedSimilarity.unifiedScore, 100, "test setup sanity: a real promoted match must be found");
+    assert.equal(healed.presentationResolved, false, "REQUIRED: a MATCHED outcome must never set presentationResolved — that signal exists only for NO_HISTORICAL_MATCH");
+
+    const occupant = await findRoomOccupant(client, "nomatch-matched-user-1", 1);
+    assert.equal(occupant.report.similarityStatus, "resolved", "sanity: MATCHED still resolves normally, through the ordinary cache-current path, unaffected by this fix");
+    const snapshotAfterFirst = await client.execute({ sql: "SELECT computed_at FROM report_historical_match_snapshots WHERE report_device_key = ? AND report_id = ?", args: [deviceKey, reportId] });
+
+    // A second read must be a genuine cache hit — computed_at unchanged —
+    // the opposite of the NO_HISTORICAL_MATCH case above, proving this fix
+    // changed nothing about MATCHED's existing, already-correct behavior.
+    const secondOccupant = await findRoomOccupant(client, "nomatch-matched-user-1", 1);
+    assert.equal(secondOccupant.report.similarityStatus, "resolved");
+    const snapshotAfterSecond = await client.execute({ sql: "SELECT computed_at FROM report_historical_match_snapshots WHERE report_device_key = ? AND report_id = ?", args: [deviceKey, reportId] });
+    assert.equal(snapshotAfterSecond.rows[0].computed_at, snapshotAfterFirst.rows[0].computed_at, "REQUIRED: unlike NO_HISTORICAL_MATCH, a MATCHED snapshot must remain an ordinary cache hit on the next read — no regression from this fix");
+  });
+});
+
+test("REQUIRED: a corpus-generation bump racing the heal (landing after the recomputation's own write, before the live re-read) prevents presentation resolution", async () => {
+  const text = "Radio astronomers surveying a dense stellar nursery detected an anomalous periodic maser signal whose emission cycle did not match any previously catalogued source in the region, presentation resolution fixture four.";
+  const { id, deviceKey } = await insertSavedReport({
+    userId: "nomatch-race-user-1", room: 0, archiveScore: 0, aiStatus: "ready", text, wordCount: 40,
+  });
+
+  await withEnv("CORPUS_SOURCE_MATCHING_ENABLED", "true", async () => {
+    let bumped = false;
+    const healed = await selfHealUnifiedSimilarity(client, {
+      reportDeviceKey: deviceKey, reportId: id, accountId: "nomatch-race-user-1",
+      testOnlyAfterWriteBeforeGenerationRecheck: async () => {
+        // Reproduces a promotion/deactivation committing on a SEPARATE
+        // connection between this recomputation's own write (already
+        // committed at this point) and the live generation re-read that
+        // decides presentationResolved — mirrors
+        // getOrComputeHistoricalMatchSnapshot's own testOnlyPauseBeforeWrite
+        // precedent (report-historical-match-invalidation.test.mjs).
+        const other = createClient({ url: `file:${dbFile}` });
+        await bumpCorpusMatchGeneration(other);
+        other.close();
+        bumped = true;
+      },
+    });
+    assert.ok(bumped, "test setup sanity: the barrier hook must actually run");
+    assert.equal(healed.attempted, true);
+    assert.equal(healed.outcome, "resolved");
+    assert.equal(healed.presentationResolved, false, "REQUIRED: a generation bump racing the recomputation must prevent presentation resolution, exactly like a plain generation-behind result");
+
+    // The underlying write itself is unaffected by this — only
+    // presentationResolved, a purely in-memory decision, changes.
+    const row = await client.execute({ sql: "SELECT payload_json FROM saved_reports WHERE device_key = ? AND id = ?", args: [deviceKey, id] });
+    const payload = JSON.parse(row.rows[0].payload_json);
+    assert.equal(payload.unifiedSimilarity !== undefined, true, "sanity: the unifiedSimilarity write itself must still have landed");
+  });
+});
+
+test("REQUIRED: one findRoomOccupant() invocation performs at most one historical recomputation — no recursive/non-converging retry within the same read", () => {
+  const source = fs.readFileSync(path.join(repoRoot, "lib", "reports-repo.ts"), "utf8");
+  const selfHealCallCount = (source.match(/selfHealUnifiedSimilarity\(/g) || []).length;
+  assert.equal(selfHealCallCount, 1, "REQUIRED: findRoomOccupant must call selfHealUnifiedSimilarity exactly once per read — no loop, no recursive retry chasing convergence");
+  assert.doesNotMatch(source, /while\s*\(/, "REQUIRED: no while-loop retry construct around the self-heal/re-read sequence");
+  assert.doesNotMatch(source, /for\s*\(.*selfHeal/, "REQUIRED: no for-loop retry construct around the self-heal call");
 });

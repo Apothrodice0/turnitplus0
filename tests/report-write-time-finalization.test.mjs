@@ -11,7 +11,7 @@ import * as signupRoute from '../app/api/auth/signup/route.ts';
 import { resetRateForTest, resetAuthRateForTest, resetReadRateForTest } from '../lib/rate-limit.ts';
 import { canonicalSha256 } from '../lib/document-identity.ts';
 import { runCorpusAdmissionPromotionSweep } from '../lib/corpus-admission-promotion.ts';
-import { getCurrentCorpusMatchGeneration } from '../lib/report-historical-match.ts';
+import { getCurrentCorpusMatchGeneration, isHistoricalMatchSnapshotCurrent } from '../lib/report-historical-match.ts';
 import { indexDocumentSubmissionIntoCorpus } from '../lib/user-submission-corpus.ts';
 import { findRoomOccupant, findReportRowForUser } from '../lib/reports-repo.ts';
 import { deriveRoomStatus } from '../lib/report-rooms.ts';
@@ -1859,4 +1859,52 @@ test('LEGACY ROOM BUG: an explicit new upload to a room whose prior (legacy) occ
 
   const legacyRowStillExists = await client.execute({ sql: 'SELECT id FROM saved_reports WHERE device_key = ? AND id = ?', args: [account.deviceKey, legacyId] });
   assert.equal(legacyRowStillExists.rows.length, 1, 'REQUIRED: the previous saved report/history must not be accidentally deleted by a new upload to the same room');
+});
+
+const NO_HISTORICAL_MATCH_FIX_TEXT =
+  'Cryptozoologists debunking a purported new amphibian sighting instead identified an unusual pigment variation in a well-documented salamander population, ' +
+  'concluding the specimen was misidentified rather than representing any previously unrecorded species in the surveyed watershed.';
+
+test('REQUIRED (real Room 4 reproduction): a genuinely unmatched submission — real POST route, ai_score=0/ai_status="ready" exactly like the confirmed stuck row — becomes fully revealable through the real findRoomOccupant + isFullyRevealed path, never stuck on "Analysis is taking longer than usual"', async () => {
+  const account = await signUpConsentingAccount();
+  const id = 'nomatch-fix-real-room4-report';
+  // No corpus source is ever promoted for this text — a genuine,
+  // non-manufactured NO_HISTORICAL_MATCH, exactly like a real document with
+  // no prior submission anywhere in the corpus.
+  const res = await postReport(account, { id, room: 3, aiStatus: 'ready', aiScore: 0, text: NO_HISTORICAL_MATCH_FIX_TEXT, wordCount: 45 });
+  assert.equal(res.status, 200, 'test setup sanity: the real POST route must accept this submission');
+
+  // Confirms this reproduces the real confirmed row shape from the live
+  // incident: ai_score=0 (not null — a real, non-null score), ai_status='ready'.
+  const rawRow = await client.execute({ sql: 'SELECT ai_score, ai_status FROM saved_reports WHERE device_key = ? AND id = ?', args: [account.deviceKey, id] });
+  assert.equal(Number(rawRow.rows[0].ai_score), 0);
+  assert.equal(rawRow.rows[0].ai_status, 'ready');
+
+  // Sanity: write-time finalization already persisted a real, current-at-
+  // that-moment NO_HISTORICAL_MATCH, but the snapshot is never a cache hit
+  // — proves the room read below genuinely exercises the self-heal +
+  // request-scoped override path, not an unrelated already-resolved state.
+  assert.equal(await isHistoricalMatchSnapshotCurrent(client, { reportDeviceKey: account.deviceKey, reportId: id }), false);
+
+  const occupant = await findRoomOccupant(client, account.userId, 3);
+  assert.equal(occupant.status, 'ready', 'REQUIRED: matches the real confirmed row — deriveRoomStatus(0, "ready") must be "ready", not "processing"');
+  assert.equal(occupant.report.similarityStatus, 'resolved', 'REQUIRED: the non-converging NO_HISTORICAL_MATCH fix must reveal this response, not leave it stuck at "stale" forever');
+  assert.equal(isFullyRevealedReal(occupant), true, 'REQUIRED: reproduces the exact reported fix for the real Room 4 shape — the room must stop polling and reveal, never show "Analysis is taking longer than usual" for a genuinely terminal, correctly-no-match report');
+});
+
+test('REQUIRED: after the real Room 4 shape presentation-resolves once, a later independent room read still recomputes (the underlying snapshot never becomes a real cache hit) yet still reveals — preserving the original concurrent-indexing protection this fix must not weaken', async () => {
+  const account = await signUpConsentingAccount();
+  const id = 'nomatch-fix-real-room4-repeat-report';
+  const text = 'Ornithologists tracking a migratory songbird population via geolocator tags documented an unexpected stopover site never previously associated with this species\' known flyway.';
+  const res = await postReport(account, { id, room: 3, aiStatus: 'ready', aiScore: 0, text, wordCount: 45 });
+  assert.equal(res.status, 200);
+
+  const firstOccupant = await findRoomOccupant(client, account.userId, 3);
+  assert.equal(isFullyRevealedReal(firstOccupant), true, 'test setup sanity: first read must already reveal');
+  const firstSnapshot = await snapshotRow(account.deviceKey, id);
+
+  const secondOccupant = await findRoomOccupant(client, account.userId, 3);
+  assert.equal(isFullyRevealedReal(secondOccupant), true, 'REQUIRED: a second, independent read must ALSO reveal — not a one-time fluke');
+  const secondSnapshot = await snapshotRow(account.deviceKey, id);
+  assert.notEqual(secondSnapshot.computed_at, firstSnapshot.computed_at, 'REQUIRED: the second read must have genuinely recomputed — the fix never persists a fake "current" flag to skip future recomputation, so a same-moment concurrent upload elsewhere would still never be permanently hidden from this report');
 });

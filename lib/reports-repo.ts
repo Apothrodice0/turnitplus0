@@ -230,6 +230,28 @@ export async function findRoomOccupant(client: Client, userId: string, room: num
     // verdict `display` already held - eligible for another attempt on the
     // next room read, never a fabricated resolved/failed state.
     display = await readDisplay();
+
+    // Non-converging NO_HISTORICAL_MATCH fix: a genuinely correct "no
+    // historical match" verdict can never satisfy isHistoricalMatchSnapshotCurrent
+    // (lib/report-historical-match.ts's own isSnapshotRowCurrent
+    // permanently excludes NO_HISTORICAL_MATCH from being a cache hit, on
+    // purpose — see that file's Phase E8E fix comment), so the re-read
+    // above will report "stale" again even immediately after a successful
+    // recomputation that correctly found no match. Without this, such a
+    // report can never become presentable and polls forever. healed.presentationResolved
+    // (see SelfHealResult's own comment) is the request-scoped-only signal
+    // that THIS call's own recomputation is a fresh, current,
+    // non-partial, version-current NO_HISTORICAL_MATCH whose write actually
+    // landed — safe to show in THIS response only. This never touches
+    // the underlying report_historical_match_snapshots row (already
+    // written, unconditionally recomputed next time regardless of this
+    // override) and never persists anything — `display` here is a
+    // purely local, in-memory variable scoped to this one findRoomOccupant
+    // call, so the very next independent call re-reads the same
+    // still-non-cacheable row and recomputes again, exactly as before.
+    if (display.status === "stale" && healed.attempted && healed.outcome === "resolved" && healed.presentationResolved) {
+      display = { status: "resolved", primaryScore: unifiedScore ?? archiveScore, isUnified: true };
+    }
   }
 
   // display.primaryScore/isUnified do not exist outside the "resolved"

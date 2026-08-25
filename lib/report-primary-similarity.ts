@@ -1,6 +1,8 @@
 import type { Client } from "@libsql/client";
 import { getOrComputeHistoricalMatchSnapshot, getCurrentCorpusMatchGeneration, isHistoricalMatchSnapshotCurrent } from "./report-historical-match";
 import { isCorpusSourceMatchingEnabled } from "./corpus-source-matching-flag";
+import { USER_SUBMISSION_MATCHER_VERSION } from "./user-submission-matching";
+import { CORPUS_FINGERPRINT_VERSION, CANONICALIZATION_VERSION } from "./user-submission-corpus";
 import { computeUnifiedSimilarity, type UnifiedSimilarityResult } from "./unified-similarity";
 import type { ReportHistoricalSubmissionMatch, SimilarityReport } from "./report-types";
 import type { ExternalAcademicEvidence } from "./academic-search/types";
@@ -287,8 +289,74 @@ export async function resolvePersistedSimilarityDisplay(
   return { status: "resolved", primaryScore: params.unifiedScore ?? params.archiveScore, isUnified: true };
 }
 
+/**
+ * Non-converging NO_HISTORICAL_MATCH fix — the "shape" half of
+ * presentationResolved (see SelfHealResult's own comment for the other
+ * half, the write-landed check). A pure, directly-testable predicate,
+ * deliberately NOT folded into lib/report-historical-match.ts's own
+ * isSnapshotRowCurrent (that one must stay unchanged — see this file's own
+ * header comment on why NO_HISTORICAL_MATCH must remain permanently
+ * excluded from being a cache hit, across requests, forever).
+ *
+ * status === "NO_HISTORICAL_MATCH" here is, by itself, structural proof
+ * that THIS EXACT resolvePrimarySimilaritySummary call's own
+ * getOrComputeHistoricalMatchSnapshot invocation just freshly recomputed
+ * and wrote a snapshot row — never a cache hit: isSnapshotRowCurrent's own
+ * cache-hit branch requires `row.status !== "NO_HISTORICAL_MATCH"`, so a
+ * cache hit could never produce this status. No separate "was this fresh"
+ * signal is needed from that module.
+ *
+ * Still explicitly re-checks version tags, partial, and generation (rather
+ * than trusting that a fresh write always has them right) so this predicate
+ * is honest and independently testable on its own terms — matching the
+ * task's own required regression coverage for "version-mismatched" /
+ * "partial" / "generation-behind" NO_HISTORICAL_MATCH results, even though
+ * the real call graph today cannot produce those combinations for a result
+ * that also has status NO_HISTORICAL_MATCH.
+ */
+export function isFreshCurrentNoHistoricalMatch(
+  match: ReportHistoricalSubmissionMatch,
+  generationAtComputation: number,
+  liveGenerationAfterWrite: number,
+): boolean {
+  return (
+    match.status === "NO_HISTORICAL_MATCH" &&
+    match.matcherVersion === USER_SUBMISSION_MATCHER_VERSION &&
+    match.fingerprintVersion === CORPUS_FINGERPRINT_VERSION &&
+    match.canonicalizationVersion === CANONICALIZATION_VERSION &&
+    match.partial !== true &&
+    generationAtComputation >= liveGenerationAfterWrite
+  );
+}
+
 export type SelfHealResult =
-  | { attempted: true; outcome: "resolved"; unifiedSimilarity: UnifiedSimilarityResult; corpusSourceMatchingEnabled: boolean }
+  | {
+    attempted: true; outcome: "resolved"; unifiedSimilarity: UnifiedSimilarityResult; corpusSourceMatchingEnabled: boolean;
+    /**
+     * Non-converging NO_HISTORICAL_MATCH fix: true only when BOTH —
+     * isFreshCurrentNoHistoricalMatch (above) confirms this call's own
+     * historical-match recomputation is a genuine, current, non-partial,
+     * version-current NO_HISTORICAL_MATCH, checked against a live
+     * corpus-generation re-read taken right after that recomputation's own
+     * write (catches a generation bump racing the recomputation itself) —
+     * AND the unifiedSimilarity write just below actually landed
+     * (rowsAffected > 0 — a concurrent write with a higher
+     * unifiedSimilarityGeneration could otherwise have silently out-raced
+     * this one's own generation-guarded UPDATE).
+     *
+     * Deliberately NOT a signal that the underlying snapshot is now
+     * cacheable — isSnapshotRowCurrent (lib/report-historical-match.ts,
+     * unchanged) still permanently excludes NO_HISTORICAL_MATCH from being a
+     * cache hit, on purpose (Phase E8E fix: a same-moment concurrent
+     * upload's later-finished indexing must never be permanently hidden). A
+     * caller (lib/reports-repo.ts's findRoomOccupant) may use this to treat
+     * ITS OWN current response as presentation-resolved, but must never
+     * persist that conclusion or use it to skip any future call's own
+     * recomputation. "Safe to display now" is not "safe to cache for
+     * later."
+     */
+    presentationResolved: boolean;
+  }
   | { attempted: true; outcome: "failed" }
   | { attempted: false };
 
@@ -363,7 +431,22 @@ export type SelfHealResult =
  */
 export async function selfHealUnifiedSimilarity(
   client: Client,
-  params: { reportDeviceKey: string; reportId: string; accountId: string | null },
+  params: {
+    reportDeviceKey: string; reportId: string; accountId: string | null;
+    /**
+     * Test-only barrier hook, mirroring getOrComputeHistoricalMatchSnapshot's
+     * own testOnlyPauseBeforeWrite convention — awaited immediately after
+     * the unifiedSimilarity write below has already committed, before the
+     * live corpus-generation re-read that decides presentationResolved.
+     * Lets a test reproduce a generation bump racing this exact
+     * recomputation (started before the bump, wrote before the bump landed,
+     * but the live re-read below must still see it) and prove
+     * presentationResolved correctly comes back false rather than trusting
+     * the now-stale resolution.corpusGeneration. Always undefined in
+     * production.
+     */
+    testOnlyAfterWriteBeforeGenerationRecheck?: () => Promise<void>;
+  },
 ): Promise<SelfHealResult> {
   try {
     const row = await client.execute({
@@ -393,13 +476,34 @@ export async function selfHealUnifiedSimilarity(
         unifiedSimilarityGeneration: resolution.corpusGeneration,
         unifiedSimilarityFailed: false,
       };
-      await client.execute({
+      const updateResult = await client.execute({
         sql: `UPDATE saved_reports SET payload_json = ?
               WHERE device_key = ? AND id = ?
                 AND COALESCE(json_extract(payload_json, '$.unifiedSimilarityGeneration'), -1) <= ?`,
         args: [JSON.stringify(persistedPayload), params.reportDeviceKey, params.reportId, resolution.corpusGeneration],
       });
-      return { attempted: true, outcome: "resolved", unifiedSimilarity: resolution.unifiedSimilarity, corpusSourceMatchingEnabled: resolution.corpusSourceMatchingEnabled };
+      const writeLanded = Number(updateResult.rowsAffected) > 0;
+      // Fresh, live re-read taken AFTER the write above has committed —
+      // never resolution.corpusGeneration itself, which is what got
+      // STAMPED onto the snapshot row (read before the recomputation ran).
+      // Comparing the two is what catches a generation bump racing this
+      // exact recomputation — see isFreshCurrentNoHistoricalMatch's own
+      // comment. Only paid for when it can possibly matter (write landed);
+      // still only ever one extra cheap indexed read, never a second
+      // recomputation.
+      let presentationResolved = false;
+      if (writeLanded) {
+        if (params.testOnlyAfterWriteBeforeGenerationRecheck) await params.testOnlyAfterWriteBeforeGenerationRecheck();
+        const generationAfterWrite = await getCurrentCorpusMatchGeneration(client);
+        presentationResolved = isFreshCurrentNoHistoricalMatch(resolution.historicalSubmissionMatch, resolution.corpusGeneration, generationAfterWrite);
+      }
+      return {
+        attempted: true,
+        outcome: "resolved",
+        unifiedSimilarity: resolution.unifiedSimilarity,
+        corpusSourceMatchingEnabled: resolution.corpusSourceMatchingEnabled,
+        presentationResolved,
+      };
     }
     if (resolution.failed) {
       const persistedPayload = {
