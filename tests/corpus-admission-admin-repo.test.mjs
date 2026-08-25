@@ -173,6 +173,51 @@ test("getCorpusAdmissionDecisionDetail returns null for a nonexistent or malform
   assert.equal(await getCorpusAdmissionDecisionDetail(client, "decision:"), null);
 });
 
+// --- list: acceptedRepresentationId/acceptedRepresentationActive ----------
+// Drives the admin dashboard's Remove ("active") vs Removed ("deactivated")
+// affordance beside Inspect — see components/admin/corpus-search.tsx.
+
+test("listCorpusAdmissionDecisions: acceptedRepresentationActive is true for an active fingerprint, false once deactivated, and null when no fingerprint exists at all", async () => {
+  const accountId = await ensureUser();
+  const marker = randomUUID();
+
+  const acceptSourceRef = `remove-ui-active-${marker}`;
+  const acceptDecisionId = await insertDecision({ sourceRef: acceptSourceRef, decision: "ACCEPT" });
+  await insertJob({ sourceRef: acceptSourceRef, accountId, status: "succeeded", decisionId: acceptDecisionId });
+  const acceptedRepresentationId = await insertAcceptedRepresentation(acceptDecisionId, randomUUID());
+
+  const rejectSourceRef = `remove-ui-reject-${marker}`;
+  const rejectDecisionId = await insertDecision({ sourceRef: rejectSourceRef, decision: "REJECT" });
+  await insertJob({ sourceRef: rejectSourceRef, accountId, status: "succeeded", decisionId: rejectDecisionId });
+
+  const pendingJobId = await insertJob({ sourceRef: `remove-ui-pending-${marker}`, accountId, status: "pending" });
+
+  const beforeDeactivate = await listCorpusAdmissionDecisions(client, { q: marker });
+  const rowsById = Object.fromEntries(beforeDeactivate.rows.map((r) => [r.rowId, r]));
+
+  const activeRow = rowsById[`decision:${acceptDecisionId}`];
+  assert.equal(activeRow.acceptedRepresentationId, acceptedRepresentationId);
+  assert.equal(activeRow.acceptedRepresentationActive, true);
+
+  const rejectedRow = rowsById[`decision:${rejectDecisionId}`];
+  assert.equal(rejectedRow.acceptedRepresentationId, null);
+  assert.equal(rejectedRow.acceptedRepresentationActive, null);
+
+  const pendingRow = rowsById[`job:${pendingJobId}`];
+  assert.equal(pendingRow.acceptedRepresentationId, null);
+  assert.equal(pendingRow.acceptedRepresentationActive, null);
+
+  await client.execute({
+    sql: "UPDATE corpus_admission_accepted_representations SET revoked_at = CURRENT_TIMESTAMP WHERE id = ?",
+    args: [acceptedRepresentationId],
+  });
+
+  const afterDeactivate = await listCorpusAdmissionDecisions(client, { q: marker });
+  const deactivatedRow = afterDeactivate.rows.find((r) => r.rowId === `decision:${acceptDecisionId}`);
+  assert.equal(deactivatedRow.acceptedRepresentationId, acceptedRepresentationId, "the row must remain in the list, still carrying its (now inactive) fingerprint id");
+  assert.equal(deactivatedRow.acceptedRepresentationActive, false);
+});
+
 // --- list: filtering, search, pagination, max page size -------------------
 
 test("listCorpusAdmissionDecisions: status filter returns only matching rows", async () => {

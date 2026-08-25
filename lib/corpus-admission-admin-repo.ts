@@ -43,6 +43,10 @@ export type CorpusAdmissionAdminListRow = {
   updatedAt: string;
   /** null when this decision was never ACCEPTed (or has no job/decision at all) — promotion never applies. See lib/corpus-admission-promotion.ts. */
   promotionStatus: "staged" | "indexed" | "failed" | "skipped" | null;
+  /** null when this decision has no accepted fingerprint at all (never ACCEPTed, or ACCEPTed with no corpus_admission_accepted_representations row). Drives the admin dashboard's Remove/Removed affordance — see lib/corpus-admission-admin-actions.ts's deactivateAcceptedRepresentation. */
+  acceptedRepresentationId: string | null;
+  /** true = participates in "first accepted sample wins" matching; false = deactivated (revoked_at set); null when acceptedRepresentationId is null. */
+  acceptedRepresentationActive: boolean | null;
 };
 
 type RawCombinedRow = {
@@ -59,6 +63,8 @@ type RawCombinedRow = {
   created_at: string;
   updated_at: string;
   promotion_status: string | null;
+  accepted_representation_id: string | null;
+  accepted_representation_revoked_at: string | null;
 };
 
 function deriveStatus(decision: string | null, jobStatus: string | null): CorpusAdmissionAdminStatus {
@@ -89,6 +95,8 @@ function toListRow(row: RawCombinedRow): CorpusAdmissionAdminListRow {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     promotionStatus: row.promotion_status as CorpusAdmissionAdminListRow["promotionStatus"],
+    acceptedRepresentationId: row.accepted_representation_id,
+    acceptedRepresentationActive: row.accepted_representation_id === null ? null : row.accepted_representation_revoked_at === null,
   };
 }
 
@@ -97,7 +105,12 @@ function toListRow(row: RawCombinedRow): CorpusAdmissionAdminListRow {
 // deleted), then job-only rows that never reached a decision at all.
 // promotion_status is read-only, admin-dashboard-only visibility into
 // lib/corpus-admission-promotion.ts's own table — never joined by anything
-// outside this admin surface.
+// outside this admin surface. accepted_representation_id/_revoked_at are the
+// same read-only visibility into corpus_admission_accepted_representations
+// (unique on decision_id — see drizzle/0030 — so this LEFT JOIN can never
+// fan out a decision into more than one row) that drives the admin
+// dashboard's own Remove/Removed affordance; deactivateAcceptedRepresentation
+// remains the only thing that ever writes revoked_at.
 const COMBINED_CTE = `
   WITH combined AS (
     SELECT
@@ -105,17 +118,20 @@ const COMBINED_CTE = `
       d.detected_language, d.extracted_word_count, d.quality_score,
       j.account_id, j.attempt_count, j.last_error,
       d.created_at AS created_at, COALESCE(j.updated_at, d.created_at) AS updated_at,
-      p.status AS promotion_status
+      p.status AS promotion_status,
+      ar.id AS accepted_representation_id, ar.revoked_at AS accepted_representation_revoked_at
     FROM corpus_admission_decisions d
     LEFT JOIN corpus_admission_report_jobs j ON j.decision_id = d.id
     LEFT JOIN corpus_admission_promotions p ON p.decision_id = d.id
+    LEFT JOIN corpus_admission_accepted_representations ar ON ar.decision_id = d.id
     UNION ALL
     SELECT
       NULL, j.id, NULL, j.status,
       NULL, NULL, NULL,
       j.account_id, j.attempt_count, j.last_error,
       j.created_at, j.updated_at,
-      NULL
+      NULL,
+      NULL, NULL
     FROM corpus_admission_report_jobs j
     WHERE j.decision_id IS NULL
   )

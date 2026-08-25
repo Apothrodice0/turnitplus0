@@ -16,11 +16,24 @@ type ListRow = {
   createdAt: string;
   updatedAt: string;
   promotionStatus: "staged" | "indexed" | "failed" | "skipped" | null;
+  /** null = never ACCEPTed (or ACCEPTed with no fingerprint at all) — no Remove/Removed affordance for this row. */
+  acceptedRepresentationId: string | null;
+  /** true = active (show Remove); false = already deactivated (show Removed); null when acceptedRepresentationId is null. */
+  acceptedRepresentationActive: boolean | null;
 };
 
 type ListResponse = { rows: ListRow[]; page: number; pageSize: number; totalCount: number };
 
 const STATUS_OPTIONS = ["", "pending", "failed", "cancelled", "accepted", "review", "rejected"] as const;
+
+// 400/404/429 are the deactivate route's own pre-defined, non-internal
+// messages (reason validation, "no accepted fingerprint", rate limit) — safe
+// to show verbatim. Anything else (500, network failure, CSRF 404 with no
+// body) falls back to this fixed message so a raw error/DB internal can
+// never reach the admin's screen — see lib/admin-http.ts's adminJsonResponse
+// for what a 500 body can otherwise contain (err.message, unsanitized).
+const REMOVE_SAFE_ERROR_STATUSES = new Set([400, 404, 429]);
+const REMOVE_GENERIC_ERROR = "Could not remove this item from the corpus. Please try again.";
 
 /** Client-side list/search/filter/pagination for /admin/corpus — hits GET /api/admin/corpus, itself independently gated by getAdminSessionUser. Renders no data of its own on first paint; every result comes from that authorized fetch. */
 export function AdminCorpusSearch() {
@@ -31,6 +44,16 @@ export function AdminCorpusSearch() {
   const [result, setResult] = useState<ListResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Bumped after a successful Remove to force the SAME fetch effect below to
+  // re-run against the current filters/page — the one and only list-loading
+  // path, never a second, parallel fetch of its own.
+  const [reloadToken, setReloadToken] = useState(0);
+
+  const [removeDialogRowId, setRemoveDialogRowId] = useState<string | null>(null);
+  const [removeReason, setRemoveReason] = useState("");
+  const [removeLoading, setRemoveLoading] = useState(false);
+  const [removeError, setRemoveError] = useState<string | null>(null);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -60,7 +83,51 @@ export function AdminCorpusSearch() {
     return () => {
       cancelled = true;
     };
-  }, [status, language, q, page]);
+  }, [status, language, q, page, reloadToken]);
+
+  function openRemoveDialog(rowId: string) {
+    setRemoveDialogRowId(rowId);
+    setRemoveReason("");
+    setRemoveError(null);
+    setSuccessMessage(null);
+  }
+
+  function closeRemoveDialog() {
+    if (removeLoading) return;
+    setRemoveDialogRowId(null);
+    setRemoveReason("");
+    setRemoveError(null);
+  }
+
+  // Calls the EXISTING admin deactivate action/endpoint
+  // (lib/corpus-admission-admin-actions.ts's deactivateAcceptedRepresentation,
+  // via app/api/admin/corpus/[id]/deactivate/route.ts) — the same one
+  // components/admin/corpus-detail.tsx already uses. No new route, no new
+  // revocation/snapshot-invalidation/generation-bump/audit logic here.
+  async function confirmRemove() {
+    if (!removeDialogRowId) return;
+    setRemoveLoading(true);
+    setRemoveError(null);
+    try {
+      const response = await fetch(`/api/admin/corpus/${encodeURIComponent(removeDialogRowId)}/deactivate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: removeReason }),
+      });
+      const body = (await response.json().catch(() => null)) as { error?: string; outcome?: string } | null;
+      if (!response.ok) {
+        throw new Error(REMOVE_SAFE_ERROR_STATUSES.has(response.status) && body?.error ? body.error : REMOVE_GENERIC_ERROR);
+      }
+      setRemoveDialogRowId(null);
+      setRemoveReason("");
+      setSuccessMessage(body?.outcome === "already_inactive" ? "Already removed from corpus." : "Removed from corpus.");
+      setReloadToken((token) => token + 1);
+    } catch (err) {
+      setRemoveError(err instanceof Error ? err.message : REMOVE_GENERIC_ERROR);
+    } finally {
+      setRemoveLoading(false);
+    }
+  }
 
   const totalPages = result ? Math.max(1, Math.ceil(result.totalCount / result.pageSize)) : 1;
 
@@ -84,6 +151,7 @@ export function AdminCorpusSearch() {
 
       {error && <p role="alert">{error}</p>}
       {loading && <p>Loading…</p>}
+      {successMessage && <p role="status">{successMessage}</p>}
 
       {result && (
         <>
@@ -116,6 +184,19 @@ export function AdminCorpusSearch() {
                     <td>{row.promotionStatus ?? "—"}</td>
                     <td>
                       <Link href={`/admin/corpus/${encodeURIComponent(row.rowId)}`}>Inspect</Link>
+                      {row.acceptedRepresentationId && (
+                        row.acceptedRepresentationActive ? (
+                          <>
+                            {" "}
+                            <button type="button" onClick={() => openRemoveDialog(row.rowId)}>Remove</button>
+                          </>
+                        ) : (
+                          <>
+                            {" "}
+                            <span>Removed</span>
+                          </>
+                        )
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -134,6 +215,33 @@ export function AdminCorpusSearch() {
             <button type="button" disabled={page >= totalPages} onClick={() => setPage((p) => p + 1)}>Next</button>
           </div>
         </>
+      )}
+
+      {removeDialogRowId && (
+        <div role="dialog" aria-modal="true" aria-labelledby="admin-corpus-remove-dialog-title">
+          <h2 id="admin-corpus-remove-dialog-title">Remove this item from the TurnitPlus corpus?</h2>
+          <p>
+            It will stop participating through this corpus entry. Existing reports, receipts, users and submission
+            history will not be deleted. If the same content is still backed by another valid corpus source, it may
+            remain matchable.
+          </p>
+          <label>
+            Reason (required):{" "}
+            <textarea
+              value={removeReason}
+              onChange={(event) => setRemoveReason(event.target.value)}
+              placeholder="Short justification"
+              disabled={removeLoading}
+            />
+          </label>
+          {removeError && <p role="alert">{removeError}</p>}
+          <div>
+            <button type="button" onClick={closeRemoveDialog} disabled={removeLoading}>Cancel</button>
+            <button type="button" onClick={confirmRemove} disabled={removeLoading || removeReason.trim().length === 0}>
+              Remove from corpus
+            </button>
+          </div>
+        </div>
       )}
     </div>
   );
