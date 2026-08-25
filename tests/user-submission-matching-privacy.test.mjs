@@ -7,7 +7,6 @@ import { applyMigrationsLibsql } from "../lib/ingest.js";
 import { createDocumentIdentity } from "../lib/document-identity.ts";
 import { indexDocumentSubmissionIntoCorpus } from "../lib/user-submission-corpus.ts";
 import { matchAgainstUserSubmissionCorpus } from "../lib/user-submission-matching.ts";
-import { buildReportAdmissionSourceRef } from "../lib/corpus-admission-report-integration.ts";
 
 const repoRoot = path.resolve(".");
 const drizzleDir = path.join(repoRoot, "drizzle");
@@ -158,30 +157,23 @@ test("A/D: Account A cannot discover Account B's identity through a matching res
   assert.ok(!serialized.toLowerCase().includes("account"));
 });
 
-test("SELF-MATCH-FIX PRIVACY: excludeSourceReport (a server-internal value embedding a real account id, device key, and report id) never appears anywhere in matchAgainstUserSubmissionCorpus's own result, matched or not", async () => {
+test("SELF-MATCH-FIX PRIVACY: excludeAccountId (a server-internal value carrying a real account id) never appears anywhere in matchAgainstUserSubmissionCorpus's own result, matched or not", async () => {
   const accountA = "privacy-exclude-account-a";
   const accountB = "privacy-exclude-account-b";
   const text = topicADoc("privacy-exclude-marker");
   await indexSubmission(accountA, "Doc", text, "exclude-a@example.test");
 
-  // A secret-shaped exclusion value — real accountId/deviceKey/reportId
-  // strings, the exact canonical format processReportAdmissionJob itself
-  // builds — passed exactly as a real caller (resolvePrimarySimilaritySummary)
-  // would, but with deliberately identifiable secrets embedded so a leak
-  // would be unmistakable.
+  // A secret-shaped exclusion value — the exact accountId string a real
+  // caller (resolvePrimarySimilaritySummary) would pass — with a
+  // deliberately identifiable secret so a leak would be unmistakable.
   const secretAccountId = "super-secret-account-id-should-never-leak";
-  const secretDeviceKey = "super-secret-device-key-should-never-leak";
-  const secretReportId = "super-secret-report-id-should-never-leak";
-  const excludeSourceReport = buildReportAdmissionSourceRef({ accountId: secretAccountId, deviceKey: secretDeviceKey, reportId: secretReportId });
+  const excludeAccountId = secretAccountId;
 
-  const result = await matchAgainstUserSubmissionCorpus(client, { accountId: accountB, canonicalText: text, excludeSourceReport });
-  assert.equal(result.status, "MATCHED", "test setup sanity: excluding an UNRELATED source_ref must not suppress a genuine match");
+  const result = await matchAgainstUserSubmissionCorpus(client, { accountId: accountB, canonicalText: text, excludeAccountId });
+  assert.equal(result.status, "MATCHED", "test setup sanity: excluding an UNRELATED account id must not suppress a genuine match");
 
   const serialized = JSON.stringify(result);
   assert.ok(!serialized.includes(secretAccountId), "the exclusion context's own account id must never appear in the result");
-  assert.ok(!serialized.includes(secretDeviceKey), "the exclusion context's own device key must never appear in the result");
-  assert.ok(!serialized.includes(secretReportId), "the exclusion context's own report id must never appear in the result");
-  assert.ok(!serialized.includes(excludeSourceReport), "the raw source_ref string itself must never appear in the result");
   assert.ok(!serialized.includes("report-upload:"), "no source_ref-shaped string of any kind may appear in the result");
 });
 

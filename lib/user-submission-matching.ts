@@ -313,21 +313,22 @@ export async function matchAgainstUserSubmissionCorpus(
     canonicalText: string;
     config?: Partial<UserSubmissionMatchConfig>;
     /**
-     * Self-match fix: the exact canonical source_ref (buildReportAdmissionSourceRef,
-     * lib/corpus-admission-report-integration.ts) of the report currently
-     * being evaluated, when it has one — i.e. an authenticated report whose
-     * own admission could, in principle, have already promoted a
-     * representation of its own content. Threaded through to
-     * findCandidateCorpusRepresentations and the exact-hash fallback below
-     * so a representation backed ONLY by this exact report's own admission
-     * is never offered as a candidate against itself, while remaining
-     * fully matchable against every other report. Server-internal only —
-     * never returned in any match result, never derived from anything this
-     * function itself looks up. Optional and undefined for every existing
-     * caller that does not pass it, which reproduces the prior, unexcluded
+     * Account-level own-submission exclusion fix: the account id of the
+     * report currently being evaluated, when it has one — i.e. an
+     * authenticated report whose own account could, in principle, have
+     * already promoted a representation of its own content, through this
+     * exact report or any OTHER prior report from the same account.
+     * Threaded through to findCandidateCorpusRepresentations and the
+     * exact-hash fallback below so a representation backed only by this
+     * account's own admission(s) is never offered as a candidate against a
+     * report from that same account, while remaining fully matchable
+     * against every other account. Server-internal only — never returned
+     * in any match result, never derived from anything this function
+     * itself looks up. Optional and undefined for every existing caller
+     * that does not pass it, which reproduces the prior, unexcluded
      * behavior exactly.
      */
-    excludeSourceReport?: string;
+    excludeAccountId?: string;
   },
 ): Promise<UserSubmissionMatchResult> {
   const config = mergeConfig(params.config);
@@ -346,7 +347,7 @@ export async function matchAgainstUserSubmissionCorpus(
         fingerprintVersion: config.fingerprintVersion,
         minSharedShingles: config.candidateShingleThreshold,
         limit: config.maxCandidates,
-        excludeSourceReport: params.excludeSourceReport,
+        excludeAccountId: params.excludeAccountId,
       }),
       config.dbQueryTimeoutMs,
       "findCandidateCorpusRepresentations",
@@ -374,7 +375,7 @@ export async function matchAgainstUserSubmissionCorpus(
     const exactHash = canonicalSha256(params.canonicalText);
     const exactRepresentation = await findReusableRepresentationByCanonicalHash(client, exactHash);
     if (exactRepresentation && !candidateById.has(exactRepresentation.id)) {
-      // Self-match fix: findReusableRepresentationByCanonicalHash is a
+      // Own-submission exclusion fix: findReusableRepresentationByCanonicalHash is a
       // plain hash lookup with no eligibility awareness of its own (it is
       // also used by lib/corpus-admission-promotion.ts's own find-or-create
       // dedup logic, where eligibility is irrelevant) — this fallback must
@@ -382,9 +383,9 @@ export async function matchAgainstUserSubmissionCorpus(
       // own WHERE clause already enforces for its shingle-based candidates.
       // A byte-identical self-upload of a just-promoted document is exactly
       // an exact-hash match, so leaving this fallback ungated would make
-      // excludeSourceReport above a no-op for the precise scenario it
-      // exists to close.
-      const eligible = await isRepresentationEligibleForMatching(client, exactRepresentation.id, { excludeSourceReport: params.excludeSourceReport });
+      // excludeAccountId above a no-op for the precise scenario it exists
+      // to close.
+      const eligible = await isRepresentationEligibleForMatching(client, exactRepresentation.id, { excludeAccountId: params.excludeAccountId });
       if (eligible) {
         candidateById.set(exactRepresentation.id, {
           representationId: exactRepresentation.id,

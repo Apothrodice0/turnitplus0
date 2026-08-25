@@ -302,16 +302,15 @@ export async function getOrComputeHistoricalMatchSnapshot(
      */
     testOnlyPauseBeforeWrite?: () => Promise<void>;
     /**
-     * Self-match fix: the exact canonical source_ref of the report
-     * currently being evaluated (buildReportAdmissionSourceRef, lib/corpus-
-     * admission-report-integration.ts), passed straight through to
+     * Account-level own-submission exclusion fix: the account id of the
+     * report currently being evaluated, passed straight through to
      * matchAgainstUserSubmissionCorpus — see that function's own comment.
      * Optional; omitted by every caller that doesn't have one (an anonymous
      * report can never itself be an admission's source_ref, since admission
      * jobs are only ever created for authenticated, consenting accounts —
      * see lib/corpus-admission-report-integration.ts's createPendingReportAdmissionJob).
      */
-    excludeSourceReport?: string;
+    excludeAccountId?: string;
   },
 ): Promise<ReportHistoricalSubmissionMatch> {
   // Read fresh, before the cache-hit decision — see this file's own header
@@ -366,7 +365,7 @@ export async function getOrComputeHistoricalMatchSnapshot(
     // counted when this is that account's only submission of the content.
     const ownIdentities = params.accountId ? await findPriorSubmissionsForAccount(client, params.accountId, canonicalSha256(params.rawText)) : [];
     const documentIdentityId = ownIdentities.length > 0 ? ownIdentities[ownIdentities.length - 1].id : null;
-    const matchResult = await matchAgainstUserSubmissionCorpus(client, { accountId: params.accountId, documentIdentityId, canonicalText, excludeSourceReport: params.excludeSourceReport });
+    const matchResult = await matchAgainstUserSubmissionCorpus(client, { accountId: params.accountId, documentIdentityId, canonicalText, excludeAccountId: params.excludeAccountId });
     isPartial = matchResult.partial === true;
     if (matchResult.status === "MATCHED") {
       status = "MATCHED";
