@@ -267,6 +267,46 @@ test("CACHING: every route response carries Cache-Control: no-store, including 4
   }
 });
 
+// --- accountEmail: admin list surfaces the account owner's email ----------
+
+async function seedJobWithAccount(sourceRef, accountId, decisionId = null) {
+  await setupClient.execute({
+    sql: `INSERT INTO corpus_admission_report_jobs
+          (id, source_ref, account_id, device_key, report_id, status, decision_id, attempt_count, created_at, updated_at)
+          VALUES (?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
+    args: [randomUUID(), sourceRef, accountId, "dk", "rid", decisionId ? "succeeded" : "pending", decisionId, 1],
+  });
+}
+
+test("ACCOUNT EMAIL: GET /api/admin/corpus resolves the real account owner's email for a row with an account, via the real authenticated route", async () => {
+  const admin = await ensureUser("admin");
+  const owner = await ensureUser("user");
+  const marker = randomUUID();
+  const { decisionId } = await seedAcceptedDecision();
+  await seedJobWithAccount(`account-email-${marker}`, owner.accountId, decisionId);
+
+  const res = await callList(`/api/admin/corpus?q=${encodeURIComponent(marker)}`, { cookie: admin.token });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.rows.length, 1);
+  assert.equal(body.rows[0].accountId, owner.accountId);
+  assert.equal(body.rows[0].accountEmail, `${owner.accountId}@example.test`);
+});
+
+test("ACCOUNT EMAIL: GET /api/admin/corpus returns null accountEmail for a row with no account_id, never a lookup failure", async () => {
+  const admin = await ensureUser("admin");
+  const marker = randomUUID();
+  await seedAcceptedDecision(); // no job row at all -> account_id is null
+  void marker;
+
+  const res = await callList("/api/admin/corpus?status=accepted&pageSize=100", { cookie: admin.token });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  const nullAccountRow = body.rows.find((r) => r.accountId === null);
+  assert.ok(nullAccountRow, "expected at least one row with no account_id");
+  assert.equal(nullAccountRow.accountEmail, null);
+});
+
 // --- PAGINATION-LIMIT via real HTTP query params ----------------------------
 
 test("PAGINATION-LIMIT: GET /api/admin/corpus clamps an oversized pageSize and rejects a garbage status filter", async () => {

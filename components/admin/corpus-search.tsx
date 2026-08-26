@@ -11,6 +11,7 @@ type ListRow = {
   extractedWordCount: number | null;
   qualityScore: number | null;
   accountId: string | null;
+  accountEmail: string | null;
   attemptCount: number | null;
   lastError: string | null;
   createdAt: string;
@@ -180,7 +181,7 @@ export function AdminCorpusSearch() {
                   <th>Language</th>
                   <th>Word count</th>
                   <th>Quality</th>
-                  <th>Account</th>
+                  <th>Account owner</th>
                   <th>Attempts</th>
                   <th>Created</th>
                   <th>Promotion</th>
@@ -194,7 +195,7 @@ export function AdminCorpusSearch() {
                     <td>{row.detectedLanguage ?? "—"}</td>
                     <td>{row.extractedWordCount ?? "—"}</td>
                     <td>{row.qualityScore ?? "—"}</td>
-                    <td>{row.accountId ?? "unknown"}</td>
+                    <td>{row.accountEmail ?? "unknown"}</td>
                     <td>{row.attemptCount ?? "—"}</td>
                     <td>{row.createdAt}</td>
                     <td>{promotionStatusLabel(row.promotionStatus, row.promotionAttemptCount)}</td>

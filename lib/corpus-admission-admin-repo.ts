@@ -38,6 +38,8 @@ export type CorpusAdmissionAdminListRow = {
   extractedWordCount: number | null;
   qualityScore: number | null;
   accountId: string | null;
+  /** Resolved via the same users.email-by-account_id lookup getCorpusAdmissionDecisionDetail uses — batched into the list query itself (a LEFT JOIN, not a per-row lookup) rather than a second identity-resolution mechanism. null when there is no account_id, or no matching users row. */
+  accountEmail: string | null;
   attemptCount: number | null;
   lastError: string | null;
   createdAt: string;
@@ -61,6 +63,7 @@ type RawCombinedRow = {
   extracted_word_count: number | null;
   quality_score: number | null;
   account_id: string | null;
+  account_email: string | null;
   attempt_count: number | bigint | null;
   last_error: string | null;
   created_at: string;
@@ -94,6 +97,7 @@ function toListRow(row: RawCombinedRow): CorpusAdmissionAdminListRow {
     extractedWordCount: row.extracted_word_count === null ? null : Number(row.extracted_word_count),
     qualityScore: row.quality_score,
     accountId: row.account_id,
+    accountEmail: row.account_email,
     attemptCount: row.attempt_count === null ? null : Number(row.attempt_count),
     lastError: row.last_error,
     createdAt: row.created_at,
@@ -116,12 +120,18 @@ function toListRow(row: RawCombinedRow): CorpusAdmissionAdminListRow {
 // fan out a decision into more than one row) that drives the admin
 // dashboard's own Remove/Removed affordance; deactivateAcceptedRepresentation
 // remains the only thing that ever writes revoked_at.
+//
+// account_email: the SAME users.email-by-account_id resolution
+// getCorpusAdmissionDecisionDetail performs with its own single-row lookup,
+// batched here into one LEFT JOIN across the whole page rather than a
+// separate per-row (N+1) lookup or a second identity-resolution mechanism.
+// users.id is a primary key, so this can never fan a row out further.
 const COMBINED_CTE = `
   WITH combined AS (
     SELECT
       d.id AS decision_id, j.id AS job_id, d.decision AS decision, j.status AS job_status,
       d.detected_language, d.extracted_word_count, d.quality_score,
-      j.account_id, j.attempt_count, j.last_error,
+      j.account_id, u.email AS account_email, j.attempt_count, j.last_error,
       d.created_at AS created_at, COALESCE(j.updated_at, d.created_at) AS updated_at,
       p.status AS promotion_status, p.attempt_count AS promotion_attempt_count,
       ar.id AS accepted_representation_id, ar.revoked_at AS accepted_representation_revoked_at
@@ -129,15 +139,17 @@ const COMBINED_CTE = `
     LEFT JOIN corpus_admission_report_jobs j ON j.decision_id = d.id
     LEFT JOIN corpus_admission_promotions p ON p.decision_id = d.id
     LEFT JOIN corpus_admission_accepted_representations ar ON ar.decision_id = d.id
+    LEFT JOIN users u ON u.id = j.account_id
     UNION ALL
     SELECT
       NULL, j.id, NULL, j.status,
       NULL, NULL, NULL,
-      j.account_id, j.attempt_count, j.last_error,
+      j.account_id, u.email, j.attempt_count, j.last_error,
       j.created_at, j.updated_at,
       NULL, NULL,
       NULL, NULL
     FROM corpus_admission_report_jobs j
+    LEFT JOIN users u ON u.id = j.account_id
     WHERE j.decision_id IS NULL
   )
 `;

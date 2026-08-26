@@ -219,6 +219,73 @@ test("listCorpusAdmissionDecisions: acceptedRepresentationActive is true for an 
   assert.equal(deactivatedRow.acceptedRepresentationActive, false);
 });
 
+// --- list: accountEmail resolution (batched join, not N+1) ----------------
+// Admin-list account-owner-email requirement: listCorpusAdmissionDecisions
+// must resolve accountEmail via the SAME users.email-by-account_id mechanism
+// getCorpusAdmissionDecisionDetail already uses (one query per row there,
+// since detail is a single row) — batched here into a single LEFT JOIN
+// across the whole page, never a second per-row lookup.
+
+test("listCorpusAdmissionDecisions: accountEmail resolves to the real users.email for a row with a live account", async () => {
+  const accountId = await ensureUser();
+  const marker = randomUUID();
+  const sourceRef = `email-resolved-${marker}`;
+  const decisionId = await insertDecision({ sourceRef, decision: "ACCEPT" });
+  await insertJob({ sourceRef, accountId, status: "succeeded", decisionId });
+
+  const result = await listCorpusAdmissionDecisions(client, { q: marker });
+  assert.equal(result.rows.length, 1);
+  assert.equal(result.rows[0].accountId, accountId);
+  assert.equal(result.rows[0].accountEmail, `${accountId}@example.test`);
+});
+
+test("listCorpusAdmissionDecisions: accountEmail is null when account_id itself is null (no job row / job deleted)", async () => {
+  const marker = randomUUID();
+  const sourceRef = `email-no-account-${marker}`;
+  // Deliberately no job row inserted — same "job/report deleted, accepted
+  // content survives" shape as the detail-level test above.
+  await insertDecision({ sourceRef, decision: "ACCEPT" });
+
+  const result = await listCorpusAdmissionDecisions(client, { q: marker });
+  assert.equal(result.rows.length, 1);
+  assert.equal(result.rows[0].accountId, null);
+  assert.equal(result.rows[0].accountEmail, null);
+});
+
+test("listCorpusAdmissionDecisions: accountEmail is null when account_id is set but does not resolve to any users row (e.g. a deleted account) — never a lookup failure/throw", async () => {
+  const marker = randomUUID();
+  const sourceRef = `email-unresolved-${marker}`;
+  const decisionId = await insertDecision({ sourceRef, decision: "REVIEW" });
+  // corpus_admission_report_jobs.account_id has no FK to users(id) by design
+  // (see drizzle/0031's own comment) — a genuinely dangling account_id is a
+  // real, reachable state, not just a test artifact.
+  await insertJob({ sourceRef, accountId: `nonexistent-account-${marker}`, status: "succeeded", decisionId });
+
+  const result = await listCorpusAdmissionDecisions(client, { q: marker });
+  assert.equal(result.rows.length, 1);
+  assert.equal(result.rows[0].accountId, `nonexistent-account-${marker}`);
+  assert.equal(result.rows[0].accountEmail, null, "an unresolved account must render as null (UI: 'unknown'), never throw or leak a raw lookup error");
+});
+
+test("listCorpusAdmissionDecisions: accountEmail resolves correctly for multiple distinct accounts on the same page (proves the batched join, not a first-row-only lookup)", async () => {
+  const marker = randomUUID();
+  const accountA = await ensureUser();
+  const accountB = await ensureUser();
+
+  const sourceRefA = `email-multi-a-${marker}`;
+  const decisionA = await insertDecision({ sourceRef: sourceRefA, decision: "ACCEPT" });
+  await insertJob({ sourceRef: sourceRefA, accountId: accountA, status: "succeeded", decisionId: decisionA });
+
+  const sourceRefB = `email-multi-b-${marker}`;
+  const decisionB = await insertDecision({ sourceRef: sourceRefB, decision: "ACCEPT" });
+  await insertJob({ sourceRef: sourceRefB, accountId: accountB, status: "succeeded", decisionId: decisionB });
+
+  const result = await listCorpusAdmissionDecisions(client, { q: marker });
+  const rowsById = Object.fromEntries(result.rows.map((r) => [r.accountId, r]));
+  assert.equal(rowsById[accountA].accountEmail, `${accountA}@example.test`);
+  assert.equal(rowsById[accountB].accountEmail, `${accountB}@example.test`);
+});
+
 // --- list: filtering, search, pagination, max page size -------------------
 
 test("listCorpusAdmissionDecisions: status filter returns only matching rows", async () => {

@@ -188,6 +188,12 @@ test("STRUCTURAL: no account id, email, retained text, or internal identifier is
   }
 });
 
+test("STRUCTURAL: the account column shows 'Account owner' / the resolved email (falling back to 'unknown'), never the raw account UUID", () => {
+  assert.match(SEARCH_SOURCE, /<th>Account owner<\/th>/, "the column header must say 'Account owner', not 'Account'");
+  assert.match(SEARCH_SOURCE, /\{row\.accountEmail \?\? "unknown"\}/, "the cell must render accountEmail, falling back to the literal string 'unknown'");
+  assert.doesNotMatch(SEARCH_SOURCE, /\{row\.accountId(?:\s*\?\?[^}]*)?\}/, "the list must never render the raw account UUID directly — see components/admin/corpus-detail.tsx for the separate, existing detail-view fallback that is deliberately not reused here");
+});
+
 // ============================================================================
 // BEHAVIORAL: exercised through the real route — the exact path Remove drives
 // ============================================================================
