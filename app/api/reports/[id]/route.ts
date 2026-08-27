@@ -6,7 +6,7 @@ import { getSessionUser } from '../../../../lib/auth-session';
 import { findReportRowForDeviceKey, findReportRowForUser } from '../../../../lib/reports-repo';
 import { classifyReportMatches } from '../../../../lib/report-classification';
 import { deleteHistoricalMatchSnapshot } from '../../../../lib/report-historical-match';
-import { resolvePrimarySimilaritySummary } from '../../../../lib/report-primary-similarity';
+import { resolvePrimarySimilaritySummary, persistRefreshedSimilarity } from '../../../../lib/report-primary-similarity';
 import { deleteReportDocumentData } from '../../../../lib/report-deletion';
 import { deleteReportCorpusAdmissionData } from '../../../../lib/corpus-admission-report-integration';
 import { runHistoricalMatchShadowEvaluation } from '../../../../lib/e8p-shadow-evaluation';
@@ -158,30 +158,26 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
           // exactly the ordering gap SIM-03's own header comment already
           // rejected runAfterResponse for — so, like write-time
           // finalization itself, this stays synchronous and awaited.
-          // Built from the ORIGINAL stored JSON string, re-parsed fresh —
-          // never from the in-memory `payload` object this response is
-          // building, which may already carry matchClassification
-          // (admin-only, see the block above — must never be persisted;
-          // it is recomputed fresh on every admin read by design) and
-          // will go on to carry experimentalHistoricalMatch/reuseContext
-          // (read-time-only display fields, never meant to be durable
-          // either). This keeps the persisted row's shape identical to
-          // what a normal save already writes, plus only the similarity
-          // fields this fix and LIFECYCLE-06 add.
+          // Fresh-report aiAnalysis-loss fix (Room 5): persistRefreshedSimilarity
+          // applies json_set to only the four similarity-owned keys of the
+          // row's CURRENT payload_json, in one atomic statement — never a
+          // wholesale rebuild from a stale in-memory copy. That copy (built
+          // from row.payload_json read at the TOP of this handler, before
+          // classification/historical-match/etc. ran) can be arbitrarily
+          // behind by the time this write executes: a concurrent
+          // AI-completion SAVE_REPORT_SQL write could have added
+          // $.aiAnalysis/$.aiScore in the meantime, which a wholesale
+          // `SET payload_json = ?` would then erase while the flat ai_*
+          // columns (untouched here) stay 'ready' + numeric — exactly the
+          // Room-5 UI. json_set reads $.aiAnalysis back live and preserves
+          // it. The generation guard is unchanged (COALESCE(...,-1) <=
+          // resolution.corpusGeneration), so a newer-generation result a
+          // concurrent write already persisted still wins. matchClassification/
+          // experimentalHistoricalMatch/reuseContext (read-time-only display
+          // fields on the in-memory `payload`) were never persistable and
+          // still are not — json_set never touches them.
           try {
-            const persistedPayload = {
-              ...(JSON.parse(String(row.payload_json)) as SimilarityReport),
-              unifiedSimilarity: resolution.unifiedSimilarity,
-              corpusSourceMatchingEnabledAtComputation: resolution.corpusSourceMatchingEnabled,
-              unifiedSimilarityGeneration: resolution.corpusGeneration,
-              unifiedSimilarityFailed: false,
-            };
-            await client.execute({
-              sql: `UPDATE saved_reports SET payload_json = ?
-                    WHERE device_key = ? AND id = ?
-                      AND COALESCE(json_extract(payload_json, '$.unifiedSimilarityGeneration'), -1) <= ?`,
-              args: [JSON.stringify(persistedPayload), row.device_key, id, resolution.corpusGeneration],
-            });
+            await persistRefreshedSimilarity(client, { reportDeviceKey: row.device_key, reportId: id }, resolution);
           } catch (err) {
             console.error('persisting the refreshed similarity result failed (non-fatal, this response still reflects it):', err instanceof Error ? err.message : String(err));
           }
@@ -213,19 +209,11 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
           payload.corpusSourceMatchingEnabledAtComputation = resolution.corpusSourceMatchingEnabled;
           payload.unifiedSimilarityGeneration = resolution.corpusGeneration;
           try {
-            const persistedPayload = {
-              ...(JSON.parse(String(row.payload_json)) as SimilarityReport),
-              unifiedSimilarity: undefined,
-              unifiedSimilarityFailed: true,
-              corpusSourceMatchingEnabledAtComputation: resolution.corpusSourceMatchingEnabled,
-              unifiedSimilarityGeneration: resolution.corpusGeneration,
-            };
-            await client.execute({
-              sql: `UPDATE saved_reports SET payload_json = ?
-                    WHERE device_key = ? AND id = ?
-                      AND COALESCE(json_extract(payload_json, '$.unifiedSimilarityGeneration'), -1) <= ?`,
-              args: [JSON.stringify(persistedPayload), row.device_key, id, resolution.corpusGeneration],
-            });
+            // Same targeted-write reasoning as the success branch above:
+            // json_remove drops only $.unifiedSimilarity, json_set stamps the
+            // three failure-marker keys, on the current row — $.aiAnalysis/
+            // $.aiScore and every other field survive untouched.
+            await persistRefreshedSimilarity(client, { reportDeviceKey: row.device_key, reportId: id }, resolution);
           } catch (err) {
             console.error('persisting the terminal similarity failure marker failed (non-fatal, this response still reflects it):', err instanceof Error ? err.message : String(err));
           }

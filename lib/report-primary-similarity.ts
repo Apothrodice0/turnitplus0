@@ -380,6 +380,105 @@ export type SelfHealResult =
   | { attempted: false };
 
 /**
+ * The payload_json keys a similarity finalization / self-heal write OWNS —
+ * the ONLY keys it may create, replace, or remove. Everything else in
+ * payload_json belongs to a different, independent writer and MUST survive a
+ * similarity write byte-for-byte, no matter how the two interleave:
+ *   - AI-owned: $.aiAnalysis and its paired raw $.aiScore — written together
+ *     by the AI-completion SAVE_REPORT_SQL path (app/api/reports/route.ts,
+ *     app/reports/rooms/[room]/room-page-shell.tsx's saveEnrichedAiResult).
+ *   - general report fields: title, text, sources, wordCount, … — set once
+ *     by the report-generation pipeline, never by a similarity refresh.
+ *
+ * Fresh-report aiAnalysis-loss fix (Room 5, "The Legal Framework Governing
+ * the Election of Constitutional Law Professors…"): the self-heal writes
+ * used to rebuild payload_json wholesale from a spread of the row as it was
+ * read EARLIER in the request, then write that whole blob back with a raw
+ * `UPDATE … SET payload_json = ?`. resolvePrimarySimilaritySummary in
+ * between does real matcher work whenever the corpus generation has just
+ * moved (exactly the corpus-admission-rollout case), so a concurrent
+ * AI-completion SAVE_REPORT_SQL write — which sets $.aiAnalysis/$.aiScore
+ * AND moves ai_status to 'ready' + a real ai_score — could commit inside
+ * that window. The wholesale write then clobbered that freshly-persisted
+ * $.aiAnalysis straight back out (the stale in-memory copy never had it),
+ * while the flat ai_* columns, which this path never touches, stayed
+ * 'ready' + numeric — producing exactly the Room-5 UI: "0% AI" with "The
+ * passage-level breakdown isn't available for this saved copy."
+ *
+ * persistRefreshedSimilarity below closes that: it applies json_set /
+ * json_remove to the row's CURRENT payload_json column value in a single
+ * atomic statement, touching ONLY the four similarity-owned keys. Any
+ * $.aiAnalysis / $.aiScore (and every other field) a concurrent writer
+ * added is read back live by json_set and preserved, regardless of commit
+ * order. The generation guard is unchanged — a genuinely newer-generation
+ * result a concurrent write already persisted still wins (COALESCE(…, -1)
+ * <= this resolution's generation).
+ */
+const SIMILARITY_GENERATION_GUARD_SQL =
+  "COALESCE(json_extract(payload_json, '$.unifiedSimilarityGeneration'), -1) <= ?";
+
+export async function persistRefreshedSimilarity(
+  client: Client,
+  params: { reportDeviceKey: string; reportId: string },
+  resolution: Pick<
+    PrimarySimilarityResolution,
+    "unifiedSimilarity" | "failed" | "corpusSourceMatchingEnabled" | "corpusGeneration"
+  >,
+): Promise<{ written: "resolved" | "failed" | "none"; rowsAffected: number }> {
+  // json(?) with the literal 'true'/'false' text inserts a real JSON boolean
+  // (SQLite has no native boolean), keeping the persisted shape identical to
+  // what JSON.stringify(resolution.corpusSourceMatchingEnabled) writes
+  // everywhere else. json_valid(payload_json) is a defensive floor: a row
+  // whose payload_json somehow is not valid JSON (json_set would return NULL
+  // for it) is simply left untouched — same "eligible for another attempt"
+  // outcome the callers' own try/catch already produces.
+  const flagText = resolution.corpusSourceMatchingEnabled ? "true" : "false";
+  if (resolution.unifiedSimilarity) {
+    const result = await client.execute({
+      sql: `UPDATE saved_reports
+            SET payload_json = json_set(
+                  payload_json,
+                  '$.unifiedSimilarity', json(?),
+                  '$.corpusSourceMatchingEnabledAtComputation', json(?),
+                  '$.unifiedSimilarityGeneration', ?,
+                  '$.unifiedSimilarityFailed', json('false')
+                )
+            WHERE device_key = ? AND id = ? AND json_valid(payload_json) AND ${SIMILARITY_GENERATION_GUARD_SQL}`,
+      args: [
+        JSON.stringify(resolution.unifiedSimilarity),
+        flagText,
+        resolution.corpusGeneration,
+        params.reportDeviceKey,
+        params.reportId,
+        resolution.corpusGeneration,
+      ],
+    });
+    return { written: "resolved", rowsAffected: Number(result.rowsAffected) };
+  }
+  if (resolution.failed) {
+    const result = await client.execute({
+      sql: `UPDATE saved_reports
+            SET payload_json = json_set(
+                  json_remove(payload_json, '$.unifiedSimilarity'),
+                  '$.corpusSourceMatchingEnabledAtComputation', json(?),
+                  '$.unifiedSimilarityGeneration', ?,
+                  '$.unifiedSimilarityFailed', json('true')
+                )
+            WHERE device_key = ? AND id = ? AND json_valid(payload_json) AND ${SIMILARITY_GENERATION_GUARD_SQL}`,
+      args: [
+        flagText,
+        resolution.corpusGeneration,
+        params.reportDeviceKey,
+        params.reportId,
+        resolution.corpusGeneration,
+      ],
+    });
+    return { written: "failed", rowsAffected: Number(result.rowsAffected) };
+  }
+  return { written: "none", rowsAffected: 0 };
+}
+
+/**
  * Legacy-room bug fix, twice-revised.
  *
  * REJECTED FIRST FIX: reading "no unifiedSimilarity + no failure marker +
@@ -465,6 +564,17 @@ export async function selfHealUnifiedSimilarity(
      * production.
      */
     testOnlyAfterWriteBeforeGenerationRecheck?: () => Promise<void>;
+    /**
+     * Test-only barrier hook — awaited AFTER resolvePrimarySimilaritySummary
+     * has returned but BEFORE the payload_json write below. Lets a test
+     * reproduce the fresh-report aiAnalysis-loss race: a concurrent
+     * AI-completion SAVE_REPORT_SQL write commits inside exactly this window
+     * (self-heal read the row without an aiAnalysis, matched, and is about
+     * to write). persistRefreshedSimilarity must then preserve that
+     * concurrently-added $.aiAnalysis/$.aiScore. Always undefined in
+     * production.
+     */
+    testOnlyBeforePersist?: () => Promise<void>;
   },
 ): Promise<SelfHealResult> {
   try {
@@ -487,21 +597,20 @@ export async function selfHealUnifiedSimilarity(
       archiveScore: payload.archiveScore ?? payload.score ?? Number(raw.archive_score),
     });
 
+    if (params.testOnlyBeforePersist) await params.testOnlyBeforePersist();
+
     if (resolution.unifiedSimilarity) {
-      const persistedPayload = {
-        ...payload,
-        unifiedSimilarity: resolution.unifiedSimilarity,
-        corpusSourceMatchingEnabledAtComputation: resolution.corpusSourceMatchingEnabled,
-        unifiedSimilarityGeneration: resolution.corpusGeneration,
-        unifiedSimilarityFailed: false,
-      };
-      const updateResult = await client.execute({
-        sql: `UPDATE saved_reports SET payload_json = ?
-              WHERE device_key = ? AND id = ?
-                AND COALESCE(json_extract(payload_json, '$.unifiedSimilarityGeneration'), -1) <= ?`,
-        args: [JSON.stringify(persistedPayload), params.reportDeviceKey, params.reportId, resolution.corpusGeneration],
-      });
-      const writeLanded = Number(updateResult.rowsAffected) > 0;
+      // AI-owned ($.aiAnalysis/$.aiScore) and every other payload field are
+      // left to json_set to read back live from the current row — a
+      // concurrent AI-completion write landing between the read above and
+      // this write is preserved, never clobbered. See
+      // persistRefreshedSimilarity's own header comment (the Room-5 fix).
+      const write = await persistRefreshedSimilarity(
+        client,
+        { reportDeviceKey: params.reportDeviceKey, reportId: params.reportId },
+        resolution,
+      );
+      const writeLanded = write.rowsAffected > 0;
       // Fresh, live re-read taken AFTER the write above has committed —
       // never resolution.corpusGeneration itself, which is what got
       // STAMPED onto the snapshot row (read before the recomputation ran).
@@ -525,19 +634,15 @@ export async function selfHealUnifiedSimilarity(
       };
     }
     if (resolution.failed) {
-      const persistedPayload = {
-        ...payload,
-        unifiedSimilarity: undefined,
-        unifiedSimilarityFailed: true,
-        corpusSourceMatchingEnabledAtComputation: resolution.corpusSourceMatchingEnabled,
-        unifiedSimilarityGeneration: resolution.corpusGeneration,
-      };
-      await client.execute({
-        sql: `UPDATE saved_reports SET payload_json = ?
-              WHERE device_key = ? AND id = ?
-                AND COALESCE(json_extract(payload_json, '$.unifiedSimilarityGeneration'), -1) <= ?`,
-        args: [JSON.stringify(persistedPayload), params.reportDeviceKey, params.reportId, resolution.corpusGeneration],
-      });
+      // Same targeted write as the success branch: json_remove drops only
+      // $.unifiedSimilarity and json_set stamps the three failure-marker
+      // keys, on the current row — $.aiAnalysis/$.aiScore and every other
+      // field are untouched.
+      await persistRefreshedSimilarity(
+        client,
+        { reportDeviceKey: params.reportDeviceKey, reportId: params.reportId },
+        resolution,
+      );
       return { attempted: true, outcome: "failed" };
     }
     return { attempted: false };
