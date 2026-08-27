@@ -247,3 +247,77 @@ test("findCandidateCorpusRepresentations returns an empty array for an empty shi
   const candidates = await findCandidateCorpusRepresentations(client, new Set());
   assert.deepEqual(candidates, []);
 });
+
+// libSQL / SQLite bind at most this many parameters per statement
+// (SQLITE_MAX_VARIABLE_NUMBER). A single `shingle_hash IN (...)` list this
+// long is exactly what threw "SQLITE_ERROR: too many SQL variables" before
+// findCandidateCorpusRepresentations chunked its lookup.
+const SQLITE_MAX_VARIABLE_NUMBER = 32_766;
+
+test("findCandidateCorpusRepresentations reproduces and survives the >32,766 SQL-variable failure (chunked lookup, cross-chunk COUNT accumulation)", async () => {
+  // 44,000 unique word tokens -> 43,996 distinct informative 5-gram hashes:
+  // > SQLITE_MAX_VARIABLE_NUMBER (32,766) AND spanning three 20,000-hash
+  // chunks (20,000 + 20,000 + 3,996). Before the chunked lookup, one
+  // `shingle_hash IN (43,996 params)` statement threw "too many SQL
+  // variables" and every caller degraded silently (matching returned
+  // partial / NO_HISTORICAL_MATCH; admission jobs failed and retried
+  // forever).
+  const words = Array.from({ length: 44_000 }, (_, i) => `tk${i.toString(36).padStart(6, "0")}`);
+  const largeText = words.join(" ");
+  const { result } = await submit("account-large-doc", "Large document", largeText);
+  assert.equal(result.status, "INDEXED");
+
+  const largeShingles = corpusShingleHashes(largeText, 5);
+  assert.ok(
+    largeShingles.size > SQLITE_MAX_VARIABLE_NUMBER,
+    `precondition: query must exceed the SQL-variable limit, got ${largeShingles.size} <= ${SQLITE_MAX_VARIABLE_NUMBER}`,
+  );
+
+  let candidates;
+  await assert.doesNotReject(
+    async () => {
+      candidates = await findCandidateCorpusRepresentations(client, largeShingles, {
+        fingerprintVersion: CORPUS_FINGERPRINT_VERSION,
+        minSharedShingles: 3,
+      });
+    },
+    "must not throw SQLITE_ERROR: too many SQL variables for a query above SQLITE_MAX_VARIABLE_NUMBER",
+  );
+
+  const match = candidates.find((c) => c.representationId === result.representationId);
+  assert.ok(match, "the just-indexed large representation must still be discovered");
+  // Cross-chunk accumulation: every one of its shingles is shared, split
+  // across three chunks (20,000 + 20,000 + 3,996). A bug that used only one
+  // chunk's COUNT would report 20,000 or 3,996 here, not the full,
+  // above-limit set size.
+  assert.equal(
+    match.sharedShingleCount,
+    largeShingles.size,
+    `shared count must equal the complete >${SQLITE_MAX_VARIABLE_NUMBER} query shingle count, summed across every chunk`,
+  );
+  // Identical text on both sides -> containment is shared / min(target, total) = 1.
+  assert.ok(match.containment > 0.99, `expected ~1.0 containment for identical text, got ${match.containment}`);
+});
+
+test("findCandidateCorpusRepresentations still applies minSharedShingles and limit on the >32,766 chunked path", async () => {
+  // Same above-limit query size, but sharing nothing with the stored doc —
+  // minSharedShingles and limit must behave exactly as on the single-query
+  // path.
+  const words = Array.from({ length: 44_000 }, (_, i) => `qz${i.toString(36).padStart(6, "0")}`);
+  const largeQueryText = words.join(" ");
+  const largeShingles = corpusShingleHashes(largeQueryText, 5);
+  assert.ok(largeShingles.size > SQLITE_MAX_VARIABLE_NUMBER);
+
+  // Stored doc shares nothing with the query above.
+  await submit("account-chunk-threshold", "Unrelated", DOCUMENT_X + " chunk-threshold-marker");
+
+  const candidates = await findCandidateCorpusRepresentations(client, largeShingles, {
+    fingerprintVersion: CORPUS_FINGERPRINT_VERSION,
+    minSharedShingles: 3,
+    limit: 5,
+  });
+  assert.ok(candidates.length <= 5, "limit is respected on the chunked path");
+  for (const candidate of candidates) {
+    assert.ok(candidate.sharedShingleCount >= 3, "minSharedShingles is respected on the chunked path");
+  }
+});

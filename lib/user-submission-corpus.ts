@@ -451,27 +451,73 @@ export async function findCandidateCorpusRepresentations(
   const excludeAccountPrefix = options.excludeAccountId ? buildReportAdmissionAccountPrefix(options.excludeAccountId) : null;
   if (shingleHashes.size === 0) return [];
 
+  type RawSharedRow = { representation_id: string; shared: number | bigint; canonical_sha256: string; word_count: number; is_actively_promoted: number | bigint };
+
+  // SQLite/libSQL binds at most 32766 parameters per statement
+  // (SQLITE_MAX_VARIABLE_NUMBER). A large submission can produce far more
+  // informative shingles than that, so the shingle-hash lookup is chunked
+  // whenever the hash list alone would approach that ceiling: each chunk's
+  // per-representation COUNT(*) is summed back together before the
+  // shared-shingle threshold, ordering, and limit are applied in memory.
+  // is_actively_promoted and admissionEligibilitySql() are both correlated
+  // on r.id alone, so a representation's value for them is identical in
+  // every chunk it appears in. The common case (a single chunk) runs the
+  // exact same one query as before, with HAVING / ORDER BY / LIMIT still
+  // applied server-side — no behavioral or performance change for it.
+  const SHINGLE_IN_CHUNK_SIZE = 20_000;
   const hashList = [...shingleHashes];
-  const placeholders = hashList.map(() => "?").join(",");
-  const sharedResult = await client.execute({
-    sql: `SELECT s.representation_id AS representation_id, COUNT(*) AS shared, r.canonical_sha256 AS canonical_sha256, r.word_count AS word_count,
-            CASE WHEN EXISTS (
+  const isActivelyPromotedCase = `CASE WHEN EXISTS (
               SELECT 1 FROM corpus_admission_promotions p
               JOIN corpus_admission_accepted_representations ar ON ar.id = p.accepted_representation_id
               WHERE p.representation_id = r.id AND p.status = 'indexed' AND ar.revoked_at IS NULL
-            ) THEN 1 ELSE 0 END AS is_actively_promoted
-          FROM corpus_document_shingles s
-          JOIN corpus_document_representations r ON r.id = s.representation_id
-          WHERE s.fingerprint_version = ? AND s.shingle_hash IN (${placeholders})
-            AND ${admissionEligibilitySql()}
-          GROUP BY s.representation_id
-          HAVING COUNT(*) >= ?
-          ORDER BY shared DESC
-          LIMIT ?`,
-    args: [fingerprintVersion, ...hashList, excludeAccountPrefix, excludeAccountPrefix, excludeAccountPrefix, minSharedShingles, limit],
-  });
-  type RawSharedRow = { representation_id: string; shared: number | bigint; canonical_sha256: string; word_count: number; is_actively_promoted: number | bigint };
-  const sharedRows = sharedResult.rows as unknown as RawSharedRow[];
+            ) THEN 1 ELSE 0 END AS is_actively_promoted`;
+
+  let sharedRows: RawSharedRow[];
+  if (hashList.length <= SHINGLE_IN_CHUNK_SIZE) {
+    const placeholders = hashList.map(() => "?").join(",");
+    const sharedResult = await client.execute({
+      sql: `SELECT s.representation_id AS representation_id, COUNT(*) AS shared, r.canonical_sha256 AS canonical_sha256, r.word_count AS word_count,
+              ${isActivelyPromotedCase}
+            FROM corpus_document_shingles s
+            JOIN corpus_document_representations r ON r.id = s.representation_id
+            WHERE s.fingerprint_version = ? AND s.shingle_hash IN (${placeholders})
+              AND ${admissionEligibilitySql()}
+            GROUP BY s.representation_id
+            HAVING COUNT(*) >= ?
+            ORDER BY shared DESC
+            LIMIT ?`,
+      args: [fingerprintVersion, ...hashList, excludeAccountPrefix, excludeAccountPrefix, excludeAccountPrefix, minSharedShingles, limit],
+    });
+    sharedRows = sharedResult.rows as unknown as RawSharedRow[];
+  } else {
+    const accumulatorById = new Map<string, RawSharedRow>();
+    for (let offset = 0; offset < hashList.length; offset += SHINGLE_IN_CHUNK_SIZE) {
+      const chunk = hashList.slice(offset, offset + SHINGLE_IN_CHUNK_SIZE);
+      const placeholders = chunk.map(() => "?").join(",");
+      const chunkResult = await client.execute({
+        sql: `SELECT s.representation_id AS representation_id, COUNT(*) AS shared, r.canonical_sha256 AS canonical_sha256, r.word_count AS word_count,
+                ${isActivelyPromotedCase}
+              FROM corpus_document_shingles s
+              JOIN corpus_document_representations r ON r.id = s.representation_id
+              WHERE s.fingerprint_version = ? AND s.shingle_hash IN (${placeholders})
+                AND ${admissionEligibilitySql()}
+              GROUP BY s.representation_id`,
+        args: [fingerprintVersion, ...chunk, excludeAccountPrefix, excludeAccountPrefix, excludeAccountPrefix],
+      });
+      for (const raw of chunkResult.rows as unknown as RawSharedRow[]) {
+        const prior = accumulatorById.get(raw.representation_id);
+        if (prior) prior.shared = Number(prior.shared) + Number(raw.shared);
+        else accumulatorById.set(raw.representation_id, { ...raw, shared: Number(raw.shared) });
+      }
+    }
+    sharedRows = [...accumulatorById.values()]
+      .filter((row) => Number(row.shared) >= minSharedShingles)
+      .sort((a, b) =>
+        Number(b.shared) - Number(a.shared) ||
+        (a.representation_id < b.representation_id ? -1 : a.representation_id > b.representation_id ? 1 : 0),
+      )
+      .slice(0, limit);
+  }
   if (sharedRows.length === 0) return [];
 
   // containment() needs each candidate's own total shingle count under this
