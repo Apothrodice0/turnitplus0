@@ -9,7 +9,7 @@ import { extractCorpusCandidateText, type CorpusExtractionResult } from "./corpu
 import { computeCorpusFeatureVector, type CorpusFeatureVector } from "./corpus-quality-signals";
 import { computeCorpusQualityScore, type CorpusQualityComponentScores, type CorpusQualityScoreResult } from "./corpus-quality-model";
 import { evaluateCorpusHardGates } from "./corpus-hard-gates";
-import { resolveCorpusArticleFamily, type CorpusFamilyCandidate, type CorpusFamilyResolution } from "./corpus-admission-family";
+import { resolveCorpusArticleFamily, isCorpusLengthCompatible, DEFAULT_CORPUS_FAMILY_THRESHOLDS, type CorpusFamilyCandidate, type CorpusFamilyResolution } from "./corpus-admission-family";
 import { decideCorpusAdmission, computeCorpusValueScore } from "./corpus-admission-policy";
 import type {
   CorpusAdmissionDecision,
@@ -208,6 +208,29 @@ function isAcceptedHashUniqueViolation(err: unknown): boolean {
 }
 
 /**
+ * Deterministic upper bound on how many accepted-representation family
+ * candidates findAcceptedFamilyCandidates returns (C-3). Matches the default
+ * `limit` of its real-corpus sibling findCandidateCorpusRepresentations
+ * (lib/user-submission-corpus.ts): computeEvaluationCore concatenates the
+ * two candidate lists into one familyCandidates array and consumes them
+ * identically. resolveCorpusArticleFamily (lib/corpus-admission-family.ts)
+ * only ever acts on the single candidate that matters — the exact-canonical-
+ * hash one, or the highest ACTUAL containment among LENGTH-COMPATIBLE ones.
+ * findAcceptedFamilyCandidates computes actual containment for the whole
+ * family-relevant set (exact-hash + every length-compatible row — see its
+ * step 1b) and only THEN ranks and caps at 50, by exactly that priority
+ * (step 3): exact hash, length-compatibility, actual containment, raw
+ * shared, id. Nothing correctness-affecting is truncated before containment
+ * is known, so a length-incompatible candidate the resolver would discard
+ * can never evict a length-compatible one it would act on — no matter how
+ * many unrelated large documents embed the submission's text.
+ */
+export const MAX_ACCEPTED_FAMILY_CANDIDATES = 50;
+
+/** libSQL/SQLite bind at most 32,766 parameters per statement; a large submission can exceed that in informative shingles alone, so every shingle-hash / representation-id IN(...) list below is chunked (C-2). */
+const ACCEPTED_SHINGLE_IN_CHUNK_SIZE = 20_000;
+
+/**
  * Queries corpus_admission_accepted_representations/_shingles for exact and
  * near-duplicate family candidates — the durable, cross-process analog of
  * findCandidateCorpusRepresentations (lib/user-submission-corpus.ts),
@@ -215,56 +238,190 @@ function isAcceptedHashUniqueViolation(err: unknown): boolean {
  * corpus. Accepts either a plain Client (the non-transactional pre-check)
  * or an open Transaction (the in-transaction re-check) via the shared
  * SqlExecutor shape, so the exact same query logic backs both.
+ *
+ * C-2/C-3 hardening. Every SQL IN(...) list is chunked so a submission with
+ * more informative shingles than SQLite's 32,766 SQLITE_MAX_VARIABLE_NUMBER
+ * can never throw "too many SQL variables":
+ *   1. shared-shingle COUNT per accepted representation (chunked over the
+ *      submission's shingle hashes; each representation's count summed
+ *      across every chunk).
+ *   1b. FAMILY-RELEVANT partition — keep only the rows resolveCorpusArticleFamily
+ *      can actually act on: the exact-canonical-hash row (EXACT_DUPLICATE)
+ *      plus every LENGTH-COMPATIBLE row (the only rows eligible for
+ *      EDITED_VERSION — the resolver itself `continue`s past every
+ *      length-incompatible one). Both tests use step-1 data only
+ *      (canonical_sha256, word_count). This is the provably-safe bound the
+ *      removed raw-shared pre-cap was not: it can never drop an
+ *      EXACT_DUPLICATE or any EDITED_VERSION-capable candidate, no matter
+ *      how many unrelated much-larger documents embed the submission's text
+ *      (measured: computing ACTUAL containment for every one of ~2.5k
+ *      matching representations / ~10M shingle rows took ~17s).
+ *   2. total shingle COUNT per family-relevant candidate (chunked), giving
+ *      each its ACTUAL containment.
+ *   3. rank by exactly the priority resolveCorpusArticleFamily itself
+ *      applies — exact canonical hash, then length-compatibility (its own
+ *      lengthCompatibilityFloor), then actual containment DESC, then raw
+ *      shared DESC, then id ASC — and take the top MAX_ACCEPTED_FAMILY_CANDIDATES.
+ *
+ * Returns BOTH:
+ *   - candidates: the family-relevant top-50, for resolveCorpusArticleFamily.
+ *   - corpusValueContainmentLowerBound: a PROVEN lower bound on the true
+ *     max containment across EVERY matching accepted representation
+ *     (length-incompatible ones included), for computeEvaluationCore's
+ *     bestContainmentAgainstCorpus -> computeCorpusValueScore. It is
+ *     `max over all matching reps of  shared_rep / min(targetCount, word_count_rep - 4)`
+ *     — `word_count_rep - 4` is the exact number of 5-gram positions in the
+ *     representation's text and is therefore a proven upper bound on its
+ *     distinct informative shingle count, so this quotient can never exceed
+ *     the representation's real containment. Computed from step-1 data only
+ *     (cheap). It is EXACT whenever the dominating representation's
+ *     informative-shingle density is ~1 (which includes exact/near-exact
+ *     containment and every representation at least as large as the
+ *     submission); it can under-shoot only for a length-incompatible
+ *     representation that is word-count-large but informative-shingle-sparse
+ *     (heavy tables/references/boilerplate) AND only moderately contained
+ *     (~0.5-0.7) — in which case a pre-change REVIEW (LOW_CORPUS_VALUE) may
+ *     become an ACCEPT. It never over-estimates, so it never produces a
+ *     spurious REVIEW. Exact preservation would require the ~17s
+ *     all-representation total-shingle scan above.
+ *
+ * `target` (the submission's own word count + canonical hash) is supplied
+ * by every production call site; when omitted (defensive/legacy callers)
+ * the family-relevant partition keeps everything and the ranking falls back
+ * to actual-containment-then-shared with no length awareness — still never
+ * the pre-C-3 unbounded IN(...) behavior. corpusValueContainmentLowerBound
+ * needs no target.
+ *
+ * Exported for regression testing only — same convention as
+ * _runThroughAcceptSerializationQueueForTesting / CORPUS_ADMISSION_FINGERPRINT_VERSION.
  */
-async function findAcceptedFamilyCandidates(
+export type FindAcceptedFamilyCandidatesResult = {
+  candidates: CorpusFamilyCandidate[];
+  corpusValueContainmentLowerBound: number;
+};
+
+export async function findAcceptedFamilyCandidates(
   exec: SqlExecutor,
   shingleHashes: Set<string>,
   /** Excludes one accepted-representation id from the results — set to a candidate's own existing row during re-evaluation, so it is never treated as a duplicate of itself. */
   excludeAcceptedRepresentationId: string | null = null,
-): Promise<CorpusFamilyCandidate[]> {
-  if (shingleHashes.size === 0) return [];
+  target?: { wordCount: number; canonicalSha256: string },
+): Promise<FindAcceptedFamilyCandidatesResult> {
+  const EMPTY: FindAcceptedFamilyCandidatesResult = { candidates: [], corpusValueContainmentLowerBound: 0 };
+  if (shingleHashes.size === 0) return EMPTY;
   const hashList = [...shingleHashes];
-  const placeholders = hashList.map(() => "?").join(",");
-  const sharedResult = await exec.execute({
-    sql: `SELECT s.accepted_representation_id AS id, COUNT(*) AS shared, r.canonical_sha256 AS canonical_sha256, r.word_count AS word_count, d.source_ref AS source_ref
-          FROM corpus_admission_accepted_shingles s
-          JOIN corpus_admission_accepted_representations r ON r.id = s.accepted_representation_id
-          JOIN corpus_admission_decisions d ON d.id = r.decision_id
-          WHERE s.fingerprint_version = ? AND s.shingle_hash IN (${placeholders})
-            AND (? IS NULL OR s.accepted_representation_id != ?)
-            AND r.revoked_at IS NULL
-          GROUP BY s.accepted_representation_id
-          HAVING COUNT(*) >= 1`,
-    args: [CORPUS_ADMISSION_FINGERPRINT_VERSION, ...hashList, excludeAcceptedRepresentationId, excludeAcceptedRepresentationId],
-  });
-  type RawSharedRow = { id: string; shared: number | bigint; canonical_sha256: string; word_count: number; source_ref: string };
-  const sharedRows = sharedResult.rows as unknown as RawSharedRow[];
-  if (sharedRows.length === 0) return [];
-
-  const candidateIds = sharedRows.map((row) => row.id);
-  const candidatePlaceholders = candidateIds.map(() => "?").join(",");
-  const totalsResult = await exec.execute({
-    sql: `SELECT accepted_representation_id, COUNT(*) AS total
-          FROM corpus_admission_accepted_shingles
-          WHERE fingerprint_version = ? AND accepted_representation_id IN (${candidatePlaceholders})
-          GROUP BY accepted_representation_id`,
-    args: [CORPUS_ADMISSION_FINGERPRINT_VERSION, ...candidateIds],
-  });
-  const totalsById = new Map(
-    (totalsResult.rows as unknown as { accepted_representation_id: string; total: number | bigint }[]).map((row) => [row.accepted_representation_id, Number(row.total)]),
-  );
-
   const targetCount = shingleHashes.size;
-  return sharedRows.map((row) => {
-    const shared = Number(row.shared);
-    const candidateTotal = totalsById.get(row.id) ?? 0;
+
+  type SharedRow = { id: string; shared: number; canonicalSha256: string; wordCount: number; sourceRef: string };
+  type RawRow = { id: string; shared: number | bigint; canonical_sha256: string; word_count: number | bigint; source_ref: string };
+
+  // --- Step 1: shared-shingle COUNT per accepted representation ------------
+  const sharedById = new Map<string, SharedRow>();
+  for (let offset = 0; offset < hashList.length; offset += ACCEPTED_SHINGLE_IN_CHUNK_SIZE) {
+    const chunk = hashList.slice(offset, offset + ACCEPTED_SHINGLE_IN_CHUNK_SIZE);
+    const placeholders = chunk.map(() => "?").join(",");
+    const res = await exec.execute({
+      sql: `SELECT s.accepted_representation_id AS id, COUNT(*) AS shared, r.canonical_sha256 AS canonical_sha256, r.word_count AS word_count, d.source_ref AS source_ref
+            FROM corpus_admission_accepted_shingles s
+            JOIN corpus_admission_accepted_representations r ON r.id = s.accepted_representation_id
+            JOIN corpus_admission_decisions d ON d.id = r.decision_id
+            WHERE s.fingerprint_version = ? AND s.shingle_hash IN (${placeholders})
+              AND (? IS NULL OR s.accepted_representation_id != ?)
+              AND r.revoked_at IS NULL
+            GROUP BY s.accepted_representation_id`,
+      args: [CORPUS_ADMISSION_FINGERPRINT_VERSION, ...chunk, excludeAcceptedRepresentationId, excludeAcceptedRepresentationId],
+    });
+    for (const raw of res.rows as unknown as RawRow[]) {
+      const prior = sharedById.get(raw.id);
+      if (prior) prior.shared += Number(raw.shared);
+      else sharedById.set(raw.id, { id: raw.id, shared: Number(raw.shared), canonicalSha256: raw.canonical_sha256, wordCount: Number(raw.word_count), sourceRef: raw.source_ref });
+    }
+  }
+  if (sharedById.size === 0) return EMPTY;
+
+  // --- corpus-value: proven containment lower bound over EVERY matching rep,
+  // any length (step-1 data only) — see this function's own header comment.
+  // containment(shared, targetCount, word_count - 4) uses `word_count - 4`
+  // (the exact 5-gram position count = proven upper bound on the rep's
+  // distinct informative shingle count) as the source-side denominator, so
+  // the result never exceeds the rep's true containment.
+  let corpusValueContainmentLowerBound = 0;
+  for (const row of sharedById.values()) {
+    const lb = containment(row.shared, targetCount, Math.max(1, row.wordCount - 4));
+    if (lb > corpusValueContainmentLowerBound) corpusValueContainmentLowerBound = lb;
+  }
+
+  // --- Family-relevant partition (mathematically safe pruning) ------------
+  // resolveCorpusArticleFamily can ONLY act on a candidate that is either
+  //   (a) the exact canonical-hash match  -> EXACT_DUPLICATE, or
+  //   (b) LENGTH-COMPATIBLE with the submission AND has containment >= the
+  //       edited-version floor  -> EDITED_VERSION.
+  // Both (a) and (b)'s length gate are decidable from step-1 data alone
+  // (canonical_sha256 and word_count are on every row). A length-incompatible
+  // non-exact row is discarded by resolveCorpusArticleFamily's own
+  // `isCorpusLengthCompatible(...) continue` — it can never change the family
+  // decision no matter its containment — so it is dropped here BEFORE the
+  // (potentially large) per-candidate total-shingle lookup. This is the
+  // provably-safe bound the removed raw-shared pre-cap was not: it cannot
+  // discard an EXACT_DUPLICATE or any EDITED_VERSION-capable candidate.
+  //
+  // Length-incompatible non-exact rows are dropped from `candidates` here
+  // (they can never change resolveCorpusArticleFamily's result), but their
+  // corpus-value contribution is preserved via corpusValueContainmentLowerBound
+  // computed above — so computeEvaluationCore still sees them.
+  const lengthFloor = DEFAULT_CORPUS_FAMILY_THRESHOLDS.lengthCompatibilityFloor.value;
+  const familyRelevant = [...sharedById.values()].filter((row) =>
+    !target ||
+    row.canonicalSha256 === target.canonicalSha256 ||
+    isCorpusLengthCompatible(target.wordCount, row.wordCount, lengthFloor),
+  );
+  if (familyRelevant.length === 0) return { candidates: [], corpusValueContainmentLowerBound };
+
+  // --- Step 2: total shingle COUNT per family-relevant candidate, chunked -
+  const relevantIds = familyRelevant.map((row) => row.id);
+  const totalById = new Map<string, number>();
+  for (let offset = 0; offset < relevantIds.length; offset += ACCEPTED_SHINGLE_IN_CHUNK_SIZE) {
+    const chunk = relevantIds.slice(offset, offset + ACCEPTED_SHINGLE_IN_CHUNK_SIZE);
+    const placeholders = chunk.map(() => "?").join(",");
+    const res = await exec.execute({
+      sql: `SELECT accepted_representation_id AS id, COUNT(*) AS total
+            FROM corpus_admission_accepted_shingles
+            WHERE fingerprint_version = ? AND accepted_representation_id IN (${placeholders})
+            GROUP BY accepted_representation_id`,
+      args: [CORPUS_ADMISSION_FINGERPRINT_VERSION, ...chunk],
+    });
+    for (const row of res.rows as unknown as { id: string; total: number | bigint }[]) totalById.set(row.id, Number(row.total));
+  }
+
+  // --- Step 3: rank by resolveCorpusArticleFamily's own priority, then cap -
+  const ranked = familyRelevant.map((row) => {
+    const total = totalById.get(row.id) ?? 0;
     return {
-      sourceRef: row.source_ref,
-      canonicalSha256: row.canonical_sha256,
-      wordCount: Number(row.word_count),
-      containment: containment(shared, targetCount, candidateTotal),
+      candidate: {
+        sourceRef: row.sourceRef,
+        canonicalSha256: row.canonicalSha256,
+        wordCount: row.wordCount,
+        containment: containment(row.shared, targetCount, total),
+      } satisfies CorpusFamilyCandidate,
+      id: row.id,
+      shared: row.shared,
+      exact: target ? row.canonicalSha256 === target.canonicalSha256 : false,
+      lengthCompatible: target ? isCorpusLengthCompatible(target.wordCount, row.wordCount, lengthFloor) : true,
     };
   });
+
+  ranked.sort((a, b) =>
+    (b.exact ? 1 : 0) - (a.exact ? 1 : 0) ||
+    (b.lengthCompatible ? 1 : 0) - (a.lengthCompatible ? 1 : 0) ||
+    b.candidate.containment - a.candidate.containment ||
+    b.shared - a.shared ||
+    (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+  );
+
+  return {
+    candidates: ranked.slice(0, MAX_ACCEPTED_FAMILY_CANDIDATES).map((r) => r.candidate),
+    corpusValueContainmentLowerBound,
+  };
 }
 
 /** Exact-hash-only lookup (no shingle scan needed) — used inside the write transaction as the first, cheapest re-check. */
@@ -327,10 +484,11 @@ async function computeEvaluationCore(client: Client, input: InternalEvaluationIn
   let bestContainmentAgainstCorpus: number | null = null;
 
   if (hardGate.passed && canonicalHash !== null && featureVector !== null && ownShingleHashes !== null) {
-    const [realCandidates, acceptedCandidates] = await Promise.all([
+    const [realCandidates, accepted] = await Promise.all([
       ownShingleHashes.size > 0 ? findCandidateCorpusRepresentations(client, ownShingleHashes) : Promise.resolve([]),
-      findAcceptedFamilyCandidates(client, ownShingleHashes, input.existingAcceptedRepresentationId),
+      findAcceptedFamilyCandidates(client, ownShingleHashes, input.existingAcceptedRepresentationId, { wordCount: featureVector.linguisticQuality.wordCount, canonicalSha256: canonicalHash }),
     ]);
+    const acceptedCandidates = accepted.candidates;
     const inBatchCandidates: CorpusFamilyCandidate[] = input.inBatchFamilyCandidates.map((entry) => ({
       sourceRef: entry.sourceRef,
       canonicalSha256: entry.canonicalSha256,
@@ -344,7 +502,15 @@ async function computeEvaluationCore(client: Client, input: InternalEvaluationIn
     ];
 
     family = resolveCorpusArticleFamily({ canonicalSha256: canonicalHash, wordCount: featureVector.linguisticQuality.wordCount }, familyCandidates);
-    bestContainmentAgainstCorpus = familyCandidates.length > 0 ? familyCandidates.reduce((max, c) => Math.max(max, c.containment), 0) : null;
+    // bestContainmentAgainstCorpus folds in findAcceptedFamilyCandidates'
+    // corpusValueContainmentLowerBound — a proven lower bound on the true
+    // max containment across EVERY matching accepted representation,
+    // length-incompatible ones included (see that function's own header
+    // comment for why the length-incompatible reps are absent from
+    // `candidates` yet still accounted for here).
+    const candidateMax = familyCandidates.length > 0 ? familyCandidates.reduce((max, c) => Math.max(max, c.containment), 0) : 0;
+    const anyContribution = familyCandidates.length > 0 || accepted.corpusValueContainmentLowerBound > 0;
+    bestContainmentAgainstCorpus = anyContribution ? Math.max(candidateMax, accepted.corpusValueContainmentLowerBound) : null;
   }
 
   const corpusValueScoreResult = computeCorpusValueScore(bestContainmentAgainstCorpus);
@@ -599,7 +765,10 @@ async function acceptWithAtomicDedupCriticalSection(input: InternalEvaluationInp
           return record;
         }
 
-        const nearDupCandidates = await findAcceptedFamilyCandidates(tx, ownShingleHashes);
+        // In-transaction re-check only needs the family verdict — corpus
+        // value is never (re-)computed here — so the corpusValueContainmentLowerBound
+        // half of the result is intentionally ignored.
+        const { candidates: nearDupCandidates } = await findAcceptedFamilyCandidates(tx, ownShingleHashes, null, { wordCount, canonicalSha256: canonicalHash });
         const nearDupFamily = resolveCorpusArticleFamily({ canonicalSha256: canonicalHash, wordCount }, nearDupCandidates);
         if (nearDupFamily.relation === "EDITED_VERSION") {
           await tx.rollback();

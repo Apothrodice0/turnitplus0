@@ -48,7 +48,15 @@ export const DEFAULT_CORPUS_FAMILY_THRESHOLDS: CorpusFamilyThresholds = {
   lengthCompatibilityFloor: { value: 0.7, status: "ENGINEERING_DEFAULT", rationale: "Placeholder — keeps a short excerpt/abstract from resolving as 'the same article' as a much longer work it partially overlaps, since high containment alone does not distinguish those two cases." },
 };
 
-function lengthCompatible(wordCountA: number, wordCountB: number, floor: number): boolean {
+/**
+ * The exact "are these two documents close enough in length to be the same
+ * article" test resolveCorpusArticleFamily applies to every EDITED_VERSION
+ * candidate. Exported so lib/corpus-admission-gate.ts's findAcceptedFamilyCandidates
+ * can rank its 50-candidate cap by the same predicate the resolver will
+ * itself use — a length-incompatible candidate the resolver would discard
+ * must never evict a length-compatible one the resolver would act on.
+ */
+export function isCorpusLengthCompatible(wordCountA: number, wordCountB: number, floor: number): boolean {
   if (wordCountA <= 0 || wordCountB <= 0) return false;
   return Math.min(wordCountA, wordCountB) / Math.max(wordCountA, wordCountB) >= floor;
 }
@@ -63,7 +71,7 @@ export function resolveCorpusArticleFamily(
 
   let best: { candidate: CorpusFamilyCandidate; containment: number } | null = null;
   for (const candidate of candidates) {
-    if (!lengthCompatible(target.wordCount, candidate.wordCount, thresholds.lengthCompatibilityFloor.value)) continue;
+    if (!isCorpusLengthCompatible(target.wordCount, candidate.wordCount, thresholds.lengthCompatibilityFloor.value)) continue;
     const value = candidate.containment;
     if (value >= thresholds.editedVersionContainmentFloor.value && (best === null || value > best.containment)) {
       best = { candidate, containment: value };
