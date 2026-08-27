@@ -6648,6 +6648,22 @@ main.report-main {
 .developer-lookup button { padding: 8px 16px; border-radius: 6px; border: none; background: var(--blue); color: #fff; font-size: 13px; cursor: pointer; }
 .developer-lookup button:disabled { opacity: .6; cursor: default; }
 
+/* Debug workspace — "Clear my rooms" (app/developer/page.tsx). Same visual
+   language as .developer-lookup; the confirm button is the only red accent
+   on the developer dashboard. */
+.developer-debug-workspace { margin-top: 36px; border-top: 1px solid var(--soft-line); padding-top: 22px; }
+.developer-debug-workspace button {
+  padding: 8px 16px; border-radius: 6px; border: 1px solid var(--line);
+  background: #f7f9fa; color: #43525a; font-size: 13px; cursor: pointer;
+}
+.developer-debug-workspace button:disabled { opacity: .6; cursor: default; }
+.developer-debug-plan { margin-top: 12px; font-size: 13px; }
+.developer-debug-plan p { margin: 4px 0; }
+.developer-debug-actions { display: flex; gap: 8px; margin-top: 12px; }
+.developer-debug-workspace .developer-debug-danger { background: #c5384c; border-color: #c5384c; color: #fff; }
+.developer-debug-done { margin-top: 12px; font-size: 13px; color: var(--sidebar); }
+.developer-debug-error { margin-top: 12px; font-size: 13px; color: #c5384c; }
+
 /* Admin corpus dashboard's filter form only (3 fields vs. the shared
    .developer-lookup pattern's 1) — scoped to its own class rather than
    .developer-lookup itself so app/developer/lookup's unrelated single-input

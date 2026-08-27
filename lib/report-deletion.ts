@@ -1,4 +1,5 @@
 import type { Client } from "@libsql/client";
+import { isRepresentationActivelyPromoted } from "./user-submission-corpus";
 
 /**
  * Privacy hardening (production audit fix): completes report deletion by
@@ -24,7 +25,19 @@ import type { Client } from "@libsql/client";
  *    account's still-live report (EXACT_CANONICAL_DUPLICATE) or by a
  *    different report of this same account — deleting shared text out from
  *    under a live reference would be the exact bug this function exists to
- *    avoid on the other end.
+ *    avoid on the other end. With
+ *    options.preserveActivelyPromotedRepresentations set (the developer
+ *    "Clear my rooms" debug reset — app/api/developer/reset-rooms/route.ts),
+ *    a representation that is ALSO backed by a live, non-revoked 'indexed'
+ *    corpus-admission promotion is additionally kept even when it has no
+ *    remaining corpus_submission_references row: an ACCEPTed + promoted
+ *    representation is durable corpus content (lib/corpus-admission-promotion.ts),
+ *    still matched against via corpus_admission_promotions (never via a
+ *    submission reference — a promoted representation structurally never has
+ *    one), so removing it would silently drop a live matching source and
+ *    would also hit corpus_admission_promotions.representation_id's
+ *    ON DELETE NO ACTION constraint. Default (unset) keeps the exact prior
+ *    behavior for the DELETE /api/reports/[id] and account-deletion paths.
  *  - provenance_sources / discovery_attempts rows whose document_identity_id
  *    pointed here: ON DELETE SET NULL per their own schema definition
  *    (db/schema.ts) — they describe EXTERNAL candidate sources, never this
@@ -52,6 +65,7 @@ export type DeleteReportDocumentDataResult = {
 export async function deleteReportDocumentData(
   client: Client,
   documentIdentityId: string | null,
+  options: { preserveActivelyPromotedRepresentations?: boolean } = {},
 ): Promise<DeleteReportDocumentDataResult> {
   if (!documentIdentityId) {
     return { identityDeleted: false, representationDeleted: false };
@@ -77,11 +91,20 @@ export async function deleteReportDocumentData(
     });
     const remainingCount = Number((remaining.rows[0] as unknown as { cnt: number | bigint }).cnt);
     if (remainingCount === 0) {
-      const representationDelete = await client.execute({
-        sql: "DELETE FROM corpus_document_representations WHERE id = ?",
-        args: [representationId],
-      });
-      representationDeleted = representationDelete.rowsAffected > 0;
+      // Debug-reset guard: never remove a representation that is still a
+      // live promoted corpus-matching source just because this developer's
+      // own (now-deleted) submission reference was its last one — see this
+      // function's own header comment.
+      const keepAsPromoted =
+        options.preserveActivelyPromotedRepresentations === true &&
+        (await isRepresentationActivelyPromoted(client, representationId));
+      if (!keepAsPromoted) {
+        const representationDelete = await client.execute({
+          sql: "DELETE FROM corpus_document_representations WHERE id = ?",
+          args: [representationId],
+        });
+        representationDeleted = representationDelete.rowsAffected > 0;
+      }
     }
   }
 
