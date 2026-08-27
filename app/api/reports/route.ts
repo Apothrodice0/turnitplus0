@@ -58,6 +58,35 @@ function isNonEmptyString(value: unknown): value is string {
 // real generation, so a first-ever write, or a failed finalization's
 // unenriched payload, can never regress an already-good persisted value —
 // it simply keeps what was already there instead.
+//
+// AI score / pending-state consistency fix (upstream persistence half):
+// that generation guard protects the WHOLE payload_json blob, similarity
+// AND AI fields alike — but the two are genuinely independent pipelines.
+// The exact production split (room card "0% AI" / detail page "AI report
+// pending" for report 1787833395119): the AI-enrichment resave carries a
+// freshly-completed payload.aiAnalysis AND updates the flat ai_score/
+// ai_tone/ai_status columns (separate args, not under this guard), but its
+// own write-time similarity finalization transiently failed, so its
+// payload has no unifiedSimilarityGeneration — the guard then keeps the
+// existing (generation-stamped) payload, which never had aiAnalysis, while
+// the columns still moved to 'ready' + a real score. The nested CASE below
+// closes that: when the guard keeps the existing payload BECAUSE the
+// incoming similarity generation is stale/missing, and the incoming
+// payload carries a real aiAnalysis, that aiAnalysis (and its paired raw
+// aiScore — written together by saveEnrichedAiResult) is merged into the
+// retained authoritative payload via json_set. Nothing else is touched:
+// the retained payload's unifiedSimilarity / unifiedSimilarityGeneration /
+// every other field stay byte-for-byte as they were, so a stale similarity
+// resave still cannot overwrite newer similarity data (json_extract of a
+// JSON object carries the JSON subtype, so json_set inserts it AS JSON,
+// never a re-quoted string). An incoming payload WITHOUT an aiAnalysis
+// (a similarity-only resave, or the still-processing first save) hits the
+// inner ELSE and leaves the retained payload — including any existing
+// aiAnalysis — completely untouched. The first WHEN (a 'failed' resave
+// against an already-'ready' row) is unchanged and never merges: that
+// incoming aiAnalysis is a genuine failure result that must not clobber
+// the good one, exactly as the ai_score/ai_tone/ai_status CASEs above
+// already refuse it.
 // Exported so tests/report-write-time-finalization.test.mjs's own SIM-04
 // concurrency-guard test can exercise this EXACT SQL text directly — never a
 // hand-copied duplicate that could silently drift from what production
@@ -76,7 +105,12 @@ export const SAVE_REPORT_SQL = `INSERT INTO saved_reports (id, device_key, submi
         ai_status = CASE WHEN saved_reports.ai_status = 'ready' AND excluded.ai_status = 'failed' THEN saved_reports.ai_status ELSE excluded.ai_status END,
         payload_json = CASE
           WHEN saved_reports.ai_status = 'ready' AND excluded.ai_status = 'failed' THEN saved_reports.payload_json
-          WHEN COALESCE(json_extract(saved_reports.payload_json, '$.unifiedSimilarityGeneration'), -1) > COALESCE(json_extract(excluded.payload_json, '$.unifiedSimilarityGeneration'), -1) THEN saved_reports.payload_json
+          WHEN COALESCE(json_extract(saved_reports.payload_json, '$.unifiedSimilarityGeneration'), -1) > COALESCE(json_extract(excluded.payload_json, '$.unifiedSimilarityGeneration'), -1)
+            THEN CASE
+              WHEN json_extract(excluded.payload_json, '$.aiAnalysis') IS NOT NULL
+                THEN json_set(saved_reports.payload_json, '$.aiAnalysis', json_extract(excluded.payload_json, '$.aiAnalysis'), '$.aiScore', json_extract(excluded.payload_json, '$.aiScore'))
+              ELSE saved_reports.payload_json
+            END
           ELSE excluded.payload_json
         END,
         user_id = COALESCE(excluded.user_id, saved_reports.user_id),

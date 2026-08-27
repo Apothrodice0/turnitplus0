@@ -42,7 +42,16 @@ type OwnedReportResult =
   // archive-only" case (a live CORPUS_SOURCE_MATCHING_ENABLED rollback) so
   // primarySimilarityScore(payload) itself agrees with this status, not
   // just the label around it.
-  | { status: "found"; payload: SimilarityReport; aiStatus: "processing" | "ready" | "failed"; similarityStatus: "resolved" | "stale" | "pending" | "failed" }
+  // aiScore/aiTone: the flat saved_reports.ai_score / ai_tone columns, passed
+  // through verbatim. These are the AUTHORITATIVE AI headline signal — the
+  // calibrated display value frozen by saveEnrichedAiResult the moment
+  // analysis completed (never SimilarityReport.aiScore, which is the raw
+  // human-reference percentile). payload.aiAnalysis can legitimately lag
+  // these columns (see lib/ai-display-state.ts's own header comment for the
+  // exact "0% AI on the room card / AI report pending on this page" split
+  // this closes), so ReportDetailShell resolves its AI state from these plus
+  // aiAnalysis-as-refinement, not from aiAnalysis alone.
+  | { status: "found"; payload: SimilarityReport; aiStatus: "processing" | "ready" | "failed"; aiScore: number | null; aiTone: string | null; similarityStatus: "resolved" | "stale" | "pending" | "failed" }
   | { status: "not-found-for-session" }
   | { status: "no-session" }
   | { status: "rate-limited"; retryAfterSeconds: number };
@@ -134,7 +143,7 @@ const loadOwnedReport = cache(async (id: string): Promise<OwnedReportResult> => 
       if (payload.unifiedSimilarity && sessionUser.role !== "admin") {
         payload.unifiedSimilarity = { ...payload.unifiedSimilarity, contributions: [] };
       }
-      return { status: "found", payload, aiStatus, similarityStatus: display.status };
+      return { status: "found", payload, aiStatus, aiScore: row.ai_score, aiTone: row.ai_tone, similarityStatus: display.status };
     } catch {
       return { status: "not-found-for-session" };
     }
@@ -199,6 +208,8 @@ export default async function ReportDetailPage({
       mode={mode}
       initialReport={result.status === "found" ? result.payload : null}
       initialAiStatus={result.status === "found" ? result.aiStatus : null}
+      initialAiScore={result.status === "found" ? result.aiScore : null}
+      initialAiTone={result.status === "found" ? result.aiTone : null}
       initialSimilarityStatus={result.status === "found" ? result.similarityStatus : null}
       requiresClientResolution={result.status === "no-session"}
       backRoom={backRoom}

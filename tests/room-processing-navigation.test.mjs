@@ -166,7 +166,13 @@ test('NOT REVEALED: the loading message is pipeline-agnostic — "Analysis in pr
 
 test('READY (fully revealed): both the real AI score and the real similarity score are shown, the AI tile as a working link into the full report', async () => {
   const branch = extractBranch(await readRoomShell(), READY_NEEDLE);
-  assert.match(branch, /<strong className="room-metric-value">\{occupant\.report\.aiScore \?\? "—"\}%<\/strong>/, "the ready branch must reveal the real AI score");
+  // The AI tile resolves through the one shared interpreter
+  // (lib/ai-display-state.ts, via aiMetricDisplay) so it can never disagree
+  // with the My Reports list row or the report detail page — the exact
+  // production split this fixes (room card "0% AI" vs detail "AI report
+  // pending" for the same report).
+  assert.match(branch, /const ai = aiMetricDisplay\(occupant\.report\);/, "the ready branch must resolve its AI tile through the shared aiMetricDisplay helper");
+  assert.match(branch, /<strong className="room-metric-value">\{ai\.value\}<\/strong>/, "the ready branch must reveal the resolved AI score");
   // Release-hardening audit finding SIM-01, extracted into its own component
   // by SIM-04 (acceptance-check hardening — see room-page-shell.tsx's own
   // SimilarityMetricTile comment for why): the ready branch delegates its
@@ -238,8 +244,15 @@ test("DIRECT REPORT URL: the report page derives its own real AI-lifecycle statu
   const page = await readFile(new URL("../app/reports/[id]/page.tsx", import.meta.url), "utf8");
   assert.match(page, /import \{ deriveRoomStatus \} from "@\/lib\/report-rooms";/);
   assert.match(page, /const aiStatus = deriveRoomStatus\(row\.ai_score, row\.ai_status\);/);
-  assert.match(page, /return \{ status: "found", payload, aiStatus, similarityStatus: display\.status \};/);
+  // The AI-lifecycle status still drives the reveal gate; the flat
+  // ai_score/ai_tone columns are now ALSO passed through, verbatim, as the
+  // authoritative AI headline signal (see lib/ai-display-state.ts) so the
+  // detail page can never disagree with the room card that reads the same
+  // columns.
+  assert.match(page, /return \{ status: "found", payload, aiStatus, aiScore: row\.ai_score, aiTone: row\.ai_tone, similarityStatus: display\.status \};/);
   assert.match(page, /initialAiStatus=\{result\.status === "found" \? result\.aiStatus : null\}/);
+  assert.match(page, /initialAiScore=\{result\.status === "found" \? result\.aiScore : null\}/);
+  assert.match(page, /initialAiTone=\{result\.status === "found" \? result\.aiTone : null\}/);
 
   const shell = await readFile(new URL("../app/reports/[id]/report-detail-shell.tsx", import.meta.url), "utf8");
   assert.match(shell, /initialAiStatus: DetailAiStatus;/, "the shell must accept the real status as a typed prop");

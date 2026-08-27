@@ -322,6 +322,14 @@ test("Scope check: this fix adds no new import of any scoring/corpus-admission/r
     "@/components/reports/document-upload-panel",
     "@/lib/ai-core",
     "@/lib/ai-core",
+    // AI score / pending-state consistency fix: the room card's AI tile now
+    // resolves through the one shared display-state interpreter every
+    // surface uses (room card, My Reports list row, report detail page), so
+    // they can never disagree the way the production "0% AI" vs "AI report
+    // pending" split did. Pure presentation logic — no scoring, corpus,
+    // retention, or PDF work — so it does not cross this scope check's
+    // actual boundary (the forbidden-substring list above).
+    "@/lib/ai-display-state",
     "@/lib/ai-model-prep",
     "@/lib/document-check-pipeline",
     "@/lib/extracted-text-normalization",

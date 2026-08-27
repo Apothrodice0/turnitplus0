@@ -2,7 +2,7 @@ import type { WebCheckResult } from "@/lib/web-check-core";
 import type { ReportSummary } from "@/lib/reports-remote";
 import type { AcademicSearchStatus, ExternalAcademicEvidence } from "@/lib/academic-search/types";
 import type { UnifiedSimilarityResult } from "@/lib/unified-similarity";
-import { AI_SCORING_VERSION, calibratedAiDisplaySignal } from "@/lib/ai-core";
+import { resolveAiDisplayState } from "@/lib/ai-display-state";
 import type { DetectedLanguage } from "@/lib/similarity-core";
 
 export type SourceType = "Internet" | "Publication";
@@ -470,9 +470,34 @@ export function sourceMatchedWordCount(source: SourceMatch, report: SimilarityRe
   return source.matchedWords ?? Math.round((source.percent / 100) * report.wordCount);
 }
 
-export function aiSignalDisplay(report: SimilarityReport): AiSignalDisplay {
-  const analysis = report.aiAnalysis;
-  if (analysis?.status === "unsupported") {
+/**
+ * The presentation wrapper around resolveAiDisplayState (lib/ai-display-state.ts) —
+ * that function is the single authoritative interpreter of a report's AI
+ * state; this one only maps its verdict onto the AiSignalDisplay copy the
+ * report UIs render.
+ *
+ * `persisted` carries the flat saved_reports.ai_status / ai_score / ai_tone
+ * columns when the caller has them (the report detail page, via
+ * app/reports/[id]/page.tsx). Those columns are the authoritative AI
+ * lifecycle + headline-score signal; `report.aiAnalysis` can legitimately
+ * lag them (see resolveAiDisplayState's own header comment for exactly how
+ * and why — the production "0% AI" vs "AI report pending" split). Called
+ * with no `persisted` argument (buildReportSummary, and any surface that
+ * genuinely only has the payload) the behaviour is byte-identical to the
+ * previous inline implementation: the in-payload analysis is the only
+ * source, and its absence resolves to "AI report pending".
+ */
+export function aiSignalDisplay(
+  report: SimilarityReport,
+  persisted?: { aiStatus?: "processing" | "ready" | "failed" | null; aiScore?: number | null; aiTone?: string | null },
+): AiSignalDisplay {
+  const resolution = resolveAiDisplayState({
+    aiStatus: persisted?.aiStatus ?? null,
+    aiScore: persisted?.aiScore ?? null,
+    aiTone: persisted?.aiTone ?? null,
+    aiAnalysis: report.aiAnalysis ?? null,
+  });
+  if (resolution.state === "not_eligible") {
     return {
       value: null,
       tone: "unavailable",
@@ -481,21 +506,16 @@ export function aiSignalDisplay(report: SimilarityReport): AiSignalDisplay {
       range: "No AI result",
     };
   }
-  if (analysis?.status === "error") {
+  if (resolution.state === "failed") {
     return {
       value: null,
       tone: "unavailable",
       label: "Analysis unavailable",
-      detail: analysis.error ?? "The local AI analysis did not finish.",
+      detail: report.aiAnalysis?.error ?? "The local AI analysis did not finish.",
       range: "Try again",
     };
   }
-  const normalizedSignal = analysis?.status === "complete"
-    && analysis.scoringVersion === AI_SCORING_VERSION
-    && typeof analysis.medianLogOdds === "number"
-    ? calibratedAiDisplaySignal(analysis.medianLogOdds)
-    : null;
-  if (normalizedSignal === null) {
+  if (resolution.state === "pending") {
     return {
       value: null,
       tone: "unavailable",
@@ -504,7 +524,8 @@ export function aiSignalDisplay(report: SimilarityReport): AiSignalDisplay {
       range: "No result yet",
     };
   }
-  const value = normalizedSignal.score;
+  // state === "complete" — resolution.score is always a real number here.
+  const value = resolution.score ?? 0;
   const scoreDetail = "The score is calculated from the language patterns found across the document's analyzed passages.";
   if (value < 20) {
     return {

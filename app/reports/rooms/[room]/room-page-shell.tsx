@@ -9,6 +9,7 @@ import { ROOM_CYCLE_MS } from "@/lib/report-rooms";
 import { storeReportBestEffort, getStoredReportById } from "@/lib/report-store";
 import { persistAiCompletion } from "@/lib/report-ai-completion";
 import { buildReportSummary, type AiAnalysis, type SimilarityReport } from "@/lib/report-types";
+import { resolveAiDisplayState } from "@/lib/ai-display-state";
 import { similarityScoreBand } from "@/lib/ai-core";
 import {
   analyzeAcademicEvidence,
@@ -212,13 +213,23 @@ function formatDateTime(iso: string): string {
   return new Date(iso).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" });
 }
 
-/** Mirrors components/reports/report-history-row.tsx's own labeling, kept local here since this page builds its own compact metric cards rather than reusing that component's row layout. */
-function aiToneLabel(aiScore: number | null, aiTone: string | null): string {
-  if (aiScore === null) return "Pending";
-  if (aiTone === "low") return "Low AI indicators";
-  if (aiTone === "review") return "Moderate AI indicators";
-  if (aiTone === "high") return "Strong AI indicators";
-  return "Pending";
+/**
+ * The room card's AI Detection tile, resolved through the one shared
+ * interpreter (lib/ai-display-state.ts) so it can never disagree with the
+ * My Reports list row or the report detail page. Only ever rendered inside
+ * the `occupant.status === "ready"` branch, where deriveRoomStatus has
+ * already established a genuine, non-null completed score — so aiStatus is
+ * passed as "ready" and a missing score falls to a neutral "Pending" label
+ * rather than ever rendering as "0%".
+ */
+function aiMetricDisplay(report: ReportSummary): { value: string; label: string; toneClass: string } {
+  const ai = resolveAiDisplayState({ aiStatus: "ready", aiScore: report.aiScore, aiTone: report.aiTone });
+  if (ai.state === "complete" && ai.score !== null) {
+    const label =
+      ai.tone === "low" ? "Low AI indicators" : ai.tone === "review" ? "Moderate AI indicators" : "Strong AI indicators";
+    return { value: `${ai.score}%`, label, toneClass: ai.tone };
+  }
+  return { value: "—", label: "Pending", toneClass: "unavailable" };
 }
 
 /**
@@ -1049,11 +1060,16 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
             </div>
 
             <div className="room-report-metrics">
-              <Link href={`/reports/${occupant.report.id}?mode=ai&room=${room}`} className={`room-metric room-metric-${occupant.report.aiTone ?? "unavailable"}`}>
-                <span className="room-metric-label">AI Detection</span>
-                <strong className="room-metric-value">{occupant.report.aiScore ?? "—"}%</strong>
-                <span className="room-metric-sub">{aiToneLabel(occupant.report.aiScore, occupant.report.aiTone)}</span>
-              </Link>
+              {(() => {
+                const ai = aiMetricDisplay(occupant.report);
+                return (
+                  <Link href={`/reports/${occupant.report.id}?mode=ai&room=${room}`} className={`room-metric room-metric-${ai.toneClass}`}>
+                    <span className="room-metric-label">AI Detection</span>
+                    <strong className="room-metric-value">{ai.value}</strong>
+                    <span className="room-metric-sub">{ai.label}</span>
+                  </Link>
+                );
+              })()}
               <SimilarityMetricTile report={occupant.report} room={room} />
               <button className="room-metric" type="button" onClick={() => handleDownloadReceipt(occupant.report!.id)} disabled={downloadingReceipt}>
                 <span className="room-metric-label">Receipt</span>

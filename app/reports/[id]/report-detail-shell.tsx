@@ -34,6 +34,8 @@ export function ReportDetailShell({
   id,
   initialReport,
   initialAiStatus,
+  initialAiScore,
+  initialAiTone,
   initialSimilarityStatus,
   requiresClientResolution,
   mode,
@@ -53,6 +55,23 @@ export function ReportDetailShell({
    * isAiTerminal's own comment in lib/report-detail-poll.ts).
    */
   initialAiStatus: DetailAiStatus;
+  /**
+   * The flat saved_reports.ai_score / ai_tone columns (see
+   * app/reports/[id]/page.tsx's own comment). These are the authoritative AI
+   * headline signal — the calibrated display value frozen when analysis
+   * completed — and are what lib/ai-display-state.ts's resolveAiDisplayState
+   * reads FIRST, falling back to initialReport.aiAnalysis only as
+   * refinement. Without this the page rendered its AI headline purely from
+   * aiAnalysis, so a row whose payload_json lost its aiAnalysis (a
+   * stale-generation payload overwrite race — see resolveAiDisplayState's
+   * header) showed "AI report pending" while the room card, reading these
+   * same columns, correctly showed the real score. null for the
+   * anonymous/device-key path (no server-computed columns to hand over —
+   * matches initialAiStatus's own convention; that path's report is fully
+   * computed client-side and always carries a live aiAnalysis anyway).
+   */
+  initialAiScore: number | null;
+  initialAiTone: string | null;
   /**
    * Release-hardening audit finding SIM-04: the SAME "resolved"/"stale"/
    * "pending" status lib/report-primary-similarity.ts's
@@ -373,7 +392,12 @@ export function ReportDetailShell({
   const canSeeSourceBreakdown = Boolean(report.viewerIsAdmin);
   const primaryLabel = primaryResultLabel(report);
   const similarityVerdict = similarityScoreBand(primaryScore);
-  const aiSignal = aiSignalDisplay(report);
+  // Resolve the AI headline from the authoritative flat columns first (the
+  // calibrated value frozen at completion), with report.aiAnalysis as
+  // refinement — never from aiAnalysis alone, which can lag those columns.
+  // `aiStatus` here is the live state (initialAiStatus, then whatever the
+  // background poll last confirmed). See lib/ai-display-state.ts.
+  const aiSignal = aiSignalDisplay(report, { aiStatus, aiScore: initialAiScore, aiTone: initialAiTone });
   const academicEvidenceCount = report.externalAcademicEvidence ? dedupeExternalAcademicEvidence(report.externalAcademicEvidence).length : 0;
   const reportDate = new Date(report.created).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" });
 
@@ -471,7 +495,7 @@ export function ReportDetailShell({
 
       <div className="report-workspace">
         {mode === "ai" ? (
-          <AiReport report={report} />
+          <AiReport report={report} signal={aiSignal} />
         ) : (
           <>
             {resultTab === "full" && (
@@ -541,7 +565,7 @@ export function ReportDetailShell({
       </div>
 
       <div className="print-report-bundle">
-        {mode === "ai" ? <AiReport report={report} printMode /> : <>
+        {mode === "ai" ? <AiReport report={report} signal={aiSignal} printMode /> : <>
           <OverviewReport report={report} similarityStatus={effectiveSimilarityStatus} />
           <SubmissionReport report={report} />
           <SourcesReport report={report} />
