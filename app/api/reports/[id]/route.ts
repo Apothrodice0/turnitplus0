@@ -10,6 +10,7 @@ import { resolvePrimarySimilaritySummary, persistRefreshedSimilarity } from '../
 import { deleteReportDocumentData } from '../../../../lib/report-deletion';
 import { deleteReportCorpusAdmissionData } from '../../../../lib/corpus-admission-report-integration';
 import { runHistoricalMatchShadowEvaluation } from '../../../../lib/e8p-shadow-evaluation';
+import { runDeviceProvenanceShadowEvaluation } from '../../../../lib/device-provenance-shadow';
 import { getExperimentalHistoricalMatchForDisplay } from '../../../../lib/e8p-visibility';
 import { getReuseContextEligibility } from '../../../../lib/e8s-report-integration';
 import { runAfterResponse } from '../../../../lib/run-after-response';
@@ -281,6 +282,25 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
           const deferredClient = await getReportsDbClient();
           try {
             await runHistoricalMatchShadowEvaluation(deferredClient, {
+              reportDeviceKey: deviceKeyForShadow,
+              reportId: id,
+              accountId,
+              rawText: rawTextForShadow,
+              productionResult: historicalSubmissionMatch,
+            });
+            // Device Passport Phase 4 — prior-submission SHADOW: same deferred,
+            // best-effort, never-throws, measurement-only pattern as the
+            // historical-match shadow above. It looks up the report's own
+            // immutable upload provenance INTERNALLY (this route's read path
+            // itself never selects or serialises any passport column — see
+            // tests/device-passport-privacy.test.mjs) and records only bounded
+            // telemetry to historical_match_shadow_evaluations under its own
+            // distinct policy_version. Never changes historicalSubmissionMatch
+            // (already resolved and on its way to the response), the unified
+            // score, or any relationship classification. Inert unless the
+            // feature flag is on AND the report was uploaded with a verified
+            // passport.
+            await runDeviceProvenanceShadowEvaluation(deferredClient, {
               reportDeviceKey: deviceKeyForShadow,
               reportId: id,
               accountId,
