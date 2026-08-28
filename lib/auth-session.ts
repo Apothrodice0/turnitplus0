@@ -167,10 +167,36 @@ export function clearSessionCookie(response: NextResponse): void {
  * reports onto a real account, run on every signup/login. Idempotent (a
  * repeat login matches nothing new) and can never take rows already claimed
  * by a different user (the user_id IS NULL guard).
+ *
+ * Also invalidates the historical-match snapshot of every report it claims.
+ * report_historical_match_snapshots is keyed on (report_device_key,
+ * report_id) only, never on the requester account, and a snapshot computed
+ * while the report was anonymous ran a BROADER search than the one that
+ * report is now entitled to as an owned report: matchAgainstUserSubmissionCorpus's
+ * own-account exclusion (excludeAccountId, lib/report-primary-similarity.ts)
+ * only engages once the report has an owning account, so an anonymous
+ * MATCHED could reference a promoted representation that is backed solely by
+ * THIS account's own admission(s) — which must be excluded as same-account
+ * the moment the report becomes theirs (lib/user-submission-corpus.ts's
+ * admissionEligibilitySql). Dropping the snapshot forces the next view to
+ * recompute under the new owner's own exclusion context. A raw DELETE here
+ * (rather than importing lib/report-historical-match.ts's own
+ * deleteHistoricalMatchSnapshot) keeps this module free of that file's
+ * matcher import chain — the same boundary lib/corpus-source-matching-flag.ts
+ * exists to preserve. Scoped to the rows this call is about to claim
+ * (user_id IS NULL for this device_key); a still-anonymous report whose
+ * snapshot is dropped by a failed claim simply recomputes to the identical
+ * anonymous result on next view, so ordering is not load-bearing.
  */
 export async function claimAnonymousReports(client: Client, userId: string, deviceKey: unknown): Promise<void> {
   if (typeof deviceKey !== "string" || deviceKey.trim().length === 0) return;
   try {
+    await client.execute({
+      sql: `DELETE FROM report_historical_match_snapshots
+            WHERE report_device_key = ?
+              AND report_id IN (SELECT id FROM saved_reports WHERE device_key = ? AND user_id IS NULL)`,
+      args: [deviceKey, deviceKey],
+    });
     await client.execute({
       sql: "UPDATE saved_reports SET user_id = ? WHERE device_key = ? AND user_id IS NULL",
       args: [userId, deviceKey],
