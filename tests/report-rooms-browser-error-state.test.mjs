@@ -13,13 +13,21 @@ import test from "node:test";
  * convention for components with no React test harness — the underlying
  * fetchReportRoomIndex contract itself is covered functionally in
  * tests/reports-remote-error-handling.test.mjs.
+ *
+ * Stale-room fix (2026-08): loadIndex() now paints the client cache then
+ * ALWAYS revalidates, routing the fetch result through the pure
+ * resolveRoomIndexFetch() decision. The error-state guarantee below is
+ * unchanged in intent — a failed fetch with nothing valid to show is still
+ * a distinct error state, never a silent empty list — only its wiring
+ * moved into that function (covered by
+ * tests/report-rooms-stale-reconciliation.test.mjs).
  */
 
 async function readComponent() {
   return readFile(new URL("../components/reports/report-rooms.tsx", import.meta.url), "utf8");
 }
 
-test("a failed index fetch sets a real error flag, distinct from loading and from a genuine empty/loaded index", async () => {
+test("a failed index fetch is a distinct error state (when nothing is cached), never a silent empty/loaded list", async () => {
   const source = await readComponent();
   const effectMatch = source.match(/async function loadIndex\(\) \{[\s\S]*?\n {4}\}/);
   assert.ok(effectMatch, "loadIndex must be found");
@@ -27,8 +35,24 @@ test("a failed index fetch sets a real error flag, distinct from loading and fro
 
   assert.match(body, /const result = await fetchReportRoomIndex\(\);/);
   assert.match(body, /if \(result\.ok\) \{/);
-  assert.match(body, /setRoomIndex\(result\.rooms\);/);
-  assert.match(body, /\} else \{\s*\n\s*setIndexError\(true\);\s*\n\s*\}/, "a failed fetch must set indexError, never fall through to setRoomIndex with empty/undefined data");
+  // setRoomIndex is GATED by resolveRoomIndexFetch's `rooms` (null on a
+  // failed fetch with no cache) — a `{ ok: false }` result with nothing to
+  // fall back on can never reach setRoomIndex with empty/undefined data.
+  assert.match(body, /const resolution = resolveRoomIndexFetch\(cached, result\);/);
+  assert.match(body, /if \(resolution\.rooms\) \{[\s\S]*?setRoomIndex\(/);
+  assert.doesNotMatch(body, /setRoomIndex\(result\.rooms\)/, "the fetch result is never rendered directly — it goes through resolveRoomIndexFetch");
+  assert.doesNotMatch(body, /setRoomIndex\(cached\)/, "the cache is never rendered before a successful fetch");
+  assert.match(body, /setIndexError\(resolution\.error\);/);
+
+  // resolveRoomIndexFetch itself (server-first): a successful fetch is
+  // authoritative; a failed fetch falls back to the cache if present, and is
+  // a real error state only when there is no cache at all.
+  const fnMatch = source.match(/export function resolveRoomIndexFetch\([\s\S]*?\n\}/);
+  assert.ok(fnMatch, "resolveRoomIndexFetch must be exported for testing");
+  const fn = fnMatch[0];
+  assert.match(fn, /if \(result\.ok\) return \{ rooms: result\.rooms, error: false \};/);
+  assert.match(fn, /if \(cached\) return \{ rooms: cached, error: false \};/, "a failed fetch falls back to the cache when one exists");
+  assert.match(fn, /return \{ rooms: null, error: true \};/, "a failed fetch with no cache is the genuine error state");
 });
 
 test("the error state renders before the loading/skeleton check, and never silently renders an empty room list", async () => {

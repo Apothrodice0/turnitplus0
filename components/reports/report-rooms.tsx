@@ -5,7 +5,7 @@ import type { MouseEvent } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { ChevronRight } from "lucide-react";
-import { fetchReportRoomIndex } from "@/lib/reports-remote";
+import { fetchReportRoomIndex, type RoomIndexFetchResult } from "@/lib/reports-remote";
 import { getCachedRoomIndex, setCachedRoomIndex } from "@/lib/report-rooms-cache";
 import type { RoomIndexEntry, RoomStatus } from "@/lib/report-rooms";
 
@@ -125,11 +125,43 @@ type Props = {
   onTotalCountChange: (total: number) => void;
 };
 
-function statusLabel(status: RoomStatus): string {
+export function statusLabel(status: RoomStatus): string {
   if (status === "ready") return "Report ready";
   if (status === "processing") return "Processing…";
   if (status === "failed") return "AI check failed — tap to retry";
   return "Ready for a new check";
+}
+
+/**
+ * Stale-display fix: the room index is cached client-side for 24h
+ * (lib/report-rooms-cache.ts), but that cache is NOT authoritative — a
+ * report can be deleted with no local invalidate event to clear it:
+ * account deletion or a developer "Clear (account) rooms" run from another
+ * session/device, single-report deletion, or simply the same account open
+ * in a second browser. An emptied room would then keep its green "Report
+ * ready · Last checked …" accent until the 24h TTL expired. The room's own
+ * page (app/reports/rooms/[room]/page.tsx) always reads saved_reports
+ * fresh, so it was already correct — only this list lagged.
+ *
+ * SERVER FIRST: loadIndex() below fetches the authoritative GET
+ * /api/reports/rooms (a lightweight, session-scoped, account-safe query —
+ * see that route's header comment) BEFORE rendering any room state, and
+ * this decides what to display:
+ *   - fetch ok            -> render the fresh server index (and refresh the cache).
+ *   - fetch failed + cache -> fall back to the cache (fetch-failure resilience only).
+ *   - fetch failed, none   -> the existing "couldn't load your rooms" error state.
+ * The cache is never rendered before a successful fetch — a short skeleton
+ * is shown instead, so a deleted report can never flash as "ready".
+ */
+export function resolveRoomIndexFetch(
+  cached: RoomIndexEntry[] | null,
+  result: RoomIndexFetchResult,
+): { rooms: RoomIndexEntry[] | null; error: boolean } {
+  // Server first — a successful fetch is the authoritative render.
+  if (result.ok) return { rooms: result.rooms, error: false };
+  // Fetch failed: the cache is a FALLBACK only here, never a pre-render.
+  if (cached) return { rooms: cached, error: false };
+  return { rooms: null, error: true };
 }
 
 function RoomRowSkeleton() {
@@ -211,23 +243,33 @@ export function ReportRoomsBrowser({ accountEmail, onTotalCountChange }: Props) 
   useEffect(() => {
     let cancelled = false;
     async function loadIndex() {
-      const cached = getCachedRoomIndex(accountEmail);
-      if (cached) {
-        setRoomIndex(cached);
-        setIndexLoading(false);
-        setIndexError(false);
-        return;
-      }
+      // SERVER FIRST. Never render the localStorage index before the
+      // authoritative fetch — a deleted report must not flash as green
+      // "Report ready". Clear any prior account's list and show a short
+      // skeleton while the fetch is in flight. The cache is read only
+      // AFTER the fetch, and used only if the fetch failed.
+      setRoomIndex(null);
       setIndexLoading(true);
       setIndexError(false);
+
       const result = await fetchReportRoomIndex();
+      // Race protection: if accountEmail changed or the component unmounted
+      // while this was in flight, this response belongs to the OLD account
+      // — drop it. React re-creates this effect (and its `cancelled`) per
+      // accountEmail, and `accountEmail` below is captured per-effect, so a
+      // stale response can neither be rendered nor written to another
+      // account's cache.
       if (cancelled) return;
+
+      const cached = getCachedRoomIndex(accountEmail);
+      const resolution = resolveRoomIndexFetch(cached, result);
       if (result.ok) {
         setCachedRoomIndex(accountEmail, result.rooms);
-        setRoomIndex(result.rooms);
-      } else {
-        setIndexError(true);
       }
+      if (resolution.rooms) {
+        setRoomIndex(resolution.rooms);
+      }
+      setIndexError(resolution.error);
       setIndexLoading(false);
     }
     loadIndex();
