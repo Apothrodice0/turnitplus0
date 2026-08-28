@@ -1,4 +1,5 @@
 import { getDeviceKey } from "./device-key";
+import { maybeAttestReportUpload, markDevicePassportReportSaved } from "./device-passport";
 import type { RoomIndexEntry } from "./report-rooms";
 
 export type ReportSummary = {
@@ -99,6 +100,16 @@ export type SaveReportRemoteResult =
 export async function saveReportRemote<T>(report: T, summary: ReportSummary, academicSearchDiagnosticsId?: number | null, room?: number): Promise<SaveReportRemoteResult> {
   try {
     const deviceKey = getDeviceKey();
+    // Device Passport (Phase 3): a cryptographic upload-provenance attestation.
+    // maybeAttestReportUpload attaches one only while this report has NOT yet
+    // been confirmed saved this browser session — so a first save that fails
+    // gets a fresh challenge + signature on the retry, and once a save
+    // succeeds (markDevicePassportReportSaved below) the AI-enrichment resave
+    // attaches nothing and makes no request. Fully fail-safe: resolves
+    // undefined for any reason (feature 404, unsupported browser, corrupt key,
+    // network/signing failure) and never throws, so it can never affect
+    // whether or how the report is saved.
+    const devicePassport = await maybeAttestReportUpload(summary.id, report);
     const response = await fetch("/api/reports", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -108,6 +119,7 @@ export async function saveReportRemote<T>(report: T, summary: ReportSummary, aca
         payload: report,
         academicSearchDiagnosticsId: academicSearchDiagnosticsId ?? null,
         ...(room !== undefined ? { room } : {}),
+        ...(devicePassport ? { devicePassport } : {}),
       }),
     });
     if (!response.ok) {
@@ -122,6 +134,10 @@ export async function saveReportRemote<T>(report: T, summary: ReportSummary, aca
       const roomOccupied = response.status === 409;
       return { ok: false, status: response.status, quotaExceeded, roomOccupied, error: body?.error, resetsAt: body?.resetsAt, cycleEndsAt: body?.cycleEndsAt };
     }
+    // The report is now durably saved server-side: any later resave of this id
+    // (AI enrichment) is definitively not a first save, so Device Passport
+    // must not build another attestation or request another challenge for it.
+    markDevicePassportReportSaved(summary.id);
     return { ok: true };
   } catch (error) {
     console.debug("Remote report save failed (local copy is unaffected).", {
