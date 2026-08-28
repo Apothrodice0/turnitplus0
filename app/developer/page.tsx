@@ -5,6 +5,7 @@ import { loadDeveloperGate } from "@/lib/developer-gate";
 import { getReportsDbClient } from "@/lib/reports-db";
 import { listRecentReportsForDeveloper } from "@/lib/developer-repo";
 import { DeveloperRoomReset } from "@/components/developer/room-reset";
+import { DeveloperAccountRoomReset } from "@/components/developer/account-room-reset";
 
 export const dynamic = "force-dynamic";
 
@@ -73,6 +74,7 @@ export default async function DeveloperOverviewPage() {
       </table>
 
       <DeveloperRoomReset />
+      <DeveloperAccountRoomReset />
     </main>
   );
 }

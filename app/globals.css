@@ -6664,6 +6664,22 @@ main.report-main {
 .developer-debug-done { margin-top: 12px; font-size: 13px; color: var(--sidebar); }
 .developer-debug-error { margin-top: 12px; font-size: 13px; color: #c5384c; }
 
+/* "Clear account rooms" — second, separate tool in the same Debug workspace
+   (app/developer/page.tsx). Its own .developer-debug-workspace top border
+   visually separates it from "Clear my rooms" above; never shares state or
+   markup with that button. */
+.developer-account-room-reset h3 { font-size: 14px; margin: 0 0 4px; color: var(--sidebar); text-transform: none; letter-spacing: 0; }
+.developer-account-room-reset-form { display: flex; gap: 8px; margin-top: 12px; max-width: 520px; }
+.developer-account-room-reset-form input {
+  flex: 1; padding: 8px 12px; border: 1px solid var(--line); border-radius: 6px; font-size: 13px;
+}
+.developer-account-room-reset-form button { white-space: nowrap; }
+.developer-account-room-reset-confirm { display: block; margin: 12px 0 4px; font-size: 13px; }
+.developer-account-room-reset-confirm input {
+  display: block; margin-top: 4px; width: 100%; max-width: 360px;
+  padding: 8px 12px; border: 1px solid var(--line); border-radius: 6px; font-size: 13px;
+}
+
 /* Admin corpus dashboard's filter form only (3 fields vs. the shared
    .developer-lookup pattern's 1) — scoped to its own class rather than
    .developer-lookup itself so app/developer/lookup's unrelated single-input
