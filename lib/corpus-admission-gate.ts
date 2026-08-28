@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Client, Transaction, InStatement, ResultSet } from "@libsql/client";
 import { canonicalizeText } from "./canonical-text";
 import { canonicalSha256 } from "./document-identity";
-import { corpusShingleHashes, findCandidateCorpusRepresentations } from "./user-submission-corpus";
+import { corpusShingleHashes, findCandidateCorpusRepresentations, CORPUS_SHINGLE_WRITE_BATCH_ROWS } from "./user-submission-corpus";
 import { containment } from "./similarity-core";
 import { validateCorpusCandidateFile, type CorpusFileValidationResult } from "./corpus-file-validation";
 import { extractCorpusCandidateText, type CorpusExtractionResult } from "./corpus-text-extraction";
@@ -809,11 +809,22 @@ async function acceptWithAtomicDedupCriticalSection(input: InternalEvaluationInp
                 VALUES (?,?,?,?,?,CURRENT_TIMESTAMP)`,
           args: [acceptedRepresentationId, decisionId, canonicalHash, wordCount, CORPUS_ADMISSION_FINGERPRINT_VERSION],
         });
-        const shingleStatements = [...ownShingleHashes].map((hash) => ({
-          sql: "INSERT INTO corpus_admission_accepted_shingles (accepted_representation_id, shingle_hash, fingerprint_version, created_at) VALUES (?,?,?,CURRENT_TIMESTAMP)",
-          args: [acceptedRepresentationId, hash, CORPUS_ADMISSION_FINGERPRINT_VERSION],
-        }));
-        if (shingleStatements.length > 0) await tx.batch(shingleStatements);
+        // Bounded batches (CORPUS_SHINGLE_WRITE_BATCH_ROWS — see its own
+        // comment): a very large accepted representation must not produce one
+        // oversized batch() request. Every chunk is a tx.batch() on the open
+        // accept-transaction, so the whole shingle write commits or rolls
+        // back with the decision / accepted_representation rows exactly as a
+        // single batch would. Rows are unique by construction (a fresh
+        // acceptedRepresentationId + a Set of hashes), so plain INSERT is
+        // kept; a rolled-back retry regenerates acceptedRepresentationId.
+        const shingleHashList = [...ownShingleHashes];
+        for (let offset = 0; offset < shingleHashList.length; offset += CORPUS_SHINGLE_WRITE_BATCH_ROWS) {
+          const chunk = shingleHashList.slice(offset, offset + CORPUS_SHINGLE_WRITE_BATCH_ROWS);
+          await tx.batch(chunk.map((hash) => ({
+            sql: "INSERT INTO corpus_admission_accepted_shingles (accepted_representation_id, shingle_hash, fingerprint_version, created_at) VALUES (?,?,?,CURRENT_TIMESTAMP)",
+            args: [acceptedRepresentationId, hash, CORPUS_ADMISSION_FINGERPRINT_VERSION],
+          })));
+        }
       }
 
       if (input.existingContentStoreId === null && contentStoreId !== null) {

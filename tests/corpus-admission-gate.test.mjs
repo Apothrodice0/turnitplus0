@@ -5,7 +5,8 @@ import path from "path";
 import { createClient } from "@libsql/client";
 import { applyMigrationsLibsql } from "../lib/ingest.js";
 import { createDocumentIdentity } from "../lib/document-identity.ts";
-import { indexDocumentSubmissionIntoCorpus } from "../lib/user-submission-corpus.ts";
+import { indexDocumentSubmissionIntoCorpus, corpusShingleHashes, CORPUS_SHINGLE_WRITE_BATCH_ROWS } from "../lib/user-submission-corpus.ts";
+import { canonicalizeText } from "../lib/canonical-text.ts";
 import { evaluateCorpusAdmissionCandidate, reEvaluateCorpusAdmissionCandidate } from "../lib/corpus-admission-gate.ts";
 import { _getActiveExtractionWorkerCountForTesting } from "../lib/corpus-text-extraction.ts";
 import { DEFAULT_CORPUS_ADMISSION_LIMITS } from "../lib/corpus-admission-types.ts";
@@ -160,6 +161,45 @@ test("a real (non-dry-run) ACCEPT with resolved retention writes exactly one con
   const rows = await client.execute({ sql: "SELECT canonical_sha256, canonical_text FROM corpus_admission_content_store WHERE id = ?", args: [decision.contentStoreId] });
   assert.equal(rows.rows.length, 1);
   assert.equal(rows.rows[0].canonical_sha256, decision.canonicalSha256);
+});
+
+test("large ACCEPT: the accepted-representation shingle set is written completely in bounded batches (CORPUS_SHINGLE_WRITE_BATCH_ROWS), never one oversized batch()", async () => {
+  // ~25k words of quality-passing English -> well over CORPUS_SHINGLE_WRITE_BATCH_ROWS
+  // informative 5-grams, so the accepted-shingle write in
+  // acceptWithAtomicDedupCriticalSection spans several tx.batch() calls.
+  const text = plausibleArticleText(20250828, 25_000);
+  const decision = await evaluateCorpusAdmissionCandidate(client, {
+    sourceRef: "candidate-large-accept",
+    filename: "candidate-large.txt",
+    bytes: Buffer.from(text, "utf8"),
+    consent: RESOLVED_PROVENANCE("https://example.test/large"),
+    dryRun: false,
+    openConnection,
+  });
+  assert.equal(decision.decision, "ACCEPT", `expected ACCEPT, got ${decision.decision} (${decision.reasonCodes.join(",")})`);
+
+  const acceptedRep = await client.execute({
+    sql: "SELECT id FROM corpus_admission_accepted_representations WHERE decision_id = ?",
+    args: [decision.id],
+  });
+  assert.equal(acceptedRep.rows.length, 1);
+  const acceptedRepId = acceptedRep.rows[0].id;
+
+  // The gate shingles canonicalizeText(extraction.rawText); for a .txt that is the decoded text.
+  const expected = corpusShingleHashes(canonicalizeText(text));
+  assert.ok(expected.size > CORPUS_SHINGLE_WRITE_BATCH_ROWS, `precondition: ${expected.size} informative shingles spans multiple write batches`);
+  const persisted = await client.execute({
+    sql: "SELECT COUNT(*) AS c FROM corpus_admission_accepted_shingles WHERE accepted_representation_id = ?",
+    args: [acceptedRepId],
+  });
+  assert.equal(Number(persisted.rows[0].c), expected.size,
+    "every informative shingle of the accepted representation must be persisted exactly once across the bounded batches");
+
+  const distinct = await client.execute({
+    sql: "SELECT COUNT(*) AS c FROM (SELECT DISTINCT shingle_hash FROM corpus_admission_accepted_shingles WHERE accepted_representation_id = ?)",
+    args: [acceptedRepId],
+  });
+  assert.equal(Number(distinct.rows[0].c), expected.size, "no duplicate shingle rows");
 });
 
 test("unresolved retention rights prevent both admission AND full-text persistence, even for real (non-dry-run) evaluation", async () => {

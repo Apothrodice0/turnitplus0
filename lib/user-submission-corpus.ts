@@ -48,6 +48,47 @@ export const CANONICALIZATION_VERSION = "canonical-text-v1";
 export const CORPUS_FINGERPRINT_VERSION = "corpus-shingle-v1";
 const DEFAULT_SHINGLE_SIZE = 5;
 
+/**
+ * Max shingle rows per bulk-INSERT batch() call, for both bulk shingle
+ * writers — recordCorpusShingles below and lib/corpus-admission-gate.ts's
+ * accepted-shingle write.
+ *
+ * WHY THIS EXISTS. Each writer hands client.batch()/tx.batch() an ARRAY of
+ * single-row statements (`INSERT … VALUES (?,?,?,CURRENT_TIMESTAMP)`, 3 binds
+ * each), executed one statement at a time. The SQL variable limit is
+ * therefore NOT the constraint — no statement ever binds more than 3
+ * variables regardless of document size, and a >32,766-shingle write already
+ * runs today (tests/user-submission-matching-maxdf.test.mjs case H). The
+ * limit that DOES scale with document size is the batch() payload itself:
+ *
+ *   - on the libSQL/Turso HTTP path a batch() is ONE Hrana pipeline request,
+ *     and both its request body AND its response grow linearly with the
+ *     statement count — a max-size document (maxExtractedChars = 2,000,000 →
+ *     ~330k informative 5-grams) is otherwise a single multi-megabyte
+ *     request whose ~330k-result response exceeds libsql-server's default
+ *     10 MiB response ceiling, failing indexing for a large but perfectly
+ *     legitimate document;
+ *   - on every path it also caps how many statement/result objects the
+ *     serverless function holds in memory at once.
+ *
+ * WHY 8,000. A deliberately conservative round number: at 8,000
+ * three-text-column rows a batch() request/response is well under 1 MB, a
+ * max-size document is ~42 bounded batches, and the wall-clock cost versus
+ * one unbounded batch is negligible (measured: ~28.3 s vs ~28.4 s for 330k
+ * rows in one transaction). It also happens to sit a comfortable ~3x under
+ * SQLITE_MAX_VARIABLE_NUMBER (32,766) if this is ever rewritten as a
+ * multi-row `VALUES (?,?,?),(?,?,?),…` statement — but that is a bonus, not
+ * the reason: today's single-row-statement shape can never approach that
+ * limit.
+ *
+ * Chunking never weakens atomicity: a caller that needs the whole shingle
+ * set written atomically (lib/corpus-admission-promotion.ts's
+ * indexPromotionAtomically) passes an open Transaction as `client`, and
+ * Transaction.batch() appends to that one open transaction — N bounded
+ * batch() calls commit or roll back exactly as one unbounded call would.
+ */
+export const CORPUS_SHINGLE_WRITE_BATCH_ROWS = 8_000;
+
 export type LinkType = "EXACT_CANONICAL_DUPLICATE" | "NEW_CONTENT_REPRESENTATION";
 
 export type CorpusDocumentRepresentation = {
@@ -879,7 +920,25 @@ export async function isRepresentationEligibleForMatching(
   return row !== undefined && Number(row.eligible) === 1;
 }
 
-/** Idempotent (INSERT OR IGNORE) — safe to call more than once for the same representation/version, matching lib/document-family.ts's recordDocumentIdentityShingles convention. */
+/**
+ * Idempotent (INSERT OR IGNORE) — safe to call more than once for the same
+ * representation/version, matching lib/document-family.ts's
+ * recordDocumentIdentityShingles convention.
+ *
+ * Shingle rows are written in bounded batches of CORPUS_SHINGLE_WRITE_BATCH_ROWS
+ * so a very large representation (up to ~330k informative shingles for a
+ * max-size document) can never produce one oversized batch() request. When
+ * `client` is an open Transaction (the indexPromotionAtomically path) every
+ * batch appends to that one transaction, so the full write commits or rolls
+ * back exactly as a single batch would.
+ *
+ * On the best-effort, non-transactional indexDocumentSubmissionIntoCorpus
+ * path each batch is its own implicit transaction, so a mid-run failure can
+ * leave the representation with only SOME of its batches. INSERT OR IGNORE
+ * makes that recoverable: that caller re-invokes recordCorpusShingles for a
+ * reused representation on every retry, and this function then simply fills
+ * the missing rows and no-ops the rest.
+ */
 export async function recordCorpusShingles(
   client: Client,
   representationId: string,
@@ -888,11 +947,15 @@ export async function recordCorpusShingles(
   shingleSize: number = DEFAULT_SHINGLE_SIZE,
 ): Promise<{ shingleCount: number }> {
   const hashes = corpusShingleHashes(canonicalText, shingleSize);
-  const statements = [...hashes].map((hash) => ({
-    sql: "INSERT OR IGNORE INTO corpus_document_shingles (representation_id, shingle_hash, fingerprint_version, created_at) VALUES (?,?,?,CURRENT_TIMESTAMP)",
-    args: [representationId, hash, fingerprintVersion],
-  }));
-  if (statements.length > 0) await client.batch(statements, "write");
+  const hashList = [...hashes];
+  for (let offset = 0; offset < hashList.length; offset += CORPUS_SHINGLE_WRITE_BATCH_ROWS) {
+    const chunk = hashList.slice(offset, offset + CORPUS_SHINGLE_WRITE_BATCH_ROWS);
+    const statements = chunk.map((hash) => ({
+      sql: "INSERT OR IGNORE INTO corpus_document_shingles (representation_id, shingle_hash, fingerprint_version, created_at) VALUES (?,?,?,CURRENT_TIMESTAMP)",
+      args: [representationId, hash, fingerprintVersion],
+    }));
+    await client.batch(statements, "write");
+  }
   return { shingleCount: hashes.size };
 }
 
@@ -911,9 +974,10 @@ export type IndexDocumentSubmissionResult =
  *      own stored canonical_sha256 (fails loudly on mismatch rather than
  *      silently indexing the wrong content)
  *   2. reuses an existing representation on an exact canonical match
- *      (EXACT_CANONICAL_DUPLICATE), or creates + shingles a new one
- *      (NEW_CONTENT_REPRESENTATION) — this phase's own task description,
- *      section 6
+ *      (EXACT_CANONICAL_DUPLICATE), or creates one (NEW_CONTENT_REPRESENTATION)
+ *      — this phase's own task description, section 6 — and in BOTH cases
+ *      (re-)runs the full INSERT-OR-IGNORE shingle write, so a retry after a
+ *      partially-written shingle set self-heals it (see the inline comment)
  *   3. records the submission reference
  *
  * Anonymous submissions (document_identities.account_id is null) are
@@ -963,6 +1027,19 @@ export async function indexDocumentSubmissionIntoCorpus(
   if (existingRepresentation) {
     representation = existingRepresentation;
     linkType = "EXACT_CANONICAL_DUPLICATE";
+    // Self-heal the shingle set on reuse. This function is non-transactional
+    // by design (see its header), and recordCorpusShingles writes in bounded
+    // batches (CORPUS_SHINGLE_WRITE_BATCH_ROWS) — so a prior attempt that
+    // created the representation but failed partway through its shingle
+    // batches would leave corpus_document_shingles under-populated, and a
+    // retry reuses that representation here and would otherwise never
+    // re-shingle it, leaving it permanently short. Re-running the full
+    // shingle write is safe and cheap: recordCorpusShingles is INSERT OR
+    // IGNORE against ux_corpus_document_shingles_representation_version_hash,
+    // so it fills exactly the missing rows, never duplicates an existing one,
+    // and every INSERT is a no-op in the common case where the representation
+    // was already fully shingled by an earlier submission.
+    await recordCorpusShingles(client, representation.id, canonicalText);
   } else {
     representation = await createReusableDocumentRepresentation(client, { canonicalText });
     await recordCorpusShingles(client, representation.id, canonicalText);
