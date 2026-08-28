@@ -2,7 +2,12 @@ import { NextResponse } from 'next/server';
 import { getReportsDbClient } from '../../../lib/reports-db';
 import { checkRate, checkPollRate, checkReadRate } from '../../../lib/rate-limit';
 import { clientIpFrom } from '../../../lib/client-ip';
-import { getSessionUser } from '../../../lib/auth-session';
+import { getSessionUser, parseCookie, hashToken, SESSION_COOKIE_NAME } from '../../../lib/auth-session';
+import {
+  isDevicePassportEnabled,
+  verifyDevicePassportAttestation,
+  maybeBumpDevicePassportProvenanceGeneration,
+} from '../../../lib/device-passport-server';
 import { captureDocumentIdentityAndFamily } from '../../../lib/document-family';
 import { linkAcademicSearchRunDiagnosticsToReport } from '../../../lib/academic-search-diagnostics-repo';
 import { checkUploadLimit } from '../../../lib/upload-limit';
@@ -19,6 +24,10 @@ import type { SimilarityReport } from '../../../lib/report-types';
 const MAX_BYTES = 2_000_000;
 const MAX_DEVICE_KEY_LENGTH = 200;
 const MAX_LISTED_REPORTS = 50;
+// Device Passport (Phase 2) — coarse structural ceilings on the optional
+// attestation object; lib/device-passport-server.ts re-validates every field
+// strictly (exact decoded byte lengths, canonical base64, EC P-256 curve).
+const MAX_ATTESTATION_FIELD_LENGTH = 1_000;
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0;
@@ -144,6 +153,16 @@ async function insertReportWithRoomCheck(params: {
   aiScore: number | null; aiTone: string | null; aiStatus: string | null;
   payloadJson: string; userId: string | null;
   roomNumberForInsert: number | null; roomOwnerId: string | null;
+  /**
+   * Device Passport (Phase 2): the cryptographically verified upload
+   * passport, or null. Written in a SECOND statement inside this same
+   * transaction, immediately after the row is inserted — never folded into
+   * SAVE_REPORT_SQL (which several tests exercise as an exact string) — and
+   * guarded `WHERE verified_device_passport_id IS NULL`, so it can only ever
+   * be set once. The caller passes non-null only on a genuine first save; a
+   * resave passes null and this statement never runs.
+   */
+  verifiedDevicePassportId: string | null;
 }): Promise<{ conflict: { mostRecent: string } | null }> {
   for (let attempt = 1; attempt <= MAX_ROOM_INSERT_BUSY_RETRIES; attempt++) {
     const txClient = await getReportsDbClient();
@@ -171,6 +190,16 @@ async function insertReportWithRoomCheck(params: {
               params.payloadJson, params.userId, params.roomNumberForInsert,
             ],
           });
+          if (params.verifiedDevicePassportId) {
+            // Immutable upload-time device provenance — set once, in the same
+            // transaction as the insert, never overwritten (the IS NULL
+            // guard). See db/schema.ts's saved_reports.verified_device_passport_id.
+            await tx.execute({
+              sql: `UPDATE saved_reports SET verified_device_passport_id = ?
+                    WHERE device_key = ? AND id = ? AND verified_device_passport_id IS NULL`,
+              args: [params.verifiedDevicePassportId, params.deviceKey, params.id],
+            });
+          }
         }
         await tx.commit();
         return { conflict };
@@ -206,7 +235,7 @@ export async function POST(request: Request) {
     const body = await request.json().catch(() => null);
     if (!body || typeof body !== 'object') return new NextResponse(JSON.stringify({ error: 'Invalid JSON' }), { status: 400 });
 
-    const { deviceKey, id, submissionId, title, createdAt, wordCount, archiveScore, scoreBand, aiScore, aiTone, aiStatus, payload, academicSearchDiagnosticsId, room } = body as Record<string, unknown>;
+    const { deviceKey, id, submissionId, title, createdAt, wordCount, archiveScore, scoreBand, aiScore, aiTone, aiStatus, payload, academicSearchDiagnosticsId, room, devicePassport } = body as Record<string, unknown>;
 
     // device_key is part of saved_reports' composite primary key, so it is
     // always required regardless of authentication state — unlike the list/
@@ -480,6 +509,54 @@ export async function POST(request: Request) {
         }
       }
 
+      // Device Passport (Phase 2): cryptographically verify an optional
+      // upload-time device attestation. NEVER affects the similarity score,
+      // the matcher, or relationship classification — this phase only
+      // captures verified provenance. Attempted only when the feature flag
+      // is ON, this is a genuine first save (a resave carries no fresh
+      // challenge), the attestation object is present, and the payload has
+      // real text to bind a hash to.
+      //
+      // Fail-safe by construction: verifyDevicePassportAttestation returns
+      // null (never throws) for every failure — bad signature, expired /
+      // consumed / missing challenge, wrong session/account binding,
+      // unregistered or revoked passport, tampered text or report id,
+      // malformed base64, oversized field, DB error — and the report upload
+      // then proceeds exactly as if no attestation had been sent. Only
+      // positive verified evidence ever produces a non-null id.
+      let verifiedDevicePassportId: string | null = null;
+      if (
+        isDevicePassportEnabled() &&
+        isFirstSaveOfThisReport &&
+        devicePassport && typeof devicePassport === 'object' &&
+        isNonEmptyString(reportPayload?.text)
+      ) {
+        const dp = devicePassport as Record<string, unknown>;
+        const attestationFieldsOk = [dp.challengeId, dp.nonce, dp.publicKeySpki, dp.signature].every(
+          (v) => typeof v === 'string' && v.length > 0 && v.length <= MAX_ATTESTATION_FIELD_LENGTH,
+        );
+        if (attestationFieldsOk) {
+          try {
+            const rawSessionToken = parseCookie(request.headers.get('cookie'), SESSION_COOKIE_NAME);
+            verifiedDevicePassportId = await verifyDevicePassportAttestation(client, {
+              challengeId: dp.challengeId,
+              nonce: dp.nonce,
+              publicKeySpki: dp.publicKeySpki,
+              signature: dp.signature,
+              method: 'POST',
+              path: '/api/reports',
+              payloadText: reportPayload.text,
+              reportId: id,
+              currentAccountId: userId,
+              currentSessionTokenHash: sessionUser && rawSessionToken ? hashToken(rawSessionToken) : null,
+            });
+          } catch (err) {
+            console.error('device passport verification failed unexpectedly (non-fatal, report upload proceeds without provenance):', err instanceof Error ? err.message : String(err));
+            verifiedDevicePassportId = null;
+          }
+        }
+      }
+
       // Concurrency (production audit fix): the occupancy check and the
       // insert must be one atomic unit relative to any OTHER concurrent
       // request touching the same room slot — otherwise two different new
@@ -494,6 +571,7 @@ export async function POST(request: Request) {
         id, deviceKey, submissionId, title, createdAt, wordCount, archiveScore, scoreBand,
         aiScore: aiScore ?? null, aiTone: aiTone ?? null, aiStatus: aiStatus ?? null,
         payloadJson: payloadJsonToPersist, userId, roomNumberForInsert, roomOwnerId,
+        verifiedDevicePassportId,
       });
 
       if (roomConflict) {
@@ -504,6 +582,26 @@ export async function POST(request: Request) {
           }),
           { status: 409, headers: { 'Content-Type': 'application/json' } },
         );
+      }
+
+      // Device Passport (Phase 2): bump this ONE passport's
+      // provenance_generation only when this just-inserted verified report
+      // introduces a NEW (passport, account) association — a repeat report
+      // from the same account on the same passport does not bump; the first
+      // anonymous report from a passport does. Never a global counter, so it
+      // never invalidates a report tied to a different passport. Synchronous
+      // (one indexed lookup + at most one one-statement UPDATE), best-effort.
+      if (verifiedDevicePassportId) {
+        try {
+          await maybeBumpDevicePassportProvenanceGeneration(client, {
+            passportId: verifiedDevicePassportId,
+            accountId: userId,
+            deviceKey,
+            reportId: id,
+          });
+        } catch (err) {
+          console.error('device passport provenance-generation bump failed (non-fatal):', err instanceof Error ? err.message : String(err));
+        }
       }
 
       // Document identity + fingerprint + family capture (Phase A/B/C):
@@ -540,7 +638,17 @@ export async function POST(request: Request) {
       // below, always re-checks consent fresh regardless of this snapshot.
       let pendingAdmissionJobId: string | null = null;
       if (rawText && isFirstSaveOfThisReport && userId !== null && sessionUser?.corpusReuseConsented) {
-        const created = await createPendingReportAdmissionJob(client, { accountId: userId, deviceKey, reportId: id });
+        // Device Passport (Phase 2): the verified upload passport is copied
+        // onto the job here, from the verified upload context — never
+        // re-derived later. processReportAdmissionJob reads it back from the
+        // job row and, on ACCEPT, records
+        // corpus_admission_decision_device_provenance.
+        const created = await createPendingReportAdmissionJob(client, {
+          accountId: userId,
+          deviceKey,
+          reportId: id,
+          verifiedDevicePassportId,
+        });
         pendingAdmissionJobId = created?.jobId ?? null;
       }
 

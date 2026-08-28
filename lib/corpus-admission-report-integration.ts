@@ -108,6 +108,8 @@ type ReportAdmissionJobRow = {
   claimedAt: string | null;
   attemptCount: number;
   lastError: string | null;
+  /** Device Passport (Phase 2): the cryptographically verified upload passport, copied here at job creation from the verified upload context — never re-derived. NULL when no attestation was verified. */
+  verifiedDevicePassportId: string | null;
 };
 
 type RawJobRow = {
@@ -121,6 +123,7 @@ type RawJobRow = {
   claimed_at: string | null;
   attempt_count: number | bigint;
   last_error: string | null;
+  verified_device_passport_id: string | null;
 };
 
 function toJobRow(row: RawJobRow): ReportAdmissionJobRow {
@@ -135,6 +138,7 @@ function toJobRow(row: RawJobRow): ReportAdmissionJobRow {
     claimedAt: row.claimed_at,
     attemptCount: Number(row.attempt_count),
     lastError: row.last_error,
+    verifiedDevicePassportId: row.verified_device_passport_id ?? null,
   };
 }
 
@@ -154,7 +158,13 @@ async function fetchJobBySourceRef(client: Client, sourceRef: string): Promise<R
 // Synchronous, durable job creation (blocker 1)
 // ============================================================================
 
-export type CreatePendingReportAdmissionJobParams = { accountId: string; deviceKey: string; reportId: string };
+export type CreatePendingReportAdmissionJobParams = {
+  accountId: string;
+  deviceKey: string;
+  reportId: string;
+  /** Device Passport (Phase 2): the verified upload passport (or null/absent). Stored on the job row so processReportAdmissionJob can record per-backing provenance on ACCEPT without re-deriving anything. */
+  verifiedDevicePassportId?: string | null;
+};
 
 /**
  * Ensures a 'pending' job row exists for this report. Called SYNCHRONOUSLY
@@ -172,10 +182,10 @@ export async function createPendingReportAdmissionJob(client: Client, params: Cr
   const sourceRef = buildReportAdmissionSourceRef(params);
   const id = randomUUID();
   await client.execute({
-    sql: `INSERT INTO corpus_admission_report_jobs (id, source_ref, account_id, device_key, report_id, status, decision_id, claimed_at, attempt_count, last_error, created_at, updated_at)
-          VALUES (?,?,?,?,?,'pending',NULL,NULL,0,NULL,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
+    sql: `INSERT INTO corpus_admission_report_jobs (id, source_ref, account_id, device_key, report_id, status, decision_id, claimed_at, attempt_count, last_error, verified_device_passport_id, created_at, updated_at)
+          VALUES (?,?,?,?,?,'pending',NULL,NULL,0,NULL,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
           ON CONFLICT(source_ref) DO NOTHING`,
-    args: [id, sourceRef, params.accountId, params.deviceKey, params.reportId],
+    args: [id, sourceRef, params.accountId, params.deviceKey, params.reportId, params.verifiedDevicePassportId ?? null],
   });
   const job = await fetchJobBySourceRef(client, sourceRef);
   return job ? { jobId: job.id } : null;
@@ -197,6 +207,16 @@ export type ProcessReportAdmissionJobParams = {
   jobId: string;
   /** Required — used both for the fresh consent re-check and for the admission gate's own write-retry paths. */
   openConnection: CorpusAdmissionConnectionFactory;
+  /**
+   * Test-only fault injection (mirrors lib/corpus-admission-promotion.ts's
+   * simulateFailureAfterShingles convention): forces the required
+   * device-provenance INSERT inside finalizeAcceptedAdmissionJob's atomic
+   * batch to fail, so a test can prove the job is NEVER marked 'succeeded'
+   * without its provenance (the batch rolls back together) and that a plain
+   * retry re-finalizes the SAME decision to completion. Always undefined in
+   * production.
+   */
+  testOnlySimulateProvenanceWriteFailure?: boolean;
 };
 
 function isSqliteBusyError(err: unknown): boolean {
@@ -237,6 +257,161 @@ async function executeJobWriteWithRetry(openConnection: CorpusAdmissionConnectio
 }
 
 /**
+ * The multi-statement counterpart to executeJobWriteWithRetry — client.batch(
+ * stmts, "write") is one server-side transaction, so either every statement
+ * commits or none does. Same fresh-connection-per-attempt SQLITE_BUSY retry
+ * (a losing concurrent write transaction does not reliably recover on a
+ * reused connection). Used by finalizeAcceptedAdmissionJob to make the
+ * job-'succeeded' write and its required device-provenance write atomic.
+ */
+async function executeJobBatchWithRetry(openConnection: CorpusAdmissionConnectionFactory, stmts: InStatement[]): Promise<void> {
+  for (let attempt = 1; attempt <= MAX_WRITE_BUSY_RETRIES; attempt += 1) {
+    const attemptClient = await openConnection();
+    try {
+      await attemptClient.batch(stmts, "write");
+      return;
+    } catch (err) {
+      if (isSqliteBusyError(err) && attempt < MAX_WRITE_BUSY_RETRIES) {
+        await writeBackoff(attempt);
+        continue;
+      }
+      throw err;
+    } finally {
+      attemptClient.close();
+    }
+  }
+}
+
+/** The decision kind (ACCEPT | REJECT | REVIEW) for a decision id, or null if the row is gone. */
+async function fetchDecisionKind(client: Client, decisionId: string): Promise<string | null> {
+  const result = await client.execute({ sql: "SELECT decision FROM corpus_admission_decisions WHERE id = ?", args: [decisionId] });
+  const row = result.rows[0] as unknown as { decision: string } | undefined;
+  return row ? String(row.decision) : null;
+}
+
+/**
+ * Finalizes an already-evaluated report-admission job as 'succeeded'. When
+ * the job carried a cryptographically verified upload passport AND the
+ * decision is ACCEPT, the corpus_admission_decision_device_provenance INSERT
+ * is placed in the SAME atomic batch as the status write — so the job can
+ * NEVER be observed 'succeeded' without its required per-decision device
+ * provenance: both land or neither does. If the provenance write fails, the
+ * batch rolls back (status stays whatever it was), this function throws, and
+ * the caller reverts the job to the retryable 'failed' state with its
+ * decision_id preserved — a plain retry then re-finalizes THIS exact
+ * decision (see processReportAdmissionJob's own re-finalization fast path),
+ * never re-evaluating.
+ *
+ * Idempotent: the provenance INSERT is ON CONFLICT(decision_id) DO NOTHING,
+ * and re-finalizing an already-'succeeded' job just re-asserts the same
+ * state. When no provenance is required (REJECT/REVIEW, or an ACCEPT with no
+ * verified passport) this is a single status UPDATE — byte-identical to the
+ * pre-Phase-2 finalization.
+ */
+async function finalizeAcceptedAdmissionJob(
+  openConnection: CorpusAdmissionConnectionFactory,
+  params: { jobId: string; decisionId: string; decisionKind: string; verifiedDevicePassportId: string | null; simulateProvenanceWriteFailure?: boolean },
+): Promise<void> {
+  const statusUpdate: InStatement = {
+    sql: "UPDATE corpus_admission_report_jobs SET status = 'succeeded', decision_id = ?, claimed_at = NULL, last_error = NULL, attempt_count = attempt_count + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+    args: [params.decisionId, params.jobId],
+  };
+
+  const needsProvenance = params.decisionKind === "ACCEPT" && params.verifiedDevicePassportId != null;
+  if (!needsProvenance) {
+    await executeJobWriteWithRetry(openConnection, statusUpdate);
+    return;
+  }
+
+  const provenanceInsert: InStatement = params.simulateProvenanceWriteFailure
+    // Test-only: a deliberately invalid statement so the batch's own
+    // transaction genuinely rolls back (proving the status write cannot
+    // land without it), rather than a mocked throw that never reaches SQL.
+    ? {
+        sql: "INSERT INTO corpus_admission_decision_device_provenance (decision_id, device_passport_id, verified_at, __test_only_forced_failure) VALUES (?,?,?,?)",
+        args: [params.decisionId, params.verifiedDevicePassportId, Date.now(), 1],
+      }
+    : {
+        sql: `INSERT INTO corpus_admission_decision_device_provenance (decision_id, device_passport_id, verified_at)
+              VALUES (?,?,?)
+              ON CONFLICT(decision_id) DO NOTHING`,
+        args: [params.decisionId, params.verifiedDevicePassportId, Date.now()],
+      };
+
+  await executeJobBatchWithRetry(openConnection, [statusUpdate, provenanceInsert]);
+}
+
+/**
+ * The immediate promotion attempt for an ACCEPT decision. Extracted so
+ * processReportAdmissionJob's normal path and its re-finalization fast path
+ * share exactly one implementation; both call it AFTER the job is already
+ * finalized 'succeeded' (nothing here can roll that back).
+ *
+ * Why do it here at all: ACCEPT previously relied exclusively on the
+ * scheduled sweep to ever get staged/indexed — a decision could sit
+ * ACCEPTed, with active fingerprint and retained content, for up to a full
+ * day (or forever, if CORPUS_PROMOTION_ENABLED happened to be off at the
+ * time) before becoming matchable. This runs the SAME real pipeline the
+ * sweep uses (stageAndClaimCorpusAdmissionPromotionForDecision, then
+ * processCorpusAdmissionPromotion — no second shingle/indexing
+ * implementation) immediately, at this exact async job boundary, which
+ * every real trigger already awaits — never fire-and-forget.
+ *
+ * Also the fix for re-ACCEPT after an admin deactivation: when a
+ * deactivated representation's canonical hash is re-uploaded,
+ * evaluateCorpusAdmissionCandidate's own pre-check (revoked_at IS NULL)
+ * does not see the old, revoked accepted_representations row, so this is a
+ * genuinely NEW ACCEPT with its own new acceptedRepresentationId — staged
+ * and promoted here exactly like a first-ever ACCEPT. Its own
+ * indexPromotionAtomically may legitimately reuse the same underlying
+ * corpus_document_representations row (EXACT_CANONICAL_DUPLICATE), but this
+ * promotion's own 'indexed' row, backed by the NEW, non-revoked
+ * accepted_representation, is what restores
+ * findCandidateCorpusRepresentations' eligibility join — matching becomes
+ * active again without this module knowing anything about matching
+ * eligibility itself.
+ *
+ * Gated the same way the sweep gates itself (isCorpusPromotionEnabled()) —
+ * while off, nothing is staged here either, so a decision accepted while
+ * disabled is discovered fresh by the sweep's own batch discovery once the
+ * flag is later turned on, exactly as before this existed.
+ *
+ * Failure isolation: processCorpusAdmissionPromotion already isolates a
+ * genuine indexing failure internally (persists status='failed', returns a
+ * value, never throws for that case); the try/catch here is only for a
+ * failure in staging/claiming/processing itself never reaching that
+ * internal write (e.g. a connection-level error) — either way the row is
+ * left 'staged' or 'failed' with claimed_at NULL, exactly the shape
+ * runCorpusAdmissionPromotionSweep's own claim query (status IN
+ * ('staged','failed')) already discovers and retries.
+ *
+ * Claim-safety: this path never processes a promotion it has not won the
+ * claim on. stageAndClaimCorpusAdmissionPromotionForDecision stages
+ * (idempotent) then attempts the SAME single-owner claim the sweep uses —
+ * a racing sweep tick that claims this row first makes this call's claim a
+ * no-op (claimed:false) and this path correctly does not re-process it. An
+ * already-'indexed'/'skipped' promotion can never be claimed either, and
+ * processCorpusAdmissionPromotion has its own terminal-idempotency guard as
+ * a second independent layer.
+ */
+async function maybePromoteAcceptedDecision(
+  client: Client,
+  openConnection: CorpusAdmissionConnectionFactory,
+  decisionId: string,
+  decisionKind: string,
+): Promise<void> {
+  if (decisionKind !== "ACCEPT" || !isCorpusPromotionEnabled()) return;
+  try {
+    const staged = await stageAndClaimCorpusAdmissionPromotionForDecision(openConnection, decisionId);
+    if (staged.staged && staged.claimed) {
+      await processCorpusAdmissionPromotion(client, { promotionId: staged.promotionId, openConnection });
+    }
+  } catch (err) {
+    console.error("processReportAdmissionJob: immediate promotion attempt failed (non-fatal — admission remains ACCEPT, and the row stays discoverable/retryable by the existing promotion sweep):", err instanceof Error ? err.message : String(err));
+  }
+}
+
+/**
  * Does the actual work for one existing job: re-checks consent fresh (a
  * connection opened via openConnection and closed immediately around this
  * one check — never a parameter, never a snapshot), re-derives rawText
@@ -263,6 +438,53 @@ export async function processReportAdmissionJob(client: Client, params: ProcessR
   }
   if (job.status === "cancelled") {
     return { outcome: "terminal", jobId: job.id, status: job.status };
+  }
+
+  // Re-finalization fast path (Device Passport Phase 2 atomicity fix). A
+  // prior attempt already evaluated this candidate — decision_id is durably
+  // recorded on the job (see the normal path below) — but did not finish
+  // finalizing it, e.g. the required device-provenance write failed and rolled
+  // the whole finalization batch back, reverting the job to 'failed'.
+  //
+  // Re-finalize THAT EXACT decision. NEVER re-evaluate:
+  // evaluateCorpusAdmissionCandidate has irreversible, already-committed side
+  // effects (the corpus_admission_decisions row, and for an ACCEPT the
+  // durable "first accepted sample wins" corpus_admission_accepted_representations
+  // row), so a second evaluation of the same content produces a divergent
+  // REJECT and orphans the first ACCEPT without its provenance — the exact
+  // corruption this fix exists to prevent.
+  //
+  // Consent is not re-checked here: it was verified when the decision was
+  // made, and a revocation since then moves a 'pending'/'failed' job to
+  // 'cancelled' (caught by the guard above), so reaching this branch means a
+  // committed decision is still owed its finalization. The decision and any
+  // accepted content it reuses are durable by policy regardless — see this
+  // module's own header comment.
+  if (job.decisionId != null) {
+    const decisionKind = await fetchDecisionKind(client, job.decisionId);
+    if (decisionKind != null) {
+      try {
+        await finalizeAcceptedAdmissionJob(params.openConnection, {
+          jobId: job.id,
+          decisionId: job.decisionId,
+          decisionKind,
+          verifiedDevicePassportId: job.verifiedDevicePassportId,
+          simulateProvenanceWriteFailure: params.testOnlySimulateProvenanceWriteFailure,
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        await executeJobWriteWithRetry(params.openConnection, {
+          sql: "UPDATE corpus_admission_report_jobs SET status = 'failed', claimed_at = NULL, last_error = ?, attempt_count = attempt_count + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+          args: [message, job.id],
+        });
+        return { outcome: "failed", jobId: job.id, error: message };
+      }
+      await maybePromoteAcceptedDecision(client, params.openConnection, job.decisionId, decisionKind);
+      return { outcome: "succeeded", jobId: job.id, decisionId: job.decisionId, decision: decisionKind as CorpusAdmissionDecisionRecord["decision"] };
+    }
+    // The recorded decision row is gone (not an expected flow — a deleted
+    // decision cascades its accepted_representation, so re-evaluation would
+    // be a clean first ACCEPT). Fall through to a fresh evaluation.
   }
 
   const consentClient = await params.openConnection();
@@ -312,80 +534,39 @@ export async function processReportAdmissionJob(client: Client, params: ProcessR
       dryRun: false,
       openConnection: params.openConnection,
     });
+
+    // Device Passport (Phase 2) atomicity: durably record which decision this
+    // job produced BEFORE finalizing it — a lone UPDATE that does not touch
+    // status. If finalization then fails (e.g. the required device-provenance
+    // write), the outer catch reverts this job to 'failed' with its
+    // decision_id preserved, and a plain retry re-finalizes THIS exact
+    // decision via the fast path at the top of this function, never
+    // re-evaluating (which would produce a divergent second decision).
     await executeJobWriteWithRetry(params.openConnection, {
-      sql: "UPDATE corpus_admission_report_jobs SET status = 'succeeded', decision_id = ?, claimed_at = NULL, last_error = NULL, attempt_count = attempt_count + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+      sql: "UPDATE corpus_admission_report_jobs SET decision_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
       args: [decision.id, job.id],
     });
 
-    // Automatic promotion fix: ACCEPT previously relied exclusively on the
-    // scheduled sweep to ever get staged/indexed — a decision could sit
-    // ACCEPTed, with active fingerprint and retained content, for up to a
-    // full day (or forever, if CORPUS_PROMOTION_ENABLED happened to be off
-    // at the time) before becoming matchable. This runs the SAME real
-    // pipeline the sweep uses (stageCorpusAdmissionPromotionForDecision,
-    // then processCorpusAdmissionPromotion — no second shingle/indexing
-    // implementation) immediately, at this exact async job boundary, which
-    // every real trigger (the deferred post-save callback, a manual retry,
-    // the report-admission sweep) already awaits — never fire-and-forget.
-    //
-    // Also the fix for re-ACCEPT after an admin deactivation: when a
-    // deactivated representation's canonical hash is re-uploaded,
-    // evaluateCorpusAdmissionCandidate's own pre-check (revoked_at IS NULL)
-    // does not see the old, revoked accepted_representations row, so this
-    // is a genuinely NEW ACCEPT with its own new acceptedRepresentationId —
-    // staged and promoted here exactly like a first-ever ACCEPT. Its own
-    // indexPromotionAtomically may legitimately reuse the same underlying
-    // corpus_document_representations row (EXACT_CANONICAL_DUPLICATE), but
-    // this promotion's own 'indexed' row, backed by the NEW, non-revoked
-    // accepted_representation, is what restores
-    // findCandidateCorpusRepresentations' own eligibility join (lib/user-
-    // submission-corpus.ts: "at least one 'indexed' promotion whose own
-    // accepted_representation is not revoked") — matching becomes active
-    // again without this module needing to know anything about matching
-    // eligibility itself.
-    //
-    // Deliberately gated the same way the sweep already gates itself
-    // (isCorpusPromotionEnabled()) — preserves existing disabled behavior:
-    // while off, nothing is staged here either, so a decision accepted
-    // while disabled is discovered fresh by the sweep's own batch discovery
-    // once the flag is later turned on, exactly as before this fix existed.
-    //
-    // Failure isolation: this decision is ALREADY committed as ACCEPT and
-    // the job is ALREADY marked 'succeeded' above — nothing below this
-    // point can roll either back. processCorpusAdmissionPromotion already
-    // isolates a genuine indexing failure internally (persists
-    // status='failed', returns a value, never throws for that case); the
-    // try/catch here exists only for a failure in staging/claiming/processing
-    // itself never reaching that internal write (e.g. a connection-level
-    // error) — either way, the row is left 'staged' or 'failed' with
-    // claimed_at NULL (a failed claim attempt never sets claimed_at at
-    // all), exactly the shape runCorpusAdmissionPromotionSweep's own claim
-    // query (status IN ('staged','failed')) already discovers and retries,
-    // so nothing extra is needed to keep it recoverable.
-    //
-    // Claim-safety fix: this path does not process a promotion it has not
-    // won the claim on. stageAndClaimCorpusAdmissionPromotionForDecision
-    // stages (idempotent, unchanged) and then attempts the SAME
-    // single-owner claim the sweep's own claim query uses (status IN
-    // ('staged','failed') AND unclaimed-or-stale) — a racing sweep tick
-    // that claims this exact row first makes this call's own claim a
-    // no-op (claimed:false), and this path correctly does not process it a
-    // second time. A promotion that is already 'indexed' or 'skipped' can
-    // never be claimed either (excluded by the same status filter), so an
-    // id returned by staging that turns out to already be terminal is
-    // never re-processed here — processCorpusAdmissionPromotion's own
-    // defensive terminal-idempotency guard is the second, independent
-    // layer of that same guarantee.
-    if (decision.decision === "ACCEPT" && isCorpusPromotionEnabled()) {
-      try {
-        const staged = await stageAndClaimCorpusAdmissionPromotionForDecision(params.openConnection, decision.id);
-        if (staged.staged && staged.claimed) {
-          await processCorpusAdmissionPromotion(client, { promotionId: staged.promotionId, openConnection: params.openConnection });
-        }
-      } catch (err) {
-        console.error("processReportAdmissionJob: immediate promotion attempt failed (non-fatal — admission remains ACCEPT, and the row stays discoverable/retryable by the existing promotion sweep):", err instanceof Error ? err.message : String(err));
-      }
-    }
+    // Finalize as 'succeeded' — atomically with the required per-decision
+    // device-provenance write when the job carried a verified upload passport
+    // and this is an ACCEPT. The job can NEVER be observed 'succeeded'
+    // without that provenance: finalizeAcceptedAdmissionJob puts both in one
+    // client.batch("write") transaction. A provenance failure throws here and
+    // is handled by the outer catch (job -> retryable 'failed', decision_id
+    // intact). The passport id NEVER touches corpus_document_representations
+    // (deduplicated, many independent backings) — it lives only on the
+    // per-decision corpus_admission_decision_device_provenance row.
+    await finalizeAcceptedAdmissionJob(params.openConnection, {
+      jobId: job.id,
+      decisionId: decision.id,
+      decisionKind: decision.decision,
+      verifiedDevicePassportId: job.verifiedDevicePassportId,
+      simulateProvenanceWriteFailure: params.testOnlySimulateProvenanceWriteFailure,
+    });
+
+    // Immediate promotion for an ACCEPT — same real pipeline the sweep uses,
+    // best-effort, isolated. Full rationale on maybePromoteAcceptedDecision.
+    await maybePromoteAcceptedDecision(client, params.openConnection, decision.id, decision.decision);
 
     return { outcome: "succeeded", jobId: job.id, decisionId: decision.id, decision: decision.decision };
   } catch (err) {

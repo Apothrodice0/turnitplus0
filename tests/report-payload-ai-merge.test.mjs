@@ -41,11 +41,21 @@ for (const suffix of ['', '-wal', '-shm']) {
   const c = `${dbFile}${suffix}`;
   if (fs.existsSync(c)) fs.unlinkSync(c);
 }
+// This file imports app/api/reports/route.ts (for its exported SAVE_REPORT_SQL
+// text); point TURSO_DATABASE_URL at the throwaway local file so nothing here
+// can ever touch a real database, satisfying tests/database-isolation.test.mjs's
+// structural safety net (the route reads TURSO_DATABASE_URL via
+// lib/reports-db.ts's getReportsDbClient).
+const originalTursoUrl = process.env.TURSO_DATABASE_URL;
+process.env.TURSO_DATABASE_URL = `file:${dbFile}`;
+
 const client = createClient({ url: `file:${dbFile}` });
 await applyMigrationsLibsql(client, drizzleDir);
 
 test.after(() => {
   client.close();
+  if (originalTursoUrl === undefined) delete process.env.TURSO_DATABASE_URL;
+  else process.env.TURSO_DATABASE_URL = originalTursoUrl;
   for (const suffix of ['', '-wal', '-shm']) {
     try { fs.unlinkSync(`${dbFile}${suffix}`); } catch { /* ignore */ }
   }

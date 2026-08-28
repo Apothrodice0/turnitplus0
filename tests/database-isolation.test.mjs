@@ -40,6 +40,8 @@ const TURSO_SENSITIVE_ROUTE_IMPORTS = [
   "app/api/auth/login/route",
   "app/api/auth/logout/route",
   "app/api/auth/me/route",
+  "app/api/device-passport/register/route",
+  "app/api/device-passport/challenge/route",
 ];
 
 // schema-drift.test.mjs deliberately does something different: it allows

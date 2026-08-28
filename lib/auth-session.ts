@@ -29,7 +29,14 @@ export function parseCookie(header: string | null, name: string): string | null 
   return null;
 }
 
-function hashToken(token: string): string {
+/**
+ * SHA-256 (hex) of a raw session token — the exact value stored in
+ * sessions.token_hash. Exported so lib/device-passport-server.ts can bind a
+ * device-passport challenge to the issuing browser session server-side
+ * (challenge.session_token_hash), computed the identical way, without
+ * re-implementing the hash.
+ */
+export function hashToken(token: string): string {
   return createHash("sha256").update(token, "utf8").digest("hex");
 }
 
