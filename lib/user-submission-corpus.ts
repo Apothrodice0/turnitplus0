@@ -336,6 +336,228 @@ export type CandidateCorpusRepresentation = {
 };
 
 /**
+ * Developer/test-only diagnostics for query-time high-frequency shingle
+ * pruning (below). Populated in place when findCandidateCorpusRepresentations
+ * is handed a `diagnostics` sink — never part of any return value, never
+ * reachable from a similarity report, and carrying no corpus identifiers
+ * (only counts and one boolean). See lib/user-submission-matching.ts's own
+ * maxCandidateShingleDocumentFrequency comment and
+ * tests/user-submission-matching-maxdf.test.mjs.
+ */
+export type CandidateDiscoveryDiagnostics = {
+  /** Informative query shingles supplied (before any pruning). */
+  inputShingleCount: number;
+  /** Query shingles actually searched on (== input when pruning is disabled, nothing was common enough to drop, or the low-information fallback abandoned pruning). */
+  survivingShingleCount: number;
+  /** inputShingleCount - survivingShingleCount. Always 0 when fallbackUsed is true (the fallback abandons pruning rather than pruning less). */
+  highDfPrunedCount: number;
+  /** True when fewer than minDiscriminativeShingles would have survived, so pruning was ABANDONED for this query and the complete original shingle set was searched (see applyHighFrequencyShinglePruning). */
+  fallbackUsed: boolean;
+  /** The maxDF ceiling actually applied, or null when pruning was disabled (options.maxDocumentFrequency undefined). */
+  appliedMaxDocumentFrequency: number | null;
+};
+
+/**
+ * Query-time high-frequency ("maxDF") shingle pruning for corpus candidate
+ * DISCOVERY — the 10k+-representation scale hardening for
+ * findCandidateCorpusRepresentations below.
+ *
+ * PROBLEM (measured): every academic document shares a few hundred
+ * common-register / boilerplate informative 5-grams ("participants were
+ * randomly assigned to", "the results of this study suggest", …). At a
+ * handful of representations these are harmless. At ~8k+ eligible
+ * representations they appear in thousands of them each, which means (a) the
+ * candidate GROUP BY has to scan and aggregate a posting list per common
+ * hash spanning most of the corpus — an 8k-representation corpus already
+ * pushes findCandidateCorpusRepresentations past
+ * USER_SUBMISSION_MATCH_THRESHOLDS.dbQueryTimeoutMs — and (b) a genuinely
+ * copied source (which shares maybe 40 highly distinctive shingles with the
+ * query) is out-ranked in `ORDER BY shared DESC LIMIT n` by unrelated
+ * documents that merely share more boilerplate, so it never reaches
+ * verification at all.
+ *
+ * FIX: drop, for candidate discovery only, any query shingle carried by
+ * more than `maxDocumentFrequency` MATCH-ELIGIBLE representations. A
+ * genuinely distinctive copied passage is a contiguous run of low-DF
+ * shingles (only the source has that exact phrasing) and is completely
+ * unaffected; boilerplate is exactly what gets removed.
+ *
+ * NOT verification-affecting: lib/user-submission-matching.ts recomputes
+ * computeDocumentCorrespondence from full canonical text for every surviving
+ * candidate, so passages, matched-word union and the final unified score are
+ * byte-identical to an unpruned run for every candidate that survives — and
+ * the only representations that fail to survive are ones sharing solely
+ * common-register shingles, which computeDocumentCorrespondence's own
+ * containment / distinctive-passage / generic-academic-register gates
+ * already refuse to accept as a match.
+ *
+ * WHAT "DF" MEANS HERE — DF(hash, requester) = the number of DISTINCT
+ * representations that contain the hash AND are eligible to participate in
+ * matching FOR THIS REQUESTER. It is the exact, WHOLE
+ * admissionEligibilitySql predicate the candidate query itself applies,
+ * including its optional per-account exclusion:
+ *   - not raw shingle rows: corpus_document_shingles'
+ *     ux_...(representation_id, fingerprint_version, shingle_hash) UNIQUE
+ *     index makes at most one row per representation per (version, hash), so
+ *     a repeated phrase inside one document can never inflate its DF;
+ *   - not a count that includes revoked/deactivated-only representations;
+ *   - not a count that includes representations backed ONLY by the
+ *     requester's OWN admission promotion(s) — the candidate query excludes
+ *     those for this requester (excludeAccountId, via
+ *     buildReportAdmissionAccountPrefix), so counting them here would let a
+ *     requester's own re-uploads falsely prune a legitimate cross-account
+ *     source that shares the same passage. options.excludeAccountId is
+ *     threaded in and bound into admissionEligibilitySql identically to
+ *     findCandidateCorpusRepresentations — never a second rule.
+ *   - null excludeAccountId => plain global eligibility (every existing
+ *     non-account-scoped caller is unchanged).
+ *
+ * DF MEASUREMENT — the part that has to stay cheap:
+ *
+ *   BOUNDED ELIGIBLE POSTING-LIST PROBE. For each query hash, walk
+ *   idx_corpus_document_shingles_hash for that shingle_hash, applying the
+ *   eligibility predicate per posting, and stop after `maxDf + 1` ELIGIBLE
+ *   representations have been counted (inner `LIMIT ?`). "> maxDf eligible
+ *   representations?" is the only question, so `maxDf + 1` is the whole
+ *   answer — no wider cap, no rankable DF beyond it.
+ *     - a common hash with thousands of representations eligible for this
+ *       requester costs ~maxDf eligibility checks and stops — O(maxDf) per
+ *       hash, INDEPENDENT of corpus size;
+ *     - a rare hash costs one check per representation that has it (<= maxDf);
+ *     - the one unbounded case is a hash sitting in thousands of
+ *       representations that are ALL ineligible FOR THIS REQUESTER
+ *       (revoked-only, or backed only by the requester's own promotions)
+ *       and almost no eligible one: the walk cannot reach `maxDf + 1`
+ *       eligible and scans that hash's whole posting list. That requires
+ *       thousands of documents all sharing one specific informative 5-gram
+ *       and all ineligible for the same requester — an operationally
+ *       implausible state (the admission gate's per-hash dedup and quality
+ *       screening make it hard for one account to promote dozens of
+ *       near-identical documents) — and dbQueryTimeoutMs still bounds it
+ *       (degrades to a recomputed-later partial, never a false negative).
+ *   Measured (work/maxdf, synthetic): probe ~0.11 s global / ~0.61 s
+ *   account-aware, two-pass total ~1.1 s, at 11.8M shingle rows / 8k
+ *   representations + 2,000 ACTIVE representations from ONE account all
+ *   sharing the requester's copied passage (the same-account stress), every
+ *   representation eligible via condition 3 (the worst case for the
+ *   per-posting check — never short-circuits on the cheap condition-1
+ *   submission-reference EXISTS a real corpus hits first). The SAME corpus's
+ *   unpruned candidate query is ~5 s (would time out); pruning takes the
+ *   whole pass to ~1.1 s even under that stress, ~0.15-0.6 s on a realistic
+ *   corpus. A plain `COUNT(*) ... GROUP BY shingle_hash` was measured first
+ *   and rejected (touches every posting of every common hash, scaled with
+ *   the corpus: ~1.4 s at 2k representations, and over-counts
+ *   ineligible representations); an eligibility-JOINED `GROUP BY` was ~9 s
+ *   at 8k.
+ *
+ * The hash list is passed to SQLite as a single json_each(?) bind value, so
+ * this pass carries no per-hash SQL-variable cost of its own and cannot
+ * approach SQLITE_MAX_VARIABLE_NUMBER regardless of query size. It is still
+ * chunked at `chunkSize` (bounded result sets, one json_each array per
+ * chunk); each hash lands in exactly one chunk.
+ *
+ * LOW-INFORMATION FALLBACK — a document written almost entirely in common
+ * register can have nearly every shingle prunable. When fewer than
+ * `minDiscriminativeShingles` shingles would survive, pruning is ABANDONED
+ * for that query: the complete original query shingle set is used, i.e.
+ * exactly the search an unpruned run would have run. This can never
+ * manufacture a NO_HISTORICAL_MATCH that a full search would not also
+ * produce. Diagnostics record fallbackUsed = true and highDfPrunedCount = 0
+ * (nothing was pruned).
+ */
+export async function applyHighFrequencyShinglePruning(
+  client: Client,
+  shingleHashes: Set<string>,
+  options: {
+    fingerprintVersion: string;
+    /** undefined disables pruning entirely — returns `shingleHashes` unchanged with no DB call. */
+    maxDocumentFrequency: number | undefined;
+    minDiscriminativeShingles: number;
+    chunkSize: number;
+    /**
+     * The requester's own account id, forwarded verbatim from
+     * findCandidateCorpusRepresentations. When present, DF counts only
+     * representations eligible FOR THIS REQUESTER — the same account-aware
+     * admissionEligibilitySql the candidate query applies: a representation
+     * backed ONLY by this account's own admission promotion(s) is not
+     * counted (it would be excluded from candidate discovery anyway), so it
+     * cannot inflate a hash's DF and falsely prune a legitimate
+     * cross-account source. Passed through buildReportAdmissionAccountPrefix
+     * exactly as findCandidateCorpusRepresentations does — never a second
+     * account-exclusion rule.
+     */
+    excludeAccountId?: string;
+    diagnostics?: CandidateDiscoveryDiagnostics;
+  },
+): Promise<Set<string>> {
+  const hashList = [...shingleHashes];
+  const writeDiagnostics = (surviving: number, fallbackUsed: boolean, appliedMaxDf: number | null) => {
+    if (!options.diagnostics) return;
+    options.diagnostics.inputShingleCount = hashList.length;
+    options.diagnostics.survivingShingleCount = surviving;
+    options.diagnostics.highDfPrunedCount = hashList.length - surviving;
+    options.diagnostics.fallbackUsed = fallbackUsed;
+    options.diagnostics.appliedMaxDocumentFrequency = appliedMaxDf;
+  };
+
+  if (options.maxDocumentFrequency === undefined || hashList.length === 0) {
+    writeDiagnostics(hashList.length, false, null);
+    return shingleHashes;
+  }
+  const maxDf = options.maxDocumentFrequency;
+  // "> maxDf ELIGIBLE representations?" is the only question, so the
+  // per-hash posting-list walk stops after maxDf + 1 eligible ones.
+  const probeLimit = Math.trunc(maxDf) + 1;
+  // Account-aware eligibility — the SAME derivation and helper
+  // findCandidateCorpusRepresentations uses (never a second rule). null =>
+  // global eligibility; a prefix => a representation backed ONLY by that
+  // account's own admission promotion(s) does not count toward DF, matching
+  // the candidate query's own account exclusion exactly.
+  const excludeAccountPrefix = options.excludeAccountId ? buildReportAdmissionAccountPrefix(options.excludeAccountId) : null;
+
+  const eligibleDocumentFrequency = new Map<string, number>();
+  for (const hash of hashList) eligibleDocumentFrequency.set(hash, 0);
+  for (let offset = 0; offset < hashList.length; offset += options.chunkSize) {
+    const chunk = hashList.slice(offset, offset + options.chunkSize);
+    // json_each(?) carries the whole chunk as ONE bind value. Per hash, the
+    // inner query walks idx_corpus_document_shingles_hash, applies the exact
+    // account-aware admissionEligibilitySql predicate per posting, and stops
+    // after maxDf + 1 ELIGIBLE representations. Anonymous ?, bound in textual
+    // order: fingerprint_version, then admissionEligibilitySql's 3
+    // account-prefix params (all the same prefix, or all NULL), then LIMIT,
+    // then the json_each array.
+    const result = await client.execute({
+      sql: `SELECT j.value AS shingle_hash,
+                   (SELECT COUNT(*) FROM (
+                      SELECT 1
+                      FROM corpus_document_shingles s
+                      JOIN corpus_document_representations r ON r.id = s.representation_id
+                      WHERE s.fingerprint_version = ?
+                        AND s.shingle_hash = j.value
+                        AND ${admissionEligibilitySql()}
+                      LIMIT ?
+                    )) AS eligible_document_frequency
+            FROM json_each(?) j`,
+      args: [options.fingerprintVersion, excludeAccountPrefix, excludeAccountPrefix, excludeAccountPrefix, probeLimit, JSON.stringify(chunk)],
+    });
+    for (const row of result.rows as unknown as { shingle_hash: string; eligible_document_frequency: number | bigint }[]) {
+      eligibleDocumentFrequency.set(String(row.shingle_hash), Number(row.eligible_document_frequency));
+    }
+  }
+
+  const discriminative = hashList.filter((hash) => (eligibleDocumentFrequency.get(hash) ?? 0) <= maxDf);
+  if (discriminative.length >= options.minDiscriminativeShingles || discriminative.length === hashList.length) {
+    writeDiagnostics(discriminative.length, false, maxDf);
+    return new Set(discriminative);
+  }
+
+  // Low-information fallback: abandon pruning for this query and search on
+  // the complete original shingle set — exactly what an unpruned run does.
+  writeDiagnostics(hashList.length, true, maxDf);
+  return shingleHashes;
+}
+
+/**
  * "Which historical reusable document representations have matching
  * passages with this submission?" (this phase's own task description,
  * section 11) — representation-level only. This query never joins to
@@ -443,7 +665,28 @@ function admissionEligibilitySql(): string {
 export async function findCandidateCorpusRepresentations(
   client: Client,
   shingleHashes: Set<string>,
-  options: { fingerprintVersion?: string; minSharedShingles?: number; limit?: number; excludeAccountId?: string } = {},
+  options: {
+    fingerprintVersion?: string;
+    minSharedShingles?: number;
+    limit?: number;
+    excludeAccountId?: string;
+    /**
+     * Query-time high-frequency shingle pruning ceiling for candidate
+     * DISCOVERY only (see applyHighFrequencyShinglePruning's own comment and
+     * lib/user-submission-matching.ts's maxCandidateShingleDocumentFrequency).
+     * A query shingle present in MORE than this many MATCH-ELIGIBLE
+     * representations (for this fingerprint_version;
+     * revoked/deactivated-only representations excluded) is dropped before
+     * the candidate GROUP BY. undefined (the default) disables pruning
+     * entirely — the DB query below is then byte-identical, and every
+     * existing caller keeps its exact prior behavior and cost.
+     */
+    maxDocumentFrequency?: number;
+    /** Low-information fallback floor — consulted only when maxDocumentFrequency is set. Below it, pruning is abandoned and the full original shingle set is searched. Default 24. See applyHighFrequencyShinglePruning. */
+    minDiscriminativeShingles?: number;
+    /** Developer/test diagnostics sink for the pruning step — populated in place, never returned. */
+    diagnostics?: CandidateDiscoveryDiagnostics;
+  } = {},
 ): Promise<CandidateCorpusRepresentation[]> {
   const fingerprintVersion = options.fingerprintVersion ?? CORPUS_FINGERPRINT_VERSION;
   const minSharedShingles = options.minSharedShingles ?? 1;
@@ -465,7 +708,27 @@ export async function findCandidateCorpusRepresentations(
   // exact same one query as before, with HAVING / ORDER BY / LIMIT still
   // applied server-side — no behavioral or performance change for it.
   const SHINGLE_IN_CHUNK_SIZE = 20_000;
-  const hashList = [...shingleHashes];
+
+  // Query-time high-frequency shingle pruning (candidate DISCOVERY only —
+  // see applyHighFrequencyShinglePruning). options.maxDocumentFrequency
+  // undefined => effectiveHashes === shingleHashes and no DB call is made
+  // here, so the search below is exactly what every prior build ran. The DF
+  // probe binds each chunk as one json_each value (no per-hash SQL
+  // variable), so the same 20,000 ceiling is reused only to keep its result
+  // sets bounded, consistently with the candidate query below.
+  const effectiveHashes = await applyHighFrequencyShinglePruning(client, shingleHashes, {
+    fingerprintVersion,
+    maxDocumentFrequency: options.maxDocumentFrequency,
+    minDiscriminativeShingles: options.minDiscriminativeShingles ?? 24,
+    chunkSize: SHINGLE_IN_CHUNK_SIZE,
+    // Account-aware DF: the DF probe must count only representations the
+    // candidate query below would also consider eligible for this requester.
+    excludeAccountId: options.excludeAccountId,
+    diagnostics: options.diagnostics,
+  });
+  if (effectiveHashes.size === 0) return [];
+
+  const hashList = [...effectiveHashes];
   const isActivelyPromotedCase = `CASE WHEN EXISTS (
               SELECT 1 FROM corpus_admission_promotions p
               JOIN corpus_admission_accepted_representations ar ON ar.id = p.accepted_representation_id
@@ -537,7 +800,15 @@ export async function findCandidateCorpusRepresentations(
     (countsResult.rows as unknown as { representation_id: string; total: number | bigint }[]).map((row) => [row.representation_id, Number(row.total)]),
   );
 
-  const targetCount = shingleHashes.size;
+  // The search was conducted over effectiveHashes (== shingleHashes unless
+  // high-DF pruning removed some), and `shared` counts only those, so the
+  // containment denominator must match the same set — otherwise a pruned
+  // run would report an artificially low containment (shared over an
+  // un-pruned target). No downstream consumer reads this field on a pruned
+  // run anyway (lib/user-submission-matching.ts recomputes containment from
+  // full text via computeDocumentCorrespondence), but keeping it internally
+  // consistent avoids a confusing diagnostic.
+  const targetCount = effectiveHashes.size;
   return sharedRows.map((row) => {
     const shared = Number(row.shared);
     const candidateTotal = totalsById.get(row.representation_id) ?? 0;

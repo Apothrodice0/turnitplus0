@@ -122,6 +122,51 @@ export type UserSubmissionMatchConfig = {
    * correspondence loop below.
    */
   dbQueryTimeoutMs: number;
+  /**
+   * 10k+-corpus scale hardening: query-time high-frequency ("maxDF") shingle
+   * pruning ceiling for candidate DISCOVERY, passed straight through to
+   * findCandidateCorpusRepresentations (see
+   * lib/user-submission-corpus.ts's applyHighFrequencyShinglePruning for the
+   * full mechanism and the measured rationale). A query 5-gram found in more
+   * than this many representations that are MATCH-ELIGIBLE FOR THIS
+   * REQUESTER (revoked/deactivated-only representations, and representations
+   * backed only by the requester's own admission promotions, do not count —
+   * the same account-aware eligibility the candidate query applies) is
+   * dropped before the candidate search — it is common register /
+   * boilerplate, contributes ~nothing to discovery, and at scale both
+   * dominates the candidate query's cost and evicts genuinely distinctive
+   * sources from the ranked LIMIT window.
+   *
+   * DISCOVERY ONLY: every surviving candidate is still re-verified by
+   * computeDocumentCorrespondence from full canonical text below, so
+   * passages, matchedWordCount, longestMatchWords, the matched-word union
+   * and the final unified score are identical to an unpruned run for every
+   * candidate that survives — and a candidate only fails to survive if it
+   * shares solely common-register shingles, which computeDocumentCorrespondence
+   * already refuses to accept as a match. Exact-canonical duplicates are
+   * additionally protected by this file's own canonical-hash fallback,
+   * independent of DF.
+   *
+   * null disables pruning entirely (findCandidateCorpusRepresentations then
+   * runs the exact query every prior build ran, with no extra DB round
+   * trip). The default is a positive integer chosen so that below ~1k
+   * representations no real shingle ever reaches it (pruning is inert at
+   * today's corpus size) while it engages exactly as the corpus grows into
+   * the range where the unpruned query would otherwise time out.
+   */
+  maxCandidateShingleDocumentFrequency: number | null;
+  /**
+   * Low-information-query fallback floor, forwarded as
+   * findCandidateCorpusRepresentations' minDiscriminativeShingles — only
+   * consulted when maxCandidateShingleDocumentFrequency is non-null. If
+   * high-DF pruning would leave fewer than this many surviving query
+   * shingles (a document written almost entirely in common academic
+   * register), pruning is ABANDONED for that query and the complete
+   * original query shingle set is searched — exactly what an unpruned run
+   * does — so such a document is never turned into a false
+   * NO_HISTORICAL_MATCH by pruning alone.
+   */
+  minDiscriminativeShingles: number;
 };
 
 /**
@@ -197,6 +242,37 @@ export const USER_SUBMISSION_MATCH_THRESHOLDS: UserSubmissionMatchConfig = {
   maxCandidateWordCount: 20_000,
   matchTimeBudgetMs: 2_500,
   dbQueryTimeoutMs: 1_500,
+  // 10k+-corpus scale hardening — see maxCandidateShingleDocumentFrequency's
+  // own comment on UserSubmissionMatchConfig. 50 was chosen from direct
+  // measurement against synthetic corpora at 200 / 2,000 / 8,000+
+  // representations with realistic shingle density (work/maxdf, not
+  // committed):
+  //   - below ~1,000 representations no real 5-gram reaches DF 50, so this
+  //     is completely inert at today's corpus size — the only cost is one
+  //     extra bounded eligible-DF probe (json_each + per-hash `LIMIT`) per
+  //     cold historical-match computation, a few ms on a small corpus, and
+  //     nothing is pruned;
+  //   - at 8,000 representations (11.8M shingle rows) the unpruned candidate
+  //     query takes ~5-9 s (over dbQueryTimeoutMs — the matcher is already
+  //     silently timing out at that scale); with maxDF=50 the
+  //     eligibility-correct DF probe measured ~0.56 s (worst-case,
+  //     corpus-size-independent) plus a small pruned candidate query
+  //     complete well under the 1.5 s budget, and a genuinely copied source
+  //     ranks #1 instead of being evicted past the LIMIT;
+  //   - 50 in a 10k corpus is 0.5% — comfortably above any real
+  //     resubmission / revision cluster (nobody resubmits one paper 50
+  //     times) and far below true boilerplate DF (hundreds to thousands),
+  //     with the minDiscriminativeShingles fallback (bypass-pruning)
+  //     covering the mostly-generic-document edge.
+  // DF counts representations that are MATCH-ELIGIBLE FOR THIS REQUESTER —
+  // the exact account-aware admissionEligibilitySql the candidate query
+  // applies: revoked/deactivated-only representations, and representations
+  // backed only by the requester's own admission promotion(s), do not
+  // inflate it (see applyHighFrequencyShinglePruning).
+  // Set to null to disable pruning entirely (exact pre-hardening behavior,
+  // no extra query).
+  maxCandidateShingleDocumentFrequency: 50,
+  minDiscriminativeShingles: 24,
 };
 
 export type EvidenceVersion = {
@@ -348,6 +424,12 @@ export async function matchAgainstUserSubmissionCorpus(
         minSharedShingles: config.candidateShingleThreshold,
         limit: config.maxCandidates,
         excludeAccountId: params.excludeAccountId,
+        // 10k+-corpus scale hardening — candidate DISCOVERY only. See
+        // maxCandidateShingleDocumentFrequency on UserSubmissionMatchConfig
+        // and lib/user-submission-corpus.ts's applyHighFrequencyShinglePruning.
+        // null => no pruning and no extra DB round trip (exact prior behavior).
+        maxDocumentFrequency: config.maxCandidateShingleDocumentFrequency ?? undefined,
+        minDiscriminativeShingles: config.minDiscriminativeShingles,
       }),
       config.dbQueryTimeoutMs,
       "findCandidateCorpusRepresentations",
