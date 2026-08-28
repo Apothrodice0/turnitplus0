@@ -362,4 +362,92 @@ function applyMigrationsExcluding(db, dir, excludeFiles) {
   console.log('[upgrade path] 0009-0011 layer cleanly onto an already-migrated database; pre-existing saved_reports rows survive with user_id = NULL');
 }
 
+// --- Section F: Device Passport foundation (drizzle/0038-0040) — fresh
+// migrate proof on both engines that the three additive tables, the two
+// verified_device_passport_id columns, and the snapshot
+// device_provenance_generation column all land, and that the immediately-
+// adjacent legacy tables (saved_reports, report_historical_match_snapshots,
+// corpus_admission_report_jobs) are only ADDED to, never restructured. ---
+{
+  const dbPath = path.join(repo, 'test_migration_integrity_device_passport_sqlite.db');
+  cleanupSqliteFile(dbPath);
+  const db = new Database(dbPath);
+  db.pragma('foreign_keys = ON');
+  applyMigrations(db, drizzleDir);
+
+  const tables = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((r) => r.name));
+  for (const t of ['device_passports', 'device_passport_challenges', 'corpus_admission_decision_device_provenance']) {
+    assert(tables.has(t), `[sqlite] 0038/0039 must create ${t}`);
+  }
+  assert(!tables.has('device_provenance_generation'), '[sqlite] there must be NO global device_provenance_generation table');
+
+  const passportCols = new Set(db.prepare(`PRAGMA table_info('device_passports')`).all().map((r) => r.name));
+  assert(passportCols.has('provenance_generation'), '[sqlite] device_passports.provenance_generation (per-passport counter) must exist');
+
+  const snapshotCols = new Set(db.prepare(`PRAGMA table_info('report_historical_match_snapshots')`).all().map((r) => r.name));
+  assert(snapshotCols.has('device_provenance_generation'), '[sqlite] 0040 must add report_historical_match_snapshots.device_provenance_generation');
+
+  const savedReportCols = new Set(db.prepare(`PRAGMA table_info('saved_reports')`).all().map((r) => r.name));
+  assert(savedReportCols.has('verified_device_passport_id'), '[sqlite] 0039 must add saved_reports.verified_device_passport_id');
+  const jobCols = new Set(db.prepare(`PRAGMA table_info('corpus_admission_report_jobs')`).all().map((r) => r.name));
+  assert(jobCols.has('verified_device_passport_id'), '[sqlite] 0039 must add corpus_admission_report_jobs.verified_device_passport_id');
+
+  // The deduplicated representation table must gain no identity column.
+  const repCols = new Set(db.prepare(`PRAGMA table_info('corpus_document_representations')`).all().map((r) => r.name));
+  for (const forbidden of ['device_passport_id', 'verified_device_passport_id', 'account_id', 'user_id', 'email']) {
+    assert(!repCols.has(forbidden), `[sqlite] corpus_document_representations must NOT gain "${forbidden}"`);
+  }
+
+  // FK actions on the per-backing provenance table.
+  const provFks = db.prepare(`PRAGMA foreign_key_list('corpus_admission_decision_device_provenance')`).all();
+  const decFk = provFks.find((r) => r.from === 'decision_id');
+  const passFk = provFks.find((r) => r.from === 'device_passport_id');
+  assert.equal(decFk.table, 'corpus_admission_decisions');
+  assert.equal(decFk.on_delete, 'CASCADE', '[sqlite] decision_id -> corpus_admission_decisions must be ON DELETE CASCADE');
+  assert.equal(passFk.table, 'device_passports');
+  assert.equal(passFk.on_delete, 'RESTRICT', '[sqlite] device_passport_id -> device_passports must be ON DELETE RESTRICT');
+
+  db.close();
+  cleanupSqliteFile(dbPath);
+  console.log('[sqlite] Device Passport foundation: 3 tables + 3 columns land, no global generation table, no representation identity column, FK actions correct');
+}
+
+{
+  const dbFile = path.join(repo, 'test_migration_integrity_device_passport_libsql.db');
+  cleanupSqliteFile(dbFile);
+  const client = createClient({ url: `file:${dbFile}` });
+  await applyMigrationsLibsql(client, drizzleDir);
+  await client.execute('PRAGMA foreign_keys = ON');
+
+  const tableRows = await client.execute("SELECT name FROM sqlite_master WHERE type='table'");
+  const tables = new Set(tableRows.rows.map((r) => String(r.name)));
+  for (const t of ['device_passports', 'device_passport_challenges', 'corpus_admission_decision_device_provenance']) {
+    assert(tables.has(t), `[libsql] 0038/0039 must create ${t}`);
+  }
+  assert(!tables.has('device_provenance_generation'), '[libsql] there must be NO global device_provenance_generation table');
+
+  const snapshotInfo = await client.execute("PRAGMA table_info('report_historical_match_snapshots')");
+  assert(snapshotInfo.rows.some((r) => String(r.name) === 'device_provenance_generation'), '[libsql] 0040 must add device_provenance_generation');
+
+  // Behavioral: RESTRICT blocks removing a referenced passport.
+  await client.execute({ sql: 'INSERT INTO device_passports (id, public_key_spki, created_at) VALUES (?,?,?)', args: ['p-1', Buffer.from('spki'), Date.now()] });
+  await client.execute({
+    sql: `INSERT INTO corpus_admission_decisions (id, source_ref, policy_version, decision, reason_codes, hard_gate_passed, hard_gate_failure_codes, dry_run) VALUES (?,?,?,?,?,?,?,?)`,
+    args: ['d-1', 'src', 'v1', 'ACCEPT', '[]', 1, '[]', 0],
+  });
+  await client.execute({ sql: 'INSERT INTO corpus_admission_decision_device_provenance (decision_id, device_passport_id, verified_at) VALUES (?,?,?)', args: ['d-1', 'p-1', Date.now()] });
+  await assert.rejects(
+    () => client.execute({ sql: 'DELETE FROM device_passports WHERE id = ?', args: ['p-1'] }),
+    /FOREIGN KEY constraint failed/,
+    '[libsql] a passport referenced by a promoted backing cannot be removed (RESTRICT)',
+  );
+  await client.execute({ sql: 'DELETE FROM corpus_admission_decisions WHERE id = ?', args: ['d-1'] });
+  const remaining = await client.execute({ sql: 'SELECT COUNT(*) AS c FROM corpus_admission_decision_device_provenance WHERE decision_id = ?', args: ['d-1'] });
+  assert.equal(Number(remaining.rows[0].c), 0, '[libsql] removing the decision cascade-removes its device provenance');
+
+  client.close();
+  cleanupSqliteFile(dbFile);
+  console.log('[libsql] Device Passport foundation: tables/columns land; RESTRICT + CASCADE FK actions enforced');
+}
+
 console.log('Migration schema integrity tests passed');

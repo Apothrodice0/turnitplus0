@@ -1,0 +1,9 @@
+# Migration SQL must stay LF in the working tree on every platform. The
+# isolated production migration runner (lib/e8-tables-migration-runner.ts)
+# pins each file's SHA-256 in EXPECTED_MIGRATION_SHA256, computed from the
+# LF-normalized bytes git stores. Without this rule, core.autocrlf=true
+# checks these files out as CRLF on Windows, so the runner's own
+# fs.readFileSync + sha256 sees CRLF bytes and every hash check fails
+# (HASH_MISMATCH). eol=lf keeps checkout, hashing, and applyMigrations*
+# byte-identical to the committed blobs everywhere.
+drizzle/*.sql text eol=lf

@@ -160,7 +160,11 @@ if (!remote) {
 
 // Guards against the check silently comparing zero tables (e.g. a broken
 // filter that skips every export) and reporting a false "0 issues" pass.
-assert(tablesChecked >= 11, `expected to check at least 11 tables from db/schema.ts, only checked ${tablesChecked} — the comparison logic itself may be broken`);
+// Floor ratcheted up as the schema grew (device-passport foundation,
+// drizzle/0038-0040, added device_passports / device_passport_challenges /
+// corpus_admission_decision_device_provenance) — it is a "did the filter
+// break" sanity bound, not an exact count.
+assert(tablesChecked >= 38, `expected to check at least 38 tables from db/schema.ts, only checked ${tablesChecked} — the comparison logic itself may be broken`);
 
 if (drift.length > 0) {
   console.error(`Schema drift detected (${drift.length} issue(s)):`);

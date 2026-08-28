@@ -1,0 +1,25 @@
+-- Device-provenance snapshot staleness — Phase 1 SCHEMA FOUNDATION ONLY.
+-- Purely additive; nothing reads or writes this column yet. This migration
+-- ONLY adds snapshot support — it creates no table (there is deliberately no
+-- global device-provenance generation table; the counter is per-passport on
+-- device_passports.provenance_generation, drizzle/0038).
+--
+-- report_historical_match_snapshots.device_provenance_generation records the
+-- per-passport device_passports.provenance_generation value that the
+-- report's own immutable upload passport
+-- (saved_reports.verified_device_passport_id, drizzle/0039) held when this
+-- snapshot's device-sensitive classification was computed. A later phase
+-- compares it the same way the existing corpus_generation / matcher_version
+-- / fingerprint_version / canonicalization_version tags already are:
+--   report has no verified upload passport  -> value stays 0
+--   report uploaded under passport D        -> stamped with D.provenance_generation
+--   later read, stored value < D.provenance_generation
+--                                           -> the device-sensitive part of
+--                                              the snapshot is stale and
+--                                              must be recomputed
+-- A passport's own counter moving never invalidates a report tied to a
+-- different passport. NOT NULL DEFAULT 0 backfills every existing snapshot
+-- row to 0 (no device classification was ever computed for it), which is
+-- exactly the "no verified passport" resting state — the common case for
+-- every existing row, so no explicit backfill statement is needed.
+ALTER TABLE report_historical_match_snapshots ADD COLUMN device_provenance_generation INTEGER NOT NULL DEFAULT 0;

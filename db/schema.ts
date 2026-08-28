@@ -202,6 +202,18 @@ export const saved_reports = sqliteTable(
     // save onward and so cannot distinguish "still running" from
     // "permanently failed" on its own.
     ai_status: text("ai_status"),
+    // Device Passport (drizzle/0039): the device passport cryptographically
+    // verified when POST /api/reports first created this report. NULL when
+    // no passport was verified at upload (feature off, unsupported browser,
+    // verification failed — all fail-safe: no device-based exclusion). NO
+    // foreign key on purpose (same no-FK / explicit-application-cleanup
+    // reasoning as report_historical_match_snapshots — report-local data
+    // must never be collaterally mutated by a passport-side change), and
+    // immutable after first insert (a later phase never lists it in the
+    // upsert's ON CONFLICT DO UPDATE, exactly like room_number). NULL for
+    // every pre-0039 row. Phase 1 = schema foundation only; nothing reads or
+    // writes this yet.
+    verified_device_passport_id: text("verified_device_passport_id"),
   },
   (table) => [
     primaryKey({ columns: [table.device_key, table.id] }),
@@ -209,6 +221,13 @@ export const saved_reports = sqliteTable(
     index("idx_saved_reports_user_id_created").on(table.user_id, table.report_created_at),
     index("idx_saved_reports_document_identity_id").on(table.document_identity_id),
     index("idx_saved_reports_user_room").on(table.user_id, table.room_number),
+    // drizzle/0039: partial index over the passport-attributed subset only —
+    // supports the per-passport shared-device aggregate and provenance
+    // lookups a later phase runs, without carrying an index entry for the
+    // (large, common) NULL majority.
+    index("idx_saved_reports_verified_device_passport")
+      .on(table.verified_device_passport_id)
+      .where(sql`verified_device_passport_id IS NOT NULL`),
   ],
 );
 
@@ -759,6 +778,16 @@ export const report_historical_match_snapshots = sqliteTable(
     // at — stale (and recomputed) once corpus_match_generation.generation
     // advances past it. See that migration's own comment.
     corpus_generation: integer("corpus_generation").notNull().default(0),
+    // drizzle/0040: the PER-PASSPORT device_passports.provenance_generation
+    // value the report's own immutable upload passport
+    // (saved_reports.verified_device_passport_id) held when this snapshot's
+    // device-sensitive classification was computed. 0 for a report with no
+    // verified upload passport. A later phase recomputes the device-sensitive
+    // part once that specific passport's counter advances past this value —
+    // never a global epoch, so another passport's change never invalidates
+    // this row. Phase 1 = schema foundation only; nothing reads or writes
+    // this yet.
+    device_provenance_generation: integer("device_provenance_generation").notNull().default(0),
   },
   (table) => [
     uniqueIndex("ux_report_historical_match_snapshots_report").on(table.report_device_key, table.report_id),
@@ -1083,6 +1112,14 @@ export const corpus_admission_report_jobs = sqliteTable(
     last_error: text("last_error"),
     created_at: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
     updated_at: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    // Device Passport (drizzle/0039): the passport verified synchronously in
+    // the upload request, carried here so the deferred admission-decision
+    // path can write the per-backing
+    // corpus_admission_decision_device_provenance row on ACCEPT. Nullable,
+    // no foreign key (mirrors this table's existing plain account_id /
+    // device_key columns). Phase 1 = schema foundation only; nothing reads
+    // or writes this yet.
+    verified_device_passport_id: text("verified_device_passport_id"),
   },
   (table) => [
     uniqueIndex("ux_corpus_admission_report_jobs_source_ref").on(table.source_ref),
@@ -1155,6 +1192,92 @@ export const corpus_admission_sweep_runs = sqliteTable("corpus_admission_sweep_r
   last_summary_json: text("last_summary_json"),
   updated_at: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 });
+
+// Device Passport — Phase 1 SCHEMA FOUNDATION ONLY (drizzle/0038-0040). Three
+// additive tables plus the two verified_device_passport_id columns and the
+// report_historical_match_snapshots.device_provenance_generation column
+// declared above. NOTHING reads or writes any of this yet: browser key
+// generation, challenge issuance, signature verification, device-continuity
+// matching, the SELF downgrade, shared-device thresholds, and admin UI are
+// all out of scope for this phase. See the three migration files' own header
+// comments for the full rationale.
+
+// One row per registered browser public key. id = lowercase SHA-256 hex of
+// public_key_spki (idempotent registration). public_key_spki is the raw DER
+// SubjectPublicKeyInfo, kept ONLY to verify ECDSA P-256 / SHA-256
+// signatures — the private key never leaves the browser. No account_id /
+// device_key / foreign key: a passport is deliberately not account-owned
+// (cross-account use is the whole point). provenance_generation is a
+// PER-PASSPORT monotonic counter — a later phase bumps THIS passport's
+// counter when it gains a materially relevant new distinct account
+// association, and on revocation. revoked_at is the only removal lever for
+// v1. Epoch-millisecond integer timestamps (the sessions / 0010 convention).
+export const device_passports = sqliteTable(
+  "device_passports",
+  {
+    id: text("id").primaryKey(),
+    public_key_spki: blob("public_key_spki").notNull(),
+    algorithm: text("algorithm").notNull().default("ECDSA-P256-SHA256"),
+    created_at: integer("created_at").notNull(),
+    last_seen_at: integer("last_seen_at"),
+    revoked_at: integer("revoked_at"),
+    provenance_generation: integer("provenance_generation").notNull().default(0),
+  },
+  (table) => [
+    index("idx_device_passports_last_seen").on(table.last_seen_at),
+  ],
+);
+
+// One row per issued device-attestation challenge nonce. nonce_hash is
+// SHA-256 of the 32-byte random nonce — the raw nonce is returned to the
+// client exactly once and never stored (the sessions.token_hash discipline).
+// account_id / session_token_hash capture the session context SERVER-SIDE at
+// issue time; verification compares them against the then-current session,
+// so the browser never handles a session secret. Single-use via an atomic
+// consumed_at write. Rows are removed freely once expired (opportunistic,
+// traffic-piggybacked — the rate_limit_buckets / 0024 pattern). No foreign
+// key: a challenge outlives nothing.
+export const device_passport_challenges = sqliteTable(
+  "device_passport_challenges",
+  {
+    id: text("id").primaryKey(),
+    nonce_hash: text("nonce_hash").notNull(),
+    account_id: text("account_id"),
+    session_token_hash: text("session_token_hash"),
+    issued_at: integer("issued_at").notNull(),
+    expires_at: integer("expires_at").notNull(),
+    consumed_at: integer("consumed_at"),
+  },
+  (table) => [
+    index("idx_device_passport_challenges_expiry").on(table.expires_at),
+  ],
+);
+
+// One verified device per admission decision (decision_id is the primary
+// key). The ONLY place a promoted corpus backing is linked to a device
+// passport — joined to the deduplicated representation only through
+// corpus_admission_promotions.decision_id, the same per-backing shape
+// admissionEligibilitySql already uses for the account check. The passport
+// id is NEVER placed on corpus_document_representations (deduplicated, many
+// independent backings). decision_id CASCADEs with its decision (accepted
+// provenance is as durable as the accepted decision); device_passport_id is
+// RESTRICT so a passport can never be removed while a promoted backing still
+// references it. verified_at is an epoch-millisecond integer.
+export const corpus_admission_decision_device_provenance = sqliteTable(
+  "corpus_admission_decision_device_provenance",
+  {
+    decision_id: text("decision_id")
+      .primaryKey()
+      .references(() => corpus_admission_decisions.id, { onDelete: "cascade" }),
+    device_passport_id: text("device_passport_id")
+      .notNull()
+      .references(() => device_passports.id, { onDelete: "restrict" }),
+    verified_at: integer("verified_at").notNull(),
+  },
+  (table) => [
+    index("idx_cadp_device_passport_id").on(table.device_passport_id),
+  ],
+);
 
 // Export nothing else — Drizzle will consume these definitions for migrations.
 export {};

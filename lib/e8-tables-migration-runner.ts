@@ -17,10 +17,19 @@ import type { Client } from "@libsql/client";
  * decision/content-store tables, the accepted-representations dedup table
  * and its revocation follow-through, the report-integration and promotion
  * job tables, the admin audit log, and the partial-snapshot/global-
- * generation cache-invalidation columns) — as a deliberate,
- * reviewed decision, not an automatic side effect of adding those migration
- * files; see this file's own EXPECTED_MIGRATION_SHA256 for how future extensions
- * are meant to be reviewed the same way) to a
+ * generation cache-invalidation columns) — and, for the Device Passport
+ * schema foundation, extended once more through 0037-0040 (0037's
+ * admin-dashboard sweep-status singleton, which shipped as a file + a
+ * db/schema.ts declaration in a501f38 without being folded in here at the
+ * time, is included now so this allowlist stays contiguous; 0038's
+ * device_passports / device_passport_challenges tables; 0039's per-backing
+ * corpus_admission_decision_device_provenance table plus the two
+ * verified_device_passport_id columns; 0040's per-passport-generation
+ * snapshot staleness column) — as a deliberate, reviewed decision, not an
+ * automatic side effect of adding those migration files; see this file's own
+ * EXPECTED_MIGRATION_SHA256 for how future extensions are meant to be
+ * reviewed the same way, and .gitattributes (drizzle/*.sql text eol=lf) for
+ * why those pinned hashes are stable on a Windows checkout) to a
  * database that is otherwise already at the pre-0012 baseline. Deliberately
  * separate from lib/ingest.ts's applyMigrationsLibsql(), which replays every
  * migration file in drizzleDir from 0000 onward with no applied-state
@@ -66,6 +75,10 @@ export const TARGET_MIGRATIONS = [
   "0034_corpus_admission_promotions.sql",
   "0035_report_historical_match_snapshots_partial.sql",
   "0036_corpus_match_generation.sql",
+  "0037_corpus_admission_sweep_runs.sql",
+  "0038_device_passports.sql",
+  "0039_device_passport_provenance.sql",
+  "0040_report_historical_match_snapshots_device_generation.sql",
 ] as const;
 
 export type TargetMigrationFile = (typeof TARGET_MIGRATIONS)[number];
@@ -143,6 +156,21 @@ export const EXPECTED_TABLES_BY_MIGRATION: Record<TargetMigrationFile, string[]>
   // report_historical_match_snapshots.corpus_generation also existing, so
   // checking the table alone correctly implies the column too.
   "0036_corpus_match_generation.sql": ["corpus_match_generation"],
+  "0037_corpus_admission_sweep_runs.sql": ["corpus_admission_sweep_runs"],
+  "0038_device_passports.sql": ["device_passports", "device_passport_challenges"],
+  // 0039 is a hybrid like 0036: it creates one genuinely new table
+  // (corpus_admission_decision_device_provenance) AND adds two columns
+  // (saved_reports.verified_device_passport_id,
+  // corpus_admission_report_jobs.verified_device_passport_id) in the same
+  // client.migrate() transaction — so table existence correctly implies the
+  // columns too, and runTargetMigrations() tracks applied-state by the table
+  // alone. The columns are ALSO declared in EXPECTED_COLUMNS_BY_MIGRATION
+  // below for documentation and test coverage, never as a second gate.
+  "0039_device_passport_provenance.sql": ["corpus_admission_decision_device_provenance"],
+  // 0040 creates no new table — one column on the already-existing
+  // report_historical_match_snapshots, tracked via EXPECTED_COLUMNS_BY_MIGRATION
+  // exactly like 0035.
+  "0040_report_historical_match_snapshots_device_generation.sql": [],
 };
 
 export const ALL_TARGET_TABLES: string[] = TARGET_MIGRATIONS.flatMap((m) => EXPECTED_TABLES_BY_MIGRATION[m]);
@@ -179,6 +207,17 @@ export const EXPECTED_COLUMNS_BY_MIGRATION: Partial<Record<TargetMigrationFile, 
   "0035_report_historical_match_snapshots_partial.sql": [
     { table: "report_historical_match_snapshots", column: "is_partial" },
   ],
+  // 0039's two additive columns — declared for documentation and test
+  // coverage. runTargetMigrations() gates 0039's applied-state on its new
+  // table (EXPECTED_TABLES_BY_MIGRATION), not on this list, since all three
+  // land in the same client.migrate() transaction — see that entry's comment.
+  "0039_device_passport_provenance.sql": [
+    { table: "saved_reports", column: "verified_device_passport_id" },
+    { table: "corpus_admission_report_jobs", column: "verified_device_passport_id" },
+  ],
+  "0040_report_historical_match_snapshots_device_generation.sql": [
+    { table: "report_historical_match_snapshots", column: "device_provenance_generation" },
+  ],
 };
 
 /**
@@ -203,15 +242,28 @@ export const EXPECTED_LEGACY_TABLES = [
  * before actually pointing this at production.
  */
 export const EXPECTED_MIGRATION_SHA256: Record<TargetMigrationFile, string> = {
-  "0012_document_identities.sql": "af7808eba21e5b025293d7d14af2693d2bf9e17e2a3d58dabae2e0c58ef88dd7",
-  "0013_document_families.sql": "018ca4baf77fc15d422b112d5171d6b4b89a4785b2aa94ca91948316f2ab40b4",
-  "0014_provenance.sql": "26b704780e8fe95d6d5780f3893bf0c091d1ed19ad2091a7ab65671bcaf1114c",
-  "0015_provenance_evidence.sql": "3cc4722197d9aade421c519da7ec7589ccc4e63f0bdf1831b1adc84f86c6b73e",
-  "0016_provenance_verification_decisions.sql": "402f7d1060170ea098ff82104fa2855c977dfd12ae5555ff11f470d4bd66d84e",
-  "0017_discovery_attempts.sql": "2ea220a9c603b5b623f3cba8e708c4e52d1807bacec386b9484d263e83a7f470",
-  "0018_source_retrievals.sql": "fb322f0a25fb692cfe512c333c85d0f238b11173033937941213cb578d077890",
-  "0019_user_submission_corpus.sql": "99bc22489bddc0b16fb359ce84e0d56c4c1ed768fd5f89dc9d946efbf5aa6c8e",
-  "0020_report_historical_match_snapshots.sql": "f915027d70eb1a8ffdd267abfa802eef8eddd8c2568eb1d97881df94df506d2e",
+  // ALL entries computed from the LF bytes git actually stores for these
+  // files (verified: sha256(git show HEAD:drizzle/<file>) == the value here
+  // for every committed migration; drizzle/*.sql content is byte-identical
+  // to HEAD — see git hash-object). .gitattributes pins `drizzle/*.sql text
+  // eol=lf` so a Windows checkout with core.autocrlf=true no longer produces
+  // CRLF working-tree copies whose fs.readFileSync bytes would mismatch.
+  //
+  // HISTORICAL CORRECTION (Device Passport schema-foundation pass): the
+  // 0012-0020 and 0029 entries below were previously pinned to CRLF-byte
+  // hashes — computed on a Windows checkout before .gitattributes existed —
+  // so this whole check (and every test depending on checkPreflight) failed
+  // on any LF-normalized checkout. Re-pinned to the LF hashes here. No
+  // migration SQL content changed; only these hash constants did.
+  "0012_document_identities.sql": "01fc8958a14690e6556ed649d1c49358af2b5510d680cd4f3fda8f5a20177275",
+  "0013_document_families.sql": "76c36cfdc02912d835c92a02a8bb6be77dc3ae2c15be1581efa65f9e4e1dd767",
+  "0014_provenance.sql": "73dfcfc59fb5d95970a45d9865d03fdfa78ef758870f2bfb71398fbc5367dc2c",
+  "0015_provenance_evidence.sql": "598763e97f0f7e59081705c893db5aa87d9847b330f8f6f14127c636330e6690",
+  "0016_provenance_verification_decisions.sql": "ad70c507528b2710ced2f19b1c6ede6f398b783fed40371662d3ebc7f871a270",
+  "0017_discovery_attempts.sql": "7c8f90737698467f20f3b80f1871cc0d32c9b451e65ec938201a9387b626e37d",
+  "0018_source_retrievals.sql": "fa32030af1ed654155a6ae712127e9b64715014652d732fd09e0ec0ad2315102",
+  "0019_user_submission_corpus.sql": "d174ae6b3d6dc364263786756f7e76ff033721410b13e34b210373ce06656b08",
+  "0020_report_historical_match_snapshots.sql": "e437f1abf942caeac51b1b231f78177aea18bf4c8cb6a2653750ccbf6faa584e",
   "0021_historical_match_shadow_evaluations.sql": "757a34bf6ca225a20ac0db9f5673d3f4e51556781b11d184e434bd55b4ab668f",
   "0022_reuse_context_declarations.sql": "80f2d9391a0bd9b89cde22218abcc1438f2c7810d09324bc6dc99e1bbdc03fde",
   "0023_privacy_consent_and_report_identity_link.sql": "ac9fbfb9bfe0e341a6bc9c07ca3fb2db7f38bf382c4e974be65e637466f6d970",
@@ -220,7 +272,7 @@ export const EXPECTED_MIGRATION_SHA256: Record<TargetMigrationFile, string> = {
   "0026_academic_search_run_diagnostics.sql": "f0ebebb4cd0a9b2e4f36560dc9990fb439a1bc4d8146842a932870934838269b",
   "0027_saved_reports_room_number.sql": "14caa98beb8b566372af7f6b21b24f9cb9d4a7c3db84396b4cd59b360947910d",
   "0028_saved_reports_ai_status.sql": "4b9f5c2bb57a156be7ff8273763b2d516fbde0d87b9e9298e12578fdc0a23d21",
-  "0029_corpus_admission_decisions.sql": "d0d57d89bc0e57673856146362cd98c01408cde10d0ef47d1bd0670661de9084",
+  "0029_corpus_admission_decisions.sql": "236d389a2086299b3e7bf87be1b5008fe22173181750ba61272ebc5c5227bcc8",
   "0030_corpus_admission_accepted_representations.sql": "837743eb56367b46f56fbc23f690e192ce134f3af123ad53f1bb6fa3ed6ad65f",
   "0031_corpus_admission_report_jobs.sql": "558cda4a1497544b5eb5fc44eb48ac649fd379155495710f583a9b5d6dae98a8",
   "0032_corpus_admission_accepted_representations_revocation.sql": "75d30525f8931a8154155aac85d745225f4ea326f7a4b878a65bf8f60f04f9c3",
@@ -228,6 +280,11 @@ export const EXPECTED_MIGRATION_SHA256: Record<TargetMigrationFile, string> = {
   "0034_corpus_admission_promotions.sql": "db367f756e6ed366d8794440107dda19fb1c8c10dd477888633b167efd580f5f",
   "0035_report_historical_match_snapshots_partial.sql": "242384eaafaec10cdd2a2735ad4e7863e850da7cbedec57670aec7c8ba33c8e8",
   "0036_corpus_match_generation.sql": "15bb6904337f2502640cc04d5ed88b9e0f3616042852779fd681439c83667b38",
+  // Device Passport schema foundation (0037-0040) — LF hashes, pinned fresh.
+  "0037_corpus_admission_sweep_runs.sql": "121e04e18e73b17f09f27c8c628dbc08d6d6246789a2ae389ad422342bb2829c",
+  "0038_device_passports.sql": "fdd4da86a41f65003f1ece2fb51098d2edec8ba51fa7c9e8b88d2d99c2f558f6",
+  "0039_device_passport_provenance.sql": "3805b0b844422ebfce331b8bd20e8fbd57f9a7f5c4c0c9a6da19909dc6e536f0",
+  "0040_report_historical_match_snapshots_device_generation.sql": "b5ef400aa4f09bda487cbc31de9be595715c700fbee3ec27d9c3074301a843cf",
 };
 
 const DESTRUCTIVE_PATTERN = /\b(DROP\s+TABLE|DROP\s+INDEX|ALTER\s+TABLE\s+\S+\s+DROP|DELETE\s+FROM|TRUNCATE)\b/gi;

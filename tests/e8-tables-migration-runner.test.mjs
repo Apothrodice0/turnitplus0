@@ -109,7 +109,7 @@ test.after(() => {
   for (const name of [
     'a', 'b', 'b2', 'c', 'd', 'e', 'e2', 'f', 'g', 'h', 'i', 'j', 'k', 'happy', 'idempotent',
     'g2-real', 'g2-extra', 'g2-wrong-file', 'g2-near-miss', 'g2-unrelated',
-    'upgrade-0028', 'interrupted', 'schema-0032',
+    'upgrade-0028', 'interrupted', 'schema-0032', 'a2-preflight', 'a2-apply',
   ]) {
     cleanupDbFile(freshDbPath(name));
   }
@@ -117,7 +117,7 @@ test.after(() => {
 
 // --- A: explicit allowlist ------------------------------------------------
 
-test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0036, in order, never touching 0000-0011', () => {
+test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0040, in order, never touching 0000-0011', () => {
   assert.deepEqual(TARGET_MIGRATIONS, [
     '0012_document_identities.sql',
     '0013_document_families.sql',
@@ -144,6 +144,10 @@ test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0036, in ord
     '0034_corpus_admission_promotions.sql',
     '0035_report_historical_match_snapshots_partial.sql',
     '0036_corpus_match_generation.sql',
+    '0037_corpus_admission_sweep_runs.sql',
+    '0038_device_passports.sql',
+    '0039_device_passport_provenance.sql',
+    '0040_report_historical_match_snapshots_device_generation.sql',
   ]);
   // Phase E8S Step 8: 0022_reuse_context_declarations.sql added
   // reuse_context_declarations, bringing the 15 E1-E8P tables across the
@@ -175,8 +179,16 @@ test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0036, in ord
   // (corpus_match_generation, plus a column on the same snapshots table —
   // see EXPECTED_TABLES_BY_MIGRATION's own comment on why table-existence
   // alone is sufficient for that hybrid case) — 26, across 25 target
-  // migrations total.
-  assert.equal(ALL_TARGET_TABLES.length, 26, 'expected exactly 26 tables across all 25 target migrations');
+  // migrations total. The Device Passport schema foundation then adds 4 more
+  // migrations (0037-0040): 0037 folds in corpus_admission_sweep_runs (which
+  // shipped file-only in a501f38) — 27; 0038 creates 2 (device_passports,
+  // device_passport_challenges) — 29; 0039 creates 1
+  // (corpus_admission_decision_device_provenance, a hybrid that also adds two
+  // verified_device_passport_id columns — table-existence tracked, see that
+  // entry's comment) — 30; 0040 creates zero (one column,
+  // report_historical_match_snapshots.device_provenance_generation) — stays
+  // 30, across 29 target migrations total.
+  assert.equal(ALL_TARGET_TABLES.length, 30, 'expected exactly 30 tables across all 29 target migrations');
   assert.deepEqual(
     EXPECTED_TABLES_BY_MIGRATION['0023_privacy_consent_and_report_identity_link.sql'],
     [],
@@ -290,6 +302,143 @@ test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0036, in ord
     ['corpus_match_generation'],
     '0036 must be declared as creating exactly one new table (its report_historical_match_snapshots.corpus_generation column is tracked implicitly — see that entry\'s own comment)',
   );
+  // Device Passport schema foundation (0037-0040) — see this file's own
+  // header comment and lib/e8-tables-migration-runner.ts's for why these
+  // four are a deliberate, contiguous extension.
+  assert.deepEqual(
+    EXPECTED_TABLES_BY_MIGRATION['0037_corpus_admission_sweep_runs.sql'],
+    ['corpus_admission_sweep_runs'],
+    '0037 must be declared as creating exactly one new table',
+  );
+  assert.equal(
+    EXPECTED_COLUMNS_BY_MIGRATION['0037_corpus_admission_sweep_runs.sql'],
+    undefined,
+    '0037 must NOT use the column-state mechanism — it creates a table, not columns on an existing one',
+  );
+  assert.deepEqual(
+    EXPECTED_TABLES_BY_MIGRATION['0038_device_passports.sql'],
+    ['device_passports', 'device_passport_challenges'],
+    '0038 must be declared as creating exactly these two new tables',
+  );
+  assert.equal(
+    EXPECTED_COLUMNS_BY_MIGRATION['0038_device_passports.sql'],
+    undefined,
+    '0038 must NOT use the column-state mechanism — it creates tables, not columns on an existing one',
+  );
+  assert.deepEqual(
+    EXPECTED_TABLES_BY_MIGRATION['0039_device_passport_provenance.sql'],
+    ['corpus_admission_decision_device_provenance'],
+    '0039 must be declared as creating exactly one new table (its two verified_device_passport_id columns are tracked implicitly via the same-transaction hybrid rule — see that entry\'s own comment)',
+  );
+  assert.deepEqual(
+    EXPECTED_COLUMNS_BY_MIGRATION['0039_device_passport_provenance.sql'],
+    [
+      { table: 'saved_reports', column: 'verified_device_passport_id' },
+      { table: 'corpus_admission_report_jobs', column: 'verified_device_passport_id' },
+    ],
+    '0039 must declare exactly these two additive columns (documentation + coverage, not the applied-state gate)',
+  );
+  assert.deepEqual(
+    EXPECTED_TABLES_BY_MIGRATION['0040_report_historical_match_snapshots_device_generation.sql'],
+    [],
+    '0040 must be declared as creating zero new tables',
+  );
+  assert.deepEqual(
+    EXPECTED_COLUMNS_BY_MIGRATION['0040_report_historical_match_snapshots_device_generation.sql'],
+    [{ table: 'report_historical_match_snapshots', column: 'device_provenance_generation' }],
+    '0040 must be declared as adding exactly this one column',
+  );
+});
+
+// --- A2: Device Passport schema foundation (0037-0040) — the deliberate,
+// contiguous extension. Ties together the task's explicit acceptance
+// criteria: presence in TARGET_MIGRATIONS, LF-byte hash stability, correct
+// expected tables/columns, a passing preflight, and the invariant that the
+// deduplicated representation table gains no device/account identity column.
+// ---
+
+test('A2: 0037-0040 are in TARGET_MIGRATIONS as a contiguous 0012-0040 range', () => {
+  for (const file of [
+    '0037_corpus_admission_sweep_runs.sql',
+    '0038_device_passports.sql',
+    '0039_device_passport_provenance.sql',
+    '0040_report_historical_match_snapshots_device_generation.sql',
+  ]) {
+    assert.ok(TARGET_MIGRATIONS.includes(file), `${file} must be in TARGET_MIGRATIONS`);
+  }
+  // No gap: every 0012..0040 prefix appears exactly once, in order.
+  const prefixes = TARGET_MIGRATIONS.map((f) => Number(f.slice(0, 4)));
+  assert.deepEqual(prefixes, Array.from({ length: 29 }, (_, i) => 12 + i), 'TARGET_MIGRATIONS must be the contiguous 0012..0040 range in order');
+});
+
+test('A2: 0037-0040 pinned hashes match the on-disk LF migration bytes (see .gitattributes drizzle/*.sql text eol=lf)', () => {
+  const gitattributes = fs.readFileSync(path.join(repo, '.gitattributes'), 'utf8');
+  assert.match(gitattributes, /drizzle\/\*\.sql\s+text\s+eol=lf/, '.gitattributes must pin drizzle/*.sql to LF so these hashes are reproducible on every platform');
+
+  for (const file of TARGET_MIGRATIONS) {
+    const raw = fs.readFileSync(path.join(drizzleDir, file));
+    assert.ok(!raw.includes(Buffer.from('\r\n')), `${file} must be LF in the working tree (CRLF breaks the pinned hash — see .gitattributes)`);
+  }
+  for (const file of [
+    '0037_corpus_admission_sweep_runs.sql',
+    '0038_device_passports.sql',
+    '0039_device_passport_provenance.sql',
+    '0040_report_historical_match_snapshots_device_generation.sql',
+  ]) {
+    const content = fs.readFileSync(path.join(drizzleDir, file), 'utf8');
+    assert.ok(!content.includes('\r'), `${file} must contain no CR bytes`);
+    assert.equal(sha256(content), EXPECTED_MIGRATION_SHA256[file], `${file}'s pinned hash must match its current LF content`);
+    assert.deepEqual(scanForDestructiveStatements(content), [], `${file} must contain zero destructive statements`);
+  }
+});
+
+test('A2: checkPreflight passes for the full 0012-0040 set against a pre-0012 database', async () => {
+  const dbFile = freshDbPath('a2-preflight');
+  const client = await buildPreMigrationDb(dbFile);
+  const result = await checkPreflight(client, drizzleDir, { environmentLabel: 'local-test', expectedEnvironmentLabel: 'local-test' });
+  assert.equal(result.ok, true, `preflight must pass for the extended allowlist — got: ${JSON.stringify(result)}`);
+  client.close();
+  cleanupDbFile(dbFile);
+});
+
+test('A2: after the full 0012-0040 runner apply, the device-passport shape is exactly right and corpus_document_representations has no identity column', async () => {
+  const dbFile = freshDbPath('a2-apply');
+  const client = await buildPreMigrationDb(dbFile);
+  const result = await runTargetMigrations(client, drizzleDir, { environmentLabel: 'local-test', expectedEnvironmentLabel: 'local-test' });
+  assert.equal(result.status, 'success', `the extended runner must apply cleanly — got: ${JSON.stringify(result).slice(0, 400)}`);
+
+  const tableNames = new Set((await client.execute("SELECT name FROM sqlite_master WHERE type='table'")).rows.map((r) => String(r.name)));
+  for (const t of ['corpus_admission_sweep_runs', 'device_passports', 'device_passport_challenges', 'corpus_admission_decision_device_provenance']) {
+    assert.ok(tableNames.has(t), `0037-0039 must create ${t}`);
+  }
+  assert.ok(!tableNames.has('device_provenance_generation'), 'there must be NO global device_provenance_generation table (per-passport column instead)');
+
+  const passportCols = new Set((await client.execute("PRAGMA table_info('device_passports')")).rows.map((r) => String(r.name)));
+  assert.ok(passportCols.has('provenance_generation'), 'device_passports.provenance_generation (per-passport counter) must exist');
+
+  const snapshotCols = new Set((await client.execute("PRAGMA table_info('report_historical_match_snapshots')")).rows.map((r) => String(r.name)));
+  assert.ok(snapshotCols.has('device_provenance_generation'), '0040 must add report_historical_match_snapshots.device_provenance_generation');
+
+  const savedReportCols = new Set((await client.execute("PRAGMA table_info('saved_reports')")).rows.map((r) => String(r.name)));
+  assert.ok(savedReportCols.has('verified_device_passport_id'), '0039 must add saved_reports.verified_device_passport_id');
+  const jobCols = new Set((await client.execute("PRAGMA table_info('corpus_admission_report_jobs')")).rows.map((r) => String(r.name)));
+  assert.ok(jobCols.has('verified_device_passport_id'), '0039 must add corpus_admission_report_jobs.verified_device_passport_id');
+
+  const repCols = new Set((await client.execute("PRAGMA table_info('corpus_document_representations')")).rows.map((r) => String(r.name)));
+  for (const forbidden of ['device_passport_id', 'verified_device_passport_id', 'account_id', 'user_id', 'email', 'device_key']) {
+    assert.ok(!repCols.has(forbidden), `corpus_document_representations must NOT gain "${forbidden}" — device provenance is per admission backing`);
+  }
+
+  const provFks = (await client.execute("PRAGMA foreign_key_list('corpus_admission_decision_device_provenance')")).rows;
+  const decFk = provFks.find((r) => String(r.from) === 'decision_id');
+  const passFk = provFks.find((r) => String(r.from) === 'device_passport_id');
+  assert.equal(String(decFk.table), 'corpus_admission_decisions');
+  assert.equal(String(decFk.on_delete).toUpperCase(), 'CASCADE');
+  assert.equal(String(passFk.table), 'device_passports');
+  assert.equal(String(passFk.on_delete).toUpperCase(), 'RESTRICT');
+
+  client.close();
+  cleanupDbFile(dbFile);
 });
 
 // --- F: no execution of 0000-0011 (structural) ----------------------------
@@ -310,7 +459,7 @@ test('F: the runner module never does an unfiltered directory scan — no readdi
 
 // --- G: destructive SQL detection -----------------------------------------
 
-test('G: scanForDestructiveStatements finds real destructive statements and finds none, or exactly the one approved exception, in the actual 25 target migration files', () => {
+test('G: scanForDestructiveStatements finds real destructive statements and finds none, or exactly the one approved exception, in the actual 29 target migration files', () => {
   assert.deepEqual(scanForDestructiveStatements('CREATE TABLE IF NOT EXISTS x (id TEXT);'), []);
   assert.ok(scanForDestructiveStatements('DROP TABLE document_chunks;').length > 0);
   assert.ok(scanForDestructiveStatements('DELETE FROM users WHERE 1=1;').length > 0);
@@ -533,7 +682,7 @@ test('splitStatements correctly splits 0028 (a single ALTER TABLE, like 0025 but
 
 // --- Section 9: disposable local DB — full happy-path run ------------------
 
-test('SECTION 9: fresh pre-0012 database — the runner applies all 25 migrations in order, creates all 26 tables, adds every column-only migration\'s columns, and preserves legacy row VALUES exactly', async () => {
+test('SECTION 9: fresh pre-0012 database — the runner applies all 29 migrations in order, creates all 30 tables, adds every column-only migration\'s columns, and preserves legacy row VALUES exactly', async () => {
   const dbFile = freshDbPath('happy');
   const client = await buildPreMigrationDb(dbFile);
   await seedRepresentativeLegacyRows(client);
@@ -620,7 +769,7 @@ test('I: re-running the runner against an already-fully-migrated database is a s
 
 // --- UPGRADE: the real release path — a populated 0028 database, not fresh ---
 
-test('UPGRADE: a populated database already at 0028 upgrades cleanly through 0036, preserving existing 0012-0028 corpus/report data exactly', async () => {
+test('UPGRADE: a populated database already at 0028 upgrades cleanly through 0040, preserving existing 0012-0028 corpus/report data exactly', async () => {
   const dbFile = freshDbPath('upgrade-0028');
   const client = await buildPreMigrationDb(dbFile);
   await seedRepresentativeLegacyRows(client);
@@ -676,8 +825,19 @@ test('UPGRADE: a populated database already at 0028 upgrades cleanly through 003
     'corpus_admission_accepted_representations', 'corpus_admission_accepted_shingles',
     'corpus_admission_report_jobs', 'corpus_admission_admin_audit_log',
     'corpus_admission_promotions', 'corpus_match_generation',
+    // Device Passport schema foundation (0037-0040):
+    'corpus_admission_sweep_runs', 'device_passports', 'device_passport_challenges',
+    'corpus_admission_decision_device_provenance',
   ]) {
     assert.ok(tableNames.has(t), `expected new table ${t} to exist after upgrade`);
+  }
+  // The deduplicated representation table must NOT gain any device/account
+  // identity column across the whole 0029-0040 upgrade — device provenance
+  // lives on corpus_admission_decision_device_provenance, per admission
+  // backing, never here.
+  const repCols = new Set((await client.execute("PRAGMA table_info('corpus_document_representations')")).rows.map((r) => String(r.name)));
+  for (const forbidden of ['device_passport_id', 'verified_device_passport_id', 'account_id', 'user_id', 'email']) {
+    assert.ok(!repCols.has(forbidden), `corpus_document_representations must NOT gain "${forbidden}"`);
   }
 
   const after = {
@@ -685,17 +845,18 @@ test('UPGRADE: a populated database already at 0028 upgrades cleanly through 003
     snapshot: { ...(await client.execute({ sql: 'SELECT * FROM report_historical_match_snapshots WHERE report_device_key = ? AND report_id = ?', args: ['upgrade-test-device-1', 'upgrade-test-report-1'] })).rows[0] },
   };
   for (const [column, value] of Object.entries(before.representation)) {
-    assert.equal(after.representation[column], value, `corpus_document_representations.${column} must be unchanged by the 0029-0036 upgrade`);
+    assert.equal(after.representation[column], value, `corpus_document_representations.${column} must be unchanged by the 0029-0040 upgrade`);
   }
   for (const [column, value] of Object.entries(before.snapshot)) {
-    assert.equal(after.snapshot[column], value, `report_historical_match_snapshots.${column} must be unchanged by the 0029-0036 upgrade`);
+    assert.equal(after.snapshot[column], value, `report_historical_match_snapshots.${column} must be unchanged by the 0029-0040 upgrade`);
   }
-  // 0035/0036 add is_partial/corpus_generation as NOT NULL DEFAULT 0 columns
-  // — a pre-existing row must be backfilled to that default, not left NULL
-  // or unset, matching each migration's own "common case for every existing
-  // row" header comment.
+  // 0035/0036/0040 add is_partial/corpus_generation/device_provenance_generation
+  // as NOT NULL DEFAULT 0 columns — a pre-existing row must be backfilled to
+  // that default, not left NULL or unset, matching each migration's own
+  // "common case for every existing row" header comment.
   assert.equal(after.snapshot.is_partial, 0, '0035 must backfill is_partial to 0 for a pre-existing snapshot row');
   assert.equal(after.snapshot.corpus_generation, 0, '0036 must backfill corpus_generation to 0 for a pre-existing snapshot row');
+  assert.equal(after.snapshot.device_provenance_generation, 0, '0040 must backfill device_provenance_generation to 0 for a pre-existing snapshot row');
 
   const repInfo = await client.execute("PRAGMA table_info('corpus_admission_accepted_representations')");
   assert.ok(repInfo.rows.some((r) => String(r.name) === 'revoked_at'), '0032 must add revoked_at to corpus_admission_accepted_representations');
@@ -709,7 +870,7 @@ test('UPGRADE: a populated database already at 0028 upgrades cleanly through 003
 
 // --- INTERRUPTED: recovery from a run that failed partway through --------
 
-test('INTERRUPTED: a run that fails partway through the 0029-0036 range can be safely resumed to completion', async () => {
+test('INTERRUPTED: a run that fails partway through the 0029-0040 range can be safely resumed to completion', async () => {
   const dbFile = freshDbPath('interrupted');
   const client = await buildPreMigrationDb(dbFile);
 
@@ -992,7 +1153,7 @@ test('K: the selectively-migrated database is structurally identical to a databa
     return result.rows.map((r) => `${r.name}::${stripSqlLineComments(String(r.sql))}`).sort();
   };
 
-  assert.deepEqual(await schemaOf(selectiveClient), await schemaOf(referenceClient), 'applying 0000-0011 then 0012-0036 via this runner must produce a structurally identical schema to applying 0000-0036 all at once');
+  assert.deepEqual(await schemaOf(selectiveClient), await schemaOf(referenceClient), 'applying 0000-0011 then 0012-0040 via this runner must produce a structurally identical schema to applying 0000-0040 all at once');
 
   selectiveClient.close();
   referenceClient.close();
