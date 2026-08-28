@@ -3,7 +3,7 @@ import { getReportsDbClient } from '../../../../../lib/reports-db';
 import { checkRate } from '../../../../../lib/rate-limit';
 import { clientIpFrom } from '../../../../../lib/client-ip';
 import { getAdminSessionUser } from '../../../../../lib/auth-session';
-import { getReportDeepDiveForDeveloper } from '../../../../../lib/developer-repo';
+import { getReportDeepDiveForDeveloper, getReportSimilarityDecisionTrace } from '../../../../../lib/developer-repo';
 
 /**
  * Developer deep-dive for one saved report: the full report payload, its
@@ -40,7 +40,19 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
       if (!deepDive.report) {
         return new NextResponse(null, { status: 404 });
       }
-      return new NextResponse(JSON.stringify(deepDive), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      // Admin-only similarity decision trace: WHY the final score is what it
+      // is (word-position union proof, per-source counted/excluded reasons,
+      // prior-submission account/backing evidence, Device Passport shadow
+      // telemetry). Consumes the already-finalized production result — never
+      // recomputes similarity, never changes a score. Best-effort: a failure
+      // here degrades to a null trace, never a failed deep-dive response.
+      let similarityDecisionTrace = null;
+      try {
+        similarityDecisionTrace = await getReportSimilarityDecisionTrace(client, deviceKey, id);
+      } catch (err) {
+        console.error('getReportSimilarityDecisionTrace failed (non-fatal):', err instanceof Error ? err.message : String(err));
+      }
+      return new NextResponse(JSON.stringify({ ...deepDive, similarityDecisionTrace }), { status: 200, headers: { 'Content-Type': 'application/json' } });
     } finally {
       client.close();
     }
