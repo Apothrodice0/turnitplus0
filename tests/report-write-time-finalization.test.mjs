@@ -1546,12 +1546,11 @@ test('BACKWARD COMPATIBILITY: a legacy-shaped resolved unifiedSimilarity (curren
 });
 
 test('BACKWARD COMPATIBILITY: a current, genuinely 0% result (a real SELF-match) with matchedPositions present-but-empty stays resolved and does not loop — "field absent" and "field present but empty" remain distinguishable', async () => {
-  // A real SELF match (not a hand-typed fixture): isHistoricalMatchSnapshotCurrent's
-  // own currency rule requires a genuinely MATCHED (never NO_HISTORICAL_MATCH
-  // — see lib/report-historical-match.ts's own isSnapshotRowCurrent comment)
-  // snapshot to ever be "current" on a repeat read. The one real, easy-to-
-  // construct way to get a genuinely MATCHED-status snapshot whose
-  // CONTRIBUTION is still exactly zero is a SELF match — the same real
+  // A real SELF match (not a hand-typed fixture): this test needs a
+  // MATCHED-status snapshot whose CONTRIBUTION to the score is still exactly
+  // zero, to prove "present-but-empty matchedPositions" reads as current
+  // rather than "needs upgrade". A SELF match is the one real, easy-to-
+  // construct way to get that — the same real
   // mechanism tests/unified-similarity-relationship-integration.test.mjs's
   // own "SCENARIO A (SELF)" proves end to end: SELF is always excluded from
   // unifiedScore/previousUploadOnlyWords/matchedPositions (DECISION 1, no
@@ -1880,19 +1879,18 @@ test('REQUIRED (real Room 4 reproduction): a genuinely unmatched submission — 
   assert.equal(Number(rawRow.rows[0].ai_score), 0);
   assert.equal(rawRow.rows[0].ai_status, 'ready');
 
-  // Sanity: write-time finalization already persisted a real, current-at-
-  // that-moment NO_HISTORICAL_MATCH, but the snapshot is never a cache hit
-  // — proves the room read below genuinely exercises the self-heal +
-  // request-scoped override path, not an unrelated already-resolved state.
-  assert.equal(await isHistoricalMatchSnapshotCurrent(client, { reportDeviceKey: account.deviceKey, reportId: id }), false);
+  // This file runs with CORPUS_SOURCE_MATCHING_ENABLED on, so write-time
+  // finalization persisted a complete, current NO_HISTORICAL_MATCH — now a
+  // genuine cache hit, reusable exactly like a MATCHED snapshot.
+  assert.equal(await isHistoricalMatchSnapshotCurrent(client, { reportDeviceKey: account.deviceKey, reportId: id }), true);
 
   const occupant = await findRoomOccupant(client, account.userId, 3);
   assert.equal(occupant.status, 'ready', 'REQUIRED: matches the real confirmed row — deriveRoomStatus(0, "ready") must be "ready", not "processing"');
-  assert.equal(occupant.report.similarityStatus, 'resolved', 'REQUIRED: the non-converging NO_HISTORICAL_MATCH fix must reveal this response, not leave it stuck at "stale" forever');
+  assert.equal(occupant.report.similarityStatus, 'resolved', 'REQUIRED: a genuine no-match report reveals, never stuck at "stale" forever');
   assert.equal(isFullyRevealedReal(occupant), true, 'REQUIRED: reproduces the exact reported fix for the real Room 4 shape — the room must stop polling and reveal, never show "Analysis is taking longer than usual" for a genuinely terminal, correctly-no-match report');
 });
 
-test('REQUIRED: after the real Room 4 shape presentation-resolves once, a later independent room read still recomputes (the underlying snapshot never becomes a real cache hit) yet still reveals — preserving the original concurrent-indexing protection this fix must not weaken', async () => {
+test('REQUIRED: after the real Room 4 shape reveals once, a later independent room read is a genuine cache hit (no matcher re-run) and still reveals — the no-match cache eliminates the per-poll recompute', async () => {
   const account = await signUpConsentingAccount();
   const id = 'nomatch-fix-real-room4-repeat-report';
   const text = 'Ornithologists tracking a migratory songbird population via geolocator tags documented an unexpected stopover site never previously associated with this species\' known flyway.';
@@ -1906,5 +1904,5 @@ test('REQUIRED: after the real Room 4 shape presentation-resolves once, a later 
   const secondOccupant = await findRoomOccupant(client, account.userId, 3);
   assert.equal(isFullyRevealedReal(secondOccupant), true, 'REQUIRED: a second, independent read must ALSO reveal — not a one-time fluke');
   const secondSnapshot = await snapshotRow(account.deviceKey, id);
-  assert.notEqual(secondSnapshot.computed_at, firstSnapshot.computed_at, 'REQUIRED: the second read must have genuinely recomputed — the fix never persists a fake "current" flag to skip future recomputation, so a same-moment concurrent upload elsewhere would still never be permanently hidden from this report');
+  assert.equal(secondSnapshot.computed_at, firstSnapshot.computed_at, 'REQUIRED: the second read must be a genuine cache hit — the snapshot row is not rewritten and the expensive matcher is not re-run on every poll (a corpus content add would bump the generation and force a recompute, so a later match is still never permanently hidden)');
 });

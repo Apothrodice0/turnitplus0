@@ -405,6 +405,17 @@ export async function matchAgainstUserSubmissionCorpus(
      * behavior exactly.
      */
     excludeAccountId?: string;
+    /**
+     * The corpus-source-matching-enabled state this call should classify
+     * under. When provided, it is used verbatim instead of a fresh
+     * isCorpusSourceMatchingEnabled() read — so a caller that has already
+     * captured the flag once for its whole computation
+     * (lib/report-historical-match.ts's getOrComputeHistoricalMatchSnapshot)
+     * cannot have this classification disagree with its own persisted
+     * snapshot status across a mid-computation flag flip. Omitted by every
+     * other caller, which keeps the existing single internal env read.
+     */
+    corpusSourceMatchingEnabled?: boolean;
   },
 ): Promise<UserSubmissionMatchResult> {
   const config = mergeConfig(params.config);
@@ -483,7 +494,10 @@ export async function matchAgainstUserSubmissionCorpus(
 
   const boundedCandidates = [...candidateById.values()].slice(0, config.maxCandidates);
   const matches: UserSubmissionMatch[] = [];
-  const corpusSourceMatchingEnabled = isCorpusSourceMatchingEnabled();
+  // params.corpusSourceMatchingEnabled, when the caller captured it once for
+  // its whole computation, is used verbatim; otherwise a single internal
+  // env read, exactly as before.
+  const corpusSourceMatchingEnabled = params.corpusSourceMatchingEnabled ?? isCorpusSourceMatchingEnabled();
   let timedOut = dbTimedOut;
 
   for (const candidate of boundedCandidates) {

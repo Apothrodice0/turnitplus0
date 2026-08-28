@@ -231,12 +231,14 @@ export async function findRoomOccupant(client: Client, userId: string, room: num
     // next room read, never a fabricated resolved/failed state.
     display = await readDisplay();
 
-    // Non-converging NO_HISTORICAL_MATCH fix: a genuinely correct "no
-    // historical match" verdict can never satisfy isHistoricalMatchSnapshotCurrent
-    // (lib/report-historical-match.ts's own isSnapshotRowCurrent
-    // permanently excludes NO_HISTORICAL_MATCH from being a cache hit, on
-    // purpose — see that file's Phase E8E fix comment), so the re-read
-    // above will report "stale" again even immediately after a successful
+    // Non-converging NO_HISTORICAL_MATCH fix: this override still covers the
+    // cases where a genuinely correct "no historical match" verdict does not
+    // (yet) satisfy isHistoricalMatchSnapshotCurrent — the request that just
+    // wrote the very first snapshot row, and every no-match computed while
+    // CORPUS_SOURCE_MATCHING_ENABLED is off (stored under the feature-
+    // disabled marker, deliberately never a cache hit — see
+    // lib/report-historical-match.ts). In those cases the re-read above
+    // reports "stale" again even immediately after a successful
     // recomputation that correctly found no match. Without this, such a
     // report can never become presentable and polls forever. healed.presentationResolved
     // (see SelfHealResult's own comment) is the request-scoped-only signal
@@ -244,11 +246,11 @@ export async function findRoomOccupant(client: Client, userId: string, room: num
     // non-partial, version-current NO_HISTORICAL_MATCH whose write actually
     // landed — safe to show in THIS response only. This never touches
     // the underlying report_historical_match_snapshots row (already
-    // written, unconditionally recomputed next time regardless of this
-    // override) and never persists anything — `display` here is a
-    // purely local, in-memory variable scoped to this one findRoomOccupant
-    // call, so the very next independent call re-reads the same
-    // still-non-cacheable row and recomputes again, exactly as before.
+    // written) and never persists anything — `display` here is a purely
+    // local, in-memory variable scoped to this one findRoomOccupant call.
+    // Once the underlying row IS a cache hit (flag on, first snapshot
+    // written, generation/version current), the normal "resolved" path
+    // above handles it and this override never fires.
     if (display.status === "stale" && healed.attempted && healed.outcome === "resolved" && healed.presentationResolved) {
       display = { status: "resolved", primaryScore: unifiedScore ?? archiveScore, isUnified: true };
     }

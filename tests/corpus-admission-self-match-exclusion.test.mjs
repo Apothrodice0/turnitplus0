@@ -162,6 +162,11 @@ async function insertIndexedPromotionRaw(decisionId, acceptedRepresentationId, r
           VALUES (?,?,?,?,?,?,'indexed',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
     args: [id, decisionId, acceptedRepresentationId, representationId, "NEW_CONTENT_REPRESENTATION", "corpus-shingle-v1"],
   });
+  // The real indexPromotionAtomically bumps corpus_match_generation in the
+  // same transaction that flips a promotion to 'indexed' — mirror that here
+  // so this raw shortcut faithfully invalidates any cached NO_HISTORICAL_MATCH
+  // for a report the new backing now matches.
+  await bumpCorpusMatchGeneration(client);
   return id;
 }
 

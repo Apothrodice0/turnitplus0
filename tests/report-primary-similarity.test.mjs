@@ -8,11 +8,10 @@ import { applyMigrationsLibsql } from "../lib/ingest.js";
 import { createDocumentIdentity, canonicalSha256 } from "../lib/document-identity.ts";
 import { indexDocumentSubmissionIntoCorpus } from "../lib/user-submission-corpus.ts";
 import { runCorpusAdmissionPromotionSweep } from "../lib/corpus-admission-promotion.ts";
-import { isHistoricalMatchSnapshotCurrent, bumpCorpusMatchGeneration } from "../lib/report-historical-match.ts";
+import { isHistoricalMatchSnapshotCurrent, bumpCorpusMatchGeneration, SNAPSHOT_MATCHER_VERSION } from "../lib/report-historical-match.ts";
 import { resolvePrimarySimilaritySummary, resolvePersistedSimilarityDisplay, selfHealUnifiedSimilarity, isFreshCurrentNoHistoricalMatch } from "../lib/report-primary-similarity.ts";
 import { findRoomOccupant } from "../lib/reports-repo.ts";
 import { computeUnifiedSimilarity } from "../lib/unified-similarity.ts";
-import { USER_SUBMISSION_MATCHER_VERSION } from "../lib/user-submission-matching.ts";
 import { CORPUS_FINGERPRINT_VERSION, CANONICALIZATION_VERSION } from "../lib/user-submission-corpus.ts";
 
 /**
@@ -443,20 +442,19 @@ test("SIM-03 (6): room and detail agree — both read the SAME write-time-persis
     await finalizeAndPersist({ deviceKey, id, userId: "sim03-agree-user-1", text: TEXT_AGREEMENT, wordCount: 100, archiveScore: 0 });
     const beforeRoom = await findRoomOccupant(client, "sim03-agree-user-1", 0);
     assert.equal(beforeRoom.report.primaryScore, 0, "sanity: no source promoted yet, nothing to match");
-    // NO_HISTORICAL_MATCH is never treated as "current," by design (see
-    // lib/report-historical-match.ts's own Phase E8E comment) — a fresh
-    // finalization that found nothing is deliberately always eligible for
-    // a cheap recheck, so a later-promoted match is never missed.
-    assert.equal(await isHistoricalMatchSnapshotCurrent(client, { reportDeviceKey: deviceKey, reportId: id }), false, "a NO_HISTORICAL_MATCH snapshot is never current, even freshly written");
+    // A complete, flag-on NO_HISTORICAL_MATCH is now a genuine cache hit —
+    // reusable exactly like a MATCHED one, invalidated only by a version or
+    // corpus_generation change (see lib/report-historical-match.ts's own
+    // definitive-no-match caching comment).
+    assert.equal(await isHistoricalMatchSnapshotCurrent(client, { reportDeviceKey: deviceKey, reportId: id }), true, "a complete, current, flag-on NO_HISTORICAL_MATCH snapshot IS current");
 
     // A source matching this exact report's text is promoted AFTER
     // finalization already ran — the real "a report is viewed before
     // another account's upload finishes indexing" ordering this codebase
-    // already documents (see lib/report-historical-match.ts's own Phase
-    // E8E comment) — bumps corpus_match_generation, making the persisted
-    // result stale (requirement 8's own separate path).
+    // already documents — bumps corpus_match_generation, making the
+    // persisted no-match stale (requirement 8's own separate path).
     await seedActivePromotedSource(TEXT_AGREEMENT);
-    assert.equal(await isHistoricalMatchSnapshotCurrent(client, { reportDeviceKey: deviceKey, reportId: id }), false, "promotion must make the previously-current snapshot stale");
+    assert.equal(await isHistoricalMatchSnapshotCurrent(client, { reportDeviceKey: deviceKey, reportId: id }), false, "promotion must make the previously-current snapshot stale via the generation bump");
 
     // The self-heal re-finalization (what the stale-generation path does)
     // persists exactly once, and BOTH surfaces immediately agree on the
@@ -464,7 +462,7 @@ test("SIM-03 (6): room and detail agree — both read the SAME write-time-persis
     // from "room": both only ever read this same persisted column.
     await finalizeAndPersist({ deviceKey, id, userId: "sim03-agree-user-1", text: TEXT_AGREEMENT, wordCount: 100, archiveScore: 0 });
     const afterRoom = await findRoomOccupant(client, "sim03-agree-user-1", 0);
-    assert.equal(afterRoom.report.primaryScore, 100, "must reflect the newly promoted match — NO_HISTORICAL_MATCH is never treated as final, exactly like every other report view");
+    assert.equal(afterRoom.report.primaryScore, 100, "must reflect the newly promoted match — the generation bump forced a recompute that found it");
     assert.equal(await isHistoricalMatchSnapshotCurrent(client, { reportDeviceKey: deviceKey, reportId: id }), true, "re-finalization must leave the snapshot current again");
   });
 });
@@ -668,7 +666,7 @@ function freshNoMatchFixture(overrides = {}) {
   return {
     status: "NO_HISTORICAL_MATCH",
     computedAt: new Date().toISOString(),
-    matcherVersion: USER_SUBMISSION_MATCHER_VERSION,
+    matcherVersion: SNAPSHOT_MATCHER_VERSION,
     fingerprintVersion: CORPUS_FINGERPRINT_VERSION,
     canonicalizationVersion: CANONICALIZATION_VERSION,
     ...overrides,
@@ -704,27 +702,57 @@ test("REQUIRED: a generation-behind no-match never presentation-resolves — the
   assert.equal(isFreshCurrentNoHistoricalMatch(freshNoMatchFixture(), 6, 5), true, "sanity: stamped generation ahead of a stale re-read must still presentation-resolve");
 });
 
-test("REQUIRED: current-version/current-generation NO_HISTORICAL_MATCH remains non-cacheable through isHistoricalMatchSnapshotCurrent() — isSnapshotRowCurrent itself is untouched by this fix", async () => {
-  const deviceKey = "device-nomatch-noncacheable";
-  const reportId = "report-nomatch-noncacheable";
+test("REQUIRED: a FEATURE-DISABLED NO_HISTORICAL_MATCH (computed with CORPUS_SOURCE_MATCHING_ENABLED off) is never a cache hit through isHistoricalMatchSnapshotCurrent() — turning the flag on must always force a real recompute (section 9)", async () => {
+  const deviceKey = "device-nomatch-featuredisabled";
+  const reportId = "report-nomatch-featuredisabled";
   await client.execute({
     sql: `INSERT INTO saved_reports (id, device_key, submission_id, title, report_created_at, word_count, archive_score, score_band, payload_json, user_id)
           VALUES (?,?,?,?,?,?,?,?,?,?)`,
     args: [reportId, deviceKey, "sub-" + reportId, "Fixture", new Date().toISOString(), 50, 0, "Low", "{}", null],
   });
+  // Flag deliberately NOT set — the current-production default. The matcher
+  // never classified any promoted-corpus-source candidate, so this no-match
+  // is an incomplete evaluation.
   await resolvePrimarySimilaritySummary(client, {
     reportDeviceKey: deviceKey, reportId, accountId: null,
-    rawText: "A distinctive fixture sentence about non-cacheable historical match status used only for this specific isSnapshotRowCurrent regression test case.",
+    rawText: "A distinctive fixture sentence about a feature-disabled historical match status used only for this specific regression test case.",
     wordCount: 20, archiveMatchedPositions: null, externalAcademicEvidence: null, archiveScore: 0,
   });
   assert.equal(
     await isHistoricalMatchSnapshotCurrent(client, { reportDeviceKey: deviceKey, reportId }),
     false,
-    "REQUIRED: even immediately after a fresh, current-version, current-generation NO_HISTORICAL_MATCH write, the ongoing cache-currency check must still say false — this fix must never weaken it",
+    "REQUIRED: a no-match computed with the corpus-source flag off must never be a cache hit — it would otherwise permanently suppress a real corpus-source match once the flag turns on",
   );
+  // With the flag on it still must not be reused — the stored row carries
+  // the feature-disabled marker, so this forces a fresh (flag-on) recompute.
+  await withEnv("CORPUS_SOURCE_MATCHING_ENABLED", "true", async () => {
+    assert.equal(await isHistoricalMatchSnapshotCurrent(client, { reportDeviceKey: deviceKey, reportId }), false, "REQUIRED: the flag turning on must not make a feature-disabled no-match retroactively current");
+  });
 });
 
-test("REQUIRED: findRoomOccupant performs one recomputation and returns similarityStatus='resolved' for that same response when the freshly computed result is a valid no-match, and does not immediately classify it as stale again", async () => {
+test("REQUIRED: a complete, flag-on NO_HISTORICAL_MATCH IS a cache hit through isHistoricalMatchSnapshotCurrent() — reusable exactly like a MATCHED snapshot", async () => {
+  const deviceKey = "device-nomatch-cacheable";
+  const reportId = "report-nomatch-cacheable";
+  await client.execute({
+    sql: `INSERT INTO saved_reports (id, device_key, submission_id, title, report_created_at, word_count, archive_score, score_band, payload_json, user_id)
+          VALUES (?,?,?,?,?,?,?,?,?,?)`,
+    args: [reportId, deviceKey, "sub-" + reportId, "Fixture", new Date().toISOString(), 50, 0, "Low", "{}", null],
+  });
+  await withEnv("CORPUS_SOURCE_MATCHING_ENABLED", "true", async () => {
+    await resolvePrimarySimilaritySummary(client, {
+      reportDeviceKey: deviceKey, reportId, accountId: null,
+      rawText: "A distinctive fixture sentence about a cacheable definitive historical no-match used only for this specific regression test case.",
+      wordCount: 20, archiveMatchedPositions: null, externalAcademicEvidence: null, archiveScore: 0,
+    });
+    assert.equal(
+      await isHistoricalMatchSnapshotCurrent(client, { reportDeviceKey: deviceKey, reportId }),
+      true,
+      "REQUIRED: a fresh, current-version, current-generation, non-partial NO_HISTORICAL_MATCH computed with the flag on is reusable",
+    );
+  });
+});
+
+test("REQUIRED: findRoomOccupant returns similarityStatus='resolved' for a valid flag-on no-match, and a second independent call is a genuine cache hit (no recompute), not stuck re-resolving forever", async () => {
   const text = "Glaciologists measuring subglacial meltwater discharge at an isolated outlet glacier recorded a seasonal pulse pattern unlike any previously documented catchment nearby, presentation resolution fixture one.";
   const { id, deviceKey } = await insertSavedReport({
     userId: "nomatch-basic-user-1", room: 0, archiveScore: 0, aiStatus: "ready", text, wordCount: 40,
@@ -733,42 +761,23 @@ test("REQUIRED: findRoomOccupant performs one recomputation and returns similari
   await withEnv("CORPUS_SOURCE_MATCHING_ENABLED", "true", async () => {
     // Write-time finalization equivalent: persists a genuine, freshly
     // computed NO_HISTORICAL_MATCH — no source was ever promoted for this
-    // text — exactly mirroring the real Room 4 shape (a report whose
-    // similarity finalization already ran and genuinely found nothing).
+    // text — exactly mirroring the real Room 4 shape.
     await finalizeAndPersist({ deviceKey, id, userId: "nomatch-basic-user-1", text, wordCount: 40, archiveScore: 0 });
 
-    // Sanity: WITHOUT this fix's own override, the freshly-persisted result
-    // reads as stale — proves this scenario genuinely exercises the gap.
-    assert.equal(await isHistoricalMatchSnapshotCurrent(client, { reportDeviceKey: deviceKey, reportId: id }), false, "test setup sanity: a fresh NO_HISTORICAL_MATCH must not be a cache hit yet");
+    // A complete flag-on no-match is now an ordinary cache hit.
+    assert.equal(await isHistoricalMatchSnapshotCurrent(client, { reportDeviceKey: deviceKey, reportId: id }), true, "a complete, current flag-on NO_HISTORICAL_MATCH is a cache hit");
 
     const occupant = await findRoomOccupant(client, "nomatch-basic-user-1", 0);
     assert.equal(occupant.status, "ready", "ai_score=0 (a real, non-null score) — deriveRoomStatus must say ready, matching the real Room 4 shape");
-    assert.equal(occupant.report.similarityStatus, "resolved", "REQUIRED: the request-scoped override must reveal a freshly recomputed, genuine no-match — never left stuck at stale");
+    assert.equal(occupant.report.similarityStatus, "resolved", "REQUIRED: a genuine no-match report reveals, never stuck at stale");
     assert.equal(occupant.report.isUnified, true);
-    assert.equal(occupant.report.primaryScore, 0, "a genuine no-match's own primaryScore is the archive/academic-only contribution — here 0, since neither exists in this fixture");
-  });
-});
+    assert.equal(occupant.report.primaryScore, 0, "a genuine no-match's own primaryScore is the archive/academic-only contribution — here 0");
 
-test("REQUIRED: a second, independent findRoomOccupant call still genuinely recomputes (never becomes a cache hit) yet still presentation-resolves — 'safe to display now' is never mistaken for 'safe to cache for later'", async () => {
-  const text = "Paleoclimatologists analyzing a sediment core from a remote alpine lake reconstructed a multi-millennial record of dust deposition tied to shifting regional wind patterns, presentation resolution fixture two.";
-  const { id, deviceKey } = await insertSavedReport({
-    userId: "nomatch-repeat-user-1", room: 0, archiveScore: 0, aiStatus: "ready", text, wordCount: 40,
-  });
-
-  await withEnv("CORPUS_SOURCE_MATCHING_ENABLED", "true", async () => {
-    await finalizeAndPersist({ deviceKey, id, userId: "nomatch-repeat-user-1", text, wordCount: 40, archiveScore: 0 });
-
-    const firstOccupant = await findRoomOccupant(client, "nomatch-repeat-user-1", 0);
-    assert.equal(firstOccupant.report.similarityStatus, "resolved");
     const snapshotAfterFirst = await client.execute({ sql: "SELECT computed_at FROM report_historical_match_snapshots WHERE report_device_key = ? AND report_id = ?", args: [deviceKey, id] });
-    assert.ok(snapshotAfterFirst.rows[0], "test setup sanity");
-
-    assert.equal(await isHistoricalMatchSnapshotCurrent(client, { reportDeviceKey: deviceKey, reportId: id }), false, "REQUIRED: presentation-resolving one response must never make the underlying snapshot a cache hit for the next request — preserves the original concurrent-indexing protection");
-
-    const secondOccupant = await findRoomOccupant(client, "nomatch-repeat-user-1", 0);
-    assert.equal(secondOccupant.report.similarityStatus, "resolved", "REQUIRED: a second, wholly independent request must ALSO presentation-resolve, not merely the first");
+    const secondOccupant = await findRoomOccupant(client, "nomatch-basic-user-1", 0);
+    assert.equal(secondOccupant.report.similarityStatus, "resolved", "REQUIRED: the second read also resolves");
     const snapshotAfterSecond = await client.execute({ sql: "SELECT computed_at FROM report_historical_match_snapshots WHERE report_device_key = ? AND report_id = ?", args: [deviceKey, id] });
-    assert.notEqual(snapshotAfterSecond.rows[0].computed_at, snapshotAfterFirst.rows[0].computed_at, "REQUIRED: the second call must have genuinely recomputed (a real, different computed_at) — never cached, exactly preserving the pre-existing E8E protection");
+    assert.equal(snapshotAfterSecond.rows[0].computed_at, snapshotAfterFirst.rows[0].computed_at, "REQUIRED: the second call must be a genuine cache hit — the snapshot row is not rewritten, the expensive matcher is not re-run");
   });
 });
 

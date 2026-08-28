@@ -4,6 +4,7 @@ import { tokens, grams, gramHash, informativeGram, containment } from "./similar
 import { canonicalizeText } from "./canonical-text";
 import { canonicalSha256, findDocumentIdentitiesByRawHash, findPriorSubmissionsForAccount } from "./document-identity";
 import { buildReportAdmissionAccountPrefix } from "./corpus-admission-source-ref";
+import { bumpCorpusMatchGeneration } from "./corpus-match-generation";
 
 /**
  * Phase E8A: the user submission history corpus — storage/indexing only.
@@ -973,6 +974,22 @@ export async function indexDocumentSubmissionIntoCorpus(
     documentIdentityId: params.documentIdentityId,
     linkType,
   });
+
+  // Corpus-match generation bump: a newly indexed submission reference is an
+  // "eligibility ADDED" event exactly like a promotion reaching 'indexed' —
+  // it can turn a report that currently has a cached NO_HISTORICAL_MATCH
+  // into a real SELF/PRIOR_SUBMISSION match, and that report's snapshot does
+  // not reference this representation yet, so only the global generation
+  // counter can invalidate it (a targeted per-representation search cannot
+  // find what is missing). Runs for both a brand-new representation and an
+  // EXACT_CANONICAL_DUPLICATE (the new reference changes ownership counting
+  // for the shared representation). Not wrapped in a transaction here — this
+  // function's callers already treat it as best-effort eventual-consistency
+  // indexing; an extra bump on a partial failure only costs a harmless
+  // recompute. This is the same counter and the same one-statement UPDATE
+  // lib/corpus-admission-promotion.ts and lib/corpus-admission-admin-actions.ts
+  // use, never a second mechanism.
+  await bumpCorpusMatchGeneration(client);
 
   return { status: "INDEXED", linkType, representationId: representation.id, submissionReferenceId: reference.id };
 }

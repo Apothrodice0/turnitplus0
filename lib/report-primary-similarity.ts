@@ -1,7 +1,6 @@
 import type { Client } from "@libsql/client";
-import { getOrComputeHistoricalMatchSnapshot, getCurrentCorpusMatchGeneration, isHistoricalMatchSnapshotCurrent } from "./report-historical-match";
+import { getOrComputeHistoricalMatchSnapshot, getCurrentCorpusMatchGeneration, isHistoricalMatchSnapshotCurrent, SNAPSHOT_MATCHER_VERSION } from "./report-historical-match";
 import { isCorpusSourceMatchingEnabled } from "./corpus-source-matching-flag";
-import { USER_SUBMISSION_MATCHER_VERSION } from "./user-submission-matching";
 import { CORPUS_FINGERPRINT_VERSION, CANONICALIZATION_VERSION } from "./user-submission-corpus";
 import { computeUnifiedSimilarity, type UnifiedSimilarityResult } from "./unified-similarity";
 import type { ReportHistoricalSubmissionMatch, SimilarityReport } from "./report-types";
@@ -128,6 +127,13 @@ export async function resolvePrimarySimilaritySummary(
     accountId: params.accountId,
     rawText: params.rawText,
     excludeAccountId,
+    // The SAME single flag read this resolution already took above
+    // (corpusSourceMatchingEnabled) — threaded through so the historical
+    // computation, its persisted snapshot status, and the
+    // corpusSourceMatchingEnabledAtComputation value this function returns
+    // are all governed by one value, never three independent env reads that
+    // could straddle a mid-request flag flip.
+    corpusSourceMatchingEnabled,
   });
 
   // Mirrors the exact try/catch boundary app/api/reports/[id]/route.ts
@@ -312,26 +318,25 @@ export async function resolvePersistedSimilarityDisplay(
  * Non-converging NO_HISTORICAL_MATCH fix — the "shape" half of
  * presentationResolved (see SelfHealResult's own comment for the other
  * half, the write-landed check). A pure, directly-testable predicate,
- * deliberately NOT folded into lib/report-historical-match.ts's own
- * isSnapshotRowCurrent (that one must stay unchanged — see this file's own
- * header comment on why NO_HISTORICAL_MATCH must remain permanently
- * excluded from being a cache hit, across requests, forever).
+ * deliberately kept OUT of lib/report-historical-match.ts's own
+ * isSnapshotRowCurrent so the two can be tested independently.
  *
- * status === "NO_HISTORICAL_MATCH" here is, by itself, structural proof
- * that THIS EXACT resolvePrimarySimilaritySummary call's own
- * getOrComputeHistoricalMatchSnapshot invocation just freshly recomputed
- * and wrote a snapshot row — never a cache hit: isSnapshotRowCurrent's own
- * cache-hit branch requires `row.status !== "NO_HISTORICAL_MATCH"`, so a
- * cache hit could never produce this status. No separate "was this fresh"
- * signal is needed from that module.
+ * Since definitive-no-match caching landed, a complete, current, flag-on
+ * NO_HISTORICAL_MATCH IS an ordinary cache hit through
+ * isHistoricalMatchSnapshotCurrent, so findRoomOccupant's normal "resolved"
+ * path already handles it. This predicate still matters for the request
+ * that computes the very first snapshot for a report (no row exists yet, so
+ * isHistoricalMatchSnapshotCurrent is briefly false until the write lands)
+ * and — the common case in current production — for every no-match computed
+ * while CORPUS_SOURCE_MATCHING_ENABLED is off, which is stored under the
+ * feature-disabled marker and deliberately never a cache hit.
  *
- * Still explicitly re-checks version tags, partial, and generation (rather
- * than trusting that a fresh write always has them right) so this predicate
- * is honest and independently testable on its own terms — matching the
- * task's own required regression coverage for "version-mismatched" /
- * "partial" / "generation-behind" NO_HISTORICAL_MATCH results, even though
- * the real call graph today cannot produce those combinations for a result
- * that also has status NO_HISTORICAL_MATCH.
+ * Re-checks version tags, partial, and generation independently rather than
+ * trusting the caller — matching the task's own required regression
+ * coverage for "version-mismatched" / "partial" / "generation-behind"
+ * NO_HISTORICAL_MATCH results. matcherVersion is compared against
+ * SNAPSHOT_MATCHER_VERSION (base label + candidate-discovery config digest)
+ * — the exact value a fresh snapshot row's matcher_version column holds.
  */
 export function isFreshCurrentNoHistoricalMatch(
   match: ReportHistoricalSubmissionMatch,
@@ -340,7 +345,7 @@ export function isFreshCurrentNoHistoricalMatch(
 ): boolean {
   return (
     match.status === "NO_HISTORICAL_MATCH" &&
-    match.matcherVersion === USER_SUBMISSION_MATCHER_VERSION &&
+    match.matcherVersion === SNAPSHOT_MATCHER_VERSION &&
     match.fingerprintVersion === CORPUS_FINGERPRINT_VERSION &&
     match.canonicalizationVersion === CANONICALIZATION_VERSION &&
     match.partial !== true &&
@@ -363,16 +368,16 @@ export type SelfHealResult =
      * unifiedSimilarityGeneration could otherwise have silently out-raced
      * this one's own generation-guarded UPDATE).
      *
-     * Deliberately NOT a signal that the underlying snapshot is now
-     * cacheable — isSnapshotRowCurrent (lib/report-historical-match.ts,
-     * unchanged) still permanently excludes NO_HISTORICAL_MATCH from being a
-     * cache hit, on purpose (Phase E8E fix: a same-moment concurrent
-     * upload's later-finished indexing must never be permanently hidden). A
-     * caller (lib/reports-repo.ts's findRoomOccupant) may use this to treat
-     * ITS OWN current response as presentation-resolved, but must never
-     * persist that conclusion or use it to skip any future call's own
-     * recomputation. "Safe to display now" is not "safe to cache for
-     * later."
+     * Still meaningful even now that a complete flag-on NO_HISTORICAL_MATCH
+     * IS cacheable through isSnapshotRowCurrent: it covers the request that
+     * writes the very first snapshot (no row to hit yet) and every no-match
+     * computed with corpus-source matching off (stored under the
+     * feature-disabled marker, deliberately never a cache hit — section 9).
+     * A caller (lib/reports-repo.ts's findRoomOccupant) uses this to treat
+     * ITS OWN current response as presentation-resolved without depending on
+     * the snapshot already being a cache hit; when the snapshot IS a cache
+     * hit, the caller's normal "resolved" path handles it and this override
+     * simply never fires.
      */
     presentationResolved: boolean;
   }
