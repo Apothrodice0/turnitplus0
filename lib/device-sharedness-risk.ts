@@ -42,7 +42,7 @@ export type SharedDeviceRiskCategory =
   | "SHARED_LOW_EVIDENCE"
   /** Two accounts PLUS anonymous uploads on the Passport — a third actor's worth of use, but the account fan-out itself is not yet high. */
   | "SHARED_MULTI_ACCOUNT"
-  /** Case 2 (≥3 distinct accounts on the Passport) OR Case 4 (≥2 distinct candidate account-pairs on the Passport). Strong shared-device signal. */
+  /** Case 2 (≥3 distinct accounts on the Passport) OR Case 4 (≥2 distinct UNORDERED candidate account-pairs on the Passport). Strong shared-device signal. */
   | "SHARED_HIGH_FANOUT"
   /** Case 3 — the candidate's (target, source) account pair has been observed together on ≥2 cryptographically DISTINCT verified Passports. Much stronger evidence the two accounts are genuinely one operator than a single shared browser profile. */
   | "PAIR_MULTI_PASSPORT"
@@ -52,8 +52,17 @@ export type SharedDeviceRiskCategory =
 /** Case 2 threshold: this many distinct (non-anonymous) accounts on one verified Passport is treated as high shared-device fan-out. */
 export const HIGH_FANOUT_ACCOUNT_THRESHOLD = 3;
 
-/** Policy C / D threshold: a (target, source) account pair seen together on at least this many distinct verified Passports is treated as a corroborated pair. */
+/** Policy C threshold: a (target, source) account pair seen together on at least this many distinct verified Passports — its own Passport included — is treated as a corroborated pair. */
 export const CORROBORATED_PAIR_PASSPORT_THRESHOLD = 2;
+
+/**
+ * Policy D Branch A threshold: the (target, source) pair must have been observed
+ * together on at least this many verified Passports OTHER than the candidate's
+ * own before a corroborated-pair downgrade is allowed. Stated explicitly as
+ * "≥1 other Passport" rather than "≥2 total" so it does not depend on whether
+ * the pair happens to also co-occur on the candidate's own Passport.
+ */
+export const BRANCH_A_OTHER_PASSPORT_MIN = 1;
 
 export type DeviceSharednessFacts = {
   /**
@@ -68,18 +77,29 @@ export type DeviceSharednessFacts = {
   /** Reports uploaded under this Passport with no account (anonymous). null when unresolved. */
   deviceAnonUploads: number | null;
   /**
-   * Distinct (target account, source account) pairs represented by ALL
-   * current device-SELF candidates that sit on this same Passport. 1 = a
-   * single pair (Case 1 / Case 3 shape); ≥2 = several unrelated pairs on one
-   * browser (Case 4). null when it could not be computed.
+   * Distinct UNORDERED {account, account} pairs represented by ALL current
+   * device-SELF candidates that sit on this same Passport. A→B and B→A collapse
+   * to ONE pair; {A,B} plus {A,C} = 2. 1 = a single pair (Case 1 / Case 3
+   * shape); ≥2 = several unrelated pairs on one browser (Case 4). null when it
+   * could not be computed. Measures device fan-out, not reciprocal-upload
+   * behaviour.
    */
-  deviceAccountPairCount: number | null;
+  unorderedDeviceAccountPairCount: number | null;
   /**
    * For THIS candidate's least-corroborated (target, source) pair: how many
-   * distinct verified Passports has that pair been observed together on.
-   * null when no source account could be resolved for the candidate.
+   * distinct verified Passports has that pair been observed together on,
+   * INCLUDING the candidate's own Passport. null when no source account could
+   * be resolved for the candidate.
    */
   pairSharedPassportCount: number | null;
+  /**
+   * The same least-corroborated pair, EXCLUDING the candidate's own Passport —
+   * how many OTHER distinct verified Passports the pair has been observed
+   * together on. This is the explicit cross-device corroboration signal used by
+   * Policy D Branch A (≥1 ⇒ the pair recurs on a second, cryptographically
+   * distinct Passport). null when no source account could be resolved.
+   */
+  pairOtherVerifiedPassportCount: number | null;
   /** Number of distinct source accounts resolved for this candidate's downgraded representation(s). 0 ⇒ pair analysis was not possible. */
   candidateSourceAccountCount: number;
   /** true when at least one downgraded representation had a same-device backing whose source account could not be resolved (non-canonical source_ref). */
@@ -118,7 +138,7 @@ export function classifyDeviceSharednessRisk(facts: DeviceSharednessFacts): Shar
   const highFanoutAccounts =
     facts.deviceDistinctAccounts !== null && facts.deviceDistinctAccounts >= HIGH_FANOUT_ACCOUNT_THRESHOLD;
   const multiplePairsOnDevice =
-    facts.deviceAccountPairCount !== null && facts.deviceAccountPairCount >= 2;
+    facts.unorderedDeviceAccountPairCount !== null && facts.unorderedDeviceAccountPairCount >= 2;
   const pairCorroborated =
     facts.pairSharedPassportCount !== null &&
     facts.pairSharedPassportCount >= CORROBORATED_PAIR_PASSPORT_THRESHOLD;
@@ -155,7 +175,7 @@ export function classifyDeviceSharednessRisk(facts: DeviceSharednessFacts): Shar
   if (highFanoutAccounts || multiplePairsOnDevice) {
     const parts: string[] = [];
     if (highFanoutAccounts) parts.push(`${facts.deviceDistinctAccounts} distinct accounts on the Passport`);
-    if (multiplePairsOnDevice) parts.push(`${facts.deviceAccountPairCount} distinct candidate account-pairs on the Passport`);
+    if (multiplePairsOnDevice) parts.push(`${facts.unorderedDeviceAccountPairCount} distinct unordered candidate account-pairs on the Passport`);
     return {
       category: "SHARED_HIGH_FANOUT",
       rationale: `High shared-device fan-out: ${parts.join("; ")}.`,
@@ -209,10 +229,12 @@ export type SharedDevicePolicyInputs = {
   currentRuleWouldDowngrade: boolean;
   deviceDistinctAccounts: number | null;
   deviceAnonUploads: number | null;
-  /** Distinct candidate account-pairs on this candidate's Passport (see DeviceSharednessFacts.deviceAccountPairCount). */
-  deviceAccountPairCount: number | null;
-  /** Shared-Passport count for this candidate's least-corroborated (target, source) pair (see DeviceSharednessFacts.pairSharedPassportCount). */
+  /** Distinct UNORDERED candidate account-pairs on this candidate's Passport (see DeviceSharednessFacts.unorderedDeviceAccountPairCount). */
+  unorderedDeviceAccountPairCount: number | null;
+  /** Least-corroborated pair's shared-Passport count INCLUDING its own Passport (see DeviceSharednessFacts.pairSharedPassportCount). Policy C. */
   pairSharedPassportCount: number | null;
+  /** The same pair's shared-Passport count EXCLUDING its own Passport (see DeviceSharednessFacts.pairOtherVerifiedPassportCount). Policy D Branch A. */
+  pairOtherVerifiedPassportCount: number | null;
 };
 
 export type SharedDevicePolicyName =
@@ -230,13 +252,21 @@ export type SharedDevicePolicySimulation = Record<SharedDevicePolicyName, boolea
  *
  *   A CURRENT_PREVIEW      — today's rule, unchanged.
  *   B TWO_ACCOUNT_MAX      — A AND the Passport has ≤2 distinct accounts.
- *   C MULTI_PASSPORT_PAIR  — A AND the (target, source) pair shares ≥2 verified Passports.
- *   D CONSERVATIVE_COMBINED— A AND ( pair shares ≥2 Passports
- *                                    OR ( ≤2 distinct accounts
- *                                         AND 0 anonymous uploads
- *                                         AND exactly 1 candidate account-pair on the device ) ).
+ *   C MULTI_PASSPORT_PAIR  — A AND the (target, source) pair shares ≥2 verified
+ *                            Passports (its own Passport included).
+ *   D CONSERVATIVE_COMBINED— A AND EXACTLY 2 distinct accounts AND 0 anonymous
+ *                            uploads on the current Passport, AND either:
+ *                              • Branch A — the pair was observed together on
+ *                                ≥1 OTHER verified Passport (cross-device
+ *                                corroboration). The exactly-2-account / no-anon
+ *                                ceiling still applies, so a corroborated pair
+ *                                does NOT override a 3+ account or
+ *                                anonymous-use current Passport; OR
+ *                              • Branch B — exactly 1 unordered candidate
+ *                                account-pair sits on the Passport (lone
+ *                                low-evidence shared browser).
  *
- * Every extra condition fails CLOSED on a null fact (policy blocks the downgrade).
+ * Every condition fails CLOSED on a null fact (policy blocks the downgrade).
  */
 export function simulateSharedDevicePolicies(inputs: SharedDevicePolicyInputs): SharedDevicePolicySimulation {
   const a = inputs.currentRuleWouldDowngrade === true;
@@ -249,13 +279,18 @@ export function simulateSharedDevicePolicies(inputs: SharedDevicePolicyInputs): 
     inputs.pairSharedPassportCount >= CORROBORATED_PAIR_PASSPORT_THRESHOLD;
   const multiPassportPair = a && pairCorroborated;
 
-  const conservativeSinglePair =
-    inputs.deviceDistinctAccounts !== null &&
-    inputs.deviceDistinctAccounts <= 2 &&
-    inputs.deviceAnonUploads === 0 &&
-    inputs.deviceAccountPairCount !== null &&
-    inputs.deviceAccountPairCount === 1;
-  const conservativeCombined = a && (pairCorroborated || conservativeSinglePair);
+  // Policy D — CONSERVATIVE_COMBINED (refined). Both branches share a strict
+  // fan-out ceiling on the CURRENT Passport: exactly two distinct accounts and
+  // zero anonymous uploads. Each `===` test fails closed on null.
+  const twoAccountsNoAnon =
+    inputs.deviceDistinctAccounts === 2 && inputs.deviceAnonUploads === 0;
+  const branchACrossDeviceCorroboration =
+    twoAccountsNoAnon &&
+    inputs.pairOtherVerifiedPassportCount !== null &&
+    inputs.pairOtherVerifiedPassportCount >= BRANCH_A_OTHER_PASSPORT_MIN;
+  const branchBLoneSharedBrowser =
+    twoAccountsNoAnon && inputs.unorderedDeviceAccountPairCount === 1;
+  const conservativeCombined = a && (branchACrossDeviceCorroboration || branchBLoneSharedBrowser);
 
   return {
     CURRENT_PREVIEW: a,

@@ -40,9 +40,10 @@ import {
  *
  * IDENTITY HANDLING: account ids, Passport ids, the report device_key, and
  * admission source_ref strings are read into server-local memory ONLY to run
- * the SELECT joins and to (a) group candidates into (target account, source
- * account) pairs and (b) count how many distinct verified Passports a given
- * pair has been seen on. NONE of them is ever returned, logged, or persisted.
+ * the SELECT joins and to (a) group candidates into UNORDERED {account, account}
+ * pairs (A→B and B→A are one pair) and (b) count how many distinct verified
+ * Passports a given pair has been seen on, with and without the candidate's own
+ * Passport. NONE of them is ever returned, logged, or persisted.
  * EVERY field of the returned summary is a bounded count, enum, or boolean —
  * the ONLY per-row identifier surfaced is `reportId` (not an account identity,
  * not a device-passport identifier, and — unlike device_key — not usable to
@@ -102,9 +103,10 @@ export type SharedDeviceRiskRecentRow = {
   deviceSubmissionCount: number | null;
   deviceAnonUploads: number | null;
   deviceDistinctAccountsAtShadow: number | null;
-  deviceAccountPairCount: number | null;
+  unorderedDeviceAccountPairCount: number | null;
   candidateSourceAccountCount: number;
   pairSharedPassportCount: number | null;
+  pairOtherVerifiedPassportCount: number | null;
   sourceAccountUnresolved: boolean;
   targetAnonymous: boolean;
   representationDrift: boolean;
@@ -152,9 +154,9 @@ export type SharedDeviceRiskMeasurement = {
   pairSharedPassportUnknown: number;
   /** distinct verified Passports carrying ≥1 evaluated candidate. */
   distinctCandidateDevices: number;
-  /** Passports carrying exactly 1 distinct candidate account-pair. */
+  /** Passports carrying exactly 1 distinct UNORDERED candidate account-pair. */
   devicesWithExactlyOnePair: number;
-  /** Passports carrying ≥2 distinct candidate account-pairs (Case 4). */
+  /** Passports carrying ≥2 distinct UNORDERED candidate account-pairs (Case 4). */
   devicesWithMultiplePairs: number;
   /** Passports carrying candidates but with 0 resolvable pairs. */
   devicesWithNoResolvablePair: number;
@@ -221,18 +223,30 @@ async function loadPassportSharedness(client: Client, passportId: string): Promi
   };
 }
 
-/** Distinct verified Passports on which BOTH accounts have a saved_reports row. */
-async function pairSharedPassportCount(client: Client, accountA: string, accountB: string): Promise<number> {
+/**
+ * Distinct verified Passports on which BOTH accounts have a saved_reports row.
+ * When `excludePassportId` is given, that Passport is not counted — the result
+ * is then "OTHER verified Passports the pair co-occurs on" (Policy D Branch A).
+ */
+async function pairSharedPassportCount(
+  client: Client,
+  accountA: string,
+  accountB: string,
+  excludePassportId?: string | null,
+): Promise<number> {
+  const exclude = excludePassportId ?? null;
   const row = (
     await client.execute({
       sql: `SELECT COUNT(*) AS n FROM (
               SELECT verified_device_passport_id
               FROM saved_reports
-              WHERE verified_device_passport_id IS NOT NULL AND user_id IN (?, ?)
+              WHERE verified_device_passport_id IS NOT NULL
+                AND (? IS NULL OR verified_device_passport_id <> ?)
+                AND user_id IN (?, ?)
               GROUP BY verified_device_passport_id
               HAVING COUNT(DISTINCT user_id) >= 2
             )`,
-      args: [accountA, accountB],
+      args: [exclude, exclude, accountA, accountB],
     })
   ).rows[0] as unknown as Record<string, unknown>;
   return num(row?.n);
@@ -310,10 +324,13 @@ type EvaluatedCandidate = {
   representationDrift: boolean;
   sourceAccountUnresolved: boolean;
   sharedness: PassportSharedness | null;
-  /** distinct (target, source) pairs for THIS candidate, as `${target}::${source}` keys. */
+  /** distinct UNORDERED {account, account} pairs for THIS candidate, as sorted `${lo}::${hi}` keys — A→B and B→A collapse to one. */
   pairKeys: Set<string>;
   sourceAccountIds: Set<string>;
+  /** least-corroborated pair's shared-Passport count INCLUDING this candidate's own Passport. */
   pairSharedPassportCount: number | null;
+  /** the same pair, EXCLUDING this candidate's own Passport (Policy D Branch A). */
+  pairOtherVerifiedPassportCount: number | null;
 };
 
 export async function summarizeSharedDeviceRiskMeasurement(
@@ -351,6 +368,7 @@ export async function summarizeSharedDeviceRiskMeasurement(
   // caches — the same Passport / account-pair recurs across candidates.
   const sharednessCache = new Map<string, PassportSharedness>();
   const pairPassportCache = new Map<string, number>();
+  const pairOtherPassportCache = new Map<string, number>();
 
   const evaluated: EvaluatedCandidate[] = [];
 
@@ -385,6 +403,7 @@ export async function summarizeSharedDeviceRiskMeasurement(
       pairKeys: new Set<string>(),
       sourceAccountIds: new Set<string>(),
       pairSharedPassportCount: null,
+      pairOtherVerifiedPassportCount: null,
     };
 
     if (ec.passportId) {
@@ -417,16 +436,23 @@ export async function summarizeSharedDeviceRiskMeasurement(
           for (const acc of accounts) {
             if (ec.targetAccountId && acc !== ec.targetAccountId) {
               ec.sourceAccountIds.add(acc);
-              ec.pairKeys.add(`${ec.targetAccountId}::${acc}`);
+              const [lo, hi] =
+                ec.targetAccountId < acc ? [ec.targetAccountId, acc] : [acc, ec.targetAccountId];
+              ec.pairKeys.add(`${lo}::${hi}`);
             }
           }
         }
         if (!anyLiveSameDeviceBacking) ec.representationDrift = true;
       }
 
-      // (5)(6) shared-Passport count for the candidate's least-corroborated pair.
+      // (5)(6) shared-Passport count for the candidate's least-corroborated
+      // pair — both INCLUDING (Policy C) and EXCLUDING (Policy D Branch A) this
+      // candidate's own Passport. The pair with the fewest total shared
+      // Passports is the least-corroborated one; its "other" count is reported
+      // alongside so the two figures always describe the same pair.
       if (ec.targetAccountId && ec.sourceAccountIds.size > 0) {
         let minShared = Infinity;
+        let otherForMin: number | null = null;
         for (const src of ec.sourceAccountIds) {
           const [lo, hi] = ec.targetAccountId < src ? [ec.targetAccountId, src] : [src, ec.targetAccountId];
           const key = `${lo}::${hi}`;
@@ -435,17 +461,27 @@ export async function summarizeSharedDeviceRiskMeasurement(
             n = await pairSharedPassportCount(client, lo, hi);
             pairPassportCache.set(key, n);
           }
-          if (n < minShared) minShared = n;
+          const otherKey = ec.passportId ? `${key}::~${ec.passportId}` : key;
+          let other = pairOtherPassportCache.get(otherKey);
+          if (other === undefined) {
+            other = await pairSharedPassportCount(client, lo, hi, ec.passportId);
+            pairOtherPassportCache.set(otherKey, other);
+          }
+          if (n < minShared) {
+            minShared = n;
+            otherForMin = other;
+          }
         }
         ec.pairSharedPassportCount = Number.isFinite(minShared) ? minShared : null;
+        ec.pairOtherVerifiedPassportCount = otherForMin;
       }
     }
 
     evaluated.push(ec);
   }
 
-  // (8) distinct candidate account-pairs per Passport — needs every candidate
-  // on the Passport, so it is computed after the loop.
+  // (8) distinct UNORDERED candidate account-pairs per Passport — needs every
+  // candidate on the Passport, so it is computed after the loop.
   const pairsByPassport = new Map<string, Set<string>>();
   const candidatesByPassport = new Map<string, number>();
   for (const ec of evaluated) {
@@ -495,7 +531,7 @@ export async function summarizeSharedDeviceRiskMeasurement(
     const targetAnonymous = !ec.missingReportRow && ec.targetAccountId === null;
     if (targetAnonymous) totals.candidatesTargetAnonymous += 1;
 
-    const deviceAccountPairCount = ec.passportId ? (pairsByPassport.get(ec.passportId)?.size ?? 0) : null;
+    const unorderedPairCount = ec.passportId ? (pairsByPassport.get(ec.passportId)?.size ?? 0) : null;
 
     const facts: DeviceSharednessFacts = {
       deviceDistinctAccounts: ec.sharedness?.deviceDistinctAccounts ?? null,
@@ -504,9 +540,10 @@ export async function summarizeSharedDeviceRiskMeasurement(
       // a candidate with no resolvable pair contributes no pair to its
       // Passport's count; expose null (unknown) rather than 0 in that case so
       // the classifier does not read "0 pairs" as "not shared".
-      deviceAccountPairCount:
-        deviceAccountPairCount === null ? null : deviceAccountPairCount === 0 ? null : deviceAccountPairCount,
+      unorderedDeviceAccountPairCount:
+        unorderedPairCount === null ? null : unorderedPairCount === 0 ? null : unorderedPairCount,
       pairSharedPassportCount: ec.pairSharedPassportCount,
+      pairOtherVerifiedPassportCount: ec.pairOtherVerifiedPassportCount,
       candidateSourceAccountCount: ec.sourceAccountIds.size,
       sourceAccountUnresolved: ec.sourceAccountUnresolved,
       targetAnonymous,
@@ -519,8 +556,9 @@ export async function summarizeSharedDeviceRiskMeasurement(
       currentRuleWouldDowngrade: true, // by construction: these are the wouldDowngrade rows
       deviceDistinctAccounts: facts.deviceDistinctAccounts,
       deviceAnonUploads: facts.deviceAnonUploads,
-      deviceAccountPairCount: facts.deviceAccountPairCount,
+      unorderedDeviceAccountPairCount: facts.unorderedDeviceAccountPairCount,
       pairSharedPassportCount: facts.pairSharedPassportCount,
+      pairOtherVerifiedPassportCount: facts.pairOtherVerifiedPassportCount,
     });
     for (const p of SHARED_DEVICE_POLICY_NAMES) {
       if (sim[p]) policyImpact[p].kept += 1;
@@ -551,9 +589,10 @@ export async function summarizeSharedDeviceRiskMeasurement(
       deviceSubmissionCount: facts.deviceSubmissionCount,
       deviceAnonUploads: facts.deviceAnonUploads,
       deviceDistinctAccountsAtShadow: evNum(ec.evidence, "deviceDistinctAccounts"),
-      deviceAccountPairCount: facts.deviceAccountPairCount,
+      unorderedDeviceAccountPairCount: facts.unorderedDeviceAccountPairCount,
       candidateSourceAccountCount: facts.candidateSourceAccountCount,
       pairSharedPassportCount: facts.pairSharedPassportCount,
+      pairOtherVerifiedPassportCount: facts.pairOtherVerifiedPassportCount,
       sourceAccountUnresolved: ec.sourceAccountUnresolved,
       targetAnonymous,
       representationDrift: ec.representationDrift,

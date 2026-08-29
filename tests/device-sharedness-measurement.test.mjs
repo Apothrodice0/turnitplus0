@@ -373,28 +373,71 @@ test("cases 1-4 + drift + independent-backing exclusion, hand-computed", async (
   assert.deepEqual(s.policyImpact.CURRENT_PREVIEW, { kept: 6, blocked: 0 });
   // B (<=2 accounts): c1 c3 kept ; c2 c4a c4b blocked ; drift (1 acc) kept
   assert.deepEqual(s.policyImpact.TWO_ACCOUNT_MAX, { kept: 3, blocked: 3 });
-  // C (pair >=2 passports): only c3
+  // C (pair >=2 passports, own included): only c3
   assert.deepEqual(s.policyImpact.MULTI_PASSPORT_PAIR, { kept: 1, blocked: 5 });
-  // D: c3 (corroborated) OR clean arm (<=2 acc, 0 anon, exactly 1 pair on device) -> c1 only
+  // D (refined): exactly 2 acc + 0 anon + (>=1 OTHER Passport | exactly 1 unordered pair)
+  //   c1 -> Branch B (2 acc, 0 anon, 1 unordered pair) ; c3 -> Branch A (pair also on PP-3b)
+  //   c2 / c4a / c4b blocked (4 accounts) ; drift blocked (1 account)
   assert.deepEqual(s.policyImpact.CONSERVATIVE_COMBINED, { kept: 2, blocked: 4 });
 
   // per-row: our proven 2-account test case (c1)
   const c1row = s.recentCandidates.find((r) => r.reportId === c1.reportId);
   assert.ok(c1row);
   assert.equal(c1row.deviceDistinctAccounts, 2);
-  assert.equal(c1row.deviceAccountPairCount, 1);
+  assert.equal(c1row.unorderedDeviceAccountPairCount, 1);
   assert.equal(c1row.pairSharedPassportCount, 1);
+  assert.equal(c1row.pairOtherVerifiedPassportCount, 0, "pair only ever seen on c1's own Passport");
   assert.equal(c1row.candidateSourceAccountCount, 1);
   assert.equal(c1row.riskCategory, "SHARED_LOW_EVIDENCE");
   assert.equal(c1row.policyA, true);
   assert.equal(c1row.policyB, true);
   assert.equal(c1row.policyC, false);
-  assert.equal(c1row.policyD, true);
+  assert.equal(c1row.policyD, true); // Branch B
 
   const c3row = s.recentCandidates.find((r) => r.reportId === c3.reportId);
   assert.equal(c3row.pairSharedPassportCount, 2);
+  assert.equal(c3row.pairOtherVerifiedPassportCount, 1, "pair also co-occurs on PP-3b");
   assert.equal(c3row.riskCategory, "PAIR_MULTI_PASSPORT");
   assert.equal(c3row.policyC, true);
+  assert.equal(c3row.policyD, true); // Branch A — >=1 other verified Passport
+});
+
+// ---------------------------------------------------------------------------
+// RECIPROCAL PAIR — A->B and B->A on one Passport collapse to ONE unordered pair
+// ---------------------------------------------------------------------------
+
+test("reciprocal A->B / B->A on one Passport counts as ONE unordered account pair", async () => {
+  // Two candidates on the SAME verified Passport, opposite directions:
+  //   recip-1: target = acc-RA, source = acc-RB
+  //   recip-2: target = acc-RB, source = acc-RA
+  // Distinct accounts on the Passport = {acc-RA, acc-RB} = 2.
+  // Directional keys would be RA::RB and RB::RA -> 2 pairs -> SHARED_HIGH_FANOUT
+  // (Case 4) and Policy D blocked. Sorted (unordered) keys collapse to one.
+  const c1 = await seedCandidate({ tag: "recip-1", passportId: "PP-RECIP", targetAccountId: "acc-RA", sourceAccountId: "acc-RB" });
+  const c2 = await seedCandidate({ tag: "recip-2", passportId: "PP-RECIP", targetAccountId: "acc-RB", sourceAccountId: "acc-RA" });
+
+  const s = await summarizeSharedDeviceRiskMeasurement(client, { recentLimit: 100 });
+
+  const r1 = s.recentCandidates.find((r) => r.reportId === c1.reportId);
+  const r2 = s.recentCandidates.find((r) => r.reportId === c2.reportId);
+  assert.ok(r1 && r2, "both reciprocal candidates surfaced");
+
+  assert.equal(r1.unorderedDeviceAccountPairCount, 1, "reciprocal directions count as one unordered pair");
+  assert.equal(r2.unorderedDeviceAccountPairCount, 1);
+  assert.equal(r1.deviceDistinctAccounts, 2);
+  assert.equal(r2.deviceDistinctAccounts, 2);
+
+  // one unordered pair + 2 accounts + no anon -> low-evidence, NOT high fan-out
+  assert.equal(r1.riskCategory, "SHARED_LOW_EVIDENCE");
+  assert.equal(r2.riskCategory, "SHARED_LOW_EVIDENCE");
+
+  // pair only ever seen on PP-RECIP -> no cross-device corroboration
+  assert.equal(r1.pairOtherVerifiedPassportCount, 0);
+  assert.equal(r2.pairOtherVerifiedPassportCount, 0);
+
+  // Policy D keeps both via Branch B (exactly 2 accounts, 0 anon, exactly 1 unordered pair)
+  assert.equal(r1.policyD, true);
+  assert.equal(r2.policyD, true);
 });
 
 // ---------------------------------------------------------------------------

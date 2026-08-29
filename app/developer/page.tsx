@@ -210,7 +210,7 @@ export default async function DeveloperOverviewPage() {
               unknown: {sharedDeviceRisk.pairSharedPassportUnknown}
             </li>
             <li>
-              Devices with exactly 1 account pair: <strong>{sharedDeviceRisk.devicesWithExactlyOnePair}</strong>,
+              Devices with exactly 1 unordered account pair: <strong>{sharedDeviceRisk.devicesWithExactlyOnePair}</strong>,
               multiple pairs: <strong>{sharedDeviceRisk.devicesWithMultiplePairs}</strong>,
               no resolvable pair: {sharedDeviceRisk.devicesWithNoResolvablePair}
             </li>
@@ -253,8 +253,9 @@ export default async function DeveloperOverviewPage() {
                 <th>Device accounts</th>
                 <th>Device submissions</th>
                 <th>Device anon</th>
-                <th>Pairs on device</th>
+                <th>Unordered pairs on device</th>
                 <th>Pair shared Passports</th>
+                <th>Pair other Passports</th>
                 <th>A</th>
                 <th>B</th>
                 <th>C</th>
@@ -274,8 +275,9 @@ export default async function DeveloperOverviewPage() {
                   <td>{row.deviceDistinctAccounts ?? "?"}</td>
                   <td>{row.deviceSubmissionCount ?? "?"}</td>
                   <td>{row.deviceAnonUploads ?? "?"}</td>
-                  <td>{row.deviceAccountPairCount ?? "?"}</td>
+                  <td>{row.unorderedDeviceAccountPairCount ?? "?"}</td>
                   <td>{row.pairSharedPassportCount ?? "?"}</td>
+                  <td>{row.pairOtherVerifiedPassportCount ?? "?"}</td>
                   <td>{row.policyA ? "keep" : "block"}</td>
                   <td>{row.policyB ? "keep" : "block"}</td>
                   <td>{row.policyC ? "keep" : "block"}</td>
@@ -285,7 +287,7 @@ export default async function DeveloperOverviewPage() {
               ))}
               {sharedDeviceRisk.recentCandidates.length === 0 && (
                 <tr>
-                  <td colSpan={16}>No current same-device SELF downgrade candidates.</td>
+                  <td colSpan={17}>No current same-device SELF downgrade candidates.</td>
                 </tr>
               )}
             </tbody>
