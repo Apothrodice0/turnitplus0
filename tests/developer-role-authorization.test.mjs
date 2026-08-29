@@ -9,6 +9,7 @@ import * as meRoute from '../app/api/auth/me/route.ts';
 import * as developerReportsRoute from '../app/api/developer/reports/route.ts';
 import * as developerReportIdRoute from '../app/api/developer/reports/[id]/route.ts';
 import * as developerLookupRoute from '../app/api/developer/lookup/route.ts';
+import * as developerDeviceShadowRoute from '../app/api/developer/device-provenance-shadow/route.ts';
 import { resetAuthRateForTest, resetRateForTest } from '../lib/rate-limit.js';
 
 // Verifies the developer/admin role mechanism end to end:
@@ -151,25 +152,34 @@ async function roleOf(email) {
   await resetRateForTest('dev-role-routes-noauth-1');
   await resetRateForTest('dev-role-routes-noauth-2');
   await resetRateForTest('dev-role-routes-noauth-3');
+  await resetRateForTest('dev-role-routes-noauth-4');
   const noSessionReports = await developerReportsRoute.GET(developerRequest('http://localhost/api/developer/reports', null, 'dev-role-routes-noauth-1'));
   const noSessionReportId = await developerReportIdRoute.GET(developerRequest('http://localhost/api/developer/reports/whatever?deviceKey=x', null, 'dev-role-routes-noauth-2'), { params: Promise.resolve({ id: 'whatever' }) });
   const noSessionLookup = await developerLookupRoute.GET(developerRequest('http://localhost/api/developer/lookup?q=whatever', null, 'dev-role-routes-noauth-3'));
+  const noSessionDeviceShadow = await developerDeviceShadowRoute.GET(developerRequest('http://localhost/api/developer/device-provenance-shadow', null, 'dev-role-routes-noauth-4'));
   assert.equal(noSessionReports.status, 404, 'no session must 404, not 401');
   assert.equal(noSessionReportId.status, 404);
   assert.equal(noSessionLookup.status, 404);
+  assert.equal(noSessionDeviceShadow.status, 404, 'device-provenance-shadow measurement must 404 for no session');
+  assert.equal((await noSessionDeviceShadow.text()).length, 0, 'no body for a non-admin');
 
   await resetRateForTest('dev-role-routes-plain-1');
   await resetRateForTest('dev-role-routes-plain-2');
   await resetRateForTest('dev-role-routes-plain-3');
+  await resetRateForTest('dev-role-routes-plain-4');
   const plainReports = await developerReportsRoute.GET(developerRequest('http://localhost/api/developer/reports', plainCookie, 'dev-role-routes-plain-1'));
   const plainReportId = await developerReportIdRoute.GET(developerRequest('http://localhost/api/developer/reports/whatever?deviceKey=x', plainCookie, 'dev-role-routes-plain-2'), { params: Promise.resolve({ id: 'whatever' }) });
   const plainLookup = await developerLookupRoute.GET(developerRequest('http://localhost/api/developer/lookup?q=whatever', plainCookie, 'dev-role-routes-plain-3'));
+  const plainDeviceShadow = await developerDeviceShadowRoute.GET(developerRequest('http://localhost/api/developer/device-provenance-shadow', plainCookie, 'dev-role-routes-plain-4'));
   assert.equal(plainReports.status, 404, 'a signed-in non-admin must also 404, indistinguishable from no session');
   assert.equal(plainReportId.status, 404);
   assert.equal(plainLookup.status, 404);
+  assert.equal(plainDeviceShadow.status, 404, 'a signed-in non-admin must not reach the device-provenance-shadow measurement');
+  assert.equal((await plainDeviceShadow.text()).length, 0);
 
   await resetRateForTest('dev-role-routes-admin-1');
   await resetRateForTest('dev-role-routes-admin-2');
+  await resetRateForTest('dev-role-routes-admin-3');
   const adminReports = await developerReportsRoute.GET(developerRequest('http://localhost/api/developer/reports', adminCookie, 'dev-role-routes-admin-1'));
   assert.equal(adminReports.status, 200, 'an admin session must be able to reach the developer overview route');
   const adminReportsBody = await adminReports.json();
@@ -177,6 +187,11 @@ async function roleOf(email) {
 
   const adminLookup = await developerLookupRoute.GET(developerRequest('http://localhost/api/developer/lookup?q=plain-user', adminCookie, 'dev-role-routes-admin-2'));
   assert.equal(adminLookup.status, 200, 'an admin session must be able to reach the lookup route');
+
+  const adminDeviceShadow = await developerDeviceShadowRoute.GET(developerRequest('http://localhost/api/developer/device-provenance-shadow', adminCookie, 'dev-role-routes-admin-3'));
+  assert.equal(adminDeviceShadow.status, 200, 'an admin session must be able to reach the device-provenance-shadow measurement');
+  const adminDeviceShadowBody = await adminDeviceShadow.json();
+  assert.equal(typeof adminDeviceShadowBody.totals.evaluations, 'number', 'the measurement route must return a totals object for an admin');
 
   console.log('/api/developer/* routes are gated correctly (404/404/200)');
 }
