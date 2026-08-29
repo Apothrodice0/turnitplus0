@@ -12,18 +12,19 @@ import {
 
 /**
  * Device Passport — refined CONSERVATIVE_COMBINED (Policy D) SHARED-DEVICE
- * SCORING GUARD, the DB-fact-resolution + decision layer for the PRODUCTION
+ * SCORING GUARD, the DB-fact-resolution + decision layer consumed by the
  * Device Passport SELF scoring path (lib/report-primary-similarity.ts's
  * resolveEffectiveDeviceSelfRepresentationIds), gated on
  * DEVICE_PASSPORT_CONSERVATIVE_SHARED_GUARD_ENABLED.
  *
- * When the guard is enabled, an already-classified EFFECTIVE Device Passport
- * SELF representation (lib/device-self-scoring-rule.ts's classifyDeviceSelfMatch
- * accepted it) keeps its SELF downgrade ONLY if the refined Policy D over the
- * four bounded facts below is satisfied. Otherwise the corpus / prior-submission
- * match STAYS COUNTED — the baseline production relationship is unchanged, the
- * effective scoring relationship stays counted, and nothing pretends it became
- * SELF.
+ * TELEMETRY ONLY: when the guard is enabled it computes the refined Policy D
+ * verdict over the four bounded durable fan-out facts below and hands it back
+ * for the ADMIN similarity decision trace. It DOES NOT veto scoring — a
+ * representation that lib/device-self-scoring-rule.ts's classifyDeviceSelfMatch
+ * accepted stays an effective Device Passport SELF regardless of this verdict.
+ * (An earlier revision had a `passed: false` verdict remove the representation
+ * from the effective-SELF set; that veto was removed — shared-device fan-out is
+ * now measured, not scored.)
  *
  * FACT SOURCES — the shared-device fan-out / pair-safety facts are now derived
  * from the DURABLE, APPEND-ONLY device_passport_actor_usage ledger (drizzle/0041),
@@ -35,7 +36,7 @@ import {
  * and imports NONE of lib/device-provenance-shadow.ts /
  * lib/device-sharedness-measurement.ts / lib/developer-repo.ts:
  *
- *   HARD PRECONDITIONS (any failing => fail closed, block the downgrade):
+ *   HARD PRECONDITIONS (any failing => passed:false, a conservative telemetry verdict):
  *     - the report's OWN verified upload Passport must carry
  *       actor_usage_tracking_version >= 1: only such a Passport's ledger is a
  *       COMPLETE record of who has used it. A version-0 (legacy) Passport is
@@ -88,8 +89,10 @@ import {
  * DeviceSelfSharedGuardResult is a bounded count, boolean, or short enum.
  *
  * FAIL CLOSED: any lookup / query / parse / HMAC error, or any required fact
- * that cannot be resolved, blocks the SELF downgrade (passed:false) — the match
- * stays counted. This function never throws.
+ * that cannot be resolved, yields passed:false (a conservative telemetry
+ * verdict). This function never throws. Because the verdict is telemetry only,
+ * a failure no longer changes the score — the Device Passport SELF downgrade is
+ * still kept.
  *
  * SAME-ACCOUNT RULE: a candidate whose only same-device backing source is the
  * report's OWN account is NOT a shared-device case — the guard does not act on
@@ -109,7 +112,7 @@ const MAX_GUARD_REPRESENTATIONS = 25;
 export type DeviceSelfSharedGuardResult = {
   /** DEVICE_PASSPORT_CONSERVATIVE_SHARED_GUARD_ENABLED state at evaluation. */
   enabled: boolean;
-  /** true => KEEP the Device Passport SELF downgrade; false => block it (the match stays counted). */
+  /** The refined Policy D verdict (ADMIN TELEMETRY): true => the durable fan-out facts satisfy a Policy D branch; false => a conservative / blocked verdict. Does NOT change scoring — an accepted Device Passport SELF is kept regardless. */
   passed: boolean;
   reason: ConservativeSharedGuardReason;
   /**
@@ -322,8 +325,9 @@ export type EvaluateDeviceSelfSharedGuardParams = {
 
 /**
  * Evaluate the refined Policy D shared-device guard for one report's already-
- * classified effective Device Passport SELF representation(s). Best-effort —
- * never throws. Any failure => passed:false (block; match stays counted).
+ * classified effective Device Passport SELF representation(s), for ADMIN
+ * TELEMETRY. Best-effort — never throws. Any failure => passed:false (a
+ * conservative verdict); the caller keeps the SELF downgrade either way.
  */
 export async function evaluateDeviceSelfSharedGuard(
   client: Client,

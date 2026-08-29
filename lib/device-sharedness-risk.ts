@@ -36,9 +36,11 @@
  *
  * The refined Policy D (CONSERVATIVE_COMBINED) decision itself lives in
  * lib/device-shared-guard-policy.ts — the ONE canonical pure definition shared
- * VERBATIM by this simulation and by the PRODUCTION Device Passport SELF
- * scoring guard (lib/device-shared-guard.ts), so the simulated Policy-D column
- * an admin sees and the scored guard decision can never drift.
+ * VERBATIM by this simulation and by the Device Passport SELF scoring path's
+ * shared-device fan-out TELEMETRY verdict (lib/device-shared-guard.ts), so the
+ * simulated Policy-D column an admin sees and the live telemetry verdict can
+ * never drift. (That live verdict is admin telemetry only — it no longer
+ * changes the score.)
  */
 
 import {
@@ -290,10 +292,10 @@ export function simulateSharedDevicePolicies(inputs: SharedDevicePolicyInputs): 
 
   // Policy D — CONSERVATIVE_COMBINED (refined). The decision over the four
   // bounded facts is the ONE canonical pure definition in
-  // lib/device-shared-guard-policy.ts, shared VERBATIM with the production
-  // Device Passport SELF scoring guard so this simulated column and the scored
-  // guard decision can never drift. Both branches share a strict fan-out
-  // ceiling on the CURRENT Passport (exactly two distinct accounts, zero
+  // lib/device-shared-guard-policy.ts, shared VERBATIM with the Device Passport
+  // SELF scoring path's live shared-device fan-out telemetry verdict so this
+  // simulated column and the live verdict can never drift. Both branches share
+  // a strict fan-out ceiling on the CURRENT Passport (exactly two distinct accounts, zero
   // anonymous uploads); each `===` test fails closed on null.
   const conservativeCombined =
     a &&

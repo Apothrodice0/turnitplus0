@@ -46,23 +46,25 @@ export function isDevicePassportSelfScoringEnabled(): boolean {
 }
 
 /**
- * Preview-gated refined CONSERVATIVE_COMBINED (Policy D) SHARED-DEVICE SCORING
- * GUARD — an OPTIONAL, narrower gate LAYERED ON TOP of the same-device SELF
- * rule above. Independent of isDevicePassportSelfScoringEnabled: this flag does
- * nothing at all unless DEVICE_PASSPORT_SELF_ENABLED is also "true".
+ * Preview-gated refined CONSERVATIVE_COMBINED (Policy D) SHARED-DEVICE fan-out
+ * TELEMETRY — an OPTIONAL admin-measurement layer LAYERED ON TOP of the
+ * same-device SELF rule above. Independent of isDevicePassportSelfScoringEnabled:
+ * this flag does nothing at all unless DEVICE_PASSPORT_SELF_ENABLED is also "true".
  *
  *   SELF flag OFF                 -> baseline scoring, unchanged, regardless of this flag.
- *   SELF flag ON  + guard OFF     -> byte-identical current Device Passport SELF behaviour.
- *   SELF flag ON  + guard ON      -> a same-device SELF downgrade is KEPT only when the
- *                                    refined Policy D (lib/device-shared-guard-policy.ts,
- *                                    resolved live from durable provenance by
- *                                    lib/device-shared-guard.ts) is satisfied; otherwise
- *                                    the corpus / prior-submission match STAYS COUNTED.
+ *   SELF flag ON  + guard OFF     -> base Device Passport SELF behaviour; no shared-device
+ *                                    fan-out verdict is computed.
+ *   SELF flag ON  + guard ON      -> the refined Policy D verdict over the durable
+ *                                    shared-device fan-out facts (lib/device-shared-guard.ts
+ *                                    / lib/device-shared-guard-policy.ts) is computed and
+ *                                    surfaced to the ADMIN decision trace as TELEMETRY. It
+ *                                    does NOT change the score — an accepted same-device
+ *                                    SELF downgrade is kept regardless of the verdict.
  *
  * Read fresh on every call (no caching) so tests can toggle it. Exact string
  * "true" only; unset / anything else = OFF (the production default). Turning it
- * on can only ever RAISE a score (keep a previously-excluded source), never
- * lower one, and never changes what a challenge verification accepts.
+ * on is score-neutral (it only adds admin telemetry) and never changes what a
+ * challenge verification accepts.
  */
 export function isDevicePassportConservativeSharedGuardEnabled(): boolean {
   return process.env.DEVICE_PASSPORT_CONSERVATIVE_SHARED_GUARD_ENABLED === "true";

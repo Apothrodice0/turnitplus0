@@ -202,11 +202,15 @@ export type DecisionTraceDeviceSelfSharedGuard = {
   /** Whether DEVICE_PASSPORT_CONSERVATIVE_SHARED_GUARD_ENABLED was on when this resolution ran. */
   sharedGuardEnabled: boolean;
   /**
-   * true  => the Device Passport SELF downgrade was KEPT (guard satisfied, or
-   *          guard off, or a same-account-only candidate the guard never acts on).
-   * false => the guard BLOCKED the downgrade — the baseline production
-   *          relationship is unchanged and the match STAYS COUNTED (it did not
-   *          become SELF).
+   * The refined Policy D verdict over the durable shared-device fan-out facts,
+   * surfaced for ADMIN TELEMETRY:
+   *   true  => the fan-out facts satisfy a Policy D branch (or the guard was
+   *            off, or a same-account-only candidate the guard never acts on).
+   *   false => a conservative / blocked verdict (account fan-out, anonymous
+   *            use, multiple pairs, incomplete actor history, or insufficient
+   *            evidence).
+   * This verdict does NOT change the score — an accepted Device Passport SELF
+   * is kept regardless. It measures shared-device risk; it is not a veto.
    */
   sharedGuardPassed: boolean;
   sharedGuardReason: ConservativeSharedGuardReason;
@@ -384,13 +388,14 @@ export type AdminSimilarityDecisionTrace = {
   scoreUnchangedByDeviceShadow: true;
 
   /**
-   * The refined CONSERVATIVE_COMBINED (Policy D) shared-device SCORING guard
-   * decision for this resolution — bounded counts + one short enum + one
-   * boolean (durableActorHistoryComplete), no identity. `null` whenever
+   * The refined CONSERVATIVE_COMBINED (Policy D) shared-device fan-out
+   * TELEMETRY verdict for this resolution — bounded counts + one short enum +
+   * one boolean (durableActorHistoryComplete), no identity. `null` whenever
    * DEVICE_PASSPORT_SELF_ENABLED is off (the guard is never consulted). When
    * present, `sharedGuardEnabled` is
    * DEVICE_PASSPORT_CONSERVATIVE_SHARED_GUARD_ENABLED and `sharedGuardPassed`
-   * records whether the Device Passport SELF downgrade survived it.
+   * records the Policy D verdict — it no longer affects the score (an accepted
+   * Device Passport SELF is kept regardless).
    */
   deviceSelfSharedGuard: DecisionTraceDeviceSelfSharedGuard | null;
 };

@@ -6,15 +6,19 @@
  *   - lib/device-sharedness-risk.ts's simulateSharedDevicePolicies — the
  *     ADMIN measurement / A-B-C-D simulation (SIMULATION ONLY, never scoring),
  *     and
- *   - lib/device-shared-guard.ts — the PRODUCTION Device Passport SELF scoring
- *     guard, gated on DEVICE_PASSPORT_CONSERVATIVE_SHARED_GUARD_ENABLED
+ *   - lib/device-shared-guard.ts — the Device Passport SELF scoring path's
+ *     shared-device fan-out TELEMETRY verdict, gated on
+ *     DEVICE_PASSPORT_CONSERVATIVE_SHARED_GUARD_ENABLED
  *     (lib/device-passport-server.ts's isDevicePassportConservativeSharedGuardEnabled).
+ *     That verdict is surfaced to the admin decision trace only — it no longer
+ *     changes the score (an accepted same-device SELF downgrade is kept
+ *     regardless of the verdict).
  *
- * Extracted so the simulated Policy-D column an admin sees and the scored
- * guard decision are computed by the SAME code and can never drift. The two
+ * Extracted so the simulated Policy-D column an admin sees and the live
+ * telemetry verdict are computed by the SAME code and can never drift. The two
  * consumers GATHER the four bounded facts differently — measurement recovers
- * them from the device-provenance shadow telemetry, scoring derives them live
- * from durable provenance — but the DECISION over those facts lives only here.
+ * them from the device-provenance shadow telemetry, the live verdict derives
+ * them from durable provenance — but the DECISION over those facts lives only here.
  *
  * PURE: no database, no environment reads, no I/O, never throws. It consumes
  * four already-computed bounded facts (counts, each `number | null`) and
@@ -95,7 +99,7 @@ export type ConservativeSharedGuardReason =
   | "NOT_APPLIED";
 
 export type ConservativeSharedGuardDecision = {
-  /** true => KEEP the Device Passport SELF downgrade; false => block it (the corpus/prior-submission match stays counted). */
+  /** The refined Policy D verdict: true => the fan-out facts satisfy a branch; false => blocked. The admin A/B/C/D simulation reads this directly; the Device Passport SELF scoring path consumes it as TELEMETRY ONLY (it no longer changes the score). */
   passed: boolean;
   branchA: boolean;
   branchB: boolean;

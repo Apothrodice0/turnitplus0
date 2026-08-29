@@ -31,17 +31,25 @@ import {
 } from "../lib/device-passport-actor-ledger.ts";
 
 /**
- * Refined CONSERVATIVE_COMBINED (Policy D) shared-device SCORING GUARD, layered
- * on the Preview-gated Device Passport SELF rule.
+ * Refined CONSERVATIVE_COMBINED (Policy D) shared-device fan-out TELEMETRY,
+ * layered on the Preview-gated Device Passport SELF rule.
  *
  * Flags:
  *   DEVICE_PASSPORT_SELF_ENABLED                     — master SELF scoring switch
- *   DEVICE_PASSPORT_CONSERVATIVE_SHARED_GUARD_ENABLED — the optional guard
+ *   DEVICE_PASSPORT_CONSERVATIVE_SHARED_GUARD_ENABLED — the optional telemetry verdict
  *
  * Behaviour matrix under test:
  *   SELF OFF                -> baseline scoring, guard flag irrelevant
- *   SELF ON  + guard OFF    -> byte-identical current Device Passport SELF behaviour
- *   SELF ON  + guard ON     -> refined Policy D decides whether the SELF downgrade survives
+ *   SELF ON  + guard OFF    -> byte-identical base Device Passport SELF behaviour
+ *   SELF ON  + guard ON     -> the refined Policy D verdict over the durable shared-device
+ *                              fan-out facts is computed and surfaced to the ADMIN decision
+ *                              trace, but it NEVER vetoes scoring — a representation the base
+ *                              rule accepted stays an effective SELF regardless of the verdict.
+ *
+ * The pure-policy tests below still exercise evaluateConservativeSharedGuard's
+ * own pass/block decision (unchanged — still consumed VERBATIM by the admin
+ * A/B/C/D simulation); the DB integration tests assert the score is no longer
+ * changed by that verdict.
  */
 
 const repoRoot = path.resolve(".");
@@ -447,34 +455,34 @@ test("4: SELF ON + guard ON + Branch B qualifies (lone shared browser, no other 
   assert.equal(g.pairOtherVerifiedPassportCount, 0);
 });
 
-test("5: SELF ON + guard ON + 3 accounts on the Passport -> blocked, match stays counted (score 100)", async () => {
+test("5: SELF ON + guard ON + 3 accounts on the Passport -> verdict BLOCKED_ACCOUNT_FANOUT (telemetry) but scoring still SELF (score 0)", async () => {
   const fx = await seedTwoAccountSharedDeviceFixture();
   await seedActorUsage(fx.passportP, uniq("accU")); // a third account durably used device P
 
   const on = await withFlags({ self: "true", guard: "true" }, () => resolve({ ...fx, rawText: fx.text }));
-  assert.equal(on.unifiedSimilarity.unifiedScore, 100, "guard blocked -> the corpus source stays counted");
-  assert.deepEqual(on.effectiveDeviceSelfRepresentationIds, [], "nothing downgraded");
+  assert.equal(on.unifiedSimilarity.unifiedScore, 0, "shared-device fan-out no longer vetoes the Device Passport SELF downgrade");
+  assert.deepEqual(on.effectiveDeviceSelfRepresentationIds, [fx.repId], "the base rule still made it an effective SELF");
   const g = on.deviceSelfSharedGuard;
-  assert.equal(g.passed, false);
+  assert.equal(g.passed, false, "the Policy D verdict is still recorded for admin telemetry");
   assert.equal(g.reason, "BLOCKED_ACCOUNT_FANOUT");
   assert.equal(g.deviceDistinctAccounts, 3);
 });
 
-test("6: SELF ON + guard ON + anonymous upload on the Passport -> blocked (score 100)", async () => {
+test("6: SELF ON + guard ON + anonymous upload on the Passport -> verdict BLOCKED_ANONYMOUS_USE (telemetry) but scoring still SELF (score 0)", async () => {
   const fx = await seedTwoAccountSharedDeviceFixture();
   await seedActorUsage(fx.passportP, null, { anonymous: true }); // durable anonymous use of device P
 
   const on = await withFlags({ self: "true", guard: "true" }, () => resolve({ ...fx, rawText: fx.text }));
-  assert.equal(on.unifiedSimilarity.unifiedScore, 100);
-  assert.deepEqual(on.effectiveDeviceSelfRepresentationIds, []);
+  assert.equal(on.unifiedSimilarity.unifiedScore, 0, "durable anonymous use no longer vetoes the Device Passport SELF downgrade");
+  assert.deepEqual(on.effectiveDeviceSelfRepresentationIds, [fx.repId]);
   const g = on.deviceSelfSharedGuard;
-  assert.equal(g.passed, false);
+  assert.equal(g.passed, false, "recorded for admin telemetry only");
   assert.equal(g.reason, "BLOCKED_ANONYMOUS_USE");
   assert.equal(g.deviceDistinctAccounts, 2);
   assert.ok(g.deviceAnonUploads >= 1);
 });
 
-test("7: SELF ON + guard ON + a second cross-account source (forces 3 device accounts) -> blocked", async () => {
+test("7: SELF ON + guard ON + a second cross-account source (forces 3 device accounts) -> verdict blocked (telemetry) but scoring still SELF", async () => {
   const fx = await seedTwoAccountSharedDeviceFixture();
   // a SECOND same-device backing on the SAME representation, from a different account U, also on passport P.
   const accountU = uniq("accU2");
@@ -482,9 +490,9 @@ test("7: SELF ON + guard ON + a second cross-account source (forces 3 device acc
   await seedActorUsage(fx.passportP, accountU);
 
   const on = await withFlags({ self: "true", guard: "true" }, () => resolve({ ...fx, rawText: fx.text }));
-  assert.equal(on.unifiedSimilarity.unifiedScore, 100, "two distinct cross-account sources -> >2 device accounts -> blocked");
-  assert.deepEqual(on.effectiveDeviceSelfRepresentationIds, []);
-  assert.equal(on.deviceSelfSharedGuard.passed, false);
+  assert.equal(on.unifiedSimilarity.unifiedScore, 0, "same-device + exact + zero independent backing -> the base rule still makes it an effective SELF");
+  assert.deepEqual(on.effectiveDeviceSelfRepresentationIds, [fx.repId]);
+  assert.equal(on.deviceSelfSharedGuard.passed, false, "the >2-account fan-out is still recorded for admin telemetry");
 });
 
 test("8: SELF ON + guard ON + pair corroborated on another Passport -> Branch A keeps SELF", async () => {
@@ -517,19 +525,19 @@ test("10: reciprocal same-device backings from ONE source account count as one p
   assert.equal(on.unifiedSimilarity.unifiedScore, 0);
 });
 
-test("11-12 (DB): a guard-resolution failure fails CLOSED — the match stays counted", async () => {
-  // Point the module at a nonexistent report row for the passport read path so
-  // the passport sharedness / backing queries return degenerate data, then a
-  // non-canonical source_ref makes the pair unresolvable -> fail closed.
+test("11-12 (DB): a guard-resolution failure is telemetry only — the Device Passport SELF downgrade still holds", async () => {
+  // A non-canonical source_ref makes the guard's account-pair unresolvable, so
+  // its verdict is a conservative BLOCKED_INSUFFICIENT_EVIDENCE — but that no
+  // longer changes the score.
   const fx = await seedTwoAccountSharedDeviceFixture();
-  // replace the backing with a non-canonical one (source account unresolvable)
+  // replace the backing with a non-canonical one (source account unresolvable by the guard)
   await client.execute({ sql: "DELETE FROM corpus_admission_promotions WHERE representation_id = ?", args: [fx.repId] });
   await addSameDeviceAdmissionBacking(fx.repId, { sourceAccountId: fx.accountS, passportId: fx.passportP, nonCanonicalSourceRef: true });
 
   const on = await withFlags({ self: "true", guard: "true" }, () => resolve({ ...fx, rawText: fx.text }));
-  assert.equal(on.unifiedSimilarity.unifiedScore, 100, "unresolvable source_ref -> FAIL CLOSED -> match stays counted");
-  assert.deepEqual(on.effectiveDeviceSelfRepresentationIds, []);
-  assert.equal(on.deviceSelfSharedGuard.passed, false);
+  assert.equal(on.unifiedSimilarity.unifiedScore, 0, "an unresolvable guard fact no longer changes the score");
+  assert.deepEqual(on.effectiveDeviceSelfRepresentationIds, [fx.repId], "the base rule still saw a same-device exact match with zero independent backing");
+  assert.equal(on.deviceSelfSharedGuard.passed, false, "the conservative verdict is still recorded for admin telemetry");
   assert.equal(on.deviceSelfSharedGuard.reason, "BLOCKED_INSUFFICIENT_EVIDENCE");
 });
 
@@ -713,12 +721,11 @@ test("26b: the pure Policy-D module is pure — no @libsql/client, no env, no db
   assert.doesNotMatch(src.replace(/\/\*[\s\S]*?\*\//g, ""), /process\.env|client\.(execute|batch)/, "no env read, no db call");
 });
 
-test("27 (DB): a throwing client during guard resolution fails CLOSED to counted", async () => {
+test("27 (DB): a throwing client during guard resolution is telemetry only — the SELF downgrade still holds", async () => {
   const fx = await seedTwoAccountSharedDeviceFixture();
-  // a client whose execute throws after the historical match is resolved: wrap
-  // the real client so the FIRST call (historical match) works and later guard
-  // queries throw. Simpler: resolve normally first to warm the snapshot, then
-  // run again with a client that throws on the passport-sharedness SELECT.
+  // a client whose execute throws on the guard's fan-out SELECT (the base-rule
+  // classifier queries still succeed). Resolve normally first to warm the
+  // snapshot, then run again with a client that throws on the fan-out SELECT.
   await withFlags({ self: "true", guard: "true" }, () => resolve({ ...fx, rawText: fx.text }));
 
   let calls = 0;
@@ -747,9 +754,9 @@ test("27 (DB): a throwing client during guard resolution fails CLOSED to counted
     }),
   );
   assert.ok(calls > 0, "the throwing client was exercised");
-  assert.equal(resolution.unifiedSimilarity.unifiedScore, 100, "guard query threw -> FAIL CLOSED -> match stays counted");
-  assert.deepEqual(resolution.effectiveDeviceSelfRepresentationIds, []);
-  assert.equal(resolution.deviceSelfSharedGuard.passed, false);
+  assert.equal(resolution.unifiedSimilarity.unifiedScore, 0, "a guard query throwing no longer changes the score");
+  assert.deepEqual(resolution.effectiveDeviceSelfRepresentationIds, [fx.repId]);
+  assert.equal(resolution.deviceSelfSharedGuard.passed, false, "the failure is recorded as a conservative admin-telemetry verdict");
 });
 
 // ===========================================================================
@@ -767,18 +774,18 @@ function runGuard(fx, over = {}) {
   });
 }
 
-test("REPOINT 1: current Passport actor_usage_tracking_version 0 BLOCKS (BLOCKED_INCOMPLETE_ACTOR_HISTORY)", async () => {
+test("REPOINT 1: current Passport actor_usage_tracking_version 0 -> verdict BLOCKED_INCOMPLETE_ACTOR_HISTORY (telemetry), scoring still SELF", async () => {
   const fx = await seedTwoAccountSharedDeviceFixture();
   await setPassportTrackingVersion(fx.passportP, 0); // legacy / history-incomplete
 
   const g = await runGuard(fx);
-  assert.equal(g.passed, false, "a version-0 Passport can never keep the SELF downgrade");
+  assert.equal(g.passed, false, "a version-0 Passport produces a conservative telemetry verdict");
   assert.equal(g.reason, "BLOCKED_INCOMPLETE_ACTOR_HISTORY", "the normal legacy case has its own bounded reason, not BLOCKED_INSUFFICIENT_EVIDENCE");
   assert.equal(g.durableActorHistoryComplete, false);
 
   const on = await withFlags({ self: "true", guard: "true" }, () => resolve({ ...fx, rawText: fx.text }));
-  assert.equal(on.unifiedSimilarity.unifiedScore, 100, "score: the corpus source stays counted (identical to before)");
-  assert.deepEqual(on.effectiveDeviceSelfRepresentationIds, []);
+  assert.equal(on.unifiedSimilarity.unifiedScore, 0, "the incomplete-actor-history verdict is telemetry only — the SELF downgrade holds");
+  assert.deepEqual(on.effectiveDeviceSelfRepresentationIds, [fx.repId]);
 });
 
 test("REPOINT 2: version 0 + a full set of backfilled/observed ledger rows STILL blocks (INCOMPLETE_ACTOR_HISTORY)", async () => {
@@ -811,7 +818,7 @@ test("REPOINT 3: version 1 + clean two-account ledger case PASSES (Branch B, sco
   assert.deepEqual(on.effectiveDeviceSelfRepresentationIds, [fx.repId]);
 });
 
-test("REPOINT 4: a THIRD durable account on the ledger blocks even after every saved_reports row is deleted", async () => {
+test("REPOINT 4: a THIRD durable account on the ledger -> blocked verdict even after every saved_reports row is deleted", async () => {
   const fx = await seedTwoAccountSharedDeviceFixture();
   await seedActorUsage(fx.passportP, uniq("accU")); // third durable actor on P
   await client.execute({ sql: "DELETE FROM saved_reports", args: [] }); // fan-out is NOT a saved_reports fact
@@ -822,7 +829,7 @@ test("REPOINT 4: a THIRD durable account on the ledger blocks even after every s
   assert.equal(g.deviceDistinctAccounts, 3, "the count came from device_passport_actor_usage, not saved_reports");
 });
 
-test("REPOINT 5: durable anonymous actor evidence vetoes even after the anonymous report is claimed / deleted", async () => {
+test("REPOINT 5: durable anonymous actor evidence -> blocked verdict even after the anonymous report is claimed / deleted", async () => {
   const fx = await seedTwoAccountSharedDeviceFixture();
   await seedActorUsage(fx.passportP, null, { anonymous: true }); // durable anonymous-use sentinel
   await client.execute({ sql: "DELETE FROM saved_reports WHERE user_id IS NULL", args: [] }); // "claim / delete" every anon report
@@ -871,7 +878,7 @@ test("REPOINT 7: a missing target OR source ledger-membership row blocks", async
   assert.equal(gT.durableActorHistoryComplete, true);
 });
 
-test("REPOINT 8: a missing actor HMAC key blocks (no verifiable pseudonym => BLOCKED_INSUFFICIENT_EVIDENCE, history still complete)", async () => {
+test("REPOINT 8: a missing actor HMAC key -> verdict BLOCKED_INSUFFICIENT_EVIDENCE (telemetry), scoring still SELF", async () => {
   const fx = await seedTwoAccountSharedDeviceFixture();
   const g = await withActorKey(undefined, () => runGuard(fx));
   assert.equal(g.passed, false);
@@ -881,8 +888,8 @@ test("REPOINT 8: a missing actor HMAC key blocks (no verifiable pseudonym => BLO
   const on = await withActorKey(undefined, () =>
     withFlags({ self: "true", guard: "true" }, () => resolve({ ...fx, rawText: fx.text })),
   );
-  assert.equal(on.unifiedSimilarity.unifiedScore, 100);
-  assert.deepEqual(on.effectiveDeviceSelfRepresentationIds, []);
+  assert.equal(on.unifiedSimilarity.unifiedScore, 0, "a guard-evidence failure is telemetry only — the SELF downgrade holds");
+  assert.deepEqual(on.effectiveDeviceSelfRepresentationIds, [fx.repId]);
 });
 
 test("REPOINT 9: guard OFF is byte-identical — the ledger has ZERO influence when the flag is off", async () => {
@@ -904,7 +911,7 @@ test("REPOINT 9: guard OFF is byte-identical — the ledger has ZERO influence w
   assert.equal(unset.deviceSelfSharedGuard.durableActorHistoryComplete, null, "guard off: durable actor history is never evaluated");
 });
 
-test("REPOINT 10: a DB failure on a ledger query fails CLOSED — facts match a block, never SELF", async () => {
+test("REPOINT 10: a DB failure on a ledger query fails CLOSED — the verdict is a block, never a pass", async () => {
   const fx = await seedTwoAccountSharedDeviceFixture();
   let hit = 0;
   const throwing = new Proxy(client, {
@@ -1054,4 +1061,154 @@ test("TRACE 6: the admin serialization stays bounded — boolean|number|string|n
   }
 });
 
-console.log("device-passport-shared-guard-scoring: pure Policy D + flag matrix + Branch A/B + all block reasons + fail-closed + same-account + independent-survival + admin trace + privacy passed");
+// ===========================================================================
+// NO-VETO REGRESSION — the shared-device fan-out verdict is ADMIN TELEMETRY,
+// never a scoring veto. Once the base Device Passport SELF rule accepts a
+// representation (production-counted relationship + EXACT_CANONICAL_MATCH +
+// sameVerifiedDeviceBacking + zero independent backing) it STAYS an effective
+// SELF no matter what the shared-device guard / durable actor ledger reports.
+// Runtime-oriented: every case drives resolvePrimarySimilaritySummary end to end.
+// ===========================================================================
+
+/** Add N extra distinct pseudonymous account actors to a Passport's durable ledger. */
+async function addExtraDeviceAccounts(passportId, n) {
+  for (let i = 0; i < n; i += 1) await seedActorUsage(passportId, uniq("fanout-acc"));
+}
+
+test("NO-VETO 1: 2 actors on one Passport, exact same-device doc -> effective SELF (score 0)", async () => {
+  const fx = await seedTwoAccountSharedDeviceFixture(); // T + S on P
+  const on = await withFlags({ self: "true", guard: "true" }, () => resolve({ ...fx, rawText: fx.text }));
+  assert.equal(on.unifiedSimilarity.unifiedScore, 0);
+  assert.deepEqual(on.effectiveDeviceSelfRepresentationIds, [fx.repId]);
+  assert.equal(on.deviceSelfSharedGuard.passed, true, "2 accounts, 0 anon -> Policy D Branch B");
+});
+
+test("NO-VETO 2: 3 actors on one Passport -> verdict BLOCKED_ACCOUNT_FANOUT, scoring still effective SELF (score 0)", async () => {
+  const fx = await seedTwoAccountSharedDeviceFixture();
+  await addExtraDeviceAccounts(fx.passportP, 1); // -> 3 distinct actors
+  const on = await withFlags({ self: "true", guard: "true" }, () => resolve({ ...fx, rawText: fx.text }));
+  assert.equal(on.unifiedSimilarity.unifiedScore, 0);
+  assert.deepEqual(on.effectiveDeviceSelfRepresentationIds, [fx.repId]);
+  assert.equal(on.deviceSelfSharedGuard.passed, false);
+  assert.equal(on.deviceSelfSharedGuard.reason, "BLOCKED_ACCOUNT_FANOUT");
+  assert.equal(on.deviceSelfSharedGuard.deviceDistinctAccounts, 3);
+});
+
+test("NO-VETO 3: 10 actors on one Passport -> verdict BLOCKED_ACCOUNT_FANOUT, scoring still effective SELF (score 0)", async () => {
+  const fx = await seedTwoAccountSharedDeviceFixture();
+  await addExtraDeviceAccounts(fx.passportP, 8); // -> 10 distinct actors
+  const on = await withFlags({ self: "true", guard: "true" }, () => resolve({ ...fx, rawText: fx.text }));
+  assert.equal(on.unifiedSimilarity.unifiedScore, 0);
+  assert.deepEqual(on.effectiveDeviceSelfRepresentationIds, [fx.repId]);
+  assert.equal(on.deviceSelfSharedGuard.passed, false);
+  assert.equal(on.deviceSelfSharedGuard.reason, "BLOCKED_ACCOUNT_FANOUT");
+  assert.equal(on.deviceSelfSharedGuard.deviceDistinctAccounts, 10);
+});
+
+test("NO-VETO 4: anonymous use in the Passport's durable history + exact same-device doc -> effective SELF (score 0)", async () => {
+  const fx = await seedTwoAccountSharedDeviceFixture();
+  await seedActorUsage(fx.passportP, null, { anonymous: true });
+  const on = await withFlags({ self: "true", guard: "true" }, () => resolve({ ...fx, rawText: fx.text }));
+  assert.equal(on.unifiedSimilarity.unifiedScore, 0);
+  assert.deepEqual(on.effectiveDeviceSelfRepresentationIds, [fx.repId]);
+  assert.equal(on.deviceSelfSharedGuard.passed, false);
+  assert.equal(on.deviceSelfSharedGuard.reason, "BLOCKED_ANONYMOUS_USE");
+});
+
+test("NO-VETO 5: verdict BLOCKED_ACCOUNT_FANOUT is carried on the admin trace but the score is 0", async () => {
+  process.env.DEVICE_PASSPORT_ENABLED = "true";
+  try {
+    const fx = await seedTwoAccountSharedDeviceFixture();
+    await addExtraDeviceAccounts(fx.passportP, 3); // -> 5 distinct actors
+    await withFlags({ self: "true", guard: "true" }, async () => {
+      const resolution = await resolve({ ...fx, rawText: fx.text });
+      assert.equal(resolution.unifiedSimilarity.unifiedScore, 0);
+      assert.deepEqual(resolution.effectiveDeviceSelfRepresentationIds, [fx.repId]);
+      const trace = await getReportSimilarityDecisionTrace(client, fx.deviceKey, fx.reportId);
+      assert.equal(trace.finalScore, 0);
+      assert.equal(trace.deviceSelfSharedGuard.sharedGuardReason, "BLOCKED_ACCOUNT_FANOUT");
+      assert.equal(trace.deviceSelfSharedGuard.sharedGuardPassed, false);
+      const src = trace.sources.find((s) => s.sourceId === fx.repId);
+      assert.equal(src.effectiveScoringRelationship, "SELF");
+      assert.equal(src.countedTowardScore, false);
+    });
+  } finally {
+    delete process.env.DEVICE_PASSPORT_ENABLED;
+  }
+});
+
+test("NO-VETO 6: verdict BLOCKED_ANONYMOUS_USE is carried on the admin trace but the score is 0", async () => {
+  process.env.DEVICE_PASSPORT_ENABLED = "true";
+  try {
+    const fx = await seedTwoAccountSharedDeviceFixture();
+    await seedActorUsage(fx.passportP, null, { anonymous: true });
+    await withFlags({ self: "true", guard: "true" }, async () => {
+      const resolution = await resolve({ ...fx, rawText: fx.text });
+      assert.equal(resolution.unifiedSimilarity.unifiedScore, 0);
+      const trace = await getReportSimilarityDecisionTrace(client, fx.deviceKey, fx.reportId);
+      assert.equal(trace.deviceSelfSharedGuard.sharedGuardReason, "BLOCKED_ANONYMOUS_USE");
+      assert.equal(trace.deviceSelfSharedGuard.sharedGuardPassed, false);
+      assert.equal(trace.finalScore, 0);
+    });
+  } finally {
+    delete process.env.DEVICE_PASSPORT_ENABLED;
+  }
+});
+
+test("NO-VETO 7: independentBackingCount > 0 STILL prevents the Device Passport SELF downgrade (base rule, not the guard)", async () => {
+  const text = takeText();
+  const deviceKey = uniq("dk"), reportId = uniq("r"), passportP = uniq("passportP"), accountT = uniq("accT"), accountS = uniq("accS");
+  await seedExactCorpusSource(text, { backingPassportId: passportP, sourceAccountId: accountS, extraIndependentBacking: true });
+  await seedReport({ deviceKey, reportId, accountId: accountT, passportId: passportP, rawText: text });
+
+  const on = await withFlags({ self: "true", guard: "true" }, () => resolve({ deviceKey, reportId, accountId: accountT, rawText: text }));
+  assert.equal(on.unifiedSimilarity.unifiedScore, 100, "an independent (different-device) backing keeps the match counted");
+  assert.deepEqual(on.effectiveDeviceSelfRepresentationIds, []);
+  assert.equal(on.deviceSelfSharedGuard.reason, "NOT_APPLIED", "the guard is never consulted — nothing qualified");
+});
+
+test("NO-VETO 8: a DIFFERENT verified Passport still does not qualify", async () => {
+  const text = takeText();
+  const deviceKey = uniq("dk"), reportId = uniq("r"), reportPassport = uniq("passportR"), otherPassport = uniq("passportO");
+  await seedExactCorpusSource(text, { backingPassportId: otherPassport, sourceAccountId: uniq("accS") });
+  await seedReport({ deviceKey, reportId, accountId: uniq("accT"), passportId: reportPassport, rawText: text });
+
+  const on = await withFlags({ self: "true", guard: "true" }, () => resolve({ deviceKey, reportId, rawText: text }));
+  assert.equal(on.unifiedSimilarity.unifiedScore, 100);
+  assert.deepEqual(on.effectiveDeviceSelfRepresentationIds, []);
+  assert.equal(on.deviceSelfSharedGuard.reason, "NOT_APPLIED");
+});
+
+test("NO-VETO 9: a STRONG_TEXT_MATCH (not exact canonical) still does not qualify", async () => {
+  const text = takeText();
+  const deviceKey = uniq("dk"), reportId = uniq("r"), passportP = uniq("passportP");
+  const nearText = `${text} A trailing clause making this a near but not byte-identical variant for this particular no-veto test case.`;
+  await seedExactCorpusSource(nearText, { backingPassportId: passportP, sourceAccountId: uniq("accS") });
+  await seedReport({ deviceKey, reportId, accountId: uniq("accT"), passportId: passportP, rawText: text });
+
+  const on = await withFlags({ self: "true", guard: "true" }, () => resolve({ deviceKey, reportId, rawText: text }));
+  assert.equal(on.historicalSubmissionMatch.matches[0].matchType, "STRONG_TEXT_MATCH");
+  assert.deepEqual(on.effectiveDeviceSelfRepresentationIds, []);
+  assert.ok(on.unifiedSimilarity.unifiedScore > 0);
+});
+
+test("NO-VETO 10: unrelated archive + scholarly positions survive the guard-blocked SELF exclusion", async () => {
+  const fx = await seedTwoAccountSharedDeviceFixture();
+  await addExtraDeviceAccounts(fx.passportP, 2); // -> 4 actors -> verdict BLOCKED_ACCOUNT_FANOUT
+  const wc = tokens(canonicalizeText(fx.text)).length;
+  const archiveMatchedPositions = range(0, Math.min(15, wc));
+  const externalAcademicEvidence = [{
+    provider: "openaire", providerId: "o-nv", title: "Ext", authors: null, publication: null, year: null,
+    doi: "10.1/nv", url: "https://ex.test/nv", similarity: 88,
+    matchedPassages: [{ submittedText: "", submittedWordStart: Math.min(30, wc - 1), submittedWordEnd: Math.min(50, wc - 1), matchedWordCount: 20 }],
+  }];
+  const on = await withFlags({ self: "true", guard: "true" }, () => resolve({ ...fx, rawText: fx.text, archiveMatchedPositions, externalAcademicEvidence }));
+  assert.deepEqual(on.effectiveDeviceSelfRepresentationIds, [fx.repId], "the device source is still an effective SELF");
+  assert.ok(on.unifiedSimilarity.deviceSelfExcludedWords > 0);
+  assert.ok(on.unifiedSimilarity.archiveOnlyWords > 0, "independent archive positions still counted");
+  assert.ok(on.unifiedSimilarity.liveAcademicOnlyWords > 0, "independent scholarly positions still counted");
+  assert.ok(on.unifiedSimilarity.unifiedScore > 0 && on.unifiedSimilarity.unifiedScore < 100);
+  assert.equal(on.deviceSelfSharedGuard.reason, "BLOCKED_ACCOUNT_FANOUT", "the fan-out is still recorded for telemetry");
+});
+
+console.log("device-passport-shared-guard-scoring: pure Policy D + flag matrix + Branch A/B + telemetry-only verdict (no scoring veto) + fail-closed + same-account + independent-survival + admin trace + privacy passed");

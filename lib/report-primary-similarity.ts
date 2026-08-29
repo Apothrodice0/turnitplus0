@@ -107,11 +107,14 @@ export type PrimarySimilarityResolution = {
    * representation ids only (already present in historicalSubmissionMatch),
    * never a passport id / account id / email / device identifier.
    *
-   * When the refined CONSERVATIVE_COMBINED shared-device guard is ENABLED (flag
-   * DEVICE_PASSPORT_CONSERVATIVE_SHARED_GUARD_ENABLED — OFF by default), a
-   * representation that classifyDeviceSelfMatch accepted is included here ONLY
-   * if it also survives the guard (see deviceSelfSharedGuard below); a blocked
-   * candidate is NOT listed, so its matched words stay counted.
+   * The refined CONSERVATIVE_COMBINED shared-device guard (flag
+   * DEVICE_PASSPORT_CONSERVATIVE_SHARED_GUARD_ENABLED — OFF by default) is
+   * evaluated for ADMIN TELEMETRY only (see deviceSelfSharedGuard below): its
+   * pass/fail verdict and bounded shared-device fan-out counts are surfaced to
+   * the admin decision trace, but it NEVER removes a representation from this
+   * list. A representation that classifyDeviceSelfMatch accepted stays an
+   * effective SELF regardless of the guard verdict or the shared-device
+   * fan-out — only the base rule's own conservative conditions gate this list.
    */
   effectiveDeviceSelfRepresentationIds: string[];
   /**
@@ -119,9 +122,12 @@ export type PrimarySimilarityResolution = {
    * for this resolution — bounded counts + one short enum, no identity. `null`
    * whenever DEVICE_PASSPORT_SELF_ENABLED is off (the guard is never consulted).
    * When the SELF flag is on, `enabled` reflects
-   * DEVICE_PASSPORT_CONSERVATIVE_SHARED_GUARD_ENABLED and `passed` records
-   * whether the SELF downgrade was kept. Consumed only by the ADMIN similarity
-   * decision trace — never persisted, never returned to an ordinary user.
+   * DEVICE_PASSPORT_CONSERVATIVE_SHARED_GUARD_ENABLED and `passed` records the
+   * refined Policy D verdict over the durable shared-device fan-out facts.
+   * TELEMETRY ONLY: a `passed: false` verdict no longer removes anything from
+   * effectiveDeviceSelfRepresentationIds — an accepted Device Passport SELF is
+   * kept regardless. Consumed only by the ADMIN similarity decision trace —
+   * never persisted, never returned to an ordinary user.
    */
   deviceSelfSharedGuard: DeviceSelfSharedGuardResult | null;
 };
@@ -141,9 +147,9 @@ type ReportDeviceProvenanceRow = {
 };
 
 type ResolvedDeviceSelf = {
-  /** The representation ids scoring treats as an EFFECTIVE SELF — already guard-filtered when the guard is on. */
+  /** The representation ids scoring treats as an EFFECTIVE SELF — the base classifier's verdict, NEVER filtered by the shared-device guard. */
   representationIds: string[];
-  /** The refined CONSERVATIVE_COMBINED guard decision, or null when the guard was never consulted (nothing qualified / device-self resolution itself failed). */
+  /** The refined CONSERVATIVE_COMBINED guard decision (ADMIN TELEMETRY only — does not affect representationIds), or null when the guard was never consulted (nothing qualified / device-self resolution itself failed). */
   guard: DeviceSelfSharedGuardResult | null;
 };
 
@@ -158,13 +164,15 @@ type ResolvedDeviceSelf = {
  * an evidence-lookup failure means "no downgrade" (a verification / evidence
  * failure must never accidentally trigger SELF), never a scoring failure.
  *
- * When DEVICE_PASSPORT_CONSERVATIVE_SHARED_GUARD_ENABLED is on, each candidate
- * that passed classifyDeviceSelfMatch is additionally run through the refined
+ * When DEVICE_PASSPORT_CONSERVATIVE_SHARED_GUARD_ENABLED is on, the refined
  * CONSERVATIVE_COMBINED (Policy D) shared-device guard
  * (lib/device-shared-guard.ts, facts derived LIVE from durable provenance —
- * never telemetry). If the guard blocks, NO representation is downgraded (the
- * matches stay counted) and the baseline production relationship is untouched.
- * Any guard failure FAILS CLOSED to "keep counted" — never fails open to SELF.
+ * never telemetry) is ALSO evaluated, but for ADMIN TELEMETRY only: its verdict
+ * and bounded shared-device fan-out counts are surfaced on `guard` for the
+ * admin decision trace and it NEVER changes `representationIds`. A
+ * representation the base classifier accepted stays an effective SELF
+ * regardless of the guard verdict, the shared-device fan-out, or a
+ * guard-resolution failure.
  */
 async function resolveEffectiveDeviceSelfRepresentationIds(
   client: Client,
@@ -243,26 +251,32 @@ async function resolveEffectiveDeviceSelfRepresentationIds(
     }
 
     // Guard OFF (the production default while DEVICE_PASSPORT_SELF_ENABLED is
-    // on): byte-identical to the current Device Passport SELF behaviour.
+    // on): byte-identical to the base Device Passport SELF behaviour.
     if (!sharedGuardEnabled) {
       return { representationIds: baselineEffective, guard: guardNotApplied(false) };
     }
-    // Nothing qualified — the guard has nothing to act on.
+    // Nothing qualified — the guard has nothing to measure.
     if (baselineEffective.length === 0) {
       return { representationIds: [], guard: guardNotApplied(true) };
     }
 
-    // Guard ON: keep the SELF downgrade only if the refined Policy D over
-    // durable provenance facts is satisfied; otherwise NONE of the candidates
-    // is downgraded (their matches stay counted). Best-effort — a guard failure
-    // is FAIL CLOSED (returns passed:false), never fails open to SELF.
+    // Guard ON: TELEMETRY ONLY. The refined Policy D decision over the durable
+    // shared-device fan-out facts is still computed and surfaced (guard ->
+    // deviceSelfSharedGuard -> the ADMIN decision trace) so shared-device
+    // fan-out stays measurable, but it NO LONGER vetoes the SELF downgrade:
+    // every representation the base classifier accepted stays an effective SELF
+    // regardless of guard.passed, the fan-out counts, or a guard-resolution
+    // failure. The base rule's own conservative gates (production-counted
+    // relationship + EXACT_CANONICAL_MATCH + sameVerifiedDeviceBacking + zero
+    // independent backing) are the only thing that can keep a representation
+    // out of `baselineEffective`.
     const guard = await evaluateDeviceSelfSharedGuard(client, {
       enabled: true,
       verifiedDevicePassportId: reportPassportId,
       reportAccountId: params.accountId,
       effectiveSelfRepresentationIds: baselineEffective,
     });
-    return { representationIds: guard.passed ? baselineEffective : [], guard };
+    return { representationIds: baselineEffective, guard };
   } catch (err) {
     console.error(
       "resolvePrimarySimilaritySummary: same-device SELF evidence resolution failed (non-fatal — no device-self downgrade applied, current scoring is used):",
