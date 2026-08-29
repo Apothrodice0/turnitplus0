@@ -8,6 +8,10 @@ import {
   summarizeDeviceProvenanceShadowMeasurement,
   type DeviceProvenanceShadowMeasurement,
 } from "@/lib/device-provenance-shadow-measurement";
+import {
+  summarizeSharedDeviceRiskMeasurement,
+  type SharedDeviceRiskMeasurement,
+} from "@/lib/device-sharedness-measurement";
 import { DeveloperRoomReset } from "@/components/developer/room-reset";
 import { DeveloperAccountRoomReset } from "@/components/developer/account-room-reset";
 
@@ -30,6 +34,7 @@ export default async function DeveloperOverviewPage() {
   const client = await getReportsDbClient();
   let reports;
   let deviceShadow: DeviceProvenanceShadowMeasurement | null = null;
+  let sharedDeviceRisk: SharedDeviceRiskMeasurement | null = null;
   try {
     reports = await listRecentReportsForDeveloper(client, 100);
     // Compact aggregate view of the device-provenance-shadow-v1 telemetry —
@@ -39,6 +44,14 @@ export default async function DeveloperOverviewPage() {
       deviceShadow = await summarizeDeviceProvenanceShadowMeasurement(client, { recentLimit: 25 });
     } catch (err) {
       console.error("developer dashboard: device-provenance shadow summary failed (non-fatal):", err instanceof Error ? err.message : String(err));
+    }
+    // Shared-device false-SELF risk for the current downgrade candidates —
+    // also SELECT-only, also never touches scoring. Same degrade-to-hidden
+    // discipline.
+    try {
+      sharedDeviceRisk = await summarizeSharedDeviceRiskMeasurement(client, { recentLimit: 25 });
+    } catch (err) {
+      console.error("developer dashboard: shared-device risk summary failed (non-fatal):", err instanceof Error ? err.message : String(err));
     }
   } finally {
     client.close();
@@ -162,6 +175,117 @@ export default async function DeveloperOverviewPage() {
               {deviceShadow.recentCandidates.length === 0 && (
                 <tr>
                   <td colSpan={11}>No device-provenance shadow evaluations yet.</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </section>
+      )}
+
+      {sharedDeviceRisk && (
+        <section className="developer-device-shadow developer-shared-device-risk">
+          <h2>Shared-device false-SELF risk</h2>
+          <p>
+            Same browser / profile ≠ automatically same human. For every current same-device SELF downgrade candidate
+            (<code>{sharedDeviceRisk.policyVersion}</code>, <strong>{sharedDeviceRisk.totals.wouldDowngradeCandidates}</strong> found),
+            how shared its verified upload Passport looks — measurement and hypothetical-policy evidence only. No score or
+            relationship is changed by any label or policy here.
+          </p>
+          <ul className="developer-device-shadow-stats">
+            <li>
+              Evaluated: <strong>{sharedDeviceRisk.totals.candidatesEvaluated}</strong>
+              {sharedDeviceRisk.totals.candidatesCapped > 0 ? ` (${sharedDeviceRisk.totals.candidatesCapped} capped)` : ""}
+              {" — "}distinct candidate devices: {sharedDeviceRisk.distinctCandidateDevices}
+            </li>
+            <li>
+              On 1-account devices: <strong>{sharedDeviceRisk.deviceAccountCountBuckets.one}</strong>,
+              2-account: <strong>{sharedDeviceRisk.deviceAccountCountBuckets.two}</strong>,
+              3+ account: <strong>{sharedDeviceRisk.deviceAccountCountBuckets.threePlus}</strong>,
+              unknown: {sharedDeviceRisk.deviceAccountCountBuckets.unknown}
+            </li>
+            <li>On devices with anonymous uploads: <strong>{sharedDeviceRisk.candidatesOnDevicesWithAnonUploads}</strong></li>
+            <li>
+              Account pair shares exactly 1 Passport: <strong>{sharedDeviceRisk.pairSharesExactlyOnePassport}</strong>,
+              2+ Passports: <strong>{sharedDeviceRisk.pairSharesTwoOrMorePassports}</strong>,
+              unknown: {sharedDeviceRisk.pairSharedPassportUnknown}
+            </li>
+            <li>
+              Devices with exactly 1 account pair: <strong>{sharedDeviceRisk.devicesWithExactlyOnePair}</strong>,
+              multiple pairs: <strong>{sharedDeviceRisk.devicesWithMultiplePairs}</strong>,
+              no resolvable pair: {sharedDeviceRisk.devicesWithNoResolvablePair}
+            </li>
+            <li>
+              Data gaps — missing report row: {sharedDeviceRisk.totals.candidatesMissingReportRow},
+              missing passport: {sharedDeviceRisk.totals.candidatesMissingPassport},
+              missing snapshot: {sharedDeviceRisk.totals.candidatesMissingSnapshot},
+              representation drift: {sharedDeviceRisk.totals.candidatesRepresentationDrift},
+              source account unresolved: {sharedDeviceRisk.totals.candidatesSourceAccountUnresolved},
+              anonymous target: {sharedDeviceRisk.totals.candidatesTargetAnonymous}
+            </li>
+            <li>Risk category: {distributionText(sharedDeviceRisk.riskCategoryDistribution)}</li>
+          </ul>
+
+          <table className="developer-table">
+            <thead>
+              <tr>
+                <th>Hypothetical policy</th>
+                <th>Kept as SELF</th>
+                <th>Blocked</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>CURRENT_PREVIEW (A)</td><td>{sharedDeviceRisk.policyImpact.CURRENT_PREVIEW.kept}</td><td>{sharedDeviceRisk.policyImpact.CURRENT_PREVIEW.blocked}</td></tr>
+              <tr><td>TWO_ACCOUNT_MAX (B)</td><td>{sharedDeviceRisk.policyImpact.TWO_ACCOUNT_MAX.kept}</td><td>{sharedDeviceRisk.policyImpact.TWO_ACCOUNT_MAX.blocked}</td></tr>
+              <tr><td>MULTI_PASSPORT_PAIR (C)</td><td>{sharedDeviceRisk.policyImpact.MULTI_PASSPORT_PAIR.kept}</td><td>{sharedDeviceRisk.policyImpact.MULTI_PASSPORT_PAIR.blocked}</td></tr>
+              <tr><td>CONSERVATIVE_COMBINED (D)</td><td>{sharedDeviceRisk.policyImpact.CONSERVATIVE_COMBINED.kept}</td><td>{sharedDeviceRisk.policyImpact.CONSERVATIVE_COMBINED.blocked}</td></tr>
+            </tbody>
+          </table>
+
+          <table className="developer-table">
+            <thead>
+              <tr>
+                <th>Report</th>
+                <th>Prod. rel.</th>
+                <th>Proposed SELF</th>
+                <th>Exact canon.</th>
+                <th>Same device</th>
+                <th>Indep. backing</th>
+                <th>Device accounts</th>
+                <th>Device submissions</th>
+                <th>Device anon</th>
+                <th>Pairs on device</th>
+                <th>Pair shared Passports</th>
+                <th>A</th>
+                <th>B</th>
+                <th>C</th>
+                <th>D</th>
+                <th>Risk</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sharedDeviceRisk.recentCandidates.map((row) => (
+                <tr key={row.reportId}>
+                  <td>{row.reportId}</td>
+                  <td>{row.productionRelationship ?? "—"}</td>
+                  <td>{row.proposedRelationship ?? "—"}</td>
+                  <td>{row.exactCanonical === null ? "?" : row.exactCanonical ? "yes" : "no"}</td>
+                  <td>{row.sameVerifiedDevice === null ? "?" : row.sameVerifiedDevice ? "yes" : "no"}</td>
+                  <td>{row.independentBackingCount ?? "?"}</td>
+                  <td>{row.deviceDistinctAccounts ?? "?"}</td>
+                  <td>{row.deviceSubmissionCount ?? "?"}</td>
+                  <td>{row.deviceAnonUploads ?? "?"}</td>
+                  <td>{row.deviceAccountPairCount ?? "?"}</td>
+                  <td>{row.pairSharedPassportCount ?? "?"}</td>
+                  <td>{row.policyA ? "keep" : "block"}</td>
+                  <td>{row.policyB ? "keep" : "block"}</td>
+                  <td>{row.policyC ? "keep" : "block"}</td>
+                  <td>{row.policyD ? "keep" : "block"}</td>
+                  <td title={row.riskRationale}>{row.riskCategory}</td>
+                </tr>
+              ))}
+              {sharedDeviceRisk.recentCandidates.length === 0 && (
+                <tr>
+                  <td colSpan={16}>No current same-device SELF downgrade candidates.</td>
                 </tr>
               )}
             </tbody>
