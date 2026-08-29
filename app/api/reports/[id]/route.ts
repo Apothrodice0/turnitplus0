@@ -9,11 +9,9 @@ import { deleteHistoricalMatchSnapshot } from '../../../../lib/report-historical
 import { resolvePrimarySimilaritySummary, persistRefreshedSimilarity } from '../../../../lib/report-primary-similarity';
 import { deleteReportDocumentData } from '../../../../lib/report-deletion';
 import { deleteReportCorpusAdmissionData } from '../../../../lib/corpus-admission-report-integration';
-import { runHistoricalMatchShadowEvaluation } from '../../../../lib/e8p-shadow-evaluation';
-import { runDeviceProvenanceShadowEvaluation } from '../../../../lib/device-provenance-shadow';
+import { scheduleReportShadowEvaluations } from '../../../../lib/report-shadow-evaluations';
 import { getExperimentalHistoricalMatchForDisplay } from '../../../../lib/e8p-visibility';
 import { getReuseContextEligibility } from '../../../../lib/e8s-report-integration';
-import { runAfterResponse } from '../../../../lib/run-after-response';
 import type { SimilarityReport } from '../../../../lib/report-types';
 
 const MAX_DEVICE_KEY_LENGTH = 200;
@@ -266,50 +264,28 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
           rawText: payload.text,
           historicalSubmissionMatch,
         });
-        // Phase E8P: production shadow evaluation — measurement only, never
-        // changes historicalSubmissionMatch above (already resolved and
-        // reused as-is, never recomputed). Deferred via runAfterResponse,
-        // same pattern as app/api/reports/route.ts's own corpus-indexing
-        // callback, with its own DB connection since `client` here is closed
-        // in `finally` before after() fires. Best-effort by construction
-        // (lib/e8p-shadow-evaluation.ts never throws), so no try/catch needed
-        // around this call itself. Plain local values (not `payload`) are
-        // captured into the closure to keep it independent of the outer
-        // request's own object.
-        const deviceKeyForShadow = row.device_key;
-        const rawTextForShadow = payload.text;
-        await runAfterResponse(async () => {
-          const deferredClient = await getReportsDbClient();
-          try {
-            await runHistoricalMatchShadowEvaluation(deferredClient, {
-              reportDeviceKey: deviceKeyForShadow,
-              reportId: id,
-              accountId,
-              rawText: rawTextForShadow,
-              productionResult: historicalSubmissionMatch,
-            });
-            // Device Passport Phase 4 — prior-submission SHADOW: same deferred,
-            // best-effort, never-throws, measurement-only pattern as the
-            // historical-match shadow above. It looks up the report's own
-            // immutable upload provenance INTERNALLY (this route's read path
-            // itself never selects or serialises any passport column — see
-            // tests/device-passport-privacy.test.mjs) and records only bounded
-            // telemetry to historical_match_shadow_evaluations under its own
-            // distinct policy_version. Never changes historicalSubmissionMatch
-            // (already resolved and on its way to the response), the unified
-            // score, or any relationship classification. Inert unless the
-            // feature flag is on AND the report was uploaded with a verified
-            // passport.
-            await runDeviceProvenanceShadowEvaluation(deferredClient, {
-              reportDeviceKey: deviceKeyForShadow,
-              reportId: id,
-              accountId,
-              rawText: rawTextForShadow,
-              productionResult: historicalSubmissionMatch,
-            });
-          } finally {
-            deferredClient.close();
-          }
+        // Phase E8P + Device Passport Phase 4: production shadow telemetry —
+        // measurement only, never changes historicalSubmissionMatch above
+        // (already resolved and reused as-is, never recomputed) or the
+        // unified score. This is the SELF-HEAL / FALLBACK trigger: the same
+        // scheduling now also runs on the successful POST /api/reports
+        // lifecycle (see lib/report-shadow-evaluations.ts and
+        // app/api/reports/route.ts) for reports whose similarity finalizes
+        // at write time and are then never fetched through this route. The
+        // shared helper defers via runAfterResponse on its own DB connection
+        // (this route's `client` is closed in `finally` before after()
+        // fires), is best-effort (a telemetry failure never fails this
+        // response), and is idempotent — both evaluators UPSERT their row per
+        // (device_key, id, policy_version), so a POST-scheduled run and a
+        // later GET-scheduled run converge on the same row. Local values (not
+        // `payload`) are passed so the deferred closure never retains the
+        // outer request's own object.
+        await scheduleReportShadowEvaluations({
+          reportDeviceKey: row.device_key,
+          reportId: id,
+          accountId,
+          rawText: payload.text,
+          productionResult: historicalSubmissionMatch,
         });
       } catch (err) {
         console.error('resolvePrimarySimilaritySummary failed (non-fatal):', err instanceof Error ? err.message : String(err));

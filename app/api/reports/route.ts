@@ -16,7 +16,8 @@ import { findRoomOccupant } from '../../../lib/reports-repo';
 import { runAfterResponse } from '../../../lib/run-after-response';
 import { createPendingReportAdmissionJob, processReportAdmissionJob } from '../../../lib/corpus-admission-report-integration';
 import { resolvePrimarySimilaritySummary } from '../../../lib/report-primary-similarity';
-import type { SimilarityReport } from '../../../lib/report-types';
+import { scheduleReportShadowEvaluations } from '../../../lib/report-shadow-evaluations';
+import type { SimilarityReport, ReportHistoricalSubmissionMatch } from '../../../lib/report-types';
 
 // Reports carry derived data (AI passages, matched phrases, extracted text)
 // on top of the ingest pipeline's raw text, so this cap is larger than
@@ -433,6 +434,14 @@ export async function POST(request: Request) {
       // earlier successful save.
       let payloadJsonToPersist = payloadJson;
       const reportPayload = payload as SimilarityReport;
+      // Shadow-telemetry handoff: production's own historical-match result
+      // from write-time finalization, captured here so the deferred
+      // shadow-evaluation scheduling below (after the row is persisted) can
+      // reuse it exactly — never a second matcher run, never a recomputed or
+      // mutated score. Stays null when this save carries no finalizable text
+      // or finalization threw unexpectedly; the GET /api/reports/[id]
+      // fallback trigger still covers those reports.
+      let historicalSubmissionMatchForShadow: ReportHistoricalSubmissionMatch | null = null;
       if (isNonEmptyString(reportPayload?.text)) {
         try {
           const resolution = await resolvePrimarySimilaritySummary(client, {
@@ -445,6 +454,11 @@ export async function POST(request: Request) {
             externalAcademicEvidence: reportPayload.externalAcademicEvidence,
             archiveScore: reportPayload.archiveScore ?? reportPayload.score,
           });
+          // Reused as-is by the deferred shadow evaluators below — the SAME
+          // resolvePrimarySimilaritySummary output the GET route hands them,
+          // populated on both the success and the
+          // computeUnifiedSimilarity-failed branches.
+          historicalSubmissionMatchForShadow = resolution.historicalSubmissionMatch;
           if (resolution.unifiedSimilarity) {
             payloadJsonToPersist = JSON.stringify({
               ...reportPayload,
@@ -755,6 +769,36 @@ export async function POST(request: Request) {
           } finally {
             deferredClient.close();
           }
+        });
+      }
+
+      // Shadow-telemetry handoff for write-time-finalized reports: the
+      // report row is now durably persisted (including any verified upload
+      // passport, written inside the same transaction as the insert by
+      // insertReportWithRoomCheck), so schedule the SAME measurement-only
+      // evaluators the GET /api/reports/[id] route runs — the historical-
+      // match shadow (lib/e8p-shadow-evaluation.ts) and the device-
+      // provenance shadow (lib/device-provenance-shadow.ts) — through the
+      // one shared lib/report-shadow-evaluations.ts helper so the two
+      // trigger sites cannot drift. Required because a report whose unified
+      // similarity finalizes here at write time (and whose AI is already
+      // done) is frequently never fetched through that GET route at all, so
+      // its telemetry would otherwise never be recorded. Reuses
+      // productionResult from write-time finalization above verbatim — never
+      // recomputes or touches the score — is deferred via runAfterResponse
+      // (never adds response latency), is best-effort (a telemetry failure
+      // never fails this save), and is idempotent: both evaluators UPSERT
+      // one row per (device_key, id, policy_version), so a later GET on the
+      // same report converges on that row rather than duplicating it.
+      // Skipped when write-time finalization produced no result to hand over
+      // (no text, or an unexpected throw) — GET remains the fallback there.
+      if (historicalSubmissionMatchForShadow !== null) {
+        await scheduleReportShadowEvaluations({
+          reportDeviceKey: deviceKey,
+          reportId: id,
+          accountId: userId,
+          rawText: reportPayload.text,
+          productionResult: historicalSubmissionMatchForShadow,
         });
       }
     } finally {
