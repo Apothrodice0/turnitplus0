@@ -232,6 +232,7 @@ function SimilarityDecisionTraceSection({ trace }: { trace: AdminSimilarityDecis
         <li>Submitted words: {trace.submittedWordCount}</li>
         <li>Included matched union: {trace.finalIncludedUnionWordCount}</li>
         <li>Excluded SELF words: {trace.excludedSelfMatchedWordCount}</li>
+        <li>Excluded effective same-device SELF words: {trace.excludedEffectiveDeviceSelfMatchedWordCount}{trace.excludedEffectiveDeviceSelfMatchedWordCount > 0 ? " (Preview rule DEVICE_PASSPORT_SELF_ENABLED — baseline relationship preserved, effective scoring relationship SELF, reason SAME_DEVICE_EXACT_DOCUMENT)" : ""}</li>
         <li>Excluded UNKNOWN-relationship words: {trace.excludedUnknownMatchedWordCount}</li>
         <li>Production score changed by Device Passport shadow: <strong>NO</strong></li>
       </ul>
@@ -295,7 +296,9 @@ function SimilarityDecisionTraceSection({ trace }: { trace: AdminSimilarityDecis
                 <tr key={source.sourceKey}>
                   <td>{source.label}</td>
                   <td>{source.sourceKind}</td>
-                  <td>{source.relationshipType}</td>
+                  <td>{source.effectiveScoringReason
+                    ? `${source.relationshipType} → ${source.effectiveScoringRelationship} (${source.effectiveScoringReason})`
+                    : source.relationshipType}</td>
                   <td>{source.matchType}</td>
                   <td>{source.containment === null ? "—" : source.containment.toFixed(3)}</td>
                   <td>{source.rawMatchedWordCount}</td>

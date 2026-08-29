@@ -28,6 +28,23 @@ export function isDevicePassportEnabled(): boolean {
   return process.env.DEVICE_PASSPORT_ENABLED === "true";
 }
 
+/**
+ * Preview-gated same-device SELF SCORING rule (separate, narrower flag than
+ * isDevicePassportEnabled above). While off — the production default,
+ * unset/anything-but-"true" — lib/report-primary-similarity.ts issues NOT ONE
+ * extra query and the unified similarity result is byte-identical to today.
+ * While on, a production-counted historical source backed ONLY by the
+ * report's own verified upload passport, with zero independent backing, and an
+ * exact canonical document match, is treated as an EFFECTIVE SELF for the
+ * unified similarity score only (see lib/device-self-scoring-rule.ts's
+ * classifyDeviceSelfMatch). Read fresh on every call so tests can toggle it;
+ * turning it on never changes what a challenge verification accepts, and can
+ * only ever LOWER a score (exclude a source), never raise one.
+ */
+export function isDevicePassportSelfScoringEnabled(): boolean {
+  return process.env.DEVICE_PASSPORT_SELF_ENABLED === "true";
+}
+
 export const DEVICE_PASSPORT_ALGORITHM = "ECDSA-P256-SHA256";
 /** The ONE canonical signed-message version prefix. Bump only on a real format change. */
 export const DEVICE_PASSPORT_SIGNED_MESSAGE_VERSION = "TP_DEVICE_PASSPORT_V1";

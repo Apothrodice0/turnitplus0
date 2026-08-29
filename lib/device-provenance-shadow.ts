@@ -4,6 +4,7 @@ import { canonicalizeText } from "./canonical-text";
 import { canonicalSha256 } from "./document-identity";
 import { isDevicePassportEnabled } from "./device-passport-server";
 import { summarizeSubmissionProvenance } from "./submission-provenance";
+import { classifyDeviceSelfMatch } from "./device-self-scoring-rule";
 import type { ReportHistoricalSubmissionMatch } from "./report-types";
 
 /**
@@ -74,10 +75,10 @@ type Agreement = "AGREE" | "DISAGREE_DEVICE_SELF";
 
 type ProductionRelationship = "SELF" | "PRIOR_SUBMISSION" | "UNKNOWN_RELATIONSHIP" | "TURNITPLUS_CORPUS_SOURCE";
 
-/** Relationships whose matched words production actually COUNTS toward the score (lib/unified-similarity.ts: SELF and UNKNOWN_RELATIONSHIP are excluded). */
-function productionCountsRelationship(relationship: string | null): boolean {
-  return relationship === "PRIOR_SUBMISSION" || relationship === "TURNITPLUS_CORPUS_SOURCE";
-}
+// productionCountsRelationship + the per-match same-device SELF test both live
+// in lib/device-self-scoring-rule.ts now — imported above and shared VERBATIM
+// with the production unified-similarity scoring path so this shadow's
+// `wouldDowngrade` and the scored decision can never diverge.
 
 function truncatedErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
@@ -447,16 +448,20 @@ export async function runDeviceProvenanceShadowEvaluation(
         reportDocumentIdentityId: reportRow?.document_identity_id ?? null,
       });
       const relationship = match.relationshipType as ProductionRelationship;
-      const exactCanonicalMatch = match.matchType === "EXACT_CANONICAL_MATCH";
-      const productionCountsThisSource = productionCountsRelationship(relationship);
       // The PROPOSED per-match Device-Passport rule, OBSERVATION only (Phase 4
-      // §1). Deliberately conservative — any independent backing (Phase 4 §10
-      // / INDEPENDENT_BACKING_DEFINITION) blocks this match's SELF proposal.
-      const wouldDowngrade =
-        productionCountsThisSource &&
-        exactCanonicalMatch &&
-        provenance.sameVerifiedDeviceBacking &&
-        provenance.independentBackingCount === 0;
+      // §1) — the exact same shared classifier lib/report-primary-similarity.ts
+      // uses for the score-changing path. Deliberately conservative: any
+      // independent backing (Phase 4 §10 / INDEPENDENT_BACKING_DEFINITION)
+      // blocks this match's SELF proposal.
+      const classification = classifyDeviceSelfMatch({
+        relationshipType: relationship,
+        matchType: match.matchType,
+        sameVerifiedDeviceBacking: provenance.sameVerifiedDeviceBacking,
+        independentBackingCount: provenance.independentBackingCount,
+      });
+      const exactCanonicalMatch = classification.exactCanonicalMatch;
+      const productionCountsThisSource = classification.productionCountsRelationship;
+      const wouldDowngrade = classification.isEffectiveDeviceSelf;
       perMatch.push({ relationship, matchType: match.matchType, exactCanonicalMatch, productionCountsThisSource, wouldDowngrade, provenance });
     }
 

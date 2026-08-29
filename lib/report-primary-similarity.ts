@@ -5,6 +5,10 @@ import { CORPUS_FINGERPRINT_VERSION, CANONICALIZATION_VERSION } from "./user-sub
 import { computeUnifiedSimilarity, type UnifiedSimilarityResult } from "./unified-similarity";
 import type { ReportHistoricalSubmissionMatch, SimilarityReport } from "./report-types";
 import type { ExternalAcademicEvidence } from "./academic-search/types";
+import { canonicalSha256 } from "./document-identity";
+import { summarizeSubmissionProvenance } from "./submission-provenance";
+import { classifyDeviceSelfMatch, productionCountsRelationship } from "./device-self-scoring-rule";
+import { isDevicePassportSelfScoringEnabled } from "./device-passport-server";
 
 /**
  * Release-hardening audit finding SIM-02/SIM-03/SIM-04: the ONE server-side
@@ -83,7 +87,137 @@ export type PrimarySimilarityResolution = {
    * Always false on the success path.
    */
   failed: boolean;
+  /**
+   * Preview-gated same-device SELF rule (flag DEVICE_PASSPORT_SELF_ENABLED —
+   * OFF by default): the matchedRepresentationId values that were treated as
+   * an EFFECTIVE SELF for this resolution's unified score, WITHOUT rewriting
+   * production's persisted relationshipType (the historical-match snapshot
+   * keeps its baseline TURNITPLUS_CORPUS_SOURCE / PRIOR_SUBMISSION). Always
+   * an empty array when the flag is off, when the report has no verified
+   * upload Device Passport, or when no counted historical source is a
+   * same-device exact match with zero independent backing. Bounded — bare
+   * representation ids only (already present in historicalSubmissionMatch),
+   * never a passport id / account id / email / device identifier.
+   */
+  effectiveDeviceSelfRepresentationIds: string[];
 };
+
+/**
+ * Defensive cap on how many distinct matched representations the same-device
+ * SELF rule will fetch provenance evidence for in one resolution — mirrors
+ * lib/developer-repo.ts's MAX_TRACE_REPRESENTATIONS. The matcher itself
+ * already bounds matches[]; this is a belt-and-braces ceiling so a
+ * pathological result can never fan out into an unbounded query loop.
+ */
+const MAX_DEVICE_SELF_REPRESENTATIONS = 25;
+
+type ReportDeviceProvenanceRow = {
+  verified_device_passport_id: string | null;
+  document_identity_id: string | null;
+};
+
+/**
+ * Resolves — from the report's OWN immutable verified upload Device Passport
+ * plus the deterministic per-backing provenance evidence (never from
+ * historical_match_shadow_evaluations, which is written AFTER the response) —
+ * the set of matched representation ids that the Preview-gated same-device
+ * SELF rule (lib/device-self-scoring-rule.ts) classifies as an EFFECTIVE SELF
+ * for scoring. Returns [] whenever the report has no verified passport
+ * (condition 3 of the rule) or nothing qualifies. Best-effort: never throws —
+ * an evidence-lookup failure means "no downgrade" (a verification / evidence
+ * failure must never accidentally trigger SELF), never a scoring failure.
+ */
+async function resolveEffectiveDeviceSelfRepresentationIds(
+  client: Client,
+  params: {
+    reportDeviceKey: string;
+    reportId: string;
+    accountId: string | null;
+    rawText: string;
+    historicalSubmissionMatch: ReportHistoricalSubmissionMatch;
+    /**
+     * undefined => read the report's persisted verified_device_passport_id +
+     * document_identity_id from saved_reports (the GET / self-heal / admin-
+     * trace / resave path). string | null => the freshly-verified passport
+     * from THIS POST first-save request, whose saved_reports row does not
+     * exist yet (document identity is likewise not yet written).
+     */
+    verifiedDevicePassportIdOverride: string | null | undefined;
+  },
+): Promise<string[]> {
+  try {
+    const matches = params.historicalSubmissionMatch.matches ?? [];
+    if (matches.length === 0) return [];
+
+    let reportPassportId: string | null;
+    let reportDocumentIdentityId: string | null;
+    if (params.verifiedDevicePassportIdOverride !== undefined) {
+      reportPassportId = params.verifiedDevicePassportIdOverride;
+      // First-save POST: the row and its document identity are written after
+      // this call, and the report's own submission is not yet an admission
+      // backing — nothing of its own to exclude.
+      reportDocumentIdentityId = null;
+    } else {
+      const row = await client.execute({
+        sql: `SELECT verified_device_passport_id, document_identity_id FROM saved_reports WHERE device_key = ? AND id = ?`,
+        args: [params.reportDeviceKey, params.reportId],
+      });
+      const provenance = row.rows[0] as unknown as ReportDeviceProvenanceRow | undefined;
+      reportPassportId = provenance?.verified_device_passport_id ?? null;
+      reportDocumentIdentityId = provenance?.document_identity_id ?? null;
+    }
+
+    // Condition 3 of the rule: the target report must carry a verified
+    // cryptographic Device Passport. No passport -> current scoring, unchanged.
+    if (!reportPassportId) return [];
+
+    const reportCanonicalSha256 = safeCanonicalSha256(params.rawText);
+    const seen = new Set<string>();
+    const effective: string[] = [];
+    let processed = 0;
+    for (const match of matches) {
+      if (seen.has(match.matchedRepresentationId)) continue;
+      seen.add(match.matchedRepresentationId);
+      if (processed >= MAX_DEVICE_SELF_REPRESENTATIONS) break;
+      processed += 1;
+
+      // Cheap pre-filter — only a production-counted, exact canonical match
+      // can ever qualify, so skip the provenance query for anything else.
+      if (!productionCountsRelationship(match.relationshipType)) continue;
+      if (match.matchType !== "EXACT_CANONICAL_MATCH") continue;
+
+      const provenance = await summarizeSubmissionProvenance(client, match.matchedRepresentationId, {
+        accountId: params.accountId,
+        excludeDocumentIdentityId: reportDocumentIdentityId,
+        reportVerifiedDevicePassportId: reportPassportId,
+        reportCanonicalSha256,
+        reportDocumentIdentityId,
+      });
+      const classification = classifyDeviceSelfMatch({
+        relationshipType: match.relationshipType,
+        matchType: match.matchType,
+        sameVerifiedDeviceBacking: provenance.sameVerifiedDeviceBacking,
+        independentBackingCount: provenance.independentBackingCount,
+      });
+      if (classification.isEffectiveDeviceSelf) effective.push(match.matchedRepresentationId);
+    }
+    return effective;
+  } catch (err) {
+    console.error(
+      "resolvePrimarySimilaritySummary: same-device SELF evidence resolution failed (non-fatal — no device-self downgrade applied, current scoring is used):",
+      err instanceof Error ? err.message : String(err),
+    );
+    return [];
+  }
+}
+
+function safeCanonicalSha256(text: string): string {
+  try {
+    return canonicalSha256(text ?? "");
+  } catch {
+    return canonicalSha256("");
+  }
+}
 
 export async function resolvePrimarySimilaritySummary(
   client: Client,
@@ -97,6 +231,19 @@ export async function resolvePrimarySimilaritySummary(
     externalAcademicEvidence?: ExternalAcademicEvidence[] | null;
     /** The archive-only fallback value — never mutated, never persisted by this function; see this module's own header comment. */
     archiveScore: number;
+    /**
+     * Preview-gated same-device SELF rule (flag DEVICE_PASSPORT_SELF_ENABLED).
+     * `undefined` (every caller except the POST first-save path) => this
+     * function reads the report's persisted saved_reports.verified_device_passport_id
+     * itself, so the GET / self-heal / admin-trace / resave paths all resolve
+     * the same effective relationship. A `string | null` value is the
+     * freshly-verified passport from THIS POST /api/reports first-save request,
+     * whose saved_reports row does not exist yet — passing it here is what
+     * lets the FIRST persisted score already reflect the same-device SELF
+     * downgrade, with no second POST or GET. Ignored entirely when the flag is
+     * off (not even read).
+     */
+    verifiedDevicePassportId?: string | null;
     /** Test-only override, mirroring getOrComputeHistoricalMatchSnapshot's own testOnlyPauseBeforeWrite convention — lets a test force the "unified matching genuinely failed" branch without fighting computeUnifiedSimilarity's own deliberately defensive, never-throws-on-malformed-input contract. Always undefined in production. */
     testOnlyComputeUnifiedSimilarity?: typeof computeUnifiedSimilarity;
   },
@@ -136,6 +283,28 @@ export async function resolvePrimarySimilaritySummary(
     corpusSourceMatchingEnabled,
   });
 
+  // Preview-gated same-device SELF rule (flag DEVICE_PASSPORT_SELF_ENABLED —
+  // OFF by default). Triple-gated so an off flag is a byte-identical no-op
+  // with NOT ONE extra query: the flag, a real MATCHED result, and at least
+  // one match. Never re-runs the matcher or mutates the historical-match
+  // snapshot; only decides which counted representations
+  // computeUnifiedSimilarity should treat as an EFFECTIVE SELF for the score.
+  let effectiveDeviceSelfRepresentationIds: string[] = [];
+  if (
+    isDevicePassportSelfScoringEnabled() &&
+    historicalSubmissionMatch.status === "MATCHED" &&
+    (historicalSubmissionMatch.matches?.length ?? 0) > 0
+  ) {
+    effectiveDeviceSelfRepresentationIds = await resolveEffectiveDeviceSelfRepresentationIds(client, {
+      reportDeviceKey: params.reportDeviceKey,
+      reportId: params.reportId,
+      accountId: params.accountId,
+      rawText: params.rawText,
+      historicalSubmissionMatch,
+      verifiedDevicePassportIdOverride: params.verifiedDevicePassportId,
+    });
+  }
+
   // Mirrors the exact try/catch boundary app/api/reports/[id]/route.ts
   // already had around its own inline computeUnifiedSimilarity call —
   // getOrComputeHistoricalMatchSnapshot above is not wrapped here for the
@@ -149,11 +318,12 @@ export async function resolvePrimarySimilaritySummary(
       archiveMatchedPositions: params.archiveMatchedPositions,
       externalAcademicEvidence: params.externalAcademicEvidence,
       historicalSubmissionMatch,
+      effectiveDeviceSelfRepresentationIds,
     });
-    return { historicalSubmissionMatch, unifiedSimilarity, primaryScore: unifiedSimilarity.unifiedScore, isUnified: true, corpusSourceMatchingEnabled, corpusGeneration, failed: false };
+    return { historicalSubmissionMatch, unifiedSimilarity, primaryScore: unifiedSimilarity.unifiedScore, isUnified: true, corpusSourceMatchingEnabled, corpusGeneration, failed: false, effectiveDeviceSelfRepresentationIds };
   } catch (err) {
     console.error("resolvePrimarySimilaritySummary: computeUnifiedSimilarity failed (genuine overall-computation failure — persisted as a terminal 'failed' state by the caller, see this function's own failed field):", err instanceof Error ? err.message : String(err));
-    return { historicalSubmissionMatch, unifiedSimilarity: undefined, primaryScore: params.archiveScore, isUnified: false, corpusSourceMatchingEnabled, corpusGeneration, failed: true };
+    return { historicalSubmissionMatch, unifiedSimilarity: undefined, primaryScore: params.archiveScore, isUnified: false, corpusSourceMatchingEnabled, corpusGeneration, failed: true, effectiveDeviceSelfRepresentationIds };
   }
 }
 

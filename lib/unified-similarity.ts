@@ -26,7 +26,17 @@ import type { HistoricalSubmissionMatchEntry, ReportHistoricalSubmissionMatch } 
 export const UNIFIED_SIMILARITY_VERSION = "unified-similarity-v1";
 
 export type UnifiedEvidenceSourceType = "archive" | "openaire" | "europe_pmc" | "previous_upload";
-export type UnifiedEvidenceStatus = "included" | "excluded_self" | "excluded_unknown";
+/**
+ * "excluded_effective_device_self": a production-counted previous-upload
+ * source the Preview-gated same-device SELF rule
+ * (lib/report-primary-similarity.ts, flag DEVICE_PASSPORT_SELF_ENABLED)
+ * downgraded to an EFFECTIVE SELF for scoring — treated exactly like
+ * "excluded_self" here (contributes nothing), but tracked under its own
+ * status/counter so genuine same-account SELF telemetry stays unchanged, and
+ * the contribution still records the unchanged BASELINE relationship. Only
+ * ever produced when the caller passes effectiveDeviceSelfRepresentationIds.
+ */
+export type UnifiedEvidenceStatus = "included" | "excluded_self" | "excluded_unknown" | "excluded_effective_device_self";
 
 /**
  * One passage's contribution, kept for internal source attribution (STEP
@@ -43,8 +53,24 @@ export type UnifiedEvidenceContribution = {
   /** Inclusive, matching MatchedPassage/HistoricalMatchPassage's own existing convention — NOT the half-open convention combineMatchedWordPositions's own ExternalMatchedWordRange uses internally. */
   submittedWordEnd: number;
   matchedWordCount: number;
-  /** Only present for sourceType "previous_upload". */
+  /**
+   * Only present for sourceType "previous_upload". This is the UNCHANGED
+   * BASELINE relationship production's matcher persisted (e.g.
+   * TURNITPLUS_CORPUS_SOURCE) — the same-device SELF rule never rewrites it;
+   * see effectiveScoringRelationship below.
+   */
   relationship?: HistoricalSubmissionMatchEntry["relationshipType"];
+  /**
+   * Set ONLY when the Preview-gated same-device SELF rule downgraded this
+   * "previous_upload" contribution to an effective SELF for scoring. The
+   * baseline `relationship` above is preserved verbatim; this records the
+   * EFFECTIVE SCORING RELATIONSHIP that was applied before the matched-
+   * position union, so an admin can see both. Absent for every other
+   * contribution.
+   */
+  effectiveScoringRelationship?: "SELF";
+  /** Why the effective relationship differs from the baseline — currently always "SAME_DEVICE_EXACT_DOCUMENT". Paired with effectiveScoringRelationship. */
+  effectiveScoringReason?: "SAME_DEVICE_EXACT_DOCUMENT";
   evidenceStatus: UnifiedEvidenceStatus;
 };
 
@@ -62,10 +88,20 @@ export type UnifiedSimilarityResult = {
   previousUploadOnlyWords: number;
   /** Words matched by more than one source at the same submitted position — the exact case the CRITICAL RULE example describes ("the same submitted passage found by multiple sources counts ONCE"), reported here as a count of how often that happened, not lost. */
   overlapWords: number;
-  /** Matched words from SELF-relationship entries — computed for transparency (STEP 6/benchmark reporting) but NEVER included in unifiedScore. DECISION 1: no override. */
+  /** Matched words from SELF-relationship entries — computed for transparency (STEP 6/benchmark reporting) but NEVER included in unifiedScore. DECISION 1: no override. Genuine same-account SELF only — an effective same-device SELF downgrade is tallied under deviceSelfExcludedWords below so this figure is unchanged by that Preview rule. */
   selfExcludedWords: number;
   /** Matched words from UNKNOWN_RELATIONSHIP entries — same transparency-only treatment. DECISION 2: no override, no guessing. */
   unknownExcludedWords: number;
+  /**
+   * Matched words from a production-counted historical source the Preview-
+   * gated same-device SELF rule (lib/report-primary-similarity.ts, flag
+   * DEVICE_PASSPORT_SELF_ENABLED) downgraded to an EFFECTIVE SELF for scoring
+   * — excluded from unifiedScore exactly like selfExcludedWords, tracked
+   * separately so genuine same-account SELF telemetry is untouched. Always 0
+   * unless the caller passed effectiveDeviceSelfRepresentationIds (i.e. 0 in
+   * every configuration where that flag is off).
+   */
+  deviceSelfExcludedWords: number;
   /** Full per-passage attribution, including excluded entries (see evidenceStatus) — internal use (debugging, calibration, a future admin view), never rendered to an end user as-is. */
   contributions: UnifiedEvidenceContribution[];
   /**
@@ -108,6 +144,26 @@ export type ComputeUnifiedSimilarityParams = {
   externalAcademicEvidence?: ExternalAcademicEvidence[] | null;
   /** SimilarityReport.historicalSubmissionMatch — already gated at strongCorrespondence/exactCanonicalMatch by lib/user-submission-matching.ts before this function sees it; relationshipType is inspected here, never re-derived. */
   historicalSubmissionMatch?: ReportHistoricalSubmissionMatch | null;
+  /**
+   * matchedRepresentationId values that the Preview-gated same-device SELF
+   * rule (lib/report-primary-similarity.ts, flag DEVICE_PASSPORT_SELF_ENABLED
+   * — resolved from the report's OWN verified upload Device Passport plus the
+   * deterministic per-backing provenance evidence, NEVER from
+   * historical_match_shadow_evaluations) has classified as an EFFECTIVE SELF
+   * for scoring: a production-counted, exact-canonical historical source
+   * backed only by the report's own verified passport with zero independent
+   * backing (see lib/device-self-scoring-rule.ts's classifyDeviceSelfMatch).
+   *
+   * Their matched positions are excluded from the scored union exactly like a
+   * SELF-relationship match — WITHOUT rewriting production's persisted
+   * relationshipType: the contribution keeps its baseline `relationship` and
+   * gains effectiveScoringRelationship "SELF". Independent archive / scholarly
+   * positions are untouched (they enter the union through their own channels).
+   *
+   * Empty / absent (the production default) => this function's output is
+   * byte-identical to before this parameter existed.
+   */
+  effectiveDeviceSelfRepresentationIds?: readonly string[] | ReadonlySet<string> | null;
 };
 
 function clampedPositions(start: number, end: number, wordCount: number): [number, number] | null {
@@ -180,6 +236,14 @@ function academicSourceType(provider: string): UnifiedEvidenceSourceType {
 export function computeUnifiedSimilarity(params: ComputeUnifiedSimilarityParams): UnifiedSimilarityResult {
   const wordCount = Number.isInteger(params.wordCount) && params.wordCount > 0 ? params.wordCount : 0;
 
+  // The Preview-gated same-device SELF rule's already-decided set of
+  // representation ids (see effectiveDeviceSelfRepresentationIds' own comment).
+  // Empty when the caller passed nothing — the production default.
+  const effectiveDeviceSelfSet: ReadonlySet<string> =
+    params.effectiveDeviceSelfRepresentationIds instanceof Set
+      ? params.effectiveDeviceSelfRepresentationIds
+      : new Set(params.effectiveDeviceSelfRepresentationIds ?? []);
+
   const archivePositions = (params.archiveMatchedPositions ?? []).filter(
     (position) => Number.isInteger(position) && position >= 0 && position < wordCount,
   );
@@ -218,8 +282,11 @@ export function computeUnifiedSimilarity(params: ComputeUnifiedSimilarityParams)
   // --- Source: previous uploads / growing corpus -----------------------------
   // DECISION 1 (no override): SELF is always excluded.
   // DECISION 2 (no guessing): UNKNOWN_RELATIONSHIP is always excluded.
+  // Preview rule: an EFFECTIVE same-device SELF is also excluded — the
+  // baseline relationshipType is left exactly as production persisted it.
   let selfExcludedWords = 0;
   let unknownExcludedWords = 0;
+  let deviceSelfExcludedWords = 0;
   const seenPriorRepresentation = new Set<string>();
   if (params.historicalSubmissionMatch?.status === "MATCHED") {
     for (const match of params.historicalSubmissionMatch.matches ?? []) {
@@ -227,9 +294,18 @@ export function computeUnifiedSimilarity(params: ComputeUnifiedSimilarityParams)
       const firstOccurrence = !seenPriorRepresentation.has(identityKey);
       seenPriorRepresentation.add(identityKey);
 
+      // Only a production-counted baseline relationship can be downgraded — a
+      // genuine SELF / UNKNOWN_RELATIONSHIP is already excluded and keeps its
+      // own status and its own tally.
+      const isEffectiveDeviceSelf =
+        effectiveDeviceSelfSet.has(identityKey) &&
+        match.relationshipType !== "SELF" &&
+        match.relationshipType !== "UNKNOWN_RELATIONSHIP";
+
       const status: UnifiedEvidenceStatus =
         match.relationshipType === "SELF" ? "excluded_self"
         : match.relationshipType === "UNKNOWN_RELATIONSHIP" ? "excluded_unknown"
+        : isEffectiveDeviceSelf ? "excluded_effective_device_self"
         : "included";
 
       const passageRanges = previousUploadPassageRanges(match, wordCount);
@@ -241,6 +317,9 @@ export function computeUnifiedSimilarity(params: ComputeUnifiedSimilarityParams)
           submittedWordEnd: passage.submittedWordEnd,
           matchedWordCount: passage.matchedWordCount,
           relationship: match.relationshipType,
+          ...(isEffectiveDeviceSelf
+            ? { effectiveScoringRelationship: "SELF" as const, effectiveScoringReason: "SAME_DEVICE_EXACT_DOCUMENT" as const }
+            : {}),
           evidenceStatus: status,
         });
       }
@@ -253,6 +332,10 @@ export function computeUnifiedSimilarity(params: ComputeUnifiedSimilarityParams)
       }
       if (status === "excluded_unknown") {
         unknownExcludedWords += match.matchedWordCount;
+        continue;
+      }
+      if (status === "excluded_effective_device_self") {
+        deviceSelfExcludedWords += match.matchedWordCount;
         continue;
       }
       for (const passage of passageRanges) {
@@ -295,6 +378,7 @@ export function computeUnifiedSimilarity(params: ComputeUnifiedSimilarityParams)
     overlapWords,
     selfExcludedWords,
     unknownExcludedWords,
+    deviceSelfExcludedWords,
     contributions,
     matchedPositions: [...allEligiblePositions].sort((left, right) => left - right),
     previousUploadPositions: previousUploadPositions.sort((left, right) => left - right),

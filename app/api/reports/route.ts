@@ -382,6 +382,63 @@ export async function POST(request: Request) {
         roomOwnerId = sessionUser.id;
       }
 
+      const reportPayload = payload as SimilarityReport;
+
+      // Device Passport (Phase 2/4): cryptographically verify an optional
+      // upload-time device attestation. ORDERING (Preview same-device SELF
+      // rule): this MUST run BEFORE write-time similarity finalization below,
+      // so the FIRST persisted unified-similarity score for this report can
+      // already reflect the same-device SELF downgrade computed against the
+      // passport verified in THIS request — never relying on a later
+      // POST/resave or a GET to correct it. Verification itself is otherwise
+      // unchanged and still touches nothing about the matcher or scoring
+      // directly; only its verified output (verifiedDevicePassportId) is
+      // threaded into resolvePrimarySimilaritySummary. Attempted only when the
+      // feature flag is ON, this is a genuine first save (a resave carries no
+      // fresh challenge), the attestation object is present, and the payload
+      // has real text to bind a hash to.
+      //
+      // Fail-safe by construction: verifyDevicePassportAttestation returns
+      // null (never throws) for every failure — bad signature, expired /
+      // consumed / missing challenge, wrong session/account binding,
+      // unregistered or revoked passport, tampered text or report id,
+      // malformed base64, oversized field, DB error — and the report upload
+      // then proceeds exactly as if no attestation had been sent (and no
+      // same-device SELF downgrade is possible). Only positive verified
+      // evidence ever produces a non-null id.
+      let verifiedDevicePassportId: string | null = null;
+      if (
+        isDevicePassportEnabled() &&
+        isFirstSaveOfThisReport &&
+        devicePassport && typeof devicePassport === 'object' &&
+        isNonEmptyString(reportPayload?.text)
+      ) {
+        const dp = devicePassport as Record<string, unknown>;
+        const attestationFieldsOk = [dp.challengeId, dp.nonce, dp.publicKeySpki, dp.signature].every(
+          (v) => typeof v === 'string' && v.length > 0 && v.length <= MAX_ATTESTATION_FIELD_LENGTH,
+        );
+        if (attestationFieldsOk) {
+          try {
+            const rawSessionToken = parseCookie(request.headers.get('cookie'), SESSION_COOKIE_NAME);
+            verifiedDevicePassportId = await verifyDevicePassportAttestation(client, {
+              challengeId: dp.challengeId,
+              nonce: dp.nonce,
+              publicKeySpki: dp.publicKeySpki,
+              signature: dp.signature,
+              method: 'POST',
+              path: '/api/reports',
+              payloadText: reportPayload.text,
+              reportId: id,
+              currentAccountId: userId,
+              currentSessionTokenHash: sessionUser && rawSessionToken ? hashToken(rawSessionToken) : null,
+            });
+          } catch (err) {
+            console.error('device passport verification failed unexpectedly (non-fatal, report upload proceeds without provenance):', err instanceof Error ? err.message : String(err));
+            verifiedDevicePassportId = null;
+          }
+        }
+      }
+
       // Release-hardening audit finding SIM-03: write-time finalization —
       // the report-generation pipeline's own authoritative unified-
       // similarity computation, persisted here (inside payload_json, via
@@ -433,7 +490,6 @@ export async function POST(request: Request) {
       // payload can never regress an already-good persisted result from an
       // earlier successful save.
       let payloadJsonToPersist = payloadJson;
-      const reportPayload = payload as SimilarityReport;
       // Shadow-telemetry handoff: production's own historical-match result
       // from write-time finalization, captured here so the deferred
       // shadow-evaluation scheduling below (after the row is persisted) can
@@ -453,6 +509,14 @@ export async function POST(request: Request) {
             archiveMatchedPositions: reportPayload.archiveMatchedPositions,
             externalAcademicEvidence: reportPayload.externalAcademicEvidence,
             archiveScore: reportPayload.archiveScore ?? reportPayload.score,
+            // Preview same-device SELF rule: on a genuine first save the
+            // saved_reports row (and its verified_device_passport_id) does not
+            // exist yet — hand the passport verified moments ago in THIS
+            // request straight in, so the FIRST persisted unified score
+            // already reflects any same-device SELF downgrade. On a resave the
+            // row exists, so pass undefined and let the resolver read the
+            // persisted, immutable upload passport itself.
+            verifiedDevicePassportId: isFirstSaveOfThisReport ? verifiedDevicePassportId : undefined,
           });
           // Reused as-is by the deferred shadow evaluators below — the SAME
           // resolvePrimarySimilaritySummary output the GET route hands them,
@@ -523,53 +587,10 @@ export async function POST(request: Request) {
         }
       }
 
-      // Device Passport (Phase 2): cryptographically verify an optional
-      // upload-time device attestation. NEVER affects the similarity score,
-      // the matcher, or relationship classification — this phase only
-      // captures verified provenance. Attempted only when the feature flag
-      // is ON, this is a genuine first save (a resave carries no fresh
-      // challenge), the attestation object is present, and the payload has
-      // real text to bind a hash to.
-      //
-      // Fail-safe by construction: verifyDevicePassportAttestation returns
-      // null (never throws) for every failure — bad signature, expired /
-      // consumed / missing challenge, wrong session/account binding,
-      // unregistered or revoked passport, tampered text or report id,
-      // malformed base64, oversized field, DB error — and the report upload
-      // then proceeds exactly as if no attestation had been sent. Only
-      // positive verified evidence ever produces a non-null id.
-      let verifiedDevicePassportId: string | null = null;
-      if (
-        isDevicePassportEnabled() &&
-        isFirstSaveOfThisReport &&
-        devicePassport && typeof devicePassport === 'object' &&
-        isNonEmptyString(reportPayload?.text)
-      ) {
-        const dp = devicePassport as Record<string, unknown>;
-        const attestationFieldsOk = [dp.challengeId, dp.nonce, dp.publicKeySpki, dp.signature].every(
-          (v) => typeof v === 'string' && v.length > 0 && v.length <= MAX_ATTESTATION_FIELD_LENGTH,
-        );
-        if (attestationFieldsOk) {
-          try {
-            const rawSessionToken = parseCookie(request.headers.get('cookie'), SESSION_COOKIE_NAME);
-            verifiedDevicePassportId = await verifyDevicePassportAttestation(client, {
-              challengeId: dp.challengeId,
-              nonce: dp.nonce,
-              publicKeySpki: dp.publicKeySpki,
-              signature: dp.signature,
-              method: 'POST',
-              path: '/api/reports',
-              payloadText: reportPayload.text,
-              reportId: id,
-              currentAccountId: userId,
-              currentSessionTokenHash: sessionUser && rawSessionToken ? hashToken(rawSessionToken) : null,
-            });
-          } catch (err) {
-            console.error('device passport verification failed unexpectedly (non-fatal, report upload proceeds without provenance):', err instanceof Error ? err.message : String(err));
-            verifiedDevicePassportId = null;
-          }
-        }
-      }
+      // (Device Passport verification for this upload was performed above,
+      // BEFORE write-time similarity finalization — see verifiedDevicePassportId's
+      // own block for why the ordering matters for the Preview same-device
+      // SELF rule.)
 
       // Concurrency (production audit fix): the occupancy check and the
       // insert must be one atomic unit relative to any OTHER concurrent

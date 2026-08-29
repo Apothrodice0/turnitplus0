@@ -62,6 +62,13 @@ export type DecisionTraceCountedReason =
 /** Why a source's matched words were NOT counted toward the final union. */
 export type DecisionTraceExclusionReason =
   | "EXCLUDED_SELF"
+  /**
+   * The Preview-gated same-device SELF rule (flag DEVICE_PASSPORT_SELF_ENABLED)
+   * treated this production-counted source as an EFFECTIVE SELF for scoring —
+   * its BASELINE relationship (see relationshipType) is unchanged; see
+   * effectiveScoringRelationship / effectiveScoringReason on the source.
+   */
+  | "EXCLUDED_EFFECTIVE_DEVICE_SELF"
   | "EXCLUDED_UNKNOWN_RELATIONSHIP"
   | "EXCLUDED_DUPLICATE_WORD_POSITIONS"
   | "NO_VERIFIED_CORRESPONDENCE";
@@ -182,7 +189,25 @@ export type DecisionTraceSource = {
   label: string;
   /** ADMIN-ONLY internal identity — representation id / academic identity key. null for the blended archive channel. */
   sourceId: string | null;
+  /**
+   * The BASELINE relationship production's matcher persisted for this source —
+   * never rewritten. When the Preview-gated same-device SELF rule downgrades a
+   * source, this still reads e.g. "TURNITPLUS_CORPUS_SOURCE" while
+   * effectiveScoringRelationship reads "SELF".
+   */
   relationshipType: DecisionTraceRelationship;
+  /**
+   * The relationship actually applied to this source BEFORE the scored
+   * matched-position union. Equals relationshipType unless the Preview-gated
+   * same-device SELF rule downgraded it, in which case this is "SELF".
+   */
+  effectiveScoringRelationship: DecisionTraceRelationship;
+  /**
+   * Why effectiveScoringRelationship differs from relationshipType — currently
+   * only "SAME_DEVICE_EXACT_DOCUMENT". null when they are identical (no
+   * downgrade was applied).
+   */
+  effectiveScoringReason: "SAME_DEVICE_EXACT_DOCUMENT" | null;
   matchType: DecisionTraceMatchType;
   containment: number | null;
   historicalSubmissionCount: number | null;
@@ -209,6 +234,8 @@ export type DecisionTraceZeroExplanation = {
   reason: DecisionTraceZeroReason;
   detail: string;
   excludedSelfSourceCount: number;
+  /** Sources the Preview-gated same-device SELF rule downgraded to an effective SELF. */
+  excludedEffectiveDeviceSelfSourceCount: number;
   excludedUnknownSourceCount: number;
   /** Candidate-rejection detail does not survive production matching into the persisted result — see the admin trace spec §7. */
   candidateRejectionDetailAvailable: false;
@@ -239,6 +266,15 @@ export type AdminSimilarityDecisionTrace = {
   includedMatchedWordCount: number;
   finalIncludedUnionWordCount: number;
   excludedSelfMatchedWordCount: number;
+  /**
+   * Matched words excluded because the Preview-gated same-device SELF rule
+   * (flag DEVICE_PASSPORT_SELF_ENABLED) downgraded a production-counted
+   * historical source to an EFFECTIVE SELF for scoring — 0 in every
+   * configuration where that flag is off. Reported separately from
+   * excludedSelfMatchedWordCount so genuine same-account SELF totals are
+   * unchanged.
+   */
+  excludedEffectiveDeviceSelfMatchedWordCount: number;
   excludedUnknownMatchedWordCount: number;
 
   archiveOnlyWordCount: number;
@@ -384,9 +420,12 @@ type ReconstructedSource = {
   label: string;
   sourceId: string | null;
   relationshipType: DecisionTraceRelationship;
+  /** "SELF" when the Preview-gated same-device rule downgraded this source; else equal to relationshipType. */
+  effectiveScoringRelationship: DecisionTraceRelationship;
+  effectiveScoringReason: "SAME_DEVICE_EXACT_DOCUMENT" | null;
   /** the source's own clamped matched-position footprint. */
   positions: Set<number>;
-  /** "included" | "excluded_self" | "excluded_unknown" — from contributions[].evidenceStatus (archive always "included"). */
+  /** "included" | "excluded_self" | "excluded_unknown" | "excluded_effective_device_self" — from contributions[].evidenceStatus (archive always "included"). */
   evidenceStatus: UnifiedEvidenceContribution["evidenceStatus"];
 };
 
@@ -407,6 +446,7 @@ function emptyTrace(
     includedMatchedWordCount: 0,
     finalIncludedUnionWordCount: 0,
     excludedSelfMatchedWordCount: 0,
+    excludedEffectiveDeviceSelfMatchedWordCount: 0,
     excludedUnknownMatchedWordCount: 0,
     archiveOnlyWordCount: 0,
     scholarlyOnlyWordCount: 0,
@@ -483,6 +523,8 @@ export function buildAdminSimilarityDecisionTrace(
       label: "TurnitPlus reference archive",
       sourceId: null,
       relationshipType: "N/A",
+      effectiveScoringRelationship: "N/A",
+      effectiveScoringReason: null,
       positions: archivePositions,
       evidenceStatus: "included",
     });
@@ -509,6 +551,20 @@ export function buildAdminSimilarityDecisionTrace(
       const sourceKey = isPrior
         ? `prior:${priorOrdinal++}`
         : `scholarly:${scholarlyOrdinal++}`;
+      // The Preview-gated same-device SELF rule downgrades a WHOLE source
+      // (representation), so every contribution in a "prior" group carries the
+      // same effectiveScoringRelationship — seeded here from the first-seen
+      // contribution, reinforced below if a later one disagrees. A DOWNGRADE
+      // is signalled ONLY by contribution.effectiveScoringRelationship ===
+      // "SELF" (set by computeUnifiedSimilarity for an effective-device-self
+      // exclusion) — a source whose BASELINE relationship is already "SELF"
+      // (an ordinary same-account SELF match) is not a downgrade, so its
+      // effectiveScoringReason stays null.
+      const isDowngradedToSelf = isPrior && contribution.effectiveScoringRelationship === "SELF";
+      const effectiveScoringRelationship: DecisionTraceRelationship =
+        isDowngradedToSelf ? "SELF" : relationshipType;
+      const effectiveScoringReason: "SAME_DEVICE_EXACT_DOCUMENT" | null =
+        isDowngradedToSelf ? contribution.effectiveScoringReason ?? "SAME_DEVICE_EXACT_DOCUMENT" : null;
       index = reconstructed.length;
       groupIndex.set(groupKey, index);
       reconstructed.push({
@@ -517,6 +573,8 @@ export function buildAdminSimilarityDecisionTrace(
         label,
         sourceId: contribution.sourceId,
         relationshipType,
+        effectiveScoringRelationship,
+        effectiveScoringReason,
         positions: new Set<number>(),
         evidenceStatus: contribution.evidenceStatus,
       });
@@ -526,6 +584,10 @@ export function buildAdminSimilarityDecisionTrace(
     // share one relationship); keep the strictest (excluded) if they ever
     // disagree.
     if (contribution.evidenceStatus !== "included") target.evidenceStatus = contribution.evidenceStatus;
+    if (contribution.effectiveScoringRelationship === "SELF" && target.relationshipType !== "SELF") {
+      target.effectiveScoringRelationship = "SELF";
+      target.effectiveScoringReason = contribution.effectiveScoringReason ?? "SAME_DEVICE_EXACT_DOCUMENT";
+    }
     const clamped = clampInclusiveRange(
       contribution.submittedWordStart,
       contribution.submittedWordEnd,
@@ -539,6 +601,7 @@ export function buildAdminSimilarityDecisionTrace(
   const unionAccumulationOrder: string[] = [];
   let excludedSelfSourceCount = 0;
   let excludedUnknownSourceCount = 0;
+  let excludedEffectiveDeviceSelfSourceCount = 0;
 
   const sources: DecisionTraceSource[] = reconstructed.map((source) => {
     const facts = source.sourceId ? factsByRep[source.sourceId] : undefined;
@@ -546,12 +609,14 @@ export function buildAdminSimilarityDecisionTrace(
 
     const excludedSelf = source.evidenceStatus === "excluded_self";
     const excludedUnknown = source.evidenceStatus === "excluded_unknown";
+    const excludedDeviceSelf = source.evidenceStatus === "excluded_effective_device_self";
     if (excludedSelf) excludedSelfSourceCount += 1;
     if (excludedUnknown) excludedUnknownSourceCount += 1;
+    if (excludedDeviceSelf) excludedEffectiveDeviceSelfSourceCount += 1;
 
     // "counted" positions = this source's footprint intersected with the
     // canonical included union computeUnifiedSimilarity actually scored.
-    const countedPositions = excludedSelf || excludedUnknown
+    const countedPositions = excludedSelf || excludedUnknown || excludedDeviceSelf
       ? new Set<number>()
       : new Set<number>([...source.positions].filter((position) => groundTruthUnion.has(position)));
     const countedWordCount = countedPositions.size;
@@ -576,6 +641,9 @@ export function buildAdminSimilarityDecisionTrace(
     if (excludedSelf) {
       countedTowardScore = false;
       exclusionReason = "EXCLUDED_SELF";
+    } else if (excludedDeviceSelf) {
+      countedTowardScore = false;
+      exclusionReason = "EXCLUDED_EFFECTIVE_DEVICE_SELF";
     } else if (excludedUnknown) {
       countedTowardScore = false;
       exclusionReason = "EXCLUDED_UNKNOWN_RELATIONSHIP";
@@ -599,6 +667,8 @@ export function buildAdminSimilarityDecisionTrace(
       label: source.label,
       sourceId: source.sourceId,
       relationshipType: source.relationshipType,
+      effectiveScoringRelationship: source.effectiveScoringRelationship,
+      effectiveScoringReason: source.effectiveScoringReason,
       matchType: (facts?.matchType as DecisionTraceMatchType) ?? "N/A",
       containment: facts ? facts.containment : null,
       historicalSubmissionCount: facts ? facts.historicalSubmissionCount : null,
@@ -642,11 +712,15 @@ export function buildAdminSimilarityDecisionTrace(
     } else if (!anyFootprint) {
       reason = "NO_MATCHES_FOUND";
       detail = "No archive, scholarly, or previous-submission source reported any matching words.";
-    } else if (includedUnionWordCount === 0 && (excludedSelfSourceCount > 0 || excludedUnknownSourceCount > 0)) {
+    } else if (
+      includedUnionWordCount === 0 &&
+      (excludedSelfSourceCount > 0 || excludedUnknownSourceCount > 0 || excludedEffectiveDeviceSelfSourceCount > 0)
+    ) {
       reason = "MATCHES_PRESENT_BUT_ALL_EXCLUDED";
       detail =
-        `${excludedSelfSourceCount} SELF and ${excludedUnknownSourceCount} UNKNOWN-relationship source(s) reported matches, ` +
-        "but SELF and UNKNOWN matches are always excluded from the score.";
+        `${excludedSelfSourceCount} SELF, ${excludedEffectiveDeviceSelfSourceCount} effective same-device SELF, and ` +
+        `${excludedUnknownSourceCount} UNKNOWN-relationship source(s) reported matches, ` +
+        "but SELF, same-device SELF, and UNKNOWN matches are all excluded from the score.";
     } else {
       reason = "VERIFIED_MATCHES_CONTRIBUTE_ZERO_NEW_POSITIONS";
       detail =
@@ -656,6 +730,7 @@ export function buildAdminSimilarityDecisionTrace(
       reason,
       detail,
       excludedSelfSourceCount,
+      excludedEffectiveDeviceSelfSourceCount,
       excludedUnknownSourceCount,
       candidateRejectionDetailAvailable: false,
     };
@@ -688,6 +763,7 @@ export function buildAdminSimilarityDecisionTrace(
     includedMatchedWordCount: includedUnionWordCount,
     finalIncludedUnionWordCount: includedUnionWordCount,
     excludedSelfMatchedWordCount: num(unified.selfExcludedWords),
+    excludedEffectiveDeviceSelfMatchedWordCount: num(unified.deviceSelfExcludedWords),
     excludedUnknownMatchedWordCount: num(unified.unknownExcludedWords),
     archiveOnlyWordCount: num(unified.archiveOnlyWords),
     scholarlyOnlyWordCount: num(unified.liveAcademicOnlyWords),
