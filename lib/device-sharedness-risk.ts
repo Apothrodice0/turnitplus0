@@ -33,7 +33,25 @@
  * unknown (null) fails that policy CLOSED — i.e. the policy blocks the
  * downgrade — because "we could not prove the pair is safe" must never read as
  * "safe".
+ *
+ * The refined Policy D (CONSERVATIVE_COMBINED) decision itself lives in
+ * lib/device-shared-guard-policy.ts — the ONE canonical pure definition shared
+ * VERBATIM by this simulation and by the PRODUCTION Device Passport SELF
+ * scoring guard (lib/device-shared-guard.ts), so the simulated Policy-D column
+ * an admin sees and the scored guard decision can never drift.
  */
+
+import {
+  evaluateConservativeSharedGuard,
+  BRANCH_A_OTHER_PASSPORT_MIN,
+} from "./device-shared-guard-policy";
+
+/**
+ * Re-exported from lib/device-shared-guard-policy.ts (its canonical home) so
+ * existing importers of this module — and tests/device-sharedness-risk.test.mjs
+ * — keep working unchanged.
+ */
+export { BRANCH_A_OTHER_PASSPORT_MIN };
 
 export type SharedDeviceRiskCategory =
   /** No cross-account / anonymous fan-out visible on the Passport (≤1 distinct actor). A real cross-account SELF candidate should essentially never land here; kept for completeness / non-candidate Passports. */
@@ -54,15 +72,6 @@ export const HIGH_FANOUT_ACCOUNT_THRESHOLD = 3;
 
 /** Policy C threshold: a (target, source) account pair seen together on at least this many distinct verified Passports — its own Passport included — is treated as a corroborated pair. */
 export const CORROBORATED_PAIR_PASSPORT_THRESHOLD = 2;
-
-/**
- * Policy D Branch A threshold: the (target, source) pair must have been observed
- * together on at least this many verified Passports OTHER than the candidate's
- * own before a corroborated-pair downgrade is allowed. Stated explicitly as
- * "≥1 other Passport" rather than "≥2 total" so it does not depend on whether
- * the pair happens to also co-occur on the candidate's own Passport.
- */
-export const BRANCH_A_OTHER_PASSPORT_MIN = 1;
 
 export type DeviceSharednessFacts = {
   /**
@@ -279,18 +288,21 @@ export function simulateSharedDevicePolicies(inputs: SharedDevicePolicyInputs): 
     inputs.pairSharedPassportCount >= CORROBORATED_PAIR_PASSPORT_THRESHOLD;
   const multiPassportPair = a && pairCorroborated;
 
-  // Policy D — CONSERVATIVE_COMBINED (refined). Both branches share a strict
-  // fan-out ceiling on the CURRENT Passport: exactly two distinct accounts and
-  // zero anonymous uploads. Each `===` test fails closed on null.
-  const twoAccountsNoAnon =
-    inputs.deviceDistinctAccounts === 2 && inputs.deviceAnonUploads === 0;
-  const branchACrossDeviceCorroboration =
-    twoAccountsNoAnon &&
-    inputs.pairOtherVerifiedPassportCount !== null &&
-    inputs.pairOtherVerifiedPassportCount >= BRANCH_A_OTHER_PASSPORT_MIN;
-  const branchBLoneSharedBrowser =
-    twoAccountsNoAnon && inputs.unorderedDeviceAccountPairCount === 1;
-  const conservativeCombined = a && (branchACrossDeviceCorroboration || branchBLoneSharedBrowser);
+  // Policy D — CONSERVATIVE_COMBINED (refined). The decision over the four
+  // bounded facts is the ONE canonical pure definition in
+  // lib/device-shared-guard-policy.ts, shared VERBATIM with the production
+  // Device Passport SELF scoring guard so this simulated column and the scored
+  // guard decision can never drift. Both branches share a strict fan-out
+  // ceiling on the CURRENT Passport (exactly two distinct accounts, zero
+  // anonymous uploads); each `===` test fails closed on null.
+  const conservativeCombined =
+    a &&
+    evaluateConservativeSharedGuard({
+      deviceDistinctAccounts: inputs.deviceDistinctAccounts,
+      deviceAnonUploads: inputs.deviceAnonUploads,
+      unorderedDeviceAccountPairCount: inputs.unorderedDeviceAccountPairCount,
+      pairOtherVerifiedPassportCount: inputs.pairOtherVerifiedPassportCount,
+    }).passed;
 
   return {
     CURRENT_PREVIEW: a,

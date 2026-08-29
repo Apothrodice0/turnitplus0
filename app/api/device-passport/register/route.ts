@@ -10,6 +10,7 @@ import {
   DEVICE_PASSPORT_ALGORITHM,
   MAX_SPKI_BASE64_LENGTH,
 } from '../../../../lib/device-passport-server';
+import { isDurableActorTrackingAvailable } from '../../../../lib/device-passport-actor-ledger';
 
 /**
  * Device Passport — Phase 2. POST /api/device-passport/register: a browser
@@ -27,6 +28,13 @@ import {
  * last_seen_at is NOT touched here — it is set only on a fully verified
  * attestation (lib/device-passport-server.ts's verifyDevicePassportAttestation),
  * so it reflects genuine use, not arbitrary registration.
+ *
+ * actor_usage_tracking_version (drizzle/0041): a BRAND-NEW passport is born at
+ * 1 only when durable actor tracking is available right now (the dedicated
+ * actor HMAC key is set — isDurableActorTrackingAvailable()); otherwise it is
+ * born at 0 and can never later be treated as complete evidence. An EXISTING
+ * passport reached via ON CONFLICT(id) DO NOTHING keeps its stored tracking
+ * version EXACTLY — re-registration never promotes 0 -> 1.
  */
 
 export const dynamic = 'force-dynamic';
@@ -61,10 +69,16 @@ export async function POST(request: Request) {
     const client = await getReportsDbClient();
     try {
       await client.execute({
-        sql: `INSERT INTO device_passports (id, public_key_spki, algorithm, created_at, last_seen_at, revoked_at, provenance_generation)
-              VALUES (?,?,?,?,NULL,NULL,0)
+        sql: `INSERT INTO device_passports (id, public_key_spki, algorithm, created_at, last_seen_at, revoked_at, provenance_generation, actor_usage_tracking_version)
+              VALUES (?,?,?,?,NULL,NULL,0,?)
               ON CONFLICT(id) DO NOTHING`,
-        args: [derivePassportId(parsed.spkiDer), parsed.spkiDer, DEVICE_PASSPORT_ALGORITHM, Date.now()],
+        args: [
+          derivePassportId(parsed.spkiDer),
+          parsed.spkiDer,
+          DEVICE_PASSPORT_ALGORITHM,
+          Date.now(),
+          isDurableActorTrackingAvailable() ? 1 : 0,
+        ],
       });
     } finally {
       client.close();

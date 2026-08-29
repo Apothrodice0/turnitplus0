@@ -8,7 +8,15 @@ import type { ExternalAcademicEvidence } from "./academic-search/types";
 import { canonicalSha256 } from "./document-identity";
 import { summarizeSubmissionProvenance } from "./submission-provenance";
 import { classifyDeviceSelfMatch, productionCountsRelationship } from "./device-self-scoring-rule";
-import { isDevicePassportSelfScoringEnabled } from "./device-passport-server";
+import {
+  isDevicePassportSelfScoringEnabled,
+  isDevicePassportConservativeSharedGuardEnabled,
+} from "./device-passport-server";
+import {
+  evaluateDeviceSelfSharedGuard,
+  guardNotApplied,
+  type DeviceSelfSharedGuardResult,
+} from "./device-shared-guard";
 
 /**
  * Release-hardening audit finding SIM-02/SIM-03/SIM-04: the ONE server-side
@@ -98,8 +106,24 @@ export type PrimarySimilarityResolution = {
    * same-device exact match with zero independent backing. Bounded — bare
    * representation ids only (already present in historicalSubmissionMatch),
    * never a passport id / account id / email / device identifier.
+   *
+   * When the refined CONSERVATIVE_COMBINED shared-device guard is ENABLED (flag
+   * DEVICE_PASSPORT_CONSERVATIVE_SHARED_GUARD_ENABLED — OFF by default), a
+   * representation that classifyDeviceSelfMatch accepted is included here ONLY
+   * if it also survives the guard (see deviceSelfSharedGuard below); a blocked
+   * candidate is NOT listed, so its matched words stay counted.
    */
   effectiveDeviceSelfRepresentationIds: string[];
+  /**
+   * The refined CONSERVATIVE_COMBINED (Policy D) shared-device guard decision
+   * for this resolution — bounded counts + one short enum, no identity. `null`
+   * whenever DEVICE_PASSPORT_SELF_ENABLED is off (the guard is never consulted).
+   * When the SELF flag is on, `enabled` reflects
+   * DEVICE_PASSPORT_CONSERVATIVE_SHARED_GUARD_ENABLED and `passed` records
+   * whether the SELF downgrade was kept. Consumed only by the ADMIN similarity
+   * decision trace — never persisted, never returned to an ordinary user.
+   */
+  deviceSelfSharedGuard: DeviceSelfSharedGuardResult | null;
 };
 
 /**
@@ -116,6 +140,13 @@ type ReportDeviceProvenanceRow = {
   document_identity_id: string | null;
 };
 
+type ResolvedDeviceSelf = {
+  /** The representation ids scoring treats as an EFFECTIVE SELF — already guard-filtered when the guard is on. */
+  representationIds: string[];
+  /** The refined CONSERVATIVE_COMBINED guard decision, or null when the guard was never consulted (nothing qualified / device-self resolution itself failed). */
+  guard: DeviceSelfSharedGuardResult | null;
+};
+
 /**
  * Resolves — from the report's OWN immutable verified upload Device Passport
  * plus the deterministic per-backing provenance evidence (never from
@@ -126,6 +157,14 @@ type ReportDeviceProvenanceRow = {
  * (condition 3 of the rule) or nothing qualifies. Best-effort: never throws —
  * an evidence-lookup failure means "no downgrade" (a verification / evidence
  * failure must never accidentally trigger SELF), never a scoring failure.
+ *
+ * When DEVICE_PASSPORT_CONSERVATIVE_SHARED_GUARD_ENABLED is on, each candidate
+ * that passed classifyDeviceSelfMatch is additionally run through the refined
+ * CONSERVATIVE_COMBINED (Policy D) shared-device guard
+ * (lib/device-shared-guard.ts, facts derived LIVE from durable provenance —
+ * never telemetry). If the guard blocks, NO representation is downgraded (the
+ * matches stay counted) and the baseline production relationship is untouched.
+ * Any guard failure FAILS CLOSED to "keep counted" — never fails open to SELF.
  */
 async function resolveEffectiveDeviceSelfRepresentationIds(
   client: Client,
@@ -144,10 +183,11 @@ async function resolveEffectiveDeviceSelfRepresentationIds(
      */
     verifiedDevicePassportIdOverride: string | null | undefined;
   },
-): Promise<string[]> {
+): Promise<ResolvedDeviceSelf> {
+  const sharedGuardEnabled = isDevicePassportConservativeSharedGuardEnabled();
   try {
     const matches = params.historicalSubmissionMatch.matches ?? [];
-    if (matches.length === 0) return [];
+    if (matches.length === 0) return { representationIds: [], guard: guardNotApplied(sharedGuardEnabled) };
 
     let reportPassportId: string | null;
     let reportDocumentIdentityId: string | null;
@@ -169,11 +209,11 @@ async function resolveEffectiveDeviceSelfRepresentationIds(
 
     // Condition 3 of the rule: the target report must carry a verified
     // cryptographic Device Passport. No passport -> current scoring, unchanged.
-    if (!reportPassportId) return [];
+    if (!reportPassportId) return { representationIds: [], guard: guardNotApplied(sharedGuardEnabled) };
 
     const reportCanonicalSha256 = safeCanonicalSha256(params.rawText);
     const seen = new Set<string>();
-    const effective: string[] = [];
+    const baselineEffective: string[] = [];
     let processed = 0;
     for (const match of matches) {
       if (seen.has(match.matchedRepresentationId)) continue;
@@ -199,15 +239,36 @@ async function resolveEffectiveDeviceSelfRepresentationIds(
         sameVerifiedDeviceBacking: provenance.sameVerifiedDeviceBacking,
         independentBackingCount: provenance.independentBackingCount,
       });
-      if (classification.isEffectiveDeviceSelf) effective.push(match.matchedRepresentationId);
+      if (classification.isEffectiveDeviceSelf) baselineEffective.push(match.matchedRepresentationId);
     }
-    return effective;
+
+    // Guard OFF (the production default while DEVICE_PASSPORT_SELF_ENABLED is
+    // on): byte-identical to the current Device Passport SELF behaviour.
+    if (!sharedGuardEnabled) {
+      return { representationIds: baselineEffective, guard: guardNotApplied(false) };
+    }
+    // Nothing qualified — the guard has nothing to act on.
+    if (baselineEffective.length === 0) {
+      return { representationIds: [], guard: guardNotApplied(true) };
+    }
+
+    // Guard ON: keep the SELF downgrade only if the refined Policy D over
+    // durable provenance facts is satisfied; otherwise NONE of the candidates
+    // is downgraded (their matches stay counted). Best-effort — a guard failure
+    // is FAIL CLOSED (returns passed:false), never fails open to SELF.
+    const guard = await evaluateDeviceSelfSharedGuard(client, {
+      enabled: true,
+      verifiedDevicePassportId: reportPassportId,
+      reportAccountId: params.accountId,
+      effectiveSelfRepresentationIds: baselineEffective,
+    });
+    return { representationIds: guard.passed ? baselineEffective : [], guard };
   } catch (err) {
     console.error(
       "resolvePrimarySimilaritySummary: same-device SELF evidence resolution failed (non-fatal — no device-self downgrade applied, current scoring is used):",
       err instanceof Error ? err.message : String(err),
     );
-    return [];
+    return { representationIds: [], guard: guardNotApplied(sharedGuardEnabled) };
   }
 }
 
@@ -290,12 +351,13 @@ export async function resolvePrimarySimilaritySummary(
   // snapshot; only decides which counted representations
   // computeUnifiedSimilarity should treat as an EFFECTIVE SELF for the score.
   let effectiveDeviceSelfRepresentationIds: string[] = [];
+  let deviceSelfSharedGuard: DeviceSelfSharedGuardResult | null = null;
   if (
     isDevicePassportSelfScoringEnabled() &&
     historicalSubmissionMatch.status === "MATCHED" &&
     (historicalSubmissionMatch.matches?.length ?? 0) > 0
   ) {
-    effectiveDeviceSelfRepresentationIds = await resolveEffectiveDeviceSelfRepresentationIds(client, {
+    const resolved = await resolveEffectiveDeviceSelfRepresentationIds(client, {
       reportDeviceKey: params.reportDeviceKey,
       reportId: params.reportId,
       accountId: params.accountId,
@@ -303,6 +365,8 @@ export async function resolvePrimarySimilaritySummary(
       historicalSubmissionMatch,
       verifiedDevicePassportIdOverride: params.verifiedDevicePassportId,
     });
+    effectiveDeviceSelfRepresentationIds = resolved.representationIds;
+    deviceSelfSharedGuard = resolved.guard;
   }
 
   // Mirrors the exact try/catch boundary app/api/reports/[id]/route.ts
@@ -320,10 +384,10 @@ export async function resolvePrimarySimilaritySummary(
       historicalSubmissionMatch,
       effectiveDeviceSelfRepresentationIds,
     });
-    return { historicalSubmissionMatch, unifiedSimilarity, primaryScore: unifiedSimilarity.unifiedScore, isUnified: true, corpusSourceMatchingEnabled, corpusGeneration, failed: false, effectiveDeviceSelfRepresentationIds };
+    return { historicalSubmissionMatch, unifiedSimilarity, primaryScore: unifiedSimilarity.unifiedScore, isUnified: true, corpusSourceMatchingEnabled, corpusGeneration, failed: false, effectiveDeviceSelfRepresentationIds, deviceSelfSharedGuard };
   } catch (err) {
     console.error("resolvePrimarySimilaritySummary: computeUnifiedSimilarity failed (genuine overall-computation failure — persisted as a terminal 'failed' state by the caller, see this function's own failed field):", err instanceof Error ? err.message : String(err));
-    return { historicalSubmissionMatch, unifiedSimilarity: undefined, primaryScore: params.archiveScore, isUnified: false, corpusSourceMatchingEnabled, corpusGeneration, failed: true, effectiveDeviceSelfRepresentationIds };
+    return { historicalSubmissionMatch, unifiedSimilarity: undefined, primaryScore: params.archiveScore, isUnified: false, corpusSourceMatchingEnabled, corpusGeneration, failed: true, effectiveDeviceSelfRepresentationIds, deviceSelfSharedGuard };
   }
 }
 

@@ -8,6 +8,12 @@ import {
   verifyDevicePassportAttestation,
   maybeBumpDevicePassportProvenanceGeneration,
 } from '../../../lib/device-passport-server';
+import {
+  resolveActorObservation,
+  readActorUsageTrackingVersion,
+  recordDevicePassportActorUsage,
+  type ActorObservation,
+} from '../../../lib/device-passport-actor-ledger';
 import { captureDocumentIdentityAndFamily } from '../../../lib/document-family';
 import { linkAcademicSearchRunDiagnosticsToReport } from '../../../lib/academic-search-diagnostics-repo';
 import { checkUploadLimit } from '../../../lib/upload-limit';
@@ -164,10 +170,28 @@ async function insertReportWithRoomCheck(params: {
    * resave passes null and this statement never runs.
    */
   verifiedDevicePassportId: string | null;
+  /**
+   * Device Passport actor-usage ledger (drizzle/0041): the resolved actor
+   * observation for this upload — a keyed pseudonym for an authenticated
+   * account, or the anonymous sentinel — or null when it could not be
+   * resolved (an authenticated upload whose actor HMAC key is unavailable).
+   * Only consulted when verifiedDevicePassportId is non-null.
+   *
+   * For a tracking-version-1 passport the actor-usage UPSERT runs INSIDE this
+   * transaction and a null observation / failed UPSERT rolls the whole first
+   * save back — the verified first save and its usage evidence are one atomic
+   * unit, never "save then best-effort ledger then swallow failure". For a
+   * legacy (version-0) passport the observation is positive evidence only,
+   * written best-effort AFTER commit.
+   */
+  actorObservation: ActorObservation | null;
 }): Promise<{ conflict: { mostRecent: string } | null }> {
   for (let attempt = 1; attempt <= MAX_ROOM_INSERT_BUSY_RETRIES; attempt++) {
     const txClient = await getReportsDbClient();
     try {
+      // Legacy (tracking-version-0) passport only: recorded best-effort AFTER
+      // this transaction commits — see the version check below.
+      let legacyActorLedgerWrite: { devicePassportId: string; observation: ActorObservation } | null = null;
       const tx = await txClient.transaction('write');
       try {
         let conflict: { mostRecent: string } | null = null;
@@ -200,9 +224,55 @@ async function insertReportWithRoomCheck(params: {
                     WHERE device_key = ? AND id = ? AND verified_device_passport_id IS NULL`,
               args: [params.verifiedDevicePassportId, params.deviceKey, params.id],
             });
+
+            // Device Passport actor-usage ledger (drizzle/0041). Read the
+            // passport's completeness marker INSIDE this transaction so the
+            // atomicity decision can't race a concurrent register/revoke.
+            const trackingVersion = await readActorUsageTrackingVersion(tx, params.verifiedDevicePassportId);
+            if (trackingVersion >= 1) {
+              // ATOMIC: a version-1 passport's verified first save and its
+              // actor-usage observation succeed together or not at all. A
+              // missing observation (authenticated upload, actor HMAC key
+              // unavailable) or a failed UPSERT throws here → the whole
+              // transaction rolls back → no partially-saved report with
+              // missing usage evidence. We never silently claim completeness.
+              if (!params.actorObservation) {
+                throw new Error(
+                  'device passport actor ledger: a tracking-version-1 passport has no resolvable actor observation for this save — refusing to persist a first save with missing usage evidence',
+                );
+              }
+              await recordDevicePassportActorUsage(tx, {
+                devicePassportId: params.verifiedDevicePassportId,
+                observation: params.actorObservation,
+                observedAt: Date.now(),
+              });
+            } else if (params.actorObservation) {
+              // Legacy (version-0) passport: it stays history-incomplete no
+              // matter what, so its actor observation is POSITIVE EVIDENCE
+              // ONLY — recorded best-effort after commit, never allowed to
+              // fail the save.
+              legacyActorLedgerWrite = {
+                devicePassportId: params.verifiedDevicePassportId,
+                observation: params.actorObservation,
+              };
+            }
           }
         }
         await tx.commit();
+        if (legacyActorLedgerWrite) {
+          try {
+            await recordDevicePassportActorUsage(txClient, {
+              devicePassportId: legacyActorLedgerWrite.devicePassportId,
+              observation: legacyActorLedgerWrite.observation,
+              observedAt: Date.now(),
+            });
+          } catch (err) {
+            console.error(
+              'device passport actor ledger (legacy positive-evidence, non-fatal):',
+              err instanceof Error ? err.message : String(err),
+            );
+          }
+        }
         return { conflict };
       } catch (err) {
         await tx.rollback().catch(() => {});
@@ -592,6 +662,20 @@ export async function POST(request: Request) {
       // own block for why the ordering matters for the Preview same-device
       // SELF rule.)
 
+      // Device Passport actor-usage ledger (drizzle/0041): resolve the durable
+      // actor observation for this upload — a keyed pseudonym for an
+      // authenticated account, or the fixed anonymous sentinel — so
+      // insertReportWithRoomCheck can record it. For a tracking-version-1
+      // passport it is written ATOMICALLY with the first-save insert; for a
+      // legacy passport it is positive evidence written best-effort. null here
+      // (authenticated upload whose actor HMAC key is unavailable) makes a
+      // version-1 first save fail rather than persist without usage evidence.
+      // Nothing in this block feeds any scoring path — the raw account id is
+      // never stored, and no ordinary API exposes actorObservationForLedger.
+      const actorObservationForLedger: ActorObservation | null = verifiedDevicePassportId
+        ? resolveActorObservation(userId)
+        : null;
+
       // Concurrency (production audit fix): the occupancy check and the
       // insert must be one atomic unit relative to any OTHER concurrent
       // request touching the same room slot — otherwise two different new
@@ -607,6 +691,7 @@ export async function POST(request: Request) {
         aiScore: aiScore ?? null, aiTone: aiTone ?? null, aiStatus: aiStatus ?? null,
         payloadJson: payloadJsonToPersist, userId, roomNumberForInsert, roomOwnerId,
         verifiedDevicePassportId,
+        actorObservation: actorObservationForLedger,
       });
 
       if (roomConflict) {

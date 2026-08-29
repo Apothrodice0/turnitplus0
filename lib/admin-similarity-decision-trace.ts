@@ -4,6 +4,7 @@ import type {
   ReportHistoricalSubmissionMatch,
 } from "./report-types";
 import type { UnifiedEvidenceContribution, UnifiedSimilarityResult } from "./unified-similarity";
+import type { ConservativeSharedGuardReason } from "./device-shared-guard-policy";
 
 /**
  * ADMIN-ONLY internal explanation of WHY a report's final TurnitPlus
@@ -180,6 +181,82 @@ export type DecisionTraceDeviceShadow = {
 };
 
 // ---------------------------------------------------------------------------
+// refined CONSERVATIVE_COMBINED (Policy D) shared-device SCORING guard
+// (optional gate layered on the Device Passport SELF rule — bounded, no identity)
+// ---------------------------------------------------------------------------
+
+/** What lib/report-primary-similarity.ts's resolvePrimarySimilaritySummary hands the admin trace (a DeviceSelfSharedGuardResult). */
+export type DecisionTraceDeviceSelfSharedGuardInput = {
+  enabled: boolean;
+  passed: boolean;
+  reason: ConservativeSharedGuardReason;
+  /** The report's own Passport's durable actor-usage completeness — a boolean, never the version number. */
+  durableActorHistoryComplete: boolean | null;
+  deviceDistinctAccounts: number | null;
+  deviceAnonUploads: number | null;
+  unorderedDeviceAccountPairCount: number | null;
+  pairOtherVerifiedPassportCount: number | null;
+};
+
+export type DecisionTraceDeviceSelfSharedGuard = {
+  /** Whether DEVICE_PASSPORT_CONSERVATIVE_SHARED_GUARD_ENABLED was on when this resolution ran. */
+  sharedGuardEnabled: boolean;
+  /**
+   * true  => the Device Passport SELF downgrade was KEPT (guard satisfied, or
+   *          guard off, or a same-account-only candidate the guard never acts on).
+   * false => the guard BLOCKED the downgrade — the baseline production
+   *          relationship is unchanged and the match STAYS COUNTED (it did not
+   *          become SELF).
+   */
+  sharedGuardPassed: boolean;
+  sharedGuardReason: ConservativeSharedGuardReason;
+  /**
+   * The report's own verified Passport's durable actor-usage completeness — a
+   * BOOLEAN only, NEVER the tracking-version number:
+   *   true  => tracked since birth (actor_usage_tracking_version >= 1).
+   *   false => the Passport exists but its actor history is incomplete (version 0).
+   *   null  => not evaluated / unavailable.
+   * No Passport id, account id, or actor key accompanies it.
+   */
+  durableActorHistoryComplete: boolean | null;
+  /** The four bounded facts the refined Policy D decided over — no Passport id, no account id, no key. */
+  deviceDistinctAccounts: number | null;
+  deviceAnonUploads: number | null;
+  unorderedDeviceAccountPairCount: number | null;
+  pairOtherVerifiedPassportCount: number | null;
+};
+
+const SHARED_GUARD_REASONS: readonly ConservativeSharedGuardReason[] = [
+  "PAIR_OTHER_PASSPORT",
+  "LOW_RISK_SINGLE_PAIR",
+  "BLOCKED_ACCOUNT_FANOUT",
+  "BLOCKED_ANONYMOUS_USE",
+  "BLOCKED_MULTIPLE_PAIRS",
+  "BLOCKED_INCOMPLETE_ACTOR_HISTORY",
+  "BLOCKED_INSUFFICIENT_EVIDENCE",
+  "NOT_APPLIED",
+];
+
+function projectDeviceSelfSharedGuard(
+  input: DecisionTraceDeviceSelfSharedGuardInput,
+): DecisionTraceDeviceSelfSharedGuard {
+  const intOrNull = (value: unknown): number | null =>
+    typeof value === "number" && Number.isFinite(value) ? value : null;
+  const boolOrNull = (value: unknown): boolean | null =>
+    value === true ? true : value === false ? false : null;
+  return {
+    sharedGuardEnabled: input.enabled === true,
+    sharedGuardPassed: input.passed === true,
+    sharedGuardReason: SHARED_GUARD_REASONS.includes(input.reason) ? input.reason : "NOT_APPLIED",
+    durableActorHistoryComplete: boolOrNull(input.durableActorHistoryComplete),
+    deviceDistinctAccounts: intOrNull(input.deviceDistinctAccounts),
+    deviceAnonUploads: intOrNull(input.deviceAnonUploads),
+    unorderedDeviceAccountPairCount: intOrNull(input.unorderedDeviceAccountPairCount),
+    pairOtherVerifiedPassportCount: intOrNull(input.pairOtherVerifiedPassportCount),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // output shape
 // ---------------------------------------------------------------------------
 
@@ -305,6 +382,17 @@ export type AdminSimilarityDecisionTrace = {
 
   /** Literal — Phase 4 device-provenance is shadow telemetry only. */
   scoreUnchangedByDeviceShadow: true;
+
+  /**
+   * The refined CONSERVATIVE_COMBINED (Policy D) shared-device SCORING guard
+   * decision for this resolution — bounded counts + one short enum + one
+   * boolean (durableActorHistoryComplete), no identity. `null` whenever
+   * DEVICE_PASSPORT_SELF_ENABLED is off (the guard is never consulted). When
+   * present, `sharedGuardEnabled` is
+   * DEVICE_PASSPORT_CONSERVATIVE_SHARED_GUARD_ENABLED and `sharedGuardPassed`
+   * records whether the Device Passport SELF downgrade survived it.
+   */
+  deviceSelfSharedGuard: DecisionTraceDeviceSelfSharedGuard | null;
 };
 
 // ---------------------------------------------------------------------------
@@ -332,6 +420,13 @@ export type BuildAdminSimilarityDecisionTraceInput = {
   deviceShadow?: DecisionTraceDeviceShadowInput | null;
   /** Whether the report was uploaded with a verified device passport — read as a plain boolean by the admin data layer, never the identifier itself. */
   hasVerifiedUploadPassport?: boolean;
+  /**
+   * The refined CONSERVATIVE_COMBINED shared-device guard decision from
+   * lib/report-primary-similarity.ts's resolvePrimarySimilaritySummary
+   * (resolution.deviceSelfSharedGuard). Absent/null => DEVICE_PASSPORT_SELF_ENABLED
+   * was off (the guard was never consulted).
+   */
+  deviceSelfSharedGuard?: DecisionTraceDeviceSelfSharedGuardInput | null;
 };
 
 // ---------------------------------------------------------------------------
@@ -436,6 +531,9 @@ function emptyTrace(
   const deviceShadow = input.deviceShadow
     ? projectDeviceShadow(input.deviceShadow, Boolean(input.hasVerifiedUploadPassport))
     : null;
+  const deviceSelfSharedGuard = input.deviceSelfSharedGuard
+    ? projectDeviceSelfSharedGuard(input.deviceSelfSharedGuard)
+    : null;
   return {
     schemaVersion: ADMIN_SIMILARITY_DECISION_TRACE_SCHEMA_VERSION,
     resolvable: false,
@@ -460,6 +558,7 @@ function emptyTrace(
     fullCoverageExplanation: null,
     deviceShadow,
     scoreUnchangedByDeviceShadow: true,
+    deviceSelfSharedGuard,
   };
 }
 
@@ -751,6 +850,9 @@ export function buildAdminSimilarityDecisionTrace(
   const deviceShadow = input.deviceShadow
     ? projectDeviceShadow(input.deviceShadow, Boolean(input.hasVerifiedUploadPassport))
     : null;
+  const deviceSelfSharedGuard = input.deviceSelfSharedGuard
+    ? projectDeviceSelfSharedGuard(input.deviceSelfSharedGuard)
+    : null;
 
   return {
     schemaVersion: ADMIN_SIMILARITY_DECISION_TRACE_SCHEMA_VERSION,
@@ -783,6 +885,7 @@ export function buildAdminSimilarityDecisionTrace(
     fullCoverageExplanation,
     deviceShadow,
     scoreUnchangedByDeviceShadow: true,
+    deviceSelfSharedGuard,
   };
 }
 

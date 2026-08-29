@@ -648,6 +648,10 @@ export async function getReportSimilarityDecisionTrace(
     deviceEvidenceByRepresentation,
     deviceShadow,
     hasVerifiedUploadPassport,
+    // The refined CONSERVATIVE_COMBINED shared-device guard decision from the
+    // SAME resolvePrimarySimilaritySummary call above — bounded counts + one
+    // enum, no identity. null when DEVICE_PASSPORT_SELF_ENABLED is off.
+    deviceSelfSharedGuard: resolution?.deviceSelfSharedGuard ?? null,
   });
 }
 

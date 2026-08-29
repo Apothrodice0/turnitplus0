@@ -1222,9 +1222,45 @@ export const device_passports = sqliteTable(
     last_seen_at: integer("last_seen_at"),
     revoked_at: integer("revoked_at"),
     provenance_generation: integer("provenance_generation").notNull().default(0),
+    // drizzle/0041 — durable actor-usage completeness marker. 0 (every
+    // existing row, the default): historical actor usage is NOT proven
+    // complete. 1: durably actor-tracked since creation. NEVER promoted
+    // 0 -> 1 after the fact — only a genuinely new passport registered while
+    // the dedicated actor HMAC key is available may be born at 1. See
+    // lib/device-passport-actor-ledger.ts and device_passport_actor_usage.
+    actor_usage_tracking_version: integer("actor_usage_tracking_version").notNull().default(0),
   },
   (table) => [
     index("idx_device_passports_last_seen").on(table.last_seen_at),
+  ],
+);
+
+// drizzle/0041 — the durable, APPEND-ONLY Device Passport actor-usage ledger.
+// One row per (passport, actor-key-version, actor-key) triple ever observed
+// uploading under a verified passport. actor_key is a stable keyed pseudonym
+// (HMAC-SHA256 over a domain-separated account id) or a fixed anonymous
+// sentinel — NEVER a raw account id. Rows are never deleted and
+// observation_count is never decremented; a repeat observation preserves
+// first_observed_at, advances last_observed_at, increments observation_count.
+// device_passport_id is ON DELETE RESTRICT so a passport can never be removed
+// while any usage observation references it. NOTHING in any scoring path reads
+// this yet. See lib/device-passport-actor-ledger.ts and drizzle/0041.
+export const device_passport_actor_usage = sqliteTable(
+  "device_passport_actor_usage",
+  {
+    device_passport_id: text("device_passport_id")
+      .notNull()
+      .references(() => device_passports.id, { onDelete: "restrict" }),
+    actor_key_version: integer("actor_key_version").notNull(),
+    actor_key: text("actor_key").notNull(),
+    is_anonymous: integer("is_anonymous").notNull().default(0),
+    first_observed_at: integer("first_observed_at").notNull(),
+    last_observed_at: integer("last_observed_at").notNull(),
+    observation_count: integer("observation_count").notNull().default(1),
+  },
+  (table) => [
+    primaryKey({ columns: [table.device_passport_id, table.actor_key_version, table.actor_key] }),
+    index("idx_device_passport_actor_usage_passport").on(table.device_passport_id),
   ],
 );
 

@@ -45,6 +45,29 @@ export function isDevicePassportSelfScoringEnabled(): boolean {
   return process.env.DEVICE_PASSPORT_SELF_ENABLED === "true";
 }
 
+/**
+ * Preview-gated refined CONSERVATIVE_COMBINED (Policy D) SHARED-DEVICE SCORING
+ * GUARD — an OPTIONAL, narrower gate LAYERED ON TOP of the same-device SELF
+ * rule above. Independent of isDevicePassportSelfScoringEnabled: this flag does
+ * nothing at all unless DEVICE_PASSPORT_SELF_ENABLED is also "true".
+ *
+ *   SELF flag OFF                 -> baseline scoring, unchanged, regardless of this flag.
+ *   SELF flag ON  + guard OFF     -> byte-identical current Device Passport SELF behaviour.
+ *   SELF flag ON  + guard ON      -> a same-device SELF downgrade is KEPT only when the
+ *                                    refined Policy D (lib/device-shared-guard-policy.ts,
+ *                                    resolved live from durable provenance by
+ *                                    lib/device-shared-guard.ts) is satisfied; otherwise
+ *                                    the corpus / prior-submission match STAYS COUNTED.
+ *
+ * Read fresh on every call (no caching) so tests can toggle it. Exact string
+ * "true" only; unset / anything else = OFF (the production default). Turning it
+ * on can only ever RAISE a score (keep a previously-excluded source), never
+ * lower one, and never changes what a challenge verification accepts.
+ */
+export function isDevicePassportConservativeSharedGuardEnabled(): boolean {
+  return process.env.DEVICE_PASSPORT_CONSERVATIVE_SHARED_GUARD_ENABLED === "true";
+}
+
 export const DEVICE_PASSPORT_ALGORITHM = "ECDSA-P256-SHA256";
 /** The ONE canonical signed-message version prefix. Bump only on a real format change. */
 export const DEVICE_PASSPORT_SIGNED_MESSAGE_VERSION = "TP_DEVICE_PASSPORT_V1";

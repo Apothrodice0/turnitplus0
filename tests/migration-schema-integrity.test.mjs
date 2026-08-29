@@ -450,4 +450,105 @@ function applyMigrationsExcluding(db, dir, excludeFiles) {
   console.log('[libsql] Device Passport foundation: tables/columns land; RESTRICT + CASCADE FK actions enforced');
 }
 
+// --- Section G: Device Passport actor-usage ledger (drizzle/0041) — fresh
+// migrate proof on both engines that the append-only device_passport_actor_usage
+// table (composite PK + RESTRICT FK + per-passport index) and the additive
+// device_passports.actor_usage_tracking_version column (NOT NULL DEFAULT 0,
+// backfilling every existing passport to 0) all land, and that device_passports
+// is only ADDED to, never restructured. ---
+{
+  const dbPath = path.join(repo, 'test_migration_integrity_actor_ledger_sqlite.db');
+  cleanupSqliteFile(dbPath);
+  const db = new Database(dbPath);
+  db.pragma('foreign_keys = ON');
+  applyMigrations(db, drizzleDir);
+
+  const tables = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((r) => r.name));
+  assert(tables.has('device_passport_actor_usage'), '[sqlite] 0041 must create device_passport_actor_usage');
+
+  const cols = db.prepare(`PRAGMA table_info('device_passport_actor_usage')`).all();
+  assert.deepEqual(
+    cols.map((c) => c.name).sort(),
+    ['actor_key', 'actor_key_version', 'device_passport_id', 'first_observed_at', 'is_anonymous', 'last_observed_at', 'observation_count'].sort(),
+    '[sqlite] device_passport_actor_usage has exactly the drizzle/0041 columns',
+  );
+  const pk = cols.filter((c) => c.pk > 0).sort((a, b) => a.pk - b.pk).map((c) => c.name);
+  assert.deepEqual(pk, ['device_passport_id', 'actor_key_version', 'actor_key'], '[sqlite] composite primary key (passport, key version, key)');
+
+  const passportCols = new Set(db.prepare(`PRAGMA table_info('device_passports')`).all().map((r) => r.name));
+  assert(passportCols.has('actor_usage_tracking_version'), '[sqlite] 0041 must add device_passports.actor_usage_tracking_version');
+  // additive only — the pre-0041 device_passports columns all still exist
+  for (const stable of ['id', 'public_key_spki', 'algorithm', 'created_at', 'last_seen_at', 'revoked_at', 'provenance_generation']) {
+    assert(passportCols.has(stable), `[sqlite] device_passports.${stable} must be preserved by 0041`);
+  }
+
+  // Every existing passport row backfills to actor_usage_tracking_version 0.
+  db.prepare(`INSERT INTO device_passports (id, public_key_spki, created_at) VALUES (?,?,?)`).run('al-p1', Buffer.from('spki'), Date.now());
+  assert.equal(
+    db.prepare(`SELECT actor_usage_tracking_version FROM device_passports WHERE id = ?`).get('al-p1').actor_usage_tracking_version,
+    0,
+    '[sqlite] a passport with no explicit tracking version rests at 0 (history not proven complete)',
+  );
+
+  // FK is ON DELETE RESTRICT, and observation_count defaults to 1.
+  const fk = db.prepare(`PRAGMA foreign_key_list('device_passport_actor_usage')`).all().find((r) => r.from === 'device_passport_id');
+  assert.equal(fk.table, 'device_passports');
+  assert.equal(fk.on_delete, 'RESTRICT', '[sqlite] device_passport_id -> device_passports must be ON DELETE RESTRICT');
+  db.prepare(`INSERT INTO device_passport_actor_usage (device_passport_id, actor_key_version, actor_key, first_observed_at, last_observed_at) VALUES (?,?,?,?,?)`)
+    .run('al-p1', 1, '__anonymous__', 1000, 1000);
+  assert.equal(
+    db.prepare(`SELECT observation_count, is_anonymous FROM device_passport_actor_usage WHERE device_passport_id = ?`).get('al-p1').observation_count,
+    1,
+    '[sqlite] observation_count defaults to 1',
+  );
+  assert.throws(
+    () => db.prepare(`DELETE FROM device_passports WHERE id = ?`).run('al-p1'),
+    /FOREIGN KEY constraint failed/,
+    '[sqlite] a passport referenced by a usage observation cannot be removed (RESTRICT)',
+  );
+
+  db.close();
+  cleanupSqliteFile(dbPath);
+  console.log('[sqlite] Device Passport actor-usage ledger: table + column land, composite PK, RESTRICT FK, defaults, no device_passports restructure');
+}
+
+{
+  const dbFile = path.join(repo, 'test_migration_integrity_actor_ledger_libsql.db');
+  cleanupSqliteFile(dbFile);
+  const client = createClient({ url: `file:${dbFile}` });
+  await applyMigrationsLibsql(client, drizzleDir);
+  await client.execute('PRAGMA foreign_keys = ON');
+
+  const tableRows = await client.execute("SELECT name FROM sqlite_master WHERE type='table'");
+  assert(new Set(tableRows.rows.map((r) => String(r.name))).has('device_passport_actor_usage'), '[libsql] 0041 must create device_passport_actor_usage');
+
+  const passportInfo = await client.execute("PRAGMA table_info('device_passports')");
+  assert(passportInfo.rows.some((r) => String(r.name) === 'actor_usage_tracking_version'), '[libsql] 0041 must add device_passports.actor_usage_tracking_version');
+
+  // Append-only UPSERT semantics behaviourally: repeat triple preserves
+  // first_observed_at, advances last_observed_at, increments observation_count.
+  await client.execute({ sql: 'INSERT INTO device_passports (id, public_key_spki, created_at, actor_usage_tracking_version) VALUES (?,?,?,1)', args: ['al-lp1', Buffer.from('k'), Date.now()] });
+  const upsert = `INSERT INTO device_passport_actor_usage (device_passport_id, actor_key_version, actor_key, is_anonymous, first_observed_at, last_observed_at, observation_count)
+                  VALUES (?,?,?,?,?,?,1)
+                  ON CONFLICT (device_passport_id, actor_key_version, actor_key) DO UPDATE SET
+                    last_observed_at = max(device_passport_actor_usage.last_observed_at, excluded.last_observed_at),
+                    observation_count = device_passport_actor_usage.observation_count + 1`;
+  await client.execute({ sql: upsert, args: ['al-lp1', 1, 'actor-x', 0, 100, 100] });
+  await client.execute({ sql: upsert, args: ['al-lp1', 1, 'actor-x', 0, 250, 250] });
+  const row = (await client.execute({ sql: 'SELECT * FROM device_passport_actor_usage WHERE device_passport_id = ? AND actor_key = ?', args: ['al-lp1', 'actor-x'] })).rows[0];
+  assert.equal(Number(row.first_observed_at), 100, '[libsql] first_observed_at preserved across the repeat observation');
+  assert.equal(Number(row.last_observed_at), 250, '[libsql] last_observed_at advanced');
+  assert.equal(Number(row.observation_count), 2, '[libsql] observation_count incremented, no duplicate row');
+
+  await assert.rejects(
+    () => client.execute({ sql: 'DELETE FROM device_passports WHERE id = ?', args: ['al-lp1'] }),
+    /FOREIGN KEY constraint failed/,
+    '[libsql] RESTRICT blocks removing a passport with a usage observation',
+  );
+
+  client.close();
+  cleanupSqliteFile(dbFile);
+  console.log('[libsql] Device Passport actor-usage ledger: table/column land; append-only UPSERT + RESTRICT enforced');
+}
+
 console.log('Migration schema integrity tests passed');
