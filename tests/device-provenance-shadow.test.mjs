@@ -292,7 +292,7 @@ test("2. same verified device backing + EXACT + zero independent backing -> prop
 // SCENARIO 3 — same passport + near-identical only (STRONG_TEXT_MATCH)
 // ---------------------------------------------------------------------------
 
-test("3. same verified device backing but only a STRONG_TEXT_MATCH -> observed, no exact-document downgrade", async () => {
+test("3. same verified device backing + STRONG_TEXT_MATCH + zero independent backing -> proposes SELF / SAME_DEVICE_STRONG_TEXT_DOCUMENT (mirrors the score-path rule — shared classifier, no drift)", async () => {
   const deviceKey = uniq("dk"), reportId = uniq("r"), accountId = uniq("acc"), passportId = uniq("passport");
   const rep = await makeRepresentation();
   await seedReport({ deviceKey, reportId, accountId, passportId });
@@ -300,12 +300,31 @@ test("3. same verified device backing but only a STRONG_TEXT_MATCH -> observed, 
 
   const row = await run(deviceKey, reportId, accountId, productionMulti([{ representationId: rep.id, relationshipType: "PRIOR_SUBMISSION", matchType: "STRONG_TEXT_MATCH" }]));
   const ev = evidenceOf(row);
-  assert.equal(ev.candidateExactCanonicalMatch, false);
-  assert.equal(ev.wouldDowngrade, false);
-  assert.equal(ev.deviceSelfCandidateCount, 0);
-  assert.equal(row.proposed_relationship, null, "no proposed change");
-  assert.equal(row.agreement, "AGREE");
+  assert.equal(ev.candidateExactCanonicalMatch, false, "still not an exact canonical match");
+  assert.equal(ev.exactSameDeviceMatchCount, 0, "the EXACT-only aggregate is unchanged by a strong match");
+  assert.equal(ev.wouldDowngrade, true, "a same-device STRONG_TEXT_MATCH now fires the rule");
+  assert.equal(ev.deviceSelfCandidateCount, 1);
+  assert.equal(ev.reason, "SAME_DEVICE_STRONG_TEXT_DOCUMENT");
+  assert.equal(row.proposed_relationship, "SELF");
+  assert.equal(row.agreement, "DISAGREE_DEVICE_SELF");
   assert.equal(ev.candidateSameVerifiedDeviceBacking, true, "the same-device observation is still recorded");
+  assert.equal(ev.candidateReason, "SAME_DEVICE_STRONG_TEXT_DOCUMENT");
+});
+
+test("3b. same verified device + STRONG_TEXT_MATCH BUT an independent backing -> observed, no downgrade (SAME_DEVICE_NOT_EXACT)", async () => {
+  const deviceKey = uniq("dk"), reportId = uniq("r"), accountId = uniq("acc"), passportId = uniq("passport");
+  const rep = await makeRepresentation();
+  await seedReport({ deviceKey, reportId, accountId, passportId });
+  await addAdmissionBacking(rep.id, { sourceAccountId: uniq("srcacc"), passportId });
+  await addSubmissionRefBacking(rep.id, uniq("otheracc")); // independent backing
+
+  const row = await run(deviceKey, reportId, accountId, productionMulti([{ representationId: rep.id, relationshipType: "PRIOR_SUBMISSION", matchType: "STRONG_TEXT_MATCH" }]));
+  const ev = evidenceOf(row);
+  assert.equal(ev.wouldDowngrade, false, "an independent backing still blocks the strong-match SELF proposal");
+  assert.equal(ev.deviceSelfCandidateCount, 0);
+  assert.equal(row.proposed_relationship, null);
+  assert.equal(row.agreement, "AGREE");
+  assert.equal(ev.candidateSameVerifiedDeviceBacking, true);
   assert.equal(ev.candidateReason, "SAME_DEVICE_NOT_EXACT");
 });
 

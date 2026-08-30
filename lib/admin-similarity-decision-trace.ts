@@ -170,9 +170,9 @@ export type DecisionTraceDeviceShadow = {
   deviceSubmissionCount: number;
   deviceAnonUploads: number;
   deviceSharedAcrossAccounts: boolean;
-  /** evidence.reason — e.g. "SAME_DEVICE_EXACT_DOCUMENT" | "NO_DEVICE_DOWNGRADE" | "NO_MATCH_TO_EVALUATE". */
+  /** evidence.reason — e.g. "SAME_DEVICE_EXACT_DOCUMENT" | "SAME_DEVICE_STRONG_TEXT_DOCUMENT" | "NO_DEVICE_DOWNGRADE" | "NO_MATCH_TO_EVALUATE". */
   reason: string | null;
-  /** evidence.candidateReason for the strongest candidate — e.g. "SAME_DEVICE_EXACT_DOCUMENT". */
+  /** evidence.candidateReason for the strongest candidate — e.g. "SAME_DEVICE_EXACT_DOCUMENT" | "SAME_DEVICE_STRONG_TEXT_DOCUMENT". */
   candidateReason: string | null;
   /** The shadow's proposal for the historical relationship: "SELF" only when wouldDowngrade. */
   shadowProposal: "SELF" | "NONE";
@@ -284,11 +284,12 @@ export type DecisionTraceSource = {
    */
   effectiveScoringRelationship: DecisionTraceRelationship;
   /**
-   * Why effectiveScoringRelationship differs from relationshipType — currently
-   * only "SAME_DEVICE_EXACT_DOCUMENT". null when they are identical (no
-   * downgrade was applied).
+   * Why effectiveScoringRelationship differs from relationshipType:
+   * "SAME_DEVICE_EXACT_DOCUMENT" for a byte-identical re-upload,
+   * "SAME_DEVICE_STRONG_TEXT_DOCUMENT" for a near-identical one. null when they
+   * are identical (no downgrade was applied).
    */
-  effectiveScoringReason: "SAME_DEVICE_EXACT_DOCUMENT" | null;
+  effectiveScoringReason: "SAME_DEVICE_EXACT_DOCUMENT" | "SAME_DEVICE_STRONG_TEXT_DOCUMENT" | null;
   matchType: DecisionTraceMatchType;
   containment: number | null;
   historicalSubmissionCount: number | null;
@@ -522,7 +523,7 @@ type ReconstructedSource = {
   relationshipType: DecisionTraceRelationship;
   /** "SELF" when the Preview-gated same-device rule downgraded this source; else equal to relationshipType. */
   effectiveScoringRelationship: DecisionTraceRelationship;
-  effectiveScoringReason: "SAME_DEVICE_EXACT_DOCUMENT" | null;
+  effectiveScoringReason: "SAME_DEVICE_EXACT_DOCUMENT" | "SAME_DEVICE_STRONG_TEXT_DOCUMENT" | null;
   /** the source's own clamped matched-position footprint. */
   positions: Set<number>;
   /** "included" | "excluded_self" | "excluded_unknown" | "excluded_effective_device_self" — from contributions[].evidenceStatus (archive always "included"). */
@@ -667,7 +668,7 @@ export function buildAdminSimilarityDecisionTrace(
       const isDowngradedToSelf = isPrior && contribution.effectiveScoringRelationship === "SELF";
       const effectiveScoringRelationship: DecisionTraceRelationship =
         isDowngradedToSelf ? "SELF" : relationshipType;
-      const effectiveScoringReason: "SAME_DEVICE_EXACT_DOCUMENT" | null =
+      const effectiveScoringReason: "SAME_DEVICE_EXACT_DOCUMENT" | "SAME_DEVICE_STRONG_TEXT_DOCUMENT" | null =
         isDowngradedToSelf ? contribution.effectiveScoringReason ?? "SAME_DEVICE_EXACT_DOCUMENT" : null;
       index = reconstructed.length;
       groupIndex.set(groupKey, index);

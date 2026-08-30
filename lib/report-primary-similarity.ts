@@ -7,7 +7,7 @@ import type { ReportHistoricalSubmissionMatch, SimilarityReport } from "./report
 import type { ExternalAcademicEvidence } from "./academic-search/types";
 import { canonicalSha256 } from "./document-identity";
 import { summarizeSubmissionProvenance } from "./submission-provenance";
-import { classifyDeviceSelfMatch, productionCountsRelationship } from "./device-self-scoring-rule";
+import { classifyDeviceSelfMatch, productionCountsRelationship, isDeviceSelfEligibleMatchType } from "./device-self-scoring-rule";
 import {
   isDevicePassportSelfScoringEnabled,
   isDevicePassportConservativeSharedGuardEnabled,
@@ -103,7 +103,8 @@ export type PrimarySimilarityResolution = {
    * keeps its baseline TURNITPLUS_CORPUS_SOURCE / PRIOR_SUBMISSION). Always
    * an empty array when the flag is off, when the report has no verified
    * upload Device Passport, or when no counted historical source is a
-   * same-device exact match with zero independent backing. Bounded — bare
+   * same-device EXACT_CANONICAL_MATCH or STRONG_TEXT_MATCH with zero
+   * independent backing. Bounded — bare
    * representation ids only (already present in historicalSubmissionMatch),
    * never a passport id / account id / email / device identifier.
    *
@@ -159,7 +160,9 @@ type ResolvedDeviceSelf = {
  * historical_match_shadow_evaluations, which is written AFTER the response) —
  * the set of matched representation ids that the Preview-gated same-device
  * SELF rule (lib/device-self-scoring-rule.ts) classifies as an EFFECTIVE SELF
- * for scoring. Returns [] whenever the report has no verified passport
+ * for scoring — a production-counted EXACT_CANONICAL_MATCH or STRONG_TEXT_MATCH
+ * backed only by the report's own verified passport with zero independent
+ * backing. Returns [] whenever the report has no verified passport
  * (condition 3 of the rule) or nothing qualifies. Best-effort: never throws —
  * an evidence-lookup failure means "no downgrade" (a verification / evidence
  * failure must never accidentally trigger SELF), never a scoring failure.
@@ -229,10 +232,11 @@ async function resolveEffectiveDeviceSelfRepresentationIds(
       if (processed >= MAX_DEVICE_SELF_REPRESENTATIONS) break;
       processed += 1;
 
-      // Cheap pre-filter — only a production-counted, exact canonical match
-      // can ever qualify, so skip the provenance query for anything else.
+      // Cheap pre-filter — only a production-counted source whose matchType is
+      // an EXACT_CANONICAL_MATCH or a STRONG_TEXT_MATCH can ever qualify, so
+      // skip the provenance query for anything else.
       if (!productionCountsRelationship(match.relationshipType)) continue;
-      if (match.matchType !== "EXACT_CANONICAL_MATCH") continue;
+      if (!isDeviceSelfEligibleMatchType(match.matchType)) continue;
 
       const provenance = await summarizeSubmissionProvenance(client, match.matchedRepresentationId, {
         accountId: params.accountId,
@@ -267,9 +271,9 @@ async function resolveEffectiveDeviceSelfRepresentationIds(
     // every representation the base classifier accepted stays an effective SELF
     // regardless of guard.passed, the fan-out counts, or a guard-resolution
     // failure. The base rule's own conservative gates (production-counted
-    // relationship + EXACT_CANONICAL_MATCH + sameVerifiedDeviceBacking + zero
-    // independent backing) are the only thing that can keep a representation
-    // out of `baselineEffective`.
+    // relationship + EXACT_CANONICAL_MATCH/STRONG_TEXT_MATCH +
+    // sameVerifiedDeviceBacking + zero independent backing) are the only thing
+    // that can keep a representation out of `baselineEffective`.
     const guard = await evaluateDeviceSelfSharedGuard(client, {
       enabled: true,
       verifiedDevicePassportId: reportPassportId,

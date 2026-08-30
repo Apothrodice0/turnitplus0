@@ -24,7 +24,9 @@ import { getReportSimilarityDecisionTrace } from "../lib/developer-repo.ts";
 import {
   classifyDeviceSelfMatch,
   productionCountsRelationship,
+  isDeviceSelfEligibleMatchType,
   DEVICE_SELF_SCORING_REASON,
+  DEVICE_SELF_STRONG_TEXT_SCORING_REASON,
 } from "../lib/device-self-scoring-rule.ts";
 import {
   derivePassportId,
@@ -45,9 +47,12 @@ import { resetRateForTest, resetReadRateForTest } from "../lib/rate-limit.ts";
  *   A  proven same-device corpus-only fixture: flag OFF -> 100, flag ON -> 0
  *   B  a different verified device: still counts
  *   C  no verified passport on the target report: still counts
- *   D  same device but not exact canonical: still counts
+ *   D  same device + STRONG_TEXT_MATCH: NOW an effective SELF too (distinct
+ *      reason SAME_DEVICE_STRONG_TEXT_DOCUMENT); a different device / an
+ *      independent backing still block it
  *   E  same device exact BUT independent backing exists: still counts
  *   F  independent archive / scholarly positions survive the SELF exclusion
+ *      (exact AND strong)
  *   G  existing same-account SELF behaviour is unchanged
  *   H  flag OFF preserves the current unified similarity output byte-for-byte
  */
@@ -123,6 +128,10 @@ const TEXT_POOL = [
   "Ecologists conducting a whole-lake nutrient-addition experiment tracked a rapid shift in the phytoplankton assemblage from diatom dominance toward filamentous cyanobacteria within a single growing season, with zooplankton grazing pressure appearing insufficient to counteract the change once water-column stratification set in for the summer.",
   "Geneticists sequencing a panel of isolated alpine plant populations along a latitudinal transect detected a clear signature of postglacial northward expansion, with southern populations retaining substantially more allelic diversity than the recently colonized northern range edge across the majority of the neutral markers surveyed.",
   "Atmospheric chemists operating a mountaintop monitoring station recorded episodic enhancements in fine particulate matter that back-trajectory analysis linked to agricultural burning several hundred kilometres upwind, with the enhancement events clustering in a narrow seasonal window each year that coincided with the regional post-harvest period.",
+  "Mycologists surveying a temperate hardwood forest across a soil-moisture gradient catalogued ectomycorrhizal fruiting bodies over five autumns, finding sporocarp diversity peaked on moderately drained mid-slope plots while both the wettest hollows and the driest ridgetops supported markedly fewer species, a pattern the team links to fine-root density rather than canopy composition alone.",
+  "Oceanographers deploying a moored profiler on the continental slope captured a train of nonlinear internal waves each generated on the ebb tide at a submarine ridge, with the leading wave of each packet displacing the thermocline by tens of metres and driving brief but intense near-bottom currents recorded by the lowest instrument on the mooring line.",
+  "Demographers reconstructing parish registers from three neighbouring valleys traced a century of marriage patterns, finding the age gap between spouses narrowed steadily as seasonal labour migration drew younger men away from the home villages, while remarriage rates for widows fell over the same interval across all three valleys studied.",
+  "Materials scientists cycling a prototype solid-state battery cell through several hundred charge-discharge cycles tracked the growth of interfacial resistance with impedance spectroscopy, attributing most of the capacity fade to a slowly thickening reaction layer at one electrode rather than to loss of active material in the bulk of the cell.",
 ];
 let textCursor = 0;
 const takeText = () => {
@@ -250,15 +259,37 @@ test("pure: productionCountsRelationship — only PRIOR_SUBMISSION and TURNITPLU
   assert.equal(productionCountsRelationship(undefined), false);
 });
 
-test("pure: classifyDeviceSelfMatch fires only when ALL four conditions hold", () => {
+test("pure: classifyDeviceSelfMatch fires only when ALL four conditions hold (matchType: EXACT or STRONG)", () => {
   const base = { relationshipType: "TURNITPLUS_CORPUS_SOURCE", matchType: "EXACT_CANONICAL_MATCH", sameVerifiedDeviceBacking: true, independentBackingCount: 0 };
   assert.equal(classifyDeviceSelfMatch(base).isEffectiveDeviceSelf, true);
   assert.equal(classifyDeviceSelfMatch(base).reason, DEVICE_SELF_SCORING_REASON);
-  assert.equal(classifyDeviceSelfMatch({ ...base, relationshipType: "SELF" }).isEffectiveDeviceSelf, false);
-  assert.equal(classifyDeviceSelfMatch({ ...base, matchType: "STRONG_TEXT_MATCH" }).isEffectiveDeviceSelf, false);
-  assert.equal(classifyDeviceSelfMatch({ ...base, sameVerifiedDeviceBacking: false }).isEffectiveDeviceSelf, false);
-  assert.equal(classifyDeviceSelfMatch({ ...base, independentBackingCount: 1 }).isEffectiveDeviceSelf, false);
-  assert.equal(classifyDeviceSelfMatch({ ...base, matchType: "STRONG_TEXT_MATCH" }).reason, "NOT_DEVICE_SELF");
+  assert.equal(classifyDeviceSelfMatch(base).exactCanonicalMatch, true);
+  assert.equal(classifyDeviceSelfMatch(base).strongTextMatch, false);
+
+  // STRONG_TEXT_MATCH now ALSO qualifies — with a DISTINCT reason.
+  const strong = { ...base, matchType: "STRONG_TEXT_MATCH" };
+  assert.equal(classifyDeviceSelfMatch(strong).isEffectiveDeviceSelf, true);
+  assert.equal(classifyDeviceSelfMatch(strong).reason, DEVICE_SELF_STRONG_TEXT_SCORING_REASON);
+  assert.equal(classifyDeviceSelfMatch(strong).strongTextMatch, true);
+  assert.equal(classifyDeviceSelfMatch(strong).exactCanonicalMatch, false);
+  assert.equal(classifyDeviceSelfMatch(strong).eligibleMatchType, true);
+
+  // the other three conditions still each independently block, for BOTH match types.
+  for (const mt of ["EXACT_CANONICAL_MATCH", "STRONG_TEXT_MATCH"]) {
+    const b = { ...base, matchType: mt };
+    assert.equal(classifyDeviceSelfMatch({ ...b, relationshipType: "SELF" }).isEffectiveDeviceSelf, false);
+    assert.equal(classifyDeviceSelfMatch({ ...b, relationshipType: "UNKNOWN_RELATIONSHIP" }).isEffectiveDeviceSelf, false);
+    assert.equal(classifyDeviceSelfMatch({ ...b, sameVerifiedDeviceBacking: false }).isEffectiveDeviceSelf, false);
+    assert.equal(classifyDeviceSelfMatch({ ...b, independentBackingCount: 1 }).isEffectiveDeviceSelf, false);
+    assert.equal(classifyDeviceSelfMatch({ ...b, independentBackingCount: 1 }).reason, "NOT_DEVICE_SELF");
+  }
+
+  // any non-EXACT/STRONG matchType is still not eligible.
+  assert.equal(isDeviceSelfEligibleMatchType("EXACT_CANONICAL_MATCH"), true);
+  assert.equal(isDeviceSelfEligibleMatchType("STRONG_TEXT_MATCH"), true);
+  assert.equal(isDeviceSelfEligibleMatchType("NEAR_MATCH"), false);
+  assert.equal(isDeviceSelfEligibleMatchType(null), false);
+  assert.equal(classifyDeviceSelfMatch({ ...base, matchType: "NEAR_MATCH" }).isEffectiveDeviceSelf, false);
 });
 
 // ===========================================================================
@@ -341,10 +372,11 @@ test("C/4: same corpus document, same-device backing, but the target report has 
 });
 
 // ===========================================================================
-// D / 5 — same device but not exact canonical: still counts
+// D / 5 — same device + STRONG_TEXT_MATCH (near, not exact): now an effective
+//         SELF too, with a DISTINCT reason, contributing 0 corpus/prior words
 // ===========================================================================
 
-test("D/5: same-device backing but only a STRONG_TEXT_MATCH (not exact canonical) -> still counts", async () => {
+test("D/5: same-device backing + STRONG_TEXT_MATCH (not exact canonical) -> effective SELF, reason SAME_DEVICE_STRONG_TEXT_DOCUMENT, 0 prior words", async () => {
   const text = takeText();
   const deviceKey = uniq("dk"), reportId = uniq("r"), passportId = uniq("passport");
   // A representation whose canonical text is a NEAR (not exact) variant of the report -> STRONG_TEXT_MATCH.
@@ -355,9 +387,45 @@ test("D/5: same-device backing but only a STRONG_TEXT_MATCH (not exact canonical
   const on = await withSelfScoring("true", () => resolve({ deviceKey, reportId, rawText: text }));
   assert.equal(on.historicalSubmissionMatch.status, "MATCHED");
   assert.equal(on.historicalSubmissionMatch.matches[0].matchType, "STRONG_TEXT_MATCH", "test setup: a near variant is a strong, not exact, match");
-  assert.deepEqual(on.effectiveDeviceSelfRepresentationIds, [], "not an exact canonical match -> condition 2 fails -> no downgrade");
+  assert.deepEqual(on.effectiveDeviceSelfRepresentationIds, [repId], "a same-device STRONG_TEXT_MATCH now qualifies");
+  assert.ok(on.unifiedSimilarity.deviceSelfExcludedWords > 0);
+  assert.equal(on.unifiedSimilarity.previousUploadOnlyWords, 0, "the same-passport STRONG match contributes 0 corpus/prior words");
+  assert.equal(on.unifiedSimilarity.unifiedScore, 0, "with no other evidence the strong same-device source zeroes the score");
+  assert.equal(on.unifiedSimilarity.selfExcludedWords, 0, "genuine same-account SELF tally is untouched");
+  const contrib = on.unifiedSimilarity.contributions.find((c) => c.sourceId === repId);
+  assert.equal(contrib.relationship, "TURNITPLUS_CORPUS_SOURCE", "baseline relationship preserved on the contribution");
+  assert.equal(contrib.effectiveScoringRelationship, "SELF");
+  assert.equal(contrib.effectiveScoringReason, "SAME_DEVICE_STRONG_TEXT_DOCUMENT", "distinct reason for the strong case");
+  assert.equal(contrib.evidenceStatus, "excluded_effective_device_self");
+  // the persisted matcher snapshot / relationship is unchanged
+  const offMatch = on.historicalSubmissionMatch.matches[0];
+  assert.equal(offMatch.relationshipType, "TURNITPLUS_CORPUS_SOURCE", "the matcher result is not rewritten by the rule");
+});
+
+test("D/5b: a DIFFERENT verified device + STRONG_TEXT_MATCH -> still counts (not the report's own passport)", async () => {
+  const text = takeText();
+  const deviceKey = uniq("dk"), reportId = uniq("r"), reportPassport = uniq("passport"), otherPassport = uniq("passport");
+  const nearText = `${text} A distinct trailing clause added so this is a near variant rather than a byte-identical copy of the document.`;
+  await seedExactCorpusSource(nearText, { backingPassportId: otherPassport });
+  await seedReport({ deviceKey, reportId, passportId: reportPassport, rawText: text });
+
+  const on = await withSelfScoring("true", () => resolve({ deviceKey, reportId, rawText: text }));
+  assert.equal(on.historicalSubmissionMatch.matches[0].matchType, "STRONG_TEXT_MATCH");
+  assert.deepEqual(on.effectiveDeviceSelfRepresentationIds, [], "a different verified device -> no downgrade even for STRONG");
   assert.ok(on.unifiedSimilarity.unifiedScore > 0, "the strong match still contributes normally");
-  void repId;
+});
+
+test("D/5c: same-device STRONG_TEXT_MATCH BUT an independent (other-device) backing exists -> still counts", async () => {
+  const text = takeText();
+  const deviceKey = uniq("dk"), reportId = uniq("r"), passportId = uniq("passport");
+  const nearText = `${text} Yet another trailing clause making this a strong near variant rather than an exact canonical match here.`;
+  await seedExactCorpusSource(nearText, { backingPassportId: passportId, extraIndependentBacking: true });
+  await seedReport({ deviceKey, reportId, passportId, rawText: text });
+
+  const on = await withSelfScoring("true", () => resolve({ deviceKey, reportId, rawText: text }));
+  assert.equal(on.historicalSubmissionMatch.matches[0].matchType, "STRONG_TEXT_MATCH");
+  assert.deepEqual(on.effectiveDeviceSelfRepresentationIds, [], "independentBackingCount > 0 blocks the SELF downgrade for STRONG too");
+  assert.ok(on.unifiedSimilarity.unifiedScore > 0);
 });
 
 // ===========================================================================
@@ -437,6 +505,32 @@ test("9: multi-source position union stays correct after one corpus source becom
   assert.equal(result.deviceSelfExcludedWords, 1000);
   assert.equal(result.previousUploadOnlyWords, 200, "the other-account PRIOR_SUBMISSION still counts");
   assert.equal(result.archiveOnlyWords, 100);
+});
+
+test("9-STRONG: a same-device STRONG_TEXT_MATCH is excluded like a SELF; independent archive + other-account STRONG survive", () => {
+  const selfRep = "rep-self-device-strong";
+  const priorRep = "rep-other-account-strong";
+  const hsm = matched([
+    matchEntry(selfRep, { relationshipType: "TURNITPLUS_CORPUS_SOURCE", matchType: "STRONG_TEXT_MATCH", matchedWordCount: 800, passages: [{ submittedText: "", submittedWordStart: 0, submittedWordEnd: 799, matchedWordCount: 800 }] }),
+    matchEntry(priorRep, { relationshipType: "PRIOR_SUBMISSION", matchType: "STRONG_TEXT_MATCH", matchedWordCount: 150, passages: [{ submittedText: "", submittedWordStart: 850, submittedWordEnd: 999, matchedWordCount: 150 }] }),
+  ]);
+  const result = computeUnifiedSimilarity({
+    wordCount: 1000,
+    archiveMatchedPositions: range(0, 100),
+    externalAcademicEvidence: null,
+    historicalSubmissionMatch: hsm,
+    effectiveDeviceSelfRepresentationIds: [selfRep],
+  });
+  // union = archive 0..99  ∪  other-account STRONG 850..999  (self-device STRONG 0..799 excluded)
+  assert.equal(result.uniqueMatchedWords, 250);
+  assert.deepEqual(result.matchedPositions, [...range(0, 100), ...range(850, 1000)]);
+  assert.equal(result.deviceSelfExcludedWords, 800, "the same-device STRONG match's words are excluded");
+  assert.equal(result.previousUploadOnlyWords, 150, "the other-account STRONG match still counts");
+  assert.equal(result.archiveOnlyWords, 100, "independent archive positions survive");
+  const contrib = result.contributions.find((c) => c.sourceId === selfRep);
+  assert.equal(contrib.effectiveScoringRelationship, "SELF");
+  assert.equal(contrib.effectiveScoringReason, "SAME_DEVICE_STRONG_TEXT_DOCUMENT");
+  assert.equal(contrib.evidenceStatus, "excluded_effective_device_self");
 });
 
 // ===========================================================================
@@ -649,6 +743,46 @@ test("14: the admin similarity decision trace distinguishes baseline vs effectiv
     const devEvidence = source.deviceEvidence;
     if (devEvidence) {
       for (const v of Object.values(devEvidence)) assert.ok(typeof v === "boolean" || typeof v === "number", "device evidence is bounded primitives only");
+    }
+  }).finally(() => { delete process.env.DEVICE_PASSPORT_ENABLED; process.env.DEVICE_PASSPORT_ENABLED = "true"; });
+});
+
+test("14-STRONG: the admin trace shows matchType STRONG_TEXT_MATCH and reason SAME_DEVICE_STRONG_TEXT_DOCUMENT for a near-identical same-device source", async () => {
+  process.env.DEVICE_PASSPORT_ENABLED = "true";
+  const text = takeText();
+  const nearText = `${text} A trailing clause appended for the admin-trace strong-match test so the source is a near, not exact, variant.`;
+  const deviceKey = uniq("dk"), reportId = uniq("r"), account = uniq("acc-admin"), passportId = uniq("passport"), srcAccount = uniq("acc-src");
+  const repId = await seedExactCorpusSource(nearText, { backingPassportId: passportId, sourceAccountId: srcAccount });
+  await seedReport({ deviceKey, reportId, accountId: account, passportId, rawText: text });
+
+  await withSelfScoring("true", async () => {
+    const resolution = await resolve({ deviceKey, reportId, accountId: account, rawText: text });
+    assert.equal(resolution.historicalSubmissionMatch.matches[0].matchType, "STRONG_TEXT_MATCH", "sanity: a near variant");
+    assert.equal(resolution.unifiedSimilarity.unifiedScore, 0, "sanity: the strong same-device source is an effective SELF");
+
+    await runDeviceProvenanceShadowEvaluation(client, { reportDeviceKey: deviceKey, reportId, accountId: account, rawText: text, productionResult: resolution.historicalSubmissionMatch });
+
+    const trace = await getReportSimilarityDecisionTrace(client, deviceKey, reportId);
+    const source = trace.sources.find((s) => s.sourceId === repId);
+    assert.ok(source, "the downgraded strong corpus source appears in the per-source trace");
+    assert.equal(source.matchType, "STRONG_TEXT_MATCH", "the trace carries production's own matchType");
+    assert.equal(source.relationshipType, "TURNITPLUS_CORPUS_SOURCE", "BASELINE relationship preserved");
+    assert.equal(source.effectiveScoringRelationship, "SELF");
+    assert.equal(source.effectiveScoringReason, "SAME_DEVICE_STRONG_TEXT_DOCUMENT", "DISTINCT reason for the strong case — not SAME_DEVICE_EXACT_DOCUMENT");
+    assert.equal(source.exclusionReason, "EXCLUDED_EFFECTIVE_DEVICE_SELF");
+    // the shadow telemetry mirrors the score-path decision (shared classifier — no drift)
+    assert.equal(trace.deviceShadow.reason, "SAME_DEVICE_STRONG_TEXT_DOCUMENT");
+    assert.equal(trace.deviceShadow.candidateReason, "SAME_DEVICE_STRONG_TEXT_DOCUMENT");
+    assert.equal(trace.deviceShadow.wouldDowngrade, true);
+    assert.equal(trace.scoreUnchangedByDeviceShadow, true);
+
+    // (srcAccount — the corpus source's own backing account — legitimately
+    // appears in the admin-only cross-account BACKING evidence, exactly as in
+    // test 14; only the PASSPORT secret and the REPORT OWNER's identity are
+    // forbidden here.)
+    const serialized = JSON.stringify(trace);
+    for (const forbidden of [passportId, `spki-${passportId}`, account, `${account}@ex.test`, "public_key_spki", "verified_device_passport_id", "session_token_hash", "publicKeySpki"]) {
+      assert.equal(serialized.includes(forbidden), false, `admin trace leaked: ${forbidden}`);
     }
   }).finally(() => { delete process.env.DEVICE_PASSPORT_ENABLED; process.env.DEVICE_PASSPORT_ENABLED = "true"; });
 });

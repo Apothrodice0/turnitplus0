@@ -232,7 +232,7 @@ function SimilarityDecisionTraceSection({ trace }: { trace: AdminSimilarityDecis
         <li>Submitted words: {trace.submittedWordCount}</li>
         <li>Included matched union: {trace.finalIncludedUnionWordCount}</li>
         <li>Excluded SELF words: {trace.excludedSelfMatchedWordCount}</li>
-        <li>Excluded effective same-device SELF words: {trace.excludedEffectiveDeviceSelfMatchedWordCount}{trace.excludedEffectiveDeviceSelfMatchedWordCount > 0 ? " (Preview rule DEVICE_PASSPORT_SELF_ENABLED — baseline relationship preserved, effective scoring relationship SELF, reason SAME_DEVICE_EXACT_DOCUMENT)" : ""}</li>
+        <li>Excluded effective same-device SELF words: {trace.excludedEffectiveDeviceSelfMatchedWordCount}{trace.excludedEffectiveDeviceSelfMatchedWordCount > 0 ? " (Preview rule DEVICE_PASSPORT_SELF_ENABLED — baseline relationship preserved, effective scoring relationship SELF; per-source reason SAME_DEVICE_EXACT_DOCUMENT or SAME_DEVICE_STRONG_TEXT_DOCUMENT)" : ""}</li>
         <li>Excluded UNKNOWN-relationship words: {trace.excludedUnknownMatchedWordCount}</li>
         <li>Production score changed by Device Passport shadow: <strong>NO</strong></li>
       </ul>

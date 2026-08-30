@@ -294,6 +294,25 @@ async function seedTwoAccountSharedDeviceFixture() {
   return { text, deviceKey, reportId, accountId: accountT, passportP, accountT, accountS, repId };
 }
 
+/**
+ * Same shape as seedTwoAccountSharedDeviceFixture, except the corpus source is a
+ * NEAR (not byte-identical) variant of the report -> the matcher produces a
+ * STRONG_TEXT_MATCH rather than an EXACT_CANONICAL_MATCH.
+ */
+async function seedTwoAccountSharedDeviceStrongFixture() {
+  const text = takeText();
+  const nearText = `${text} qzExtraTrailingClauseForStrongVariant one two three four five six seven eight nine ten`;
+  const deviceKey = uniq("dk"), reportId = uniq("r");
+  const passportP = uniq("passportP");
+  const accountT = uniq("accT"), accountS = uniq("accS");
+  const repId = await seedExactCorpusSource(nearText, { backingPassportId: passportP, sourceAccountId: accountS });
+  await seedReport({ deviceKey, reportId, accountId: accountT, passportId: passportP, rawText: text });
+  await setPassportTrackingVersion(passportP, 1);
+  await seedActorUsage(passportP, accountT);
+  await seedActorUsage(passportP, accountS);
+  return { text, deviceKey, reportId, accountId: accountT, passportP, accountT, accountS, repId };
+}
+
 // ===========================================================================
 // PURE POLICY — the ONE canonical refined Policy D (lib/device-shared-guard-policy.ts)
 // ===========================================================================
@@ -583,12 +602,27 @@ test("17: a DIFFERENT verified Passport still counts (guard never runs)", async 
   assert.equal(on.deviceSelfSharedGuard.reason, "NOT_APPLIED");
 });
 
-test("18: a STRONG_TEXT_MATCH (not exact canonical) still counts", async () => {
+test("18: a same-device STRONG_TEXT_MATCH now qualifies as an effective SELF (guard does not veto)", async () => {
   const text = takeText();
   const deviceKey = uniq("dk"), reportId = uniq("r"), passportP = uniq("passportP");
   const nearText = `${text} A trailing clause that makes this a near but not byte-identical variant of the submitted document for this particular test case.`;
-  await seedExactCorpusSource(nearText, { backingPassportId: passportP, sourceAccountId: uniq("accS") });
+  const repId = await seedExactCorpusSource(nearText, { backingPassportId: passportP, sourceAccountId: uniq("accS") });
   await seedReport({ deviceKey, reportId, accountId: uniq("accT"), passportId: passportP, rawText: text });
+
+  const on = await withFlags({ self: "true", guard: "true" }, () => resolve({ deviceKey, reportId, rawText: text }));
+  assert.equal(on.historicalSubmissionMatch.matches[0].matchType, "STRONG_TEXT_MATCH");
+  assert.deepEqual(on.effectiveDeviceSelfRepresentationIds, [repId], "STRONG_TEXT_MATCH same-device source qualifies");
+  assert.equal(on.unifiedSimilarity.unifiedScore, 0, "and the strong same-device source contributes 0");
+  const contrib = on.unifiedSimilarity.contributions.find((c) => c.sourceId === repId);
+  assert.equal(contrib.effectiveScoringReason, "SAME_DEVICE_STRONG_TEXT_DOCUMENT");
+});
+
+test("18b: a DIFFERENT verified Passport + STRONG_TEXT_MATCH still counts (guard never runs)", async () => {
+  const text = takeText();
+  const deviceKey = uniq("dk"), reportId = uniq("r"), reportPassport = uniq("passportR"), otherPassport = uniq("passportO");
+  const nearText = `${text} A trailing clause that makes this a near but not byte-identical variant for the different-passport strong case.`;
+  await seedExactCorpusSource(nearText, { backingPassportId: otherPassport, sourceAccountId: uniq("accS") });
+  await seedReport({ deviceKey, reportId, accountId: uniq("accT"), passportId: reportPassport, rawText: text });
 
   const on = await withFlags({ self: "true", guard: "true" }, () => resolve({ deviceKey, reportId, rawText: text }));
   assert.equal(on.historicalSubmissionMatch.matches[0].matchType, "STRONG_TEXT_MATCH");
@@ -1064,9 +1098,10 @@ test("TRACE 6: the admin serialization stays bounded — boolean|number|string|n
 // ===========================================================================
 // NO-VETO REGRESSION — the shared-device fan-out verdict is ADMIN TELEMETRY,
 // never a scoring veto. Once the base Device Passport SELF rule accepts a
-// representation (production-counted relationship + EXACT_CANONICAL_MATCH +
-// sameVerifiedDeviceBacking + zero independent backing) it STAYS an effective
-// SELF no matter what the shared-device guard / durable actor ledger reports.
+// representation (production-counted relationship +
+// EXACT_CANONICAL_MATCH/STRONG_TEXT_MATCH + sameVerifiedDeviceBacking + zero
+// independent backing) it STAYS an effective SELF no matter what the
+// shared-device guard / durable actor ledger reports.
 // Runtime-oriented: every case drives resolvePrimarySimilaritySummary end to end.
 // ===========================================================================
 
@@ -1179,17 +1214,52 @@ test("NO-VETO 8: a DIFFERENT verified Passport still does not qualify", async ()
   assert.equal(on.deviceSelfSharedGuard.reason, "NOT_APPLIED");
 });
 
-test("NO-VETO 9: a STRONG_TEXT_MATCH (not exact canonical) still does not qualify", async () => {
+test("NO-VETO 9: a same-device STRONG_TEXT_MATCH with an independent backing STILL does not qualify (base rule)", async () => {
   const text = takeText();
   const deviceKey = uniq("dk"), reportId = uniq("r"), passportP = uniq("passportP");
   const nearText = `${text} A trailing clause making this a near but not byte-identical variant for this particular no-veto test case.`;
-  await seedExactCorpusSource(nearText, { backingPassportId: passportP, sourceAccountId: uniq("accS") });
+  await seedExactCorpusSource(nearText, { backingPassportId: passportP, sourceAccountId: uniq("accS"), extraIndependentBacking: true });
   await seedReport({ deviceKey, reportId, accountId: uniq("accT"), passportId: passportP, rawText: text });
 
   const on = await withFlags({ self: "true", guard: "true" }, () => resolve({ deviceKey, reportId, rawText: text }));
   assert.equal(on.historicalSubmissionMatch.matches[0].matchType, "STRONG_TEXT_MATCH");
-  assert.deepEqual(on.effectiveDeviceSelfRepresentationIds, []);
+  assert.deepEqual(on.effectiveDeviceSelfRepresentationIds, [], "independentBackingCount > 0 blocks the STRONG downgrade");
   assert.ok(on.unifiedSimilarity.unifiedScore > 0);
+});
+
+test("NO-VETO 11: same-device STRONG_TEXT_MATCH + 3 actors on the Passport -> BLOCKED_ACCOUNT_FANOUT (telemetry) but scoring still effective SELF (score 0)", async () => {
+  const fx = await seedTwoAccountSharedDeviceStrongFixture();
+  await addExtraDeviceAccounts(fx.passportP, 1); // -> 3 distinct actors
+  const on = await withFlags({ self: "true", guard: "true" }, () => resolve({ ...fx, rawText: fx.text }));
+  assert.equal(on.historicalSubmissionMatch.matches[0].matchType, "STRONG_TEXT_MATCH");
+  assert.equal(on.unifiedSimilarity.unifiedScore, 0);
+  assert.deepEqual(on.effectiveDeviceSelfRepresentationIds, [fx.repId]);
+  assert.equal(on.deviceSelfSharedGuard.passed, false);
+  assert.equal(on.deviceSelfSharedGuard.reason, "BLOCKED_ACCOUNT_FANOUT");
+  assert.equal(on.deviceSelfSharedGuard.deviceDistinctAccounts, 3);
+});
+
+test("NO-VETO 12: same-device STRONG_TEXT_MATCH + 10 actors on the Passport -> BLOCKED_ACCOUNT_FANOUT (telemetry) but scoring still effective SELF (score 0)", async () => {
+  const fx = await seedTwoAccountSharedDeviceStrongFixture();
+  await addExtraDeviceAccounts(fx.passportP, 8); // -> 10 distinct actors
+  const on = await withFlags({ self: "true", guard: "true" }, () => resolve({ ...fx, rawText: fx.text }));
+  assert.equal(on.historicalSubmissionMatch.matches[0].matchType, "STRONG_TEXT_MATCH");
+  assert.equal(on.unifiedSimilarity.unifiedScore, 0);
+  assert.deepEqual(on.effectiveDeviceSelfRepresentationIds, [fx.repId]);
+  assert.equal(on.deviceSelfSharedGuard.passed, false);
+  assert.equal(on.deviceSelfSharedGuard.reason, "BLOCKED_ACCOUNT_FANOUT");
+  assert.equal(on.deviceSelfSharedGuard.deviceDistinctAccounts, 10);
+});
+
+test("NO-VETO 13: same-device STRONG_TEXT_MATCH + anonymous use in the Passport's durable history -> BLOCKED_ANONYMOUS_USE (telemetry) but scoring still effective SELF (score 0)", async () => {
+  const fx = await seedTwoAccountSharedDeviceStrongFixture();
+  await seedActorUsage(fx.passportP, null, { anonymous: true });
+  const on = await withFlags({ self: "true", guard: "true" }, () => resolve({ ...fx, rawText: fx.text }));
+  assert.equal(on.historicalSubmissionMatch.matches[0].matchType, "STRONG_TEXT_MATCH");
+  assert.equal(on.unifiedSimilarity.unifiedScore, 0);
+  assert.deepEqual(on.effectiveDeviceSelfRepresentationIds, [fx.repId]);
+  assert.equal(on.deviceSelfSharedGuard.passed, false);
+  assert.equal(on.deviceSelfSharedGuard.reason, "BLOCKED_ANONYMOUS_USE");
 });
 
 test("NO-VETO 10: unrelated archive + scholarly positions survive the guard-blocked SELF exclusion", async () => {

@@ -69,8 +69,14 @@ export type UnifiedEvidenceContribution = {
    * contribution.
    */
   effectiveScoringRelationship?: "SELF";
-  /** Why the effective relationship differs from the baseline — currently always "SAME_DEVICE_EXACT_DOCUMENT". Paired with effectiveScoringRelationship. */
-  effectiveScoringReason?: "SAME_DEVICE_EXACT_DOCUMENT";
+  /**
+   * Why the effective relationship differs from the baseline:
+   * "SAME_DEVICE_EXACT_DOCUMENT" for a byte-identical canonical re-upload,
+   * "SAME_DEVICE_STRONG_TEXT_DOCUMENT" for a near-identical (STRONG_TEXT_MATCH)
+   * one. Both exclude the contribution from the score identically. Paired with
+   * effectiveScoringRelationship.
+   */
+  effectiveScoringReason?: "SAME_DEVICE_EXACT_DOCUMENT" | "SAME_DEVICE_STRONG_TEXT_DOCUMENT";
   evidenceStatus: UnifiedEvidenceStatus;
 };
 
@@ -150,15 +156,18 @@ export type ComputeUnifiedSimilarityParams = {
    * — resolved from the report's OWN verified upload Device Passport plus the
    * deterministic per-backing provenance evidence, NEVER from
    * historical_match_shadow_evaluations) has classified as an EFFECTIVE SELF
-   * for scoring: a production-counted, exact-canonical historical source
-   * backed only by the report's own verified passport with zero independent
-   * backing (see lib/device-self-scoring-rule.ts's classifyDeviceSelfMatch).
+   * for scoring: a production-counted historical source whose matchType is an
+   * EXACT_CANONICAL_MATCH or a STRONG_TEXT_MATCH, backed only by the report's
+   * own verified passport with zero independent backing (see
+   * lib/device-self-scoring-rule.ts's classifyDeviceSelfMatch).
    *
    * Their matched positions are excluded from the scored union exactly like a
    * SELF-relationship match — WITHOUT rewriting production's persisted
    * relationshipType: the contribution keeps its baseline `relationship` and
-   * gains effectiveScoringRelationship "SELF". Independent archive / scholarly
-   * positions are untouched (they enter the union through their own channels).
+   * gains effectiveScoringRelationship "SELF" plus an effectiveScoringReason of
+   * "SAME_DEVICE_EXACT_DOCUMENT" (exact) or "SAME_DEVICE_STRONG_TEXT_DOCUMENT"
+   * (strong). Independent archive / scholarly positions are untouched (they
+   * enter the union through their own channels).
    *
    * Empty / absent (the production default) => this function's output is
    * byte-identical to before this parameter existed.
@@ -318,7 +327,13 @@ export function computeUnifiedSimilarity(params: ComputeUnifiedSimilarityParams)
           matchedWordCount: passage.matchedWordCount,
           relationship: match.relationshipType,
           ...(isEffectiveDeviceSelf
-            ? { effectiveScoringRelationship: "SELF" as const, effectiveScoringReason: "SAME_DEVICE_EXACT_DOCUMENT" as const }
+            ? {
+                effectiveScoringRelationship: "SELF" as const,
+                effectiveScoringReason:
+                  match.matchType === "STRONG_TEXT_MATCH"
+                    ? ("SAME_DEVICE_STRONG_TEXT_DOCUMENT" as const)
+                    : ("SAME_DEVICE_EXACT_DOCUMENT" as const),
+              }
             : {}),
           evidenceStatus: status,
         });

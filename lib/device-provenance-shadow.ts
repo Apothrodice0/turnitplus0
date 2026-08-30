@@ -157,18 +157,20 @@ export async function summarizeDevicePassportSharedness(client: Client, passport
 type CandidateReason =
   /** A production-counted, EXACT_CANONICAL_MATCH match with a same-device backing and ZERO independent backing — the per-match device rule fired. */
   | "SAME_DEVICE_EXACT_DOCUMENT"
+  /** A production-counted, STRONG_TEXT_MATCH (near-identical) match with a same-device backing and ZERO independent backing — the per-match device rule fired. */
+  | "SAME_DEVICE_STRONG_TEXT_DOCUMENT"
   /** Counted + exact + same-device backing, but ≥1 independent backing (another account's submission, or a different verified device) blocked the SELF proposal. */
   | "INDEPENDENT_BACKING_BLOCKED"
   /** Exact + same-device backing, but the relationship (SELF / UNKNOWN_RELATIONSHIP) is one production already does not count toward the score. */
   | "SAME_DEVICE_EXACT_NOT_COUNTED"
-  /** A same-device backing exists but this was only a STRONG_TEXT_MATCH, not an exact canonical match. */
+  /** A same-device backing exists on a STRONG_TEXT_MATCH that did NOT fire the rule (relationship not counted, or an independent backing). */
   | "SAME_DEVICE_NOT_EXACT"
   /** A production-counted match with no same-device backing at all. */
   | "COUNTED_NO_SAME_DEVICE"
   | "OTHER";
 
 type ProposedEvidence = {
-  reason: "SAME_DEVICE_EXACT_DOCUMENT" | "NO_DEVICE_DOWNGRADE" | "NO_MATCH_TO_EVALUATE";
+  reason: "SAME_DEVICE_EXACT_DOCUMENT" | "SAME_DEVICE_STRONG_TEXT_DOCUMENT" | "NO_DEVICE_DOWNGRADE" | "NO_MATCH_TO_EVALUATE";
   hasReportPassport: true;
   reportPassportGeneration: number;
 
@@ -236,7 +238,7 @@ function candidateRank(m: PerMatchEvaluation): number {
 }
 
 function candidateReasonFor(m: PerMatchEvaluation): CandidateReason {
-  if (m.wouldDowngrade) return "SAME_DEVICE_EXACT_DOCUMENT";
+  if (m.wouldDowngrade) return m.exactCanonicalMatch ? "SAME_DEVICE_EXACT_DOCUMENT" : "SAME_DEVICE_STRONG_TEXT_DOCUMENT";
   if (m.productionCountsThisSource && m.exactCanonicalMatch && m.provenance.sameVerifiedDeviceBacking) return "INDEPENDENT_BACKING_BLOCKED";
   if (m.exactCanonicalMatch && m.provenance.sameVerifiedDeviceBacking) return "SAME_DEVICE_EXACT_NOT_COUNTED";
   if (m.provenance.sameVerifiedDeviceBacking) return "SAME_DEVICE_NOT_EXACT";
@@ -486,9 +488,15 @@ export async function runDeviceProvenanceShadowEvaluation(
     let strongest = perMatch[0];
     for (const m of perMatch) if (candidateRank(m) > candidateRank(strongest)) strongest = m;
 
+    // When >=1 match fires the rule, `strongest` is one of them (candidateRank
+    // gives a firing match the top rank), so its exact/strong split is the
+    // right headline reason.
+    const downgradeReason: "SAME_DEVICE_EXACT_DOCUMENT" | "SAME_DEVICE_STRONG_TEXT_DOCUMENT" =
+      strongest.exactCanonicalMatch ? "SAME_DEVICE_EXACT_DOCUMENT" : "SAME_DEVICE_STRONG_TEXT_DOCUMENT";
+
     const evidence: ProposedEvidence = {
       ...baseEvidence,
-      reason: wouldDowngrade ? "SAME_DEVICE_EXACT_DOCUMENT" : "NO_DEVICE_DOWNGRADE",
+      reason: wouldDowngrade ? downgradeReason : "NO_DEVICE_DOWNGRADE",
       productionCountedMatchCount,
       matchesEvaluated: perMatch.length,
       deviceSelfCandidateCount,
