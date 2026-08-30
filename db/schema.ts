@@ -788,6 +788,15 @@ export const report_historical_match_snapshots = sqliteTable(
     // this row. Phase 1 = schema foundation only; nothing reads or writes
     // this yet.
     device_provenance_generation: integer("device_provenance_generation").notNull().default(0),
+    // drizzle/0042: the account_owner_link_state.link_generation value the
+    // report account's owner-link state held when this snapshot's
+    // owner-link-sensitive classification was computed. 0 for a report whose
+    // account has no direct owner link (and every existing row). A later phase
+    // recomputes the owner-link-sensitive part once the account's generation
+    // advances past this value — never a global epoch, so another account's
+    // link churn never invalidates this row. Foundation only; nothing reads or
+    // writes this yet.
+    owner_link_generation: integer("owner_link_generation").notNull().default(0),
   },
   (table) => [
     uniqueIndex("ux_report_historical_match_snapshots_report").on(table.report_device_key, table.report_id),
@@ -1312,6 +1321,177 @@ export const corpus_admission_decision_device_provenance = sqliteTable(
   },
   (table) => [
     index("idx_cadp_device_passport_id").on(table.device_passport_id),
+  ],
+);
+
+// ── Direct owner-link foundation (drizzle/0042) — SCHEMA + STORAGE ONLY ──────
+// Three additive tables plus report_historical_match_snapshots.owner_link_generation
+// (declared above). NOTHING reads or writes any of this yet: computeUnifiedSimilarity,
+// resolveEffectiveDeviceSelfRepresentationIds, the same-device SELF rule, the
+// Policy D shared-device guard, relationshipType, candidate discovery and the
+// matcher are all untouched, and no OWNER_LINK_SELF_ENABLED flag is wired into
+// scoring. See lib/owner-link.ts / lib/owner-link-repo.ts and the migration's
+// own header for the full rationale.
+//
+// account_owner_links: one row per canonical unordered account-ref pair.
+// account_ref_lo / account_ref_hi are HMAC pseudonyms
+// (HMAC-SHA256(OWNER_LINK_HMAC_KEY, "TP_OWNER_LINK_V1:" + accountId), lib/owner-link.ts) —
+// NEVER a raw account id — ordered lexicographically so {A,B} and {B,A} collapse
+// to one row (a SQL CHECK (account_ref_lo < account_ref_hi) enforces it and
+// rules out a self-pair; not modelled here as this project's schema-drift
+// tooling does not compare CHECK constraints, matching corpus_match_generation's
+// own id=1 CHECK). status ACTIVE | WITHDRAWN — WITHDRAWN is a tombstone; a link
+// row is NEVER deleted. strongest_confidence is the strongest confidence across
+// the link's non-withdrawn evidence, retained for admin / audit. Epoch-ms
+// integer timestamps (the 0038 convention). withdrawn_reason is a CHECK-
+// constrained controlled vocabulary (lib/owner-link.ts's
+// OWNER_LINK_WITHDRAWAL_REASONS — MANUAL_REVIEW | REVOKED | NO_QUALIFYING_EVIDENCE
+// | SUPERSEDED | ADMIN_CORRECTION, or NULL), never free text; the CHECK lives in
+// the migration only (schema-drift tooling does not compare CHECKs).
+// idx_account_owner_links_account_ref_hi is the reverse-endpoint index — the
+// unique pair index already covers account_ref_lo lookups (leftmost column), so
+// only account_ref_hi needs its own.
+// HMAC KEY ROTATION: OWNER_LINK_HMAC_KEY has no online rotation path in v1 —
+// changing it orphans every ref and every generation counter (see
+// lib/owner-link.ts / the migration header). GENERATION SCOPE: the per-account
+// link_generation is sufficient ONLY for direct pairs; a transitive phase MUST
+// add cluster-wide invalidation.
+export const account_owner_links = sqliteTable(
+  "account_owner_links",
+  {
+    id: text("id").primaryKey(),
+    account_ref_lo: text("account_ref_lo").notNull(),
+    account_ref_hi: text("account_ref_hi").notNull(),
+    key_version: integer("key_version").notNull(),
+    status: text("status").notNull().default("ACTIVE"),
+    strongest_confidence: text("strongest_confidence").notNull(),
+    first_linked_at: integer("first_linked_at").notNull(),
+    last_evidence_at: integer("last_evidence_at").notNull(),
+    withdrawn_at: integer("withdrawn_at"),
+    withdrawn_reason: text("withdrawn_reason"),
+    decided_by: text("decided_by").notNull().default("SYSTEM"),
+  },
+  (table) => [
+    uniqueIndex("ux_account_owner_links_pair").on(
+      table.account_ref_lo,
+      table.account_ref_hi,
+      table.key_version,
+    ),
+    index("idx_account_owner_links_account_ref_hi").on(table.account_ref_hi),
+  ],
+);
+
+// account_owner_link_evidence: append-only, tombstone-only evidence rows.
+// link_id -> account_owner_links(id) ON DELETE RESTRICT (an owner link can
+// never be removed while any evidence references it, and links are never
+// removed anyway — the same posture drizzle/0039 / drizzle/0041 took).
+// evidence_fingerprint is itself an HMAC / domain-separated digest over a
+// JSON-encoded component array (lib/owner-link.ts's ownerLinkEvidenceFingerprint
+// — unambiguous, so ["a b","c"] and ["a","b c"] never collide), NEVER a raw
+// account / passport / phone / email value. signal_type is a CHECK-constrained
+// closed vocabulary (lib/owner-link.ts's ALL_OWNER_LINK_SIGNAL_TYPES) — the
+// CHECK lives in the migration only. observation_count / first_observed_at /
+// last_observed_at follow UPSERT semantics keyed on
+// UNIQUE(link_id, signal_type, evidence_fingerprint): a repeat observation
+// PRESERVES first_observed_at, ADVANCES last_observed_at, INCREMENTS
+// observation_count. observation_count / first_observed_at are preserved across
+// every revive. withdrawn_at tombstones a row; rows are NEVER deleted, counts
+// NEVER decremented. withdrawn_reason is the same CHECK-constrained controlled
+// vocabulary as account_owner_links.withdrawn_reason but reflects only the
+// CURRENT tombstone (NULL for a live row; a revive necessarily clears it, since
+// a live row must read as live). The withdrawal/revival AUDIT HISTORY is NOT on
+// the live row — it is the append-only account_owner_link_events table below.
+// detail_json is a bounded numeric / boolean / short-enum-token blob only
+// (lib/owner-link.ts's boundOwnerLinkDetail).
+export const account_owner_link_evidence = sqliteTable(
+  "account_owner_link_evidence",
+  {
+    id: text("id").primaryKey(),
+    link_id: text("link_id")
+      .notNull()
+      .references(() => account_owner_links.id, { onDelete: "restrict" }),
+    confidence: text("confidence").notNull(),
+    signal_type: text("signal_type").notNull(),
+    evidence_fingerprint: text("evidence_fingerprint").notNull(),
+    observation_count: integer("observation_count").notNull().default(1),
+    first_observed_at: integer("first_observed_at").notNull(),
+    last_observed_at: integer("last_observed_at").notNull(),
+    withdrawn_at: integer("withdrawn_at"),
+    withdrawn_reason: text("withdrawn_reason"),
+    detail_json: text("detail_json"),
+    created_by: text("created_by").notNull().default("SYSTEM"),
+  },
+  (table) => [
+    uniqueIndex("ux_account_owner_link_evidence_signal").on(
+      table.link_id,
+      table.signal_type,
+      table.evidence_fingerprint,
+    ),
+    index("idx_account_owner_link_evidence_link").on(table.link_id),
+  ],
+);
+
+// account_owner_link_events (drizzle/0042): APPEND-ONLY state-transition log —
+// the immutable history the live account_owner_links / _evidence rows cannot be
+// (reviving a tombstoned evidence row necessarily clears its own withdrawn_at /
+// withdrawn_reason). One row per meaningful ACTIVE<->WITHDRAWN transition plus
+// link / evidence genesis (lib/owner-link.ts OWNER_LINK_EVENT_TYPES). Rows are
+// NEVER updated or deleted; nothing here cascades from report / room / account
+// cleanup (both FKs are ON DELETE RESTRICT and neither parent is ever deleted).
+// id is an autoincrement INTEGER so insertion order is the canonical event
+// order. event_type / previous_state / new_state / reason / actor are all
+// CHECK-constrained bounded enums (the CHECKs live in the migration only);
+// reason reuses OWNER_LINK_WITHDRAWAL_REASONS and is non-NULL only on a
+// *_WITHDRAWN event. Beyond the per-column vocabularies, ONE table-level shape
+// CHECK (also migration-only) pins each event_type to its single legal
+// combination of evidence_id presence / previous_state / new_state / reason
+// presence — mirrored by lib/owner-link.ts's assertOwnerLinkEventShape. actor is
+// SYSTEM | ADMIN as a CLASS, not proof of which administrator (this foundation
+// stores no admin identity). NO account ref / passport id / fingerprint / email
+// / IP / free text — only internal link/evidence ids, enums, one reason, one
+// actor class, one epoch-ms timestamp. Every insert is in the same write
+// transaction as the state mutation it records.
+export const account_owner_link_events = sqliteTable(
+  "account_owner_link_events",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    link_id: text("link_id")
+      .notNull()
+      .references(() => account_owner_links.id, { onDelete: "restrict" }),
+    evidence_id: text("evidence_id").references(() => account_owner_link_evidence.id, { onDelete: "restrict" }),
+    event_type: text("event_type").notNull(),
+    previous_state: text("previous_state"),
+    new_state: text("new_state").notNull(),
+    reason: text("reason"),
+    actor: text("actor").notNull(),
+    occurred_at: integer("occurred_at").notNull(),
+  },
+  (table) => [
+    index("idx_account_owner_link_events_link").on(table.link_id, table.id),
+    index("idx_account_owner_link_events_evidence")
+      .on(table.evidence_id, table.id)
+      .where(sql`evidence_id IS NOT NULL`),
+  ],
+);
+
+// account_owner_link_state: one row per (account_ref, key_version) carrying a
+// monotonic link_generation counter, bumped on BOTH endpoints whenever a direct
+// link between them is created, materially gains / loses evidence, or is
+// withdrawn. Never a global counter; an absent row reads as generation 0. A
+// later phase stamps report_historical_match_snapshots.owner_link_generation
+// with the report account's counter and treats the owner-link-sensitive part of
+// the snapshot as stale once the stored value trails it — the same per-key
+// staleness shape corpus_generation / device_provenance_generation use.
+export const account_owner_link_state = sqliteTable(
+  "account_owner_link_state",
+  {
+    account_ref: text("account_ref").notNull(),
+    key_version: integer("key_version").notNull(),
+    link_generation: integer("link_generation").notNull().default(0),
+    updated_at: integer("updated_at").notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.account_ref, table.key_version] }),
   ],
 );
 
