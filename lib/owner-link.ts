@@ -11,12 +11,16 @@ import { createHmac } from "node:crypto";
  *
  * WHAT AN OWNER LINK IS
  * A DIRECT owner link between account A and account B is durable evidence that
- * the two accounts share the same human owner — the same cryptographically
- * verified Device Passport used by both, a verified shared phone / recovery
- * email / OAuth provider subject / payment account or instrument, an admin
- * manual link, or a cross-Passport actor co-occurrence. A direct qualifying
- * owner-bound signal MAY later make the other account SELF / 0 for the unified
- * similarity score — but NOT in this phase. Nothing here is wired into scoring.
+ * the two accounts share the same human owner. In v1 an owner link becomes
+ * ACTIVE only from HIGH-confidence owner-bound evidence — currently, in
+ * practice, an ADMIN_MANUAL link. Owner-bound signals that a producer can only
+ * assert at MEDIUM (a shared verified Device Passport, a cross-Passport actor
+ * co-occurrence, a verified shared phone / recovery email / OAuth subject /
+ * payment account or instrument, …) are SUPPORTING evidence: they corroborate,
+ * they attach to an existing link, but one of them alone never establishes or
+ * keeps ACTIVE. A HIGH direct owner-bound signal MAY later make the other
+ * account SELF / 0 for the unified similarity score — but NOT in this phase.
+ * Nothing here is wired into scoring.
  *
  * WHAT IT IS NOT
  *   - NOT transitive: an A-B link and a B-C link never imply an A-C link. This
@@ -95,10 +99,13 @@ export type OwnerLinkStatus = "ACTIVE" | "WITHDRAWN";
 export type OwnerLinkDecidedBy = "SYSTEM" | "ADMIN";
 
 /**
- * OWNER-BOUND signals — a signal in this set, at confidence >= MEDIUM, MAY by
- * itself establish an ACTIVE direct owner link (evidenceCanEstablishActiveLink).
- * This phase collects NO new source data for any of them; the vocabulary is
- * defined now so the storage and helper layer is complete.
+ * OWNER-BOUND signals — a signal whose NATURE is about the same human owner
+ * (not mere co-location telemetry). Being owner-bound does NOT make a signal
+ * ownership-establishing: only a HIGH-confidence owner-bound row activates a
+ * direct owner link (evidenceCanEstablishActiveLink — v1 threshold). A MEDIUM
+ * owner-bound row is SUPPORTING evidence only. This phase collects NO new source
+ * data for any of them; the vocabulary is defined now so the storage and helper
+ * layer is complete.
  */
 export const OWNER_BOUND_SIGNAL_TYPES = [
   "SHARED_DEVICE_PASSPORT",
@@ -165,7 +172,9 @@ export const ALL_OWNER_LINK_SIGNAL_TYPES: readonly OwnerLinkSignalType[] = [
  *
  *   MANUAL_REVIEW           an admin / analyst withdrew it after review
  *   REVOKED                 the underlying owner-bound signal was revoked
- *   NO_QUALIFYING_EVIDENCE  automatic: no live owner-bound >= MEDIUM evidence remains
+ *   NO_QUALIFYING_EVIDENCE  automatic: no live owner-bound HIGH evidence remains
+ *                           (the v1 establishment threshold — a lone MEDIUM/
+ *                           supporting row does not keep a link ACTIVE)
  *   SUPERSEDED              replaced by another link / a re-keyed pair
  *   ADMIN_CORRECTION        an admin corrected a link recorded in error
  */
@@ -475,33 +484,58 @@ export function strongestConfidenceOf(confidences: readonly (OwnerLinkConfidence
 }
 
 /**
+ * ESTABLISHMENT THRESHOLD (v1): owner-bound is NOT the same as
+ * ownership-establishing.
+ *
+ *   LOW    = weak / observational
+ *   MEDIUM = SUPPORTING owner evidence — corroborates an ownership finding but
+ *            CANNOT, alone, create or keep an ACTIVE owner relationship
+ *   HIGH   = ownership-ESTABLISHING evidence — the ONLY tier that activates a
+ *            direct owner link in this phase
+ *
+ * A single MEDIUM owner-bound row (e.g. SHARED_DEVICE_PASSPORT or
+ * CROSS_PASSPORT_ACTOR_COOCCURRENCE) is household/family-ambiguous: one person's
+ * two accounts and two related people sharing two devices produce identical
+ * evidence, and a false owner link can later suppress genuine plagiarism as
+ * SELF / 0. Precision over recall => MEDIUM never establishes on its own. This
+ * is a GENERAL, fail-closed confidence boundary — no signal type is
+ * special-cased.
+ *
+ * ADMIN_MANUAL at HIGH is currently the ONLY practical path to an ACTIVE link.
+ * Future automatic identity producers (VERIFIED_PHONE, OAUTH_PROVIDER_SUBJECT,
+ * PAYMENT_*, …) must NOT be promoted to HIGH merely for being owner-bound —
+ * each requires its own separate confidence review before it may emit HIGH.
+ *
  * The load-bearing pure rule: can THIS one piece of evidence, by itself,
  * establish (or keep) an ACTIVE direct owner link?
  *   - observation-only signal            -> NO, at any confidence.
- *   - owner-bound signal, LOW confidence  -> NO.
- *   - owner-bound signal, MEDIUM or HIGH  -> YES.
- * "LOW observation-only evidence cannot create an ACTIVE owner link by itself"
- * is the union of the first two branches; this is the strict form of it.
+ *   - owner-bound signal, LOW or MEDIUM   -> NO (MEDIUM = supporting only).
+ *   - owner-bound signal, HIGH            -> YES.
+ * Any non-HIGH value (including an unrecognised one) fails closed.
  */
 export function evidenceCanEstablishActiveLink(signalType: string, confidence: OwnerLinkConfidence): boolean {
   if (!isOwnerBoundSignal(signalType)) return false;
-  return CONFIDENCE_RANK[confidence] >= CONFIDENCE_RANK.MEDIUM;
+  return confidence === "HIGH";
 }
 
 export type LinkStatusResolution = {
   status: OwnerLinkStatus;
   strongestConfidence: OwnerLinkConfidence | null;
-  /** how many of the live evidence rows are owner-bound at >= MEDIUM */
+  /** how many of the live evidence rows are owner-bound AND HIGH (the v1 establishment threshold) */
   qualifyingCount: number;
 };
 
 /**
  * Resolve a link's effective status from its LIVE (non-withdrawn) evidence:
- *   - ACTIVE iff at least one live row is owner-bound at >= MEDIUM.
- *   - WITHDRAWN otherwise (including "no live evidence at all").
- * strongestConfidence is the max across ALL live rows (observation-only rows
- * included — the number is retained for admin / audit even when it cannot
- * activate the link).
+ *   - ACTIVE iff at least one live row is owner-bound at HIGH (the v1
+ *     establishment threshold — see evidenceCanEstablishActiveLink).
+ *   - WITHDRAWN otherwise: no live evidence at all, OR only observation-only /
+ *     LOW / MEDIUM (supporting) owner-bound evidence remains. So an ACTIVE link
+ *     that loses its last live HIGH row drops to WITHDRAWN even while MEDIUM
+ *     supporting evidence still lives.
+ * strongestConfidence is the max across ALL live rows (supporting / observation-
+ * only rows included — retained for admin / audit even though it cannot activate
+ * the link).
  */
 export function resolveLinkStatusFromEvidence(
   liveEvidence: readonly { signalType: string; confidence: OwnerLinkConfidence }[],
@@ -523,8 +557,11 @@ export function resolveLinkStatusFromEvidence(
 
 /**
  * The same verified Device Passport used by both accounts -> a direct MEDIUM
- * owner-bound evidence row (signal SHARED_DEVICE_PASSPORT). Shared-device
- * fan-out / anonymous history telemetry MUST NOT veto this.
+ * owner-bound evidence row (signal SHARED_DEVICE_PASSPORT). MEDIUM = SUPPORTING
+ * only: one shared/public browser produces this shape with two unrelated
+ * accounts, so it never establishes an ACTIVE link on its own (v1 threshold is
+ * HIGH — evidenceCanEstablishActiveLink). Shared-device fan-out / anonymous
+ * history telemetry MUST NOT veto its RECORDING as supporting evidence.
  */
 export function sharedVerifiedPassportEvidenceConfidence(): OwnerLinkConfidence {
   return "MEDIUM";
@@ -533,7 +570,12 @@ export function sharedVerifiedPassportEvidenceConfidence(): OwnerLinkConfidence 
 /**
  * A cross-Passport actor co-occurrence count of >= 1 -> a direct MEDIUM
  * owner-bound evidence row (signal CROSS_PASSPORT_ACTOR_COOCCURRENCE). A count
- * of 0 (or a non-finite value) yields null — nothing to record.
+ * of 0 (or a non-finite value) yields null — nothing to record. MEDIUM =
+ * SUPPORTING only: a two-device household in which two related people each use
+ * both machines produces the identical evidence to one person's two accounts,
+ * so it never establishes an ACTIVE link on its own (v1 threshold is HIGH). A
+ * producer of this signal needs an independent HIGH corroboration or an
+ * ADMIN_MANUAL confirmation before an owner link can go ACTIVE.
  */
 export function crossPassportActorCooccurrenceConfidence(cooccurrenceCount: number): OwnerLinkConfidence | null {
   return Number.isFinite(cooccurrenceCount) && cooccurrenceCount >= 1 ? "MEDIUM" : null;

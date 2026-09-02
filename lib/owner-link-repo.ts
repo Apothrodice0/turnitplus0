@@ -409,7 +409,15 @@ export type UpsertOwnerLinkEvidenceOutcome =
   | "SAME_ACCOUNT"
   | "UNKNOWN_SIGNAL"
   | "MISSING_FINGERPRINT"
-  | "OBSERVATION_ONLY_NO_LINK"
+  /**
+   * The evidence is not ownership-ESTABLISHING (an observation-only signal, or
+   * an owner-bound signal below the v1 HIGH threshold — LOW or MEDIUM/supporting)
+   * AND there is no existing link for it to attach to. Nothing is written. NOT
+   * "observation-only" — a MEDIUM SHARED_DEVICE_PASSPORT / CROSS_PASSPORT_ACTOR_
+   * COOCCURRENCE row lands here too, because MEDIUM is supporting evidence, not
+   * establishing evidence.
+   */
+  | "NON_ESTABLISHING_NO_LINK"
   | "EVIDENCE_RECORDED";
 
 export type UpsertOwnerLinkEvidenceResult = {
@@ -441,17 +449,24 @@ function emptyUpsert(outcome: UpsertOwnerLinkEvidenceOutcome): UpsertOwnerLinkEv
  *
  *   - key unavailable / same account / unknown signal / missing fingerprint
  *     -> a no-op result, nothing written.
- *   - a qualifying owner-bound signal (>= MEDIUM) with no link row yet
+ *   - an ESTABLISHING signal (owner-bound at HIGH — the v1 threshold, see
+ *     evidenceCanEstablishActiveLink) with no link row yet
  *     -> the link row is CREATED ACTIVE, the evidence row inserted, BOTH
  *        endpoint generations bumped.
- *   - a non-qualifying signal (observation-only, or LOW) with no link row
- *     -> OBSERVATION_ONLY_NO_LINK, nothing written (there is nothing for it to
- *        attach to; it can never create a link by itself).
+ *   - a NON-ESTABLISHING signal (observation-only, or owner-bound below HIGH —
+ *     LOW or MEDIUM/supporting) with no link row
+ *     -> NON_ESTABLISHING_NO_LINK, nothing written. There is no link for it to
+ *        attach to, and it cannot create one by itself. The durable upstream
+ *        source (e.g. device_passport_actor_usage) remains the history from
+ *        which this supporting evidence can be recomputed later, once an
+ *        establishing signal creates the link.
  *   - any signal when a link row already exists
  *     -> the evidence row is UPSERTed (first_observed_at preserved,
  *        last_observed_at advanced, observation_count incremented; a withdrawn
  *        row is revived), then the link's status + strongest_confidence are
- *        recomputed from ALL live evidence.
+ *        recomputed from ALL live evidence. Note: if the ONLY live evidence is
+ *        now non-establishing (all HIGH rows withdrawn, only LOW/MEDIUM remain),
+ *        resolveLinkStatusFromEvidence returns WITHDRAWN and the link drops.
  *
  * Shared-device fan-out / anonymous-history / IP / timing values passed in
  * `detail` are stored (bounded) but are NEVER consulted here — they cannot veto
@@ -489,7 +504,7 @@ export async function upsertOwnerLinkEvidence(
 
     if (!existingLink && !qualifies) {
       await tx.rollback();
-      return emptyUpsert("OBSERVATION_ONLY_NO_LINK");
+      return emptyUpsert("NON_ESTABLISHING_NO_LINK");
     }
 
     let linkId: string;

@@ -1340,10 +1340,14 @@ export const corpus_admission_decision_device_provenance = sqliteTable(
 // to one row (a SQL CHECK (account_ref_lo < account_ref_hi) enforces it and
 // rules out a self-pair; not modelled here as this project's schema-drift
 // tooling does not compare CHECK constraints, matching corpus_match_generation's
-// own id=1 CHECK). status ACTIVE | WITHDRAWN — WITHDRAWN is a tombstone; a link
-// row is NEVER deleted. strongest_confidence is the strongest confidence across
-// the link's non-withdrawn evidence, retained for admin / audit. Epoch-ms
-// integer timestamps (the 0038 convention). withdrawn_reason is a CHECK-
+// own id=1 CHECK). status ACTIVE | WITHDRAWN — ACTIVE iff >= 1 live owner-bound
+// HIGH evidence row (the v1 OWNERSHIP-ESTABLISHING threshold; MEDIUM owner-bound
+// evidence is SUPPORTING only and never establishes or keeps ACTIVE alone — see
+// lib/owner-link.ts evidenceCanEstablishActiveLink and the migration header).
+// WITHDRAWN is a tombstone; a link row is NEVER deleted. strongest_confidence is
+// the strongest confidence across the link's non-withdrawn evidence, retained
+// for admin / audit — it does NOT gate status. Epoch-ms integer timestamps (the
+// 0038 convention). withdrawn_reason is a CHECK-
 // constrained controlled vocabulary (lib/owner-link.ts's
 // OWNER_LINK_WITHDRAWAL_REASONS — MANUAL_REVIEW | REVOKED | NO_QUALIFYING_EVIDENCE
 // | SUPERSEDED | ADMIN_CORRECTION, or NULL), never free text; the CHECK lives in
@@ -1390,7 +1394,10 @@ export const account_owner_links = sqliteTable(
 // — unambiguous, so ["a b","c"] and ["a","b c"] never collide), NEVER a raw
 // account / passport / phone / email value. signal_type is a CHECK-constrained
 // closed vocabulary (lib/owner-link.ts's ALL_OWNER_LINK_SIGNAL_TYPES) — the
-// CHECK lives in the migration only. observation_count / first_observed_at /
+// CHECK lives in the migration only. confidence HIGH | MEDIUM | LOW: HIGH is the
+// v1 ownership-ESTABLISHING tier; MEDIUM owner-bound rows are SUPPORTING only
+// (they attach to an existing link but never create/keep ACTIVE alone).
+// observation_count / first_observed_at /
 // last_observed_at follow UPSERT semantics keyed on
 // UNIQUE(link_id, signal_type, evidence_fingerprint): a repeat observation
 // PRESERVES first_observed_at, ADVANCES last_observed_at, INCREMENTS

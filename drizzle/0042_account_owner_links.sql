@@ -10,12 +10,27 @@
 -- this phase.
 --
 -- WHY THIS EXISTS
--- A DIRECT, owner-bound signal between two accounts — the same cryptographically
--- verified Device Passport used by both; a verified shared phone / recovery
--- email / OAuth provider subject / payment account or instrument; an admin
--- manual link; or >= 1 cross-Passport actor co-occurrence — is durable evidence
--- that the two accounts have the SAME human owner. account_owner_links records
--- exactly those direct pairwise links.
+-- A DIRECT owner link between two accounts records durable evidence that the two
+-- accounts have the SAME human owner. account_owner_links records exactly those
+-- direct pairwise links.
+--
+-- ── ESTABLISHMENT THRESHOLD (v1): OWNER-BOUND != OWNERSHIP-ESTABLISHING ─────
+-- confidence has three tiers (lib/owner-link.ts evidenceCanEstablishActiveLink):
+--     LOW    weak / observational
+--     MEDIUM SUPPORTING owner evidence — corroborates, attaches to an existing
+--            link, but CANNOT alone create or keep an ACTIVE link
+--     HIGH   ownership-ESTABLISHING — the ONLY tier that activates a link in v1
+-- A single MEDIUM owner-bound row (a shared verified Device Passport used by two
+-- accounts, a cross-Passport actor co-occurrence, a verified shared phone /
+-- recovery email / OAuth subject / payment account or instrument) is
+-- household/family-ambiguous — one person's two accounts and two related people
+-- sharing two devices produce identical evidence — and a false owner link can
+-- later suppress genuine plagiarism as SELF / 0. Precision over recall => MEDIUM
+-- never establishes on its own. This is a GENERAL, fail-closed confidence
+-- boundary; no signal type is special-cased. ADMIN_MANUAL at HIGH is currently
+-- the ONLY practical path to an ACTIVE link. Future automatic identity producers
+-- must pass a separate confidence review before they may emit HIGH — they are
+-- NOT promoted to HIGH merely for being owner-bound.
 --
 -- It is deliberately NON-TRANSITIVE: an A-B link and a B-C link never imply an
 -- A-C link in this phase. Shared-device fan-out, anonymous passport history,
@@ -69,10 +84,13 @@
 --     can be derived, so no owner-link row is ever written (fail closed).
 --   key_version records which keying generation produced the pair (see HMAC KEY
 --     ROTATION above) — OWNER_LINK_KEY_VERSION.
---   status ACTIVE | WITHDRAWN — WITHDRAWN is a tombstone; a link row is NEVER
---     deleted. strongest_confidence HIGH | MEDIUM | LOW is the strongest
---     confidence across the link's non-withdrawn evidence, retained for
---     admin / audit (scoring integration comes in a later phase).
+--   status ACTIVE | WITHDRAWN — ACTIVE iff >= 1 live owner-bound HIGH evidence
+--     row (see ESTABLISHMENT THRESHOLD above); a lone MEDIUM/supporting row is
+--     never enough. WITHDRAWN is a tombstone; a link row is NEVER deleted.
+--     strongest_confidence HIGH | MEDIUM | LOW is the strongest confidence
+--     across the link's non-withdrawn evidence, retained for admin / audit —
+--     it does NOT gate status (a link with strongest_confidence MEDIUM and no
+--     live HIGH row is WITHDRAWN). Scoring integration comes in a later phase.
 --   first_linked_at / last_evidence_at / withdrawn_at and decided_by
 --     SYSTEM | ADMIN — epoch-millisecond integers (the drizzle/0038 / sessions
 --     / 0010 convention), never TEXT CURRENT_TIMESTAMP. On a WITHDRAWN -> ACTIVE
@@ -98,7 +116,13 @@
 --     never be removed while any evidence references it (and links are never
 --     removed anyway) — the same durability posture drizzle/0039 /
 --     drizzle/0041 took.
---   confidence / signal_type / evidence_fingerprint — evidence_fingerprint is
+--   confidence HIGH | MEDIUM | LOW — HIGH is the v1 OWNERSHIP-ESTABLISHING tier
+--     (see ESTABLISHMENT THRESHOLD in this file's header); MEDIUM is SUPPORTING
+--     only; LOW is weak / observational. A row's confidence does not restrict
+--     its signal_type: a producer that can only assert SHARED_DEVICE_PASSPORT /
+--     CROSS_PASSPORT_ACTOR_COOCCURRENCE at MEDIUM records it at MEDIUM and it
+--     cannot, alone, activate a link.
+--   signal_type / evidence_fingerprint — evidence_fingerprint is
 --     itself an HMAC / domain-separated digest over a JSON-ENCODED component
 --     array (lib/owner-link.ts's ownerLinkEvidenceFingerprint — the encoding is
 --     unambiguous: ["a b","c"] and ["a","b c"] never collide), NEVER a raw

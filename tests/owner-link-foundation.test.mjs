@@ -127,16 +127,38 @@ async function ensureUser(id) {
   return createSession(client, id);
 }
 
-/** Record one qualifying SHARED_DEVICE_PASSPORT MEDIUM evidence between A and B. */
-async function linkViaSharedPassport(accountA, accountB, passportRef = uniq('pp'), at = Date.now()) {
+/**
+ * Establish an ACTIVE owner link the ONLY way v1 allows: a HIGH-confidence
+ * owner-bound evidence row, which in practice today is ADMIN_MANUAL (see
+ * evidenceCanEstablishActiveLink — a MEDIUM owner-bound row is SUPPORTING only
+ * and never establishes/keeps ACTIVE). `ref` is a stable fingerprint
+ * discriminator so revive / reactivation tests can re-observe the same row.
+ * `opts.{createdBy,decidedBy}` default to ADMIN (an admin-manual link).
+ */
+async function establishOwnerLink(accountA, accountB, ref = uniq('adm'), at = Date.now(), opts = {}) {
   return upsertOwnerLinkEvidence(client, {
     accountId: accountA,
     candidateSourceAccountId: accountB,
-    signalType: 'SHARED_DEVICE_PASSPORT',
-    confidence: sharedVerifiedPassportEvidenceConfidence(),
-    evidenceFingerprint: fp('SHARED_DEVICE_PASSPORT', passportRef),
+    signalType: 'ADMIN_MANUAL',
+    confidence: 'HIGH',
+    evidenceFingerprint: fp('ADMIN_MANUAL', ref),
+    observedAt: at,
+    createdBy: opts.createdBy ?? 'ADMIN',
+    decidedBy: opts.decidedBy ?? 'ADMIN',
+  });
+}
+
+/** Attach one MEDIUM owner-bound SUPPORTING evidence row (cannot establish; only ever attaches to an existing link). */
+async function addSupportingEvidence(accountA, accountB, signalType, ref = uniq('sup'), at = Date.now(), detail = undefined) {
+  return upsertOwnerLinkEvidence(client, {
+    accountId: accountA,
+    candidateSourceAccountId: accountB,
+    signalType,
+    confidence: 'MEDIUM',
+    evidenceFingerprint: fp(signalType, ref),
     observedAt: at,
     createdBy: 'SYSTEM',
+    detail,
   });
 }
 
@@ -218,9 +240,9 @@ test('5: raw account ids never appear in account_owner_links / _evidence / _stat
   const B = uniq('raw-check-b');
   await upsertOwnerLinkEvidence(client, {
     accountId: A, candidateSourceAccountId: B,
-    signalType: 'SHARED_DEVICE_PASSPORT', confidence: 'MEDIUM',
-    evidenceFingerprint: fp('SHARED_DEVICE_PASSPORT', uniq('pp')),
-    observedAt: Date.now(), createdBy: 'SYSTEM',
+    signalType: 'ADMIN_MANUAL', confidence: 'HIGH',
+    evidenceFingerprint: fp('ADMIN_MANUAL', uniq('adm')),
+    observedAt: Date.now(), createdBy: 'ADMIN', decidedBy: 'ADMIN',
     detail: {
       subjectAccountId: A,
       candidateAccountId: B,
@@ -256,8 +278,8 @@ test('6: no transitive closure — an A-B link and a B-C link do not create an A
   const C = uniq('tc-c');
   const linksBefore = await countRows('account_owner_links');
 
-  await linkViaSharedPassport(A, B);
-  await linkViaSharedPassport(B, C);
+  await establishOwnerLink(A, B);
+  await establishOwnerLink(B, C);
   assert.equal(await countRows('account_owner_links'), linksBefore + 2, 'exactly two direct link rows');
 
   assert.ok(await readDirectActiveOwnerLinkBetween(client, A, B), 'A-B is directly linked');
@@ -273,18 +295,18 @@ test('6: no transitive closure — an A-B link and a B-C link do not create an A
 test('7: a repeat observation of the same (link, signal, fingerprint) preserves first_observed_at and increments observation_count', async () => {
   const A = uniq('up-a');
   const B = uniq('up-b');
-  const fingerprint = fp('SHARED_DEVICE_PASSPORT', uniq('pp'));
+  const fingerprint = fp('ADMIN_MANUAL', uniq('adm'));
   const t0 = 1_000_000;
 
   const first = await upsertOwnerLinkEvidence(client, {
-    accountId: A, candidateSourceAccountId: B, signalType: 'SHARED_DEVICE_PASSPORT', confidence: 'MEDIUM',
-    evidenceFingerprint: fingerprint, observedAt: t0, createdBy: 'SYSTEM',
+    accountId: A, candidateSourceAccountId: B, signalType: 'ADMIN_MANUAL', confidence: 'HIGH',
+    evidenceFingerprint: fingerprint, observedAt: t0, createdBy: 'ADMIN', decidedBy: 'ADMIN',
   });
   assert.equal(first.evidenceCreated, true);
 
   const second = await upsertOwnerLinkEvidence(client, {
-    accountId: B, candidateSourceAccountId: A, signalType: 'SHARED_DEVICE_PASSPORT', confidence: 'MEDIUM',
-    evidenceFingerprint: fingerprint, observedAt: t0 + 5_000, createdBy: 'SYSTEM',
+    accountId: B, candidateSourceAccountId: A, signalType: 'ADMIN_MANUAL', confidence: 'HIGH',
+    evidenceFingerprint: fingerprint, observedAt: t0 + 5_000, createdBy: 'ADMIN', decidedBy: 'ADMIN',
   });
   assert.equal(second.evidenceCreated, false, 'no second row — same triple, unordered');
   assert.equal(second.linkId, first.linkId, 'same link, regardless of A/B order');
@@ -297,8 +319,8 @@ test('7: a repeat observation of the same (link, signal, fingerprint) preserves 
 
   // last_observed_at never regresses on an out-of-order observation
   await upsertOwnerLinkEvidence(client, {
-    accountId: A, candidateSourceAccountId: B, signalType: 'SHARED_DEVICE_PASSPORT', confidence: 'MEDIUM',
-    evidenceFingerprint: fingerprint, observedAt: t0 + 1_000, createdBy: 'SYSTEM',
+    accountId: A, candidateSourceAccountId: B, signalType: 'ADMIN_MANUAL', confidence: 'HIGH',
+    evidenceFingerprint: fingerprint, observedAt: t0 + 1_000, createdBy: 'ADMIN', decidedBy: 'ADMIN',
   });
   const after = (await readOwnerLinkEvidence(client, first.linkId))[0];
   assert.equal(after.observationCount, 3);
@@ -312,7 +334,7 @@ test('7: a repeat observation of the same (link, signal, fingerprint) preserves 
 test('8: withdrawing evidence or a link tombstones rows (withdrawn_at set) and never deletes them', async () => {
   const A = uniq('wd-a');
   const B = uniq('wd-b');
-  const rec = await linkViaSharedPassport(A, B);
+  const rec = await establishOwnerLink(A, B);
   const evBefore = await countRows('account_owner_link_evidence');
   const linkBefore = await countRows('account_owner_links');
   const [ev] = await readOwnerLinkEvidence(client, rec.linkId);
@@ -345,7 +367,7 @@ test('9: recording a direct link bumps the link generation of BOTH endpoint acco
   assert.equal(await readAccountOwnerLinkGeneration(client, A), 0);
   assert.equal(await readAccountOwnerLinkGeneration(client, B), 0);
 
-  const rec = await linkViaSharedPassport(A, B);
+  const rec = await establishOwnerLink(A, B);
   assert.equal(rec.generationsBumped, true);
 
   const ga = await readAccountOwnerLinkGeneration(client, A);
@@ -366,7 +388,7 @@ test('9: recording a direct link bumps the link generation of BOTH endpoint acco
 test('10: withdrawal bumps the generation forward — it is never reset or decremented', async () => {
   const A = uniq('mono-a');
   const B = uniq('mono-b');
-  const rec = await linkViaSharedPassport(A, B);
+  const rec = await establishOwnerLink(A, B);
   const g1 = await readAccountOwnerLinkGeneration(client, A);
   assert.equal(g1, 1);
 
@@ -382,124 +404,143 @@ test('10: withdrawal bumps the generation forward — it is never reset or decre
 });
 
 // ===========================================================================
-// 11 — same verified Passport => direct MEDIUM link
+// 11 — HIGH owner-bound evidence establishes an ACTIVE link
 // ===========================================================================
 
-test('11: the same verified Device Passport used by both accounts creates a direct MEDIUM ACTIVE link', async () => {
-  assert.equal(sharedVerifiedPassportEvidenceConfidence(), 'MEDIUM');
+test('11: a HIGH owner-bound evidence row (ADMIN_MANUAL) creates a direct ACTIVE link; strongest_confidence is HIGH', async () => {
   const A = uniq('sp-a');
   const B = uniq('sp-b');
-  const rec = await linkViaSharedPassport(A, B);
+  const rec = await establishOwnerLink(A, B);
   assert.equal(rec.outcome, 'EVIDENCE_RECORDED');
   assert.equal(rec.linkCreated, true);
   assert.equal(rec.linkStatus, 'ACTIVE');
-  assert.equal(rec.strongestConfidence, 'MEDIUM');
+  assert.equal(rec.strongestConfidence, 'HIGH');
 
   const link = await readDirectActiveOwnerLinkBetween(client, A, B);
   assert.ok(link);
-  assert.equal(link.strongestConfidence, 'MEDIUM');
-  assert.equal(link.decidedBy, 'SYSTEM');
+  assert.equal(link.strongestConfidence, 'HIGH');
+  assert.equal(link.decidedBy, 'ADMIN', 'the establishing actor (ADMIN_MANUAL is the only practical HIGH path in v1)');
 });
 
 // ===========================================================================
-// 12 — cross-Passport actor co-occurrence >= 1 => direct MEDIUM link
+// 12 — a lone MEDIUM owner-bound signal CANNOT establish an ACTIVE link
 // ===========================================================================
 
-test('12: a cross-Passport actor co-occurrence count >= 1 creates a direct MEDIUM ACTIVE link', async () => {
+test('12: a single MEDIUM owner-bound row (SHARED_DEVICE_PASSPORT / CROSS_PASSPORT_ACTOR_COOCCURRENCE) does NOT create an ACTIVE link — it is supporting evidence only', async () => {
+  // the helpers still report MEDIUM (the honest confidence of these signals)
+  assert.equal(sharedVerifiedPassportEvidenceConfidence(), 'MEDIUM');
   assert.equal(crossPassportActorCooccurrenceConfidence(1), 'MEDIUM');
-  assert.equal(crossPassportActorCooccurrenceConfidence(4), 'MEDIUM');
-  assert.equal(crossPassportActorCooccurrenceConfidence(0), null, '0 co-occurrences -> nothing to record');
+  assert.equal(crossPassportActorCooccurrenceConfidence(9), 'MEDIUM');
+  assert.equal(crossPassportActorCooccurrenceConfidence(0), null);
   assert.equal(crossPassportActorCooccurrenceConfidence(Number.NaN), null);
 
-  const A = uniq('cp-a');
-  const B = uniq('cp-b');
-  const rec = await upsertOwnerLinkEvidence(client, {
-    accountId: A, candidateSourceAccountId: B,
-    signalType: 'CROSS_PASSPORT_ACTOR_COOCCURRENCE',
-    confidence: crossPassportActorCooccurrenceConfidence(1),
-    evidenceFingerprint: fp('CROSS_PASSPORT_ACTOR_COOCCURRENCE', uniq('scope')),
-    observedAt: Date.now(), createdBy: 'SYSTEM',
-    detail: { cooccurrenceCount: 1 },
-  });
-  assert.equal(rec.linkStatus, 'ACTIVE');
-  assert.equal(rec.strongestConfidence, 'MEDIUM');
-  assert.ok(await readDirectActiveOwnerLinkBetween(client, A, B));
+  // ...but a lone MEDIUM row establishes nothing
+  const linksBefore = await countRows('account_owner_links');
+  const evBefore = await countRows('account_owner_link_evidence');
+  for (const signalType of ['SHARED_DEVICE_PASSPORT', 'CROSS_PASSPORT_ACTOR_COOCCURRENCE', 'SHARED_PASSPORT_ACTOR_COOCCURRENCE', 'SHARED_CORPUS_DEVICE_PROVENANCE', 'VERIFIED_PHONE']) {
+    const A = uniq(`m12-${signalType}-a`);
+    const B = uniq(`m12-${signalType}-b`);
+    const res = await addSupportingEvidence(A, B, signalType, uniq('r'), Date.now(), { cooccurrenceCount: 3 });
+    assert.equal(res.outcome, 'NON_ESTABLISHING_NO_LINK', `${signalType} MEDIUM alone -> NON_ESTABLISHING_NO_LINK`);
+    assert.equal(res.linkId, null);
+    assert.equal(res.linkCreated, false);
+    assert.equal(await readDirectActiveOwnerLinkBetween(client, A, B), null);
+    assert.equal(await readDirectOwnerLink(client, deriveOwnerRefPair(A, B)), null, 'no link row at all');
+  }
+  assert.equal(await countRows('account_owner_links'), linksBefore, 'zero link rows written by any lone MEDIUM signal');
+  assert.equal(await countRows('account_owner_link_evidence'), evBefore, 'zero evidence rows written either — nothing to attach to');
 });
 
 // ===========================================================================
-// 13 / 14 — telemetry NEVER vetoes a direct owner link
+// 12b — MULTIPLE different MEDIUM owner-bound signals still cannot establish
 // ===========================================================================
 
-test('13: a high device fan-out passed alongside the evidence does NOT block the link', async () => {
+test('12b: several different MEDIUM owner-bound signals for the same pair still create NO active link — count of supporting evidence is not corroboration', async () => {
+  const A = uniq('m12b-a');
+  const B = uniq('m12b-b');
+  for (const signalType of ['SHARED_DEVICE_PASSPORT', 'CROSS_PASSPORT_ACTOR_COOCCURRENCE', 'SHARED_PASSPORT_ACTOR_COOCCURRENCE']) {
+    const res = await addSupportingEvidence(A, B, signalType, uniq('r'));
+    assert.equal(res.outcome, 'NON_ESTABLISHING_NO_LINK');
+  }
+  assert.equal(await readDirectOwnerLink(client, deriveOwnerRefPair(A, B)), null, 'still no link — v1 has no corroboration rule, and none of these is HIGH');
+  assert.equal(await readDirectActiveOwnerLinkBetween(client, A, B), null);
+});
+
+// ===========================================================================
+// 13 / 14 — telemetry NEVER vetoes an ESTABLISHED (HIGH) link; MEDIUM
+//            supporting evidence attaches without changing status
+// ===========================================================================
+
+test('13: a high device fan-out passed alongside SUPPORTING evidence does NOT withdraw an established link', async () => {
   const A = uniq('fan-a');
   const B = uniq('fan-b');
-  const rec = await upsertOwnerLinkEvidence(client, {
-    accountId: A, candidateSourceAccountId: B,
-    signalType: 'SHARED_DEVICE_PASSPORT', confidence: 'MEDIUM',
-    evidenceFingerprint: fp('SHARED_DEVICE_PASSPORT', uniq('pp')),
-    observedAt: Date.now(), createdBy: 'SYSTEM',
-    detail: { deviceDistinctAccounts: 250, sharedDeviceFanout: 250, deviceAnonUploads: 0 },
+  const rec = await establishOwnerLink(A, B); // HIGH ADMIN_MANUAL -> ACTIVE
+  const attach = await addSupportingEvidence(A, B, 'SHARED_DEVICE_PASSPORT', uniq('pp'), Date.now(), {
+    deviceDistinctAccounts: 250, sharedDeviceFanout: 250, deviceAnonUploads: 0,
   });
-  assert.equal(rec.linkStatus, 'ACTIVE', 'fan-out is telemetry only — it cannot withdraw a direct link');
+  assert.equal(attach.outcome, 'EVIDENCE_RECORDED');
+  assert.equal(attach.linkStatus, 'ACTIVE', 'fan-out is telemetry only — it cannot withdraw an established link');
   const link = await readDirectActiveOwnerLinkBetween(client, A, B);
   assert.ok(link);
-  const [ev] = await readOwnerLinkEvidence(client, link.id);
-  assert.equal(JSON.parse(ev.detailJson).deviceDistinctAccounts, 250, 'the fan-out count is retained as bounded telemetry');
+  const supporting = (await readOwnerLinkEvidence(client, link.id)).find((e) => e.signalType === 'SHARED_DEVICE_PASSPORT');
+  assert.equal(JSON.parse(supporting.detailJson).deviceDistinctAccounts, 250, 'the fan-out count is retained as bounded telemetry on the supporting row');
+  assert.equal(supporting.confidence, 'MEDIUM', 'and it is stored as MEDIUM/supporting, not promoted');
 });
 
-test('14: anonymous passport history passed alongside the evidence does NOT block the link', async () => {
+test('14: anonymous passport history passed alongside SUPPORTING evidence does NOT withdraw an established link', async () => {
   const A = uniq('anon-a');
   const B = uniq('anon-b');
-  const rec = await upsertOwnerLinkEvidence(client, {
-    accountId: A, candidateSourceAccountId: B,
-    signalType: 'SHARED_PASSPORT_ACTOR_COOCCURRENCE', confidence: 'MEDIUM',
-    evidenceFingerprint: fp('SHARED_PASSPORT_ACTOR_COOCCURRENCE', uniq('pp')),
-    observedAt: Date.now(), createdBy: 'SYSTEM',
-    detail: { anonymousHistoryPresent: true, deviceAnonUploads: 7 },
+  await establishOwnerLink(A, B);
+  const attach = await addSupportingEvidence(A, B, 'SHARED_PASSPORT_ACTOR_COOCCURRENCE', uniq('pp'), Date.now(), {
+    anonymousHistoryPresent: true, deviceAnonUploads: 7,
   });
-  assert.equal(rec.linkStatus, 'ACTIVE', 'anonymous history is telemetry only');
+  assert.equal(attach.linkStatus, 'ACTIVE', 'anonymous history is telemetry only');
   assert.ok(await readDirectActiveOwnerLinkBetween(client, A, B));
 });
 
 // ===========================================================================
-// 15 — IP / location / timing alone cannot create an ACTIVE link
+// 15 — the establishment threshold: only owner-bound + HIGH establishes
 // ===========================================================================
 
-test('15: observation-only signals (and LOW owner-bound evidence) cannot create an ACTIVE owner link by themselves', async () => {
+test('15: evidenceCanEstablishActiveLink — only owner-bound AND HIGH qualifies; observation-only never, LOW/MEDIUM owner-bound never', async () => {
   for (const signalType of OBSERVATION_ONLY_SIGNAL_TYPES) {
     assert.equal(isObservationOnlySignal(signalType), true);
-    assert.equal(evidenceCanEstablishActiveLink(signalType, 'HIGH'), false, `${signalType} never qualifies, even at HIGH`);
+    for (const c of ['LOW', 'MEDIUM', 'HIGH']) {
+      assert.equal(evidenceCanEstablishActiveLink(signalType, c), false, `${signalType} never qualifies, even at ${c}`);
+    }
   }
-  assert.equal(evidenceCanEstablishActiveLink('SHARED_DEVICE_PASSPORT', 'LOW'), false, 'LOW owner-bound evidence never qualifies');
-  assert.equal(evidenceCanEstablishActiveLink('SHARED_DEVICE_PASSPORT', 'MEDIUM'), true);
+  for (const signalType of OWNER_BOUND_SIGNAL_TYPES) {
+    assert.equal(evidenceCanEstablishActiveLink(signalType, 'LOW'), false, `${signalType} LOW does not qualify`);
+    assert.equal(evidenceCanEstablishActiveLink(signalType, 'MEDIUM'), false, `${signalType} MEDIUM is SUPPORTING only`);
+    assert.equal(evidenceCanEstablishActiveLink(signalType, 'HIGH'), true, `${signalType} HIGH establishes`);
+  }
+  // an unrecognised signal fails closed
+  assert.equal(evidenceCanEstablishActiveLink('NOT_A_SIGNAL', 'HIGH'), false);
 
   const A = uniq('ip-a');
   const B = uniq('ip-b');
   const linksBefore = await countRows('account_owner_links');
-
   for (const signalType of ['IP_COOCCURRENCE', 'COARSE_LOCATION', 'TIMING']) {
     const res = await upsertOwnerLinkEvidence(client, {
       accountId: A, candidateSourceAccountId: B, signalType, confidence: 'LOW',
       evidenceFingerprint: fp(signalType, uniq('obs')), observedAt: Date.now(), createdBy: 'SYSTEM',
     });
-    assert.equal(res.outcome, 'OBSERVATION_ONLY_NO_LINK', `${signalType} alone records nothing`);
+    assert.equal(res.outcome, 'NON_ESTABLISHING_NO_LINK', `${signalType} alone records nothing`);
     assert.equal(res.linkId, null);
   }
-  // a LOW owner-bound signal with no link is likewise non-creating
-  const lowRes = await upsertOwnerLinkEvidence(client, {
-    accountId: A, candidateSourceAccountId: B, signalType: 'SHARED_DEVICE_PASSPORT', confidence: 'LOW',
-    evidenceFingerprint: fp('SHARED_DEVICE_PASSPORT', uniq('pp')), observedAt: Date.now(), createdBy: 'SYSTEM',
-  });
-  assert.equal(lowRes.outcome, 'OBSERVATION_ONLY_NO_LINK');
-
-  assert.equal(await countRows('account_owner_links'), linksBefore, 'no link row created by any observation-only / LOW signal');
+  // LOW and MEDIUM owner-bound signals with no link are likewise non-establishing
+  for (const c of ['LOW', 'MEDIUM']) {
+    const res = await addSupportingEvidence(uniq(`nl-${c}-a`), uniq(`nl-${c}-b`), 'SHARED_DEVICE_PASSPORT', uniq('pp'));
+    assert.equal(res.outcome, 'NON_ESTABLISHING_NO_LINK', `SHARED_DEVICE_PASSPORT (recorded MEDIUM) alone -> NON_ESTABLISHING_NO_LINK`);
+  }
+  assert.equal(await countRows('account_owner_links'), linksBefore, 'no link row created by any non-establishing signal');
   assert.equal(await readDirectActiveOwnerLinkBetween(client, A, B), null);
 });
 
-test('15b: an observation-only signal DOES attach to an already-existing link (audit trail), without changing its status', async () => {
+test('15b: an observation-only signal attaches to an already-established link without changing its status; withdrawing the sole HIGH row drops it', async () => {
   const A = uniq('att-a');
   const B = uniq('att-b');
-  const rec = await linkViaSharedPassport(A, B);
+  const rec = await establishOwnerLink(A, B);
 
   const attach = await upsertOwnerLinkEvidence(client, {
     accountId: A, candidateSourceAccountId: B, signalType: 'IP_COOCCURRENCE', confidence: 'LOW',
@@ -507,17 +548,78 @@ test('15b: an observation-only signal DOES attach to an already-existing link (a
   });
   assert.equal(attach.outcome, 'EVIDENCE_RECORDED');
   assert.equal(attach.linkId, rec.linkId);
-  assert.equal(attach.linkStatus, 'ACTIVE', 'the qualifying evidence still holds the link ACTIVE');
+  assert.equal(attach.linkStatus, 'ACTIVE', 'the HIGH evidence still holds the link ACTIVE');
 
   const evidence = await readOwnerLinkEvidence(client, rec.linkId);
   assert.equal(evidence.length, 2, 'the observation is retained on the link for audit');
 
-  // withdraw the qualifying evidence -> only the observation-only row lives -> link WITHDRAWN
-  const qualifying = evidence.find((e) => e.signalType === 'SHARED_DEVICE_PASSPORT');
-  await withdrawOwnerLinkEvidence(client, { evidenceId: qualifying.id, reason: 'MANUAL_REVIEW', withdrawnAt: Date.now(), decidedBy: 'ADMIN' });
+  // withdraw the establishing (HIGH) evidence -> only the observation-only row lives -> link WITHDRAWN
+  const establishing = evidence.find((e) => e.signalType === 'ADMIN_MANUAL');
+  await withdrawOwnerLinkEvidence(client, { evidenceId: establishing.id, reason: 'MANUAL_REVIEW', withdrawnAt: Date.now(), decidedBy: 'ADMIN' });
   const link = await readDirectOwnerLink(client, deriveOwnerRefPair(A, B));
   assert.equal(link.status, 'WITHDRAWN', 'an observation-only row cannot keep a link ACTIVE on its own');
   assert.equal((await readOwnerLinkEvidence(client, rec.linkId)).length, 2, 'both rows still present (one tombstoned)');
+});
+
+// ===========================================================================
+// 15c — an ACTIVE link drops to WITHDRAWN when its last HIGH row is
+//        withdrawn, EVEN THOUGH live MEDIUM supporting evidence remains
+// ===========================================================================
+
+test('15c: ACTIVE + (withdraw last HIGH while MEDIUM supporting evidence still lives) -> WITHDRAWN', async () => {
+  const A = uniq('drop-a');
+  const B = uniq('drop-b');
+  const highRef = uniq('adm');
+  const rec = await establishOwnerLink(A, B, highRef); // HIGH ADMIN_MANUAL
+  await addSupportingEvidence(A, B, 'CROSS_PASSPORT_ACTOR_COOCCURRENCE', uniq('x'), Date.now(), { cooccurrenceCount: 2 });
+  await addSupportingEvidence(A, B, 'SHARED_DEVICE_PASSPORT', uniq('pp'));
+  let evs = await readOwnerLinkEvidence(client, rec.linkId);
+  assert.equal(evs.filter((e) => e.withdrawnAt == null).length, 3, 'one HIGH + two MEDIUM live');
+  assert.equal((await readDirectOwnerLink(client, deriveOwnerRefPair(A, B))).status, 'ACTIVE');
+
+  const high = evs.find((e) => e.signalType === 'ADMIN_MANUAL');
+  const w = await withdrawOwnerLinkEvidence(client, { evidenceId: high.id, reason: 'ADMIN_CORRECTION', withdrawnAt: Date.now(), decidedBy: 'ADMIN' });
+  assert.equal(w.outcome, 'EVIDENCE_WITHDRAWN');
+  assert.equal(w.linkStatus, 'WITHDRAWN');
+  const link = await readDirectOwnerLink(client, deriveOwnerRefPair(A, B));
+  assert.equal(link.status, 'WITHDRAWN', 'no live HIGH row -> WITHDRAWN, even with two live MEDIUM rows');
+  assert.equal(link.strongestConfidence, 'MEDIUM', 'strongest_confidence tracks the surviving MEDIUM rows but does NOT keep the link ACTIVE');
+  evs = await readOwnerLinkEvidence(client, rec.linkId);
+  assert.equal(evs.filter((e) => e.withdrawnAt == null).length, 2, 'the two MEDIUM rows are still live — they were not tombstoned, they just cannot hold ACTIVE');
+
+  // a fresh MEDIUM supporting observation on the now-WITHDRAWN link does NOT revive it
+  const stillDown = await addSupportingEvidence(A, B, 'SHARED_PASSPORT_ACTOR_COOCCURRENCE', uniq('pp2'));
+  assert.equal(stillDown.outcome, 'EVIDENCE_RECORDED', 'it attaches to the existing (withdrawn) link');
+  assert.equal(stillDown.linkStatus, 'WITHDRAWN', 'MEDIUM supporting evidence cannot reactivate a link');
+  assert.equal((await readDirectOwnerLink(client, deriveOwnerRefPair(A, B))).status, 'WITHDRAWN');
+});
+
+// ===========================================================================
+// 15d — re-observing the SAME withdrawn HIGH row reactivates the link
+// ===========================================================================
+
+test('15d: a HIGH re-observation of the withdrawn establishing row flips the link WITHDRAWN -> ACTIVE again', async () => {
+  const A = uniq('re-a');
+  const B = uniq('re-b');
+  const highRef = uniq('adm');
+  const rec = await establishOwnerLink(A, B, highRef);
+  const [high] = await readOwnerLinkEvidence(client, rec.linkId);
+
+  await withdrawOwnerLinkEvidence(client, { evidenceId: high.id, reason: 'MANUAL_REVIEW', withdrawnAt: Date.now(), decidedBy: 'ADMIN' });
+  assert.equal((await readDirectOwnerLink(client, deriveOwnerRefPair(A, B))).status, 'WITHDRAWN');
+
+  // same accounts, same signal, same fingerprint -> revives the tombstoned row
+  const back = await establishOwnerLink(A, B, highRef);
+  assert.equal(back.outcome, 'EVIDENCE_RECORDED');
+  assert.equal(back.linkId, rec.linkId, 'same link row');
+  assert.equal(back.evidenceCreated, false, 'no new evidence row — the withdrawn one was revived');
+  assert.equal(back.linkStatus, 'ACTIVE');
+  const link = await readDirectOwnerLink(client, deriveOwnerRefPair(A, B));
+  assert.equal(link.status, 'ACTIVE', 'a fresh HIGH observation reactivates the link');
+  assert.equal(link.strongestConfidence, 'HIGH');
+
+  const events = (await readOwnerLinkEvents(client, rec.linkId)).map((e) => e.eventType);
+  assert.deepEqual(events, ['LINK_CREATED', 'EVIDENCE_ADDED', 'EVIDENCE_WITHDRAWN', 'LINK_WITHDRAWN', 'EVIDENCE_REACTIVATED', 'LINK_REACTIVATED']);
 });
 
 // ===========================================================================
@@ -529,7 +631,7 @@ test('16: report deletion, room clearing, and account deletion leave every owner
   const B = uniq('del-b');
   await ensureUser(A);
   await ensureUser(B);
-  await linkViaSharedPassport(A, B);
+  await establishOwnerLink(A, B);
   await upsertOwnerLinkEvidence(client, {
     accountId: A, candidateSourceAccountId: B, signalType: 'IP_COOCCURRENCE', confidence: 'LOW',
     evidenceFingerprint: fp('IP_COOCCURRENCE', uniq('obs')), observedAt: Date.now(), createdBy: 'SYSTEM',
@@ -558,12 +660,16 @@ test('17: no scoring / matcher / candidate-discovery module and no app/ route im
   const importLines = (src) => src.split(/\r?\n/).filter((l) => /^\s*(?:import|export)\b.*\bfrom\b/.test(l)).join('\n');
   const OWNER_LINK_RE = /owner-link(?:-repo)?/;
 
+  // includes the independent same-Passport SELF scoring path (device-self-scoring-rule,
+  // report-primary-similarity, device-passport-server, device-sharedness-risk) — a
+  // separate, already-proven scoring mechanism that this owner-link work must not touch.
   const scoringFiles = [
     'lib/report-primary-similarity.ts',
     'lib/unified-similarity.ts',
     'lib/similarity-core.ts',
     'lib/report-types.ts',
     'lib/device-self-scoring-rule.ts',
+    'lib/device-sharedness-risk.ts',
     'lib/device-shared-guard.ts',
     'lib/device-shared-guard-policy.ts',
     'lib/report-historical-match.ts',
@@ -687,7 +793,7 @@ test('18: drizzle/0042 shape — four additive tables, unique indexes, RESTRICT 
   // RESTRICT behaviourally blocks deleting a link that still has evidence
   const A = uniq('shape-a');
   const B = uniq('shape-b');
-  const rec = await linkViaSharedPassport(A, B);
+  const rec = await establishOwnerLink(A, B);
   await assert.rejects(
     () => client.execute({ sql: 'DELETE FROM account_owner_links WHERE id = ?', args: [rec.linkId] }),
     /FOREIGN KEY constraint failed/,
@@ -731,10 +837,34 @@ test('19: signal vocabulary and status resolution are internally consistent', ()
   assert.equal(strongestConfidenceOf(['LOW', 'HIGH']), 'HIGH');
   assert.equal(strongestConfidenceOf([]), null);
 
+  // a lone MEDIUM owner-bound row is SUPPORTING only — it does NOT resolve to ACTIVE
   assert.deepEqual(
     resolveLinkStatusFromEvidence([{ signalType: 'SHARED_DEVICE_PASSPORT', confidence: 'MEDIUM' }]),
-    { status: 'ACTIVE', strongestConfidence: 'MEDIUM', qualifyingCount: 1 },
+    { status: 'WITHDRAWN', strongestConfidence: 'MEDIUM', qualifyingCount: 0 },
   );
+  // only an owner-bound HIGH row establishes ACTIVE (the v1 threshold)
+  assert.deepEqual(
+    resolveLinkStatusFromEvidence([{ signalType: 'ADMIN_MANUAL', confidence: 'HIGH' }]),
+    { status: 'ACTIVE', strongestConfidence: 'HIGH', qualifyingCount: 1 },
+  );
+  // a HIGH row alongside live MEDIUM supporting rows: ACTIVE, one qualifying
+  assert.deepEqual(
+    resolveLinkStatusFromEvidence([
+      { signalType: 'ADMIN_MANUAL', confidence: 'HIGH' },
+      { signalType: 'SHARED_DEVICE_PASSPORT', confidence: 'MEDIUM' },
+      { signalType: 'CROSS_PASSPORT_ACTOR_COOCCURRENCE', confidence: 'MEDIUM' },
+    ]),
+    { status: 'ACTIVE', strongestConfidence: 'HIGH', qualifyingCount: 1 },
+  );
+  // withdraw that HIGH row and only MEDIUM remains -> WITHDRAWN, even with two live rows
+  assert.deepEqual(
+    resolveLinkStatusFromEvidence([
+      { signalType: 'SHARED_DEVICE_PASSPORT', confidence: 'MEDIUM' },
+      { signalType: 'CROSS_PASSPORT_ACTOR_COOCCURRENCE', confidence: 'MEDIUM' },
+    ]),
+    { status: 'WITHDRAWN', strongestConfidence: 'MEDIUM', qualifyingCount: 0 },
+  );
+  // an owner-bound signal at HIGH is the ONLY establishing shape — even HIGH observation-only never qualifies
   assert.deepEqual(
     resolveLinkStatusFromEvidence([{ signalType: 'IP_COOCCURRENCE', confidence: 'HIGH' }]),
     { status: 'WITHDRAWN', strongestConfidence: 'HIGH', qualifyingCount: 0 },
@@ -829,7 +959,7 @@ test('21: every OWNER_LINK_WITHDRAWAL_REASONS value is accepted by both withdraw
 
     const A = uniq(`wr-${reason}-a`);
     const B = uniq(`wr-${reason}-b`);
-    const rec = await linkViaSharedPassport(A, B);
+    const rec = await establishOwnerLink(A, B);
 
     const liveLink = await readDirectOwnerLink(client, deriveOwnerRefPair(A, B));
     assert.equal(liveLink.withdrawnReason, null, 'a live link carries no withdrawn_reason');
@@ -844,22 +974,20 @@ test('21: every OWNER_LINK_WITHDRAWAL_REASONS value is accepted by both withdraw
   }
 
   // single-evidence withdrawal records the reason on the evidence tombstone even while the link stays ACTIVE
+  // (a SECOND establishing HIGH row keeps the link ACTIVE after the first is withdrawn)
   const A = uniq('wr-ev-a');
   const B = uniq('wr-ev-b');
-  const rec = await linkViaSharedPassport(A, B);
-  await upsertOwnerLinkEvidence(client, {
-    accountId: A, candidateSourceAccountId: B,
-    signalType: 'CROSS_PASSPORT_ACTOR_COOCCURRENCE', confidence: 'MEDIUM',
-    evidenceFingerprint: fp('CROSS_PASSPORT_ACTOR_COOCCURRENCE', uniq('scope')),
-    observedAt: Date.now(), createdBy: 'SYSTEM',
-  });
-  const first = (await readOwnerLinkEvidence(client, rec.linkId)).find((e) => e.signalType === 'SHARED_DEVICE_PASSPORT');
+  const rec = await establishOwnerLink(A, B, uniq('adm'));
+  await establishOwnerLink(A, B, uniq('adm')); // a second HIGH ADMIN_MANUAL row (distinct fingerprint)
+  const evRows = await readOwnerLinkEvidence(client, rec.linkId);
+  assert.equal(evRows.filter((e) => e.signalType === 'ADMIN_MANUAL').length, 2, 'two HIGH establishing rows');
+  const first = evRows[0];
   await withdrawOwnerLinkEvidence(client, { evidenceId: first.id, reason: 'ADMIN_CORRECTION', withdrawnAt: Date.now(), decidedBy: 'ADMIN' });
   const firstAfter = (await readOwnerLinkEvidence(client, rec.linkId)).find((e) => e.id === first.id);
   assert.equal(firstAfter.withdrawnReason, 'ADMIN_CORRECTION');
   assert.ok(firstAfter.withdrawnAt != null);
   const link = await readDirectOwnerLink(client, deriveOwnerRefPair(A, B));
-  assert.equal(link.status, 'ACTIVE', 'the other qualifying evidence still holds the link ACTIVE');
+  assert.equal(link.status, 'ACTIVE', 'the other qualifying (HIGH) evidence still holds the link ACTIVE');
   assert.equal(link.withdrawnReason, null, 'an ACTIVE link carries no withdrawn_reason');
 });
 
@@ -886,7 +1014,7 @@ test('22: an arbitrary withdrawn_reason is rejected at the app layer (throws, wr
 
   const A = uniq('bad-reason-a');
   const B = uniq('bad-reason-b');
-  const rec = await linkViaSharedPassport(A, B);
+  const rec = await establishOwnerLink(A, B);
   const [ev] = await readOwnerLinkEvidence(client, rec.linkId);
   const dumpBefore = await dumpOwnerLinkTables();
 
@@ -926,7 +1054,7 @@ test('22: an arbitrary withdrawn_reason is rejected at the app layer (throws, wr
 test('23: an unknown signal_type is rejected at the DB level; every real signal type passes the CHECK', async () => {
   const A = uniq('sig-a');
   const B = uniq('sig-b');
-  const rec = await linkViaSharedPassport(A, B);
+  const rec = await establishOwnerLink(A, B);
 
   await assert.rejects(
     () => client.execute({
@@ -966,7 +1094,7 @@ test('24: account_owner_links has the reverse-endpoint index on account_ref_hi; 
 
   const A = uniq('rev-a');
   const B = uniq('rev-b');
-  const rec = await linkViaSharedPassport(A, B);
+  const rec = await establishOwnerLink(A, B);
   const pair = deriveOwnerRefPair(A, B);
   const byHi = (await client.execute({
     sql: 'SELECT id FROM account_owner_links WHERE account_ref_hi = ? AND key_version = ?',
@@ -991,13 +1119,18 @@ test('24: account_owner_links has the reverse-endpoint index on account_ref_hi; 
 test('25: a WITHDRAWN -> ACTIVE reactivation re-attributes decided_by on the live row (which necessarily clears its withdrawn_* fields); the history lives in account_owner_link_events', async () => {
   const A = uniq('react-a');
   const B = uniq('react-b');
-  const passportRef = uniq('react-pp');
+  const admRef = uniq('react-adm');
   const t0 = 5_000_000;
 
-  const created = await linkViaSharedPassport(A, B, passportRef, t0);
+  // Genesis + every reactivation here is a HIGH owner-bound establishing row
+  // (ADMIN_MANUAL — the v1 establishment path). createdBy / decidedBy are driven
+  // explicitly per cycle so BOTH reactivation-attribution branches
+  // (params.decidedBy ?? params.createdBy) are exercised; a SYSTEM reactivating
+  // actor stands in for a future HIGH-capable automatic identity producer.
+  const created = await establishOwnerLink(A, B, admRef, t0, { createdBy: 'ADMIN', decidedBy: 'ADMIN' });
   assert.equal(created.linkCreated, true);
   let link = await readDirectOwnerLink(client, deriveOwnerRefPair(A, B));
-  assert.equal(link.decidedBy, 'SYSTEM');
+  assert.equal(link.decidedBy, 'ADMIN', 'an ADMIN_MANUAL genesis link is decided_by ADMIN');
   const genA0 = await readAccountOwnerLinkGeneration(client, A);
 
   await withdrawOwnerLink(client, { linkId: created.linkId, reason: 'MANUAL_REVIEW', withdrawnAt: t0 + 1_000, decidedBy: 'ADMIN' });
@@ -1008,8 +1141,8 @@ test('25: a WITHDRAWN -> ACTIVE reactivation re-attributes decided_by on the liv
   const genAafterWithdraw = await readAccountOwnerLinkGeneration(client, A);
   assert.ok(genAafterWithdraw > genA0);
 
-  // fresh SYSTEM observation of the SAME evidence -> reactivation
-  const reactivated = await linkViaSharedPassport(A, B, passportRef, t0 + 2_000);
+  // fresh SYSTEM-attributed observation of the SAME establishing evidence -> reactivation
+  const reactivated = await establishOwnerLink(A, B, admRef, t0 + 2_000, { createdBy: 'SYSTEM', decidedBy: 'SYSTEM' });
   assert.equal(reactivated.linkId, created.linkId);
   assert.equal(reactivated.linkStatus, 'ACTIVE');
   assert.equal(reactivated.generationsBumped, true);
@@ -1043,25 +1176,16 @@ test('25: a WITHDRAWN -> ACTIVE reactivation re-attributes decided_by on the liv
 
   // an ADMIN-recorded reactivation attributes to ADMIN
   await withdrawOwnerLink(client, { linkId: created.linkId, reason: 'REVOKED', withdrawnAt: t0 + 3_000, decidedBy: 'ADMIN' });
-  await upsertOwnerLinkEvidence(client, {
-    accountId: A, candidateSourceAccountId: B, signalType: 'SHARED_DEVICE_PASSPORT', confidence: 'MEDIUM',
-    evidenceFingerprint: fp('SHARED_DEVICE_PASSPORT', passportRef), observedAt: t0 + 4_000, createdBy: 'ADMIN',
-  });
+  await establishOwnerLink(A, B, admRef, t0 + 4_000, { createdBy: 'ADMIN', decidedBy: 'ADMIN' });
   assert.equal((await readDirectOwnerLink(client, deriveOwnerRefPair(A, B))).decidedBy, 'ADMIN');
 
   // an explicit decidedBy overrides createdBy on reactivation
   await withdrawOwnerLink(client, { linkId: created.linkId, reason: 'REVOKED', withdrawnAt: t0 + 5_000, decidedBy: 'ADMIN' });
-  await upsertOwnerLinkEvidence(client, {
-    accountId: A, candidateSourceAccountId: B, signalType: 'SHARED_DEVICE_PASSPORT', confidence: 'MEDIUM',
-    evidenceFingerprint: fp('SHARED_DEVICE_PASSPORT', passportRef), observedAt: t0 + 6_000, createdBy: 'ADMIN', decidedBy: 'SYSTEM',
-  });
+  await establishOwnerLink(A, B, admRef, t0 + 6_000, { createdBy: 'ADMIN', decidedBy: 'SYSTEM' });
   assert.equal((await readDirectOwnerLink(client, deriveOwnerRefPair(A, B))).decidedBy, 'SYSTEM');
 
   // a plain repeat observation on an already-ACTIVE link does NOT touch decided_by
-  await upsertOwnerLinkEvidence(client, {
-    accountId: A, candidateSourceAccountId: B, signalType: 'SHARED_DEVICE_PASSPORT', confidence: 'MEDIUM',
-    evidenceFingerprint: fp('SHARED_DEVICE_PASSPORT', passportRef), observedAt: t0 + 7_000, createdBy: 'ADMIN',
-  });
+  await establishOwnerLink(A, B, admRef, t0 + 7_000, { createdBy: 'ADMIN', decidedBy: 'ADMIN' });
   assert.equal((await readDirectOwnerLink(client, deriveOwnerRefPair(A, B))).decidedBy, 'SYSTEM', 'a repeat observation on a live link is not a reactivation');
 
   // full 3-cycle history is retained, in order, with per-transition reason + actor + time
@@ -1105,13 +1229,13 @@ test('26: owner_link_generation is DIRECT-PAIR scoped — an A-B link plus a lat
   const B = uniq('gscope-b');
   const C = uniq('gscope-c');
 
-  await linkViaSharedPassport(A, B);
+  await establishOwnerLink(A, B);
   const genA1 = await readAccountOwnerLinkGeneration(client, A);
   const genB1 = await readAccountOwnerLinkGeneration(client, B);
   assert.equal(genA1, 1);
   assert.equal(genB1, 1);
 
-  await linkViaSharedPassport(B, C);
+  await establishOwnerLink(B, C);
 
   assert.equal(
     await readAccountOwnerLinkGeneration(client, A), genA1,
@@ -1133,7 +1257,7 @@ test('27: changing OWNER_LINK_HMAC_KEY orphans existing refs + generations (hidd
 
   const A = uniq('rot-a');
   const B = uniq('rot-b');
-  const rec = await linkViaSharedPassport(A, B);
+  const rec = await establishOwnerLink(A, B);
   assert.ok(await readDirectActiveOwnerLinkBetween(client, A, B));
   assert.equal(await readAccountOwnerLinkGeneration(client, A), 1);
   const refAunderK1 = ownerAccountRef(A);
@@ -1192,8 +1316,9 @@ test('28: drizzle/0042 signal_type + withdrawn_reason CHECK lists match lib/owne
 test('29: LINK_CREATED + EVIDENCE_ADDED on genesis; a repeat observation or a same-band confidence change on already-live evidence records NO event', async () => {
   const A = uniq('evt29-a');
   const B = uniq('evt29-b');
-  const passportRef = uniq('evt29-pp');
-  const rec = await linkViaSharedPassport(A, B, passportRef, 1_000);
+  const admRef = uniq('evt29-adm');
+  const suppRef = uniq('evt29-supp');
+  const rec = await establishOwnerLink(A, B, admRef, 1_000);
 
   let events = await readOwnerLinkEvents(client, rec.linkId);
   assert.deepEqual(events.map((e) => e.eventType), ['LINK_CREATED', 'EVIDENCE_ADDED']);
@@ -1203,21 +1328,32 @@ test('29: LINK_CREATED + EVIDENCE_ADDED on genesis; a repeat observation or a sa
   assert.equal(events[0].evidenceId, null, 'LINK_CREATED is link-level');
   assert.ok(events[1].evidenceId, 'EVIDENCE_ADDED points at the evidence row');
 
-  // plain repeat observation of the SAME live evidence -> no event
-  await upsertOwnerLinkEvidence(client, {
-    accountId: A, candidateSourceAccountId: B, signalType: 'SHARED_DEVICE_PASSPORT', confidence: 'MEDIUM',
-    evidenceFingerprint: fp('SHARED_DEVICE_PASSPORT', passportRef), observedAt: 2_000, createdBy: 'SYSTEM',
-  });
+  // plain repeat observation of the SAME live establishing evidence -> no event, no generation bump
+  const repeat = await establishOwnerLink(A, B, admRef, 2_000);
+  assert.equal(repeat.generationsBumped, false, 'nothing material changed');
   assert.equal((await readOwnerLinkEvents(client, rec.linkId)).length, 2, 'a repeat observation of already-live evidence is not a state transition');
 
-  // confidence MEDIUM -> HIGH (still qualifying, link stays ACTIVE) -> still no event
-  const bump = await upsertOwnerLinkEvidence(client, {
-    accountId: A, candidateSourceAccountId: B, signalType: 'SHARED_DEVICE_PASSPORT', confidence: 'HIGH',
-    evidenceFingerprint: fp('SHARED_DEVICE_PASSPORT', passportRef), observedAt: 3_000, createdBy: 'SYSTEM',
+  // attach a LOW supporting owner-bound row (the link already exists) -> that IS a new evidence row
+  await upsertOwnerLinkEvidence(client, {
+    accountId: A, candidateSourceAccountId: B, signalType: 'SHARED_DEVICE_PASSPORT', confidence: 'LOW',
+    evidenceFingerprint: fp('SHARED_DEVICE_PASSPORT', suppRef), observedAt: 3_000, createdBy: 'SYSTEM',
   });
-  assert.equal(bump.generationsBumped, true, 'a confidence change is still a material change for generation');
+  assert.deepEqual(
+    (await readOwnerLinkEvents(client, rec.linkId)).map((e) => e.eventType),
+    ['LINK_CREATED', 'EVIDENCE_ADDED', 'EVIDENCE_ADDED'],
+    'attaching a new supporting row is one EVIDENCE_ADDED',
+  );
+
+  // same-band confidence change of that SUPPORTING row (LOW -> MEDIUM) — link stays ACTIVE
+  // on the HIGH establishing row, strongest_confidence stays HIGH -> NO event
+  const bump = await upsertOwnerLinkEvidence(client, {
+    accountId: A, candidateSourceAccountId: B, signalType: 'SHARED_DEVICE_PASSPORT', confidence: 'MEDIUM',
+    evidenceFingerprint: fp('SHARED_DEVICE_PASSPORT', suppRef), observedAt: 4_000, createdBy: 'SYSTEM',
+  });
+  assert.equal(bump.linkStatus, 'ACTIVE');
+  assert.equal(bump.generationsBumped, false, 'the link strongest_confidence (HIGH) did not move — not a material change');
   events = await readOwnerLinkEvents(client, rec.linkId);
-  assert.equal(events.length, 2, 'a strongest_confidence change that does not cross ACTIVE/WITHDRAWN records no event');
+  assert.equal(events.length, 3, 'a confidence change on live evidence that does not cross ACTIVE/WITHDRAWN records no event');
 });
 
 // ===========================================================================
@@ -1227,7 +1363,7 @@ test('29: LINK_CREATED + EVIDENCE_ADDED on genesis; a repeat observation or a sa
 test('30: withdrawing already-withdrawn evidence, or an already-withdrawn link, appends no event (idempotent — no state transition)', async () => {
   const A = uniq('evt30-a');
   const B = uniq('evt30-b');
-  const rec = await linkViaSharedPassport(A, B);
+  const rec = await establishOwnerLink(A, B);
   const [ev] = await readOwnerLinkEvidence(client, rec.linkId);
 
   await withdrawOwnerLinkEvidence(client, { evidenceId: ev.id, reason: 'MANUAL_REVIEW', withdrawnAt: 10, decidedBy: 'ADMIN' });
@@ -1252,41 +1388,43 @@ test('30: withdrawing already-withdrawn evidence, or an already-withdrawn link, 
 test('31: withdrawing one of several qualifying evidence rows is EVIDENCE_WITHDRAWN only; withdrawing the last one also emits LINK_WITHDRAWN; a confidence downgrade of the sole evidence emits LINK_WITHDRAWN', async () => {
   const A = uniq('evt31-a');
   const B = uniq('evt31-b');
-  const rec = await linkViaSharedPassport(A, B, uniq('pp'), 100);
-  await upsertOwnerLinkEvidence(client, {
-    accountId: A, candidateSourceAccountId: B, signalType: 'CROSS_PASSPORT_ACTOR_COOCCURRENCE', confidence: 'MEDIUM',
-    evidenceFingerprint: fp('CROSS_PASSPORT_ACTOR_COOCCURRENCE', uniq('scope')), observedAt: 110, createdBy: 'SYSTEM',
-  });
+  // two HIGH owner-bound establishing rows for the same pair (distinct fingerprints)
+  const rec = await establishOwnerLink(A, B, uniq('adm'), 100);
+  await establishOwnerLink(A, B, uniq('adm'), 110);
+  // plus a MEDIUM supporting row — it can never hold the link ACTIVE on its own
+  await addSupportingEvidence(A, B, 'CROSS_PASSPORT_ACTOR_COOCCURRENCE', uniq('scope'), 115);
   const evs = await readOwnerLinkEvidence(client, rec.linkId);
-  const first = evs.find((e) => e.signalType === 'SHARED_DEVICE_PASSPORT');
-  const second = evs.find((e) => e.signalType === 'CROSS_PASSPORT_ACTOR_COOCCURRENCE');
+  const highs = evs.filter((e) => e.signalType === 'ADMIN_MANUAL');
+  assert.equal(highs.length, 2);
 
-  // withdraw one -> link stays ACTIVE (other still qualifies) -> EVIDENCE_WITHDRAWN only
-  await withdrawOwnerLinkEvidence(client, { evidenceId: first.id, reason: 'REVOKED', withdrawnAt: 200, decidedBy: 'ADMIN' });
+  // withdraw one HIGH -> link stays ACTIVE (the other HIGH still qualifies) -> EVIDENCE_WITHDRAWN only
+  await withdrawOwnerLinkEvidence(client, { evidenceId: highs[0].id, reason: 'REVOKED', withdrawnAt: 200, decidedBy: 'ADMIN' });
   assert.equal((await readDirectOwnerLink(client, deriveOwnerRefPair(A, B))).status, 'ACTIVE');
   let events = await readOwnerLinkEvents(client, rec.linkId);
-  assert.deepEqual(events.map((e) => e.eventType), ['LINK_CREATED', 'EVIDENCE_ADDED', 'EVIDENCE_ADDED', 'EVIDENCE_WITHDRAWN']);
-  assert.equal(events.at(-1).evidenceId, first.id);
+  assert.deepEqual(events.map((e) => e.eventType), ['LINK_CREATED', 'EVIDENCE_ADDED', 'EVIDENCE_ADDED', 'EVIDENCE_ADDED', 'EVIDENCE_WITHDRAWN']);
+  assert.equal(events.at(-1).evidenceId, highs[0].id);
 
-  // withdraw the last qualifying one -> link drops -> EVIDENCE_WITHDRAWN + LINK_WITHDRAWN
-  await withdrawOwnerLinkEvidence(client, { evidenceId: second.id, reason: 'MANUAL_REVIEW', withdrawnAt: 300, decidedBy: 'ADMIN' });
+  // withdraw the last HIGH one -> link drops (the live MEDIUM row cannot hold it) -> EVIDENCE_WITHDRAWN + LINK_WITHDRAWN
+  await withdrawOwnerLinkEvidence(client, { evidenceId: highs[1].id, reason: 'MANUAL_REVIEW', withdrawnAt: 300, decidedBy: 'ADMIN' });
+  assert.equal((await readDirectOwnerLink(client, deriveOwnerRefPair(A, B))).status, 'WITHDRAWN', 'no live HIGH row remains — the MEDIUM supporting row does not keep it ACTIVE');
   events = await readOwnerLinkEvents(client, rec.linkId);
   assert.deepEqual(
     events.map((e) => e.eventType),
-    ['LINK_CREATED', 'EVIDENCE_ADDED', 'EVIDENCE_ADDED', 'EVIDENCE_WITHDRAWN', 'EVIDENCE_WITHDRAWN', 'LINK_WITHDRAWN'],
+    ['LINK_CREATED', 'EVIDENCE_ADDED', 'EVIDENCE_ADDED', 'EVIDENCE_ADDED', 'EVIDENCE_WITHDRAWN', 'EVIDENCE_WITHDRAWN', 'LINK_WITHDRAWN'],
   );
   assert.equal(events.at(-1).eventType, 'LINK_WITHDRAWN');
   assert.equal(events.at(-1).reason, 'MANUAL_REVIEW');
   assert.equal(events.at(-1).evidenceId, null);
 
-  // a confidence downgrade of a sole qualifying evidence withdraws the link via upsert
+  // a confidence downgrade of the SOLE qualifying evidence withdraws the link via upsert
   const C = uniq('evt31-c');
   const D = uniq('evt31-d');
-  const ppCD = uniq('pp-cd');
-  const recCD = await linkViaSharedPassport(C, D, ppCD, 400);
+  const admCD = uniq('adm-cd');
+  const recCD = await establishOwnerLink(C, D, admCD, 400);
+  // re-observe the SAME establishing row at MEDIUM -> it is no longer qualifying -> link drops
   await upsertOwnerLinkEvidence(client, {
-    accountId: C, candidateSourceAccountId: D, signalType: 'SHARED_DEVICE_PASSPORT', confidence: 'LOW',
-    evidenceFingerprint: fp('SHARED_DEVICE_PASSPORT', ppCD), observedAt: 410, createdBy: 'SYSTEM',
+    accountId: C, candidateSourceAccountId: D, signalType: 'ADMIN_MANUAL', confidence: 'MEDIUM',
+    evidenceFingerprint: fp('ADMIN_MANUAL', admCD), observedAt: 410, createdBy: 'ADMIN', decidedBy: 'ADMIN',
   });
   assert.equal((await readDirectOwnerLink(client, deriveOwnerRefPair(C, D))).status, 'WITHDRAWN');
   const cdEvents = await readOwnerLinkEvents(client, recCD.linkId);
@@ -1302,7 +1440,7 @@ test('31: withdrawing one of several qualifying evidence rows is EVIDENCE_WITHDR
 test('32: withdrawOwnerLink emits one EVIDENCE_WITHDRAWN per tombstoned row plus one LINK_WITHDRAWN; withdrawEvidence:false emits only LINK_WITHDRAWN', async () => {
   const A = uniq('evt32-a');
   const B = uniq('evt32-b');
-  const rec = await linkViaSharedPassport(A, B, uniq('pp'), 1);
+  const rec = await establishOwnerLink(A, B, uniq('pp'), 1);
   await upsertOwnerLinkEvidence(client, {
     accountId: A, candidateSourceAccountId: B, signalType: 'CROSS_PASSPORT_ACTOR_COOCCURRENCE', confidence: 'MEDIUM',
     evidenceFingerprint: fp('CROSS_PASSPORT_ACTOR_COOCCURRENCE', uniq('s')), observedAt: 2, createdBy: 'SYSTEM',
@@ -1329,7 +1467,7 @@ test('32: withdrawOwnerLink emits one EVIDENCE_WITHDRAWN per tombstoned row plus
   // withdrawEvidence:false -> only LINK_WITHDRAWN, evidence stays live
   const C = uniq('evt32-c');
   const D = uniq('evt32-d');
-  const recCD = await linkViaSharedPassport(C, D);
+  const recCD = await establishOwnerLink(C, D);
   const wNoEv = await withdrawOwnerLink(client, { linkId: recCD.linkId, reason: 'SUPERSEDED', withdrawnAt: 600, decidedBy: 'ADMIN', withdrawEvidence: false });
   assert.equal(wNoEv.evidenceTombstoned, 0);
   const cdEvents = await readOwnerLinkEvents(client, recCD.linkId);
@@ -1344,10 +1482,10 @@ test('32: withdrawOwnerLink emits one EVIDENCE_WITHDRAWN per tombstoned row plus
 test('33: account_owner_link_events stores only internal ids, bounded enums, one reason, one actor, one timestamp — never account/email/fingerprint/free text', async () => {
   const A = uniq('evt33-account-alpha');
   const B = uniq('evt33-account-beta');
-  const rec = await linkViaSharedPassport(A, B, uniq('pp-secret'), 1);
+  const rec = await establishOwnerLink(A, B, uniq('pp-secret'), 1);
   const [ev] = await readOwnerLinkEvidence(client, rec.linkId);
   await withdrawOwnerLinkEvidence(client, { evidenceId: ev.id, reason: 'MANUAL_REVIEW', withdrawnAt: 2, decidedBy: 'ADMIN' });
-  await linkViaSharedPassport(A, B, uniq('pp-secret'), 3); // (different pp ref → new evidence, keeps link ACTIVE)
+  await establishOwnerLink(A, B, uniq('pp-secret'), 3); // (a fresh HIGH row → new evidence, reactivates the link)
 
   const rows = (await client.execute('SELECT * FROM account_owner_link_events WHERE link_id = ? ORDER BY id', [rec.linkId])).rows;
   const dump = JSON.stringify(rows);
@@ -1386,7 +1524,7 @@ test('34: account_owner_link_events rejects invalid enums at the DB level; a rea
 test('34b: raw INSERTs into account_owner_link_events are CHECK-constrained on every enum column', async () => {
   const A = uniq('evt34-a');
   const B = uniq('evt34-b');
-  const rec = await linkViaSharedPassport(A, B);
+  const rec = await establishOwnerLink(A, B);
 
   const bad = [
     `INSERT INTO account_owner_link_events (link_id, event_type, new_state, actor, occurred_at) VALUES ('${rec.linkId}', 'NOT_AN_EVENT', 'ACTIVE', 'SYSTEM', 1)`,
@@ -1451,7 +1589,7 @@ test('35: drizzle/0042 account_owner_link_events CHECK lists match lib/owner-lin
 test('35b: account_owner_link_events shape CHECK rejects every impossible (event_type, evidence_id, previous_state, new_state, reason) combination at the DB layer', async () => {
   const A = uniq('shape-a');
   const B = uniq('shape-b');
-  const rec = await linkViaSharedPassport(A, B);
+  const rec = await establishOwnerLink(A, B);
   const [ev] = await readOwnerLinkEvidence(client, rec.linkId); // a real evidence id for the "link event with evidence_id" case
   const L = rec.linkId;
   const E = ev.id;
@@ -1554,10 +1692,10 @@ test('36: report deletion, room clearing, and account deletion leave account_own
   await ensureUser(A);
   await ensureUser(B);
   const passportRef = uniq('evt36-pp');
-  const rec = await linkViaSharedPassport(A, B, passportRef, 1_000);
+  const rec = await establishOwnerLink(A, B, passportRef, 1_000);
   // one full withdraw + reactivate cycle so there is real history to lose
   await withdrawOwnerLink(client, { linkId: rec.linkId, reason: 'MANUAL_REVIEW', withdrawnAt: 1_100, decidedBy: 'ADMIN' });
-  await linkViaSharedPassport(A, B, passportRef, 1_200);
+  await establishOwnerLink(A, B, passportRef, 1_200);
 
   await client.execute({
     sql: `INSERT INTO saved_reports (id, device_key, submission_id, title, report_created_at, word_count, archive_score, score_band, payload_json, user_id)
