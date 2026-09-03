@@ -84,11 +84,19 @@ async function callGet(routeModule, url, token) {
   return routeModule.GET(req);
 }
 
-async function callPost(routeModule, url, token, body) {
+// E8S Step 6.2: the four POST routes now enforce isSameOriginRequest
+// (lib/same-origin.ts). A real browser always sends Origin on an unsafe
+// method, so every non-CSRF call here sends a matching same-origin
+// Origin/Host by default — mirroring tests/corpus-admission-admin-routes.mjs's
+// SAME_ORIGIN convention. `origin: null` / `host: null` omit the header, for
+// the dedicated CSRF cases.
+async function callPost(routeModule, url, token, body, { origin = "http://localhost", host = "localhost" } = {}) {
   const ip = nextIp("post");
   await resetRateForTest(ip);
   const headers = { "content-type": "application/json", "x-forwarded-for": ip };
   if (token) headers["cookie"] = `tp_session_v1=${token}`;
+  if (origin !== null) headers["origin"] = origin;
+  if (host !== null) headers["host"] = host;
   const req = new Request(url, { method: "POST", headers, body: JSON.stringify(body) });
   return routeModule.POST(req);
 }

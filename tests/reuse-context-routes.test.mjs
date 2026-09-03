@@ -93,11 +93,18 @@ async function callGet(routeModule, url, token) {
   return routeModule.GET(req);
 }
 
-async function callPost(routeModule, url, token, body) {
+// E8S Step 6.2: declare/confirm/reject/revoke now enforce isSameOriginRequest
+// (lib/same-origin.ts, the same fail-closed check /api/admin/corpus/* uses).
+// A real browser always sends Origin on an unsafe method, so every functional
+// call here sends a matching same-origin Origin/Host by default; the CSRF
+// tests pass `origin: null` (no header) or a foreign origin explicitly.
+async function callPost(routeModule, url, token, body, { origin = "http://localhost", host = "localhost" } = {}) {
   const ip = nextIp("post");
   await resetRateForTest(ip);
   const headers = { "content-type": "application/json", "x-forwarded-for": ip };
   if (token) headers["cookie"] = `tp_session_v1=${token}`;
+  if (origin !== null) headers["origin"] = origin;
+  if (host !== null) headers["host"] = host;
   const req = new Request(url, { method: "POST", headers, body: JSON.stringify(body) });
   return routeModule.POST(req);
 }
@@ -428,4 +435,159 @@ test("O: representation deletion does not cascade to the declaration row -- audi
     args: [raw.rows[0].matched_submission_reference_id],
   });
   assert.equal(refCheck.rows.length, 0, "the underlying reference should be gone -- cascaded from the representation delete, per corpus_submission_references' own ON DELETE CASCADE");
+});
+
+// --- E8S Step 6.2: CSRF / same-origin enforcement --------------------------
+//
+// declare/confirm/reject/revoke each enforce isSameOriginRequest
+// (lib/same-origin.ts) — the same fail-closed check /api/admin/corpus/* uses.
+// The check runs after rate-limiting and BEFORE the body is read or the
+// session resolved, so a cross-site caller cannot probe JSON-validation, the
+// allowlist, or per-pair authorization. A same-origin failure returns this
+// feature's own generic hidden 404 ({ error: "Not found." }) — byte-identical
+// to the allowlist-gate response, revealing nothing.
+
+const CSRF_ROUTES = [
+  { name: "declare", mod: declareRoute, url: "http://localhost/api/reuse-context/declare" },
+  { name: "confirm", mod: confirmRoute, url: "http://localhost/api/reuse-context/confirm" },
+  { name: "reject", mod: rejectRoute, url: "http://localhost/api/reuse-context/reject" },
+  { name: "revoke", mod: revokeRoute, url: "http://localhost/api/reuse-context/revoke" },
+];
+
+/** A correctly-shaped body for each route, so a rejection can only be the same-origin gate, never body validation. */
+function csrfBodyFor(name, fx) {
+  if (name === "declare") {
+    return { documentIdentityId: fx.identity2.id, representationId: fx.ref1.representationId, declaredContext: "OTHER_AUTHORIZED_REUSE" };
+  }
+  return { declarationId: fx.declarationId };
+}
+/** The session actually authorized for each route's happy path. */
+function csrfTokenFor(name, fx) {
+  return name === "declare" ? fx.reuser.token : fx.original.token;
+}
+async function assertDeclarationUntouched(declarationId, note) {
+  const row = await client.execute({
+    sql: "SELECT verification_state, confirmed_at, revoked_at FROM reuse_context_declarations WHERE id = ?",
+    args: [declarationId],
+  });
+  assert.equal(row.rows[0].verification_state, "SELF_ASSERTED_UNVERIFIED", note);
+  assert.equal(row.rows[0].confirmed_at, null, note);
+  assert.equal(row.rows[0].revoked_at, null, note);
+}
+
+for (const { name, mod, url } of CSRF_ROUTES) {
+  test(`CSRF ${name}: missing Origin header -> generic hidden 404, declaration untouched`, async () => {
+    const fx = await declaredFixture(`csrf-noorigin-${name}`);
+    const res = await callPost(mod, url, csrfTokenFor(name, fx), csrfBodyFor(name, fx), { origin: null });
+    assert.equal(res.status, 404);
+    assert.deepEqual(await res.json(), { error: "Not found." });
+    await assertDeclarationUntouched(fx.declarationId, `${name}: a missing-Origin POST must not mutate the declaration`);
+  });
+
+  test(`CSRF ${name}: foreign Origin -> generic hidden 404, declaration untouched`, async () => {
+    const fx = await declaredFixture(`csrf-foreign-${name}`);
+    const res = await callPost(mod, url, csrfTokenFor(name, fx), csrfBodyFor(name, fx), { origin: "http://evil.example" });
+    assert.equal(res.status, 404);
+    assert.deepEqual(await res.json(), { error: "Not found." });
+    await assertDeclarationUntouched(fx.declarationId, `${name}: a foreign-Origin POST must not mutate the declaration`);
+  });
+}
+
+test("CSRF: same-origin declare reaches normal route behavior (DECLARED)", async () => {
+  const text = "CSRF same-origin declare fixture, long enough to canonicalize deterministically.";
+  const original = await createAccount("csrf-ok-declare-orig");
+  const reuser = await createAccount("csrf-ok-declare-reuse");
+  const { indexResult: ref1 } = await indexSubmission(original.id, "doc", text);
+  const { identity: identity2 } = await indexSubmission(reuser.id, "doc", text);
+  const res = await callPost(declareRoute, "http://localhost/api/reuse-context/declare", reuser.token, {
+    documentIdentityId: identity2.id, representationId: ref1.representationId, declaredContext: "SUPERVISOR_COPY",
+  });
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).status, "DECLARED");
+});
+
+test("CSRF: same-origin confirm / reject / revoke each reach normal route behavior", async () => {
+  const confirmFx = await declaredFixture("csrf-ok-confirm");
+  const cRes = await callPost(confirmRoute, "http://localhost/api/reuse-context/confirm", confirmFx.original.token, { declarationId: confirmFx.declarationId });
+  assert.equal(cRes.status, 200);
+  assert.equal((await cRes.json()).status, "CONFIRMED");
+
+  const rejectFx = await declaredFixture("csrf-ok-reject");
+  const rRes = await callPost(rejectRoute, "http://localhost/api/reuse-context/reject", rejectFx.original.token, { declarationId: rejectFx.declarationId });
+  assert.equal(rRes.status, 200);
+  assert.equal((await rRes.json()).status, "REVOKED");
+
+  const revokeFx = await declaredFixture("csrf-ok-revoke");
+  const vRes = await callPost(revokeRoute, "http://localhost/api/reuse-context/revoke", revokeFx.reuser.token, { declarationId: revokeFx.declarationId });
+  assert.equal(vRes.status, 200);
+  assert.equal((await vRes.json()).status, "REVOKED");
+});
+
+test("CSRF: the same-origin check precedes body parsing -- cross-origin malformed JSON is the CSRF 404, never a 400", async () => {
+  for (const { name, mod, url } of CSRF_ROUTES) {
+    const ip = nextIp("post");
+    await resetRateForTest(ip);
+    const req = new Request(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-forwarded-for": ip, origin: "http://evil.example", host: "localhost" },
+      body: "{ this is not valid json",
+    });
+    const res = await mod.POST(req);
+    assert.equal(res.status, 404, `${name}: cross-origin malformed JSON must be the CSRF 404, not a body 400`);
+    assert.deepEqual(await res.json(), { error: "Not found." }, `${name}: cross-origin response shape must not vary with body validity`);
+  }
+});
+
+test("CSRF: same-origin malformed JSON still reaches the 400 body-validation path (proves the gate was passed, not skipped)", async () => {
+  const { original } = await declaredFixture("csrf-sameorigin-badjson");
+  const ip = nextIp("post");
+  await resetRateForTest(ip);
+  const req = new Request("http://localhost/api/reuse-context/confirm", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-forwarded-for": ip, origin: "http://localhost", host: "localhost", cookie: `tp_session_v1=${original.token}` },
+    body: "{ not json",
+  });
+  const res = await confirmRoute.POST(req);
+  assert.equal(res.status, 400);
+  assert.equal((await res.json()).error, "Invalid JSON");
+});
+
+test("CSRF: an unauthenticated same-origin POST still gets 401 -- the same-origin gate never masks the auth requirement", async () => {
+  const fx = await declaredFixture("csrf-unauth");
+  for (const { name, mod, url } of CSRF_ROUTES) {
+    const res = await callPost(mod, url, undefined, csrfBodyFor(name, fx));
+    assert.equal(res.status, 401, `${name}: same-origin + no session -> 401 (unchanged)`);
+  }
+  await assertDeclarationUntouched(fx.declarationId, "an unauthenticated same-origin POST must not mutate the declaration");
+});
+
+test("CSRF: a same-origin POST from a non-allowlisted account still gets 404 -- passing the same-origin check never bypasses the allowlist gate", async () => {
+  const fx = await declaredFixture("csrf-allowlist");
+  const saved = process.env.E8S_REUSE_CONTEXT_ALLOWLIST;
+  process.env.E8S_REUSE_CONTEXT_ALLOWLIST = "an-unrelated-account-id";
+  try {
+    const res = await callPost(confirmRoute, "http://localhost/api/reuse-context/confirm", fx.original.token, { declarationId: fx.declarationId });
+    assert.equal(res.status, 404);
+    assert.deepEqual(await res.json(), { error: "Not found." });
+  } finally {
+    process.env.E8S_REUSE_CONTEXT_ALLOWLIST = saved;
+  }
+  await assertDeclarationUntouched(fx.declarationId, "a non-allowlisted same-origin POST must not mutate the declaration");
+});
+
+test("CSRF: a rejected cross-origin lifecycle attempt never touches an unrelated saved_reports row's score fields", async () => {
+  const reportId = "csrf-report-1";
+  await client.execute({
+    sql: `INSERT INTO saved_reports (id, device_key, submission_id, title, report_created_at, word_count, archive_score, score_band, payload_json, saved_at, updated_at)
+          VALUES (?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
+    args: [reportId, "csrf-device", "csrf-sub", "csrf.pdf", new Date().toISOString(), 100, 42, "Low", JSON.stringify({ score: 42, archiveScore: 42 })],
+  });
+  const before = await client.execute({ sql: "SELECT archive_score, payload_json FROM saved_reports WHERE id = ?", args: [reportId] });
+
+  const fx = await declaredFixture("csrf-noscore");
+  await callPost(confirmRoute, "http://localhost/api/reuse-context/confirm", fx.original.token, { declarationId: fx.declarationId }, { origin: "http://evil.example" });
+  await callPost(revokeRoute, "http://localhost/api/reuse-context/revoke", fx.reuser.token, { declarationId: fx.declarationId }, { origin: null });
+
+  const after = await client.execute({ sql: "SELECT archive_score, payload_json FROM saved_reports WHERE id = ?", args: [reportId] });
+  assert.deepEqual(before.rows[0], after.rows[0], "a cross-origin (rejected) declaration lifecycle must leave every saved_reports row byte-identical");
 });

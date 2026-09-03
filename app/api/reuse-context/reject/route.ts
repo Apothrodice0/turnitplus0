@@ -3,6 +3,7 @@ import { getReportsDbClient } from '../../../../lib/reports-db';
 import { checkRate } from '../../../../lib/rate-limit';
 import { clientIpFrom } from '../../../../lib/client-ip';
 import { getSessionUser } from '../../../../lib/auth-session';
+import { isSameOriginRequest } from '../../../../lib/same-origin';
 import { isE8sReuseContextAllowlisted } from '../../../../lib/e8s-visibility';
 import { getReuseContextDeclarationById, revokeReuseContext } from '../../../../lib/reuse-context-declarations';
 
@@ -33,6 +34,17 @@ export async function POST(request: Request) {
     const rate = await checkRate(clientIpFrom(request));
     if (!rate.allowed) {
       return new NextResponse(JSON.stringify({ error: 'Too many requests' }), { status: 429, headers: { 'Retry-After': String(rate.retryAfter) } });
+    }
+
+    // CSRF / same-origin (defense in depth beyond the SameSite=lax session
+    // cookie) — checked before the body is read or the session is resolved,
+    // so a cross-site caller cannot probe JSON validation or auth behavior.
+    // Mirrors the /api/admin/corpus/* fail-closed pattern (lib/same-origin.ts):
+    // a missing or foreign Origin is rejected with this feature's own generic
+    // hidden 404 — byte-identical to the allowlist-gate response below, so a
+    // cross-origin caller learns nothing a non-allowlisted user does not.
+    if (!isSameOriginRequest(request)) {
+      return new NextResponse(JSON.stringify({ error: 'Not found.' }), { status: 404, headers: { 'Content-Type': 'application/json' } });
     }
 
     const body = await request.json().catch(() => null);
