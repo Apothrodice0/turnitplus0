@@ -447,3 +447,41 @@ test("RENDER: a report with no unifiedSimilarity at all (predates Phase 4A) stil
   const ranges = findHighlightRanges(report);
   assert.deepEqual(ranges, []);
 });
+
+// --- Part 4: Phase B1 — the shadow hypothetical exclusion never alters the ---
+// --- authoritative matched-position union that drives highlighting ----------
+
+test("PHASE B1: computeUnifiedSimilarity's matchedPositions / previousUploadPositions are byte-identical with hypotheticalExcludedRepresentationIds absent vs [] vs undefined", () => {
+  const params = {
+    wordCount: INVARIANT_WORD_COUNT,
+    archiveMatchedPositions: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+    historicalSubmissionMatch: corpusMatch({ start: 5, end: 14 }),
+  };
+  const base = computeUnifiedSimilarity(params);
+  for (const variant of [undefined, null, [], new Set()]) {
+    const withParam = computeUnifiedSimilarity({ ...params, hypotheticalExcludedRepresentationIds: variant });
+    assert.deepEqual(withParam.matchedPositions, base.matchedPositions);
+    assert.deepEqual(withParam.previousUploadPositions, base.previousUploadPositions);
+    assert.deepEqual(withParam, base, "the whole authoritative result is unchanged, not just the position arrays");
+  }
+});
+
+test("PHASE B1: passing the hypothetical set only shrinks the position union — it never adds a position the authoritative result did not have", () => {
+  const params = {
+    wordCount: INVARIANT_WORD_COUNT,
+    archiveMatchedPositions: [0, 1, 2, 3, 4],
+    historicalSubmissionMatch: corpusMatch({ start: 0, end: INVARIANT_WORD_COUNT - 1 }),
+  };
+  const authoritative = computeUnifiedSimilarity(params);
+  const hypothetical = computeUnifiedSimilarity({
+    ...params,
+    hypotheticalExcludedRepresentationIds: ["unified-highlighting-fixture-representation"],
+  });
+  const authoritativeSet = new Set(authoritative.matchedPositions);
+  for (const position of hypothetical.matchedPositions) {
+    assert.ok(authoritativeSet.has(position), `hypothetical position ${position} must be a subset of the authoritative union`);
+  }
+  assert.ok(hypothetical.matchedPositions.length < authoritative.matchedPositions.length, "excluding the corpus source must remove positions");
+  // the 5 archive-covered positions still survive
+  assert.deepEqual(hypothetical.matchedPositions, [0, 1, 2, 3, 4]);
+});

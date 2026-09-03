@@ -35,8 +35,21 @@ export type UnifiedEvidenceSourceType = "archive" | "openaire" | "europe_pmc" | 
  * status/counter so genuine same-account SELF telemetry stays unchanged, and
  * the contribution still records the unchanged BASELINE relationship. Only
  * ever produced when the caller passes effectiveDeviceSelfRepresentationIds.
+ *
+ * "excluded_document_local_corpus_duplicate" (Phase B1 — SHADOW ONLY): a
+ * production-counted previous-upload contribution a shadow counterfactual
+ * (lib/corpus-duplicate-counterfactual.ts) is hypothetically removing, to
+ * measure what the score would be if one qualifying TurnitPlus internal
+ * exact-canonical representation did not inflate it. Contributes nothing to
+ * the union, exactly like "excluded_self", but records NO result-level
+ * counter of its own (deliberately — see hypotheticalExcludedRepresentationIds
+ * on ComputeUnifiedSimilarityParams) and keeps its UNCHANGED baseline
+ * relationship. Applied strictly AFTER the SELF / UNKNOWN / effective-device-
+ * SELF checks. Only ever produced when the caller passes
+ * hypotheticalExcludedRepresentationIds — which production scoring never does,
+ * so this value can never appear in an authoritative result.
  */
-export type UnifiedEvidenceStatus = "included" | "excluded_self" | "excluded_unknown" | "excluded_effective_device_self";
+export type UnifiedEvidenceStatus = "included" | "excluded_self" | "excluded_unknown" | "excluded_effective_device_self" | "excluded_document_local_corpus_duplicate";
 
 /**
  * One passage's contribution, kept for internal source attribution (STEP
@@ -173,6 +186,36 @@ export type ComputeUnifiedSimilarityParams = {
    * byte-identical to before this parameter existed.
    */
   effectiveDeviceSelfRepresentationIds?: readonly string[] | ReadonlySet<string> | null;
+  /**
+   * Phase B1 — SHADOW ONLY. matchedRepresentationId values a shadow
+   * counterfactual (lib/corpus-duplicate-counterfactual.ts, driven by
+   * lib/corpus-duplicate-suppression-policy.ts) is HYPOTHETICALLY excluding, to
+   * answer "what would the unified score be if this one qualifying TurnitPlus
+   * internal exact-canonical whole-document duplicate did not inflate it".
+   *
+   * A representation in this set: keeps its baseline relationshipType verbatim
+   * (this is NOT SELF, NOT ownership, NOT authorship, NOT authorized reuse —
+   * see lib/corpus-duplicate-suppression-policy.ts's own header); has its
+   * contribution recorded with evidenceStatus
+   * "excluded_document_local_corpus_duplicate"; and has its matched ranges left
+   * OUT of the scored union. Applied AFTER the SELF / UNKNOWN_RELATIONSHIP /
+   * effective-same-Passport-SELF checks, so a genuine SELF still gets
+   * "excluded_self" and its own tally, and an effective device SELF still gets
+   * "excluded_effective_device_self" and its own tally — this set never
+   * overrides either.
+   *
+   * Deliberately adds NO new counter or property to UnifiedSimilarityResult:
+   * the counterfactual helper derives every figure it needs from the two
+   * results (authoritative vs hypothetical) plus the historical-match input.
+   *
+   * PRODUCTION SCORING NEVER PASSES THIS. lib/report-primary-similarity.ts's
+   * resolvePrimarySimilaritySummary does not construct or forward it, so every
+   * authoritative call leaves it absent — and absent / empty makes this
+   * function's output (shape AND values) byte-identical to before this
+   * parameter existed. "excluded_document_local_corpus_duplicate" can therefore
+   * never appear in an authoritative result.
+   */
+  hypotheticalExcludedRepresentationIds?: readonly string[] | ReadonlySet<string> | null;
 };
 
 function clampedPositions(start: number, end: number, wordCount: number): [number, number] | null {
@@ -253,6 +296,15 @@ export function computeUnifiedSimilarity(params: ComputeUnifiedSimilarityParams)
       ? params.effectiveDeviceSelfRepresentationIds
       : new Set(params.effectiveDeviceSelfRepresentationIds ?? []);
 
+  // Phase B1 — SHADOW ONLY (see hypotheticalExcludedRepresentationIds' own
+  // comment). Empty whenever the caller passed nothing — i.e. every
+  // authoritative production call, which keeps this function's output
+  // byte-identical to before the parameter existed.
+  const hypotheticalExcludedSet: ReadonlySet<string> =
+    params.hypotheticalExcludedRepresentationIds instanceof Set
+      ? params.hypotheticalExcludedRepresentationIds
+      : new Set(params.hypotheticalExcludedRepresentationIds ?? []);
+
   const archivePositions = (params.archiveMatchedPositions ?? []).filter(
     (position) => Number.isInteger(position) && position >= 0 && position < wordCount,
   );
@@ -311,10 +363,22 @@ export function computeUnifiedSimilarity(params: ComputeUnifiedSimilarityParams)
         match.relationshipType !== "SELF" &&
         match.relationshipType !== "UNKNOWN_RELATIONSHIP";
 
+      // Phase B1 — SHADOW ONLY. Deliberately gated AFTER isEffectiveDeviceSelf:
+      // a genuine SELF, an UNKNOWN_RELATIONSHIP, and an effective device SELF
+      // all keep their own status and their own tally — the hypothetical
+      // exclusion never overrides any of them, it only ever removes an
+      // otherwise-"included" contribution.
+      const isHypotheticalCorpusDuplicate =
+        !isEffectiveDeviceSelf &&
+        hypotheticalExcludedSet.has(identityKey) &&
+        match.relationshipType !== "SELF" &&
+        match.relationshipType !== "UNKNOWN_RELATIONSHIP";
+
       const status: UnifiedEvidenceStatus =
         match.relationshipType === "SELF" ? "excluded_self"
         : match.relationshipType === "UNKNOWN_RELATIONSHIP" ? "excluded_unknown"
         : isEffectiveDeviceSelf ? "excluded_effective_device_self"
+        : isHypotheticalCorpusDuplicate ? "excluded_document_local_corpus_duplicate"
         : "included";
 
       const passageRanges = previousUploadPassageRanges(match, wordCount);
@@ -351,6 +415,13 @@ export function computeUnifiedSimilarity(params: ComputeUnifiedSimilarityParams)
       }
       if (status === "excluded_effective_device_self") {
         deviceSelfExcludedWords += match.matchedWordCount;
+        continue;
+      }
+      if (status === "excluded_document_local_corpus_duplicate") {
+        // Phase B1 — SHADOW ONLY: dropped from the scored union, and
+        // deliberately NOT tallied into any result-level counter (see the
+        // parameter's own comment). The counterfactual helper measures the
+        // removal from authoritative-vs-hypothetical, never a field here.
         continue;
       }
       for (const passage of passageRanges) {

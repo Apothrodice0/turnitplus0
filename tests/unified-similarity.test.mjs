@@ -401,3 +401,91 @@ test("extra: result carries the version tag", () => {
   const result = computeUnifiedSimilarity({ wordCount: 10 });
   assert.equal(result.version, UNIFIED_SIMILARITY_VERSION);
 });
+
+// --- Phase B1: hypotheticalExcludedRepresentationIds (SHADOW ONLY) ----------
+// The production scoring path NEVER passes this parameter, so absent / empty /
+// undefined must leave the result byte-identical (shape AND values), and the
+// "excluded_document_local_corpus_duplicate" status must never appear without
+// it. When passed, the named representation contributes nothing to the union
+// but keeps its baseline relationshipType — and it is applied strictly AFTER
+// SELF / UNKNOWN / effective-device-SELF.
+
+test("B1: absent vs undefined vs empty-array vs empty-Set all produce a byte-identical result to before the parameter existed", () => {
+  const params = {
+    wordCount: 400,
+    archiveMatchedPositions: [0, 1, 2, 3, 4, 100, 101],
+    externalAcademicEvidence: [academicEvidence({ matchedPassages: [passage(50, 79)] })],
+    historicalSubmissionMatch: matchedResult([
+      historicalMatch({ matchedRepresentationId: "rep-a", relationshipType: "TURNITPLUS_CORPUS_SOURCE", matchType: "EXACT_CANONICAL_MATCH", matchedWordCount: 400, passages: [] }),
+      historicalMatch({ matchedRepresentationId: "rep-b", relationshipType: "SELF", matchedWordCount: 30, passages: [passage(0, 29)] }),
+    ]),
+    effectiveDeviceSelfRepresentationIds: ["rep-c"],
+  };
+  const base = computeUnifiedSimilarity(params);
+  assert.deepEqual(computeUnifiedSimilarity({ ...params, hypotheticalExcludedRepresentationIds: undefined }), base);
+  assert.deepEqual(computeUnifiedSimilarity({ ...params, hypotheticalExcludedRepresentationIds: null }), base);
+  assert.deepEqual(computeUnifiedSimilarity({ ...params, hypotheticalExcludedRepresentationIds: [] }), base);
+  assert.deepEqual(computeUnifiedSimilarity({ ...params, hypotheticalExcludedRepresentationIds: new Set() }), base);
+  // no shadow status ever appears without the parameter
+  for (const contribution of base.contributions) {
+    assert.notEqual(contribution.evidenceStatus, "excluded_document_local_corpus_duplicate");
+  }
+  // no new top-level counter/property
+  assert.equal("documentLocalCorpusDuplicateExcludedWords" in base, false);
+});
+
+test("B1: a counted TURNITPLUS_CORPUS_SOURCE + EXACT_CANONICAL_MATCH rep in the hypothetical set drops out of the union but keeps its baseline relationship", () => {
+  const params = {
+    wordCount: 100,
+    archiveMatchedPositions: Array.from({ length: 20 }, (_, i) => i), // 0..19 survives
+    historicalSubmissionMatch: matchedResult([
+      historicalMatch({ matchedRepresentationId: "rep-dup", relationshipType: "TURNITPLUS_CORPUS_SOURCE", matchType: "EXACT_CANONICAL_MATCH", matchedWordCount: 100, passages: [] }),
+    ]),
+  };
+  const authoritative = computeUnifiedSimilarity(params);
+  assert.equal(authoritative.unifiedScore, 100);
+
+  const hypothetical = computeUnifiedSimilarity({ ...params, hypotheticalExcludedRepresentationIds: ["rep-dup"] });
+  assert.equal(hypothetical.unifiedScore, 20, "only the 20 archive-covered words survive");
+  assert.equal(hypothetical.previousUploadOnlyWords, 0);
+  assert.equal(hypothetical.archiveOnlyWords, 20);
+  const dup = hypothetical.contributions.find((c) => c.sourceId === "rep-dup");
+  assert.equal(dup.evidenceStatus, "excluded_document_local_corpus_duplicate");
+  assert.equal(dup.relationship, "TURNITPLUS_CORPUS_SOURCE");
+  assert.equal(dup.effectiveScoringRelationship, undefined);
+});
+
+test("B1 precedence: SELF and UNKNOWN_RELATIONSHIP in the hypothetical set keep their own status and tally", () => {
+  const selfInSet = computeUnifiedSimilarity({
+    wordCount: 100,
+    historicalSubmissionMatch: matchedResult([
+      historicalMatch({ matchedRepresentationId: "rep-self", relationshipType: "SELF", matchType: "EXACT_CANONICAL_MATCH", matchedWordCount: 40, passages: [passage(0, 39)] }),
+    ]),
+    hypotheticalExcludedRepresentationIds: ["rep-self"],
+  });
+  assert.equal(selfInSet.contributions[0].evidenceStatus, "excluded_self");
+  assert.equal(selfInSet.selfExcludedWords, 40);
+
+  const unknownInSet = computeUnifiedSimilarity({
+    wordCount: 100,
+    historicalSubmissionMatch: matchedResult([
+      historicalMatch({ matchedRepresentationId: "rep-unk", relationshipType: "UNKNOWN_RELATIONSHIP", matchType: "EXACT_CANONICAL_MATCH", matchedWordCount: 25, passages: [passage(0, 24)] }),
+    ]),
+    hypotheticalExcludedRepresentationIds: ["rep-unk"],
+  });
+  assert.equal(unknownInSet.contributions[0].evidenceStatus, "excluded_unknown");
+  assert.equal(unknownInSet.unknownExcludedWords, 25);
+});
+
+test("B1 precedence: a rep in BOTH effectiveDeviceSelfRepresentationIds and the hypothetical set stays excluded_effective_device_self", () => {
+  const result = computeUnifiedSimilarity({
+    wordCount: 100,
+    historicalSubmissionMatch: matchedResult([
+      historicalMatch({ matchedRepresentationId: "rep-x", relationshipType: "TURNITPLUS_CORPUS_SOURCE", matchType: "EXACT_CANONICAL_MATCH", matchedWordCount: 70, passages: [passage(0, 69)] }),
+    ]),
+    effectiveDeviceSelfRepresentationIds: ["rep-x"],
+    hypotheticalExcludedRepresentationIds: ["rep-x"],
+  });
+  assert.equal(result.contributions[0].evidenceStatus, "excluded_effective_device_self");
+  assert.equal(result.deviceSelfExcludedWords, 70);
+});
