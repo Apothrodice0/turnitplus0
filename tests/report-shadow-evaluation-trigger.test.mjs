@@ -332,6 +332,8 @@ test('4. a failure inside the deferred shadow work never rejects out of schedule
   await assert.doesNotReject(() => scheduleReportShadowEvaluations({
     reportDeviceKey: 'dk-fail-1', reportId: 'r-fail-1', accountId: null,
     rawText: 'irrelevant text for this case only.', productionResult: productionNoMatch(),
+    authoritativeUnifiedSimilarity: null, effectiveDeviceSelfRepresentationIds: [], authoritativeCorpusGeneration: 0,
+    authoritativeArchiveMatchedPositions: null, authoritativeExternalAcademicEvidence: null,
     openConnection: () => { throw new Error('simulated deferred-connection failure'); },
   }));
 
@@ -341,6 +343,8 @@ test('4. a failure inside the deferred shadow work never rejects out of schedule
     reportDeviceKey: 'dk-fail-2', reportId: 'r-fail-2', accountId: 'acc',
     rawText: takeText(),
     productionResult: { status: 'MATCHED', matches: [], computedAt: new Date().toISOString(), matcherVersion: 'x', fingerprintVersion: 'x', canonicalizationVersion: 'x' },
+    authoritativeUnifiedSimilarity: null, effectiveDeviceSelfRepresentationIds: [], authoritativeCorpusGeneration: 0,
+    authoritativeArchiveMatchedPositions: null, authoritativeExternalAcademicEvidence: null,
     openConnection: () => ({ execute: async () => { throw new Error('simulated historical_match_shadow_evaluations outage'); }, close() {} }),
   }));
 
@@ -454,6 +458,11 @@ test('7. the persisted production unified score is byte-for-byte identical with 
     await scheduleReportShadowEvaluations({
       reportDeviceKey: account.deviceKey, reportId, accountId: account.userId, rawText: text,
       productionResult: resolution.historicalSubmissionMatch,
+      authoritativeUnifiedSimilarity: resolution.unifiedSimilarity ?? null,
+      effectiveDeviceSelfRepresentationIds: resolution.effectiveDeviceSelfRepresentationIds,
+      authoritativeCorpusGeneration: resolution.corpusGeneration,
+      authoritativeArchiveMatchedPositions: null,
+      authoritativeExternalAcademicEvidence: null,
     });
   }
 

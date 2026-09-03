@@ -24,6 +24,8 @@ import { createPendingReportAdmissionJob, processReportAdmissionJob } from '../.
 import { resolvePrimarySimilaritySummary } from '../../../lib/report-primary-similarity';
 import { scheduleReportShadowEvaluations } from '../../../lib/report-shadow-evaluations';
 import type { SimilarityReport, ReportHistoricalSubmissionMatch } from '../../../lib/report-types';
+import type { UnifiedSimilarityResult } from '../../../lib/unified-similarity';
+import type { ExternalAcademicEvidence } from '../../../lib/academic-search/types';
 
 // Reports carry derived data (AI passages, matched phrases, extracted text)
 // on top of the ingest pipeline's raw text, so this cap is larger than
@@ -560,14 +562,33 @@ export async function POST(request: Request) {
       // payload can never regress an already-good persisted result from an
       // earlier successful save.
       let payloadJsonToPersist = payloadJson;
-      // Shadow-telemetry handoff: production's own historical-match result
-      // from write-time finalization, captured here so the deferred
-      // shadow-evaluation scheduling below (after the row is persisted) can
-      // reuse it exactly — never a second matcher run, never a recomputed or
-      // mutated score. Stays null when this save carries no finalizable text
-      // or finalization threw unexpectedly; the GET /api/reports/[id]
-      // fallback trigger still covers those reports.
-      let historicalSubmissionMatchForShadow: ReportHistoricalSubmissionMatch | null = null;
+      // Shadow-telemetry handoff. ONE request-local object, function-local to
+      // POST() and set exactly once (inside the try block below, immediately
+      // after resolvePrimarySimilaritySummary returns) — never module scope,
+      // never mutated after capture. Declared out here only because `resolution`
+      // itself is scoped to that try block. It carries:
+      //   - production's own write-time historical-match result and authoritative
+      //     UnifiedSimilarityResult, reused verbatim by the deferred evaluators
+      //     below (after the row is persisted) — never a second matcher run,
+      //     never a recomputed or mutated score; and
+      //   - the EXACT archive / live-academic scoring inputs THIS request fed
+      //     into that resolvePrimarySimilaritySummary call, so the Phase B2
+      //     counterfactual is measured against precisely the authoritative
+      //     inputs and never re-reads payload_json (which a concurrent resave /
+      //     self-heal could drift).
+      // Stays null when this save carries no finalizable text or finalization
+      // threw unexpectedly; the GET /api/reports/[id] fallback trigger still
+      // covers those reports.
+      let shadowEvaluationInputs:
+        | {
+            historicalSubmissionMatch: ReportHistoricalSubmissionMatch;
+            unifiedSimilarity: UnifiedSimilarityResult | null;
+            effectiveDeviceSelfRepresentationIds: readonly string[];
+            authoritativeCorpusGeneration: number;
+            archiveMatchedPositions: number[] | null;
+            externalAcademicEvidence: ExternalAcademicEvidence[] | null;
+          }
+        | null = null;
       if (isNonEmptyString(reportPayload?.text)) {
         try {
           const resolution = await resolvePrimarySimilaritySummary(client, {
@@ -591,8 +612,19 @@ export async function POST(request: Request) {
           // Reused as-is by the deferred shadow evaluators below — the SAME
           // resolvePrimarySimilaritySummary output the GET route hands them,
           // populated on both the success and the
-          // computeUnifiedSimilarity-failed branches.
-          historicalSubmissionMatchForShadow = resolution.historicalSubmissionMatch;
+          // computeUnifiedSimilarity-failed branches. archiveMatchedPositions /
+          // externalAcademicEvidence are the very values passed into the
+          // resolvePrimarySimilaritySummary call just above, captured here so
+          // the Phase B2 counterfactual uses the authoritative scoring inputs
+          // exactly.
+          shadowEvaluationInputs = {
+            historicalSubmissionMatch: resolution.historicalSubmissionMatch,
+            unifiedSimilarity: resolution.unifiedSimilarity ?? null,
+            effectiveDeviceSelfRepresentationIds: resolution.effectiveDeviceSelfRepresentationIds,
+            authoritativeCorpusGeneration: resolution.corpusGeneration,
+            archiveMatchedPositions: reportPayload.archiveMatchedPositions ?? null,
+            externalAcademicEvidence: reportPayload.externalAcademicEvidence ?? null,
+          };
           if (resolution.unifiedSimilarity) {
             payloadJsonToPersist = JSON.stringify({
               ...reportPayload,
@@ -898,13 +930,18 @@ export async function POST(request: Request) {
       // same report converges on that row rather than duplicating it.
       // Skipped when write-time finalization produced no result to hand over
       // (no text, or an unexpected throw) — GET remains the fallback there.
-      if (historicalSubmissionMatchForShadow !== null) {
+      if (shadowEvaluationInputs !== null) {
         await scheduleReportShadowEvaluations({
           reportDeviceKey: deviceKey,
           reportId: id,
           accountId: userId,
           rawText: reportPayload.text,
-          productionResult: historicalSubmissionMatchForShadow,
+          productionResult: shadowEvaluationInputs.historicalSubmissionMatch,
+          authoritativeUnifiedSimilarity: shadowEvaluationInputs.unifiedSimilarity,
+          effectiveDeviceSelfRepresentationIds: shadowEvaluationInputs.effectiveDeviceSelfRepresentationIds,
+          authoritativeCorpusGeneration: shadowEvaluationInputs.authoritativeCorpusGeneration,
+          authoritativeArchiveMatchedPositions: shadowEvaluationInputs.archiveMatchedPositions,
+          authoritativeExternalAcademicEvidence: shadowEvaluationInputs.externalAcademicEvidence,
         });
       }
     } finally {

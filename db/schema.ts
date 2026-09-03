@@ -1518,6 +1518,73 @@ export const account_owner_link_state = sqliteTable(
   ],
 );
 
+// Phase B2a (drizzle/0044): bounded SHADOW-MEASUREMENT telemetry for the B1
+// corpus-duplicate counterfactual (lib/corpus-duplicate-suppression-policy.ts +
+// lib/corpus-duplicate-counterfactual.ts). MEASUREMENT ONLY — never read by the
+// production similarity / relationship / scoring path; write-only from
+// lib/corpus-duplicate-suppression-shadow.ts, scheduled off-response. No B2
+// field ever reaches an ordinary user's report payload. See
+// drizzle/0044_corpus_duplicate_suppression_shadow_evaluations.sql for the full
+// rationale, the nullable-measurement-column contract, and the AFTER DELETE
+// trigger (which drizzle-orm cannot express and which the schema-drift test does
+// not enumerate — its correctness is covered by the B2 deletion tests). No
+// DB-level FOREIGN KEY, same reasoning as report_historical_match_snapshots /
+// historical_match_shadow_evaluations above. report_device_key is a random
+// per-browser UUID, not an account identity.
+export const corpus_duplicate_suppression_shadow_evaluations = sqliteTable(
+  "corpus_duplicate_suppression_shadow_evaluations",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    report_device_key: text("report_device_key").notNull(),
+    report_id: text("report_id").notNull(),
+    status: text("status").notNull(),
+    error_code: text("error_code"),
+    error_detail: text("error_detail"),
+    checker_accounts_status: text("checker_accounts_status").notNull().default("NOT_APPLICABLE"),
+    distinct_checker_accounts_bucket: text("distinct_checker_accounts_bucket"),
+    policy_version: text("policy_version").notNull(),
+    rule_version: text("rule_version").notNull(),
+    unified_similarity_version: text("unified_similarity_version").notNull(),
+    counterfactual_version: text("counterfactual_version").notNull(),
+    authoritative_corpus_generation: integer("authoritative_corpus_generation"),
+    authoritative_snapshot_computed_at: text("authoritative_snapshot_computed_at"),
+    submitted_word_count: integer("submitted_word_count"),
+    authoritative_score: integer("authoritative_score"),
+    hypothetical_score: integer("hypothetical_score"),
+    score_delta: integer("score_delta"),
+    authoritative_unique_matched_words: integer("authoritative_unique_matched_words"),
+    hypothetical_unique_matched_words: integer("hypothetical_unique_matched_words"),
+    unique_matched_words_removed: integer("unique_matched_words_removed"),
+    candidate_matched_words: integer("candidate_matched_words"),
+    candidates_excluded: integer("candidates_excluded"),
+    archive_only_words_surviving: integer("archive_only_words_surviving"),
+    live_academic_only_words_surviving: integer("live_academic_only_words_surviving"),
+    previous_upload_only_words_surviving: integer("previous_upload_only_words_surviving"),
+    overlap_words_surviving: integer("overlap_words_surviving"),
+    candidate_count: integer("candidate_count"),
+    measurement_category: text("measurement_category"),
+    origin_confidence: text("origin_confidence"),
+    multi_origin_evidence: text("multi_origin_evidence"),
+    candidate_admitted_promotion_backing_count: integer("candidate_admitted_promotion_backing_count"),
+    candidate_submission_reference_backing_count: integer("candidate_submission_reference_backing_count"),
+    candidate_independent_backing_count: integer("candidate_independent_backing_count"),
+    candidate_same_device_backing_count: integer("candidate_same_device_backing_count"),
+    same_passport_category: integer("same_passport_category"),
+    cross_account_category: integer("cross_account_category"),
+    evaluation_truncated: integer("evaluation_truncated").notNull().default(0),
+    total_runtime_ms: integer("total_runtime_ms"),
+    computed_at: text("computed_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    created_at: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("ux_corpus_duplicate_suppression_shadow_report_policy").on(
+      table.report_device_key,
+      table.report_id,
+      table.policy_version,
+    ),
+  ],
+);
+
 // Export nothing else — Drizzle will consume these definitions for migrations.
 export {};
 

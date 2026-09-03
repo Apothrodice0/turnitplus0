@@ -282,6 +282,19 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
           accountId,
           rawText: payload.text,
           productionResult: historicalSubmissionMatch,
+          // Phase B2 — the corpus-duplicate shadow evaluator's inputs, taken
+          // straight from the resolution this route already computed. null /
+          // empty when the authoritative unified result is unavailable.
+          authoritativeUnifiedSimilarity: resolution.unifiedSimilarity ?? null,
+          effectiveDeviceSelfRepresentationIds: resolution.effectiveDeviceSelfRepresentationIds,
+          authoritativeCorpusGeneration: resolution.corpusGeneration,
+          // The EXACT archive / live-academic scoring inputs passed into the
+          // resolvePrimarySimilaritySummary call above — the same in-memory
+          // `payload` fields, which this route never reassigns after parsing it
+          // from payload_json. Threaded through so the B2 counterfactual is
+          // measured against the authoritative scoring inputs, never a re-read.
+          authoritativeArchiveMatchedPositions: payload.archiveMatchedPositions ?? null,
+          authoritativeExternalAcademicEvidence: payload.externalAcademicEvidence ?? null,
         });
       } catch (err) {
         console.error('resolvePrimarySimilaritySummary failed (non-fatal):', err instanceof Error ? err.message : String(err));
