@@ -1,103 +1,100 @@
 "use client";
 
-import type { DeclaredContext, ReuseContextDeclarationView } from "@/lib/reuse-context-declarations";
+import type { ReuseContextEnvelope } from "@/lib/reuse-context-types";
+import { REUSE_CONTEXT_LABELS } from "@/lib/reuse-context-labels";
 
 /**
- * E8S Step 6: the ORIGINAL-submitter-facing UI for E8S Step 5's Flows 3, 4,
- * 5. Renders the reverse-lookup result (lib/reuse-context-declarations.ts's
- * getDeclarationsReferencingSubmission, via GET /api/reuse-context/pending)
- * for one of the viewer's own submissions. Purely presentational, same
- * renderToStaticMarkup-testable convention as reuse-context-panel.tsx.
+ * ORIGINAL-submitter-facing UI: the reuse-context declarations someone has
+ * made against one of the viewer's own submissions.
  *
- * The only information ever rendered here is the bounded
- * ReuseContextDeclarationView shape — declaredContext (an enum) and
- * declaredAt (a date). There is no free-text field anywhere in this
- * feature's schema, so there is structurally nothing here a declarer could
- * use to write a persuasive message to the original submitter (E8S Step
- * 5's own social-engineering defense, §4).
+ *   - `pending[]`   : SELF_ASSERTED_UNVERIFIED — awaiting a confirm / reject
+ *                     decision.
+ *   - `confirmed[]` : the viewer's own active confirmations — retractable
+ *                     with "Revoke confirmation".
+ *
+ * Purely presentational. The only data shown is the bounded context enum
+ * and a date; there is no free-text field anywhere in this feature.
+ * Actions are keyed by the opaque session-bound actionRef, never a
+ * declaration id. Nothing here implies same owner, same person, or verified
+ * authorship, and nothing here changes the similarity score.
  */
 
-const CONTEXT_LABELS: Record<DeclaredContext, string> = {
-  SUPERVISOR_COPY: "supervisor copy",
-  COAUTHOR_COPY: "coauthor copy",
-  INSTITUTIONAL_SUBMISSION: "institutional submission",
-  AUTHORIZED_ARCHIVAL_COPY: "authorized archival copy",
-  OTHER_AUTHORIZED_REUSE: "authorized reuse",
-};
+export type PendingActionOutcome =
+  | { actionRef: string; outcome: "CONFIRMED" | "REJECTED" | "CONFIRMATION_REVOKED" }
+  | null;
 
-function capitalize(label: string): string {
-  return label.charAt(0).toUpperCase() + label.slice(1);
+function capitalize(value: string): string {
+  return value.charAt(0).toUpperCase() + value.slice(1);
 }
-
-function PendingDeclarationRow({
-  declaration,
-  justConfirmed,
-  onConfirm,
-  onReject,
-}: {
-  declaration: ReuseContextDeclarationView;
-  justConfirmed: boolean;
-  onConfirm?: (declarationId: number) => void;
-  onReject?: (declarationId: number) => void;
-}) {
-  if (declaration.verificationState === "MUTUALLY_CONFIRMED") {
-    return (
-      <li className="reuse-context-pending-item reuse-context-pending-confirmed">
-        {justConfirmed ? "Confirmed." : `You confirmed this is a ${CONTEXT_LABELS[declaration.declaredContext]}.`}
-      </li>
-    );
-  }
-
-  return (
-    <li className="reuse-context-pending-item">
-      <p>
-        <strong>Someone has indicated a reuse context for this submission.</strong>
-      </p>
-      <p>
-        Claimed context: <em>{capitalize(CONTEXT_LABELS[declaration.declaredContext])}</em><br />
-        Declared: {declaration.declaredAt}
-      </p>
-      <p>This claim has not been verified. You can confirm it if it&rsquo;s accurate, or reject it.</p>
-      <button type="button" onClick={() => onConfirm?.(declaration.id)}>Confirm</button>
-      <button type="button" onClick={() => onReject?.(declaration.id)}>Reject</button>
-    </li>
-  );
-}
-
-export type PendingActionOutcome = { declarationId: number; outcome: "CONFIRMED" | "REJECTED" } | null;
 
 export function OriginalSubmitterConfirmationPanel({
   pending,
+  confirmed,
   lastAction = null,
   onConfirm,
   onReject,
+  onRevokeConfirmation,
 }: {
-  pending: ReuseContextDeclarationView[];
-  /** A one-time, transient outcome to display immediately after Confirm/Reject completes — re-fetched server state (requirement 9) already reflects the real, persistent state; this only softens the immediate UI response. Never stored, never re-derived from a column. */
+  pending: ReuseContextEnvelope["confirm"]["pending"];
+  confirmed: ReuseContextEnvelope["confirm"]["confirmed"];
+  /** One-time transient outcome shown immediately after an action; the re-fetched envelope is the real answer. Never stored. */
   lastAction?: PendingActionOutcome;
-  onConfirm?: (declarationId: number) => void;
-  onReject?: (declarationId: number) => void;
+  onConfirm: (actionRef: string) => void;
+  onReject: (actionRef: string) => void;
+  onRevokeConfirmation: (actionRef: string) => void;
 }) {
-  // A rejected declaration is revoked server-side, so it no longer appears
-  // in `pending` at all on the next fetch (E8S Step 5's own default: no
-  // persistent trace) — the transient note below is the only place this
-  // outcome is ever shown, and only once.
-  const showRejectedNote = lastAction?.outcome === "REJECTED" && !pending.some((d) => d.id === lastAction.declarationId);
+  const rejectedNote = lastAction?.outcome === "REJECTED" && !pending.some((d) => d.actionRef === lastAction.actionRef);
+  const revokedNote =
+    lastAction?.outcome === "CONFIRMATION_REVOKED" && !confirmed.some((d) => d.actionRef === lastAction.actionRef);
 
-  if (pending.length === 0 && !showRejectedNote) return null;
+  if (pending.length === 0 && confirmed.length === 0 && !rejectedNote && !revokedNote) return null;
+
   return (
     <>
-      {showRejectedNote && <p className="reuse-context-note reuse-context-outcome">You&rsquo;ve indicated this context is not confirmed.</p>}
+      {rejectedNote && (
+        <p className="reuse-context-note reuse-context-outcome">You&rsquo;ve indicated this context is not confirmed.</p>
+      )}
+      {revokedNote && (
+        <p className="reuse-context-note reuse-context-outcome">Your reuse-context confirmation has been retracted. This has no effect on the similarity score.</p>
+      )}
+
       {pending.length > 0 && (
         <ul className="reuse-context-pending-list">
-          {pending.map((declaration) => (
-            <PendingDeclarationRow
-              key={declaration.id}
-              declaration={declaration}
-              justConfirmed={lastAction?.outcome === "CONFIRMED" && lastAction.declarationId === declaration.id}
-              onConfirm={onConfirm}
-              onReject={onReject}
-            />
+          {pending.map((declaration) => {
+            const justConfirmed = lastAction?.outcome === "CONFIRMED" && lastAction.actionRef === declaration.actionRef;
+            if (justConfirmed) {
+              return (
+                <li key={declaration.actionRef} className="reuse-context-pending-item reuse-context-pending-confirmed">Confirmed.</li>
+              );
+            }
+            return (
+              <li key={declaration.actionRef} className="reuse-context-pending-item">
+                <p><strong>Someone has indicated a reuse context for this submission.</strong></p>
+                <p>
+                  Claimed context: <em>{capitalize(REUSE_CONTEXT_LABELS[declaration.declaredContext].badge)}</em><br />
+                  Declared: {declaration.declaredDate}
+                </p>
+                <p>This claim has not been verified. You can confirm it if it&rsquo;s accurate, or reject it. It does not change the similarity score either way.</p>
+                <button type="button" onClick={() => onConfirm(declaration.actionRef)}>Confirm</button>
+                <button type="button" onClick={() => onReject(declaration.actionRef)}>Reject</button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+
+      {confirmed.length > 0 && (
+        <ul className="reuse-context-confirmed-list">
+          {confirmed.map((declaration) => (
+            <li key={declaration.actionRef} className="reuse-context-confirmed-item">
+              <p>
+                You confirmed a reuse context for this submission:{" "}
+                <em>{capitalize(REUSE_CONTEXT_LABELS[declaration.declaredContext].badge)}</em>
+                {declaration.confirmedDate ? ` on ${declaration.confirmedDate}` : ""}.
+              </p>
+              <p>Revoking retracts your reuse-context confirmation. It has no effect on the similarity score and makes no claim about who owns the work.</p>
+              <button type="button" onClick={() => onRevokeConfirmation(declaration.actionRef)}>Revoke confirmation</button>
+            </li>
           ))}
         </ul>
       )}

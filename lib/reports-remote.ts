@@ -311,9 +311,39 @@ export async function fetchRemoteReport<T>(id: string): Promise<T | null> {
     });
     if (!response.ok) return null;
     const data = (await response.json()) as { payload?: T };
+    // Deliberately returns ONLY data.payload — never data.reuseContext. Every
+    // resave/restore path (room AI-retry, home restore loop) funnels through
+    // here, so the session-bound reuse-context envelope can never ride along
+    // into a persisted payload. The detail shell reads the envelope via
+    // fetchReportReuseContext() below, into separate state.
     return (data.payload ?? null) as T | null;
   } catch (error) {
     console.debug("Remote report fetch failed.", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
+}
+
+/**
+ * The reuse-context sibling of the report envelope — a bounded, id-free,
+ * session-bound object (or null when the account is not allowlisted, the
+ * report has no resolvable document identity, or there is no session).
+ * Never merged into a SimilarityReport; held in its own React state and
+ * never persisted. `unknown` return so the caller applies its own
+ * ReuseContextEnvelope type (that type lives in a node:crypto-free module).
+ */
+export async function fetchReportReuseContext(id: string): Promise<unknown | null> {
+  try {
+    const deviceKey = getDeviceKey();
+    const response = await fetch(`/api/reports/${encodeURIComponent(id)}?deviceKey=${encodeURIComponent(deviceKey)}`, {
+      cache: "no-store",
+    });
+    if (!response.ok) return null;
+    const data = (await response.json()) as { reuseContext?: unknown };
+    return data.reuseContext ?? null;
+  } catch (error) {
+    console.debug("Remote reuse-context fetch failed.", {
       error: error instanceof Error ? error.message : String(error),
     });
     return null;

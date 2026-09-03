@@ -576,8 +576,8 @@ test('LIFECYCLE-04/06 SIDEBAR/WIRING (structural): the ENTIRE report render — 
   // after the correction — OverviewReport must be told the real status
   // explicitly again, this time backed by genuine pipeline state rather
   // than poll timing.
-  const overviewReportCalls = (shell.match(/<OverviewReport report=\{report\} similarityStatus=\{effectiveSimilarityStatus\} \/>/g) ?? []).length;
-  assert.equal(overviewReportCalls, 3, 'expected 3 call sites: full-report-preview, the standalone overview tab, and the print bundle, each passing the real status explicitly');
+  const overviewReportCalls = (shell.match(/<OverviewReport report=\{report\} similarityStatus=\{effectiveSimilarityStatus\} reuseContext=\{reuseContext \?\? undefined\} \/>/g) ?? []).length;
+  assert.equal(overviewReportCalls, 3, 'expected 3 call sites: full-report-preview, the standalone overview tab, and the print bundle, each passing the real status explicitly (plus the id-free reuseContext envelope)');
   // The summary-strip chip and sidebar score render primaryScore only once
   // revealState.similarityUnavailable is ruled out — never a guessed
   // number for a similarity that genuinely, terminally failed.

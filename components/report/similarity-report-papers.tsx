@@ -30,6 +30,7 @@ import {
 } from "@/lib/report-types";
 import { ReportPageFooter, ReportPageHeader } from "./report-page-chrome";
 import { ReuseContextContainer } from "@/components/reuse-context/reuse-context-container";
+import type { ReuseContextEnvelope } from "@/lib/reuse-context-types";
 
 /**
  * Phase E8R-SELF-UI.2: groups every SELF-relationship entry in matches[]
@@ -663,7 +664,7 @@ export function UnifiedSimilaritySection({ report }: { report: SimilarityReport 
  * externalAcademicEvidence is resolved before a report is ever first
  * saved — see AcademicEvidenceSection's own call site comment below).
  */
-export function OverviewReport({ report, similarityStatus = "resolved" }: { report: SimilarityReport; similarityStatus?: "resolved" | "stale" | "pending" | "failed" }) {
+export function OverviewReport({ report, similarityStatus = "resolved", reuseContext }: { report: SimilarityReport; similarityStatus?: "resolved" | "stale" | "pending" | "failed"; reuseContext?: ReuseContextEnvelope }) {
   const primaryScore = primarySimilarityScore(report);
   const primaryLabel = primaryResultLabel(report);
   const isUnified = hasUnifiedSimilarity(report);
@@ -835,9 +836,6 @@ export function OverviewReport({ report, similarityStatus = "resolved" }: { repo
           <section className="historical-match-block">
             <h3>Previously submitted content</h3>
             <p>Historical matching unavailable for this report.</p>
-            {report.reuseContext && (
-              <ReuseContextContainer documentIdentityId={report.reuseContext.documentIdentityId} representationId={null} />
-            )}
           </section>
         )}
         {report.historicalSubmissionMatch?.status === "MATCHED" && (
@@ -845,17 +843,6 @@ export function OverviewReport({ report, similarityStatus = "resolved" }: { repo
             <h3>Previously submitted content</h3>
             <p className="historical-match-archive-note">This historical submission match is not included in the similarity result.</p>
             {renderHistoricalMatchEntries(report.historicalSubmissionMatch.matches?.slice(0, 5) ?? [])}
-            {/* Phase E8S Step 11: additive only — representationId is null
-                unless lib/e8s-report-integration.ts already determined the
-                primary match is PRIOR_SUBMISSION, so this never appears for
-                a SELF match and never touches renderHistoricalMatchEntries
-                above (E8R-SELF-UI.2's own consolidated block, untouched). */}
-            {report.reuseContext && (
-              <ReuseContextContainer
-                documentIdentityId={report.reuseContext.documentIdentityId}
-                representationId={report.reuseContext.representationId}
-              />
-            )}
           </section>
         )}
 
@@ -889,18 +876,15 @@ export function OverviewReport({ report, similarityStatus = "resolved" }: { repo
           </section>
         )}
 
-        {/* Phase E8S Step 11: the original-submitter pending-declarations
-            panel can apply even when THIS report shows no historical match
-            of its own (production's own status here reflects only what
-            existed BEFORE this submission — a later, unrelated submission
-            can still reference this report's own identity). Never renders
-            a visible section unless there is actually something to show —
-            see ReuseContextContainer's own standalone-mode comment. Placed
-            after the E8P.3 block, never inside it, so it can never be
-            mistaken for part of that experimental result. */}
-        {report.historicalSubmissionMatch?.status !== "UNAVAILABLE" && report.historicalSubmissionMatch?.status !== "MATCHED" && report.reuseContext && (
-          <ReuseContextContainer documentIdentityId={report.reuseContext.documentIdentityId} representationId={null} standalone />
-        )}
+        {/* Confirmed-reuse annotation (ordinary-user flow). Driven ENTIRELY
+            by the bounded, id-free `reuseContext` envelope — never
+            report.historicalSubmissionMatch, which is admin-only, so an
+            ordinary allowlisted user with a real PRIOR_SUBMISSION match sees
+            the declarer CTA/state here. One placement, its own section;
+            renders nothing unless the envelope has something to show. Never
+            changes the similarity headline, matched positions, or source
+            inclusion. */}
+        {reuseContext && <ReuseContextContainer reuseContext={reuseContext} />}
         </>)}
 
         {/* Phase 3: external academic-source evidence (OpenAIRE + Europe

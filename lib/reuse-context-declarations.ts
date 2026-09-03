@@ -319,6 +319,36 @@ export async function getActiveReuseContextDeclaration(
   return row ? toView(row) : null;
 }
 
+/**
+ * Every ACTIVE (revoked_at IS NULL) declaration made against one document
+ * identity, deterministically ordered by id.
+ *
+ * The active-row uniqueness index (ux_reuse_context_declarations_active_pair,
+ * drizzle/0022) is per (document_identity_id, matched_representation_id), NOT
+ * per document identity — so a single identity legitimately holds more than
+ * one active declaration when the report's first-eligible PRIOR_SUBMISSION
+ * match changed between two declare actions (a corpus/matcher reorder). The
+ * report-bound withdrawal flow (POST /api/reuse-context/withdraw) enumerates
+ * exactly this set, never the "current first eligible" pair, so a
+ * declaration stays withdrawable regardless of later matcher ordering.
+ *
+ * Callers must have already verified the session owns documentIdentityId
+ * (via the caller-owned saved_reports row) — every returned view is still
+ * the account-id-free ReuseContextDeclarationView.
+ */
+export async function getActiveDeclarationsByDocumentIdentity(
+  client: Client,
+  params: { documentIdentityId: string },
+): Promise<ReuseContextDeclarationView[]> {
+  const result = await client.execute({
+    sql: `SELECT * FROM reuse_context_declarations
+          WHERE document_identity_id = ? AND revoked_at IS NULL
+          ORDER BY id ASC`,
+    args: [params.documentIdentityId],
+  });
+  return (result.rows as unknown as DeclarationRow[]).map(toView);
+}
+
 /** A single declaration by id, regardless of active/revoked state — used by the /reject route to distinguish "reject before ever confirmed" from "revoke an already-confirmed one" before acting, never to bypass any authorization check. */
 export async function getReuseContextDeclarationById(client: Client, declarationId: number): Promise<ReuseContextDeclarationView | null> {
   const row = await fetchDeclarationRow(client, declarationId);
@@ -336,8 +366,9 @@ export async function getReuseContextDeclarationById(client: Client, declaration
  * ReuseContextDeclarationView as every other function here). Callers are
  * responsible for verifying the caller's session actually owns
  * documentIdentityId before invoking this — see
- * app/api/reuse-context/pending/route.ts, which is the only place that
- * matters, since the DTO itself leaks nothing even if it didn't.
+ * lib/reuse-context-report-binding.ts, which resolves that identity only
+ * from a caller-owned saved_reports row, since the DTO itself leaks nothing
+ * even if it didn't.
  *
  * Returns only ACTIVE (revoked_at IS NULL) rows — both SELF_ASSERTED_
  * UNVERIFIED (needs a confirm/reject decision) and MUTUALLY_CONFIRMED (the
@@ -359,7 +390,7 @@ export async function getDeclarationsReferencingSubmission(
   const result = await client.execute({
     sql: `SELECT * FROM reuse_context_declarations
           WHERE matched_submission_reference_id IN (${placeholders}) AND revoked_at IS NULL
-          ORDER BY declared_at DESC`,
+          ORDER BY declared_at DESC, id DESC`,
     args: referenceIds,
   });
   return (result.rows as unknown as DeclarationRow[]).map(toView);
@@ -378,8 +409,9 @@ export type CanDeclareReuseContextResult =
  * every check declareReuseContext performs, in the same order, but never
  * writes anything. accountId is the CALLER's own session account id — the
  * caller must never pass another account's id (this function does not,
- * and cannot, verify that; the route layer's session lookup is what makes
- * this safe — see app/api/reuse-context/status/route.ts).
+ * and cannot, verify that; the route layer's session lookup + caller-owned
+ * report resolution is what makes this safe — see
+ * lib/reuse-context-report-binding.ts).
  */
 export async function canDeclareReuseContext(
   client: Client,

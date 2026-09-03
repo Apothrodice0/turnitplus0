@@ -20,8 +20,8 @@ import type {
 /**
  * Phase 3 bridge layer: the only module that knows about both "reports" and
  * "the academic-search subsystem" — same role lib/report-historical-match.ts
- * plays for the user-submission corpus, lib/e8s-report-integration.ts plays
- * for E8S reuse context. lib/academic-search/ itself stays completely
+ * plays for the user-submission corpus, lib/reuse-context-report-binding.ts
+ * plays for E8S reuse context. lib/academic-search/ itself stays completely
  * unaware of SimilarityReport/reports — this file is the only seam.
  *
  * Deliberately never touches score/archiveScore/aiScore/verifiedSimilarity/
@@ -36,7 +36,7 @@ import type {
  * a second, outer safety net for anything unexpected around it (e.g. the
  * cache/budget construction itself), matching every other read-time
  * enrichment in this codebase (getOrComputeHistoricalMatchSnapshot,
- * getReuseContextEligibility) that treats "this optional signal failed to
+ * buildReuseContextEnvelope) that treats "this optional signal failed to
  * compute" as a normal, non-fatal outcome, never a reason to fail the
  * report it's attached to.
  *

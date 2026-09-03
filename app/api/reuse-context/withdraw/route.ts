@@ -1,28 +1,30 @@
 import { getReportsDbClient } from '../../../../lib/reports-db';
 import { getOrComputeHistoricalMatchSnapshot } from '../../../../lib/report-historical-match';
 import { isCorpusSourceMatchingEnabled } from '../../../../lib/corpus-source-matching-flag';
-import { getDeclarationsReferencingSubmission, revokeReuseContext } from '../../../../lib/reuse-context-declarations';
+import { getActiveDeclarationsByDocumentIdentity, revokeReuseContext } from '../../../../lib/reuse-context-declarations';
 import { buildReuseContextEnvelope, resolveCallerOwnedReportBinding } from '../../../../lib/reuse-context-report-binding';
 import { isWellFormedActionRef, matchReuseContextActionRef } from '../../../../lib/reuse-context-action-ref';
 import { guardReuseContextRequest, resolveReuseContextSession, reuseContextJson } from '../../../../lib/reuse-context-mutation-guard';
 
 /**
- * POST /api/reuse-context/revoke  { reportId, actionRef }  -- ORIGINAL-SUBMITTER side.
+ * POST /api/reuse-context/withdraw  { reportId, actionRef }  -- DECLARER side.
  *
- * The account that owns the ORIGINAL submission retracts a reuse-context
- * attestation it previously CONFIRMED. /reject handles declining an
- * unconfirmed claim; /withdraw handles the declarer's own side; this route
- * is specifically the confirmer un-confirming a MUTUALLY_CONFIRMED
- * declaration.
+ * The declarer withdraws one of THEIR OWN reuse-context declarations for
+ * this report (either state). Withdrawal is NOT resolved from the current
+ * first-eligible PRIOR_SUBMISSION — historical-match ordering can change
+ * after a declaration was made — instead the server:
+ *   1. resolves the caller-owned report -> exact document_identity_id
+ *   2. enumerates EVERY non-revoked declaration for that identity
+ *   3. recomputes the session-bound actionRef for each candidate
+ *   4. constant-time matches the submitted ref (loop never early-returns)
+ *   5. calls revokeReuseContext with the matched server-side id
  *
- * Report-bound: `reportId` is the original submitter's own caller-owned
- * report. The server resolves its exact document_identity_id and enumerates
- * the declarations referencing it (candidate set includes active
- * MUTUALLY_CONFIRMED rows). The submitted actionRef selects one candidate
- * (constant-time; loop never early-returns). The matched declaration must be
- * MUTUALLY_CONFIRMED. revokeReuseContext's own authority check — which
- * allows the confirmer and the fresh-resolved original submitter — is the
- * final authority; the actionRef is only a selector.
+ * revokeReuseContext's own authority check (declarer / confirmer /
+ * validated original submitter) is the final authority. A ref from a
+ * different report, account, or session matches nothing -> generic 404.
+ *
+ * The ORIGINAL submitter retracts a MUTUALLY_CONFIRMED attestation through
+ * /api/reuse-context/revoke instead (see that route).
  *
  * Checkpoint order: rate -> same-origin (hidden 404) -> body validation ->
  * session + allowlist -> session key -> resolution. Always no-store.
@@ -54,19 +56,12 @@ export async function POST(request: Request) {
       if (binding.status === 'NOT_FOUND' || binding.status === 'AMBIGUOUS') return reuseContextJson({ error: 'Not found.' }, 404);
       if (binding.status === 'REUSE_CONTEXT_UNAVAILABLE') return reuseContextJson({ status: 'REUSE_CONTEXT_UNAVAILABLE' }, 409);
 
-      const candidates = await getDeclarationsReferencingSubmission(client, { documentIdentityId: binding.documentIdentityId });
+      const candidates = await getActiveDeclarationsByDocumentIdentity(client, { documentIdentityId: binding.documentIdentityId });
       const matchedId = matchReuseContextActionRef(session.sessionKey, actionRef, candidates.map((c) => c.id));
       if (matchedId === null) return reuseContextJson({ error: 'Not found.' }, 404);
 
-      const matched = candidates.find((c) => Number(c.id) === Number(matchedId));
-      if (!matched || matched.verificationState !== 'MUTUALLY_CONFIRMED') {
-        return reuseContextJson({ status: 'NOT_CONFIRMED' }, 409);
-      }
-
       const result = await revokeReuseContext(client, { declarationId: Number(matchedId), revokedByAccountId: session.sessionUser.id });
-      if (result.status === 'NOT_AUTHORIZED_TO_REVOKE' || result.status === 'NOT_FOUND') {
-        return reuseContextJson({ error: 'Not found.' }, 404);
-      }
+      if (result.status === 'NOT_AUTHORIZED_TO_REVOKE') return reuseContextJson({ error: 'Not found.' }, 404);
 
       const historicalSubmissionMatch = await getOrComputeHistoricalMatchSnapshot(client, {
         reportDeviceKey: binding.deviceKey,

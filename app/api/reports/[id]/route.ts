@@ -2,7 +2,6 @@ import { NextResponse } from 'next/server';
 import { getReportsDbClient } from '../../../../lib/reports-db';
 import { checkRate, checkReadRate } from '../../../../lib/rate-limit';
 import { clientIpFrom } from '../../../../lib/client-ip';
-import { getSessionUser } from '../../../../lib/auth-session';
 import { findReportRowForDeviceKey, findReportRowForUser } from '../../../../lib/reports-repo';
 import { classifyReportMatches } from '../../../../lib/report-classification';
 import { deleteHistoricalMatchSnapshot } from '../../../../lib/report-historical-match';
@@ -11,10 +10,21 @@ import { deleteReportDocumentData } from '../../../../lib/report-deletion';
 import { deleteReportCorpusAdmissionData } from '../../../../lib/corpus-admission-report-integration';
 import { scheduleReportShadowEvaluations } from '../../../../lib/report-shadow-evaluations';
 import { getExperimentalHistoricalMatchForDisplay } from '../../../../lib/e8p-visibility';
-import { getReuseContextEligibility } from '../../../../lib/e8s-report-integration';
+import { getSessionUser, parseCookie, SESSION_COOKIE_NAME } from '../../../../lib/auth-session';
+import { isE8sReuseContextAllowlisted } from '../../../../lib/e8s-visibility';
+import { reuseContextSessionKey } from '../../../../lib/reuse-context-action-ref';
+import { buildReuseContextEnvelope, resolveCallerOwnedReportBinding, type ReuseContextEnvelope } from '../../../../lib/reuse-context-report-binding';
 import type { SimilarityReport } from '../../../../lib/report-types';
 
+// This response is per-session personalized (viewerIsAdmin, admin-gated
+// historical-match data, and the session-bound reuseContext envelope below)
+// and MUST NOT be shared-cached. Every response from this file is
+// Cache-Control: no-store; the route is force-dynamic so Next/Vercel never
+// attempts to cache the handler itself.
+export const dynamic = 'force-dynamic';
+
 const MAX_DEVICE_KEY_LENGTH = 200;
+const NO_STORE_JSON = { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } as const;
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0;
@@ -24,16 +34,22 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
   try {
     const rate = await checkReadRate(clientIpFrom(request));
     if (!rate.allowed) {
-      return new NextResponse(JSON.stringify({ error: 'Too many requests' }), { status: 429, headers: { 'Retry-After': String(rate.retryAfter) } });
+      return new NextResponse(JSON.stringify({ error: 'Too many requests' }), { status: 429, headers: { ...NO_STORE_JSON, 'Retry-After': String(rate.retryAfter) } });
     }
 
     const { id } = await params;
-    if (!isNonEmptyString(id)) return new NextResponse(JSON.stringify({ error: 'id is required' }), { status: 400 });
+    if (!isNonEmptyString(id)) return new NextResponse(JSON.stringify({ error: 'id is required' }), { status: 400, headers: NO_STORE_JSON });
 
     const client = await getReportsDbClient();
     let row;
     let payload: SimilarityReport | undefined;
+    // Reuse context is a SIBLING of `payload` in the response envelope, never
+    // a property of it — so no client resave/restore path (which sends
+    // `payload: report`) can ever carry a session-bound actionRef into
+    // saved_reports.payload_json or IndexedDB.
+    let reuseContext: ReuseContextEnvelope | undefined;
     try {
+      const rawSessionToken = parseCookie(request.headers.get('cookie'), SESSION_COOKIE_NAME);
       const sessionUser = await getSessionUser(request, client);
       const accountId = sessionUser ? sessionUser.id : null;
       if (sessionUser) {
@@ -42,16 +58,23 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
         const url = new URL(request.url);
         const deviceKey = url.searchParams.get('deviceKey');
         if (!isNonEmptyString(deviceKey) || deviceKey.length > MAX_DEVICE_KEY_LENGTH) {
-          return new NextResponse(JSON.stringify({ error: 'deviceKey is required' }), { status: 400 });
+          return new NextResponse(JSON.stringify({ error: 'deviceKey is required' }), { status: 400, headers: NO_STORE_JSON });
         }
         row = await findReportRowForDeviceKey(client, id, deviceKey);
       }
 
       if (!row) {
-        return new NextResponse(JSON.stringify({ error: 'Report not found' }), { status: 404 });
+        return new NextResponse(JSON.stringify({ error: 'Report not found' }), { status: 404, headers: NO_STORE_JSON });
       }
 
       payload = JSON.parse(String(row.payload_json)) as SimilarityReport;
+      // Persistence boundary: reuse context is delivered as a sibling of
+      // `payload` (see the response below), never inside it, and is never
+      // persisted (json_set in lib/report-primary-similarity.ts only ever
+      // touches similarity keys; POST /api/reports strips any client-sent
+      // reuseContext). A stale row that somehow carries one is scrubbed here
+      // so it can never reach the client on `payload`.
+      delete (payload as Record<string, unknown>).reuseContext;
       // Task A correction: an explicit, unconditional authorization signal —
       // set here, once, directly from the authenticated session's own real
       // `role` column, independent of whether any admin-only DATA field
@@ -254,16 +277,29 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
           rawText: payload.text,
           productionResult: historicalSubmissionMatch,
         }) ?? undefined;
-        // Phase E8S Step 11: same read-time-enrichment/non-fatal discipline
-        // as experimentalHistoricalMatch just above — see
-        // lib/e8s-report-integration.ts's own header comment. Never decides
-        // what renders; only tells the client which ids (if any) to fetch
-        // fresh E8S state for.
-        payload.reuseContext = await getReuseContextEligibility(client, {
-          accountId,
-          rawText: payload.text,
-          historicalSubmissionMatch,
-        });
+        // Confirmed-reuse annotation (ordinary-user flow): a bounded,
+        // id-free, session-bound envelope built ENTIRELY server-side from a
+        // caller-owned report. Contains no document_identity_id,
+        // representation id, declaration PK, account id, or source_ref — only
+        // bounded enums, dates, the public reportId, and per-declaration
+        // session-bound actionRefs (lib/reuse-context-action-ref.ts). Same
+        // best-effort / non-fatal discipline as the enrichment above; a
+        // session key is required (valid session AND raw cookie) before any
+        // ref is derived. Kept OFF `payload` — see the `reuseContext`
+        // declaration and the response envelope below.
+        const reuseContextSessionKeyValue = reuseContextSessionKey(rawSessionToken, Boolean(sessionUser));
+        if (accountId && reuseContextSessionKeyValue && isE8sReuseContextAllowlisted(accountId)) {
+          const binding = await resolveCallerOwnedReportBinding(client, { reportId: id, accountId });
+          if (binding.status === 'OK') {
+            reuseContext = await buildReuseContextEnvelope(client, {
+              reportId: id,
+              documentIdentityId: binding.documentIdentityId,
+              accountId,
+              sessionKey: reuseContextSessionKeyValue,
+              historicalSubmissionMatch,
+            });
+          }
+        }
         // Phase E8P + Device Passport Phase 4: production shadow telemetry —
         // measurement only, never changes historicalSubmissionMatch above
         // (already resolved and reused as-is, never recomputed) or the
@@ -294,9 +330,9 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
       client.close();
     }
 
-    return new NextResponse(JSON.stringify({ payload }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    return new NextResponse(JSON.stringify({ payload, ...(reuseContext ? { reuseContext } : {}) }), { status: 200, headers: NO_STORE_JSON });
   } catch (err) {
-    return new NextResponse(JSON.stringify({ error: err instanceof Error ? err.message : 'Internal error' }), { status: 500 });
+    return new NextResponse(JSON.stringify({ error: err instanceof Error ? err.message : 'Internal error' }), { status: 500, headers: NO_STORE_JSON });
   }
 }
 

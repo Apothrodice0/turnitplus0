@@ -102,7 +102,12 @@ test("the local IndexedDB lookup is never left unhandled — a rejection must fa
 
 test("delete uses the checked remote-delete variant, not the fail-soft one used by bulk history clearing", async () => {
   const shell = await readFile(new URL("../app/reports/[id]/report-detail-shell.tsx", import.meta.url), "utf8");
-  assert.match(shell, /import \{ deleteRemoteReportChecked, fetchRemoteReport \} from "@\/lib\/reports-remote";/);
+  const remoteImport = shell.match(/import \{ ([^}]+) \} from "@\/lib\/reports-remote";/);
+  assert.ok(remoteImport, "reports-remote import present");
+  const named = remoteImport[1].split(",").map((s) => s.trim());
+  assert.ok(named.includes("deleteRemoteReportChecked"), "must import the checked delete variant");
+  assert.ok(named.includes("fetchRemoteReport"), "must import fetchRemoteReport");
+  assert.ok(!named.includes("deleteRemoteReport"), "must NOT import the fail-soft deleteRemoteReport");
   assert.match(shell, /import \{ deleteStoredReport, getStoredReportById \} from "@\/lib\/report-store";/);
   assert.match(shell, /await deleteStoredReport\(id\);/);
   assert.match(shell, /const ok = await deleteRemoteReportChecked\(id\);/);

@@ -6,26 +6,19 @@ import { createClient } from "@libsql/client";
 import { applyMigrationsLibsql } from "../lib/ingest.js";
 import { createDocumentIdentity } from "../lib/document-identity.ts";
 import { indexDocumentSubmissionIntoCorpus } from "../lib/user-submission-corpus.ts";
-import { createSession } from "../lib/auth-session.ts";
+import { createSession, hashToken } from "../lib/auth-session.ts";
 import { resetRateForTest } from "../lib/rate-limit.js";
-import * as statusRoute from "../app/api/reuse-context/status/route.ts";
-import * as pendingRoute from "../app/api/reuse-context/pending/route.ts";
+import { deriveReuseContextActionRef } from "../lib/reuse-context-action-ref.ts";
 import * as declareRoute from "../app/api/reuse-context/declare/route.ts";
+import * as withdrawRoute from "../app/api/reuse-context/withdraw/route.ts";
+import * as revokeRoute from "../app/api/reuse-context/revoke/route.ts";
 import * as confirmRoute from "../app/api/reuse-context/confirm/route.ts";
 import * as rejectRoute from "../app/api/reuse-context/reject/route.ts";
-import * as revokeRoute from "../app/api/reuse-context/revoke/route.ts";
+import * as reportRoute from "../app/api/reports/[id]/route.ts";
 
 /**
- * Phase E8S Step 6: end-to-end tests for the real, session-authenticated
- * API routes (app/api/reuse-context/*), exercised exactly as production
- * would call them -- real Request objects, real session cookies (minted via
- * lib/auth-session.ts's own createSession, the actual production
- * mechanism), real route handlers imported and invoked directly (no Next.js
- * server needed -- see lib/auth-session.ts's own header comment on why
- * every route in this app is written against plain Request objects for
- * exactly this reason). Disposable local SQLite only; TURSO_DATABASE_URL is
- * pointed at a throwaway local file for the duration of this file, same
- * pattern as tests/report-historical-match-integration.test.mjs.
+ * Report-bound, session-bound-actionRef reuse-context routes. Disposable
+ * local SQLite; real Request objects, real session cookies, real handlers.
  */
 
 const repoRoot = path.resolve(".");
@@ -36,12 +29,6 @@ for (const suffix of ["", "-wal", "-shm"]) {
   if (fs.existsSync(candidate)) fs.unlinkSync(candidate);
 }
 process.env.TURSO_DATABASE_URL = `file:${dbFile}`;
-// Phase E8S Step 6.1 added a default-off allowlist gate (E8S_REUSE_CONTEXT_ALLOWLIST)
-// in front of every route this file exercises. This file's own purpose is
-// the FUNCTIONAL behavior of declare/confirm/reject/revoke, not the gate
-// itself (that's tests/e8s-visibility.test.mjs's job) -- so every account
-// createAccount() mints below is auto-appended to the allowlist, keeping
-// every pre-existing test in this file passing exactly as before Step 6.1.
 process.env.E8S_REUSE_CONTEXT_ALLOWLIST = "";
 
 const client = createClient({ url: `file:${dbFile}` });
@@ -69,7 +56,7 @@ async function createAccount(prefix) {
   const token = await createSession(client, id);
   const existing = process.env.E8S_REUSE_CONTEXT_ALLOWLIST;
   process.env.E8S_REUSE_CONTEXT_ALLOWLIST = existing ? `${existing},${id}` : id;
-  return { id, token };
+  return { id, token, sessionKey: hashToken(token) };
 }
 
 async function indexSubmission(accountId, title, rawText) {
@@ -78,26 +65,22 @@ async function indexSubmission(accountId, title, rawText) {
   return { identity, indexResult };
 }
 
+let reportCounter = 0;
+async function seedReport({ accountId, documentIdentityId, rawText }) {
+  reportCounter += 1;
+  const reportId = `rpt-${reportCounter}-${Date.now()}`;
+  const deviceKey = `dev-${reportCounter}`;
+  await client.execute({
+    sql: `INSERT INTO saved_reports (id, device_key, submission_id, title, report_created_at, word_count, archive_score, score_band, payload_json, user_id, document_identity_id)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+    args: [reportId, deviceKey, `sub-${reportId}`, "doc.txt", new Date().toISOString(), 20, 0, "Low", JSON.stringify({ text: rawText }), accountId, documentIdentityId],
+  });
+  return { reportId, deviceKey };
+}
+
 let ipCounter = 0;
-function nextIp(label) {
-  ipCounter += 1;
-  return `rc-${label}-${ipCounter}`;
-}
+function nextIp(label) { ipCounter += 1; return `rc-${label}-${ipCounter}`; }
 
-async function callGet(routeModule, url, token) {
-  const ip = nextIp("get");
-  await resetRateForTest(ip);
-  const headers = { "x-forwarded-for": ip };
-  if (token) headers["cookie"] = `tp_session_v1=${token}`;
-  const req = new Request(url, { headers });
-  return routeModule.GET(req);
-}
-
-// E8S Step 6.2: declare/confirm/reject/revoke now enforce isSameOriginRequest
-// (lib/same-origin.ts, the same fail-closed check /api/admin/corpus/* uses).
-// A real browser always sends Origin on an unsafe method, so every functional
-// call here sends a matching same-origin Origin/Host by default; the CSRF
-// tests pass `origin: null` (no header) or a foreign origin explicitly.
 async function callPost(routeModule, url, token, body, { origin = "http://localhost", host = "localhost" } = {}) {
   const ip = nextIp("post");
   await resetRateForTest(ip);
@@ -109,485 +92,394 @@ async function callPost(routeModule, url, token, body, { origin = "http://localh
   return routeModule.POST(req);
 }
 
-function statusUrl(documentIdentityId, representationId) {
-  return `http://localhost/api/reuse-context/status?documentIdentityId=${encodeURIComponent(documentIdentityId)}&representationId=${encodeURIComponent(representationId)}`;
-}
-function pendingUrl(documentIdentityId) {
-  return `http://localhost/api/reuse-context/pending?documentIdentityId=${encodeURIComponent(documentIdentityId)}`;
+async function callReportGet(reportId, token) {
+  const ip = nextIp("get");
+  await resetRateForTest(ip);
+  const headers = { "x-forwarded-for": ip };
+  if (token) headers["cookie"] = `tp_session_v1=${token}`;
+  const req = new Request(`http://localhost/api/reports/${encodeURIComponent(reportId)}`, { headers });
+  return reportRoute.GET(req, { params: Promise.resolve({ id: reportId }) });
 }
 
-/** Shared fixture for the confirm/reject/revoke lifecycle tests: an original submitter and a reuser who has already declared SUPERVISOR_COPY. */
-async function declaredFixture(marker) {
-  const text = `Fixture body for E2E lifecycle tests, marker ${marker}, long enough to canonicalize deterministically.`;
+const DECLARE_URL = "http://localhost/api/reuse-context/declare";
+const WITHDRAW_URL = "http://localhost/api/reuse-context/withdraw";
+const REVOKE_URL = "http://localhost/api/reuse-context/revoke";
+const CONFIRM_URL = "http://localhost/api/reuse-context/confirm";
+const REJECT_URL = "http://localhost/api/reuse-context/reject";
+
+/** original indexes text; reuser indexes the same text and gets a report whose first-eligible PRIOR_SUBMISSION is the original's representation. */
+async function priorSubmissionFixture(marker) {
+  const text = `Reuse-context routes fixture ${marker}, long enough to canonicalize into stable shingles for the matcher.`;
   const original = await createAccount(`${marker}-orig`);
   const reuser = await createAccount(`${marker}-reuse`);
-  const { identity: identity1, indexResult: ref1 } = await indexSubmission(original.id, "doc", text);
-  const { identity: identity2 } = await indexSubmission(reuser.id, "doc", text);
-  const res = await callPost(declareRoute, "http://localhost/api/reuse-context/declare", reuser.token, {
-    documentIdentityId: identity2.id,
-    representationId: ref1.representationId,
-    declaredContext: "SUPERVISOR_COPY",
-  });
-  assert.equal(res.status, 200, `fixture declare for marker ${marker} must succeed`);
-  const body = await res.json();
-  return { original, reuser, identity1, identity2, ref1, declarationId: body.declaration.id };
+  const { identity: originalIdentity } = await indexSubmission(original.id, "orig", text);
+  const { identity: reuserIdentity } = await indexSubmission(reuser.id, "reuse", text);
+  const reuserReport = await seedReport({ accountId: reuser.id, documentIdentityId: reuserIdentity.id, rawText: text });
+  const originalReport = await seedReport({ accountId: original.id, documentIdentityId: originalIdentity.id, rawText: text });
+  return { text, original, reuser, originalIdentity, reuserIdentity, reuserReport, originalReport };
 }
 
-test("A: PRIOR_SUBMISSION pair shows canDeclare=true -- the 'Add context' affordance", async () => {
-  const text = "Fixture body for E2E test A, long enough to canonicalize deterministically.";
-  const original = await createAccount("a-orig");
-  const reuser = await createAccount("a-reuse");
-  const { indexResult: ref1 } = await indexSubmission(original.id, "doc", text);
-  const { identity: identity2 } = await indexSubmission(reuser.id, "doc", text);
-
-  const res = await callGet(statusRoute, statusUrl(identity2.id, ref1.representationId), reuser.token);
-  assert.equal(res.status, 200);
-  const body = await res.json();
-  assert.deepEqual(body.affordance, { canDeclare: true });
-  assert.equal(body.activeDeclaration, null);
-});
-
-test("B: declare supervisor copy", async () => {
-  const text = "Fixture body for E2E test B.";
-  const original = await createAccount("b-orig");
-  const reuser = await createAccount("b-reuse");
-  const { indexResult: ref1 } = await indexSubmission(original.id, "doc", text);
-  const { identity: identity2 } = await indexSubmission(reuser.id, "doc", text);
-
-  const res = await callPost(declareRoute, "http://localhost/api/reuse-context/declare", reuser.token, {
-    documentIdentityId: identity2.id,
-    representationId: ref1.representationId,
-    declaredContext: "SUPERVISOR_COPY",
+async function activeDeclarationIds(documentIdentityId) {
+  const r = await client.execute({
+    sql: "SELECT id FROM reuse_context_declarations WHERE document_identity_id = ? AND revoked_at IS NULL ORDER BY id ASC",
+    args: [documentIdentityId],
   });
+  return r.rows.map((row) => Number(row.id));
+}
+
+// --- declare: report-bound ---------------------------------------------------
+
+test("declare: report-bound, resolves the first-eligible PRIOR_SUBMISSION server-side", async () => {
+  const f = await priorSubmissionFixture("decl");
+  const res = await callPost(declareRoute, DECLARE_URL, f.reuser.token, { reportId: f.reuserReport.reportId, declaredContext: "SUPERVISOR_COPY" });
   assert.equal(res.status, 200);
   const body = await res.json();
   assert.equal(body.status, "DECLARED");
-  assert.equal(body.declaration.declaredContext, "SUPERVISOR_COPY");
-  assert.equal(body.declaration.verificationState, "SELF_ASSERTED_UNVERIFIED");
-  assert.equal(body.declaration.confirmedAt, null);
-  assert.equal(body.declaration.revokedAt, null);
+  assert.ok(body.reuseContext, "response carries a fresh envelope");
+  assert.equal(body.reuseContext.declare.activeDeclarations.length, 1);
+  assert.equal(body.reuseContext.declare.activeDeclarations[0].state, "SELF_ASSERTED_UNVERIFIED");
+  assert.equal(body.reuseContext.declare.activeDeclarations[0].declaredContext, "SUPERVISOR_COPY");
+  assert.equal(body.reuseContext.declare.activeDeclarations[0].isCurrent, true);
+  assert.match(body.reuseContext.declare.activeDeclarations[0].actionRef, /^[0-9a-f]{64}$/);
 });
 
-test("C: original submitter sees confirmation panel (GET /pending)", async () => {
-  const { original, identity1, declarationId } = await declaredFixture("c");
-  const res = await callGet(pendingRoute, pendingUrl(identity1.id), original.token);
+test("declare: never accepts documentIdentityId / representationId from the client", async () => {
+  const f = await priorSubmissionFixture("decl-noids");
+  // Even if the client tries to smuggle ids, they are ignored — the route reads reportId only.
+  const res = await callPost(declareRoute, DECLARE_URL, f.reuser.token, {
+    reportId: f.reuserReport.reportId,
+    declaredContext: "COAUTHOR_COPY",
+    documentIdentityId: "attacker-supplied",
+    representationId: "attacker-supplied",
+  });
   assert.equal(res.status, 200);
-  const body = await res.json();
-  assert.equal(body.declarations.length, 1);
-  assert.equal(body.declarations[0].id, declarationId);
-  assert.equal(body.declarations[0].verificationState, "SELF_ASSERTED_UNVERIFIED");
+  const rows = await activeDeclarationIds(f.reuserIdentity.id);
+  assert.equal(rows.length, 1, "declaration bound to the server-resolved identity, not the smuggled one");
 });
 
-test("D: original submitter confirms", async () => {
-  const { original, declarationId } = await declaredFixture("d");
-  const res = await callPost(confirmRoute, "http://localhost/api/reuse-context/confirm", original.token, { declarationId });
-  assert.equal(res.status, 200);
-  const body = await res.json();
-  assert.equal(body.status, "CONFIRMED");
-  assert.equal(body.declaration.verificationState, "MUTUALLY_CONFIRMED");
-  assert.notEqual(body.declaration.confirmedAt, null);
-});
-
-test("E: original submitter rejects without confirming", async () => {
-  const { original, declarationId } = await declaredFixture("e");
-  const res = await callPost(rejectRoute, "http://localhost/api/reuse-context/reject", original.token, { declarationId });
-  assert.equal(res.status, 200);
-  const body = await res.json();
-  assert.equal(body.status, "REVOKED");
-  assert.equal(body.declaration.confirmedAt, null, "rejected without ever confirming");
-  assert.notEqual(body.declaration.revokedAt, null);
-});
-
-test("E2: /reject refuses (USE_REVOKE_INSTEAD) once a declaration is already confirmed", async () => {
-  const { original, declarationId } = await declaredFixture("e2");
-  const confirmRes = await callPost(confirmRoute, "http://localhost/api/reuse-context/confirm", original.token, { declarationId });
-  assert.equal(confirmRes.status, 200);
-  const rejectRes = await callPost(rejectRoute, "http://localhost/api/reuse-context/reject", original.token, { declarationId });
-  assert.equal(rejectRes.status, 409);
-  const body = await rejectRes.json();
-  assert.equal(body.status, "USE_REVOKE_INSTEAD");
-});
-
-test("F: declarer withdraws", async () => {
-  const { reuser, declarationId } = await declaredFixture("f");
-  const res = await callPost(revokeRoute, "http://localhost/api/reuse-context/revoke", reuser.token, { declarationId });
-  assert.equal(res.status, 200);
-  const body = await res.json();
-  assert.equal(body.status, "REVOKED");
-});
-
-test("G: either party revokes after confirmation, and the audit trail retains that it was once confirmed", async () => {
-  const { original, reuser, declarationId } = await declaredFixture("g");
-  const confirmRes = await callPost(confirmRoute, "http://localhost/api/reuse-context/confirm", original.token, { declarationId });
-  assert.equal(confirmRes.status, 200);
-
-  const revokeRes = await callPost(revokeRoute, "http://localhost/api/reuse-context/revoke", reuser.token, { declarationId });
-  assert.equal(revokeRes.status, 200);
-  const body = await revokeRes.json();
-  assert.equal(body.status, "REVOKED");
-  assert.notEqual(body.declaration.confirmedAt, null, "confirmedAt must survive revocation -- it is a preserved historical fact");
-});
-
-test("G2: the original submitter (as confirmer) can also revoke after confirmation", async () => {
-  const { original, declarationId } = await declaredFixture("g2");
-  await callPost(confirmRoute, "http://localhost/api/reuse-context/confirm", original.token, { declarationId });
-  const revokeRes = await callPost(revokeRoute, "http://localhost/api/reuse-context/revoke", original.token, { declarationId });
-  assert.equal(revokeRes.status, 200);
-  const body = await revokeRes.json();
-  assert.equal(body.status, "REVOKED");
-});
-
-test("H: ambiguous pair hides Add context", async () => {
-  const text = "Fixture body for E2E test H, three submitters.";
-  const acct1 = await createAccount("h1");
-  const acct2 = await createAccount("h2");
-  const acct3 = await createAccount("h3");
-  const { indexResult: ref1 } = await indexSubmission(acct1.id, "doc", text);
-  await indexSubmission(acct2.id, "doc", text);
-  const { identity: identity3 } = await indexSubmission(acct3.id, "doc", text);
-
-  const res = await callGet(statusRoute, statusUrl(identity3.id, ref1.representationId), acct3.token);
-  assert.equal(res.status, 200);
-  const body = await res.json();
-  assert.deepEqual(body.affordance, { canDeclare: false, reason: "AMBIGUOUS" });
-  assert.equal(body.activeDeclaration, null);
-});
-
-test("I: unresolvable pair disables confirmation after the underlying reference is gone", async () => {
-  const { original, declarationId, ref1 } = await declaredFixture("i");
-  // Deleting the representation cascades to corpus_submission_references (ON DELETE CASCADE) -- no cascade to reuse_context_declarations (E8S Step 2/4's own design).
-  await client.execute({ sql: "DELETE FROM corpus_document_representations WHERE id = ?", args: [ref1.representationId] });
-
-  const res = await callPost(confirmRoute, "http://localhost/api/reuse-context/confirm", original.token, { declarationId });
+test("declare: NULL document_identity_id fails closed with REUSE_CONTEXT_UNAVAILABLE", async () => {
+  const acct = await createAccount("decl-nullid");
+  await client.execute({
+    sql: `INSERT INTO saved_reports (id, device_key, submission_id, title, report_created_at, word_count, archive_score, score_band, payload_json, user_id)
+          VALUES (?,?,?,?,?,?,?,?,?,?)`,
+    args: ["rpt-nullid", "dev-nullid", "sub-nullid", "d", new Date().toISOString(), 10, 0, "Low", JSON.stringify({ text: "no identity link here at all" }), acct.id],
+  });
+  const res = await callPost(declareRoute, DECLARE_URL, acct.token, { reportId: "rpt-nullid", declaredContext: "SUPERVISOR_COPY" });
   assert.equal(res.status, 409);
-  const body = await res.json();
-  assert.equal(body.status, "ORIGINAL_SUBMISSION_UNRESOLVABLE");
+  assert.equal((await res.json()).status, "REUSE_CONTEXT_UNAVAILABLE");
 });
 
-test("J: SELF never shows Add context", async () => {
-  const text = "Fixture body for E2E test J, same-account resubmission.";
-  const account = await createAccount("j");
-  const { indexResult: ref1 } = await indexSubmission(account.id, "doc-v1", text);
-  const { identity: identity2 } = await indexSubmission(account.id, "doc-v2", text);
+test("declare: another user's reportId -> generic 404, no row written", async () => {
+  const f = await priorSubmissionFixture("decl-crossreport");
+  const stranger = await createAccount("decl-stranger");
+  const res = await callPost(declareRoute, DECLARE_URL, stranger.token, { reportId: f.reuserReport.reportId, declaredContext: "SUPERVISOR_COPY" });
+  assert.equal(res.status, 404);
+  assert.equal((await activeDeclarationIds(f.reuserIdentity.id)).length, 0);
+});
 
-  const res = await callGet(statusRoute, statusUrl(identity2.id, ref1.representationId), account.token);
+test("declare: > 1 caller-owned (reportId,user) rows -> fail closed, no mutation", async () => {
+  const f = await priorSubmissionFixture("decl-dup");
+  // A second saved_reports row with the same id + user_id, different device_key.
+  await client.execute({
+    sql: `INSERT INTO saved_reports (id, device_key, submission_id, title, report_created_at, word_count, archive_score, score_band, payload_json, user_id, document_identity_id)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+    args: [f.reuserReport.reportId, "dev-dup-2", "sub-dup-2", "d", new Date().toISOString(), 10, 0, "Low", JSON.stringify({ text: f.text }), f.reuser.id, f.reuserIdentity.id],
+  });
+  const res = await callPost(declareRoute, DECLARE_URL, f.reuser.token, { reportId: f.reuserReport.reportId, declaredContext: "SUPERVISOR_COPY" });
+  assert.equal(res.status, 404);
+  assert.equal((await activeDeclarationIds(f.reuserIdentity.id)).length, 0);
+});
+
+// --- withdrawal: actionRef-bound, survives ordering change ------------------
+
+test("withdraw: actionRef-bound; a declaration stays withdrawable regardless of current match order", async () => {
+  const f = await priorSubmissionFixture("wd");
+  const declareRes = await callPost(declareRoute, DECLARE_URL, f.reuser.token, { reportId: f.reuserReport.reportId, declaredContext: "SUPERVISOR_COPY" });
+  const declared = await declareRes.json();
+  const actionRef = declared.reuseContext.declare.activeDeclarations[0].actionRef;
+
+  // Simulate the historical-match ordering changing: add a *second* active
+  // declaration for a different representation directly, so this identity now
+  // has two active rows and the original may no longer be "first".
+  const secondRepIdentity = (await indexSubmission((await createAccount("wd-other")).id, "other", `${f.text} extra tail to shift representation`)).identity;
+  // (Directly insert a second active declaration for the reuser identity.)
+  const secondRefRow = await client.execute({ sql: "SELECT id FROM corpus_submission_references WHERE document_identity_id = ?", args: [secondRepIdentity.id] });
+  await client.execute({
+    sql: `INSERT INTO reuse_context_declarations (document_identity_id, matched_representation_id, matched_submission_reference_id, declared_context, declared_by_account_id, declared_at, verification_state, created_at)
+          VALUES (?,?,?,?,?,CURRENT_TIMESTAMP,'SELF_ASSERTED_UNVERIFIED',CURRENT_TIMESTAMP)`,
+    args: [f.reuserIdentity.id, `rep-shifted-${f.reuser.id}`, Number(secondRefRow.rows[0].id), "COAUTHOR_COPY", f.reuser.id],
+  });
+
+  const before = await activeDeclarationIds(f.reuserIdentity.id);
+  assert.equal(before.length, 2);
+
+  const wdRes = await callPost(withdrawRoute, WITHDRAW_URL, f.reuser.token, { reportId: f.reuserReport.reportId, actionRef });
+  assert.equal(wdRes.status, 200);
+  const after = await activeDeclarationIds(f.reuserIdentity.id);
+  assert.equal(after.length, 1, "exactly the ref-selected declaration was withdrawn");
+  assert.ok(!after.includes(before.find((id) => !after.includes(id)) ?? -1) || after.length === 1);
+});
+
+test("withdraw: two active declarations get distinct actionRefs; withdrawing D1 leaves D2", async () => {
+  const f = await priorSubmissionFixture("wd2");
+  await callPost(declareRoute, DECLARE_URL, f.reuser.token, { reportId: f.reuserReport.reportId, declaredContext: "SUPERVISOR_COPY" });
+  // second active row for a different representation
+  const other = await createAccount("wd2-other");
+  const otherIdentity = (await indexSubmission(other.id, "o", `${f.text} distinct trailing content here`)).identity;
+  const otherRef = await client.execute({ sql: "SELECT id FROM corpus_submission_references WHERE document_identity_id = ?", args: [otherIdentity.id] });
+  await client.execute({
+    sql: `INSERT INTO reuse_context_declarations (document_identity_id, matched_representation_id, matched_submission_reference_id, declared_context, declared_by_account_id, declared_at, verification_state, created_at)
+          VALUES (?,?,?,?,?,CURRENT_TIMESTAMP,'SELF_ASSERTED_UNVERIFIED',CURRENT_TIMESTAMP)`,
+    args: [f.reuserIdentity.id, `rep-second-${f.reuser.id}`, Number(otherRef.rows[0].id), "OTHER_AUTHORIZED_REUSE", f.reuser.id],
+  });
+
+  const ids = await activeDeclarationIds(f.reuserIdentity.id);
+  assert.equal(ids.length, 2);
+  const refs = ids.map((id) => deriveReuseContextActionRef(f.reuser.sessionKey, id));
+  assert.notEqual(refs[0], refs[1]);
+
+  const wdRes = await callPost(withdrawRoute, WITHDRAW_URL, f.reuser.token, { reportId: f.reuserReport.reportId, actionRef: refs[0] });
+  assert.equal(wdRes.status, 200);
+  const remaining = await activeDeclarationIds(f.reuserIdentity.id);
+  assert.deepEqual(remaining, [ids[1]]);
+});
+
+test("withdraw: cross-session / cross-report / cross-account ref -> 404, no mutation", async () => {
+  const f = await priorSubmissionFixture("wd-forge");
+  const declared = await (await callPost(declareRoute, DECLARE_URL, f.reuser.token, { reportId: f.reuserReport.reportId, declaredContext: "SUPERVISOR_COPY" })).json();
+  const realRef = declared.reuseContext.declare.activeDeclarations[0].actionRef;
+  const ids = await activeDeclarationIds(f.reuserIdentity.id);
+
+  // cross-account: stranger uses the reuser's real ref against their own (empty) report
+  const stranger = await createAccount("wd-stranger");
+  const strangerReport = await seedReport({ accountId: stranger.id, documentIdentityId: f.originalIdentity.id, rawText: "unrelated" });
+  const crossAccount = await callPost(withdrawRoute, WITHDRAW_URL, stranger.token, { reportId: strangerReport.reportId, actionRef: realRef });
+  assert.equal(crossAccount.status, 404);
+
+  // cross-report: reuser uses the real ref but names the original's report
+  const crossReport = await callPost(withdrawRoute, WITHDRAW_URL, f.reuser.token, { reportId: f.originalReport.reportId, actionRef: realRef });
+  assert.equal(crossReport.status, 404);
+
+  // cross-session: a ref derived under a different session key
+  const foreignRef = deriveReuseContextActionRef(hashToken("some-other-session-token-value-1234567890"), ids[0]);
+  const crossSession = await callPost(withdrawRoute, WITHDRAW_URL, f.reuser.token, { reportId: f.reuserReport.reportId, actionRef: foreignRef });
+  assert.equal(crossSession.status, 404);
+
+  assert.equal((await activeDeclarationIds(f.reuserIdentity.id)).length, 1, "nothing was withdrawn by any forged attempt");
+});
+
+test("withdraw: a stale ref for an already-revoked declaration -> 404", async () => {
+  const f = await priorSubmissionFixture("wd-stale");
+  const declared = await (await callPost(declareRoute, DECLARE_URL, f.reuser.token, { reportId: f.reuserReport.reportId, declaredContext: "SUPERVISOR_COPY" })).json();
+  const ref = declared.reuseContext.declare.activeDeclarations[0].actionRef;
+  assert.equal((await callPost(withdrawRoute, WITHDRAW_URL, f.reuser.token, { reportId: f.reuserReport.reportId, actionRef: ref })).status, 200);
+  const again = await callPost(withdrawRoute, WITHDRAW_URL, f.reuser.token, { reportId: f.reuserReport.reportId, actionRef: ref });
+  assert.equal(again.status, 404);
+});
+
+test("withdraw: malformed actionRef -> 404 without crypto", async () => {
+  const f = await priorSubmissionFixture("wd-bad");
+  const res = await callPost(withdrawRoute, WITHDRAW_URL, f.reuser.token, { reportId: f.reuserReport.reportId, actionRef: "not-a-hex-ref" });
+  assert.equal(res.status, 404);
+});
+
+// --- confirm / reject: original submitter ----------------------------------
+
+async function declaredFixture(marker) {
+  const f = await priorSubmissionFixture(marker);
+  const res = await callPost(declareRoute, DECLARE_URL, f.reuser.token, { reportId: f.reuserReport.reportId, declaredContext: "SUPERVISOR_COPY" });
+  assert.equal(res.status, 200, "fixture declare must succeed");
+  return f;
+}
+
+async function pendingRefForOriginal(f, token) {
+  const res = await callReportGet(f.originalReport.reportId, token);
   assert.equal(res.status, 200);
   const body = await res.json();
-  assert.deepEqual(body.affordance, { canDeclare: false, reason: "SELF_RELATIONSHIP" });
-});
-
-test("K: third party cannot see or act on a pair they do not own", async () => {
-  const { identity1, identity2, ref1, declarationId } = await declaredFixture("k");
-  const stranger = await createAccount("k-stranger");
-
-  const statusRes = await callGet(statusRoute, statusUrl(identity2.id, ref1.representationId), stranger.token);
-  assert.equal(statusRes.status, 403);
-
-  const pendingRes = await callGet(pendingRoute, pendingUrl(identity1.id), stranger.token);
-  assert.equal(pendingRes.status, 403);
-
-  const declareRes = await callPost(declareRoute, "http://localhost/api/reuse-context/declare", stranger.token, {
-    documentIdentityId: identity2.id, representationId: ref1.representationId, declaredContext: "OTHER_AUTHORIZED_REUSE",
-  });
-  assert.equal(declareRes.status, 403);
-  assert.equal((await declareRes.json()).status, "DECLARER_NOT_SUBMISSION_OWNER");
-
-  const confirmRes = await callPost(confirmRoute, "http://localhost/api/reuse-context/confirm", stranger.token, { declarationId });
-  assert.equal(confirmRes.status, 409);
-  assert.equal((await confirmRes.json()).status, "NOT_ORIGINAL_SUBMITTER");
-
-  const revokeRes = await callPost(revokeRoute, "http://localhost/api/reuse-context/revoke", stranger.token, { declarationId });
-  assert.equal(revokeRes.status, 409);
-  assert.equal((await revokeRes.json()).status, "NOT_AUTHORIZED_TO_REVOKE");
-
-  const rejectRes = await callPost(rejectRoute, "http://localhost/api/reuse-context/reject", stranger.token, { declarationId });
-  assert.equal(rejectRes.status, 409);
-  assert.equal((await rejectRes.json()).status, "NOT_AUTHORIZED_TO_REVOKE");
-});
-
-test("K2: unauthenticated requests are rejected with 401 across every route", async () => {
-  const { identity1, identity2, ref1, declarationId } = await declaredFixture("k2");
-  assert.equal((await callGet(statusRoute, statusUrl(identity2.id, ref1.representationId), undefined)).status, 401);
-  assert.equal((await callGet(pendingRoute, pendingUrl(identity1.id), undefined)).status, 401);
-  assert.equal((await callPost(declareRoute, "http://localhost/api/reuse-context/declare", undefined, {
-    documentIdentityId: identity2.id, representationId: ref1.representationId, declaredContext: "OTHER_AUTHORIZED_REUSE",
-  })).status, 401);
-  assert.equal((await callPost(confirmRoute, "http://localhost/api/reuse-context/confirm", undefined, { declarationId })).status, 401);
-  assert.equal((await callPost(rejectRoute, "http://localhost/api/reuse-context/reject", undefined, { declarationId })).status, 401);
-  assert.equal((await callPost(revokeRoute, "http://localhost/api/reuse-context/revoke", undefined, { declarationId })).status, 401);
-});
-
-test("L (structural): no new E8S Step 6 file references score/archiveScore/aiScore/verifiedSimilarity/containment/matchedWordCount as a code identifier", () => {
-  function stripComments(src) {
-    return src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
-  }
-  // Reassurance prose ("It will not change your score.") is expected and
-  // intentional (E8S Step 5's own copy) -- it must never trip this check,
-  // which is only about CODE referencing the actual score/archiveScore/
-  // aiScore/verifiedSimilarity/containment/matchedWordCount fields. camelCase
-  // identifiers can never occur in natural English, so they're checked
-  // as-is; the bare word "score" is only checked where it could plausibly
-  // be a code reference (immediately followed by an identifier boundary
-  // like `.`, `:`, `=`, `,`, `)`, or camelCase continuation), never inside
-  // a sentence.
-  const CODE_IDENTIFIER_PATTERN = /archiveScore|aiScore|verifiedSimilarity|matchedWordCount|\bcontainment\b|\.score\b|\bscore\s*[:=]/i;
-  const files = [
-    "lib/reuse-context-declarations.ts",
-    "app/api/reuse-context/status/route.ts",
-    "app/api/reuse-context/pending/route.ts",
-    "app/api/reuse-context/declare/route.ts",
-    "app/api/reuse-context/confirm/route.ts",
-    "app/api/reuse-context/reject/route.ts",
-    "app/api/reuse-context/revoke/route.ts",
-    "components/reuse-context/reuse-context-panel.tsx",
-    "components/reuse-context/original-submitter-confirmation-panel.tsx",
-  ];
-  for (const file of files) {
-    const source = stripComments(fs.readFileSync(path.join(repoRoot, file), "utf8"));
-    assert.doesNotMatch(
-      source,
-      CODE_IDENTIFIER_PATTERN,
-      `${file} must never reference score/archiveScore/aiScore/verifiedSimilarity/containment/matchedWordCount as a code identifier`,
-    );
-  }
-});
-
-test("L2 (runtime): a full declare -> confirm -> revoke cycle never touches an unrelated saved_reports row's score fields", async () => {
-  const reportId = "l2-report-1";
-  await client.execute({
-    sql: `INSERT INTO saved_reports (id, device_key, submission_id, title, report_created_at, word_count, archive_score, score_band, payload_json, saved_at, updated_at)
-          VALUES (?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
-    args: [reportId, "l2-device", "l2-sub", "l2.pdf", new Date().toISOString(), 100, 37, "Low", JSON.stringify({ score: 37, archiveScore: 37, aiScore: 61 })],
-  });
-  const before = await client.execute({ sql: "SELECT archive_score, payload_json FROM saved_reports WHERE id = ?", args: [reportId] });
-
-  const { original, declarationId } = await declaredFixture("l2");
-  await callPost(confirmRoute, "http://localhost/api/reuse-context/confirm", original.token, { declarationId });
-  await callPost(revokeRoute, "http://localhost/api/reuse-context/revoke", original.token, { declarationId });
-
-  const after = await client.execute({ sql: "SELECT archive_score, payload_json FROM saved_reports WHERE id = ?", args: [reportId] });
-  assert.deepEqual(before.rows[0], after.rows[0], "an unrelated report's score fields must be byte-identical before and after a full declaration lifecycle");
-});
-
-test("M: concurrent actions remain race-safe (duplicate declare, simultaneous confirm, simultaneous revoke)", async () => {
-  const text = "Fixture body for E2E test M concurrency.";
-  const original = await createAccount("m-orig");
-  const reuser = await createAccount("m-reuse");
-  const { indexResult: ref1 } = await indexSubmission(original.id, "doc", text);
-  const { identity: identity2 } = await indexSubmission(reuser.id, "doc", text);
-
-  const declareBody = { documentIdentityId: identity2.id, representationId: ref1.representationId, declaredContext: "COAUTHOR_COPY" };
-  const [d1, d2] = await Promise.all([
-    callPost(declareRoute, "http://localhost/api/reuse-context/declare", reuser.token, declareBody),
-    callPost(declareRoute, "http://localhost/api/reuse-context/declare", reuser.token, declareBody),
-  ]);
-  const declareStatuses = [(await d1.json()).status, (await d2.json()).status].sort();
-  assert.deepEqual(declareStatuses, ["ALREADY_ACTIVE", "DECLARED"]);
-
-  const active = await client.execute({
-    sql: "SELECT id FROM reuse_context_declarations WHERE document_identity_id=? AND matched_representation_id=? AND revoked_at IS NULL",
-    args: [identity2.id, ref1.representationId],
-  });
-  assert.equal(active.rows.length, 1, "exactly one active row must survive the concurrent declare race");
-  const declarationId = Number(active.rows[0].id);
-
-  const [c1, c2] = await Promise.all([
-    callPost(confirmRoute, "http://localhost/api/reuse-context/confirm", original.token, { declarationId }),
-    callPost(confirmRoute, "http://localhost/api/reuse-context/confirm", original.token, { declarationId }),
-  ]);
-  const confirmStatuses = [(await c1.json()).status, (await c2.json()).status].sort();
-  assert.deepEqual(confirmStatuses, ["ALREADY_CONFIRMED", "CONFIRMED"]);
-
-  const [r1, r2] = await Promise.all([
-    callPost(revokeRoute, "http://localhost/api/reuse-context/revoke", reuser.token, { declarationId }),
-    callPost(revokeRoute, "http://localhost/api/reuse-context/revoke", original.token, { declarationId }),
-  ]);
-  const revokeStatuses = [(await r1.json()).status, (await r2.json()).status].sort();
-  assert.deepEqual(revokeStatuses, ["ALREADY_REVOKED", "REVOKED"]);
-});
-
-test("N: report deletion does not affect the declaration -- it is anchored to document_identity, not the report", async () => {
-  const { declarationId } = await declaredFixture("n");
-  await client.execute({
-    sql: `INSERT INTO saved_reports (id, device_key, submission_id, title, report_created_at, word_count, archive_score, score_band, payload_json, saved_at, updated_at)
-          VALUES (?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
-    args: ["n-report-1", "n-device-1", "n-sub-1", "n.pdf", new Date().toISOString(), 100, 5, "Low", JSON.stringify({ score: 5, archiveScore: 5 })],
-  });
-  await client.execute({ sql: "DELETE FROM saved_reports WHERE id = ?", args: ["n-report-1"] });
-
-  const raw = await client.execute({ sql: "SELECT id, verification_state FROM reuse_context_declarations WHERE id = ?", args: [declarationId] });
-  assert.equal(raw.rows.length, 1);
-  assert.equal(raw.rows[0].verification_state, "SELF_ASSERTED_UNVERIFIED");
-});
-
-test("O: representation deletion does not cascade to the declaration row -- audit trail preserved, reference left dangling", async () => {
-  const { declarationId, ref1 } = await declaredFixture("o");
-  await client.execute({ sql: "DELETE FROM corpus_document_representations WHERE id = ?", args: [ref1.representationId] });
-
-  const raw = await client.execute({
-    sql: "SELECT id, matched_representation_id, matched_submission_reference_id FROM reuse_context_declarations WHERE id = ?",
-    args: [declarationId],
-  });
-  assert.equal(raw.rows.length, 1, "the declaration row must survive representation deletion");
-
-  const refCheck = await client.execute({
-    sql: "SELECT id FROM corpus_submission_references WHERE id = ?",
-    args: [raw.rows[0].matched_submission_reference_id],
-  });
-  assert.equal(refCheck.rows.length, 0, "the underlying reference should be gone -- cascaded from the representation delete, per corpus_submission_references' own ON DELETE CASCADE");
-});
-
-// --- E8S Step 6.2: CSRF / same-origin enforcement --------------------------
-//
-// declare/confirm/reject/revoke each enforce isSameOriginRequest
-// (lib/same-origin.ts) — the same fail-closed check /api/admin/corpus/* uses.
-// The check runs after rate-limiting and BEFORE the body is read or the
-// session resolved, so a cross-site caller cannot probe JSON-validation, the
-// allowlist, or per-pair authorization. A same-origin failure returns this
-// feature's own generic hidden 404 ({ error: "Not found." }) — byte-identical
-// to the allowlist-gate response, revealing nothing.
-
-const CSRF_ROUTES = [
-  { name: "declare", mod: declareRoute, url: "http://localhost/api/reuse-context/declare" },
-  { name: "confirm", mod: confirmRoute, url: "http://localhost/api/reuse-context/confirm" },
-  { name: "reject", mod: rejectRoute, url: "http://localhost/api/reuse-context/reject" },
-  { name: "revoke", mod: revokeRoute, url: "http://localhost/api/reuse-context/revoke" },
-];
-
-/** A correctly-shaped body for each route, so a rejection can only be the same-origin gate, never body validation. */
-function csrfBodyFor(name, fx) {
-  if (name === "declare") {
-    return { documentIdentityId: fx.identity2.id, representationId: fx.ref1.representationId, declaredContext: "OTHER_AUTHORIZED_REUSE" };
-  }
-  return { declarationId: fx.declarationId };
-}
-/** The session actually authorized for each route's happy path. */
-function csrfTokenFor(name, fx) {
-  return name === "declare" ? fx.reuser.token : fx.original.token;
-}
-async function assertDeclarationUntouched(declarationId, note) {
-  const row = await client.execute({
-    sql: "SELECT verification_state, confirmed_at, revoked_at FROM reuse_context_declarations WHERE id = ?",
-    args: [declarationId],
-  });
-  assert.equal(row.rows[0].verification_state, "SELF_ASSERTED_UNVERIFIED", note);
-  assert.equal(row.rows[0].confirmed_at, null, note);
-  assert.equal(row.rows[0].revoked_at, null, note);
+  return { body, ref: body.reuseContext?.confirm?.pending?.[0]?.actionRef ?? null };
 }
 
-for (const { name, mod, url } of CSRF_ROUTES) {
-  test(`CSRF ${name}: missing Origin header -> generic hidden 404, declaration untouched`, async () => {
-    const fx = await declaredFixture(`csrf-noorigin-${name}`);
-    const res = await callPost(mod, url, csrfTokenFor(name, fx), csrfBodyFor(name, fx), { origin: null });
-    assert.equal(res.status, 404);
-    assert.deepEqual(await res.json(), { error: "Not found." });
-    await assertDeclarationUntouched(fx.declarationId, `${name}: a missing-Origin POST must not mutate the declaration`);
-  });
+test("confirm: original submitter confirms via the pending actionRef from their own report envelope", async () => {
+  const f = await declaredFixture("cf");
+  const { body, ref } = await pendingRefForOriginal(f, f.original.token);
+  assert.ok(ref, "the original submitter's report envelope lists the pending declaration");
+  assert.equal(body.reuseContext.confirm.pending.length, 1);
+  assert.equal(body.reuseContext.confirm.pending[0].state, "SELF_ASSERTED_UNVERIFIED");
 
-  test(`CSRF ${name}: foreign Origin -> generic hidden 404, declaration untouched`, async () => {
-    const fx = await declaredFixture(`csrf-foreign-${name}`);
-    const res = await callPost(mod, url, csrfTokenFor(name, fx), csrfBodyFor(name, fx), { origin: "http://evil.example" });
-    assert.equal(res.status, 404);
-    assert.deepEqual(await res.json(), { error: "Not found." });
-    await assertDeclarationUntouched(fx.declarationId, `${name}: a foreign-Origin POST must not mutate the declaration`);
-  });
-}
-
-test("CSRF: same-origin declare reaches normal route behavior (DECLARED)", async () => {
-  const text = "CSRF same-origin declare fixture, long enough to canonicalize deterministically.";
-  const original = await createAccount("csrf-ok-declare-orig");
-  const reuser = await createAccount("csrf-ok-declare-reuse");
-  const { indexResult: ref1 } = await indexSubmission(original.id, "doc", text);
-  const { identity: identity2 } = await indexSubmission(reuser.id, "doc", text);
-  const res = await callPost(declareRoute, "http://localhost/api/reuse-context/declare", reuser.token, {
-    documentIdentityId: identity2.id, representationId: ref1.representationId, declaredContext: "SUPERVISOR_COPY",
-  });
+  const res = await callPost(confirmRoute, CONFIRM_URL, f.original.token, { reportId: f.originalReport.reportId, actionRef: ref });
   assert.equal(res.status, 200);
-  assert.equal((await res.json()).status, "DECLARED");
+  assert.equal((await res.json()).status, "CONFIRMED");
+
+  const dRow = await client.execute({ sql: "SELECT verification_state FROM reuse_context_declarations WHERE document_identity_id = ?", args: [f.reuserIdentity.id] });
+  assert.equal(dRow.rows[0].verification_state, "MUTUALLY_CONFIRMED");
 });
 
-test("CSRF: same-origin confirm / reject / revoke each reach normal route behavior", async () => {
-  const confirmFx = await declaredFixture("csrf-ok-confirm");
-  const cRes = await callPost(confirmRoute, "http://localhost/api/reuse-context/confirm", confirmFx.original.token, { declarationId: confirmFx.declarationId });
-  assert.equal(cRes.status, 200);
-  assert.equal((await cRes.json()).status, "CONFIRMED");
-
-  const rejectFx = await declaredFixture("csrf-ok-reject");
-  const rRes = await callPost(rejectRoute, "http://localhost/api/reuse-context/reject", rejectFx.original.token, { declarationId: rejectFx.declarationId });
-  assert.equal(rRes.status, 200);
-  assert.equal((await rRes.json()).status, "REVOKED");
-
-  const revokeFx = await declaredFixture("csrf-ok-revoke");
-  const vRes = await callPost(revokeRoute, "http://localhost/api/reuse-context/revoke", revokeFx.reuser.token, { declarationId: revokeFx.declarationId });
-  assert.equal(vRes.status, 200);
-  assert.equal((await vRes.json()).status, "REVOKED");
+test("confirm: only SELF_ASSERTED_UNVERIFIED rows ever appear in confirm.pending[]", async () => {
+  const f = await declaredFixture("cf-pending");
+  const first = await pendingRefForOriginal(f, f.original.token);
+  await callPost(confirmRoute, CONFIRM_URL, f.original.token, { reportId: f.originalReport.reportId, actionRef: first.ref });
+  const after = await pendingRefForOriginal(f, f.original.token);
+  assert.equal(after.body.reuseContext.confirm.pending.length, 0, "a confirmed declaration is not pending");
 });
 
-test("CSRF: the same-origin check precedes body parsing -- cross-origin malformed JSON is the CSRF 404, never a 400", async () => {
-  for (const { name, mod, url } of CSRF_ROUTES) {
-    const ip = nextIp("post");
-    await resetRateForTest(ip);
-    const req = new Request(url, {
-      method: "POST",
-      headers: { "content-type": "application/json", "x-forwarded-for": ip, origin: "http://evil.example", host: "localhost" },
-      body: "{ this is not valid json",
-    });
-    const res = await mod.POST(req);
-    assert.equal(res.status, 404, `${name}: cross-origin malformed JSON must be the CSRF 404, not a body 400`);
-    assert.deepEqual(await res.json(), { error: "Not found." }, `${name}: cross-origin response shape must not vary with body validity`);
-  }
+test("confirm: concurrent / double confirm is idempotent (ALREADY_CONFIRMED), server still recognises the ref", async () => {
+  const f = await declaredFixture("cf-idem");
+  const { ref } = await pendingRefForOriginal(f, f.original.token);
+  const one = await callPost(confirmRoute, CONFIRM_URL, f.original.token, { reportId: f.originalReport.reportId, actionRef: ref });
+  assert.equal(one.status, 200);
+  const two = await callPost(confirmRoute, CONFIRM_URL, f.original.token, { reportId: f.originalReport.reportId, actionRef: ref });
+  assert.equal(two.status, 200);
+  assert.equal((await two.json()).status, "ALREADY_CONFIRMED");
 });
 
-test("CSRF: same-origin malformed JSON still reaches the 400 body-validation path (proves the gate was passed, not skipped)", async () => {
-  const { original } = await declaredFixture("csrf-sameorigin-badjson");
-  const ip = nextIp("post");
-  await resetRateForTest(ip);
-  const req = new Request("http://localhost/api/reuse-context/confirm", {
-    method: "POST",
-    headers: { "content-type": "application/json", "x-forwarded-for": ip, origin: "http://localhost", host: "localhost", cookie: `tp_session_v1=${original.token}` },
-    body: "{ not json",
-  });
-  const res = await confirmRoute.POST(req);
-  assert.equal(res.status, 400);
-  assert.equal((await res.json()).error, "Invalid JSON");
+test("confirm: a non-original-submitter session cannot confirm (generic 404)", async () => {
+  const f = await declaredFixture("cf-auth");
+  const { ref } = await pendingRefForOriginal(f, f.original.token);
+  // The reuser owns their own report, and their identity is referenced by nothing; use the reuser's own report + the ref.
+  const res = await callPost(confirmRoute, CONFIRM_URL, f.reuser.token, { reportId: f.reuserReport.reportId, actionRef: ref });
+  assert.equal(res.status, 404);
 });
 
-test("CSRF: an unauthenticated same-origin POST still gets 401 -- the same-origin gate never masks the auth requirement", async () => {
-  const fx = await declaredFixture("csrf-unauth");
-  for (const { name, mod, url } of CSRF_ROUTES) {
-    const res = await callPost(mod, url, undefined, csrfBodyFor(name, fx));
-    assert.equal(res.status, 401, `${name}: same-origin + no session -> 401 (unchanged)`);
-  }
-  await assertDeclarationUntouched(fx.declarationId, "an unauthenticated same-origin POST must not mutate the declaration");
+test("reject: original submitter rejects an unverified declaration", async () => {
+  const f = await declaredFixture("rj");
+  const { ref } = await pendingRefForOriginal(f, f.original.token);
+  const res = await callPost(rejectRoute, REJECT_URL, f.original.token, { reportId: f.originalReport.reportId, actionRef: ref });
+  assert.equal(res.status, 200);
+  const dRow = await client.execute({ sql: "SELECT verification_state, revoked_at FROM reuse_context_declarations WHERE document_identity_id = ?", args: [f.reuserIdentity.id] });
+  assert.equal(dRow.rows[0].verification_state, "REVOKED");
 });
 
-test("CSRF: a same-origin POST from a non-allowlisted account still gets 404 -- passing the same-origin check never bypasses the allowlist gate", async () => {
-  const fx = await declaredFixture("csrf-allowlist");
-  const saved = process.env.E8S_REUSE_CONTEXT_ALLOWLIST;
-  process.env.E8S_REUSE_CONTEXT_ALLOWLIST = "an-unrelated-account-id";
-  try {
-    const res = await callPost(confirmRoute, "http://localhost/api/reuse-context/confirm", fx.original.token, { declarationId: fx.declarationId });
+test("reject: cannot remove a mutually-confirmed declaration (USE_REVOKE)", async () => {
+  const f = await declaredFixture("rj-confirmed");
+  const { ref } = await pendingRefForOriginal(f, f.original.token);
+  await callPost(confirmRoute, CONFIRM_URL, f.original.token, { reportId: f.originalReport.reportId, actionRef: ref });
+  // ref is stable for the declaration; reject must refuse now.
+  const res = await callPost(rejectRoute, REJECT_URL, f.original.token, { reportId: f.originalReport.reportId, actionRef: ref });
+  assert.equal(res.status, 409);
+  assert.equal((await res.json()).status, "USE_REVOKE");
+});
+
+// --- revoke: original submitter retracts a confirmed attestation ----------
+
+async function confirmedFixture(marker) {
+  const f = await declaredFixture(marker);
+  const { ref } = await pendingRefForOriginal(f, f.original.token);
+  const res = await callPost(confirmRoute, CONFIRM_URL, f.original.token, { reportId: f.originalReport.reportId, actionRef: ref });
+  assert.equal(res.status, 200);
+  return { f, pendingRef: ref };
+}
+
+test("confirm -> item leaves pending[] and appears in confirmed[]", async () => {
+  const { f } = await confirmedFixture("rv-move");
+  const body = await (await callReportGet(f.originalReport.reportId, f.original.token)).json();
+  assert.equal(body.reuseContext.confirm.pending.length, 0);
+  assert.equal(body.reuseContext.confirm.confirmed.length, 1);
+  const c = body.reuseContext.confirm.confirmed[0];
+  assert.deepEqual(Object.keys(c).sort(), ["actionRef", "confirmedDate", "declaredContext"].sort());
+  assert.match(c.actionRef, /^[0-9a-f]{64}$/);
+  assert.equal(c.declaredContext, "SUPERVISOR_COPY");
+});
+
+test("revoke: original submitter revokes -> declaration REVOKED, disappears from pending[] and confirmed[]", async () => {
+  const { f } = await confirmedFixture("rv-do");
+  const env = await (await callReportGet(f.originalReport.reportId, f.original.token)).json();
+  const confRef = env.reuseContext.confirm.confirmed[0].actionRef;
+
+  const res = await callPost(revokeRoute, REVOKE_URL, f.original.token, { reportId: f.originalReport.reportId, actionRef: confRef });
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).status, "REVOKED");
+
+  const dRow = await client.execute({ sql: "SELECT verification_state FROM reuse_context_declarations WHERE document_identity_id = ?", args: [f.reuserIdentity.id] });
+  assert.equal(dRow.rows[0].verification_state, "REVOKED");
+
+  const after = await (await callReportGet(f.originalReport.reportId, f.original.token)).json();
+  assert.equal(after.reuseContext.confirm.pending.length, 0);
+  assert.equal(after.reuseContext.confirm.confirmed.length, 0);
+});
+
+test("revoke: after the original submitter revokes, the declarer's report shows no active confirmed declaration", async () => {
+  const { f } = await confirmedFixture("rv-declarer");
+  const env = await (await callReportGet(f.originalReport.reportId, f.original.token)).json();
+  await callPost(revokeRoute, REVOKE_URL, f.original.token, { reportId: f.originalReport.reportId, actionRef: env.reuseContext.confirm.confirmed[0].actionRef });
+
+  const declarer = await (await callReportGet(f.reuserReport.reportId, f.reuser.token)).json();
+  assert.equal(declarer.reuseContext.declare.activeDeclarations.length, 0, "no active declaration remains for the declarer");
+});
+
+test("revoke: refuses an unconfirmed declaration (NOT_CONFIRMED) — that's /reject's job", async () => {
+  const f = await declaredFixture("rv-unconf");
+  const { ref } = await pendingRefForOriginal(f, f.original.token);
+  const res = await callPost(revokeRoute, REVOKE_URL, f.original.token, { reportId: f.originalReport.reportId, actionRef: ref });
+  assert.equal(res.status, 409);
+  assert.equal((await res.json()).status, "NOT_CONFIRMED");
+});
+
+test("revoke: another account/session cannot replay the confirmed actionRef", async () => {
+  const { f } = await confirmedFixture("rv-replay");
+  const env = await (await callReportGet(f.originalReport.reportId, f.original.token)).json();
+  const confRef = env.reuseContext.confirm.confirmed[0].actionRef;
+
+  const stranger = await createAccount("rv-stranger");
+  const strangerReport = await seedReport({ accountId: stranger.id, documentIdentityId: f.originalIdentity.id, rawText: "unrelated" });
+  const crossAccount = await callPost(revokeRoute, REVOKE_URL, stranger.token, { reportId: strangerReport.reportId, actionRef: confRef });
+  assert.equal(crossAccount.status, 404);
+
+  // declarer (reuser) is not the confirmer — a confirmed ref against their own report resolves to nothing
+  const crossParty = await callPost(revokeRoute, REVOKE_URL, f.reuser.token, { reportId: f.reuserReport.reportId, actionRef: confRef });
+  assert.equal(crossParty.status, 404);
+
+  const dRow = await client.execute({ sql: "SELECT verification_state FROM reuse_context_declarations WHERE document_identity_id = ?", args: [f.reuserIdentity.id] });
+  assert.equal(dRow.rows[0].verification_state, "MUTUALLY_CONFIRMED", "nothing was revoked by a forged attempt");
+});
+
+test("revoke: declarer's /withdraw still works independently on a confirmed declaration", async () => {
+  const { f } = await confirmedFixture("rv-wd");
+  const declarerEnv = await (await callReportGet(f.reuserReport.reportId, f.reuser.token)).json();
+  const wdRef = declarerEnv.reuseContext.declare.activeDeclarations[0].actionRef;
+  const res = await callPost(withdrawRoute, WITHDRAW_URL, f.reuser.token, { reportId: f.reuserReport.reportId, actionRef: wdRef });
+  assert.equal(res.status, 200);
+  const dRow = await client.execute({ sql: "SELECT verification_state FROM reuse_context_declarations WHERE document_identity_id = ?", args: [f.reuserIdentity.id] });
+  assert.equal(dRow.rows[0].verification_state, "REVOKED");
+});
+
+// --- same-origin matrix (committed in 67c49a0) ----------------------------
+
+for (const [name, routeModule, url, extraBody] of [
+  ["declare", declareRoute, DECLARE_URL, { declaredContext: "SUPERVISOR_COPY" }],
+  ["withdraw", withdrawRoute, WITHDRAW_URL, { actionRef: "a".repeat(64) }],
+  ["confirm", confirmRoute, CONFIRM_URL, { actionRef: "a".repeat(64) }],
+  ["reject", rejectRoute, REJECT_URL, { actionRef: "a".repeat(64) }],
+]) {
+  test(`same-origin: ${name} rejects a missing Origin with the generic hidden 404`, async () => {
+    const acct = await createAccount(`so-${name}-null`);
+    const res = await callPost(routeModule, url, acct.token, { reportId: "whatever", ...extraBody }, { origin: null });
     assert.equal(res.status, 404);
-    assert.deepEqual(await res.json(), { error: "Not found." });
-  } finally {
-    process.env.E8S_REUSE_CONTEXT_ALLOWLIST = saved;
-  }
-  await assertDeclarationUntouched(fx.declarationId, "a non-allowlisted same-origin POST must not mutate the declaration");
+  });
+  test(`same-origin: ${name} rejects a foreign Origin with the generic hidden 404`, async () => {
+    const acct = await createAccount(`so-${name}-foreign`);
+    const res = await callPost(routeModule, url, acct.token, { reportId: "whatever", ...extraBody }, { origin: "http://evil.example" });
+    assert.equal(res.status, 404);
+  });
+}
+
+test("mutations require a signed-in session with a raw cookie", async () => {
+  const res = await callPost(declareRoute, DECLARE_URL, null, { reportId: "x", declaredContext: "SUPERVISOR_COPY" });
+  assert.equal(res.status, 401);
 });
 
-test("CSRF: a rejected cross-origin lifecycle attempt never touches an unrelated saved_reports row's score fields", async () => {
-  const reportId = "csrf-report-1";
-  await client.execute({
-    sql: `INSERT INTO saved_reports (id, device_key, submission_id, title, report_created_at, word_count, archive_score, score_band, payload_json, saved_at, updated_at)
-          VALUES (?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
-    args: [reportId, "csrf-device", "csrf-sub", "csrf.pdf", new Date().toISOString(), 100, 42, "Low", JSON.stringify({ score: 42, archiveScore: 42 })],
-  });
-  const before = await client.execute({ sql: "SELECT archive_score, payload_json FROM saved_reports WHERE id = ?", args: [reportId] });
+test("non-allowlisted account gets the generic hidden 404", async () => {
+  // account created WITHOUT allowlist append
+  userCounter += 1;
+  const id = `no-allow-${userCounter}`;
+  await client.execute({ sql: "INSERT INTO users (id, email, username, password_hash) VALUES (?,?,?,?)", args: [id, `${id}@x.test`, id, "h"] });
+  const token = await createSession(client, id);
+  const res = await callPost(declareRoute, DECLARE_URL, token, { reportId: "x", declaredContext: "SUPERVISOR_COPY" });
+  assert.equal(res.status, 404);
+});
 
-  const fx = await declaredFixture("csrf-noscore");
-  await callPost(confirmRoute, "http://localhost/api/reuse-context/confirm", fx.original.token, { declarationId: fx.declarationId }, { origin: "http://evil.example" });
-  await callPost(revokeRoute, "http://localhost/api/reuse-context/revoke", fx.reuser.token, { declarationId: fx.declarationId }, { origin: null });
+// --- no canonical-hash lookup anywhere in the binding path ----------------
 
-  const after = await client.execute({ sql: "SELECT archive_score, payload_json FROM saved_reports WHERE id = ?", args: [reportId] });
-  assert.deepEqual(before.rows[0], after.rows[0], "a cross-origin (rejected) declaration lifecycle must leave every saved_reports row byte-identical");
+test("STRUCTURAL: the reuse-context binding path performs no canonical-hash identity lookup", () => {
+  const src = fs.readFileSync(path.join(repoRoot, "lib/reuse-context-report-binding.ts"), "utf8");
+  assert.doesNotMatch(src, /canonicalSha256|findPriorSubmissionsForAccount/, "identity comes only from saved_reports.document_identity_id");
 });

@@ -1,53 +1,41 @@
 "use client";
 
-import { useState } from "react";
-import type { CanDeclareReuseContextResult, DeclaredContext, ReuseContextDeclarationView } from "@/lib/reuse-context-declarations";
+import { useId, useState } from "react";
+import type { DeclaredContext } from "@/lib/reuse-context-declarations";
+import type { ReuseContextEnvelope } from "@/lib/reuse-context-types";
+import {
+  REUSE_CONTEXT_BADGE_CONFIRMED,
+  REUSE_CONTEXT_BADGE_UNVERIFIED,
+  REUSE_CONTEXT_FORM_OPTIONS,
+  REUSE_CONTEXT_LABELS,
+  REUSE_CONTEXT_SCORE_UNCHANGED_CONFIRMED,
+  REUSE_CONTEXT_SCORE_UNCHANGED_UNVERIFIED,
+} from "@/lib/reuse-context-labels";
 
 /**
- * E8S Step 6: the DECLARER-facing UI for E8S Step 5's design — Flows 1, 2,
- * 6, 7, 8, 9. Purely presentational: every action is a caller-supplied
- * callback, this component never calls fetch() itself, so it can be
- * rendered and asserted on via react-dom/server's renderToStaticMarkup
- * exactly like every other report component in this repo (no jsdom, no
- * click simulation — see components/report/similarity-report-papers.tsx's
- * own existing test conventions).
+ * DECLARER-facing UI for one report's reuse-context state. Purely
+ * presentational — every action is a caller-supplied callback, so this
+ * renders and asserts via react-dom/server exactly like the other report
+ * components.
  *
- * Deliberately additive, never a replacement: this component renders
- * nothing about containment/matchedWordCount/score/archiveScore/aiScore —
- * those stay exactly where they already are, in
- * components/report/similarity-report-papers.tsx's existing "Previously
- * submitted content" block. This component is meant to be composed
- * alongside that block, not instead of it (E8S Step 6 requirement 7). Not
- * actually composed there yet — see this phase's own final report for why.
+ * Driven entirely by the bounded, id-free `declare` envelope
+ * (lib/reuse-context-types.ts). It never reads report.historicalSubmissionMatch
+ * (admin-only) — an ordinary allowlisted user with a real PRIOR_SUBMISSION
+ * match sees the CTA and state here.
  *
- * Renders nothing (returns null) whenever the current viewer is not
- * eligible to see an "Add context" affordance at all — SELF relationships,
- * a viewer who does not own the submission, or a representation/identity
- * that could not be found. This is what makes "SELF never shows Add
- * context" (test J) and "third party cannot see/act" (test K) true at the
- * UI layer, on top of the same guarantee already enforced server-side by
- * canDeclareReuseContext/declareReuseContext.
+ * Copy rules: the unverified badge/explanation never use "authorized",
+ * "verified", or "confirmed" as affirmative descriptors, and never imply
+ * same owner / same person / SELF / verified authorship / plagiarism-free /
+ * removed from score. The one confirmed sentence
+ * (REUSE_CONTEXT_SCORE_UNCHANGED_CONFIRMED) is always shown on a confirmed
+ * row and is plain body text, never hover-only.
  */
 
-const CONTEXT_LABELS: Record<DeclaredContext, string> = {
-  SUPERVISOR_COPY: "supervisor copy",
-  COAUTHOR_COPY: "coauthor copy",
-  INSTITUTIONAL_SUBMISSION: "institutional submission",
-  AUTHORIZED_ARCHIVAL_COPY: "authorized archival copy",
-  OTHER_AUTHORIZED_REUSE: "authorized reuse",
-};
+export type ReuseContextOutcome = "REJECTED" | "WITHDRAWN" | null;
 
-const CONTEXT_FORM_OPTIONS: { value: DeclaredContext; label: string }[] = [
-  { value: "SUPERVISOR_COPY", label: "My supervisor submitted this" },
-  { value: "COAUTHOR_COPY", label: "A coauthor submitted this" },
-  { value: "INSTITUTIONAL_SUBMISSION", label: "This was submitted through my institution/instructor" },
-  { value: "AUTHORIZED_ARCHIVAL_COPY", label: "This is an authorized archival copy" },
-  { value: "OTHER_AUTHORIZED_REUSE", label: "Other authorized reuse" },
-];
-
-/** E8S Step 5 Flow 2's declare form. A separate component so ReuseContextPanel can render it conditionally without holding its own local radio-selection state. */
-export function AddContextForm({ onSubmit, onCancel }: { onSubmit: (context: DeclaredContext) => void; onCancel?: () => void }) {
+function AddContextForm({ onSubmit, onCancel }: { onSubmit: (context: DeclaredContext) => void; onCancel: () => void }) {
   const [selected, setSelected] = useState<DeclaredContext | null>(null);
+  const groupName = useId();
   return (
     <form
       className="reuse-context-form"
@@ -56,13 +44,13 @@ export function AddContextForm({ onSubmit, onCancel }: { onSubmit: (context: Dec
         if (selected) onSubmit(selected);
       }}
     >
-      <p>Why is this content already in TurnitPlus?</p>
       <fieldset>
-        {CONTEXT_FORM_OPTIONS.map((option) => (
+        <legend>Why is this content already in TurnitPlus?</legend>
+        {REUSE_CONTEXT_FORM_OPTIONS.map((option) => (
           <label key={option.value} className="reuse-context-form-option">
             <input
               type="radio"
-              name="declaredContext"
+              name={groupName}
               value={option.value}
               checked={selected === option.value}
               onChange={() => setSelected(option.value)}
@@ -72,97 +60,106 @@ export function AddContextForm({ onSubmit, onCancel }: { onSubmit: (context: Dec
         ))}
       </fieldset>
       <p className="reuse-context-form-note">
-        This is your own claim. The original submitter will be asked to confirm it. It will not change your score.
+        This is your own claim. The original submitter will be asked to confirm it. It will not change your similarity score.
       </p>
       <button type="submit" disabled={!selected}>Add context</button>
-      {onCancel && <button type="button" onClick={onCancel}>Cancel</button>}
+      <button type="button" onClick={onCancel}>Cancel</button>
     </form>
   );
 }
 
-export type ReuseContextOutcome = "REJECTED" | "REVOKED" | null;
+function ActiveDeclarationRow({
+  declaration,
+  onWithdraw,
+}: {
+  declaration: ReuseContextEnvelope["declare"]["activeDeclarations"][number];
+  onWithdraw: (actionRef: string) => void;
+}) {
+  const label = REUSE_CONTEXT_LABELS[declaration.declaredContext];
+  if (declaration.state === "MUTUALLY_CONFIRMED") {
+    return (
+      <div className="reuse-context-block reuse-context-confirmed">
+        <p className="reuse-context-badge"><strong>{REUSE_CONTEXT_BADGE_CONFIRMED}</strong></p>
+        <p>
+          {label.badge}. The original submitting account confirmed this reuse context
+          {declaration.confirmedDate ? ` on ${declaration.confirmedDate}` : ""}.
+        </p>
+        <p>{REUSE_CONTEXT_SCORE_UNCHANGED_CONFIRMED}</p>
+        {!declaration.isCurrent && (
+          <p className="reuse-context-note">This applies to another matching prior submission on this report.</p>
+        )}
+        <button type="button" onClick={() => onWithdraw(declaration.actionRef)}>Withdraw</button>
+      </div>
+    );
+  }
+  return (
+    <div className="reuse-context-block reuse-context-unverified">
+      <p className="reuse-context-badge"><strong>{REUSE_CONTEXT_BADGE_UNVERIFIED}</strong></p>
+      <p>
+        You indicated this is {label.awaitingPhrase}. The original submitter has not confirmed this.{" "}
+        {REUSE_CONTEXT_SCORE_UNCHANGED_UNVERIFIED}
+      </p>
+      {!declaration.isCurrent && (
+        <p className="reuse-context-note">This applies to another matching prior submission on this report.</p>
+      )}
+      <button type="button" onClick={() => onWithdraw(declaration.actionRef)}>Withdraw</button>
+    </div>
+  );
+}
 
 export function ReuseContextPanel({
-  affordance,
-  activeDeclaration,
-  unresolvable = false,
-  lastOutcome = null,
+  declare,
+  outcome = null,
   onDeclare,
   onWithdraw,
 }: {
-  affordance: CanDeclareReuseContextResult;
-  activeDeclaration: ReuseContextDeclarationView | null;
-  /** True when the resolved matched_submission_reference_id (or the account behind it) is no longer resolvable — E8S Step 5's Flow 10. Only meaningful while activeDeclaration is SELF_ASSERTED_UNVERIFIED. */
-  unresolvable?: boolean;
-  /** A one-time, transient outcome to display immediately after an action completes (E8S Step 5's recommended default: no persistent revocation-history UI). Never re-derived from a stored column. */
-  lastOutcome?: ReuseContextOutcome;
-  onDeclare?: (context: DeclaredContext) => void;
-  onWithdraw?: () => void;
+  declare: ReuseContextEnvelope["declare"];
+  /** A one-time transient note shown once after an action completes. Never re-derived from a column. */
+  outcome?: ReuseContextOutcome;
+  onDeclare: (context: DeclaredContext) => void;
+  onWithdraw: (actionRef: string) => void;
 }) {
   const [showForm, setShowForm] = useState(false);
 
-  if (activeDeclaration && activeDeclaration.verificationState === "MUTUALLY_CONFIRMED") {
-    return (
-      <div className="reuse-context-block reuse-context-confirmed">
-        <p><strong>Confirmed</strong></p>
-        <p>The original submitter has confirmed this reuse context.</p>
-        {onWithdraw && <button type="button" onClick={onWithdraw}>Revoke</button>}
-      </div>
-    );
-  }
-
-  if (activeDeclaration && activeDeclaration.verificationState === "SELF_ASSERTED_UNVERIFIED") {
-    return (
-      <div className="reuse-context-block reuse-context-unverified">
-        <p><strong>Unverified</strong></p>
-        <p>
-          You indicated this is a {CONTEXT_LABELS[activeDeclaration.declaredContext]}.{" "}
-          {unresolvable
-            ? "This can no longer be confirmed — the original submission is no longer available."
-            : "The original submitter has not confirmed it yet."}
-        </p>
-        {onWithdraw && <button type="button" onClick={onWithdraw}>Withdraw</button>}
-      </div>
-    );
-  }
-
-  // No active declaration. lastOutcome (if any) is shown once, then the
-  // normal baseline/CTA/ambiguous rendering below takes over on next load.
-  const outcomeNote = lastOutcome === "REJECTED"
+  const outcomeNote = outcome === "REJECTED"
     ? <p className="reuse-context-note reuse-context-outcome">This context was not confirmed by the original submitter.</p>
-    : lastOutcome === "REVOKED"
+    : outcome === "WITHDRAWN"
       ? <p className="reuse-context-note reuse-context-outcome">This context is no longer active.</p>
       : null;
 
-  if (affordance.canDeclare) {
-    return (
-      <div className="reuse-context-block">
-        {outcomeNote}
-        {showForm
-          ? <AddContextForm onSubmit={(context) => { setShowForm(false); onDeclare?.(context); }} onCancel={() => setShowForm(false)} />
-          : (
+  const hasCurrentActive = declare.activeDeclarations.some((d) => d.isCurrent);
+
+  return (
+    <div className="reuse-context-panel">
+      {outcomeNote}
+
+      {declare.activeDeclarations.map((declaration) => (
+        <ActiveDeclarationRow key={declaration.actionRef} declaration={declaration} onWithdraw={onWithdraw} />
+      ))}
+
+      {declare.canDeclare && !hasCurrentActive && (
+        <div className="reuse-context-block">
+          {showForm ? (
+            <AddContextForm
+              onSubmit={(context) => { setShowForm(false); onDeclare(context); }}
+              onCancel={() => setShowForm(false)}
+            />
+          ) : (
             <p className="reuse-context-note">
               Have a legitimate reason for this match?{" "}
               <button type="button" className="reuse-context-add-link" onClick={() => setShowForm(true)}>Add context</button>
             </p>
           )}
-      </div>
-    );
-  }
+        </div>
+      )}
 
-  if (affordance.reason === "AMBIGUOUS") {
-    return (
-      <div className="reuse-context-block">
-        {outcomeNote}
-        <p className="reuse-context-note reuse-context-ambiguous">
-          This content matches more than one TurnitPlus reference source, so a specific context can&rsquo;t be added yet.
-        </p>
-      </div>
-    );
-  }
-
-  // SELF_RELATIONSHIP, NOT_SUBMISSION_OWNER, NO_MATCH_PAIR, IDENTITY_NOT_FOUND,
-  // REPRESENTATION_NOT_FOUND, ALREADY_ACTIVE (unreachable here without
-  // activeDeclaration, kept for exhaustiveness) -- nothing to show.
-  return outcomeNote ? <div className="reuse-context-block">{outcomeNote}</div> : null;
+      {!declare.canDeclare && !hasCurrentActive && declare.unavailableReason === "MULTIPLE_SOURCES" && (
+        <div className="reuse-context-block">
+          <p className="reuse-context-note reuse-context-ambiguous">
+            This content matches more than one TurnitPlus reference source, so a specific context can&rsquo;t be added yet.
+          </p>
+        </div>
+      )}
+    </div>
+  );
 }
