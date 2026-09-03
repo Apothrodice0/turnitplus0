@@ -25,9 +25,9 @@ import { resetRateForTest, resetAuthRateForTest, resetReadRateForTest } from "..
  * MatchGroups derive purely from report.sources (archive-only), with zero
  * awareness of report.unifiedSimilarity. Separately, several surfaces
  * (report-detail-shell.tsx's Report Notes paragraph, the receipt PDF, the
- * pending-state message, the E8S reuse-context ambiguous note) leaked
- * "previous TurnitPlus submission"/"retained source" wording to ordinary
- * users unconditionally, not just to admins. Fixed presentation-only: the
+ * pending-state message) leaked "previous TurnitPlus submission"/"retained
+ * source" wording to ordinary users unconditionally, not just to admins.
+ * Fixed presentation-only: the
  * underlying data (lib/unified-similarity.ts's previousUploadOnlyWords) and
  * scoring/matching/corpus admission/consent/atomic-reveal are all untouched.
  * The pre-existing admin-only breakdown in UnifiedSimilaritySection (UI-02,

@@ -855,6 +855,12 @@ export const historical_match_shadow_evaluations = sqliteTable(
 
 // Phase E8S Step 4: reuse-context declarations — see
 // drizzle/0022_reuse_context_declarations.sql for the full rationale.
+// DORMANT as of 2026-09: the ordinary-user reuse-context declaration /
+// confirmation workflow (app/api/reuse-context/*, components/reuse-context/*,
+// lib/reuse-context-*, lib/e8s-*) was removed as a cancelled product
+// direction. This table + its 0022 migration are retained (migration history
+// is immutable; the runner pins 0022's hash/order), but NOTHING reads or
+// writes it any more. No down migration; existing rows are left in place.
 // document_identity_id / matched_representation_id / matched_submission_
 // reference_id deliberately carry no DB-level FOREIGN KEY (same schema-
 // drift-tooling reason as report_historical_match_snapshots and

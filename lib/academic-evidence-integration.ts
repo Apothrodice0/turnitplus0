@@ -20,9 +20,8 @@ import type {
 /**
  * Phase 3 bridge layer: the only module that knows about both "reports" and
  * "the academic-search subsystem" — same role lib/report-historical-match.ts
- * plays for the user-submission corpus, lib/reuse-context-report-binding.ts
- * plays for E8S reuse context. lib/academic-search/ itself stays completely
- * unaware of SimilarityReport/reports — this file is the only seam.
+ * plays for the user-submission corpus. lib/academic-search/ itself stays
+ * completely unaware of SimilarityReport/reports — this file is the only seam.
  *
  * Deliberately never touches score/archiveScore/aiScore/verifiedSimilarity/
  * historical-match state/E8S/E8P (this phase's own PRIMARY PRODUCT RULE) —
@@ -35,10 +34,9 @@ import type {
  * stats.providerErrors, never a rejected promise), so the try/catch here is
  * a second, outer safety net for anything unexpected around it (e.g. the
  * cache/budget construction itself), matching every other read-time
- * enrichment in this codebase (getOrComputeHistoricalMatchSnapshot,
- * buildReuseContextEnvelope) that treats "this optional signal failed to
- * compute" as a normal, non-fatal outcome, never a reason to fail the
- * report it's attached to.
+ * enrichment in this codebase (getOrComputeHistoricalMatchSnapshot) that
+ * treats "this optional signal failed to compute" as a normal, non-fatal
+ * outcome, never a reason to fail the report it's attached to.
  *
  * Module-level cache (mirrors lib/academic-search/'s own Phase 2 report on
  * why: a warm serverless instance reuses it across requests — identical

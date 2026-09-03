@@ -29,8 +29,6 @@ import {
   type SourceType,
 } from "@/lib/report-types";
 import { ReportPageFooter, ReportPageHeader } from "./report-page-chrome";
-import { ReuseContextContainer } from "@/components/reuse-context/reuse-context-container";
-import type { ReuseContextEnvelope } from "@/lib/reuse-context-types";
 
 /**
  * Phase E8R-SELF-UI.2: groups every SELF-relationship entry in matches[]
@@ -664,7 +662,7 @@ export function UnifiedSimilaritySection({ report }: { report: SimilarityReport 
  * externalAcademicEvidence is resolved before a report is ever first
  * saved — see AcademicEvidenceSection's own call site comment below).
  */
-export function OverviewReport({ report, similarityStatus = "resolved", reuseContext }: { report: SimilarityReport; similarityStatus?: "resolved" | "stale" | "pending" | "failed"; reuseContext?: ReuseContextEnvelope }) {
+export function OverviewReport({ report, similarityStatus = "resolved" }: { report: SimilarityReport; similarityStatus?: "resolved" | "stale" | "pending" | "failed" }) {
   const primaryScore = primarySimilarityScore(report);
   const primaryLabel = primaryResultLabel(report);
   const isUnified = hasUnifiedSimilarity(report);
@@ -747,8 +745,7 @@ export function OverviewReport({ report, similarityStatus = "resolved", reuseCon
         )}
 
         {/* Release-hardening audit finding SIM-02, SIM-04: every block in
-            this run, through the standalone ReuseContextContainer just
-            before the academic-evidence section, is derived from
+            this run, up to the academic-evidence section, is derived from
             report.unifiedSimilarity/historicalSubmissionMatch/
             matchClassification — fields that are genuinely absent, or no
             longer trustworthy, whenever similarityStatus is not "resolved"
@@ -876,15 +873,6 @@ export function OverviewReport({ report, similarityStatus = "resolved", reuseCon
           </section>
         )}
 
-        {/* Confirmed-reuse annotation (ordinary-user flow). Driven ENTIRELY
-            by the bounded, id-free `reuseContext` envelope — never
-            report.historicalSubmissionMatch, which is admin-only, so an
-            ordinary allowlisted user with a real PRIOR_SUBMISSION match sees
-            the declarer CTA/state here. One placement, its own section;
-            renders nothing unless the envelope has something to show. Never
-            changes the similarity headline, matched positions, or source
-            inclusion. */}
-        {reuseContext && <ReuseContextContainer reuseContext={reuseContext} />}
         </>)}
 
         {/* Phase 3: external academic-source evidence (OpenAIRE + Europe

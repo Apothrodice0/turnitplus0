@@ -6,11 +6,10 @@ import { AcademicEvidenceSection, OverviewReport, dedupeExternalAcademicEvidence
 
 /**
  * Phase 3 STEP 9: report/UI integration tests for the "External Academic
- * Sources" section. Same no-jsdom, renderToStaticMarkup convention as
- * tests/reuse-context-ui.test.mjs — see that file's own header comment for why
- * (this repo has no jsdom/click-simulation infrastructure; nothing here
- * needs one, since the section is pure presentational, driven entirely by
- * report.externalAcademicEvidence).
+ * Sources" section. Uses the repo's no-jsdom, renderToStaticMarkup
+ * convention (this repo has no jsdom/click-simulation infrastructure;
+ * nothing here needs one, since the section is pure presentational, driven
+ * entirely by report.externalAcademicEvidence).
  */
 
 function baseReport(overrides = {}) {

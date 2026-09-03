@@ -5,8 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ArrowLeft, FileText, GraduationCap, Globe2, Printer } from "lucide-react";
 import { similarityScoreBand } from "@/lib/ai-core";
-import { deleteRemoteReportChecked, fetchRemoteReport, fetchReportReuseContext } from "@/lib/reports-remote";
-import type { ReuseContextEnvelope } from "@/lib/reuse-context-types";
+import { deleteRemoteReportChecked, fetchRemoteReport } from "@/lib/reports-remote";
 import { deleteStoredReport, getStoredReportById } from "@/lib/report-store";
 import {
   PRIMARY_SIMILARITY_BAND_LABELS,
@@ -99,11 +98,6 @@ export function ReportDetailShell({
   const backLabel = backRoom !== null ? `Back to Room ${backRoom + 1}` : "Back to reports";
   const router = useRouter();
   const [report, setReport] = useState<SimilarityReport | null>(initialReport);
-  // Reuse context is the no-store, session-bound sibling of the report
-  // envelope — held in its own state, NEVER merged into `report`, never
-  // passed to any store/save path. See lib/reports-remote.ts's
-  // fetchReportReuseContext.
-  const [reuseContext, setReuseContext] = useState<ReuseContextEnvelope | null>(null);
   const [aiStatus, setAiStatus] = useState<DetailAiStatus>(initialAiStatus);
   const [status, setStatus] = useState<LoadStatus>(
     initialReport ? "found" : requiresClientResolution ? "loading" : "not-found",
@@ -229,23 +223,6 @@ export function ReportDetailShell({
       handle.cancel();
     };
   }, [id, requiresClientResolution, initialReport, bothReady, pollExhausted]);
-
-  // Reuse-context enrichment: ONE bounded, no-store fetch, independent of the
-  // completion poll above. The poll skips already-complete reports
-  // (bothReady), so this must run on its own to load reuse context (and it
-  // does not touch the AI/similarity lifecycle). Server-side gating
-  // (allowlist, session, resolvable identity) means this is null for almost
-  // everyone; the component renders nothing then.
-  useEffect(() => {
-    if (requiresClientResolution || !initialReport) return;
-    let cancelled = false;
-    void (async () => {
-      const envelope = await fetchReportReuseContext(id);
-      if (cancelled) return;
-      setReuseContext((envelope as ReuseContextEnvelope | null) ?? null);
-    })();
-    return () => { cancelled = true; };
-  }, [id, requiresClientResolution, initialReport]);
 
   /**
    * Release-hardening audit finding LIFECYCLE-06: starts a genuinely fresh
@@ -523,12 +500,12 @@ export function ReportDetailShell({
           <>
             {resultTab === "full" && (
               <div className="full-report-preview">
-                <OverviewReport report={report} similarityStatus={effectiveSimilarityStatus} reuseContext={reuseContext ?? undefined} />
+                <OverviewReport report={report} similarityStatus={effectiveSimilarityStatus} />
                 <SubmissionReport report={report} />
                 <SourcesReport report={report} />
               </div>
             )}
-            {resultTab === "overview" && <OverviewReport report={report} similarityStatus={effectiveSimilarityStatus} reuseContext={reuseContext ?? undefined} />}
+            {resultTab === "overview" && <OverviewReport report={report} similarityStatus={effectiveSimilarityStatus} />}
             {resultTab === "submission" && <SubmissionReport report={report} />}
             {resultTab === "sources" && <SourcesReport report={report} />}
           </>
@@ -589,7 +566,7 @@ export function ReportDetailShell({
 
       <div className="print-report-bundle">
         {mode === "ai" ? <AiReport report={report} signal={aiSignal} printMode /> : <>
-          <OverviewReport report={report} similarityStatus={effectiveSimilarityStatus} reuseContext={reuseContext ?? undefined} />
+          <OverviewReport report={report} similarityStatus={effectiveSimilarityStatus} />
           <SubmissionReport report={report} />
           <SourcesReport report={report} />
         </>}

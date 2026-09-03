@@ -366,6 +366,6 @@ test("LIFECYCLE-06 CORRECTED REVEAL GATE (structural): revealState comes ONLY fr
   // so relying on OverviewReport's own "resolved" default would silently
   // show a real-looking score/section run for a report whose similarity
   // genuinely, terminally failed.
-  const overviewCalls = shell.match(/<OverviewReport report=\{report\} similarityStatus=\{effectiveSimilarityStatus\} reuseContext=\{reuseContext \?\? undefined\} \/>/g) ?? [];
-  assert.equal(overviewCalls.length, 3, "expected 3 call sites: full-report-preview, the standalone overview tab, and the print bundle, each passing the real status explicitly (plus the id-free reuseContext envelope)");
+  const overviewCalls = shell.match(/<OverviewReport report=\{report\} similarityStatus=\{effectiveSimilarityStatus\} \/>/g) ?? [];
+  assert.equal(overviewCalls.length, 3, "expected 3 call sites: full-report-preview, the standalone overview tab, and the print bundle, each passing the real status explicitly");
 });

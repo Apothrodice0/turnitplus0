@@ -47,13 +47,16 @@ import { isRepresentationActivelyPromoted } from "./user-submission-corpus";
  *    as an empty row — harmless clutter (id + timestamps only, no text, no
  *    account reference), not a privacy concern, so cleaning it up is out of
  *    scope for a text-retention fix.
- *  - reuse_context_declarations / historical_match_shadow_evaluations: no
- *    DB-level FOREIGN KEY to document_identities (see db/schema.ts's own
- *    comment on both tables) and no document/passage text in either — same
- *    "ids, enums, and timestamps only" shape as report_historical_match_
- *    snapshots, which the DELETE handler already explicitly cleans up
- *    separately. Left untouched here to keep this change scoped to actual
- *    text retention; a dangling id in either is not a text leak.
+ *  - historical_match_shadow_evaluations: no DB-level FOREIGN KEY to
+ *    document_identities (see db/schema.ts's own comment on that table) and
+ *    no document/passage text in it — same "ids, enums, and timestamps only"
+ *    shape as report_historical_match_snapshots, which the DELETE handler
+ *    already explicitly cleans up separately. Left untouched here to keep
+ *    this change scoped to actual text retention; a dangling id in it is not
+ *    a text leak. (reuse_context_declarations, from the removed E8S
+ *    reuse-context workflow, has the same id-only shape and the same
+ *    non-issue; its table is retained but dormant — see
+ *    drizzle/0022_reuse_context_declarations.sql.)
  */
 export type DeleteReportDocumentDataResult = {
   /** True if a document_identities row was found and deleted for this id. */

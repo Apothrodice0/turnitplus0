@@ -328,17 +328,6 @@ export async function POST(request: Request) {
       return new NextResponse(JSON.stringify({ error: "aiStatus must be 'processing', 'ready', 'failed', or null" }), { status: 400 });
     }
     if (payload === undefined) return new NextResponse(JSON.stringify({ error: 'payload is required' }), { status: 400 });
-    // Persistence boundary (defense in depth): reuse context is a
-    // session-bound, no-store sibling of the report response envelope and is
-    // never part of the report payload. A client that fetched an enriched
-    // report and resaves it (the AI-retry / restore paths) must never
-    // persist a session-bound actionRef into saved_reports.payload_json.
-    // The envelope keeps it off `payload` structurally; this strip covers a
-    // malformed or future client that adds it back. Only this one key is
-    // removed — the rest of the payload is validated/stored exactly as before.
-    if (payload !== null && typeof payload === 'object') {
-      delete (payload as Record<string, unknown>).reuseContext;
-    }
     // Developer-diagnostics addition: optional, never required — an older
     // client build, or a run where /api/academic-evidence never produced a
     // diagnostics row (network failure, short text), simply omits or nulls

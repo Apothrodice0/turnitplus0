@@ -199,12 +199,6 @@ export type SimilarityReport = {
   historicalSubmissionMatch?: ReportHistoricalSubmissionMatch;
   /** Phase E8P.3 enrichment — see ExperimentalHistoricalMatchDisplay's own comment. Absent for every account outside the explicit allowlist, and absent whenever historicalSubmissionMatch already has a real production match. */
   experimentalHistoricalMatch?: ExperimentalHistoricalMatchDisplay;
-  // Reuse context is deliberately NOT a field on SimilarityReport: it is a
-  // session-bound, no-store sibling of `payload` in the GET /api/reports/[id]
-  // envelope (ReuseContextEnvelope in lib/reuse-context-types.ts), held in
-  // separate client state and never persisted. Keeping it off this type is
-  // what makes it structurally impossible for a resave/restore path to carry
-  // a session-bound actionRef into saved_reports.payload_json or IndexedDB.
   aiScore?: number | null;
   aiAnalysis?: AiAnalysis;
   webCheck?: WebCheckResult;
