@@ -12,6 +12,10 @@ import {
   summarizeSharedDeviceRiskMeasurement,
   type SharedDeviceRiskMeasurement,
 } from "@/lib/device-sharedness-measurement";
+import {
+  summarizeCorpusDuplicateSuppressionShadowMeasurement,
+  type CorpusDuplicateSuppressionShadowMeasurement,
+} from "@/lib/corpus-duplicate-suppression-shadow-measurement";
 import { DeveloperRoomReset } from "@/components/developer/room-reset";
 import { DeveloperAccountRoomReset } from "@/components/developer/account-room-reset";
 
@@ -35,6 +39,7 @@ export default async function DeveloperOverviewPage() {
   let reports;
   let deviceShadow: DeviceProvenanceShadowMeasurement | null = null;
   let sharedDeviceRisk: SharedDeviceRiskMeasurement | null = null;
+  let corpusDuplicateShadow: CorpusDuplicateSuppressionShadowMeasurement | null = null;
   try {
     reports = await listRecentReportsForDeveloper(client, 100);
     // Compact aggregate view of the device-provenance-shadow-v1 telemetry —
@@ -52,6 +57,14 @@ export default async function DeveloperOverviewPage() {
       sharedDeviceRisk = await summarizeSharedDeviceRiskMeasurement(client, { recentLimit: 25 });
     } catch (err) {
       console.error("developer dashboard: shared-device risk summary failed (non-fatal):", err instanceof Error ? err.message : String(err));
+    }
+    // Phase B2b corpus-duplicate suppression shadow — SELECT-only aggregate of
+    // what the B1 counterfactual would do to the similarity score. Never
+    // touches scoring. Same degrade-to-hidden discipline.
+    try {
+      corpusDuplicateShadow = await summarizeCorpusDuplicateSuppressionShadowMeasurement(client, { recentLimit: 25 });
+    } catch (err) {
+      console.error("developer dashboard: corpus-duplicate shadow summary failed (non-fatal):", err instanceof Error ? err.message : String(err));
     }
   } finally {
     client.close();
@@ -288,6 +301,104 @@ export default async function DeveloperOverviewPage() {
               {sharedDeviceRisk.recentCandidates.length === 0 && (
                 <tr>
                   <td colSpan={17}>No current same-device SELF downgrade candidates.</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </section>
+      )}
+
+      {corpusDuplicateShadow && (
+        <section className="developer-device-shadow developer-corpus-duplicate-shadow">
+          <h2>Corpus-duplicate suppression shadow (Phase B2)</h2>
+          <p>
+            <code>{corpusDuplicateShadow.policyVersion}</code> — what the unified similarity score would be if one qualifying
+            TurnitPlus-internal exact-canonical whole-document duplicate did not inflate it. Measurement only; no score or
+            relationship is changed by this policy today. Score statistics cover only <code>status IN (OK, BOUNDED)</code>.
+          </p>
+          <ul className="developer-device-shadow-stats">
+            <li>
+              Evaluations: <strong>{corpusDuplicateShadow.totals.evaluations}</strong>
+              {" — "}OK {corpusDuplicateShadow.totals.ok} / BOUNDED {corpusDuplicateShadow.totals.bounded}
+              {" / "}FAILED {corpusDuplicateShadow.totals.failed}
+              {" / "}skipped {corpusDuplicateShadow.totals.skipped}
+              {" ("}not-matched {corpusDuplicateShadow.totals.skippedNotMatched},
+              {" no-authoritative "}{corpusDuplicateShadow.totals.skippedNoAuthoritative})
+            </li>
+            <li>
+              Real-measurement rows: <strong>{corpusDuplicateShadow.totals.realMeasurementRows}</strong>
+              {" — "}with ≥1 candidate: <strong>{corpusDuplicateShadow.totals.candidatePositive}</strong>
+              {" (frequency "}{corpusDuplicateShadow.candidateFrequency.toFixed(3)})
+            </li>
+            <li>
+              candidate_count — 0: {corpusDuplicateShadow.candidateCountDistribution.zero},
+              1: {corpusDuplicateShadow.candidateCountDistribution.one},
+              2+: {corpusDuplicateShadow.candidateCountDistribution.twoPlus}
+            </li>
+            <li>
+              score_delta buckets — 0: {corpusDuplicateShadow.scoreDeltaBuckets.zero},
+              1–9: {corpusDuplicateShadow.scoreDeltaBuckets.d1to9},
+              10–24: {corpusDuplicateShadow.scoreDeltaBuckets.d10to24},
+              25–49: {corpusDuplicateShadow.scoreDeltaBuckets.d25to49},
+              50–99: {corpusDuplicateShadow.scoreDeltaBuckets.d50to99},
+              100: {corpusDuplicateShadow.scoreDeltaBuckets.d100}
+            </li>
+            <li>
+              Average score_delta: <strong>{corpusDuplicateShadow.averageScoreDelta === null ? "not measured" : corpusDuplicateShadow.averageScoreDelta.toFixed(2)}</strong>
+              {" — where candidate: "}
+              <strong>{corpusDuplicateShadow.averageScoreDeltaWhereCandidate === null ? "not measured" : corpusDuplicateShadow.averageScoreDeltaWhereCandidate.toFixed(2)}</strong>
+            </li>
+            <li>
+              authoritative 100 → hypothetical 0: <strong>{corpusDuplicateShadow.authoritative100Hypothetical0Count}</strong>
+              {" · authoritative 100 → hypothetical 1–99: "}
+              <strong>{corpusDuplicateShadow.authoritative100HypotheticalPartialCount}</strong>
+            </li>
+            <li>measurement_category: {distributionText(corpusDuplicateShadow.measurementCategoryDistribution)}</li>
+            <li>origin_confidence: {distributionText(corpusDuplicateShadow.originConfidenceDistribution)}</li>
+            <li>multi_origin_evidence: {distributionText(corpusDuplicateShadow.multiOriginEvidenceDistribution)}</li>
+            <li>checker_accounts_status: {distributionText(corpusDuplicateShadow.checkerAccountsStatusDistribution)}</li>
+            <li>distinct_checker_accounts_bucket (OK/BOUNDED &amp; checker OK): {distributionText(corpusDuplicateShadow.distinctCheckerAccountsBucketDistribution)}</li>
+            <li>error_code (FAILED rows): {distributionText(corpusDuplicateShadow.errorCodeDistribution)}</li>
+            <li>
+              Surviving-word reconciliation: <strong>{corpusDuplicateShadow.reconciliation.reconciledRows}</strong> / {corpusDuplicateShadow.reconciliation.checkedRows} rows
+            </li>
+          </ul>
+
+          <table className="developer-table">
+            <thead>
+              <tr>
+                <th>Report</th>
+                <th>Status</th>
+                <th>Category</th>
+                <th>Cand.</th>
+                <th>Authoritative</th>
+                <th>Hypothetical</th>
+                <th>Delta</th>
+                <th>Checker</th>
+                <th>Computed</th>
+              </tr>
+            </thead>
+            <tbody>
+              {corpusDuplicateShadow.recentCandidates.map((row) => (
+                <tr key={`${row.reportDeviceKey}:${row.reportId}`}>
+                  <td>
+                    <Link href={`/developer/reports/${encodeURIComponent(row.reportId)}?deviceKey=${encodeURIComponent(row.reportDeviceKey)}`}>
+                      {row.reportId}
+                    </Link>
+                  </td>
+                  <td>{row.status}{row.status === "FAILED" && row.errorCode ? ` (${row.errorCode})` : ""}</td>
+                  <td>{row.measurementCategory ?? "not measured"}</td>
+                  <td>{row.candidateCount === null ? "not measured" : row.candidateCount}</td>
+                  <td>{row.authoritativeScore === null ? "not measured" : row.authoritativeScore}</td>
+                  <td>{row.hypotheticalScore === null ? "not measured" : row.hypotheticalScore}</td>
+                  <td>{row.scoreDelta === null ? "not measured" : row.scoreDelta}</td>
+                  <td>{row.checkerAccountsStatus}{row.distinctCheckerAccountsBucket ? ` / ${row.distinctCheckerAccountsBucket}` : ""}</td>
+                  <td>{row.computedAt}</td>
+                </tr>
+              ))}
+              {corpusDuplicateShadow.recentCandidates.length === 0 && (
+                <tr>
+                  <td colSpan={9}>No corpus-duplicate suppression shadow evaluations yet.</td>
                 </tr>
               )}
             </tbody>

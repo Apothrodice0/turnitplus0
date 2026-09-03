@@ -306,6 +306,92 @@ test("§15G: a same-device EXACT corpus source -> production counts it, shadow w
 });
 
 // ===========================================================================
+// §15H — Phase B2 corpus-duplicate suppression shadow row surfaces in the trace
+// ===========================================================================
+
+test("§15H: a corpus_duplicate_suppression_shadow_evaluations row -> admin trace carries corpusDuplicateSuppressionShadow, score untouched", async () => {
+  const text = takeDistinctText();
+  const deviceKey = uniq("dk"), reportId = uniq("r"), account = uniq("acc-b2");
+  await seedReport({ deviceKey, reportId, accountId: account, rawText: text });
+
+  await client.execute({
+    sql: `INSERT INTO corpus_duplicate_suppression_shadow_evaluations
+            (report_device_key, report_id, status, checker_accounts_status, distinct_checker_accounts_bucket,
+             policy_version, rule_version, unified_similarity_version, counterfactual_version,
+             authoritative_corpus_generation, authoritative_snapshot_computed_at, submitted_word_count,
+             authoritative_score, hypothetical_score, score_delta,
+             authoritative_unique_matched_words, hypothetical_unique_matched_words, unique_matched_words_removed,
+             candidate_matched_words, candidates_excluded,
+             archive_only_words_surviving, live_academic_only_words_surviving,
+             previous_upload_only_words_surviving, overlap_words_surviving,
+             candidate_count, measurement_category, origin_confidence, multi_origin_evidence,
+             same_passport_category, cross_account_category, evaluation_truncated, computed_at)
+          VALUES (?,?,?,?,?, ?,?,?,?, ?,?,?, ?,?,?, ?,?,?, ?,?, ?,?,?,?, ?,?,?,?, ?,?,?, ?)`,
+    args: [
+      deviceKey, reportId, "OK", "OK", "2",
+      "document-local-corpus-duplicate-shadow-v1", "document-local-corpus-duplicate-policy-v1",
+      "unified-similarity-vX", "corpus-duplicate-counterfactual-v1",
+      9, "2026-09-02T12:00:00Z", 90,
+      100, 40, 60,
+      100, 40, 60,
+      60, 1,
+      20, 10, 5, 5,
+      1, "CROSS_ACCOUNT_EXACT_CANONICAL", "SINGLE_BACKING_NO_MULTI_ORIGIN_EVIDENCE", "MULTI_ORIGIN_NOT_PROVEN",
+      0, 1, 0, "2026-09-03 03:00:00",
+    ],
+  });
+
+  const trace = await getReportSimilarityDecisionTrace(client, deviceKey, reportId);
+  assert.ok(trace);
+  assert.equal(trace.scoreUnchangedByCorpusDuplicateShadow, true);
+  const b2 = trace.corpusDuplicateSuppressionShadow;
+  assert.ok(b2, "the B2 shadow block must surface in the admin trace");
+  assert.equal(b2.status, "OK");
+  assert.equal(b2.authoritativeScore, 100);
+  assert.equal(b2.hypotheticalScore, 40);
+  assert.equal(b2.scoreDelta, 60);
+  assert.equal(b2.candidateCount, 1);
+  assert.equal(b2.measurementCategory, "CROSS_ACCOUNT_EXACT_CANONICAL");
+  assert.equal(b2.originConfidence, "SINGLE_BACKING_NO_MULTI_ORIGIN_EVIDENCE");
+  assert.equal(b2.checkerAccountsStatus, "OK");
+  assert.equal(b2.distinctCheckerAccountsBucket, "2");
+  assert.equal(b2.productionScoreChangedByShadow, false);
+
+  // the production similarity result is untouched by the shadow row existing
+  const resolution = await resolve(deviceKey, reportId, account, text);
+  const traceAgain = await getReportSimilarityDecisionTrace(client, deviceKey, reportId);
+  assert.equal(traceAgain.finalScore, resolution.unifiedSimilarity.unifiedScore);
+});
+
+test("§15H2: a FAILED corpus-duplicate shadow row -> every measurement field serialises as null, never 0", async () => {
+  const text = takeDistinctText();
+  const deviceKey = uniq("dk"), reportId = uniq("r"), account = uniq("acc-b2f");
+  await seedReport({ deviceKey, reportId, accountId: account, rawText: text });
+  await client.execute({
+    sql: `INSERT INTO corpus_duplicate_suppression_shadow_evaluations
+            (report_device_key, report_id, status, error_code, checker_accounts_status,
+             policy_version, rule_version, unified_similarity_version, counterfactual_version, computed_at)
+          VALUES (?,?,?,?,?, ?,?,?,?, ?)`,
+    args: [
+      deviceKey, reportId, "FAILED", "PROVENANCE_QUERY_FAILED", "NOT_APPLICABLE",
+      "document-local-corpus-duplicate-shadow-v1", "document-local-corpus-duplicate-policy-v1",
+      "unified-similarity-vX", "corpus-duplicate-counterfactual-v1", "2026-09-03 03:05:00",
+    ],
+  });
+  const trace = await getReportSimilarityDecisionTrace(client, deviceKey, reportId);
+  const b2 = trace.corpusDuplicateSuppressionShadow;
+  assert.ok(b2);
+  assert.equal(b2.status, "FAILED");
+  assert.equal(b2.errorCode, "PROVENANCE_QUERY_FAILED");
+  assert.equal(b2.authoritativeScore, null);
+  assert.equal(b2.scoreDelta, null);
+  assert.equal(b2.candidateCount, null);
+  assert.equal(b2.measurementCategory, null);
+  const serialised = JSON.stringify(b2);
+  assert.doesNotMatch(serialised, /"scoreDelta":\s*0/, "a not-measured delta must never serialise as 0");
+});
+
+// ===========================================================================
 // §12 — fresh / empty database and missing report never crash
 // ===========================================================================
 
@@ -425,6 +511,17 @@ test("§13: an admin session receives similarityDecisionTrace from the developer
   assert.equal(typeof adminBody.similarityDecisionTrace.finalScore, "number");
   assert.ok(Array.isArray(adminBody.similarityDecisionTrace.sources));
 
+  // §B2b: the corpus-duplicate suppression shadow block is serialised for an
+  // admin. The real deferred B2a evaluator wrote a row for this report during
+  // postReport's runAfterResponse (a PRIOR_SUBMISSION match — not a corpus
+  // source — so it is a real OK row with no candidate).
+  assert.equal(adminBody.similarityDecisionTrace.scoreUnchangedByCorpusDuplicateShadow, true);
+  const b2 = adminBody.similarityDecisionTrace.corpusDuplicateSuppressionShadow;
+  assert.ok(b2, "an admin must see the Phase B2 corpus-duplicate suppression shadow block");
+  assert.ok(["OK", "BOUNDED", "FAILED", "SKIPPED_NOT_MATCHED", "SKIPPED_NO_AUTHORITATIVE"].includes(b2.status));
+  assert.equal(b2.productionScoreChangedByShadow, false);
+  assert.equal(b2.policyVersion, "document-local-corpus-duplicate-shadow-v1");
+
   // §13: the full admin developer response serialises no device-passport secret.
   const adminRaw = JSON.stringify(adminBody);
   for (const forbidden of [/public_?key/i, /publicKeySpki/, /\bspki\b/i, /"signature"/, /challengeId/, /challenge_id/, /"nonce"/, /session_?token/i, /verified_device_passport_id/]) {
@@ -439,6 +536,9 @@ test("§13: the ordinary GET /api/reports/[id] response carries none of the deci
 
   const ordinaryCookie = await login("asdt-ordinary@example.com", "asdt-ordinary-dev", "asdt-ord-login");
   await postReport({ deviceKey: "asdt-ordinary-dev", cookie: ordinaryCookie, id: "asdt-ordinary-report", text: PRIOR_TEXT, room: 1, tag: "asdt-ord-post" });
+  // postReport's runAfterResponse ran the real deferred B2a evaluator, so a
+  // corpus_duplicate_suppression_shadow_evaluations row now exists for this
+  // report — it must be completely invisible to the ordinary viewer below.
 
   const { res, body } = await getOrdinaryReport("asdt-ordinary-report", ordinaryCookie, "asdt-ord-get");
   assert.equal(res.status, 200);
@@ -449,6 +549,8 @@ test("§13: the ordinary GET /api/reports/[id] response carries none of the deci
   assert.doesNotMatch(raw, /similarityDecisionTrace/, "the trace key must not appear anywhere in the ordinary response");
   assert.doesNotMatch(raw, /schemaVersion.{0,40}admin-similarity-decision-trace/);
   assert.doesNotMatch(raw, /accountEvidence|deviceEvidence|backingListTruncated|COUNTED_PRIOR_SUBMISSION|EXCLUDED_SELF/, "no per-source trace field may leak to an ordinary viewer");
+  // §B2b: no corpus-duplicate suppression shadow telemetry may reach an ordinary viewer
+  assert.doesNotMatch(raw, /corpusDuplicateSuppressionShadow|CROSS_ACCOUNT_EXACT_CANONICAL|MULTI_ORIGIN_NOT_PROVEN|scoreUnchangedByCorpusDuplicateShadow/, "no Phase B2 shadow telemetry may leak to an ordinary viewer");
   assert.doesNotMatch(raw, new RegExp(`${priorAccount}@ex\\.test`), "no backing account email may reach an ordinary viewer");
   // unifiedSimilarity itself is still present for the ordinary owner, but with contributions stripped.
   if (body.payload.unifiedSimilarity) {

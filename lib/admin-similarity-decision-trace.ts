@@ -181,6 +181,118 @@ export type DecisionTraceDeviceShadow = {
 };
 
 // ---------------------------------------------------------------------------
+// Phase B2 corpus-duplicate suppression shadow (measurement only)
+// ---------------------------------------------------------------------------
+
+/**
+ * One corpus_duplicate_suppression_shadow_evaluations row (drizzle/0044), read
+ * by the admin-gated data layer and passed through this builder verbatim.
+ * Every field is already a bounded count / enum / integer score / timestamp /
+ * version string — drizzle/0044 has, by construction, no account id, email,
+ * device-passport id, HMAC, source_ref, canonical hash, representation id,
+ * provenance id, or document / passage text column to begin with.
+ */
+export type DecisionTraceCorpusDuplicateShadowInput = {
+  policyVersion: string;
+  /** 'OK' | 'BOUNDED' | 'FAILED' | 'SKIPPED_NOT_MATCHED' | 'SKIPPED_NO_AUTHORITATIVE'. */
+  status: string;
+  computedAt: string;
+  /** NULL unless status = 'FAILED'. */
+  errorCode: string | null;
+  authoritativeScore: number | null;
+  hypotheticalScore: number | null;
+  scoreDelta: number | null;
+  candidateCount: number | null;
+  measurementCategory: string | null;
+  originConfidence: string | null;
+  multiOriginEvidence: string | null;
+  archiveOnlyWordsSurviving: number | null;
+  liveAcademicOnlyWordsSurviving: number | null;
+  previousUploadOnlyWordsSurviving: number | null;
+  overlapWordsSurviving: number | null;
+  authoritativeUniqueMatchedWords: number | null;
+  hypotheticalUniqueMatchedWords: number | null;
+  uniqueMatchedWordsRemoved: number | null;
+  candidateMatchedWords: number | null;
+  candidatesExcluded: number | null;
+  checkerAccountsStatus: string;
+  distinctCheckerAccountsBucket: string | null;
+  authoritativeCorpusGeneration: number | null;
+  authoritativeSnapshotComputedAt: string | null;
+  evaluationTruncated: boolean;
+};
+
+export type DecisionTraceCorpusDuplicateShadow = {
+  present: true;
+  policyVersion: string;
+  status: string;
+  computedAt: string;
+  errorCode: string | null;
+  /** NULL where a real counterfactual measurement was never computed (FAILED / SKIPPED_*). Never rendered as 0. */
+  authoritativeScore: number | null;
+  hypotheticalScore: number | null;
+  scoreDelta: number | null;
+  candidateCount: number | null;
+  measurementCategory: string | null;
+  originConfidence: string | null;
+  multiOriginEvidence: string | null;
+  archiveOnlyWordsSurviving: number | null;
+  liveAcademicOnlyWordsSurviving: number | null;
+  previousUploadOnlyWordsSurviving: number | null;
+  overlapWordsSurviving: number | null;
+  authoritativeUniqueMatchedWords: number | null;
+  hypotheticalUniqueMatchedWords: number | null;
+  uniqueMatchedWordsRemoved: number | null;
+  candidateMatchedWords: number | null;
+  candidatesExcluded: number | null;
+  checkerAccountsStatus: string;
+  distinctCheckerAccountsBucket: string | null;
+  authoritativeCorpusGeneration: number | null;
+  authoritativeSnapshotComputedAt: string | null;
+  evaluationTruncated: boolean;
+  /** Literal — Phase B is shadow MEASUREMENT only; the authoritative score is never changed by this evaluation. */
+  productionScoreChangedByShadow: false;
+};
+
+function projectCorpusDuplicateShadow(
+  input: DecisionTraceCorpusDuplicateShadowInput,
+): DecisionTraceCorpusDuplicateShadow {
+  const intOrNull = (value: unknown): number | null =>
+    typeof value === "number" && Number.isFinite(value) ? value : null;
+  const strOrNull = (value: unknown): string | null =>
+    typeof value === "string" && value.length > 0 ? value : null;
+  return {
+    present: true,
+    policyVersion: input.policyVersion,
+    status: input.status,
+    computedAt: input.computedAt,
+    errorCode: strOrNull(input.errorCode),
+    authoritativeScore: intOrNull(input.authoritativeScore),
+    hypotheticalScore: intOrNull(input.hypotheticalScore),
+    scoreDelta: intOrNull(input.scoreDelta),
+    candidateCount: intOrNull(input.candidateCount),
+    measurementCategory: strOrNull(input.measurementCategory),
+    originConfidence: strOrNull(input.originConfidence),
+    multiOriginEvidence: strOrNull(input.multiOriginEvidence),
+    archiveOnlyWordsSurviving: intOrNull(input.archiveOnlyWordsSurviving),
+    liveAcademicOnlyWordsSurviving: intOrNull(input.liveAcademicOnlyWordsSurviving),
+    previousUploadOnlyWordsSurviving: intOrNull(input.previousUploadOnlyWordsSurviving),
+    overlapWordsSurviving: intOrNull(input.overlapWordsSurviving),
+    authoritativeUniqueMatchedWords: intOrNull(input.authoritativeUniqueMatchedWords),
+    hypotheticalUniqueMatchedWords: intOrNull(input.hypotheticalUniqueMatchedWords),
+    uniqueMatchedWordsRemoved: intOrNull(input.uniqueMatchedWordsRemoved),
+    candidateMatchedWords: intOrNull(input.candidateMatchedWords),
+    candidatesExcluded: intOrNull(input.candidatesExcluded),
+    checkerAccountsStatus: input.checkerAccountsStatus,
+    distinctCheckerAccountsBucket: strOrNull(input.distinctCheckerAccountsBucket),
+    authoritativeCorpusGeneration: intOrNull(input.authoritativeCorpusGeneration),
+    authoritativeSnapshotComputedAt: strOrNull(input.authoritativeSnapshotComputedAt),
+    evaluationTruncated: input.evaluationTruncated === true,
+    productionScoreChangedByShadow: false,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // refined CONSERVATIVE_COMBINED (Policy D) shared-device SCORING guard
 // (optional gate layered on the Device Passport SELF rule — bounded, no identity)
 // ---------------------------------------------------------------------------
@@ -389,6 +501,19 @@ export type AdminSimilarityDecisionTrace = {
   scoreUnchangedByDeviceShadow: true;
 
   /**
+   * The Phase B2 corpus-duplicate suppression shadow row for this report
+   * (corpus_duplicate_suppression_shadow_evaluations, drizzle/0044), when one
+   * exists — bounded counts / enums / integer scores only, no identifier.
+   * `null` when the deferred evaluator has not written a row yet. Every score
+   * field is `null` (NOT 0) where a real counterfactual measurement was never
+   * computed (status FAILED / SKIPPED_*).
+   */
+  corpusDuplicateSuppressionShadow: DecisionTraceCorpusDuplicateShadow | null;
+
+  /** Literal — Phase B2 corpus-duplicate suppression is shadow MEASUREMENT only. */
+  scoreUnchangedByCorpusDuplicateShadow: true;
+
+  /**
    * The refined CONSERVATIVE_COMBINED (Policy D) shared-device fan-out
    * TELEMETRY verdict for this resolution — bounded counts + one short enum +
    * one boolean (durableActorHistoryComplete), no identity. `null` whenever
@@ -424,6 +549,8 @@ export type BuildAdminSimilarityDecisionTraceInput = {
   deviceEvidenceByRepresentation?: Record<string, DecisionTraceDeviceEvidence>;
   /** The device-provenance shadow row (parsed), when one exists. */
   deviceShadow?: DecisionTraceDeviceShadowInput | null;
+  /** The Phase B2 corpus-duplicate suppression shadow row (parsed), when one exists. Absent/null => the deferred evaluator has not written a row for this report. */
+  corpusDuplicateSuppressionShadow?: DecisionTraceCorpusDuplicateShadowInput | null;
   /** Whether the report was uploaded with a verified device passport — read as a plain boolean by the admin data layer, never the identifier itself. */
   hasVerifiedUploadPassport?: boolean;
   /**
@@ -540,6 +667,9 @@ function emptyTrace(
   const deviceSelfSharedGuard = input.deviceSelfSharedGuard
     ? projectDeviceSelfSharedGuard(input.deviceSelfSharedGuard)
     : null;
+  const corpusDuplicateSuppressionShadow = input.corpusDuplicateSuppressionShadow
+    ? projectCorpusDuplicateShadow(input.corpusDuplicateSuppressionShadow)
+    : null;
   return {
     schemaVersion: ADMIN_SIMILARITY_DECISION_TRACE_SCHEMA_VERSION,
     resolvable: false,
@@ -564,6 +694,8 @@ function emptyTrace(
     fullCoverageExplanation: null,
     deviceShadow,
     scoreUnchangedByDeviceShadow: true,
+    corpusDuplicateSuppressionShadow,
+    scoreUnchangedByCorpusDuplicateShadow: true,
     deviceSelfSharedGuard,
   };
 }
@@ -859,6 +991,9 @@ export function buildAdminSimilarityDecisionTrace(
   const deviceSelfSharedGuard = input.deviceSelfSharedGuard
     ? projectDeviceSelfSharedGuard(input.deviceSelfSharedGuard)
     : null;
+  const corpusDuplicateSuppressionShadow = input.corpusDuplicateSuppressionShadow
+    ? projectCorpusDuplicateShadow(input.corpusDuplicateSuppressionShadow)
+    : null;
 
   return {
     schemaVersion: ADMIN_SIMILARITY_DECISION_TRACE_SCHEMA_VERSION,
@@ -891,6 +1026,8 @@ export function buildAdminSimilarityDecisionTrace(
     fullCoverageExplanation,
     deviceShadow,
     scoreUnchangedByDeviceShadow: true,
+    corpusDuplicateSuppressionShadow,
+    scoreUnchangedByCorpusDuplicateShadow: true,
     deviceSelfSharedGuard,
   };
 }

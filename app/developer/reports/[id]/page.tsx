@@ -5,6 +5,7 @@ import { getReportsDbClient } from "@/lib/reports-db";
 import { getReportDeepDiveForDeveloper, getReportSimilarityDecisionTrace } from "@/lib/developer-repo";
 import type {
   AdminSimilarityDecisionTrace,
+  DecisionTraceCorpusDuplicateShadow,
   DecisionTraceSource,
 } from "@/lib/admin-similarity-decision-trace";
 
@@ -194,6 +195,53 @@ function yesNo(value: boolean): string {
   return value ? "YES" : "NO";
 }
 
+// Phase B2 shadow measurement columns are NULL wherever a real counterfactual
+// was never computed (status FAILED / SKIPPED_*). Render that as "not measured",
+// NEVER as 0 — a genuine 0 (e.g. hypothetical score 0) is a real measurement.
+function notMeasured(value: number | string | boolean | null | undefined): string {
+  return value === null || value === undefined ? "not measured" : String(value);
+}
+
+function CorpusDuplicateShadowBlock({ shadow }: { shadow: DecisionTraceCorpusDuplicateShadow | null }) {
+  return (
+    <>
+      <h3>Corpus-duplicate suppression shadow (Phase B2 — measurement only)</h3>
+      {shadow ? (
+        <ul>
+          <li>
+            Core status: <strong>{shadow.status}</strong>
+            {shadow.status === "FAILED" ? ` · error_code: ${notMeasured(shadow.errorCode)}` : ""}
+          </li>
+          <li>Policy version: {shadow.policyVersion} · computed {shadow.computedAt}</li>
+          <li>Authoritative score: {notMeasured(shadow.authoritativeScore)}</li>
+          <li>Hypothetical score (candidate excluded): {notMeasured(shadow.hypotheticalScore)}</li>
+          <li>Delta: {notMeasured(shadow.scoreDelta)}</li>
+          <li>Candidate count: {notMeasured(shadow.candidateCount)}</li>
+          <li>Candidate category: {notMeasured(shadow.measurementCategory)}</li>
+          <li>Origin confidence: {notMeasured(shadow.originConfidence)}</li>
+          <li>Multi-origin evidence: {notMeasured(shadow.multiOriginEvidence)}</li>
+          <li>
+            Surviving matched words — archive: {notMeasured(shadow.archiveOnlyWordsSurviving)},
+            academic: {notMeasured(shadow.liveAcademicOnlyWordsSurviving)},
+            previous-upload: {notMeasured(shadow.previousUploadOnlyWordsSurviving)},
+            overlap: {notMeasured(shadow.overlapWordsSurviving)}
+          </li>
+          <li>
+            Checker accounts: {shadow.checkerAccountsStatus} · distinct-checker bucket: {notMeasured(shadow.distinctCheckerAccountsBucket)}
+          </li>
+          <li>
+            Authoritative corpus generation: {notMeasured(shadow.authoritativeCorpusGeneration)} · snapshot: {notMeasured(shadow.authoritativeSnapshotComputedAt)}
+          </li>
+          <li>Evaluation truncated (defensive cap hit): {yesNo(shadow.evaluationTruncated)}</li>
+          <li><strong>Production score changed by this shadow: NO</strong> (Phase B2 is measurement only)</li>
+        </ul>
+      ) : (
+        <p>No corpus-duplicate suppression shadow evaluation has been recorded for this report.</p>
+      )}
+    </>
+  );
+}
+
 function SimilarityDecisionTraceSection({ trace }: { trace: AdminSimilarityDecisionTrace | null }) {
   if (!trace) {
     return (
@@ -216,6 +264,7 @@ function SimilarityDecisionTraceSection({ trace }: { trace: AdminSimilarityDecis
               : "The final similarity result could not be resolved."}
         </p>
         <p>Archive-only fallback score: {trace.finalScore}%</p>
+        <CorpusDuplicateShadowBlock shadow={trace.corpusDuplicateSuppressionShadow} />
       </section>
     );
   }
@@ -341,6 +390,8 @@ function SimilarityDecisionTraceSection({ trace }: { trace: AdminSimilarityDecis
       ) : (
         <p>No Device Passport shadow evaluation has been recorded for this report.</p>
       )}
+
+      <CorpusDuplicateShadowBlock shadow={trace.corpusDuplicateSuppressionShadow} />
     </section>
   );
 }

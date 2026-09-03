@@ -343,6 +343,128 @@ test("G2. no shadow row -> trace.deviceShadow is null, no crash", () => {
 });
 
 // ---------------------------------------------------------------------------
+// H — Phase B2 corpus-duplicate suppression shadow projection (measurement only)
+// ---------------------------------------------------------------------------
+
+test("H. an OK corpus-duplicate shadow row -> projected verbatim, productionScoreChangedByShadow false, score unchanged", () => {
+  const unified = computeUnifiedSimilarity({ wordCount: 90, archiveMatchedPositions: [], externalAcademicEvidence: [], historicalSubmissionMatch: null });
+  const trace = buildAdminSimilarityDecisionTrace({
+    archiveScore: 0,
+    unifiedSimilarity: unified,
+    corpusDuplicateSuppressionShadow: {
+      policyVersion: "document-local-corpus-duplicate-shadow-v1",
+      status: "OK",
+      computedAt: "2026-09-03T00:00:00Z",
+      errorCode: null,
+      authoritativeScore: 100,
+      hypotheticalScore: 40,
+      scoreDelta: 60,
+      candidateCount: 1,
+      measurementCategory: "CROSS_ACCOUNT_EXACT_CANONICAL",
+      originConfidence: "SINGLE_BACKING_NO_MULTI_ORIGIN_EVIDENCE",
+      multiOriginEvidence: "MULTI_ORIGIN_NOT_PROVEN",
+      archiveOnlyWordsSurviving: 20,
+      liveAcademicOnlyWordsSurviving: 10,
+      previousUploadOnlyWordsSurviving: 5,
+      overlapWordsSurviving: 5,
+      authoritativeUniqueMatchedWords: 100,
+      hypotheticalUniqueMatchedWords: 40,
+      uniqueMatchedWordsRemoved: 60,
+      candidateMatchedWords: 60,
+      candidatesExcluded: 1,
+      checkerAccountsStatus: "OK",
+      distinctCheckerAccountsBucket: "2",
+      authoritativeCorpusGeneration: 7,
+      authoritativeSnapshotComputedAt: "2026-09-02T12:00:00Z",
+      evaluationTruncated: false,
+    },
+  });
+
+  assert.equal(trace.scoreUnchangedByCorpusDuplicateShadow, true);
+  assert.ok(trace.corpusDuplicateSuppressionShadow);
+  const b2 = trace.corpusDuplicateSuppressionShadow;
+  assert.equal(b2.present, true);
+  assert.equal(b2.status, "OK");
+  assert.equal(b2.authoritativeScore, 100);
+  assert.equal(b2.hypotheticalScore, 40);
+  assert.equal(b2.scoreDelta, 60);
+  assert.equal(b2.candidateCount, 1);
+  assert.equal(b2.measurementCategory, "CROSS_ACCOUNT_EXACT_CANONICAL");
+  assert.equal(b2.originConfidence, "SINGLE_BACKING_NO_MULTI_ORIGIN_EVIDENCE");
+  assert.equal(b2.multiOriginEvidence, "MULTI_ORIGIN_NOT_PROVEN");
+  assert.equal(b2.archiveOnlyWordsSurviving, 20);
+  assert.equal(b2.checkerAccountsStatus, "OK");
+  assert.equal(b2.distinctCheckerAccountsBucket, "2");
+  assert.equal(b2.authoritativeCorpusGeneration, 7);
+  assert.equal(b2.productionScoreChangedByShadow, false);
+  assert.equal(b2.errorCode, null);
+  // the production score is untouched by the shadow
+  assert.equal(trace.finalScore, unified.unifiedScore);
+});
+
+test("H2. a FAILED / SKIPPED corpus-duplicate shadow row -> every measurement field stays null (never 0)", () => {
+  const unified = computeUnifiedSimilarity({ wordCount: 10, archiveMatchedPositions: [], externalAcademicEvidence: [], historicalSubmissionMatch: null });
+  const trace = buildAdminSimilarityDecisionTrace({
+    archiveScore: 0,
+    unifiedSimilarity: unified,
+    corpusDuplicateSuppressionShadow: {
+      policyVersion: "document-local-corpus-duplicate-shadow-v1",
+      status: "FAILED",
+      computedAt: "2026-09-03T00:00:00Z",
+      errorCode: "PROVENANCE_QUERY_FAILED",
+      authoritativeScore: null,
+      hypotheticalScore: null,
+      scoreDelta: null,
+      candidateCount: null,
+      measurementCategory: null,
+      originConfidence: null,
+      multiOriginEvidence: null,
+      archiveOnlyWordsSurviving: null,
+      liveAcademicOnlyWordsSurviving: null,
+      previousUploadOnlyWordsSurviving: null,
+      overlapWordsSurviving: null,
+      authoritativeUniqueMatchedWords: null,
+      hypotheticalUniqueMatchedWords: null,
+      uniqueMatchedWordsRemoved: null,
+      candidateMatchedWords: null,
+      candidatesExcluded: null,
+      checkerAccountsStatus: "NOT_APPLICABLE",
+      distinctCheckerAccountsBucket: null,
+      authoritativeCorpusGeneration: null,
+      authoritativeSnapshotComputedAt: null,
+      evaluationTruncated: false,
+    },
+  });
+  const b2 = trace.corpusDuplicateSuppressionShadow;
+  assert.ok(b2);
+  assert.equal(b2.status, "FAILED");
+  assert.equal(b2.errorCode, "PROVENANCE_QUERY_FAILED");
+  for (const field of [
+    "authoritativeScore", "hypotheticalScore", "scoreDelta", "candidateCount",
+    "measurementCategory", "originConfidence", "multiOriginEvidence",
+    "archiveOnlyWordsSurviving", "liveAcademicOnlyWordsSurviving",
+    "previousUploadOnlyWordsSurviving", "overlapWordsSurviving",
+    "authoritativeCorpusGeneration", "authoritativeSnapshotComputedAt",
+  ]) {
+    assert.equal(b2[field], null, `${field} must serialise as null, never 0`);
+  }
+  // and it round-trips through JSON as null, not 0
+  const roundTripped = JSON.parse(JSON.stringify(b2));
+  assert.equal(roundTripped.scoreDelta, null);
+});
+
+test("H3. no corpus-duplicate shadow row -> trace.corpusDuplicateSuppressionShadow is null, no crash", () => {
+  const unified = computeUnifiedSimilarity({ wordCount: 10, archiveMatchedPositions: [], externalAcademicEvidence: [], historicalSubmissionMatch: null });
+  const trace = buildAdminSimilarityDecisionTrace({ archiveScore: 0, unifiedSimilarity: unified });
+  assert.equal(trace.corpusDuplicateSuppressionShadow, null);
+  assert.equal(trace.scoreUnchangedByCorpusDuplicateShadow, true);
+  // also present on an unresolvable/legacy trace
+  const legacy = buildAdminSimilarityDecisionTrace({ archiveScore: 5, unifiedSimilarity: null });
+  assert.equal(legacy.corpusDuplicateSuppressionShadow, null);
+  assert.equal(legacy.scoreUnchangedByCorpusDuplicateShadow, true);
+});
+
+// ---------------------------------------------------------------------------
 // §14 — score invariance: the builder never mutates its inputs, deterministic
 // ---------------------------------------------------------------------------
 

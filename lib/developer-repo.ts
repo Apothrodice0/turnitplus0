@@ -10,11 +10,13 @@ import { summarizeSubmissionOwnership } from "./user-submission-corpus";
 import { summarizeSubmissionProvenance } from "./submission-provenance";
 import { resolvePrimarySimilaritySummary } from "./report-primary-similarity";
 import { DEVICE_PROVENANCE_SHADOW_POLICY_VERSION } from "./device-provenance-shadow";
+import { CORPUS_DUPLICATE_SUPPRESSION_SHADOW_POLICY_VERSION } from "./corpus-duplicate-suppression-shadow";
 import {
   buildAdminSimilarityDecisionTrace,
   type AdminSimilarityDecisionTrace,
   type DecisionTraceAccountEvidence,
   type DecisionTraceBackingAccount,
+  type DecisionTraceCorpusDuplicateShadowInput,
   type DecisionTraceDeviceEvidence,
   type DecisionTraceDeviceShadowInput,
   type DecisionTraceHistoricalMatchFacts,
@@ -573,6 +575,64 @@ export async function getReportSimilarityDecisionTrace(
     console.error("getReportSimilarityDecisionTrace: shadow-row read failed (non-fatal):", err instanceof Error ? err.message : String(err));
   }
 
+  // Phase B2 corpus-duplicate suppression shadow row (drizzle/0044) —
+  // observation only. Bounded counts / enums / integer scores; drizzle/0044
+  // has no identifier column, and this SELECT reads no other table. A NULL
+  // measurement column stays null here (never coerced to 0) so the developer
+  // UI can render it as "not measured".
+  let corpusDuplicateSuppressionShadow: DecisionTraceCorpusDuplicateShadowInput | null = null;
+  try {
+    const cdShadow = await client.execute({
+      sql: `SELECT policy_version, status, computed_at, error_code,
+                   authoritative_score, hypothetical_score, score_delta,
+                   candidate_count, measurement_category, origin_confidence, multi_origin_evidence,
+                   archive_only_words_surviving, live_academic_only_words_surviving,
+                   previous_upload_only_words_surviving, overlap_words_surviving,
+                   authoritative_unique_matched_words, hypothetical_unique_matched_words,
+                   unique_matched_words_removed, candidate_matched_words, candidates_excluded,
+                   checker_accounts_status, distinct_checker_accounts_bucket,
+                   authoritative_corpus_generation, authoritative_snapshot_computed_at, evaluation_truncated
+            FROM corpus_duplicate_suppression_shadow_evaluations
+            WHERE report_device_key = ? AND report_id = ? AND policy_version = ?`,
+      args: [deviceKey, id, CORPUS_DUPLICATE_SUPPRESSION_SHADOW_POLICY_VERSION],
+    });
+    const cdRow = cdShadow.rows[0] as unknown as Record<string, unknown> | undefined;
+    if (cdRow) {
+      const int = (v: unknown): number | null =>
+        v === null || v === undefined ? null : Number.isFinite(Number(v)) ? Number(v) : null;
+      const str = (v: unknown): string | null => (v === null || v === undefined ? null : String(v));
+      corpusDuplicateSuppressionShadow = {
+        policyVersion: String(cdRow.policy_version),
+        status: String(cdRow.status),
+        computedAt: String(cdRow.computed_at),
+        errorCode: str(cdRow.error_code),
+        authoritativeScore: int(cdRow.authoritative_score),
+        hypotheticalScore: int(cdRow.hypothetical_score),
+        scoreDelta: int(cdRow.score_delta),
+        candidateCount: int(cdRow.candidate_count),
+        measurementCategory: str(cdRow.measurement_category),
+        originConfidence: str(cdRow.origin_confidence),
+        multiOriginEvidence: str(cdRow.multi_origin_evidence),
+        archiveOnlyWordsSurviving: int(cdRow.archive_only_words_surviving),
+        liveAcademicOnlyWordsSurviving: int(cdRow.live_academic_only_words_surviving),
+        previousUploadOnlyWordsSurviving: int(cdRow.previous_upload_only_words_surviving),
+        overlapWordsSurviving: int(cdRow.overlap_words_surviving),
+        authoritativeUniqueMatchedWords: int(cdRow.authoritative_unique_matched_words),
+        hypotheticalUniqueMatchedWords: int(cdRow.hypothetical_unique_matched_words),
+        uniqueMatchedWordsRemoved: int(cdRow.unique_matched_words_removed),
+        candidateMatchedWords: int(cdRow.candidate_matched_words),
+        candidatesExcluded: int(cdRow.candidates_excluded),
+        checkerAccountsStatus: String(cdRow.checker_accounts_status),
+        distinctCheckerAccountsBucket: str(cdRow.distinct_checker_accounts_bucket),
+        authoritativeCorpusGeneration: int(cdRow.authoritative_corpus_generation),
+        authoritativeSnapshotComputedAt: str(cdRow.authoritative_snapshot_computed_at),
+        evaluationTruncated: int(cdRow.evaluation_truncated) === 1,
+      };
+    }
+  } catch (err) {
+    console.error("getReportSimilarityDecisionTrace: corpus-duplicate shadow-row read failed (non-fatal):", err instanceof Error ? err.message : String(err));
+  }
+
   // Per-representation account/device evidence for every matched
   // representation that either contributed to, or was considered for, the
   // unified result.
@@ -647,6 +707,7 @@ export async function getReportSimilarityDecisionTrace(
     accountEvidenceByRepresentation,
     deviceEvidenceByRepresentation,
     deviceShadow,
+    corpusDuplicateSuppressionShadow,
     hasVerifiedUploadPassport,
     // The refined CONSERVATIVE_COMBINED shared-device guard decision from the
     // SAME resolvePrimarySimilaritySummary call above — bounded counts + one
