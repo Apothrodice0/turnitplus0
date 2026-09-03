@@ -11,11 +11,33 @@ import {
   createReusableDocumentRepresentation,
   recordCorpusShingles,
   corpusShingleHashes,
-  findCandidateCorpusRepresentations,
-  applyHighFrequencyShinglePruning,
+  findCandidateCorpusRepresentations as _findCandidateCorpusRepresentations,
+  applyHighFrequencyShinglePruning as _applyHighFrequencyShinglePruning,
   CORPUS_FINGERPRINT_VERSION,
 } from "../lib/user-submission-corpus.ts";
-import { matchAgainstUserSubmissionCorpus, USER_SUBMISSION_MATCH_THRESHOLDS } from "../lib/user-submission-matching.ts";
+import { matchAgainstUserSubmissionCorpus as _matchAgainstUserSubmissionCorpus, USER_SUBMISSION_MATCH_THRESHOLDS } from "../lib/user-submission-matching.ts";
+import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
+
+// Phase A safe-by-default maturity: this whole suite predates the 7-day corpus
+// activation clock and every test seeds its sources (and boilerplate/revoked
+// noise) immediately before probing. All three entry points now enforce
+// maturity for MATCHING callers by default — so age the just-seeded backings
+// past the window first. These tests exercise DF pruning, not the clock
+// (that is tests/corpus-activation-7day.test.mjs). The applyHighFrequencyShingle
+// -Pruning shim leaves the disabled-pruning path (maxDocumentFrequency
+// undefined) untouched so test K's "no DB round trip" assertion still holds.
+const matchAgainstUserSubmissionCorpus = async (client, params) => {
+  await matureCorpusBackings(client);
+  return _matchAgainstUserSubmissionCorpus(client, params);
+};
+const findCandidateCorpusRepresentations = async (client, hashes, opts) => {
+  await matureCorpusBackings(client);
+  return _findCandidateCorpusRepresentations(client, hashes, opts);
+};
+const applyHighFrequencyShinglePruning = async (client, hashes, opts) => {
+  if (opts?.maxDocumentFrequency !== undefined) await matureCorpusBackings(client);
+  return _applyHighFrequencyShinglePruning(client, hashes, opts);
+};
 
 /**
  * 10k+-own-corpus scale hardening: query-time high-frequency ("maxDF")

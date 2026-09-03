@@ -17,7 +17,19 @@ import {
   stageAndClaimCorpusAdmissionPromotionForDecision,
   processCorpusAdmissionPromotion,
 } from "../lib/corpus-admission-promotion.ts";
-import { findCandidateCorpusRepresentations, corpusShingleHashes } from "../lib/user-submission-corpus.ts";
+import { findCandidateCorpusRepresentations as _findCandidateCorpusRepresentations, corpusShingleHashes } from "../lib/user-submission-corpus.ts";
+import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
+
+// Phase A safe-by-default maturity: these tests assert that auto-promotion
+// makes a representation matchable "immediately" — written before the 7-day
+// activation clock existed. findCandidateCorpusRepresentations now enforces
+// maturity for MATCHING callers by default, so age the freshly-promoted
+// backing past the window first. (The activation clock itself is covered by
+// tests/corpus-activation-7day.test.mjs.)
+const findCandidateCorpusRepresentations = async (client, hashes, opts) => {
+  await matureCorpusBackings(client);
+  return _findCandidateCorpusRepresentations(client, hashes, opts);
+};
 import { deactivateAcceptedRepresentation } from "../lib/corpus-admission-admin-actions.ts";
 import { getCurrentCorpusMatchGeneration } from "../lib/report-historical-match.ts";
 

@@ -17,6 +17,7 @@ import { deactivateAcceptedRepresentation } from "../lib/corpus-admission-admin-
 import { bumpCorpusMatchGeneration, getCurrentCorpusMatchGeneration } from "../lib/report-historical-match.ts";
 import { isRepresentationEligibleForMatching, createReusableDocumentRepresentation, recordCorpusShingles, corpusShingleHashes } from "../lib/user-submission-corpus.ts";
 import { canonicalSha256 } from "../lib/document-identity.ts";
+import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
 import { canonicalizeText } from "../lib/canonical-text.ts";
 
 /**
@@ -196,6 +197,9 @@ function plausibleArticleText(seed, targetWords = 3300) {
 
 /** Mirrors tests/report-primary-similarity.test.mjs's own finalizeAndPersist exactly — the real write-time-finalization call, which is where excludeAccountId is threaded through internally (as params.accountId). */
 async function finalizeAndPersist({ deviceKey, id, userId, text, wordCount, archiveScore = 0 }) {
+  // Phase A: this suite tests account-level self-match EXCLUSION, not the
+  // 7-day activation gate — age the seeded backings so they are matchable "now".
+  await matureCorpusBackings(client);
   const resolution = await resolvePrimarySimilaritySummary(client, {
     reportDeviceKey: deviceKey, reportId: id, accountId: userId, rawText: text,
     wordCount, archiveMatchedPositions: null, externalAcademicEvidence: null, archiveScore,
@@ -577,6 +581,7 @@ test("REQUIRED: the exact-canonical-hash fallback path (matchAgainstUserSubmissi
   const decisionA = await insertDecisionRaw({ sourceRef: sourceRefA, canonicalSha256: hash });
   const acceptedA = await insertAcceptedRepresentationRaw(decisionA, hash);
   await insertIndexedPromotionRaw(decisionA, acceptedA, representation.id);
+  await matureCorpusBackings(client); // Phase A: this test is about account-level exclusion on the fallback path, not the activation clock
 
   // Same account as the sole backing: exact-hash fallback must exclude it.
   const selfResult = await matchAgainstUserSubmissionCorpus(client, { accountId: accountA, canonicalText, excludeAccountId: accountA });
@@ -605,6 +610,7 @@ test("REQUIRED: account ids with a shared textual prefix (e.g. \"abc\" / \"abc12
   const decisionShort = await insertDecisionRaw({ sourceRef: sourceRefShort, canonicalSha256: `${canonicalSha256(text)}-short` });
   const acceptedShort = await insertAcceptedRepresentationRaw(decisionShort, `${canonicalSha256(text)}-short`);
   await insertIndexedPromotionRaw(decisionShort, acceptedShort, repShort.id);
+  await matureCorpusBackings(client); // Phase A: prefix-collision test, not the activation clock
 
   assert.equal(
     await isRepresentationEligibleForMatching(client, repShort.id, { excludeAccountId: longAccountId }),
@@ -627,6 +633,7 @@ test("REQUIRED: account ids with a shared textual prefix (e.g. \"abc\" / \"abc12
   const decisionLong = await insertDecisionRaw({ sourceRef: sourceRefLong, canonicalSha256: `${canonicalSha256(textLong)}-long` });
   const acceptedLong = await insertAcceptedRepresentationRaw(decisionLong, `${canonicalSha256(textLong)}-long`);
   await insertIndexedPromotionRaw(decisionLong, acceptedLong, repLong.id);
+  await matureCorpusBackings(client); // Phase A: prefix-collision test, not the activation clock
 
   assert.equal(
     await isRepresentationEligibleForMatching(client, repLong.id, { excludeAccountId: shortAccountId }),
@@ -649,6 +656,7 @@ test("REQUIRED: isRepresentationEligibleForMatching directly — self-account-on
   await finalizeAndPersist({ deviceKey: deviceA, id: reportA, userId: accountA, text, wordCount: 40 });
   const decisionA = await admitAndAutoPromote({ accountId: accountA, deviceKey: deviceA, reportId: reportA });
   const promotionA = await promotionRowForDecision(decisionA.decisionId);
+  await matureCorpusBackings(client); // Phase A: direct predicate unit test, not the activation clock
 
   assert.equal(await isRepresentationEligibleForMatching(client, promotionA.representation_id), true, "without excludeAccountId, unchanged pre-fix behavior: eligible");
   assert.equal(await isRepresentationEligibleForMatching(client, promotionA.representation_id, { excludeAccountId: accountA }), false, "REQUIRED: self-only backing excluded when the caller is that exact account, even via a DIFFERENT report than the one that created the backing");

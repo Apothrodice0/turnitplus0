@@ -29,6 +29,7 @@ import {
   ANONYMOUS_ACTOR_KEY,
   DEVICE_PASSPORT_ACTOR_HMAC_KEY_ENV,
 } from "../lib/device-passport-actor-ledger.ts";
+import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
 
 /**
  * Refined CONSERVATIVE_COMBINED (Policy D) shared-device fan-out TELEMETRY,
@@ -262,6 +263,9 @@ async function seedExactCorpusSource(rawText, { backingPassportId, sourceAccount
 }
 
 async function resolve({ deviceKey, reportId, accountId = null, rawText, archiveMatchedPositions = null, externalAcademicEvidence = null }) {
+  // Phase A: exercises the shared-guard TELEMETRY over the SELF rule, not the
+  // 7-day activation gate — age the seeded corpus so it is matchable "now".
+  await matureCorpusBackings(client);
   return resolvePrimarySimilaritySummary(client, {
     reportDeviceKey: deviceKey, reportId, accountId, rawText,
     wordCount: tokens(canonicalizeText(rawText)).length,

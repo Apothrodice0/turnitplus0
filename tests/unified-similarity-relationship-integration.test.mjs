@@ -12,6 +12,7 @@ import { tokens } from '../lib/similarity-core.ts';
 import { computeUnifiedSimilarity } from '../lib/unified-similarity.ts';
 import { indexDocumentSubmissionIntoCorpus } from '../lib/user-submission-corpus.ts';
 import { getOrComputeHistoricalMatchSnapshot } from '../lib/report-historical-match.ts';
+import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
 
 /**
  * Phase 4B, Part A: end-to-end proof that computeUnifiedSimilarity()'s
@@ -172,6 +173,7 @@ async function seedCorpusIndexForReport(deviceKey, reportId, text) {
   const documentIdentityId = identityRow.rows[0]?.document_identity_id ? String(identityRow.rows[0].document_identity_id) : null;
   if (!documentIdentityId) throw new Error(`seedCorpusIndexForReport: no document_identity_id captured yet for ${deviceKey}/${reportId}`);
   await indexDocumentSubmissionIntoCorpus(setupClient, { documentIdentityId, rawText: text });
+  await matureCorpusBackings(setupClient); // Phase A: age the seeded backing so it is matchable "now"
 }
 
 /** Fetches the real historicalSubmissionMatch for a saved report via the real GET route, waiting briefly for the save route's deferred after-response indexing to land (mirrors production's own eventual-consistency window, documented in lib/report-historical-match.ts's own header comment). */

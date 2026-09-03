@@ -8,6 +8,7 @@ import { applyMigrationsLibsql } from '../lib/ingest.js';
 import { resetRateForTest, resetReadRateForTest, resetAuthRateForTest } from '../lib/rate-limit.ts';
 import { createDocumentIdentity } from '../lib/document-identity.ts';
 import { indexDocumentSubmissionIntoCorpus } from '../lib/user-submission-corpus.ts';
+import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
 import { tokens } from '../lib/similarity-core.ts';
 import { canonicalizeText } from '../lib/canonical-text.ts';
 import { resolvePrimarySimilaritySummary } from '../lib/report-primary-similarity.ts';
@@ -109,7 +110,9 @@ async function ensureUser(accountId) {
 async function indexPriorSubmission(accountId, text) {
   await ensureUser(accountId);
   const identity = await createDocumentIdentity(client, { accountId, title: 'prior', author: null, rawText: text });
-  return indexDocumentSubmissionIntoCorpus(client, { documentIdentityId: identity.id, rawText: text });
+  const _r = await indexDocumentSubmissionIntoCorpus(client, { documentIdentityId: identity.id, rawText: text });
+  await matureCorpusBackings(client); // Phase A: age the seeded backing so it is matchable "now"
+  return _r;
 }
 
 function extractCookie(response) {

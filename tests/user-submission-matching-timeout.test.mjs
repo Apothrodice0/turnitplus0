@@ -8,6 +8,7 @@ import { applyMigrationsLibsql } from "../lib/ingest.js";
 import { createDocumentIdentity } from "../lib/document-identity.ts";
 import { indexDocumentSubmissionIntoCorpus, corpusShingleHashes, recordCorpusShingles, CORPUS_FINGERPRINT_VERSION } from "../lib/user-submission-corpus.ts";
 import { matchAgainstUserSubmissionCorpus, USER_SUBMISSION_MATCH_THRESHOLDS } from "../lib/user-submission-matching.ts";
+import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
 
 /**
  * TIMEOUT HONESTY, made concrete: dbQueryTimeoutMs is a real race against
@@ -54,6 +55,10 @@ async function indexSubmission(accountId, title, rawText) {
   await ensureUser(accountId);
   const identity = await createDocumentIdentity(client, { accountId, title, author: null, rawText });
   await indexDocumentSubmissionIntoCorpus(client, { documentIdentityId: identity.id, rawText });
+  // Phase A safe-by-default maturity: this suite is about timeout/budget
+  // behaviour, not the activation clock — age the backing past 7 days so it is
+  // a real candidate.
+  await matureCorpusBackings(client);
   return identity;
 }
 
@@ -165,6 +170,7 @@ test("maxCandidateWordCount: an oversized candidate is skipped entirely, never r
     sql: "INSERT INTO corpus_submission_references (representation_id, document_identity_id, link_type, created_at) VALUES (?,?,?,CURRENT_TIMESTAMP)",
     args: [representationId, ownerIdentity.id, "NEW_CONTENT_REPRESENTATION"],
   });
+  await matureCorpusBackings(client);
 
   const withoutLimit = await matchAgainstUserSubmissionCorpus(client, {
     accountId: "some-other-account-4",

@@ -7,6 +7,7 @@ import { createClient } from "@libsql/client";
 import { applyMigrationsLibsql } from "../lib/ingest.js";
 import { createDocumentIdentity, canonicalSha256 } from "../lib/document-identity.ts";
 import { indexDocumentSubmissionIntoCorpus } from "../lib/user-submission-corpus.ts";
+import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
 import { runCorpusAdmissionPromotionSweep } from "../lib/corpus-admission-promotion.ts";
 import { isHistoricalMatchSnapshotCurrent, bumpCorpusMatchGeneration, SNAPSHOT_MATCHER_VERSION } from "../lib/report-historical-match.ts";
 import { resolvePrimarySimilaritySummary, resolvePersistedSimilarityDisplay, selfHealUnifiedSimilarity, isFreshCurrentNoHistoricalMatch } from "../lib/report-primary-similarity.ts";
@@ -110,6 +111,9 @@ async function seedActivePromotedSource(text) {
   const sweep = await runCorpusAdmissionPromotionSweep(client, { openConnection, batchSize: 20 });
   const outcome = sweep.results.find((r) => r.decisionId === decisionId);
   assert.equal(outcome?.outcome, "indexed", "test setup sanity: promotion must succeed");
+  // Phase A: this suite tests score resolution / staleness, not the 7-day
+  // activation gate — age the just-promoted backing so it is matchable "now".
+  await matureCorpusBackings(client);
   return decisionId;
 }
 

@@ -11,6 +11,7 @@ import * as signupRoute from '../app/api/auth/signup/route.ts';
 import { resetRateForTest, resetAuthRateForTest, resetReadRateForTest } from '../lib/rate-limit.ts';
 import { canonicalSha256 } from '../lib/document-identity.ts';
 import { runCorpusAdmissionPromotionSweep } from '../lib/corpus-admission-promotion.ts';
+import { matureCorpusBackings } from './helpers/corpus-maturity.mjs';
 import { getCurrentCorpusMatchGeneration, isHistoricalMatchSnapshotCurrent } from '../lib/report-historical-match.ts';
 import { indexDocumentSubmissionIntoCorpus } from '../lib/user-submission-corpus.ts';
 import { findRoomOccupant, findReportRowForUser } from '../lib/reports-repo.ts';
@@ -119,6 +120,10 @@ async function promoteDocumentIntoCorpus(text) {
   const sweep = await runCorpusAdmissionPromotionSweep(client, { openConnection, batchSize: 20 });
   const outcome = sweep.results.find((r) => r.decisionId === decisionId);
   assert.equal(outcome?.outcome, 'indexed', 'test setup sanity: promotion must succeed');
+  // Phase A: this suite tests write-time finalization / self-heal, not the
+  // 7-day activation gate — age the just-promoted backing so the report POST's
+  // own write-time resolution sees it as matchable "now".
+  await matureCorpusBackings(client);
 }
 
 let userCounter = 0;
@@ -1574,6 +1579,7 @@ test('BACKWARD COMPATIBILITY: a current, genuinely 0% result (a real SELF-match)
   const firstDocumentIdentityId = String(firstIdentity.rows[0]?.document_identity_id ?? '');
   assert.ok(firstDocumentIdentityId, 'test setup sanity: the first save must have captured a document_identity_id');
   await indexDocumentSubmissionIntoCorpus(client, { documentIdentityId: firstDocumentIdentityId, rawText: selfMatchText });
+  await matureCorpusBackings(client); // Phase A: the SELF source must be matchable at the second save's write-time finalization
 
   const secondRes = await postReport(account, { id: 'self-match-zero-second', room: 9, aiStatus: 'ready', aiScore: 5, text: selfMatchText, wordCount: selfMatchWordCount });
   assert.equal(secondRes.status, 200, 'test setup sanity: the second (SELF-matching) save must succeed');

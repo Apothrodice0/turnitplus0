@@ -10,6 +10,7 @@ import { indexDocumentSubmissionIntoCorpus } from "../lib/user-submission-corpus
 import { runCorpusAdmissionPromotionSweep } from "../lib/corpus-admission-promotion.ts";
 import { deactivateAcceptedRepresentation, reactivateAcceptedRepresentation } from "../lib/corpus-admission-admin-actions.ts";
 import { getOrComputeHistoricalMatchSnapshot, getCurrentCorpusMatchGeneration } from "../lib/report-historical-match.ts";
+import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
 
 /**
  * Cache correctness for report_historical_match_snapshots across every
@@ -78,6 +79,9 @@ async function indexSubmission(accountId, title, rawText) {
   await ensureUser(accountId);
   const identity = await createDocumentIdentity(client, { accountId, title, author: null, rawText });
   await indexDocumentSubmissionIntoCorpus(client, { documentIdentityId: identity.id, rawText });
+  // Phase A: this suite tests generation-based snapshot invalidation, not the
+  // 7-day activation gate — age the just-indexed backing so it is matchable "now".
+  await matureCorpusBackings(client);
   return identity;
 }
 
@@ -122,6 +126,9 @@ async function promote(decisionId) {
   const sweep = await runCorpusAdmissionPromotionSweep(client, { openConnection, batchSize: 20 });
   const outcome = sweep.results.find((r) => r.decisionId === decisionId);
   assert.equal(outcome?.outcome, "indexed", "test setup sanity: promotion must succeed");
+  // Phase A: age the just-promoted backing so it is matchable "now" (this
+  // suite exercises generation-based staleness, not the 7-day gate).
+  await matureCorpusBackings(client);
   return outcome.representationId;
 }
 

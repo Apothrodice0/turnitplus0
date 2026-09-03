@@ -37,6 +37,7 @@ import {
 import * as reportsRoute from "../app/api/reports/route.ts";
 import * as reportIdRoute from "../app/api/reports/[id]/route.ts";
 import { resetRateForTest, resetReadRateForTest } from "../lib/rate-limit.ts";
+import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
 
 /**
  * Preview-gated same-device SELF unified-similarity SCORING rule
@@ -216,10 +217,17 @@ async function seedExactCorpusSource(rawText, { backingPassportId = null, extraI
     // the relationship TURNITPLUS_CORPUS_SOURCE (no submission reference).
     await addAdmissionBacking(rep.id, { sourceAccountId: uniq("indep-acc"), passportId: uniq("indep-passport") });
   }
+  // Phase A: this suite tests the SELF scoring rule, not the 7-day activation
+  // gate — age the backing so it is matchable "now" (covers the route-driven
+  // POST/GET tests that never touch the resolve() helper).
+  await matureCorpusBackings(client);
   return rep.id;
 }
 
 async function resolve({ deviceKey, reportId, accountId = null, rawText, archiveMatchedPositions = null, externalAcademicEvidence = null }) {
+  // Phase A: these scenarios test the SELF scoring rule, not the 7-day
+  // activation gate — age the seeded corpus so it is matchable "now".
+  await matureCorpusBackings(client);
   return resolvePrimarySimilaritySummary(client, {
     reportDeviceKey: deviceKey, reportId, accountId, rawText,
     wordCount: tokens(canonicalizeText(rawText)).length,

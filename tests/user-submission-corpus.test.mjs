@@ -17,6 +17,7 @@ import {
   corpusShingleHashes,
   CORPUS_FINGERPRINT_VERSION,
 } from "../lib/user-submission-corpus.ts";
+import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
 
 const repoRoot = path.resolve(".");
 const drizzleDir = path.join(repoRoot, "drizzle");
@@ -237,6 +238,10 @@ test("findCandidateCorpusRepresentations returns deterministic, containment-rank
   const hashes = corpusShingleHashes(text.replace(/canonical/gi, ""), 5); // approximate query text, not identical
   // Use the exact text's own shingles for a guaranteed, deterministic hit.
   const exactHashes = corpusShingleHashes(text, 5);
+  // Phase A safe-by-default maturity: findCandidateCorpusRepresentations now
+  // enforces the 7-day gate for MATCHING callers (the default). This test is
+  // about ranking/determinism, not the activation clock.
+  await matureCorpusBackings(client);
   const candidates = await findCandidateCorpusRepresentations(client, exactHashes, { fingerprintVersion: CORPUS_FINGERPRINT_VERSION });
   assert.ok(candidates.length >= 1);
   assert.ok(candidates[0].containment > 0.9, `expected near-1.0 containment for the exact same text, got ${candidates[0].containment}`);
@@ -266,6 +271,7 @@ test("findCandidateCorpusRepresentations reproduces and survives the >32,766 SQL
   const largeText = words.join(" ");
   const { result } = await submit("account-large-doc", "Large document", largeText);
   assert.equal(result.status, "INDEXED");
+  await matureCorpusBackings(client); // Phase A: age the backing past the 7-day gate (chunked-lookup test, not the activation clock)
 
   const largeShingles = corpusShingleHashes(largeText, 5);
   assert.ok(

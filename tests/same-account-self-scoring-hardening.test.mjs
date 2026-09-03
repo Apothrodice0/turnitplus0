@@ -22,6 +22,7 @@ import * as reportsRoute from "../app/api/reports/route.ts";
 import * as reportIdRoute from "../app/api/reports/[id]/route.ts";
 import * as signupRoute from "../app/api/auth/signup/route.ts";
 import { resetRateForTest, resetReadRateForTest, resetAuthRateForTest } from "../lib/rate-limit.ts";
+import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
 
 /**
  * FINAL SAME-ACCOUNT SELF HARDENING regression suite.
@@ -188,6 +189,9 @@ async function seedReport({ deviceKey, reportId, accountId = null, rawText, titl
 }
 
 async function resolve({ deviceKey, reportId, accountId = null, rawText, archiveMatchedPositions = null, externalAcademicEvidence = null }) {
+  // Phase A: exercises same-account SELF classification, not the 7-day
+  // activation gate — age the seeded corpus so it is matchable "now".
+  await matureCorpusBackings(client);
   return resolvePrimarySimilaritySummary(client, {
     reportDeviceKey: deviceKey, reportId, accountId, rawText,
     wordCount: tokens(canonicalizeText(rawText)).length,

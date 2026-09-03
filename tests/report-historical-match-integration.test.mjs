@@ -9,6 +9,7 @@ import * as reportIdRoute from '../app/api/reports/[id]/route.ts';
 import * as signupRoute from '../app/api/auth/signup/route.ts';
 import { resetRateForTest, resetAuthRateForTest } from '../lib/rate-limit.js';
 import { getOrComputeHistoricalMatchSnapshot } from '../lib/report-historical-match.ts';
+import { matureCorpusBackings } from './helpers/corpus-maturity.mjs';
 
 const repo = path.resolve('.');
 const drizzleDir = path.join(repo, 'drizzle');
@@ -207,6 +208,7 @@ test('LIFECYCLE: a signed-in account viewing its own re-saved-equivalent content
   const accountId = sessionRow.rows[0].user_id;
   const identity = await createDocumentIdentity(client, { accountId, title: 'T', author: null, rawText: text });
   await indexDocumentSubmissionIntoCorpus(client, { documentIdentityId: identity.id, rawText: text });
+  await matureCorpusBackings(client); // Phase A: age the seeded backing so it is matchable "now"
   client.close();
 
   const { id: secondReportId } = await postReport('ehist-device-self', { cookie, text });
@@ -254,6 +256,7 @@ test('ANONYMOUS: an anonymous report still loads normally and, if a match exists
   await client.execute({ sql: "INSERT OR IGNORE INTO users (id, email, username, password_hash) VALUES (?,?,?,?)", args: ['ehist-anon-owner', 'ehist-anon-owner@example.test', 'ehist-anon-owner', 'x'] });
   const identity = await createDocumentIdentity(client, { accountId: 'ehist-anon-owner', title: 'T', author: null, rawText: text });
   await indexDocumentSubmissionIntoCorpus(client, { documentIdentityId: identity.id, rawText: text });
+  await matureCorpusBackings(client); // Phase A: age the seeded backing so it is matchable "now"
   client.close();
 
   const deviceKey = 'ehist-device-anonymous';

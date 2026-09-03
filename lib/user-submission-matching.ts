@@ -9,6 +9,7 @@ import {
   summarizeSubmissionOwnership,
   isRepresentationActivelyPromoted,
   isRepresentationEligibleForMatching,
+  corpusMaturityCutoff,
   CORPUS_FINGERPRINT_VERSION,
   type CandidateCorpusRepresentation,
 } from "./user-submission-corpus";
@@ -416,10 +417,29 @@ export async function matchAgainstUserSubmissionCorpus(
      * other caller, which keeps the existing single internal env read.
      */
     corpusSourceMatchingEnabled?: boolean;
+    /**
+     * Phase A — 7-day corpus maturity. This is a MATCHING call by definition
+     * (it produces plagiarism evidence), so the 7-day gate is ALWAYS applied.
+     * The production caller (lib/report-historical-match.ts's
+     * getOrComputeHistoricalMatchSnapshot) threads its single logical clock's
+     * cutoff string in here; a caller that omits it still gets the gate,
+     * derived from `asOf ?? new Date()` below. There is deliberately no way to
+     * disable maturity through this function — findCandidateCorpusRepresentations
+     * and the exact-hash fallback are both invoked with eligibilityMode
+     * "MATCHING" and the resolved cutoff.
+     */
+    maturityCutoff?: string;
+    /** Fallback logical clock when no explicit maturityCutoff is threaded in. Tests inject/freeze it; production leaves it undefined (=> server time). */
+    asOf?: Date;
   },
 ): Promise<UserSubmissionMatchResult> {
   const config = mergeConfig(params.config);
   const deadline = Date.now() + config.matchTimeBudgetMs;
+  // Resolved ONCE for this whole match — a single string handed to both
+  // candidate discovery and the exact-hash fallback (never asOf separately),
+  // so they cannot straddle a maturity boundary. Never null: matching always
+  // enforces maturity.
+  const maturityCutoff = params.maturityCutoff ?? corpusMaturityCutoff(params.asOf ?? new Date());
 
   const queryWordCount = tokens(params.canonicalText).length;
   if (queryWordCount === 0) return { status: "NO_HISTORICAL_MATCH" };
@@ -441,6 +461,10 @@ export async function matchAgainstUserSubmissionCorpus(
         // null => no pruning and no extra DB round trip (exact prior behavior).
         maxDocumentFrequency: config.maxCandidateShingleDocumentFrequency ?? undefined,
         minDiscriminativeShingles: config.minDiscriminativeShingles,
+        // Phase A: an explicit MATCHING call with the resolved cutoff;
+        // findCandidateCorpusRepresentations forwards both to its DF probe.
+        eligibilityMode: "MATCHING",
+        maturityCutoff,
       }),
       config.dbQueryTimeoutMs,
       "findCandidateCorpusRepresentations",
@@ -477,8 +501,14 @@ export async function matchAgainstUserSubmissionCorpus(
       // A byte-identical self-upload of a just-promoted document is exactly
       // an exact-hash match, so leaving this fallback ungated would make
       // excludeAccountId above a no-op for the precise scenario it exists
-      // to close.
-      const eligible = await isRepresentationEligibleForMatching(client, exactRepresentation.id, { excludeAccountId: params.excludeAccountId });
+      // to close. Phase A: the SAME MATCHING gate and resolved cutoff too — an
+      // exact-canonical duplicate of an immature corpus source must not slip in
+      // via this fallback when the shingle search already correctly excluded it.
+      const eligible = await isRepresentationEligibleForMatching(client, exactRepresentation.id, {
+        excludeAccountId: params.excludeAccountId,
+        eligibilityMode: "MATCHING",
+        maturityCutoff,
+      });
       if (eligible) {
         candidateById.set(exactRepresentation.id, {
           representationId: exactRepresentation.id,

@@ -106,7 +106,11 @@ export type RoomOccupantResult =
  * still mid-AI-analysis can have a fully finalized, immediately displayable
  * similarity result.
  */
-export async function findRoomOccupant(client: Client, userId: string, room: number): Promise<RoomOccupantResult> {
+export async function findRoomOccupant(client: Client, userId: string, room: number, asOf: Date = new Date()): Promise<RoomOccupantResult> {
+  // Phase A — one logical clock for this occupant resolution: the same instant
+  // is used for both the persisted-display currentness check and any self-heal
+  // recomputation it triggers, so a corpus-maturity boundary can't fall
+  // between them.
   const result = await client.execute({
     sql: `SELECT id, submission_id, title, report_created_at, word_count, archive_score, score_band, ai_score, ai_tone, ai_status, device_key,
                  json_extract(payload_json, '$.unifiedSimilarity.unifiedScore') AS unified_score,
@@ -158,6 +162,7 @@ export async function findRoomOccupant(client: Client, userId: string, room: num
       corpusSourceMatchingEnabledAtComputation: corpusFlagAtComputation,
       unifiedSimilarityFailed,
       hasPositionEvidence,
+      asOf,
     });
 
   // Legacy-room bug fix (Preview regression, corrected): the self-heal
@@ -208,6 +213,7 @@ export async function findRoomOccupant(client: Client, userId: string, room: num
       reportDeviceKey: occupant.device_key,
       reportId: String(occupant.id),
       accountId: userId,
+      asOf,
     });
     if (healed.attempted && healed.outcome === "resolved") {
       hasUnifiedSimilarity = true;

@@ -49,6 +49,95 @@ export const CORPUS_FINGERPRINT_VERSION = "corpus-shingle-v1";
 const DEFAULT_SHINGLE_SIZE = 5;
 
 /**
+ * Phase A — 7-day corpus maturity. Every TurnitPlus corpus backing waits this
+ * many full days before it can contribute plagiarism evidence to the
+ * production similarity score. Frozen in code, no env var. Folded into
+ * lib/report-historical-match.ts's SNAPSHOT_MATCHER_VERSION config digest so a
+ * change to this value — or its introduction — invalidates every snapshot
+ * computed under the previous activation-less policy, exactly as a thresholds
+ * change does.
+ *
+ * Backing-level maturity T0 (immutable, one per backing):
+ *   submission-reference backing -> corpus_submission_references.created_at
+ *   admission-promotion backing  -> corpus_admission_decisions.created_at
+ *                                    WHERE decisions.id = promotions.decision_id
+ *   legacy representation        -> corpus_document_representations.first_seen_at
+ * A backing is mature INCLUSIVELY at T0 + CORPUS_ACTIVATION_DELAY_DAYS <= asOf,
+ * i.e. T0 <= (asOf - CORPUS_ACTIVATION_DELAY_DAYS) == corpusMaturityCutoff(asOf).
+ */
+export const CORPUS_ACTIVATION_DELAY_DAYS = 7;
+
+const MS_PER_DAY = 86_400_000;
+
+/**
+ * A Date rendered as SQLite's own `CURRENT_TIMESTAMP` text shape
+ * ('YYYY-MM-DD HH:MM:SS', UTC, second precision) so it is directly, index-
+ * friendly comparable against a `created_at` / `first_seen_at` column with no
+ * SQL date function on the column side.
+ */
+export function sqliteUtcTimestamp(date: Date): string {
+  return date.toISOString().replace("T", " ").slice(0, 19);
+}
+
+/**
+ * The single maturity cutoff for one matching/snapshot resolution taken `asOf`
+ * a logical instant: a backing is mature iff its immutable T0 <= this string.
+ * Derived exactly once per resolution and threaded through eligibility, the
+ * maturity-crossing snapshot check, and the snapshot currentness decision so
+ * no two queries in one resolution can disagree on a boundary.
+ */
+export function corpusMaturityCutoff(asOf: Date): string {
+  return sqliteUtcTimestamp(new Date(asOf.getTime() - CORPUS_ACTIVATION_DELAY_DAYS * MS_PER_DAY));
+}
+
+/**
+ * Phase A — 7-day corpus maturity. The intent a caller of the shared
+ * admission-eligibility predicate is expressing. Two, mutually exclusive:
+ *
+ *   "MATCHING" — the DEFAULT for every consumer. The representation is being
+ *     considered as plagiarism evidence, so the 7-day maturity gate is ALWAYS
+ *     enforced. A caller that does not inject an explicit `maturityCutoff`
+ *     still gets one (derived from `asOf ?? new Date()` — see
+ *     resolveMaturityCutoff); omitting the argument can NOT silently disable
+ *     the policy, and any future matching call site is protected by default.
+ *
+ *   "ADMISSION_DEDUP" — the corpus-admission gate deliberately inspecting
+ *     stored representations regardless of age, so it does not re-admit
+ *     content already present in the corpus. This is the ONLY sanctioned
+ *     maturity bypass and it never contributes to a similarity score. Used at
+ *     exactly one production call site: lib/corpus-admission-gate.ts's
+ *     computeEvaluationCore family/redundancy lookup. Any new use must be an
+ *     equally deliberate, non-scoring admission-side decision.
+ */
+export type CorpusEligibilityMode = "MATCHING" | "ADMISSION_DEDUP";
+
+/**
+ * The ONE place the "matching is safe by default" rule is implemented.
+ * MATCHING => always a cutoff string: the caller's injected one (production's
+ * single logical clock, or a test's frozen `asOf`), else derived from
+ * `asOf ?? new Date()`. ADMISSION_DEDUP => null (the deliberate bypass).
+ */
+export function resolveMaturityCutoff(
+  mode: CorpusEligibilityMode,
+  opts: { maturityCutoff?: string; asOf?: Date },
+): string | null {
+  if (mode === "ADMISSION_DEDUP") return null;
+  return opts.maturityCutoff ?? corpusMaturityCutoff(opts.asOf ?? new Date());
+}
+
+/**
+ * Format-tolerant UTC parse of a stored timestamp. `report_historical_match_
+ * snapshots.computed_at` is written as an ISO string ('…T…Z') by
+ * getOrComputeHistoricalMatchSnapshot; a `CURRENT_TIMESTAMP` default would be
+ * 'YYYY-MM-DD HH:MM:SS' (space, no zone). Both are UTC — normalize the latter
+ * so `new Date` does not read it as local time.
+ */
+export function parseSqliteUtc(value: string): Date {
+  const iso = value.includes("T") ? value : `${value.replace(" ", "T")}Z`;
+  return new Date(iso);
+}
+
+/**
  * Max shingle rows per bulk-INSERT batch() call, for both bulk shingle
  * writers — recordCorpusShingles below and lib/corpus-admission-gate.ts's
  * accepted-shingle write.
@@ -529,6 +618,22 @@ export async function applyHighFrequencyShinglePruning(
      * account-exclusion rule.
      */
     excludeAccountId?: string;
+    /**
+     * Phase A — 7-day corpus maturity. "MATCHING" (default) => the DF probe
+     * counts a shingle only against representations the candidate query would
+     * also treat as mature and eligible. "ADMISSION_DEDUP" => no maturity gate.
+     * Forwarded verbatim from findCandidateCorpusRepresentations.
+     */
+    eligibilityMode?: CorpusEligibilityMode;
+    /**
+     * The already-resolved maturity cutoff for this resolution (MATCHING mode),
+     * forwarded verbatim from findCandidateCorpusRepresentations so the probe
+     * and the candidate query share ONE logical clock. When absent in MATCHING
+     * mode it is derived from `asOf ?? new Date()` — never treated as "gate off".
+     */
+    maturityCutoff?: string;
+    /** Fallback clock for MATCHING mode when no explicit maturityCutoff is threaded in. */
+    asOf?: Date;
     diagnostics?: CandidateDiscoveryDiagnostics;
   },
 ): Promise<Set<string>> {
@@ -556,6 +661,9 @@ export async function applyHighFrequencyShinglePruning(
   // account's own admission promotion(s) does not count toward DF, matching
   // the candidate query's own account exclusion exactly.
   const excludeAccountPrefix = options.excludeAccountId ? buildReportAdmissionAccountPrefix(options.excludeAccountId) : null;
+  const eligibilityMode: CorpusEligibilityMode = options.eligibilityMode ?? "MATCHING";
+  const maturityCutoff = resolveMaturityCutoff(eligibilityMode, options);
+  const eligibilitySql = admissionEligibilitySql(eligibilityMode);
 
   const eligibleDocumentFrequency = new Map<string, number>();
   for (const hash of hashList) eligibleDocumentFrequency.set(hash, 0);
@@ -563,11 +671,12 @@ export async function applyHighFrequencyShinglePruning(
     const chunk = hashList.slice(offset, offset + options.chunkSize);
     // json_each(?) carries the whole chunk as ONE bind value. Per hash, the
     // inner query walks idx_corpus_document_shingles_hash, applies the exact
-    // account-aware admissionEligibilitySql predicate per posting, and stops
-    // after maxDf + 1 ELIGIBLE representations. Anonymous ?, bound in textual
-    // order: fingerprint_version, then admissionEligibilitySql's 3
-    // account-prefix params (all the same prefix, or all NULL), then LIMIT,
-    // then the json_each array.
+    // account-aware + maturity-aware admissionEligibilitySql predicate per
+    // posting, and stops after maxDf + 1 ELIGIBLE representations. Anonymous
+    // ?, bound in textual order: fingerprint_version, then
+    // admissionEligibilityBindArgs (account-prefix ×3 for ADMISSION_DEDUP, or
+    // cutoff + account-prefix ×3 + cutoff ×2 for MATCHING), then LIMIT, then
+    // the json_each array.
     const result = await client.execute({
       sql: `SELECT j.value AS shingle_hash,
                    (SELECT COUNT(*) FROM (
@@ -576,11 +685,11 @@ export async function applyHighFrequencyShinglePruning(
                       JOIN corpus_document_representations r ON r.id = s.representation_id
                       WHERE s.fingerprint_version = ?
                         AND s.shingle_hash = j.value
-                        AND ${admissionEligibilitySql()}
+                        AND ${eligibilitySql}
                       LIMIT ?
                     )) AS eligible_document_frequency
             FROM json_each(?) j`,
-      args: [options.fingerprintVersion, excludeAccountPrefix, excludeAccountPrefix, excludeAccountPrefix, probeLimit, JSON.stringify(chunk)],
+      args: [options.fingerprintVersion, ...admissionEligibilityBindArgs(excludeAccountPrefix, eligibilityMode, maturityCutoff), probeLimit, JSON.stringify(chunk)],
     });
     for (const row of result.rows as unknown as { shingle_hash: string; eligible_document_frequency: number | bigint }[]) {
       eligibleDocumentFrequency.set(String(row.shingle_hash), Number(row.eligible_document_frequency));
@@ -648,20 +757,29 @@ export async function applyHighFrequencyShinglePruning(
  * (correlated on `r.id` — every caller of this fragment must alias
  * corpus_document_representations as `r`) — the single source of truth for
  * "does this representation have an active, eligible backing," shared by
- * findCandidateCorpusRepresentations' own batch WHERE clause and
- * isRepresentationEligibleForMatching's single-row check below, so the two
- * can never diverge. Three conditions, unchanged in substance from the
- * pre-existing rule (see this file's own header comment above
- * findCandidateCorpusRepresentations) — only condition 2 gained a fourth,
- * optional refinement (the account-level self-match fix):
- *   1. a real submission reference exists — always eligible, untouched by
- *      excludeAccountId. A completely separate identity system from
+ * findCandidateCorpusRepresentations' own batch WHERE clause,
+ * isRepresentationEligibleForMatching's single-row check, and
+ * applyHighFrequencyShinglePruning's DF probe, so all three can never
+ * diverge. Three conditions (see this file's own header comment above
+ * findCandidateCorpusRepresentations); condition 2 carries the account-level
+ * self-match refinement, and Phase A adds a per-backing 7-day maturity gate to
+ * all three arms in "MATCHING" mode — the default for all three consumers.
+ * Only the corpus-admission gate's redundancy lookup passes "ADMISSION_DEDUP"
+ * to inspect immature stored content (see CorpusEligibilityMode and
+ * admissionEligibilitySql's own `mode` doc below):
+ *   1. a real submission reference exists — untouched by excludeAccountId;
+ *      Phase A: its corpus_submission_references.created_at must be mature.
+ *      A completely separate identity system from
  *      admission-promotion (see lib/report-historical-match.ts's own
  *      SELF/PRIOR_SUBMISSION path, which already has its own, unrelated
  *      self-exclusion via documentIdentityId) — this fix does not touch it.
  *   2. an 'indexed' promotion exists whose own accepted_representation is
  *      not revoked, AND — when excludeAccountId is supplied — whose own
- *      decision's source_ref does not belong to that account. A
+ *      decision's source_ref does not belong to that account, AND (Phase A)
+ *      whose own decision's created_at is mature. `ar` (joined via
+ *      p.accepted_representation_id) supplies ONLY revocation state; the
+ *      decision is joined via p.decision_id and supplies BOTH source_ref and
+ *      the immutable maturity T0. A
  *      representation backed only by admissions from the account currently
  *      being evaluated is therefore NOT eligible through this condition,
  *      REGARDLESS of which of that account's own reports created each
@@ -672,8 +790,11 @@ export async function applyHighFrequencyShinglePruning(
  *      one from this account and one from another, must still satisfy this
  *      condition via the other account's own backing).
  *   3. no promotion with link_type = 'NEW_CONTENT_REPRESENTATION' exists
- *      for it at all (a legacy/pre-existing row) — untouched; no self-match
- *      is possible for a row nothing in this pipeline ever created.
+ *      for it at all (a legacy/pre-existing row) — no self-match is possible
+ *      for a row nothing in this pipeline ever created. Phase A: it must
+ *      ALSO have r.first_seen_at mature, so a freshly-seeded legacy row
+ *      still waits the full 7-day window (old legacy rows have a first_seen_at
+ *      long in the past and stay eligible).
  * excludeAccountId is compared via a plain substr/exact-equality prefix
  * check against d.source_ref, never SQL LIKE (no wildcard-injection risk
  * from an account id containing `%`/`_`) and never by parsing the OTHER
@@ -687,21 +808,79 @@ export async function applyHighFrequencyShinglePruning(
  * never a broader class of content or every backing of a shared
  * representation.
  */
-function admissionEligibilitySql(): string {
+/**
+ * Phase A — 7-day corpus maturity. In "MATCHING" mode (the default for every
+ * consumer) each backing arm additionally requires its own immutable T0 <= the
+ * caller-supplied maturity cutoff (asOf - CORPUS_ACTIVATION_DELAY_DAYS), and
+ * the legacy arm requires `r.first_seen_at <= cutoff` so a freshly-seeded
+ * representation with neither backing type also waits the full window (old
+ * legacy rows have a first_seen_at long in the past and stay eligible). In
+ * "ADMISSION_DEDUP" mode NO maturity term is emitted (see CorpusEligibilityMode)
+ * — the exact pre-Phase-A predicate.
+ *
+ * ADMISSION arm — the join to `d` moves from `ar.decision_id` to
+ * `p.decision_id`. `ar` supplies ONLY revocation state (`ar.revoked_at`); the
+ * promotion's OWN decision supplies BOTH the account-exclusion `source_ref`
+ * AND the immutable maturity T0 (`d.created_at`). This is deliberate:
+ * corpus_admission_accepted_representations is canonical-SHA unique
+ * (first-accepted-sample-wins), so its `created_at` is frozen to the first
+ * decision and a later backing deduped onto that same AR would inherit an
+ * older age; corpus_admission_decisions has one immutable row per evaluation.
+ * For every promotion the current staging path creates
+ * (stageCorpusAdmissionPromotionForDecision / runCorpusAdmissionPromotionSweep
+ * both join `ar.decision_id = d.id`), `p.decision_id == ar.decision_id`, so
+ * `d.source_ref` — and therefore the account-exclusion predicate — is
+ * byte-identical to the previous `d ON d.id = ar.decision_id` form.
+ *
+ * The `?` placeholders appear in a FIXED textual order — bind them via
+ * admissionEligibilityBindArgs, never inline.
+ */
+function admissionEligibilitySql(mode: CorpusEligibilityMode): string {
+  const emitMaturityTerms = mode === "MATCHING";
+  const arm1Maturity = emitMaturityTerms ? " AND sr.created_at <= ?" : "";
+  const arm2Maturity = emitMaturityTerms ? " AND d.created_at <= ?" : "";
+  const arm3Maturity = emitMaturityTerms ? " AND r.first_seen_at <= ?" : "";
   return `(
-    EXISTS (SELECT 1 FROM corpus_submission_references sr WHERE sr.representation_id = r.id)
+    EXISTS (SELECT 1 FROM corpus_submission_references sr WHERE sr.representation_id = r.id${arm1Maturity})
     OR EXISTS (
       SELECT 1 FROM corpus_admission_promotions p
       JOIN corpus_admission_accepted_representations ar ON ar.id = p.accepted_representation_id
-      JOIN corpus_admission_decisions d ON d.id = ar.decision_id
+      JOIN corpus_admission_decisions d ON d.id = p.decision_id
       WHERE p.representation_id = r.id AND p.status = 'indexed' AND ar.revoked_at IS NULL
-        AND (? IS NULL OR substr(d.source_ref, 1, length(?)) != ?)
+        AND (? IS NULL OR substr(d.source_ref, 1, length(?)) != ?)${arm2Maturity}
     )
-    OR NOT EXISTS (
-      SELECT 1 FROM corpus_admission_promotions p2
-      WHERE p2.representation_id = r.id AND p2.link_type = 'NEW_CONTENT_REPRESENTATION'
+    OR (
+      NOT EXISTS (
+        SELECT 1 FROM corpus_admission_promotions p2
+        WHERE p2.representation_id = r.id AND p2.link_type = 'NEW_CONTENT_REPRESENTATION'
+      )${arm3Maturity}
     )
   )`;
+}
+
+/**
+ * Positional bind values for admissionEligibilitySql(mode), in the exact `?`
+ * order of the fragment:
+ *   ADMISSION_DEDUP: [prefix, prefix, prefix]                      (arm 2 only)
+ *   MATCHING:        [cutoff, prefix, prefix, prefix, cutoff, cutoff]
+ *                     arm1    ── arm 2 account-exclusion ──  arm2   arm3
+ *
+ * MATCHING mode with a null cutoff is unreachable through resolveMaturityCutoff
+ * — the explicit throw is a tripwire so a future refactor can never emit a
+ * MATCHING query whose maturity binds are silently missing.
+ */
+function admissionEligibilityBindArgs(
+  excludeAccountPrefix: string | null,
+  mode: CorpusEligibilityMode,
+  maturityCutoff: string | null,
+): (string | null)[] {
+  if (mode === "ADMISSION_DEDUP") {
+    return [excludeAccountPrefix, excludeAccountPrefix, excludeAccountPrefix];
+  }
+  if (maturityCutoff === null) {
+    throw new Error("admissionEligibilityBindArgs: MATCHING mode requires a resolved maturityCutoff");
+  }
+  return [maturityCutoff, excludeAccountPrefix, excludeAccountPrefix, excludeAccountPrefix, maturityCutoff, maturityCutoff];
 }
 
 export async function findCandidateCorpusRepresentations(
@@ -726,6 +905,26 @@ export async function findCandidateCorpusRepresentations(
     maxDocumentFrequency?: number;
     /** Low-information fallback floor — consulted only when maxDocumentFrequency is set. Below it, pruning is abandoned and the full original shingle set is searched. Default 24. See applyHighFrequencyShinglePruning. */
     minDiscriminativeShingles?: number;
+    /**
+     * Phase A — 7-day corpus maturity. "MATCHING" (the DEFAULT) enforces the
+     * 7-day gate on every candidate — an ordinary matching caller that omits
+     * every maturity argument still gets it, derived from `asOf ?? new Date()`.
+     * "ADMISSION_DEDUP" is the single deliberate bypass (corpus-admission
+     * gate's redundancy lookup — never a similarity score). See
+     * CorpusEligibilityMode.
+     */
+    eligibilityMode?: CorpusEligibilityMode;
+    /**
+     * MATCHING mode only. The already-resolved cutoff string
+     * (asOf - CORPUS_ACTIVATION_DELAY_DAYS) — production's single logical clock,
+     * threaded down from getOrComputeHistoricalMatchSnapshot. When omitted it
+     * is derived from `asOf ?? new Date()`; it is NEVER interpreted as "gate
+     * off". Resolved ONCE here and forwarded verbatim to the DF probe so
+     * discovery, pruning and selection share one instant.
+     */
+    maturityCutoff?: string;
+    /** Fallback clock for MATCHING mode when no explicit maturityCutoff is threaded in. Tests inject/freeze it. */
+    asOf?: Date;
     /** Developer/test diagnostics sink for the pruning step — populated in place, never returned. */
     diagnostics?: CandidateDiscoveryDiagnostics;
   } = {},
@@ -734,6 +933,13 @@ export async function findCandidateCorpusRepresentations(
   const minSharedShingles = options.minSharedShingles ?? 1;
   const limit = options.limit ?? 50;
   const excludeAccountPrefix = options.excludeAccountId ? buildReportAdmissionAccountPrefix(options.excludeAccountId) : null;
+  const eligibilityMode: CorpusEligibilityMode = options.eligibilityMode ?? "MATCHING";
+  // Resolved ONCE for the whole call — the DF probe below is handed this exact
+  // string (not asOf), so pruning and candidate selection can never straddle a
+  // maturity boundary.
+  const maturityCutoff = resolveMaturityCutoff(eligibilityMode, options);
+  const eligibilitySql = admissionEligibilitySql(eligibilityMode);
+  const eligibilityArgs = () => admissionEligibilityBindArgs(excludeAccountPrefix, eligibilityMode, maturityCutoff);
   if (shingleHashes.size === 0) return [];
 
   type RawSharedRow = { representation_id: string; shared: number | bigint; canonical_sha256: string; word_count: number; is_actively_promoted: number | bigint };
@@ -766,6 +972,12 @@ export async function findCandidateCorpusRepresentations(
     // Account-aware DF: the DF probe must count only representations the
     // candidate query below would also consider eligible for this requester.
     excludeAccountId: options.excludeAccountId,
+    // Phase A: the DF probe must apply the SAME maturity gate the candidate
+    // query does — same mode, same already-resolved cutoff string (one clock),
+    // so an immature representation cannot inflate a shingle's document
+    // frequency any more than it could become a candidate.
+    eligibilityMode,
+    maturityCutoff: maturityCutoff ?? undefined,
     diagnostics: options.diagnostics,
   });
   if (effectiveHashes.size === 0) return [];
@@ -786,12 +998,12 @@ export async function findCandidateCorpusRepresentations(
             FROM corpus_document_shingles s
             JOIN corpus_document_representations r ON r.id = s.representation_id
             WHERE s.fingerprint_version = ? AND s.shingle_hash IN (${placeholders})
-              AND ${admissionEligibilitySql()}
+              AND ${eligibilitySql}
             GROUP BY s.representation_id
             HAVING COUNT(*) >= ?
             ORDER BY shared DESC
             LIMIT ?`,
-      args: [fingerprintVersion, ...hashList, excludeAccountPrefix, excludeAccountPrefix, excludeAccountPrefix, minSharedShingles, limit],
+      args: [fingerprintVersion, ...hashList, ...eligibilityArgs(), minSharedShingles, limit],
     });
     sharedRows = sharedResult.rows as unknown as RawSharedRow[];
   } else {
@@ -805,9 +1017,9 @@ export async function findCandidateCorpusRepresentations(
               FROM corpus_document_shingles s
               JOIN corpus_document_representations r ON r.id = s.representation_id
               WHERE s.fingerprint_version = ? AND s.shingle_hash IN (${placeholders})
-                AND ${admissionEligibilitySql()}
+                AND ${eligibilitySql}
               GROUP BY s.representation_id`,
-        args: [fingerprintVersion, ...chunk, excludeAccountPrefix, excludeAccountPrefix, excludeAccountPrefix],
+        args: [fingerprintVersion, ...chunk, ...eligibilityArgs()],
       });
       for (const raw of chunkResult.rows as unknown as RawSharedRow[]) {
         const prior = accumulatorById.get(raw.representation_id);
@@ -909,12 +1121,27 @@ export async function isRepresentationActivelyPromoted(client: Client, represent
 export async function isRepresentationEligibleForMatching(
   client: Client,
   representationId: string,
-  options: { excludeAccountId?: string } = {},
+  options: {
+    excludeAccountId?: string;
+    /**
+     * Phase A — 7-day corpus maturity. "MATCHING" (the DEFAULT) applies the
+     * same 7-day gate findCandidateCorpusRepresentations does; omitting a
+     * cutoff derives it from `asOf ?? new Date()`, never "gate off".
+     * "ADMISSION_DEDUP" is the single deliberate bypass. See CorpusEligibilityMode.
+     */
+    eligibilityMode?: CorpusEligibilityMode;
+    /** MATCHING mode: the already-resolved cutoff (production's single logical clock). Omitted => derived from `asOf ?? new Date()`. */
+    maturityCutoff?: string;
+    /** Fallback clock for MATCHING mode when no explicit maturityCutoff is threaded in. */
+    asOf?: Date;
+  } = {},
 ): Promise<boolean> {
   const excludeAccountPrefix = options.excludeAccountId ? buildReportAdmissionAccountPrefix(options.excludeAccountId) : null;
+  const eligibilityMode: CorpusEligibilityMode = options.eligibilityMode ?? "MATCHING";
+  const maturityCutoff = resolveMaturityCutoff(eligibilityMode, options);
   const result = await client.execute({
-    sql: `SELECT ${admissionEligibilitySql()} AS eligible FROM corpus_document_representations r WHERE r.id = ?`,
-    args: [excludeAccountPrefix, excludeAccountPrefix, excludeAccountPrefix, representationId],
+    sql: `SELECT ${admissionEligibilitySql(eligibilityMode)} AS eligible FROM corpus_document_representations r WHERE r.id = ?`,
+    args: [...admissionEligibilityBindArgs(excludeAccountPrefix, eligibilityMode, maturityCutoff), representationId],
   });
   const row = result.rows[0] as unknown as { eligible: number | bigint } | undefined;
   return row !== undefined && Number(row.eligible) === 1;

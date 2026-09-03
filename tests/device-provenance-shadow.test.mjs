@@ -22,6 +22,7 @@ import {
   DEVICE_PROVENANCE_SHADOW_POLICY_VERSION,
 } from "../lib/device-provenance-shadow.ts";
 import { summarizeSubmissionProvenance } from "../lib/submission-provenance.ts";
+import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
 
 const repoRoot = path.resolve(".");
 const drizzleDir = path.join(repoRoot, "drizzle");
@@ -522,6 +523,7 @@ test("13. a telemetry-store failure makes runDeviceProvenanceShadowEvaluation re
 test("14. production relationship, unified score, and the real historical-match snapshot are all unchanged by a shadow run", async () => {
   const deviceKey = uniq("dk"), reportId = uniq("r"), accountId = uniq("acc"), passportId = uniq("passport");
   await indexDocumentSubmissionIntoCorpus(client, { documentIdentityId: await makeIdentity(uniq("owner"), DISTINCT_TEXT), rawText: DISTINCT_TEXT });
+  await matureCorpusBackings(client); // Phase A: age the seeded backing so it is matchable "now" (this test asserts a real end-to-end MATCHED result)
   await seedReport({ deviceKey, reportId, accountId, passportId, documentIdentityId: await makeIdentity(accountId, DISTINCT_TEXT) });
 
   const before = await resolvePrimarySimilaritySummary(client, {

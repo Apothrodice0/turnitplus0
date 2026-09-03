@@ -22,6 +22,7 @@ import {
   CORPUS_SHINGLE_WRITE_BATCH_ROWS,
 } from "../lib/user-submission-corpus.ts";
 import { matchAgainstUserSubmissionCorpus } from "../lib/user-submission-matching.ts";
+import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
 import { getCurrentCorpusMatchGeneration } from "../lib/report-historical-match.ts";
 
 /**
@@ -325,6 +326,7 @@ test("matching invariance: a distinctive passage from a large chunked-write repr
   const sweep = await runCorpusAdmissionPromotionSweep(client, { openConnection, batchSize: 20 });
   const outcome = sweep.results.find((r) => r.decisionId === decisionId);
   assert.equal(outcome.outcome, "indexed");
+  await matureCorpusBackings(client); // Phase A: this test is about chunked shingle writes, not the 7-day activation clock
 
   // (1) candidate discovery still finds the large representation via the passage's shingles
   const queryShingles = corpusShingleHashes(canonicalizeText(DISTINCTIVE_PASSAGE));

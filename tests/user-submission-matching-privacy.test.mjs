@@ -7,6 +7,7 @@ import { applyMigrationsLibsql } from "../lib/ingest.js";
 import { createDocumentIdentity } from "../lib/document-identity.ts";
 import { indexDocumentSubmissionIntoCorpus } from "../lib/user-submission-corpus.ts";
 import { matchAgainstUserSubmissionCorpus } from "../lib/user-submission-matching.ts";
+import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
 
 const repoRoot = path.resolve(".");
 const drizzleDir = path.join(repoRoot, "drizzle");
@@ -42,6 +43,9 @@ async function indexSubmission(accountId, title, rawText, email) {
   return indexDocumentSubmissionIntoCorpus(client, { documentIdentityId: identity.id, rawText });
 }
 async function match(accountId, canonicalText) {
+  // Phase A safe-by-default maturity: age just-seeded backings past the 7-day
+  // window — this suite checks privacy of match results, not the activation clock.
+  await matureCorpusBackings(client);
   return matchAgainstUserSubmissionCorpus(client, { accountId, canonicalText });
 }
 
@@ -169,6 +173,7 @@ test("SELF-MATCH-FIX PRIVACY: excludeAccountId (a server-internal value carrying
   const secretAccountId = "super-secret-account-id-should-never-leak";
   const excludeAccountId = secretAccountId;
 
+  await matureCorpusBackings(client);
   const result = await matchAgainstUserSubmissionCorpus(client, { accountId: accountB, canonicalText: text, excludeAccountId });
   assert.equal(result.status, "MATCHED", "test setup sanity: excluding an UNRELATED account id must not suppress a genuine match");
 

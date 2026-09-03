@@ -9,6 +9,7 @@ import { createSession, SESSION_COOKIE_NAME } from "../lib/auth-session.ts";
 import { resetAdminRateForTest } from "../lib/rate-limit.js";
 import * as deactivateRoute from "../app/api/admin/corpus/[id]/deactivate/route.ts";
 import { findCandidateCorpusRepresentations, CORPUS_FINGERPRINT_VERSION } from "../lib/user-submission-corpus.ts";
+import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
 
 /**
  * Task B1A: admin "Remove" beside Inspect (components/admin/corpus-search.tsx),
@@ -330,6 +331,7 @@ test("SHARED BACKING: deactivating one of two sources backing the same represent
 
   const sourceA = await seedIndexedPromotion(representationId, "NEW_CONTENT_REPRESENTATION");
   const sourceB = await seedIndexedPromotion(representationId, "EXACT_CANONICAL_DUPLICATE");
+  await matureCorpusBackings(client); // Phase A: this test is about shared-backing vote counting, not the 7-day activation clock
 
   const shingleSet = new Set(shingleHashes);
   const beforeAny = await findCandidateCorpusRepresentations(client, shingleSet, { minSharedShingles: 1 });

@@ -485,7 +485,16 @@ async function computeEvaluationCore(client: Client, input: InternalEvaluationIn
 
   if (hardGate.passed && canonicalHash !== null && featureVector !== null && ownShingleHashes !== null) {
     const [realCandidates, accepted] = await Promise.all([
-      ownShingleHashes.size > 0 ? findCandidateCorpusRepresentations(client, ownShingleHashes) : Promise.resolve([]),
+      // Phase A — the ONE sanctioned corpus-maturity bypass. This is the
+      // admission gate deciding whether the INCOMING document is redundant
+      // against content already in the corpus; a representation that is < 7
+      // days old is still real corpus content we must not re-admit a duplicate
+      // of, so family/redundancy resolution must see it. This result feeds
+      // only the admission decision (family relation + corpusValue score) —
+      // never a plagiarism similarity score. See CorpusEligibilityMode.
+      ownShingleHashes.size > 0
+        ? findCandidateCorpusRepresentations(client, ownShingleHashes, { eligibilityMode: "ADMISSION_DEDUP" })
+        : Promise.resolve([]),
       findAcceptedFamilyCandidates(client, ownShingleHashes, input.existingAcceptedRepresentationId, { wordCount: featureVector.linguisticQuality.wordCount, canonicalSha256: canonicalHash }),
     ]);
     const acceptedCandidates = accepted.candidates;

@@ -325,10 +325,19 @@ export async function resolvePrimarySimilaritySummary(
     verifiedDevicePassportId?: string | null;
     /** Test-only override, mirroring getOrComputeHistoricalMatchSnapshot's own testOnlyPauseBeforeWrite convention — lets a test force the "unified matching genuinely failed" branch without fighting computeUnifiedSimilarity's own deliberately defensive, never-throws-on-malformed-input contract. Always undefined in production. */
     testOnlyComputeUnifiedSimilarity?: typeof computeUnifiedSimilarity;
+    /**
+     * Phase A — 7-day corpus maturity. The ONE logical instant this whole
+     * resolution reasons "as of" — passed straight to
+     * getOrComputeHistoricalMatchSnapshot, which derives the single maturity
+     * cutoff from it and threads that through eligibility AND the
+     * maturity-crossing cache check. Defaults to server time; tests inject it.
+     */
+    asOf?: Date;
   },
 ): Promise<PrimarySimilarityResolution> {
   const corpusSourceMatchingEnabled = isCorpusSourceMatchingEnabled();
   const corpusGeneration = await getCurrentCorpusMatchGeneration(client);
+  const asOf = params.asOf ?? new Date();
   // Account-level self-match fix: the raw account id is already right here
   // (params.accountId) — no source_ref needs to be constructed at this call
   // site at all (buildReportAdmissionAccountPrefix, lib/corpus-admission-
@@ -360,6 +369,8 @@ export async function resolvePrimarySimilaritySummary(
     // are all governed by one value, never three independent env reads that
     // could straddle a mid-request flag flip.
     corpusSourceMatchingEnabled,
+    // Phase A: one logical clock for the whole resolution.
+    asOf,
   });
 
   // Preview-gated same-device SELF rule (flag DEVICE_PASSPORT_SELF_ENABLED —
@@ -522,6 +533,15 @@ export async function resolvePersistedSimilarityDisplay(
      * resolved score with no position evidence to render highlighting from.
      */
     hasPositionEvidence: boolean;
+    /**
+     * Phase A — the logical instant this display resolution reasons "as of".
+     * Passed to isHistoricalMatchSnapshotCurrent so a backing that crossed
+     * maturity since the score was persisted flips this to "stale" (the
+     * caller — findRoomOccupant / app/reports/[id]/page.tsx — then self-heals
+     * / shows "Updating…", never the stale number). Defaults to server time;
+     * tests inject/freeze it.
+     */
+    asOf?: Date;
   },
 ): Promise<PersistedSimilarityDisplay> {
   if (!params.hasUnifiedSimilarity) {
@@ -545,7 +565,11 @@ export async function resolvePersistedSimilarityDisplay(
     // route.ts's own self-heal path) resolves and persists the answer.
     return { status: "stale" };
   }
-  const current = await isHistoricalMatchSnapshotCurrent(client, { reportDeviceKey: params.reportDeviceKey, reportId: params.reportId });
+  const current = await isHistoricalMatchSnapshotCurrent(client, {
+    reportDeviceKey: params.reportDeviceKey,
+    reportId: params.reportId,
+    asOf: params.asOf,
+  });
   if (!current) {
     return { status: "stale" };
   }
@@ -832,6 +856,12 @@ export async function selfHealUnifiedSimilarity(
      * production.
      */
     testOnlyBeforePersist?: () => Promise<void>;
+    /**
+     * Phase A — the logical instant this self-heal recomputation reasons "as
+     * of". Passed straight to resolvePrimarySimilaritySummary. Defaults to
+     * server time; tests inject/freeze it.
+     */
+    asOf?: Date;
   },
 ): Promise<SelfHealResult> {
   try {
@@ -852,6 +882,7 @@ export async function selfHealUnifiedSimilarity(
       archiveMatchedPositions: payload.archiveMatchedPositions,
       externalAcademicEvidence: payload.externalAcademicEvidence,
       archiveScore: payload.archiveScore ?? payload.score ?? Number(raw.archive_score),
+      asOf: params.asOf,
     });
 
     if (params.testOnlyBeforePersist) await params.testOnlyBeforePersist();

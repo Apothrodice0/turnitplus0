@@ -7,6 +7,7 @@ import { applyMigrationsLibsql } from "../lib/ingest.js";
 import { createDocumentIdentity } from "../lib/document-identity.ts";
 import { indexDocumentSubmissionIntoCorpus } from "../lib/user-submission-corpus.ts";
 import { matchAgainstUserSubmissionCorpus, USER_SUBMISSION_MATCH_THRESHOLDS } from "../lib/user-submission-matching.ts";
+import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
 
 const repoRoot = path.resolve(".");
 const drizzleDir = path.join(repoRoot, "drizzle");
@@ -46,6 +47,13 @@ async function indexSubmission(accountId, title, rawText) {
 }
 
 async function match(accountId, canonicalText, documentIdentityId = null) {
+  // Phase A: this suite predates 7-day corpus maturity and seeds every source
+  // immediately before querying it. matchAgainstUserSubmissionCorpus now
+  // enforces maturity by default (safe-by-default hardening), so age the
+  // just-seeded backings past the 7-day window first — these tests exercise
+  // matching logic, not the activation clock (that is covered by
+  // tests/corpus-activation-7day.test.mjs).
+  await matureCorpusBackings(client);
   return matchAgainstUserSubmissionCorpus(client, { accountId, documentIdentityId, canonicalText });
 }
 

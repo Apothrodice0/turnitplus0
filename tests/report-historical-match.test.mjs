@@ -7,6 +7,7 @@ import { applyMigrationsLibsql } from "../lib/ingest.js";
 import { createDocumentIdentity } from "../lib/document-identity.ts";
 import { indexDocumentSubmissionIntoCorpus } from "../lib/user-submission-corpus.ts";
 import { getOrComputeHistoricalMatchSnapshot, deleteHistoricalMatchSnapshot } from "../lib/report-historical-match.ts";
+import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
 
 const repoRoot = path.resolve(".");
 const drizzleDir = path.join(repoRoot, "drizzle");
@@ -47,7 +48,12 @@ async function ensureSavedReport(deviceKey, reportId, accountId) {
 async function indexSubmission(accountId, rawText) {
   await ensureUser(accountId);
   const identity = await createDocumentIdentity(client, { accountId, title: "T", author: null, rawText });
-  return indexDocumentSubmissionIntoCorpus(client, { documentIdentityId: identity.id, rawText });
+  const res = await indexDocumentSubmissionIntoCorpus(client, { documentIdentityId: identity.id, rawText });
+  // Phase A: this suite tests the snapshot cache / staleness / classification,
+  // not the 7-day activation gate — age the just-indexed backing so it is
+  // matchable "now".
+  await matureCorpusBackings(client);
+  return res;
 }
 
 // --- STRUCTURAL SAFETY --------------------------------------------------------

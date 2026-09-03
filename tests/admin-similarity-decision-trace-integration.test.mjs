@@ -13,6 +13,7 @@ import {
   createReusableDocumentRepresentation,
   recordCorpusShingles,
 } from "../lib/user-submission-corpus.ts";
+import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
 import { buildReportAdmissionSourceRef } from "../lib/corpus-admission-source-ref.ts";
 import { resolvePrimarySimilaritySummary } from "../lib/report-primary-similarity.ts";
 import { runDeviceProvenanceShadowEvaluation } from "../lib/device-provenance-shadow.ts";
@@ -122,6 +123,9 @@ async function indexPriorSubmission(accountId, rawText) {
   await ensureUser(accountId);
   const identity = await createDocumentIdentity(client, { accountId, title: "prior", author: null, rawText });
   const result = await indexDocumentSubmissionIntoCorpus(client, { documentIdentityId: identity.id, rawText });
+  // Phase A: age the just-indexed backing so it is matchable "now" (this
+  // suite tests the admin trace, not the 7-day activation gate).
+  await matureCorpusBackings(client);
   return { identityId: identity.id, representationId: result.representationId };
 }
 
@@ -154,6 +158,9 @@ async function seedSameDeviceCorpusSource(rawText, passportId, sourceAccountId) 
     sql: `INSERT INTO corpus_admission_decision_device_provenance (decision_id, device_passport_id, verified_at) VALUES (?,?,?)`,
     args: [decisionId, passportId, Date.now()],
   });
+  // Phase A: this suite tests the admin decision trace, not the 7-day
+  // activation gate — age the seeded backing so it is matchable "now".
+  await matureCorpusBackings(client);
   return { representationId: rep.id, sourceAccountId };
 }
 

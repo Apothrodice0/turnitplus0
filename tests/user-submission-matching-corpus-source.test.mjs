@@ -9,6 +9,7 @@ import { createDocumentIdentity, canonicalSha256 } from "../lib/document-identit
 import { indexDocumentSubmissionIntoCorpus } from "../lib/user-submission-corpus.ts";
 import { matchAgainstUserSubmissionCorpus } from "../lib/user-submission-matching.ts";
 import { runCorpusAdmissionPromotionSweep } from "../lib/corpus-admission-promotion.ts";
+import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
 
 /**
  * The TURNITPLUS_CORPUS_SOURCE classification branch in
@@ -53,6 +54,9 @@ async function indexSubmission(accountId, title, rawText) {
   await ensureUser(accountId);
   const identity = await createDocumentIdentity(client, { accountId, title, author: null, rawText });
   await indexDocumentSubmissionIntoCorpus(client, { documentIdentityId: identity.id, rawText });
+  // Phase A safe-by-default maturity — this suite is about the
+  // TURNITPLUS_CORPUS_SOURCE classification branch, not the 7-day clock.
+  await matureCorpusBackings(client);
   return identity;
 }
 
@@ -94,6 +98,9 @@ async function seedActivePromotedSource(text) {
   const sweep = await runCorpusAdmissionPromotionSweep(client, { openConnection, batchSize: 20 });
   const outcome = sweep.results.find((r) => r.decisionId === decisionId);
   assert.equal(outcome?.outcome, "indexed", "test setup sanity: promotion must succeed");
+  // Phase A safe-by-default maturity — age the promotion's decision past 7 days
+  // so the promoted source is matchable (this suite predates the activation clock).
+  await matureCorpusBackings(client);
   return { decisionId, hash };
 }
 

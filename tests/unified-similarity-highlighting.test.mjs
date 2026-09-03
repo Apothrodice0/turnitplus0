@@ -9,6 +9,7 @@ import { createClient } from "@libsql/client";
 import { applyMigrationsLibsql } from "../lib/ingest.js";
 import { canonicalSha256 } from "../lib/document-identity.ts";
 import { runCorpusAdmissionPromotionSweep } from "../lib/corpus-admission-promotion.ts";
+import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
 import { tokens, tokenSpans, mergeAdjacentPositions } from "../lib/similarity-core.ts";
 import { computeUnifiedSimilarity } from "../lib/unified-similarity.ts";
 import {
@@ -110,6 +111,9 @@ async function promoteDocumentIntoCorpus(text) {
   const sweep = await runCorpusAdmissionPromotionSweep(client, { openConnection, batchSize: 20 });
   const outcome = sweep.results.find((r) => r.decisionId === decisionId);
   assert.equal(outcome?.outcome, "indexed", "test setup sanity: promotion must succeed");
+  // Phase A: these INTEGRATION tests match end to end against the promoted
+  // source, not the 7-day activation gate — age it so it is matchable "now".
+  await matureCorpusBackings(client);
 }
 
 function extractCookie(response) {

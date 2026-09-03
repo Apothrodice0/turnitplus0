@@ -6,6 +6,7 @@ import { createClient } from "@libsql/client";
 import { applyMigrationsLibsql } from "../lib/ingest.js";
 import { createDocumentIdentity } from "../lib/document-identity.ts";
 import { indexDocumentSubmissionIntoCorpus, createReusableDocumentRepresentation, recordCorpusShingles } from "../lib/user-submission-corpus.ts";
+import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
 import { matchAgainstUserSubmissionCorpus, USER_SUBMISSION_MATCH_THRESHOLDS } from "../lib/user-submission-matching.ts";
 import { computeDocumentCorrespondence } from "../lib/document-correspondence.ts";
 import { canonicalizeText } from "../lib/canonical-text.ts";
@@ -68,6 +69,12 @@ async function match(accountId, canonicalText) {
 
 // Index the base document once, under Account A — every test below queries against it.
 await indexSubmission(ACCOUNT_A, "Aurelia Pilot Evaluation Report", BASE_DOCUMENT);
+// Phase A safe-by-default maturity: this calibration suite predates the 7-day
+// corpus activation clock and matches against a source it just indexed.
+// matchAgainstUserSubmissionCorpus now enforces maturity by default, so age the
+// base document past the window — calibration is about matcher thresholds, not
+// the clock (that is tests/corpus-activation-7day.test.mjs).
+await matureCorpusBackings(client);
 
 function fixture(category) {
   return CALIBRATION_FIXTURES.find((f) => f.category === category);
@@ -243,6 +250,7 @@ test("N: candidate generation stays fast and index-backed against a 300-represen
     const representation = await createReusableDocumentRepresentation(client, { canonicalText });
     await recordCorpusShingles(client, representation.id, canonicalText);
   }
+  await matureCorpusBackings(client); // Phase A: age the 300 noise reps + base doc past the 7-day window
 
   const plan = await client.execute(
     "EXPLAIN QUERY PLAN SELECT s.representation_id FROM corpus_document_shingles s JOIN corpus_document_representations r ON r.id = s.representation_id WHERE s.fingerprint_version = 'corpus-shingle-v1' AND s.shingle_hash IN ('a','b','c') GROUP BY s.representation_id HAVING COUNT(*) >= 3 ORDER BY 1 LIMIT 10",

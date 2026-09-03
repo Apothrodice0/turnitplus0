@@ -2,7 +2,14 @@ import type { Client } from "@libsql/client";
 import { createHash } from "node:crypto";
 import { canonicalizeText } from "./canonical-text";
 import { matchAgainstUserSubmissionCorpus, isCorpusSourceMatchingEnabled, USER_SUBMISSION_MATCHER_VERSION, USER_SUBMISSION_MATCH_THRESHOLDS } from "./user-submission-matching";
-import { CORPUS_FINGERPRINT_VERSION, CANONICALIZATION_VERSION } from "./user-submission-corpus";
+import {
+  CORPUS_FINGERPRINT_VERSION,
+  CANONICALIZATION_VERSION,
+  CORPUS_ACTIVATION_DELAY_DAYS,
+  corpusMaturityCutoff,
+  sqliteUtcTimestamp,
+  parseSqliteUtc,
+} from "./user-submission-corpus";
 import { canonicalSha256, findPriorSubmissionsForAccount } from "./document-identity";
 import { getCurrentCorpusMatchGeneration, bumpCorpusMatchGeneration } from "./corpus-match-generation";
 import type { ReportHistoricalSubmissionMatch, HistoricalSubmissionMatchEntry } from "./report-types";
@@ -201,7 +208,16 @@ function stableStringify(value: unknown): string {
   }
   return JSON.stringify(value ?? null);
 }
-const MATCH_CONFIG_DIGEST = createHash("sha256").update(stableStringify(USER_SUBMISSION_MATCH_THRESHOLDS)).digest("hex").slice(0, 12);
+// Phase A — 7-day corpus maturity. CORPUS_ACTIVATION_DELAY_DAYS is folded into
+// this digest alongside the matcher thresholds so deploying Phase A (or ever
+// changing the window) invalidates every snapshot computed under the previous
+// activation-less policy — the same automatic, no-column, no-migration
+// invalidation a thresholds change already gets. An activation-less snapshot
+// could otherwise keep an immature source's contribution cached indefinitely.
+const MATCH_CONFIG_DIGEST = createHash("sha256")
+  .update(stableStringify({ thresholds: USER_SUBMISSION_MATCH_THRESHOLDS, corpusActivationDelayDays: CORPUS_ACTIVATION_DELAY_DAYS }))
+  .digest("hex")
+  .slice(0, 12);
 
 /**
  * The matcher identity a snapshot is validated against: the hand-maintained
@@ -278,6 +294,74 @@ function isSnapshotRowCurrent(row: SnapshotRow | undefined, currentGeneration: n
     Number(row.is_partial) !== 1 &&
     Number(row.corpus_generation) >= currentGeneration,
   );
+}
+
+/**
+ * Phase A — 7-day corpus maturity. Time-based snapshot invalidation.
+ *
+ * The corpus_match_generation counter is bumped only by a DATABASE WRITE that
+ * adds matchable content (a promotion reaching 'indexed', a reactivation, a
+ * user submission indexed). NO write happens when a backing simply reaches
+ * CORPUS_ACTIVATION_DELAY_DAYS old — so isSnapshotRowCurrent above would keep
+ * reusing a cached snapshot forever even though a source that was invisible
+ * (or an already-visible source whose lineage age changed — Phase C) has now
+ * matured. This closes that gap: a cached snapshot is ALSO stale when ANY
+ * corpus backing crossed maturity strictly after it was computed and on/before
+ * the current logical `asOf`.
+ *
+ * A backing matures at `T0 + CORPUS_ACTIVATION_DELAY_DAYS`, so it "matured in
+ * (snapshot.computed_at, asOf]" iff its immutable `T0` is in
+ * `(computed_at - CORPUS_ACTIVATION_DELAY_DAYS, asOf - CORPUS_ACTIVATION_DELAY_DAYS]`
+ * — a bounded range on `created_at`, indexed by drizzle/0043.
+ *
+ * Deliberately corpus-wide: it does NOT scope to "a backing that could match
+ * THIS report" (a search over what is already stored can never find what is
+ * missing — the same argument drizzle/0036's own comment makes for the global
+ * generation counter). A backing maturing anywhere stales every cached
+ * snapshot whose window it falls in; each such report then does ONE lazy
+ * recompute on its next score read and converges. Conservative
+ * over-invalidation, accepted — correctness first.
+ *
+ * `maturityCutoff` (== asOf - CORPUS_ACTIVATION_DELAY_DAYS) is the SAME string
+ * threaded through eligibility for this resolution, so the two can never
+ * disagree on a boundary. The lower bound is derived in JS from the snapshot's
+ * own `computed_at` (format-tolerant UTC parse) so both bounds are plain
+ * 'YYYY-MM-DD HH:MM:SS' strings and the range stays index-friendly.
+ */
+async function corpusBackingMaturedInWindow(
+  exec: Pick<Client, "execute">,
+  params: { snapshotComputedAt: string; maturityCutoff: string },
+): Promise<boolean> {
+  const lowerExclusive = sqliteUtcTimestamp(
+    new Date(parseSqliteUtc(params.snapshotComputedAt).getTime() - CORPUS_ACTIVATION_DELAY_DAYS * 86_400_000),
+  );
+  // A snapshot computed at/after `asOf` (a fresh write) has an empty window —
+  // nothing can have matured "since" it. Skip the query.
+  if (lowerExclusive >= params.maturityCutoff) return false;
+  const result = await exec.execute({
+    // Both EXISTS drive from the selective created_at range (indexed by
+    // drizzle/0043 — EXPLAIN QUERY PLAN: covering-index range SEARCH on
+    // idx_corpus_submission_references_created_at / idx_corpus_admission_decisions_created_at),
+    // then the admission side confirms an 'indexed' promotion for that
+    // decision via ux_corpus_admission_promotions_decision_id.
+    sql: `SELECT (
+            EXISTS (
+              SELECT 1 FROM corpus_submission_references sr
+              WHERE sr.created_at > ? AND sr.created_at <= ?
+            )
+            OR EXISTS (
+              SELECT 1 FROM corpus_admission_decisions d
+              WHERE d.created_at > ? AND d.created_at <= ?
+                AND EXISTS (
+                  SELECT 1 FROM corpus_admission_promotions p
+                  WHERE p.decision_id = d.id AND p.status = 'indexed'
+                )
+            )
+          ) AS matured`,
+    args: [lowerExclusive, params.maturityCutoff, lowerExclusive, params.maturityCutoff],
+  });
+  const row = result.rows[0] as unknown as { matured: number | bigint } | undefined;
+  return row !== undefined && Number(row.matured) === 1;
 }
 
 function rowToResult(row: SnapshotRow): ReportHistoricalSubmissionMatch {
@@ -416,6 +500,15 @@ export async function getOrComputeHistoricalMatchSnapshot(
      * not the environment value at the later write instant.
      */
     corpusSourceMatchingEnabled?: boolean;
+    /**
+     * Phase A — 7-day corpus maturity. The ONE logical instant this whole
+     * resolution reasons "as of". `maturityCutoff` (asOf - CORPUS_ACTIVATION_DELAY_DAYS)
+     * is derived from it exactly once here and threaded into BOTH the matcher
+     * (eligibility) AND the maturity-crossing check that decides cache reuse,
+     * so no two queries in this call can disagree on a boundary. Defaults to
+     * `new Date()` (server time). Tests inject/freeze it.
+     */
+    asOf?: Date;
   },
 ): Promise<ReportHistoricalSubmissionMatch> {
   // Read fresh, before the cache-hit decision — see this file's own header
@@ -423,6 +516,11 @@ export async function getOrComputeHistoricalMatchSnapshot(
   // against a stored row's own corpus_generation exactly like the
   // matcher/fingerprint/canonicalization version tags already are.
   const currentGeneration = await getCurrentCorpusMatchGeneration(client);
+
+  // Phase A: the single maturity clock for this resolution — derived ONCE,
+  // used for eligibility AND the maturity-crossing cache check below.
+  const asOf = params.asOf ?? new Date();
+  const maturityCutoff = corpusMaturityCutoff(asOf);
 
   // Captured ONCE here, before any matcher work or snapshot write — the
   // single source of truth for this computation's corpus-source-matching
@@ -447,7 +545,18 @@ export async function getOrComputeHistoricalMatchSnapshot(
   // eligibility newly ADDED, which a targeted, per-representation search
   // could never discover for a report that doesn't reference the new
   // content yet.
-  if (isSnapshotRowCurrent(existingRow, currentGeneration)) {
+  //
+  // Phase A: corpus_generation ALSO cannot catch a backing simply reaching
+  // CORPUS_ACTIVATION_DELAY_DAYS old — no DB write happens then. So an
+  // otherwise-current row is reused only when NO corpus backing crossed
+  // maturity in (row.computed_at, asOf] — see corpusBackingMaturedInWindow.
+  if (
+    isSnapshotRowCurrent(existingRow, currentGeneration) &&
+    !(await corpusBackingMaturedInWindow(client, {
+      snapshotComputedAt: (existingRow as SnapshotRow).computed_at,
+      maturityCutoff,
+    }))
+  ) {
     return applyCorpusSourceMatchingFlag(rowToResult(existingRow as SnapshotRow));
   }
 
@@ -488,6 +597,8 @@ export async function getOrComputeHistoricalMatchSnapshot(
       canonicalText,
       excludeAccountId: params.excludeAccountId,
       corpusSourceMatchingEnabled: corpusSourceMatchingEnabledAtComputation,
+      // Phase A: the SAME cutoff the maturity-crossing cache check above uses.
+      maturityCutoff,
     });
     isPartial = matchResult.partial === true;
     if (matchResult.status === "MATCHED") {
@@ -516,7 +627,14 @@ export async function getOrComputeHistoricalMatchSnapshot(
   }
 
   const processingDurationMs = Date.now() - startedAt;
-  const computedAt = new Date().toISOString();
+  // Phase A: stamp the snapshot with the LOGICAL instant this computation
+  // reasoned "as of" (== asOf), NOT wall-clock now. In production the two are
+  // the same (asOf defaults to `new Date()`), so this is byte-identical there.
+  // It matters for the maturity-crossing check: corpusBackingMaturedInWindow
+  // treats this value as "the moment the matcher already accounted for
+  // maturity through", so a fresh recompute's own window is empty and the row
+  // reads as current immediately after it is written.
+  const computedAt = asOf.toISOString();
 
   // Test-only barrier — see params.testOnlyPauseBeforeWrite's own comment.
   // Every read this function does (currentGeneration, the candidate
@@ -595,7 +713,17 @@ export async function getOrComputeHistoricalMatchSnapshot(
  */
 export async function isHistoricalMatchSnapshotCurrent(
   client: Client,
-  params: { reportDeviceKey: string; reportId: string },
+  params: {
+    reportDeviceKey: string;
+    reportId: string;
+    /**
+     * Phase A — the logical instant this check reasons "as of". Must be the
+     * SAME instant the caller (lib/report-primary-similarity.ts's
+     * resolvePersistedSimilarityDisplay) uses for its whole resolution.
+     * Defaults to server time; tests inject/freeze it.
+     */
+    asOf?: Date;
+  },
 ): Promise<boolean> {
   const currentGeneration = await getCurrentCorpusMatchGeneration(client);
   const existing = await client.execute({
@@ -604,7 +732,16 @@ export async function isHistoricalMatchSnapshotCurrent(
     args: [params.reportDeviceKey, params.reportId],
   });
   const existingRow = existing.rows[0] as unknown as SnapshotRow | undefined;
-  return isSnapshotRowCurrent(existingRow, currentGeneration);
+  if (!isSnapshotRowCurrent(existingRow, currentGeneration)) return false;
+  // Phase A: an otherwise-current row is stale the moment a corpus backing
+  // crosses maturity after it was computed — the SAME check
+  // getOrComputeHistoricalMatchSnapshot's own cache-hit branch applies, so a
+  // "would this be a cache hit right now" answer stays truthful.
+  const maturityCutoff = corpusMaturityCutoff(params.asOf ?? new Date());
+  return !(await corpusBackingMaturedInWindow(client, {
+    snapshotComputedAt: (existingRow as SnapshotRow).computed_at,
+    maturityCutoff,
+  }));
 }
 
 /** Deletes a report's historical-match snapshot, if any — see db/schema.ts's own comment on why this is an explicit application-level cascade rather than a DB-level FOREIGN KEY ... ON DELETE CASCADE. Called from app/api/reports/[id]/route.ts's DELETE handler, in the same request that deletes the report itself. */

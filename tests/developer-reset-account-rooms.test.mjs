@@ -15,6 +15,7 @@ import { buildReportAdmissionSourceRef } from '../lib/corpus-admission-source-re
 import { indexDocumentSubmissionIntoCorpus } from '../lib/user-submission-corpus.ts';
 import { runCorpusAdmissionPromotionSweep } from '../lib/corpus-admission-promotion.ts';
 import { matchAgainstUserSubmissionCorpus } from '../lib/user-submission-matching.ts';
+import { matureCorpusBackings } from './helpers/corpus-maturity.mjs';
 
 /**
  * POST /api/developer/reset-account-rooms — "Clear account rooms". An admin
@@ -389,6 +390,7 @@ test('T9: T\'s accepted decision / content / fingerprint / promoted representati
 });
 
 test('T10: a different-account document STILL MATCHES that accepted/promoted source after T\'s reset', async () => {
+  await matureCorpusBackings(db); // Phase A: this test is about reset survival, not the 7-day activation clock
   const result = await matchAgainstUserSubmissionCorpus(db, { accountId: null, canonicalText: PROMOTED_TEXT });
   assert.equal(result.status, 'MATCHED');
   assert.equal(result.matches[0].relationshipType, 'TURNITPLUS_CORPUS_SOURCE');

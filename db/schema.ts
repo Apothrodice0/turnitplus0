@@ -701,6 +701,11 @@ export const corpus_submission_references = sqliteTable(
   (table) => [
     uniqueIndex("ux_corpus_submission_references_document_identity_id").on(table.document_identity_id),
     index("idx_corpus_submission_references_representation_id").on(table.representation_id),
+    // drizzle/0043 — Phase A 7-day corpus maturity. Range index over this
+    // backing's immutable T0, for lib/report-historical-match.ts's
+    // corpusBackingMaturedInWindow snapshot-invalidation range scan (not the
+    // per-representation eligibility EXISTS, which the rep index already serves).
+    index("idx_corpus_submission_references_created_at").on(table.created_at),
   ],
 );
 
@@ -1019,6 +1024,11 @@ export const corpus_admission_decisions = sqliteTable(
     index("idx_corpus_admission_decisions_source_ref").on(table.source_ref),
     index("idx_corpus_admission_decisions_decision").on(table.decision),
     index("idx_corpus_admission_decisions_run_id").on(table.run_id),
+    // drizzle/0043 — Phase A 7-day corpus maturity. A promotion's OWN decision
+    // (promotions.decision_id -> this row) supplies both its account-exclusion
+    // source_ref and its immutable maturity T0 (created_at). Range index for
+    // lib/report-historical-match.ts's corpusBackingMaturedInWindow scan.
+    index("idx_corpus_admission_decisions_created_at").on(table.created_at),
   ],
 );
 

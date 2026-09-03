@@ -14,6 +14,7 @@ import { buildReportAdmissionSourceRef } from '../lib/corpus-admission-source-re
 import { indexDocumentSubmissionIntoCorpus } from '../lib/user-submission-corpus.ts';
 import { runCorpusAdmissionPromotionSweep } from '../lib/corpus-admission-promotion.ts';
 import { matchAgainstUserSubmissionCorpus } from '../lib/user-submission-matching.ts';
+import { matureCorpusBackings } from './helpers/corpus-maturity.mjs';
 
 /**
  * BLOCKING REVIEW proof: "Clear my rooms" must NOT destroy an ACCEPTed +
@@ -173,6 +174,9 @@ async function acceptAndPromoteReport(accountId, reportId, text) {
 }
 
 async function matchAnon(text) {
+  // Phase A safe-by-default maturity: this suite is about promotion/reset
+  // visibility, not the 7-day activation clock — age the just-promoted backings.
+  await matureCorpusBackings(db);
   return matchAgainstUserSubmissionCorpus(db, { accountId: null, canonicalText: text });
 }
 

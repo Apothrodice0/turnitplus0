@@ -12,6 +12,7 @@ import {
 import { resolvePrimarySimilaritySummary } from "../lib/report-primary-similarity.ts";
 import { claimAnonymousReports } from "../lib/auth-session.ts";
 import { getCurrentCorpusMatchGeneration } from "../lib/report-historical-match.ts";
+import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
 
 /**
  * ANONYMOUS -> ACCOUNT CLAIM: a report's cached historical-match snapshot is
@@ -122,6 +123,9 @@ function plausibleArticleText(seed, targetWords = 3300) {
 }
 
 async function finalize({ deviceKey, reportId, accountId, text }) {
+  // Phase A: this suite tests account-claim snapshot invalidation, not the
+  // 7-day activation gate — age the seeded backing so it is matchable "now".
+  await matureCorpusBackings(client);
   return resolvePrimarySimilaritySummary(client, {
     reportDeviceKey: deviceKey, reportId, accountId, rawText: text,
     wordCount: 40, archiveMatchedPositions: null, externalAcademicEvidence: null, archiveScore: 0,

@@ -8,6 +8,7 @@ import { applyMigrationsLibsql } from "../lib/ingest.js";
 import { createDocumentIdentity, canonicalSha256 } from "../lib/document-identity.ts";
 import { indexDocumentSubmissionIntoCorpus } from "../lib/user-submission-corpus.ts";
 import { runCorpusAdmissionPromotionSweep } from "../lib/corpus-admission-promotion.ts";
+import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
 import {
   getOrComputeHistoricalMatchSnapshot,
   getCurrentCorpusMatchGeneration,
@@ -77,7 +78,9 @@ async function ensureUser(accountId) {
 async function indexSubmission(accountId, rawText) {
   await ensureUser(accountId);
   const identity = await createDocumentIdentity(client, { accountId, title: "T", author: null, rawText });
-  return indexDocumentSubmissionIntoCorpus(client, { documentIdentityId: identity.id, rawText });
+  const _r = await indexDocumentSubmissionIntoCorpus(client, { documentIdentityId: identity.id, rawText });
+  await matureCorpusBackings(client); // Phase A: age the seeded backing so it is matchable "now"
+  return _r;
 }
 
 async function insertDecision(hash) {
@@ -112,6 +115,7 @@ async function seedActivePromotedSource(text) {
           VALUES (?,?,?,?,?,?,CURRENT_TIMESTAMP)`,
     args: [randomUUID(), decisionId, hash, text, "v1", "LICENSED_REUSE"],
   });
+  await matureCorpusBackings(client); // Phase A: age the promoted backing so it is matchable "now" (this suite tests no-match caching, not the 7-day gate)
   const sweep = await runCorpusAdmissionPromotionSweep(client, { openConnection, batchSize: 20 });
   const outcome = sweep.results.find((r) => r.decisionId === decisionId);
   assert.equal(outcome?.outcome, "indexed", "test setup sanity: promotion must succeed");

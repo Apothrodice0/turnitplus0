@@ -7,7 +7,18 @@ import { createClient } from "@libsql/client";
 import { applyMigrationsLibsql } from "../lib/ingest.js";
 import { canonicalSha256 } from "../lib/document-identity.ts";
 import { runCorpusAdmissionPromotionSweep, processCorpusAdmissionPromotion, MAX_PROMOTION_ATTEMPTS } from "../lib/corpus-admission-promotion.ts";
-import { findCandidateCorpusRepresentations, corpusShingleHashes } from "../lib/user-submission-corpus.ts";
+import { findCandidateCorpusRepresentations as _findCandidateCorpusRepresentations, corpusShingleHashes } from "../lib/user-submission-corpus.ts";
+import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
+
+// Phase A safe-by-default maturity: this suite predates the 7-day activation
+// clock and asserts promotion/revocation visibility "immediately".
+// findCandidateCorpusRepresentations now gates MATCHING callers by default —
+// age the just-promoted backings past the window so these tests still measure
+// promotion/revocation, not the clock (tests/corpus-activation-7day.test.mjs).
+const findCandidateCorpusRepresentations = async (client, hashes, opts) => {
+  await matureCorpusBackings(client);
+  return _findCandidateCorpusRepresentations(client, hashes, opts);
+};
 import { deactivateAcceptedRepresentation, reactivateAcceptedRepresentation } from "../lib/corpus-admission-admin-actions.ts";
 
 /**

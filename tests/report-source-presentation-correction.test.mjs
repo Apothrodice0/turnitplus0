@@ -9,6 +9,7 @@ import { createClient } from "@libsql/client";
 import { applyMigrationsLibsql } from "../lib/ingest.js";
 import { canonicalSha256 } from "../lib/document-identity.ts";
 import { runCorpusAdmissionPromotionSweep } from "../lib/corpus-admission-promotion.ts";
+import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
 import { tokens } from "../lib/similarity-core.ts";
 import { CategorySummary, OverviewReport } from "../components/report/similarity-report-papers.tsx";
 import { primarySimilarityScore, referenceSourceContributionPercent, unifiedEvidenceSummary } from "../lib/report-types.ts";
@@ -146,6 +147,7 @@ async function uispcPromoteDocumentIntoCorpus(text) {
           VALUES (?,?,?,?,?,?,CURRENT_TIMESTAMP)`,
     args: [randomUUID(), decisionId, hash, text, "v1", "LICENSED_REUSE"],
   });
+  await matureCorpusBackings(uispcClient); // Phase A: age the promoted backing so it is matchable "now"
   const sweep = await runCorpusAdmissionPromotionSweep(uispcClient, { openConnection: uispcOpenConnection, batchSize: 20 });
   const outcome = sweep.results.find((r) => r.decisionId === decisionId);
   assert.equal(outcome?.outcome, "indexed", "test setup sanity: promotion must succeed");

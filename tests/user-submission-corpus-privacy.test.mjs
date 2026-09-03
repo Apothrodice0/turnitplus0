@@ -12,6 +12,7 @@ import {
   isRepresentationEligibleForMatching,
   corpusShingleHashes,
 } from "../lib/user-submission-corpus.ts";
+import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
 
 const repoRoot = path.resolve(".");
 const drizzleDir = path.join(repoRoot, "drizzle");
@@ -137,6 +138,7 @@ test("A/B: representation and candidate-search results never carry an account id
   await indexDocumentSubmissionIntoCorpus(client, { documentIdentityId: identityB.id, rawText: SHARED_TEXT_ALPHA });
 
   const hashes = corpusShingleHashes(SHARED_TEXT_ALPHA, 5);
+  await matureCorpusBackings(client); // Phase A: privacy-of-results test, not the activation clock
   const candidates = await findCandidateCorpusRepresentations(client, hashes);
   assert.ok(candidates.length >= 1);
 
@@ -166,6 +168,7 @@ test("SELF-MATCH-FIX PRIVACY: excludeAccountId never appears in findCandidateCor
   const secretAccountId = "corpus-secret-account-id-should-never-leak";
   const excludeAccountId = secretAccountId;
 
+  await matureCorpusBackings(client); // Phase A: privacy-of-results test, not the activation clock
   const candidates = await findCandidateCorpusRepresentations(client, corpusShingleHashes(text, 5), { excludeAccountId });
   assert.ok(candidates.length >= 1, "test setup sanity: an unrelated exclusion value must not suppress a genuine submission-reference-backed candidate");
   const serialized = JSON.stringify(candidates);
@@ -206,6 +209,7 @@ test("E: cross-account historical material is identifiable as a candidate withou
   await indexDocumentSubmissionIntoCorpus(client, { documentIdentityId: identityA.id, rawText: sharedText });
 
   // Account B has not submitted this yet — simulate B's own upload discovering it as a candidate via shingle overlap.
+  await matureCorpusBackings(client); // Phase A: privacy-of-results test, not the activation clock
   const candidates = await findCandidateCorpusRepresentations(client, corpusShingleHashes(sharedText, 5));
   assert.ok(candidates.length >= 1);
   assert.ok(candidates.some((c) => c.containment > 0.9));
