@@ -1,15 +1,28 @@
 "use client";
 
-import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useState } from "react";
 import { ISO_3166_1_COUNTRIES } from "@/lib/iso-3166-1-countries";
 
 /**
  * A2 — the structured-identity fields shared by the signup form and the account-
  * settings form. It COLLECTS canonical values (ISO alpha-2 country, GeoNames
- * city id, ROR institution id, E.164-bound phone, account type, full name) and
- * hands them to the parent via a ref. All authority is server-side: this is a
- * convenience layer, and the server re-resolves the city + institution ids and
+ * city id, ROR institution id, an Algeria-first phone, account type, full name)
+ * and hands them to the parent via a ref. All authority is server-side: this is
+ * a convenience layer, and the server re-resolves the city + institution ids and
  * re-validates everything on submit.
+ *
+ * Institution is account-type-driven, not a separate choice: student / instructor
+ * / researcher MUST resolve to a canonical ROR institution (the section is shown
+ * and required, with no "independent" escape hatch); an independent account has
+ * no institution UI at all and submits status NONE automatically.
+ *
+ * Markup: a Fragment of plain <label><span>…</span>…</label> blocks so every
+ * field is a direct child of the surrounding <form className="auth-form"> and
+ * inherits the exact same label typography, field height and spacing as the
+ * Username / Email / Password fields above it (see app/globals.css .auth-form).
+ *
+ * Rollout is Algeria-first: country defaults to Algeria, and the phone field is
+ * a fixed "+213" prefix followed by exactly 9 local digits.
  */
 
 export type AccountTypeValue = "student" | "instructor" | "researcher" | "independent";
@@ -26,7 +39,7 @@ export type CollectedIdentity = {
 export type IdentityFieldsHandle = {
   /** Returns the collected identity, or null (and shows inline errors) if incomplete. */
   collect: () => CollectedIdentity | null;
-  /** True when the user has not entered anything (used to let a grandfathered account save username/email alone). */
+  /** True when the user has not entered anything (lets a grandfathered account save username/email alone). */
   isPristine: () => boolean;
 };
 
@@ -41,7 +54,21 @@ const ACCOUNT_TYPES: { value: AccountTypeValue; label: string }[] = [
 ];
 const AFFILIATED = new Set<AccountTypeValue>(["student", "instructor", "researcher"]);
 
+// Algeria-first defaults.
+const DEFAULT_COUNTRY = "DZ";
+const PHONE_PREFIX = "+213";
+const PHONE_LOCAL_DIGITS = 9;
+
+/** Split a stored E.164 into the 9 local digits when it is an Algeria (+213) number; otherwise "". */
+function localDigitsFromE164(e164: string | null | undefined): string {
+  if (typeof e164 !== "string") return "";
+  if (!e164.startsWith(PHONE_PREFIX)) return "";
+  const rest = e164.slice(PHONE_PREFIX.length).replace(/\D/g, "");
+  return rest.length === PHONE_LOCAL_DIGITS ? rest : "";
+}
+
 export type IdentityFieldsProps = {
+  mode?: "signup" | "settings";
   /** Pre-fill (account settings). */
   initial?: Partial<{
     fullName: string;
@@ -55,13 +82,15 @@ export type IdentityFieldsProps = {
 };
 
 export const IdentityFields = forwardRef<IdentityFieldsHandle, IdentityFieldsProps>(function IdentityFields(
-  { initial, disabled },
+  { mode = "signup", initial, disabled },
   ref,
 ) {
   const [fullName, setFullName] = useState(initial?.fullName ?? "");
   const [accountType, setAccountType] = useState<AccountTypeValue | "">(initial?.accountType ?? "");
-  const [countryCode, setCountryCode] = useState(initial?.countryCode ?? "");
-  const [phone, setPhone] = useState(initial?.phoneE164 ?? "");
+  const [countryCode, setCountryCode] = useState(
+    initial?.countryCode ?? (mode === "signup" ? DEFAULT_COUNTRY : ""),
+  );
+  const [phoneDigits, setPhoneDigits] = useState(localDigitsFromE164(initial?.phoneE164));
 
   const [cityQuery, setCityQuery] = useState(initial?.city?.name ?? "");
   const [citySelected, setCitySelected] = useState<CityHit | null>(
@@ -71,9 +100,6 @@ export const IdentityFields = forwardRef<IdentityFieldsHandle, IdentityFieldsPro
   );
   const [cityHits, setCityHits] = useState<CityHit[]>([]);
 
-  const [instMode, setInstMode] = useState<"search" | "none">(
-    initial?.institution?.status === "NONE" ? "none" : "search",
-  );
   const [instQuery, setInstQuery] = useState("");
   const [instSelected, setInstSelected] = useState<InstitutionHit | null>(
     initial?.institution?.status === "ROR"
@@ -84,6 +110,12 @@ export const IdentityFields = forwardRef<IdentityFieldsHandle, IdentityFieldsPro
 
   const [errors, setErrors] = useState<Record<string, string>>({});
 
+  // The institution section is a pure function of account type: it is shown, and
+  // a canonical ROR institution is required, only for the affiliated types.
+  // Independent (and not-yet-chosen) accounts have no institution UI and submit
+  // status NONE automatically.
+  const institutionRequired = accountType !== "" && AFFILIATED.has(accountType);
+
   const countries = useMemo(
     () => [...ISO_3166_1_COUNTRIES].map((c) => ({ code: c.alpha2, name: c.name })).sort((a, b) => a.name.localeCompare(b.name)),
     [],
@@ -91,15 +123,14 @@ export const IdentityFields = forwardRef<IdentityFieldsHandle, IdentityFieldsPro
 
   // Debounced city search, scoped to the chosen residence country.
   useEffect(() => {
-    if (!cityQuery || cityQuery.length < 2 || (citySelected && citySelected.name === cityQuery)) {
+    if (!countryCode || !cityQuery || cityQuery.length < 2 || (citySelected && citySelected.name === cityQuery)) {
       setCityHits([]);
       return;
     }
     const ctrl = new AbortController();
     const t = setTimeout(async () => {
       try {
-        const url = `/api/identity/cities?q=${encodeURIComponent(cityQuery)}${countryCode ? `&country=${countryCode}` : ""}`;
-        const res = await fetch(url, { signal: ctrl.signal });
+        const res = await fetch(`/api/identity/cities?q=${encodeURIComponent(cityQuery)}&country=${countryCode}`, { signal: ctrl.signal });
         const data = (await res.json()) as { results?: CityHit[] };
         setCityHits(Array.isArray(data.results) ? data.results : []);
       } catch {
@@ -112,9 +143,9 @@ export const IdentityFields = forwardRef<IdentityFieldsHandle, IdentityFieldsPro
     };
   }, [cityQuery, countryCode, citySelected]);
 
-  // Debounced institution search.
+  // Debounced institution search (only while an affiliated account type is selected).
   useEffect(() => {
-    if (instMode !== "search" || !instQuery || instQuery.length < 2) {
+    if (!institutionRequired || !instQuery || instQuery.length < 2) {
       setInstHits([]);
       return;
     }
@@ -132,7 +163,7 @@ export const IdentityFields = forwardRef<IdentityFieldsHandle, IdentityFieldsPro
       ctrl.abort();
       clearTimeout(t);
     };
-  }, [instQuery, instMode]);
+  }, [instQuery, institutionRequired]);
 
   const collect = useCallback((): CollectedIdentity | null => {
     const next: Record<string, string> = {};
@@ -143,16 +174,20 @@ export const IdentityFields = forwardRef<IdentityFieldsHandle, IdentityFieldsPro
     else if (countryCode && citySelected.countryCode && citySelected.countryCode !== countryCode) {
       next.city = "That city is not in the country you selected.";
     }
-    if (!phone.trim()) next.phone = "A phone number is required.";
-    const affiliated = accountType && AFFILIATED.has(accountType);
+    if (phoneDigits.length !== PHONE_LOCAL_DIGITS) {
+      next.phone = `Enter the ${PHONE_LOCAL_DIGITS} digits after ${PHONE_PREFIX}.`;
+    }
+
+    // Institution is entirely account-type-driven — there is no user-facing
+    // "no institution" choice. Affiliated types must resolve to a canonical ROR
+    // id; every other account submits NONE with no institution input at all.
     let institution: CollectedIdentity["institution"];
-    if (instMode === "none") {
-      if (affiliated) next.institution = "Students, instructors and researchers must select an institution.";
+    if (!institutionRequired) {
       institution = { status: "NONE" };
     } else if (instSelected) {
       institution = { status: "ROR", rorId: instSelected.rorId };
     } else {
-      next.institution = "Search for and select your institution (or choose 'no institution').";
+      next.institution = "Search for and select your institution.";
       institution = { status: "NONE" };
     }
 
@@ -163,47 +198,71 @@ export const IdentityFields = forwardRef<IdentityFieldsHandle, IdentityFieldsPro
       accountType: accountType as AccountTypeValue,
       countryCode,
       cityGeonamesId: citySelected!.geonamesId,
-      phone: { number: phone.trim(), defaultCountry: countryCode || null },
+      phone: { number: `${PHONE_PREFIX}${phoneDigits}`, defaultCountry: countryCode || DEFAULT_COUNTRY },
       institution,
     };
-  }, [fullName, accountType, countryCode, citySelected, phone, instMode, instSelected]);
+  }, [fullName, accountType, countryCode, citySelected, phoneDigits, institutionRequired, instSelected]);
 
   const isPristine = useCallback(
     () =>
       !fullName.trim() &&
       !accountType &&
-      !countryCode &&
-      !phone.trim() &&
+      (mode === "settings" ? !countryCode : countryCode === DEFAULT_COUNTRY) &&
+      !phoneDigits &&
       !citySelected &&
-      !instSelected &&
-      instMode === "search",
-    [fullName, accountType, countryCode, phone, citySelected, instSelected, instMode],
+      !instSelected,
+    [fullName, accountType, countryCode, phoneDigits, citySelected, instSelected, mode],
   );
 
   useImperativeHandle(ref, () => ({ collect, isPristine }), [collect, isPristine]);
 
-  const cityInputRef = useRef<HTMLInputElement>(null);
-
   return (
-    <div className="identity-fields">
-      <label className="auth-field">
+    <>
+      <p className="identity-section-lead">A few details about you. Your name, city and institution are checked against
+      official registries; nothing here is verified yet.</p>
+
+      <label>
         <span>Full name</span>
-        <input type="text" value={fullName} onChange={(e) => setFullName(e.target.value)} autoComplete="name" maxLength={200} disabled={disabled} required />
-        {errors.fullName && <em className="auth-field-error">{errors.fullName}</em>}
+        <input type="text" value={fullName} onChange={(e) => setFullName(e.target.value)} autoComplete="name" maxLength={200} placeholder="Your full name" disabled={disabled} required />
+        {errors.fullName && <em className="identity-field-error">{errors.fullName}</em>}
       </label>
 
-      <label className="auth-field">
+      <label>
         <span>Account type</span>
-        <select value={accountType} onChange={(e) => setAccountType(e.target.value as AccountTypeValue)} disabled={disabled} required>
-          <option value="" disabled>Select…</option>
+        <select
+          value={accountType}
+          onChange={(e) => {
+            const nextType = e.target.value as AccountTypeValue;
+            setAccountType(nextType);
+            // Institution follows account type. Moving to a non-affiliated type
+            // clears any chosen/typed institution (the account now submits NONE);
+            // moving back to an affiliated type therefore forces a fresh ROR
+            // selection instead of silently reusing a stale one.
+            if (!AFFILIATED.has(nextType)) {
+              setInstSelected(null);
+              setInstQuery("");
+              setInstHits([]);
+            }
+            if (errors.institution) {
+              setErrors((prev) => {
+                const rest = { ...prev };
+                delete rest.institution;
+                return rest;
+              });
+            }
+          }}
+          disabled={disabled}
+          required
+        >
+          <option value="" disabled>Select an account type…</option>
           {ACCOUNT_TYPES.map((t) => (
             <option key={t.value} value={t.value}>{t.label}</option>
           ))}
         </select>
-        {errors.accountType && <em className="auth-field-error">{errors.accountType}</em>}
+        {errors.accountType && <em className="identity-field-error">{errors.accountType}</em>}
       </label>
 
-      <label className="auth-field">
+      <label>
         <span>Country of residence</span>
         <select
           value={countryCode}
@@ -217,18 +276,17 @@ export const IdentityFields = forwardRef<IdentityFieldsHandle, IdentityFieldsPro
           disabled={disabled}
           required
         >
-          <option value="" disabled>Select…</option>
+          <option value="" disabled>Select a country…</option>
           {countries.map((c) => (
             <option key={c.code} value={c.code}>{c.name}</option>
           ))}
         </select>
-        {errors.countryCode && <em className="auth-field-error">{errors.countryCode}</em>}
+        {errors.countryCode && <em className="identity-field-error">{errors.countryCode}</em>}
       </label>
 
-      <label className="auth-field">
+      <label>
         <span>City</span>
         <input
-          ref={cityInputRef}
           type="text"
           value={cityQuery}
           onChange={(e) => {
@@ -251,29 +309,23 @@ export const IdentityFields = forwardRef<IdentityFieldsHandle, IdentityFieldsPro
                     setCityHits([]);
                   }}
                 >
-                  {c.name}
-                  {c.admin1 ? `, ${c.admin1}` : ""} — {c.countryName}
+                  <strong>{c.name}</strong>
+                  <span>{c.admin1 ? `${c.admin1} · ` : ""}{c.countryName}</span>
                 </button>
               </li>
             ))}
           </ul>
         )}
         {citySelected && <em className="identity-field-ok">Selected: {citySelected.name}</em>}
-        {errors.city && <em className="auth-field-error">{errors.city}</em>}
+        {errors.city && <em className="identity-field-error">{errors.city}</em>}
       </label>
 
-      <fieldset className="auth-field">
-        <legend>Institution / university</legend>
-        <label className="identity-radio">
-          <input type="radio" name="instMode" checked={instMode === "search"} onChange={() => setInstMode("search")} disabled={disabled} />
-          <span>Select my institution</span>
-        </label>
-        <label className="identity-radio">
-          <input type="radio" name="instMode" checked={instMode === "none"} onChange={() => setInstMode("none")} disabled={disabled} />
-          <span>No institution — I am independent</span>
-        </label>
-        {instMode === "search" && (
-          <>
+      {institutionRequired && (
+        <fieldset className="identity-institution">
+          <legend>Institution / university</legend>
+          <p className="identity-hint">Students, instructors and researchers must be affiliated with a
+          registered institution. Search the global registry and select yours.</p>
+          <div className="identity-institution-search">
             <input
               type="text"
               value={instSelected ? instSelected.name : instQuery}
@@ -284,6 +336,7 @@ export const IdentityFields = forwardRef<IdentityFieldsHandle, IdentityFieldsPro
               placeholder="Start typing your institution…"
               disabled={disabled}
               autoComplete="off"
+              aria-label="Institution or university"
             />
             {instHits.length > 0 && !instSelected && (
               <ul className="identity-typeahead" role="listbox">
@@ -297,33 +350,39 @@ export const IdentityFields = forwardRef<IdentityFieldsHandle, IdentityFieldsPro
                         setInstHits([]);
                       }}
                     >
-                      {i.name}
-                      {i.countryName ? ` — ${i.countryName}` : ""}
+                      <strong>{i.name}</strong>
+                      {i.countryName && <span>{i.countryName}</span>}
                     </button>
                   </li>
                 ))}
               </ul>
             )}
             {instSelected && <em className="identity-field-ok">Selected: {instSelected.name}</em>}
-          </>
-        )}
-        {errors.institution && <em className="auth-field-error">{errors.institution}</em>}
-      </fieldset>
+          </div>
+          {errors.institution && <em className="identity-field-error">{errors.institution}</em>}
+        </fieldset>
+      )}
 
-      <label className="auth-field">
+      <label>
         <span>Phone number</span>
-        <input
-          type="tel"
-          value={phone}
-          onChange={(e) => setPhone(e.target.value)}
-          placeholder="+1 415 555 2671"
-          autoComplete="tel"
-          disabled={disabled}
-          required
-        />
-        {errors.phone && <em className="auth-field-error">{errors.phone}</em>}
-        <em className="identity-field-hint">Not verified yet — stored so we can support future account recovery.</em>
+        <div className="identity-phone-group">
+          <span className="identity-phone-prefix" aria-hidden="true">{PHONE_PREFIX}</span>
+          <input
+            type="tel"
+            inputMode="numeric"
+            autoComplete="tel-national"
+            value={phoneDigits}
+            onChange={(e) => setPhoneDigits(e.target.value.replace(/\D/g, "").slice(0, PHONE_LOCAL_DIGITS))}
+            placeholder="555123456"
+            maxLength={PHONE_LOCAL_DIGITS}
+            aria-label={`Phone number, ${PHONE_LOCAL_DIGITS} digits after ${PHONE_PREFIX}`}
+            disabled={disabled}
+            required
+          />
+        </div>
+        {errors.phone && <em className="identity-field-error">{errors.phone}</em>}
+        <em className="identity-hint">Not verified yet — stored so we can support future account recovery.</em>
       </label>
-    </div>
+    </>
   );
 });

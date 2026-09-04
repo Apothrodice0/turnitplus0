@@ -1280,7 +1280,7 @@ export default function Home() {
                       </div>
                       <IdentityFields
                         ref={profileIdentityRef}
-                        disabled={false}
+                        mode="settings"
                         initial={accountIdentity ? {
                           fullName: accountIdentity.fullName ?? "",
                           accountType: accountIdentity.accountType,
@@ -1482,7 +1482,7 @@ export default function Home() {
                       </label>
                     )}
                     {(authMode ?? "login") === "signup" && (
-                      <IdentityFields ref={signupIdentityRef} disabled={isAuthenticating} />
+                      <IdentityFields ref={signupIdentityRef} mode="signup" disabled={isAuthenticating} />
                     )}
                     {(authMode ?? "login") === "login" && (
                       <div className="auth-form-row">
