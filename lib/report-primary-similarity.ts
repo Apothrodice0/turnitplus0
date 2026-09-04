@@ -356,6 +356,19 @@ export async function resolvePrimarySimilaritySummary(
   // used solely as a SQL comparison value, never appears in anything this
   // function (or any of its callers) returns.
   const excludeAccountId = params.accountId ?? undefined;
+  // Mandatory cross-account corpus lookup: this call is deliberately NOT
+  // gated on users.corpus_reuse_consented_at (or any other per-account
+  // preference) — every authenticated report performs this lookup, subject
+  // only to the global isCorpusSourceMatchingEnabled() flag captured above.
+  // That column is a SEPARATE, still-consent-gated primitive governing
+  // corpus ADMISSION only — whether *this account's own* future uploads may
+  // be added to the searchable corpus (see app/api/reports/route.ts's
+  // pending-admission-job creation and lib/corpus-admission-report-
+  // integration.ts's fresh re-check) — not whether this account's reports
+  // may search it. Do not reintroduce a consent check on this call; that
+  // would silently make cross-account checking optional again, which the
+  // product decision (mandatory corpus lookup, no user-facing toggle)
+  // explicitly forbids.
   const historicalSubmissionMatch = await getOrComputeHistoricalMatchSnapshot(client, {
     reportDeviceKey: params.reportDeviceKey,
     reportId: params.reportId,

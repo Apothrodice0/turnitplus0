@@ -1430,39 +1430,6 @@ main.report-main {
   box-shadow: 0 0 0 4px rgba(0, 127, 186, 0.1);
 }
 
-.account-consent-toggle {
-  display: flex;
-  align-items: flex-start;
-  gap: 11px;
-  margin-top: 15px;
-  padding: 13px 15px;
-  border: 1px solid #cadce4;
-  border-radius: 12px;
-  background: #f7fafb;
-}
-
-.account-consent-toggle input {
-  margin-top: 3px;
-  accent-color: var(--blue);
-}
-
-.account-consent-toggle span {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.account-consent-toggle strong {
-  font-size: 11px;
-  color: var(--ink);
-}
-
-.account-consent-toggle small {
-  font-size: 10px;
-  line-height: 1.5;
-  color: var(--muted);
-}
-
 .account-edit-actions {
   display: flex;
   justify-content: flex-end;

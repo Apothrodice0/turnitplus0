@@ -95,7 +95,15 @@ const ACCOUNT_DELETION_CONFIRMATION_PHRASE = "DELETE MY ACCOUNT";
 // manually refreshed, even though the session cookie was already cleared.
 const SIGNED_OUT_BROADCAST_KEY = "tp_signed_out_broadcast";
 type LegalTab = "privacy" | "terms";
-type LocalAccount = { username: string; email: string; corpusReuseConsent: boolean };
+// Deliberately no cross-account-consent field here: cross-account TurnitPlus
+// corpus lookup is mandatory for every authenticated report and carries no
+// user-facing preference (see submitProfileEdit below and lib/report-primary-
+// similarity.ts). The server's /api/auth/me|login|signup responses still
+// carry a legacy per-account consent boolean of the same name — that is a
+// separate, still-consent-gated *corpus-admission* primitive (lib/corpus-
+// admission-report-integration.ts), not a lookup toggle — and this client
+// intentionally no longer reads it.
+type LocalAccount = { username: string; email: string };
 // Structured identity is collected once, at signup, and is not re-shown or
 // re-editable on the Account page (product decision) — so no identity view
 // type is kept here. /api/auth/me still returns it (untouched, unread by this
@@ -525,18 +533,21 @@ export default function Home() {
     navigate("welcome");
   }
 
-  // Display-name / email / corpus-reuse-consent only. Structured identity is
-  // collected once at signup (unchanged, still mandatory there) and is not
-  // re-shown or re-editable from this form — the Account page never sends an
-  // `identity` payload, so /api/auth/me's identity handling is simply unused
-  // from here rather than removed.
+  // Display-name / email only. Structured identity is collected once at
+  // signup (unchanged, still mandatory there) and is not re-shown or
+  // re-editable from this form — the Account page never sends an `identity`
+  // payload, so /api/auth/me's identity handling is simply unused from here
+  // rather than removed. Cross-account corpus checking is mandatory and not
+  // a user preference (see the LocalAccount comment above), so this form has
+  // no consent field and never sends one — /api/auth/me's PATCH handler
+  // still accepts that legacy field for other callers/back-compat, but this
+  // client intentionally omits it from its request body.
   async function submitProfileEdit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!account) return;
     const data = new FormData(event.currentTarget);
     const username = String(data.get("profileUsername") ?? "").trim();
     const email = String(data.get("profileEmail") ?? "").trim();
-    const corpusReuseConsent = data.get("corpusReuseConsent") === "on";
 
     setProfileEditError(null);
     let response: Response;
@@ -544,7 +555,7 @@ export default function Home() {
       response = await fetch("/api/auth/me", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username, email, corpusReuseConsent }),
+        body: JSON.stringify({ username, email }),
       });
     } catch {
       setProfileEditError("Could not reach TurnitPlus. Check your connection and try again.");
@@ -1334,13 +1345,6 @@ export default function Home() {
                           <input name="profileEmail" type="email" defaultValue={account.email} autoComplete="email" required />
                         </label>
                       </div>
-                      <label className="account-consent-toggle">
-                        <input name="corpusReuseConsent" type="checkbox" defaultChecked={account.corpusReuseConsent} />
-                        <span>
-                          <strong>Check my uploads against other TurnitPlus users&apos; submissions</strong>
-                          <small>Off by default. When on, future uploads you save may be compared against documents other signed-in users have submitted, and vice versa, to flag prior submissions. Your document text is never shown to another account &mdash; only that a prior submission exists. Turning this off stops future uploads from being added; it does not remove documents already indexed while it was on (delete the report to remove those).</small>
-                        </span>
-                      </label>
                       {profileEditError && <p className="auth-form-error" role="alert">{profileEditError}</p>}
                       <div className="account-edit-actions">
                         <button className="button subtle" type="button" onClick={() => setIsEditingProfile(false)}>Cancel</button>
@@ -1349,11 +1353,6 @@ export default function Home() {
                     </form>
                   )}
                   <div className="account-profile-status"><Check aria-hidden="true" /> Your account session is active on this device.</div>
-                  <div className="account-profile-status">
-                    {account.corpusReuseConsent
-                      ? "Cross-account prior-submission checking is ON for your uploads."
-                      : "Cross-account prior-submission checking is OFF for your uploads (default)."}
-                  </div>
                   {uploadLimitStatus && uploadLimitStatus.authenticated && (
                     <div className="account-profile-status">
                       {uploadLimitStatus.unlimited

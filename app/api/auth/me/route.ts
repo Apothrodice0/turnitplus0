@@ -6,7 +6,6 @@ import { clientIpFrom } from '../../../../lib/client-ip';
 import { getSessionUser, clearSessionCookie } from '../../../../lib/auth-session';
 import { verifyPassword } from '../../../../lib/auth-crypto';
 import { deleteAccountData, invalidateSessionsAndDeleteUser, ACCOUNT_DELETION_CONFIRMATION_PHRASE } from '../../../../lib/account-deletion';
-import { revokeConsentAndCancelPendingAdmissionJobs } from '../../../../lib/corpus-admission-report-integration';
 import { isCrossOriginBrowserRequest, CROSS_ORIGIN_REJECTED } from '../../../../lib/same-origin';
 import { resolveSignupIdentity } from '../../../../lib/account-identity-signup';
 import { readAccountIdentityProfile, accountIdentityProfileUpsertStatement } from '../../../../lib/account-identity-repo';
@@ -178,10 +177,15 @@ export async function PATCH(request: Request) {
         { status: 400, headers: { 'Content-Type': 'application/json' } },
       );
     }
-    // Privacy hardening: optional — omitting the field leaves existing
-    // consent state untouched (a plain profile-only update never silently
-    // revokes or grants it). When present it must be a real boolean; this
-    // is the only place users.corpus_reuse_consented_at is ever written.
+    // Product decision: cross-account TurnitPlus corpus checking is
+    // mandatory for every authenticated account and carries no account
+    // preference — there is no UI control that sends this field any more
+    // (see app/page.tsx). Accepted here only for request-shape back-compat
+    // with any caller still sending it: validated if present, then
+    // completely ignored — it is never written to
+    // users.corpus_reuse_consented_at (that column is now a vestigial
+    // historical timestamp, see db/schema.ts) and can no longer grant,
+    // revoke, or block anything.
     if (corpusReuseConsent !== undefined && typeof corpusReuseConsent !== 'boolean') {
       return new NextResponse(JSON.stringify({ error: 'corpusReuseConsent must be a boolean.' }), { status: 400 });
     }
@@ -243,44 +247,13 @@ export async function PATCH(request: Request) {
       };
 
       try {
-      if (corpusReuseConsent !== undefined) {
-        // Corpus-admission consent revocation (production audit fix):
-        // synchronous, in this same request — not deferred, for the same
-        // durability reason app/api/reports/route.ts's job creation is not
-        // deferred (see lib/corpus-admission-report-integration.ts's own
-        // header comment). Only fires on an actual true->false transition;
-        // granting consent, or a no-op PATCH that leaves it unchanged, never
-        // triggers this and takes the plain single-statement path below.
-        //
-        // On a real revocation, the profile-fields UPDATE deliberately does
-        // NOT touch corpus_reuse_consented_at at all — that write happens
-        // atomically, together with cancelling this account's still-
-        // pending/failed admission jobs, inside
-        // revokeConsentAndCancelPendingAdmissionJobs's own transaction, so
-        // there is never a window where consent has been flipped but
-        // cancellation has not (or vice versa). Already-accepted corpus
-        // content is untouched either way — see that function's own header
-        // comment.
-        if (corpusReuseConsent === false && sessionUser.corpusReuseConsented === true) {
-          // username / email / profile / email-change writes go together first;
-          // the consent revocation then runs in its own transaction (below).
-          await applyAccountWrites({
-            sql: 'UPDATE users SET username = ?, email = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
-            args: [trimmedUsername, normalizedEmail, sessionUser.id],
-          });
-          await revokeConsentAndCancelPendingAdmissionJobs(sessionUser.id, () => getReportsDbClient());
-        } else {
-          await applyAccountWrites({
-            sql: 'UPDATE users SET username = ?, email = ?, corpus_reuse_consented_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
-            args: [trimmedUsername, normalizedEmail, corpusReuseConsent ? new Date().toISOString() : null, sessionUser.id],
-          });
-        }
-      } else {
+        // corpusReuseConsent (if the request body sent it at all) is
+        // intentionally never applied to any write — see the validation
+        // comment above. Every PATCH takes this one plain path regardless.
         await applyAccountWrites({
           sql: 'UPDATE users SET username = ?, email = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
           args: [trimmedUsername, normalizedEmail, sessionUser.id],
         });
-      }
       } catch (writeErr) {
         const message = writeErr instanceof Error ? writeErr.message : String(writeErr);
         if (/UNIQUE constraint failed: users\.email/i.test(message)) {
@@ -293,7 +266,6 @@ export async function PATCH(request: Request) {
         );
       }
 
-      const resolvedConsent = corpusReuseConsent !== undefined ? corpusReuseConsent : sessionUser.corpusReuseConsented;
       const storedProfile = await readAccountIdentityProfile(client, sessionUser.id);
       let storedVerifiedAt: number | null = null;
       if (emailVerifiedColumnExists) {
@@ -306,7 +278,8 @@ export async function PATCH(request: Request) {
       }
       return new NextResponse(
         JSON.stringify({
-          user: { username: trimmedUsername, email: normalizedEmail, corpusReuseConsent: resolvedConsent },
+          // Always true — see the validation comment above.
+          user: { username: trimmedUsername, email: normalizedEmail, corpusReuseConsent: true },
           identity: storedProfile ? identityView(storedProfile) : null,
           // A3 — from the authoritative users.email_verified_at, re-read after
           // the write: an email change here cleared it, so this returns

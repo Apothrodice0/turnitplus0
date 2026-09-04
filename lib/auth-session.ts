@@ -61,11 +61,15 @@ export type SessionUser = {
   username: string;
   email: string;
   /**
-   * Privacy hardening: true only when users.corpus_reuse_consented_at is
-   * non-NULL — see db/schema.ts's own comment on that column. Read here
-   * (rather than a second query at each call site) so every session lookup
-   * carries it for free; app/api/reports/route.ts gates
-   * indexDocumentSubmissionIntoCorpus on this being true.
+   * Product decision: cross-account TurnitPlus corpus checking (both
+   * lookup and corpus-admission eligibility) is mandatory for every
+   * authenticated account — no per-account preference can disable it.
+   * Always `true` for a resolved session; users.corpus_reuse_consented_at
+   * is no longer read here (see db/schema.ts's own comment on that column,
+   * now a vestigial historical timestamp). Kept as a field (rather than
+   * removed) so existing callers — app/api/reports/route.ts's admission-
+   * job creation, app/api/auth/me's GET response — need no shape change,
+   * even though its value can no longer vary.
    */
   corpusReuseConsented: boolean;
   /**
@@ -113,13 +117,13 @@ export async function getSessionUserByToken(token: string | null, client: Client
   if (!token) return null;
   const tokenHash = hashToken(token);
   const result = await client.execute({
-    sql: `SELECT sessions.expires_at as expires_at, users.id as id, users.username as username, users.email as email, users.corpus_reuse_consented_at as corpus_reuse_consented_at, users.role as role
+    sql: `SELECT sessions.expires_at as expires_at, users.id as id, users.username as username, users.email as email, users.role as role
           FROM sessions JOIN users ON users.id = sessions.user_id
           WHERE sessions.token_hash = ?`,
     args: [tokenHash],
   });
   const row = result.rows[0] as unknown as
-    | { expires_at: number | bigint; id: string; username: string; email: string; corpus_reuse_consented_at: string | null; role: string }
+    | { expires_at: number | bigint; id: string; username: string; email: string; role: string }
     | undefined;
   if (!row) return null;
   if (Number(row.expires_at) <= Date.now()) {
@@ -130,7 +134,9 @@ export async function getSessionUserByToken(token: string | null, client: Client
     id: row.id,
     username: row.username,
     email: row.email,
-    corpusReuseConsented: row.corpus_reuse_consented_at !== null,
+    // See the SessionUser type's own comment: mandatory, not read from the
+    // users row any more.
+    corpusReuseConsented: true,
     role: toUserRole(row.role),
   };
 }

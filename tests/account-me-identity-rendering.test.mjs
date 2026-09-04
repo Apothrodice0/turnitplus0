@@ -271,7 +271,12 @@ async function test(name, fn) {
   await test('STRUCTURAL: the profile-edit form no longer collects or sends an identity payload', () => {
     const editFn = src.slice(src.indexOf('async function submitProfileEdit'), src.indexOf('async function sendEmailVerification'));
     assert.doesNotMatch(editFn, /identityPayload|identityHandle|CollectedIdentity/, 'submitProfileEdit must not reference an identity payload any more');
-    assert.match(editFn, /JSON\.stringify\(\{ username, email, corpusReuseConsent \}\)/, 'the PATCH body is exactly {username, email, corpusReuseConsent}');
+    // Product decision (mandatory cross-account corpus checking, no user
+    // preference): the PATCH body no longer carries a consent field at all —
+    // see tests/corpus-lookup-mandatory.test.mjs for the full removal proof
+    // (checkbox, paragraph, ON/OFF banner, CSS hook).
+    assert.match(editFn, /JSON\.stringify\(\{ username, email \}\)/, 'the PATCH body is exactly {username, email} — no consent field');
+    assert.doesNotMatch(editFn, /corpusReuseConsent/, 'submitProfileEdit must not reference the removed consent field any more');
   });
 }
 

@@ -177,7 +177,10 @@ export async function POST(request: Request) {
       const { display } = identityResult.identity;
       const response = new NextResponse(
         JSON.stringify({
-          user: { username: trimmedUsername, email: normalizedEmail, corpusReuseConsent: false },
+          // Product decision: cross-account TurnitPlus corpus checking is
+          // mandatory for every account, from the moment it's created — no
+          // opt-in step, no account preference can disable it.
+          user: { username: trimmedUsername, email: normalizedEmail, corpusReuseConsent: true },
           identity: {
             accountType: display.accountType,
             countryCode: display.countryCode,

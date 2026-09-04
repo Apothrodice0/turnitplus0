@@ -33,8 +33,8 @@ export async function POST(request: Request) {
 
     const client = await getReportsDbClient();
     try {
-      const result = await client.execute({ sql: 'SELECT id, username, password_hash, corpus_reuse_consented_at FROM users WHERE email = ?', args: [normalizedEmail] });
-      const row = result.rows[0] as unknown as { id: string; username: string; password_hash: string; corpus_reuse_consented_at: string | null } | undefined;
+      const result = await client.execute({ sql: 'SELECT id, username, password_hash FROM users WHERE email = ?', args: [normalizedEmail] });
+      const row = result.rows[0] as unknown as { id: string; username: string; password_hash: string } | undefined;
 
       if (!row) {
         // Run a dummy derivation so response timing doesn't reveal whether
@@ -56,7 +56,13 @@ export async function POST(request: Request) {
 
       const token = await createSession(client, row.id);
       const response = new NextResponse(
-        JSON.stringify({ user: { username: row.username, email: normalizedEmail, corpusReuseConsent: row.corpus_reuse_consented_at !== null } }),
+        // Product decision: cross-account TurnitPlus corpus checking is
+        // mandatory for every authenticated account — no account preference
+        // can disable it, so this is always true (see lib/auth-session.ts's
+        // SessionUser.corpusReuseConsented for the single-source-of-truth
+        // rationale; this route derives its own response rather than a
+        // session lookup, so it is hardcoded here to match).
+        JSON.stringify({ user: { username: row.username, email: normalizedEmail, corpusReuseConsent: true } }),
         { status: 200, headers: { 'Content-Type': 'application/json' } },
       );
       setSessionCookie(response, token, remember === true);

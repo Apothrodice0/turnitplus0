@@ -44,13 +44,15 @@ export { buildReportAdmissionSourceRef };
  *    runReportAdmissionRetrySweep to find later. This function only ever
  *    ensures a row exists (INSERT ... ON CONFLICT DO NOTHING) — it never
  *    disturbs an existing job's status/decision_id/attempt_count.
- *  - Consent re-checked fresh, every time: processReportAdmissionJob takes
- *    no "consented" parameter at all — it always re-reads
- *    users.corpus_reuse_consented_at itself, on a connection obtained via
- *    the caller's openConnection factory, opened and closed immediately
- *    around that one check. A caller cannot pass a stale snapshot because
- *    there is no parameter for one. This runs identically whether the
- *    caller is the original deferred attempt, a manual retry, or a sweep.
+  *  - Mandatory, not consent-gated: product decision — cross-account
+ *    TurnitPlus corpus-admission eligibility applies to every authenticated
+ *    account, with no per-account preference able to block it.
+ *    processReportAdmissionJob no longer reads or re-checks
+ *    users.corpus_reuse_consented_at at all (that column is now a vestigial
+ *    historical timestamp — see db/schema.ts's own comment on it); the
+ *    "consent_not_granted" job outcome this module used to produce no
+ *    longer exists. This runs identically whether the caller is the
+ *    original deferred attempt, a manual retry, or a sweep.
  *  - Atomic retry sweep: runReportAdmissionRetrySweep claims a batch of
  *    pending/failed jobs inside one real write transaction (the same
  *    BEGIN IMMEDIATE mechanism this session's cross-process work already
@@ -61,19 +63,18 @@ export { buildReportAdmissionSourceRef };
  *    same job.
  *  - Accepted corpus content is durable — retention policy, not a
  *    self-service toggle: once a candidate has been ACCEPTed (a decision
- *    row with a corpus_admission_content_store row), neither revoking the
- *    submitting account's consent NOR deleting the report or account ever
- *    removes it. This mirrors the real corpus's own existing behavior
- *    (lib/report-deletion.ts's own header comment: shared corpus content
- *    outlives the submission that produced it) — consent and deletion
- *    govern what happens to FUTURE/PENDING work for an account, never what
- *    already became part of the shared, reusable corpus:
- *      - revokeConsentAndCancelPendingAdmissionJobs (called from
- *        PATCH /api/auth/me on a true->false transition) flips the consent
- *        flag and cancels this account's still-'pending'/'failed' jobs
- *        (nothing not-yet-accepted survives to be processed later) —
- *        atomically, in one transaction — but never touches a 'succeeded'
- *        job or its decision/content/fingerprint rows, accepted or not.
+ *    row with a corpus_admission_content_store row), deleting the report or
+ *    account never removes it. This mirrors the real corpus's own existing
+ *    behavior (lib/report-deletion.ts's own header comment: shared corpus
+ *    content outlives the submission that produced it):
+ *      - revokeConsentAndCancelPendingAdmissionJobs still exists (some
+ *        callers/tests use it directly) but PATCH /api/auth/me no longer
+ *        calls it — since corpus-admission eligibility can no longer be
+ *        disabled per-account, there is nothing left for an account action
+ *        to revoke. If called directly, it still flips the (now-vestigial)
+ *        consent flag and cancels this account's still-'pending'/'failed'
+ *        jobs atomically, but never touches a 'succeeded' job or its
+ *        decision/content/fingerprint rows, accepted or not.
  *      - deleteReportCorpusAdmissionData (report/account deletion) always
  *        removes this report's own job-tracking row, but only removes the
  *        decision row (and cascaded content/fingerprint) when that
@@ -198,14 +199,16 @@ export async function createPendingReportAdmissionJob(client: Client, params: Cr
 export type ReportAdmissionOutcome =
   | { outcome: "disabled" }
   | { outcome: "already_succeeded"; jobId: string; decisionId: string | null }
+  // "cancelled" jobs still exist (e.g. a direct call to
+  // revokeConsentAndCancelPendingAdmissionJobs, or report/account deletion)
+  // even though no per-account preference can produce one any more.
   | { outcome: "terminal"; jobId: string; status: "cancelled" }
-  | { outcome: "consent_not_granted"; jobId: string }
   | { outcome: "succeeded"; jobId: string; decisionId: string; decision: CorpusAdmissionDecisionRecord["decision"] }
   | { outcome: "failed"; jobId: string; error: string };
 
 export type ProcessReportAdmissionJobParams = {
   jobId: string;
-  /** Required — used both for the fresh consent re-check and for the admission gate's own write-retry paths. */
+  /** Required — used for the admission gate's own write-retry paths. */
   openConnection: CorpusAdmissionConnectionFactory;
   /**
    * Test-only fault injection (mirrors lib/corpus-admission-promotion.ts's
@@ -454,12 +457,9 @@ export async function processReportAdmissionJob(client: Client, params: ProcessR
   // REJECT and orphans the first ACCEPT without its provenance — the exact
   // corruption this fix exists to prevent.
   //
-  // Consent is not re-checked here: it was verified when the decision was
-  // made, and a revocation since then moves a 'pending'/'failed' job to
-  // 'cancelled' (caught by the guard above), so reaching this branch means a
-  // committed decision is still owed its finalization. The decision and any
-  // accepted content it reuses are durable by policy regardless — see this
-  // module's own header comment.
+  // Reaching this branch means a committed decision is still owed its
+  // finalization. The decision and any accepted content it reuses are
+  // durable by policy regardless — see this module's own header comment.
   if (job.decisionId != null) {
     const decisionKind = await fetchDecisionKind(client, job.decisionId);
     if (decisionKind != null) {
@@ -487,22 +487,10 @@ export async function processReportAdmissionJob(client: Client, params: ProcessR
     // be a clean first ACCEPT). Fall through to a fresh evaluation.
   }
 
-  const consentClient = await params.openConnection();
-  let consented: boolean;
-  try {
-    const result = await consentClient.execute({ sql: "SELECT corpus_reuse_consented_at FROM users WHERE id = ?", args: [job.accountId] });
-    const row = result.rows[0] as unknown as { corpus_reuse_consented_at: string | null } | undefined;
-    consented = row?.corpus_reuse_consented_at != null;
-  } finally {
-    consentClient.close();
-  }
-  if (!consented) {
-    await executeJobWriteWithRetry(params.openConnection, {
-      sql: "UPDATE corpus_admission_report_jobs SET status = 'cancelled', claimed_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-      args: [job.id],
-    });
-    return { outcome: "consent_not_granted", jobId: job.id };
-  }
+  // Product decision: corpus-admission eligibility is mandatory for every
+  // authenticated account — there is no per-account preference left to
+  // re-check here (see this module's own header comment; the
+  // "consent_not_granted" outcome this used to produce no longer exists).
 
   const reportResult = await client.execute({
     sql: "SELECT payload_json FROM saved_reports WHERE device_key = ? AND id = ?",
@@ -742,37 +730,34 @@ function revocationBackoff(attempt: number): Promise<void> {
 }
 
 /**
- * Called synchronously from PATCH /api/auth/me the moment consent flips
- * from true to false — not deferred, for the same durability reason job
- * creation is not deferred (a durability-critical write must not depend on
- * a callback that might never run).
+ * NOT called by PATCH /api/auth/me any more (product decision: corpus-
+ * admission eligibility is mandatory for every authenticated account, so
+ * there is no account action left that should revoke/cancel anything —
+ * see this module's own header comment). Kept for its own direct test
+ * coverage and as a primitive some future explicitly admin-triggered flow
+ * could still reuse; no production caller reaches it today.
  *
  * Deliberately narrow: this is a consent change, not a takedown request.
  * It affects only work that has not yet been accepted —
- *  1. users.corpus_reuse_consented_at set to NULL (no new admission
- *     attempts will pass the fresh consent check processReportAdmissionJob
- *     always performs).
+ *  1. users.corpus_reuse_consented_at (now a vestigial historical
+ *     timestamp — processReportAdmissionJob no longer reads it) set to
+ *     NULL.
  *  2. Every job still 'pending' or 'failed' for this account is cancelled
  *     (status='cancelled') — nothing not-yet-accepted survives to be
  *     processed later.
  * It never touches a 'succeeded' job, its decision row, its retained
  * corpus_admission_content_store text, or its accepted_representations
- * fingerprint — accepted corpus content is durable and outlives a later
- * consent change, exactly as it outlives report/account deletion (see
- * deleteReportCorpusAdmissionData). revoked_at stays unset here; it is
- * reserved for a future, explicitly admin-triggered removal flow.
+ * fingerprint — accepted corpus content is durable, exactly as it outlives
+ * report/account deletion (see deleteReportCorpusAdmissionData). revoked_at
+ * stays unset here; it is reserved for a future, explicitly admin-triggered
+ * removal flow.
  *
  * Atomic: both writes run inside ONE real write transaction (the same
  * BEGIN IMMEDIATE + fresh-connection-per-retry mechanism used throughout
  * this module and lib/corpus-admission-gate.ts) — either both commit or
  * neither does. A caller that gets an exception (retries exhausted, or an
  * unexpected error) is guaranteed the account's data is completely
- * unchanged, exactly as if the call had never been made — so simply
- * calling it again (exactly what happens if the browser retries a failed
- * PATCH /api/auth/me) is always safe and will eventually succeed once the
- * transient condition clears; no separate persistent retry-job bookkeeping
- * is needed for this operation, because a rolled-back attempt has done
- * nothing to redo.
+ * unchanged, exactly as if the call had never been made.
  */
 export async function revokeConsentAndCancelPendingAdmissionJobs(
   accountId: string,

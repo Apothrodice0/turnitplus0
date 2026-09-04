@@ -243,13 +243,16 @@ export const users = sqliteTable(
     password_hash: text("password_hash").notNull(),
     created_at: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
     updated_at: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
-    // Privacy hardening (0023): explicit opt-in for the cross-account
-    // matching corpus (lib/user-submission-corpus.ts). NULL (the default for
-    // every existing and new account) means indexDocumentSubmissionIntoCorpus
-    // is never called for this account's uploads — see
-    // app/api/reports/route.ts. Non-NULL records *when* consent was granted,
-    // matching this schema's existing declared_at/confirmed_at/revoked_at
-    // convention (reuse_context_declarations) rather than a plain boolean.
+    // VESTIGIAL (originally privacy hardening, 0023): cross-account
+    // TurnitPlus corpus checking — both lookup (lib/report-primary-
+    // similarity.ts) and corpus-admission eligibility (lib/corpus-admission-
+    // report-integration.ts) — is now mandatory for every authenticated
+    // account, a later product decision with no per-account preference. No
+    // production code reads or writes this column for a behavioral decision
+    // any more (app/api/auth/me's PATCH accepts the field for request-shape
+    // back-compat but ignores it — see that route's own comment); it is not
+    // migrated away since it costs nothing to leave. Never re-purpose it as
+    // a gate again without checking every caller this comment used to list.
     corpus_reuse_consented_at: text("corpus_reuse_consented_at"),
     // Developer/admin authorization (0025). "user" for every existing and
     // new account by default — the only way a row ever becomes "admin" is

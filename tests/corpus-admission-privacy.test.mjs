@@ -41,10 +41,15 @@ test("lib/corpus-admission-gate.ts only imports the two READ functions from lib/
 // guarantees; (2) the set of app/ files using that one door is closed and
 // explicit, not open-ended.
 const ALLOWED_CORPUS_ADMISSION_DOOR = "corpus-admission-report-integration";
+// app/api/auth/me/route.ts used to import revokeConsentAndCancelPendingAdmissionJobs
+// here — removed (not merely stopped using it) once corpus-admission
+// eligibility became mandatory for every authenticated account: there is no
+// account action left that should revoke/cancel anything, so PATCH no longer
+// has any reason to reach this module at all. See that route's own comment
+// and this module's own header comment.
 const EXPECTED_APP_FILES_USING_THE_DOOR = [
   "app/api/reports/route.ts",
   "app/api/reports/[id]/route.ts",
-  "app/api/auth/me/route.ts",
   "app/api/internal/corpus-admission-sweep/route.ts",
 ];
 // The admin-only corpus dashboard (below) is a second, deliberately separate

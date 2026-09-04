@@ -784,12 +784,16 @@ export async function POST(request: Request) {
       // was ever supposed to happen; this durable 'pending' row is what a
       // later corpus-admission retry sweep (lib/corpus-admission-report-
       // integration.ts's runReportAdmissionRetrySweep) can find and
-      // process instead. Gated on sessionUser.corpusReuseConsented (the
-      // request-time snapshot) purely to avoid creating a pointless row for
-      // every non-consenting upload — the actual admission work, run
-      // below, always re-checks consent fresh regardless of this snapshot.
+      // process instead. Product decision: corpus-admission eligibility is
+      // mandatory for every authenticated account, no per-account
+      // preference can block it — createPendingReportAdmissionJob's own
+      // CORPUS_ADMISSION_ENABLED flag check is the only remaining gate
+      // (still off by default), and processReportAdmissionJob below no
+      // longer re-checks or can be blocked by users.corpus_reuse_consented_at
+      // either (see that function's own header comment) — that column is
+      // now a vestigial historical timestamp (db/schema.ts).
       let pendingAdmissionJobId: string | null = null;
-      if (rawText && isFirstSaveOfThisReport && userId !== null && sessionUser?.corpusReuseConsented) {
+      if (rawText && isFirstSaveOfThisReport && userId !== null) {
         // Device Passport (Phase 2): the verified upload passport is copied
         // onto the job here, from the verified upload context — never
         // re-derived later. processReportAdmissionJob reads it back from the
@@ -868,18 +872,16 @@ export async function POST(request: Request) {
             // Controlled ADMISSION is wired below: processReportAdmissionJob
             // runs the full corpus-admission gate (lib/corpus-admission-
             // gate.ts — English-only, 3000-word minimum, quality scoring,
-            // retention/consent, "first accepted sample wins" family-
-            // duplicate checks) against the job row already created
-            // SYNCHRONOUSLY above (before this deferred callback ever
-            // started — see that call site's own comment for why), and
-            // records its own audit trail, entirely behind
-            // CORPUS_ADMISSION_ENABLED (off by default) and a fresh,
-            // request-time-independent re-check of
-            // users.corpus_reuse_consented_at — see
-            // lib/corpus-admission-report-integration.ts's own header
-            // comment for why sessionUser.corpusReuseConsented (captured
-            // earlier in this same request) is deliberately never trusted
-            // for the actual admission decision. As of the automatic-
+            // retention, "first accepted sample wins" family-duplicate
+            // checks) against the job row already created SYNCHRONOUSLY
+            // above (before this deferred callback ever started — see that
+            // call site's own comment for why), and records its own audit
+            // trail, entirely behind CORPUS_ADMISSION_ENABLED (off by
+            // default). Product decision: corpus-admission eligibility is
+            // mandatory for every authenticated account — no per-account
+            // preference gates it any more, so there is no consent re-check
+            // here (see lib/corpus-admission-report-integration.ts's own
+            // header comment). As of the automatic-
             // promotion fix, processReportAdmissionJob also immediately
             // stages and attempts to promote a fresh ACCEPT into the real
             // reusable corpus (never the account-linked

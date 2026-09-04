@@ -203,23 +203,41 @@ test("CRASH-BEFORE-AFTER(): a pending job created synchronously survives even if
   assert.equal(await decisionCountFor(sourceRef), 1);
 });
 
-// --- consent-gated, re-checked fresh (never a snapshot) ------------------
+// --- MANDATORY: consent can no longer block or cancel processing --------
 
-test("CONSENT-REVOCATION RACE: consent granted at job-creation time, then revoked before processing runs — the fresh re-check sees the revocation and cancels the job", async () => {
+test("MANDATORY: an account whose corpus_reuse_consented_at is NULL at job-creation time, and stays NULL, still gets its job evaluated and can ACCEPT — corpus-admission eligibility carries no per-account preference any more", async () => {
+  process.env.CORPUS_ADMISSION_ENABLED = "true";
+  const accountId = await ensureUser(false); // never consented — the only state any account can reach with the UI checkbox gone
+  const { deviceKey, reportId } = await seedSavedReport(accountId, plausibleArticleText(9501));
+  const sourceRef = buildReportAdmissionSourceRef({ accountId, deviceKey, reportId });
+  assert.equal(await consentedAtFor(accountId), null, "test setup sanity: genuinely never consented");
+
+  const created = await createPendingReportAdmissionJob(client, { accountId, deviceKey, reportId });
+  const outcome = await processReportAdmissionJob(client, { jobId: created.jobId, openConnection });
+  assert.equal(outcome.outcome, "succeeded", "REQUIRED: a never-consented account's job must still be evaluated and can succeed");
+  assert.equal(outcome.decision, "ACCEPT");
+
+  const job = await jobRowFor(sourceRef);
+  assert.equal(job.status, "succeeded");
+  assert.equal(await decisionCountFor(sourceRef), 1);
+});
+
+test("MANDATORY: consent granted at job-creation time, then revoked (via direct SQL, simulating any external actor) before processing runs — processing is unaffected; the job still evaluates and can succeed, it is never cancelled for lack of consent", async () => {
   process.env.CORPUS_ADMISSION_ENABLED = "true";
   const accountId = await ensureUser(true);
-  const { deviceKey, reportId } = await seedSavedReport(accountId, plausibleArticleText(2));
+  const { deviceKey, reportId } = await seedSavedReport(accountId, plausibleArticleText(9502));
   const sourceRef = buildReportAdmissionSourceRef({ accountId, deviceKey, reportId });
 
   const created = await createPendingReportAdmissionJob(client, { accountId, deviceKey, reportId });
-  await setConsent(accountId, false); // simulates PATCH /api/auth/me revoking consent before processing runs
+  await setConsent(accountId, false); // no production caller can do this any more (PATCH /api/auth/me no longer touches this column) — simulated directly to prove processing is now independent of it regardless of how it changed
 
   const outcome = await processReportAdmissionJob(client, { jobId: created.jobId, openConnection });
-  assert.deepEqual(outcome, { outcome: "consent_not_granted", jobId: created.jobId });
+  assert.equal(outcome.outcome, "succeeded", "REQUIRED: the job must still be evaluated normally — no code path may cancel it for a consent value that changed after creation");
+  assert.equal(outcome.decision, "ACCEPT");
 
   const job = await jobRowFor(sourceRef);
-  assert.equal(job.status, "cancelled");
-  assert.equal(await decisionCountFor(sourceRef), 0);
+  assert.equal(job.status, "succeeded");
+  assert.equal(await decisionCountFor(sourceRef), 1);
 });
 
 // --- successful admission ----------------------------------------------
@@ -333,8 +351,10 @@ test("FAILURE-STATUS: a genuine admission failure is persisted to corpus_admissi
   const sourceRef = buildReportAdmissionSourceRef({ accountId, deviceKey, reportId });
   const created = await createPendingReportAdmissionJob(client, { accountId, deviceKey, reportId });
 
-  // Fails on exactly the 2nd call (the gate's own first internal write
-  // attempt, right after the 1st call serves the fresh consent check) and
+  // Fails on exactly the 1st call (the gate's own first internal write
+  // attempt — processReportAdmissionJob itself no longer opens a
+  // connection of its own before this, now that corpus-admission
+  // eligibility carries no per-account consent check to re-verify) and
   // succeeds on every other call, including the "mark this job failed"
   // write that follows — simulating one genuine write-path failure during
   // evaluation, not a permanently broken connection factory (which would
@@ -342,7 +362,7 @@ test("FAILURE-STATUS: a genuine admission failure is persisted to corpus_admissi
   let calls = 0;
   function flakyOpenConnection() {
     calls += 1;
-    if (calls === 2) throw new Error("simulated connection failure for the admission write path");
+    if (calls === 1) throw new Error("simulated connection failure for the admission write path");
     return createClient({ url: dbUrl });
   }
 
@@ -371,7 +391,7 @@ test("RETRY-IDEMPOTENCY: reprocessing a failed job succeeds once content can be 
   let calls = 0;
   function flakyOnceOpenConnection() {
     calls += 1;
-    if (calls === 2) throw new Error("simulated failure — the gate's own first write attempt only");
+    if (calls === 1) throw new Error("simulated failure — the gate's own first write attempt only");
     return createClient({ url: dbUrl });
   }
   const failed = await processReportAdmissionJob(client, { jobId: created.jobId, openConnection: flakyOnceOpenConnection });
