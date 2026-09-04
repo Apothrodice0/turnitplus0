@@ -4,7 +4,6 @@ import { checkAuthRate } from '../../../../lib/rate-limit';
 import { clientIpFrom } from '../../../../lib/client-ip';
 import { verifyPassword, verifyAgainstDummy } from '../../../../lib/auth-crypto';
 import { createSession, setSessionCookie, claimAnonymousReports } from '../../../../lib/auth-session';
-import { maybePromoteToAdmin } from '../../../../lib/admin-role';
 
 const MAX_EMAIL_LENGTH = 254;
 const MAX_PASSWORD_LENGTH = 200;
@@ -51,7 +50,9 @@ export async function POST(request: Request) {
       }
 
       await claimAnonymousReports(client, row.id, deviceKey);
-      await maybePromoteToAdmin(client, row.id, normalizedEmail);
+      // No admin promotion here (or on signup): the admin role is granted only
+      // by a deliberate operator action — see lib/admin-role.ts. An account that
+      // already holds it keeps it (getSessionUserByToken reads users.role fresh).
 
       const token = await createSession(client, row.id);
       const response = new NextResponse(

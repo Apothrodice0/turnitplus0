@@ -16,6 +16,7 @@ import {
 } from "../lib/device-sharedness-measurement.ts";
 import * as signupRoute from "../app/api/auth/signup/route.ts";
 import * as sharedDeviceRoute from "../app/api/developer/shared-device-risk/route.ts";
+import { withTestIdentity, grantTestAdmin } from './helpers/test-signup.mjs';
 
 /**
  * ADMIN-ONLY shared-device false-SELF RISK measurement
@@ -545,7 +546,7 @@ async function signup(email, deviceKey, tag) {
   const res = await signupRoute.POST(new Request("http://localhost/api/auth/signup", {
     method: "POST",
     headers: { "content-type": "application/json", "x-forwarded-for": tag },
-    body: JSON.stringify({ email, password: "sdrm-password-1", username: tag.replace(/[^a-z0-9]/gi, ""), deviceKey }),
+    body: JSON.stringify(withTestIdentity({ email, password: "sdrm-password-1", username: tag.replace(/[^a-z0-9]/gi, ""), deviceKey })),
   }));
   assert.equal(res.status, 201, `signup ${email}`);
   return extractCookie(res);
@@ -560,6 +561,7 @@ async function callRoute(cookie, tag, qs = "") {
 
 test("admin-only: no session -> 404 (no body), non-admin -> 404 (no body), admin -> 200 with the measurement", async () => {
   const adminCookie = await signup("sdrm-admin@example.com", "sdrm-admin-dev", "sdrm-admin-1");
+  await grantTestAdmin(dbFile, "sdrm-admin@example.com");
   const plainCookie = await signup("sdrm-ordinary@example.com", "sdrm-ordinary-dev", "sdrm-ordinary-1");
 
   const noSession = await callRoute(null, "sdrm-nosess");

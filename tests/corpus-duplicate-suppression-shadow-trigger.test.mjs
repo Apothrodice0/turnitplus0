@@ -17,6 +17,7 @@ import { SHADOW_POLICY } from "./helpers/corpus-duplicate-shadow.mjs";
 import * as reportsRoute from "../app/api/reports/route.ts";
 import * as reportIdRoute from "../app/api/reports/[id]/route.ts";
 import * as signupRoute from "../app/api/auth/signup/route.ts";
+import { withTestIdentity } from './helpers/test-signup.mjs';
 
 /**
  * Phase B2a — POST + GET both schedule the corpus-duplicate suppression shadow
@@ -96,7 +97,7 @@ async function signUp() {
   const res = await signupRoute.POST(new Request("http://localhost/api/auth/signup", {
     method: "POST",
     headers: { "content-type": "application/json", "x-forwarded-for": tag },
-    body: JSON.stringify({ email, password: "cds-pw-123456", username: `cds${seq}`, deviceKey }),
+    body: JSON.stringify(withTestIdentity({ email, password: "cds-pw-123456", username: `cds${seq}`, deviceKey })),
   }));
   assert.equal(res.status, 201);
   const row = await client.execute({ sql: "SELECT id FROM users WHERE email = ?", args: [email] });

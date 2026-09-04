@@ -1,5 +1,4 @@
-import { randomUUID } from "node:crypto";
-import type { Client } from "@libsql/client";
+import type { Client, InStatement } from "@libsql/client";
 import {
   normalizeAccountIdentityProfile,
   ACCOUNT_IDENTITY_KEY_VERSION,
@@ -125,31 +124,20 @@ export type UpsertAccountIdentityProfileResult = {
 };
 
 /**
- * Validate + normalize `input` and UPSERT the account's 1:1 identity profile.
- * Throws AccountIdentityValidationException (value-free message) if the input
- * does not normalize cleanly. The `users` row must already exist (FK).
- *
- * On update, created_at is preserved and updated_at advances. The three
- * *_verified_at columns are NEVER written by this function - a pre-existing
- * value (there is none in A1) is left as-is; a new row gets SQL NULL by column
- * default.
+ * The `INSERT ... ON CONFLICT (user_id) DO UPDATE` statement that persists ONE
+ * already-normalized profile. Shared by upsertAccountIdentityProfile (below)
+ * and the ATOMIC signup path (app/api/auth/signup/route.ts's client.batch,
+ * where it rides in the same transaction as the users + sessions inserts so a
+ * profile CHECK failure rolls the whole account creation back — no users row,
+ * no session). Never writes a *_verified_at column: a new row gets SQL NULL by
+ * column default; a pre-existing value is left untouched.
  */
-export async function upsertAccountIdentityProfile(
-  exec: Exec,
+export function accountIdentityProfileUpsertStatement(
   userId: string,
-  input: AccountIdentityProfileInput,
+  profile: NormalizedAccountIdentityProfile,
   now: number = Date.now(),
-): Promise<UpsertAccountIdentityProfileResult> {
-  if (typeof userId !== "string" || userId.length === 0) {
-    throw new Error("upsertAccountIdentityProfile: userId must be a non-empty string");
-  }
-  const result = normalizeAccountIdentityProfile(input);
-  if (!result.ok) throw new AccountIdentityValidationException(result.errors);
-  const p: NormalizedAccountIdentityProfile = result.profile;
-
-  const existing = await readAccountIdentityProfile(exec, userId);
-
-  await exec.execute({
+): InStatement {
+  return {
     sql: `INSERT INTO account_identity_profiles (
             user_id, account_type, full_name, country_code,
             institution_status, institution_ror_id, institution_unverified_name,
@@ -173,26 +161,65 @@ export async function upsertAccountIdentityProfile(
             updated_at = excluded.updated_at`,
     args: [
       userId,
-      p.accountType,
-      p.fullName,
-      p.countryCode,
-      p.institutionStatus,
-      p.institutionRorId,
-      p.institutionUnverifiedName,
-      p.cityStatus,
-      p.cityGeonamesId,
-      p.cityUnverifiedName,
-      p.phoneE164,
-      p.phoneRegion,
-      p.normalizationVersion,
+      profile.accountType,
+      profile.fullName,
+      profile.countryCode,
+      profile.institutionStatus,
+      profile.institutionRorId,
+      profile.institutionUnverifiedName,
+      profile.cityStatus,
+      profile.cityGeonamesId,
+      profile.cityUnverifiedName,
+      profile.phoneE164,
+      profile.phoneRegion,
+      profile.normalizationVersion,
       now,
       now,
     ],
-  });
+  };
+}
+
+/**
+ * Validate + normalize `input` and UPSERT the account's 1:1 identity profile.
+ * Throws AccountIdentityValidationException (value-free message) if the input
+ * does not normalize cleanly. The `users` row must already exist (FK).
+ *
+ * On update, created_at is preserved and updated_at advances. The three
+ * *_verified_at columns are NEVER written by this function - a pre-existing
+ * value (there is none in A1) is left as-is; a new row gets SQL NULL by column
+ * default.
+ */
+export async function upsertAccountIdentityProfile(
+  exec: Exec,
+  userId: string,
+  input: AccountIdentityProfileInput,
+  now: number = Date.now(),
+): Promise<UpsertAccountIdentityProfileResult> {
+  if (typeof userId !== "string" || userId.length === 0) {
+    throw new Error("upsertAccountIdentityProfile: userId must be a non-empty string");
+  }
+  const result = normalizeAccountIdentityProfile(input);
+  if (!result.ok) throw new AccountIdentityValidationException(result.errors);
+
+  const existing = await readAccountIdentityProfile(exec, userId);
+  await exec.execute(accountIdentityProfileUpsertStatement(userId, result.profile, now));
 
   const stored = await readAccountIdentityProfile(exec, userId);
   if (!stored) throw new Error("upsertAccountIdentityProfile: row vanished immediately after write");
   return { profile: stored, created: existing === null };
+}
+
+/** Persist an ALREADY-NORMALIZED profile (from lib/account-identity-signup.ts's resolver). Same NULL-verification guarantee. */
+export async function persistNormalizedAccountIdentityProfile(
+  exec: Exec,
+  userId: string,
+  profile: NormalizedAccountIdentityProfile,
+  now: number = Date.now(),
+): Promise<StoredAccountIdentityProfile> {
+  await exec.execute(accountIdentityProfileUpsertStatement(userId, profile, now));
+  const stored = await readAccountIdentityProfile(exec, userId);
+  if (!stored) throw new Error("persistNormalizedAccountIdentityProfile: row vanished immediately after write");
+  return stored;
 }
 
 /**

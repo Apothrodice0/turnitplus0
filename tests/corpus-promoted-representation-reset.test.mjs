@@ -15,6 +15,7 @@ import { indexDocumentSubmissionIntoCorpus } from '../lib/user-submission-corpus
 import { runCorpusAdmissionPromotionSweep } from '../lib/corpus-admission-promotion.ts';
 import { matchAgainstUserSubmissionCorpus } from '../lib/user-submission-matching.ts';
 import { matureCorpusBackings } from './helpers/corpus-maturity.mjs';
+import { withTestIdentity, grantTestAdmin } from './helpers/test-signup.mjs';
 
 /**
  * BLOCKING REVIEW proof: "Clear my rooms" must NOT destroy an ACCEPTed +
@@ -82,7 +83,7 @@ async function signup(email, deviceKey) {
   const res = await signupRoute.POST(new Request('http://localhost/api/auth/signup', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-forwarded-for': ip },
-    body: JSON.stringify({ email, password: PASSWORD, username: email.split('@')[0].replace(/[^a-z0-9]/gi, ''), deviceKey }),
+    body: JSON.stringify(withTestIdentity({ email, password: PASSWORD, username: email.split('@')[0].replace(/[^a-z0-9]/gi, ''), deviceKey })),
   }));
   assert.equal(res.status, 201, `signup ${email}`);
   return extractCookie(res);
@@ -199,6 +200,7 @@ const TEXT_PRIVACY =
 // --- Fixtures -----------------------------------------------------------
 
 const cookieA = await signup(ADMIN_EMAIL, DEVICE);
+await grantTestAdmin(dbFile, ADMIN_EMAIL);
 const idA = String((await one('SELECT id FROM users WHERE email = ?', [ADMIN_EMAIL])).id);
 assert.equal((await one('SELECT role FROM users WHERE id = ?', [idA])).role, 'admin');
 

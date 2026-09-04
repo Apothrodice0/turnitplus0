@@ -10,6 +10,7 @@ import * as signupRoute from '../app/api/auth/signup/route.ts';
 import { resetRateForTest, resetAuthRateForTest } from '../lib/rate-limit.js';
 import { canonicalSha256, createDocumentIdentity } from '../lib/document-identity.ts';
 import { indexDocumentSubmissionIntoCorpus } from '../lib/user-submission-corpus.ts';
+import { withTestIdentity } from './helpers/test-signup.mjs';
 
 /**
  * Phase E8D originally activated indexDocumentSubmissionIntoCorpus from the
@@ -80,7 +81,7 @@ async function signup(email, deviceKey) {
   const req = new Request('http://localhost/api/auth/signup', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-forwarded-for': 'activation-signup-' + email },
-    body: JSON.stringify({ email, password: 'activation-password-1', username: email.split('@')[0], deviceKey }),
+    body: JSON.stringify(withTestIdentity({ email, password: 'activation-password-1', username: email.split('@')[0], deviceKey })),
   });
   const res = await signupRoute.POST(req);
   // Privacy hardening: grants cross-account corpus-reuse consent immediately

@@ -13,6 +13,7 @@ import * as resetAccountRoomsRoute from '../app/api/developer/reset-account-room
 import { resetRateForTest, resetAuthRateForTest, resetReadRateForTest } from '../lib/rate-limit.js';
 import { deleteAllReportDataForAccount } from '../lib/account-deletion.ts';
 import { statusLabel } from '../components/reports/report-rooms.tsx';
+import { withTestIdentity, grantTestAdmin } from './helpers/test-signup.mjs';
 
 /**
  * BUG: after a report is deleted (developer "Clear account rooms" by email,
@@ -61,7 +62,7 @@ async function signup(email, deviceKey) {
   const res = await signupRoute.POST(new Request('http://localhost/api/auth/signup', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-forwarded-for': ip },
-    body: JSON.stringify({ email, password: PASSWORD, username: email.split('@')[0].replace(/[^a-z0-9]/gi, ''), deviceKey }),
+    body: JSON.stringify(withTestIdentity({ email, password: PASSWORD, username: email.split('@')[0].replace(/[^a-z0-9]/gi, ''), deviceKey })),
   }));
   assert.equal(res.status, 201, `signup ${email}`);
   return extractCookie(res);
@@ -157,6 +158,7 @@ function assertReadyRoom(entry, roomNumber) {
 // --- Fixtures ------------------------------------------------------
 
 const cookieAdmin = await signup(ADMIN_EMAIL, 'device-rear-admin');
+await grantTestAdmin(dbFile, ADMIN_EMAIL);
 const cookieT = await signup('target@roomsempty.test', 'device-rear-t');
 const idT = await userIdFor('target@roomsempty.test');
 const cookieO = await signup('other@roomsempty.test', 'device-rear-o');

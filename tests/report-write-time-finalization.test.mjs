@@ -37,6 +37,7 @@ import { extractPdfTextDocument } from '../lib/pdf-text-extraction.ts';
 // aliased so the new regression test below proves the actual deployed
 // function's behavior, not a parallel description of it.
 import { isFullyRevealed as isFullyRevealedReal } from '../app/reports/rooms/[room]/room-page-shell.tsx';
+import { withTestIdentity } from './helpers/test-signup.mjs';
 
 /**
  * Release-hardening audit finding SIM-03: the required end-to-end
@@ -135,7 +136,7 @@ async function signUpConsentingAccount() {
   const req = new Request('http://localhost/api/auth/signup', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-forwarded-for': 'write-time-finalization-signup-' + userCounter },
-    body: JSON.stringify({ email, password: 'write-time-finalization-pw-1', username: `wtfuser${userCounter}`, deviceKey: `write-time-finalization-device-${userCounter}` }),
+    body: JSON.stringify(withTestIdentity({ email, password: 'write-time-finalization-pw-1', username: `wtfuser${userCounter}`, deviceKey: `write-time-finalization-device-${userCounter}` })),
   });
   const res = await signupRoute.POST(req);
   assert.equal(res.status, 201, 'test setup sanity: signup must succeed');

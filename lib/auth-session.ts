@@ -1,5 +1,5 @@
 import { randomBytes, createHash } from "node:crypto";
-import type { Client } from "@libsql/client";
+import type { Client, InStatement } from "@libsql/client";
 import type { NextResponse } from "next/server";
 
 export const SESSION_COOKIE_NAME = "tp_session_v1";
@@ -84,12 +84,21 @@ function toUserRole(value: string): UserRole {
 
 export async function createSession(client: Client, userId: string): Promise<string> {
   const token = bytesToHex(randomBytes(32));
-  const now = Date.now();
-  await client.execute({
+  await client.execute(sessionInsertStatement(token, userId));
+  return token;
+}
+
+/** A fresh session token plus the INSERT that persists it — for atomic account creation (client.batch). */
+export function newSession(userId: string, now: number = Date.now()): { token: string; statement: InStatement } {
+  const token = bytesToHex(randomBytes(32));
+  return { token, statement: sessionInsertStatement(token, userId, now) };
+}
+
+function sessionInsertStatement(token: string, userId: string, now: number = Date.now()): InStatement {
+  return {
     sql: "INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?,?,?,?)",
     args: [hashToken(token), userId, now, now + SESSION_TTL_MS],
-  });
-  return token;
+  };
 }
 
 export async function destroySessionByToken(client: Client, token: string): Promise<void> {

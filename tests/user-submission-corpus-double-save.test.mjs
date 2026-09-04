@@ -9,6 +9,7 @@ import * as reportIdRoute from '../app/api/reports/[id]/route.ts';
 import * as signupRoute from '../app/api/auth/signup/route.ts';
 import { resetRateForTest, resetAuthRateForTest } from '../lib/rate-limit.js';
 import { canonicalSha256 } from '../lib/document-identity.ts';
+import { withTestIdentity } from './helpers/test-signup.mjs';
 
 /**
  * Phase E8F: the double-save fix. app/page.tsx's generateReport() saves
@@ -76,7 +77,7 @@ async function signup(email, deviceKey) {
   const req = new Request('http://localhost/api/auth/signup', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-forwarded-for': 'e8f-signup-' + email },
-    body: JSON.stringify({ email, password: 'e8f-password-1', username: email.split('@')[0], deviceKey }),
+    body: JSON.stringify(withTestIdentity({ email, password: 'e8f-password-1', username: email.split('@')[0], deviceKey })),
   });
   const res = await signupRoute.POST(req);
   // Privacy hardening: grants cross-account corpus-reuse consent immediately

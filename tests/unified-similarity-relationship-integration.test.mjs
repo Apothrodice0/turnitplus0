@@ -13,6 +13,7 @@ import { computeUnifiedSimilarity } from '../lib/unified-similarity.ts';
 import { indexDocumentSubmissionIntoCorpus } from '../lib/user-submission-corpus.ts';
 import { getOrComputeHistoricalMatchSnapshot } from '../lib/report-historical-match.ts';
 import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
+import { withTestIdentity } from './helpers/test-signup.mjs';
 
 /**
  * Phase 4B, Part A: end-to-end proof that computeUnifiedSimilarity()'s
@@ -130,7 +131,7 @@ async function signup(email, deviceKey) {
   const req = new Request('http://localhost/api/auth/signup', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-forwarded-for': 'urel-signup-' + email },
-    body: JSON.stringify({ email, password: 'urel-password-1', username: email.split('@')[0], deviceKey }),
+    body: JSON.stringify(withTestIdentity({ email, password: 'urel-password-1', username: email.split('@')[0], deviceKey })),
   });
   const res = await signupRoute.POST(req);
   // Privacy hardening: grants cross-account corpus-reuse consent immediately

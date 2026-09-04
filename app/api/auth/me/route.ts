@@ -1,3 +1,4 @@
+import type { InStatement } from '@libsql/client';
 import { NextResponse } from 'next/server';
 import { getReportsDbClient } from '../../../../lib/reports-db';
 import { checkRate, checkAuthRate } from '../../../../lib/rate-limit';
@@ -6,6 +7,43 @@ import { getSessionUser, clearSessionCookie } from '../../../../lib/auth-session
 import { verifyPassword } from '../../../../lib/auth-crypto';
 import { deleteAccountData, invalidateSessionsAndDeleteUser, ACCOUNT_DELETION_CONFIRMATION_PHRASE } from '../../../../lib/account-deletion';
 import { revokeConsentAndCancelPendingAdmissionJobs } from '../../../../lib/corpus-admission-report-integration';
+import { isCrossOriginBrowserRequest, CROSS_ORIGIN_REJECTED } from '../../../../lib/same-origin';
+import { resolveSignupIdentity } from '../../../../lib/account-identity-signup';
+import { readAccountIdentityProfile, accountIdentityProfileUpsertStatement } from '../../../../lib/account-identity-repo';
+import { resolveGeonamesCity } from '../../../../lib/geonames-cities';
+import { isoCountryByAlpha2 } from '../../../../lib/iso-3166-1-countries';
+
+/**
+ * Shape one account's stored identity profile for the OWNER's own settings
+ * view. Deliberately narrow: account type, residence, city (resolved name from
+ * the bundled dataset), institution ROR id, phone (the owner's own E.164) and
+ * phone region. NEVER a fingerprint, an owner-link/SELF signal, a cross-account
+ * match, or a verification flag beyond the plain "unverified" resting state.
+ */
+type ProfileRow = Awaited<ReturnType<typeof readAccountIdentityProfile>>;
+function identityView(profile: NonNullable<ProfileRow>) {
+  const city = profile.cityGeonamesId != null ? resolveGeonamesCity(profile.cityGeonamesId) : null;
+  return {
+    accountType: profile.accountType,
+    fullName: profile.fullName,
+    countryCode: profile.countryCode,
+    countryName: profile.countryCode ? isoCountryByAlpha2(profile.countryCode)?.name ?? null : null,
+    city: city
+      ? { geonamesId: city.geonamesId, name: city.name, countryCode: city.countryCode }
+      : profile.cityGeonamesId != null
+        ? { geonamesId: profile.cityGeonamesId, name: null, countryCode: null }
+        : null,
+    institution:
+      profile.institutionStatus === 'ROR'
+        ? { status: 'ROR' as const, rorId: profile.institutionRorId }
+        : { status: 'NONE' as const },
+    phoneE164: profile.phoneE164,
+    phoneRegion: profile.phoneRegion,
+    emailVerified: profile.emailVerifiedAt != null,
+    phoneVerified: profile.phoneVerifiedAt != null,
+    institutionVerified: profile.institutionVerifiedAt != null,
+  };
+}
 
 export const dynamic = 'force-dynamic';
 
@@ -33,8 +71,26 @@ export async function GET(request: Request) {
     if (!sessionUser) {
       return new NextResponse(JSON.stringify({ user: null }), { status: 200, headers: { 'Content-Type': 'application/json' } });
     }
+
+    // Grandfathering: an account created before A2 has no identity profile.
+    // identity: null just means "profile not completed" — it never blocks login
+    // or anything else.
+    let identity: ReturnType<typeof identityView> | null = null;
+    const profileClient = await getReportsDbClient();
+    try {
+      const profile = await readAccountIdentityProfile(profileClient, sessionUser.id);
+      if (profile) identity = identityView(profile);
+    } catch {
+      identity = null;
+    } finally {
+      profileClient.close();
+    }
+
     return new NextResponse(
-      JSON.stringify({ user: { username: sessionUser.username, email: sessionUser.email, corpusReuseConsent: sessionUser.corpusReuseConsented } }),
+      JSON.stringify({
+        user: { username: sessionUser.username, email: sessionUser.email, corpusReuseConsent: sessionUser.corpusReuseConsented },
+        identity,
+      }),
       { status: 200, headers: { 'Content-Type': 'application/json' } },
     );
   } catch (err) {
@@ -44,6 +100,12 @@ export async function GET(request: Request) {
 
 export async function PATCH(request: Request) {
   try {
+    // Same-origin guard (defence in depth alongside SameSite=Lax) — this route
+    // changes the account's identity fields.
+    if (isCrossOriginBrowserRequest(request)) {
+      return new NextResponse(JSON.stringify(CROSS_ORIGIN_REJECTED), { status: 403, headers: { 'Content-Type': 'application/json' } });
+    }
+
     const rate = await checkRate(clientIpFrom(request));
     if (!rate.allowed) {
       return new NextResponse(JSON.stringify({ error: 'Too many requests' }), { status: 429, headers: { 'Retry-After': String(rate.retryAfter) } });
@@ -59,6 +121,22 @@ export async function PATCH(request: Request) {
     }
     if (!isNonEmptyString(email) || email.length > MAX_EMAIL_LENGTH || !EMAIL_PATTERN.test(email)) {
       return new NextResponse(JSON.stringify({ error: 'A valid email address is required.' }), { status: 400 });
+    }
+
+    // Identity profile edit (A2). Present only when the settings form submits the
+    // full identity object; a plain username/email/consent PATCH omits it and an
+    // account with no profile (grandfathered) is unaffected. Same server-
+    // authoritative validation as signup: canonical country, RE-RESOLVED
+    // GeoNames city (name never trusted), RE-RESOLVED ROR institution,
+    // libphonenumber-js phone, everything UNVERIFIED, no fingerprints. Validated
+    // BEFORE any write — a failure returns 400 and changes nothing.
+    const rawIdentity = (body as { identity?: unknown }).identity;
+    const identityResult = rawIdentity != null ? await resolveSignupIdentity(rawIdentity as Record<string, unknown>) : null;
+    if (identityResult && !identityResult.ok) {
+      return new NextResponse(
+        JSON.stringify({ error: 'Some of your details could not be verified. Please review the highlighted fields.', fields: identityResult.errors }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } },
+      );
     }
     // Privacy hardening: optional — omitting the field leaves existing
     // consent state untouched (a plain profile-only update never silently
@@ -85,6 +163,13 @@ export async function PATCH(request: Request) {
         }
       }
 
+      const now = Date.now();
+      const profileStatement: InStatement | null =
+        identityResult && identityResult.ok
+          ? accountIdentityProfileUpsertStatement(sessionUser.id, identityResult.identity.normalized, now)
+          : null;
+
+      try {
       if (corpusReuseConsent !== undefined) {
         // Corpus-admission consent revocation (production audit fix):
         // synchronous, in this same request — not deferred, for the same
@@ -108,23 +193,43 @@ export async function PATCH(request: Request) {
             sql: 'UPDATE users SET username = ?, email = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
             args: [trimmedUsername, normalizedEmail, sessionUser.id],
           });
+          if (profileStatement) await client.execute(profileStatement);
           await revokeConsentAndCancelPendingAdmissionJobs(sessionUser.id, () => getReportsDbClient());
         } else {
-          await client.execute({
+          const userUpdate: InStatement = {
             sql: 'UPDATE users SET username = ?, email = ?, corpus_reuse_consented_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
             args: [trimmedUsername, normalizedEmail, corpusReuseConsent ? new Date().toISOString() : null, sessionUser.id],
-          });
+          };
+          if (profileStatement) await client.batch([userUpdate, profileStatement], 'write');
+          else await client.execute(userUpdate);
         }
       } else {
-        await client.execute({
+        const userUpdate: InStatement = {
           sql: 'UPDATE users SET username = ?, email = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
           args: [trimmedUsername, normalizedEmail, sessionUser.id],
-        });
+        };
+        if (profileStatement) await client.batch([userUpdate, profileStatement], 'write');
+        else await client.execute(userUpdate);
+      }
+      } catch (writeErr) {
+        const message = writeErr instanceof Error ? writeErr.message : String(writeErr);
+        if (/UNIQUE constraint failed: users\.email/i.test(message)) {
+          return new NextResponse(JSON.stringify({ error: 'An account with this email already exists.' }), { status: 409, headers: { 'Content-Type': 'application/json' } });
+        }
+        // A profile CHECK failure or other write error — the batch rolled back.
+        return new NextResponse(
+          JSON.stringify({ error: 'Some of your details could not be verified. Please review the highlighted fields.' }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } },
+        );
       }
 
       const resolvedConsent = corpusReuseConsent !== undefined ? corpusReuseConsent : sessionUser.corpusReuseConsented;
+      const storedProfile = await readAccountIdentityProfile(client, sessionUser.id);
       return new NextResponse(
-        JSON.stringify({ user: { username: trimmedUsername, email: normalizedEmail, corpusReuseConsent: resolvedConsent } }),
+        JSON.stringify({
+          user: { username: trimmedUsername, email: normalizedEmail, corpusReuseConsent: resolvedConsent },
+          identity: storedProfile ? identityView(storedProfile) : null,
+        }),
         { status: 200, headers: { 'Content-Type': 'application/json' } },
       );
     } finally {

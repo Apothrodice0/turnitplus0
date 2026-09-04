@@ -547,11 +547,14 @@ test("11: lib/account-identity.ts vocabularies match the drizzle/0045 CHECK list
 // 12 - isolation: no scoring / auth / owner-link / Device Passport coupling
 // ===========================================================================
 
-test("12: no scoring / matcher / auth-flow / owner-link module imports account-identity, and vice versa", () => {
+test("12: no scoring / matcher / owner-link / Device-Passport / authz module imports account-identity; the identity libs never import scoring", () => {
   const importLines = (src) =>
     src.split(/\r?\n/).filter((l) => /^\s*(?:import|export)\b.*\bfrom\b/.test(l)).join("\n");
   const IDENTITY_RE = /account-identity/;
 
+  // Scoring / matcher / owner-link / Device-Passport / authorization must stay
+  // completely unaware of identity. (A2 wires identity into the SIGNUP /
+  // account-settings flow only — see the allowlist below.)
   const mustNotImportIdentity = [
     "lib/report-primary-similarity.ts",
     "lib/unified-similarity.ts",
@@ -565,7 +568,6 @@ test("12: no scoring / matcher / auth-flow / owner-link module imports account-i
     "lib/admin-role.ts",
     "lib/auth-session.ts",
     "lib/account-deletion.ts",
-    "app/api/auth/signup/route.ts",
     "app/api/auth/login/route.ts",
     "app/api/reports/route.ts",
     "app/api/reports/[id]/route.ts",
@@ -576,7 +578,7 @@ test("12: no scoring / matcher / auth-flow / owner-link module imports account-i
     assert.doesNotMatch(importLines(fs.readFileSync(full, "utf8")), IDENTITY_RE, `${rel} must not import account-identity`);
   }
 
-  for (const rel of ["lib/account-identity.ts", "lib/account-identity-repo.ts"]) {
+  for (const rel of ["lib/account-identity.ts", "lib/account-identity-repo.ts", "lib/account-identity-signup.ts"]) {
     const imports = importLines(fs.readFileSync(path.join(repo, rel), "utf8"));
     for (const forbidden of [
       "unified-similarity",
@@ -601,8 +603,17 @@ test("12: no scoring / matcher / auth-flow / owner-link module imports account-i
     }
     return acc;
   };
+  // The ONLY app/ files permitted to touch identity: the signup + account-
+  // settings routes and the two canonical-search proxies (A2).
+  const ALLOWED_APP_IMPORTERS = new Set([
+    "app/api/auth/signup/route.ts",
+    "app/api/auth/me/route.ts",
+    "app/api/identity/cities/route.ts",
+    "app/api/identity/institutions/route.ts",
+  ]);
   const appImporters = walk(path.join(repo, "app"))
     .filter((f) => IDENTITY_RE.test(importLines(fs.readFileSync(f, "utf8"))))
-    .map((f) => path.relative(repo, f).split(path.sep).join("/"));
-  assert.deepEqual(appImporters, [], `no app/ file may import an account-identity module yet: ${appImporters.join(", ")}`);
+    .map((f) => path.relative(repo, f).split(path.sep).join("/"))
+    .filter((rel) => !ALLOWED_APP_IMPORTERS.has(rel));
+  assert.deepEqual(appImporters, [], `unexpected app/ file imports an account-identity module: ${appImporters.join(", ")}`);
 });

@@ -15,6 +15,7 @@ import { PROPOSED_ACCEPTANCE_POLICY_VERSION } from '../lib/e8o-historical-match-
 import * as signupRoute from '../app/api/auth/signup/route.ts';
 import * as loginRoute from '../app/api/auth/login/route.ts';
 import * as deviceShadowRoute from '../app/api/developer/device-provenance-shadow/route.ts';
+import { withTestIdentity, grantTestAdmin } from './helpers/test-signup.mjs';
 
 /**
  * Admin-only Device Passport shadow measurement summary
@@ -385,7 +386,7 @@ async function signup(email, deviceKey, tag) {
   const res = await signupRoute.POST(new Request('http://localhost/api/auth/signup', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-forwarded-for': tag },
-    body: JSON.stringify({ email, password: 'dpsm-password-1', username: tag.replace(/[^a-z0-9]/gi, ''), deviceKey }),
+    body: JSON.stringify(withTestIdentity({ email, password: 'dpsm-password-1', username: tag.replace(/[^a-z0-9]/gi, ''), deviceKey })),
   }));
   assert.equal(res.status, 201, `signup ${email}`);
   return extractCookie(res);
@@ -410,6 +411,7 @@ async function callRoute(cookie, tag, qs = '') {
 
 test('admin-only access: no session -> 404, non-admin -> 404 (no body), admin -> 200 with the measurement', async () => {
   const adminCookie = await signup('dpsm-admin@example.com', 'dpsm-admin-dev', 'dpsm-admin-1');
+  await grantTestAdmin(dbFile, "dpsm-admin@example.com");
   const plainCookie = await signup('dpsm-ordinary@example.com', 'dpsm-ordinary-dev', 'dpsm-ordinary-1');
 
   const noSession = await callRoute(null, 'dpsm-nosess');

@@ -23,6 +23,7 @@ import * as reportIdRoute from "../app/api/reports/[id]/route.ts";
 import * as signupRoute from "../app/api/auth/signup/route.ts";
 import { resetRateForTest, resetReadRateForTest, resetAuthRateForTest } from "../lib/rate-limit.ts";
 import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
+import { withTestIdentity, grantTestAdmin } from './helpers/test-signup.mjs';
 
 /**
  * FINAL SAME-ACCOUNT SELF HARDENING regression suite.
@@ -532,6 +533,7 @@ test("15: the admin similarity decision trace still explains a same-account SELF
     assert.equal(trace.excludedEffectiveDeviceSelfMatchedWordCount, 0);
     assert.ok(trace.excludedSelfMatchedWordCount > 0);
   } finally {
+    await grantTestAdmin(dbFile);
     delete process.env.ADMIN_EMAIL;
   }
 });
@@ -548,7 +550,7 @@ test("16: an ordinary GET response for a report whose own-history match was SELF
   const signupRes = await signupRoute.POST(new Request("http://localhost/api/auth/signup", {
     method: "POST",
     headers: { "content-type": "application/json", "x-forwarded-for": "saself-signup", ...SAME_ORIGIN },
-    body: JSON.stringify({ email, password: "saself-password-1", username: "saselfuser", deviceKey: "saself-leak-device" }),
+    body: JSON.stringify(withTestIdentity({ email, password: "saself-password-1", username: "saselfuser", deviceKey: "saself-leak-device" })),
   }));
   assert.equal(signupRes.status, 201);
   const cookie = (signupRes.headers.get("set-cookie") ?? "").match(/tp_session_v1=([^;]*)/)?.[1];

@@ -10,6 +10,7 @@ import * as signupRoute from '../app/api/auth/signup/route.ts';
 import * as loginRoute from '../app/api/auth/login/route.ts';
 import * as meRoute from '../app/api/auth/me/route.ts';
 import { resetRateForTest, resetAuthRateForTest } from '../lib/rate-limit.js';
+import { withTestIdentity } from './helpers/test-signup.mjs';
 
 /**
  * Privacy hardening (production audit fix, item 2): originally proved the
@@ -74,7 +75,7 @@ async function signup(email, deviceKey) {
   const req = new Request('http://localhost/api/auth/signup', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-forwarded-for': 'consent-signup-' + email },
-    body: JSON.stringify({ email, password: 'consent-password-1', username: email.split('@')[0], deviceKey }),
+    body: JSON.stringify(withTestIdentity({ email, password: 'consent-password-1', username: email.split('@')[0], deviceKey })),
   });
   const res = await signupRoute.POST(req);
   const body = await res.json();

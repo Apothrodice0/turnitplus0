@@ -14,6 +14,7 @@ import { resetRateForTest, resetAuthRateForTest } from '../lib/rate-limit.js';
 import { canonicalSha256 } from '../lib/document-identity.ts';
 import { indexDocumentSubmissionIntoCorpus } from '../lib/user-submission-corpus.ts';
 import { buildReportAdmissionSourceRef } from '../lib/corpus-admission-source-ref.ts';
+import { withTestIdentity, grantTestAdmin } from './helpers/test-signup.mjs';
 
 /**
  * POST /api/developer/reset-rooms — "Clear my rooms". Real DB, real route
@@ -66,7 +67,7 @@ async function signup(email, deviceKey) {
   const req = new Request('http://localhost/api/auth/signup', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-forwarded-for': ip },
-    body: JSON.stringify({ email, password: PASSWORD, username: email.split('@')[0].replace(/[^a-z0-9]/gi, ''), deviceKey }),
+    body: JSON.stringify(withTestIdentity({ email, password: PASSWORD, username: email.split('@')[0].replace(/[^a-z0-9]/gi, ''), deviceKey })),
   });
   const res = await signupRoute.POST(req);
   assert.equal(res.status, 201, `signup for ${email} should succeed`);
@@ -201,6 +202,7 @@ async function documentIdentityIdFor(deviceKey, reportId) {
 
 // Developer A — promoted via ADMIN_EMAIL at signup.
 const cookieA = await signup(ADMIN_A_EMAIL, 'device-reset-a');
+await grantTestAdmin(dbFile, ADMIN_A_EMAIL);
 const idA = await userIdFor(ADMIN_A_EMAIL);
 assert.equal((await me(cookieA)).user.email, ADMIN_A_EMAIL, 'developer A session is valid');
 assert.equal(

@@ -42,6 +42,7 @@ import { clearAllReportRoomCaches } from "@/lib/report-rooms-cache";
 import { ReportRoomsBrowser } from "@/components/reports/report-rooms";
 import { ReportHistoryRow } from "@/components/reports/report-history-row";
 import { DocumentUploadPanel } from "@/components/reports/document-upload-panel";
+import { IdentityFields, type IdentityFieldsHandle, type CollectedIdentity } from "@/components/auth/identity-fields";
 import {
   analyzeAcademicEvidence,
   analyzeText,
@@ -94,6 +95,17 @@ const ACCOUNT_DELETION_CONFIRMATION_PHRASE = "DELETE MY ACCOUNT";
 const SIGNED_OUT_BROADCAST_KEY = "tp_signed_out_broadcast";
 type LegalTab = "privacy" | "terms";
 type LocalAccount = { username: string; email: string; corpusReuseConsent: boolean };
+// The owner-only identity block /api/auth/me returns (A2). Never a fingerprint,
+// owner-link, SELF status, or cross-account signal.
+type AccountIdentityView = {
+  accountType: "student" | "instructor" | "researcher" | "independent";
+  fullName: string | null;
+  countryCode: string | null;
+  city: { geonamesId: number; name: string | null } | null;
+  institution: { status: "NONE" } | { status: "ROR"; rorId: string | null };
+  phoneE164: string | null;
+  phoneRegion: string | null;
+};
 
 // The shape lib/report-store.ts's loadStoredReports() actually returns since
 // it started reading from IndexedDB's own lightweight summary store rather
@@ -226,7 +238,10 @@ export default function Home() {
   const [authMode, setAuthMode] = useState<AuthMode | null>(null);
   const [welcomeMode, setWelcomeMode] = useState<AuthMode | null>(null);
   const [account, setAccount] = useState<LocalAccount | null>(null);
+  const [accountIdentity, setAccountIdentity] = useState<AccountIdentityView | null>(null);
   const [accountLoaded, setAccountLoaded] = useState(false);
+  const signupIdentityRef = useRef<IdentityFieldsHandle>(null);
+  const profileIdentityRef = useRef<IdentityFieldsHandle>(null);
   const [uploadLimitStatus, setUploadLimitStatus] = useState<UploadLimitStatus | null>(null);
   const [isEditingProfile, setIsEditingProfile] = useState(false);
   const [isDeletingAccount, setIsDeletingAccount] = useState(false);
@@ -302,9 +317,10 @@ export default function Home() {
     fetch("/api/auth/me")
       .then((response) => (response.ok ? response.json() : Promise.resolve({ user: null })))
       .then(async (data) => {
-        const result = data as { user: LocalAccount | null };
+        const result = data as { user: LocalAccount | null; identity?: AccountIdentityView | null };
         if (result && result.user) {
           setAccount(result.user);
+          setAccountIdentity(result.identity ?? null);
           await loadAccountReports();
         } else {
           await loadAnonymousReports();
@@ -390,6 +406,7 @@ export default function Home() {
     const username = String(formData.get("username") ?? "").trim();
     const remember = formData.get("remember") === "on";
 
+    let signupIdentity: CollectedIdentity | null = null;
     if (completedMode === "signup") {
       const confirmPassword = String(formData.get("confirmPassword") ?? "");
       const confirmInput = event.currentTarget.elements.namedItem("confirmPassword") as HTMLInputElement | null;
@@ -399,6 +416,10 @@ export default function Home() {
         return;
       }
       confirmInput?.setCustomValidity("");
+      // The server re-resolves and re-validates all of this; the component just
+      // shows its own inline errors and blocks submit until they're resolved.
+      signupIdentity = signupIdentityRef.current?.collect() ?? null;
+      if (!signupIdentity) return;
     }
 
     setAuthError(null);
@@ -430,7 +451,11 @@ export default function Home() {
       response = await fetch(completedMode === "login" ? "/api/auth/login" : "/api/auth/signup", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password, username, deviceKey: getDeviceKey(), remember }),
+        body: JSON.stringify(
+          completedMode === "signup"
+            ? { email, password, username, deviceKey: getDeviceKey(), remember, identity: signupIdentity }
+            : { email, password, username, deviceKey: getDeviceKey(), remember },
+        ),
       });
     } catch {
       stopAnimation();
@@ -474,26 +499,38 @@ export default function Home() {
     const email = String(data.get("profileEmail") ?? "").trim();
     const corpusReuseConsent = data.get("corpusReuseConsent") === "on";
 
+    // A grandfathered account with no profile can still just change its
+    // username/email (the identity fields left untouched). Once it has a profile
+    // — or the user starts entering identity — the SAME server-side validation
+    // as signup applies and an incomplete profile blocks the save.
+    let identityPayload: CollectedIdentity | null = null;
+    const identityHandle = profileIdentityRef.current;
+    if (identityHandle && !(accountIdentity === null && identityHandle.isPristine())) {
+      identityPayload = identityHandle.collect();
+      if (!identityPayload) return;
+    }
+
     setProfileEditError(null);
     let response: Response;
     try {
       response = await fetch("/api/auth/me", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username, email, corpusReuseConsent }),
+        body: JSON.stringify(identityPayload ? { username, email, corpusReuseConsent, identity: identityPayload } : { username, email, corpusReuseConsent }),
       });
     } catch {
       setProfileEditError("Could not reach TurnitPlus. Check your connection and try again.");
       return;
     }
 
-    const result = (await response.json().catch(() => null)) as { user?: LocalAccount; error?: string } | null;
+    const result = (await response.json().catch(() => null)) as { user?: LocalAccount; identity?: AccountIdentityView | null; error?: string } | null;
     if (!response.ok || !result?.user) {
       setProfileEditError((result && typeof result.error === "string" && result.error) || "Could not update your account information.");
       return;
     }
 
     setAccount(result.user as LocalAccount);
+    setAccountIdentity(result.identity ?? null);
     setIsEditingProfile(false);
     notify("Your account information has been updated.");
   }
@@ -1235,6 +1272,27 @@ export default function Home() {
                           <small>Off by default. When on, future uploads you save may be compared against documents other signed-in users have submitted, and vice versa, to flag prior submissions. Your document text is never shown to another account &mdash; only that a prior submission exists. Turning this off stops future uploads from being added; it does not remove documents already indexed while it was on (delete the report to remove those).</small>
                         </span>
                       </label>
+                      <div className="account-edit-heading">
+                        <div>
+                          <strong>{accountIdentity ? "Identity details" : "Complete your identity profile"}</strong>
+                          <span>Your name, account type, country, city (canonical) and institution (canonical). Not verified yet.</span>
+                        </div>
+                      </div>
+                      <IdentityFields
+                        ref={profileIdentityRef}
+                        disabled={false}
+                        initial={accountIdentity ? {
+                          fullName: accountIdentity.fullName ?? "",
+                          accountType: accountIdentity.accountType,
+                          countryCode: accountIdentity.countryCode ?? "",
+                          city: accountIdentity.city,
+                          institution:
+                            accountIdentity.institution.status === "ROR" && accountIdentity.institution.rorId
+                              ? { status: "ROR", rorId: accountIdentity.institution.rorId }
+                              : { status: "NONE" },
+                          phoneE164: accountIdentity.phoneE164,
+                        } : undefined}
+                      />
                       {profileEditError && <p className="auth-form-error" role="alert">{profileEditError}</p>}
                       <div className="account-edit-actions">
                         <button className="button subtle" type="button" onClick={() => setIsEditingProfile(false)}>Cancel</button>
@@ -1422,6 +1480,9 @@ export default function Home() {
                           required
                         />
                       </label>
+                    )}
+                    {(authMode ?? "login") === "signup" && (
+                      <IdentityFields ref={signupIdentityRef} disabled={isAuthenticating} />
                     )}
                     {(authMode ?? "login") === "login" && (
                       <div className="auth-form-row">

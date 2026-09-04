@@ -9,6 +9,7 @@ import * as reportsRoute from '../app/api/reports/route.ts';
 import * as uploadLimitRoute from '../app/api/upload-limit/route.ts';
 import { resetAuthRateForTest, resetRateForTest } from '../lib/rate-limit.js';
 import { DAILY_UPLOAD_LIMIT, checkUploadLimit, countUploadsToday, getUploadLimitStatus } from '../lib/upload-limit.ts';
+import { withTestIdentity, grantTestAdmin } from './helpers/test-signup.mjs';
 
 // Verifies the daily upload quota: 10 new uploads/day for authenticated
 // non-admin accounts, unlimited for role="admin", enforced server-side at
@@ -47,7 +48,7 @@ async function signup(body) {
   const req = new Request('http://localhost/api/auth/signup', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-forwarded-for': ip },
-    body: JSON.stringify(body),
+    body: JSON.stringify(withTestIdentity(body)),
   });
   return signupRoute.POST(req);
 }
@@ -163,6 +164,7 @@ async function getUploadLimit(cookie) {
   const signupRes = await signup({ email: 'admin-quota@example.com', password: 'correct-horse-3', username: 'adminquota', deviceKey: 'device-admin-1' });
   const cookie = extractCookie(signupRes);
   assert.ok(cookie);
+  await grantTestAdmin(dbFile);
   delete process.env.ADMIN_EMAIL;
 
   const client = createClient({ url: `file:${dbFile}` });

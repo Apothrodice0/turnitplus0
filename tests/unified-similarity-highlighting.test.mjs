@@ -23,6 +23,7 @@ import * as reportsRoute from "../app/api/reports/route.ts";
 import * as reportIdRoute from "../app/api/reports/[id]/route.ts";
 import * as signupRoute from "../app/api/auth/signup/route.ts";
 import { resetRateForTest, resetAuthRateForTest, resetReadRateForTest } from "../lib/rate-limit.ts";
+import { withTestIdentity } from './helpers/test-signup.mjs';
 
 /**
  * Task A, final correctness bug: the visible matched-word highlighting must
@@ -128,7 +129,7 @@ async function signup(email, deviceKey, tag) {
   const req = new Request("http://localhost/api/auth/signup", {
     method: "POST",
     headers: { "content-type": "application/json", "x-forwarded-for": tag },
-    body: JSON.stringify({ email, password: "uwh-password-1", username: tag.replace(/[^a-z0-9]/gi, ""), deviceKey }),
+    body: JSON.stringify(withTestIdentity({ email, password: "uwh-password-1", username: tag.replace(/[^a-z0-9]/gi, ""), deviceKey })),
   });
   const res = await signupRoute.POST(req);
   assert.equal(res.status, 201, `signup must succeed for ${email}`);

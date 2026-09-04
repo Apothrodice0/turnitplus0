@@ -16,6 +16,7 @@ import * as reportsRoute from "../app/api/reports/route.ts";
 import * as reportIdRoute from "../app/api/reports/[id]/route.ts";
 import * as signupRoute from "../app/api/auth/signup/route.ts";
 import { resetRateForTest, resetAuthRateForTest, resetReadRateForTest } from "../lib/rate-limit.ts";
+import { withTestIdentity, grantTestAdmin } from './helpers/test-signup.mjs';
 
 /**
  * Release-hardening audit finding UI-02: historicalSubmissionMatch (a
@@ -120,13 +121,15 @@ function extractCookie(response) {
   return match ? match[1] : null;
 }
 
-/** ADMIN_EMAIL-driven promotion (lib/admin-role.ts's maybePromoteToAdmin) — the real production mechanism, not a raw DB write, so this file also proves the fix is reachable through the actual account-creation path. */
+/** A2: signup no longer auto-promotes anyone. The admin fixture below is
+ *  granted explicitly with grantTestAdmin (the deliberate-operator path — the
+ *  only way an account becomes admin). */
 async function signup(email, deviceKey, tag) {
   await resetAuthRateForTest(tag);
   const req = new Request("http://localhost/api/auth/signup", {
     method: "POST",
     headers: { "content-type": "application/json", "x-forwarded-for": tag },
-    body: JSON.stringify({ email, password: "hmvis-password-1", username: tag.replace(/[^a-z0-9]/gi, ""), deviceKey }),
+    body: JSON.stringify(withTestIdentity({ email, password: "hmvis-password-1", username: tag.replace(/[^a-z0-9]/gi, ""), deviceKey })),
   });
   const res = await signupRoute.POST(req);
   assert.equal(res.status, 201, `signup must succeed for ${email}`);
@@ -172,6 +175,7 @@ const CORPUS_WORD_COUNT = 60;
 await promoteDocumentIntoCorpus(CORPUS_TEXT);
 
 const admin = await signup("hmvis-admin@example.com", "hmvis-admin-device", "hmvis-admin-signup");
+await grantTestAdmin(dbFile, "hmvis-admin@example.com");
 const ordinary = await signup("hmvis-ordinary@example.com", "hmvis-ordinary-device", "hmvis-ordinary-signup");
 
 await postReport({ deviceKey: "hmvis-admin-device", cookie: admin.cookie, id: "hmvis-admin-report", title: "admin-corpus-match.pdf", text: CORPUS_TEXT, wordCount: CORPUS_WORD_COUNT, room: 0, tag: "hmvis-admin-post" });

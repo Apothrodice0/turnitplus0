@@ -10,6 +10,7 @@ import * as loginRoute from '../app/api/auth/login/route.ts';
 import * as logoutRoute from '../app/api/auth/logout/route.ts';
 import * as meRoute from '../app/api/auth/me/route.ts';
 import { resetAuthRateForTest, resetRateForTest } from '../lib/rate-limit.js';
+import { withTestIdentity } from './helpers/test-signup.mjs';
 
 const repo = path.resolve('.');
 const drizzleDir = path.join(repo, 'drizzle');
@@ -37,7 +38,10 @@ async function signup(body, ip = 'auth-test-signup') {
   const req = new Request('http://localhost/api/auth/signup', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-forwarded-for': ip },
-    body: JSON.stringify(body),
+    // A2: signup requires a full server-validated identity. These auth tests
+    // are not about identity, so they spread a valid default (independent /
+    // institution NONE / a real bundled GeoNames city — no ROR network call).
+    body: JSON.stringify(withTestIdentity(body)),
   });
   return signupRoute.POST(req);
 }
@@ -73,7 +77,13 @@ async function logout(cookieValue, ip = 'auth-test-logout') {
   const res = await signup({ email: 'Alice@Example.com', password: 'correct-horse-1', username: 'alice', deviceKey: 'device-signup-1' });
   assert.equal(res.status, 201, 'signup should succeed');
   const body = await res.json();
-  assert.deepEqual(body, { user: { username: 'alice', email: 'alice@example.com', corpusReuseConsent: false } }, 'response must only contain username/email/corpusReuseConsent, never a password or token');
+  assert.deepEqual(body.user, { username: 'alice', email: 'alice@example.com', corpusReuseConsent: false }, 'user block must only contain username/email/corpusReuseConsent, never a password or token');
+  // A2 adds a resolved-identity confirmation block — display data only, never a
+  // fingerprint / verification internal / owner-link / cross-account signal.
+  assert.deepEqual(Object.keys(body).sort(), ['identity', 'user']);
+  assert.deepEqual(Object.keys(body.identity).sort(), ['accountType', 'city', 'countryCode', 'countryName', 'institution', 'phoneRegion']);
+  assert.equal(body.identity.accountType, 'independent');
+  assert.equal(JSON.stringify(body).includes('fingerprint'), false, 'no fingerprint anywhere in the signup response');
   const cookie = extractCookie(res);
   assert.ok(cookie && cookie.length > 20, 'a session cookie must be set');
 
@@ -87,7 +97,16 @@ async function logout(cookieValue, ip = 'auth-test-logout') {
 
   const meRes = await me(cookie);
   const meBody = await meRes.json();
-  assert.deepEqual(meBody, { user: { username: 'alice', email: 'alice@example.com', corpusReuseConsent: false } }, '/api/auth/me must reflect the new session');
+  assert.deepEqual(meBody.user, { username: 'alice', email: 'alice@example.com', corpusReuseConsent: false }, '/api/auth/me must reflect the new session');
+  // A2: me also returns the owner's own identity profile (never a fingerprint /
+  // owner-link / SELF / cross-account signal).
+  assert.equal(meBody.identity.accountType, 'independent');
+  assert.equal(meBody.identity.emailVerified, false);
+  assert.equal(meBody.identity.phoneVerified, false);
+  assert.equal(meBody.identity.institutionVerified, false);
+  for (const forbidden of ['fingerprint', 'ownerLink', 'owner_link', 'selfStatus', 'crossAccount']) {
+    assert.equal(JSON.stringify(meBody).toLowerCase().includes(forbidden.toLowerCase()), false, `me must not expose ${forbidden}`);
+  }
   console.log('signup happy path passed');
 }
 
@@ -241,7 +260,9 @@ async function logout(cookieValue, ip = 'auth-test-logout') {
     signupRes = await signupRoute.POST(new Request('http://localhost/api/auth/signup', {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-forwarded-for': signupIp },
-      body: JSON.stringify({ email: 'db-down-2@example.com', password: 'whatever-1', username: 'dbdown', deviceKey: 'device-db-down-2' }),
+      // Valid identity (independent / NONE — no ROR call) so the request gets
+      // PAST identity validation and reaches the now-broken DB connection.
+      body: JSON.stringify(withTestIdentity({ email: 'db-down-2@example.com', password: 'whatever-1', username: 'dbdown', deviceKey: 'device-db-down-2' })),
     }));
   } finally {
     console.error = originalError;

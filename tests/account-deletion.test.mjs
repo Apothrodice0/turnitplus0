@@ -13,6 +13,7 @@ import { resetRateForTest, resetAuthRateForTest } from '../lib/rate-limit.js';
 import { canonicalSha256 } from '../lib/document-identity.ts';
 import { ACCOUNT_DELETION_CONFIRMATION_PHRASE } from '../lib/account-deletion.ts';
 import { indexDocumentSubmissionIntoCorpus } from '../lib/user-submission-corpus.ts';
+import { withTestIdentity } from './helpers/test-signup.mjs';
 
 /**
  * Account deletion (production audit fix — no such endpoint existed
@@ -61,7 +62,7 @@ async function signup(email, deviceKey) {
   const req = new Request('http://localhost/api/auth/signup', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-forwarded-for': 'acct-del-signup-' + email },
-    body: JSON.stringify({ email, password: PASSWORD, username: email.split('@')[0], deviceKey }),
+    body: JSON.stringify(withTestIdentity({ email, password: PASSWORD, username: email.split('@')[0], deviceKey })),
   });
   const res = await signupRoute.POST(req);
   const body = await res.json();

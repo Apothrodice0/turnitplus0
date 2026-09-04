@@ -9,6 +9,7 @@ import * as reportIdRoute from "../app/api/reports/[id]/route.ts";
 import * as signupRoute from "../app/api/auth/signup/route.ts";
 import { resetRateForTest, resetAuthRateForTest } from "../lib/rate-limit.js";
 import { classifyReportMatches } from "../lib/report-classification.ts";
+import { withTestIdentity } from './helpers/test-signup.mjs';
 
 // Phase D: connects the existing SELF/PRIOR_SUBMISSION classification
 // (lib/document-family.ts, lib/document-relationship.ts — Phases B/C) to the
@@ -69,7 +70,7 @@ async function signup(email, deviceKey) {
   const req = new Request("http://localhost/api/auth/signup", {
     method: "POST",
     headers: { "content-type": "application/json", "x-forwarded-for": `classify-signup-${email}` },
-    body: JSON.stringify({ email, password: "classification-password-1", username: email.split("@")[0], deviceKey }),
+    body: JSON.stringify(withTestIdentity({ email, password: "classification-password-1", username: email.split("@")[0], deviceKey })),
   });
   const res = await signupRoute.POST(req);
   // Privacy hardening: grants cross-account corpus-reuse consent immediately

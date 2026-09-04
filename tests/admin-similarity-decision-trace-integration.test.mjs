@@ -24,6 +24,7 @@ import * as reportsRoute from "../app/api/reports/route.ts";
 import * as reportIdRoute from "../app/api/reports/[id]/route.ts";
 import * as developerReportIdRoute from "../app/api/developer/reports/[id]/route.ts";
 import { resetRateForTest, resetReadRateForTest, resetAuthRateForTest } from "../lib/rate-limit.ts";
+import { withTestIdentity, grantTestAdmin } from './helpers/test-signup.mjs';
 
 /**
  * Integration coverage for the admin similarity decision trace:
@@ -427,7 +428,7 @@ async function signup(email, deviceKey, tag) {
   const res = await signupRoute.POST(new Request("http://localhost/api/auth/signup", {
     method: "POST",
     headers: { "content-type": "application/json", "x-forwarded-for": tag },
-    body: JSON.stringify({ email, password: "asdt-password-1", username: tag.replace(/[^a-z0-9]/gi, ""), deviceKey }),
+    body: JSON.stringify(withTestIdentity({ email, password: "asdt-password-1", username: tag.replace(/[^a-z0-9]/gi, ""), deviceKey })),
   }));
   assert.equal(res.status, 201, `signup must succeed for ${email}`);
   return extractCookie(res);
@@ -489,6 +490,7 @@ test("§13: an admin session receives similarityDecisionTrace from the developer
   await indexPriorSubmission(uniq("acc-http-prior"), PRIOR_TEXT);
 
   const adminCookie = await signup("asdt-admin@example.com", "asdt-admin-dev", "asdt-admin-1");
+  await grantTestAdmin(dbFile, "asdt-admin@example.com");
   const ordinaryCookie = await signup("asdt-ordinary@example.com", "asdt-ordinary-dev", "asdt-ordinary-1");
 
   await postReport({ deviceKey: "asdt-admin-dev", cookie: adminCookie, id: "asdt-admin-report", text: PRIOR_TEXT, room: 0, tag: "asdt-admin-post" });

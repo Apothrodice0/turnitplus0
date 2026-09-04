@@ -10,6 +10,7 @@ import * as signupRoute from '../app/api/auth/signup/route.ts';
 import { resetRateForTest, resetAuthRateForTest } from '../lib/rate-limit.js';
 import { getOrComputeHistoricalMatchSnapshot } from '../lib/report-historical-match.ts';
 import { matureCorpusBackings } from './helpers/corpus-maturity.mjs';
+import { withTestIdentity } from './helpers/test-signup.mjs';
 
 const repo = path.resolve('.');
 const drizzleDir = path.join(repo, 'drizzle');
@@ -107,7 +108,7 @@ async function signup(email, deviceKey) {
   const req = new Request('http://localhost/api/auth/signup', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-forwarded-for': 'ehist-signup-' + email },
-    body: JSON.stringify({ email, password: 'ehist-password-1', username: email.split('@')[0], deviceKey }),
+    body: JSON.stringify(withTestIdentity({ email, password: 'ehist-password-1', username: email.split('@')[0], deviceKey })),
   });
   const res = await signupRoute.POST(req);
   // Privacy hardening: grants cross-account corpus-reuse consent immediately

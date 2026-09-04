@@ -16,6 +16,7 @@ import { indexDocumentSubmissionIntoCorpus } from '../lib/user-submission-corpus
 import { runCorpusAdmissionPromotionSweep } from '../lib/corpus-admission-promotion.ts';
 import { matchAgainstUserSubmissionCorpus } from '../lib/user-submission-matching.ts';
 import { matureCorpusBackings } from './helpers/corpus-maturity.mjs';
+import { withTestIdentity, grantTestAdmin } from './helpers/test-signup.mjs';
 
 /**
  * POST /api/developer/reset-account-rooms — "Clear account rooms". An admin
@@ -69,7 +70,7 @@ async function signup(email, deviceKey) {
   const res = await signupRoute.POST(new Request('http://localhost/api/auth/signup', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-forwarded-for': ip },
-    body: JSON.stringify({ email, password: PASSWORD, username: email.split('@')[0].replace(/[^a-z0-9]/gi, ''), deviceKey }),
+    body: JSON.stringify(withTestIdentity({ email, password: PASSWORD, username: email.split('@')[0].replace(/[^a-z0-9]/gi, ''), deviceKey })),
   }));
   assert.equal(res.status, 201, `signup ${email}`);
   return extractCookie(res);
@@ -193,6 +194,7 @@ const DISPOSABLE_TEXT =
 // --- Fixtures --------------------------------------------------------
 
 const cookieAdmin = await signup(ADMIN_EMAIL, 'device-arr-admin');
+await grantTestAdmin(dbFile, ADMIN_EMAIL);
 const idAdmin = await userId(ADMIN_EMAIL);
 assert.equal((await one('SELECT role FROM users WHERE id = ?', [idAdmin])).role, 'admin');
 

@@ -15,6 +15,7 @@ import { CORPUS_DUPLICATE_SUPPRESSION_SHADOW_POLICY_VERSION } from "../lib/corpu
 import * as signupRoute from "../app/api/auth/signup/route.ts";
 import * as loginRoute from "../app/api/auth/login/route.ts";
 import * as cdShadowRoute from "../app/api/developer/corpus-duplicate-suppression-shadow/route.ts";
+import { withTestIdentity, grantTestAdmin } from './helpers/test-signup.mjs';
 
 /**
  * Phase B2b — ADMIN-ONLY corpus-duplicate suppression shadow measurement
@@ -511,7 +512,7 @@ async function signup(email, deviceKey, tag) {
   const res = await signupRoute.POST(new Request("http://localhost/api/auth/signup", {
     method: "POST",
     headers: { "content-type": "application/json", "x-forwarded-for": tag },
-    body: JSON.stringify({ email, password: "cdsm-password-1", username: tag.replace(/[^a-z0-9]/gi, ""), deviceKey }),
+    body: JSON.stringify(withTestIdentity({ email, password: "cdsm-password-1", username: tag.replace(/[^a-z0-9]/gi, ""), deviceKey })),
   }));
   assert.equal(res.status, 201, `signup ${email}`);
   return extractCookie(res);
@@ -536,6 +537,7 @@ async function callRoute(cookie, tag, qs = "") {
 
 test("admin-only access: no session -> 404, non-admin -> 404 (no body), admin -> 200 with the measurement", async () => {
   const adminCookie = await signup("cdsm-admin@example.com", "cdsm-admin-dev", "cdsm-admin-1");
+  await grantTestAdmin(dbFile, "cdsm-admin@example.com");
   const plainCookie = await signup("cdsm-ordinary@example.com", "cdsm-ordinary-dev", "cdsm-ordinary-1");
 
   const noSession = await callRoute(null, "cdsm-nosess");
