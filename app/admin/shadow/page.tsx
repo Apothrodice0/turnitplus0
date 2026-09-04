@@ -16,6 +16,7 @@ import {
   type CorpusDuplicateSuppressionShadowMeasurement,
 } from "@/lib/corpus-duplicate-suppression-shadow-measurement";
 import { AdminHeader } from "@/components/admin/admin-header";
+import { MetricGrid, MetricTile } from "@/components/admin/metric-tile";
 import { DeviceProvenanceShadowCard } from "@/components/admin/shadow/device-provenance-shadow-card";
 import { SharedDeviceRiskCard } from "@/components/admin/shadow/shared-device-risk-card";
 import { CorpusDuplicateShadowCard } from "@/components/admin/shadow/corpus-duplicate-shadow-card";
@@ -69,6 +70,22 @@ export default async function AdminShadowPage() {
     client.close();
   }
 
+  // Page-level summary — every number here is a direct read (or trivial
+  // in-memory sum) of fields the three measurement calls above already
+  // computed; no additional query is issued for this row.
+  const totalShadowEvaluations = (deviceShadow?.totals.evaluations ?? 0) + (corpusDuplicateShadow?.totals.evaluations ?? 0);
+  const sameDeviceSelfCandidates = deviceShadow?.wouldDowngradeCount ?? 0;
+  const sharedDeviceRiskCandidates = sharedDeviceRisk?.totals.candidatesEvaluated ?? 0;
+  const corpusDuplicateCandidates = corpusDuplicateShadow?.totals.candidatePositive ?? 0;
+  const blockedByIndependentBacking = deviceShadow?.blockedByIndependentBackingCount ?? 0;
+  const hypotheticalScoreChanged = corpusDuplicateShadow
+    ? corpusDuplicateShadow.scoreDeltaBuckets.d1to9 +
+      corpusDuplicateShadow.scoreDeltaBuckets.d10to24 +
+      corpusDuplicateShadow.scoreDeltaBuckets.d25to49 +
+      corpusDuplicateShadow.scoreDeltaBuckets.d50to99 +
+      corpusDuplicateShadow.scoreDeltaBuckets.d100
+    : 0;
+
   return (
     <main className="developer-page">
       <AdminHeader
@@ -76,6 +93,17 @@ export default async function AdminShadowPage() {
         title="Shadow"
         description="Telemetry-only measurements for proposed policies — none of these change production scoring or relationships."
       />
+
+      {(deviceShadow || sharedDeviceRisk || corpusDuplicateShadow) && (
+        <MetricGrid>
+          <MetricTile label="Total shadow evaluations" value={totalShadowEvaluations} sub="Device Passport + corpus-duplicate" />
+          <MetricTile label="Same-device SELF candidates" value={sameDeviceSelfCandidates} />
+          <MetricTile label="Shared-device risk candidates" value={sharedDeviceRiskCandidates} />
+          <MetricTile label="Corpus duplicate candidates" value={corpusDuplicateCandidates} />
+          <MetricTile label="Blocked by indep. backing" value={blockedByIndependentBacking} />
+          <MetricTile label="Hypothetical score changed" value={hypotheticalScoreChanged} sub="corpus-duplicate, delta ≠ 0" />
+        </MetricGrid>
+      )}
 
       {deviceShadow && <DeviceProvenanceShadowCard measurement={deviceShadow} />}
       {sharedDeviceRisk && <SharedDeviceRiskCard measurement={sharedDeviceRisk} />}

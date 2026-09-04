@@ -115,6 +115,10 @@ export type CorpusDuplicateSuppressionShadowMeasurement = {
   averageScoreDelta: number | null;
   /** AVG(score_delta) over status IN ('OK','BOUNDED') AND candidate_count > 0; null when there are none. */
   averageScoreDeltaWhereCandidate: number | null;
+  /** AVG(authoritative_score) over status IN ('OK','BOUNDED'); null when there are none. Admin Phase 2B summary tile — same REAL_MEASUREMENT_FILTER scope as averageScoreDelta, no new query. */
+  averageAuthoritativeScore: number | null;
+  /** AVG(hypothetical_score) over status IN ('OK','BOUNDED'); null when there are none. */
+  averageHypotheticalScore: number | null;
 
   /** status IN ('OK','BOUNDED') AND authoritative_score = 100 AND hypothetical_score = 0. */
   authoritative100Hypothetical0Count: number;
@@ -248,6 +252,8 @@ export async function summarizeCorpusDuplicateSuppressionShadowMeasurement(
 
             AVG(CASE WHEN ${REAL_MEASUREMENT_FILTER} THEN CAST(score_delta AS REAL) END) AS avg_delta,
             AVG(CASE WHEN ${REAL_MEASUREMENT_FILTER} AND candidate_count > 0 THEN CAST(score_delta AS REAL) END) AS avg_delta_candidate,
+            AVG(CASE WHEN ${REAL_MEASUREMENT_FILTER} THEN CAST(authoritative_score AS REAL) END) AS avg_authoritative,
+            AVG(CASE WHEN ${REAL_MEASUREMENT_FILTER} THEN CAST(hypothetical_score AS REAL) END) AS avg_hypothetical,
 
             SUM(CASE WHEN ${REAL_MEASUREMENT_FILTER} AND authoritative_score = 100 AND hypothetical_score = 0 THEN 1 ELSE 0 END) AS a100_h0,
             SUM(CASE WHEN ${REAL_MEASUREMENT_FILTER} AND authoritative_score = 100 AND hypothetical_score BETWEEN 1 AND 99 THEN 1 ELSE 0 END) AS a100_hp,
@@ -429,6 +435,8 @@ export async function summarizeCorpusDuplicateSuppressionShadowMeasurement(
     },
     averageScoreDelta: numOrNull(aggRow.avg_delta),
     averageScoreDeltaWhereCandidate: numOrNull(aggRow.avg_delta_candidate),
+    averageAuthoritativeScore: numOrNull(aggRow.avg_authoritative),
+    averageHypotheticalScore: numOrNull(aggRow.avg_hypothetical),
     authoritative100Hypothetical0Count: num(aggRow.a100_h0),
     authoritative100HypotheticalPartialCount: num(aggRow.a100_hp),
     checkerAccountsStatusDistribution: toDistribution(checkerStatusRows),

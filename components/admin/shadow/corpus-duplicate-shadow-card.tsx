@@ -3,19 +3,30 @@ import type { CorpusDuplicateSuppressionShadowMeasurement } from "@/lib/corpus-d
 import { MetricGrid, MetricTile } from "@/components/admin/metric-tile";
 import { BadgeGroup } from "@/components/admin/badge-list";
 import { AdminCollapsible } from "@/components/admin/collapsible";
+import { AdminStatusBadge, YesNoBadge } from "@/components/admin/status-badge";
 
 /**
- * Corpus-duplicate suppression shadow (Phase B2) — same data as the former
- * app/developer/page.tsx inline section, reorganized into summary metric
- * tiles + collapsible distributions/detail table. Measurement only; no score
- * or relationship is changed by this policy today.
+ * Corpus-duplicate suppression shadow (Phase B2) — summary metric tiles +
+ * collapsible distributions/detail tables. Measurement only; no score or
+ * relationship is changed by this policy today.
+ *
+ * Admin Phase 2B finding: the measurement layer already computes
+ * averageAuthoritativeScore/averageHypotheticalScore is a NEW trivial
+ * aggregation added alongside the existing averageScoreDelta (same query,
+ * same REAL_MEASUREMENT_FILTER scope — see that lib's own comment). Separately,
+ * ~20 fields on every recentCandidates row (word-survival reconciliation,
+ * backing counts, same-Passport/cross-account category flags, corpus
+ * snapshot generation, truncation, runtime) were already fetched into the
+ * page but had NO UI at all — surfaced below in a dedicated collapsible
+ * rather than widening the main table past what the task's own column spec
+ * asks for.
  */
 export function CorpusDuplicateShadowCard({ measurement }: { measurement: CorpusDuplicateSuppressionShadowMeasurement }) {
   const m = measurement;
   return (
     <section className="admin-card">
-      <h2>Corpus-duplicate suppression shadow (Phase B2)</h2>
-      <p>
+      <h2>Corpus-duplicate suppression shadow</h2>
+      <p className="admin-card-description">
         <span className="admin-workspace-badge">{m.policyVersion}</span>{" "}
         What the unified similarity score would be if one qualifying TurnitPlus-internal exact-canonical
         whole-document duplicate did not inflate it. Score statistics cover only <code>status IN (OK, BOUNDED)</code>.
@@ -27,15 +38,16 @@ export function CorpusDuplicateShadowCard({ measurement }: { measurement: Corpus
           value={m.totals.evaluations}
           sub={`OK ${m.totals.ok} · BOUNDED ${m.totals.bounded} · FAILED ${m.totals.failed} · skipped ${m.totals.skipped}`}
         />
-        <MetricTile label="Real-measurement rows" value={m.totals.realMeasurementRows} />
-        <MetricTile label="Rows with ≥1 candidate" value={m.totals.candidatePositive} sub={`frequency ${m.candidateFrequency.toFixed(3)}`} />
+        <MetricTile label="Candidates" value={m.totals.candidatePositive} sub={`of ${m.totals.realMeasurementRows} real-measurement rows`} />
+        <MetricTile label="Candidate frequency" value={m.candidateFrequency.toFixed(3)} />
+        <MetricTile label="Avg. authoritative score" value={m.averageAuthoritativeScore === null ? "not measured" : m.averageAuthoritativeScore.toFixed(1)} />
+        <MetricTile label="Avg. hypothetical score" value={m.averageHypotheticalScore === null ? "not measured" : m.averageHypotheticalScore.toFixed(1)} />
         <MetricTile
           label="Average score delta"
           value={m.averageScoreDelta === null ? "not measured" : m.averageScoreDelta.toFixed(2)}
           sub={m.averageScoreDeltaWhereCandidate === null ? undefined : `where candidate: ${m.averageScoreDeltaWhereCandidate.toFixed(2)}`}
         />
         <MetricTile label="Authoritative 100 → hypothetical 0" value={m.authoritative100Hypothetical0Count} />
-        <MetricTile label="Authoritative 100 → hypothetical 1–99" value={m.authoritative100HypotheticalPartialCount} />
         <MetricTile label="Surviving-word reconciliation" value={`${m.reconciliation.reconciledRows} / ${m.reconciliation.checkedRows}`} />
       </MetricGrid>
 
@@ -88,19 +100,91 @@ export function CorpusDuplicateShadowCard({ measurement }: { measurement: Corpus
                       {row.reportId}
                     </Link>
                   </td>
-                  <td>{row.status}{row.status === "FAILED" && row.errorCode ? ` (${row.errorCode})` : ""}</td>
-                  <td>{row.measurementCategory ?? "not measured"}</td>
+                  <td>
+                    <AdminStatusBadge status={row.status} />
+                    {row.status === "FAILED" && row.errorCode ? <div className="admin-table-subtext">{row.errorCode}</div> : null}
+                  </td>
+                  <td>{row.measurementCategory ? <AdminStatusBadge status={row.measurementCategory} /> : "not measured"}</td>
                   <td>{row.candidateCount === null ? "not measured" : row.candidateCount}</td>
                   <td>{row.authoritativeScore === null ? "not measured" : row.authoritativeScore}</td>
                   <td>{row.hypotheticalScore === null ? "not measured" : row.hypotheticalScore}</td>
                   <td>{row.scoreDelta === null ? "not measured" : row.scoreDelta}</td>
-                  <td>{row.checkerAccountsStatus}{row.distinctCheckerAccountsBucket ? ` / ${row.distinctCheckerAccountsBucket}` : ""}</td>
+                  <td>
+                    <AdminStatusBadge status={row.checkerAccountsStatus} />
+                    {row.distinctCheckerAccountsBucket ? <div className="admin-table-subtext">{row.distinctCheckerAccountsBucket} accounts</div> : null}
+                  </td>
                   <td>{row.computedAt}</td>
                 </tr>
               ))}
               {m.recentCandidates.length === 0 && (
                 <tr>
                   <td colSpan={9}>No corpus-duplicate suppression shadow evaluations yet.</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </AdminCollapsible>
+
+      <AdminCollapsible summary="Per-candidate word-survival & backing detail (technical)">
+        <div className="admin-table-scroll">
+          <table className="developer-table">
+            <thead>
+              <tr>
+                <th>Report</th>
+                <th>Submitted words</th>
+                <th>Authoritative unique</th>
+                <th>Hypothetical unique</th>
+                <th>Unique removed</th>
+                <th>Candidate matched</th>
+                <th>Candidates excluded</th>
+                <th>Archive-only surv.</th>
+                <th>Live-academic-only surv.</th>
+                <th>Prior-upload-only surv.</th>
+                <th>Overlap surv.</th>
+                <th>Admitted-promotion backing</th>
+                <th>Submission-ref backing</th>
+                <th>Independent backing</th>
+                <th>Same-device backing</th>
+                <th>Same-Passport</th>
+                <th>Cross-account</th>
+                <th>Corpus generation</th>
+                <th>Snapshot computed</th>
+                <th>Truncated</th>
+                <th>Runtime (ms)</th>
+                <th>Created</th>
+              </tr>
+            </thead>
+            <tbody>
+              {m.recentCandidates.map((row) => (
+                <tr key={`detail:${row.reportDeviceKey}:${row.reportId}`}>
+                  <td>{row.reportId}</td>
+                  <td>{row.submittedWordCount ?? "—"}</td>
+                  <td>{row.authoritativeUniqueMatchedWords ?? "—"}</td>
+                  <td>{row.hypotheticalUniqueMatchedWords ?? "—"}</td>
+                  <td>{row.uniqueMatchedWordsRemoved ?? "—"}</td>
+                  <td>{row.candidateMatchedWords ?? "—"}</td>
+                  <td>{row.candidatesExcluded ?? "—"}</td>
+                  <td>{row.archiveOnlyWordsSurviving ?? "—"}</td>
+                  <td>{row.liveAcademicOnlyWordsSurviving ?? "—"}</td>
+                  <td>{row.previousUploadOnlyWordsSurviving ?? "—"}</td>
+                  <td>{row.overlapWordsSurviving ?? "—"}</td>
+                  <td>{row.candidateAdmittedPromotionBackingCount ?? "—"}</td>
+                  <td>{row.candidateSubmissionReferenceBackingCount ?? "—"}</td>
+                  <td>{row.candidateIndependentBackingCount ?? "—"}</td>
+                  <td>{row.candidateSameDeviceBackingCount ?? "—"}</td>
+                  <td><YesNoBadge value={row.samePassportCategory} /></td>
+                  <td><YesNoBadge value={row.crossAccountCategory} /></td>
+                  <td>{row.authoritativeCorpusGeneration ?? "—"}</td>
+                  <td>{row.authoritativeSnapshotComputedAt ?? "—"}</td>
+                  <td><YesNoBadge value={row.evaluationTruncated} /></td>
+                  <td>{row.totalRuntimeMs ?? "—"}</td>
+                  <td>{row.createdAt}</td>
+                </tr>
+              ))}
+              {m.recentCandidates.length === 0 && (
+                <tr>
+                  <td colSpan={21}>No corpus-duplicate suppression shadow evaluations yet.</td>
                 </tr>
               )}
             </tbody>

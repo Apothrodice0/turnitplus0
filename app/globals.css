@@ -7126,3 +7126,16 @@ main.report-main {
   .admin-corpus-toolbar { flex-direction: column; align-items: stretch; }
   .admin-corpus-toolbar input, .admin-corpus-toolbar select { width: 100%; }
 }
+
+/* Admin Phase 2B — Shadow workspace polish. Reuses the same card/metric-
+   tile/badge/collapsible system as Corpus (Phase 2A); nothing new here
+   beyond the policy-comparison cards and two small table helpers. */
+.admin-policy-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin: 12px 0 20px; }
+.admin-policy-card { background: var(--canvas); border: 1px solid var(--soft-line); border-radius: 10px; padding: 12px 14px; }
+.admin-policy-card-name { font-size: 12px; font-weight: 700; color: var(--sidebar); margin-bottom: 8px; font-family: var(--font-geist-mono), monospace; }
+.admin-policy-card-stats { display: flex; flex-wrap: wrap; gap: 6px; }
+
+.admin-status-badge-count { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--ink); }
+
+.admin-table-subtext { font-size: 11px; color: var(--muted); margin-top: 2px; white-space: nowrap; }
+.admin-table-drift { background: rgba(245, 138, 59, .12); font-weight: 700; }
