@@ -43,6 +43,7 @@ import { ReportRoomsBrowser } from "@/components/reports/report-rooms";
 import { ReportHistoryRow } from "@/components/reports/report-history-row";
 import { DocumentUploadPanel } from "@/components/reports/document-upload-panel";
 import { IdentityFields, type IdentityFieldsHandle, type CollectedIdentity } from "@/components/auth/identity-fields";
+import { EmailVerificationStatus } from "@/components/account/email-verification-status";
 import {
   analyzeAcademicEvidence,
   analyzeText,
@@ -313,6 +314,39 @@ export default function Home() {
     void fetchUploadLimitStatus().then(setUploadLimitStatus);
   }
 
+  // /api/auth/me is the SINGLE source of truth for the signed-in account's
+  // display state: `user`, the identity profile, and the email-verification
+  // status. The /api/auth/login and /api/auth/signup responses carry only
+  // `user`, so after an in-page sign-in this must run too — otherwise
+  // `accountIdentity` and `emailVerification` stay at their logged-out `null`
+  // and the account page renders without the identity details and without the
+  // "Email not verified / Verify email" control until a manual refresh.
+  //
+  // On success it populates all three; it NEVER clears them on a transient
+  // failure (a caller that already set `account` from a fresh auth response
+  // must not have it wiped by a flaky follow-up request).
+  async function hydrateAccountFromServer(): Promise<"signed-in" | "signed-out" | "error"> {
+    let result: {
+      user?: LocalAccount | null;
+      identity?: AccountIdentityView | null;
+      emailVerification?: EmailVerificationView | null;
+    } | null;
+    try {
+      const response = await fetch("/api/auth/me");
+      if (!response.ok) return "error";
+      result = (await response.json()) as typeof result;
+    } catch {
+      return "error";
+    }
+    if (result && result.user) {
+      setAccount(result.user);
+      setAccountIdentity(result.identity ?? null);
+      setEmailVerification(result.emailVerification ?? null);
+      return "signed-in";
+    }
+    return "signed-out";
+  }
+
   useEffect(() => {
     queueMicrotask(() => {
       setSidebarCollapsed(window.localStorage.getItem("tp_sidebar_collapsed") === "true");
@@ -320,25 +354,17 @@ export default function Home() {
     // Authentication state is resolved first, then exactly one of the two
     // report sources is used — never both — so a previous session's
     // reports can never linger into a different auth state at hydration.
-    fetch("/api/auth/me")
-      .then((response) => (response.ok ? response.json() : Promise.resolve({ user: null })))
-      .then(async (data) => {
-        const result = data as {
-          user: LocalAccount | null;
-          identity?: AccountIdentityView | null;
-          emailVerification?: EmailVerificationView | null;
-        };
-        if (result && result.user) {
-          setAccount(result.user);
-          setAccountIdentity(result.identity ?? null);
-          setEmailVerification(result.emailVerification ?? null);
-          await loadAccountReports();
-        } else {
-          await loadAnonymousReports();
-        }
-      })
-      .catch(() => loadAnonymousReports())
-      .finally(() => setAccountLoaded(true));
+    (async () => {
+      try {
+        const state = await hydrateAccountFromServer();
+        if (state === "signed-in") await loadAccountReports();
+        else await loadAnonymousReports();
+      } catch {
+        await loadAnonymousReports();
+      } finally {
+        setAccountLoaded(true);
+      }
+    })();
   }, []);
 
   // Cross-tab sign-out (production audit fix): the "storage" event fires in
@@ -484,6 +510,13 @@ export default function Home() {
     }
 
     setAccount(data.user as LocalAccount);
+    // The login/signup response carries only `user`. Pull the identity profile
+    // and the email-verification status from /api/auth/me so the account page
+    // is complete immediately — without this, `accountIdentity` and
+    // `emailVerification` would stay `null` (their logged-out value) until the
+    // user manually refreshed, hiding the "Verify email" control and the
+    // identity details even when the server has them.
+    await hydrateAccountFromServer();
     setAuthLoadingLabel("Loading your report history");
     // Replaces (never merges with) whatever was previously displayed —
     // signing in as a different account, or into an account after browsing
@@ -1291,27 +1324,12 @@ export default function Home() {
                       <p className="section-label">SIGNED IN</p>
                       <h2>{account.username}</h2>
                       <p>{account.email}</p>
-                      {emailVerification?.status === "verified" && (
-                        <p className="email-verify-line is-verified">
-                          <ShieldCheck aria-hidden="true" /> Email verified
-                        </p>
-                      )}
-                      {emailVerification?.status === "unverified" && (
-                        <p className="email-verify-line is-unverified">
-                          <TriangleAlert aria-hidden="true" /> Email not verified
-                          <button
-                            type="button"
-                            className="email-verify-action"
-                            onClick={sendEmailVerification}
-                            disabled={emailVerifySending}
-                          >
-                            {emailVerifySending ? "Sending…" : "Verify email"}
-                          </button>
-                        </p>
-                      )}
-                      {emailVerifyNotice && (
-                        <p className={`email-verify-notice is-${emailVerifyNotice.tone}`}>{emailVerifyNotice.text}</p>
-                      )}
+                      <EmailVerificationStatus
+                        status={emailVerification?.status ?? null}
+                        onVerify={sendEmailVerification}
+                        sending={emailVerifySending}
+                        notice={emailVerifyNotice}
+                      />
                     </div>
                     <button className="button secondary account-edit-button" type="button" onClick={() => setIsEditingProfile((editing) => !editing)}>
                       <Pencil aria-hidden="true" /> {isEditingProfile ? "Close editor" : "Edit information"}

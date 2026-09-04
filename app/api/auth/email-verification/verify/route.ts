@@ -9,6 +9,7 @@ import {
   classifyEmailVerificationChallenge,
   consumeEmailVerificationChallengeStatement,
   setUserEmailVerifiedIfChallengeConsumedStatement,
+  usersHaveEmailVerifiedAtColumn,
   type EmailVerificationRejectReason,
 } from '../../../../../lib/email-verification';
 
@@ -72,6 +73,13 @@ export async function POST(request: Request) {
     let challengeId: string;
     let challengeUserId: string;
     try {
+      // Deploy-ordering safety: the challenge table + users.email_verified_at
+      // arrive with migration 0046. Without it no token can be valid — treat it
+      // as an invalid link, not a 500.
+      if (!(await usersHaveEmailVerifiedAtColumn(readClient))) {
+        return json({ error: GENERIC_REJECT }, 400);
+      }
+
       const challenge = await findEmailVerificationChallengeByToken(readClient, token);
       if (!challenge) {
         return json({ error: GENERIC_REJECT }, 400);

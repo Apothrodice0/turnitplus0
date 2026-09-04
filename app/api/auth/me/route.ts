@@ -15,6 +15,7 @@ import { isoCountryByAlpha2 } from '../../../../lib/iso-3166-1-countries';
 import {
   revokeOutstandingEmailVerificationChallengesStatement,
   clearUserEmailVerifiedStatement,
+  usersHaveEmailVerifiedAtColumn,
 } from '../../../../lib/email-verification';
 
 /**
@@ -89,20 +90,34 @@ export async function GET(request: Request) {
 
     // Grandfathering: an account created before A2 has no identity profile.
     // identity: null just means "profile not completed" — it never blocks login
-    // or anything else. Email verification is INDEPENDENT of the profile: it
-    // comes exclusively from the authoritative users.email_verified_at.
+    // or anything else.
+    //
+    // The identity (profile) read and the email-verification read are FULLY
+    // INDEPENDENT: a failure of one must never zero out the other. In
+    // particular, when this A3 code is live in an environment where migration
+    // 0046 has not yet added users.email_verified_at, the verification read is
+    // simply skipped ("unverified") — the profile, and so "Edit information" vs
+    // "Complete your identity profile", is unaffected.
     let identity: ReturnType<typeof identityView> | null = null;
     let emailVerificationStatus: EmailVerificationStatus = 'unverified';
     const profileClient = await getReportsDbClient();
     try {
-      const userRow = await profileClient.execute({ sql: 'SELECT email_verified_at FROM users WHERE id = ?', args: [sessionUser.id] });
-      const verifiedAt = (userRow.rows[0] as unknown as { email_verified_at: number | null } | undefined)?.email_verified_at ?? null;
-      emailVerificationStatus = emailVerificationStatusFor(verifiedAt);
+      try {
+        const profile = await readAccountIdentityProfile(profileClient, sessionUser.id);
+        if (profile) identity = identityView(profile);
+      } catch {
+        identity = null;
+      }
 
-      const profile = await readAccountIdentityProfile(profileClient, sessionUser.id);
-      if (profile) identity = identityView(profile);
-    } catch {
-      identity = null;
+      try {
+        if (await usersHaveEmailVerifiedAtColumn(profileClient)) {
+          const userRow = await profileClient.execute({ sql: 'SELECT email_verified_at FROM users WHERE id = ?', args: [sessionUser.id] });
+          const verifiedAt = (userRow.rows[0] as unknown as { email_verified_at: number | null } | undefined)?.email_verified_at ?? null;
+          emailVerificationStatus = emailVerificationStatusFor(verifiedAt);
+        }
+      } catch {
+        emailVerificationStatus = 'unverified';
+      }
     } finally {
       profileClient.close();
     }
@@ -194,22 +209,29 @@ export async function PATCH(request: Request) {
           ? accountIdentityProfileUpsertStatement(sessionUser.id, identityResult.identity.normalized, now)
           : null;
 
+      // Deploy-ordering safety: the users.email_verified_at column and the
+      // email_verification_challenges table both arrive with migration 0046. If
+      // 0046 is not applied here, skip every statement that touches them — a
+      // plain username/email/profile PATCH must still succeed.
+      const emailVerifiedColumnExists = await usersHaveEmailVerifiedAtColumn(client);
+
       // A3 — changing the login email VOIDS the account's verified-email state
       // (users.email_verified_at -> NULL) and kills every outstanding
       // verification link, and both must land atomically with the users.email
       // UPDATE itself (no window where the address moved but an old link still
       // verifies, or the account still reads "verified"). Since every statement
-      // here goes into ONE client.batch transaction below, the three effects
-      // commit together. The revoke is a no-op when there are no challenges. A
-      // profile edit that does NOT change the email never runs these — editing
-      // your city must not un-verify your email.
+      // here goes into ONE client.batch transaction below, the effects commit
+      // together. The revoke is a no-op when there are no challenges. A profile
+      // edit that does NOT change the email never runs these — editing your city
+      // must not un-verify your email.
       const emailChanged = normalizedEmail !== sessionUser.email;
-      const emailChangeStatements: InStatement[] = emailChanged
-        ? [
-            clearUserEmailVerifiedStatement(sessionUser.id),
-            revokeOutstandingEmailVerificationChallengesStatement(sessionUser.id, now),
-          ]
-        : [];
+      const emailChangeStatements: InStatement[] =
+        emailChanged && emailVerifiedColumnExists
+          ? [
+              clearUserEmailVerifiedStatement(sessionUser.id),
+              revokeOutstandingEmailVerificationChallengesStatement(sessionUser.id, now),
+            ]
+          : [];
 
       // Run one user-facing UPDATE plus whatever profile / email-change
       // statements apply, atomically. A single statement goes through execute();
@@ -273,8 +295,15 @@ export async function PATCH(request: Request) {
 
       const resolvedConsent = corpusReuseConsent !== undefined ? corpusReuseConsent : sessionUser.corpusReuseConsented;
       const storedProfile = await readAccountIdentityProfile(client, sessionUser.id);
-      const verifiedRow = await client.execute({ sql: 'SELECT email_verified_at FROM users WHERE id = ?', args: [sessionUser.id] });
-      const storedVerifiedAt = (verifiedRow.rows[0] as unknown as { email_verified_at: number | null } | undefined)?.email_verified_at ?? null;
+      let storedVerifiedAt: number | null = null;
+      if (emailVerifiedColumnExists) {
+        try {
+          const verifiedRow = await client.execute({ sql: 'SELECT email_verified_at FROM users WHERE id = ?', args: [sessionUser.id] });
+          storedVerifiedAt = (verifiedRow.rows[0] as unknown as { email_verified_at: number | null } | undefined)?.email_verified_at ?? null;
+        } catch {
+          storedVerifiedAt = null;
+        }
+      }
       return new NextResponse(
         JSON.stringify({
           user: { username: trimmedUsername, email: normalizedEmail, corpusReuseConsent: resolvedConsent },

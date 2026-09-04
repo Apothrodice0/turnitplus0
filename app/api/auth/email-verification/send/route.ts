@@ -13,6 +13,7 @@ import {
   mostRecentEmailVerificationChallenge,
   countEmailVerificationChallengesSince,
   pruneExpiredEmailVerificationChallenges,
+  usersHaveEmailVerifiedAtColumn,
   EMAIL_VERIFICATION_RESEND_COOLDOWN_MS,
   EMAIL_VERIFICATION_ISSUANCE_WINDOW_MS,
   EMAIL_VERIFICATION_MAX_ISSUANCE_PER_WINDOW,
@@ -69,6 +70,16 @@ export async function POST(request: Request) {
       const sessionUser = await getSessionUser(request, client);
       if (!sessionUser) {
         return json({ error: 'Not signed in.' }, 401);
+      }
+
+      // Deploy-ordering safety: users.email_verified_at + the challenge table
+      // both arrive with migration 0046. Without it, verification cannot
+      // complete — say so cleanly rather than 500 on a missing column/table.
+      if (!(await usersHaveEmailVerifiedAtColumn(client))) {
+        return json(
+          { status: 'unavailable', error: 'Email verification is not available yet. Please try again later.' },
+          503,
+        );
       }
 
       // Authoritative verified state: users.email_verified_at (works for EVERY

@@ -5,11 +5,9 @@ import type { Client, InStatement } from "@libsql/client";
  * A3 — the email-verification challenge state machine (storage in
  * drizzle/0046_email_verification_challenges.sql).
  *
- * This module owns the CHALLENGE ONLY. It deliberately knows nothing about
- * where an account's verified-email state is finally recorded (today:
- * account_identity_profiles.email_verified_at, written by the routes) — keeping
- * it uncoupled from account-identity so a future move of that column is a
- * route-level change, not a change here.
+ * This module owns the CHALLENGE ONLY. The authoritative verified-email marker
+ * is users.email_verified_at (added by drizzle/0046); the routes read/write it
+ * directly. This module stays uncoupled from account-identity.
  *
  * TOKEN DISCIPLINE (identical to lib/auth-session.ts / device-passport
  * challenges):
@@ -180,6 +178,36 @@ export function setUserEmailVerifiedIfChallengeConsumedStatement(
 /** Clear users.email_verified_at back to NULL. Used atomically with a users.email change. */
 export function clearUserEmailVerifiedStatement(userId: string): InStatement {
   return { sql: `UPDATE users SET email_verified_at = NULL WHERE id = ?`, args: [userId] };
+}
+
+/**
+ * Deploy-ordering safety: A3 code can reach an environment where migration 0046
+ * has NOT yet added users.email_verified_at (and the email_verification_challenges
+ * table). Every route that reads/writes email-verification state calls this
+ * first so it degrades gracefully — treating an account as "unverified" and
+ * skipping the challenge / clear writes — instead of throwing "no such column".
+ *
+ * Cached once the column is seen (columns are never dropped in this schema);
+ * while absent it is re-checked on every call, so the code self-heals the
+ * instant 0046 is applied without a redeploy. The column and the challenge
+ * table are added by the SAME migration, so this one check gates both.
+ */
+let usersEmailVerifiedAtColumnKnownPresent = false;
+export async function usersHaveEmailVerifiedAtColumn(exec: Exec): Promise<boolean> {
+  if (usersEmailVerifiedAtColumnKnownPresent) return true;
+  try {
+    const info = await exec.execute("PRAGMA table_info('users')");
+    const present = info.rows.some((r) => String((r as { name?: unknown }).name) === "email_verified_at");
+    if (present) usersEmailVerifiedAtColumnKnownPresent = true;
+    return present;
+  } catch {
+    return false;
+  }
+}
+
+/** TEST ONLY — forget the cached column-presence result so a test can exercise both schema states. */
+export function __resetUsersEmailVerifiedAtColumnCacheForTest(): void {
+  usersEmailVerifiedAtColumnKnownPresent = false;
 }
 
 // ---------------------------------------------------------------------------
