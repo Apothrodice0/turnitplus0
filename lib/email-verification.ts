@@ -1,21 +1,19 @@
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createHmac, randomInt, randomUUID, timingSafeEqual } from "node:crypto";
 import type { Client, InStatement } from "@libsql/client";
 
 /**
- * A3 — the email-verification challenge state machine (storage in
+ * A3 / A3b — the email-verification challenge state machine (storage in
  * drizzle/0046_email_verification_challenges.sql).
  *
  * This module owns the CHALLENGE ONLY. The authoritative verified-email marker
  * is users.email_verified_at (added by drizzle/0046); the routes read/write it
  * directly. This module stays uncoupled from account-identity.
  *
- * TOKEN DISCIPLINE (identical to lib/auth-session.ts / device-passport
- * challenges):
- *   - 32 bytes (256 bits) of CSPRNG output, hex-encoded.
- *   - The RAW token is returned exactly once, to the caller, for the
- *     mail-delivery layer. It is NEVER stored and NEVER logged.
- *   - Only sha256(rawToken) — a 64-char lowercase hex digest — is persisted,
- *     and it is the verification lookup key.
+ * A3b changed the challenge from a 256-bit link token to a 6-digit numeric
+ * code (see generateEmailVerificationChallenge / hashEmailVerificationCode
+ * below for why that also changes how the digest and the verify lookup work).
+ * The storage column is still named token_digest (reused from A3, no
+ * migration) even though it now holds a code digest.
  *
  * All TTL / cooldown / issuance bounds are APPLICATION CONSTANTS below, never
  * environment variables.
@@ -23,7 +21,7 @@ import type { Client, InStatement } from "@libsql/client";
 
 type Exec = Pick<Client, "execute">;
 
-/** Short bounded TTL for a verification link. Application constant — not env-configurable. */
+/** Short bounded TTL for a verification code. Application constant — not env-configurable. */
 export const EMAIL_VERIFICATION_TTL_MS = 30 * 60 * 1000; // 30 minutes
 
 /** Minimum gap between two "send"/"resend" requests for one account. */
@@ -33,43 +31,98 @@ export const EMAIL_VERIFICATION_RESEND_COOLDOWN_MS = 60 * 1000; // 60 seconds
 export const EMAIL_VERIFICATION_ISSUANCE_WINDOW_MS = 60 * 60 * 1000; // 1 hour
 export const EMAIL_VERIFICATION_MAX_ISSUANCE_PER_WINDOW = 5;
 
-/** Raw token size. 32 bytes = 256 bits of entropy. */
-export const EMAIL_VERIFICATION_TOKEN_BYTES = 32;
+/** Every code is exactly this many decimal digits, zero-padded. */
+export const EMAIL_VERIFICATION_CODE_LENGTH = 6;
 
-const TOKEN_HEX_PATTERN = /^[0-9a-f]{64}$/;
+const CODE_PATTERN = /^\d{6}$/;
 
-function bytesToHex(bytes: Uint8Array): string {
-  let hex = "";
-  for (let i = 0; i < bytes.length; i++) hex += bytes[i].toString(16).padStart(2, "0");
-  return hex;
+/** True only for a syntactically well-formed code (exactly 6 decimal digits). Cheap pre-check before any DB work. */
+export function isWellFormedEmailVerificationCode(value: unknown): value is string {
+  return typeof value === "string" && CODE_PATTERN.test(value);
 }
 
-/** sha256 (lowercase hex) of the raw token string — the exact value stored in token_digest. */
-export function hashEmailVerificationToken(rawToken: string): string {
-  return createHash("sha256").update(rawToken, "utf8").digest("hex");
+/**
+ * CSPRNG-uniform 6-digit code, 000000-999999, zero-padded. node:crypto's
+ * randomInt is rejection-sampled over randomBytes internally, so this has no
+ * modulo bias (unlike `randomBytes(n) % 1_000_000`).
+ */
+function generateRawCode(): string {
+  return String(randomInt(0, 1_000_000)).padStart(EMAIL_VERIFICATION_CODE_LENGTH, "0");
 }
 
-/** True only for a syntactically well-formed raw token (64 lowercase hex chars). Cheap pre-check before any DB work. */
-export function isWellFormedEmailVerificationToken(value: unknown): value is string {
-  return typeof value === "string" && TOKEN_HEX_PATTERN.test(value);
+/** True when EMAIL_VERIFICATION_CODE_SECRET is set. Gates challenge issuance the same way usersHaveEmailVerifiedAtColumn gates on migration 0046 — see its own comment. */
+export function emailVerificationCodeSecretConfigured(): boolean {
+  const secret = process.env.EMAIL_VERIFICATION_CODE_SECRET;
+  return typeof secret === "string" && secret.length > 0;
+}
+
+/**
+ * Keyed HMAC-SHA256 digest of a challenge's code — deliberately NOT a bare
+ * SHA-256 hash. A 6-digit code has only ~20 bits of entropy (1e6
+ * possibilities): a bare hash of the code alone would be brute-forceable
+ * offline in a fraction of a second if the database were ever exfiltrated.
+ * Keying with a dedicated server secret (EMAIL_VERIFICATION_CODE_SECRET,
+ * never itself stored in the database) makes that infeasible without also
+ * exfiltrating the secret.
+ *
+ * The challenge id (a random UUID) is mixed into the HMAC input alongside the
+ * code, not the code alone. token_digest carries a UNIQUE index
+ * (drizzle/0046) that a global code-only digest could collide on: at 6-digit
+ * entropy, ~1,200 concurrently outstanding codes already cross the 50%
+ * birthday-collision mark, and two different accounts issued the identical
+ * code at the same time is realistic at any real scale. Mixing in the
+ * (unique, random) challenge id makes the digest practically unique per row
+ * regardless of code collisions, so the UNIQUE index never spuriously
+ * rejects a legitimate concurrent issuance.
+ *
+ * Throws when the secret is not configured — callers MUST check
+ * emailVerificationCodeSecretConfigured() first and treat "not configured"
+ * as "verification unavailable" (fail closed), exactly like the
+ * usersHaveEmailVerifiedAtColumn() deploy-ordering gate.
+ */
+export function hashEmailVerificationCode(challengeId: string, rawCode: string): string {
+  const secret = process.env.EMAIL_VERIFICATION_CODE_SECRET;
+  if (!secret) throw new Error("EMAIL_VERIFICATION_CODE_SECRET is not configured");
+  return createHmac("sha256", secret).update(`${challengeId}:${rawCode}`, "utf8").digest("hex");
+}
+
+/**
+ * Constant-time check of a presented code against a challenge's stored
+ * digest. Recomputes the keyed HMAC (over challengeId:rawCode, see
+ * hashEmailVerificationCode) and compares with timingSafeEqual rather than
+ * `===`, matching this codebase's convention for secret comparison (see
+ * lib/auth-crypto.ts's password verification).
+ */
+export function emailVerificationCodeMatches(challengeId: string, rawCode: string, storedDigest: string): boolean {
+  const expected = hashEmailVerificationCode(challengeId, rawCode);
+  const a = Buffer.from(expected, "hex");
+  const b = Buffer.from(storedDigest, "hex");
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
 }
 
 export type GeneratedEmailVerificationChallenge = {
   id: string;
   /** Return ONLY to the mail-delivery layer. Never persist, never log. */
-  rawToken: string;
-  tokenDigest: string;
+  rawCode: string;
+  codeDigest: string;
   createdAt: number;
   expiresAt: number;
 };
 
-/** Pure: mint a new challenge's identifiers + token. Does not touch the DB. */
+/**
+ * Pure: mint a new challenge's identifiers + code. Does not touch the DB.
+ * Throws if EMAIL_VERIFICATION_CODE_SECRET is not configured (see
+ * hashEmailVerificationCode) — callers must gate on
+ * emailVerificationCodeSecretConfigured() first.
+ */
 export function generateEmailVerificationChallenge(now: number = Date.now()): GeneratedEmailVerificationChallenge {
-  const rawToken = bytesToHex(randomBytes(EMAIL_VERIFICATION_TOKEN_BYTES));
+  const id = randomUUID();
+  const rawCode = generateRawCode();
   return {
-    id: randomUUID(),
-    rawToken,
-    tokenDigest: hashEmailVerificationToken(rawToken),
+    id,
+    rawCode,
+    codeDigest: hashEmailVerificationCode(id, rawCode),
     createdAt: now,
     expiresAt: now + EMAIL_VERIFICATION_TTL_MS,
   };
@@ -89,15 +142,16 @@ export function emailVerificationChallengeInsertStatement(
     sql: `INSERT INTO email_verification_challenges
             (id, user_id, email, token_digest, created_at, expires_at, consumed_at, revoked_at)
           VALUES (?,?,?,?,?,?,NULL,NULL)`,
-    args: [challenge.id, userId, email, challenge.tokenDigest, challenge.createdAt, challenge.expiresAt],
+    args: [challenge.id, userId, email, challenge.codeDigest, challenge.createdAt, challenge.expiresAt],
   };
 }
 
 /**
  * Revoke every still-outstanding (not consumed, not revoked) challenge for an
  * account. Bulk — used atomically with a users.email UPDATE so an address
- * change invalidates every in-flight link in the same transaction. A no-op
- * when the account has none.
+ * change invalidates every in-flight code in the same transaction, and by a
+ * resend so only the latest code is ever live. A no-op when the account has
+ * none.
  */
 export function revokeOutstandingEmailVerificationChallengesStatement(
   userId: string,
@@ -157,7 +211,7 @@ export function consumeEmailVerificationChallengeStatement(
  * Set users.email_verified_at, but ONLY when `challengeId` was just consumed at
  * exactly `verifiedAt`. Pair this in ONE client.batch with
  * consumeEmailVerificationChallengeStatement(challengeId, verifiedAt): the
- * self-guard means a concurrent verify of the same token (whose own consume
+ * self-guard means a concurrent verify of the same code (whose own consume
  * failed) can never also flip the marker, without needing a read-back
  * mid-transaction.
  */
@@ -218,6 +272,7 @@ export type EmailVerificationChallengeRow = {
   id: string;
   userId: string;
   email: string;
+  codeDigest: string;
   createdAt: number;
   expiresAt: number;
   consumedAt: number | null;
@@ -230,6 +285,7 @@ function mapRow(row: Record<string, unknown>): EmailVerificationChallengeRow {
     id: String(row.id),
     userId: String(row.user_id),
     email: String(row.email),
+    codeDigest: String(row.token_digest),
     createdAt: Number(row.created_at),
     expiresAt: Number(row.expires_at),
     consumedAt: n(row.consumed_at),
@@ -237,30 +293,23 @@ function mapRow(row: Record<string, unknown>): EmailVerificationChallengeRow {
   };
 }
 
-/** Look up a challenge by the digest of a presented raw token. Null when nothing matches. */
-export async function findEmailVerificationChallengeByToken(
-  exec: Exec,
-  rawToken: string,
-): Promise<EmailVerificationChallengeRow | null> {
-  const digest = hashEmailVerificationToken(rawToken);
-  const row = (
-    await exec.execute({
-      sql: `SELECT id, user_id, email, created_at, expires_at, consumed_at, revoked_at
-              FROM email_verification_challenges WHERE token_digest = ?`,
-      args: [digest],
-    })
-  ).rows[0] as unknown as Record<string, unknown> | undefined;
-  return row ? mapRow(row) : null;
-}
-
-/** The account's most recent challenge (any state), for the resend-cooldown check. */
+/**
+ * The account's most recent challenge (any state) — used both for the
+ * resend-cooldown check and as the verify route's lookup (A3b: verify no
+ * longer looks a challenge up by a global digest, since a 6-digit code's
+ * digest is only unique per-row, not a safe global lookup key by itself — see
+ * hashEmailVerificationCode. Instead it requires a session and asks "does
+ * THIS account's current challenge match the code they typed", which is also
+ * exactly what makes it impossible for one account to verify another's
+ * challenge).
+ */
 export async function mostRecentEmailVerificationChallenge(
   exec: Exec,
   userId: string,
 ): Promise<EmailVerificationChallengeRow | null> {
   const row = (
     await exec.execute({
-      sql: `SELECT id, user_id, email, created_at, expires_at, consumed_at, revoked_at
+      sql: `SELECT id, user_id, email, token_digest, created_at, expires_at, consumed_at, revoked_at
               FROM email_verification_challenges
              WHERE user_id = ? ORDER BY created_at DESC LIMIT 1`,
       args: [userId],
@@ -285,22 +334,25 @@ export async function countEmailVerificationChallengesSince(
 }
 
 // ---------------------------------------------------------------------------
-// Failure classification (for a token holder's own helpful error message)
+// Failure classification (for a code holder's own helpful error message)
 // ---------------------------------------------------------------------------
 
 export type EmailVerificationRejectReason =
-  | "MALFORMED"        // token isn't 64 hex chars — never hit the DB
-  | "UNKNOWN"          // no challenge with this digest
-  | "REVOKED"          // invalidated (e.g. the account's email changed)
+  | "MALFORMED"        // code isn't exactly 6 digits — never hit the DB
+  | "UNKNOWN"          // this account has no challenge at all (never requested a code)
+  | "REVOKED"          // invalidated (e.g. the account's email changed, or a resend superseded it)
   | "CONSUMED"         // already used
   | "EXPIRED"          // past its TTL
-  | "EMAIL_CHANGED";   // challenge's target address no longer matches the account's current email
+  | "EMAIL_CHANGED"    // challenge's target address no longer matches the account's current email
+  | "WRONG_CODE";      // the challenge is otherwise live, but the presented code doesn't match it
 
 /**
  * Classify why a found challenge cannot verify. `currentEmail` is the account's
  * CURRENT users.email (lowercased). Returns null when the challenge is good to
  * consume. Order matters: revoked/consumed/expired are reported ahead of the
- * email-state mismatch so the most specific actionable message wins.
+ * email-state mismatch so the most specific actionable message wins. Does NOT
+ * check the code itself — callers compare it separately with
+ * emailVerificationCodeMatches once a challenge classifies as null here.
  */
 export function classifyEmailVerificationChallenge(
   challenge: EmailVerificationChallengeRow,

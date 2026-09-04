@@ -4,7 +4,6 @@ import { checkEmailVerificationRate } from '../../../../../lib/rate-limit';
 import { clientIpFrom } from '../../../../../lib/client-ip';
 import { getSessionUser } from '../../../../../lib/auth-session';
 import { isCrossOriginBrowserRequest, CROSS_ORIGIN_REJECTED } from '../../../../../lib/same-origin';
-import { resolveTrustedVerificationBaseUrl } from '../../../../../lib/request-origin';
 import {
   generateEmailVerificationChallenge,
   emailVerificationChallengeInsertStatement,
@@ -14,6 +13,7 @@ import {
   countEmailVerificationChallengesSince,
   pruneExpiredEmailVerificationChallenges,
   usersHaveEmailVerifiedAtColumn,
+  emailVerificationCodeSecretConfigured,
   EMAIL_VERIFICATION_RESEND_COOLDOWN_MS,
   EMAIL_VERIFICATION_ISSUANCE_WINDOW_MS,
   EMAIL_VERIFICATION_MAX_ISSUANCE_PER_WINDOW,
@@ -33,8 +33,9 @@ function json(body: unknown, status: number, extraHeaders?: Record<string, strin
 }
 
 /**
- * A3 — issue (or re-issue) an email-verification challenge for the CURRENTLY
- * SIGNED-IN account and hand it to the mail-delivery layer.
+ * A3 / A3b — issue (or re-issue) an email-verification challenge for the
+ * CURRENTLY SIGNED-IN account and hand it to the mail-delivery layer as a
+ * 6-digit code.
  *
  * There is deliberately NO email parameter: the challenge is always for the
  * session account's own current users.email, so this route has no
@@ -52,19 +53,6 @@ export async function POST(request: Request) {
       return json({ error: 'Too many requests' }, 429, { 'Retry-After': String(rate.retryAfter) });
     }
 
-    // The verification link's host must be one we explicitly trust — refuse to
-    // mint a token-bearing URL for a spoofed Host / X-Forwarded-Host rather
-    // than send it. Checked up front so nothing is issued when we can't
-    // deliver a safe link.
-    const baseUrl = resolveTrustedVerificationBaseUrl(request);
-    if (!baseUrl) {
-      console.error('email verification send: request host is not trusted; no verification URL minted');
-      return json(
-        { status: 'delivery_failed', error: 'We could not send the verification email right now. Please try again shortly.' },
-        503,
-      );
-    }
-
     const client = await getReportsDbClient();
     try {
       const sessionUser = await getSessionUser(request, client);
@@ -72,10 +60,14 @@ export async function POST(request: Request) {
         return json({ error: 'Not signed in.' }, 401);
       }
 
-      // Deploy-ordering safety: users.email_verified_at + the challenge table
-      // both arrive with migration 0046. Without it, verification cannot
-      // complete — say so cleanly rather than 500 on a missing column/table.
-      if (!(await usersHaveEmailVerifiedAtColumn(client))) {
+      // Deploy-ordering / config safety: migration 0046 (users.email_verified_at
+      // + the challenge table) and EMAIL_VERIFICATION_CODE_SECRET (the keyed
+      // HMAC secret a code digest is computed with — see
+      // lib/email-verification.ts's hashEmailVerificationCode) are both
+      // required before a challenge can be minted at all. Missing either fails
+      // closed with the same clean 503 rather than a 500 or a code nobody can
+      // ever verify.
+      if (!(await usersHaveEmailVerifiedAtColumn(client)) || !emailVerificationCodeSecretConfigured()) {
         return json(
           { status: 'unavailable', error: 'Email verification is not available yet. Please try again later.' },
           503,
@@ -104,7 +96,7 @@ export async function POST(request: Request) {
       if (recent && now - recent.createdAt < EMAIL_VERIFICATION_RESEND_COOLDOWN_MS) {
         const retryAfter = Math.ceil((EMAIL_VERIFICATION_RESEND_COOLDOWN_MS - (now - recent.createdAt)) / 1000);
         return json(
-          { status: 'cooldown', error: 'Please wait a moment before requesting another verification email.' },
+          { status: 'cooldown', error: 'Please wait a moment before requesting another verification code.' },
           429,
           { 'Retry-After': String(Math.max(retryAfter, 1)) },
         );
@@ -118,14 +110,14 @@ export async function POST(request: Request) {
       );
       if (issuedInWindow >= EMAIL_VERIFICATION_MAX_ISSUANCE_PER_WINDOW) {
         return json(
-          { status: 'cooldown', error: 'Too many verification emails requested. Please try again later.' },
+          { status: 'cooldown', error: 'Too many verification codes requested. Please try again later.' },
           429,
           { 'Retry-After': String(Math.ceil(EMAIL_VERIFICATION_ISSUANCE_WINDOW_MS / 1000)) },
         );
       }
 
       // Issue: revoke every prior outstanding challenge and insert the new one
-      // in ONE transaction, so only the latest link is ever live.
+      // in ONE transaction, so only the latest code is ever live.
       const challenge = generateEmailVerificationChallenge(now);
       await client.batch(
         [
@@ -138,24 +130,25 @@ export async function POST(request: Request) {
       void pruneExpiredEmailVerificationChallenges(client, now - STALE_CHALLENGE_MS).catch(() => {});
 
       try {
-        await dispatchEmailVerificationMessage(challenge, sessionUser.email, baseUrl);
+        await dispatchEmailVerificationMessage(challenge, sessionUser.email);
       } catch (deliveryErr) {
         // The row exists but no message went out. Revoke THIS exact challenge
         // (by id, not a broad per-account revoke that could catch a concurrent
         // resend) so the account is not left holding a live-but-undelivered
-        // link, and return a GENERIC "try later" — never surface "no provider
-        // configured" to the client, and never log the URL/token.
+        // code, and return a GENERIC "try later" — never surface "no provider
+        // configured" to the client, and never log the code.
         await client
           .execute(revokeEmailVerificationChallengeByIdStatement(challenge.id, Date.now()))
           .catch(() => {});
-        // In A3 "no provider configured" is the expected baseline (the caller
-        // already gets a clear 503). Only a genuine provider failure — once one
-        // is wired — is worth logging here.
+        // "No provider configured" is the expected baseline when Resend isn't
+        // wired for this environment — not worth a log line on every send. A
+        // genuine provider failure (Resend configured but erroring) is
+        // surfaced by lib/mail/resend-email-provider.ts itself.
         if (!(deliveryErr instanceof EmailDeliveryUnavailableError)) {
           console.error('email verification send failed: delivery error');
         }
         return json(
-          { status: 'delivery_failed', error: 'We could not send the verification email right now. Please try again shortly.' },
+          { status: 'delivery_failed', error: 'We could not send the verification code right now. Please try again shortly.' },
           503,
         );
       }

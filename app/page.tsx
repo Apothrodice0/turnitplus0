@@ -44,6 +44,7 @@ import { ReportHistoryRow } from "@/components/reports/report-history-row";
 import { DocumentUploadPanel } from "@/components/reports/document-upload-panel";
 import { IdentityFields, type IdentityFieldsHandle, type CollectedIdentity } from "@/components/auth/identity-fields";
 import { EmailVerificationStatus } from "@/components/account/email-verification-status";
+import { EmailVerificationModal, type EmailVerificationModalStage } from "@/components/account/email-verification-modal";
 import {
   analyzeAcademicEvidence,
   analyzeText,
@@ -246,6 +247,16 @@ export default function Home() {
   const [emailVerification, setEmailVerification] = useState<EmailVerificationView | null>(null);
   const [emailVerifySending, setEmailVerifySending] = useState(false);
   const [emailVerifyNotice, setEmailVerifyNotice] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
+  // A3b — the code-entry modal's own state (components/account/
+  // email-verification-modal.tsx). Kept separate from the notice/sending
+  // state above, which still covers the initial "Verify email" click before
+  // the modal has anything to show.
+  const [emailVerifyModalOpen, setEmailVerifyModalOpen] = useState(false);
+  const [emailVerifyModalStage, setEmailVerifyModalStage] = useState<EmailVerificationModalStage>("sending");
+  const [emailVerifyCode, setEmailVerifyCode] = useState("");
+  const [emailVerifyModalError, setEmailVerifyModalError] = useState<string | null>(null);
+  const [emailVerifyResendCooldown, setEmailVerifyResendCooldown] = useState(0);
+  const [emailVerifyResending, setEmailVerifyResending] = useState(false);
   const [accountLoaded, setAccountLoaded] = useState(false);
   const signupIdentityRef = useRef<IdentityFieldsHandle>(null);
   const [uploadLimitStatus, setUploadLimitStatus] = useState<UploadLimitStatus | null>(null);
@@ -261,6 +272,18 @@ export default function Home() {
   const [legalTab, setLegalTab] = useState<LegalTab>("privacy");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const generationLockRef = useRef(false);
+
+  // Ticks the modal's "Resend code (Ns)" countdown down to 0 once a second
+  // while the modal is open and a cooldown is active. Purely a display timer
+  // — the server is always the authoritative check (see
+  // resendEmailVerificationCode's own Retry-After handling below).
+  useEffect(() => {
+    if (!emailVerifyModalOpen || emailVerifyResendCooldown <= 0) return;
+    const timer = window.setInterval(() => {
+      setEmailVerifyResendCooldown((seconds) => Math.max(0, seconds - 1));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [emailVerifyModalOpen, emailVerifyResendCooldown > 0]);
 
   // Anonymous/device-scoped report loading (no authenticated session).
   // Unchanged from the pre-Phase-2A behavior: IndexedDB is the primary
@@ -579,9 +602,24 @@ export default function Home() {
     notify("Your account information has been updated.");
   }
 
-  // A3 — request (or resend) the verification email for the signed-in account.
-  // The account UI never sees a token or challenge id; it only learns the
-  // coarse outcome.
+  // A3b resend cooldown, mirrored client-side only for the countdown display
+  // — EMAIL_VERIFICATION_RESEND_COOLDOWN_MS in lib/email-verification.ts is
+  // the authoritative value (that file imports node:crypto and must never be
+  // pulled into a "use client" bundle). A 429 response's own Retry-After
+  // header always overrides this when the server disagrees.
+  const RESEND_COOLDOWN_SECONDS = 60;
+
+  function closeEmailVerificationModal() {
+    setEmailVerifyModalOpen(false);
+    setEmailVerifyModalStage("sending");
+    setEmailVerifyCode("");
+    setEmailVerifyModalError(null);
+  }
+
+  // A3b — request (or resend) the verification code for the signed-in
+  // account. The account UI never sees the code, a token, or a challenge id
+  // until the user types it back in themselves; it only learns the coarse
+  // outcome.
   async function sendEmailVerification() {
     if (emailVerifySending) return;
     setEmailVerifySending(true);
@@ -590,20 +628,94 @@ export default function Home() {
       const response = await fetch("/api/auth/email-verification/send", { method: "POST" });
       const data = (await response.json().catch(() => ({}))) as { status?: string; error?: string };
       if (response.ok && data.status === "sent") {
-        setEmailVerifyNotice({ tone: "ok", text: "Verification email sent. Check your inbox and open the link within 30 minutes." });
+        setEmailVerifyModalOpen(true);
+        setEmailVerifyModalStage("ready");
+        setEmailVerifyCode("");
+        setEmailVerifyModalError(null);
+        setEmailVerifyResendCooldown(RESEND_COOLDOWN_SECONDS);
       } else if (response.ok && data.status === "verified") {
         setEmailVerification({ status: "verified" });
         setEmailVerifyNotice({ tone: "ok", text: "Your email is already verified." });
+      } else if (data.status === "cooldown") {
+        // A code from a recent request is still live — open the modal
+        // straight to code entry instead of just showing an error, so the
+        // user can enter the code they already received.
+        const retryAfter = Number(response.headers.get("Retry-After"));
+        setEmailVerifyModalOpen(true);
+        setEmailVerifyModalStage("ready");
+        setEmailVerifyCode("");
+        setEmailVerifyModalError(null);
+        setEmailVerifyResendCooldown(Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : RESEND_COOLDOWN_SECONDS);
       } else {
         setEmailVerifyNotice({
           tone: "error",
-          text: typeof data.error === "string" && data.error ? data.error : "Could not send the verification email. Please try again shortly.",
+          text: typeof data.error === "string" && data.error ? data.error : "Could not send the verification code. Please try again shortly.",
         });
       }
     } catch {
       setEmailVerifyNotice({ tone: "error", text: "Could not reach TurnitPlus. Check your connection and try again." });
     } finally {
       setEmailVerifySending(false);
+    }
+  }
+
+  async function submitEmailVerificationCode(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (emailVerifyModalStage === "verifying" || emailVerifyCode.length !== 6) return;
+    setEmailVerifyModalStage("verifying");
+    setEmailVerifyModalError(null);
+    try {
+      const response = await fetch("/api/auth/email-verification/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: emailVerifyCode }),
+      });
+      const data = (await response.json().catch(() => ({}))) as { status?: string; error?: string };
+      if (response.ok && data.status === "verified") {
+        // Immediately hydrate the UI — no refresh, no re-fetch of /api/auth/me
+        // required — matching how sendEmailVerification's "already verified"
+        // branch above updates the same state.
+        setEmailVerification({ status: "verified" });
+        setEmailVerifyModalStage("verified");
+        window.setTimeout(() => closeEmailVerificationModal(), 1600);
+      } else {
+        setEmailVerifyModalStage("ready");
+        setEmailVerifyModalError(
+          typeof data.error === "string" && data.error ? data.error : "Could not verify that code. Please try again.",
+        );
+      }
+    } catch {
+      setEmailVerifyModalStage("ready");
+      setEmailVerifyModalError("Could not reach TurnitPlus. Check your connection and try again.");
+    }
+  }
+
+  async function resendEmailVerificationCode() {
+    if (emailVerifyResendCooldown > 0 || emailVerifyResending) return;
+    setEmailVerifyResending(true);
+    setEmailVerifyModalError(null);
+    try {
+      const response = await fetch("/api/auth/email-verification/send", { method: "POST" });
+      const data = (await response.json().catch(() => ({}))) as { status?: string; error?: string };
+      const retryAfter = Number(response.headers.get("Retry-After"));
+      if (response.ok && data.status === "sent") {
+        setEmailVerifyCode("");
+        setEmailVerifyResendCooldown(RESEND_COOLDOWN_SECONDS);
+      } else if (response.ok && data.status === "verified") {
+        setEmailVerification({ status: "verified" });
+        setEmailVerifyModalStage("verified");
+        window.setTimeout(() => closeEmailVerificationModal(), 1600);
+      } else if (data.status === "cooldown" && Number.isFinite(retryAfter) && retryAfter > 0) {
+        setEmailVerifyResendCooldown(retryAfter);
+      } else {
+        setEmailVerifyModalError(
+          typeof data.error === "string" && data.error ? data.error : "Could not resend the code. Please try again shortly.",
+        );
+      }
+    } catch {
+      setEmailVerifyModalError("Could not reach TurnitPlus. Check your connection and try again.");
+    } finally {
+      setEmailVerifyResending(false);
     }
   }
 
@@ -1321,6 +1433,19 @@ export default function Home() {
                         onVerify={sendEmailVerification}
                         sending={emailVerifySending}
                         notice={emailVerifyNotice}
+                      />
+                      <EmailVerificationModal
+                        open={emailVerifyModalOpen}
+                        stage={emailVerifyModalStage}
+                        email={account.email}
+                        code={emailVerifyCode}
+                        onCodeChange={setEmailVerifyCode}
+                        onSubmit={submitEmailVerificationCode}
+                        onResend={resendEmailVerificationCode}
+                        onClose={closeEmailVerificationModal}
+                        error={emailVerifyModalError}
+                        resendCooldownSeconds={emailVerifyResendCooldown}
+                        resending={emailVerifyResending}
                       />
                     </div>
                     <button className="button secondary account-edit-button" type="button" onClick={() => setIsEditingProfile((editing) => !editing)}>

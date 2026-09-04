@@ -9,12 +9,12 @@ import { newSession, setSessionCookie, claimAnonymousReports } from '../../../..
 import { isCrossOriginBrowserRequest, CROSS_ORIGIN_REJECTED } from '../../../../lib/same-origin';
 import { resolveSignupIdentity } from '../../../../lib/account-identity-signup';
 import { accountIdentityProfileUpsertStatement } from '../../../../lib/account-identity-repo';
-import { resolveTrustedVerificationBaseUrl } from '../../../../lib/request-origin';
 import {
   generateEmailVerificationChallenge,
   emailVerificationChallengeInsertStatement,
   revokeEmailVerificationChallengeByIdStatement,
   usersHaveEmailVerifiedAtColumn,
+  emailVerificationCodeSecretConfigured,
 } from '../../../../lib/email-verification';
 import { dispatchEmailVerificationMessage } from '../../../../lib/email-verification-dispatch';
 import { EmailDeliveryUnavailableError } from '../../../../lib/mail/email-delivery';
@@ -88,19 +88,23 @@ export async function POST(request: Request) {
       const passwordHash = await hashPassword(password);
       const now = Date.now();
       const session = newSession(userId, now);
-      // A3: an email-verification challenge is minted and persisted AS PART OF
-      // account creation, so "challenge issued" is guaranteed the moment the
-      // account exists. email_verified_at itself stays NULL — only consuming
-      // this challenge (POST /api/auth/email-verification/verify) ever sets it.
-      // The raw token never leaves this handler except to the mail layer below.
+      // A3 / A3b: an email-verification challenge (a 6-digit code) is minted
+      // and persisted AS PART OF account creation, so "challenge issued" is
+      // guaranteed the moment the account exists. email_verified_at itself
+      // stays NULL — only consuming this challenge (POST
+      // /api/auth/email-verification/verify) ever sets it. The raw code never
+      // leaves this handler except to the mail layer below.
       //
-      // Deploy-ordering safety: the challenge table (and users.email_verified_at)
-      // arrive with migration 0046. If this A3 code is live before 0046 is
-      // applied, the challenge INSERT is simply omitted from the batch — account
-      // creation must NEVER fail because email verification is not yet wired.
-      // The account can request verification later once 0046 lands.
-      const verificationChallenge = generateEmailVerificationChallenge(now);
-      const emailVerificationReady = await usersHaveEmailVerifiedAtColumn(client);
+      // Deploy-ordering / config safety: migration 0046 (the challenge table +
+      // users.email_verified_at) AND EMAIL_VERIFICATION_CODE_SECRET (required
+      // to compute a code's digest — see generateEmailVerificationChallenge)
+      // must both be ready before a challenge can even be generated, let alone
+      // inserted. If either is missing, the challenge is simply omitted from
+      // the batch — account creation must NEVER fail because email
+      // verification is not yet wired. The account can request verification
+      // later once both land.
+      const emailVerificationReady = (await usersHaveEmailVerifiedAtColumn(client)) && emailVerificationCodeSecretConfigured();
+      const verificationChallenge = emailVerificationReady ? generateEmailVerificationChallenge(now) : null;
 
       // ATOMIC account creation: the users row, the 1:1 account_identity_profiles
       // row, the email-verification challenge (when 0046 is applied) and the
@@ -117,7 +121,7 @@ export async function POST(request: Request) {
           args: [userId, normalizedEmail, trimmedUsername, passwordHash],
         },
         accountIdentityProfileUpsertStatement(userId, identityResult.identity.normalized, now),
-        ...(emailVerificationReady
+        ...(verificationChallenge
           ? [emailVerificationChallengeInsertStatement(verificationChallenge, userId, normalizedEmail)]
           : []),
         session.statement,
@@ -139,39 +143,33 @@ export async function POST(request: Request) {
       // Best-effort, post-commit — a data migration, not part of account creation.
       await claimAnonymousReports(client, userId, deviceKey);
 
-      // Request the verification email (A3). Best-effort and post-commit: the
-      // account already exists, so nothing here can fail signup — but the
-      // DELIVERY INVARIANT is strict. The challenge stays ACTIVE only when ALL of
-      //   (a) migration 0046 is applied (a challenge was actually persisted),
-      //   (b) a trusted verification base URL resolved, AND
-      //   (c) the provider accepted delivery.
-      // Any other outcome (0046 not applied, untrusted/unresolvable host, or the
-      // provider throwing) revokes THIS exact challenge by its id — never a
-      // broad revoke that could catch a concurrently-issued resend — so no dead
-      // or undeliverable link is ever left live. The raw token / URL are never
-      // logged (and never appear in the signup response).
-      const verificationBaseUrl = resolveTrustedVerificationBaseUrl(request);
+      // Request the verification code (A3 / A3b). Best-effort and post-commit:
+      // the account already exists, so nothing here can fail signup — but the
+      // DELIVERY INVARIANT is strict. The challenge stays ACTIVE only when the
+      // provider accepted delivery; a provider throw (no provider configured,
+      // or a genuine Resend failure) revokes THIS exact challenge by its id —
+      // never a broad revoke that could catch a concurrently-issued resend —
+      // so no dead or undeliverable code is ever left live. The raw code is
+      // never logged (and never appears in the signup response).
       let verificationDelivered = false;
-      if (emailVerificationReady && verificationBaseUrl) {
+      if (verificationChallenge) {
         try {
-          await dispatchEmailVerificationMessage(verificationChallenge, normalizedEmail, verificationBaseUrl);
+          await dispatchEmailVerificationMessage(verificationChallenge, normalizedEmail);
           verificationDelivered = true;
         } catch (sendErr) {
-          // In A3 there is no provider, so EmailDeliveryUnavailableError is the
-          // EXPECTED baseline — not worth a log line on every signup. Anything
-          // else (a real provider failing, once one is wired) is surfaced.
+          // "No provider configured" is the expected baseline when Resend
+          // isn't wired for this environment — not worth a log line on every
+          // signup. A genuine provider failure is surfaced by
+          // lib/mail/resend-email-provider.ts itself.
           if (!(sendErr instanceof EmailDeliveryUnavailableError)) {
             console.error('signup email verification dispatch failed (non-fatal): delivery error');
           }
         }
-      } else if (emailVerificationReady && !verificationBaseUrl) {
-        // Untrusted / ambiguous request host — do NOT mint a token-bearing URL.
-        console.error('signup: request host not trusted; verification email not dispatched');
-      }
-      if (emailVerificationReady && !verificationDelivered) {
-        await client
-          .execute(revokeEmailVerificationChallengeByIdStatement(verificationChallenge.id, Date.now()))
-          .catch(() => {});
+        if (!verificationDelivered) {
+          await client
+            .execute(revokeEmailVerificationChallengeByIdStatement(verificationChallenge.id, Date.now()))
+            .catch(() => {});
+        }
       }
 
       const { display } = identityResult.identity;

@@ -299,3 +299,27 @@ export async function checkEmailVerificationRate(clientId: string): Promise<Rate
 export async function resetEmailVerificationRateForTest(clientId: string): Promise<void> {
   await resetBucketForTest(`emailverify:${clientId}`);
 }
+
+// A3b — per-ACCOUNT guessing protection for POST
+// /api/auth/email-verification/verify, on top of the coarse per-IP
+// checkEmailVerificationRate bucket above. A 6-digit code has only ~1e6
+// possibilities; checkEmailVerificationRate alone (12/min, PER IP) doesn't
+// bound total guesses against one account's code tightly enough, and is
+// scoped to the wrong dimension (IP, not account) for what is fundamentally
+// an offline-guessing risk against a specific account's current code. This
+// bucket is keyed by the SIGNED-IN account's own user id — verify now
+// requires a session (lib/email-verification.ts's classifyEmailVerification
+// Challenge / the route's own comment), so it can never be used to probe a
+// different account. 8 tokens / 15 minutes bounds total guesses across a
+// code's ~30-minute lifetime (EMAIL_VERIFICATION_TTL_MS) to a small double
+// digit, many orders of magnitude below the 1-in-1,000,000 search space.
+const EMAIL_VERIFICATION_ATTEMPT_MAX_TOKENS = 8;
+const EMAIL_VERIFICATION_ATTEMPT_INTERVAL_MS = 15 * 60_000;
+
+export async function checkEmailVerificationAttemptRate(userId: string): Promise<RateCheckResult> {
+  return checkBucket(`emailverifyattempt:${userId}`, EMAIL_VERIFICATION_ATTEMPT_MAX_TOKENS, EMAIL_VERIFICATION_ATTEMPT_INTERVAL_MS);
+}
+
+export async function resetEmailVerificationAttemptRateForTest(userId: string): Promise<void> {
+  await resetBucketForTest(`emailverifyattempt:${userId}`);
+}

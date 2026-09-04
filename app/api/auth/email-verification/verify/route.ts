@@ -1,12 +1,14 @@
 import { NextResponse } from 'next/server';
 import { getReportsDbClient } from '../../../../../lib/reports-db';
-import { checkEmailVerificationRate } from '../../../../../lib/rate-limit';
+import { checkEmailVerificationRate, checkEmailVerificationAttemptRate } from '../../../../../lib/rate-limit';
 import { clientIpFrom } from '../../../../../lib/client-ip';
+import { getSessionUser } from '../../../../../lib/auth-session';
 import { isCrossOriginBrowserRequest, CROSS_ORIGIN_REJECTED } from '../../../../../lib/same-origin';
 import {
-  isWellFormedEmailVerificationToken,
-  findEmailVerificationChallengeByToken,
+  isWellFormedEmailVerificationCode,
+  mostRecentEmailVerificationChallenge,
   classifyEmailVerificationChallenge,
+  emailVerificationCodeMatches,
   consumeEmailVerificationChallengeStatement,
   setUserEmailVerifiedIfChallengeConsumedStatement,
   usersHaveEmailVerifiedAtColumn,
@@ -15,37 +17,46 @@ import {
 
 export const dynamic = 'force-dynamic';
 
-// A generic message for every "can't tell you exactly why" case — an unknown or
-// malformed token must not reveal whether a challenge with that shape exists.
-const GENERIC_REJECT = 'This verification link is invalid or has expired.';
+// A generic message for every "can't tell you exactly why" case.
+const GENERIC_REJECT = 'This verification code is invalid or has expired.';
 
 const REJECT_MESSAGE: Record<EmailVerificationRejectReason, string> = {
-  MALFORMED: GENERIC_REJECT,
-  UNKNOWN: GENERIC_REJECT,
-  EXPIRED: 'This verification link has expired. Request a new one from your account page.',
-  CONSUMED: 'This verification link has already been used.',
-  REVOKED: 'This verification link is no longer valid. Request a new verification email from your account page.',
-  EMAIL_CHANGED: 'This verification link is no longer valid because your email address changed. Request a new one.',
+  MALFORMED: 'Enter the 6-digit code exactly as it appears in the email.',
+  UNKNOWN: 'Request a verification code from your account page first.',
+  EXPIRED: 'This code has expired. Request a new one from your account page.',
+  CONSUMED: 'This code has already been used.',
+  REVOKED: 'This code is no longer valid. Request a new one from your account page.',
+  EMAIL_CHANGED: 'This code is no longer valid because your email address changed. Request a new one.',
+  WRONG_CODE: "That code doesn't match. Check the digits and try again.",
 };
 
-function json(body: unknown, status: number) {
-  return new NextResponse(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+function json(body: unknown, status: number, extraHeaders?: Record<string, string>) {
+  return new NextResponse(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json', ...extraHeaders },
+  });
 }
 
 const isSqliteBusy = (err: unknown) => err instanceof Error && /SQLITE_BUSY/i.test(err.message);
 const MAX_WRITE_RETRIES = 5;
 
 /**
- * A3 — consume an email-verification challenge and mark the account's email
- * verified, atomically.
+ * A3b — consume the signed-in account's current email-verification code and
+ * mark the account's email verified, atomically.
+ *
+ * REQUIRES A SESSION (A3b change from the link-token design, which needed
+ * none: a 256-bit token was itself unguessable proof of mailbox control, but
+ * a 6-digit code is not). The lookup is always the CALLER's own most recent
+ * challenge (lib/email-verification.ts's mostRecentEmailVerificationChallenge)
+ * — never a global digest lookup — so there is no way for one account to even
+ * address another account's challenge, let alone verify it.
  *
  * Safe against: replay / double-use (single atomic conditional consume,
- * rowsAffected must be 1), expired token, revoked token (email change),
- * malformed token (rejected before any DB work), and a token whose target
- * address no longer matches the account's current email.
- *
- * No session is required — the 256-bit single-use token IS the proof of
- * mailbox control, exactly as an email link works when opened logged-out.
+ * rowsAffected must be 1), expired code, revoked code (email change or a
+ * newer resend), malformed code (rejected before any DB work), a code whose
+ * target address no longer matches the account's current email, and
+ * brute-force guessing (checkEmailVerificationAttemptRate — a code is only
+ * ~1e6 possibilities, unlike the old 256-bit token).
  */
 export async function POST(request: Request) {
   try {
@@ -55,45 +66,54 @@ export async function POST(request: Request) {
 
     const rate = await checkEmailVerificationRate(clientIpFrom(request));
     if (!rate.allowed) {
-      return new NextResponse(JSON.stringify({ error: 'Too many requests' }), {
-        status: 429,
-        headers: { 'Retry-After': String(rate.retryAfter), 'Content-Type': 'application/json' },
-      });
+      return json({ error: 'Too many requests' }, 429, { 'Retry-After': String(rate.retryAfter) });
     }
 
     const body = await request.json().catch(() => null);
-    const token = body && typeof body === 'object' ? (body as { token?: unknown }).token : null;
+    const code = body && typeof body === 'object' ? (body as { code?: unknown }).code : null;
 
-    if (!isWellFormedEmailVerificationToken(token)) {
-      return json({ error: GENERIC_REJECT }, 400);
+    if (!isWellFormedEmailVerificationCode(code)) {
+      return json({ error: REJECT_MESSAGE.MALFORMED }, 400);
     }
 
-    // --- read + classify -------------------------------------------------
+    // --- session + per-account guess-rate + read + classify -------------
     const readClient = await getReportsDbClient();
     let challengeId: string;
     let challengeUserId: string;
     try {
       // Deploy-ordering safety: the challenge table + users.email_verified_at
-      // arrive with migration 0046. Without it no token can be valid — treat it
-      // as an invalid link, not a 500.
+      // arrive with migration 0046. Without it no code can be valid — treat it
+      // as an invalid code, not a 500.
       if (!(await usersHaveEmailVerifiedAtColumn(readClient))) {
         return json({ error: GENERIC_REJECT }, 400);
       }
 
-      const challenge = await findEmailVerificationChallengeByToken(readClient, token);
+      const sessionUser = await getSessionUser(request, readClient);
+      if (!sessionUser) {
+        return json({ error: 'Not signed in.' }, 401);
+      }
+
+      const attemptRate = await checkEmailVerificationAttemptRate(sessionUser.id);
+      if (!attemptRate.allowed) {
+        return json(
+          { error: 'Too many attempts. Please wait a moment or request a new code.' },
+          429,
+          { 'Retry-After': String(attemptRate.retryAfter) },
+        );
+      }
+
+      const challenge = await mostRecentEmailVerificationChallenge(readClient, sessionUser.id);
       if (!challenge) {
-        return json({ error: GENERIC_REJECT }, 400);
+        return json({ error: REJECT_MESSAGE.UNKNOWN }, 400);
       }
 
-      const userRow = await readClient.execute({ sql: 'SELECT email FROM users WHERE id = ?', args: [challenge.userId] });
-      if (userRow.rows.length === 0) {
-        return json({ error: GENERIC_REJECT }, 400);
-      }
-      const currentEmail = String((userRow.rows[0] as unknown as { email: string }).email);
-
-      const reject = classifyEmailVerificationChallenge(challenge, currentEmail, Date.now());
+      const reject = classifyEmailVerificationChallenge(challenge, sessionUser.email, Date.now());
       if (reject) {
         return json({ error: REJECT_MESSAGE[reject] }, 400);
+      }
+
+      if (!emailVerificationCodeMatches(challenge.id, code, challenge.codeDigest)) {
+        return json({ error: REJECT_MESSAGE.WRONG_CODE }, 400);
       }
 
       // No profile check: verified-email state lives on users.email_verified_at,
@@ -109,7 +129,7 @@ export async function POST(request: Request) {
     // ONE transaction (client.batch): the conditional consume and a
     // SELF-GUARDED UPDATE of users.email_verified_at — the UPDATE only fires
     // when THIS request's consume set consumed_at to exactly `now`, so a
-    // concurrent verify of the same token can never also flip the marker. The
+    // concurrent verify of the same code can never also flip the marker. The
     // consume's rowsAffected is the authoritative "did I win" signal. Retried on
     // SQLITE_BUSY with a fresh connection each time, matching this codebase's
     // concurrent-write convention (see app/api/reports/route.ts

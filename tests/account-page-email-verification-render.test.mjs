@@ -215,6 +215,33 @@ await test('STRUCTURAL: page.tsx re-hydrates emailVerification from /api/auth/me
   assert.match(src, /<EmailVerificationStatus\s+status=\{emailVerification\?\.status \?\? null\}/);
 });
 
+// A3b — the code-entry modal (components/account/email-verification-modal.tsx).
+await test('STRUCTURAL (A3b): a successful code verification hydrates `emailVerification` directly, without waiting on a fresh /api/auth/me fetch', () => {
+  const src = fs.readFileSync(path.join(repo, 'app/page.tsx'), 'utf8');
+
+  const submitIdx = src.indexOf('async function submitEmailVerificationCode(');
+  assert.ok(submitIdx >= 0, 'expected a submitEmailVerificationCode function (the modal\'s Verify submit handler)');
+  const submitBody = src.slice(submitIdx, submitIdx + 1400);
+
+  assert.match(submitBody, /fetch\("\/api\/auth\/email-verification\/verify"/, 'posts to the verify route');
+  assert.match(
+    submitBody,
+    /data\.status === "verified"/,
+    'branches on the verify route\'s own success status',
+  );
+  assert.match(
+    submitBody,
+    /setEmailVerification\(\{\s*status:\s*"verified"\s*\}\)/,
+    'on success, sets emailVerification straight from the response — no re-fetch of /api/auth/me needed for the UI to update immediately',
+  );
+
+  // And the modal is actually wired into the account hero, driven by that
+  // same state (open/stage/code/etc. all come from useState, not props
+  // baked in only at mount).
+  assert.match(src, /<EmailVerificationModal\b/);
+  assert.match(src, /onSubmit=\{submitEmailVerificationCode\}/);
+});
+
 // ======================================================================
 
 db.close();

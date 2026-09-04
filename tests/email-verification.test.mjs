@@ -8,10 +8,10 @@ import * as signupRoute from '../app/api/auth/signup/route.ts';
 import * as meRoute from '../app/api/auth/me/route.ts';
 import * as sendRoute from '../app/api/auth/email-verification/send/route.ts';
 import * as verifyRoute from '../app/api/auth/email-verification/verify/route.ts';
-import { resetAuthRateForTest, resetRateForTest, resetEmailVerificationRateForTest } from '../lib/rate-limit.js';
+import { resetAuthRateForTest, resetRateForTest, resetEmailVerificationRateForTest, resetEmailVerificationAttemptRateForTest } from '../lib/rate-limit.js';
 import { __setEmailDeliveryProviderForTest } from '../lib/mail/email-delivery.ts';
 import {
-  hashEmailVerificationToken,
+  hashEmailVerificationCode,
   revokeEmailVerificationChallengeByIdStatement,
   EMAIL_VERIFICATION_TTL_MS,
   EMAIL_VERIFICATION_RESEND_COOLDOWN_MS,
@@ -20,14 +20,30 @@ import {
 import { withTestIdentity } from './helpers/test-signup.mjs';
 
 /**
- * A3 — email-verification foundation.
+ * A3 / A3b — email-verification challenge system.
+ *
+ * A3b adapted the challenge from a 256-bit link token to a 6-digit numeric
+ * code (see lib/email-verification.ts's own header comment for why the
+ * digest and lookup strategy both had to change with it — in short: a code
+ * has too little entropy to be its own bearer credential, so
+ * POST .../verify now REQUIRES A SESSION and only ever looks up the CALLER's
+ * own current challenge, never a global digest lookup).
  *
  * Authoritative verified state is users.email_verified_at (works for EVERY
  * account, profile or not). account_identity_profiles.email_verified_at is
  * deprecated/vestigial and is asserted to stay NULL.
  *
- * The mail provider is a fake injected here; NO real mail is ever sent, and the
- * default provider's fail-closed behaviour is proven in a dedicated case.
+ * The mail provider is a fake injected here; NO real mail is ever sent, and
+ * the default provider's fail-closed behaviour is proven in a dedicated case.
+ * lib/mail/resend-email-provider.ts itself is covered by
+ * tests/mail-resend-provider.test.mjs, not here.
+ *
+ * REMOVED (A3b): the "HOSTILE HOST" / trusted-Vercel-host tests that used to
+ * live in this file. They protected a token-bearing URL from being minted
+ * for a spoofed Host header — with a 6-digit code there is no URL and no
+ * bearer credential in the message at all, so lib/request-origin.ts and its
+ * host-trust gate were deleted outright (see the send/signup routes, which
+ * no longer resolve or depend on a base URL).
  */
 
 const repo = path.resolve('.');
@@ -39,11 +55,15 @@ for (const suffix of ['', '-wal', '-shm']) {
 }
 process.env.TURSO_DATABASE_URL = `file:${dbFile}`;
 process.env.ADMIN_EMAIL = 'a3-admin@example.com';
-// Belt-and-braces: make sure no Vercel system host is inherited into this run —
-// the trusted-host policy must fall back to "localhost only".
-delete process.env.VERCEL;
-delete process.env.VERCEL_URL;
-delete process.env.VERCEL_PROJECT_PRODUCTION_URL;
+// Test-only HMAC key so emailVerificationCodeSecretConfigured() (and every
+// route gated on it) is exercised end-to-end. A dedicated "unset" test below
+// removes it for exactly one case, then restores it.
+process.env.EMAIL_VERIFICATION_CODE_SECRET = 'test-only-email-verification-code-secret';
+// Belt-and-braces: make sure a real Resend provider never activates in this
+// file — every test here injects a fake provider explicitly, and provider
+// selection must stay deterministic regardless of the host machine's shell.
+delete process.env.RESEND_API_KEY;
+delete process.env.EMAIL_VERIFICATION_FROM_ADDRESS;
 
 const setup = createClient({ url: `file:${dbFile}` });
 await setup.execute('PRAGMA foreign_keys = ON');
@@ -57,10 +77,8 @@ const fakeProvider = {
   },
 };
 __setEmailDeliveryProviderForTest(fakeProvider);
-function tokenFromLastMessage() {
-  const url = sentMessages.at(-1)?.verificationUrl ?? '';
-  const m = url.match(/[?&]token=([0-9a-f]{64})\b/);
-  return m ? m[1] : null;
+function codeFromLastMessage() {
+  return sentMessages.at(-1)?.code ?? null;
 }
 
 // ---- helpers --------------------------------------------------------
@@ -95,14 +113,17 @@ async function callSend(cookie, { url = 'http://localhost/api/auth/email-verific
   return sendRoute.POST(new Request(url, { method: 'POST', headers }));
 }
 
-async function callVerify(token, { ip } = {}) {
+async function callVerify(cookie, code, { ip, userIdForAttemptReset } = {}) {
   const useIp = ip ?? nextIp('verify');
   await resetEmailVerificationRateForTest(useIp);
+  if (userIdForAttemptReset) await resetEmailVerificationAttemptRateForTest(userIdForAttemptReset);
+  const headers = { 'content-type': 'application/json', 'x-forwarded-for': useIp };
+  if (cookie) headers.cookie = `tp_session_v1=${cookie}`;
   return verifyRoute.POST(
     new Request('http://localhost/api/auth/email-verification/verify', {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-forwarded-for': useIp },
-      body: JSON.stringify({ token }),
+      headers,
+      body: JSON.stringify({ code }),
     }),
   );
 }
@@ -156,6 +177,11 @@ const clearCooldown = (userId) =>
     sql: 'UPDATE email_verification_challenges SET created_at = created_at - ? WHERE user_id = ?',
     args: [EMAIL_VERIFICATION_RESEND_COOLDOWN_MS + 5000, userId],
   });
+// A code that is guaranteed NOT to equal the real one (mod 10 on the last digit).
+const wrongCodeFor = (realCode) => {
+  const lastDigit = (Number(realCode[5]) + 1) % 10;
+  return realCode.slice(0, 5) + String(lastDigit);
+};
 
 let failures = 0;
 async function test(name, fn) {
@@ -170,7 +196,7 @@ async function test(name, fn) {
 
 // ====================================================================
 
-await test('signup: account created, users.email_verified_at stays NULL, exactly one challenge issued, nothing leaked', async () => {
+await test('signup: account created, users.email_verified_at stays NULL, exactly one challenge issued, a 6-digit code dispatched, nothing leaked', async () => {
   sentMessages.length = 0;
   const { res } = await signup('user1@example.com');
   assert.equal(res.status, 201);
@@ -185,39 +211,40 @@ await test('signup: account created, users.email_verified_at stays NULL, exactly
   assert.equal(rows[0].consumed_at, null);
   assert.equal(rows[0].revoked_at, null);
   assert.equal(Number(rows[0].expires_at) - Number(rows[0].created_at), EMAIL_VERIFICATION_TTL_MS);
-  assert.equal(sentMessages.length, 1, 'signup requested one verification email through the provider');
+  assert.equal(sentMessages.length, 1, 'signup requested one verification code through the provider');
   assert.equal(sentMessages[0].to, 'user1@example.com');
-  assert.match(sentMessages[0].verificationUrl, /^http:\/\/localhost\/verify-email\?token=[0-9a-f]{64}$/, 'link points at the trusted local host only');
+  assert.match(sentMessages[0].code, /^[0-9]{6}$/, 'the dispatched code is exactly 6 numeric digits');
+  assert.equal(sentMessages[0].verificationUrl, undefined, 'A3b: no more link/URL in the message');
 });
 
-await test('the raw token is NEVER stored — only its SHA-256 digest, in no column anywhere', async () => {
+await test('the raw code is NEVER stored in plaintext — only its keyed HMAC digest, in no column anywhere', async () => {
   sentMessages.length = 0;
   await signup('user2@example.com');
-  const rawToken = tokenFromLastMessage();
-  assert.match(rawToken, /^[0-9a-f]{64}$/);
+  const rawCode = codeFromLastMessage();
+  assert.match(rawCode, /^[0-9]{6}$/);
 
   const uid = await userIdByEmail('user2@example.com');
   const row = (await challengesFor(uid))[0];
-  assert.notEqual(String(row.token_digest), rawToken);
-  assert.equal(String(row.token_digest), createHash('sha256').update(rawToken, 'utf8').digest('hex'));
-  assert.equal(String(row.token_digest), hashEmailVerificationToken(rawToken));
+  assert.notEqual(String(row.token_digest), rawCode);
+  assert.equal(String(row.token_digest).length, 64, 'still a 64-char hex digest — the column is reused unchanged');
+  assert.equal(String(row.token_digest), hashEmailVerificationCode(String(row.id), rawCode));
 
   for (const r of (await db.execute('SELECT * FROM email_verification_challenges')).rows) {
-    for (const v of Object.values(r)) assert.notEqual(String(v ?? ''), rawToken, 'no column holds the raw token');
+    for (const v of Object.values(r)) assert.notEqual(String(v ?? ''), rawCode, 'no column holds the raw code');
   }
 });
 
 await test('valid verification succeeds once, sets users.email_verified_at, and /api/auth/me reflects it', async () => {
   sentMessages.length = 0;
   const { cookie } = await signup('user3@example.com');
-  const token = tokenFromLastMessage();
+  const code = codeFromLastMessage();
   const uid = await userIdByEmail('user3@example.com');
 
   let meBody = await (await callMe(cookie)).json();
   assert.equal(meBody.emailVerification.status, 'unverified');
   assert.equal(meBody.identity.emailVerified, undefined, 'identity carries no email-verification flag');
 
-  const res = await callVerify(token);
+  const res = await callVerify(cookie, code);
   assert.equal(res.status, 200);
   assert.deepEqual(await res.json(), { status: 'verified' });
   assert.ok(Number(await userEmailVerifiedAt(uid)) > 0, 'users.email_verified_at is set');
@@ -228,84 +255,75 @@ await test('valid verification succeeds once, sets users.email_verified_at, and 
   assert.equal(meBody.emailVerification.status, 'verified');
 });
 
-await test('replay: a consumed token cannot verify again', async () => {
+await test('wrong code fails and does not consume or verify the real challenge', async () => {
   sentMessages.length = 0;
-  await signup('user4@example.com');
-  const token = tokenFromLastMessage();
-  assert.equal((await callVerify(token)).status, 200);
-  const replay = await callVerify(token);
+  const { cookie } = await signup('user-wrongcode@example.com');
+  const realCode = codeFromLastMessage();
+  const uid = await userIdByEmail('user-wrongcode@example.com');
+
+  const res = await callVerify(cookie, wrongCodeFor(realCode));
+  assert.equal(res.status, 400);
+  assert.match((await res.json()).error, /doesn't match/i);
+  assert.equal(await userEmailVerifiedAt(uid), null);
+  assert.equal((await challengesFor(uid))[0].consumed_at, null, 'the real challenge is still unconsumed after a wrong guess');
+
+  // and the REAL code still works afterward
+  assert.equal((await callVerify(cookie, realCode)).status, 200);
+});
+
+await test('replay: a consumed code cannot verify again', async () => {
+  sentMessages.length = 0;
+  const { cookie } = await signup('user4@example.com');
+  const code = codeFromLastMessage();
+  assert.equal((await callVerify(cookie, code)).status, 200);
+  const replay = await callVerify(cookie, code);
   assert.equal(replay.status, 400);
   assert.match((await replay.json()).error, /already been used/i);
 });
 
-await test('expired: a token past its TTL cannot verify and does not set verified state', async () => {
+await test('expired: a code past its TTL cannot verify and does not set verified state', async () => {
   sentMessages.length = 0;
-  await signup('user5@example.com');
-  const token = tokenFromLastMessage();
+  const { cookie } = await signup('user5@example.com');
+  const code = codeFromLastMessage();
   const uid = await userIdByEmail('user5@example.com');
   await db.execute({
     sql: 'UPDATE email_verification_challenges SET created_at = ?, expires_at = ? WHERE user_id = ?',
     args: [Date.now() - 60_000, Date.now() - 30_000, uid],
   });
-  const res = await callVerify(token);
+  const res = await callVerify(cookie, code);
   assert.equal(res.status, 400);
   assert.match((await res.json()).error, /expired/i);
   assert.equal(await userEmailVerifiedAt(uid), null);
 });
 
-await test('revoked: a revoked token cannot verify', async () => {
+await test('revoked: a revoked code cannot verify', async () => {
   sentMessages.length = 0;
-  await signup('user6@example.com');
-  const token = tokenFromLastMessage();
+  const { cookie } = await signup('user6@example.com');
+  const code = codeFromLastMessage();
   const uid = await userIdByEmail('user6@example.com');
   await db.execute({ sql: 'UPDATE email_verification_challenges SET revoked_at = ? WHERE user_id = ?', args: [Date.now(), uid] });
-  const res = await callVerify(token);
+  const res = await callVerify(cookie, code);
   assert.equal(res.status, 400);
   assert.match((await res.json()).error, /no longer valid/i);
 });
 
-await test('malformed token fails with a generic message', async () => {
-  for (const bad of [undefined, null, '', 'not-hex', 'abc', 'A'.repeat(64), '0'.repeat(63), '0'.repeat(65), 123]) {
-    const res = await callVerify(bad);
+await test('malformed code fails with a generic message, and needs no session (rejected before any DB work)', async () => {
+  for (const bad of [undefined, null, '', 'abcdef', '12345', '1234567', '12a456', 123456, '00000o']) {
+    const res = await callVerify(null, bad);
     assert.equal(res.status, 400, `rejected: ${String(bad)}`);
-    assert.match((await res.json()).error, /invalid or has expired/i);
+    assert.match((await res.json()).error, /6-digit code/i);
   }
-});
-
-await test('email change: UPDATE users (email + email_verified_at NULL) and challenge revoke land atomically; old token cannot verify the new email', async () => {
-  sentMessages.length = 0;
-  const { cookie } = await signup('user7@example.com', { username: 'user7' });
-  assert.equal((await callVerify(tokenFromLastMessage())).status, 200);
-  const uid = await userIdByEmail('user7@example.com');
-  assert.ok(Number(await userEmailVerifiedAt(uid)) > 0);
-
-  await clearCooldown(uid);
-  assert.equal((await callSend(cookie)).status, 200);
-  const staleToken = tokenFromLastMessage();
-
-  const patch = await callPatch(cookie, { username: 'user7', email: 'user7-new@example.com' });
-  assert.equal(patch.status, 200);
-  const patchBody = await patch.json();
-  assert.equal(patchBody.user.email, 'user7-new@example.com');
-  assert.equal(patchBody.emailVerification.status, 'unverified');
-
-  assert.equal(await userEmailVerifiedAt(uid), null, 'users.email_verified_at cleared by the email change');
-  const rows = await challengesFor(uid);
-  assert.equal(rows.every((r) => r.revoked_at != null || r.consumed_at != null), true, 'every prior challenge is revoked or already consumed');
-
-  const res = await callVerify(staleToken);
-  assert.equal(res.status, 400);
-  assert.equal(await userEmailVerifiedAt(uid), null);
 });
 
 await test('a challenge whose target address no longer matches the current email is rejected even without an explicit revoke', async () => {
   sentMessages.length = 0;
   const { cookie } = await signup('user8@example.com', { username: 'user8' });
-  const token = tokenFromLastMessage();
+  const code = codeFromLastMessage();
   const uid = await userIdByEmail('user8@example.com');
   await db.execute({ sql: 'UPDATE users SET email = ? WHERE id = ?', args: ['user8-elsewhere@example.com', uid] });
-  assert.equal((await callVerify(token)).status, 400);
-  void cookie;
+  const res = await callVerify(cookie, code);
+  assert.equal(res.status, 400);
+  assert.match((await res.json()).error, /email address changed/i);
 });
 
 await test('resend cooldown: a second send inside the window is 429; allowed again after it', async () => {
@@ -322,6 +340,33 @@ await test('resend cooldown: a second send inside the window is 429; allowed aga
 
   await clearCooldown(uid);
   assert.equal((await callSend(cookie)).status, 200);
+});
+
+await test('resend revokes the previous outstanding challenge — only the latest code ever verifies', async () => {
+  sentMessages.length = 0;
+  const { cookie } = await signup('user-resend@example.com');
+  const firstCode = codeFromLastMessage();
+  const uid = await userIdByEmail('user-resend@example.com');
+  await clearCooldown(uid);
+
+  assert.equal((await callSend(cookie)).status, 200);
+  const secondCode = codeFromLastMessage();
+  assert.notEqual(firstCode, secondCode, 'sanity: two independently generated codes collided in this test run');
+
+  const rows = await challengesFor(uid);
+  assert.equal(rows.length, 2);
+  assert.ok(Number(rows[0].revoked_at) > 0, 'the first (superseded) challenge is revoked');
+  assert.equal(rows[1].revoked_at, null, 'the second (current) challenge is still live');
+
+  // The stale code is compared against the account's CURRENT (most recent)
+  // challenge — the row it actually belonged to is revoked at the DB level
+  // (asserted above), but the lookup never reaches that row at all, so this
+  // surfaces as an ordinary code mismatch rather than a "revoked" message.
+  const oldAttempt = await callVerify(cookie, firstCode);
+  assert.equal(oldAttempt.status, 400);
+  assert.match((await oldAttempt.json()).error, /doesn't match/i);
+
+  assert.equal((await callVerify(cookie, secondCode)).status, 200);
 });
 
 await test('bounded issuance: once the per-window cap is reached, send is rejected', async () => {
@@ -343,10 +388,10 @@ await test('bounded issuance: once the per-window cap is reached, send is reject
 
 await test('concurrent verification: exactly one of two simultaneous verifies succeeds', async () => {
   sentMessages.length = 0;
-  await signup('user11@example.com');
-  const token = tokenFromLastMessage();
+  const { cookie } = await signup('user11@example.com');
+  const code = codeFromLastMessage();
   const uid = await userIdByEmail('user11@example.com');
-  const [a, b] = await Promise.all([callVerify(token, { ip: 'race-a' }), callVerify(token, { ip: 'race-b' })]);
+  const [a, b] = await Promise.all([callVerify(cookie, code, { ip: 'race-a' }), callVerify(cookie, code, { ip: 'race-b' })]);
   assert.deepEqual([a.status, b.status].sort(), [200, 400]);
   assert.ok(Number(await userEmailVerifiedAt(uid)) > 0);
 });
@@ -356,21 +401,20 @@ await test('no identity fingerprint is ever created by verification; the vestigi
   const before = Number((await db.execute('SELECT COUNT(*) c FROM account_identity_fingerprints')).rows[0].c);
   const { cookie } = await signup('user12@example.com');
   const uid = await userIdByEmail('user12@example.com');
-  await callVerify(tokenFromLastMessage());
+  await callVerify(cookie, codeFromLastMessage());
   const after = Number((await db.execute('SELECT COUNT(*) c FROM account_identity_fingerprints')).rows[0].c);
   assert.equal(after, before);
   assert.equal(after, 0);
   assert.equal(await profileEmailVerifiedAt(uid), null, 'account_identity_profiles.email_verified_at is never written');
-  void cookie;
 });
 
 await test('a verified address matching ADMIN_EMAIL still does NOT gain the admin role', async () => {
   sentMessages.length = 0;
   assert.equal(process.env.ADMIN_EMAIL, 'a3-admin@example.com');
-  await signup('a3-admin@example.com', { username: 'a3admin' });
+  const { cookie } = await signup('a3-admin@example.com', { username: 'a3admin' });
   const uid = await userIdByEmail('a3-admin@example.com');
   assert.equal(String((await db.execute({ sql: 'SELECT role FROM users WHERE id = ?', args: [uid] })).rows[0].role), 'user');
-  assert.equal((await callVerify(tokenFromLastMessage())).status, 200);
+  assert.equal((await callVerify(cookie, codeFromLastMessage())).status, 200);
   assert.ok(Number(await userEmailVerifiedAt(uid)) > 0, 'the admin email IS verified');
   assert.equal(
     String((await db.execute({ sql: 'SELECT role FROM users WHERE id = ?', args: [uid] })).rows[0].role),
@@ -399,12 +443,12 @@ await test('LEGACY (profile-less) account: can request AND complete verification
   const sendRes = await callSend(sessionToken);
   assert.equal(sendRes.status, 200);
   assert.equal((await sendRes.json()).status, 'sent');
-  const token = tokenFromLastMessage();
-  assert.match(token, /^[0-9a-f]{64}$/);
+  const code = codeFromLastMessage();
+  assert.match(code, /^[0-9]{6}$/);
   assert.equal(Number((await db.execute({ sql: 'SELECT COUNT(*) c FROM email_verification_challenges WHERE user_id = ?', args: [legacyId] })).rows[0].c), 1);
 
   // verify
-  const verifyRes = await callVerify(token);
+  const verifyRes = await callVerify(sessionToken, code);
   assert.equal(verifyRes.status, 200);
 
   assert.ok(Number(await userEmailVerifiedAt(legacyId)) > 0, 'users.email_verified_at is now set for the legacy account');
@@ -431,13 +475,38 @@ await test('the DEFAULT mail provider is fail-closed: /send returns 503 (never f
   }
 });
 
+await test('absent EMAIL_VERIFICATION_CODE_SECRET fails closed: /send returns 503, no challenge row is created, signup still succeeds', async () => {
+  const saved = process.env.EMAIL_VERIFICATION_CODE_SECRET;
+  delete process.env.EMAIL_VERIFICATION_CODE_SECRET;
+  try {
+    sentMessages.length = 0;
+    const { res, cookie } = await signup('user-nosecret@example.com');
+    assert.equal(res.status, 201, 'signup still succeeds with no code secret configured');
+    assert.ok(cookie, 'a session cookie was still issued');
+    const uid = await userIdByEmail('user-nosecret@example.com');
+    assert.equal((await challengesFor(uid)).length, 0, 'no challenge was ever generated or stored');
+    assert.equal(sentMessages.length, 0, 'nothing was dispatched');
+
+    const sendRes = await callSend(cookie);
+    assert.equal(sendRes.status, 503);
+    assert.equal((await sendRes.json()).status, 'unavailable');
+    assert.equal((await challengesFor(uid)).length, 0);
+
+    const meBody = await (await callMe(cookie)).json();
+    assert.equal(meBody.user.email, 'user-nosecret@example.com');
+    assert.equal(meBody.emailVerification.status, 'unverified');
+  } finally {
+    process.env.EMAIL_VERIFICATION_CODE_SECRET = saved;
+  }
+});
+
 await test('send/verify responses leak nothing internal (digest / challenge id / fingerprint / user id)', async () => {
   sentMessages.length = 0;
   const { cookie } = await signup('user14@example.com');
   const uid = await userIdByEmail('user14@example.com');
   await clearCooldown(uid);
   const sendBody = JSON.stringify(await (await callSend(cookie)).json());
-  const verifyBody = JSON.stringify(await (await callVerify(tokenFromLastMessage())).json());
+  const verifyBody = JSON.stringify(await (await callVerify(cookie, codeFromLastMessage())).json());
   for (const blob of [sendBody, verifyBody]) {
     for (const forbidden of ['token_digest', 'digest', 'challengeid', 'challenge_id', 'fingerprint', 'ownerlink', 'user_id', uid.toLowerCase()]) {
       assert.equal(blob.toLowerCase().includes(forbidden), false, `${forbidden} must not appear in ${blob}`);
@@ -445,141 +514,109 @@ await test('send/verify responses leak nothing internal (digest / challenge id /
   }
 });
 
-await test('verify requires no session — the token alone is the proof', async () => {
+// ---- session / ownership requirements (A3b) -------------------------
+
+await test('verify requires a session — a signed-out request is rejected even with a correct-shaped code', async () => {
   sentMessages.length = 0;
   await signup('user15@example.com');
-  const token = tokenFromLastMessage();
-  const res = await callVerify(token);
-  assert.equal(res.status, 200);
+  const code = codeFromLastMessage();
+  const res = await callVerify(null, code);
+  assert.equal(res.status, 401);
+  assert.match((await res.json()).error, /not signed in/i);
 });
 
-// ---- trusted-host policy -------------------------------------------
-
-await test('HOSTILE HOST: a spoofed X-Forwarded-Host never leaks into the verification URL', async () => {
+await test('non-owner cannot verify another account: entering account A\'s code while signed in as account B fails, and neither account is affected', async () => {
   sentMessages.length = 0;
-  const { cookie } = await signup('host1@example.com');
-  const uid = await userIdByEmail('host1@example.com');
-  await clearCooldown(uid);
-  const res = await callSend(cookie, { extraHeaders: { 'x-forwarded-host': 'attacker.example.com' } });
-  assert.equal(res.status, 200);
-  assert.match(sentMessages.at(-1).verificationUrl, /^http:\/\/localhost\//, 'the spoofed host was ignored; only the trusted request host is used');
-  assert.equal(sentMessages.at(-1).verificationUrl.includes('attacker.example.com'), false);
+  const { cookie: cookieA } = await signup('owner-a@example.com', { username: 'ownera' });
+  const codeA = codeFromLastMessage();
+  const uidA = await userIdByEmail('owner-a@example.com');
+
+  sentMessages.length = 0;
+  const { cookie: cookieB } = await signup('owner-b@example.com', { username: 'ownerb' });
+  const uidB = await userIdByEmail('owner-b@example.com');
+
+  // B is signed in, but presents A's code — B's lookup only ever considers
+  // B's own most recent challenge, so this can only ever be a wrong-code
+  // mismatch, never a successful cross-account verify.
+  const res = await callVerify(cookieB, codeA);
+  assert.equal(res.status, 400);
+  assert.match((await res.json()).error, /doesn't match/i);
+
+  assert.equal(await userEmailVerifiedAt(uidA), null, "A's account was not verified by B's request");
+  assert.equal(await userEmailVerifiedAt(uidB), null, "B's own account was not accidentally verified either");
+
+  // and A's real code still works for A.
+  assert.equal((await callVerify(cookieA, codeA)).status, 200);
 });
 
-await test('HOSTILE HOST: a request whose canonical host is untrusted is REFUSED — no URL minted, no NEW challenge', async () => {
-  const { cookie } = await signup('host2@example.com');
-  const uid = await userIdByEmail('host2@example.com');
-  await clearCooldown(uid);
-  sentMessages.length = 0; // ignore the signup dispatch — we only care about the hostile /send call
-  const challengeCountBefore = (await challengesFor(uid)).length;
-  // The whole request appears to come from attacker.example.com.
-  const hostIp = nextIp('host');
-  await resetEmailVerificationRateForTest(hostIp);
-  const req = new Request('https://attacker.example.com/api/auth/email-verification/send', {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      'x-forwarded-for': hostIp,
-      'x-forwarded-host': 'attacker.example.com',
-      host: 'attacker.example.com',
-      cookie: `tp_session_v1=${cookie}`,
-    },
-  });
-  const res = await sendRoute.POST(req);
-  assert.equal(res.status, 503, 'ambiguous/untrusted host → refuse rather than mint a token URL');
-  assert.equal(sentMessages.length, 0, 'no verification message was produced');
-  assert.equal((await challengesFor(uid)).length, challengeCountBefore, 'the refused request issued no new challenge');
-});
+// ---- guessing / attempt protection (A3b) -----------------------------
 
-await test('HOST POLICY: an exact Vercel system host is trusted; an arbitrary *.vercel.app is not', async () => {
-  process.env.VERCEL = '1';
-  process.env.VERCEL_URL = 'turnitplus-a3.vercel.app';
-  try {
-    sentMessages.length = 0;
-    const { cookie } = await signup('host3@example.com');
-    const uid = await userIdByEmail('host3@example.com');
-    await clearCooldown(uid);
+await test('attempt cap: repeated wrong guesses against one account are rate-limited, independent of the coarse per-IP bucket', async () => {
+  sentMessages.length = 0;
+  const { cookie } = await signup('user-attempts@example.com');
+  const realCode = codeFromLastMessage();
+  const uid = await userIdByEmail('user-attempts@example.com');
+  await resetEmailVerificationAttemptRateForTest(uid);
 
-    // exact match against VERCEL_URL -> trusted, https
-    const okRes = await callSend(cookie, {
-      url: 'https://turnitplus-a3.vercel.app/api/auth/email-verification/send',
-      extraHeaders: { 'x-forwarded-host': 'turnitplus-a3.vercel.app', host: 'turnitplus-a3.vercel.app' },
-    });
-    assert.equal(okRes.status, 200);
-    assert.match(sentMessages.at(-1).verificationUrl, /^https:\/\/turnitplus-a3\.vercel\.app\/verify-email\?token=/);
-
-    await clearCooldown(uid);
-    // a DIFFERENT *.vercel.app is NOT trusted just for the suffix
-    sentMessages.length = 0;
-    const badRes = await callSend(cookie, {
-      url: 'https://evil-a3.vercel.app/api/auth/email-verification/send',
-      extraHeaders: { 'x-forwarded-host': 'evil-a3.vercel.app', host: 'evil-a3.vercel.app' },
-    });
-    assert.equal(badRes.status, 503, 'an arbitrary *.vercel.app host is refused');
-    assert.equal(sentMessages.length, 0);
-  } finally {
-    delete process.env.VERCEL;
-    delete process.env.VERCEL_URL;
-  }
-});
-
-await test('HOST POLICY: VERCEL_BRANCH_URL exact host is trusted; a similar/spoofed branch host and an arbitrary *.vercel.app are not', async () => {
-  process.env.VERCEL = '1';
-  process.env.VERCEL_BRANCH_URL = 'turnitplus-git-test-corpus-admission-team.vercel.app';
-  try {
-    const { cookie } = await signup('host4@example.com');
-    const uid = await userIdByEmail('host4@example.com');
-
-    // exact VERCEL_BRANCH_URL host -> accepted (https)
-    await clearCooldown(uid);
-    sentMessages.length = 0;
-    const okRes = await callSend(cookie, {
-      url: 'https://turnitplus-git-test-corpus-admission-team.vercel.app/api/auth/email-verification/send',
-      extraHeaders: {
-        'x-forwarded-host': 'turnitplus-git-test-corpus-admission-team.vercel.app',
-        host: 'turnitplus-git-test-corpus-admission-team.vercel.app',
-      },
-    });
-    assert.equal(okRes.status, 200);
-    assert.match(sentMessages.at(-1).verificationUrl, /^https:\/\/turnitplus-git-test-corpus-admission-team\.vercel\.app\/verify-email\?token=/);
-
-    // a SIMILAR / spoofed branch host (prefix, suffix, typo) -> refused
-    for (const spoof of [
-      'turnitplus-git-test-corpus-admission-team.vercel.app.evil.com',
-      'evil-turnitplus-git-test-corpus-admission-team.vercel.app',
-      'turnitplus-git-test-corpus-admission-team-x.vercel.app',
-      'turnitplus-git-test-corpus-admission-tea.vercel.app',
-    ]) {
-      await clearCooldown(uid);
-      sentMessages.length = 0;
-      const res = await callSend(cookie, {
-        url: `https://${spoof}/api/auth/email-verification/send`,
-        extraHeaders: { 'x-forwarded-host': spoof, host: spoof },
-      });
-      assert.equal(res.status, 503, `similar/spoofed branch host "${spoof}" must be refused`);
-      assert.equal(sentMessages.length, 0);
+  let sawRateLimited = false;
+  let lastStatus = null;
+  for (let i = 0; i < 12; i++) {
+    // A fresh IP every call so the OUTER per-IP bucket (12/min) never fires —
+    // isolates the per-ACCOUNT attempt bucket this test is pinning.
+    const res = await callVerify(cookie, wrongCodeFor(realCode), { ip: `attempt-${uid}-${i}` });
+    lastStatus = res.status;
+    if (res.status === 429) {
+      sawRateLimited = true;
+      assert.ok(Number(res.headers.get('Retry-After')) >= 1);
+      break;
     }
-
-    // an unrelated *.vercel.app -> refused
-    await clearCooldown(uid);
-    sentMessages.length = 0;
-    const arb = await callSend(cookie, {
-      url: 'https://something-else.vercel.app/api/auth/email-verification/send',
-      extraHeaders: { 'x-forwarded-host': 'something-else.vercel.app', host: 'something-else.vercel.app' },
-    });
-    assert.equal(arb.status, 503, 'an arbitrary *.vercel.app is not trusted for the suffix');
-    assert.equal(sentMessages.length, 0);
-  } finally {
-    delete process.env.VERCEL;
-    delete process.env.VERCEL_BRANCH_URL;
+    assert.equal(res.status, 400, 'a wrong guess under the cap is a plain invalid-code rejection, not a 500');
   }
+  assert.ok(sawRateLimited, `expected the per-account attempt bucket to eventually return 429 (last status was ${lastStatus})`);
+
+  // Even the CORRECT code is blocked while the account's attempt bucket is exhausted.
+  const stillBlocked = await callVerify(cookie, realCode, { ip: `attempt-${uid}-final` });
+  assert.equal(stillBlocked.status, 429);
+  assert.equal(await userEmailVerifiedAt(uid), null);
+
+  // and once the bucket is reset (simulating time passing), the real code works.
+  await resetEmailVerificationAttemptRateForTest(uid);
+  assert.equal((await callVerify(cookie, realCode, { ip: `attempt-${uid}-after-reset` })).status, 200);
+});
+
+// ---- email-change interaction ----------------------------------------
+
+await test('email change: UPDATE users (email + email_verified_at NULL) and challenge revoke land atomically; old code cannot verify the new email', async () => {
+  sentMessages.length = 0;
+  const { cookie } = await signup('user7@example.com', { username: 'user7' });
+  assert.equal((await callVerify(cookie, codeFromLastMessage())).status, 200);
+  const uid = await userIdByEmail('user7@example.com');
+  assert.ok(Number(await userEmailVerifiedAt(uid)) > 0);
+
+  await clearCooldown(uid);
+  assert.equal((await callSend(cookie)).status, 200);
+  const staleCode = codeFromLastMessage();
+
+  const patch = await callPatch(cookie, { username: 'user7', email: 'user7-new@example.com' });
+  assert.equal(patch.status, 200);
+  const patchBody = await patch.json();
+  assert.equal(patchBody.user.email, 'user7-new@example.com');
+  assert.equal(patchBody.emailVerification.status, 'unverified');
+
+  assert.equal(await userEmailVerifiedAt(uid), null, 'users.email_verified_at cleared by the email change');
+  const rows = await challengesFor(uid);
+  assert.equal(rows.every((r) => r.revoked_at != null || r.consumed_at != null), true, 'every prior challenge is revoked or already consumed');
+
+  const res = await callVerify(cookie, staleCode);
+  assert.equal(res.status, 400);
+  assert.equal(await userEmailVerifiedAt(uid), null);
 });
 
 // ---- signup challenge-delivery invariant --------------------------
 
 await test('signup + provider SUCCESS: the challenge stays ACTIVE', async () => {
   sentMessages.length = 0;
-  const { res } = await signup('deliver1@example.com');
+  const { res, cookie } = await signup('deliver1@example.com');
   assert.equal(res.status, 201);
   const uid = await userIdByEmail('deliver1@example.com');
   const rows = await challengesFor(uid);
@@ -588,7 +625,7 @@ await test('signup + provider SUCCESS: the challenge stays ACTIVE', async () => 
   assert.equal(rows[0].revoked_at, null, 'delivered challenge is still active');
   assert.equal(sentMessages.length, 1);
   // and it actually verifies
-  assert.equal((await callVerify(tokenFromLastMessage())).status, 200);
+  assert.equal((await callVerify(cookie, codeFromLastMessage())).status, 200);
   assert.ok(Number(await userEmailVerifiedAt(uid)) > 0);
 });
 
@@ -619,27 +656,6 @@ await test('signup + provider FAILURE: that exact challenge is REVOKED; account 
   } finally {
     __setEmailDeliveryProviderForTest(fakeProvider);
   }
-});
-
-await test('signup + UNTRUSTED HOST: no URL minted, that exact challenge is REVOKED; account + session still succeed', async () => {
-  sentMessages.length = 0;
-  const { res, cookie } = await signup('deliver3@example.com', {
-    url: 'https://attacker.example.com/api/auth/signup',
-    extraHeaders: { 'x-forwarded-host': 'attacker.example.com', host: 'attacker.example.com' },
-  });
-  assert.equal(res.status, 201, 'signup still succeeds');
-  assert.ok(cookie && cookie.length > 20, 'session cookie issued');
-  assert.equal(sentMessages.length, 0, 'no verification message — the host was not trusted');
-
-  const uid = await userIdByEmail('deliver3@example.com');
-  const rows = await challengesFor(uid);
-  assert.equal(rows.length, 1);
-  assert.ok(Number(rows[0].revoked_at) > 0, 'the undeliverable challenge was revoked');
-  assert.equal(rows[0].consumed_at, null);
-
-  const meBody = await (await callMe(cookie)).json();
-  assert.equal(meBody.user.email, 'deliver3@example.com');
-  assert.equal(meBody.emailVerification.status, 'unverified');
 });
 
 await test('the failed-delivery revoke targets ONE exact challenge id — never a broad per-account sweep', async () => {
