@@ -6879,7 +6879,8 @@ main.report-main {
 .developer-page h3 { font-size: 12.5px; margin: 14px 0 4px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
 .developer-page pre { background: var(--sidebar); color: #d7e6ea; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 12px; line-height: 1.6; font-family: var(--font-geist-mono), monospace; max-height: 480px; overflow-y: auto; }
 .developer-page code { font-size: 12.5px; font-family: var(--font-geist-mono), monospace; }
-.developer-table-scroll { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.developer-table-scroll,
+.admin-table-scroll { width: 100%; max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
 .developer-table { width: 100%; min-width: 860px; border-collapse: collapse; font-size: 13.5px; }
 .developer-table th, .developer-table td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--soft-line); white-space: nowrap; }
 .developer-table th { color: var(--muted); font-weight: 600; }
