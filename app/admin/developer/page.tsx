@@ -6,6 +6,7 @@ import { loadDeveloperGate } from "@/lib/developer-gate";
 import { getReportsDbClient } from "@/lib/reports-db";
 import { listRecentReportsForDeveloper } from "@/lib/developer-repo";
 import { AdminHeader } from "@/components/admin/admin-header";
+import { MetricGrid, MetricTile } from "@/components/admin/metric-tile";
 import { AdminStatusBadge } from "@/components/admin/status-badge";
 import { DeveloperRoomReset } from "@/components/developer/room-reset";
 import { DeveloperAccountRoomReset } from "@/components/developer/account-room-reset";
@@ -69,32 +70,35 @@ export default async function AdminDeveloperPage() {
           <p className="admin-corpus-empty">No reports yet.</p>
         ) : (
           <div className="admin-table-scroll">
-            <table className="developer-table">
+            <table className="developer-table admin-table--report-list">
               <thead>
                 <tr>
-                  <th>Title</th>
-                  <th>Account</th>
-                  <th>Score band</th>
-                  <th>AI score</th>
-                  <th>Updated</th>
-                  <th></th>
+                  <th className="admin-col-title">Title</th>
+                  <th className="admin-col-account">Account</th>
+                  <th className="admin-col-band">Score band</th>
+                  <th className="admin-col-score">AI score</th>
+                  <th className="admin-col-updated">Updated</th>
+                  <th className="admin-col-action"></th>
                 </tr>
               </thead>
               <tbody>
-                {reports.map((report) => (
-                  <tr key={`${report.deviceKey}:${report.id}`}>
-                    <td>{report.title}</td>
-                    <td>{report.email ? `${report.username} (${report.email})` : "anonymous"}</td>
-                    <td><AdminStatusBadge status={report.scoreBand} /></td>
-                    <td>{report.aiScore ?? "—"}</td>
-                    <td>{report.updatedAt}</td>
-                    <td>
-                      <Link href={`/admin/developer/reports/${encodeURIComponent(report.id)}?deviceKey=${encodeURIComponent(report.deviceKey)}`} className="admin-action-link">
-                        Inspect
-                      </Link>
-                    </td>
-                  </tr>
-                ))}
+                {reports.map((report) => {
+                  const account = report.email ? `${report.username} (${report.email})` : "anonymous";
+                  return (
+                    <tr key={`${report.deviceKey}:${report.id}`}>
+                      <td className="admin-col-title" title={report.title}>{report.title}</td>
+                      <td className="admin-col-account" title={account}>{account}</td>
+                      <td className="admin-col-band"><AdminStatusBadge status={report.scoreBand} /></td>
+                      <td className="admin-col-score">{report.aiScore ?? "—"}</td>
+                      <td className="admin-col-updated">{report.updatedAt}</td>
+                      <td className="admin-col-action">
+                        <Link href={`/admin/developer/reports/${encodeURIComponent(report.id)}?deviceKey=${encodeURIComponent(report.deviceKey)}`} className="admin-action-link">
+                          Inspect
+                        </Link>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -116,17 +120,10 @@ export default async function AdminDeveloperPage() {
           <Activity size={17} className="admin-card-title-icon" aria-hidden="true" />
           Developer diagnostics
         </h2>
-        <div className="admin-metric-grid">
-          <div className="admin-metric-tile">
-            <div className="admin-metric-tile-label">Signed in as</div>
-            <div className="admin-metric-tile-value admin-metric-tile-value--text">{admin.username}</div>
-            <div className="admin-metric-tile-sub">{admin.email}</div>
-          </div>
-          <div className="admin-metric-tile">
-            <div className="admin-metric-tile-label">Environment</div>
-            <div className="admin-metric-tile-value admin-metric-tile-value--text">{process.env.VERCEL_ENV ?? "local"}</div>
-          </div>
-        </div>
+        <MetricGrid>
+          <MetricTile label="Signed in as" value={admin.username} sub={admin.email} variant="text" />
+          <MetricTile label="Environment" value={process.env.VERCEL_ENV ?? "local"} variant="text" />
+        </MetricGrid>
 
         <p className="admin-badge-group-label admin-endpoint-list-label">Raw diagnostic endpoints</p>
         <ul className="admin-endpoint-list">

@@ -114,7 +114,7 @@ export default async function DeveloperReportInspectPage({
           <MetricTile label="Score band" value={<AdminStatusBadge status={report.payload.scoreBand} />} />
           <MetricTile label="Archive / similarity score" value={`${report.payload.archiveScore ?? report.payload.score}%`} />
           <MetricTile label="AI score" value={report.payload.aiScore ?? "unavailable"} />
-          <MetricTile label="Academic evidence" value={report.payload.academicEvidenceStatus ?? "n/a"} />
+          <MetricTile label="Academic evidence" value={report.payload.academicEvidenceStatus ?? "n/a"} variant="text" />
           <MetricTile label="Matched words" value={report.payload.matchedWordCount} />
         </MetricGrid>
 

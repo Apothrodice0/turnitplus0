@@ -121,32 +121,35 @@ export function DeveloperLookupSearch() {
               <p className="admin-corpus-empty">No report matched.</p>
             ) : (
               <div className="admin-table-scroll">
-                <table className="developer-table">
+                <table className="developer-table admin-table--report-list">
                   <thead>
                     <tr>
-                      <th>Title</th>
-                      <th>Account</th>
-                      <th>Score band</th>
-                      <th>AI score</th>
-                      <th>Updated</th>
-                      <th></th>
+                      <th className="admin-col-title">Title</th>
+                      <th className="admin-col-account">Account</th>
+                      <th className="admin-col-band">Score band</th>
+                      <th className="admin-col-score">AI score</th>
+                      <th className="admin-col-updated">Updated</th>
+                      <th className="admin-col-action"></th>
                     </tr>
                   </thead>
                   <tbody>
-                    {reports.map((report) => (
-                      <tr key={`${report.deviceKey}:${report.id}`}>
-                        <td>{report.title}</td>
-                        <td>{report.email ?? "anonymous"}</td>
-                        <td><AdminStatusBadge status={report.scoreBand} /></td>
-                        <td>{report.aiScore ?? "unavailable"}</td>
-                        <td>{report.updatedAt}</td>
-                        <td>
-                          <Link href={`/admin/developer/reports/${encodeURIComponent(report.id)}?deviceKey=${encodeURIComponent(report.deviceKey)}`} className="admin-action-link">
-                            Inspect
-                          </Link>
-                        </td>
-                      </tr>
-                    ))}
+                    {reports.map((report) => {
+                      const account = report.email ?? "anonymous";
+                      return (
+                        <tr key={`${report.deviceKey}:${report.id}`}>
+                          <td className="admin-col-title" title={report.title}>{report.title}</td>
+                          <td className="admin-col-account" title={account}>{account}</td>
+                          <td className="admin-col-band"><AdminStatusBadge status={report.scoreBand} /></td>
+                          <td className="admin-col-score">{report.aiScore ?? "unavailable"}</td>
+                          <td className="admin-col-updated">{report.updatedAt}</td>
+                          <td className="admin-col-action">
+                            <Link href={`/admin/developer/reports/${encodeURIComponent(report.id)}?deviceKey=${encodeURIComponent(report.deviceKey)}`} className="admin-action-link">
+                              Inspect
+                            </Link>
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>

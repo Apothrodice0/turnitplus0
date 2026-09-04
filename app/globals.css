@@ -6871,7 +6871,11 @@ main.report-main {
    deliberately plain/utilitarian rather than matching the consumer product's
    own visual polish. Scoped entirely under .developer-* so it can never leak
    into or be affected by any other page's styles. */
-.developer-page { max-width: 1180px; margin: 0 auto; padding: 32px 24px 80px; font-family: var(--font-geist-sans), sans-serif; }
+/* overflow-x: hidden here is the outermost guarantee that nothing on any
+   admin page can ever create a page-level horizontal scrollbar — every
+   genuinely wide element (a table) is expected to scroll inside its own
+   .admin-table-scroll wrapper, never the page itself. */
+.developer-page { max-width: 1180px; margin: 0 auto; padding: 32px 24px 80px; font-family: var(--font-geist-sans), sans-serif; overflow-x: hidden; }
 .developer-header h1 { margin: 0 0 6px; font-size: 22px; }
 .developer-header p { margin: 0 0 10px; color: var(--muted); font-size: 13.5px; }
 .developer-page section { margin-top: 28px; }
@@ -6947,8 +6951,12 @@ main.report-main {
   background: var(--blue-soft); color: var(--blue-dark);
   display: flex; align-items: center; justify-content: center;
 }
-.admin-header-text h1 { margin: 0 0 5px; font-size: 21px; color: var(--sidebar); }
-.admin-header-text p { margin: 0; font-size: 13.5px; color: var(--muted); line-height: 1.5; max-width: 62ch; }
+/* min-width: 0 + flex: 1 — .admin-header is a flex row; without this, a
+   very long report title (the h1 here, on the report-inspect page) can
+   force the flex item wider than its share of the row instead of wrapping. */
+.admin-header-text { min-width: 0; flex: 1; }
+.admin-header-text h1 { margin: 0 0 5px; font-size: 21px; color: var(--sidebar); overflow-wrap: anywhere; }
+.admin-header-text p { margin: 0; font-size: 13.5px; color: var(--muted); line-height: 1.5; max-width: 62ch; overflow-wrap: anywhere; }
 
 .admin-launcher-intro { margin: 0 0 26px; font-size: 14px; color: var(--muted); max-width: 62ch; line-height: 1.5; }
 .admin-launcher-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 18px; }
@@ -6984,6 +6992,12 @@ main.report-main {
 .admin-card {
   background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
   padding: 20px 22px; margin-top: 20px; box-shadow: var(--small-shadow);
+  /* Belt-and-suspenders: the card itself never paints past its own box,
+     however wide a child's intrinsic content is — the only place overflow
+     is ever meant to be visible is inside a .admin-table-scroll wrapper,
+     which scrolls on its own. */
+  overflow-x: hidden;
+  min-width: 0;
 }
 .admin-card:first-of-type { margin-top: 0; }
 .admin-card > h2:first-child, .admin-card > h3:first-child { margin-top: 0; }
@@ -6995,9 +7009,13 @@ main.report-main {
 }
 
 .admin-metric-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin: 16px 0 6px; }
-.admin-metric-tile { background: var(--canvas); border: 1px solid var(--soft-line); border-radius: 10px; padding: 12px 14px; }
+/* min-width: 0 overrides a grid item's default min-width: auto — without it,
+   a long unbroken value (an enum/status string with no spaces to wrap at)
+   can force its own track wider than the minmax() track size calls for,
+   pushing the grid past the card. */
+.admin-metric-tile { background: var(--canvas); border: 1px solid var(--soft-line); border-radius: 10px; padding: 12px 14px; min-width: 0; }
 .admin-metric-tile-label { font-size: 11.5px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin-bottom: 5px; }
-.admin-metric-tile-value { font-size: 21px; font-weight: 600; color: var(--sidebar); line-height: 1.2; }
+.admin-metric-tile-value { font-size: 21px; font-weight: 600; color: var(--sidebar); line-height: 1.2; overflow-wrap: anywhere; }
 .admin-metric-tile-sub { font-size: 11.5px; color: var(--muted); margin-top: 3px; }
 
 .admin-badge-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 14px; }
@@ -7146,7 +7164,7 @@ main.report-main {
 .admin-cta-link {
   display: inline-flex; align-items: center; gap: 8px; text-decoration: none; margin: 4px 0 16px;
 }
-.admin-metric-tile-value--text { font-size: 15px; font-weight: 600; word-break: break-word; }
+.admin-metric-tile-value--text { font-size: 14px; font-weight: 600; line-height: 1.35; word-break: break-word; overflow-wrap: anywhere; }
 
 .admin-endpoint-list { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 .admin-endpoint-list li {
@@ -7204,3 +7222,30 @@ main.report-main {
 .admin-card-callout h3 { margin-top: 0; }
 
 .admin-collapsible-summary-line { display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+/* Report-list style tables — the "recent reports" table on /admin/developer
+   and the "Saved reports" results table on /admin/developer/lookup share
+   this exact 6-column shape (Title, Account, Score band, AI score, Updated,
+   Inspect). table-layout: fixed lets Title/Account truncate with an
+   ellipsis instead of growing to fit a long title, which is what forced
+   the whole table (and therefore its .admin-card) wider than the page on
+   Preview. Score band / AI score / Updated / Inspect stay compact and
+   never wrap. A lower min-width (640px, vs. the base .developer-table's
+   860px) still guarantees the compact columns stay legible on a narrow
+   viewport, where .admin-table-scroll's own overflow-x: auto takes over. */
+.admin-table--report-list { table-layout: fixed; min-width: 640px; }
+.admin-table--report-list th, .admin-table--report-list td { overflow: hidden; }
+.admin-table--report-list .admin-col-title { width: 34%; }
+.admin-table--report-list .admin-col-account { width: 24%; }
+.admin-table--report-list .admin-col-band { width: 12%; }
+.admin-table--report-list .admin-col-score { width: 10%; }
+.admin-table--report-list .admin-col-updated { width: 14%; }
+.admin-table--report-list .admin-col-action { width: 6%; }
+.admin-table--report-list td.admin-col-title,
+.admin-table--report-list td.admin-col-account {
+  text-overflow: ellipsis; white-space: nowrap; cursor: default;
+}
+
+@media (max-width: 720px) {
+  .admin-table--report-list { min-width: 560px; }
+}
