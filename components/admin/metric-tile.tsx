@@ -11,7 +11,8 @@ export function MetricTile({
   sub,
 }: {
   label: string;
-  value: string | number;
+  /** A plain value, or a small inline element (e.g. an AdminStatusBadge) for an enum-shaped metric. */
+  value: ReactNode;
   sub?: ReactNode;
 }) {
   return (

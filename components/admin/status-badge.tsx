@@ -53,6 +53,40 @@ const VARIANT_BY_VALUE: Record<string, BadgeVariant> = {
   SKIPPED_NOT_MATCHED: "neutral",
   SKIPPED_NO_AUTHORITATIVE: "neutral",
   NOT_APPLICABLE: "neutral",
+
+  // Similarity decision trace (lib/admin-similarity-decision-trace.ts) —
+  // source relationships, match types, counted/exclusion reasons.
+  "N/A": "neutral",
+  UNKNOWN_RELATIONSHIP: "warning",
+  EXACT_CANONICAL_MATCH: "positive",
+  STRONG_TEXT_MATCH: "info",
+  COUNTED_ARCHIVE_SOURCE: "positive",
+  COUNTED_SCHOLARLY_SOURCE: "positive",
+  COUNTED_PRIOR_SUBMISSION: "positive",
+  COUNTED_CORPUS_SOURCE: "positive",
+  EXCLUDED_SELF: "neutral",
+  EXCLUDED_EFFECTIVE_DEVICE_SELF: "neutral",
+  EXCLUDED_UNKNOWN_RELATIONSHIP: "neutral",
+  EXCLUDED_DUPLICATE_WORD_POSITIONS: "neutral",
+  NO_VERIFIED_CORRESPONDENCE: "neutral",
+
+  // Refined CONSERVATIVE_COMBINED (Policy D) shared-device guard reason
+  // (lib/device-shared-guard-policy.ts) — telemetry only, never a score veto.
+  PAIR_OTHER_PASSPORT: "positive",
+  LOW_RISK_SINGLE_PAIR: "positive",
+  BLOCKED_ACCOUNT_FANOUT: "negative",
+  BLOCKED_ANONYMOUS_USE: "negative",
+  BLOCKED_MULTIPLE_PAIRS: "negative",
+  BLOCKED_INCOMPLETE_ACTOR_HISTORY: "warning",
+  BLOCKED_INSUFFICIENT_EVIDENCE: "warning",
+  NOT_APPLIED: "neutral",
+
+  // Score band (lib/report-types.ts) and academic-search run status.
+  Low: "positive",
+  Moderate: "warning",
+  High: "negative",
+  COMPLETE_WITH_MATCHES: "positive",
+  COMPLETE_NO_MATCHES: "info",
 };
 
 /** Small colored pill for a status/decision/relationship value — purely presentational, reused across the admin console. Unmapped values fall back to a neutral pill with their own exact text, never invented. */

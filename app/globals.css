@@ -7139,3 +7139,67 @@ main.report-main {
 
 .admin-table-subtext { font-size: 11px; color: var(--muted); margin-top: 2px; white-space: nowrap; }
 .admin-table-drift { background: rgba(245, 138, 59, .12); font-weight: 700; }
+
+/* Admin Phase 2C — Developer workspace polish. Reuses the Corpus/Shadow
+   card/metric-tile/badge/collapsible system throughout. */
+.admin-cta-link {
+  display: inline-flex; align-items: center; gap: 8px; text-decoration: none; margin: 4px 0 16px;
+}
+.admin-metric-tile-value--text { font-size: 15px; font-weight: 600; word-break: break-word; }
+
+.admin-endpoint-list { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.admin-endpoint-list li {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; padding: 8px 12px;
+  background: var(--canvas); border-radius: 8px; font-size: 12.5px;
+}
+.admin-endpoint-list code { font-family: var(--font-geist-mono), monospace; font-size: 12px; color: var(--blue-dark); }
+.admin-endpoint-list span { color: var(--muted); }
+.admin-endpoint-list-label { margin-top: 18px; }
+
+/* Test workspace tools — each a self-contained block; a visible divider
+   separates "Clear my rooms" from "Clear account rooms" inside one card. */
+.admin-debug-tool { padding-top: 20px; border-top: 1px solid var(--soft-line); }
+.admin-debug-tool:first-of-type { padding-top: 14px; border-top: none; }
+.admin-debug-tool-heading { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; font-size: 14.5px; color: var(--sidebar); }
+.admin-debug-tool-heading .admin-card-title-icon { color: var(--sidebar); }
+
+.admin-debug-plan { margin-top: 14px; padding: 14px 16px; border-radius: 10px; font-size: 13.5px; }
+.admin-debug-plan--warning { background: rgba(245, 138, 59, .08); border: 1px solid rgba(245, 138, 59, .3); }
+.admin-debug-plan-heading { display: flex; align-items: center; gap: 8px; color: #a15a1f; margin-bottom: 6px; }
+.admin-debug-plan p { margin: 4px 0; color: var(--ink); }
+.admin-debug-confirm-label { display: block; margin: 12px 0 4px; font-size: 13px; }
+.admin-debug-confirm-label input {
+  display: block; margin-top: 6px; width: 100%; max-width: 360px; padding: 8px 12px;
+  border: 1px solid var(--line); border-radius: 8px; font-size: 13.5px;
+}
+.admin-dialog-actions--inline { margin-top: 14px; justify-content: flex-start; }
+
+.admin-form-notice--icon { display: inline-flex; align-items: center; gap: 6px; }
+
+.admin-lookup { max-width: 100%; }
+.admin-lookup-form { display: flex; gap: 10px; margin: 4px 0 24px; }
+.admin-lookup-input-wrap { position: relative; flex: 1; }
+.admin-lookup-input-icon { position: absolute; left: 14px; top: 50%; transform: translateY(-50%); color: var(--muted); pointer-events: none; }
+.admin-lookup-input-wrap input {
+  width: 100%; padding: 12px 14px 12px 40px; border: 1px solid var(--line); border-radius: 10px;
+  font-size: 15px; font-family: var(--font-geist-sans), sans-serif; color: var(--ink);
+}
+.admin-lookup-input-wrap input:focus { outline: none; border-color: var(--blue); box-shadow: 0 0 0 3px var(--blue-soft); }
+.admin-lookup-results { margin-top: 24px; }
+.admin-lookup-results h3 { font-size: 14px; margin: 0 0 10px; color: var(--sidebar); }
+
+/* Report inspection (app/admin/developer/reports/[id]) — replaces bare,
+   browser-default-bulleted <ul> lists with a clean key/value list, and gives
+   the zero/full-coverage explanation callouts and collapsible summary lines
+   their own light styling. */
+.admin-plain-list { list-style: none; margin: 8px 0 16px; padding: 0; display: flex; flex-direction: column; gap: 7px; }
+.admin-plain-list li { font-size: 13.5px; color: var(--ink); line-height: 1.5; }
+.admin-plain-list code { font-size: 12.5px; }
+
+.admin-card-callout {
+  margin: 16px 0; padding: 14px 16px; background: var(--canvas); border-left: 3px solid var(--blue);
+  border-radius: 0 8px 8px 0;
+}
+.admin-card-callout h3 { margin-top: 0; }
+
+.admin-collapsible-summary-line { display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap; }

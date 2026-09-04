@@ -1,13 +1,18 @@
 import { notFound } from "next/navigation";
 import type { Metadata } from "next";
-import { FileSearch } from "lucide-react";
+import type { ReactNode } from "react";
+import { FileText, Percent, GitBranch, ShieldCheck, FileJson } from "lucide-react";
 import { loadDeveloperGate } from "@/lib/developer-gate";
 import { getReportsDbClient } from "@/lib/reports-db";
 import { getReportDeepDiveForDeveloper, getReportSimilarityDecisionTrace } from "@/lib/developer-repo";
 import { AdminHeader } from "@/components/admin/admin-header";
+import { MetricGrid, MetricTile } from "@/components/admin/metric-tile";
+import { AdminCollapsible } from "@/components/admin/collapsible";
+import { AdminStatusBadge, YesNoBadge } from "@/components/admin/status-badge";
 import type {
   AdminSimilarityDecisionTrace,
   DecisionTraceCorpusDuplicateShadow,
+  DecisionTraceDeviceSelfSharedGuard,
   DecisionTraceSource,
 } from "@/lib/admin-similarity-decision-trace";
 
@@ -86,118 +91,159 @@ export default async function DeveloperReportInspectPage({
   }
 
   if (!deepDive.report) notFound();
-  const { report, documentIdentity, familyMembers, family, academicSearchRuns } = deepDive;
+  const { report, documentIdentity, familyMembers, academicSearchRuns } = deepDive;
 
   return (
     <main className="developer-page">
       <AdminHeader
-        icon={FileSearch}
+        icon={FileText}
         title={report.payload.title}
         description={`${report.email ? `${report.username} (${report.email})` : "anonymous"} · report ${report.id} · device ${report.deviceKey}`}
         backHref="/admin/developer"
         backLabel="Back to Developer"
       />
 
-      <section>
-        <h2>Previous submission?</h2>
+      {/* ================= Report overview ================= */}
+      <section className="admin-card">
+        <h2>
+          <FileText size={17} className="admin-card-title-icon" aria-hidden="true" />
+          Report overview
+        </h2>
+
+        <MetricGrid>
+          <MetricTile label="Score band" value={<AdminStatusBadge status={report.payload.scoreBand} />} />
+          <MetricTile label="Archive / similarity score" value={`${report.payload.archiveScore ?? report.payload.score}%`} />
+          <MetricTile label="AI score" value={report.payload.aiScore ?? "unavailable"} />
+          <MetricTile label="Academic evidence" value={report.payload.academicEvidenceStatus ?? "n/a"} />
+          <MetricTile label="Matched words" value={report.payload.matchedWordCount} />
+        </MetricGrid>
+
+        <p className="admin-card-description">
+          Report created <strong>{report.reportCreatedAt}</strong> · saved <strong>{report.savedAt}</strong> · last
+          updated <strong>{report.updatedAt}</strong>
+        </p>
+
+        <h3>Previous submission?</h3>
         {previousReports.length > 0 ? (
           <>
-            <p><strong>YES.</strong> This document has {previousReports.length} previous saved submission{previousReports.length === 1 ? "" : "s"} in TurnitPlus.</p>
+            <p>
+              <AdminStatusBadge status="YES" label="YES" /> This document has {previousReports.length} previous saved
+              submission{previousReports.length === 1 ? "" : "s"} in TurnitPlus.
+            </p>
+            <AdminCollapsible summary={`Previous submissions (${previousReports.length})`} defaultOpen={previousReports.length <= 5}>
+              <div className="admin-table-scroll">
+                <table className="developer-table">
+                  <thead><tr><th>Date</th><th>Account</th><th>Title</th><th>Submission ID</th><th>Report ID</th></tr></thead>
+                  <tbody>
+                    {previousReports.map((previous) => (
+                      <tr key={`${previous.deviceKey}:${previous.id}`}>
+                        <td>{previous.reportCreatedAt}</td>
+                        <td>{previous.email ? `${previous.username} (${previous.email})` : "anonymous"}</td>
+                        <td>{previous.title}</td>
+                        <td>{previous.submissionId}</td>
+                        <td><a href={`/admin/developer/reports/${encodeURIComponent(previous.id)}?deviceKey=${encodeURIComponent(previous.deviceKey)}`} className="admin-action-link">{previous.id}</a></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </AdminCollapsible>
+          </>
+        ) : (
+          <p><AdminStatusBadge status="NO" label="NO" /> No previous saved report with the same canonical document identity was found.</p>
+        )}
+      </section>
+
+      {/* ================= Similarity & scoring ================= */}
+      <SimilarityDecisionTraceSection trace={similarityDecisionTrace} />
+
+      {/* ================= Source & provenance diagnostics ================= */}
+      <section className="admin-card">
+        <h2>
+          <GitBranch size={17} className="admin-card-title-icon" aria-hidden="true" />
+          Source & provenance diagnostics
+        </h2>
+
+        <h3>Document identity</h3>
+        {documentIdentity ? (
+          <>
+            <ul className="admin-plain-list">
+              <li>Account: {documentIdentity.accountEmail ? `${documentIdentity.accountUsername} (${documentIdentity.accountEmail})` : "anonymous"}</li>
+              <li>Title: {documentIdentity.title ?? "—"}</li>
+              <li>Author: {documentIdentity.author ?? "—"}</li>
+              <li>Created: {documentIdentity.createdAt}</li>
+            </ul>
+            <AdminCollapsible summary="Identity IDs & hashes (technical)">
+              <ul className="admin-plain-list">
+                <li>Identity id: <code>{documentIdentity.id}</code></li>
+                <li>Raw SHA-256: <code>{documentIdentity.rawSha256}</code></li>
+                <li>Canonical SHA-256: <code>{documentIdentity.canonicalSha256}</code></li>
+              </ul>
+            </AdminCollapsible>
+          </>
+        ) : (
+          <p>No document identity captured for this report (predates capture, or capture failed).</p>
+        )}
+
+        <h3>Seen before? (document family)</h3>
+        {familyMembers.length > 0 ? (
+          <div className="admin-table-scroll">
             <table className="developer-table">
-              <thead><tr><th>Date</th><th>Account</th><th>Title</th><th>Submission ID</th><th>Report ID</th></tr></thead>
+              <thead><tr><th>Relationship</th><th>Identity id</th><th>Account</th><th>Match type</th><th>Evidence score</th></tr></thead>
               <tbody>
-                {previousReports.map((previous) => (
-                  <tr key={`${previous.deviceKey}:${previous.id}`}>
-                    <td>{previous.reportCreatedAt}</td>
-                    <td>{previous.email ? `${previous.username} (${previous.email})` : "anonymous"}</td>
-                    <td>{previous.title}</td>
-                    <td>{previous.submissionId}</td>
-                    <td><a href={`/admin/developer/reports/${encodeURIComponent(previous.id)}?deviceKey=${encodeURIComponent(previous.deviceKey)}`}>{previous.id}</a></td>
+                {familyMembers.map((member) => (
+                  <tr key={member.id}>
+                    <td><AdminStatusBadge status={member.relationship} /></td>
+                    <td><code>{member.documentIdentityId}</code></td>
+                    <td>{member.accountId ?? "anonymous"}</td>
+                    <td><AdminStatusBadge status={member.matchType} /></td>
+                    <td>{member.evidenceScore ?? "—"}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
-          </>
+          </div>
         ) : (
-          <p><strong>NO.</strong> No previous saved report with the same canonical document identity was found.</p>
+          <p>No other submission has ever matched this document&apos;s family.</p>
         )}
-      </section>
 
-      <section>
-        <h2>Final classification</h2>
-        <ul>
-          <li>Score band: {report.payload.scoreBand}</li>
-          <li>Archive/similarity score: {report.payload.archiveScore ?? report.payload.score}</li>
-          <li>AI score: {report.payload.aiScore ?? "unavailable"}</li>
-          <li>Academic evidence status: {report.payload.academicEvidenceStatus ?? "n/a"}</li>
-          <li>Matched word count: {report.payload.matchedWordCount}</li>
-          <li>Report created: {report.reportCreatedAt} · saved: {report.savedAt} · last updated: {report.updatedAt}</li>
-        </ul>
-      </section>
-
-      <section>
-        <h2>Document identity</h2>
-        {documentIdentity ? (
-          <ul>
-            <li>Identity id: {documentIdentity.id}</li>
-            <li>Account: {documentIdentity.accountEmail ? `${documentIdentity.accountUsername} (${documentIdentity.accountEmail})` : "anonymous"}</li>
-            <li>Title: {documentIdentity.title ?? "—"}</li>
-            <li>Author: {documentIdentity.author ?? "—"}</li>
-            <li>Raw SHA-256: <code>{documentIdentity.rawSha256}</code></li>
-            <li>Canonical SHA-256: <code>{documentIdentity.canonicalSha256}</code></li>
-            <li>Created: {documentIdentity.createdAt}</li>
-          </ul>
-        ) : (
-          <p>No document identity captured for this report (predates capture, or capture failed).</p>
-        )}
-      </section>
-
-      <section>
-        <h2>Seen before? (document family)</h2>
-        {familyMembers.length > 0 ? (
-          <table className="developer-table">
-            <thead><tr><th>Relationship</th><th>Identity id</th><th>Account</th><th>Match type</th><th>Evidence score</th></tr></thead>
-            <tbody>
-              {familyMembers.map((member) => (
-                <tr key={member.id}>
-                  <td>{member.relationship}</td>
-                  <td>{member.documentIdentityId}</td>
-                  <td>{member.accountId ?? "anonymous"}</td>
-                  <td>{member.matchType}</td>
-                  <td>{member.evidenceScore ?? "—"}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        ) : (
-          <p>No other submission has ever matched this document's family.</p>
-        )}
-      </section>
-
-      <section>
-        <h2>Academic-search runs</h2>
+        <h3>Academic-search runs</h3>
         {academicSearchRuns.length === 0 && <p>No academic-search diagnostics captured for this report.</p>}
         {academicSearchRuns.map((run) => (
-          <details key={run.id} open>
-            <summary>Run #{run.id} — {run.status} · {run.totalLatencyMs}ms total · {run.createdAt}</summary>
-            <h3>Stats</h3><pre>{JSON.stringify(run.stats, null, 2)}</pre>
-            <h3>Generated queries ({run.queries?.length ?? 0})</h3><pre>{JSON.stringify(run.queries, null, 2)}</pre>
-            <h3>Ranked candidates ({run.candidates?.length ?? 0})</h3><pre>{JSON.stringify(run.candidates, null, 2)}</pre>
-            <h3>Retrieval / comparison outcome per candidate</h3><pre>{JSON.stringify(run.retrievalDiagnostics, null, 2)}</pre>
-          </details>
+          <AdminCollapsible
+            key={run.id}
+            summary={
+              <span className="admin-collapsible-summary-line">
+                Run #{run.id} <AdminStatusBadge status={run.status} /> <span className="admin-table-subtext">{run.totalLatencyMs}ms total · {run.createdAt}</span>
+              </span>
+            }
+          >
+            <h4>Stats</h4><pre>{JSON.stringify(run.stats, null, 2)}</pre>
+            <h4>Generated queries ({run.queries?.length ?? 0})</h4><pre>{JSON.stringify(run.queries, null, 2)}</pre>
+            <h4>Ranked candidates ({run.candidates?.length ?? 0})</h4><pre>{JSON.stringify(run.candidates, null, 2)}</pre>
+            <h4>Retrieval / comparison outcome per candidate</h4><pre>{JSON.stringify(run.retrievalDiagnostics, null, 2)}</pre>
+          </AdminCollapsible>
         ))}
       </section>
 
-      <SimilarityDecisionTraceSection trace={similarityDecisionTrace} />
+      {/* ================= Device Passport & internal diagnostics ================= */}
+      <DevicePassportDiagnosticsSection trace={similarityDecisionTrace} />
 
-      <section><h2>Matched sources (evidence used in the final report)</h2><pre>{JSON.stringify(report.payload.externalAcademicEvidence ?? [], null, 2)}</pre></section>
-      <section><h2>Full report payload</h2><details><summary>Raw payload_json</summary><pre>{JSON.stringify(report.payload, null, 2)}</pre></details></section>
+      {/* ================= Raw data ================= */}
+      <section className="admin-card">
+        <h2>
+          <FileJson size={17} className="admin-card-title-icon" aria-hidden="true" />
+          Raw data
+        </h2>
+        <AdminCollapsible summary="Matched sources (evidence used in the final report)">
+          <pre>{JSON.stringify(report.payload.externalAcademicEvidence ?? [], null, 2)}</pre>
+        </AdminCollapsible>
+        <AdminCollapsible summary="Full report payload (raw payload_json)">
+          <pre>{JSON.stringify(report.payload, null, 2)}</pre>
+        </AdminCollapsible>
+      </section>
     </main>
   );
-}
-
-function yesNo(value: boolean): string {
-  return value ? "YES" : "NO";
 }
 
 // Phase B2 shadow measurement columns are NULL wherever a real counterfactual
@@ -207,39 +253,46 @@ function notMeasured(value: number | string | boolean | null | undefined): strin
   return value === null || value === undefined ? "not measured" : String(value);
 }
 
+/** Per-source "Reason" cell: the counted or exclusion reason as a badge, falling back to the contribution note (or a dash) when neither is set. */
+function reasonCell(source: DecisionTraceSource): ReactNode {
+  const reason = source.countedReason ?? source.exclusionReason;
+  return reason ? <AdminStatusBadge status={reason} /> : (source.contributionNote ?? "—");
+}
+
 function CorpusDuplicateShadowBlock({ shadow }: { shadow: DecisionTraceCorpusDuplicateShadow | null }) {
   return (
     <>
       <h3>Corpus-duplicate suppression shadow (Phase B2 — measurement only)</h3>
       {shadow ? (
-        <ul>
-          <li>
-            Core status: <strong>{shadow.status}</strong>
-            {shadow.status === "FAILED" ? ` · error_code: ${notMeasured(shadow.errorCode)}` : ""}
-          </li>
-          <li>Policy version: {shadow.policyVersion} · computed {shadow.computedAt}</li>
-          <li>Authoritative score: {notMeasured(shadow.authoritativeScore)}</li>
-          <li>Hypothetical score (candidate excluded): {notMeasured(shadow.hypotheticalScore)}</li>
-          <li>Delta: {notMeasured(shadow.scoreDelta)}</li>
-          <li>Candidate count: {notMeasured(shadow.candidateCount)}</li>
-          <li>Candidate category: {notMeasured(shadow.measurementCategory)}</li>
-          <li>Origin confidence: {notMeasured(shadow.originConfidence)}</li>
-          <li>Multi-origin evidence: {notMeasured(shadow.multiOriginEvidence)}</li>
-          <li>
-            Surviving matched words — archive: {notMeasured(shadow.archiveOnlyWordsSurviving)},
-            academic: {notMeasured(shadow.liveAcademicOnlyWordsSurviving)},
-            previous-upload: {notMeasured(shadow.previousUploadOnlyWordsSurviving)},
-            overlap: {notMeasured(shadow.overlapWordsSurviving)}
-          </li>
-          <li>
-            Checker accounts: {shadow.checkerAccountsStatus} · distinct-checker bucket: {notMeasured(shadow.distinctCheckerAccountsBucket)}
-          </li>
-          <li>
-            Authoritative corpus generation: {notMeasured(shadow.authoritativeCorpusGeneration)} · snapshot: {notMeasured(shadow.authoritativeSnapshotComputedAt)}
-          </li>
-          <li>Evaluation truncated (defensive cap hit): {yesNo(shadow.evaluationTruncated)}</li>
-          <li><strong>Production score changed by this shadow: NO</strong> (Phase B2 is measurement only)</li>
-        </ul>
+        <>
+          <MetricGrid>
+            <MetricTile label="Core status" value={<AdminStatusBadge status={shadow.status} />} sub={shadow.status === "FAILED" ? `error_code: ${notMeasured(shadow.errorCode)}` : undefined} />
+            <MetricTile label="Authoritative score" value={notMeasured(shadow.authoritativeScore)} />
+            <MetricTile label="Hypothetical score" value={notMeasured(shadow.hypotheticalScore)} sub="candidate excluded" />
+            <MetricTile label="Delta" value={notMeasured(shadow.scoreDelta)} />
+            <MetricTile label="Candidate count" value={notMeasured(shadow.candidateCount)} />
+          </MetricGrid>
+          <ul className="admin-plain-list">
+            <li>Policy version: <code>{shadow.policyVersion}</code> · computed {shadow.computedAt}</li>
+            <li>Candidate category: {shadow.measurementCategory ? <AdminStatusBadge status={shadow.measurementCategory} /> : "not measured"}</li>
+            <li>Origin confidence: {shadow.originConfidence ? <AdminStatusBadge status={shadow.originConfidence} /> : "not measured"}</li>
+            <li>Multi-origin evidence: {notMeasured(shadow.multiOriginEvidence)}</li>
+            <li>
+              Surviving matched words — archive: {notMeasured(shadow.archiveOnlyWordsSurviving)},
+              academic: {notMeasured(shadow.liveAcademicOnlyWordsSurviving)},
+              previous-upload: {notMeasured(shadow.previousUploadOnlyWordsSurviving)},
+              overlap: {notMeasured(shadow.overlapWordsSurviving)}
+            </li>
+            <li>
+              Checker accounts: {shadow.checkerAccountsStatus} · distinct-checker bucket: {notMeasured(shadow.distinctCheckerAccountsBucket)}
+            </li>
+            <li>
+              Authoritative corpus generation: {notMeasured(shadow.authoritativeCorpusGeneration)} · snapshot: {notMeasured(shadow.authoritativeSnapshotComputedAt)}
+            </li>
+            <li>Evaluation truncated (defensive cap hit): <YesNoBadge value={shadow.evaluationTruncated} /></li>
+            <li><strong>Production score changed by this shadow: NO</strong> (Phase B2 is measurement only)</li>
+          </ul>
+        </>
       ) : (
         <p>No corpus-duplicate suppression shadow evaluation has been recorded for this report.</p>
       )}
@@ -247,11 +300,94 @@ function CorpusDuplicateShadowBlock({ shadow }: { shadow: DecisionTraceCorpusDup
   );
 }
 
+/**
+ * Admin Phase 2C finding: `trace.deviceSelfSharedGuard` — the refined
+ * CONSERVATIVE_COMBINED (Policy D) shared-device fan-out TELEMETRY verdict —
+ * is computed by lib/report-primary-similarity.ts's resolvePrimarySimilaritySummary
+ * and threaded all the way through lib/developer-repo.ts and
+ * buildAdminSimilarityDecisionTrace on every single page load, but had NO
+ * rendering anywhere on this page. Surfaced here.
+ */
+function SharedDeviceGuardBlock({ guard }: { guard: DecisionTraceDeviceSelfSharedGuard | null }) {
+  return (
+    <>
+      <h3>Shared-device guard (Policy D — telemetry only)</h3>
+      {guard ? (
+        guard.sharedGuardEnabled ? (
+          <>
+            <ul className="admin-plain-list">
+              <li>Verdict: <AdminStatusBadge status={guard.sharedGuardReason} label={`${guard.sharedGuardPassed ? "PASS" : "BLOCK"} — ${guard.sharedGuardReason}`} /></li>
+              <li>Durable actor history complete: <YesNoBadge value={guard.durableActorHistoryComplete} /></li>
+              <li>Device distinct accounts: {guard.deviceDistinctAccounts ?? "—"}</li>
+              <li>Device anonymous uploads: {guard.deviceAnonUploads ?? "—"}</li>
+              <li>Unordered device-account pairs: {guard.unorderedDeviceAccountPairCount ?? "—"}</li>
+              <li>Pair-other-verified-Passport count: {guard.pairOtherVerifiedPassportCount ?? "—"}</li>
+              <li><strong>Score changed by this guard: NO</strong> — an accepted Device Passport SELF is kept regardless; this is risk telemetry, not a veto.</li>
+            </ul>
+          </>
+        ) : (
+          <p>DEVICE_PASSPORT_CONSERVATIVE_SHARED_GUARD_ENABLED was off for this resolution — the guard was never consulted.</p>
+        )
+      ) : (
+        <p>Not applicable — DEVICE_PASSPORT_SELF_ENABLED was off, so the shared-device guard was never consulted for this report.</p>
+      )}
+    </>
+  );
+}
+
+function DevicePassportDiagnosticsSection({ trace }: { trace: AdminSimilarityDecisionTrace | null }) {
+  return (
+    <section className="admin-card">
+      <h2>
+        <ShieldCheck size={17} className="admin-card-title-icon" aria-hidden="true" />
+        Device Passport & internal diagnostics
+      </h2>
+
+      <h3>Device Passport shadow evidence</h3>
+      {trace?.deviceShadow ? (
+        <>
+          <MetricGrid>
+            <MetricTile label="Verified upload passport" value={<YesNoBadge value={trace.deviceShadow.verifiedUploadPassport} />} />
+            <MetricTile label="Shadow proposal" value={<AdminStatusBadge status={trace.deviceShadow.shadowProposal} />} />
+            <MetricTile label="Agreement" value={<AdminStatusBadge status={trace.deviceShadow.agreement} />} />
+            <MetricTile label="Would downgrade" value={<YesNoBadge value={trace.deviceShadow.wouldDowngrade} />} />
+            <MetricTile label="Matches evaluated" value={trace.deviceShadow.matchesEvaluated} />
+          </MetricGrid>
+          <ul className="admin-plain-list">
+            <li>Policy version: <code>{trace.deviceShadow.policyVersion}</code> · computed {trace.deviceShadow.computedAt} · status <AdminStatusBadge status={trace.deviceShadow.status} /></li>
+            <li>Production status / relationship: {trace.deviceShadow.productionStatus} / {trace.deviceShadow.productionRelationship ? <AdminStatusBadge status={trace.deviceShadow.productionRelationship} /> : "—"}</li>
+            {trace.deviceShadow.proposedRelationship && <li>Proposed relationship: <AdminStatusBadge status={trace.deviceShadow.proposedRelationship} /></li>}
+            <li>deviceSelfCandidateCount: {trace.deviceShadow.deviceSelfCandidateCount}</li>
+            <li>exactSameDeviceMatchCount: {trace.deviceShadow.exactSameDeviceMatchCount}</li>
+            <li>independentBlockedCandidateCount: {trace.deviceShadow.independentBlockedCandidateCount}</li>
+            <li>deviceDistinctAccounts: {trace.deviceShadow.deviceDistinctAccounts}</li>
+            <li>deviceSubmissionCount: {trace.deviceShadow.deviceSubmissionCount}</li>
+            <li>deviceAnonUploads: {trace.deviceShadow.deviceAnonUploads}</li>
+            <li>deviceSharedAcrossAccounts: <YesNoBadge value={trace.deviceShadow.deviceSharedAcrossAccounts} /></li>
+            <li>Shadow reason: {trace.deviceShadow.reason ? <AdminStatusBadge status={trace.deviceShadow.reason} /> : "—"}</li>
+            <li>Strongest-candidate reason: {trace.deviceShadow.candidateReason ? <AdminStatusBadge status={trace.deviceShadow.candidateReason} /> : "—"}</li>
+            <li><strong>Production score changed by Device Passport shadow: NO</strong> (Phase 4 is observation only)</li>
+          </ul>
+        </>
+      ) : (
+        <p>No Device Passport shadow evaluation has been recorded for this report.</p>
+      )}
+
+      <SharedDeviceGuardBlock guard={trace?.deviceSelfSharedGuard ?? null} />
+
+      <CorpusDuplicateShadowBlock shadow={trace?.corpusDuplicateSuppressionShadow ?? null} />
+    </section>
+  );
+}
+
 function SimilarityDecisionTraceSection({ trace }: { trace: AdminSimilarityDecisionTrace | null }) {
   if (!trace) {
     return (
-      <section>
-        <h2>Similarity decision trace</h2>
+      <section className="admin-card">
+        <h2>
+          <Percent size={17} className="admin-card-title-icon" aria-hidden="true" />
+          Similarity & scoring
+        </h2>
         <p>Not available for this report.</p>
       </section>
     );
@@ -259,8 +395,11 @@ function SimilarityDecisionTraceSection({ trace }: { trace: AdminSimilarityDecis
 
   if (!trace.resolvable) {
     return (
-      <section>
-        <h2>Similarity decision trace</h2>
+      <section className="admin-card">
+        <h2>
+          <Percent size={17} className="admin-card-title-icon" aria-hidden="true" />
+          Similarity & scoring
+        </h2>
         <p>
           <strong>Not resolvable.</strong> {trace.unresolvableReason === "UNIFIED_SIMILARITY_NOT_PERSISTED"
             ? "No finalized unified-similarity result has been persisted for this report (legacy report, or write-time finalization never completed)."
@@ -269,7 +408,6 @@ function SimilarityDecisionTraceSection({ trace }: { trace: AdminSimilarityDecis
               : "The final similarity result could not be resolved."}
         </p>
         <p>Archive-only fallback score: {trace.finalScore}%</p>
-        <CorpusDuplicateShadowBlock shadow={trace.corpusDuplicateSuppressionShadow} />
       </section>
     );
   }
@@ -277,59 +415,66 @@ function SimilarityDecisionTraceSection({ trace }: { trace: AdminSimilarityDecis
   const d = trace.scoreDerivation;
 
   return (
-    <section>
-      <h2>Similarity decision trace</h2>
+    <section className="admin-card">
+      <h2>
+        <Percent size={17} className="admin-card-title-icon" aria-hidden="true" />
+        Similarity & scoring
+      </h2>
 
-      <h3>Summary</h3>
-      <ul>
-        <li>Final similarity: <strong>{trace.finalScore}%</strong> (basis: {trace.finalScoreBasis})</li>
-        <li>Submitted words: {trace.submittedWordCount}</li>
-        <li>Included matched union: {trace.finalIncludedUnionWordCount}</li>
-        <li>Excluded SELF words: {trace.excludedSelfMatchedWordCount}</li>
-        <li>Excluded effective same-device SELF words: {trace.excludedEffectiveDeviceSelfMatchedWordCount}{trace.excludedEffectiveDeviceSelfMatchedWordCount > 0 ? " (Preview rule DEVICE_PASSPORT_SELF_ENABLED — baseline relationship preserved, effective scoring relationship SELF; per-source reason SAME_DEVICE_EXACT_DOCUMENT or SAME_DEVICE_STRONG_TEXT_DOCUMENT)" : ""}</li>
-        <li>Excluded UNKNOWN-relationship words: {trace.excludedUnknownMatchedWordCount}</li>
-        <li>Production score changed by Device Passport shadow: <strong>NO</strong></li>
-      </ul>
+      <MetricGrid>
+        <MetricTile label="Final similarity" value={`${trace.finalScore}%`} sub={`basis: ${trace.finalScoreBasis}`} />
+        <MetricTile label="Submitted words" value={trace.submittedWordCount} />
+        <MetricTile label="Included matched union" value={trace.finalIncludedUnionWordCount} />
+        <MetricTile label="Excluded SELF words" value={trace.excludedSelfMatchedWordCount} />
+        <MetricTile label="Excluded same-device SELF words" value={trace.excludedEffectiveDeviceSelfMatchedWordCount} />
+        <MetricTile label="Excluded UNKNOWN-relationship words" value={trace.excludedUnknownMatchedWordCount} />
+      </MetricGrid>
+      {trace.excludedEffectiveDeviceSelfMatchedWordCount > 0 && (
+        <p className="admin-card-description">
+          Preview rule DEVICE_PASSPORT_SELF_ENABLED — baseline relationship preserved, effective scoring relationship
+          SELF; per-source reason SAME_DEVICE_EXACT_DOCUMENT or SAME_DEVICE_STRONG_TEXT_DOCUMENT.
+        </p>
+      )}
 
-      <h3>Word-union proof</h3>
-      <p>
-        Final percentage = included matched word-position union ÷ submitted words:
-        {" "}<code>{d.numerator} / {d.denominator} = {d.rawPercent.toFixed(4)}% → {d.roundedPercent}%{d.cappedAt100 ? " (capped at 100%)" : ""}</code>
-      </p>
-      <p>Per-source raw matched words are NOT summed — the same submitted word found by multiple sources is counted once.</p>
-      <ul>
-        <li>Archive-only words: {trace.archiveOnlyWordCount}</li>
-        <li>Scholarly-only words: {trace.scholarlyOnlyWordCount}</li>
-        <li>Previous-submission-only words: {trace.priorSubmissionOnlyWordCount}</li>
-        <li>Words matched by more than one source (counted once): {trace.multiSourceOverlapWordCount}</li>
-        <li>Union accumulation order: {trace.unionAccumulationOrder.length > 0 ? trace.unionAccumulationOrder.join(" → ") : "—"}</li>
-        {trace.unattributedUnionWordCount > 0 && (
-          <li><strong>Unattributed union words: {trace.unattributedUnionWordCount}</strong> (archive matched positions were not available on the payload)</li>
-        )}
-      </ul>
+      <AdminCollapsible summary="Word-union proof" defaultOpen>
+        <p>
+          Final percentage = included matched word-position union ÷ submitted words:
+          {" "}<code>{d.numerator} / {d.denominator} = {d.rawPercent.toFixed(4)}% → {d.roundedPercent}%{d.cappedAt100 ? " (capped at 100%)" : ""}</code>
+        </p>
+        <p className="admin-card-description">Per-source raw matched words are NOT summed — the same submitted word found by multiple sources is counted once.</p>
+        <ul className="admin-plain-list">
+          <li>Archive-only words: {trace.archiveOnlyWordCount}</li>
+          <li>Scholarly-only words: {trace.scholarlyOnlyWordCount}</li>
+          <li>Previous-submission-only words: {trace.priorSubmissionOnlyWordCount}</li>
+          <li>Words matched by more than one source (counted once): {trace.multiSourceOverlapWordCount}</li>
+          <li>Union accumulation order: {trace.unionAccumulationOrder.length > 0 ? trace.unionAccumulationOrder.join(" → ") : "—"}</li>
+          {trace.unattributedUnionWordCount > 0 && (
+            <li><strong>Unattributed union words: {trace.unattributedUnionWordCount}</strong> (archive matched positions were not available on the payload)</li>
+          )}
+        </ul>
+      </AdminCollapsible>
 
       {trace.zeroScoreExplanation && (
-        <>
+        <div className="admin-card-callout">
           <h3>Why the score is 0%</h3>
-          <ul>
-            <li>Reason: <strong>{trace.zeroScoreExplanation.reason}</strong></li>
+          <ul className="admin-plain-list">
+            <li>Reason: <AdminStatusBadge status={trace.zeroScoreExplanation.reason} /></li>
             <li>{trace.zeroScoreExplanation.detail}</li>
             <li>SELF sources with matches: {trace.zeroScoreExplanation.excludedSelfSourceCount}</li>
             <li>UNKNOWN-relationship sources with matches: {trace.zeroScoreExplanation.excludedUnknownSourceCount}</li>
             <li>Per-candidate rejection detail: not available (does not survive production matching into the persisted result)</li>
           </ul>
-        </>
+        </div>
       )}
 
       {trace.fullCoverageExplanation && (
-        <>
+        <div className="admin-card-callout">
           <h3>Why the score is 100%</h3>
-          <ul>
-            <li>Reason: <strong>{trace.fullCoverageExplanation.reason}</strong></li>
+          <ul className="admin-plain-list">
             <li>Included union covers every submitted word: {trace.fullCoverageExplanation.includedUnionWordCount} / {trace.fullCoverageExplanation.submittedWordCount}</li>
             <li>Driving sources: {trace.fullCoverageExplanation.drivingSources.join(", ") || "—"}</li>
           </ul>
-        </>
+        </div>
       )}
 
       <h3>Per-source trace</h3>
@@ -337,66 +482,45 @@ function SimilarityDecisionTraceSection({ trace }: { trace: AdminSimilarityDecis
         <p>No archive, scholarly, or previous-submission source contributed to or was considered for this result.</p>
       ) : (
         <>
-          <table className="developer-table">
-            <thead>
-              <tr>
-                <th>Source</th><th>Kind</th><th>Relationship</th><th>Match type</th><th>Containment</th>
-                <th>Raw matched words</th><th>Counted words</th><th>Unique contribution</th><th>Overlap</th>
-                <th>Counted?</th><th>Reason</th>
-              </tr>
-            </thead>
-            <tbody>
-              {trace.sources.map((source) => (
-                <tr key={source.sourceKey}>
-                  <td>{source.label}</td>
-                  <td>{source.sourceKind}</td>
-                  <td>{source.effectiveScoringReason
-                    ? `${source.relationshipType} → ${source.effectiveScoringRelationship} (${source.effectiveScoringReason})`
-                    : source.relationshipType}</td>
-                  <td>{source.matchType}</td>
-                  <td>{source.containment === null ? "—" : source.containment.toFixed(3)}</td>
-                  <td>{source.rawMatchedWordCount}</td>
-                  <td>{source.countedWordCount}</td>
-                  <td>{source.newUniqueWordContribution}</td>
-                  <td>{source.overlappingWordCount}</td>
-                  <td>{yesNo(source.countedTowardScore)}</td>
-                  <td>{source.countedReason ?? source.exclusionReason ?? source.contributionNote ?? "—"}</td>
+          <div className="admin-table-scroll">
+            <table className="developer-table">
+              <thead>
+                <tr>
+                  <th>Source</th><th>Kind</th><th>Relationship</th><th>Match type</th><th>Containment</th>
+                  <th>Matcher-reported words</th><th>Raw matched words</th><th>Counted words</th><th>Unique contribution</th><th>Overlap</th>
+                  <th>Counted?</th><th>Reason</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {trace.sources.map((source) => (
+                  <tr key={source.sourceKey}>
+                    <td>{source.label}</td>
+                    <td>{source.sourceKind}</td>
+                    <td>
+                      <AdminStatusBadge status={source.relationshipType} />
+                      {source.effectiveScoringReason && (
+                        <div className="admin-table-subtext">→ {source.effectiveScoringRelationship} ({source.effectiveScoringReason})</div>
+                      )}
+                    </td>
+                    <td><AdminStatusBadge status={source.matchType} /></td>
+                    <td>{source.containment === null ? "—" : source.containment.toFixed(3)}</td>
+                    <td>{source.productionReportedMatchedWordCount ?? "—"}</td>
+                    <td>{source.rawMatchedWordCount}</td>
+                    <td>{source.countedWordCount}</td>
+                    <td>{source.newUniqueWordContribution}</td>
+                    <td>{source.overlappingWordCount}</td>
+                    <td><YesNoBadge value={source.countedTowardScore} /></td>
+                    <td>{reasonCell(source)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
           {trace.sources.map((source) => (
             <SourceEvidenceDetails key={`${source.sourceKey}-evidence`} source={source} />
           ))}
         </>
       )}
-
-      <h3>Device Passport shadow evidence</h3>
-      {trace.deviceShadow ? (
-        <ul>
-          <li>Verified upload passport: <strong>{yesNo(trace.deviceShadow.verifiedUploadPassport)}</strong></li>
-          <li>Policy version: {trace.deviceShadow.policyVersion} · computed {trace.deviceShadow.computedAt} · status {trace.deviceShadow.status}</li>
-          <li>Production status / relationship: {trace.deviceShadow.productionStatus} / {trace.deviceShadow.productionRelationship ?? "—"}</li>
-          <li>Shadow proposal: {trace.deviceShadow.shadowProposal}{trace.deviceShadow.proposedRelationship ? ` (proposedRelationship=${trace.deviceShadow.proposedRelationship})` : ""}</li>
-          <li>Agreement: {trace.deviceShadow.agreement}</li>
-          <li>wouldDowngrade: {yesNo(trace.deviceShadow.wouldDowngrade)}</li>
-          <li>deviceSelfCandidateCount: {trace.deviceShadow.deviceSelfCandidateCount}</li>
-          <li>exactSameDeviceMatchCount: {trace.deviceShadow.exactSameDeviceMatchCount}</li>
-          <li>independentBlockedCandidateCount: {trace.deviceShadow.independentBlockedCandidateCount}</li>
-          <li>matchesEvaluated: {trace.deviceShadow.matchesEvaluated}</li>
-          <li>deviceDistinctAccounts: {trace.deviceShadow.deviceDistinctAccounts}</li>
-          <li>deviceSubmissionCount: {trace.deviceShadow.deviceSubmissionCount}</li>
-          <li>deviceAnonUploads: {trace.deviceShadow.deviceAnonUploads}</li>
-          <li>deviceSharedAcrossAccounts: {yesNo(trace.deviceShadow.deviceSharedAcrossAccounts)}</li>
-          <li>Shadow reason: {trace.deviceShadow.reason ?? "—"}</li>
-          <li>Strongest-candidate reason: {trace.deviceShadow.candidateReason ?? "—"}</li>
-          <li><strong>Production score changed by Device Passport shadow: NO</strong> (Phase 4 is observation only)</li>
-        </ul>
-      ) : (
-        <p>No Device Passport shadow evaluation has been recorded for this report.</p>
-      )}
-
-      <CorpusDuplicateShadowBlock shadow={trace.corpusDuplicateSuppressionShadow} />
     </section>
   );
 }
@@ -406,55 +530,58 @@ function SourceEvidenceDetails({ source }: { source: DecisionTraceSource }) {
   const a = source.accountEvidence;
   const dev = source.deviceEvidence;
   return (
-    <details>
-      <summary>{source.label} — account &amp; device backing evidence</summary>
+    <AdminCollapsible summary={`${source.label} — account & device backing evidence`}>
       {a && (
         <>
           <h4>Account / backing evidence</h4>
-          <ul>
-            <li>Has same-account submission: {yesNo(a.hasSameAccountSubmission)}</li>
-            <li>Other-account submission count: {a.otherAccountSubmissionCount}</li>
-            <li>Same-account backings: {a.sameAccountBackingCount} · other-account backings: {a.otherAccountBackingCount} · anonymous backings: {a.anonymousBackingCount}</li>
-          </ul>
+          <MetricGrid>
+            <MetricTile label="Has same-account submission" value={<YesNoBadge value={a.hasSameAccountSubmission} />} />
+            <MetricTile label="Other-account submissions" value={a.otherAccountSubmissionCount} />
+            <MetricTile label="Same-account backings" value={a.sameAccountBackingCount} />
+            <MetricTile label="Other-account backings" value={a.otherAccountBackingCount} />
+            <MetricTile label="Anonymous backings" value={a.anonymousBackingCount} />
+          </MetricGrid>
           {a.backings.length > 0 && (
-            <table className="developer-table">
-              <thead>
-                <tr><th>Channel</th><th>Relationship to report account</th><th>Account</th><th>Document identity</th><th>Admission decision</th><th>Source report</th></tr>
-              </thead>
-              <tbody>
-                {a.backings.map((backing, index) => (
-                  <tr key={index}>
-                    <td>{backing.channel}</td>
-                    <td>{backing.relationshipToReportAccount}</td>
-                    <td>{backing.accountEmail ? `${backing.accountUsername ?? "?"} (${backing.accountEmail})` : backing.accountUsername ?? "anonymous"}</td>
-                    <td>{backing.documentIdentityId ?? "—"}</td>
-                    <td>{backing.admissionDecisionId ?? "—"}</td>
-                    <td>{backing.sourceReportId ?? "—"}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <div className="admin-table-scroll">
+              <table className="developer-table">
+                <thead>
+                  <tr><th>Channel</th><th>Relationship to report account</th><th>Account</th><th>Document identity</th><th>Admission decision</th><th>Source report</th></tr>
+                </thead>
+                <tbody>
+                  {a.backings.map((backing, index) => (
+                    <tr key={index}>
+                      <td><AdminStatusBadge status={backing.channel} /></td>
+                      <td><AdminStatusBadge status={backing.relationshipToReportAccount} /></td>
+                      <td>{backing.accountEmail ? `${backing.accountUsername ?? "?"} (${backing.accountEmail})` : backing.accountUsername ?? "anonymous"}</td>
+                      <td>{backing.documentIdentityId ?? "—"}</td>
+                      <td>{backing.admissionDecisionId ?? "—"}</td>
+                      <td>{backing.sourceReportId ?? "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
-          {a.backingListTruncated && <p>(backing list truncated)</p>}
+          {a.backingListTruncated && <p className="admin-card-description">(backing list truncated)</p>}
         </>
       )}
       {dev && (
         <>
           <h4>Device Passport shadow evidence (per representation)</h4>
-          <ul>
-            <li>sameVerifiedDeviceBacking: {yesNo(dev.sameVerifiedDeviceBacking)}</li>
-            <li>sameDeviceBackingCount: {dev.sameDeviceBackingCount}</li>
-            <li>independentBackingCount: {dev.independentBackingCount}</li>
-            <li>backingsWithoutDeviceProvenance: {dev.backingsWithoutDeviceProvenance}</li>
-            <li>admittedBackingsDifferentDevice: {dev.admittedBackingsDifferentDevice}</li>
-            <li>admittedBackingsNoDeviceProvenance: {dev.admittedBackingsNoDeviceProvenance}</li>
-            <li>admittedPromotionBackingCount: {dev.admittedPromotionBackingCount}</li>
-            <li>submissionReferenceBackingCount: {dev.submissionReferenceBackingCount}</li>
-            <li>identitySameAccount: {yesNo(dev.identitySameAccount)}</li>
-            <li>priorSameAccountIdentityCount: {dev.priorSameAccountIdentityCount}</li>
-          </ul>
+          <MetricGrid>
+            <MetricTile label="Same verified device backing" value={<YesNoBadge value={dev.sameVerifiedDeviceBacking} />} />
+            <MetricTile label="Same-device backings" value={dev.sameDeviceBackingCount} />
+            <MetricTile label="Independent backings" value={dev.independentBackingCount} />
+            <MetricTile label="Backings without device provenance" value={dev.backingsWithoutDeviceProvenance} />
+            <MetricTile label="Admitted, different device" value={dev.admittedBackingsDifferentDevice} />
+            <MetricTile label="Admitted, no device provenance" value={dev.admittedBackingsNoDeviceProvenance} />
+            <MetricTile label="Admitted-promotion backings" value={dev.admittedPromotionBackingCount} />
+            <MetricTile label="Submission-reference backings" value={dev.submissionReferenceBackingCount} />
+            <MetricTile label="Identity same account" value={<YesNoBadge value={dev.identitySameAccount} />} />
+            <MetricTile label="Prior same-account identities" value={dev.priorSameAccountIdentityCount} />
+          </MetricGrid>
         </>
       )}
-    </details>
+    </AdminCollapsible>
   );
 }

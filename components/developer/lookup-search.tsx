@@ -2,6 +2,8 @@
 
 import { useState } from "react";
 import Link from "next/link";
+import { Search } from "lucide-react";
+import { AdminStatusBadge } from "@/components/admin/status-badge";
 
 type DocumentIdentityResult = {
   id: string;
@@ -21,6 +23,8 @@ type ReportResult = {
   title: string;
   updatedAt: string;
   scoreBand: string;
+  /** Admin Phase 2C finding: GET /api/developer/lookup already returns this field (searchArticleHistory forwards the full DeveloperReportSummary), but the previous client type omitted it and it was never rendered. */
+  aiScore: number | null;
   username: string | null;
   email: string | null;
 };
@@ -55,85 +59,97 @@ export function DeveloperLookupSearch() {
   }
 
   return (
-    <div className="developer-lookup">
-      <form onSubmit={runSearch}>
-        <input
-          type="text"
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-          placeholder="Title, DOI, URL, hash, author, or document/report id"
-          aria-label="Search article history"
-        />
-        <button type="submit" disabled={loading}>{loading ? "Searching…" : "Search"}</button>
+    <div className="admin-lookup">
+      <form className="admin-lookup-form" onSubmit={runSearch}>
+        <div className="admin-lookup-input-wrap">
+          <Search size={16} className="admin-lookup-input-icon" aria-hidden="true" />
+          <input
+            type="text"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Title, DOI, URL, hash, author, or document/report id"
+            aria-label="Search article history"
+          />
+        </div>
+        <button type="submit" className="admin-btn-primary" disabled={loading || query.trim().length === 0}>
+          {loading ? "Searching…" : "Search"}
+        </button>
       </form>
 
-      {error && <p role="alert">{error}</p>}
+      {error && <p role="alert" className="admin-form-error">{error}</p>}
+      {loading && <p className="admin-corpus-loading">Searching…</p>}
 
-      {searched && (
+      {searched && !loading && (
         <>
-          <section>
-            <h2>Document identities ({documentIdentities.length})</h2>
+          <section className="admin-lookup-results">
+            <h3>Document identities ({documentIdentities.length})</h3>
             {documentIdentities.length === 0 ? (
-              <p>No document identity matched.</p>
+              <p className="admin-corpus-empty">No document identity matched.</p>
             ) : (
-              <table className="developer-table">
-                <thead>
-                  <tr>
-                    <th>Title</th>
-                    <th>Author</th>
-                    <th>Account</th>
-                    <th>Raw SHA-256</th>
-                    <th>Canonical SHA-256</th>
-                    <th>Created</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {documentIdentities.map((identity) => (
-                    <tr key={identity.id}>
-                      <td>{identity.title ?? "—"}</td>
-                      <td>{identity.author ?? "—"}</td>
-                      <td>{identity.accountEmail ?? "anonymous"}</td>
-                      <td><code>{identity.rawSha256.slice(0, 16)}…</code></td>
-                      <td><code>{identity.canonicalSha256.slice(0, 16)}…</code></td>
-                      <td>{identity.createdAt}</td>
+              <div className="admin-table-scroll">
+                <table className="developer-table">
+                  <thead>
+                    <tr>
+                      <th>Title</th>
+                      <th>Author</th>
+                      <th>Account</th>
+                      <th>Raw SHA-256</th>
+                      <th>Canonical SHA-256</th>
+                      <th>Created</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {documentIdentities.map((identity) => (
+                      <tr key={identity.id}>
+                        <td>{identity.title ?? "—"}</td>
+                        <td>{identity.author ?? "—"}</td>
+                        <td>{identity.accountEmail ?? "anonymous"}</td>
+                        <td><code>{identity.rawSha256.slice(0, 16)}…</code></td>
+                        <td><code>{identity.canonicalSha256.slice(0, 16)}…</code></td>
+                        <td>{identity.createdAt}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             )}
           </section>
 
-          <section>
-            <h2>Saved reports ({reports.length})</h2>
+          <section className="admin-lookup-results">
+            <h3>Saved reports ({reports.length})</h3>
             {reports.length === 0 ? (
-              <p>No report matched.</p>
+              <p className="admin-corpus-empty">No report matched.</p>
             ) : (
-              <table className="developer-table">
-                <thead>
-                  <tr>
-                    <th>Title</th>
-                    <th>Account</th>
-                    <th>Score band</th>
-                    <th>Updated</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {reports.map((report) => (
-                    <tr key={`${report.deviceKey}:${report.id}`}>
-                      <td>{report.title}</td>
-                      <td>{report.email ?? "anonymous"}</td>
-                      <td>{report.scoreBand}</td>
-                      <td>{report.updatedAt}</td>
-                      <td>
-                        <Link href={`/admin/developer/reports/${encodeURIComponent(report.id)}?deviceKey=${encodeURIComponent(report.deviceKey)}`}>
-                          Inspect
-                        </Link>
-                      </td>
+              <div className="admin-table-scroll">
+                <table className="developer-table">
+                  <thead>
+                    <tr>
+                      <th>Title</th>
+                      <th>Account</th>
+                      <th>Score band</th>
+                      <th>AI score</th>
+                      <th>Updated</th>
+                      <th></th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {reports.map((report) => (
+                      <tr key={`${report.deviceKey}:${report.id}`}>
+                        <td>{report.title}</td>
+                        <td>{report.email ?? "anonymous"}</td>
+                        <td><AdminStatusBadge status={report.scoreBand} /></td>
+                        <td>{report.aiScore ?? "unavailable"}</td>
+                        <td>{report.updatedAt}</td>
+                        <td>
+                          <Link href={`/admin/developer/reports/${encodeURIComponent(report.id)}?deviceKey=${encodeURIComponent(report.deviceKey)}`} className="admin-action-link">
+                            Inspect
+                          </Link>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             )}
           </section>
         </>

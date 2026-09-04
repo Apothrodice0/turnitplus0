@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { AlertTriangle, CheckCircle2, DoorOpen } from "lucide-react";
 
 /**
  * Debug workspace — "Clear my rooms". A first click is always a DRY RUN
@@ -83,55 +84,56 @@ export function DeveloperRoomReset() {
   }
 
   return (
-    <section className="developer-debug-workspace">
-      <h2>Debug workspace</h2>
-      <p>
-        Delete all saved reports from your developer account so you can start testing with empty
-        rooms.
-      </p>
+    <div className="admin-debug-tool">
+      <div className="admin-debug-tool-heading">
+        <DoorOpen size={16} className="admin-card-title-icon" aria-hidden="true" />
+        <strong>Clear my rooms</strong>
+      </div>
+      <p className="admin-card-description">Delete all saved reports from your developer account so you can start testing with empty rooms.</p>
 
       {(phase === "idle" || phase === "checking") && (
-        <button type="button" onClick={runDryRun} disabled={phase === "checking"}>
+        <button type="button" className="admin-btn-primary" onClick={runDryRun} disabled={phase === "checking"}>
           {phase === "checking" ? "Checking…" : "Clear my rooms"}
         </button>
       )}
 
       {phase === "confirm" && plan && (
-        <div className="developer-debug-plan">
-          <p>
+        <div className="admin-debug-plan admin-debug-plan--warning">
+          <div className="admin-debug-plan-heading">
+            <AlertTriangle size={16} aria-hidden="true" />
             <strong>
               {plan.reportsToDelete} {plan.reportsToDelete === 1 ? "report" : "reports"} across{" "}
-              {plan.roomsAffected.length}{" "}
-              {plan.roomsAffected.length === 1 ? "room" : "rooms"} will be deleted.
+              {plan.roomsAffected.length} {plan.roomsAffected.length === 1 ? "room" : "rooms"} will be deleted.
             </strong>
-          </p>
+          </div>
           <p>Rooms affected: {displayRooms(plan.roomsAffected)}</p>
-          <p>Accepted / promoted corpus content: not affected</p>
-          <div className="developer-debug-actions">
-            <button type="button" className="developer-debug-danger" onClick={runDelete}>
-              Delete {plan.reportsToDelete} {plan.reportsToDelete === 1 ? "report" : "reports"}
-            </button>
-            <button type="button" onClick={cancel}>
+          <p>Accepted / promoted corpus content: not affected.</p>
+          <div className="admin-dialog-actions admin-dialog-actions--inline">
+            <button type="button" onClick={cancel} className="admin-dialog-cancel">
               Cancel
+            </button>
+            <button type="button" className="admin-dialog-danger" onClick={runDelete}>
+              Delete {plan.reportsToDelete} {plan.reportsToDelete === 1 ? "report" : "reports"}
             </button>
           </div>
         </div>
       )}
 
-      {phase === "deleting" && <p aria-live="polite">Clearing rooms…</p>}
+      {phase === "deleting" && <p aria-live="polite" className="admin-corpus-loading">Clearing rooms…</p>}
 
       {phase === "done" && (
-        <p aria-live="polite" className="developer-debug-done">
+        <p aria-live="polite" className="admin-form-notice admin-form-notice--icon">
+          <CheckCircle2 size={15} aria-hidden="true" />
           Developer rooms cleared.
           {deletedCount !== null && ` (${deletedCount} ${deletedCount === 1 ? "report" : "reports"} deleted.)`}
         </p>
       )}
 
       {error && (
-        <p role="alert" className="developer-debug-error">
+        <p role="alert" className="admin-form-error">
           {error}
         </p>
       )}
-    </section>
+    </div>
   );
 }

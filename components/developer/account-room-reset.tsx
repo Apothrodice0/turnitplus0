@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { AlertTriangle, CheckCircle2, UserX } from "lucide-react";
 
 /**
  * Debug workspace — "Clear account rooms". An admin-only tool to clear the
@@ -150,22 +151,29 @@ export function DeveloperAccountRoomReset() {
   const confirmMatches = plan !== null && confirmEmail.trim().toLowerCase() === plan.accountEmail;
 
   return (
-    <section className="developer-debug-workspace developer-account-room-reset">
-      <h3>Clear account rooms</h3>
-      <p>Clear saved reports and occupied rooms for one test account.</p>
+    <div className="admin-debug-tool">
+      <div className="admin-debug-tool-heading">
+        <UserX size={16} className="admin-card-title-icon" aria-hidden="true" />
+        <strong>Clear account rooms</strong>
+      </div>
+      <p className="admin-card-description">Clear saved reports and occupied rooms for one test account.</p>
 
-      <div className="developer-account-room-reset-form">
-        <input
-          type="email"
-          value={email}
-          onChange={(event) => onEmailChange(event.target.value)}
-          placeholder="Account email"
-          aria-label="Account email"
-          autoComplete="off"
-          spellCheck={false}
-        />
+      <div className="admin-corpus-toolbar">
+        <label>
+          Account email
+          <input
+            type="email"
+            value={email}
+            onChange={(event) => onEmailChange(event.target.value)}
+            placeholder="name@example.com"
+            aria-label="Account email"
+            autoComplete="off"
+            spellCheck={false}
+          />
+        </label>
         <button
           type="button"
+          className="admin-btn-primary"
           onClick={runPreview}
           disabled={phase === "checking" || phase === "deleting" || email.trim().length === 0}
         >
@@ -174,22 +182,22 @@ export function DeveloperAccountRoomReset() {
       </div>
 
       {notFoundEmail && (
-        <p className="developer-debug-error" role="status">
+        <p className="admin-form-error" role="status">
           No account found for {notFoundEmail}.
         </p>
       )}
 
       {phase === "confirm" && plan && (
-        <div className="developer-debug-plan">
-          <p>
+        <div className="admin-debug-plan admin-debug-plan--warning">
+          <div className="admin-debug-plan-heading">
+            <AlertTriangle size={16} aria-hidden="true" />
             <strong>
-              {plural(plan.reportsToDelete, "report")} across {plural(plan.roomsAffected.length, "room")} will be
-              deleted.
+              {plural(plan.reportsToDelete, "report")} across {plural(plan.roomsAffected.length, "room")} will be deleted.
             </strong>
-          </p>
+          </div>
           <p>Rooms affected: {displayRooms(plan.roomsAffected)}</p>
-          <p>Accepted / promoted corpus content: not affected</p>
-          <label className="developer-account-room-reset-confirm">
+          <p>Accepted / promoted corpus content: not affected.</p>
+          <label className="admin-debug-confirm-label">
             Re-enter <code>{plan.accountEmail}</code> to confirm:
             <input
               type="email"
@@ -201,35 +209,36 @@ export function DeveloperAccountRoomReset() {
               spellCheck={false}
             />
           </label>
-          <div className="developer-debug-actions">
+          <div className="admin-dialog-actions admin-dialog-actions--inline">
+            <button type="button" onClick={resetToIdle} className="admin-dialog-cancel">
+              Cancel
+            </button>
             <button
               type="button"
-              className="developer-debug-danger"
+              className="admin-dialog-danger"
               onClick={runDelete}
               disabled={!confirmMatches}
             >
               Delete {plural(plan.reportsToDelete, "report")} for {plan.accountEmail}
             </button>
-            <button type="button" onClick={resetToIdle}>
-              Cancel
-            </button>
           </div>
         </div>
       )}
 
-      {phase === "deleting" && <p aria-live="polite">Clearing rooms…</p>}
+      {phase === "deleting" && <p aria-live="polite" className="admin-corpus-loading">Clearing rooms…</p>}
 
       {phase === "done" && doneMessage && (
-        <p aria-live="polite" className="developer-debug-done">
+        <p aria-live="polite" className="admin-form-notice admin-form-notice--icon">
+          <CheckCircle2 size={15} aria-hidden="true" />
           {doneMessage}
         </p>
       )}
 
       {error && (
-        <p role="alert" className="developer-debug-error">
+        <p role="alert" className="admin-form-error">
           {error}
         </p>
       )}
-    </section>
+    </div>
   );
 }
