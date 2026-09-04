@@ -12,23 +12,25 @@ import { __resetUsersEmailVerifiedAtColumnCacheForTest } from '../lib/email-veri
 import { withTestIdentity } from './helpers/test-signup.mjs';
 
 /**
- * Regression for the A3 Preview bug: a logged-in account rendered "Complete
- * your identity profile" with blank fields even though it had a full identity
- * profile, and the email-verification control was missing.
+ * Two things pinned here:
  *
- * Root cause (fixed here): /api/auth/me GET read users.email_verified_at in the
- * SAME try/catch as the profile read, BEFORE it. When A3 code is live in an
- * environment where migration 0046 has not added that column, the SELECT threw
- * "no such column", the shared catch zeroed `identity`, and the profile read
- * never ran — for EVERY account, profiled or not.
+ * (1) The /api/auth/me API CONTRACT, in BOTH schema states (0046 applied /
+ *     not applied). Originally written for the A3 Preview bug: GET read
+ *     users.email_verified_at in the SAME try/catch as the profile read,
+ *     BEFORE it, so a missing column (0046 not yet applied) zeroed `identity`
+ *     for EVERY account. The two reads are now fully independent and every
+ *     users.email_verified_at / challenge-table access degrades gracefully.
+ *     `identity` itself is UNCHANGED and UNTOUCHED by the later Account-page
+ *     cleanup below — the stored profile still exists, and /api/auth/me still
+ *     returns it exactly as before; only the Account PAGE stopped reading it.
  *
- * The two reads are now fully independent, and every users.email_verified_at /
- * challenge-table access degrades gracefully when 0046 is not applied. These
- * tests pin the /api/auth/me response contract — which is exactly what
- * app/page.tsx keys the "Edit information" vs "Complete your identity profile"
- * heading and the "Email not verified / Verify email" vs "Email verified" badge
- * off — for a profiled account AND a legacy profile-less account, in BOTH
- * schema states (0046 applied / not applied).
+ * (2) The Account-page cleanup (product decision: structured identity is
+ *     collected once at signup and is not re-shown/re-editable on the Account
+ *     page). Section C asserts the identity board — "Complete your identity
+ *     profile", "Identity details", the settings-mode <IdentityFields>, and
+ *     the `accountIdentity` state it depended on — is GONE from app/page.tsx,
+ *     so none of those strings can silently reappear, while the
+ *     email-verification control (unaffected by this cleanup) stays wired.
  */
 
 const repo = path.resolve('.');
@@ -98,19 +100,20 @@ async function seedLegacyAccount(dbFile, { id, email }) {
   } finally { c.close(); }
 }
 
-// ---- frontend-contract assertions (mirror app/page.tsx) ----------------
-function assertRendersEditInformation(meBody, msg) {
-  assert.ok(meBody.identity && typeof meBody.identity === 'object', `${msg}: identity must be a populated object -> heading "Identity details" / "Edit information"`);
+// ---- API-contract assertions (the /api/auth/me response shape only — this
+// file no longer claims anything about how the Account page renders it) -----
+function assertProfilePresentInApi(meBody, msg) {
+  assert.ok(meBody.identity && typeof meBody.identity === 'object', `${msg}: /api/auth/me still returns the stored identity profile`);
   assert.ok(typeof meBody.identity.accountType === 'string' && meBody.identity.accountType.length > 0, `${msg}: identity.accountType present`);
 }
-function assertRendersCompletionState(meBody, msg) {
-  assert.equal(meBody.identity, null, `${msg}: identity must be null -> heading "Complete your identity profile"`);
+function assertProfileAbsentInApi(meBody, msg) {
+  assert.equal(meBody.identity, null, `${msg}: /api/auth/me correctly reports no profile for a profile-less account`);
 }
-function assertEmailUnverifiedControl(meBody, msg) {
-  assert.ok(meBody.emailVerification && meBody.emailVerification.status === 'unverified', `${msg}: emailVerification.status === "unverified" -> "Email not verified / Verify email"`);
+function assertEmailUnverified(meBody, msg) {
+  assert.ok(meBody.emailVerification && meBody.emailVerification.status === 'unverified', `${msg}: emailVerification.status === "unverified"`);
 }
-function assertEmailVerifiedControl(meBody, msg) {
-  assert.equal(meBody.emailVerification.status, 'verified', `${msg}: emailVerification.status === "verified" -> "Email verified"`);
+function assertEmailVerified(meBody, msg) {
+  assert.equal(meBody.emailVerification.status, 'verified', `${msg}: emailVerification.status === "verified"`);
 }
 
 let failures = 0;
@@ -133,29 +136,29 @@ async function test(name, fn) {
   const db = createClient({ url: `file:${dbFile}` });
   await db.execute('PRAGMA foreign_keys = ON');
 
-  await test('[0046 applied] profiled account -> me returns a populated identity + emailVerification, renders "Edit information" + "Email not verified"', async () => {
+  await test('[0046 applied] profiled account -> /api/auth/me still returns the stored identity + emailVerification unverified', async () => {
     const { res, cookie } = await signupWithCookie('profiled-full@example.com');
     assert.equal(res.status, 201);
     const meBody = await (await callMe(cookie)).json();
-    assertRendersEditInformation(meBody, 'profiled/full');
+    assertProfilePresentInApi(meBody, 'profiled/full');
     assert.equal(meBody.identity.accountType, 'independent');
     assert.equal(meBody.identity.emailVerified, undefined, 'identity carries no email-verification flag');
-    assertEmailUnverifiedControl(meBody, 'profiled/full');
+    assertEmailUnverified(meBody, 'profiled/full');
   });
 
-  await test('[0046 applied] legacy profile-less account -> me returns identity: null + emailVerification, renders the completion state + "Email not verified"', async () => {
+  await test('[0046 applied] legacy profile-less account -> /api/auth/me returns identity: null + emailVerification unverified', async () => {
     const token = await seedLegacyAccount(dbFile, { id: 'legacy-full-1', email: 'legacy-full@example.com' });
     const meBody = await (await callMe(token)).json();
-    assertRendersCompletionState(meBody, 'legacy/full');
+    assertProfileAbsentInApi(meBody, 'legacy/full');
     assert.equal(meBody.user.email, 'legacy-full@example.com');
-    assertEmailUnverifiedControl(meBody, 'legacy/full');
+    assertEmailUnverified(meBody, 'legacy/full');
   });
 
-  await test('[0046 applied] a verified account renders the verified state', async () => {
+  await test('[0046 applied] a verified account -> /api/auth/me reports emailVerification.status "verified"', async () => {
     const token = await seedLegacyAccount(dbFile, { id: 'verified-1', email: 'verified@example.com' });
     await db.execute({ sql: 'UPDATE users SET email_verified_at = ? WHERE id = ?', args: [Date.now(), 'verified-1'] });
     const meBody = await (await callMe(token)).json();
-    assertEmailVerifiedControl(meBody, 'verified/full');
+    assertEmailVerified(meBody, 'verified/full');
   });
 
   db.close();
@@ -189,16 +192,16 @@ async function test(name, fn) {
     assert.equal(meBody.user.email, 'signup-pre46@example.com');
   });
 
-  await test('[pre-0046] profiled account STILL renders "Edit information" — the profile read is not blocked by the missing column', async () => {
+  await test('[pre-0046] profiled account -> /api/auth/me STILL returns the stored identity — the profile read is not blocked by the missing column', async () => {
     __resetUsersEmailVerifiedAtColumnCacheForTest();
     const { res, cookie } = await signupWithCookie('profiled-pre46@example.com', { username: 'prof46' });
     assert.equal(res.status, 201);
     const meRes = await callMe(cookie);
     assert.equal(meRes.status, 200, 'me must not 500 when users.email_verified_at is missing');
     const meBody = await meRes.json();
-    assertRendersEditInformation(meBody, 'profiled/pre-0046');  // <-- the regression that broke on Preview
+    assertProfilePresentInApi(meBody, 'profiled/pre-0046');  // <-- the regression that broke on Preview
     assert.equal(meBody.identity.accountType, 'independent');
-    assertEmailUnverifiedControl(meBody, 'profiled/pre-0046');  // gracefully "unverified"
+    assertEmailUnverified(meBody, 'profiled/pre-0046');  // gracefully "unverified"
   });
 
   await test('[pre-0046] legacy profile-less account -> me: 200, identity null, emailVerification unverified', async () => {
@@ -207,8 +210,8 @@ async function test(name, fn) {
     const meRes = await callMe(token);
     assert.equal(meRes.status, 200);
     const meBody = await meRes.json();
-    assertRendersCompletionState(meBody, 'legacy/pre-0046');
-    assertEmailUnverifiedControl(meBody, 'legacy/pre-0046');
+    assertProfileAbsentInApi(meBody, 'legacy/pre-0046');
+    assertEmailUnverified(meBody, 'legacy/pre-0046');
   });
 
   await test('[pre-0046] me PATCH (username + email change) succeeds without 500 and updates the email', async () => {
@@ -222,26 +225,53 @@ async function test(name, fn) {
     // and me still reflects it
     const meBody = await (await callMe(cookie)).json();
     assert.equal(meBody.user.email, 'patch-pre46-new@example.com');
-    assertRendersEditInformation(meBody, 'patch/pre-0046');
+    assertProfilePresentInApi(meBody, 'patch/pre-0046');
   });
 
   cleanupDb(dbFile);
 }
 
 // ======================================================================
-// SECTION C — structural: app/page.tsx keys the two UI states off exactly
-// the fields the API returns.
+// SECTION C — structural: the Account-page identity board is GONE (product
+// decision — structured identity is signup-only, never re-shown/re-edited on
+// the Account page), while the (unrelated) email-verification wiring survives.
+// See tests/account-page-email-verification-render.test.mjs for the real
+// render of the email-verification control and the login/signup re-hydration
+// wiring.
 // ======================================================================
 {
   const src = fs.readFileSync(path.join(repo, 'app/page.tsx'), 'utf8');
-  await test('STRUCTURAL: page.tsx heading is driven by `accountIdentity` truthiness, and the email badge by `emailVerification?.status` (see tests/account-page-email-verification-render.test.mjs for the real render + the login/signup re-hydration wiring)', () => {
+
+  await test('STRUCTURAL: none of the removed identity-board strings/wiring exist in app/page.tsx any more', () => {
+    for (const gone of [
+      'Complete your identity profile',
+      'Identity details',
+      'accountIdentity',
+      'AccountIdentityView',
+      'profileIdentityRef',
+      'setAccountIdentity',
+    ]) {
+      assert.doesNotMatch(src, new RegExp(gone.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), `"${gone}" must not appear in app/page.tsx — the identity board was removed`);
+    }
+    // The settings-mode identity form specifically must be gone; the SIGNUP
+    // usage of the same component is explicitly unaffected (signup identity
+    // requirements are unchanged).
+    assert.doesNotMatch(src, /<IdentityFields[^>]*mode="settings"/, 'no settings-mode <IdentityFields> on the Account page');
+    assert.match(src, /<IdentityFields ref=\{signupIdentityRef\} mode="signup"/, 'the signup identity form is untouched');
+  });
+
+  await test('STRUCTURAL: the email-verification control is unaffected by the identity-board removal', () => {
     const componentSrc = fs.readFileSync(path.join(repo, 'components/account/email-verification-status.tsx'), 'utf8');
-    assert.match(src, /accountIdentity \? "Identity details" : "Complete your identity profile"/, 'heading toggles on accountIdentity');
-    assert.match(src, /<EmailVerificationStatus\s+status=\{emailVerification\?\.status \?\? null\}/, 'the account hero drives the extracted component from emailVerification.status');
+    assert.match(src, /<EmailVerificationStatus\s+status=\{emailVerification\?\.status \?\? null\}/, 'the account hero still drives the extracted component from emailVerification.status');
     assert.match(componentSrc, /status === "verified"/, 'verified badge branch');
     assert.match(componentSrc, /status === "unverified"/, 'unverified branch with the Verify email button');
-    assert.match(src, /setEmailVerification\(result\.emailVerification \?\? null\)/, 'me response emailVerification is stored into state');
-    assert.match(src, /setAccountIdentity\(result\.identity \?\? null\)/, 'me response identity is stored into state');
+    assert.match(src, /setEmailVerification\(result\.emailVerification \?\? null\)/, 'me response emailVerification is still stored into state');
+  });
+
+  await test('STRUCTURAL: the profile-edit form no longer collects or sends an identity payload', () => {
+    const editFn = src.slice(src.indexOf('async function submitProfileEdit'), src.indexOf('async function sendEmailVerification'));
+    assert.doesNotMatch(editFn, /identityPayload|identityHandle|CollectedIdentity/, 'submitProfileEdit must not reference an identity payload any more');
+    assert.match(editFn, /JSON\.stringify\(\{ username, email, corpusReuseConsent \}\)/, 'the PATCH body is exactly {username, email, corpusReuseConsent}');
   });
 }
 

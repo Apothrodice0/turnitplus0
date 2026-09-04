@@ -27,10 +27,14 @@ import { withTestIdentity } from './helpers/test-signup.mjs';
  * before the user had signed in. A hard refresh (which re-runs the mount
  * effect) "fixed" it, which is why it looked like a deployment/staleness issue.
  *
- * Fix: app/page.tsx now re-hydrates `account` + `accountIdentity` +
- * `emailVerification` from /api/auth/me immediately after a successful
- * login/signup (see hydrateAccountFromServer / its call in the auth-submit
- * handler), not only at mount.
+ * Fix: app/page.tsx now re-hydrates `account` + `emailVerification` from
+ * /api/auth/me immediately after a successful login/signup (see
+ * hydrateAccountFromServer / its call in the auth-submit handler), not only at
+ * mount. (At the time of this fix it also re-hydrated `accountIdentity`; a
+ * later, separate product decision removed the Account page's identity board
+ * entirely — see tests/account-me-identity-rendering.test.mjs Section C —
+ * so that part no longer exists. `identity` is still returned by
+ * /api/auth/me and asserted directly against the API below.)
  *
  * This file exercises the REAL render path for the email-verification control
  * (components/account/email-verification-status.tsx, extracted from
@@ -178,24 +182,30 @@ await test('the null (not-yet-hydrated) state renders nothing — proves the con
 });
 
 // ---- structural: the wiring page.tsx must have so the above is reachable ----
-await test('STRUCTURAL: page.tsx re-hydrates identity + emailVerification from /api/auth/me after login/signup (not only at mount), and the account hero renders the real component', () => {
+// NOTE: hydrateAccountFromServer originally also set `accountIdentity` from
+// /api/auth/me's `identity` field. A later, separate product decision removed
+// the Account page's entire identity board (see tests/account-me-identity-
+// rendering.test.mjs Section C) — accountIdentity/setAccountIdentity no longer
+// exist on this page at all, so this test only asserts the email-verification
+// half of the wiring, which that cleanup left untouched.
+await test('STRUCTURAL: page.tsx re-hydrates emailVerification from /api/auth/me after login/signup (not only at mount), and the account hero renders the real component', () => {
   const src = fs.readFileSync(path.join(repo, 'app/page.tsx'), 'utf8');
 
   // The auth-submit handler must not stop at setAccount(data.user) — it must
-  // also pull identity/emailVerification from the server, since the login/
-  // signup response does not carry them (proven above).
+  // also pull emailVerification from the server, since the login/signup
+  // response does not carry it (proven above).
   const setAccountIdx = src.indexOf('setAccount(data.user as LocalAccount);');
   assert.ok(setAccountIdx >= 0, 'expected the post-auth setAccount(data.user) call');
   const afterSetAccount = src.slice(setAccountIdx, setAccountIdx + 700);
   assert.match(afterSetAccount, /hydrateAccountFromServer\(\)/, 'the auth-submit handler must re-hydrate from /api/auth/me after setAccount(data.user)');
 
-  // hydrateAccountFromServer itself must populate all three from /api/auth/me.
+  // hydrateAccountFromServer itself must populate emailVerification from /api/auth/me.
   const hydrateIdx = src.indexOf('async function hydrateAccountFromServer(');
   assert.ok(hydrateIdx >= 0, 'expected a hydrateAccountFromServer function');
   const hydrateBody = src.slice(hydrateIdx, hydrateIdx + 1200);
   assert.match(hydrateBody, /fetch\("\/api\/auth\/me"\)/);
-  assert.match(hydrateBody, /setAccountIdentity\(result\.identity \?\? null\)/);
   assert.match(hydrateBody, /setEmailVerification\(result\.emailVerification \?\? null\)/);
+  assert.doesNotMatch(hydrateBody, /setAccountIdentity/, 'the identity board was removed — hydrateAccountFromServer must not reference it');
 
   // The mount effect must use the SAME hydration path (single source of truth).
   assert.match(src, /await hydrateAccountFromServer\(\)/);
