@@ -25,7 +25,7 @@ type ReportResult = {
   email: string | null;
 };
 
-/** Client-side search box for /developer/lookup — hits GET /api/developer/lookup, which is itself gated by getAdminSessionUser (see that route's own comment). This component renders no data of its own on first paint; every result comes from that authorized fetch. */
+/** Client-side search box for /admin/developer/lookup — hits GET /api/developer/lookup, which is itself gated by getAdminSessionUser (see that route's own comment). This component renders no data of its own on first paint; every result comes from that authorized fetch. */
 export function DeveloperLookupSearch() {
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(false);
@@ -126,7 +126,7 @@ export function DeveloperLookupSearch() {
                       <td>{report.scoreBand}</td>
                       <td>{report.updatedAt}</td>
                       <td>
-                        <Link href={`/developer/reports/${encodeURIComponent(report.id)}?deviceKey=${encodeURIComponent(report.deviceKey)}`}>
+                        <Link href={`/admin/developer/reports/${encodeURIComponent(report.id)}?deviceKey=${encodeURIComponent(report.deviceKey)}`}>
                           Inspect
                         </Link>
                       </td>

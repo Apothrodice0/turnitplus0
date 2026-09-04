@@ -8,7 +8,7 @@ import test from "node:test";
 // outside a real Next.js request scope (generateMetadata/the page body both
 // call next/headers' cookies() via lib/developer-gate.ts's loadDeveloperGate).
 //
-// Production audit fix: every app/developer/* generateMetadata() used to
+// Production audit fix: every developer-gated generateMetadata() used to
 // return a page-identifying title unconditionally, with no admin check at
 // all — even though the page body correctly notFound()s a non-admin. Next
 // resolves <head> metadata independently of the body's notFound(), so a
@@ -16,11 +16,17 @@ import test from "node:test";
 // title alone. Every generateMetadata() here must now gate on the exact
 // same lib/developer-gate.ts loadDeveloperGate() the page body uses, and
 // return {} (never the real title) when it resolves null.
+//
+// Admin Console Phase 1: these three pages were relocated from
+// app/developer/* to app/admin/developer/* (a UI/routing consolidation
+// only — same loadDeveloperGate, same notFound() body, same underlying
+// data). The old app/developer/* paths are now plain redirects, covered by
+// the second test block below.
 
 const developerPages = [
-  { file: "../app/developer/page.tsx", title: "Developer · TurnitPlus" },
-  { file: "../app/developer/lookup/page.tsx", title: "Article lookup · Developer · TurnitPlus" },
-  { file: "../app/developer/reports/[id]/page.tsx", title: "Report inspection · Developer · TurnitPlus" },
+  { file: "../app/admin/developer/page.tsx", title: "Developer · Admin · TurnitPlus" },
+  { file: "../app/admin/developer/lookup/page.tsx", title: "Article lookup · Developer · Admin · TurnitPlus" },
+  { file: "../app/admin/developer/reports/[id]/page.tsx", title: "Report inspection · Developer · Admin · TurnitPlus" },
 ];
 
 for (const { file, title } of developerPages) {
@@ -58,4 +64,28 @@ test("lib/developer-gate.ts: the shared gate is cache()-wrapped (one DB lookup p
   assert.match(source, /export const loadDeveloperGate = cache\(async \(\): Promise<SessionUser \| null> => \{/);
   assert.match(source, /if \(!token\) return null;/);
   assert.match(source, /return await getAdminSessionUserByToken\(token, client\);/);
+});
+
+// Admin Console Phase 1: the old app/developer/* paths are kept only for
+// link/bookmark compatibility. Each is now a plain, unconditional redirect()
+// to its app/admin/developer/* equivalent — no gate of its own is needed
+// here, since the redirect never reveals anything (the destination page
+// re-gates and 404s a non-admin exactly as before).
+const redirectedDeveloperPages = [
+  { file: "../app/developer/page.tsx", target: "/admin/developer" },
+  { file: "../app/developer/lookup/page.tsx", target: "/admin/developer/lookup" },
+];
+
+for (const { file, target } of redirectedDeveloperPages) {
+  test(`${file}: redirects to ${target} for link/bookmark compatibility`, async () => {
+    const source = await readFile(new URL(file, import.meta.url), "utf8");
+    assert.match(source, /import \{ redirect \} from "next\/navigation";/);
+    assert.match(source, new RegExp(`redirect\\(${JSON.stringify(target)}\\);`));
+  });
+}
+
+test("../app/developer/reports/[id]/page.tsx: redirects to /admin/developer/reports/[id], forwarding id and deviceKey", async () => {
+  const source = await readFile(new URL("../app/developer/reports/[id]/page.tsx", import.meta.url), "utf8");
+  assert.match(source, /import \{ redirect \} from "next\/navigation";/);
+  assert.match(source, /redirect\(`\/admin\/developer\/reports\/\$\{encodeURIComponent\(id\)\}\$\{query\}`\);/);
 });

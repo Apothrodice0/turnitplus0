@@ -6871,17 +6871,17 @@ main.report-main {
    deliberately plain/utilitarian rather than matching the consumer product's
    own visual polish. Scoped entirely under .developer-* so it can never leak
    into or be affected by any other page's styles. */
-.developer-page { max-width: 1100px; margin: 0 auto; padding: 32px 24px 80px; font-family: var(--font-geist-mono), monospace; }
+.developer-page { max-width: 1180px; margin: 0 auto; padding: 32px 24px 80px; font-family: var(--font-geist-sans), sans-serif; }
 .developer-header h1 { margin: 0 0 6px; font-size: 22px; }
-.developer-header p { margin: 0 0 10px; color: var(--muted); font-size: 13px; }
+.developer-header p { margin: 0 0 10px; color: var(--muted); font-size: 13.5px; }
 .developer-page section { margin-top: 28px; }
-.developer-page h2 { font-size: 15px; margin: 0 0 10px; color: var(--sidebar); }
-.developer-page h3 { font-size: 12px; margin: 14px 0 4px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
-.developer-page pre { background: var(--sidebar); color: #d7e6ea; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 11px; line-height: 1.5; max-height: 480px; overflow-y: auto; }
-.developer-page code { font-size: 12px; }
+.developer-page h2 { font-size: 16px; margin: 0 0 10px; color: var(--sidebar); }
+.developer-page h3 { font-size: 12.5px; margin: 14px 0 4px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.developer-page pre { background: var(--sidebar); color: #d7e6ea; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 12px; line-height: 1.6; font-family: var(--font-geist-mono), monospace; max-height: 480px; overflow-y: auto; }
+.developer-page code { font-size: 12.5px; font-family: var(--font-geist-mono), monospace; }
 .developer-table-scroll { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
-.developer-table { width: 100%; min-width: 860px; border-collapse: collapse; font-size: 12px; }
-.developer-table th, .developer-table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--soft-line); white-space: nowrap; }
+.developer-table { width: 100%; min-width: 860px; border-collapse: collapse; font-size: 13.5px; }
+.developer-table th, .developer-table td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--soft-line); white-space: nowrap; }
 .developer-table th { color: var(--muted); font-weight: 600; }
 .developer-lookup form { display: flex; gap: 8px; margin: 14px 0 22px; }
 .developer-lookup input { flex: 1; padding: 8px 12px; border: 1px solid var(--line); border-radius: 6px; font-size: 13px; }
@@ -6928,4 +6928,96 @@ main.report-main {
   .admin-corpus-filters { flex-direction: column; align-items: stretch; }
   .admin-corpus-filters input,
   .admin-corpus-filters select { flex: none; min-width: 0; width: 100%; }
+}
+
+/* Admin console (app/admin/*) — the single internal entry point: a launcher
+   with three workspace cards (Corpus / Shadow / Developer), each opening a
+   full page under .developer-page. Shares that container's box model/type
+   scale for visual consistency across every admin surface. */
+.admin-back-link {
+  display: inline-flex; align-items: center; gap: 6px; margin-bottom: 18px;
+  font-size: 13.5px; color: var(--blue); text-decoration: none; font-weight: 500;
+}
+.admin-back-link:hover { text-decoration: underline; }
+
+.admin-header { display: flex; align-items: flex-start; gap: 14px; margin-bottom: 26px; padding-bottom: 22px; border-bottom: 1px solid var(--soft-line); }
+.admin-header-icon {
+  flex-shrink: 0; width: 42px; height: 42px; border-radius: 11px;
+  background: var(--blue-soft); color: var(--blue-dark);
+  display: flex; align-items: center; justify-content: center;
+}
+.admin-header-text h1 { margin: 0 0 5px; font-size: 21px; color: var(--sidebar); }
+.admin-header-text p { margin: 0; font-size: 13.5px; color: var(--muted); line-height: 1.5; max-width: 62ch; }
+
+.admin-launcher-intro { margin: 0 0 26px; font-size: 14px; color: var(--muted); max-width: 62ch; line-height: 1.5; }
+.admin-launcher-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 18px; }
+.admin-workspace-card {
+  display: flex; flex-direction: column; gap: 10px; text-align: left;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 14px;
+  padding: 24px; text-decoration: none; color: inherit;
+  box-shadow: var(--small-shadow); transition: box-shadow .15s ease, transform .15s ease, border-color .15s ease;
+}
+.admin-workspace-card:hover { box-shadow: var(--shadow); transform: translateY(-2px); border-color: var(--blue); }
+.admin-workspace-card-icon {
+  width: 46px; height: 46px; border-radius: 12px; background: var(--blue-soft); color: var(--blue-dark);
+  display: flex; align-items: center; justify-content: center;
+}
+.admin-workspace-card h2 { margin: 4px 0 0; font-size: 17px; color: var(--sidebar); }
+.admin-workspace-card p { margin: 0; font-size: 13.5px; color: var(--muted); line-height: 1.5; }
+.admin-workspace-card-arrow { margin-top: 2px; color: var(--blue); }
+
+.admin-link-card {
+  display: flex; align-items: center; gap: 12px; text-decoration: none; color: inherit;
+  cursor: pointer; transition: box-shadow .15s ease, border-color .15s ease;
+}
+.admin-link-card:hover { box-shadow: var(--shadow); border-color: var(--blue); }
+.admin-link-card-icon {
+  flex-shrink: 0; width: 34px; height: 34px; border-radius: 9px; background: var(--blue-soft); color: var(--blue-dark);
+  display: flex; align-items: center; justify-content: center;
+}
+.admin-link-card-text { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.admin-link-card-text strong { font-size: 14.5px; color: var(--sidebar); }
+.admin-link-card-text span { font-size: 13px; color: var(--muted); }
+.admin-link-card-arrow { flex-shrink: 0; color: var(--blue); }
+
+.admin-card {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
+  padding: 20px 22px; margin-top: 20px; box-shadow: var(--small-shadow);
+}
+.admin-card:first-of-type { margin-top: 0; }
+.admin-card > h2:first-child, .admin-card > h3:first-child { margin-top: 0; }
+.admin-card > .developer-debug-workspace:first-child { margin-top: 0; border-top: none; padding-top: 0; }
+
+.admin-workspace-badge {
+  display: inline-flex; align-items: center; padding: 2px 9px; border-radius: 999px;
+  background: var(--soft-line); color: var(--muted); font-size: 12px; font-family: var(--font-geist-mono), monospace;
+}
+
+.admin-metric-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin: 16px 0 6px; }
+.admin-metric-tile { background: var(--canvas); border: 1px solid var(--soft-line); border-radius: 10px; padding: 12px 14px; }
+.admin-metric-tile-label { font-size: 11.5px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin-bottom: 5px; }
+.admin-metric-tile-value { font-size: 21px; font-weight: 600; color: var(--sidebar); line-height: 1.2; }
+.admin-metric-tile-sub { font-size: 11.5px; color: var(--muted); margin-top: 3px; }
+
+.admin-badge-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 14px; }
+.admin-badge { display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; border-radius: 999px; background: var(--soft-line); color: var(--ink); font-size: 12.5px; }
+.admin-badge strong { font-weight: 700; }
+.admin-badge-group { margin: 14px 0; }
+.admin-badge-group-label { font-size: 12px; color: var(--muted); margin: 0 0 6px; }
+
+.admin-collapsible { border: 1px solid var(--soft-line); border-radius: 10px; margin-top: 14px; overflow: hidden; background: var(--surface); }
+.admin-collapsible summary {
+  cursor: pointer; padding: 11px 15px; font-size: 13.5px; font-weight: 600; color: var(--sidebar);
+  background: var(--canvas); list-style: none; display: flex; align-items: center; justify-content: space-between; gap: 8px;
+}
+.admin-collapsible summary::-webkit-details-marker { display: none; }
+.admin-collapsible summary::after { content: "+"; color: var(--muted); font-weight: 400; }
+.admin-collapsible[open] summary::after { content: "\2212"; }
+.admin-collapsible[open] summary { border-bottom: 1px solid var(--soft-line); }
+.admin-collapsible-body { padding: 16px; }
+.admin-collapsible-body > *:first-child { margin-top: 0; }
+
+@media (max-width: 720px) {
+  .admin-header { flex-direction: column; align-items: flex-start; }
+  .admin-link-card { flex-wrap: wrap; }
 }
