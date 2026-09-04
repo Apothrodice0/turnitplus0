@@ -1733,6 +1733,31 @@ export const email_verification_challenges = sqliteTable(
   ],
 );
 
+// ── Developer corpus-maturity exemptions (drizzle/0047) ──────────────────────
+// One row per account exempted from lib/user-submission-corpus.ts's 7-day
+// corpus maturity gate (admissionEligibilitySql / CORPUS_ACTIVATION_DELAY_DAYS).
+// While a row exists for an account, every corpus backing OWNED BY that
+// account (submission-reference via document_identities.account_id, or
+// admission-promotion via corpus_admission_decisions.source_ref's embedded
+// account) is treated as mature immediately — this affects ONLY the maturity
+// term of the shared eligibility predicate, never the account self-exclusion
+// check, ADMISSION_DEDUP's own unconditional visibility, or any
+// scoring/relationship/duplicate-suppression logic downstream of eligibility.
+// user_id is the PRIMARY KEY (an account is exempt or not, never "exempt more
+// than once"); ON DELETE CASCADE so a deleted account's exemption cannot
+// outlive it. created_by_user_id is informational only (which admin granted
+// it) and is never read by the maturity gate; ON DELETE SET NULL.
+export const developer_corpus_maturity_exemptions = sqliteTable(
+  "developer_corpus_maturity_exemptions",
+  {
+    user_id: text("user_id")
+      .primaryKey()
+      .references(() => users.id, { onDelete: "cascade" }),
+    created_at: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    created_by_user_id: text("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+  },
+);
+
 // Export nothing else — Drizzle will consume these definitions for migrations.
 export {};
 

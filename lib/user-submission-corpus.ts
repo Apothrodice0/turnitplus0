@@ -30,12 +30,16 @@ import { bumpCorpusMatchGeneration } from "./corpus-match-generation";
  *
  * Account isolation is structural, not a convention to remember: every
  * function that returns representation-level data for candidate matching
- * (findCandidateCorpusRepresentations) never joins to document_identities or
- * users at all, so there is no account_id/email column it could leak even by
- * mistake. Only the explicitly account-scoped functions
- * (findSubmissionReferencesForAccount, findAccountSubmissionForCanonicalHash)
- * join through document_identities.account_id, and only for the account the
- * caller already supplies.
+ * (findCandidateCorpusRepresentations) never SELECTs an account_id/email
+ * column, so there is none it could leak even by mistake. Only the explicitly
+ * account-scoped functions (findSubmissionReferencesForAccount,
+ * findAccountSubmissionForCanonicalHash) join through
+ * document_identities.account_id and return it, and only for the account the
+ * caller already supplies. admissionEligibilitySql's arm-1 maturity-exemption
+ * check (developer_corpus_maturity_exemptions, below) does join
+ * document_identities, but only inside a boolean EXISTS — same discipline as
+ * isRepresentationActivelyPromoted/isRepresentationEligibleForMatching:
+ * never returns the account id itself.
  *
  * This module never imports lib/provenance-verification-workflow.ts and
  * never creates a VERIFIED_SOURCE — see this phase's own task description,
@@ -123,6 +127,23 @@ export function resolveMaturityCutoff(
 ): string | null {
   if (mode === "ADMISSION_DEDUP") return null;
   return opts.maturityCutoff ?? corpusMaturityCutoff(opts.asOf ?? new Date());
+}
+
+/**
+ * Developer corpus-maturity exemption (drizzle/0047,
+ * developer_corpus_maturity_exemptions) — live DB read, always current, no
+ * caching. "ADMISSION_DEDUP" never emits a maturity term at all (see
+ * CorpusEligibilityMode), so the exemption list is moot there — skipped
+ * entirely, matching resolveMaturityCutoff's own mode short-circuit.
+ * Returns each exempt account's admission-source_ref prefix via
+ * buildReportAdmissionAccountPrefix — the ONE place that format is built —
+ * ready to bind as a JSON array for admissionEligibilitySql's arm-2
+ * exemption check (json_each(?)).
+ */
+async function resolveExemptAccountPrefixes(client: Client, mode: CorpusEligibilityMode): Promise<string[]> {
+  if (mode === "ADMISSION_DEDUP") return [];
+  const result = await client.execute("SELECT user_id FROM developer_corpus_maturity_exemptions");
+  return (result.rows as unknown as { user_id: string }[]).map((row) => buildReportAdmissionAccountPrefix(row.user_id));
 }
 
 /**
@@ -634,6 +655,15 @@ export async function applyHighFrequencyShinglePruning(
     maturityCutoff?: string;
     /** Fallback clock for MATCHING mode when no explicit maturityCutoff is threaded in. */
     asOf?: Date;
+    /**
+     * The already-resolved developer corpus-maturity exemption list (JSON
+     * array of buildReportAdmissionAccountPrefix(...) strings), forwarded
+     * verbatim from findCandidateCorpusRepresentations so the probe and the
+     * candidate query can never disagree on which accounts are exempt mid-
+     * resolution — same "one clock" discipline as maturityCutoff. When
+     * absent it is resolved fresh here (a direct call, or a test).
+     */
+    exemptAccountPrefixesJson?: string;
     diagnostics?: CandidateDiscoveryDiagnostics;
   },
 ): Promise<Set<string>> {
@@ -663,6 +693,7 @@ export async function applyHighFrequencyShinglePruning(
   const excludeAccountPrefix = options.excludeAccountId ? buildReportAdmissionAccountPrefix(options.excludeAccountId) : null;
   const eligibilityMode: CorpusEligibilityMode = options.eligibilityMode ?? "MATCHING";
   const maturityCutoff = resolveMaturityCutoff(eligibilityMode, options);
+  const exemptAccountPrefixesJson = options.exemptAccountPrefixesJson ?? JSON.stringify(await resolveExemptAccountPrefixes(client, eligibilityMode));
   const eligibilitySql = admissionEligibilitySql(eligibilityMode);
 
   const eligibleDocumentFrequency = new Map<string, number>();
@@ -675,8 +706,8 @@ export async function applyHighFrequencyShinglePruning(
     // posting, and stops after maxDf + 1 ELIGIBLE representations. Anonymous
     // ?, bound in textual order: fingerprint_version, then
     // admissionEligibilityBindArgs (account-prefix ×3 for ADMISSION_DEDUP, or
-    // cutoff + account-prefix ×3 + cutoff ×2 for MATCHING), then LIMIT, then
-    // the json_each array.
+    // cutoff + account-prefix ×3 + cutoff + exempt-json + cutoff for MATCHING —
+    // see that function's own doc comment), then LIMIT, then the json_each array.
     const result = await client.execute({
       sql: `SELECT j.value AS shingle_hash,
                    (SELECT COUNT(*) FROM (
@@ -689,7 +720,7 @@ export async function applyHighFrequencyShinglePruning(
                       LIMIT ?
                     )) AS eligible_document_frequency
             FROM json_each(?) j`,
-      args: [options.fingerprintVersion, ...admissionEligibilityBindArgs(excludeAccountPrefix, eligibilityMode, maturityCutoff), probeLimit, JSON.stringify(chunk)],
+      args: [options.fingerprintVersion, ...admissionEligibilityBindArgs(excludeAccountPrefix, eligibilityMode, maturityCutoff, exemptAccountPrefixesJson), probeLimit, JSON.stringify(chunk)],
     });
     for (const row of result.rows as unknown as { shingle_hash: string; eligible_document_frequency: number | bigint }[]) {
       eligibleDocumentFrequency.set(String(row.shingle_hash), Number(row.eligible_document_frequency));
@@ -832,13 +863,42 @@ export async function applyHighFrequencyShinglePruning(
  * `d.source_ref` — and therefore the account-exclusion predicate — is
  * byte-identical to the previous `d ON d.id = ar.decision_id` form.
  *
+ * Developer corpus-maturity exemption (drizzle/0047,
+ * developer_corpus_maturity_exemptions) — a per-account, admin-managed
+ * override of ONLY the maturity term, never the account self-exclusion
+ * predicate above, and never emitted at all outside "MATCHING" mode (moot in
+ * "ADMISSION_DEDUP" since no maturity term is emitted there either):
+ *   arm 1 (submission-reference): OR'd with a plain correlated EXISTS join
+ *     from sr.document_identity_id -> document_identities.account_id -> the
+ *     exemptions table — a clean FK, no string parsing needed.
+ *   arm 2 (admission-promotion): the owning account is embedded in
+ *     d.source_ref (buildReportAdmissionAccountPrefix's own format, "the ONE
+ *     place this exact format is built" — see corpus-admission-source-ref.ts).
+ *     Never re-derive that format inline in SQL: the caller precomputes one
+ *     prefix per currently-exempt account via buildReportAdmissionAccountPrefix
+ *     (resolveExemptAccountPrefixes below), binds them as ONE json array, and
+ *     the SQL below does the SAME substr-prefix-equality check the account-
+ *     exclusion predicate above already uses (never LIKE) over json_each(?).
+ *   arm 3 (legacy representation): no owner is recoverable, so no exemption
+ *     term applies — unaffected.
+ *
  * The `?` placeholders appear in a FIXED textual order — bind them via
  * admissionEligibilityBindArgs, never inline.
  */
 function admissionEligibilitySql(mode: CorpusEligibilityMode): string {
   const emitMaturityTerms = mode === "MATCHING";
-  const arm1Maturity = emitMaturityTerms ? " AND sr.created_at <= ?" : "";
-  const arm2Maturity = emitMaturityTerms ? " AND d.created_at <= ?" : "";
+  const arm1Maturity = emitMaturityTerms
+    ? ` AND (sr.created_at <= ? OR EXISTS (
+        SELECT 1 FROM document_identities di
+        JOIN developer_corpus_maturity_exemptions dcme ON dcme.user_id = di.account_id
+        WHERE di.id = sr.document_identity_id
+      ))`
+    : "";
+  const arm2Maturity = emitMaturityTerms
+    ? ` AND (d.created_at <= ? OR EXISTS (
+        SELECT 1 FROM json_each(?) exempt WHERE substr(d.source_ref, 1, length(exempt.value)) = exempt.value
+      ))`
+    : "";
   const arm3Maturity = emitMaturityTerms ? " AND r.first_seen_at <= ?" : "";
   return `(
     EXISTS (SELECT 1 FROM corpus_submission_references sr WHERE sr.representation_id = r.id${arm1Maturity})
@@ -861,18 +921,21 @@ function admissionEligibilitySql(mode: CorpusEligibilityMode): string {
 /**
  * Positional bind values for admissionEligibilitySql(mode), in the exact `?`
  * order of the fragment:
- *   ADMISSION_DEDUP: [prefix, prefix, prefix]                      (arm 2 only)
- *   MATCHING:        [cutoff, prefix, prefix, prefix, cutoff, cutoff]
- *                     arm1    ── arm 2 account-exclusion ──  arm2   arm3
+ *   ADMISSION_DEDUP: [prefix, prefix, prefix]                                        (arm 2 only)
+ *   MATCHING:        [cutoff, prefix, prefix, prefix, cutoff, exemptJson, cutoff]
+ *                     arm1    ── arm 2 account-exclusion ──  arm2  arm2-exempt  arm3
  *
  * MATCHING mode with a null cutoff is unreachable through resolveMaturityCutoff
  * — the explicit throw is a tripwire so a future refactor can never emit a
- * MATCHING query whose maturity binds are silently missing.
+ * MATCHING query whose maturity binds are silently missing. exemptAccountPrefixesJson
+ * is a JSON array of buildReportAdmissionAccountPrefix(...) strings (possibly
+ * "[]") — see resolveExemptAccountPrefixes.
  */
 function admissionEligibilityBindArgs(
   excludeAccountPrefix: string | null,
   mode: CorpusEligibilityMode,
   maturityCutoff: string | null,
+  exemptAccountPrefixesJson: string,
 ): (string | null)[] {
   if (mode === "ADMISSION_DEDUP") {
     return [excludeAccountPrefix, excludeAccountPrefix, excludeAccountPrefix];
@@ -880,7 +943,7 @@ function admissionEligibilityBindArgs(
   if (maturityCutoff === null) {
     throw new Error("admissionEligibilityBindArgs: MATCHING mode requires a resolved maturityCutoff");
   }
-  return [maturityCutoff, excludeAccountPrefix, excludeAccountPrefix, excludeAccountPrefix, maturityCutoff, maturityCutoff];
+  return [maturityCutoff, excludeAccountPrefix, excludeAccountPrefix, excludeAccountPrefix, maturityCutoff, exemptAccountPrefixesJson, maturityCutoff];
 }
 
 export async function findCandidateCorpusRepresentations(
@@ -938,8 +1001,9 @@ export async function findCandidateCorpusRepresentations(
   // string (not asOf), so pruning and candidate selection can never straddle a
   // maturity boundary.
   const maturityCutoff = resolveMaturityCutoff(eligibilityMode, options);
+  const exemptAccountPrefixesJson = JSON.stringify(await resolveExemptAccountPrefixes(client, eligibilityMode));
   const eligibilitySql = admissionEligibilitySql(eligibilityMode);
-  const eligibilityArgs = () => admissionEligibilityBindArgs(excludeAccountPrefix, eligibilityMode, maturityCutoff);
+  const eligibilityArgs = () => admissionEligibilityBindArgs(excludeAccountPrefix, eligibilityMode, maturityCutoff, exemptAccountPrefixesJson);
   if (shingleHashes.size === 0) return [];
 
   type RawSharedRow = { representation_id: string; shared: number | bigint; canonical_sha256: string; word_count: number; is_actively_promoted: number | bigint };
@@ -978,6 +1042,7 @@ export async function findCandidateCorpusRepresentations(
     // frequency any more than it could become a candidate.
     eligibilityMode,
     maturityCutoff: maturityCutoff ?? undefined,
+    exemptAccountPrefixesJson,
     diagnostics: options.diagnostics,
   });
   if (effectiveHashes.size === 0) return [];
@@ -1139,9 +1204,10 @@ export async function isRepresentationEligibleForMatching(
   const excludeAccountPrefix = options.excludeAccountId ? buildReportAdmissionAccountPrefix(options.excludeAccountId) : null;
   const eligibilityMode: CorpusEligibilityMode = options.eligibilityMode ?? "MATCHING";
   const maturityCutoff = resolveMaturityCutoff(eligibilityMode, options);
+  const exemptAccountPrefixesJson = JSON.stringify(await resolveExemptAccountPrefixes(client, eligibilityMode));
   const result = await client.execute({
     sql: `SELECT ${admissionEligibilitySql(eligibilityMode)} AS eligible FROM corpus_document_representations r WHERE r.id = ?`,
-    args: [...admissionEligibilityBindArgs(excludeAccountPrefix, eligibilityMode, maturityCutoff), representationId],
+    args: [...admissionEligibilityBindArgs(excludeAccountPrefix, eligibilityMode, maturityCutoff, exemptAccountPrefixesJson), representationId],
   });
   const row = result.rows[0] as unknown as { eligible: number | bigint } | undefined;
   return row !== undefined && Number(row.eligible) === 1;

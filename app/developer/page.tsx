@@ -18,6 +18,8 @@ import {
 } from "@/lib/corpus-duplicate-suppression-shadow-measurement";
 import { DeveloperRoomReset } from "@/components/developer/room-reset";
 import { DeveloperAccountRoomReset } from "@/components/developer/account-room-reset";
+import { DeveloperCorpusMaturityExemptions, type CorpusMaturityExemptionRow } from "@/components/developer/corpus-maturity-exemptions";
+import { listCorpusMaturityExemptions } from "@/lib/developer-corpus-maturity-exemptions";
 
 export const dynamic = "force-dynamic";
 
@@ -40,6 +42,7 @@ export default async function DeveloperOverviewPage() {
   let deviceShadow: DeviceProvenanceShadowMeasurement | null = null;
   let sharedDeviceRisk: SharedDeviceRiskMeasurement | null = null;
   let corpusDuplicateShadow: CorpusDuplicateSuppressionShadowMeasurement | null = null;
+  let corpusMaturityExemptions: CorpusMaturityExemptionRow[] = [];
   try {
     reports = await listRecentReportsForDeveloper(client, 100);
     // Compact aggregate view of the device-provenance-shadow-v1 telemetry —
@@ -65,6 +68,14 @@ export default async function DeveloperOverviewPage() {
       corpusDuplicateShadow = await summarizeCorpusDuplicateSuppressionShadowMeasurement(client, { recentLimit: 25 });
     } catch (err) {
       console.error("developer dashboard: corpus-duplicate shadow summary failed (non-fatal):", err instanceof Error ? err.message : String(err));
+    }
+    // Corpus maturity exemptions — SELECT-only list for the dashboard section;
+    // adding/removing goes through POST/DELETE /api/developer/corpus-maturity-
+    // exemptions (its own admin gate), never written from this Server Component.
+    try {
+      corpusMaturityExemptions = await listCorpusMaturityExemptions(client);
+    } catch (err) {
+      console.error("developer dashboard: corpus maturity exemptions list failed (non-fatal):", err instanceof Error ? err.message : String(err));
     }
   } finally {
     client.close();
@@ -405,6 +416,8 @@ export default async function DeveloperOverviewPage() {
           </table>
         </section>
       )}
+
+      <DeveloperCorpusMaturityExemptions initialExemptions={corpusMaturityExemptions} />
 
       <DeveloperRoomReset />
       <DeveloperAccountRoomReset />
