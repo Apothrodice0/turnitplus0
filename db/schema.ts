@@ -1585,6 +1585,102 @@ export const corpus_duplicate_suppression_shadow_evaluations = sqliteTable(
   ],
 );
 
+// ── Account Identity FOUNDATION (drizzle/0045) — SCHEMA + STORAGE ONLY ──────
+// Two additive tables; NOTHING is altered on `users` or any other existing
+// table. NOTHING reads or writes any of this in a scoring / similarity /
+// owner-link / Device Passport / corpus path — see lib/account-identity.ts and
+// lib/account-identity-repo.ts and tests/account-identity*.test.mjs.
+//
+// account_identity_profiles: strictly 1:1 with `users` (user_id is BOTH the
+// primary key and a REFERENCES users(id) ON DELETE CASCADE foreign key, so
+// account deletion removes the profile automatically — it is per-account PII,
+// unlike the durable RESTRICT owner-link tables). account_type (student |
+// instructor | researcher | independent) is DESCRIPTIVE identity, never
+// authorization — `users.role` stays the only authorization field. Institution
+// and city each have an explicit 'NONE' state plus a canonical form (ROR id /
+// GeoNames id) and a low-trust 'UNVERIFIED_TEXT' form kept only for future
+// import compatibility. full_name is NOT NULL (the required identity anchor).
+// country_code is RESIDENCE (ISO 3166-1 alpha-2), a separate concept from
+// phone_region (the phone number's own dial context). phone_e164 is
+// libphonenumber-js/max-validated E.164, with a wildcard-free structural DB
+// backstop CHECK. The *_verified_at columns are ALWAYS NULL in this phase — no
+// code marks anything VERIFIED in A1. The CHECK constraints (account_type /
+// *_status vocabularies, the one-shape-per-status consistency rules, the
+// country / E.164 structural backstops) live in the migration only, matching
+// this project's schema-drift tooling (which does not compare CHECKs), as
+// account_owner_links already does.
+//
+// account_identity_fingerprints: FUTURE keyed-HMAC pseudonyms of VERIFIED
+// identity values. In A1 this table is NEVER written — lib/account-identity-repo.ts
+// has a reader and no writer, and lib/account-identity.ts's
+// accountIdentityFingerprint fails closed unless { verified: true }. A
+// fingerprint is an HMAC-SHA256 digest, never a raw email / phone / ror id.
+export const account_identity_profiles = sqliteTable(
+  "account_identity_profiles",
+  {
+    user_id: text("user_id")
+      .primaryKey()
+      .references(() => users.id, { onDelete: "cascade" }),
+    account_type: text("account_type").notNull().default("independent"),
+    // NOT NULL — the required human-identity anchor. normalizeAccountIdentityProfile
+    // rejects a missing/empty name, so a profile row never exists without one.
+    full_name: text("full_name").notNull(),
+    country_code: text("country_code"),
+    institution_status: text("institution_status").notNull().default("NONE"),
+    institution_ror_id: text("institution_ror_id"),
+    institution_unverified_name: text("institution_unverified_name"),
+    city_status: text("city_status").notNull().default("NONE"),
+    city_geonames_id: integer("city_geonames_id"),
+    city_unverified_name: text("city_unverified_name"),
+    phone_e164: text("phone_e164"),
+    phone_region: text("phone_region"),
+    // ALWAYS NULL in A1 — the verified-identity phase is purely additive on top.
+    email_verified_at: integer("email_verified_at"),
+    phone_verified_at: integer("phone_verified_at"),
+    institution_verified_at: integer("institution_verified_at"),
+    normalization_version: integer("normalization_version").notNull().default(1),
+    created_at: integer("created_at").notNull(),
+    updated_at: integer("updated_at").notNull(),
+  },
+  (table) => [
+    index("idx_account_identity_profiles_institution_ror")
+      .on(table.institution_ror_id)
+      .where(sql`institution_ror_id IS NOT NULL`),
+    index("idx_account_identity_profiles_city_geonames")
+      .on(table.city_geonames_id)
+      .where(sql`city_geonames_id IS NOT NULL`),
+    index("idx_account_identity_profiles_country_code")
+      .on(table.country_code)
+      .where(sql`country_code IS NOT NULL`),
+  ],
+);
+
+export const account_identity_fingerprints = sqliteTable(
+  "account_identity_fingerprints",
+  {
+    id: text("id").primaryKey(),
+    user_id: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    fingerprint_kind: text("fingerprint_kind").notNull(),
+    fingerprint: text("fingerprint").notNull(),
+    key_version: integer("key_version").notNull(),
+    source_verified_at: integer("source_verified_at").notNull(),
+    created_at: integer("created_at").notNull(),
+  },
+  (table) => [
+    uniqueIndex("ux_account_identity_fingerprints_kind").on(
+      table.user_id,
+      table.fingerprint_kind,
+      table.key_version,
+    ),
+    index("idx_account_identity_fingerprints_lookup").on(
+      table.fingerprint_kind,
+      table.fingerprint,
+    ),
+  ],
+);
+
 // Export nothing else — Drizzle will consume these definitions for migrations.
 export {};
 

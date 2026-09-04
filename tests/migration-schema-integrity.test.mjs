@@ -551,4 +551,117 @@ function applyMigrationsExcluding(db, dir, excludeFiles) {
   console.log('[libsql] Device Passport actor-usage ledger: table/column land; append-only UPSERT + RESTRICT enforced');
 }
 
+// --- Section H: Account Identity foundation (drizzle/0045) — fresh-migrate
+// proof on both engines that the two additive tables (account_identity_profiles
+// 1:1 with users via a PRIMARY-KEY foreign key, account_identity_fingerprints)
+// land with their CHECK constraints and ON DELETE CASCADE, and that `users` and
+// every other pre-existing table are only depended on, never restructured. ---
+{
+  const dbPath = path.join(repo, 'test_migration_integrity_account_identity_sqlite.db');
+  cleanupSqliteFile(dbPath);
+  const db = new Database(dbPath);
+  db.pragma('foreign_keys = ON');
+  applyMigrations(db, drizzleDir);
+
+  const tables = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((r) => r.name));
+  for (const t of ['account_identity_profiles', 'account_identity_fingerprints']) {
+    assert(tables.has(t), `[sqlite] 0045 must create ${t}`);
+  }
+
+  // users is only depended on — never altered by 0045.
+  const userCols = db.prepare(`PRAGMA table_info('users')`).all().map((r) => r.name).sort();
+  assert.deepEqual(
+    userCols,
+    ['corpus_reuse_consented_at', 'created_at', 'email', 'id', 'password_hash', 'role', 'updated_at', 'username'].sort(),
+    '[sqlite] 0045 must not add any column to users',
+  );
+
+  // profile is 1:1 with users and CASCADE-cleaned.
+  const profFk = db.prepare(`PRAGMA foreign_key_list('account_identity_profiles')`).all().find((r) => r.from === 'user_id');
+  assert.equal(profFk.table, 'users');
+  assert.equal(profFk.on_delete, 'CASCADE', '[sqlite] profile.user_id -> users is ON DELETE CASCADE');
+  const profPk = db.prepare(`PRAGMA table_info('account_identity_profiles')`).all().filter((r) => r.pk > 0).map((r) => r.name);
+  assert.deepEqual(profPk, ['user_id'], '[sqlite] user_id is the 1:1 primary key');
+
+  db.prepare(`INSERT INTO users (id, email, username, password_hash) VALUES (?,?,?,?)`).run('mi-ai-1', 'mi-ai-1@e.test', 'mi-ai-1', 'h');
+  // full_name is NOT NULL
+  assert.throws(
+    () => db.prepare(`INSERT INTO account_identity_profiles (user_id, account_type, institution_status, city_status, normalization_version, created_at, updated_at) VALUES ('mi-ai-1','student','NONE','NONE',1,1,1)`).run(),
+    /NOT NULL constraint failed/,
+    '[sqlite] full_name is NOT NULL',
+  );
+  // account_type CHECK
+  assert.throws(
+    () => db.prepare(`INSERT INTO account_identity_profiles (user_id, account_type, full_name, institution_status, city_status, normalization_version, created_at, updated_at) VALUES ('mi-ai-1','wizard','n','NONE','NONE',1,1,1)`).run(),
+    /CHECK constraint failed/,
+    '[sqlite] account_type CHECK rejects an unknown type',
+  );
+  // E.164 backstop CHECK rejects a value GLOB '+[1-9]*' alone would accept
+  assert.throws(
+    () => db.prepare(`INSERT INTO account_identity_profiles (user_id, account_type, full_name, institution_status, city_status, phone_e164, normalization_version, created_at, updated_at) VALUES ('mi-ai-1','student','n','NONE','NONE','+1abcdefg',1,1,1)`).run(),
+    /CHECK constraint failed/,
+    '[sqlite] E.164 CHECK rejects non-digit characters after the +',
+  );
+  // valid row, verification columns rest at NULL
+  db.prepare(`INSERT INTO account_identity_profiles (user_id, account_type, full_name, institution_status, city_status, phone_e164, phone_region, normalization_version, created_at, updated_at) VALUES ('mi-ai-1','student','Test Name','NONE','NONE','+14155552671','US',1,1,1)`).run();
+  const restRow = db.prepare(`SELECT email_verified_at, phone_verified_at, institution_verified_at FROM account_identity_profiles WHERE user_id = 'mi-ai-1'`).get();
+  assert.equal(restRow.email_verified_at, null);
+  assert.equal(restRow.phone_verified_at, null);
+  assert.equal(restRow.institution_verified_at, null);
+  // fingerprint FK + CASCADE
+  db.prepare(`INSERT INTO account_identity_fingerprints (id, user_id, fingerprint_kind, fingerprint, key_version, source_verified_at, created_at) VALUES ('mi-fp-1','mi-ai-1','VERIFIED_EMAIL','abc',1,1,1)`).run();
+  db.prepare(`DELETE FROM users WHERE id = 'mi-ai-1'`).run();
+  assert.equal(db.prepare(`SELECT COUNT(*) c FROM account_identity_profiles WHERE user_id = 'mi-ai-1'`).get().c, 0, '[sqlite] profile CASCADE-deletes with the account');
+  assert.equal(db.prepare(`SELECT COUNT(*) c FROM account_identity_fingerprints WHERE user_id = 'mi-ai-1'`).get().c, 0, '[sqlite] fingerprints CASCADE-delete with the account');
+
+  db.close();
+  cleanupSqliteFile(dbPath);
+  console.log('[sqlite] Account Identity foundation: 2 tables land, users unchanged, 1:1 PK-FK, full_name NOT NULL, account_type + E.164 CHECK + CASCADE enforced');
+}
+
+{
+  const dbFile = path.join(repo, 'test_migration_integrity_account_identity_libsql.db');
+  cleanupSqliteFile(dbFile);
+  const client = createClient({ url: `file:${dbFile}` });
+  await applyMigrationsLibsql(client, drizzleDir);
+  await client.execute('PRAGMA foreign_keys = ON');
+
+  const tableRows = await client.execute("SELECT name FROM sqlite_master WHERE type='table'");
+  const tables = new Set(tableRows.rows.map((r) => String(r.name)));
+  for (const t of ['account_identity_profiles', 'account_identity_fingerprints']) {
+    assert(tables.has(t), `[libsql] 0045 must create ${t}`);
+  }
+
+  await client.execute({ sql: 'INSERT INTO users (id, email, username, password_hash) VALUES (?,?,?,?)', args: ['li-ai-1', 'li-ai-1@e.test', 'li-ai-1', 'h'] });
+  // consistency CHECK: a NONE institution status cannot carry a ror id
+  await assert.rejects(
+    () => client.execute({
+      sql: `INSERT INTO account_identity_profiles (user_id, account_type, full_name, institution_status, institution_ror_id, city_status, normalization_version, created_at, updated_at) VALUES ('li-ai-1','student','n','NONE','03vek6s52','NONE',1,1,1)`,
+    }),
+    /CHECK constraint failed/,
+    '[libsql] institution consistency CHECK rejects NONE + ror id',
+  );
+  // E.164 backstop CHECK: '++1234567' passes GLOB '+[1-9]*' (the '+' after position 1 is swallowed by '*') but must be rejected
+  await assert.rejects(
+    () => client.execute({
+      sql: `INSERT INTO account_identity_profiles (user_id, account_type, full_name, institution_status, city_status, phone_e164, normalization_version, created_at, updated_at) VALUES ('li-ai-1','student','n','NONE','NONE','++1234567',1,1,1)`,
+    }),
+    /CHECK constraint failed/,
+    '[libsql] E.164 CHECK rejects a doubled leading +',
+  );
+  await client.execute({ sql: `INSERT INTO account_identity_profiles (user_id, account_type, full_name, institution_status, city_status, normalization_version, created_at, updated_at) VALUES ('li-ai-1','instructor','Test Name','NONE','NONE',1,1,1)` });
+  // 1:1
+  await assert.rejects(
+    () => client.execute({ sql: `INSERT INTO account_identity_profiles (user_id, account_type, full_name, institution_status, city_status, normalization_version, created_at, updated_at) VALUES ('li-ai-1','student','n','NONE','NONE',1,1,1)` }),
+    /UNIQUE constraint failed|PRIMARY KEY/,
+    '[libsql] a second profile row for one account is rejected',
+  );
+  await client.execute({ sql: `DELETE FROM users WHERE id = 'li-ai-1'` });
+  assert.equal(Number((await client.execute("SELECT COUNT(*) c FROM account_identity_profiles WHERE user_id = 'li-ai-1'")).rows[0].c), 0, '[libsql] profile CASCADE-deletes with the account');
+
+  client.close();
+  cleanupSqliteFile(dbFile);
+  console.log('[libsql] Account Identity foundation: tables land; full_name NOT NULL, consistency + E.164 CHECK, 1:1 + CASCADE enforced');
+}
+
 console.log('Migration schema integrity tests passed');

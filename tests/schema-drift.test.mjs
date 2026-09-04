@@ -162,9 +162,11 @@ if (!remote) {
 // filter that skips every export) and reporting a false "0 issues" pass.
 // Floor ratcheted up as the schema grew (device-passport foundation,
 // drizzle/0038-0040, added device_passports / device_passport_challenges /
-// corpus_admission_decision_device_provenance) — it is a "did the filter
-// break" sanity bound, not an exact count.
-assert(tablesChecked >= 38, `expected to check at least 38 tables from db/schema.ts, only checked ${tablesChecked} — the comparison logic itself may be broken`);
+// corpus_admission_decision_device_provenance; owner-link foundation
+// drizzle/0042; account-identity foundation drizzle/0045 added
+// account_identity_profiles / account_identity_fingerprints) — it is a "did
+// the filter break" sanity bound, not an exact count.
+assert(tablesChecked >= 40, `expected to check at least 40 tables from db/schema.ts, only checked ${tablesChecked} — the comparison logic itself may be broken`);
 
 if (drift.length > 0) {
   console.error(`Schema drift detected (${drift.length} issue(s)):`);

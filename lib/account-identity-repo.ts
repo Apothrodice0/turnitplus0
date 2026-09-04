@@ -1,0 +1,257 @@
+import { randomUUID } from "node:crypto";
+import type { Client } from "@libsql/client";
+import {
+  normalizeAccountIdentityProfile,
+  ACCOUNT_IDENTITY_KEY_VERSION,
+  type AccountType,
+  type InstitutionStatus,
+  type CityStatus,
+  type AccountIdentityProfileInput,
+  type NormalizedAccountIdentityProfile,
+  type AccountIdentityValidationError as AccountIdentityValidationErrorDetail,
+  type AccountIdentityFingerprintKind,
+} from "./account-identity";
+
+/**
+ * Account Identity FOUNDATION (A1) - the DB layer. Pure SELECTs plus ONE
+ * writer: upsert the 1:1 identity profile row for an account. Every write runs
+ * lib/account-identity.ts's normalizeAccountIdentityProfile first, so only
+ * canonical, Unicode-safe, libphonenumber-js-validated values are ever
+ * persisted, and every *_verified_at column is left untouched (NULL) - NOTHING
+ * here can mark an email / phone / institution VERIFIED in A1.
+ *
+ * account_identity_fingerprints has a READER ONLY and no writer at all in this
+ * phase (see readAccountIdentityFingerprints). A fingerprint is only ever
+ * written by a later, separately-reviewed verified-identity phase; A1 keeps the
+ * table empty. lib/account-identity.ts's accountIdentityFingerprint additionally
+ * fails closed unless a value is explicitly { verified: true }.
+ *
+ * NOTHING in this module is imported by any scoring / similarity / matcher /
+ * candidate-discovery / owner-link / Device Passport path
+ * (tests/account-identity.test.mjs pins the isolation). Deleting a `users` row
+ * removes its profile and fingerprints automatically via ON DELETE CASCADE - no
+ * change to lib/account-deletion.ts is needed.
+ *
+ * PRIVACY: this module never logs. A validation failure throws
+ * AccountIdentityValidationException whose message is field/code pairs only -
+ * never the offending phone number or name.
+ */
+
+type Exec = Pick<Client, "execute">;
+
+function num(value: unknown): number {
+  return typeof value === "bigint" ? Number(value) : typeof value === "number" ? value : Number(value ?? 0) || 0;
+}
+function numOrNull(value: unknown): number | null {
+  return value == null ? null : num(value);
+}
+function strOrNull(value: unknown): string | null {
+  return value == null ? null : String(value);
+}
+
+export class AccountIdentityValidationException extends Error {
+  readonly errors: readonly AccountIdentityValidationErrorDetail[];
+  constructor(errors: readonly AccountIdentityValidationErrorDetail[]) {
+    super(`account identity validation failed: ${errors.map((e) => `${e.field}/${e.code}`).join(", ")}`);
+    this.name = "AccountIdentityValidationException";
+    this.errors = errors;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// account_identity_profiles
+// ---------------------------------------------------------------------------
+
+export type StoredAccountIdentityProfile = {
+  userId: string;
+  accountType: AccountType;
+  /** NOT NULL in the schema - always a normalized non-empty string. */
+  fullName: string;
+  countryCode: string | null;
+  institutionStatus: InstitutionStatus;
+  institutionRorId: string | null;
+  institutionUnverifiedName: string | null;
+  cityStatus: CityStatus;
+  cityGeonamesId: number | null;
+  cityUnverifiedName: string | null;
+  phoneE164: string | null;
+  phoneRegion: string | null;
+  /** ALWAYS null in A1 - no code sets these in this phase. */
+  emailVerifiedAt: number | null;
+  phoneVerifiedAt: number | null;
+  institutionVerifiedAt: number | null;
+  normalizationVersion: number;
+  createdAt: number;
+  updatedAt: number;
+};
+
+function mapProfileRow(row: Record<string, unknown>): StoredAccountIdentityProfile {
+  return {
+    userId: String(row.user_id),
+    accountType: String(row.account_type) as AccountType,
+    fullName: String(row.full_name),
+    countryCode: strOrNull(row.country_code),
+    institutionStatus: String(row.institution_status) as InstitutionStatus,
+    institutionRorId: strOrNull(row.institution_ror_id),
+    institutionUnverifiedName: strOrNull(row.institution_unverified_name),
+    cityStatus: String(row.city_status) as CityStatus,
+    cityGeonamesId: numOrNull(row.city_geonames_id),
+    cityUnverifiedName: strOrNull(row.city_unverified_name),
+    phoneE164: strOrNull(row.phone_e164),
+    phoneRegion: strOrNull(row.phone_region),
+    emailVerifiedAt: numOrNull(row.email_verified_at),
+    phoneVerifiedAt: numOrNull(row.phone_verified_at),
+    institutionVerifiedAt: numOrNull(row.institution_verified_at),
+    normalizationVersion: num(row.normalization_version),
+    createdAt: num(row.created_at),
+    updatedAt: num(row.updated_at),
+  };
+}
+
+/** Read one account's identity profile, or null if it has none. SELECT-only. */
+export async function readAccountIdentityProfile(
+  exec: Exec,
+  userId: string,
+): Promise<StoredAccountIdentityProfile | null> {
+  const row = (
+    await exec.execute({ sql: `SELECT * FROM account_identity_profiles WHERE user_id = ?`, args: [userId] })
+  ).rows[0] as unknown as Record<string, unknown> | undefined;
+  return row ? mapProfileRow(row) : null;
+}
+
+export type UpsertAccountIdentityProfileResult = {
+  profile: StoredAccountIdentityProfile;
+  created: boolean;
+};
+
+/**
+ * Validate + normalize `input` and UPSERT the account's 1:1 identity profile.
+ * Throws AccountIdentityValidationException (value-free message) if the input
+ * does not normalize cleanly. The `users` row must already exist (FK).
+ *
+ * On update, created_at is preserved and updated_at advances. The three
+ * *_verified_at columns are NEVER written by this function - a pre-existing
+ * value (there is none in A1) is left as-is; a new row gets SQL NULL by column
+ * default.
+ */
+export async function upsertAccountIdentityProfile(
+  exec: Exec,
+  userId: string,
+  input: AccountIdentityProfileInput,
+  now: number = Date.now(),
+): Promise<UpsertAccountIdentityProfileResult> {
+  if (typeof userId !== "string" || userId.length === 0) {
+    throw new Error("upsertAccountIdentityProfile: userId must be a non-empty string");
+  }
+  const result = normalizeAccountIdentityProfile(input);
+  if (!result.ok) throw new AccountIdentityValidationException(result.errors);
+  const p: NormalizedAccountIdentityProfile = result.profile;
+
+  const existing = await readAccountIdentityProfile(exec, userId);
+
+  await exec.execute({
+    sql: `INSERT INTO account_identity_profiles (
+            user_id, account_type, full_name, country_code,
+            institution_status, institution_ror_id, institution_unverified_name,
+            city_status, city_geonames_id, city_unverified_name,
+            phone_e164, phone_region,
+            normalization_version, created_at, updated_at
+          ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+          ON CONFLICT (user_id) DO UPDATE SET
+            account_type = excluded.account_type,
+            full_name = excluded.full_name,
+            country_code = excluded.country_code,
+            institution_status = excluded.institution_status,
+            institution_ror_id = excluded.institution_ror_id,
+            institution_unverified_name = excluded.institution_unverified_name,
+            city_status = excluded.city_status,
+            city_geonames_id = excluded.city_geonames_id,
+            city_unverified_name = excluded.city_unverified_name,
+            phone_e164 = excluded.phone_e164,
+            phone_region = excluded.phone_region,
+            normalization_version = excluded.normalization_version,
+            updated_at = excluded.updated_at`,
+    args: [
+      userId,
+      p.accountType,
+      p.fullName,
+      p.countryCode,
+      p.institutionStatus,
+      p.institutionRorId,
+      p.institutionUnverifiedName,
+      p.cityStatus,
+      p.cityGeonamesId,
+      p.cityUnverifiedName,
+      p.phoneE164,
+      p.phoneRegion,
+      p.normalizationVersion,
+      now,
+      now,
+    ],
+  });
+
+  const stored = await readAccountIdentityProfile(exec, userId);
+  if (!stored) throw new Error("upsertAccountIdentityProfile: row vanished immediately after write");
+  return { profile: stored, created: existing === null };
+}
+
+/**
+ * Explicitly delete one account's identity profile. Rarely needed - deleting
+ * the `users` row already CASCADE-removes it - but available for an admin
+ * "forget my identity, keep my account" action.
+ */
+export async function deleteAccountIdentityProfile(exec: Exec, userId: string): Promise<void> {
+  await exec.execute({ sql: `DELETE FROM account_identity_profiles WHERE user_id = ?`, args: [userId] });
+}
+
+export async function countAccountIdentityProfiles(exec: Exec): Promise<number> {
+  return num((await exec.execute(`SELECT COUNT(*) AS c FROM account_identity_profiles`)).rows[0]?.c);
+}
+
+// ---------------------------------------------------------------------------
+// account_identity_fingerprints - READER ONLY in A1
+// ---------------------------------------------------------------------------
+
+export type StoredAccountIdentityFingerprint = {
+  id: string;
+  userId: string;
+  fingerprintKind: AccountIdentityFingerprintKind;
+  fingerprint: string;
+  keyVersion: number;
+  sourceVerifiedAt: number;
+  createdAt: number;
+};
+
+function mapFingerprintRow(row: Record<string, unknown>): StoredAccountIdentityFingerprint {
+  return {
+    id: String(row.id),
+    userId: String(row.user_id),
+    fingerprintKind: String(row.fingerprint_kind) as AccountIdentityFingerprintKind,
+    fingerprint: String(row.fingerprint),
+    keyVersion: num(row.key_version),
+    sourceVerifiedAt: num(row.source_verified_at),
+    createdAt: num(row.created_at),
+  };
+}
+
+/**
+ * Read one account's identity fingerprints. In A1 this ALWAYS returns [] because
+ * nothing writes account_identity_fingerprints yet - there is deliberately no
+ * writer in this module. It exists so the later verified-identity phase has a
+ * stable read path to build on. PRIVACY: a fingerprint row is an opaque HMAC
+ * digest; callers must not log it.
+ */
+export async function readAccountIdentityFingerprints(
+  exec: Exec,
+  userId: string,
+  keyVersion: number = ACCOUNT_IDENTITY_KEY_VERSION,
+): Promise<StoredAccountIdentityFingerprint[]> {
+  const rows = (
+    await exec.execute({
+      sql: `SELECT * FROM account_identity_fingerprints
+            WHERE user_id = ? AND key_version = ? ORDER BY fingerprint_kind`,
+      args: [userId, keyVersion],
+    })
+  ).rows as unknown as Record<string, unknown>[];
+  return rows.map(mapFingerprintRow);
+}
