@@ -90,8 +90,12 @@ test("1: 0045 adds exactly two tables and alters nothing else", async () => {
   const before = createClient({ url: `file:${beforeFile}` });
   const after = createClient({ url: `file:${afterFile}` });
   try {
-    await applyExcluding(before, ["0045_account_identity.sql"]);
-    await applyMigrationsLibsql(after, drizzleDir);
+    // Measure 0045 in isolation: `before` = everything up to 0044, `after` =
+    // that plus 0045. 0046 (which adds users.email_verified_at + the
+    // email-verification challenge table) is excluded from BOTH so it never
+    // shows up in this 0045-only diff.
+    await applyExcluding(before, ["0045_account_identity.sql", "0046_email_verification_challenges.sql"]);
+    await applyExcluding(after, ["0046_email_verification_challenges.sql"]);
 
     const beforeTables = await tableSet(before);
     const afterTables = await tableSet(after);

@@ -1488,6 +1488,110 @@ main.report-main {
   height: 16px;
 }
 
+/* A3 — email-verification state line under the account email */
+.email-verify-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+  margin-top: 6px !important;
+  font-size: 11px;
+  font-weight: 700;
+}
+.email-verify-line svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+.email-verify-line.is-verified {
+  color: #27634f;
+}
+.email-verify-line.is-unverified {
+  color: #9a6212;
+}
+.email-verify-action {
+  padding: 3px 10px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 10px;
+  font-weight: 800;
+  cursor: pointer;
+}
+.email-verify-action:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.email-verify-notice {
+  margin-top: 6px !important;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+.email-verify-notice.is-ok {
+  color: #27634f;
+}
+.email-verify-notice.is-error {
+  color: var(--red);
+}
+
+/* A3 — /verify-email landing page */
+.verify-email-page {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  padding: 24px;
+  background: var(--bg, #f4f7f9);
+}
+.verify-email-card {
+  width: 100%;
+  max-width: 420px;
+  padding: clamp(24px, 4vw, 38px);
+  text-align: center;
+}
+.verify-email-status {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  margin: 18px 0 8px;
+}
+.verify-email-status svg {
+  width: 34px;
+  height: 34px;
+}
+.verify-email-status.is-verified svg {
+  color: #27634f;
+}
+.verify-email-status.is-error svg {
+  color: var(--red);
+}
+.verify-email-status h1 {
+  margin: 0;
+  font-size: 17px;
+}
+.verify-email-card p {
+  margin: 0 0 18px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.verify-email-spinner {
+  width: 26px;
+  height: 26px;
+  border: 3px solid #cfdde2;
+  border-top-color: var(--blue);
+  border-radius: 50%;
+  animation: verify-email-spin 800ms linear infinite;
+}
+@keyframes verify-email-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .account-profile-actions {
   display: grid;
   grid-template-columns: 1fr 1fr auto;

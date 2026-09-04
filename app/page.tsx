@@ -106,6 +106,9 @@ type AccountIdentityView = {
   phoneE164: string | null;
   phoneRegion: string | null;
 };
+// A3 — the plain email-verification state /api/auth/me returns, from the
+// authoritative users.email_verified_at. Never a challenge id, token, or digest.
+type EmailVerificationView = { status: "verified" | "unverified" };
 
 // The shape lib/report-store.ts's loadStoredReports() actually returns since
 // it started reading from IndexedDB's own lightweight summary store rather
@@ -239,6 +242,9 @@ export default function Home() {
   const [welcomeMode, setWelcomeMode] = useState<AuthMode | null>(null);
   const [account, setAccount] = useState<LocalAccount | null>(null);
   const [accountIdentity, setAccountIdentity] = useState<AccountIdentityView | null>(null);
+  const [emailVerification, setEmailVerification] = useState<EmailVerificationView | null>(null);
+  const [emailVerifySending, setEmailVerifySending] = useState(false);
+  const [emailVerifyNotice, setEmailVerifyNotice] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
   const [accountLoaded, setAccountLoaded] = useState(false);
   const signupIdentityRef = useRef<IdentityFieldsHandle>(null);
   const profileIdentityRef = useRef<IdentityFieldsHandle>(null);
@@ -317,10 +323,15 @@ export default function Home() {
     fetch("/api/auth/me")
       .then((response) => (response.ok ? response.json() : Promise.resolve({ user: null })))
       .then(async (data) => {
-        const result = data as { user: LocalAccount | null; identity?: AccountIdentityView | null };
+        const result = data as {
+          user: LocalAccount | null;
+          identity?: AccountIdentityView | null;
+          emailVerification?: EmailVerificationView | null;
+        };
         if (result && result.user) {
           setAccount(result.user);
           setAccountIdentity(result.identity ?? null);
+          setEmailVerification(result.emailVerification ?? null);
           await loadAccountReports();
         } else {
           await loadAnonymousReports();
@@ -523,7 +534,12 @@ export default function Home() {
       return;
     }
 
-    const result = (await response.json().catch(() => null)) as { user?: LocalAccount; identity?: AccountIdentityView | null; error?: string } | null;
+    const result = (await response.json().catch(() => null)) as {
+      user?: LocalAccount;
+      identity?: AccountIdentityView | null;
+      emailVerification?: EmailVerificationView | null;
+      error?: string;
+    } | null;
     if (!response.ok || !result?.user) {
       setProfileEditError((result && typeof result.error === "string" && result.error) || "Could not update your account information.");
       return;
@@ -531,8 +547,38 @@ export default function Home() {
 
     setAccount(result.user as LocalAccount);
     setAccountIdentity(result.identity ?? null);
+    setEmailVerification(result.emailVerification ?? null);
+    setEmailVerifyNotice(null);
     setIsEditingProfile(false);
     notify("Your account information has been updated.");
+  }
+
+  // A3 — request (or resend) the verification email for the signed-in account.
+  // The account UI never sees a token or challenge id; it only learns the
+  // coarse outcome.
+  async function sendEmailVerification() {
+    if (emailVerifySending) return;
+    setEmailVerifySending(true);
+    setEmailVerifyNotice(null);
+    try {
+      const response = await fetch("/api/auth/email-verification/send", { method: "POST" });
+      const data = (await response.json().catch(() => ({}))) as { status?: string; error?: string };
+      if (response.ok && data.status === "sent") {
+        setEmailVerifyNotice({ tone: "ok", text: "Verification email sent. Check your inbox and open the link within 30 minutes." });
+      } else if (response.ok && data.status === "verified") {
+        setEmailVerification({ status: "verified" });
+        setEmailVerifyNotice({ tone: "ok", text: "Your email is already verified." });
+      } else {
+        setEmailVerifyNotice({
+          tone: "error",
+          text: typeof data.error === "string" && data.error ? data.error : "Could not send the verification email. Please try again shortly.",
+        });
+      }
+    } catch {
+      setEmailVerifyNotice({ tone: "error", text: "Could not reach TurnitPlus. Check your connection and try again." });
+    } finally {
+      setEmailVerifySending(false);
+    }
   }
 
   // The account and every one of its sessions are already gone server-side
@@ -644,6 +690,9 @@ export default function Home() {
     setReports([]);
     setCurrentReport(null);
     setAccount(null);
+    setAccountIdentity(null);
+    setEmailVerification(null);
+    setEmailVerifyNotice(null);
     setUploadLimitStatus(null);
     setAccountReportCount(0);
     setIsEditingProfile(false);
@@ -1242,6 +1291,27 @@ export default function Home() {
                       <p className="section-label">SIGNED IN</p>
                       <h2>{account.username}</h2>
                       <p>{account.email}</p>
+                      {emailVerification?.status === "verified" && (
+                        <p className="email-verify-line is-verified">
+                          <ShieldCheck aria-hidden="true" /> Email verified
+                        </p>
+                      )}
+                      {emailVerification?.status === "unverified" && (
+                        <p className="email-verify-line is-unverified">
+                          <TriangleAlert aria-hidden="true" /> Email not verified
+                          <button
+                            type="button"
+                            className="email-verify-action"
+                            onClick={sendEmailVerification}
+                            disabled={emailVerifySending}
+                          >
+                            {emailVerifySending ? "Sending…" : "Verify email"}
+                          </button>
+                        </p>
+                      )}
+                      {emailVerifyNotice && (
+                        <p className={`email-verify-notice is-${emailVerifyNotice.tone}`}>{emailVerifyNotice.text}</p>
+                      )}
                     </div>
                     <button className="button secondary account-edit-button" type="button" onClick={() => setIsEditingProfile((editing) => !editing)}>
                       <Pencil aria-hidden="true" /> {isEditingProfile ? "Close editor" : "Edit information"}

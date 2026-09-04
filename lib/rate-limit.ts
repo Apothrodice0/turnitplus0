@@ -279,3 +279,23 @@ export async function checkAdminRate(clientId: string): Promise<RateCheckResult>
 export async function resetAdminRateForTest(clientId: string): Promise<void> {
   await resetBucketForTest(`admin:${clientId}`);
 }
+
+// Dedicated, coarse IP bucket for the two email-verification endpoints
+// (/api/auth/email-verification/send + /verify). This is the outer backstop
+// against a single host hammering the routes; the real per-account abuse
+// controls (a resend cooldown and a bounded issuance window, both checked
+// against email_verification_challenges rows) live in the send route itself.
+// Kept separate from the auth bucket so a normal "log in, then click Verify
+// email once or twice" sequence never competes with the 5/min signup/login
+// budget. 12/min covers a legitimate send + a verify + a resend with headroom
+// while still bounding a runaway client.
+const EMAIL_VERIFICATION_MAX_TOKENS = 12;
+const EMAIL_VERIFICATION_INTERVAL_MS = 60_000;
+
+export async function checkEmailVerificationRate(clientId: string): Promise<RateCheckResult> {
+  return checkBucket(`emailverify:${clientId}`, EMAIL_VERIFICATION_MAX_TOKENS, EMAIL_VERIFICATION_INTERVAL_MS);
+}
+
+export async function resetEmailVerificationRateForTest(clientId: string): Promise<void> {
+  await resetBucketForTest(`emailverify:${clientId}`);
+}

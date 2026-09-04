@@ -261,6 +261,14 @@ export const users = sqliteTable(
     // codebase. A plain text enum (not a boolean) so a future intermediate
     // role does not require a second migration.
     role: text("role").notNull().default("user"),
+    // Email verification (drizzle/0046, A3). The SINGLE authoritative record of
+    // whether this account's login email is verified — a property of the
+    // credential itself, so it works for every account shape including
+    // grandfathered profile-less ones. Epoch-ms; NULL = unverified. Set ONLY by
+    // consuming an email_verification_challenges row; cleared to NULL atomically
+    // with any users.email change. account_identity_profiles.email_verified_at
+    // is deprecated/vestigial — never read or written any more.
+    email_verified_at: integer("email_verified_at"),
   },
   (table) => [
     uniqueIndex("ux_users_email").on(table.email),
@@ -1634,8 +1642,12 @@ export const account_identity_profiles = sqliteTable(
     city_unverified_name: text("city_unverified_name"),
     phone_e164: text("phone_e164"),
     phone_region: text("phone_region"),
-    // ALWAYS NULL in A1 — the verified-identity phase is purely additive on top.
+    // DEPRECATED / VESTIGIAL (A3, drizzle/0046): email verification state moved
+    // to the authoritative users.email_verified_at. This column is kept only for
+    // schema compatibility (so 0045 need not be rewritten) — it is NEVER read or
+    // written any more. Do not reintroduce a reader/writer. Always NULL.
     email_verified_at: integer("email_verified_at"),
+    // Reserved for a later phase; always NULL now — no code writes these.
     phone_verified_at: integer("phone_verified_at"),
     institution_verified_at: integer("institution_verified_at"),
     normalization_version: integer("normalization_version").notNull().default(1),
@@ -1678,6 +1690,43 @@ export const account_identity_fingerprints = sqliteTable(
       table.fingerprint_kind,
       table.fingerprint,
     ),
+  ],
+);
+
+// ── Email Verification FOUNDATION (drizzle/0046) — challenge state machine ──
+// One row per issued email-verification challenge. (0046 also adds the
+// authoritative users.email_verified_at column — see the users table above;
+// account_identity_profiles is unchanged, its email_verified_at now vestigial.)
+// user_id REFERENCES users(id) ON DELETE CASCADE (transient per-account state,
+// removed with the account, no change to lib/account-deletion.ts needed — same
+// as sessions / account_identity_profiles). token_digest is the lowercase
+// SHA-256 hex of the raw 256-bit token; the raw token goes ONLY to the
+// mail-delivery layer and is never stored or logged (sessions.token_hash /
+// device_passport_challenges.nonce_hash discipline). Single-use via an atomic
+// conditional consume;
+// revoked_at is bulk-set when users.email changes. The TTL is an application
+// constant (lib/email-verification.ts), never an env var. The CHECK constraints
+// (token_digest length, expires_at > created_at) live in the migration only,
+// matching this project's schema-drift tooling. A3 writes NO
+// account_identity_fingerprints row — a verified primary email stays
+// ACCOUNT_ONLY and never becomes cross-account ownership evidence.
+export const email_verification_challenges = sqliteTable(
+  "email_verification_challenges",
+  {
+    id: text("id").primaryKey(),
+    user_id: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    email: text("email").notNull(),
+    token_digest: text("token_digest").notNull(),
+    created_at: integer("created_at").notNull(),
+    expires_at: integer("expires_at").notNull(),
+    consumed_at: integer("consumed_at"),
+    revoked_at: integer("revoked_at"),
+  },
+  (table) => [
+    uniqueIndex("ux_email_verification_challenges_token_digest").on(table.token_digest),
+    index("idx_email_verification_challenges_user_created").on(table.user_id, table.created_at),
   ],
 );
 

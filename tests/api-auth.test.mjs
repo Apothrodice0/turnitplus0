@@ -101,9 +101,12 @@ async function logout(cookieValue, ip = 'auth-test-logout') {
   // A2: me also returns the owner's own identity profile (never a fingerprint /
   // owner-link / SELF / cross-account signal).
   assert.equal(meBody.identity.accountType, 'independent');
-  assert.equal(meBody.identity.emailVerified, false);
   assert.equal(meBody.identity.phoneVerified, false);
   assert.equal(meBody.identity.institutionVerified, false);
+  // A3: email verification is NOT a profile field — it comes only from
+  // users.email_verified_at, surfaced as emailVerification.status.
+  assert.equal(meBody.identity.emailVerified, undefined, 'identity no longer carries an email-verification flag');
+  assert.equal(meBody.emailVerification.status, 'unverified');
   for (const forbidden of ['fingerprint', 'ownerLink', 'owner_link', 'selfStatus', 'crossAccount']) {
     assert.equal(JSON.stringify(meBody).toLowerCase().includes(forbidden.toLowerCase()), false, `me must not expose ${forbidden}`);
   }

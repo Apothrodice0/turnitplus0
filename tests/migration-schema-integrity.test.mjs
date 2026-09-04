@@ -324,19 +324,19 @@ function applyMigrationsExcluding(db, dir, excludeFiles) {
   cleanupSqliteFile(dbPath);
   const db = new Database(dbPath);
 
-  // 0023, 0025, and 0027 also excluded here: unlike every migration from
+  // 0023, 0025, 0027 and 0046 also excluded here: unlike every migration from
   // 0012-0022 (which only ever *reference* users(id) declaratively inside a
   // new CREATE TABLE — never checked by SQLite until an actual insert, so
-  // those are fine without users existing yet), 0023/0025 both do
+  // those are fine without users existing yet), 0023/0025/0046 all do
   // `ALTER TABLE users ADD COLUMN`, and 0027 both alters saved_reports AND
-  // reads its own user_id column in its backfill UPDATE — all three require
+  // reads its own user_id column in its backfill UPDATE — all require
   // users/saved_reports.user_id to already physically exist. In any real
   // migration run this is a non-issue (files always apply in filename
   // order, so 0009-0011 always run before any of them) — this exclusion
   // only matters for this test's own artificial "simulate a pre-Phase-2A
   // database" scenario, which none of them have any bearing on and is not
   // what this block is verifying.
-  applyMigrationsExcluding(db, drizzleDir, ['0009_users.sql', '0010_sessions.sql', '0011_saved_reports_user_id.sql', '0023_privacy_consent_and_report_identity_link.sql', '0025_users_role.sql', '0027_saved_reports_room_number.sql']);
+  applyMigrationsExcluding(db, drizzleDir, ['0009_users.sql', '0010_sessions.sql', '0011_saved_reports_user_id.sql', '0023_privacy_consent_and_report_identity_link.sql', '0025_users_role.sql', '0027_saved_reports_room_number.sql', '0046_email_verification_challenges.sql']);
 
   // Old-shape row: inserted before user_id existed on this table at all.
   db.prepare(`INSERT INTO saved_reports (id, device_key, submission_id, title, report_created_at, word_count, archive_score, score_band, payload_json) VALUES (?,?,?,?,?,?,?,?,?)`)
@@ -561,7 +561,10 @@ function applyMigrationsExcluding(db, dir, excludeFiles) {
   cleanupSqliteFile(dbPath);
   const db = new Database(dbPath);
   db.pragma('foreign_keys = ON');
-  applyMigrations(db, drizzleDir);
+  // Apply everything EXCEPT 0046 so this section proves 0045's effect in
+  // isolation (0046 is the migration that adds users.email_verified_at — see
+  // Section I).
+  applyMigrationsExcluding(db, drizzleDir, ['0046_email_verification_challenges.sql']);
 
   const tables = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((r) => r.name));
   for (const t of ['account_identity_profiles', 'account_identity_fingerprints']) {
@@ -662,6 +665,176 @@ function applyMigrationsExcluding(db, dir, excludeFiles) {
   client.close();
   cleanupSqliteFile(dbFile);
   console.log('[libsql] Account Identity foundation: tables land; full_name NOT NULL, consistency + E.164 CHECK, 1:1 + CASCADE enforced');
+}
+
+// --- Section I: Email Verification foundation (drizzle/0046) — proof on both
+// engines that 0046 (a) adds EXACTLY users.email_verified_at (nullable, the new
+// authoritative marker), (b) creates email_verification_challenges with its
+// user_id -> users ON DELETE CASCADE, UNIQUE token_digest index and CHECK
+// constraints, (c) leaves account_identity_profiles.email_verified_at in place
+// but VESTIGIAL, and (d) restructures nothing else. Upgrade-path style
+// (0000..0045 first, then 0046) so the users column delta is measured. ---
+{
+  const dbPath = path.join(repo, 'test_migration_integrity_email_verification_sqlite.db');
+  cleanupSqliteFile(dbPath);
+  const db = new Database(dbPath);
+  db.pragma('foreign_keys = ON');
+  applyMigrationsExcluding(db, drizzleDir, ['0046_email_verification_challenges.sql']);
+
+  // pre-0046 users shape
+  const usersBefore = db.prepare(`PRAGMA table_info('users')`).all().map((r) => r.name).sort();
+  assert.deepEqual(
+    usersBefore,
+    ['corpus_reuse_consented_at', 'created_at', 'email', 'id', 'password_hash', 'role', 'updated_at', 'username'].sort(),
+    '[sqlite] pre-0046 users shape baseline',
+  );
+  assert(!db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((r) => r.name).includes('email_verification_challenges'), '[sqlite] challenge table absent before 0046');
+
+  db.exec(fs.readFileSync(path.join(drizzleDir, '0046_email_verification_challenges.sql'), 'utf8'));
+
+  // (a) 0046 added EXACTLY users.email_verified_at, nullable.
+  const usersAfter = db.prepare(`PRAGMA table_info('users')`).all();
+  const newUserCols = usersAfter.map((r) => r.name).filter((n) => !usersBefore.includes(n));
+  assert.deepEqual(newUserCols, ['email_verified_at'], '[sqlite] 0046 adds exactly users.email_verified_at');
+  assert.equal(usersAfter.find((r) => r.name === 'email_verified_at').notnull, 0, '[sqlite] users.email_verified_at is nullable');
+  db.prepare(`INSERT INTO users (id, email, username, password_hash) VALUES ('mi-ev-baseline','mi-ev-baseline@e.test','mib','h')`).run();
+  assert.equal(db.prepare(`SELECT email_verified_at FROM users WHERE id = 'mi-ev-baseline'`).get().email_verified_at, null, '[sqlite] a fresh account defaults to unverified (NULL)');
+
+  const tables = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((r) => r.name));
+  assert(tables.has('email_verification_challenges'), '[sqlite] 0046 must create email_verification_challenges');
+
+  const cols = db.prepare(`PRAGMA table_info('email_verification_challenges')`).all();
+  assert.deepEqual(
+    cols.map((c) => c.name).sort(),
+    ['consumed_at', 'created_at', 'email', 'expires_at', 'id', 'revoked_at', 'token_digest', 'user_id'].sort(),
+    '[sqlite] email_verification_challenges has exactly the drizzle/0046 columns',
+  );
+  for (const notNull of ['id', 'user_id', 'email', 'token_digest', 'created_at', 'expires_at']) {
+    assert.equal(cols.find((c) => c.name === notNull).notnull, 1, `[sqlite] email_verification_challenges.${notNull} is NOT NULL`);
+  }
+  for (const nullable of ['consumed_at', 'revoked_at']) {
+    assert.equal(cols.find((c) => c.name === nullable).notnull, 0, `[sqlite] email_verification_challenges.${nullable} is nullable`);
+  }
+
+  // (c) account_identity_profiles is otherwise untouched — its now-vestigial
+  // email_verified_at column is still present (kept for schema compatibility).
+  const profCols = db.prepare(`PRAGMA table_info('account_identity_profiles')`).all().map((r) => r.name);
+  assert(profCols.includes('email_verified_at'), '[sqlite] account_identity_profiles.email_verified_at is retained (deprecated, not dropped)');
+  assert(!profCols.includes('email_verification_challenge_id'), '[sqlite] 0046 must not add a column to account_identity_profiles');
+
+  const fk = db.prepare(`PRAGMA foreign_key_list('email_verification_challenges')`).all().find((r) => r.from === 'user_id');
+  assert.equal(fk.table, 'users');
+  assert.equal(fk.on_delete, 'CASCADE', '[sqlite] user_id -> users must be ON DELETE CASCADE');
+
+  const idxList = db.prepare(`PRAGMA index_list('email_verification_challenges')`).all();
+  const uxDigest = idxList.find((r) => r.name === 'ux_email_verification_challenges_token_digest');
+  assert(uxDigest && uxDigest.unique === 1, '[sqlite] token_digest index must be UNIQUE');
+  assert(idxList.some((r) => r.name === 'idx_email_verification_challenges_user_created'), '[sqlite] the (user_id, created_at) lookup index must exist');
+
+  // CHECK: token_digest length must be 64.
+  db.prepare(`INSERT INTO users (id, email, username, password_hash) VALUES ('mi-ev-1','mi-ev-1@e.test','mi-ev-1','h')`).run();
+  assert.throws(
+    () => db.prepare(`INSERT INTO email_verification_challenges (id, user_id, email, token_digest, created_at, expires_at) VALUES ('c1','mi-ev-1','mi-ev-1@e.test','tooshort',1,2)`).run(),
+    /CHECK constraint failed/,
+    '[sqlite] token_digest length CHECK rejects a non-64-char digest',
+  );
+  // CHECK: expires_at must be after created_at.
+  assert.throws(
+    () => db.prepare(`INSERT INTO email_verification_challenges (id, user_id, email, token_digest, created_at, expires_at) VALUES ('c2','mi-ev-1','mi-ev-1@e.test','${'a'.repeat(64)}',10,10)`).run(),
+    /CHECK constraint failed/,
+    '[sqlite] expires_at > created_at CHECK rejects a non-future expiry',
+  );
+  // valid row, consumed_at / revoked_at rest at NULL
+  db.prepare(`INSERT INTO email_verification_challenges (id, user_id, email, token_digest, created_at, expires_at) VALUES ('c3','mi-ev-1','mi-ev-1@e.test','${'a'.repeat(64)}',10,20)`).run();
+  const restRow = db.prepare(`SELECT consumed_at, revoked_at FROM email_verification_challenges WHERE id = 'c3'`).get();
+  assert.equal(restRow.consumed_at, null);
+  assert.equal(restRow.revoked_at, null);
+  // UNIQUE token_digest
+  assert.throws(
+    () => db.prepare(`INSERT INTO email_verification_challenges (id, user_id, email, token_digest, created_at, expires_at) VALUES ('c4','mi-ev-1','mi-ev-1@e.test','${'a'.repeat(64)}',10,20)`).run(),
+    /UNIQUE constraint failed/,
+    '[sqlite] a duplicate token_digest is rejected',
+  );
+  // CASCADE on account delete
+  db.prepare(`DELETE FROM users WHERE id = 'mi-ev-1'`).run();
+  assert.equal(
+    db.prepare(`SELECT COUNT(*) c FROM email_verification_challenges WHERE user_id = 'mi-ev-1'`).get().c,
+    0,
+    '[sqlite] challenges CASCADE-delete with the account',
+  );
+
+  db.close();
+  cleanupSqliteFile(dbPath);
+  console.log('[sqlite] Email Verification foundation: users.email_verified_at added, challenge table lands, profile column vestigial, CASCADE + UNIQUE digest + CHECKs enforced');
+}
+
+{
+  const dbFile = path.join(repo, 'test_migration_integrity_email_verification_libsql.db');
+  cleanupSqliteFile(dbFile);
+  const client = createClient({ url: `file:${dbFile}` });
+  await applyMigrationsLibsql(client, drizzleDir);
+  await client.execute('PRAGMA foreign_keys = ON');
+
+  const tableRows = await client.execute("SELECT name FROM sqlite_master WHERE type='table'");
+  assert(new Set(tableRows.rows.map((r) => String(r.name))).has('email_verification_challenges'), '[libsql] 0046 must create email_verification_challenges');
+  const userInfo = await client.execute("PRAGMA table_info('users')");
+  assert(userInfo.rows.some((r) => String(r.name) === 'email_verified_at'), '[libsql] 0046 adds users.email_verified_at');
+
+  await client.execute({ sql: 'INSERT INTO users (id, email, username, password_hash) VALUES (?,?,?,?)', args: ['li-ev-1', 'li-ev-1@e.test', 'li-ev-1', 'h'] });
+  assert.equal((await client.execute("SELECT email_verified_at FROM users WHERE id = 'li-ev-1'")).rows[0].email_verified_at, null, '[libsql] fresh account is unverified');
+  const digest = 'b'.repeat(64);
+  // single-use behavioural proof: the atomic conditional consume flips exactly once.
+  await client.execute({
+    sql: `INSERT INTO email_verification_challenges (id, user_id, email, token_digest, created_at, expires_at) VALUES (?,?,?,?,?,?)`,
+    args: ['li-c1', 'li-ev-1', 'li-ev-1@e.test', digest, 1000, 9_999_999_999_999],
+  });
+  const consume = `UPDATE email_verification_challenges SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL AND revoked_at IS NULL AND expires_at > ?`;
+  const first = await client.execute({ sql: consume, args: [2000, 'li-c1', 2000] });
+  const second = await client.execute({ sql: consume, args: [3000, 'li-c1', 3000] });
+  assert.equal(Number(first.rowsAffected), 1, '[libsql] first consume succeeds');
+  assert.equal(Number(second.rowsAffected), 0, '[libsql] a second consume is a no-op (single-use)');
+
+  // revoked challenge cannot be consumed
+  await client.execute({
+    sql: `INSERT INTO email_verification_challenges (id, user_id, email, token_digest, created_at, expires_at, revoked_at) VALUES (?,?,?,?,?,?,?)`,
+    args: ['li-c2', 'li-ev-1', 'li-ev-1@e.test', 'c'.repeat(64), 1000, 9_999_999_999_999, 1500],
+  });
+  const revokedConsume = await client.execute({ sql: consume, args: [4000, 'li-c2', 4000] });
+  assert.equal(Number(revokedConsume.rowsAffected), 0, '[libsql] a revoked challenge cannot be consumed');
+
+  // atomic verify: consume + set users.email_verified_at land together;
+  // a subsequent users.email change clears it and revokes challenges.
+  await client.execute({
+    sql: `INSERT INTO email_verification_challenges (id, user_id, email, token_digest, created_at, expires_at) VALUES (?,?,?,?,?,?)`,
+    args: ['li-c3', 'li-ev-1', 'li-ev-1@e.test', 'd'.repeat(64), 1000, 9_999_999_999_999],
+  });
+  await client.batch(
+    [
+      { sql: consume, args: [5000, 'li-c3', 5000] },
+      { sql: `UPDATE users SET email_verified_at = ? WHERE id = ? AND EXISTS (SELECT 1 FROM email_verification_challenges WHERE id = ? AND consumed_at = ?)`, args: [5000, 'li-ev-1', 'li-c3', 5000] },
+    ],
+    'write',
+  );
+  assert.equal(Number((await client.execute("SELECT email_verified_at FROM users WHERE id = 'li-ev-1'")).rows[0].email_verified_at), 5000, '[libsql] verify set users.email_verified_at');
+  await client.batch(
+    [
+      { sql: `UPDATE users SET email = ?, email_verified_at = NULL WHERE id = ?`, args: ['li-ev-1-new@e.test', 'li-ev-1'] },
+      { sql: `UPDATE email_verification_challenges SET revoked_at = ? WHERE user_id = ? AND consumed_at IS NULL AND revoked_at IS NULL`, args: [6000, 'li-ev-1'] },
+    ],
+    'write',
+  );
+  assert.equal((await client.execute("SELECT email_verified_at FROM users WHERE id = 'li-ev-1'")).rows[0].email_verified_at, null, '[libsql] email change cleared users.email_verified_at');
+
+  await client.execute({ sql: `DELETE FROM users WHERE id = 'li-ev-1'` });
+  assert.equal(
+    Number((await client.execute("SELECT COUNT(*) c FROM email_verification_challenges WHERE user_id = 'li-ev-1'")).rows[0].c),
+    0,
+    '[libsql] challenges CASCADE-delete with the account',
+  );
+
+  client.close();
+  cleanupSqliteFile(dbFile);
+  console.log('[libsql] Email Verification foundation: users.email_verified_at authoritative; single-use consume + verify-atomicity + email-change clear + revoked-block + CASCADE enforced');
 }
 
 console.log('Migration schema integrity tests passed');

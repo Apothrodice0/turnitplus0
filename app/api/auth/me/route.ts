@@ -12,13 +12,19 @@ import { resolveSignupIdentity } from '../../../../lib/account-identity-signup';
 import { readAccountIdentityProfile, accountIdentityProfileUpsertStatement } from '../../../../lib/account-identity-repo';
 import { resolveGeonamesCity } from '../../../../lib/geonames-cities';
 import { isoCountryByAlpha2 } from '../../../../lib/iso-3166-1-countries';
+import {
+  revokeOutstandingEmailVerificationChallengesStatement,
+  clearUserEmailVerifiedStatement,
+} from '../../../../lib/email-verification';
 
 /**
  * Shape one account's stored identity profile for the OWNER's own settings
  * view. Deliberately narrow: account type, residence, city (resolved name from
  * the bundled dataset), institution ROR id, phone (the owner's own E.164) and
  * phone region. NEVER a fingerprint, an owner-link/SELF signal, a cross-account
- * match, or a verification flag beyond the plain "unverified" resting state.
+ * match, or an email-verification flag — email verification is a property of
+ * the login credential (users.email_verified_at), NOT of this profile, and is
+ * reported separately as `emailVerification.status`.
  */
 type ProfileRow = Awaited<ReturnType<typeof readAccountIdentityProfile>>;
 function identityView(profile: NonNullable<ProfileRow>) {
@@ -39,10 +45,19 @@ function identityView(profile: NonNullable<ProfileRow>) {
         : { status: 'NONE' as const },
     phoneE164: profile.phoneE164,
     phoneRegion: profile.phoneRegion,
-    emailVerified: profile.emailVerifiedAt != null,
     phoneVerified: profile.phoneVerifiedAt != null,
     institutionVerified: profile.institutionVerifiedAt != null,
   };
+}
+
+/**
+ * The email-verification state the account UI needs — a single plain enum from
+ * the AUTHORITATIVE users.email_verified_at (never a challenge id, token, or
+ * digest). Every account can be verified, so there is no "unavailable" state.
+ */
+type EmailVerificationStatus = 'verified' | 'unverified';
+function emailVerificationStatusFor(userEmailVerifiedAt: number | null): EmailVerificationStatus {
+  return userEmailVerifiedAt != null ? 'verified' : 'unverified';
 }
 
 export const dynamic = 'force-dynamic';
@@ -74,10 +89,16 @@ export async function GET(request: Request) {
 
     // Grandfathering: an account created before A2 has no identity profile.
     // identity: null just means "profile not completed" — it never blocks login
-    // or anything else.
+    // or anything else. Email verification is INDEPENDENT of the profile: it
+    // comes exclusively from the authoritative users.email_verified_at.
     let identity: ReturnType<typeof identityView> | null = null;
+    let emailVerificationStatus: EmailVerificationStatus = 'unverified';
     const profileClient = await getReportsDbClient();
     try {
+      const userRow = await profileClient.execute({ sql: 'SELECT email_verified_at FROM users WHERE id = ?', args: [sessionUser.id] });
+      const verifiedAt = (userRow.rows[0] as unknown as { email_verified_at: number | null } | undefined)?.email_verified_at ?? null;
+      emailVerificationStatus = emailVerificationStatusFor(verifiedAt);
+
       const profile = await readAccountIdentityProfile(profileClient, sessionUser.id);
       if (profile) identity = identityView(profile);
     } catch {
@@ -90,6 +111,10 @@ export async function GET(request: Request) {
       JSON.stringify({
         user: { username: sessionUser.username, email: sessionUser.email, corpusReuseConsent: sessionUser.corpusReuseConsented },
         identity,
+        // A3: a plain enum for the account UI's "Verify email / Email verified"
+        // state, from users.email_verified_at only. Never a challenge id, token,
+        // or digest.
+        emailVerification: { status: emailVerificationStatus },
       }),
       { status: 200, headers: { 'Content-Type': 'application/json' } },
     );
@@ -169,6 +194,32 @@ export async function PATCH(request: Request) {
           ? accountIdentityProfileUpsertStatement(sessionUser.id, identityResult.identity.normalized, now)
           : null;
 
+      // A3 — changing the login email VOIDS the account's verified-email state
+      // (users.email_verified_at -> NULL) and kills every outstanding
+      // verification link, and both must land atomically with the users.email
+      // UPDATE itself (no window where the address moved but an old link still
+      // verifies, or the account still reads "verified"). Since every statement
+      // here goes into ONE client.batch transaction below, the three effects
+      // commit together. The revoke is a no-op when there are no challenges. A
+      // profile edit that does NOT change the email never runs these — editing
+      // your city must not un-verify your email.
+      const emailChanged = normalizedEmail !== sessionUser.email;
+      const emailChangeStatements: InStatement[] = emailChanged
+        ? [
+            clearUserEmailVerifiedStatement(sessionUser.id),
+            revokeOutstandingEmailVerificationChallengesStatement(sessionUser.id, now),
+          ]
+        : [];
+
+      // Run one user-facing UPDATE plus whatever profile / email-change
+      // statements apply, atomically. A single statement goes through execute();
+      // anything more becomes one client.batch transaction.
+      const applyAccountWrites = async (userUpdate: InStatement) => {
+        const statements = [userUpdate, ...(profileStatement ? [profileStatement] : []), ...emailChangeStatements];
+        if (statements.length === 1) await client.execute(statements[0]);
+        else await client.batch(statements, 'write');
+      };
+
       try {
       if (corpusReuseConsent !== undefined) {
         // Corpus-admission consent revocation (production audit fix):
@@ -189,27 +240,24 @@ export async function PATCH(request: Request) {
         // content is untouched either way — see that function's own header
         // comment.
         if (corpusReuseConsent === false && sessionUser.corpusReuseConsented === true) {
-          await client.execute({
+          // username / email / profile / email-change writes go together first;
+          // the consent revocation then runs in its own transaction (below).
+          await applyAccountWrites({
             sql: 'UPDATE users SET username = ?, email = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
             args: [trimmedUsername, normalizedEmail, sessionUser.id],
           });
-          if (profileStatement) await client.execute(profileStatement);
           await revokeConsentAndCancelPendingAdmissionJobs(sessionUser.id, () => getReportsDbClient());
         } else {
-          const userUpdate: InStatement = {
+          await applyAccountWrites({
             sql: 'UPDATE users SET username = ?, email = ?, corpus_reuse_consented_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
             args: [trimmedUsername, normalizedEmail, corpusReuseConsent ? new Date().toISOString() : null, sessionUser.id],
-          };
-          if (profileStatement) await client.batch([userUpdate, profileStatement], 'write');
-          else await client.execute(userUpdate);
+          });
         }
       } else {
-        const userUpdate: InStatement = {
+        await applyAccountWrites({
           sql: 'UPDATE users SET username = ?, email = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
           args: [trimmedUsername, normalizedEmail, sessionUser.id],
-        };
-        if (profileStatement) await client.batch([userUpdate, profileStatement], 'write');
-        else await client.execute(userUpdate);
+        });
       }
       } catch (writeErr) {
         const message = writeErr instanceof Error ? writeErr.message : String(writeErr);
@@ -225,10 +273,16 @@ export async function PATCH(request: Request) {
 
       const resolvedConsent = corpusReuseConsent !== undefined ? corpusReuseConsent : sessionUser.corpusReuseConsented;
       const storedProfile = await readAccountIdentityProfile(client, sessionUser.id);
+      const verifiedRow = await client.execute({ sql: 'SELECT email_verified_at FROM users WHERE id = ?', args: [sessionUser.id] });
+      const storedVerifiedAt = (verifiedRow.rows[0] as unknown as { email_verified_at: number | null } | undefined)?.email_verified_at ?? null;
       return new NextResponse(
         JSON.stringify({
           user: { username: trimmedUsername, email: normalizedEmail, corpusReuseConsent: resolvedConsent },
           identity: storedProfile ? identityView(storedProfile) : null,
+          // A3 — from the authoritative users.email_verified_at, re-read after
+          // the write: an email change here cleared it, so this returns
+          // 'unverified' in the same response.
+          emailVerification: { status: emailVerificationStatusFor(storedVerifiedAt) },
         }),
         { status: 200, headers: { 'Content-Type': 'application/json' } },
       );

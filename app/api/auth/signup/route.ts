@@ -9,6 +9,14 @@ import { newSession, setSessionCookie, claimAnonymousReports } from '../../../..
 import { isCrossOriginBrowserRequest, CROSS_ORIGIN_REJECTED } from '../../../../lib/same-origin';
 import { resolveSignupIdentity } from '../../../../lib/account-identity-signup';
 import { accountIdentityProfileUpsertStatement } from '../../../../lib/account-identity-repo';
+import { resolveTrustedVerificationBaseUrl } from '../../../../lib/request-origin';
+import {
+  generateEmailVerificationChallenge,
+  emailVerificationChallengeInsertStatement,
+  revokeEmailVerificationChallengeByIdStatement,
+} from '../../../../lib/email-verification';
+import { dispatchEmailVerificationMessage } from '../../../../lib/email-verification-dispatch';
+import { EmailDeliveryUnavailableError } from '../../../../lib/mail/email-delivery';
 
 const MAX_EMAIL_LENGTH = 254;
 const MIN_PASSWORD_LENGTH = 8;
@@ -79,20 +87,29 @@ export async function POST(request: Request) {
       const passwordHash = await hashPassword(password);
       const now = Date.now();
       const session = newSession(userId, now);
+      // A3: an email-verification challenge is minted and persisted AS PART OF
+      // account creation, so "challenge issued" is guaranteed the moment the
+      // account exists. email_verified_at itself stays NULL — only consuming
+      // this challenge (POST /api/auth/email-verification/verify) ever sets it.
+      // The raw token never leaves this handler except to the mail layer below.
+      const verificationChallenge = generateEmailVerificationChallenge(now);
 
       // ATOMIC account creation: the users row, the 1:1 account_identity_profiles
-      // row and the session are one write transaction. If the profile INSERT
-      // fails any CHECK (or the email UNIQUE index races), the whole batch rolls
-      // back — no users row, no profile row, no session. NOTHING promotes the
-      // account: there is no admin-promotion call here (or anywhere in the auth
-      // routes) any more — a brand-new unverified account can never gain the
-      // admin role from its email string (see lib/admin-role.ts).
+      // row, the email-verification challenge and the session are one write
+      // transaction. If the profile INSERT fails any CHECK (or the email UNIQUE
+      // index races), the whole batch rolls back — no users row, no profile row,
+      // no challenge, no session. NOTHING promotes the account: there is no
+      // admin-promotion call here (or anywhere in the auth routes) any more — a
+      // brand-new unverified account can never gain the admin role from its
+      // email string, and verifying that email later does not change this
+      // (see lib/admin-role.ts).
       const statements: InStatement[] = [
         {
           sql: 'INSERT INTO users (id, email, username, password_hash) VALUES (?,?,?,?)',
           args: [userId, normalizedEmail, trimmedUsername, passwordHash],
         },
         accountIdentityProfileUpsertStatement(userId, identityResult.identity.normalized, now),
+        emailVerificationChallengeInsertStatement(verificationChallenge, userId, normalizedEmail),
         session.statement,
       ];
 
@@ -111,6 +128,40 @@ export async function POST(request: Request) {
 
       // Best-effort, post-commit — a data migration, not part of account creation.
       await claimAnonymousReports(client, userId, deviceKey);
+
+      // Request the verification email (A3). Best-effort and post-commit: the
+      // account already exists, so nothing here can fail signup — but the
+      // DELIVERY INVARIANT is strict. The challenge stays ACTIVE only when BOTH
+      //   (a) a trusted verification base URL resolved, AND
+      //   (b) the provider accepted delivery.
+      // Any other outcome (untrusted/unresolvable host, or the provider
+      // throwing) revokes THIS exact challenge by its id — never a broad revoke
+      // that could catch a concurrently-issued resend — so no dead or
+      // undeliverable link is ever left live. The raw token / URL are never
+      // logged (and never appear in the signup response).
+      const verificationBaseUrl = resolveTrustedVerificationBaseUrl(request);
+      let verificationDelivered = false;
+      if (verificationBaseUrl) {
+        try {
+          await dispatchEmailVerificationMessage(verificationChallenge, normalizedEmail, verificationBaseUrl);
+          verificationDelivered = true;
+        } catch (sendErr) {
+          // In A3 there is no provider, so EmailDeliveryUnavailableError is the
+          // EXPECTED baseline — not worth a log line on every signup. Anything
+          // else (a real provider failing, once one is wired) is surfaced.
+          if (!(sendErr instanceof EmailDeliveryUnavailableError)) {
+            console.error('signup email verification dispatch failed (non-fatal): delivery error');
+          }
+        }
+      } else {
+        // Untrusted / ambiguous request host — do NOT mint a token-bearing URL.
+        console.error('signup: request host not trusted; verification email not dispatched');
+      }
+      if (!verificationDelivered) {
+        await client
+          .execute(revokeEmailVerificationChallengeByIdStatement(verificationChallenge.id, Date.now()))
+          .catch(() => {});
+      }
 
       const { display } = identityResult.identity;
       const response = new NextResponse(
