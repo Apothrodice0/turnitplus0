@@ -1621,11 +1621,20 @@ export const corpus_duplicate_suppression_shadow_evaluations = sqliteTable(
 // this project's schema-drift tooling (which does not compare CHECKs), as
 // account_owner_links already does.
 //
-// account_identity_fingerprints: FUTURE keyed-HMAC pseudonyms of VERIFIED
-// identity values. In A1 this table is NEVER written — lib/account-identity-repo.ts
-// has a reader and no writer, and lib/account-identity.ts's
-// accountIdentityFingerprint fails closed unless { verified: true }. A
-// fingerprint is an HMAC-SHA256 digest, never a raw email / phone / ror id.
+// account_identity_fingerprints: keyed-HMAC pseudonyms of VERIFIED identity
+// values. lib/account-identity-repo.ts still has no insert/upsert writer of
+// its own — a row is only ever produced by the specific, reviewed flow that
+// verified the underlying value, and lib/account-identity.ts's
+// accountIdentityFingerprint fails closed unless { verified: true }. A3c
+// (drizzle/0046's users.email_verified_at) is the first such flow: a
+// successful email verification writes/upserts a VERIFIED_EMAIL row via
+// lib/email-verification.ts's own guarded statement, atomically with the
+// winning challenge consume; changing the login email removes it atomically
+// with the users.email UPDATE (app/api/auth/me/route.ts). VERIFIED_EMAIL
+// stays ACCOUNT_ONLY evidence (ACCOUNT_IDENTITY_FINGERPRINT_EVIDENCE_CEILING)
+// — nothing here interprets it as ownership. VERIFIED_PHONE_E164 and
+// VERIFIED_INSTITUTION_ROR still have no writer at all. A fingerprint is an
+// HMAC-SHA256 digest, never a raw email / phone / ror id.
 export const account_identity_profiles = sqliteTable(
   "account_identity_profiles",
   {
@@ -1710,9 +1719,11 @@ export const account_identity_fingerprints = sqliteTable(
 // revoked_at is bulk-set when users.email changes. The TTL is an application
 // constant (lib/email-verification.ts), never an env var. The CHECK constraints
 // (token_digest length, expires_at > created_at) live in the migration only,
-// matching this project's schema-drift tooling. A3 writes NO
-// account_identity_fingerprints row — a verified primary email stays
-// ACCOUNT_ONLY and never becomes cross-account ownership evidence.
+// matching this project's schema-drift tooling. A3c: the SAME atomic batch
+// that wins a challenge consume also upserts a VERIFIED_EMAIL row in
+// account_identity_fingerprints (see that table's own comment above); a
+// verified primary email still stays ACCOUNT_ONLY and never becomes
+// cross-account ownership evidence on its own.
 export const email_verification_challenges = sqliteTable(
   "email_verification_challenges",
   {

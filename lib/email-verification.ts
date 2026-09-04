@@ -1,13 +1,23 @@
 import { createHmac, randomInt, randomUUID, timingSafeEqual } from "node:crypto";
 import type { Client, InStatement } from "@libsql/client";
+import { accountIdentityFingerprint, ACCOUNT_IDENTITY_KEY_VERSION } from "./account-identity";
 
 /**
- * A3 / A3b — the email-verification challenge state machine (storage in
+ * A3 / A3b / A3c — the email-verification challenge state machine (storage in
  * drizzle/0046_email_verification_challenges.sql).
  *
- * This module owns the CHALLENGE ONLY. The authoritative verified-email marker
- * is users.email_verified_at (added by drizzle/0046); the routes read/write it
- * directly. This module stays uncoupled from account-identity.
+ * This module owns the CHALLENGE. The authoritative verified-email marker is
+ * users.email_verified_at (added by drizzle/0046); the routes read/write it
+ * directly. A3c additionally lets a successful consume write ONE piece of
+ * downstream identity evidence — a VERIFIED_EMAIL row in
+ * account_identity_fingerprints (drizzle/0045, reused unchanged) — via
+ * verifiedEmailFingerprintForChallenge / upsertVerifiedEmailFingerprintIfChallengeConsumedStatement
+ * below. That is the ONLY account-identity coupling this module has: it calls
+ * lib/account-identity.ts's existing keyed-HMAC contract (accountIdentityFingerprint)
+ * and never computes a digest itself, never touches account_identity_profiles,
+ * and the fingerprint stays ACCOUNT_ONLY evidence (lib/account-identity.ts
+ * ACCOUNT_IDENTITY_FINGERPRINT_EVIDENCE_CEILING) — this module does not
+ * interpret it as ownership.
  *
  * A3b changed the challenge from a 256-bit link token to a 6-digit numeric
  * code (see generateEmailVerificationChallenge / hashEmailVerificationCode
@@ -232,6 +242,76 @@ export function setUserEmailVerifiedIfChallengeConsumedStatement(
 /** Clear users.email_verified_at back to NULL. Used atomically with a users.email change. */
 export function clearUserEmailVerifiedStatement(userId: string): InStatement {
   return { sql: `UPDATE users SET email_verified_at = NULL WHERE id = ?`, args: [userId] };
+}
+
+// ---------------------------------------------------------------------------
+// account_identity_fingerprints (VERIFIED_EMAIL) — A3c.
+// ---------------------------------------------------------------------------
+
+/**
+ * The VERIFIED_EMAIL identity fingerprint for `normalizedEmail` (already
+ * lowercased/trimmed by the caller with this codebase's usual
+ * `.trim().toLowerCase()` convention). A thin wrapper around
+ * lib/account-identity.ts's accountIdentityFingerprint so callers of this
+ * module never need their own account-identity import (see the module
+ * docstring, and tests/account-identity.test.mjs's app/ import allowlist).
+ *
+ * FAILS CLOSED: returns null when ACCOUNT_IDENTITY_HMAC_KEY is not
+ * configured (the only way it can be null here, since kind is always the
+ * literal 'VERIFIED_EMAIL' and verified is always true). Callers MUST treat
+ * null as "identity evidence unavailable" and refuse to verify at all —
+ * never consume the challenge or set users.email_verified_at without also
+ * being able to persist this fingerprint in the same transaction.
+ */
+export function verifiedEmailFingerprintForChallenge(normalizedEmail: string): string | null {
+  return accountIdentityFingerprint("VERIFIED_EMAIL", normalizedEmail, { verified: true });
+}
+
+/**
+ * Upsert this account's VERIFIED_EMAIL fingerprint, but ONLY when
+ * `challengeId` was just consumed at exactly `verifiedAt` — the same
+ * self-guard as setUserEmailVerifiedIfChallengeConsumedStatement above, so
+ * this belongs in the SAME client.batch as the consume statement (see
+ * verify/route.ts). A losing concurrent verify of the same challenge (whose
+ * own consume affected 0 rows) can therefore never also write or restamp
+ * this fingerprint.
+ *
+ * `fingerprint` must already be the value of verifiedEmailFingerprintForChallenge
+ * — this function does no hashing and never sees a raw email. One row per
+ * (account, VERIFIED_EMAIL, key version): a second verification of the same
+ * still-current email (e.g. a re-requested code) updates the existing row in
+ * place rather than duplicating it, via the same ON CONFLICT target as
+ * lib/account-identity-repo.ts's accountIdentityProfileUpsertStatement.
+ */
+export function upsertVerifiedEmailFingerprintIfChallengeConsumedStatement(
+  fingerprintId: string,
+  userId: string,
+  fingerprint: string,
+  challengeId: string,
+  verifiedAt: number,
+): InStatement {
+  return {
+    sql: `INSERT INTO account_identity_fingerprints
+            (id, user_id, fingerprint_kind, fingerprint, key_version, source_verified_at, created_at)
+          SELECT ?, ?, 'VERIFIED_EMAIL', ?, ?, ?, ?
+           WHERE EXISTS (
+             SELECT 1 FROM email_verification_challenges WHERE id = ? AND consumed_at = ?
+           )
+          ON CONFLICT (user_id, fingerprint_kind, key_version) DO UPDATE SET
+            fingerprint = excluded.fingerprint,
+            source_verified_at = excluded.source_verified_at,
+            created_at = excluded.created_at`,
+    args: [
+      fingerprintId,
+      userId,
+      fingerprint,
+      ACCOUNT_IDENTITY_KEY_VERSION,
+      verifiedAt,
+      verifiedAt,
+      challengeId,
+      verifiedAt,
+    ],
+  };
 }
 
 /**

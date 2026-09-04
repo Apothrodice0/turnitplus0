@@ -13,14 +13,16 @@ import { __setEmailDeliveryProviderForTest } from '../lib/mail/email-delivery.ts
 import {
   hashEmailVerificationCode,
   revokeEmailVerificationChallengeByIdStatement,
+  upsertVerifiedEmailFingerprintIfChallengeConsumedStatement,
   EMAIL_VERIFICATION_TTL_MS,
   EMAIL_VERIFICATION_RESEND_COOLDOWN_MS,
   EMAIL_VERIFICATION_MAX_ISSUANCE_PER_WINDOW,
 } from '../lib/email-verification.ts';
+import { accountIdentityFingerprint, ACCOUNT_IDENTITY_HMAC_KEY_ENV, ACCOUNT_IDENTITY_KEY_VERSION } from '../lib/account-identity.ts';
 import { withTestIdentity } from './helpers/test-signup.mjs';
 
 /**
- * A3 / A3b — email-verification challenge system.
+ * A3 / A3b / A3c — email-verification challenge system.
  *
  * A3b adapted the challenge from a 256-bit link token to a 6-digit numeric
  * code (see lib/email-verification.ts's own header comment for why the
@@ -32,6 +34,17 @@ import { withTestIdentity } from './helpers/test-signup.mjs';
  * Authoritative verified state is users.email_verified_at (works for EVERY
  * account, profile or not). account_identity_profiles.email_verified_at is
  * deprecated/vestigial and is asserted to stay NULL.
+ *
+ * A3c: a winning verify additionally upserts a VERIFIED_EMAIL row in
+ * account_identity_fingerprints, atomically with the challenge consume and
+ * the users.email_verified_at write (see lib/email-verification.ts's
+ * upsertVerifiedEmailFingerprintIfChallengeConsumedStatement). This file pins
+ * that the fingerprint is exactly what lib/account-identity.ts's
+ * accountIdentityFingerprint('VERIFIED_EMAIL', ...) would independently
+ * compute, that it is ACCOUNT_IDENTITY_HMAC_KEY-gated fail-closed (a missing
+ * key must leave verification wholly unattempted, not partially applied),
+ * and that email-change removes it atomically with clearing
+ * users.email_verified_at.
  *
  * The mail provider is a fake injected here; NO real mail is ever sent, and
  * the default provider's fail-closed behaviour is proven in a dedicated case.
@@ -59,6 +72,12 @@ process.env.ADMIN_EMAIL = 'a3-admin@example.com';
 // route gated on it) is exercised end-to-end. A dedicated "unset" test below
 // removes it for exactly one case, then restores it.
 process.env.EMAIL_VERIFICATION_CODE_SECRET = 'test-only-email-verification-code-secret';
+// A3c — test-only identity root key so verifiedEmailFingerprintForChallenge
+// (and every verify call gated on it) is exercised end-to-end. A dedicated
+// "unset" test below removes it for exactly one case, then restores it.
+// Deliberately a DIFFERENT string from EMAIL_VERIFICATION_CODE_SECRET above —
+// the two must never be conflated.
+process.env[ACCOUNT_IDENTITY_HMAC_KEY_ENV] = 'test-only-account-identity-hmac-key';
 // Belt-and-braces: make sure a real Resend provider never activates in this
 // file — every test here injects a fake provider explicitly, and provider
 // selection must stay deterministic regardless of the host machine's shell.
@@ -159,6 +178,16 @@ const challengesFor = async (userId) =>
     sql: 'SELECT id, email, token_digest, created_at, expires_at, consumed_at, revoked_at FROM email_verification_challenges WHERE user_id = ? ORDER BY created_at',
     args: [userId],
   })).rows;
+// A3c — this account's account_identity_fingerprints rows (any kind).
+const fingerprintsFor = async (userId) =>
+  (await db.execute({
+    sql: 'SELECT id, fingerprint_kind, fingerprint, key_version, source_verified_at, created_at FROM account_identity_fingerprints WHERE user_id = ? ORDER BY fingerprint_kind',
+    args: [userId],
+  })).rows;
+// The independently-computed expected VERIFIED_EMAIL digest for one address —
+// same canonical normalization auth already uses everywhere (.trim().toLowerCase()).
+const expectedVerifiedEmailFingerprint = (email) =>
+  accountIdentityFingerprint('VERIFIED_EMAIL', email.trim().toLowerCase(), { verified: true });
 // THE authoritative marker.
 const userEmailVerifiedAt = async (userId) => {
   const r = await db.execute({ sql: 'SELECT email_verified_at FROM users WHERE id = ?', args: [userId] });
@@ -250,12 +279,13 @@ await test('valid verification succeeds once, sets users.email_verified_at, and 
   assert.ok(Number(await userEmailVerifiedAt(uid)) > 0, 'users.email_verified_at is set');
   assert.equal(await profileEmailVerifiedAt(uid), null, 'the vestigial profile column stays NULL');
   assert.ok(Number((await challengesFor(uid))[0].consumed_at) > 0);
+  assert.equal((await fingerprintsFor(uid)).length, 1, 'A3c: exactly one fingerprint written alongside the verify');
 
   meBody = await (await callMe(cookie)).json();
   assert.equal(meBody.emailVerification.status, 'verified');
 });
 
-await test('wrong code fails and does not consume or verify the real challenge', async () => {
+await test('wrong code fails and does not consume or verify the real challenge, and writes no fingerprint', async () => {
   sentMessages.length = 0;
   const { cookie } = await signup('user-wrongcode@example.com');
   const realCode = codeFromLastMessage();
@@ -266,19 +296,27 @@ await test('wrong code fails and does not consume or verify the real challenge',
   assert.match((await res.json()).error, /doesn't match/i);
   assert.equal(await userEmailVerifiedAt(uid), null);
   assert.equal((await challengesFor(uid))[0].consumed_at, null, 'the real challenge is still unconsumed after a wrong guess');
+  assert.equal((await fingerprintsFor(uid)).length, 0, 'no fingerprint from a wrong guess');
 
   // and the REAL code still works afterward
   assert.equal((await callVerify(cookie, realCode)).status, 200);
+  assert.equal((await fingerprintsFor(uid)).length, 1, 'the real code does write one');
 });
 
-await test('replay: a consumed code cannot verify again', async () => {
+await test('replay: a consumed code cannot verify again, and the replay does not touch the fingerprint', async () => {
   sentMessages.length = 0;
   const { cookie } = await signup('user4@example.com');
   const code = codeFromLastMessage();
+  const uid = await userIdByEmail('user4@example.com');
   assert.equal((await callVerify(cookie, code)).status, 200);
+  const fpAfterFirst = (await fingerprintsFor(uid))[0];
   const replay = await callVerify(cookie, code);
   assert.equal(replay.status, 400);
   assert.match((await replay.json()).error, /already been used/i);
+  const rows = await fingerprintsFor(uid);
+  assert.equal(rows.length, 1, 'the replay did not add a second row');
+  assert.equal(rows[0].id, fpAfterFirst.id, 'and did not touch the existing one');
+  assert.equal(rows[0].source_verified_at, fpAfterFirst.source_verified_at, 'timestamp unchanged by the failed replay');
 });
 
 await test('expired: a code past its TTL cannot verify and does not set verified state', async () => {
@@ -294,9 +332,10 @@ await test('expired: a code past its TTL cannot verify and does not set verified
   assert.equal(res.status, 400);
   assert.match((await res.json()).error, /expired/i);
   assert.equal(await userEmailVerifiedAt(uid), null);
+  assert.equal((await fingerprintsFor(uid)).length, 0, 'no fingerprint from an expired code');
 });
 
-await test('revoked: a revoked code cannot verify', async () => {
+await test('revoked: a revoked code cannot verify, and writes no fingerprint', async () => {
   sentMessages.length = 0;
   const { cookie } = await signup('user6@example.com');
   const code = codeFromLastMessage();
@@ -305,6 +344,7 @@ await test('revoked: a revoked code cannot verify', async () => {
   const res = await callVerify(cookie, code);
   assert.equal(res.status, 400);
   assert.match((await res.json()).error, /no longer valid/i);
+  assert.equal((await fingerprintsFor(uid)).length, 0, 'no fingerprint from a revoked code');
 });
 
 await test('malformed code fails with a generic message, and needs no session (rejected before any DB work)', async () => {
@@ -324,6 +364,7 @@ await test('a challenge whose target address no longer matches the current email
   const res = await callVerify(cookie, code);
   assert.equal(res.status, 400);
   assert.match((await res.json()).error, /email address changed/i);
+  assert.equal((await fingerprintsFor(uid)).length, 0, 'no fingerprint from a stale-address code');
 });
 
 await test('resend cooldown: a second send inside the window is 429; allowed again after it', async () => {
@@ -386,7 +427,7 @@ await test('bounded issuance: once the per-window cap is reached, send is reject
   assert.equal((await res.json()).status, 'cooldown');
 });
 
-await test('concurrent verification: exactly one of two simultaneous verifies succeeds', async () => {
+await test('concurrent verification: exactly one of two simultaneous verifies succeeds, and re-processing the race writes exactly one fingerprint', async () => {
   sentMessages.length = 0;
   const { cookie } = await signup('user11@example.com');
   const code = codeFromLastMessage();
@@ -394,18 +435,117 @@ await test('concurrent verification: exactly one of two simultaneous verifies su
   const [a, b] = await Promise.all([callVerify(cookie, code, { ip: 'race-a' }), callVerify(cookie, code, { ip: 'race-b' })]);
   assert.deepEqual([a.status, b.status].sort(), [200, 400]);
   assert.ok(Number(await userEmailVerifiedAt(uid)) > 0);
+  const rows = await fingerprintsFor(uid);
+  assert.equal(rows.length, 1, 'A3c: the losing concurrent attempt did not also write (or duplicate) a fingerprint');
+  assert.equal(String(rows[0].fingerprint), expectedVerifiedEmailFingerprint('user11@example.com'));
 });
 
-await test('no identity fingerprint is ever created by verification; the vestigial profile column stays NULL', async () => {
+await test('A3c: successful verification writes exactly one VERIFIED_EMAIL fingerprint matching the pure-function digest; the vestigial profile column stays NULL', async () => {
   sentMessages.length = 0;
-  const before = Number((await db.execute('SELECT COUNT(*) c FROM account_identity_fingerprints')).rows[0].c);
   const { cookie } = await signup('user12@example.com');
   const uid = await userIdByEmail('user12@example.com');
-  await callVerify(cookie, codeFromLastMessage());
-  const after = Number((await db.execute('SELECT COUNT(*) c FROM account_identity_fingerprints')).rows[0].c);
-  assert.equal(after, before);
-  assert.equal(after, 0);
+  assert.equal((await fingerprintsFor(uid)).length, 0, 'nothing before verification');
+
+  const res = await callVerify(cookie, codeFromLastMessage());
+  assert.equal(res.status, 200);
+
+  const rows = await fingerprintsFor(uid);
+  assert.equal(rows.length, 1, 'exactly one fingerprint row');
+  const row = rows[0];
+  assert.equal(String(row.fingerprint_kind), 'VERIFIED_EMAIL');
+  assert.equal(Number(row.key_version), ACCOUNT_IDENTITY_KEY_VERSION);
+  assert.ok(Number(row.source_verified_at) > 0);
+  assert.ok(Number(row.created_at) > 0);
+  assert.match(String(row.fingerprint), /^[0-9a-f]{64}$/, 'a 64-char hex HMAC digest');
+  assert.equal(String(row.fingerprint), expectedVerifiedEmailFingerprint('user12@example.com'), 'matches the independently-computed keyed HMAC');
+
+  // plaintext email is not stored anywhere in the fingerprint row
+  for (const v of Object.values(row)) {
+    assert.equal(String(v ?? '').toLowerCase().includes('user12@example.com'), false, 'no column holds the raw email');
+  }
+
   assert.equal(await profileEmailVerifiedAt(uid), null, 'account_identity_profiles.email_verified_at is never written');
+});
+
+await test('A3c: different accounts/emails produce different VERIFIED_EMAIL fingerprints', async () => {
+  sentMessages.length = 0;
+  const { cookie: cookieA } = await signup('fp-a@example.com', { username: 'fpusera' });
+  assert.equal((await callVerify(cookieA, codeFromLastMessage())).status, 200);
+  const uidA = await userIdByEmail('fp-a@example.com');
+
+  sentMessages.length = 0;
+  const { cookie: cookieB } = await signup('fp-b@example.com', { username: 'fpuserb' });
+  assert.equal((await callVerify(cookieB, codeFromLastMessage())).status, 200);
+  const uidB = await userIdByEmail('fp-b@example.com');
+
+  const fpA = String((await fingerprintsFor(uidA))[0].fingerprint);
+  const fpB = String((await fingerprintsFor(uidB))[0].fingerprint);
+  assert.notEqual(fpA, fpB, 'different verified emails -> different digests');
+  assert.equal(fpA, expectedVerifiedEmailFingerprint('fp-a@example.com'));
+  assert.equal(fpB, expectedVerifiedEmailFingerprint('fp-b@example.com'));
+});
+
+await test('A3c: re-applying the guarded fingerprint-upsert statement for the same winning consume updates in place — no duplicate row', async () => {
+  // Directly exercises the statement the verify route puts in its
+  // client.batch (upsertVerifiedEmailFingerprintIfChallengeConsumedStatement),
+  // simulating "successful re-processing" of the SAME winning write (e.g. a
+  // retried batch after a transient SQLITE_BUSY on a later statement, or any
+  // other reason the same guarded write is applied more than once). Bypasses
+  // the HTTP layer deliberately: POST /send itself refuses to mint a second
+  // code once an account is already verified (see send/route.ts), so this
+  // scenario cannot be reached by calling /send twice — the guarantee that
+  // matters lives in the SQL upsert semantics, not in there being no route
+  // that could ever call it twice.
+  const uid = 'reprocess-fp-user';
+  await db.execute({ sql: 'INSERT INTO users (id, email, username, password_hash) VALUES (?,?,?,?)', args: [uid, 'reprocess@example.com', 'reprocess', 'h'] });
+  const now = Date.now();
+  const challengeId = 'reprocess-challenge-1';
+  await db.execute({
+    sql: 'INSERT INTO email_verification_challenges (id, user_id, email, token_digest, created_at, expires_at, consumed_at) VALUES (?,?,?,?,?,?,?)',
+    args: [challengeId, uid, 'reprocess@example.com', 'x'.repeat(64), now - 1000, now + 600_000, now],
+  });
+  const fp = expectedVerifiedEmailFingerprint('reprocess@example.com');
+
+  await db.execute(upsertVerifiedEmailFingerprintIfChallengeConsumedStatement('fp-row-a', uid, fp, challengeId, now));
+  const afterFirst = await fingerprintsFor(uid);
+  assert.equal(afterFirst.length, 1);
+  assert.equal(String(afterFirst[0].fingerprint), fp);
+
+  // re-apply the SAME guarded write again, with a different candidate row id
+  await db.execute(upsertVerifiedEmailFingerprintIfChallengeConsumedStatement('fp-row-b', uid, fp, challengeId, now));
+  const afterSecond = await fingerprintsFor(uid);
+  assert.equal(afterSecond.length, 1, 'still exactly one row — the ON CONFLICT DO UPDATE upserted in place, not a duplicate');
+  assert.equal(afterSecond[0].id, 'fp-row-a', "the ORIGINAL row's id survives — ON CONFLICT DO UPDATE never touches id");
+
+  // and the guard itself: a write claiming a DIFFERENT (never-consumed)
+  // challenge id is a no-op, even for an otherwise-identical fingerprint.
+  await db.execute(upsertVerifiedEmailFingerprintIfChallengeConsumedStatement('fp-row-c', uid, fp, 'no-such-challenge', now));
+  assert.equal((await fingerprintsFor(uid)).length, 1, 'an unguarded/unmatched challenge id writes nothing');
+});
+
+await test('A3c: fingerprint secret missing fails closed BEFORE any write — verification is never partial', async () => {
+  const saved = process.env[ACCOUNT_IDENTITY_HMAC_KEY_ENV];
+  sentMessages.length = 0;
+  const { cookie } = await signup('user-nofpkey@example.com');
+  const uid = await userIdByEmail('user-nofpkey@example.com');
+  const code = codeFromLastMessage();
+  delete process.env[ACCOUNT_IDENTITY_HMAC_KEY_ENV];
+  try {
+    const res = await callVerify(cookie, code);
+    assert.equal(res.status, 500, 'refuses rather than verifying without evidence');
+    assert.equal(await userEmailVerifiedAt(uid), null, 'NOT marked verified — no partial success');
+    assert.equal((await challengesFor(uid))[0].consumed_at, null, 'the challenge itself was NOT consumed');
+    assert.equal((await fingerprintsFor(uid)).length, 0, 'no fingerprint row exists');
+    assert.equal((await res.json()).error, 'Something went wrong. Please try again.', 'a generic message only — no secret or internal detail leaks');
+  } finally {
+    process.env[ACCOUNT_IDENTITY_HMAC_KEY_ENV] = saved;
+  }
+
+  // and once the key is restored, the SAME still-live code verifies normally
+  const recovered = await callVerify(cookie, code);
+  assert.equal(recovered.status, 200);
+  assert.ok(Number(await userEmailVerifiedAt(uid)) > 0);
+  assert.equal((await fingerprintsFor(uid)).length, 1);
 });
 
 await test('a verified address matching ADMIN_EMAIL still does NOT gain the admin role', async () => {
@@ -453,6 +593,7 @@ await test('LEGACY (profile-less) account: can request AND complete verification
 
   assert.ok(Number(await userEmailVerifiedAt(legacyId)) > 0, 'users.email_verified_at is now set for the legacy account');
   assert.equal(await hasProfile(legacyId), false, 'STILL profile-less — no synthetic profile row was created');
+  assert.equal((await fingerprintsFor(legacyId)).length, 1, 'A3c: a profile-less account still gets a VERIFIED_EMAIL fingerprint - it keys off users.id, not the profile');
   const meAfter = await (await callMe(sessionToken)).json();
   assert.equal(meAfter.emailVerification.status, 'verified');
   assert.equal(meAfter.identity, null, 'still no identity profile — verification did not fabricate a full name / account type');
@@ -500,15 +641,17 @@ await test('absent EMAIL_VERIFICATION_CODE_SECRET fails closed: /send returns 50
   }
 });
 
-await test('send/verify responses leak nothing internal (digest / challenge id / fingerprint / user id)', async () => {
+await test('send/verify/me responses leak nothing internal (digest / challenge id / fingerprint / user id / the actual fingerprint value)', async () => {
   sentMessages.length = 0;
   const { cookie } = await signup('user14@example.com');
   const uid = await userIdByEmail('user14@example.com');
   await clearCooldown(uid);
   const sendBody = JSON.stringify(await (await callSend(cookie)).json());
   const verifyBody = JSON.stringify(await (await callVerify(cookie, codeFromLastMessage())).json());
-  for (const blob of [sendBody, verifyBody]) {
-    for (const forbidden of ['token_digest', 'digest', 'challengeid', 'challenge_id', 'fingerprint', 'ownerlink', 'user_id', uid.toLowerCase()]) {
+  const meBody = JSON.stringify(await (await callMe(cookie)).json());
+  const actualFingerprint = String((await fingerprintsFor(uid))[0].fingerprint);
+  for (const blob of [sendBody, verifyBody, meBody]) {
+    for (const forbidden of ['token_digest', 'digest', 'challengeid', 'challenge_id', 'fingerprint', 'ownerlink', 'user_id', uid.toLowerCase(), actualFingerprint.toLowerCase()]) {
       assert.equal(blob.toLowerCase().includes(forbidden), false, `${forbidden} must not appear in ${blob}`);
     }
   }
@@ -544,9 +687,15 @@ await test('non-owner cannot verify another account: entering account A\'s code 
 
   assert.equal(await userEmailVerifiedAt(uidA), null, "A's account was not verified by B's request");
   assert.equal(await userEmailVerifiedAt(uidB), null, "B's own account was not accidentally verified either");
+  assert.equal((await fingerprintsFor(uidA)).length, 0, "B's request did not create a fingerprint for A");
+  assert.equal((await fingerprintsFor(uidB)).length, 0, "B's request did not create a fingerprint for B either");
 
   // and A's real code still works for A.
   assert.equal((await callVerify(cookieA, codeA)).status, 200);
+  const fpA = await fingerprintsFor(uidA);
+  assert.equal(fpA.length, 1, "A's own successful verify does write A's fingerprint");
+  assert.equal(String(fpA[0].fingerprint), expectedVerifiedEmailFingerprint('owner-a@example.com'));
+  assert.equal((await fingerprintsFor(uidB)).length, 0, "B still has none");
 });
 
 // ---- guessing / attempt protection (A3b) -----------------------------
@@ -586,12 +735,14 @@ await test('attempt cap: repeated wrong guesses against one account are rate-lim
 
 // ---- email-change interaction ----------------------------------------
 
-await test('email change: UPDATE users (email + email_verified_at NULL) and challenge revoke land atomically; old code cannot verify the new email', async () => {
+await test('email change: UPDATE users (email + email_verified_at NULL), challenge revoke, and VERIFIED_EMAIL fingerprint removal land atomically; old code cannot verify the new email', async () => {
   sentMessages.length = 0;
   const { cookie } = await signup('user7@example.com', { username: 'user7' });
   assert.equal((await callVerify(cookie, codeFromLastMessage())).status, 200);
   const uid = await userIdByEmail('user7@example.com');
   assert.ok(Number(await userEmailVerifiedAt(uid)) > 0);
+  assert.equal((await fingerprintsFor(uid)).length, 1, 'precondition: verified with a fingerprint');
+  assert.equal(String((await fingerprintsFor(uid))[0].fingerprint), expectedVerifiedEmailFingerprint('user7@example.com'));
 
   await clearCooldown(uid);
   assert.equal((await callSend(cookie)).status, 200);
@@ -606,10 +757,22 @@ await test('email change: UPDATE users (email + email_verified_at NULL) and chal
   assert.equal(await userEmailVerifiedAt(uid), null, 'users.email_verified_at cleared by the email change');
   const rows = await challengesFor(uid);
   assert.equal(rows.every((r) => r.revoked_at != null || r.consumed_at != null), true, 'every prior challenge is revoked or already consumed');
+  assert.equal((await fingerprintsFor(uid)).length, 0, 'the old VERIFIED_EMAIL fingerprint was removed atomically with the email change');
 
   const res = await callVerify(cookie, staleCode);
   assert.equal(res.status, 400);
   assert.equal(await userEmailVerifiedAt(uid), null);
+  assert.equal((await fingerprintsFor(uid)).length, 0, 'still nothing — the stale code cannot resurrect it');
+
+  // verifying the NEW email writes a REPLACEMENT fingerprint for the new address
+  await clearCooldown(uid);
+  assert.equal((await callSend(cookie)).status, 200);
+  const newCode = codeFromLastMessage();
+  assert.equal((await callVerify(cookie, newCode)).status, 200);
+  const after = await fingerprintsFor(uid);
+  assert.equal(after.length, 1, 'exactly one fingerprint for the new email');
+  assert.equal(String(after[0].fingerprint), expectedVerifiedEmailFingerprint('user7-new@example.com'));
+  assert.notEqual(String(after[0].fingerprint), expectedVerifiedEmailFingerprint('user7@example.com'), 'different from the old email\'s digest');
 });
 
 // ---- signup challenge-delivery invariant --------------------------

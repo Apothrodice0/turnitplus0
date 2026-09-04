@@ -8,7 +8,11 @@ import { verifyPassword } from '../../../../lib/auth-crypto';
 import { deleteAccountData, invalidateSessionsAndDeleteUser, ACCOUNT_DELETION_CONFIRMATION_PHRASE } from '../../../../lib/account-deletion';
 import { isCrossOriginBrowserRequest, CROSS_ORIGIN_REJECTED } from '../../../../lib/same-origin';
 import { resolveSignupIdentity } from '../../../../lib/account-identity-signup';
-import { readAccountIdentityProfile, accountIdentityProfileUpsertStatement } from '../../../../lib/account-identity-repo';
+import {
+  readAccountIdentityProfile,
+  accountIdentityProfileUpsertStatement,
+  deleteAccountIdentityFingerprintStatement,
+} from '../../../../lib/account-identity-repo';
 import { resolveGeonamesCity } from '../../../../lib/geonames-cities';
 import { isoCountryByAlpha2 } from '../../../../lib/iso-3166-1-countries';
 import {
@@ -223,17 +227,23 @@ export async function PATCH(request: Request) {
       // (users.email_verified_at -> NULL) and kills every outstanding
       // verification link, and both must land atomically with the users.email
       // UPDATE itself (no window where the address moved but an old link still
-      // verifies, or the account still reads "verified"). Since every statement
-      // here goes into ONE client.batch transaction below, the effects commit
-      // together. The revoke is a no-op when there are no challenges. A profile
-      // edit that does NOT change the email never runs these — editing your city
-      // must not un-verify your email.
+      // verifies, or the account still reads "verified"). A3c additionally
+      // revokes the now-stale VERIFIED_EMAIL identity fingerprint in the same
+      // transaction — a changed email must never leave evidence for an address
+      // the account no longer controls; verifying the new address later writes
+      // a fresh fingerprint (see the email-verification route). Since every
+      // statement here goes into ONE client.batch transaction below, the
+      // effects commit together. The revoke/delete are no-ops when there is
+      // nothing to revoke/delete. A profile edit that does NOT change the
+      // email never runs these — editing your city must not un-verify your
+      // email or touch its fingerprint.
       const emailChanged = normalizedEmail !== sessionUser.email;
       const emailChangeStatements: InStatement[] =
         emailChanged && emailVerifiedColumnExists
           ? [
               clearUserEmailVerifiedStatement(sessionUser.id),
               revokeOutstandingEmailVerificationChallengesStatement(sessionUser.id, now),
+              deleteAccountIdentityFingerprintStatement(sessionUser.id, 'VERIFIED_EMAIL'),
             ]
           : [];
 

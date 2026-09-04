@@ -416,7 +416,10 @@ function deriveAccountIdentityKey(rootKey: string, kind: AccountIdentityFingerpr
 /**
  * The keyed fingerprint of ONE already-canonical identity value (a lowercased
  * email, an E.164 phone, a ROR id body). This is the derivation CONTRACT for
- * account_identity_fingerprints - it is NOT called by any writer in A1.
+ * account_identity_fingerprints. A1 called this from no writer at all; A3c is
+ * the first caller - lib/email-verification.ts's verifiedEmailFingerprintForChallenge
+ * wraps this exact function for the VERIFIED_EMAIL kind. VERIFIED_PHONE_E164
+ * and VERIFIED_INSTITUTION_ROR still have no caller.
  *
  * Construction: rootKey -> per-kind key (deriveAccountIdentityKey) ->
  * HMAC-SHA256(perKindKey, ACCOUNT_IDENTITY_FINGERPRINT_DOMAIN + value), hex.

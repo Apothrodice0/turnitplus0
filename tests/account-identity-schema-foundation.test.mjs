@@ -10,6 +10,7 @@ import {
   deleteAccountIdentityProfile,
   countAccountIdentityProfiles,
   readAccountIdentityFingerprints,
+  deleteAccountIdentityFingerprintStatement,
   AccountIdentityValidationException,
 } from "../lib/account-identity-repo.ts";
 import * as repoModule from "../lib/account-identity-repo.ts";
@@ -19,8 +20,11 @@ import * as repoModule from "../lib/account-identity-repo.ts";
  * is PURELY ADDITIVE (two new tables, nothing altered on `users` or any other
  * existing table), pins the exact table/column/index/FK shape and the CHECK
  * constraints, and exercises the repo: the 1:1 upsert, the value-free validation
- * failure, the CASCADE cleanup, and that account_identity_fingerprints has NO
- * writer in this phase.
+ * failure, the CASCADE cleanup, and that this module still has no
+ * insert/upsert writer for account_identity_fingerprints (A3c's VERIFIED_EMAIL
+ * writer lives in lib/email-verification.ts instead, pinned end-to-end in
+ * tests/email-verification.test.mjs — this file only pins the repo's own
+ * deleteAccountIdentityFingerprintStatement, used for email-change cleanup).
  */
 
 const repo = path.resolve(".");
@@ -314,10 +318,12 @@ test("3: CHECK constraints + 1:1 PK + CASCADE cleanup all behave", async () => {
 });
 
 // ===========================================================================
-// 4 - the repo: 1:1 upsert, value-free validation failure, no fingerprint writer
+// 4 - the repo: 1:1 upsert, value-free validation failure, no INSERT/UPSERT
+// fingerprint writer (deletion for email-change cleanup is a deliberate A3c
+// exception, pinned separately below)
 // ===========================================================================
 
-test("4: account-identity-repo upserts a 1:1 profile, never marks anything verified, and has no fingerprint writer", async () => {
+test("4: account-identity-repo upserts a 1:1 profile, never marks anything verified, and has no INSERT/UPSERT fingerprint writer", async () => {
   const f = freshDbFile("test_account_identity_repo.db");
   const client = createClient({ url: `file:${f}` });
   try {
@@ -387,12 +393,33 @@ test("4: account-identity-repo upserts a 1:1 profile, never marks anything verif
       },
     );
 
-    // account_identity_fingerprints: reader returns [], and there is NO writer export
+    // account_identity_fingerprints: reader returns [], and there is no
+    // INSERT/UPSERT writer export in THIS module (deleteAccountIdentityFingerprintStatement
+    // is deliberately exempt — it removes evidence, never creates it; pinned below).
     assert.deepEqual(await readAccountIdentityFingerprints(client, "ru-1"), []);
     const fingerprintWriters = Object.keys(repoModule).filter(
       (k) => /fingerprint/i.test(k) && /(insert|write|upsert|create|add|record|set|save|put|store)/i.test(k),
     );
-    assert.deepEqual(fingerprintWriters, [], `no fingerprint writer may exist in A1: ${fingerprintWriters.join(", ")}`);
+    assert.deepEqual(fingerprintWriters, [], `no INSERT/UPSERT fingerprint writer may exist in this module: ${fingerprintWriters.join(", ")}`);
+
+    // deleteAccountIdentityFingerprintStatement (A3c, used by the email-change
+    // transaction): removes exactly one account's fingerprint of one kind, a
+    // no-op for a kind/account with none, and leaves other kinds/accounts alone.
+    await client.execute({
+      sql: "INSERT INTO account_identity_fingerprints (id, user_id, fingerprint_kind, fingerprint, key_version, source_verified_at, created_at) VALUES (?,?,?,?,?,?,?)",
+      args: ["fp-ru-1-email", "ru-1", "VERIFIED_EMAIL", "deadbeef", 1, 1, 1],
+    });
+    await client.execute({
+      sql: "INSERT INTO account_identity_fingerprints (id, user_id, fingerprint_kind, fingerprint, key_version, source_verified_at, created_at) VALUES (?,?,?,?,?,?,?)",
+      args: ["fp-ru-1-ror", "ru-1", "VERIFIED_INSTITUTION_ROR", "cafe", 1, 1, 1],
+    });
+    await client.execute(deleteAccountIdentityFingerprintStatement("ru-1", "VERIFIED_EMAIL"));
+    const afterDelete = await readAccountIdentityFingerprints(client, "ru-1");
+    assert.deepEqual(afterDelete.map((r) => r.fingerprintKind), ["VERIFIED_INSTITUTION_ROR"], "only the targeted kind was removed");
+    // a no-op when there is nothing to delete
+    await client.execute(deleteAccountIdentityFingerprintStatement("ru-1", "VERIFIED_EMAIL"));
+    await client.execute(deleteAccountIdentityFingerprintStatement("no-such-user", "VERIFIED_INSTITUTION_ROR"));
+    assert.equal((await readAccountIdentityFingerprints(client, "ru-1")).length, 1, "the untouched kind survives repeated/foreign deletes");
 
     await deleteAccountIdentityProfile(client, "ru-1");
     assert.equal(await readAccountIdentityProfile(client, "ru-1"), null);

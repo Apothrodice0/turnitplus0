@@ -19,11 +19,17 @@ import {
  * persisted, and every *_verified_at column is left untouched (NULL) - NOTHING
  * here can mark an email / phone / institution VERIFIED in A1.
  *
- * account_identity_fingerprints has a READER ONLY and no writer at all in this
- * phase (see readAccountIdentityFingerprints). A fingerprint is only ever
- * written by a later, separately-reviewed verified-identity phase; A1 keeps the
- * table empty. lib/account-identity.ts's accountIdentityFingerprint additionally
- * fails closed unless a value is explicitly { verified: true }.
+ * account_identity_fingerprints: this module still has NO insert/upsert writer
+ * of its own (see readAccountIdentityFingerprints below) — a fingerprint row is
+ * only ever produced by the specific, separately-reviewed flow that verified
+ * the underlying value, and lib/account-identity.ts's accountIdentityFingerprint
+ * fails closed unless that value is explicitly { verified: true }. A3c is the
+ * first such flow: a successful email verification writes a VERIFIED_EMAIL row
+ * via lib/email-verification.ts's own guarded statement (coupled to the
+ * winning challenge-consume, not exposed here — see that module). This module
+ * DOES own deleteAccountIdentityFingerprintStatement below, used by the
+ * email-change transaction (app/api/auth/me/route.ts) to revoke a now-stale
+ * VERIFIED_EMAIL fingerprint atomically with the users.email UPDATE.
  *
  * NOTHING in this module is imported by any scoring / similarity / matcher /
  * candidate-discovery / owner-link / Device Passport path
@@ -262,11 +268,12 @@ function mapFingerprintRow(row: Record<string, unknown>): StoredAccountIdentityF
 }
 
 /**
- * Read one account's identity fingerprints. In A1 this ALWAYS returns [] because
- * nothing writes account_identity_fingerprints yet - there is deliberately no
- * writer in this module. It exists so the later verified-identity phase has a
- * stable read path to build on. PRIVACY: a fingerprint row is an opaque HMAC
- * digest; callers must not log it.
+ * Read one account's identity fingerprints. Empty for every account that has
+ * never completed a verification flow that produces one (still every account
+ * before A3c, and still every kind other than VERIFIED_EMAIL). This module
+ * has no insert/upsert writer of its own - see the module docstring for where
+ * VERIFIED_EMAIL rows actually come from. PRIVACY: a fingerprint row is an
+ * opaque HMAC digest; callers must not log it.
  */
 export async function readAccountIdentityFingerprints(
   exec: Exec,
@@ -281,4 +288,25 @@ export async function readAccountIdentityFingerprints(
     })
   ).rows as unknown as Record<string, unknown>[];
   return rows.map(mapFingerprintRow);
+}
+
+/**
+ * Remove one account's fingerprint of a given kind (and key generation),
+ * a no-op if it has none. Used by the email-change transaction to revoke a
+ * now-stale VERIFIED_EMAIL fingerprint atomically with the users.email
+ * UPDATE (app/api/auth/me/route.ts) - a changed email must never leave
+ * evidence for an address the account no longer controls. Deletion, unlike
+ * creation, needs no verification-flow guard: removing evidence is always
+ * safe, and this statement runs in the SAME batch as the email UPDATE so
+ * there is no window where the address moved but the old fingerprint lingers.
+ */
+export function deleteAccountIdentityFingerprintStatement(
+  userId: string,
+  kind: AccountIdentityFingerprintKind,
+  keyVersion: number = ACCOUNT_IDENTITY_KEY_VERSION,
+): InStatement {
+  return {
+    sql: `DELETE FROM account_identity_fingerprints WHERE user_id = ? AND fingerprint_kind = ? AND key_version = ?`,
+    args: [userId, kind, keyVersion],
+  };
 }

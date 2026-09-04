@@ -4,6 +4,7 @@ import { checkEmailVerificationRate, checkEmailVerificationAttemptRate } from '.
 import { clientIpFrom } from '../../../../../lib/client-ip';
 import { getSessionUser } from '../../../../../lib/auth-session';
 import { isCrossOriginBrowserRequest, CROSS_ORIGIN_REJECTED } from '../../../../../lib/same-origin';
+import { randomUUID } from 'node:crypto';
 import {
   isWellFormedEmailVerificationCode,
   mostRecentEmailVerificationChallenge,
@@ -12,6 +13,8 @@ import {
   consumeEmailVerificationChallengeStatement,
   setUserEmailVerifiedIfChallengeConsumedStatement,
   usersHaveEmailVerifiedAtColumn,
+  verifiedEmailFingerprintForChallenge,
+  upsertVerifiedEmailFingerprintIfChallengeConsumedStatement,
   type EmailVerificationRejectReason,
 } from '../../../../../lib/email-verification';
 
@@ -57,6 +60,15 @@ const MAX_WRITE_RETRIES = 5;
  * target address no longer matches the account's current email, and
  * brute-force guessing (checkEmailVerificationAttemptRate — a code is only
  * ~1e6 possibilities, unlike the old 256-bit token).
+ *
+ * A3c: the same atomic write also upserts this account's VERIFIED_EMAIL
+ * identity fingerprint (account_identity_fingerprints), guarded so it can
+ * only land alongside a winning consume — see
+ * upsertVerifiedEmailFingerprintIfChallengeConsumedStatement. The fingerprint
+ * is computed BEFORE the write loop even starts; if
+ * ACCOUNT_IDENTITY_HMAC_KEY is not configured, this route fails closed here
+ * and never touches the challenge or users.email_verified_at — verification
+ * is all-or-nothing, never partial.
  */
 export async function POST(request: Request) {
   try {
@@ -80,6 +92,8 @@ export async function POST(request: Request) {
     const readClient = await getReportsDbClient();
     let challengeId: string;
     let challengeUserId: string;
+    let fingerprint: string;
+    let fingerprintId: string;
     try {
       // Deploy-ordering safety: the challenge table + users.email_verified_at
       // arrive with migration 0046. Without it no code can be valid — treat it
@@ -116,11 +130,24 @@ export async function POST(request: Request) {
         return json({ error: REJECT_MESSAGE.WRONG_CODE }, 400);
       }
 
+      // A3c: derive the VERIFIED_EMAIL identity fingerprint now, BEFORE any
+      // write. Fails closed (null) only when ACCOUNT_IDENTITY_HMAC_KEY is not
+      // configured — treat that as "verification unavailable" rather than
+      // silently verifying without evidence, so this can never partially
+      // succeed. Never logs the secret or the email, only that it's missing.
+      const derivedFingerprint = verifiedEmailFingerprintForChallenge(sessionUser.email.trim().toLowerCase());
+      if (!derivedFingerprint) {
+        console.error('email verification: identity fingerprint secret not configured; refusing to verify');
+        return json({ error: 'Something went wrong. Please try again.' }, 500);
+      }
+
       // No profile check: verified-email state lives on users.email_verified_at,
       // which every account has — a grandfathered profile-less account verifies
       // exactly like any other.
       challengeId = challenge.id;
       challengeUserId = challenge.userId;
+      fingerprint = derivedFingerprint;
+      fingerprintId = randomUUID();
     } finally {
       readClient.close();
     }
@@ -143,6 +170,13 @@ export async function POST(request: Request) {
           [
             consumeEmailVerificationChallengeStatement(challengeId, now),
             setUserEmailVerifiedIfChallengeConsumedStatement(challengeUserId, challengeId, now),
+            upsertVerifiedEmailFingerprintIfChallengeConsumedStatement(
+              fingerprintId,
+              challengeUserId,
+              fingerprint,
+              challengeId,
+              now,
+            ),
           ],
           'write',
         );
