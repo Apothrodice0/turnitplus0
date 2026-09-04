@@ -4,12 +4,14 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 
 /**
- * Developer dashboard — "Corpus maturity exemptions". Lets an admin enter an
- * account email and exempt that account's corpus sources from the 7-day
- * maturity gate (lib/user-submission-corpus.ts's admissionEligibilitySql).
- * Affects ONLY maturity — same-Passport SELF, exact/strong matching,
- * duplicate suppression, archive/web/scholarly evidence, corpus admission,
- * scoring, and owner-link logic are all unaffected.
+ * Corpus workspace — "Maturity exemptions" (originally built for the
+ * developer dashboard, now presented inside /admin/corpus's own card — see
+ * app/admin/corpus/page.tsx). Lets an admin enter an account email and
+ * exempt that account's corpus sources from the 7-day maturity gate
+ * (lib/user-submission-corpus.ts's admissionEligibilitySql). Affects ONLY
+ * maturity — same-Passport SELF, exact/strong matching, duplicate
+ * suppression, archive/web/scholarly evidence, corpus admission, scoring,
+ * and owner-link logic are all unaffected.
  *
  * The email is a lookup key only — POST /api/developer/corpus-maturity-
  * exemptions resolves it to users.id server-side and persists only that id;
@@ -96,71 +98,75 @@ export function DeveloperCorpusMaturityExemptions({ initialExemptions }: { initi
   }
 
   return (
-    <section className="developer-debug-workspace developer-corpus-maturity-exemptions">
-      <h3>Corpus maturity exemptions</h3>
-      <p>
-        Exempt an account&apos;s corpus sources from the 7-day maturity gate — they contribute plagiarism
-        evidence immediately instead of waiting 7 days. Affects maturity only; same-account/Passport self-
-        exclusion, matching, and duplicate suppression are unchanged.
+    <div className="admin-corpus-maturity-exemptions">
+      <p className="admin-card-description">
+        Exempt an account&apos;s corpus sources from the 7-day maturity gate — they contribute plagiarism evidence
+        immediately instead of waiting 7 days. Affects maturity only; same-account/Passport self-exclusion,
+        matching, and duplicate suppression are unchanged.
       </p>
 
-      <div className="developer-corpus-maturity-exemptions-form">
-        <input
-          type="email"
-          value={email}
-          onChange={(event) => setEmail(event.target.value)}
-          placeholder="Account email"
-          aria-label="Account email"
-          autoComplete="off"
-          spellCheck={false}
-        />
-        <button type="button" onClick={addExemption} disabled={adding || email.trim().length === 0}>
+      <div className="admin-corpus-toolbar">
+        <label>
+          Account email
+          <input
+            type="email"
+            value={email}
+            onChange={(event) => setEmail(event.target.value)}
+            placeholder="name@example.com"
+            aria-label="Account email"
+            autoComplete="off"
+            spellCheck={false}
+          />
+        </label>
+        <button type="button" className="admin-btn-primary" onClick={addExemption} disabled={adding || email.trim().length === 0}>
           {adding ? "Adding…" : "Add exemption"}
         </button>
       </div>
 
       {notice && (
-        <p aria-live="polite" className="developer-debug-done">
+        <p aria-live="polite" className="admin-form-notice">
           {notice}
         </p>
       )}
       {error && (
-        <p role="alert" className="developer-debug-error">
+        <p role="alert" className="admin-form-error">
           {error}
         </p>
       )}
 
       {exemptions.length === 0 ? (
-        <p>No accounts are currently exempt.</p>
+        <p className="admin-corpus-empty">No accounts are currently exempt from the maturity gate.</p>
       ) : (
-        <table>
-          <thead>
-            <tr>
-              <th>Email</th>
-              <th>Exempt since</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {exemptions.map((row) => (
-              <tr key={row.userId}>
-                <td>{row.email}</td>
-                <td>{row.createdAt}</td>
-                <td>
-                  <button
-                    type="button"
-                    className="developer-debug-danger"
-                    onClick={() => removeExemption(row.userId)}
-                    disabled={removingId === row.userId}
-                  >
-                    {removingId === row.userId ? "Removing…" : "Remove"}
-                  </button>
-                </td>
+        <div className="developer-table-scroll">
+          <table className="developer-table">
+            <thead>
+              <tr>
+                <th>Email</th>
+                <th>Exempt since</th>
+                <th></th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {exemptions.map((row) => (
+                <tr key={row.userId}>
+                  <td>{row.email}</td>
+                  <td>{row.createdAt}</td>
+                  <td>
+                    <button
+                      type="button"
+                      className="admin-btn-danger-outline"
+                      onClick={() => removeExemption(row.userId)}
+                      disabled={removingId === row.userId}
+                    >
+                      {removingId === row.userId ? "Removing…" : "Remove"}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
-    </section>
+    </div>
   );
 }

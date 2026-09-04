@@ -1,4 +1,8 @@
 import { CRON_SCHEDULES, nextDailyUtcRun } from "@/lib/cron-schedule";
+import { MetricGrid, MetricTile } from "@/components/admin/metric-tile";
+import { AdminStatusBadge } from "@/components/admin/status-badge";
+import { AdminCollapsible } from "@/components/admin/collapsible";
+import { BadgeGroup } from "@/components/admin/badge-list";
 
 type SweepKind = "promotion" | "report_admission" | "retention";
 type SweepEntry = { lastRunAt: string; lastStatus: "success" | "failed"; summary: Record<string, number> | null } | null;
@@ -82,41 +86,72 @@ export function AdminCorpusStatusStrip({
   vercelEnv,
   promotionEnabled,
   retentionEnabled,
+  sourceMatchingEnabled,
   summary,
 }: {
   vercelEnv: string | undefined;
   promotionEnabled: boolean;
   retentionEnabled: boolean;
+  sourceMatchingEnabled: boolean;
   summary: OperationalSummary | null;
 }) {
   const isProduction = vercelEnv === "production";
-  const queueHealth = summary ? `${summary.retryablePromotionCount} retrying · ${summary.deadLetteredPromotionCount} dead-lettered` : "queue health unavailable";
+  const sweepKinds: SweepKind[] = ["report_admission", "retention", "promotion"];
+  const sweepDetails: { kind: SweepKind; summary: Record<string, number> }[] = [];
+  for (const kind of sweepKinds) {
+    const entrySummary = summary?.sweeps[kind]?.summary;
+    if (entrySummary) sweepDetails.push({ kind, summary: entrySummary });
+  }
 
   return (
     <div className="admin-corpus-status-strip">
-      <p>
-        Promotion: <strong>{promotionEnabled ? "enabled" : "disabled"}</strong>
-        {" · "}
-        Retention: <strong>{retentionEnabled ? "enabled" : "disabled"}</strong>
-        {" · "}
-        {queueHealth}
-      </p>
+      <MetricGrid>
+        <MetricTile label="Promotion" value={promotionEnabled ? "Enabled" : "Disabled"} />
+        <MetricTile label="Retention" value={retentionEnabled ? "Enabled" : "Disabled"} />
+        <MetricTile label="Source matching" value={sourceMatchingEnabled ? "Enabled" : "Disabled"} />
+        <MetricTile label="Retrying promotions" value={summary ? summary.retryablePromotionCount : "—"} />
+        <MetricTile label="Dead-lettered promotions" value={summary ? summary.deadLetteredPromotionCount : "—"} />
+      </MetricGrid>
+
       {isProduction ? (
-        <ul>
-          {(["report_admission", "retention", "promotion"] as SweepKind[]).map((kind) => {
-            const entry = summary?.sweeps[kind] ?? null;
-            const next = `next ${formatUtcInstant(nextDailyUtcRun(SWEEP_SCHEDULE[kind].hourUtc))} UTC`;
-            return (
-              <li key={kind}>
-                {SWEEP_LABELS[kind]}: {entry ? `last ${formatUtcTimestamp(entry.lastRunAt)} · ${entry.lastStatus} · ${next}` : `last sweep never · ${next}`}
-              </li>
-            );
-          })}
-        </ul>
+        <div className="admin-table-scroll">
+          <table className="developer-table">
+            <thead>
+              <tr>
+                <th>Sweep</th>
+                <th>Last run</th>
+                <th>Status</th>
+                <th>Next run</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sweepKinds.map((kind) => {
+                const entry = summary?.sweeps[kind] ?? null;
+                const next = `${formatUtcInstant(nextDailyUtcRun(SWEEP_SCHEDULE[kind].hourUtc))} UTC`;
+                return (
+                  <tr key={kind}>
+                    <td>{SWEEP_LABELS[kind]}</td>
+                    <td>{entry ? formatUtcTimestamp(entry.lastRunAt) : "never"}</td>
+                    <td>{entry ? <AdminStatusBadge status={entry.lastStatus} /> : "—"}</td>
+                    <td>{next}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
       ) : (
-        <p>
+        <p className="admin-corpus-status-note">
           Cron schedule: Production only · admission/retention {hourLabel(CRON_SCHEDULES.admissionRetention.hourUtc)} · promotion {hourLabel(CRON_SCHEDULES.promotion.hourUtc)}
         </p>
+      )}
+
+      {sweepDetails.length > 0 && (
+        <AdminCollapsible summary="Sweep run details">
+          {sweepDetails.map(({ kind, summary: sweepSummary }) => (
+            <BadgeGroup key={kind} label={SWEEP_LABELS[kind]} distribution={sweepSummary} />
+          ))}
+        </AdminCollapsible>
       )}
     </div>
   );

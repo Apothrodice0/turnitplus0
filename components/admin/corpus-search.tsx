@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { AdminStatusBadge } from "@/components/admin/status-badge";
 
 type ListRow = {
   rowId: string;
@@ -149,114 +150,123 @@ export function AdminCorpusSearch() {
   const totalPages = result ? Math.max(1, Math.ceil(result.totalCount / result.pageSize)) : 1;
 
   return (
-    <div className="developer-lookup">
+    <div className="admin-corpus-search">
       <form
-        className="admin-corpus-filters"
+        className="admin-corpus-filters admin-corpus-toolbar"
         onSubmit={(event) => {
           event.preventDefault();
           setPage(1);
         }}
       >
-        <input type="text" value={q} onChange={(event) => { setQ(event.target.value); setPage(1); }} placeholder="Search source ref, reason codes, error" aria-label="Search corpus admission" />
-        <select value={status} onChange={(event) => { setStatus(event.target.value as (typeof STATUS_OPTIONS)[number]); setPage(1); }} aria-label="Filter by status">
-          {STATUS_OPTIONS.map((option) => (
-            <option key={option} value={option}>{option === "" ? "All statuses" : option}</option>
-          ))}
-        </select>
-        <input type="text" value={language} onChange={(event) => { setLanguage(event.target.value); setPage(1); }} placeholder="Language (e.g. English)" aria-label="Filter by detected language" />
+        <label>
+          Search
+          <input type="text" value={q} onChange={(event) => { setQ(event.target.value); setPage(1); }} placeholder="Source ref, reason codes, error" aria-label="Search corpus admission" />
+        </label>
+        <label>
+          Status
+          <select value={status} onChange={(event) => { setStatus(event.target.value as (typeof STATUS_OPTIONS)[number]); setPage(1); }} aria-label="Filter by status">
+            {STATUS_OPTIONS.map((option) => (
+              <option key={option} value={option}>{option === "" ? "All statuses" : option}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Language
+          <input type="text" value={language} onChange={(event) => { setLanguage(event.target.value); setPage(1); }} placeholder="e.g. English" aria-label="Filter by detected language" />
+        </label>
       </form>
 
-      {error && <p role="alert">{error}</p>}
-      {loading && <p>Loading…</p>}
-      {successMessage && <p role="status">{successMessage}</p>}
+      {error && <p role="alert" className="admin-form-error">{error}</p>}
+      {loading && <p className="admin-corpus-loading">Loading…</p>}
+      {successMessage && <p role="status" className="admin-form-notice">{successMessage}</p>}
 
       {result && (
         <>
-          <p>{result.totalCount} total · page {result.page} of {totalPages}</p>
-          <div className="developer-table-scroll">
-            <table className="developer-table">
-              <thead>
-                <tr>
-                  <th>Status</th>
-                  <th>Language</th>
-                  <th>Word count</th>
-                  <th>Quality</th>
-                  <th>Account owner</th>
-                  <th>Attempts</th>
-                  <th>Created</th>
-                  <th>Promotion</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {result.rows.map((row) => (
-                  <tr key={row.rowId}>
-                    <td>{row.status}</td>
-                    <td>{row.detectedLanguage ?? "—"}</td>
-                    <td>{row.extractedWordCount ?? "—"}</td>
-                    <td>{row.qualityScore ?? "—"}</td>
-                    <td>{row.accountEmail ?? "unknown"}</td>
-                    <td>{row.attemptCount ?? "—"}</td>
-                    <td>{row.createdAt}</td>
-                    <td>{promotionStatusLabel(row.promotionStatus, row.promotionAttemptCount)}</td>
-                    <td>
-                      <Link href={`/admin/corpus/${encodeURIComponent(row.rowId)}`}>Inspect</Link>
-                      {row.acceptedRepresentationId && (
-                        row.acceptedRepresentationActive ? (
-                          <>
-                            {" "}
-                            <button type="button" onClick={() => openRemoveDialog(row.rowId)}>Remove</button>
-                          </>
-                        ) : (
-                          <>
-                            {" "}
-                            <span>Removed</span>
-                          </>
-                        )
-                      )}
-                    </td>
-                  </tr>
-                ))}
-                {result.rows.length === 0 && (
-                  <tr>
-                    <td colSpan={9}>No matching rows.</td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
+          <div className="admin-corpus-result-meta">
+            <span>{result.totalCount} total · page {result.page} of {totalPages}</span>
           </div>
 
-          <div>
+          {result.rows.length === 0 ? (
+            <p className="admin-corpus-empty">No matching rows.</p>
+          ) : (
+            <div className="developer-table-scroll">
+              <table className="developer-table">
+                <thead>
+                  <tr>
+                    <th>Status</th>
+                    <th>Language</th>
+                    <th>Word count</th>
+                    <th>Quality</th>
+                    <th>Account owner</th>
+                    <th>Attempts</th>
+                    <th>Created</th>
+                    <th>Promotion</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {result.rows.map((row) => (
+                    <tr key={row.rowId}>
+                      <td><AdminStatusBadge status={row.status} /></td>
+                      <td>{row.detectedLanguage ?? "—"}</td>
+                      <td>{row.extractedWordCount ?? "—"}</td>
+                      <td>{row.qualityScore ?? "—"}</td>
+                      <td>{row.accountEmail ?? "unknown"}</td>
+                      <td>{row.attemptCount ?? "—"}</td>
+                      <td>{row.createdAt}</td>
+                      <td>{promotionStatusLabel(row.promotionStatus, row.promotionAttemptCount)}</td>
+                      <td>
+                        <span className="admin-corpus-actions-cell">
+                          <Link href={`/admin/corpus/${encodeURIComponent(row.rowId)}`} className="admin-action-link">Inspect</Link>
+                          {row.acceptedRepresentationId && (
+                            row.acceptedRepresentationActive ? (
+                              <button type="button" onClick={() => openRemoveDialog(row.rowId)}>Remove</button>
+                            ) : (
+                              <span>Removed</span>
+                            )
+                          )}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          <div className="admin-corpus-pager">
             <button type="button" disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>Previous</button>
-            <span> Page {page} of {totalPages} </span>
+            <span>Page {page} of {totalPages}</span>
             <button type="button" disabled={page >= totalPages} onClick={() => setPage((p) => p + 1)}>Next</button>
           </div>
         </>
       )}
 
       {removeDialogRowId && (
-        <div role="dialog" aria-modal="true" aria-labelledby="admin-corpus-remove-dialog-title">
-          <h2 id="admin-corpus-remove-dialog-title">Remove this item from the TurnitPlus corpus?</h2>
-          <p>
-            It will stop participating through this corpus entry. Existing reports, receipts, users and submission
-            history will not be deleted. If the same content is still backed by another valid corpus source, it may
-            remain matchable.
-          </p>
-          <label>
-            Reason (required):{" "}
-            <textarea
-              value={removeReason}
-              onChange={(event) => setRemoveReason(event.target.value)}
-              placeholder="Short justification"
-              disabled={removeLoading}
-            />
-          </label>
-          {removeError && <p role="alert">{removeError}</p>}
-          <div>
-            <button type="button" onClick={closeRemoveDialog} disabled={removeLoading}>Cancel</button>
-            <button type="button" onClick={confirmRemove} disabled={removeLoading || removeReason.trim().length === 0}>
-              Remove from corpus
-            </button>
+        <div className="admin-dialog-backdrop">
+          <div role="dialog" aria-modal="true" aria-labelledby="admin-corpus-remove-dialog-title">
+            <h2 id="admin-corpus-remove-dialog-title">Remove this item from the TurnitPlus corpus?</h2>
+            <p>
+              It will stop participating through this corpus entry. Existing reports, receipts, users and submission
+              history will not be deleted. If the same content is still backed by another valid corpus source, it may
+              remain matchable.
+            </p>
+            <label>
+              Reason (required):
+              <textarea
+                value={removeReason}
+                onChange={(event) => setRemoveReason(event.target.value)}
+                placeholder="Short justification"
+                disabled={removeLoading}
+              />
+            </label>
+            {removeError && <p role="alert" className="admin-form-error">{removeError}</p>}
+            <div className="admin-dialog-actions">
+              <button type="button" className="admin-dialog-cancel" onClick={closeRemoveDialog} disabled={removeLoading}>Cancel</button>
+              <button type="button" className="admin-dialog-danger" onClick={confirmRemove} disabled={removeLoading || removeReason.trim().length === 0}>
+                Remove from corpus
+              </button>
+            </div>
           </div>
         </div>
       )}

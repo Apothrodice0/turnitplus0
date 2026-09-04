@@ -480,6 +480,59 @@ export async function getCorpusAdmissionDecisionDetail(client: Client, rowId: st
   };
 }
 
+export type CorpusAdmissionStatusCounts = {
+  /** COUNT(*) across every row the admin list ever shows (every status combined). */
+  total: number;
+  accepted: number;
+  review: number;
+  rejected: number;
+  pending: number;
+  failed: number;
+  cancelled: number;
+  /** COUNT(*) of corpus_admission_accepted_representations rows with revoked_at IS NULL — the corpus's current live size. Distinct from `accepted`: an ACCEPTed decision's representation can later be deactivated via this same dashboard's Remove action (see lib/corpus-admission-admin-actions.ts's deactivateAcceptedRepresentation) without changing the original decision. */
+  activeRepresentations: number;
+};
+
+/**
+ * Trivial read-only status-breakdown for the admin corpus dashboard's
+ * top-of-page summary tiles (Admin Phase 2A) — a COUNT(*)/GROUP BY over the
+ * exact same `combined` CTE listCorpusAdmissionDecisions already queries, so
+ * these numbers share identical status semantics with the list's own status
+ * filter (no separate derivation, no new admission/maturity/scoring logic).
+ * Same "no authorization of its own" contract as every other function here.
+ */
+export async function getCorpusAdmissionStatusCounts(client: Client): Promise<CorpusAdmissionStatusCounts> {
+  const countsResult = await client.execute(`
+    ${COMBINED_CTE}
+    SELECT
+      COUNT(*) AS total,
+      SUM(CASE WHEN decision = 'ACCEPT' THEN 1 ELSE 0 END) AS accepted,
+      SUM(CASE WHEN decision = 'REVIEW' THEN 1 ELSE 0 END) AS review,
+      SUM(CASE WHEN decision = 'REJECT' THEN 1 ELSE 0 END) AS rejected,
+      SUM(CASE WHEN job_status = 'pending' THEN 1 ELSE 0 END) AS pending,
+      SUM(CASE WHEN job_status = 'failed' THEN 1 ELSE 0 END) AS failed,
+      SUM(CASE WHEN job_status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled
+    FROM combined
+  `);
+  const row = countsResult.rows[0] as unknown as Record<string, number | bigint | null>;
+
+  const activeRepsResult = await client.execute(
+    "SELECT COUNT(*) AS c FROM corpus_admission_accepted_representations WHERE revoked_at IS NULL",
+  );
+  const activeRepresentations = Number((activeRepsResult.rows[0] as unknown as { c: number | bigint }).c);
+
+  return {
+    total: Number(row.total ?? 0),
+    accepted: Number(row.accepted ?? 0),
+    review: Number(row.review ?? 0),
+    rejected: Number(row.rejected ?? 0),
+    pending: Number(row.pending ?? 0),
+    failed: Number(row.failed ?? 0),
+    cancelled: Number(row.cancelled ?? 0),
+    activeRepresentations,
+  };
+}
+
 export type CorpusAdmissionOperationalSummary = {
   /** COUNT(*) of corpus_admission_promotions rows with status='failed' — still retryable by the promotion sweep. */
   retryablePromotionCount: number;

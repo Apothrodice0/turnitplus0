@@ -7021,3 +7021,108 @@ main.report-main {
   .admin-header { flex-direction: column; align-items: flex-start; }
   .admin-link-card { flex-wrap: wrap; }
 }
+
+/* Admin Phase 2A — Corpus workspace polish. Reuses every token/class the
+   Phase 1 admin console system already established (.admin-card,
+   .admin-metric-grid, .admin-collapsible, etc.); nothing here is a new
+   design language. */
+.admin-card h2 { display: flex; align-items: center; gap: 8px; }
+.admin-card-title-icon { color: var(--blue-dark); flex-shrink: 0; }
+.admin-card-description { color: var(--muted); font-size: 13.5px; line-height: 1.5; max-width: 70ch; }
+
+/* Generic small colored status pill (admission status, sweep run status,
+   promotion status, ...) — purely presentational, see
+   components/admin/status-badge.tsx. */
+.admin-status-badge {
+  display: inline-flex; align-items: center; padding: 3px 10px; border-radius: 999px;
+  font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; white-space: nowrap;
+}
+.admin-status-badge--positive { background: rgba(8, 125, 85, .12); color: var(--green); }
+.admin-status-badge--negative { background: rgba(232, 79, 99, .12); color: var(--red); }
+.admin-status-badge--warning { background: rgba(245, 138, 59, .16); color: #a15a1f; }
+.admin-status-badge--info { background: rgba(0, 127, 186, .12); color: var(--blue-dark); }
+.admin-status-badge--neutral { background: var(--soft-line); color: var(--muted); }
+
+/* Shared "toolbar" layout for a filter/search row or an add-item form
+   (Corpus admission filters, Maturity exemptions add-by-email). */
+.admin-corpus-toolbar { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px; margin: 4px 0 16px; }
+.admin-corpus-toolbar label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--muted); font-weight: 600; }
+.admin-corpus-toolbar input,
+.admin-corpus-toolbar select {
+  padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; font-size: 13.5px; min-width: 0;
+  font-family: var(--font-geist-sans), sans-serif; color: var(--ink); background: var(--surface);
+}
+.admin-corpus-toolbar input:focus, .admin-corpus-toolbar select:focus { outline: none; border-color: var(--blue); box-shadow: 0 0 0 3px var(--blue-soft); }
+
+.admin-corpus-result-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 4px 0 12px; font-size: 13px; color: var(--muted); }
+.admin-corpus-loading { color: var(--muted); font-size: 13.5px; }
+.admin-corpus-empty { padding: 28px 16px; text-align: center; color: var(--muted); font-size: 13.5px; background: var(--canvas); border-radius: 10px; }
+
+.admin-form-notice { margin: 10px 0; font-size: 13px; color: var(--green); }
+.admin-form-error { margin: 10px 0; font-size: 13px; color: var(--red); }
+
+.admin-corpus-actions-cell { display: inline-flex; align-items: center; gap: 10px; white-space: nowrap; }
+.admin-action-link { color: var(--blue); text-decoration: none; font-weight: 600; }
+.admin-action-link:hover { text-decoration: underline; }
+.admin-corpus-actions-cell button {
+  padding: 5px 12px; border-radius: 6px; border: 1px solid var(--red); background: #fff; color: var(--red);
+  font-size: 12.5px; font-weight: 600; cursor: pointer;
+}
+.admin-corpus-actions-cell button:hover { background: rgba(232, 79, 99, .08); }
+.admin-corpus-actions-cell span { color: var(--muted); font-size: 12.5px; }
+
+.admin-corpus-pager { display: flex; align-items: center; gap: 12px; margin-top: 16px; font-size: 13px; color: var(--muted); }
+.admin-corpus-pager button {
+  padding: 6px 14px; border-radius: 6px; border: 1px solid var(--line); background: #fff; font-size: 13px;
+  cursor: pointer; color: var(--ink);
+}
+.admin-corpus-pager button:hover:not(:disabled) { border-color: var(--blue); color: var(--blue-dark); }
+.admin-corpus-pager button:disabled { opacity: .5; cursor: default; }
+
+.admin-btn-primary {
+  padding: 8px 16px; border-radius: 8px; border: none; background: var(--blue); color: #fff;
+  font-size: 13.5px; font-weight: 600; cursor: pointer;
+}
+.admin-btn-primary:hover:not(:disabled) { background: var(--blue-dark); }
+.admin-btn-primary:disabled { opacity: .55; cursor: default; }
+.admin-btn-danger-outline {
+  padding: 6px 14px; border-radius: 6px; border: 1px solid var(--red); background: #fff; color: var(--red);
+  font-size: 12.5px; font-weight: 600; cursor: pointer;
+}
+.admin-btn-danger-outline:hover:not(:disabled) { background: rgba(232, 79, 99, .08); }
+.admin-btn-danger-outline:disabled { opacity: .55; cursor: default; }
+
+.admin-corpus-status-note { color: var(--muted); font-size: 13px; margin-top: 12px; }
+
+/* Remove-from-corpus confirmation — a real centered modal instead of an
+   inline unstyled block. The dialog's own internal markup (button/span text)
+   is intentionally left byte-identical where tests/corpus-admission-remove-ui
+   .test.mjs asserts on it; only the backdrop and non-asserted elements are
+   styled here. */
+.admin-dialog-backdrop {
+  position: fixed; inset: 0; background: rgba(8, 20, 26, .5); display: flex; align-items: center;
+  justify-content: center; padding: 20px; z-index: 60;
+}
+.admin-dialog-backdrop [role="dialog"] {
+  background: var(--surface); border-radius: 14px; padding: 26px; max-width: 480px; width: 100%;
+  box-shadow: var(--shadow); max-height: 90vh; overflow-y: auto;
+}
+.admin-dialog-backdrop [role="dialog"] h2 { margin: 0 0 12px; font-size: 17px; color: var(--sidebar); }
+.admin-dialog-backdrop [role="dialog"] p { font-size: 13.5px; color: var(--muted); line-height: 1.55; margin: 0 0 6px; }
+.admin-dialog-backdrop [role="dialog"] label { display: block; margin: 16px 0 4px; font-size: 13px; font-weight: 600; color: var(--ink); }
+.admin-dialog-backdrop [role="dialog"] textarea {
+  display: block; width: 100%; margin-top: 6px; padding: 9px 12px; border: 1px solid var(--line);
+  border-radius: 8px; font-size: 13.5px; min-height: 76px; font-family: inherit; resize: vertical;
+}
+.admin-dialog-backdrop [role="dialog"] textarea:focus { outline: none; border-color: var(--blue); box-shadow: 0 0 0 3px var(--blue-soft); }
+.admin-dialog-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
+.admin-dialog-cancel { padding: 8px 16px; border-radius: 6px; border: 1px solid var(--line); background: #fff; font-size: 13px; cursor: pointer; }
+.admin-dialog-cancel:hover:not(:disabled) { border-color: var(--muted); }
+.admin-dialog-danger { padding: 8px 16px; border-radius: 6px; border: none; background: var(--red); color: #fff; font-size: 13px; font-weight: 600; cursor: pointer; }
+.admin-dialog-danger:hover:not(:disabled) { background: #c5384c; }
+.admin-dialog-danger:disabled { opacity: .5; cursor: default; }
+
+@media (max-width: 640px) {
+  .admin-corpus-toolbar { flex-direction: column; align-items: stretch; }
+  .admin-corpus-toolbar input, .admin-corpus-toolbar select { width: 100%; }
+}
