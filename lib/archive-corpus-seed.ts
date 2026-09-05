@@ -3,12 +3,20 @@ import path from "node:path";
 import type { Client } from "@libsql/client";
 import { canonicalizeText } from "./canonical-text";
 import { canonicalSha256 } from "./document-identity";
-import { tokens, grams, gramHash } from "./similarity-core";
 import {
   createReusableDocumentRepresentation,
   findReusableRepresentationByCanonicalHash,
-  CORPUS_SHINGLE_WRITE_BATCH_ROWS,
 } from "./user-submission-corpus";
+import {
+  recordArchiveDocumentFingerprints,
+  recordArchiveDocumentPhraseEntry,
+  rebuildArchiveDfBands,
+} from "./archive-index-build";
+import { optimizePhraseIndex } from "./archive-phrase-index";
+// archiveShingleHashes / ARCHIVE_SHINGLE_SIZE now live in the leaf module
+// lib/archive-fingerprint.ts (breaking the seed -> index-build -> df-bands ->
+// seed import cycle); re-exported here so existing importers are unaffected.
+export { archiveShingleHashes, ARCHIVE_SHINGLE_SIZE } from "./archive-fingerprint";
 
 /**
  * 100k-scale architecture, slice 1 (server-side archive parity foundation).
@@ -62,8 +70,16 @@ import {
  * adapter that actually matches against these rows.
  */
 
+/**
+ * The OLD full-shingle namespace (corpus_document_shingles.fingerprint_version
+ * for archive rows) — retained ONLY because archive_document_representations
+ * .fingerprint_version still records it as a historical fact. As of the
+ * scalable-index slice (drizzle/0049) the seed path no longer writes
+ * corpus_document_shingles rows under this namespace at all; candidate
+ * discovery reads archive_document_fingerprints (ARCHIVE_COMPACT_FINGERPRINT_
+ * VERSION) instead. See lib/archive-fingerprint.ts / lib/archive-corpus-matching.ts.
+ */
 export const ARCHIVE_FINGERPRINT_VERSION = "archive-shingle-v1";
-export const ARCHIVE_SHINGLE_SIZE = 5;
 export const ARCHIVE_EXTRACTOR_VERSION = "archive-corpus-seed-v1";
 
 export type ArchiveManifestEntry = {
@@ -123,49 +139,6 @@ export function loadArchiveSourceEntries(corpusRoot: string, packedIndexMetaPath
     }));
 }
 
-/**
- * EVERY 5-gram hash of canonicalText — deliberately unfiltered by
- * informativeGram. See this module's own header for why.
- */
-export function archiveShingleHashes(canonicalText: string, shingleSize: number = ARCHIVE_SHINGLE_SIZE): Set<string> {
-  const words = tokens(canonicalText);
-  const hashes = new Set<string>();
-  for (const gram of grams(words, shingleSize)) hashes.add(gramHash(gram));
-  return hashes;
-}
-
-/**
- * Same batched-write shape as lib/user-submission-corpus.ts's
- * recordCorpusShingles (bounded at CORPUS_SHINGLE_WRITE_BATCH_ROWS rows per
- * batch() call, INSERT OR IGNORE against the same
- * ux_corpus_document_shingles_representation_version_hash unique index, so
- * idempotent on retry) — a deliberately SEPARATE function rather than a
- * shared call, because the hash-selection semantics differ (see
- * archiveShingleHashes). This mirrors the codebase's own existing
- * convention of one shingle-writer per distinct semantic purpose
- * (document_identity_shingles vs corpus_document_shingles are already two
- * independent writers for exactly this reason).
- */
-export async function recordArchiveDocumentShingles(
-  client: Client,
-  representationId: string,
-  canonicalText: string,
-  fingerprintVersion: string = ARCHIVE_FINGERPRINT_VERSION,
-  shingleSize: number = ARCHIVE_SHINGLE_SIZE,
-): Promise<{ shingleCount: number }> {
-  const hashes = archiveShingleHashes(canonicalText, shingleSize);
-  const hashList = [...hashes];
-  for (let offset = 0; offset < hashList.length; offset += CORPUS_SHINGLE_WRITE_BATCH_ROWS) {
-    const chunk = hashList.slice(offset, offset + CORPUS_SHINGLE_WRITE_BATCH_ROWS);
-    const statements = chunk.map((hash) => ({
-      sql: "INSERT OR IGNORE INTO corpus_document_shingles (representation_id, shingle_hash, fingerprint_version, created_at) VALUES (?,?,?,CURRENT_TIMESTAMP)",
-      args: [representationId, hash, fingerprintVersion],
-    }));
-    await client.batch(statements, "write");
-  }
-  return { shingleCount: hashes.size };
-}
-
 export type SeedArchiveDocumentOptions = {
   corpusVersion: string;
   /**
@@ -178,20 +151,36 @@ export type SeedArchiveDocumentOptions = {
    * for genuinely pre-existing content.
    */
   firstSeenAt: string;
+  /** Compact-fingerprint generation. Defaults to ARCHIVE_COMPACT_FINGERPRINT_VERSION. */
   fingerprintVersion?: string;
 };
 
 export type SeedArchiveDocumentResult =
-  | { status: "SEEDED"; archiveArticleId: string; representationId: string; shingleCount: number }
+  | { status: "SEEDED"; archiveArticleId: string; representationId: string; fingerprintCount: number }
   | { status: "ALREADY_SEEDED"; archiveArticleId: string; representationId: string };
 
-/** Idempotent — safe to re-run; a second run for the same archiveArticleId no-ops via the archive_document_representations lookup. */
+/**
+ * Idempotent — a re-run for the same archiveArticleId no-ops via the
+ * archive_document_representations lookup. On the SEEDED path it produces
+ * exactly: canonical representation, archive metadata row, compact
+ * fingerprints (archive_document_fingerprints), and a phrase-index entry
+ * (archive_phrase_fts + archive_phrase_fts_map). It NO LONGER writes any
+ * corpus_document_shingles rows — the ~5,500-rows-per-doc full-shingle write
+ * is gone. The archive-global DF-band table is built once per corpus by
+ * seedArchiveCorpus() / lib/archive-index-build.ts after all documents are in.
+ *
+ * SHARED-REPRESENTATION SAFETY: if findReusableRepresentationByCanonicalHash
+ * returns a representation that a genuine user submission already created,
+ * that row's own corpus_document_shingles (written under CORPUS_FINGERPRINT_
+ * VERSION by the historical-corpus path) are NEVER touched here — this
+ * function only ever adds archive-namespaced fingerprint/phrase rows keyed by
+ * representation_id, and never deletes anything.
+ */
 export async function seedArchiveDocument(
   client: Client,
   entry: ArchiveSeedSourceEntry,
   options: SeedArchiveDocumentOptions,
 ): Promise<SeedArchiveDocumentResult> {
-  const fingerprintVersion = options.fingerprintVersion ?? ARCHIVE_FINGERPRINT_VERSION;
   const existing = await client.execute({
     sql: "SELECT representation_id FROM archive_document_representations WHERE archive_article_id = ?",
     args: [entry.archiveArticleId],
@@ -209,18 +198,42 @@ export async function seedArchiveDocument(
     extractorVersion: ARCHIVE_EXTRACTOR_VERSION,
     firstSeenAt: options.firstSeenAt,
   });
-  const { shingleCount } = await recordArchiveDocumentShingles(client, representation.id, canonicalText, fingerprintVersion);
+
+  const { fingerprintCount } = await recordArchiveDocumentFingerprints(
+    client,
+    representation.id,
+    canonicalText,
+    options.fingerprintVersion,
+  );
 
   await client.execute({
     sql: `INSERT INTO archive_document_representations
           (archive_article_id, representation_id, title, source_type, original_similarity, archive_order, corpus_version, fingerprint_version, created_at)
           VALUES (?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`,
-    args: [entry.archiveArticleId, representation.id, entry.title, "Publication", entry.originalSimilarity, entry.archiveOrder ?? null, options.corpusVersion, fingerprintVersion],
+    args: [
+      entry.archiveArticleId,
+      representation.id,
+      entry.title,
+      "Publication",
+      entry.originalSimilarity,
+      entry.archiveOrder ?? null,
+      options.corpusVersion,
+      // archive_document_representations.fingerprint_version keeps recording
+      // the historical full-shingle namespace for continuity with drizzle/0048.
+      ARCHIVE_FINGERPRINT_VERSION,
+    ],
   });
 
-  return { status: "SEEDED", archiveArticleId: entry.archiveArticleId, representationId: representation.id, shingleCount };
+  await recordArchiveDocumentPhraseEntry(client, representation.id, canonicalText);
+
+  return { status: "SEEDED", archiveArticleId: entry.archiveArticleId, representationId: representation.id, fingerprintCount };
 }
 
+/**
+ * Seeds every entry, then finalises the corpus-global structures: rebuilds
+ * the compact DF-band table (which needs every document present to tally true
+ * archive-wide DF) and merges the FTS b-tree segments. Idempotent.
+ */
 export async function seedArchiveCorpus(
   client: Client,
   entries: ArchiveSeedSourceEntry[],
@@ -230,5 +243,7 @@ export async function seedArchiveCorpus(
   for (const entry of entries) {
     results.push(await seedArchiveDocument(client, entry, options));
   }
+  await rebuildArchiveDfBands(client);
+  await optimizePhraseIndex(client);
   return results;
 }

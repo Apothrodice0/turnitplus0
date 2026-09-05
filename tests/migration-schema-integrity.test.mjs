@@ -837,4 +837,126 @@ function applyMigrationsExcluding(db, dir, excludeFiles) {
   console.log('[libsql] Email Verification foundation: users.email_verified_at authoritative; single-use consume + verify-atomicity + email-change clear + revoked-block + CASCADE enforced');
 }
 
+// --- Section J: built-in-archive parity foundation (0048) + 100k-scale
+// scalable archive index (0049) — fresh-migrate proof on BOTH engines that:
+// (a) 0048 creates archive_document_representations; (b) 0049 creates the
+// three ordinary tables (archive_document_fingerprints, archive_hash_df_bands,
+// archive_phrase_fts_map) with their indexes / composite PK / FK+CASCADE, and
+// the archive_phrase_fts FTS5 virtual table + its shadow tables; (c) the
+// contentless FTS index is queryable, joins the rowid bridge back to
+// representation_id, and returns NULL for its own column; (d) a representation
+// delete CASCADEs to the derived fingerprint and bridge rows; (e) nothing
+// pre-existing is restructured — in particular corpus_document_shingles is
+// only depended on, never altered. ---
+{
+  const dbPath = path.join(repo, 'test_migration_integrity_archive_index_sqlite.db');
+  cleanupSqliteFile(dbPath);
+  const db = new Database(dbPath);
+  db.pragma('foreign_keys = ON');
+  applyMigrations(db, drizzleDir);
+
+  const tables = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((r) => r.name));
+  for (const t of [
+    'archive_document_representations',
+    'archive_document_fingerprints', 'archive_hash_df_bands', 'archive_phrase_fts_map',
+    'archive_phrase_fts', 'archive_phrase_fts_data', 'archive_phrase_fts_idx', 'archive_phrase_fts_config',
+  ]) {
+    assert(tables.has(t), `[sqlite] 0048/0049 must create ${t}`);
+  }
+
+  // corpus_document_shingles is only depended on — 0049 adds no column to it.
+  const shingleCols = db.prepare(`PRAGMA table_info('corpus_document_shingles')`).all().map((r) => r.name).sort();
+  assert.deepEqual(
+    shingleCols,
+    ['created_at', 'fingerprint_version', 'id', 'representation_id', 'shingle_hash'].sort(),
+    '[sqlite] 0049 must not alter corpus_document_shingles',
+  );
+
+  // archive_hash_df_bands: composite PK, WITHOUT ROWID uniqueness.
+  const dfPk = db.prepare(`PRAGMA table_info('archive_hash_df_bands')`).all().filter((r) => r.pk > 0).sort((a, b) => a.pk - b.pk).map((r) => r.name);
+  assert.deepEqual(dfPk, ['shingle_hash', 'policy_version'], '[sqlite] archive_hash_df_bands composite PK (shingle_hash, policy_version)');
+  db.prepare(`INSERT INTO archive_hash_df_bands (shingle_hash, df_bucket, policy_version) VALUES ('h1', 15, 'p1')`).run();
+  db.prepare(`INSERT INTO archive_hash_df_bands (shingle_hash, df_bucket, policy_version) VALUES ('h1', 21, 'p2')`).run(); // same hash, different policy — allowed
+  assert.throws(
+    () => db.prepare(`INSERT INTO archive_hash_df_bands (shingle_hash, df_bucket, policy_version) VALUES ('h1', 18, 'p1')`).run(),
+    /UNIQUE constraint failed|PRIMARY KEY/,
+    '[sqlite] a duplicate (shingle_hash, policy_version) is rejected',
+  );
+
+  // A representation + its derived fingerprint / phrase-index rows.
+  db.prepare(`INSERT INTO corpus_document_representations (id, canonical_sha256, canonical_text, word_count, canonicalization_version) VALUES (?,?,?,?,?)`)
+    .run('mi-arc-1', 'mi-arc-sha-1', 'a coastal aquaculture monitoring initiative recorded shellfish density', 8, 'v1');
+  db.prepare(`INSERT INTO archive_document_representations (archive_article_id, representation_id, title, corpus_version, fingerprint_version) VALUES (?,?,?,?,?)`)
+    .run('mi-arc-article-1', 'mi-arc-1', 'MI Archive Doc', 'corpus-v1', 'archive-shingle-v1');
+  db.prepare(`INSERT INTO archive_document_fingerprints (representation_id, fingerprint_hash, optional_position, fingerprint_version) VALUES (?,?,?,?)`)
+    .run('mi-arc-1', 'deadbeefdeadbeef', 3, 'archive-compact-fp-v1');
+  assert.throws(
+    () => db.prepare(`INSERT INTO archive_document_fingerprints (representation_id, fingerprint_hash, optional_position, fingerprint_version) VALUES (?,?,?,?)`)
+      .run('mi-arc-1', 'deadbeefdeadbeef', 99, 'archive-compact-fp-v1'),
+    /UNIQUE constraint failed/,
+    '[sqlite] ux_archive_document_fingerprints_repr_version_hash rejects a duplicate (repr, version, hash)',
+  );
+
+  // FTS entry via the rowid bridge; exact-phrase MATCH; contentless NULL.
+  const mapId = db.prepare(`INSERT INTO archive_phrase_fts_map(representation_id) VALUES (?)`).run('mi-arc-1').lastInsertRowid;
+  db.prepare(`INSERT INTO archive_phrase_fts(rowid, body) VALUES (?, ?)`).run(mapId, 'a coastal aquaculture monitoring initiative recorded shellfish density');
+  const ftsHit = db.prepare(`SELECT m.representation_id AS r FROM archive_phrase_fts f JOIN archive_phrase_fts_map m ON m.fts_rowid = f.rowid WHERE f.archive_phrase_fts MATCH ?`).all('"aquaculture monitoring initiative"');
+  assert.deepEqual(ftsHit.map((x) => x.r), ['mi-arc-1'], '[sqlite] an exact-phrase MATCH joins the bridge back to representation_id');
+  assert.equal(db.prepare(`SELECT body FROM archive_phrase_fts LIMIT 1`).get().body, null, '[sqlite] contentless FTS5 returns NULL for its indexed column');
+
+  // Representation delete CASCADEs to fingerprints + the bridge.
+  db.prepare(`DELETE FROM corpus_document_representations WHERE id = ?`).run('mi-arc-1');
+  assert.equal(db.prepare(`SELECT COUNT(*) c FROM archive_document_fingerprints WHERE representation_id = 'mi-arc-1'`).get().c, 0, '[sqlite] fingerprints CASCADE-delete with the representation');
+  assert.equal(db.prepare(`SELECT COUNT(*) c FROM archive_phrase_fts_map WHERE representation_id = 'mi-arc-1'`).get().c, 0, '[sqlite] the phrase-index bridge CASCADE-deletes with the representation');
+
+  db.close();
+  cleanupSqliteFile(dbPath);
+  console.log('[sqlite] Scalable archive index: 0048/0049 tables + FTS5 virtual table land, composite PK + unique fingerprint index + FK CASCADE + contentless-NULL all verified');
+}
+
+{
+  const dbFile = path.join(repo, 'test_migration_integrity_archive_index_libsql.db');
+  cleanupSqliteFile(dbFile);
+  const client = createClient({ url: `file:${dbFile}` });
+  await applyMigrationsLibsql(client, drizzleDir);
+  await client.execute('PRAGMA foreign_keys = ON');
+
+  const tableRows = await client.execute("SELECT name FROM sqlite_master WHERE type='table'");
+  const tables = new Set(tableRows.rows.map((r) => String(r.name)));
+  for (const t of ['archive_document_fingerprints', 'archive_hash_df_bands', 'archive_phrase_fts_map', 'archive_phrase_fts']) {
+    assert(tables.has(t), `[libsql] 0049 must create ${t}`);
+  }
+
+  // The exact per-doc seed shape client.batch produces: a bridge row (auto
+  // rowid) then the FTS row bound to that rowid via a subquery in the SAME
+  // transaction.
+  await client.execute({
+    sql: "INSERT INTO corpus_document_representations (id, canonical_sha256, canonical_text, word_count, canonicalization_version) VALUES (?,?,?,?,?)",
+    args: ['li-arc-1', 'li-arc-sha-1', 'cooperative credit unions in the kabylie highlands adopted a tiered collateral model', 12, 'v1'],
+  });
+  await client.batch([
+    { sql: "INSERT INTO archive_phrase_fts_map(representation_id) VALUES (?)", args: ['li-arc-1'] },
+    { sql: "INSERT INTO archive_phrase_fts(rowid, body) SELECT fts_rowid, ? FROM archive_phrase_fts_map WHERE representation_id = ?", args: ['cooperative credit unions in the kabylie highlands adopted a tiered collateral model', 'li-arc-1'] },
+  ], 'write');
+  const hit = await client.execute({
+    sql: "SELECT m.representation_id r FROM archive_phrase_fts f JOIN archive_phrase_fts_map m ON m.fts_rowid = f.rowid WHERE f.archive_phrase_fts MATCH ?",
+    args: ['"tiered collateral model"'],
+  });
+  assert.deepEqual(hit.rows.map((x) => String(x.r)), ['li-arc-1'], '[libsql] the per-doc batch insert shape yields a joinable phrase entry');
+
+  // fan-out COUNT (the DF-oracle query the phrase fallback uses).
+  const fanOut = await client.execute({ sql: "SELECT COUNT(*) n FROM archive_phrase_fts f WHERE f.archive_phrase_fts MATCH ?", args: ['"kabylie highlands adopted"'] });
+  assert.equal(Number(fanOut.rows[0].n), 1, '[libsql] a phrase fan-out COUNT works (== that phrase\'s document frequency)');
+
+  // FTS5 'delete-all' clears the contentless index without DROP.
+  await client.execute("INSERT INTO archive_phrase_fts(archive_phrase_fts) VALUES('delete-all')");
+  await client.execute("DELETE FROM archive_phrase_fts_map");
+  const afterClear = await client.execute({ sql: "SELECT COUNT(*) n FROM archive_phrase_fts f WHERE f.archive_phrase_fts MATCH ?", args: ['"tiered collateral model"'] });
+  assert.equal(Number(afterClear.rows[0].n), 0, "[libsql] 'delete-all' + bridge wipe clears the phrase index for a clean rebuild");
+
+  client.close();
+  cleanupSqliteFile(dbFile);
+  console.log('[libsql] Scalable archive index: per-doc batch insert shape, exact-phrase MATCH, fan-out COUNT, and delete-all rebuild all verified');
+}
+
 console.log('Migration schema integrity tests passed');

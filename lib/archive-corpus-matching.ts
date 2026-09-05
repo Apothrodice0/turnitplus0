@@ -1,196 +1,316 @@
 import type { Client } from "@libsql/client";
 import { tokens, grams, gramHash } from "./similarity-core";
 import { scoreAgainstArchive, type ArchiveScoringResult, type ArchiveScoringMatchingParameters } from "./archive-similarity-scoring";
-import { findCandidateCorpusRepresentations } from "./user-submission-corpus";
-import { ARCHIVE_FINGERPRINT_VERSION, ARCHIVE_SHINGLE_SIZE } from "./archive-corpus-seed";
+import { ARCHIVE_FINGERPRINT_VERSION } from "./archive-corpus-seed";
+import { ARCHIVE_SHINGLE_SIZE, ARCHIVE_COMPACT_FINGERPRINT_VERSION, archiveShingleHashes } from "./archive-fingerprint";
+import { loadDfBandMap, deriveStopHashSet, ARCHIVE_DF_BAND_POLICY_VERSION } from "./archive-df-bands";
+import { phraseFallbackDiscovery, ARCHIVE_PHRASE_FALLBACK_POLICY_VERSION, PHRASE_FALLBACK_BUDGET } from "./archive-phrase-fallback";
 
 /**
- * 100k-scale architecture, slice 1 (server-side archive parity foundation).
+ * 100k-scale architecture — the server-side built-in-archive matcher. Slice 2B
+ * replaces ONLY archive candidate DISCOVERY. The scoring algorithm
+ * (lib/archive-similarity-scoring.ts's scoreAgainstArchive, ported verbatim
+ * from app/similarity-worker.ts's analyze()) is UNCHANGED and still runs over
+ * canonical-text-reconstructed archive grams. Read-only; never writes.
  *
- * The server-side counterpart to app/similarity-worker.ts's client-side
- * static-index lookup: discovers archive candidates via the SAME scalable,
- * indexed machinery the live historical-match path uses
- * (findCandidateCorpusRepresentations), then runs the IDENTICAL scoring
- * algorithm (lib/archive-similarity-scoring.ts's scoreAgainstArchive) over
- * DB-backed postings instead of a static binary index. Read-only; never
- * writes anything. Not wired into POST /api/reports or any live scoring
- * path yet — see this slice's own task description ("do not change the
- * user-visible similarity result yet").
+ * DISCOVERY PIPELINE (frozen shape, Slices 2A / 2A.4 / 2A.5):
+ *   submission
+ *     → compact winnowed fingerprints (archive_document_fingerprints)  → primary candidate IDs
+ *     → reconstruct primary candidates' full grams from canonical_text
+ *     → scoreAgainstArchive (global-DF-pruned postings)                → primary result
+ *     → discovery-gap regions of the query
+ *     → bounded FTS phrase fallback (budget 16, discovery-only)         → additional candidate IDs
+ *     → deduplicated candidate union
+ *     → reconstruct union's full grams from canonical_text
+ *     → scoreAgainstArchive (SAME pruned postings)                     → final result
  *
- * DISCOVERY, NOT A FULL SCAN: the browser's static index effectively "sees"
- * every one of the archive's documents on every analysis (the whole
- * postings array is already resident in memory). This adapter instead asks
- * findCandidateCorpusRepresentations for only the archive representations
- * that share at least one 5-gram with the submission — at 100k+ archive
- * documents this is the difference between "shippable" and "not." At
- * today's 321-document archive this candidate set is, in practice, the same
- * set the browser's exclusion/scoring passes would ever assign a non-zero
- * `shared` count to anyway (see scoreAgainstArchive's own step 1: an article
- * with zero shared shingles has containment 0 and can never be excluded or
- * scored), so no accuracy is traded away at current scale — `candidateLimit`
- * just needs to stay above the true archive size, which it does by a wide
- * margin. A LATER slice should apply the same maxDF-style query-time pruning
- * lib/user-submission-corpus.ts's applyHighFrequencyShinglePruning already
- * proved out for the live corpus, once the archive itself grows large enough
- * for that to matter — see this repo's own 100k-scale architecture analysis.
+ * GLOBAL DF PRUNING is independent of how many candidates were discovered:
+ * a hash is pruned iff it is in the precomputed archive-global stop set
+ * ({ h : archive_hash_df_bands.df_bucket > maximumDocumentFrequency }),
+ * never based on the discovered candidate count. This is the Slice 2A.2 fix —
+ * with compact discovery the candidate set is small, so the browser static
+ * index's build-time exclusion cannot be reproduced by a candidate-relative
+ * posting-length check.
  *
- * ALL 5-GRAMS, NOT JUST INFORMATIVE ONES: matches how the archive was
- * seeded (lib/archive-corpus-seed.ts) and how the browser's own static index
- * was built — see that module's header for the grep-verified reason
- * (scripts/build-document-corpus.py's informative() filter is dead code).
+ * NO FULL corpus_document_shingles PERSISTENCE is required for the archive:
+ * discovery reads compact fingerprints, postings are reconstructed
+ * request-locally from canonical_text, DF comes from the compact df-band
+ * table (with the FTS index resolving the DF 0..12 band on demand).
  *
- * getPostings is served from ONE bulk fetch of every shingle row belonging
- * to the discovered candidates (not one query per submission gram, which
- * would be thousands of round trips for a long document) — a
- * `representation_id IN (...)` scan bounded by candidate count x their own
- * shingle counts, never by total archive size. The in-repo document-
- * frequency cap (meta.json's own maximumDocumentFrequency) is then applied
- * purely in memory against that already-fetched map, reproducing the
- * browser static index's own build-time exclusion (a hash whose true
- * document frequency exceeds the cap is absent from the index and therefore
- * never returned by a lookup) without any corpus-size-proportional query.
- *
- * MATURITY: candidate discovery runs under CorpusEligibilityMode "ARCHIVE"
- * (lib/user-submission-corpus.ts), NOT "MATCHING" — a representation is an
- * archive candidate iff it has an archive_document_representations row, full
- * stop, with no 7-day maturity term at all. This is deliberate and narrower
- * than backdating first_seen_at at seed time alone would guarantee:
- * lib/archive-corpus-seed.ts's seedArchiveDocument dedupes by canonical
- * hash, so seeding an archive document whose text byte-for-byte matches an
- * EXISTING, unrelated, still-immature representation (e.g. an ordinary
- * user's submission from moments ago) reuses that row without touching its
- * first_seen_at — "ARCHIVE" mode is what still makes it immediately eligible
- * for archive matching in that case, while ordinary historical matching
- * (CorpusEligibilityMode "MATCHING", lib/user-submission-matching.ts) keeps
- * treating that same representation as immature until its own first_seen_at
- * clears the normal window. See tests/archive-corpus-parity.test.mjs's
- * "reused representation" test for the exact scenario proved end to end.
+ * ARCHIVE ELIGIBILITY is structural: every archive_document_fingerprints row
+ * is written only by the archive seed path (lib/archive-corpus-seed.ts) for a
+ * representation that has an archive_document_representations row — no 7-day
+ * maturity term is ever consulted, exactly as CorpusEligibilityMode "ARCHIVE"
+ * specified for the old discovery path. This function has no accountId, no
+ * excludeAccountId, and never imports the SELF/PRIOR_SUBMISSION/
+ * TURNITPLUS_CORPUS_SOURCE relationship classifier — archive evidence is
+ * structurally unreachable by any account/SELF concept.
  */
 
+/** The version constants this matcher's behaviour is pinned to — surfaced for
+ *  diagnostics / tests so a policy change is a visible, reviewed edit. */
+export const ARCHIVE_MATCH_POLICY = {
+  compactFingerprintVersion: ARCHIVE_COMPACT_FINGERPRINT_VERSION,
+  dfBandPolicyVersion: ARCHIVE_DF_BAND_POLICY_VERSION,
+  phraseFallbackPolicyVersion: ARCHIVE_PHRASE_FALLBACK_POLICY_VERSION,
+  phraseFallbackBudget: PHRASE_FALLBACK_BUDGET,
+} as const;
+
 export type MatchAgainstArchiveCorpusOptions = {
+  /** Kept for API stability; unused since discovery moved to compact fingerprints. */
   fingerprintVersion?: string;
-  /** The archive build's own maximumDocumentFrequency (public/data/document-index.meta.json) — required, never silently defaulted, so this can never drift from the value the browser engine actually used to build its index. */
+  /** The archive build's own maximumDocumentFrequency (public/data/document-index.meta.json).
+   *  Required, never silently defaulted — it is both the scorer's index cap and the
+   *  threshold that turns df_bucket rows into the stop set. */
   maximumDocumentFrequency: number;
   matchingParameters?: ArchiveScoringMatchingParameters;
-  /** Candidate-discovery LIMIT — must stay >= the true archive size for exact parity (see this module's own header). Default is generous for archive sizes well past today's 321 documents. */
+  /** Candidate-discovery LIMIT — generous; compact discovery already returns
+   *  only documents sharing a winnowed fingerprint. */
   candidateLimit?: number;
+  /** Compact-fingerprint generation to query. Defaults to ARCHIVE_COMPACT_FINGERPRINT_VERSION. */
+  compactFingerprintVersion?: string;
+  /** DF-band policy generation to load. Defaults to ARCHIVE_DF_BAND_POLICY_VERSION. */
+  dfBandPolicyVersion?: string;
   /**
-   * UNUSED as of the "ARCHIVE" eligibility mode (lib/user-submission-corpus.ts's
-   * CorpusEligibilityMode): archive candidates are never subject to the 7-day
-   * maturity gate, so no cutoff is ever computed or applied here. Kept as
-   * accepted-but-ignored fields for API stability rather than removed —
-   * passing either is harmless.
+   * UNUSED — archive candidates are never subject to the 7-day maturity gate.
+   * Accepted-but-ignored for API stability; passing either is harmless.
    */
   maturityCutoff?: string;
   asOf?: Date;
 };
 
-type CandidateShingleRow = { representation_id: string; shingle_hash: string };
 type CandidateOrderRow = { representation_id: string; title: string; archive_order: number | bigint | null };
 
-export async function matchAgainstArchiveCorpus(
+function queryHashSet(text: string): Set<string> {
+  const set = new Set<string>();
+  for (const gram of grams(tokens(text), ARCHIVE_SHINGLE_SIZE)) set.add(gramHash(gram));
+  return set;
+}
+
+/**
+ * PRIMARY candidate discovery — every archive document sharing at least one
+ * winnowed compact fingerprint with the (unreduced) query 5-gram set.
+ * Deterministic ORDER BY: shared count then representation_id, purely so the
+ * candidateLimit cut is stable; final scoring re-orders by archive_order.
+ */
+async function compactDiscovery(
+  client: Client,
+  queryHashes: Set<string>,
+  compactFingerprintVersion: string,
+  candidateLimit: number,
+): Promise<string[]> {
+  const hashList = [...queryHashes];
+  if (hashList.length === 0) return [];
+  const placeholders = hashList.map(() => "?").join(",");
+  const res = await client.execute({
+    sql: `SELECT representation_id, COUNT(*) AS shared
+            FROM archive_document_fingerprints
+           WHERE fingerprint_version = ? AND fingerprint_hash IN (${placeholders})
+           GROUP BY representation_id
+          HAVING COUNT(*) >= 1
+           ORDER BY shared DESC, representation_id ASC
+           LIMIT ?`,
+    args: [compactFingerprintVersion, ...hashList, candidateLimit],
+  });
+  return res.rows.map((r) => String((r as unknown as { representation_id: string }).representation_id));
+}
+
+type ScoreOverCandidatesResult = {
+  result: ArchiveScoringResult;
+  candidateIds: string[];
+};
+
+/**
+ * The "existing scorer" wrapper: reconstruct each candidate's full 5-gram
+ * hash set from canonical_text (request-local; NO corpus_document_shingles
+ * read), assign sourceIndex by archive_order (the browser static index's
+ * fixed, query-independent order — reproduces its winner-take-all tie-break),
+ * build a getPostings that prunes iff the hash is in the archive-global stop
+ * set, then call scoreAgainstArchive UNMODIFIED.
+ */
+async function scoreOverCandidates(
   client: Client,
   submittedText: string,
-  options: MatchAgainstArchiveCorpusOptions,
-): Promise<ArchiveScoringResult> {
-  const fingerprintVersion = options.fingerprintVersion ?? ARCHIVE_FINGERPRINT_VERSION;
-  const candidateLimit = options.candidateLimit ?? 5_000;
-
-  const queryHashes = new Set<string>();
-  for (const gram of grams(tokens(submittedText), ARCHIVE_SHINGLE_SIZE)) queryHashes.add(gramHash(gram));
-
-  const documentCountResult = await client.execute({
-    sql: "SELECT COUNT(*) AS total FROM archive_document_representations WHERE fingerprint_version = ?",
-    args: [fingerprintVersion],
-  });
-  const documentCount = Number((documentCountResult.rows[0] as unknown as { total: number | bigint }).total);
-
-  const emptyIndex = { shingleSize: ARCHIVE_SHINGLE_SIZE, documentCount, maximumDocumentFrequency: options.maximumDocumentFrequency, articles: [], getPostings: () => [] };
-  if (queryHashes.size === 0 || documentCount === 0) {
-    return scoreAgainstArchive(submittedText, emptyIndex, options.matchingParameters);
+  candidateIds: string[],
+  documentCount: number,
+  maximumDocumentFrequency: number,
+  matchingParameters: ArchiveScoringMatchingParameters | undefined,
+  stopHashSet: Set<string>,
+): Promise<ScoreOverCandidatesResult> {
+  const emptyIndex = {
+    shingleSize: ARCHIVE_SHINGLE_SIZE,
+    documentCount,
+    maximumDocumentFrequency,
+    articles: [],
+    getPostings: () => [] as number[],
+  };
+  if (candidateIds.length === 0) {
+    return { result: scoreAgainstArchive(submittedText, emptyIndex, matchingParameters), candidateIds: [] };
   }
 
-  const candidates = await findCandidateCorpusRepresentations(client, queryHashes, {
-    fingerprintVersion,
-    minSharedShingles: 1,
-    limit: candidateLimit,
-    // "ARCHIVE" mode (not "MATCHING"): eligibility is "has an
-    // archive_document_representations row," never subject to the 7-day
-    // maturity gate — see that mode's own doc comment in
-    // lib/user-submission-corpus.ts for why first_seen_at can't be trusted
-    // here once seedArchiveDocument reuses an existing, possibly-immature
-    // representation via canonical-hash dedup.
-    eligibilityMode: "ARCHIVE",
-  });
-  if (candidates.length === 0) {
-    return scoreAgainstArchive(submittedText, emptyIndex, options.matchingParameters);
-  }
-
-  const candidateIds = candidates.map((candidate) => candidate.representationId);
   const placeholders = candidateIds.map(() => "?").join(",");
-  const [orderResult, shingleResult] = await Promise.all([
+  const [orderResult, textResult] = await Promise.all([
     client.execute({
       sql: `SELECT representation_id, title, archive_order FROM archive_document_representations
             WHERE fingerprint_version = ? AND representation_id IN (${placeholders})`,
-      args: [fingerprintVersion, ...candidateIds],
+      args: [ARCHIVE_FINGERPRINT_VERSION, ...candidateIds],
     }),
     client.execute({
-      sql: `SELECT representation_id, shingle_hash FROM corpus_document_shingles
-            WHERE fingerprint_version = ? AND representation_id IN (${placeholders})`,
-      args: [fingerprintVersion, ...candidateIds],
+      sql: `SELECT id, canonical_text FROM corpus_document_representations WHERE id IN (${placeholders})`,
+      args: candidateIds,
     }),
   ]);
 
-  // sourceIndex is assigned from archive_order (the browser static index's
-  // own fixed, build-time, query-independent document order), NEVER from
-  // this query's own "most shared shingles first" ranking — see
-  // archive_document_representations.archive_order's migration comment for
-  // why a query-dependent assignment would silently diverge from the
-  // browser on same-score winner-take-all ties. NULL archive_order sorts
-  // last; ties within that (or within an equal archive_order, which
-  // shouldn't happen for real seeded data) fall back to representation_id
-  // for a fully deterministic order.
+  const hashSetByRepresentationId = new Map<string, Set<string>>();
+  for (const row of textResult.rows) {
+    const r = row as unknown as { id: string; canonical_text: string };
+    hashSetByRepresentationId.set(String(r.id), archiveShingleHashes(String(r.canonical_text), ARCHIVE_SHINGLE_SIZE));
+  }
+
   const orderedCandidates = (orderResult.rows as unknown as CandidateOrderRow[]).slice().sort((left, right) => {
-    const leftOrder = left.archive_order === null ? Number.POSITIVE_INFINITY : Number(left.archive_order);
-    const rightOrder = right.archive_order === null ? Number.POSITIVE_INFINITY : Number(right.archive_order);
-    if (leftOrder !== rightOrder) return leftOrder - rightOrder;
+    const l = left.archive_order === null ? Number.POSITIVE_INFINITY : Number(left.archive_order);
+    const r = right.archive_order === null ? Number.POSITIVE_INFINITY : Number(right.archive_order);
+    if (l !== r) return l - r;
     return left.representation_id < right.representation_id ? -1 : left.representation_id > right.representation_id ? 1 : 0;
   });
-  const sourceIndexByRepresentationId = new Map<string, number>(
-    orderedCandidates.map((row, index) => [row.representation_id, index]),
-  );
+  const sourceIndexByRepresentationId = new Map(orderedCandidates.map((row, index) => [row.representation_id, index]));
   const titleByRepresentationId = new Map(orderedCandidates.map((row) => [row.representation_id, row.title]));
 
   const postingsByHash = new Map<string, number[]>();
-  const shingleCountByRepresentationId = new Map<string, number>();
-  for (const row of shingleResult.rows as unknown as CandidateShingleRow[]) {
-    const sourceIndex = sourceIndexByRepresentationId.get(row.representation_id);
-    if (sourceIndex === undefined) continue; // defensive: cannot happen, candidateIds is the IN() list itself
-    shingleCountByRepresentationId.set(row.representation_id, (shingleCountByRepresentationId.get(row.representation_id) ?? 0) + 1);
-    const list = postingsByHash.get(row.shingle_hash);
-    if (list) list.push(sourceIndex);
-    else postingsByHash.set(row.shingle_hash, [sourceIndex]);
+  const uniqueShingleCountByRepresentationId = new Map<string, number>();
+  for (const [repId, hashSet] of hashSetByRepresentationId) {
+    const sourceIndex = sourceIndexByRepresentationId.get(repId);
+    if (sourceIndex === undefined) continue;
+    uniqueShingleCountByRepresentationId.set(repId, hashSet.size);
+    for (const hash of hashSet) {
+      const list = postingsByHash.get(hash);
+      if (list) list.push(sourceIndex);
+      else postingsByHash.set(hash, [sourceIndex]);
+    }
   }
 
   const articles = orderedCandidates.map((row) => ({
     title: titleByRepresentationId.get(row.representation_id) ?? row.representation_id,
     sourceType: "Publication" as const,
-    uniqueShingleCount: shingleCountByRepresentationId.get(row.representation_id) ?? 0,
+    uniqueShingleCount: uniqueShingleCountByRepresentationId.get(row.representation_id) ?? 0,
   }));
 
+  // Global-DF pruning: pruned iff in the precomputed archive-global stop set,
+  // NEVER based on the discovered candidate count. scoreAgainstArchive's own
+  // internal `sourceIndexes.length > runtimeMaximumDocumentFrequency` check
+  // still applies on top (a stricter, query-time cap from matchingParameters).
   const getPostings = (hash: string): number[] => {
-    const postings = postingsByHash.get(hash);
-    if (!postings || postings.length === 0) return [];
-    // Mirrors the browser static index's own build-time exclusion: a hash
-    // whose document frequency exceeds the cap is absent from the index
-    // entirely, so a lookup for it finds nothing — never a truncated list.
-    if (postings.length > options.maximumDocumentFrequency) return [];
-    return postings;
+    if (stopHashSet.has(hash)) return [];
+    return postingsByHash.get(hash) ?? [];
   };
 
-  return scoreAgainstArchive(
+  const result = scoreAgainstArchive(
     submittedText,
-    { shingleSize: ARCHIVE_SHINGLE_SIZE, documentCount, maximumDocumentFrequency: options.maximumDocumentFrequency, articles, getPostings },
-    options.matchingParameters,
+    { shingleSize: ARCHIVE_SHINGLE_SIZE, documentCount, maximumDocumentFrequency, articles, getPostings },
+    matchingParameters,
   );
+  return { result, candidateIds };
+}
+
+export type MatchAgainstArchiveCorpusResult = ArchiveScoringResult & {
+  /** Discovery diagnostics — never scoring-relevant. */
+  archiveDiscovery: {
+    compactCandidateCount: number;
+    phraseCandidateCount: number;
+    unionCandidateCount: number;
+    phraseProbeCount: number;
+    admittedPhraseProbeCount: number;
+    maxAdmittedPhraseFanOut: number;
+    dfResolveChecks: number;
+  };
+};
+
+export async function matchAgainstArchiveCorpus(
+  client: Client,
+  submittedText: string,
+  options: MatchAgainstArchiveCorpusOptions,
+): Promise<MatchAgainstArchiveCorpusResult> {
+  const compactFingerprintVersion = options.compactFingerprintVersion ?? ARCHIVE_COMPACT_FINGERPRINT_VERSION;
+  const candidateLimit = options.candidateLimit ?? 5_000;
+
+  const documentCountResult = await client.execute({
+    sql: "SELECT COUNT(*) AS total FROM archive_document_representations WHERE fingerprint_version = ?",
+    args: [ARCHIVE_FINGERPRINT_VERSION],
+  });
+  const documentCount = Number((documentCountResult.rows[0] as unknown as { total: number | bigint }).total);
+
+  const queryHashes = queryHashSet(submittedText);
+
+  const emptyDiscovery = {
+    compactCandidateCount: 0,
+    phraseCandidateCount: 0,
+    unionCandidateCount: 0,
+    phraseProbeCount: 0,
+    admittedPhraseProbeCount: 0,
+    maxAdmittedPhraseFanOut: 0,
+    dfResolveChecks: 0,
+  };
+
+  if (queryHashes.size === 0 || documentCount === 0) {
+    const empty = scoreAgainstArchive(
+      submittedText,
+      { shingleSize: ARCHIVE_SHINGLE_SIZE, documentCount, maximumDocumentFrequency: options.maximumDocumentFrequency, articles: [], getPostings: () => [] },
+      options.matchingParameters,
+    );
+    return { ...empty, archiveDiscovery: emptyDiscovery };
+  }
+
+  // Archive-global DF metadata — the only DF data read directly.
+  const { bandByHash } = await loadDfBandMap(client, { policyVersion: options.dfBandPolicyVersion });
+  const stopHashSet = deriveStopHashSet(bandByHash, options.maximumDocumentFrequency);
+
+  // 1) primary discovery + score
+  const compactCandidateIds = await compactDiscovery(client, queryHashes, compactFingerprintVersion, candidateLimit);
+  const primary = await scoreOverCandidates(
+    client,
+    submittedText,
+    compactCandidateIds,
+    documentCount,
+    options.maximumDocumentFrequency,
+    options.matchingParameters,
+    stopHashSet,
+  );
+
+  // 2) bounded phrase fallback — discovery only
+  const fallback = await phraseFallbackDiscovery(
+    client,
+    submittedText,
+    primary.result.archiveMatchedPositions,
+    compactCandidateIds,
+    { stopHashSet, bandByHash },
+  );
+
+  // 3) final score over the deduplicated union (unchanged when the fallback
+  //    added nothing — the union is then exactly the compact set)
+  const noNewCandidates = fallback.unionCandidateIds.length === compactCandidateIds.length;
+  const final = noNewCandidates
+    ? primary
+    : await scoreOverCandidates(
+        client,
+        submittedText,
+        fallback.unionCandidateIds,
+        documentCount,
+        options.maximumDocumentFrequency,
+        options.matchingParameters,
+        stopHashSet,
+      );
+
+  const admitted = fallback.perProbe.filter((p) => p.admitted);
+  return {
+    ...final.result,
+    archiveDiscovery: {
+      compactCandidateCount: compactCandidateIds.length,
+      phraseCandidateCount: fallback.phraseCandidateIds.length,
+      unionCandidateCount: fallback.unionCandidateIds.length,
+      phraseProbeCount: fallback.probes.length,
+      admittedPhraseProbeCount: admitted.length,
+      maxAdmittedPhraseFanOut: admitted.reduce((m, p) => Math.max(m, p.fanOut), 0),
+      dfResolveChecks: fallback.dfResolveChecks,
+    },
+  };
 }

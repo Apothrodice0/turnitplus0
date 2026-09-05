@@ -1799,6 +1799,88 @@ export const archive_document_representations = sqliteTable(
   ],
 );
 
+// ── Scalable built-in-archive index (drizzle/0049, 100k-scale slice 2B) ───────
+// Replaces the per-archive-document full-shingle write
+// (recordArchiveDocumentShingles → thousands of corpus_document_shingles rows
+// per doc) with three bounded structures. Derived, rebuildable data only:
+// every row here is reconstructible from corpus_document_representations
+// .canonical_text via lib/archive-index-build.ts. None of these is read by
+// admissionEligibilitySql or any historical-corpus / SELF / relationship
+// predicate — the archive matcher (lib/archive-corpus-matching.ts) is the sole
+// reader. See lib/archive-fingerprint.ts / lib/archive-df-bands.ts /
+// lib/archive-phrase-index.ts for the algorithms and their version constants.
+
+// Compact winnowed fingerprint set — the PRIMARY candidate-discovery index.
+// ~118–128 rows/doc (Schleimer/Wilkerson/Aiken winnowing, window 85, hard cap
+// 192), NOT one row per 5-gram. fingerprint_version namespaces a fingerprint-
+// algorithm generation (ARCHIVE_COMPACT_FINGERPRINT_VERSION) so a re-fingerprint
+// pass can add a new generation without colliding with the old one. Same
+// synthetic-id + composite-unique shape as corpus_document_shingles.
+export const archive_document_fingerprints = sqliteTable(
+  "archive_document_fingerprints",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    representation_id: text("representation_id")
+      .notNull()
+      .references(() => corpus_document_representations.id, { onDelete: "cascade" }),
+    fingerprint_hash: text("fingerprint_hash").notNull(),
+    optional_position: integer("optional_position"),
+    fingerprint_version: text("fingerprint_version").notNull(),
+    created_at: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("ux_archive_document_fingerprints_repr_version_hash").on(
+      table.representation_id,
+      table.fingerprint_version,
+      table.fingerprint_hash,
+    ),
+    index("idx_archive_document_fingerprints_hash").on(table.fingerprint_hash, table.fingerprint_version),
+  ],
+);
+
+// Compact archive-global document-frequency metadata (Slice 2A.5). Persists a
+// hash → df_bucket row ONLY for 5-grams with archive-wide DF >= MIN_PERSISTED_DF
+// (13): df_bucket is the exact DF for 13..20, and 21 means "DF >= 21". Absent =
+// DF in {0..12}, resolved on demand via the FTS phrase index's exact
+// fan-out (lib/archive-phrase-fallback.ts's resolveQueryGramDf). This one
+// structure IS the scorer's stop set ({ h : df_bucket > maximumDocumentFrequency })
+// — there is no separate stop-hash table. policy_version
+// (ARCHIVE_DF_BAND_POLICY_VERSION) distinguishes a DF-threshold change from a
+// fingerprint-algorithm change. 16-hex TEXT hash for v1 (see
+// lib/archive-df-bands.ts's own note on why not INTEGER). WITHOUT ROWID: the
+// table is a pure hash→bucket lookup, never scanned.
+export const archive_hash_df_bands = sqliteTable(
+  "archive_hash_df_bands",
+  {
+    shingle_hash: text("shingle_hash").notNull(),
+    df_bucket: integer("df_bucket").notNull(),
+    policy_version: text("policy_version").notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.shingle_hash, table.policy_version] }),
+  ],
+);
+
+// rowid → representation_id bridge for the contentless FTS5 phrase index
+// `archive_phrase_fts` (a virtual table Drizzle cannot model — created and
+// managed by drizzle/0049 + lib/archive-phrase-index.ts as raw SQL, never
+// declared here). A contentless FTS5 table cannot itself return
+// representation_id (reading an indexed column yields NULL), so every phrase
+// query joins back through this table on the FTS rowid. Wiped and rebuilt
+// wholesale alongside the FTS index — never partially updated.
+export const archive_phrase_fts_map = sqliteTable(
+  "archive_phrase_fts_map",
+  {
+    fts_rowid: integer("fts_rowid").primaryKey(),
+    representation_id: text("representation_id")
+      .notNull()
+      .references(() => corpus_document_representations.id, { onDelete: "cascade" }),
+  },
+  (table) => [
+    uniqueIndex("ux_archive_phrase_fts_map_representation_id").on(table.representation_id),
+  ],
+);
+
 // Export nothing else — Drizzle will consume these definitions for migrations.
 export {};
 

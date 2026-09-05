@@ -42,7 +42,17 @@ import type { Client } from "@libsql/client";
  * see APPROVED_DESTRUCTIVE_STATEMENTS' own comment; 0045's two-table
  * account-identity foundation; 0046's email_verification_challenges table
  * plus users.email_verified_at; and 0047's developer_corpus_maturity_exemptions
- * table) — as a deliberate, reviewed decision, not an
+ * table) — and, for the built-in-archive parity foundation and the 100k-scale
+ * scalable archive index that followed, extended once more through 0048-0049
+ * (0048's archive_document_representations display/lookup table; 0049's three
+ * ordinary tables — archive_document_fingerprints, archive_hash_df_bands,
+ * archive_phrase_fts_map — plus the archive_phrase_fts FTS5 virtual table,
+ * the first virtual table any target migration creates. A virtual table is
+ * listed in EXPECTED_TABLES_BY_MIGRATION alongside ordinary ones because it
+ * appears in sqlite_master with type='table' exactly like one; its shadow
+ * tables are implied by it. 0049 has no destructive statement — every
+ * CREATE ... IF NOT EXISTS — so no APPROVED_DESTRUCTIVE_STATEMENTS entry.)
+ * — as a deliberate, reviewed decision, not an
  * automatic side effect of adding those migration files; see this file's own
  * EXPECTED_MIGRATION_SHA256 for how future extensions are meant to be
  * reviewed the same way, and .gitattributes (drizzle/*.sql text eol=lf) for
@@ -103,6 +113,8 @@ export const TARGET_MIGRATIONS = [
   "0045_account_identity.sql",
   "0046_email_verification_challenges.sql",
   "0047_developer_corpus_maturity_exemptions.sql",
+  "0048_archive_document_representations.sql",
+  "0049_archive_scalable_index.sql",
 ] as const;
 
 export type TargetMigrationFile = (typeof TARGET_MIGRATIONS)[number];
@@ -249,6 +261,27 @@ export const EXPECTED_TABLES_BY_MIGRATION: Record<TargetMigrationFile, string[]>
   // (developer_corpus_maturity_exemptions) and alters no existing table —
   // plain table-existence tracking.
   "0047_developer_corpus_maturity_exemptions.sql": ["developer_corpus_maturity_exemptions"],
+  // 0048 creates one genuinely new table (archive_document_representations —
+  // built-in archive parity foundation) and alters no existing table.
+  "0048_archive_document_representations.sql": ["archive_document_representations"],
+  // 0049 (100k-scale slice 2B — scalable archive index) creates three ordinary
+  // tables plus one FTS5 virtual table, all in the same client.migrate()
+  // transaction, altering nothing. An FTS5 virtual table appears in
+  // sqlite_master with type='table' exactly like an ordinary table, so
+  // tableSetState()'s existing sqlite_master query detects it with no special
+  // casing — archive_phrase_fts is listed here alongside the ordinary tables
+  // (its own shadow tables archive_phrase_fts_{data,idx,docsize,config} are
+  // implied by it, same as an ordinary table's indexes are implied by the
+  // table). archive_phrase_fts_map is the rowid -> representation bridge the
+  // contentless FTS table needs; it plus archive_document_fingerprints and
+  // archive_hash_df_bands are the three Drizzle-modelled tables (see
+  // db/schema.ts). No column-only or index-only tracking applies.
+  "0049_archive_scalable_index.sql": [
+    "archive_document_fingerprints",
+    "archive_hash_df_bands",
+    "archive_phrase_fts_map",
+    "archive_phrase_fts",
+  ],
 };
 
 export const ALL_TARGET_TABLES: string[] = TARGET_MIGRATIONS.flatMap((m) => EXPECTED_TABLES_BY_MIGRATION[m]);
@@ -410,6 +443,14 @@ export const EXPECTED_MIGRATION_SHA256: Record<TargetMigrationFile, string> = {
   "0045_account_identity.sql": "52ea1a2bd50ec37a82bd14a0e6f35739f4e51aaa97cff448fff07fd82c8485ee",
   "0046_email_verification_challenges.sql": "4b37fe8d1029eeff3b7ea983b0cc200d54e9a98f3708e28ac1e4c7f14c269a42",
   "0047_developer_corpus_maturity_exemptions.sql": "7da32d06a251058bd03bc83b46381b849ad92b5a104703ee3543cb049533b1e5",
+  // Built-in archive parity foundation (0048) and the 100k-scale scalable
+  // archive index (0049) — LF hashes, computed directly from the files
+  // currently in drizzle/ (see this file's own header comment on the review
+  // discipline). 0049 is the first target migration to create an FTS5 virtual
+  // table; its scanForDestructiveStatements() output is empty (all CREATE ...
+  // IF NOT EXISTS) so no APPROVED_DESTRUCTIVE_STATEMENTS entry is needed.
+  "0048_archive_document_representations.sql": "fcf1142f0ceaa4c2387200896eaabd7e46dccaf5612026de91d5f141f54e0851",
+  "0049_archive_scalable_index.sql": "3a5bd9cc3dde61f10af17633cb0a5d4131b6eb664a51a580fcf03f94c4960ca0",
 };
 
 const DESTRUCTIVE_PATTERN = /\b(DROP\s+TABLE|DROP\s+INDEX|ALTER\s+TABLE\s+\S+\s+DROP|DELETE\s+FROM|TRUNCATE)\b/gi;

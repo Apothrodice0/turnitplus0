@@ -121,7 +121,7 @@ test.after(() => {
 
 // --- A: explicit allowlist ------------------------------------------------
 
-test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0047, in order, never touching 0000-0011', () => {
+test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0049, in order, never touching 0000-0011', () => {
   assert.deepEqual(TARGET_MIGRATIONS, [
     '0012_document_identities.sql',
     '0013_document_families.sql',
@@ -159,6 +159,8 @@ test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0047, in ord
     '0045_account_identity.sql',
     '0046_email_verification_challenges.sql',
     '0047_developer_corpus_maturity_exemptions.sql',
+    '0048_archive_document_representations.sql',
+    '0049_archive_scalable_index.sql',
   ]);
   // Phase E8S Step 8: 0022_reuse_context_declarations.sql added
   // reuse_context_declarations, bringing the 15 E1-E8P tables across the
@@ -212,8 +214,14 @@ test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0047, in ord
   // 36; 0045 creates 2 (account_identity_profiles, account_identity_fingerprints)
   // — 38; 0046 creates 1 (email_verification_challenges, plus users.email_verified_at
   // — hybrid, table-tracked) — 39; 0047 creates 1 (developer_corpus_maturity_exemptions)
-  // — 40, across 36 target migrations total.
-  assert.equal(ALL_TARGET_TABLES.length, 40, 'expected exactly 40 tables across all 36 target migrations');
+  // — 40, across 36 target migrations total. The built-in-archive parity
+  // foundation and 100k-scale scalable archive index then add 2 more
+  // migrations (0048-0049): 0048 creates 1 (archive_document_representations)
+  // — 41; 0049 creates 4 (archive_document_fingerprints, archive_hash_df_bands,
+  // archive_phrase_fts_map, and the archive_phrase_fts FTS5 virtual table —
+  // which sqlite_master reports with type='table' exactly like an ordinary
+  // one) — 45, across 38 target migrations total.
+  assert.equal(ALL_TARGET_TABLES.length, 45, 'expected exactly 45 tables across all 38 target migrations');
   assert.deepEqual(
     EXPECTED_TABLES_BY_MIGRATION['0023_privacy_consent_and_report_identity_link.sql'],
     [],
@@ -571,7 +579,7 @@ test('A3: 0041-0047 are in TARGET_MIGRATIONS as a contiguous 0012-0047 range', (
     assert.ok(TARGET_MIGRATIONS.includes(file), `${file} must be in TARGET_MIGRATIONS`);
   }
   const prefixes = TARGET_MIGRATIONS.map((f) => Number(f.slice(0, 4)));
-  assert.deepEqual(prefixes, Array.from({ length: 36 }, (_, i) => 12 + i), 'TARGET_MIGRATIONS must be the contiguous 0012..0047 range in order');
+  assert.deepEqual(prefixes, Array.from({ length: 38 }, (_, i) => 12 + i), 'TARGET_MIGRATIONS must be the contiguous 0012..0049 range in order');
 });
 
 test('A3: 0041-0047 pinned hashes match the on-disk LF migration bytes', () => {
@@ -678,6 +686,168 @@ test('A3: after the full 0012-0047 runner apply, the new schema shapes are exact
     args: ['a3-trigger-device-1', 'a3-trigger-report-1'],
   });
   assert.equal(Number(afterDelete.rows[0].c), 0, "0044's AFTER DELETE trigger must cascade-remove the shadow row when its saved_reports row is deleted");
+
+  client.close();
+  cleanupDbFile(dbFile);
+});
+
+// --- A4: built-in-archive parity foundation (0048) + 100k-scale scalable
+// archive index (0049) — the deliberate, contiguous extension. Mirrors
+// A2/A3: presence + contiguity + LF-byte hash stability + correct expected
+// tables + zero destructive statements + a real applied shape. 0049 is the
+// first target migration to create an FTS5 VIRTUAL TABLE, so this section
+// explicitly proves the runner detects ordinary tables, an index, AND the
+// virtual table / its rowid->representation bridge. ---
+
+const ARCHIVE_2B_FILES = ['0048_archive_document_representations.sql', '0049_archive_scalable_index.sql'];
+
+test('A4: 0048-0049 are in TARGET_MIGRATIONS, contiguous, immediately after 0047, and last', () => {
+  for (const file of ARCHIVE_2B_FILES) {
+    assert.ok(TARGET_MIGRATIONS.includes(file), `${file} must be in TARGET_MIGRATIONS`);
+  }
+  const i48 = TARGET_MIGRATIONS.indexOf('0048_archive_document_representations.sql');
+  const i49 = TARGET_MIGRATIONS.indexOf('0049_archive_scalable_index.sql');
+  assert.equal(TARGET_MIGRATIONS[i48 - 1], '0047_developer_corpus_maturity_exemptions.sql');
+  assert.equal(i49, i48 + 1);
+  assert.equal(i49, TARGET_MIGRATIONS.length - 1, '0049 must be the last target migration');
+});
+
+test('A4: 0048-0049 pinned hashes match the on-disk LF bytes, and both are non-destructive', () => {
+  for (const file of ARCHIVE_2B_FILES) {
+    const raw = fs.readFileSync(path.join(drizzleDir, file));
+    assert.ok(!raw.includes(Buffer.from('\r\n')), `${file} must be LF in the working tree`);
+    const content = fs.readFileSync(path.join(drizzleDir, file), 'utf8');
+    assert.ok(!content.includes('\r'), `${file} must contain no CR bytes`);
+    assert.equal(sha256(content), EXPECTED_MIGRATION_SHA256[file], `${file}'s pinned hash must match its current LF content`);
+    assert.deepEqual(scanForDestructiveStatements(content), [], `${file} must contain zero destructive statements — every CREATE ... IF NOT EXISTS`);
+  }
+  // 0049's CREATE VIRTUAL TABLE must survive splitStatements() intact (one
+  // statement, no shredding on an internal token) alongside its ordinary DDL.
+  const s49 = splitStatements(fs.readFileSync(path.join(drizzleDir, '0049_archive_scalable_index.sql'), 'utf8'));
+  assert.equal(s49.filter((s) => /^CREATE VIRTUAL TABLE/i.test(s)).length, 1, '0049 has exactly one CREATE VIRTUAL TABLE statement');
+  assert.equal(s49.filter((s) => /^CREATE TABLE/i.test(s)).length, 3, '0049 has exactly three ordinary CREATE TABLE statements');
+  assert.equal(s49.filter((s) => /^CREATE (UNIQUE )?INDEX/i.test(s)).length, 3, '0049 has exactly three CREATE INDEX statements');
+});
+
+test('A4: EXPECTED_TABLES_BY_MIGRATION for 0048-0049 is exact; neither uses the column/index mechanism', () => {
+  assert.deepEqual(
+    EXPECTED_TABLES_BY_MIGRATION['0048_archive_document_representations.sql'],
+    ['archive_document_representations'],
+    '0048 creates exactly one new table',
+  );
+  assert.deepEqual(
+    EXPECTED_TABLES_BY_MIGRATION['0049_archive_scalable_index.sql'],
+    ['archive_document_fingerprints', 'archive_hash_df_bands', 'archive_phrase_fts_map', 'archive_phrase_fts'],
+    '0049 creates exactly these four tables (the last being the FTS5 virtual table)',
+  );
+  for (const file of ARCHIVE_2B_FILES) {
+    assert.equal(EXPECTED_COLUMNS_BY_MIGRATION[file], undefined, `${file} must NOT use the column-state mechanism`);
+    assert.equal(EXPECTED_INDEXES_BY_MIGRATION[file], undefined, `${file} must NOT use the index-state mechanism`);
+  }
+});
+
+test('A4: checkPreflight passes for the full 0012-0049 set against a pre-0012 database', async () => {
+  const dbFile = freshDbPath('a4-preflight');
+  const client = await buildPreMigrationDb(dbFile);
+  const result = await checkPreflight(client, drizzleDir, { environmentLabel: 'local-test', expectedEnvironmentLabel: 'local-test' });
+  assert.equal(result.ok, true, `preflight must pass for the extended allowlist — got: ${JSON.stringify(result)}`);
+  client.close();
+  cleanupDbFile(dbFile);
+});
+
+test('A4: after the full runner apply, all three ordinary tables, the FTS5 virtual table, and the rowid bridge land with the right shape; the runner detects each; re-run is idempotent', async () => {
+  const dbFile = freshDbPath('a4-apply');
+  const client = await buildPreMigrationDb(dbFile);
+  const result = await runTargetMigrations(client, drizzleDir, { environmentLabel: 'local-test', expectedEnvironmentLabel: 'local-test' });
+  assert.equal(result.status, 'success', `the extended runner must apply cleanly — got: ${JSON.stringify(result).slice(0, 400)}`);
+
+  const tableNames = new Set((await client.execute("SELECT name FROM sqlite_master WHERE type='table'")).rows.map((r) => String(r.name)));
+  for (const t of ['archive_document_representations', 'archive_document_fingerprints', 'archive_hash_df_bands', 'archive_phrase_fts_map', 'archive_phrase_fts']) {
+    assert.ok(tableNames.has(t), `0048/0049 must create ${t}`);
+  }
+  // FTS5 shadow tables — supporting state the runner does NOT list explicitly
+  // (they are implied by the virtual table, just as an ordinary table's
+  // indexes are). Their presence confirms the virtual table is real.
+  for (const shadow of ['archive_phrase_fts_data', 'archive_phrase_fts_idx', 'archive_phrase_fts_config']) {
+    assert.ok(tableNames.has(shadow), `the FTS5 virtual table must materialise its ${shadow} shadow table`);
+  }
+
+  // ordinary-table detection: tableSetState reports 'all' for 0049's set.
+  assert.equal(await tableSetState(client, EXPECTED_TABLES_BY_MIGRATION['0049_archive_scalable_index.sql']), 'all', 'the runner must see 0049 as fully applied');
+
+  // index detection.
+  const indexNames = new Set((await client.execute("SELECT name FROM sqlite_master WHERE type='index'")).rows.map((r) => String(r.name)));
+  for (const idx of ['ux_archive_document_fingerprints_repr_version_hash', 'idx_archive_document_fingerprints_hash', 'ux_archive_phrase_fts_map_representation_id']) {
+    assert.ok(indexNames.has(idx), `0049 must create ${idx}`);
+  }
+
+  // column shapes.
+  const fpCols = (await client.execute("PRAGMA table_info('archive_document_fingerprints')")).rows.map((r) => String(r.name)).sort();
+  assert.deepEqual(fpCols, ['created_at', 'fingerprint_hash', 'fingerprint_version', 'id', 'optional_position', 'representation_id'].sort());
+  const dfCols = (await client.execute("PRAGMA table_info('archive_hash_df_bands')")).rows;
+  assert.deepEqual(dfCols.map((r) => String(r.name)).sort(), ['df_bucket', 'policy_version', 'shingle_hash'].sort());
+  const dfPk = dfCols.filter((r) => Number(r.pk) > 0).sort((a, b) => Number(a.pk) - Number(b.pk)).map((r) => String(r.name));
+  assert.deepEqual(dfPk, ['shingle_hash', 'policy_version'], 'archive_hash_df_bands composite PK is (shingle_hash, policy_version)');
+  const mapCols = (await client.execute("PRAGMA table_info('archive_phrase_fts_map')")).rows;
+  assert.deepEqual(mapCols.map((r) => String(r.name)).sort(), ['fts_rowid', 'representation_id'].sort());
+  assert.equal(Number(mapCols.find((r) => String(r.name) === 'fts_rowid').pk), 1, 'fts_rowid is the primary key');
+  assert.equal(Number(mapCols.find((r) => String(r.name) === 'fts_rowid').notnull), 1, 'fts_rowid is NOT NULL (matches db/schema.ts .primaryKey())');
+  assert.equal(Number(mapCols.find((r) => String(r.name) === 'representation_id').notnull), 1, 'representation_id is NOT NULL');
+
+  // FK + cascade on the two representation-derived tables.
+  for (const t of ['archive_document_fingerprints', 'archive_phrase_fts_map']) {
+    const fk = (await client.execute(`PRAGMA foreign_key_list('${t}')`)).rows.find((r) => String(r.from) === 'representation_id');
+    assert.ok(fk, `${t}.representation_id must be a foreign key`);
+    assert.equal(String(fk.table), 'corpus_document_representations');
+    assert.equal(String(fk.on_delete).toUpperCase(), 'CASCADE', `${t}.representation_id -> corpus_document_representations must be ON DELETE CASCADE`);
+  }
+  assert.equal((await client.execute("PRAGMA foreign_key_list('archive_hash_df_bands')")).rows.length, 0, 'archive_hash_df_bands (hash-keyed) has no foreign key');
+
+  // the FTS5 virtual table is queryable and its rowid joins the bridge.
+  await client.execute("PRAGMA foreign_keys = ON");
+  await client.execute({
+    sql: "INSERT INTO corpus_document_representations (id, canonical_sha256, canonical_text, word_count, canonicalization_version) VALUES (?,?,?,?,?)",
+    args: ['a4-rep-1', 'a4-sha-1', 'the quick brown fox jumps over the lazy dog', 9, 'v1'],
+  });
+  await client.batch([
+    { sql: "INSERT INTO archive_phrase_fts_map(representation_id) VALUES (?)", args: ['a4-rep-1'] },
+    { sql: "INSERT INTO archive_phrase_fts(rowid, body) SELECT fts_rowid, ? FROM archive_phrase_fts_map WHERE representation_id = ?", args: ['the quick brown fox jumps over the lazy dog', 'a4-rep-1'] },
+  ], 'write');
+  const hit = await client.execute({
+    sql: "SELECT m.representation_id r FROM archive_phrase_fts f JOIN archive_phrase_fts_map m ON m.fts_rowid = f.rowid WHERE f.archive_phrase_fts MATCH ?",
+    args: ['"quick brown fox"'],
+  });
+  assert.deepEqual(hit.rows.map((x) => String(x.r)), ['a4-rep-1'], 'an exact-phrase MATCH joins the bridge back to representation_id');
+  // contentless: reading the indexed column yields NULL (hence the bridge).
+  const bodyRead = await client.execute("SELECT body FROM archive_phrase_fts LIMIT 1");
+  assert.equal(bodyRead.rows[0].body, null, 'a contentless FTS5 table returns NULL for its indexed column');
+  // CASCADE reaches the bridge (the FTS shadow row for that rowid is left
+  // behind harmlessly and cleared by a full rebuild — documented in 0049).
+  await client.execute({ sql: "DELETE FROM corpus_document_representations WHERE id = ?", args: ['a4-rep-1'] });
+  assert.equal(
+    Number((await client.execute({ sql: "SELECT COUNT(*) c FROM archive_phrase_fts_map WHERE representation_id = ?", args: ['a4-rep-1'] })).rows[0].c),
+    0,
+    'archive_phrase_fts_map CASCADE-deletes with its representation',
+  );
+
+  // partial-application detection for the mixed ordinary + virtual set.
+  const partialDbFile = freshDbPath('a4-partial');
+  const partial = await buildPreMigrationDb(partialDbFile);
+  await partial.execute("CREATE TABLE archive_document_fingerprints (id INTEGER PRIMARY KEY, representation_id TEXT, fingerprint_hash TEXT, optional_position INTEGER, fingerprint_version TEXT, created_at TEXT)");
+  assert.equal(
+    await tableSetState(partial, EXPECTED_TABLES_BY_MIGRATION['0049_archive_scalable_index.sql']),
+    'partial',
+    'one of 0049\'s four tables present without the rest must be detected as partial (the runner then refuses to guess)',
+  );
+  partial.close();
+  cleanupDbFile(partialDbFile);
+
+  // idempotent re-run: 0048 + 0049 report already-applied.
+  const rerun = await runTargetMigrations(client, drizzleDir, { environmentLabel: 'local-test', expectedEnvironmentLabel: 'local-test' });
+  assert.equal(rerun.status, 'already-fully-applied');
+  for (const file of ARCHIVE_2B_FILES) {
+    assert.equal(rerun.steps.find((s) => s.file === file).status, 'already-applied', `${file} must be seen as already-applied on a re-run`);
+  }
 
   client.close();
   cleanupDbFile(dbFile);
