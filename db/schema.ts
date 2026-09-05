@@ -1769,6 +1769,36 @@ export const developer_corpus_maturity_exemptions = sqliteTable(
   },
 );
 
+// ── Built-in archive parity foundation (drizzle/0048) ────────────────────────
+// Display/lookup metadata only — never read by admissionEligibilitySql or any
+// scoring/matching predicate. Joins a corpus_document_representations row
+// seeded from the built-in archive (public/data/document-index.*) back to
+// that article's stable id, title, and original-similarity metadata, and
+// records which corpus_document_shingles fingerprint_version its shingles
+// were written under (a namespace distinct from CORPUS_FINGERPRINT_VERSION,
+// so seeding this table can never change what the live historical-match path
+// discovers). See lib/archive-corpus-seed.ts.
+export const archive_document_representations = sqliteTable(
+  "archive_document_representations",
+  {
+    archive_article_id: text("archive_article_id").primaryKey(),
+    representation_id: text("representation_id")
+      .notNull()
+      .references(() => corpus_document_representations.id, { onDelete: "cascade" }),
+    title: text("title").notNull(),
+    source_type: text("source_type").notNull().default("Publication"),
+    original_similarity: integer("original_similarity"),
+    archive_order: integer("archive_order"),
+    corpus_version: text("corpus_version").notNull(),
+    fingerprint_version: text("fingerprint_version").notNull(),
+    created_at: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("ux_archive_document_representations_representation_id").on(table.representation_id),
+    index("idx_archive_document_representations_corpus_version").on(table.corpus_version),
+  ],
+);
+
 // Export nothing else — Drizzle will consume these definitions for migrations.
 export {};
 

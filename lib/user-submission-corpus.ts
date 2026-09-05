@@ -96,7 +96,7 @@ export function corpusMaturityCutoff(asOf: Date): string {
 
 /**
  * Phase A — 7-day corpus maturity. The intent a caller of the shared
- * admission-eligibility predicate is expressing. Two, mutually exclusive:
+ * admission-eligibility predicate is expressing. Three, mutually exclusive:
  *
  *   "MATCHING" — the DEFAULT for every consumer. The representation is being
  *     considered as plagiarism evidence, so the 7-day maturity gate is ALWAYS
@@ -108,40 +108,60 @@ export function corpusMaturityCutoff(asOf: Date): string {
  *   "ADMISSION_DEDUP" — the corpus-admission gate deliberately inspecting
  *     stored representations regardless of age, so it does not re-admit
  *     content already present in the corpus. This is the ONLY sanctioned
- *     maturity bypass and it never contributes to a similarity score. Used at
- *     exactly one production call site: lib/corpus-admission-gate.ts's
- *     computeEvaluationCore family/redundancy lookup. Any new use must be an
- *     equally deliberate, non-scoring admission-side decision.
+ *     maturity bypass for ADMISSION purposes and it never contributes to a
+ *     similarity score. Used at exactly one production call site:
+ *     lib/corpus-admission-gate.ts's computeEvaluationCore family/redundancy
+ *     lookup. Any new use must be an equally deliberate, non-scoring
+ *     admission-side decision.
+ *
+ *   "ARCHIVE" — lib/archive-corpus-matching.ts's matchAgainstArchiveCorpus,
+ *     ONLY. A representation is eligible under this mode iff it has a row in
+ *     archive_document_representations — no maturity term is ever emitted,
+ *     by design: the built-in archive's real-world pre-existence is already
+ *     established at seed time (its own corpus_version/build date), and
+ *     `first_seen_at` on the underlying corpus_document_representations row
+ *     is NOT a reliable proxy for that once a representation is REUSED —
+ *     lib/archive-corpus-seed.ts's seedArchiveDocument dedupes by canonical
+ *     hash, so a byte-identical representation created moments ago by an
+ *     ordinary, unrelated, still-immature user submission would otherwise be
+ *     backdating-blind and wait out the same 7 days the archive itself is
+ *     exempt from. This mode answers a narrower, different question than
+ *     MATCHING ("is this representation part of the built-in archive," not
+ *     "has enough time passed") and must never be used for anything that
+ *     feeds a similarity score outside the archive's own matching path.
  */
-export type CorpusEligibilityMode = "MATCHING" | "ADMISSION_DEDUP";
+export type CorpusEligibilityMode = "MATCHING" | "ADMISSION_DEDUP" | "ARCHIVE";
 
 /**
  * The ONE place the "matching is safe by default" rule is implemented.
  * MATCHING => always a cutoff string: the caller's injected one (production's
  * single logical clock, or a test's frozen `asOf`), else derived from
- * `asOf ?? new Date()`. ADMISSION_DEDUP => null (the deliberate bypass).
+ * `asOf ?? new Date()`. ADMISSION_DEDUP / ARCHIVE => null (both are
+ * deliberate, narrowly-scoped bypasses — see CorpusEligibilityMode).
  */
 export function resolveMaturityCutoff(
   mode: CorpusEligibilityMode,
   opts: { maturityCutoff?: string; asOf?: Date },
 ): string | null {
-  if (mode === "ADMISSION_DEDUP") return null;
+  if (mode === "ADMISSION_DEDUP" || mode === "ARCHIVE") return null;
   return opts.maturityCutoff ?? corpusMaturityCutoff(opts.asOf ?? new Date());
 }
 
 /**
  * Developer corpus-maturity exemption (drizzle/0047,
  * developer_corpus_maturity_exemptions) — live DB read, always current, no
- * caching. "ADMISSION_DEDUP" never emits a maturity term at all (see
- * CorpusEligibilityMode), so the exemption list is moot there — skipped
- * entirely, matching resolveMaturityCutoff's own mode short-circuit.
+ * caching. "ADMISSION_DEDUP" and "ARCHIVE" never emit a maturity term at all
+ * (see CorpusEligibilityMode), so the exemption list is moot for both —
+ * skipped entirely, matching resolveMaturityCutoff's own mode short-circuit
+ * (and sparing "ARCHIVE" callers, e.g. every matchAgainstArchiveCorpus call,
+ * a wholly unnecessary DB round trip).
  * Returns each exempt account's admission-source_ref prefix via
  * buildReportAdmissionAccountPrefix — the ONE place that format is built —
  * ready to bind as a JSON array for admissionEligibilitySql's arm-2
  * exemption check (json_each(?)).
  */
 async function resolveExemptAccountPrefixes(client: Client, mode: CorpusEligibilityMode): Promise<string[]> {
-  if (mode === "ADMISSION_DEDUP") return [];
+  if (mode === "ADMISSION_DEDUP" || mode === "ARCHIVE") return [];
   const result = await client.execute("SELECT user_id FROM developer_corpus_maturity_exemptions");
   return (result.rows as unknown as { user_id: string }[]).map((row) => buildReportAdmissionAccountPrefix(row.user_id));
 }
@@ -255,6 +275,20 @@ export type CreateReusableDocumentRepresentationParams = {
   language?: string | null;
   canonicalizationVersion?: string;
   extractorVersion?: string | null;
+  /**
+   * Overrides first_seen_at (CURRENT_TIMESTAMP by default) with a caller-
+   * supplied SQLite-UTC timestamp — see sqliteUtcTimestamp. The ONLY
+   * sanctioned use is seeding a representation whose real-world age predates
+   * this row's own creation (e.g. lib/archive-corpus-seed.ts backdating a
+   * built-in archive document to its actual corpus-version build date, never
+   * to "now" and never to fabricate an age it doesn't have) — this directly
+   * feeds admissionEligibilitySql's maturity term (r.first_seen_at <=
+   * cutoff), so an honest value here is what lets genuinely pre-existing
+   * content skip an unearned 7-day wait, not a way to bypass the gate for
+   * new content. undefined (every existing caller) reproduces today's exact
+   * CURRENT_TIMESTAMP behavior with a byte-identical SQL statement.
+   */
+  firstSeenAt?: string;
 };
 
 /** Inserts one representation row. Does not deduplicate itself — callers check findReusableRepresentationByCanonicalHash first (see indexDocumentSubmissionIntoCorpus, the orchestrator that does this correctly). */
@@ -265,20 +299,38 @@ export async function createReusableDocumentRepresentation(
   const id = randomUUID();
   const canonicalHash = canonicalSha256(params.canonicalText);
   const wordCount = tokens(params.canonicalText).length;
-  await client.execute({
-    sql: `INSERT INTO corpus_document_representations
-          (id, canonical_sha256, canonical_text, word_count, language, canonicalization_version, extractor_version, first_seen_at, created_at)
-          VALUES (?,?,?,?,?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
-    args: [
-      id,
-      canonicalHash,
-      params.canonicalText,
-      wordCount,
-      params.language ?? null,
-      params.canonicalizationVersion ?? CANONICALIZATION_VERSION,
-      params.extractorVersion ?? null,
-    ],
-  });
+  if (params.firstSeenAt === undefined) {
+    await client.execute({
+      sql: `INSERT INTO corpus_document_representations
+            (id, canonical_sha256, canonical_text, word_count, language, canonicalization_version, extractor_version, first_seen_at, created_at)
+            VALUES (?,?,?,?,?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
+      args: [
+        id,
+        canonicalHash,
+        params.canonicalText,
+        wordCount,
+        params.language ?? null,
+        params.canonicalizationVersion ?? CANONICALIZATION_VERSION,
+        params.extractorVersion ?? null,
+      ],
+    });
+  } else {
+    await client.execute({
+      sql: `INSERT INTO corpus_document_representations
+            (id, canonical_sha256, canonical_text, word_count, language, canonicalization_version, extractor_version, first_seen_at, created_at)
+            VALUES (?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`,
+      args: [
+        id,
+        canonicalHash,
+        params.canonicalText,
+        wordCount,
+        params.language ?? null,
+        params.canonicalizationVersion ?? CANONICALIZATION_VERSION,
+        params.extractorVersion ?? null,
+        params.firstSeenAt,
+      ],
+    });
+  }
   const result = await client.execute({
     sql: `SELECT id, canonical_sha256, canonical_text, word_count, language, canonicalization_version, extractor_version, first_seen_at, created_at
           FROM corpus_document_representations WHERE id = ?`,
@@ -884,8 +936,22 @@ export async function applyHighFrequencyShinglePruning(
  *
  * The `?` placeholders appear in a FIXED textual order — bind them via
  * admissionEligibilityBindArgs, never inline.
+ *
+ * "ARCHIVE" mode (lib/archive-corpus-matching.ts's matchAgainstArchiveCorpus,
+ * ONLY) is a completely separate, narrower predicate — NOT arms 1/2/3 above,
+ * and no maturity term of any kind — see CorpusEligibilityMode's own
+ * comment for why first_seen_at cannot be trusted as a maturity proxy once a
+ * representation is reused by seedArchiveDocument's canonical-hash dedup.
+ * Eligibility is exactly "does this representation have an
+ * archive_document_representations row" — no fingerprint_version filter is
+ * needed here because the caller's own shingle-hash JOIN (in
+ * findCandidateCorpusRepresentations) already scopes every candidate to the
+ * requested fingerprint_version before this predicate ever runs.
  */
 function admissionEligibilitySql(mode: CorpusEligibilityMode): string {
+  if (mode === "ARCHIVE") {
+    return `EXISTS (SELECT 1 FROM archive_document_representations adr WHERE adr.representation_id = r.id)`;
+  }
   const emitMaturityTerms = mode === "MATCHING";
   const arm1Maturity = emitMaturityTerms
     ? ` AND (sr.created_at <= ? OR EXISTS (
@@ -921,6 +987,7 @@ function admissionEligibilitySql(mode: CorpusEligibilityMode): string {
 /**
  * Positional bind values for admissionEligibilitySql(mode), in the exact `?`
  * order of the fragment:
+ *   ARCHIVE:         []                                                                (no placeholders at all)
  *   ADMISSION_DEDUP: [prefix, prefix, prefix]                                        (arm 2 only)
  *   MATCHING:        [cutoff, prefix, prefix, prefix, cutoff, exemptJson, cutoff]
  *                     arm1    ── arm 2 account-exclusion ──  arm2  arm2-exempt  arm3
@@ -937,6 +1004,9 @@ function admissionEligibilityBindArgs(
   maturityCutoff: string | null,
   exemptAccountPrefixesJson: string,
 ): (string | null)[] {
+  if (mode === "ARCHIVE") {
+    return [];
+  }
   if (mode === "ADMISSION_DEDUP") {
     return [excludeAccountPrefix, excludeAccountPrefix, excludeAccountPrefix];
   }
