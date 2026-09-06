@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import fs from "node:fs/promises";
 import {
   analyzeArchive,
   resolveArchiveEngine,
   __resetArchiveEngineForTests,
+  __getArchiveRuntimeTestState,
 } from "../lib/archive-analysis-runtime.ts";
 
 /**
@@ -20,6 +22,15 @@ import {
  * Phase 9 also proves server mode fetches no packed-archive asset (.bin /
  * document-index.meta.json / risk-calibration.json) — the basis for dropping
  * the ~28 MB browser archive download later.
+ *
+ * Slice 2G — the legacy browser worker now lives in a separate module
+ * (lib/archive-browser-runtime.ts) reached ONLY through a lazy
+ * `import("./archive-browser-runtime")`. archive-analysis-runtime.ts holds no
+ * static `new Worker(...)` / similarity-worker.ts reference. The 2G section
+ * below proves that lazy boundary: engine resolution alone never imports it,
+ * only the explicit browser path does, and server / ambiguous / POST-failure
+ * paths never reach it. __getArchiveRuntimeTestState().browserRuntimeRequested
+ * is the accessor for "was the lazy browser module requested".
  */
 
 const FROZEN_RESULT = {
@@ -205,4 +216,108 @@ test("a successful resolution is memoised — GET /api/archive/match runs once p
   await analyzeArchive("a", "a.txt", () => {});
   await analyzeArchive("b", "b.txt", () => {});
   assert.equal(getCount, 1);
+});
+
+// ── slice 2G: the lazy browser-runtime module boundary ────────────────────
+//
+// archive-analysis-runtime.ts must contain NO `new Worker(...)` and NO
+// `similarity-worker.ts` reference; the legacy engine is
+// lib/archive-browser-runtime.ts, imported on demand ONLY on the explicit
+// archiveServerSide:false path. `browserRuntimeRequested` flips true the
+// moment that dynamic import is kicked off.
+
+test("2G source: archive-analysis-runtime.ts has no static Worker / similarity-worker.ts reference", async () => {
+  const src = await fs.readFile(new URL("../lib/archive-analysis-runtime.ts", import.meta.url), "utf8");
+  const code = src.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, ""); // strip comments — prose may mention the file
+  assert.doesNotMatch(code, /new\s+Worker\s*\(/, "no `new Worker(` in the runtime module");
+  assert.doesNotMatch(code, /similarity-worker/, "no similarity-worker.ts reference in the runtime module code");
+  assert.match(code, /import\(\s*["']\.\/archive-browser-runtime["']\s*\)/, "reaches the browser engine via a lazy import");
+});
+
+test("2G source: lib/archive-browser-runtime.ts is the ONLY runtime holder of the similarity-worker.ts URL", async () => {
+  const browser = await fs.readFile(new URL("../lib/archive-browser-runtime.ts", import.meta.url), "utf8");
+  const browserCode = browser.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, "");
+  assert.match(browserCode, /new URL\(\s*["']\.\.\/app\/similarity-worker\.ts["']/, "browser runtime owns the worker URL");
+  assert.match(browserCode, /new\s+Worker\s*\(/, "browser runtime owns Worker construction");
+  assert.match(browser, /createBrowserArchiveRunner/, "exposes createBrowserArchiveRunner()");
+});
+
+test("2G #1: explicit-false engine resolution ALONE does not request the legacy browser runtime", async () => {
+  installFetch(({ method }) => (method === "GET" ? jsonResponse({ archiveServerSide: false }) : jsonResponse({}, 500)));
+  assert.equal(await resolveArchiveEngine(), "browser");
+  assert.equal(__getArchiveRuntimeTestState().browserRuntimeRequested, false, "not requested until analyzeArchive runs it");
+  assert.equal(workerCtorCalls.length, 0, "no Worker constructed by resolution alone");
+});
+
+test("2G #2: analyzeArchive with explicit false DOES request the browser runtime and constructs the Worker", async () => {
+  installFetch(({ method }) => (method === "GET" ? jsonResponse({ archiveServerSide: false }) : jsonResponse({}, 500)));
+  const out = await analyzeArchive("submission text", "paper.pdf", () => {});
+  assert.equal(__getArchiveRuntimeTestState().browserRuntimeRequested, true);
+  assert.equal(workerCtorCalls.length, 1);
+  assert.match(workerCtorCalls[0].url, /app[\\/]similarity-worker\.ts$/);
+  assert.deepEqual(workerCtorCalls[0].opts, { type: "module" });
+  assert.equal(out.__echoedText, "submission text");
+});
+
+test("2G #3: explicit true never requests the legacy browser runtime", async () => {
+  installFetch(({ url, method }) => {
+    if (method === "GET") return jsonResponse({ archiveServerSide: true });
+    if (method === "POST" && url === "/api/archive/match") return jsonResponse({ result: FROZEN_RESULT });
+    throw new Error(`unexpected fetch ${method} ${url}`);
+  });
+  await analyzeArchive("submission", "doc.txt", () => {});
+  assert.equal(__getArchiveRuntimeTestState().browserRuntimeRequested, false);
+  assert.equal(workerCtorCalls.length, 0);
+});
+
+test("2G #4: GET network failure never requests the legacy browser runtime", async () => {
+  installFetch(() => { throw new TypeError("Failed to fetch"); });
+  await assert.rejects(() => analyzeArchive("submission", "doc.txt", () => {}), /could not be determined/);
+  assert.equal(__getArchiveRuntimeTestState().browserRuntimeRequested, false);
+  assert.equal(workerCtorCalls.length, 0);
+});
+
+test("2G #5: every ambiguous discovery (non-2xx / non-JSON / missing / non-boolean flag) never reaches the legacy runtime", async () => {
+  const ambiguous = [
+    () => jsonResponse({ error: "boom" }, 503),
+    () => nonJsonResponse(200),
+    () => jsonResponse({}),
+    () => jsonResponse({ archiveServerSide: "true" }),
+    () => jsonResponse({ archiveServerSide: 1 }),
+    () => jsonResponse({ archiveServerSide: null }),
+  ];
+  for (const handler of ambiguous) {
+    __resetArchiveEngineForTests();
+    fetchCalls = [];
+    workerCtorCalls = [];
+    installFetch(({ method }) => (method === "GET" ? handler() : jsonResponse({ result: FROZEN_RESULT })));
+    await assert.rejects(() => analyzeArchive("submission", "doc.txt", () => {}));
+    assert.equal(__getArchiveRuntimeTestState().browserRuntimeRequested, false, "ambiguous discovery must not import the browser runtime");
+    assert.equal(workerCtorCalls.length, 0);
+  }
+});
+
+test("2G #6: server POST failure never requests the legacy browser runtime and never falls back", async () => {
+  installFetch(({ method }) => (method === "GET" ? jsonResponse({ archiveServerSide: true }) : jsonResponse({ error: "matcher exploded" }, 500)));
+  await assert.rejects(() => analyzeArchive("submission", "doc.txt", () => {}), /archive comparison service returned 500/);
+  assert.equal(__getArchiveRuntimeTestState().browserRuntimeRequested, false, "no browser fallback after a server-mode failure");
+  assert.equal(workerCtorCalls.length, 0);
+});
+
+test("2G #7: server mode fetches ONLY GET + POST /api/archive/match — no .bin / meta / risk / data asset, no browser runtime", async () => {
+  installFetch(({ url, method }) => {
+    if (method === "GET" && url === "/api/archive/match") return jsonResponse({ archiveServerSide: true });
+    if (method === "POST" && url === "/api/archive/match") return jsonResponse({ result: FROZEN_RESULT });
+    throw new Error(`unexpected fetch ${method} ${url}`);
+  });
+  await analyzeArchive("submission", "doc.txt", () => {});
+  for (const c of fetchCalls) {
+    assert.doesNotMatch(c.url, /\.bin(\?|$)/, c.url);
+    assert.doesNotMatch(c.url, /document-index\.meta\.json/, c.url);
+    assert.doesNotMatch(c.url, /risk-calibration\.json/, c.url);
+    assert.doesNotMatch(c.url, /^\/data\//, c.url);
+  }
+  assert.deepEqual(fetchCalls.map((c) => `${c.method} ${c.url}`), ["GET /api/archive/match", "POST /api/archive/match"]);
+  assert.equal(__getArchiveRuntimeTestState().browserRuntimeRequested, false);
+  assert.equal(workerCtorCalls.length, 0);
 });

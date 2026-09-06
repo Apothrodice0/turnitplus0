@@ -1,74 +1,68 @@
 import type { ArchiveAnalysisResult } from "./archive-result-framing";
 
 /**
- * 100k-scale architecture, slice 2E — the ONE place the real document-analysis
- * flow decides which archive engine runs, so ordinary uploads
- * (app/page.tsx) and room uploads (app/reports/rooms/[room]/room-page-shell.tsx)
- * — both of which go through lib/document-check-pipeline.ts's analyzeText —
- * share a single abstraction instead of two server-call paths:
+ * 100k-scale architecture, slice 2E / 2G — the ONE place the real
+ * document-analysis flow decides which archive engine runs, so ordinary
+ * uploads (app/page.tsx) and room uploads
+ * (app/reports/rooms/[room]/room-page-shell.tsx) — both of which go through
+ * lib/document-check-pipeline.ts's analyzeText — share a single abstraction
+ * instead of two server-call paths:
  *
  *              analyzeArchive(text, fileName, onProgress)
  *                    |
- *      engine === "browser"  (ARCHIVE_SERVER_SIDE_ENABLED off / unknown)
- *                    |            -> app/similarity-worker.ts  (static packed index)
+ *      engine === "server"   (ARCHIVE_SERVER_SIDE_ENABLED === "true")
+ *                    |            -> POST /api/archive/match  (DB matcher + G1s)
  *                    |
- *      engine === "server"   (ARCHIVE_SERVER_SIDE_ENABLED on)
- *                                 -> POST /api/archive/match  (DB matcher + G1s)
+ *      engine === "browser"  (explicit archiveServerSide:false ONLY)
+ *                                 -> await import("./archive-browser-runtime")
+ *                                    -> the legacy static packed-index worker
  *
  * The engine is resolved ONCE per page load from GET /api/archive/match and
  * never both run for one submission. Resolution FAILS CLOSED: only a
  * successful GET that returns a real boolean archiveServerSide picks an
  * engine (false => browser, true => server). A network failure, a non-2xx
  * response, a non-JSON body, or a missing/non-boolean archiveServerSide field
- * is AMBIGUOUS — it THROWS and archive analysis fails, and the browser worker
- * is NEVER instantiated as a consolation. (A successful resolution is
- * memoised; a failed one is not, so the next submission re-attempts
- * discovery rather than wedging the session.) When the resolved engine is
- * "server" and the POST fails, this likewise REJECTS — it does not silently
- * fall back to the browser worker: Preview testing must prove the server path
- * actually executed, and the browser engine stays one flag flip
- * (ARCHIVE_SERVER_SIDE_ENABLED off, so the GET returns false) away regardless.
+ * is AMBIGUOUS — it THROWS and archive analysis fails; it does NOT fall back
+ * to "browser", and the browser runtime module is NEVER imported as a
+ * consolation. (A successful resolution is memoised; a failed one is not, so
+ * the next submission re-attempts discovery rather than wedging the session.)
+ * When the resolved engine is "server" and the POST fails, this likewise
+ * REJECTS — it does not silently fall back to the browser worker: Preview
+ * testing must prove the server path actually executed, and the browser
+ * engine stays one flag flip (ARCHIVE_SERVER_SIDE_ENABLED off, so the GET
+ * returns false) away regardless.
+ *
+ * Slice 2G: the legacy browser worker — and the only reference to its module
+ * URL — lives in lib/archive-browser-runtime.ts, reached ONLY through the
+ * dynamic import below. This module therefore holds no static reference to
+ * that worker at all, so Turbopack code-splits it (and the packed archive it
+ * loads) into a lazy chunk fetched only on the explicit browser path.
  *
  * ArchiveAnalysisResult is the frozen worker-result contract
  * (lib/archive-result-framing.ts); both paths return exactly it, so
  * analyzeText's SimilarityReport mapping is engine-agnostic.
  */
 
+import type { BrowserArchiveRunner } from "./archive-browser-runtime";
+
 export type ArchiveEngine = "browser" | "server";
 
 type ArchiveProgress = (progress: number, label: string) => void;
 
-// ── browser engine (static packed index) ────────────────────────────────────
-// The similarity worker singleton — lifted verbatim out of
-// lib/document-check-pipeline.ts (same URL, same { type: "module" }, same
-// request-id + progress plumbing).
-let similarityWorker: Worker | null = null;
-let workerRequestId = 0;
+// ── browser engine (lazy module boundary — slice 2G) ───────────────────────
+// lib/archive-browser-runtime.ts (and the packed archive it fetches) is
+// imported on demand so it is never part of this module's static dependency
+// graph. The import is kicked off ONLY from the explicit
+// archiveServerSide:false path in analyzeArchive.
+let browserRunnerPromise: Promise<BrowserArchiveRunner> | null = null;
+let browserRuntimeRequested = false;
 
-function runViaBrowserWorker(
-  text: string,
-  fileName: string,
-  onProgress: ArchiveProgress,
-): Promise<ArchiveAnalysisResult> {
-  similarityWorker ??= new Worker(
-    new URL("../app/similarity-worker.ts", import.meta.url),
-    { type: "module" },
+function getBrowserRunner(): Promise<BrowserArchiveRunner> {
+  browserRuntimeRequested = true;
+  browserRunnerPromise ??= import("./archive-browser-runtime").then(
+    ({ createBrowserArchiveRunner }) => createBrowserArchiveRunner(),
   );
-  const id = ++workerRequestId;
-  return new Promise<ArchiveAnalysisResult>((resolve, reject) => {
-    const handleMessage = (event: MessageEvent) => {
-      if (event.data.type === "progress") {
-        onProgress(event.data.progress, event.data.label);
-        return;
-      }
-      if (event.data.id !== id) return;
-      similarityWorker?.removeEventListener("message", handleMessage);
-      if (event.data.ok) resolve(event.data.result as ArchiveAnalysisResult);
-      else reject(new Error(event.data.error));
-    };
-    similarityWorker?.addEventListener("message", handleMessage);
-    similarityWorker?.postMessage({ id, text, fileName });
-  });
+  return browserRunnerPromise;
 }
 
 // ── server engine (DB matcher via API) ─────────────────────────────────────
@@ -123,11 +117,20 @@ export function resolveArchiveEngine(): Promise<ArchiveEngine> {
   return enginePromise;
 }
 
-/** Test-only: forget the memoised engine decision. Never called in production. */
+/** Test-only: forget the memoised engine decision and the lazy browser runtime. Never called in production. */
 export function __resetArchiveEngineForTests(): void {
   enginePromise = null;
-  similarityWorker = null;
-  workerRequestId = 0;
+  browserRunnerPromise = null;
+  browserRuntimeRequested = false;
+}
+
+/**
+ * Test-only: report whether the lazy browser runtime has been requested since
+ * the last reset. Proves server / ambiguous / POST-failure paths never reach
+ * the legacy worker module. Never called in production.
+ */
+export function __getArchiveRuntimeTestState(): { browserRuntimeRequested: boolean } {
+  return { browserRuntimeRequested };
 }
 
 /**
@@ -136,8 +139,8 @@ export function __resetArchiveEngineForTests(): void {
  * never both run for one submission.
  *
  * Fail closed: if resolveArchiveEngine() throws (ambiguous mode discovery),
- * this rejects here — BEFORE runViaBrowserWorker — so the similarity worker
- * is never instantiated as a consolation. Only an explicit
+ * this rejects here — BEFORE getBrowserRunner() — so the browser runtime
+ * module is never imported as a consolation. Only an explicit
  * archiveServerSide:false ever reaches the browser path.
  */
 export async function analyzeArchive(
@@ -151,5 +154,6 @@ export async function analyzeArchive(
     // caller exactly like a worker failure would.
     return runViaServer(text, onProgress);
   }
-  return runViaBrowserWorker(text, fileName, onProgress);
+  const runner = await getBrowserRunner();
+  return runner.run(text, fileName, onProgress);
 }
