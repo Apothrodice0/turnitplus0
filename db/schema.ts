@@ -1881,6 +1881,45 @@ export const archive_phrase_fts_map = sqliteTable(
   ],
 );
 
+// Directed archive-document co-source adjacency (drizzle/0050, slice 2D.4). An
+// edge representation_id -> co_representation_id means the two archive documents
+// share >= ARCHIVE_COSOURCE_MIN_SHARED archive-informative, non-stop,
+// owner-capped 5-grams; each document keeps only its ARCHIVE_COSOURCE_MAX_NEIGHBORS
+// (24) highest-sharing neighbours. Derived, rebuildable data
+// (lib/archive-cosource.ts buildCosourceAdjacencyTable, reconstructed from
+// canonical_text + the df-band stop set — no persistent full archive shingle
+// table). policy_version (ARCHIVE_COSOURCE_POLICY_VERSION) namespaces a build
+// generation, like archive_hash_df_bands.policy_version. Read only by
+// lib/archive-corpus-matching.ts's G1s gate, and only when the
+// ARCHIVE_COSOURCE_EXPANSION_ENABLED flag is on. Two CHECK constraints
+// (representation_id <> co_representation_id; shared_gram_count >= 2) and one
+// BEFORE INSERT guard trigger (<= 24 outgoing neighbours per doc per policy)
+// live in drizzle/0050 only — Drizzle models neither, exactly like an FTS5
+// virtual table or 0044's cleanup trigger.
+export const archive_document_cosources = sqliteTable(
+  "archive_document_cosources",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    representation_id: text("representation_id")
+      .notNull()
+      .references(() => corpus_document_representations.id, { onDelete: "cascade" }),
+    co_representation_id: text("co_representation_id")
+      .notNull()
+      .references(() => corpus_document_representations.id, { onDelete: "cascade" }),
+    shared_gram_count: integer("shared_gram_count").notNull(),
+    policy_version: text("policy_version").notNull(),
+    created_at: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("ux_archive_document_cosources_edge").on(
+      table.policy_version,
+      table.representation_id,
+      table.co_representation_id,
+    ),
+    index("idx_archive_document_cosources_lookup").on(table.representation_id, table.policy_version),
+  ],
+);
+
 // Export nothing else — Drizzle will consume these definitions for migrations.
 export {};
 

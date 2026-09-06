@@ -1,10 +1,22 @@
 import type { Client } from "@libsql/client";
-import { tokens, grams, gramHash } from "./similarity-core";
+import { tokens, grams, gramHash, containment } from "./similarity-core";
 import { scoreAgainstArchive, type ArchiveScoringResult, type ArchiveScoringMatchingParameters } from "./archive-similarity-scoring";
 import { ARCHIVE_FINGERPRINT_VERSION } from "./archive-corpus-seed";
 import { ARCHIVE_SHINGLE_SIZE, ARCHIVE_COMPACT_FINGERPRINT_VERSION, archiveShingleHashes } from "./archive-fingerprint";
 import { loadDfBandMap, deriveStopHashSet, ARCHIVE_DF_BAND_POLICY_VERSION } from "./archive-df-bands";
 import { phraseFallbackDiscovery, ARCHIVE_PHRASE_FALLBACK_POLICY_VERSION, PHRASE_FALLBACK_BUDGET } from "./archive-phrase-fallback";
+import {
+  loadCosources,
+  isArchiveCosourceExpansionEnabled,
+  ARCHIVE_COSOURCE_POLICY_VERSION,
+} from "./archive-cosource";
+
+/** The 5-gram whole-query containment at/above which a candidate is treated as
+ *  the submission itself and cannot be a scoring source — scoreAgainstArchive's
+ *  own self-exclusion threshold, mirrored here so the G1s gate reasons about
+ *  the SAME "self-excluded" set the scorer will exclude. Computed over the full
+ *  (unpruned) 5-gram sets, matching the frozen Slice 2D.3 prototype. */
+const ARCHIVE_SELF_EXCLUSION_CONTAINMENT = 0.75;
 
 /**
  * 100k-scale architecture — the server-side built-in-archive matcher. Slice 2B
@@ -54,6 +66,7 @@ export const ARCHIVE_MATCH_POLICY = {
   dfBandPolicyVersion: ARCHIVE_DF_BAND_POLICY_VERSION,
   phraseFallbackPolicyVersion: ARCHIVE_PHRASE_FALLBACK_POLICY_VERSION,
   phraseFallbackBudget: PHRASE_FALLBACK_BUDGET,
+  cosourcePolicyVersion: ARCHIVE_COSOURCE_POLICY_VERSION,
 } as const;
 
 export type MatchAgainstArchiveCorpusOptions = {
@@ -71,6 +84,9 @@ export type MatchAgainstArchiveCorpusOptions = {
   compactFingerprintVersion?: string;
   /** DF-band policy generation to load. Defaults to ARCHIVE_DF_BAND_POLICY_VERSION. */
   dfBandPolicyVersion?: string;
+  /** Co-source adjacency policy generation to consult when the expansion flag
+   *  is on. Defaults to ARCHIVE_COSOURCE_POLICY_VERSION. */
+  cosourcePolicyVersion?: string;
   /**
    * UNUSED — archive candidates are never subject to the 7-day maturity gate.
    * Accepted-but-ignored for API stability; passing either is harmless.
@@ -118,6 +134,10 @@ async function compactDiscovery(
 type ScoreOverCandidatesResult = {
   result: ArchiveScoringResult;
   candidateIds: string[];
+  /** Candidates whose whole-query 5-gram containment reached
+   *  ARCHIVE_SELF_EXCLUSION_CONTAINMENT — the same set scoreAgainstArchive
+   *  excludes. Used ONLY by the G1s gate; unordered. */
+  selfExcludedRepresentationIds: string[];
 };
 
 /**
@@ -136,6 +156,7 @@ async function scoreOverCandidates(
   maximumDocumentFrequency: number,
   matchingParameters: ArchiveScoringMatchingParameters | undefined,
   stopHashSet: Set<string>,
+  queryHashes: Set<string>,
 ): Promise<ScoreOverCandidatesResult> {
   const emptyIndex = {
     shingleSize: ARCHIVE_SHINGLE_SIZE,
@@ -145,7 +166,11 @@ async function scoreOverCandidates(
     getPostings: () => [] as number[],
   };
   if (candidateIds.length === 0) {
-    return { result: scoreAgainstArchive(submittedText, emptyIndex, matchingParameters), candidateIds: [] };
+    return {
+      result: scoreAgainstArchive(submittedText, emptyIndex, matchingParameters),
+      candidateIds: [],
+      selfExcludedRepresentationIds: [],
+    };
   }
 
   const placeholders = candidateIds.map(() => "?").join(",");
@@ -165,6 +190,19 @@ async function scoreOverCandidates(
   for (const row of textResult.rows) {
     const r = row as unknown as { id: string; canonical_text: string };
     hashSetByRepresentationId.set(String(r.id), archiveShingleHashes(String(r.canonical_text), ARCHIVE_SHINGLE_SIZE));
+  }
+
+  // Self-exclusion set — the SAME containment(shared, |query grams|, |source grams|)
+  // >= 0.75 rule scoreAgainstArchive applies internally, computed here over the
+  // full (unpruned) 5-gram sets exactly as the frozen Slice 2D.3 prototype did,
+  // so the G1s gate reasons about "self-excluded" identically across runs.
+  const selfExcludedRepresentationIds: string[] = [];
+  for (const [representationId, hashSet] of hashSetByRepresentationId) {
+    let shared = 0;
+    for (const hash of queryHashes) if (hashSet.has(hash)) shared += 1;
+    if (containment(shared, queryHashes.size, hashSet.size) >= ARCHIVE_SELF_EXCLUSION_CONTAINMENT) {
+      selfExcludedRepresentationIds.push(representationId);
+    }
   }
 
   const orderedCandidates = (orderResult.rows as unknown as CandidateOrderRow[]).slice().sort((left, right) => {
@@ -209,7 +247,7 @@ async function scoreOverCandidates(
     { shingleSize: ARCHIVE_SHINGLE_SIZE, documentCount, maximumDocumentFrequency, articles, getPostings },
     matchingParameters,
   );
-  return { result, candidateIds };
+  return { result, candidateIds, selfExcludedRepresentationIds };
 }
 
 export type MatchAgainstArchiveCorpusResult = ArchiveScoringResult & {
@@ -222,6 +260,27 @@ export type MatchAgainstArchiveCorpusResult = ArchiveScoringResult & {
     admittedPhraseProbeCount: number;
     maxAdmittedPhraseFanOut: number;
     dfResolveChecks: number;
+    /**
+     * Co-source (G1s) expansion diagnostics — present ONLY when
+     * isArchiveCosourceExpansionEnabled() (absent entirely when the flag is
+     * off, so the flag-off result is byte-identical to the pre-2D.4 matcher).
+     * Never scoring-relevant.
+     */
+    cosource?: {
+      /** self-excluded compact candidates (the potential G1s anchors). */
+      selfExcludedCandidateCount: number;
+      /** did the G1s gate open (>=1 self-excluded AND (all self-excluded OR
+       *  primary produced no non-self-excluded contributing source))? */
+      eligible: boolean;
+      /** anchors actually queried for co-sources (0 unless eligible). */
+      anchorCount: number;
+      /** de-duplicated co-source neighbours returned for those anchors. */
+      neighborCount: number;
+      /** true iff neighbours were unioned in and the result was re-scored. */
+      applied: boolean;
+      /** candidate count handed to the final scoreAgainstArchive. */
+      finalCandidateCount: number;
+    };
   };
 };
 
@@ -274,6 +333,7 @@ export async function matchAgainstArchiveCorpus(
     options.maximumDocumentFrequency,
     options.matchingParameters,
     stopHashSet,
+    queryHashes,
   );
 
   // 2) bounded phrase fallback — discovery only
@@ -298,19 +358,92 @@ export async function matchAgainstArchiveCorpus(
         options.maximumDocumentFrequency,
         options.matchingParameters,
         stopHashSet,
+        queryHashes,
       );
 
   const admitted = fallback.perProbe.filter((p) => p.admitted);
+  const baseDiscovery = {
+    compactCandidateCount: compactCandidateIds.length,
+    phraseCandidateCount: fallback.phraseCandidateIds.length,
+    unionCandidateCount: fallback.unionCandidateIds.length,
+    phraseProbeCount: fallback.probes.length,
+    admittedPhraseProbeCount: admitted.length,
+    maxAdmittedPhraseFanOut: admitted.reduce((m, p) => Math.max(m, p.fanOut), 0),
+    dfResolveChecks: fallback.dfResolveChecks,
+  };
+
+  // ── committed-B behaviour — the ONLY path when the flag is off ────────────
+  // (byte-identical to the pre-2D.4 matcher: no `cosource` diagnostics field)
+  if (!isArchiveCosourceExpansionEnabled()) {
+    return { ...final.result, archiveDiscovery: baseDiscovery };
+  }
+
+  // ── G1s gate (frozen Slice 2D.3 semantics) ──────────────────────────────
+  // Expansion is eligible iff at least one discovered candidate self-excludes
+  // AND ( every discovered candidate self-excludes OR primary scoring produced
+  // zero non-self-excluded contributing sources ). Only self-excluded
+  // candidates may be adjacency anchors; with no self-excluded candidate there
+  // is no adjacency lookup at all.
+  const selfExcludedIds = primary.selfExcludedRepresentationIds;
+  const everyDiscoveredCandidateSelfExcludes =
+    selfExcludedIds.length >= 1 && selfExcludedIds.length === compactCandidateIds.length;
+  const primaryHasNoNonSelfExcludedContributingSource = primary.result.sources.length === 0;
+  const g1sEligible =
+    selfExcludedIds.length >= 1
+    && (everyDiscoveredCandidateSelfExcludes || primaryHasNoNonSelfExcludedContributingSource);
+
+  const cosourceBase = {
+    selfExcludedCandidateCount: selfExcludedIds.length,
+    eligible: g1sEligible,
+    anchorCount: 0,
+    neighborCount: 0,
+    applied: false,
+    finalCandidateCount: fallback.unionCandidateIds.length,
+  };
+
+  if (!g1sEligible) {
+    return { ...final.result, archiveDiscovery: { ...baseDiscovery, cosource: cosourceBase } };
+  }
+
+  // Anchors → bounded adjacency lookup → union/dedupe with the primary
+  // candidates → canonical reconstruction + UNCHANGED scoreAgainstArchive.
+  const cosourceNeighborIds = await loadCosources(client, selfExcludedIds, {
+    policyVersion: options.cosourcePolicyVersion,
+  });
+  const expandedUnionIds = [...new Set([...fallback.unionCandidateIds, ...cosourceNeighborIds])];
+
+  if (expandedUnionIds.length === fallback.unionCandidateIds.length) {
+    // adjacency added no new candidate — committed-B result stands unchanged
+    return {
+      ...final.result,
+      archiveDiscovery: {
+        ...baseDiscovery,
+        cosource: { ...cosourceBase, anchorCount: selfExcludedIds.length, neighborCount: cosourceNeighborIds.length },
+      },
+    };
+  }
+
+  const expanded = await scoreOverCandidates(
+    client,
+    submittedText,
+    expandedUnionIds,
+    documentCount,
+    options.maximumDocumentFrequency,
+    options.matchingParameters,
+    stopHashSet,
+    queryHashes,
+  );
   return {
-    ...final.result,
+    ...expanded.result,
     archiveDiscovery: {
-      compactCandidateCount: compactCandidateIds.length,
-      phraseCandidateCount: fallback.phraseCandidateIds.length,
-      unionCandidateCount: fallback.unionCandidateIds.length,
-      phraseProbeCount: fallback.probes.length,
-      admittedPhraseProbeCount: admitted.length,
-      maxAdmittedPhraseFanOut: admitted.reduce((m, p) => Math.max(m, p.fanOut), 0),
-      dfResolveChecks: fallback.dfResolveChecks,
+      ...baseDiscovery,
+      cosource: {
+        ...cosourceBase,
+        anchorCount: selfExcludedIds.length,
+        neighborCount: cosourceNeighborIds.length,
+        applied: true,
+        finalCandidateCount: expandedUnionIds.length,
+      },
     },
   };
 }

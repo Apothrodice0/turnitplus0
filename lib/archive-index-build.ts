@@ -13,6 +13,12 @@ import {
   MIN_PERSISTED_DF,
   type DfBandBuildResult,
 } from "./archive-df-bands";
+import {
+  buildCosourceAdjacencyTable,
+  ARCHIVE_COSOURCE_POLICY_VERSION,
+  type ArchiveCosourceRepresentation,
+  type CosourceAdjacencyBuildResult,
+} from "./archive-cosource";
 
 /**
  * 100k-scale architecture — the deterministic build / rebuild path for the
@@ -148,15 +154,52 @@ export async function rebuildArchiveDfBands(
   });
 }
 
+/** Every archive representation with its canonical text AND archive_order,
+ *  sorted archive_order ASC then representation_id ASC — the deterministic
+ *  iteration order buildCosourceAdjacencyTable requires (its tie-break depends
+ *  on it, and it is what the Slice 2D.3 prototype used). */
+async function loadArchiveRepresentationsOrdered(client: Client): Promise<ArchiveCosourceRepresentation[]> {
+  const rows = await client.execute(
+    `SELECT a.representation_id AS representation_id, a.archive_order AS archive_order, c.canonical_text AS canonical_text
+       FROM archive_document_representations a
+       JOIN corpus_document_representations c ON c.id = a.representation_id
+      ORDER BY (a.archive_order IS NULL), a.archive_order ASC, a.representation_id ASC`,
+  );
+  return rows.rows.map((r) => {
+    const row = r as unknown as { representation_id: string; archive_order: number | bigint | null; canonical_text: string };
+    return {
+      representationId: String(row.representation_id),
+      canonicalText: String(row.canonical_text),
+      archiveOrder: row.archive_order === null ? null : Number(row.archive_order),
+    };
+  });
+}
+
+/** Rebuild the co-source adjacency graph (drizzle/0050). Must run AFTER
+ *  rebuildArchiveDfBands — it reads the df-band stop set. Deterministic,
+ *  idempotent; replaces only `policyVersion`'s rows. */
+export async function rebuildArchiveCosources(
+  client: Client,
+  options: { policyVersion?: string; dfBandPolicyVersion?: string } = {},
+): Promise<CosourceAdjacencyBuildResult> {
+  const reps = await loadArchiveRepresentationsOrdered(client);
+  return buildCosourceAdjacencyTable(client, reps, {
+    policyVersion: options.policyVersion ?? ARCHIVE_COSOURCE_POLICY_VERSION,
+    dfBandPolicyVersion: options.dfBandPolicyVersion ?? ARCHIVE_DF_BAND_POLICY_VERSION,
+  });
+}
+
 export type ArchiveScalableIndexRebuildSummary = {
   versions: {
     compactFingerprint: string;
     dfBandPolicy: string;
     phraseIndex: string;
+    cosourcePolicy: string;
   };
   fingerprints: Awaited<ReturnType<typeof rebuildArchiveCompactFingerprints>>;
   phraseIndex: Awaited<ReturnType<typeof rebuildArchivePhraseIndex>>;
   dfBands: DfBandBuildResult;
+  cosources: CosourceAdjacencyBuildResult;
 };
 
 /**
@@ -173,6 +216,7 @@ export async function rebuildArchiveScalableIndex(
     fingerprintVersion?: string;
     dfBandPolicyVersion?: string;
     dfBandMinPersistedDf?: number;
+    cosourcePolicyVersion?: string;
   } = {},
 ): Promise<ArchiveScalableIndexRebuildSummary> {
   const fingerprints = await rebuildArchiveCompactFingerprints(client, { fingerprintVersion: options.fingerprintVersion });
@@ -181,15 +225,23 @@ export async function rebuildArchiveScalableIndex(
     policyVersion: options.dfBandPolicyVersion,
     minPersistedDf: options.dfBandMinPersistedDf,
   });
+  // MUST come after the df-band build — buildCosourceAdjacencyTable reads the
+  // df-band stop set for its common-phrasing guard.
+  const cosources = await rebuildArchiveCosources(client, {
+    policyVersion: options.cosourcePolicyVersion,
+    dfBandPolicyVersion: options.dfBandPolicyVersion,
+  });
   return {
     versions: {
       compactFingerprint: options.fingerprintVersion ?? ARCHIVE_COMPACT_FINGERPRINT_VERSION,
       dfBandPolicy: options.dfBandPolicyVersion ?? ARCHIVE_DF_BAND_POLICY_VERSION,
       phraseIndex: ARCHIVE_PHRASE_INDEX_VERSION,
+      cosourcePolicy: options.cosourcePolicyVersion ?? ARCHIVE_COSOURCE_POLICY_VERSION,
     },
     fingerprints,
     phraseIndex,
     dfBands,
+    cosources,
   };
 }
 

@@ -52,6 +52,14 @@ import type { Client } from "@libsql/client";
  * appears in sqlite_master with type='table' exactly like one; its shadow
  * tables are implied by it. 0049 has no destructive statement — every
  * CREATE ... IF NOT EXISTS — so no APPROVED_DESTRUCTIVE_STATEMENTS entry.)
+ * — and, for the archive co-source adjacency graph (slice 2D.4) that followed,
+ * extended once more through 0050 (0050's one ordinary table
+ * archive_document_cosources plus two indexes, two CHECK constraints, and one
+ * BEFORE INSERT ... RAISE(ABORT) guard trigger. Like 0044 the file contains a
+ * CREATE TRIGGER block splitStatements() already handles trigger-aware; UNLIKE
+ * 0044 that trigger body only RAISE(ABORT)s — it has no DELETE / DROP / ALTER —
+ * so scanForDestructiveStatements() flags nothing and no
+ * APPROVED_DESTRUCTIVE_STATEMENTS entry is required.)
  * — as a deliberate, reviewed decision, not an
  * automatic side effect of adding those migration files; see this file's own
  * EXPECTED_MIGRATION_SHA256 for how future extensions are meant to be
@@ -115,6 +123,7 @@ export const TARGET_MIGRATIONS = [
   "0047_developer_corpus_maturity_exemptions.sql",
   "0048_archive_document_representations.sql",
   "0049_archive_scalable_index.sql",
+  "0050_archive_cosource_adjacency.sql",
 ] as const;
 
 export type TargetMigrationFile = (typeof TARGET_MIGRATIONS)[number];
@@ -282,6 +291,12 @@ export const EXPECTED_TABLES_BY_MIGRATION: Record<TargetMigrationFile, string[]>
     "archive_phrase_fts_map",
     "archive_phrase_fts",
   ],
+  // 0050 (slice 2D.4 — archive co-source adjacency) creates one ordinary table
+  // plus two indexes and a BEFORE INSERT guard trigger, all in the same
+  // client.migrate() transaction, altering nothing. Plain table-existence
+  // tracking (the indexes and trigger are implied by the table, exactly like
+  // every other table-creating migration).
+  "0050_archive_cosource_adjacency.sql": ["archive_document_cosources"],
 };
 
 export const ALL_TARGET_TABLES: string[] = TARGET_MIGRATIONS.flatMap((m) => EXPECTED_TABLES_BY_MIGRATION[m]);
@@ -451,6 +466,12 @@ export const EXPECTED_MIGRATION_SHA256: Record<TargetMigrationFile, string> = {
   // IF NOT EXISTS) so no APPROVED_DESTRUCTIVE_STATEMENTS entry is needed.
   "0048_archive_document_representations.sql": "fcf1142f0ceaa4c2387200896eaabd7e46dccaf5612026de91d5f141f54e0851",
   "0049_archive_scalable_index.sql": "3a5bd9cc3dde61f10af17633cb0a5d4131b6eb664a51a580fcf03f94c4960ca0",
+  // Archive co-source adjacency (slice 2D.4). LF hash, computed directly from
+  // drizzle/0050_archive_cosource_adjacency.sql (see this file's own header on
+  // the review discipline). 0050's guard trigger only RAISE(ABORT)s, so
+  // scanForDestructiveStatements() is empty and no APPROVED_DESTRUCTIVE_STATEMENTS
+  // entry is needed.
+  "0050_archive_cosource_adjacency.sql": "c4e687dcb612485bb1db4f55cdd8608d6c4703ef517c9ff2ceb05a6d48adf64b",
 };
 
 const DESTRUCTIVE_PATTERN = /\b(DROP\s+TABLE|DROP\s+INDEX|ALTER\s+TABLE\s+\S+\s+DROP|DELETE\s+FROM|TRUNCATE)\b/gi;

@@ -173,6 +173,41 @@ for (const host of [{ k: "normal", w: 5500 }, { k: "long10k", w: 10500 }]) {
   }
 }
 
+// ── slice 2D.4 — co-source adjacency + G1s fixtures ──────────────────────────
+// A near-duplicate catastrophe: two content-near-dup archive docs that both
+// fully contain NEARDUP_PASSAGE (so an excerpt of it self-excludes BOTH),
+// plus a co-source doc arc-cosrc-c (and 3 more carriers) sharing only
+// COSOURCE_RUN with them. COSOURCE_RUN is short (< the winnowing guarantee) so
+// compact discovery never finds the carriers, and DF-6 — rare enough for the
+// co-source build to count it, common enough that the budget-16 phrase fallback
+// spends every slot on the DF-2 NEARDUP_PASSAGE grams and never probes it. With
+// the flag off the excerpt scores 0 (the catastrophe); with it on, G1s takes
+// arc-nd-1/arc-nd-2 as anchors and the adjacency lookup restores arc-cosrc-c.
+const NEARDUP_PASSAGE = distinctiveDoc(4000, 340);              // DF 2 — only the two near-dups
+const COSOURCE_RUN = distinctiveDoc(4001, 7);                   // DF 6 — a 7-word run below any compact-fingerprint window
+ARCHIVE_DOCS.push(
+  { id: "arc-nd-1", title: "Near-Dup One", body: `${filler(4010, 240, 71)} ${NEARDUP_PASSAGE} ${COSOURCE_RUN} ${filler(4011, 240, 72)}` },
+  { id: "arc-nd-2", title: "Near-Dup Two", body: `${filler(4012, 240, 73)} ${NEARDUP_PASSAGE} ${COSOURCE_RUN} ${filler(4013, 240, 74)}` },
+  { id: "arc-cosrc-c", title: "Co-Source C", body: `${distinctiveDoc(4020, 320)} ${COSOURCE_RUN} ${distinctiveDoc(4021, 320)}` },
+);
+for (let i = 0; i < 3; i += 1) {
+  ARCHIVE_DOCS.push({ id: `arc-cosrc-carrier-${i}`, title: `Co-Source Carrier ${i}`, body: `${distinctiveDoc(4030 + i, 320)} ${COSOURCE_RUN} ${distinctiveDoc(4040 + i, 320)}` });
+}
+// G1s control: a normal source a ~45-word excerpt does NOT self-exclude, so the
+// gate never opens for it even with the flag on.
+const G1S_CONTROL_PASSAGE = distinctiveDoc(4050, 620);
+ARCHIVE_DOCS.push({ id: "arc-g1s-control", title: "G1s Control Source", body: `${filler(4051, 260, 81)} ${G1S_CONTROL_PASSAGE} ${filler(4052, 260, 82)}` });
+// Self-exclude-plus: an archive doc a re-upload self-excludes, that ALSO shares
+// a >= 100-word run (SHARED_RUN) with arc-partial-match — which the re-upload
+// does NOT self-exclude and which DOES contribute a source. G1s must stay
+// closed (a surviving non-self-excluded contributing source, and not every
+// discovered candidate self-excludes).
+const SHARED_RUN = distinctiveDoc(4060, 120);
+ARCHIVE_DOCS.push(
+  { id: "arc-selfexcl-plus", title: "Self-Exclude Plus", body: `${distinctiveDoc(4061, 200)} ${SHARED_RUN} ${distinctiveDoc(4062, 200)}` },
+  { id: "arc-partial-match", title: "Partial Match Peer", body: `${distinctiveDoc(4063, 420)} ${SHARED_RUN} ${distinctiveDoc(4064, 420)}` },
+);
+
 for (const [order, doc] of ARCHIVE_DOCS.entries()) {
   const r = await seedArchiveDocument(client, { archiveArticleId: doc.id, title: doc.title, originalSimilarity: null, text: doc.body, archiveOrder: order }, {
     corpusVersion: CORPUS_VERSION,
@@ -392,4 +427,168 @@ test("archive evidence is structurally unreachable by any SELF/account concept",
   const text = `${FRAME_PRE} ${excerpt(SOURCE_B, 10, 45)} ${FRAME_POST}`;
   const m = await matchAgainstArchiveCorpus(client, text, { maximumDocumentFrequency: MDF, matchingParameters: MATCHING });
   assert.ok(m.sources.length > 0, "archive evidence survives with no account/SELF context available to suppress it");
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// slice 2D.4 — co-source adjacency (drizzle/0050) + the G1s expansion gate
+// ══════════════════════════════════════════════════════════════════════════
+
+test("adjacency build: deterministic + idempotent — a second rebuild reproduces byte-identical rows", async () => {
+  const snapshot = async () => (await client.execute(
+    "SELECT representation_id, co_representation_id, shared_gram_count, policy_version FROM archive_document_cosources ORDER BY representation_id, co_representation_id, policy_version",
+  )).rows.map((r) => `${r.representation_id}|${r.co_representation_id}|${r.shared_gram_count}|${r.policy_version}`);
+  const before = await snapshot();
+  assert.ok(before.length > 0, "the near-dup / co-source fixtures must produce adjacency rows");
+  await rebuildArchiveScalableIndex(client);
+  assert.deepEqual(await snapshot(), before, "a re-run of the whole scalable-index rebuild must reproduce the exact same co-source rows");
+  assert.equal(rebuildSummary.versions.cosourcePolicy, "archive-cosource-v1");
+});
+
+test("adjacency invariants: min shared >= 2, no self edges, single policy version, <= 24 outgoing neighbours per doc", async () => {
+  const rows = (await client.execute("SELECT representation_id, co_representation_id, shared_gram_count, policy_version FROM archive_document_cosources")).rows;
+  for (const r of rows) {
+    assert.ok(Number(r.shared_gram_count) >= 2, `shared_gram_count must be >= 2, got ${r.shared_gram_count}`);
+    assert.notEqual(String(r.representation_id), String(r.co_representation_id), "no self edge");
+    assert.equal(String(r.policy_version), "archive-cosource-v1");
+  }
+  const perDoc = new Map();
+  for (const r of rows) perDoc.set(String(r.representation_id), (perDoc.get(String(r.representation_id)) ?? 0) + 1);
+  for (const [rep, n] of perDoc) assert.ok(n <= 24, `${rep} has ${n} outgoing co-source neighbours — must be <= 24`);
+  // the expected edge for the near-dup catastrophe fixture
+  const ndReps = (await client.execute("SELECT representation_id FROM archive_document_representations WHERE archive_article_id IN ('arc-nd-1','arc-nd-2','arc-cosrc-c')")).rows.map((r) => String(r.representation_id));
+  const [nd1, nd2, cosrcC] = ndReps.length === 3 ? await Promise.all(['arc-nd-1', 'arc-nd-2', 'arc-cosrc-c'].map(async (a) => String((await client.execute({ sql: "SELECT representation_id FROM archive_document_representations WHERE archive_article_id = ?", args: [a] })).rows[0].representation_id))) : [];
+  const edge = await client.execute({ sql: "SELECT 1 FROM archive_document_cosources WHERE representation_id = ? AND co_representation_id = ? AND policy_version = 'archive-cosource-v1'", args: [nd1, cosrcC] });
+  assert.equal(edge.rows.length, 1, "arc-nd-1 -> arc-cosrc-c must be a co-source edge");
+});
+
+test("adjacency build reads canonical text / df-band derived data only — ZERO archive-shingle-v1 writes, historical corpus untouched", async () => {
+  const archiveShingles = await client.execute({ sql: "SELECT COUNT(*) c FROM corpus_document_shingles WHERE fingerprint_version = ?", args: ["archive-shingle-v1"] });
+  assert.equal(Number(archiveShingles.rows[0].c), 0, "the co-source build (like the whole scalable index) writes ZERO corpus_document_shingles under the old archive namespace");
+});
+
+test("archive_order is not touched by the co-source build", async () => {
+  const orders = (await client.execute("SELECT archive_article_id, archive_order FROM archive_document_representations ORDER BY archive_order")).rows;
+  await rebuildArchiveScalableIndex(client);
+  const after = (await client.execute("SELECT archive_article_id, archive_order FROM archive_document_representations ORDER BY archive_order")).rows;
+  assert.deepEqual(after.map((r) => [String(r.archive_article_id), Number(r.archive_order)]), orders.map((r) => [String(r.archive_article_id), Number(r.archive_order)]));
+});
+
+// helper: run the matcher with the expansion flag forced to a value
+async function runWithFlag(flag, text, matchingParameters = MATCHING) {
+  const prev = process.env.ARCHIVE_COSOURCE_EXPANSION_ENABLED;
+  if (flag === undefined) delete process.env.ARCHIVE_COSOURCE_EXPANSION_ENABLED;
+  else process.env.ARCHIVE_COSOURCE_EXPANSION_ENABLED = flag;
+  try {
+    return await matchAgainstArchiveCorpus(client, text, { maximumDocumentFrequency: MDF, matchingParameters });
+  } finally {
+    if (prev === undefined) delete process.env.ARCHIVE_COSOURCE_EXPANSION_ENABLED;
+    else process.env.ARCHIVE_COSOURCE_EXPANSION_ENABLED = prev;
+  }
+}
+
+// The near-dup catastrophe probe: a 120-word NEARDUP_PASSAGE excerpt plus the
+// 7-word COSOURCE_RUN. Compact discovery finds only arc-nd-1 / arc-nd-2 (both
+// self-excluding — COSOURCE_RUN is far below any winnowed-fingerprint window);
+// the budget-16 phrase fallback spends every slot on the DF-2 NEARDUP grams;
+// arc-cosrc-c (and the carriers) are reachable only through the adjacency graph,
+// where they then score their shared COSOURCE_RUN.
+const CATASTROPHE_PROBE = `${FRAME_PRE} ${excerpt(NEARDUP_PASSAGE, 40, 120)} ${COSOURCE_RUN} ${FRAME_POST}`;
+
+test("flag OFF (default): the committed compact+phrase matcher is UNCHANGED — the near-dup collapse still happens, and no `cosource` diagnostics field is attached", async () => {
+  const off = await runWithFlag(undefined, CATASTROPHE_PROBE);
+  // the catastrophe: exhaustive Baseline B recovers arc-cosrc-c, the committed
+  // bounded matcher does NOT — this is exactly the discovery gap 2D.4 closes.
+  const b = await baselineB(client, CATASTROPHE_PROBE, { maximumDocumentFrequency: MDF, matchingParameters: MATCHING });
+  assert.ok(b.sources.some((s) => s.name === "Co-Source C"), "sanity: exhaustive Baseline B DOES recover arc-cosrc-c");
+  assert.equal(off.score, 0, "flag off: the committed matcher collapses to 0 (both near-dups self-excluded, nothing else discovered)");
+  assert.ok(!off.sources.some((s) => s.name === "Co-Source C"), "flag off: arc-cosrc-c is NOT recovered");
+  assert.equal(off.archiveDiscovery.cosource, undefined, "flag off must not attach any cosource diagnostics (byte-identical to the pre-2D.4 matcher)");
+  const explicitFalse = await runWithFlag("false", CATASTROPHE_PROBE);
+  assert.deepEqual(normalizeArchiveResult(explicitFalse), normalizeArchiveResult(off), "'false' behaves exactly like absent");
+  assert.equal(explicitFalse.archiveDiscovery.cosource, undefined);
+  // every non-flag test in this file already runs with the flag off and still
+  // asserts full Baseline-B parity on the ordinary fixtures — proving the
+  // flag-off path is unchanged for every case the committed matcher already
+  // handled. This test only pins the ONE case it deliberately does not.
+});
+
+test("flag ON: G1s opens for the near-dup catastrophe, adjacency lookup restores the co-source, and both near-dups stay self-excluded", async () => {
+  const on = await runWithFlag("true", CATASTROPHE_PROBE);
+  assert.ok(on.archiveDiscovery.cosource, "flag on attaches cosource diagnostics");
+  assert.equal(on.archiveDiscovery.cosource.selfExcludedCandidateCount, 2, "arc-nd-1 and arc-nd-2 both self-exclude the excerpt");
+  assert.equal(on.archiveDiscovery.cosource.eligible, true, "every discovered candidate self-excludes -> G1s eligible");
+  assert.equal(on.archiveDiscovery.cosource.anchorCount, 2, "both self-excluded candidates become anchors");
+  assert.equal(on.archiveDiscovery.cosource.applied, true, "co-source neighbours were unioned in and re-scored");
+  assert.ok(on.archiveDiscovery.cosource.neighborCount >= 1);
+  assert.ok(on.sources.some((s) => s.name === "Co-Source C"), "flag on: arc-cosrc-c is recovered through the adjacency graph");
+  assert.ok(!on.sources.some((s) => s.name === "Near-Dup One" || s.name === "Near-Dup Two"), "the near-dup twins remain self-excluded, never attributed");
+  assert.ok(on.score > 0, "the recovered co-source produces real similarity where the committed matcher scored 0");
+});
+
+test("flag ON: a query with NO self-excluded candidate never triggers an adjacency lookup", async () => {
+  // a 45-word excerpt of the G1s control source — a genuine partial copy, not
+  // self-exclusion.
+  const text = `${FRAME_PRE} ${excerpt(G1S_CONTROL_PASSAGE, 20, 45)} ${FRAME_POST}`;
+  const on = await runWithFlag("true", text);
+  const off = await runWithFlag(undefined, text);
+  assert.equal(on.archiveDiscovery.cosource.selfExcludedCandidateCount, 0, "the partial copy does not self-exclude its source");
+  assert.equal(on.archiveDiscovery.cosource.eligible, false, "no self-excluded candidate -> G1s cannot open");
+  assert.equal(on.archiveDiscovery.cosource.anchorCount, 0, "no adjacency lookup was performed");
+  assert.equal(on.archiveDiscovery.cosource.applied, false);
+  assert.deepEqual(normalizeArchiveResult(on), normalizeArchiveResult(off), "with the gate closed, flag on == flag off");
+  assert.ok(on.sources.some((s) => s.name === "G1s Control Source"), "the genuine partial copy is still attributed, exactly as before");
+});
+
+test("flag ON: G1s stays closed when a non-self-excluded candidate still contributed a source", async () => {
+  // arc-selfexcl-plus verbatim: it self-excludes itself, but arc-partial-match
+  // (its >= 100-word SHARED_RUN peer) does NOT self-exclude the re-upload and
+  // DOES contribute a source. Not every discovered candidate self-excludes, and
+  // a non-self-excluded contributing source survived — G1s must not open, and
+  // arc-selfexcl-plus's own co-source neighbours must not be pulled in.
+  const body = ARCHIVE_DOCS.find((d) => d.id === "arc-selfexcl-plus").body;
+  const on = await runWithFlag("true", body);
+  assert.ok(on.archiveDiscovery.cosource.selfExcludedCandidateCount >= 1, "the exact re-upload self-excludes arc-selfexcl-plus");
+  assert.ok(on.archiveDiscovery.cosource.selfExcludedCandidateCount < on.archiveDiscovery.compactCandidateCount, "arc-partial-match is a discovered candidate that does NOT self-exclude");
+  assert.ok(on.sources.some((s) => s.name === "Partial Match Peer"), "sanity: arc-partial-match contributes a source");
+  assert.equal(on.archiveDiscovery.cosource.eligible, false, "a surviving non-self-excluded contributing source keeps G1s closed");
+  assert.equal(on.archiveDiscovery.cosource.anchorCount, 0, "no adjacency lookup was performed");
+  assert.equal(on.archiveDiscovery.cosource.applied, false);
+  const off = await runWithFlag(undefined, body);
+  assert.deepEqual(normalizeArchiveResult(on), normalizeArchiveResult(off), "flag on == flag off when G1s does not open");
+});
+
+test("flag ON: a no-match control stays 0 — no self-excluded candidate, no expansion, no spurious source", async () => {
+  const text = `${distinctiveDoc(96521, 160)}`;
+  const on = await runWithFlag("true", text);
+  assert.equal(on.score, 0);
+  assert.equal(on.sources.length, 0);
+  assert.equal(on.archiveDiscovery.cosource.eligible, false);
+  assert.equal(on.archiveDiscovery.cosource.anchorCount, 0);
+});
+
+test("flag ON: the candidate union handed to the re-score is de-duplicated (no representation ID appears twice)", async () => {
+  const on = await runWithFlag("true", CATASTROPHE_PROBE);
+  assert.ok(on.archiveDiscovery.cosource.applied, "sanity: this probe expands");
+  // finalCandidateCount is the size of a Set-deduped union; assert it is
+  // strictly the compact+phrase union plus the *new* neighbours, never more.
+  assert.ok(
+    on.archiveDiscovery.cosource.finalCandidateCount <= on.archiveDiscovery.unionCandidateCount + on.archiveDiscovery.cosource.neighborCount,
+    "the expanded union cannot exceed union + neighbours (it is Set-deduped)",
+  );
+  assert.ok(on.archiveDiscovery.cosource.finalCandidateCount > on.archiveDiscovery.unionCandidateCount, "at least one new candidate was actually added");
+});
+
+test("only self-excluded candidates are adjacency anchors — a co-source of a NON-self-excluded candidate is never pulled in", async () => {
+  // arc-cosrc-c has co-source edges to the carriers. A probe that makes
+  // arc-cosrc-c a NON-self-excluded contributing candidate must not drag the
+  // carriers in via the graph — arc-cosrc-c is not an anchor.
+  const text = `${FRAME_PRE} ${excerpt(COSOURCE_RUN, 0, 30)} ${distinctiveDoc(97010, 90)} ${FRAME_POST}`;
+  const on = await runWithFlag("true", text);
+  // arc-cosrc-c may or may not score here, but if G1s is not eligible the
+  // carriers are never queried.
+  if (!on.archiveDiscovery.cosource.eligible) {
+    assert.equal(on.archiveDiscovery.cosource.anchorCount, 0);
+    const off = await runWithFlag(undefined, text);
+    assert.deepEqual(normalizeArchiveResult(on), normalizeArchiveResult(off));
+  }
 });

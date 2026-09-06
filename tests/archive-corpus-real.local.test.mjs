@@ -8,9 +8,10 @@ import { canonicalizeText } from "../lib/canonical-text.ts";
 import { tokens } from "../lib/similarity-core.ts";
 import { ARCHIVE_COMPACT_FINGERPRINT_VERSION } from "../lib/archive-fingerprint.ts";
 import { loadArchiveSourceEntries, seedArchiveCorpus, seedArchiveDocument, ARCHIVE_FINGERPRINT_VERSION } from "../lib/archive-corpus-seed.ts";
-import { rebuildArchiveDfBands } from "../lib/archive-index-build.ts";
+import { rebuildArchiveDfBands, rebuildArchiveScalableIndex } from "../lib/archive-index-build.ts";
 import { optimizePhraseIndex } from "../lib/archive-phrase-index.ts";
 import { matchAgainstArchiveCorpus, ARCHIVE_MATCH_POLICY } from "../lib/archive-corpus-matching.ts";
+import { ARCHIVE_COSOURCE_POLICY_VERSION, ARCHIVE_COSOURCE_MIN_SHARED, ARCHIVE_COSOURCE_MAX_NEIGHBORS } from "../lib/archive-cosource.ts";
 import { PHRASE_FALLBACK_BUDGET, PHRASE_FALLBACK_FANOUT_GATE } from "../lib/archive-phrase-fallback.ts";
 import { baselineB, normalizeArchiveResult } from "./helpers/archive-baseline-b.mjs";
 
@@ -66,6 +67,48 @@ if (HAVE_CORPUS) {
   test("seed shape: ~120 compact fingerprint rows per document, ZERO old archive full-shingle rows", () => {
     assert.ok(seedFpRows > 50 && seedFpRows < 200, `~120 fingerprint rows/doc, got ${seedFpRows.toFixed(1)}`);
     assert.equal(seedOldShingleRows, 0, "the real seed path must write ZERO old archive full-shingle rows");
+  });
+
+  // ── slice 2D.4 — the co-source adjacency graph on the real 321-doc corpus ──
+  // seedArchiveCorpus already built it (drizzle/0050 + lib/archive-cosource.ts);
+  // these assertions pin it to the frozen Slice 2D.3 M2/K24 lock.
+  const cosRows = (await client.execute({
+    sql: "SELECT representation_id, co_representation_id, shared_gram_count FROM archive_document_cosources WHERE policy_version = ?",
+    args: [ARCHIVE_COSOURCE_POLICY_VERSION],
+  })).rows;
+  test("co-source adjacency: exactly 6,871 rows on the real 321-doc corpus (Slice 2D.3 M2/K24 lock)", () => {
+    assert.equal(cosRows.length, 6871, "the real-corpus adjacency must reproduce the locked prototype's row count exactly");
+    assert.equal(ARCHIVE_COSOURCE_MIN_SHARED, 2);
+    assert.equal(ARCHIVE_COSOURCE_MAX_NEIGHBORS, 24);
+  });
+  test("co-source adjacency invariants: <= 24 outgoing/doc, shared >= 2, no self edge, single policy version", async () => {
+    const perDoc = new Map();
+    for (const r of cosRows) {
+      assert.ok(Number(r.shared_gram_count) >= 2);
+      assert.notEqual(String(r.representation_id), String(r.co_representation_id));
+      perDoc.set(String(r.representation_id), (perDoc.get(String(r.representation_id)) ?? 0) + 1);
+    }
+    assert.ok(Math.max(...perDoc.values()) <= 24, "no document exceeds 24 outgoing co-source neighbours");
+    const distinctPolicies = (await client.execute("SELECT DISTINCT policy_version p FROM archive_document_cosources")).rows.map((r) => String(r.p));
+    assert.deepEqual(distinctPolicies, [ARCHIVE_COSOURCE_POLICY_VERSION], "only the v1 policy generation exists");
+  });
+  test("co-source adjacency rebuild is idempotent — a second full rebuild reproduces byte-identical rows", async () => {
+    const before = cosRows.map((r) => `${r.representation_id}|${r.co_representation_id}|${r.shared_gram_count}`).sort();
+    await rebuildArchiveScalableIndex(client);
+    const after = (await client.execute({
+      sql: "SELECT representation_id, co_representation_id, shared_gram_count FROM archive_document_cosources WHERE policy_version = ?",
+      args: [ARCHIVE_COSOURCE_POLICY_VERSION],
+    })).rows.map((r) => `${r.representation_id}|${r.co_representation_id}|${r.shared_gram_count}`).sort();
+    assert.deepEqual(after, before, "re-running the whole scalable-index rebuild reproduces the exact same co-source rows");
+    assert.equal(after.length, 6871);
+  });
+  test("co-source build wrote ZERO archive-shingle-v1 rows and did not touch archive_order", async () => {
+    const shingleV1 = Number((await client.execute("SELECT COUNT(*) c FROM corpus_document_shingles WHERE fingerprint_version = 'archive-shingle-v1'")).rows[0].c);
+    assert.equal(shingleV1, 0);
+    const orders = (await client.execute("SELECT archive_article_id, archive_order FROM archive_document_representations ORDER BY archive_order")).rows;
+    // orders were captured implicitly by every parity test above still passing;
+    // assert monotonic 0..N-1 as a direct check the build never reordered them.
+    orders.forEach((r, i) => assert.equal(Number(r.archive_order), i, `archive_order must stay ${i}`));
   });
 }
 

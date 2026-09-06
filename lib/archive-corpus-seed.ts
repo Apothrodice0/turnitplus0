@@ -11,6 +11,7 @@ import {
   recordArchiveDocumentFingerprints,
   recordArchiveDocumentPhraseEntry,
   rebuildArchiveDfBands,
+  rebuildArchiveCosources,
 } from "./archive-index-build";
 import { optimizePhraseIndex } from "./archive-phrase-index";
 // archiveShingleHashes / ARCHIVE_SHINGLE_SIZE now live in the leaf module
@@ -232,7 +233,9 @@ export async function seedArchiveDocument(
 /**
  * Seeds every entry, then finalises the corpus-global structures: rebuilds
  * the compact DF-band table (which needs every document present to tally true
- * archive-wide DF) and merges the FTS b-tree segments. Idempotent.
+ * archive-wide DF), rebuilds the co-source adjacency graph (drizzle/0050 —
+ * needs the df-band stop set, so it runs after), and merges the FTS b-tree
+ * segments. Idempotent.
  */
 export async function seedArchiveCorpus(
   client: Client,
@@ -244,6 +247,7 @@ export async function seedArchiveCorpus(
     results.push(await seedArchiveDocument(client, entry, options));
   }
   await rebuildArchiveDfBands(client);
+  await rebuildArchiveCosources(client);
   await optimizePhraseIndex(client);
   return results;
 }

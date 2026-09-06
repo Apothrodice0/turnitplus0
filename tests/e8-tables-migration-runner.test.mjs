@@ -121,7 +121,7 @@ test.after(() => {
 
 // --- A: explicit allowlist ------------------------------------------------
 
-test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0049, in order, never touching 0000-0011', () => {
+test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0050, in order, never touching 0000-0011', () => {
   assert.deepEqual(TARGET_MIGRATIONS, [
     '0012_document_identities.sql',
     '0013_document_families.sql',
@@ -161,6 +161,7 @@ test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0049, in ord
     '0047_developer_corpus_maturity_exemptions.sql',
     '0048_archive_document_representations.sql',
     '0049_archive_scalable_index.sql',
+    '0050_archive_cosource_adjacency.sql',
   ]);
   // Phase E8S Step 8: 0022_reuse_context_declarations.sql added
   // reuse_context_declarations, bringing the 15 E1-E8P tables across the
@@ -220,8 +221,12 @@ test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0049, in ord
   // — 41; 0049 creates 4 (archive_document_fingerprints, archive_hash_df_bands,
   // archive_phrase_fts_map, and the archive_phrase_fts FTS5 virtual table —
   // which sqlite_master reports with type='table' exactly like an ordinary
-  // one) — 45, across 38 target migrations total.
-  assert.equal(ALL_TARGET_TABLES.length, 45, 'expected exactly 45 tables across all 38 target migrations');
+  // one) — 45, across 38 target migrations total. The archive co-source
+  // adjacency graph (slice 2D.4) then adds one more migration (0050): 0050
+  // creates 1 (archive_document_cosources, plus two indexes, two CHECK
+  // constraints and a BEFORE INSERT guard trigger — table-tracked) — 46,
+  // across 39 target migrations total.
+  assert.equal(ALL_TARGET_TABLES.length, 46, 'expected exactly 46 tables across all 39 target migrations');
   assert.deepEqual(
     EXPECTED_TABLES_BY_MIGRATION['0023_privacy_consent_and_report_identity_link.sql'],
     [],
@@ -579,7 +584,7 @@ test('A3: 0041-0047 are in TARGET_MIGRATIONS as a contiguous 0012-0047 range', (
     assert.ok(TARGET_MIGRATIONS.includes(file), `${file} must be in TARGET_MIGRATIONS`);
   }
   const prefixes = TARGET_MIGRATIONS.map((f) => Number(f.slice(0, 4)));
-  assert.deepEqual(prefixes, Array.from({ length: 38 }, (_, i) => 12 + i), 'TARGET_MIGRATIONS must be the contiguous 0012..0049 range in order');
+  assert.deepEqual(prefixes, Array.from({ length: 39 }, (_, i) => 12 + i), 'TARGET_MIGRATIONS must be the contiguous 0012..0050 range in order');
 });
 
 test('A3: 0041-0047 pinned hashes match the on-disk LF migration bytes', () => {
@@ -701,7 +706,7 @@ test('A3: after the full 0012-0047 runner apply, the new schema shapes are exact
 
 const ARCHIVE_2B_FILES = ['0048_archive_document_representations.sql', '0049_archive_scalable_index.sql'];
 
-test('A4: 0048-0049 are in TARGET_MIGRATIONS, contiguous, immediately after 0047, and last', () => {
+test('A4: 0048-0049 are in TARGET_MIGRATIONS, contiguous, immediately after 0047', () => {
   for (const file of ARCHIVE_2B_FILES) {
     assert.ok(TARGET_MIGRATIONS.includes(file), `${file} must be in TARGET_MIGRATIONS`);
   }
@@ -709,7 +714,6 @@ test('A4: 0048-0049 are in TARGET_MIGRATIONS, contiguous, immediately after 0047
   const i49 = TARGET_MIGRATIONS.indexOf('0049_archive_scalable_index.sql');
   assert.equal(TARGET_MIGRATIONS[i48 - 1], '0047_developer_corpus_maturity_exemptions.sql');
   assert.equal(i49, i48 + 1);
-  assert.equal(i49, TARGET_MIGRATIONS.length - 1, '0049 must be the last target migration');
 });
 
 test('A4: 0048-0049 pinned hashes match the on-disk LF bytes, and both are non-destructive', () => {
@@ -746,7 +750,7 @@ test('A4: EXPECTED_TABLES_BY_MIGRATION for 0048-0049 is exact; neither uses the 
   }
 });
 
-test('A4: checkPreflight passes for the full 0012-0049 set against a pre-0012 database', async () => {
+test('A4: checkPreflight passes for the full 0012-0050 set against a pre-0012 database', async () => {
   const dbFile = freshDbPath('a4-preflight');
   const client = await buildPreMigrationDb(dbFile);
   const result = await checkPreflight(client, drizzleDir, { environmentLabel: 'local-test', expectedEnvironmentLabel: 'local-test' });
@@ -848,6 +852,140 @@ test('A4: after the full runner apply, all three ordinary tables, the FTS5 virtu
   for (const file of ARCHIVE_2B_FILES) {
     assert.equal(rerun.steps.find((s) => s.file === file).status, 'already-applied', `${file} must be seen as already-applied on a re-run`);
   }
+
+  client.close();
+  cleanupDbFile(dbFile);
+});
+
+// archive co-source adjacency (0050, slice 2D.4) — the deliberate, contiguous
+// extension. Mirrors A4: presence + contiguity + last + LF-byte hash stability
+// + correct expected tables + zero destructive statements (its guard trigger
+// only RAISE(ABORT)s) + a real applied shape (table, both indexes, the
+// BEFORE INSERT trigger, the two CHECK constraints, CASCADE). ---
+
+const ARCHIVE_2D4_FILE = '0050_archive_cosource_adjacency.sql';
+
+test('A5: 0050 is in TARGET_MIGRATIONS, immediately after 0049, and now last', () => {
+  assert.ok(TARGET_MIGRATIONS.includes(ARCHIVE_2D4_FILE), `${ARCHIVE_2D4_FILE} must be in TARGET_MIGRATIONS`);
+  const i49 = TARGET_MIGRATIONS.indexOf('0049_archive_scalable_index.sql');
+  const i50 = TARGET_MIGRATIONS.indexOf(ARCHIVE_2D4_FILE);
+  assert.equal(i50, i49 + 1, '0050 must immediately follow 0049');
+  assert.equal(i50, TARGET_MIGRATIONS.length - 1, '0050 must be the last target migration');
+});
+
+test('A5: 0050 pinned hash matches the on-disk LF bytes; the file is non-destructive; splitStatements keeps its trigger atomic', () => {
+  const raw = fs.readFileSync(path.join(drizzleDir, ARCHIVE_2D4_FILE));
+  assert.ok(!raw.includes(Buffer.from('\r\n')), `${ARCHIVE_2D4_FILE} must be LF in the working tree`);
+  const content = fs.readFileSync(path.join(drizzleDir, ARCHIVE_2D4_FILE), 'utf8');
+  assert.ok(!content.includes('\r'), 'no CR bytes');
+  assert.equal(sha256(content), EXPECTED_MIGRATION_SHA256[ARCHIVE_2D4_FILE], 'pinned hash must match current LF content');
+  // The guard trigger only RAISE(ABORT)s — no DELETE / DROP / ALTER — so unlike
+  // 0044's trigger it needs no APPROVED_DESTRUCTIVE_STATEMENTS entry.
+  assert.deepEqual(scanForDestructiveStatements(content), [], '0050 must contain zero destructive statements');
+  assert.equal(APPROVED_DESTRUCTIVE_STATEMENTS[ARCHIVE_2D4_FILE], undefined, '0050 needs no destructive-statement exception');
+  const stmts = splitStatements(content);
+  assert.equal(stmts.filter((s) => /^CREATE TABLE/i.test(s)).length, 1, '0050 has exactly one CREATE TABLE');
+  assert.equal(stmts.filter((s) => /^CREATE (UNIQUE )?INDEX/i.test(s)).length, 2, '0050 has exactly two CREATE INDEX');
+  const triggers = stmts.filter((s) => /^CREATE TRIGGER/i.test(s));
+  assert.equal(triggers.length, 1, '0050 has exactly one CREATE TRIGGER');
+  assert.ok(/RAISE\(ABORT/i.test(triggers[0]) && /END$/i.test(triggers[0].trim()), 'the trigger survives splitStatements intact, not shredded at its internal semicolon');
+});
+
+test('A5: EXPECTED_TABLES_BY_MIGRATION for 0050 is exact; it uses neither the column nor the index mechanism', () => {
+  assert.deepEqual(EXPECTED_TABLES_BY_MIGRATION[ARCHIVE_2D4_FILE], ['archive_document_cosources']);
+  assert.equal(EXPECTED_COLUMNS_BY_MIGRATION[ARCHIVE_2D4_FILE], undefined);
+  assert.equal(EXPECTED_INDEXES_BY_MIGRATION[ARCHIVE_2D4_FILE], undefined);
+});
+
+test('A5: a database already at 0049 applies ONLY 0050 — the pure 0049 -> 0050 upgrade', async () => {
+  const dbFile = freshDbPath('a5-0049-to-0050');
+  const client = await buildPreMigrationDb(dbFile);
+  // bring it exactly to 0049 by executing 0012..0049 directly (not via the
+  // target runner, which would also apply 0050).
+  for (const file of TARGET_MIGRATIONS) {
+    if (file === ARCHIVE_2D4_FILE) break;
+    await client.executeMultiple(fs.readFileSync(path.join(drizzleDir, file), 'utf8'));
+  }
+  const at49 = new Set((await client.execute("SELECT name FROM sqlite_master WHERE type='table'")).rows.map((r) => String(r.name)));
+  assert.ok(at49.has('archive_document_fingerprints') && !at49.has('archive_document_cosources'), 'sanity: the DB is at 0049, not 0050');
+
+  const result = await runTargetMigrations(client, drizzleDir, { environmentLabel: 'local-test', expectedEnvironmentLabel: 'local-test' });
+  assert.equal(result.status, 'success');
+  const applied = result.steps.filter((s) => s.status === 'applied').map((s) => s.file);
+  assert.deepEqual(applied, [ARCHIVE_2D4_FILE], 'only 0050 should be newly applied; 0012-0049 already-applied');
+  assert.ok((await client.execute("SELECT name FROM sqlite_master WHERE name='archive_document_cosources'")).rows.length === 1, '0050 landed');
+
+  client.close();
+  cleanupDbFile(dbFile);
+});
+
+test('A5: after the full runner apply, archive_document_cosources lands with the right shape; every invariant holds; the runner detects it; re-run is idempotent', async () => {
+  const dbFile = freshDbPath('a5-apply');
+  const client = await buildPreMigrationDb(dbFile);
+  const result = await runTargetMigrations(client, drizzleDir, { environmentLabel: 'local-test', expectedEnvironmentLabel: 'local-test' });
+  assert.equal(result.status, 'success', `the runner must apply 0050 cleanly — got: ${JSON.stringify(result).slice(0, 400)}`);
+  await client.execute('PRAGMA foreign_keys = ON');
+
+  const objs = new Set((await client.execute("SELECT name FROM sqlite_master WHERE name LIKE 'archive_document_cosources%' OR name LIKE '%archive_document_cosources%'")).rows.map((r) => String(r.name)));
+  assert.ok(objs.has('archive_document_cosources'), '0050 must create archive_document_cosources');
+  assert.ok(objs.has('ux_archive_document_cosources_edge'));
+  assert.ok(objs.has('idx_archive_document_cosources_lookup'));
+  assert.ok(objs.has('trg_archive_document_cosources_max_neighbors'));
+
+  const cols = (await client.execute("PRAGMA table_info('archive_document_cosources')")).rows;
+  assert.deepEqual(cols.map((r) => String(r.name)).sort(), ['co_representation_id', 'created_at', 'id', 'policy_version', 'representation_id', 'shared_gram_count'].sort());
+  assert.equal(Number(cols.find((r) => String(r.name) === 'id').pk), 1, 'id is the primary key');
+
+  for (const from of ['representation_id', 'co_representation_id']) {
+    const fk = (await client.execute("PRAGMA foreign_key_list('archive_document_cosources')")).rows.find((r) => String(r.from) === from);
+    assert.ok(fk, `${from} must be a foreign key`);
+    assert.equal(String(fk.table), 'corpus_document_representations');
+    assert.equal(String(fk.on_delete).toUpperCase(), 'CASCADE');
+  }
+
+  assert.equal(await tableSetState(client, EXPECTED_TABLES_BY_MIGRATION[ARCHIVE_2D4_FILE]), 'all', 'the runner must see 0050 as fully applied');
+
+  // invariants
+  await client.execute({ sql: "INSERT INTO corpus_document_representations (id, canonical_sha256, canonical_text, word_count, canonicalization_version) VALUES ('a5-r1','a5-s1','x',1,'v'),('a5-r2','a5-s2','y',1,'v')" });
+  const rej = async (sql, args) => { try { await client.execute({ sql, args }); return null; } catch (e) { return e.message; } };
+  assert.equal(await rej("INSERT INTO archive_document_cosources (representation_id, co_representation_id, shared_gram_count, policy_version) VALUES ('a5-r1','a5-r2',3,'archive-cosource-v1')", []), null, 'a valid edge inserts');
+  assert.match(await rej("INSERT INTO archive_document_cosources (representation_id, co_representation_id, shared_gram_count, policy_version) VALUES ('a5-r1','a5-r1',3,'archive-cosource-v1')", []), /CHECK/, 'self-edge rejected');
+  assert.match(await rej("INSERT INTO archive_document_cosources (representation_id, co_representation_id, shared_gram_count, policy_version) VALUES ('a5-r2','a5-r1',1,'archive-cosource-v1')", []), /CHECK/, 'shared_gram_count < 2 rejected');
+  assert.match(await rej("INSERT INTO archive_document_cosources (representation_id, co_representation_id, shared_gram_count, policy_version) VALUES ('a5-r1','a5-r2',9,'archive-cosource-v1')", []), /UNIQUE/, 'duplicate edge in the same policy rejected');
+  assert.equal(await rej("INSERT INTO archive_document_cosources (representation_id, co_representation_id, shared_gram_count, policy_version) VALUES ('a5-r1','a5-r2',9,'archive-cosource-v2')", []), null, 'the same edge in a different policy is allowed');
+
+  // 24-cap trigger
+  for (let i = 0; i < 40; i += 1) {
+    await client.execute({ sql: "INSERT OR IGNORE INTO corpus_document_representations (id, canonical_sha256, canonical_text, word_count, canonicalization_version) VALUES (?,?,?,1,'v')", args: [`a5-c${i}`, `a5-cs${i}`, 't'] });
+  }
+  let inserted = 0;
+  for (let i = 0; i < 40; i += 1) {
+    if (await rej("INSERT INTO archive_document_cosources (representation_id, co_representation_id, shared_gram_count, policy_version) VALUES (?,?,2,'archive-cosource-v1')", [`a5-c${i}`, 'a5-r2']) === null) inserted += 1;
+  }
+  const cap = Number((await client.execute("SELECT COUNT(*) c FROM archive_document_cosources WHERE representation_id = 'a5-c0' OR representation_id LIKE 'a5-c%'")).rows[0].c);
+  // (r1 already has 1 v1 edge; c0..c39 each get one until any single doc hits 24 — here each c* has at most 1, so all 40 insert)
+  assert.equal(inserted, 40, 'distinct source docs are each well under the 24 cap');
+  // now hammer ONE doc past 24
+  let ok24 = 0;
+  for (let i = 0; i < 40; i += 1) {
+    await client.execute({ sql: "INSERT OR IGNORE INTO corpus_document_representations (id, canonical_sha256, canonical_text, word_count, canonicalization_version) VALUES (?,?,?,1,'v')", args: [`a5-t${i}`, `a5-ts${i}`, 't'] });
+    if (await rej("INSERT INTO archive_document_cosources (representation_id, co_representation_id, shared_gram_count, policy_version) VALUES ('a5-r2',?,2,'archive-cosource-v1')", [`a5-t${i}`]) === null) ok24 += 1;
+  }
+  const r2Count = Number((await client.execute("SELECT COUNT(*) c FROM archive_document_cosources WHERE representation_id = 'a5-r2' AND policy_version = 'archive-cosource-v1'")).rows[0].c);
+  assert.equal(r2Count, 24, 'trg_archive_document_cosources_max_neighbors caps a single doc at 24 outgoing v1 edges');
+  assert.equal(ok24, 24, 'exactly 24 of the 40 attempts succeeded');
+
+  // CASCADE
+  await client.execute("DELETE FROM corpus_document_representations WHERE id = 'a5-r2'");
+  assert.equal(
+    Number((await client.execute("SELECT COUNT(*) c FROM archive_document_cosources WHERE representation_id = 'a5-r2' OR co_representation_id = 'a5-r2'")).rows[0].c),
+    0,
+    'archive_document_cosources CASCADE-deletes with either endpoint representation',
+  );
+
+  const rerun = await runTargetMigrations(client, drizzleDir, { environmentLabel: 'local-test', expectedEnvironmentLabel: 'local-test' });
+  assert.equal(rerun.status, 'already-fully-applied');
+  assert.equal(rerun.steps.find((s) => s.file === ARCHIVE_2D4_FILE).status, 'already-applied');
 
   client.close();
   cleanupDbFile(dbFile);
