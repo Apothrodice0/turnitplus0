@@ -166,61 +166,24 @@ async function analyze(text: string) {
     (progress, label) => self.postMessage({ type: "progress", progress, label }),
   );
 
-  const words = tokens(text);
-  const triples = grams(words, 3);
-  const frequency = triples.reduce<Record<string, number>>((total, gram) => {
-    total[gram] = (total[gram] ?? 0) + 1;
-    return total;
-  }, {});
-  const repeats = Object.entries(frequency)
-    .filter(([gram, count]) => count >= 3 && !/^(the|and|for|with|that|this|from|into|have|has|was|were)\b/.test(gram))
-    .sort((left, right) => right[1] - left[1])
-    .slice(0, 6);
-
-  const scoreBand = search.scoreBands.find(
-    (candidate) => result.score >= candidate.minimum && result.score <= candidate.maximum,
-  )?.label ?? "High";
-  const completeWordCount = normalize(text).split(" ").filter(Boolean).length;
-  const referenceListRatio = Math.max(0, (completeWordCount - result.wordCount) / Math.max(1, completeWordCount));
-  const quotedWordCount = [...text.matchAll(/["“«]([\s\S]*?)["”»]/g)]
-    .reduce((total, match) => total + tokens(match[1]).length, 0);
-  const quotationDensity = quotedWordCount / Math.max(1, completeWordCount);
-  const riskStatus = result.score >= risk.archiveCutoff ? "Elevated" : "Lower";
-  return {
-    wordCount: result.wordCount,
-    databaseSize: result.databaseSize,
-    excludedDocuments: result.excludedDocuments,
-    matchedWordCount: result.matchedWordCount,
-    archiveMatchedPositions: result.archiveMatchedPositions,
-    score: result.score,
-    scoreBand,
-    riskStatus,
-    riskTarget: risk.targetThreshold,
-    riskCutoff: risk.archiveCutoff,
-    riskCalibration: {
+  // slice 2E: the risk/quotation/reference-list/repeated-phrase framing this
+  // worker has always layered on scoreAgainstArchive's result now lives in
+  // lib/archive-result-framing.ts (frameArchiveResult), shared VERBATIM with
+  // the server DB-backed path (lib/archive-server-analysis.ts) so the two
+  // cannot drift. Same statements, same order, same sourceIndex strip — see
+  // that file's own header.
+  return frameArchiveResult(text, result, {
+    scoreBands: search.scoreBands,
+    corpusVersion: search.corpusVersion,
+    risk: {
+      targetThreshold: risk.targetThreshold,
+      archiveCutoff: risk.archiveCutoff,
       auc: risk.auc,
       precision: risk.precision,
       recall: risk.recall,
       sampleSize: risk.sampleSize,
     },
-    features: {
-      maxSourceContainment: result.maxSourceContainment,
-      longestMatchedSpan: result.longestMatchedSpan,
-      quotationDensity: Math.round(quotationDensity * 1000) / 1000,
-      referenceListRatio: Math.round(referenceListRatio * 1000) / 1000,
-      highFrequencyShingleCount: result.highFrequencyShingleCount,
-      repeatedThreeGramCount: repeats.length,
-      detectedLanguage: detectLanguage(text),
-    },
-    corpusVersion: search.corpusVersion,
-    // sourceIndex exists on ArchiveScoringSource for the DB-backed adapter's
-    // own use (mapping back to representation/article identity) — the
-    // browser worker's own output shape never included it, so it is
-    // stripped back out here for byte-identical parity with every existing
-    // consumer of this worker's postMessage result.
-    sources: result.sources.map(({ sourceIndex: _sourceIndex, ...source }) => source),
-    repeats,
-  };
+  });
 }
 
 self.addEventListener("message", async (event: MessageEvent<WorkerRequest>) => {
@@ -237,10 +200,5 @@ self.addEventListener("message", async (event: MessageEvent<WorkerRequest>) => {
 });
 
 export {};
-import {
-  detectLanguage,
-  grams,
-  normalize,
-  tokens,
-} from "@/lib/similarity-core";
 import { scoreAgainstArchive } from "@/lib/archive-similarity-scoring";
+import { frameArchiveResult } from "@/lib/archive-result-framing";

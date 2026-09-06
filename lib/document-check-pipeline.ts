@@ -4,13 +4,13 @@ import { extractDocxTextDocument } from "@/lib/docx-text-extraction";
 import { combineMatchedWordPositions } from "@/lib/similarity-enrichment";
 import { computeUnifiedSimilarity } from "@/lib/unified-similarity";
 import { similarityScoreBand } from "@/lib/ai-core";
+import { analyzeArchive } from "@/lib/archive-analysis-runtime";
 import {
   hasUnifiedSimilarity,
   PRIMARY_SIMILARITY_BAND_LABELS,
   primarySimilarityScore,
   unifiedEvidenceSummary,
   type SimilarityReport,
-  type SourceMatch,
 } from "@/lib/report-types";
 import type { WebCheckResult } from "@/lib/web-check-core";
 import type { AcademicSearchStatus, ExternalAcademicEvidence } from "@/lib/academic-search/types";
@@ -29,8 +29,6 @@ import type { AcademicSearchStatus, ExternalAcademicEvidence } from "@/lib/acade
  * self-contained AI-worker singleton instead.
  */
 
-let similarityWorker: Worker | null = null;
-let workerRequestId = 0;
 let webCheckWorker: Worker | null = null;
 let webCheckRequestId = 0;
 
@@ -46,41 +44,13 @@ export async function analyzeText(
   fileSize: number,
   onProgress: (progress: number, label: string) => void,
 ): Promise<SimilarityReport> {
-  similarityWorker ??= new Worker(
-    new URL("../app/similarity-worker.ts", import.meta.url),
-    { type: "module" },
-  );
-  const id = ++workerRequestId;
-  const result = await new Promise<{
-    score: number;
-    wordCount: number;
-    databaseSize: number;
-    corpusVersion: string;
-    scoreBand: "Low" | "Moderate" | "High";
-    riskStatus: "Elevated" | "Lower";
-    riskTarget: number;
-    riskCutoff: number;
-    riskCalibration: SimilarityReport["riskCalibration"];
-    features: SimilarityReport["features"];
-    excludedDocuments: number;
-    matchedWordCount: number;
-    archiveMatchedPositions: number[];
-    sources: SourceMatch[];
-    repeats: [string, number][];
-  }>((resolve, reject) => {
-    const handleMessage = (event: MessageEvent) => {
-      if (event.data.type === "progress") {
-        onProgress(event.data.progress, event.data.label);
-        return;
-      }
-      if (event.data.id !== id) return;
-      similarityWorker?.removeEventListener("message", handleMessage);
-      if (event.data.ok) resolve(event.data.result);
-      else reject(new Error(event.data.error));
-    };
-    similarityWorker?.addEventListener("message", handleMessage);
-    similarityWorker?.postMessage({ id, text, fileName });
-  });
+  // slice 2E: the archive engine (browser static-index worker vs server DB
+  // matcher) is chosen inside analyzeArchive, once per page load, from
+  // ARCHIVE_SERVER_SIDE_ENABLED via GET /api/archive/match. Both engines
+  // return the identical frozen ArchiveAnalysisResult shape, so everything
+  // below is engine-agnostic. Ordinary uploads (app/page.tsx) and room
+  // uploads (room-page-shell.tsx) both reach it through here.
+  const result = await analyzeArchive(text, fileName, onProgress);
   const now = new Date();
 
   return {

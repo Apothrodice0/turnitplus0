@@ -42,6 +42,9 @@ const TURSO_SENSITIVE_ROUTE_IMPORTS = [
   "app/api/auth/me/route",
   "app/api/device-passport/register/route",
   "app/api/device-passport/challenge/route",
+  // slice 2E: POST /api/archive/match runs the server DB matcher via
+  // getReportsDbClient() (GET only reads process.env for the flag).
+  "app/api/archive/match/route",
 ];
 
 // schema-drift.test.mjs deliberately does something different: it allows
