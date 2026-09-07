@@ -39,8 +39,15 @@ test("no user-facing 'Archive overlap' label or exact indexed-document count rem
 });
 
 test("the report card renders the neutral 'Similarity result' banner instead of the old archive-scope disclaimer", async () => {
+  // Release-hardening audit finding SIM-01 renamed the local variable this
+  // regex pins (overlapScore -> primaryScore, now selected via
+  // primarySimilarityScore so it reflects the combined result when one has
+  // been computed) — the wording asserted here is otherwise unchanged and
+  // still renders for the archive-only fallback case this test's own intent
+  // describes; see tests/similarity-result-consistency.test.mjs for coverage
+  // of the unified-result banner text.
   const overviewReport = await readFile("components/report/similarity-report-papers.tsx", "utf8");
-  assert.match(overviewReport, /Similarity result: \{overlapScore\}% — based on identified overlapping passages and verified academic sources\./);
+  assert.match(overviewReport, /Similarity result: \{primaryScore\}% — based on identified overlapping passages and verified academic sources\./);
 });
 
 test("external coverage messaging uses the approved 'millions of scholarly records' wording, never a specific unverified count", async () => {

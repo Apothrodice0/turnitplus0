@@ -109,12 +109,15 @@ test('STEP 9.15/7: a report saved WITHOUT externalAcademicEvidence round-trips w
   assert.equal('externalAcademicEvidence' in body.payload, false, 'the field must be entirely absent, not null/[]');
   // Phase D/E8C enrichments must still run normally — proves this phase's
   // change did not interfere with the existing read-time enrichment chain.
-  // (matchClassification itself is undefined for an anonymous device-key
-  // report — no owning account to classify family membership against —
-  // and JSON.stringify drops undefined keys entirely, so its absence here
-  // is expected, not a regression; historicalSubmissionMatch has no such
-  // anonymous-only gap and is always attached.)
-  assert.equal(body.payload.historicalSubmissionMatch?.status, 'NO_HISTORICAL_MATCH');
+  // matchClassification is undefined for an anonymous device-key report —
+  // no owning account to classify family membership against. Release-
+  // hardening audit finding UI-02: historicalSubmissionMatch is now
+  // admin-only (app/api/reports/[id]/route.ts's GET handler) — this
+  // anonymous request has no session at all, so it is undefined here too,
+  // for the same reason matchClassification already was, not a regression.
+  // See tests/report-historical-match-visibility.test.mjs for dedicated
+  // admin-vs-ordinary coverage.
+  assert.equal(body.payload.historicalSubmissionMatch, undefined, 'REQUIRED (UI-02): an anonymous viewer must never receive historicalSubmissionMatch');
 });
 
 test('STEP 9.7: a report saved WITH externalAcademicEvidence round-trips with the SAME score/archiveScore as an equivalent report without it', async () => {
@@ -140,7 +143,7 @@ test('STEP 9.7: a report saved WITH externalAcademicEvidence round-trips with th
   assert.deepEqual(bodyWith.externalAcademicEvidence, EVIDENCE_FIXTURE, 'evidence survives the JSON round trip unchanged');
 });
 
-test('STEP 9.8: E8S/E8P-adjacent read-time fields (matchClassification, historicalSubmissionMatch, reuseContext) are populated identically whether or not externalAcademicEvidence is present', async () => {
+test('STEP 9.8: E8P-adjacent read-time fields (matchClassification, historicalSubmissionMatch) are populated identically whether or not externalAcademicEvidence is present', async () => {
   const deviceKeyWith = 'device-e8-with';
   const deviceKeyWithout = 'device-e8-without';
   const sharedText = 'identical submission text used to compare E8-adjacent enrichment behavior across both variants of this test';
@@ -154,16 +157,18 @@ test('STEP 9.8: E8S/E8P-adjacent read-time fields (matchClassification, historic
 
   const getWith = await getReport(deviceKeyWith, withEv.id, 'client-e8-with-get');
   const getWithout = await getReport(deviceKeyWithout, withoutEv.id, 'client-e8-without-get');
-  const bodyWith = (await getWith.json()).payload;
-  const bodyWithout = (await getWithout.json()).payload;
+  const envelopeWith = await getWith.json();
+  const envelopeWithout = await getWithout.json();
+  const bodyWith = envelopeWith.payload;
+  const bodyWithout = envelopeWithout.payload;
 
   assert.equal(bodyWith.matchClassification?.selfMatchPercent, bodyWithout.matchClassification?.selfMatchPercent);
   assert.equal(bodyWith.matchClassification?.priorSubmissionPercent, bodyWithout.matchClassification?.priorSubmissionPercent);
   assert.equal(bodyWith.historicalSubmissionMatch?.status, bodyWithout.historicalSubmissionMatch?.status);
-  assert.equal(bodyWith.reuseContext, undefined, 'non-allowlisted anonymous account: reuseContext stays undefined regardless');
-  assert.equal(bodyWithout.reuseContext, undefined);
   assert.equal(bodyWith.experimentalHistoricalMatch, undefined, 'non-allowlisted account: no experimental field either way');
   assert.equal(bodyWithout.experimentalHistoricalMatch, undefined);
+  assert.ok(!('reuseContext' in envelopeWith), 'reuse-context workflow removed: the report GET envelope must not carry reuseContext');
+  assert.ok(!('reuseContext' in envelopeWithout), 'reuse-context workflow removed: the report GET envelope must not carry reuseContext');
 });
 
 test('a payload with externalAcademicEvidence stays comfortably under the existing 2MB payload cap for a realistic number of sources', async () => {

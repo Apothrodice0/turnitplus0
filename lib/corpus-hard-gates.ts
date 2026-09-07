@@ -23,21 +23,29 @@ export type CorpusLanguageAdmissionClass = "CONFIDENT_ENGLISH" | "CONFIDENT_NON_
 
 export type CorpusHardGateThresholds = {
   minimumWords: SpecifiedValue<number>;
-  /** Below this, classifyLanguageForAdmission returns UNCERTAIN regardless of the detected label — catches "Mixed" (pinned low by construction in lib/corpus-quality-signals.ts) and any low-confidence single-language guess alike. */
+  /** Below this, classifyLanguageForAdmission returns UNCERTAIN regardless of the detected label — catches any single-language guess (English or non-English) whose dominance share wasn't strong. "Mixed" is caught separately and unconditionally, never relying on this floor alone — see classifyLanguageForAdmission's own comment. */
   languageConfidenceFloor: SpecifiedValue<number>;
 };
 
 export const DEFAULT_CORPUS_HARD_GATE_THRESHOLDS: CorpusHardGateThresholds = {
   minimumWords: { value: 3000, status: "ENGINEERING_DEFAULT", rationale: "Directly specified by the corpus-admission requirements (not statistically calibrated); corpus-admission-only, never applied to ordinary report checking." },
-  languageConfidenceFloor: { value: 0.65, status: "ENGINEERING_DEFAULT", rationale: "Placeholder pending 770-article calibration (spec section 6) — chosen to comfortably exceed the 0.5 confidence lib/corpus-quality-signals.ts pins 'Mixed' detections to, so ambiguous documents reliably land as UNCERTAIN rather than slipping through as falsely confident." },
+  languageConfidenceFloor: { value: 0.65, status: "ENGINEERING_DEFAULT", rationale: "Placeholder pending 770-article calibration (spec section 6). Reviewed against lib/similarity-core.ts's dominant-language confidence scale (a genuine share of word-weighted window evidence, MIN_DOMINANCE_SHARE=0.55 minimum once a single language is even reported at all): a document whose dominant language barely clears the 0.55 dominance gate is still a narrow, review-worthy call, so a floor a further 10 points above that gate keeps meaning 'needs a comfortable, not merely technical, majority' under the new scale exactly as it did under the old one — kept unchanged rather than re-picked, since the fixture evidence (tests/similarity-core.test.mjs, tests/corpus-hard-gates.test.mjs) shows a genuinely dominant document scores far above both gates (typically >0.85) while a genuinely close/short-embedded-passage case stays below 0.65, so the existing value still separates the two cleanly." },
 };
 
 /**
- * Reuses the SAME underlying script-ratio/French-stopword confidence
- * lib/corpus-quality-signals.ts already derives (passed in, not
- * recomputed) — this function only applies the admission-specific decision
- * boundary on top of it. "Mixed" and any low-confidence guess both resolve
- * to UNCERTAIN; only a confident non-English detection is NOT_ENGLISH.
+ * Reuses the SAME centralized label + confidence
+ * lib/similarity-core.ts's detectDominantLanguage already derives (passed
+ * in, not recomputed) — this function only applies the admission-specific
+ * decision boundary on top of it. "Mixed" always resolves to UNCERTAIN,
+ * explicitly — not merely because its own confidence typically lands below
+ * the floor. A "Mixed" result means the document genuinely didn't have one
+ * dominant language by lib/similarity-core.ts's own dominance-margin
+ * gate; that is a REVIEW-worthy fact regardless of how numerically close
+ * or far the underlying share was, so it must never fall through to
+ * CONFIDENT_NON_ENGLISH just because a future change to the confidence
+ * formula happened to report a high number for it. Any other low-confidence
+ * guess (English or non-English alike) resolves to UNCERTAIN via the floor
+ * check below.
  */
 export function classifyLanguageForAdmission(
   detectedLanguage: ReturnType<typeof detectLanguage> | null,
@@ -45,6 +53,7 @@ export function classifyLanguageForAdmission(
   thresholds: CorpusHardGateThresholds = DEFAULT_CORPUS_HARD_GATE_THRESHOLDS,
 ): CorpusLanguageAdmissionClass {
   if (detectedLanguage === null || languageConfidence === null) return "UNCERTAIN";
+  if (detectedLanguage === "Mixed") return "UNCERTAIN";
   if (languageConfidence < thresholds.languageConfidenceFloor.value) return "UNCERTAIN";
   return detectedLanguage === "English" ? "CONFIDENT_ENGLISH" : "CONFIDENT_NON_ENGLISH";
 }

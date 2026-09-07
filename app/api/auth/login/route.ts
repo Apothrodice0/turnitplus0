@@ -4,7 +4,6 @@ import { checkAuthRate } from '../../../../lib/rate-limit';
 import { clientIpFrom } from '../../../../lib/client-ip';
 import { verifyPassword, verifyAgainstDummy } from '../../../../lib/auth-crypto';
 import { createSession, setSessionCookie, claimAnonymousReports } from '../../../../lib/auth-session';
-import { maybePromoteToAdmin } from '../../../../lib/admin-role';
 
 const MAX_EMAIL_LENGTH = 254;
 const MAX_PASSWORD_LENGTH = 200;
@@ -34,8 +33,8 @@ export async function POST(request: Request) {
 
     const client = await getReportsDbClient();
     try {
-      const result = await client.execute({ sql: 'SELECT id, username, password_hash, corpus_reuse_consented_at FROM users WHERE email = ?', args: [normalizedEmail] });
-      const row = result.rows[0] as unknown as { id: string; username: string; password_hash: string; corpus_reuse_consented_at: string | null } | undefined;
+      const result = await client.execute({ sql: 'SELECT id, username, password_hash FROM users WHERE email = ?', args: [normalizedEmail] });
+      const row = result.rows[0] as unknown as { id: string; username: string; password_hash: string } | undefined;
 
       if (!row) {
         // Run a dummy derivation so response timing doesn't reveal whether
@@ -51,11 +50,19 @@ export async function POST(request: Request) {
       }
 
       await claimAnonymousReports(client, row.id, deviceKey);
-      await maybePromoteToAdmin(client, row.id, normalizedEmail);
+      // No admin promotion here (or on signup): the admin role is granted only
+      // by a deliberate operator action — see lib/admin-role.ts. An account that
+      // already holds it keeps it (getSessionUserByToken reads users.role fresh).
 
       const token = await createSession(client, row.id);
       const response = new NextResponse(
-        JSON.stringify({ user: { username: row.username, email: normalizedEmail, corpusReuseConsent: row.corpus_reuse_consented_at !== null } }),
+        // Product decision: cross-account TurnitPlus corpus checking is
+        // mandatory for every authenticated account — no account preference
+        // can disable it, so this is always true (see lib/auth-session.ts's
+        // SessionUser.corpusReuseConsented for the single-source-of-truth
+        // rationale; this route derives its own response rather than a
+        // session lookup, so it is hardcoded here to match).
+        JSON.stringify({ user: { username: row.username, email: normalizedEmail, corpusReuseConsent: true } }),
         { status: 200, headers: { 'Content-Type': 'application/json' } },
       );
       setSessionCookie(response, token, remember === true);

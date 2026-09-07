@@ -10,6 +10,7 @@ import * as signupRoute from '../app/api/auth/signup/route.ts';
 import { resetRateForTest, resetAuthRateForTest } from '../lib/rate-limit.js';
 import { canonicalSha256, createDocumentIdentity } from '../lib/document-identity.ts';
 import { indexDocumentSubmissionIntoCorpus } from '../lib/user-submission-corpus.ts';
+import { withTestIdentity } from './helpers/test-signup.mjs';
 
 /**
  * Phase E8D originally activated indexDocumentSubmissionIntoCorpus from the
@@ -80,7 +81,7 @@ async function signup(email, deviceKey) {
   const req = new Request('http://localhost/api/auth/signup', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-forwarded-for': 'activation-signup-' + email },
-    body: JSON.stringify({ email, password: 'activation-password-1', username: email.split('@')[0], deviceKey }),
+    body: JSON.stringify(withTestIdentity({ email, password: 'activation-password-1', username: email.split('@')[0], deviceKey })),
   });
   const res = await signupRoute.POST(req);
   // Privacy hardening: grants cross-account corpus-reuse consent immediately
@@ -89,7 +90,14 @@ async function signup(email, deviceKey) {
   // path via the live route, unchanged — see
   // tests/report-privacy-consent.test.mjs for the dedicated consent on/off
   // behavior this gate itself needs.
-  await setupClient.execute({ sql: 'UPDATE users SET corpus_reuse_consented_at = CURRENT_TIMESTAMP WHERE email = ?', args: [email] });
+  //
+  // Release-hardening audit finding UI-02: historicalSubmissionMatch is now
+  // admin-only on the GET response — this file's own scenarios read its
+  // `.status` to verify indexing/activation behavior, orthogonal to
+  // admin-only VISIBILITY. Promoted here too, matching tests/report-match-
+  // classification.test.mjs's own precedent; visibility itself is covered
+  // separately in tests/report-historical-match-visibility.test.mjs.
+  await setupClient.execute({ sql: "UPDATE users SET corpus_reuse_consented_at = CURRENT_TIMESTAMP, role = 'admin' WHERE email = ?", args: [email] });
   return { res, cookie: extractCookie(res) };
 }
 

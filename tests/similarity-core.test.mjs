@@ -4,6 +4,7 @@ import {
   aggregateSimilaritySources,
   acceptedSimilaritySpans,
   containment,
+  detectDominantLanguage,
   detectLanguage,
   gramHash,
   grams,
@@ -112,4 +113,131 @@ test("detects Arabic, French, English, and mixed text", () => {
 test("Arabic stopwords do not make a phrase informative by themselves", () => {
   assert.equal(informativeGram("في من على هذا التي"), false);
   assert.equal(informativeGram("القانون الدولي في المحكمة الجنائية"), true);
+});
+
+/**
+ * detectDominantLanguage regression suite.
+ *
+ * Reproduces a real misclassification: "Philanthropy, Socioemotional Wealth,
+ * and Cultural Embeddedness in the Maghrebi Family Firm" is a predominantly
+ * English article with a Spanish-translated abstract on page 1-2. The old
+ * whole-document, presence-only detector counted the Spanish abstract's
+ * "la"/"le"/"les" as French stopword evidence (Spanish and French share
+ * those tokens) and had no Spanish label at all, so the document was
+ * misclassified "French" at confidence 0.5 - below the 0.65 admission floor
+ * - which routed the corpus decision to REVIEW with LANGUAGE_UNCERTAIN, and
+ * separately made the AI-detector's English-only eligibility gate
+ * (app/ai-detector-worker.ts) treat the document as non-English, producing
+ * "AI analysis unavailable" for a document that is overwhelmingly English.
+ *
+ * The fixtures below use fixed, hand-curated word banks (not natural prose)
+ * so weight ratios and window-boundary quantization are exactly
+ * reproducible; the expected outputs were verified empirically against this
+ * exact detector before being hard-coded here (see PR description / session
+ * notes - not repeated as a comment per file since the values are the
+ * regression contract itself).
+ */
+
+const ENGLISH_WORDS = [
+  "the", "study", "examined", "population", "sample", "and", "the", "results",
+  "were", "compared", "with", "previous", "findings", "in", "this", "research",
+  "which", "was", "conducted", "across", "several", "institutions", "over",
+  "a", "period", "of", "years", "before", "publication",
+];
+const FRENCH_WORDS = [
+  "le", "droit", "de", "la", "recherche", "dans", "les", "universites",
+  "avec", "une", "methode", "claire", "pour", "des", "etudiants", "sur",
+  "cette", "question", "qui", "demeure", "importante", "ainsi", "nous",
+  "concluons", "que", "chaque", "resultat", "est", "significatif",
+];
+const SPANISH_WORDS = [
+  "el", "estudio", "examina", "la", "filantropia", "y", "la", "riqueza",
+  "en", "las", "empresas", "familiares", "con", "una", "metodologia",
+  "para", "estos", "resultados", "muestran", "que", "es", "un", "factor",
+  "determinante", "del", "comportamiento", "al", "comprender", "este",
+  "fenomeno", "tambien", "desde", "hacia",
+];
+const ARABIC_WORDS = [
+  "هذا", "البحث", "يشرح", "القانون", "الدولي", "والعلاقات", "بين", "الدول",
+  "المختلفة", "في", "هذا", "المجال", "الواسع", "والمهم", "جدا", "لفهم",
+  "النظام", "القانوني", "الدولي", "الحديث", "والمعاصر",
+];
+
+function repeatWords(bank, count) {
+  const out = [];
+  for (let i = 0; i < count; i += 1) out.push(bank[i % bank.length]);
+  return out.join(" ");
+}
+
+function mix(bankA, countA, bankB, countB) {
+  return `${repeatWords(bankA, countA)} ${repeatWords(bankB, countB)}`;
+}
+
+const REAL_SPANISH_ABSTRACT =
+  "Resumen: Este articulo examina la filantropia y la riqueza socioemocional en las empresas familiares del Magreb. " +
+  "El estudio analiza como la cultura influye en las decisiones filantropicas de estas empresas. Los resultados " +
+  "muestran que la incrustacion cultural es un factor determinante para entender el comportamiento filantropico de " +
+  "las familias empresarias en la region.";
+
+test("dominant language: a real English/French/Spanish/Arabic document each resolve to their own label at full confidence", () => {
+  assert.deepEqual(detectDominantLanguage(repeatWords(ENGLISH_WORDS, 3000)), { language: "English", confidence: 1 });
+  assert.deepEqual(detectDominantLanguage(repeatWords(FRENCH_WORDS, 3000)), { language: "French", confidence: 1 });
+  assert.deepEqual(detectDominantLanguage(repeatWords(SPANISH_WORDS, 3000)), { language: "Spanish", confidence: 1 });
+  assert.deepEqual(detectDominantLanguage(repeatWords(ARABIC_WORDS, 1000)), { language: "Arabic", confidence: 1 });
+});
+
+test("dominant language: bug reproduction - a long English body with a short Spanish abstract is confidently English, not French or Mixed", () => {
+  const result = detectDominantLanguage(mix(SPANISH_WORDS, 60, ENGLISH_WORDS, 3000));
+  assert.equal(result.language, "English");
+  assert.ok(result.confidence >= 0.65, `expected confidence >= the 0.65 admission floor, got ${result.confidence}`);
+});
+
+test("dominant language: bug reproduction with the real reported Spanish abstract text prepended to a long English body", () => {
+  const result = detectDominantLanguage(`${REAL_SPANISH_ABSTRACT} ${repeatWords(ENGLISH_WORDS, 3000)}`);
+  assert.equal(result.language, "English");
+  assert.ok(result.confidence >= 0.65, `expected confidence >= the 0.65 admission floor, got ${result.confidence}`);
+});
+
+test("dominant language: a short embedded French passage inside a long English body does not dominate - still English", () => {
+  const result = detectDominantLanguage(mix(FRENCH_WORDS, 80, ENGLISH_WORDS, 3000));
+  assert.equal(result.language, "English");
+  assert.ok(result.confidence >= 0.65);
+});
+
+test("dominant language: predominantly Spanish resolves to Spanish, not French or English, even though Spanish and French share stopwords", () => {
+  const result = detectDominantLanguage(mix(SPANISH_WORDS, 2400, ENGLISH_WORDS, 600));
+  assert.equal(result.language, "Spanish");
+  assert.ok(result.confidence >= 0.65);
+});
+
+test("dominant language: predominantly French resolves to French", () => {
+  const result = detectDominantLanguage(mix(FRENCH_WORDS, 2400, ENGLISH_WORDS, 600));
+  assert.equal(result.language, "French");
+  assert.ok(result.confidence >= 0.65);
+});
+
+test("dominant language: a genuinely balanced 50/50 English/Spanish document is Mixed, not defaulted to English", () => {
+  const result = detectDominantLanguage(mix(ENGLISH_WORDS, 1500, SPANISH_WORDS, 1500));
+  assert.equal(result.language, "Mixed");
+});
+
+test("dominant language: a 55/45 split still fails to dominate (margin gate) and is Mixed", () => {
+  const result = detectDominantLanguage(mix(ENGLISH_WORDS, 1650, SPANISH_WORDS, 1350));
+  assert.equal(result.language, "Mixed");
+});
+
+test("dominant language: a 60/40 split clears dominance but lands below the 0.65 admission floor - distinct from a genuinely confident document", () => {
+  const result = detectDominantLanguage(mix(ENGLISH_WORDS, 1800, SPANISH_WORDS, 1200));
+  assert.equal(result.language, "English");
+  assert.ok(result.confidence < 0.65, `expected a merely-dominant, not confidently-dominant, score below 0.65, got ${result.confidence}`);
+});
+
+test("dominant language: no evidence anywhere (empty text, or text with no recognizable words) falls back to English at confidence 0, never a confident guess", () => {
+  assert.deepEqual(detectDominantLanguage(""), { language: "English", confidence: 0 });
+  assert.deepEqual(detectDominantLanguage("1234 5678 90 123"), { language: "English", confidence: 0 });
+});
+
+test("detectLanguage remains a thin label-only wrapper around detectDominantLanguage", () => {
+  const text = mix(SPANISH_WORDS, 60, ENGLISH_WORDS, 3000);
+  assert.equal(detectLanguage(text), detectDominantLanguage(text).language);
 });

@@ -9,6 +9,7 @@ import { applyMigrationsLibsql } from "../lib/ingest.js";
 import { createDocumentIdentity } from "../lib/document-identity.ts";
 import { indexDocumentSubmissionIntoCorpus } from "../lib/user-submission-corpus.ts";
 import { getOrComputeHistoricalMatchSnapshot } from "../lib/report-historical-match.ts";
+import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
 import { runHistoricalMatchShadowEvaluation } from "../lib/e8p-shadow-evaluation.ts";
 import { getExperimentalHistoricalMatchForDisplay, isE8pVisibilityAllowlisted } from "../lib/e8p-visibility.ts";
 import { OverviewReport } from "../components/report/similarity-report-papers.tsx";
@@ -66,7 +67,9 @@ async function ensureSavedReport(deviceKey, reportId, accountId) {
 async function indexSubmission(accountId, rawText) {
   await ensureUser(accountId);
   const identity = await createDocumentIdentity(client, { accountId, title: "T", author: null, rawText });
-  return indexDocumentSubmissionIntoCorpus(client, { documentIdentityId: identity.id, rawText });
+  const _r = await indexDocumentSubmissionIntoCorpus(client, { documentIdentityId: identity.id, rawText });
+  await matureCorpusBackings(client); // Phase A: age the seeded backing so it is matchable "now"
+  return _r;
 }
 async function snapshotRow(reportDeviceKey, reportId) {
   const result = await client.execute({

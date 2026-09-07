@@ -27,7 +27,12 @@ Object.values(invertedIndex).forEach((sourceIndexes) => sourceIndexes.forEach((i
 const fingerprint = createHash("sha256").update(
   documents.map((document) => `${document.id}:${document.provenance.sha256}`).sort().join("\n"),
 ).digest("hex").slice(0, 10);
-const corpusVersion = `archive-v4-${documents.length}-${fingerprint}`;
+// archive-v5: this generation deliberately re-tokenizes the original documents
+// with the current reference-section-aware tokenizer (lib/similarity-core ->
+// lib/reference-section, introduced after archive-v4 was built) and adds the
+// medical similarity sources. The fingerprint is still derived from the normal
+// corpus fingerprint above — only the generation prefix changes.
+const corpusVersion = `archive-v5-${documents.length}-${fingerprint}`;
 const output = {
   schema: "tplus-search-index",
   version: 3,

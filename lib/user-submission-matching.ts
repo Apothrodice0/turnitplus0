@@ -8,6 +8,8 @@ import {
   findRepresentationById,
   summarizeSubmissionOwnership,
   isRepresentationActivelyPromoted,
+  isRepresentationEligibleForMatching,
+  corpusMaturityCutoff,
   CORPUS_FINGERPRINT_VERSION,
   type CandidateCorpusRepresentation,
 } from "./user-submission-corpus";
@@ -121,6 +123,51 @@ export type UserSubmissionMatchConfig = {
    * correspondence loop below.
    */
   dbQueryTimeoutMs: number;
+  /**
+   * 10k+-corpus scale hardening: query-time high-frequency ("maxDF") shingle
+   * pruning ceiling for candidate DISCOVERY, passed straight through to
+   * findCandidateCorpusRepresentations (see
+   * lib/user-submission-corpus.ts's applyHighFrequencyShinglePruning for the
+   * full mechanism and the measured rationale). A query 5-gram found in more
+   * than this many representations that are MATCH-ELIGIBLE FOR THIS
+   * REQUESTER (revoked/deactivated-only representations, and representations
+   * backed only by the requester's own admission promotions, do not count —
+   * the same account-aware eligibility the candidate query applies) is
+   * dropped before the candidate search — it is common register /
+   * boilerplate, contributes ~nothing to discovery, and at scale both
+   * dominates the candidate query's cost and evicts genuinely distinctive
+   * sources from the ranked LIMIT window.
+   *
+   * DISCOVERY ONLY: every surviving candidate is still re-verified by
+   * computeDocumentCorrespondence from full canonical text below, so
+   * passages, matchedWordCount, longestMatchWords, the matched-word union
+   * and the final unified score are identical to an unpruned run for every
+   * candidate that survives — and a candidate only fails to survive if it
+   * shares solely common-register shingles, which computeDocumentCorrespondence
+   * already refuses to accept as a match. Exact-canonical duplicates are
+   * additionally protected by this file's own canonical-hash fallback,
+   * independent of DF.
+   *
+   * null disables pruning entirely (findCandidateCorpusRepresentations then
+   * runs the exact query every prior build ran, with no extra DB round
+   * trip). The default is a positive integer chosen so that below ~1k
+   * representations no real shingle ever reaches it (pruning is inert at
+   * today's corpus size) while it engages exactly as the corpus grows into
+   * the range where the unpruned query would otherwise time out.
+   */
+  maxCandidateShingleDocumentFrequency: number | null;
+  /**
+   * Low-information-query fallback floor, forwarded as
+   * findCandidateCorpusRepresentations' minDiscriminativeShingles — only
+   * consulted when maxCandidateShingleDocumentFrequency is non-null. If
+   * high-DF pruning would leave fewer than this many surviving query
+   * shingles (a document written almost entirely in common academic
+   * register), pruning is ABANDONED for that query and the complete
+   * original query shingle set is searched — exactly what an unpruned run
+   * does — so such a document is never turned into a false
+   * NO_HISTORICAL_MATCH by pruning alone.
+   */
+  minDiscriminativeShingles: number;
 };
 
 /**
@@ -196,6 +243,37 @@ export const USER_SUBMISSION_MATCH_THRESHOLDS: UserSubmissionMatchConfig = {
   maxCandidateWordCount: 20_000,
   matchTimeBudgetMs: 2_500,
   dbQueryTimeoutMs: 1_500,
+  // 10k+-corpus scale hardening — see maxCandidateShingleDocumentFrequency's
+  // own comment on UserSubmissionMatchConfig. 50 was chosen from direct
+  // measurement against synthetic corpora at 200 / 2,000 / 8,000+
+  // representations with realistic shingle density (work/maxdf, not
+  // committed):
+  //   - below ~1,000 representations no real 5-gram reaches DF 50, so this
+  //     is completely inert at today's corpus size — the only cost is one
+  //     extra bounded eligible-DF probe (json_each + per-hash `LIMIT`) per
+  //     cold historical-match computation, a few ms on a small corpus, and
+  //     nothing is pruned;
+  //   - at 8,000 representations (11.8M shingle rows) the unpruned candidate
+  //     query takes ~5-9 s (over dbQueryTimeoutMs — the matcher is already
+  //     silently timing out at that scale); with maxDF=50 the
+  //     eligibility-correct DF probe measured ~0.56 s (worst-case,
+  //     corpus-size-independent) plus a small pruned candidate query
+  //     complete well under the 1.5 s budget, and a genuinely copied source
+  //     ranks #1 instead of being evicted past the LIMIT;
+  //   - 50 in a 10k corpus is 0.5% — comfortably above any real
+  //     resubmission / revision cluster (nobody resubmits one paper 50
+  //     times) and far below true boilerplate DF (hundreds to thousands),
+  //     with the minDiscriminativeShingles fallback (bypass-pruning)
+  //     covering the mostly-generic-document edge.
+  // DF counts representations that are MATCH-ELIGIBLE FOR THIS REQUESTER —
+  // the exact account-aware admissionEligibilitySql the candidate query
+  // applies: revoked/deactivated-only representations, and representations
+  // backed only by the requester's own admission promotion(s), do not
+  // inflate it (see applyHighFrequencyShinglePruning).
+  // Set to null to disable pruning entirely (exact pre-hardening behavior,
+  // no extra query).
+  maxCandidateShingleDocumentFrequency: 50,
+  minDiscriminativeShingles: 24,
 };
 
 export type EvidenceVersion = {
@@ -311,10 +389,57 @@ export async function matchAgainstUserSubmissionCorpus(
     documentIdentityId?: string | null;
     canonicalText: string;
     config?: Partial<UserSubmissionMatchConfig>;
+    /**
+     * Account-level own-submission exclusion fix: the account id of the
+     * report currently being evaluated, when it has one — i.e. an
+     * authenticated report whose own account could, in principle, have
+     * already promoted a representation of its own content, through this
+     * exact report or any OTHER prior report from the same account.
+     * Threaded through to findCandidateCorpusRepresentations and the
+     * exact-hash fallback below so a representation backed only by this
+     * account's own admission(s) is never offered as a candidate against a
+     * report from that same account, while remaining fully matchable
+     * against every other account. Server-internal only — never returned
+     * in any match result, never derived from anything this function
+     * itself looks up. Optional and undefined for every existing caller
+     * that does not pass it, which reproduces the prior, unexcluded
+     * behavior exactly.
+     */
+    excludeAccountId?: string;
+    /**
+     * The corpus-source-matching-enabled state this call should classify
+     * under. When provided, it is used verbatim instead of a fresh
+     * isCorpusSourceMatchingEnabled() read — so a caller that has already
+     * captured the flag once for its whole computation
+     * (lib/report-historical-match.ts's getOrComputeHistoricalMatchSnapshot)
+     * cannot have this classification disagree with its own persisted
+     * snapshot status across a mid-computation flag flip. Omitted by every
+     * other caller, which keeps the existing single internal env read.
+     */
+    corpusSourceMatchingEnabled?: boolean;
+    /**
+     * Phase A — 7-day corpus maturity. This is a MATCHING call by definition
+     * (it produces plagiarism evidence), so the 7-day gate is ALWAYS applied.
+     * The production caller (lib/report-historical-match.ts's
+     * getOrComputeHistoricalMatchSnapshot) threads its single logical clock's
+     * cutoff string in here; a caller that omits it still gets the gate,
+     * derived from `asOf ?? new Date()` below. There is deliberately no way to
+     * disable maturity through this function — findCandidateCorpusRepresentations
+     * and the exact-hash fallback are both invoked with eligibilityMode
+     * "MATCHING" and the resolved cutoff.
+     */
+    maturityCutoff?: string;
+    /** Fallback logical clock when no explicit maturityCutoff is threaded in. Tests inject/freeze it; production leaves it undefined (=> server time). */
+    asOf?: Date;
   },
 ): Promise<UserSubmissionMatchResult> {
   const config = mergeConfig(params.config);
   const deadline = Date.now() + config.matchTimeBudgetMs;
+  // Resolved ONCE for this whole match — a single string handed to both
+  // candidate discovery and the exact-hash fallback (never asOf separately),
+  // so they cannot straddle a maturity boundary. Never null: matching always
+  // enforces maturity.
+  const maturityCutoff = params.maturityCutoff ?? corpusMaturityCutoff(params.asOf ?? new Date());
 
   const queryWordCount = tokens(params.canonicalText).length;
   if (queryWordCount === 0) return { status: "NO_HISTORICAL_MATCH" };
@@ -329,6 +454,17 @@ export async function matchAgainstUserSubmissionCorpus(
         fingerprintVersion: config.fingerprintVersion,
         minSharedShingles: config.candidateShingleThreshold,
         limit: config.maxCandidates,
+        excludeAccountId: params.excludeAccountId,
+        // 10k+-corpus scale hardening — candidate DISCOVERY only. See
+        // maxCandidateShingleDocumentFrequency on UserSubmissionMatchConfig
+        // and lib/user-submission-corpus.ts's applyHighFrequencyShinglePruning.
+        // null => no pruning and no extra DB round trip (exact prior behavior).
+        maxDocumentFrequency: config.maxCandidateShingleDocumentFrequency ?? undefined,
+        minDiscriminativeShingles: config.minDiscriminativeShingles,
+        // Phase A: an explicit MATCHING call with the resolved cutoff;
+        // findCandidateCorpusRepresentations forwards both to its DF probe.
+        eligibilityMode: "MATCHING",
+        maturityCutoff,
       }),
       config.dbQueryTimeoutMs,
       "findCandidateCorpusRepresentations",
@@ -356,20 +492,42 @@ export async function matchAgainstUserSubmissionCorpus(
     const exactHash = canonicalSha256(params.canonicalText);
     const exactRepresentation = await findReusableRepresentationByCanonicalHash(client, exactHash);
     if (exactRepresentation && !candidateById.has(exactRepresentation.id)) {
-      candidateById.set(exactRepresentation.id, {
-        representationId: exactRepresentation.id,
-        canonicalSha256: exactRepresentation.canonicalSha256,
-        wordCount: exactRepresentation.wordCount,
-        sharedShingleCount: queryShingles.size,
-        containment: 1,
-        isActivelyPromoted: await isRepresentationActivelyPromoted(client, exactRepresentation.id),
+      // Own-submission exclusion fix: findReusableRepresentationByCanonicalHash is a
+      // plain hash lookup with no eligibility awareness of its own (it is
+      // also used by lib/corpus-admission-promotion.ts's own find-or-create
+      // dedup logic, where eligibility is irrelevant) — this fallback must
+      // apply the SAME eligibility rule findCandidateCorpusRepresentations'
+      // own WHERE clause already enforces for its shingle-based candidates.
+      // A byte-identical self-upload of a just-promoted document is exactly
+      // an exact-hash match, so leaving this fallback ungated would make
+      // excludeAccountId above a no-op for the precise scenario it exists
+      // to close. Phase A: the SAME MATCHING gate and resolved cutoff too — an
+      // exact-canonical duplicate of an immature corpus source must not slip in
+      // via this fallback when the shingle search already correctly excluded it.
+      const eligible = await isRepresentationEligibleForMatching(client, exactRepresentation.id, {
+        excludeAccountId: params.excludeAccountId,
+        eligibilityMode: "MATCHING",
+        maturityCutoff,
       });
+      if (eligible) {
+        candidateById.set(exactRepresentation.id, {
+          representationId: exactRepresentation.id,
+          canonicalSha256: exactRepresentation.canonicalSha256,
+          wordCount: exactRepresentation.wordCount,
+          sharedShingleCount: queryShingles.size,
+          containment: 1,
+          isActivelyPromoted: await isRepresentationActivelyPromoted(client, exactRepresentation.id),
+        });
+      }
     }
   }
 
   const boundedCandidates = [...candidateById.values()].slice(0, config.maxCandidates);
   const matches: UserSubmissionMatch[] = [];
-  const corpusSourceMatchingEnabled = isCorpusSourceMatchingEnabled();
+  // params.corpusSourceMatchingEnabled, when the caller captured it once for
+  // its whole computation, is used verbatim; otherwise a single internal
+  // env read, exactly as before.
+  const corpusSourceMatchingEnabled = params.corpusSourceMatchingEnabled ?? isCorpusSourceMatchingEnabled();
   let timedOut = dbTimedOut;
 
   for (const candidate of boundedCandidates) {

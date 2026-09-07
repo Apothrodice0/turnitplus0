@@ -35,3 +35,50 @@ export function isSameOriginRequest(request: Request): boolean {
     return false;
   }
 }
+
+/**
+ * The A2 signup / account-settings guard. It BLOCKS a cross-origin browser
+ * submission (returns true) but ALLOWS a request with no Origin / Sec-Fetch-Site
+ * signal at all (returns false).
+ *
+ * Deliberately weaker than isSameOriginRequest above: those admin / device-
+ * passport endpoints fail closed on a missing Origin because a legitimate caller
+ * there is always a same-origin browser fetch. POST /api/auth/signup and PATCH
+ * /api/auth/me additionally serve non-browser callers (and the whole route-
+ * handler test suite calls them with bare Request objects). A CSRF attack
+ * requires a victim's browser, and a browser ALWAYS sends Origin on a
+ * cross-origin POST/PATCH — so blocking exactly "Origin present and mismatched"
+ * (or Sec-Fetch-Site: cross-site) stops the browser-CSRF vector without
+ * rejecting every header-free programmatic client. The SameSite=Lax session
+ * cookie (lib/auth-session.ts) is the other half of this defense.
+ */
+export function isCrossOriginBrowserRequest(request: Request): boolean {
+  const secFetchSite = request.headers.get("sec-fetch-site");
+  if (secFetchSite && secFetchSite.toLowerCase() === "cross-site") return true;
+
+  const origin = request.headers.get("origin");
+  if (!origin || origin.toLowerCase() === "null") return false; // no browser cross-origin signal
+
+  let originHost: string;
+  try {
+    originHost = new URL(origin).host.toLowerCase();
+  } catch {
+    return true; // malformed Origin — treat as hostile
+  }
+
+  const expectedHost = (request.headers.get("x-forwarded-host") ?? request.headers.get("host") ?? "")
+    .split(",")[0]
+    .trim()
+    .toLowerCase();
+  if (expectedHost && originHost === expectedHost) return false;
+
+  try {
+    if (originHost === new URL(request.url).host.toLowerCase()) return false;
+  } catch {
+    /* ignore */
+  }
+  return true;
+}
+
+/** Standard 403 body for a rejected cross-origin request. */
+export const CROSS_ORIGIN_REJECTED = { error: "This request must come from the TurnitPlus site." } as const;

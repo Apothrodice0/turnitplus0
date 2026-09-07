@@ -9,7 +9,8 @@ import { clientIpFromHeaders } from "@/lib/client-ip";
 import { getReportsDbClient } from "@/lib/reports-db";
 import { findReportRowForUser } from "@/lib/reports-repo";
 import { deriveRoomStatus } from "@/lib/report-rooms";
-import type { SimilarityReport } from "@/lib/report-types";
+import { resolvePersistedSimilarityDisplay } from "@/lib/report-primary-similarity";
+import { archiveOverlapScore, hasUnifiedSimilarity, type SimilarityReport } from "@/lib/report-types";
 import { ReportDetailShell } from "./report-detail-shell";
 
 export const dynamic = "force-dynamic";
@@ -24,7 +25,33 @@ type OwnedReportResult =
   // "pending." Always defined (never null): a legacy report predating
   // ai_status falls back to deriveRoomStatus's own ai_score-only rule,
   // exactly like the room page already does for the same case.
-  | { status: "found"; payload: SimilarityReport; aiStatus: "processing" | "ready" | "failed" }
+  // Release-hardening audit finding SIM-04: similarityStatus is a cheap,
+  // read-only signal — computed via lib/report-primary-similarity.ts's
+  // resolvePersistedSimilarityDisplay, the SAME function
+  // lib/reports-repo.ts's findRoomOccupant uses, so room and detail can
+  // never disagree. Never triggers recomputation itself (no matcher calls,
+  // no writes); it only tells ReportDetailShell whether payload's own
+  // primarySimilarityScore is already trustworthy ("resolved"), known
+  // outdated by generation/live-flag change ("stale" — show "Updating
+  // similarity…" instead), never computed at all ("pending" — show
+  // "Calculating similarity…"), or genuinely, reproducibly failed
+  // ("failed" — release-hardening audit finding LIFECYCLE-06, corrected —
+  // show "Unavailable," never inferred from client poll timing). See
+  // loadOwnedReport's own comment for why
+  // payload.unifiedSimilarity is stripped in the one "resolved but
+  // archive-only" case (a live CORPUS_SOURCE_MATCHING_ENABLED rollback) so
+  // primarySimilarityScore(payload) itself agrees with this status, not
+  // just the label around it.
+  // aiScore/aiTone: the flat saved_reports.ai_score / ai_tone columns, passed
+  // through verbatim. These are the AUTHORITATIVE AI headline signal — the
+  // calibrated display value frozen by saveEnrichedAiResult the moment
+  // analysis completed (never SimilarityReport.aiScore, which is the raw
+  // human-reference percentile). payload.aiAnalysis can legitimately lag
+  // these columns (see lib/ai-display-state.ts's own header comment for the
+  // exact "0% AI on the room card / AI report pending on this page" split
+  // this closes), so ReportDetailShell resolves its AI state from these plus
+  // aiAnalysis-as-refinement, not from aiAnalysis alone.
+  | { status: "found"; payload: SimilarityReport; aiStatus: "processing" | "ready" | "failed"; aiScore: number | null; aiTone: string | null; similarityStatus: "resolved" | "stale" | "pending" | "failed" }
   | { status: "not-found-for-session" }
   | { status: "no-session" }
   | { status: "rate-limited"; retryAfterSeconds: number };
@@ -63,8 +90,60 @@ const loadOwnedReport = cache(async (id: string): Promise<OwnedReportResult> => 
     // more honest and avoids a dead-end retry loop. Production audit fix.
     try {
       const payload = JSON.parse(row.payload_json) as SimilarityReport;
+      // Task A correction: the same explicit, unconditional authorization
+      // signal app/api/reports/[id]/route.ts's GET handler sets for the
+      // client-side background re-fetch — this is the server-rendered FIRST
+      // PAINT path, so it must set the identical field the identical way
+      // (the authenticated session's own real `role` column) or the very
+      // first render would show/hide detailed source-channel UI differently
+      // from every subsequent client re-render. See SimilarityReport's own
+      // comment on this field.
+      payload.viewerIsAdmin = sessionUser.role === "admin";
       const aiStatus = deriveRoomStatus(row.ai_score, row.ai_status);
-      return { status: "found", payload, aiStatus };
+      const display = await resolvePersistedSimilarityDisplay(client, {
+        reportDeviceKey: row.device_key,
+        reportId: id,
+        archiveScore: archiveOverlapScore(payload),
+        unifiedScore: payload.unifiedSimilarity?.unifiedScore ?? null,
+        hasUnifiedSimilarity: hasUnifiedSimilarity(payload),
+        corpusSourceMatchingEnabledAtComputation: payload.corpusSourceMatchingEnabledAtComputation ?? null,
+        unifiedSimilarityFailed: payload.unifiedSimilarityFailed ?? false,
+        // Backward-compatibility fix: a report self-healed before
+        // matchedPositions existed (see lib/unified-similarity.ts's own
+        // comment) must not render as "resolved" here with nothing for the
+        // renderer to highlight from. `!== undefined`, not `.length`, so a
+        // real, current 0% match (matchedPositions: []) still counts as
+        // present. This page never self-heals itself (see this function's
+        // own header comment on staying fast/unenriched) — a "stale" result
+        // here is picked up by the client's own fetch to
+        // app/api/reports/[id]/route.ts's GET handler, which always
+        // resolves fresh and therefore always persists the new fields.
+        hasPositionEvidence: payload.unifiedSimilarity?.matchedPositions !== undefined,
+      });
+      // Release-hardening audit finding SIM-04: "resolved" + isUnified
+      // false means the live flag rollback path — payload.unifiedSimilarity
+      // itself still holds the OLD, flag-computed value (it is never
+      // mutated in storage just by a read), so it must be stripped here,
+      // not just labeled around: primarySimilarityScore(payload) on the
+      // client reads report.unifiedSimilarity directly and has no
+      // knowledge of the live flag at all — without this, the client would
+      // render the correct "resolved" status next to the WRONG (stale,
+      // corpus-inflated) number.
+      if (display.status === "resolved" && !display.isUnified) {
+        delete payload.unifiedSimilarity;
+      }
+      // Release-hardening audit finding UI-02: payload.unifiedSimilarity is
+      // read straight from durable storage here, so a non-admin's very
+      // first server render would otherwise carry the same
+      // contributions[].sourceId (an internal representation id) that
+      // app/api/reports/[id]/route.ts's GET handler now strips for the
+      // background-fetch response — see that route's own comment for why
+      // this is safe (contributions is never rendered by any production UI)
+      // and why unifiedScore itself is never touched.
+      if (payload.unifiedSimilarity && sessionUser.role !== "admin") {
+        payload.unifiedSimilarity = { ...payload.unifiedSimilarity, contributions: [] };
+      }
+      return { status: "found", payload, aiStatus, aiScore: row.ai_score, aiTone: row.ai_tone, similarityStatus: display.status };
     } catch {
       return { status: "not-found-for-session" };
     }
@@ -129,6 +208,9 @@ export default async function ReportDetailPage({
       mode={mode}
       initialReport={result.status === "found" ? result.payload : null}
       initialAiStatus={result.status === "found" ? result.aiStatus : null}
+      initialAiScore={result.status === "found" ? result.aiScore : null}
+      initialAiTone={result.status === "found" ? result.aiTone : null}
+      initialSimilarityStatus={result.status === "found" ? result.similarityStatus : null}
       requiresClientResolution={result.status === "no-session"}
       backRoom={backRoom}
     />

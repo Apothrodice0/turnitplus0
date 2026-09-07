@@ -1,9 +1,26 @@
 import type { Client } from "@libsql/client";
+import { createHash } from "node:crypto";
 import { canonicalizeText } from "./canonical-text";
-import { matchAgainstUserSubmissionCorpus, isCorpusSourceMatchingEnabled, USER_SUBMISSION_MATCHER_VERSION } from "./user-submission-matching";
-import { CORPUS_FINGERPRINT_VERSION, CANONICALIZATION_VERSION } from "./user-submission-corpus";
+import { matchAgainstUserSubmissionCorpus, isCorpusSourceMatchingEnabled, USER_SUBMISSION_MATCHER_VERSION, USER_SUBMISSION_MATCH_THRESHOLDS } from "./user-submission-matching";
+import {
+  CORPUS_FINGERPRINT_VERSION,
+  CANONICALIZATION_VERSION,
+  CORPUS_ACTIVATION_DELAY_DAYS,
+  corpusMaturityCutoff,
+  sqliteUtcTimestamp,
+  parseSqliteUtc,
+} from "./user-submission-corpus";
 import { canonicalSha256, findPriorSubmissionsForAccount } from "./document-identity";
+import { getCurrentCorpusMatchGeneration, bumpCorpusMatchGeneration } from "./corpus-match-generation";
 import type { ReportHistoricalSubmissionMatch, HistoricalSubmissionMatchEntry } from "./report-types";
+
+// Re-exported unchanged so every existing importer
+// (lib/corpus-admission-promotion.ts, lib/corpus-admission-admin-actions.ts,
+// lib/report-primary-similarity.ts, and this feature's tests) keeps importing
+// them from here — the definitions moved to lib/corpus-match-generation.ts
+// only so lib/user-submission-corpus.ts can bump the counter without an
+// import cycle back through this bridge module. See that file's header.
+export { getCurrentCorpusMatchGeneration, bumpCorpusMatchGeneration };
 
 /**
  * Phase E8C bridge layer: turns a saved report's raw text + viewing account
@@ -24,27 +41,70 @@ import type { ReportHistoricalSubmissionMatch, HistoricalSubmissionMatchEntry } 
  *
  * Snapshot/staleness model (this phase's own task description, section 14):
  * report_historical_match_snapshots holds exactly one row per report,
- * upserted on recompute. A stored snapshot is reused as-is when its three
- * version tags (matcher/fingerprint/canonicalization) all equal the
- * CURRENT_VERSIONS below; if any differ (or no snapshot exists yet), a
- * fresh computation runs and overwrites it via INSERT ... ON CONFLICT DO
- * UPDATE — atomic, so two simultaneous requests computing the same stale
- * snapshot race harmlessly to the same eventually-consistent row (this
- * phase's own task description, section 15) rather than needing a lock
+ * upserted on recompute. A stored snapshot is reused as-is when its version
+ * tags (matcher — see SNAPSHOT_MATCHER_VERSION below, which now folds in the
+ * full candidate-discovery config — plus fingerprint/canonicalization) all
+ * equal the CURRENT_VERSIONS below AND its corpus_generation is still
+ * current AND it is not a partial result; if any differ (or no snapshot
+ * exists yet), a fresh computation runs and overwrites it via INSERT ... ON
+ * CONFLICT DO UPDATE — atomic, so two simultaneous requests computing the
+ * same stale snapshot race harmlessly to the same eventually-consistent row
+ * (this phase's own task description, section 15) rather than needing a lock
  * table. A computation failure is itself persisted as status "FAILED" (never
  * thrown past this function) so a permanently-failing document does not get
  * recomputed on every single report view.
  *
- * Phase E8E fix: a cached "NO_HISTORICAL_MATCH" row is the one exception —
- * it is never reused, even with current version tags. Phase E8D activated
- * save-time indexing via a genuinely deferred after() callback in
- * production, so a report can legitimately be viewed for the first time
- * before another account's earlier upload has finished indexing; the very
- * first view would then compute and permanently cache NO_HISTORICAL_MATCH,
- * silently hiding a real PRIOR_SUBMISSION/SELF match that only exists a
- * moment later — version tags never change to invalidate it, since nothing
- * about the matcher/fingerprint/canonicalization changed, only the corpus's
- * contents did.
+ * Definitive-no-match caching (supersedes the original "Phase E8E fix",
+ * which unconditionally excluded every NO_HISTORICAL_MATCH row from reuse):
+ * a COMPLETE, CURRENT no-match is now reused exactly like a MATCHED one.
+ * That original blanket exclusion predated the corpus_match_generation
+ * counter (drizzle/0036); its stated reason — "version tags never change
+ * when only the corpus's *contents* change" — is precisely what the
+ * generation counter now covers. Every event that can turn a no-match into
+ * a match bumps the generation in the SAME transaction that adds the
+ * content: a promotion reaching 'indexed'
+ * (lib/corpus-admission-promotion.ts), a reactivation
+ * (lib/corpus-admission-admin-actions.ts), and a user submission indexed
+ * into the corpus (lib/user-submission-corpus.ts's
+ * indexDocumentSubmissionIntoCorpus — the deferred after() path the
+ * original E8E comment worried about, which additionally no longer has any
+ * production call site at all: app/api/reports/route.ts stopped calling it
+ * directly). So a stamped corpus_generation older than the current global
+ * value is the reliable, race-proof "this no-match might be out of date"
+ * signal — checked here exactly like the version tags.
+ *
+ * TWO results that LOOK like a no-match but must NEVER be cached as a
+ * durable one, both already distinguished in storage:
+ *   - a PARTIAL result (is_partial column, drizzle/0035): the matcher's
+ *     candidate DB query timed out / errored, or its soft time budget was
+ *     exceeded mid-loop, so only some candidates were evaluated. Always
+ *     recomputed on next view.
+ *   - a FEATURE-DISABLED result: computed while
+ *     CORPUS_SOURCE_MATCHING_ENABLED was off, so promoted-corpus-source
+ *     candidates were deliberately not classified. Stored under the
+ *     distinct status "NO_HISTORICAL_MATCH_FEATURE_DISABLED" (rowToResult
+ *     still maps it to the ordinary external NO_HISTORICAL_MATCH shape — the
+ *     distinction is a storage-layer reuse marker only) and never reused, so
+ *     turning the flag on cannot leave a real corpus-source match
+ *     permanently suppressed (this phase's own task description, section 9).
+ *     Net effect: no-match caching is inert until the flag is on — exactly
+ *     the rollout it exists to serve — and current production behaviour is
+ *     unchanged.
+ *
+ *     CACHEABILITY DESCRIBES THE CONDITIONS THE RESULT WAS COMPUTED UNDER,
+ *     NOT THE ENVIRONMENT VALUE AT THE LATER WRITE INSTANT. The flag is
+ *     therefore captured ONCE per computation
+ *     (corpusSourceMatchingEnabledAtComputation, read at the very top of
+ *     getOrComputeHistoricalMatchSnapshot, or threaded in by
+ *     resolvePrimarySimilaritySummary from its own single request-scoped
+ *     read) and that one value governs BOTH the matcher's classification
+ *     (passed into matchAgainstUserSubmissionCorpus) AND the status choice
+ *     above. Without this, an OFF->ON flip landing between the matcher run
+ *     and the write would let a suppressed-corpus-source no-match be
+ *     persisted as the reusable "NO_HISTORICAL_MATCH". Read-time filtering
+ *     (applyCorpusSourceMatchingFlag) still uses the LIVE flag — that is the
+ *     separate, intentional rollback behaviour that hides corpus-source
+ *     entries from a stored MATCHED row while the flag is currently off.
  *
  * corpus-source matching addendum (this file's own review required this
  * THREE times now — each round below records what the previous one got
@@ -112,14 +172,73 @@ import type { ReportHistoricalSubmissionMatch, HistoricalSubmissionMatchEntry } 
  *      already proves for this exact codebase.
  *
  * A "partial" result (lib/user-submission-matching.ts's own soft time
- * budget was exceeded — see that file's TIMEOUT HONESTY comment) is treated
- * like NO_HISTORICAL_MATCH for staleness purposes: never cached as final,
- * always recomputed on next view (is_partial column, drizzle/0035) — an
- * incomplete computation must never be mistaken for a settled one.
+ * budget was exceeded, or its candidate DB query timed out / errored — see
+ * that file's TIMEOUT HONESTY comment) is never cached as final, always
+ * recomputed on next view (is_partial column, drizzle/0035) — an incomplete
+ * computation must never be mistaken for a settled one, whichever status it
+ * happened to carry.
  */
 
+/**
+ * A stable digest of every value in USER_SUBMISSION_MATCH_THRESHOLDS —
+ * folded into the snapshot's own matcher_version tag below. USER_SUBMISSION_MATCHER_VERSION
+ * ("user-submission-match-v1") is a hand-maintained label that, by its own
+ * history, does NOT reliably move when the matcher's config does: the maxDF
+ * candidate-discovery hardening (maxCandidateShingleDocumentFrequency,
+ * minDiscriminativeShingles) shipped without touching it. That was harmless
+ * while NO_HISTORICAL_MATCH was never cached; now that a complete no-match
+ * IS reused, a no-match computed under one candidate-discovery config must
+ * stop being reused the moment that config changes in a way that could
+ * surface a candidate it could not before. Digesting the whole thresholds
+ * object (candidate-DF ceiling, discriminative-shingle floor, shingle
+ * threshold, candidate LIMIT, per-candidate size cap, correspondence
+ * thresholds, time budgets — all of it) makes "the matcher config changed"
+ * an automatic snapshot invalidation with no column and no migration, and
+ * with nothing to remember to bump. A config deploy is rare; an extra
+ * one-time lazy recompute per report on such a deploy is wasted work, never
+ * wrong behaviour.
+ */
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value as Record<string, unknown>)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${stableStringify((value as Record<string, unknown>)[k])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value ?? null);
+}
+// Phase A — 7-day corpus maturity. CORPUS_ACTIVATION_DELAY_DAYS is folded into
+// this digest alongside the matcher thresholds so deploying Phase A (or ever
+// changing the window) invalidates every snapshot computed under the previous
+// activation-less policy — the same automatic, no-column, no-migration
+// invalidation a thresholds change already gets. An activation-less snapshot
+// could otherwise keep an immature source's contribution cached indefinitely.
+const MATCH_CONFIG_DIGEST = createHash("sha256")
+  .update(stableStringify({ thresholds: USER_SUBMISSION_MATCH_THRESHOLDS, corpusActivationDelayDays: CORPUS_ACTIVATION_DELAY_DAYS }))
+  .digest("hex")
+  .slice(0, 12);
+
+/**
+ * The matcher identity a snapshot is validated against: the hand-maintained
+ * matcher version PLUS the config digest above. Exported so
+ * lib/report-primary-similarity.ts's isFreshCurrentNoHistoricalMatch checks
+ * against the exact same value a stored row's matcher_version column holds.
+ */
+export const SNAPSHOT_MATCHER_VERSION = `${USER_SUBMISSION_MATCHER_VERSION}+cfg.${MATCH_CONFIG_DIGEST}`;
+
+/**
+ * Written to a snapshot row's status column (instead of "NO_HISTORICAL_MATCH")
+ * when the no-match was computed while CORPUS_SOURCE_MATCHING_ENABLED was
+ * off — a deliberately incomplete evaluation (promoted-corpus-source
+ * candidates were not classified). rowToResult maps it back to the ordinary
+ * external NO_HISTORICAL_MATCH shape; isSnapshotRowCurrent never treats it
+ * as a cache hit, so turning the flag on always forces a real recompute.
+ */
+export const NO_HISTORICAL_MATCH_FEATURE_DISABLED_STATUS = "NO_HISTORICAL_MATCH_FEATURE_DISABLED";
+
 const CURRENT_VERSIONS = {
-  matcherVersion: USER_SUBMISSION_MATCHER_VERSION,
+  matcherVersion: SNAPSHOT_MATCHER_VERSION,
   fingerprintVersion: CORPUS_FINGERPRINT_VERSION,
   canonicalizationVersion: CANONICALIZATION_VERSION,
 };
@@ -138,39 +257,111 @@ type SnapshotRow = {
   corpus_generation: number | bigint;
 };
 
-/**
- * Reads the current global corpus-match generation (drizzle/0036) — always
- * fresh, never cached in memory, same discipline as
- * isCorpusSourceMatchingEnabled()'s own live process.env read. The seed row
- * (id=1, generation=0) is inserted by the migration itself; this never
- * needs to create it.
- */
-export async function getCurrentCorpusMatchGeneration(execOrTx: Pick<Client, "execute">): Promise<number> {
-  const result = await execOrTx.execute("SELECT generation FROM corpus_match_generation WHERE id = 1");
-  const row = result.rows[0] as unknown as { generation: number | bigint } | undefined;
-  return row ? Number(row.generation) : 0;
-}
-
-/**
- * Bumps the global generation by 1 — called whenever corpus eligibility is
- * ADDED (a promotion newly 'indexed', a fingerprint reactivated), never for
- * eligibility removed (see this file's own header comment for why
- * deactivation uses targeted invalidation instead). Safe to call more than
- * once for what is conceptually "one" eligibility-adding event (e.g. several
- * decisions promoted in the same sweep tick each bump it separately) — an
- * extra bump only means an extra harmless recompute somewhere, never a
- * missed one.
- */
-export async function bumpCorpusMatchGeneration(execOrTx: Pick<Client, "execute">): Promise<void> {
-  await execOrTx.execute("UPDATE corpus_match_generation SET generation = generation + 1, updated_at = CURRENT_TIMESTAMP WHERE id = 1");
-}
-
 function isCurrentVersion(row: SnapshotRow): boolean {
   return (
     row.matcher_version === CURRENT_VERSIONS.matcherVersion &&
     row.fingerprint_version === CURRENT_VERSIONS.fingerprintVersion &&
     row.canonicalization_version === CURRENT_VERSIONS.canonicalizationVersion
   );
+}
+
+/**
+ * Release-hardening audit finding SIM-03: the exact "is this existing row
+ * still cache-worthy" condition getOrComputeHistoricalMatchSnapshot already
+ * used inline — factored out so a caller that only needs to know "would a
+ * call right now be a cache hit or a real recompute" (lib/report-primary-
+ * similarity.ts's write-time finalization, and any future stale-generation
+ * check) can ask without duplicating this exact rule, and can never drift
+ * out of sync with what getOrComputeHistoricalMatchSnapshot itself actually
+ * does. See this file's own header comment for why every one of these
+ * conditions exists.
+ *
+ * A MATCHED, a definitive NO_HISTORICAL_MATCH, and a FAILED row are all
+ * reusable on equal terms: current version tags (SNAPSHOT_MATCHER_VERSION,
+ * which now folds in the whole candidate-discovery config), not a partial
+ * result, and a corpus_generation still at or ahead of the current global
+ * value. The ONLY no-match-shaped row that is never a cache hit is the
+ * feature-disabled one (NO_HISTORICAL_MATCH_FEATURE_DISABLED_STATUS): it was
+ * computed with corpus-source matching switched off, so it is not a complete
+ * evaluation and must not survive the flag being switched on (this phase's
+ * own task description, section 9).
+ */
+function isSnapshotRowCurrent(row: SnapshotRow | undefined, currentGeneration: number): boolean {
+  return Boolean(
+    row &&
+    isCurrentVersion(row) &&
+    row.status !== NO_HISTORICAL_MATCH_FEATURE_DISABLED_STATUS &&
+    Number(row.is_partial) !== 1 &&
+    Number(row.corpus_generation) >= currentGeneration,
+  );
+}
+
+/**
+ * Phase A — 7-day corpus maturity. Time-based snapshot invalidation.
+ *
+ * The corpus_match_generation counter is bumped only by a DATABASE WRITE that
+ * adds matchable content (a promotion reaching 'indexed', a reactivation, a
+ * user submission indexed). NO write happens when a backing simply reaches
+ * CORPUS_ACTIVATION_DELAY_DAYS old — so isSnapshotRowCurrent above would keep
+ * reusing a cached snapshot forever even though a source that was invisible
+ * (or an already-visible source whose lineage age changed — Phase C) has now
+ * matured. This closes that gap: a cached snapshot is ALSO stale when ANY
+ * corpus backing crossed maturity strictly after it was computed and on/before
+ * the current logical `asOf`.
+ *
+ * A backing matures at `T0 + CORPUS_ACTIVATION_DELAY_DAYS`, so it "matured in
+ * (snapshot.computed_at, asOf]" iff its immutable `T0` is in
+ * `(computed_at - CORPUS_ACTIVATION_DELAY_DAYS, asOf - CORPUS_ACTIVATION_DELAY_DAYS]`
+ * — a bounded range on `created_at`, indexed by drizzle/0043.
+ *
+ * Deliberately corpus-wide: it does NOT scope to "a backing that could match
+ * THIS report" (a search over what is already stored can never find what is
+ * missing — the same argument drizzle/0036's own comment makes for the global
+ * generation counter). A backing maturing anywhere stales every cached
+ * snapshot whose window it falls in; each such report then does ONE lazy
+ * recompute on its next score read and converges. Conservative
+ * over-invalidation, accepted — correctness first.
+ *
+ * `maturityCutoff` (== asOf - CORPUS_ACTIVATION_DELAY_DAYS) is the SAME string
+ * threaded through eligibility for this resolution, so the two can never
+ * disagree on a boundary. The lower bound is derived in JS from the snapshot's
+ * own `computed_at` (format-tolerant UTC parse) so both bounds are plain
+ * 'YYYY-MM-DD HH:MM:SS' strings and the range stays index-friendly.
+ */
+async function corpusBackingMaturedInWindow(
+  exec: Pick<Client, "execute">,
+  params: { snapshotComputedAt: string; maturityCutoff: string },
+): Promise<boolean> {
+  const lowerExclusive = sqliteUtcTimestamp(
+    new Date(parseSqliteUtc(params.snapshotComputedAt).getTime() - CORPUS_ACTIVATION_DELAY_DAYS * 86_400_000),
+  );
+  // A snapshot computed at/after `asOf` (a fresh write) has an empty window —
+  // nothing can have matured "since" it. Skip the query.
+  if (lowerExclusive >= params.maturityCutoff) return false;
+  const result = await exec.execute({
+    // Both EXISTS drive from the selective created_at range (indexed by
+    // drizzle/0043 — EXPLAIN QUERY PLAN: covering-index range SEARCH on
+    // idx_corpus_submission_references_created_at / idx_corpus_admission_decisions_created_at),
+    // then the admission side confirms an 'indexed' promotion for that
+    // decision via ux_corpus_admission_promotions_decision_id.
+    sql: `SELECT (
+            EXISTS (
+              SELECT 1 FROM corpus_submission_references sr
+              WHERE sr.created_at > ? AND sr.created_at <= ?
+            )
+            OR EXISTS (
+              SELECT 1 FROM corpus_admission_decisions d
+              WHERE d.created_at > ? AND d.created_at <= ?
+                AND EXISTS (
+                  SELECT 1 FROM corpus_admission_promotions p
+                  WHERE p.decision_id = d.id AND p.status = 'indexed'
+                )
+            )
+          ) AS matured`,
+    args: [lowerExclusive, params.maturityCutoff, lowerExclusive, params.maturityCutoff],
+  });
+  const row = result.rows[0] as unknown as { matured: number | bigint } | undefined;
+  return row !== undefined && Number(row.matured) === 1;
 }
 
 function rowToResult(row: SnapshotRow): ReportHistoricalSubmissionMatch {
@@ -270,16 +461,54 @@ export async function getOrComputeHistoricalMatchSnapshot(
      * own simulateFailureAfterShingles / tests/ingest.unit.test.mjs's
      * simulateFailureAfterChunkIndex convention) — awaited immediately
      * before this function's own snapshot write, after every read
-     * (including currentGeneration below) has already happened. Lets a
-     * test pause a fresh computation at exactly the point described in
-     * this file's own header comment (corpus-source matching addendum,
-     * point 1): reproduce a deactivation committing — targeted delete AND
-     * generation bump — DURING the gap between this function's reads and
-     * its write, then let the write proceed, and prove the NEXT call
-     * rejects the now-stale result the generation bump stamped it against.
+     * (including currentGeneration and corpusSourceMatchingEnabledAtComputation
+     * below) has already happened. Lets a test pause a fresh computation in
+     * the gap between this function's reads and its write, then let the
+     * write proceed, to prove the persisted row reflects the state the
+     * computation actually ran under — not whatever changed during the gap.
+     * Two scenarios use it: (1) a deactivation committing — targeted delete
+     * AND generation bump — mid-gap, proving the NEXT call rejects the
+     * now-stale result the generation bump stamped it against; (2) the
+     * corpus-source-matching flag flipping mid-gap, proving the persisted
+     * status comes from the captured value, never a write-time re-read.
      * Always undefined in production.
      */
     testOnlyPauseBeforeWrite?: () => Promise<void>;
+    /**
+     * Account-level own-submission exclusion fix: the account id of the
+     * report currently being evaluated, passed straight through to
+     * matchAgainstUserSubmissionCorpus — see that function's own comment.
+     * Optional; omitted by every caller that doesn't have one (an anonymous
+     * report can never itself be an admission's source_ref, since admission
+     * jobs are only ever created for authenticated, consenting accounts —
+     * see lib/corpus-admission-report-integration.ts's createPendingReportAdmissionJob).
+     */
+    excludeAccountId?: string;
+    /**
+     * The corpus-source-matching-enabled state THIS computation should run
+     * under — captured ONCE by the caller and threaded straight through, so
+     * one value governs BOTH whether promoted-corpus-source candidates
+     * participate/classify inside matchAgainstUserSubmissionCorpus AND
+     * whether a complete no-match is persisted as the reusable
+     * "NO_HISTORICAL_MATCH" or the never-reused
+     * "NO_HISTORICAL_MATCH_FEATURE_DISABLED". lib/report-primary-similarity.ts's
+     * resolvePrimarySimilaritySummary passes its own single request-scoped
+     * isCorpusSourceMatchingEnabled() read here. Omitted only by direct test
+     * callers, which then get a single fallback read taken below — still
+     * ONE read per computation, never re-read at snapshot-write time.
+     * Cacheability describes the conditions the result was computed under,
+     * not the environment value at the later write instant.
+     */
+    corpusSourceMatchingEnabled?: boolean;
+    /**
+     * Phase A — 7-day corpus maturity. The ONE logical instant this whole
+     * resolution reasons "as of". `maturityCutoff` (asOf - CORPUS_ACTIVATION_DELAY_DAYS)
+     * is derived from it exactly once here and threaded into BOTH the matcher
+     * (eligibility) AND the maturity-crossing check that decides cache reuse,
+     * so no two queries in this call can disagree on a boundary. Defaults to
+     * `new Date()` (server time). Tests inject/freeze it.
+     */
+    asOf?: Date;
   },
 ): Promise<ReportHistoricalSubmissionMatch> {
   // Read fresh, before the cache-hit decision — see this file's own header
@@ -288,32 +517,51 @@ export async function getOrComputeHistoricalMatchSnapshot(
   // matcher/fingerprint/canonicalization version tags already are.
   const currentGeneration = await getCurrentCorpusMatchGeneration(client);
 
+  // Phase A: the single maturity clock for this resolution — derived ONCE,
+  // used for eligibility AND the maturity-crossing cache check below.
+  const asOf = params.asOf ?? new Date();
+  const maturityCutoff = corpusMaturityCutoff(asOf);
+
+  // Captured ONCE here, before any matcher work or snapshot write — the
+  // single source of truth for this computation's corpus-source-matching
+  // semantics. Never re-read from the environment at write time (that was
+  // the OFF->ON race: matcher suppresses the corpus source while the flag is
+  // off, the flag flips on before persistence, and an independent write-time
+  // read stores a reusable "NO_HISTORICAL_MATCH" for what was really an
+  // incomplete evaluation).
+  const corpusSourceMatchingEnabledAtComputation = params.corpusSourceMatchingEnabled ?? isCorpusSourceMatchingEnabled();
+
   const existing = await client.execute({
     sql: `SELECT status, matcher_version, fingerprint_version, canonicalization_version, result_json, candidate_count, processing_duration_ms, error_message, computed_at, is_partial, corpus_generation
           FROM report_historical_match_snapshots WHERE report_device_key = ? AND report_id = ?`,
     args: [params.reportDeviceKey, params.reportId],
   });
   const existingRow = existing.rows[0] as unknown as SnapshotRow | undefined;
-  // See this file's own header comment (Phase E8E fix, and the corpus-source
-  // matching addendum below it): NO_HISTORICAL_MATCH and a partial result
-  // are never treated as final, even with current version tags, because
-  // either can be invalidated/completed by new corpus content or more time
-  // — something version tags alone cannot detect. corpus_generation catches
-  // the case those alone cannot: eligibility newly ADDED, which a targeted,
-  // per-representation search could never discover for a report that
-  // doesn't reference the new content yet.
+  // See this file's own header comment (definitive-no-match caching): a
+  // complete, current MATCHED / NO_HISTORICAL_MATCH / FAILED row is reused
+  // as-is. A partial result and a feature-disabled no-match never are —
+  // either could be completed by more time or by the corpus-source flag
+  // turning on. corpus_generation catches what version tags alone cannot:
+  // eligibility newly ADDED, which a targeted, per-representation search
+  // could never discover for a report that doesn't reference the new
+  // content yet.
+  //
+  // Phase A: corpus_generation ALSO cannot catch a backing simply reaching
+  // CORPUS_ACTIVATION_DELAY_DAYS old — no DB write happens then. So an
+  // otherwise-current row is reused only when NO corpus backing crossed
+  // maturity in (row.computed_at, asOf] — see corpusBackingMaturedInWindow.
   if (
-    existingRow &&
-    isCurrentVersion(existingRow) &&
-    existingRow.status !== "NO_HISTORICAL_MATCH" &&
-    Number(existingRow.is_partial) !== 1 &&
-    Number(existingRow.corpus_generation) >= currentGeneration
+    isSnapshotRowCurrent(existingRow, currentGeneration) &&
+    !(await corpusBackingMaturedInWindow(client, {
+      snapshotComputedAt: (existingRow as SnapshotRow).computed_at,
+      maturityCutoff,
+    }))
   ) {
-    return applyCorpusSourceMatchingFlag(rowToResult(existingRow));
+    return applyCorpusSourceMatchingFlag(rowToResult(existingRow as SnapshotRow));
   }
 
   const startedAt = Date.now();
-  let status: "MATCHED" | "NO_HISTORICAL_MATCH" | "FAILED";
+  let status: "MATCHED" | "NO_HISTORICAL_MATCH" | typeof NO_HISTORICAL_MATCH_FEATURE_DISABLED_STATUS | "FAILED";
   let resultJson: string | null = null;
   let candidateCount: number | null = null;
   let errorMessage: string | null = null;
@@ -340,15 +588,38 @@ export async function getOrComputeHistoricalMatchSnapshot(
     // counted when this is that account's only submission of the content.
     const ownIdentities = params.accountId ? await findPriorSubmissionsForAccount(client, params.accountId, canonicalSha256(params.rawText)) : [];
     const documentIdentityId = ownIdentities.length > 0 ? ownIdentities[ownIdentities.length - 1].id : null;
-    const matchResult = await matchAgainstUserSubmissionCorpus(client, { accountId: params.accountId, documentIdentityId, canonicalText });
+    // corpusSourceMatchingEnabledAtComputation (captured once, above) governs
+    // classification here — never a fresh env read inside the matcher — so
+    // it and the status choice below can never disagree across a flag flip.
+    const matchResult = await matchAgainstUserSubmissionCorpus(client, {
+      accountId: params.accountId,
+      documentIdentityId,
+      canonicalText,
+      excludeAccountId: params.excludeAccountId,
+      corpusSourceMatchingEnabled: corpusSourceMatchingEnabledAtComputation,
+      // Phase A: the SAME cutoff the maturity-crossing cache check above uses.
+      maturityCutoff,
+    });
     isPartial = matchResult.partial === true;
     if (matchResult.status === "MATCHED") {
       status = "MATCHED";
       const serialized = serializeMatchesForStorage(matchResult.matches);
       resultJson = JSON.stringify(serialized);
       candidateCount = serialized.length;
-    } else {
+    } else if (isPartial || corpusSourceMatchingEnabledAtComputation) {
+      // A complete no-match evaluated with corpus-source matching ON — the
+      // reusable kind. Chosen from the SAME captured value the matcher just
+      // ran under, never a re-read of the live environment. (A partial
+      // no-match also lands here but is_partial keeps it out of the cache
+      // regardless of status.)
       status = "NO_HISTORICAL_MATCH";
+    } else {
+      // Computed with corpus-source matching off: promoted-corpus-source
+      // candidates were never classified, so this is not a complete
+      // evaluation. Stored under a distinct status so isSnapshotRowCurrent
+      // never reuses it and the flag turning on forces a real recompute
+      // (section 9). Externally still an ordinary NO_HISTORICAL_MATCH.
+      status = NO_HISTORICAL_MATCH_FEATURE_DISABLED_STATUS;
     }
   } catch (error) {
     status = "FAILED";
@@ -356,7 +627,14 @@ export async function getOrComputeHistoricalMatchSnapshot(
   }
 
   const processingDurationMs = Date.now() - startedAt;
-  const computedAt = new Date().toISOString();
+  // Phase A: stamp the snapshot with the LOGICAL instant this computation
+  // reasoned "as of" (== asOf), NOT wall-clock now. In production the two are
+  // the same (asOf defaults to `new Date()`), so this is byte-identical there.
+  // It matters for the maturity-crossing check: corpusBackingMaturedInWindow
+  // treats this value as "the moment the matcher already accounted for
+  // maturity through", so a fresh recompute's own window is empty and the row
+  // reads as current immediately after it is written.
+  const computedAt = asOf.toISOString();
 
   // Test-only barrier — see params.testOnlyPauseBeforeWrite's own comment.
   // Every read this function does (currentGeneration, the candidate
@@ -417,6 +695,52 @@ export async function getOrComputeHistoricalMatchSnapshot(
     processing_duration_ms: processingDurationMs,
     error_message: errorMessage,
     computed_at: computedAt,
+  }));
+}
+
+/**
+ * Release-hardening audit finding SIM-03: a pure freshness check — no
+ * candidate search, no write, not even rowToResult's own JSON.parse of
+ * result_json (this SELECT never reads that column at all). Lets a caller
+ * that already has a persisted SimilarityReport.unifiedSimilarity in hand
+ * (lib/report-primary-similarity.ts's write-time finalization, and
+ * app/reports/[id]/page.tsx's own read-time staleness signal) ask "is that
+ * value still trustworthy right now" without paying for — or risking —
+ * getOrComputeHistoricalMatchSnapshot's own recompute path. Exactly the
+ * same two cheap, indexed reads (corpus_match_generation, then this table)
+ * that function's own cache-hit path already does; true here if and only if
+ * a call to that function right now would also be a cache hit.
+ */
+export async function isHistoricalMatchSnapshotCurrent(
+  client: Client,
+  params: {
+    reportDeviceKey: string;
+    reportId: string;
+    /**
+     * Phase A — the logical instant this check reasons "as of". Must be the
+     * SAME instant the caller (lib/report-primary-similarity.ts's
+     * resolvePersistedSimilarityDisplay) uses for its whole resolution.
+     * Defaults to server time; tests inject/freeze it.
+     */
+    asOf?: Date;
+  },
+): Promise<boolean> {
+  const currentGeneration = await getCurrentCorpusMatchGeneration(client);
+  const existing = await client.execute({
+    sql: `SELECT status, matcher_version, fingerprint_version, canonicalization_version, candidate_count, processing_duration_ms, error_message, computed_at, is_partial, corpus_generation
+          FROM report_historical_match_snapshots WHERE report_device_key = ? AND report_id = ?`,
+    args: [params.reportDeviceKey, params.reportId],
+  });
+  const existingRow = existing.rows[0] as unknown as SnapshotRow | undefined;
+  if (!isSnapshotRowCurrent(existingRow, currentGeneration)) return false;
+  // Phase A: an otherwise-current row is stale the moment a corpus backing
+  // crosses maturity after it was computed — the SAME check
+  // getOrComputeHistoricalMatchSnapshot's own cache-hit branch applies, so a
+  // "would this be a cache hit right now" answer stays truthful.
+  const maturityCutoff = corpusMaturityCutoff(params.asOf ?? new Date());
+  return !(await corpusBackingMaturedInWindow(client, {
+    snapshotComputedAt: (existingRow as SnapshotRow).computed_at,
+    maturityCutoff,
   }));
 }
 

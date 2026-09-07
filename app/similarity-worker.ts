@@ -139,188 +139,51 @@ async function analyze(text: string) {
   if (risk.corpusVersion !== search.corpusVersion) {
     throw new Error("The risk calibration does not match the current archive.");
   }
-  const words = tokens(text);
-  const documentGrams = grams(words, search.shingleSize);
-  const uniqueDocumentGrams = new Set(documentGrams);
-  const sharedBySource = new Map<number, number>();
-  let highFrequencyShingleCount = 0;
 
-  uniqueDocumentGrams.forEach((gram) => {
-    const sourceIndexes = indexPostings(search, gramHash(gram));
-    if (sourceIndexes.length >= Math.max(3, Math.ceil(search.maximumDocumentFrequency * 0.75))) {
-      highFrequencyShingleCount += 1;
-    }
-    sourceIndexes.forEach((sourceIndex) => {
-      sharedBySource.set(sourceIndex, (sharedBySource.get(sourceIndex) ?? 0) + 1);
-    });
-  });
-
-  const excluded = new Set<number>();
-  search.articles.forEach((article, sourceIndex) => {
-    const shared = sharedBySource.get(sourceIndex) ?? 0;
-    if (containment(shared, uniqueDocumentGrams.size, article.uniqueShingleCount) >= 0.75) {
-      excluded.add(sourceIndex);
-    }
-  });
-  self.postMessage({ type: "progress", progress: 68, label: "Comparing distinctive passages" });
-
-  const eligibleCount = search.documentCount - excluded.size;
-  const minimumMatchedWords = risk.matchingParameters?.minimumMatchedWords ?? search.shingleSize;
-  const runtimeMaximumDocumentFrequency = Math.min(
-    search.maximumDocumentFrequency,
-    risk.matchingParameters?.maximumDocumentFrequency ?? search.maximumDocumentFrequency,
+  // 100k-scale architecture, slice 1: the actual matching/scoring algorithm
+  // now lives in lib/archive-similarity-scoring.ts, shared with the
+  // server-side DB-backed adapter (lib/archive-corpus-matching.ts) — this is
+  // only the browser-specific data source (binary-search over the packed
+  // static index) and the risk/quotation/reference-list framing this worker
+  // has always layered on top. Behavior is unchanged: same statements, same
+  // order, same two progress posts, wired through onProgress below.
+  const result = scoreAgainstArchive(
+    text,
+    {
+      shingleSize: search.shingleSize,
+      documentCount: search.documentCount,
+      maximumDocumentFrequency: search.maximumDocumentFrequency,
+      articles: search.articles,
+      getPostings: (hash) => indexPostings(search, hash),
+    },
+    {
+      minimumMatchedWords: risk.matchingParameters?.minimumMatchedWords,
+      maximumDocumentFrequency: risk.matchingParameters?.maximumDocumentFrequency,
+      minimumSourceContribution: risk.matchingParameters?.minimumSourceContribution,
+      maximumContributingSources: risk.matchingParameters?.maximumContributingSources,
+      sourceWeighting: risk.matchingParameters?.sourceWeighting,
+    },
+    (progress, label) => self.postMessage({ type: "progress", progress, label }),
   );
-  const positionScores = new Map<number, Map<number, number>>();
-  documentGrams.forEach((gram, start) => {
-    const sourceIndexes = indexPostings(search, gramHash(gram)).filter(
-      (sourceIndex) => !excluded.has(sourceIndex),
-    );
-    if (
-      sourceIndexes.length === 0
-      || sourceIndexes.length > runtimeMaximumDocumentFrequency
-      || !informativeGram(gram)
-    ) return;
-    const idf = Math.log((eligibleCount + 1) / (sourceIndexes.length + 1)) + 1;
-    sourceIndexes.forEach((sourceIndex) => {
-      for (let position = start; position < start + search.shingleSize; position += 1) {
-        const scores = positionScores.get(position) ?? new Map<number, number>();
-        scores.set(sourceIndex, (scores.get(sourceIndex) ?? 0) + idf);
-        positionScores.set(position, scores);
-      }
-    });
-  });
 
-  const matchedBySource = new Map<number, Set<number>>();
-  positionScores.forEach((scores, position) => {
-    const best = [...scores.entries()].sort(
-      (left, right) => right[1] - left[1] || left[0] - right[0],
-    )[0]?.[0];
-    if (best === undefined) return;
-    const positions = matchedBySource.get(best) ?? new Set<number>();
-    positions.add(position);
-    matchedBySource.set(best, positions);
-  });
-
-  const { spansBySource } = acceptedSimilaritySpans(
-    matchedBySource,
-    minimumMatchedWords,
-  );
-  const evidence = [...spansBySource.entries()].map(([sourceIndex, spans]) => {
-    const positions = new Set<number>();
-    spans.forEach(([start, end]) => {
-      for (let position = start; position <= end; position += 1) positions.add(position);
-    });
-    return {
-      sourceIndex,
-      positions,
-      containment: containment(
-        sharedBySource.get(sourceIndex) ?? 0,
-        uniqueDocumentGrams.size,
-        search.articles[sourceIndex].uniqueShingleCount,
-      ),
-    };
-  });
-  const aggregation = aggregateSimilaritySources(evidence, words.length, {
-    minimumSourceContribution: risk.matchingParameters?.minimumSourceContribution ?? 0,
-    maximumContributingSources: risk.matchingParameters?.maximumContributingSources ?? null,
-    sourceWeighting: risk.matchingParameters?.sourceWeighting ?? "raw",
-  });
-  const acceptedSourceIndexes = new Set(aggregation.sourceContributions.map((source) => source.sourceIndex));
-  const allMatchedPositions = aggregation.acceptedPositions;
-
-  const sources = [...matchedBySource.entries()].filter(([sourceIndex]) => acceptedSourceIndexes.has(sourceIndex))
-    .map(([sourceIndex]) => {
-    const validSpans = spansBySource.get(sourceIndex) ?? [];
-    const acceptedSourcePositions = new Set<number>();
-    validSpans.forEach(([start, end]) => {
-      for (let position = start; position <= end; position += 1) acceptedSourcePositions.add(position);
-    });
-    const phrases = validSpans.flatMap(([start, end]) => {
-      const chunks: string[] = [];
-      for (let cursor = start; cursor <= end; cursor += 34) {
-        if (end - cursor + 1 < search.shingleSize) break;
-        chunks.push(words.slice(cursor, Math.min(end + 1, cursor + 40)).join(" "));
-      }
-      return chunks;
-    });
-    return {
-      name: search.articles[sourceIndex].title,
-      type: "Publication" as const,
-      color: "#d7263d",
-      matches: validSpans.length,
-      matchedWords: acceptedSourcePositions.size,
-      phrases,
-      percent: Math.floor((acceptedSourcePositions.size / Math.max(words.length, 1)) * 100),
-    };
-  }).filter((source) => source.matches > 0)
-    .sort((left, right) => right.percent - left.percent || right.matches - left.matches)
-    .slice(0, 20);
-
-  const triples = grams(words, 3);
-  const frequency = triples.reduce<Record<string, number>>((result, gram) => {
-    result[gram] = (result[gram] ?? 0) + 1;
-    return result;
-  }, {});
-  const repeats = Object.entries(frequency)
-    .filter(([gram, count]) => count >= 3 && !/^(the|and|for|with|that|this|from|into|have|has|was|were)\b/.test(gram))
-    .sort((left, right) => right[1] - left[1])
-    .slice(0, 6);
-
-  self.postMessage({ type: "progress", progress: 88, label: "Calculating similarity result" });
-  const score = aggregation.score;
-  const scoreBand = search.scoreBands.find(
-    (candidate) => score >= candidate.minimum && score <= candidate.maximum,
-  )?.label ?? "High";
-  const longestMatchedSpan = sources.reduce(
-    (maximum, source) => Math.max(maximum, ...source.phrases.map((phrase) => phrase.split(" ").length), 0),
-    0,
-  );
-  const maxSourceContainment = Math.max(
-    0,
-    ...[...sharedBySource.entries()]
-      .filter(([sourceIndex]) => !excluded.has(sourceIndex))
-      .map(([sourceIndex, shared]) => containment(
-        shared,
-        uniqueDocumentGrams.size,
-        search.articles[sourceIndex].uniqueShingleCount,
-      )),
-  );
-  const completeWordCount = normalize(text).split(" ").filter(Boolean).length;
-  const referenceListRatio = Math.max(0, (completeWordCount - words.length) / Math.max(1, completeWordCount));
-  const quotedWordCount = [...text.matchAll(/["“«]([\s\S]*?)["”»]/g)]
-    .reduce((total, match) => total + tokens(match[1]).length, 0);
-  const quotationDensity = quotedWordCount / Math.max(1, completeWordCount);
-  const riskStatus = score >= risk.archiveCutoff ? "Elevated" : "Lower";
-  return {
-    wordCount: words.length,
-    databaseSize: eligibleCount,
-    excludedDocuments: excluded.size,
-    matchedWordCount: allMatchedPositions.size,
-    archiveMatchedPositions: [...allMatchedPositions].sort((left, right) => left - right),
-    score,
-    scoreBand,
-    riskStatus,
-    riskTarget: risk.targetThreshold,
-    riskCutoff: risk.archiveCutoff,
-    riskCalibration: {
+  // slice 2E: the risk/quotation/reference-list/repeated-phrase framing this
+  // worker has always layered on scoreAgainstArchive's result now lives in
+  // lib/archive-result-framing.ts (frameArchiveResult), shared VERBATIM with
+  // the server DB-backed path (lib/archive-server-analysis.ts) so the two
+  // cannot drift. Same statements, same order, same sourceIndex strip — see
+  // that file's own header.
+  return frameArchiveResult(text, result, {
+    scoreBands: search.scoreBands,
+    corpusVersion: search.corpusVersion,
+    risk: {
+      targetThreshold: risk.targetThreshold,
+      archiveCutoff: risk.archiveCutoff,
       auc: risk.auc,
       precision: risk.precision,
       recall: risk.recall,
       sampleSize: risk.sampleSize,
     },
-    features: {
-      maxSourceContainment: Math.round(maxSourceContainment * 1000) / 1000,
-      longestMatchedSpan,
-      quotationDensity: Math.round(quotationDensity * 1000) / 1000,
-      referenceListRatio: Math.round(referenceListRatio * 1000) / 1000,
-      highFrequencyShingleCount,
-      repeatedThreeGramCount: repeats.length,
-      detectedLanguage: detectLanguage(text),
-    },
-    corpusVersion: search.corpusVersion,
-    sources,
-    repeats,
-  };
+  });
 }
 
 self.addEventListener("message", async (event: MessageEvent<WorkerRequest>) => {
@@ -337,14 +200,5 @@ self.addEventListener("message", async (event: MessageEvent<WorkerRequest>) => {
 });
 
 export {};
-import {
-  acceptedSimilaritySpans,
-  aggregateSimilaritySources,
-  containment,
-  detectLanguage,
-  gramHash,
-  grams,
-  informativeGram,
-  normalize,
-  tokens,
-} from "@/lib/similarity-core";
+import { scoreAgainstArchive } from "@/lib/archive-similarity-scoring";
+import { frameArchiveResult } from "@/lib/archive-result-framing";

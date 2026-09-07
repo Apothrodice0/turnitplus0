@@ -1,4 +1,5 @@
 import { getDeviceKey } from "./device-key";
+import { maybeAttestReportUpload, markDevicePassportReportSaved } from "./device-passport";
 import type { RoomIndexEntry } from "./report-rooms";
 
 export type ReportSummary = {
@@ -22,6 +23,47 @@ export type ReportSummary = {
    * falls back cleanly when this is absent.
    */
   aiStatus?: "processing" | "ready" | "failed";
+  /**
+   * Release-hardening audit finding SIM-01, SIM-03: lib/report-types.ts's
+   * buildReportSummary() sets this from primarySimilarityScore(report) —
+   * the SAME combined-result selection the detail page's headline/sidebar
+   * use — whenever the caller already had a full SimilarityReport in hand
+   * (a just-generated or just-AI-completed report). lib/reports-repo.ts's
+   * findRoomOccupant ALSO sets it (as of SIM-03/SIM-04) — cheaply, via
+   * json_extract against the write-time-finalized payload_json (see
+   * app/api/reports/route.ts's POST handler), never by recomputing
+   * anything. `archiveScore` itself is NEVER changed by this field's
+   * existence (still the pure archive-only value other readers of the
+   * persisted column, e.g. lib/developer-repo.ts, depend on) — this is
+   * purely an additive display hint. Absent, or similarityStatus below not
+   * "resolved", means "do not trust this as final — fall back to
+   * archiveScore," never "zero."
+   */
+  primaryScore?: number;
+  /** True when primaryScore reflects the full unified result rather than the archive-only fallback — see primaryScore's own comment. Absent/false with primaryScore also absent means the same thing: nothing more precise than archiveScore is known at this call site. */
+  isUnified?: boolean;
+  /**
+   * Release-hardening audit finding SIM-04, widened by LIFECYCLE-06
+   * (corrected): the SAME four-way status
+   * lib/report-primary-similarity.ts's resolvePersistedSimilarityDisplay
+   * returns — "resolved" (primaryScore is trustworthy, whether combined or
+   * a definitive archive-only answer), "stale" (a real combined result IS
+   * persisted, but corpus_match_generation has moved on, or
+   * CORPUS_SOURCE_MATCHING_ENABLED was rolled back ON since computation —
+   * show "Updating similarity…" rather than primaryScore), "pending"
+   * (unifiedSimilarity has never been persisted for this report at all,
+   * and no terminal failure recorded either — show neutral loading, never
+   * primaryScore as if it were final), or "failed" (a genuine, persisted,
+   * reproducible computation failure — see resolvePrimarySimilaritySummary's
+   * own `failed` field's investigation of what does/doesn't set it — show
+   * "Unavailable," never a number, never inferred from client poll timing).
+   * Absent only for a caller that predates this field (client-built
+   * summaries via buildReportSummary always set it); a "processing" room
+   * occupant never gets this far (see findRoomOccupant's own scoping
+   * comment), so it is simply omitted there — the UI already shows
+   * "Analyzing…" for that case regardless.
+   */
+  similarityStatus?: "resolved" | "stale" | "pending" | "failed";
 };
 
 // Every function here is fail-soft by design: a network or database problem
@@ -58,6 +100,16 @@ export type SaveReportRemoteResult =
 export async function saveReportRemote<T>(report: T, summary: ReportSummary, academicSearchDiagnosticsId?: number | null, room?: number): Promise<SaveReportRemoteResult> {
   try {
     const deviceKey = getDeviceKey();
+    // Device Passport (Phase 3): a cryptographic upload-provenance attestation.
+    // maybeAttestReportUpload attaches one only while this report has NOT yet
+    // been confirmed saved this browser session — so a first save that fails
+    // gets a fresh challenge + signature on the retry, and once a save
+    // succeeds (markDevicePassportReportSaved below) the AI-enrichment resave
+    // attaches nothing and makes no request. Fully fail-safe: resolves
+    // undefined for any reason (feature 404, unsupported browser, corrupt key,
+    // network/signing failure) and never throws, so it can never affect
+    // whether or how the report is saved.
+    const devicePassport = await maybeAttestReportUpload(summary.id, report);
     const response = await fetch("/api/reports", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -67,6 +119,7 @@ export async function saveReportRemote<T>(report: T, summary: ReportSummary, aca
         payload: report,
         academicSearchDiagnosticsId: academicSearchDiagnosticsId ?? null,
         ...(room !== undefined ? { room } : {}),
+        ...(devicePassport ? { devicePassport } : {}),
       }),
     });
     if (!response.ok) {
@@ -81,6 +134,10 @@ export async function saveReportRemote<T>(report: T, summary: ReportSummary, aca
       const roomOccupied = response.status === 409;
       return { ok: false, status: response.status, quotaExceeded, roomOccupied, error: body?.error, resetsAt: body?.resetsAt, cycleEndsAt: body?.cycleEndsAt };
     }
+    // The report is now durably saved server-side: any later resave of this id
+    // (AI enrichment) is definitively not a first save, so Device Passport
+    // must not build another attestation or request another challenge for it.
+    markDevicePassportReportSaved(summary.id);
     return { ok: true };
   } catch (error) {
     console.debug("Remote report save failed (local copy is unaffected).", {

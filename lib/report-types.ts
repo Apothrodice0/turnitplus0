@@ -2,7 +2,8 @@ import type { WebCheckResult } from "@/lib/web-check-core";
 import type { ReportSummary } from "@/lib/reports-remote";
 import type { AcademicSearchStatus, ExternalAcademicEvidence } from "@/lib/academic-search/types";
 import type { UnifiedSimilarityResult } from "@/lib/unified-similarity";
-import { AI_SCORING_VERSION, calibratedAiDisplaySignal } from "@/lib/ai-core";
+import { resolveAiDisplayState } from "@/lib/ai-display-state";
+import type { DetectedLanguage } from "@/lib/similarity-core";
 
 export type SourceType = "Internet" | "Publication";
 export type ReportMode = "ai" | "similarity";
@@ -177,14 +178,27 @@ export type SimilarityReport = {
   created: string;
   score: number;
   archiveScore?: number;
+  /**
+   * Explicit, server-decided viewer authorization for detailed source-
+   * channel/debug UI (per-source-type percentages, provider labels,
+   * internal matching-channel legend/highlight detail, admin-only report
+   * notes). Set unconditionally by app/api/reports/[id]/route.ts's GET
+   * handler from the authenticated session's real `role === 'admin'`
+   * column — always present as a real boolean on every response, never
+   * inferred from whether some OTHER admin-only field (historicalSubmissionMatch,
+   * matchClassification) happens to be present, which conflates "this
+   * report has a match to show" with "this viewer is authorized": a report
+   * with no historical match at all would otherwise read as ordinary even
+   * for a real admin. Use this field directly wherever detailed-source-UI
+   * visibility is decided; never `Boolean(report.historicalSubmissionMatch)`.
+   */
+  viewerIsAdmin?: boolean;
   /** Phase D enrichment — see ReportMatchClassification's own comment. Absent on older/unsaved/not-yet-classified reports; the reporting layer must treat its absence as "nothing to show", not an error. */
   matchClassification?: ReportMatchClassification;
   /** Phase E8C enrichment — see ReportHistoricalSubmissionMatch's own comment. Absent on a freshly-analyzed, not-yet-saved report (the snapshot only exists once a saved_reports row does), or if computing it failed before even producing an UNAVAILABLE snapshot. */
   historicalSubmissionMatch?: ReportHistoricalSubmissionMatch;
   /** Phase E8P.3 enrichment — see ExperimentalHistoricalMatchDisplay's own comment. Absent for every account outside the explicit allowlist, and absent whenever historicalSubmissionMatch already has a real production match. */
   experimentalHistoricalMatch?: ExperimentalHistoricalMatchDisplay;
-  /** Phase E8S Step 11 enrichment — see lib/e8s-report-integration.ts's own comment. Absent for every account outside E8S_REUSE_CONTEXT_ALLOWLIST, or if this report's own document identity can't be resolved. Never decides what renders by itself — only tells the client which ids to fetch fresh state for. */
-  reuseContext?: { documentIdentityId: string; representationId: string | null };
   aiScore?: number | null;
   aiAnalysis?: AiAnalysis;
   webCheck?: WebCheckResult;
@@ -229,6 +243,34 @@ export type SimilarityReport = {
    * present, absent, or from a report saved before Phase 4A existed.
    */
   unifiedSimilarity?: UnifiedSimilarityResult;
+  /**
+   * Release-hardening audit finding SIM-04: the flag/generation snapshot
+   * lib/report-primary-similarity.ts's resolvePrimarySimilaritySummary
+   * captured at the moment unifiedSimilarity above was computed — never
+   * read by any scoring logic, only by resolvePersistedSimilarityDisplay's
+   * own freshness/flag-mismatch check (lib/reports-repo.ts's
+   * findRoomOccupant, app/reports/[id]/page.tsx), which is the ONLY thing
+   * that may ever read them. Both absent together means unifiedSimilarity
+   * itself is also absent (finalization never completed) — never set
+   * independently of it.
+   */
+  corpusSourceMatchingEnabledAtComputation?: boolean;
+  /** See corpusSourceMatchingEnabledAtComputation's own comment — the corpus_match_generation value historicalSubmissionMatch was computed against. */
+  unifiedSimilarityGeneration?: number;
+  /**
+   * Release-hardening audit finding LIFECYCLE-06 (corrected): true only
+   * when the last write-time/self-heal finalization attempt genuinely,
+   * reproducibly failed (lib/report-primary-similarity.ts's
+   * resolvePrimarySimilaritySummary's own `failed` field — computeUnifiedSimilarity
+   * itself threw for this report's own data, never a fail-soft individual-
+   * source issue). Mutually exclusive with unifiedSimilarity in practice: a
+   * later successful resave persists a real unifiedSimilarity and
+   * explicitly clears this back to false, exactly mirroring how a later
+   * successful AI retry overwrites ai_status "failed" with "ready". Only
+   * ever read by resolvePersistedSimilarityDisplay's own "failed" branch —
+   * never by any scoring logic.
+   */
+  unifiedSimilarityFailed?: boolean;
   wordCount: number;
   characterCount: number;
   pageCount: number;
@@ -247,7 +289,7 @@ export type SimilarityReport = {
     referenceListRatio: number;
     highFrequencyShingleCount: number;
     repeatedThreeGramCount: number;
-    detectedLanguage: "Arabic" | "French" | "English" | "Mixed";
+    detectedLanguage: DetectedLanguage;
   };
   excludedDocuments: number;
   matchedWordCount: number;
@@ -264,7 +306,18 @@ export type HighlightRange = {
   sourceIndex: number;
   color: string;
   label: string;
-  kind: "source" | "wikipedia";
+  /**
+   * Highlighting fix: "academic" (a real, named external academic source —
+   * OpenAIRE/Europe PMC, individually attributable, same treatment as
+   * "source") and "reference-source" (the generic, privacy-safe
+   * "TurnitPlus reference sources" bucket — the previous-upload/corpus
+   * channel, deliberately never individually attributable) added alongside
+   * the existing "source" (archive) and "wikipedia" kinds — see
+   * findHighlightRanges's own comment for why the report body previously
+   * never highlighted these two evidence channels at all, even when they
+   * were the majority (or entirety) of the unified similarity result.
+   */
+  kind: "source" | "wikipedia" | "academic" | "reference-source";
   url?: string;
   wikipediaSources?: Array<{ pageId: number; title: string; url: string }>;
 };
@@ -312,6 +365,34 @@ export function hasUnifiedSimilarity(report: SimilarityReport): boolean {
 }
 
 /**
+ * Release-hardening audit finding SIM-01: the word-count partner to
+ * primarySimilarityScore — same fallback rule (unified when computed,
+ * archive-only otherwise), so a matched-word-count sentence displayed next
+ * to primarySimilarityScore's percentage can never cite a different,
+ * contradicting source's word count. Before this existed, several surfaces
+ * paired primarySimilarityScore (correctly preferring unifiedSimilarity)
+ * with archiveMatchedWordCount (never preferring it) — a report whose
+ * unified result came primarily from live-academic or prior-submission
+ * evidence, not the archive, showed a headline percentage next to a matched-
+ * word count that described a mostly-unrelated, much smaller figure.
+ */
+export function primaryMatchedWordCount(report: SimilarityReport): number {
+  return report.unifiedSimilarity?.uniqueMatchedWords ?? archiveMatchedWordCount(report);
+}
+
+/**
+ * The customer-facing label paired with primarySimilarityScore —
+ * "TurnitPlus Similarity" whenever the unified result is what's being
+ * shown, "Similarity result" for the archive-only fallback. Single source
+ * for wording that was previously duplicated inline (and could drift) in
+ * app/reports/[id]/report-detail-shell.tsx and, after this fix,
+ * components/report/similarity-report-papers.tsx's OverviewReport.
+ */
+export function primaryResultLabel(report: SimilarityReport): string {
+  return hasUnifiedSimilarity(report) ? "TurnitPlus Similarity" : "Similarity result";
+}
+
+/**
  * Phase 7 PRIORITY 6: a short, plain-language list of which evidence
  * channels contributed matched words to the unified score — for surfaces
  * (the receipt PDF) that show one summary line rather than the full
@@ -320,14 +401,62 @@ export function hasUnifiedSimilarity(report: SimilarityReport): boolean {
  * internal-only per UnifiedEvidenceContribution's own comment). Returns
  * "no matched sources" rather than an empty string so the PDF never prints
  * a blank value.
+ *
+ * Report-source presentation correction: the receipt has no admin/ordinary
+ * distinction (same PDF for every downloader), so previousUploadOnlyWords
+ * — the corpus/internal-only contribution — is described with the same
+ * generic "TurnitPlus reference sources" wording used everywhere else an
+ * ordinary user can see this figure, never "a prior submission."
  */
 export function unifiedEvidenceSummary(unified: UnifiedSimilarityResult): string {
   const parts: string[] = [];
   if (unified.archiveOnlyWords > 0 || unified.overlapWords > 0) parts.push("own reference material");
   if (unified.liveAcademicOnlyWords > 0) parts.push("live academic sources");
-  if (unified.previousUploadOnlyWords > 0) parts.push("a prior submission");
+  if (unified.previousUploadOnlyWords > 0) parts.push("TurnitPlus reference sources");
   if (parts.length === 0) return "no matched sources";
   return parts.join(", ");
+}
+
+/**
+ * Report-source presentation correction: the generic, ordinary-user-safe
+ * percentage for the internal/corpus contribution (previousUploadOnlyWords)
+ * — the same wordCount-based formula combineMatchedWordPositions already
+ * uses for unifiedScore itself, so a 100% internal-only match reports 100%
+ * here too rather than leaving every source category at 0%. Archive-only
+ * and live-academic-only words are deliberately excluded: those stay
+ * correctly labeled under their own categories and must never be folded
+ * into this figure.
+ */
+export function referenceSourceContributionPercent(report: SimilarityReport): number {
+  const unified = report.unifiedSimilarity;
+  if (!unified) return 0;
+  return Math.min(100, Math.round((unified.previousUploadOnlyWords / Math.max(1, unified.wordCount)) * 100));
+}
+
+/**
+ * Highlighting fix: the ONE canonical, presentation-safe position set a
+ * renderer must read to visually account for the full unified matched-word
+ * result — never independently recomputed, never inferred from a
+ * percentage. Directly mirrors report.unifiedSimilarity.matchedPositions
+ * (see that field's own comment in lib/unified-similarity.ts for why it now
+ * exists — it used to be computed and discarded). Empty array (not
+ * undefined) when unifiedSimilarity itself is absent, so callers can
+ * `.length`/spread this unconditionally.
+ */
+export function unifiedMatchedPositions(report: SimilarityReport): number[] {
+  return report.unifiedSimilarity?.matchedPositions ?? [];
+}
+
+/**
+ * The privacy-safe position subset behind the generic "TurnitPlus reference
+ * sources" bucket (previousUploadOnlyWords) — word indices only, no
+ * representation id, no relationship type, no account identity, needing no
+ * privacy gating of its own. Used to render ONE generic highlight/Source
+ * Details entry for the previous-upload/corpus-source channel, distinct
+ * from named archive/academic sources.
+ */
+export function referenceSourceMatchedPositions(report: SimilarityReport): number[] {
+  return report.unifiedSimilarity?.previousUploadPositions ?? [];
 }
 
 export function archiveMatchedWordCount(report: SimilarityReport) {
@@ -339,9 +468,34 @@ export function sourceMatchedWordCount(source: SourceMatch, report: SimilarityRe
   return source.matchedWords ?? Math.round((source.percent / 100) * report.wordCount);
 }
 
-export function aiSignalDisplay(report: SimilarityReport): AiSignalDisplay {
-  const analysis = report.aiAnalysis;
-  if (analysis?.status === "unsupported") {
+/**
+ * The presentation wrapper around resolveAiDisplayState (lib/ai-display-state.ts) —
+ * that function is the single authoritative interpreter of a report's AI
+ * state; this one only maps its verdict onto the AiSignalDisplay copy the
+ * report UIs render.
+ *
+ * `persisted` carries the flat saved_reports.ai_status / ai_score / ai_tone
+ * columns when the caller has them (the report detail page, via
+ * app/reports/[id]/page.tsx). Those columns are the authoritative AI
+ * lifecycle + headline-score signal; `report.aiAnalysis` can legitimately
+ * lag them (see resolveAiDisplayState's own header comment for exactly how
+ * and why — the production "0% AI" vs "AI report pending" split). Called
+ * with no `persisted` argument (buildReportSummary, and any surface that
+ * genuinely only has the payload) the behaviour is byte-identical to the
+ * previous inline implementation: the in-payload analysis is the only
+ * source, and its absence resolves to "AI report pending".
+ */
+export function aiSignalDisplay(
+  report: SimilarityReport,
+  persisted?: { aiStatus?: "processing" | "ready" | "failed" | null; aiScore?: number | null; aiTone?: string | null },
+): AiSignalDisplay {
+  const resolution = resolveAiDisplayState({
+    aiStatus: persisted?.aiStatus ?? null,
+    aiScore: persisted?.aiScore ?? null,
+    aiTone: persisted?.aiTone ?? null,
+    aiAnalysis: report.aiAnalysis ?? null,
+  });
+  if (resolution.state === "not_eligible") {
     return {
       value: null,
       tone: "unavailable",
@@ -350,21 +504,16 @@ export function aiSignalDisplay(report: SimilarityReport): AiSignalDisplay {
       range: "No AI result",
     };
   }
-  if (analysis?.status === "error") {
+  if (resolution.state === "failed") {
     return {
       value: null,
       tone: "unavailable",
       label: "Analysis unavailable",
-      detail: analysis.error ?? "The local AI analysis did not finish.",
+      detail: report.aiAnalysis?.error ?? "The local AI analysis did not finish.",
       range: "Try again",
     };
   }
-  const normalizedSignal = analysis?.status === "complete"
-    && analysis.scoringVersion === AI_SCORING_VERSION
-    && typeof analysis.medianLogOdds === "number"
-    ? calibratedAiDisplaySignal(analysis.medianLogOdds)
-    : null;
-  if (normalizedSignal === null) {
+  if (resolution.state === "pending") {
     return {
       value: null,
       tone: "unavailable",
@@ -373,7 +522,8 @@ export function aiSignalDisplay(report: SimilarityReport): AiSignalDisplay {
       range: "No result yet",
     };
   }
-  const value = normalizedSignal.score;
+  // state === "complete" — resolution.score is always a real number here.
+  const value = resolution.score ?? 0;
   const scoreDetail = "The score is calculated from the language patterns found across the document's analyzed passages.";
   if (value < 20) {
     return {
@@ -411,6 +561,28 @@ export function buildReportSummary(report: SimilarityReport): ReportSummary {
     createdAt: report.created,
     wordCount: report.wordCount,
     archiveScore: archiveOverlapScore(report),
+    // Release-hardening audit finding SIM-01: additive only — archiveScore
+    // above is untouched, still the pure archive-only value. Whenever this
+    // function is called, the caller already holds the full report (see
+    // ReportSummary's own comment on primaryScore for why the lightweight,
+    // DB-only room/history endpoints never go through this function at
+    // all), so surfacing primarySimilarityScore/hasUnifiedSimilarity here
+    // costs nothing extra and lets any room/history card display the same
+    // combined result the detail page would show, instead of only ever
+    // the archive component.
+    primaryScore: primarySimilarityScore(report),
+    isUnified: hasUnifiedSimilarity(report),
+    // Release-hardening audit finding SIM-04: client-built summaries have
+    // no cheap way to know generation/flag staleness (that needs a DB
+    // read — see lib/report-primary-similarity.ts's
+    // resolvePersistedSimilarityDisplay, the server-side counterpart) —
+    // "resolved"/"pending"/"failed" (LIFECYCLE-06: report.unifiedSimilarityFailed
+    // is a real field on the same report object, so this is a genuine
+    // signal, not a guess) is the full range available here, matching
+    // this function's own existing archive-only-vs-combined fallback rule
+    // exactly: a report with no unifiedSimilarity yet is pending, not a
+    // settled archive-only answer.
+    similarityStatus: report.unifiedSimilarityFailed ? "failed" : hasUnifiedSimilarity(report) ? "resolved" : "pending",
     scoreBand: report.scoreBand,
     aiScore: aiSignal.value,
     aiTone: aiSignal.tone,

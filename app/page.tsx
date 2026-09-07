@@ -42,6 +42,9 @@ import { clearAllReportRoomCaches } from "@/lib/report-rooms-cache";
 import { ReportRoomsBrowser } from "@/components/reports/report-rooms";
 import { ReportHistoryRow } from "@/components/reports/report-history-row";
 import { DocumentUploadPanel } from "@/components/reports/document-upload-panel";
+import { IdentityFields, type IdentityFieldsHandle, type CollectedIdentity } from "@/components/auth/identity-fields";
+import { EmailVerificationStatus } from "@/components/account/email-verification-status";
+import { EmailVerificationModal, type EmailVerificationModalStage } from "@/components/account/email-verification-modal";
 import {
   analyzeAcademicEvidence,
   analyzeText,
@@ -93,7 +96,22 @@ const ACCOUNT_DELETION_CONFIRMATION_PHRASE = "DELETE MY ACCOUNT";
 // manually refreshed, even though the session cookie was already cleared.
 const SIGNED_OUT_BROADCAST_KEY = "tp_signed_out_broadcast";
 type LegalTab = "privacy" | "terms";
-type LocalAccount = { username: string; email: string; corpusReuseConsent: boolean };
+// Deliberately no cross-account-consent field here: cross-account TurnitPlus
+// corpus lookup is mandatory for every authenticated report and carries no
+// user-facing preference (see submitProfileEdit below and lib/report-primary-
+// similarity.ts). The server's /api/auth/me|login|signup responses still
+// carry a legacy per-account consent boolean of the same name — that is a
+// separate, still-consent-gated *corpus-admission* primitive (lib/corpus-
+// admission-report-integration.ts), not a lookup toggle — and this client
+// intentionally no longer reads it.
+type LocalAccount = { username: string; email: string };
+// Structured identity is collected once, at signup, and is not re-shown or
+// re-editable on the Account page (product decision) — so no identity view
+// type is kept here. /api/auth/me still returns it (untouched, unread by this
+// page); nothing about the stored data changes.
+// A3 — the plain email-verification state /api/auth/me returns, from the
+// authoritative users.email_verified_at. Never a challenge id, token, or digest.
+type EmailVerificationView = { status: "verified" | "unverified" };
 
 // The shape lib/report-store.ts's loadStoredReports() actually returns since
 // it started reading from IndexedDB's own lightweight summary store rather
@@ -226,7 +244,21 @@ export default function Home() {
   const [authMode, setAuthMode] = useState<AuthMode | null>(null);
   const [welcomeMode, setWelcomeMode] = useState<AuthMode | null>(null);
   const [account, setAccount] = useState<LocalAccount | null>(null);
+  const [emailVerification, setEmailVerification] = useState<EmailVerificationView | null>(null);
+  const [emailVerifySending, setEmailVerifySending] = useState(false);
+  const [emailVerifyNotice, setEmailVerifyNotice] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
+  // A3b — the code-entry modal's own state (components/account/
+  // email-verification-modal.tsx). Kept separate from the notice/sending
+  // state above, which still covers the initial "Verify email" click before
+  // the modal has anything to show.
+  const [emailVerifyModalOpen, setEmailVerifyModalOpen] = useState(false);
+  const [emailVerifyModalStage, setEmailVerifyModalStage] = useState<EmailVerificationModalStage>("sending");
+  const [emailVerifyCode, setEmailVerifyCode] = useState("");
+  const [emailVerifyModalError, setEmailVerifyModalError] = useState<string | null>(null);
+  const [emailVerifyResendCooldown, setEmailVerifyResendCooldown] = useState(0);
+  const [emailVerifyResending, setEmailVerifyResending] = useState(false);
   const [accountLoaded, setAccountLoaded] = useState(false);
+  const signupIdentityRef = useRef<IdentityFieldsHandle>(null);
   const [uploadLimitStatus, setUploadLimitStatus] = useState<UploadLimitStatus | null>(null);
   const [isEditingProfile, setIsEditingProfile] = useState(false);
   const [isDeletingAccount, setIsDeletingAccount] = useState(false);
@@ -240,6 +272,18 @@ export default function Home() {
   const [legalTab, setLegalTab] = useState<LegalTab>("privacy");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const generationLockRef = useRef(false);
+
+  // Ticks the modal's "Resend code (Ns)" countdown down to 0 once a second
+  // while the modal is open and a cooldown is active. Purely a display timer
+  // — the server is always the authoritative check (see
+  // resendEmailVerificationCode's own Retry-After handling below).
+  useEffect(() => {
+    if (!emailVerifyModalOpen || emailVerifyResendCooldown <= 0) return;
+    const timer = window.setInterval(() => {
+      setEmailVerifyResendCooldown((seconds) => Math.max(0, seconds - 1));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [emailVerifyModalOpen, emailVerifyResendCooldown > 0]);
 
   // Anonymous/device-scoped report loading (no authenticated session).
   // Unchanged from the pre-Phase-2A behavior: IndexedDB is the primary
@@ -292,6 +336,39 @@ export default function Home() {
     void fetchUploadLimitStatus().then(setUploadLimitStatus);
   }
 
+  // /api/auth/me is the SINGLE source of truth for the signed-in account's
+  // display state: `user` and the email-verification status. (It also returns
+  // the stored identity profile — untouched, A2 signup remains mandatory and
+  // unchanged — but the Account page no longer displays it, so this page never
+  // reads that field.) The /api/auth/login and /api/auth/signup responses
+  // carry only `user`, so after an in-page sign-in this must run too —
+  // otherwise `emailVerification` stays at its logged-out `null` and the
+  // account page renders without the "Email not verified / Verify email"
+  // control until a manual refresh.
+  //
+  // On success it populates both; it NEVER clears them on a transient failure
+  // (a caller that already set `account` from a fresh auth response must not
+  // have it wiped by a flaky follow-up request).
+  async function hydrateAccountFromServer(): Promise<"signed-in" | "signed-out" | "error"> {
+    let result: {
+      user?: LocalAccount | null;
+      emailVerification?: EmailVerificationView | null;
+    } | null;
+    try {
+      const response = await fetch("/api/auth/me");
+      if (!response.ok) return "error";
+      result = (await response.json()) as typeof result;
+    } catch {
+      return "error";
+    }
+    if (result && result.user) {
+      setAccount(result.user);
+      setEmailVerification(result.emailVerification ?? null);
+      return "signed-in";
+    }
+    return "signed-out";
+  }
+
   useEffect(() => {
     queueMicrotask(() => {
       setSidebarCollapsed(window.localStorage.getItem("tp_sidebar_collapsed") === "true");
@@ -299,19 +376,17 @@ export default function Home() {
     // Authentication state is resolved first, then exactly one of the two
     // report sources is used — never both — so a previous session's
     // reports can never linger into a different auth state at hydration.
-    fetch("/api/auth/me")
-      .then((response) => (response.ok ? response.json() : Promise.resolve({ user: null })))
-      .then(async (data) => {
-        const result = data as { user: LocalAccount | null };
-        if (result && result.user) {
-          setAccount(result.user);
-          await loadAccountReports();
-        } else {
-          await loadAnonymousReports();
-        }
-      })
-      .catch(() => loadAnonymousReports())
-      .finally(() => setAccountLoaded(true));
+    (async () => {
+      try {
+        const state = await hydrateAccountFromServer();
+        if (state === "signed-in") await loadAccountReports();
+        else await loadAnonymousReports();
+      } catch {
+        await loadAnonymousReports();
+      } finally {
+        setAccountLoaded(true);
+      }
+    })();
   }, []);
 
   // Cross-tab sign-out (production audit fix): the "storage" event fires in
@@ -390,6 +465,7 @@ export default function Home() {
     const username = String(formData.get("username") ?? "").trim();
     const remember = formData.get("remember") === "on";
 
+    let signupIdentity: CollectedIdentity | null = null;
     if (completedMode === "signup") {
       const confirmPassword = String(formData.get("confirmPassword") ?? "");
       const confirmInput = event.currentTarget.elements.namedItem("confirmPassword") as HTMLInputElement | null;
@@ -399,6 +475,10 @@ export default function Home() {
         return;
       }
       confirmInput?.setCustomValidity("");
+      // The server re-resolves and re-validates all of this; the component just
+      // shows its own inline errors and blocks submit until they're resolved.
+      signupIdentity = signupIdentityRef.current?.collect() ?? null;
+      if (!signupIdentity) return;
     }
 
     setAuthError(null);
@@ -430,7 +510,11 @@ export default function Home() {
       response = await fetch(completedMode === "login" ? "/api/auth/login" : "/api/auth/signup", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password, username, deviceKey: getDeviceKey(), remember }),
+        body: JSON.stringify(
+          completedMode === "signup"
+            ? { email, password, username, deviceKey: getDeviceKey(), remember, identity: signupIdentity }
+            : { email, password, username, deviceKey: getDeviceKey(), remember },
+        ),
       });
     } catch {
       stopAnimation();
@@ -448,6 +532,12 @@ export default function Home() {
     }
 
     setAccount(data.user as LocalAccount);
+    // The login/signup response carries only `user`. Pull the email-
+    // verification status from /api/auth/me so the account page is complete
+    // immediately — without this, `emailVerification` would stay `null` (its
+    // logged-out value) until the user manually refreshed, hiding the
+    // "Verify email" control even though the server already has it.
+    await hydrateAccountFromServer();
     setAuthLoadingLabel("Loading your report history");
     // Replaces (never merges with) whatever was previously displayed —
     // signing in as a different account, or into an account after browsing
@@ -466,13 +556,21 @@ export default function Home() {
     navigate("welcome");
   }
 
+  // Display-name / email only. Structured identity is collected once at
+  // signup (unchanged, still mandatory there) and is not re-shown or
+  // re-editable from this form — the Account page never sends an `identity`
+  // payload, so /api/auth/me's identity handling is simply unused from here
+  // rather than removed. Cross-account corpus checking is mandatory and not
+  // a user preference (see the LocalAccount comment above), so this form has
+  // no consent field and never sends one — /api/auth/me's PATCH handler
+  // still accepts that legacy field for other callers/back-compat, but this
+  // client intentionally omits it from its request body.
   async function submitProfileEdit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!account) return;
     const data = new FormData(event.currentTarget);
     const username = String(data.get("profileUsername") ?? "").trim();
     const email = String(data.get("profileEmail") ?? "").trim();
-    const corpusReuseConsent = data.get("corpusReuseConsent") === "on";
 
     setProfileEditError(null);
     let response: Response;
@@ -480,22 +578,145 @@ export default function Home() {
       response = await fetch("/api/auth/me", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username, email, corpusReuseConsent }),
+        body: JSON.stringify({ username, email }),
       });
     } catch {
       setProfileEditError("Could not reach TurnitPlus. Check your connection and try again.");
       return;
     }
 
-    const result = (await response.json().catch(() => null)) as { user?: LocalAccount; error?: string } | null;
+    const result = (await response.json().catch(() => null)) as {
+      user?: LocalAccount;
+      emailVerification?: EmailVerificationView | null;
+      error?: string;
+    } | null;
     if (!response.ok || !result?.user) {
       setProfileEditError((result && typeof result.error === "string" && result.error) || "Could not update your account information.");
       return;
     }
 
     setAccount(result.user as LocalAccount);
+    setEmailVerification(result.emailVerification ?? null);
+    setEmailVerifyNotice(null);
     setIsEditingProfile(false);
     notify("Your account information has been updated.");
+  }
+
+  // A3b resend cooldown, mirrored client-side only for the countdown display
+  // — EMAIL_VERIFICATION_RESEND_COOLDOWN_MS in lib/email-verification.ts is
+  // the authoritative value (that file imports node:crypto and must never be
+  // pulled into a "use client" bundle). A 429 response's own Retry-After
+  // header always overrides this when the server disagrees.
+  const RESEND_COOLDOWN_SECONDS = 60;
+
+  function closeEmailVerificationModal() {
+    setEmailVerifyModalOpen(false);
+    setEmailVerifyModalStage("sending");
+    setEmailVerifyCode("");
+    setEmailVerifyModalError(null);
+  }
+
+  // A3b — request (or resend) the verification code for the signed-in
+  // account. The account UI never sees the code, a token, or a challenge id
+  // until the user types it back in themselves; it only learns the coarse
+  // outcome.
+  async function sendEmailVerification() {
+    if (emailVerifySending) return;
+    setEmailVerifySending(true);
+    setEmailVerifyNotice(null);
+    try {
+      const response = await fetch("/api/auth/email-verification/send", { method: "POST" });
+      const data = (await response.json().catch(() => ({}))) as { status?: string; error?: string };
+      if (response.ok && data.status === "sent") {
+        setEmailVerifyModalOpen(true);
+        setEmailVerifyModalStage("ready");
+        setEmailVerifyCode("");
+        setEmailVerifyModalError(null);
+        setEmailVerifyResendCooldown(RESEND_COOLDOWN_SECONDS);
+      } else if (response.ok && data.status === "verified") {
+        setEmailVerification({ status: "verified" });
+        setEmailVerifyNotice({ tone: "ok", text: "Your email is already verified." });
+      } else if (data.status === "cooldown") {
+        // A code from a recent request is still live — open the modal
+        // straight to code entry instead of just showing an error, so the
+        // user can enter the code they already received.
+        const retryAfter = Number(response.headers.get("Retry-After"));
+        setEmailVerifyModalOpen(true);
+        setEmailVerifyModalStage("ready");
+        setEmailVerifyCode("");
+        setEmailVerifyModalError(null);
+        setEmailVerifyResendCooldown(Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : RESEND_COOLDOWN_SECONDS);
+      } else {
+        setEmailVerifyNotice({
+          tone: "error",
+          text: typeof data.error === "string" && data.error ? data.error : "Could not send the verification code. Please try again shortly.",
+        });
+      }
+    } catch {
+      setEmailVerifyNotice({ tone: "error", text: "Could not reach TurnitPlus. Check your connection and try again." });
+    } finally {
+      setEmailVerifySending(false);
+    }
+  }
+
+  async function submitEmailVerificationCode(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (emailVerifyModalStage === "verifying" || emailVerifyCode.length !== 6) return;
+    setEmailVerifyModalStage("verifying");
+    setEmailVerifyModalError(null);
+    try {
+      const response = await fetch("/api/auth/email-verification/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: emailVerifyCode }),
+      });
+      const data = (await response.json().catch(() => ({}))) as { status?: string; error?: string };
+      if (response.ok && data.status === "verified") {
+        // Immediately hydrate the UI — no refresh, no re-fetch of /api/auth/me
+        // required — matching how sendEmailVerification's "already verified"
+        // branch above updates the same state.
+        setEmailVerification({ status: "verified" });
+        setEmailVerifyModalStage("verified");
+        window.setTimeout(() => closeEmailVerificationModal(), 1600);
+      } else {
+        setEmailVerifyModalStage("ready");
+        setEmailVerifyModalError(
+          typeof data.error === "string" && data.error ? data.error : "Could not verify that code. Please try again.",
+        );
+      }
+    } catch {
+      setEmailVerifyModalStage("ready");
+      setEmailVerifyModalError("Could not reach TurnitPlus. Check your connection and try again.");
+    }
+  }
+
+  async function resendEmailVerificationCode() {
+    if (emailVerifyResendCooldown > 0 || emailVerifyResending) return;
+    setEmailVerifyResending(true);
+    setEmailVerifyModalError(null);
+    try {
+      const response = await fetch("/api/auth/email-verification/send", { method: "POST" });
+      const data = (await response.json().catch(() => ({}))) as { status?: string; error?: string };
+      const retryAfter = Number(response.headers.get("Retry-After"));
+      if (response.ok && data.status === "sent") {
+        setEmailVerifyCode("");
+        setEmailVerifyResendCooldown(RESEND_COOLDOWN_SECONDS);
+      } else if (response.ok && data.status === "verified") {
+        setEmailVerification({ status: "verified" });
+        setEmailVerifyModalStage("verified");
+        window.setTimeout(() => closeEmailVerificationModal(), 1600);
+      } else if (data.status === "cooldown" && Number.isFinite(retryAfter) && retryAfter > 0) {
+        setEmailVerifyResendCooldown(retryAfter);
+      } else {
+        setEmailVerifyModalError(
+          typeof data.error === "string" && data.error ? data.error : "Could not resend the code. Please try again shortly.",
+        );
+      }
+    } catch {
+      setEmailVerifyModalError("Could not reach TurnitPlus. Check your connection and try again.");
+    } finally {
+      setEmailVerifyResending(false);
+    }
   }
 
   // The account and every one of its sessions are already gone server-side
@@ -607,6 +828,8 @@ export default function Home() {
     setReports([]);
     setCurrentReport(null);
     setAccount(null);
+    setEmailVerification(null);
+    setEmailVerifyNotice(null);
     setUploadLimitStatus(null);
     setAccountReportCount(0);
     setIsEditingProfile(false);
@@ -1205,6 +1428,25 @@ export default function Home() {
                       <p className="section-label">SIGNED IN</p>
                       <h2>{account.username}</h2>
                       <p>{account.email}</p>
+                      <EmailVerificationStatus
+                        status={emailVerification?.status ?? null}
+                        onVerify={sendEmailVerification}
+                        sending={emailVerifySending}
+                        notice={emailVerifyNotice}
+                      />
+                      <EmailVerificationModal
+                        open={emailVerifyModalOpen}
+                        stage={emailVerifyModalStage}
+                        email={account.email}
+                        code={emailVerifyCode}
+                        onCodeChange={setEmailVerifyCode}
+                        onSubmit={submitEmailVerificationCode}
+                        onResend={resendEmailVerificationCode}
+                        onClose={closeEmailVerificationModal}
+                        error={emailVerifyModalError}
+                        resendCooldownSeconds={emailVerifyResendCooldown}
+                        resending={emailVerifyResending}
+                      />
                     </div>
                     <button className="button secondary account-edit-button" type="button" onClick={() => setIsEditingProfile((editing) => !editing)}>
                       <Pencil aria-hidden="true" /> {isEditingProfile ? "Close editor" : "Edit information"}
@@ -1228,13 +1470,6 @@ export default function Home() {
                           <input name="profileEmail" type="email" defaultValue={account.email} autoComplete="email" required />
                         </label>
                       </div>
-                      <label className="account-consent-toggle">
-                        <input name="corpusReuseConsent" type="checkbox" defaultChecked={account.corpusReuseConsent} />
-                        <span>
-                          <strong>Check my uploads against other TurnitPlus users&apos; submissions</strong>
-                          <small>Off by default. When on, future uploads you save may be compared against documents other signed-in users have submitted, and vice versa, to flag prior submissions. Your document text is never shown to another account &mdash; only that a prior submission exists. Turning this off stops future uploads from being added; it does not remove documents already indexed while it was on (delete the report to remove those).</small>
-                        </span>
-                      </label>
                       {profileEditError && <p className="auth-form-error" role="alert">{profileEditError}</p>}
                       <div className="account-edit-actions">
                         <button className="button subtle" type="button" onClick={() => setIsEditingProfile(false)}>Cancel</button>
@@ -1243,11 +1478,6 @@ export default function Home() {
                     </form>
                   )}
                   <div className="account-profile-status"><Check aria-hidden="true" /> Your account session is active on this device.</div>
-                  <div className="account-profile-status">
-                    {account.corpusReuseConsent
-                      ? "Cross-account prior-submission checking is ON for your uploads."
-                      : "Cross-account prior-submission checking is OFF for your uploads (default)."}
-                  </div>
                   {uploadLimitStatus && uploadLimitStatus.authenticated && (
                     <div className="account-profile-status">
                       {uploadLimitStatus.unlimited
@@ -1422,6 +1652,9 @@ export default function Home() {
                           required
                         />
                       </label>
+                    )}
+                    {(authMode ?? "login") === "signup" && (
+                      <IdentityFields ref={signupIdentityRef} mode="signup" disabled={isAuthenticating} />
                     )}
                     {(authMode ?? "login") === "login" && (
                       <div className="auth-form-row">

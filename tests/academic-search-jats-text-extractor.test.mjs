@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { extractTextFromJatsXml } from "../lib/academic-search/providers/jats-text-extractor.ts";
+import { computeDocumentCorrespondence, DEFAULT_DOCUMENT_CORRESPONDENCE_THRESHOLDS } from "../lib/document-correspondence.ts";
 
 test("extracts paragraph text from <body>, joined with newlines between block elements", () => {
   const xml = `<article><body><sec><title>1 Introduction</title><p>First paragraph.</p><p>Second paragraph.</p></sec></body></article>`;
@@ -111,4 +112,183 @@ test("real-world sample: a captured Europe PMC fullTextXML fragment extracts to 
   assert.ok(text.startsWith("1 Introduction\nPain assessme"));
   assert.ok(!text.includes("<xref"));
   assert.ok(!text.includes("ref-type"));
+});
+
+// =============================================================================
+// Missing-passage audit fixes: JATS float / sub-article / trans-abstract hygiene
+// (D:/TurnitPlusTemp/missing-passage-audit — confirmed defects JATS-1..5).
+// =============================================================================
+
+test("audit JATS-1: a <table-wrap> keeps its <label> and <caption> (a copied table title now has text to match), while the cell grid stays dropped", () => {
+  const xml = `<article><body><sec><p>Body prose.</p>` +
+    `<table-wrap id="t5" position="float"><label>Table 5</label>` +
+    `<caption><title>Associations of proteins with retinal nerve fiber layer thickness in UK Biobank.</title></caption>` +
+    `<table><thead><tr><th>Protein</th><th>Beta</th></tr></thead><tbody><tr><td>UMOD</td><td>0.322</td></tr></tbody></table>` +
+    `</table-wrap></sec></body></article>`;
+  const text = extractTextFromJatsXml(xml);
+  assert.ok(text.includes("Table 5"), "the table label must be kept");
+  assert.ok(text.includes("Associations of proteins with retinal nerve fiber layer thickness in UK Biobank"), "the table caption must be kept");
+  assert.ok(text.includes("Body prose."), "surrounding body prose is unaffected");
+  assert.ok(!text.includes("UMOD") && !text.includes("0.322"), "raw table cell values must NOT be flattened into the text");
+});
+
+test("audit JATS-1: a <table-wrap-foot> footnote / abbreviation legend is kept", () => {
+  const xml = `<article><body><sec>` +
+    `<table-wrap id="t3"><label>Table 3</label><caption><p>Incidence rate ratios.</p></caption>` +
+    `<table><tbody><tr><td>1.00</td></tr></tbody></table>` +
+    `<table-wrap-foot><fn id="fn3"><p>IRR=incidence rate ratio; CI=confidence interval. All estimates are adjusted for age in one year age band, seasonal effect, opioids and psychotropic medications.</p></fn></table-wrap-foot>` +
+    `</table-wrap></sec></body></article>`;
+  const text = extractTextFromJatsXml(xml);
+  assert.ok(text.includes("All estimates are adjusted for age in one year age band, seasonal effect, opioids and psychotropic medications"), "the table footnote prose must survive");
+  assert.ok(text.includes("IRR=incidence rate ratio"), "an abbreviation legend in the footnote must survive");
+});
+
+test("audit JATS-1: a <fig> keeps its caption, drops the <graphic>", () => {
+  const xml = `<article><body><sec><p>See figure.</p>` +
+    `<fig id="f2" position="float"><label>Fig 2</label>` +
+    `<caption><p>Forest plot summarising the adjusted IRRs for self-harm associated with gabapentinoid use, stratified by sex.</p></caption>` +
+    `<alternatives><graphic xmlns:xlink="http://www.w3.org/1999/xlink" xlink:href="fig2.jpg"/></alternatives></fig>` +
+    `</sec></body></article>`;
+  const text = extractTextFromJatsXml(xml);
+  assert.ok(text.includes("Fig 2"));
+  assert.ok(text.includes("Forest plot summarising the adjusted IRRs for self-harm associated with gabapentinoid use, stratified by sex."));
+  assert.ok(!text.includes("fig2.jpg") && !text.includes("xlink"), "graphic href / attributes must not leak");
+});
+
+test("audit JATS-3: <boxed-text> prose (key-points box, policy box) is kept", () => {
+  const xml = `<article><body><sec><p>Main text.</p>` +
+    `<boxed-text id="boxa"><sec><title>What this study adds</title><list list-type="simple"><list-item><p>Risk of self-harm is increased before treatment, persists during the initial treatment period, and rises again shortly after discontinuation.</p></list-item></list></sec></boxed-text>` +
+    `</sec></body></article>`;
+  const text = extractTextFromJatsXml(xml);
+  assert.ok(text.includes("What this study adds"));
+  assert.ok(text.includes("Risk of self-harm is increased before treatment, persists during the initial treatment period, and rises again shortly after discontinuation."));
+});
+
+test("audit JATS-4: a <sub-article> (peer review) is not extracted — no duplicate or mis-attributed prose", () => {
+  const xml = `<article>` +
+    `<front><article-meta><abstract><p>Main article abstract.</p></abstract></article-meta></front>` +
+    `<body><sec><p>The article's own body prose about metabolic divergence.</p></sec></body>` +
+    `<sub-article article-type="peer-review"><front-stub><title-group><article-title>Peer Review File</article-title></title-group></front-stub>` +
+    `<body><sec><p>Reviewer 2 notes the sample size is small and requests clarification of the primary endpoint.</p></sec></body></sub-article>` +
+    `</article>`;
+  const text = extractTextFromJatsXml(xml);
+  assert.ok(text.includes("The article's own body prose about metabolic divergence."));
+  assert.ok(text.includes("Main article abstract."));
+  assert.ok(!text.includes("Reviewer 2"), "reviewer commentary from a <sub-article> must not be extracted as the article's text");
+  assert.ok(!text.includes("Peer Review File"));
+});
+
+test("audit JATS-4: a document that is ONLY a container of <sub-article>s (conference proceedings) yields '' rather than one arbitrary sub-article", () => {
+  const xml = `<article><front><journal-meta><journal-title>Proceedings</journal-title></journal-meta></front>` +
+    `<sub-article id="a1"><front-stub/><body><sec><p>First abstract body.</p></sec></body></sub-article>` +
+    `<sub-article id="a2"><front-stub/><body><sec><p>Second abstract body.</p></sec></body></sub-article>` +
+    `</article>`;
+  assert.equal(extractTextFromJatsXml(xml), "");
+});
+
+test("audit JATS-5: a <trans-abstract> (translated abstract — still the authors' words) is captured alongside the main abstract, not silently dropped", () => {
+  const xml = `<article><front><article-meta>` +
+    `<abstract><p>Background: endothelial dysregulation precedes chronic lung allograft dysfunction.</p></abstract>` +
+    `<trans-abstract xml:lang="fr"><p>Contexte: la dysregulation endotheliale precede la dysfonction chronique de l'allogreffe pulmonaire.</p></trans-abstract>` +
+    `</article-meta></front><body><sec><p>Body prose.</p></sec></body></article>`;
+  const text = extractTextFromJatsXml(xml);
+  assert.ok(text.includes("endothelial dysregulation precedes chronic lung allograft dysfunction"), "main abstract kept");
+  assert.ok(text.includes("la dysregulation endotheliale precede la dysfonction chronique"), "translated abstract kept");
+  assert.ok(text.includes("Body prose."));
+});
+
+test("audit scope: JATS <front> metadata (affiliations, the 'Citation:' line, funding, licence) is NOT pulled in as article text", () => {
+  const xml = `<article><front><article-meta>` +
+    `<contrib-group><contrib contrib-type="author"><name><surname>Li</surname><given-names>H</given-names></name></contrib></contrib-group>` +
+    `<aff id="aff5">5 Centre for Eye and Vision Research (CEVR), Hong Kong, Hong Kong SAR, China</aff>` +
+    `<author-notes><fn><p>These authors are co-first authors on this work.</p></fn></author-notes>` +
+    `<permissions><license><license-p>This is an open access article distributed under the terms of the Creative Commons Attribution License.</license-p></license></permissions>` +
+    `<funding-group><award-group><funding-source>National Natural Science Foundation of China</funding-source></award-group></funding-group>` +
+    `<abstract><p>Real abstract prose here.</p></abstract>` +
+    `</article-meta></front><body><sec><p>Real body prose here.</p></sec></body></article>`;
+  const text = extractTextFromJatsXml(xml);
+  assert.ok(text.includes("Real abstract prose here."));
+  assert.ok(text.includes("Real body prose here."));
+  assert.ok(!text.includes("Centre for Eye and Vision Research"), "affiliations are not article text");
+  assert.ok(!text.includes("co-first authors"), "author notes are not article text");
+  assert.ok(!text.includes("Creative Commons"), "licence boilerplate is not article text");
+  assert.ok(!text.includes("National Natural Science Foundation"), "funding metadata is not article text");
+});
+
+test("audit scope: the reference list in <back> is still never extracted (no regression from the new elements)", () => {
+  const xml = `<article><body><sec><p>Article prose.</p></sec></body>` +
+    `<back><ref-list><title>References</title>` +
+    `<ref id="r1"><mixed-citation>Gulshan V, et al. Development and validation of a deep learning algorithm. JAMA. 2016;316(22):2402-2410.</mixed-citation></ref>` +
+    `</ref-list></back></article>`;
+  const text = extractTextFromJatsXml(xml);
+  assert.ok(text.includes("Article prose."));
+  assert.ok(!text.includes("Gulshan"), "the bibliography must stay out of the extracted text");
+  assert.ok(!text.includes("JAMA. 2016"));
+});
+
+test("audit: a <table-wrap> parked in a sibling <floats-group> (not inside <body>) still has its caption salvaged, and is not double-counted when also referenced inline", () => {
+  const xml = `<article><body><sec><p>As shown in Table 1, the cohorts were balanced.</p></sec></body>` +
+    `<floats-group>` +
+    `<table-wrap id="t1"><label>Table 1</label><caption><p>Patient characteristics at baseline across the three enrolment cohorts.</p></caption>` +
+    `<table><tbody><tr><td>n</td><td>100</td></tr></tbody></table></table-wrap>` +
+    `</floats-group></article>`;
+  const text = extractTextFromJatsXml(xml);
+  assert.ok(text.includes("Patient characteristics at baseline across the three enrolment cohorts."), "a floats-group caption must be reachable");
+  const occurrences = text.split("Patient characteristics at baseline across the three enrolment cohorts.").length - 1;
+  assert.equal(occurrences, 1, "the caption must appear exactly once, not once per place the float is emitted");
+});
+
+test("audit: a verbatim-repeated long block (>= 12 words, e.g. a shared table footnote) is de-duplicated, keeping the first occurrence", () => {
+  const line = "All models were adjusted for baseline age sex body mass index smoking status and diabetes duration at enrolment.";
+  const xml = `<article><body>` +
+    `<sec><title>Table 1</title><p>${line}</p></sec>` +
+    `<sec><title>Table 2</title><p>${line}</p><p>A distinctive unique results sentence follows here.</p></sec>` +
+    `</body></article>`;
+  const text = extractTextFromJatsXml(xml);
+  assert.equal(text.split(line).length - 1, 1, "the repeated block appears once");
+  assert.ok(text.includes("A distinctive unique results sentence follows here."), "unique prose is untouched");
+});
+
+test("audit: deduplication does not remove genuinely recurring SHORT lines (headings, brief notes < 12 words)", () => {
+  const xml = `<article><body>` +
+    `<sec><title>Results</title><p>First finding.</p><p>Values are mean and standard deviation.</p></sec>` +
+    `<sec><title>Results</title><p>Second finding.</p><p>Values are mean and standard deviation.</p></sec>` +
+    `</body></article>`;
+  const text = extractTextFromJatsXml(xml);
+  assert.equal(text.split("Results").length - 1, 2, "a short heading may legitimately repeat");
+  assert.equal(text.split("Values are mean and standard deviation.").length - 1, 2, "a short (< 12-word) recurring note is kept, not de-duplicated");
+});
+
+test("audit: deduplication cannot destroy a match when the SAME long block appears in two different surrounding contexts", () => {
+  // The de-dup risk: a submission that copied "[context B] + [repeated block] + [context B after]"
+  // contiguously, where only context A's copy of the repeated block survives extraction.
+  const dupBlock = "The composite endpoint combined cardiovascular death nonfatal myocardial infarction and nonfatal stroke over the full follow up period.";
+  const aBefore = "In the primary analysis of the intention to treat population we evaluated the following outcome.";
+  const aAfter = "These results were consistent across every prespecified subgroup examined in the trial cohort.";
+  const bBefore = "A sensitivity analysis restricted to participants with complete baseline data reported the same estimate.";
+  const bAfter = "This robustness check used multiple imputation for the seventeen participants missing a single covariate.";
+  const xml = `<article><body>` +
+    `<sec><title>Primary analysis</title><p>${aBefore}</p><p>${dupBlock}</p><p>${aAfter}</p></sec>` +
+    `<sec><title>Sensitivity analysis</title><p>${bBefore}</p><p>${dupBlock}</p><p>${bAfter}</p></sec>` +
+    `</body></article>`;
+  const source = extractTextFromJatsXml(xml);
+
+  // 1. The repeated block is de-duplicated (one copy) ...
+  assert.equal(source.split(dupBlock).length - 1, 1, "the repeated block appears once in the extracted source");
+  // 2. ... but its words, and BOTH surrounding contexts, are still all present:
+  for (const chunk of [aBefore, aAfter, bBefore, bAfter, dupBlock]) {
+    assert.ok(source.replace(/\s+/g, " ").includes(chunk.replace(/\s+/g, " ")), `context/block still present: "${chunk.slice(0, 40)}..."`);
+  }
+  // 3. A submission that copied the B-context span contiguously still matches
+  //    that whole span against this de-duplicated source, end to end.
+  const bSpanCopiedByStudent = `${bBefore} ${dupBlock} ${bAfter}`;
+  const result = computeDocumentCorrespondence(bSpanCopiedByStudent, source, {
+    ...DEFAULT_DOCUMENT_CORRESPONDENCE_THRESHOLDS,
+    strongContainmentThreshold: 0.01,
+    minimumMatchedWords: 1,
+  });
+  const studentWordCount = bSpanCopiedByStudent.split(/\s+/).filter(Boolean).length;
+  assert.equal(result.matchedWordCount, studentWordCount, "every word the student copied is still flagged");
+  assert.equal(result.allMatchedPassages.length, 1, "the match stays a single contiguous passage — de-dup did not fragment it");
+  assert.equal(result.longestMatchWords, studentWordCount, "the flagged passage spans the full copied run");
 });

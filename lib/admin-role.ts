@@ -1,41 +1,52 @@
 import type { Client } from "@libsql/client";
 
 /**
- * The single source of truth for which account is the developer/admin
- * account. ADMIN_EMAIL is read in exactly this one function and nowhere
- * else in the codebase — the designated address itself lives only in
- * deployment config (.env.local for dev, the Vercel project's environment
- * variables for production), never hardcoded into source. This keeps the
- * grant mechanism safe to review: there is exactly one place that could ever
- * promote an account, and exactly one env var that controls it.
+ * Developer/admin role management.
  *
- * Called from /api/auth/login and /api/auth/signup, after the account's id
- * is known but before the response is built, so a first login/signup with
- * the designated address is upgraded immediately rather than requiring a
- * separate manual step. Idempotent and self-healing: safe to call on every
- * login (a no-op once the row is already "admin"), and if the role column
- * were ever reset by an unrelated migration or manual edit, the very next
- * login from the configured address repairs it automatically.
+ * ── SECURITY (A2): NO AUTOMATIC PROMOTION FROM AN EMAIL STRING ──────────────
+ * Historically an account was promoted to `admin` automatically the first time
+ * the address in the ADMIN_EMAIL env var logged in OR signed up. That predates
+ * any email verification: because a signup email is entirely unverified, anyone
+ * who learned the configured ADMIN_EMAIL could create an account with it (when
+ * no admin account existed yet) and instantly hold the admin role.
  *
- * Deliberately never demotes: unsetting or changing ADMIN_EMAIL does not by
- * itself revoke an already-granted role (there is no "un-admin on mismatch"
- * branch below) — revoking access is an explicit, separate action (update
- * the row directly), never an incidental side effect of an env var change.
+ * That path is REMOVED. Neither /api/auth/signup nor /api/auth/login promotes
+ * anyone. The admin role is now granted ONLY by a deliberate operator action —
+ * a one-off `UPDATE users SET role = 'admin' WHERE email = ?` (or grantAdminRole
+ * below, run from a maintenance script), performed once the operator has
+ * confirmed out of band that the account is genuinely theirs.
+ *
+ * An account that already holds `role = 'admin'` keeps it — nothing here ever
+ * demotes, and the removed auto-promote path was a no-op for an already-admin
+ * row anyway, so existing admin access is unaffected.
+ *
+ * ADMIN_EMAIL remains a deployment note (see .env.example) recording WHICH
+ * address an operator should grant; it is not read by any request handler.
  */
-export async function maybePromoteToAdmin(client: Client, userId: string, normalizedEmail: string): Promise<void> {
-  const adminEmail = process.env.ADMIN_EMAIL;
-  if (!adminEmail) return;
-  const normalizedAdminEmail = adminEmail.trim().toLowerCase();
-  if (!normalizedAdminEmail || normalizedEmail !== normalizedAdminEmail) return;
-  try {
-    await client.execute({
-      sql: "UPDATE users SET role = 'admin' WHERE id = ? AND role != 'admin'",
-      args: [userId],
-    });
-  } catch (err) {
-    // Best-effort, matching every other login/signup side effect in this
-    // codebase (e.g. claimAnonymousReports) — a failed promotion must never
-    // block a legitimate login.
-    console.error("maybePromoteToAdmin failed (non-fatal):", err instanceof Error ? err.message : String(err));
-  }
+
+/** The configured admin address, normalized, or null. Not consulted by any request path — for operator tooling / docs only. */
+export function configuredAdminEmail(): string | null {
+  const raw = process.env.ADMIN_EMAIL;
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim().toLowerCase();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+/** True iff `email` is exactly the configured ADMIN_EMAIL (case-insensitive). Operator tooling only. */
+export function isConfiguredAdminEmail(email: string): boolean {
+  const configured = configuredAdminEmail();
+  return configured !== null && typeof email === "string" && email.trim().toLowerCase() === configured;
+}
+
+/**
+ * The manual grant primitive: set one account's role to `admin`. This is
+ * DELIBERATELY not wired into any request handler — call it only from a
+ * maintenance script, after confirming the account belongs to the intended
+ * operator. Idempotent.
+ */
+export async function grantAdminRole(client: Client, userId: string): Promise<void> {
+  await client.execute({
+    sql: "UPDATE users SET role = 'admin' WHERE id = ? AND role != 'admin'",
+    args: [userId],
+  });
 }

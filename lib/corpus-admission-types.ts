@@ -99,11 +99,14 @@ export type CorpusProvenanceRecord = {
 };
 
 /**
- * Two distinct consent shapes for two distinct callers: a live, per-account
- * user upload continues to use the existing users.corpus_reuse_consented_at
- * primitive (see lib/auth-session.ts's SessionUser.corpusReuseConsented);
- * an externally-sourced bulk-import candidate has no per-account consent to
- * check at all and instead carries its own CorpusProvenanceRecord.
+ * Two distinct consent shapes for two distinct callers. A live, per-account
+ * user upload always carries `{ kind: "PER_USER_CONSENT", consented: true }`
+ * — corpus-admission eligibility is mandatory for every authenticated
+ * account (product decision), so lib/corpus-admission-report-integration.ts's
+ * processReportAdmissionJob no longer reads users.corpus_reuse_consented_at
+ * (now a vestigial column) to derive this. An externally-sourced bulk-import
+ * candidate has no per-account consent to check at all and instead carries
+ * its own CorpusProvenanceRecord.
  */
 export type CorpusConsentEvidence =
   | { kind: "PER_USER_CONSENT"; consented: boolean }

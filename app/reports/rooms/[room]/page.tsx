@@ -113,5 +113,20 @@ export default async function RoomPage({ params }: { params: Promise<{ room: str
     );
   }
 
-  return <RoomPageShell room={result.room} accountEmail={result.accountEmail} initialOccupant={result.occupant} />;
+  // Defect #3 fix: an explicit, room-derived key forces React to remount
+  // RoomPageShell (fresh occupant/isGeneratingReport/progress/refs/polling
+  // state) whenever the account navigates from one room to another via
+  // client-side navigation. Without a key, React reconciles consecutive
+  // <RoomPageShell room={X} .../> renders at this same JSX position as the
+  // SAME component instance across a room change (only the props update) —
+  // useState(initialOccupant)'s own initializer never re-runs on a prop
+  // change, and every ref/local-only state (isGeneratingReport,
+  // generationLockRef, progress, processingLabel, poll-attempt tracking)
+  // would silently carry over from whichever room was previously mounted in
+  // this slot into the newly-navigated-to room. `room` is the same raw,
+  // zero-based value already threaded through save/read/poll everywhere
+  // else in this tree — using it as a key changes nothing about that
+  // persisted semantics, it only tells React when a genuinely different
+  // room warrants a fresh instance.
+  return <RoomPageShell key={result.room} room={result.room} accountEmail={result.accountEmail} initialOccupant={result.occupant} />;
 }

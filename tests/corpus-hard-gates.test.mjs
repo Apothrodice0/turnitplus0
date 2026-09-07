@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { evaluateCorpusHardGates, classifyLanguageForAdmission, DEFAULT_CORPUS_HARD_GATE_THRESHOLDS } from "../lib/corpus-hard-gates.ts";
+import { detectDominantLanguage } from "../lib/similarity-core.ts";
 
 const OK_FILE_VALIDATION = { ok: true, format: "txt" };
 const OK_EXTRACTION = { ok: true, rawText: "irrelevant for these tests", extractorVersion: "test" };
@@ -90,6 +91,13 @@ test("classifyLanguageForAdmission: confident non-English (Arabic, French)", () 
 
 test("classifyLanguageForAdmission: Mixed always resolves UNCERTAIN regardless of confidence value passed in", () => {
   assert.equal(classifyLanguageForAdmission("Mixed", 0.5), "UNCERTAIN");
+  // Under the windowed dominant-language detector, a genuinely decisive
+  // Mixed-script case (Arabic+Latin both clearing the script-ratio bar) can
+  // legitimately carry a HIGH confidence/share value — unlike the old
+  // detector, whose Mixed result was always exactly 0.5. Mixed must resolve
+  // UNCERTAIN by explicit construction in classifyLanguageForAdmission, not
+  // merely because Mixed happened to always produce a low number.
+  assert.equal(classifyLanguageForAdmission("Mixed", 0.95), "UNCERTAIN");
 });
 
 test("classifyLanguageForAdmission: low-confidence English is UNCERTAIN, not CONFIDENT_ENGLISH", () => {
@@ -113,6 +121,25 @@ test("uncertain language does NOT fail the hard gate (it is a policy-level REVIE
 test("confident English never fails the language gate, for any word-count/consent-passing candidate", () => {
   const result = evaluateCorpusHardGates(baseInput({ detectedLanguage: "English", languageConfidence: 0.95 }));
   assert.equal(result.languageClass, "CONFIDENT_ENGLISH");
+  assert.ok(!result.failureCodes.includes("NOT_ENGLISH"));
+});
+
+test("bug reproduction end-to-end: an English body with a short Spanish abstract, run through the real detector, clears the hard gate as CONFIDENT_ENGLISH", () => {
+  function repeatWords(bank, count) {
+    const out = [];
+    for (let i = 0; i < count; i += 1) out.push(bank[i % bank.length]);
+    return out.join(" ");
+  }
+  const ENGLISH_WORDS = ["the", "study", "examined", "population", "sample", "and", "results", "were", "compared", "with", "previous", "findings", "in", "this", "research", "which", "was", "conducted"];
+  const SPANISH_WORDS = ["el", "estudio", "examina", "la", "filantropia", "y", "riqueza", "en", "las", "empresas", "con", "una", "metodologia", "para", "estos", "resultados", "que", "es"];
+  const text = `${repeatWords(SPANISH_WORDS, 60)} ${repeatWords(ENGLISH_WORDS, 3000)}`;
+
+  const { language, confidence } = detectDominantLanguage(text);
+  const result = evaluateCorpusHardGates(baseInput({ wordCount: 3000, detectedLanguage: language, languageConfidence: confidence }));
+
+  assert.equal(language, "English");
+  assert.equal(result.languageClass, "CONFIDENT_ENGLISH");
+  assert.equal(result.passed, true);
   assert.ok(!result.failureCodes.includes("NOT_ENGLISH"));
 });
 

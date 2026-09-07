@@ -13,7 +13,7 @@ import {
   type AiPrepStage,
   type AiPrepUpdate,
 } from "@/lib/ai-model-prep";
-import { aiSignalDisplay, type SimilarityReport } from "@/lib/report-types";
+import { aiSignalDisplay, type AiSignalDisplay, type SimilarityReport } from "@/lib/report-types";
 import { ReportPageFooter, ReportPageHeader } from "./report-page-chrome";
 
 function AnimatedAiPercentage({
@@ -126,6 +126,7 @@ function AiPreparationPanel({
 
 export function AiReport({
   report,
+  signal: signalProp,
   isRunning = false,
   prepState = null,
   onRetry,
@@ -133,6 +134,16 @@ export function AiReport({
   printMode = false,
 }: {
   report: SimilarityReport;
+  /**
+   * The already-resolved AI signal from the caller (the report detail
+   * shell), computed via aiSignalDisplay(report, { persisted ai_status/
+   * ai_score/ai_tone }) — the authoritative headline, which can differ from
+   * aiSignalDisplay(report) alone when payload_json.aiAnalysis has lagged
+   * the flat columns (see lib/ai-display-state.ts). Omitted by callers that
+   * genuinely only have the payload (e.g. the in-run preview), which fall
+   * back to the payload-only computation, unchanged.
+   */
+  signal?: AiSignalDisplay;
   isRunning?: boolean;
   prepState?: AiPrepUpdate | null;
   onRetry?: () => void;
@@ -142,7 +153,11 @@ export function AiReport({
   const rawScore = typeof report.aiScore === "number" ? report.aiScore : null;
   const isSuppressed = rawScore !== null && shouldSuppressAiScore(rawScore);
   const analysis = report.aiAnalysis;
-  const signal = aiSignalDisplay(report);
+  const signal = signalProp ?? aiSignalDisplay(report);
+  // The AI check is authoritatively finished (a real headline score exists —
+  // from the persisted columns even if this payload's aiAnalysis was lost to
+  // a stale-generation overwrite), just without the passage-level detail.
+  const completeWithoutDetail = signal.value !== null && !analysis;
 
   return (
     <article className={`report-paper ai-paper ${printMode ? "ai-report-print" : "ai-report-enter"} ai-signal-${signal.tone}`}>
@@ -233,7 +248,17 @@ export function AiReport({
           </section>
         )}
 
-        {!isRunning && (!analysis || analysis.status === "error") && (
+        {!isRunning && completeWithoutDetail && (
+          <section className="ai-analysis-message">
+            <strong>—</strong>
+            <div>
+              <p>The AI writing score above is this report&apos;s completed result. The passage-level breakdown isn&apos;t available for this saved copy{onRetry ? " — re-run the analysis to regenerate it" : ""}.</p>
+              {onRetry && <button className="button primary" type="button" onClick={onRetry}>Re-run AI analysis</button>}
+            </div>
+          </section>
+        )}
+
+        {!isRunning && !completeWithoutDetail && (!analysis || analysis.status === "error") && (
           <section className="ai-analysis-message">
             <strong>—</strong>
             <div>

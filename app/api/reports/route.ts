@@ -2,7 +2,18 @@ import { NextResponse } from 'next/server';
 import { getReportsDbClient } from '../../../lib/reports-db';
 import { checkRate, checkPollRate, checkReadRate } from '../../../lib/rate-limit';
 import { clientIpFrom } from '../../../lib/client-ip';
-import { getSessionUser } from '../../../lib/auth-session';
+import { getSessionUser, parseCookie, hashToken, SESSION_COOKIE_NAME } from '../../../lib/auth-session';
+import {
+  isDevicePassportEnabled,
+  verifyDevicePassportAttestation,
+  maybeBumpDevicePassportProvenanceGeneration,
+} from '../../../lib/device-passport-server';
+import {
+  resolveActorObservation,
+  readActorUsageTrackingVersion,
+  recordDevicePassportActorUsage,
+  type ActorObservation,
+} from '../../../lib/device-passport-actor-ledger';
 import { captureDocumentIdentityAndFamily } from '../../../lib/document-family';
 import { linkAcademicSearchRunDiagnosticsToReport } from '../../../lib/academic-search-diagnostics-repo';
 import { checkUploadLimit } from '../../../lib/upload-limit';
@@ -10,6 +21,11 @@ import { getRoomCountForRole, isWithinActiveCycle, roomCycleEndsAt } from '../..
 import { findRoomOccupant } from '../../../lib/reports-repo';
 import { runAfterResponse } from '../../../lib/run-after-response';
 import { createPendingReportAdmissionJob, processReportAdmissionJob } from '../../../lib/corpus-admission-report-integration';
+import { resolvePrimarySimilaritySummary } from '../../../lib/report-primary-similarity';
+import { scheduleReportShadowEvaluations } from '../../../lib/report-shadow-evaluations';
+import type { SimilarityReport, ReportHistoricalSubmissionMatch } from '../../../lib/report-types';
+import type { UnifiedSimilarityResult } from '../../../lib/unified-similarity';
+import type { ExternalAcademicEvidence } from '../../../lib/academic-search/types';
 
 // Reports carry derived data (AI passages, matched phrases, extracted text)
 // on top of the ingest pipeline's raw text, so this cap is larger than
@@ -17,6 +33,10 @@ import { createPendingReportAdmissionJob, processReportAdmissionJob } from '../.
 const MAX_BYTES = 2_000_000;
 const MAX_DEVICE_KEY_LENGTH = 200;
 const MAX_LISTED_REPORTS = 50;
+// Device Passport (Phase 2) — coarse structural ceilings on the optional
+// attestation object; lib/device-passport-server.ts re-validates every field
+// strictly (exact decoded byte lengths, canonical base64, EC P-256 curve).
+const MAX_ATTESTATION_FIELD_LENGTH = 1_000;
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0;
@@ -24,7 +44,7 @@ function isNonEmptyString(value: unknown): value is string {
 
 // Release-hardening audit finding LIFECYCLE-02: two AI-completion resaves
 // for the same report can race (the automatic post-upload pass in one tab
-// still finishing while a different tab/device's manual "Retry AI check"
+// still finishing while a different tab/device's manual "Retry analysis"
 // also completes — both target the same (device_key, id), see
 // app/reports/rooms/[room]/room-page-shell.tsx's saveEnrichedAiResult). A
 // plain unconditional UPSERT is last-write-wins: whichever request's
@@ -40,7 +60,56 @@ function isNonEmptyString(value: unknown): value is string {
 // can still be reached from processing or failed (a late genuine success
 // is exactly what a retry is for), and processing/failed/failed all behave
 // exactly as before.
-const SAVE_REPORT_SQL = `INSERT INTO saved_reports (id, device_key, submission_id, title, report_created_at, word_count, archive_score, score_band, ai_score, ai_tone, ai_status, payload_json, user_id, room_number, updated_at)
+//
+// Release-hardening audit finding SIM-04: payload_json's own CASE gained a
+// SECOND, independent guard — concurrent resaves of the SAME report can
+// each finalize (lib/report-primary-similarity.ts) against a DIFFERENT
+// corpus_match_generation snapshot; whichever transaction happens to COMMIT
+// last must not be allowed to overwrite an already-persisted result that
+// reflects a NEWER generation with one reflecting an OLDER one, regardless
+// of commit order. json_extract on excluded/saved_reports.payload_json
+// compares the unifiedSimilarityGeneration each side's own payload embeds
+// (see lib/report-types.ts's own comment on that field) — COALESCE(...,-1)
+// treats "never persisted a generation at all" (a legacy payload, or a
+// finalization attempt that genuinely failed and left unifiedSimilarity
+// unset — see this route's own POST handler try/catch) as lower than any
+// real generation, so a first-ever write, or a failed finalization's
+// unenriched payload, can never regress an already-good persisted value —
+// it simply keeps what was already there instead.
+//
+// AI score / pending-state consistency fix (upstream persistence half):
+// that generation guard protects the WHOLE payload_json blob, similarity
+// AND AI fields alike — but the two are genuinely independent pipelines.
+// The exact production split (room card "0% AI" / detail page "AI report
+// pending" for report 1787833395119): the AI-enrichment resave carries a
+// freshly-completed payload.aiAnalysis AND updates the flat ai_score/
+// ai_tone/ai_status columns (separate args, not under this guard), but its
+// own write-time similarity finalization transiently failed, so its
+// payload has no unifiedSimilarityGeneration — the guard then keeps the
+// existing (generation-stamped) payload, which never had aiAnalysis, while
+// the columns still moved to 'ready' + a real score. The nested CASE below
+// closes that: when the guard keeps the existing payload BECAUSE the
+// incoming similarity generation is stale/missing, and the incoming
+// payload carries a real aiAnalysis, that aiAnalysis (and its paired raw
+// aiScore — written together by saveEnrichedAiResult) is merged into the
+// retained authoritative payload via json_set. Nothing else is touched:
+// the retained payload's unifiedSimilarity / unifiedSimilarityGeneration /
+// every other field stay byte-for-byte as they were, so a stale similarity
+// resave still cannot overwrite newer similarity data (json_extract of a
+// JSON object carries the JSON subtype, so json_set inserts it AS JSON,
+// never a re-quoted string). An incoming payload WITHOUT an aiAnalysis
+// (a similarity-only resave, or the still-processing first save) hits the
+// inner ELSE and leaves the retained payload — including any existing
+// aiAnalysis — completely untouched. The first WHEN (a 'failed' resave
+// against an already-'ready' row) is unchanged and never merges: that
+// incoming aiAnalysis is a genuine failure result that must not clobber
+// the good one, exactly as the ai_score/ai_tone/ai_status CASEs above
+// already refuse it.
+// Exported so tests/report-write-time-finalization.test.mjs's own SIM-04
+// concurrency-guard test can exercise this EXACT SQL text directly — never a
+// hand-copied duplicate that could silently drift from what production
+// actually runs.
+export const SAVE_REPORT_SQL = `INSERT INTO saved_reports (id, device_key, submission_id, title, report_created_at, word_count, archive_score, score_band, ai_score, ai_tone, ai_status, payload_json, user_id, room_number, updated_at)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
       ON CONFLICT(device_key, id) DO UPDATE SET
         submission_id = excluded.submission_id,
@@ -52,7 +121,16 @@ const SAVE_REPORT_SQL = `INSERT INTO saved_reports (id, device_key, submission_i
         ai_score = CASE WHEN saved_reports.ai_status = 'ready' AND excluded.ai_status = 'failed' THEN saved_reports.ai_score ELSE excluded.ai_score END,
         ai_tone = CASE WHEN saved_reports.ai_status = 'ready' AND excluded.ai_status = 'failed' THEN saved_reports.ai_tone ELSE excluded.ai_tone END,
         ai_status = CASE WHEN saved_reports.ai_status = 'ready' AND excluded.ai_status = 'failed' THEN saved_reports.ai_status ELSE excluded.ai_status END,
-        payload_json = CASE WHEN saved_reports.ai_status = 'ready' AND excluded.ai_status = 'failed' THEN saved_reports.payload_json ELSE excluded.payload_json END,
+        payload_json = CASE
+          WHEN saved_reports.ai_status = 'ready' AND excluded.ai_status = 'failed' THEN saved_reports.payload_json
+          WHEN COALESCE(json_extract(saved_reports.payload_json, '$.unifiedSimilarityGeneration'), -1) > COALESCE(json_extract(excluded.payload_json, '$.unifiedSimilarityGeneration'), -1)
+            THEN CASE
+              WHEN json_extract(excluded.payload_json, '$.aiAnalysis') IS NOT NULL
+                THEN json_set(saved_reports.payload_json, '$.aiAnalysis', json_extract(excluded.payload_json, '$.aiAnalysis'), '$.aiScore', json_extract(excluded.payload_json, '$.aiScore'))
+              ELSE saved_reports.payload_json
+            END
+          ELSE excluded.payload_json
+        END,
         user_id = COALESCE(excluded.user_id, saved_reports.user_id),
         updated_at = CURRENT_TIMESTAMP`;
 
@@ -84,10 +162,38 @@ async function insertReportWithRoomCheck(params: {
   aiScore: number | null; aiTone: string | null; aiStatus: string | null;
   payloadJson: string; userId: string | null;
   roomNumberForInsert: number | null; roomOwnerId: string | null;
+  /**
+   * Device Passport (Phase 2): the cryptographically verified upload
+   * passport, or null. Written in a SECOND statement inside this same
+   * transaction, immediately after the row is inserted — never folded into
+   * SAVE_REPORT_SQL (which several tests exercise as an exact string) — and
+   * guarded `WHERE verified_device_passport_id IS NULL`, so it can only ever
+   * be set once. The caller passes non-null only on a genuine first save; a
+   * resave passes null and this statement never runs.
+   */
+  verifiedDevicePassportId: string | null;
+  /**
+   * Device Passport actor-usage ledger (drizzle/0041): the resolved actor
+   * observation for this upload — a keyed pseudonym for an authenticated
+   * account, or the anonymous sentinel — or null when it could not be
+   * resolved (an authenticated upload whose actor HMAC key is unavailable).
+   * Only consulted when verifiedDevicePassportId is non-null.
+   *
+   * For a tracking-version-1 passport the actor-usage UPSERT runs INSIDE this
+   * transaction and a null observation / failed UPSERT rolls the whole first
+   * save back — the verified first save and its usage evidence are one atomic
+   * unit, never "save then best-effort ledger then swallow failure". For a
+   * legacy (version-0) passport the observation is positive evidence only,
+   * written best-effort AFTER commit.
+   */
+  actorObservation: ActorObservation | null;
 }): Promise<{ conflict: { mostRecent: string } | null }> {
   for (let attempt = 1; attempt <= MAX_ROOM_INSERT_BUSY_RETRIES; attempt++) {
     const txClient = await getReportsDbClient();
     try {
+      // Legacy (tracking-version-0) passport only: recorded best-effort AFTER
+      // this transaction commits — see the version check below.
+      let legacyActorLedgerWrite: { devicePassportId: string; observation: ActorObservation } | null = null;
       const tx = await txClient.transaction('write');
       try {
         let conflict: { mostRecent: string } | null = null;
@@ -111,8 +217,64 @@ async function insertReportWithRoomCheck(params: {
               params.payloadJson, params.userId, params.roomNumberForInsert,
             ],
           });
+          if (params.verifiedDevicePassportId) {
+            // Immutable upload-time device provenance — set once, in the same
+            // transaction as the insert, never overwritten (the IS NULL
+            // guard). See db/schema.ts's saved_reports.verified_device_passport_id.
+            await tx.execute({
+              sql: `UPDATE saved_reports SET verified_device_passport_id = ?
+                    WHERE device_key = ? AND id = ? AND verified_device_passport_id IS NULL`,
+              args: [params.verifiedDevicePassportId, params.deviceKey, params.id],
+            });
+
+            // Device Passport actor-usage ledger (drizzle/0041). Read the
+            // passport's completeness marker INSIDE this transaction so the
+            // atomicity decision can't race a concurrent register/revoke.
+            const trackingVersion = await readActorUsageTrackingVersion(tx, params.verifiedDevicePassportId);
+            if (trackingVersion >= 1) {
+              // ATOMIC: a version-1 passport's verified first save and its
+              // actor-usage observation succeed together or not at all. A
+              // missing observation (authenticated upload, actor HMAC key
+              // unavailable) or a failed UPSERT throws here → the whole
+              // transaction rolls back → no partially-saved report with
+              // missing usage evidence. We never silently claim completeness.
+              if (!params.actorObservation) {
+                throw new Error(
+                  'device passport actor ledger: a tracking-version-1 passport has no resolvable actor observation for this save — refusing to persist a first save with missing usage evidence',
+                );
+              }
+              await recordDevicePassportActorUsage(tx, {
+                devicePassportId: params.verifiedDevicePassportId,
+                observation: params.actorObservation,
+                observedAt: Date.now(),
+              });
+            } else if (params.actorObservation) {
+              // Legacy (version-0) passport: it stays history-incomplete no
+              // matter what, so its actor observation is POSITIVE EVIDENCE
+              // ONLY — recorded best-effort after commit, never allowed to
+              // fail the save.
+              legacyActorLedgerWrite = {
+                devicePassportId: params.verifiedDevicePassportId,
+                observation: params.actorObservation,
+              };
+            }
+          }
         }
         await tx.commit();
+        if (legacyActorLedgerWrite) {
+          try {
+            await recordDevicePassportActorUsage(txClient, {
+              devicePassportId: legacyActorLedgerWrite.devicePassportId,
+              observation: legacyActorLedgerWrite.observation,
+              observedAt: Date.now(),
+            });
+          } catch (err) {
+            console.error(
+              'device passport actor ledger (legacy positive-evidence, non-fatal):',
+              err instanceof Error ? err.message : String(err),
+            );
+          }
+        }
         return { conflict };
       } catch (err) {
         await tx.rollback().catch(() => {});
@@ -146,7 +308,7 @@ export async function POST(request: Request) {
     const body = await request.json().catch(() => null);
     if (!body || typeof body !== 'object') return new NextResponse(JSON.stringify({ error: 'Invalid JSON' }), { status: 400 });
 
-    const { deviceKey, id, submissionId, title, createdAt, wordCount, archiveScore, scoreBand, aiScore, aiTone, aiStatus, payload, academicSearchDiagnosticsId, room } = body as Record<string, unknown>;
+    const { deviceKey, id, submissionId, title, createdAt, wordCount, archiveScore, scoreBand, aiScore, aiTone, aiStatus, payload, academicSearchDiagnosticsId, room, devicePassport } = body as Record<string, unknown>;
 
     // device_key is part of saved_reports' composite primary key, so it is
     // always required regardless of authentication state — unlike the list/
@@ -292,6 +454,260 @@ export async function POST(request: Request) {
         roomOwnerId = sessionUser.id;
       }
 
+      const reportPayload = payload as SimilarityReport;
+
+      // Device Passport (Phase 2/4): cryptographically verify an optional
+      // upload-time device attestation. ORDERING (Preview same-device SELF
+      // rule): this MUST run BEFORE write-time similarity finalization below,
+      // so the FIRST persisted unified-similarity score for this report can
+      // already reflect the same-device SELF downgrade computed against the
+      // passport verified in THIS request — never relying on a later
+      // POST/resave or a GET to correct it. Verification itself is otherwise
+      // unchanged and still touches nothing about the matcher or scoring
+      // directly; only its verified output (verifiedDevicePassportId) is
+      // threaded into resolvePrimarySimilaritySummary. Attempted only when the
+      // feature flag is ON, this is a genuine first save (a resave carries no
+      // fresh challenge), the attestation object is present, and the payload
+      // has real text to bind a hash to.
+      //
+      // Fail-safe by construction: verifyDevicePassportAttestation returns
+      // null (never throws) for every failure — bad signature, expired /
+      // consumed / missing challenge, wrong session/account binding,
+      // unregistered or revoked passport, tampered text or report id,
+      // malformed base64, oversized field, DB error — and the report upload
+      // then proceeds exactly as if no attestation had been sent (and no
+      // same-device SELF downgrade is possible). Only positive verified
+      // evidence ever produces a non-null id.
+      let verifiedDevicePassportId: string | null = null;
+      if (
+        isDevicePassportEnabled() &&
+        isFirstSaveOfThisReport &&
+        devicePassport && typeof devicePassport === 'object' &&
+        isNonEmptyString(reportPayload?.text)
+      ) {
+        const dp = devicePassport as Record<string, unknown>;
+        const attestationFieldsOk = [dp.challengeId, dp.nonce, dp.publicKeySpki, dp.signature].every(
+          (v) => typeof v === 'string' && v.length > 0 && v.length <= MAX_ATTESTATION_FIELD_LENGTH,
+        );
+        if (attestationFieldsOk) {
+          try {
+            const rawSessionToken = parseCookie(request.headers.get('cookie'), SESSION_COOKIE_NAME);
+            verifiedDevicePassportId = await verifyDevicePassportAttestation(client, {
+              challengeId: dp.challengeId,
+              nonce: dp.nonce,
+              publicKeySpki: dp.publicKeySpki,
+              signature: dp.signature,
+              method: 'POST',
+              path: '/api/reports',
+              payloadText: reportPayload.text,
+              reportId: id,
+              currentAccountId: userId,
+              currentSessionTokenHash: sessionUser && rawSessionToken ? hashToken(rawSessionToken) : null,
+            });
+          } catch (err) {
+            console.error('device passport verification failed unexpectedly (non-fatal, report upload proceeds without provenance):', err instanceof Error ? err.message : String(err));
+            verifiedDevicePassportId = null;
+          }
+        }
+      }
+
+      // Release-hardening audit finding SIM-03: write-time finalization —
+      // the report-generation pipeline's own authoritative unified-
+      // similarity computation, persisted here (inside payload_json, via
+      // payloadJson below) BEFORE this save's response is ever sent, never
+      // deferred via runAfterResponse. That distinction matters: after()
+      // gives no ordering guarantee relative to this same client's very
+      // next request (see lib/run-after-response.ts's own header comment
+      // and lib/report-historical-match.ts's own documented E8D race for a
+      // concrete precedent) — a deferred finalization could still be
+      // in-flight when the client turns around and opens the report or
+      // polls its room, reproducing exactly the "still matching after the
+      // user opens it" bug this fix exists to close.
+      //
+      // Runs on EVERY save with real text, not only the first: a resave's
+      // own payload only ever carries the CLIENT's own partial (archive +
+      // live-academic only — see lib/document-check-pipeline.ts's
+      // attachUnifiedSimilarity, which has no way to reach the corpus at
+      // all) computation, and the UPSERT below replaces payload_json
+      // unconditionally; skipping this on a resave would silently regress
+      // an already-finalized report back to that partial value.
+      // getOrComputeHistoricalMatchSnapshot's own snapshot cache (reused
+      // as-is, never a second matching implementation) makes every call
+      // after the first genuine one for this exact (deviceKey, id) a cheap
+      // cache hit, never a second real matcher search — see
+      // tests/report-primary-similarity.test.mjs's own dedup coverage.
+      //
+      // Never touches archiveScore/score/scoreBand — only
+      // payload.unifiedSimilarity, exactly like every other read-time
+      // enrichment in this codebase already respects (see
+      // lib/unified-similarity.ts's own DECISION 3).
+      //
+      // Release-hardening audit finding SIM-04: wrapped in its own
+      // try/catch — this OUTER catch is for anything unexpected bubbling
+      // out of resolvePrimarySimilaritySummary itself (e.g. a DB
+      // connectivity error in getCurrentCorpusMatchGeneration or the
+      // historical-match snapshot's own initial read, both outside that
+      // function's own try/catch) — likely transient infrastructure
+      // trouble, not a permanent, reproducible computation failure, so it
+      // is deliberately left as "pending" (payloadJsonToPersist stays the
+      // client's own submitted payloadJson, unchanged), eligible for an
+      // automatic retry on the next view. This is distinct from
+      // resolution.failed below (LIFECYCLE-06, corrected): THAT is
+      // resolvePrimarySimilaritySummary's own INNER catch — computeUnifiedSimilarity
+      // itself threw for this report's own data, a genuine, reproducible
+      // overall-computation failure — persisted explicitly as
+      // unifiedSimilarityFailed: true rather than silently staying
+      // "pending" forever. SAVE_REPORT_SQL's own generation guard protects
+      // both branches identically: an unenriched or failed-and-persisted
+      // payload can never regress an already-good persisted result from an
+      // earlier successful save.
+      let payloadJsonToPersist = payloadJson;
+      // Shadow-telemetry handoff. ONE request-local object, function-local to
+      // POST() and set exactly once (inside the try block below, immediately
+      // after resolvePrimarySimilaritySummary returns) — never module scope,
+      // never mutated after capture. Declared out here only because `resolution`
+      // itself is scoped to that try block. It carries:
+      //   - production's own write-time historical-match result and authoritative
+      //     UnifiedSimilarityResult, reused verbatim by the deferred evaluators
+      //     below (after the row is persisted) — never a second matcher run,
+      //     never a recomputed or mutated score; and
+      //   - the EXACT archive / live-academic scoring inputs THIS request fed
+      //     into that resolvePrimarySimilaritySummary call, so the Phase B2
+      //     counterfactual is measured against precisely the authoritative
+      //     inputs and never re-reads payload_json (which a concurrent resave /
+      //     self-heal could drift).
+      // Stays null when this save carries no finalizable text or finalization
+      // threw unexpectedly; the GET /api/reports/[id] fallback trigger still
+      // covers those reports.
+      let shadowEvaluationInputs:
+        | {
+            historicalSubmissionMatch: ReportHistoricalSubmissionMatch;
+            unifiedSimilarity: UnifiedSimilarityResult | null;
+            effectiveDeviceSelfRepresentationIds: readonly string[];
+            authoritativeCorpusGeneration: number;
+            archiveMatchedPositions: number[] | null;
+            externalAcademicEvidence: ExternalAcademicEvidence[] | null;
+          }
+        | null = null;
+      if (isNonEmptyString(reportPayload?.text)) {
+        try {
+          const resolution = await resolvePrimarySimilaritySummary(client, {
+            reportDeviceKey: deviceKey,
+            reportId: id,
+            accountId: userId,
+            rawText: reportPayload.text,
+            wordCount: reportPayload.wordCount,
+            archiveMatchedPositions: reportPayload.archiveMatchedPositions,
+            externalAcademicEvidence: reportPayload.externalAcademicEvidence,
+            archiveScore: reportPayload.archiveScore ?? reportPayload.score,
+            // Preview same-device SELF rule: on a genuine first save the
+            // saved_reports row (and its verified_device_passport_id) does not
+            // exist yet — hand the passport verified moments ago in THIS
+            // request straight in, so the FIRST persisted unified score
+            // already reflects any same-device SELF downgrade. On a resave the
+            // row exists, so pass undefined and let the resolver read the
+            // persisted, immutable upload passport itself.
+            verifiedDevicePassportId: isFirstSaveOfThisReport ? verifiedDevicePassportId : undefined,
+          });
+          // Reused as-is by the deferred shadow evaluators below — the SAME
+          // resolvePrimarySimilaritySummary output the GET route hands them,
+          // populated on both the success and the
+          // computeUnifiedSimilarity-failed branches. archiveMatchedPositions /
+          // externalAcademicEvidence are the very values passed into the
+          // resolvePrimarySimilaritySummary call just above, captured here so
+          // the Phase B2 counterfactual uses the authoritative scoring inputs
+          // exactly.
+          shadowEvaluationInputs = {
+            historicalSubmissionMatch: resolution.historicalSubmissionMatch,
+            unifiedSimilarity: resolution.unifiedSimilarity ?? null,
+            effectiveDeviceSelfRepresentationIds: resolution.effectiveDeviceSelfRepresentationIds,
+            authoritativeCorpusGeneration: resolution.corpusGeneration,
+            archiveMatchedPositions: reportPayload.archiveMatchedPositions ?? null,
+            externalAcademicEvidence: reportPayload.externalAcademicEvidence ?? null,
+          };
+          if (resolution.unifiedSimilarity) {
+            payloadJsonToPersist = JSON.stringify({
+              ...reportPayload,
+              unifiedSimilarity: resolution.unifiedSimilarity,
+              corpusSourceMatchingEnabledAtComputation: resolution.corpusSourceMatchingEnabled,
+              unifiedSimilarityGeneration: resolution.corpusGeneration,
+              // Explicit false, never omitted: a resave following an
+              // earlier genuine failure must clear that marker, not let it
+              // survive via reportPayload's own spread (which, for a retry
+              // resave built by re-reading the previously stored report,
+              // could otherwise still carry it forward).
+              unifiedSimilarityFailed: false,
+            });
+            if (payloadJsonToPersist.length > MAX_BYTES) {
+              return new NextResponse(JSON.stringify({ error: 'Payload too large' }), { status: 413 });
+            }
+          } else if (resolution.failed) {
+            // Release-hardening audit finding LIFECYCLE-06 (corrected): a
+            // genuine, reproducible overall-computation failure (see
+            // resolution.failed's own comment) — persisted explicitly
+            // instead of silently leaving this report indistinguishable
+            // from "never attempted" (which stays "pending" forever,
+            // auto-retried on every view, but never gives the user an
+            // honest, actionable "Unavailable" the atomic reveal can work
+            // with). unifiedSimilarityGeneration is still recorded so this
+            // write participates correctly in SAVE_REPORT_SQL's own
+            // generation guard below — omitting it would let COALESCE(...,
+            // -1) make this failure write always lose to ANY already-
+            // persisted generation, including a much older one, and never
+            // actually land.
+            //
+            // Release-hardening audit finding LIFECYCLE-06 (approval-pass
+            // fix): unifiedSimilarity: undefined is REQUIRED here, not
+            // decorative. reportPayload is the client's own submitted
+            // payload — for a resave built from a locally-cached copy of a
+            // PREVIOUSLY successful result (e.g. saveEnrichedAiResult's
+            // {...report, ...aiResult} spread), reportPayload.unifiedSimilarity
+            // can already be set. Without this explicit clear, the spread
+            // below would silently carry that stale success forward
+            // alongside the fresh unifiedSimilarityFailed marker —
+            // resolvePersistedSimilarityDisplay checks hasUnifiedSimilarity
+            // BEFORE unifiedSimilarityFailed (a real result is meant to
+            // always win over a stale failure marker — see that function's
+            // own comment), so a lingering stale success would silently
+            // mask this genuinely fresh failure, showing "resolved" with an
+            // outdated score instead of "Unavailable". JSON.stringify drops
+            // an `undefined`-valued key entirely, so this genuinely deletes
+            // the field rather than persisting a literal null.
+            payloadJsonToPersist = JSON.stringify({
+              ...reportPayload,
+              unifiedSimilarity: undefined,
+              unifiedSimilarityFailed: true,
+              corpusSourceMatchingEnabledAtComputation: resolution.corpusSourceMatchingEnabled,
+              unifiedSimilarityGeneration: resolution.corpusGeneration,
+            });
+            if (payloadJsonToPersist.length > MAX_BYTES) {
+              return new NextResponse(JSON.stringify({ error: 'Payload too large' }), { status: 413 });
+            }
+          }
+        } catch (err) {
+          console.error('write-time similarity finalization failed unexpectedly (non-fatal, report save proceeds without it):', err instanceof Error ? err.message : String(err));
+        }
+      }
+
+      // (Device Passport verification for this upload was performed above,
+      // BEFORE write-time similarity finalization — see verifiedDevicePassportId's
+      // own block for why the ordering matters for the Preview same-device
+      // SELF rule.)
+
+      // Device Passport actor-usage ledger (drizzle/0041): resolve the durable
+      // actor observation for this upload — a keyed pseudonym for an
+      // authenticated account, or the fixed anonymous sentinel — so
+      // insertReportWithRoomCheck can record it. For a tracking-version-1
+      // passport it is written ATOMICALLY with the first-save insert; for a
+      // legacy passport it is positive evidence written best-effort. null here
+      // (authenticated upload whose actor HMAC key is unavailable) makes a
+      // version-1 first save fail rather than persist without usage evidence.
+      // Nothing in this block feeds any scoring path — the raw account id is
+      // never stored, and no ordinary API exposes actorObservationForLedger.
+      const actorObservationForLedger: ActorObservation | null = verifiedDevicePassportId
+        ? resolveActorObservation(userId)
+        : null;
+
       // Concurrency (production audit fix): the occupancy check and the
       // insert must be one atomic unit relative to any OTHER concurrent
       // request touching the same room slot — otherwise two different new
@@ -305,7 +721,9 @@ export async function POST(request: Request) {
       const { conflict: roomConflict } = await insertReportWithRoomCheck({
         id, deviceKey, submissionId, title, createdAt, wordCount, archiveScore, scoreBand,
         aiScore: aiScore ?? null, aiTone: aiTone ?? null, aiStatus: aiStatus ?? null,
-        payloadJson, userId, roomNumberForInsert, roomOwnerId,
+        payloadJson: payloadJsonToPersist, userId, roomNumberForInsert, roomOwnerId,
+        verifiedDevicePassportId,
+        actorObservation: actorObservationForLedger,
       });
 
       if (roomConflict) {
@@ -316,6 +734,26 @@ export async function POST(request: Request) {
           }),
           { status: 409, headers: { 'Content-Type': 'application/json' } },
         );
+      }
+
+      // Device Passport (Phase 2): bump this ONE passport's
+      // provenance_generation only when this just-inserted verified report
+      // introduces a NEW (passport, account) association — a repeat report
+      // from the same account on the same passport does not bump; the first
+      // anonymous report from a passport does. Never a global counter, so it
+      // never invalidates a report tied to a different passport. Synchronous
+      // (one indexed lookup + at most one one-statement UPDATE), best-effort.
+      if (verifiedDevicePassportId) {
+        try {
+          await maybeBumpDevicePassportProvenanceGeneration(client, {
+            passportId: verifiedDevicePassportId,
+            accountId: userId,
+            deviceKey,
+            reportId: id,
+          });
+        } catch (err) {
+          console.error('device passport provenance-generation bump failed (non-fatal):', err instanceof Error ? err.message : String(err));
+        }
       }
 
       // Document identity + fingerprint + family capture (Phase A/B/C):
@@ -346,13 +784,27 @@ export async function POST(request: Request) {
       // was ever supposed to happen; this durable 'pending' row is what a
       // later corpus-admission retry sweep (lib/corpus-admission-report-
       // integration.ts's runReportAdmissionRetrySweep) can find and
-      // process instead. Gated on sessionUser.corpusReuseConsented (the
-      // request-time snapshot) purely to avoid creating a pointless row for
-      // every non-consenting upload — the actual admission work, run
-      // below, always re-checks consent fresh regardless of this snapshot.
+      // process instead. Product decision: corpus-admission eligibility is
+      // mandatory for every authenticated account, no per-account
+      // preference can block it — createPendingReportAdmissionJob's own
+      // CORPUS_ADMISSION_ENABLED flag check is the only remaining gate
+      // (still off by default), and processReportAdmissionJob below no
+      // longer re-checks or can be blocked by users.corpus_reuse_consented_at
+      // either (see that function's own header comment) — that column is
+      // now a vestigial historical timestamp (db/schema.ts).
       let pendingAdmissionJobId: string | null = null;
-      if (rawText && isFirstSaveOfThisReport && userId !== null && sessionUser?.corpusReuseConsented) {
-        const created = await createPendingReportAdmissionJob(client, { accountId: userId, deviceKey, reportId: id });
+      if (rawText && isFirstSaveOfThisReport && userId !== null) {
+        // Device Passport (Phase 2): the verified upload passport is copied
+        // onto the job here, from the verified upload context — never
+        // re-derived later. processReportAdmissionJob reads it back from the
+        // job row and, on ACCEPT, records
+        // corpus_admission_decision_device_provenance.
+        const created = await createPendingReportAdmissionJob(client, {
+          accountId: userId,
+          deviceKey,
+          reportId: id,
+          verifiedDevicePassportId,
+        });
         pendingAdmissionJobId = created?.jobId ?? null;
       }
 
@@ -412,28 +864,31 @@ export async function POST(request: Request) {
             }
             // Corpus-admission hardening: this route no longer calls
             // lib/user-submission-corpus.ts's indexDocumentSubmissionIntoCorpus
-            // directly (Phase E8D's original activation, removed). Automatic
-            // reusable-corpus INDEXING (making content live-searchable via
-            // corpus_document_representations et al) still requires a
-            // separate, later, explicitly out-of-scope phase — see
-            // tests/corpus-admission-privacy.test.mjs's structural proof that
-            // no file under app/ can reach indexDocumentSubmissionIntoCorpus.
+            // directly (Phase E8D's original activation, removed) — that
+            // specific, account-linked live-indexing path stays out of scope
+            // here, still enforced by tests/corpus-admission-privacy.test.mjs's
+            // structural proof that no file under app/ can reach it.
             //
-            // Controlled ADMISSION (not indexing) is wired below:
-            // processReportAdmissionJob runs the full corpus-admission gate
-            // (lib/corpus-admission-gate.ts — English-only, 3000-word
-            // minimum, quality scoring, retention/consent, "first accepted
-            // sample wins" family-duplicate checks) against the job row
-            // already created SYNCHRONOUSLY above (before this deferred
-            // callback ever started — see that call site's own comment for
-            // why), and records its own audit trail, entirely behind
-            // CORPUS_ADMISSION_ENABLED (off by default) and a fresh,
-            // request-time-independent re-check of
-            // users.corpus_reuse_consented_at — see
-            // lib/corpus-admission-report-integration.ts's own header
-            // comment for why sessionUser.corpusReuseConsented (captured
-            // earlier in this same request) is deliberately never trusted
-            // for the actual admission decision.
+            // Controlled ADMISSION is wired below: processReportAdmissionJob
+            // runs the full corpus-admission gate (lib/corpus-admission-
+            // gate.ts — English-only, 3000-word minimum, quality scoring,
+            // retention, "first accepted sample wins" family-duplicate
+            // checks) against the job row already created SYNCHRONOUSLY
+            // above (before this deferred callback ever started — see that
+            // call site's own comment for why), and records its own audit
+            // trail, entirely behind CORPUS_ADMISSION_ENABLED (off by
+            // default). Product decision: corpus-admission eligibility is
+            // mandatory for every authenticated account — no per-account
+            // preference gates it any more, so there is no consent re-check
+            // here (see lib/corpus-admission-report-integration.ts's own
+            // header comment). As of the automatic-
+            // promotion fix, processReportAdmissionJob also immediately
+            // stages and attempts to promote a fresh ACCEPT into the real
+            // reusable corpus (never the account-linked
+            // indexDocumentSubmissionIntoCorpus path above — a separate,
+            // narrower mechanism via lib/corpus-admission-promotion.ts, see
+            // that module's own header comment), behind its own
+            // CORPUS_PROMOTION_ENABLED flag.
             if (capturedPendingAdmissionJobId !== null) {
               try {
                 await processReportAdmissionJob(deferredClient, {
@@ -454,6 +909,41 @@ export async function POST(request: Request) {
           } finally {
             deferredClient.close();
           }
+        });
+      }
+
+      // Shadow-telemetry handoff for write-time-finalized reports: the
+      // report row is now durably persisted (including any verified upload
+      // passport, written inside the same transaction as the insert by
+      // insertReportWithRoomCheck), so schedule the SAME measurement-only
+      // evaluators the GET /api/reports/[id] route runs — the historical-
+      // match shadow (lib/e8p-shadow-evaluation.ts) and the device-
+      // provenance shadow (lib/device-provenance-shadow.ts) — through the
+      // one shared lib/report-shadow-evaluations.ts helper so the two
+      // trigger sites cannot drift. Required because a report whose unified
+      // similarity finalizes here at write time (and whose AI is already
+      // done) is frequently never fetched through that GET route at all, so
+      // its telemetry would otherwise never be recorded. Reuses
+      // productionResult from write-time finalization above verbatim — never
+      // recomputes or touches the score — is deferred via runAfterResponse
+      // (never adds response latency), is best-effort (a telemetry failure
+      // never fails this save), and is idempotent: both evaluators UPSERT
+      // one row per (device_key, id, policy_version), so a later GET on the
+      // same report converges on that row rather than duplicating it.
+      // Skipped when write-time finalization produced no result to hand over
+      // (no text, or an unexpected throw) — GET remains the fallback there.
+      if (shadowEvaluationInputs !== null) {
+        await scheduleReportShadowEvaluations({
+          reportDeviceKey: deviceKey,
+          reportId: id,
+          accountId: userId,
+          rawText: reportPayload.text,
+          productionResult: shadowEvaluationInputs.historicalSubmissionMatch,
+          authoritativeUnifiedSimilarity: shadowEvaluationInputs.unifiedSimilarity,
+          effectiveDeviceSelfRepresentationIds: shadowEvaluationInputs.effectiveDeviceSelfRepresentationIds,
+          authoritativeCorpusGeneration: shadowEvaluationInputs.authoritativeCorpusGeneration,
+          authoritativeArchiveMatchedPositions: shadowEvaluationInputs.archiveMatchedPositions,
+          authoritativeExternalAcademicEvidence: shadowEvaluationInputs.externalAcademicEvidence,
         });
       }
     } finally {

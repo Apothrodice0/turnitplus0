@@ -10,6 +10,7 @@ import { resetRateForTest, resetAuthRateForTest } from "../lib/rate-limit.js";
 import { rawSha256 } from "../lib/document-identity.ts";
 import { findFamilyForIdentity } from "../lib/document-family.ts";
 import { classifyFamilyRelationships } from "../lib/document-relationship.ts";
+import { withTestIdentity } from './helpers/test-signup.mjs';
 
 // Phase C activation: POST /api/reports now runs the full identity +
 // fingerprint + family pipeline (lib/document-family.ts's
@@ -57,7 +58,7 @@ async function signup(email, deviceKey) {
   const req = new Request("http://localhost/api/auth/signup", {
     method: "POST",
     headers: { "content-type": "application/json", "x-forwarded-for": `activation-signup-${email}` },
-    body: JSON.stringify({ email, password: "activation-password-1", username: email.split("@")[0], deviceKey }),
+    body: JSON.stringify(withTestIdentity({ email, password: "activation-password-1", username: email.split("@")[0], deviceKey })),
   });
   const res = await signupRoute.POST(req);
   // Privacy hardening: grants cross-account corpus-reuse consent immediately

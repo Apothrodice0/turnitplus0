@@ -1,4 +1,4 @@
-import { grams, gramHash, detectLanguage, normalize, COMMON_WORDS } from "./similarity-core";
+import { grams, gramHash, detectDominantLanguage, normalize, COMMON_WORDS } from "./similarity-core";
 import { stripReferenceSection } from "./reference-section";
 import { stripBoilerplateSections } from "./boilerplate-section";
 
@@ -95,7 +95,7 @@ export type CorpusLinguisticQualitySignals = {
   sentenceCount: number;
   meanSentenceLengthWords: number;
   sentenceLengthCv: number;
-  detectedLanguage: ReturnType<typeof detectLanguage>;
+  detectedLanguage: ReturnType<typeof detectDominantLanguage>["language"];
   languageConfidence: number;
   mattr: number;
   mattrWindowSize: number;
@@ -115,42 +115,19 @@ function movingAverageTypeTokenRatio(words: string[], windowSize: number): numbe
   return windows === 0 ? 0 : sum / windows;
 }
 
-/**
- * Not a re-derivation of lib/similarity-core.ts's detectLanguage() decision
- * (that function is called directly for the language value itself) — this
- * reuses the SAME underlying script-ratio/French-stopword signals purely to
- * express how decisively detectLanguage's own internal boundaries were
- * crossed, as a continuous [0,1] confidence rather than a bare label.
- * ENGINEERING_DEFAULT heuristic, not independently calibrated.
- */
-function languageConfidenceFor(text: string, detected: ReturnType<typeof detectLanguage>): number {
-  const arabic = (text.match(/[؀-ۿ]/g) ?? []).length;
-  const latin = (text.match(/[a-zà-ÿ]/gi) ?? []).length;
-  const totalScript = arabic + latin;
-  if (totalScript === 0) return 0;
-  if (detected === "Mixed") return 0.5;
-
-  if (detected === "Arabic") {
-    const ratio = arabic / totalScript;
-    return Math.max(0, Math.min(1, (ratio - 0.5) * 2));
-  }
-
-  const normalized = ` ${normalize(text)} `;
-  const frenchSignals = [" le ", " la ", " les ", " des ", " une ", " dans ", " avec ", " pour "]
-    .filter((signal) => normalized.includes(signal)).length;
-  if (detected === "French") {
-    return Math.max(0, Math.min(1, (frenchSignals - 3) / 3 + 0.5));
-  }
-  return Math.max(0, Math.min(1, 1 - frenchSignals / 3));
-}
-
 function computeLinguisticQuality(text: string, fullWordCount: number): CorpusLinguisticQualitySignals {
   const bodyText = stripReferenceSection(text);
   const bodyWords = wordTokens(bodyText);
 
   const sentences = (bodyText.match(SENTENCE_SPLIT_PATTERN) ?? []).map((s) => s.trim()).filter(Boolean);
   const sentenceLengths = sentences.map((s) => countWords(s)).filter((n) => n > 0);
-  const detectedLanguage = detectLanguage(text);
+  // Centralized: label AND confidence come from the SAME
+  // lib/similarity-core.ts computation now (detectDominantLanguage) — this
+  // module used to re-derive its own [0,1] confidence from a second,
+  // separately-hand-maintained copy of the script-ratio/stopword signals
+  // (languageConfidenceFor, removed), which is exactly the kind of drift
+  // that let corpus admission and report/AI eligibility silently disagree.
+  const { language: detectedLanguage, confidence: languageConfidence } = detectDominantLanguage(text);
 
   return {
     wordCount: fullWordCount,
@@ -158,7 +135,7 @@ function computeLinguisticQuality(text: string, fullWordCount: number): CorpusLi
     meanSentenceLengthWords: mean(sentenceLengths),
     sentenceLengthCv: coefficientOfVariation(sentenceLengths),
     detectedLanguage,
-    languageConfidence: languageConfidenceFor(text, detectedLanguage),
+    languageConfidence,
     mattr: movingAverageTypeTokenRatio(bodyWords, MATTR_WINDOW_SIZE),
     mattrWindowSize: MATTR_WINDOW_SIZE,
   };

@@ -9,6 +9,7 @@ import {
   TARGET_MIGRATIONS,
   EXPECTED_TABLES_BY_MIGRATION,
   EXPECTED_COLUMNS_BY_MIGRATION,
+  EXPECTED_INDEXES_BY_MIGRATION,
   ALL_TARGET_TABLES,
   EXPECTED_LEGACY_TABLES,
   EXPECTED_MIGRATION_SHA256,
@@ -20,6 +21,7 @@ import {
   checkPreflight,
   tableSetState,
   columnSetState,
+  indexSetState,
   runTargetMigrations,
 } from '../lib/e8-tables-migration-runner.ts';
 import { loadEnvFile, hostnameLabel, parseArgs } from '../tools/apply-e8-tables-migration.ts';
@@ -107,9 +109,11 @@ async function snapshotLegacyRows(client) {
 
 test.after(() => {
   for (const name of [
-    'a', 'b', 'b2', 'c', 'd', 'e', 'e2', 'f', 'g', 'h', 'i', 'j', 'k', 'happy', 'idempotent',
+    'a', 'b', 'b2', 'b3', 'c', 'd', 'e', 'e2', 'e3', 'f', 'g', 'h', 'i', 'j', 'k', 'happy', 'idempotent',
     'g2-real', 'g2-extra', 'g2-wrong-file', 'g2-near-miss', 'g2-unrelated',
-    'upgrade-0028', 'interrupted', 'schema-0032',
+    'g3-real', 'g3-extra', 'g3-wrong-file', 'g3-near-miss',
+    'upgrade-0028', 'interrupted', 'schema-0032', 'a2-preflight', 'a2-apply',
+    'a3-preflight', 'a3-apply',
   ]) {
     cleanupDbFile(freshDbPath(name));
   }
@@ -117,7 +121,7 @@ test.after(() => {
 
 // --- A: explicit allowlist ------------------------------------------------
 
-test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0036, in order, never touching 0000-0011', () => {
+test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0051, in order, never touching 0000-0011', () => {
   assert.deepEqual(TARGET_MIGRATIONS, [
     '0012_document_identities.sql',
     '0013_document_families.sql',
@@ -144,6 +148,21 @@ test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0036, in ord
     '0034_corpus_admission_promotions.sql',
     '0035_report_historical_match_snapshots_partial.sql',
     '0036_corpus_match_generation.sql',
+    '0037_corpus_admission_sweep_runs.sql',
+    '0038_device_passports.sql',
+    '0039_device_passport_provenance.sql',
+    '0040_report_historical_match_snapshots_device_generation.sql',
+    '0041_device_passport_actor_usage.sql',
+    '0042_account_owner_links.sql',
+    '0043_corpus_maturity_indexes.sql',
+    '0044_corpus_duplicate_suppression_shadow_evaluations.sql',
+    '0045_account_identity.sql',
+    '0046_email_verification_challenges.sql',
+    '0047_developer_corpus_maturity_exemptions.sql',
+    '0048_archive_document_representations.sql',
+    '0049_archive_scalable_index.sql',
+    '0050_archive_cosource_adjacency.sql',
+    '0051_corpus_shingle_hash_version_cursor_index.sql',
   ]);
   // Phase E8S Step 8: 0022_reuse_context_declarations.sql added
   // reuse_context_declarations, bringing the 15 E1-E8P tables across the
@@ -175,8 +194,44 @@ test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0036, in ord
   // (corpus_match_generation, plus a column on the same snapshots table —
   // see EXPECTED_TABLES_BY_MIGRATION's own comment on why table-existence
   // alone is sufficient for that hybrid case) — 26, across 25 target
-  // migrations total.
-  assert.equal(ALL_TARGET_TABLES.length, 26, 'expected exactly 26 tables across all 25 target migrations');
+  // migrations total. The Device Passport schema foundation then adds 4 more
+  // migrations (0037-0040): 0037 folds in corpus_admission_sweep_runs (which
+  // shipped file-only in a501f38) — 27; 0038 creates 2 (device_passports,
+  // device_passport_challenges) — 29; 0039 creates 1
+  // (corpus_admission_decision_device_provenance, a hybrid that also adds two
+  // verified_device_passport_id columns — table-existence tracked, see that
+  // entry's comment) — 30; 0040 creates zero (one column,
+  // report_historical_match_snapshots.device_provenance_generation) — stays
+  // 30, across 29 target migrations total. The direct-owner-link /
+  // corpus-maturity / account-identity / email-verification / developer
+  // corpus-maturity extension then adds 7 more migrations (0041-0047): 0041
+  // creates 1 (device_passport_actor_usage, plus a column on device_passports
+  // — hybrid, table-tracked) — 31; 0042 creates 4 (the direct owner-link
+  // foundation's four tables, plus a column on report_historical_match_snapshots
+  // — hybrid, table-tracked) — 35; 0043 creates zero (two indexes on already-
+  // existing tables, the first target migration with neither a new table nor
+  // a new column — see EXPECTED_INDEXES_BY_MIGRATION) — stays 35; 0044
+  // creates 1 (corpus_duplicate_suppression_shadow_evaluations, plus its own
+  // unique index and AFTER DELETE cleanup trigger — hybrid, table-tracked) —
+  // 36; 0045 creates 2 (account_identity_profiles, account_identity_fingerprints)
+  // — 38; 0046 creates 1 (email_verification_challenges, plus users.email_verified_at
+  // — hybrid, table-tracked) — 39; 0047 creates 1 (developer_corpus_maturity_exemptions)
+  // — 40, across 36 target migrations total. The built-in-archive parity
+  // foundation and 100k-scale scalable archive index then add 2 more
+  // migrations (0048-0049): 0048 creates 1 (archive_document_representations)
+  // — 41; 0049 creates 4 (archive_document_fingerprints, archive_hash_df_bands,
+  // archive_phrase_fts_map, and the archive_phrase_fts FTS5 virtual table —
+  // which sqlite_master reports with type='table' exactly like an ordinary
+  // one) — 45, across 38 target migrations total. The archive co-source
+  // adjacency graph (slice 2D.4) then adds one more migration (0050): 0050
+  // creates 1 (archive_document_cosources, plus two indexes, two CHECK
+  // constraints and a BEFORE INSERT guard trigger — table-tracked) — 46,
+  // across 39 target migrations total. The fingerprint-version-safe bounded
+  // admission-family recovery (slice 2H) then adds one more migration (0051):
+  // 0051 creates ZERO tables (one additive index only — the second
+  // index-only migration after 0043, tracked via EXPECTED_INDEXES_BY_MIGRATION)
+  // — still 46, across 40 target migrations total.
+  assert.equal(ALL_TARGET_TABLES.length, 46, 'expected exactly 46 tables across all 40 target migrations');
   assert.deepEqual(
     EXPECTED_TABLES_BY_MIGRATION['0023_privacy_consent_and_report_identity_link.sql'],
     [],
@@ -290,6 +345,794 @@ test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0036, in ord
     ['corpus_match_generation'],
     '0036 must be declared as creating exactly one new table (its report_historical_match_snapshots.corpus_generation column is tracked implicitly — see that entry\'s own comment)',
   );
+  // Device Passport schema foundation (0037-0040) — see this file's own
+  // header comment and lib/e8-tables-migration-runner.ts's for why these
+  // four are a deliberate, contiguous extension.
+  assert.deepEqual(
+    EXPECTED_TABLES_BY_MIGRATION['0037_corpus_admission_sweep_runs.sql'],
+    ['corpus_admission_sweep_runs'],
+    '0037 must be declared as creating exactly one new table',
+  );
+  assert.equal(
+    EXPECTED_COLUMNS_BY_MIGRATION['0037_corpus_admission_sweep_runs.sql'],
+    undefined,
+    '0037 must NOT use the column-state mechanism — it creates a table, not columns on an existing one',
+  );
+  assert.deepEqual(
+    EXPECTED_TABLES_BY_MIGRATION['0038_device_passports.sql'],
+    ['device_passports', 'device_passport_challenges'],
+    '0038 must be declared as creating exactly these two new tables',
+  );
+  assert.equal(
+    EXPECTED_COLUMNS_BY_MIGRATION['0038_device_passports.sql'],
+    undefined,
+    '0038 must NOT use the column-state mechanism — it creates tables, not columns on an existing one',
+  );
+  assert.deepEqual(
+    EXPECTED_TABLES_BY_MIGRATION['0039_device_passport_provenance.sql'],
+    ['corpus_admission_decision_device_provenance'],
+    '0039 must be declared as creating exactly one new table (its two verified_device_passport_id columns are tracked implicitly via the same-transaction hybrid rule — see that entry\'s own comment)',
+  );
+  assert.deepEqual(
+    EXPECTED_COLUMNS_BY_MIGRATION['0039_device_passport_provenance.sql'],
+    [
+      { table: 'saved_reports', column: 'verified_device_passport_id' },
+      { table: 'corpus_admission_report_jobs', column: 'verified_device_passport_id' },
+    ],
+    '0039 must declare exactly these two additive columns (documentation + coverage, not the applied-state gate)',
+  );
+  assert.deepEqual(
+    EXPECTED_TABLES_BY_MIGRATION['0040_report_historical_match_snapshots_device_generation.sql'],
+    [],
+    '0040 must be declared as creating zero new tables',
+  );
+  assert.deepEqual(
+    EXPECTED_COLUMNS_BY_MIGRATION['0040_report_historical_match_snapshots_device_generation.sql'],
+    [{ table: 'report_historical_match_snapshots', column: 'device_provenance_generation' }],
+    '0040 must be declared as adding exactly this one column',
+  );
+  // Direct owner-link / corpus-maturity / account-identity / email-verification
+  // / developer corpus-maturity extension (0041-0047).
+  assert.deepEqual(
+    EXPECTED_TABLES_BY_MIGRATION['0041_device_passport_actor_usage.sql'],
+    ['device_passport_actor_usage'],
+    '0041 must be declared as creating exactly one new table (its device_passports.actor_usage_tracking_version column is tracked implicitly via the same-transaction hybrid rule)',
+  );
+  assert.deepEqual(
+    EXPECTED_COLUMNS_BY_MIGRATION['0041_device_passport_actor_usage.sql'],
+    [{ table: 'device_passports', column: 'actor_usage_tracking_version' }],
+    '0041 must declare exactly this one additive column (documentation + coverage, not the applied-state gate)',
+  );
+  assert.deepEqual(
+    EXPECTED_TABLES_BY_MIGRATION['0042_account_owner_links.sql'],
+    ['account_owner_links', 'account_owner_link_evidence', 'account_owner_link_events', 'account_owner_link_state'],
+    '0042 must be declared as creating exactly these four new tables (its report_historical_match_snapshots.owner_link_generation column is tracked implicitly via the same-transaction hybrid rule)',
+  );
+  assert.deepEqual(
+    EXPECTED_COLUMNS_BY_MIGRATION['0042_account_owner_links.sql'],
+    [{ table: 'report_historical_match_snapshots', column: 'owner_link_generation' }],
+    '0042 must declare exactly this one additive column (documentation + coverage, not the applied-state gate)',
+  );
+  assert.deepEqual(
+    EXPECTED_TABLES_BY_MIGRATION['0043_corpus_maturity_indexes.sql'],
+    [],
+    '0043 must be declared as creating zero new tables',
+  );
+  assert.equal(
+    EXPECTED_COLUMNS_BY_MIGRATION['0043_corpus_maturity_indexes.sql'],
+    undefined,
+    '0043 must NOT use the column-state mechanism — it adds indexes, not columns',
+  );
+  assert.deepEqual(
+    EXPECTED_INDEXES_BY_MIGRATION['0043_corpus_maturity_indexes.sql'],
+    ['idx_corpus_submission_references_created_at', 'idx_corpus_admission_decisions_created_at'],
+    '0043 must be declared as adding exactly these two indexes',
+  );
+  assert.deepEqual(
+    EXPECTED_TABLES_BY_MIGRATION['0044_corpus_duplicate_suppression_shadow_evaluations.sql'],
+    ['corpus_duplicate_suppression_shadow_evaluations'],
+    '0044 must be declared as creating exactly one new table (its unique index and cleanup trigger are tracked implicitly via the same-transaction hybrid rule)',
+  );
+  assert.equal(
+    EXPECTED_COLUMNS_BY_MIGRATION['0044_corpus_duplicate_suppression_shadow_evaluations.sql'],
+    undefined,
+    '0044 must NOT use the column-state mechanism — it creates a table, not columns on an existing one',
+  );
+  assert.deepEqual(
+    EXPECTED_TABLES_BY_MIGRATION['0045_account_identity.sql'],
+    ['account_identity_profiles', 'account_identity_fingerprints'],
+    '0045 must be declared as creating exactly these two new tables',
+  );
+  assert.equal(
+    EXPECTED_COLUMNS_BY_MIGRATION['0045_account_identity.sql'],
+    undefined,
+    '0045 must NOT use the column-state mechanism — it alters no existing table',
+  );
+  assert.deepEqual(
+    EXPECTED_TABLES_BY_MIGRATION['0046_email_verification_challenges.sql'],
+    ['email_verification_challenges'],
+    '0046 must be declared as creating exactly one new table (its users.email_verified_at column is tracked implicitly via the same-transaction hybrid rule)',
+  );
+  assert.deepEqual(
+    EXPECTED_COLUMNS_BY_MIGRATION['0046_email_verification_challenges.sql'],
+    [{ table: 'users', column: 'email_verified_at' }],
+    '0046 must declare exactly this one additive column (documentation + coverage, not the applied-state gate)',
+  );
+  assert.deepEqual(
+    EXPECTED_TABLES_BY_MIGRATION['0047_developer_corpus_maturity_exemptions.sql'],
+    ['developer_corpus_maturity_exemptions'],
+    '0047 must be declared as creating exactly one new table',
+  );
+  assert.equal(
+    EXPECTED_COLUMNS_BY_MIGRATION['0047_developer_corpus_maturity_exemptions.sql'],
+    undefined,
+    '0047 must NOT use the column-state mechanism — it alters no existing table',
+  );
+});
+
+// --- A2: Device Passport schema foundation (0037-0040) — the deliberate,
+// contiguous extension. Ties together the task's explicit acceptance
+// criteria: presence in TARGET_MIGRATIONS, LF-byte hash stability, correct
+// expected tables/columns, a passing preflight, and the invariant that the
+// deduplicated representation table gains no device/account identity column.
+// ---
+
+test('A2: 0037-0040 are present in TARGET_MIGRATIONS, contiguous and in order (full 0012-0047 contiguity is A3\'s own assertion)', () => {
+  const devicePassportFiles = [
+    '0037_corpus_admission_sweep_runs.sql',
+    '0038_device_passports.sql',
+    '0039_device_passport_provenance.sql',
+    '0040_report_historical_match_snapshots_device_generation.sql',
+  ];
+  for (const file of devicePassportFiles) {
+    assert.ok(TARGET_MIGRATIONS.includes(file), `${file} must be in TARGET_MIGRATIONS`);
+  }
+  // 0037-0040 must appear consecutively, immediately after 0036 and
+  // immediately before 0041 — not just "present somewhere."
+  const indices = devicePassportFiles.map((f) => TARGET_MIGRATIONS.indexOf(f));
+  for (let i = 1; i < indices.length; i++) {
+    assert.equal(indices[i], indices[i - 1] + 1, `${devicePassportFiles[i]} must immediately follow ${devicePassportFiles[i - 1]}`);
+  }
+  assert.equal(TARGET_MIGRATIONS[indices[0] - 1], '0036_corpus_match_generation.sql');
+  assert.equal(TARGET_MIGRATIONS[indices[indices.length - 1] + 1], '0041_device_passport_actor_usage.sql');
+});
+
+test('A2: 0037-0040 pinned hashes match the on-disk LF migration bytes (see .gitattributes drizzle/*.sql text eol=lf)', () => {
+  const gitattributes = fs.readFileSync(path.join(repo, '.gitattributes'), 'utf8');
+  assert.match(gitattributes, /drizzle\/\*\.sql\s+text\s+eol=lf/, '.gitattributes must pin drizzle/*.sql to LF so these hashes are reproducible on every platform');
+
+  for (const file of TARGET_MIGRATIONS) {
+    const raw = fs.readFileSync(path.join(drizzleDir, file));
+    assert.ok(!raw.includes(Buffer.from('\r\n')), `${file} must be LF in the working tree (CRLF breaks the pinned hash — see .gitattributes)`);
+  }
+  for (const file of [
+    '0037_corpus_admission_sweep_runs.sql',
+    '0038_device_passports.sql',
+    '0039_device_passport_provenance.sql',
+    '0040_report_historical_match_snapshots_device_generation.sql',
+  ]) {
+    const content = fs.readFileSync(path.join(drizzleDir, file), 'utf8');
+    assert.ok(!content.includes('\r'), `${file} must contain no CR bytes`);
+    assert.equal(sha256(content), EXPECTED_MIGRATION_SHA256[file], `${file}'s pinned hash must match its current LF content`);
+    assert.deepEqual(scanForDestructiveStatements(content), [], `${file} must contain zero destructive statements`);
+  }
+});
+
+test('A2: checkPreflight passes for the full 0012-0040 set against a pre-0012 database', async () => {
+  const dbFile = freshDbPath('a2-preflight');
+  const client = await buildPreMigrationDb(dbFile);
+  const result = await checkPreflight(client, drizzleDir, { environmentLabel: 'local-test', expectedEnvironmentLabel: 'local-test' });
+  assert.equal(result.ok, true, `preflight must pass for the extended allowlist — got: ${JSON.stringify(result)}`);
+  client.close();
+  cleanupDbFile(dbFile);
+});
+
+test('A2: after the full 0012-0040 runner apply, the device-passport shape is exactly right and corpus_document_representations has no identity column', async () => {
+  const dbFile = freshDbPath('a2-apply');
+  const client = await buildPreMigrationDb(dbFile);
+  const result = await runTargetMigrations(client, drizzleDir, { environmentLabel: 'local-test', expectedEnvironmentLabel: 'local-test' });
+  assert.equal(result.status, 'success', `the extended runner must apply cleanly — got: ${JSON.stringify(result).slice(0, 400)}`);
+
+  const tableNames = new Set((await client.execute("SELECT name FROM sqlite_master WHERE type='table'")).rows.map((r) => String(r.name)));
+  for (const t of ['corpus_admission_sweep_runs', 'device_passports', 'device_passport_challenges', 'corpus_admission_decision_device_provenance']) {
+    assert.ok(tableNames.has(t), `0037-0039 must create ${t}`);
+  }
+  assert.ok(!tableNames.has('device_provenance_generation'), 'there must be NO global device_provenance_generation table (per-passport column instead)');
+
+  const passportCols = new Set((await client.execute("PRAGMA table_info('device_passports')")).rows.map((r) => String(r.name)));
+  assert.ok(passportCols.has('provenance_generation'), 'device_passports.provenance_generation (per-passport counter) must exist');
+
+  const snapshotCols = new Set((await client.execute("PRAGMA table_info('report_historical_match_snapshots')")).rows.map((r) => String(r.name)));
+  assert.ok(snapshotCols.has('device_provenance_generation'), '0040 must add report_historical_match_snapshots.device_provenance_generation');
+
+  const savedReportCols = new Set((await client.execute("PRAGMA table_info('saved_reports')")).rows.map((r) => String(r.name)));
+  assert.ok(savedReportCols.has('verified_device_passport_id'), '0039 must add saved_reports.verified_device_passport_id');
+  const jobCols = new Set((await client.execute("PRAGMA table_info('corpus_admission_report_jobs')")).rows.map((r) => String(r.name)));
+  assert.ok(jobCols.has('verified_device_passport_id'), '0039 must add corpus_admission_report_jobs.verified_device_passport_id');
+
+  const repCols = new Set((await client.execute("PRAGMA table_info('corpus_document_representations')")).rows.map((r) => String(r.name)));
+  for (const forbidden of ['device_passport_id', 'verified_device_passport_id', 'account_id', 'user_id', 'email', 'device_key']) {
+    assert.ok(!repCols.has(forbidden), `corpus_document_representations must NOT gain "${forbidden}" — device provenance is per admission backing`);
+  }
+
+  const provFks = (await client.execute("PRAGMA foreign_key_list('corpus_admission_decision_device_provenance')")).rows;
+  const decFk = provFks.find((r) => String(r.from) === 'decision_id');
+  const passFk = provFks.find((r) => String(r.from) === 'device_passport_id');
+  assert.equal(String(decFk.table), 'corpus_admission_decisions');
+  assert.equal(String(decFk.on_delete).toUpperCase(), 'CASCADE');
+  assert.equal(String(passFk.table), 'device_passports');
+  assert.equal(String(passFk.on_delete).toUpperCase(), 'RESTRICT');
+
+  client.close();
+  cleanupDbFile(dbFile);
+});
+
+// --- A3: direct owner-link / corpus-maturity / account-identity /
+// email-verification / developer corpus-maturity extension (0041-0047) —
+// the deliberate, contiguous extension. Mirrors A2's structure exactly:
+// presence in TARGET_MIGRATIONS, LF-byte hash stability, correct expected
+// tables/columns/indexes, a passing preflight, and a real applied shape —
+// including 0044's trigger, whose narrow destructive-statement exception
+// requires proving it actually FIRES correctly at runtime, not merely that
+// checkPreflight tolerates its text. ---
+
+test('A3: 0041-0047 are in TARGET_MIGRATIONS as a contiguous 0012-0047 range', () => {
+  for (const file of [
+    '0041_device_passport_actor_usage.sql',
+    '0042_account_owner_links.sql',
+    '0043_corpus_maturity_indexes.sql',
+    '0044_corpus_duplicate_suppression_shadow_evaluations.sql',
+    '0045_account_identity.sql',
+    '0046_email_verification_challenges.sql',
+    '0047_developer_corpus_maturity_exemptions.sql',
+  ]) {
+    assert.ok(TARGET_MIGRATIONS.includes(file), `${file} must be in TARGET_MIGRATIONS`);
+  }
+  const prefixes = TARGET_MIGRATIONS.map((f) => Number(f.slice(0, 4)));
+  assert.deepEqual(prefixes, Array.from({ length: 40 }, (_, i) => 12 + i), 'TARGET_MIGRATIONS must be the contiguous 0012..0051 range in order');
+});
+
+test('A3: 0041-0047 pinned hashes match the on-disk LF migration bytes', () => {
+  for (const file of [
+    '0041_device_passport_actor_usage.sql',
+    '0042_account_owner_links.sql',
+    '0043_corpus_maturity_indexes.sql',
+    '0044_corpus_duplicate_suppression_shadow_evaluations.sql',
+    '0045_account_identity.sql',
+    '0046_email_verification_challenges.sql',
+    '0047_developer_corpus_maturity_exemptions.sql',
+  ]) {
+    const raw = fs.readFileSync(path.join(drizzleDir, file));
+    assert.ok(!raw.includes(Buffer.from('\r\n')), `${file} must be LF in the working tree (CRLF breaks the pinned hash — see .gitattributes)`);
+    const content = fs.readFileSync(path.join(drizzleDir, file), 'utf8');
+    assert.equal(sha256(content), EXPECTED_MIGRATION_SHA256[file], `${file}'s pinned hash must match its current LF content`);
+
+    const destructive = scanForDestructiveStatements(content);
+    if (file === '0044_corpus_duplicate_suppression_shadow_evaluations.sql') {
+      // The one deliberate, reviewed exception in this extension: 0044 must
+      // contain EXACTLY its approved trigger statement and nothing else
+      // destructive — proving the exception is as narrow as
+      // APPROVED_DESTRUCTIVE_STATEMENTS' own comment claims.
+      assert.deepEqual(
+        destructive,
+        APPROVED_DESTRUCTIVE_STATEMENTS[file],
+        `${file} must contain exactly its one approved destructive statement, and nothing else destructive`,
+      );
+    } else {
+      assert.deepEqual(destructive, [], `${file} must contain zero destructive statements`);
+    }
+  }
+});
+
+test('A3: checkPreflight passes for the full 0012-0047 set against a pre-0012 database', async () => {
+  const dbFile = freshDbPath('a3-preflight');
+  const client = await buildPreMigrationDb(dbFile);
+  const result = await checkPreflight(client, drizzleDir, { environmentLabel: 'local-test', expectedEnvironmentLabel: 'local-test' });
+  assert.equal(result.ok, true, `preflight must pass for the extended allowlist — got: ${JSON.stringify(result)}`);
+  client.close();
+  cleanupDbFile(dbFile);
+});
+
+test('A3: after the full 0012-0047 runner apply, the new schema shapes are exactly right, and 0044\'s trigger actually cascades a real DELETE', async () => {
+  const dbFile = freshDbPath('a3-apply');
+  const client = await buildPreMigrationDb(dbFile);
+  const result = await runTargetMigrations(client, drizzleDir, { environmentLabel: 'local-test', expectedEnvironmentLabel: 'local-test' });
+  assert.equal(result.status, 'success', `the extended runner must apply cleanly — got: ${JSON.stringify(result).slice(0, 400)}`);
+
+  const tableNames = new Set((await client.execute("SELECT name FROM sqlite_master WHERE type='table'")).rows.map((r) => String(r.name)));
+  for (const t of [
+    'device_passport_actor_usage',
+    'account_owner_links', 'account_owner_link_evidence', 'account_owner_link_events', 'account_owner_link_state',
+    'corpus_duplicate_suppression_shadow_evaluations',
+    'account_identity_profiles', 'account_identity_fingerprints',
+    'email_verification_challenges',
+    'developer_corpus_maturity_exemptions',
+  ]) {
+    assert.ok(tableNames.has(t), `0041-0047 must create ${t}`);
+  }
+
+  const passportCols = new Set((await client.execute("PRAGMA table_info('device_passports')")).rows.map((r) => String(r.name)));
+  assert.ok(passportCols.has('actor_usage_tracking_version'), '0041 must add device_passports.actor_usage_tracking_version');
+
+  const snapshotCols = new Set((await client.execute("PRAGMA table_info('report_historical_match_snapshots')")).rows.map((r) => String(r.name)));
+  assert.ok(snapshotCols.has('owner_link_generation'), '0042 must add report_historical_match_snapshots.owner_link_generation');
+
+  const usersCols = new Set((await client.execute("PRAGMA table_info('users')")).rows.map((r) => String(r.name)));
+  assert.ok(usersCols.has('email_verified_at'), '0046 must add users.email_verified_at');
+
+  // 0043: the first target migration tracked purely by index existence.
+  const indexNames = new Set((await client.execute("SELECT name FROM sqlite_master WHERE type='index'")).rows.map((r) => String(r.name)));
+  assert.ok(indexNames.has('idx_corpus_submission_references_created_at'), '0043 must create idx_corpus_submission_references_created_at');
+  assert.ok(indexNames.has('idx_corpus_admission_decisions_created_at'), '0043 must create idx_corpus_admission_decisions_created_at');
+
+  // 0044's trigger must actually WORK, not merely exist as text: seed a
+  // saved_reports row and a shadow-evaluation row keyed to it, delete the
+  // saved_reports row, and confirm the trigger cascaded the shadow row away
+  // — proving splitStatements()'s trigger-aware parsing produced a real,
+  // executable trigger (a shredded/invalid CREATE TRIGGER would have failed
+  // client.migrate() outright during the apply above, but only a live DELETE
+  // proves the BODY itself is correct, not just that it parsed).
+  await client.execute({
+    sql: `INSERT INTO saved_reports (id, device_key, submission_id, title, report_created_at, word_count, archive_score, score_band, payload_json)
+          VALUES (?,?,?,?,?,?,?,?,?)`,
+    args: ['a3-trigger-report-1', 'a3-trigger-device-1', 'a3-trigger-sub-1', 'a3.pdf', new Date().toISOString(), 100, 5, 'Low', '{}'],
+  });
+  await client.execute({
+    sql: `INSERT INTO corpus_duplicate_suppression_shadow_evaluations
+          (report_device_key, report_id, status, policy_version, rule_version, unified_similarity_version, counterfactual_version)
+          VALUES (?,?,?,?,?,?,?)`,
+    args: ['a3-trigger-device-1', 'a3-trigger-report-1', 'SKIPPED_NOT_MATCHED', 'v1', 'v1', 'v1', 'v1'],
+  });
+  const beforeDelete = await client.execute({
+    sql: 'SELECT COUNT(*) AS c FROM corpus_duplicate_suppression_shadow_evaluations WHERE report_device_key = ? AND report_id = ?',
+    args: ['a3-trigger-device-1', 'a3-trigger-report-1'],
+  });
+  assert.equal(Number(beforeDelete.rows[0].c), 1, 'the shadow row must exist before the delete');
+
+  await client.execute({ sql: 'DELETE FROM saved_reports WHERE id = ?', args: ['a3-trigger-report-1'] });
+
+  const afterDelete = await client.execute({
+    sql: 'SELECT COUNT(*) AS c FROM corpus_duplicate_suppression_shadow_evaluations WHERE report_device_key = ? AND report_id = ?',
+    args: ['a3-trigger-device-1', 'a3-trigger-report-1'],
+  });
+  assert.equal(Number(afterDelete.rows[0].c), 0, "0044's AFTER DELETE trigger must cascade-remove the shadow row when its saved_reports row is deleted");
+
+  client.close();
+  cleanupDbFile(dbFile);
+});
+
+// --- A4: built-in-archive parity foundation (0048) + 100k-scale scalable
+// archive index (0049) — the deliberate, contiguous extension. Mirrors
+// A2/A3: presence + contiguity + LF-byte hash stability + correct expected
+// tables + zero destructive statements + a real applied shape. 0049 is the
+// first target migration to create an FTS5 VIRTUAL TABLE, so this section
+// explicitly proves the runner detects ordinary tables, an index, AND the
+// virtual table / its rowid->representation bridge. ---
+
+const ARCHIVE_2B_FILES = ['0048_archive_document_representations.sql', '0049_archive_scalable_index.sql'];
+
+test('A4: 0048-0049 are in TARGET_MIGRATIONS, contiguous, immediately after 0047', () => {
+  for (const file of ARCHIVE_2B_FILES) {
+    assert.ok(TARGET_MIGRATIONS.includes(file), `${file} must be in TARGET_MIGRATIONS`);
+  }
+  const i48 = TARGET_MIGRATIONS.indexOf('0048_archive_document_representations.sql');
+  const i49 = TARGET_MIGRATIONS.indexOf('0049_archive_scalable_index.sql');
+  assert.equal(TARGET_MIGRATIONS[i48 - 1], '0047_developer_corpus_maturity_exemptions.sql');
+  assert.equal(i49, i48 + 1);
+});
+
+test('A4: 0048-0049 pinned hashes match the on-disk LF bytes, and both are non-destructive', () => {
+  for (const file of ARCHIVE_2B_FILES) {
+    const raw = fs.readFileSync(path.join(drizzleDir, file));
+    assert.ok(!raw.includes(Buffer.from('\r\n')), `${file} must be LF in the working tree`);
+    const content = fs.readFileSync(path.join(drizzleDir, file), 'utf8');
+    assert.ok(!content.includes('\r'), `${file} must contain no CR bytes`);
+    assert.equal(sha256(content), EXPECTED_MIGRATION_SHA256[file], `${file}'s pinned hash must match its current LF content`);
+    assert.deepEqual(scanForDestructiveStatements(content), [], `${file} must contain zero destructive statements — every CREATE ... IF NOT EXISTS`);
+  }
+  // 0049's CREATE VIRTUAL TABLE must survive splitStatements() intact (one
+  // statement, no shredding on an internal token) alongside its ordinary DDL.
+  const s49 = splitStatements(fs.readFileSync(path.join(drizzleDir, '0049_archive_scalable_index.sql'), 'utf8'));
+  assert.equal(s49.filter((s) => /^CREATE VIRTUAL TABLE/i.test(s)).length, 1, '0049 has exactly one CREATE VIRTUAL TABLE statement');
+  assert.equal(s49.filter((s) => /^CREATE TABLE/i.test(s)).length, 3, '0049 has exactly three ordinary CREATE TABLE statements');
+  assert.equal(s49.filter((s) => /^CREATE (UNIQUE )?INDEX/i.test(s)).length, 3, '0049 has exactly three CREATE INDEX statements');
+});
+
+test('A4: EXPECTED_TABLES_BY_MIGRATION for 0048-0049 is exact; neither uses the column/index mechanism', () => {
+  assert.deepEqual(
+    EXPECTED_TABLES_BY_MIGRATION['0048_archive_document_representations.sql'],
+    ['archive_document_representations'],
+    '0048 creates exactly one new table',
+  );
+  assert.deepEqual(
+    EXPECTED_TABLES_BY_MIGRATION['0049_archive_scalable_index.sql'],
+    ['archive_document_fingerprints', 'archive_hash_df_bands', 'archive_phrase_fts_map', 'archive_phrase_fts'],
+    '0049 creates exactly these four tables (the last being the FTS5 virtual table)',
+  );
+  for (const file of ARCHIVE_2B_FILES) {
+    assert.equal(EXPECTED_COLUMNS_BY_MIGRATION[file], undefined, `${file} must NOT use the column-state mechanism`);
+    assert.equal(EXPECTED_INDEXES_BY_MIGRATION[file], undefined, `${file} must NOT use the index-state mechanism`);
+  }
+});
+
+test('A4: checkPreflight passes for the full 0012-0050 set against a pre-0012 database', async () => {
+  const dbFile = freshDbPath('a4-preflight');
+  const client = await buildPreMigrationDb(dbFile);
+  const result = await checkPreflight(client, drizzleDir, { environmentLabel: 'local-test', expectedEnvironmentLabel: 'local-test' });
+  assert.equal(result.ok, true, `preflight must pass for the extended allowlist — got: ${JSON.stringify(result)}`);
+  client.close();
+  cleanupDbFile(dbFile);
+});
+
+test('A4: after the full runner apply, all three ordinary tables, the FTS5 virtual table, and the rowid bridge land with the right shape; the runner detects each; re-run is idempotent', async () => {
+  const dbFile = freshDbPath('a4-apply');
+  const client = await buildPreMigrationDb(dbFile);
+  const result = await runTargetMigrations(client, drizzleDir, { environmentLabel: 'local-test', expectedEnvironmentLabel: 'local-test' });
+  assert.equal(result.status, 'success', `the extended runner must apply cleanly — got: ${JSON.stringify(result).slice(0, 400)}`);
+
+  const tableNames = new Set((await client.execute("SELECT name FROM sqlite_master WHERE type='table'")).rows.map((r) => String(r.name)));
+  for (const t of ['archive_document_representations', 'archive_document_fingerprints', 'archive_hash_df_bands', 'archive_phrase_fts_map', 'archive_phrase_fts']) {
+    assert.ok(tableNames.has(t), `0048/0049 must create ${t}`);
+  }
+  // FTS5 shadow tables — supporting state the runner does NOT list explicitly
+  // (they are implied by the virtual table, just as an ordinary table's
+  // indexes are). Their presence confirms the virtual table is real.
+  for (const shadow of ['archive_phrase_fts_data', 'archive_phrase_fts_idx', 'archive_phrase_fts_config']) {
+    assert.ok(tableNames.has(shadow), `the FTS5 virtual table must materialise its ${shadow} shadow table`);
+  }
+
+  // ordinary-table detection: tableSetState reports 'all' for 0049's set.
+  assert.equal(await tableSetState(client, EXPECTED_TABLES_BY_MIGRATION['0049_archive_scalable_index.sql']), 'all', 'the runner must see 0049 as fully applied');
+
+  // index detection.
+  const indexNames = new Set((await client.execute("SELECT name FROM sqlite_master WHERE type='index'")).rows.map((r) => String(r.name)));
+  for (const idx of ['ux_archive_document_fingerprints_repr_version_hash', 'idx_archive_document_fingerprints_hash', 'ux_archive_phrase_fts_map_representation_id']) {
+    assert.ok(indexNames.has(idx), `0049 must create ${idx}`);
+  }
+
+  // column shapes.
+  const fpCols = (await client.execute("PRAGMA table_info('archive_document_fingerprints')")).rows.map((r) => String(r.name)).sort();
+  assert.deepEqual(fpCols, ['created_at', 'fingerprint_hash', 'fingerprint_version', 'id', 'optional_position', 'representation_id'].sort());
+  const dfCols = (await client.execute("PRAGMA table_info('archive_hash_df_bands')")).rows;
+  assert.deepEqual(dfCols.map((r) => String(r.name)).sort(), ['df_bucket', 'policy_version', 'shingle_hash'].sort());
+  const dfPk = dfCols.filter((r) => Number(r.pk) > 0).sort((a, b) => Number(a.pk) - Number(b.pk)).map((r) => String(r.name));
+  assert.deepEqual(dfPk, ['shingle_hash', 'policy_version'], 'archive_hash_df_bands composite PK is (shingle_hash, policy_version)');
+  const mapCols = (await client.execute("PRAGMA table_info('archive_phrase_fts_map')")).rows;
+  assert.deepEqual(mapCols.map((r) => String(r.name)).sort(), ['fts_rowid', 'representation_id'].sort());
+  assert.equal(Number(mapCols.find((r) => String(r.name) === 'fts_rowid').pk), 1, 'fts_rowid is the primary key');
+  assert.equal(Number(mapCols.find((r) => String(r.name) === 'fts_rowid').notnull), 1, 'fts_rowid is NOT NULL (matches db/schema.ts .primaryKey())');
+  assert.equal(Number(mapCols.find((r) => String(r.name) === 'representation_id').notnull), 1, 'representation_id is NOT NULL');
+
+  // FK + cascade on the two representation-derived tables.
+  for (const t of ['archive_document_fingerprints', 'archive_phrase_fts_map']) {
+    const fk = (await client.execute(`PRAGMA foreign_key_list('${t}')`)).rows.find((r) => String(r.from) === 'representation_id');
+    assert.ok(fk, `${t}.representation_id must be a foreign key`);
+    assert.equal(String(fk.table), 'corpus_document_representations');
+    assert.equal(String(fk.on_delete).toUpperCase(), 'CASCADE', `${t}.representation_id -> corpus_document_representations must be ON DELETE CASCADE`);
+  }
+  assert.equal((await client.execute("PRAGMA foreign_key_list('archive_hash_df_bands')")).rows.length, 0, 'archive_hash_df_bands (hash-keyed) has no foreign key');
+
+  // the FTS5 virtual table is queryable and its rowid joins the bridge.
+  await client.execute("PRAGMA foreign_keys = ON");
+  await client.execute({
+    sql: "INSERT INTO corpus_document_representations (id, canonical_sha256, canonical_text, word_count, canonicalization_version) VALUES (?,?,?,?,?)",
+    args: ['a4-rep-1', 'a4-sha-1', 'the quick brown fox jumps over the lazy dog', 9, 'v1'],
+  });
+  await client.batch([
+    { sql: "INSERT INTO archive_phrase_fts_map(representation_id) VALUES (?)", args: ['a4-rep-1'] },
+    { sql: "INSERT INTO archive_phrase_fts(rowid, body) SELECT fts_rowid, ? FROM archive_phrase_fts_map WHERE representation_id = ?", args: ['the quick brown fox jumps over the lazy dog', 'a4-rep-1'] },
+  ], 'write');
+  const hit = await client.execute({
+    sql: "SELECT m.representation_id r FROM archive_phrase_fts f JOIN archive_phrase_fts_map m ON m.fts_rowid = f.rowid WHERE f.archive_phrase_fts MATCH ?",
+    args: ['"quick brown fox"'],
+  });
+  assert.deepEqual(hit.rows.map((x) => String(x.r)), ['a4-rep-1'], 'an exact-phrase MATCH joins the bridge back to representation_id');
+  // contentless: reading the indexed column yields NULL (hence the bridge).
+  const bodyRead = await client.execute("SELECT body FROM archive_phrase_fts LIMIT 1");
+  assert.equal(bodyRead.rows[0].body, null, 'a contentless FTS5 table returns NULL for its indexed column');
+  // CASCADE reaches the bridge (the FTS shadow row for that rowid is left
+  // behind harmlessly and cleared by a full rebuild — documented in 0049).
+  await client.execute({ sql: "DELETE FROM corpus_document_representations WHERE id = ?", args: ['a4-rep-1'] });
+  assert.equal(
+    Number((await client.execute({ sql: "SELECT COUNT(*) c FROM archive_phrase_fts_map WHERE representation_id = ?", args: ['a4-rep-1'] })).rows[0].c),
+    0,
+    'archive_phrase_fts_map CASCADE-deletes with its representation',
+  );
+
+  // partial-application detection for the mixed ordinary + virtual set.
+  const partialDbFile = freshDbPath('a4-partial');
+  const partial = await buildPreMigrationDb(partialDbFile);
+  await partial.execute("CREATE TABLE archive_document_fingerprints (id INTEGER PRIMARY KEY, representation_id TEXT, fingerprint_hash TEXT, optional_position INTEGER, fingerprint_version TEXT, created_at TEXT)");
+  assert.equal(
+    await tableSetState(partial, EXPECTED_TABLES_BY_MIGRATION['0049_archive_scalable_index.sql']),
+    'partial',
+    'one of 0049\'s four tables present without the rest must be detected as partial (the runner then refuses to guess)',
+  );
+  partial.close();
+  cleanupDbFile(partialDbFile);
+
+  // idempotent re-run: 0048 + 0049 report already-applied.
+  const rerun = await runTargetMigrations(client, drizzleDir, { environmentLabel: 'local-test', expectedEnvironmentLabel: 'local-test' });
+  assert.equal(rerun.status, 'already-fully-applied');
+  for (const file of ARCHIVE_2B_FILES) {
+    assert.equal(rerun.steps.find((s) => s.file === file).status, 'already-applied', `${file} must be seen as already-applied on a re-run`);
+  }
+
+  client.close();
+  cleanupDbFile(dbFile);
+});
+
+// archive co-source adjacency (0050, slice 2D.4) — the deliberate, contiguous
+// extension. Mirrors A4: presence + contiguity + last + LF-byte hash stability
+// + correct expected tables + zero destructive statements (its guard trigger
+// only RAISE(ABORT)s) + a real applied shape (table, both indexes, the
+// BEFORE INSERT trigger, the two CHECK constraints, CASCADE). ---
+
+const ARCHIVE_2D4_FILE = '0050_archive_cosource_adjacency.sql';
+const SLICE_2H_FILE = '0051_corpus_shingle_hash_version_cursor_index.sql';
+
+test('A5: 0050 is in TARGET_MIGRATIONS, immediately after 0049 and immediately before 0051', () => {
+  assert.ok(TARGET_MIGRATIONS.includes(ARCHIVE_2D4_FILE), `${ARCHIVE_2D4_FILE} must be in TARGET_MIGRATIONS`);
+  const i49 = TARGET_MIGRATIONS.indexOf('0049_archive_scalable_index.sql');
+  const i50 = TARGET_MIGRATIONS.indexOf(ARCHIVE_2D4_FILE);
+  const i51 = TARGET_MIGRATIONS.indexOf(SLICE_2H_FILE);
+  assert.equal(i50, i49 + 1, '0050 must immediately follow 0049');
+  assert.equal(i51, i50 + 1, '0051 must immediately follow 0050 (0050 is no longer last — see A6)');
+});
+
+test('A5: 0050 pinned hash matches the on-disk LF bytes; the file is non-destructive; splitStatements keeps its trigger atomic', () => {
+  const raw = fs.readFileSync(path.join(drizzleDir, ARCHIVE_2D4_FILE));
+  assert.ok(!raw.includes(Buffer.from('\r\n')), `${ARCHIVE_2D4_FILE} must be LF in the working tree`);
+  const content = fs.readFileSync(path.join(drizzleDir, ARCHIVE_2D4_FILE), 'utf8');
+  assert.ok(!content.includes('\r'), 'no CR bytes');
+  assert.equal(sha256(content), EXPECTED_MIGRATION_SHA256[ARCHIVE_2D4_FILE], 'pinned hash must match current LF content');
+  // The guard trigger only RAISE(ABORT)s — no DELETE / DROP / ALTER — so unlike
+  // 0044's trigger it needs no APPROVED_DESTRUCTIVE_STATEMENTS entry.
+  assert.deepEqual(scanForDestructiveStatements(content), [], '0050 must contain zero destructive statements');
+  assert.equal(APPROVED_DESTRUCTIVE_STATEMENTS[ARCHIVE_2D4_FILE], undefined, '0050 needs no destructive-statement exception');
+  const stmts = splitStatements(content);
+  assert.equal(stmts.filter((s) => /^CREATE TABLE/i.test(s)).length, 1, '0050 has exactly one CREATE TABLE');
+  assert.equal(stmts.filter((s) => /^CREATE (UNIQUE )?INDEX/i.test(s)).length, 2, '0050 has exactly two CREATE INDEX');
+  const triggers = stmts.filter((s) => /^CREATE TRIGGER/i.test(s));
+  assert.equal(triggers.length, 1, '0050 has exactly one CREATE TRIGGER');
+  assert.ok(/RAISE\(ABORT/i.test(triggers[0]) && /END$/i.test(triggers[0].trim()), 'the trigger survives splitStatements intact, not shredded at its internal semicolon');
+});
+
+test('A5: EXPECTED_TABLES_BY_MIGRATION for 0050 is exact; it uses neither the column nor the index mechanism', () => {
+  assert.deepEqual(EXPECTED_TABLES_BY_MIGRATION[ARCHIVE_2D4_FILE], ['archive_document_cosources']);
+  assert.equal(EXPECTED_COLUMNS_BY_MIGRATION[ARCHIVE_2D4_FILE], undefined);
+  assert.equal(EXPECTED_INDEXES_BY_MIGRATION[ARCHIVE_2D4_FILE], undefined);
+});
+
+test('A5: a database already at 0049 applies exactly 0050 then 0051 — 0012-0049 already-applied', async () => {
+  const dbFile = freshDbPath('a5-0049-to-0050');
+  const client = await buildPreMigrationDb(dbFile);
+  // bring it exactly to 0049 by executing 0012..0049 directly (not via the
+  // target runner, which would also apply 0050 and 0051).
+  for (const file of TARGET_MIGRATIONS) {
+    if (file === ARCHIVE_2D4_FILE) break;
+    await client.executeMultiple(fs.readFileSync(path.join(drizzleDir, file), 'utf8'));
+  }
+  const at49 = new Set((await client.execute("SELECT name FROM sqlite_master WHERE type='table'")).rows.map((r) => String(r.name)));
+  assert.ok(at49.has('archive_document_fingerprints') && !at49.has('archive_document_cosources'), 'sanity: the DB is at 0049, not 0050');
+  const idx49 = new Set((await client.execute("SELECT name FROM sqlite_master WHERE type='index'")).rows.map((r) => String(r.name)));
+  assert.ok(!idx49.has('idx_corpus_document_shingles_hash_version_id'), 'sanity: 0051 index absent at 0049');
+
+  const result = await runTargetMigrations(client, drizzleDir, { environmentLabel: 'local-test', expectedEnvironmentLabel: 'local-test' });
+  assert.equal(result.status, 'success');
+  const applied = result.steps.filter((s) => s.status === 'applied').map((s) => s.file);
+  assert.deepEqual(applied, [ARCHIVE_2D4_FILE, SLICE_2H_FILE], 'only 0050 and 0051 should be newly applied; 0012-0049 already-applied');
+  assert.ok((await client.execute("SELECT name FROM sqlite_master WHERE name='archive_document_cosources'")).rows.length === 1, '0050 landed');
+  assert.ok((await client.execute("SELECT name FROM sqlite_master WHERE name='idx_corpus_document_shingles_hash_version_id'")).rows.length === 1, '0051 landed');
+
+  client.close();
+  cleanupDbFile(dbFile);
+});
+
+test('A5: after the full runner apply, archive_document_cosources lands with the right shape; every invariant holds; the runner detects it; re-run is idempotent', async () => {
+  const dbFile = freshDbPath('a5-apply');
+  const client = await buildPreMigrationDb(dbFile);
+  const result = await runTargetMigrations(client, drizzleDir, { environmentLabel: 'local-test', expectedEnvironmentLabel: 'local-test' });
+  assert.equal(result.status, 'success', `the runner must apply 0050 cleanly — got: ${JSON.stringify(result).slice(0, 400)}`);
+  await client.execute('PRAGMA foreign_keys = ON');
+
+  const objs = new Set((await client.execute("SELECT name FROM sqlite_master WHERE name LIKE 'archive_document_cosources%' OR name LIKE '%archive_document_cosources%'")).rows.map((r) => String(r.name)));
+  assert.ok(objs.has('archive_document_cosources'), '0050 must create archive_document_cosources');
+  assert.ok(objs.has('ux_archive_document_cosources_edge'));
+  assert.ok(objs.has('idx_archive_document_cosources_lookup'));
+  assert.ok(objs.has('trg_archive_document_cosources_max_neighbors'));
+
+  const cols = (await client.execute("PRAGMA table_info('archive_document_cosources')")).rows;
+  assert.deepEqual(cols.map((r) => String(r.name)).sort(), ['co_representation_id', 'created_at', 'id', 'policy_version', 'representation_id', 'shared_gram_count'].sort());
+  assert.equal(Number(cols.find((r) => String(r.name) === 'id').pk), 1, 'id is the primary key');
+
+  for (const from of ['representation_id', 'co_representation_id']) {
+    const fk = (await client.execute("PRAGMA foreign_key_list('archive_document_cosources')")).rows.find((r) => String(r.from) === from);
+    assert.ok(fk, `${from} must be a foreign key`);
+    assert.equal(String(fk.table), 'corpus_document_representations');
+    assert.equal(String(fk.on_delete).toUpperCase(), 'CASCADE');
+  }
+
+  assert.equal(await tableSetState(client, EXPECTED_TABLES_BY_MIGRATION[ARCHIVE_2D4_FILE]), 'all', 'the runner must see 0050 as fully applied');
+
+  // invariants
+  await client.execute({ sql: "INSERT INTO corpus_document_representations (id, canonical_sha256, canonical_text, word_count, canonicalization_version) VALUES ('a5-r1','a5-s1','x',1,'v'),('a5-r2','a5-s2','y',1,'v')" });
+  const rej = async (sql, args) => { try { await client.execute({ sql, args }); return null; } catch (e) { return e.message; } };
+  assert.equal(await rej("INSERT INTO archive_document_cosources (representation_id, co_representation_id, shared_gram_count, policy_version) VALUES ('a5-r1','a5-r2',3,'archive-cosource-v1')", []), null, 'a valid edge inserts');
+  assert.match(await rej("INSERT INTO archive_document_cosources (representation_id, co_representation_id, shared_gram_count, policy_version) VALUES ('a5-r1','a5-r1',3,'archive-cosource-v1')", []), /CHECK/, 'self-edge rejected');
+  assert.match(await rej("INSERT INTO archive_document_cosources (representation_id, co_representation_id, shared_gram_count, policy_version) VALUES ('a5-r2','a5-r1',1,'archive-cosource-v1')", []), /CHECK/, 'shared_gram_count < 2 rejected');
+  assert.match(await rej("INSERT INTO archive_document_cosources (representation_id, co_representation_id, shared_gram_count, policy_version) VALUES ('a5-r1','a5-r2',9,'archive-cosource-v1')", []), /UNIQUE/, 'duplicate edge in the same policy rejected');
+  assert.equal(await rej("INSERT INTO archive_document_cosources (representation_id, co_representation_id, shared_gram_count, policy_version) VALUES ('a5-r1','a5-r2',9,'archive-cosource-v2')", []), null, 'the same edge in a different policy is allowed');
+
+  // 24-cap trigger
+  for (let i = 0; i < 40; i += 1) {
+    await client.execute({ sql: "INSERT OR IGNORE INTO corpus_document_representations (id, canonical_sha256, canonical_text, word_count, canonicalization_version) VALUES (?,?,?,1,'v')", args: [`a5-c${i}`, `a5-cs${i}`, 't'] });
+  }
+  let inserted = 0;
+  for (let i = 0; i < 40; i += 1) {
+    if (await rej("INSERT INTO archive_document_cosources (representation_id, co_representation_id, shared_gram_count, policy_version) VALUES (?,?,2,'archive-cosource-v1')", [`a5-c${i}`, 'a5-r2']) === null) inserted += 1;
+  }
+  const cap = Number((await client.execute("SELECT COUNT(*) c FROM archive_document_cosources WHERE representation_id = 'a5-c0' OR representation_id LIKE 'a5-c%'")).rows[0].c);
+  // (r1 already has 1 v1 edge; c0..c39 each get one until any single doc hits 24 — here each c* has at most 1, so all 40 insert)
+  assert.equal(inserted, 40, 'distinct source docs are each well under the 24 cap');
+  // now hammer ONE doc past 24
+  let ok24 = 0;
+  for (let i = 0; i < 40; i += 1) {
+    await client.execute({ sql: "INSERT OR IGNORE INTO corpus_document_representations (id, canonical_sha256, canonical_text, word_count, canonicalization_version) VALUES (?,?,?,1,'v')", args: [`a5-t${i}`, `a5-ts${i}`, 't'] });
+    if (await rej("INSERT INTO archive_document_cosources (representation_id, co_representation_id, shared_gram_count, policy_version) VALUES ('a5-r2',?,2,'archive-cosource-v1')", [`a5-t${i}`]) === null) ok24 += 1;
+  }
+  const r2Count = Number((await client.execute("SELECT COUNT(*) c FROM archive_document_cosources WHERE representation_id = 'a5-r2' AND policy_version = 'archive-cosource-v1'")).rows[0].c);
+  assert.equal(r2Count, 24, 'trg_archive_document_cosources_max_neighbors caps a single doc at 24 outgoing v1 edges');
+  assert.equal(ok24, 24, 'exactly 24 of the 40 attempts succeeded');
+
+  // CASCADE
+  await client.execute("DELETE FROM corpus_document_representations WHERE id = 'a5-r2'");
+  assert.equal(
+    Number((await client.execute("SELECT COUNT(*) c FROM archive_document_cosources WHERE representation_id = 'a5-r2' OR co_representation_id = 'a5-r2'")).rows[0].c),
+    0,
+    'archive_document_cosources CASCADE-deletes with either endpoint representation',
+  );
+
+  const rerun = await runTargetMigrations(client, drizzleDir, { environmentLabel: 'local-test', expectedEnvironmentLabel: 'local-test' });
+  assert.equal(rerun.status, 'already-fully-applied');
+  assert.equal(rerun.steps.find((s) => s.file === ARCHIVE_2D4_FILE).status, 'already-applied');
+
+  client.close();
+  cleanupDbFile(dbFile);
+});
+
+// --- A6: fingerprint-version-safe bounded admission-family recovery (0051,
+// slice 2H) — the deliberate, contiguous extension. Mirrors A5's structure:
+// presence + contiguity + now-last + LF-byte hash stability + non-destructive
+// + correct index-only metadata + a real applied shape (the composite index
+// with its exact column order, NO new table) + a clean 0050 -> 0051 upgrade +
+// idempotent re-run. Also re-proves, once, that no historical migration hash
+// changed and that unknown newer files remain tolerated. ---
+
+test('A6: 0051 is in TARGET_MIGRATIONS, immediately after 0050, and now last', () => {
+  assert.ok(TARGET_MIGRATIONS.includes(SLICE_2H_FILE), `${SLICE_2H_FILE} must be in TARGET_MIGRATIONS`);
+  const i50 = TARGET_MIGRATIONS.indexOf(ARCHIVE_2D4_FILE);
+  const i51 = TARGET_MIGRATIONS.indexOf(SLICE_2H_FILE);
+  assert.equal(i51, i50 + 1, '0051 must immediately follow 0050');
+  assert.equal(i51, TARGET_MIGRATIONS.length - 1, '0051 must be the last target migration');
+  // full 0012..0051 contiguity (A3 owns the general assertion; re-checked here
+  // so this section is self-contained after the 0051 extension).
+  assert.deepEqual(
+    TARGET_MIGRATIONS.map((f) => Number(f.slice(0, 4))),
+    Array.from({ length: 40 }, (_, i) => 12 + i),
+    'TARGET_MIGRATIONS is the contiguous 0012..0051 range',
+  );
+});
+
+test('A6: 0051 pinned hash matches the on-disk LF bytes; the file is non-destructive; it is a single CREATE INDEX', () => {
+  const raw = fs.readFileSync(path.join(drizzleDir, SLICE_2H_FILE));
+  assert.ok(!raw.includes(Buffer.from('\r\n')), `${SLICE_2H_FILE} must be LF in the working tree (CRLF breaks the pinned hash)`);
+  const content = fs.readFileSync(path.join(drizzleDir, SLICE_2H_FILE), 'utf8');
+  assert.ok(!content.includes('\r'), 'no CR bytes');
+  assert.equal(sha256(content), EXPECTED_MIGRATION_SHA256[SLICE_2H_FILE], 'pinned 0051 hash must match its current LF content');
+  assert.deepEqual(scanForDestructiveStatements(content), [], '0051 must contain zero destructive statements — CREATE INDEX IF NOT EXISTS only');
+  assert.equal(APPROVED_DESTRUCTIVE_STATEMENTS[SLICE_2H_FILE], undefined, '0051 needs no destructive-statement exception');
+  const stmts = splitStatements(content);
+  assert.equal(stmts.length, 1, '0051 has exactly one statement');
+  assert.equal(stmts.filter((s) => /^CREATE INDEX IF NOT EXISTS idx_corpus_document_shingles_hash_version_id/i.test(s)).length, 1, '0051 is a single CREATE INDEX IF NOT EXISTS on the slice-2H index');
+  assert.equal(stmts.filter((s) => /^CREATE TABLE/i.test(s)).length, 0, '0051 creates no table');
+  assert.equal(stmts.filter((s) => /^CREATE TRIGGER/i.test(s)).length, 0, '0051 creates no trigger');
+});
+
+test('A6: 0051 metadata is index-only — no expected tables, exactly one expected index, no column mechanism', () => {
+  assert.deepEqual(EXPECTED_TABLES_BY_MIGRATION[SLICE_2H_FILE], [], '0051 must declare zero new tables');
+  assert.deepEqual(
+    EXPECTED_INDEXES_BY_MIGRATION[SLICE_2H_FILE],
+    ['idx_corpus_document_shingles_hash_version_id'],
+    '0051 must declare exactly its one additive index',
+  );
+  assert.equal(EXPECTED_COLUMNS_BY_MIGRATION[SLICE_2H_FILE], undefined, '0051 must NOT use the column-state mechanism — it adds an index, not a column');
+});
+
+test('A6: no historical migration hash changed — every 0012-0050 pin still equals its current file, and only 0051 is new in the manifest', () => {
+  // The manifest and TARGET_MIGRATIONS carry exactly the same set.
+  assert.deepEqual(
+    Object.keys(EXPECTED_MIGRATION_SHA256).sort(),
+    [...TARGET_MIGRATIONS].sort(),
+    'EXPECTED_MIGRATION_SHA256 covers exactly TARGET_MIGRATIONS',
+  );
+  // Every pin (historical AND 0051) matches the current on-disk LF content —
+  // proving this extension re-pinned nothing it should not have.
+  for (const file of TARGET_MIGRATIONS) {
+    const content = fs.readFileSync(path.join(drizzleDir, file), 'utf8');
+    assert.equal(sha256(content), EXPECTED_MIGRATION_SHA256[file], `${file}'s pinned hash must match its current content (no historical hash was disturbed)`);
+  }
+  assert.equal(
+    EXPECTED_MIGRATION_SHA256[SLICE_2H_FILE],
+    '5acde90ef71c0d95561f6de236e1ff839e72039b90a34c28f351f649609cb042',
+    '0051 is pinned to the exact LF-normalized SHA-256 of the committed file',
+  );
+});
+
+test('A6: checkPreflight passes for the full 0012-0051 set against a pre-0012 database', async () => {
+  const dbFile = freshDbPath('a6-preflight');
+  const client = await buildPreMigrationDb(dbFile);
+  const result = await checkPreflight(client, drizzleDir, { environmentLabel: 'local-test', expectedEnvironmentLabel: 'local-test' });
+  assert.equal(result.ok, true, `preflight must pass for the 0051-extended allowlist — got: ${JSON.stringify(result)}`);
+  client.close();
+  cleanupDbFile(dbFile);
+});
+
+test('A6: checkPreflight still REJECTS a tampered 0051 (integrity check not weakened by the new pin)', async () => {
+  const tamperedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'e8-a6-tamper-'));
+  for (const file of TARGET_MIGRATIONS) fs.copyFileSync(path.join(drizzleDir, file), path.join(tamperedDir, file));
+  // append one harmless-looking byte to 0051 — still valid SQL, but not the reviewed content.
+  fs.appendFileSync(path.join(tamperedDir, SLICE_2H_FILE), '\n-- tampered\n');
+  const dbFile = freshDbPath('a6-tamper');
+  const client = await buildPreMigrationDb(dbFile);
+  const result = await checkPreflight(client, tamperedDir, { environmentLabel: 'local-test', expectedEnvironmentLabel: 'local-test' });
+  assert.equal(result.ok, false, 'a tampered 0051 must be refused');
+  assert.equal(result.code, 'HASH_MISMATCH');
+  assert.equal(result.details.file, SLICE_2H_FILE);
+  client.close();
+  cleanupDbFile(dbFile);
+  fs.rmSync(tamperedDir, { recursive: true, force: true });
+});
+
+test('A6: a database already at 0050 applies ONLY 0051 — the pure 0050 -> 0051 upgrade; the composite index lands with the exact column order and NO new table', async () => {
+  const dbFile = freshDbPath('a6-0050-to-0051');
+  const client = await buildPreMigrationDb(dbFile);
+  // bring it exactly to 0050 by executing 0012..0050 directly.
+  for (const file of TARGET_MIGRATIONS) {
+    if (file === SLICE_2H_FILE) break;
+    await client.executeMultiple(fs.readFileSync(path.join(drizzleDir, file), 'utf8'));
+  }
+  const tablesAt50 = new Set((await client.execute("SELECT name FROM sqlite_master WHERE type='table'")).rows.map((r) => String(r.name)));
+  const indexesAt50 = new Set((await client.execute("SELECT name FROM sqlite_master WHERE type='index'")).rows.map((r) => String(r.name)));
+  assert.ok(tablesAt50.has('archive_document_cosources'), 'sanity: the DB is at 0050');
+  assert.ok(indexesAt50.has('idx_corpus_document_shingles_hash'), 'sanity: 0019 single-column shingle index present');
+  assert.ok(!indexesAt50.has('idx_corpus_document_shingles_hash_version_id'), 'sanity: 0051 composite index absent at 0050');
+
+  const result = await runTargetMigrations(client, drizzleDir, { environmentLabel: 'local-test', expectedEnvironmentLabel: 'local-test' });
+  assert.equal(result.status, 'success', `the runner must apply 0051 cleanly — got: ${JSON.stringify(result).slice(0, 400)}`);
+  const applied = result.steps.filter((s) => s.status === 'applied').map((s) => s.file);
+  assert.deepEqual(applied, [SLICE_2H_FILE], 'only 0051 should be newly applied; 0012-0050 already-applied');
+
+  // the composite index exists with EXACTLY (shingle_hash, fingerprint_version, id).
+  const idxCols = (await client.execute("PRAGMA index_info('idx_corpus_document_shingles_hash_version_id')")).rows.map((r) => String(r.name));
+  assert.deepEqual(idxCols, ['shingle_hash', 'fingerprint_version', 'id'], '0051 index column order must be exactly (shingle_hash, fingerprint_version, id)');
+  // 0051 creates NO table — the table set is unchanged from 0050.
+  const tablesAt51 = new Set((await client.execute("SELECT name FROM sqlite_master WHERE type='table'")).rows.map((r) => String(r.name)));
+  assert.deepEqual([...tablesAt51].sort(), [...tablesAt50].sort(), '0051 must create no new table');
+  // the pre-existing 0019 single-column index is retained.
+  const indexesAt51 = new Set((await client.execute("SELECT name FROM sqlite_master WHERE type='index'")).rows.map((r) => String(r.name)));
+  assert.ok(indexesAt51.has('idx_corpus_document_shingles_hash'), '0051 must not drop the 0019 single-column shingle index');
+
+  // the runner detects 0051 as fully applied via the index mechanism.
+  assert.equal(await indexSetState(client, EXPECTED_INDEXES_BY_MIGRATION[SLICE_2H_FILE]), 'all', 'the runner must see 0051 as fully applied');
+
+  // re-run is idempotent.
+  const rerun = await runTargetMigrations(client, drizzleDir, { environmentLabel: 'local-test', expectedEnvironmentLabel: 'local-test' });
+  assert.equal(rerun.status, 'already-fully-applied');
+  assert.equal(rerun.steps.find((s) => s.file === SLICE_2H_FILE).status, 'already-applied');
+
+  client.close();
+  cleanupDbFile(dbFile);
 });
 
 // --- F: no execution of 0000-0011 (structural) ----------------------------
@@ -310,7 +1153,7 @@ test('F: the runner module never does an unfiltered directory scan — no readdi
 
 // --- G: destructive SQL detection -----------------------------------------
 
-test('G: scanForDestructiveStatements finds real destructive statements and finds none, or exactly the one approved exception, in the actual 25 target migration files', () => {
+test('G: scanForDestructiveStatements finds real destructive statements and finds none, or exactly an approved exception, in the actual 36 target migration files', () => {
   assert.deepEqual(scanForDestructiveStatements('CREATE TABLE IF NOT EXISTS x (id TEXT);'), []);
   assert.ok(scanForDestructiveStatements('DROP TABLE document_chunks;').length > 0);
   assert.ok(scanForDestructiveStatements('DELETE FROM users WHERE 1=1;').length > 0);
@@ -319,19 +1162,24 @@ test('G: scanForDestructiveStatements finds real destructive statements and find
   // a comment merely mentioning the word must not trigger a false positive
   assert.deepEqual(scanForDestructiveStatements('-- this migration never uses DROP TABLE or DELETE FROM\nCREATE TABLE IF NOT EXISTS x (id TEXT);'), []);
 
-  const approvedException = '0032_corpus_admission_accepted_representations_revocation.sql';
+  const approvedExceptions = new Set([
+    '0032_corpus_admission_accepted_representations_revocation.sql',
+    '0044_corpus_duplicate_suppression_shadow_evaluations.sql',
+  ]);
   for (const file of TARGET_MIGRATIONS) {
     const content = fs.readFileSync(path.join(drizzleDir, file), 'utf8');
     const destructive = scanForDestructiveStatements(content);
-    if (file === approvedException) {
-      // The one deliberate, reviewed exception (requirement 2 of this
-      // hardening pass): 0032 must contain EXACTLY the approved DROP INDEX
-      // statement and nothing else destructive — proving the exception is
-      // as narrow as APPROVED_DESTRUCTIVE_STATEMENTS' own header comment
-      // claims, not a blanket pass for this file.
+    if (approvedExceptions.has(file)) {
+      // The deliberate, reviewed exceptions: 0032's DROP INDEX (requirement 2
+      // of the corpus-admission hardening pass) and 0044's trigger-embedded
+      // DELETE (requirement of the 0041-0047 extension) must each contain
+      // EXACTLY their own approved destructive statement and nothing else
+      // destructive — proving each exception is as narrow as
+      // APPROVED_DESTRUCTIVE_STATEMENTS' own header comment claims, not a
+      // blanket pass for the file.
       assert.deepEqual(
         destructive,
-        APPROVED_DESTRUCTIVE_STATEMENTS[approvedException],
+        APPROVED_DESTRUCTIVE_STATEMENTS[file],
         `${file} must contain exactly its one approved destructive statement, and nothing else destructive`,
       );
     } else {
@@ -475,6 +1323,117 @@ test('G2: checkPreflight still refuses unrelated destructive statements in unrel
   fs.rmSync(tempDrizzleDir, { recursive: true, force: true });
 });
 
+// --- G3: 0044's trigger-embedded DELETE exception is narrow, per-file, per-exact-statement (mirrors G2) ---
+
+test('G3: checkPreflight accepts the real 0044 file (its trigger-embedded DELETE is the approved exception)', async () => {
+  const dbFile = freshDbPath('g3-real');
+  const client = await buildPreMigrationDb(dbFile);
+
+  const result = await checkPreflight(client, drizzleDir, { environmentLabel: 'local-test', expectedEnvironmentLabel: 'local-test' });
+  assert.equal(result.ok, true, "the real, unmodified migration set (including 0044's approved trigger DELETE) must pass preflight");
+
+  client.close();
+  cleanupDbFile(dbFile);
+});
+
+test('G3: checkPreflight refuses a genuine top-level, unapproved DELETE smuggled into 0044 alongside its approved trigger', async () => {
+  const dbFile = freshDbPath('g3-extra');
+  const client = await buildPreMigrationDb(dbFile);
+
+  const tempDrizzleDir = fs.mkdtempSync(path.join(os.tmpdir(), 'e8-g3-extra-'));
+  const manifest = {};
+  for (const file of TARGET_MIGRATIONS) {
+    let content = fs.readFileSync(path.join(drizzleDir, file), 'utf8');
+    if (file === '0044_corpus_duplicate_suppression_shadow_evaluations.sql') {
+      // A genuine TOP-LEVEL destructive statement (not inside any trigger
+      // body) smuggled in alongside the approved, trigger-scoped exception —
+      // the allowlist must not treat "this file has an approved exception"
+      // as "this file's destructive scanning is off." This is the exact
+      // "equivalent top-level/unapproved DELETE still fails" case.
+      content += '\nDELETE FROM corpus_duplicate_suppression_shadow_evaluations WHERE 1=1;\n';
+    }
+    fs.writeFileSync(path.join(tempDrizzleDir, file), content);
+    manifest[file] = sha256(content);
+  }
+
+  const result = await checkPreflight(client, tempDrizzleDir, {
+    environmentLabel: 'local-test',
+    expectedEnvironmentLabel: 'local-test',
+    migrationShaManifest: manifest,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'DESTRUCTIVE_STATEMENT_DETECTED');
+  assert.equal(result.details.file, '0044_corpus_duplicate_suppression_shadow_evaluations.sql');
+  assert.match(result.message, /DELETE FROM corpus_duplicate_suppression_shadow_evaluations WHERE 1=1/);
+  // The approved trigger statement itself must not be re-flagged alongside the real violation.
+  assert.doesNotMatch(result.message, /CREATE TRIGGER IF NOT EXISTS trg_corpus_duplicate_suppression_shadow_cleanup_on_report_delete/);
+
+  client.close();
+  fs.rmSync(tempDrizzleDir, { recursive: true, force: true });
+});
+
+test('G3: checkPreflight refuses 0044\'s approved trigger text, verbatim, if it appears unapproved in a DIFFERENT file', async () => {
+  const dbFile = freshDbPath('g3-wrong-file');
+  const client = await buildPreMigrationDb(dbFile);
+
+  const tempDrizzleDir = fs.mkdtempSync(path.join(os.tmpdir(), 'e8-g3-wrong-file-'));
+  const manifest = {};
+  const approvedTriggerText = APPROVED_DESTRUCTIVE_STATEMENTS['0044_corpus_duplicate_suppression_shadow_evaluations.sql'][0];
+  for (const file of TARGET_MIGRATIONS) {
+    let content = fs.readFileSync(path.join(drizzleDir, file), 'utf8');
+    if (file === '0047_developer_corpus_maturity_exemptions.sql') {
+      // The exact text approved for 0044, verbatim, but in 0047 instead —
+      // the allowlist is keyed by filename, so this must still be refused.
+      content += `\n${approvedTriggerText};\n`;
+    }
+    fs.writeFileSync(path.join(tempDrizzleDir, file), content);
+    manifest[file] = sha256(content);
+  }
+
+  const result = await checkPreflight(client, tempDrizzleDir, {
+    environmentLabel: 'local-test',
+    expectedEnvironmentLabel: 'local-test',
+    migrationShaManifest: manifest,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'DESTRUCTIVE_STATEMENT_DETECTED');
+  assert.equal(result.details.file, '0047_developer_corpus_maturity_exemptions.sql');
+
+  client.close();
+  fs.rmSync(tempDrizzleDir, { recursive: true, force: true });
+});
+
+test('G3: checkPreflight refuses a near-miss variant of 0044\'s approved trigger (different trigger name)', async () => {
+  const dbFile = freshDbPath('g3-near-miss');
+  const client = await buildPreMigrationDb(dbFile);
+
+  const tempDrizzleDir = fs.mkdtempSync(path.join(os.tmpdir(), 'e8-g3-near-miss-'));
+  const manifest = {};
+  for (const file of TARGET_MIGRATIONS) {
+    let content = fs.readFileSync(path.join(drizzleDir, file), 'utf8');
+    if (file === '0044_corpus_duplicate_suppression_shadow_evaluations.sql') {
+      content = content.replace(
+        'trg_corpus_duplicate_suppression_shadow_cleanup_on_report_delete',
+        'trg_some_other_trigger_entirely',
+      );
+    }
+    fs.writeFileSync(path.join(tempDrizzleDir, file), content);
+    manifest[file] = sha256(content);
+  }
+
+  const result = await checkPreflight(client, tempDrizzleDir, {
+    environmentLabel: 'local-test',
+    expectedEnvironmentLabel: 'local-test',
+    migrationShaManifest: manifest,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'DESTRUCTIVE_STATEMENT_DETECTED');
+  assert.match(result.message, /trg_some_other_trigger_entirely/);
+
+  client.close();
+  fs.rmSync(tempDrizzleDir, { recursive: true, force: true });
+});
+
 test('splitStatements correctly splits a real multi-statement migration file into individually executable statements', () => {
   const content = fs.readFileSync(path.join(drizzleDir, '0019_user_submission_corpus.sql'), 'utf8');
   const statements = splitStatements(content);
@@ -531,9 +1490,89 @@ test('splitStatements correctly splits 0028 (a single ALTER TABLE, like 0025 but
   assert.ok(/^ALTER TABLE saved_reports ADD COLUMN ai_status/i.test(statements[0]));
 });
 
+test('splitStatements correctly splits 0041 (one ALTER TABLE, one CREATE TABLE, one CREATE INDEX)', () => {
+  const content = fs.readFileSync(path.join(drizzleDir, '0041_device_passport_actor_usage.sql'), 'utf8');
+  const statements = splitStatements(content);
+  assert.equal(statements.length, 3);
+  for (const s of statements) assert.doesNotMatch(s, /^--/, 'no statement should be a leftover comment line');
+  assert.ok(/^ALTER TABLE device_passports ADD COLUMN actor_usage_tracking_version/i.test(statements[0]));
+  assert.ok(/^CREATE TABLE IF NOT EXISTS device_passport_actor_usage/i.test(statements[1]));
+  assert.ok(/^CREATE INDEX/i.test(statements[2]));
+});
+
+test('splitStatements correctly splits 0042 (four CREATE TABLE, five CREATE INDEX, one ALTER TABLE — no triggers)', () => {
+  const content = fs.readFileSync(path.join(drizzleDir, '0042_account_owner_links.sql'), 'utf8');
+  const statements = splitStatements(content);
+  assert.equal(statements.length, 11);
+  for (const s of statements) assert.doesNotMatch(s, /^--/, 'no statement should be a leftover comment line');
+  assert.equal(statements.filter((s) => /^CREATE TABLE/i.test(s)).length, 4);
+  assert.equal(statements.filter((s) => /^CREATE (UNIQUE )?INDEX/i.test(s)).length, 6);
+  assert.ok(/^ALTER TABLE report_historical_match_snapshots ADD COLUMN owner_link_generation/i.test(statements[10]));
+});
+
+test('splitStatements correctly splits 0043 (two plain CREATE INDEX statements — no table, no column)', () => {
+  const content = fs.readFileSync(path.join(drizzleDir, '0043_corpus_maturity_indexes.sql'), 'utf8');
+  const statements = splitStatements(content);
+  assert.equal(statements.length, 2);
+  for (const s of statements) {
+    assert.doesNotMatch(s, /^--/, 'no statement should be a leftover comment line');
+    assert.ok(/^CREATE INDEX/i.test(s));
+  }
+});
+
+test('splitStatements is trigger-aware: 0044\'s CREATE TRIGGER ... BEGIN ... END block is ONE atomic statement, not shredded at its internal semicolon', () => {
+  const content = fs.readFileSync(path.join(drizzleDir, '0044_corpus_duplicate_suppression_shadow_evaluations.sql'), 'utf8');
+  const statements = splitStatements(content);
+  assert.equal(statements.length, 3, 'expected exactly 1 CREATE TABLE + 1 CREATE UNIQUE INDEX + 1 CREATE TRIGGER (as one statement)');
+  assert.ok(/^CREATE TABLE IF NOT EXISTS corpus_duplicate_suppression_shadow_evaluations/i.test(statements[0]));
+  assert.ok(/^CREATE UNIQUE INDEX/i.test(statements[1]));
+
+  const trigger = statements[2];
+  assert.ok(/^CREATE TRIGGER IF NOT EXISTS trg_corpus_duplicate_suppression_shadow_cleanup_on_report_delete/i.test(trigger));
+  // The body's own internal semicolon (after `AND report_id = OLD.id`) must
+  // be PRESERVED — proving this wasn't split there — and the statement must
+  // end in a syntactically complete `END`, not be truncated before it.
+  assert.match(trigger, /AND report_id = OLD\.id;\s*\nEND$/, "the trigger's internal semicolon must survive and the statement must end in a complete END");
+  assert.ok(!trigger.trimEnd().endsWith(';'), 'the OUTER statement-terminating semicolon must be stripped (client.migrate() adds its own statement boundary)');
+
+  // A naive `;`-split (the pre-fix behavior) would have produced 4 pieces
+  // instead of 3, with the trigger shredded into an invalid fragment plus a
+  // dangling `END` — pin that this regression cannot silently return.
+  const naiveCount = content.replace(/--.*$/gm, '').split(';').map((s) => s.trim()).filter((s) => s.length > 0).length;
+  assert.equal(naiveCount, 4, 'sanity check: naive splitting on this exact file must still produce 4 pieces (proves the trigger-aware path is doing real work, not a no-op)');
+});
+
+test('splitStatements correctly splits 0045 (two CREATE TABLE, five CREATE INDEX — no triggers, no columns on existing tables)', () => {
+  const content = fs.readFileSync(path.join(drizzleDir, '0045_account_identity.sql'), 'utf8');
+  const statements = splitStatements(content);
+  assert.equal(statements.length, 7);
+  for (const s of statements) assert.doesNotMatch(s, /^--/, 'no statement should be a leftover comment line');
+  assert.equal(statements.filter((s) => /^CREATE TABLE/i.test(s)).length, 2);
+  assert.equal(statements.filter((s) => /^CREATE (UNIQUE )?INDEX/i.test(s)).length, 5);
+});
+
+test('splitStatements correctly splits 0046 (one ALTER TABLE, one CREATE TABLE, two CREATE INDEX)', () => {
+  const content = fs.readFileSync(path.join(drizzleDir, '0046_email_verification_challenges.sql'), 'utf8');
+  const statements = splitStatements(content);
+  assert.equal(statements.length, 4);
+  for (const s of statements) assert.doesNotMatch(s, /^--/, 'no statement should be a leftover comment line');
+  assert.ok(/^ALTER TABLE users ADD COLUMN email_verified_at/i.test(statements[0]));
+  assert.ok(/^CREATE TABLE IF NOT EXISTS email_verification_challenges/i.test(statements[1]));
+  assert.ok(/^CREATE UNIQUE INDEX/i.test(statements[2]));
+  assert.ok(/^CREATE INDEX/i.test(statements[3]));
+});
+
+test('splitStatements correctly splits 0047 (a single CREATE TABLE)', () => {
+  const content = fs.readFileSync(path.join(drizzleDir, '0047_developer_corpus_maturity_exemptions.sql'), 'utf8');
+  const statements = splitStatements(content);
+  assert.equal(statements.length, 1);
+  assert.doesNotMatch(statements[0], /^--/, 'no statement should be a leftover comment line');
+  assert.ok(/^CREATE TABLE IF NOT EXISTS developer_corpus_maturity_exemptions/i.test(statements[0]));
+});
+
 // --- Section 9: disposable local DB — full happy-path run ------------------
 
-test('SECTION 9: fresh pre-0012 database — the runner applies all 25 migrations in order, creates all 26 tables, adds every column-only migration\'s columns, and preserves legacy row VALUES exactly', async () => {
+test('SECTION 9: fresh pre-0012 database — the runner applies all 29 migrations in order, creates all 30 tables, adds every column-only migration\'s columns, and preserves legacy row VALUES exactly', async () => {
   const dbFile = freshDbPath('happy');
   const client = await buildPreMigrationDb(dbFile);
   await seedRepresentativeLegacyRows(client);
@@ -620,7 +1659,7 @@ test('I: re-running the runner against an already-fully-migrated database is a s
 
 // --- UPGRADE: the real release path — a populated 0028 database, not fresh ---
 
-test('UPGRADE: a populated database already at 0028 upgrades cleanly through 0036, preserving existing 0012-0028 corpus/report data exactly', async () => {
+test('UPGRADE: a populated database already at 0028 upgrades cleanly through 0040, preserving existing 0012-0028 corpus/report data exactly', async () => {
   const dbFile = freshDbPath('upgrade-0028');
   const client = await buildPreMigrationDb(dbFile);
   await seedRepresentativeLegacyRows(client);
@@ -676,8 +1715,27 @@ test('UPGRADE: a populated database already at 0028 upgrades cleanly through 003
     'corpus_admission_accepted_representations', 'corpus_admission_accepted_shingles',
     'corpus_admission_report_jobs', 'corpus_admission_admin_audit_log',
     'corpus_admission_promotions', 'corpus_match_generation',
+    // Device Passport schema foundation (0037-0040):
+    'corpus_admission_sweep_runs', 'device_passports', 'device_passport_challenges',
+    'corpus_admission_decision_device_provenance',
+    // Direct owner-link / corpus-maturity / account-identity / email-verification
+    // / developer corpus-maturity extension (0041-0047):
+    'device_passport_actor_usage',
+    'account_owner_links', 'account_owner_link_evidence', 'account_owner_link_events', 'account_owner_link_state',
+    'corpus_duplicate_suppression_shadow_evaluations',
+    'account_identity_profiles', 'account_identity_fingerprints',
+    'email_verification_challenges',
+    'developer_corpus_maturity_exemptions',
   ]) {
     assert.ok(tableNames.has(t), `expected new table ${t} to exist after upgrade`);
+  }
+  // The deduplicated representation table must NOT gain any device/account
+  // identity column across the whole 0029-0040 upgrade — device provenance
+  // lives on corpus_admission_decision_device_provenance, per admission
+  // backing, never here.
+  const repCols = new Set((await client.execute("PRAGMA table_info('corpus_document_representations')")).rows.map((r) => String(r.name)));
+  for (const forbidden of ['device_passport_id', 'verified_device_passport_id', 'account_id', 'user_id', 'email']) {
+    assert.ok(!repCols.has(forbidden), `corpus_document_representations must NOT gain "${forbidden}"`);
   }
 
   const after = {
@@ -685,17 +1743,18 @@ test('UPGRADE: a populated database already at 0028 upgrades cleanly through 003
     snapshot: { ...(await client.execute({ sql: 'SELECT * FROM report_historical_match_snapshots WHERE report_device_key = ? AND report_id = ?', args: ['upgrade-test-device-1', 'upgrade-test-report-1'] })).rows[0] },
   };
   for (const [column, value] of Object.entries(before.representation)) {
-    assert.equal(after.representation[column], value, `corpus_document_representations.${column} must be unchanged by the 0029-0036 upgrade`);
+    assert.equal(after.representation[column], value, `corpus_document_representations.${column} must be unchanged by the 0029-0040 upgrade`);
   }
   for (const [column, value] of Object.entries(before.snapshot)) {
-    assert.equal(after.snapshot[column], value, `report_historical_match_snapshots.${column} must be unchanged by the 0029-0036 upgrade`);
+    assert.equal(after.snapshot[column], value, `report_historical_match_snapshots.${column} must be unchanged by the 0029-0040 upgrade`);
   }
-  // 0035/0036 add is_partial/corpus_generation as NOT NULL DEFAULT 0 columns
-  // — a pre-existing row must be backfilled to that default, not left NULL
-  // or unset, matching each migration's own "common case for every existing
-  // row" header comment.
+  // 0035/0036/0040 add is_partial/corpus_generation/device_provenance_generation
+  // as NOT NULL DEFAULT 0 columns — a pre-existing row must be backfilled to
+  // that default, not left NULL or unset, matching each migration's own
+  // "common case for every existing row" header comment.
   assert.equal(after.snapshot.is_partial, 0, '0035 must backfill is_partial to 0 for a pre-existing snapshot row');
   assert.equal(after.snapshot.corpus_generation, 0, '0036 must backfill corpus_generation to 0 for a pre-existing snapshot row');
+  assert.equal(after.snapshot.device_provenance_generation, 0, '0040 must backfill device_provenance_generation to 0 for a pre-existing snapshot row');
 
   const repInfo = await client.execute("PRAGMA table_info('corpus_admission_accepted_representations')");
   assert.ok(repInfo.rows.some((r) => String(r.name) === 'revoked_at'), '0032 must add revoked_at to corpus_admission_accepted_representations');
@@ -709,7 +1768,7 @@ test('UPGRADE: a populated database already at 0028 upgrades cleanly through 003
 
 // --- INTERRUPTED: recovery from a run that failed partway through --------
 
-test('INTERRUPTED: a run that fails partway through the 0029-0036 range can be safely resumed to completion', async () => {
+test('INTERRUPTED: a run that fails partway through the 0029-0040 range can be safely resumed to completion', async () => {
   const dbFile = freshDbPath('interrupted');
   const client = await buildPreMigrationDb(dbFile);
 
@@ -988,11 +2047,17 @@ test('K: the selectively-migrated database is structurally identical to a databa
   // constraint) still fails this comparison, since only comment TEXT is
   // stripped, nothing else.
   const schemaOf = async (client) => {
-    const result = await client.execute("SELECT name, sql FROM sqlite_master WHERE type IN ('table','index') AND name != 'sqlite_sequence' ORDER BY name");
+    // Includes 'trigger' since the 0041-0047 extension (0044 adds one) —
+    // runTargetMigrations() builds it via splitStatements()'s trigger-aware
+    // parsing + client.migrate(), while applyMigrationsLibsql() builds it via
+    // client.executeMultiple() on the raw file text; this comparison (after
+    // stripping incidental comment-text differences) proves both paths
+    // produce the SAME trigger definition, not just the same tables/indexes.
+    const result = await client.execute("SELECT name, sql FROM sqlite_master WHERE type IN ('table','index','trigger') AND name != 'sqlite_sequence' ORDER BY name");
     return result.rows.map((r) => `${r.name}::${stripSqlLineComments(String(r.sql))}`).sort();
   };
 
-  assert.deepEqual(await schemaOf(selectiveClient), await schemaOf(referenceClient), 'applying 0000-0011 then 0012-0036 via this runner must produce a structurally identical schema to applying 0000-0036 all at once');
+  assert.deepEqual(await schemaOf(selectiveClient), await schemaOf(referenceClient), 'applying 0000-0011 then 0012-0047 via this runner must produce a structurally identical schema (including 0044\'s trigger) to applying 0000-0047 all at once');
 
   selectiveClient.close();
   referenceClient.close();
@@ -1065,4 +2130,48 @@ test('columnSetState correctly distinguishes none/all/partial, and treats an emp
   assert.equal(await columnSetState(client, columns), 'all');
   assert.equal(await columnSetState(client, []), 'all', 'a migration declaring zero columns has nothing left to apply');
   client.close();
+});
+
+test('indexSetState correctly distinguishes none/all/partial, and treats an empty index list as vacuously "all"', async () => {
+  const dbFile = freshDbPath('e3');
+  const client = await buildPreMigrationDb(dbFile);
+  const indexes = ['idx_corpus_submission_references_created_at', 'idx_corpus_admission_decisions_created_at'];
+  assert.equal(await indexSetState(client, indexes), 'none');
+  await client.execute('CREATE INDEX idx_corpus_submission_references_created_at ON saved_reports(id)');
+  assert.equal(await indexSetState(client, indexes), 'partial');
+  await client.execute('CREATE INDEX idx_corpus_admission_decisions_created_at ON saved_reports(device_key)');
+  assert.equal(await indexSetState(client, indexes), 'all');
+  assert.equal(await indexSetState(client, []), 'all', 'a migration declaring zero indexes has nothing left to apply');
+  client.close();
+});
+
+// --- B3: refusal when 0043's indexes exist in a mixed state (some but not all) ---
+
+test('B3: refuses when 0043\'s indexes exist in a mixed state (one of the two present, not both)', async () => {
+  const dbFile = freshDbPath('b3');
+  const client = await buildPreMigrationDb(dbFile);
+
+  // Apply exactly 0012-0042 for real (via a temp dir excluding 0043 and
+  // anything after it), then hand-add only ONE of 0043's two indexes — an
+  // "unexpected" partial state no legitimate prior run of this runner could
+  // produce (0043 applies as a single client.migrate() transaction, same as
+  // every other target migration).
+  const only0012to0042 = fs.mkdtempSync(path.join(os.tmpdir(), 'e8-b3-'));
+  for (const file of TARGET_MIGRATIONS.filter((f) => f.slice(0, 4) <= '0042')) {
+    fs.copyFileSync(path.join(drizzleDir, file), path.join(only0012to0042, file));
+  }
+  await applyMigrationsLibsql(client, only0012to0042);
+  await client.execute('CREATE INDEX idx_corpus_submission_references_created_at ON corpus_submission_references(created_at)');
+  // Deliberately omit idx_corpus_admission_decisions_created_at — the partial state.
+
+  const result = await runTargetMigrations(client, drizzleDir, { environmentLabel: 'local-test', expectedEnvironmentLabel: 'local-test' });
+  assert.equal(result.status, 'failed');
+  assert.equal(result.failedMigration, '0043_corpus_maturity_indexes.sql');
+  assert.match(result.error, /partially applied/);
+  assert.match(result.error, /idx_corpus_admission_decisions_created_at|idx_corpus_submission_references_created_at/);
+  // every migration before 0043 (unrelated, unaffected) must still have succeeded
+  assert.ok(result.steps.some((s) => s.file === '0042_account_owner_links.sql' && s.status === 'already-applied'));
+
+  client.close();
+  fs.rmSync(only0012to0042, { recursive: true, force: true });
 });

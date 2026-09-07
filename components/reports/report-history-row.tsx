@@ -7,6 +7,7 @@ import type { ReportSummary } from "@/lib/reports-remote";
 import { fetchRemoteReport } from "@/lib/reports-remote";
 import { getStoredReportById } from "@/lib/report-store";
 import { similarityScoreBand } from "@/lib/ai-core";
+import { resolveAiDisplayState } from "@/lib/ai-display-state";
 import type { SimilarityReport } from "@/lib/report-types";
 
 /**
@@ -19,16 +20,40 @@ import type { SimilarityReport } from "@/lib/report-types";
  * opened, at /reports/[id]).
  *
  * "Receipt" is the one action here that genuinely needs the full report
- * body — resolved on demand, only on click: local IndexedDB first (already
- * present for most anonymous reports), then a remote fetch, never eagerly.
+ * body — resolved on demand, only on click.
+ *
+ * Preview receipt regression: the receipt must show the same server-
+ * finalized primary/unified similarity result the room card and report
+ * detail page already show — never a locally-cached snapshot. The local
+ * IndexedDB copy is written once, at upload time, from
+ * attachUnifiedSimilarity's own client-side, corpus-blind computation (see
+ * that call site's own comment) and is never refreshed once write-time
+ * finalization persists the real, corpus-aware result server-side — so for
+ * any report whose similarity depends on corpus-source matching, the local
+ * copy can permanently disagree with what the room/detail page show. Fetches
+ * the server-confirmed copy first; the local copy is used only as an
+ * offline fallback when the network fetch itself fails.
  */
 
-function aiToneLabel(aiScore: number | null, aiTone: string | null): string {
-  if (aiScore === null) return "AI report pending";
-  if (aiTone === "low") return "Low AI indicators";
-  if (aiTone === "review") return "Moderate AI indicators";
-  if (aiTone === "high") return "Strong AI indicators";
-  return "AI report pending";
+/**
+ * Every AI result surface resolves through the one shared interpreter
+ * (lib/ai-display-state.ts) so the list row can never disagree with the
+ * room card or the detail page. A ReportSummary carries no aiAnalysis, so
+ * this only ever exercises the flat-column branches — equivalent to the
+ * previous inline logic for the common case, but now with a real "failed"
+ * state instead of it collapsing back into "AI report pending", and a
+ * missing score can never render as "0%".
+ */
+function aiRowDisplay(report: ReportSummary): { value: string; label: string; toneClass: string } {
+  const ai = resolveAiDisplayState({ aiStatus: report.aiStatus, aiScore: report.aiScore, aiTone: report.aiTone });
+  if (ai.state === "complete" && ai.score !== null) {
+    const label =
+      ai.tone === "low" ? "Low AI indicators" : ai.tone === "review" ? "Moderate AI indicators" : "Strong AI indicators";
+    return { value: `${ai.score}%`, label, toneClass: ai.tone };
+  }
+  if (ai.state === "failed") return { value: "—", label: "AI unavailable", toneClass: "unavailable" };
+  if (ai.state === "not_eligible") return { value: "—", label: "Not enough text", toneClass: "unavailable" };
+  return { value: "—", label: "AI report pending", toneClass: "unavailable" };
 }
 
 export function ReportHistoryRow({
@@ -40,7 +65,16 @@ export function ReportHistoryRow({
 }) {
   const [downloading, setDownloading] = useState(false);
   const [downloadError, setDownloadError] = useState(false);
-  const similarityVerdict = similarityScoreBand(report.archiveScore);
+  // Release-hardening audit finding SIM-01: prefer the combined result when
+  // this summary happens to carry one (see ReportSummary.primaryScore's own
+  // comment) — falls back to the archive-only value with the same
+  // "Similarity result" label the detail page itself uses for exactly the
+  // same fallback case, so this row can never contradict what opening the
+  // report would show.
+  const displayScore = report.primaryScore ?? report.archiveScore;
+  const displayLabel = report.isUnified ? "TurnitPlus Similarity" : "Similarity result";
+  const similarityVerdict = similarityScoreBand(displayScore);
+  const aiRow = aiRowDisplay(report);
 
   async function handleDownloadReceipt() {
     setDownloading(true);
@@ -50,8 +84,8 @@ export function ReportHistoryRow({
       // and "onDownloadReceipt itself threw" (e.g. its own font-loading
       // fetch failed) used to be entirely silent — the button just flipped
       // back to "Receipt" with no indication anything went wrong.
-      const local = await getStoredReportById<SimilarityReport>(report.id).catch(() => null);
-      const full = local ?? (await fetchRemoteReport<SimilarityReport>(report.id));
+      const remote = await fetchRemoteReport<SimilarityReport>(report.id);
+      const full = remote ?? (await getStoredReportById<SimilarityReport>(report.id).catch(() => null));
       if (full) {
         await onDownloadReceipt(full);
       } else {
@@ -82,17 +116,17 @@ export function ReportHistoryRow({
           see components/reports/report-rooms.tsx's own room-link comment for
           the same fix applied to the room directory. */}
       <div className="history-action-group" aria-label={`Actions for ${report.title}`}>
-        <Link href={`/reports/${report.id}?mode=ai`} prefetch={false} className={`history-result history-ai-result history-ai-${report.aiTone ?? "unavailable"}`} aria-label={`Open AI report for ${report.title}`}>
+        <Link href={`/reports/${report.id}?mode=ai`} prefetch={false} className={`history-result history-ai-result history-ai-${aiRow.toneClass}`} aria-label={`Open AI report for ${report.title}`}>
           <span className="history-result-score">
-            <strong className="history-ai-value">{report.aiScore === null ? "—" : `${report.aiScore}%`}</strong>
-            <span>{aiToneLabel(report.aiScore, report.aiTone)}</span>
+            <strong className="history-ai-value">{aiRow.value}</strong>
+            <span>{aiRow.label}</span>
           </span>
           <span className="history-open-cue" aria-hidden="true"><ChevronRight /></span>
         </Link>
-        <Link href={`/reports/${report.id}`} prefetch={false} className={`history-result history-similarity-result ${similarityVerdict ? `history-similarity-${similarityVerdict.key}` : ""}`} aria-label={`Open similarity report for ${report.title}`}>
+        <Link href={`/reports/${report.id}`} prefetch={false} className={`history-result history-similarity-result ${similarityVerdict ? `history-similarity-${similarityVerdict.key}` : ""}`} aria-label={`Open similarity report for ${report.title} — ${displayScore}% ${displayLabel}`}>
           <span className="history-result-score">
-            <strong>{report.archiveScore}%</strong>
-            <span>Similarity result</span>
+            <strong>{displayScore}%</strong>
+            <span>{displayLabel}</span>
           </span>
           <span className="history-open-cue" aria-hidden="true"><ChevronRight /></span>
         </Link>

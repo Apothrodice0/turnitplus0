@@ -66,10 +66,18 @@ test("report metadata is generic and excludes the page from search indexing", as
 
 test("the anonymous client-side resolution path tries the local IndexedDB copy before the remote fetch", async () => {
   const shell = await readFile(new URL("../app/reports/[id]/report-detail-shell.tsx", import.meta.url), "utf8");
-  // Call sites specifically, not just identifier occurrence — the import
-  // statements alone would put fetchRemoteReport's text first.
-  const localCallIndex = shell.indexOf("await getStoredReportById<");
-  const remoteCallIndex = shell.indexOf("await fetchRemoteReport<");
+  // Release-hardening audit finding LIFECYCLE-04: this shell now has TWO
+  // separate effects — the authenticated/owned-report path (its own poll
+  // loop, calling fetchRemoteReport only) and the anonymous/device-key
+  // path (calling getStoredReportById then, on a local miss or as a
+  // background refresh, fetchRemoteReport). Scoped to the anonymous
+  // effect's own text specifically — comparing call positions across the
+  // whole file would compare two unrelated, mutually-exclusive effects.
+  const anonymousEffectStart = shell.indexOf("if (!requiresClientResolution || initialReport) return;");
+  assert.ok(anonymousEffectStart > -1, "the anonymous-resolution effect must be found");
+  const anonymousEffect = shell.slice(anonymousEffectStart);
+  const localCallIndex = anonymousEffect.indexOf("await getStoredReportById<");
+  const remoteCallIndex = anonymousEffect.indexOf("await fetchRemoteReport<");
   assert.ok(localCallIndex >= 0, "getStoredReportById must be called");
   assert.ok(remoteCallIndex >= 0, "fetchRemoteReport must be called");
   assert.ok(localCallIndex < remoteCallIndex, "the local IndexedDB lookup must be attempted before the remote fetch fallback");
@@ -94,7 +102,12 @@ test("the local IndexedDB lookup is never left unhandled — a rejection must fa
 
 test("delete uses the checked remote-delete variant, not the fail-soft one used by bulk history clearing", async () => {
   const shell = await readFile(new URL("../app/reports/[id]/report-detail-shell.tsx", import.meta.url), "utf8");
-  assert.match(shell, /import \{ deleteRemoteReportChecked, fetchRemoteReport \} from "@\/lib\/reports-remote";/);
+  const remoteImport = shell.match(/import \{ ([^}]+) \} from "@\/lib\/reports-remote";/);
+  assert.ok(remoteImport, "reports-remote import present");
+  const named = remoteImport[1].split(",").map((s) => s.trim());
+  assert.ok(named.includes("deleteRemoteReportChecked"), "must import the checked delete variant");
+  assert.ok(named.includes("fetchRemoteReport"), "must import fetchRemoteReport");
+  assert.ok(!named.includes("deleteRemoteReport"), "must NOT import the fail-soft deleteRemoteReport");
   assert.match(shell, /import \{ deleteStoredReport, getStoredReportById \} from "@\/lib\/report-store";/);
   assert.match(shell, /await deleteStoredReport\(id\);/);
   assert.match(shell, /const ok = await deleteRemoteReportChecked\(id\);/);

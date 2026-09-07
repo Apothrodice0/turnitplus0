@@ -202,6 +202,18 @@ export const saved_reports = sqliteTable(
     // save onward and so cannot distinguish "still running" from
     // "permanently failed" on its own.
     ai_status: text("ai_status"),
+    // Device Passport (drizzle/0039): the device passport cryptographically
+    // verified when POST /api/reports first created this report. NULL when
+    // no passport was verified at upload (feature off, unsupported browser,
+    // verification failed — all fail-safe: no device-based exclusion). NO
+    // foreign key on purpose (same no-FK / explicit-application-cleanup
+    // reasoning as report_historical_match_snapshots — report-local data
+    // must never be collaterally mutated by a passport-side change), and
+    // immutable after first insert (a later phase never lists it in the
+    // upsert's ON CONFLICT DO UPDATE, exactly like room_number). NULL for
+    // every pre-0039 row. Phase 1 = schema foundation only; nothing reads or
+    // writes this yet.
+    verified_device_passport_id: text("verified_device_passport_id"),
   },
   (table) => [
     primaryKey({ columns: [table.device_key, table.id] }),
@@ -209,6 +221,13 @@ export const saved_reports = sqliteTable(
     index("idx_saved_reports_user_id_created").on(table.user_id, table.report_created_at),
     index("idx_saved_reports_document_identity_id").on(table.document_identity_id),
     index("idx_saved_reports_user_room").on(table.user_id, table.room_number),
+    // drizzle/0039: partial index over the passport-attributed subset only —
+    // supports the per-passport shared-device aggregate and provenance
+    // lookups a later phase runs, without carrying an index entry for the
+    // (large, common) NULL majority.
+    index("idx_saved_reports_verified_device_passport")
+      .on(table.verified_device_passport_id)
+      .where(sql`verified_device_passport_id IS NOT NULL`),
   ],
 );
 
@@ -224,13 +243,16 @@ export const users = sqliteTable(
     password_hash: text("password_hash").notNull(),
     created_at: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
     updated_at: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
-    // Privacy hardening (0023): explicit opt-in for the cross-account
-    // matching corpus (lib/user-submission-corpus.ts). NULL (the default for
-    // every existing and new account) means indexDocumentSubmissionIntoCorpus
-    // is never called for this account's uploads — see
-    // app/api/reports/route.ts. Non-NULL records *when* consent was granted,
-    // matching this schema's existing declared_at/confirmed_at/revoked_at
-    // convention (reuse_context_declarations) rather than a plain boolean.
+    // VESTIGIAL (originally privacy hardening, 0023): cross-account
+    // TurnitPlus corpus checking — both lookup (lib/report-primary-
+    // similarity.ts) and corpus-admission eligibility (lib/corpus-admission-
+    // report-integration.ts) — is now mandatory for every authenticated
+    // account, a later product decision with no per-account preference. No
+    // production code reads or writes this column for a behavioral decision
+    // any more (app/api/auth/me's PATCH accepts the field for request-shape
+    // back-compat but ignores it — see that route's own comment); it is not
+    // migrated away since it costs nothing to leave. Never re-purpose it as
+    // a gate again without checking every caller this comment used to list.
     corpus_reuse_consented_at: text("corpus_reuse_consented_at"),
     // Developer/admin authorization (0025). "user" for every existing and
     // new account by default — the only way a row ever becomes "admin" is
@@ -242,6 +264,14 @@ export const users = sqliteTable(
     // codebase. A plain text enum (not a boolean) so a future intermediate
     // role does not require a second migration.
     role: text("role").notNull().default("user"),
+    // Email verification (drizzle/0046, A3). The SINGLE authoritative record of
+    // whether this account's login email is verified — a property of the
+    // credential itself, so it works for every account shape including
+    // grandfathered profile-less ones. Epoch-ms; NULL = unverified. Set ONLY by
+    // consuming an email_verification_challenges row; cleared to NULL atomically
+    // with any users.email change. account_identity_profiles.email_verified_at
+    // is deprecated/vestigial — never read or written any more.
+    email_verified_at: integer("email_verified_at"),
   },
   (table) => [
     uniqueIndex("ux_users_email").on(table.email),
@@ -682,6 +712,11 @@ export const corpus_submission_references = sqliteTable(
   (table) => [
     uniqueIndex("ux_corpus_submission_references_document_identity_id").on(table.document_identity_id),
     index("idx_corpus_submission_references_representation_id").on(table.representation_id),
+    // drizzle/0043 — Phase A 7-day corpus maturity. Range index over this
+    // backing's immutable T0, for lib/report-historical-match.ts's
+    // corpusBackingMaturedInWindow snapshot-invalidation range scan (not the
+    // per-representation eligibility EXISTS, which the rep index already serves).
+    index("idx_corpus_submission_references_created_at").on(table.created_at),
   ],
 );
 
@@ -706,6 +741,16 @@ export const corpus_document_shingles = sqliteTable(
   (table) => [
     uniqueIndex("ux_corpus_document_shingles_representation_version_hash").on(table.representation_id, table.fingerprint_version, table.shingle_hash),
     index("idx_corpus_document_shingles_hash").on(table.shingle_hash),
+    // drizzle/0051 — Slice 2H fingerprint-version-safe bounded recovery.
+    // Composite (shingle_hash, fingerprint_version, id) so
+    // lib/user-submission-corpus.ts's findRepresentationOwnersForShingle
+    // rowid-cursor page (WHERE shingle_hash = ? AND fingerprint_version = ?
+    // AND id > ? ORDER BY id LIMIT ?) is a single index range seek: stale
+    // fingerprint generations can never consume the bounded admission-family
+    // recovery cursor budget, and the scan never grows with a hash's document
+    // frequency. The single-column idx_corpus_document_shingles_hash above is
+    // retained — primary discovery's shingle_hash IN (...) GROUP BY still uses it.
+    index("idx_corpus_document_shingles_hash_version_id").on(table.shingle_hash, table.fingerprint_version, table.id),
   ],
 );
 
@@ -759,6 +804,25 @@ export const report_historical_match_snapshots = sqliteTable(
     // at — stale (and recomputed) once corpus_match_generation.generation
     // advances past it. See that migration's own comment.
     corpus_generation: integer("corpus_generation").notNull().default(0),
+    // drizzle/0040: the PER-PASSPORT device_passports.provenance_generation
+    // value the report's own immutable upload passport
+    // (saved_reports.verified_device_passport_id) held when this snapshot's
+    // device-sensitive classification was computed. 0 for a report with no
+    // verified upload passport. A later phase recomputes the device-sensitive
+    // part once that specific passport's counter advances past this value —
+    // never a global epoch, so another passport's change never invalidates
+    // this row. Phase 1 = schema foundation only; nothing reads or writes
+    // this yet.
+    device_provenance_generation: integer("device_provenance_generation").notNull().default(0),
+    // drizzle/0042: the account_owner_link_state.link_generation value the
+    // report account's owner-link state held when this snapshot's
+    // owner-link-sensitive classification was computed. 0 for a report whose
+    // account has no direct owner link (and every existing row). A later phase
+    // recomputes the owner-link-sensitive part once the account's generation
+    // advances past this value — never a global epoch, so another account's
+    // link churn never invalidates this row. Foundation only; nothing reads or
+    // writes this yet.
+    owner_link_generation: integer("owner_link_generation").notNull().default(0),
   },
   (table) => [
     uniqueIndex("ux_report_historical_match_snapshots_report").on(table.report_device_key, table.report_id),
@@ -817,6 +881,12 @@ export const historical_match_shadow_evaluations = sqliteTable(
 
 // Phase E8S Step 4: reuse-context declarations — see
 // drizzle/0022_reuse_context_declarations.sql for the full rationale.
+// DORMANT as of 2026-09: the ordinary-user reuse-context declaration /
+// confirmation workflow (app/api/reuse-context/*, components/reuse-context/*,
+// lib/reuse-context-*, lib/e8s-*) was removed as a cancelled product
+// direction. This table + its 0022 migration are retained (migration history
+// is immutable; the runner pins 0022's hash/order), but NOTHING reads or
+// writes it any more. No down migration; existing rows are left in place.
 // document_identity_id / matched_representation_id / matched_submission_
 // reference_id deliberately carry no DB-level FOREIGN KEY (same schema-
 // drift-tooling reason as report_historical_match_snapshots and
@@ -975,6 +1045,11 @@ export const corpus_admission_decisions = sqliteTable(
     index("idx_corpus_admission_decisions_source_ref").on(table.source_ref),
     index("idx_corpus_admission_decisions_decision").on(table.decision),
     index("idx_corpus_admission_decisions_run_id").on(table.run_id),
+    // drizzle/0043 — Phase A 7-day corpus maturity. A promotion's OWN decision
+    // (promotions.decision_id -> this row) supplies both its account-exclusion
+    // source_ref and its immutable maturity T0 (created_at). Range index for
+    // lib/report-historical-match.ts's corpusBackingMaturedInWindow scan.
+    index("idx_corpus_admission_decisions_created_at").on(table.created_at),
   ],
 );
 
@@ -1083,6 +1158,14 @@ export const corpus_admission_report_jobs = sqliteTable(
     last_error: text("last_error"),
     created_at: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
     updated_at: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    // Device Passport (drizzle/0039): the passport verified synchronously in
+    // the upload request, carried here so the deferred admission-decision
+    // path can write the per-backing
+    // corpus_admission_decision_device_provenance row on ACCEPT. Nullable,
+    // no foreign key (mirrors this table's existing plain account_id /
+    // device_key columns). Phase 1 = schema foundation only; nothing reads
+    // or writes this yet.
+    verified_device_passport_id: text("verified_device_passport_id"),
   },
   (table) => [
     uniqueIndex("ux_corpus_admission_report_jobs_source_ref").on(table.source_ref),
@@ -1137,6 +1220,713 @@ export const corpus_admission_promotions = sqliteTable(
     uniqueIndex("ux_corpus_admission_promotions_decision_id").on(table.decision_id),
     index("idx_corpus_admission_promotions_sweep_candidates").on(table.status, table.claimed_at),
     index("idx_corpus_admission_promotions_representation_id").on(table.representation_id),
+  ],
+);
+
+// drizzle/0037: durable SINGLETON operational-state table for the admin
+// corpus dashboard's status strip — one row per logical sweep kind
+// ('promotion' | 'report_admission' | 'retention'), upserted in place, not
+// a history log. See that migration's own header comment for the full
+// rationale (mirrors corpus_match_generation's own singleton pattern) and
+// lib/corpus-admission-sweep-state.ts for the sole writer/reader discipline. No
+// account/report/decision/representation-shaped column; last_summary_json
+// is a bounded, numeric-only JSON blob.
+export const corpus_admission_sweep_runs = sqliteTable("corpus_admission_sweep_runs", {
+  sweep_kind: text("sweep_kind").primaryKey(),
+  last_run_at: text("last_run_at").notNull(),
+  last_status: text("last_status").notNull(),
+  last_summary_json: text("last_summary_json"),
+  updated_at: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
+// Device Passport — Phase 1 SCHEMA FOUNDATION ONLY (drizzle/0038-0040). Three
+// additive tables plus the two verified_device_passport_id columns and the
+// report_historical_match_snapshots.device_provenance_generation column
+// declared above. NOTHING reads or writes any of this yet: browser key
+// generation, challenge issuance, signature verification, device-continuity
+// matching, the SELF downgrade, shared-device thresholds, and admin UI are
+// all out of scope for this phase. See the three migration files' own header
+// comments for the full rationale.
+
+// One row per registered browser public key. id = lowercase SHA-256 hex of
+// public_key_spki (idempotent registration). public_key_spki is the raw DER
+// SubjectPublicKeyInfo, kept ONLY to verify ECDSA P-256 / SHA-256
+// signatures — the private key never leaves the browser. No account_id /
+// device_key / foreign key: a passport is deliberately not account-owned
+// (cross-account use is the whole point). provenance_generation is a
+// PER-PASSPORT monotonic counter — a later phase bumps THIS passport's
+// counter when it gains a materially relevant new distinct account
+// association, and on revocation. revoked_at is the only removal lever for
+// v1. Epoch-millisecond integer timestamps (the sessions / 0010 convention).
+export const device_passports = sqliteTable(
+  "device_passports",
+  {
+    id: text("id").primaryKey(),
+    public_key_spki: blob("public_key_spki").notNull(),
+    algorithm: text("algorithm").notNull().default("ECDSA-P256-SHA256"),
+    created_at: integer("created_at").notNull(),
+    last_seen_at: integer("last_seen_at"),
+    revoked_at: integer("revoked_at"),
+    provenance_generation: integer("provenance_generation").notNull().default(0),
+    // drizzle/0041 — durable actor-usage completeness marker. 0 (every
+    // existing row, the default): historical actor usage is NOT proven
+    // complete. 1: durably actor-tracked since creation. NEVER promoted
+    // 0 -> 1 after the fact — only a genuinely new passport registered while
+    // the dedicated actor HMAC key is available may be born at 1. See
+    // lib/device-passport-actor-ledger.ts and device_passport_actor_usage.
+    actor_usage_tracking_version: integer("actor_usage_tracking_version").notNull().default(0),
+  },
+  (table) => [
+    index("idx_device_passports_last_seen").on(table.last_seen_at),
+  ],
+);
+
+// drizzle/0041 — the durable, APPEND-ONLY Device Passport actor-usage ledger.
+// One row per (passport, actor-key-version, actor-key) triple ever observed
+// uploading under a verified passport. actor_key is a stable keyed pseudonym
+// (HMAC-SHA256 over a domain-separated account id) or a fixed anonymous
+// sentinel — NEVER a raw account id. Rows are never deleted and
+// observation_count is never decremented; a repeat observation preserves
+// first_observed_at, advances last_observed_at, increments observation_count.
+// device_passport_id is ON DELETE RESTRICT so a passport can never be removed
+// while any usage observation references it. NOTHING in any scoring path reads
+// this yet. See lib/device-passport-actor-ledger.ts and drizzle/0041.
+export const device_passport_actor_usage = sqliteTable(
+  "device_passport_actor_usage",
+  {
+    device_passport_id: text("device_passport_id")
+      .notNull()
+      .references(() => device_passports.id, { onDelete: "restrict" }),
+    actor_key_version: integer("actor_key_version").notNull(),
+    actor_key: text("actor_key").notNull(),
+    is_anonymous: integer("is_anonymous").notNull().default(0),
+    first_observed_at: integer("first_observed_at").notNull(),
+    last_observed_at: integer("last_observed_at").notNull(),
+    observation_count: integer("observation_count").notNull().default(1),
+  },
+  (table) => [
+    primaryKey({ columns: [table.device_passport_id, table.actor_key_version, table.actor_key] }),
+    index("idx_device_passport_actor_usage_passport").on(table.device_passport_id),
+  ],
+);
+
+// One row per issued device-attestation challenge nonce. nonce_hash is
+// SHA-256 of the 32-byte random nonce — the raw nonce is returned to the
+// client exactly once and never stored (the sessions.token_hash discipline).
+// account_id / session_token_hash capture the session context SERVER-SIDE at
+// issue time; verification compares them against the then-current session,
+// so the browser never handles a session secret. Single-use via an atomic
+// consumed_at write. Rows are removed freely once expired (opportunistic,
+// traffic-piggybacked — the rate_limit_buckets / 0024 pattern). No foreign
+// key: a challenge outlives nothing.
+export const device_passport_challenges = sqliteTable(
+  "device_passport_challenges",
+  {
+    id: text("id").primaryKey(),
+    nonce_hash: text("nonce_hash").notNull(),
+    account_id: text("account_id"),
+    session_token_hash: text("session_token_hash"),
+    issued_at: integer("issued_at").notNull(),
+    expires_at: integer("expires_at").notNull(),
+    consumed_at: integer("consumed_at"),
+  },
+  (table) => [
+    index("idx_device_passport_challenges_expiry").on(table.expires_at),
+  ],
+);
+
+// One verified device per admission decision (decision_id is the primary
+// key). The ONLY place a promoted corpus backing is linked to a device
+// passport — joined to the deduplicated representation only through
+// corpus_admission_promotions.decision_id, the same per-backing shape
+// admissionEligibilitySql already uses for the account check. The passport
+// id is NEVER placed on corpus_document_representations (deduplicated, many
+// independent backings). decision_id CASCADEs with its decision (accepted
+// provenance is as durable as the accepted decision); device_passport_id is
+// RESTRICT so a passport can never be removed while a promoted backing still
+// references it. verified_at is an epoch-millisecond integer.
+export const corpus_admission_decision_device_provenance = sqliteTable(
+  "corpus_admission_decision_device_provenance",
+  {
+    decision_id: text("decision_id")
+      .primaryKey()
+      .references(() => corpus_admission_decisions.id, { onDelete: "cascade" }),
+    device_passport_id: text("device_passport_id")
+      .notNull()
+      .references(() => device_passports.id, { onDelete: "restrict" }),
+    verified_at: integer("verified_at").notNull(),
+  },
+  (table) => [
+    index("idx_cadp_device_passport_id").on(table.device_passport_id),
+  ],
+);
+
+// ── Direct owner-link foundation (drizzle/0042) — SCHEMA + STORAGE ONLY ──────
+// Three additive tables plus report_historical_match_snapshots.owner_link_generation
+// (declared above). NOTHING reads or writes any of this yet: computeUnifiedSimilarity,
+// resolveEffectiveDeviceSelfRepresentationIds, the same-device SELF rule, the
+// Policy D shared-device guard, relationshipType, candidate discovery and the
+// matcher are all untouched, and no OWNER_LINK_SELF_ENABLED flag is wired into
+// scoring. See lib/owner-link.ts / lib/owner-link-repo.ts and the migration's
+// own header for the full rationale.
+//
+// account_owner_links: one row per canonical unordered account-ref pair.
+// account_ref_lo / account_ref_hi are HMAC pseudonyms
+// (HMAC-SHA256(OWNER_LINK_HMAC_KEY, "TP_OWNER_LINK_V1:" + accountId), lib/owner-link.ts) —
+// NEVER a raw account id — ordered lexicographically so {A,B} and {B,A} collapse
+// to one row (a SQL CHECK (account_ref_lo < account_ref_hi) enforces it and
+// rules out a self-pair; not modelled here as this project's schema-drift
+// tooling does not compare CHECK constraints, matching corpus_match_generation's
+// own id=1 CHECK). status ACTIVE | WITHDRAWN — ACTIVE iff >= 1 live owner-bound
+// HIGH evidence row (the v1 OWNERSHIP-ESTABLISHING threshold; MEDIUM owner-bound
+// evidence is SUPPORTING only and never establishes or keeps ACTIVE alone — see
+// lib/owner-link.ts evidenceCanEstablishActiveLink and the migration header).
+// WITHDRAWN is a tombstone; a link row is NEVER deleted. strongest_confidence is
+// the strongest confidence across the link's non-withdrawn evidence, retained
+// for admin / audit — it does NOT gate status. Epoch-ms integer timestamps (the
+// 0038 convention). withdrawn_reason is a CHECK-
+// constrained controlled vocabulary (lib/owner-link.ts's
+// OWNER_LINK_WITHDRAWAL_REASONS — MANUAL_REVIEW | REVOKED | NO_QUALIFYING_EVIDENCE
+// | SUPERSEDED | ADMIN_CORRECTION, or NULL), never free text; the CHECK lives in
+// the migration only (schema-drift tooling does not compare CHECKs).
+// idx_account_owner_links_account_ref_hi is the reverse-endpoint index — the
+// unique pair index already covers account_ref_lo lookups (leftmost column), so
+// only account_ref_hi needs its own.
+// HMAC KEY ROTATION: OWNER_LINK_HMAC_KEY has no online rotation path in v1 —
+// changing it orphans every ref and every generation counter (see
+// lib/owner-link.ts / the migration header). GENERATION SCOPE: the per-account
+// link_generation is sufficient ONLY for direct pairs; a transitive phase MUST
+// add cluster-wide invalidation.
+export const account_owner_links = sqliteTable(
+  "account_owner_links",
+  {
+    id: text("id").primaryKey(),
+    account_ref_lo: text("account_ref_lo").notNull(),
+    account_ref_hi: text("account_ref_hi").notNull(),
+    key_version: integer("key_version").notNull(),
+    status: text("status").notNull().default("ACTIVE"),
+    strongest_confidence: text("strongest_confidence").notNull(),
+    first_linked_at: integer("first_linked_at").notNull(),
+    last_evidence_at: integer("last_evidence_at").notNull(),
+    withdrawn_at: integer("withdrawn_at"),
+    withdrawn_reason: text("withdrawn_reason"),
+    decided_by: text("decided_by").notNull().default("SYSTEM"),
+  },
+  (table) => [
+    uniqueIndex("ux_account_owner_links_pair").on(
+      table.account_ref_lo,
+      table.account_ref_hi,
+      table.key_version,
+    ),
+    index("idx_account_owner_links_account_ref_hi").on(table.account_ref_hi),
+  ],
+);
+
+// account_owner_link_evidence: append-only, tombstone-only evidence rows.
+// link_id -> account_owner_links(id) ON DELETE RESTRICT (an owner link can
+// never be removed while any evidence references it, and links are never
+// removed anyway — the same posture drizzle/0039 / drizzle/0041 took).
+// evidence_fingerprint is itself an HMAC / domain-separated digest over a
+// JSON-encoded component array (lib/owner-link.ts's ownerLinkEvidenceFingerprint
+// — unambiguous, so ["a b","c"] and ["a","b c"] never collide), NEVER a raw
+// account / passport / phone / email value. signal_type is a CHECK-constrained
+// closed vocabulary (lib/owner-link.ts's ALL_OWNER_LINK_SIGNAL_TYPES) — the
+// CHECK lives in the migration only. confidence HIGH | MEDIUM | LOW: HIGH is the
+// v1 ownership-ESTABLISHING tier; MEDIUM owner-bound rows are SUPPORTING only
+// (they attach to an existing link but never create/keep ACTIVE alone).
+// observation_count / first_observed_at /
+// last_observed_at follow UPSERT semantics keyed on
+// UNIQUE(link_id, signal_type, evidence_fingerprint): a repeat observation
+// PRESERVES first_observed_at, ADVANCES last_observed_at, INCREMENTS
+// observation_count. observation_count / first_observed_at are preserved across
+// every revive. withdrawn_at tombstones a row; rows are NEVER deleted, counts
+// NEVER decremented. withdrawn_reason is the same CHECK-constrained controlled
+// vocabulary as account_owner_links.withdrawn_reason but reflects only the
+// CURRENT tombstone (NULL for a live row; a revive necessarily clears it, since
+// a live row must read as live). The withdrawal/revival AUDIT HISTORY is NOT on
+// the live row — it is the append-only account_owner_link_events table below.
+// detail_json is a bounded numeric / boolean / short-enum-token blob only
+// (lib/owner-link.ts's boundOwnerLinkDetail).
+export const account_owner_link_evidence = sqliteTable(
+  "account_owner_link_evidence",
+  {
+    id: text("id").primaryKey(),
+    link_id: text("link_id")
+      .notNull()
+      .references(() => account_owner_links.id, { onDelete: "restrict" }),
+    confidence: text("confidence").notNull(),
+    signal_type: text("signal_type").notNull(),
+    evidence_fingerprint: text("evidence_fingerprint").notNull(),
+    observation_count: integer("observation_count").notNull().default(1),
+    first_observed_at: integer("first_observed_at").notNull(),
+    last_observed_at: integer("last_observed_at").notNull(),
+    withdrawn_at: integer("withdrawn_at"),
+    withdrawn_reason: text("withdrawn_reason"),
+    detail_json: text("detail_json"),
+    created_by: text("created_by").notNull().default("SYSTEM"),
+  },
+  (table) => [
+    uniqueIndex("ux_account_owner_link_evidence_signal").on(
+      table.link_id,
+      table.signal_type,
+      table.evidence_fingerprint,
+    ),
+    index("idx_account_owner_link_evidence_link").on(table.link_id),
+  ],
+);
+
+// account_owner_link_events (drizzle/0042): APPEND-ONLY state-transition log —
+// the immutable history the live account_owner_links / _evidence rows cannot be
+// (reviving a tombstoned evidence row necessarily clears its own withdrawn_at /
+// withdrawn_reason). One row per meaningful ACTIVE<->WITHDRAWN transition plus
+// link / evidence genesis (lib/owner-link.ts OWNER_LINK_EVENT_TYPES). Rows are
+// NEVER updated or deleted; nothing here cascades from report / room / account
+// cleanup (both FKs are ON DELETE RESTRICT and neither parent is ever deleted).
+// id is an autoincrement INTEGER so insertion order is the canonical event
+// order. event_type / previous_state / new_state / reason / actor are all
+// CHECK-constrained bounded enums (the CHECKs live in the migration only);
+// reason reuses OWNER_LINK_WITHDRAWAL_REASONS and is non-NULL only on a
+// *_WITHDRAWN event. Beyond the per-column vocabularies, ONE table-level shape
+// CHECK (also migration-only) pins each event_type to its single legal
+// combination of evidence_id presence / previous_state / new_state / reason
+// presence — mirrored by lib/owner-link.ts's assertOwnerLinkEventShape. actor is
+// SYSTEM | ADMIN as a CLASS, not proof of which administrator (this foundation
+// stores no admin identity). NO account ref / passport id / fingerprint / email
+// / IP / free text — only internal link/evidence ids, enums, one reason, one
+// actor class, one epoch-ms timestamp. Every insert is in the same write
+// transaction as the state mutation it records.
+export const account_owner_link_events = sqliteTable(
+  "account_owner_link_events",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    link_id: text("link_id")
+      .notNull()
+      .references(() => account_owner_links.id, { onDelete: "restrict" }),
+    evidence_id: text("evidence_id").references(() => account_owner_link_evidence.id, { onDelete: "restrict" }),
+    event_type: text("event_type").notNull(),
+    previous_state: text("previous_state"),
+    new_state: text("new_state").notNull(),
+    reason: text("reason"),
+    actor: text("actor").notNull(),
+    occurred_at: integer("occurred_at").notNull(),
+  },
+  (table) => [
+    index("idx_account_owner_link_events_link").on(table.link_id, table.id),
+    index("idx_account_owner_link_events_evidence")
+      .on(table.evidence_id, table.id)
+      .where(sql`evidence_id IS NOT NULL`),
+  ],
+);
+
+// account_owner_link_state: one row per (account_ref, key_version) carrying a
+// monotonic link_generation counter, bumped on BOTH endpoints whenever a direct
+// link between them is created, materially gains / loses evidence, or is
+// withdrawn. Never a global counter; an absent row reads as generation 0. A
+// later phase stamps report_historical_match_snapshots.owner_link_generation
+// with the report account's counter and treats the owner-link-sensitive part of
+// the snapshot as stale once the stored value trails it — the same per-key
+// staleness shape corpus_generation / device_provenance_generation use.
+export const account_owner_link_state = sqliteTable(
+  "account_owner_link_state",
+  {
+    account_ref: text("account_ref").notNull(),
+    key_version: integer("key_version").notNull(),
+    link_generation: integer("link_generation").notNull().default(0),
+    updated_at: integer("updated_at").notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.account_ref, table.key_version] }),
+  ],
+);
+
+// Phase B2a (drizzle/0044): bounded SHADOW-MEASUREMENT telemetry for the B1
+// corpus-duplicate counterfactual (lib/corpus-duplicate-suppression-policy.ts +
+// lib/corpus-duplicate-counterfactual.ts). MEASUREMENT ONLY — never read by the
+// production similarity / relationship / scoring path; write-only from
+// lib/corpus-duplicate-suppression-shadow.ts, scheduled off-response. No B2
+// field ever reaches an ordinary user's report payload. See
+// drizzle/0044_corpus_duplicate_suppression_shadow_evaluations.sql for the full
+// rationale, the nullable-measurement-column contract, and the AFTER DELETE
+// trigger (which drizzle-orm cannot express and which the schema-drift test does
+// not enumerate — its correctness is covered by the B2 deletion tests). No
+// DB-level FOREIGN KEY, same reasoning as report_historical_match_snapshots /
+// historical_match_shadow_evaluations above. report_device_key is a random
+// per-browser UUID, not an account identity.
+export const corpus_duplicate_suppression_shadow_evaluations = sqliteTable(
+  "corpus_duplicate_suppression_shadow_evaluations",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    report_device_key: text("report_device_key").notNull(),
+    report_id: text("report_id").notNull(),
+    status: text("status").notNull(),
+    error_code: text("error_code"),
+    error_detail: text("error_detail"),
+    checker_accounts_status: text("checker_accounts_status").notNull().default("NOT_APPLICABLE"),
+    distinct_checker_accounts_bucket: text("distinct_checker_accounts_bucket"),
+    policy_version: text("policy_version").notNull(),
+    rule_version: text("rule_version").notNull(),
+    unified_similarity_version: text("unified_similarity_version").notNull(),
+    counterfactual_version: text("counterfactual_version").notNull(),
+    authoritative_corpus_generation: integer("authoritative_corpus_generation"),
+    authoritative_snapshot_computed_at: text("authoritative_snapshot_computed_at"),
+    submitted_word_count: integer("submitted_word_count"),
+    authoritative_score: integer("authoritative_score"),
+    hypothetical_score: integer("hypothetical_score"),
+    score_delta: integer("score_delta"),
+    authoritative_unique_matched_words: integer("authoritative_unique_matched_words"),
+    hypothetical_unique_matched_words: integer("hypothetical_unique_matched_words"),
+    unique_matched_words_removed: integer("unique_matched_words_removed"),
+    candidate_matched_words: integer("candidate_matched_words"),
+    candidates_excluded: integer("candidates_excluded"),
+    archive_only_words_surviving: integer("archive_only_words_surviving"),
+    live_academic_only_words_surviving: integer("live_academic_only_words_surviving"),
+    previous_upload_only_words_surviving: integer("previous_upload_only_words_surviving"),
+    overlap_words_surviving: integer("overlap_words_surviving"),
+    candidate_count: integer("candidate_count"),
+    measurement_category: text("measurement_category"),
+    origin_confidence: text("origin_confidence"),
+    multi_origin_evidence: text("multi_origin_evidence"),
+    candidate_admitted_promotion_backing_count: integer("candidate_admitted_promotion_backing_count"),
+    candidate_submission_reference_backing_count: integer("candidate_submission_reference_backing_count"),
+    candidate_independent_backing_count: integer("candidate_independent_backing_count"),
+    candidate_same_device_backing_count: integer("candidate_same_device_backing_count"),
+    same_passport_category: integer("same_passport_category"),
+    cross_account_category: integer("cross_account_category"),
+    evaluation_truncated: integer("evaluation_truncated").notNull().default(0),
+    total_runtime_ms: integer("total_runtime_ms"),
+    computed_at: text("computed_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    created_at: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("ux_corpus_duplicate_suppression_shadow_report_policy").on(
+      table.report_device_key,
+      table.report_id,
+      table.policy_version,
+    ),
+  ],
+);
+
+// ── Account Identity FOUNDATION (drizzle/0045) — SCHEMA + STORAGE ONLY ──────
+// Two additive tables; NOTHING is altered on `users` or any other existing
+// table. NOTHING reads or writes any of this in a scoring / similarity /
+// owner-link / Device Passport / corpus path — see lib/account-identity.ts and
+// lib/account-identity-repo.ts and tests/account-identity*.test.mjs.
+//
+// account_identity_profiles: strictly 1:1 with `users` (user_id is BOTH the
+// primary key and a REFERENCES users(id) ON DELETE CASCADE foreign key, so
+// account deletion removes the profile automatically — it is per-account PII,
+// unlike the durable RESTRICT owner-link tables). account_type (student |
+// instructor | researcher | independent) is DESCRIPTIVE identity, never
+// authorization — `users.role` stays the only authorization field. Institution
+// and city each have an explicit 'NONE' state plus a canonical form (ROR id /
+// GeoNames id) and a low-trust 'UNVERIFIED_TEXT' form kept only for future
+// import compatibility. full_name is NOT NULL (the required identity anchor).
+// country_code is RESIDENCE (ISO 3166-1 alpha-2), a separate concept from
+// phone_region (the phone number's own dial context). phone_e164 is
+// libphonenumber-js/max-validated E.164, with a wildcard-free structural DB
+// backstop CHECK. The *_verified_at columns are ALWAYS NULL in this phase — no
+// code marks anything VERIFIED in A1. The CHECK constraints (account_type /
+// *_status vocabularies, the one-shape-per-status consistency rules, the
+// country / E.164 structural backstops) live in the migration only, matching
+// this project's schema-drift tooling (which does not compare CHECKs), as
+// account_owner_links already does.
+//
+// account_identity_fingerprints: keyed-HMAC pseudonyms of VERIFIED identity
+// values. lib/account-identity-repo.ts still has no insert/upsert writer of
+// its own — a row is only ever produced by the specific, reviewed flow that
+// verified the underlying value, and lib/account-identity.ts's
+// accountIdentityFingerprint fails closed unless { verified: true }. A3c
+// (drizzle/0046's users.email_verified_at) is the first such flow: a
+// successful email verification writes/upserts a VERIFIED_EMAIL row via
+// lib/email-verification.ts's own guarded statement, atomically with the
+// winning challenge consume; changing the login email removes it atomically
+// with the users.email UPDATE (app/api/auth/me/route.ts). VERIFIED_EMAIL
+// stays ACCOUNT_ONLY evidence (ACCOUNT_IDENTITY_FINGERPRINT_EVIDENCE_CEILING)
+// — nothing here interprets it as ownership. VERIFIED_PHONE_E164 and
+// VERIFIED_INSTITUTION_ROR still have no writer at all. A fingerprint is an
+// HMAC-SHA256 digest, never a raw email / phone / ror id.
+export const account_identity_profiles = sqliteTable(
+  "account_identity_profiles",
+  {
+    user_id: text("user_id")
+      .primaryKey()
+      .references(() => users.id, { onDelete: "cascade" }),
+    account_type: text("account_type").notNull().default("independent"),
+    // NOT NULL — the required human-identity anchor. normalizeAccountIdentityProfile
+    // rejects a missing/empty name, so a profile row never exists without one.
+    full_name: text("full_name").notNull(),
+    country_code: text("country_code"),
+    institution_status: text("institution_status").notNull().default("NONE"),
+    institution_ror_id: text("institution_ror_id"),
+    institution_unverified_name: text("institution_unverified_name"),
+    city_status: text("city_status").notNull().default("NONE"),
+    city_geonames_id: integer("city_geonames_id"),
+    city_unverified_name: text("city_unverified_name"),
+    phone_e164: text("phone_e164"),
+    phone_region: text("phone_region"),
+    // DEPRECATED / VESTIGIAL (A3, drizzle/0046): email verification state moved
+    // to the authoritative users.email_verified_at. This column is kept only for
+    // schema compatibility (so 0045 need not be rewritten) — it is NEVER read or
+    // written any more. Do not reintroduce a reader/writer. Always NULL.
+    email_verified_at: integer("email_verified_at"),
+    // Reserved for a later phase; always NULL now — no code writes these.
+    phone_verified_at: integer("phone_verified_at"),
+    institution_verified_at: integer("institution_verified_at"),
+    normalization_version: integer("normalization_version").notNull().default(1),
+    created_at: integer("created_at").notNull(),
+    updated_at: integer("updated_at").notNull(),
+  },
+  (table) => [
+    index("idx_account_identity_profiles_institution_ror")
+      .on(table.institution_ror_id)
+      .where(sql`institution_ror_id IS NOT NULL`),
+    index("idx_account_identity_profiles_city_geonames")
+      .on(table.city_geonames_id)
+      .where(sql`city_geonames_id IS NOT NULL`),
+    index("idx_account_identity_profiles_country_code")
+      .on(table.country_code)
+      .where(sql`country_code IS NOT NULL`),
+  ],
+);
+
+export const account_identity_fingerprints = sqliteTable(
+  "account_identity_fingerprints",
+  {
+    id: text("id").primaryKey(),
+    user_id: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    fingerprint_kind: text("fingerprint_kind").notNull(),
+    fingerprint: text("fingerprint").notNull(),
+    key_version: integer("key_version").notNull(),
+    source_verified_at: integer("source_verified_at").notNull(),
+    created_at: integer("created_at").notNull(),
+  },
+  (table) => [
+    uniqueIndex("ux_account_identity_fingerprints_kind").on(
+      table.user_id,
+      table.fingerprint_kind,
+      table.key_version,
+    ),
+    index("idx_account_identity_fingerprints_lookup").on(
+      table.fingerprint_kind,
+      table.fingerprint,
+    ),
+  ],
+);
+
+// ── Email Verification FOUNDATION (drizzle/0046) — challenge state machine ──
+// One row per issued email-verification challenge. (0046 also adds the
+// authoritative users.email_verified_at column — see the users table above;
+// account_identity_profiles is unchanged, its email_verified_at now vestigial.)
+// user_id REFERENCES users(id) ON DELETE CASCADE (transient per-account state,
+// removed with the account, no change to lib/account-deletion.ts needed — same
+// as sessions / account_identity_profiles). token_digest is the lowercase
+// SHA-256 hex of the raw 256-bit token; the raw token goes ONLY to the
+// mail-delivery layer and is never stored or logged (sessions.token_hash /
+// device_passport_challenges.nonce_hash discipline). Single-use via an atomic
+// conditional consume;
+// revoked_at is bulk-set when users.email changes. The TTL is an application
+// constant (lib/email-verification.ts), never an env var. The CHECK constraints
+// (token_digest length, expires_at > created_at) live in the migration only,
+// matching this project's schema-drift tooling. A3c: the SAME atomic batch
+// that wins a challenge consume also upserts a VERIFIED_EMAIL row in
+// account_identity_fingerprints (see that table's own comment above); a
+// verified primary email still stays ACCOUNT_ONLY and never becomes
+// cross-account ownership evidence on its own.
+export const email_verification_challenges = sqliteTable(
+  "email_verification_challenges",
+  {
+    id: text("id").primaryKey(),
+    user_id: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    email: text("email").notNull(),
+    token_digest: text("token_digest").notNull(),
+    created_at: integer("created_at").notNull(),
+    expires_at: integer("expires_at").notNull(),
+    consumed_at: integer("consumed_at"),
+    revoked_at: integer("revoked_at"),
+  },
+  (table) => [
+    uniqueIndex("ux_email_verification_challenges_token_digest").on(table.token_digest),
+    index("idx_email_verification_challenges_user_created").on(table.user_id, table.created_at),
+  ],
+);
+
+// ── Developer corpus-maturity exemptions (drizzle/0047) ──────────────────────
+// One row per account exempted from lib/user-submission-corpus.ts's 7-day
+// corpus maturity gate (admissionEligibilitySql / CORPUS_ACTIVATION_DELAY_DAYS).
+// While a row exists for an account, every corpus backing OWNED BY that
+// account (submission-reference via document_identities.account_id, or
+// admission-promotion via corpus_admission_decisions.source_ref's embedded
+// account) is treated as mature immediately — this affects ONLY the maturity
+// term of the shared eligibility predicate, never the account self-exclusion
+// check, ADMISSION_DEDUP's own unconditional visibility, or any
+// scoring/relationship/duplicate-suppression logic downstream of eligibility.
+// user_id is the PRIMARY KEY (an account is exempt or not, never "exempt more
+// than once"); ON DELETE CASCADE so a deleted account's exemption cannot
+// outlive it. created_by_user_id is informational only (which admin granted
+// it) and is never read by the maturity gate; ON DELETE SET NULL.
+export const developer_corpus_maturity_exemptions = sqliteTable(
+  "developer_corpus_maturity_exemptions",
+  {
+    user_id: text("user_id")
+      .primaryKey()
+      .references(() => users.id, { onDelete: "cascade" }),
+    created_at: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    created_by_user_id: text("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+  },
+);
+
+// ── Built-in archive parity foundation (drizzle/0048) ────────────────────────
+// Display/lookup metadata only — never read by admissionEligibilitySql or any
+// scoring/matching predicate. Joins a corpus_document_representations row
+// seeded from the built-in archive (public/data/document-index.*) back to
+// that article's stable id, title, and original-similarity metadata, and
+// records which corpus_document_shingles fingerprint_version its shingles
+// were written under (a namespace distinct from CORPUS_FINGERPRINT_VERSION,
+// so seeding this table can never change what the live historical-match path
+// discovers). See lib/archive-corpus-seed.ts.
+export const archive_document_representations = sqliteTable(
+  "archive_document_representations",
+  {
+    archive_article_id: text("archive_article_id").primaryKey(),
+    representation_id: text("representation_id")
+      .notNull()
+      .references(() => corpus_document_representations.id, { onDelete: "cascade" }),
+    title: text("title").notNull(),
+    source_type: text("source_type").notNull().default("Publication"),
+    original_similarity: integer("original_similarity"),
+    archive_order: integer("archive_order"),
+    corpus_version: text("corpus_version").notNull(),
+    fingerprint_version: text("fingerprint_version").notNull(),
+    created_at: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("ux_archive_document_representations_representation_id").on(table.representation_id),
+    index("idx_archive_document_representations_corpus_version").on(table.corpus_version),
+  ],
+);
+
+// ── Scalable built-in-archive index (drizzle/0049, 100k-scale slice 2B) ───────
+// Replaces the per-archive-document full-shingle write
+// (recordArchiveDocumentShingles → thousands of corpus_document_shingles rows
+// per doc) with three bounded structures. Derived, rebuildable data only:
+// every row here is reconstructible from corpus_document_representations
+// .canonical_text via lib/archive-index-build.ts. None of these is read by
+// admissionEligibilitySql or any historical-corpus / SELF / relationship
+// predicate — the archive matcher (lib/archive-corpus-matching.ts) is the sole
+// reader. See lib/archive-fingerprint.ts / lib/archive-df-bands.ts /
+// lib/archive-phrase-index.ts for the algorithms and their version constants.
+
+// Compact winnowed fingerprint set — the PRIMARY candidate-discovery index.
+// ~118–128 rows/doc (Schleimer/Wilkerson/Aiken winnowing, window 85, hard cap
+// 192), NOT one row per 5-gram. fingerprint_version namespaces a fingerprint-
+// algorithm generation (ARCHIVE_COMPACT_FINGERPRINT_VERSION) so a re-fingerprint
+// pass can add a new generation without colliding with the old one. Same
+// synthetic-id + composite-unique shape as corpus_document_shingles.
+export const archive_document_fingerprints = sqliteTable(
+  "archive_document_fingerprints",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    representation_id: text("representation_id")
+      .notNull()
+      .references(() => corpus_document_representations.id, { onDelete: "cascade" }),
+    fingerprint_hash: text("fingerprint_hash").notNull(),
+    optional_position: integer("optional_position"),
+    fingerprint_version: text("fingerprint_version").notNull(),
+    created_at: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("ux_archive_document_fingerprints_repr_version_hash").on(
+      table.representation_id,
+      table.fingerprint_version,
+      table.fingerprint_hash,
+    ),
+    index("idx_archive_document_fingerprints_hash").on(table.fingerprint_hash, table.fingerprint_version),
+  ],
+);
+
+// Compact archive-global document-frequency metadata (Slice 2A.5). Persists a
+// hash → df_bucket row ONLY for 5-grams with archive-wide DF >= MIN_PERSISTED_DF
+// (13): df_bucket is the exact DF for 13..20, and 21 means "DF >= 21". Absent =
+// DF in {0..12}, resolved on demand via the FTS phrase index's exact
+// fan-out (lib/archive-phrase-fallback.ts's resolveQueryGramDf). This one
+// structure IS the scorer's stop set ({ h : df_bucket > maximumDocumentFrequency })
+// — there is no separate stop-hash table. policy_version
+// (ARCHIVE_DF_BAND_POLICY_VERSION) distinguishes a DF-threshold change from a
+// fingerprint-algorithm change. 16-hex TEXT hash for v1 (see
+// lib/archive-df-bands.ts's own note on why not INTEGER). WITHOUT ROWID: the
+// table is a pure hash→bucket lookup, never scanned.
+export const archive_hash_df_bands = sqliteTable(
+  "archive_hash_df_bands",
+  {
+    shingle_hash: text("shingle_hash").notNull(),
+    df_bucket: integer("df_bucket").notNull(),
+    policy_version: text("policy_version").notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.shingle_hash, table.policy_version] }),
+  ],
+);
+
+// rowid → representation_id bridge for the contentless FTS5 phrase index
+// `archive_phrase_fts` (a virtual table Drizzle cannot model — created and
+// managed by drizzle/0049 + lib/archive-phrase-index.ts as raw SQL, never
+// declared here). A contentless FTS5 table cannot itself return
+// representation_id (reading an indexed column yields NULL), so every phrase
+// query joins back through this table on the FTS rowid. Wiped and rebuilt
+// wholesale alongside the FTS index — never partially updated.
+export const archive_phrase_fts_map = sqliteTable(
+  "archive_phrase_fts_map",
+  {
+    fts_rowid: integer("fts_rowid").primaryKey(),
+    representation_id: text("representation_id")
+      .notNull()
+      .references(() => corpus_document_representations.id, { onDelete: "cascade" }),
+  },
+  (table) => [
+    uniqueIndex("ux_archive_phrase_fts_map_representation_id").on(table.representation_id),
+  ],
+);
+
+// Directed archive-document co-source adjacency (drizzle/0050, slice 2D.4). An
+// edge representation_id -> co_representation_id means the two archive documents
+// share >= ARCHIVE_COSOURCE_MIN_SHARED archive-informative, non-stop,
+// owner-capped 5-grams; each document keeps only its ARCHIVE_COSOURCE_MAX_NEIGHBORS
+// (24) highest-sharing neighbours. Derived, rebuildable data
+// (lib/archive-cosource.ts buildCosourceAdjacencyTable, reconstructed from
+// canonical_text + the df-band stop set — no persistent full archive shingle
+// table). policy_version (ARCHIVE_COSOURCE_POLICY_VERSION) namespaces a build
+// generation, like archive_hash_df_bands.policy_version. Read only by
+// lib/archive-corpus-matching.ts's G1s gate, and only when the
+// ARCHIVE_COSOURCE_EXPANSION_ENABLED flag is on. Two CHECK constraints
+// (representation_id <> co_representation_id; shared_gram_count >= 2) and one
+// BEFORE INSERT guard trigger (<= 24 outgoing neighbours per doc per policy)
+// live in drizzle/0050 only — Drizzle models neither, exactly like an FTS5
+// virtual table or 0044's cleanup trigger.
+export const archive_document_cosources = sqliteTable(
+  "archive_document_cosources",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    representation_id: text("representation_id")
+      .notNull()
+      .references(() => corpus_document_representations.id, { onDelete: "cascade" }),
+    co_representation_id: text("co_representation_id")
+      .notNull()
+      .references(() => corpus_document_representations.id, { onDelete: "cascade" }),
+    shared_gram_count: integer("shared_gram_count").notNull(),
+    policy_version: text("policy_version").notNull(),
+    created_at: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("ux_archive_document_cosources_edge").on(
+      table.policy_version,
+      table.representation_id,
+      table.co_representation_id,
+    ),
+    index("idx_archive_document_cosources_lookup").on(table.representation_id, table.policy_version),
   ],
 );
 

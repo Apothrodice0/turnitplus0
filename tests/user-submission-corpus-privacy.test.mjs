@@ -9,8 +9,10 @@ import {
   indexDocumentSubmissionIntoCorpus,
   findCandidateCorpusRepresentations,
   findSubmissionReferencesForAccount,
+  isRepresentationEligibleForMatching,
   corpusShingleHashes,
 } from "../lib/user-submission-corpus.ts";
+import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
 
 const repoRoot = path.resolve(".");
 const drizzleDir = path.join(repoRoot, "drizzle");
@@ -136,6 +138,7 @@ test("A/B: representation and candidate-search results never carry an account id
   await indexDocumentSubmissionIntoCorpus(client, { documentIdentityId: identityB.id, rawText: SHARED_TEXT_ALPHA });
 
   const hashes = corpusShingleHashes(SHARED_TEXT_ALPHA, 5);
+  await matureCorpusBackings(client); // Phase A: privacy-of-results test, not the activation clock
   const candidates = await findCandidateCorpusRepresentations(client, hashes);
   assert.ok(candidates.length >= 1);
 
@@ -153,6 +156,28 @@ test("A/B: representation and candidate-search results never carry an account id
     assert.deepEqual(Object.keys(candidate).sort(), ["canonicalSha256", "containment", "isActivelyPromoted", "representationId", "sharedShingleCount", "wordCount"].sort());
     assert.equal(typeof candidate.isActivelyPromoted, "boolean");
   }
+});
+
+test("SELF-MATCH-FIX PRIVACY: excludeAccountId never appears in findCandidateCorpusRepresentations' own results, and isRepresentationEligibleForMatching returns a plain boolean carrying no identifiers at all", async () => {
+  const accountA = "privacy-exclude-corpus-account-a";
+  await ensureUser(accountA, "exclude-corpus-a@example.test");
+  const text = SHARED_TEXT_ALPHA + " exclude-corpus-marker";
+  const identityA = await createDocumentIdentity(client, { accountId: accountA, title: "T", author: null, rawText: text });
+  const indexed = await indexDocumentSubmissionIntoCorpus(client, { documentIdentityId: identityA.id, rawText: text });
+
+  const secretAccountId = "corpus-secret-account-id-should-never-leak";
+  const excludeAccountId = secretAccountId;
+
+  await matureCorpusBackings(client); // Phase A: privacy-of-results test, not the activation clock
+  const candidates = await findCandidateCorpusRepresentations(client, corpusShingleHashes(text, 5), { excludeAccountId });
+  assert.ok(candidates.length >= 1, "test setup sanity: an unrelated exclusion value must not suppress a genuine submission-reference-backed candidate");
+  const serialized = JSON.stringify(candidates);
+  assert.ok(!serialized.includes(secretAccountId), "the exclusion context's own account id must never appear in candidate results");
+
+  // isRepresentationEligibleForMatching: boolean-only, same discipline as
+  // isRepresentationActivelyPromoted/summarizeSubmissionOwnership.
+  const eligible = await isRepresentationEligibleForMatching(client, indexed.representationId, { excludeAccountId });
+  assert.equal(typeof eligible, "boolean");
 });
 
 test("D: SELF (same-account) queries are correctly scoped to the querying account and do not return another account's submissions", async () => {
@@ -184,6 +209,7 @@ test("E: cross-account historical material is identifiable as a candidate withou
   await indexDocumentSubmissionIntoCorpus(client, { documentIdentityId: identityA.id, rawText: sharedText });
 
   // Account B has not submitted this yet — simulate B's own upload discovering it as a candidate via shingle overlap.
+  await matureCorpusBackings(client); // Phase A: privacy-of-results test, not the activation clock
   const candidates = await findCandidateCorpusRepresentations(client, corpusShingleHashes(sharedText, 5));
   assert.ok(candidates.length >= 1);
   assert.ok(candidates.some((c) => c.containment > 0.9));

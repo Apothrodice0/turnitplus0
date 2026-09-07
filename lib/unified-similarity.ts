@@ -26,7 +26,30 @@ import type { HistoricalSubmissionMatchEntry, ReportHistoricalSubmissionMatch } 
 export const UNIFIED_SIMILARITY_VERSION = "unified-similarity-v1";
 
 export type UnifiedEvidenceSourceType = "archive" | "openaire" | "europe_pmc" | "previous_upload";
-export type UnifiedEvidenceStatus = "included" | "excluded_self" | "excluded_unknown";
+/**
+ * "excluded_effective_device_self": a production-counted previous-upload
+ * source the Preview-gated same-device SELF rule
+ * (lib/report-primary-similarity.ts, flag DEVICE_PASSPORT_SELF_ENABLED)
+ * downgraded to an EFFECTIVE SELF for scoring — treated exactly like
+ * "excluded_self" here (contributes nothing), but tracked under its own
+ * status/counter so genuine same-account SELF telemetry stays unchanged, and
+ * the contribution still records the unchanged BASELINE relationship. Only
+ * ever produced when the caller passes effectiveDeviceSelfRepresentationIds.
+ *
+ * "excluded_document_local_corpus_duplicate" (Phase B1 — SHADOW ONLY): a
+ * production-counted previous-upload contribution a shadow counterfactual
+ * (lib/corpus-duplicate-counterfactual.ts) is hypothetically removing, to
+ * measure what the score would be if one qualifying TurnitPlus internal
+ * exact-canonical representation did not inflate it. Contributes nothing to
+ * the union, exactly like "excluded_self", but records NO result-level
+ * counter of its own (deliberately — see hypotheticalExcludedRepresentationIds
+ * on ComputeUnifiedSimilarityParams) and keeps its UNCHANGED baseline
+ * relationship. Applied strictly AFTER the SELF / UNKNOWN / effective-device-
+ * SELF checks. Only ever produced when the caller passes
+ * hypotheticalExcludedRepresentationIds — which production scoring never does,
+ * so this value can never appear in an authoritative result.
+ */
+export type UnifiedEvidenceStatus = "included" | "excluded_self" | "excluded_unknown" | "excluded_effective_device_self" | "excluded_document_local_corpus_duplicate";
 
 /**
  * One passage's contribution, kept for internal source attribution (STEP
@@ -43,8 +66,30 @@ export type UnifiedEvidenceContribution = {
   /** Inclusive, matching MatchedPassage/HistoricalMatchPassage's own existing convention — NOT the half-open convention combineMatchedWordPositions's own ExternalMatchedWordRange uses internally. */
   submittedWordEnd: number;
   matchedWordCount: number;
-  /** Only present for sourceType "previous_upload". */
+  /**
+   * Only present for sourceType "previous_upload". This is the UNCHANGED
+   * BASELINE relationship production's matcher persisted (e.g.
+   * TURNITPLUS_CORPUS_SOURCE) — the same-device SELF rule never rewrites it;
+   * see effectiveScoringRelationship below.
+   */
   relationship?: HistoricalSubmissionMatchEntry["relationshipType"];
+  /**
+   * Set ONLY when the Preview-gated same-device SELF rule downgraded this
+   * "previous_upload" contribution to an effective SELF for scoring. The
+   * baseline `relationship` above is preserved verbatim; this records the
+   * EFFECTIVE SCORING RELATIONSHIP that was applied before the matched-
+   * position union, so an admin can see both. Absent for every other
+   * contribution.
+   */
+  effectiveScoringRelationship?: "SELF";
+  /**
+   * Why the effective relationship differs from the baseline:
+   * "SAME_DEVICE_EXACT_DOCUMENT" for a byte-identical canonical re-upload,
+   * "SAME_DEVICE_STRONG_TEXT_DOCUMENT" for a near-identical (STRONG_TEXT_MATCH)
+   * one. Both exclude the contribution from the score identically. Paired with
+   * effectiveScoringRelationship.
+   */
+  effectiveScoringReason?: "SAME_DEVICE_EXACT_DOCUMENT" | "SAME_DEVICE_STRONG_TEXT_DOCUMENT";
   evidenceStatus: UnifiedEvidenceStatus;
 };
 
@@ -62,12 +107,52 @@ export type UnifiedSimilarityResult = {
   previousUploadOnlyWords: number;
   /** Words matched by more than one source at the same submitted position — the exact case the CRITICAL RULE example describes ("the same submitted passage found by multiple sources counts ONCE"), reported here as a count of how often that happened, not lost. */
   overlapWords: number;
-  /** Matched words from SELF-relationship entries — computed for transparency (STEP 6/benchmark reporting) but NEVER included in unifiedScore. DECISION 1: no override. */
+  /** Matched words from SELF-relationship entries — computed for transparency (STEP 6/benchmark reporting) but NEVER included in unifiedScore. DECISION 1: no override. Genuine same-account SELF only — an effective same-device SELF downgrade is tallied under deviceSelfExcludedWords below so this figure is unchanged by that Preview rule. */
   selfExcludedWords: number;
   /** Matched words from UNKNOWN_RELATIONSHIP entries — same transparency-only treatment. DECISION 2: no override, no guessing. */
   unknownExcludedWords: number;
+  /**
+   * Matched words from a production-counted historical source the Preview-
+   * gated same-device SELF rule (lib/report-primary-similarity.ts, flag
+   * DEVICE_PASSPORT_SELF_ENABLED) downgraded to an EFFECTIVE SELF for scoring
+   * — excluded from unifiedScore exactly like selfExcludedWords, tracked
+   * separately so genuine same-account SELF telemetry is untouched. Always 0
+   * unless the caller passed effectiveDeviceSelfRepresentationIds (i.e. 0 in
+   * every configuration where that flag is off).
+   */
+  deviceSelfExcludedWords: number;
   /** Full per-passage attribution, including excluded entries (see evidenceStatus) — internal use (debugging, calibration, a future admin view), never rendered to an end user as-is. */
   contributions: UnifiedEvidenceContribution[];
+  /**
+   * Highlighting fix: the deduplicated union of every word position that
+   * contributed to unifiedScore/uniqueMatchedWords — previously computed
+   * internally (as allEligiblePositions, just below) purely to derive the
+   * *OnlyWords/overlapWords counts, then discarded. Persisting it here is
+   * the ONE canonical, presentation-safe position set the render layer
+   * must read (never independently recompute or infer from a percentage)
+   * to visually account for the full matched-word result — see
+   * lib/report-types.ts's unifiedMatchedPositions() and this codebase's
+   * own LEGACY ROOM BUG precedent for why "throws away the position union,
+   * persists only counts" is exactly the class of gap that produces a
+   * correct number with an incomplete presentation. Word indices only —
+   * carries no source identity, so it needs no privacy gating.
+   */
+  matchedPositions: number[];
+  /**
+   * The exclusive subset of matchedPositions attributable ONLY to the
+   * previous-upload/corpus-source channel (both PRIOR_SUBMISSION and
+   * TURNITPLUS_CORPUS_SOURCE relationship types alike — the same
+   * "included" set previousUploadOnlyWords already counts, just as
+   * positions instead of a count). Deliberately carries no
+   * matchedRepresentationId, no relationshipType, no account/report
+   * identity of any kind — privacy-safe by construction, needed so the
+   * render layer can draw ONE generic "TurnitPlus reference sources"
+   * highlight/Source Details entry without ever touching per-contribution
+   * sourceId data (which stays admin-only — see UnifiedEvidenceContribution's
+   * own comment and app/reports/[id]/page.tsx's contributions stripping for
+   * non-admins).
+   */
+  previousUploadPositions: number[];
 };
 
 export type ComputeUnifiedSimilarityParams = {
@@ -78,6 +163,59 @@ export type ComputeUnifiedSimilarityParams = {
   externalAcademicEvidence?: ExternalAcademicEvidence[] | null;
   /** SimilarityReport.historicalSubmissionMatch — already gated at strongCorrespondence/exactCanonicalMatch by lib/user-submission-matching.ts before this function sees it; relationshipType is inspected here, never re-derived. */
   historicalSubmissionMatch?: ReportHistoricalSubmissionMatch | null;
+  /**
+   * matchedRepresentationId values that the Preview-gated same-device SELF
+   * rule (lib/report-primary-similarity.ts, flag DEVICE_PASSPORT_SELF_ENABLED
+   * — resolved from the report's OWN verified upload Device Passport plus the
+   * deterministic per-backing provenance evidence, NEVER from
+   * historical_match_shadow_evaluations) has classified as an EFFECTIVE SELF
+   * for scoring: a production-counted historical source whose matchType is an
+   * EXACT_CANONICAL_MATCH or a STRONG_TEXT_MATCH, backed only by the report's
+   * own verified passport with zero independent backing (see
+   * lib/device-self-scoring-rule.ts's classifyDeviceSelfMatch).
+   *
+   * Their matched positions are excluded from the scored union exactly like a
+   * SELF-relationship match — WITHOUT rewriting production's persisted
+   * relationshipType: the contribution keeps its baseline `relationship` and
+   * gains effectiveScoringRelationship "SELF" plus an effectiveScoringReason of
+   * "SAME_DEVICE_EXACT_DOCUMENT" (exact) or "SAME_DEVICE_STRONG_TEXT_DOCUMENT"
+   * (strong). Independent archive / scholarly positions are untouched (they
+   * enter the union through their own channels).
+   *
+   * Empty / absent (the production default) => this function's output is
+   * byte-identical to before this parameter existed.
+   */
+  effectiveDeviceSelfRepresentationIds?: readonly string[] | ReadonlySet<string> | null;
+  /**
+   * Phase B1 — SHADOW ONLY. matchedRepresentationId values a shadow
+   * counterfactual (lib/corpus-duplicate-counterfactual.ts, driven by
+   * lib/corpus-duplicate-suppression-policy.ts) is HYPOTHETICALLY excluding, to
+   * answer "what would the unified score be if this one qualifying TurnitPlus
+   * internal exact-canonical whole-document duplicate did not inflate it".
+   *
+   * A representation in this set: keeps its baseline relationshipType verbatim
+   * (this is NOT SELF, NOT ownership, NOT authorship, NOT authorized reuse —
+   * see lib/corpus-duplicate-suppression-policy.ts's own header); has its
+   * contribution recorded with evidenceStatus
+   * "excluded_document_local_corpus_duplicate"; and has its matched ranges left
+   * OUT of the scored union. Applied AFTER the SELF / UNKNOWN_RELATIONSHIP /
+   * effective-same-Passport-SELF checks, so a genuine SELF still gets
+   * "excluded_self" and its own tally, and an effective device SELF still gets
+   * "excluded_effective_device_self" and its own tally — this set never
+   * overrides either.
+   *
+   * Deliberately adds NO new counter or property to UnifiedSimilarityResult:
+   * the counterfactual helper derives every figure it needs from the two
+   * results (authoritative vs hypothetical) plus the historical-match input.
+   *
+   * PRODUCTION SCORING NEVER PASSES THIS. lib/report-primary-similarity.ts's
+   * resolvePrimarySimilaritySummary does not construct or forward it, so every
+   * authoritative call leaves it absent — and absent / empty makes this
+   * function's output (shape AND values) byte-identical to before this
+   * parameter existed. "excluded_document_local_corpus_duplicate" can therefore
+   * never appear in an authoritative result.
+   */
+  hypotheticalExcludedRepresentationIds?: readonly string[] | ReadonlySet<string> | null;
 };
 
 function clampedPositions(start: number, end: number, wordCount: number): [number, number] | null {
@@ -150,6 +288,23 @@ function academicSourceType(provider: string): UnifiedEvidenceSourceType {
 export function computeUnifiedSimilarity(params: ComputeUnifiedSimilarityParams): UnifiedSimilarityResult {
   const wordCount = Number.isInteger(params.wordCount) && params.wordCount > 0 ? params.wordCount : 0;
 
+  // The Preview-gated same-device SELF rule's already-decided set of
+  // representation ids (see effectiveDeviceSelfRepresentationIds' own comment).
+  // Empty when the caller passed nothing — the production default.
+  const effectiveDeviceSelfSet: ReadonlySet<string> =
+    params.effectiveDeviceSelfRepresentationIds instanceof Set
+      ? params.effectiveDeviceSelfRepresentationIds
+      : new Set(params.effectiveDeviceSelfRepresentationIds ?? []);
+
+  // Phase B1 — SHADOW ONLY (see hypotheticalExcludedRepresentationIds' own
+  // comment). Empty whenever the caller passed nothing — i.e. every
+  // authoritative production call, which keeps this function's output
+  // byte-identical to before the parameter existed.
+  const hypotheticalExcludedSet: ReadonlySet<string> =
+    params.hypotheticalExcludedRepresentationIds instanceof Set
+      ? params.hypotheticalExcludedRepresentationIds
+      : new Set(params.hypotheticalExcludedRepresentationIds ?? []);
+
   const archivePositions = (params.archiveMatchedPositions ?? []).filter(
     (position) => Number.isInteger(position) && position >= 0 && position < wordCount,
   );
@@ -188,8 +343,11 @@ export function computeUnifiedSimilarity(params: ComputeUnifiedSimilarityParams)
   // --- Source: previous uploads / growing corpus -----------------------------
   // DECISION 1 (no override): SELF is always excluded.
   // DECISION 2 (no guessing): UNKNOWN_RELATIONSHIP is always excluded.
+  // Preview rule: an EFFECTIVE same-device SELF is also excluded — the
+  // baseline relationshipType is left exactly as production persisted it.
   let selfExcludedWords = 0;
   let unknownExcludedWords = 0;
+  let deviceSelfExcludedWords = 0;
   const seenPriorRepresentation = new Set<string>();
   if (params.historicalSubmissionMatch?.status === "MATCHED") {
     for (const match of params.historicalSubmissionMatch.matches ?? []) {
@@ -197,9 +355,30 @@ export function computeUnifiedSimilarity(params: ComputeUnifiedSimilarityParams)
       const firstOccurrence = !seenPriorRepresentation.has(identityKey);
       seenPriorRepresentation.add(identityKey);
 
+      // Only a production-counted baseline relationship can be downgraded — a
+      // genuine SELF / UNKNOWN_RELATIONSHIP is already excluded and keeps its
+      // own status and its own tally.
+      const isEffectiveDeviceSelf =
+        effectiveDeviceSelfSet.has(identityKey) &&
+        match.relationshipType !== "SELF" &&
+        match.relationshipType !== "UNKNOWN_RELATIONSHIP";
+
+      // Phase B1 — SHADOW ONLY. Deliberately gated AFTER isEffectiveDeviceSelf:
+      // a genuine SELF, an UNKNOWN_RELATIONSHIP, and an effective device SELF
+      // all keep their own status and their own tally — the hypothetical
+      // exclusion never overrides any of them, it only ever removes an
+      // otherwise-"included" contribution.
+      const isHypotheticalCorpusDuplicate =
+        !isEffectiveDeviceSelf &&
+        hypotheticalExcludedSet.has(identityKey) &&
+        match.relationshipType !== "SELF" &&
+        match.relationshipType !== "UNKNOWN_RELATIONSHIP";
+
       const status: UnifiedEvidenceStatus =
         match.relationshipType === "SELF" ? "excluded_self"
         : match.relationshipType === "UNKNOWN_RELATIONSHIP" ? "excluded_unknown"
+        : isEffectiveDeviceSelf ? "excluded_effective_device_self"
+        : isHypotheticalCorpusDuplicate ? "excluded_document_local_corpus_duplicate"
         : "included";
 
       const passageRanges = previousUploadPassageRanges(match, wordCount);
@@ -211,6 +390,15 @@ export function computeUnifiedSimilarity(params: ComputeUnifiedSimilarityParams)
           submittedWordEnd: passage.submittedWordEnd,
           matchedWordCount: passage.matchedWordCount,
           relationship: match.relationshipType,
+          ...(isEffectiveDeviceSelf
+            ? {
+                effectiveScoringRelationship: "SELF" as const,
+                effectiveScoringReason:
+                  match.matchType === "STRONG_TEXT_MATCH"
+                    ? ("SAME_DEVICE_STRONG_TEXT_DOCUMENT" as const)
+                    : ("SAME_DEVICE_EXACT_DOCUMENT" as const),
+              }
+            : {}),
           evidenceStatus: status,
         });
       }
@@ -223,6 +411,17 @@ export function computeUnifiedSimilarity(params: ComputeUnifiedSimilarityParams)
       }
       if (status === "excluded_unknown") {
         unknownExcludedWords += match.matchedWordCount;
+        continue;
+      }
+      if (status === "excluded_effective_device_self") {
+        deviceSelfExcludedWords += match.matchedWordCount;
+        continue;
+      }
+      if (status === "excluded_document_local_corpus_duplicate") {
+        // Phase B1 — SHADOW ONLY: dropped from the scored union, and
+        // deliberately NOT tallied into any result-level counter (see the
+        // parameter's own comment). The counterfactual helper measures the
+        // removal from authoritative-vs-hypothetical, never a field here.
         continue;
       }
       for (const passage of passageRanges) {
@@ -244,13 +443,14 @@ export function computeUnifiedSimilarity(params: ComputeUnifiedSimilarityParams)
   let liveAcademicOnlyWords = 0;
   let previousUploadOnlyWords = 0;
   let overlapWords = 0;
+  const previousUploadPositions: number[] = [];
   const allEligiblePositions = new Set<number>([...archiveSet, ...liveSet, ...priorSet]);
   for (const position of allEligiblePositions) {
     const sourcesHere = (archiveSet.has(position) ? 1 : 0) + (liveSet.has(position) ? 1 : 0) + (priorSet.has(position) ? 1 : 0);
     if (sourcesHere > 1) { overlapWords += 1; continue; }
     if (archiveSet.has(position)) archiveOnlyWords += 1;
     else if (liveSet.has(position)) liveAcademicOnlyWords += 1;
-    else previousUploadOnlyWords += 1;
+    else { previousUploadOnlyWords += 1; previousUploadPositions.push(position); }
   }
 
   return {
@@ -264,6 +464,9 @@ export function computeUnifiedSimilarity(params: ComputeUnifiedSimilarityParams)
     overlapWords,
     selfExcludedWords,
     unknownExcludedWords,
+    deviceSelfExcludedWords,
     contributions,
+    matchedPositions: [...allEligiblePositions].sort((left, right) => left - right),
+    previousUploadPositions: previousUploadPositions.sort((left, right) => left - right),
   };
 }

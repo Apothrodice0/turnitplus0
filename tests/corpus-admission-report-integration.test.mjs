@@ -13,6 +13,7 @@ import {
   buildReportAdmissionSourceRef,
   isCorpusAdmissionEnabled,
 } from "../lib/corpus-admission-report-integration.ts";
+import { _getActiveExtractionWorkerCountForTesting } from "../lib/corpus-text-extraction.ts";
 
 /**
  * Controlled live-report integration: covers the flag default, durable
@@ -98,6 +99,10 @@ async function jobRowById(jobId) {
 async function decisionCountFor(sourceRef) {
   const result = await client.execute({ sql: "SELECT COUNT(*) AS c FROM corpus_admission_decisions WHERE source_ref = ?", args: [sourceRef] });
   return Number(result.rows[0].c);
+}
+async function decisionRowFor(sourceRef) {
+  const result = await client.execute({ sql: "SELECT * FROM corpus_admission_decisions WHERE source_ref = ?", args: [sourceRef] });
+  return result.rows[0] ?? null;
 }
 async function contentStoreCountFor(sourceRef) {
   const result = await client.execute({
@@ -198,23 +203,41 @@ test("CRASH-BEFORE-AFTER(): a pending job created synchronously survives even if
   assert.equal(await decisionCountFor(sourceRef), 1);
 });
 
-// --- consent-gated, re-checked fresh (never a snapshot) ------------------
+// --- MANDATORY: consent can no longer block or cancel processing --------
 
-test("CONSENT-REVOCATION RACE: consent granted at job-creation time, then revoked before processing runs — the fresh re-check sees the revocation and cancels the job", async () => {
+test("MANDATORY: an account whose corpus_reuse_consented_at is NULL at job-creation time, and stays NULL, still gets its job evaluated and can ACCEPT — corpus-admission eligibility carries no per-account preference any more", async () => {
+  process.env.CORPUS_ADMISSION_ENABLED = "true";
+  const accountId = await ensureUser(false); // never consented — the only state any account can reach with the UI checkbox gone
+  const { deviceKey, reportId } = await seedSavedReport(accountId, plausibleArticleText(9501));
+  const sourceRef = buildReportAdmissionSourceRef({ accountId, deviceKey, reportId });
+  assert.equal(await consentedAtFor(accountId), null, "test setup sanity: genuinely never consented");
+
+  const created = await createPendingReportAdmissionJob(client, { accountId, deviceKey, reportId });
+  const outcome = await processReportAdmissionJob(client, { jobId: created.jobId, openConnection });
+  assert.equal(outcome.outcome, "succeeded", "REQUIRED: a never-consented account's job must still be evaluated and can succeed");
+  assert.equal(outcome.decision, "ACCEPT");
+
+  const job = await jobRowFor(sourceRef);
+  assert.equal(job.status, "succeeded");
+  assert.equal(await decisionCountFor(sourceRef), 1);
+});
+
+test("MANDATORY: consent granted at job-creation time, then revoked (via direct SQL, simulating any external actor) before processing runs — processing is unaffected; the job still evaluates and can succeed, it is never cancelled for lack of consent", async () => {
   process.env.CORPUS_ADMISSION_ENABLED = "true";
   const accountId = await ensureUser(true);
-  const { deviceKey, reportId } = await seedSavedReport(accountId, plausibleArticleText(2));
+  const { deviceKey, reportId } = await seedSavedReport(accountId, plausibleArticleText(9502));
   const sourceRef = buildReportAdmissionSourceRef({ accountId, deviceKey, reportId });
 
   const created = await createPendingReportAdmissionJob(client, { accountId, deviceKey, reportId });
-  await setConsent(accountId, false); // simulates PATCH /api/auth/me revoking consent before processing runs
+  await setConsent(accountId, false); // no production caller can do this any more (PATCH /api/auth/me no longer touches this column) — simulated directly to prove processing is now independent of it regardless of how it changed
 
   const outcome = await processReportAdmissionJob(client, { jobId: created.jobId, openConnection });
-  assert.deepEqual(outcome, { outcome: "consent_not_granted", jobId: created.jobId });
+  assert.equal(outcome.outcome, "succeeded", "REQUIRED: the job must still be evaluated normally — no code path may cancel it for a consent value that changed after creation");
+  assert.equal(outcome.decision, "ACCEPT");
 
   const job = await jobRowFor(sourceRef);
-  assert.equal(job.status, "cancelled");
-  assert.equal(await decisionCountFor(sourceRef), 0);
+  assert.equal(job.status, "succeeded");
+  assert.equal(await decisionCountFor(sourceRef), 1);
 });
 
 // --- successful admission ----------------------------------------------
@@ -238,6 +261,55 @@ test("a consented, ACCEPT-quality submission succeeds: job status=succeeded, one
   assert.equal(Number(job.attempt_count), 1);
   assert.equal(await decisionCountFor(sourceRef), 1);
   assert.equal(await contentStoreCountFor(sourceRef), 1);
+});
+
+// --- WORKER-01: live report integration must never hit EXTRACTION_WORKER_TERMINATED ---
+// This is the exact call site the production bug came from: this function
+// wraps a saved report's already-extracted text as filename:
+// "live-submission.txt" and feeds it through evaluateCorpusAdmissionCandidate
+// (see this file's own "the underlying report ... has no retained text"
+// branch just above). Before the fix, that always routed through the
+// isolated worker — which cannot load in a deployed Vercel serverless
+// function — so this job failed identically to the real production
+// decision (44e51035-261b-41f1-85e3-a93060222cdb) every time. The .txt
+// bypass added to lib/corpus-text-extraction.ts's extractCorpusCandidateText
+// closes it. This test still runs under `node --import tsx`, same as every
+// other test in this file — it proves the JOB PIPELINE'S OWN behavior
+// (word count/language/hash/quality end to end, zero worker slots), not the
+// "does this survive a tsx-less runtime" property, which
+// tests/corpus-text-extraction.test.mjs and the separate plain-node/
+// production-build verification cover directly.
+test("WORKER-01: live report integration produces a real decision (word count, language, hash, quality) instead of EXTRACTION_WORKER_TERMINATED, and never spawns a worker", async () => {
+  process.env.CORPUS_ADMISSION_ENABLED = "true";
+  assert.equal(_getActiveExtractionWorkerCountForTesting(), 0, "sanity: no worker active before this test runs");
+
+  const accountId = await ensureUser(true);
+  // seed 3: every other single-digit seed in this file (1, 2, 4, 5, 6, 7) is
+  // already used by another test sharing this same database — a collision
+  // would make this text resolve as an EXACT_DUPLICATE family match against
+  // an unrelated test's own content, corrupting both.
+  const text = plausibleArticleText(3);
+  const { deviceKey, reportId } = await seedSavedReport(accountId, text);
+  const sourceRef = buildReportAdmissionSourceRef({ accountId, deviceKey, reportId });
+
+  const created = await createPendingReportAdmissionJob(client, { accountId, deviceKey, reportId });
+  const outcome = await processReportAdmissionJob(client, { jobId: created.jobId, openConnection });
+
+  assert.equal(outcome.outcome, "succeeded", outcome.outcome === "failed" ? `job failed: ${outcome.error}` : undefined);
+  assert.equal(outcome.decision, "ACCEPT");
+
+  const decisionRow = await decisionRowFor(sourceRef);
+  assert.ok(decisionRow, "a decision row must exist");
+  assert.equal(decisionRow.detected_format, "txt", "the synthetic live-submission.txt wrapper must be classified as txt");
+  assert.ok(Number(decisionRow.extracted_word_count) > 0, `expected a real word count, got ${decisionRow.extracted_word_count}`);
+  assert.equal(typeof decisionRow.detected_language, "string");
+  assert.ok(decisionRow.detected_language.length > 0);
+  assert.equal(typeof decisionRow.canonical_sha256, "string");
+  assert.equal(decisionRow.canonical_sha256.length, 64);
+  assert.equal(typeof decisionRow.quality_score, "number");
+  assert.doesNotMatch(String(decisionRow.hard_gate_failure_codes ?? ""), /EXTRACTION_WORKER_TERMINATED/, "the exact production bug this fix closes must never reappear here");
+
+  assert.equal(_getActiveExtractionWorkerCountForTesting(), 0, "the live-report-integration path must never acquire a worker slot for its synthetic txt candidate");
 });
 
 // --- double-save idempotency ---------------------------------------------
@@ -279,8 +351,10 @@ test("FAILURE-STATUS: a genuine admission failure is persisted to corpus_admissi
   const sourceRef = buildReportAdmissionSourceRef({ accountId, deviceKey, reportId });
   const created = await createPendingReportAdmissionJob(client, { accountId, deviceKey, reportId });
 
-  // Fails on exactly the 2nd call (the gate's own first internal write
-  // attempt, right after the 1st call serves the fresh consent check) and
+  // Fails on exactly the 1st call (the gate's own first internal write
+  // attempt — processReportAdmissionJob itself no longer opens a
+  // connection of its own before this, now that corpus-admission
+  // eligibility carries no per-account consent check to re-verify) and
   // succeeds on every other call, including the "mark this job failed"
   // write that follows — simulating one genuine write-path failure during
   // evaluation, not a permanently broken connection factory (which would
@@ -288,7 +362,7 @@ test("FAILURE-STATUS: a genuine admission failure is persisted to corpus_admissi
   let calls = 0;
   function flakyOpenConnection() {
     calls += 1;
-    if (calls === 2) throw new Error("simulated connection failure for the admission write path");
+    if (calls === 1) throw new Error("simulated connection failure for the admission write path");
     return createClient({ url: dbUrl });
   }
 
@@ -317,7 +391,7 @@ test("RETRY-IDEMPOTENCY: reprocessing a failed job succeeds once content can be 
   let calls = 0;
   function flakyOnceOpenConnection() {
     calls += 1;
-    if (calls === 2) throw new Error("simulated failure — the gate's own first write attempt only");
+    if (calls === 1) throw new Error("simulated failure — the gate's own first write attempt only");
     return createClient({ url: dbUrl });
   }
   const failed = await processReportAdmissionJob(client, { jobId: created.jobId, openConnection: flakyOnceOpenConnection });

@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import { createClient } from "@libsql/client";
 import { applyMigrationsLibsql } from "../lib/ingest.js";
 import { canonicalSha256 } from "../lib/document-identity.ts";
-import { runCorpusAdmissionPromotionSweep } from "../lib/corpus-admission-promotion.ts";
+import { runCorpusAdmissionPromotionSweep, MAX_PROMOTION_ATTEMPTS } from "../lib/corpus-admission-promotion.ts";
 import { listCorpusAdmissionDecisions, getCorpusAdmissionDecisionDetail } from "../lib/corpus-admission-admin-repo.ts";
 
 /**
@@ -133,4 +133,34 @@ test("detail view surfaces a failed promotion's last error and null representati
   const list = await listCorpusAdmissionDecisions(client, { pageSize: 50 });
   const row = list.rows.find((r) => r.rowId === `decision:${decisionId}`);
   assert.equal(row.promotionStatus, "failed");
+});
+
+test("B1C: list and detail views distinguish a retryable 'failed' promotion (attempt N/MAX) from a terminal 'dead_lettered' one (exhausted MAX/MAX), and both surface the final error admin-only", async () => {
+  const storedHash = canonicalSha256("B1C admin-visibility dead-letter fixture stored hash.");
+  const decisionId = await insertDecision({ decision: "ACCEPT", canonicalSha256: storedHash });
+  await insertAcceptedRepresentation(decisionId, storedHash);
+  await insertContentStore(decisionId, storedHash, "B1C admin-visibility dead-letter fixture: deliberately mismatched retained text.");
+
+  let lastOutcome;
+  for (let i = 1; i <= MAX_PROMOTION_ATTEMPTS; i += 1) {
+    const sweep = await runCorpusAdmissionPromotionSweep(client, { openConnection, batchSize: 20 });
+    lastOutcome = sweep.results.find((r) => r.decisionId === decisionId);
+    if (i < MAX_PROMOTION_ATTEMPTS) {
+      const midDetail = await getCorpusAdmissionDecisionDetail(client, `decision:${decisionId}`);
+      assert.equal(midDetail.promotionStatus, "failed", `attempt ${i} must still surface as retryable 'failed'`);
+      assert.equal(midDetail.promotionAttemptCount, i, `attempt count must reflect exactly ${i} completed attempts`);
+    }
+  }
+  assert.equal(lastOutcome.outcome, "dead_lettered");
+
+  const detail = await getCorpusAdmissionDecisionDetail(client, `decision:${decisionId}`);
+  assert.equal(detail.promotionStatus, "dead_lettered", "REQUIRED: the exhausted promotion must surface as 'dead_lettered', not 'failed'");
+  assert.equal(detail.promotionAttemptCount, MAX_PROMOTION_ATTEMPTS, "REQUIRED: attempt count must show exhausted MAX/MAX");
+  assert.ok(detail.promotionLastError && detail.promotionLastError.length > 0, "the final error must remain visible in the admin-only detail view");
+  assert.equal(detail.promotionRepresentationId, null, "a dead-lettered promotion never produced a representation");
+
+  const list = await listCorpusAdmissionDecisions(client, { pageSize: 50 });
+  const row = list.rows.find((r) => r.rowId === `decision:${decisionId}`);
+  assert.equal(row.promotionStatus, "dead_lettered", "REQUIRED: the list view must also distinguish dead_lettered from failed");
+  assert.equal(row.promotionAttemptCount, MAX_PROMOTION_ATTEMPTS, "REQUIRED: the list view must also surface the exhausted attempt count");
 });

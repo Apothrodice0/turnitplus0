@@ -5,7 +5,8 @@ import path from "path";
 import { randomUUID } from "node:crypto";
 import { createClient } from "@libsql/client";
 import { applyMigrationsLibsql } from "../lib/ingest.js";
-import { listCorpusAdmissionDecisions, getCorpusAdmissionDecisionDetail } from "../lib/corpus-admission-admin-repo.ts";
+import { listCorpusAdmissionDecisions, getCorpusAdmissionDecisionDetail, getCorpusAdmissionOperationalSummary } from "../lib/corpus-admission-admin-repo.ts";
+import { recordSweepRun } from "../lib/corpus-admission-sweep-state.ts";
 
 /**
  * lib/corpus-admission-admin-repo.ts: list filtering/pagination (incl. the
@@ -173,6 +174,118 @@ test("getCorpusAdmissionDecisionDetail returns null for a nonexistent or malform
   assert.equal(await getCorpusAdmissionDecisionDetail(client, "decision:"), null);
 });
 
+// --- list: acceptedRepresentationId/acceptedRepresentationActive ----------
+// Drives the admin dashboard's Remove ("active") vs Removed ("deactivated")
+// affordance beside Inspect — see components/admin/corpus-search.tsx.
+
+test("listCorpusAdmissionDecisions: acceptedRepresentationActive is true for an active fingerprint, false once deactivated, and null when no fingerprint exists at all", async () => {
+  const accountId = await ensureUser();
+  const marker = randomUUID();
+
+  const acceptSourceRef = `remove-ui-active-${marker}`;
+  const acceptDecisionId = await insertDecision({ sourceRef: acceptSourceRef, decision: "ACCEPT" });
+  await insertJob({ sourceRef: acceptSourceRef, accountId, status: "succeeded", decisionId: acceptDecisionId });
+  const acceptedRepresentationId = await insertAcceptedRepresentation(acceptDecisionId, randomUUID());
+
+  const rejectSourceRef = `remove-ui-reject-${marker}`;
+  const rejectDecisionId = await insertDecision({ sourceRef: rejectSourceRef, decision: "REJECT" });
+  await insertJob({ sourceRef: rejectSourceRef, accountId, status: "succeeded", decisionId: rejectDecisionId });
+
+  const pendingJobId = await insertJob({ sourceRef: `remove-ui-pending-${marker}`, accountId, status: "pending" });
+
+  const beforeDeactivate = await listCorpusAdmissionDecisions(client, { q: marker });
+  const rowsById = Object.fromEntries(beforeDeactivate.rows.map((r) => [r.rowId, r]));
+
+  const activeRow = rowsById[`decision:${acceptDecisionId}`];
+  assert.equal(activeRow.acceptedRepresentationId, acceptedRepresentationId);
+  assert.equal(activeRow.acceptedRepresentationActive, true);
+
+  const rejectedRow = rowsById[`decision:${rejectDecisionId}`];
+  assert.equal(rejectedRow.acceptedRepresentationId, null);
+  assert.equal(rejectedRow.acceptedRepresentationActive, null);
+
+  const pendingRow = rowsById[`job:${pendingJobId}`];
+  assert.equal(pendingRow.acceptedRepresentationId, null);
+  assert.equal(pendingRow.acceptedRepresentationActive, null);
+
+  await client.execute({
+    sql: "UPDATE corpus_admission_accepted_representations SET revoked_at = CURRENT_TIMESTAMP WHERE id = ?",
+    args: [acceptedRepresentationId],
+  });
+
+  const afterDeactivate = await listCorpusAdmissionDecisions(client, { q: marker });
+  const deactivatedRow = afterDeactivate.rows.find((r) => r.rowId === `decision:${acceptDecisionId}`);
+  assert.equal(deactivatedRow.acceptedRepresentationId, acceptedRepresentationId, "the row must remain in the list, still carrying its (now inactive) fingerprint id");
+  assert.equal(deactivatedRow.acceptedRepresentationActive, false);
+});
+
+// --- list: accountEmail resolution (batched join, not N+1) ----------------
+// Admin-list account-owner-email requirement: listCorpusAdmissionDecisions
+// must resolve accountEmail via the SAME users.email-by-account_id mechanism
+// getCorpusAdmissionDecisionDetail already uses (one query per row there,
+// since detail is a single row) — batched here into a single LEFT JOIN
+// across the whole page, never a second per-row lookup.
+
+test("listCorpusAdmissionDecisions: accountEmail resolves to the real users.email for a row with a live account", async () => {
+  const accountId = await ensureUser();
+  const marker = randomUUID();
+  const sourceRef = `email-resolved-${marker}`;
+  const decisionId = await insertDecision({ sourceRef, decision: "ACCEPT" });
+  await insertJob({ sourceRef, accountId, status: "succeeded", decisionId });
+
+  const result = await listCorpusAdmissionDecisions(client, { q: marker });
+  assert.equal(result.rows.length, 1);
+  assert.equal(result.rows[0].accountId, accountId);
+  assert.equal(result.rows[0].accountEmail, `${accountId}@example.test`);
+});
+
+test("listCorpusAdmissionDecisions: accountEmail is null when account_id itself is null (no job row / job deleted)", async () => {
+  const marker = randomUUID();
+  const sourceRef = `email-no-account-${marker}`;
+  // Deliberately no job row inserted — same "job/report deleted, accepted
+  // content survives" shape as the detail-level test above.
+  await insertDecision({ sourceRef, decision: "ACCEPT" });
+
+  const result = await listCorpusAdmissionDecisions(client, { q: marker });
+  assert.equal(result.rows.length, 1);
+  assert.equal(result.rows[0].accountId, null);
+  assert.equal(result.rows[0].accountEmail, null);
+});
+
+test("listCorpusAdmissionDecisions: accountEmail is null when account_id is set but does not resolve to any users row (e.g. a deleted account) — never a lookup failure/throw", async () => {
+  const marker = randomUUID();
+  const sourceRef = `email-unresolved-${marker}`;
+  const decisionId = await insertDecision({ sourceRef, decision: "REVIEW" });
+  // corpus_admission_report_jobs.account_id has no FK to users(id) by design
+  // (see drizzle/0031's own comment) — a genuinely dangling account_id is a
+  // real, reachable state, not just a test artifact.
+  await insertJob({ sourceRef, accountId: `nonexistent-account-${marker}`, status: "succeeded", decisionId });
+
+  const result = await listCorpusAdmissionDecisions(client, { q: marker });
+  assert.equal(result.rows.length, 1);
+  assert.equal(result.rows[0].accountId, `nonexistent-account-${marker}`);
+  assert.equal(result.rows[0].accountEmail, null, "an unresolved account must render as null (UI: 'unknown'), never throw or leak a raw lookup error");
+});
+
+test("listCorpusAdmissionDecisions: accountEmail resolves correctly for multiple distinct accounts on the same page (proves the batched join, not a first-row-only lookup)", async () => {
+  const marker = randomUUID();
+  const accountA = await ensureUser();
+  const accountB = await ensureUser();
+
+  const sourceRefA = `email-multi-a-${marker}`;
+  const decisionA = await insertDecision({ sourceRef: sourceRefA, decision: "ACCEPT" });
+  await insertJob({ sourceRef: sourceRefA, accountId: accountA, status: "succeeded", decisionId: decisionA });
+
+  const sourceRefB = `email-multi-b-${marker}`;
+  const decisionB = await insertDecision({ sourceRef: sourceRefB, decision: "ACCEPT" });
+  await insertJob({ sourceRef: sourceRefB, accountId: accountB, status: "succeeded", decisionId: decisionB });
+
+  const result = await listCorpusAdmissionDecisions(client, { q: marker });
+  const rowsById = Object.fromEntries(result.rows.map((r) => [r.accountId, r]));
+  assert.equal(rowsById[accountA].accountEmail, `${accountA}@example.test`);
+  assert.equal(rowsById[accountB].accountEmail, `${accountB}@example.test`);
+});
+
 // --- list: filtering, search, pagination, max page size -------------------
 
 test("listCorpusAdmissionDecisions: status filter returns only matching rows", async () => {
@@ -252,4 +365,77 @@ test("PAGINATION-LIMIT: a non-positive or missing page/pageSize falls back to a 
   const result = await listCorpusAdmissionDecisions(client, { page: -5, pageSize: -5 });
   assert.ok(result.page >= 1);
   assert.ok(result.pageSize >= 1);
+});
+
+// --- getCorpusAdmissionOperationalSummary (admin corpus status strip) ----
+
+async function insertPromotionRaw(status, attemptCount) {
+  const decisionId = await insertDecision({ decision: "ACCEPT", sourceRef: `operational-summary-fixture-${randomUUID()}` });
+  const hash = randomUUID();
+  await insertContentStore(decisionId, hash, "operational-summary fixture text");
+  const acceptedRepId = await insertAcceptedRepresentation(decisionId, hash);
+  const id = randomUUID();
+  await client.execute({
+    sql: `INSERT INTO corpus_admission_promotions (id, decision_id, accepted_representation_id, status, attempt_count, created_at, updated_at)
+          VALUES (?,?,?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
+    args: [id, decisionId, acceptedRepId, status, attemptCount],
+  });
+  return id;
+}
+
+test("getCorpusAdmissionOperationalSummary: retryable ('failed') and dead-lettered counts reflect only those two statuses, never 'staged'/'indexed'/'skipped'", async () => {
+  const before = await getCorpusAdmissionOperationalSummary(client);
+
+  await insertPromotionRaw("failed", 2);
+  await insertPromotionRaw("failed", 3);
+  await insertPromotionRaw("dead_lettered", 5);
+  await insertPromotionRaw("staged", 0);
+  await insertPromotionRaw("indexed", 1);
+  await insertPromotionRaw("skipped", 1);
+
+  const after = await getCorpusAdmissionOperationalSummary(client);
+  assert.equal(after.retryablePromotionCount, before.retryablePromotionCount + 2, "REQUIRED: only the 2 new 'failed' rows must be counted as retryable");
+  assert.equal(after.deadLetteredPromotionCount, before.deadLetteredPromotionCount + 1, "REQUIRED: only the 1 new 'dead_lettered' row must be counted");
+});
+
+test("getCorpusAdmissionOperationalSummary: sweeps is always keyed by all 3 known kinds; a kind with no recorded run is null ('never')", async () => {
+  const dbFile2 = path.join(repoRoot, "test_corpus_admission_admin_repo_summary_empty.db");
+  for (const suffix of ["", "-wal", "-shm"]) {
+    const candidate = `${dbFile2}${suffix}`;
+    if (fs.existsSync(candidate)) fs.unlinkSync(candidate);
+  }
+  const freshClient = createClient({ url: `file:${dbFile2}` });
+  await freshClient.execute("PRAGMA foreign_keys = ON");
+  await applyMigrationsLibsql(freshClient, drizzleDir);
+  try {
+    const summary = await getCorpusAdmissionOperationalSummary(freshClient);
+    assert.deepEqual(Object.keys(summary.sweeps).sort(), ["promotion", "report_admission", "retention"].sort());
+    assert.equal(summary.sweeps.promotion, null, "REQUIRED: a never-run kind must be null, not a fabricated row");
+    assert.equal(summary.sweeps.report_admission, null);
+    assert.equal(summary.sweeps.retention, null);
+    assert.equal(summary.retryablePromotionCount, 0);
+    assert.equal(summary.deadLetteredPromotionCount, 0);
+  } finally {
+    freshClient.close();
+    for (const suffix of ["", "-wal", "-shm"]) {
+      const candidate = `${dbFile2}${suffix}`;
+      try { fs.unlinkSync(candidate); } catch { /* ignore */ }
+    }
+  }
+});
+
+test("getCorpusAdmissionOperationalSummary: a recorded sweep run surfaces its own status/summary under the right kind, and updating it again overwrites rather than duplicating", async () => {
+  await recordSweepRun(client, "promotion", { status: "success", summary: { claimedCount: 4, indexed: 3, failed: 1 } });
+  const first = await getCorpusAdmissionOperationalSummary(client);
+  assert.equal(first.sweeps.promotion.lastStatus, "success");
+  assert.deepEqual(first.sweeps.promotion.summary, { claimedCount: 4, indexed: 3, failed: 1 });
+  assert.equal(first.sweeps.report_admission, null, "REQUIRED: recording one kind must never affect another kind's own null state");
+
+  await recordSweepRun(client, "promotion", { status: "failed" });
+  const second = await getCorpusAdmissionOperationalSummary(client);
+  assert.equal(second.sweeps.promotion.lastStatus, "failed");
+  assert.equal(second.sweeps.promotion.summary, null, "REQUIRED: a later run with no summary must not keep the previous run's stale summary");
+
+  const rowCount = await client.execute("SELECT COUNT(*) AS c FROM corpus_admission_sweep_runs WHERE sweep_kind = 'promotion'");
+  assert.equal(Number(rowCount.rows[0].c), 1, "REQUIRED: this is a singleton row per kind, never an appended history");
 });

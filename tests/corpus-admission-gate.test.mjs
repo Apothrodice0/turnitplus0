@@ -5,8 +5,11 @@ import path from "path";
 import { createClient } from "@libsql/client";
 import { applyMigrationsLibsql } from "../lib/ingest.js";
 import { createDocumentIdentity } from "../lib/document-identity.ts";
-import { indexDocumentSubmissionIntoCorpus } from "../lib/user-submission-corpus.ts";
+import { indexDocumentSubmissionIntoCorpus, corpusShingleHashes, CORPUS_SHINGLE_WRITE_BATCH_ROWS } from "../lib/user-submission-corpus.ts";
+import { canonicalizeText } from "../lib/canonical-text.ts";
 import { evaluateCorpusAdmissionCandidate, reEvaluateCorpusAdmissionCandidate } from "../lib/corpus-admission-gate.ts";
+import { _getActiveExtractionWorkerCountForTesting } from "../lib/corpus-text-extraction.ts";
+import { DEFAULT_CORPUS_ADMISSION_LIMITS } from "../lib/corpus-admission-types.ts";
 
 const repoRoot = path.resolve(".");
 const drizzleDir = path.join(repoRoot, "drizzle");
@@ -160,6 +163,45 @@ test("a real (non-dry-run) ACCEPT with resolved retention writes exactly one con
   assert.equal(rows.rows[0].canonical_sha256, decision.canonicalSha256);
 });
 
+test("large ACCEPT: the accepted-representation shingle set is written completely in bounded batches (CORPUS_SHINGLE_WRITE_BATCH_ROWS), never one oversized batch()", async () => {
+  // ~25k words of quality-passing English -> well over CORPUS_SHINGLE_WRITE_BATCH_ROWS
+  // informative 5-grams, so the accepted-shingle write in
+  // acceptWithAtomicDedupCriticalSection spans several tx.batch() calls.
+  const text = plausibleArticleText(20250828, 25_000);
+  const decision = await evaluateCorpusAdmissionCandidate(client, {
+    sourceRef: "candidate-large-accept",
+    filename: "candidate-large.txt",
+    bytes: Buffer.from(text, "utf8"),
+    consent: RESOLVED_PROVENANCE("https://example.test/large"),
+    dryRun: false,
+    openConnection,
+  });
+  assert.equal(decision.decision, "ACCEPT", `expected ACCEPT, got ${decision.decision} (${decision.reasonCodes.join(",")})`);
+
+  const acceptedRep = await client.execute({
+    sql: "SELECT id FROM corpus_admission_accepted_representations WHERE decision_id = ?",
+    args: [decision.id],
+  });
+  assert.equal(acceptedRep.rows.length, 1);
+  const acceptedRepId = acceptedRep.rows[0].id;
+
+  // The gate shingles canonicalizeText(extraction.rawText); for a .txt that is the decoded text.
+  const expected = corpusShingleHashes(canonicalizeText(text));
+  assert.ok(expected.size > CORPUS_SHINGLE_WRITE_BATCH_ROWS, `precondition: ${expected.size} informative shingles spans multiple write batches`);
+  const persisted = await client.execute({
+    sql: "SELECT COUNT(*) AS c FROM corpus_admission_accepted_shingles WHERE accepted_representation_id = ?",
+    args: [acceptedRepId],
+  });
+  assert.equal(Number(persisted.rows[0].c), expected.size,
+    "every informative shingle of the accepted representation must be persisted exactly once across the bounded batches");
+
+  const distinct = await client.execute({
+    sql: "SELECT COUNT(*) AS c FROM (SELECT DISTINCT shingle_hash FROM corpus_admission_accepted_shingles WHERE accepted_representation_id = ?)",
+    args: [acceptedRepId],
+  });
+  assert.equal(Number(distinct.rows[0].c), expected.size, "no duplicate shingle rows");
+});
+
 test("unresolved retention rights prevent both admission AND full-text persistence, even for real (non-dry-run) evaluation", async () => {
   const text = plausibleArticleText(203);
   const decision = await evaluateCorpusAdmissionCandidate(client, {
@@ -247,6 +289,66 @@ test("REJECT (too-short) and REVIEW candidates leave the real corpus tables at z
   assert.deepEqual(after, before, "no REJECT/REVIEW candidate may ever create a row in the real corpus tables");
 });
 
+// --- mixed-language misclassification regression (bug reproduction) --------
+// A real document ("...Maghrebi Family Firm") is predominantly English with
+// a short Spanish-translated abstract on page 1-2. The old whole-document,
+// presence-only detector counted the Spanish abstract's la/le/les as French
+// stopword evidence and misclassified the whole document "French" at
+// confidence 0.5, capping it to REVIEW via LANGUAGE_UNCERTAIN. The new
+// windowed, weighted, dominant-language detector must not repeat this.
+
+const SPANISH_WORDS = [
+  "el", "estudio", "examina", "la", "filantropia", "y", "la", "riqueza",
+  "en", "las", "empresas", "familiares", "con", "una", "metodologia",
+  "para", "estos", "resultados", "muestran", "que", "es", "un", "factor",
+  "determinante", "del", "comportamiento", "al", "comprender", "este",
+  "fenomeno", "tambien", "desde", "hacia",
+];
+
+function repeatSpanishWords(count) {
+  const out = [];
+  for (let i = 0; i < count; i += 1) out.push(SPANISH_WORDS[i % SPANISH_WORDS.length]);
+  return out.join(" ");
+}
+
+const REAL_SPANISH_ABSTRACT =
+  "Resumen: Este articulo examina la filantropia y la riqueza socioemocional en las empresas familiares del Magreb. " +
+  "El estudio analiza como la cultura influye en las decisiones filantropicas de estas empresas. Los resultados " +
+  "muestran que la incrustacion cultural es un factor determinante para entender el comportamiento filantropico de " +
+  "las familias empresarias en la region.";
+
+test("bug reproduction: an English article with a short Spanish abstract is ACCEPTed as CONFIDENT_ENGLISH, never capped to REVIEW via LANGUAGE_UNCERTAIN", async () => {
+  const text = `${REAL_SPANISH_ABSTRACT}\n\n${plausibleArticleText(301)}`;
+
+  const decision = await evaluateCorpusAdmissionCandidate(client, {
+    sourceRef: "candidate-english-with-spanish-abstract",
+    filename: "candidate.txt",
+    bytes: Buffer.from(text, "utf8"),
+    consent: RESOLVED_PROVENANCE("https://example.test/spanish-abstract"),
+    dryRun: true,
+  });
+
+  assert.equal(decision.decision, "ACCEPT", `expected ACCEPT, got ${decision.decision} (${decision.reasonCodes.join(",")})`);
+  assert.ok(!decision.reasonCodes.includes("LANGUAGE_UNCERTAIN"), `must not be capped to REVIEW by language uncertainty: ${decision.reasonCodes.join(",")}`);
+});
+
+test("a genuinely balanced English/Spanish document (not a short embedded abstract) is capped to REVIEW via LANGUAGE_UNCERTAIN, not silently ACCEPTed as English", async () => {
+  const englishText = plausibleArticleText(302);
+  const spanishText = repeatSpanishWords(englishText.split(/\s+/).length);
+  const text = `${englishText}\n\n${spanishText}`;
+
+  const decision = await evaluateCorpusAdmissionCandidate(client, {
+    sourceRef: "candidate-balanced-bilingual",
+    filename: "candidate.txt",
+    bytes: Buffer.from(text, "utf8"),
+    consent: RESOLVED_PROVENANCE("https://example.test/balanced-bilingual"),
+    dryRun: true,
+  });
+
+  assert.ok(decision.reasonCodes.includes("LANGUAGE_UNCERTAIN"), `expected LANGUAGE_UNCERTAIN, got ${decision.reasonCodes.join(",")}`);
+  assert.notEqual(decision.decision, "ACCEPT");
+});
+
 // --- openConnection: mandatory for every non-dry admission, fail fast -------
 
 test("openConnection is required whenever dryRun is not true, and the failure happens before any extraction or write is attempted — but a dry run never requires it at all", async () => {
@@ -301,4 +403,118 @@ test("openConnection is required whenever dryRun is not true, and the failure ha
     () => reEvaluateCorpusAdmissionCandidate(client, { decisionId: accepted.id /* openConnection omitted */ }),
     /openConnection is required/,
   );
+});
+
+// ============================================================================
+// Release-hardening audit finding WORKER-01: lib/corpus-extraction-worker.ts
+// cannot load in a deployed Vercel serverless function (confirmed live in
+// Preview runtime logs — Next.js copies the file into the build as a raw,
+// untranspiled asset, unparseable by a bare Node runtime with no tsx
+// loader). Every format shares that one worker script, so every corpus-
+// admission extraction attempt failed identically in production, reported
+// as EXTRACTION_WORKER_TERMINATED — including the trivially-safe txt case
+// (bytes.toString('utf8'), no third-party parser). Fix: extractCorpusCandidateText
+// now decodes a VALIDATED txt candidate inline, never touching the worker.
+// These tests exercise the full evaluateCorpusAdmissionCandidate pipeline —
+// file validation, extraction, hard gates, quality/hashing — end to end,
+// proving the bypass is gated on the validator's own classification (never
+// a raw claimed filename) and that PDF/DOCX still require the worker.
+// ============================================================================
+
+test("WORKER-01: a validated txt candidate produces a complete decision (word count, language, hash, quality) without ever spawning a worker", async () => {
+  assert.equal(_getActiveExtractionWorkerCountForTesting(), 0, "sanity: no worker active before this test runs");
+  const text = plausibleArticleText(31001);
+  const decision = await evaluateCorpusAdmissionCandidate(client, {
+    sourceRef: "worker01-valid-txt",
+    filename: "live-submission.txt",
+    bytes: Buffer.from(text, "utf8"),
+    consent: RESOLVED_PROVENANCE("https://example.test/worker01-valid-txt"),
+    dryRun: true,
+  });
+
+  assert.equal(decision.detectedFormat, "txt");
+  assert.equal(decision.extractorVersion, "plain-text-decode-v1");
+  assert.ok(decision.hardGatePassed, `expected hard gates to pass, got failure codes: ${decision.hardGateFailureCodes.join(",")}`);
+  assert.ok(Number.isInteger(decision.extractedWordCount) && decision.extractedWordCount > 0, `expected a real word count, got ${decision.extractedWordCount}`);
+  assert.equal(typeof decision.detectedLanguage, "string");
+  assert.ok(decision.detectedLanguage.length > 0);
+  assert.equal(typeof decision.canonicalSha256, "string");
+  assert.equal(decision.canonicalSha256.length, 64, "a real sha256 hex digest");
+  assert.equal(typeof decision.qualityScore, "number");
+  assert.notEqual(decision.decision, undefined);
+  assert.notDeepEqual(decision.reasonCodes, ["EXTRACTION_WORKER_TERMINATED"]);
+  assert.ok(!decision.reasonCodes.includes("EXTRACTION_WORKER_TERMINATED"), "the exact production bug this fix closes must never reappear");
+
+  assert.equal(_getActiveExtractionWorkerCountForTesting(), 0, "no worker slot should ever have been acquired for this txt candidate");
+});
+
+test("WORKER-01: a dangerous Windows PE executable claiming a .txt filename is rejected by file validation — never reaches the txt bypass, never produces a decision claiming real content", async () => {
+  const peBytes = Buffer.concat([Buffer.from([0x4d, 0x5a]), Buffer.from("this is not really text, it is a renamed executable payload", "utf8")]);
+  const decision = await evaluateCorpusAdmissionCandidate(client, {
+    sourceRef: "worker01-dangerous-pe-as-txt",
+    filename: "malware.txt",
+    bytes: peBytes,
+    consent: RESOLVED_PROVENANCE("https://example.test/worker01-dangerous-pe"),
+    dryRun: true,
+  });
+
+  assert.equal(decision.decision, "REJECT");
+  assert.equal(decision.hardGatePassed, false);
+  assert.ok(decision.hardGateFailureCodes.includes("DANGEROUS_FILE_SIGNATURE"), `expected DANGEROUS_FILE_SIGNATURE, got ${decision.hardGateFailureCodes.join(",")}`);
+  assert.equal(decision.extractedWordCount, null, "a rejected-at-validation candidate must never report a word count as if real text had been decoded");
+  assert.equal(decision.canonicalSha256, null);
+});
+
+test("WORKER-01: a ZIP archive (e.g. a mislabeled DOCX) claiming a .txt filename is rejected by file validation, not silently decoded as garbage text", async () => {
+  const zipBytes = Buffer.concat([Buffer.from([0x50, 0x4b, 0x03, 0x04]), Buffer.from("fake zip local file header content here", "utf8")]);
+  const decision = await evaluateCorpusAdmissionCandidate(client, {
+    sourceRef: "worker01-zip-as-txt",
+    filename: "disguised.txt",
+    bytes: zipBytes,
+    consent: RESOLVED_PROVENANCE("https://example.test/worker01-zip-as-txt"),
+    dryRun: true,
+  });
+
+  assert.equal(decision.decision, "REJECT");
+  assert.ok(decision.hardGateFailureCodes.includes("DANGEROUS_FILE_SIGNATURE"), `expected DANGEROUS_FILE_SIGNATURE, got ${decision.hardGateFailureCodes.join(",")}`);
+});
+
+test("WORKER-01: empty and oversized txt candidates still fail with the existing reason codes end-to-end through the full gate, not just the raw extraction function", async () => {
+  const emptyDecision = await evaluateCorpusAdmissionCandidate(client, {
+    sourceRef: "worker01-empty-txt",
+    filename: "empty.txt",
+    bytes: Buffer.from("   \n\n  ", "utf8"),
+    consent: RESOLVED_PROVENANCE("https://example.test/worker01-empty-txt"),
+    dryRun: true,
+  });
+  assert.equal(emptyDecision.decision, "REJECT");
+  assert.ok(emptyDecision.hardGateFailureCodes.includes("EXTRACTION_EMPTY_RESULT"), `expected EXTRACTION_EMPTY_RESULT, got ${emptyDecision.hardGateFailureCodes.join(",")}`);
+
+  const oversizedText = "x ".repeat(50_000);
+  const oversizedDecision = await evaluateCorpusAdmissionCandidate(client, {
+    sourceRef: "worker01-oversized-txt",
+    filename: "oversized.txt",
+    bytes: Buffer.from(oversizedText, "utf8"),
+    consent: RESOLVED_PROVENANCE("https://example.test/worker01-oversized-txt"),
+    limits: { ...DEFAULT_CORPUS_ADMISSION_LIMITS, maxExtractedChars: { value: 100, status: "ENGINEERING_DEFAULT", rationale: "test" } },
+    dryRun: true,
+  });
+  assert.equal(oversizedDecision.decision, "REJECT");
+  assert.ok(oversizedDecision.hardGateFailureCodes.includes("EXTRACTED_CONTENT_TOO_LARGE"), `expected EXTRACTED_CONTENT_TOO_LARGE, got ${oversizedDecision.hardGateFailureCodes.join(",")}`);
+});
+
+test("WORKER-01: PDF and DOCX candidates still route through the real isolated worker, unaffected by the txt bypass", async () => {
+  const pdfBytes = fs.readFileSync(path.join(repoRoot, "tests/fixtures/attention-is-all-you-need.pdf"));
+  const pdfPromise = evaluateCorpusAdmissionCandidate(client, {
+    sourceRef: "worker01-pdf-still-uses-worker",
+    filename: "real.pdf",
+    bytes: pdfBytes,
+    consent: RESOLVED_PROVENANCE("https://example.test/worker01-pdf"),
+    dryRun: true,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const observedDuringPdf = _getActiveExtractionWorkerCountForTesting();
+  const pdfDecision = await pdfPromise;
+  assert.equal(pdfDecision.detectedFormat, "pdf");
+  assert.ok(observedDuringPdf >= 1, `PDF must still acquire a real worker slot — observed ${observedDuringPdf}`);
 });

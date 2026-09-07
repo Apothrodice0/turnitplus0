@@ -17,10 +17,61 @@ import type { Client } from "@libsql/client";
  * decision/content-store tables, the accepted-representations dedup table
  * and its revocation follow-through, the report-integration and promotion
  * job tables, the admin audit log, and the partial-snapshot/global-
- * generation cache-invalidation columns) — as a deliberate,
- * reviewed decision, not an automatic side effect of adding those migration
- * files; see this file's own EXPECTED_MIGRATION_SHA256 for how future extensions
- * are meant to be reviewed the same way) to a
+ * generation cache-invalidation columns) — and, for the Device Passport
+ * schema foundation, extended once more through 0037-0040 (0037's
+ * admin-dashboard sweep-status singleton, which shipped as a file + a
+ * db/schema.ts declaration in a501f38 without being folded in here at the
+ * time, is included now so this allowlist stays contiguous; 0038's
+ * device_passports / device_passport_challenges tables; 0039's per-backing
+ * corpus_admission_decision_device_provenance table plus the two
+ * verified_device_passport_id columns; 0040's per-passport-generation
+ * snapshot staleness column) — and, for the direct-owner-link foundation,
+ * corpus-maturity gate, account-identity foundation, email-verification
+ * foundation, and developer corpus-maturity exemption that followed,
+ * extended once more through 0041-0047 (0041's device-passport actor-usage
+ * ledger table plus its device_passports.actor_usage_tracking_version
+ * column; 0042's four-table direct owner-link foundation plus its
+ * report_historical_match_snapshots.owner_link_generation column — schema
+ * only, unwired from scoring; 0043's two corpus-maturity range indexes,
+ * the first target migration with neither a new table nor a new column —
+ * tracked via the new EXPECTED_INDEXES_BY_MIGRATION / indexSetState()
+ * mechanism added specifically for this case, see those declarations'
+ * own comments; 0044's corpus-duplicate-suppression shadow-measurement
+ * table, whose AFTER DELETE cleanup trigger required both a trigger-aware
+ * splitStatements() and a narrowly-scoped destructive-statement exception —
+ * see APPROVED_DESTRUCTIVE_STATEMENTS' own comment; 0045's two-table
+ * account-identity foundation; 0046's email_verification_challenges table
+ * plus users.email_verified_at; and 0047's developer_corpus_maturity_exemptions
+ * table) — and, for the built-in-archive parity foundation and the 100k-scale
+ * scalable archive index that followed, extended once more through 0048-0049
+ * (0048's archive_document_representations display/lookup table; 0049's three
+ * ordinary tables — archive_document_fingerprints, archive_hash_df_bands,
+ * archive_phrase_fts_map — plus the archive_phrase_fts FTS5 virtual table,
+ * the first virtual table any target migration creates. A virtual table is
+ * listed in EXPECTED_TABLES_BY_MIGRATION alongside ordinary ones because it
+ * appears in sqlite_master with type='table' exactly like one; its shadow
+ * tables are implied by it. 0049 has no destructive statement — every
+ * CREATE ... IF NOT EXISTS — so no APPROVED_DESTRUCTIVE_STATEMENTS entry.)
+ * — and, for the archive co-source adjacency graph (slice 2D.4) that followed,
+ * extended once more through 0050 (0050's one ordinary table
+ * archive_document_cosources plus two indexes, two CHECK constraints, and one
+ * BEFORE INSERT ... RAISE(ABORT) guard trigger. Like 0044 the file contains a
+ * CREATE TRIGGER block splitStatements() already handles trigger-aware; UNLIKE
+ * 0044 that trigger body only RAISE(ABORT)s — it has no DELETE / DROP / ALTER —
+ * so scanForDestructiveStatements() flags nothing and no
+ * APPROVED_DESTRUCTIVE_STATEMENTS entry is required.)
+ * — and, for the fingerprint-version-safe bounded admission-family recovery
+ * (slice 2H) that followed, extended once more through 0051 (0051 is the
+ * SECOND index-only target migration after 0043: one additive
+ * CREATE INDEX IF NOT EXISTS idx_corpus_document_shingles_hash_version_id on
+ * the already-existing corpus_document_shingles table, no new table, no new
+ * column, no destructive statement — tracked via EXPECTED_INDEXES_BY_MIGRATION
+ * / indexSetState(), exactly like 0043.)
+ * — as a deliberate, reviewed decision, not an
+ * automatic side effect of adding those migration files; see this file's own
+ * EXPECTED_MIGRATION_SHA256 for how future extensions are meant to be
+ * reviewed the same way, and .gitattributes (drizzle/*.sql text eol=lf) for
+ * why those pinned hashes are stable on a Windows checkout) to a
  * database that is otherwise already at the pre-0012 baseline. Deliberately
  * separate from lib/ingest.ts's applyMigrationsLibsql(), which replays every
  * migration file in drizzleDir from 0000 onward with no applied-state
@@ -66,6 +117,21 @@ export const TARGET_MIGRATIONS = [
   "0034_corpus_admission_promotions.sql",
   "0035_report_historical_match_snapshots_partial.sql",
   "0036_corpus_match_generation.sql",
+  "0037_corpus_admission_sweep_runs.sql",
+  "0038_device_passports.sql",
+  "0039_device_passport_provenance.sql",
+  "0040_report_historical_match_snapshots_device_generation.sql",
+  "0041_device_passport_actor_usage.sql",
+  "0042_account_owner_links.sql",
+  "0043_corpus_maturity_indexes.sql",
+  "0044_corpus_duplicate_suppression_shadow_evaluations.sql",
+  "0045_account_identity.sql",
+  "0046_email_verification_challenges.sql",
+  "0047_developer_corpus_maturity_exemptions.sql",
+  "0048_archive_document_representations.sql",
+  "0049_archive_scalable_index.sql",
+  "0050_archive_cosource_adjacency.sql",
+  "0051_corpus_shingle_hash_version_cursor_index.sql",
 ] as const;
 
 export type TargetMigrationFile = (typeof TARGET_MIGRATIONS)[number];
@@ -143,6 +209,109 @@ export const EXPECTED_TABLES_BY_MIGRATION: Record<TargetMigrationFile, string[]>
   // report_historical_match_snapshots.corpus_generation also existing, so
   // checking the table alone correctly implies the column too.
   "0036_corpus_match_generation.sql": ["corpus_match_generation"],
+  "0037_corpus_admission_sweep_runs.sql": ["corpus_admission_sweep_runs"],
+  "0038_device_passports.sql": ["device_passports", "device_passport_challenges"],
+  // 0039 is a hybrid like 0036: it creates one genuinely new table
+  // (corpus_admission_decision_device_provenance) AND adds two columns
+  // (saved_reports.verified_device_passport_id,
+  // corpus_admission_report_jobs.verified_device_passport_id) in the same
+  // client.migrate() transaction — so table existence correctly implies the
+  // columns too, and runTargetMigrations() tracks applied-state by the table
+  // alone. The columns are ALSO declared in EXPECTED_COLUMNS_BY_MIGRATION
+  // below for documentation and test coverage, never as a second gate.
+  "0039_device_passport_provenance.sql": ["corpus_admission_decision_device_provenance"],
+  // 0040 creates no new table — one column on the already-existing
+  // report_historical_match_snapshots, tracked via EXPECTED_COLUMNS_BY_MIGRATION
+  // exactly like 0035.
+  "0040_report_historical_match_snapshots_device_generation.sql": [],
+  // 0041 is a hybrid like 0036/0039: it creates one genuinely new table
+  // (device_passport_actor_usage) AND adds one column
+  // (device_passports.actor_usage_tracking_version) in the same
+  // client.migrate() transaction — table existence correctly implies the
+  // column too, so runTargetMigrations() tracks applied-state by the table
+  // alone. The column is ALSO declared in EXPECTED_COLUMNS_BY_MIGRATION below
+  // for documentation and test coverage, never as a second gate.
+  "0041_device_passport_actor_usage.sql": ["device_passport_actor_usage"],
+  // 0042 is a hybrid like 0041: it creates four genuinely new tables
+  // (account_owner_links, account_owner_link_evidence,
+  // account_owner_link_events, account_owner_link_state) AND adds one column
+  // (report_historical_match_snapshots.owner_link_generation) in the same
+  // client.migrate() transaction — table existence correctly implies the
+  // column too. The column is ALSO declared in EXPECTED_COLUMNS_BY_MIGRATION
+  // below for documentation and test coverage, never as a second gate.
+  "0042_account_owner_links.sql": [
+    "account_owner_links",
+    "account_owner_link_evidence",
+    "account_owner_link_events",
+    "account_owner_link_state",
+  ],
+  // 0043 creates no new table and adds no new column — it only adds two
+  // range indexes on already-existing tables (corpus_submission_references,
+  // corpus_admission_decisions). Unlike every column-only migration above,
+  // there is nothing here for tableSetState() or columnSetState() to observe
+  // (columnSetState() would vacuously report "all" forever on an empty list,
+  // silently never applying this migration — see EXPECTED_INDEXES_BY_MIGRATION
+  // and indexSetState() below, added specifically for this case).
+  "0043_corpus_maturity_indexes.sql": [],
+  // 0044 creates one genuinely new table
+  // (corpus_duplicate_suppression_shadow_evaluations) plus one unique index
+  // and one AFTER DELETE cleanup trigger on it, all in the same
+  // client.migrate() transaction — table existence implies the index and
+  // trigger too. See splitStatements()'s own comment for why this file needs
+  // trigger-aware statement splitting, and APPROVED_DESTRUCTIVE_STATEMENTS'
+  // own comment for the narrow destructive-statement exception its trigger
+  // body requires.
+  "0044_corpus_duplicate_suppression_shadow_evaluations.sql": ["corpus_duplicate_suppression_shadow_evaluations"],
+  // 0045 creates two genuinely new tables (account_identity_profiles,
+  // account_identity_fingerprints) and alters no existing table at all —
+  // plain table-existence tracking, like every non-hybrid table-creating
+  // migration above.
+  "0045_account_identity.sql": ["account_identity_profiles", "account_identity_fingerprints"],
+  // 0046 is a hybrid like 0041/0042: it creates one genuinely new table
+  // (email_verification_challenges) AND adds one column
+  // (users.email_verified_at) in the same client.migrate() transaction —
+  // table existence correctly implies the column too. The column is ALSO
+  // declared in EXPECTED_COLUMNS_BY_MIGRATION below for documentation and
+  // test coverage, never as a second gate.
+  "0046_email_verification_challenges.sql": ["email_verification_challenges"],
+  // 0047 creates one genuinely new table
+  // (developer_corpus_maturity_exemptions) and alters no existing table —
+  // plain table-existence tracking.
+  "0047_developer_corpus_maturity_exemptions.sql": ["developer_corpus_maturity_exemptions"],
+  // 0048 creates one genuinely new table (archive_document_representations —
+  // built-in archive parity foundation) and alters no existing table.
+  "0048_archive_document_representations.sql": ["archive_document_representations"],
+  // 0049 (100k-scale slice 2B — scalable archive index) creates three ordinary
+  // tables plus one FTS5 virtual table, all in the same client.migrate()
+  // transaction, altering nothing. An FTS5 virtual table appears in
+  // sqlite_master with type='table' exactly like an ordinary table, so
+  // tableSetState()'s existing sqlite_master query detects it with no special
+  // casing — archive_phrase_fts is listed here alongside the ordinary tables
+  // (its own shadow tables archive_phrase_fts_{data,idx,docsize,config} are
+  // implied by it, same as an ordinary table's indexes are implied by the
+  // table). archive_phrase_fts_map is the rowid -> representation bridge the
+  // contentless FTS table needs; it plus archive_document_fingerprints and
+  // archive_hash_df_bands are the three Drizzle-modelled tables (see
+  // db/schema.ts). No column-only or index-only tracking applies.
+  "0049_archive_scalable_index.sql": [
+    "archive_document_fingerprints",
+    "archive_hash_df_bands",
+    "archive_phrase_fts_map",
+    "archive_phrase_fts",
+  ],
+  // 0050 (slice 2D.4 — archive co-source adjacency) creates one ordinary table
+  // plus two indexes and a BEFORE INSERT guard trigger, all in the same
+  // client.migrate() transaction, altering nothing. Plain table-existence
+  // tracking (the indexes and trigger are implied by the table, exactly like
+  // every other table-creating migration).
+  "0050_archive_cosource_adjacency.sql": ["archive_document_cosources"],
+  // 0051 (slice 2H — fingerprint-version-safe bounded admission-family recovery)
+  // creates no new table and adds no new column — like 0043 it only adds one
+  // additive index (idx_corpus_document_shingles_hash_version_id) on the
+  // already-existing corpus_document_shingles table, so its applied-state is
+  // tracked via EXPECTED_INDEXES_BY_MIGRATION / indexSetState() below, not
+  // tableSetState() (which would vacuously report "all" on this empty list).
+  "0051_corpus_shingle_hash_version_cursor_index.sql": [],
 };
 
 export const ALL_TARGET_TABLES: string[] = TARGET_MIGRATIONS.flatMap((m) => EXPECTED_TABLES_BY_MIGRATION[m]);
@@ -179,6 +348,64 @@ export const EXPECTED_COLUMNS_BY_MIGRATION: Partial<Record<TargetMigrationFile, 
   "0035_report_historical_match_snapshots_partial.sql": [
     { table: "report_historical_match_snapshots", column: "is_partial" },
   ],
+  // 0039's two additive columns — declared for documentation and test
+  // coverage. runTargetMigrations() gates 0039's applied-state on its new
+  // table (EXPECTED_TABLES_BY_MIGRATION), not on this list, since all three
+  // land in the same client.migrate() transaction — see that entry's comment.
+  "0039_device_passport_provenance.sql": [
+    { table: "saved_reports", column: "verified_device_passport_id" },
+    { table: "corpus_admission_report_jobs", column: "verified_device_passport_id" },
+  ],
+  "0040_report_historical_match_snapshots_device_generation.sql": [
+    { table: "report_historical_match_snapshots", column: "device_provenance_generation" },
+  ],
+  // 0041's additive column — declared for documentation and test coverage.
+  // runTargetMigrations() gates 0041's applied-state on its new table
+  // (EXPECTED_TABLES_BY_MIGRATION), not on this list, since both land in the
+  // same client.migrate() transaction — see that entry's comment.
+  "0041_device_passport_actor_usage.sql": [
+    { table: "device_passports", column: "actor_usage_tracking_version" },
+  ],
+  // 0042's additive column — declared for documentation and test coverage.
+  // runTargetMigrations() gates 0042's applied-state on its four new tables
+  // (EXPECTED_TABLES_BY_MIGRATION), not on this list, since all five land in
+  // the same client.migrate() transaction — see that entry's comment.
+  "0042_account_owner_links.sql": [
+    { table: "report_historical_match_snapshots", column: "owner_link_generation" },
+  ],
+  // 0046's additive column — declared for documentation and test coverage.
+  // runTargetMigrations() gates 0046's applied-state on its new table
+  // (EXPECTED_TABLES_BY_MIGRATION), not on this list, since both land in the
+  // same client.migrate() transaction — see that entry's comment.
+  "0046_email_verification_challenges.sql": [
+    { table: "users", column: "email_verified_at" },
+  ],
+};
+
+/**
+ * indexSetState()'s companion declaration — for a migration that adds
+ * indexes on already-existing tables and creates neither a new table nor a
+ * new column (0043 was the first such case; 0051 is the second — slice 2H's
+ * single additive index on corpus_document_shingles). Every migration not
+ * listed here either creates a new table (whose indexes are implied by table
+ * existence, per EXPECTED_TABLES_BY_MIGRATION's own comment) or adds a
+ * column, and is unaffected by this map's existence.
+ */
+export const EXPECTED_INDEXES_BY_MIGRATION: Partial<Record<TargetMigrationFile, string[]>> = {
+  "0043_corpus_maturity_indexes.sql": [
+    "idx_corpus_submission_references_created_at",
+    "idx_corpus_admission_decisions_created_at",
+  ],
+  // 0051 (slice 2H) — one additive composite index
+  // (shingle_hash, fingerprint_version, id) on corpus_document_shingles, so
+  // lib/user-submission-corpus.ts's findRepresentationOwnersForShingle
+  // rowid-cursor page seeks straight to the requested fingerprint generation
+  // and stale generations can never consume the bounded recovery cursor
+  // budget. No new table, no new column, no destructive statement —
+  // CREATE INDEX IF NOT EXISTS only, tracked purely by index existence.
+  "0051_corpus_shingle_hash_version_cursor_index.sql": [
+    "idx_corpus_document_shingles_hash_version_id",
+  ],
 };
 
 /**
@@ -203,15 +430,28 @@ export const EXPECTED_LEGACY_TABLES = [
  * before actually pointing this at production.
  */
 export const EXPECTED_MIGRATION_SHA256: Record<TargetMigrationFile, string> = {
-  "0012_document_identities.sql": "af7808eba21e5b025293d7d14af2693d2bf9e17e2a3d58dabae2e0c58ef88dd7",
-  "0013_document_families.sql": "018ca4baf77fc15d422b112d5171d6b4b89a4785b2aa94ca91948316f2ab40b4",
-  "0014_provenance.sql": "26b704780e8fe95d6d5780f3893bf0c091d1ed19ad2091a7ab65671bcaf1114c",
-  "0015_provenance_evidence.sql": "3cc4722197d9aade421c519da7ec7589ccc4e63f0bdf1831b1adc84f86c6b73e",
-  "0016_provenance_verification_decisions.sql": "402f7d1060170ea098ff82104fa2855c977dfd12ae5555ff11f470d4bd66d84e",
-  "0017_discovery_attempts.sql": "2ea220a9c603b5b623f3cba8e708c4e52d1807bacec386b9484d263e83a7f470",
-  "0018_source_retrievals.sql": "fb322f0a25fb692cfe512c333c85d0f238b11173033937941213cb578d077890",
-  "0019_user_submission_corpus.sql": "99bc22489bddc0b16fb359ce84e0d56c4c1ed768fd5f89dc9d946efbf5aa6c8e",
-  "0020_report_historical_match_snapshots.sql": "f915027d70eb1a8ffdd267abfa802eef8eddd8c2568eb1d97881df94df506d2e",
+  // ALL entries computed from the LF bytes git actually stores for these
+  // files (verified: sha256(git show HEAD:drizzle/<file>) == the value here
+  // for every committed migration; drizzle/*.sql content is byte-identical
+  // to HEAD — see git hash-object). .gitattributes pins `drizzle/*.sql text
+  // eol=lf` so a Windows checkout with core.autocrlf=true no longer produces
+  // CRLF working-tree copies whose fs.readFileSync bytes would mismatch.
+  //
+  // HISTORICAL CORRECTION (Device Passport schema-foundation pass): the
+  // 0012-0020 and 0029 entries below were previously pinned to CRLF-byte
+  // hashes — computed on a Windows checkout before .gitattributes existed —
+  // so this whole check (and every test depending on checkPreflight) failed
+  // on any LF-normalized checkout. Re-pinned to the LF hashes here. No
+  // migration SQL content changed; only these hash constants did.
+  "0012_document_identities.sql": "01fc8958a14690e6556ed649d1c49358af2b5510d680cd4f3fda8f5a20177275",
+  "0013_document_families.sql": "76c36cfdc02912d835c92a02a8bb6be77dc3ae2c15be1581efa65f9e4e1dd767",
+  "0014_provenance.sql": "73dfcfc59fb5d95970a45d9865d03fdfa78ef758870f2bfb71398fbc5367dc2c",
+  "0015_provenance_evidence.sql": "598763e97f0f7e59081705c893db5aa87d9847b330f8f6f14127c636330e6690",
+  "0016_provenance_verification_decisions.sql": "ad70c507528b2710ced2f19b1c6ede6f398b783fed40371662d3ebc7f871a270",
+  "0017_discovery_attempts.sql": "7c8f90737698467f20f3b80f1871cc0d32c9b451e65ec938201a9387b626e37d",
+  "0018_source_retrievals.sql": "fa32030af1ed654155a6ae712127e9b64715014652d732fd09e0ec0ad2315102",
+  "0019_user_submission_corpus.sql": "d174ae6b3d6dc364263786756f7e76ff033721410b13e34b210373ce06656b08",
+  "0020_report_historical_match_snapshots.sql": "e437f1abf942caeac51b1b231f78177aea18bf4c8cb6a2653750ccbf6faa584e",
   "0021_historical_match_shadow_evaluations.sql": "757a34bf6ca225a20ac0db9f5673d3f4e51556781b11d184e434bd55b4ab668f",
   "0022_reuse_context_declarations.sql": "80f2d9391a0bd9b89cde22218abcc1438f2c7810d09324bc6dc99e1bbdc03fde",
   "0023_privacy_consent_and_report_identity_link.sql": "ac9fbfb9bfe0e341a6bc9c07ca3fb2db7f38bf382c4e974be65e637466f6d970",
@@ -220,7 +460,7 @@ export const EXPECTED_MIGRATION_SHA256: Record<TargetMigrationFile, string> = {
   "0026_academic_search_run_diagnostics.sql": "f0ebebb4cd0a9b2e4f36560dc9990fb439a1bc4d8146842a932870934838269b",
   "0027_saved_reports_room_number.sql": "14caa98beb8b566372af7f6b21b24f9cb9d4a7c3db84396b4cd59b360947910d",
   "0028_saved_reports_ai_status.sql": "4b9f5c2bb57a156be7ff8273763b2d516fbde0d87b9e9298e12578fdc0a23d21",
-  "0029_corpus_admission_decisions.sql": "d0d57d89bc0e57673856146362cd98c01408cde10d0ef47d1bd0670661de9084",
+  "0029_corpus_admission_decisions.sql": "236d389a2086299b3e7bf87be1b5008fe22173181750ba61272ebc5c5227bcc8",
   "0030_corpus_admission_accepted_representations.sql": "837743eb56367b46f56fbc23f690e192ce134f3af123ad53f1bb6fa3ed6ad65f",
   "0031_corpus_admission_report_jobs.sql": "558cda4a1497544b5eb5fc44eb48ac649fd379155495710f583a9b5d6dae98a8",
   "0032_corpus_admission_accepted_representations_revocation.sql": "75d30525f8931a8154155aac85d745225f4ea326f7a4b878a65bf8f60f04f9c3",
@@ -228,21 +468,93 @@ export const EXPECTED_MIGRATION_SHA256: Record<TargetMigrationFile, string> = {
   "0034_corpus_admission_promotions.sql": "db367f756e6ed366d8794440107dda19fb1c8c10dd477888633b167efd580f5f",
   "0035_report_historical_match_snapshots_partial.sql": "242384eaafaec10cdd2a2735ad4e7863e850da7cbedec57670aec7c8ba33c8e8",
   "0036_corpus_match_generation.sql": "15bb6904337f2502640cc04d5ed88b9e0f3616042852779fd681439c83667b38",
+  // Device Passport schema foundation (0037-0040) — LF hashes, pinned fresh.
+  "0037_corpus_admission_sweep_runs.sql": "121e04e18e73b17f09f27c8c628dbc08d6d6246789a2ae389ad422342bb2829c",
+  "0038_device_passports.sql": "fdd4da86a41f65003f1ece2fb51098d2edec8ba51fa7c9e8b88d2d99c2f558f6",
+  "0039_device_passport_provenance.sql": "3805b0b844422ebfce331b8bd20e8fbd57f9a7f5c4c0c9a6da19909dc6e536f0",
+  "0040_report_historical_match_snapshots_device_generation.sql": "b5ef400aa4f09bda487cbc31de9be595715c700fbee3ec27d9c3074301a843cf",
+  // Direct owner-link foundation / corpus-maturity gate / account-identity
+  // foundation / email-verification foundation / developer corpus-maturity
+  // exemption (0041-0047) — LF hashes, pinned fresh, computed directly from
+  // the files currently in drizzle/ (see this file's own header comment).
+  "0041_device_passport_actor_usage.sql": "085c97eeb22ca0a10ab5aa2f1c6ad040c4824f91b9da3fa2280a7015f190d124",
+  "0042_account_owner_links.sql": "81289df3bdbe184b6109f85f00c1e8a6636f72abe88391e1e245ce4e434bde9d",
+  "0043_corpus_maturity_indexes.sql": "03d11620b5244802b832a08c683c4e8884e07f34089607f318a2d3fe182caf61",
+  "0044_corpus_duplicate_suppression_shadow_evaluations.sql": "6a62eaee1a845a74d5ba1b66784b00c79bd784ea5c5ea27061babf2fc75bc8a7",
+  "0045_account_identity.sql": "52ea1a2bd50ec37a82bd14a0e6f35739f4e51aaa97cff448fff07fd82c8485ee",
+  "0046_email_verification_challenges.sql": "4b37fe8d1029eeff3b7ea983b0cc200d54e9a98f3708e28ac1e4c7f14c269a42",
+  "0047_developer_corpus_maturity_exemptions.sql": "7da32d06a251058bd03bc83b46381b849ad92b5a104703ee3543cb049533b1e5",
+  // Built-in archive parity foundation (0048) and the 100k-scale scalable
+  // archive index (0049) — LF hashes, computed directly from the files
+  // currently in drizzle/ (see this file's own header comment on the review
+  // discipline). 0049 is the first target migration to create an FTS5 virtual
+  // table; its scanForDestructiveStatements() output is empty (all CREATE ...
+  // IF NOT EXISTS) so no APPROVED_DESTRUCTIVE_STATEMENTS entry is needed.
+  "0048_archive_document_representations.sql": "fcf1142f0ceaa4c2387200896eaabd7e46dccaf5612026de91d5f141f54e0851",
+  "0049_archive_scalable_index.sql": "3a5bd9cc3dde61f10af17633cb0a5d4131b6eb664a51a580fcf03f94c4960ca0",
+  // Archive co-source adjacency (slice 2D.4). LF hash, computed directly from
+  // drizzle/0050_archive_cosource_adjacency.sql (see this file's own header on
+  // the review discipline). 0050's guard trigger only RAISE(ABORT)s, so
+  // scanForDestructiveStatements() is empty and no APPROVED_DESTRUCTIVE_STATEMENTS
+  // entry is needed.
+  "0050_archive_cosource_adjacency.sql": "c4e687dcb612485bb1db4f55cdd8608d6c4703ef517c9ff2ceb05a6d48adf64b",
+  // Fingerprint-version-safe bounded admission-family recovery (slice 2H). LF
+  // hash, computed directly from drizzle/0051_corpus_shingle_hash_version_cursor_index.sql
+  // (verified: sha256(git show HEAD:drizzle/0051_...) == the value here; the file
+  // is byte-identical to HEAD). 0051 is a single CREATE INDEX IF NOT EXISTS —
+  // scanForDestructiveStatements() is empty, so no APPROVED_DESTRUCTIVE_STATEMENTS
+  // entry is needed; like 0043 it is tracked by EXPECTED_INDEXES_BY_MIGRATION.
+  "0051_corpus_shingle_hash_version_cursor_index.sql": "5acde90ef71c0d95561f6de236e1ff839e72039b90a34c28f351f649609cb042",
 };
 
 const DESTRUCTIVE_PATTERN = /\b(DROP\s+TABLE|DROP\s+INDEX|ALTER\s+TABLE\s+\S+\s+DROP|DELETE\s+FROM|TRUNCATE)\b/gi;
 
-/** Strips `--` line comments only — none of these 25 files use block comments — so a comment mentioning a keyword by name can't be mistaken for a real statement. */
+/** Strips `--` line comments only — none of these 36 files use block comments — so a comment mentioning a keyword by name can't be mistaken for a real statement. */
 export function stripSqlLineComments(sql: string): string {
   return sql.replace(/--.*$/gm, "");
 }
 
-/** Splits one migration file into individual statements for client.migrate()/client.batch(), which take an array of statements rather than one multi-statement string. Safe for these 25 files specifically (verified: no embedded semicolons in string literals, no drizzle-kit `--> statement-breakpoint` markers) — not a general-purpose SQL parser. */
+/**
+ * Splits one migration file into individual statements for
+ * client.migrate()/client.batch(), which take an array of statements rather
+ * than one multi-statement string. Safe for these 36 files specifically
+ * (verified: no embedded semicolons in string literals outside a trigger
+ * body, no drizzle-kit `--> statement-breakpoint` markers) — not a
+ * general-purpose SQL parser.
+ *
+ * Trigger-aware since the 0041-0047 extension: exactly one target migration
+ * (0044_corpus_duplicate_suppression_shadow_evaluations.sql) contains a
+ * `CREATE TRIGGER ... BEGIN ... END;` block, whose BEGIN/END body has its own
+ * internal statement-terminating semicolon(s). Naive `;`-splitting would
+ * shred that block into an invalid, incomplete fragment (missing its own
+ * END) plus a dangling `END` — exactly what this migration's own header
+ * comment warns about. The dedicated triggerPattern below matches the whole
+ * `CREATE TRIGGER ... END;` block (non-greedy, so it stops at the trigger's
+ * OWN terminating `END;`, not a later one) as ONE atomic statement, with only
+ * its own trailing statement-terminator `;` removed (the body's internal
+ * `;` is preserved, since it is part of the trigger's own valid syntax, not
+ * a statement separator this function should act on). Everything before and
+ * after each matched trigger block is still split normally on `;`. For every
+ * other file (no `CREATE TRIGGER` at all), the loop below never matches
+ * anything and this degrades to exactly the prior plain `;`-split behavior —
+ * verified unchanged by this file's own tests.
+ */
 export function splitStatements(sql: string): string[] {
-  return stripSqlLineComments(sql)
-    .split(";")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
+  const stripped = stripSqlLineComments(sql);
+  const statements: string[] = [];
+  const triggerPattern = /CREATE\s+TRIGGER\b[\s\S]*?\bEND\s*;/gi;
+  const plainSplit = (text: string) => text.split(";").map((s) => s.trim()).filter((s) => s.length > 0);
+
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = triggerPattern.exec(stripped)) !== null) {
+    statements.push(...plainSplit(stripped.slice(lastIndex, match.index)));
+    statements.push(match[0].replace(/;\s*$/, "").trim());
+    lastIndex = triggerPattern.lastIndex;
+  }
+  statements.push(...plainSplit(stripped.slice(lastIndex)));
+
+  return statements;
 }
 
 /**
@@ -298,6 +610,31 @@ export function scanForDestructiveStatements(sql: string): string[] {
 export const APPROVED_DESTRUCTIVE_STATEMENTS: Partial<Record<TargetMigrationFile, string[]>> = {
   "0032_corpus_admission_accepted_representations_revocation.sql": [
     "DROP INDEX IF EXISTS ux_corpus_admission_accepted_representations_canonical_sha256",
+  ],
+  // 0044_corpus_duplicate_suppression_shadow_evaluations.sql's DELETE FROM is
+  // reviewed-safe: it lives entirely inside an AFTER DELETE ... FOR EACH ROW
+  // BEGIN ... END trigger body, not a top-level statement this runner would
+  // ever execute directly against migration-time data. The trigger only ever
+  // FIRES later, at ordinary application runtime, when a real DELETE removes
+  // a row from `saved_reports` — and even then it deletes exactly the
+  // trigger-owning migration's OWN shadow-measurement rows for that
+  // (device_key, id) pair (corpus_duplicate_suppression_shadow_evaluations,
+  // matched on report_device_key/report_id), never saved_reports itself or
+  // any other table. This is the same atomic-cascade-cleanup shape
+  // report_historical_match_snapshots / historical_match_shadow_evaluations
+  // already rely on (see drizzle/0044's own header comment) — no table, row,
+  // or column this runner creates is ever destroyed by applying this file.
+  //
+  // The allowlisted text below is the FULL, exact, syntactically complete
+  // CREATE TRIGGER statement — including its own closing END — as produced
+  // by splitStatements()'s trigger-aware parsing (see that function's own
+  // comment on why naive `;`-splitting would otherwise shred this block into
+  // an invalid fragment). Matching is exact-string equality against that
+  // parsed output, not a keyword or prefix: a different trigger name, a
+  // different guarded table, or a missing/altered END is a DIFFERENT string
+  // and is still refused, exactly like 0032's own exception.
+  "0044_corpus_duplicate_suppression_shadow_evaluations.sql": [
+    "CREATE TRIGGER IF NOT EXISTS trg_corpus_duplicate_suppression_shadow_cleanup_on_report_delete AFTER DELETE ON saved_reports FOR EACH ROW BEGIN DELETE FROM corpus_duplicate_suppression_shadow_evaluations WHERE report_device_key = OLD.device_key AND report_id = OLD.id; END",
   ],
 };
 
@@ -415,6 +752,28 @@ export async function columnSetState(client: Client, columns: ExpectedColumn[]):
   return "partial";
 }
 
+/**
+ * tableSetState()/columnSetState()'s counterpart for a migration that adds
+ * indexes on already-existing tables and creates neither a new table nor a
+ * new column (0043 is the first such case — see EXPECTED_INDEXES_BY_MIGRATION's
+ * own comment) — same none/all/partial semantics, checked via a single
+ * sqlite_master query (mirroring tableSetState()'s style) rather than
+ * PRAGMA table_info() per table. An empty `indexes` list is vacuously "all",
+ * matching columnSetState()'s own defensive handling of the degenerate case —
+ * in practice runTargetMigrations() only ever calls this with a non-empty
+ * list, since an empty EXPECTED_INDEXES_BY_MIGRATION entry is simply absent
+ * from the map.
+ */
+export async function indexSetState(client: Client, indexes: string[]): Promise<TableSetState> {
+  if (indexes.length === 0) return "all";
+  const existing = await client.execute("SELECT name FROM sqlite_master WHERE type='index'");
+  const existingNames = new Set(existing.rows.map((r) => String(r.name)));
+  const present = indexes.filter((i) => existingNames.has(i));
+  if (present.length === 0) return "none";
+  if (present.length === indexes.length) return "all";
+  return "partial";
+}
+
 export type MigrationStepResult = {
   file: TargetMigrationFile;
   status: "applied" | "already-applied" | "would-apply";
@@ -462,17 +821,23 @@ export async function runTargetMigrations(
   for (const file of TARGET_MIGRATIONS) {
     const tables = EXPECTED_TABLES_BY_MIGRATION[file];
     const columns = EXPECTED_COLUMNS_BY_MIGRATION[file];
+    const indexes = EXPECTED_INDEXES_BY_MIGRATION[file];
     // A migration with new tables is checked by table existence; one with
-    // none (0023) is checked by column existence instead — see
-    // columnSetState()'s own comment.
+    // indexes only (0043) is checked by index existence instead — see
+    // indexSetState()'s own comment; anything else (0023) is checked by
+    // column existence — see columnSetState()'s own comment.
     const state = tables.length > 0
       ? await tableSetState(client, tables)
-      : await columnSetState(client, columns ?? []);
+      : (indexes && indexes.length > 0)
+        ? await indexSetState(client, indexes)
+        : await columnSetState(client, columns ?? []);
 
     if (state === "partial") {
       const what = tables.length > 0
         ? `some but not all of its tables exist (${tables.join(", ")})`
-        : `some but not all of its columns exist (${(columns ?? []).map((c) => `${c.table}.${c.column}`).join(", ")})`;
+        : (indexes && indexes.length > 0)
+          ? `some but not all of its indexes exist (${indexes.join(", ")})`
+          : `some but not all of its columns exist (${(columns ?? []).map((c) => `${c.table}.${c.column}`).join(", ")})`;
       return {
         status: "failed",
         steps,

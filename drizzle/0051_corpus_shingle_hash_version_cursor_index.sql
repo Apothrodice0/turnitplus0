@@ -1,0 +1,44 @@
+-- Slice 2H — fingerprint-version-safe bounded admission-family recovery.
+-- Purely additive: one composite index, no new column, no backfill, no data
+-- mutation, no table rebuild, no down migration. The pre-existing single-column
+-- idx_corpus_document_shingles_hash (drizzle/0019) is NOT dropped — primary
+-- discovery (findCandidateCorpusRepresentations' GROUP BY over
+-- shingle_hash IN (...)) still relies on it.
+--
+-- lib/user-submission-corpus.ts's findRepresentationOwnersForShingle walks ONE
+-- selected shingle's raw posting list, paged by a rowid cursor, for
+-- lib/corpus-admission-gate.ts's bounded maxDF-recovery pass (STEP D). Its
+-- query is:
+--
+--   SELECT id, representation_id
+--   FROM corpus_document_shingles
+--   WHERE shingle_hash = ?
+--     AND fingerprint_version = ?
+--     AND id > ?
+--   ORDER BY id
+--   LIMIT ?
+--
+-- corpus_document_shingles deliberately lets multiple fingerprint generations
+-- coexist for one hash (the ux_...(representation_id, fingerprint_version,
+-- shingle_hash) unique key is version-scoped on purpose — see drizzle/0019).
+-- Served only by idx_corpus_document_shingles_hash, that query is a
+-- (shingle_hash, rowid) range scan with fingerprint_version applied as a
+-- residual filter: if >= one bounded page of stale-generation rows for the
+-- hash sort ahead (lower rowid) of the current generation, the four-page
+-- recovery cursor budget is spent entirely on stale rows and the legitimate
+-- current-generation cohort is never reached (starvation). Adding
+-- fingerprint_version to the WHERE clause alone does not fix the cost: without
+-- this index SQLite still scans every stale predecessor to fill LIMIT, making
+-- the work O(posting document frequency).
+--
+-- This composite index makes (shingle_hash = ?, fingerprint_version = ?,
+-- id > ?) a single index range seek: SQLite seeks straight to the first
+-- current-generation entry at (hash, version, afterId) and walks at most LIMIT
+-- index rows, with no temp B-tree for the ORDER BY (the index is already in id
+-- order within the (hash, version) group). Rows examined == rows returned
+-- <= LIMIT for a hash of document frequency 500, 5,000 or 50,000 alike, and
+-- stale fingerprint generations can never consume the bounded recovery cursor
+-- budget. Column order is exactly (shingle_hash, fingerprint_version, id):
+-- both equality columns first, the cursor/ordering column last.
+CREATE INDEX IF NOT EXISTS idx_corpus_document_shingles_hash_version_id
+  ON corpus_document_shingles(shingle_hash, fingerprint_version, id);

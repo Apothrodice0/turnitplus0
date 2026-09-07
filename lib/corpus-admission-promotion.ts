@@ -66,13 +66,39 @@ export function isCorpusPromotionEnabled(): boolean {
   return process.env.CORPUS_PROMOTION_ENABLED === "true";
 }
 
-export type CorpusAdmissionPromotionStatus = "staged" | "indexed" | "failed" | "skipped";
+export type CorpusAdmissionPromotionStatus = "staged" | "indexed" | "failed" | "skipped" | "dead_lettered";
+
+/**
+ * B1C: the one place "how many completed processing attempts before we stop
+ * retrying" is defined — no CHECK constraint backs this (drizzle/0034 has
+ * none), so this is the sole source of truth for the cap, read by both the
+ * claim queries (excluding an at-or-past-cap 'failed' row from being
+ * claimed again) and recordPromotionProcessingFailure (deciding 'failed' vs
+ * 'dead_lettered' on each completed failure). attempt_count keeps its
+ * pre-existing meaning unchanged (see indexPromotionAtomically's own
+ * success-path increment): completed processing attempts, including the
+ * initial automatic one — never bumped merely by claiming, only by a
+ * terminal write, so a crash between claim and terminal write still costs
+ * no attempt (recovered by the existing stale-claim timeout, unchanged).
+ * 5 total attempts (the initial automatic one plus up to 4 daily-sweep
+ * retries, since the promotion sweep's own cron runs once a day —
+ * vercel.json) is a deliberately small, bounded number; no next_retry_at
+ * column or backoff timing was added because the daily cron cadence is
+ * already the backoff.
+ */
+export const MAX_PROMOTION_ATTEMPTS = 5;
 
 type PromotionRow = {
   id: string;
   decisionId: string;
   acceptedRepresentationId: string;
   status: CorpusAdmissionPromotionStatus;
+  /** Set only once status='indexed' — see the migration's own schema comment. Read here so processCorpusAdmissionPromotion's own terminal-idempotency guard can reconstruct an already-'indexed' outcome without a second query. */
+  representationId: string | null;
+  linkType: LinkType | null;
+  lastError: string | null;
+  /** B1C: read here so the dead_lettered branch of the terminal-idempotency guard can report it without a second query, matching the indexed/skipped branches' own existing shape. */
+  attemptCount: number;
 };
 
 type RawPromotionRow = {
@@ -80,14 +106,30 @@ type RawPromotionRow = {
   decision_id: string;
   accepted_representation_id: string;
   status: string;
+  representation_id: string | null;
+  link_type: string | null;
+  last_error: string | null;
+  attempt_count: number | bigint;
 };
 
 function toPromotionRow(row: RawPromotionRow): PromotionRow {
-  return { id: row.id, decisionId: row.decision_id, acceptedRepresentationId: row.accepted_representation_id, status: row.status as CorpusAdmissionPromotionStatus };
+  return {
+    id: row.id,
+    decisionId: row.decision_id,
+    acceptedRepresentationId: row.accepted_representation_id,
+    status: row.status as CorpusAdmissionPromotionStatus,
+    representationId: row.representation_id,
+    linkType: row.link_type as LinkType | null,
+    lastError: row.last_error,
+    attemptCount: Number(row.attempt_count),
+  };
 }
 
 async function fetchPromotionById(client: Client, promotionId: string): Promise<PromotionRow | null> {
-  const result = await client.execute({ sql: "SELECT id, decision_id, accepted_representation_id, status FROM corpus_admission_promotions WHERE id = ?", args: [promotionId] });
+  const result = await client.execute({
+    sql: "SELECT id, decision_id, accepted_representation_id, status, representation_id, link_type, last_error, attempt_count FROM corpus_admission_promotions WHERE id = ?",
+    args: [promotionId],
+  });
   const row = result.rows[0] as unknown as RawPromotionRow | undefined;
   return row ? toPromotionRow(row) : null;
 }
@@ -107,12 +149,12 @@ function isCanonicalHashUniqueViolation(err: unknown): boolean {
   );
 }
 
-async function executePromotionWriteWithRetry(openConnection: CorpusAdmissionConnectionFactory, stmt: InStatement): Promise<void> {
+/** Returns the executed statement's own ResultSet (needed by recordPromotionProcessingFailure's RETURNING read) — every existing caller that only needed the write to land simply discards it, unchanged. */
+async function executePromotionWriteWithRetry(openConnection: CorpusAdmissionConnectionFactory, stmt: InStatement): Promise<Awaited<ReturnType<Client["execute"]>>> {
   for (let attempt = 1; attempt <= MAX_PROMOTION_BUSY_RETRIES; attempt += 1) {
     const attemptClient = await openConnection();
     try {
-      await attemptClient.execute(stmt);
-      return;
+      return await attemptClient.execute(stmt);
     } catch (err) {
       if (isSqliteBusyError(err) && attempt < MAX_PROMOTION_BUSY_RETRIES) {
         await promotionBackoff(attempt);
@@ -123,6 +165,208 @@ async function executePromotionWriteWithRetry(openConnection: CorpusAdmissionCon
       attemptClient.close();
     }
   }
+  throw new Error("executePromotionWriteWithRetry: exhausted retries without resolving");
+}
+
+export type PromotionFailureOutcome = { status: "failed" | "dead_lettered"; attemptCount: number };
+
+/**
+ * B1C: the single place a completed processing failure is ever recorded —
+ * every failure branch in processCorpusAdmissionPromotion below calls this
+ * instead of writing its own UPDATE, so "attempt_count + 1 >= MAX ?
+ * dead_lettered : failed" can never drift out of sync between them. One
+ * atomic UPDATE ... RETURNING (same idiom lib/rate-limit.ts's checkBucket
+ * already uses for this exact reason: a CASE result written to its own
+ * column and then RETURNED always reflects exactly what was just written,
+ * with no ambiguity about which branch fired) does all of:
+ *   - increments attempt_count exactly once;
+ *   - decides 'failed' vs 'dead_lettered' from the RESULTING count (>= MAX_PROMOTION_ATTEMPTS),
+ *     not the count read before this call — a single expression, not a
+ *     read-then-write race;
+ *   - clears claimed_at (this attempt has concluded, whichever way);
+ *   - overwrites last_error with the actual final error (never a stale
+ *     earlier one — this IS the final error for a dead-lettering write, and
+ *     the most recent one for an ordinary 'failed' write, same as before);
+ *   - bumps updated_at.
+ * Never called for the initial claim, never for the 'skipped' outcome
+ * (permanent-inapplicability is not a processing failure and keeps its own
+ * unchanged inline UPDATE) — only for the three genuine-failure branches
+ * below.
+ */
+async function recordPromotionProcessingFailure(
+  openConnection: CorpusAdmissionConnectionFactory,
+  promotionId: string,
+  message: string,
+): Promise<PromotionFailureOutcome> {
+  const result = await executePromotionWriteWithRetry(openConnection, {
+    sql: `UPDATE corpus_admission_promotions
+          SET attempt_count = attempt_count + 1,
+              status = CASE WHEN attempt_count + 1 >= ? THEN 'dead_lettered' ELSE 'failed' END,
+              claimed_at = NULL, last_error = ?, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?
+          RETURNING status, attempt_count`,
+    args: [MAX_PROMOTION_ATTEMPTS, message, promotionId],
+  });
+  const row = result.rows[0] as unknown as { status: string; attempt_count: number | bigint };
+  return { status: row.status as "failed" | "dead_lettered", attemptCount: Number(row.attempt_count) };
+}
+
+/**
+ * The exact staging INSERT — the one place "what does a freshly-staged
+ * corpus_admission_promotions row look like" is defined. Shared by
+ * stageCorpusAdmissionPromotionForDecision (below) and
+ * runCorpusAdmissionPromotionSweep's own batch discovery step, so the
+ * immediate post-ACCEPT path and the sweep's own recovery path can never
+ * define "staged" differently. ux_corpus_admission_promotions_decision_id
+ * (drizzle/0034) is a real unique index, not merely the NOT EXISTS the
+ * sweep's own discovery SELECT also happens to use — OR IGNORE here relies
+ * on that index directly, so two concurrent staging attempts for the same
+ * decision (this function called twice at once, a caller racing the
+ * sweep's own discovery, or two sweep ticks racing each other) converge on
+ * exactly one row.
+ */
+function buildStagePromotionInsertStatement(decisionId: string, acceptedRepresentationId: string): InStatement {
+  return {
+    sql: `INSERT OR IGNORE INTO corpus_admission_promotions (id, decision_id, accepted_representation_id, status, attempt_count, created_at, updated_at)
+          VALUES (?,?,?,'staged',0,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
+    args: [randomUUID(), decisionId, acceptedRepresentationId],
+  };
+}
+
+/**
+ * Idempotently ensures exactly one corpus_admission_promotions row exists
+ * for this ACCEPT decision, staging it if none exists yet — the
+ * single-decision analogue of runCorpusAdmissionPromotionSweep's own batch
+ * discovery, sharing the exact same INSERT (buildStagePromotionInsertStatement)
+ * so the two can never drift into staging different shapes.
+ *
+ * The fix for "ACCEPT relies exclusively on the scheduled sweep": called
+ * synchronously, immediately after an ACCEPT decision's accepted
+ * representation/content has committed
+ * (lib/corpus-admission-report-integration.ts's processReportAdmissionJob),
+ * so a decision no longer has to wait for the next scheduled sweep tick to
+ * even be discovered. The sweep's own discovery step is intentionally left
+ * as-is (still one batched multi-row INSERT inside its own transaction,
+ * sharing only the statement shape, not this function's own extra
+ * roundtrips) — it remains the recovery/retry path for anything this
+ * synchronous call missed or failed to stage (a transient error here, a
+ * request that crashed before reaching this point, CORPUS_PROMOTION_ENABLED
+ * having been off at ACCEPT time and flipped on later).
+ *
+ * Returns the existing OR newly-created promotion id — a caller never needs
+ * to distinguish "was already staged" from "just staged it," matching
+ * createPendingReportAdmissionJob's own "ensure the row exists" idiom.
+ * Returns null (never throws for this reason) when decisionId does not
+ * currently resolve to an eligible ACCEPT with a committed accepted
+ * representation — defensive: a caller that just confirmed ACCEPT status
+ * itself should never actually observe this, but this function does not
+ * assume that and re-derives eligibility from the database itself rather
+ * than trusting a caller-supplied flag.
+ */
+export async function stageCorpusAdmissionPromotionForDecision(client: Client, decisionId: string): Promise<string | null> {
+  const existing = await client.execute({ sql: "SELECT id FROM corpus_admission_promotions WHERE decision_id = ?", args: [decisionId] });
+  const existingRow = existing.rows[0] as unknown as { id: string } | undefined;
+  if (existingRow) return existingRow.id;
+
+  const acceptedRepResult = await client.execute({
+    sql: `SELECT ar.id AS accepted_representation_id
+          FROM corpus_admission_decisions d
+          JOIN corpus_admission_accepted_representations ar ON ar.decision_id = d.id
+          WHERE d.decision = 'ACCEPT' AND d.id = ?`,
+    args: [decisionId],
+  });
+  const acceptedRep = acceptedRepResult.rows[0] as unknown as { accepted_representation_id: string } | undefined;
+  if (!acceptedRep) return null;
+
+  await client.execute(buildStagePromotionInsertStatement(decisionId, acceptedRep.accepted_representation_id));
+
+  // Re-read rather than trust the id just generated: OR IGNORE means a
+  // concurrent staging attempt for the same decision may have won the
+  // unique-index race instead — this returns whichever row actually exists
+  // now, exactly like createPendingReportAdmissionJob's own re-fetch after
+  // its own ON CONFLICT DO NOTHING insert.
+  const finalRow = await client.execute({ sql: "SELECT id FROM corpus_admission_promotions WHERE decision_id = ?", args: [decisionId] });
+  const row = finalRow.rows[0] as unknown as { id: string } | undefined;
+  return row ? row.id : null;
+}
+
+export type StageAndClaimPromotionResult =
+  | { staged: false; claimed: false; promotionId: null }
+  | { staged: true; promotionId: string; claimed: boolean };
+
+const DEFAULT_STALE_CLAIM_MS = 5 * 60 * 1000;
+
+/**
+ * The claim-safety fix: single-owner claim semantics for the immediate,
+ * automatic-promotion path — the exact same predicate
+ * runCorpusAdmissionPromotionSweep's own claim step already uses (status =
+ * 'staged', or 'failed' with attempt_count still under MAX_PROMOTION_ATTEMPTS
+ * (B1C — an at-or-past-cap 'failed' row is not claimable here either; the
+ * sweep's own normalization step is what moves it to 'dead_lettered'), AND
+ * (claimed_at IS NULL OR claimed_at < stale threshold)), applied to one
+ * specific row instead of a batch.
+ *
+ * Stages first (via stageCorpusAdmissionPromotionForDecision — idempotent,
+ * unchanged), then attempts to claim that SAME row with a single
+ * conditional UPDATE. A single UPDATE statement is its own atomic unit in
+ * SQLite (no explicit transaction needed for this one check-and-set): if a
+ * concurrent claimant (a racing sweep tick, or another immediate-promotion
+ * call for the same decision) already claimed it first, this UPDATE's own
+ * WHERE clause no longer matches (claimed_at is now fresh, non-stale) and
+ * affects zero rows — `claimed` comes back false, telling the caller not to
+ * process. Whichever caller's UPDATE actually lands first wins; the loser
+ * never processes, so the same promotion can never be indexed twice
+ * concurrently by two different callers.
+ *
+ * A promotion already 'indexed', 'skipped', or 'dead_lettered' can never be
+ * claimed here — `claimed` comes back false for those too, which is exactly
+ * "already terminal, do not process again," the other half of this fix (see
+ * processCorpusAdmissionPromotion's own defensive terminal-idempotency guard
+ * for the second layer of this same guarantee).
+ *
+ * Takes openConnection, not a plain client, and retries with a genuinely
+ * fresh connection on SQLITE_BUSY (the same MAX_PROMOTION_BUSY_RETRIES/
+ * promotionBackoff every other write in this module already uses) —
+ * confirmed necessary by this fix's own regression test, not merely
+ * consistent-for-its-own-sake: this function is EXPECTED to genuinely race
+ * the sweep's own claim transaction under real concurrent load (that IS the
+ * scenario this fix exists for), and retrying on the SAME connection does
+ * not reliably recover from SQLITE_BUSY once a transaction elsewhere is
+ * actually holding the write lock — this codebase's own established,
+ * empirically-confirmed finding (see e.g. acceptWithAtomicDedupCriticalSection's
+ * own header comment in lib/corpus-admission-gate.ts).
+ */
+export async function stageAndClaimCorpusAdmissionPromotionForDecision(
+  openConnection: CorpusAdmissionConnectionFactory,
+  decisionId: string,
+  staleClaimMs: number = DEFAULT_STALE_CLAIM_MS,
+): Promise<StageAndClaimPromotionResult> {
+  const staleClaimSeconds = Math.max(1, Math.floor(staleClaimMs / 1000));
+  for (let attempt = 1; attempt <= MAX_PROMOTION_BUSY_RETRIES; attempt += 1) {
+    const attemptClient = await openConnection();
+    try {
+      const promotionId = await stageCorpusAdmissionPromotionForDecision(attemptClient, decisionId);
+      if (!promotionId) return { staged: false, claimed: false, promotionId: null };
+
+      const claimResult = await attemptClient.execute({
+        sql: `UPDATE corpus_admission_promotions
+              SET claimed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+              WHERE id = ? AND (status = 'staged' OR (status = 'failed' AND attempt_count < ?))
+                AND (claimed_at IS NULL OR claimed_at < datetime('now', ?))`,
+        args: [promotionId, MAX_PROMOTION_ATTEMPTS, `-${staleClaimSeconds} seconds`],
+      });
+      return { staged: true, promotionId, claimed: Number(claimResult.rowsAffected) > 0 };
+    } catch (err) {
+      if (isSqliteBusyError(err) && attempt < MAX_PROMOTION_BUSY_RETRIES) {
+        await promotionBackoff(attempt);
+        continue;
+      }
+      throw err;
+    } finally {
+      attemptClient.close();
+    }
+  }
+  throw new Error("stageAndClaimCorpusAdmissionPromotionForDecision: exhausted retries without resolving");
 }
 
 type IndexedResult = { representationId: string; linkType: LinkType; fingerprintVersion: string };
@@ -249,7 +493,8 @@ async function indexPromotionAtomically(
 export type CorpusAdmissionPromotionOutcome =
   | { outcome: "indexed"; promotionId: string; decisionId: string; representationId: string; linkType: LinkType }
   | { outcome: "skipped"; promotionId: string; decisionId: string; reason: string }
-  | { outcome: "failed"; promotionId: string; decisionId: string; error: string };
+  | { outcome: "failed"; promotionId: string; decisionId: string; error: string; attemptCount: number }
+  | { outcome: "dead_lettered"; promotionId: string; decisionId: string; error: string; attemptCount: number };
 
 export type ProcessCorpusAdmissionPromotionParams = {
   promotionId: string;
@@ -260,11 +505,16 @@ export type ProcessCorpusAdmissionPromotionParams = {
 
 /**
  * Processes ONE already-claimed promotion row. Every terminal write
- * (indexed/skipped/failed) goes through executePromotionWriteWithRetry, its
- * own fresh-connection SQLITE_BUSY retry — mirrors
- * lib/corpus-admission-report-integration.ts's processReportAdmissionJob
- * exactly, including "one status write per real attempt, whichever outcome
- * it was."
+ * (indexed/skipped/failed/dead_lettered) goes through
+ * executePromotionWriteWithRetry (the last two exclusively via
+ * recordPromotionProcessingFailure), its own fresh-connection SQLITE_BUSY
+ * retry — mirrors lib/corpus-admission-report-integration.ts's
+ * processReportAdmissionJob exactly, including "one status write per real
+ * attempt, whichever outcome it was." 'dead_lettered' is not a distinct
+ * outcome path of its own here; it is simply what recordPromotionProcessingFailure
+ * writes instead of 'failed' once the resulting attempt_count reaches
+ * MAX_PROMOTION_ATTEMPTS (B1C) — every genuine-failure branch below is
+ * eligible to produce it.
  */
 export async function processCorpusAdmissionPromotion(client: Client, params: ProcessCorpusAdmissionPromotionParams): Promise<CorpusAdmissionPromotionOutcome> {
   const promotion = await fetchPromotionById(client, params.promotionId);
@@ -272,31 +522,55 @@ export async function processCorpusAdmissionPromotion(client: Client, params: Pr
     throw new Error(`processCorpusAdmissionPromotion: no corpus_admission_promotions row for id ${params.promotionId}`);
   }
 
+  // Defensive terminal-idempotency (claim-safety fix): the PRIMARY defense
+  // against double-processing is the claim itself
+  // (stageAndClaimCorpusAdmissionPromotionForDecision / the sweep's own
+  // claim query) — a caller that does not own the claim should never reach
+  // this function with an id that is already terminal. This is a SECOND,
+  // independent layer that makes the function itself safe even when called
+  // directly (every existing sweep/test call site still does, unclaimed),
+  // so that re-processing an already-'indexed', already-'skipped', or
+  // already-'dead_lettered' row — however it happened — can never re-run
+  // indexPromotionAtomically or recordPromotionProcessingFailure, which
+  // would otherwise double-increment attempt_count, double-bump
+  // corpus_match_generation, or overwrite a dead-lettered row's final
+  // last_error for what is logically a single completed attempt (B1C:
+  // "direct processing of dead-lettered is idempotent" — no indexing, no
+  // attempt/generation change, no last_error change). 'staged' and 'failed'
+  // (below MAX_PROMOTION_ATTEMPTS) are the only retryable statuses and fall
+  // through to the normal processing below, unchanged.
+  if (promotion.status === "indexed" && promotion.representationId && promotion.linkType) {
+    return { outcome: "indexed", promotionId: promotion.id, decisionId: promotion.decisionId, representationId: promotion.representationId, linkType: promotion.linkType };
+  }
+  if (promotion.status === "skipped") {
+    return { outcome: "skipped", promotionId: promotion.id, decisionId: promotion.decisionId, reason: promotion.lastError ?? "previously skipped (no error message recorded)" };
+  }
+  if (promotion.status === "dead_lettered") {
+    return { outcome: "dead_lettered", promotionId: promotion.id, decisionId: promotion.decisionId, error: promotion.lastError ?? "previously dead-lettered (no error message recorded)", attemptCount: promotion.attemptCount };
+  }
+
   const decisionResult = await client.execute({ sql: "SELECT decision FROM corpus_admission_decisions WHERE id = ?", args: [promotion.decisionId] });
   const decisionRow = decisionResult.rows[0] as unknown as { decision: string } | undefined;
   if (!decisionRow || decisionRow.decision !== "ACCEPT") {
     // Invariant violation, not an expected outcome (the sweep only ever
     // creates a promotions row for a decision it just confirmed is ACCEPT)
-    // — recorded as 'failed' rather than thrown uncaught, so it surfaces
-    // visibly in the admin dashboard's last-error column for investigation
-    // instead of crashing the whole sweep batch over one bad row.
+    // — recorded as 'failed' (or 'dead_lettered' at the cap) rather than
+    // thrown uncaught, so it surfaces visibly in the admin dashboard's
+    // last-error column for investigation instead of crashing the whole
+    // sweep batch over one bad row. B1C: routed through
+    // recordPromotionProcessingFailure, the single place that decides
+    // 'failed' vs 'dead_lettered' — see that function's own comment.
     const message = `decision ${promotion.decisionId} is not an ACCEPT (found: ${decisionRow?.decision ?? "missing"}) — a corpus_admission_promotions row should never exist for a non-ACCEPT decision`;
-    await executePromotionWriteWithRetry(params.openConnection, {
-      sql: "UPDATE corpus_admission_promotions SET status = 'failed', claimed_at = NULL, last_error = ?, attempt_count = attempt_count + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-      args: [message, promotion.id],
-    });
-    return { outcome: "failed", promotionId: promotion.id, decisionId: promotion.decisionId, error: message };
+    const failure = await recordPromotionProcessingFailure(params.openConnection, promotion.id, message);
+    return { outcome: failure.status, promotionId: promotion.id, decisionId: promotion.decisionId, error: message, attemptCount: failure.attemptCount };
   }
 
   const acceptedRepResult = await client.execute({ sql: "SELECT canonical_sha256 FROM corpus_admission_accepted_representations WHERE id = ?", args: [promotion.acceptedRepresentationId] });
   const acceptedRep = acceptedRepResult.rows[0] as unknown as { canonical_sha256: string } | undefined;
   if (!acceptedRep) {
     const message = `no corpus_admission_accepted_representations row for id ${promotion.acceptedRepresentationId} (decision ${promotion.decisionId})`;
-    await executePromotionWriteWithRetry(params.openConnection, {
-      sql: "UPDATE corpus_admission_promotions SET status = 'failed', claimed_at = NULL, last_error = ?, attempt_count = attempt_count + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-      args: [message, promotion.id],
-    });
-    return { outcome: "failed", promotionId: promotion.id, decisionId: promotion.decisionId, error: message };
+    const failure = await recordPromotionProcessingFailure(params.openConnection, promotion.id, message);
+    return { outcome: failure.status, promotionId: promotion.id, decisionId: promotion.decisionId, error: message, attemptCount: failure.attemptCount };
   }
 
   const contentResult = await client.execute({ sql: "SELECT canonical_text FROM corpus_admission_content_store WHERE decision_id = ?", args: [promotion.decisionId] });
@@ -330,11 +604,8 @@ export async function processCorpusAdmissionPromotion(client: Client, params: Pr
     return { outcome: "indexed", promotionId: promotion.id, decisionId: promotion.decisionId, representationId, linkType };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    await executePromotionWriteWithRetry(params.openConnection, {
-      sql: "UPDATE corpus_admission_promotions SET status = 'failed', claimed_at = NULL, last_error = ?, attempt_count = attempt_count + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-      args: [message, promotion.id],
-    });
-    return { outcome: "failed", promotionId: promotion.id, decisionId: promotion.decisionId, error: message };
+    const failure = await recordPromotionProcessingFailure(params.openConnection, promotion.id, message);
+    return { outcome: failure.status, promotionId: promotion.id, decisionId: promotion.decisionId, error: message, attemptCount: failure.attemptCount };
   }
 }
 
@@ -351,15 +622,35 @@ export type RunCorpusAdmissionPromotionSweepResult = {
 };
 
 /**
- * One sweep tick, two things inside a single atomic write transaction:
+ * One sweep tick, three things inside a single atomic write transaction:
  *   1. Discover — INSERT OR IGNORE a 'staged' promotions row for every
  *      ACCEPT decision that doesn't have one yet (bounded by batchSize).
  *      This is the only place a promotions row is ever created; there is no
  *      synchronous hook elsewhere (see this module's own header comment).
- *   2. Claim — same atomic-claim shape as runReportAdmissionRetrySweep:
- *      status IN ('staged','failed'), unclaimed or stale-claimed, claimed_at
- *      stamped inside the same transaction so no concurrent sweep can select
- *      the same rows before this one commits.
+ *   2. Normalize (B1C) — every 'failed' row already AT OR PAST
+ *      MAX_PROMOTION_ATTEMPTS, that is not currently held by a fresh claim
+ *      (same claimed_at IS NULL OR claimed_at < stale-threshold test the
+ *      claim step below uses — a row actively being worked by another
+ *      process right now must never be stolen out from under it merely
+ *      because its count already sits at the cap), transitions straight to
+ *      'dead_lettered' — WITHOUT re-running indexPromotionAtomically,
+ *      WITHOUT incrementing attempt_count again, and WITHOUT touching
+ *      last_error (the existing final error is preserved as-is). This is
+ *      the safety net for a legacy row that reached 'failed' at
+ *      attempt_count >= MAX_PROMOTION_ATTEMPTS before this cap existed (or,
+ *      in principle, any row that otherwise ended up in that shape) — it
+ *      can never be silently stranded retryable-forever, but it also never
+ *      gets a phantom extra processing attempt just for being normalized.
+ *      Runs BEFORE the claim step so a just-normalized row can never also
+ *      be claimed in the same tick.
+ *   3. Claim — same atomic-claim shape as runReportAdmissionRetrySweep:
+ *      status = 'staged', or 'failed' with attempt_count still under
+ *      MAX_PROMOTION_ATTEMPTS (step 2 above already moved every over-cap,
+ *      non-fresh-claimed row out of 'failed', but this condition is kept
+ *      here too as its own independent guarantee — see B1C's own "Claim
+ *      rules" requirement), unclaimed or stale-claimed, claimed_at stamped
+ *      inside the same transaction so no concurrent sweep can select the
+ *      same rows before this one commits.
  * Claimed rows are then processed one at a time via
  * processCorpusAdmissionPromotion on the plain `client` passed in, exactly
  * like the report-admission sweep's own reasoning for keeping claim and
@@ -387,19 +678,34 @@ export async function runCorpusAdmissionPromotionSweep(client: Client, params: R
         });
         const newRows = discovered.rows as unknown as { decision_id: string; accepted_representation_id: string }[];
         if (newRows.length > 0) {
-          const statements = newRows.map((row) => ({
-            sql: `INSERT OR IGNORE INTO corpus_admission_promotions (id, decision_id, accepted_representation_id, status, attempt_count, created_at, updated_at)
-                  VALUES (?,?,?,'staged',0,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
-            args: [randomUUID(), row.decision_id, row.accepted_representation_id],
-          }));
+          // Same staging INSERT stageCorpusAdmissionPromotionForDecision's
+          // own single-row path uses (buildStagePromotionInsertStatement) —
+          // reused here as a batch via tx.batch, not a loop, so this step's
+          // existing roundtrip/performance characteristics are unchanged.
+          const statements = newRows.map((row) => buildStagePromotionInsertStatement(row.decision_id, row.accepted_representation_id));
           await tx.batch(statements);
         }
 
+        // Step 2 (B1C): normalize legacy/stranded over-cap 'failed' rows to
+        // 'dead_lettered' — see this function's own header comment. Only
+        // unclaimed-or-stale rows qualify, the identical predicate the
+        // claim step below uses, so a freshly claimed in-flight row (however
+        // it got to attempt_count >= MAX_PROMOTION_ATTEMPTS) is never
+        // touched here.
+        await tx.execute({
+          sql: `UPDATE corpus_admission_promotions
+                SET status = 'dead_lettered', claimed_at = NULL, updated_at = CURRENT_TIMESTAMP
+                WHERE status = 'failed' AND attempt_count >= ?
+                  AND (claimed_at IS NULL OR claimed_at < datetime('now', ?))`,
+          args: [MAX_PROMOTION_ATTEMPTS, `-${staleClaimSeconds} seconds`],
+        });
+
         const candidates = await tx.execute({
           sql: `SELECT id FROM corpus_admission_promotions
-                WHERE status IN ('staged','failed') AND (claimed_at IS NULL OR claimed_at < datetime('now', ?))
+                WHERE (status = 'staged' OR (status = 'failed' AND attempt_count < ?))
+                  AND (claimed_at IS NULL OR claimed_at < datetime('now', ?))
                 ORDER BY updated_at ASC LIMIT ?`,
-          args: [`-${staleClaimSeconds} seconds`, batchSize],
+          args: [MAX_PROMOTION_ATTEMPTS, `-${staleClaimSeconds} seconds`, batchSize],
         });
         const ids = (candidates.rows as unknown as { id: string }[]).map((r) => r.id);
         if (ids.length > 0) {

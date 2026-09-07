@@ -7,6 +7,7 @@ import { applyMigrationsLibsql } from "../lib/ingest.js";
 import { createDocumentIdentity } from "../lib/document-identity.ts";
 import { indexDocumentSubmissionIntoCorpus } from "../lib/user-submission-corpus.ts";
 import { matchAgainstUserSubmissionCorpus } from "../lib/user-submission-matching.ts";
+import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
 
 const repoRoot = path.resolve(".");
 const drizzleDir = path.join(repoRoot, "drizzle");
@@ -42,6 +43,9 @@ async function indexSubmission(accountId, title, rawText, email) {
   return indexDocumentSubmissionIntoCorpus(client, { documentIdentityId: identity.id, rawText });
 }
 async function match(accountId, canonicalText) {
+  // Phase A safe-by-default maturity: age just-seeded backings past the 7-day
+  // window — this suite checks privacy of match results, not the activation clock.
+  await matureCorpusBackings(client);
   return matchAgainstUserSubmissionCorpus(client, { accountId, canonicalText });
 }
 
@@ -155,6 +159,27 @@ test("A/D: Account A cannot discover Account B's identity through a matching res
   assert.ok(!serialized.includes("alice-e8b@example.test"));
   assert.ok(!serialized.toLowerCase().includes("email"));
   assert.ok(!serialized.toLowerCase().includes("account"));
+});
+
+test("SELF-MATCH-FIX PRIVACY: excludeAccountId (a server-internal value carrying a real account id) never appears anywhere in matchAgainstUserSubmissionCorpus's own result, matched or not", async () => {
+  const accountA = "privacy-exclude-account-a";
+  const accountB = "privacy-exclude-account-b";
+  const text = topicADoc("privacy-exclude-marker");
+  await indexSubmission(accountA, "Doc", text, "exclude-a@example.test");
+
+  // A secret-shaped exclusion value — the exact accountId string a real
+  // caller (resolvePrimarySimilaritySummary) would pass — with a
+  // deliberately identifiable secret so a leak would be unmistakable.
+  const secretAccountId = "super-secret-account-id-should-never-leak";
+  const excludeAccountId = secretAccountId;
+
+  await matureCorpusBackings(client);
+  const result = await matchAgainstUserSubmissionCorpus(client, { accountId: accountB, canonicalText: text, excludeAccountId });
+  assert.equal(result.status, "MATCHED", "test setup sanity: excluding an UNRELATED account id must not suppress a genuine match");
+
+  const serialized = JSON.stringify(result);
+  assert.ok(!serialized.includes(secretAccountId), "the exclusion context's own account id must never appear in the result");
+  assert.ok(!serialized.includes("report-upload:"), "no source_ref-shaped string of any kind may appear in the result");
 });
 
 test("B: SELF detection works for repeated Account A uploads (privacy-framing check: SELF never exposes anything beyond the relationship itself)", async () => {

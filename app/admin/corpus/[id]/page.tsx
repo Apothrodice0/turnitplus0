@@ -1,5 +1,7 @@
 import { notFound } from "next/navigation";
 import type { Metadata } from "next";
+import Link from "next/link";
+import { ArrowLeft } from "lucide-react";
 import { loadAdminGate } from "@/lib/admin-gate";
 import { AdminCorpusDetail } from "@/components/admin/corpus-detail";
 
@@ -35,6 +37,10 @@ export default async function AdminCorpusDetailPage({ params }: { params: Promis
 
   return (
     <main className="developer-page">
+      <Link href="/admin/corpus" className="admin-back-link">
+        <ArrowLeft size={15} />
+        Back to Corpus
+      </Link>
       <AdminCorpusDetail rowId={rowId} />
     </main>
   );

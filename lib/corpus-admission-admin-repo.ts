@@ -1,4 +1,5 @@
 import type { Client } from "@libsql/client";
+import { getSweepRunRecords, type SweepKind, type SweepRunStatus } from "./corpus-admission-sweep-state";
 
 /**
  * Data-access layer for the admin-only corpus-admission dashboard
@@ -37,12 +38,20 @@ export type CorpusAdmissionAdminListRow = {
   extractedWordCount: number | null;
   qualityScore: number | null;
   accountId: string | null;
+  /** Resolved via the same users.email-by-account_id lookup getCorpusAdmissionDecisionDetail uses — batched into the list query itself (a LEFT JOIN, not a per-row lookup) rather than a second identity-resolution mechanism. null when there is no account_id, or no matching users row. */
+  accountEmail: string | null;
   attemptCount: number | null;
   lastError: string | null;
   createdAt: string;
   updatedAt: string;
   /** null when this decision was never ACCEPTed (or has no job/decision at all) — promotion never applies. See lib/corpus-admission-promotion.ts. */
-  promotionStatus: "staged" | "indexed" | "failed" | "skipped" | null;
+  promotionStatus: "staged" | "indexed" | "failed" | "skipped" | "dead_lettered" | null;
+  /** B1C: null under the same conditions as promotionStatus — the current completed-attempt count, distinguishing a retryable 'failed' row from one that has reached MAX_PROMOTION_ATTEMPTS. */
+  promotionAttemptCount: number | null;
+  /** null when this decision has no accepted fingerprint at all (never ACCEPTed, or ACCEPTed with no corpus_admission_accepted_representations row). Drives the admin dashboard's Remove/Removed affordance — see lib/corpus-admission-admin-actions.ts's deactivateAcceptedRepresentation. */
+  acceptedRepresentationId: string | null;
+  /** true = participates in "first accepted sample wins" matching; false = deactivated (revoked_at set); null when acceptedRepresentationId is null. */
+  acceptedRepresentationActive: boolean | null;
 };
 
 type RawCombinedRow = {
@@ -54,11 +63,15 @@ type RawCombinedRow = {
   extracted_word_count: number | null;
   quality_score: number | null;
   account_id: string | null;
+  account_email: string | null;
   attempt_count: number | bigint | null;
   last_error: string | null;
   created_at: string;
   updated_at: string;
   promotion_status: string | null;
+  promotion_attempt_count: number | bigint | null;
+  accepted_representation_id: string | null;
+  accepted_representation_revoked_at: string | null;
 };
 
 function deriveStatus(decision: string | null, jobStatus: string | null): CorpusAdmissionAdminStatus {
@@ -84,11 +97,15 @@ function toListRow(row: RawCombinedRow): CorpusAdmissionAdminListRow {
     extractedWordCount: row.extracted_word_count === null ? null : Number(row.extracted_word_count),
     qualityScore: row.quality_score,
     accountId: row.account_id,
+    accountEmail: row.account_email,
     attemptCount: row.attempt_count === null ? null : Number(row.attempt_count),
     lastError: row.last_error,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     promotionStatus: row.promotion_status as CorpusAdmissionAdminListRow["promotionStatus"],
+    promotionAttemptCount: row.promotion_attempt_count === null ? null : Number(row.promotion_attempt_count),
+    acceptedRepresentationId: row.accepted_representation_id,
+    acceptedRepresentationActive: row.accepted_representation_id === null ? null : row.accepted_representation_revoked_at === null,
   };
 }
 
@@ -97,26 +114,42 @@ function toListRow(row: RawCombinedRow): CorpusAdmissionAdminListRow {
 // deleted), then job-only rows that never reached a decision at all.
 // promotion_status is read-only, admin-dashboard-only visibility into
 // lib/corpus-admission-promotion.ts's own table — never joined by anything
-// outside this admin surface.
+// outside this admin surface. accepted_representation_id/_revoked_at are the
+// same read-only visibility into corpus_admission_accepted_representations
+// (unique on decision_id — see drizzle/0030 — so this LEFT JOIN can never
+// fan out a decision into more than one row) that drives the admin
+// dashboard's own Remove/Removed affordance; deactivateAcceptedRepresentation
+// remains the only thing that ever writes revoked_at.
+//
+// account_email: the SAME users.email-by-account_id resolution
+// getCorpusAdmissionDecisionDetail performs with its own single-row lookup,
+// batched here into one LEFT JOIN across the whole page rather than a
+// separate per-row (N+1) lookup or a second identity-resolution mechanism.
+// users.id is a primary key, so this can never fan a row out further.
 const COMBINED_CTE = `
   WITH combined AS (
     SELECT
       d.id AS decision_id, j.id AS job_id, d.decision AS decision, j.status AS job_status,
       d.detected_language, d.extracted_word_count, d.quality_score,
-      j.account_id, j.attempt_count, j.last_error,
+      j.account_id, u.email AS account_email, j.attempt_count, j.last_error,
       d.created_at AS created_at, COALESCE(j.updated_at, d.created_at) AS updated_at,
-      p.status AS promotion_status
+      p.status AS promotion_status, p.attempt_count AS promotion_attempt_count,
+      ar.id AS accepted_representation_id, ar.revoked_at AS accepted_representation_revoked_at
     FROM corpus_admission_decisions d
     LEFT JOIN corpus_admission_report_jobs j ON j.decision_id = d.id
     LEFT JOIN corpus_admission_promotions p ON p.decision_id = d.id
+    LEFT JOIN corpus_admission_accepted_representations ar ON ar.decision_id = d.id
+    LEFT JOIN users u ON u.id = j.account_id
     UNION ALL
     SELECT
       NULL, j.id, NULL, j.status,
       NULL, NULL, NULL,
-      j.account_id, j.attempt_count, j.last_error,
+      j.account_id, u.email, j.attempt_count, j.last_error,
       j.created_at, j.updated_at,
-      NULL
+      NULL, NULL,
+      NULL, NULL
     FROM corpus_admission_report_jobs j
+    LEFT JOIN users u ON u.id = j.account_id
     WHERE j.decision_id IS NULL
   )
 `;
@@ -239,7 +272,7 @@ export type CorpusAdmissionAdminDetail = {
   // Never the text itself — see lib/corpus-admission-admin-actions.ts's revealRetainedTextPreview.
   hasRetainedText: boolean;
   // Promotion into the shared matching index (lib/corpus-admission-promotion.ts) — all null when this decision was never ACCEPTed.
-  promotionStatus: "staged" | "indexed" | "failed" | "skipped" | null;
+  promotionStatus: "staged" | "indexed" | "failed" | "skipped" | "dead_lettered" | null;
   promotionAttemptCount: number | null;
   promotionLastError: string | null;
   promotionRepresentationId: string | null;
@@ -445,4 +478,97 @@ export async function getCorpusAdmissionDecisionDetail(client: Client, rowId: st
     promotionLastError: raw.promotion_last_error,
     promotionRepresentationId: raw.promotion_representation_id,
   };
+}
+
+export type CorpusAdmissionStatusCounts = {
+  /** COUNT(*) across every row the admin list ever shows (every status combined). */
+  total: number;
+  accepted: number;
+  review: number;
+  rejected: number;
+  pending: number;
+  failed: number;
+  cancelled: number;
+  /** COUNT(*) of corpus_admission_accepted_representations rows with revoked_at IS NULL — the corpus's current live size. Distinct from `accepted`: an ACCEPTed decision's representation can later be deactivated via this same dashboard's Remove action (see lib/corpus-admission-admin-actions.ts's deactivateAcceptedRepresentation) without changing the original decision. */
+  activeRepresentations: number;
+};
+
+/**
+ * Trivial read-only status-breakdown for the admin corpus dashboard's
+ * top-of-page summary tiles (Admin Phase 2A) — a COUNT(*)/GROUP BY over the
+ * exact same `combined` CTE listCorpusAdmissionDecisions already queries, so
+ * these numbers share identical status semantics with the list's own status
+ * filter (no separate derivation, no new admission/maturity/scoring logic).
+ * Same "no authorization of its own" contract as every other function here.
+ */
+export async function getCorpusAdmissionStatusCounts(client: Client): Promise<CorpusAdmissionStatusCounts> {
+  const countsResult = await client.execute(`
+    ${COMBINED_CTE}
+    SELECT
+      COUNT(*) AS total,
+      SUM(CASE WHEN decision = 'ACCEPT' THEN 1 ELSE 0 END) AS accepted,
+      SUM(CASE WHEN decision = 'REVIEW' THEN 1 ELSE 0 END) AS review,
+      SUM(CASE WHEN decision = 'REJECT' THEN 1 ELSE 0 END) AS rejected,
+      SUM(CASE WHEN job_status = 'pending' THEN 1 ELSE 0 END) AS pending,
+      SUM(CASE WHEN job_status = 'failed' THEN 1 ELSE 0 END) AS failed,
+      SUM(CASE WHEN job_status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled
+    FROM combined
+  `);
+  const row = countsResult.rows[0] as unknown as Record<string, number | bigint | null>;
+
+  const activeRepsResult = await client.execute(
+    "SELECT COUNT(*) AS c FROM corpus_admission_accepted_representations WHERE revoked_at IS NULL",
+  );
+  const activeRepresentations = Number((activeRepsResult.rows[0] as unknown as { c: number | bigint }).c);
+
+  return {
+    total: Number(row.total ?? 0),
+    accepted: Number(row.accepted ?? 0),
+    review: Number(row.review ?? 0),
+    rejected: Number(row.rejected ?? 0),
+    pending: Number(row.pending ?? 0),
+    failed: Number(row.failed ?? 0),
+    cancelled: Number(row.cancelled ?? 0),
+    activeRepresentations,
+  };
+}
+
+export type CorpusAdmissionOperationalSummary = {
+  /** COUNT(*) of corpus_admission_promotions rows with status='failed' — still retryable by the promotion sweep. */
+  retryablePromotionCount: number;
+  /** COUNT(*) of corpus_admission_promotions rows with status='dead_lettered' — exhausted MAX_PROMOTION_ATTEMPTS, terminal (see lib/corpus-admission-promotion.ts). */
+  deadLetteredPromotionCount: number;
+  /** One entry per known SweepKind, always present as a key — null when that kind has never recorded a run at all (the admin strip's own "Last sweep: never"). */
+  sweeps: Record<SweepKind, { lastRunAt: string; lastStatus: SweepRunStatus; summary: Record<string, number> | null } | null>;
+};
+
+/**
+ * The admin corpus dashboard's status-strip data source — everything it
+ * needs in one cheap call: two indexed COUNT(*) queries against
+ * corpus_admission_promotions (idx_corpus_admission_promotions_sweep_candidates
+ * covers both, leading on status) plus a read of every
+ * corpus_admission_sweep_runs row (lib/corpus-admission-sweep-state.ts, at most 3
+ * rows, no filter needed). Never touches decision_id, representation_id,
+ * account/report identifiers, or last_error text — only counts and the
+ * already-numeric-only sweep summaries. Same "no authorization of its own"
+ * contract as every other function in this file.
+ */
+export async function getCorpusAdmissionOperationalSummary(client: Client): Promise<CorpusAdmissionOperationalSummary> {
+  const countsResult = await client.execute(
+    "SELECT status, COUNT(*) AS c FROM corpus_admission_promotions WHERE status IN ('failed','dead_lettered') GROUP BY status",
+  );
+  let retryablePromotionCount = 0;
+  let deadLetteredPromotionCount = 0;
+  for (const row of countsResult.rows as unknown as { status: string; c: number | bigint }[]) {
+    if (row.status === "failed") retryablePromotionCount = Number(row.c);
+    else if (row.status === "dead_lettered") deadLetteredPromotionCount = Number(row.c);
+  }
+
+  const records = await getSweepRunRecords(client);
+  const sweeps: CorpusAdmissionOperationalSummary["sweeps"] = { promotion: null, report_admission: null, retention: null };
+  for (const record of records) {
+    sweeps[record.sweepKind] = { lastRunAt: record.lastRunAt, lastStatus: record.lastStatus, summary: record.summary };
+  }
+
+  return { retryablePromotionCount, deadLetteredPromotionCount, sweeps };
 }

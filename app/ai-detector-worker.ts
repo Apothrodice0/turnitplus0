@@ -27,11 +27,12 @@ import {
   type AiPrepStage,
   type RawModelProgressEvent,
 } from "@/lib/ai-model-prep";
+import type { DetectedLanguage } from "@/lib/similarity-core";
 
 type WorkerRequest = {
   id: number;
   text: string;
-  detectedLanguage: "Arabic" | "French" | "English" | "Mixed";
+  detectedLanguage: DetectedLanguage;
 };
 
 type ModelSignal = { probability: number; logOdds: number };

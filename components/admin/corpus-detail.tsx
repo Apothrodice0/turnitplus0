@@ -40,11 +40,25 @@ type Detail = {
   acceptedRepresentationActive: boolean | null;
   revokedAt: string | null;
   hasRetainedText: boolean;
-  promotionStatus: "staged" | "indexed" | "failed" | "skipped" | null;
+  promotionStatus: "staged" | "indexed" | "failed" | "skipped" | "dead_lettered" | null;
   promotionAttemptCount: number | null;
   promotionLastError: string | null;
   promotionRepresentationId: string | null;
 };
+
+// B1C: 5 mirrors MAX_PROMOTION_ATTEMPTS in lib/corpus-admission-promotion.ts
+// — a literal, not an import; that module cannot be imported from a "use
+// client" component (see components/admin/corpus-search.tsx's own comment
+// on the same duplication, and lib/corpus-admission-source-ref.ts's header
+// comment for the exact class of `next build` failure this avoids).
+const MAX_PROMOTION_ATTEMPTS_DISPLAY = 5;
+
+function promotionStatusLabel(status: Detail["promotionStatus"], attemptCount: number | null): string {
+  if (status === null) return "not yet staged";
+  if (status === "failed") return `failed — retrying (attempt ${attemptCount ?? "?"}/${MAX_PROMOTION_ATTEMPTS_DISPLAY})`;
+  if (status === "dead_lettered") return `dead-lettered — exhausted ${MAX_PROMOTION_ATTEMPTS_DISPLAY}/${MAX_PROMOTION_ATTEMPTS_DISPLAY}, automatic retries stopped`;
+  return status;
+}
 
 /** Client-side detail view for /admin/corpus/[id] — hits GET /api/admin/corpus/[id], and POST .../preview | .../deactivate | .../reactivate, all independently gated by getAdminSessionUser. */
 export function AdminCorpusDetail({ rowId }: { rowId: string }) {
@@ -221,7 +235,7 @@ export function AdminCorpusDetail({ rowId }: { rowId: string }) {
         <section>
           <h2>Promotion (matching index)</h2>
           <ul>
-            <li>Status: {detail.promotionStatus ?? "not yet staged"}</li>
+            <li>Status: {promotionStatusLabel(detail.promotionStatus, detail.promotionAttemptCount)}</li>
             <li>Attempts: {detail.promotionAttemptCount ?? "—"}</li>
             <li>Last error: {detail.promotionLastError ?? "none"}</li>
             <li>Representation id: {detail.promotionRepresentationId ?? "—"}</li>

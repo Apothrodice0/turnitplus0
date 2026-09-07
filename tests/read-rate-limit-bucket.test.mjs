@@ -11,6 +11,7 @@ import * as roomsRoute from '../app/api/reports/rooms/route.ts';
 import * as uploadLimitRoute from '../app/api/upload-limit/route.ts';
 import * as reportByIdRoute from '../app/api/reports/[id]/route.ts';
 import * as logoutRoute from '../app/api/auth/logout/route.ts';
+import { withTestIdentity } from './helpers/test-signup.mjs';
 import {
   resetAuthRateForTest,
   resetRateForTest,
@@ -116,7 +117,7 @@ async function signup(email, ip, password = 'correct-horse-read-1') {
   const req = new Request('http://localhost/api/auth/signup', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-forwarded-for': ip },
-    body: JSON.stringify({ email, password, username: email.split('@')[0], deviceKey: `device-${email}` }),
+    body: JSON.stringify(withTestIdentity({ email, password, username: email.split('@')[0], deviceKey: `device-${email}` })),
   });
   return signupRoute.POST(req);
 }

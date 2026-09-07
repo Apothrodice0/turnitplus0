@@ -6,7 +6,8 @@ import { randomUUID } from "node:crypto";
 import { createClient } from "@libsql/client";
 import { applyMigrationsLibsql } from "../lib/ingest.js";
 import { canonicalSha256 } from "../lib/document-identity.ts";
-import { runCorpusAdmissionPromotionSweep } from "../lib/corpus-admission-promotion.ts";
+import { runCorpusAdmissionPromotionSweep, processCorpusAdmissionPromotion, MAX_PROMOTION_ATTEMPTS } from "../lib/corpus-admission-promotion.ts";
+import { getCurrentCorpusMatchGeneration } from "../lib/report-historical-match.ts";
 
 /**
  * lib/corpus-admission-promotion.ts: ACCEPT-only promotion, idempotent
@@ -219,5 +220,113 @@ test("identity non-disclosure: outcome objects and the promotions row itself car
   const columnNames = columns.rows.map((r) => r.name);
   for (const forbidden of ["account_id", "device_key", "report_id", "source_ref", "email"]) {
     assert.ok(!columnNames.includes(forbidden), `corpus_admission_promotions must never gain a ${forbidden} column`);
+  }
+});
+
+// --- B1C: bounded promotion retries + dead-letter ---------------------------
+//
+// A canonical-hash mismatch (retained text does not match the accepted
+// fingerprint's own stored hash) is used as the deterministic, repeatable
+// failure trigger throughout — the same trigger the existing "canonical-hash
+// mismatch" test above already relies on, chosen here specifically because
+// it fails IDENTICALLY on every attempt (no flakiness), and because fixing
+// the underlying content_store row between sweeps is a clean way to turn a
+// persistently-failing fixture into an eventually-succeeding one for the
+// "success on the last attempt" test below.
+
+test("B1C: failure attempts 1-4 remain 'failed'; the 5th completed failed attempt becomes 'dead_lettered' with attempt_count === MAX_PROMOTION_ATTEMPTS", async () => {
+  assert.equal(MAX_PROMOTION_ATTEMPTS, 5, "test setup sanity: this test's own loop bound assumes the locked policy value");
+  const storedHash = canonicalSha256("B1C persistent-failure fixture: what the accepted_representations row claims the hash is.");
+  const actualText = "B1C persistent-failure fixture: what is actually stored in content_store — deliberately and permanently different, so every attempt fails identically.";
+  const decisionId = await insertDecision({ decision: "ACCEPT", canonicalSha256: storedHash });
+  await insertAcceptedRepresentation(decisionId, storedHash);
+  await insertContentStore(decisionId, storedHash, actualText);
+
+  for (let expectedAttempt = 1; expectedAttempt <= MAX_PROMOTION_ATTEMPTS; expectedAttempt += 1) {
+    const sweep = await runCorpusAdmissionPromotionSweep(client, { openConnection, batchSize: 20 });
+    const outcome = sweep.results.find((r) => r.decisionId === decisionId);
+    assert.ok(outcome, `sweep #${expectedAttempt} must claim and process this promotion — no backoff means an unclaimed 'failed' row is immediately reclaimable`);
+
+    const row = await client.execute({ sql: "SELECT status, attempt_count, claimed_at FROM corpus_admission_promotions WHERE decision_id = ?", args: [decisionId] });
+    assert.equal(Number(row.rows[0].attempt_count), expectedAttempt, `attempt_count must be exactly ${expectedAttempt} after sweep #${expectedAttempt}`);
+    assert.equal(row.rows[0].claimed_at, null, "claimed_at must be cleared by every terminal write, retryable or not");
+
+    if (expectedAttempt < MAX_PROMOTION_ATTEMPTS) {
+      assert.equal(outcome.outcome, "failed", `REQUIRED: attempt ${expectedAttempt} must stay 'failed', not dead-letter early`);
+      assert.equal(row.rows[0].status, "failed");
+    } else {
+      assert.equal(outcome.outcome, "dead_lettered", "REQUIRED: the 5th completed failed attempt must dead-letter");
+      assert.equal(row.rows[0].status, "dead_lettered");
+      assert.equal(outcome.attemptCount, MAX_PROMOTION_ATTEMPTS);
+    }
+  }
+});
+
+test("B1C: 4 failed attempts followed by a fixed (correct) fixture succeeds on attempt 5 as 'indexed', never 'dead_lettered'", async () => {
+  const correctText = "B1C eventual-success fixture: the eventually-correct retained text.";
+  const correctHash = canonicalSha256(correctText);
+  const wrongText = "B1C eventual-success fixture: deliberately wrong text stored first, causing genuine hash-mismatch failures before the fix.";
+  const decisionId = await insertDecision({ decision: "ACCEPT", canonicalSha256: correctHash });
+  await insertAcceptedRepresentation(decisionId, correctHash);
+  await insertContentStore(decisionId, correctHash, wrongText);
+
+  for (let i = 1; i < MAX_PROMOTION_ATTEMPTS; i += 1) {
+    const sweep = await runCorpusAdmissionPromotionSweep(client, { openConnection, batchSize: 20 });
+    const outcome = sweep.results.find((r) => r.decisionId === decisionId);
+    assert.equal(outcome.outcome, "failed", `attempt ${i} must fail against the still-wrong retained text`);
+  }
+  const rowBeforeFix = await client.execute({ sql: "SELECT status, attempt_count FROM corpus_admission_promotions WHERE decision_id = ?", args: [decisionId] });
+  assert.equal(rowBeforeFix.rows[0].status, "failed");
+  assert.equal(Number(rowBeforeFix.rows[0].attempt_count), MAX_PROMOTION_ATTEMPTS - 1, "test setup sanity: exactly one attempt of budget must remain");
+
+  // Fix the retained text so the deciding 5th attempt actually matches the accepted hash.
+  await client.execute({ sql: "UPDATE corpus_admission_content_store SET canonical_text = ? WHERE decision_id = ?", args: [correctText, decisionId] });
+
+  const finalSweep = await runCorpusAdmissionPromotionSweep(client, { openConnection, batchSize: 20 });
+  const finalOutcome = finalSweep.results.find((r) => r.decisionId === decisionId);
+  assert.equal(finalOutcome.outcome, "indexed", "REQUIRED: success on the 5th (final-budget) attempt must be 'indexed', never 'dead_lettered'");
+
+  const rowAfter = await client.execute({ sql: "SELECT status, attempt_count FROM corpus_admission_promotions WHERE decision_id = ?", args: [decisionId] });
+  assert.equal(rowAfter.rows[0].status, "indexed");
+  assert.equal(Number(rowAfter.rows[0].attempt_count), MAX_PROMOTION_ATTEMPTS, "REQUIRED: attempt_count keeps its existing semantics — a successful terminal attempt still counts, exactly as before B1C");
+});
+
+test("B1C: direct processCorpusAdmissionPromotion on an already-dead_lettered row is idempotent — no reprocessing, no attempt/generation/error change", async () => {
+  const storedHash = canonicalSha256("B1C idempotency-of-dead-letter fixture stored hash.");
+  const actualText = "B1C idempotency-of-dead-letter fixture: deliberately mismatched retained text.";
+  const decisionId = await insertDecision({ decision: "ACCEPT", canonicalSha256: storedHash });
+  await insertAcceptedRepresentation(decisionId, storedHash);
+  await insertContentStore(decisionId, storedHash, actualText);
+
+  let promotionId;
+  for (let i = 1; i <= MAX_PROMOTION_ATTEMPTS; i += 1) {
+    const sweep = await runCorpusAdmissionPromotionSweep(client, { openConnection, batchSize: 20 });
+    const outcome = sweep.results.find((r) => r.decisionId === decisionId);
+    promotionId = outcome.promotionId;
+  }
+  const rowAtDeadLetter = await client.execute({ sql: "SELECT status, attempt_count, last_error FROM corpus_admission_promotions WHERE id = ?", args: [promotionId] });
+  assert.equal(rowAtDeadLetter.rows[0].status, "dead_lettered", "test setup sanity: the fixture must actually reach dead_lettered before this test's own assertions matter");
+  const attemptCountAtDeadLetter = Number(rowAtDeadLetter.rows[0].attempt_count);
+  const lastErrorAtDeadLetter = rowAtDeadLetter.rows[0].last_error;
+
+  const generationBefore = await getCurrentCorpusMatchGeneration(client);
+  const direct = await processCorpusAdmissionPromotion(client, { promotionId, openConnection });
+  assert.equal(direct.outcome, "dead_lettered");
+  assert.equal(direct.attemptCount, attemptCountAtDeadLetter);
+  assert.equal(direct.error, lastErrorAtDeadLetter);
+
+  const generationAfter = await getCurrentCorpusMatchGeneration(client);
+  assert.equal(generationAfter, generationBefore, "REQUIRED: direct processing of an already-dead_lettered row must never bump corpus_match_generation");
+
+  const rowAfterDirect = await client.execute({ sql: "SELECT status, attempt_count, last_error FROM corpus_admission_promotions WHERE id = ?", args: [promotionId] });
+  assert.equal(Number(rowAfterDirect.rows[0].attempt_count), attemptCountAtDeadLetter, "REQUIRED: attempt_count must not change on a direct dead_lettered replay");
+  assert.equal(rowAfterDirect.rows[0].last_error, lastErrorAtDeadLetter, "REQUIRED: last_error must not change on a direct dead_lettered replay");
+
+  const repCount = await countRows("SELECT COUNT(*) AS c FROM corpus_document_representations WHERE canonical_sha256 = ?", [storedHash]);
+  assert.equal(repCount, 0, "REQUIRED: no representation must ever be created for a dead-lettered row, even after a direct replay");
+
+  const forbiddenKeys = ["accountId", "account_id", "deviceKey", "device_key", "reportId", "report_id", "sourceRef", "source_ref", "email"];
+  for (const key of forbiddenKeys) {
+    assert.ok(!(key in direct), `dead_lettered outcome must never carry a ${key} field, same discipline as every other outcome`);
   }
 });

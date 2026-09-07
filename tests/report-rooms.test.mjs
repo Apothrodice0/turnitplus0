@@ -9,6 +9,7 @@ import * as reportsRoute from '../app/api/reports/route.ts';
 import * as roomsRoute from '../app/api/reports/rooms/route.ts';
 import { resetAuthRateForTest, resetRateForTest } from '../lib/rate-limit.js';
 import { NORMAL_ROOM_COUNT, ADMIN_ROOM_COUNT, ROOM_CYCLE_MS } from '../lib/report-rooms.ts';
+import { withTestIdentity, grantTestAdmin } from './helpers/test-signup.mjs';
 
 // Verifies the room/slot architecture's server-side pieces: a room is a
 // real upload SLOT (at most one current report, an explicit fact recorded
@@ -48,7 +49,7 @@ async function signup(body) {
   const req = new Request('http://localhost/api/auth/signup', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-forwarded-for': ip },
-    body: JSON.stringify(body),
+    body: JSON.stringify(withTestIdentity(body)),
   });
   return signupRoute.POST(req);
 }
@@ -295,6 +296,7 @@ async function getRoom(cookie, room) {
   process.env.ADMIN_EMAIL = 'rooms-admin@example.com';
   const signupRes = await signup({ email: 'rooms-admin@example.com', password: 'correct-horse-6', username: 'roomsadmin', deviceKey: 'device-admin-rooms-1' });
   const cookie = extractCookie(signupRes);
+  await grantTestAdmin(dbFile);
   delete process.env.ADMIN_EMAIL;
 
   const client = createClient({ url: `file:${dbFile}` });

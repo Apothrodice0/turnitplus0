@@ -883,7 +883,176 @@ main.report-main {
 
 .auth-submit {
   min-height: 46px;
-  margin-top: 2px;
+  margin-top: 6px;
+}
+
+/* ===========================================================================
+ * A2 structured-identity fields (components/auth/identity-fields.tsx).
+ * Rendered as a Fragment of plain <label>/<fieldset> blocks directly inside
+ * <form className="auth-form">, so Full name / Account type / Country / City /
+ * Institution / Phone inherit the exact label typography, 45px field height and
+ * spacing of the Username / Email / Password fields above. Single column at
+ * every width. Generous vertical rhythm and hit areas for easy tapping.
+ * ======================================================================== */
+
+.auth-form {
+  gap: 17px;
+}
+
+.identity-section-lead {
+  margin: 4px 0 -2px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+/* selects + the phone input pick up the same box styling as the text inputs */
+.auth-form select,
+.auth-form input[type="tel"] {
+  width: 100%;
+  height: 45px;
+  padding: 0 13px;
+  border: 1px solid #cfdde2;
+  border-radius: 10px;
+  outline: none;
+  background: #fbfdfe;
+  color: var(--ink);
+  font-family: inherit;
+  font-size: 12px;
+  transition: border-color 150ms ease, box-shadow 150ms ease, background 150ms ease;
+}
+.auth-form select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 36px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='none' stroke='%2358707a' stroke-width='1.6' stroke-linecap='round' d='M1 1.5 6 6.5 11 1.5'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 13px center;
+  cursor: pointer;
+}
+.auth-form select:focus,
+.auth-form input[type="tel"]:focus {
+  border-color: var(--blue);
+  background-color: #fff;
+  box-shadow: 0 0 0 4px rgba(0, 127, 186, 0.1);
+}
+.auth-form select:disabled,
+.auth-form input:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* institution: a real fieldset, styled to sit in the same grid rhythm */
+.auth-form > fieldset.identity-institution {
+  display: grid;
+  gap: 9px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+.identity-institution > legend {
+  padding: 0;
+  color: #30444d;
+  font-size: 11px;
+  font-weight: 750;
+}
+.identity-institution > .identity-hint {
+  margin: 0;
+}
+.identity-institution-search {
+  display: grid;
+  gap: 6px;
+}
+
+/* phone: fixed "+213" prefix box + 9-digit typing area */
+.identity-phone-group {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+.identity-phone-prefix {
+  display: inline-flex;
+  align-items: center;
+  height: 45px;
+  padding: 0 14px;
+  border: 1px solid #cfdde2;
+  border-radius: 10px;
+  background: #eef4f6;
+  color: #30444d;
+  font-size: 13px;
+  font-weight: 750;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.identity-phone-group input[type="tel"] {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  letter-spacing: 0.1em;
+}
+
+/* canonical-search dropdown — in-flow, pushes the next field while open */
+.identity-typeahead {
+  list-style: none;
+  margin: 5px 0 0;
+  padding: 4px;
+  max-height: 236px;
+  overflow-y: auto;
+  border: 1px solid #cfdde2;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 10px 26px rgba(15, 45, 60, 0.12);
+}
+.identity-typeahead li {
+  margin: 0;
+}
+.identity-typeahead button {
+  display: grid;
+  gap: 1px;
+  width: 100%;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+.identity-typeahead button:hover,
+.identity-typeahead button:focus-visible {
+  background: #eef6f9;
+  outline: none;
+}
+.identity-typeahead button strong {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink);
+}
+.identity-typeahead button span {
+  font-size: 10px;
+  color: var(--muted);
+}
+
+/* confirmation / helper / per-field error — all non-italic, quiet */
+.identity-field-ok,
+.identity-hint,
+.identity-field-error {
+  font-style: normal;
+  line-height: 1.5;
+}
+.identity-field-ok {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--blue-dark);
+}
+.identity-hint {
+  font-size: 10px;
+  color: var(--muted);
+}
+.identity-field-error {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--red);
 }
 
 .auth-loading-panel {
@@ -1261,39 +1430,6 @@ main.report-main {
   box-shadow: 0 0 0 4px rgba(0, 127, 186, 0.1);
 }
 
-.account-consent-toggle {
-  display: flex;
-  align-items: flex-start;
-  gap: 11px;
-  margin-top: 15px;
-  padding: 13px 15px;
-  border: 1px solid #cadce4;
-  border-radius: 12px;
-  background: #f7fafb;
-}
-
-.account-consent-toggle input {
-  margin-top: 3px;
-  accent-color: var(--blue);
-}
-
-.account-consent-toggle span {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.account-consent-toggle strong {
-  font-size: 11px;
-  color: var(--ink);
-}
-
-.account-consent-toggle small {
-  font-size: 10px;
-  line-height: 1.5;
-  color: var(--muted);
-}
-
 .account-edit-actions {
   display: flex;
   justify-content: flex-end;
@@ -1317,6 +1453,166 @@ main.report-main {
 .account-profile-status svg {
   width: 16px;
   height: 16px;
+}
+
+/* A3 — email-verification state line under the account email */
+.email-verify-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+  margin-top: 6px !important;
+  font-size: 11px;
+  font-weight: 700;
+}
+.email-verify-line svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+.email-verify-line.is-verified {
+  color: #27634f;
+}
+.email-verify-line.is-unverified {
+  color: #9a6212;
+}
+.email-verify-action {
+  padding: 3px 10px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 10px;
+  font-weight: 800;
+  cursor: pointer;
+}
+.email-verify-action:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.email-verify-notice {
+  margin-top: 6px !important;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+.email-verify-notice.is-ok {
+  color: #27634f;
+}
+.email-verify-notice.is-error {
+  color: var(--red);
+}
+
+/* A3b — email-verification code-entry modal (components/account/
+   email-verification-modal.tsx), replacing the A3 /verify-email link-landing
+   page (removed — a 6-digit code has nothing for a link to carry any more). */
+.email-verify-modal-overlay {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(10, 20, 25, 0.45);
+  z-index: 60;
+}
+.email-verify-modal {
+  position: relative;
+  width: 100%;
+  max-width: 380px;
+  padding: clamp(22px, 4vw, 32px);
+  text-align: center;
+}
+.email-verify-modal-close {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.email-verify-modal-close svg {
+  width: 16px;
+  height: 16px;
+}
+.email-verify-modal h2 {
+  margin: 0 0 8px;
+  font-size: 16px;
+}
+.email-verify-modal-lead {
+  margin: 0 0 20px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.email-verify-code-input {
+  width: 100%;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: 10px;
+  text-align: center;
+  box-sizing: border-box;
+}
+.email-verify-code-input:disabled {
+  opacity: 0.6;
+}
+.email-verify-modal-error {
+  margin: 12px 0 0;
+  color: var(--red);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+.email-verify-modal-submit {
+  width: 100%;
+  margin-top: 18px;
+}
+.email-verify-modal-submit:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.email-verify-modal-resend {
+  margin-top: 14px;
+  border: none;
+  background: transparent;
+  color: var(--blue);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.email-verify-modal-resend:disabled {
+  color: var(--muted);
+  cursor: default;
+}
+.email-verify-modal-success {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+}
+.email-verify-modal-success svg {
+  width: 34px;
+  height: 34px;
+  color: #27634f;
+}
+.email-verify-modal-success h2 {
+  margin: 0;
+}
+.email-verify-modal-success p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .account-profile-actions {
@@ -6631,22 +6927,59 @@ main.report-main {
    deliberately plain/utilitarian rather than matching the consumer product's
    own visual polish. Scoped entirely under .developer-* so it can never leak
    into or be affected by any other page's styles. */
-.developer-page { max-width: 1100px; margin: 0 auto; padding: 32px 24px 80px; font-family: var(--font-geist-mono), monospace; }
+/* overflow-x: hidden here is the outermost guarantee that nothing on any
+   admin page can ever create a page-level horizontal scrollbar — every
+   genuinely wide element (a table) is expected to scroll inside its own
+   .admin-table-scroll wrapper, never the page itself. */
+.developer-page { max-width: 1180px; margin: 0 auto; padding: 32px 24px 80px; font-family: var(--font-geist-sans), sans-serif; overflow-x: hidden; }
 .developer-header h1 { margin: 0 0 6px; font-size: 22px; }
-.developer-header p { margin: 0 0 10px; color: var(--muted); font-size: 13px; }
+.developer-header p { margin: 0 0 10px; color: var(--muted); font-size: 13.5px; }
 .developer-page section { margin-top: 28px; }
-.developer-page h2 { font-size: 15px; margin: 0 0 10px; color: var(--sidebar); }
-.developer-page h3 { font-size: 12px; margin: 14px 0 4px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
-.developer-page pre { background: var(--sidebar); color: #d7e6ea; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 11px; line-height: 1.5; max-height: 480px; overflow-y: auto; }
-.developer-page code { font-size: 12px; }
-.developer-table-scroll { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
-.developer-table { width: 100%; min-width: 860px; border-collapse: collapse; font-size: 12px; }
-.developer-table th, .developer-table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--soft-line); white-space: nowrap; }
+.developer-page h2 { font-size: 16px; margin: 0 0 10px; color: var(--sidebar); }
+.developer-page h3 { font-size: 12.5px; margin: 14px 0 4px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.developer-page pre { background: var(--sidebar); color: #d7e6ea; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 12px; line-height: 1.6; font-family: var(--font-geist-mono), monospace; max-height: 480px; overflow-y: auto; }
+.developer-page code { font-size: 12.5px; font-family: var(--font-geist-mono), monospace; }
+.developer-table-scroll,
+.admin-table-scroll { width: 100%; max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.developer-table { width: 100%; min-width: 860px; border-collapse: collapse; font-size: 13.5px; }
+.developer-table th, .developer-table td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--soft-line); white-space: nowrap; }
 .developer-table th { color: var(--muted); font-weight: 600; }
 .developer-lookup form { display: flex; gap: 8px; margin: 14px 0 22px; }
 .developer-lookup input { flex: 1; padding: 8px 12px; border: 1px solid var(--line); border-radius: 6px; font-size: 13px; }
 .developer-lookup button { padding: 8px 16px; border-radius: 6px; border: none; background: var(--blue); color: #fff; font-size: 13px; cursor: pointer; }
 .developer-lookup button:disabled { opacity: .6; cursor: default; }
+
+/* Debug workspace — "Clear my rooms" (app/developer/page.tsx). Same visual
+   language as .developer-lookup; the confirm button is the only red accent
+   on the developer dashboard. */
+.developer-debug-workspace { margin-top: 36px; border-top: 1px solid var(--soft-line); padding-top: 22px; }
+.developer-debug-workspace button {
+  padding: 8px 16px; border-radius: 6px; border: 1px solid var(--line);
+  background: #f7f9fa; color: #43525a; font-size: 13px; cursor: pointer;
+}
+.developer-debug-workspace button:disabled { opacity: .6; cursor: default; }
+.developer-debug-plan { margin-top: 12px; font-size: 13px; }
+.developer-debug-plan p { margin: 4px 0; }
+.developer-debug-actions { display: flex; gap: 8px; margin-top: 12px; }
+.developer-debug-workspace .developer-debug-danger { background: #c5384c; border-color: #c5384c; color: #fff; }
+.developer-debug-done { margin-top: 12px; font-size: 13px; color: var(--sidebar); }
+.developer-debug-error { margin-top: 12px; font-size: 13px; color: #c5384c; }
+
+/* "Clear account rooms" — second, separate tool in the same Debug workspace
+   (app/developer/page.tsx). Its own .developer-debug-workspace top border
+   visually separates it from "Clear my rooms" above; never shares state or
+   markup with that button. */
+.developer-account-room-reset h3 { font-size: 14px; margin: 0 0 4px; color: var(--sidebar); text-transform: none; letter-spacing: 0; }
+.developer-account-room-reset-form { display: flex; gap: 8px; margin-top: 12px; max-width: 520px; }
+.developer-account-room-reset-form input {
+  flex: 1; padding: 8px 12px; border: 1px solid var(--line); border-radius: 6px; font-size: 13px;
+}
+.developer-account-room-reset-form button { white-space: nowrap; }
+.developer-account-room-reset-confirm { display: block; margin: 12px 0 4px; font-size: 13px; }
+.developer-account-room-reset-confirm input {
+  display: block; margin-top: 4px; width: 100%; max-width: 360px;
+  padding: 8px 12px; border: 1px solid var(--line); border-radius: 6px; font-size: 13px;
+}
 
 /* Admin corpus dashboard's filter form only (3 fields vs. the shared
    .developer-lookup pattern's 1) — scoped to its own class rather than
@@ -6656,4 +6989,319 @@ main.report-main {
   .admin-corpus-filters { flex-direction: column; align-items: stretch; }
   .admin-corpus-filters input,
   .admin-corpus-filters select { flex: none; min-width: 0; width: 100%; }
+}
+
+/* Admin console (app/admin/*) — the single internal entry point: a launcher
+   with three workspace cards (Corpus / Shadow / Developer), each opening a
+   full page under .developer-page. Shares that container's box model/type
+   scale for visual consistency across every admin surface. */
+.admin-back-link {
+  display: inline-flex; align-items: center; gap: 6px; margin-bottom: 18px;
+  font-size: 13.5px; color: var(--blue); text-decoration: none; font-weight: 500;
+}
+.admin-back-link:hover { text-decoration: underline; }
+
+.admin-header { display: flex; align-items: flex-start; gap: 14px; margin-bottom: 26px; padding-bottom: 22px; border-bottom: 1px solid var(--soft-line); }
+.admin-header-icon {
+  flex-shrink: 0; width: 42px; height: 42px; border-radius: 11px;
+  background: var(--blue-soft); color: var(--blue-dark);
+  display: flex; align-items: center; justify-content: center;
+}
+/* min-width: 0 + flex: 1 — .admin-header is a flex row; without this, a
+   very long report title (the h1 here, on the report-inspect page) can
+   force the flex item wider than its share of the row instead of wrapping. */
+.admin-header-text { min-width: 0; flex: 1; }
+.admin-header-text h1 { margin: 0 0 5px; font-size: 21px; color: var(--sidebar); overflow-wrap: anywhere; }
+.admin-header-text p { margin: 0; font-size: 13.5px; color: var(--muted); line-height: 1.5; max-width: 62ch; overflow-wrap: anywhere; }
+
+.admin-launcher-intro { margin: 0 0 26px; font-size: 14px; color: var(--muted); max-width: 62ch; line-height: 1.5; }
+.admin-launcher-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 18px; }
+.admin-workspace-card {
+  display: flex; flex-direction: column; gap: 10px; text-align: left;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 14px;
+  padding: 24px; text-decoration: none; color: inherit;
+  box-shadow: var(--small-shadow); transition: box-shadow .15s ease, transform .15s ease, border-color .15s ease;
+}
+.admin-workspace-card:hover { box-shadow: var(--shadow); transform: translateY(-2px); border-color: var(--blue); }
+.admin-workspace-card-icon {
+  width: 46px; height: 46px; border-radius: 12px; background: var(--blue-soft); color: var(--blue-dark);
+  display: flex; align-items: center; justify-content: center;
+}
+.admin-workspace-card h2 { margin: 4px 0 0; font-size: 17px; color: var(--sidebar); }
+.admin-workspace-card p { margin: 0; font-size: 13.5px; color: var(--muted); line-height: 1.5; }
+.admin-workspace-card-arrow { margin-top: 2px; color: var(--blue); }
+
+.admin-link-card {
+  display: flex; align-items: center; gap: 12px; text-decoration: none; color: inherit;
+  cursor: pointer; transition: box-shadow .15s ease, border-color .15s ease;
+}
+.admin-link-card:hover { box-shadow: var(--shadow); border-color: var(--blue); }
+.admin-link-card-icon {
+  flex-shrink: 0; width: 34px; height: 34px; border-radius: 9px; background: var(--blue-soft); color: var(--blue-dark);
+  display: flex; align-items: center; justify-content: center;
+}
+.admin-link-card-text { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.admin-link-card-text strong { font-size: 14.5px; color: var(--sidebar); }
+.admin-link-card-text span { font-size: 13px; color: var(--muted); }
+.admin-link-card-arrow { flex-shrink: 0; color: var(--blue); }
+
+.admin-card {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
+  padding: 20px 22px; margin-top: 20px; box-shadow: var(--small-shadow);
+  /* Belt-and-suspenders: the card itself never paints past its own box,
+     however wide a child's intrinsic content is — the only place overflow
+     is ever meant to be visible is inside a .admin-table-scroll wrapper,
+     which scrolls on its own. */
+  overflow-x: hidden;
+  min-width: 0;
+}
+.admin-card:first-of-type { margin-top: 0; }
+.admin-card > h2:first-child, .admin-card > h3:first-child { margin-top: 0; }
+.admin-card > .developer-debug-workspace:first-child { margin-top: 0; border-top: none; padding-top: 0; }
+
+.admin-workspace-badge {
+  display: inline-flex; align-items: center; padding: 2px 9px; border-radius: 999px;
+  background: var(--soft-line); color: var(--muted); font-size: 12px; font-family: var(--font-geist-mono), monospace;
+}
+
+.admin-metric-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin: 16px 0 6px; }
+/* min-width: 0 overrides a grid item's default min-width: auto — without it,
+   a long unbroken value (an enum/status string with no spaces to wrap at)
+   can force its own track wider than the minmax() track size calls for,
+   pushing the grid past the card. */
+.admin-metric-tile { background: var(--canvas); border: 1px solid var(--soft-line); border-radius: 10px; padding: 12px 14px; min-width: 0; }
+.admin-metric-tile-label { font-size: 11.5px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin-bottom: 5px; }
+.admin-metric-tile-value { font-size: 21px; font-weight: 600; color: var(--sidebar); line-height: 1.2; overflow-wrap: anywhere; }
+.admin-metric-tile-sub { font-size: 11.5px; color: var(--muted); margin-top: 3px; }
+
+.admin-badge-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 14px; }
+.admin-badge { display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; border-radius: 999px; background: var(--soft-line); color: var(--ink); font-size: 12.5px; }
+.admin-badge strong { font-weight: 700; }
+.admin-badge-group { margin: 14px 0; }
+.admin-badge-group-label { font-size: 12px; color: var(--muted); margin: 0 0 6px; }
+
+.admin-collapsible { border: 1px solid var(--soft-line); border-radius: 10px; margin-top: 14px; overflow: hidden; background: var(--surface); }
+.admin-collapsible summary {
+  cursor: pointer; padding: 11px 15px; font-size: 13.5px; font-weight: 600; color: var(--sidebar);
+  background: var(--canvas); list-style: none; display: flex; align-items: center; justify-content: space-between; gap: 8px;
+}
+.admin-collapsible summary::-webkit-details-marker { display: none; }
+.admin-collapsible summary::after { content: "+"; color: var(--muted); font-weight: 400; }
+.admin-collapsible[open] summary::after { content: "\2212"; }
+.admin-collapsible[open] summary { border-bottom: 1px solid var(--soft-line); }
+.admin-collapsible-body { padding: 16px; }
+.admin-collapsible-body > *:first-child { margin-top: 0; }
+
+@media (max-width: 720px) {
+  .admin-header { flex-direction: column; align-items: flex-start; }
+  .admin-link-card { flex-wrap: wrap; }
+}
+
+/* Admin Phase 2A — Corpus workspace polish. Reuses every token/class the
+   Phase 1 admin console system already established (.admin-card,
+   .admin-metric-grid, .admin-collapsible, etc.); nothing here is a new
+   design language. */
+.admin-card h2 { display: flex; align-items: center; gap: 8px; }
+.admin-card-title-icon { color: var(--blue-dark); flex-shrink: 0; }
+.admin-card-description { color: var(--muted); font-size: 13.5px; line-height: 1.5; max-width: 70ch; }
+
+/* Generic small colored status pill (admission status, sweep run status,
+   promotion status, ...) — purely presentational, see
+   components/admin/status-badge.tsx. */
+.admin-status-badge {
+  display: inline-flex; align-items: center; padding: 3px 10px; border-radius: 999px;
+  font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; white-space: nowrap;
+}
+.admin-status-badge--positive { background: rgba(8, 125, 85, .12); color: var(--green); }
+.admin-status-badge--negative { background: rgba(232, 79, 99, .12); color: var(--red); }
+.admin-status-badge--warning { background: rgba(245, 138, 59, .16); color: #a15a1f; }
+.admin-status-badge--info { background: rgba(0, 127, 186, .12); color: var(--blue-dark); }
+.admin-status-badge--neutral { background: var(--soft-line); color: var(--muted); }
+
+/* Shared "toolbar" layout for a filter/search row or an add-item form
+   (Corpus admission filters, Maturity exemptions add-by-email). */
+.admin-corpus-toolbar { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px; margin: 4px 0 16px; }
+.admin-corpus-toolbar label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--muted); font-weight: 600; }
+.admin-corpus-toolbar input,
+.admin-corpus-toolbar select {
+  padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; font-size: 13.5px; min-width: 0;
+  font-family: var(--font-geist-sans), sans-serif; color: var(--ink); background: var(--surface);
+}
+.admin-corpus-toolbar input:focus, .admin-corpus-toolbar select:focus { outline: none; border-color: var(--blue); box-shadow: 0 0 0 3px var(--blue-soft); }
+
+.admin-corpus-result-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 4px 0 12px; font-size: 13px; color: var(--muted); }
+.admin-corpus-loading { color: var(--muted); font-size: 13.5px; }
+.admin-corpus-empty { padding: 28px 16px; text-align: center; color: var(--muted); font-size: 13.5px; background: var(--canvas); border-radius: 10px; }
+
+.admin-form-notice { margin: 10px 0; font-size: 13px; color: var(--green); }
+.admin-form-error { margin: 10px 0; font-size: 13px; color: var(--red); }
+
+.admin-corpus-actions-cell { display: inline-flex; align-items: center; gap: 10px; white-space: nowrap; }
+.admin-action-link { color: var(--blue); text-decoration: none; font-weight: 600; }
+.admin-action-link:hover { text-decoration: underline; }
+.admin-corpus-actions-cell button {
+  padding: 5px 12px; border-radius: 6px; border: 1px solid var(--red); background: #fff; color: var(--red);
+  font-size: 12.5px; font-weight: 600; cursor: pointer;
+}
+.admin-corpus-actions-cell button:hover { background: rgba(232, 79, 99, .08); }
+.admin-corpus-actions-cell span { color: var(--muted); font-size: 12.5px; }
+
+.admin-corpus-pager { display: flex; align-items: center; gap: 12px; margin-top: 16px; font-size: 13px; color: var(--muted); }
+.admin-corpus-pager button {
+  padding: 6px 14px; border-radius: 6px; border: 1px solid var(--line); background: #fff; font-size: 13px;
+  cursor: pointer; color: var(--ink);
+}
+.admin-corpus-pager button:hover:not(:disabled) { border-color: var(--blue); color: var(--blue-dark); }
+.admin-corpus-pager button:disabled { opacity: .5; cursor: default; }
+
+.admin-btn-primary {
+  padding: 8px 16px; border-radius: 8px; border: none; background: var(--blue); color: #fff;
+  font-size: 13.5px; font-weight: 600; cursor: pointer;
+}
+.admin-btn-primary:hover:not(:disabled) { background: var(--blue-dark); }
+.admin-btn-primary:disabled { opacity: .55; cursor: default; }
+.admin-btn-danger-outline {
+  padding: 6px 14px; border-radius: 6px; border: 1px solid var(--red); background: #fff; color: var(--red);
+  font-size: 12.5px; font-weight: 600; cursor: pointer;
+}
+.admin-btn-danger-outline:hover:not(:disabled) { background: rgba(232, 79, 99, .08); }
+.admin-btn-danger-outline:disabled { opacity: .55; cursor: default; }
+
+.admin-corpus-status-note { color: var(--muted); font-size: 13px; margin-top: 12px; }
+
+/* Remove-from-corpus confirmation — a real centered modal instead of an
+   inline unstyled block. The dialog's own internal markup (button/span text)
+   is intentionally left byte-identical where tests/corpus-admission-remove-ui
+   .test.mjs asserts on it; only the backdrop and non-asserted elements are
+   styled here. */
+.admin-dialog-backdrop {
+  position: fixed; inset: 0; background: rgba(8, 20, 26, .5); display: flex; align-items: center;
+  justify-content: center; padding: 20px; z-index: 60;
+}
+.admin-dialog-backdrop [role="dialog"] {
+  background: var(--surface); border-radius: 14px; padding: 26px; max-width: 480px; width: 100%;
+  box-shadow: var(--shadow); max-height: 90vh; overflow-y: auto;
+}
+.admin-dialog-backdrop [role="dialog"] h2 { margin: 0 0 12px; font-size: 17px; color: var(--sidebar); }
+.admin-dialog-backdrop [role="dialog"] p { font-size: 13.5px; color: var(--muted); line-height: 1.55; margin: 0 0 6px; }
+.admin-dialog-backdrop [role="dialog"] label { display: block; margin: 16px 0 4px; font-size: 13px; font-weight: 600; color: var(--ink); }
+.admin-dialog-backdrop [role="dialog"] textarea {
+  display: block; width: 100%; margin-top: 6px; padding: 9px 12px; border: 1px solid var(--line);
+  border-radius: 8px; font-size: 13.5px; min-height: 76px; font-family: inherit; resize: vertical;
+}
+.admin-dialog-backdrop [role="dialog"] textarea:focus { outline: none; border-color: var(--blue); box-shadow: 0 0 0 3px var(--blue-soft); }
+.admin-dialog-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
+.admin-dialog-cancel { padding: 8px 16px; border-radius: 6px; border: 1px solid var(--line); background: #fff; font-size: 13px; cursor: pointer; }
+.admin-dialog-cancel:hover:not(:disabled) { border-color: var(--muted); }
+.admin-dialog-danger { padding: 8px 16px; border-radius: 6px; border: none; background: var(--red); color: #fff; font-size: 13px; font-weight: 600; cursor: pointer; }
+.admin-dialog-danger:hover:not(:disabled) { background: #c5384c; }
+.admin-dialog-danger:disabled { opacity: .5; cursor: default; }
+
+@media (max-width: 640px) {
+  .admin-corpus-toolbar { flex-direction: column; align-items: stretch; }
+  .admin-corpus-toolbar input, .admin-corpus-toolbar select { width: 100%; }
+}
+
+/* Admin Phase 2B — Shadow workspace polish. Reuses the same card/metric-
+   tile/badge/collapsible system as Corpus (Phase 2A); nothing new here
+   beyond the policy-comparison cards and two small table helpers. */
+.admin-policy-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin: 12px 0 20px; }
+.admin-policy-card { background: var(--canvas); border: 1px solid var(--soft-line); border-radius: 10px; padding: 12px 14px; }
+.admin-policy-card-name { font-size: 12px; font-weight: 700; color: var(--sidebar); margin-bottom: 8px; font-family: var(--font-geist-mono), monospace; }
+.admin-policy-card-stats { display: flex; flex-wrap: wrap; gap: 6px; }
+
+.admin-status-badge-count { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--ink); }
+
+.admin-table-subtext { font-size: 11px; color: var(--muted); margin-top: 2px; white-space: nowrap; }
+.admin-table-drift { background: rgba(245, 138, 59, .12); font-weight: 700; }
+
+/* Admin Phase 2C — Developer workspace polish. Reuses the Corpus/Shadow
+   card/metric-tile/badge/collapsible system throughout. */
+.admin-cta-link {
+  display: inline-flex; align-items: center; gap: 8px; text-decoration: none; margin: 4px 0 16px;
+}
+.admin-metric-tile-value--text { font-size: 14px; font-weight: 600; line-height: 1.35; word-break: break-word; overflow-wrap: anywhere; }
+
+.admin-endpoint-list { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.admin-endpoint-list li {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; padding: 8px 12px;
+  background: var(--canvas); border-radius: 8px; font-size: 12.5px;
+}
+.admin-endpoint-list code { font-family: var(--font-geist-mono), monospace; font-size: 12px; color: var(--blue-dark); }
+.admin-endpoint-list span { color: var(--muted); }
+.admin-endpoint-list-label { margin-top: 18px; }
+
+/* Test workspace tools — each a self-contained block; a visible divider
+   separates "Clear my rooms" from "Clear account rooms" inside one card. */
+.admin-debug-tool { padding-top: 20px; border-top: 1px solid var(--soft-line); }
+.admin-debug-tool:first-of-type { padding-top: 14px; border-top: none; }
+.admin-debug-tool-heading { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; font-size: 14.5px; color: var(--sidebar); }
+.admin-debug-tool-heading .admin-card-title-icon { color: var(--sidebar); }
+
+.admin-debug-plan { margin-top: 14px; padding: 14px 16px; border-radius: 10px; font-size: 13.5px; }
+.admin-debug-plan--warning { background: rgba(245, 138, 59, .08); border: 1px solid rgba(245, 138, 59, .3); }
+.admin-debug-plan-heading { display: flex; align-items: center; gap: 8px; color: #a15a1f; margin-bottom: 6px; }
+.admin-debug-plan p { margin: 4px 0; color: var(--ink); }
+.admin-debug-confirm-label { display: block; margin: 12px 0 4px; font-size: 13px; }
+.admin-debug-confirm-label input {
+  display: block; margin-top: 6px; width: 100%; max-width: 360px; padding: 8px 12px;
+  border: 1px solid var(--line); border-radius: 8px; font-size: 13.5px;
+}
+.admin-dialog-actions--inline { margin-top: 14px; justify-content: flex-start; }
+
+.admin-form-notice--icon { display: inline-flex; align-items: center; gap: 6px; }
+
+.admin-lookup { max-width: 100%; }
+.admin-lookup-form { display: flex; gap: 10px; margin: 4px 0 24px; }
+.admin-lookup-input-wrap { position: relative; flex: 1; }
+.admin-lookup-input-icon { position: absolute; left: 14px; top: 50%; transform: translateY(-50%); color: var(--muted); pointer-events: none; }
+.admin-lookup-input-wrap input {
+  width: 100%; padding: 12px 14px 12px 40px; border: 1px solid var(--line); border-radius: 10px;
+  font-size: 15px; font-family: var(--font-geist-sans), sans-serif; color: var(--ink);
+}
+.admin-lookup-input-wrap input:focus { outline: none; border-color: var(--blue); box-shadow: 0 0 0 3px var(--blue-soft); }
+.admin-lookup-results { margin-top: 24px; }
+.admin-lookup-results h3 { font-size: 14px; margin: 0 0 10px; color: var(--sidebar); }
+
+/* Report inspection (app/admin/developer/reports/[id]) — replaces bare,
+   browser-default-bulleted <ul> lists with a clean key/value list, and gives
+   the zero/full-coverage explanation callouts and collapsible summary lines
+   their own light styling. */
+.admin-plain-list { list-style: none; margin: 8px 0 16px; padding: 0; display: flex; flex-direction: column; gap: 7px; }
+.admin-plain-list li { font-size: 13.5px; color: var(--ink); line-height: 1.5; }
+.admin-plain-list code { font-size: 12.5px; }
+
+.admin-card-callout {
+  margin: 16px 0; padding: 14px 16px; background: var(--canvas); border-left: 3px solid var(--blue);
+  border-radius: 0 8px 8px 0;
+}
+.admin-card-callout h3 { margin-top: 0; }
+
+.admin-collapsible-summary-line { display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+/* Report-list style tables — the "recent reports" table on /admin/developer
+   and the "Saved reports" results table on /admin/developer/lookup share
+   this exact 6-column shape (Title, Account, Score band, AI score, Updated,
+   Inspect). table-layout: fixed lets Title/Account truncate with an
+   ellipsis instead of growing to fit a long title, which is what forced
+   the whole table (and therefore its .admin-card) wider than the page on
+   Preview. Score band / AI score / Updated / Inspect stay compact and
+   never wrap. A lower min-width (640px, vs. the base .developer-table's
+   860px) still guarantees the compact columns stay legible on a narrow
+   viewport, where .admin-table-scroll's own overflow-x: auto takes over. */
+.admin-table--report-list { table-layout: fixed; min-width: 640px; }
+.admin-table--report-list th, .admin-table--report-list td { overflow: hidden; }
+.admin-table--report-list .admin-col-title { width: 34%; }
+.admin-table--report-list .admin-col-account { width: 24%; }
+.admin-table--report-list .admin-col-band { width: 12%; }
+.admin-table--report-list .admin-col-score { width: 10%; }
+.admin-table--report-list .admin-col-updated { width: 14%; }
+.admin-table--report-list .admin-col-action { width: 6%; }
+.admin-table--report-list td.admin-col-title,
+.admin-table--report-list td.admin-col-account {
+  text-overflow: ellipsis; white-space: nowrap; cursor: default;
+}
+
+@media (max-width: 720px) {
+  .admin-table--report-list { min-width: 560px; }
 }

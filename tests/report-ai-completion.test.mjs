@@ -82,6 +82,43 @@ test("AI worker/model rejection: room-page-shell.tsx's runAiAnalysis never rejec
   assert.ok(result.aiAnalysis.error.length > 0, "a genuine AI failure must carry a useful, non-empty error message, not a blank one");
 });
 
+/**
+ * Mixed-language misclassification bug, retry-recovery half: retryAiCheck
+ * used to call runAiAnalysis(full.text, full.features.detectedLanguage) —
+ * reusing whatever language was persisted at the ORIGINAL upload time. A
+ * report misclassified by the old detector (e.g. "French" for a document
+ * that is actually English) could never recover via retry, since the stale
+ * persisted value never changed. retryAiAnalysisWithFreshLanguage recomputes
+ * language from the report's own text via the CURRENT detectLanguage() on
+ * every call, so a report affected by the old detector self-heals the
+ * moment this fix ships, with no database mutation and no re-upload.
+ */
+test("mixed-language retry recovery: retryAiAnalysisWithFreshLanguage recomputes language from the report's own text via the current detector, rather than trusting a persisted value", async () => {
+  const { retryAiAnalysisWithFreshLanguage } = await import("../app/reports/rooms/[room]/room-page-shell.tsx");
+  const { detectLanguage } = await import("../lib/similarity-core.ts");
+
+  const englishBody = "The study examined population samples and the results were compared with previous findings in this research which was conducted across several institutions. ".repeat(30);
+  assert.equal(detectLanguage(englishBody), "English", "fixture sanity check: the current detector must call this text English");
+
+  // No Worker global in Node, so the real AI analysis genuinely fails here —
+  // matching this file's own established convention (see the runAiAnalysis
+  // test above). The point of this test is that retryAiAnalysisWithFreshLanguage
+  // never throws and never needs a caller-supplied language at all: it derives
+  // language itself, fresh, from the text — there is no stale value to reuse.
+  const result = await retryAiAnalysisWithFreshLanguage(englishBody);
+  assert.equal(result.aiScore, null);
+  assert.equal(result.aiAnalysis.status, "error");
+});
+
+test("mixed-language retry recovery: retryAiCheck calls retryAiAnalysisWithFreshLanguage, not runAiAnalysis(full.text, full.features.detectedLanguage) with the stale persisted value", async () => {
+  const shell = await readFile(new URL("../app/reports/rooms/[room]/room-page-shell.tsx", import.meta.url), "utf8");
+
+  const retryBody = shell.match(/async function retryAiCheck\([\s\S]*?\n {2}\}/)?.[0] ?? "";
+  assert.ok(retryBody.length > 0, "retryAiCheck function body must be found");
+  assert.match(retryBody, /await retryAiAnalysisWithFreshLanguage\(full\.text\)/, "retry must recompute language fresh from the report's own text, not reuse full.features.detectedLanguage");
+  assert.doesNotMatch(retryBody, /runAiAnalysis\(full\.text, full\.features\.detectedLanguage\)/, "retry must no longer trust the persisted (potentially stale) detectedLanguage value");
+});
+
 test("report-save/network rejection: persistAiCompletion resolves {ok:false} when the remote save reports a normal, documented failure, never throwing", async () => {
   const failRemote = async () => ({ ok: false, status: 0, quotaExceeded: false, roomOccupied: false });
   const result = await persistAiCompletion(fakeReport, fakeSummary, 3, failRemote);
@@ -148,9 +185,14 @@ test("similarity remaining available when AI fails: runCheck saves the similarit
 test("refresh/reopen after failure, and pre-existing stranded reports: the room's 'processing' branch offers a real retry action once polling is exhausted, not just re-polling the same frozen state — this is also the backward-compatible recovery for any report already stuck at ai_status='processing' before this fix, since deriveRoomStatus treats every processing row identically regardless of age", async () => {
   const shell = await readFile(new URL("../app/reports/rooms/[room]/room-page-shell.tsx", import.meta.url), "utf8");
 
-  const processingBranchStart = shell.indexOf('{occupant.status === "processing" && occupant.report && (');
-  const readyBranchStart = shell.indexOf('{occupant.status === "ready" && occupant.report && (');
-  assert.ok(processingBranchStart > -1 && readyBranchStart > processingBranchStart, "the processing branch must be found, before the ready branch");
+  // Release-hardening audit finding LIFECYCLE-05: the room card no longer
+  // branches on occupant.status === "processing" directly — it branches on
+  // !isFullyRevealed(occupant), which also covers an AI/similarity-terminal
+  // occupant still waiting on the other pipeline (see room-processing-navigation.test.mjs's
+  // own NOT_REVEALED_NEEDLE/READY_NEEDLE constants for the same needles).
+  const processingBranchStart = shell.indexOf('{!isFullyRevealed(occupant) && occupant.report && (');
+  const readyBranchStart = shell.indexOf('{occupant.status === "ready" && isFullyRevealed(occupant) && occupant.report && (');
+  assert.ok(processingBranchStart > -1 && readyBranchStart > processingBranchStart, "the not-revealed branch must be found, before the ready branch");
   const processingBranch = shell.slice(processingBranchStart, readyBranchStart);
 
   assert.match(processingBranch, /pollExhausted \?/, "the exhausted-poll state must still be distinguished from genuinely still-in-flight");
@@ -250,7 +292,7 @@ test("directly rejected aiAnalysisPromise: the happy path is unaffected — a re
 /**
  * Release-hardening audit finding LIFECYCLE-02: two AI-completion resaves
  * for the same report can race (the automatic post-upload pass in one tab
- * still finishing while a different tab/device's "Retry AI check" also
+ * still finishing while a different tab/device's "Retry analysis" also
  * completes). Proven here against the REAL POST /api/reports route and a
  * real on-disk database — not a unit-level stand-in — because the guarantee
  * this test exists to prove ("ready" is a sticky terminal state with

@@ -34,7 +34,12 @@ export type DeleteAccountDataResult = {
  * corpus_document_representation is only ever deleted once its LAST
  * remaining corpus_submission_references row is gone, so another account's
  * still-live report keeps its evidence exactly as report-deletion.ts already
- * guarantees for the single-report case.
+ * guarantees for the single-report case. Accepted/promoted corpus content is
+ * likewise durable: deleteReportCorpusAdmissionData leaves an ACCEPTed
+ * decision, its retained text, and its accepted_representations fingerprint
+ * completely untouched (only the report's own job-tracking row and any
+ * never-accepted decision go), so this function is safe to run against a
+ * living account without ever eroding the corpus.
  *
  * Goes further than saved_reports.document_identity_id alone: also queries
  * document_identities directly by account_id, which additionally reaches
@@ -47,16 +52,42 @@ export type DeleteAccountDataResult = {
  * guess, so there is no risk of touching a different account's data the way
  * a canonical-hash lookup would.
  *
- * Does NOT touch users/sessions itself — the caller (DELETE /api/auth/me)
- * does that in its own transaction, only after this function returns, per
- * "delete the account only after dependent cleanup succeeds."
+ * Every query and write here is scoped to `accountId` (WHERE user_id = ? /
+ * WHERE account_id = ? / a source_ref deterministically built from this
+ * account + its own report's device_key + id) — it can never reach another
+ * account's rows, and `accountId` must come from the caller's authenticated
+ * session, never from request input.
+ *
+ * Does NOT touch users/sessions/consent state itself — a full account
+ * deletion's caller (DELETE /api/auth/me) removes those separately, in its
+ * own transaction, only after this function returns; the developer
+ * rooms-reset caller (POST /api/developer/reset-rooms) deliberately keeps
+ * the account, its sessions, and its consent exactly as they were and only
+ * wants the report/room state cleared.
  *
  * Safe to retry: every statement here is a plain DELETE (a no-op, not an
  * error, against a row already gone), and both row sets are queried fresh on
  * every call rather than from a stale precomputed list — a retry after a
  * partial failure simply finds fewer remaining rows and finishes the job.
+ * Calling it again once the account already has zero reports is a clean
+ * no-op that returns { reportsDeleted: 0, identitiesProcessed: 0 }.
+ *
+ * options.preserveActivelyPromotedRepresentations is forwarded verbatim to
+ * every deleteReportDocumentData call (see that function's header comment).
+ * The developer rooms-reset endpoint sets it so a promoted corpus-matching
+ * source is never removed as a side effect of clearing the developer's own
+ * rooms; the account-deletion path (deleteAccountData below) deliberately
+ * leaves it unset, keeping its behavior byte-for-byte identical to before —
+ * in the live product no report ever has a corpus_submission_references row
+ * at all (recordSubmissionReference has no production caller), so that path
+ * never reaches the representation-deletion branch this option guards
+ * regardless.
  */
-export async function deleteAccountData(client: Client, accountId: string): Promise<DeleteAccountDataResult> {
+export async function deleteAllReportDataForAccount(
+  client: Client,
+  accountId: string,
+  options: { preserveActivelyPromotedRepresentations?: boolean } = {},
+): Promise<DeleteAccountDataResult> {
   const reportsResult = await client.execute({
     sql: "SELECT device_key, id FROM saved_reports WHERE user_id = ?",
     args: [accountId],
@@ -82,10 +113,22 @@ export async function deleteAccountData(client: Client, accountId: string): Prom
   });
   const identities = identitiesResult.rows as unknown as { id: string }[];
   for (const identity of identities) {
-    await deleteReportDocumentData(client, identity.id);
+    await deleteReportDocumentData(client, identity.id, options);
   }
 
   return { reportsDeleted: reports.length, identitiesProcessed: identities.length };
+}
+
+/**
+ * Account deletion's dependent-cleanup phase — a thin, stable alias kept for
+ * DELETE /api/auth/me (and its tests), which call this immediately before
+ * invalidateSessionsAndDeleteUser. See deleteAllReportDataForAccount for the
+ * full contract; this name is retained only so account-deletion call sites
+ * read as "account data" rather than the more general report/room cleanup
+ * the developer rooms-reset endpoint reuses.
+ */
+export async function deleteAccountData(client: Client, accountId: string): Promise<DeleteAccountDataResult> {
+  return deleteAllReportDataForAccount(client, accountId);
 }
 
 /**

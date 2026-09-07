@@ -1,3 +1,5 @@
+import type { DetectedLanguage } from "./similarity-core";
+
 const DATABASE = "turnitplus";
 const STORE = "reports";
 const SUMMARY_STORE = "report_summaries";
@@ -36,7 +38,7 @@ type ReportHistorySummary = StoredReportLike & {
     referenceListRatio: number;
     highFrequencyShingleCount: number;
     repeatedThreeGramCount: number;
-    detectedLanguage: "Arabic" | "French" | "English" | "Mixed";
+    detectedLanguage: DetectedLanguage;
   };
   excludedDocuments: number;
   matchedWordCount: number;

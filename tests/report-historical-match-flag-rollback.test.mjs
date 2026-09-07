@@ -5,7 +5,14 @@ import path from "path";
 import { createClient } from "@libsql/client";
 import { applyMigrationsLibsql } from "../lib/ingest.js";
 import { getOrComputeHistoricalMatchSnapshot } from "../lib/report-historical-match.ts";
-import { USER_SUBMISSION_MATCHER_VERSION } from "../lib/user-submission-matching.ts";
+// SNAPSHOT_MATCHER_VERSION (base matcher label + candidate-discovery config
+// digest) is the exact value CURRENT_VERSIONS.matcherVersion holds, so a row
+// inserted with it takes the cache-hit path rather than a fresh recompute —
+// which is what every test here relies on (see this file's own header
+// comment). Imported directly to avoid hardcoding a version string that
+// could silently drift.
+import { SNAPSHOT_MATCHER_VERSION } from "../lib/report-historical-match.ts";
+const USER_SUBMISSION_MATCHER_VERSION = SNAPSHOT_MATCHER_VERSION;
 import { CORPUS_FINGERPRINT_VERSION, CANONICALIZATION_VERSION } from "../lib/user-submission-corpus.ts";
 
 /**
