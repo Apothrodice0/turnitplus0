@@ -1,4 +1,4 @@
-import type { Client } from "@libsql/client";
+import type { ArchiveReadClient } from "./archive-read-retry";
 import { tokens, gramHash, informativeGram } from "./similarity-core";
 import { ARCHIVE_SHINGLE_SIZE } from "./archive-fingerprint";
 import { phraseFanOut, phraseSearch } from "./archive-phrase-index";
@@ -199,7 +199,7 @@ export type PhraseProbeRun = {
  * fanOut === 0 also resolves "this absent gram was really DF=0").
  */
 export async function runPhraseProbes(
-  client: Client,
+  client: ArchiveReadClient,
   probes: SelectedProbe[],
   opts: { fanOutLimit: number; existingCandidateIds?: string[] },
 ): Promise<PhraseProbeRun> {
@@ -229,7 +229,7 @@ export async function runPhraseProbes(
  * skipped without a round-trip. Returns Map<gramHash, exactDf>.
  */
 export async function resolveQueryGramDf(
-  client: Client,
+  client: ArchiveReadClient,
   queryWords: string[],
   matchedPositions: number[],
   opts: { stopHashSet: Set<string>; maxChecks?: number },
@@ -273,7 +273,7 @@ export type PhraseFallbackDiscovery = {
  * per-probe candidates by fanOutLimit.
  */
 export async function phraseFallbackDiscovery(
-  client: Client,
+  client: ArchiveReadClient,
   submittedText: string,
   matchedPositions: number[],
   compactCandidateIds: string[],

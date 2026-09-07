@@ -1,4 +1,5 @@
 import type { Client } from "@libsql/client";
+import type { ArchiveReadClient } from "./archive-read-retry";
 import { tokens, grams, gramHash, informativeGram } from "./similarity-core";
 import { ARCHIVE_SHINGLE_SIZE } from "./archive-fingerprint";
 import { loadDfBandMap, deriveStopHashSet, ARCHIVE_DF_BAND_POLICY_VERSION, SCORER_STOP_THRESHOLD } from "./archive-df-bands";
@@ -231,7 +232,7 @@ export async function buildCosourceAdjacencyTable(
  *   - never an N+1-per-neighbour query
  */
 export async function loadCosources(
-  client: Client,
+  client: ArchiveReadClient,
   anchorRepresentationIds: string[],
   opts: { policyVersion?: string } = {},
 ): Promise<string[]> {

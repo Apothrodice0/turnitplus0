@@ -1,4 +1,5 @@
 import type { Client } from "@libsql/client";
+import type { ArchiveReadClient } from "./archive-read-retry";
 import { archiveShingleHashes, ARCHIVE_SHINGLE_SIZE } from "./archive-fingerprint";
 
 /**
@@ -126,9 +127,11 @@ export type DfBandMap = {
 };
 
 /** Request-time load — the ONLY archive-DF data a request reads directly.
- *  Small by design (~the stop set). */
+ *  Small by design (~the stop set). Takes the narrow read-client surface so the
+ *  server matcher can hand it its bounded read-retry wrapper
+ *  (lib/archive-read-retry.ts); a full `Client` still satisfies it. */
 export async function loadDfBandMap(
-  client: Client,
+  client: ArchiveReadClient,
   opts: { policyVersion?: string; bandMax?: number } = {},
 ): Promise<DfBandMap> {
   const policyVersion = opts.policyVersion ?? ARCHIVE_DF_BAND_POLICY_VERSION;

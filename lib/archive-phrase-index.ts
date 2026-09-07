@@ -1,4 +1,5 @@
 import type { Client, InStatement } from "@libsql/client";
+import type { ArchiveReadClient } from "./archive-read-retry";
 import { tokens } from "./similarity-core";
 
 /**
@@ -82,7 +83,7 @@ export async function optimizePhraseIndex(client: Client): Promise<void> {
  * Every archive document whose token stream contains `phraseWords` as a
  * contiguous run. representation_id list only — no text, no snippet, no score.
  */
-export async function phraseSearch(client: Client, phraseWords: string[], limit = 100_000): Promise<string[]> {
+export async function phraseSearch(client: ArchiveReadClient, phraseWords: string[], limit = 100_000): Promise<string[]> {
   const res = await client.execute({
     sql: `SELECT m.representation_id AS representation_id
             FROM ${ARCHIVE_PHRASE_FTS_TABLE} f
@@ -101,7 +102,7 @@ export async function phraseSearch(client: Client, phraseWords: string[], limit 
  * doubles as the exact DF oracle for DF values the compact df-band table
  * does not persist (lib/archive-phrase-fallback.ts).
  */
-export async function phraseFanOut(client: Client, phraseWords: string[]): Promise<number> {
+export async function phraseFanOut(client: ArchiveReadClient, phraseWords: string[]): Promise<number> {
   const res = await client.execute({
     sql: `SELECT COUNT(*) AS n FROM ${ARCHIVE_PHRASE_FTS_TABLE} f WHERE f.${ARCHIVE_PHRASE_FTS_TABLE} MATCH ?`,
     args: [toPhraseMatch(phraseWords)],

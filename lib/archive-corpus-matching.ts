@@ -1,4 +1,4 @@
-import type { Client } from "@libsql/client";
+import type { ArchiveReadClient } from "./archive-read-retry";
 import { tokens, grams, gramHash, containment } from "./similarity-core";
 import { scoreAgainstArchive, type ArchiveScoringResult, type ArchiveScoringMatchingParameters } from "./archive-similarity-scoring";
 import { ARCHIVE_FINGERPRINT_VERSION } from "./archive-corpus-seed";
@@ -24,6 +24,11 @@ const ARCHIVE_SELF_EXCLUSION_CONTAINMENT = 0.75;
  * (lib/archive-similarity-scoring.ts's scoreAgainstArchive, ported verbatim
  * from app/similarity-worker.ts's analyze()) is UNCHANGED and still runs over
  * canonical-text-reconstructed archive grams. Read-only; never writes.
+ *
+ * `client` is the narrow ArchiveReadClient surface (execute() only) so the
+ * server matcher can pass its bounded transient-read-retry wrapper
+ * (lib/archive-read-retry.ts) — a real @libsql/client Client still satisfies
+ * it, and this function's behaviour is identical either way.
  *
  * DISCOVERY PIPELINE (frozen shape, Slices 2A / 2A.4 / 2A.5):
  *   submission
@@ -110,7 +115,7 @@ function queryHashSet(text: string): Set<string> {
  * candidateLimit cut is stable; final scoring re-orders by archive_order.
  */
 async function compactDiscovery(
-  client: Client,
+  client: ArchiveReadClient,
   queryHashes: Set<string>,
   compactFingerprintVersion: string,
   candidateLimit: number,
@@ -149,7 +154,7 @@ type ScoreOverCandidatesResult = {
  * set, then call scoreAgainstArchive UNMODIFIED.
  */
 async function scoreOverCandidates(
-  client: Client,
+  client: ArchiveReadClient,
   submittedText: string,
   candidateIds: string[],
   documentCount: number,
@@ -285,7 +290,7 @@ export type MatchAgainstArchiveCorpusResult = ArchiveScoringResult & {
 };
 
 export async function matchAgainstArchiveCorpus(
-  client: Client,
+  client: ArchiveReadClient,
   submittedText: string,
   options: MatchAgainstArchiveCorpusOptions,
 ): Promise<MatchAgainstArchiveCorpusResult> {
