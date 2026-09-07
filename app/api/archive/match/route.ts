@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { checkRate, checkReadRate } from "../../../../lib/rate-limit";
+import { checkRate } from "../../../../lib/rate-limit";
 import { clientIpFrom } from "../../../../lib/client-ip";
 import { getReportsDbClient } from "../../../../lib/reports-db";
 import { isArchiveServerSideEnabled } from "../../../../lib/archive-server-flag";
@@ -11,11 +11,13 @@ import { analyzeArchiveOnServer } from "../../../../lib/archive-server-analysis"
  * ARCHIVE_SERVER_SIDE_ENABLED is on.
  *
  *   GET  -> { archiveServerSide: boolean }
- *           The client (lib/archive-analysis-runtime.ts) reads this ONCE per
- *           session to decide engine: false => keep the browser static-index
- *           worker (app/similarity-worker.ts); true => POST here instead. Same
- *           "small dedicated GET for client-facing server state" shape as
- *           /api/upload-limit. Default OFF when the env var is absent/malformed.
+ *           A pure, DB-independent read of ARCHIVE_SERVER_SIDE_ENABLED — no
+ *           libsql client, no rate-limit bucket, no DB dependency of any kind
+ *           (see the GET handler's own comment). The client
+ *           (lib/archive-analysis-runtime.ts) reads this ONCE per session to
+ *           decide engine: false => keep the browser static-index worker
+ *           (app/similarity-worker.ts); true => POST here instead. Default OFF
+ *           when the env var is absent/malformed.
  *
  *   POST { text } -> { result: ArchiveAnalysisResult }
  *           Runs the committed server matcher (compact + FTS + G1s co-source)
@@ -46,19 +48,25 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
 
-export async function GET(request: Request) {
-  try {
-    const rate = await checkReadRate(clientIpFrom(request));
-    if (!rate.allowed) {
-      return new NextResponse(JSON.stringify({ error: "Too many requests" }), { status: 429, headers: { "Retry-After": String(rate.retryAfter) } });
-    }
-    return new NextResponse(
-      JSON.stringify({ archiveServerSide: isArchiveServerSideEnabled() }),
-      { status: 200, headers: { "Content-Type": "application/json" } },
-    );
-  } catch (err) {
-    return new NextResponse(JSON.stringify({ error: err instanceof Error ? err.message : "Internal error" }), { status: 500 });
-  }
+/**
+ * Engine discovery — a pure read of the process-level flag
+ * (lib/archive-server-flag.ts). No client IP parsing, no rate-limit bucket,
+ * no libsql/Turso client, no DB access of any kind: with
+ * ARCHIVE_SERVER_SIDE_ENABLED off (the default) the browser-engine path must
+ * not inherit a server/DB failure mode it has no need for.
+ *
+ * There is deliberately NO try/catch here downgrading a failure to
+ * `{ archiveServerSide: false }` — the handler has no failure path to catch.
+ * If the HTTP layer itself ever fails, the client's discovery
+ * (lib/archive-analysis-runtime.ts) still THROWS on the network error /
+ * non-2xx / malformed body exactly as before: fail closed, never a silent
+ * browser fallback.
+ */
+export async function GET() {
+  return new NextResponse(
+    JSON.stringify({ archiveServerSide: isArchiveServerSideEnabled() }),
+    { status: 200, headers: { "Content-Type": "application/json" } },
+  );
 }
 
 export async function POST(request: Request) {
