@@ -559,6 +559,28 @@ export type CandidateDiscoveryDiagnostics = {
   fallbackUsed: boolean;
   /** The maxDF ceiling actually applied, or null when pruning was disabled (options.maxDocumentFrequency undefined). */
   appliedMaxDocumentFrequency: number | null;
+  /**
+   * Slice 2H — bounded admission-family maxDF recovery. The query shingle
+   * hashes that maxDF pruning REMOVED, in deterministic query/gram order (a
+   * subsequence of the ordered input hash list — first-occurrence order of
+   * each informative 5-gram in the submitted text, never reordered). Paired
+   * with the caller's own ordered full query hash list
+   * ([...ownShingleHashes]), this is enough to reconstruct every maximal
+   * contiguous run of pruned 5-grams WITHOUT a second DF query — see
+   * lib/corpus-admission-gate.ts's admission-family recovery pass. It is the
+   * empty array whenever nothing was pruned, pruning was disabled, or the
+   * low-information fallback abandoned pruning (highDfPrunedCount === 0 in
+   * all three cases).
+   *
+   * OPT-IN capture: writeDiagnostics only assigns this when the diagnostics
+   * sink the caller supplied already carries the key (e.g. the gate's own
+   * sink is constructed with `prunedShingleHashes: []`). A caller that
+   * passes a bare counts-only diagnostics object — several existing
+   * matching-path tests do — keeps its exact five-key shape and pays nothing
+   * for a hash array it does not read. Every scalar field above is still
+   * populated unconditionally.
+   */
+  prunedShingleHashes: string[];
 };
 
 /**
@@ -720,13 +742,24 @@ export async function applyHighFrequencyShinglePruning(
   },
 ): Promise<Set<string>> {
   const hashList = [...shingleHashes];
-  const writeDiagnostics = (surviving: number, fallbackUsed: boolean, appliedMaxDf: number | null) => {
+  const writeDiagnostics = (
+    surviving: number,
+    fallbackUsed: boolean,
+    appliedMaxDf: number | null,
+    prunedHashesInQueryOrder: string[] = [],
+  ) => {
     if (!options.diagnostics) return;
     options.diagnostics.inputShingleCount = hashList.length;
     options.diagnostics.survivingShingleCount = surviving;
     options.diagnostics.highDfPrunedCount = hashList.length - surviving;
     options.diagnostics.fallbackUsed = fallbackUsed;
     options.diagnostics.appliedMaxDocumentFrequency = appliedMaxDf;
+    // Slice 2H opt-in capture — only when the caller's sink already carries
+    // the key (see CandidateDiscoveryDiagnostics.prunedShingleHashes). Keeps
+    // every existing counts-only diagnostics consumer byte-identical.
+    if ("prunedShingleHashes" in options.diagnostics) {
+      options.diagnostics.prunedShingleHashes = prunedHashesInQueryOrder;
+    }
   };
 
   if (options.maxDocumentFrequency === undefined || hashList.length === 0) {
@@ -781,13 +814,17 @@ export async function applyHighFrequencyShinglePruning(
 
   const discriminative = hashList.filter((hash) => (eligibleDocumentFrequency.get(hash) ?? 0) <= maxDf);
   if (discriminative.length >= options.minDiscriminativeShingles || discriminative.length === hashList.length) {
-    writeDiagnostics(discriminative.length, false, maxDf);
+    // `hashList.filter` preserves query/gram order, so the pruned list is a
+    // deterministic subsequence of the ordered input — exactly what Slice 2H
+    // recovery needs to reconstruct contiguous pruned runs.
+    const prunedInQueryOrder = hashList.filter((hash) => (eligibleDocumentFrequency.get(hash) ?? 0) > maxDf);
+    writeDiagnostics(discriminative.length, false, maxDf, prunedInQueryOrder);
     return new Set(discriminative);
   }
 
   // Low-information fallback: abandon pruning for this query and search on
   // the complete original shingle set — exactly what an unpruned run does.
-  writeDiagnostics(hashList.length, true, maxDf);
+  writeDiagnostics(hashList.length, true, maxDf, []);
   return shingleHashes;
 }
 
@@ -1281,6 +1318,185 @@ export async function isRepresentationEligibleForMatching(
   });
   const row = result.rows[0] as unknown as { eligible: number | bigint } | undefined;
   return row !== undefined && Number(row.eligible) === 1;
+}
+
+// ===========================================================================
+// Slice 2H — bounded admission-family maxDF recovery helpers.
+//
+// maxDF pruning (applyHighFrequencyShinglePruning, above) stays a
+// discovery-COST optimisation for lib/corpus-admission-gate.ts's
+// ADMISSION_DEDUP family/redundancy lookup. The three helpers below let the
+// gate fully preserve admission-family CORRECTNESS for a large legitimate
+// cohort — one whose shared passage sits in enough already-admitted
+// representations that maxDF would drop those shingles from primary
+// discovery — with a hard, corpus-size-independent work bound. All three
+// reuse the SINGLE source-of-truth ADMISSION_DEDUP eligibility fragment
+// (admissionEligibilitySql / admissionEligibilityBindArgs), never a second
+// rule, and emit no maturity term (ADMISSION_DEDUP deliberately sees
+// immature stored content — see CorpusEligibilityMode).
+// ===========================================================================
+
+/**
+ * Exact canonical-hash guard for computeEvaluationCore's STEP A: "is this
+ * incoming document already present, canonically byte-for-byte, as an
+ * ADMISSION_DEDUP-ELIGIBLE representation?" — a single point lookup on
+ * ux_corpus_document_representations_canonical_sha256 plus the exact
+ * ADMISSION_DEDUP eligibility predicate candidate discovery applies.
+ *
+ * NOT findReusableRepresentationByCanonicalHash: that is a bare hash lookup
+ * with no eligibility awareness of its own (it also backs
+ * lib/corpus-admission-promotion.ts's find-or-create dedup, where
+ * eligibility is irrelevant), so it would return a representation whose only
+ * backing is a REVOKED promotion and wrongly block re-admission. No maturity
+ * term — ADMISSION_DEDUP mode emits none. excludeAccountId is threaded
+ * identically to findCandidateCorpusRepresentations
+ * (buildReportAdmissionAccountPrefix) so a representation backed ONLY by the
+ * evaluating account's own prior admissions does not block re-admission of
+ * that account's own content.
+ */
+export async function findAdmissionDedupRepresentationByCanonicalHash(
+  client: Client,
+  canonicalHash: string,
+  options: { excludeAccountId?: string } = {},
+): Promise<CorpusDocumentRepresentation | null> {
+  const excludeAccountPrefix = options.excludeAccountId ? buildReportAdmissionAccountPrefix(options.excludeAccountId) : null;
+  const eligibilitySql = admissionEligibilitySql("ADMISSION_DEDUP");
+  const result = await client.execute({
+    sql: `SELECT r.id, r.canonical_sha256, r.canonical_text, r.word_count, r.language, r.canonicalization_version, r.extractor_version, r.first_seen_at, r.created_at
+          FROM corpus_document_representations r
+          WHERE r.canonical_sha256 = ?
+            AND ${eligibilitySql}`,
+    // `?` order: the canonical hash, then admissionEligibilitySql's fixed
+    // placeholder order (account-prefix ×3 for ADMISSION_DEDUP — no maturity
+    // / exempt binds are emitted in this mode).
+    args: [canonicalHash, ...admissionEligibilityBindArgs(excludeAccountPrefix, "ADMISSION_DEDUP", null, "[]")],
+  });
+  const row = result.rows[0] as unknown as RawRepresentationRow | undefined;
+  return row ? toRepresentation(row) : null;
+}
+
+/** One bounded cursor page of a shingle's raw posting list — see findRepresentationOwnersForShingle. */
+export type ShingleOwnerPage = {
+  /** Raw (rowId, representationId) pairs for this page, ascending by rowId, ALREADY scoped to the requested fingerprint_version. */
+  owners: { rowId: number; representationId: string }[];
+  /**
+   * Number of corpus_document_shingles rows this page's indexed range seek
+   * returned for the requested fingerprint_version (== `owners.length`, and
+   * == the requested `limit` when the page is full, fewer at the end of the
+   * posting list). This is the value the Slice 2H hard bound
+   * (<= selectedHashes * maxPages * pageSize) is accounted against — it never
+   * grows with the shingle's total document frequency, and stale fingerprint
+   * generations for the same hash are skipped by the seek, not counted here.
+   */
+  examinedRowCount: number;
+  /**
+   * The rowid cursor to pass as `afterId` for the next page, or null when
+   * the posting list is exhausted (the DB returned fewer rows than `limit`).
+   */
+  nextAfterId: number | null;
+};
+
+/**
+ * ONE bounded cursor page of a single shingle's raw posting list for ONE
+ * fingerprint generation, ordered by corpus_document_shingles.id (the INTEGER
+ * PRIMARY KEY == rowid).
+ *
+ * BOUNDED-PLAN GUARANTEE (Slice 2H). The composite index
+ * idx_corpus_document_shingles_hash_version_id (drizzle/0051) is physically
+ * (shingle_hash, fingerprint_version, id), and `id` IS the rowid, so
+ *   `WHERE shingle_hash = ? AND fingerprint_version = ? AND id > ?
+ *      ORDER BY id LIMIT ?`
+ * is a pure forward range seek: SQLite seeks straight to the first
+ * current-generation entry at (hash, version, afterId) and walks at most
+ * `limit` index entries, with no temp B-tree for the ORDER BY (the index is
+ * already in id order within the (hash, version) group). Rows EXAMINED ==
+ * rows RETURNED <= limit, for a shingle of document frequency 500, 5,000 or
+ * 50,000 alike — no work grows with the posting list or the corpus.
+ *
+ *   - deliberately NOT `ORDER BY representation_id` (forces a full sort of the
+ *     posting list);
+ *   - deliberately no COUNT / aggregate (scans the posting list);
+ *   - the ux_corpus_document_shingles_representation_version_hash unique index
+ *     means at most one row per (representation, version, hash), so one page
+ *     never contains the same representation twice under one fingerprint
+ *     version.
+ *
+ * fingerprint_version is a WHERE term, NOT a post-filter on a hash-only page:
+ * corpus_document_shingles deliberately lets multiple fingerprint generations
+ * coexist for one hash (see drizzle/0019). A post-filter over a
+ * `shingle_hash = ? AND id > ?` page would let a bounded page of
+ * stale-generation rows that sort ahead (lower rowid) of the current cohort
+ * starve the caller's fixed page budget so the current generation is never
+ * reached. Scoping the WHERE clause to the requested generation — served by
+ * the drizzle/0051 composite index so the seek still walks at most `limit`
+ * index entries and never scans a stale predecessor to fill LIMIT — is what
+ * makes the recovery cursor both correct and corpus-size-independent. This
+ * also matches how primary discovery (findCandidateCorpusRepresentations)
+ * already scopes its own shingle JOIN.
+ */
+export async function findRepresentationOwnersForShingle(
+  client: Client,
+  shingleHash: string,
+  options: { afterId: number; limit: number; fingerprintVersion?: string },
+): Promise<ShingleOwnerPage> {
+  const fingerprintVersion = options.fingerprintVersion ?? CORPUS_FINGERPRINT_VERSION;
+  const result = await client.execute({
+    sql: `SELECT id, representation_id
+          FROM corpus_document_shingles
+          WHERE shingle_hash = ?
+            AND fingerprint_version = ?
+            AND id > ?
+          ORDER BY id
+          LIMIT ?`,
+    args: [shingleHash, fingerprintVersion, options.afterId, options.limit],
+  });
+  const rawRows = result.rows as unknown as { id: number | bigint; representation_id: string }[];
+  const owners = rawRows.map((row) => ({ rowId: Number(row.id), representationId: row.representation_id }));
+  const pageWasFull = rawRows.length === options.limit;
+  const lastExaminedRowId = rawRows.length > 0 ? Number(rawRows[rawRows.length - 1].id) : options.afterId;
+  return {
+    owners,
+    examinedRowCount: rawRows.length,
+    nextAfterId: pageWasFull ? lastExaminedRowId : null,
+  };
+}
+
+/**
+ * Given a BOUNDED list of representation ids (at most one recovery owner
+ * page's worth), returns the subset that satisfies the EXACT ADMISSION_DEDUP
+ * eligibility predicate candidate discovery applies
+ * (admissionEligibilitySql("ADMISSION_DEDUP") — the single source of truth,
+ * never a second rule), preserving input order and de-duplicating.
+ *
+ * ONE batched query over the whole id list (chunked only for SQLite's 32,766
+ * SQLITE_MAX_VARIABLE_NUMBER ceiling — never reached at recovery page sizes),
+ * never N+1 per representation. No maturity term (ADMISSION_DEDUP mode).
+ */
+export async function filterRepresentationIdsByEligibility(
+  client: Client,
+  representationIds: string[],
+  options: { excludeAccountId?: string } = {},
+): Promise<string[]> {
+  if (representationIds.length === 0) return [];
+  const uniqueInOrder = [...new Set(representationIds)];
+  const excludeAccountPrefix = options.excludeAccountId ? buildReportAdmissionAccountPrefix(options.excludeAccountId) : null;
+  const eligibilitySql = admissionEligibilitySql("ADMISSION_DEDUP");
+  const bindArgs = admissionEligibilityBindArgs(excludeAccountPrefix, "ADMISSION_DEDUP", null, "[]");
+  const eligible = new Set<string>();
+  const ID_IN_CHUNK_SIZE = 20_000;
+  for (let offset = 0; offset < uniqueInOrder.length; offset += ID_IN_CHUNK_SIZE) {
+    const chunk = uniqueInOrder.slice(offset, offset + ID_IN_CHUNK_SIZE);
+    const placeholders = chunk.map(() => "?").join(",");
+    const result = await client.execute({
+      sql: `SELECT r.id AS id
+            FROM corpus_document_representations r
+            WHERE r.id IN (${placeholders})
+              AND ${eligibilitySql}`,
+      args: [...chunk, ...bindArgs],
+    });
+    for (const row of result.rows as unknown as { id: string }[]) eligible.add(row.id);
+  }
+  return uniqueInOrder.filter((id) => eligible.has(id));
 }
 
 /**

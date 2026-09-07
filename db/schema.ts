@@ -741,6 +741,16 @@ export const corpus_document_shingles = sqliteTable(
   (table) => [
     uniqueIndex("ux_corpus_document_shingles_representation_version_hash").on(table.representation_id, table.fingerprint_version, table.shingle_hash),
     index("idx_corpus_document_shingles_hash").on(table.shingle_hash),
+    // drizzle/0051 — Slice 2H fingerprint-version-safe bounded recovery.
+    // Composite (shingle_hash, fingerprint_version, id) so
+    // lib/user-submission-corpus.ts's findRepresentationOwnersForShingle
+    // rowid-cursor page (WHERE shingle_hash = ? AND fingerprint_version = ?
+    // AND id > ? ORDER BY id LIMIT ?) is a single index range seek: stale
+    // fingerprint generations can never consume the bounded admission-family
+    // recovery cursor budget, and the scan never grows with a hash's document
+    // frequency. The single-column idx_corpus_document_shingles_hash above is
+    // retained — primary discovery's shingle_hash IN (...) GROUP BY still uses it.
+    index("idx_corpus_document_shingles_hash_version_id").on(table.shingle_hash, table.fingerprint_version, table.id),
   ],
 );
 
