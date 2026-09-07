@@ -60,6 +60,13 @@ import type { Client } from "@libsql/client";
  * 0044 that trigger body only RAISE(ABORT)s — it has no DELETE / DROP / ALTER —
  * so scanForDestructiveStatements() flags nothing and no
  * APPROVED_DESTRUCTIVE_STATEMENTS entry is required.)
+ * — and, for the fingerprint-version-safe bounded admission-family recovery
+ * (slice 2H) that followed, extended once more through 0051 (0051 is the
+ * SECOND index-only target migration after 0043: one additive
+ * CREATE INDEX IF NOT EXISTS idx_corpus_document_shingles_hash_version_id on
+ * the already-existing corpus_document_shingles table, no new table, no new
+ * column, no destructive statement — tracked via EXPECTED_INDEXES_BY_MIGRATION
+ * / indexSetState(), exactly like 0043.)
  * — as a deliberate, reviewed decision, not an
  * automatic side effect of adding those migration files; see this file's own
  * EXPECTED_MIGRATION_SHA256 for how future extensions are meant to be
@@ -124,6 +131,7 @@ export const TARGET_MIGRATIONS = [
   "0048_archive_document_representations.sql",
   "0049_archive_scalable_index.sql",
   "0050_archive_cosource_adjacency.sql",
+  "0051_corpus_shingle_hash_version_cursor_index.sql",
 ] as const;
 
 export type TargetMigrationFile = (typeof TARGET_MIGRATIONS)[number];
@@ -297,6 +305,13 @@ export const EXPECTED_TABLES_BY_MIGRATION: Record<TargetMigrationFile, string[]>
   // tracking (the indexes and trigger are implied by the table, exactly like
   // every other table-creating migration).
   "0050_archive_cosource_adjacency.sql": ["archive_document_cosources"],
+  // 0051 (slice 2H — fingerprint-version-safe bounded admission-family recovery)
+  // creates no new table and adds no new column — like 0043 it only adds one
+  // additive index (idx_corpus_document_shingles_hash_version_id) on the
+  // already-existing corpus_document_shingles table, so its applied-state is
+  // tracked via EXPECTED_INDEXES_BY_MIGRATION / indexSetState() below, not
+  // tableSetState() (which would vacuously report "all" on this empty list).
+  "0051_corpus_shingle_hash_version_cursor_index.sql": [],
 };
 
 export const ALL_TARGET_TABLES: string[] = TARGET_MIGRATIONS.flatMap((m) => EXPECTED_TABLES_BY_MIGRATION[m]);
@@ -370,15 +385,26 @@ export const EXPECTED_COLUMNS_BY_MIGRATION: Partial<Record<TargetMigrationFile, 
 /**
  * indexSetState()'s companion declaration — for a migration that adds
  * indexes on already-existing tables and creates neither a new table nor a
- * new column (0043 is the first and, as of this writing, only such case).
- * Every migration not listed here either creates a new table (whose
- * indexes are implied by table existence, per EXPECTED_TABLES_BY_MIGRATION's
- * own comment) or adds a column, and is unaffected by this map's existence.
+ * new column (0043 was the first such case; 0051 is the second — slice 2H's
+ * single additive index on corpus_document_shingles). Every migration not
+ * listed here either creates a new table (whose indexes are implied by table
+ * existence, per EXPECTED_TABLES_BY_MIGRATION's own comment) or adds a
+ * column, and is unaffected by this map's existence.
  */
 export const EXPECTED_INDEXES_BY_MIGRATION: Partial<Record<TargetMigrationFile, string[]>> = {
   "0043_corpus_maturity_indexes.sql": [
     "idx_corpus_submission_references_created_at",
     "idx_corpus_admission_decisions_created_at",
+  ],
+  // 0051 (slice 2H) — one additive composite index
+  // (shingle_hash, fingerprint_version, id) on corpus_document_shingles, so
+  // lib/user-submission-corpus.ts's findRepresentationOwnersForShingle
+  // rowid-cursor page seeks straight to the requested fingerprint generation
+  // and stale generations can never consume the bounded recovery cursor
+  // budget. No new table, no new column, no destructive statement —
+  // CREATE INDEX IF NOT EXISTS only, tracked purely by index existence.
+  "0051_corpus_shingle_hash_version_cursor_index.sql": [
+    "idx_corpus_document_shingles_hash_version_id",
   ],
 };
 
@@ -472,6 +498,13 @@ export const EXPECTED_MIGRATION_SHA256: Record<TargetMigrationFile, string> = {
   // scanForDestructiveStatements() is empty and no APPROVED_DESTRUCTIVE_STATEMENTS
   // entry is needed.
   "0050_archive_cosource_adjacency.sql": "c4e687dcb612485bb1db4f55cdd8608d6c4703ef517c9ff2ceb05a6d48adf64b",
+  // Fingerprint-version-safe bounded admission-family recovery (slice 2H). LF
+  // hash, computed directly from drizzle/0051_corpus_shingle_hash_version_cursor_index.sql
+  // (verified: sha256(git show HEAD:drizzle/0051_...) == the value here; the file
+  // is byte-identical to HEAD). 0051 is a single CREATE INDEX IF NOT EXISTS —
+  // scanForDestructiveStatements() is empty, so no APPROVED_DESTRUCTIVE_STATEMENTS
+  // entry is needed; like 0043 it is tracked by EXPECTED_INDEXES_BY_MIGRATION.
+  "0051_corpus_shingle_hash_version_cursor_index.sql": "5acde90ef71c0d95561f6de236e1ff839e72039b90a34c28f351f649609cb042",
 };
 
 const DESTRUCTIVE_PATTERN = /\b(DROP\s+TABLE|DROP\s+INDEX|ALTER\s+TABLE\s+\S+\s+DROP|DELETE\s+FROM|TRUNCATE)\b/gi;

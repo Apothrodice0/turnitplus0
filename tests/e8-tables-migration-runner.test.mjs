@@ -121,7 +121,7 @@ test.after(() => {
 
 // --- A: explicit allowlist ------------------------------------------------
 
-test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0050, in order, never touching 0000-0011', () => {
+test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0051, in order, never touching 0000-0011', () => {
   assert.deepEqual(TARGET_MIGRATIONS, [
     '0012_document_identities.sql',
     '0013_document_families.sql',
@@ -162,6 +162,7 @@ test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0050, in ord
     '0048_archive_document_representations.sql',
     '0049_archive_scalable_index.sql',
     '0050_archive_cosource_adjacency.sql',
+    '0051_corpus_shingle_hash_version_cursor_index.sql',
   ]);
   // Phase E8S Step 8: 0022_reuse_context_declarations.sql added
   // reuse_context_declarations, bringing the 15 E1-E8P tables across the
@@ -225,8 +226,12 @@ test('A: TARGET_MIGRATIONS is an explicit allowlist of exactly 0012-0050, in ord
   // adjacency graph (slice 2D.4) then adds one more migration (0050): 0050
   // creates 1 (archive_document_cosources, plus two indexes, two CHECK
   // constraints and a BEFORE INSERT guard trigger — table-tracked) — 46,
-  // across 39 target migrations total.
-  assert.equal(ALL_TARGET_TABLES.length, 46, 'expected exactly 46 tables across all 39 target migrations');
+  // across 39 target migrations total. The fingerprint-version-safe bounded
+  // admission-family recovery (slice 2H) then adds one more migration (0051):
+  // 0051 creates ZERO tables (one additive index only — the second
+  // index-only migration after 0043, tracked via EXPECTED_INDEXES_BY_MIGRATION)
+  // — still 46, across 40 target migrations total.
+  assert.equal(ALL_TARGET_TABLES.length, 46, 'expected exactly 46 tables across all 40 target migrations');
   assert.deepEqual(
     EXPECTED_TABLES_BY_MIGRATION['0023_privacy_consent_and_report_identity_link.sql'],
     [],
@@ -584,7 +589,7 @@ test('A3: 0041-0047 are in TARGET_MIGRATIONS as a contiguous 0012-0047 range', (
     assert.ok(TARGET_MIGRATIONS.includes(file), `${file} must be in TARGET_MIGRATIONS`);
   }
   const prefixes = TARGET_MIGRATIONS.map((f) => Number(f.slice(0, 4)));
-  assert.deepEqual(prefixes, Array.from({ length: 39 }, (_, i) => 12 + i), 'TARGET_MIGRATIONS must be the contiguous 0012..0050 range in order');
+  assert.deepEqual(prefixes, Array.from({ length: 40 }, (_, i) => 12 + i), 'TARGET_MIGRATIONS must be the contiguous 0012..0051 range in order');
 });
 
 test('A3: 0041-0047 pinned hashes match the on-disk LF migration bytes', () => {
@@ -864,13 +869,15 @@ test('A4: after the full runner apply, all three ordinary tables, the FTS5 virtu
 // BEFORE INSERT trigger, the two CHECK constraints, CASCADE). ---
 
 const ARCHIVE_2D4_FILE = '0050_archive_cosource_adjacency.sql';
+const SLICE_2H_FILE = '0051_corpus_shingle_hash_version_cursor_index.sql';
 
-test('A5: 0050 is in TARGET_MIGRATIONS, immediately after 0049, and now last', () => {
+test('A5: 0050 is in TARGET_MIGRATIONS, immediately after 0049 and immediately before 0051', () => {
   assert.ok(TARGET_MIGRATIONS.includes(ARCHIVE_2D4_FILE), `${ARCHIVE_2D4_FILE} must be in TARGET_MIGRATIONS`);
   const i49 = TARGET_MIGRATIONS.indexOf('0049_archive_scalable_index.sql');
   const i50 = TARGET_MIGRATIONS.indexOf(ARCHIVE_2D4_FILE);
+  const i51 = TARGET_MIGRATIONS.indexOf(SLICE_2H_FILE);
   assert.equal(i50, i49 + 1, '0050 must immediately follow 0049');
-  assert.equal(i50, TARGET_MIGRATIONS.length - 1, '0050 must be the last target migration');
+  assert.equal(i51, i50 + 1, '0051 must immediately follow 0050 (0050 is no longer last — see A6)');
 });
 
 test('A5: 0050 pinned hash matches the on-disk LF bytes; the file is non-destructive; splitStatements keeps its trigger atomic', () => {
@@ -897,23 +904,26 @@ test('A5: EXPECTED_TABLES_BY_MIGRATION for 0050 is exact; it uses neither the co
   assert.equal(EXPECTED_INDEXES_BY_MIGRATION[ARCHIVE_2D4_FILE], undefined);
 });
 
-test('A5: a database already at 0049 applies ONLY 0050 — the pure 0049 -> 0050 upgrade', async () => {
+test('A5: a database already at 0049 applies exactly 0050 then 0051 — 0012-0049 already-applied', async () => {
   const dbFile = freshDbPath('a5-0049-to-0050');
   const client = await buildPreMigrationDb(dbFile);
   // bring it exactly to 0049 by executing 0012..0049 directly (not via the
-  // target runner, which would also apply 0050).
+  // target runner, which would also apply 0050 and 0051).
   for (const file of TARGET_MIGRATIONS) {
     if (file === ARCHIVE_2D4_FILE) break;
     await client.executeMultiple(fs.readFileSync(path.join(drizzleDir, file), 'utf8'));
   }
   const at49 = new Set((await client.execute("SELECT name FROM sqlite_master WHERE type='table'")).rows.map((r) => String(r.name)));
   assert.ok(at49.has('archive_document_fingerprints') && !at49.has('archive_document_cosources'), 'sanity: the DB is at 0049, not 0050');
+  const idx49 = new Set((await client.execute("SELECT name FROM sqlite_master WHERE type='index'")).rows.map((r) => String(r.name)));
+  assert.ok(!idx49.has('idx_corpus_document_shingles_hash_version_id'), 'sanity: 0051 index absent at 0049');
 
   const result = await runTargetMigrations(client, drizzleDir, { environmentLabel: 'local-test', expectedEnvironmentLabel: 'local-test' });
   assert.equal(result.status, 'success');
   const applied = result.steps.filter((s) => s.status === 'applied').map((s) => s.file);
-  assert.deepEqual(applied, [ARCHIVE_2D4_FILE], 'only 0050 should be newly applied; 0012-0049 already-applied');
+  assert.deepEqual(applied, [ARCHIVE_2D4_FILE, SLICE_2H_FILE], 'only 0050 and 0051 should be newly applied; 0012-0049 already-applied');
   assert.ok((await client.execute("SELECT name FROM sqlite_master WHERE name='archive_document_cosources'")).rows.length === 1, '0050 landed');
+  assert.ok((await client.execute("SELECT name FROM sqlite_master WHERE name='idx_corpus_document_shingles_hash_version_id'")).rows.length === 1, '0051 landed');
 
   client.close();
   cleanupDbFile(dbFile);
@@ -986,6 +996,140 @@ test('A5: after the full runner apply, archive_document_cosources lands with the
   const rerun = await runTargetMigrations(client, drizzleDir, { environmentLabel: 'local-test', expectedEnvironmentLabel: 'local-test' });
   assert.equal(rerun.status, 'already-fully-applied');
   assert.equal(rerun.steps.find((s) => s.file === ARCHIVE_2D4_FILE).status, 'already-applied');
+
+  client.close();
+  cleanupDbFile(dbFile);
+});
+
+// --- A6: fingerprint-version-safe bounded admission-family recovery (0051,
+// slice 2H) — the deliberate, contiguous extension. Mirrors A5's structure:
+// presence + contiguity + now-last + LF-byte hash stability + non-destructive
+// + correct index-only metadata + a real applied shape (the composite index
+// with its exact column order, NO new table) + a clean 0050 -> 0051 upgrade +
+// idempotent re-run. Also re-proves, once, that no historical migration hash
+// changed and that unknown newer files remain tolerated. ---
+
+test('A6: 0051 is in TARGET_MIGRATIONS, immediately after 0050, and now last', () => {
+  assert.ok(TARGET_MIGRATIONS.includes(SLICE_2H_FILE), `${SLICE_2H_FILE} must be in TARGET_MIGRATIONS`);
+  const i50 = TARGET_MIGRATIONS.indexOf(ARCHIVE_2D4_FILE);
+  const i51 = TARGET_MIGRATIONS.indexOf(SLICE_2H_FILE);
+  assert.equal(i51, i50 + 1, '0051 must immediately follow 0050');
+  assert.equal(i51, TARGET_MIGRATIONS.length - 1, '0051 must be the last target migration');
+  // full 0012..0051 contiguity (A3 owns the general assertion; re-checked here
+  // so this section is self-contained after the 0051 extension).
+  assert.deepEqual(
+    TARGET_MIGRATIONS.map((f) => Number(f.slice(0, 4))),
+    Array.from({ length: 40 }, (_, i) => 12 + i),
+    'TARGET_MIGRATIONS is the contiguous 0012..0051 range',
+  );
+});
+
+test('A6: 0051 pinned hash matches the on-disk LF bytes; the file is non-destructive; it is a single CREATE INDEX', () => {
+  const raw = fs.readFileSync(path.join(drizzleDir, SLICE_2H_FILE));
+  assert.ok(!raw.includes(Buffer.from('\r\n')), `${SLICE_2H_FILE} must be LF in the working tree (CRLF breaks the pinned hash)`);
+  const content = fs.readFileSync(path.join(drizzleDir, SLICE_2H_FILE), 'utf8');
+  assert.ok(!content.includes('\r'), 'no CR bytes');
+  assert.equal(sha256(content), EXPECTED_MIGRATION_SHA256[SLICE_2H_FILE], 'pinned 0051 hash must match its current LF content');
+  assert.deepEqual(scanForDestructiveStatements(content), [], '0051 must contain zero destructive statements — CREATE INDEX IF NOT EXISTS only');
+  assert.equal(APPROVED_DESTRUCTIVE_STATEMENTS[SLICE_2H_FILE], undefined, '0051 needs no destructive-statement exception');
+  const stmts = splitStatements(content);
+  assert.equal(stmts.length, 1, '0051 has exactly one statement');
+  assert.equal(stmts.filter((s) => /^CREATE INDEX IF NOT EXISTS idx_corpus_document_shingles_hash_version_id/i.test(s)).length, 1, '0051 is a single CREATE INDEX IF NOT EXISTS on the slice-2H index');
+  assert.equal(stmts.filter((s) => /^CREATE TABLE/i.test(s)).length, 0, '0051 creates no table');
+  assert.equal(stmts.filter((s) => /^CREATE TRIGGER/i.test(s)).length, 0, '0051 creates no trigger');
+});
+
+test('A6: 0051 metadata is index-only — no expected tables, exactly one expected index, no column mechanism', () => {
+  assert.deepEqual(EXPECTED_TABLES_BY_MIGRATION[SLICE_2H_FILE], [], '0051 must declare zero new tables');
+  assert.deepEqual(
+    EXPECTED_INDEXES_BY_MIGRATION[SLICE_2H_FILE],
+    ['idx_corpus_document_shingles_hash_version_id'],
+    '0051 must declare exactly its one additive index',
+  );
+  assert.equal(EXPECTED_COLUMNS_BY_MIGRATION[SLICE_2H_FILE], undefined, '0051 must NOT use the column-state mechanism — it adds an index, not a column');
+});
+
+test('A6: no historical migration hash changed — every 0012-0050 pin still equals its current file, and only 0051 is new in the manifest', () => {
+  // The manifest and TARGET_MIGRATIONS carry exactly the same set.
+  assert.deepEqual(
+    Object.keys(EXPECTED_MIGRATION_SHA256).sort(),
+    [...TARGET_MIGRATIONS].sort(),
+    'EXPECTED_MIGRATION_SHA256 covers exactly TARGET_MIGRATIONS',
+  );
+  // Every pin (historical AND 0051) matches the current on-disk LF content —
+  // proving this extension re-pinned nothing it should not have.
+  for (const file of TARGET_MIGRATIONS) {
+    const content = fs.readFileSync(path.join(drizzleDir, file), 'utf8');
+    assert.equal(sha256(content), EXPECTED_MIGRATION_SHA256[file], `${file}'s pinned hash must match its current content (no historical hash was disturbed)`);
+  }
+  assert.equal(
+    EXPECTED_MIGRATION_SHA256[SLICE_2H_FILE],
+    '5acde90ef71c0d95561f6de236e1ff839e72039b90a34c28f351f649609cb042',
+    '0051 is pinned to the exact LF-normalized SHA-256 of the committed file',
+  );
+});
+
+test('A6: checkPreflight passes for the full 0012-0051 set against a pre-0012 database', async () => {
+  const dbFile = freshDbPath('a6-preflight');
+  const client = await buildPreMigrationDb(dbFile);
+  const result = await checkPreflight(client, drizzleDir, { environmentLabel: 'local-test', expectedEnvironmentLabel: 'local-test' });
+  assert.equal(result.ok, true, `preflight must pass for the 0051-extended allowlist — got: ${JSON.stringify(result)}`);
+  client.close();
+  cleanupDbFile(dbFile);
+});
+
+test('A6: checkPreflight still REJECTS a tampered 0051 (integrity check not weakened by the new pin)', async () => {
+  const tamperedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'e8-a6-tamper-'));
+  for (const file of TARGET_MIGRATIONS) fs.copyFileSync(path.join(drizzleDir, file), path.join(tamperedDir, file));
+  // append one harmless-looking byte to 0051 — still valid SQL, but not the reviewed content.
+  fs.appendFileSync(path.join(tamperedDir, SLICE_2H_FILE), '\n-- tampered\n');
+  const dbFile = freshDbPath('a6-tamper');
+  const client = await buildPreMigrationDb(dbFile);
+  const result = await checkPreflight(client, tamperedDir, { environmentLabel: 'local-test', expectedEnvironmentLabel: 'local-test' });
+  assert.equal(result.ok, false, 'a tampered 0051 must be refused');
+  assert.equal(result.code, 'HASH_MISMATCH');
+  assert.equal(result.details.file, SLICE_2H_FILE);
+  client.close();
+  cleanupDbFile(dbFile);
+  fs.rmSync(tamperedDir, { recursive: true, force: true });
+});
+
+test('A6: a database already at 0050 applies ONLY 0051 — the pure 0050 -> 0051 upgrade; the composite index lands with the exact column order and NO new table', async () => {
+  const dbFile = freshDbPath('a6-0050-to-0051');
+  const client = await buildPreMigrationDb(dbFile);
+  // bring it exactly to 0050 by executing 0012..0050 directly.
+  for (const file of TARGET_MIGRATIONS) {
+    if (file === SLICE_2H_FILE) break;
+    await client.executeMultiple(fs.readFileSync(path.join(drizzleDir, file), 'utf8'));
+  }
+  const tablesAt50 = new Set((await client.execute("SELECT name FROM sqlite_master WHERE type='table'")).rows.map((r) => String(r.name)));
+  const indexesAt50 = new Set((await client.execute("SELECT name FROM sqlite_master WHERE type='index'")).rows.map((r) => String(r.name)));
+  assert.ok(tablesAt50.has('archive_document_cosources'), 'sanity: the DB is at 0050');
+  assert.ok(indexesAt50.has('idx_corpus_document_shingles_hash'), 'sanity: 0019 single-column shingle index present');
+  assert.ok(!indexesAt50.has('idx_corpus_document_shingles_hash_version_id'), 'sanity: 0051 composite index absent at 0050');
+
+  const result = await runTargetMigrations(client, drizzleDir, { environmentLabel: 'local-test', expectedEnvironmentLabel: 'local-test' });
+  assert.equal(result.status, 'success', `the runner must apply 0051 cleanly — got: ${JSON.stringify(result).slice(0, 400)}`);
+  const applied = result.steps.filter((s) => s.status === 'applied').map((s) => s.file);
+  assert.deepEqual(applied, [SLICE_2H_FILE], 'only 0051 should be newly applied; 0012-0050 already-applied');
+
+  // the composite index exists with EXACTLY (shingle_hash, fingerprint_version, id).
+  const idxCols = (await client.execute("PRAGMA index_info('idx_corpus_document_shingles_hash_version_id')")).rows.map((r) => String(r.name));
+  assert.deepEqual(idxCols, ['shingle_hash', 'fingerprint_version', 'id'], '0051 index column order must be exactly (shingle_hash, fingerprint_version, id)');
+  // 0051 creates NO table — the table set is unchanged from 0050.
+  const tablesAt51 = new Set((await client.execute("SELECT name FROM sqlite_master WHERE type='table'")).rows.map((r) => String(r.name)));
+  assert.deepEqual([...tablesAt51].sort(), [...tablesAt50].sort(), '0051 must create no new table');
+  // the pre-existing 0019 single-column index is retained.
+  const indexesAt51 = new Set((await client.execute("SELECT name FROM sqlite_master WHERE type='index'")).rows.map((r) => String(r.name)));
+  assert.ok(indexesAt51.has('idx_corpus_document_shingles_hash'), '0051 must not drop the 0019 single-column shingle index');
+
+  // the runner detects 0051 as fully applied via the index mechanism.
+  assert.equal(await indexSetState(client, EXPECTED_INDEXES_BY_MIGRATION[SLICE_2H_FILE]), 'all', 'the runner must see 0051 as fully applied');
+
+  // re-run is idempotent.
+  const rerun = await runTargetMigrations(client, drizzleDir, { environmentLabel: 'local-test', expectedEnvironmentLabel: 'local-test' });
+  assert.equal(rerun.status, 'already-fully-applied');
+  assert.equal(rerun.steps.find((s) => s.file === SLICE_2H_FILE).status, 'already-applied');
 
   client.close();
   cleanupDbFile(dbFile);
