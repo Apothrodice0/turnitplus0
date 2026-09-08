@@ -11,6 +11,8 @@ import { deleteReportCorpusAdmissionData } from '../../../../lib/corpus-admissio
 import { scheduleReportShadowEvaluations } from '../../../../lib/report-shadow-evaluations';
 import { getExperimentalHistoricalMatchForDisplay } from '../../../../lib/e8p-visibility';
 import { getSessionUser } from '../../../../lib/auth-session';
+import { resolveVerifiedAcademicEvidence } from '../../../../lib/academic-search-diagnostics-repo';
+import { canonicalSha256 } from '../../../../lib/document-identity';
 import type { SimilarityReport } from '../../../../lib/report-types';
 
 // This response is per-session personalized (viewerIsAdmin and admin-gated
@@ -103,6 +105,35 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
       // net for anything unexpected (e.g. a database error on the snapshot
       // read/write itself), not the primary error handling.
       try {
+        // Scholarly evidence server trust boundary (drizzle/0052): re-resolve
+        // the authoritative scholarly evidence server-side from the verified
+        // diagnostics id POST stamped onto the payload (payload.text unchanged
+        // since — this route never reassigns it), gated on the diagnostics
+        // row's stored hash still matching canonicalSha256(payload.text). This
+        // does NOT read the deferred diagnostics->report link columns, so a
+        // link that never landed cannot cost this report its evidence. Any
+        // miss/mismatch/parse => []; the persisted payload.externalAcademicEvidence
+        // is NEVER trusted for scoring. Best-effort — a lookup failure just
+        // means no scholarly contribution this recompute.
+        const verifiedAcademicEvidence = typeof payload.text === 'string' && payload.text.length > 0
+          ? (await resolveVerifiedAcademicEvidence(client, {
+              diagnosticsId: typeof payload.verifiedAcademicSearchDiagnosticsId === 'number' && Number.isFinite(payload.verifiedAcademicSearchDiagnosticsId)
+                ? payload.verifiedAcademicSearchDiagnosticsId
+                : null,
+              submissionCanonicalSha256: canonicalSha256(payload.text),
+            })).evidence
+          : [];
+        // Keep the response's display field consistent with what actually
+        // scored, WITHOUT changing the "field absent for a report with no
+        // academic evidence" contract: only overwrite when there is verified
+        // evidence to show, or when a value is already present (a legacy report
+        // carrying an unverified externalAcademicEvidence now shows []).
+        if (verifiedAcademicEvidence.length > 0) {
+          payload.externalAcademicEvidence = verifiedAcademicEvidence;
+        } else if (payload.externalAcademicEvidence !== undefined) {
+          payload.externalAcademicEvidence = [];
+        }
+
         // Release-hardening audit finding SIM-02: getOrComputeHistoricalMatchSnapshot
         // + computeUnifiedSimilarity now run through the ONE shared
         // lib/report-primary-similarity.ts helper — the same call
@@ -117,7 +148,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
           rawText: payload.text,
           wordCount: payload.wordCount,
           archiveMatchedPositions: payload.archiveMatchedPositions,
-          externalAcademicEvidence: payload.externalAcademicEvidence,
+          externalAcademicEvidence: verifiedAcademicEvidence,
           archiveScore: payload.archiveScore ?? payload.score,
         });
         const historicalSubmissionMatch = resolution.historicalSubmissionMatch;
@@ -294,7 +325,9 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
           // from payload_json. Threaded through so the B2 counterfactual is
           // measured against the authoritative scoring inputs, never a re-read.
           authoritativeArchiveMatchedPositions: payload.archiveMatchedPositions ?? null,
-          authoritativeExternalAcademicEvidence: payload.externalAcademicEvidence ?? null,
+          // Trust boundary (drizzle/0052): the server-verified set (also now on
+          // payload.externalAcademicEvidence), never a client-supplied value.
+          authoritativeExternalAcademicEvidence: verifiedAcademicEvidence,
         });
       } catch (err) {
         console.error('resolvePrimarySimilaritySummary failed (non-fatal):', err instanceof Error ? err.message : String(err));

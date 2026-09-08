@@ -4,6 +4,7 @@ import { clientIpFrom } from '../../../lib/client-ip';
 import { getExternalAcademicEvidence } from '../../../lib/academic-evidence-integration';
 import { getReportsDbClient } from '../../../lib/reports-db';
 import { recordAcademicSearchRunDiagnostics } from '../../../lib/academic-search-diagnostics-repo';
+import { canonicalSha256 } from '../../../lib/document-identity';
 
 /**
  * Phase 3: the one server endpoint the academic-search subsystem is reached
@@ -73,14 +74,24 @@ export async function POST(request: Request) {
 
     const { evidence, stats, status, candidates, queries, retrievalDiagnostics } = await getExternalAcademicEvidence(text);
 
+    // Scholarly evidence server trust boundary (drizzle/0052): bind the
+    // matcher-produced evidence to THIS submission's canonical text hash and
+    // persist both, server-side, right here. This row is the only place
+    // /api/reports (POST, GET recompute, self-heal) will ever read scholarly
+    // matchedPassages from — the client's payload.externalAcademicEvidence is
+    // never trusted for scoring again.
+    const submissionCanonicalSha256 = canonicalSha256(text);
+
     // Best-effort, non-fatal: a diagnostics-persistence failure must never
     // turn an otherwise-successful academic-evidence check into an error —
-    // the user's report generation does not depend on this succeeding.
+    // the user's report generation does not depend on this succeeding. (If it
+    // fails, academicSearchDiagnosticsId stays null and /api/reports scores this
+    // submission with zero scholarly evidence — the safe direction.)
     let academicSearchDiagnosticsId: number | null = null;
     if (stats) {
       const client = await getReportsDbClient();
       try {
-        academicSearchDiagnosticsId = await recordAcademicSearchRunDiagnostics(client, { status, stats, queries, candidates, retrievalDiagnostics });
+        academicSearchDiagnosticsId = await recordAcademicSearchRunDiagnostics(client, { status, stats, queries, candidates, retrievalDiagnostics, evidence, submissionCanonicalSha256 });
       } catch (err) {
         console.error('recordAcademicSearchRunDiagnostics failed (non-fatal):', err instanceof Error ? err.message : String(err));
       } finally {

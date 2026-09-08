@@ -140,7 +140,12 @@ test('STEP 9.7: a report saved WITH externalAcademicEvidence round-trips with th
   assert.equal(bodyWith.score, bodyWithout.score, 'presence of external evidence must never change score');
   assert.equal(bodyWith.archiveScore, bodyWithout.archiveScore, 'presence of external evidence must never change archiveScore');
   assert.equal(bodyWith.score, 41);
-  assert.deepEqual(bodyWith.externalAcademicEvidence, EVIDENCE_FIXTURE, 'evidence survives the JSON round trip unchanged');
+  // Scholarly evidence server trust boundary (drizzle/0052): a client-supplied
+  // externalAcademicEvidence with NO backing academic_search_run_diagnostics row
+  // is NOT trusted — the server resolves the authoritative set (here: []) and it
+  // is that value which round-trips, not the client fixture. See
+  // tests/report-academic-evidence-trust-boundary.test.mjs for the full coverage.
+  assert.deepEqual(bodyWith.externalAcademicEvidence, [], 'unverified client evidence is replaced by the server-verified set ([])');
 });
 
 test('STEP 9.8: E8P-adjacent read-time fields (matchClassification, historicalSubmissionMatch) are populated identically whether or not externalAcademicEvidence is present', async () => {

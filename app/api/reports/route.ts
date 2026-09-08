@@ -15,7 +15,8 @@ import {
   type ActorObservation,
 } from '../../../lib/device-passport-actor-ledger';
 import { captureDocumentIdentityAndFamily } from '../../../lib/document-family';
-import { linkAcademicSearchRunDiagnosticsToReport } from '../../../lib/academic-search-diagnostics-repo';
+import { linkAcademicSearchRunDiagnosticsToReport, resolveVerifiedAcademicEvidence } from '../../../lib/academic-search-diagnostics-repo';
+import { canonicalSha256 } from '../../../lib/document-identity';
 import { checkUploadLimit } from '../../../lib/upload-limit';
 import { getRoomCountForRole, isWithinActiveCycle, roomCycleEndsAt } from '../../../lib/report-rooms';
 import { findRoomOccupant } from '../../../lib/reports-repo';
@@ -456,6 +457,52 @@ export async function POST(request: Request) {
 
       const reportPayload = payload as SimilarityReport;
 
+      // Scholarly evidence server trust boundary (drizzle/0052). The client's
+      // payload.externalAcademicEvidence is NEVER trusted for scoring. The
+      // authoritative scholarly evidence is resolved here, server-side, from the
+      // academic_search_run_diagnostics row that /api/academic-evidence already
+      // wrote — gated on that row's stored submission_canonical_sha256 equalling
+      // canonicalSha256(this report's own text). The client only supplies an
+      // opaque lookup handle: the body's academicSearchDiagnosticsId on a first
+      // save, or the previously-server-persisted
+      // payload.verifiedAcademicSearchDiagnosticsId on a resave. Any
+      // miss/mismatch/parse failure => verifiedEvidence = [], never a fallback
+      // to client matchedPassages. verifiedDiagnosticsId is persisted below so
+      // GET recomputation and selfHealUnifiedSimilarity can re-resolve without
+      // depending on the deferred diagnostics->report link.
+      const academicEvidenceLookupHandle =
+        academicDiagnosticsId ??
+        (typeof reportPayload?.verifiedAcademicSearchDiagnosticsId === 'number' && Number.isFinite(reportPayload.verifiedAcademicSearchDiagnosticsId)
+          ? reportPayload.verifiedAcademicSearchDiagnosticsId
+          : null);
+      const { evidence: verifiedAcademicEvidence, verifiedDiagnosticsId: verifiedAcademicDiagnosticsId } = isNonEmptyString(reportPayload?.text)
+        ? await resolveVerifiedAcademicEvidence(client, {
+            diagnosticsId: academicEvidenceLookupHandle,
+            submissionCanonicalSha256: canonicalSha256(reportPayload.text),
+          })
+        : { evidence: [], verifiedDiagnosticsId: null };
+      // The payload actually persisted: the client's fields, but with
+      // externalAcademicEvidence forced to the server-verified set and the
+      // verified diagnostics id stamped on so later reads can re-verify.
+      // Shape discipline (matches the pre-fix contract that a report with no
+      // academic evidence has the field entirely absent, not []):
+      //   - verified evidence present  -> persist it + the verified id
+      //   - client sent an (untrusted) value but nothing verified -> persist []
+      //     (explicitly strips the client value; GET/self-heal re-resolve anyway)
+      //   - client sent nothing and nothing verified -> field stays absent
+      // JSON.stringify drops undefined-valued keys.
+      const persistedExternalAcademicEvidence =
+        verifiedAcademicEvidence.length > 0
+          ? verifiedAcademicEvidence
+          : reportPayload.externalAcademicEvidence !== undefined
+            ? []
+            : undefined;
+      const persistedReportPayload = {
+        ...reportPayload,
+        externalAcademicEvidence: persistedExternalAcademicEvidence,
+        verifiedAcademicSearchDiagnosticsId: verifiedAcademicDiagnosticsId ?? undefined,
+      };
+
       // Device Passport (Phase 2/4): cryptographically verify an optional
       // upload-time device attestation. ORDERING (Preview same-device SELF
       // rule): this MUST run BEFORE write-time similarity finalization below,
@@ -561,7 +608,16 @@ export async function POST(request: Request) {
       // both branches identically: an unenriched or failed-and-persisted
       // payload can never regress an already-good persisted result from an
       // earlier successful save.
-      let payloadJsonToPersist = payloadJson;
+      // Base = the SERVER-RESOLVED payload (client fields, but
+      // externalAcademicEvidence forced to the verified set + the verified
+      // diagnostics id stamped on), not the raw client payloadJson. Every branch
+      // below spreads persistedReportPayload, so a fabricated
+      // payload.externalAcademicEvidence can never survive a save, even on the
+      // transient-"pending" path that keeps this base value unchanged.
+      let payloadJsonToPersist = JSON.stringify(persistedReportPayload);
+      if (payloadJsonToPersist.length > MAX_BYTES) {
+        return new NextResponse(JSON.stringify({ error: 'Payload too large' }), { status: 413 });
+      }
       // Shadow-telemetry handoff. ONE request-local object, function-local to
       // POST() and set exactly once (inside the try block below, immediately
       // after resolvePrimarySimilaritySummary returns) — never module scope,
@@ -598,7 +654,9 @@ export async function POST(request: Request) {
             rawText: reportPayload.text,
             wordCount: reportPayload.wordCount,
             archiveMatchedPositions: reportPayload.archiveMatchedPositions,
-            externalAcademicEvidence: reportPayload.externalAcademicEvidence,
+            // Trust boundary (drizzle/0052): the SERVER-VERIFIED scholarly
+            // evidence only — never reportPayload.externalAcademicEvidence.
+            externalAcademicEvidence: verifiedAcademicEvidence,
             archiveScore: reportPayload.archiveScore ?? reportPayload.score,
             // Preview same-device SELF rule: on a genuine first save the
             // saved_reports row (and its verified_device_passport_id) does not
@@ -612,29 +670,29 @@ export async function POST(request: Request) {
           // Reused as-is by the deferred shadow evaluators below — the SAME
           // resolvePrimarySimilaritySummary output the GET route hands them,
           // populated on both the success and the
-          // computeUnifiedSimilarity-failed branches. archiveMatchedPositions /
-          // externalAcademicEvidence are the very values passed into the
-          // resolvePrimarySimilaritySummary call just above, captured here so
-          // the Phase B2 counterfactual uses the authoritative scoring inputs
-          // exactly.
+          // computeUnifiedSimilarity-failed branches. archiveMatchedPositions is
+          // the value passed into the call just above; externalAcademicEvidence
+          // is the SERVER-VERIFIED set (trust boundary, drizzle/0052) — never
+          // reportPayload's — so the Phase B2 counterfactual is measured against
+          // exactly the authoritative scoring inputs.
           shadowEvaluationInputs = {
             historicalSubmissionMatch: resolution.historicalSubmissionMatch,
             unifiedSimilarity: resolution.unifiedSimilarity ?? null,
             effectiveDeviceSelfRepresentationIds: resolution.effectiveDeviceSelfRepresentationIds,
             authoritativeCorpusGeneration: resolution.corpusGeneration,
             archiveMatchedPositions: reportPayload.archiveMatchedPositions ?? null,
-            externalAcademicEvidence: reportPayload.externalAcademicEvidence ?? null,
+            externalAcademicEvidence: verifiedAcademicEvidence,
           };
           if (resolution.unifiedSimilarity) {
             payloadJsonToPersist = JSON.stringify({
-              ...reportPayload,
+              ...persistedReportPayload,
               unifiedSimilarity: resolution.unifiedSimilarity,
               corpusSourceMatchingEnabledAtComputation: resolution.corpusSourceMatchingEnabled,
               unifiedSimilarityGeneration: resolution.corpusGeneration,
               // Explicit false, never omitted: a resave following an
               // earlier genuine failure must clear that marker, not let it
-              // survive via reportPayload's own spread (which, for a retry
-              // resave built by re-reading the previously stored report,
+              // survive via persistedReportPayload's own spread (which, for a
+              // retry resave built by re-reading the previously stored report,
               // could otherwise still carry it forward).
               unifiedSimilarityFailed: false,
             });
@@ -658,9 +716,9 @@ export async function POST(request: Request) {
             //
             // Release-hardening audit finding LIFECYCLE-06 (approval-pass
             // fix): unifiedSimilarity: undefined is REQUIRED here, not
-            // decorative. reportPayload is the client's own submitted
-            // payload — for a resave built from a locally-cached copy of a
-            // PREVIOUSLY successful result (e.g. saveEnrichedAiResult's
+            // decorative. persistedReportPayload spreads the client's own
+            // submitted payload — for a resave built from a locally-cached copy
+            // of a PREVIOUSLY successful result (e.g. saveEnrichedAiResult's
             // {...report, ...aiResult} spread), reportPayload.unifiedSimilarity
             // can already be set. Without this explicit clear, the spread
             // below would silently carry that stale success forward
@@ -674,7 +732,7 @@ export async function POST(request: Request) {
             // an `undefined`-valued key entirely, so this genuinely deletes
             // the field rather than persisting a literal null.
             payloadJsonToPersist = JSON.stringify({
-              ...reportPayload,
+              ...persistedReportPayload,
               unifiedSimilarity: undefined,
               unifiedSimilarityFailed: true,
               corpusSourceMatchingEnabledAtComputation: resolution.corpusSourceMatchingEnabled,

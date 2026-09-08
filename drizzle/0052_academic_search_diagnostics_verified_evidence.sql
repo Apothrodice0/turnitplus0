@@ -1,0 +1,42 @@
+-- Scholarly evidence — server trust boundary. Purely additive: two nullable
+-- columns on academic_search_run_diagnostics (drizzle/0026). No existing
+-- row/column/constraint change, no backfill, no table rebuild, no down migration.
+--
+-- BACKGROUND. app/api/academic-evidence/route.ts runs the real academic-search
+-- pipeline server-side (Stage 7 = lib/document-correspondence.ts's
+-- computeDocumentCorrespondence, the same matcher the report uses) and returns
+-- the resulting ExternalAcademicEvidence[] to the browser, which then puts it in
+-- payload.externalAcademicEvidence and POSTs it to /api/reports. Until this
+-- migration the authoritative evidence was NEVER persisted server-side, so
+-- POST /api/reports, GET /api/reports/[id] recomputation, and
+-- selfHealUnifiedSimilarity all fed the *client-supplied* matchedPassages
+-- straight into computeUnifiedSimilarity — a modified client could fabricate
+-- whole-document matchedPassages and inflate the persisted, authoritative
+-- unifiedSimilarity.unifiedScore. computeUnifiedSimilarity only clamp-validates
+-- passage word ranges; it never checks them against real retrieved text.
+--
+-- evidence_json: the exact ExternalAcademicEvidence[] the server-side matcher
+--   produced for this run — the ONLY scholarly matchedPassages the report /
+--   scoring path is allowed to score. Written once, by
+--   app/api/academic-evidence/route.ts's recordAcademicSearchRunDiagnostics call;
+--   never by any client-facing route. JSON, bounded by the pipeline's own
+--   maxCandidatesToRetrieve (5) and a defensive slice in the repo, matching this
+--   table's existing "variable-shape pipeline data as a JSON column" convention
+--   (stats_json / candidates_json / retrieval_diagnostics_json).
+--
+-- submission_canonical_sha256: canonicalSha256(submission text) (== the
+--   sha256(canonicalizeText(text)) that lib/document-identity.ts already
+--   computes) at the moment this run was performed. The scoring path requires
+--   this to equal canonicalSha256(the report's own text) before it will read
+--   evidence_json — so a high-evidence row can never be replayed against a
+--   different document. Lowercase hex, 64 chars when present.
+--
+-- Both nullable: a row created before this migration, or from a run where the
+-- pipeline never actually executed (short text, total provider outage), has
+-- neither. The scoring path treats "either column NULL / hash mismatch / parse
+-- failure" identically: verified scholarly evidence = [] — it NEVER falls back
+-- to a client-supplied value. No index is added: the row is looked up by its
+-- own integer primary key (the id the client carries as an opaque handle), which
+-- is already the table's implicit primary-key index.
+ALTER TABLE academic_search_run_diagnostics ADD COLUMN evidence_json TEXT;
+ALTER TABLE academic_search_run_diagnostics ADD COLUMN submission_canonical_sha256 TEXT;

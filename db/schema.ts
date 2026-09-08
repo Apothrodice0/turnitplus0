@@ -983,6 +983,16 @@ export const academic_search_run_diagnostics = sqliteTable(
     queries_json: text("queries_json"),
     candidates_json: text("candidates_json"),
     retrieval_diagnostics_json: text("retrieval_diagnostics_json"),
+    // Scholarly evidence server trust boundary (drizzle/0052). evidence_json is
+    // the matcher-produced ExternalAcademicEvidence[] for this run — the only
+    // scholarly matchedPassages the report/scoring path is allowed to score.
+    // submission_canonical_sha256 binds it to the exact submission text; the
+    // scoring path requires it to equal canonicalSha256(report text) before
+    // reading evidence_json. Both nullable (pre-fix rows / non-running pipeline);
+    // "missing or mismatched" => verified scholarly evidence = [], never a
+    // client fallback.
+    evidence_json: text("evidence_json"),
+    submission_canonical_sha256: text("submission_canonical_sha256"),
     created_at: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   },
   (table) => [

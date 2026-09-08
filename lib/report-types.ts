@@ -220,6 +220,20 @@ export type SimilarityReport = {
    */
   externalAcademicEvidence?: ExternalAcademicEvidence[];
   /**
+   * Scholarly evidence server trust boundary (drizzle/0052). The
+   * academic_search_run_diagnostics row id whose server-owned evidence_json was
+   * accepted, at POST time, as the authoritative scholarly scoring input for
+   * this report (its stored submission_canonical_sha256 matched
+   * canonicalSha256(this report's text)). POST persists it here so
+   * GET /api/reports/[id] recomputation and selfHealUnifiedSimilarity can
+   * re-resolve the authoritative evidence via
+   * lib/academic-search-diagnostics-repo.ts's resolveVerifiedAcademicEvidence
+   * WITHOUT depending on the deferred diagnostics->report link ever succeeding.
+   * Absent when no scholarly evidence verified (or the report predates this).
+   * Never trusted on its own — every read re-checks the row and the text hash.
+   */
+  verifiedAcademicSearchDiagnosticsId?: number;
+  /**
    * "start the two fixes now" TASK 2: the outcome of the academic search
    * that produced externalAcademicEvidence above — see
    * lib/academic-search/types.ts's own AcademicSearchStatus comment for the

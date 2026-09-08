@@ -6,6 +6,7 @@ import { computeUnifiedSimilarity, type UnifiedSimilarityResult } from "./unifie
 import type { ReportHistoricalSubmissionMatch, SimilarityReport } from "./report-types";
 import type { ExternalAcademicEvidence } from "./academic-search/types";
 import { canonicalSha256 } from "./document-identity";
+import { resolveVerifiedAcademicEvidence } from "./academic-search-diagnostics-repo";
 import { summarizeSubmissionProvenance } from "./submission-provenance";
 import { classifyDeviceSelfMatch, productionCountsRelationship, isDeviceSelfEligibleMatchType } from "./device-self-scoring-rule";
 import {
@@ -886,6 +887,22 @@ export async function selfHealUnifiedSimilarity(
     if (!raw) return { attempted: false };
     const payload = JSON.parse(String(raw.payload_json)) as SimilarityReport;
 
+    // Scholarly evidence server trust boundary (drizzle/0052): re-resolve the
+    // authoritative scholarly evidence server-side from the verified diagnostics
+    // id POST stamped onto the payload, gated on the diagnostics row's stored
+    // hash still matching canonicalSha256(payload.text). Never reads the deferred
+    // diagnostics->report link, so a link that never landed cannot cost a
+    // legitimately-verified report its evidence. Any miss/mismatch/parse => [];
+    // the persisted payload.externalAcademicEvidence is never trusted for scoring.
+    const verifiedAcademicEvidence = typeof payload.text === "string" && payload.text.length > 0
+      ? (await resolveVerifiedAcademicEvidence(client, {
+          diagnosticsId: typeof payload.verifiedAcademicSearchDiagnosticsId === "number" && Number.isFinite(payload.verifiedAcademicSearchDiagnosticsId)
+            ? payload.verifiedAcademicSearchDiagnosticsId
+            : null,
+          submissionCanonicalSha256: safeCanonicalSha256(payload.text),
+        })).evidence
+      : [];
+
     const resolution = await resolvePrimarySimilaritySummary(client, {
       reportDeviceKey: params.reportDeviceKey,
       reportId: params.reportId,
@@ -893,7 +910,8 @@ export async function selfHealUnifiedSimilarity(
       rawText: payload.text,
       wordCount: payload.wordCount,
       archiveMatchedPositions: payload.archiveMatchedPositions,
-      externalAcademicEvidence: payload.externalAcademicEvidence,
+      // Trust boundary (drizzle/0052): server-verified scholarly evidence only.
+      externalAcademicEvidence: verifiedAcademicEvidence,
       archiveScore: payload.archiveScore ?? payload.score ?? Number(raw.archive_score),
       asOf: params.asOf,
     });

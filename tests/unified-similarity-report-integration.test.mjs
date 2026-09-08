@@ -7,6 +7,8 @@ import { applyMigrationsLibsql } from '../lib/ingest.ts';
 import * as reportsRoute from '../app/api/reports/route.ts';
 import * as reportIdRoute from '../app/api/reports/[id]/route.ts';
 import { resetRateForTest } from '../lib/rate-limit.ts';
+import { canonicalSha256 } from '../lib/document-identity.ts';
+import { recordAcademicSearchRunDiagnostics } from '../lib/academic-search-diagnostics-repo.ts';
 
 /**
  * Phase 6: proves computeUnifiedSimilarity() is actually wired into the real
@@ -39,6 +41,27 @@ process.env.TURSO_DATABASE_URL = `file:${dbFile}`;
 const setupClient = createClient({ url: `file:${dbFile}` });
 await applyMigrationsLibsql(setupClient, drizzleDir);
 setupClient.close();
+
+const seedDb = createClient({ url: `file:${dbFile}` });
+
+/**
+ * Scholarly evidence server trust boundary (drizzle/0052): the report route no
+ * longer trusts payload.externalAcademicEvidence for scoring — it re-resolves
+ * the authoritative set from an academic_search_run_diagnostics row bound to the
+ * submission's canonical text hash. So a test that wants live-academic evidence
+ * to actually score must first seed that server-owned row (what
+ * /api/academic-evidence does in production), then thread its id back as the
+ * academicSearchDiagnosticsId lookup handle. This helper does exactly that.
+ */
+async function seedVerifiedAcademicDiagnostics(text, evidence) {
+  return recordAcademicSearchRunDiagnostics(seedDb, {
+    status: evidence.length ? 'COMPLETE_WITH_MATCHES' : 'COMPLETE_NO_MATCHES',
+    stats: { queryCount: 1, searchLatencyMs: 1, candidateCountBeforeDedup: 1, candidateCountAfterDedup: 1, deduplicationRate: 0, candidatesTextRetrieved: 1, textRetrievalLatencyMs: 1, comparisonLatencyMs: 1, totalLatencyMs: 3, providerErrors: [], searchAttempts: 1 },
+    queries: null, candidates: null, retrievalDiagnostics: null,
+    evidence,
+    submissionCanonicalSha256: canonicalSha256(text),
+  });
+}
 
 function academicEvidence(overrides = {}) {
   return {
@@ -78,6 +101,12 @@ function samplePayload(overrides = {}) {
 async function postReport(deviceKey, clientTag, { payloadOverrides = {} } = {}) {
   await resetRateForTest(clientTag);
   const payload = samplePayload(payloadOverrides);
+  // If the test wants live-academic evidence to score, seed the server-owned
+  // verified-evidence row and pass its id as the lookup handle (drizzle/0052).
+  let academicSearchDiagnosticsId;
+  if (Array.isArray(payload.externalAcademicEvidence)) {
+    academicSearchDiagnosticsId = Number(await seedVerifiedAcademicDiagnostics(payload.text, payload.externalAcademicEvidence));
+  }
   const req = new Request('http://localhost/api/reports', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-forwarded-for': clientTag },
@@ -92,6 +121,7 @@ async function postReport(deviceKey, clientTag, { payloadOverrides = {} } = {}) 
       scoreBand: 'Low',
       aiScore: null,
       aiTone: null,
+      ...(academicSearchDiagnosticsId !== undefined ? { academicSearchDiagnosticsId } : {}),
       payload,
     }),
   });
