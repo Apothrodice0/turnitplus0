@@ -90,6 +90,14 @@ const loadOwnedReport = cache(async (id: string): Promise<OwnedReportResult> => 
     // more honest and avoids a dead-end retry loop. Production audit fix.
     try {
       const payload = JSON.parse(row.payload_json) as SimilarityReport;
+      // Scholarly evidence server trust boundary (drizzle/0052): strip the
+      // internal verifiedAcademicSearchDiagnosticsId re-lookup handle from the
+      // server-rendered first-paint payload, exactly as
+      // app/api/reports/[id]/route.ts's GET handler strips it from the
+      // background-fetch response — no UI renders it and it must not reach the
+      // browser. The stored payload_json keeps it for GET recompute / self-heal;
+      // POST re-derives it server-side on a resave.
+      delete payload.verifiedAcademicSearchDiagnosticsId;
       // Task A correction: the same explicit, unconditional authorization
       // signal app/api/reports/[id]/route.ts's GET handler sets for the
       // client-side background re-fetch — this is the server-rendered FIRST

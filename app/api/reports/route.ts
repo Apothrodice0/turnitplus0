@@ -363,10 +363,21 @@ export async function POST(request: Request) {
       // the runAfterResponse callback below uses to decide whether this
       // save may create a document identity / corpus reference at all.
       const existingReportRow = await client.execute({
-        sql: `SELECT user_id FROM saved_reports WHERE device_key = ? AND id = ?`,
+        // Scholarly evidence server trust boundary (drizzle/0052): the persisted
+        // verifiedAcademicSearchDiagnosticsId is read back here so a RESAVE can
+        // re-resolve the server-owned evidence_json without the client ever
+        // echoing that handle — it is stripped from every report response, so a
+        // resave payload built from a GET (e.g. saveEnrichedAiResult's
+        // {...report, ...aiResult}) no longer carries it.
+        sql: `SELECT user_id, json_extract(payload_json, '$.verifiedAcademicSearchDiagnosticsId') AS verified_academic_diagnostics_id FROM saved_reports WHERE device_key = ? AND id = ?`,
         args: [deviceKey, id],
       });
       const isFirstSaveOfThisReport = existingReportRow.rows.length === 0;
+      const persistedVerifiedAcademicDiagnosticsId = ((): number | null => {
+        const v = existingReportRow.rows[0]?.verified_academic_diagnostics_id as number | bigint | null | undefined;
+        if (typeof v === 'bigint') return Number(v);
+        return typeof v === 'number' && Number.isFinite(v) ? v : null;
+      })();
 
       // Release-hardening audit finding AUTHZ-01 (corrected): (device_key,
       // id) is the primary key, but the resave upsert (SAVE_REPORT_SQL
@@ -462,16 +473,20 @@ export async function POST(request: Request) {
       // authoritative scholarly evidence is resolved here, server-side, from the
       // academic_search_run_diagnostics row that /api/academic-evidence already
       // wrote — gated on that row's stored submission_canonical_sha256 equalling
-      // canonicalSha256(this report's own text). The client only supplies an
-      // opaque lookup handle: the body's academicSearchDiagnosticsId on a first
-      // save, or the previously-server-persisted
-      // payload.verifiedAcademicSearchDiagnosticsId on a resave. Any
-      // miss/mismatch/parse failure => verifiedEvidence = [], never a fallback
-      // to client matchedPassages. verifiedDiagnosticsId is persisted below so
-      // GET recomputation and selfHealUnifiedSimilarity can re-resolve without
+      // canonicalSha256(this report's own text). Any miss/mismatch/parse
+      // failure => verifiedEvidence = [], never a fallback to client
+      // matchedPassages. verifiedDiagnosticsId is persisted below so GET
+      // recomputation and selfHealUnifiedSimilarity can re-resolve without
       // depending on the deferred diagnostics->report link.
+      // Precedence: (1) the body's academicSearchDiagnosticsId (first-save
+      // academic-evidence flow); (2) the server-persisted id read from the
+      // existing row above (a RESAVE — the client no longer carries the handle,
+      // it is stripped from every response); (3) a client-supplied
+      // payload.verifiedAcademicSearchDiagnosticsId (legacy/defensive only, and
+      // harmless — resolveVerifiedAcademicEvidence hash-verifies any id it gets).
       const academicEvidenceLookupHandle =
         academicDiagnosticsId ??
+        persistedVerifiedAcademicDiagnosticsId ??
         (typeof reportPayload?.verifiedAcademicSearchDiagnosticsId === 'number' && Number.isFinite(reportPayload.verifiedAcademicSearchDiagnosticsId)
           ? reportPayload.verifiedAcademicSearchDiagnosticsId
           : null);

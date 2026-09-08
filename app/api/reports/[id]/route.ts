@@ -336,6 +336,16 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
       client.close();
     }
 
+    // Scholarly evidence server trust boundary (drizzle/0052): verifiedAcademicSearchDiagnosticsId
+    // is an INTERNAL re-lookup handle — POST stamps it into payload_json purely so this route's
+    // recompute above and selfHealUnifiedSimilarity can re-resolve the server-owned evidence_json
+    // by (id + canonical text hash). No UI ever renders it, admin or otherwise. It must not reach
+    // any client, so it is stripped from the response here — AFTER the resolve above has read it,
+    // and only from this outbound copy. The stored payload_json keeps it (SAVE_REPORT_SQL and
+    // persistRefreshedSimilarity's json_set never remove it; POST re-derives the handle server-side
+    // from the existing row on a resave, so a client that never sees it still round-trips fine).
+    if (payload) delete payload.verifiedAcademicSearchDiagnosticsId;
+
     return new NextResponse(JSON.stringify({ payload }), { status: 200, headers: NO_STORE_JSON });
   } catch (err) {
     return new NextResponse(JSON.stringify({ error: err instanceof Error ? err.message : 'Internal error' }), { status: 500, headers: NO_STORE_JSON });

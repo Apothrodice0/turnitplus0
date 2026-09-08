@@ -286,3 +286,74 @@ test('8. resolveVerifiedAcademicEvidence unit: every failure mode -> [] , never 
   await db.execute({ sql: 'UPDATE academic_search_run_diagnostics SET evidence_json = ? WHERE id = ?', args: ['{not json', Number(id)] });
   assert.deepEqual((await resolveVerifiedAcademicEvidence(db, { diagnosticsId: Number(id), submissionCanonicalSha256: good })), { evidence: [], verifiedDiagnosticsId: null });
 });
+
+test('9. verifiedAcademicSearchDiagnosticsId: persisted in payload_json, NEVER in a report response, and a resave that never echoes it still keeps the verified evidence', async () => {
+  const verified = [{
+    provider: 'europe-pmc', providerId: 'PMCkeep', title: 'Keep', authors: null, publication: null, year: 2020,
+    doi: '10.7/keep', url: 'https://europepmc.org/article/PMC/PMCkeep',
+    matchedPassages: [{ submittedText: 'x', submittedWordStart: 12, submittedWordEnd: 33, matchedWordCount: 22 }],
+    similarity: 44,
+  }];
+  const diagId = Number(await seedDiagnostics(BODY, verified));
+
+  const dk = 'tb-handle-strip';
+  const { res: postRes, payload } = await postReport(dk, 'tb9a', {
+    academicSearchDiagnosticsId: diagId,
+    payloadOverrides: { externalAcademicEvidence: verified },
+  });
+  assert.equal(postRes.status, 200);
+  const rid = String(payload.id);
+
+  // (a) persisted in payload_json
+  const p0 = (await persistedUnified(dk, rid)).payload;
+  assert.equal(p0.verifiedAcademicSearchDiagnosticsId, diagId, 'handle IS persisted in payload_json');
+  assert.equal(p0.externalAcademicEvidence.length, 1);
+  const liveWords0 = (await persistedUnified(dk, rid)).unified.liveAcademicOnlyWords;
+  assert.ok(liveWords0 >= 1, 'verified evidence scored on first save');
+
+  // (b) never in the GET response
+  const getBody = await getReport(dk, rid, 'tb9b');
+  assert.equal('verifiedAcademicSearchDiagnosticsId' in getBody, false, 'GET response must NOT carry the internal handle');
+  assert.equal(getBody.externalAcademicEvidence.length, 1, 'but the verified evidence itself is still there');
+  assert.ok(getBody.unifiedSimilarity.liveAcademicOnlyWords >= 1, 'and it still scores on GET recompute');
+
+  // (c) a resave built from the GET response (no handle, no body academicSearchDiagnosticsId)
+  //     — mirrors saveEnrichedAiResult's {...report, ...aiResult} — must not lose the evidence
+  assert.equal('verifiedAcademicSearchDiagnosticsId' in getBody, false); // precondition: client genuinely has no handle
+  const resavePayload = { ...getBody, aiAnalysis: { summary: 'x' }, aiScore: 10 };
+  await resetRateForTest('tb9c');
+  const resaveReq = new Request('http://localhost/api/reports', {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-forwarded-for': 'tb9c' },
+    body: JSON.stringify({
+      deviceKey: dk, id: rid, submissionId: payload.submissionId, title: payload.title,
+      createdAt: payload.created, wordCount: payload.wordCount, archiveScore: payload.score, scoreBand: 'Low',
+      aiScore: 10, aiTone: null, aiStatus: 'ready', payload: resavePayload,
+      // deliberately NO academicSearchDiagnosticsId
+    }),
+  });
+  const resaveRes = await reportsRoute.POST(resaveReq);
+  assert.equal(resaveRes.status, 200);
+
+  const p1 = (await persistedUnified(dk, rid));
+  assert.equal(p1.payload.verifiedAcademicSearchDiagnosticsId, diagId, 'resave re-derived the handle server-side from the existing row');
+  assert.equal(p1.payload.externalAcademicEvidence.length, 1, 'verified evidence survived the resave');
+  assert.equal(p1.payload.externalAcademicEvidence[0].providerId, 'PMCkeep');
+  assert.ok(p1.unified.liveAcademicOnlyWords >= 1, 'verified evidence still scores after the resave');
+
+  // (d) still no handle in the response after the resave
+  const getBody2 = await getReport(dk, rid, 'tb9d');
+  assert.equal('verifiedAcademicSearchDiagnosticsId' in getBody2, false);
+  assert.equal(getBody2.externalAcademicEvidence.length, 1);
+});
+
+test('10. structural: every ordinary-user report-response path strips verifiedAcademicSearchDiagnosticsId', () => {
+  const files = ['app/api/reports/[id]/route.ts', 'app/reports/[id]/page.tsx'];
+  for (const rel of files) {
+    const src = fs.readFileSync(path.join(repo, rel), 'utf8');
+    assert.match(src, /delete\s+payload\.verifiedAcademicSearchDiagnosticsId/, `${rel} must delete the internal handle from the outbound payload`);
+  }
+  // the POST route must re-derive the handle server-side (json_extract on the existing row)
+  const postSrc = fs.readFileSync(path.join(repo, 'app/api/reports/route.ts'), 'utf8');
+  assert.match(postSrc, /json_extract\(payload_json,\s*'\$\.verifiedAcademicSearchDiagnosticsId'\)/, 'POST must read the persisted handle from the existing row for a resave');
+  assert.match(postSrc, /persistedVerifiedAcademicDiagnosticsId/, 'POST lookup-handle precedence must include the server-persisted id');
+});
