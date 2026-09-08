@@ -1940,6 +1940,123 @@ export const archive_document_cosources = sqliteTable(
   ],
 );
 
+// ── PMC OA scholarly-coverage SHADOW slice (drizzle/0053) ───────────────────
+// Turso-backed dedicated PMC shadow corpus for the server-side two-stage
+// scholarly-coverage matcher. Purely additive; NONE of these is read by
+// admissionEligibilitySql or any historical-corpus / SELF / relationship /
+// archive predicate. lib/pmc-coverage/* + lib/pmc-coverage-shadow.ts are the
+// sole readers, and only when process.env.PMC_COVERAGE_SHADOW_ENABLED === "true".
+// tools/seed-pmc-coverage-shadow-corpus.ts is the sole writer of the first
+// three; the deferred evaluator (via lib/report-shadow-evaluations.ts) is the
+// sole writer of pmc_coverage_shadow_evaluations. Winnowed fingerprint hits
+// only pick which <= 20 documents scoreAgainstArchive verifies — they never
+// score. The authoritative unifiedSimilarity.unifiedScore is never touched.
+
+// One row per PMC open-access document. canonical_text is the
+// front-matter-stripped body; tokens(canonical_text) reproduces the validated
+// prototype normalization exactly. is_retracted is the query-time tombstone.
+export const pmc_coverage_documents = sqliteTable(
+  "pmc_coverage_documents",
+  {
+    pmc_id: text("pmc_id").primaryKey(),
+    pmcid: text("pmcid").notNull(),
+    doi: text("doi"),
+    pmid: text("pmid"),
+    title: text("title").notNull(),
+    license: text("license").notNull(),
+    citation: text("citation"),
+    canonical_text: text("canonical_text").notNull(),
+    canonical_sha256: text("canonical_sha256").notNull(),
+    body_words: integer("body_words").notNull(),
+    version: integer("version").notNull(),
+    is_retracted: integer("is_retracted").notNull().default(0),
+    oa_snapshot_date: text("oa_snapshot_date"),
+    ingested_at: text("ingested_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    index("idx_pmc_coverage_documents_canonical_sha256").on(table.canonical_sha256),
+  ],
+);
+
+// Stage A compact winnowed fingerprint postings (~800 rows/doc, window 15).
+// The composite PRIMARY KEY IS the unique(pmc_id, fingerprint_version,
+// fingerprint_hash) constraint (INSERT OR IGNORE idempotent re-seed).
+export const pmc_document_fingerprints = sqliteTable(
+  "pmc_document_fingerprints",
+  {
+    pmc_id: text("pmc_id")
+      .notNull()
+      .references(() => pmc_coverage_documents.pmc_id, { onDelete: "cascade" }),
+    fingerprint_hash: text("fingerprint_hash").notNull(),
+    fingerprint_version: text("fingerprint_version").notNull(),
+    created_at: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    primaryKey({ columns: [table.pmc_id, table.fingerprint_version, table.fingerprint_hash] }),
+    index("idx_pmc_document_fingerprints_hash").on(table.fingerprint_hash, table.fingerprint_version),
+  ],
+);
+
+// Compact PMC-global DF-band metadata — exact copy of archive_hash_df_bands'
+// shape (drizzle/0049). REQUIRED in phase 1: the stop set for BOTH Stage A
+// (query-fingerprint fan-out control) and Stage B (getPostings pruning).
+export const pmc_hash_df_bands = sqliteTable(
+  "pmc_hash_df_bands",
+  {
+    shingle_hash: text("shingle_hash").notNull(),
+    df_bucket: integer("df_bucket").notNull(),
+    policy_version: text("policy_version").notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.shingle_hash, table.policy_version] }),
+  ],
+);
+
+// Bounded SHADOW telemetry — one row per (report_id, evaluator_version).
+// MEASUREMENT ONLY, never read by any production scoring / report path. No
+// DB-level FOREIGN KEY (same reasoning as report_historical_match_snapshots /
+// corpus_duplicate_suppression_shadow_evaluations); drizzle/0053's AFTER DELETE
+// trigger on saved_reports does the atomic cleanup.
+export const pmc_coverage_shadow_evaluations = sqliteTable(
+  "pmc_coverage_shadow_evaluations",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    report_device_key: text("report_device_key").notNull(),
+    report_id: text("report_id").notNull(),
+    status: text("status").notNull(),
+    error_code: text("error_code"),
+    evaluator_version: text("evaluator_version").notNull(),
+    unified_similarity_version: text("unified_similarity_version").notNull(),
+    fingerprint_version: text("fingerprint_version").notNull(),
+    df_band_policy_version: text("df_band_policy_version").notNull(),
+    authoritative_snapshot_computed_at: text("authoritative_snapshot_computed_at"),
+    submission_canonical_sha256: text("submission_canonical_sha256"),
+    submitted_word_count: integer("submitted_word_count"),
+    baseline_unified_score: integer("baseline_unified_score"),
+    counterfactual_unified_score: integer("counterfactual_unified_score"),
+    score_delta: integer("score_delta"),
+    pmc_matched_word_count: integer("pmc_matched_word_count"),
+    pmc_marginal_word_count: integer("pmc_marginal_word_count"),
+    pmc_candidate_count: integer("pmc_candidate_count"),
+    pmc_verified_source_count: integer("pmc_verified_source_count"),
+    stage_a_query_fingerprints: integer("stage_a_query_fingerprints"),
+    stage_a_stopped_fingerprints: integer("stage_a_stopped_fingerprints"),
+    stage_a_tombstoned_hits: integer("stage_a_tombstoned_hits"),
+    evaluation_truncated: integer("evaluation_truncated").notNull().default(0),
+    pmc_matched_positions_json: text("pmc_matched_positions_json"),
+    pmc_sources_json: text("pmc_sources_json"),
+    total_runtime_ms: integer("total_runtime_ms"),
+    computed_at: text("computed_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    created_at: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("ux_pmc_coverage_shadow_report_evaluator").on(
+      table.report_id,
+      table.evaluator_version,
+    ),
+  ],
+);
+
 // Export nothing else — Drizzle will consume these definitions for migrations.
 export {};
 

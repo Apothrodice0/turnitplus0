@@ -4,6 +4,7 @@ import { runAfterResponse } from "./run-after-response";
 import { runHistoricalMatchShadowEvaluation } from "./e8p-shadow-evaluation";
 import { runDeviceProvenanceShadowEvaluation } from "./device-provenance-shadow";
 import { runCorpusDuplicateSuppressionShadowEvaluation } from "./corpus-duplicate-suppression-shadow";
+import { runPmcCoverageShadowEvaluation } from "./pmc-coverage-shadow";
 import type { ReportHistoricalSubmissionMatch } from "./report-types";
 import type { UnifiedSimilarityResult } from "./unified-similarity";
 import type { ExternalAcademicEvidence } from "./academic-search/types";
@@ -187,8 +188,25 @@ export async function scheduleReportShadowEvaluations(
         archiveMatchedPositions: authoritativeArchiveMatchedPositions,
         externalAcademicEvidence: authoritativeExternalAcademicEvidence,
       });
+      // PMC OA scholarly-coverage shadow — what the unified score WOULD be if a
+      // Turso-backed PMC open-access coverage corpus were also a source (two-stage
+      // server matcher: winnowed fingerprint retrieval, then the UNMODIFIED
+      // scoreAgainstArchive over <= 20 candidates). IMMEDIATE no-op unless
+      // PMC_COVERAGE_SHADOW_ENABLED === "true"; never reads or writes the
+      // authoritative unifiedScore; never throws.
+      await runPmcCoverageShadowEvaluation(deferredClient, {
+        reportDeviceKey,
+        reportId,
+        accountId,
+        rawText,
+        productionResult,
+        authoritativeUnifiedSimilarity,
+        effectiveDeviceSelfRepresentationIds,
+        authoritativeArchiveMatchedPositions,
+        authoritativeExternalAcademicEvidence,
+      });
     } catch (err) {
-      // All three evaluators are "never throws" by their own contract; this is
+      // All four evaluators are "never throws" by their own contract; this is
       // a second, unconditional net so a telemetry failure (a broken
       // connection, an unexpected error path — including a failed shadow UPSERT,
       // which by design writes no row and is retried on a later view) can never
