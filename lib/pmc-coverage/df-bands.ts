@@ -49,11 +49,6 @@ export async function buildPmcDfBandTable(
   pmcIds: string[],
   opts: { policyVersion?: string; minPersistedDf?: number; bandMax?: number } = {},
 ): Promise<PmcDfBandBuildResult> {
-  const policyVersion = opts.policyVersion ?? PMC_DF_BAND_POLICY_VERSION;
-  const minPersistedDf = opts.minPersistedDf ?? PMC_MIN_PERSISTED_DF;
-  const bandMax = opts.bandMax ?? PMC_DF_BAND_MAX;
-  const overflow = bandMax + 1;
-
   const globalDf = new Map<string, number>();
   const CHUNK = 200;
   for (let i = 0; i < pmcIds.length; i += CHUNK) {
@@ -70,6 +65,40 @@ export async function buildPmcDfBandTable(
       }
     }
   }
+  return writePmcDfBands(client, globalDf, opts);
+}
+
+/**
+ * Same deterministic (re)build as buildPmcDfBandTable, but the caller supplies
+ * the per-document DISTINCT 5-gram hash sets it already has in memory (the seed
+ * path computes these once for winnowing and reuses them here) — so no
+ * canonical_text is re-read from the DB and no text is re-tokenized. The tally,
+ * the DELETE, the hash-sorted INSERT order and the resulting rows are IDENTICAL
+ * to buildPmcDfBandTable for the same corpus.
+ */
+export async function buildPmcDfBandTableFromGramSets(
+  client: Client,
+  gramSetsByPmcId: ReadonlyMap<string, ReadonlySet<string>>,
+  opts: { policyVersion?: string; minPersistedDf?: number; bandMax?: number } = {},
+): Promise<PmcDfBandBuildResult> {
+  const globalDf = new Map<string, number>();
+  for (const set of gramSetsByPmcId.values()) {
+    for (const h of set) globalDf.set(h, (globalDf.get(h) ?? 0) + 1);
+  }
+  return writePmcDfBands(client, globalDf, opts);
+}
+
+/** The shared write half: histogram, DELETE this generation, hash-sorted INSERT
+ *  of the DF >= minPersistedDf rows. Deterministic. */
+async function writePmcDfBands(
+  client: Client,
+  globalDf: Map<string, number>,
+  opts: { policyVersion?: string; minPersistedDf?: number; bandMax?: number } = {},
+): Promise<PmcDfBandBuildResult> {
+  const policyVersion = opts.policyVersion ?? PMC_DF_BAND_POLICY_VERSION;
+  const minPersistedDf = opts.minPersistedDf ?? PMC_MIN_PERSISTED_DF;
+  const bandMax = opts.bandMax ?? PMC_DF_BAND_MAX;
+  const overflow = bandMax + 1;
 
   await client.execute({
     sql: `DELETE FROM pmc_hash_df_bands WHERE policy_version = ?`,
@@ -77,14 +106,8 @@ export async function buildPmcDfBandTable(
   });
 
   const hist = { distinct: globalDf.size, df1: 0, df2_12: 0, df13_20: 0, df21plus: 0 };
-  let batch: { sql: string; args: (string | number)[] }[] = [];
-  let persisted = 0;
-  const flush = async () => {
-    if (batch.length === 0) return;
-    await client.batch(batch, "write");
-    batch = [];
-  };
   // Deterministic row order: sort by hash so a re-seed writes identical bytes.
+  const persistRows: Array<[string, number]> = [];
   for (const h of [...globalDf.keys()].sort()) {
     const df = globalDf.get(h)!;
     if (df <= 1) { hist.df1 += 1; continue; }
@@ -92,17 +115,20 @@ export async function buildPmcDfBandTable(
     else if (df <= bandMax) hist.df13_20 += 1;
     else hist.df21plus += 1;
     if (df < minPersistedDf) continue;
-    const bucket = df <= bandMax ? df : overflow;
-    batch.push({
-      sql: `INSERT INTO pmc_hash_df_bands(shingle_hash, df_bucket, policy_version) VALUES (?,?,?)`,
-      args: [h, bucket, policyVersion],
-    });
-    persisted += 1;
-    if (batch.length >= 2000) await flush();
+    persistRows.push([h, df <= bandMax ? df : overflow]);
   }
-  await flush();
 
-  return { policyVersion, minPersistedDf, persistedRows: persisted, histogram: hist };
+  // One multi-row INSERT per chunk instead of one prepared statement per row.
+  const ROWS_PER_STATEMENT = 500;
+  for (let i = 0; i < persistRows.length; i += ROWS_PER_STATEMENT) {
+    const chunk = persistRows.slice(i, i + ROWS_PER_STATEMENT);
+    await client.execute({
+      sql: `INSERT INTO pmc_hash_df_bands(shingle_hash, df_bucket, policy_version) VALUES ${chunk.map(() => "(?,?,?)").join(",")}`,
+      args: chunk.flatMap(([h, b]) => [h, b, policyVersion]),
+    });
+  }
+
+  return { policyVersion, minPersistedDf, persistedRows: persistRows.length, histogram: hist };
 }
 
 export type PmcDfBandMap = {

@@ -153,10 +153,12 @@ async function main(): Promise<void> {
   const updated = result.documents.filter((d) => d.status === "UPDATED").length;
   const unchanged = result.documents.filter((d) => d.status === "UNCHANGED").length;
   const totalFingerprints = result.documents.reduce((t, d) => t + d.fingerprintRows, 0);
+  const dfBands = result.dfBands.skipped
+    ? `${result.dfBands.persistedRows} DF-band rows (unchanged — rebuild skipped)`
+    : `${result.dfBands.persistedRows} DF-band rows (DF>=${result.dfBands.minPersistedDf}); histogram=${JSON.stringify(result.dfBands.histogram)}`;
   console.log(
-    `Done in ${elapsedMs}ms: ${seeded} seeded, ${updated} updated, ${unchanged} unchanged; ` +
-    `${totalFingerprints} distinct fingerprints; ${result.dfBands.persistedRows} DF-band rows ` +
-    `(DF>=${result.dfBands.minPersistedDf}); histogram=${JSON.stringify(result.dfBands.histogram)}.`,
+    `Done in ${elapsedMs}ms (${result.dbCalls} DB round trips): ${seeded} seeded, ${updated} updated, ` +
+    `${unchanged} unchanged; ${totalFingerprints} distinct fingerprints; ${dfBands}.`,
   );
   client.close();
 }
