@@ -236,7 +236,12 @@ test("REQUIREMENT (no representation-id leak via unifiedSimilarity itself): an o
 
   assert.deepEqual(ordinaryView.body.payload.unifiedSimilarity.contributions, [], "REQUIRED: an ordinary viewer's contributions array must be empty — it is not rendered by any production UI and carries the same internal id historicalSubmissionMatch is gated to protect");
   const ordinaryRawJson = JSON.stringify(ordinaryView.body);
-  assert.doesNotMatch(ordinaryRawJson, /sourceId|TURNITPLUS_CORPUS_SOURCE|previous_upload/, "no contribution-shaped diagnostic content may leak anywhere in the ordinary viewer's response");
+  // Match the internal contribution key EXACTLY ("sourceId":) — the additive
+  // Report V2 evidenceInterpretation payload carries a deliberately-opaque
+  // `sourceIds: ["src-1"]` array (report-local labels, never a representation
+  // id), which the loose /sourceId/ substring used to flag as a false positive.
+  assert.doesNotMatch(ordinaryRawJson, /"sourceId"|TURNITPLUS_CORPUS_SOURCE|previous_upload/, "no contribution-shaped diagnostic content may leak anywhere in the ordinary viewer's response");
+  assert.doesNotMatch(ordinaryRawJson, /"src-[0-9a-f]{6,}"|matchedRepresentationId/, "the opaque Report V2 source ids must be short report-local labels, never a representation id");
   assert.equal(ordinaryView.body.payload.unifiedSimilarity.unifiedScore, 100, "stripping contributions must never affect the aggregate score sitting right next to it");
 });
 

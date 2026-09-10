@@ -26,6 +26,7 @@ import {
 } from "@/lib/report-detail-poll";
 import { AiReport } from "@/components/report/ai-report";
 import { CategorySummary, OverviewReport, SourcesReport, SubmissionReport, dedupeExternalAcademicEvidence } from "@/components/report/similarity-report-papers";
+import { ReportV2View, ReportV2Print } from "@/components/report/report-v2/report-v2-view";
 import { ReportNotFoundPanel } from "@/components/report/report-not-found-panel";
 
 type LoadStatus = "loading" | "found" | "not-found";
@@ -119,7 +120,16 @@ export function ReportDetailShell({
       ? "resolved"
       : (initialSimilarityStatus ?? (initialReport !== null && hasUnifiedSimilarity(initialReport) ? "resolved" : "pending")),
   );
-  const [resultTab, setResultTab] = useState<ResultTab>("full");
+  // Report V2: when the additive evidenceInterpretation payload is present
+  // (every report saved since the Report V2 wiring), the "Overlap breakdown"
+  // tab is shown and is the default view. An older report without that payload
+  // never shows the tab and opens on "Full report" exactly as before — the
+  // existing report UI/fallback path is completely untouched for it.
+  const hasV2 = Boolean((report ?? initialReport)?.evidenceInterpretation);
+  const [resultTab, setResultTab] = useState<ResultTab>(
+    initialReport?.evidenceInterpretation ? "overlap" : "full",
+  );
+  const effectiveResultTab: ResultTab = resultTab === "overlap" && !hasV2 ? "full" : resultTab;
   const [isDeleting, setIsDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   // Release-hardening audit finding LIFECYCLE-06: true once the bounded
@@ -485,10 +495,11 @@ export function ReportDetailShell({
           <button className="active" type="button">AI report</button>
         ) : (
           <>
-            <button className={resultTab === "full" ? "active" : ""} type="button" onClick={() => setResultTab("full")}>Full report</button>
-            <button className={resultTab === "overview" ? "active" : ""} type="button" onClick={() => setResultTab("overview")}>Integrity overview</button>
-            <button className={resultTab === "submission" ? "active" : ""} type="button" onClick={() => setResultTab("submission")}>Submission</button>
-            <button className={resultTab === "sources" ? "active" : ""} type="button" onClick={() => setResultTab("sources")}>Source details</button>
+            {hasV2 && <button className={effectiveResultTab === "overlap" ? "active" : ""} type="button" onClick={() => setResultTab("overlap")}>Overlap breakdown</button>}
+            <button className={effectiveResultTab === "full" ? "active" : ""} type="button" onClick={() => setResultTab("full")}>Full report</button>
+            <button className={effectiveResultTab === "overview" ? "active" : ""} type="button" onClick={() => setResultTab("overview")}>Integrity overview</button>
+            <button className={effectiveResultTab === "submission" ? "active" : ""} type="button" onClick={() => setResultTab("submission")}>Submission</button>
+            <button className={effectiveResultTab === "sources" ? "active" : ""} type="button" onClick={() => setResultTab("sources")}>Source details</button>
           </>
         )}
       </nav>
@@ -498,16 +509,17 @@ export function ReportDetailShell({
           <AiReport report={report} signal={aiSignal} />
         ) : (
           <>
-            {resultTab === "full" && (
+            {effectiveResultTab === "overlap" && hasV2 && <ReportV2View report={report} />}
+            {effectiveResultTab === "full" && (
               <div className="full-report-preview">
                 <OverviewReport report={report} similarityStatus={effectiveSimilarityStatus} />
                 <SubmissionReport report={report} />
                 <SourcesReport report={report} />
               </div>
             )}
-            {resultTab === "overview" && <OverviewReport report={report} similarityStatus={effectiveSimilarityStatus} />}
-            {resultTab === "submission" && <SubmissionReport report={report} />}
-            {resultTab === "sources" && <SourcesReport report={report} />}
+            {effectiveResultTab === "overview" && <OverviewReport report={report} similarityStatus={effectiveSimilarityStatus} />}
+            {effectiveResultTab === "submission" && <SubmissionReport report={report} />}
+            {effectiveResultTab === "sources" && <SourcesReport report={report} />}
           </>
         )}
 
@@ -566,6 +578,7 @@ export function ReportDetailShell({
 
       <div className="print-report-bundle">
         {mode === "ai" ? <AiReport report={report} signal={aiSignal} printMode /> : <>
+          {hasV2 && <ReportV2Print report={report} />}
           <OverviewReport report={report} similarityStatus={effectiveSimilarityStatus} />
           <SubmissionReport report={report} />
           <SourcesReport report={report} />

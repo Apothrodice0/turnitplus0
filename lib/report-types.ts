@@ -29,7 +29,7 @@ export type {
 
 export type SourceType = "Internet" | "Publication";
 export type ReportMode = "ai" | "similarity";
-export type ResultTab = "full" | "overview" | "submission" | "sources";
+export type ResultTab = "overlap" | "full" | "overview" | "submission" | "sources";
 
 export type SourceMatch = {
   name: string;
