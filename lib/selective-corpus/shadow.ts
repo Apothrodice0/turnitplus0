@@ -11,6 +11,7 @@ import { selectiveCorpusStageA } from "./stage-a";
 import { loadSelectiveCorpusCandidateText } from "./source-loader";
 import { admitSelectiveCorpusCandidate } from "./verify";
 import { disambiguateSelectiveCorpusCoSources } from "./co-source";
+import { interpretSelectiveCorpusEvidence } from "./interpretation";
 import {
   SELECTIVE_CORPUS_SHADOW_EVALUATOR_VERSION,
   SELECTIVE_CORPUS_TIME_BUDGET_MS,
@@ -121,6 +122,9 @@ export function runSelectiveCorpusShadow(
     let familyGuardActivations = 0;
     const admittedSpansByKey = new Map<string, ReturnType<typeof admitSelectiveCorpusCandidate>["spans"]>();
     const rankByKey = new Map<string, number>();
+    /** FAMILY_GUARD's own per-source verdict, kept for the Evidence Interpretation
+     *  Layer (explanation only — never re-derived, never changes a position). */
+    const guardByKey = new Map<string, { familyGuardActivated: boolean; dominantSpanBoilerplate: boolean }>();
 
     for (const cand of stageA.topK) {
       if (performance.now() - started > SELECTIVE_CORPUS_TIME_BUDGET_MS) {
@@ -148,6 +152,10 @@ export function runSelectiveCorpusShadow(
         const key = String(cand.ordinal);
         admittedSpansByKey.set(key, res.spans);
         rankByKey.set(key, stageA.rankByOrdinal.get(cand.ordinal) ?? -1);
+        guardByKey.set(key, {
+          familyGuardActivated: res.familyGuardActivated,
+          dominantSpanBoilerplate: res.dominantSpanBoilerplate,
+        });
       }
     }
 
@@ -168,6 +176,44 @@ export function runSelectiveCorpusShadow(
       ? Math.min(100, Math.round((merged.size / submissionWordCount) * 100))
       : 0;
     const delta = authScore === null ? 0 : counterfactual - authScore;
+
+    // ---- Evidence Interpretation Layer V1 (EXPLANATION ONLY) ----
+    // Runs AFTER the counterfactual is computed, over the already-verified spans.
+    // It re-runs nothing and touches no position: matchedPositionCount,
+    // verifiedSourceCount, counterfactualUnifiedSimilarity and deltaVsAuthoritative
+    // above are final and independent of anything below.
+    const interpretation = interpretSelectiveCorpusEvidence({
+      submissionText: params.canonicalSubmissionText,
+      submissionWordCount,
+      sources: [...admittedSpansByKey.entries()].map(([key, spans]) => {
+        const pos = new Set<number>();
+        for (const s of spans) for (let i = s.start; i <= s.end; i += 1) pos.add(i);
+        const guard = guardByKey.get(key);
+        return {
+          key,
+          spans,
+          familyGuardActivated: guard?.familyGuardActivated ?? false,
+          dominantSpanBoilerplate: guard?.dominantSpanBoilerplate ?? false,
+          submissionCoverageFraction: submissionWordCount > 0 ? pos.size / submissionWordCount : 0,
+          // The shadow has no trusted work/version relationship signal, so
+          // POSSIBLE_SAME_WORK is never emitted here (overlap % alone must not
+          // produce it). Left null deliberately.
+          sameWorkRelationship: null,
+        };
+      }),
+    });
+    // stable, NON-SENSITIVE per-source labels (S1..Sn in admitted-rank order) —
+    // never the ordinal, never a source id, never a path or hash.
+    const orderedKeys = [...admittedSpansByKey.keys()];
+    const interpretationBreakdown = orderedKeys.map((key, i) => ({
+      sourceLabel: `S${i + 1}`,
+      spans: (interpretation.bySource.get(key) ?? []).map((si) => ({
+        wordRange: si.wordRange,
+        kind: si.kind,
+        confidence: si.confidence,
+        reasons: si.reasons,
+      })),
+    }));
 
     // Did any packed shard fail to load while serving Stage A / FAMILY_GUARD for
     // this submission? If so the discovery ran over an incomplete index and the
@@ -190,6 +236,9 @@ export function runSelectiveCorpusShadow(
       runtimeStageBMs: +stageBMs.toFixed(2),
       familyGuardActivations,
       coSourceAttributionActivations: co.activations,
+      interpretationVersion: interpretation.version,
+      interpretationCounts: interpretation.counts,
+      interpretationBreakdown,
       ...base,
     };
 

@@ -6,6 +6,7 @@ import { findReportRowForDeviceKey, findReportRowForUser } from '../../../../lib
 import { classifyReportMatches } from '../../../../lib/report-classification';
 import { deleteHistoricalMatchSnapshot } from '../../../../lib/report-historical-match';
 import { resolvePrimarySimilaritySummary, persistRefreshedSimilarity } from '../../../../lib/report-primary-similarity';
+import { withEvidenceInterpretation, stripClientEvidenceInterpretation } from '../../../../lib/report-evidence-interpretation';
 import { deleteReportDocumentData } from '../../../../lib/report-deletion';
 import { deleteReportCorpusAdmissionData } from '../../../../lib/corpus-admission-report-integration';
 import { scheduleReportShadowEvaluations } from '../../../../lib/report-shadow-evaluations';
@@ -60,6 +61,13 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
       }
 
       payload = JSON.parse(String(row.payload_json)) as SimilarityReport;
+      // Report V2 trust boundary: drop any persisted/forged
+      // evidenceInterpretation / reportCompletion / extractionDiagnostic
+      // immediately after parsing. They are recomputed server-side below from
+      // the freshly-resolved authoritative report; if that recompute is skipped
+      // (a resolution failure), the response simply carries none rather than a
+      // stale or client-forged value.
+      payload = stripClientEvidenceInterpretation(payload);
       // Task A correction: an explicit, unconditional authorization signal —
       // set here, once, directly from the authenticated session's own real
       // `role` column, independent of whether any admin-only DATA field
@@ -277,6 +285,24 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
         // already persisted).
         if (payload.unifiedSimilarity && sessionUser?.role !== 'admin') {
           payload.unifiedSimilarity = { ...payload.unifiedSimilarity, contributions: [] };
+        }
+        // Report V2 — recompute the additive, EXPLANATION-ONLY interpretation /
+        // completion / extraction diagnostic from THIS server-resolved payload
+        // (unifiedSimilarity merged, externalAcademicEvidence forced to the
+        // verified set). Replaces whatever payload_json carried. Never touches a
+        // score or a matched position; positionsByKind is a disjoint partition
+        // of payload.unifiedSimilarity.matchedPositions. Public-safe: opaque
+        // src-N ids + word indices into the user's own text only, so no extra
+        // non-admin stripping is required. historicalSubmissionMatch is the
+        // fully-populated local var (role-gating only affects whether IT is
+        // serialized, not this derivation) — and same-work stays dormant anyway.
+        try {
+          const v2 = withEvidenceInterpretation(payload, { historicalSubmissionMatch, selectiveCorpusBranch: null });
+          payload.evidenceInterpretation = v2.evidenceInterpretation;
+          payload.reportCompletion = v2.reportCompletion;
+          payload.extractionDiagnostic = v2.extractionDiagnostic;
+        } catch (err) {
+          console.error('report V2 interpretation (GET) failed (non-fatal, response omits it):', err instanceof Error ? err.message : String(err));
         }
         // Phase E8P.3: the experimental, allowlist-gated display value — see
         // lib/e8p-visibility.ts's own header comment. Synchronous (unlike the

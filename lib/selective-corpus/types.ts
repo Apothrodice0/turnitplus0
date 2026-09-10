@@ -1,4 +1,8 @@
 import type { SelectiveCorpusArtifactErrorCode } from "./artifact";
+import type {
+  SelectiveCorpusInterpretationKind,
+  SelectiveCorpusInterpretationConfidence,
+} from "./interpretation";
 
 /**
  * Selective Corpus V1 SHADOW slice — the internal shadow result.
@@ -48,6 +52,32 @@ export type SelectiveCorpusShadowResult = {
 
   familyGuardActivations?: number;
   coSourceAttributionActivations?: number;
+
+  /**
+   * Evidence Interpretation Layer V1 — EXPLANATION ONLY. Classifies the
+   * already-verified spans; changes NO matched position and NO similarity
+   * number (matchedPositionCount / counterfactualUnifiedSimilarity above are
+   * computed before it runs). Present only on state COMPLETED / PARTIAL.
+   *
+   * `interpretationBreakdown` uses NON-SENSITIVE per-source labels (S1..Sn) and
+   * word indices into the user's own submission — no source id, path, hash,
+   * fingerprint, corpus digest or provenance internal ever appears here.
+   *
+   * POSSIBLE_SAME_WORK is emitted ONLY on a trusted work/version relationship
+   * signal, never from overlap percentage. The shadow supplies no such signal,
+   * so `interpretationCounts.POSSIBLE_SAME_WORK` is currently always 0.
+   */
+  interpretationVersion?: string;
+  interpretationCounts?: Record<SelectiveCorpusInterpretationKind, number>;
+  interpretationBreakdown?: Array<{
+    sourceLabel: string;
+    spans: Array<{
+      wordRange: [start: number, end: number];
+      kind: SelectiveCorpusInterpretationKind;
+      confidence: SelectiveCorpusInterpretationConfidence;
+      reasons: string[];
+    }>;
+  }>;
 
   /**
    * Set when state is PARTIAL (and, when already observed, on a TIMEOUT):

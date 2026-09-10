@@ -12,6 +12,7 @@ import {
   unifiedEvidenceSummary,
   type SimilarityReport,
 } from "@/lib/report-types";
+import { withEvidenceInterpretation } from "@/lib/report-evidence-interpretation";
 import type { WebCheckResult } from "@/lib/web-check-core";
 import type { AcademicSearchStatus, ExternalAcademicEvidence } from "@/lib/academic-search/types";
 
@@ -270,6 +271,27 @@ export function attachUnifiedSimilarity(report: SimilarityReport): SimilarityRep
         externalAcademicEvidence: report.externalAcademicEvidence,
       }),
     };
+  } catch {
+    return report;
+  }
+}
+
+/**
+ * Report V2 — attach the additive, EXPLANATION-ONLY `evidenceInterpretation` /
+ * `reportCompletion` / `extractionDiagnostic` fields for the immediately-shown
+ * (pre-save / anonymous) view and the receipt. Same pattern as
+ * attachUnifiedSimilarity: pure, synchronous, network-free, changes no score
+ * or matched position.
+ *
+ * Client-side this omits `historicalSubmissionMatch` (server-only, and
+ * same-work is dormant regardless) and passes `null` for the Selective Corpus
+ * branch (a flag-OFF shadow, never a client search). The SERVER recomputes and
+ * OVERWRITES these values on save — see lib/report-evidence-interpretation.ts
+ * withEvidenceInterpretation.
+ */
+export function attachEvidenceInterpretation(report: SimilarityReport): SimilarityReport {
+  try {
+    return withEvidenceInterpretation(report, { selectiveCorpusBranch: null });
   } catch {
     return report;
   }

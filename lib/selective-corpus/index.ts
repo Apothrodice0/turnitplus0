@@ -29,6 +29,18 @@ export {
 } from "./shard-reader";
 export type { SelectiveCorpusShadowResult, SelectiveCorpusShadowState } from "./types";
 export {
+  interpretSelectiveCorpusEvidence,
+  SELECTIVE_CORPUS_INTERPRETATION_VERSION,
+  SELECTIVE_CORPUS_INTERPRETATION_KINDS,
+  type SelectiveCorpusInterpretationKind,
+  type SelectiveCorpusInterpretationConfidence,
+  type SelectiveCorpusSpanInterpretation,
+  type SelectiveCorpusInterpretationInput,
+  type SelectiveCorpusInterpretationResult,
+  type SelectiveCorpusInterpretationSourceInput,
+  type SelectiveCorpusSameWorkRelationship,
+} from "./interpretation";
+export {
   SELECTIVE_CORPUS_EXPECTED_DIGEST,
   SELECTIVE_CORPUS_VERSION,
   SELECTIVE_CORPUS_SHADOW_EVALUATOR_VERSION,

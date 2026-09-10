@@ -23,6 +23,7 @@ import { findRoomOccupant } from '../../../lib/reports-repo';
 import { runAfterResponse } from '../../../lib/run-after-response';
 import { createPendingReportAdmissionJob, processReportAdmissionJob } from '../../../lib/corpus-admission-report-integration';
 import { resolvePrimarySimilaritySummary } from '../../../lib/report-primary-similarity';
+import { withEvidenceInterpretation, stripClientEvidenceInterpretation } from '../../../lib/report-evidence-interpretation';
 import { scheduleReportShadowEvaluations } from '../../../lib/report-shadow-evaluations';
 import type { SimilarityReport, ReportHistoricalSubmissionMatch } from '../../../lib/report-types';
 import type { UnifiedSimilarityResult } from '../../../lib/unified-similarity';
@@ -512,11 +513,16 @@ export async function POST(request: Request) {
           : reportPayload.externalAcademicEvidence !== undefined
             ? []
             : undefined;
-      const persistedReportPayload = {
+      // Report V2 trust boundary: strip any client-supplied
+      // evidenceInterpretation / reportCompletion / extractionDiagnostic here —
+      // exactly like externalAcademicEvidence above, these are recomputed
+      // server-side below from the SERVER's own final report and can never
+      // survive a save as a client value.
+      const persistedReportPayload = stripClientEvidenceInterpretation({
         ...reportPayload,
         externalAcademicEvidence: persistedExternalAcademicEvidence,
         verifiedAcademicSearchDiagnosticsId: verifiedAcademicDiagnosticsId ?? undefined,
-      };
+      });
 
       // Device Passport (Phase 2/4): cryptographically verify an optional
       // upload-time device attestation. ORDERING (Preview same-device SELF
@@ -623,13 +629,28 @@ export async function POST(request: Request) {
       // both branches identically: an unenriched or failed-and-persisted
       // payload can never regress an already-good persisted result from an
       // earlier successful save.
+      // Report V2: attach the additive, EXPLANATION-ONLY evidenceInterpretation /
+      // reportCompletion / extractionDiagnostic computed from THIS server-
+      // resolved payload. Never touches a score or a matched position. If the
+      // interpretation would push the blob over MAX_BYTES (a pathologically
+      // large fully-matched document), it is dropped rather than 413-ing a
+      // report that would otherwise save — GET recomputes it on read.
+      const finalizeReportJson = (obj: SimilarityReport, hsm?: ReportHistoricalSubmissionMatch | null): string => {
+        try {
+          const enriched = JSON.stringify(withEvidenceInterpretation(obj, { historicalSubmissionMatch: hsm ?? null, selectiveCorpusBranch: null }));
+          if (enriched.length <= MAX_BYTES) return enriched;
+        } catch (err) {
+          console.error('report V2 interpretation attach failed (non-fatal, report saved without it):', err instanceof Error ? err.message : String(err));
+        }
+        return JSON.stringify(obj);
+      };
       // Base = the SERVER-RESOLVED payload (client fields, but
       // externalAcademicEvidence forced to the verified set + the verified
       // diagnostics id stamped on), not the raw client payloadJson. Every branch
       // below spreads persistedReportPayload, so a fabricated
       // payload.externalAcademicEvidence can never survive a save, even on the
       // transient-"pending" path that keeps this base value unchanged.
-      let payloadJsonToPersist = JSON.stringify(persistedReportPayload);
+      let payloadJsonToPersist = finalizeReportJson(persistedReportPayload as SimilarityReport);
       if (payloadJsonToPersist.length > MAX_BYTES) {
         return new NextResponse(JSON.stringify({ error: 'Payload too large' }), { status: 413 });
       }
@@ -699,7 +720,7 @@ export async function POST(request: Request) {
             externalAcademicEvidence: verifiedAcademicEvidence,
           };
           if (resolution.unifiedSimilarity) {
-            payloadJsonToPersist = JSON.stringify({
+            payloadJsonToPersist = finalizeReportJson({
               ...persistedReportPayload,
               unifiedSimilarity: resolution.unifiedSimilarity,
               corpusSourceMatchingEnabledAtComputation: resolution.corpusSourceMatchingEnabled,
@@ -710,7 +731,7 @@ export async function POST(request: Request) {
               // retry resave built by re-reading the previously stored report,
               // could otherwise still carry it forward).
               unifiedSimilarityFailed: false,
-            });
+            } as SimilarityReport, resolution.historicalSubmissionMatch);
             if (payloadJsonToPersist.length > MAX_BYTES) {
               return new NextResponse(JSON.stringify({ error: 'Payload too large' }), { status: 413 });
             }
@@ -746,13 +767,13 @@ export async function POST(request: Request) {
             // outdated score instead of "Unavailable". JSON.stringify drops
             // an `undefined`-valued key entirely, so this genuinely deletes
             // the field rather than persisting a literal null.
-            payloadJsonToPersist = JSON.stringify({
+            payloadJsonToPersist = finalizeReportJson({
               ...persistedReportPayload,
               unifiedSimilarity: undefined,
               unifiedSimilarityFailed: true,
               corpusSourceMatchingEnabledAtComputation: resolution.corpusSourceMatchingEnabled,
               unifiedSimilarityGeneration: resolution.corpusGeneration,
-            });
+            } as SimilarityReport, resolution.historicalSubmissionMatch);
             if (payloadJsonToPersist.length > MAX_BYTES) {
               return new NextResponse(JSON.stringify({ error: 'Payload too large' }), { status: 413 });
             }

@@ -15,6 +15,7 @@ import {
   analyzeAcademicEvidence,
   analyzeText,
   analyzeWikipediaText,
+  attachEvidenceInterpretation,
   attachUnifiedSimilarity,
   downloadReceipt,
   enrichReportWithAcademicEvidence,
@@ -826,6 +827,8 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
     if (webCheck) report = enrichReportWithWikipedia(report, webCheck);
     report = enrichReportWithAcademicEvidence(report, academicResult);
     report = attachUnifiedSimilarity(report);
+    // Report V2 — additive, explanation-only (server recomputes on save).
+    report = attachEvidenceInterpretation(report);
 
     const remainingAnimationMs = Math.max(0, minimumProcessingMs - (Date.now() - animationStartedAt));
     if (remainingAnimationMs > 0) await new Promise((resolve) => window.setTimeout(resolve, remainingAnimationMs));

@@ -49,6 +49,7 @@ import {
   analyzeAcademicEvidence,
   analyzeText,
   analyzeWikipediaText,
+  attachEvidenceInterpretation,
   attachUnifiedSimilarity,
   downloadReceipt,
   enrichReportWithAcademicEvidence,
@@ -1030,6 +1031,10 @@ export default function Home() {
     // this is the FINAL unified similarity result, not a provisional one to
     // be silently revised by a later save.
     report = attachUnifiedSimilarity(report);
+    // Report V2 — additive, explanation-only interpretation / completion for
+    // the immediately-shown view and the receipt. The server recomputes and
+    // overwrites these on save (lib/report-evidence-interpretation.ts).
+    report = attachEvidenceInterpretation(report);
 
     setCurrentReport(report);
     const remainingAnimationMs = Math.max(0, minimumProcessingMs - (Date.now() - animationStartedAt));

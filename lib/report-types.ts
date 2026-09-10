@@ -4,6 +4,28 @@ import type { AcademicSearchStatus, ExternalAcademicEvidence } from "@/lib/acade
 import type { UnifiedSimilarityResult } from "@/lib/unified-similarity";
 import { resolveAiDisplayState } from "@/lib/ai-display-state";
 import type { DetectedLanguage } from "@/lib/similarity-core";
+// Report V2 evidence-interpretation payload types. These are imported from
+// LEAF modules of lib/evidence-interpretation/ (report-payload-types /
+// completion / extraction) that never import back from this file, so there is
+// no import cycle — the same "describe the shape without pulling in a feature
+// module" goal HistoricalMatchPassage's hand-mirror serves, achieved by
+// pointing at dependency-free type files instead of copying them.
+import type {
+  ReportEvidenceInterpretation,
+  ReportEvidenceSource,
+  ReportEvidencePassage,
+} from "@/lib/evidence-interpretation/report-payload-types";
+import type { ReportCompletion } from "@/lib/evidence-interpretation/completion";
+import type { ReportExtractionDiagnostic } from "@/lib/evidence-interpretation/extraction";
+import type { EvidenceInterpretationKind, EvidenceInterpretationTone } from "@/lib/evidence-interpretation/kinds";
+
+export type {
+  ReportEvidenceInterpretation,
+  ReportEvidenceSource,
+  ReportEvidencePassage,
+  ReportCompletion,
+  ReportExtractionDiagnostic,
+};
 
 export type SourceType = "Internet" | "Publication";
 export type ReportMode = "ai" | "similarity";
@@ -285,6 +307,33 @@ export type SimilarityReport = {
    * never by any scoring logic.
    */
   unifiedSimilarityFailed?: boolean;
+  /**
+   * Report V2 — ADDITIVE, EXPLANATION ONLY. The Evidence Interpretation Layer's
+   * classification of the report's ALREADY-VERIFIED evidence
+   * (lib/evidence-interpretation/). NEVER read by, or written into,
+   * score/archiveScore/aiScore/unifiedSimilarity/matched positions/source
+   * admission — `positionsByKind` is a disjoint partition of the SAME
+   * authoritative matched-position union that produced the headline similarity,
+   * never a new or adjusted score. Absent whenever it has not been computed for
+   * this report; every consumer must keep working identically when it is
+   * absent. Carries only report-local opaque `src-N` ids and word indices into
+   * the user's own submission.
+   */
+  evidenceInterpretation?: ReportEvidenceInterpretation;
+  /**
+   * Report V2 — ADDITIVE. One deterministic report-level completion state
+   * (COMPLETED / PARTIAL / SOURCE_UNAVAILABLE / EXTRACTION_PARTIAL) resolved
+   * from the individual branch signals (academic search status, Selective
+   * Corpus shard state, extraction diagnostic, unverified-candidate count).
+   * Copy is non-alarming and never implies "the entire internet was searched".
+   */
+  reportCompletion?: ReportCompletion;
+  /**
+   * Report V2 — ADDITIVE. Document-extraction completeness diagnostic. Default
+   * (when the extractor surfaces nothing) is completeness "UNKNOWN" — a
+   * percentage is never invented. Feeds reportCompletion above.
+   */
+  extractionDiagnostic?: ReportExtractionDiagnostic;
   wordCount: number;
   characterCount: number;
   pageCount: number;
@@ -334,6 +383,17 @@ export type HighlightRange = {
   kind: "source" | "wikipedia" | "academic" | "reference-source";
   url?: string;
   wikipediaSources?: Array<{ pageId: number; title: string; url: string }>;
+  /**
+   * Report V2 — ADDITIVE, optional. The Evidence Interpretation Layer's kind /
+   * presentation tone for this highlighted run, plus the report-local opaque
+   * source id (`src-N`) and the `evidenceInterpretation.passages` index it maps
+   * to. Set only by a Report-V2-aware builder; the existing findHighlightRanges
+   * geometry never populates these and the current report UI never reads them.
+   */
+  interpretationKind?: EvidenceInterpretationKind;
+  tone?: EvidenceInterpretationTone;
+  sourceRef?: string;
+  passageRef?: number;
 };
 
 export const PRIMARY_SIMILARITY_BAND_LABELS = {
