@@ -2,6 +2,8 @@ import type { WebCheckResult } from "@/lib/web-check-core";
 import type { ReportSummary } from "@/lib/reports-remote";
 import type { AcademicSearchStatus, ExternalAcademicEvidence } from "@/lib/academic-search/types";
 import type { UnifiedSimilarityResult } from "@/lib/unified-similarity";
+import type { SuppliedReferenceVerifiedEvidence, SuppliedReferenceInput } from "@/lib/user-supplied-references";
+import type { UserSuppliedReferenceGuard, UserSuppliedReferencePersistedChannel } from "@/lib/report-user-supplied-references";
 import { resolveAiDisplayState } from "@/lib/ai-display-state";
 import type { DetectedLanguage } from "@/lib/similarity-core";
 // Report V2 evidence-interpretation payload types. These are imported from
@@ -334,6 +336,39 @@ export type SimilarityReport = {
    * percentage is never invented. Feeds reportCompletion above.
    */
   extractionDiagnostic?: ReportExtractionDiagnostic;
+  /**
+   * USER-SUPPLIED REFERENCES V1 — ADDITIVE, SERVER-AUTHORITATIVE. The safe,
+   * per-reference verified evidence for reference files the report's own author
+   * supplied for this check (lib/user-supplied-references.ts). Carries NO
+   * storage path, upload id, account id, content hash, database id, or
+   * Passport/provenance data. Recomputed server-side from the supplied
+   * reference TEXT on save; any client-supplied value is stripped
+   * (CLIENT_UNTRUSTED_EVIDENCE_INTERPRETATION_KEYS). Absent when no reference
+   * files were supplied — every consumer keeps working identically.
+   */
+  userSuppliedReferenceEvidence?: SuppliedReferenceVerifiedEvidence[];
+  /**
+   * USER-SUPPLIED REFERENCES V1 — TRANSIENT CLIENT INPUT (never persisted). A
+   * future upload flow sets this to the reference files' already-extracted text
+   * + name/type; saveReportRemote lifts it onto the save request as an
+   * `userSuppliedReferences` SIBLING of `payload`, and the server strips it from
+   * `payload` (CLIENT_UNTRUSTED_EVIDENCE_INTERPRETATION_KEYS) before persisting.
+   */
+  userSuppliedReferences?: SuppliedReferenceInput[];
+  /** USER-SUPPLIED REFERENCES V1 — ADDITIVE. The reference channel's completion
+   *  state, feeding reportCompletion. Absent when no reference files were
+   *  supplied (channel absent, NOT failed). */
+  userSuppliedReferenceChannel?: UserSuppliedReferencePersistedChannel;
+  /**
+   * USER-SUPPLIED REFERENCES V1.1 — INTERNAL carry-forward guard. Persisted in
+   * `payload_json` so a resave that omits the raw reference inputs can decide
+   * whether the persisted verified evidence still applies (same manuscript
+   * canonical identity + compatible channel/matcher version). NEVER exposed to
+   * an ordinary user — stripped from every GET / SSR / receipt response, exactly
+   * like `verifiedAcademicSearchDiagnosticsId`. Not a source identity; carries no
+   * filename / storage id / account id; never on a source card.
+   */
+  userSuppliedReferenceGuard?: UserSuppliedReferenceGuard;
   wordCount: number;
   characterCount: number;
   pageCount: number;
@@ -531,6 +566,15 @@ export function unifiedMatchedPositions(report: SimilarityReport): number[] {
  */
 export function referenceSourceMatchedPositions(report: SimilarityReport): number[] {
   return report.unifiedSimilarity?.previousUploadPositions ?? [];
+}
+
+/**
+ * USER-SUPPLIED REFERENCES V1 — the privacy-safe position subset behind
+ * matched-only-by-a-supplied-reference-file. Word indices only (no filename,
+ * storage id, or hash). Empty array when no reference files were supplied.
+ */
+export function userSuppliedReferenceMatchedPositions(report: SimilarityReport): number[] {
+  return report.unifiedSimilarity?.userSuppliedReferencePositions ?? [];
 }
 
 export function archiveMatchedWordCount(report: SimilarityReport) {

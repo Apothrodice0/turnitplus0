@@ -118,6 +118,13 @@ export async function saveReportRemote<T>(report: T, summary: ReportSummary, aca
     // whether or how the report is saved.
     const devicePassport = await maybeAttestReportUpload(summary.id, report);
     const extractionCompleteness = (report as { extractionDiagnostic?: unknown } | null)?.extractionDiagnostic;
+    // USER-SUPPLIED REFERENCES V1 — the reference files' ALREADY-EXTRACTED text
+    // travels as a sibling of `payload` (never inside it — the server strips any
+    // in-payload copy). Only the extracted text + file name/type is sent; the
+    // server (re)computes every matched position / word / % / interpretation.
+    // A future upload flow attaches `report.userSuppliedReferences`; until then
+    // this is simply absent and the report behaves exactly as today.
+    const userSuppliedReferences = (report as { userSuppliedReferences?: unknown } | null)?.userSuppliedReferences;
     const response = await fetch("/api/reports", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -129,6 +136,7 @@ export async function saveReportRemote<T>(report: T, summary: ReportSummary, aca
         ...(room !== undefined ? { room } : {}),
         ...(devicePassport ? { devicePassport } : {}),
         ...(extractionCompleteness && typeof extractionCompleteness === "object" ? { extractionCompleteness } : {}),
+        ...(Array.isArray(userSuppliedReferences) && userSuppliedReferences.length > 0 ? { userSuppliedReferences } : {}),
       }),
     });
     if (!response.ok) {

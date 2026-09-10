@@ -25,6 +25,8 @@ import { createPendingReportAdmissionJob, processReportAdmissionJob } from '../.
 import { resolvePrimarySimilaritySummary } from '../../../lib/report-primary-similarity';
 import { withEvidenceInterpretation, stripClientEvidenceInterpretation } from '../../../lib/report-evidence-interpretation';
 import { sanitizeExtractionDiagnostic } from '../../../lib/evidence-interpretation';
+import { verifySuppliedReferences } from '../../../lib/user-supplied-references';
+import { sanitizeSuppliedReferenceInputs, admittedReferenceEvidenceForUnifiedSimilarity, resolveUserSuppliedReferenceEvidenceForSave } from '../../../lib/report-user-supplied-references';
 import { scheduleReportShadowEvaluations } from '../../../lib/report-shadow-evaluations';
 import type { SimilarityReport, ReportHistoricalSubmissionMatch } from '../../../lib/report-types';
 import type { UnifiedSimilarityResult } from '../../../lib/unified-similarity';
@@ -311,7 +313,7 @@ export async function POST(request: Request) {
     const body = await request.json().catch(() => null);
     if (!body || typeof body !== 'object') return new NextResponse(JSON.stringify({ error: 'Invalid JSON' }), { status: 400 });
 
-    const { deviceKey, id, submissionId, title, createdAt, wordCount, archiveScore, scoreBand, aiScore, aiTone, aiStatus, payload, academicSearchDiagnosticsId, room, devicePassport, extractionCompleteness } = body as Record<string, unknown>;
+    const { deviceKey, id, submissionId, title, createdAt, wordCount, archiveScore, scoreBand, aiScore, aiTone, aiStatus, payload, academicSearchDiagnosticsId, room, devicePassport, extractionCompleteness, userSuppliedReferences } = body as Record<string, unknown>;
 
     // device_key is part of saved_reports' composite primary key, so it is
     // always required regardless of authentication state — unlike the list/
@@ -380,10 +382,31 @@ export async function POST(request: Request) {
         // echoing that handle — it is stripped from every report response, so a
         // resave payload built from a GET (e.g. saveEnrichedAiResult's
         // {...report, ...aiResult}) no longer carries it.
-        sql: `SELECT user_id, json_extract(payload_json, '$.verifiedAcademicSearchDiagnosticsId') AS verified_academic_diagnostics_id FROM saved_reports WHERE device_key = ? AND id = ?`,
+        // USER-SUPPLIED REFERENCES V1.1 — also read back the persisted,
+        // server-generated reference evidence + channel + internal carry-forward
+        // guard, and the persisted manuscript text, so a resave that omits raw
+        // reference inputs can carry the trusted evidence forward IFF the
+        // manuscript identity is unchanged (see resolveUserSuppliedReferenceEvidenceForSave).
+        sql: `SELECT user_id,
+                     json_extract(payload_json, '$.verifiedAcademicSearchDiagnosticsId') AS verified_academic_diagnostics_id,
+                     json_extract(payload_json, '$.userSuppliedReferenceEvidence') AS supplied_reference_evidence,
+                     json_extract(payload_json, '$.userSuppliedReferenceChannel') AS supplied_reference_channel,
+                     json_extract(payload_json, '$.userSuppliedReferenceGuard') AS supplied_reference_guard,
+                     json_extract(payload_json, '$.text') AS persisted_manuscript_text
+              FROM saved_reports WHERE device_key = ? AND id = ?`,
         args: [deviceKey, id],
       });
       const isFirstSaveOfThisReport = existingReportRow.rows.length === 0;
+      const parseJsonExtract = (v: unknown): unknown => {
+        if (typeof v !== 'string' || v.length === 0) return null;
+        try { return JSON.parse(v); } catch { return null; }
+      };
+      const persistedSuppliedReferenceEvidenceRaw = parseJsonExtract(existingReportRow.rows[0]?.supplied_reference_evidence);
+      const persistedSuppliedReferenceChannelRaw = parseJsonExtract(existingReportRow.rows[0]?.supplied_reference_channel);
+      const persistedSuppliedReferenceGuardRaw = parseJsonExtract(existingReportRow.rows[0]?.supplied_reference_guard);
+      const persistedManuscriptText = typeof existingReportRow.rows[0]?.persisted_manuscript_text === 'string'
+        ? (existingReportRow.rows[0].persisted_manuscript_text as string)
+        : null;
       const persistedVerifiedAcademicDiagnosticsId = ((): number | null => {
         const v = existingReportRow.rows[0]?.verified_academic_diagnostics_id as number | bigint | null | undefined;
         if (typeof v === 'bigint') return Number(v);
@@ -479,6 +502,39 @@ export async function POST(request: Request) {
 
       const reportPayload = payload as SimilarityReport;
 
+      // USER-SUPPLIED REFERENCES V1 — the trust boundary. The client sends the
+      // reference files' ALREADY-EXTRACTED text as an `userSuppliedReferences`
+      // sibling (never trusted from inside `payload` — that key is stripped).
+      // Only the extracted TEXT + file name/type is taken from the client;
+      // every matched position, matched word, contribution %, interpretation
+      // and completion state below is (re)computed HERE, server-side, by the
+      // EXISTING matcher (computeDocumentCorrespondence) + the FROZEN
+      // STRICT_SPAN admission gate. Filename similarity never contributes. A
+      // reference that fails extraction never fails the manuscript report — it
+      // just makes the reference channel PARTIAL. Supplied references are a
+      // PRIVATE report input: nothing here touches corpus admission /
+      // promotion / archive publication / Selective Corpus ingestion.
+      const suppliedReferenceInputs = sanitizeSuppliedReferenceInputs(userSuppliedReferences);
+      const freshSuppliedReferenceChannel = isNonEmptyString(reportPayload?.text) && suppliedReferenceInputs.length > 0
+        ? verifySuppliedReferences(reportPayload.text, suppliedReferenceInputs, reportPayload.wordCount)
+        : null;
+      // V1.1 RULE 3 — FRESH (new refs) / CARRY_FORWARD (same manuscript, compatible
+      // version) / DROPPED (manuscript changed, or version moved on) / NONE.
+      const suppliedReferenceResolution = isNonEmptyString(reportPayload?.text)
+        ? resolveUserSuppliedReferenceEvidenceForSave({
+            manuscriptText: reportPayload.text,
+            freshChannel: freshSuppliedReferenceChannel,
+            persistedEvidenceRaw: persistedSuppliedReferenceEvidenceRaw,
+            persistedChannelRaw: persistedSuppliedReferenceChannelRaw,
+            persistedGuardRaw: persistedSuppliedReferenceGuardRaw,
+            persistedManuscriptText,
+          })
+        : { action: 'NONE' as const, evidence: null, channel: null, guard: null };
+      const suppliedReferenceEvidence = suppliedReferenceResolution.evidence;
+      const suppliedReferenceChannelState = suppliedReferenceResolution.channel;
+      const suppliedReferenceGuard = suppliedReferenceResolution.guard;
+      const suppliedReferenceEvidenceForScore = admittedReferenceEvidenceForUnifiedSimilarity(suppliedReferenceEvidence);
+
       // Scholarly evidence server trust boundary (drizzle/0052). The client's
       // payload.externalAcademicEvidence is NEVER trusted for scoring. The
       // authoritative scholarly evidence is resolved here, server-side, from the
@@ -528,11 +584,26 @@ export async function POST(request: Request) {
       // exactly like externalAcademicEvidence above, these are recomputed
       // server-side below from the SERVER's own final report and can never
       // survive a save as a client value.
-      const persistedReportPayload = stripClientEvidenceInterpretation({
-        ...reportPayload,
-        externalAcademicEvidence: persistedExternalAcademicEvidence,
-        verifiedAcademicSearchDiagnosticsId: verifiedAcademicDiagnosticsId ?? undefined,
-      });
+      // USER-SUPPLIED REFERENCES V1 / V1.1 — the SERVER-VERIFIED per-reference
+      // evidence (safe fields only) + channel state + internal carry-forward
+      // guard, from THIS request's matcher run OR (a same-manuscript resave that
+      // omitted raw refs) carried forward verbatim from the persisted row.
+      // stripClientEvidenceInterpretation drops any client value for these keys
+      // first; only the server value is spread in afterwards.
+      const persistedReportPayload = {
+        ...stripClientEvidenceInterpretation({
+          ...reportPayload,
+          externalAcademicEvidence: persistedExternalAcademicEvidence,
+          verifiedAcademicSearchDiagnosticsId: verifiedAcademicDiagnosticsId ?? undefined,
+        }),
+        ...(suppliedReferenceEvidence && suppliedReferenceGuard
+          ? {
+              userSuppliedReferenceEvidence: suppliedReferenceEvidence,
+              ...(suppliedReferenceChannelState ? { userSuppliedReferenceChannel: suppliedReferenceChannelState } : {}),
+              userSuppliedReferenceGuard: suppliedReferenceGuard,
+            }
+          : {}),
+      };
 
       // Device Passport (Phase 2/4): cryptographically verify an optional
       // upload-time device attestation. ORDERING (Preview same-device SELF
@@ -647,7 +718,14 @@ export async function POST(request: Request) {
       // report that would otherwise save — GET recomputes it on read.
       const finalizeReportJson = (obj: SimilarityReport, hsm?: ReportHistoricalSubmissionMatch | null): string => {
         try {
-          const enriched = JSON.stringify(withEvidenceInterpretation(obj, { historicalSubmissionMatch: hsm ?? null, selectiveCorpusBranch: null, serverExtractionDiagnostic: clientExtractionDiagnostic }));
+          const enriched = JSON.stringify(withEvidenceInterpretation(obj, {
+            historicalSubmissionMatch: hsm ?? null,
+            selectiveCorpusBranch: null,
+            serverExtractionDiagnostic: clientExtractionDiagnostic,
+            userSuppliedReferenceEvidence: suppliedReferenceEvidence,
+            userSuppliedReferenceChannel: suppliedReferenceChannelState,
+            userSuppliedReferenceGuard: suppliedReferenceGuard,
+          }));
           if (enriched.length <= MAX_BYTES) return enriched;
         } catch (err) {
           console.error('report V2 interpretation attach failed (non-fatal, report saved without it):', err instanceof Error ? err.message : String(err));
@@ -703,6 +781,10 @@ export async function POST(request: Request) {
             // Trust boundary (drizzle/0052): the SERVER-VERIFIED scholarly
             // evidence only — never reportPayload.externalAcademicEvidence.
             externalAcademicEvidence: verifiedAcademicEvidence,
+            // USER-SUPPLIED REFERENCES V1 — the SERVER-VERIFIED reference
+            // passages just computed above; absent/empty leaves the unified
+            // score byte-identical to before this channel existed.
+            userSuppliedReferenceEvidence: suppliedReferenceEvidenceForScore,
             archiveScore: reportPayload.archiveScore ?? reportPayload.score,
             // Preview same-device SELF rule: on a genuine first save the
             // saved_reports row (and its verified_device_passport_id) does not

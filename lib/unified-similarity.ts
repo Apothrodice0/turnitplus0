@@ -25,7 +25,7 @@ import type { HistoricalSubmissionMatchEntry, ReportHistoricalSubmissionMatch } 
 
 export const UNIFIED_SIMILARITY_VERSION = "unified-similarity-v1";
 
-export type UnifiedEvidenceSourceType = "archive" | "openaire" | "europe_pmc" | "previous_upload";
+export type UnifiedEvidenceSourceType = "archive" | "openaire" | "europe_pmc" | "previous_upload" | "user_supplied_reference";
 /**
  * "excluded_effective_device_self": a production-counted previous-upload
  * source the Preview-gated same-device SELF rule
@@ -121,6 +121,15 @@ export type UnifiedSimilarityResult = {
    * every configuration where that flag is off).
    */
   deviceSelfExcludedWords: number;
+  /**
+   * USER-SUPPLIED REFERENCES V1 — words matched ONLY by a user-supplied
+   * reference file (no archive / live-academic / eligible-prior-upload overlap
+   * at that position). Always 0 when the caller passed no
+   * userSuppliedReferenceEvidence (every configuration without supplied
+   * reference files), which keeps this function's output byte-identical (shape
+   * and values) to before this channel existed apart from this key being 0.
+   */
+  userSuppliedReferenceOnlyWords: number;
   /** Full per-passage attribution, including excluded entries (see evidenceStatus) — internal use (debugging, calibration, a future admin view), never rendered to an end user as-is. */
   contributions: UnifiedEvidenceContribution[];
   /**
@@ -153,6 +162,14 @@ export type UnifiedSimilarityResult = {
    * non-admins).
    */
   previousUploadPositions: number[];
+  /**
+   * USER-SUPPLIED REFERENCES V1 — the exclusive subset of matchedPositions
+   * attributable ONLY to a user-supplied reference file. Word indices only —
+   * no filename, no storage id, no content hash — privacy-safe by construction,
+   * so the render layer can draw a supplied-reference highlight without touching
+   * per-contribution data. Empty when no reference files were supplied.
+   */
+  userSuppliedReferencePositions: number[];
 };
 
 export type ComputeUnifiedSimilarityParams = {
@@ -163,6 +180,21 @@ export type ComputeUnifiedSimilarityParams = {
   externalAcademicEvidence?: ExternalAcademicEvidence[] | null;
   /** SimilarityReport.historicalSubmissionMatch — already gated at strongCorrespondence/exactCanonicalMatch by lib/user-submission-matching.ts before this function sees it; relationshipType is inspected here, never re-derived. */
   historicalSubmissionMatch?: ReportHistoricalSubmissionMatch | null;
+  /**
+   * USER-SUPPLIED REFERENCES V1 — per-reference SERVER-VERIFIED submission
+   * passages (lib/user-supplied-references.ts: computeDocumentCorrespondence +
+   * the frozen STRICT_SPAN gate). Never a client-authored value. Absent / empty
+   * (the default whenever no reference files were supplied) makes this
+   * function's output byte-identical to before this channel existed, apart from
+   * the always-present userSuppliedReferenceOnlyWords: 0 /
+   * userSuppliedReferencePositions: [] keys.
+   */
+  userSuppliedReferenceEvidence?:
+    | ReadonlyArray<{
+        sourceId: string;
+        matchedPassages: ReadonlyArray<{ submittedWordStart: number; submittedWordEnd: number; matchedWordCount: number }>;
+      }>
+    | null;
   /**
    * matchedRepresentationId values that the Preview-gated same-device SELF
    * rule (lib/report-primary-similarity.ts, flag DEVICE_PASSPORT_SELF_ENABLED
@@ -313,7 +345,37 @@ export function computeUnifiedSimilarity(params: ComputeUnifiedSimilarityParams)
   const eligibleRanges: ExternalMatchedWordRange[] = [];
   const liveSet = new Set<number>();
   const priorSet = new Set<number>();
+  const referenceSet = new Set<number>();
   const contributions: UnifiedEvidenceContribution[] = [];
+
+  // --- Source: user-supplied reference files -------------------------------
+  // The report's own author supplied these; there is no discovery step and no
+  // SELF / UNKNOWN gating (a reference is the user's own supplied source
+  // material, always "included"). Every passage here is already SERVER-VERIFIED
+  // by lib/user-supplied-references.ts (computeDocumentCorrespondence + the
+  // frozen STRICT_SPAN gate) — this function only unions the positions, exactly
+  // as it does for the academic channel.
+  const seenReference = new Set<string>();
+  for (const ref of params.userSuppliedReferenceEvidence ?? []) {
+    const identityKey = `user-supplied-reference:${ref.sourceId}`;
+    const firstOccurrence = !seenReference.has(identityKey);
+    seenReference.add(identityKey);
+    for (const passage of ref.matchedPassages ?? []) {
+      const clamped = clampedPositions(passage.submittedWordStart, passage.submittedWordEnd, wordCount);
+      contributions.push({
+        sourceType: "user_supplied_reference",
+        sourceId: identityKey,
+        submittedWordStart: passage.submittedWordStart,
+        submittedWordEnd: passage.submittedWordEnd,
+        matchedWordCount: passage.matchedWordCount,
+        evidenceStatus: "included",
+      });
+      if (!clamped || !firstOccurrence) continue;
+      const [start, end] = clamped;
+      addRange(referenceSet, start, end);
+      eligibleRanges.push({ wordStart: start, wordEnd: end + 1 });
+    }
+  }
 
   // --- Source: live academic evidence (OpenAIRE / Europe PMC) ---------------
   const seenAcademic = new Set<string>();
@@ -442,15 +504,22 @@ export function computeUnifiedSimilarity(params: ComputeUnifiedSimilarityParams)
   let archiveOnlyWords = 0;
   let liveAcademicOnlyWords = 0;
   let previousUploadOnlyWords = 0;
+  let userSuppliedReferenceOnlyWords = 0;
   let overlapWords = 0;
   const previousUploadPositions: number[] = [];
-  const allEligiblePositions = new Set<number>([...archiveSet, ...liveSet, ...priorSet]);
+  const userSuppliedReferencePositions: number[] = [];
+  const allEligiblePositions = new Set<number>([...archiveSet, ...liveSet, ...priorSet, ...referenceSet]);
   for (const position of allEligiblePositions) {
-    const sourcesHere = (archiveSet.has(position) ? 1 : 0) + (liveSet.has(position) ? 1 : 0) + (priorSet.has(position) ? 1 : 0);
+    const sourcesHere =
+      (archiveSet.has(position) ? 1 : 0) +
+      (liveSet.has(position) ? 1 : 0) +
+      (priorSet.has(position) ? 1 : 0) +
+      (referenceSet.has(position) ? 1 : 0);
     if (sourcesHere > 1) { overlapWords += 1; continue; }
     if (archiveSet.has(position)) archiveOnlyWords += 1;
     else if (liveSet.has(position)) liveAcademicOnlyWords += 1;
-    else { previousUploadOnlyWords += 1; previousUploadPositions.push(position); }
+    else if (priorSet.has(position)) { previousUploadOnlyWords += 1; previousUploadPositions.push(position); }
+    else { userSuppliedReferenceOnlyWords += 1; userSuppliedReferencePositions.push(position); }
   }
 
   return {
@@ -465,8 +534,10 @@ export function computeUnifiedSimilarity(params: ComputeUnifiedSimilarityParams)
     selfExcludedWords,
     unknownExcludedWords,
     deviceSelfExcludedWords,
+    userSuppliedReferenceOnlyWords,
     contributions,
     matchedPositions: [...allEligiblePositions].sort((left, right) => left - right),
     previousUploadPositions: previousUploadPositions.sort((left, right) => left - right),
+    userSuppliedReferencePositions: userSuppliedReferencePositions.sort((left, right) => left - right),
   };
 }

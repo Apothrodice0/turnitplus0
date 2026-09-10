@@ -93,6 +93,7 @@ export const SOURCE_TYPE_BADGE: Record<ReportV2SourceType, string> = {
   "reference-collection": "TurnitPlus reference collection",
   "prior-submission": "TurnitPlus reference collection",
   "selective-corpus": "TurnitPlus reference collection",
+  "user-supplied-reference": "Supplied reference",
 };
 
 /** Non-attributable buckets — no external link, no named document, ever. */
@@ -268,6 +269,7 @@ function resolveCompletionView(
       selectiveCorpus: null,
       extraction: extraction?.completeness ?? "UNKNOWN",
       unverifiedCandidateCount: 0,
+      userSuppliedReference: null,
     },
   };
 }

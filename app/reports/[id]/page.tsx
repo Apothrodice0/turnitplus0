@@ -98,6 +98,13 @@ const loadOwnedReport = cache(async (id: string): Promise<OwnedReportResult> => 
       // browser. The stored payload_json keeps it for GET recompute / self-heal;
       // POST re-derives it server-side on a resave.
       delete payload.verifiedAcademicSearchDiagnosticsId;
+      // USER-SUPPLIED REFERENCES V1.1 (RULE 5): the internal carry-forward guard
+      // (manuscript canonical digest + channel/matcher versions) is server-only —
+      // it must never reach the browser on the first-paint SSR payload, exactly
+      // like verifiedAcademicSearchDiagnosticsId above. The stored payload_json
+      // keeps it so a resave can decide whether to carry the reference evidence
+      // forward.
+      delete payload.userSuppliedReferenceGuard;
       // Task A correction: the same explicit, unconditional authorization
       // signal app/api/reports/[id]/route.ts's GET handler sets for the
       // client-side background re-fetch — this is the server-rendered FIRST

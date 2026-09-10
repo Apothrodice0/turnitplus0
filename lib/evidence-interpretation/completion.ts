@@ -20,6 +20,13 @@ export type ReportCompletionState = "COMPLETED" | "PARTIAL" | "SOURCE_UNAVAILABL
 
 export type SelectiveCorpusBranchState = "COMPLETED" | "PARTIAL" | "DISABLED" | "UNAVAILABLE";
 
+/** USER-SUPPLIED REFERENCES V1 — the reference-file channel's own state.
+ *  null / absent = no reference files were supplied (channel ABSENT, NOT failed).
+ *  "COMPLETE" = every supplied reference was extracted and matcher-checked.
+ *  "PARTIAL" = one or more supplied references failed extraction / had no usable
+ *  text (the report is still produced; this contributes a PARTIAL completion). */
+export type UserSuppliedReferenceBranchState = "COMPLETE" | "PARTIAL" | null;
+
 export type ReportCompletion = {
   state: ReportCompletionState;
   /** short line for the top of the report. */
@@ -34,6 +41,8 @@ export type ReportCompletion = {
     extraction: ReportExtractionCompleteness;
     /** candidate sources identified but not text-verified (rank-ordered upstream). */
     unverifiedCandidateCount: number;
+    /** USER-SUPPLIED REFERENCES V1 — null when no reference files were supplied. */
+    userSuppliedReference: UserSuppliedReferenceBranchState;
   };
 };
 
@@ -42,6 +51,9 @@ export type ResolveReportCompletionInput = {
   selectiveCorpus?: SelectiveCorpusBranchState | null;
   extraction?: ReportExtractionDiagnostic | null;
   unverifiedCandidateCount?: number;
+  /** USER-SUPPLIED REFERENCES V1 — the reference-file channel state, or null when
+   *  no reference files were supplied (channel ABSENT — never a failure). */
+  userSuppliedReference?: UserSuppliedReferenceBranchState;
   /** for the PARTIAL/SOURCE_UNAVAILABLE detail sentence. */
   verifiedSimilarityPercent?: number;
 };
@@ -58,6 +70,7 @@ export function resolveReportCompletion(input: ResolveReportCompletionInput): Re
   const selectiveCorpus = input.selectiveCorpus ?? null;
   const extraction: ReportExtractionCompleteness = input.extraction?.completeness ?? "UNKNOWN";
   const unverifiedCandidateCount = Math.max(0, input.unverifiedCandidateCount ?? 0);
+  const userSuppliedReference: UserSuppliedReferenceBranchState = input.userSuppliedReference ?? null;
   const pct = input.verifiedSimilarityPercent;
 
   const reasons: string[] = [];
@@ -65,13 +78,19 @@ export function resolveReportCompletion(input: ResolveReportCompletionInput): Re
   if (academicSearch === "FAILED") reasons.push("the live academic-source search could not complete");
   if (selectiveCorpus === "PARTIAL") reasons.push("part of the TurnitPlus reference index was unavailable at search time");
   if (selectiveCorpus === "UNAVAILABLE") reasons.push("the TurnitPlus reference index could not be loaded");
+  if (userSuppliedReference === "PARTIAL") reasons.push("one or more supplied reference files could not be read");
   if (unverifiedCandidateCount > 0) {
     reasons.push(`${unverifiedCandidateCount} candidate source${unverifiedCandidateCount === 1 ? "" : "s"} could not be text-verified`);
   }
 
   let state: ReportCompletionState = "COMPLETED";
   if (extraction === "PARTIAL") state = "EXTRACTION_PARTIAL";
-  else if (academicSearch === "FAILED" || selectiveCorpus === "PARTIAL" || selectiveCorpus === "UNAVAILABLE") state = "PARTIAL";
+  else if (
+    academicSearch === "FAILED" ||
+    selectiveCorpus === "PARTIAL" ||
+    selectiveCorpus === "UNAVAILABLE" ||
+    userSuppliedReference === "PARTIAL"
+  ) state = "PARTIAL";
   else if (unverifiedCandidateCount > 0) state = "SOURCE_UNAVAILABLE";
 
   let detail: string | null = null;
@@ -94,6 +113,6 @@ export function resolveReportCompletion(input: ResolveReportCompletionInput): Re
     headline: HEADLINE[state],
     detail,
     reasons,
-    signals: { academicSearch, selectiveCorpus, extraction, unverifiedCandidateCount },
+    signals: { academicSearch, selectiveCorpus, extraction, unverifiedCandidateCount, userSuppliedReference },
   };
 }

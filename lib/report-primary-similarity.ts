@@ -309,6 +309,19 @@ export async function resolvePrimarySimilaritySummary(
     wordCount: number;
     archiveMatchedPositions?: number[] | null;
     externalAcademicEvidence?: ExternalAcademicEvidence[] | null;
+    /**
+     * USER-SUPPLIED REFERENCES V1 — the SERVER-VERIFIED per-reference submission
+     * passages (lib/user-supplied-references.ts). Absent / empty makes the
+     * unified score byte-identical to before this channel existed. Passed the
+     * same way on the POST (fresh verification) and GET (persisted evidence)
+     * paths, so the reference-augmented score is stable across a reload.
+     */
+    userSuppliedReferenceEvidence?:
+      | ReadonlyArray<{
+          sourceId: string;
+          matchedPassages: ReadonlyArray<{ submittedWordStart: number; submittedWordEnd: number; matchedWordCount: number }>;
+        }>
+      | null;
     /** The archive-only fallback value — never mutated, never persisted by this function; see this module's own header comment. */
     archiveScore: number;
     /**
@@ -426,6 +439,7 @@ export async function resolvePrimarySimilaritySummary(
       externalAcademicEvidence: params.externalAcademicEvidence,
       historicalSubmissionMatch,
       effectiveDeviceSelfRepresentationIds,
+      userSuppliedReferenceEvidence: params.userSuppliedReferenceEvidence,
     });
     return { historicalSubmissionMatch, unifiedSimilarity, primaryScore: unifiedSimilarity.unifiedScore, isUnified: true, corpusSourceMatchingEnabled, corpusGeneration, failed: false, effectiveDeviceSelfRepresentationIds, deviceSelfSharedGuard };
   } catch (err) {

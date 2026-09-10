@@ -8,6 +8,7 @@ import { deleteHistoricalMatchSnapshot } from '../../../../lib/report-historical
 import { resolvePrimarySimilaritySummary, persistRefreshedSimilarity } from '../../../../lib/report-primary-similarity';
 import { withEvidenceInterpretation, stripClientEvidenceInterpretation } from '../../../../lib/report-evidence-interpretation';
 import { sanitizeExtractionDiagnostic } from '../../../../lib/evidence-interpretation';
+import { admittedReferenceEvidenceForUnifiedSimilarity } from '../../../../lib/report-user-supplied-references';
 import { deleteReportDocumentData } from '../../../../lib/report-deletion';
 import { deleteReportCorpusAdmissionData } from '../../../../lib/corpus-admission-report-integration';
 import { scheduleReportShadowEvaluations } from '../../../../lib/report-shadow-evaluations';
@@ -73,6 +74,18 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
       const persistedExtractionDiagnostic = sanitizeExtractionDiagnostic(
         (payload as Record<string, unknown>).extractionDiagnostic,
       );
+      // USER-SUPPLIED REFERENCES V1 — capture the persisted, server-verified
+      // reference evidence + channel BEFORE the strip below. Written by THIS
+      // report's own save (already server-verified then, from the actual
+      // reference text — the raw text is never persisted), so it is trusted
+      // as-is on read and re-threaded through the unified-score recompute + the
+      // interpretation recompute, keeping the reference-augmented result stable
+      // across a reload. A pre-V1 report simply has none.
+      const persistedReferenceEvidence = Array.isArray(payload.userSuppliedReferenceEvidence)
+        ? payload.userSuppliedReferenceEvidence
+        : null;
+      const persistedReferenceChannel = payload.userSuppliedReferenceChannel ?? null;
+      const persistedReferenceEvidenceForScore = admittedReferenceEvidenceForUnifiedSimilarity(persistedReferenceEvidence);
       // Report V2 trust boundary: drop any persisted/forged
       // evidenceInterpretation / reportCompletion / extractionDiagnostic
       // immediately after parsing. They are recomputed server-side below from
@@ -169,6 +182,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
           wordCount: payload.wordCount,
           archiveMatchedPositions: payload.archiveMatchedPositions,
           externalAcademicEvidence: verifiedAcademicEvidence,
+          userSuppliedReferenceEvidence: persistedReferenceEvidenceForScore,
           archiveScore: payload.archiveScore ?? payload.score,
         });
         const historicalSubmissionMatch = resolution.historicalSubmissionMatch;
@@ -309,10 +323,18 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
         // fully-populated local var (role-gating only affects whether IT is
         // serialized, not this derivation) — and same-work stays dormant anyway.
         try {
-          const v2 = withEvidenceInterpretation(payload, { historicalSubmissionMatch, selectiveCorpusBranch: null, serverExtractionDiagnostic: persistedExtractionDiagnostic });
+          const v2 = withEvidenceInterpretation(payload, {
+            historicalSubmissionMatch,
+            selectiveCorpusBranch: null,
+            serverExtractionDiagnostic: persistedExtractionDiagnostic,
+            userSuppliedReferenceEvidence: persistedReferenceEvidence,
+            userSuppliedReferenceChannel: persistedReferenceChannel,
+          });
           payload.evidenceInterpretation = v2.evidenceInterpretation;
           payload.reportCompletion = v2.reportCompletion;
           payload.extractionDiagnostic = v2.extractionDiagnostic;
+          if (v2.userSuppliedReferenceEvidence) payload.userSuppliedReferenceEvidence = v2.userSuppliedReferenceEvidence;
+          if (v2.userSuppliedReferenceChannel) payload.userSuppliedReferenceChannel = v2.userSuppliedReferenceChannel;
         } catch (err) {
           console.error('report V2 interpretation (GET) failed (non-fatal, response omits it):', err instanceof Error ? err.message : String(err));
         }

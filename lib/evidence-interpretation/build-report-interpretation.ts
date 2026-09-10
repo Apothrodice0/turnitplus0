@@ -19,6 +19,7 @@ import {
   normalizeScholarlyEvidence,
   normalizePriorSubmissionEvidence,
   normalizeSelectiveCorpusEvidence,
+  normalizeUserSuppliedReferenceEvidence,
 } from "./adapters";
 import type {
   ReportEvidenceInterpretation,
@@ -66,6 +67,14 @@ export type BuildReportEvidenceInterpretationOptions = {
   selectiveCorpusAdmittedSources?: ReadonlyArray<
     Pick<InterpretationSourceInput, "spans" | "familyGuardActivated" | "dominantSpanBoilerplate"> & { key?: string }
   >;
+  /** SERVER-VERIFIED user-supplied reference evidence (lib/user-supplied-references.ts).
+   *  Absent unless the report carried supplied reference files. Only ADMITTED
+   *  references with real verified passages should be passed. */
+  userSuppliedReferences?: ReadonlyArray<{
+    key: string;
+    safeLabel: string;
+    verifiedPassages: ReadonlyArray<{ submittedWordStart: number; submittedWordEnd: number; matchedWordCount: number }>;
+  }>;
 };
 
 // ── build the normalized evidence bundle ─────────────────────────────────
@@ -82,6 +91,7 @@ export function normalizeReportEvidence(
     ...(opts.selectiveCorpusAdmittedSources
       ? normalizeSelectiveCorpusEvidence(opts.selectiveCorpusAdmittedSources, report.wordCount)
       : []),
+    ...normalizeUserSuppliedReferenceEvidence(opts.userSuppliedReferences ?? [], report.wordCount),
   ];
   return {
     submissionText: report.text ?? "",
@@ -97,6 +107,7 @@ const PRODUCER_ORDER: Record<NormalizedVerifiedSource["producer"], number> = {
   scholarly: 1,
   "prior-submission": 2,
   "selective-corpus": 3,
+  "user-supplied-reference": 4,
 };
 
 function assignOpaqueIds(sources: NormalizedVerifiedSource[]): Map<string, string> {
@@ -118,6 +129,7 @@ const GENERIC_LABEL: Record<NormalizedSourceType, string> = {
   "reference-collection": "TurnitPlus reference collection",
   "prior-submission": "Earlier submission",
   "selective-corpus": "TurnitPlus reference collection",
+  "user-supplied-reference": "Supplied reference",
 };
 
 function safeLabel(source: NormalizedVerifiedSource): string {
@@ -233,8 +245,17 @@ export function buildReportEvidenceInterpretation(
     present.sort((a, b) => wordsByKind[b].length - wordsByKind[a].length);
     const primaryKind = present[0] ?? "DISTINCTIVE_EXTERNAL_MATCH";
     // pick a representative reasons list for the primary kind
-    const repReasons =
+    const baseReasons =
       spanInterps.find((s) => s.kind === primaryKind)?.reasons ?? ["distinctive text that matches this source"];
+    // USER-SUPPLIED REFERENCES V1.1 (RULE 1) — make the trust semantics explicit
+    // on the card: this text also appears in a file the report's OWN author
+    // supplied. The overlap is matcher-verified; the source is NOT represented
+    // as independently discovered or independently authenticated. (This is
+    // presentation copy — the kind classification itself is unchanged.)
+    const repReasons =
+      src.producer === "user-supplied-reference"
+        ? ["this text also appears in a reference file you supplied", ...baseReasons.filter((r) => r !== "distinctive text that matches this source")]
+        : baseReasons;
     const repConfidence = spanInterps
       .filter((s) => s.kind === primaryKind)
       .reduce<EvidenceInterpretationConfidence>(

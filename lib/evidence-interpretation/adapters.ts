@@ -112,6 +112,43 @@ export function normalizePriorSubmissionEvidence(
   ];
 }
 
+// ── E. user-supplied reference files ─────────────────────────────────────
+// The report's own author supplied these reference files for this check. Spans
+// are the SERVER-VERIFIED submission passages from lib/user-supplied-references.ts
+// (computeDocumentCorrespondence + the frozen STRICT_SPAN gate) — never a
+// client-authored value. sameWorkRelationship is ALWAYS null: POSSIBLE_SAME_WORK
+// stays relationship-gated only and must never activate just because a reference
+// was supplied, or the overlap is 80/90/100%, or the filename is similar.
+// familyGuard does not apply (no indexed family for a private one-off file).
+export function normalizeUserSuppliedReferenceEvidence(
+  admittedReferences: ReadonlyArray<{
+    key: string;
+    safeLabel: string;
+    verifiedPassages: ReadonlyArray<{ submittedWordStart: number; submittedWordEnd: number; matchedWordCount: number }>;
+  }>,
+  submissionWordCount: number,
+): NormalizedVerifiedSource[] {
+  return admittedReferences
+    .map((ref) => {
+      const spans = [...ref.verifiedPassages]
+        .map((p) => ({ start: p.submittedWordStart | 0, end: p.submittedWordEnd | 0, words: p.matchedWordCount | 0 }))
+        .filter((s) => s.end >= s.start)
+        .sort((a, b) => a.start - b.start);
+      const matchedWordCount = sourcePositions({ spans }).size;
+      return {
+        key: ref.key,
+        producer: "user-supplied-reference" as const,
+        sourceType: "user-supplied-reference" as const,
+        labelParts: { title: ref.safeLabel, publication: null, hostname: null, year: null, doi: null, url: null },
+        spans,
+        matchedWordCount,
+        submissionCoverageFraction: coverage(matchedWordCount, submissionWordCount),
+        sameWorkRelationship: null,
+      };
+    })
+    .filter((s) => s.spans.length > 0);
+}
+
 // ── D. Selective Corpus verified evidence ────────────────────────────────
 // Not on SimilarityReport today (it is a shadow slice). A caller that has the
 // selective-corpus admission results passes them here in the same shape the

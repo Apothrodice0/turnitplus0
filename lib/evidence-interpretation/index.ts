@@ -50,6 +50,7 @@ export {
   normalizeScholarlyEvidence,
   normalizePriorSubmissionEvidence,
   normalizeSelectiveCorpusEvidence,
+  normalizeUserSuppliedReferenceEvidence,
 } from "./adapters";
 
 export {
@@ -77,5 +78,6 @@ export {
   type ReportCompletion,
   type ReportCompletionState,
   type SelectiveCorpusBranchState,
+  type UserSuppliedReferenceBranchState,
   type ResolveReportCompletionInput,
 } from "./completion";

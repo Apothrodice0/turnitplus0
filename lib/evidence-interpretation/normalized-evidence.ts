@@ -21,9 +21,16 @@ export type NormalizedSourceType =
   | "publication"
   | "reference-collection"
   | "prior-submission"
-  | "selective-corpus";
+  | "selective-corpus"
+  /** a reference file the report's own author supplied for this check — see lib/user-supplied-references.ts. NOT a shared-corpus source. */
+  | "user-supplied-reference";
 
-export type NormalizedEvidenceProducer = "archive" | "scholarly" | "prior-submission" | "selective-corpus";
+export type NormalizedEvidenceProducer =
+  | "archive"
+  | "scholarly"
+  | "prior-submission"
+  | "selective-corpus"
+  | "user-supplied-reference";
 
 /** Public-safe descriptive metadata for one matched source. Every field is
  *  optional and NON-authoritative. No internal id, hash, path, or provenance. */
