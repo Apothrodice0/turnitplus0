@@ -5,6 +5,7 @@ import { runHistoricalMatchShadowEvaluation } from "./e8p-shadow-evaluation";
 import { runDeviceProvenanceShadowEvaluation } from "./device-provenance-shadow";
 import { runCorpusDuplicateSuppressionShadowEvaluation } from "./corpus-duplicate-suppression-shadow";
 import { runPmcCoverageShadowEvaluation } from "./pmc-coverage-shadow";
+import { runSelectiveCorpusShadowEvaluation } from "./selective-corpus/shadow-evaluation";
 import type { ReportHistoricalSubmissionMatch } from "./report-types";
 import type { UnifiedSimilarityResult } from "./unified-similarity";
 import type { ExternalAcademicEvidence } from "./academic-search/types";
@@ -204,6 +205,21 @@ export async function scheduleReportShadowEvaluations(
         effectiveDeviceSelfRepresentationIds,
         authoritativeArchiveMatchedPositions,
         authoritativeExternalAcademicEvidence,
+      });
+      // Selective Corpus V1 shadow — what the unified score WOULD be if the
+      // validated 9,211-doc packed selective full-text corpus were also a
+      // source (winnowed-fingerprint Stage A, then the UNMODIFIED
+      // compareSubmissionToExternalText matcher + STRICT_SPAN + FAMILY_GUARD +
+      // co-source attribution over <= 20 candidates). IMMEDIATE no-op unless
+      // SELECTIVE_CORPUS_SHADOW_ENABLED === "true"; loads a packed artifact from
+      // a configurable local path (NOT a DB table, NOT a deployment asset);
+      // never reads or writes the authoritative unifiedScore; never throws; and
+      // — unlike the other four evaluators — writes NO DB row (its telemetry
+      // sink is a local diagnostics file, gated on SELECTIVE_CORPUS_DIAGNOSTICS_DIR).
+      await runSelectiveCorpusShadowEvaluation({
+        reportId,
+        rawText,
+        authoritativeUnifiedSimilarity,
       });
     } catch (err) {
       // All four evaluators are "never throws" by their own contract; this is
