@@ -8,7 +8,7 @@ import { invalidateRoomCache } from "@/lib/report-rooms-cache";
 import { ROOM_CYCLE_MS } from "@/lib/report-rooms";
 import { storeReportBestEffort, getStoredReportById } from "@/lib/report-store";
 import { persistAiCompletion } from "@/lib/report-ai-completion";
-import { buildReportSummary, type AiAnalysis, type SimilarityReport } from "@/lib/report-types";
+import { buildReportSummary, type AiAnalysis, type ReportExtractionDiagnostic, type SimilarityReport } from "@/lib/report-types";
 import { resolveAiDisplayState } from "@/lib/ai-display-state";
 import { similarityScoreBand } from "@/lib/ai-core";
 import {
@@ -20,7 +20,7 @@ import {
   downloadReceipt,
   enrichReportWithAcademicEvidence,
   enrichReportWithWikipedia,
-  extractFileText,
+  extractFileTextWithDiagnostics,
 } from "@/lib/document-check-pipeline";
 import { normalizeExtractedText } from "@/lib/extracted-text-normalization";
 import { detectLanguage } from "@/lib/similarity-core";
@@ -780,8 +780,11 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
     }, 250);
 
     let text = "";
+    let extractionDiagnostic: ReportExtractionDiagnostic | null = null;
     try {
-      text = normalizeExtractedText(await extractFileText(submittedFile, (_value, label) => setProcessingLabel(label)));
+      const extracted = await extractFileTextWithDiagnostics(submittedFile, (_value, label) => setProcessingLabel(label));
+      extractionDiagnostic = extracted.extraction;
+      text = normalizeExtractedText(extracted.text);
     } catch {
       notify("I could not read that document. Try another file.");
       window.clearInterval(progressTimerRef.current);
@@ -827,8 +830,10 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
     if (webCheck) report = enrichReportWithWikipedia(report, webCheck);
     report = enrichReportWithAcademicEvidence(report, academicResult);
     report = attachUnifiedSimilarity(report);
-    // Report V2 — additive, explanation-only (server recomputes on save).
-    report = attachEvidenceInterpretation(report);
+    // Report V2 — additive, explanation-only (server recomputes on save, except
+    // the extraction diagnostic, which travels as a sanitised save-payload
+    // sibling since only the client sees the uploaded bytes).
+    report = attachEvidenceInterpretation(report, { extraction: extractionDiagnostic });
 
     const remainingAnimationMs = Math.max(0, minimumProcessingMs - (Date.now() - animationStartedAt));
     if (remainingAnimationMs > 0) await new Promise((resolve) => window.setTimeout(resolve, remainingAnimationMs));

@@ -69,6 +69,7 @@ export {
   extractionDiagnosticFromCounts,
   plainTextExtractionDiagnostic,
   skippedUnitCount,
+  sanitizeExtractionDiagnostic,
 } from "./extraction";
 
 export {

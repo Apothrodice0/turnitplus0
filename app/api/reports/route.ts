@@ -24,6 +24,7 @@ import { runAfterResponse } from '../../../lib/run-after-response';
 import { createPendingReportAdmissionJob, processReportAdmissionJob } from '../../../lib/corpus-admission-report-integration';
 import { resolvePrimarySimilaritySummary } from '../../../lib/report-primary-similarity';
 import { withEvidenceInterpretation, stripClientEvidenceInterpretation } from '../../../lib/report-evidence-interpretation';
+import { sanitizeExtractionDiagnostic } from '../../../lib/evidence-interpretation';
 import { scheduleReportShadowEvaluations } from '../../../lib/report-shadow-evaluations';
 import type { SimilarityReport, ReportHistoricalSubmissionMatch } from '../../../lib/report-types';
 import type { UnifiedSimilarityResult } from '../../../lib/unified-similarity';
@@ -310,7 +311,7 @@ export async function POST(request: Request) {
     const body = await request.json().catch(() => null);
     if (!body || typeof body !== 'object') return new NextResponse(JSON.stringify({ error: 'Invalid JSON' }), { status: 400 });
 
-    const { deviceKey, id, submissionId, title, createdAt, wordCount, archiveScore, scoreBand, aiScore, aiTone, aiStatus, payload, academicSearchDiagnosticsId, room, devicePassport } = body as Record<string, unknown>;
+    const { deviceKey, id, submissionId, title, createdAt, wordCount, archiveScore, scoreBand, aiScore, aiTone, aiStatus, payload, academicSearchDiagnosticsId, room, devicePassport, extractionCompleteness } = body as Record<string, unknown>;
 
     // device_key is part of saved_reports' composite primary key, so it is
     // always required regardless of authentication state — unlike the list/
@@ -342,6 +343,15 @@ export async function POST(request: Request) {
     const academicDiagnosticsId = typeof academicSearchDiagnosticsId === 'number' && Number.isFinite(academicSearchDiagnosticsId)
       ? academicSearchDiagnosticsId
       : null;
+    // DOCUMENT EXTRACTION V2 — the client-observed extraction completeness,
+    // sent as a sibling of `payload` (never trusted from inside it — see
+    // lib/reports-remote.ts saveReportRemote). Document extraction runs only in
+    // the browser, so there is no server recompute path; this SCORE-NEUTRAL
+    // value (it feeds only the completion banner) is sanitised — completeness
+    // clamped to the known enum, counts bounded — and then used as the
+    // report-completion extraction signal below. An older client build simply
+    // omits it and the report stays completeness UNKNOWN, exactly as today.
+    const clientExtractionDiagnostic = sanitizeExtractionDiagnostic(extractionCompleteness);
 
     const payloadJson = JSON.stringify(payload);
     if (payloadJson.length > MAX_BYTES) {
@@ -637,7 +647,7 @@ export async function POST(request: Request) {
       // report that would otherwise save — GET recomputes it on read.
       const finalizeReportJson = (obj: SimilarityReport, hsm?: ReportHistoricalSubmissionMatch | null): string => {
         try {
-          const enriched = JSON.stringify(withEvidenceInterpretation(obj, { historicalSubmissionMatch: hsm ?? null, selectiveCorpusBranch: null }));
+          const enriched = JSON.stringify(withEvidenceInterpretation(obj, { historicalSubmissionMatch: hsm ?? null, selectiveCorpusBranch: null, serverExtractionDiagnostic: clientExtractionDiagnostic }));
           if (enriched.length <= MAX_BYTES) return enriched;
         } catch (err) {
           console.error('report V2 interpretation attach failed (non-fatal, report saved without it):', err instanceof Error ? err.message : String(err));

@@ -60,3 +60,63 @@ export async function extractDocxTextDocument<Input>(
   const { value: html } = await convertToHtml(input);
   return extractTextFromHtml(html);
 }
+
+export type DocxExtractionCompleteness = "COMPLETE" | "FAILED";
+
+/**
+ * DOCUMENT EXTRACTION V2 — same conversion as {@link extractDocxTextDocument},
+ * plus a completeness verdict.
+ *
+ * mammoth's document model has no reliable per-section "this part was lost"
+ * signal (its `messages` are overwhelmingly benign style warnings — unmapped
+ * paragraph styles, dropped inline images — not structural content loss), and
+ * this project's convertToHtml path already resolves the one real gap
+ * mammoth.extractRawText had (footnotes/endnotes — see this file's header). So
+ * DOCX only ever reports COMPLETE (parsed, produced usable text) or FAILED
+ * (convertToHtml threw, or produced zero usable text) — never a fabricated
+ * PARTIAL. Any mammoth message is surfaced as a non-sensitive tag in
+ * `diagnostics` for observability only; it does not change the verdict.
+ */
+export async function extractDocxTextDocumentWithCompleteness<Input>(
+  convertToHtml: (input: Input) => Promise<{ value: string; messages?: Array<{ type?: unknown }> }>,
+  input: Input,
+): Promise<{
+  text: string;
+  completeness: DocxExtractionCompleteness;
+  parsed: boolean;
+  extractedWordCount: number;
+  diagnostics: string[];
+}> {
+  let html: string;
+  let messages: Array<{ type?: unknown }> = [];
+  try {
+    const result = await convertToHtml(input);
+    html = result.value;
+    messages = Array.isArray(result.messages) ? result.messages : [];
+  } catch (error) {
+    return {
+      text: "",
+      completeness: "FAILED",
+      parsed: false,
+      extractedWordCount: 0,
+      diagnostics: [`DOCX_PARSE_FAILED:${error instanceof Error ? error.name : "error"}`],
+    };
+  }
+
+  const text = extractTextFromHtml(html);
+  const extractedWordCount = text.trim().length === 0 ? 0 : text.trim().split(/\s+/).length;
+
+  const diagnostics: string[] = [];
+  const warnings = messages.filter((m) => m && m.type === "warning").length;
+  const errors = messages.filter((m) => m && m.type === "error").length;
+  if (warnings > 0) diagnostics.push(`DOCX_CONVERSION_WARNINGS:${warnings}`);
+  if (errors > 0) diagnostics.push(`DOCX_CONVERSION_ERRORS:${errors}`);
+
+  return {
+    text,
+    completeness: extractedWordCount === 0 ? "FAILED" : "COMPLETE",
+    parsed: true,
+    extractedWordCount,
+    diagnostics,
+  };
+}

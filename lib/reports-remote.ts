@@ -96,6 +96,13 @@ export type SaveReportRemoteResult =
  * resave of an already-existing report (room_number is immutable after the
  * first insert). Omitted entirely for anonymous saves, which have no room
  * concept at all.
+ *
+ * DOCUMENT EXTRACTION V2 — `extractionCompleteness` is likewise sent as a
+ * sibling of `payload`, never trusted from inside it. Document extraction runs
+ * only in this browser (the server never receives the uploaded bytes), so the
+ * server sanitises this value and uses it for the report-completion banner;
+ * the in-payload `report.extractionDiagnostic` stays on the untrusted-key strip
+ * list. Read off the report here so no call site has to thread it.
  */
 export async function saveReportRemote<T>(report: T, summary: ReportSummary, academicSearchDiagnosticsId?: number | null, room?: number): Promise<SaveReportRemoteResult> {
   try {
@@ -110,6 +117,7 @@ export async function saveReportRemote<T>(report: T, summary: ReportSummary, aca
     // network/signing failure) and never throws, so it can never affect
     // whether or how the report is saved.
     const devicePassport = await maybeAttestReportUpload(summary.id, report);
+    const extractionCompleteness = (report as { extractionDiagnostic?: unknown } | null)?.extractionDiagnostic;
     const response = await fetch("/api/reports", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -120,6 +128,7 @@ export async function saveReportRemote<T>(report: T, summary: ReportSummary, aca
         academicSearchDiagnosticsId: academicSearchDiagnosticsId ?? null,
         ...(room !== undefined ? { room } : {}),
         ...(devicePassport ? { devicePassport } : {}),
+        ...(extractionCompleteness && typeof extractionCompleteness === "object" ? { extractionCompleteness } : {}),
       }),
     });
     if (!response.ok) {

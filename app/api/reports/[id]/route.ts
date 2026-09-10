@@ -7,6 +7,7 @@ import { classifyReportMatches } from '../../../../lib/report-classification';
 import { deleteHistoricalMatchSnapshot } from '../../../../lib/report-historical-match';
 import { resolvePrimarySimilaritySummary, persistRefreshedSimilarity } from '../../../../lib/report-primary-similarity';
 import { withEvidenceInterpretation, stripClientEvidenceInterpretation } from '../../../../lib/report-evidence-interpretation';
+import { sanitizeExtractionDiagnostic } from '../../../../lib/evidence-interpretation';
 import { deleteReportDocumentData } from '../../../../lib/report-deletion';
 import { deleteReportCorpusAdmissionData } from '../../../../lib/corpus-admission-report-integration';
 import { scheduleReportShadowEvaluations } from '../../../../lib/report-shadow-evaluations';
@@ -61,6 +62,17 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
       }
 
       payload = JSON.parse(String(row.payload_json)) as SimilarityReport;
+      // DOCUMENT EXTRACTION V2 — capture the persisted extraction diagnostic
+      // BEFORE the strip below. Unlike evidenceInterpretation / reportCompletion
+      // (recomputed from the server's authoritative matched-position data),
+      // extraction completeness can only be observed at upload time in the
+      // browser — the server never had the bytes — so the value written by THIS
+      // report's own save (already server-sanitised then) is re-sanitised
+      // defensively and carried through the recompute below. A pre-V2 report
+      // simply has none and stays completeness UNKNOWN.
+      const persistedExtractionDiagnostic = sanitizeExtractionDiagnostic(
+        (payload as Record<string, unknown>).extractionDiagnostic,
+      );
       // Report V2 trust boundary: drop any persisted/forged
       // evidenceInterpretation / reportCompletion / extractionDiagnostic
       // immediately after parsing. They are recomputed server-side below from
@@ -297,7 +309,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
         // fully-populated local var (role-gating only affects whether IT is
         // serialized, not this derivation) — and same-work stays dormant anyway.
         try {
-          const v2 = withEvidenceInterpretation(payload, { historicalSubmissionMatch, selectiveCorpusBranch: null });
+          const v2 = withEvidenceInterpretation(payload, { historicalSubmissionMatch, selectiveCorpusBranch: null, serverExtractionDiagnostic: persistedExtractionDiagnostic });
           payload.evidenceInterpretation = v2.evidenceInterpretation;
           payload.reportCompletion = v2.reportCompletion;
           payload.extractionDiagnostic = v2.extractionDiagnostic;

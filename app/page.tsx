@@ -54,7 +54,7 @@ import {
   downloadReceipt,
   enrichReportWithAcademicEvidence,
   enrichReportWithWikipedia,
-  extractFileText,
+  extractFileTextWithDiagnostics,
 } from "@/lib/document-check-pipeline";
 import { normalizeExtractedText } from "@/lib/extracted-text-normalization";
 import {
@@ -71,6 +71,7 @@ import {
 import {
   buildReportSummary,
   type AiAnalysis,
+  type ReportExtractionDiagnostic,
   type SimilarityReport,
 } from "@/lib/report-types";
 
@@ -916,10 +917,13 @@ export default function Home() {
     }, 250);
 
     let text = "";
+    let extractionDiagnostic: ReportExtractionDiagnostic | null = null;
     try {
-      text = normalizeExtractedText(await extractFileText(submittedFile, (_value, label) => {
+      const extracted = await extractFileTextWithDiagnostics(submittedFile, (_value, label) => {
         setProcessingLabel(label);
-      }));
+      });
+      extractionDiagnostic = extracted.extraction;
+      text = normalizeExtractedText(extracted.text);
     } catch {
       navigate("dashboard");
       notify("I could not read that document. Try another file.");
@@ -1033,8 +1037,11 @@ export default function Home() {
     report = attachUnifiedSimilarity(report);
     // Report V2 — additive, explanation-only interpretation / completion for
     // the immediately-shown view and the receipt. The server recomputes and
-    // overwrites these on save (lib/report-evidence-interpretation.ts).
-    report = attachEvidenceInterpretation(report);
+    // overwrites these on save (lib/report-evidence-interpretation.ts) — except
+    // the extraction diagnostic, which only the client can observe (the server
+    // never sees the uploaded bytes) and which travels to the server as a
+    // sanitised sibling of the save payload.
+    report = attachEvidenceInterpretation(report, { extraction: extractionDiagnostic });
 
     setCurrentReport(report);
     const remainingAnimationMs = Math.max(0, minimumProcessingMs - (Date.now() - animationStartedAt));

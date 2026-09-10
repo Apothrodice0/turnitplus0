@@ -1,6 +1,6 @@
 import { createReceiptPdf } from "@/lib/receipt-pdf";
-import { extractPdfTextDocument } from "@/lib/pdf-text-extraction";
-import { extractDocxTextDocument } from "@/lib/docx-text-extraction";
+import { extractPdfTextDocument, extractPdfTextDocumentWithCompleteness, PDF_EXTRACTOR_VERSION } from "@/lib/pdf-text-extraction";
+import { extractDocxTextDocument, extractDocxTextDocumentWithCompleteness } from "@/lib/docx-text-extraction";
 import { combineMatchedWordPositions } from "@/lib/similarity-enrichment";
 import { computeUnifiedSimilarity } from "@/lib/unified-similarity";
 import { similarityScoreBand } from "@/lib/ai-core";
@@ -13,6 +13,11 @@ import {
   type SimilarityReport,
 } from "@/lib/report-types";
 import { withEvidenceInterpretation } from "@/lib/report-evidence-interpretation";
+import {
+  extractionDiagnosticFromCounts,
+  plainTextExtractionDiagnostic,
+  type ReportExtractionDiagnostic,
+} from "@/lib/evidence-interpretation";
 import type { WebCheckResult } from "@/lib/web-check-core";
 import type { AcademicSearchStatus, ExternalAcademicEvidence } from "@/lib/academic-search/types";
 
@@ -194,6 +199,81 @@ export async function extractFileText(file: File, onProgress: (progress: number,
   throw new Error("This file type is not supported.");
 }
 
+/**
+ * DOCUMENT EXTRACTION V2 — the product upload boundary. Same format routing and
+ * same extracted TEXT as {@link extractFileText} (delegates to the same
+ * helpers), plus a {@link ReportExtractionDiagnostic} describing whether the
+ * extraction was COMPLETE / PARTIAL / UNKNOWN.
+ *
+ * - txt/md/html/csv: a successful `file.text()` read is always COMPLETE
+ *   (a read failure throws, exactly as before — the FAILED path, no report).
+ * - docx: COMPLETE on a successful parse with usable text; a parse failure or
+ *   zero-usable-text throws (existing failure path). mammoth has no reliable
+ *   partial-loss signal, so DOCX never reports PARTIAL.
+ * - pdf: COMPLETE when every page parsed; PARTIAL when one or more non-blank
+ *   pages failed to parse (the rest of the document is still analysed); a
+ *   throw only when NO analyzable text could be extracted at all. No OCR.
+ *
+ * The diagnostic is SCORE-NEUTRAL — it feeds only the report-completion banner
+ * (lib/evidence-interpretation/completion.ts), never a score or a matched
+ * position — and is recomputed/replaced client-side for the immediately-shown
+ * view; the server sanitises the client value on save (it never sees the
+ * uploaded bytes and so cannot recompute this itself).
+ */
+export async function extractFileTextWithDiagnostics(
+  file: File,
+  onProgress: (progress: number, label: string) => void,
+): Promise<{ text: string; extraction: ReportExtractionDiagnostic }> {
+  const extension = file.name.split(".").pop()?.toLowerCase();
+
+  if (["txt", "md", "html", "csv"].includes(extension ?? "")) {
+    onProgress(18, "Reading document content");
+    const text = await file.text();
+    const words = text.trim().length === 0 ? 0 : text.trim().split(/\s+/).length;
+    return { text, extraction: plainTextExtractionDiagnostic(words) };
+  }
+
+  if (extension === "docx") {
+    onProgress(18, "Reading document content");
+    const mammoth = await import("mammoth/mammoth.browser");
+    const result = await extractDocxTextDocumentWithCompleteness(mammoth.convertToHtml, {
+      arrayBuffer: await file.arrayBuffer(),
+    });
+    if (result.completeness === "FAILED") throw new Error("This file could not be read.");
+    return {
+      text: result.text,
+      extraction: {
+        completeness: "COMPLETE",
+        analyzableWordCount: result.extractedWordCount,
+        skipped: null,
+        extractor: "docx-text-extraction-v1",
+      },
+    };
+  }
+
+  if (extension === "pdf") {
+    const pdfjs = await import("pdfjs-dist");
+    pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
+    const document = await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise;
+    const result = await extractPdfTextDocumentWithCompleteness(document, (pageNumber, pageCount) => {
+      onProgress(8 + Math.round((pageNumber / pageCount) * 20), `Reading page ${pageNumber} of ${pageCount}`);
+    });
+    if (result.completeness === "FAILED") throw new Error("This file could not be read.");
+    return {
+      text: result.text,
+      extraction: extractionDiagnosticFromCounts({
+        extractor: PDF_EXTRACTOR_VERSION,
+        unit: "pages",
+        total: result.totalPages,
+        read: result.parsedPages,
+        analyzableWordCount: result.extractedWordCount,
+      }),
+    };
+  }
+
+  throw new Error("This file type is not supported.");
+}
+
 export async function downloadReceipt(report: SimilarityReport) {
   const primaryScore = primarySimilarityScore(report);
   const verdict = similarityScoreBand(primaryScore);
@@ -289,9 +369,18 @@ export function attachUnifiedSimilarity(report: SimilarityReport): SimilarityRep
  * OVERWRITES these values on save — see lib/report-evidence-interpretation.ts
  * withEvidenceInterpretation.
  */
-export function attachEvidenceInterpretation(report: SimilarityReport): SimilarityReport {
+export function attachEvidenceInterpretation(
+  report: SimilarityReport,
+  opts: { extraction?: ReportExtractionDiagnostic | null } = {},
+): SimilarityReport {
   try {
-    return withEvidenceInterpretation(report, { selectiveCorpusBranch: null });
+    return withEvidenceInterpretation(report, {
+      selectiveCorpusBranch: null,
+      // DOCUMENT EXTRACTION V2 — the client-observed extraction completeness for
+      // the immediately-shown view. The server re-sanitises the same value from
+      // the save request's sibling field (it never sees the uploaded bytes).
+      serverExtractionDiagnostic: opts.extraction ?? null,
+    });
   } catch {
     return report;
   }

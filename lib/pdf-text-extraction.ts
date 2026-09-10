@@ -154,18 +154,118 @@ function joinPageTextItems(items: unknown[]): string {
  * from an external academic-search provider) where the byte cap alone still
  * permits a pathologically page-dense document to cost unbounded CPU time.
  */
+/**
+ * Shared page loop for {@link extractPdfTextDocument} (strict — rethrows a page
+ * error exactly as before) and {@link extractPdfTextDocumentWithCompleteness}
+ * (records the failure and keeps going). `strict: true` is byte- AND
+ * behaviour-identical to the original inline loop: when no page throws, both
+ * paths run the same `onProgress` → `getPage` → `getTextContent` →
+ * `joinPageTextItems` sequence and `pages` is the identical array.
+ */
+async function collectPdfPages(
+  document: PdfTextDocument,
+  onProgress: PdfExtractionProgress | undefined,
+  pageCount: number,
+  strict: boolean,
+): Promise<{ pages: string[]; failedPageNumbers: number[]; emptyPageCount: number }> {
+  const pages: string[] = [];
+  const failedPageNumbers: number[] = [];
+  let emptyPageCount = 0;
+  for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
+    onProgress?.(pageNumber, document.numPages);
+    try {
+      const page = await document.getPage(pageNumber);
+      const content = await page.getTextContent();
+      const joined = joinPageTextItems(content.items);
+      if (joined.trim().length === 0) emptyPageCount += 1;
+      pages.push(joined);
+    } catch (error) {
+      if (strict) throw error;
+      failedPageNumbers.push(pageNumber);
+      pages.push("");
+    }
+  }
+  return { pages, failedPageNumbers, emptyPageCount };
+}
+
 export async function extractPdfTextDocument(
   document: PdfTextDocument,
   onProgress?: PdfExtractionProgress,
   maxPages?: number,
 ) {
   const pageCount = maxPages && maxPages > 0 ? Math.min(document.numPages, maxPages) : document.numPages;
-  const pages: string[] = [];
-  for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
-    onProgress?.(pageNumber, document.numPages);
-    const page = await document.getPage(pageNumber);
-    const content = await page.getTextContent();
-    pages.push(joinPageTextItems(content.items));
-  }
+  const { pages } = await collectPdfPages(document, onProgress, pageCount, true);
   return `${pages.join("\n\n")}\n\n`;
+}
+
+export type PdfExtractionCompleteness =
+  | "COMPLETE"
+  | "PARTIAL"
+  | "FAILED";
+
+/**
+ * DOCUMENT EXTRACTION V2 — the same page assembly as {@link
+ * extractPdfTextDocument}, but instead of letting the FIRST failing page abort
+ * the whole extraction it records which pages failed, keeps the rest, and
+ * reports a completeness verdict alongside the text. The product upload boundary
+ * (lib/document-check-pipeline.ts `extractFileTextWithDiagnostics`) uses this so
+ * a single un-parseable page produces a PARTIAL report rather than "I could not
+ * read that document"; every other caller keeps using the strict function above
+ * unchanged.
+ *
+ * `text` is byte-identical to `extractPdfTextDocument`'s output whenever no page
+ * fails (a failed page contributes an empty string in its slot, exactly as if
+ * the page were blank).
+ *
+ * A legitimately BLANK page (parsed fine, no text) is counted separately and
+ * never on its own makes the result PARTIAL — only a genuine parse failure, a
+ * `maxPages` truncation, or "no analyzable text anywhere" changes the verdict.
+ * No OCR.
+ */
+export async function extractPdfTextDocumentWithCompleteness(
+  document: PdfTextDocument,
+  onProgress?: PdfExtractionProgress,
+  maxPages?: number,
+): Promise<{
+  text: string;
+  completeness: PdfExtractionCompleteness;
+  totalPages: number;
+  parsedPages: number;
+  failedPages: number;
+  emptyPages: number;
+  truncatedByMaxPages: boolean;
+  extractedWordCount: number;
+  diagnostics: string[];
+}> {
+  const totalPages = document.numPages;
+  const pageCount = maxPages && maxPages > 0 ? Math.min(totalPages, maxPages) : totalPages;
+  const truncatedByMaxPages = pageCount < totalPages;
+
+  const { pages, failedPageNumbers, emptyPageCount } = await collectPdfPages(document, onProgress, pageCount, false);
+  const text = `${pages.join("\n\n")}\n\n`;
+
+  const failedPages = failedPageNumbers.length;
+  const parsedPages = pageCount - failedPages;
+  const extractedWordCount = text.trim().length === 0 ? 0 : text.trim().split(/\s+/).length;
+
+  const diagnostics: string[] = [];
+  for (const n of failedPageNumbers) diagnostics.push(`PAGE_EXTRACTION_FAILED:${n}`);
+  if (truncatedByMaxPages) diagnostics.push(`MAX_PAGES_TRUNCATED:${pageCount}/${totalPages}`);
+
+  let completeness: PdfExtractionCompleteness;
+  if (parsedPages === 0 || extractedWordCount === 0) completeness = "FAILED";
+  else if (failedPages > 0 || truncatedByMaxPages) completeness = "PARTIAL";
+  else completeness = "COMPLETE";
+
+  return {
+    text,
+    completeness,
+    totalPages,
+    parsedPages,
+    failedPages,
+    emptyPages: emptyPageCount,
+    truncatedByMaxPages,
+    extractedWordCount,
+    diagnostics,
+  };
 }
