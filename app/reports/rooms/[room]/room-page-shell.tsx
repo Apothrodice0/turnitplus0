@@ -21,6 +21,15 @@ import {
   enrichReportWithAcademicEvidence,
   enrichReportWithWikipedia,
   extractFileTextWithDiagnostics,
+  extractReferenceInputs,
+  addReferenceFiles,
+  removeReferenceFile,
+  markReferencesChecked,
+  referenceTransportBudgetError,
+  REFERENCE_BUDGET_MESSAGE,
+  type ReferenceIntakeEntry,
+  type ReferenceRejection,
+  type SuppliedReferenceInput,
 } from "@/lib/document-check-pipeline";
 import { normalizeExtractedText } from "@/lib/extracted-text-normalization";
 import { detectLanguage } from "@/lib/similarity-core";
@@ -425,6 +434,13 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
   const [toast, setToast] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const generationLockRef = useRef(false);
+  // USER-SUPPLIED REFERENCES V1 — optional reference files checked automatically
+  // against the manuscript. Transient client state only; the raw extracted text
+  // rides along as the `userSuppliedReferences` save sibling and is never mixed
+  // into the long-lived report object or the local IndexedDB copy.
+  const [referenceEntries, setReferenceEntries] = useState<ReferenceIntakeEntry[]>([]);
+  const [referenceRejections, setReferenceRejections] = useState<ReferenceRejection[]>([]);
+  const referenceInputRef = useRef<HTMLInputElement>(null);
   // Defect #2 fix: the poll-for-completion effect's own attempt count, moved
   // out of the effect's per-instance closure into a ref so it survives the
   // effect being torn down and re-run by React whenever `occupant` changes
@@ -753,6 +769,26 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
     setFile(selected);
   }
 
+  // USER-SUPPLIED REFERENCES V1 — pure list edits; nothing is extracted or
+  // checked until runCheck() runs.
+  function addReferences(incoming: File[]) {
+    if (generationLockRef.current || incoming.length === 0) return;
+    setReferenceEntries((current) => {
+      const { entries, rejected } = addReferenceFiles(current, incoming);
+      setReferenceRejections(rejected);
+      return entries;
+    });
+  }
+  function removeReference(id: string) {
+    if (generationLockRef.current) return;
+    setReferenceEntries((current) => removeReferenceFile(current, id));
+  }
+  function clearReferences() {
+    if (generationLockRef.current) return;
+    setReferenceEntries([]);
+    setReferenceRejections([]);
+  }
+
   async function runCheck() {
     if (generationLockRef.current) {
       notify("Your current document is still being analyzed.");
@@ -799,6 +835,28 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
       generationLockRef.current = false;
       setIsGeneratingReport(false);
       return;
+    }
+
+    // USER-SUPPLIED REFERENCES V1 — extract every supplied reference through
+    // Extraction V2, then run the TRANSPORT-BUDGET guard BEFORE any analysis or
+    // network call. Nothing is matched here; the raw text is sent as the
+    // `userSuppliedReferences` save sibling and the server runs the actual
+    // verification. A reference that fails to read is still recorded (empty
+    // text) so the server marks the reference channel PARTIAL; it never aborts
+    // this report. A reference SET whose combined extracted text would not fit
+    // the save request is caught locally: nothing is submitted, the chosen
+    // files are kept, and the user is asked to remove some.
+    let suppliedReferenceInputs: SuppliedReferenceInput[] = [];
+    if (referenceEntries.length > 0) {
+      suppliedReferenceInputs = await extractReferenceInputs(referenceEntries, (next) => setReferenceEntries(next));
+      if (referenceTransportBudgetError(suppliedReferenceInputs, text) !== null) {
+        window.clearInterval(progressTimerRef.current);
+        generationLockRef.current = false;
+        setIsGeneratingReport(false);
+        setReferenceEntries((current) => current.map((entry) => ({ ...entry, status: "ready" as const, note: null })));
+        notify(REFERENCE_BUDGET_MESSAGE);
+        return;
+      }
     }
 
     const wikipediaPromise = analyzeWikipediaText(text, submittedFile.name, () => undefined).catch((error) => {
@@ -857,11 +915,18 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
       // become a false "resolved" source if it is ever read before AI
       // finishes, or if isFullyRevealed's own condition ever changes.
       const summary: ReportSummary = { ...buildReportSummary(report), aiStatus: "processing", similarityStatus: "pending" };
+      // The local IndexedDB copy stays clean — the raw reference text only ever
+      // leaves as the save request's `userSuppliedReferences` sibling (never
+      // persisted locally, never mixed into the long-lived report object, so an
+      // ordinary resave / AI-completion pass never re-sends it).
       await storeReportBestEffort(report);
+      const reportForRemote =
+        suppliedReferenceInputs.length > 0 ? { ...report, userSuppliedReferences: suppliedReferenceInputs } : report;
       // The upload request always names its room explicitly — the server
       // re-validates occupancy itself (409 if this room filled in the
       // meantime) rather than trusting this client's own view of it.
-      const saveResult = await saveReportRemote(report, summary, academicResult.academicSearchDiagnosticsId, room);
+      const saveResult = await saveReportRemote(reportForRemote, summary, academicResult.academicSearchDiagnosticsId, room);
+      if (saveResult.ok) setReferenceEntries((current) => markReferencesChecked(current));
       if (!saveResult.ok) {
         if (saveResult.quotaExceeded) {
           const resetLabel = saveResult.resetsAt
@@ -971,6 +1036,15 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
               fileInputRef={fileInputRef}
               onChooseFile={chooseFile}
               onGenerate={runCheck}
+              references={{
+                referenceEntries,
+                referenceRejections,
+                referenceInputRef,
+                onAddReferenceFiles: addReferences,
+                onRemoveReferenceFile: removeReference,
+                onClearReferenceFiles: clearReferences,
+                onDismissReferenceRejections: () => setReferenceRejections([]),
+              }}
             />
           </div>
         )}

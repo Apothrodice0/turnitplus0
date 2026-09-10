@@ -164,7 +164,10 @@ test("repeated retry/double-click: calling persistAiCompletion twice concurrentl
 test("similarity remaining available when AI fails: runCheck saves the similarity report and marks the room processing BEFORE the AI-completion chain (persistAiCompletion) ever runs — an AI failure downstream can never retroactively touch the already-saved similarity result", async () => {
   const shell = await readFile(new URL("../app/reports/rooms/[room]/room-page-shell.tsx", import.meta.url), "utf8");
 
-  const firstSaveIndex = shell.indexOf("const saveResult = await saveReportRemote(report, summary, academicResult.academicSearchDiagnosticsId, room);");
+  // USER-SUPPLIED REFERENCES V1: the first arg is now `reportForRemote` (the
+  // report plus an optional `userSuppliedReferences` sibling for this one
+  // request); the ordering guarantee this test checks is unchanged.
+  const firstSaveIndex = shell.indexOf("const saveResult = await saveReportRemote(reportForRemote, summary, academicResult.academicSearchDiagnosticsId, room);");
   const setProcessingIndex = shell.indexOf('setOccupant({ status: "processing", report: summary, cycleEndsAt:');
   const aiChainIndex = shell.indexOf("void completeAiAnalysisWithRecovery(aiAnalysisPromise");
 
@@ -231,8 +234,10 @@ test("app/page.tsx's anonymous-flow twin of the same bug is fixed the same way: 
   // The first/similarity save also moved to storeReportBestEffort, for the
   // same reason: an IndexedDB failure there must not silently abort the
   // whole generateReport() flow before the authoritative remote save ever
-  // runs.
-  assert.match(page, /await storeReportBestEffort\(report\);\s*\n\s*return await saveReportRemote\(report, summary, academicSearchDiagnosticsId\);/);
+  // runs. USER-SUPPLIED REFERENCES V1: the local copy stays the clean
+  // `report`; the remote save gets `reportForRemote` (report + optional
+  // `userSuppliedReferences` sibling).
+  assert.match(page, /await storeReportBestEffort\(report\);\s*\n\s*const reportForRemote =[\s\S]{0,200}?return await saveReportRemote\(reportForRemote, summary, academicSearchDiagnosticsId\);/);
 });
 
 /**

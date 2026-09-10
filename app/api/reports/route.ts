@@ -27,6 +27,8 @@ import { withEvidenceInterpretation, stripClientEvidenceInterpretation } from '.
 import { sanitizeExtractionDiagnostic } from '../../../lib/evidence-interpretation';
 import { verifySuppliedReferences } from '../../../lib/user-supplied-references';
 import { sanitizeSuppliedReferenceInputs, admittedReferenceEvidenceForUnifiedSimilarity, resolveUserSuppliedReferenceEvidenceForSave } from '../../../lib/report-user-supplied-references';
+import { referenceTransportBudgetError } from '../../../lib/user-supplied-reference-constants';
+import { MAX_REPORT_SAVE_REQUEST_BYTES } from '../../../lib/report-transport-limits';
 import { scheduleReportShadowEvaluations } from '../../../lib/report-shadow-evaluations';
 import type { SimilarityReport, ReportHistoricalSubmissionMatch } from '../../../lib/report-types';
 import type { UnifiedSimilarityResult } from '../../../lib/unified-similarity';
@@ -35,7 +37,9 @@ import type { ExternalAcademicEvidence } from '../../../lib/academic-search/type
 // Reports carry derived data (AI passages, matched phrases, extracted text)
 // on top of the ingest pipeline's raw text, so this cap is larger than
 // /api/ingest's 200KB — sized generously pending real-world calibration.
-const MAX_BYTES = 2_000_000;
+// Single source of truth: lib/report-transport-limits.ts (also consumed by the
+// pre-submit client transport guard for user-supplied references).
+const MAX_BYTES = MAX_REPORT_SAVE_REQUEST_BYTES;
 const MAX_DEVICE_KEY_LENGTH = 200;
 const MAX_LISTED_REPORTS = 50;
 // Device Passport (Phase 2) — coarse structural ceilings on the optional
@@ -515,6 +519,17 @@ export async function POST(request: Request) {
       // PRIVATE report input: nothing here touches corpus admission /
       // promotion / archive publication / Selective Corpus ingestion.
       const suppliedReferenceInputs = sanitizeSuppliedReferenceInputs(userSuppliedReferences);
+      // TRANSPORT BUDGET — the server independently enforces the aggregate
+      // supplied-reference bounds (count + per-reference chars are already
+      // clamped by sanitizeSuppliedReferenceInputs; this adds the aggregate
+      // char + serialized-byte ceiling). Runs BEFORE the matcher and BEFORE any
+      // persistence, so an over-budget input fails cleanly (413) and never
+      // produces forged/truncated evidence or a partially-persisted report. The
+      // pre-submit client guard makes this unreachable for a well-behaved
+      // client; a client that omits Content-Length still cannot get past here.
+      if (suppliedReferenceInputs.length > 0 && referenceTransportBudgetError(suppliedReferenceInputs) !== null) {
+        return new NextResponse(JSON.stringify({ error: 'Payload too large' }), { status: 413 });
+      }
       const freshSuppliedReferenceChannel = isNonEmptyString(reportPayload?.text) && suppliedReferenceInputs.length > 0
         ? verifySuppliedReferences(reportPayload.text, suppliedReferenceInputs, reportPayload.wordCount)
         : null;

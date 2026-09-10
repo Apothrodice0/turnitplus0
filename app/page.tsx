@@ -55,6 +55,15 @@ import {
   enrichReportWithAcademicEvidence,
   enrichReportWithWikipedia,
   extractFileTextWithDiagnostics,
+  extractReferenceInputs,
+  addReferenceFiles,
+  removeReferenceFile,
+  markReferencesChecked,
+  referenceTransportBudgetError,
+  REFERENCE_BUDGET_MESSAGE,
+  type ReferenceIntakeEntry,
+  type ReferenceRejection,
+  type SuppliedReferenceInput,
 } from "@/lib/document-check-pipeline";
 import { normalizeExtractedText } from "@/lib/extracted-text-normalization";
 import {
@@ -274,6 +283,13 @@ export default function Home() {
   const [legalTab, setLegalTab] = useState<LegalTab>("privacy");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const generationLockRef = useRef(false);
+  // USER-SUPPLIED REFERENCES V1 — optional reference files checked automatically
+  // against the manuscript. Held here as transient client state only; the raw
+  // extracted text rides along as the `userSuppliedReferences` save sibling and
+  // is never mixed into the long-lived report object.
+  const [referenceEntries, setReferenceEntries] = useState<ReferenceIntakeEntry[]>([]);
+  const [referenceRejections, setReferenceRejections] = useState<ReferenceRejection[]>([]);
+  const referenceInputRef = useRef<HTMLInputElement>(null);
 
   // Ticks the modal's "Resend code (Ns)" countdown down to 0 once a second
   // while the modal is open and a cooldown is active. Purely a display timer
@@ -878,6 +894,26 @@ export default function Home() {
     setFile(selected);
   }
 
+  // USER-SUPPLIED REFERENCES V1 — add/remove/clear are pure list edits; nothing
+  // is extracted or checked until generateReport() runs (see below).
+  function addReferences(incoming: File[]) {
+    if (generationLockRef.current || incoming.length === 0) return;
+    setReferenceEntries((current) => {
+      const { entries, rejected } = addReferenceFiles(current, incoming);
+      setReferenceRejections(rejected);
+      return entries;
+    });
+  }
+  function removeReference(id: string) {
+    if (generationLockRef.current) return;
+    setReferenceEntries((current) => removeReferenceFile(current, id));
+  }
+  function clearReferences() {
+    if (generationLockRef.current) return;
+    setReferenceEntries([]);
+    setReferenceRejections([]);
+  }
+
   // Anonymous-only from here on: an authenticated account's new check
   // always happens on its own dedicated room page
   // (app/reports/rooms/[room]/room-page-shell.tsx), which owns its own
@@ -886,11 +922,22 @@ export default function Home() {
   // account in normal use (goToNewCheck() routes them into My Reports
   // instead — see below), so it stays exactly as simple as a roomless,
   // account-less save actually is.
-  async function saveReport(report: SimilarityReport, academicSearchDiagnosticsId?: number | null) {
+  async function saveReport(
+    report: SimilarityReport,
+    academicSearchDiagnosticsId?: number | null,
+    userSuppliedReferences?: SuppliedReferenceInput[],
+  ) {
     const summary = buildReportSummary(report);
     setReports((current) => [summary, ...current.filter((item) => item.id !== summary.id)].slice(0, 50));
+    // The local IndexedDB copy and the summary stay clean — the raw reference
+    // text only ever leaves as the save request's `userSuppliedReferences`
+    // sibling (server strips any in-payload copy), never persisted locally.
     await storeReportBestEffort(report);
-    return await saveReportRemote(report, summary, academicSearchDiagnosticsId);
+    const reportForRemote =
+      userSuppliedReferences && userSuppliedReferences.length > 0
+        ? { ...report, userSuppliedReferences }
+        : report;
+    return await saveReportRemote(reportForRemote, summary, academicSearchDiagnosticsId);
   }
 
   async function generateReport() {
@@ -940,6 +987,29 @@ export default function Home() {
       generationLockRef.current = false;
       setIsGeneratingReport(false);
       return;
+    }
+
+    // USER-SUPPLIED REFERENCES V1 — extract every supplied reference through
+    // Extraction V2, then run the TRANSPORT-BUDGET guard BEFORE any analysis or
+    // network call. Nothing is "matched" here — the raw text is sent as the
+    // `userSuppliedReferences` save sibling and the server runs the actual
+    // verification. A reference that fails to read is still recorded (empty
+    // text) so the server marks the reference channel PARTIAL; it never aborts
+    // this report. But a reference SET whose combined extracted text would not
+    // fit the save request is caught locally: nothing is submitted, the chosen
+    // files are kept, and the user is asked to remove some.
+    let suppliedReferenceInputs: SuppliedReferenceInput[] = [];
+    if (referenceEntries.length > 0) {
+      suppliedReferenceInputs = await extractReferenceInputs(referenceEntries, (next) => setReferenceEntries(next));
+      if (referenceTransportBudgetError(suppliedReferenceInputs, text) !== null) {
+        window.clearInterval(progressTimer);
+        generationLockRef.current = false;
+        setIsGeneratingReport(false);
+        setReferenceEntries((current) => current.map((entry) => ({ ...entry, status: "ready" as const, note: null })));
+        navigate("dashboard");
+        notify(REFERENCE_BUDGET_MESSAGE);
+        return;
+      }
     }
 
     // "start the two fixes now" TASK 1: extract -> archive analysis +
@@ -1052,7 +1122,8 @@ export default function Home() {
     setProgress(100);
     setProcessingLabel("Saving your report");
     try {
-      const saveResult = await saveReport(report, academicResult.academicSearchDiagnosticsId);
+      const saveResult = await saveReport(report, academicResult.academicSearchDiagnosticsId, suppliedReferenceInputs);
+      if (saveResult.ok) setReferenceEntries((current) => markReferencesChecked(current));
       navigate("reports");
       // A network/DB hiccup here is silently tolerated since the local copy
       // already succeeded (see saveReport/saveReportRemote's own comments) —
@@ -1107,7 +1178,10 @@ export default function Home() {
     setFile(null);
     setProgress(0);
     setCurrentReport(null);
+    setReferenceEntries([]);
+    setReferenceRejections([]);
     if (fileInputRef.current) fileInputRef.current.value = "";
+    if (referenceInputRef.current) referenceInputRef.current.value = "";
     navigate("dashboard");
   }
 
@@ -1372,6 +1446,15 @@ export default function Home() {
                 fileInputRef={fileInputRef}
                 onChooseFile={chooseFile}
                 onGenerate={generateReport}
+                references={{
+                  referenceEntries,
+                  referenceRejections,
+                  referenceInputRef,
+                  onAddReferenceFiles: addReferences,
+                  onRemoveReferenceFile: removeReference,
+                  onClearReferenceFiles: clearReferences,
+                  onDismissReferenceRejections: () => setReferenceRejections([]),
+                }}
               />
             </section>
 

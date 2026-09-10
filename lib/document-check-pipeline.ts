@@ -20,6 +20,39 @@ import {
 } from "@/lib/evidence-interpretation";
 import type { WebCheckResult } from "@/lib/web-check-core";
 import type { AcademicSearchStatus, ExternalAcademicEvidence } from "@/lib/academic-search/types";
+import {
+  setReferenceEntryStatus,
+  MAX_REFERENCE_TEXT_CHARS,
+  REFERENCE_TOO_LARGE_MESSAGE,
+  type ReferenceIntakeEntry,
+  type SuppliedReferenceInput,
+} from "@/lib/user-supplied-reference-constants";
+
+// USER-SUPPLIED REFERENCES — the browser upload intake. Re-exported through the
+// existing shared check-pipeline module so app/page.tsx and the room shell add
+// no new import (see lib/user-supplied-reference-constants.ts for the pure
+// validation/limits and components/reports/reference-files-panel.tsx for the UI).
+export {
+  addReferenceFiles,
+  removeReferenceFile,
+  markReferencesChecked,
+  referenceFileType,
+  referenceTransportBudgetError,
+  REFERENCE_BUDGET_MESSAGE,
+  REFERENCE_TOO_LARGE_MESSAGE,
+  MAX_REFERENCE_FILES,
+  MAX_REFERENCE_TEXT_CHARS,
+  MAX_REFERENCE_AGGREGATE_TEXT_CHARS,
+  REFERENCE_ACCEPT_ATTR,
+  REFERENCE_STATUS_LABEL,
+} from "@/lib/user-supplied-reference-constants";
+export type {
+  ReferenceIntakeEntry,
+  ReferenceIntakeStatus,
+  ReferenceRejection,
+  ReferenceBudgetError,
+  SuppliedReferenceInput,
+} from "@/lib/user-supplied-reference-constants";
 
 /**
  * The document-check pipeline's shared, stateless pieces — extracted so
@@ -272,6 +305,67 @@ export async function extractFileTextWithDiagnostics(
   }
 
   throw new Error("This file type is not supported.");
+}
+
+/**
+ * USER-SUPPLIED REFERENCES V1 — PHASE 3. Run every chosen reference file through
+ * Extraction V2 and shape ONLY the raw, server-expected input:
+ * `{ fileName, fileType, extractedText, extraction }`. This never computes a
+ * matched position, similarity %, contribution %, interpretation, admission, or
+ * source ref — the server (re)derives all of that from the text.
+ *
+ * A reference whose extraction fails — OR whose extracted text is over
+ * {@link MAX_REFERENCE_TEXT_CHARS} — still yields an input, but with an EMPTY
+ * `extractedText` (NEVER a truncated prefix): the server records it as a FAILED
+ * reference, the reference channel becomes PARTIAL, and the OTHER references are
+ * still checked. It never aborts the manuscript report. `onStatus` drives the
+ * per-file UI lifecycle (processing → failed | checking); `checked` is set by
+ * the caller once the save that runs the server verification has completed.
+ *
+ * `extract` is injectable purely for tests — production always uses the real
+ * client-side {@link extractFileTextWithDiagnostics}.
+ */
+export async function extractReferenceInputs(
+  entries: readonly ReferenceIntakeEntry[],
+  onStatus: (entries: ReferenceIntakeEntry[]) => void,
+  extract: (
+    file: File,
+    onProgress: (progress: number, label: string) => void,
+  ) => Promise<{ text: string; extraction: ReportExtractionDiagnostic }> = extractFileTextWithDiagnostics,
+): Promise<SuppliedReferenceInput[]> {
+  let live: ReferenceIntakeEntry[] = [...entries];
+  const push = (id: string, status: ReferenceIntakeEntry["status"], note: string | null = null) => {
+    live = setReferenceEntryStatus(live, id, status, note);
+    onStatus(live);
+  };
+
+  const inputs: SuppliedReferenceInput[] = [];
+  for (const entry of entries) {
+    push(entry.id, "processing");
+    try {
+      const { text, extraction } = await extract(entry.file, () => {});
+      const usable = typeof text === "string" ? text : "";
+      if (usable.trim().length === 0) {
+        push(entry.id, "failed", "Could not read this reference");
+        inputs.push({ fileName: entry.displayName, fileType: entry.fileType, extractedText: "", extraction: null });
+        continue;
+      }
+      if (usable.length > MAX_REFERENCE_TEXT_CHARS) {
+        // Over the per-reference limit — REJECT this one reference, never
+        // truncate it. Sent as an empty (FAILED) input so the server marks the
+        // channel PARTIAL; every other reference is still checked normally.
+        push(entry.id, "failed", REFERENCE_TOO_LARGE_MESSAGE);
+        inputs.push({ fileName: entry.displayName, fileType: entry.fileType, extractedText: "", extraction: null });
+        continue;
+      }
+      push(entry.id, "checking");
+      inputs.push({ fileName: entry.displayName, fileType: entry.fileType, extractedText: usable, extraction });
+    } catch {
+      push(entry.id, "failed", "Could not read this reference");
+      inputs.push({ fileName: entry.displayName, fileType: entry.fileType, extractedText: "", extraction: null });
+    }
+  }
+  return inputs;
 }
 
 export async function downloadReceipt(report: SimilarityReport) {

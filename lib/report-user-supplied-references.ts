@@ -2,13 +2,17 @@ import { sanitizeExtractionDiagnostic } from "@/lib/evidence-interpretation";
 import { canonicalSha256 } from "@/lib/document-identity";
 import { DOCUMENT_CORRESPONDENCE_THRESHOLDS_VERSION } from "@/lib/document-correspondence";
 import {
-  SUPPORTED_REFERENCE_FILE_TYPES,
   USER_SUPPLIED_REFERENCE_MATCHER_VERSION,
-  type SuppliedReferenceInput,
-  type SuppliedReferenceFileType,
   type SuppliedReferenceVerifiedEvidence,
   type SuppliedReferenceChannelResult,
 } from "@/lib/user-supplied-references";
+import {
+  SUPPORTED_REFERENCE_FILE_TYPES,
+  MAX_REFERENCE_FILES,
+  MAX_REFERENCE_FILENAME_CHARS,
+  type SuppliedReferenceInput,
+  type SuppliedReferenceFileType,
+} from "@/lib/user-supplied-reference-constants";
 
 /**
  * USER-SUPPLIED REFERENCES V1 / V1.1 — server-side trust boundary.
@@ -35,17 +39,22 @@ import {
  * persistence — only server-computed values are written.
  */
 
-const MAX_REFERENCE_FILES = 20;
-/** ~2M chars ≈ a very large book; well under the report payload cap, and the
- *  matcher is linear in this. A reference longer than this is truncated. */
-const MAX_REFERENCE_TEXT_CHARS = 2_000_000;
-const MAX_FILENAME_CHARS = 260;
+const MAX_FILENAME_CHARS = MAX_REFERENCE_FILENAME_CHARS;
 
 function isFileType(v: unknown): v is SuppliedReferenceFileType {
   return typeof v === "string" && (SUPPORTED_REFERENCE_FILE_TYPES as readonly string[]).includes(v);
 }
 
-/** Clamp the raw client sibling into a safe SuppliedReferenceInput[] (or []). */
+/**
+ * Shape the raw client sibling into a safe SuppliedReferenceInput[] (or []).
+ *
+ * Structural bounds only — count (`MAX_REFERENCE_FILES`) and filename length. The
+ * per-reference extracted text is NEVER truncated here: an over-limit reference
+ * is kept verbatim so `referenceTransportBudgetError` (called by the route right
+ * after this) can reject the WHOLE request with a 413 rather than silently
+ * checking a prefix. Aggregate / byte / per-reference ceilings all live in that
+ * one guard so the client and server agree exactly.
+ */
 export function sanitizeSuppliedReferenceInputs(raw: unknown): SuppliedReferenceInput[] {
   if (!Array.isArray(raw)) return [];
   const out: SuppliedReferenceInput[] = [];
@@ -58,7 +67,7 @@ export function sanitizeSuppliedReferenceInputs(raw: unknown): SuppliedReference
       typeof r.fileName === "string" && r.fileName.trim().length > 0
         ? r.fileName.slice(0, MAX_FILENAME_CHARS)
         : `reference.${fileType}`;
-    const extractedText = typeof r.extractedText === "string" ? r.extractedText.slice(0, MAX_REFERENCE_TEXT_CHARS) : "";
+    const extractedText = typeof r.extractedText === "string" ? r.extractedText : "";
     out.push({
       fileName,
       fileType,

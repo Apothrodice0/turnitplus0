@@ -264,7 +264,12 @@ test("Defect #3 (structural): runCheck() tracks its own check's identity — cur
 
 test("Room-number mapping: the raw, zero-based `room` value is used identically for save, poll, and reconciliation — the +1 offset exists ONLY in display text, never in a query/save argument", async () => {
   const shell = await readRoomShell();
-  assert.match(shell, /saveReportRemote\(report, summary, academicResult\.academicSearchDiagnosticsId, room\)/, "the save must pass the raw room prop");
+  // USER-SUPPLIED REFERENCES V1: the first save arg is now `reportForRemote`
+  // (the report plus an optional `userSuppliedReferences` sibling for that one
+  // request only — never the long-lived `report` object, so an AI-completion
+  // resave never re-sends reference text). The room argument — this test's
+  // actual concern — is still the raw, zero-based `room` prop.
+  assert.match(shell, /saveReportRemote\((?:report|reportForRemote), summary, academicResult\.academicSearchDiagnosticsId, room\)/, "the save must pass the raw room prop");
   assert.match(shell, /fetchReportRoomContents\(room\)/, "must appear for both the completion poll and the reconciliation watchdog");
   const fetchOccurrences = shell.match(/fetchReportRoomContents\(room\)/g) ?? [];
   assert.equal(fetchOccurrences.length, 2, "expected exactly 2 call sites: the completion poll and the reconciliation watchdog");

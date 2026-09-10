@@ -53,7 +53,13 @@ test("remote report persistence (Turso) is layered alongside local storage, not 
   // app/reports/rooms/[room]/room-page-shell.tsx, which has the equivalent,
   // room-aware version of this same pairing), so neither call site here
   // threads a room through.
-  assert.match(page, /await storeReportBestEffort\(report\);\s*\n\s*return await saveReportRemote\(report, summary, academicSearchDiagnosticsId\);/);
+  //
+  // USER-SUPPLIED REFERENCES V1: the local cache write is still the CLEAN
+  // `report` (raw reference text is never persisted locally); the remote save
+  // gets `reportForRemote`, which is `report` plus an optional
+  // `userSuppliedReferences` sibling for that one request only.
+  assert.match(page, /await storeReportBestEffort\(report\);\s*\n\s*const reportForRemote =[\s\S]{0,200}?return await saveReportRemote\(reportForRemote, summary, academicSearchDiagnosticsId\);/);
+  assert.doesNotMatch(page, /\bstoreReportBestEffort\(reportForRemote\)/, "the local IndexedDB copy must never carry the raw supplied-reference text");
   assert.match(page, /await persistAiCompletion\(enriched, enrichedSummary\);/);
 
   // clearHistory must clear local storage first, then best-effort delete the
