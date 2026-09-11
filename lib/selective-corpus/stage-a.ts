@@ -5,6 +5,7 @@ import {
   SELECTIVE_CORPUS_STAGE_A_MAX_POSTING_ROWS,
   SELECTIVE_CORPUS_STAGE_A_MAX_CANDIDATES,
 } from "./constants";
+import type { SelectiveCorpusFailureCollector } from "./shard-reader";
 
 /**
  * Selective Corpus V1 SHADOW slice — bounded Stage A candidate discovery.
@@ -38,6 +39,11 @@ export async function selectiveCorpusStageA(
   submissionText: string,
   artifact: SelectiveCorpusArtifact,
   opts: { topK?: number; maxPostingRows?: number; maxCandidates?: number } = {},
+  /** The CALLING evaluation's own failure collector (see shard-reader.ts) —
+   *  any shard this call fails to read is attributed there, never to shared
+   *  reader-level state. Optional so existing direct callers (equivalence
+   *  tests) that do not care about degradation attribution are unaffected. */
+  collector?: SelectiveCorpusFailureCollector,
 ): Promise<SelectiveCorpusStageAResult> {
   const topK = opts.topK ?? SELECTIVE_CORPUS_STAGE_A_TOP_K;
   const maxPostingRows = opts.maxPostingRows ?? SELECTIVE_CORPUS_STAGE_A_MAX_POSTING_ROWS;
@@ -65,7 +71,7 @@ export async function selectiveCorpusStageA(
       stoppedFingerprints += 1;
       continue;
     }
-    const arr = await artifact.postingsAccessor.getPostings(h);
+    const arr = await artifact.postingsAccessor.getPostings(h, collector);
     if (!arr) continue;
     postingRowsTallied += arr.length;
     if (postingRowsTallied > maxPostingRows) {

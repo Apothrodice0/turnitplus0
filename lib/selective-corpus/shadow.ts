@@ -16,7 +16,7 @@ import {
   SELECTIVE_CORPUS_SHADOW_EVALUATOR_VERSION,
   SELECTIVE_CORPUS_TIME_BUDGET_MS,
 } from "./constants";
-import type { SelectiveCorpusShardFailure } from "./shard-reader";
+import { createSelectiveCorpusFailureCollector, type SelectiveCorpusShardFailure } from "./shard-reader";
 import type { SelectiveCorpusShadowResult } from "./types";
 
 /**
@@ -107,14 +107,18 @@ export async function runSelectiveCorpusShadow(
       };
     }
 
-    // Discard any shard-failure ledger a prior evaluation left on the shared,
-    // cached reader (e.g. one that exited via TIMEOUT). This evaluation must
-    // report only shards that fail while serving THIS submission.
-    artifact.postingsAccessor.takeShardFailures();
+    // Evaluation-scoped shard-failure attribution: this collector is
+    // exclusive to THIS runSelectiveCorpusShadow() call, threaded through
+    // Stage A and FAMILY_GUARD below. It is never a shared/reader-level
+    // ledger, so a concurrently-running evaluation sharing the same cached
+    // artifact/reader can never drain a failure this evaluation also
+    // depended on -- and this evaluation can never see a failure it did not
+    // itself encounter.
+    const failureCollector = createSelectiveCorpusFailureCollector();
 
     // ---- Stage A ----
     const tA0 = performance.now();
-    const stageA = await selectiveCorpusStageA(params.canonicalSubmissionText, artifact);
+    const stageA = await selectiveCorpusStageA(params.canonicalSubmissionText, artifact, undefined, failureCollector);
     const stageAMs = performance.now() - tA0;
 
     // ---- Stage B: admit each top-K candidate ----
@@ -128,7 +132,7 @@ export async function runSelectiveCorpusShadow(
 
     for (const cand of stageA.topK) {
       if (performance.now() - started > SELECTIVE_CORPUS_TIME_BUDGET_MS) {
-        const timedOutShardFailures = artifact.postingsAccessor.takeShardFailures();
+        const timedOutShardFailures = failureCollector.getFailures();
         return {
           state: "TIMEOUT",
           failureCode: "TIMEOUT",
@@ -146,7 +150,7 @@ export async function runSelectiveCorpusShadow(
       }
       const ct = await loadSelectiveCorpusCandidateText(artifact, cand.ordinal);
       if (!ct) continue;
-      const res = await admitSelectiveCorpusCandidate(params.canonicalSubmissionText, submissionWords, ct.text, artifact);
+      const res = await admitSelectiveCorpusCandidate(params.canonicalSubmissionText, submissionWords, ct.text, artifact, failureCollector);
       if (res.familyGuardActivated) familyGuardActivations += 1;
       if (res.admitted) {
         const key = String(cand.ordinal);
@@ -216,9 +220,11 @@ export async function runSelectiveCorpusShadow(
     }));
 
     // Did any packed shard fail to load while serving Stage A / FAMILY_GUARD for
-    // this submission? If so the discovery ran over an incomplete index and the
+    // THIS evaluation? If so the discovery ran over an incomplete index and the
     // counterfactual is a LOWER BOUND — report PARTIAL, not a silent COMPLETED.
-    const shardFailures = artifact.postingsAccessor.takeShardFailures();
+    // Read from this evaluation's own collector only — never a shared/reader-
+    // level ledger another concurrently-running evaluation could have drained.
+    const shardFailures = failureCollector.getFailures();
 
     const completed: SelectiveCorpusShadowResult = {
       state: "COMPLETED",

@@ -22,6 +22,20 @@ import { SelectiveCorpusObjectNotFoundError, type SelectiveCorpusStorageAdapter 
  *
  * Exact Stage-A semantics preserved: same postings, same order, same stop-hash
  * exclusion (stop hashes are simply absent from the shard files, as before).
+ *
+ * EVALUATION-SCOPED FAILURE ATTRIBUTION: this reader instance, and its
+ * decoded-shard LRU, are shared across every runSelectiveCorpusShadow()
+ * evaluation that reuses the same cached artifact. A shard that fails to load
+ * must never be attributed via reader-level, destructively-drained shared
+ * state — two evaluations overlapping in time could otherwise race to "steal"
+ * the same failure record via a drain, leaving one incorrectly COMPLETED even
+ * though it also depended on the failed shard. Instead, getPostings() accepts
+ * an OPTIONAL per-evaluation SelectiveCorpusFailureCollector (see below); on
+ * any shard failure it observes (whether from a fresh physical read or a
+ * cache-fast-pathed one), it records into THAT collector, non-destructively.
+ * `recentFailures` below is a SEPARATE, reader-level, NEVER-drained cache used
+ * ONLY to avoid a redundant physical re-read of a shard already known bad — it
+ * is never itself read by any caller to decide PARTIAL/COMPLETED.
  */
 
 type LoadedShard = {
@@ -46,22 +60,20 @@ export type SelectiveCorpusShardReaderStats = {
   residentBytes: number;
   peakResidentBytes: number;
   loadedShards: number;
-  /** Shard-failure records opened over this reader's whole life (monotonic; a
-   *  drain does not reset it, and a shard re-observed after a drain counts
-   *  again). */
+  /** Distinct shards this reader instance has EVER observed failing to load,
+   *  over its whole life — a reader-level I/O diagnostic, monotonically
+   *  non-decreasing (never reset by an evaluation). NOT an evaluation-scoped
+   *  count — use a SelectiveCorpusFailureCollector for that. */
   shardLoadFailures: number;
-  /** Shards sitting in the not-yet-drained failure ledger right now. */
-  pendingShardFailures: number;
 };
 
 export type SelectiveCorpusShardFailureCode = "MISSING" | "UNREADABLE" | "CORRUPT";
 
 /**
  * One packed shard that could not be loaded WHILE SERVING A QUERY (i.e. after
- * the artifact passed initialization). Surfaced through
- * SelectiveCorpusShardReader.takeShardFailures() so the shadow evaluator can
- * emit explicit PARTIAL/DEGRADED telemetry instead of silently treating that
- * shard's fingerprints as an ordinary "no postings" miss.
+ * the artifact passed initialization), as recorded into ONE evaluation's own
+ * SelectiveCorpusFailureCollector. `observations` counts how many getPostings()
+ * calls WITHIN THAT EVALUATION hit this shard — never a cross-evaluation count.
  */
 export type SelectiveCorpusShardFailure = {
   /** shard number 0-255 (first byte of the winnowed fingerprint hash). */
@@ -69,16 +81,55 @@ export type SelectiveCorpusShardFailure = {
   code: SelectiveCorpusShardFailureCode;
   /** bounded, path-free diagnostic string. */
   message: string;
-  /** getPostings() calls that hit this failed shard before the drain. */
+  /** getPostings() calls within THIS evaluation that hit this failed shard. */
   observations: number;
 };
 
 /**
+ * Evaluation-scoped shard-failure attribution. One collector is created per
+ * runSelectiveCorpusShadow() call (see shadow.ts) and threaded through every
+ * Stage A / FAMILY_GUARD shard read that evaluation performs — including
+ * reads served by an in-flight load a DIFFERENT, concurrently-running
+ * evaluation happens to have started (the physical read is shared; each
+ * evaluation's own attribution is not). Never destructively drained: reading
+ * it twice (e.g. once at a TIMEOUT bailout, once at normal completion) always
+ * returns the same evaluation's own accumulated failures.
+ */
+export interface SelectiveCorpusFailureCollector {
+  recordFailure(shard: number, code: SelectiveCorpusShardFailureCode, message: string): void;
+  /** This evaluation's own observed failures, ascending by shard number. Safe
+   *  to call more than once — never clears anything. */
+  getFailures(): SelectiveCorpusShardFailure[];
+}
+
+export function createSelectiveCorpusFailureCollector(): SelectiveCorpusFailureCollector {
+  const failures = new Map<number, SelectiveCorpusShardFailure>();
+  return {
+    recordFailure(shard, code, message) {
+      const existing = failures.get(shard);
+      if (existing) {
+        existing.observations += 1;
+        return;
+      }
+      failures.set(shard, {
+        shard,
+        code,
+        message: message.length > 240 ? `${message.slice(0, 237)}...` : message,
+        observations: 1,
+      });
+    },
+    getFailures() {
+      return [...failures.values()].map((f) => ({ ...f })).sort((a, b) => a.shard - b.shard);
+    },
+  };
+}
+
+/**
  * Decode one packed shard. THROWS on a structurally corrupt / truncated file
  * (a shard that was overwritten or clipped after the artifact was validated) —
- * the caller records that as a SelectiveCorpusShardFailure. A well-formed EMPTY
- * shard is exactly the 4-byte header with entryCount 0 and decodes to `empty()`,
- * never a throw.
+ * the caller records that into the calling evaluation's failure collector. A
+ * well-formed EMPTY shard is exactly the 4-byte header with entryCount 0 and
+ * decodes to `empty()`, never a throw.
  */
 function decodeShard(buf: Uint8Array): LoadedShard {
   const empty = (): LoadedShard => ({ hi: new Uint32Array(0), lo: new Uint32Array(0), postStart: new Uint32Array(1), postings: new Uint32Array(0), bytes: 0 });
@@ -163,10 +214,12 @@ export class SelectiveCorpusShardReader {
   private readonly packedPrefix: string;
   private readonly maxShards: number;
   private readonly cache = new Map<number, LoadedShard>(); // insertion-ordered LRU
-  /** Per-evaluation ledger of shards that failed to load at query time. Drained
-   *  by takeShardFailures(). Failed loads NEVER enter `cache`, so a shard that
-   *  is still broken is re-observed by the next evaluation that needs it. */
-  private readonly shardFailures = new Map<number, SelectiveCorpusShardFailure>();
+  /** Reader-level, NEVER-drained I/O-optimization cache: shards already known
+   *  to fail, so a report's hundreds of query hashes routing through the same
+   *  broken shard trigger ONE physical read attempt, not one per hash. This
+   *  is NOT a failure ledger for reporting purposes — see
+   *  SelectiveCorpusFailureCollector for that. */
+  private readonly recentFailures = new Map<number, { code: SelectiveCorpusShardFailureCode; message: string }>();
   /** Concurrency hardening: shards currently being read+decoded, so two
    *  callers racing on the SAME shard (the cache-miss check happens before
    *  an awaited storage read) share one physical read/decode instead of each
@@ -194,41 +247,21 @@ export class SelectiveCorpusShardReader {
     return `${this.packedPrefix}/shard-${String(shard).padStart(3, "0")}.bin`;
   }
 
-  private recordShardFailure(shard: number, code: SelectiveCorpusShardFailureCode, message: string): void {
-    const existing = this.shardFailures.get(shard);
-    if (existing) {
-      existing.observations += 1;
-      return;
+  /** Records into the reader-level I/O-optimization cache ONLY (never an
+   *  evaluation collector — callers of getShard() do that themselves, once
+   *  per evaluation, from whatever this method leaves in `recentFailures`). */
+  private markShardFailed(shard: number, code: SelectiveCorpusShardFailureCode, message: string): void {
+    const bounded = message.length > 240 ? `${message.slice(0, 237)}...` : message;
+    if (!this.recentFailures.has(shard)) {
+      this.stats.shardLoadFailures += 1;
     }
-    this.shardFailures.set(shard, {
-      shard,
-      code,
-      message: message.length > 240 ? `${message.slice(0, 237)}...` : message,
-      observations: 1,
-    });
-    this.stats.shardLoadFailures += 1;
+    this.recentFailures.set(shard, { code, message: bounded });
   }
 
-  /**
-   * Drain the per-evaluation shard-failure ledger: the shards that could not be
-   * loaded at query time since the last drain (ascending), then clear it so the
-   * next evaluation over this cached reader starts clean. The shadow
-   * orchestrator calls this once per evaluation to decide COMPLETED vs PARTIAL.
-   */
-  takeShardFailures(): SelectiveCorpusShardFailure[] {
-    const out = [...this.shardFailures.values()]
-      .map((f) => ({ ...f }))
-      .sort((a, b) => a.shard - b.shard);
-    this.shardFailures.clear();
-    return out;
-  }
-
-  /** Load one shard into the LRU (evicting the oldest if full). Throws when the
-   *  shard file is missing / unreadable / structurally corrupt AND records the
-   *  reason in the per-evaluation ledger (takeShardFailures). The caller
-   *  (getPostings) still returns undefined so Stage A degrades WITHOUT throwing
-   *  into the report flow — but the failure is no longer invisible. */
-  private async getShard(shard: number): Promise<LoadedShard> {
+  /** Load one shard into the LRU (evicting the oldest if full), attributing
+   *  any failure into the CALLING evaluation's own collector (if given).
+   *  Never throws into the report flow — see getPostings(). */
+  private async getShard(shard: number, collector?: SelectiveCorpusFailureCollector): Promise<LoadedShard> {
     const hit = this.cache.get(shard);
     if (hit) {
       this.stats.cacheHits += 1;
@@ -238,43 +271,48 @@ export class SelectiveCorpusShardReader {
       return hit;
     }
 
-    // Already observed bad in this drain-window: fail the same way without
-    // re-hitting storage (a report's hundreds of query hashes would otherwise
-    // re-request the same missing shard once per hash).
-    const known = this.shardFailures.get(shard);
+    // Already known bad (I/O-optimization fast path, not an evaluation
+    // ledger): skip re-hitting storage, but still tell THIS caller's own
+    // evaluation collector — every evaluation that depends on a known-bad
+    // shard must independently learn that, however many already have.
+    const known = this.recentFailures.get(shard);
     if (known) {
-      known.observations += 1;
+      collector?.recordFailure(shard, known.code, known.message);
       throw new Error(`shard ${shard} unavailable (${known.code})`);
     }
 
-    // A concurrent caller may already be reading+decoding this exact shard
-    // (the cache-miss check above happens before the awaited storage read
-    // below) -- share that single in-flight load rather than starting a
-    // second physical read. Without this, two callers racing on the same
-    // shard would each independently increment cacheMisses/shardFileReads/
-    // shardBytesRead and each call cache.set(), double-adding to
-    // residentBytes even though only one entry ultimately remains.
+    // A concurrent caller (possibly from a DIFFERENT evaluation) may already
+    // be reading+decoding this exact shard -- share that single in-flight
+    // load rather than starting a second physical read. Only the caller that
+    // actually CREATES the in-flight entry owns its lifecycle (sets it up,
+    // clears it in `finally`); a caller that finds an existing one just
+    // awaits it and reports into its OWN collector below.
     const existing = this.inFlightLoads.get(shard);
-    if (existing) return existing;
-
-    const loadPromise = this.loadAndCacheShard(shard);
-    this.inFlightLoads.set(shard, loadPromise);
+    const loadPromise = existing ?? this.loadAndCacheShard(shard);
+    if (!existing) this.inFlightLoads.set(shard, loadPromise);
     try {
       return await loadPromise;
+    } catch (err) {
+      // Whether this caller originated the physical read or joined an
+      // already-in-flight one, loadAndCacheShard has already populated
+      // `recentFailures` with the reason by the time any awaiter observes
+      // the rejection (a promise only settles after its own body has
+      // finished running) -- record it into THIS caller's own evaluation
+      // collector. Every evaluation waiting on the shared load independently
+      // learns its dependency failed, even though only one physical read
+      // (and one recentFailures write) ever happened.
+      const failed = this.recentFailures.get(shard);
+      if (failed) collector?.recordFailure(shard, failed.code, failed.message);
+      throw err;
     } finally {
-      // Runs on BOTH success and failure: a resolved load has already been
-      // written into `cache` by loadAndCacheShard, so the next getShard()
-      // call finds it there (a genuine cache hit) instead of here; a
-      // rejected load must not permanently block a later retry.
-      this.inFlightLoads.delete(shard);
+      if (!existing) this.inFlightLoads.delete(shard);
     }
   }
 
   /** The actual read+decode+cache-population, executed exactly once per
    *  physical shard load no matter how many concurrent getShard() callers
-   *  are waiting on it (see the inFlightLoads map above). Records at most
-   *  one shard-failure-ledger entry per physical failure, for the same
-   *  reason. */
+   *  (from one or several evaluations) are waiting on it. Purely mechanical —
+   *  no evaluation/collector concept here at all; see getShard(). */
   private async loadAndCacheShard(shard: number): Promise<LoadedShard> {
     this.stats.cacheMisses += 1;
     const key = this.shardKey(shard);
@@ -283,11 +321,11 @@ export class SelectiveCorpusShardReader {
       raw = await this.storage.readObject(key);
     } catch (err) {
       if (err instanceof SelectiveCorpusObjectNotFoundError) {
-        this.recordShardFailure(shard, "MISSING", `shard ${shard} absent at query time (removed after artifact initialization)`);
+        this.markShardFailed(shard, "MISSING", `shard ${shard} absent at query time (removed after artifact initialization)`);
         throw new Error(`missing shard ${shard}`);
       }
       const message = err instanceof Error ? err.message : String(err);
-      this.recordShardFailure(shard, "UNREADABLE", `shard ${shard} unreadable (${message})`);
+      this.markShardFailed(shard, "UNREADABLE", `shard ${shard} unreadable (${message})`);
       throw new Error(`unreadable shard ${shard}`);
     }
     this.stats.shardFileReads += 1;
@@ -296,7 +334,7 @@ export class SelectiveCorpusShardReader {
     try {
       loaded = decodeShard(raw);
     } catch (err) {
-      this.recordShardFailure(shard, "CORRUPT", `shard ${shard} failed to decode: ${err instanceof Error ? err.message : String(err)}`);
+      this.markShardFailed(shard, "CORRUPT", `shard ${shard} failed to decode: ${err instanceof Error ? err.message : String(err)}`);
       throw new Error(`corrupt shard ${shard}`);
     }
     this.cache.set(shard, loaded);
@@ -323,19 +361,22 @@ export class SelectiveCorpusShardReader {
 
   /** Doc ordinals sharing this exact winnowed fingerprint. undefined when the
    *  hash is not in the packed index (a stop hash, or a hash that never
-   *  occurred). Byte-identical to the old Map's `.get(hash)`. */
-  async getPostings(hexHash: string): Promise<Uint32Array | undefined> {
+   *  occurred) OR when its shard could not be loaded. `collector`, when
+   *  given, is the CALLING evaluation's own SelectiveCorpusFailureCollector —
+   *  any shard failure this call depends on is attributed there, never to a
+   *  shared/reader-level ledger. */
+  async getPostings(hexHash: string, collector?: SelectiveCorpusFailureCollector): Promise<Uint32Array | undefined> {
     const shard = Number.parseInt(hexHash.slice(0, 2), 16);
     if (!Number.isFinite(shard) || shard < 0 || shard > 255) return undefined;
     let s: LoadedShard;
     try {
-      s = await this.getShard(shard);
+      s = await this.getShard(shard, collector);
     } catch {
       // Missing / unreadable / corrupt shard: Stage A still degrades to "no
       // postings for these hashes" (no throw into the report flow), but the
-      // failure is now recorded in the ledger so the orchestrator classifies the
-      // whole evaluation as PARTIAL rather than a silent COMPLETED. See
-      // takeShardFailures().
+      // failure has already been attributed into the calling evaluation's
+      // own collector above, so the orchestrator can classify THAT
+      // evaluation as PARTIAL rather than a silent COMPLETED.
       return undefined;
     }
     const { hi, lo } = SelectiveCorpusShardReader.hiLo(hexHash);
@@ -368,13 +409,14 @@ export class SelectiveCorpusShardReader {
       peakResidentBytes: this.stats.peakResidentBytes,
       loadedShards: this.cache.size,
       shardLoadFailures: this.stats.shardLoadFailures,
-      pendingShardFailures: this.shardFailures.size,
     };
   }
 
+  /** Resets the numeric counters only. `recentFailures` (the I/O-optimization
+   *  fast-path cache) is deliberately left untouched — a shard genuinely
+   *  known bad stays known bad regardless of a stats reset. */
   resetStats(): void {
     this.stats = { shardFileReads: 0, cacheHits: 0, cacheMisses: 0, shardBytesRead: 0, residentBytes: this.stats.residentBytes, peakResidentBytes: this.stats.residentBytes, shardLoadFailures: 0 };
-    this.shardFailures.clear();
   }
 }
 
@@ -383,23 +425,19 @@ export class SelectiveCorpusShardReader {
  *  product default. */
 export class InMemoryPostingsAccessor {
   constructor(private readonly map: Map<string, Uint32Array>) {}
-  /** async only to satisfy SelectiveCorpusPostingsAccessor — this mode has no I/O to await. */
-  async getPostings(hexHash: string): Promise<Uint32Array | undefined> {
+  /** async only to satisfy SelectiveCorpusPostingsAccessor — this mode has no
+   *  I/O to await and can never fail, so `collector` is accepted for
+   *  interface compatibility but never used. */
+  async getPostings(hexHash: string, _collector?: SelectiveCorpusFailureCollector): Promise<Uint32Array | undefined> {
     return this.map.get(hexHash);
   }
   getStats(): SelectiveCorpusShardReaderStats {
-    return { maxShards: Infinity, shardFileReads: 0, cacheHits: this.map.size, cacheMisses: 0, shardBytesRead: 0, residentBytes: -1, peakResidentBytes: -1, loadedShards: 256, shardLoadFailures: 0, pendingShardFailures: 0 };
-  }
-  /** The in-memory Map has no shard files and cannot partially fail. */
-  takeShardFailures(): SelectiveCorpusShardFailure[] {
-    return [];
+    return { maxShards: Infinity, shardFileReads: 0, cacheHits: this.map.size, cacheMisses: 0, shardBytesRead: 0, residentBytes: -1, peakResidentBytes: -1, loadedShards: 256, shardLoadFailures: 0 };
   }
 }
 
 export type SelectiveCorpusPostingsAccessor = {
-  getPostings(hexHash: string): Promise<Uint32Array | undefined>;
+  getPostings(hexHash: string, collector?: SelectiveCorpusFailureCollector): Promise<Uint32Array | undefined>;
   /** No I/O — pure in-memory accounting, stays synchronous. */
   getStats(): SelectiveCorpusShardReaderStats;
-  /** No I/O — pure ledger drain, stays synchronous. */
-  takeShardFailures(): SelectiveCorpusShardFailure[];
 };

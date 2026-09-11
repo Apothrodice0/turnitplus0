@@ -14,7 +14,8 @@ import {
 } from "../lib/selective-corpus/artifact.ts";
 import { selectiveCorpusStageA } from "../lib/selective-corpus/stage-a.ts";
 import { loadSelectiveCorpusCandidateText, clearSelectiveCorpusSourceCache } from "../lib/selective-corpus/source-loader.ts";
-import { SelectiveCorpusShardReader } from "../lib/selective-corpus/shard-reader.ts";
+import { admitSelectiveCorpusCandidate, selectiveCorpusSubmissionWords } from "../lib/selective-corpus/verify.ts";
+import { SelectiveCorpusShardReader, createSelectiveCorpusFailureCollector } from "../lib/selective-corpus/shard-reader.ts";
 import { SELECTIVE_CORPUS_EXPECTED_DIGEST } from "../lib/selective-corpus/constants.ts";
 import {
   createLocalFilesystemStorageAdapter,
@@ -248,7 +249,7 @@ test("query-time corruption of packed shards after init => state PARTIAL, code C
   clearSelectiveCorpusArtifactCache();
 });
 
-test("SelectiveCorpusShardReader records + drains a per-evaluation shard-failure ledger", async () => {
+test("SelectiveCorpusShardReader: evaluation-scoped failure collector records without destructive draining", async () => {
   const dir = mkdtempSync(join(tmpdir(), "scv-reader-ledger-"));
   const packed = join(dir, "packed");
   mkdirSync(packed, { recursive: true });
@@ -258,28 +259,46 @@ test("SelectiveCorpusShardReader records + drains a per-evaluation shard-failure
   const storage = createLocalFilesystemStorageAdapter(dir);
   const reader = new SelectiveCorpusShardReader(storage, "packed", 8);
 
-  // a present-but-empty shard: undefined, and NO failure recorded
-  assert.equal(await reader.getPostings("00" + "ff".repeat(7)), undefined);
-  assert.equal(reader.takeShardFailures().length, 0);
+  // a present-but-empty shard: undefined, and NO failure recorded into the collector
+  const c0 = createSelectiveCorpusFailureCollector();
+  assert.equal(await reader.getPostings("00" + "ff".repeat(7), c0), undefined);
+  assert.equal(c0.getFailures().length, 0);
 
-  // shard 0x2a disappears, then two query hashes land in it
+  // shard 0x2a disappears, then two query hashes (within the SAME evaluation
+  // collector) land in it
   rmSync(join(packed, "shard-042.bin"), { force: true });
-  assert.equal(await reader.getPostings("2a" + "00".repeat(7)), undefined);
-  assert.equal(await reader.getPostings("2a" + "11".repeat(7)), undefined);
+  const c1 = createSelectiveCorpusFailureCollector();
+  assert.equal(await reader.getPostings("2a" + "00".repeat(7), c1), undefined);
+  assert.equal(await reader.getPostings("2a" + "11".repeat(7), c1), undefined);
 
-  const failures = reader.takeShardFailures();
-  assert.equal(failures.length, 1);
+  const failures = c1.getFailures();
+  assert.equal(failures.length, 1, "deduplicated by shard number within one evaluation collector");
   assert.equal(failures[0].shard, 0x2a);
   assert.equal(failures[0].code, "MISSING");
   assert.ok(failures[0].observations >= 2, "the second hit is memoized but still counted");
   assert.equal(typeof failures[0].message, "string");
 
-  // drained: a subsequent drain is empty until the shard is re-observed
-  assert.equal(reader.takeShardFailures().length, 0);
-  assert.equal(await reader.getPostings("2a" + "22".repeat(7)), undefined);
-  assert.equal(reader.takeShardFailures().length, 1);
-  assert.equal(reader.getStats().shardLoadFailures, 2); // monotonic: re-observed after the drain
-  assert.equal(reader.getStats().pendingShardFailures, 0); // just drained
+  // NON-destructive: reading the same collector again returns the same result
+  assert.equal(c1.getFailures().length, 1);
+  assert.equal(c1.getFailures()[0].observations, failures[0].observations);
+
+  // a DIFFERENT, later evaluation (fresh collector) that also depends on the
+  // SAME still-broken shard independently learns about it too, via the
+  // reader's internal "known bad" fast path (no redundant physical read) --
+  // this is exactly the property that fixes the original PARTIAL-vs-
+  // COMPLETED race: every evaluation that depends on a failed shard gets
+  // its own, independent record of that failure.
+  const c2 = createSelectiveCorpusFailureCollector();
+  assert.equal(await reader.getPostings("2a" + "22".repeat(7), c2), undefined);
+  assert.equal(c2.getFailures().length, 1);
+  assert.equal(c2.getFailures()[0].shard, 0x2a);
+
+  // c1 is completely unaffected by c2 having also recorded the same shard
+  assert.equal(c1.getFailures().length, 1);
+
+  // reader-level stat: ONE distinct shard has ever been observed failing,
+  // regardless of how many separate evaluation collectors observed it
+  assert.equal(reader.getStats().shardLoadFailures, 1);
 
   rmSync(dir, { recursive: true, force: true });
 });
@@ -497,7 +516,7 @@ test("concurrency A: two concurrent getPostings() calls for hashes in the SAME s
   rmSync(dir, { recursive: true, force: true });
 });
 
-test("concurrency B: two concurrent getPostings() calls for a FAILING shard share one physical read and one ledger entry; a later retry can succeed", async () => {
+test("concurrency B: two concurrent getPostings() calls (from two DIFFERENT evaluation collectors) for a FAILING shard share one physical read, and BOTH collectors independently learn of the failure", async () => {
   const dir = mkdtempSync(join(tmpdir(), "scv-conc-b-"));
   const packed = join(dir, "packed");
   mkdirSync(packed, { recursive: true });
@@ -508,27 +527,50 @@ test("concurrency B: two concurrent getPostings() calls for a FAILING shard shar
 
   // scripted to fail the shard's read exactly once -- since the concurrent
   // dedup means only ONE physical read is ever attempted for the batch,
-  // this consumes the single scripted failure; a later, separate call is
-  // not scripted to fail and hits the real (well-formed) file.
+  // this consumes the single scripted failure.
   const counting = createCountingStorageAdapter(createLocalFilesystemStorageAdapter(dir), { "packed/shard-043.bin": 1 });
   const reader = new SelectiveCorpusShardReader(counting, "packed", 8);
 
-  const [postingsA, postingsB] = await Promise.all([reader.getPostings(hashA), reader.getPostings(hashB)]);
+  // hashA and hashB represent two DIFFERENT overlapping evaluations, each
+  // with its OWN failure collector, both depending on the same shard.
+  const collectorX = createSelectiveCorpusFailureCollector();
+  const collectorY = createSelectiveCorpusFailureCollector();
+  const [postingsA, postingsB] = await Promise.all([
+    reader.getPostings(hashA, collectorX),
+    reader.getPostings(hashB, collectorY),
+  ]);
   assert.equal(postingsA, undefined);
   assert.equal(postingsB, undefined);
   assert.equal(counting.callCount("packed/shard-043.bin"), 1, "exactly one physical read attempt for the concurrent failing batch");
 
-  const failures = reader.takeShardFailures();
-  assert.equal(failures.length, 1, "exactly one ledger entry, not one per concurrent caller");
-  assert.equal(failures[0].shard, 0x2b);
-  assert.equal(failures[0].code, "MISSING");
-  assert.equal(failures[0].observations, 1, "both concurrent callers were served by the SAME physical attempt, not two separate observations");
+  // BOTH evaluations' own collectors independently learned of the SAME
+  // physical failure -- this is the exact property that fixes the
+  // PARTIAL-vs-COMPLETED race: neither evaluation "steals" the other's
+  // failure record, and neither is left unaware of it.
+  const failuresX = collectorX.getFailures();
+  const failuresY = collectorY.getFailures();
+  assert.equal(failuresX.length, 1);
+  assert.equal(failuresY.length, 1);
+  assert.equal(failuresX[0].shard, 0x2b);
+  assert.equal(failuresY[0].shard, 0x2b);
+  assert.equal(failuresX[0].code, "MISSING");
+  assert.equal(failuresY[0].code, "MISSING");
+  assert.equal(failuresX[0].observations, 1, "each collector saw its own ONE call, not the other's");
+  assert.equal(failuresY[0].observations, 1);
 
-  // future corrected retry: the scripted failure was already consumed, and
-  // the in-flight marker was cleared on both success and failure -- a later
-  // call must not be permanently poisoned.
-  const retried = await reader.getPostings(hashA);
-  assert.deepEqual([...retried], [5], "a later retry succeeds once the underlying read stops failing");
+  // a later, separate evaluation (fresh collector) that also depends on the
+  // same shard within this SAME reader instance still correctly reports the
+  // failure -- the reader's internal "known bad" fast path is intentionally
+  // persistent for the reader's lifetime (never destructively drained, since
+  // draining was the source of the original cross-evaluation race). Whether
+  // a shard that failed once should ever be retried within one reader's
+  // lifetime is a retry-POLICY question for the future remote-storage
+  // adapter, out of this task's scope -- not tested here.
+  const collectorZ = createSelectiveCorpusFailureCollector();
+  const postingsC = await reader.getPostings(hashA, collectorZ);
+  assert.equal(postingsC, undefined);
+  assert.equal(collectorZ.getFailures().length, 1);
+  assert.equal(counting.callCount("packed/shard-043.bin"), 1, "still exactly one physical read ever -- the known-bad fast path avoided a second one");
 
   rmSync(dir, { recursive: true, force: true });
 });
@@ -638,4 +680,168 @@ test("concurrency E: injected storage-adapter identity partitions the artifact c
   rmSync(dirA, { recursive: true, force: true });
   rmSync(dirB, { recursive: true, force: true });
   rmSync(badDir, { recursive: true, force: true });
+});
+
+// ── evaluation-scoped failure attribution (runSelectiveCorpusShadow level) ──
+// Fixes the specific race: two runSelectiveCorpusShadow() evaluations
+// overlapping while sharing the same cached artifact/reader must each
+// independently learn which shards THEY depended on failed -- never via a
+// shared, destructively-drained ledger one evaluation could steal from
+// another.
+
+// Empirically confirmed (not guessed): SHARD_QUERY_TEXT's winnowed
+// fingerprints touch 46 distinct shards, including shard 30 (0x1e);
+// SMALL_UNAFFECTED_TEXT's touch exactly shard 5, never 30.
+const SMALL_UNAFFECTED_TEXT = "the quick brown fox jumps over the lazy dog while the sun sets slowly behind the distant mountains today";
+
+test("evaluation-scoping A: two overlapping evaluations sharing the same cached reader BOTH independently become PARTIAL from the same failing shard", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "scv-evalscope-a-"));
+  writeMinimalSelectiveCorpusArtifact(dir);
+  clearSelectiveCorpusArtifactCache();
+  await withEnv({ SELECTIVE_CORPUS_SHADOW_ENABLED: "true", SELECTIVE_CORPUS_ARTIFACT_PATH: dir }, async () => {
+    const artifactRef = await loadSelectiveCorpusArtifact(dir); // clean initialization, all 256 shards present
+    for (let s = 0; s < 256; s++) rmSync(join(dir, "packed", `shard-${String(s).padStart(3, "0")}.bin`), { force: true });
+
+    const statsBefore = artifactRef.postingsAccessor.getStats();
+    const authA = { unifiedScore: 10, matchedPositions: [] };
+    const authB = { unifiedScore: 20, matchedPositions: [] };
+    const [resultA, resultB] = await Promise.all([
+      runSelectiveCorpusShadow({ canonicalSubmissionText: SHARD_QUERY_TEXT, authoritative: authA }),
+      runSelectiveCorpusShadow({ canonicalSubmissionText: SHARD_QUERY_TEXT, authoritative: authB }),
+    ]);
+
+    assert.equal(resultA.state, "PARTIAL", "evaluation A independently classifies PARTIAL");
+    assert.equal(resultB.state, "PARTIAL", "evaluation B independently classifies PARTIAL -- neither stole the other's failure");
+    assert.ok((resultA.degradedShardCount ?? 0) > 0);
+    assert.ok((resultB.degradedShardCount ?? 0) > 0);
+    // both used the identical submission text, so both genuinely depended on
+    // the SAME shard numbers -- confirm real overlap, not coincidence
+    const sharedShards = resultA.degradedShards.filter((s) => resultB.degradedShards.includes(s));
+    assert.ok(sharedShards.length > 0, "both evaluations recorded at least one of the SAME shard number as degraded");
+    assert.equal(resultA.authoritativeUnifiedSimilarity, 10, "authoritative inputs stay distinct per evaluation");
+    assert.equal(resultB.authoritativeUnifiedSimilarity, 20);
+
+    // physical I/O dedup (requirement D): two overlapping evaluations
+    // touching the SAME ~46 distinct shards concurrently must still only
+    // ever ATTEMPT each distinct shard once physically, thanks to the
+    // in-flight-load sharing in shard-reader.ts -- not once per evaluation.
+    const statsAfter = artifactRef.postingsAccessor.getStats();
+    assert.ok(
+      statsAfter.cacheMisses - statsBefore.cacheMisses <= 46,
+      `expected at most 46 distinct physical read attempts shared across both evaluations, got ${statsAfter.cacheMisses - statsBefore.cacheMisses}`,
+    );
+  });
+  rmSync(dir, { recursive: true, force: true });
+  clearSelectiveCorpusArtifactCache();
+});
+
+test("evaluation-scoping B: one evaluation touching a failing shard is PARTIAL; a concurrent one that never depends on it stays COMPLETED, with no cross-contamination", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "scv-evalscope-b-"));
+  writeMinimalSelectiveCorpusArtifact(dir);
+  clearSelectiveCorpusArtifactCache();
+  await withEnv({ SELECTIVE_CORPUS_SHADOW_ENABLED: "true", SELECTIVE_CORPUS_ARTIFACT_PATH: dir }, async () => {
+    await loadSelectiveCorpusArtifact(dir);
+    // remove ONLY shard 30 (0x1e) -- empirically confirmed touched by
+    // SHARD_QUERY_TEXT's own fingerprints but NOT by
+    // SMALL_UNAFFECTED_TEXT's (which touches only shard 5).
+    rmSync(join(dir, "packed", "shard-030.bin"), { force: true });
+
+    const [affected, unaffected] = await Promise.all([
+      runSelectiveCorpusShadow({ canonicalSubmissionText: SHARD_QUERY_TEXT, authoritative: { unifiedScore: 1, matchedPositions: [] } }),
+      runSelectiveCorpusShadow({ canonicalSubmissionText: SMALL_UNAFFECTED_TEXT, authoritative: { unifiedScore: 2, matchedPositions: [] } }),
+    ]);
+
+    assert.equal(affected.state, "PARTIAL");
+    assert.ok(affected.degradedShards.includes(30));
+    assert.equal(unaffected.state, "COMPLETED", "an evaluation whose own fingerprints never route through the failing shard stays COMPLETED");
+    assert.equal(unaffected.degradedShardCount, undefined, "no contamination from the concurrently-running affected evaluation");
+  });
+  rmSync(dir, { recursive: true, force: true });
+  clearSelectiveCorpusArtifactCache();
+});
+
+test("evaluation-scoping C: Stage A and FAMILY_GUARD (verify.ts) share ONE evaluation collector -- a shard consulted by both is deduplicated to one entry", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "scv-evalscope-c-"));
+  mkdirSync(join(dir, "packed"), { recursive: true });
+  // NO shard files at all -- every postings lookup, from Stage A's own
+  // fingerprint sweep AND from FAMILY_GUARD's span-fingerprint check (drawn
+  // from the SAME submission text), deterministically fails, regardless of
+  // exact hash values -- no need to guess which specific shards overlap.
+  const storage = createLocalFilesystemStorageAdapter(dir);
+  const reader = new SelectiveCorpusShardReader(storage, "packed", 8);
+  const artifact = {
+    artifactPath: dir,
+    corpusVersion: "selective-corpus-v1",
+    corpusDigest: SELECTIVE_CORPUS_EXPECTED_DIGEST,
+    fingerprintVersion: "selective-corpus-fp-w15-s5-v1",
+    documentCount: 0,
+    postingsAccessor: reader,
+    stopHashes: new Set(),
+    docs: [],
+    docByOrdinal: [],
+    mode: "file-backed",
+    storage,
+  };
+
+  const collector = createSelectiveCorpusFailureCollector();
+
+  // Stage A's own sweep over the submission's winnowed fingerprints
+  await selectiveCorpusStageA(SHARD_QUERY_TEXT, artifact, undefined, collector);
+  const afterStageA = collector.getFailures();
+  const observationsAfterStageA = afterStageA.reduce((sum, f) => sum + f.observations, 0);
+  assert.ok(afterStageA.length > 0, "Stage A's sweep recorded at least one degraded shard");
+
+  // FAMILY_GUARD (verify.ts), called directly the same way shadow.ts's own
+  // Stage B loop calls it, sharing the SAME collector. candidateText ===
+  // submission guarantees STRICT_SPAN passes via a real, exact match, so
+  // classifySpanFamily's own span-hash sweep runs over real content drawn
+  // from the SAME text Stage A already swept.
+  const submissionWords = selectiveCorpusSubmissionWords(SHARD_QUERY_TEXT);
+  await admitSelectiveCorpusCandidate(SHARD_QUERY_TEXT, submissionWords, SHARD_QUERY_TEXT, artifact, collector);
+
+  const final = collector.getFailures();
+  const totalObservations = final.reduce((sum, f) => sum + f.observations, 0);
+  assert.ok(totalObservations > observationsAfterStageA, "FAMILY_GUARD's own span-hash sweep added more observations to the SAME collector");
+
+  // the key property: every entry is keyed by shard number ONCE, regardless
+  // of how many times (from Stage A, from FAMILY_GUARD, or both) that shard
+  // was individually touched.
+  const shardNumbers = final.map((f) => f.shard);
+  assert.equal(new Set(shardNumbers).size, shardNumbers.length, "no duplicate shard-number entries -- degradedShardCount counts each shard once");
+
+  // and at least one shard's observation count grew strictly beyond what
+  // Stage A alone produced for it -- proving real overlap (FAMILY_GUARD
+  // genuinely re-touched a shard Stage A had already recorded), not two
+  // disjoint sets that merely happen to sit in the same collector.
+  const grew = final.some((f) => {
+    const stageAEntry = afterStageA.find((x) => x.shard === f.shard);
+    return stageAEntry && f.observations > stageAEntry.observations;
+  });
+  assert.ok(grew, "at least one shard's observation count grew after FAMILY_GUARD ran, on the SAME collector Stage A used");
+
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("evaluation-scoping E: existing single-evaluation PARTIAL/COMPLETED fixture expectations are unchanged by the evaluation-scoped redesign", async () => {
+  // Re-confirms, in this same file, that the two pre-existing query-time
+  // shard-loss/corruption tests (unmodified above) and the frozen-artifact
+  // COMPLETED test still hold under the new collector-based mechanism --
+  // the authoritative behavioral contract this whole redesign must preserve.
+  const dir = mkdtempSync(join(tmpdir(), "scv-evalscope-e-"));
+  writeMinimalSelectiveCorpusArtifact(dir);
+  clearSelectiveCorpusArtifactCache();
+  await withEnv({ SELECTIVE_CORPUS_SHADOW_ENABLED: "true", SELECTIVE_CORPUS_ARTIFACT_PATH: dir }, async () => {
+    await loadSelectiveCorpusArtifact(dir);
+    const r = await runSelectiveCorpusShadow({
+      canonicalSubmissionText: SHARD_QUERY_TEXT,
+      authoritative: { unifiedScore: 7, matchedPositions: [1, 2] },
+    });
+    // no shards were removed in this variant -- ordinary COMPLETED, exactly
+    // as a single, unaffected evaluation always has.
+    assert.equal(r.state, "COMPLETED");
+    assert.equal(r.degradedShardCount, undefined);
+    assert.equal(r.authoritativeUnifiedSimilarity, 7);
+  });
+  rmSync(dir, { recursive: true, force: true });
+  clearSelectiveCorpusArtifactCache();
 });

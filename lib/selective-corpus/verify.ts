@@ -3,6 +3,7 @@ import { compareSubmissionToExternalText } from "../academic-search/comparator";
 import type { SelectiveCorpusArtifact } from "./artifact";
 import { winnowWordSpanHashes } from "./fingerprint";
 import { SELECTIVE_CORPUS_STRICT_SPAN, SELECTIVE_CORPUS_FAMILY_GUARD } from "./constants";
+import type { SelectiveCorpusFailureCollector } from "./shard-reader";
 
 /**
  * Selective Corpus V1 SHADOW slice — Stage B admission adapters.
@@ -48,6 +49,7 @@ async function classifySpanFamily(
   start: number,
   end: number,
   artifact: SelectiveCorpusArtifact,
+  collector?: SelectiveCorpusFailureCollector,
 ): Promise<SpanFamily> {
   const hashes = winnowWordSpanHashes(submissionWords.slice(start, end + 1));
   const n = hashes.length;
@@ -66,7 +68,7 @@ async function classifySpanFamily(
   // Sequential — same determinism rationale as stage-a.ts's own postings loop.
   const hitByDoc = new Map<number, number>();
   for (const h of nonStop) {
-    const arr = await artifact.postingsAccessor.getPostings(h);
+    const arr = await artifact.postingsAccessor.getPostings(h, collector);
     if (!arr) continue;
     for (const ord of arr) hitByDoc.set(ord, (hitByDoc.get(ord) ?? 0) + 1);
   }
@@ -85,6 +87,12 @@ export async function admitSelectiveCorpusCandidate(
   submissionWords: readonly string[],
   candidateText: string,
   artifact: SelectiveCorpusArtifact,
+  /** The CALLING evaluation's own failure collector (see shard-reader.ts) —
+   *  any packed-shard read FAMILY_GUARD depends on is attributed there.
+   *  Optional so existing direct callers (the source-coverage classifier,
+   *  equivalence tests) that do not care about degradation attribution are
+   *  unaffected. */
+  collector?: SelectiveCorpusFailureCollector,
 ): Promise<SelectiveCorpusAdmissionResult> {
   const cmp = compareSubmissionToExternalText(submissionText, candidateText);
   const spans: SelectiveCorpusVerifiedSpan[] = (cmp.matchedPassages ?? [])
@@ -119,7 +127,7 @@ export async function admitSelectiveCorpusCandidate(
   // dominant span exactly as before.
   for (let i = 0; i < spans.length; i++) {
     const sp = spans[i];
-    const fam = await classifySpanFamily(submissionWords, sp.start, sp.end, artifact);
+    const fam = await classifySpanFamily(submissionWords, sp.start, sp.end, artifact, collector);
     if (fam.isBoilerplate) {
       boilerplateWords += sp.words;
       if (i === 0) dominantSpanBoilerplate = true;
