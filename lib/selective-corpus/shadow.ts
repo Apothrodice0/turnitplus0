@@ -1,12 +1,13 @@
 import { performance } from "node:perf_hooks";
 import { tokens } from "../similarity-core";
 import { isSelectiveCorpusShadowEnabled } from "./flag";
-import { getSelectiveCorpusArtifactPath } from "./config";
+import { getSelectiveCorpusArtifactPath, getSelectiveCorpusStorageMode, getSelectiveCorpusBlobPrefix } from "./config";
 import {
   loadSelectiveCorpusArtifact,
   SelectiveCorpusArtifactError,
   type SelectiveCorpusArtifact,
 } from "./artifact";
+import { createVercelBlobStorageAdapter } from "./vercel-blob-storage-adapter";
 import { selectiveCorpusStageA } from "./stage-a";
 import { loadSelectiveCorpusCandidateText } from "./source-loader";
 import { admitSelectiveCorpusCandidate } from "./verify";
@@ -69,12 +70,30 @@ export async function runSelectiveCorpusShadow(
     if (params.artifactOverride) {
       artifact = params.artifactOverride;
     } else {
-      const path = params.artifactPathOverride ?? getSelectiveCorpusArtifactPath();
-      if (!path) {
-        return { state: "ARTIFACT_UNAVAILABLE", failureCode: "MISSING", failureMessage: "no artifact path configured", ...base };
-      }
       try {
-        artifact = await loadSelectiveCorpusArtifact(path);
+        if (getSelectiveCorpusStorageMode() === "vercel-blob") {
+          // VERCEL-BLOB MODE: manifest is mandatory (integrity-required),
+          // shards/source objects stay lazy (see artifact.ts's cold-start
+          // hardening) — and a missing/invalid prefix fails closed here,
+          // never silently falling back to SELECTIVE_CORPUS_ARTIFACT_PATH.
+          const prefix = getSelectiveCorpusBlobPrefix();
+          if (!prefix) {
+            throw new SelectiveCorpusArtifactError("MISSING", "vercel-blob storage mode requires SELECTIVE_CORPUS_BLOB_PREFIX");
+          }
+          const storageAdapter = createVercelBlobStorageAdapter({ prefix });
+          artifact = await loadSelectiveCorpusArtifact(`vercel-blob:${prefix}`, {
+            storageAdapter,
+            integrityMode: "integrity-required",
+          });
+        } else {
+          // LOCAL MODE (default, unchanged): SELECTIVE_CORPUS_ARTIFACT_PATH,
+          // local-compatible artifact loading, exactly as before this task.
+          const path = params.artifactPathOverride ?? getSelectiveCorpusArtifactPath();
+          if (!path) {
+            throw new SelectiveCorpusArtifactError("MISSING", "no artifact path configured");
+          }
+          artifact = await loadSelectiveCorpusArtifact(path);
+        }
       } catch (err) {
         if (err instanceof SelectiveCorpusArtifactError) {
           return { state: "ARTIFACT_UNAVAILABLE", failureCode: err.code, failureMessage: err.message, ...base };

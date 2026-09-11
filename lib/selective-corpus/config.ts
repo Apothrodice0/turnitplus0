@@ -33,3 +33,30 @@ export function getSelectiveCorpusDiagnosticsDir(): string | null {
   const p = process.env.SELECTIVE_CORPUS_DIAGNOSTICS_DIR;
   return p && p.trim().length > 0 ? p.trim() : null;
 }
+
+export type SelectiveCorpusStorageMode = "local" | "vercel-blob";
+
+/**
+ * Runtime storage-mode selector. "vercel-blob" ONLY on the exact literal
+ * match; absent, "local", or any typo/unrecognized value preserves today's
+ * LOCAL default exactly — the same fail-safe-default convention
+ * lib/selective-corpus/flag.ts uses ("anything but the exact string => the
+ * safe default"). Selecting "vercel-blob" here does not by itself do
+ * anything — see shadow.ts, which additionally requires
+ * getSelectiveCorpusBlobPrefix() and always loads with
+ * integrityMode: "integrity-required" in that mode; it never silently falls
+ * back to local storage if the Blob configuration is incomplete.
+ */
+export function getSelectiveCorpusStorageMode(): SelectiveCorpusStorageMode {
+  return process.env.SELECTIVE_CORPUS_STORAGE_MODE === "vercel-blob" ? "vercel-blob" : "local";
+}
+
+/** Fixed, server-configured corpus prefix for vercel-blob mode (e.g.
+ *  "selective-corpus/v1") — never derived from user/manuscript input. null
+ *  when unset/blank; a caller in vercel-blob mode must treat that as a
+ *  fail-closed misconfiguration (ARTIFACT_UNAVAILABLE), never a silent
+ *  fallback to local storage. */
+export function getSelectiveCorpusBlobPrefix(): string | null {
+  const p = process.env.SELECTIVE_CORPUS_BLOB_PREFIX;
+  return p && p.trim().length > 0 ? p.trim() : null;
+}
