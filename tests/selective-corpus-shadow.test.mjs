@@ -13,6 +13,7 @@ import {
   clearSelectiveCorpusArtifactCache,
 } from "../lib/selective-corpus/artifact.ts";
 import { selectiveCorpusStageA } from "../lib/selective-corpus/stage-a.ts";
+import { loadSelectiveCorpusCandidateText, clearSelectiveCorpusSourceCache } from "../lib/selective-corpus/source-loader.ts";
 import { SelectiveCorpusShardReader } from "../lib/selective-corpus/shard-reader.ts";
 import { SELECTIVE_CORPUS_EXPECTED_DIGEST } from "../lib/selective-corpus/constants.ts";
 import {
@@ -377,4 +378,264 @@ test("a failed artifact load does not poison the cache — a corrected retry suc
   assert.equal(artifact.corpusDigest, SELECTIVE_CORPUS_EXPECTED_DIGEST);
   rmSync(dir, { recursive: true, force: true });
   clearSelectiveCorpusArtifactCache();
+});
+
+// ── concurrency hardening ────────────────────────────────────────────────
+// Two callers racing on the SAME shard / SAME candidate / SAME nominal
+// artifact path+mode must never (a) duplicate the underlying physical read,
+// (b) skew cache-hit/miss/bytes-read accounting, or (c) collide across
+// distinct injected storage-adapter instances.
+
+function encodeVarint(n) {
+  const bytes = [];
+  let v = n >>> 0;
+  do {
+    let b = v & 0x7f;
+    v >>>= 7;
+    if (v) b |= 0x80;
+    bytes.push(b);
+  } while (v);
+  return Buffer.from(bytes);
+}
+
+/** Hand-encodes one well-formed packed shard file: entries sorted ascending
+ *  by their 16-hex-char (64-bit) hash, each with its own doc-ordinal list —
+ *  the same binary format shard-reader.ts's decodeShard() expects. */
+function writeShardFile(path, entries) {
+  const sorted = [...entries].sort((a, b) => (a.hash < b.hash ? -1 : a.hash > b.hash ? 1 : 0));
+  const header = Buffer.alloc(4);
+  header.writeUInt32LE(sorted.length, 0);
+  const parts = [header];
+  for (const e of sorted) {
+    parts.push(Buffer.from(e.hash, "hex"));
+    parts.push(encodeVarint(e.ordinals.length));
+    let prev = 0;
+    for (const ord of e.ordinals) {
+      parts.push(encodeVarint(ord - prev));
+      prev = ord;
+    }
+  }
+  writeFileSync(path, Buffer.concat(parts));
+}
+
+/** Wraps a real local storage adapter with per-key call counting and an
+ *  optional scripted-failure count (fails the first N reads for a given key
+ *  with SelectiveCorpusObjectNotFoundError, then falls through to the real
+ *  read) — lets concurrent-dedup tests assert exact physical-read counts
+ *  deterministically, without depending on real I/O timing. */
+function createCountingStorageAdapter(realAdapter, failNTimesByKey = {}) {
+  const counts = new Map();
+  const remaining = new Map(Object.entries(failNTimesByKey));
+  return {
+    async readObject(key) {
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+      const left = remaining.get(key) ?? 0;
+      if (left > 0) {
+        remaining.set(key, left - 1);
+        throw new SelectiveCorpusObjectNotFoundError(key);
+      }
+      return realAdapter.readObject(key);
+    },
+    async objectExists(key) {
+      return realAdapter.objectExists(key);
+    },
+    callCount(key) {
+      return counts.get(key) ?? 0;
+    },
+  };
+}
+
+function writeConcurrencyTestArtifactMeta(dir, documentCount = 1) {
+  mkdirSync(join(dir, "packed"), { recursive: true });
+  writeFileSync(
+    join(dir, "corpus-version.json"),
+    JSON.stringify({
+      corpusVersion: "selective-corpus-v1",
+      corpusIdentityDigest: SELECTIVE_CORPUS_EXPECTED_DIGEST,
+      fingerprintVersion: "selective-corpus-fp-w15-s5-v1",
+      winnowWindow: 15,
+      shingleSize: 5,
+      stopPolicy: "global DF>=13",
+      documentCount,
+    }),
+  );
+  writeFileSync(join(dir, "packed", "docmap.tsv"), "0\ta\tA_wikipedia\tbulk:a\t500\tORDINARY_REFERENCE");
+  writeFileSync(join(dir, "packed", "stopset.bin"), Buffer.alloc(0));
+}
+
+test("concurrency A: two concurrent getPostings() calls for hashes in the SAME shard share one physical read", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "scv-conc-a-"));
+  const packed = join(dir, "packed");
+  mkdirSync(packed, { recursive: true });
+  for (let s = 0; s < 256; s++) writeFileSync(join(packed, `shard-${String(s).padStart(3, "0")}.bin`), Buffer.alloc(4));
+  const hashA = "2a" + "00".repeat(7);
+  const hashB = "2a" + "11".repeat(7);
+  writeShardFile(join(packed, "shard-042.bin"), [
+    { hash: hashA, ordinals: [10, 20] },
+    { hash: hashB, ordinals: [30] },
+  ]);
+
+  const counting = createCountingStorageAdapter(createLocalFilesystemStorageAdapter(dir));
+  const reader = new SelectiveCorpusShardReader(counting, "packed", 8);
+
+  const [postingsA, postingsB] = await Promise.all([reader.getPostings(hashA), reader.getPostings(hashB)]);
+  assert.deepEqual([...postingsA], [10, 20]);
+  assert.deepEqual([...postingsB], [30]);
+  assert.equal(counting.callCount("packed/shard-042.bin"), 1, "exactly one physical readObject call for the shared shard");
+
+  const stats = reader.getStats();
+  assert.equal(stats.shardFileReads, 1, "exactly one shardFileReads counted, not one per concurrent caller");
+  assert.equal(stats.cacheMisses, 1, "exactly one cacheMisses counted");
+  assert.equal(stats.loadedShards, 1);
+
+  // a later, sequential call for either hash is a genuine cache hit -- no new read
+  const postingsAAgain = await reader.getPostings(hashA);
+  assert.deepEqual([...postingsAAgain], [10, 20]);
+  assert.equal(counting.callCount("packed/shard-042.bin"), 1, "still exactly one physical read after a later cache-hit call");
+  assert.equal(reader.getStats().cacheHits, 1);
+
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("concurrency B: two concurrent getPostings() calls for a FAILING shard share one physical read and one ledger entry; a later retry can succeed", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "scv-conc-b-"));
+  const packed = join(dir, "packed");
+  mkdirSync(packed, { recursive: true });
+  for (let s = 0; s < 256; s++) writeFileSync(join(packed, `shard-${String(s).padStart(3, "0")}.bin`), Buffer.alloc(4));
+  const hashA = "2b" + "00".repeat(7);
+  const hashB = "2b" + "22".repeat(7);
+  writeShardFile(join(packed, "shard-043.bin"), [{ hash: hashA, ordinals: [5] }]);
+
+  // scripted to fail the shard's read exactly once -- since the concurrent
+  // dedup means only ONE physical read is ever attempted for the batch,
+  // this consumes the single scripted failure; a later, separate call is
+  // not scripted to fail and hits the real (well-formed) file.
+  const counting = createCountingStorageAdapter(createLocalFilesystemStorageAdapter(dir), { "packed/shard-043.bin": 1 });
+  const reader = new SelectiveCorpusShardReader(counting, "packed", 8);
+
+  const [postingsA, postingsB] = await Promise.all([reader.getPostings(hashA), reader.getPostings(hashB)]);
+  assert.equal(postingsA, undefined);
+  assert.equal(postingsB, undefined);
+  assert.equal(counting.callCount("packed/shard-043.bin"), 1, "exactly one physical read attempt for the concurrent failing batch");
+
+  const failures = reader.takeShardFailures();
+  assert.equal(failures.length, 1, "exactly one ledger entry, not one per concurrent caller");
+  assert.equal(failures[0].shard, 0x2b);
+  assert.equal(failures[0].code, "MISSING");
+  assert.equal(failures[0].observations, 1, "both concurrent callers were served by the SAME physical attempt, not two separate observations");
+
+  // future corrected retry: the scripted failure was already consumed, and
+  // the in-flight marker was cleared on both success and failure -- a later
+  // call must not be permanently poisoned.
+  const retried = await reader.getPostings(hashA);
+  assert.deepEqual([...retried], [5], "a later retry succeeds once the underlying read stops failing");
+
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("concurrency C: two concurrent loadSelectiveCorpusCandidateText() calls for the SAME candidate share one physical read", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "scv-conc-c-"));
+  writeConcurrencyTestArtifactMeta(dir);
+  mkdirSync(join(dir, "raw"), { recursive: true });
+  writeFileSync(join(dir, "raw", "doc1.txt"), "the quick brown fox jumps over the lazy dog");
+  clearSelectiveCorpusSourceCache();
+
+  const counting = createCountingStorageAdapter(createLocalFilesystemStorageAdapter(dir));
+  const artifact = {
+    artifactPath: dir,
+    storage: counting,
+    docByOrdinal: [{ ordinal: 0, sourceId: "s0", family: "A_wikipedia", rawId: "bulk:doc1", wordCount: 9, interpretationLabel: "ORDINARY_REFERENCE" }],
+  };
+
+  const [r1, r2] = await Promise.all([
+    loadSelectiveCorpusCandidateText(artifact, 0),
+    loadSelectiveCorpusCandidateText(artifact, 0),
+  ]);
+  assert.equal(r1.text, "the quick brown fox jumps over the lazy dog");
+  assert.equal(r2.text, r1.text);
+  assert.equal(counting.callCount("raw/doc1.txt"), 1, "exactly one physical read for the concurrent batch");
+
+  const r3 = await loadSelectiveCorpusCandidateText(artifact, 0);
+  assert.equal(r3.text, r1.text);
+  assert.equal(counting.callCount("raw/doc1.txt"), 1, "the third, later call is a genuine LRU cache hit -- no new read");
+
+  clearSelectiveCorpusSourceCache();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("concurrency D: two concurrent loadSelectiveCorpusCandidateText() calls for a MISSING candidate both return null from one physical attempt, and a later retry is not permanently poisoned", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "scv-conc-d-"));
+  writeConcurrencyTestArtifactMeta(dir);
+  mkdirSync(join(dir, "raw"), { recursive: true });
+  clearSelectiveCorpusSourceCache();
+
+  const counting = createCountingStorageAdapter(createLocalFilesystemStorageAdapter(dir));
+  const artifact = {
+    artifactPath: dir,
+    storage: counting,
+    docByOrdinal: [{ ordinal: 0, sourceId: "s0", family: "A_wikipedia", rawId: "bulk:missing", wordCount: 0, interpretationLabel: "ORDINARY_REFERENCE" }],
+  };
+
+  const [r1, r2] = await Promise.all([
+    loadSelectiveCorpusCandidateText(artifact, 0),
+    loadSelectiveCorpusCandidateText(artifact, 0),
+  ]);
+  assert.equal(r1, null);
+  assert.equal(r2, null);
+  assert.equal(counting.callCount("raw/missing.txt"), 1, "exactly one physical read attempt for the concurrent missing batch");
+
+  // the source becomes available later -- a fresh, later call must not be
+  // permanently poisoned by the earlier concurrent miss.
+  writeFileSync(join(dir, "raw", "missing.txt"), "now it exists");
+  const r3 = await loadSelectiveCorpusCandidateText(artifact, 0);
+  assert.equal(r3.text, "now it exists");
+
+  clearSelectiveCorpusSourceCache();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("concurrency E: injected storage-adapter identity partitions the artifact cache -- two adapters sharing a nominal path/mode never collide", async () => {
+  const dirA = mkdtempSync(join(tmpdir(), "scv-conc-e-a-"));
+  const dirB = mkdtempSync(join(tmpdir(), "scv-conc-e-b-"));
+  writeConcurrencyTestArtifactMeta(dirA, 111);
+  for (let s = 0; s < 256; s++) writeFileSync(join(dirA, "packed", `shard-${String(s).padStart(3, "0")}.bin`), Buffer.alloc(4));
+  writeConcurrencyTestArtifactMeta(dirB, 222);
+  for (let s = 0; s < 256; s++) writeFileSync(join(dirB, "packed", `shard-${String(s).padStart(3, "0")}.bin`), Buffer.alloc(4));
+
+  const adapterA = createLocalFilesystemStorageAdapter(dirA);
+  const adapterB = createLocalFilesystemStorageAdapter(dirB);
+  const NOMINAL_PATH = "nominal-shared-path-not-a-real-directory";
+
+  const artifactA = await loadSelectiveCorpusArtifact(NOMINAL_PATH, { storageAdapter: adapterA });
+  const artifactB = await loadSelectiveCorpusArtifact(NOMINAL_PATH, { storageAdapter: adapterB });
+  assert.equal(artifactA.documentCount, 111);
+  assert.equal(artifactB.documentCount, 222, "adapter B's own artifact, not adapter A's cached one, despite the identical nominal path/mode");
+  assert.notEqual(artifactA, artifactB);
+
+  // same adapter instance + same nominal path => shared cache
+  const artifactAAgain = await loadSelectiveCorpusArtifact(NOMINAL_PATH, { storageAdapter: adapterA });
+  assert.equal(artifactAAgain, artifactA, "repeated calls with the SAME adapter instance share the cached artifact");
+
+  // concurrent calls with the SAME adapter share one in-flight initialization
+  const freshAdapter = createLocalFilesystemStorageAdapter(dirA);
+  const [c1, c2] = await Promise.all([
+    loadSelectiveCorpusArtifact(NOMINAL_PATH, { storageAdapter: freshAdapter }),
+    loadSelectiveCorpusArtifact(NOMINAL_PATH, { storageAdapter: freshAdapter }),
+  ]);
+  assert.equal(c1, c2, "concurrent calls with the same injected adapter resolve to the identical cached artifact object");
+
+  // a failed load with an injected adapter is retryable, not permanently
+  // cached as a rejection -- prove it concretely: fix the underlying
+  // directory after the failure and retry with the SAME adapter instance.
+  const badDir = mkdtempSync(join(tmpdir(), "scv-conc-e-bad-"));
+  const badAdapter = createLocalFilesystemStorageAdapter(badDir); // initially empty, no corpus-version.json
+  await assert.rejects(() => loadSelectiveCorpusArtifact(NOMINAL_PATH, { storageAdapter: badAdapter }), SelectiveCorpusArtifactError);
+  writeConcurrencyTestArtifactMeta(badDir, 333);
+  for (let s = 0; s < 256; s++) writeFileSync(join(badDir, "packed", `shard-${String(s).padStart(3, "0")}.bin`), Buffer.alloc(4));
+  const fixed = await loadSelectiveCorpusArtifact(NOMINAL_PATH, { storageAdapter: badAdapter });
+  assert.equal(fixed.documentCount, 333, "a corrected retry with the SAME adapter instance succeeds -- the failed load did not permanently poison this cache partition");
+
+  rmSync(dirA, { recursive: true, force: true });
+  rmSync(dirB, { recursive: true, force: true });
+  rmSync(badDir, { recursive: true, force: true });
 });

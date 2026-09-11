@@ -167,6 +167,11 @@ export class SelectiveCorpusShardReader {
    *  by takeShardFailures(). Failed loads NEVER enter `cache`, so a shard that
    *  is still broken is re-observed by the next evaluation that needs it. */
   private readonly shardFailures = new Map<number, SelectiveCorpusShardFailure>();
+  /** Concurrency hardening: shards currently being read+decoded, so two
+   *  callers racing on the SAME shard (the cache-miss check happens before
+   *  an awaited storage read) share one physical read/decode instead of each
+   *  independently starting one — see loadAndCacheShard's own comment. */
+  private readonly inFlightLoads = new Map<number, Promise<LoadedShard>>();
   private stats = {
     shardFileReads: 0,
     cacheHits: 0,
@@ -242,6 +247,35 @@ export class SelectiveCorpusShardReader {
       throw new Error(`shard ${shard} unavailable (${known.code})`);
     }
 
+    // A concurrent caller may already be reading+decoding this exact shard
+    // (the cache-miss check above happens before the awaited storage read
+    // below) -- share that single in-flight load rather than starting a
+    // second physical read. Without this, two callers racing on the same
+    // shard would each independently increment cacheMisses/shardFileReads/
+    // shardBytesRead and each call cache.set(), double-adding to
+    // residentBytes even though only one entry ultimately remains.
+    const existing = this.inFlightLoads.get(shard);
+    if (existing) return existing;
+
+    const loadPromise = this.loadAndCacheShard(shard);
+    this.inFlightLoads.set(shard, loadPromise);
+    try {
+      return await loadPromise;
+    } finally {
+      // Runs on BOTH success and failure: a resolved load has already been
+      // written into `cache` by loadAndCacheShard, so the next getShard()
+      // call finds it there (a genuine cache hit) instead of here; a
+      // rejected load must not permanently block a later retry.
+      this.inFlightLoads.delete(shard);
+    }
+  }
+
+  /** The actual read+decode+cache-population, executed exactly once per
+   *  physical shard load no matter how many concurrent getShard() callers
+   *  are waiting on it (see the inFlightLoads map above). Records at most
+   *  one shard-failure-ledger entry per physical failure, for the same
+   *  reason. */
+  private async loadAndCacheShard(shard: number): Promise<LoadedShard> {
     this.stats.cacheMisses += 1;
     const key = this.shardKey(shard);
     let raw: Uint8Array;

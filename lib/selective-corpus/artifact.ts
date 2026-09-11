@@ -119,17 +119,55 @@ function hex8(buf: Uint8Array, off: number): string {
   );
 }
 
-// module-level cache keyed by "<absolute artifact path>|<mode>", now caching
-// the in-flight PROMISE (not just the resolved value) so two callers that
+// module-level cache keyed by "<absolute artifact path>|<mode>", caching the
+// in-flight PROMISE (not just the resolved value) so two callers that
 // request the same artifact concurrently, before either has resolved, share
 // ONE load rather than each independently re-validating 256 shards. A failed
 // load never poisons the cache — the entry is removed on rejection so the
 // next call gets a fresh attempt, generalising the old "only set on success"
-// behavior to promise form.
+// behavior to promise form. This Map is used ONLY for the DEFAULT (no
+// injected storage adapter) case.
 const cache = new Map<string, Promise<SelectiveCorpusArtifact>>();
+
+/**
+ * Concurrency/identity hardening: a SEPARATE cache, partitioned per injected
+ * storage-adapter INSTANCE, for the `options.storageAdapter` case (tests
+ * today; a future remote-storage adapter). Two distinct adapter objects
+ * pointed at the same nominal artifactPath/mode must never collide — a
+ * single shared `cache` keyed only by "path|mode" cannot tell them apart,
+ * since the key carries no adapter identity at all. WeakMap keys by REFERENCE
+ * IDENTITY (never a constructor name or a stringified adapter, which could
+ * collide or be spoofed), and its entries are automatically eligible for GC
+ * once nothing else holds a reference to that adapter — no unbounded
+ * registry to manage, and no explicit cleanup needed as adapters are
+ * discarded. The DEFAULT path never touches this map: constructing a fresh
+ * local adapter on every uncached call (as it always has) would give each
+ * call a distinct identity here, defeating path/mode-based caching for the
+ * common case, so the default case keeps using the plain `cache` above,
+ * unchanged.
+ */
+const adapterScopedCaches = new WeakMap<SelectiveCorpusStorageAdapter, Map<string, Promise<SelectiveCorpusArtifact>>>();
 
 export function clearSelectiveCorpusArtifactCache(): void {
   cache.clear();
+  // adapterScopedCaches is deliberately NOT (and cannot be) cleared here — a
+  // WeakMap offers no enumeration/clear API by design, which is exactly what
+  // makes it safe from an unbounded-registry standpoint. Every caller that
+  // injects an adapter owns that adapter's own lifetime; discarding the
+  // adapter reference (e.g. a test ending) is how its cache partition goes
+  // away.
+}
+
+function resolveArtifactCacheMap(
+  options: LoadSelectiveCorpusArtifactOptions,
+): Map<string, Promise<SelectiveCorpusArtifact>> {
+  if (!options.storageAdapter) return cache;
+  let scoped = adapterScopedCaches.get(options.storageAdapter);
+  if (!scoped) {
+    scoped = new Map<string, Promise<SelectiveCorpusArtifact>>();
+    adapterScopedCaches.set(options.storageAdapter, scoped);
+  }
+  return scoped;
 }
 
 export function loadSelectiveCorpusArtifact(
@@ -138,17 +176,19 @@ export function loadSelectiveCorpusArtifact(
 ): Promise<SelectiveCorpusArtifact> {
   const mode = options.mode ?? "file-backed";
   const cacheKey = `${artifactPath}|${mode}`;
-  const cached = cache.get(cacheKey);
+  const targetCache = resolveArtifactCacheMap(options);
+  const cached = targetCache.get(cacheKey);
   if (cached) return cached;
 
-  // cache.set happens synchronously, before this async function's first
-  // await runs — any concurrent caller arriving in the same tick sees the
-  // cache hit above instead of starting a second load.
+  // targetCache.set happens synchronously, before this async function's
+  // first await runs — any concurrent caller arriving in the same tick
+  // (using the SAME adapter instance, or the default path) sees the cache
+  // hit above instead of starting a second load.
   const promise = loadSelectiveCorpusArtifactUncached(artifactPath, options).catch((err: unknown) => {
-    cache.delete(cacheKey);
+    targetCache.delete(cacheKey);
     throw err;
   });
-  cache.set(cacheKey, promise);
+  targetCache.set(cacheKey, promise);
   return promise;
 }
 
