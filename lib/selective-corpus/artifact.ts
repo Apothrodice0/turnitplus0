@@ -16,6 +16,7 @@ import {
 } from "./storage-adapter";
 import {
   parseSelectiveCorpusIntegrityManifest,
+  verifySelectiveCorpusObjectIntegrity,
   SelectiveCorpusIntegrityManifestError,
   type SelectiveCorpusIntegrityManifest,
 } from "./integrity";
@@ -27,8 +28,16 @@ import {
  * returns state "ARTIFACT_UNAVAILABLE" so the application continues normally.
  *
  * Loads: docmap.tsv into a row array and stopset.bin into a Set<hash> (both
- * small, always resident) and validates that all 256 shard files exist and
- * shard-000 decodes. It does NOT deserialise the packed postings — Stage A
+ * small, always resident) and validates the 256 packed shards' structural
+ * inventory: in LOCAL COMPATIBILITY MODE (default) every shard file's
+ * existence is checked via objectExists(), exactly as before this comment was
+ * updated. In INTEGRITY-REQUIRED MODE the integrity manifest itself IS the
+ * inventory — every shard key must have a manifest entry, but no
+ * objectExists()/readObject() round trip is made for shard-001..255 at
+ * initialization, avoiding an unnecessary remote-request burst; their actual
+ * presence is discovered lazily, per-shard, at query time. Either mode always
+ * physically reads+decodes shard-000 as a smoke test. It does NOT deserialise
+ * the packed postings — Stage A
  * reads them through a bounded file-backed hot-shard LRU
  * (lib/selective-corpus/shard-reader.ts), so at most SELECTIVE_CORPUS_HOT_SHARD_LRU
  * shards' worth of postings are ever in RAM. The previous implementation
@@ -355,21 +364,68 @@ async function loadSelectiveCorpusArtifactUncached(
     throw new SelectiveCorpusArtifactError("CORRUPT", "packed/stopset.bin unreadable");
   }
 
-  // packed shards — structural validation only: every shard file must exist and
-  // shard-000 must decode. We do NOT decode all 256 (that is the ~1 GB /
-  // ~4 s cost this runtime removes). Sequential, not parallel — deterministic
+  // packed shards — structural validation, forked by integrityMode.
+  //
+  // LOCAL COMPATIBILITY MODE (default, unchanged from before this task): every
+  // one of the 256 shard files is existence-checked via objectExists() before
+  // shard-000 is read/decoded. Sequential, not parallel — deterministic
   // first-failure reporting, matching the original loop's order exactly.
-  for (let s = 0; s < 256; s++) {
-    const shardKey = `${packPrefix}/shard-${String(s).padStart(3, "0")}.bin`;
-    if (!(await storage.objectExists(shardKey))) {
-      throw new SelectiveCorpusArtifactError("MISSING", `packed/shard-${String(s).padStart(3, "0")}.bin not found`);
+  //
+  // INTEGRITY-REQUIRED MODE: objectExists() against all 256 shards would be an
+  // unnecessary remote-request burst before Stage A ever runs. The sidecar
+  // manifest (already read/parsed above) IS the structural inventory instead —
+  // we require it to carry an entry for every shard key, but never ask storage
+  // whether the backing object for shard-001..255 actually exists. A manifest
+  // entry existing does not guarantee the object still does; that is
+  // discovered lazily, per-shard, the first time Stage A/FAMILY_GUARD queries
+  // it (see shard-reader.ts), where a missing/corrupt non-zero shard degrades
+  // only the affected evaluation to PARTIAL with zero evidence rather than
+  // failing initialization for the whole corpus.
+  if (integrityMode === "integrity-required") {
+    // Guaranteed defined here: the block above either assigned `integrity` or
+    // already threw INTEGRITY_MANIFEST_INVALID.
+    const manifest = integrity!;
+    for (let s = 0; s < 256; s++) {
+      const shardKey = `${packPrefix}/shard-${String(s).padStart(3, "0")}.bin`;
+      if (!manifest.get(shardKey)) {
+        throw new SelectiveCorpusArtifactError(
+          "INTEGRITY_MANIFEST_INVALID",
+          `object-integrity.json is missing a required entry for ${shardKey}`,
+        );
+      }
+    }
+  } else {
+    for (let s = 0; s < 256; s++) {
+      const shardKey = `${packPrefix}/shard-${String(s).padStart(3, "0")}.bin`;
+      if (!(await storage.objectExists(shardKey))) {
+        throw new SelectiveCorpusArtifactError("MISSING", `packed/shard-${String(s).padStart(3, "0")}.bin not found`);
+      }
     }
   }
+
+  // shard-000 smoke validation — ALWAYS one real physical read+decode, in
+  // BOTH modes, proving the adapter is operational and the artifact format is
+  // usable. Integrity-required mode additionally verifies these exact bytes
+  // against the manifest — the only packed-shard byte-integrity check done
+  // eagerly at initialization; shard-001..255 are verified lazily, per read.
   let smoke: Uint8Array;
   try {
     smoke = await storage.readObject(`${packPrefix}/shard-000.bin`);
-  } catch {
+  } catch (err) {
+    if (err instanceof SelectiveCorpusObjectNotFoundError) {
+      throw new SelectiveCorpusArtifactError("MISSING", "packed/shard-000.bin not found");
+    }
     throw new SelectiveCorpusArtifactError("CORRUPT", "packed/shard-000.bin unreadable");
+  }
+  if (integrity) {
+    try {
+      verifySelectiveCorpusObjectIntegrity(`${packPrefix}/shard-000.bin`, smoke, integrity);
+    } catch (err) {
+      throw new SelectiveCorpusArtifactError(
+        "CORRUPT",
+        `packed/shard-000.bin failed integrity verification: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
   if (smoke.length >= 4) {
     const n0 = readUint32LE(smoke, 0);

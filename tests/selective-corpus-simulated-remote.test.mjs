@@ -110,6 +110,38 @@ function shardKeyFor(shardNumber) {
   return `packed/shard-${String(shardNumber).padStart(3, "0")}.bin`;
 }
 
+/** Test-only call-counting wrapper around a real SelectiveCorpusStorageAdapter
+ *  -- delegates every call to `inner` unchanged, but records exact per-key
+ *  readObject()/objectExists() invocation counts so cold-start request-count
+ *  assertions (e.g. "zero calls for shard-001..255 in integrity-required
+ *  mode") do not have to guess at internals. */
+function createCountingAdapter(inner) {
+  const readObjectCalls = new Map();
+  const objectExistsCalls = new Map();
+  return {
+    async readObject(key) {
+      readObjectCalls.set(key, (readObjectCalls.get(key) ?? 0) + 1);
+      return inner.readObject(key);
+    },
+    async objectExists(key) {
+      objectExistsCalls.set(key, (objectExistsCalls.get(key) ?? 0) + 1);
+      return inner.objectExists(key);
+    },
+    readObjectCallCount(key) {
+      return readObjectCalls.get(key) ?? 0;
+    },
+    objectExistsCallCount(key) {
+      return objectExistsCalls.get(key) ?? 0;
+    },
+    totalReadObjectCalls() {
+      return [...readObjectCalls.values()].reduce((a, b) => a + b, 0);
+    },
+    totalObjectExistsCalls() {
+      return [...objectExistsCalls.values()].reduce((a, b) => a + b, 0);
+    },
+  };
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // 9. SHARD TESTS
 // ═══════════════════════════════════════════════════════════════════════
@@ -482,17 +514,126 @@ test("local-compatible mode (default) does NOT require a manifest -- existing be
   rmSync(dir, { recursive: true, force: true });
 });
 
-test("integrity-required mode: missing required shard entry encountered at verification time => INTEGRITY_MISMATCH", async () => {
+// ═══════════════════════════════════════════════════════════════════════
+// 13. REMOTE COLD-START REQUEST HARDENING (integrity manifest as structural
+//     inventory instead of eager per-shard objectExists()).
+// ═══════════════════════════════════════════════════════════════════════
+
+// Required test A + F: full manifest inventory => initialization succeeds
+// with ZERO eager storage calls for shard-001..255, and exactly one real
+// smoke read (no objectExists) for shard-000.
+test("integrity-required mode: manifest covers all 256 shards => init succeeds, zero readObject/objectExists calls for shard-001..255, one smoke read for shard-000", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "scv-remote-full-manifest-"));
+  writeFullLocalArtifact(dir, { withManifest: true });
+  const counting = createCountingAdapter(createLocalFilesystemStorageAdapter(dir));
+  clearSelectiveCorpusArtifactCache();
+  const artifact = await loadSelectiveCorpusArtifact(dir, { storageAdapter: counting, integrityMode: "integrity-required" });
+  assert.ok(artifact.integrity);
+
+  for (let s = 1; s < 256; s++) {
+    const key = shardKeyFor(s);
+    assert.equal(counting.readObjectCallCount(key), 0, `shard ${s}: zero readObject calls during initialization`);
+    assert.equal(counting.objectExistsCallCount(key), 0, `shard ${s}: zero objectExists calls during initialization`);
+  }
+  assert.equal(counting.readObjectCallCount(shardKeyFor(0)), 1, "shard-000: exactly one real smoke read");
+  assert.equal(counting.objectExistsCallCount(shardKeyFor(0)), 0, "shard-000: no objectExists call -- covered by the manifest inventory check");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// Required test B: one required shard manifest entry missing => fail closed
+// at initialization, and storage is never queried about that shard's
+// existence merely to discover the manifest is missing it.
+test("integrity-required mode: one required shard manifest entry missing => initialization fails closed without querying storage for that shard", async () => {
   const dir = mkdtempSync(join(tmpdir(), "scv-remote-missing-shard-entry-"));
   writeFullLocalArtifact(dir, { withManifest: true, excludeShards: [30] });
+  const counting = createCountingAdapter(createLocalFilesystemStorageAdapter(dir));
+  clearSelectiveCorpusArtifactCache();
+  await assert.rejects(
+    () => loadSelectiveCorpusArtifact(dir, { storageAdapter: counting, integrityMode: "integrity-required" }),
+    (e) => e instanceof SelectiveCorpusArtifactError && e.code === "INTEGRITY_MANIFEST_INVALID",
+  );
+  assert.equal(counting.readObjectCallCount(shardKeyFor(30)), 0, "storage is never read merely to discover whether the missing-manifest shard exists");
+  assert.equal(counting.objectExistsCallCount(shardKeyFor(30)), 0, "storage existence is never queried for the missing-manifest shard either");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// Required test C: shard-000's manifest entry is present but the physical
+// object is gone => fail closed (the one shard that IS eagerly, physically
+// read at initialization).
+test("integrity-required mode: shard-000 manifest entry present but physical object missing => initialization fails closed", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "scv-remote-shard0-missing-"));
+  writeFullLocalArtifact(dir, { withManifest: true });
+  rmSync(join(dir, "packed", "shard-000.bin"));
+  clearSelectiveCorpusArtifactCache();
+  await assert.rejects(
+    () => loadSelectiveCorpusArtifact(dir, { integrityMode: "integrity-required" }),
+    (e) => e instanceof SelectiveCorpusArtifactError && e.code === "MISSING",
+  );
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// Required test D: a non-zero shard's manifest entry exists but the physical
+// object is gone => initialization still SUCCEEDS (the manifest entry alone
+// satisfies the structural inventory), and the failure surfaces only lazily,
+// at query time, as zero evidence for the evaluation that touches it.
+test("integrity-required mode: non-zero shard manifest entry present but physical object missing => init succeeds, query-time MISSING, zero evidence", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "scv-remote-shard30-missing-"));
+  writeFullLocalArtifact(dir, { withManifest: true });
+  rmSync(join(dir, "packed", "shard-030.bin"));
   clearSelectiveCorpusArtifactCache();
   const artifact = await loadSelectiveCorpusArtifact(dir, { integrityMode: "integrity-required" });
-  assert.ok(artifact.integrity, "artifact loaded fine -- init-time reads are not integrity-gated, only per-query shard reads");
+  assert.ok(artifact.integrity, "initialization succeeds -- the manifest entry alone satisfies the structural inventory check");
 
   const collector = createSelectiveCorpusFailureCollector();
   const postings = await artifact.postingsAccessor.getPostings("1e" + "00".repeat(7), collector); // shard 0x1e = 30
+  assert.equal(postings, undefined, "zero evidence from a shard whose backing object is missing");
+  assert.equal(collector.getFailures()[0].code, "MISSING");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// Required test E: a non-zero shard's manifest entry exists, and the object
+// physically exists, but its bytes do not match the manifest's digest =>
+// zero evidence, INTEGRITY_MISMATCH -- distinct from test D (object present,
+// content wrong, rather than object absent).
+test("integrity-required mode: non-zero shard integrity mismatch at query time => zero evidence, INTEGRITY_MISMATCH", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "scv-remote-shard31-mismatch-"));
+  writeFullLocalArtifact(dir, { withManifest: false });
+  const entries = [];
+  for (let s = 0; s < 256; s++) {
+    const bytes = readFileSync(join(dir, "packed", `shard-${String(s).padStart(3, "0")}.bin`));
+    entries.push(s === 31 ? { key: shardKeyFor(s), bytes, sha256Override: "f".repeat(64) } : { key: shardKeyFor(s), bytes });
+  }
+  writeFileSync(join(dir, "object-integrity.json"), buildManifestBytes(entries));
+  clearSelectiveCorpusArtifactCache();
+  const artifact = await loadSelectiveCorpusArtifact(dir, { integrityMode: "integrity-required" });
+
+  const collector = createSelectiveCorpusFailureCollector();
+  const postings = await artifact.postingsAccessor.getPostings("1f" + "00".repeat(7), collector); // shard 0x1f = 31
   assert.equal(postings, undefined);
   assert.equal(collector.getFailures()[0].code, "INTEGRITY_MISMATCH");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// Required test G: local-compatible mode is untouched -- still eagerly
+// validates every one of the 256 shard files via objectExists(), and a
+// missing local shard still fails initialization exactly as before.
+test("local-compatible mode: still eagerly validates all 256 shard files exist, and a missing one fails initialization", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "scv-remote-localcompat-eager-"));
+  writeFullLocalArtifact(dir, { withManifest: false });
+  const counting = createCountingAdapter(createLocalFilesystemStorageAdapter(dir));
+  clearSelectiveCorpusArtifactCache();
+  const artifact = await loadSelectiveCorpusArtifact(dir, { storageAdapter: counting }); // no integrityMode => local-compatible
+  assert.equal(artifact.integrity, undefined);
+  for (let s = 0; s < 256; s++) {
+    assert.equal(counting.objectExistsCallCount(shardKeyFor(s)), 1, `shard ${s}: existing eager objectExists check preserved`);
+  }
+
+  rmSync(join(dir, "packed", "shard-045.bin"));
+  clearSelectiveCorpusArtifactCache();
+  await assert.rejects(
+    () => loadSelectiveCorpusArtifact(dir),
+    (e) => e instanceof SelectiveCorpusArtifactError && e.code === "MISSING",
+  );
   rmSync(dir, { recursive: true, force: true });
 });
 
