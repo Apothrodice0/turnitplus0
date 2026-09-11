@@ -34,11 +34,11 @@ export type SelectiveCorpusStageAResult = {
   rankByOrdinal: Map<number, number>;
 };
 
-export function selectiveCorpusStageA(
+export async function selectiveCorpusStageA(
   submissionText: string,
   artifact: SelectiveCorpusArtifact,
   opts: { topK?: number; maxPostingRows?: number; maxCandidates?: number } = {},
-): SelectiveCorpusStageAResult {
+): Promise<SelectiveCorpusStageAResult> {
   const topK = opts.topK ?? SELECTIVE_CORPUS_STAGE_A_TOP_K;
   const maxPostingRows = opts.maxPostingRows ?? SELECTIVE_CORPUS_STAGE_A_MAX_POSTING_ROWS;
   const maxCandidates = opts.maxCandidates ?? SELECTIVE_CORPUS_STAGE_A_MAX_CANDIDATES;
@@ -55,13 +55,17 @@ export function selectiveCorpusStageA(
   // each shard at most once per submission (LRU-friendly). Sort is by hex hash,
   // which groups by first byte = shard; stable and deterministic. Tally order
   // does not affect the final ranking (weight + matched + ordinal tie-break).
+  // Sequential awaits, deliberately not parallelized: this task only threads
+  // async I/O through the existing call chain, and concurrent postings reads
+  // could reorder shard-LRU touches / shard-failure observation order —
+  // preserved exactly by staying sequential.
   const orderedFingerprints = [...fingerprints].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   for (const h of orderedFingerprints) {
     if (artifact.stopHashes.has(h)) {
       stoppedFingerprints += 1;
       continue;
     }
-    const arr = artifact.postingsAccessor.getPostings(h);
+    const arr = await artifact.postingsAccessor.getPostings(h);
     if (!arr) continue;
     postingRowsTallied += arr.length;
     if (postingRowsTallied > maxPostingRows) {

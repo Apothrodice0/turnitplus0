@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { classifySourceCoverageCase } from "./classify";
 import { ALL_FIXTURE_CASES } from "./fixtures";
+import type { SourceCoverageClassification } from "./types";
 
 /**
  * Offline demo harness — runs ONLY the deterministic local/synthetic
@@ -20,11 +21,15 @@ export function assertWithinAllowedDrive(path: string): void {
   }
 }
 
-function main(): void {
+async function main(): Promise<void> {
   assertWithinAllowedDrive(OUTPUT_DIR);
   mkdirSync(OUTPUT_DIR, { recursive: true });
 
-  const records = ALL_FIXTURE_CASES.map((c) => classifySourceCoverageCase(c));
+  // Sequential, not Promise.all — this offline harness has no concurrency
+  // requirement, and staying sequential keeps output ordering trivially
+  // deterministic.
+  const records: SourceCoverageClassification[] = [];
+  for (const c of ALL_FIXTURE_CASES) records.push(await classifySourceCoverageCase(c));
 
   const countsByOutcome: Record<string, number> = {};
   for (const record of records) countsByOutcome[record.outcome] = (countsByOutcome[record.outcome] ?? 0) + 1;
@@ -62,4 +67,9 @@ function main(): void {
 // never as a side effect of another module importing this file (e.g. tests
 // importing assertWithinAllowedDrive).
 const isDirectInvocation = process.argv[1] !== undefined && fileURLToPath(import.meta.url) === process.argv[1];
-if (isDirectInvocation) main();
+if (isDirectInvocation) {
+  main().catch((err) => {
+    console.error(err);
+    process.exitCode = 1;
+  });
+}

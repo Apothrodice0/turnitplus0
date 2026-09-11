@@ -1,5 +1,4 @@
-import { readFileSync, existsSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, statSync } from "node:fs";
 import {
   SELECTIVE_CORPUS_EXPECTED_DIGEST,
   SELECTIVE_CORPUS_STOP_DF,
@@ -10,6 +9,11 @@ import {
   InMemoryPostingsAccessor,
   type SelectiveCorpusPostingsAccessor,
 } from "./shard-reader";
+import {
+  createLocalFilesystemStorageAdapter,
+  SelectiveCorpusObjectNotFoundError,
+  type SelectiveCorpusStorageAdapter,
+} from "./storage-adapter";
 
 /**
  * Selective Corpus V1 SHADOW slice — packed artifact loader + version/digest
@@ -71,6 +75,11 @@ export type SelectiveCorpusArtifact = {
   docs: SelectiveCorpusDoc[];
   docByOrdinal: SelectiveCorpusDoc[];
   mode: "file-backed" | "in-memory";
+  /** The SAME storage adapter this artifact was loaded through — reused by
+   *  source-loader.ts for `bulk:`-kind candidate text so every read for this
+   *  artifact goes through one consistent adapter instance (local-fs today;
+   *  an injected/remote adapter in a future task). */
+  storage: SelectiveCorpusStorageAdapter;
 };
 
 export type LoadSelectiveCorpusArtifactOptions = {
@@ -79,6 +88,11 @@ export type LoadSelectiveCorpusArtifactOptions = {
   mode?: "file-backed" | "in-memory";
   /** file-backed only: hot-shard LRU size override (also SELECTIVE_CORPUS_HOT_SHARD_LRU). */
   hotShards?: number;
+  /** Test/future-storage seam: use this adapter instead of constructing a
+   *  local-filesystem adapter rooted at `artifactPath`. When given, the
+   *  local-only "is artifactPath a real directory" pre-check is skipped —
+   *  validating that is the injected adapter's own responsibility. */
+  storageAdapter?: SelectiveCorpusStorageAdapter;
 };
 
 // Byte-level helpers — deliberately operate on Uint8Array so the code does not
@@ -105,9 +119,14 @@ function hex8(buf: Uint8Array, off: number): string {
   );
 }
 
-// module-level cache keyed by "<absolute artifact path>|<mode>". A failed load
-// never poisons the cache (we only set it on success).
-const cache = new Map<string, SelectiveCorpusArtifact>();
+// module-level cache keyed by "<absolute artifact path>|<mode>", now caching
+// the in-flight PROMISE (not just the resolved value) so two callers that
+// request the same artifact concurrently, before either has resolved, share
+// ONE load rather than each independently re-validating 256 shards. A failed
+// load never poisons the cache — the entry is removed on rejection so the
+// next call gets a fresh attempt, generalising the old "only set on success"
+// behavior to promise form.
+const cache = new Map<string, Promise<SelectiveCorpusArtifact>>();
 
 export function clearSelectiveCorpusArtifactCache(): void {
   cache.clear();
@@ -116,18 +135,54 @@ export function clearSelectiveCorpusArtifactCache(): void {
 export function loadSelectiveCorpusArtifact(
   artifactPath: string,
   options: LoadSelectiveCorpusArtifactOptions = {},
-): SelectiveCorpusArtifact {
+): Promise<SelectiveCorpusArtifact> {
   const mode = options.mode ?? "file-backed";
   const cacheKey = `${artifactPath}|${mode}`;
   const cached = cache.get(cacheKey);
   if (cached) return cached;
 
-  if (!existsSync(artifactPath) || !statSync(artifactPath).isDirectory()) {
-    throw new SelectiveCorpusArtifactError("MISSING", `artifact path not a directory: ${artifactPath}`);
+  // cache.set happens synchronously, before this async function's first
+  // await runs — any concurrent caller arriving in the same tick sees the
+  // cache hit above instead of starting a second load.
+  const promise = loadSelectiveCorpusArtifactUncached(artifactPath, options).catch((err: unknown) => {
+    cache.delete(cacheKey);
+    throw err;
+  });
+  cache.set(cacheKey, promise);
+  return promise;
+}
+
+async function loadSelectiveCorpusArtifactUncached(
+  artifactPath: string,
+  options: LoadSelectiveCorpusArtifactOptions,
+): Promise<SelectiveCorpusArtifact> {
+  const mode = options.mode ?? "file-backed";
+
+  let storage: SelectiveCorpusStorageAdapter;
+  if (options.storageAdapter) {
+    storage = options.storageAdapter;
+  } else {
+    // Local-filesystem-only bootstrap check: confirms artifactPath itself is
+    // a real directory before treating it as a local adapter root. This is
+    // the one remaining sync fs call in this module — justified because it
+    // fires at most once per (uncached) artifact load, never in the per-shard
+    // hot path, and "is this local path a directory" has no analogue for an
+    // injected (future remote) adapter, which is why it is skipped when one
+    // is supplied.
+    if (!existsSync(artifactPath) || !statSync(artifactPath).isDirectory()) {
+      throw new SelectiveCorpusArtifactError("MISSING", `artifact path not a directory: ${artifactPath}`);
+    }
+    storage = createLocalFilesystemStorageAdapter(artifactPath);
   }
-  const versionFile = join(artifactPath, "corpus-version.json");
-  if (!existsSync(versionFile)) {
-    throw new SelectiveCorpusArtifactError("MISSING", "corpus-version.json not found");
+
+  let versionBytes: Uint8Array;
+  try {
+    versionBytes = await storage.readObject("corpus-version.json");
+  } catch (err) {
+    if (err instanceof SelectiveCorpusObjectNotFoundError) {
+      throw new SelectiveCorpusArtifactError("MISSING", "corpus-version.json not found");
+    }
+    throw err;
   }
 
   let version: {
@@ -140,7 +195,7 @@ export function loadSelectiveCorpusArtifact(
     documentCount?: number;
   };
   try {
-    version = JSON.parse(readFileSync(versionFile, "utf8"));
+    version = JSON.parse(Buffer.from(versionBytes).toString("utf8"));
   } catch {
     throw new SelectiveCorpusArtifactError("CORRUPT", "corpus-version.json is not valid JSON");
   }
@@ -165,15 +220,17 @@ export function loadSelectiveCorpusArtifact(
   }
 
   // docmap
-  const packDir = join(artifactPath, "packed");
-  const docmapFile = join(packDir, "docmap.tsv");
-  const stopFile = join(packDir, "stopset.bin");
-  if (!existsSync(docmapFile) || !existsSync(stopFile)) {
+  const packPrefix = "packed";
+  const docmapKey = `${packPrefix}/docmap.tsv`;
+  const stopKey = `${packPrefix}/stopset.bin`;
+  const [docmapExists, stopExists] = [await storage.objectExists(docmapKey), await storage.objectExists(stopKey)];
+  if (!docmapExists || !stopExists) {
     throw new SelectiveCorpusArtifactError("MISSING", "packed/docmap.tsv or packed/stopset.bin not found");
   }
   const docs: SelectiveCorpusDoc[] = [];
   try {
-    for (const line of readFileSync(docmapFile, "utf8").split(/\r?\n/)) {
+    const docmapBytes = await storage.readObject(docmapKey);
+    for (const line of Buffer.from(docmapBytes).toString("utf8").split(/\r?\n/)) {
       if (!line) continue;
       const [ord, sourceId, family, rawId, wc, label] = line.split("\t");
       docs.push({
@@ -195,7 +252,7 @@ export function loadSelectiveCorpusArtifact(
   // stopset
   const stopHashes = new Set<string>();
   try {
-    const stopBuf = new Uint8Array(readFileSync(stopFile));
+    const stopBuf = await storage.readObject(stopKey);
     for (let i = 0; i + 8 <= stopBuf.length; i += 8) stopHashes.add(hex8(stopBuf, i));
   } catch {
     throw new SelectiveCorpusArtifactError("CORRUPT", "packed/stopset.bin unreadable");
@@ -203,16 +260,17 @@ export function loadSelectiveCorpusArtifact(
 
   // packed shards — structural validation only: every shard file must exist and
   // shard-000 must decode. We do NOT decode all 256 (that is the ~1 GB /
-  // ~4 s cost this runtime removes).
+  // ~4 s cost this runtime removes). Sequential, not parallel — deterministic
+  // first-failure reporting, matching the original loop's order exactly.
   for (let s = 0; s < 256; s++) {
-    const shardFile = join(packDir, `shard-${String(s).padStart(3, "0")}.bin`);
-    if (!existsSync(shardFile)) {
+    const shardKey = `${packPrefix}/shard-${String(s).padStart(3, "0")}.bin`;
+    if (!(await storage.objectExists(shardKey))) {
       throw new SelectiveCorpusArtifactError("MISSING", `packed/shard-${String(s).padStart(3, "0")}.bin not found`);
     }
   }
   let smoke: Uint8Array;
   try {
-    smoke = new Uint8Array(readFileSync(join(packDir, "shard-000.bin")));
+    smoke = await storage.readObject(`${packPrefix}/shard-000.bin`);
   } catch {
     throw new SelectiveCorpusArtifactError("CORRUPT", "packed/shard-000.bin unreadable");
   }
@@ -234,8 +292,11 @@ export function loadSelectiveCorpusArtifact(
   if (mode === "in-memory") {
     const map = new Map<string, Uint32Array>();
     try {
+      // Sequential, not parallel — this mode exists solely for the
+      // equivalence test (never the production path), so there is no reason
+      // to risk changing its behavior by parallelizing.
       for (let s = 0; s < 256; s++) {
-        const buf = new Uint8Array(readFileSync(join(packDir, `shard-${String(s).padStart(3, "0")}.bin`)));
+        const buf = await storage.readObject(`${packPrefix}/shard-${String(s).padStart(3, "0")}.bin`);
         if (buf.length < 4) continue;
         const n = readUint32LE(buf, 0);
         const st = { i: 4 };
@@ -258,10 +319,10 @@ export function loadSelectiveCorpusArtifact(
     if (map.size === 0) throw new SelectiveCorpusArtifactError("CORRUPT", "packed shards decoded to zero postings");
     postingsAccessor = new InMemoryPostingsAccessor(map);
   } else {
-    postingsAccessor = new SelectiveCorpusShardReader(packDir, options.hotShards);
+    postingsAccessor = new SelectiveCorpusShardReader(storage, packPrefix, options.hotShards);
   }
 
-  const artifact: SelectiveCorpusArtifact = {
+  return {
     artifactPath,
     corpusVersion: version.corpusVersion,
     corpusDigest: version.corpusIdentityDigest ?? "",
@@ -272,7 +333,6 @@ export function loadSelectiveCorpusArtifact(
     stopHashes,
     docs,
     docByOrdinal,
+    storage,
   };
-  cache.set(cacheKey, artifact);
-  return artifact;
 }

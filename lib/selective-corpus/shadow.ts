@@ -54,9 +54,9 @@ export type RunSelectiveCorpusShadowParams = {
   artifactOverride?: SelectiveCorpusArtifact;
 };
 
-export function runSelectiveCorpusShadow(
+export async function runSelectiveCorpusShadow(
   params: RunSelectiveCorpusShadowParams,
-): SelectiveCorpusShadowResult {
+): Promise<SelectiveCorpusShadowResult> {
   const base = { evaluatorVersion: SELECTIVE_CORPUS_SHADOW_EVALUATOR_VERSION } as const;
 
   if (!isSelectiveCorpusShadowEnabled()) {
@@ -74,7 +74,7 @@ export function runSelectiveCorpusShadow(
         return { state: "ARTIFACT_UNAVAILABLE", failureCode: "MISSING", failureMessage: "no artifact path configured", ...base };
       }
       try {
-        artifact = loadSelectiveCorpusArtifact(path);
+        artifact = await loadSelectiveCorpusArtifact(path);
       } catch (err) {
         if (err instanceof SelectiveCorpusArtifactError) {
           return { state: "ARTIFACT_UNAVAILABLE", failureCode: err.code, failureMessage: err.message, ...base };
@@ -114,13 +114,13 @@ export function runSelectiveCorpusShadow(
 
     // ---- Stage A ----
     const tA0 = performance.now();
-    const stageA = selectiveCorpusStageA(params.canonicalSubmissionText, artifact);
+    const stageA = await selectiveCorpusStageA(params.canonicalSubmissionText, artifact);
     const stageAMs = performance.now() - tA0;
 
     // ---- Stage B: admit each top-K candidate ----
     const tB0 = performance.now();
     let familyGuardActivations = 0;
-    const admittedSpansByKey = new Map<string, ReturnType<typeof admitSelectiveCorpusCandidate>["spans"]>();
+    const admittedSpansByKey = new Map<string, Awaited<ReturnType<typeof admitSelectiveCorpusCandidate>>["spans"]>();
     const rankByKey = new Map<string, number>();
     /** FAMILY_GUARD's own per-source verdict, kept for the Evidence Interpretation
      *  Layer (explanation only — never re-derived, never changes a position). */
@@ -144,9 +144,9 @@ export function runSelectiveCorpusShadow(
           ...base,
         };
       }
-      const ct = loadSelectiveCorpusCandidateText(artifact, cand.ordinal);
+      const ct = await loadSelectiveCorpusCandidateText(artifact, cand.ordinal);
       if (!ct) continue;
-      const res = admitSelectiveCorpusCandidate(params.canonicalSubmissionText, submissionWords, ct.text, artifact);
+      const res = await admitSelectiveCorpusCandidate(params.canonicalSubmissionText, submissionWords, ct.text, artifact);
       if (res.familyGuardActivated) familyGuardActivations += 1;
       if (res.admitted) {
         const key = String(cand.ordinal);

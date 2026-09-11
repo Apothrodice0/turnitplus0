@@ -43,12 +43,12 @@ type SpanFamily = { isBoilerplate: boolean; distinctDocs: number; stopFraction: 
 /** Does the submission span [start,end] recur across >= 3 distinct indexed
  *  documents? Uses artifact fingerprint/index evidence only — no source
  *  labels, no ground truth. Identical to the strict-span-family-final run. */
-function classifySpanFamily(
+async function classifySpanFamily(
   submissionWords: readonly string[],
   start: number,
   end: number,
   artifact: SelectiveCorpusArtifact,
-): SpanFamily {
+): Promise<SpanFamily> {
   const hashes = winnowWordSpanHashes(submissionWords.slice(start, end + 1));
   const n = hashes.length;
   if (n === 0) return { isBoilerplate: false, distinctDocs: 0, stopFraction: 0 };
@@ -63,9 +63,10 @@ function classifySpanFamily(
   if (nonStop.length < SELECTIVE_CORPUS_FAMILY_GUARD.minSpanFingerprints) {
     return { isBoilerplate: false, distinctDocs: 0, stopFraction: +stopFraction.toFixed(3) };
   }
+  // Sequential — same determinism rationale as stage-a.ts's own postings loop.
   const hitByDoc = new Map<number, number>();
   for (const h of nonStop) {
-    const arr = artifact.postingsAccessor.getPostings(h);
+    const arr = await artifact.postingsAccessor.getPostings(h);
     if (!arr) continue;
     for (const ord of arr) hitByDoc.set(ord, (hitByDoc.get(ord) ?? 0) + 1);
   }
@@ -79,12 +80,12 @@ function classifySpanFamily(
   };
 }
 
-export function admitSelectiveCorpusCandidate(
+export async function admitSelectiveCorpusCandidate(
   submissionText: string,
   submissionWords: readonly string[],
   candidateText: string,
   artifact: SelectiveCorpusArtifact,
-): SelectiveCorpusAdmissionResult {
+): Promise<SelectiveCorpusAdmissionResult> {
   const cmp = compareSubmissionToExternalText(submissionText, candidateText);
   const spans: SelectiveCorpusVerifiedSpan[] = (cmp.matchedPassages ?? [])
     .map((p) => ({ start: p.submittedWordStart | 0, end: p.submittedWordEnd | 0, words: p.matchedWordCount | 0 }))
@@ -113,13 +114,17 @@ export function admitSelectiveCorpusCandidate(
 
   let boilerplateWords = 0;
   let dominantSpanBoilerplate = false;
-  spans.forEach((sp, i) => {
-    const fam = classifySpanFamily(submissionWords, sp.start, sp.end, artifact);
+  // for-of, not .forEach, so each classification can be awaited in order —
+  // spans are already sorted `words desc` above, so index 0 is still the
+  // dominant span exactly as before.
+  for (let i = 0; i < spans.length; i++) {
+    const sp = spans[i];
+    const fam = await classifySpanFamily(submissionWords, sp.start, sp.end, artifact);
     if (fam.isBoilerplate) {
       boilerplateWords += sp.words;
       if (i === 0) dominantSpanBoilerplate = true;
     }
-  });
+  }
   const sourceSpecificWords = totalMatchedWords - boilerplateWords;
 
   if (!dominantSpanBoilerplate) {

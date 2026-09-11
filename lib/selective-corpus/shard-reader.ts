@@ -1,6 +1,5 @@
-import { readFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
 import { SELECTIVE_CORPUS_HOT_SHARD_LRU } from "./constants";
+import { SelectiveCorpusObjectNotFoundError, type SelectiveCorpusStorageAdapter } from "./storage-adapter";
 
 /**
  * Selective Corpus V1 SHADOW slice — file-backed packed-shard reader.
@@ -73,14 +72,6 @@ export type SelectiveCorpusShardFailure = {
   /** getPostings() calls that hit this failed shard before the drain. */
   observations: number;
 };
-
-function fsErrCode(err: unknown): string | undefined {
-  if (err && typeof err === "object" && "code" in err) {
-    const c = (err as { code?: unknown }).code;
-    if (typeof c === "string") return c;
-  }
-  return undefined;
-}
 
 /**
  * Decode one packed shard. THROWS on a structurally corrupt / truncated file
@@ -168,7 +159,8 @@ function decodeShard(buf: Uint8Array): LoadedShard {
 }
 
 export class SelectiveCorpusShardReader {
-  private readonly packedDir: string;
+  private readonly storage: SelectiveCorpusStorageAdapter;
+  private readonly packedPrefix: string;
   private readonly maxShards: number;
   private readonly cache = new Map<number, LoadedShard>(); // insertion-ordered LRU
   /** Per-evaluation ledger of shards that failed to load at query time. Drained
@@ -185,13 +177,16 @@ export class SelectiveCorpusShardReader {
     shardLoadFailures: 0,
   };
 
-  constructor(packedDir: string, maxShards: number = SELECTIVE_CORPUS_HOT_SHARD_LRU) {
-    this.packedDir = packedDir;
+  /** `packedPrefix` is an artifact-relative key prefix (default "packed") —
+   *  never an absolute path; resolved against `storage`'s own root. */
+  constructor(storage: SelectiveCorpusStorageAdapter, packedPrefix: string = "packed", maxShards: number = SELECTIVE_CORPUS_HOT_SHARD_LRU) {
+    this.storage = storage;
+    this.packedPrefix = packedPrefix;
     this.maxShards = Math.max(1, maxShards);
   }
 
-  private shardPath(shard: number): string {
-    return join(this.packedDir, `shard-${String(shard).padStart(3, "0")}.bin`);
+  private shardKey(shard: number): string {
+    return `${this.packedPrefix}/shard-${String(shard).padStart(3, "0")}.bin`;
   }
 
   private recordShardFailure(shard: number, code: SelectiveCorpusShardFailureCode, message: string): void {
@@ -228,7 +223,7 @@ export class SelectiveCorpusShardReader {
    *  reason in the per-evaluation ledger (takeShardFailures). The caller
    *  (getPostings) still returns undefined so Stage A degrades WITHOUT throwing
    *  into the report flow — but the failure is no longer invisible. */
-  private getShard(shard: number): LoadedShard {
+  private async getShard(shard: number): Promise<LoadedShard> {
     const hit = this.cache.get(shard);
     if (hit) {
       this.stats.cacheHits += 1;
@@ -239,8 +234,8 @@ export class SelectiveCorpusShardReader {
     }
 
     // Already observed bad in this drain-window: fail the same way without
-    // re-hitting the disk (a report's hundreds of query hashes would otherwise
-    // re-stat the same missing shard once per hash).
+    // re-hitting storage (a report's hundreds of query hashes would otherwise
+    // re-request the same missing shard once per hash).
     const known = this.shardFailures.get(shard);
     if (known) {
       known.observations += 1;
@@ -248,21 +243,17 @@ export class SelectiveCorpusShardReader {
     }
 
     this.stats.cacheMisses += 1;
-    const path = this.shardPath(shard);
-    if (!existsSync(path)) {
-      this.recordShardFailure(shard, "MISSING", `shard ${shard} absent at query time (removed after artifact initialization)`);
-      throw new Error(`missing shard ${shard}`);
-    }
+    const key = this.shardKey(shard);
     let raw: Uint8Array;
     try {
-      raw = new Uint8Array(readFileSync(path));
+      raw = await this.storage.readObject(key);
     } catch (err) {
-      const code = fsErrCode(err);
-      if (code === "ENOENT") {
-        this.recordShardFailure(shard, "MISSING", `shard ${shard} disappeared between stat and read`);
+      if (err instanceof SelectiveCorpusObjectNotFoundError) {
+        this.recordShardFailure(shard, "MISSING", `shard ${shard} absent at query time (removed after artifact initialization)`);
         throw new Error(`missing shard ${shard}`);
       }
-      this.recordShardFailure(shard, "UNREADABLE", `shard ${shard} unreadable${code ? ` (${code})` : ""}`);
+      const message = err instanceof Error ? err.message : String(err);
+      this.recordShardFailure(shard, "UNREADABLE", `shard ${shard} unreadable (${message})`);
       throw new Error(`unreadable shard ${shard}`);
     }
     this.stats.shardFileReads += 1;
@@ -299,12 +290,12 @@ export class SelectiveCorpusShardReader {
   /** Doc ordinals sharing this exact winnowed fingerprint. undefined when the
    *  hash is not in the packed index (a stop hash, or a hash that never
    *  occurred). Byte-identical to the old Map's `.get(hash)`. */
-  getPostings(hexHash: string): Uint32Array | undefined {
+  async getPostings(hexHash: string): Promise<Uint32Array | undefined> {
     const shard = Number.parseInt(hexHash.slice(0, 2), 16);
     if (!Number.isFinite(shard) || shard < 0 || shard > 255) return undefined;
     let s: LoadedShard;
     try {
-      s = this.getShard(shard);
+      s = await this.getShard(shard);
     } catch {
       // Missing / unreadable / corrupt shard: Stage A still degrades to "no
       // postings for these hashes" (no throw into the report flow), but the
@@ -358,7 +349,8 @@ export class SelectiveCorpusShardReader {
  *  product default. */
 export class InMemoryPostingsAccessor {
   constructor(private readonly map: Map<string, Uint32Array>) {}
-  getPostings(hexHash: string): Uint32Array | undefined {
+  /** async only to satisfy SelectiveCorpusPostingsAccessor — this mode has no I/O to await. */
+  async getPostings(hexHash: string): Promise<Uint32Array | undefined> {
     return this.map.get(hexHash);
   }
   getStats(): SelectiveCorpusShardReaderStats {
@@ -371,7 +363,9 @@ export class InMemoryPostingsAccessor {
 }
 
 export type SelectiveCorpusPostingsAccessor = {
-  getPostings(hexHash: string): Uint32Array | undefined;
+  getPostings(hexHash: string): Promise<Uint32Array | undefined>;
+  /** No I/O — pure in-memory accounting, stays synchronous. */
   getStats(): SelectiveCorpusShardReaderStats;
+  /** No I/O — pure ledger drain, stays synchronous. */
   takeShardFailures(): SelectiveCorpusShardFailure[];
 };

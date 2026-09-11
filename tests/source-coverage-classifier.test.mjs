@@ -38,11 +38,11 @@ function byId(cases, caseId) {
   assert.ok(found, `fixture case "${caseId}" not found`);
   return found;
 }
-function classifyAs(caseId) {
+async function classifyAs(caseId) {
   const fixture = byId(ACADEMIC_SEARCH_FIXTURE_CASES, caseId);
   return classifySourceCoverageCase({ lane: "ACADEMIC_SEARCH", ...fixture });
 }
-function classifySc(caseId) {
+async function classifySc(caseId) {
   const fixture = byId(SELECTIVE_CORPUS_FIXTURE_CASES, caseId);
   return classifySourceCoverageCase({ lane: "SELECTIVE_CORPUS", ...fixture });
 }
@@ -57,65 +57,65 @@ function classifierSourceFiles() {
 // repair changed the discovery/retrieval shape)
 // =====================================================================
 
-test("1. explicit known source absent (academic-search) => SOURCE_ABSENT", () => {
-  const r = classifyAs("as-01-source-absent");
+test("1. explicit known source absent (academic-search) => SOURCE_ABSENT", async () => {
+  const r = await classifyAs("as-01-source-absent");
   assert.equal(r.outcome, "SOURCE_ABSENT");
   assert.equal(r.failureStage, "ground-truth");
   assert.equal(r.verifiedMatchedWordCount, 0);
 });
-test("1b. explicit known source absent (selective-corpus) => SOURCE_ABSENT", () => {
-  const r = classifySc("sc-01-source-absent");
+test("1b. explicit known source absent (selective-corpus) => SOURCE_ABSENT", async () => {
+  const r = await classifySc("sc-01-source-absent");
   assert.equal(r.outcome, "SOURCE_ABSENT");
   assert.equal(r.failureStage, "ground-truth");
   assert.equal(r.verifiedMatchedWordCount, 0);
 });
 
-test("2. expected source not discovered at all => CANDIDATE_MISSED (reasonCode CANDIDATE_NOT_DISCOVERED)", () => {
-  const r = classifyAs("as-02-candidate-missed");
+test("2. expected source not discovered at all => CANDIDATE_MISSED (reasonCode CANDIDATE_NOT_DISCOVERED)", async () => {
+  const r = await classifyAs("as-02-candidate-missed");
   assert.equal(r.outcome, "CANDIDATE_MISSED");
   assert.equal(r.failureStage, "discovery");
   assert.equal(r.reasonCode, "CANDIDATE_NOT_DISCOVERED");
 });
-test("2b. present in artifact but Stage A does not surface it => CANDIDATE_MISSED", () => {
-  const r = classifySc("sc-02-candidate-missed");
+test("2b. present in artifact but Stage A does not surface it => CANDIDATE_MISSED", async () => {
+  const r = await classifySc("sc-02-candidate-missed");
   assert.equal(r.outcome, "CANDIDATE_MISSED");
   assert.equal(r.failureStage, "discovery");
 });
 
-test("3. candidate discovered but text unavailable (network cause) => RETRIEVAL_FAILED", () => {
-  const r = classifyAs("as-03-retrieval-failed");
+test("3. candidate discovered but text unavailable (network cause) => RETRIEVAL_FAILED", async () => {
+  const r = await classifyAs("as-03-retrieval-failed");
   assert.equal(r.outcome, "RETRIEVAL_FAILED");
   assert.equal(r.retrievalSource, "unavailable");
   assert.equal(r.reasonCode, "NETWORK_ERROR");
 });
-test("3b. candidate discovered but text unavailable => RETRIEVAL_FAILED (selective-corpus)", () => {
-  const r = classifySc("sc-03-retrieval-failed");
+test("3b. candidate discovered but text unavailable => RETRIEVAL_FAILED (selective-corpus)", async () => {
+  const r = await classifySc("sc-03-retrieval-failed");
   assert.equal(r.outcome, "RETRIEVAL_FAILED");
 });
 
-test("4. real production extraction-failure signal (httpRetrievalStatus EXTRACTION_FAILED) => EXTRACTION_FAILED, not RETRIEVAL_FAILED", () => {
-  const r = classifyAs("as-04-extraction-failed");
+test("4. real production extraction-failure signal (httpRetrievalStatus EXTRACTION_FAILED) => EXTRACTION_FAILED, not RETRIEVAL_FAILED", async () => {
+  const r = await classifyAs("as-04-extraction-failed");
   assert.equal(r.outcome, "EXTRACTION_FAILED");
   assert.equal(r.failureStage, "extraction");
   assert.equal(r.retrievalSource, "unavailable"); // production nests this INSIDE "unavailable" — confirmed still surfaced as EXTRACTION_FAILED at the outcome level
   assert.equal(r.verifiedMatchedWordCount, 0);
 });
 
-test("5. retrieved usable source but insufficient verified correspondence (academic-search) => MATCHER_FAILED", () => {
-  const r = classifyAs("as-05-matcher-failed");
+test("5. retrieved usable source but insufficient verified correspondence (academic-search) => MATCHER_FAILED", async () => {
+  const r = await classifyAs("as-05-matcher-failed");
   assert.equal(r.outcome, "MATCHER_FAILED");
   assert.equal(r.matcherDiagnostics.ran, true);
   assert.equal(r.verifiedMatchedWordCount, 0);
 });
-test("5b. source text retrieved but strict-span verification fails (selective-corpus) => MATCHER_FAILED", () => {
-  const r = classifySc("sc-05-matcher-failed");
+test("5b. source text retrieved but strict-span verification fails (selective-corpus) => MATCHER_FAILED", async () => {
+  const r = await classifySc("sc-05-matcher-failed");
   assert.equal(r.outcome, "MATCHER_FAILED");
   assert.equal(r.admissionDiagnostics.strictSpanPass, false);
   assert.equal(r.verifiedMatchedWordCount, 0);
 });
 
-test("6. correspondence passes matcher but FAMILY_GUARD blocks authority (stopFraction path) => ADMISSION_OR_ATTRIBUTION_FAILED", () => {
-  const r = classifySc("sc-06-admission-attribution-failed-stopfraction-path");
+test("6. correspondence passes matcher but FAMILY_GUARD blocks authority (stopFraction path) => ADMISSION_OR_ATTRIBUTION_FAILED", async () => {
+  const r = await classifySc("sc-06-admission-attribution-failed-stopfraction-path");
   assert.equal(r.outcome, "ADMISSION_OR_ATTRIBUTION_FAILED");
   assert.equal(r.admissionDiagnostics.strictSpanPass, true);
   assert.equal(r.admissionDiagnostics.familyGuardActivated, true);
@@ -124,32 +124,32 @@ test("6. correspondence passes matcher but FAMILY_GUARD blocks authority (stopFr
   assert.equal(r.verifiedMatchedWordCount, 0);
 });
 
-test("7. academic source successfully verified => VERIFIED_RECOVERED", () => {
-  const r = classifyAs("as-06-verified-recovered");
+test("7. academic source successfully verified => VERIFIED_RECOVERED", async () => {
+  const r = await classifyAs("as-06-verified-recovered");
   assert.equal(r.outcome, "VERIFIED_RECOVERED");
   assert.ok(r.verifiedMatchedWordCount > 0);
 });
-test("8. selective-corpus source successfully verified => VERIFIED_RECOVERED", () => {
-  const r = classifySc("sc-08-verified-recovered");
+test("8. selective-corpus source successfully verified => VERIFIED_RECOVERED", async () => {
+  const r = await classifySc("sc-08-verified-recovered");
   assert.equal(r.outcome, "VERIFIED_RECOVERED");
   assert.equal(r.admissionDiagnostics.admitted, true);
   assert.ok(r.verifiedMatchedWordCount > 0);
 });
 
-test("9. no candidate without explicit absence proof MUST NOT become SOURCE_ABSENT (academic-search)", () => {
-  const r = classifyAs("as-09-no-candidate-not-absent");
+test("9. no candidate without explicit absence proof MUST NOT become SOURCE_ABSENT (academic-search)", async () => {
+  const r = await classifyAs("as-09-no-candidate-not-absent");
   assert.notEqual(r.outcome, "SOURCE_ABSENT");
   assert.equal(r.outcome, "CANDIDATE_MISSED");
 });
-test("9b. no candidate without explicit absence proof MUST NOT become SOURCE_ABSENT (selective-corpus)", () => {
-  const r = classifySc("sc-09-no-candidate-not-absent");
+test("9b. no candidate without explicit absence proof MUST NOT become SOURCE_ABSENT (selective-corpus)", async () => {
+  const r = await classifySc("sc-09-no-candidate-not-absent");
   assert.notEqual(r.outcome, "SOURCE_ABSENT");
   assert.equal(r.outcome, "CANDIDATE_MISSED");
 });
-test("9c. SOURCE_ABSENT is unreachable without a groundTruthAbsent field, across every non-absent fixture", () => {
+test("9c. SOURCE_ABSENT is unreachable without a groundTruthAbsent field, across every non-absent fixture", async () => {
   for (const c of ALL_FIXTURE_CASES) {
     if (c.groundTruthAbsent) continue;
-    const r = classifySourceCoverageCase(c);
+    const r = await classifySourceCoverageCase(c);
     assert.notEqual(r.outcome, "SOURCE_ABSENT", `case "${c.caseId}" produced SOURCE_ABSENT without ground truth`);
   }
 });
@@ -158,16 +158,16 @@ test("9c. SOURCE_ABSENT is unreachable without a groundTruthAbsent field, across
 // 10-11: verifiedMatchedWordCount exactness (post span-validation repair)
 // =====================================================================
 
-test("10. verifiedMatchedWordCount exactly reconciles matcher positions for a recovered academic-search fixture", () => {
-  const r = classifyAs("as-06-verified-recovered");
+test("10. verifiedMatchedWordCount exactly reconciles matcher positions for a recovered academic-search fixture", async () => {
+  const r = await classifyAs("as-06-verified-recovered");
   const spans = r.diagnostics.comparison.matchedPassages.map((p) => ({ start: p.submittedWordStart, end: p.submittedWordEnd }));
   const expected = unionVerifiedWordCount(spans, MANUSCRIPT_WORD_COUNT);
   assert.equal(r.verifiedMatchedWordCount, expected);
   assert.ok(expected > 0);
   assert.equal(r.matcherDiagnostics.rawMatchedWordCount, r.verifiedMatchedWordCount);
 });
-test("10b. verifiedMatchedWordCount exactly reconciles admitted spans for a recovered selective-corpus fixture", () => {
-  const r = classifySc("sc-08-verified-recovered");
+test("10b. verifiedMatchedWordCount exactly reconciles admitted spans for a recovered selective-corpus fixture", async () => {
+  const r = await classifySc("sc-08-verified-recovered");
   const admittedSpans = r.diagnostics.admission.spans;
   const expected = unionVerifiedWordCount(admittedSpans.map((s) => ({ start: s.start, end: s.end })), MANUSCRIPT_WORD_COUNT);
   assert.equal(r.verifiedMatchedWordCount, expected);
@@ -207,14 +207,14 @@ test("11d. a span exactly at the last valid index (end === manuscriptWordCount -
 // 12-13: lane isolation
 // =====================================================================
 
-test("12. an academic-search fixture is never evaluated with Selective Corpus's 60/25 policy", () => {
-  const r = classifyAs("as-12-lane-isolation-40-words");
+test("12. an academic-search fixture is never evaluated with Selective Corpus's 60/25 policy", async () => {
+  const r = await classifyAs("as-12-lane-isolation-40-words");
   assert.equal(r.outcome, "VERIFIED_RECOVERED");
   assert.ok(r.matcherDiagnostics.similarity >= DEFAULT_ACADEMIC_SEARCH_RUN_CONFIG.minEvidenceSimilarity);
   assert.ok(r.verifiedMatchedWordCount < SELECTIVE_CORPUS_STRICT_SPAN.minMatchedWords, "sanity: below the Selective Corpus STRICT_SPAN word floor");
 });
-test("13. a Selective Corpus fixture is not misclassified using academic-search-only semantics", () => {
-  const r = classifySc("sc-13-lane-isolation-40-words");
+test("13. a Selective Corpus fixture is not misclassified using academic-search-only semantics", async () => {
+  const r = await classifySc("sc-13-lane-isolation-40-words");
   assert.equal(r.outcome, "MATCHER_FAILED");
   assert.equal(r.admissionDiagnostics.strictSpanPass, false);
 });
@@ -223,12 +223,12 @@ test("13. a Selective Corpus fixture is not misclassified using academic-search-
 // Repair item 1 (B1): real academic extraction-failure semantics
 // =====================================================================
 
-test("B1a. httpRetrievalStatus EXTRACTION_FAILED classifies as EXTRACTION_FAILED, not RETRIEVAL_FAILED", () => {
-  const r = classifyAs("as-04-extraction-failed");
+test("B1a. httpRetrievalStatus EXTRACTION_FAILED classifies as EXTRACTION_FAILED, not RETRIEVAL_FAILED", async () => {
+  const r = await classifyAs("as-04-extraction-failed");
   assert.equal(r.outcome, "EXTRACTION_FAILED");
 });
-test("B1b. HTTP_ERROR (a non-extraction unavailable status) classifies as RETRIEVAL_FAILED", () => {
-  const r = classifySourceCoverageCase({
+test("B1b. HTTP_ERROR (a non-extraction unavailable status) classifies as RETRIEVAL_FAILED", async () => {
+  const r = await classifySourceCoverageCase({
     lane: "ACADEMIC_SEARCH", caseId: "b1b-http-error", expectedSourceId: "x", submittedText: SUBMISSION_TEXT,
     discovery: { status: "SELECTED_FOR_RETRIEVAL", candidateRank: 0 },
     retrieval: { source: "unavailable", httpRetrievalStatus: "HTTP_ERROR" },
@@ -236,28 +236,28 @@ test("B1b. HTTP_ERROR (a non-extraction unavailable status) classifies as RETRIE
   assert.equal(r.outcome, "RETRIEVAL_FAILED");
   assert.equal(r.reasonCode, "HTTP_ERROR");
 });
-test("B1c. TIMEOUT classifies as RETRIEVAL_FAILED", () => {
-  const r = classifySourceCoverageCase({
+test("B1c. TIMEOUT classifies as RETRIEVAL_FAILED", async () => {
+  const r = await classifySourceCoverageCase({
     lane: "ACADEMIC_SEARCH", caseId: "b1c-timeout", expectedSourceId: "x", submittedText: SUBMISSION_TEXT,
     discovery: { status: "SELECTED_FOR_RETRIEVAL", candidateRank: 0 },
     retrieval: { source: "unavailable", httpRetrievalStatus: "TIMEOUT" },
   });
   assert.equal(r.outcome, "RETRIEVAL_FAILED");
 });
-test("B1d. NETWORK_ERROR classifies as RETRIEVAL_FAILED", () => {
-  const r = classifyAs("as-03-retrieval-failed");
+test("B1d. NETWORK_ERROR classifies as RETRIEVAL_FAILED", async () => {
+  const r = await classifyAs("as-03-retrieval-failed");
   assert.equal(r.outcome, "RETRIEVAL_FAILED");
 });
-test("B1e. NO_CONTENT classifies as RETRIEVAL_FAILED", () => {
-  const r = classifySourceCoverageCase({
+test("B1e. NO_CONTENT classifies as RETRIEVAL_FAILED", async () => {
+  const r = await classifySourceCoverageCase({
     lane: "ACADEMIC_SEARCH", caseId: "b1e-no-content", expectedSourceId: "x", submittedText: SUBMISSION_TEXT,
     discovery: { status: "SELECTED_FOR_RETRIEVAL", candidateRank: 0 },
     retrieval: { source: "unavailable", httpRetrievalStatus: "NO_CONTENT" },
   });
   assert.equal(r.outcome, "RETRIEVAL_FAILED");
 });
-test("B1f. unavailable with no httpRetrievalStatus at all (no candidate URL) still classifies as RETRIEVAL_FAILED", () => {
-  const r = classifyAs("as-03b-retrieval-failed-no-http-status");
+test("B1f. unavailable with no httpRetrievalStatus at all (no candidate URL) still classifies as RETRIEVAL_FAILED", async () => {
+  const r = await classifyAs("as-03b-retrieval-failed-no-http-status");
   assert.equal(r.outcome, "RETRIEVAL_FAILED");
   assert.equal(r.reasonCode, "TEXT_RETRIEVAL_UNAVAILABLE");
 });
@@ -272,18 +272,18 @@ test("B2a. academic-search-lane.ts imports the canonical config and never assign
   assert.doesNotMatch(source, /minEvidenceSimilarity\s*[:=]\s*\d/, "must not assign the threshold to a locally-duplicated numeric literal");
   assert.doesNotMatch(source, /ACADEMIC_SEARCH_MIN_EVIDENCE_SIMILARITY/, "the old duplicated constant must be fully removed");
 });
-test("B2b. the classification boundary tracks the real, live DEFAULT_ACADEMIC_SEARCH_RUN_CONFIG.minEvidenceSimilarity value", () => {
+test("B2b. the classification boundary tracks the real, live DEFAULT_ACADEMIC_SEARCH_RUN_CONFIG.minEvidenceSimilarity value", async () => {
   assert.equal(DEFAULT_ACADEMIC_SEARCH_RUN_CONFIG.minEvidenceSimilarity, 15); // pins the assumption the rest of this suite relies on
-  const r = classifyAs("as-06-verified-recovered");
+  const r = await classifyAs("as-06-verified-recovered");
   assert.ok(r.matcherDiagnostics.similarity >= DEFAULT_ACADEMIC_SEARCH_RUN_CONFIG.minEvidenceSimilarity);
   assert.equal(r.outcome, "VERIFIED_RECOVERED");
 });
-test("B2c. importing the canonical academic-search config triggers no network call, at import or classification time", () => {
+test("B2c. importing the canonical academic-search config triggers no network call, at import or classification time", async () => {
   const originalFetch = globalThis.fetch;
   let called = false;
   globalThis.fetch = () => { called = true; throw new Error("network call attempted"); };
   try {
-    for (const c of ACADEMIC_SEARCH_FIXTURE_CASES) classifyAs(c.caseId);
+    for (const c of ACADEMIC_SEARCH_FIXTURE_CASES) await classifyAs(c.caseId);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -294,14 +294,14 @@ test("B2c. importing the canonical academic-search config triggers no network ca
 // Repair item 3: ranked-outside-retrieval-budget representation
 // =====================================================================
 
-test("3-budget. expected candidate not discovered at all => CANDIDATE_MISSED / CANDIDATE_NOT_DISCOVERED", () => {
-  const r = classifyAs("as-02-candidate-missed");
+test("3-budget. expected candidate not discovered at all => CANDIDATE_MISSED / CANDIDATE_NOT_DISCOVERED", async () => {
+  const r = await classifyAs("as-02-candidate-missed");
   assert.equal(r.outcome, "CANDIDATE_MISSED");
   assert.equal(r.reasonCode, "CANDIDATE_NOT_DISCOVERED");
   assert.equal(r.candidateRank, null);
 });
-test("3-budget2. expected candidate discovered and ranked but outside maxCandidatesToRetrieve => CANDIDATE_MISSED / RANKED_OUTSIDE_RETRIEVAL_BUDGET, distinct reasonCode and a real candidateRank", () => {
-  const r = classifyAs("as-02b-ranked-outside-retrieval-budget");
+test("3-budget2. expected candidate discovered and ranked but outside maxCandidatesToRetrieve => CANDIDATE_MISSED / RANKED_OUTSIDE_RETRIEVAL_BUDGET, distinct reasonCode and a real candidateRank", async () => {
+  const r = await classifyAs("as-02b-ranked-outside-retrieval-budget");
   assert.equal(r.outcome, "CANDIDATE_MISSED");
   assert.equal(r.reasonCode, "RANKED_OUTSIDE_RETRIEVAL_BUDGET");
   assert.equal(r.candidateRank, 7);
@@ -311,44 +311,47 @@ test("3-budget2. expected candidate discovered and ranked but outside maxCandida
 // =====================================================================
 // Repair item 5: contradictory diagnostic states fail closed
 // =====================================================================
+// classifySourceCoverageCase is now async, so even a synchronous
+// assertConsistentInput() throw inside it surfaces as a REJECTED promise,
+// never a synchronous throw — assert.rejects, not assert.throws.
 
-test("5-contra. academic-search: groundTruthAbsent + discovered is rejected", () => {
-  assert.throws(() => classifySourceCoverageCase({
+test("5-contra. academic-search: groundTruthAbsent + discovered is rejected", async () => {
+  await assert.rejects(() => classifySourceCoverageCase({
     lane: "ACADEMIC_SEARCH", caseId: "bad-as-1", expectedSourceId: "x", submittedText: SUBMISSION_TEXT,
     groundTruthAbsent: { reasonCode: "X", detail: "X" },
     discovery: { status: "SELECTED_FOR_RETRIEVAL", candidateRank: 0 },
     retrieval: { source: "provider" }, retrievedExternalText: "foo bar baz",
   }), SourceCoverageInputError);
 });
-test("5-contra2. academic-search: SELECTED_FOR_RETRIEVAL without a retrieval outcome is rejected", () => {
-  assert.throws(() => classifySourceCoverageCase({
+test("5-contra2. academic-search: SELECTED_FOR_RETRIEVAL without a retrieval outcome is rejected", async () => {
+  await assert.rejects(() => classifySourceCoverageCase({
     lane: "ACADEMIC_SEARCH", caseId: "bad-as-2", expectedSourceId: "x", submittedText: SUBMISSION_TEXT,
     discovery: { status: "SELECTED_FOR_RETRIEVAL", candidateRank: 0 },
   }), SourceCoverageInputError);
 });
-test("5-contra3. academic-search: retrieval unavailable + retrievedExternalText also supplied is rejected", () => {
-  assert.throws(() => classifySourceCoverageCase({
+test("5-contra3. academic-search: retrieval unavailable + retrievedExternalText also supplied is rejected", async () => {
+  await assert.rejects(() => classifySourceCoverageCase({
     lane: "ACADEMIC_SEARCH", caseId: "bad-as-3", expectedSourceId: "x", submittedText: SUBMISSION_TEXT,
     discovery: { status: "SELECTED_FOR_RETRIEVAL", candidateRank: 0 },
     retrieval: { source: "unavailable" }, retrievedExternalText: "foo bar baz",
   }), SourceCoverageInputError);
 });
-test("5-contra4. academic-search: retrieval succeeded but no retrievedExternalText is rejected", () => {
-  assert.throws(() => classifySourceCoverageCase({
+test("5-contra4. academic-search: retrieval succeeded but no retrievedExternalText is rejected", async () => {
+  await assert.rejects(() => classifySourceCoverageCase({
     lane: "ACADEMIC_SEARCH", caseId: "bad-as-4", expectedSourceId: "x", submittedText: SUBMISSION_TEXT,
     discovery: { status: "SELECTED_FOR_RETRIEVAL", candidateRank: 0 },
     retrieval: { source: "provider" },
   }), SourceCoverageInputError);
 });
-test("5-contra5. academic-search: retrieval supplied for a not-discovered candidate is rejected", () => {
-  assert.throws(() => classifySourceCoverageCase({
+test("5-contra5. academic-search: retrieval supplied for a not-discovered candidate is rejected", async () => {
+  await assert.rejects(() => classifySourceCoverageCase({
     lane: "ACADEMIC_SEARCH", caseId: "bad-as-5", expectedSourceId: "x", submittedText: SUBMISSION_TEXT,
     discovery: { status: "NOT_DISCOVERED" },
     retrieval: { source: "unavailable" },
   }), SourceCoverageInputError);
 });
-test("5-contra6. selective-corpus: groundTruthAbsent + surfaced is rejected", () => {
-  assert.throws(() => classifySourceCoverageCase({
+test("5-contra6. selective-corpus: groundTruthAbsent + surfaced is rejected", async () => {
+  await assert.rejects(() => classifySourceCoverageCase({
     lane: "SELECTIVE_CORPUS", caseId: "bad-sc-1", expectedSourceId: "x", submissionText: SUBMISSION_TEXT,
     groundTruthAbsent: { reasonCode: "X", detail: "X" },
     stageA: { surfaced: true, candidateRank: 0 },
@@ -356,35 +359,35 @@ test("5-contra6. selective-corpus: groundTruthAbsent + surfaced is rejected", ()
     artifact: buildEmptyFixtureArtifact(),
   }), SourceCoverageInputError);
 });
-test("5-contra7. selective-corpus: surfaced without a sourceText outcome is rejected", () => {
-  assert.throws(() => classifySourceCoverageCase({
+test("5-contra7. selective-corpus: surfaced without a sourceText outcome is rejected", async () => {
+  await assert.rejects(() => classifySourceCoverageCase({
     lane: "SELECTIVE_CORPUS", caseId: "bad-sc-2", expectedSourceId: "x", submissionText: SUBMISSION_TEXT,
     stageA: { surfaced: true, candidateRank: 0 },
   }), SourceCoverageInputError);
 });
-test("5-contra8. selective-corpus: sourceText.available true but no text supplied is rejected", () => {
-  assert.throws(() => classifySourceCoverageCase({
+test("5-contra8. selective-corpus: sourceText.available true but no text supplied is rejected", async () => {
+  await assert.rejects(() => classifySourceCoverageCase({
     lane: "SELECTIVE_CORPUS", caseId: "bad-sc-3", expectedSourceId: "x", submissionText: SUBMISSION_TEXT,
     stageA: { surfaced: true, candidateRank: 0 },
     sourceText: { available: true },
   }), SourceCoverageInputError);
 });
-test("5-contra9. selective-corpus: sourceText.available true but no artifact supplied is rejected", () => {
-  assert.throws(() => classifySourceCoverageCase({
+test("5-contra9. selective-corpus: sourceText.available true but no artifact supplied is rejected", async () => {
+  await assert.rejects(() => classifySourceCoverageCase({
     lane: "SELECTIVE_CORPUS", caseId: "bad-sc-4", expectedSourceId: "x", submissionText: SUBMISSION_TEXT,
     stageA: { surfaced: true, candidateRank: 0 },
     sourceText: { available: true, text: "foo bar baz" },
   }), SourceCoverageInputError);
 });
-test("5-contra10. selective-corpus: sourceText/artifact supplied for a not-surfaced candidate is rejected", () => {
-  assert.throws(() => classifySourceCoverageCase({
+test("5-contra10. selective-corpus: sourceText/artifact supplied for a not-surfaced candidate is rejected", async () => {
+  await assert.rejects(() => classifySourceCoverageCase({
     lane: "SELECTIVE_CORPUS", caseId: "bad-sc-5", expectedSourceId: "x", submissionText: SUBMISSION_TEXT,
     stageA: { surfaced: false, candidateRank: null },
     sourceText: { available: false },
   }), SourceCoverageInputError);
 });
-test("5-contra11. SOURCE_ABSENT is unaffected by the new validation layer — still requires explicit ground truth only", () => {
-  const r = classifyAs("as-01-source-absent");
+test("5-contra11. SOURCE_ABSENT is unaffected by the new validation layer — still requires explicit ground truth only", async () => {
+  const r = await classifyAs("as-01-source-absent");
   assert.equal(r.outcome, "SOURCE_ABSENT");
 });
 
@@ -392,14 +395,14 @@ test("5-contra11. SOURCE_ABSENT is unaffected by the new validation layer — st
 // Repair item 6: both real FAMILY_GUARD paths
 // =====================================================================
 
-test("6a. FAMILY_GUARD stopFraction path => ADMISSION_OR_ATTRIBUTION_FAILED after strict-span passes", () => {
-  const r = classifySc("sc-06-admission-attribution-failed-stopfraction-path");
+test("6a. FAMILY_GUARD stopFraction path => ADMISSION_OR_ATTRIBUTION_FAILED after strict-span passes", async () => {
+  const r = await classifySc("sc-06-admission-attribution-failed-stopfraction-path");
   assert.equal(r.outcome, "ADMISSION_OR_ATTRIBUTION_FAILED");
   assert.equal(r.admissionDiagnostics.strictSpanPass, true);
   assert.equal(r.admissionDiagnostics.familyGuardActivated, true);
 });
-test("6b. FAMILY_GUARD postings (distinctDocs>=3) path => ADMISSION_OR_ATTRIBUTION_FAILED after strict-span passes, using only local in-memory postings", () => {
-  const r = classifySc("sc-06b-admission-attribution-failed-postings-path");
+test("6b. FAMILY_GUARD postings (distinctDocs>=3) path => ADMISSION_OR_ATTRIBUTION_FAILED after strict-span passes, using only local in-memory postings", async () => {
+  const r = await classifySc("sc-06b-admission-attribution-failed-postings-path");
   assert.equal(r.outcome, "ADMISSION_OR_ATTRIBUTION_FAILED");
   assert.equal(r.admissionDiagnostics.strictSpanPass, true);
   assert.equal(r.admissionDiagnostics.familyGuardActivated, true);
@@ -416,8 +419,8 @@ test("6c. the two FAMILY_GUARD fixtures exercise genuinely different artifact me
 // Repair item 7: remaining missing negative tests
 // =====================================================================
 
-test("7a. selective-corpus matcherDiagnostics.similarity is honestly null — the real admission result does not expose it", () => {
-  const r = classifySc("sc-08-verified-recovered");
+test("7a. selective-corpus matcherDiagnostics.similarity is honestly null — the real admission result does not expose it", async () => {
+  const r = await classifySc("sc-08-verified-recovered");
   assert.equal(r.matcherDiagnostics.similarity, null);
   assert.equal(r.matcherDiagnostics.strongMatch, null);
   assert.equal(r.matcherDiagnostics.exactMatch, null);
@@ -426,9 +429,9 @@ test("7b. ADMISSION_OR_ATTRIBUTION_FAILED is structurally absent from academic-s
   const source = readFileSync(join(CLASSIFIER_DIR, "academic-search-lane.ts"), "utf8");
   assert.doesNotMatch(source, /ADMISSION_OR_ATTRIBUTION_FAILED/);
 });
-test("7c. no academic-search fixture ever produces ADMISSION_OR_ATTRIBUTION_FAILED (behavioral confirmation)", () => {
+test("7c. no academic-search fixture ever produces ADMISSION_OR_ATTRIBUTION_FAILED (behavioral confirmation)", async () => {
   for (const c of ACADEMIC_SEARCH_FIXTURE_CASES) {
-    const r = classifySourceCoverageCase({ lane: "ACADEMIC_SEARCH", ...c });
+    const r = await classifySourceCoverageCase({ lane: "ACADEMIC_SEARCH", ...c });
     assert.notEqual(r.outcome, "ADMISSION_OR_ATTRIBUTION_FAILED");
   }
 });
@@ -437,12 +440,12 @@ test("7c. no academic-search fixture ever produces ADMISSION_OR_ATTRIBUTION_FAIL
 // Structural safety
 // =====================================================================
 
-test("structural: classifier performs no network calls across every fixture case", () => {
+test("structural: classifier performs no network calls across every fixture case", async () => {
   const originalFetch = globalThis.fetch;
   let called = false;
   globalThis.fetch = () => { called = true; throw new Error("network call attempted"); };
   try {
-    for (const c of ALL_FIXTURE_CASES) classifySourceCoverageCase(c);
+    for (const c of ALL_FIXTURE_CASES) await classifySourceCoverageCase(c);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -519,14 +522,14 @@ test("structural: no source file writes or references a C: path", () => {
   }
 });
 
-test("structural: classifier does not mutate the frozen matcher/admission constants", () => {
+test("structural: classifier does not mutate the frozen matcher/admission constants", async () => {
   const before = {
     correspondence: JSON.stringify(DEFAULT_DOCUMENT_CORRESPONDENCE_THRESHOLDS),
     strictSpan: JSON.stringify(SELECTIVE_CORPUS_STRICT_SPAN),
     familyGuard: JSON.stringify(SELECTIVE_CORPUS_FAMILY_GUARD),
     academicSearchConfig: JSON.stringify(DEFAULT_ACADEMIC_SEARCH_RUN_CONFIG),
   };
-  for (const c of ALL_FIXTURE_CASES) classifySourceCoverageCase(c);
+  for (const c of ALL_FIXTURE_CASES) await classifySourceCoverageCase(c);
   assert.equal(JSON.stringify(DEFAULT_DOCUMENT_CORRESPONDENCE_THRESHOLDS), before.correspondence);
   assert.equal(JSON.stringify(SELECTIVE_CORPUS_STRICT_SPAN), before.strictSpan);
   assert.equal(JSON.stringify(SELECTIVE_CORPUS_FAMILY_GUARD), before.familyGuard);
@@ -538,8 +541,10 @@ test("structural: refuses to write outside D:", () => {
   assert.doesNotThrow(() => assertWithinAllowedDrive("D:\\TurnitPlusTemp\\source-coverage-classifier\\out.json"));
 });
 
-test("structural: every fixture case is fully deterministic (identical classification across repeated runs)", () => {
-  const first = ALL_FIXTURE_CASES.map((c) => JSON.stringify(classifySourceCoverageCase(c)));
-  const second = ALL_FIXTURE_CASES.map((c) => JSON.stringify(classifySourceCoverageCase(c)));
+test("structural: every fixture case is fully deterministic (identical classification across repeated runs)", async () => {
+  const first = [];
+  for (const c of ALL_FIXTURE_CASES) first.push(JSON.stringify(await classifySourceCoverageCase(c)));
+  const second = [];
+  for (const c of ALL_FIXTURE_CASES) second.push(JSON.stringify(await classifySourceCoverageCase(c)));
   assert.deepEqual(first, second);
 });

@@ -29,7 +29,7 @@ export async function runSelectiveCorpusShadowEvaluation(params: {
     return { state: "DISABLED", evaluatorVersion: "selective-corpus-shadow-v1" };
   }
   try {
-    const result = runSelectiveCorpusShadow({
+    const result = await runSelectiveCorpusShadow({
       canonicalSubmissionText: params.rawText,
       authoritative: params.authoritativeUnifiedSimilarity
         ? {

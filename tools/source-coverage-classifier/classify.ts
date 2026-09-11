@@ -7,7 +7,7 @@ export type SourceCoverageCaseInput =
   | ({ lane: "ACADEMIC_SEARCH" } & AcademicSearchCaseInput)
   | ({ lane: "SELECTIVE_CORPUS" } & SelectiveCorpusCaseInput);
 
-export function classifySourceCoverageCase(input: SourceCoverageCaseInput): SourceCoverageClassification {
+export async function classifySourceCoverageCase(input: SourceCoverageCaseInput): Promise<SourceCoverageClassification> {
   if (input.lane === "ACADEMIC_SEARCH") return classifyAcademicSearchCase(input);
   return classifySelectiveCorpusCase(input);
 }

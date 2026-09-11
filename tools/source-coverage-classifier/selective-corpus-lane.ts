@@ -96,7 +96,7 @@ function assertConsistentInput(input: SelectiveCorpusCaseInput): void {
   }
 }
 
-export function classifySelectiveCorpusCase(input: SelectiveCorpusCaseInput): SourceCoverageClassification {
+export async function classifySelectiveCorpusCase(input: SelectiveCorpusCaseInput): Promise<SourceCoverageClassification> {
   assertConsistentInput(input);
 
   const caseId = input.caseId;
@@ -156,7 +156,7 @@ export function classifySelectiveCorpusCase(input: SelectiveCorpusCaseInput): So
 
   // The REAL, frozen Stage B: the unmodified comparator + STRICT_SPAN + FAMILY_GUARD.
   const submissionWords = selectiveCorpusSubmissionWords(input.submissionText);
-  const admission = admitSelectiveCorpusCandidate(input.submissionText, submissionWords, sourceTextValue, artifact);
+  const admission = await admitSelectiveCorpusCandidate(input.submissionText, submissionWords, sourceTextValue, artifact);
 
   const admissionDiagnostics: AdmissionDiagnosticsSummary = {
     admitted: admission.admitted,

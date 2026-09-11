@@ -28,14 +28,18 @@ const present = (() => {
   }
 })();
 
-function withEnv(env, fn) {
+// async-safe: the finally block must only run AFTER an async `fn` resolves,
+// or env vars restore before the awaited work inside `fn` actually finishes.
+async function withEnv(env, fn) {
   const saved = {};
   for (const k of Object.keys(env)) {
     saved[k] = process.env[k];
     if (env[k] === undefined) delete process.env[k];
     else process.env[k] = env[k];
   }
-  try { return fn(); } finally {
+  try {
+    return await fn();
+  } finally {
     for (const k of Object.keys(saved)) {
       if (saved[k] === undefined) delete process.env[k];
       else process.env[k] = saved[k];
@@ -213,10 +217,10 @@ test("counts object never carries a COMMON_* key", () => {
 // ── integration: frozen Track_C ──────────────────────────────────────────
 const dev = present ? JSON.parse(readFileSync(join(TRACKC, "track-c-dev.json"), "utf8")) : { cases: [] };
 
-function frozenInterpret(caseId, { skipHost = true } = {}) {
+async function frozenInterpret(caseId, { skipHost = true } = {}) {
   const raw = readFileSync(join(TRACKC, "track-c", "submissions", `${caseId}.txt`), "utf8");
   clearSelectiveCorpusArtifactCache();
-  const artifact = loadSelectiveCorpusArtifact(ARTIFACT);
+  const artifact = await loadSelectiveCorpusArtifact(ARTIFACT);
   const rawToOrd = new Map();
   for (const d of artifact.docs) {
     rawToOrd.set(d.rawId, d.ordinal);
@@ -226,13 +230,13 @@ function frozenInterpret(caseId, { skipHost = true } = {}) {
   const c = dev.cases.find((x) => x.caseId === caseId);
   const hostOrd = rawToOrd.get(c.hostDocId);
   const words = tokens(raw);
-  const stageA = selectiveCorpusStageA(raw, artifact);
+  const stageA = await selectiveCorpusStageA(raw, artifact);
   const sources = [];
   for (const cand of stageA.topK) {
     if (skipHost && cand.ordinal === hostOrd) continue;
-    const ct = loadSelectiveCorpusCandidateText(artifact, cand.ordinal);
+    const ct = await loadSelectiveCorpusCandidateText(artifact, cand.ordinal);
     if (!ct) continue;
-    const res = admitSelectiveCorpusCandidate(raw, words, ct.text, artifact);
+    const res = await admitSelectiveCorpusCandidate(raw, words, ct.text, artifact);
     if (!res.admitted) continue;
     const pos = new Set();
     for (const s of res.spans) for (let i = s.start; i <= s.end; i += 1) pos.add(i);
@@ -249,12 +253,12 @@ function frozenInterpret(caseId, { skipHost = true } = {}) {
   return { r, sources };
 }
 
-test("Track_C: the 5 quotation-controlled cases all classify as ATTRIBUTED_QUOTATION", { skip: !present }, () => {
+test("Track_C: the 5 quotation-controlled cases all classify as ATTRIBUTED_QUOTATION", { skip: !present }, async () => {
   let hits = 0;
   for (const id of ["tcx-029", "tcx-030", "tcx-031", "tcx-032", "tcx-033"]) {
     const c = dev.cases.find((x) => x.caseId === id);
     const [gs, ge] = c.groundTruth[0].submissionSpanWords;
-    const { r, sources } = withEnv({ SELECTIVE_CORPUS_FIXTURE_PATH: TRACKC }, () => frozenInterpret(id));
+    const { r, sources } = await withEnv({ SELECTIVE_CORPUS_FIXTURE_PATH: TRACKC }, () => frozenInterpret(id));
     // the source carrying the copied quotation is the one whose spans land in
     // the ground-truth copied region (robust to the bulk corpus re-crawling the
     // expected source under a different id).
@@ -269,16 +273,16 @@ test("Track_C: the 5 quotation-controlled cases all classify as ATTRIBUTED_QUOTA
   assert.equal(hits, 5);
 });
 
-test("Track_C tcx-017: the alternate Wikipedia source is LEGITIMATE_ALTERNATE_SOURCE", { skip: !present }, () => {
-  const { r, sources } = withEnv({ SELECTIVE_CORPUS_FIXTURE_PATH: TRACKC }, () => frozenInterpret("tcx-017"));
+test("Track_C tcx-017: the alternate Wikipedia source is LEGITIMATE_ALTERNATE_SOURCE", { skip: !present }, async () => {
+  const { r, sources } = await withEnv({ SELECTIVE_CORPUS_FIXTURE_PATH: TRACKC }, () => frozenInterpret("tcx-017"));
   const alt = sources.find((s) => s.rawId.replace(/^(bulk|fixture):/, "") === "A-wiki-051");
   assert.ok(alt, "A-wiki-051 admitted");
   const kinds = r.bySource.get(alt.key).map((s) => s.kind);
   assert.ok(kinds.every((k) => k === "LEGITIMATE_ALTERNATE_SOURCE"), `all A-wiki-051 spans are LEGITIMATE_ALTERNATE_SOURCE (${kinds})`);
 });
 
-test("Track_C tcx-004: the FAO source stays ORDINARY verified overlap (DISTINCTIVE) — common-definition deferred", { skip: !present }, () => {
-  const { r, sources } = withEnv({ SELECTIVE_CORPUS_FIXTURE_PATH: TRACKC }, () => frozenInterpret("tcx-004"));
+test("Track_C tcx-004: the FAO source stays ORDINARY verified overlap (DISTINCTIVE) — common-definition deferred", { skip: !present }, async () => {
+  const { r, sources } = await withEnv({ SELECTIVE_CORPUS_FIXTURE_PATH: TRACKC }, () => frozenInterpret("tcx-004"));
   const fao = sources.find((s) => s.rawId.endsWith("B-00235") || s.rawId.endsWith("B-rpt-022"));
   assert.ok(fao, "the FAO source is admitted for tcx-004");
   const kinds = r.bySource.get(fao.key).map((s) => s.kind);
@@ -288,11 +292,11 @@ test("Track_C tcx-004: the FAO source stays ORDINARY verified overlap (DISTINCTI
 });
 
 // ── integration: the shadow result carries a SAFE interpretation breakdown ─
-test("shadow result: interpretationBreakdown is present, safe-labelled, and does not change positions/score", { skip: !present }, () => {
+test("shadow result: interpretationBreakdown is present, safe-labelled, and does not change positions/score", { skip: !present }, async () => {
   const sub = readFileSync(join(TRACKC, "track-c", "submissions", "tcx-029.txt"), "utf8");
   const authoritative = { unifiedScore: 9, matchedPositions: [3, 4, 5] };
   const before = JSON.stringify(authoritative);
-  const r = withEnv({ SELECTIVE_CORPUS_SHADOW_ENABLED: "true", SELECTIVE_CORPUS_ARTIFACT_PATH: ARTIFACT, SELECTIVE_CORPUS_FIXTURE_PATH: TRACKC }, () => {
+  const r = await withEnv({ SELECTIVE_CORPUS_SHADOW_ENABLED: "true", SELECTIVE_CORPUS_ARTIFACT_PATH: ARTIFACT, SELECTIVE_CORPUS_FIXTURE_PATH: TRACKC }, async () => {
     clearSelectiveCorpusArtifactCache();
     return runSelectiveCorpusShadow({ canonicalSubmissionText: sub, authoritative });
   });
@@ -328,9 +332,9 @@ test("shadow result: interpretationBreakdown is present, safe-labelled, and does
   }
 });
 
-test("shadow flag OFF is unchanged by the interpretation layer (immediate DISABLED, no fields)", () => {
-  withEnv({ SELECTIVE_CORPUS_SHADOW_ENABLED: undefined, SELECTIVE_CORPUS_ARTIFACT_PATH: "/nope" }, () => {
-    const r = runSelectiveCorpusShadow({ canonicalSubmissionText: "word ".repeat(400), authoritative: { unifiedScore: 1, matchedPositions: [1] } });
+test("shadow flag OFF is unchanged by the interpretation layer (immediate DISABLED, no fields)", async () => {
+  await withEnv({ SELECTIVE_CORPUS_SHADOW_ENABLED: undefined, SELECTIVE_CORPUS_ARTIFACT_PATH: "/nope" }, async () => {
+    const r = await runSelectiveCorpusShadow({ canonicalSubmissionText: "word ".repeat(400), authoritative: { unifiedScore: 1, matchedPositions: [1] } });
     assert.equal(r.state, "DISABLED");
     assert.equal(r.interpretationCounts, undefined);
     assert.equal(r.interpretationBreakdown, undefined);
