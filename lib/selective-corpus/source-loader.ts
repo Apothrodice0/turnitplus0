@@ -2,6 +2,7 @@ import type { SelectiveCorpusArtifact, SelectiveCorpusDoc } from "./artifact";
 import { getSelectiveCorpusFixturePath } from "./config";
 import { SELECTIVE_CORPUS_SOURCE_TEXT_LRU } from "./constants";
 import { createLocalFilesystemStorageAdapter } from "./storage-adapter";
+import { verifySelectiveCorpusObjectIntegrity } from "./integrity";
 
 /**
  * Selective Corpus V1 SHADOW slice — lazy candidate source-text loader.
@@ -50,8 +51,18 @@ async function loadCandidateTextUncached(
 ): Promise<string | null> {
   const { kind, id } = bareId(doc.rawId);
   if (kind === "bulk") {
+    const key = `raw/${id}.txt`;
     try {
-      const bytes = await artifact.storage.readObject(`raw/${id}.txt`);
+      const bytes = await artifact.storage.readObject(key);
+      // REMOTE/INTEGRITY MODE only (artifact.integrity set): a candidate
+      // whose bytes fail verification, or which has NO manifest entry at
+      // all, can never be trusted as evidence — fail closed exactly like a
+      // missing file (this evaluation skips the candidate; it never
+      // manufactures similarity from unverified bytes). LOCAL COMPATIBILITY
+      // MODE (artifact.integrity undefined) is unaffected.
+      if (artifact.integrity) {
+        verifySelectiveCorpusObjectIntegrity(key, bytes, artifact.integrity);
+      }
       return Buffer.from(bytes).toString("utf8");
     } catch {
       return null;

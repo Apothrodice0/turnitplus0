@@ -105,6 +105,19 @@ export const SELECTIVE_CORPUS_HOT_SHARD_LRU = (() => {
 export const SELECTIVE_CORPUS_SHADOW_EVALUATOR_VERSION = "selective-corpus-shadow-v1";
 
 /**
+ * Default cooldown before a TRANSIENT shard-read failure (see
+ * shard-reader.ts's SelectiveCorpusShardFailureCode) may be retried. PERSISTENT
+ * failure codes (MISSING / UNREADABLE / CORRUPT / INTEGRITY_MISMATCH) ignore
+ * this entirely and are remembered for the reader's whole lifetime, unchanged
+ * from before simulated-remote-storage support. Not currently reachable from
+ * any real adapter (only the local filesystem adapter exists in production;
+ * a remote-like adapter that can raise SelectiveCorpusTransientStorageError is
+ * test-only, see lib/selective-corpus/testing/). Tests inject their own
+ * clock + cooldown for determinism rather than waiting on a real timer.
+ */
+export const SELECTIVE_CORPUS_TRANSIENT_RETRY_COOLDOWN_MS = 2_000;
+
+/**
  * The frozen corpus identity digest the artifact MUST carry. A loaded
  * corpus-version.json whose corpusIdentityDigest differs => the loader fails
  * closed with code "WRONG_DIGEST". Bump only alongside a deliberately

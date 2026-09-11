@@ -25,12 +25,29 @@ import { isAbsolute, relative, resolve } from "node:path";
 /** Thrown by readObject() when the object does not exist — lets every caller
  *  distinguish "missing" from "exists but unreadable/corrupt" without any
  *  adapter-specific error-code sniffing, the same distinction
- *  artifact.ts / shard-reader.ts already made against existsSync/ENOENT. */
+ *  artifact.ts / shard-reader.ts already made against existsSync/ENOENT.
+ *  PERSISTENT: a reader may remember this for its whole lifetime. */
 export class SelectiveCorpusObjectNotFoundError extends Error {
   readonly key: string;
   constructor(key: string) {
     super(`selective-corpus object not found: ${key}`);
     this.name = "SelectiveCorpusObjectNotFoundError";
+    this.key = key;
+  }
+}
+
+/** Thrown by a storage adapter's readObject() for a failure the caller should
+ *  treat as RETRYABLE after a bounded cooldown — e.g. a simulated network
+ *  timeout or a transient upstream hiccup. TRANSIENT: a reader must NOT
+ *  remember this forever (unlike SelectiveCorpusObjectNotFoundError or a
+ *  plain Error), only for a bounded retry-after window. The local-filesystem
+ *  adapter above never throws this — only a remote-like adapter (see
+ *  lib/selective-corpus/testing/simulated-remote-storage-adapter.ts) does. */
+export class SelectiveCorpusTransientStorageError extends Error {
+  readonly key: string;
+  constructor(key: string, message?: string) {
+    super(message ?? `selective-corpus object transiently unavailable: ${key}`);
+    this.name = "SelectiveCorpusTransientStorageError";
     this.key = key;
   }
 }
@@ -60,8 +77,10 @@ function fsErrCode(err: unknown): string | undefined {
 /** Rejects an absolute path, a Windows drive-letter path, or any segment
  *  that would climb above the artifact root — BEFORE the key ever reaches
  *  node:path/node:fs, so a traversal attempt fails the same way regardless
- *  of the host OS's own path-separator quirks. */
-function assertArtifactRelativeKey(key: string): void {
+ *  of the host OS's own path-separator quirks. Exported so other
+ *  artifact-relative-key contracts (e.g. lib/selective-corpus/integrity.ts's
+ *  manifest keys) can reuse the SAME validation instead of duplicating it. */
+export function assertArtifactRelativeKey(key: string): void {
   if (typeof key !== "string" || key.length === 0 || key.includes("\0")) {
     throw new Error(`invalid selective-corpus object key: ${JSON.stringify(key)}`);
   }

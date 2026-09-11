@@ -1,5 +1,14 @@
-import { SELECTIVE_CORPUS_HOT_SHARD_LRU } from "./constants";
-import { SelectiveCorpusObjectNotFoundError, type SelectiveCorpusStorageAdapter } from "./storage-adapter";
+import { SELECTIVE_CORPUS_HOT_SHARD_LRU, SELECTIVE_CORPUS_TRANSIENT_RETRY_COOLDOWN_MS } from "./constants";
+import {
+  SelectiveCorpusObjectNotFoundError,
+  SelectiveCorpusTransientStorageError,
+  type SelectiveCorpusStorageAdapter,
+} from "./storage-adapter";
+import {
+  verifySelectiveCorpusObjectIntegrity,
+  SelectiveCorpusIntegrityMismatchError,
+  type SelectiveCorpusIntegrityManifest,
+} from "./integrity";
 
 /**
  * Selective Corpus V1 SHADOW slice — file-backed packed-shard reader.
@@ -67,7 +76,15 @@ export type SelectiveCorpusShardReaderStats = {
   shardLoadFailures: number;
 };
 
-export type SelectiveCorpusShardFailureCode = "MISSING" | "UNREADABLE" | "CORRUPT";
+/**
+ * MISSING / UNREADABLE / CORRUPT are PERSISTENT — this reader instance
+ * remembers them for its whole lifetime (see `recentFailures` below).
+ * TRANSIENT is the one RETRYABLE code — remembered only until a bounded
+ * cooldown expires (see SelectiveCorpusShardReaderOptions.transientRetryCooldownMs).
+ * INTEGRITY_MISMATCH is PERSISTENT: a byte-length or SHA-256 mismatch against
+ * the artifact's integrity manifest is never assumed to self-correct.
+ */
+export type SelectiveCorpusShardFailureCode = "MISSING" | "UNREADABLE" | "CORRUPT" | "INTEGRITY_MISMATCH" | "TRANSIENT";
 
 /**
  * One packed shard that could not be loaded WHILE SERVING A QUERY (i.e. after
@@ -209,17 +226,49 @@ function decodeShard(buf: Uint8Array): LoadedShard {
   return { hi, lo, postStart, postings, bytes };
 }
 
+export type SelectiveCorpusShardReaderOptions = {
+  /** When given, every physical shard read is verified against this manifest
+   *  before it is decoded/cached/used — see integrity.ts. Undefined (the
+   *  default) is LOCAL COMPATIBILITY MODE: existing behavior, unchanged. */
+  integrity?: SelectiveCorpusIntegrityManifest;
+  /** Injectable clock — real Date.now() by default. Tests inject a fake,
+   *  manually-advanced clock for deterministic TRANSIENT retry-cooldown
+   *  behavior instead of waiting on a real timer. */
+  now?: () => number;
+  /** ms a TRANSIENT shard failure is remembered before a retry is attempted
+   *  again. Ignored entirely by PERSISTENT failure codes. */
+  transientRetryCooldownMs?: number;
+};
+
+type FailureEntry = {
+  code: SelectiveCorpusShardFailureCode;
+  message: string;
+  /** true: MISSING / UNREADABLE / CORRUPT / INTEGRITY_MISMATCH — remembered
+   *  for this reader's whole lifetime, exactly as before this task. false:
+   *  TRANSIENT — remembered only until `retryAfterMs`. */
+  persistent: boolean;
+  /** epoch ms (per the injected clock) after which a TRANSIENT failure may be
+   *  retried. Always undefined for a persistent failure. */
+  retryAfterMs?: number;
+};
+
 export class SelectiveCorpusShardReader {
   private readonly storage: SelectiveCorpusStorageAdapter;
   private readonly packedPrefix: string;
   private readonly maxShards: number;
+  private readonly integrity: SelectiveCorpusIntegrityManifest | undefined;
+  private readonly now: () => number;
+  private readonly transientRetryCooldownMs: number;
   private readonly cache = new Map<number, LoadedShard>(); // insertion-ordered LRU
-  /** Reader-level, NEVER-drained I/O-optimization cache: shards already known
-   *  to fail, so a report's hundreds of query hashes routing through the same
-   *  broken shard trigger ONE physical read attempt, not one per hash. This
-   *  is NOT a failure ledger for reporting purposes — see
-   *  SelectiveCorpusFailureCollector for that. */
-  private readonly recentFailures = new Map<number, { code: SelectiveCorpusShardFailureCode; message: string }>();
+  /** Reader-level I/O-optimization cache: shards already known to fail, so a
+   *  report's hundreds of query hashes routing through the same broken shard
+   *  trigger ONE physical read attempt, not one per hash. This is NOT a
+   *  failure ledger for reporting purposes — see SelectiveCorpusFailureCollector
+   *  for that. PERSISTENT entries are never removed (never drained — that was
+   *  the source of the original cross-evaluation race); a TRANSIENT entry is
+   *  removed once its cooldown expires AND the next physical retry succeeds
+   *  (see loadAndCacheShard), so a corrected backend is not poisoned forever. */
+  private readonly recentFailures = new Map<number, FailureEntry>();
   /** Concurrency hardening: shards currently being read+decoded, so two
    *  callers racing on the SAME shard (the cache-miss check happens before
    *  an awaited storage read) share one physical read/decode instead of each
@@ -237,10 +286,18 @@ export class SelectiveCorpusShardReader {
 
   /** `packedPrefix` is an artifact-relative key prefix (default "packed") —
    *  never an absolute path; resolved against `storage`'s own root. */
-  constructor(storage: SelectiveCorpusStorageAdapter, packedPrefix: string = "packed", maxShards: number = SELECTIVE_CORPUS_HOT_SHARD_LRU) {
+  constructor(
+    storage: SelectiveCorpusStorageAdapter,
+    packedPrefix: string = "packed",
+    maxShards: number = SELECTIVE_CORPUS_HOT_SHARD_LRU,
+    options: SelectiveCorpusShardReaderOptions = {},
+  ) {
     this.storage = storage;
     this.packedPrefix = packedPrefix;
     this.maxShards = Math.max(1, maxShards);
+    this.integrity = options.integrity;
+    this.now = options.now ?? Date.now;
+    this.transientRetryCooldownMs = options.transientRetryCooldownMs ?? SELECTIVE_CORPUS_TRANSIENT_RETRY_COOLDOWN_MS;
   }
 
   private shardKey(shard: number): string {
@@ -249,13 +306,20 @@ export class SelectiveCorpusShardReader {
 
   /** Records into the reader-level I/O-optimization cache ONLY (never an
    *  evaluation collector — callers of getShard() do that themselves, once
-   *  per evaluation, from whatever this method leaves in `recentFailures`). */
-  private markShardFailed(shard: number, code: SelectiveCorpusShardFailureCode, message: string): void {
+   *  per evaluation, from whatever this method leaves in `recentFailures`).
+   *  `persistent: false` (TRANSIENT only) stamps a retry-after timestamp
+   *  instead of remembering the failure forever. */
+  private markShardFailed(shard: number, code: SelectiveCorpusShardFailureCode, message: string, persistent: boolean): void {
     const bounded = message.length > 240 ? `${message.slice(0, 237)}...` : message;
     if (!this.recentFailures.has(shard)) {
       this.stats.shardLoadFailures += 1;
     }
-    this.recentFailures.set(shard, { code, message: bounded });
+    this.recentFailures.set(shard, {
+      code,
+      message: bounded,
+      persistent,
+      retryAfterMs: persistent ? undefined : this.now() + this.transientRetryCooldownMs,
+    });
   }
 
   /** Load one shard into the LRU (evicting the oldest if full), attributing
@@ -275,10 +339,17 @@ export class SelectiveCorpusShardReader {
     // ledger): skip re-hitting storage, but still tell THIS caller's own
     // evaluation collector — every evaluation that depends on a known-bad
     // shard must independently learn that, however many already have.
+    // A TRANSIENT entry is only honored until its retry-after cooldown
+    // expires; a PERSISTENT one (retryAfterMs undefined) never expires.
     const known = this.recentFailures.get(shard);
     if (known) {
-      collector?.recordFailure(shard, known.code, known.message);
-      throw new Error(`shard ${shard} unavailable (${known.code})`);
+      const cooldownExpired = !known.persistent && known.retryAfterMs !== undefined && this.now() >= known.retryAfterMs;
+      if (!cooldownExpired) {
+        collector?.recordFailure(shard, known.code, known.message);
+        throw new Error(`shard ${shard} unavailable (${known.code})`);
+      }
+      // Cooldown elapsed — fall through to a fresh physical attempt below
+      // (still de-duplicated against concurrent callers via inFlightLoads).
     }
 
     // A concurrent caller (possibly from a DIFFERENT evaluation) may already
@@ -321,22 +392,44 @@ export class SelectiveCorpusShardReader {
       raw = await this.storage.readObject(key);
     } catch (err) {
       if (err instanceof SelectiveCorpusObjectNotFoundError) {
-        this.markShardFailed(shard, "MISSING", `shard ${shard} absent at query time (removed after artifact initialization)`);
+        this.markShardFailed(shard, "MISSING", `shard ${shard} absent at query time (removed after artifact initialization)`, true);
         throw new Error(`missing shard ${shard}`);
       }
+      if (err instanceof SelectiveCorpusTransientStorageError) {
+        this.markShardFailed(shard, "TRANSIENT", `shard ${shard} transiently unavailable (${err.message})`, false);
+        throw new Error(`transient failure reading shard ${shard}`);
+      }
       const message = err instanceof Error ? err.message : String(err);
-      this.markShardFailed(shard, "UNREADABLE", `shard ${shard} unreadable (${message})`);
+      this.markShardFailed(shard, "UNREADABLE", `shard ${shard} unreadable (${message})`, true);
       throw new Error(`unreadable shard ${shard}`);
     }
     this.stats.shardFileReads += 1;
     this.stats.shardBytesRead += raw.length;
+
+    if (this.integrity) {
+      try {
+        verifySelectiveCorpusObjectIntegrity(key, raw, this.integrity);
+      } catch (err) {
+        const message = err instanceof SelectiveCorpusIntegrityMismatchError ? err.message : (err instanceof Error ? err.message : String(err));
+        this.markShardFailed(shard, "INTEGRITY_MISMATCH", `shard ${shard} failed integrity verification (${message})`, true);
+        throw new Error(`integrity mismatch for shard ${shard}`);
+      }
+    }
+
     let loaded: LoadedShard;
     try {
       loaded = decodeShard(raw);
     } catch (err) {
-      this.markShardFailed(shard, "CORRUPT", `shard ${shard} failed to decode: ${err instanceof Error ? err.message : String(err)}`);
+      this.markShardFailed(shard, "CORRUPT", `shard ${shard} failed to decode: ${err instanceof Error ? err.message : String(err)}`, true);
       throw new Error(`corrupt shard ${shard}`);
     }
+    // A successful read+integrity-check+decode clears any stale entry —
+    // relevant ONLY for a TRANSIENT failure whose cooldown just expired and
+    // whose retry has now succeeded (a corrected backend). PERSISTENT codes
+    // never reach this line for an already-failed shard: getShard()'s fast
+    // path never falls through to a fresh attempt for them in the first
+    // place (cooldownExpired is always false when `persistent` is true).
+    this.recentFailures.delete(shard);
     this.cache.set(shard, loaded);
     this.stats.residentBytes += loaded.bytes;
     while (this.cache.size > this.maxShards) {

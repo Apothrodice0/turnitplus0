@@ -14,6 +14,11 @@ import {
   SelectiveCorpusObjectNotFoundError,
   type SelectiveCorpusStorageAdapter,
 } from "./storage-adapter";
+import {
+  parseSelectiveCorpusIntegrityManifest,
+  SelectiveCorpusIntegrityManifestError,
+  type SelectiveCorpusIntegrityManifest,
+} from "./integrity";
 
 /**
  * Selective Corpus V1 SHADOW slice — packed artifact loader + version/digest
@@ -39,7 +44,8 @@ export type SelectiveCorpusArtifactErrorCode =
   | "MISSING"
   | "CORRUPT"
   | "WRONG_VERSION"
-  | "WRONG_DIGEST";
+  | "WRONG_DIGEST"
+  | "INTEGRITY_MANIFEST_INVALID";
 
 export class SelectiveCorpusArtifactError extends Error {
   readonly code: SelectiveCorpusArtifactErrorCode;
@@ -80,6 +86,13 @@ export type SelectiveCorpusArtifact = {
    *  artifact goes through one consistent adapter instance (local-fs today;
    *  an injected/remote adapter in a future task). */
   storage: SelectiveCorpusStorageAdapter;
+  /** Present only when this artifact was loaded with
+   *  `integrityMode: "integrity-required"`. When set, shard-reader.ts and
+   *  source-loader.ts verify every packed-shard / candidate-source-text
+   *  object's bytes against it before decoding/using/caching them. Absent
+   *  (LOCAL COMPATIBILITY MODE, the default) preserves existing behavior
+   *  exactly — no manifest is required, and nothing is verified. */
+  integrity?: SelectiveCorpusIntegrityManifest;
 };
 
 export type LoadSelectiveCorpusArtifactOptions = {
@@ -93,6 +106,18 @@ export type LoadSelectiveCorpusArtifactOptions = {
    *  local-only "is artifactPath a real directory" pre-check is skipped —
    *  validating that is the injected adapter's own responsibility. */
   storageAdapter?: SelectiveCorpusStorageAdapter;
+  /**
+   * "local-compatible" (default): existing behavior — no integrity manifest
+   * is required or read, exactly as before this option existed.
+   * "integrity-required": proves the future remote/object-store contract —
+   * the artifact fails to load (code "INTEGRITY_MANIFEST_INVALID") unless
+   * "object-integrity.json" is present and well-formed. Every subsequent
+   * packed-shard / candidate-source-text read is then verified against it
+   * (see integrity.ts) before its bytes are decoded, cached, or scored from.
+   * The CURRENT local frozen artifact is never required to carry this
+   * sidecar unless a caller explicitly opts into this mode.
+   */
+  integrityMode?: "local-compatible" | "integrity-required";
 };
 
 // Byte-level helpers — deliberately operate on Uint8Array so the code does not
@@ -175,7 +200,8 @@ export function loadSelectiveCorpusArtifact(
   options: LoadSelectiveCorpusArtifactOptions = {},
 ): Promise<SelectiveCorpusArtifact> {
   const mode = options.mode ?? "file-backed";
-  const cacheKey = `${artifactPath}|${mode}`;
+  const integrityMode = options.integrityMode ?? "local-compatible";
+  const cacheKey = `${artifactPath}|${mode}|${integrityMode}`;
   const targetCache = resolveArtifactCacheMap(options);
   const cached = targetCache.get(cacheKey);
   if (cached) return cached;
@@ -197,6 +223,7 @@ async function loadSelectiveCorpusArtifactUncached(
   options: LoadSelectiveCorpusArtifactOptions,
 ): Promise<SelectiveCorpusArtifact> {
   const mode = options.mode ?? "file-backed";
+  const integrityMode = options.integrityMode ?? "local-compatible";
 
   let storage: SelectiveCorpusStorageAdapter;
   if (options.storageAdapter) {
@@ -257,6 +284,36 @@ async function loadSelectiveCorpusArtifactUncached(
       "WRONG_DIGEST",
       `artifact digest mismatch — expected ${SELECTIVE_CORPUS_EXPECTED_DIGEST}, got ${String(version.corpusIdentityDigest)}`,
     );
+  }
+
+  // REMOTE/INTEGRITY MODE only: the sidecar manifest is itself an ordinary
+  // artifact-relative object, read through the SAME storage adapter as
+  // everything else — never a separate side-channel. LOCAL COMPATIBILITY
+  // MODE (the default) skips this entirely: the current local frozen
+  // artifact is never required to carry this file unless a caller
+  // explicitly opts in.
+  let integrity: SelectiveCorpusIntegrityManifest | undefined;
+  if (integrityMode === "integrity-required") {
+    let manifestBytes: Uint8Array;
+    try {
+      manifestBytes = await storage.readObject("object-integrity.json");
+    } catch (err) {
+      if (err instanceof SelectiveCorpusObjectNotFoundError) {
+        throw new SelectiveCorpusArtifactError(
+          "INTEGRITY_MANIFEST_INVALID",
+          "integrity-required mode requires object-integrity.json, none found",
+        );
+      }
+      throw err;
+    }
+    try {
+      integrity = parseSelectiveCorpusIntegrityManifest(manifestBytes);
+    } catch (err) {
+      if (err instanceof SelectiveCorpusIntegrityManifestError) {
+        throw new SelectiveCorpusArtifactError("INTEGRITY_MANIFEST_INVALID", `object-integrity.json invalid (${err.code}): ${err.message}`);
+      }
+      throw err;
+    }
   }
 
   // docmap
@@ -359,7 +416,7 @@ async function loadSelectiveCorpusArtifactUncached(
     if (map.size === 0) throw new SelectiveCorpusArtifactError("CORRUPT", "packed shards decoded to zero postings");
     postingsAccessor = new InMemoryPostingsAccessor(map);
   } else {
-    postingsAccessor = new SelectiveCorpusShardReader(storage, packPrefix, options.hotShards);
+    postingsAccessor = new SelectiveCorpusShardReader(storage, packPrefix, options.hotShards, { integrity });
   }
 
   return {
@@ -374,5 +431,6 @@ async function loadSelectiveCorpusArtifactUncached(
     docs,
     docByOrdinal,
     storage,
+    integrity,
   };
 }
