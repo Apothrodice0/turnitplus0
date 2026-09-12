@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { statSync } from "node:fs";
+import { join } from "node:path";
 import test from "node:test";
 
 import {
@@ -12,6 +14,32 @@ import {
 } from "../tools/build-selective-corpus-production.ts";
 import { tokens } from "../lib/similarity-core.ts";
 import { canonicalSha256 } from "../lib/document-identity.ts";
+import {
+  loadSelectiveCorpusArtifact,
+  clearSelectiveCorpusArtifactCache,
+  SelectiveCorpusArtifactError,
+} from "../lib/selective-corpus/artifact.ts";
+import {
+  SELECTIVE_CORPUS_EXPECTED_DIGEST,
+  SELECTIVE_CORPUS_DEV_REGRESSION_DIGEST,
+} from "../lib/selective-corpus/constants.ts";
+
+const PRODUCTION_ARTIFACT = "D:/TurnitPlusTemp/selective-corpus-production-v1/run-20260912-023011";
+const productionArtifactPresent = (() => {
+  try {
+    return statSync(join(PRODUCTION_ARTIFACT, "corpus-version.json")).isFile();
+  } catch {
+    return false;
+  }
+})();
+const DEV_REGRESSION_ARTIFACT = "D:/TurnitPlusTemp/selective-corpus-bulk-v1/run-20260909-224038";
+const devRegressionArtifactPresent = (() => {
+  try {
+    return statSync(join(DEV_REGRESSION_ARTIFACT, "corpus-version.json")).isFile();
+  } catch {
+    return false;
+  }
+})();
 
 /**
  * SELECTIVE CORPUS PRODUCTION PACKER — focused, fully synthetic, fast tests.
@@ -194,4 +222,38 @@ test("corpus-version.json builder: trackCRegressionFixtures is 0, algorithm fiel
   assert.equal(cv.shingleSize, 5);
   assert.equal(cv.stopPolicy, "global DF>=13");
   assert.equal(cv.corpusVersion, "selective-corpus-v1");
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// DIGEST ADOPTION — production vs dev/regression trust boundary
+// ═══════════════════════════════════════════════════════════════════════
+
+test("digest A: default/production loader accepts the new clean production artifact", { skip: !productionArtifactPresent }, async () => {
+  clearSelectiveCorpusArtifactCache();
+  const artifact = await loadSelectiveCorpusArtifact(PRODUCTION_ARTIFACT); // no override -- the default production path
+  assert.equal(artifact.corpusDigest, SELECTIVE_CORPUS_EXPECTED_DIGEST);
+  assert.equal(artifact.documentCount, 9234);
+});
+
+test("digest B: default/production loader rejects the OLD fixture-inclusive dev/regression artifact with WRONG_DIGEST", { skip: !devRegressionArtifactPresent }, async () => {
+  clearSelectiveCorpusArtifactCache();
+  await assert.rejects(
+    () => loadSelectiveCorpusArtifact(DEV_REGRESSION_ARTIFACT), // no override -- must fail closed by default
+    (e) => e instanceof SelectiveCorpusArtifactError && e.code === "WRONG_DIGEST",
+  );
+});
+
+test("digest C: an explicit test/regression-only call can still load the OLD fixture-inclusive artifact", { skip: !devRegressionArtifactPresent }, async () => {
+  clearSelectiveCorpusArtifactCache();
+  const artifact = await loadSelectiveCorpusArtifact(DEV_REGRESSION_ARTIFACT, { expectedDigest: SELECTIVE_CORPUS_DEV_REGRESSION_DIGEST });
+  assert.equal(artifact.corpusDigest, SELECTIVE_CORPUS_DEV_REGRESSION_DIGEST);
+  assert.notEqual(SELECTIVE_CORPUS_DEV_REGRESSION_DIGEST, SELECTIVE_CORPUS_EXPECTED_DIGEST, "sanity: the two digests really are different constants");
+});
+
+test("digest D: an arbitrary wrong digest still fails closed even through the override seam", { skip: !productionArtifactPresent }, async () => {
+  clearSelectiveCorpusArtifactCache();
+  await assert.rejects(
+    () => loadSelectiveCorpusArtifact(PRODUCTION_ARTIFACT, { expectedDigest: "0".repeat(64) }),
+    (e) => e instanceof SelectiveCorpusArtifactError && e.code === "WRONG_DIGEST",
+  );
 });

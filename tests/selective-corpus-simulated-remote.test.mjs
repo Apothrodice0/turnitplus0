@@ -22,7 +22,7 @@ import {
   SelectiveCorpusIntegrityMismatchError,
 } from "../lib/selective-corpus/integrity.ts";
 import { createSimulatedRemoteStorageAdapter } from "../lib/selective-corpus/testing/simulated-remote-storage-adapter.ts";
-import { SELECTIVE_CORPUS_EXPECTED_DIGEST } from "../lib/selective-corpus/constants.ts";
+import { SELECTIVE_CORPUS_EXPECTED_DIGEST, SELECTIVE_CORPUS_DEV_REGRESSION_DIGEST } from "../lib/selective-corpus/constants.ts";
 
 /**
  * SELECTIVE CORPUS SIMULATED REMOTE STORAGE + INTEGRITY VERIFICATION.
@@ -707,7 +707,9 @@ test(
       const authoritative = { unifiedScore: 8, matchedPositions: [10, 11, 12] };
 
       clearSelectiveCorpusArtifactCache();
-      const artifactLocal = await loadSelectiveCorpusArtifact(ARTIFACT);
+      // this equivalence test deliberately exercises the OLDER fixture-inclusive
+      // dev/regression artifact -- content-agnostic to the production digest.
+      const artifactLocal = await loadSelectiveCorpusArtifact(ARTIFACT, { expectedDigest: SELECTIVE_CORPUS_DEV_REGRESSION_DIGEST });
 
       // Discover exactly which shard/raw objects THIS submission will touch,
       // so the manifest only needs to cover what will actually be read --
@@ -743,6 +745,7 @@ test(
       const artifactRemote = await loadSelectiveCorpusArtifact(ARTIFACT, {
         storageAdapter: remoteAdapter,
         integrityMode: "integrity-required",
+        expectedDigest: SELECTIVE_CORPUS_DEV_REGRESSION_DIGEST,
       });
       assert.ok(artifactRemote.integrity);
 

@@ -16,7 +16,7 @@ import { selectiveCorpusStageA } from "../lib/selective-corpus/stage-a.ts";
 import { loadSelectiveCorpusCandidateText, clearSelectiveCorpusSourceCache } from "../lib/selective-corpus/source-loader.ts";
 import { admitSelectiveCorpusCandidate, selectiveCorpusSubmissionWords } from "../lib/selective-corpus/verify.ts";
 import { SelectiveCorpusShardReader, createSelectiveCorpusFailureCollector } from "../lib/selective-corpus/shard-reader.ts";
-import { SELECTIVE_CORPUS_EXPECTED_DIGEST } from "../lib/selective-corpus/constants.ts";
+import { SELECTIVE_CORPUS_EXPECTED_DIGEST, SELECTIVE_CORPUS_DEV_REGRESSION_DIGEST } from "../lib/selective-corpus/constants.ts";
 import {
   createLocalFilesystemStorageAdapter,
   SelectiveCorpusObjectNotFoundError,
@@ -25,6 +25,11 @@ import {
 const ARTIFACT = "D:/TurnitPlusTemp/selective-corpus-bulk-v1/run-20260909-224038";
 const artifactPresent = (() => {
   try { return statSync(join(ARTIFACT, "corpus-version.json")).isFile(); } catch { return false; }
+})();
+// the current PRODUCTION (fixture-free) artifact -- matches SELECTIVE_CORPUS_EXPECTED_DIGEST by default
+const PRODUCTION_ARTIFACT = "D:/TurnitPlusTemp/selective-corpus-production-v1/run-20260912-023011";
+const productionArtifactPresent = (() => {
+  try { return statSync(join(PRODUCTION_ARTIFACT, "corpus-version.json")).isFile(); } catch { return false; }
 })();
 
 // async-safe: the finally block must only run AFTER an async `fn` resolves,
@@ -94,11 +99,15 @@ test("wrong-digest artifact fails closed (WRONG_DIGEST)", async () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-test("flag ON with the frozen artifact: COMPLETED, digest verified, authoritative object untouched", { skip: !artifactPresent }, async () => {
-  const sub = readFileSync(join(ARTIFACT, "raw", "A-000010.txt"), "utf8");
+test("flag ON with the frozen artifact: COMPLETED, digest verified, authoritative object untouched", { skip: !productionArtifactPresent }, async () => {
+  // exercises the DEFAULT env-var-driven production path end-to-end -- must
+  // be the current PRODUCTION (fixture-free) artifact, since
+  // SELECTIVE_CORPUS_ARTIFACT_PATH alone can never select a non-production
+  // digest (shadow.ts's local-mode branch never passes expectedDigest).
+  const sub = readFileSync(join(PRODUCTION_ARTIFACT, "raw", "A-000010.txt"), "utf8");
   const authoritative = { unifiedScore: 8, matchedPositions: [10, 11, 12] };
   const before = JSON.stringify(authoritative);
-  await withEnv({ SELECTIVE_CORPUS_SHADOW_ENABLED: "true", SELECTIVE_CORPUS_ARTIFACT_PATH: ARTIFACT }, async () => {
+  await withEnv({ SELECTIVE_CORPUS_SHADOW_ENABLED: "true", SELECTIVE_CORPUS_ARTIFACT_PATH: PRODUCTION_ARTIFACT }, async () => {
     clearSelectiveCorpusArtifactCache();
     const r = await runSelectiveCorpusShadow({ canonicalSubmissionText: sub, authoritative });
     assert.equal(r.state, "COMPLETED");
@@ -112,8 +121,8 @@ test("flag ON with the frozen artifact: COMPLETED, digest verified, authoritativ
 
 test("file-backed shard reader is exactly equivalent to the in-memory Map for Stage A", { skip: !artifactPresent }, async () => {
   clearSelectiveCorpusArtifactCache();
-  const im = await loadSelectiveCorpusArtifact(ARTIFACT, { mode: "in-memory" });
-  const fb = await loadSelectiveCorpusArtifact(ARTIFACT, { mode: "file-backed", hotShards: 8 });
+  const im = await loadSelectiveCorpusArtifact(ARTIFACT, { mode: "in-memory", expectedDigest: SELECTIVE_CORPUS_DEV_REGRESSION_DIGEST });
+  const fb = await loadSelectiveCorpusArtifact(ARTIFACT, { mode: "file-backed", hotShards: 8, expectedDigest: SELECTIVE_CORPUS_DEV_REGRESSION_DIGEST });
   assert.equal(fb.mode, "file-backed");
   assert.equal("postings" in fb, false); // the full Map is gone
   for (const id of ["A-000003", "A-000050", "Fen-000010"]) {
@@ -372,12 +381,12 @@ test("local adapter: performs no writes — the filesystem is untouched by any a
 test("two concurrent loadSelectiveCorpusArtifact calls for the same path share one load, not two", { skip: !artifactPresent }, async () => {
   clearSelectiveCorpusArtifactCache();
   const [a, b] = await Promise.all([
-    loadSelectiveCorpusArtifact(ARTIFACT),
-    loadSelectiveCorpusArtifact(ARTIFACT),
+    loadSelectiveCorpusArtifact(ARTIFACT, { expectedDigest: SELECTIVE_CORPUS_DEV_REGRESSION_DIGEST }),
+    loadSelectiveCorpusArtifact(ARTIFACT, { expectedDigest: SELECTIVE_CORPUS_DEV_REGRESSION_DIGEST }),
   ]);
   // same resolved artifact object identity — proves one shared load, not two independent ones
   assert.equal(a, b);
-  assert.equal(a.corpusDigest, SELECTIVE_CORPUS_EXPECTED_DIGEST);
+  assert.equal(a.corpusDigest, SELECTIVE_CORPUS_DEV_REGRESSION_DIGEST);
 });
 
 test("a failed artifact load does not poison the cache — a corrected retry succeeds", async () => {

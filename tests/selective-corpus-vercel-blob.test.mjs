@@ -33,7 +33,7 @@ import { selectiveCorpusStageA } from "../lib/selective-corpus/stage-a.ts";
 import { runSelectiveCorpusShadow } from "../lib/selective-corpus/shadow.ts";
 import { getSelectiveCorpusStorageMode } from "../lib/selective-corpus/config.ts";
 import { parseSelectiveCorpusIntegrityManifest } from "../lib/selective-corpus/integrity.ts";
-import { SELECTIVE_CORPUS_EXPECTED_DIGEST } from "../lib/selective-corpus/constants.ts";
+import { SELECTIVE_CORPUS_EXPECTED_DIGEST, SELECTIVE_CORPUS_DEV_REGRESSION_DIGEST } from "../lib/selective-corpus/constants.ts";
 
 /**
  * VERCEL PRIVATE BLOB STORAGE ADAPTER — deterministic tests, NO real network.
@@ -609,7 +609,9 @@ test(
       const authoritative = { unifiedScore: 8, matchedPositions: [10, 11, 12] };
 
       clearSelectiveCorpusArtifactCache();
-      const artifactLocal = await loadSelectiveCorpusArtifact(REAL_ARTIFACT);
+      // this equivalence test deliberately exercises the OLDER fixture-inclusive
+      // dev/regression artifact -- content-agnostic to the production digest.
+      const artifactLocal = await loadSelectiveCorpusArtifact(REAL_ARTIFACT, { expectedDigest: SELECTIVE_CORPUS_DEV_REGRESSION_DIGEST });
 
       // Discover exactly which raw/<id>.txt source-text objects THIS
       // submission's candidates will need, so the manifest covers them too --
@@ -639,6 +641,7 @@ test(
       const artifactBlob = await loadSelectiveCorpusArtifact(`vercel-blob-e2e-di:${PREFIX}`, {
         storageAdapter: adapter,
         integrityMode: "integrity-required",
+        expectedDigest: SELECTIVE_CORPUS_DEV_REGRESSION_DIGEST,
       });
 
       const resultLocal = await runSelectiveCorpusShadow({ canonicalSubmissionText: sub, authoritative, artifactOverride: artifactLocal });

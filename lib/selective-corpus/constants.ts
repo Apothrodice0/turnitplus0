@@ -118,12 +118,31 @@ export const SELECTIVE_CORPUS_SHADOW_EVALUATOR_VERSION = "selective-corpus-shado
 export const SELECTIVE_CORPUS_TRANSIENT_RETRY_COOLDOWN_MS = 2_000;
 
 /**
- * The frozen corpus identity digest the artifact MUST carry. A loaded
- * corpus-version.json whose corpusIdentityDigest differs => the loader fails
- * closed with code "WRONG_DIGEST". Bump only alongside a deliberately
+ * The frozen corpus identity digest the artifact MUST carry BY DEFAULT. A
+ * loaded corpus-version.json whose corpusIdentityDigest differs => the loader
+ * fails closed with code "WRONG_DIGEST", UNLESS the caller explicitly passed
+ * loadSelectiveCorpusArtifact()'s `expectedDigest` test/regression seam (see
+ * artifact.ts) — which no production code path (shadow.ts's env-var-driven
+ * local/vercel-blob branches) ever does. Bump only alongside a deliberately
  * re-validated corpus rebuild.
+ *
+ * This is the PRODUCTION-CLEAN "production-v1" build (9,234 bulk documents,
+ * zero Track_C regression fixtures) — see build-report.json under
+ * D:/TurnitPlusTemp/selective-corpus-production-v1/run-20260912-023011/.
  */
 export const SELECTIVE_CORPUS_EXPECTED_DIGEST =
+  "4fcfdd6fbc25f133d376fb9bdecc5a48a3f703c357406710bd40bed389efccd6";
+
+/**
+ * The OLDER "bulk-v1" dev/regression digest — a fixture-INCLUSIVE build (9,211
+ * bulk + 232 Track_C regression fixture documents) still used deliberately by
+ * Track_C/regression tests that need the fixture population resolvable via
+ * SELECTIVE_CORPUS_FIXTURE_PATH. Reachable ONLY by tests that pass it as
+ * loadSelectiveCorpusArtifact()'s explicit `expectedDigest` option — never by
+ * an environment variable, user input, or any Vercel Blob production code
+ * path. NOT the production expected digest.
+ */
+export const SELECTIVE_CORPUS_DEV_REGRESSION_DIGEST =
   "5a234fa33fa9403059a14726bb169703444614c3aca7bb08fb20d37f6646581a";
 
 export const SELECTIVE_CORPUS_VERSION = "selective-corpus-v1";

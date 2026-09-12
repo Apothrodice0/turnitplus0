@@ -14,6 +14,7 @@ import { selectiveCorpusStageA } from "../lib/selective-corpus/stage-a.ts";
 import { loadSelectiveCorpusCandidateText } from "../lib/selective-corpus/source-loader.ts";
 import { admitSelectiveCorpusCandidate } from "../lib/selective-corpus/verify.ts";
 import { runSelectiveCorpusShadow } from "../lib/selective-corpus/shadow.ts";
+import { SELECTIVE_CORPUS_DEV_REGRESSION_DIGEST } from "../lib/selective-corpus/constants.ts";
 
 const ARTIFACT = "D:/TurnitPlusTemp/selective-corpus-bulk-v1/run-20260909-224038";
 const TRACKC = "D:/TurnitPlusTemp/selective-corpus-v1/run-20260909-211001";
@@ -220,7 +221,9 @@ const dev = present ? JSON.parse(readFileSync(join(TRACKC, "track-c-dev.json"), 
 async function frozenInterpret(caseId, { skipHost = true } = {}) {
   const raw = readFileSync(join(TRACKC, "track-c", "submissions", `${caseId}.txt`), "utf8");
   clearSelectiveCorpusArtifactCache();
-  const artifact = await loadSelectiveCorpusArtifact(ARTIFACT);
+  // Track_C regression: this helper deliberately loads the OLDER
+  // fixture-inclusive dev/regression artifact (never the production digest).
+  const artifact = await loadSelectiveCorpusArtifact(ARTIFACT, { expectedDigest: SELECTIVE_CORPUS_DEV_REGRESSION_DIGEST });
   const rawToOrd = new Map();
   for (const d of artifact.docs) {
     rawToOrd.set(d.rawId, d.ordinal);
@@ -296,9 +299,14 @@ test("shadow result: interpretationBreakdown is present, safe-labelled, and does
   const sub = readFileSync(join(TRACKC, "track-c", "submissions", "tcx-029.txt"), "utf8");
   const authoritative = { unifiedScore: 9, matchedPositions: [3, 4, 5] };
   const before = JSON.stringify(authoritative);
-  const r = await withEnv({ SELECTIVE_CORPUS_SHADOW_ENABLED: "true", SELECTIVE_CORPUS_ARTIFACT_PATH: ARTIFACT, SELECTIVE_CORPUS_FIXTURE_PATH: TRACKC }, async () => {
+  const r = await withEnv({ SELECTIVE_CORPUS_SHADOW_ENABLED: "true", SELECTIVE_CORPUS_FIXTURE_PATH: TRACKC }, async () => {
     clearSelectiveCorpusArtifactCache();
-    return runSelectiveCorpusShadow({ canonicalSubmissionText: sub, authoritative });
+    // Track_C regression: loads the OLDER fixture-inclusive dev/regression
+    // artifact explicitly via artifactOverride -- SELECTIVE_CORPUS_ARTIFACT_PATH
+    // alone can never select a non-production digest (shadow.ts's env-var
+    // branch never passes expectedDigest).
+    const artifact = await loadSelectiveCorpusArtifact(ARTIFACT, { expectedDigest: SELECTIVE_CORPUS_DEV_REGRESSION_DIGEST });
+    return runSelectiveCorpusShadow({ canonicalSubmissionText: sub, authoritative, artifactOverride: artifact });
   });
   assert.ok(r.state === "COMPLETED" || r.state === "PARTIAL");
   assert.equal(r.interpretationVersion, SELECTIVE_CORPUS_INTERPRETATION_VERSION);

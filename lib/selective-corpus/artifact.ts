@@ -127,6 +127,19 @@ export type LoadSelectiveCorpusArtifactOptions = {
    * sidecar unless a caller explicitly opts into this mode.
    */
   integrityMode?: "local-compatible" | "integrity-required";
+  /**
+   * TEST/REGRESSION SEAM ONLY. Overrides SELECTIVE_CORPUS_EXPECTED_DIGEST for
+   * this one load. Omitted (the default) strictly enforces the production
+   * constant — this is the ONLY behavior reachable from any user input,
+   * environment variable, or Vercel Blob production code path: shadow.ts's
+   * local/vercel-blob branches never set this option. It exists solely so a
+   * handful of hardcoded, deliberate test call sites can load the OLDER
+   * fixture-inclusive dev/regression artifact (SELECTIVE_CORPUS_DEV_REGRESSION_DIGEST)
+   * for Track_C regression coverage without weakening the default contract —
+   * a caller must pass a literal digest string; nothing here reads from
+   * process.env or any other runtime-controlled source.
+   */
+  expectedDigest?: string;
 };
 
 // Byte-level helpers — deliberately operate on Uint8Array so the code does not
@@ -210,7 +223,11 @@ export function loadSelectiveCorpusArtifact(
 ): Promise<SelectiveCorpusArtifact> {
   const mode = options.mode ?? "file-backed";
   const integrityMode = options.integrityMode ?? "local-compatible";
-  const cacheKey = `${artifactPath}|${mode}|${integrityMode}`;
+  const expectedDigest = options.expectedDigest ?? SELECTIVE_CORPUS_EXPECTED_DIGEST;
+  // expectedDigest is part of the cache key so a test-only override never
+  // collides with (or is silently satisfied by) a default-digest load of the
+  // same path/mode/integrityMode racing concurrently.
+  const cacheKey = `${artifactPath}|${mode}|${integrityMode}|${expectedDigest}`;
   const targetCache = resolveArtifactCacheMap(options);
   const cached = targetCache.get(cacheKey);
   if (cached) return cached;
@@ -288,10 +305,11 @@ async function loadSelectiveCorpusArtifactUncached(
       `artifact fingerprint parameters do not match this build (w=${String(version.winnowWindow)} s=${String(version.shingleSize)} stop=${String(version.stopPolicy)})`,
     );
   }
-  if (version.corpusIdentityDigest !== SELECTIVE_CORPUS_EXPECTED_DIGEST) {
+  const expectedDigest = options.expectedDigest ?? SELECTIVE_CORPUS_EXPECTED_DIGEST;
+  if (version.corpusIdentityDigest !== expectedDigest) {
     throw new SelectiveCorpusArtifactError(
       "WRONG_DIGEST",
-      `artifact digest mismatch — expected ${SELECTIVE_CORPUS_EXPECTED_DIGEST}, got ${String(version.corpusIdentityDigest)}`,
+      `artifact digest mismatch — expected ${expectedDigest}, got ${String(version.corpusIdentityDigest)}`,
     );
   }
 
