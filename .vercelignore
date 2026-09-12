@@ -1,0 +1,25 @@
+# Selective mirror of .gitignore entries for LOCAL-ONLY scratch/cache/eval
+# content. vercel deploy does NOT read .gitignore, so these must be
+# restated here.
+
+# npm/npx package cache
+/.sites-runtime/
+
+# Ad-hoc local scratch-script outputs
+/out/
+
+# Generated Graphify output
+/graphify-out/
+
+# Local/evaluation datasets -- root only, never public/data/
+/data/
+
+# Local/offline-only corpus fixtures
+/corpus/
+
+# Cloudflare Workers local development cache
+/.wrangler/
+
+# Local SQLite databases and TypeScript incremental-build cache
+*.db
+*.tsbuildinfo
