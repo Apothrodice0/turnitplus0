@@ -268,6 +268,57 @@ async function loadSelectiveCorpusArtifactUncached(
     storage = createLocalFilesystemStorageAdapter(artifactPath);
   }
 
+  // TRUST ORDER (integrity-required mode): the sidecar manifest is read and
+  // parsed FIRST — before ANY bootstrap/control object's bytes are read —
+  // so corpus-version.json / packed/docmap.tsv / packed/stopset.bin can each
+  // be verified against it before their content is ever parsed or trusted.
+  // This is deliberately read through the SAME storage adapter as everything
+  // else, never a separate side-channel. LOCAL COMPATIBILITY MODE (the
+  // default) skips this entirely: the current local frozen artifact is never
+  // required to carry this file unless a caller explicitly opts in, and
+  // `integrity` stays undefined so verifyControlObjectOrThrow() below is a
+  // no-op — existing local/dev/test artifact-loading behavior is unchanged.
+  let integrity: SelectiveCorpusIntegrityManifest | undefined;
+  if (integrityMode === "integrity-required") {
+    let manifestBytes: Uint8Array;
+    try {
+      manifestBytes = await storage.readObject("object-integrity.json");
+    } catch (err) {
+      if (err instanceof SelectiveCorpusObjectNotFoundError) {
+        throw new SelectiveCorpusArtifactError(
+          "INTEGRITY_MANIFEST_INVALID",
+          "integrity-required mode requires object-integrity.json, none found",
+        );
+      }
+      throw err;
+    }
+    try {
+      integrity = parseSelectiveCorpusIntegrityManifest(manifestBytes);
+    } catch (err) {
+      if (err instanceof SelectiveCorpusIntegrityManifestError) {
+        throw new SelectiveCorpusArtifactError("INTEGRITY_MANIFEST_INVALID", `object-integrity.json invalid (${err.code}): ${err.message}`);
+      }
+      throw err;
+    }
+  }
+
+  /** Verifies `bytes` (already read, NOT yet parsed/trusted) against the
+   *  manifest before the caller is allowed to parse them. No-op in local-
+   *  compatible mode (`integrity` undefined) — existing behavior preserved
+   *  exactly. Throws the SAME established "CORRUPT" typed artifact error the
+   *  shard-000 smoke check below already uses for a failed verification, so
+   *  a bootstrap failure here is unambiguously attributable to integrity
+   *  verification (a missing manifest entry surfaces via integrity.ts's own
+   *  UNKNOWN_ENTRY reason), never conflated with a downstream parse error. */
+  function verifyControlObjectOrThrow(key: string, bytes: Uint8Array): void {
+    if (!integrity) return;
+    try {
+      verifySelectiveCorpusObjectIntegrity(key, bytes, integrity);
+    } catch (err) {
+      throw new SelectiveCorpusArtifactError("CORRUPT", `${key} failed integrity verification: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   let versionBytes: Uint8Array;
   try {
     versionBytes = await storage.readObject("corpus-version.json");
@@ -277,6 +328,7 @@ async function loadSelectiveCorpusArtifactUncached(
     }
     throw err;
   }
+  verifyControlObjectOrThrow("corpus-version.json", versionBytes);
 
   let version: {
     corpusVersion?: string;
@@ -313,36 +365,6 @@ async function loadSelectiveCorpusArtifactUncached(
     );
   }
 
-  // REMOTE/INTEGRITY MODE only: the sidecar manifest is itself an ordinary
-  // artifact-relative object, read through the SAME storage adapter as
-  // everything else — never a separate side-channel. LOCAL COMPATIBILITY
-  // MODE (the default) skips this entirely: the current local frozen
-  // artifact is never required to carry this file unless a caller
-  // explicitly opts in.
-  let integrity: SelectiveCorpusIntegrityManifest | undefined;
-  if (integrityMode === "integrity-required") {
-    let manifestBytes: Uint8Array;
-    try {
-      manifestBytes = await storage.readObject("object-integrity.json");
-    } catch (err) {
-      if (err instanceof SelectiveCorpusObjectNotFoundError) {
-        throw new SelectiveCorpusArtifactError(
-          "INTEGRITY_MANIFEST_INVALID",
-          "integrity-required mode requires object-integrity.json, none found",
-        );
-      }
-      throw err;
-    }
-    try {
-      integrity = parseSelectiveCorpusIntegrityManifest(manifestBytes);
-    } catch (err) {
-      if (err instanceof SelectiveCorpusIntegrityManifestError) {
-        throw new SelectiveCorpusArtifactError("INTEGRITY_MANIFEST_INVALID", `object-integrity.json invalid (${err.code}): ${err.message}`);
-      }
-      throw err;
-    }
-  }
-
   // docmap
   const packPrefix = "packed";
   const docmapKey = `${packPrefix}/docmap.tsv`;
@@ -351,9 +373,16 @@ async function loadSelectiveCorpusArtifactUncached(
   if (!docmapExists || !stopExists) {
     throw new SelectiveCorpusArtifactError("MISSING", "packed/docmap.tsv or packed/stopset.bin not found");
   }
+  let docmapBytes: Uint8Array;
+  try {
+    docmapBytes = await storage.readObject(docmapKey);
+  } catch {
+    throw new SelectiveCorpusArtifactError("CORRUPT", "packed/docmap.tsv unreadable");
+  }
+  verifyControlObjectOrThrow(docmapKey, docmapBytes);
+
   const docs: SelectiveCorpusDoc[] = [];
   try {
-    const docmapBytes = await storage.readObject(docmapKey);
     for (const line of Buffer.from(docmapBytes).toString("utf8").split(/\r?\n/)) {
       if (!line) continue;
       const [ord, sourceId, family, rawId, wc, label] = line.split("\t");
@@ -374,9 +403,16 @@ async function loadSelectiveCorpusArtifactUncached(
   for (const d of docs) docByOrdinal[d.ordinal] = d;
 
   // stopset
+  let stopBuf: Uint8Array;
+  try {
+    stopBuf = await storage.readObject(stopKey);
+  } catch {
+    throw new SelectiveCorpusArtifactError("CORRUPT", "packed/stopset.bin unreadable");
+  }
+  verifyControlObjectOrThrow(stopKey, stopBuf);
+
   const stopHashes = new Set<string>();
   try {
-    const stopBuf = await storage.readObject(stopKey);
     for (let i = 0; i + 8 <= stopBuf.length; i += 8) stopHashes.add(hex8(stopBuf, i));
   } catch {
     throw new SelectiveCorpusArtifactError("CORRUPT", "packed/stopset.bin unreadable");

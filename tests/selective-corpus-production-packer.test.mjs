@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { statSync } from "node:fs";
+import { statSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -11,6 +11,8 @@ import {
   computeCorpusIdentityDigest,
   buildCorpusVersionJson,
   runProductionPacker,
+  loadBulkRecords,
+  writeProductionArtifact,
 } from "../tools/build-selective-corpus-production.ts";
 import { tokens } from "../lib/similarity-core.ts";
 import { canonicalSha256 } from "../lib/document-identity.ts";
@@ -222,6 +224,118 @@ test("corpus-version.json builder: trackCRegressionFixtures is 0, algorithm fiel
   assert.equal(cv.shingleSize, 5);
   assert.equal(cv.stopPolicy, "global DF>=13");
   assert.equal(cv.corpusVersion, "selective-corpus-v1");
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// G. loadBulkRecords — corpus-cleaning stage integration (disk-based)
+// ═══════════════════════════════════════════════════════════════════════
+
+function padWords(text, targetWords) {
+  const words = text.split(/\s+/).filter(Boolean);
+  if (words.length >= targetWords) return text;
+  const filler = Array.from({ length: targetWords - words.length }, (_, i) => `fillerword${i}`).join(" ");
+  return `${text} ${filler}`;
+}
+
+function writeSyntheticBulkSource(records) {
+  const dir = mkdtempSync(join("D:/tmp", "scb-packer-test-"));
+  mkdirSync(join(dir, "raw"), { recursive: true });
+  const manifestLines = [];
+  for (const r of records) {
+    writeFileSync(join(dir, "raw", `${r.docId}.txt`), r.text, "utf8");
+    manifestLines.push(JSON.stringify({ docId: r.docId, status: "OK", family: r.family, title: r.title }));
+  }
+  writeFileSync(join(dir, "bulk-source-manifest.jsonl"), `${manifestLines.join("\n")}\n`);
+  return dir;
+}
+
+test("G1: loadBulkRecords excludes a source when the cleaning rule requires exclusion (World Bank)", () => {
+  const dir = writeSyntheticBulkSource([
+    { docId: "B-wb-001", family: "B_public_reports", title: "wb-broken-report", text: padWords("sec-spacing col ctrl col CSS leakage everywhere", 300) },
+    { docId: "A-000001", family: "A_wikipedia", title: "Ordinary Topic", text: padWords("An ordinary unrelated Wikipedia article body.", 300) },
+  ]);
+  try {
+    const { docs, cleaningReport } = loadBulkRecords(dir);
+    assert.equal(docs.length, 1, "the World Bank doc must be excluded, only the ordinary doc survives");
+    assert.equal(docs[0].rawId, "bulk:A-000001");
+    assert.equal(cleaningReport.excludedCount, 1);
+    assert.equal(cleaningReport.unchangedCount, 1);
+    assert.equal(cleaningReport.cleanedCount, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("G2: loadBulkRecords applies cleaning and recomputes contentHash/canonicalTextHash fresh from the cleaned text", () => {
+  const climateIntro =
+    "This article documents events, research findings, scientific and technological advances, and human actions to measure, predict, mitigate, and adapt to the effects of global warming and climate change—during the year 2022.";
+  const summaries = padWords("Summaries\n\nSpecific year content goes here for the test.", 280);
+  const text = `${climateIntro}\n\n${summaries}`;
+  const dir = writeSyntheticBulkSource([{ docId: "A-clim-2022", family: "A_wikipedia", title: "2022 in climate change", text }]);
+  try {
+    const { docs, cleaningReport } = loadBulkRecords(dir);
+    assert.equal(docs.length, 1);
+    assert.equal(cleaningReport.cleanedCount, 1);
+    const cleanedDoc = docs[0];
+    assert.ok(!cleanedDoc.text.includes("This article documents events"), "indexed text must be the cleaned text, not the raw text");
+    const expectedContentHash = createHash("sha256").update(cleanedDoc.text, "utf8").digest("hex");
+    assert.equal(cleanedDoc.contentHash, expectedContentHash, "contentHash must be recomputed from the CLEANED text");
+    assert.equal(cleanedDoc.canonicalTextHash, canonicalSha256(cleanedDoc.text), "canonicalTextHash must be recomputed from the CLEANED text");
+    assert.notEqual(cleanedDoc.contentHash, createHash("sha256").update(text, "utf8").digest("hex"), "must NOT equal a hash of the raw (uncleaned) text");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("G3: loadBulkRecords leaves a source with no matching rule byte-identical, hash unchanged from the manifest-independent recompute", () => {
+  const text = padWords("An ordinary unrelated document with no recognized cleaning pattern at all in its body text.", 300);
+  const dir = writeSyntheticBulkSource([{ docId: "A-ordinary-1", family: "A_wikipedia", title: "Some Ordinary Topic", text }]);
+  try {
+    const { docs, cleaningReport } = loadBulkRecords(dir);
+    assert.equal(docs.length, 1);
+    assert.equal(cleaningReport.unchangedCount, 1);
+    assert.equal(cleaningReport.cleanedCount, 0);
+    assert.equal(cleaningReport.excludedCount, 0);
+    assert.equal(docs[0].text, text);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("G4: a fixture-shaped docId cannot enter the production build even via loadBulkRecords' own manifest path", () => {
+  const dir = writeSyntheticBulkSource([{ docId: "fixture-A-999", family: "A_wikipedia", title: "Should Never Load", text: padWords("fixture content", 300) }]);
+  try {
+    assert.throws(() => loadBulkRecords(dir), /FAIL CLOSED/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("G5: writeProductionArtifact writes raw/<id>.txt from the ACTUAL cleaned in-memory text, never re-reading the uncleaned source directory", () => {
+  const climateIntro =
+    "This article documents events, research findings, scientific and technological advances, and human actions to measure, predict, mitigate, and adapt to the effects of global warming and climate change—during the year 2022.";
+  const summaries = padWords("Summaries\n\nSpecific year content goes here for the artifact-write test.", 280);
+  const rawText = `${climateIntro}\n\n${summaries}`;
+  const sourceDir = writeSyntheticBulkSource([{ docId: "A-artifact-clim", family: "A_wikipedia", title: "2022 in climate change", text: rawText }]);
+  const outputDir = mkdtempSync(join("D:/tmp", "scb-artifact-out-"));
+  try {
+    const { docs } = loadBulkRecords(sourceDir);
+    assert.equal(docs.length, 1);
+    const result = runProductionPacker(docs, "run-g5", sourceDir);
+    writeProductionArtifact(sourceDir, outputDir, result);
+
+    const writtenText = readFileSync(join(outputDir, "raw", "A-artifact-clim.txt"), "utf8");
+    assert.ok(!writtenText.includes("This article documents events"), "the artifact's raw/ copy must reflect the CLEANED text, not the original uncleaned source directory");
+    assert.equal(writtenText, docs[0].text, "must exactly match the in-memory text that was actually indexed/hashed");
+
+    // sanity: the ORIGINAL uncleaned file on disk still has the intro untouched
+    // (loadBulkRecords/writeProductionArtifact must never mutate the source dir)
+    const originalOnDisk = readFileSync(join(sourceDir, "raw", "A-artifact-clim.txt"), "utf8");
+    assert.ok(originalOnDisk.includes("This article documents events"), "the source directory itself must remain untouched");
+  } finally {
+    rmSync(sourceDir, { recursive: true, force: true });
+    rmSync(outputDir, { recursive: true, force: true });
+  }
 });
 
 // ═══════════════════════════════════════════════════════════════════════

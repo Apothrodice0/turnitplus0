@@ -442,7 +442,11 @@ function writeMinimalSelectiveCorpusArtifact(dir) {
 }
 
 function buildFullManifestEntriesFromDir(dir) {
-  const entries = [];
+  const entries = [
+    { key: "corpus-version.json", bytes: readFileSync(join(dir, "corpus-version.json")) },
+    { key: "packed/docmap.tsv", bytes: readFileSync(join(dir, "packed", "docmap.tsv")) },
+    { key: "packed/stopset.bin", bytes: readFileSync(join(dir, "packed", "stopset.bin")) },
+  ];
   for (let s = 0; s < 256; s++) {
     const key = shardKeyFor(s);
     const bytes = readFileSync(join(dir, key));

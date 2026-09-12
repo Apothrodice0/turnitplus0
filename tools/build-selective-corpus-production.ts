@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, mkdirSync, existsSync, copyFileSync, statSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -11,6 +11,7 @@ import {
   SELECTIVE_CORPUS_SHINGLE_SIZE,
   SELECTIVE_CORPUS_STOP_DF,
 } from "../lib/selective-corpus/constants";
+import { cleanSourceDocument, MIN_ANALYZABLE_WORD_COUNT } from "../lib/selective-corpus/corpus-cleaning";
 
 /**
  * Selective Corpus PRODUCTION packer — builds a fixture-free artifact from the
@@ -117,15 +118,37 @@ function sha256Hex(s: string): string {
   return createHash("sha256").update(s, "utf8").digest("hex");
 }
 
+export type CleaningReport = {
+  totalRecordsConsidered: number;
+  unchangedCount: number;
+  cleanedCount: number;
+  excludedCount: number;
+  cleanedByRule: Record<string, number>;
+  excludedByReason: Record<string, number>;
+};
+
+function emptyCleaningReport(): CleaningReport {
+  return { totalRecordsConsidered: 0, unchangedCount: 0, cleanedCount: 0, excludedCount: 0, cleanedByRule: {}, excludedByReason: {} };
+}
+
 /** Reads ONLY bulk-source-manifest.jsonl (never packed/docmap.tsv, which may
  *  carry fixture rows in the dev/regression artifact) -- the pre-dedup bulk
  *  population, exactly mirroring the historical bulk-ingest Phase 2 load
- *  (status "OK", raw text present, >=250 words) with the Track_C fold-in
- *  block simply never present in this file at all. */
-export function loadBulkRecords(sourceArtifactDir: string): ProductionDoc[] {
+ *  (status "OK", raw text present, >=250 words after cleaning) with the
+ *  Track_C fold-in block simply never present in this file at all.
+ *
+ *  Applies the deterministic, source-family-aware corpus-cleaning policy
+ *  (lib/selective-corpus/corpus-cleaning.ts) to every candidate's raw text
+ *  BEFORE tokenizing/hashing: a document the policy excludes never reaches
+ *  the output population, and a document the policy cleans gets its
+ *  contentHash/canonicalTextHash recomputed fresh from the cleaned text
+ *  (the original manifest's hash fields, computed over the UNCLEANED text,
+ *  would otherwise silently misdescribe the indexed content). */
+export function loadBulkRecords(sourceArtifactDir: string): { docs: ProductionDoc[]; cleaningReport: CleaningReport } {
   const manifestPath = join(sourceArtifactDir, "bulk-source-manifest.jsonl");
   const lines = readFileSync(manifestPath, "utf8").split("\n").filter(Boolean);
   const docs: ProductionDoc[] = [];
+  const cleaningReport = emptyCleaningReport();
   for (const line of lines) {
     let r: BulkManifestRecord;
     try {
@@ -136,9 +159,29 @@ export function loadBulkRecords(sourceArtifactDir: string): ProductionDoc[] {
     if (r.status !== "OK") continue;
     const rawPath = join(sourceArtifactDir, "raw", `${r.docId}.txt`);
     if (!existsSync(rawPath)) continue;
-    const text = readFileSync(rawPath, "utf8");
+    const rawText = readFileSync(rawPath, "utf8");
+
+    cleaningReport.totalRecordsConsidered++;
+    const cleaning = cleanSourceDocument(rawText, { family: r.family, title: r.title });
+    if (cleaning.action === "excluded") {
+      cleaningReport.excludedCount++;
+      const reasonKey = cleaning.reason ?? "unknown";
+      cleaningReport.excludedByReason[reasonKey] = (cleaningReport.excludedByReason[reasonKey] ?? 0) + 1;
+      continue;
+    }
+    if (cleaning.action === "cleaned") {
+      cleaningReport.cleanedCount++;
+      const ruleKey = cleaning.rule ?? "unknown";
+      cleaningReport.cleanedByRule[ruleKey] = (cleaningReport.cleanedByRule[ruleKey] ?? 0) + 1;
+    } else {
+      cleaningReport.unchangedCount++;
+    }
+
+    const text = cleaning.text;
     const words = tokens(text);
-    if (words.length < 250) continue;
+    if (words.length < MIN_ANALYZABLE_WORD_COUNT) continue; // safety net for "unchanged" docs already short pre-cleaning
+
+    const textChanged = cleaning.action === "cleaned";
     docs.push({
       rawId: `bulk:${r.docId}`,
       family: r.family,
@@ -151,15 +194,15 @@ export function loadBulkRecords(sourceArtifactDir: string): ProductionDoc[] {
       workVersionId: r.pageid ? `pageid:${r.pageid}` : null,
       license: r.license,
       interpretationLabel: r.interpretationLabel || "ORDINARY_REFERENCE",
-      contentHash: r.contentHash || sha256Hex(text),
-      canonicalTextHash: r.canonicalTextHash || canonicalSha256(text),
+      contentHash: textChanged ? sha256Hex(text) : r.contentHash || sha256Hex(text),
+      canonicalTextHash: textChanged ? canonicalSha256(text) : r.canonicalTextHash || canonicalSha256(text),
       text,
       words,
       wordCount: words.length,
     });
   }
   assertNoFixtureContamination(docs);
-  return docs;
+  return { docs, cleaningReport };
 }
 
 export type DedupResult = {
@@ -386,7 +429,7 @@ export function buildCorpusVersionJson(
   for (const d of kept) categoryDistribution[d.family] = (categoryDistribution[d.family] ?? 0) + 1;
   return {
     corpusVersion: SELECTIVE_CORPUS_VERSION,
-    buildLine: "production-v1",
+    buildLine: "production-v2-cleaned",
     runId,
     generatedAt: new Date().toISOString(),
     corpusIdentityDigest: digest,
@@ -423,7 +466,14 @@ export function runProductionPacker(records: ProductionDoc[], runId: string, sou
 }
 
 /** Writes the artifact to a BRAND NEW output directory. Never touches
- *  sourceArtifactDir except to read raw text for copying. */
+ *  sourceArtifactDir except (historically) to read raw text -- as of the
+ *  corpus-cleaning integration, raw/<id>.txt is written from each kept
+ *  doc's OWN in-memory `text` field (the text actually indexed/hashed/
+ *  fingerprinted), never copied from sourceArtifactDir. Copying from disk
+ *  would silently re-introduce the UNCLEANED source text into the artifact
+ *  that lib/selective-corpus/source-loader.ts serves at runtime for
+ *  candidate/verification text -- a real mismatch between what was indexed
+ *  and what gets compared during admission, not merely a cosmetic one. */
 export function writeProductionArtifact(sourceArtifactDir: string, outputDir: string, result: ProductionPackResult): void {
   const packedDir = join(outputDir, "packed");
   const rawDir = join(outputDir, "raw");
@@ -439,7 +489,7 @@ export function writeProductionArtifact(sourceArtifactDir: string, outputDir: st
 
   for (const d of result.dedup.kept) {
     const id = d.rawId.slice(5); // strip "bulk:"
-    copyFileSync(join(sourceArtifactDir, "raw", `${id}.txt`), join(rawDir, `${id}.txt`));
+    writeFileSync(join(rawDir, `${id}.txt`), d.text, "utf8");
   }
 
   const report = {
@@ -472,8 +522,12 @@ async function main(): Promise<void> {
   console.log(`[production-packer] output: ${outputDir}`);
 
   const t0 = Date.now();
-  const records = loadBulkRecords(sourceArtifactDir);
-  console.log(`[production-packer] loaded ${records.length} pre-dedup bulk records (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
+  const { docs: records, cleaningReport } = loadBulkRecords(sourceArtifactDir);
+  console.log(
+    `[production-packer] loaded ${records.length} pre-dedup bulk records ` +
+      `(cleaning: ${cleaningReport.unchangedCount} unchanged, ${cleaningReport.cleanedCount} cleaned, ${cleaningReport.excludedCount} excluded) ` +
+      `(${((Date.now() - t0) / 1000).toFixed(1)}s)`,
+  );
 
   const result = runProductionPacker(records, runId, sourceArtifactDir);
   console.log(
@@ -487,6 +541,7 @@ async function main(): Promise<void> {
   console.log(`[production-packer] corpusIdentityDigest: ${result.digest}`);
 
   writeProductionArtifact(sourceArtifactDir, outputDir, result);
+  writeFileSync(join(outputDir, "cleaning-report.json"), JSON.stringify(cleaningReport, null, 2));
   console.log(`[production-packer] BUILD DONE in ${((Date.now() - t0) / 1000).toFixed(1)}s -> ${outputDir}`);
 }
 

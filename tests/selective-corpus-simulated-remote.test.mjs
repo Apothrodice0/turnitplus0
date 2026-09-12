@@ -454,10 +454,9 @@ test("integrity manifest: an object with no manifest entry fails closed as UNKNO
   );
 });
 
-function writeFullLocalArtifact(dir, { withManifest = false, excludeShards = [] } = {}) {
+function writeFullLocalArtifact(dir, { withManifest = false, excludeShards = [], excludeControlEntries = [] } = {}) {
   mkdirSync(join(dir, "packed"), { recursive: true });
-  writeFileSync(
-    join(dir, "corpus-version.json"),
+  const corpusVersionBytes = Buffer.from(
     JSON.stringify({
       corpusVersion: "selective-corpus-v1",
       corpusIdentityDigest: SELECTIVE_CORPUS_EXPECTED_DIGEST,
@@ -468,9 +467,22 @@ function writeFullLocalArtifact(dir, { withManifest = false, excludeShards = [] 
       documentCount: 1,
     }),
   );
-  writeFileSync(join(dir, "packed", "docmap.tsv"), "0\ta\tA_wikipedia\tbulk:a\t500\tORDINARY_REFERENCE");
-  writeFileSync(join(dir, "packed", "stopset.bin"), Buffer.alloc(0));
-  const entries = [];
+  writeFileSync(join(dir, "corpus-version.json"), corpusVersionBytes);
+  const docmapBytes = Buffer.from("0\ta\tA_wikipedia\tbulk:a\t500\tORDINARY_REFERENCE");
+  writeFileSync(join(dir, "packed", "docmap.tsv"), docmapBytes);
+  const stopsetBytes = Buffer.alloc(0);
+  writeFileSync(join(dir, "packed", "stopset.bin"), stopsetBytes);
+  // The 3 control/meta objects MUST be integrity-protected too (see
+  // lib/selective-corpus/artifact.ts's trust-order fix) -- included here by
+  // default so every existing test fixture reflects the real, established
+  // package contract; `excludeControlEntries` lets a test deliberately omit
+  // one to prove the loader fails closed on a missing manifest entry.
+  const controlEntries = [
+    { key: "corpus-version.json", bytes: corpusVersionBytes },
+    { key: "packed/docmap.tsv", bytes: docmapBytes },
+    { key: "packed/stopset.bin", bytes: stopsetBytes },
+  ].filter((e) => !excludeControlEntries.includes(e.key));
+  const entries = [...controlEntries];
   for (let s = 0; s < 256; s++) {
     const bytes = Buffer.alloc(4);
     const key = shardKeyFor(s);
@@ -598,7 +610,11 @@ test("integrity-required mode: non-zero shard manifest entry present but physica
 test("integrity-required mode: non-zero shard integrity mismatch at query time => zero evidence, INTEGRITY_MISMATCH", async () => {
   const dir = mkdtempSync(join(tmpdir(), "scv-remote-shard31-mismatch-"));
   writeFullLocalArtifact(dir, { withManifest: false });
-  const entries = [];
+  const entries = [
+    { key: "corpus-version.json", bytes: readFileSync(join(dir, "corpus-version.json")) },
+    { key: "packed/docmap.tsv", bytes: readFileSync(join(dir, "packed", "docmap.tsv")) },
+    { key: "packed/stopset.bin", bytes: readFileSync(join(dir, "packed", "stopset.bin")) },
+  ];
   for (let s = 0; s < 256; s++) {
     const bytes = readFileSync(join(dir, "packed", `shard-${String(s).padStart(3, "0")}.bin`));
     entries.push(s === 31 ? { key: shardKeyFor(s), bytes, sha256Override: "f".repeat(64) } : { key: shardKeyFor(s), bytes });
@@ -686,6 +702,146 @@ test("integrity-required mode: different adapters sharing a nominal path do not 
 });
 
 // ═══════════════════════════════════════════════════════════════════════
+// 11B. CONTROL-OBJECT (corpus-version.json / packed/docmap.tsv /
+//      packed/stopset.bin) BOOTSTRAP-TIME INTEGRITY ENFORCEMENT
+//
+// Proves the loader trust-order fix in lib/selective-corpus/artifact.ts:
+// in integrity-required mode, these 3 bootstrap objects are read and
+// VERIFIED against object-integrity.json BEFORE their bytes are parsed or
+// trusted -- not merely listed in the manifest. Each corruption below is
+// deliberately kept syntactically/structurally valid (valid JSON, valid TSV
+// row shape, a readable binary blob) so a failure can only be attributable
+// to integrity verification, never to a downstream parse error.
+// ═══════════════════════════════════════════════════════════════════════
+
+const CONTROL_KEYS = ["corpus-version.json", "packed/docmap.tsv", "packed/stopset.bin"];
+
+test("control objects: valid package with all 3 control entries => integrity-required bootstrap succeeds normally", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "scv-remote-control-valid-"));
+  writeFullLocalArtifact(dir, { withManifest: true });
+  clearSelectiveCorpusArtifactCache();
+  const artifact = await loadSelectiveCorpusArtifact(dir, { integrityMode: "integrity-required" });
+  assert.ok(artifact.integrity, "manifest was loaded and attached");
+  assert.equal(artifact.corpusVersion, "selective-corpus-v1");
+  assert.equal(artifact.corpusDigest, SELECTIVE_CORPUS_EXPECTED_DIGEST);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+for (const missingKey of CONTROL_KEYS) {
+  test(`control objects: manifest entry for ${missingKey} absent (physical file still exists) => bootstrap fails closed`, async () => {
+    const dir = mkdtempSync(join(tmpdir(), "scv-remote-control-missing-entry-"));
+    writeFullLocalArtifact(dir, { withManifest: true, excludeControlEntries: [missingKey] });
+    // sanity: the physical file is genuinely still present on disk
+    assert.ok(statSync(join(dir, ...missingKey.split("/"))).isFile(), "physical file must still exist -- only the manifest entry is missing");
+    clearSelectiveCorpusArtifactCache();
+    await assert.rejects(
+      () => loadSelectiveCorpusArtifact(dir, { integrityMode: "integrity-required" }),
+      (e) => {
+        assert.ok(e instanceof SelectiveCorpusArtifactError, "must be the established typed artifact error");
+        assert.equal(e.code, "CORRUPT");
+        assert.match(e.message, /failed integrity verification/);
+        assert.match(e.message, new RegExp(missingKey.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+        return true;
+      },
+    );
+    rmSync(dir, { recursive: true, force: true });
+  });
+}
+
+test("control objects: corpus-version.json bytes corrupted (still valid JSON, unrelated field changed) => fails on integrity, not on JSON/version/digest checks", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "scv-remote-control-corrupt-version-"));
+  writeFullLocalArtifact(dir, { withManifest: true });
+  const original = JSON.parse(readFileSync(join(dir, "corpus-version.json"), "utf8"));
+  // change a field the loader never validates (documentCount) -- stays valid
+  // JSON, and corpusVersion/digest/winnow/shingle/stopPolicy are untouched,
+  // so if this is caught it can ONLY be the integrity check catching it.
+  const corrupted = { ...original, documentCount: (original.documentCount ?? 0) + 999 };
+  writeFileSync(join(dir, "corpus-version.json"), JSON.stringify(corrupted));
+  assert.doesNotThrow(() => JSON.parse(readFileSync(join(dir, "corpus-version.json"), "utf8")), "corruption must remain valid JSON");
+
+  clearSelectiveCorpusArtifactCache();
+  await assert.rejects(
+    () => loadSelectiveCorpusArtifact(dir, { integrityMode: "integrity-required" }),
+    (e) => {
+      assert.ok(e instanceof SelectiveCorpusArtifactError);
+      assert.equal(e.code, "CORRUPT");
+      assert.match(e.message, /corpus-version\.json failed integrity verification/, "must be attributed to integrity, not to WRONG_VERSION/WRONG_DIGEST/JSON parse");
+      return true;
+    },
+  );
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("control objects: packed/docmap.tsv bytes corrupted (still valid TSV row shape) => fails on integrity, not on TSV parsing", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "scv-remote-control-corrupt-docmap-"));
+  writeFullLocalArtifact(dir, { withManifest: true });
+  const original = readFileSync(join(dir, "packed", "docmap.tsv"), "utf8");
+  const fields = original.split("\t");
+  fields[4] = String(Number(fields[4]) + 1); // wordCount, off by one -- structurally still a valid TSV row
+  const corrupted = fields.join("\t");
+  writeFileSync(join(dir, "packed", "docmap.tsv"), corrupted);
+  assert.equal(corrupted.split("\t").length, original.split("\t").length, "corruption must preserve valid TSV row structure");
+
+  clearSelectiveCorpusArtifactCache();
+  await assert.rejects(
+    () => loadSelectiveCorpusArtifact(dir, { integrityMode: "integrity-required" }),
+    (e) => {
+      assert.ok(e instanceof SelectiveCorpusArtifactError);
+      assert.equal(e.code, "CORRUPT");
+      assert.match(e.message, /packed\/docmap\.tsv failed integrity verification/, "must be attributed to integrity, not to a TSV parse/empty-docmap error");
+      return true;
+    },
+  );
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("control objects: packed/stopset.bin bytes corrupted (still a readable binary blob) => fails on integrity, not on decode", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "scv-remote-control-corrupt-stopset-"));
+  // stopset.bin is empty (0 hashes) in writeFullLocalArtifact's fixture, so
+  // give it real content here to have bytes worth flipping.
+  writeFullLocalArtifact(dir, { withManifest: false });
+  const realStopBytes = Buffer.concat([Buffer.alloc(8, 0x11), Buffer.alloc(8, 0x22)]); // 2 fake hashes
+  writeFileSync(join(dir, "packed", "stopset.bin"), realStopBytes);
+  const entries = [
+    { key: "corpus-version.json", bytes: readFileSync(join(dir, "corpus-version.json")) },
+    { key: "packed/docmap.tsv", bytes: readFileSync(join(dir, "packed", "docmap.tsv")) },
+    { key: "packed/stopset.bin", bytes: realStopBytes }, // manifest reflects the ORIGINAL bytes
+  ];
+  for (let s = 0; s < 256; s++) {
+    entries.push({ key: shardKeyFor(s), bytes: readFileSync(join(dir, "packed", `shard-${String(s).padStart(3, "0")}.bin`)) });
+  }
+  writeFileSync(join(dir, "object-integrity.json"), buildManifestBytes(entries));
+
+  const corrupted = Buffer.from(realStopBytes);
+  corrupted[3] = corrupted[3] ^ 0xff; // flip a byte -- still exactly 16 bytes, still cleanly decodes as 2 hashes
+  writeFileSync(join(dir, "packed", "stopset.bin"), corrupted);
+  assert.equal(corrupted.length, realStopBytes.length, "corruption must preserve the readable binary structure (same length, decodes fine)");
+
+  clearSelectiveCorpusArtifactCache();
+  await assert.rejects(
+    () => loadSelectiveCorpusArtifact(dir, { integrityMode: "integrity-required" }),
+    (e) => {
+      assert.ok(e instanceof SelectiveCorpusArtifactError);
+      assert.equal(e.code, "CORRUPT");
+      assert.match(e.message, /packed\/stopset\.bin failed integrity verification/, "must be attributed to integrity, not to a decode error");
+      return true;
+    },
+  );
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("control objects: local-compatible mode (no integrityMode given) ignores control-object corruption entirely -- existing non-integrity workflows are unaffected", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "scv-remote-control-localcompat-corrupt-"));
+  writeFullLocalArtifact(dir, { withManifest: false }); // no manifest at all -- pure local-compatible fixture
+  const original = JSON.parse(readFileSync(join(dir, "corpus-version.json"), "utf8"));
+  writeFileSync(join(dir, "corpus-version.json"), JSON.stringify({ ...original, documentCount: 12345 }));
+  clearSelectiveCorpusArtifactCache();
+  const artifact = await loadSelectiveCorpusArtifact(dir); // default local-compatible mode
+  assert.equal(artifact.integrity, undefined, "local-compatible mode never attaches an integrity manifest");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
 // 12. LOCAL vs SIMULATED-REMOTE/INTEGRITY-REQUIRED EQUIVALENCE
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -720,7 +876,11 @@ test(
         .filter((id) => typeof id === "string" && id.startsWith("bulk:"))
         .map((id) => id.slice(5));
 
-      const integrityEntries = [];
+      const integrityEntries = [
+        { key: "corpus-version.json", bytes: readFileSync(join(ARTIFACT, "corpus-version.json")) },
+        { key: "packed/docmap.tsv", bytes: readFileSync(join(ARTIFACT, "packed", "docmap.tsv")) },
+        { key: "packed/stopset.bin", bytes: readFileSync(join(ARTIFACT, "packed", "stopset.bin")) },
+      ];
       for (let s = 0; s < 256; s++) {
         const key = shardKeyFor(s);
         const bytes = readFileSync(join(ARTIFACT, key));
