@@ -65,8 +65,5 @@ next-env.d.ts
 # vinext build cache
 .vinext/
 
-.vercel
-.env*
-
 # Generated Graphify knowledge graph (rebuild locally with `graphify update .`)
 /graphify-out/
