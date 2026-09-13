@@ -111,6 +111,7 @@ export async function runSelectiveCorpusShadow(
         state: "COMPLETED",
         corpusVersion: artifact.corpusVersion,
         corpusDigest: artifact.corpusDigest,
+        documentCount: artifact.documentCount,
         candidateCount: 0,
         topCandidateRanks: [],
         verifiedSourceCount: 0,
@@ -158,6 +159,12 @@ export async function runSelectiveCorpusShadow(
           failureMessage: "time budget exceeded during Stage B",
           corpusVersion: artifact.corpusVersion,
           corpusDigest: artifact.corpusDigest,
+          documentCount: artifact.documentCount,
+          // Stage A itself always finishes before this check can fire (it runs
+          // unconditionally before the Stage B loop below), so its own
+          // duration is a real, already-computed value here — Stage B's is
+          // not, since it timed out mid-loop; omitted rather than guessed.
+          runtimeStageAMs: +stageAMs.toFixed(2),
           ...(timedOutShardFailures.length > 0
             ? {
                 degradedShardCount: timedOutShardFailures.length,
@@ -249,6 +256,7 @@ export async function runSelectiveCorpusShadow(
       state: "COMPLETED",
       corpusVersion: artifact.corpusVersion,
       corpusDigest: artifact.corpusDigest,
+      documentCount: artifact.documentCount,
       candidateCount: stageA.ranked.length,
       topCandidateRanks: admittedKeys.map((k) => rankByKey.get(k) ?? -1).sort((a, b) => a - b),
       stageATruncated: stageA.truncated,

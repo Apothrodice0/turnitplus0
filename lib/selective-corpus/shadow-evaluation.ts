@@ -1,8 +1,10 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { performance } from "node:perf_hooks";
 import { isSelectiveCorpusShadowEnabled } from "./flag";
 import { getSelectiveCorpusDiagnosticsDir } from "./config";
 import { runSelectiveCorpusShadow } from "./shadow";
+import { logSelectiveCorpusShadowTelemetry } from "./shadow-telemetry";
 import type { UnifiedSimilarityResult } from "../unified-similarity";
 import type { SelectiveCorpusShadowResult } from "./types";
 
@@ -18,6 +20,12 @@ import type { SelectiveCorpusShadowResult } from "./types";
  * is NO DB read or write here: this slice's telemetry sink is a local file,
  * never a migration.
  *
+ * PRODUCTION TELEMETRY: exactly one structured "selective_corpus_shadow"
+ * event (see shadow-telemetry.ts) is logged per terminal result, covering
+ * every state including DISABLED — this replaces the older PARTIAL-only,
+ * reportId-bearing console.warn (reportId is deliberately not carried into
+ * the new event; see shadow-telemetry.ts's privacy-allowlist rationale).
+ *
  * NEVER THROWS.
  */
 export async function runSelectiveCorpusShadowEvaluation(params: {
@@ -26,8 +34,11 @@ export async function runSelectiveCorpusShadowEvaluation(params: {
   authoritativeUnifiedSimilarity: UnifiedSimilarityResult | null;
 }): Promise<SelectiveCorpusShadowResult> {
   if (!isSelectiveCorpusShadowEnabled()) {
-    return { state: "DISABLED", evaluatorVersion: "selective-corpus-shadow-v1" };
+    const disabled: SelectiveCorpusShadowResult = { state: "DISABLED", evaluatorVersion: "selective-corpus-shadow-v1" };
+    logSelectiveCorpusShadowTelemetry(disabled, 0);
+    return disabled;
   }
+  const tStart = performance.now();
   try {
     const result = await runSelectiveCorpusShadow({
       canonicalSubmissionText: params.rawText,
@@ -38,17 +49,7 @@ export async function runSelectiveCorpusShadowEvaluation(params: {
           }
         : null,
     });
-
-    // PARTIAL means the packed artifact lost one or more shards AFTER it passed
-    // initialization — the discovery index is now incomplete. Surface it in the
-    // server log even when no diagnostics dir is configured, so the degradation
-    // is not invisible (still telemetry-only — the authoritative score is
-    // unaffected either way).
-    if (result.state === "PARTIAL") {
-      console.warn(
-        `selective-corpus shadow: DEGRADED index for report=${params.reportId} — ${result.degradedDetail ?? "packed shards unavailable at query time"}`,
-      );
-    }
+    logSelectiveCorpusShadowTelemetry(result, performance.now() - tStart);
 
     const dir = getSelectiveCorpusDiagnosticsDir();
     if (dir) {
@@ -66,11 +67,13 @@ export async function runSelectiveCorpusShadowEvaluation(params: {
     }
     return result;
   } catch (err) {
-    return {
+    const failed: SelectiveCorpusShadowResult = {
       state: "FAILED",
       evaluatorVersion: "selective-corpus-shadow-v1",
       failureCode: "UNEXPECTED",
       failureMessage: err instanceof Error ? err.message : String(err),
     };
+    logSelectiveCorpusShadowTelemetry(failed, performance.now() - tStart);
+    return failed;
   }
 }

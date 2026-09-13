@@ -30,6 +30,10 @@ export type SelectiveCorpusShadowResult = {
   /** Present unless state is DISABLED / ARTIFACT_UNAVAILABLE. */
   corpusVersion?: string;
   corpusDigest?: string;
+  /** The loaded artifact's own document count — same presence rule as
+   *  corpusDigest/corpusVersion above (sourced directly from the artifact
+   *  object already in scope wherever those are; never fabricated). */
+  documentCount?: number;
 
   /** Stage A discovery — fingerprint hits, which NEVER score. */
   candidateCount?: number;
