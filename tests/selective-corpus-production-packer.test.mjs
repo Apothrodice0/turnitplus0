@@ -26,10 +26,28 @@ import {
   SELECTIVE_CORPUS_DEV_REGRESSION_DIGEST,
 } from "../lib/selective-corpus/constants.ts";
 
-const PRODUCTION_ARTIFACT = "D:/TurnitPlusTemp/selective-corpus-production-v1/run-20260912-023011";
+// The V4 build (production-v2-cleaned, corpusIdentityDigest matches
+// SELECTIVE_CORPUS_EXPECTED_DIGEST): 9,176 documents, all 256 packed shards,
+// object-integrity.json sha256 a4dea687cff4cd838662b7a7131e0e96a7089435e59480eb11d21b948e4598e0
+// -- the exact package already remotely rehash-verified (9,435/9,435 protected
+// objects PASS). This directory is pre-existing and read-only here; nothing
+// rebuilds or copies it.
+const PRODUCTION_ARTIFACT = "D:/TurnitPlusTemp/selective-corpus-production-v4-rebuild/run-20260912-214919-package-fixed";
 const productionArtifactPresent = (() => {
   try {
     return statSync(join(PRODUCTION_ARTIFACT, "corpus-version.json")).isFile();
+  } catch {
+    return false;
+  }
+})();
+// The OLDER V1 build -- correctly no longer trusted by default now that
+// SELECTIVE_CORPUS_EXPECTED_DIGEST points at V4. Kept ONLY to prove the
+// default loader still fails closed against this specific, real,
+// once-trusted artifact -- never to make it acceptable again.
+const V1_ARTIFACT = "D:/TurnitPlusTemp/selective-corpus-production-v1/run-20260912-023011";
+const v1ArtifactPresent = (() => {
+  try {
+    return statSync(join(V1_ARTIFACT, "corpus-version.json")).isFile();
   } catch {
     return false;
   }
@@ -346,7 +364,15 @@ test("digest A: default/production loader accepts the new clean production artif
   clearSelectiveCorpusArtifactCache();
   const artifact = await loadSelectiveCorpusArtifact(PRODUCTION_ARTIFACT); // no override -- the default production path
   assert.equal(artifact.corpusDigest, SELECTIVE_CORPUS_EXPECTED_DIGEST);
-  assert.equal(artifact.documentCount, 9234);
+  assert.equal(artifact.documentCount, 9176);
+});
+
+test("digest E: default/production loader rejects the OLD V1 artifact with WRONG_DIGEST -- V1 is correctly no longer trusted", { skip: !v1ArtifactPresent }, async () => {
+  clearSelectiveCorpusArtifactCache();
+  await assert.rejects(
+    () => loadSelectiveCorpusArtifact(V1_ARTIFACT), // no override -- must fail closed now that trust has moved to V4
+    (e) => e instanceof SelectiveCorpusArtifactError && e.code === "WRONG_DIGEST",
+  );
 });
 
 test("digest B: default/production loader rejects the OLD fixture-inclusive dev/regression artifact with WRONG_DIGEST", { skip: !devRegressionArtifactPresent }, async () => {

@@ -149,12 +149,21 @@ export const SELECTIVE_CORPUS_TRANSIENT_RETRY_COOLDOWN_MS = 2_000;
  * local/vercel-blob branches) ever does. Bump only alongside a deliberately
  * re-validated corpus rebuild.
  *
- * This is the PRODUCTION-CLEAN "production-v1" build (9,234 bulk documents,
- * zero Track_C regression fixtures) — see build-report.json under
- * D:/TurnitPlusTemp/selective-corpus-production-v1/run-20260912-023011/.
+ * This is the V4 build (9,436 runtime objects: 9,176 sources + 256 shards +
+ * 3 controls + 1 object-integrity.json), remotely verified against the
+ * future Vercel Blob runtime prefix
+ * selective-corpus/selective-corpus-v1/7b1a2fd17c11383361b628fb9639bcb30eee0c5e2ee9c831fde2b0f8a368cfd6
+ * (9,435/9,435 protected-object rehash PASS; integrity manifest sha256
+ * a4dea687cff4cd838662b7a7131e0e96a7089435e59480eb11d21b948e4598e0). This
+ * constant change alone does NOT configure that remote prefix — see
+ * config.ts/SELECTIVE_CORPUS_BLOB_PREFIX for that separate step — and no
+ * local artifact directory currently on disk carries this digest, so any
+ * local test that loads a real local artifact by its DEFAULT (unoverridden)
+ * digest will correctly fail closed (WRONG_DIGEST) until a matching local
+ * V4 artifact exists.
  */
 export const SELECTIVE_CORPUS_EXPECTED_DIGEST =
-  "4fcfdd6fbc25f133d376fb9bdecc5a48a3f703c357406710bd40bed389efccd6";
+  "7b1a2fd17c11383361b628fb9639bcb30eee0c5e2ee9c831fde2b0f8a368cfd6";
 
 /**
  * The OLDER "bulk-v1" dev/regression digest — a fixture-INCLUSIVE build (9,211

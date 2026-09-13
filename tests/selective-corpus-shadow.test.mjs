@@ -29,8 +29,10 @@ const ARTIFACT = "D:/TurnitPlusTemp/selective-corpus-bulk-v1/run-20260909-224038
 const artifactPresent = (() => {
   try { return statSync(join(ARTIFACT, "corpus-version.json")).isFile(); } catch { return false; }
 })();
-// the current PRODUCTION (fixture-free) artifact -- matches SELECTIVE_CORPUS_EXPECTED_DIGEST by default
-const PRODUCTION_ARTIFACT = "D:/TurnitPlusTemp/selective-corpus-production-v1/run-20260912-023011";
+// the current PRODUCTION (fixture-free) V4 artifact -- matches
+// SELECTIVE_CORPUS_EXPECTED_DIGEST by default; the same pre-existing,
+// already remotely-verified package used by tests/selective-corpus-production-packer.test.mjs.
+const PRODUCTION_ARTIFACT = "D:/TurnitPlusTemp/selective-corpus-production-v4-rebuild/run-20260912-214919-package-fixed";
 const productionArtifactPresent = (() => {
   try { return statSync(join(PRODUCTION_ARTIFACT, "corpus-version.json")).isFile(); } catch { return false; }
 })();
