@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import fs from 'fs';
 import path from 'path';
+import { tmpdir } from 'node:os';
 import { webcrypto, createHash, randomUUID } from 'node:crypto';
 import { createClient } from '@libsql/client';
 import { applyMigrationsLibsql } from '../lib/ingest.js';
@@ -16,6 +17,8 @@ import { computeUnifiedSimilarity } from '../lib/unified-similarity.ts';
 import { scheduleReportShadowEvaluations } from '../lib/report-shadow-evaluations.ts';
 import { PROPOSED_ACCEPTANCE_POLICY_VERSION } from '../lib/e8o-historical-match-policy.ts';
 import { DEVICE_PROVENANCE_SHADOW_POLICY_VERSION } from '../lib/device-provenance-shadow.ts';
+import { SELECTIVE_CORPUS_EXPECTED_DIGEST } from '../lib/selective-corpus/constants.ts';
+import { clearSelectiveCorpusArtifactCache } from '../lib/selective-corpus/artifact.ts';
 import {
   derivePassportId,
   buildDevicePassportSignedMessage,
@@ -524,4 +527,179 @@ test('8. auth still gates GET, non-admin responses still carry no internal match
   }
 });
 
-console.log('report-shadow-evaluation-trigger: POST trigger + GET fallback + idempotency + score invariance + privacy passed');
+// ===========================================================================
+// 9. GET-fallback Selective Corpus idempotency gating (includeSelectiveCorpus)
+// ===========================================================================
+//
+// Selective Corpus shadow (lib/selective-corpus/) is the 5th evaluator this
+// same scheduler runs, appended after the 4 above. Unlike them it writes NO
+// DB row of its own — its only observable output is a structured
+// "selective_corpus_shadow" console line (lib/selective-corpus/shadow-
+// telemetry.ts) and, when SELECTIVE_CORPUS_DIAGNOSTICS_DIR is set, a local
+// diagnostics JSON file named by reportId. Both are used below as the
+// "did it run" signal, at two independent levels: a fast, artifact-free,
+// direct call to the shared scheduler (console-line presence), and a real
+// end-to-end POST/GET through the actual routes (diagnostics-file presence).
+
+/** Section 9's own text generator — deliberately NOT drawn from the shared,
+ *  exactly-10-entry TEXT_POOL above (already fully consumed by tests 1-8;
+ *  this section adds 3 more callers, which would exhaust it). Uniqueness
+ *  here only needs to avoid colliding with itself across this section's own
+ *  calls, never with the pool. */
+let gateTextCounter = 0;
+function gateText() {
+  gateTextCounter += 1;
+  return `Section nine fixture paragraph number ${gateTextCounter} for the Selective Corpus GET-fallback gating tests, describing a wholly invented scenario about a research team calibrating a bespoke instrument under controlled laboratory conditions, repeating the calibration procedure several times to characterise drift before drawing any conclusion about the instrument long term stability under sustained continuous operation across a full working shift.`;
+}
+
+/** A minimal, valid, digest-matching Selective Corpus artifact: 256
+ *  well-formed EMPTY shards (matches tests/selective-corpus-shadow.test.mjs's
+ *  own writeMinimalSelectiveCorpusArtifact) — enough for the evaluator to
+ *  reach state COMPLETED (zero candidates) quickly; no real matching needed
+ *  for this section, only "did the evaluator run at all". */
+function writeMinimalSelectiveCorpusArtifactFixture(dir) {
+  fs.mkdirSync(path.join(dir, 'packed'), { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, 'corpus-version.json'),
+    JSON.stringify({
+      corpusVersion: 'selective-corpus-v1',
+      corpusIdentityDigest: SELECTIVE_CORPUS_EXPECTED_DIGEST,
+      fingerprintVersion: 'selective-corpus-fp-w15-s5-v1',
+      winnowWindow: 15,
+      shingleSize: 5,
+      stopPolicy: 'global DF>=13',
+      documentCount: 1,
+    }),
+  );
+  fs.writeFileSync(path.join(dir, 'packed', 'docmap.tsv'), '0\ta\tA_wikipedia\tbulk:a\t500\tORDINARY_REFERENCE');
+  fs.writeFileSync(path.join(dir, 'packed', 'stopset.bin'), Buffer.alloc(0));
+  for (let s = 0; s < 256; s++) {
+    fs.writeFileSync(path.join(dir, 'packed', `shard-${String(s).padStart(3, '0')}.bin`), Buffer.alloc(4));
+  }
+}
+
+/** Captures every console.log line emitted while `fn` runs, restoring
+ *  console.log unconditionally afterward (success or throw). */
+async function captureConsoleLog(fn) {
+  const lines = [];
+  const original = console.log;
+  console.log = (...args) => { lines.push(args.map(String).join(' ')); };
+  try {
+    await fn();
+  } finally {
+    console.log = original;
+  }
+  return lines;
+}
+
+test('9a. scheduleReportShadowEvaluations: default (POST shape) includes Selective Corpus telemetry; includeSelectiveCorpus:false (GET shape) excludes it — no real artifact needed (flag itself stays off, so the evaluator logs a fast DISABLED event either way, isolating ONLY the gating behavior)', async () => {
+  // No openConnection override: uses the real getReportsDbClient() default
+  // against this file's own real test DB (TURSO_DATABASE_URL, set at module
+  // load) — the same DB every other test in this file already relies on,
+  // rather than a hand-rolled mock that could silently miss a call shape one
+  // of the 4 sibling evaluators (which this call also exercises) depends on.
+  const base = {
+    reportDeviceKey: uniq('gate-dev'), reportId: uniq('gate-report'), accountId: null,
+    rawText: gateText(), productionResult: productionNoMatch(),
+    authoritativeUnifiedSimilarity: null, effectiveDeviceSelfRepresentationIds: [], authoritativeCorpusGeneration: 0,
+    authoritativeArchiveMatchedPositions: null, authoritativeExternalAcademicEvidence: null,
+  };
+
+  // POST's call site never passes includeSelectiveCorpus at all — this is exactly that shape.
+  const postShapeLines = await captureConsoleLog(() => scheduleReportShadowEvaluations({ ...base }));
+  const postShapeScLines = postShapeLines.filter((l) => l.includes('"selective_corpus_shadow"'));
+  assert.equal(postShapeScLines.length, 1, 'POST shape (default/omitted includeSelectiveCorpus) must produce exactly one Selective Corpus telemetry line');
+  assert.match(postShapeScLines[0], /"state":"DISABLED"/, 'flag itself is off in this test — a fast DISABLED event proves the evaluator was actually invoked');
+
+  // GET's call site shape — includeSelectiveCorpus explicitly false.
+  const getShapeLines = await captureConsoleLog(() => scheduleReportShadowEvaluations({ ...base, includeSelectiveCorpus: false }));
+  const getShapeScLines = getShapeLines.filter((l) => l.includes('"selective_corpus_shadow"'));
+  assert.equal(getShapeScLines.length, 0, 'GET shape (includeSelectiveCorpus:false) must produce NO Selective Corpus telemetry event at all');
+});
+
+test('9b. real POST /api/reports produces a Selective Corpus shadow diagnostics artifact (end-to-end confirmation of existing/unchanged POST behavior)', async () => {
+  const dir = fs.mkdtempSync(path.join(tmpdir(), 'scv-gate-post-'));
+  const diagDir = fs.mkdtempSync(path.join(tmpdir(), 'scv-gate-post-diag-'));
+  writeMinimalSelectiveCorpusArtifactFixture(dir);
+  clearSelectiveCorpusArtifactCache();
+  const savedEnv = {
+    SELECTIVE_CORPUS_SHADOW_ENABLED: process.env.SELECTIVE_CORPUS_SHADOW_ENABLED,
+    SELECTIVE_CORPUS_ARTIFACT_PATH: process.env.SELECTIVE_CORPUS_ARTIFACT_PATH,
+    SELECTIVE_CORPUS_DIAGNOSTICS_DIR: process.env.SELECTIVE_CORPUS_DIAGNOSTICS_DIR,
+  };
+  process.env.SELECTIVE_CORPUS_SHADOW_ENABLED = 'true';
+  process.env.SELECTIVE_CORPUS_ARTIFACT_PATH = dir;
+  process.env.SELECTIVE_CORPUS_DIAGNOSTICS_DIR = diagDir;
+  try {
+    const text = gateText();
+    const account = await signUpAccount();
+    const reportId = 'shadow-trigger-sc-post-diag';
+    const res = await postReport(account, { id: reportId, text, room: 0 });
+    assert.equal(res.status, 200);
+
+    const diagFile = path.join(diagDir, `${reportId}.selective-corpus-shadow.json`);
+    assert.ok(fs.existsSync(diagFile), 'a real POST must still produce the Selective Corpus diagnostics artifact — unchanged from before this patch');
+    const diag = JSON.parse(fs.readFileSync(diagFile, 'utf8'));
+    assert.equal(diag.reportId, reportId);
+    assert.ok(['COMPLETED', 'PARTIAL', 'TIMEOUT', 'FAILED', 'ARTIFACT_UNAVAILABLE'].includes(diag.result.state));
+  } finally {
+    for (const [k, v] of Object.entries(savedEnv)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(diagDir, { recursive: true, force: true });
+    clearSelectiveCorpusArtifactCache();
+  }
+});
+
+test('9c. real GET /api/reports/[id] fallback: sibling evaluators still run, Selective Corpus does not (end-to-end)', async () => {
+  const dir = fs.mkdtempSync(path.join(tmpdir(), 'scv-gate-get-'));
+  const diagDir = fs.mkdtempSync(path.join(tmpdir(), 'scv-gate-get-diag-'));
+  writeMinimalSelectiveCorpusArtifactFixture(dir);
+  clearSelectiveCorpusArtifactCache();
+  const savedEnv = {
+    SELECTIVE_CORPUS_SHADOW_ENABLED: process.env.SELECTIVE_CORPUS_SHADOW_ENABLED,
+    SELECTIVE_CORPUS_ARTIFACT_PATH: process.env.SELECTIVE_CORPUS_ARTIFACT_PATH,
+    SELECTIVE_CORPUS_DIAGNOSTICS_DIR: process.env.SELECTIVE_CORPUS_DIAGNOSTICS_DIR,
+  };
+  process.env.SELECTIVE_CORPUS_SHADOW_ENABLED = 'true';
+  process.env.SELECTIVE_CORPUS_ARTIFACT_PATH = dir;
+  process.env.SELECTIVE_CORPUS_DIAGNOSTICS_DIR = diagDir;
+  process.env.DEVICE_PASSPORT_ENABLED = 'true';
+  try {
+    const text = gateText();
+    await indexPriorSubmission(uniq('prior-acc'), text);
+
+    // A "legacy" report, seeded directly — POST never ran for it, so nothing
+    // (including no Selective Corpus diagnostics file) exists yet.
+    const deviceKey = uniq('legacy-sc-dev');
+    const reportId = 'shadow-trigger-sc-get-fallback';
+    const wordCount = tokens(canonicalizeText(text)).length;
+    const { passportId } = await makeAttestation(text, reportId);
+    const payload = JSON.stringify({ version: 11, id: 1, submissionId: 'sub', title: 't', text, wordCount, score: 0, archiveScore: 0, sources: [], repeats: [] });
+    await client.execute({
+      sql: `INSERT INTO saved_reports (id, device_key, submission_id, title, report_created_at, word_count, archive_score, score_band, payload_json, user_id, verified_device_passport_id)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+      args: [reportId, deviceKey, 'sub', 't', new Date().toISOString(), wordCount, 0, 'Low', payload, null, passportId],
+    });
+
+    const diagFile = path.join(diagDir, `${reportId}.selective-corpus-shadow.json`);
+    assert.equal(fs.existsSync(diagFile), false, 'sanity: no Selective Corpus diagnostics artifact exists before the report is ever viewed');
+    assert.deepEqual(await shadowRows(deviceKey, reportId), [], 'sanity: no sibling shadow rows exist before the report is ever viewed');
+
+    const account = { deviceKey, cookie: null, tag: uniq('legacy-sc') };
+    const res = await getReport(account, reportId);
+    assert.equal(res.status, 200);
+
+    const rows = await shadowRows(deviceKey, reportId);
+    assert.ok(e8pRow(rows), 'GET fallback: the historical-match shadow evaluator still ran');
+    assert.ok(deviceRow(rows), 'GET fallback: the device-provenance shadow evaluator still ran');
+    assert.equal(fs.existsSync(diagFile), false, 'GET fallback: Selective Corpus must NOT have run — no diagnostics artifact was produced');
+  } finally {
+    for (const [k, v] of Object.entries(savedEnv)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    delete process.env.DEVICE_PASSPORT_ENABLED;
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(diagDir, { recursive: true, force: true });
+    clearSelectiveCorpusArtifactCache();
+  }
+});
+
+console.log('report-shadow-evaluation-trigger: POST trigger + GET fallback + idempotency + score invariance + privacy + Selective-Corpus GET-gating passed');

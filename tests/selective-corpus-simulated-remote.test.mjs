@@ -32,6 +32,8 @@ import {
   SELECTIVE_CORPUS_STAGE_A_MAX_CANDIDATES,
   SELECTIVE_CORPUS_TIME_BUDGET_MS,
   SELECTIVE_CORPUS_HOT_SHARD_LRU,
+  SELECTIVE_CORPUS_STAGE_B_SOURCE_FETCH_CONCURRENCY,
+  SELECTIVE_CORPUS_SOURCE_TEXT_LRU,
 } from "../lib/selective-corpus/constants.ts";
 
 /**
@@ -1567,3 +1569,372 @@ test("high-fanout failure semantics: transient + permanent-missing + integrity-m
   assert.equal(collector2.getFailures().find((f) => f.shard === transientShardNum), undefined, "transient shard healed after cooldown");
   assert.equal(adapter.callCount(shardKeyFor(transientShardNum)), 2, "exactly one retry attempt after cooldown, still no hot loop");
 });
+
+// ═══════════════════════════════════════════════════════════════════════
+// 16. STAGE B BOUNDED-CONCURRENCY SOURCE-TEXT PREFETCH
+// ═══════════════════════════════════════════════════════════════════════
+//
+// Root cause under test: Stage B previously loaded each admitted candidate's
+// source text sequentially -- one network round trip per candidate, none
+// overlapping. shadow.ts now runs a bounded-concurrency PREFETCH pass over
+// stageA.topK's source text (reusing stage-a.ts's own already-proven
+// runWithBoundedConcurrency) before its sequential, ORIGINAL-rank-order
+// verification pass. Every test below uses ONLY the existing
+// SelectiveCorpusStorageAdapter / SimulatedRemoteObjectSpec test seam; no
+// production code path other than the new prefetch itself is touched, and
+// SELECTIVE_CORPUS_TIME_BUDGET_MS is asserted, never modified.
+
+let stageBFixtureCounter = 0;
+
+/**
+ * A deterministic multi-candidate Stage-B fixture: `count` distinct winnowed
+ * hashes of `submissionText`, each on its OWN distinct shard, each pointing
+ * at its own doc ordinal (0..count-1) with exactly one posting -- identical
+ * weight/matchedFingerprints for every candidate, so Stage A's own tie-break
+ * (ordinal ascending) makes stageA.topK's order exactly [0, 1, ..., count-1]
+ * regardless of this fixture's own construction order. Shard reads are
+ * always instant (delay 0) -- these tests isolate STAGE B timing only.
+ *
+ * `admitIndices` (default: all) controls which candidates' source text is
+ * the submission text itself (candidateText === submission unconditionally
+ * guarantees STRICT_SPAN admission, the same trick the earlier "det-test"
+ * fixture in this file already relies on) versus deliberately unrelated
+ * filler text that shares nothing with the submission (guaranteed
+ * rejection). `missingIndices` (default: none) omits that candidate's raw
+ * source object entirely -- the existing "source E" missing-object
+ * semantics. `delayForIndex` (default: 0) configures each candidate's raw
+ * source read latency.
+ */
+function buildStageBArtifact(submissionText, count, opts = {}) {
+  const admitIndices = opts.admitIndices ?? new Set(Array.from({ length: count }, (_, i) => i));
+  const missingIndices = opts.missingIndices ?? new Set();
+  const delayForIndex = opts.delayForIndex ?? (() => 0);
+
+  const { fingerprints } = winnowSubmissionFingerprints(submissionText);
+  const sortedFp = [...fingerprints].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  const chosen = [];
+  const seenShards = new Set();
+  for (const h of sortedFp) {
+    const shard = h.slice(0, 2);
+    if (seenShards.has(shard)) continue;
+    seenShards.add(shard);
+    chosen.push(h);
+    if (chosen.length === count) break;
+  }
+  assert.equal(chosen.length, count, `fixture sanity: need ${count} distinct-shard hashes, found ${chosen.length}`);
+
+  const objects = {};
+  for (let s = 0; s < 256; s++) objects[shardKeyFor(s)] = { bytes: Buffer.alloc(4) };
+  const docs = [];
+  for (let i = 0; i < count; i++) {
+    const hash = chosen[i];
+    const shardNum = Number.parseInt(hash.slice(0, 2), 16);
+    objects[shardKeyFor(shardNum)] = { bytes: encodeShardBytes([{ hash, ordinals: [i] }]) };
+    docs.push(minimalDoc(`bulk:doc${i}`));
+    if (!missingIndices.has(i)) {
+      const text = admitIndices.has(i) ? submissionText : "completely unrelated filler content sharing no vocabulary with the submission at all";
+      objects[`raw/doc${i}.txt`] = { bytes: Buffer.from(text, "utf8"), delayMs: delayForIndex(i) };
+    }
+  }
+
+  stageBFixtureCounter += 1;
+  const rawAdapter = createSimulatedRemoteStorageAdapter({ objects });
+  const tracking = createConcurrencyTrackingAdapter(rawAdapter);
+  const reader = new SelectiveCorpusShardReader(tracking, "packed", 256);
+  const artifact = {
+    artifactPath: `stage-b-test-${stageBFixtureCounter}`,
+    corpusVersion: "selective-corpus-v1",
+    corpusDigest: SELECTIVE_CORPUS_EXPECTED_DIGEST,
+    fingerprintVersion: "selective-corpus-fp-w15-s5-v1",
+    documentCount: count,
+    postingsAccessor: reader,
+    stopHashes: new Set(),
+    docs,
+    docByOrdinal: docs,
+    mode: "file-backed",
+    storage: tracking,
+  };
+  return { artifact, tracking, rawTextKey: (i) => `raw/doc${i}.txt` };
+}
+
+function pickShadowResult(r) {
+  return {
+    state: r.state,
+    candidateCount: r.candidateCount,
+    topCandidateRanks: r.topCandidateRanks,
+    stageATruncated: r.stageATruncated,
+    verifiedSourceCount: r.verifiedSourceCount,
+    matchedPositionCount: r.matchedPositionCount,
+    counterfactualUnifiedSimilarity: r.counterfactualUnifiedSimilarity,
+    deltaVsAuthoritative: r.deltaVsAuthoritative,
+    familyGuardActivations: r.familyGuardActivations,
+    coSourceAttributionActivations: r.coSourceAttributionActivations,
+    interpretationVersion: r.interpretationVersion,
+    interpretationCounts: r.interpretationCounts,
+    interpretationBreakdown: r.interpretationBreakdown,
+  };
+}
+
+test("stage B sanity: SELECTIVE_CORPUS_STAGE_A_TOP_K (the max candidates ever prefetched in one evaluation) fits within SELECTIVE_CORPUS_SOURCE_TEXT_LRU with room to spare — the single-window (no windowing) design is safe", () => {
+  assert.ok(
+    SELECTIVE_CORPUS_STAGE_A_TOP_K <= SELECTIVE_CORPUS_SOURCE_TEXT_LRU,
+    `topK=${SELECTIVE_CORPUS_STAGE_A_TOP_K} must not exceed the source LRU capacity=${SELECTIVE_CORPUS_SOURCE_TEXT_LRU} — if this ever regresses, Stage B's prefetch needs windowing like Stage A's shard prefetch already has`,
+  );
+});
+
+test("stage B determinism: concurrency=1 and the real default concurrency produce byte-identical Selective Corpus results for the same fixture", async () => {
+  await withEnv({ SELECTIVE_CORPUS_SHADOW_ENABLED: "true" }, async () => {
+    const submissionText = seededRandomWords(600, 7001);
+    const CANDIDATE_COUNT = 12;
+
+    async function runOnce(concurrencyOverride) {
+      clearSelectiveCorpusSourceCache();
+      const { artifact } = buildStageBArtifact(submissionText, CANDIDATE_COUNT, { delayForIndex: (i) => (i % 4) * 3 });
+      const authoritative = { unifiedScore: 5, matchedPositions: [1, 2] };
+      const r = await runSelectiveCorpusShadow({
+        canonicalSubmissionText: submissionText,
+        authoritative,
+        artifactOverride: artifact,
+        stageBSourceFetchConcurrencyOverride: concurrencyOverride,
+      });
+      clearSelectiveCorpusSourceCache();
+      return r;
+    }
+
+    const sequential = await runOnce(1);
+    const parallel = await runOnce(SELECTIVE_CORPUS_STAGE_B_SOURCE_FETCH_CONCURRENCY);
+    assert.equal(sequential.state, "COMPLETED");
+    assert.ok(sequential.verifiedSourceCount >= 1, "sanity: fixture actually admits candidates");
+    assert.deepEqual(pickShadowResult(parallel), pickShadowResult(sequential), "concurrency=1 and the real default concurrency must produce byte-identical evidence");
+  });
+});
+
+test("stage B ordered verification: mixed admit/reject candidates produce identical results under ascending, descending, and shuffled fetch-completion delay", async () => {
+  await withEnv({ SELECTIVE_CORPUS_SHADOW_ENABLED: "true" }, async () => {
+    const submissionText = seededRandomWords(500, 8123);
+    const CANDIDATE_COUNT = 10;
+    const admitIndices = new Set([0, 2, 4, 6, 8]); // even indices admit, odd indices are guaranteed rejects
+
+    async function runOnce(delayForIndex) {
+      clearSelectiveCorpusSourceCache();
+      const { artifact } = buildStageBArtifact(submissionText, CANDIDATE_COUNT, { admitIndices, delayForIndex });
+      const authoritative = { unifiedScore: 1, matchedPositions: [] };
+      const r = await runSelectiveCorpusShadow({ canonicalSubmissionText: submissionText, authoritative, artifactOverride: artifact });
+      clearSelectiveCorpusSourceCache();
+      return r;
+    }
+
+    const zero = await runOnce(() => 0);
+    const ascending = await runOnce((i) => i * 5); // later-ranked candidates finish LAST
+    const descending = await runOnce((i) => (CANDIDATE_COUNT - i) * 5); // later-ranked candidates finish FIRST — fetch completion order is the exact reverse of rank order
+    const shuffled = await runOnce((i) => ((i * 7 + 3) % 6) * 4); // fixed, reproducible non-monotonic permutation
+
+    assert.equal(zero.state, "COMPLETED");
+    assert.equal(zero.verifiedSourceCount, 5, "sanity: exactly the 5 even-indexed candidates admitted");
+    // Every candidate in this fixture has identical weight/matchedFingerprints
+    // (one posting each), so Stage A's tie-break (ordinal ascending) makes
+    // rank === ordinal exactly — admitted ordinals [0,2,4,6,8] therefore admit
+    // at ranks [0,2,4,6,8], not a compacted [0..4].
+    assert.deepEqual(zero.topCandidateRanks, [0, 2, 4, 6, 8], "sanity: admitted ranks are the 5 even-indexed candidates' own Stage-A ranks (rank === ordinal in this fixture)");
+    assert.deepEqual(pickShadowResult(ascending), pickShadowResult(zero), "ascending fetch-completion delay must match the zero-delay baseline");
+    assert.deepEqual(pickShadowResult(descending), pickShadowResult(zero), "descending (reversed) fetch-completion delay must match the zero-delay baseline");
+    assert.deepEqual(pickShadowResult(shuffled), pickShadowResult(zero), "shuffled fetch-completion delay must match the zero-delay baseline");
+  });
+});
+
+test("stage B concurrency: bounded prefetch achieves real parallelism and never exceeds the configured limit", async () => {
+  await withEnv({ SELECTIVE_CORPUS_SHADOW_ENABLED: "true" }, async () => {
+    const submissionText = seededRandomWords(700, 9911);
+    const CANDIDATE_COUNT = 14; // comfortably above the default concurrency (8) and within topK (20)
+    const { artifact, tracking } = buildStageBArtifact(submissionText, CANDIDATE_COUNT, { delayForIndex: () => 15 });
+    clearSelectiveCorpusSourceCache();
+
+    const r = await runSelectiveCorpusShadow({
+      canonicalSubmissionText: submissionText,
+      authoritative: { unifiedScore: 0, matchedPositions: [] },
+      artifactOverride: artifact,
+    });
+    clearSelectiveCorpusSourceCache();
+
+    assert.equal(r.state, "COMPLETED");
+    assert.ok(tracking.peakConcurrency() > 1, `expected real parallelism, peak was ${tracking.peakConcurrency()}`);
+    assert.ok(
+      tracking.peakConcurrency() <= SELECTIVE_CORPUS_STAGE_B_SOURCE_FETCH_CONCURRENCY,
+      `peak concurrency ${tracking.peakConcurrency()} must never exceed the configured limit ${SELECTIVE_CORPUS_STAGE_B_SOURCE_FETCH_CONCURRENCY}`,
+    );
+  });
+});
+
+test("stage B performance: bounded concurrency completes materially faster than forced sequential (concurrency=1) loading, for the identical fixture", async () => {
+  await withEnv({ SELECTIVE_CORPUS_SHADOW_ENABLED: "true" }, async () => {
+    const submissionText = seededRandomWords(700, 4477);
+    const CANDIDATE_COUNT = 12;
+    const PER_SOURCE_DELAY_MS = 80;
+
+    async function timedRun(concurrencyOverride) {
+      clearSelectiveCorpusSourceCache();
+      const { artifact } = buildStageBArtifact(submissionText, CANDIDATE_COUNT, { delayForIndex: () => PER_SOURCE_DELAY_MS });
+      const t0 = Date.now();
+      const r = await runSelectiveCorpusShadow({
+        canonicalSubmissionText: submissionText,
+        authoritative: { unifiedScore: 0, matchedPositions: [] },
+        artifactOverride: artifact,
+        stageBSourceFetchConcurrencyOverride: concurrencyOverride,
+      });
+      const elapsedMs = Date.now() - t0;
+      clearSelectiveCorpusSourceCache();
+      assert.equal(r.state, "COMPLETED", "sanity: neither run may accidentally time out");
+      return elapsedMs;
+    }
+
+    const sequentialMs = await timedRun(1);
+    const optimizedMs = await timedRun(SELECTIVE_CORPUS_STAGE_B_SOURCE_FETCH_CONCURRENCY);
+
+    // Generous, deterministic relationship (never a fragile exact-ms threshold):
+    // forced-sequential must cost roughly CANDIDATE_COUNT * delay; bounded
+    // concurrency must cost roughly ceil(CANDIDATE_COUNT / limit) * delay — for
+    // 12 candidates at limit 8, that is 2 rounds vs 12, a >4x theoretical gap.
+    // Asserting "well under half" tolerates real scheduling/timer jitter
+    // without depending on either absolute number.
+    assert.ok(
+      optimizedMs < sequentialMs / 2,
+      `optimized (${optimizedMs}ms) expected well under half of forced-sequential (${sequentialMs}ms)`,
+    );
+  });
+});
+
+test("stage B source failure: one missing candidate source contributes zero, exactly as before — remaining candidates unaffected, no PARTIAL/degraded marker", async () => {
+  await withEnv({ SELECTIVE_CORPUS_SHADOW_ENABLED: "true" }, async () => {
+    const submissionText = seededRandomWords(400, 3210);
+    const CANDIDATE_COUNT = 5;
+    const { artifact } = buildStageBArtifact(submissionText, CANDIDATE_COUNT, { missingIndices: new Set([2]) });
+    clearSelectiveCorpusSourceCache();
+
+    const r = await runSelectiveCorpusShadow({
+      canonicalSubmissionText: submissionText,
+      authoritative: { unifiedScore: 0, matchedPositions: [] },
+      artifactOverride: artifact,
+    });
+    clearSelectiveCorpusSourceCache();
+
+    assert.equal(r.state, "COMPLETED", "a missing SOURCE (not a shard) never degrades the evaluation to PARTIAL");
+    assert.equal(r.verifiedSourceCount, 4, "the 4 present candidates admit normally; the missing one contributes zero, not an error");
+    assert.deepEqual(r.topCandidateRanks, [0, 1, 3, 4], "candidate index 2 (the missing source) is simply absent from the admitted set");
+    assert.equal(r.degradedShardCount, undefined, "a missing SOURCE is not a shard failure — degradedShard* stays unset");
+    assert.equal(r.degradedShardCodes, undefined);
+  });
+});
+
+test("stage B: each candidate's source is physically loaded no more than once per evaluation (prefetch is the only read; verification reuses it)", async () => {
+  await withEnv({ SELECTIVE_CORPUS_SHADOW_ENABLED: "true" }, async () => {
+    const submissionText = seededRandomWords(600, 5566);
+    const CANDIDATE_COUNT = 8;
+    const { artifact, tracking, rawTextKey } = buildStageBArtifact(submissionText, CANDIDATE_COUNT, { delayForIndex: () => 5 });
+    clearSelectiveCorpusSourceCache();
+
+    const r = await runSelectiveCorpusShadow({
+      canonicalSubmissionText: submissionText,
+      authoritative: { unifiedScore: 0, matchedPositions: [] },
+      artifactOverride: artifact,
+    });
+
+    assert.equal(r.state, "COMPLETED");
+    for (let i = 0; i < CANDIDATE_COUNT; i++) {
+      assert.equal(tracking.callCount(rawTextKey(i)), 1, `candidate ${i}: exactly one physical source read despite prefetch + verification both wanting its text`);
+    }
+    clearSelectiveCorpusSourceCache();
+  });
+});
+
+test("stage B cache/window: the realistic maximum (topK=20 candidates in one evaluation) prefetches with zero duplicate loads — confirms the single-window (no windowing needed) design", async () => {
+  await withEnv({ SELECTIVE_CORPUS_SHADOW_ENABLED: "true" }, async () => {
+    const submissionText = seededRandomWords(1200, 6789);
+    const CANDIDATE_COUNT = SELECTIVE_CORPUS_STAGE_A_TOP_K; // the real, frozen cap — never a smaller stand-in
+    const { artifact, tracking, rawTextKey } = buildStageBArtifact(submissionText, CANDIDATE_COUNT, { delayForIndex: () => 3 });
+    clearSelectiveCorpusSourceCache();
+
+    const r = await runSelectiveCorpusShadow({
+      canonicalSubmissionText: submissionText,
+      authoritative: { unifiedScore: 0, matchedPositions: [] },
+      artifactOverride: artifact,
+    });
+
+    assert.equal(r.state, "COMPLETED");
+    assert.equal(r.candidateCount, CANDIDATE_COUNT, "sanity: Stage A actually surfaced the full topK");
+    for (let i = 0; i < CANDIDATE_COUNT; i++) {
+      assert.equal(tracking.callCount(rawTextKey(i)), 1, `candidate ${i}: exactly one physical read at the realistic maximum prefetch size — no prefetch-then-evict duplicate`);
+    }
+    clearSelectiveCorpusSourceCache();
+  });
+});
+
+test(
+  "stage B TIMEOUT: budget exhausted during the prefetch window returns TIMEOUT with zero evidence, performs no verification, and leaves no detached work after return",
+  async () => {
+    await withEnv({ SELECTIVE_CORPUS_SHADOW_ENABLED: "true" }, async () => {
+      // One candidate whose source read alone exceeds the budget, plus a second
+      // candidate whose source read is instant — both fetched CONCURRENTLY in
+      // the SAME bounded window, so the fast one's own read completing quickly
+      // must NOT let verification start early: the whole window is awaited as
+      // one unit before checkpoint 2 runs.
+      const submissionText = seededRandomWords(300, 1357);
+      const SLOW_DELAY_MS = SELECTIVE_CORPUS_TIME_BUDGET_MS + 300;
+      const { artifact, tracking, rawTextKey } = buildStageBArtifact(submissionText, 2, {
+        delayForIndex: (i) => (i === 0 ? SLOW_DELAY_MS : 0),
+      });
+      clearSelectiveCorpusArtifactCache();
+      clearSelectiveCorpusSourceCache();
+
+      const t0 = Date.now();
+      const r = await runSelectiveCorpusShadow({
+        canonicalSubmissionText: submissionText,
+        authoritative: { unifiedScore: 7, matchedPositions: [3, 4] },
+        artifactOverride: artifact,
+      });
+      const elapsedMs = Date.now() - t0;
+
+      assert.equal(r.state, "TIMEOUT");
+      assert.equal(r.failureCode, "TIMEOUT");
+      assert.match(r.failureMessage, /Stage B source prefetch/, "attributed to the new prefetch checkpoint specifically, not Stage A or the old per-candidate loop");
+      // TIMEOUT never surfaces partial Stage-B evidence — same discriminated
+      // shape as every other TIMEOUT path (see types.ts); proves no
+      // verification ever ran for EITHER candidate, including the fast one.
+      assert.equal(r.candidateCount, undefined);
+      assert.equal(r.verifiedSourceCount, undefined);
+      assert.equal(r.matchedPositionCount, undefined);
+      assert.equal(r.counterfactualUnifiedSimilarity, undefined);
+      assert.ok(elapsedMs >= SELECTIVE_CORPUS_TIME_BUDGET_MS, `expected real elapsed time (${elapsedMs}ms) to reach the ${SELECTIVE_CORPUS_TIME_BUDGET_MS}ms budget`);
+
+      // No detached background work survives the return: the prefetch window
+      // was fully awaited before TIMEOUT was ever decided, so no NEW physical
+      // read can occur after this function has already resolved.
+      const callsAtReturn = tracking.totalCalls();
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      assert.equal(tracking.totalCalls(), callsAtReturn, "no additional physical reads occurred after runSelectiveCorpusShadow returned — nothing was left running detached");
+
+      clearSelectiveCorpusSourceCache();
+      clearSelectiveCorpusArtifactCache();
+    });
+  },
+);
+
+test(
+  "stage B TIMEOUT determinism: the SAME two-candidate fixture completes normally under fast (zero-delay) simulated latency",
+  async () => {
+    await withEnv({ SELECTIVE_CORPUS_SHADOW_ENABLED: "true" }, async () => {
+      const submissionText = seededRandomWords(300, 1357); // identical fixture text to the TIMEOUT test above
+      const { artifact } = buildStageBArtifact(submissionText, 2, { delayForIndex: () => 0 });
+      clearSelectiveCorpusSourceCache();
+
+      const r = await runSelectiveCorpusShadow({
+        canonicalSubmissionText: submissionText,
+        authoritative: { unifiedScore: 2, matchedPositions: [] },
+        artifactOverride: artifact,
+      });
+
+      assert.equal(r.state, "COMPLETED", "the identical fixture, with zero simulated source latency, completes normally — proving the TIMEOUT above was a genuine latency effect");
+      assert.equal(r.verifiedSourceCount, 2);
+      clearSelectiveCorpusSourceCache();
+    });
+  },
+);

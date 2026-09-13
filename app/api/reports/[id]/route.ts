@@ -388,6 +388,15 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
           // Trust boundary (drizzle/0052): the server-verified set (also now on
           // payload.externalAcademicEvidence), never a client-supplied value.
           authoritativeExternalAcademicEvidence: verifiedAcademicEvidence,
+          // GET-fallback idempotency fix: this is the generic self-heal path
+          // (a report whose POST-time schedule never ran) — every OTHER
+          // evaluator above still runs here unaffected, but Selective Corpus
+          // has no idempotent DB row of its own, so re-running its expensive
+          // remote-Blob-backed Stage A/B pass on every view (not just every
+          // save) has no completion record to show for it. POST's own call
+          // site (app/api/reports/route.ts) omits this and keeps running it.
+          // See lib/report-shadow-evaluations.ts's own doc comment on this flag.
+          includeSelectiveCorpus: false,
         });
       } catch (err) {
         console.error('resolvePrimarySimilaritySummary failed (non-fatal):', err instanceof Error ? err.message : String(err));

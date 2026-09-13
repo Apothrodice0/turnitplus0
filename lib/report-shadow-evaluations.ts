@@ -141,6 +141,22 @@ export type ScheduleReportShadowEvaluationsParams = {
    * dedicated connection.
    */
   openConnection?: () => Promise<Client> | Client;
+  /**
+   * GET-fallback idempotency fix. Default true (POST's call site never
+   * passes this — its behavior is byte-for-byte unchanged). GET
+   * /api/reports/[id]/route.ts passes false: unlike the other four
+   * evaluators here, Selective Corpus writes no DB row of its own (its only
+   * observable output is a fresh structured log line — see
+   * lib/selective-corpus/shadow-telemetry.ts), so re-running it on every
+   * report view — not just every save — repeats its most expensive work
+   * (a remote-Blob-backed Stage A/B pass) with no idempotent record to show
+   * for it, unlike the sibling evaluators' own (report_device_key, report_id,
+   * policy_version) UPSERTs. The GET trigger here is a generic self-heal
+   * fallback (a report whose POST-time schedule never ran), not a Selective-
+   * Corpus-specific requirement — this flag lets GET keep that fallback for
+   * every OTHER evaluator while skipping only this one.
+   */
+  includeSelectiveCorpus?: boolean;
 };
 
 export async function scheduleReportShadowEvaluations(
@@ -157,6 +173,7 @@ export async function scheduleReportShadowEvaluations(
     authoritativeCorpusGeneration,
     authoritativeArchiveMatchedPositions,
     authoritativeExternalAcademicEvidence,
+    includeSelectiveCorpus = true,
   } = params;
   const openConnection = params.openConnection ?? getReportsDbClient;
   await runAfterResponse(async () => {
@@ -216,11 +233,17 @@ export async function scheduleReportShadowEvaluations(
       // never reads or writes the authoritative unifiedScore; never throws; and
       // — unlike the other four evaluators — writes NO DB row (its telemetry
       // sink is a local diagnostics file, gated on SELECTIVE_CORPUS_DIAGNOSTICS_DIR).
-      await runSelectiveCorpusShadowEvaluation({
-        reportId,
-        rawText,
-        authoritativeUnifiedSimilarity,
-      });
+      //
+      // includeSelectiveCorpus (default true): GET's self-heal fallback call
+      // site passes false — see this param's own doc comment above. Every
+      // OTHER evaluator above still runs on GET, unaffected.
+      if (includeSelectiveCorpus) {
+        await runSelectiveCorpusShadowEvaluation({
+          reportId,
+          rawText,
+          authoritativeUnifiedSimilarity,
+        });
+      }
     } catch (err) {
       // All four evaluators are "never throws" by their own contract; this is
       // a second, unconditional net so a telemetry failure (a broken

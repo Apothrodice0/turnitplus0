@@ -124,6 +124,28 @@ export const SELECTIVE_CORPUS_STAGE_A_SHARD_FETCH_CONCURRENCY = (() => {
   return Number.isFinite(n) && n >= 1 && n <= 64 ? n : 8;
 })();
 
+/**
+ * Bounded concurrency for Stage B's candidate source-text prefetch (see
+ * shadow.ts). Root cause this bounds: Stage B previously loaded each
+ * candidate's source text sequentially — one network round trip per
+ * candidate, none overlapping — the same class of remote-I/O bottleneck
+ * SELECTIVE_CORPUS_STAGE_A_SHARD_FETCH_CONCURRENCY already fixed for Stage
+ * A's shard reads. A single prefetch window covers the WHOLE of
+ * stageA.topK (capped at SELECTIVE_CORPUS_STAGE_A_TOP_K = 20), comfortably
+ * below SELECTIVE_CORPUS_SOURCE_TEXT_LRU (64), so — unlike Stage A's
+ * shard prefetch — no windowing is needed here to avoid self-eviction.
+ * Changes NOTHING about candidate ranking/order, which source text is
+ * loaded, or admission semantics — only how many of those loads may be in
+ * flight at once (see shadow.ts's own comment on ordered verification).
+ *
+ * Conservative default, same bounds/pattern as
+ * SELECTIVE_CORPUS_STAGE_A_SHARD_FETCH_CONCURRENCY.
+ */
+export const SELECTIVE_CORPUS_STAGE_B_SOURCE_FETCH_CONCURRENCY = (() => {
+  const n = Number.parseInt(process.env.SELECTIVE_CORPUS_STAGE_B_SOURCE_FETCH_CONCURRENCY ?? "", 10);
+  return Number.isFinite(n) && n >= 1 && n <= 64 ? n : 8;
+})();
+
 /** This shadow evaluator's own version — a diagnostic freshness key. */
 export const SELECTIVE_CORPUS_SHADOW_EVALUATOR_VERSION = "selective-corpus-shadow-v1";
 

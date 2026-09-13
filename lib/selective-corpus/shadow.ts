@@ -8,14 +8,15 @@ import {
   type SelectiveCorpusArtifact,
 } from "./artifact";
 import { createVercelBlobStorageAdapter } from "./vercel-blob-storage-adapter";
-import { selectiveCorpusStageA } from "./stage-a";
-import { loadSelectiveCorpusCandidateText } from "./source-loader";
+import { selectiveCorpusStageA, runWithBoundedConcurrency } from "./stage-a";
+import { loadSelectiveCorpusCandidateText, type SelectiveCorpusCandidateText } from "./source-loader";
 import { admitSelectiveCorpusCandidate } from "./verify";
 import { disambiguateSelectiveCorpusCoSources } from "./co-source";
 import { interpretSelectiveCorpusEvidence } from "./interpretation";
 import {
   SELECTIVE_CORPUS_SHADOW_EVALUATOR_VERSION,
   SELECTIVE_CORPUS_TIME_BUDGET_MS,
+  SELECTIVE_CORPUS_STAGE_B_SOURCE_FETCH_CONCURRENCY,
 } from "./constants";
 import { createSelectiveCorpusFailureCollector, type SelectiveCorpusShardFailure } from "./shard-reader";
 import type { SelectiveCorpusShadowResult } from "./types";
@@ -53,6 +54,14 @@ export type RunSelectiveCorpusShadowParams = {
   artifactPathOverride?: string;
   /** Test/regression seam: an already-loaded artifact (skips the loader). */
   artifactOverride?: SelectiveCorpusArtifact;
+  /** Test/regression seam, mirroring selectiveCorpusStageA's own
+   *  opts.shardFetchConcurrency: overrides SELECTIVE_CORPUS_STAGE_B_SOURCE_FETCH_CONCURRENCY
+   *  for this one call — the module-level constant is frozen at import time
+   *  (read from process.env once, like its Stage-A counterpart), so a
+   *  per-call override is the only way tests can exercise a different bound
+   *  (e.g. proving concurrency=1 and the real default produce identical
+   *  evidence) without a process restart. */
+  stageBSourceFetchConcurrencyOverride?: number;
 };
 
 export async function runSelectiveCorpusShadow(
@@ -141,8 +150,78 @@ export async function runSelectiveCorpusShadow(
     const stageA = await selectiveCorpusStageA(params.canonicalSubmissionText, artifact, undefined, failureCollector);
     const stageAMs = performance.now() - tA0;
 
-    // ---- Stage B: admit each top-K candidate ----
+    // ---- Stage B: prefetch candidate source text (bounded concurrency),
+    // then admit each top-K candidate in ORIGINAL Stage-A rank order ----
     const tB0 = performance.now();
+
+    // Shared by every TIMEOUT return point below (before the prefetch
+    // window, after it resolves, and during ordered verification) so the
+    // three checkpoints can never drift into different result shapes.
+    // Surfaces the SAME zero-evidence shape the original single mid-loop
+    // check always did — a TIMEOUT here can therefore never admit MORE
+    // evidence than the old sequential implementation would have, because
+    // the old implementation never surfaced partial Stage-B evidence on a
+    // timeout either (a mid-loop timeout returned before the `completed`
+    // object — carrying any admitted spans — was ever constructed).
+    const timeoutResult = (failureMessage: string): SelectiveCorpusShadowResult => {
+      const timedOutShardFailures = failureCollector.getFailures();
+      return {
+        state: "TIMEOUT",
+        failureCode: "TIMEOUT",
+        failureMessage,
+        corpusVersion: artifact.corpusVersion,
+        corpusDigest: artifact.corpusDigest,
+        documentCount: artifact.documentCount,
+        // Stage A itself always finishes before any Stage-B check can fire
+        // (it runs unconditionally before Stage B), so its own duration is a
+        // real, already-computed value here — Stage B's own runtime is not,
+        // since it timed out before finishing; omitted rather than guessed.
+        runtimeStageAMs: +stageAMs.toFixed(2),
+        ...(timedOutShardFailures.length > 0
+          ? {
+              degradedShardCount: timedOutShardFailures.length,
+              degradedShards: timedOutShardFailures.slice(0, 32).map((f) => f.shard),
+            }
+          : {}),
+        ...base,
+      };
+    };
+
+    // Checkpoint 1: before starting ANY prefetch — never begin prefetching
+    // (even a trivial/empty window) once the budget is already exhausted by
+    // Stage A alone. Same logical position the original implementation's
+    // very first per-candidate check occupied.
+    if (performance.now() - started > SELECTIVE_CORPUS_TIME_BUDGET_MS) {
+      return timeoutResult("time budget exceeded before Stage B began");
+    }
+
+    // Bounded-concurrency prefetch of every stageA.topK candidate's source
+    // text. topK is capped at SELECTIVE_CORPUS_STAGE_A_TOP_K (20), comfortably
+    // <= SELECTIVE_CORPUS_SOURCE_TEXT_LRU (64) — a SINGLE prefetch window for
+    // this evaluation's own candidates cannot self-evict, so (unlike Stage
+    // A's shard prefetch, whose fanout can exceed its own LRU) no windowing
+    // loop is needed here. Reuses the SAME bounded-concurrency primitive
+    // Stage A's shard prefetch already uses and has already proven safe and
+    // deterministic — never a second, divergent concurrency helper.
+    // loadSelectiveCorpusCandidateText never throws (see source-loader.ts),
+    // so this prefetch can never reject; every candidate's outcome — a real
+    // text, or null for missing/transient/corrupt/unreadable, exactly as
+    // before — lands in this map. Fully awaited before any decision below is
+    // made, so no fetch promise is ever left running past a return.
+    const prefetchedTextByOrdinal = new Map<number, SelectiveCorpusCandidateText | null>();
+    const stageBConcurrency = params.stageBSourceFetchConcurrencyOverride ?? SELECTIVE_CORPUS_STAGE_B_SOURCE_FETCH_CONCURRENCY;
+    await runWithBoundedConcurrency(stageA.topK, stageBConcurrency, async (cand) => {
+      const ct = await loadSelectiveCorpusCandidateText(artifact, cand.ordinal);
+      prefetchedTextByOrdinal.set(cand.ordinal, ct);
+    });
+
+    // Checkpoint 2: after the prefetch window fully resolves, before ordered
+    // verification begins — stops wasted verification work if the prefetch
+    // itself consumed the remaining budget.
+    if (performance.now() - started > SELECTIVE_CORPUS_TIME_BUDGET_MS) {
+      return timeoutResult("time budget exceeded during Stage B source prefetch");
+    }
+
     let familyGuardActivations = 0;
     const admittedSpansByKey = new Map<string, Awaited<ReturnType<typeof admitSelectiveCorpusCandidate>>["spans"]>();
     const rankByKey = new Map<string, number>();
@@ -150,31 +229,19 @@ export async function runSelectiveCorpusShadow(
      *  Layer (explanation only — never re-derived, never changes a position). */
     const guardByKey = new Map<string, { familyGuardActivated: boolean; dominantSpanBoilerplate: boolean }>();
 
+    // Ordered verification, in the EXACT original stageA.topK (rank) order —
+    // fetch completion order during the prefetch above has zero effect on
+    // this order or on the result, since every candidate's text is already
+    // resolved in prefetchedTextByOrdinal before this loop starts. Checkpoint
+    // 3: the per-candidate boundary check is retained here, unchanged in
+    // position and behavior from the original implementation, so a slow
+    // verification pass (not I/O — the text is already loaded) still cannot
+    // run unbounded past the budget.
     for (const cand of stageA.topK) {
       if (performance.now() - started > SELECTIVE_CORPUS_TIME_BUDGET_MS) {
-        const timedOutShardFailures = failureCollector.getFailures();
-        return {
-          state: "TIMEOUT",
-          failureCode: "TIMEOUT",
-          failureMessage: "time budget exceeded during Stage B",
-          corpusVersion: artifact.corpusVersion,
-          corpusDigest: artifact.corpusDigest,
-          documentCount: artifact.documentCount,
-          // Stage A itself always finishes before this check can fire (it runs
-          // unconditionally before the Stage B loop below), so its own
-          // duration is a real, already-computed value here — Stage B's is
-          // not, since it timed out mid-loop; omitted rather than guessed.
-          runtimeStageAMs: +stageAMs.toFixed(2),
-          ...(timedOutShardFailures.length > 0
-            ? {
-                degradedShardCount: timedOutShardFailures.length,
-                degradedShards: timedOutShardFailures.slice(0, 32).map((f) => f.shard),
-              }
-            : {}),
-          ...base,
-        };
+        return timeoutResult("time budget exceeded during Stage B verification");
       }
-      const ct = await loadSelectiveCorpusCandidateText(artifact, cand.ordinal);
+      const ct = prefetchedTextByOrdinal.get(cand.ordinal) ?? null;
       if (!ct) continue;
       const res = await admitSelectiveCorpusCandidate(params.canonicalSubmissionText, submissionWords, ct.text, artifact, failureCollector);
       if (res.familyGuardActivated) familyGuardActivations += 1;

@@ -50,8 +50,10 @@ import type { SelectiveCorpusFailureCollector } from "./shard-reader";
  *  invocations in flight at once — a pure scheduling primitive with no
  *  opinion about what `worker` does or the order its OWN side effects land
  *  in. `worker` must never reject (true here: SelectiveCorpusPostingsAccessor
- *  implementations never throw from getPostings — see shard-reader.ts). */
-async function runWithBoundedConcurrency<T>(
+ *  implementations never throw from getPostings — see shard-reader.ts).
+ *  Exported so shadow.ts's Stage-B source-text prefetch can reuse this exact,
+ *  already-proven primitive rather than duplicating a second one. */
+export async function runWithBoundedConcurrency<T>(
   items: readonly T[],
   concurrency: number,
   worker: (item: T) => Promise<void>,
