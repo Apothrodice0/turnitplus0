@@ -101,6 +101,29 @@ export const SELECTIVE_CORPUS_HOT_SHARD_LRU = (() => {
   return Number.isFinite(n) && n >= 1 && n <= 256 ? n : 128;
 })();
 
+/**
+ * Bounded concurrency for Stage A's shard-fetch prefetch pass (see
+ * stage-a.ts). Root cause this bounds: each DISTINCT packed shard a
+ * submission's fingerprints touch previously required its own sequential
+ * network round trip before any candidate could be ranked. Measured against a
+ * real remote store, that serialization alone timed out even a 526-word/
+ * 35-shard submission; representative natural manuscripts touch 77-85
+ * distinct shards, over 2x that fanout. This constant bounds how many shard
+ * fetches may be in flight at once — it changes NOTHING about which shards
+ * are fetched, their content, or the final Stage A ranking (see stage-a.ts's
+ * two-pass design: a discardable prefetch pass, then the original,
+ * byte-for-byte-unchanged sequential aggregation pass).
+ *
+ * Conservative default. Overridable per process for tuning/measurement, the
+ * same pattern as SELECTIVE_CORPUS_HOT_SHARD_LRU; individual callers (tests)
+ * can also override it per-call via selectiveCorpusStageA's own
+ * `opts.shardFetchConcurrency`.
+ */
+export const SELECTIVE_CORPUS_STAGE_A_SHARD_FETCH_CONCURRENCY = (() => {
+  const n = Number.parseInt(process.env.SELECTIVE_CORPUS_STAGE_A_SHARD_FETCH_CONCURRENCY ?? "", 10);
+  return Number.isFinite(n) && n >= 1 && n <= 64 ? n : 8;
+})();
+
 /** This shadow evaluator's own version — a diagnostic freshness key. */
 export const SELECTIVE_CORPUS_SHADOW_EVALUATOR_VERSION = "selective-corpus-shadow-v1";
 

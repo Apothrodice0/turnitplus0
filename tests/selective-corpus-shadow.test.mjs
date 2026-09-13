@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync, statSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,11 +17,13 @@ import { selectiveCorpusStageA } from "../lib/selective-corpus/stage-a.ts";
 import { loadSelectiveCorpusCandidateText, clearSelectiveCorpusSourceCache } from "../lib/selective-corpus/source-loader.ts";
 import { admitSelectiveCorpusCandidate, selectiveCorpusSubmissionWords } from "../lib/selective-corpus/verify.ts";
 import { SelectiveCorpusShardReader, createSelectiveCorpusFailureCollector } from "../lib/selective-corpus/shard-reader.ts";
-import { SELECTIVE_CORPUS_EXPECTED_DIGEST, SELECTIVE_CORPUS_DEV_REGRESSION_DIGEST } from "../lib/selective-corpus/constants.ts";
+import { winnowSubmissionFingerprints } from "../lib/selective-corpus/fingerprint.ts";
+import { SELECTIVE_CORPUS_EXPECTED_DIGEST, SELECTIVE_CORPUS_DEV_REGRESSION_DIGEST, SELECTIVE_CORPUS_TIME_BUDGET_MS } from "../lib/selective-corpus/constants.ts";
 import {
   createLocalFilesystemStorageAdapter,
   SelectiveCorpusObjectNotFoundError,
 } from "../lib/selective-corpus/storage-adapter.ts";
+import { createSimulatedRemoteStorageAdapter } from "../lib/selective-corpus/testing/simulated-remote-storage-adapter.ts";
 
 const ARTIFACT = "D:/TurnitPlusTemp/selective-corpus-bulk-v1/run-20260909-224038";
 const artifactPresent = (() => {
@@ -854,3 +857,183 @@ test("evaluation-scoping E: existing single-evaluation PARTIAL/COMPLETED fixture
   rmSync(dir, { recursive: true, force: true });
   clearSelectiveCorpusArtifactCache();
 });
+
+// ═══════════════════════════════════════════════════════════════════════
+// TIMEOUT SEMANTICS (remote-I/O optimization safety net)
+// ═══════════════════════════════════════════════════════════════════════
+// No prior test exercised state "TIMEOUT" end-to-end. These do, using ONLY
+// the existing SelectiveCorpusStorageAdapter / SimulatedRemoteObjectSpec test
+// seam (per-key configured latency) -- never a fake clock, and never a
+// production timeout override. SELECTIVE_CORPUS_TIME_BUDGET_MS is read from
+// the real constant and asserted, never modified. There is no existing
+// clock-injection seam into shadow.ts, so proving a GENUINE end-to-end
+// TIMEOUT requires real elapsed wall-clock time exceeding the real 6000ms
+// budget -- this is deliberately the one intentionally-slow test in this
+// suite (~6.6s); its fast (zero-delay) companion test below costs nothing
+// extra and proves the same mechanism is not simply flaky/random.
+
+function timeoutTestSha256Hex(bytes) {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+function timeoutTestManifestBytes(entries) {
+  return Buffer.from(JSON.stringify({
+    version: 1,
+    objects: entries.map((e) => ({ key: e.key, sha256: timeoutTestSha256Hex(e.bytes), byteLength: e.bytes.length })),
+  }));
+}
+function timeoutTestShardKey(s) {
+  return `packed/shard-${String(s).padStart(3, "0")}.bin`;
+}
+
+/**
+ * writeMinimalSelectiveCorpusArtifact() alone produces 256 well-formed but
+ * EMPTY shards -- zero postings anywhere. shadow.ts's ONLY timeout check
+ * lives inside its Stage-B per-candidate loop (`for (const cand of
+ * stageA.topK)`); with topK empty, that loop runs zero iterations and the
+ * check never fires, no matter how long Stage A itself took. So a genuine
+ * end-to-end TIMEOUT test needs at least ONE real candidate surfaced by
+ * Stage A -- this overwrites one of SHARD_QUERY_TEXT's own touched shards
+ * with a real one-entry posting (pointing at the fixture's only docmap
+ * ordinal, 0) so Stage B's loop -- and its timeout check -- actually runs.
+ */
+function writeMinimalSelectiveCorpusArtifactWithOneRealCandidate(dir) {
+  writeMinimalSelectiveCorpusArtifact(dir);
+  const { fingerprints } = winnowSubmissionFingerprints(SHARD_QUERY_TEXT);
+  const hash = [...fingerprints].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))[0];
+  const shardNum = Number.parseInt(hash.slice(0, 2), 16);
+  writeShardFile(join(dir, "packed", `shard-${String(shardNum).padStart(3, "0")}.bin`), [{ hash, ordinals: [0] }]);
+}
+
+/**
+ * Loads a simulated-remote, integrity-required artifact from `dir` (already
+ * populated by writeMinimalSelectiveCorpusArtifact) where the 4 control
+ * objects and shard-000 (all read eagerly during the ONE-TIME artifact
+ * bootstrap, which shadow.ts does NOT count against the per-submission time
+ * budget) resolve instantly, but every OTHER shard incurs
+ * `perOtherShardDelayMs` -- so only Stage A's OWN per-submission shard
+ * fetches are slow. Integrity-required mode is used specifically because it
+ * skips local-compatible mode's eager 256-way objectExists() sweep (which
+ * would otherwise multiply this delay 256x during bootstrap alone).
+ */
+async function loadDelayedSimulatedArtifact(dir, perOtherShardDelayMs) {
+  const corpusVersionBytes = readFileSync(join(dir, "corpus-version.json"));
+  const docmapBytes = readFileSync(join(dir, "packed", "docmap.tsv"));
+  const stopsetBytes = readFileSync(join(dir, "packed", "stopset.bin"));
+  const entries = [
+    { key: "corpus-version.json", bytes: corpusVersionBytes },
+    { key: "packed/docmap.tsv", bytes: docmapBytes },
+    { key: "packed/stopset.bin", bytes: stopsetBytes },
+  ];
+  const objects = {
+    "corpus-version.json": { bytes: corpusVersionBytes, delayMs: 0 },
+    "packed/docmap.tsv": { bytes: docmapBytes, delayMs: 0 },
+    "packed/stopset.bin": { bytes: stopsetBytes, delayMs: 0 },
+  };
+  for (let s = 0; s < 256; s++) {
+    const bytes = readFileSync(join(dir, "packed", `shard-${String(s).padStart(3, "0")}.bin`));
+    entries.push({ key: timeoutTestShardKey(s), bytes });
+    objects[timeoutTestShardKey(s)] = { bytes, delayMs: s === 0 ? 0 : perOtherShardDelayMs };
+  }
+  objects["object-integrity.json"] = { bytes: timeoutTestManifestBytes(entries), delayMs: 0 };
+
+  const adapter = createSimulatedRemoteStorageAdapter({ objects });
+  return loadSelectiveCorpusArtifact(dir, { storageAdapter: adapter, integrityMode: "integrity-required" });
+}
+
+test(
+  "TIMEOUT: real simulated remote latency across a 46-distinct-shard submission exceeds the 6s budget => state TIMEOUT, authoritative input untouched, no evidence manufactured",
+  async () => {
+    const dir = mkdtempSync(join(tmpdir(), "scv-timeout-"));
+    writeMinimalSelectiveCorpusArtifactWithOneRealCandidate(dir);
+    clearSelectiveCorpusArtifactCache();
+
+    await withEnv({ SELECTIVE_CORPUS_SHADOW_ENABLED: "true" }, async () => {
+      // ceil(46 shards / 8 concurrency) = 6 rounds * 1100ms = 6600ms, comfortably
+      // past the 6000ms budget (the production default shard-fetch concurrency
+      // is used here -- shadow.ts never overrides it).
+      const artifact = await loadDelayedSimulatedArtifact(dir, 1100);
+
+      const authoritative = { unifiedScore: 9, matchedPositions: [4, 5, 6] };
+      const before = JSON.stringify(authoritative);
+      const beforeHash = timeoutTestSha256Hex(Buffer.from(before));
+
+      const t0 = Date.now();
+      const r = await runSelectiveCorpusShadow({
+        canonicalSubmissionText: SHARD_QUERY_TEXT,
+        authoritative,
+        artifactOverride: artifact,
+      });
+      const elapsedMs = Date.now() - t0;
+
+      assert.equal(r.state, "TIMEOUT");
+      assert.equal(r.failureCode, "TIMEOUT");
+      assert.equal(typeof r.failureMessage, "string");
+
+      // TIMEOUT must never manufacture authoritative evidence -- these fields
+      // are simply absent from a TIMEOUT result (see types.ts's discriminated
+      // shape), never a fabricated/zeroed stand-in for "no evaluation happened".
+      assert.equal(r.candidateCount, undefined);
+      assert.equal(r.verifiedSourceCount, undefined);
+      assert.equal(r.matchedPositionCount, undefined);
+      assert.equal(r.counterfactualUnifiedSimilarity, undefined);
+      assert.equal(r.authoritativeUnifiedSimilarity, undefined);
+
+      // Authoritative input object: untouched, by both a structural JSON
+      // comparison and an independent sha256 -- this assertion works
+      // regardless of the result's own shape (it never reads
+      // result.authoritativeUnifiedSimilarity, which TIMEOUT omits).
+      assert.equal(JSON.stringify(authoritative), before);
+      assert.equal(timeoutTestSha256Hex(Buffer.from(JSON.stringify(authoritative))), beforeHash);
+
+      // Integrity/shard failures remain distinct from TIMEOUT: this fixture's
+      // shards are all valid (merely slow), so no degradedShard* fields are
+      // set -- TIMEOUT is not being confused with, or standing in for, a
+      // PARTIAL/integrity-failure classification (those remain covered by the
+      // pre-existing "query-time loss/corruption" tests above, which continue
+      // to pass unmodified through this same optimized code path).
+      assert.equal(r.degradedShardCount, undefined);
+      assert.equal(r.degradedShardCodes, undefined);
+
+      // Sanity: this really did take real wall-clock time reaching the
+      // configured budget -- not a coincidental/instant TIMEOUT from a bug
+      // elsewhere (e.g. an artifact-load failure returns ARTIFACT_UNAVAILABLE,
+      // not TIMEOUT, and would not take ~6s).
+      assert.ok(
+        elapsedMs >= SELECTIVE_CORPUS_TIME_BUDGET_MS,
+        `expected the real elapsed time (${elapsedMs}ms) to reach the ${SELECTIVE_CORPUS_TIME_BUDGET_MS}ms budget`,
+      );
+    });
+
+    rmSync(dir, { recursive: true, force: true });
+    clearSelectiveCorpusArtifactCache();
+  },
+);
+
+test(
+  "TIMEOUT determinism: the SAME mechanism/fixture completes normally under fast (zero-delay) simulated latency -- driven purely by configured latency, not flaky",
+  async () => {
+    const dir = mkdtempSync(join(tmpdir(), "scv-timeout-fast-"));
+    writeMinimalSelectiveCorpusArtifactWithOneRealCandidate(dir);
+    clearSelectiveCorpusArtifactCache();
+
+    await withEnv({ SELECTIVE_CORPUS_SHADOW_ENABLED: "true" }, async () => {
+      const artifact = await loadDelayedSimulatedArtifact(dir, 0);
+      const authoritative = { unifiedScore: 2, matchedPositions: [] };
+      const r = await runSelectiveCorpusShadow({
+        canonicalSubmissionText: SHARD_QUERY_TEXT,
+        authoritative,
+        artifactOverride: artifact,
+      });
+
+      assert.equal(
+        r.state,
+        "COMPLETED",
+        "the identical fixture/submission, with zero simulated latency, completes normally -- proving the TIMEOUT above was a genuine latency effect, not a fixture bug",
+      );
+      assert.equal(r.authoritativeUnifiedSimilarity, 2);
+    });
+
+    rmSync(dir, { recursive: true, force: true });
+    clearSelectiveCorpusArtifactCache();
+  },
+);
