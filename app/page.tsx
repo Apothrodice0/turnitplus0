@@ -57,6 +57,7 @@ import {
   enrichReportWithWikipedia,
   extractFileTextWithDiagnostics,
   extractReferenceInputs,
+  isPasswordProtectedPdfError,
   addReferenceFiles,
   removeReferenceFile,
   markReferencesChecked,
@@ -972,9 +973,13 @@ export default function Home() {
       });
       extractionDiagnostic = extracted.extraction;
       text = normalizeExtractedText(extracted.text);
-    } catch {
+    } catch (error) {
       navigate("dashboard");
-      notify("I could not read that document. Try another file.");
+      notify(
+        isPasswordProtectedPdfError(error)
+          ? "This PDF is password-protected. Remove the password and upload it again."
+          : "I could not read that document. Try another file.",
+      );
       window.clearInterval(progressTimer);
       generationLockRef.current = false;
       setIsGeneratingReport(false);

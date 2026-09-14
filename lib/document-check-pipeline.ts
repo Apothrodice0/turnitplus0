@@ -71,6 +71,44 @@ export type {
 let webCheckWorker: Worker | null = null;
 let webCheckRequestId = 0;
 
+/**
+ * Password-protected-PDF hardening. pdfjs-dist rejects getDocument()'s
+ * promise with its own PasswordException (name: "PasswordException") when a
+ * PDF requires a password and no onPassword callback is supplied — neither
+ * this module nor its callers ever supplies one (no password-entry/retry UI
+ * exists anywhere in the product). Reusing the exact same stable-identity
+ * idiom lib/corpus-extraction-worker.ts's own isPasswordException already
+ * uses for the corpus-ingestion path: error NAME, never the exception's own
+ * user-facing message text (not a stable contract across pdfjs versions).
+ *
+ * Converted here, at the getDocument() boundary, into this small app-owned
+ * signal so callers (app/page.tsx, the room page) never need to import
+ * pdfjs-dist themselves just to recognize this one case. Every OTHER
+ * getDocument() rejection (InvalidPDFException, UnknownErrorException, ...)
+ * is rethrown completely unchanged — this is the only new branch.
+ */
+export class PasswordProtectedPdfError extends Error {
+  constructor() {
+    super("This PDF is password-protected.");
+    this.name = "PasswordProtectedPdfError";
+  }
+}
+
+export function isPasswordProtectedPdfError(error: unknown): boolean {
+  return error instanceof Error && error.name === "PasswordProtectedPdfError";
+}
+
+async function loadPdfDocument(pdfjs: typeof import("pdfjs-dist"), data: ArrayBuffer) {
+  try {
+    return await pdfjs.getDocument({ data }).promise;
+  } catch (error) {
+    if (error instanceof Error && error.name === "PasswordException") {
+      throw new PasswordProtectedPdfError();
+    }
+    throw error;
+  }
+}
+
 export function formatBytes(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -287,7 +325,7 @@ export async function extractFileTextWithDiagnostics(
   if (extension === "pdf") {
     const pdfjs = await import("pdfjs-dist");
     pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
-    const document = await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise;
+    const document = await loadPdfDocument(pdfjs, await file.arrayBuffer());
     const result = await extractPdfTextDocumentWithCompleteness(document, (pageNumber, pageCount) => {
       onProgress(8 + Math.round((pageNumber / pageCount) * 20), `Reading page ${pageNumber} of ${pageCount}`);
     });

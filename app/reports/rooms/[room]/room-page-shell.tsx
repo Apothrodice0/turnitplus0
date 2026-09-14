@@ -22,6 +22,7 @@ import {
   enrichReportWithWikipedia,
   extractFileTextWithDiagnostics,
   extractReferenceInputs,
+  isPasswordProtectedPdfError,
   addReferenceFiles,
   removeReferenceFile,
   markReferencesChecked,
@@ -821,8 +822,12 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
       const extracted = await extractFileTextWithDiagnostics(submittedFile, (_value, label) => setProcessingLabel(label));
       extractionDiagnostic = extracted.extraction;
       text = normalizeExtractedText(extracted.text);
-    } catch {
-      notify("I could not read that document. Try another file.");
+    } catch (error) {
+      notify(
+        isPasswordProtectedPdfError(error)
+          ? "This PDF is password-protected. Remove the password and upload it again."
+          : "I could not read that document. Try another file.",
+      );
       window.clearInterval(progressTimerRef.current);
       generationLockRef.current = false;
       setIsGeneratingReport(false);
