@@ -33,7 +33,58 @@
  * real reference list from an inline citation or a stray prose mention.
  */
 
-const HEADING_PATTERN = /\b(references|bibliography|works\s+cited)\b/gi;
+/**
+ * MULTILINGUAL HEADING SUPPORT: the heading terms this detector recognizes.
+ * Deliberately narrow — one heading vocabulary per supported language, not a
+ * synonym dictionary. Multi-word headings use `\s+` between their words
+ * (matching the existing "works\s+cited" convention) so the WHOLE phrase is
+ * consumed as one match, letting looksLikeReferenceListStart's immediate-
+ * marker checks apply right after the full heading, exactly as they already
+ * do for "works cited".
+ *
+ *   English (unchanged): references | bibliography | works cited
+ *   French:  références | bibliographie | références bibliographiques
+ *            ("references", unaccented, is already covered by the English
+ *            term above and doubles as valid French usage)
+ *   Arabic:  المراجع (references/sources) | قائمة المراجع (list of
+ *            references) | المصادر والمراجع (the sources and references)
+ */
+const HEADING_TERMS = [
+  "references",
+  "bibliography",
+  "works\\s+cited",
+  "références\\s+bibliographiques",
+  "références",
+  "bibliographie",
+  "المراجع",
+  "قائمة\\s+المراجع",
+  "المصادر\\s+والمراجع",
+].join("|");
+
+/**
+ * UNICODE-SAFE BOUNDARIES: JavaScript's \b is defined purely in terms of \w
+ * ([A-Za-z0-9_]), which does not include Arabic letters OR Latin letters
+ * with diacritics (é, à, ç, …) even with the /u flag — \w itself never
+ * changes meaning under /u. Two concrete failures this caused when naively
+ * tried: (1) \bالمراجع\b never matches at all when surrounded by whitespace,
+ * because neither an Arabic letter nor a space is ever \w, so there is no
+ * \w/non-\w transition for \b to fire on; (2) \bréférences\b matches in
+ * spurious, unstable places inside ordinary French words — "é" is itself
+ * "non-word" under \w's ASCII-only definition, so e.g. "préférences"
+ * ("preferences", an unrelated word) contains internal \w/non-\w
+ * transitions around each "é" that could let a naive \b-based pattern fire
+ * where it should not.
+ *
+ * The fix used here — negative lookbehind/lookahead requiring the character
+ * immediately outside the match to NOT be a Unicode letter or number
+ * (\p{L}\p{N}) — reuses the exact \p{L}/\p{N} convention lib/similarity-
+ * core.ts's own normalize()/tokenSpans() already rely on elsewhere in this
+ * codebase, rather than introducing a second boundary mechanism. It
+ * correctly rejects "références" inside "préférences" (the preceding "p" is
+ * \p{L}) and correctly matches "المراجع" surrounded by plain whitespace
+ * (space is neither \p{L} nor \p{N}).
+ */
+const HEADING_PATTERN = new RegExp(`(?<![\\p{L}\\p{N}])(?:${HEADING_TERMS})(?![\\p{L}\\p{N}])`, "giu");
 
 /** How far past a candidate heading to look for corroborating reference-list-shaped content. Generous enough to skip a short "References" subtitle/byline before the first entry, small enough that unrelated later text can't accidentally corroborate an early false match. */
 const LOOKAHEAD_WINDOW = 700;
