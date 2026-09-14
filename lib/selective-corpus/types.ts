@@ -45,6 +45,30 @@ export type SelectiveCorpusShadowResult = {
   verifiedSourceCount?: number;
   matchedPositionCount?: number;
 
+  /**
+   * AUTHORITATIVE PROMOTION — INTERNAL ONLY, never sent to any client. The
+   * actual verified matched-passage ranges behind matchedPositionCount above,
+   * in the exact shape lib/unified-similarity.ts's other evidence channels
+   * (e.g. userSuppliedReferenceEvidence) already consume — populated DIRECTLY
+   * from the same already-computed, co-source-disambiguated attribution data
+   * matchedPositionCount itself is derived from (shadow.ts's `co.attributed`),
+   * never reconstructed from matchedPositionCount, topCandidateRanks,
+   * interpretationBreakdown, or counterfactualUnifiedSimilarity — none of
+   * those retain real position data in a form safe to re-score from (a count,
+   * a rank, and an explanation-only structure, respectively). Present only on
+   * COMPLETED and PARTIAL (a PARTIAL's verified spans are genuine, verified
+   * evidence over an incomplete shard index — a lower bound, never
+   * fabricated). `sourceLabel` reuses the SAME non-sensitive "S1..Sn"
+   * convention interpretationBreakdown already uses — never a source id,
+   * title, URL, path, or Blob reference. Absent on every other state
+   * (DISABLED/ARTIFACT_UNAVAILABLE/TIMEOUT/FAILED), which always carry zero
+   * evidence of any kind.
+   */
+  verifiedEvidence?: Array<{
+    sourceLabel: string;
+    matchedPassages: Array<{ submittedWordStart: number; submittedWordEnd: number; matchedWordCount: number }>;
+  }>;
+
   /** Counterfactual: unified similarity if the selective-corpus verified
    *  positions were also unioned into the authoritative matched set. */
   counterfactualUnifiedSimilarity?: number;

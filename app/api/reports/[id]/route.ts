@@ -138,6 +138,31 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
       // net for anything unexpected (e.g. a database error on the snapshot
       // read/write itself), not the primary error handling.
       try {
+        // AUTHORITATIVE PROMOTION — ANY persisted selectiveCorpusAuthoritativeStatus
+        // (not just "pending") means this report's final score is, or was,
+        // decided by the canonical Selective-Corpus-aware finalizer
+        // (lib/selective-corpus-authoritative.ts), never by this route's
+        // ordinary resolvePrimarySimilaritySummary call — which has no
+        // selectiveCorpusEvidence input at all. Letting it run here anyway
+        // would, for:
+        //   - "pending": compute and persist a premature, pre-V4 "final"
+        //     score the instant anyone views the report — the false-early-
+        //     finalization this whole design exists to prevent; and
+        //   - "completed" / "incomplete": silently REGRESS an already-final,
+        //     genuinely V4-inclusive score back down to a V4-less one on the
+        //     very next GET (the generation guard alone does not stop this —
+        //     same generation, <= still passes) — a real rollback-contract
+        //     violation ("already completed/incomplete reports remain
+        //     immutable as persisted"), not merely a missed-optimization.
+        // Skip this entire recompute/persist/telemetry block outright for
+        // every one of the three states: no compute, no write, no marker
+        // change. Only the deferred finalizer or the recovery sweep may ever
+        // change this report's score once it has entered this lifecycle.
+        // Mirrors selfHealUnifiedSimilarity's own identical short-circuit in
+        // lib/report-primary-similarity.ts (the room-card read path) — GET
+        // /api/reports/[id] has its own separate recompute here, so it needs
+        // its own separate guard.
+        if (payload.selectiveCorpusAuthoritativeStatus == null) {
         // Scholarly evidence server trust boundary (drizzle/0052): re-resolve
         // the authoritative scholarly evidence server-side from the verified
         // diagnostics id POST stamped onto the payload (payload.text unchanged
@@ -398,6 +423,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
           // See lib/report-shadow-evaluations.ts's own doc comment on this flag.
           includeSelectiveCorpus: false,
         });
+        } // end: payload.selectiveCorpusAuthoritativeStatus == null
       } catch (err) {
         console.error('resolvePrimarySimilaritySummary failed (non-fatal):', err instanceof Error ? err.message : String(err));
       }

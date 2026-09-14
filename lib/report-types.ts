@@ -310,6 +310,57 @@ export type SimilarityReport = {
    */
   unifiedSimilarityFailed?: boolean;
   /**
+   * AUTHORITATIVE PROMOTION — SERVER-INTERNAL ONLY, never needed by an
+   * ordinary client (no UI reads this directly; similarityStatus="pending"
+   * via the existing PersistedSimilarityDisplay/RoomOccupantResult mechanism
+   * already carries the customer-facing "still processing" signal). Absent
+   * means not applicable — the report predates Selective Corpus V4
+   * authoritative promotion, or effectiveSelectiveCorpusAuthoritativeEnabled()
+   * was false at creation time; such a report is scored exactly as it always
+   * was and this field is never written or read for it.
+   *
+   * Set exactly once, at first-save, when
+   * effectiveSelectiveCorpusAuthoritativeEnabled() was true for THIS report:
+   *   "pending" — V4 is required before similarity may become final;
+   *     unifiedSimilarity is deliberately left unpersisted so the existing
+   *     similarityStatus="pending" mechanism (never a new UI lifecycle) keeps
+   *     the report honestly non-terminal until finalization lands.
+   *   "completed" — V4 completed fully; the persisted unifiedSimilarity
+   *     already includes its verified evidence.
+   *   "incomplete" — the report is finalized (a real, final unifiedSimilarity
+   *     IS persisted), but one or more required V4 checks did not complete
+   *     (TIMEOUT / ARTIFACT_UNAVAILABLE / FAILED / an unexpected finalizer
+   *     exception, or a PARTIAL result whose verified evidence is only a
+   *     lower bound over an incomplete shard index) — the score is real and
+   *     final, never stuck, but V4's own contribution may be a lower bound
+   *     or absent.
+   *
+   * Deliberately NEVER compared against the live
+   * SELECTIVE_CORPUS_AUTHORITATIVE_ENABLED/SELECTIVE_CORPUS_SHADOW_ENABLED
+   * flags on a later read, unlike corpusSourceMatchingEnabledAtComputation
+   * above — turning the authoritative flag on/off after this report exists
+   * must never roll it forward to "stale" or roll it back, by design (see
+   * lib/selective-corpus-authoritative.ts's own header comment). ANY save
+   * (first save or a later resave, e.g. the AI/Wikipedia-enrichment
+   * double-save) must carry this value forward unconditionally — see
+   * app/api/reports/route.ts's existingReportRow query, which is the ONLY
+   * thing standing between this field and being silently dropped by that
+   * route's wholesale payload_json replace.
+   */
+  selectiveCorpusAuthoritativeStatus?: "pending" | "completed" | "incomplete";
+  /**
+   * AUTHORITATIVE PROMOTION — SERVER-INTERNAL ONLY. Set only by the recovery
+   * sweep (app/api/internal/selective-corpus-authoritative-sweep/route.ts)
+   * when it atomically claims a stale-pending report for a retry attempt;
+   * absent otherwise. An ISO timestamp string, mirroring this project's
+   * existing convention elsewhere. Cleared (removed) the moment a terminal
+   * write lands (see persistSelectiveCorpusAuthoritativeFinalization) — never
+   * a permanent lease; a claim older than the sweep's own stale-claim
+   * threshold is reclaimable by a later sweep run exactly like the existing
+   * corpus_admission_report_jobs.claimed_at pattern.
+   */
+  selectiveCorpusAuthoritativeClaimedAt?: string;
+  /**
    * Report V2 — ADDITIVE, EXPLANATION ONLY. The Evidence Interpretation Layer's
    * classification of the report's ALREADY-VERIFIED evidence
    * (lib/evidence-interpretation/). NEVER read by, or written into,
@@ -522,6 +573,7 @@ export function unifiedEvidenceSummary(unified: UnifiedSimilarityResult): string
   if (unified.archiveOnlyWords > 0 || unified.overlapWords > 0) parts.push("own reference material");
   if (unified.liveAcademicOnlyWords > 0) parts.push("live academic sources");
   if (unified.previousUploadOnlyWords > 0) parts.push("TurnitPlus reference sources");
+  if (unified.selectiveCorpusOnlyWords > 0) parts.push("supplementary reference sources");
   if (parts.length === 0) return "no matched sources";
   return parts.join(", ");
 }
@@ -575,6 +627,33 @@ export function referenceSourceMatchedPositions(report: SimilarityReport): numbe
  */
 export function userSuppliedReferenceMatchedPositions(report: SimilarityReport): number[] {
   return report.unifiedSimilarity?.userSuppliedReferencePositions ?? [];
+}
+
+/**
+ * AUTHORITATIVE PROMOTION — the privacy-safe position subset behind the
+ * generic "supplementary reference sources" bucket (selectiveCorpusOnlyWords).
+ * Word indices only — no source label, corpus digest, or provenance of any
+ * kind. Empty when no verified Selective Corpus V4 evidence contributed.
+ */
+export function selectiveCorpusMatchedPositions(report: SimilarityReport): number[] {
+  return report.unifiedSimilarity?.selectiveCorpusPositions ?? [];
+}
+
+/**
+ * AUTHORITATIVE PROMOTION — the minimum additive check needed to distinguish
+ * "finalized, V4 checks completed" from "finalized, but one or more required
+ * V4 checks were incomplete" (TIMEOUT / ARTIFACT_UNAVAILABLE / FAILED / an
+ * unexpected finalizer exception / a PARTIAL lower-bound result). Reuses the
+ * persisted selectiveCorpusAuthoritativeStatus as the sole source of truth —
+ * no separate message/reason field exists or is needed today. false for a
+ * report with no marker at all (predates V4 authoritative, or the creation-
+ * time policy was pre-V4) and false for "completed" — true only for
+ * "incomplete". This never hides the condition: a caller that wants to
+ * disclose it reads this exact function rather than re-deriving its own
+ * check against the raw field.
+ */
+export function hasIncompleteSelectiveCorpusCheck(report: SimilarityReport): boolean {
+  return report.selectiveCorpusAuthoritativeStatus === "incomplete";
 }
 
 export function archiveMatchedWordCount(report: SimilarityReport) {

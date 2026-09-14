@@ -32,8 +32,18 @@ export async function runSelectiveCorpusShadowEvaluation(params: {
   reportId: string;
   rawText: string;
   authoritativeUnifiedSimilarity: UnifiedSimilarityResult | null;
+  /**
+   * AUTHORITATIVE PROMOTION — narrow internal bypass, threaded straight
+   * through to runSelectiveCorpusShadow. See that function's own
+   * RunSelectiveCorpusShadowParams doc comment for exactly what it does and
+   * does not bypass, and which two callers may ever set it true (the
+   * deferred finalizer and the recovery sweep, both in
+   * lib/selective-corpus-authoritative.ts). Absent/false for every ordinary
+   * caller — byte-identical to before this parameter existed.
+   */
+  requiredForAuthoritativePendingReport?: boolean;
 }): Promise<SelectiveCorpusShadowResult> {
-  if (!isSelectiveCorpusShadowEnabled()) {
+  if (!isSelectiveCorpusShadowEnabled() && !params.requiredForAuthoritativePendingReport) {
     const disabled: SelectiveCorpusShadowResult = { state: "DISABLED", evaluatorVersion: "selective-corpus-shadow-v1" };
     logSelectiveCorpusShadowTelemetry(disabled, 0);
     return disabled;
@@ -48,6 +58,7 @@ export async function runSelectiveCorpusShadowEvaluation(params: {
             matchedPositions: params.authoritativeUnifiedSimilarity.matchedPositions,
           }
         : null,
+      requiredForAuthoritativePendingReport: params.requiredForAuthoritativePendingReport,
     });
     logSelectiveCorpusShadowTelemetry(result, performance.now() - tStart);
 

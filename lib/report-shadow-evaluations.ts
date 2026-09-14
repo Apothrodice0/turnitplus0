@@ -6,6 +6,7 @@ import { runDeviceProvenanceShadowEvaluation } from "./device-provenance-shadow"
 import { runCorpusDuplicateSuppressionShadowEvaluation } from "./corpus-duplicate-suppression-shadow";
 import { runPmcCoverageShadowEvaluation } from "./pmc-coverage-shadow";
 import { runSelectiveCorpusShadowEvaluation } from "./selective-corpus/shadow-evaluation";
+import { finalizeSelectiveCorpusAuthoritativeReport } from "./selective-corpus-authoritative";
 import type { ReportHistoricalSubmissionMatch } from "./report-types";
 import type { UnifiedSimilarityResult } from "./unified-similarity";
 import type { ExternalAcademicEvidence } from "./academic-search/types";
@@ -157,6 +158,24 @@ export type ScheduleReportShadowEvaluationsParams = {
    * every OTHER evaluator while skipping only this one.
    */
   includeSelectiveCorpus?: boolean;
+  /**
+   * AUTHORITATIVE PROMOTION — set ONLY by app/api/reports/route.ts's POST
+   * handler, and only when THIS SAME request just persisted
+   * selectiveCorpusAuthoritativeStatus:"pending" for a genuinely first save
+   * (effectiveSelectiveCorpusAuthoritativeEnabled() was true at that exact
+   * moment). Never re-derived from a live flag read here or anywhere
+   * downstream — the persisted marker this same request just wrote is the
+   * sole, durable record of that creation-time decision, so a flag flip
+   * before this deferred callback fires can never strand or reinterpret it
+   * (see lib/selective-corpus/flag.ts's own header comment). When true, the
+   * Selective Corpus evaluation below runs with
+   * requiredForAuthoritativePendingReport:true (bypassing ONLY the live
+   * shadow-enabled gate) and its result is immediately handed to
+   * lib/selective-corpus-authoritative.ts's canonical finalizer — never a
+   * second scoring implementation. GET's own call site never sets this
+   * (includeSelectiveCorpus:false already skips the whole evaluator for GET).
+   */
+  selectiveCorpusAuthoritativePending?: boolean;
 };
 
 export async function scheduleReportShadowEvaluations(
@@ -174,6 +193,7 @@ export async function scheduleReportShadowEvaluations(
     authoritativeArchiveMatchedPositions,
     authoritativeExternalAcademicEvidence,
     includeSelectiveCorpus = true,
+    selectiveCorpusAuthoritativePending = false,
   } = params;
   const openConnection = params.openConnection ?? getReportsDbClient;
   await runAfterResponse(async () => {
@@ -238,11 +258,29 @@ export async function scheduleReportShadowEvaluations(
       // site passes false — see this param's own doc comment above. Every
       // OTHER evaluator above still runs on GET, unaffected.
       if (includeSelectiveCorpus) {
-        await runSelectiveCorpusShadowEvaluation({
+        const selectiveCorpusResult = await runSelectiveCorpusShadowEvaluation({
           reportId,
           rawText,
           authoritativeUnifiedSimilarity,
+          // AUTHORITATIVE PROMOTION — see selectiveCorpusAuthoritativePending's
+          // own doc comment above. False for every ordinary (shadow-only)
+          // report, in which case this is byte-identical to before this
+          // parameter existed.
+          requiredForAuthoritativePendingReport: selectiveCorpusAuthoritativePending,
         });
+        if (selectiveCorpusAuthoritativePending) {
+          // Canonical finalizer — never a second scoring implementation, see
+          // lib/selective-corpus-authoritative.ts's own header comment. Never
+          // throws; a failure here is already best-effort internally (falls
+          // back to a zero-V4 "incomplete" finalization, or leaves the report
+          // pending for the recovery sweep to retry).
+          await finalizeSelectiveCorpusAuthoritativeReport(deferredClient, {
+            reportDeviceKey,
+            reportId,
+            accountId,
+            shadowResult: selectiveCorpusResult,
+          });
+        }
       }
     } catch (err) {
       // All four evaluators are "never throws" by their own contract; this is

@@ -25,7 +25,7 @@ import type { HistoricalSubmissionMatchEntry, ReportHistoricalSubmissionMatch } 
 
 export const UNIFIED_SIMILARITY_VERSION = "unified-similarity-v1";
 
-export type UnifiedEvidenceSourceType = "archive" | "openaire" | "europe_pmc" | "previous_upload" | "user_supplied_reference";
+export type UnifiedEvidenceSourceType = "archive" | "openaire" | "europe_pmc" | "previous_upload" | "user_supplied_reference" | "selective_corpus";
 /**
  * "excluded_effective_device_self": a production-counted previous-upload
  * source the Preview-gated same-device SELF rule
@@ -130,6 +130,20 @@ export type UnifiedSimilarityResult = {
    * and values) to before this channel existed apart from this key being 0.
    */
   userSuppliedReferenceOnlyWords: number;
+  /**
+   * AUTHORITATIVE PROMOTION — words matched ONLY by verified Selective Corpus
+   * V4 evidence (no archive / live-academic / eligible-prior-upload /
+   * supplied-reference overlap at that position). Always 0 when the caller
+   * passed no selectiveCorpusEvidence (every configuration without
+   * authoritative V4 evidence available for this report), which keeps this
+   * function's output byte-identical to before this channel existed apart
+   * from this key being 0. Selective Corpus is an independent, externally-
+   * built source pool — it is never a "previous upload," so it is wired here
+   * as its own sibling channel, never inside the previous-upload/SELF block
+   * below, and can never be excluded by (or itself trigger) SELF/UNKNOWN
+   * classification.
+   */
+  selectiveCorpusOnlyWords: number;
   /** Full per-passage attribution, including excluded entries (see evidenceStatus) — internal use (debugging, calibration, a future admin view), never rendered to an end user as-is. */
   contributions: UnifiedEvidenceContribution[];
   /**
@@ -170,6 +184,14 @@ export type UnifiedSimilarityResult = {
    * per-contribution data. Empty when no reference files were supplied.
    */
   userSuppliedReferencePositions: number[];
+  /**
+   * AUTHORITATIVE PROMOTION — the privacy-safe position subset attributable
+   * ONLY to verified Selective Corpus V4 evidence. Word indices only — no
+   * source label, source id, family, or corpus digest — so the render layer
+   * can draw one generic bucket without touching per-contribution data.
+   * Empty when no selectiveCorpusEvidence was supplied.
+   */
+  selectiveCorpusPositions: number[];
 };
 
 export type ComputeUnifiedSimilarityParams = {
@@ -248,6 +270,26 @@ export type ComputeUnifiedSimilarityParams = {
    * never appear in an authoritative result.
    */
   hypotheticalExcludedRepresentationIds?: readonly string[] | ReadonlySet<string> | null;
+  /**
+   * AUTHORITATIVE PROMOTION — verified Selective Corpus V4 evidence, in the
+   * SAME shape userSuppliedReferenceEvidence already uses. Every passage here
+   * is already SERVER-VERIFIED by the unmodified lib/selective-corpus/
+   * matcher (STRICT_SPAN + FAMILY_GUARD + co-source attribution) — this
+   * function only unions the positions, exactly as it does for every other
+   * channel; it never re-verifies, re-ranks, or re-derives anything. Absent /
+   * empty (every report not created under authoritative V4, and every
+   * authoritative-pending report whose terminal V4 state carried zero
+   * evidence — TIMEOUT/ARTIFACT_UNAVAILABLE/FAILED/no-match) makes this
+   * function's output byte-identical to before this parameter existed, apart
+   * from the always-present selectiveCorpusOnlyWords: 0 /
+   * selectiveCorpusPositions: [] keys.
+   */
+  selectiveCorpusEvidence?:
+    | ReadonlyArray<{
+        sourceId: string;
+        matchedPassages: ReadonlyArray<{ submittedWordStart: number; submittedWordEnd: number; matchedWordCount: number }>;
+      }>
+    | null;
 };
 
 function clampedPositions(start: number, end: number, wordCount: number): [number, number] | null {
@@ -373,6 +415,38 @@ export function computeUnifiedSimilarity(params: ComputeUnifiedSimilarityParams)
       if (!clamped || !firstOccurrence) continue;
       const [start, end] = clamped;
       addRange(referenceSet, start, end);
+      eligibleRanges.push({ wordStart: start, wordEnd: end + 1 });
+    }
+  }
+
+  // --- Source: Selective Corpus V4 verified evidence (AUTHORITATIVE PROMOTION) ---
+  // An independent, externally-built source pool (Wikipedia/public-report
+  // bulk corpus) — never a "previous upload," so it is wired here as its own
+  // sibling channel, deliberately BEFORE the previous-upload/SELF block below
+  // and with no dependency on it whatsoever: it can never be excluded by SELF
+  // classification, and it can never itself trigger one. Every passage here
+  // is already SERVER-VERIFIED (STRICT_SPAN/FAMILY_GUARD/co-source) — no
+  // discovery step, no re-verification, exactly the same "union only" role
+  // every other channel here plays.
+  const selectiveCorpusSet = new Set<number>();
+  const seenSelectiveCorpus = new Set<string>();
+  for (const source of params.selectiveCorpusEvidence ?? []) {
+    const identityKey = `selective-corpus:${source.sourceId}`;
+    const firstOccurrence = !seenSelectiveCorpus.has(identityKey);
+    seenSelectiveCorpus.add(identityKey);
+    for (const passage of source.matchedPassages ?? []) {
+      const clamped = clampedPositions(passage.submittedWordStart, passage.submittedWordEnd, wordCount);
+      contributions.push({
+        sourceType: "selective_corpus",
+        sourceId: identityKey,
+        submittedWordStart: passage.submittedWordStart,
+        submittedWordEnd: passage.submittedWordEnd,
+        matchedWordCount: passage.matchedWordCount,
+        evidenceStatus: "included",
+      });
+      if (!clamped || !firstOccurrence) continue;
+      const [start, end] = clamped;
+      addRange(selectiveCorpusSet, start, end);
       eligibleRanges.push({ wordStart: start, wordEnd: end + 1 });
     }
   }
@@ -505,21 +579,25 @@ export function computeUnifiedSimilarity(params: ComputeUnifiedSimilarityParams)
   let liveAcademicOnlyWords = 0;
   let previousUploadOnlyWords = 0;
   let userSuppliedReferenceOnlyWords = 0;
+  let selectiveCorpusOnlyWords = 0;
   let overlapWords = 0;
   const previousUploadPositions: number[] = [];
   const userSuppliedReferencePositions: number[] = [];
-  const allEligiblePositions = new Set<number>([...archiveSet, ...liveSet, ...priorSet, ...referenceSet]);
+  const selectiveCorpusPositions: number[] = [];
+  const allEligiblePositions = new Set<number>([...archiveSet, ...liveSet, ...priorSet, ...referenceSet, ...selectiveCorpusSet]);
   for (const position of allEligiblePositions) {
     const sourcesHere =
       (archiveSet.has(position) ? 1 : 0) +
       (liveSet.has(position) ? 1 : 0) +
       (priorSet.has(position) ? 1 : 0) +
-      (referenceSet.has(position) ? 1 : 0);
+      (referenceSet.has(position) ? 1 : 0) +
+      (selectiveCorpusSet.has(position) ? 1 : 0);
     if (sourcesHere > 1) { overlapWords += 1; continue; }
     if (archiveSet.has(position)) archiveOnlyWords += 1;
     else if (liveSet.has(position)) liveAcademicOnlyWords += 1;
     else if (priorSet.has(position)) { previousUploadOnlyWords += 1; previousUploadPositions.push(position); }
-    else { userSuppliedReferenceOnlyWords += 1; userSuppliedReferencePositions.push(position); }
+    else if (referenceSet.has(position)) { userSuppliedReferenceOnlyWords += 1; userSuppliedReferencePositions.push(position); }
+    else { selectiveCorpusOnlyWords += 1; selectiveCorpusPositions.push(position); }
   }
 
   return {
@@ -535,9 +613,11 @@ export function computeUnifiedSimilarity(params: ComputeUnifiedSimilarityParams)
     unknownExcludedWords,
     deviceSelfExcludedWords,
     userSuppliedReferenceOnlyWords,
+    selectiveCorpusOnlyWords,
     contributions,
     matchedPositions: [...allEligiblePositions].sort((left, right) => left - right),
     previousUploadPositions: previousUploadPositions.sort((left, right) => left - right),
     userSuppliedReferencePositions: userSuppliedReferencePositions.sort((left, right) => left - right),
+    selectiveCorpusPositions: selectiveCorpusPositions.sort((left, right) => left - right),
   };
 }

@@ -62,6 +62,27 @@ export type RunSelectiveCorpusShadowParams = {
    *  (e.g. proving concurrency=1 and the real default produce identical
    *  evidence) without a process restart. */
   stageBSourceFetchConcurrencyOverride?: number;
+  /**
+   * AUTHORITATIVE PROMOTION — narrow internal bypass, NEVER set by an
+   * ordinary caller. A report already persisted as
+   * selectiveCorpusAuthoritativeStatus:"pending" was created under a
+   * creation-time policy decision that requires a real V4 evaluation
+   * regardless of what SELECTIVE_CORPUS_SHADOW_ENABLED reads at THIS later
+   * moment (an operator flipping that live flag between creation and
+   * evaluation must never strand or silently reinterpret an already-pending
+   * report — see lib/selective-corpus/flag.ts's own header comment on
+   * effectiveSelectiveCorpusAuthoritativeEnabled). Setting this true skips
+   * ONLY the isSelectiveCorpusShadowEnabled() gate below — every other rule
+   * (trusted digest, integrity validation, artifact loading, the 6000ms
+   * budget, Stage A, Stage B, STRICT_SPAN 60/25, FAMILY_GUARD, co-source
+   * verification, source-unavailable-contributes-zero) is completely
+   * unaffected. Only two callers may ever set this: the deferred finalizer
+   * for a persisted authoritative-pending report, and the recovery sweep
+   * after atomically claiming one (both in
+   * lib/selective-corpus-authoritative.ts) — never the public GET route,
+   * never an ordinary shadow-telemetry-only evaluation.
+   */
+  requiredForAuthoritativePendingReport?: boolean;
 };
 
 export async function runSelectiveCorpusShadow(
@@ -69,7 +90,11 @@ export async function runSelectiveCorpusShadow(
 ): Promise<SelectiveCorpusShadowResult> {
   const base = { evaluatorVersion: SELECTIVE_CORPUS_SHADOW_EVALUATOR_VERSION } as const;
 
-  if (!isSelectiveCorpusShadowEnabled()) {
+  // requiredForAuthoritativePendingReport bypasses ONLY this one gate — see
+  // its own doc comment on RunSelectiveCorpusShadowParams for exactly why and
+  // who may set it. An ordinary caller (the shadow-telemetry-only path) never
+  // sets it, so this is byte-identical to before for every existing caller.
+  if (!isSelectiveCorpusShadowEnabled() && !params.requiredForAuthoritativePendingReport) {
     return { state: "DISABLED", ...base };
   }
 
@@ -312,6 +337,21 @@ export async function runSelectiveCorpusShadow(
       })),
     }));
 
+    // AUTHORITATIVE PROMOTION — the real, verified matched-passage ranges
+    // behind matchedPositionCount, keyed by the SAME S1..Sn labels as
+    // interpretationBreakdown above (same orderedKeys index, so the two never
+    // disagree about source identity). Built directly from co.attributed —
+    // the already-computed, co-source-disambiguated position set per key —
+    // never from matchedPositionCount, topCandidateRanks, or
+    // interpretationBreakdown itself (see this field's own doc comment on
+    // SelectiveCorpusShadowResult for exactly why those are unsuitable).
+    // A key whose positions were entirely reassigned away by co-source
+    // attribution (co.attributed.get(key) empty or absent) contributes no
+    // passage — consistent with admittedKeys' own size>0 filter above.
+    const verifiedEvidence = orderedKeys
+      .map((key, i) => ({ sourceLabel: `S${i + 1}`, matchedPassages: positionsToMatchedPassages(co.attributed.get(key)) }))
+      .filter((source) => source.matchedPassages.length > 0);
+
     // Did any packed shard fail to load while serving Stage A / FAMILY_GUARD for
     // THIS evaluation? If so the discovery ran over an incomplete index and the
     // counterfactual is a LOWER BOUND — report PARTIAL, not a silent COMPLETED.
@@ -339,6 +379,7 @@ export async function runSelectiveCorpusShadow(
       interpretationVersion: interpretation.version,
       interpretationCounts: interpretation.counts,
       interpretationBreakdown,
+      ...(verifiedEvidence.length > 0 ? { verifiedEvidence } : {}),
       ...base,
     };
 
@@ -362,6 +403,39 @@ export async function runSelectiveCorpusShadow(
       ...base,
     };
   }
+}
+
+/**
+ * AUTHORITATIVE PROMOTION — run-length-encodes a set of individual word
+ * positions into the minimal set of contiguous [start,end] passages, each
+ * with its own matchedWordCount. Positions, not the original per-candidate
+ * spans, are the source of truth here: co-source attribution can split or
+ * reassign parts of an originally-contiguous admitted span across sources, so
+ * only re-deriving ranges from the FINAL attributed position set (never the
+ * pre-co-source `spans`) can be trusted to reflect what was actually
+ * attributed to this source label.
+ */
+function positionsToMatchedPassages(
+  positions: ReadonlySet<number> | undefined,
+): Array<{ submittedWordStart: number; submittedWordEnd: number; matchedWordCount: number }> {
+  if (!positions || positions.size === 0) return [];
+  const sorted = [...positions].sort((a, b) => a - b);
+  const passages: Array<{ submittedWordStart: number; submittedWordEnd: number; matchedWordCount: number }> = [];
+  let start = sorted[0];
+  let prev = sorted[0];
+  for (let i = 1; i <= sorted.length; i += 1) {
+    const current = sorted[i];
+    if (current === prev + 1) {
+      prev = current;
+      continue;
+    }
+    passages.push({ submittedWordStart: start, submittedWordEnd: prev, matchedWordCount: prev - start + 1 });
+    if (i < sorted.length) {
+      start = current;
+      prev = current;
+    }
+  }
+  return passages;
 }
 
 function summarizeSelectiveCorpusShardFailures(

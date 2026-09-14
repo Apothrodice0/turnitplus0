@@ -32,9 +32,24 @@ test("CRON_SCHEDULES.promotion matches vercel.json's own corpus-admission-promot
   assert.equal(CRON_SCHEDULES.promotion.path, entry.path);
 });
 
-test("vercel.json defines exactly the 2 cron entries this app relies on — no unreviewed new/removed entry silently changing what the status strip should describe", () => {
+test("vercel.json defines exactly the 3 cron entries this app relies on — no unreviewed new/removed entry silently changing what the status strip should describe", () => {
   const vercelConfig = JSON.parse(fs.readFileSync(path.join(repoRoot, "vercel.json"), "utf8"));
-  assert.equal(vercelConfig.crons.length, 2, "expected exactly 2 cron entries in vercel.json");
+  // AUTHORITATIVE PROMOTION: the 3rd entry, /api/internal/selective-corpus-
+  // authoritative-sweep, is a pure internal durability backstop (see
+  // lib/selective-corpus-authoritative.ts) — it has no admin status-strip
+  // display, so it is deliberately NOT tracked in CRON_SCHEDULES above; the
+  // two drift-guard tests up top still cover the two entries that ARE.
+  assert.equal(vercelConfig.crons.length, 3, "expected exactly 3 cron entries in vercel.json");
+  const sweepEntry = vercelConfig.crons.find((c) => c.path === "/api/internal/selective-corpus-authoritative-sweep");
+  assert.ok(sweepEntry, "expected the Selective Corpus authoritative-promotion recovery sweep's cron entry");
+  // Follow-up correction: the sweep's own minAgeMs/staleClaimMs are both 10
+  // minutes (lib/selective-corpus-authoritative.ts) — a once-daily cron
+  // (the original "0 5 * * *") could leave a genuinely stale-pending report
+  // stuck for up to ~24h before the sweep ever ran again, wildly inconsistent
+  // with the 10-minute recovery design. Every 5 minutes keeps the first
+  // recovery opportunity after the 10-minute stale threshold within roughly
+  // another 0-5 minutes, while staying low-frequency operationally.
+  assert.equal(sweepEntry.schedule, "*/5 * * * *", "the recovery sweep must run every 5 minutes, consistent with the 10-minute stale-pending design");
 });
 
 test("every CRON_SCHEDULES.hourUtc is actually derived from its own cronExpression's minute-hour fields — the two cannot drift apart from each other", () => {

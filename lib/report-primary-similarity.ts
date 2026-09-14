@@ -322,6 +322,22 @@ export async function resolvePrimarySimilaritySummary(
           matchedPassages: ReadonlyArray<{ submittedWordStart: number; submittedWordEnd: number; matchedWordCount: number }>;
         }>
       | null;
+    /**
+     * AUTHORITATIVE PROMOTION — verified Selective Corpus V4 evidence for
+     * THIS report, already chosen by the caller according to the shadow
+     * evaluation's own terminal-state policy (see
+     * lib/selective-corpus-authoritative.ts's evidence-selection helper).
+     * Absent / empty makes this resolution byte-identical to before this
+     * channel existed. Never resolved or re-derived here — this function
+     * only threads it straight through to computeUnifiedSimilarity, exactly
+     * like userSuppliedReferenceEvidence above.
+     */
+    selectiveCorpusEvidence?:
+      | ReadonlyArray<{
+          sourceId: string;
+          matchedPassages: ReadonlyArray<{ submittedWordStart: number; submittedWordEnd: number; matchedWordCount: number }>;
+        }>
+      | null;
     /** The archive-only fallback value — never mutated, never persisted by this function; see this module's own header comment. */
     archiveScore: number;
     /**
@@ -440,6 +456,7 @@ export async function resolvePrimarySimilaritySummary(
       historicalSubmissionMatch,
       effectiveDeviceSelfRepresentationIds,
       userSuppliedReferenceEvidence: params.userSuppliedReferenceEvidence,
+      selectiveCorpusEvidence: params.selectiveCorpusEvidence,
     });
     return { historicalSubmissionMatch, unifiedSimilarity, primaryScore: unifiedSimilarity.unifiedScore, isUnified: true, corpusSourceMatchingEnabled, corpusGeneration, failed: false, effectiveDeviceSelfRepresentationIds, deviceSelfSharedGuard };
   } catch (err) {
@@ -787,6 +804,73 @@ export async function persistRefreshedSimilarity(
   return { written: "none", rowsAffected: 0 };
 }
 
+export type SelectiveCorpusAuthoritativeTerminalStatus = "completed" | "incomplete";
+
+/**
+ * AUTHORITATIVE PROMOTION — the ONE write path that ever transitions a
+ * report's selectiveCorpusAuthoritativeStatus away from "pending". Deliberately
+ * NOT a variant of persistRefreshedSimilarity's ordinary "resolved" branch:
+ * this write requires an ADDITIONAL, independent condition on top of the same
+ * existing generation guard — see CRITICAL CAS below — that ordinary similarity
+ * refreshes must never carry.
+ *
+ * CRITICAL CAS: the existing unifiedSimilarityGeneration guard alone is
+ * insufficient here. Two finalizers computing at the SAME corpus generation
+ * (e.g. a duplicate deferred run and a recovery-sweep retry racing each
+ * other) would both pass a generation-only guard, and a "last write wins"
+ * semantics could let a worse duplicate result (e.g. one that hit TIMEOUT)
+ * silently overwrite an already-"completed" one with "incomplete" — a real
+ * regression. Requiring
+ * json_extract(payload_json,'$.selectiveCorpusAuthoritativeStatus') = 'pending'
+ * in the SAME WHERE clause makes the pending -> {completed|incomplete}
+ * transition atomic and exactly-once: whichever write commits first flips the
+ * status away from 'pending', and every other concurrent/duplicate write then
+ * matches zero rows. A rowsAffected === 0 result MUST be treated by the caller
+ * as "already finalized by someone else" — a clean no-op, never an error, and
+ * never retried.
+ *
+ * The claim field (selectiveCorpusAuthoritativeClaimedAt) is cleared on a
+ * successful transition — a finalized report needs no further claim, and
+ * clearing it keeps this server-internal field from lingering indefinitely.
+ */
+export async function persistSelectiveCorpusAuthoritativeFinalization(
+  client: Client,
+  params: { reportDeviceKey: string; reportId: string },
+  resolution: {
+    unifiedSimilarity: UnifiedSimilarityResult;
+    corpusSourceMatchingEnabled: boolean;
+    corpusGeneration: number;
+    terminalStatus: SelectiveCorpusAuthoritativeTerminalStatus;
+  },
+): Promise<{ written: boolean; rowsAffected: number }> {
+  const flagText = resolution.corpusSourceMatchingEnabled ? "true" : "false";
+  const result = await client.execute({
+    sql: `UPDATE saved_reports
+          SET payload_json = json_set(
+                json_remove(payload_json, '$.selectiveCorpusAuthoritativeClaimedAt'),
+                '$.unifiedSimilarity', json(?),
+                '$.corpusSourceMatchingEnabledAtComputation', json(?),
+                '$.unifiedSimilarityGeneration', ?,
+                '$.unifiedSimilarityFailed', json('false'),
+                '$.selectiveCorpusAuthoritativeStatus', ?
+              )
+          WHERE device_key = ? AND id = ? AND json_valid(payload_json)
+            AND json_extract(payload_json, '$.selectiveCorpusAuthoritativeStatus') = 'pending'
+            AND ${SIMILARITY_GENERATION_GUARD_SQL}`,
+    args: [
+      JSON.stringify(resolution.unifiedSimilarity),
+      flagText,
+      resolution.corpusGeneration,
+      resolution.terminalStatus,
+      params.reportDeviceKey,
+      params.reportId,
+      resolution.corpusGeneration,
+    ],
+  });
+  const rowsAffected = Number(result.rowsAffected);
+  return { written: rowsAffected > 0, rowsAffected };
+}
+
 /**
  * Legacy-room bug fix, twice-revised.
  *
@@ -900,6 +984,27 @@ export async function selfHealUnifiedSimilarity(
     const raw = row.rows[0] as unknown as { payload_json: string; archive_score: number | bigint } | undefined;
     if (!raw) return { attempted: false };
     const payload = JSON.parse(String(raw.payload_json)) as SimilarityReport;
+
+    // AUTHORITATIVE PROMOTION — ANY persisted selectiveCorpusAuthoritativeStatus
+    // means this report's score is owned by the canonical Selective-Corpus-
+    // aware finalizer (lib/selective-corpus-authoritative.ts), never by this
+    // cheap, non-V4-aware self-heal. For "pending", attempting the ordinary
+    // resolution here would compute and persist a premature, pre-V4 "final"
+    // score the instant anyone views the report — exactly the false-early-
+    // finalization this whole design exists to prevent. For "completed" /
+    // "incomplete", it would be worse: silently REGRESS an already-final,
+    // genuinely V4-inclusive score back down to a V4-less one (the
+    // generation guard alone does not stop this — same generation, <= still
+    // passes), violating the rollback contract's "already completed/
+    // incomplete reports remain immutable as persisted." Return immediately
+    // in every one of the three cases: no compute, no write, no marker
+    // change — a pending row is left exactly as pending, eligible for the
+    // deferred finalizer or the recovery sweep to resolve; a terminal row is
+    // left exactly as already finalized. Multiple concurrent callers all hit
+    // this same early return, so no write-race is even possible here.
+    if (payload.selectiveCorpusAuthoritativeStatus != null) {
+      return { attempted: false };
+    }
 
     // Scholarly evidence server trust boundary (drizzle/0052): re-resolve the
     // authoritative scholarly evidence server-side from the verified diagnostics

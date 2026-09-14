@@ -30,6 +30,7 @@ import { sanitizeSuppliedReferenceInputs, admittedReferenceEvidenceForUnifiedSim
 import { referenceTransportBudgetError } from '../../../lib/user-supplied-reference-constants';
 import { MAX_REPORT_SAVE_REQUEST_BYTES } from '../../../lib/report-transport-limits';
 import { scheduleReportShadowEvaluations } from '../../../lib/report-shadow-evaluations';
+import { effectiveSelectiveCorpusAuthoritativeEnabled } from '../../../lib/selective-corpus/flag';
 import type { SimilarityReport, ReportHistoricalSubmissionMatch } from '../../../lib/report-types';
 import type { UnifiedSimilarityResult } from '../../../lib/unified-similarity';
 import type { ExternalAcademicEvidence } from '../../../lib/academic-search/types';
@@ -396,7 +397,9 @@ export async function POST(request: Request) {
                      json_extract(payload_json, '$.userSuppliedReferenceEvidence') AS supplied_reference_evidence,
                      json_extract(payload_json, '$.userSuppliedReferenceChannel') AS supplied_reference_channel,
                      json_extract(payload_json, '$.userSuppliedReferenceGuard') AS supplied_reference_guard,
-                     json_extract(payload_json, '$.text') AS persisted_manuscript_text
+                     json_extract(payload_json, '$.text') AS persisted_manuscript_text,
+                     json_extract(payload_json, '$.selectiveCorpusAuthoritativeStatus') AS selective_corpus_authoritative_status,
+                     json_extract(payload_json, '$.selectiveCorpusAuthoritativeClaimedAt') AS selective_corpus_authoritative_claimed_at
               FROM saved_reports WHERE device_key = ? AND id = ?`,
         args: [deviceKey, id],
       });
@@ -410,6 +413,25 @@ export async function POST(request: Request) {
       const persistedSuppliedReferenceGuardRaw = parseJsonExtract(existingReportRow.rows[0]?.supplied_reference_guard);
       const persistedManuscriptText = typeof existingReportRow.rows[0]?.persisted_manuscript_text === 'string'
         ? (existingReportRow.rows[0].persisted_manuscript_text as string)
+        : null;
+      // AUTHORITATIVE PROMOTION — CRITICAL RESAVE PRESERVATION: payload_json is
+      // wholesale-replaced by this route on every save (SAVE_REPORT_SQL's
+      // `payload_json = ... ELSE excluded.payload_json`), built from
+      // persistedReportPayload below, whose base is the CLIENT's own
+      // resubmitted payload for THIS request. selectiveCorpusAuthoritativeStatus/
+      // ClaimedAt are purely server-internal fields the client never receives
+      // (never returned by GET) and therefore never echoes back — without this
+      // explicit read-and-carry-forward, exactly like
+      // verifiedAcademicSearchDiagnosticsId / userSuppliedReferenceEvidence
+      // above, a plain resave (e.g. the AI/Wikipedia-enrichment double-save)
+      // would silently drop these fields, regardless of their current value
+      // ("pending", "completed", or "incomplete").
+      const persistedSelectiveCorpusAuthoritativeStatus = ((): 'pending' | 'completed' | 'incomplete' | null => {
+        const v = existingReportRow.rows[0]?.selective_corpus_authoritative_status;
+        return v === 'pending' || v === 'completed' || v === 'incomplete' ? v : null;
+      })();
+      const persistedSelectiveCorpusAuthoritativeClaimedAt = typeof existingReportRow.rows[0]?.selective_corpus_authoritative_claimed_at === 'string'
+        ? (existingReportRow.rows[0].selective_corpus_authoritative_claimed_at as string)
         : null;
       const persistedVerifiedAcademicDiagnosticsId = ((): number | null => {
         const v = existingReportRow.rows[0]?.verified_academic_diagnostics_id as number | bigint | null | undefined;
@@ -605,11 +627,80 @@ export async function POST(request: Request) {
       // omitted raw refs) carried forward verbatim from the persisted row.
       // stripClientEvidenceInterpretation drops any client value for these keys
       // first; only the server value is spread in afterwards.
+      // AUTHORITATIVE PROMOTION — the marker value THIS save persists.
+      //   - genuine first save: evaluated ONCE, right now, against the live
+      //     effectiveSelectiveCorpusAuthoritativeEnabled() gate (both
+      //     SELECTIVE_CORPUS_AUTHORITATIVE_ENABLED and
+      //     SELECTIVE_CORPUS_SHADOW_ENABLED must be true) — "pending" if so,
+      //     otherwise the field is simply omitted (undefined), exactly
+      //     preserving today's behavior byte-for-byte for every report not
+      //     created under authoritative mode.
+      //   - a resave: NEVER re-evaluates the live flag — it unconditionally
+      //     carries forward whatever this report's OWN persisted marker
+      //     already is (including null/absent), so a later flag flip can
+      //     never roll a historical report forward or backward, and an
+      //     in-flight "pending" report's creation-time policy survives every
+      //     resave untouched (see CRITICAL RESAVE PRESERVATION above).
+      const selectiveCorpusAuthoritativeStatusToPersist = isFirstSaveOfThisReport
+        ? (effectiveSelectiveCorpusAuthoritativeEnabled() ? ('pending' as const) : undefined)
+        : (persistedSelectiveCorpusAuthoritativeStatus ?? undefined);
+      // A resave must also carry forward any in-progress recovery-sweep claim
+      // untouched — this route never sets or clears it itself (only the
+      // sweep's own atomic claim, and the finalizer's own terminal write, do).
+      const selectiveCorpusAuthoritativeClaimedAtToPersist = isFirstSaveOfThisReport
+        ? undefined
+        : (persistedSelectiveCorpusAuthoritativeClaimedAt ?? undefined);
+      // True whenever THIS save must NOT persist a final unifiedSimilarity:
+      // either a brand-new report just entering authoritative-pending, or any
+      // resave of a report that is STILL pending from an earlier save. In
+      // both cases the existing write-time finalization below still RUNS
+      // (needed for shadowEvaluationInputs / the other four shadow
+      // evaluators, exactly as today) — only its unifiedSimilarity result is
+      // withheld from payloadJsonToPersist; the deferred Selective Corpus
+      // finalizer (lib/selective-corpus-authoritative.ts) is the ONE place
+      // that ever persists this report's real, final unifiedSimilarity.
+      const selectiveCorpusAuthoritativeMustDeferFinalScore =
+        selectiveCorpusAuthoritativeStatusToPersist === 'pending';
+      // Narrower than the flag above: true ONLY for a genuine first save that
+      // just entered "pending" THIS request. A resave of an ALREADY-pending
+      // report must still defer its final score (handled above), but must
+      // NOT schedule a second, redundant Selective Corpus Stage A+B run —
+      // the original first save's own already-scheduled deferred callback
+      // remains the one responsible for finalizing this report exactly once.
+      const selectiveCorpusAuthoritativeNewlyPending =
+        isFirstSaveOfThisReport && selectiveCorpusAuthoritativeStatusToPersist === 'pending';
+
       const persistedReportPayload = {
         ...stripClientEvidenceInterpretation({
           ...reportPayload,
           externalAcademicEvidence: persistedExternalAcademicEvidence,
           verifiedAcademicSearchDiagnosticsId: verifiedAcademicDiagnosticsId ?? undefined,
+          // TRUST BOUNDARY (final-review finding, authoritative promotion):
+          // unifiedSimilarity / unifiedSimilarityFailed / unifiedSimilarityGeneration /
+          // corpusSourceMatchingEnabledAtComputation are SERVER-AUTHORITATIVE —
+          // reportPayload above is the raw, unvalidated client payload, so
+          // without this explicit override a client-forged value for any of
+          // these four keys would survive into persistedReportPayload's base
+          // untouched. Every branch below that legitimately persists one of
+          // these values (the success branch, the resolution.failed branch)
+          // already re-sets it explicitly from a server-computed value, so
+          // this override never removes a real feature — it only ensures
+          // that base itself starts from a clean, server-controlled slate.
+          // This matters most for the Selective Corpus authoritative-pending
+          // "no-op" branch (app/api/reports/route.ts's own
+          // selectiveCorpusAuthoritativeMustDeferFinalScore guard), which
+          // deliberately persists payloadJsonToPersist built directly from
+          // this base with NO further override of these four fields — before
+          // this fix, that branch would have silently persisted whatever the
+          // client submitted, making hasUnifiedSimilarity look true and
+          // surfacing similarityStatus="resolved" for a report that must
+          // stay "pending". Applies unconditionally to every save (first
+          // save, resave, pending, success, failure) since it lives in the
+          // one shared base construction, not in any one branch.
+          unifiedSimilarity: undefined,
+          unifiedSimilarityFailed: undefined,
+          unifiedSimilarityGeneration: undefined,
+          corpusSourceMatchingEnabledAtComputation: undefined,
         }),
         ...(suppliedReferenceEvidence && suppliedReferenceGuard
           ? {
@@ -618,6 +709,8 @@ export async function POST(request: Request) {
               userSuppliedReferenceGuard: suppliedReferenceGuard,
             }
           : {}),
+        selectiveCorpusAuthoritativeStatus: selectiveCorpusAuthoritativeStatusToPersist,
+        selectiveCorpusAuthoritativeClaimedAt: selectiveCorpusAuthoritativeClaimedAtToPersist,
       };
 
       // Device Passport (Phase 2/4): cryptographically verify an optional
@@ -826,7 +919,24 @@ export async function POST(request: Request) {
             archiveMatchedPositions: reportPayload.archiveMatchedPositions ?? null,
             externalAcademicEvidence: verifiedAcademicEvidence,
           };
-          if (resolution.unifiedSimilarity) {
+          // AUTHORITATIVE PROMOTION — NEW REPORT CREATION FLOW / RESAVE
+          // GUARD: when this report is (still) authoritative-pending,
+          // deliberately do NOT persist a final unifiedSimilarity from this
+          // ordinary write-time finalization — resolution above still ran
+          // (shadowEvaluationInputs, just captured, still needs it for the
+          // sibling shadow evaluators), but persisting its result here would
+          // be exactly the false-early-finalization this whole design exists
+          // to prevent: a pre-V4 score presented as final, later silently
+          // replaced. payloadJsonToPersist stays whatever it already was
+          // (the line above this whole block: persistedReportPayload alone,
+          // carrying selectiveCorpusAuthoritativeStatus:"pending" and no
+          // unifiedSimilarity at all) — the deferred Selective Corpus
+          // finalizer (lib/selective-corpus-authoritative.ts, scheduled
+          // below) is the ONE place that will ever persist this report's
+          // real, final unifiedSimilarity.
+          if (selectiveCorpusAuthoritativeMustDeferFinalScore) {
+            // no-op: leave payloadJsonToPersist exactly as initialized above
+          } else if (resolution.unifiedSimilarity) {
             payloadJsonToPersist = finalizeReportJson({
               ...persistedReportPayload,
               unifiedSimilarity: resolution.unifiedSimilarity,
@@ -1145,6 +1255,12 @@ export async function POST(request: Request) {
           authoritativeCorpusGeneration: shadowEvaluationInputs.authoritativeCorpusGeneration,
           authoritativeArchiveMatchedPositions: shadowEvaluationInputs.archiveMatchedPositions,
           authoritativeExternalAcademicEvidence: shadowEvaluationInputs.externalAcademicEvidence,
+          // AUTHORITATIVE PROMOTION — true only for a genuinely first save
+          // that this SAME request just persisted as
+          // selectiveCorpusAuthoritativeStatus:"pending" (never for a resave
+          // of an already-pending report — see
+          // selectiveCorpusAuthoritativeNewlyPending's own comment above).
+          selectiveCorpusAuthoritativePending: selectiveCorpusAuthoritativeNewlyPending,
         });
       }
     } finally {
