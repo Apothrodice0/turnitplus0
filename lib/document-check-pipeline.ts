@@ -1,5 +1,5 @@
 import { createReceiptPdf } from "@/lib/receipt-pdf";
-import { extractPdfTextDocument, extractPdfTextDocumentWithCompleteness, PDF_EXTRACTOR_VERSION } from "@/lib/pdf-text-extraction";
+import { extractPdfTextDocument, extractPdfTextDocumentWithCompleteness, PDF_EXTRACTOR_VERSION, type PdfExtractionCompleteness } from "@/lib/pdf-text-extraction";
 import { extractDocxTextDocument, extractDocxTextDocumentWithCompleteness } from "@/lib/docx-text-extraction";
 import { combineMatchedWordPositions } from "@/lib/similarity-enrichment";
 import { computeUnifiedSimilarity } from "@/lib/unified-similarity";
@@ -124,6 +124,61 @@ export class MalformedPdfError extends Error {
 
 export function isMalformedPdfError(error: unknown): boolean {
   return error instanceof Error && error.name === "MalformedPdfError";
+}
+
+/**
+ * Zero-selectable-text-PDF hardening. Unlike PasswordProtectedPdfError/
+ * MalformedPdfError above, this is NOT a loadPdfDocument()/getDocument()
+ * boundary conversion — a valid, structurally-sound PDF (e.g. scanned/
+ * image-only) opens and parses every page successfully; there is no pdfjs
+ * exception to convert. The signal is decided downstream, from
+ * extractPdfTextDocumentWithCompleteness()'s own result, using the narrowest
+ * truthful condition (see this module's own PDF-failure-semantics audit):
+ * completeness === "FAILED" AND failedPages === 0 AND parsedPages > 0 AND
+ * extractedWordCount === 0. failedPages === 0 is required, not optional — a
+ * document with even one genuinely broken page (a real per-page parse
+ * failure, mixed in with otherwise-blank pages) is a different, more
+ * serious failure than "this file simply has no selectable text," and must
+ * keep the existing generic message instead. parsedPages === 0 (every page
+ * individually failed) also stays generic for the same reason. No OCR.
+ */
+export class PdfHasNoSelectableTextError extends Error {
+  constructor() {
+    super("This PDF has no selectable text.");
+    this.name = "PdfHasNoSelectableTextError";
+  }
+}
+
+export function isPdfHasNoSelectableTextError(error: unknown): boolean {
+  return error instanceof Error && error.name === "PdfHasNoSelectableTextError";
+}
+
+/**
+ * The narrowest truthful zero-selectable-text condition, named and exported
+ * so tests can exercise this exact boundary directly against a real {@link
+ * extractPdfTextDocumentWithCompleteness} result — rather than re-deriving a
+ * second copy of this condition in test code, which could silently drift
+ * from the real one. Self-contained: requires completeness === "FAILED"
+ * itself rather than relying on an outer caller guard, so it cannot return
+ * true for a PARTIAL/COMPLETE result even if some future or test-supplied
+ * object happened to carry failedPages/parsedPages/extractedWordCount values
+ * that would otherwise satisfy the rest of the condition. failedPages === 0
+ * is required, not optional: a document with even one genuinely broken page
+ * must stay on the generic fallback (see this module's own
+ * PdfHasNoSelectableTextError comment).
+ */
+export function isNoSelectableTextResult(result: {
+  completeness: PdfExtractionCompleteness;
+  failedPages: number;
+  parsedPages: number;
+  extractedWordCount: number;
+}): boolean {
+  return (
+    result.completeness === "FAILED" &&
+    result.failedPages === 0 &&
+    result.parsedPages > 0 &&
+    result.extractedWordCount === 0
+  );
 }
 
 async function loadPdfDocument(pdfjs: typeof import("pdfjs-dist"), data: ArrayBuffer) {
@@ -360,7 +415,10 @@ export async function extractFileTextWithDiagnostics(
     const result = await extractPdfTextDocumentWithCompleteness(document, (pageNumber, pageCount) => {
       onProgress(8 + Math.round((pageNumber / pageCount) * 20), `Reading page ${pageNumber} of ${pageCount}`);
     });
-    if (result.completeness === "FAILED") throw new Error("This file could not be read.");
+    if (result.completeness === "FAILED") {
+      if (isNoSelectableTextResult(result)) throw new PdfHasNoSelectableTextError();
+      throw new Error("This file could not be read.");
+    }
     return {
       text: result.text,
       extraction: extractionDiagnosticFromCounts({

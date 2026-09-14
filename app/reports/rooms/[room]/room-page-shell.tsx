@@ -24,6 +24,7 @@ import {
   extractReferenceInputs,
   isPasswordProtectedPdfError,
   isMalformedPdfError,
+  isPdfHasNoSelectableTextError,
   addReferenceFiles,
   removeReferenceFile,
   markReferencesChecked,
@@ -829,7 +830,9 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
           ? "This PDF is password-protected. Remove the password and upload it again."
           : isMalformedPdfError(error)
             ? "We couldn't read this PDF. Try exporting or downloading a fresh copy and uploading it again."
-            : "I could not read that document. Try another file.",
+            : isPdfHasNoSelectableTextError(error)
+              ? "This PDF doesn't contain enough selectable text to analyze."
+              : "I could not read that document. Try another file.",
       );
       window.clearInterval(progressTimerRef.current);
       generationLockRef.current = false;
