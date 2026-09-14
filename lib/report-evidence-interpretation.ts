@@ -145,3 +145,54 @@ export function withEvidenceInterpretation<T extends SimilarityReport>(
     ...(referenceGuard && referenceEvidence.length > 0 ? { userSuppliedReferenceGuard: referenceGuard } : {}),
   };
 }
+
+/**
+ * AUTHORITATIVE PROMOTION — refreshes ONLY reportCompletion's selectiveCorpus
+ * signal from the report's own persisted selectiveCorpusAuthoritativeStatus.
+ * Called at RESPONSE time (GET / SSR first paint), never at write time: the
+ * deferred finalizer's own CAS-guarded terminal write
+ * (persistSelectiveCorpusAuthoritativeFinalization) deliberately touches only
+ * unifiedSimilarity / its own generation+flag snapshot / the status marker
+ * itself — never reportCompletion/evidenceInterpretation — so a report's
+ * persisted reportCompletion still reflects whatever selectiveCorpusBranch
+ * was true at the ORIGINAL pending-branch save (always null there, since the
+ * search had not run yet). This is the one place that goes stale without a
+ * response-time refresh; nothing else about reportCompletion needs one.
+ *
+ * PURE, no DB access, no score/matched-position change. Every other input is
+ * read straight off the report's own already-persisted fields — the SAME
+ * primary sources withEvidenceInterpretation itself reads (academicEvidenceStatus,
+ * extractionDiagnostic, userSuppliedReferenceChannel, primarySimilarityScore)
+ * — so this reproduces exactly what a fresh withEvidenceInterpretation call
+ * would have computed had the real terminal selectiveCorpusBranch been known
+ * at save time, without re-deriving evidenceInterpretation or touching
+ * anything score-related. unverifiedCandidateCount has no such primary field
+ * on SimilarityReport (see ReportEvidenceInterpretationWiringOptions's own
+ * comment on it), so it is the one signal carried forward from the already-
+ * persisted reportCompletion.signals — the exact value that produced it.
+ *
+ * No-op when there is no persisted reportCompletion to refresh (a pre-Report-V2
+ * report), when the marker is absent (historical/non-authoritative — never
+ * touched), still "pending" (no terminal branch to report yet — the
+ * customer-facing similarityStatus="pending" mechanism is what matters there),
+ * or when the signal is already correct.
+ */
+export function refreshSelectiveCorpusCompletionSignal(report: SimilarityReport): void {
+  if (!report.reportCompletion) return;
+  const selectiveCorpusBranch: SelectiveCorpusBranchState | null =
+    report.selectiveCorpusAuthoritativeStatus === "completed"
+      ? "COMPLETED"
+      : report.selectiveCorpusAuthoritativeStatus === "incomplete"
+        ? "PARTIAL"
+        : null;
+  if (selectiveCorpusBranch === null) return;
+  if (report.reportCompletion.signals.selectiveCorpus === selectiveCorpusBranch) return;
+  report.reportCompletion = resolveReportCompletion({
+    academicSearch: report.academicEvidenceStatus ?? null,
+    selectiveCorpus: selectiveCorpusBranch,
+    extraction: report.extractionDiagnostic ?? unknownExtractionDiagnostic(),
+    unverifiedCandidateCount: report.reportCompletion.signals.unverifiedCandidateCount,
+    userSuppliedReference: report.userSuppliedReferenceChannel ? report.userSuppliedReferenceChannel.state : null,
+    verifiedSimilarityPercent: primarySimilarityScore(report),
+  });
+}

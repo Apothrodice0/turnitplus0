@@ -10,7 +10,8 @@ import { getReportsDbClient } from "@/lib/reports-db";
 import { findReportRowForUser } from "@/lib/reports-repo";
 import { deriveRoomStatus } from "@/lib/report-rooms";
 import { resolvePersistedSimilarityDisplay } from "@/lib/report-primary-similarity";
-import { archiveOverlapScore, hasUnifiedSimilarity, type SimilarityReport } from "@/lib/report-types";
+import { archiveOverlapScore, hasUnifiedSimilarity, stripServerInternalReportFields, type SimilarityReport } from "@/lib/report-types";
+import { refreshSelectiveCorpusCompletionSignal } from "@/lib/report-evidence-interpretation";
 import { ReportDetailShell } from "./report-detail-shell";
 
 export const dynamic = "force-dynamic";
@@ -105,6 +106,15 @@ const loadOwnedReport = cache(async (id: string): Promise<OwnedReportResult> => 
       // keeps it so a resave can decide whether to carry the reference evidence
       // forward.
       delete payload.userSuppliedReferenceGuard;
+      // AUTHORITATIVE PROMOTION — response hygiene, mirroring
+      // app/api/reports/[id]/route.ts's own GET handler exactly: refresh
+      // reportCompletion's selectiveCorpus signal from the persisted
+      // authoritative status FIRST (it needs to read
+      // selectiveCorpusAuthoritativeStatus), then strip that field and its
+      // claim timestamp from this server-rendered first-paint payload — the
+      // stored payload_json keeps them. See each function's own doc comment.
+      refreshSelectiveCorpusCompletionSignal(payload);
+      stripServerInternalReportFields(payload);
       // Task A correction: the same explicit, unconditional authorization
       // signal app/api/reports/[id]/route.ts's GET handler sets for the
       // client-side background re-fetch — this is the server-rendered FIRST

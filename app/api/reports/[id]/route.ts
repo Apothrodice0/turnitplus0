@@ -6,7 +6,7 @@ import { findReportRowForDeviceKey, findReportRowForUser } from '../../../../lib
 import { classifyReportMatches } from '../../../../lib/report-classification';
 import { deleteHistoricalMatchSnapshot } from '../../../../lib/report-historical-match';
 import { resolvePrimarySimilaritySummary, persistRefreshedSimilarity } from '../../../../lib/report-primary-similarity';
-import { withEvidenceInterpretation, stripClientEvidenceInterpretation } from '../../../../lib/report-evidence-interpretation';
+import { withEvidenceInterpretation, stripClientEvidenceInterpretation, refreshSelectiveCorpusCompletionSignal } from '../../../../lib/report-evidence-interpretation';
 import { sanitizeExtractionDiagnostic } from '../../../../lib/evidence-interpretation';
 import { admittedReferenceEvidenceForUnifiedSimilarity } from '../../../../lib/report-user-supplied-references';
 import { deleteReportDocumentData } from '../../../../lib/report-deletion';
@@ -16,7 +16,7 @@ import { getExperimentalHistoricalMatchForDisplay } from '../../../../lib/e8p-vi
 import { getSessionUser } from '../../../../lib/auth-session';
 import { resolveVerifiedAcademicEvidence } from '../../../../lib/academic-search-diagnostics-repo';
 import { canonicalSha256 } from '../../../../lib/document-identity';
-import type { SimilarityReport } from '../../../../lib/report-types';
+import { stripServerInternalReportFields, type SimilarityReport } from '../../../../lib/report-types';
 
 // This response is per-session personalized (viewerIsAdmin and admin-gated
 // historical-match data) and MUST NOT be shared-cached. Every response from
@@ -86,6 +86,20 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
         : null;
       const persistedReferenceChannel = payload.userSuppliedReferenceChannel ?? null;
       const persistedReferenceEvidenceForScore = admittedReferenceEvidenceForUnifiedSimilarity(persistedReferenceEvidence);
+      // AUTHORITATIVE PROMOTION — capture the persisted, already-server-computed
+      // evidenceInterpretation/reportCompletion BEFORE the strip below, for the
+      // SAME reason persistedExtractionDiagnostic captures extractionDiagnostic
+      // just above: a pending/completed/incomplete authoritative report skips
+      // the recompute block entirely (see that block's own guard comment), so
+      // without this capture the strip below would remove these two
+      // explanation-only fields and nothing would ever restore them — not a
+      // "stale value," since this report is never recomputed again, just the
+      // one, final, correct value silently going missing. Restored (never
+      // recomputed) after the guarded block, only when it was skipped.
+      const persistedEvidenceInterpretationForAuthoritativeReport =
+        (payload as Record<string, unknown>).evidenceInterpretation;
+      const persistedReportCompletionForAuthoritativeReport =
+        (payload as Record<string, unknown>).reportCompletion;
       // Report V2 trust boundary: drop any persisted/forged
       // evidenceInterpretation / reportCompletion / extractionDiagnostic
       // immediately after parsing. They are recomputed server-side below from
@@ -423,6 +437,24 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
           // See lib/report-shadow-evaluations.ts's own doc comment on this flag.
           includeSelectiveCorpus: false,
         });
+        } else {
+          // AUTHORITATIVE PROMOTION — the recompute above was skipped for this
+          // pending/completed/incomplete report (see the guard's own comment).
+          // Restore, never recompute, the already-correct persisted
+          // evidenceInterpretation/reportCompletion captured before the strip
+          // above — a completed/incomplete report's explanation-only fields
+          // are final and never need recomputing again; a still-pending
+          // report simply carries forward whatever placeholder shape it had
+          // (harmless: no score is shown for it regardless).
+          if (persistedEvidenceInterpretationForAuthoritativeReport !== undefined) {
+            payload.evidenceInterpretation = persistedEvidenceInterpretationForAuthoritativeReport as SimilarityReport['evidenceInterpretation'];
+          }
+          if (persistedReportCompletionForAuthoritativeReport !== undefined) {
+            payload.reportCompletion = persistedReportCompletionForAuthoritativeReport as SimilarityReport['reportCompletion'];
+          }
+          if (persistedExtractionDiagnostic) {
+            payload.extractionDiagnostic = persistedExtractionDiagnostic;
+          }
         } // end: payload.selectiveCorpusAuthoritativeStatus == null
       } catch (err) {
         console.error('resolvePrimarySimilaritySummary failed (non-fatal):', err instanceof Error ? err.message : String(err));
@@ -440,6 +472,19 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
     // persistRefreshedSimilarity's json_set never remove it; POST re-derives the handle server-side
     // from the existing row on a resave, so a client that never sees it still round-trips fine).
     if (payload) delete payload.verifiedAcademicSearchDiagnosticsId;
+
+    // AUTHORITATIVE PROMOTION — response hygiene. Runs for EVERY response
+    // (marker-less, pending, completed, incomplete alike) since it is purely
+    // additive/idempotent for the cases where it does nothing (see each
+    // function's own doc comment): refresh reportCompletion's selectiveCorpus
+    // signal from the persisted status FIRST (it needs to read
+    // selectiveCorpusAuthoritativeStatus), then strip the two server-internal
+    // fields from this outbound copy — the stored payload_json keeps them,
+    // exactly like verifiedAcademicSearchDiagnosticsId above.
+    if (payload) {
+      refreshSelectiveCorpusCompletionSignal(payload);
+      stripServerInternalReportFields(payload);
+    }
 
     return new NextResponse(JSON.stringify({ payload }), { status: 200, headers: NO_STORE_JSON });
   } catch (err) {

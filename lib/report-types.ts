@@ -656,6 +656,31 @@ export function hasIncompleteSelectiveCorpusCheck(report: SimilarityReport): boo
   return report.selectiveCorpusAuthoritativeStatus === "incomplete";
 }
 
+/**
+ * AUTHORITATIVE PROMOTION — response hygiene: selectiveCorpusAuthoritativeStatus
+ * and selectiveCorpusAuthoritativeClaimedAt are SERVER-INTERNAL lifecycle/
+ * recovery control state (see their own doc comments above) — never meant to
+ * reach an ordinary client. Mutates the given report in place, deleting only
+ * these two keys; every other field is untouched. Call this ONLY on an
+ * already-loaded, about-to-be-serialized outbound copy — never on anything
+ * still headed for persistence (server-side lifecycle/recovery code, and the
+ * two persist paths in lib/report-primary-similarity.ts and
+ * lib/selective-corpus-authoritative.ts, read/write payload_json directly and
+ * never call this).
+ *
+ * This is the ONE shared boundary for these two fields specifically, used at
+ * both existing outbound-report-serialization sites
+ * (app/api/reports/[id]/route.ts's GET response and app/reports/[id]/page.tsx's
+ * server-rendered first paint) — mirroring, rather than duplicating a third
+ * time, the same "delete before responding, the stored payload_json keeps it"
+ * pattern each of those already uses for verifiedAcademicSearchDiagnosticsId /
+ * userSuppliedReferenceGuard.
+ */
+export function stripServerInternalReportFields(report: SimilarityReport): void {
+  delete report.selectiveCorpusAuthoritativeStatus;
+  delete report.selectiveCorpusAuthoritativeClaimedAt;
+}
+
 export function archiveMatchedWordCount(report: SimilarityReport) {
   return report.archiveMatchedPositions?.length
     ?? Math.max(0, report.matchedWordCount - (report.wikipediaMatchedWordCount ?? 0));
