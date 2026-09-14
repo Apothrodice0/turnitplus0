@@ -82,6 +82,41 @@ export type SaveReportRemoteResult =
   | { ok: false; status: number; quotaExceeded: boolean; roomOccupied: boolean; error?: string; resetsAt?: string; cycleEndsAt?: string };
 
 /**
+ * Pre-launch hardening fix: the smallest failure classification a caller
+ * needs to show truthful save-failure copy, reusing the `status` this result
+ * already carries rather than inventing new server signal.
+ *
+ *   REQUEST_TOO_LARGE    — HTTP 413. app/api/reports/route.ts returns this
+ *                          status EXCLUSIVELY for "the request/payload
+ *                          exceeded MAX_REPORT_SAVE_REQUEST_BYTES" (see
+ *                          lib/report-transport-limits.ts) — every guard
+ *                          point in that route uses the same
+ *                          `{ error: 'Payload too large' }` / 413 shape, so
+ *                          this status code alone is a fully reliable signal
+ *                          there, with no other meaning ever assigned to it.
+ *   CLIENT_REJECTED       — any other deterministic 4xx.
+ *   TRANSIENT_OR_UNKNOWN  — status 0 (the request never reached the server —
+ *                          a network/fetch exception, see saveReportRemote's
+ *                          own catch block below), any 5xx, or anything else
+ *                          not confidently classifiable above.
+ *   SUCCESS               — ok: true.
+ *
+ * Deliberately does NOT special-case quotaExceeded/roomOccupied (both are
+ * simply specific CLIENT_REJECTED shapes, 429/409) — a caller that wants to
+ * react to those specifically already checks them itself before falling back
+ * to this classifier (see app/reports/rooms/[room]/room-page-shell.tsx's own
+ * saveResult handling).
+ */
+export type SaveReportRemoteResultClass = "SUCCESS" | "REQUEST_TOO_LARGE" | "CLIENT_REJECTED" | "TRANSIENT_OR_UNKNOWN";
+
+export function classifySaveReportRemoteResult(result: SaveReportRemoteResult): SaveReportRemoteResultClass {
+  if (result.ok) return "SUCCESS";
+  if (result.status === 413) return "REQUEST_TOO_LARGE";
+  if (result.status >= 400 && result.status < 500) return "CLIENT_REJECTED";
+  return "TRANSIENT_OR_UNKNOWN";
+}
+
+/**
  * `academicSearchDiagnosticsId` is sent as a sibling of `payload`, never
  * nested inside it — it must never become part of SimilarityReport/
  * saved_reports.payload_json. It is only ever a bare row id (see

@@ -37,6 +37,7 @@ import type { FormEvent } from "react";
 import { getDeviceKey } from "@/lib/device-key";
 import { clearStoredReports, loadStoredReports, storeReport, storeReportBestEffort } from "@/lib/report-store";
 import { deleteRemoteReport, fetchAllReportSummariesAcrossRooms, fetchRemoteReport, fetchUploadLimitStatus, listRemoteReportSummaries, saveReportRemote, type ReportSummary, type UploadLimitStatus } from "@/lib/reports-remote";
+import { classifySaveReportRemoteResult } from "@/lib/reports-remote";
 import { persistAiCompletion } from "@/lib/report-ai-completion";
 import { clearAllReportRoomCaches } from "@/lib/report-rooms-cache";
 import { ReportRoomsBrowser } from "@/components/reports/report-rooms";
@@ -1128,12 +1129,25 @@ export default function Home() {
       // A network/DB hiccup here is silently tolerated since the local copy
       // already succeeded (see saveReport/saveReportRemote's own comments) —
       // there is no quota or room concept on this anonymous-only path.
+      //
+      // Pre-launch hardening fix: this used to claim "syncing to the server
+      // will retry automatically" for every failure shape — untrue, since no
+      // automatic retry mechanism exists anywhere in this codebase. The copy
+      // below states only what actually happened (local copy safe, server
+      // sync did not complete) and never promises a retry. REQUEST_TOO_LARGE
+      // gets its own truthful message because that cause is exactly known
+      // (see classifySaveReportRemoteResult's own comment); every other
+      // failure shape shares one honest, equally conservative message rather
+      // than fabricating a distinction the client cannot safely make.
+      const saveFailureClass = classifySaveReportRemoteResult(saveResult);
       notify(
-        !saveResult.ok
-          ? "Your report is ready. It's saved on this device; syncing to the server will retry automatically."
-          : academicResult.status === "FAILED"
-            ? "Your report is ready. External academic verification was unavailable this time."
-            : "Your report is ready. Choose AI or TurnitPlus Similarity.",
+        saveFailureClass === "REQUEST_TOO_LARGE"
+          ? "Your report is ready and saved on this device. It's too large to sync to the server, so only the local copy is available."
+          : saveFailureClass !== "SUCCESS"
+            ? "Your report is ready and saved on this device, but syncing to the server did not complete."
+            : academicResult.status === "FAILED"
+              ? "Your report is ready. External academic verification was unavailable this time."
+              : "Your report is ready. Choose AI or TurnitPlus Similarity.",
       );
 
       // TASK 4: the AI-writing score merges into the ALREADY-shown,

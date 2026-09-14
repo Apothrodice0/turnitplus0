@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { fetchReportRoomIndex, fetchReportRoomContents, fetchRemoteReport } from "../lib/reports-remote.ts";
+import { fetchReportRoomIndex, fetchReportRoomContents, fetchRemoteReport, saveReportRemote, classifySaveReportRemoteResult } from "../lib/reports-remote.ts";
 
 /**
  * Production bug fix: fetchReportRoomIndex/fetchReportRoomContents used to
@@ -223,5 +224,122 @@ test("REQUIRED (proves the receipt's exact `remote ?? local` line): a network fa
     }
   } finally {
     restoreWindow();
+  }
+});
+
+/**
+ * Pre-launch hardening fix — "will retry automatically" removal.
+ *
+ * saveReportRemote/classifySaveReportRemoteResult are the REAL production
+ * functions (no mocking framework in this codebase's existing conventions —
+ * see this file's own header comment): every case below stubs only
+ * globalThis.fetch/window.localStorage and calls the genuine exported code.
+ * A minimal ReportSummary fixture with no `report.text` field keeps
+ * maybeAttestReportUpload's Device Passport attestation on its documented
+ * fast no-op path (see lib/device-passport.ts's own header comment) without
+ * needing to stub WebAuthn/crypto.
+ */
+const MINIMAL_SUMMARY = {
+  id: "save-result-fixture",
+  submissionId: "submission-fixture",
+  title: "Fixture report",
+  createdAt: new Date().toISOString(),
+  wordCount: 500,
+  archiveScore: 10,
+  scoreBand: "low",
+  aiScore: null,
+  aiTone: null,
+};
+
+test("saveReportRemote + classifySaveReportRemoteResult: a genuine 2xx save classifies as SUCCESS", async () => {
+  const restoreFetch = stubFetchOnce(async () => new Response(JSON.stringify({}), { status: 200 }));
+  const restoreWindow = stubWindowLocalStorage();
+  try {
+    const result = await saveReportRemote({}, MINIMAL_SUMMARY);
+    assert.deepEqual(result, { ok: true });
+    assert.equal(classifySaveReportRemoteResult(result), "SUCCESS");
+  } finally {
+    restoreFetch();
+    restoreWindow();
+  }
+});
+
+test("saveReportRemote + classifySaveReportRemoteResult: HTTP 413 (request/payload too large) classifies as REQUEST_TOO_LARGE, matching app/api/reports/route.ts's exact 'Payload too large' shape", async () => {
+  const restoreFetch = stubFetchOnce(async () => new Response(JSON.stringify({ error: "Payload too large" }), { status: 413 }));
+  const restoreWindow = stubWindowLocalStorage();
+  try {
+    const result = await saveReportRemote({}, MINIMAL_SUMMARY);
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 413);
+    assert.equal(classifySaveReportRemoteResult(result), "REQUEST_TOO_LARGE");
+  } finally {
+    restoreFetch();
+    restoreWindow();
+  }
+});
+
+test("saveReportRemote + classifySaveReportRemoteResult: a generic deterministic 4xx (400) classifies as CLIENT_REJECTED, distinct from REQUEST_TOO_LARGE and from a transient failure", async () => {
+  const restoreFetch = stubFetchOnce(async () => new Response(JSON.stringify({ error: "Bad request" }), { status: 400 }));
+  const restoreWindow = stubWindowLocalStorage();
+  try {
+    const result = await saveReportRemote({}, MINIMAL_SUMMARY);
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 400);
+    assert.equal(classifySaveReportRemoteResult(result), "CLIENT_REJECTED");
+  } finally {
+    restoreFetch();
+    restoreWindow();
+  }
+});
+
+test("saveReportRemote + classifySaveReportRemoteResult: HTTP 500 classifies as TRANSIENT_OR_UNKNOWN", async () => {
+  const restoreFetch = stubFetchOnce(async () => new Response(JSON.stringify({ error: "Internal error" }), { status: 500 }));
+  const restoreWindow = stubWindowLocalStorage();
+  try {
+    const result = await saveReportRemote({}, MINIMAL_SUMMARY);
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 500);
+    assert.equal(classifySaveReportRemoteResult(result), "TRANSIENT_OR_UNKNOWN");
+  } finally {
+    restoreFetch();
+    restoreWindow();
+  }
+});
+
+test("saveReportRemote + classifySaveReportRemoteResult: a thrown network/fetch exception classifies as TRANSIENT_OR_UNKNOWN (status 0), and saveReportRemote never throws past this — the local copy is always the caller's own separate, already-completed step", async () => {
+  const restoreFetch = stubFetchOnce(async () => {
+    throw new TypeError("Failed to fetch");
+  });
+  const restoreWindow = stubWindowLocalStorage();
+  try {
+    const result = await saveReportRemote({}, MINIMAL_SUMMARY);
+    assert.deepEqual(result, { ok: false, status: 0, quotaExceeded: false, roomOccupied: false });
+    assert.equal(classifySaveReportRemoteResult(result), "TRANSIENT_OR_UNKNOWN");
+  } finally {
+    restoreFetch();
+    restoreWindow();
+  }
+});
+
+test("REGRESSION: the customer-facing save path makes no 'will retry automatically' (or equivalent) promise anywhere it is not actually true", async () => {
+  // No automatic retry mechanism exists anywhere in this codebase (no
+  // background timers, queue persistence, service workers, or repeated
+  // fetch loops) — see this fix's own scope notes. Reads the REAL shipped
+  // source text of every file that renders a save-result message to the
+  // user, so a future regression restoring the false claim (here or in a
+  // sibling save-failure code path) fails this test immediately.
+  const filesToCheck = ["../app/page.tsx", "../app/reports/rooms/[room]/room-page-shell.tsx", "../lib/reports-remote.ts"];
+  for (const relativePath of filesToCheck) {
+    const source = await readFile(new URL(relativePath, import.meta.url), "utf8");
+    // Strip comments first so this only inspects text that could actually
+    // reach a user — this fix's own explanatory comment legitimately
+    // mentions the old (removed) claim by name.
+    const withoutLineComments = source.replace(/\/\/.*$/gm, "");
+    const withoutBlockComments = withoutLineComments.replace(/\/\*[\s\S]*?\*\//g, "");
+    assert.doesNotMatch(
+      withoutBlockComments,
+      /retry automatically/i,
+      `${relativePath} must not promise an automatic retry outside of comments — no such mechanism exists`,
+    );
   }
 });
