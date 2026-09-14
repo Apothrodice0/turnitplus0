@@ -3,6 +3,7 @@ import { getOrComputeHistoricalMatchSnapshot, getCurrentCorpusMatchGeneration, i
 import { isCorpusSourceMatchingEnabled } from "./corpus-source-matching-flag";
 import { CORPUS_FINGERPRINT_VERSION, CANONICALIZATION_VERSION } from "./user-submission-corpus";
 import { computeUnifiedSimilarity, type UnifiedSimilarityResult } from "./unified-similarity";
+import { compactUnifiedSimilarityForPersistence } from "./unified-similarity-persistence";
 import type { ReportHistoricalSubmissionMatch, SimilarityReport } from "./report-types";
 import type { ExternalAcademicEvidence } from "./academic-search/types";
 import { canonicalSha256 } from "./document-identity";
@@ -771,7 +772,15 @@ export async function persistRefreshedSimilarity(
                 )
             WHERE device_key = ? AND id = ? AND json_valid(payload_json) AND ${SIMILARITY_GENERATION_GUARD_SQL}`,
       args: [
-        JSON.stringify(resolution.unifiedSimilarity),
+        // Pre-launch hardening fix — same shared compaction as
+        // app/api/reports/route.ts's finalizeReportJson (measured 2MB
+        // transport-ceiling fix): elides previousUploadPositions from the
+        // PERSISTED JSON only when it exactly duplicates matchedPositions.
+        // resolution.unifiedSimilarity itself (the in-memory
+        // computeUnifiedSimilarity output every OTHER caller of this
+        // function's result relies on) is never mutated — see
+        // lib/unified-similarity-persistence.ts's own header comment.
+        JSON.stringify(compactUnifiedSimilarityForPersistence(resolution.unifiedSimilarity)),
         flagText,
         resolution.corpusGeneration,
         params.reportDeviceKey,
@@ -858,7 +867,11 @@ export async function persistSelectiveCorpusAuthoritativeFinalization(
             AND json_extract(payload_json, '$.selectiveCorpusAuthoritativeStatus') = 'pending'
             AND ${SIMILARITY_GENERATION_GUARD_SQL}`,
     args: [
-      JSON.stringify(resolution.unifiedSimilarity),
+      // Pre-launch hardening fix — same shared compaction as
+      // finalizeReportJson/persistRefreshedSimilarity above. The CAS/status
+      // guard clauses above are untouched; only the persisted JSON value for
+      // '$.unifiedSimilarity' changes shape when eligible.
+      JSON.stringify(compactUnifiedSimilarityForPersistence(resolution.unifiedSimilarity)),
       flagText,
       resolution.corpusGeneration,
       resolution.terminalStatus,

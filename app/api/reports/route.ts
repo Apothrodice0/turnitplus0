@@ -29,6 +29,7 @@ import { verifySuppliedReferences } from '../../../lib/user-supplied-references'
 import { sanitizeSuppliedReferenceInputs, admittedReferenceEvidenceForUnifiedSimilarity, resolveUserSuppliedReferenceEvidenceForSave } from '../../../lib/report-user-supplied-references';
 import { referenceTransportBudgetError } from '../../../lib/user-supplied-reference-constants';
 import { MAX_REPORT_SAVE_REQUEST_BYTES } from '../../../lib/report-transport-limits';
+import { compactUnifiedSimilarityForPersistence } from '../../../lib/unified-similarity-persistence';
 import { scheduleReportShadowEvaluations } from '../../../lib/report-shadow-evaluations';
 import { effectiveSelectiveCorpusAuthoritativeEnabled } from '../../../lib/selective-corpus/flag';
 import type { SimilarityReport, ReportHistoricalSubmissionMatch } from '../../../lib/report-types';
@@ -824,21 +825,37 @@ export async function POST(request: Request) {
       // interpretation would push the blob over MAX_BYTES (a pathologically
       // large fully-matched document), it is dropped rather than 413-ing a
       // report that would otherwise save — GET recomputes it on read.
+      //
+      // Pre-launch hardening fix (measured 2MB transport-ceiling
+      // characterization): compaction happens ONLY here — immediately before
+      // JSON.stringify, strictly AFTER withEvidenceInterpretation has already
+      // seen and built from the FULL EXPANDED unifiedSimilarity (that
+      // function reads report.unifiedSimilarity?.matchedPositions only,
+      // never previousUploadPositions — see
+      // lib/unified-similarity-persistence.ts's own header comment for the
+      // full audit trail). This preserves the exact existing soft-degrade
+      // ordering: the size check below (CHECK 4/5/6, identical either way)
+      // now measures the COMPACT representation, never changing which
+      // branch (enriched vs. plain obj) wins on its own merits.
+      const compactForPersistence = <T extends SimilarityReport>(obj: T): T =>
+        obj.unifiedSimilarity
+          ? ({ ...obj, unifiedSimilarity: compactUnifiedSimilarityForPersistence(obj.unifiedSimilarity) } as T)
+          : obj;
       const finalizeReportJson = (obj: SimilarityReport, hsm?: ReportHistoricalSubmissionMatch | null): string => {
         try {
-          const enriched = JSON.stringify(withEvidenceInterpretation(obj, {
+          const enriched = JSON.stringify(compactForPersistence(withEvidenceInterpretation(obj, {
             historicalSubmissionMatch: hsm ?? null,
             selectiveCorpusBranch: null,
             serverExtractionDiagnostic: clientExtractionDiagnostic,
             userSuppliedReferenceEvidence: suppliedReferenceEvidence,
             userSuppliedReferenceChannel: suppliedReferenceChannelState,
             userSuppliedReferenceGuard: suppliedReferenceGuard,
-          }));
+          })));
           if (enriched.length <= MAX_BYTES) return enriched;
         } catch (err) {
           console.error('report V2 interpretation attach failed (non-fatal, report saved without it):', err instanceof Error ? err.message : String(err));
         }
-        return JSON.stringify(obj);
+        return JSON.stringify(compactForPersistence(obj));
       };
       // Base = the SERVER-RESOLVED payload (client fields, but
       // externalAcademicEvidence forced to the verified set + the verified

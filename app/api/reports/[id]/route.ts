@@ -17,6 +17,7 @@ import { getSessionUser } from '../../../../lib/auth-session';
 import { resolveVerifiedAcademicEvidence } from '../../../../lib/academic-search-diagnostics-repo';
 import { canonicalSha256 } from '../../../../lib/document-identity';
 import { stripServerInternalReportFields, type SimilarityReport } from '../../../../lib/report-types';
+import { expandUnifiedSimilarityFromPersistence } from '../../../../lib/unified-similarity-persistence';
 
 // This response is per-session personalized (viewerIsAdmin and admin-gated
 // historical-match data) and MUST NOT be shared-cached. Every response from
@@ -63,6 +64,17 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
       }
 
       payload = JSON.parse(String(row.payload_json)) as SimilarityReport;
+      // Pre-launch hardening fix (measured 2MB transport-ceiling fix):
+      // immediately expand a possibly-compact persisted unifiedSimilarity
+      // back to the full legacy shape every downstream consumer in this
+      // handler already expects (evidence interpretation, report-completion,
+      // non-admin filtering, response serialization) — BEFORE any of them
+      // run. A row with no compaction marker (every pre-existing report,
+      // permanently) round-trips through this as a true no-op. See
+      // lib/unified-similarity-persistence.ts's own header comment.
+      if (payload.unifiedSimilarity) {
+        payload.unifiedSimilarity = expandUnifiedSimilarityFromPersistence(payload.unifiedSimilarity);
+      }
       // DOCUMENT EXTRACTION V2 — capture the persisted extraction diagnostic
       // BEFORE the strip below. Unlike evidenceInterpretation / reportCompletion
       // (recomputed from the server's authoritative matched-position data),

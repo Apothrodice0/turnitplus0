@@ -12,6 +12,7 @@ import { deriveRoomStatus } from "@/lib/report-rooms";
 import { resolvePersistedSimilarityDisplay } from "@/lib/report-primary-similarity";
 import { archiveOverlapScore, hasUnifiedSimilarity, stripServerInternalReportFields, type SimilarityReport } from "@/lib/report-types";
 import { refreshSelectiveCorpusCompletionSignal } from "@/lib/report-evidence-interpretation";
+import { expandUnifiedSimilarityFromPersistence } from "@/lib/unified-similarity-persistence";
 import { ReportDetailShell } from "./report-detail-shell";
 
 export const dynamic = "force-dynamic";
@@ -91,6 +92,16 @@ const loadOwnedReport = cache(async (id: string): Promise<OwnedReportResult> => 
     // more honest and avoids a dead-end retry loop. Production audit fix.
     try {
       const payload = JSON.parse(row.payload_json) as SimilarityReport;
+      // Pre-launch hardening fix (measured 2MB transport-ceiling fix):
+      // expand a possibly-compact persisted unifiedSimilarity to the full
+      // legacy shape BEFORE persisted-display evaluation / initialReport
+      // construction below — this SSR path never self-heals, so it is a
+      // second, independent decode boundary alongside the GET API's own
+      // (see lib/unified-similarity-persistence.ts's own header comment). A
+      // row with no compaction marker round-trips through this as a no-op.
+      if (payload.unifiedSimilarity) {
+        payload.unifiedSimilarity = expandUnifiedSimilarityFromPersistence(payload.unifiedSimilarity);
+      }
       // Scholarly evidence server trust boundary (drizzle/0052): strip the
       // internal verifiedAcademicSearchDiagnosticsId re-lookup handle from the
       // server-rendered first-paint payload, exactly as
