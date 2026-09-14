@@ -98,12 +98,43 @@ export function isPasswordProtectedPdfError(error: unknown): boolean {
   return error instanceof Error && error.name === "PasswordProtectedPdfError";
 }
 
+/**
+ * Malformed/corrupt-PDF hardening. pdfjs-dist rejects getDocument()'s promise
+ * with its own InvalidPDFException (name: "InvalidPDFException") for a
+ * narrow, well-defined set of whole-document structural failures — an empty
+ * (zero-byte) file, an unresolvable root reference, or PDF structure that
+ * fails basic validation (confirmed by reading pdfjs-dist's own bundled
+ * source: exactly three throw sites, all inside document-manager setup,
+ * never inside per-page content parsing). Deliberately does NOT convert
+ * UnknownErrorException (pdfjs's own uncategorized catch-all — not specific
+ * enough to mean "corrupt PDF," see this module's own audit) or FormatError
+ * (a PAGE-CONTENT-level failure already handled per-page by
+ * lib/pdf-text-extraction.ts's collectPdfPages, producing PARTIAL rather
+ * than aborting the whole document) or ResponseException (HTTP range-request
+ * failures — never reached by a local File/ArrayBuffer upload). Same
+ * stable-identity idiom as PasswordProtectedPdfError above: error NAME, never
+ * message text.
+ */
+export class MalformedPdfError extends Error {
+  constructor() {
+    super("This PDF could not be read.");
+    this.name = "MalformedPdfError";
+  }
+}
+
+export function isMalformedPdfError(error: unknown): boolean {
+  return error instanceof Error && error.name === "MalformedPdfError";
+}
+
 async function loadPdfDocument(pdfjs: typeof import("pdfjs-dist"), data: ArrayBuffer) {
   try {
     return await pdfjs.getDocument({ data }).promise;
   } catch (error) {
     if (error instanceof Error && error.name === "PasswordException") {
       throw new PasswordProtectedPdfError();
+    }
+    if (error instanceof Error && error.name === "InvalidPDFException") {
+      throw new MalformedPdfError();
     }
     throw error;
   }

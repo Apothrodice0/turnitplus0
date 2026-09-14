@@ -58,6 +58,7 @@ import {
   extractFileTextWithDiagnostics,
   extractReferenceInputs,
   isPasswordProtectedPdfError,
+  isMalformedPdfError,
   addReferenceFiles,
   removeReferenceFile,
   markReferencesChecked,
@@ -978,7 +979,9 @@ export default function Home() {
       notify(
         isPasswordProtectedPdfError(error)
           ? "This PDF is password-protected. Remove the password and upload it again."
-          : "I could not read that document. Try another file.",
+          : isMalformedPdfError(error)
+            ? "We couldn't read this PDF. Try exporting or downloading a fresh copy and uploading it again."
+            : "I could not read that document. Try another file.",
       );
       window.clearInterval(progressTimer);
       generationLockRef.current = false;
