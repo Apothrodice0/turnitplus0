@@ -163,6 +163,7 @@ function createFakeVercelBlobReadClient({ objects = {} } = {}) {
   const getCalls = new Map();
   const headCalls = new Map();
   const getCallOptionsLog = [];
+  const headCallOptionsLog = [];
   const transientGetRemaining = new Map();
   function bump(map, key) {
     map.set(key, (map.get(key) ?? 0) + 1);
@@ -184,8 +185,9 @@ function createFakeVercelBlobReadClient({ objects = {} } = {}) {
       if (spec.bytes === undefined) return null;
       return makeGetResult(spec.bytes);
     },
-    async head(pathname) {
+    async head(pathname, options) {
       bump(headCalls, pathname);
+      headCallOptionsLog.push(options);
       const spec = objects[pathname];
       if (!spec) throw new BlobNotFoundError();
       if (spec.headError) throw spec.headError;
@@ -206,6 +208,9 @@ function createFakeVercelBlobReadClient({ objects = {} } = {}) {
     },
     getCallOptions(index) {
       return getCallOptionsLog[index];
+    },
+    headCallOptions(index) {
+      return headCallOptionsLog[index];
     },
   };
 }
@@ -463,6 +468,41 @@ test("adapter L: a REAL AbortSignal.timeout() (tiny, test-local only -- never th
   assert.equal(signal.aborted, true);
   assert.ok(signal.reason instanceof DOMException, "AbortSignal.timeout()'s reason is a DOMException");
   assert.equal(signal.reason.name, "TimeoutError", "never \"AbortError\" -- this is exactly why @vercel/blob's own head() retry-bail check (name === \"AbortError\") does not catch it, per this adapter's own header comment");
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// 12c. head()/objectExists TIMEOUT (follow-up to 12b: a manual
+// AbortController, not AbortSignal.timeout() -- see
+// SELECTIVE_CORPUS_BLOB_HEAD_TIMEOUT_MS's own comment for why). Reuses
+// adapter B (success -> true), adapter C (BlobNotFoundError -> false),
+// adapter D's abortedPathname case (BlobRequestAbortedError -> rejects with
+// SelectiveCorpusTransientStorageError, never false -- already exact
+// coverage for a "simulated SDK abort" outcome), and adapter E (persistent
+// auth/config failures unchanged) for that already-existing behavior --
+// this section adds ONLY the signal-plumbing coverage those do not touch.
+// ═══════════════════════════════════════════════════════════════════════
+
+test("adapter M: objectExists passes a fresh, non-aborted AbortSignal per call; two calls get two different signals; successful/not-found behavior unchanged", async () => {
+  const existsPathname = `${PREFIX}/packed/shard-040.bin`;
+  const client = createFakeVercelBlobReadClient({ objects: { [existsPathname]: { bytes: Buffer.alloc(4) } } });
+  const adapter = createVercelBlobStorageAdapter({ prefix: PREFIX, client });
+
+  const exists1 = await adapter.objectExists("packed/shard-040.bin");
+  const exists2 = await adapter.objectExists("packed/shard-040.bin");
+  const missing = await adapter.objectExists("packed/shard-999.bin"); // not in `objects` -> BlobNotFoundError
+
+  assert.equal(exists1, true, "first call: success unchanged by the new option");
+  assert.equal(exists2, true, "second call: success unchanged by the new option");
+  assert.equal(missing, false, "BlobNotFoundError still -> false, unchanged by the new option");
+  assert.equal(client.headCallCount(existsPathname), 2);
+
+  const opts1 = client.headCallOptions(0);
+  const opts2 = client.headCallOptions(1);
+  assert.ok(opts1.abortSignal instanceof AbortSignal, "first call receives an AbortSignal");
+  assert.ok(opts2.abortSignal instanceof AbortSignal, "second call receives an AbortSignal");
+  assert.equal(opts1.abortSignal.aborted, false, "signal is not already aborted at call start");
+  assert.equal(opts2.abortSignal.aborted, false, "signal is not already aborted at call start");
+  assert.notEqual(opts1.abortSignal, opts2.abortSignal, "each call gets its OWN fresh AbortController signal -- never reused across reads");
 });
 
 // ═══════════════════════════════════════════════════════════════════════

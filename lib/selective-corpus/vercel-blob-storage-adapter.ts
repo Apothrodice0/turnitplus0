@@ -101,12 +101,12 @@ import {
  *  this adapter could perform one. */
 export interface VercelBlobReadClient {
   get(pathname: string, options: { access: "private"; abortSignal?: AbortSignal }): Promise<GetBlobResult | null>;
-  head(pathname: string): Promise<HeadBlobResult>;
+  head(pathname: string, options?: { abortSignal?: AbortSignal }): Promise<HeadBlobResult>;
 }
 
 const defaultVercelBlobReadClient: VercelBlobReadClient = {
   get: (pathname, options) => vercelBlobGet(pathname, options),
-  head: (pathname) => vercelBlobHead(pathname),
+  head: (pathname, options) => vercelBlobHead(pathname, options),
 };
 
 export type CreateVercelBlobStorageAdapterOptions = {
@@ -140,14 +140,28 @@ const URL_SHAPED_KEY = /^[a-z][a-z0-9+.-]*:\/\//i;
  * observed phase maxima, while still dramatically below the transport-level
  * (~300s-class) stall this timeout exists to bound, and still leaves most of
  * the 6000ms selective-corpus budget for the rest of Stage A/B if one read
- * hits it. get()-only: head()
- * (objectExists) routes through the SDK's own control-plane retry() wrapper,
- * which does not recognize an AbortSignal.timeout()'s "TimeoutError"-named
- * abort as its clean bail case and would instead retry it (up to 10 attempts,
- * exponential backoff) before the abort finally surfaces — a separate,
- * not-yet-addressed design question left untouched here.
+ * hits it. get()-only: head() (objectExists) needs a DIFFERENT mechanism —
+ * see SELECTIVE_CORPUS_BLOB_HEAD_TIMEOUT_MS below — because it routes
+ * through the SDK's own control-plane retry() wrapper, which this constant's
+ * AbortSignal.timeout() would not bail out of cleanly.
  */
 const SELECTIVE_CORPUS_BLOB_GET_TIMEOUT_MS = 4000;
+
+/**
+ * Release-hardening audit finding (head()/objectExists I/O-timeout audit,
+ * follow-up to the get()/readObject fix above): head() routes through
+ * @vercel/blob's own control-plane retry() wrapper. A bare
+ * AbortSignal.timeout() rejects with a DOMException named "TimeoutError",
+ * which that retry wrapper does not recognize as a clean-stop signal and
+ * retries instead — see objectExists()'s own comment for why a manual
+ * AbortController is used here instead. A manual AbortController's default
+ * abort() (no custom reason) rejects with a DOMException named "AbortError",
+ * which the SDK's retry wrapper DOES recognize and bails out of immediately,
+ * converting it to its own typed BlobRequestAbortedError — already handled
+ * by isTransientBlobError() below. 4000ms matches the established get()
+ * policy value without reopening that decision.
+ */
+const SELECTIVE_CORPUS_BLOB_HEAD_TIMEOUT_MS = 4000;
 
 function normalizePrefix(prefix: string): string {
   if (typeof prefix !== "string" || prefix.trim().length === 0) {
@@ -281,8 +295,15 @@ export function createVercelBlobStorageAdapter(
 
     async objectExists(key: string): Promise<boolean> {
       const pathname = resolvePathname(prefix, key);
+      // Fresh AbortController PER CALL — see SELECTIVE_CORPUS_BLOB_HEAD_TIMEOUT_MS's
+      // own comment for why this is a manual AbortController (default abort()
+      // reason, deliberately NOT AbortSignal.timeout()) rather than the same
+      // mechanism readObject() uses. Timer always cleared below, on every exit
+      // path, so a fast/successful head() never leaves a dangling timer.
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), SELECTIVE_CORPUS_BLOB_HEAD_TIMEOUT_MS);
       try {
-        await client.head(pathname);
+        await client.head(pathname, { abortSignal: controller.signal });
         return true;
       } catch (err) {
         if (err instanceof BlobNotFoundError) return false;
@@ -305,6 +326,8 @@ export function createVercelBlobStorageAdapter(
         }
         // Raw, non-BlobError failure — see readObject()'s matching comment.
         throw new SelectiveCorpusTransientStorageError(key, err instanceof Error ? err.message : String(err));
+      } finally {
+        clearTimeout(timer);
       }
     },
   };
