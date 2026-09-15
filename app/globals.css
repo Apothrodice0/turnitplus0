@@ -6611,19 +6611,49 @@ main.report-main {
     display: block;
     width: 100%;
     padding: 16px 10px 28px;
+    /* Defensive fallback only (never masks a real bug with `hidden`) — with
+       .report-paper now responsive below, nothing here should force this
+       scrollbar to appear in normal use. */
     overflow-x: auto;
   }
 
+  /* Mobile overflow fix: this used to be a fixed 720px paper (no transform
+     ever scaled it down — `transform-origin` alone did nothing), forcing
+     every phone-width viewport to horizontally scroll to read the report,
+     the product's primary deliverable. Now shrinks to the available width,
+     matching the .overview-paper override below, which already proved this
+     exact pattern renders correctly. Print is unaffected: @media print's
+     `.print-report-bundle .report-paper` rule is a separate, more specific
+     selector with its own fixed 8.5in page sizing, and .report-workspace
+     (which contains these screen-only .report-paper instances) is itself
+     hidden entirely during print. */
   .report-paper {
-    width: 720px;
+    width: 100%;
     min-height: 980px;
-    transform-origin: top left;
   }
 
-  /* The Integrity Overview page reflows instead of joining the fixed-width
-     scroll treatment above: .overview-columns' second column has a 230px
-     floor that, inside a 720px paper, lands past the edge of a phone
-     screen and is never reachable. */
+  /* RESPONSIVE_EDGE_CASE_FOUND follow-up: .paper-header/.paper-footer's
+     base auto-1fr-auto grid keeps its base 44px horizontal padding and
+     20px gap everywhere else, which was fine when this paper was a fixed
+     720px box (632px of content room) but leaves only ~212px at a ~320px
+     phone width once the paper above is responsive — narrower than the
+     header/footer's own combined min-content (brand lockup + page label +
+     "Submission ID" + id, each still fully present, just tighter). Only
+     the horizontal spacing shrinks here; vertical padding (30/18 header,
+     20/30 footer, set elsewhere) and every other paper-header/footer rule,
+     the submission ID content, and desktop/print sizing are untouched. */
+  .paper-header,
+  .paper-footer {
+    padding-left: 16px;
+    padding-right: 16px;
+    gap: 12px;
+  }
+
+  /* Now redundant with .report-paper's own width:100% above (kept for
+     clarity/specificity, harmless either way). .overview-columns still
+     needs its own override regardless of paper width: its second column
+     has an independent 230px floor (see its base rule) that would still
+     land past a phone screen's edge inside a full-width paper. */
   .overview-paper {
     width: 100%;
   }
