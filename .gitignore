@@ -61,6 +61,7 @@ next-env.d.ts
 /turnitplus-site-v38.tar.gz
 # test databases
 *.db
+*.db-journal
 
 # vinext build cache
 .vinext/

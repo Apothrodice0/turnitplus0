@@ -22,4 +22,5 @@
 
 # Local SQLite databases and TypeScript incremental-build cache
 *.db
+*.db-journal
 *.tsbuildinfo
