@@ -1047,15 +1047,6 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
               fileInputRef={fileInputRef}
               onChooseFile={chooseFile}
               onGenerate={runCheck}
-              references={{
-                referenceEntries,
-                referenceRejections,
-                referenceInputRef,
-                onAddReferenceFiles: addReferences,
-                onRemoveReferenceFile: removeReference,
-                onClearReferenceFiles: clearReferences,
-                onDismissReferenceRejections: () => setReferenceRejections([]),
-              }}
             />
           </div>
         )}

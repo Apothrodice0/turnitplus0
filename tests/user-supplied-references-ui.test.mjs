@@ -254,6 +254,28 @@ test("16: DocumentUploadPanel with no `references` prop renders no reference sec
   assert.match(html, /Generate free report/, "the manuscript upload UI is intact");
 });
 
+// ── 16a — UX_CLEANUP: the component itself still has full capability; only
+// the normal-flow call sites (asserted below) stopped passing the prop ─────
+test("16a: DocumentUploadPanel still renders the Reference files UI when the `references` prop is explicitly supplied (component capability intact, not deleted)", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(DocumentUploadPanel, {
+      file: null, isGeneratingReport: false, progress: 0, processingLabel: "Reading",
+      fileInputRef: { current: null }, onChooseFile() {}, onGenerate() {},
+      references: {
+        referenceEntries: [],
+        referenceRejections: [],
+        referenceInputRef: { current: null },
+        onAddReferenceFiles() {},
+        onRemoveReferenceFile() {},
+        onClearReferenceFiles() {},
+        onDismissReferenceRejections() {},
+      },
+    }),
+  );
+  assert.match(html, /Reference files/, "a future internal surface can still wire this back in without any component change");
+  assert.match(html, /Generate free report/, "the manuscript upload UI renders alongside it");
+});
+
 test("16b: a report saved before this feature still builds a Report V2 view model (no reference fields required)", () => {
   const SHARED = Array.from({ length: 12 }, (_, i) => `w${i}`).join(" ");
   const text = `legacy report body ${SHARED} legacy tail`;
@@ -270,20 +292,27 @@ test("16b: a report saved before this feature still builds a Report V2 view mode
 // ─────────────────────────────────────────────────────────────────────────
 // STRUCTURAL WIRING — app/page.tsx + room-page-shell.tsx are full client
 // components (no React test harness — see room-lifecycle-reconciliation.test.mjs);
-// verify the reference intake is wired at both new-check sites.
+// verify the reference intake backend stays wired at both new-check sites.
+//
+// UX_CLEANUP (bounded slice): the "Reference files" UI no longer appears on
+// the normal customer flow — DocumentUploadPanel is now called WITHOUT the
+// `references` prop at both sites (component-level proof: test 16 above).
+// The backend intake logic below (state/extraction/submission-merge/
+// post-save 'checked') is intentionally left fully wired and dormant, not
+// deleted, per this slice's own scope.
 // ─────────────────────────────────────────────────────────────────────────
 async function read(rel) {
   return readFile(new URL(`../${rel}`, import.meta.url), "utf8");
 }
 
 for (const rel of ["app/page.tsx", "app/reports/rooms/[room]/room-page-shell.tsx"]) {
-  test(`wiring (${rel}): reference state + extraction + sibling submission + post-save 'checked'`, async () => {
+  test(`wiring (${rel}): reference state + extraction + sibling submission + post-save 'checked' remain, but the UI prop is no longer passed`, async () => {
     const src = await read(rel);
     assert.match(src, /useState<ReferenceIntakeEntry\[\]>\(\[\]\)/, "reference entry list state");
     assert.match(src, /extractReferenceInputs\(referenceEntries,/, "references are extracted through Extraction V2 at submit time");
     assert.match(src, /\{ \.\.\.report, userSuppliedReferences[^}]*\}/, "the raw text rides as a sibling of the report, merged for the remote save only");
     assert.match(src, /markReferencesChecked/, "post-save the per-file state becomes 'checked'");
-    assert.match(src, /references=\{\{/, "the reference panel is wired into DocumentUploadPanel");
+    assert.doesNotMatch(src, /references=\{\{/, "UX_CLEANUP: the reference panel is no longer wired into DocumentUploadPanel in the normal customer flow (backend intake above remains intact and dormant)");
     // PHASE 6 — the long-lived `report` (used by the AI-completion resave) must
     // never be the object that carries userSuppliedReferences.
     assert.doesNotMatch(src, /report = \{ \.\.\.report, userSuppliedReferences/, "references must not be merged into the long-lived report object");

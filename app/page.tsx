@@ -1471,15 +1471,6 @@ export default function Home() {
                 fileInputRef={fileInputRef}
                 onChooseFile={chooseFile}
                 onGenerate={generateReport}
-                references={{
-                  referenceEntries,
-                  referenceRejections,
-                  referenceInputRef,
-                  onAddReferenceFiles: addReferences,
-                  onRemoveReferenceFile: removeReference,
-                  onClearReferenceFiles: clearReferences,
-                  onDismissReferenceRejections: () => setReferenceRejections([]),
-                }}
               />
             </section>
 
