@@ -77,12 +77,14 @@ import {
  *   credential, which the SDK reports exactly the same way) is conservatively
  *   classified PERSISTENT/unreadable rather than guessed transient. A raw,
  *   non-BlobError failure reaching this adapter (an undici-level network
- *   fault, or an aborted request if a caller-supplied AbortSignal were ever
- *   wired in) IS classified transient — that is the one category safely
- *   inferable without any structured status at all: it is not a typed Blob
- *   failure of any kind, so it cannot be the well-classified persistent cases
- *   above, and "the transport didn't complete" is exactly the shape of thing
- *   a later attempt may resolve.
+ *   fault, or an aborted request — including get()'s own per-call
+ *   AbortSignal.timeout(), see SELECTIVE_CORPUS_BLOB_GET_TIMEOUT_MS below,
+ *   which rejects with a plain, non-BlobError "TimeoutError" DOMException)
+ *   IS classified transient — that is the one category safely inferable
+ *   without any structured status at all: it is not a typed Blob failure of
+ *   any kind, so it cannot be the well-classified persistent cases above,
+ *   and "the transport didn't complete" is exactly the shape of thing a
+ *   later attempt may resolve.
  *
  * TESTABILITY: the real `get`/`head` SDK functions are injected as a narrow
  * `VercelBlobReadClient` (default: the real functions). Tests supply
@@ -98,7 +100,7 @@ import {
  *  operation (put/upload/del/copy/rename) — there is no seam through which
  *  this adapter could perform one. */
 export interface VercelBlobReadClient {
-  get(pathname: string, options: { access: "private" }): Promise<GetBlobResult | null>;
+  get(pathname: string, options: { access: "private"; abortSignal?: AbortSignal }): Promise<GetBlobResult | null>;
   head(pathname: string): Promise<HeadBlobResult>;
 }
 
@@ -119,6 +121,33 @@ export type CreateVercelBlobStorageAdapterOptions = {
 };
 
 const URL_SHAPED_KEY = /^[a-z][a-z0-9+.-]*:\/\//i;
+
+/**
+ * Release-hardening audit finding (recovery-sweep I/O-timeout audit): the
+ * @vercel/blob SDK's get() call is a single, unretried `undici.fetch` with no
+ * timeout of its own (only the bundled undici's own default 300s headers/300s
+ * body timeouts) — a single stalled shard/source-text/manifest read could
+ * otherwise sit unresolved for most or all of the recovery sweep's 300s
+ * function budget, well past the 6000ms per-report selective-corpus time
+ * budget's own checkpoints ever getting a chance to fire (those checkpoints
+ * only run between whole I/O phases, never during one).
+ *
+ * 4000ms, fixed, not env-configurable. Available production evidence is
+ * PHASE-level only (no artifact records a single individual read's own
+ * duration) — n=20 real production evaluations: Stage A max 3077.45ms,
+ * Stage B max 2270.88ms; n=4 remote-probe: cold artifact-load max 2124.07ms;
+ * 20/20 and 4/4 COMPLETED, zero timeouts. 4000ms is above every one of those
+ * observed phase maxima, while still dramatically below the transport-level
+ * (~300s-class) stall this timeout exists to bound, and still leaves most of
+ * the 6000ms selective-corpus budget for the rest of Stage A/B if one read
+ * hits it. get()-only: head()
+ * (objectExists) routes through the SDK's own control-plane retry() wrapper,
+ * which does not recognize an AbortSignal.timeout()'s "TimeoutError"-named
+ * abort as its clean bail case and would instead retry it (up to 10 attempts,
+ * exponential backoff) before the abort finally surfaces — a separate,
+ * not-yet-addressed design question left untouched here.
+ */
+const SELECTIVE_CORPUS_BLOB_GET_TIMEOUT_MS = 4000;
 
 function normalizePrefix(prefix: string): string {
   if (typeof prefix !== "string" || prefix.trim().length === 0) {
@@ -211,7 +240,13 @@ export function createVercelBlobStorageAdapter(
       const pathname = resolvePathname(prefix, key);
       let result: GetBlobResult | null;
       try {
-        result = await client.get(pathname, { access: "private" });
+        // Fresh AbortSignal.timeout() PER CALL — a signal's clock starts at
+        // creation and, once fired, stays fired forever; reusing one across
+        // reads would let an earlier read's elapsed time (or an already-fired
+        // signal) silently shorten or void a later, unrelated read's own
+        // budget. See SELECTIVE_CORPUS_BLOB_GET_TIMEOUT_MS's own comment for
+        // the evidence behind the 4000ms value.
+        result = await client.get(pathname, { access: "private", abortSignal: AbortSignal.timeout(SELECTIVE_CORPUS_BLOB_GET_TIMEOUT_MS) });
       } catch (err) {
         if (isTransientBlobError(err)) {
           throw new SelectiveCorpusTransientStorageError(

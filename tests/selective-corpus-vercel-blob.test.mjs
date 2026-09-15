@@ -15,6 +15,7 @@ import {
   BlobRequestAbortedError,
   BlobUnknownError,
 } from "@vercel/blob";
+import { setTimeout as sleep } from "node:timers/promises";
 import {
   createVercelBlobStorageAdapter,
 } from "../lib/selective-corpus/vercel-blob-storage-adapter.ts";
@@ -276,7 +277,15 @@ test("adapter A: readObject success -- pathname includes the fixed prefix, acces
   const result = await adapter.readObject("packed/shard-000.bin");
   assert.deepEqual(Buffer.from(result), bytes, "exact bytes preserved");
   assert.equal(client.getCallCount(pathname), 1);
-  assert.deepEqual(client.getCallOptions(0), { access: "private" });
+  // Release-hardening audit finding (recovery-sweep I/O-timeout audit): every
+  // get() call now also carries a fresh per-call AbortSignal.timeout() (see
+  // adapter J/K/L below for the dedicated signal-plumbing/classification
+  // coverage) -- this assertion only re-confirms the two fields this test has
+  // always cared about, `access` and the pathname/byte-count assertions above,
+  // rather than pinning the whole options object's exact shape.
+  const options = client.getCallOptions(0);
+  assert.equal(options.access, "private");
+  assert.ok(options.abortSignal instanceof AbortSignal);
 });
 
 test("adapter B: objectExists success", async () => {
@@ -397,6 +406,63 @@ test("adapter I: has no write capability -- only readObject/objectExists are exp
     assert.equal(adapter[method], undefined, `adapter must not expose ${method}()`);
   }
   assert.deepEqual(Object.keys(adapter).sort(), ["objectExists", "readObject"]);
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// 12b. get() TIMEOUT (release-hardening audit: recovery-sweep I/O timeout)
+// ═══════════════════════════════════════════════════════════════════════
+
+test("adapter J: readObject passes a fresh, non-aborted AbortSignal per call; two calls get two different signals; successful behavior unchanged", async () => {
+  const bytes = Buffer.from("timeout-signal-plumbing-bytes", "utf8");
+  const pathname = `${PREFIX}/packed/shard-030.bin`;
+  const client = createFakeVercelBlobReadClient({ objects: { [pathname]: { bytes } } });
+  const adapter = createVercelBlobStorageAdapter({ prefix: PREFIX, client });
+
+  const result1 = await adapter.readObject("packed/shard-030.bin");
+  const result2 = await adapter.readObject("packed/shard-030.bin");
+
+  assert.deepEqual(Buffer.from(result1), bytes, "first call: exact bytes preserved, unchanged by the new option");
+  assert.deepEqual(Buffer.from(result2), bytes, "second call: exact bytes preserved, unchanged by the new option");
+  assert.equal(client.getCallCount(pathname), 2);
+
+  const opts1 = client.getCallOptions(0);
+  const opts2 = client.getCallOptions(1);
+  assert.equal(opts1.access, "private");
+  assert.equal(opts2.access, "private");
+  assert.ok(opts1.abortSignal instanceof AbortSignal, "first call receives an AbortSignal");
+  assert.ok(opts2.abortSignal instanceof AbortSignal, "second call receives an AbortSignal");
+  assert.equal(opts1.abortSignal.aborted, false, "signal is not already aborted at call start");
+  assert.equal(opts2.abortSignal.aborted, false, "signal is not already aborted at call start");
+  assert.notEqual(opts1.abortSignal, opts2.abortSignal, "each call gets its OWN fresh signal -- never reused across reads");
+});
+
+test("adapter K: a timeout/abort from get() classifies through the EXISTING transient-storage path -- no new error type, no raw SDK/DOMException detail in the message", async () => {
+  const pathname = `${PREFIX}/packed/shard-031.bin`;
+  // The exact error SHAPE undici's fetch rejects with when an AbortSignal.timeout()
+  // fires: it rejects with the signal's own `.reason`, and a real
+  // AbortSignal.timeout()'s reason is a DOMException named "TimeoutError" --
+  // proven for real, without waiting on the production timeout value, by adapter L
+  // below. Constructed directly here so THIS test never waits on a real timer.
+  const timeoutError = new DOMException("The operation was aborted due to timeout", "TimeoutError");
+  const client = createFakeVercelBlobReadClient({ objects: { [pathname]: { getError: timeoutError } } });
+  const adapter = createVercelBlobStorageAdapter({ prefix: PREFIX, client });
+
+  await assert.rejects(
+    () => adapter.readObject("packed/shard-031.bin"),
+    (e) => {
+      assert.ok(e instanceof SelectiveCorpusTransientStorageError, "classified as the EXISTING transient-storage failure -- not a new error type, not a fatal/persistent Error");
+      assert.ok(!/TimeoutError|DOMException/.test(e.message), "no raw SDK error class/DOMException name leaks into the message");
+      return true;
+    },
+  );
+});
+
+test("adapter L: a REAL AbortSignal.timeout() (tiny, test-local only -- never the production timeout) fires as a DOMException named TimeoutError, validating adapter K's assumed error shape", async () => {
+  const signal = AbortSignal.timeout(5);
+  await sleep(25);
+  assert.equal(signal.aborted, true);
+  assert.ok(signal.reason instanceof DOMException, "AbortSignal.timeout()'s reason is a DOMException");
+  assert.equal(signal.reason.name, "TimeoutError", "never \"AbortError\" -- this is exactly why @vercel/blob's own head() retry-bail check (name === \"AbortError\") does not catch it, per this adapter's own header comment");
 });
 
 // ═══════════════════════════════════════════════════════════════════════
