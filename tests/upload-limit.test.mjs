@@ -103,6 +103,23 @@ async function postReport(deviceKey, { id, cookie, payloadOverrides = {}, room =
   return { res, payload };
 }
 
+// report_save_rejected telemetry (lib/report-save-telemetry.ts) --
+// deliberately minimal: captures console.warn only for the duration of
+// `fn`, restores it unconditionally, and never touches console.log/error
+// (the shadow-telemetry lines this file's own reports already emit stay
+// untouched and unfiltered).
+async function captureConsoleWarn(fn) {
+  const calls = [];
+  const original = console.warn;
+  console.warn = (...args) => calls.push(args);
+  try {
+    const result = await fn();
+    return { result, calls };
+  } finally {
+    console.warn = original;
+  }
+}
+
 async function getUploadLimit(cookie) {
   const ip = `upload-limit-status-${++ipCounter}`;
   await resetRateForTest(ip);
@@ -145,7 +162,9 @@ async function getUploadLimit(cookie) {
     assert.equal(res.status, 200, `upload ${i}/${DAILY_UPLOAD_LIMIT} should succeed`);
   }
 
-  const { res: eleventh } = await postReport('device-ten-1', { id: 'ten-quota-11', cookie, room: 0 });
+  const { result: { res: eleventh }, calls: warnCalls } = await captureConsoleWarn(() =>
+    postReport('device-ten-1', { id: 'ten-quota-11', cookie, room: 0 }),
+  );
   assert.equal(eleventh.status, 429, 'the 11th genuinely new upload must be rejected');
   const body = await eleventh.json();
   assert.equal(body.limit, DAILY_UPLOAD_LIMIT);
@@ -155,7 +174,17 @@ async function getUploadLimit(cookie) {
   const retryAfter = eleventh.headers.get('Retry-After');
   assert.ok(retryAfter && Number(retryAfter) > 0, 'Retry-After must be present and positive');
 
-  console.log('10 uploads allowed, 11th rejected with a clear 429 including reset info');
+  // report_save_rejected telemetry: exactly one DAILY_UPLOAD_QUOTA/429 event,
+  // authMode "authenticated" (this branch only ever runs for a signed-in,
+  // non-admin session -- see route.ts's own gate), no customer data.
+  const telemetryCalls = warnCalls.filter((args) => {
+    try { return JSON.parse(args[0]).event === 'report_save_rejected'; } catch { return false; }
+  });
+  assert.equal(telemetryCalls.length, 1, 'exactly one report_save_rejected event for the 11th rejected upload');
+  const telemetryEvent = JSON.parse(telemetryCalls[0][0]);
+  assert.deepEqual(telemetryEvent, { event: 'report_save_rejected', reason: 'DAILY_UPLOAD_QUOTA', status: 429, authMode: 'authenticated' });
+
+  console.log('10 uploads allowed, 11th rejected with a clear 429 including reset info, and telemetry recorded correctly');
 }
 
 // 3. Admin (role=admin) accounts are unlimited — well beyond 10 in the same day.

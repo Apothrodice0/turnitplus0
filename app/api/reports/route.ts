@@ -29,6 +29,7 @@ import { verifySuppliedReferences } from '../../../lib/user-supplied-references'
 import { sanitizeSuppliedReferenceInputs, admittedReferenceEvidenceForUnifiedSimilarity, resolveUserSuppliedReferenceEvidenceForSave } from '../../../lib/report-user-supplied-references';
 import { referenceTransportBudgetError } from '../../../lib/user-supplied-reference-constants';
 import { MAX_REPORT_SAVE_REQUEST_BYTES } from '../../../lib/report-transport-limits';
+import { logReportSaveRejectedTelemetry } from '../../../lib/report-save-telemetry';
 import { compactUnifiedSimilarityForPersistence } from '../../../lib/unified-similarity-persistence';
 import { scheduleReportShadowEvaluations } from '../../../lib/report-shadow-evaluations';
 import { effectiveSelectiveCorpusAuthoritativeEnabled } from '../../../lib/selective-corpus/flag';
@@ -308,16 +309,21 @@ export async function POST(request: Request) {
   try {
     const rate = await checkRate(clientIpFrom(request));
     if (!rate.allowed) {
+      logReportSaveRejectedTelemetry({ reason: 'IP_RATE_LIMIT', status: 429 });
       return new NextResponse(JSON.stringify({ error: 'Too many requests' }), { status: 429, headers: { 'Retry-After': String(rate.retryAfter) } });
     }
 
     const contentLength = request.headers.get('content-length');
     if (contentLength && Number(contentLength) > MAX_BYTES) {
+      logReportSaveRejectedTelemetry({ reason: 'RAW_CONTENT_LENGTH', status: 413 });
       return new NextResponse(JSON.stringify({ error: 'Payload too large' }), { status: 413 });
     }
 
     const body = await request.json().catch(() => null);
-    if (!body || typeof body !== 'object') return new NextResponse(JSON.stringify({ error: 'Invalid JSON' }), { status: 400 });
+    if (!body || typeof body !== 'object') {
+      logReportSaveRejectedTelemetry({ reason: 'MALFORMED_REQUEST', status: 400 });
+      return new NextResponse(JSON.stringify({ error: 'Invalid JSON' }), { status: 400 });
+    }
 
     const { deviceKey, id, submissionId, title, createdAt, wordCount, archiveScore, scoreBand, aiScore, aiTone, aiStatus, payload, academicSearchDiagnosticsId, room, devicePassport, extractionCompleteness, userSuppliedReferences } = body as Record<string, unknown>;
 
@@ -326,21 +332,53 @@ export async function POST(request: Request) {
     // get/delete endpoints below, where an authenticated session replaces
     // the need for it entirely.
     if (!isNonEmptyString(deviceKey) || deviceKey.length > MAX_DEVICE_KEY_LENGTH) {
+      logReportSaveRejectedTelemetry({ reason: 'MALFORMED_REQUEST', status: 400 });
       return new NextResponse(JSON.stringify({ error: 'deviceKey is required' }), { status: 400 });
     }
-    if (!isNonEmptyString(id)) return new NextResponse(JSON.stringify({ error: 'id is required' }), { status: 400 });
-    if (!isNonEmptyString(submissionId)) return new NextResponse(JSON.stringify({ error: 'submissionId is required' }), { status: 400 });
-    if (!isNonEmptyString(title)) return new NextResponse(JSON.stringify({ error: 'title is required' }), { status: 400 });
-    if (!isNonEmptyString(createdAt)) return new NextResponse(JSON.stringify({ error: 'createdAt is required' }), { status: 400 });
-    if (typeof wordCount !== 'number' || !Number.isFinite(wordCount)) return new NextResponse(JSON.stringify({ error: 'wordCount must be a number' }), { status: 400 });
-    if (typeof archiveScore !== 'number' || !Number.isFinite(archiveScore)) return new NextResponse(JSON.stringify({ error: 'archiveScore must be a number' }), { status: 400 });
-    if (!isNonEmptyString(scoreBand)) return new NextResponse(JSON.stringify({ error: 'scoreBand is required' }), { status: 400 });
-    if (aiScore !== null && aiScore !== undefined && typeof aiScore !== 'number') return new NextResponse(JSON.stringify({ error: 'aiScore must be a number or null' }), { status: 400 });
-    if (aiTone !== null && aiTone !== undefined && typeof aiTone !== 'string') return new NextResponse(JSON.stringify({ error: 'aiTone must be a string or null' }), { status: 400 });
+    if (!isNonEmptyString(id)) {
+      logReportSaveRejectedTelemetry({ reason: 'MALFORMED_REQUEST', status: 400 });
+      return new NextResponse(JSON.stringify({ error: 'id is required' }), { status: 400 });
+    }
+    if (!isNonEmptyString(submissionId)) {
+      logReportSaveRejectedTelemetry({ reason: 'MALFORMED_REQUEST', status: 400 });
+      return new NextResponse(JSON.stringify({ error: 'submissionId is required' }), { status: 400 });
+    }
+    if (!isNonEmptyString(title)) {
+      logReportSaveRejectedTelemetry({ reason: 'MALFORMED_REQUEST', status: 400 });
+      return new NextResponse(JSON.stringify({ error: 'title is required' }), { status: 400 });
+    }
+    if (!isNonEmptyString(createdAt)) {
+      logReportSaveRejectedTelemetry({ reason: 'MALFORMED_REQUEST', status: 400 });
+      return new NextResponse(JSON.stringify({ error: 'createdAt is required' }), { status: 400 });
+    }
+    if (typeof wordCount !== 'number' || !Number.isFinite(wordCount)) {
+      logReportSaveRejectedTelemetry({ reason: 'MALFORMED_REQUEST', status: 400 });
+      return new NextResponse(JSON.stringify({ error: 'wordCount must be a number' }), { status: 400 });
+    }
+    if (typeof archiveScore !== 'number' || !Number.isFinite(archiveScore)) {
+      logReportSaveRejectedTelemetry({ reason: 'MALFORMED_REQUEST', status: 400 });
+      return new NextResponse(JSON.stringify({ error: 'archiveScore must be a number' }), { status: 400 });
+    }
+    if (!isNonEmptyString(scoreBand)) {
+      logReportSaveRejectedTelemetry({ reason: 'MALFORMED_REQUEST', status: 400 });
+      return new NextResponse(JSON.stringify({ error: 'scoreBand is required' }), { status: 400 });
+    }
+    if (aiScore !== null && aiScore !== undefined && typeof aiScore !== 'number') {
+      logReportSaveRejectedTelemetry({ reason: 'MALFORMED_REQUEST', status: 400 });
+      return new NextResponse(JSON.stringify({ error: 'aiScore must be a number or null' }), { status: 400 });
+    }
+    if (aiTone !== null && aiTone !== undefined && typeof aiTone !== 'string') {
+      logReportSaveRejectedTelemetry({ reason: 'MALFORMED_REQUEST', status: 400 });
+      return new NextResponse(JSON.stringify({ error: 'aiTone must be a string or null' }), { status: 400 });
+    }
     if (aiStatus !== null && aiStatus !== undefined && aiStatus !== 'processing' && aiStatus !== 'ready' && aiStatus !== 'failed') {
+      logReportSaveRejectedTelemetry({ reason: 'MALFORMED_REQUEST', status: 400 });
       return new NextResponse(JSON.stringify({ error: "aiStatus must be 'processing', 'ready', 'failed', or null" }), { status: 400 });
     }
-    if (payload === undefined) return new NextResponse(JSON.stringify({ error: 'payload is required' }), { status: 400 });
+    if (payload === undefined) {
+      logReportSaveRejectedTelemetry({ reason: 'MALFORMED_REQUEST', status: 400 });
+      return new NextResponse(JSON.stringify({ error: 'payload is required' }), { status: 400 });
+    }
     // Developer-diagnostics addition: optional, never required — an older
     // client build, or a run where /api/academic-evidence never produced a
     // diagnostics row (network failure, short text), simply omits or nulls
@@ -363,6 +401,7 @@ export async function POST(request: Request) {
 
     const payloadJson = JSON.stringify(payload);
     if (payloadJson.length > MAX_BYTES) {
+      logReportSaveRejectedTelemetry({ reason: 'CLIENT_PAYLOAD_TOO_LARGE', status: 413 });
       return new NextResponse(JSON.stringify({ error: 'Payload too large' }), { status: 413 });
     }
 
@@ -479,6 +518,7 @@ export async function POST(request: Request) {
       if (!isFirstSaveOfThisReport) {
         const existingOwnerId = (existingReportRow.rows[0]?.user_id as string | null) ?? null;
         if (existingOwnerId !== null && existingOwnerId !== userId) {
+          logReportSaveRejectedTelemetry({ reason: 'OWNERSHIP_CONFLICT', status: 404, authMode: sessionUser ? 'authenticated' : 'anonymous' });
           return new NextResponse(JSON.stringify({ error: 'Report not found' }), { status: 404 });
         }
       }
@@ -494,6 +534,7 @@ export async function POST(request: Request) {
       if (sessionUser && sessionUser.role !== 'admin' && isFirstSaveOfThisReport) {
         const limitCheck = await checkUploadLimit(client, sessionUser.id);
         if (!limitCheck.allowed) {
+          logReportSaveRejectedTelemetry({ reason: 'DAILY_UPLOAD_QUOTA', status: 429, authMode: 'authenticated' });
           return new NextResponse(
             JSON.stringify({
               error: `Daily upload limit reached (${limitCheck.uploadsToday}/${limitCheck.limit}). Try again after the limit resets.`,
@@ -521,6 +562,7 @@ export async function POST(request: Request) {
       if (sessionUser && isFirstSaveOfThisReport) {
         const roomCount = getRoomCountForRole(sessionUser.role);
         if (!Number.isInteger(room) || (room as number) < 0 || (room as number) >= roomCount) {
+          logReportSaveRejectedTelemetry({ reason: 'MALFORMED_REQUEST', status: 400, authMode: 'authenticated' });
           return new NextResponse(JSON.stringify({ error: `room must be an integer 0-${roomCount - 1}` }), { status: 400 });
         }
         roomNumberForInsert = room as number;
@@ -551,6 +593,7 @@ export async function POST(request: Request) {
       // pre-submit client guard makes this unreachable for a well-behaved
       // client; a client that omits Content-Length still cannot get past here.
       if (suppliedReferenceInputs.length > 0 && referenceTransportBudgetError(suppliedReferenceInputs) !== null) {
+        logReportSaveRejectedTelemetry({ reason: 'REFERENCE_TRANSPORT_BUDGET', status: 413, authMode: sessionUser ? 'authenticated' : 'anonymous' });
         return new NextResponse(JSON.stringify({ error: 'Payload too large' }), { status: 413 });
       }
       const freshSuppliedReferenceChannel = isNonEmptyString(reportPayload?.text) && suppliedReferenceInputs.length > 0
@@ -865,6 +908,7 @@ export async function POST(request: Request) {
       // transient-"pending" path that keeps this base value unchanged.
       let payloadJsonToPersist = finalizeReportJson(persistedReportPayload as SimilarityReport);
       if (payloadJsonToPersist.length > MAX_BYTES) {
+        logReportSaveRejectedTelemetry({ reason: 'PERSISTED_PAYLOAD_TOO_LARGE', status: 413, authMode: sessionUser ? 'authenticated' : 'anonymous' });
         return new NextResponse(JSON.stringify({ error: 'Payload too large' }), { status: 413 });
       }
       // Shadow-telemetry handoff. ONE request-local object, function-local to
@@ -967,6 +1011,7 @@ export async function POST(request: Request) {
               unifiedSimilarityFailed: false,
             } as SimilarityReport, resolution.historicalSubmissionMatch);
             if (payloadJsonToPersist.length > MAX_BYTES) {
+              logReportSaveRejectedTelemetry({ reason: 'PERSISTED_PAYLOAD_TOO_LARGE', status: 413, authMode: sessionUser ? 'authenticated' : 'anonymous' });
               return new NextResponse(JSON.stringify({ error: 'Payload too large' }), { status: 413 });
             }
           } else if (resolution.failed) {
@@ -1009,6 +1054,7 @@ export async function POST(request: Request) {
               unifiedSimilarityGeneration: resolution.corpusGeneration,
             } as SimilarityReport, resolution.historicalSubmissionMatch);
             if (payloadJsonToPersist.length > MAX_BYTES) {
+              logReportSaveRejectedTelemetry({ reason: 'PERSISTED_PAYLOAD_TOO_LARGE', status: 413, authMode: sessionUser ? 'authenticated' : 'anonymous' });
               return new NextResponse(JSON.stringify({ error: 'Payload too large' }), { status: 413 });
             }
           }
@@ -1055,6 +1101,7 @@ export async function POST(request: Request) {
       });
 
       if (roomConflict) {
+        logReportSaveRejectedTelemetry({ reason: 'ROOM_OCCUPIED', status: 409, authMode: 'authenticated' });
         return new NextResponse(
           JSON.stringify({
             error: `Room ${(roomNumberForInsert as number) + 1} already has an active report. It will be available again at ${roomCycleEndsAt(roomConflict.mostRecent)}.`,
@@ -1292,10 +1339,14 @@ export async function POST(request: Request) {
     // this catch's own audit trail for why: no production client reads this
     // string for a 500 (classifySaveReportRemoteResult only ever inspects
     // `status`), so this is a response-body-only change with zero client
-    // behavior impact. Logged with a fixed marker only — never err/err.message/
-    // err.stack/err.name/err.code/request data — so an unexpected failure here
-    // stays operationally visible without risking a content-bearing log line.
-    console.error('POST /api/reports: unexpected error');
+    // behavior impact. Logged via the same report_save_rejected telemetry
+    // every other rejection uses — purely categorical (reason:
+    // "INTERNAL_ERROR", status: 500) — never err/err.message/err.stack/
+    // err.name/err.code/request data, so an unexpected failure here stays
+    // operationally visible without risking a content-bearing log line.
+    // `err` itself is intentionally unused beyond this point (see `catch (err)`
+    // above) — it exists only to satisfy the catch clause; nothing here reads it.
+    logReportSaveRejectedTelemetry({ reason: 'INTERNAL_ERROR', status: 500 });
     return new NextResponse(JSON.stringify({ error: 'Unable to save report. Please try again.' }), { status: 500 });
   }
 }
