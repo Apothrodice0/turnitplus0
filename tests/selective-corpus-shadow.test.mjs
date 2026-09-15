@@ -138,6 +138,15 @@ test("file-backed shard reader is exactly equivalent to the in-memory Map for St
     assert.equal(b.ranked.length, a.ranked.length);
     assert.equal(b.truncated, a.truncated);
     assert.equal(b.stoppedFingerprints, a.stoppedFingerprints);
+    // queryFingerprintsRawCount/queryFingerprintsTrimmed are threaded
+    // straight through from winnowSubmissionFingerprints(sub) -- identical
+    // submission text on both sides means identical metadata regardless of
+    // which artifact mode (in-memory vs file-backed) Stage A ran against.
+    assert.equal(b.queryFingerprintsUsed, a.queryFingerprintsUsed);
+    assert.equal(b.queryFingerprintsRawCount, a.queryFingerprintsRawCount);
+    assert.equal(b.queryFingerprintsTrimmed, a.queryFingerprintsTrimmed);
+    assert.equal(a.queryFingerprintsTrimmed, false, "these real dev-fixture documents are well under the 4096 cap");
+    assert.equal(a.queryFingerprintsRawCount, a.queryFingerprintsUsed, "not trimmed => rawCount === retained count");
     for (let i = 0; i < a.ranked.length; i++) {
       assert.equal(b.ranked[i].ordinal, a.ranked[i].ordinal);
       assert.equal(b.ranked[i].matchedFingerprints, a.ranked[i].matchedFingerprints);
@@ -979,6 +988,16 @@ test(
       assert.equal(r.matchedPositionCount, undefined);
       assert.equal(r.counterfactualUnifiedSimilarity, undefined);
       assert.equal(r.authoritativeUnifiedSimilarity, undefined);
+
+      // Stage A itself DID fully run before this TIMEOUT fired (only Stage B
+      // never got a chance to), so its query-fingerprint metadata is a real,
+      // already-computed value here -- unlike the Stage-B-derived fields
+      // above, which correctly stay undefined. Never fabricated, never
+      // defaulted -- see shadow.ts's timeoutResult() and its own comment.
+      assert.equal(typeof r.queryFingerprintsRawCount, "number");
+      assert.equal(typeof r.queryFingerprintsTrimmed, "boolean");
+      assert.equal(r.queryFingerprintsTrimmed, false, "SHARD_QUERY_TEXT is far under the 4096 cap");
+      assert.ok(r.queryFingerprintsRawCount > 0);
 
       // Authoritative input object: untouched, by both a structural JSON
       // comparison and an independent sha256 -- this assertion works

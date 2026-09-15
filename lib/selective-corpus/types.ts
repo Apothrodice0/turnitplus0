@@ -40,6 +40,22 @@ export type SelectiveCorpusShadowResult = {
   /** Stage-A ranks (0-based) of the admitted sources, ascending. */
   topCandidateRanks?: number[];
   stageATruncated?: boolean;
+  /**
+   * Metadata-only, threaded straight through from Stage A's own
+   * queryFingerprintsRawCount/queryFingerprintsTrimmed (see
+   * lib/selective-corpus/stage-a.ts's own doc comment) — never recomputed
+   * here, never affects scoring. Distinct from stageATruncated above:
+   * stageATruncated means posting/candidate ENUMERATION was cut short while
+   * scanning the corpus index; queryFingerprintsTrimmed means the
+   * SUBMISSION'S OWN winnowed fingerprint set exceeded
+   * SELECTIVE_CORPUS_MAX_QUERY_FINGERPRINTS before any corpus lookup began —
+   * an earlier, independent concept. Present only when Stage A actually ran
+   * (absent on DISABLED/ARTIFACT_UNAVAILABLE, the <10-word short-circuit
+   * COMPLETED result, and FAILED — never fabricated when fingerprint
+   * generation did not occur for this evaluation).
+   */
+  queryFingerprintsRawCount?: number;
+  queryFingerprintsTrimmed?: boolean;
 
   /** Stage B — the unmodified matcher + STRICT_SPAN + FAMILY_GUARD + co-source. */
   verifiedSourceCount?: number;

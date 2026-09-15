@@ -202,6 +202,11 @@ export async function runSelectiveCorpusShadow(
         // real, already-computed value here — Stage B's own runtime is not,
         // since it timed out before finishing; omitted rather than guessed.
         runtimeStageAMs: +stageAMs.toFixed(2),
+        // Same reasoning: Stage A (and therefore its query-fingerprint
+        // metadata) is always already computed by the time any of the three
+        // TIMEOUT checkpoints below can fire.
+        queryFingerprintsRawCount: stageA.queryFingerprintsRawCount,
+        queryFingerprintsTrimmed: stageA.queryFingerprintsTrimmed,
         ...(timedOutShardFailures.length > 0
           ? {
               degradedShardCount: timedOutShardFailures.length,
@@ -367,6 +372,8 @@ export async function runSelectiveCorpusShadow(
       candidateCount: stageA.ranked.length,
       topCandidateRanks: admittedKeys.map((k) => rankByKey.get(k) ?? -1).sort((a, b) => a - b),
       stageATruncated: stageA.truncated,
+      queryFingerprintsRawCount: stageA.queryFingerprintsRawCount,
+      queryFingerprintsTrimmed: stageA.queryFingerprintsTrimmed,
       verifiedSourceCount: admittedKeys.length,
       matchedPositionCount: verifiedPositions.size,
       counterfactualUnifiedSimilarity: counterfactual,

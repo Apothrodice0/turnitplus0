@@ -150,6 +150,43 @@ test("formatter: COMPLETED produces exactly the allowlisted fields it has", () =
   });
 });
 
+test("formatter: queryFingerprintsRawCount/queryFingerprintsTrimmed survive exactly when set, alongside existing privacy exclusions", () => {
+  const result = {
+    state: "COMPLETED",
+    evaluatorVersion: "selective-corpus-shadow-v1",
+    corpusDigest: SELECTIVE_CORPUS_EXPECTED_DIGEST,
+    documentCount: 9176,
+    candidateCount: 5,
+    stageATruncated: false,
+    queryFingerprintsRawCount: 4979,
+    queryFingerprintsTrimmed: true,
+    runtimeStageAMs: 44.1,
+    // deliberately also set on this same result, to prove the two new
+    // fields' presence does not loosen any pre-existing exclusion.
+    failureMessage: "should never be emitted even when fingerprint fields are present",
+    degradedShards: [1, 2, 3],
+    degradedDetail: "should never be emitted either",
+  };
+  const event = buildSelectiveCorpusShadowTelemetryEvent(result, 60);
+  assert.equal(event.queryFingerprintsRawCount, 4979, "exact value passthrough, no transformation");
+  assert.equal(event.queryFingerprintsTrimmed, true);
+  assert.equal(event.stageATruncated, false, "distinct field, independently correct -- never conflated with queryFingerprintsTrimmed");
+  assert.equal("failureMessage" in event, false);
+  assert.equal("degradedShards" in event, false);
+  assert.equal("degradedDetail" in event, false);
+});
+
+test("formatter: queryFingerprintsRawCount/queryFingerprintsTrimmed are omitted (not defaulted) when the result never set them", () => {
+  const result = {
+    state: "ARTIFACT_UNAVAILABLE",
+    evaluatorVersion: "selective-corpus-shadow-v1",
+    failureCode: "NO_PATH_CONFIGURED",
+  };
+  const event = buildSelectiveCorpusShadowTelemetryEvent(result, 1);
+  assert.equal("queryFingerprintsRawCount" in event, false, "Stage A never ran -- must not be fabricated as 0 or any other value");
+  assert.equal("queryFingerprintsTrimmed" in event, false, "Stage A never ran -- must not default to false");
+});
+
 test("formatter: PARTIAL includes degradedShardCount/degradedShardCodes but not degradedShards/degradedDetail", () => {
   const result = {
     state: "PARTIAL",
@@ -377,6 +414,17 @@ test("integration: a real COMPLETED evaluation emits exactly one structured even
     assert.equal(typeof parsed.runtimeStageAMs, "number");
     assert.equal(typeof parsed.runtimeStageBMs, "number");
     assert.equal(typeof parsed.evaluationWallMs, "number");
+
+    // Real end-to-end propagation: Stage A (stage-a.ts) -> the shadow result
+    // (shadow.ts) -> the telemetry event (shadow-telemetry.ts), with no
+    // hand-built literal result object anywhere in this test -- the SAME
+    // values must appear, unmodified, at every layer.
+    assert.equal(typeof result.queryFingerprintsRawCount, "number");
+    assert.equal(typeof result.queryFingerprintsTrimmed, "boolean");
+    assert.equal(result.queryFingerprintsTrimmed, false, "SHARD_QUERY_TEXT (640 words) is far under the 4096 cap");
+    assert.ok(result.queryFingerprintsRawCount > 0);
+    assert.equal(parsed.queryFingerprintsRawCount, result.queryFingerprintsRawCount, "telemetry event carries the exact shadow-result value, no transformation");
+    assert.equal(parsed.queryFingerprintsTrimmed, result.queryFingerprintsTrimmed);
   });
   rmSync(dir, { recursive: true, force: true });
   clearSelectiveCorpusArtifactCache();

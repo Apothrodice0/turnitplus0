@@ -59,6 +59,16 @@ export type SelectiveCorpusShadowTelemetryEvent = {
   documentCount?: number;
   candidateCount?: number;
   stageATruncated?: boolean;
+  /**
+   * Metadata-only: whether the submission's own winnowed query-fingerprint
+   * set exceeded SELECTIVE_CORPUS_MAX_QUERY_FINGERPRINTS before any corpus
+   * lookup began, and its pre-cap distinct count. Deliberately distinct from
+   * stageATruncated above (see SelectiveCorpusShadowResult's own doc comment
+   * on these two fields) — never conflate the two. Both are a boolean and a
+   * bounded integer; neither carries any content-derived string or hash.
+   */
+  queryFingerprintsRawCount?: number;
+  queryFingerprintsTrimmed?: boolean;
   verifiedSourceCount?: number;
   matchedPositionCount?: number;
   /** Per-submission Stage A discovery time, counted against the 6000ms
@@ -94,6 +104,8 @@ export function buildSelectiveCorpusShadowTelemetryEvent(
   if (result.documentCount !== undefined) event.documentCount = result.documentCount;
   if (result.candidateCount !== undefined) event.candidateCount = result.candidateCount;
   if (result.stageATruncated !== undefined) event.stageATruncated = result.stageATruncated;
+  if (result.queryFingerprintsRawCount !== undefined) event.queryFingerprintsRawCount = result.queryFingerprintsRawCount;
+  if (result.queryFingerprintsTrimmed !== undefined) event.queryFingerprintsTrimmed = result.queryFingerprintsTrimmed;
   if (result.verifiedSourceCount !== undefined) event.verifiedSourceCount = result.verifiedSourceCount;
   if (result.matchedPositionCount !== undefined) event.matchedPositionCount = result.matchedPositionCount;
   if (result.runtimeStageAMs !== undefined) event.runtimeStageAMs = result.runtimeStageAMs;

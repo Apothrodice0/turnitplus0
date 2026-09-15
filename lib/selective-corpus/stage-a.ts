@@ -80,6 +80,22 @@ export type SelectiveCorpusStageAResult = {
   ranked: SelectiveCorpusStageACandidate[];
   topK: SelectiveCorpusStageACandidate[];
   queryFingerprintsUsed: number;
+  /**
+   * Metadata-only, threaded straight through from winnowSubmissionFingerprints
+   * (lib/selective-corpus/fingerprint.ts) — NEVER recomputed here. Distinct
+   * from `truncated` below: `truncated` means Stage A's own posting/candidate
+   * ENUMERATION was cut short by maxPostingRows/maxCandidates while scanning
+   * the (already-capped) query fingerprint set against the corpus index.
+   * queryFingerprintsRawCount/queryFingerprintsTrimmed instead describe
+   * whether the SUBMISSION'S OWN winnowed fingerprint set, before any corpus
+   * lookup ever started, exceeded SELECTIVE_CORPUS_MAX_QUERY_FINGERPRINTS —
+   * an entirely earlier, independent concept. queryFingerprintsUsed is the
+   * POST-cap retained count (== fingerprints.length); queryFingerprintsRawCount
+   * is the PRE-cap distinct count, so the two together tell you exactly how
+   * much (if any) of the submission's own fingerprint set was clipped.
+   */
+  queryFingerprintsRawCount: number;
+  queryFingerprintsTrimmed: boolean;
   stoppedFingerprints: number;
   postingRowsTallied: number;
   truncated: boolean;
@@ -101,7 +117,7 @@ export async function selectiveCorpusStageA(
   const maxCandidates = opts.maxCandidates ?? SELECTIVE_CORPUS_STAGE_A_MAX_CANDIDATES;
   const shardFetchConcurrency = opts.shardFetchConcurrency ?? SELECTIVE_CORPUS_STAGE_A_SHARD_FETCH_CONCURRENCY;
 
-  const { fingerprints } = winnowSubmissionFingerprints(submissionText);
+  const { fingerprints, rawCount: queryFingerprintsRawCount, trimmed: queryFingerprintsTrimmed } = winnowSubmissionFingerprints(submissionText);
 
   let postingRowsTallied = 0;
   let stoppedFingerprints = 0;
@@ -208,6 +224,8 @@ export async function selectiveCorpusStageA(
     ranked,
     topK: ranked.slice(0, topK),
     queryFingerprintsUsed: fingerprints.length,
+    queryFingerprintsRawCount,
+    queryFingerprintsTrimmed,
     stoppedFingerprints,
     postingRowsTallied,
     truncated,
