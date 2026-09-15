@@ -1286,7 +1286,17 @@ export async function POST(request: Request) {
 
     return new NextResponse(JSON.stringify({ ok: true }), { status: 200, headers: { 'Content-Type': 'application/json' } });
   } catch (err) {
-    return new NextResponse(JSON.stringify({ error: err instanceof Error ? err.message : 'Internal error' }), { status: 500 });
+    // Security/privacy hardening: never echo an internal Error.message (driver/
+    // config/invariant text — never designed for public consumption) into a
+    // public API response. Fixed, generic, truthful, no retry promise. See
+    // this catch's own audit trail for why: no production client reads this
+    // string for a 500 (classifySaveReportRemoteResult only ever inspects
+    // `status`), so this is a response-body-only change with zero client
+    // behavior impact. Logged with a fixed marker only — never err/err.message/
+    // err.stack/err.name/err.code/request data — so an unexpected failure here
+    // stays operationally visible without risking a content-bearing log line.
+    console.error('POST /api/reports: unexpected error');
+    return new NextResponse(JSON.stringify({ error: 'Unable to save report. Please try again.' }), { status: 500 });
   }
 }
 
