@@ -105,8 +105,14 @@ export function isGenericReferenceSource(sourceType: ReportV2SourceType): boolea
   );
 }
 
+// UX cleanup: no provider brand names here — ordinary customers should only
+// need to know TurnitPlus checked its reference collection and available
+// live academic sources, not which providers those checks used. Provider
+// names remain visible to admins elsewhere (components/report/similarity-
+// report-papers.tsx's canSeeSourceBreakdown-gated copy) — this constant only
+// controls the customer-facing Report V2 scope line.
 export const COMPLETION_SCOPE_LINE =
-  "Compared against TurnitPlus’s reference collection and live academic sources (OpenAIRE, Europe PMC). Exact Wikipedia phrase matches are listed separately and do not change this result.";
+  "Compared against TurnitPlus’s reference collection and available live academic sources. Exact Wikipedia phrase matches are listed separately and do not change this result.";
 
 // ── filter taxonomy ──────────────────────────────────────────────────────
 export type ReportV2Filter = "all" | "review" | "quotations" | "other";
