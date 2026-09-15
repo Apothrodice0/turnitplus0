@@ -32,6 +32,31 @@ import {
  * secret is created or required.
  */
 
+/**
+ * Release-hardening audit finding (DB transport-timeout audit): bounds every
+ * underlying libSQL HTTP request this route's DB client(s) make — a
+ * DIFFERENT, independent concern from lib/user-submission-matching.ts's own
+ * dbQueryTimeoutMs (1500ms, deliberately unchanged by this constant), which
+ * is a semantic "how long is the matcher willing to wait for the whole
+ * candidate-discovery operation" product decision made of several HTTP
+ * requests, not a transport-level bound on any ONE of them.
+ *
+ * 4000ms, fixed, not env-configurable, opt-in only via
+ * getReportsDbClient({ requestTimeoutMs }) — see that function's own
+ * comment. Evidence (release-hardening audit, DB transport-timeout turns):
+ * measured real HTTP round trips against Preview (SELECT 1 max 386.61ms;
+ * a real application read max 106.70ms) and two user-approved Production
+ * COUNT(*) queries (corpus_document_representations 467.33ms;
+ * corpus_document_shingles 1388.36ms) — all comfortably inside 4000ms.
+ * Production's current corpus scale (365 representations / 185,053 shingle
+ * rows) sits far below the code-documented ~8,000-representation /
+ * ~11.8M-shingle calibration point where the matcher's own 1500ms deadline
+ * is known to be exercised — evidence about risk proximity, not a proof this
+ * transport bound can never be hit, hence a materially larger margin here
+ * than the semantic deadline it deliberately does not touch.
+ */
+const SELECTIVE_CORPUS_DB_REQUEST_TIMEOUT_MS = 4000;
+
 function isAuthorizedSweepRequest(request: Request): boolean {
   const secret = process.env.CRON_SECRET;
   if (!secret) return false;
@@ -60,14 +85,14 @@ async function handleSweepRequest(request: Request): Promise<Response> {
       return new NextResponse(null, { status: 404 });
     }
 
-    const client = await getReportsDbClient();
+    const client = await getReportsDbClient({ requestTimeoutMs: SELECTIVE_CORPUS_DB_REQUEST_TIMEOUT_MS });
     try {
       // Atomic claim — see lib/selective-corpus-authoritative.ts's own header
       // comment for exactly why this must be a real write transaction, and
       // why it uses SQLite's own datetime('now', ...) rather than a
       // JS-computed threshold.
       const claimed = await claimStaleSelectiveCorpusAuthoritativePendingReports({
-        openConnection: () => getReportsDbClient(),
+        openConnection: () => getReportsDbClient({ requestTimeoutMs: SELECTIVE_CORPUS_DB_REQUEST_TIMEOUT_MS }),
       });
 
       const outcomeSummary: Record<string, number> = {};
