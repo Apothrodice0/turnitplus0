@@ -9,10 +9,12 @@ import {
   Quote,
   Search,
   ShieldCheck,
+  TriangleAlert,
 } from "lucide-react";
 import type { ExternalAcademicEvidence } from "@/lib/academic-search/types";
 import { similarityScoreBand } from "@/lib/ai-core";
 import { mergeAdjacentPositions, tokenSpans } from "@/lib/similarity-core";
+import { resolveCompletionView } from "@/lib/report-v2-view";
 import {
   PRIMARY_SIMILARITY_BAND_LABELS,
   archiveOverlapScore,
@@ -661,7 +663,27 @@ export function UnifiedSimilaritySection({ report }: { report: SimilarityReport 
  * status (report.sources is archive data attached at save time;
  * externalAcademicEvidence is resolved before a report is ever first
  * saved — see AcademicEvidenceSection's own call site comment below).
+ *
+ * UX cleanup slice 2: a compact, customer-safe notice (CompletionNotice
+ * below) now surfaces report.reportCompletion here too, reusing Report V2's
+ * own resolveCompletionView mapping (lib/report-v2-view.ts) rather than a
+ * second copy of the wording. Renders nothing for COMPLETED (including a
+ * genuine 0% overlap) or for a report saved before this field existed —
+ * only a non-COMPLETED state produces a notice, and only once the primary
+ * result itself is showing (i.e. inside the `!notResolved` branch below).
  */
+function CompletionNotice({ report, primaryScore }: { report: SimilarityReport; primaryScore: number }) {
+  const view = resolveCompletionView(report.reportCompletion, report.extractionDiagnostic, primaryScore);
+  if (view.state === "COMPLETED") return null;
+  return (
+    <aside className="report-completion-notice" role="status">
+      <TriangleAlert aria-hidden="true" />
+      <p className="report-completion-notice-headline">{view.headline}</p>
+      {view.detail && <p className="report-completion-notice-detail">{view.detail}</p>}
+    </aside>
+  );
+}
+
 export function OverviewReport({ report, similarityStatus = "resolved" }: { report: SimilarityReport; similarityStatus?: "resolved" | "stale" | "pending" | "failed" }) {
   const primaryScore = primarySimilarityScore(report);
   const primaryLabel = primaryResultLabel(report);
@@ -704,7 +726,7 @@ export function OverviewReport({ report, similarityStatus = "resolved" }: { repo
                   : "TurnitPlus is still checking this submission against every reference source. This can take a few seconds."}
             </p>
           </section>
-        ) : (
+        ) : (<>
           <section
             className={`similarity-heading ${similarityVerdict ? `similarity-verdict-${similarityVerdict.key}` : ""}`}
             aria-label={`${primaryScore}% ${primaryLabel}${similarityVerdict ? `, ${PRIMARY_SIMILARITY_BAND_LABELS[similarityVerdict.key]}` : ""}`}
@@ -742,7 +764,8 @@ export function OverviewReport({ report, similarityStatus = "resolved" }: { repo
               )}
             </p>
           </section>
-        )}
+          <CompletionNotice report={report} primaryScore={primaryScore} />
+        </>)}
 
         {/* Release-hardening audit finding SIM-02, SIM-04: every block in
             this run, up to the academic-evidence section, is derived from

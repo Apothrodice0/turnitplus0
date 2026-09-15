@@ -5614,6 +5614,21 @@ main.report-main {
   line-height: 1.45;
 }
 
+.report-completion-notice {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin-top: 14px;
+  padding: 9px 11px;
+  border: 1px solid #f0ddb0;
+  border-radius: 8px;
+  background: #fffaf0;
+  color: #7a5b17;
+}
+.report-completion-notice svg { flex: 0 0 auto; width: 14px; height: 14px; margin-top: 1px; }
+.report-completion-notice-headline { margin: 0; font-size: 10px; font-weight: 700; line-height: 1.45; }
+.report-completion-notice-detail { margin: 3px 0 0; font-size: 9px; font-weight: 400; line-height: 1.45; }
+
 .similarity-heading p,
 .filtered-block p,
 .top-sources-section > p,

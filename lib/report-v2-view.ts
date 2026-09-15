@@ -221,7 +221,10 @@ export type ReportV2ViewModel = {
 };
 
 // ── completion copy ──────────────────────────────────────────────────────
-function resolveCompletionView(
+// Exported so the legacy/full report views (components/report/similarity-
+// report-papers.tsx) can surface the exact same customer-safe completion
+// wording Report V2 uses, rather than duplicating this mapping.
+export function resolveCompletionView(
   completion: ReportCompletion | undefined,
   extraction: ReportExtractionDiagnostic | undefined,
   verifiedSimilarityPercent: number,
