@@ -6,6 +6,7 @@ import { webcrypto, createHash } from 'node:crypto';
 import { createClient } from '@libsql/client';
 import { applyMigrationsLibsql } from '../lib/ingest.js';
 import { resetRateForTest } from '../lib/rate-limit.js';
+import { createSession, hashToken } from '../lib/auth-session.ts';
 import * as reportsRoute from '../app/api/reports/route.ts';
 import * as reportIdRoute from '../app/api/reports/[id]/route.ts';
 import * as registerRoute from '../app/api/device-passport/register/route.ts';
@@ -139,10 +140,25 @@ test('a verified upload leaks no passport data into the owner\'s report detail o
     sql: `INSERT INTO device_passports (id, public_key_spki, algorithm, created_at, last_seen_at, revoked_at, provenance_generation) VALUES (?,?,?,?,NULL,NULL,0) ON CONFLICT(id) DO NOTHING`,
     args: [k.id, k.spkiDer, DEVICE_PASSPORT_ALGORITHM, Date.now()],
   });
+  // AUTH GATE (product requirement): a genuinely new report can no longer be
+  // created anonymously at all (see app/api/reports/route.ts's own "AUTH
+  // GATE" comment). Device Passport verification is orthogonal to auth state,
+  // so a lightweight direct session (createSession against a throwaway users
+  // row) now authenticates the upload — and the challenge must be bound to
+  // that SAME account/session (verifyDevicePassportAttestation rejects any
+  // mismatch), so it is created with the account's session too, not anonymous.
+  const userId = `dpp-account-${seq}`;
+  await client.execute({
+    sql: 'INSERT INTO users (id, email, username, password_hash) VALUES (?,?,?,?)',
+    args: [userId, `${userId}@example.test`, userId, 'x'],
+  });
+  const token = await createSession(client, userId);
+  const session = { accountId: userId, sessionTokenHash: hashToken(token) };
+
   const deviceKey = `dpp-dev-${seq}`;
   const reportId = `dpp-report-${seq}`;
   const text = 'the private document body';
-  const { challengeId, nonce } = await createDevicePassportChallenge(client, { accountId: null, sessionTokenHash: null });
+  const { challengeId, nonce } = await createDevicePassportChallenge(client, session);
   const message = buildDevicePassportSignedMessage({
     nonceBase64: nonce, challengeId, method: 'POST', path: '/api/reports',
     payloadTextSha256Hex: sha256Hex(Buffer.from(text, 'utf8')), reportId,
@@ -153,10 +169,10 @@ test('a verified upload leaks no passport data into the owner\'s report detail o
   await resetRateForTest(ip);
   const postRes = await reportsRoute.POST(new Request('http://localhost/api/reports', {
     method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-forwarded-for': ip, ...SAME_ORIGIN },
+    headers: { 'content-type': 'application/json', 'x-forwarded-for': ip, cookie: `tp_session_v1=${token}`, ...SAME_ORIGIN },
     body: JSON.stringify({
       deviceKey, id: reportId, submissionId: 'sub', title: 't.pdf', createdAt: new Date().toISOString(),
-      wordCount: 4, archiveScore: 0, scoreBand: 'Low',
+      wordCount: 4, archiveScore: 0, scoreBand: 'Low', room: 0,
       payload: { version: 11, id: 1, submissionId: 'sub', title: 't.pdf', created: new Date().toISOString(), score: 0, wordCount: 4, text },
       devicePassport: { challengeId, nonce, publicKeySpki: k.spkiB64, signature },
     }),
@@ -168,10 +184,12 @@ test('a verified upload leaks no passport data into the owner\'s report detail o
 
   const forbiddenSubstrings = [k.id, k.spkiB64, signature, nonce, challengeId, 'verified_device_passport_id', 'devicePassport', 'device_passport', 'provenance_generation'];
 
-  // detail (anonymous owner, by device key)
+  // detail — the report is now account-owned, so the owner reads it back via
+  // their own session, not an anonymous device-key lookup (which would no
+  // longer find it at all).
   await resetRateForTest(nextIp());
   const detailRes = await reportIdRoute.GET(
-    new Request(`http://localhost/api/reports/${reportId}?deviceKey=${encodeURIComponent(deviceKey)}`, { headers: { 'x-forwarded-for': nextIp() } }),
+    new Request(`http://localhost/api/reports/${reportId}`, { headers: { 'x-forwarded-for': nextIp(), cookie: `tp_session_v1=${token}` } }),
     { params: Promise.resolve({ id: reportId }) },
   );
   assert.equal(detailRes.status, 200);
@@ -180,7 +198,7 @@ test('a verified upload leaks no passport data into the owner\'s report detail o
 
   // list
   await resetRateForTest(nextIp());
-  const listRes = await reportsRoute.GET(new Request(`http://localhost/api/reports?deviceKey=${encodeURIComponent(deviceKey)}`, { headers: { 'x-forwarded-for': nextIp() } }));
+  const listRes = await reportsRoute.GET(new Request('http://localhost/api/reports', { headers: { 'x-forwarded-for': nextIp(), cookie: `tp_session_v1=${token}` } }));
   const listText = await listRes.text();
   for (const s of forbiddenSubstrings) assert.equal(listText.includes(s), false, `report list leaked: ${s.slice(0, 24)}`);
 });

@@ -100,10 +100,16 @@ async function postReport(account, { id, text, aiStatus = 'ready', aiScore = 3, 
       sources: [], repeats: [], text,
       ...(forgedPayloadFields ?? {}),
     },
+    // AUTH GATE: a genuinely new report can no longer be created
+    // anonymously at all (see app/api/reports/route.ts) — every account
+    // from signUpAccount() only ever creates exactly one first-save report
+    // (a resave of the same id, if any, ignores room), so a fixed room is
+    // safe here.
+    room: 0,
   };
   return reportsRoute.POST(new Request('http://localhost/api/reports', {
     method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-forwarded-for': account.tag + '-post' },
+    headers: { 'content-type': 'application/json', 'x-forwarded-for': account.tag + '-post', cookie: `tp_session_v1=${account.cookie}` },
     body: JSON.stringify(body),
   }));
 }
@@ -112,7 +118,7 @@ async function getReport(account, id) {
   await resetReadRateForTest(account.tag + '-get');
   const url = `http://localhost/api/reports/${id}?deviceKey=${encodeURIComponent(account.deviceKey)}`;
   return reportIdRoute.GET(
-    new Request(url, { headers: { 'x-forwarded-for': account.tag + '-get' } }),
+    new Request(url, { headers: { 'x-forwarded-for': account.tag + '-get', cookie: `tp_session_v1=${account.cookie}` } }),
     { params: Promise.resolve({ id: String(id) }) },
   );
 }

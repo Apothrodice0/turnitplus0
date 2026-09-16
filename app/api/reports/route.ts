@@ -410,6 +410,29 @@ export async function POST(request: Request) {
       const sessionUser = await getSessionUser(request, client);
       const userId = sessionUser ? sessionUser.id : null;
 
+      // AUTH GATE (product requirement, tightened): EVERY report save — a
+      // genuine first save AND a resave of an already-existing report — is
+      // an authenticated-account action only. Historical anonymous
+      // compatibility is READ-ONLY from here on: an old anonymous report
+      // (saved before this gate existed) can still be listed/fetched/
+      // reopened via its device key (this route's own GET handler below,
+      // and app/api/reports/[id]/route.ts's anonymous branch), and an
+      // authenticated account can still CLAIM one by resaving it (see the
+      // ownership-conflict check below — an existing user_id IS NULL still
+      // lets an AUTHENTICATED resave through, exactly as before) — but a
+      // caller with no session at all can never write to saved_reports
+      // again, first save or resave. Checked immediately after session
+      // resolution, before the existing-row lookup or any other DB/matcher
+      // work, so an unauthenticated write is rejected as cheaply as
+      // possible. Client-side, the ordinary product UI (app/page.tsx) never
+      // reaches this route unauthenticated at all any more — this is the
+      // server-side enforcement of that same rule, independent of any
+      // client-side gating.
+      if (!sessionUser) {
+        logReportSaveRejectedTelemetry({ reason: 'AUTH_REQUIRED', status: 401, authMode: 'anonymous' });
+        return new NextResponse(JSON.stringify({ error: 'Log in to save a report.' }), { status: 401 });
+      }
+
       // Phase E8F: (device_key, id) is saved_reports' own composite primary
       // key — already the stable identifier for "one upload," with no new
       // UUID needed. app/page.tsx's generateReport() saves every report
@@ -444,6 +467,7 @@ export async function POST(request: Request) {
         args: [deviceKey, id],
       });
       const isFirstSaveOfThisReport = existingReportRow.rows.length === 0;
+
       const parseJsonExtract = (v: unknown): unknown => {
         if (typeof v !== 'string' || v.length === 0) return null;
         try { return JSON.parse(v); } catch { return null; }
@@ -479,36 +503,36 @@ export async function POST(request: Request) {
         return typeof v === 'number' && Number.isFinite(v) ? v : null;
       })();
 
-      // Release-hardening audit finding AUTHZ-01 (corrected): (device_key,
-      // id) is the primary key, but the resave upsert (SAVE_REPORT_SQL
-      // below) overwrites every column — including payload_json —
-      // unconditionally from the request body.
+      // Release-hardening audit finding AUTHZ-01 (corrected), narrowed by the
+      // AUTH GATE above: (device_key, id) is the primary key, but the resave
+      // upsert (SAVE_REPORT_SQL below) overwrites every column — including
+      // payload_json — unconditionally from the request body.
       // COALESCE(excluded.user_id, saved_reports.user_id) only ever
       // protects against a NULL excluded.user_id clearing an existing
       // owner; it does nothing to stop the write itself, from anyone, once
       // (device_key, id) is known or guessed.
       //
-      // Policy (an earlier version of this fix was too permissive — it
-      // exempted an unauthenticated caller entirely, which still let an
-      // anonymous request overwrite an account-owned report's content
-      // without ever claiming it):
-      //   - existing user_id IS NULL: any resave (anonymous or
-      //     authenticated) proceeds under the existing device-key
-      //     behavior — an anonymous report staying claimable is the
-      //     pre-existing, intentional "claim on resave" behavior, and
-      //     COALESCE resolving to a real userId there is a legitimate
-      //     first claim, never a transfer away from an existing owner.
-      //   - existing user_id IS NOT NULL: the request must carry an
-      //     authenticated session whose id matches that owner exactly.
-      //     No session, or a different account, gets the same generic
-      //     404 — regardless of which one it is, never revealing that a
-      //     report under this exact id belongs to someone else — and the
-      //     row is never touched. This also covers the deferred Wikipedia-
+      // A caller reaching this point is always authenticated — the AUTH
+      // GATE above already rejects every unauthenticated request, first
+      // save or resave — so `userId` below is always a real account id.
+      // Policy for a resave:
+      //   - existing user_id IS NULL: the authenticated caller's resave
+      //     proceeds and CLAIMS the row (COALESCE resolves to their real
+      //     userId) — this is the intentional "claim by resave" path for a
+      //     pre-existing (legacy) anonymous report, distinct from
+      //     claimAnonymousReports' own claim-on-signup/login path, and
+      //     never a transfer away from an existing owner (there wasn't
+      //     one).
+      //   - existing user_id IS NOT NULL: the authenticated caller's
+      //     session id must match that owner exactly. A different account
+      //     gets the same generic 404 — never revealing that a report
+      //     under this exact id belongs to someone else — and the row is
+      //     never touched. This also covers the deferred Wikipedia-
       //     enrichment double-save: it normally carries the same session
       //     as the first save (same-origin fetch, cookies included by
       //     default) and passes; if the user signed out in between, the
-      //     resave now correctly rejects rather than silently succeeding
-      //     unauthenticated against someone else's report.
+      //     resave is now rejected by the AUTH GATE above before it even
+      //     reaches this check.
       // Ownership itself can therefore never be transferred away from an
       // existing non-NULL owner by any resave — the only way to pass this
       // guard for an owned report is for the caller to already BE that
@@ -518,7 +542,7 @@ export async function POST(request: Request) {
       if (!isFirstSaveOfThisReport) {
         const existingOwnerId = (existingReportRow.rows[0]?.user_id as string | null) ?? null;
         if (existingOwnerId !== null && existingOwnerId !== userId) {
-          logReportSaveRejectedTelemetry({ reason: 'OWNERSHIP_CONFLICT', status: 404, authMode: sessionUser ? 'authenticated' : 'anonymous' });
+          logReportSaveRejectedTelemetry({ reason: 'OWNERSHIP_CONFLICT', status: 404, authMode: 'authenticated' });
           return new NextResponse(JSON.stringify({ error: 'Report not found' }), { status: 404 });
         }
       }

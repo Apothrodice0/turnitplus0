@@ -23,6 +23,7 @@ import {
   ANONYMOUS_ACTOR_KEY,
   isDurableActorTrackingAvailable,
   resolveActorObservation,
+  recordDevicePassportActorUsage,
 } from '../lib/device-passport-actor-ledger.ts';
 import { backfillDevicePassportActorUsageFromSavedReports } from '../lib/device-passport-actor-usage-backfill.ts';
 import { deleteAccountData, deleteAllReportDataForAccount, invalidateSessionsAndDeleteUser } from '../lib/account-deletion.ts';
@@ -325,12 +326,26 @@ test('7: repeated observations of the SAME (passport, actor) preserve first_obse
 // 9 / 10 — anonymous sentinel row + claimAnonymousReports keeps it
 // ===========================================================================
 
+// AUTH GATE (product requirement): POST /api/reports now refuses to create a
+// genuinely NEW report at all without a session (app/api/reports/route.ts),
+// so a live anonymous upload can no longer reach postVerifiedReport's HTTP
+// path — the anonymous-sentinel ledger write it used to trigger as a side
+// effect of a real upload is now unreachable in production for any NEW
+// report. It remains reachable for an OLD, already-existing anonymous report
+// (the exact scenario claimAnonymousReports itself exists for), and the
+// ledger-writing mechanism these two tests are actually about
+// (recordDevicePassportActorUsage's own anonymous-sentinel write) is a
+// perfectly ordinary DB helper, independent of how the request that
+// triggered it got authenticated — so both tests now exercise that helper
+// directly, exactly as it already runs inside the real POST handler for a
+// genuinely legacy anonymous report, rather than through a live anonymous
+// HTTP upload that can no longer exist.
 test('9: an anonymous verified upload creates the fixed anonymous-sentinel row (is_anonymous = 1)', async () => {
   const kp = await keyPair();
   await withActorKey(HMAC_KEY, async () => {
     await registerViaRoute(kp);
-    const res = await postVerifiedReport({ deviceKey: uniq('dk'), reportId: uniq('r'), text: 'anonymous verified upload body content', kp });
-    assert.equal(res.status, 200);
+    const observation = resolveActorObservation(null);
+    await recordDevicePassportActorUsage(client, { devicePassportId: kp.id, observation, observedAt: Date.now() });
   });
   const rows = await ledgerRows(kp.id);
   assert.equal(rows.length, 1);
@@ -343,9 +358,19 @@ test('10: claimAnonymousReports moves the report to an account but NEVER removes
   const deviceKey = uniq('dk');
   const reportId = uniq('r');
   const account = uniq('acc-claim');
+  // Pre-existing (legacy) anonymous report — inserted directly via the real
+  // production SAVE_REPORT_SQL, exactly this codebase's own established
+  // pattern for a genuinely-anonymous fixture now that a live POST can no
+  // longer create one (see tests/report-write-time-finalization.test.mjs's
+  // own insertLegacyRow).
+  await client.execute({
+    sql: reportsRoute.SAVE_REPORT_SQL,
+    args: [reportId, deviceKey, 'sub-' + reportId, 'anon body that will later be claimed.pdf', new Date().toISOString(), 10, 0, 'Low', null, null, null, JSON.stringify({ note: 'legacy anonymous' }), null, null],
+  });
   await withActorKey(HMAC_KEY, async () => {
     await registerViaRoute(kp);
-    assert.equal((await postVerifiedReport({ deviceKey, reportId, text: 'anon body that will later be claimed', kp })).status, 200);
+    const observation = resolveActorObservation(null);
+    await recordDevicePassportActorUsage(client, { devicePassportId: kp.id, observation, observedAt: Date.now() });
   });
   const before = await ledgerRows(kp.id);
   assert.equal(before.length, 1);
@@ -421,9 +446,14 @@ test('13: developer / account room clearing (deleteAllReportDataForAccount) leav
 
 test('14: the corpus retention sweep leaves the actor ledger unchanged', async () => {
   const kp = await keyPair();
+  // AUTH GATE: a live anonymous upload can no longer happen (see tests 9/10's
+  // own comment) — the anonymous-sentinel ledger write this test needs is
+  // recorded directly, exactly as it already runs inside the real POST
+  // handler for a genuinely legacy anonymous report.
   await withActorKey(HMAC_KEY, async () => {
     await registerViaRoute(kp);
-    assert.equal((await postVerifiedReport({ deviceKey: uniq('dk'), reportId: uniq('r'), text: 'retention sweep invariant body content', kp })).status, 200);
+    const observation = resolveActorObservation(null);
+    await recordDevicePassportActorUsage(client, { devicePassportId: kp.id, observation, observedAt: Date.now() });
   });
   const before = await ledgerRows(kp.id);
   const totalBefore = await totalLedgerRows();
@@ -476,8 +506,12 @@ test('16: a version-0 passport stays version 0 through re-registration, later au
 
   const account = uniq('acc-legacy');
   await withActorKey(HMAC_KEY, async () => {
-    // anonymous upload -> legacy best-effort positive-evidence row
-    assert.equal((await postVerifiedReport({ deviceKey: uniq('dk'), reportId: uniq('r'), text: 'legacy passport anon upload body one', kp })).status, 200);
+    // anonymous upload -> legacy best-effort positive-evidence row. AUTH GATE:
+    // a live anonymous upload can no longer happen (see tests 9/10's own
+    // comment) — recorded directly instead, exactly as the real POST handler
+    // already does for a genuinely legacy anonymous report.
+    const anonymousObservation = resolveActorObservation(null);
+    await recordDevicePassportActorUsage(client, { devicePassportId: kp.id, observation: anonymousObservation, observedAt: Date.now() });
     // authenticated upload -> another positive-evidence row
     const token = await ensureUser(account);
     assert.equal((await postVerifiedReport({ deviceKey: uniq('dk'), reportId: uniq('r'), text: 'legacy passport authed upload body two', kp, token, accountId: account, room: 0 })).status, 200);

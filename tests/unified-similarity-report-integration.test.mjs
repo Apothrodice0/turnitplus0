@@ -6,9 +6,11 @@ import { createClient } from '@libsql/client';
 import { applyMigrationsLibsql } from '../lib/ingest.ts';
 import * as reportsRoute from '../app/api/reports/route.ts';
 import * as reportIdRoute from '../app/api/reports/[id]/route.ts';
-import { resetRateForTest } from '../lib/rate-limit.ts';
+import * as signupRoute from '../app/api/auth/signup/route.ts';
+import { resetRateForTest, resetAuthRateForTest } from '../lib/rate-limit.ts';
 import { canonicalSha256 } from '../lib/document-identity.ts';
 import { recordAcademicSearchRunDiagnostics } from '../lib/academic-search-diagnostics-repo.ts';
+import { withTestIdentity } from './helpers/test-signup.mjs';
 
 /**
  * Phase 6: proves computeUnifiedSimilarity() is actually wired into the real
@@ -98,6 +100,28 @@ function samplePayload(overrides = {}) {
   };
 }
 
+// AUTH GATE (product requirement): a genuinely new report can no longer be
+// created anonymously at all (see app/api/reports/route.ts's own "AUTH GATE"
+// comment). This file's fixtures were never actually about anonymity — they
+// use a fresh, per-test device key only as a unique namespace for exercising
+// the unified-similarity read pipeline — so postReport now signs up a fresh
+// throwaway account for that device key first, and every getReport call below
+// is updated to carry that same account's session (an anonymous device-key
+// GET would no longer find an account-owned report at all).
+async function signupFor(deviceKey, clientTag) {
+  await resetAuthRateForTest(clientTag + '-signup');
+  const email = `${clientTag}@example.test`;
+  const req = new Request('http://localhost/api/auth/signup', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-forwarded-for': clientTag + '-signup' },
+    body: JSON.stringify(withTestIdentity({ email, password: 'unified-sim-fixture-pw', username: clientTag.replace(/[^a-z0-9]/gi, '').slice(0, 24) || 'unifiedsimuser', deviceKey })),
+  });
+  const res = await signupRoute.POST(req);
+  const setCookie = res.headers.get('set-cookie');
+  const match = setCookie ? setCookie.match(/tp_session_v1=([^;]*)/) : null;
+  return match ? match[1] : null;
+}
+
 async function postReport(deviceKey, clientTag, { payloadOverrides = {} } = {}) {
   await resetRateForTest(clientTag);
   const payload = samplePayload(payloadOverrides);
@@ -107,9 +131,10 @@ async function postReport(deviceKey, clientTag, { payloadOverrides = {} } = {}) 
   if (Array.isArray(payload.externalAcademicEvidence)) {
     academicSearchDiagnosticsId = Number(await seedVerifiedAcademicDiagnostics(payload.text, payload.externalAcademicEvidence));
   }
+  const cookie = await signupFor(deviceKey, clientTag);
   const req = new Request('http://localhost/api/reports', {
     method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-forwarded-for': clientTag },
+    headers: { 'content-type': 'application/json', 'x-forwarded-for': clientTag, cookie: `tp_session_v1=${cookie}` },
     body: JSON.stringify({
       deviceKey,
       id: String(payload.id),
@@ -121,30 +146,32 @@ async function postReport(deviceKey, clientTag, { payloadOverrides = {} } = {}) 
       scoreBand: 'Low',
       aiScore: null,
       aiTone: null,
+      room: 0,
       ...(academicSearchDiagnosticsId !== undefined ? { academicSearchDiagnosticsId } : {}),
       payload,
     }),
   });
   const res = await reportsRoute.POST(req);
-  return { res, payload };
+  return { res, payload, cookie };
 }
 
-async function getReport(deviceKey, id, clientTag) {
+async function getReport(deviceKey, id, clientTag, cookie) {
   await resetRateForTest(clientTag);
-  const req = new Request(`http://localhost/api/reports/${id}?deviceKey=${encodeURIComponent(deviceKey)}`, {
-    headers: { 'x-forwarded-for': clientTag },
-  });
+  const url = cookie ? `http://localhost/api/reports/${id}` : `http://localhost/api/reports/${id}?deviceKey=${encodeURIComponent(deviceKey)}`;
+  const headers = { 'x-forwarded-for': clientTag };
+  if (cookie) headers.cookie = `tp_session_v1=${cookie}`;
+  const req = new Request(url, { headers });
   return reportIdRoute.GET(req, { params: Promise.resolve({ id: String(id) }) });
 }
 
 test('1. ARCHIVE ONLY: a real GET response attaches unifiedSimilarity reflecting archiveMatchedPositions alone', async () => {
   const deviceKey = 'device-unified-archive-only';
   const archiveMatchedPositions = Array.from({ length: 150 }, (_, i) => i); // 0..149 of 1000
-  const { payload } = await postReport(deviceKey, 'client-unified-archive-only', {
+  const { payload, cookie } = await postReport(deviceKey, 'client-unified-archive-only', {
     payloadOverrides: { archiveMatchedPositions },
   });
 
-  const res = await getReport(deviceKey, payload.id, 'client-unified-archive-only-get');
+  const res = await getReport(deviceKey, payload.id, 'client-unified-archive-only-get', cookie);
   assert.equal(res.status, 200);
   const body = (await res.json()).payload;
 
@@ -157,13 +184,13 @@ test('1. ARCHIVE ONLY: a real GET response attaches unifiedSimilarity reflecting
 
 test('2. LIVE ONLY: no archive coverage, live academic evidence alone drives unifiedSimilarity', async () => {
   const deviceKey = 'device-unified-live-only';
-  const { payload } = await postReport(deviceKey, 'client-unified-live-only', {
+  const { payload, cookie } = await postReport(deviceKey, 'client-unified-live-only', {
     payloadOverrides: {
       externalAcademicEvidence: [academicEvidence({ matchedPassages: [passage(100, 249)] })], // 150 words
     },
   });
 
-  const res = await getReport(deviceKey, payload.id, 'client-unified-live-only-get');
+  const res = await getReport(deviceKey, payload.id, 'client-unified-live-only-get', cookie);
   const body = (await res.json()).payload;
 
   assert.ok(body.unifiedSimilarity);
@@ -175,14 +202,14 @@ test('2. LIVE ONLY: no archive coverage, live academic evidence alone drives uni
 test('3. ARCHIVE + LIVE SAME PASSAGE: real GET response counts the overlapping span once, not twice', async () => {
   const deviceKey = 'device-unified-same-passage';
   const archiveMatchedPositions = Array.from({ length: 100 }, (_, i) => i); // 0..99
-  const { payload } = await postReport(deviceKey, 'client-unified-same-passage', {
+  const { payload, cookie } = await postReport(deviceKey, 'client-unified-same-passage', {
     payloadOverrides: {
       archiveMatchedPositions,
       externalAcademicEvidence: [academicEvidence({ matchedPassages: [passage(0, 99)] })], // exact same range
     },
   });
 
-  const res = await getReport(deviceKey, payload.id, 'client-unified-same-passage-get');
+  const res = await getReport(deviceKey, payload.id, 'client-unified-same-passage-get', cookie);
   const body = (await res.json()).payload;
 
   assert.equal(body.unifiedSimilarity.uniqueMatchedWords, 100, 'must not become 200 just because both sources found it');
@@ -193,14 +220,14 @@ test('3. ARCHIVE + LIVE SAME PASSAGE: real GET response counts the overlapping s
 test('4. ARCHIVE + LIVE DIFFERENT PASSAGES: real GET response combines disjoint unique coverage', async () => {
   const deviceKey = 'device-unified-different-passages';
   const archiveMatchedPositions = Array.from({ length: 100 }, (_, i) => i); // 0..99
-  const { payload } = await postReport(deviceKey, 'client-unified-different-passages', {
+  const { payload, cookie } = await postReport(deviceKey, 'client-unified-different-passages', {
     payloadOverrides: {
       archiveMatchedPositions,
       externalAcademicEvidence: [academicEvidence({ matchedPassages: [passage(500, 599)] })], // 500..599, disjoint
     },
   });
 
-  const res = await getReport(deviceKey, payload.id, 'client-unified-different-passages-get');
+  const res = await getReport(deviceKey, payload.id, 'client-unified-different-passages-get', cookie);
   const body = (await res.json()).payload;
 
   assert.equal(body.unifiedSimilarity.uniqueMatchedWords, 200);
@@ -213,12 +240,12 @@ test('4. ARCHIVE + LIVE DIFFERENT PASSAGES: real GET response combines disjoint 
 test('9. PROVIDER FAILURE (no externalAcademicEvidence field at all): report generation and GET still succeed, unifiedSimilarity falls back to archive alone', async () => {
   const deviceKey = 'device-unified-provider-failure';
   const archiveMatchedPositions = Array.from({ length: 40 }, (_, i) => i);
-  const { res: saveRes, payload } = await postReport(deviceKey, 'client-unified-provider-failure', {
+  const { res: saveRes, payload, cookie } = await postReport(deviceKey, 'client-unified-provider-failure', {
     payloadOverrides: { archiveMatchedPositions }, // no externalAcademicEvidence key at all, as if the background lookup never resolved
   });
   assert.equal(saveRes.status, 200, 'save must succeed even though no academic evidence was ever attached');
 
-  const res = await getReport(deviceKey, payload.id, 'client-unified-provider-failure-get');
+  const res = await getReport(deviceKey, payload.id, 'client-unified-provider-failure-get', cookie);
   assert.equal(res.status, 200, 'GET must succeed with no crash');
   const body = (await res.json()).payload;
 
@@ -229,10 +256,10 @@ test('9. PROVIDER FAILURE (no externalAcademicEvidence field at all): report gen
 
 test('10. NO EVIDENCE AT ALL: report with no archive positions and no academic evidence still completes with a well-formed zero unifiedSimilarity', async () => {
   const deviceKey = 'device-unified-no-evidence';
-  const { res: saveRes, payload } = await postReport(deviceKey, 'client-unified-no-evidence');
+  const { res: saveRes, payload, cookie } = await postReport(deviceKey, 'client-unified-no-evidence');
   assert.equal(saveRes.status, 200);
 
-  const res = await getReport(deviceKey, payload.id, 'client-unified-no-evidence-get');
+  const res = await getReport(deviceKey, payload.id, 'client-unified-no-evidence-get', cookie);
   assert.equal(res.status, 200);
   const body = (await res.json()).payload;
 
@@ -244,16 +271,16 @@ test('10. NO EVIDENCE AT ALL: report with no archive positions and no academic e
 test('PERSISTENCE: a second GET ("refresh"/reopen) recomputes the identical unifiedSimilarity result from the same persisted inputs', async () => {
   const deviceKey = 'device-unified-persistence';
   const archiveMatchedPositions = Array.from({ length: 75 }, (_, i) => i);
-  const { payload } = await postReport(deviceKey, 'client-unified-persistence', {
+  const { payload, cookie } = await postReport(deviceKey, 'client-unified-persistence', {
     payloadOverrides: {
       archiveMatchedPositions,
       externalAcademicEvidence: [academicEvidence({ matchedPassages: [passage(300, 349)] })],
     },
   });
 
-  const firstRes = await getReport(deviceKey, payload.id, 'client-unified-persistence-get-1');
+  const firstRes = await getReport(deviceKey, payload.id, 'client-unified-persistence-get-1', cookie);
   const firstBody = (await firstRes.json()).payload;
-  const secondRes = await getReport(deviceKey, payload.id, 'client-unified-persistence-get-2');
+  const secondRes = await getReport(deviceKey, payload.id, 'client-unified-persistence-get-2', cookie);
   const secondBody = (await secondRes.json()).payload;
 
   assert.deepEqual(firstBody.unifiedSimilarity, secondBody.unifiedSimilarity, 'refreshing/reopening the report must yield the identical unified result');
@@ -276,9 +303,13 @@ test('OLD REPORT: a payload with no archiveMatchedPositions field at all (pre-Ph
     // Deliberately no archiveMatchedPositions, no externalAcademicEvidence.
   };
   await resetRateForTest('client-unified-legacy-report');
+  // AUTH GATE: a genuinely new report can no longer be created anonymously
+  // at all — this fixture is about a legacy PAYLOAD SHAPE, not anonymity, so
+  // it now signs up a fresh throwaway account instead.
+  const cookie = await signupFor(deviceKey, 'client-unified-legacy-report');
   const req = new Request('http://localhost/api/reports', {
     method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-forwarded-for': 'client-unified-legacy-report' },
+    headers: { 'content-type': 'application/json', 'x-forwarded-for': 'client-unified-legacy-report', cookie: `tp_session_v1=${cookie}` },
     body: JSON.stringify({
       deviceKey,
       id: String(legacyPayload.id),
@@ -290,13 +321,14 @@ test('OLD REPORT: a payload with no archiveMatchedPositions field at all (pre-Ph
       scoreBand: 'Low',
       aiScore: null,
       aiTone: null,
+      room: 0,
       payload: legacyPayload,
     }),
   });
   const saveRes = await reportsRoute.POST(req);
   assert.equal(saveRes.status, 200);
 
-  const res = await getReport(deviceKey, legacyPayload.id, 'client-unified-legacy-report-get');
+  const res = await getReport(deviceKey, legacyPayload.id, 'client-unified-legacy-report-get', cookie);
   assert.equal(res.status, 200, 'a legacy report missing archiveMatchedPositions must still load successfully');
   const body = (await res.json()).payload;
 
@@ -308,7 +340,7 @@ test('OLD REPORT: a payload with no archiveMatchedPositions field at all (pre-Ph
 test('SCORE ISOLATION: presence of unifiedSimilarity never changes score/archiveScore themselves', async () => {
   const deviceKey = 'device-unified-score-isolation';
   const archiveMatchedPositions = Array.from({ length: 300 }, (_, i) => i); // would push unifiedScore well above archiveScore's own 24 if it leaked in
-  const { payload } = await postReport(deviceKey, 'client-unified-score-isolation', {
+  const { payload, cookie } = await postReport(deviceKey, 'client-unified-score-isolation', {
     payloadOverrides: {
       archiveMatchedPositions,
       externalAcademicEvidence: [academicEvidence({ matchedPassages: [passage(700, 799)] })],
@@ -317,7 +349,7 @@ test('SCORE ISOLATION: presence of unifiedSimilarity never changes score/archive
     },
   });
 
-  const res = await getReport(deviceKey, payload.id, 'client-unified-score-isolation-get');
+  const res = await getReport(deviceKey, payload.id, 'client-unified-score-isolation-get', cookie);
   const body = (await res.json()).payload;
 
   assert.equal(body.score, 24, 'score must stay exactly what was saved, regardless of unifiedSimilarity');

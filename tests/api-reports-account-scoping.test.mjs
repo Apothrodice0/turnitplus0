@@ -81,6 +81,21 @@ async function getReport(id, { deviceKey, cookie } = {}) {
   return reportIdRoute.GET(req, { params: Promise.resolve({ id }) });
 }
 
+/** Directly INSERTs a pre-existing ("old") anonymous saved_reports row, bypassing the POST route entirely — a POST can no longer create a first-ever anonymous row (see app/api/reports/route.ts's own "AUTH GATE" comment), so a genuinely legacy anonymous fixture is seeded this way, matching this codebase's own established pattern (see tests/report-write-time-finalization.test.mjs's own insertLegacyRow). Every scenario below is about what happens to an EXISTING anonymous report (claim-on-signup/login, resave rules, ownership) — none of them are about how that report first came to exist, so this substitution changes nothing about what each scenario proves. */
+async function insertLegacyAnonymousReport(deviceKey, { id, title = 'scoping.pdf' } = {}) {
+  const reportId = id ?? nextId();
+  const raw = createClient({ url: `file:${dbFile}` });
+  try {
+    await raw.execute({
+      sql: reportsRoute.SAVE_REPORT_SQL,
+      args: [reportId, deviceKey, 'sub-' + reportId, title, new Date().toISOString(), 10, 0, 'Low', null, null, null, JSON.stringify({ note: title }), null, null],
+    });
+  } finally {
+    raw.close();
+  }
+  return { id: reportId };
+}
+
 async function signup(email, deviceKey) {
   await resetAuthRateForTest('scoping-signup');
   const req = new Request('http://localhost/api/auth/signup', {
@@ -103,14 +118,18 @@ async function login(email, deviceKey) {
   return { res, cookie: extractCookie(res) };
 }
 
-// Scenario A: signup claims a device's existing anonymous reports, and the
-// leak-fix regression — the raw device_key path must stop seeing them.
+// Scenario A: signup claims a device's existing (pre-existing/legacy)
+// anonymous report, and the leak-fix regression — the raw device_key path
+// must stop seeing it. AUTH GATE: a live anonymous POST can no longer create
+// a first-ever report at all, so this is seeded as an old, already-existing
+// anonymous row instead — exactly the scenario claimAnonymousReports itself
+// exists for.
 const deviceA = 'scoping-device-A';
-const { id: reportA } = await postReport(deviceA);
+const { id: reportA } = await insertLegacyAnonymousReport(deviceA);
 {
   const anonBefore = await listReports({ deviceKey: deviceA });
   const anonBeforeBody = await anonBefore.json();
-  assert.equal(anonBeforeBody.reports.length, 1, 'anonymous device A should see its own report before signup');
+  assert.equal(anonBeforeBody.reports.length, 1, 'anonymous device A should see its own pre-existing report before signup');
 
   const { res: signupRes, cookie: cookieA } = await signup('scope-a@example.com', deviceA);
   assert.equal(signupRes.status, 201);
@@ -135,22 +154,23 @@ const { id: reportA } = await postReport(deviceA);
 
   // Release-hardening audit finding AUTHZ-01 (corrected), scenario D: an
   // ANONYMOUS re-save of an already-claimed (owned) report must now be
-  // REJECTED outright, never silently accepted. An earlier version of this
-  // fix permitted this specific case (to preserve a since-recognized-as-
-  // wrong assumption about the Wikipedia-enrichment double-save), which
-  // still let an unauthenticated caller overwrite an account-owned
-  // report's content without ever claiming it — not acceptable. The
-  // legitimate double-save flow carries the SAME session as the first save
-  // (same-origin fetch, cookies included by default) and is covered
-  // separately below; if a user genuinely signs out between the two saves,
-  // rejecting the second one is the correct, safe behavior, not a bug.
+  // REJECTED outright, never silently accepted. AUTH GATE (further
+  // tightened): a caller with no session at all can no longer write to
+  // saved_reports at all — first save or resave — so this now fails at the
+  // AUTH GATE itself (401), before the ownership-conflict check below is
+  // ever reached, never revealing whether this exact (device_key, id) is
+  // claimed, unclaimed, or doesn't exist. The legitimate double-save flow
+  // carries the SAME session as the first save (same-origin fetch, cookies
+  // included by default) and is covered separately below; if a user
+  // genuinely signs out between the two saves, rejecting the second one is
+  // the correct, safe behavior, not a bug.
   const beforeAnonResave = await getReport(reportA, { cookie: cookieA });
   const beforeAnonResaveBody = await beforeAnonResave.json();
 
   const { res: anonResaveRes } = await postReport(deviceA, { id: reportA, title: 'ANON-OVERWRITE-ATTEMPT' });
-  assert.equal(anonResaveRes.status, 404, 'an anonymous resave of an account-owned report must be rejected, not silently accepted');
+  assert.equal(anonResaveRes.status, 401, 'an anonymous resave of an account-owned report must be rejected by the auth gate, not silently accepted');
   const anonResaveBody = await anonResaveRes.json();
-  assert.equal(anonResaveBody.error, 'Report not found', 'the rejection must not reveal that this report belongs to someone else');
+  assert.equal(anonResaveBody.error, 'Log in to save a report.', 'the rejection is the same generic auth-required response as an anonymous first save — it never reveals anything about this report');
 
   const afterAnonResave = await getReport(reportA, { cookie: cookieA });
   const afterAnonResaveBody = await afterAnonResave.json();
@@ -228,7 +248,7 @@ const { id: reportA } = await postReport(deviceA);
   // Scenario B: a second device belonging to the same account, claimed via
   // login rather than signup, and the resulting cross-device list.
   const deviceB = 'scoping-device-B';
-  const { id: reportB } = await postReport(deviceB);
+  const { id: reportB } = await insertLegacyAnonymousReport(deviceB);
   const anonBBefore = await listReports({ deviceKey: deviceB });
   assert.equal((await anonBBefore.json()).reports.length, 1);
 
@@ -251,26 +271,50 @@ const { id: reportA } = await postReport(deviceA);
 // any of the above.
 {
   const deviceC = 'scoping-device-C';
-  const { id: reportC } = await postReport(deviceC);
+  const { id: reportC } = await insertLegacyAnonymousReport(deviceC);
   const listC = await listReports({ deviceKey: deviceC });
   const bodyC = await listC.json();
   assert.equal(bodyC.reports.length, 1);
   assert.equal(bodyC.reports[0].id, reportC);
   console.log('scenario C (never-authenticated device unaffected) passed');
 
-  // Release-hardening audit finding AUTHZ-01, scenario G: a report whose
-  // existing owner is genuinely NULL (never claimed by anyone) must keep
-  // following its existing, legitimate anonymous device-key resave flow —
-  // the ownership guard only ever applies once an owner exists.
+  // Release-hardening audit finding AUTHZ-01, scenario G — AUTH GATE
+  // (further tightened): a report whose existing owner is genuinely NULL
+  // (never claimed by anyone) is READ-ONLY for an anonymous caller now —
+  // the ownership guard used to let an anonymous resave through untouched
+  // (never claiming it, just updating content), but that WRITE path is
+  // exactly what this correction removes. Historical anonymous
+  // compatibility from here on is read/reopen only.
   const { res: anonResaveOwnResRes } = await postReport(deviceC, { id: reportC, title: 'scoping-c-updated.pdf' });
-  assert.equal(anonResaveOwnResRes.status, 200, 'an anonymous resave of a never-claimed (user_id IS NULL) report must still succeed');
+  assert.equal(anonResaveOwnResRes.status, 401, 'an anonymous resave of a never-claimed (user_id IS NULL) report must now be rejected — anonymous writes are gone entirely');
+  const anonResaveOwnResBody = await anonResaveOwnResRes.json();
+  assert.equal(anonResaveOwnResBody.error, 'Log in to save a report.');
 
-  const listCAfterResave = await listReports({ deviceKey: deviceC });
-  const bodyCAfterResave = await listCAfterResave.json();
-  assert.equal(bodyCAfterResave.reports.length, 1, 'still exactly one report, updated in place, not duplicated');
-  assert.equal(bodyCAfterResave.reports[0].id, reportC);
-  assert.equal(bodyCAfterResave.reports[0].title, 'scoping-c-updated.pdf', 'the anonymous resave of an unclaimed report must actually update the content');
-  console.log('scenario G (an anonymous resave of a never-claimed report still follows the existing legitimate flow) passed');
+  const listCAfterRejectedResave = await listReports({ deviceKey: deviceC });
+  const bodyCAfterRejectedResave = await listCAfterRejectedResave.json();
+  assert.equal(bodyCAfterRejectedResave.reports.length, 1, 'still exactly one report, completely untouched by the rejected write');
+  assert.equal(bodyCAfterRejectedResave.reports[0].id, reportC);
+  assert.equal(bodyCAfterRejectedResave.reports[0].title, 'scoping.pdf', 'the rejected anonymous resave must never have changed the content — still the original legacy title');
+  console.log('scenario G (an anonymous resave of a never-claimed report is now rejected, content untouched) passed');
+
+  // Scenario H: the ONLY way left to touch that same never-claimed legacy
+  // row is an authenticated resave, which legitimately CLAIMS it (the
+  // "claim by resave" path — distinct from claim-on-signup/login in
+  // scenarios A/B, and still fully supported, per app/api/reports/route.ts's
+  // own ownership-conflict comment: existing user_id IS NULL lets an
+  // AUTHENTICATED resave through and COALESCE assigns real ownership).
+  const { cookie: cookieH } = await signup('scope-h@example.com', 'scoping-device-h');
+  const { res: authedClaimResaveRes } = await postReport(deviceC, { id: reportC, title: 'scoping-c-claimed-by-resave.pdf', cookie: cookieH });
+  assert.equal(authedClaimResaveRes.status, 200, 'an authenticated resave of a never-claimed legacy row must still succeed and claim it');
+
+  const claimedRow = await getReport(reportC, { cookie: cookieH });
+  assert.equal(claimedRow.status, 200, 'the authenticated claimant can now read the row back through their own session');
+  const claimedBody = await claimedRow.json();
+  assert.equal(claimedBody.payload.note, 'scoping-c-claimed-by-resave.pdf', 'the authenticated resave actually updated the content');
+
+  const anonListAfterClaimByResave = await listReports({ deviceKey: deviceC });
+  assert.equal((await anonListAfterClaimByResave.json()).reports.length, 0, 'once claimed by resave, the report must no longer be visible via the raw anonymous device_key path');
+  console.log('scenario H (an authenticated resave still legitimately claims a never-claimed legacy row) passed');
 }
 
 for (const suffix of ['', '-wal', '-shm']) {

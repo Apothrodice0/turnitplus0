@@ -6,6 +6,7 @@ import { createHash, verify as nodeVerify, createPublicKey } from 'node:crypto';
 import { createClient } from '@libsql/client';
 import { applyMigrationsLibsql } from '../lib/ingest.js';
 import { resetRateForTest } from '../lib/rate-limit.js';
+import { createSession, hashToken } from '../lib/auth-session.ts';
 import * as registerRoute from '../app/api/device-passport/register/route.ts';
 import * as challengeRoute from '../app/api/device-passport/challenge/route.ts';
 import * as reportsRoute from '../app/api/reports/route.ts';
@@ -56,6 +57,35 @@ await dbClient.execute('PRAGMA foreign_keys = ON');
 await applyMigrationsLibsql(dbClient, drizzleDir);
 
 const sha256Hex = (buf) => createHash('sha256').update(buf).digest('hex');
+
+// AUTH GATE (product requirement): a genuinely new report can no longer be
+// created anonymously at all (see app/api/reports/route.ts's own "AUTH GATE"
+// comment). saveReportRemote (the real client function under test here)
+// builds its own fetch call with no session concept at all, and the mocked
+// fetch layer below (installRouteBackedFetch/installScriptedFetch) never
+// forwards cookies — so any test that routes a report POST through to the
+// REAL reportsRoute.POST handler now authenticates it directly: a lightweight
+// session (createSession against a throwaway users row) whose cookie is
+// injected into the reconstructed Request, with `room` added to the body if
+// the client didn't send one (saveReportRemote has no session, so it never
+// does).
+let devicePassportClientAccountSeq = 0;
+async function createTestAccount() {
+  devicePassportClientAccountSeq += 1;
+  const userId = `dpc-account-${devicePassportClientAccountSeq}`;
+  await dbClient.execute({
+    sql: 'INSERT INTO users (id, email, username, password_hash) VALUES (?,?,?,?)',
+    args: [userId, `${userId}@example.test`, userId, 'x'],
+  });
+  const token = await createSession(dbClient, userId);
+  return { userId, token, session: { accountId: userId, sessionTokenHash: hashToken(token) } };
+}
+
+function withRoom(bodyJson, room = 0) {
+  const parsed = JSON.parse(bodyJson);
+  if (parsed.room === undefined) parsed.room = room;
+  return JSON.stringify(parsed);
+}
 
 // ---------------------------------------------------------------------------
 // Test doubles
@@ -158,8 +188,19 @@ function stubWindowLocalStorage() {
   return () => { globalThis.window = original; };
 }
 
-/** fetch stub that routes device-passport calls to the REAL Next route handlers against the test DB. */
-function installRouteBackedFetch({ onReports } = {}) {
+/**
+ * fetch stub that routes device-passport calls to the REAL Next route
+ * handlers against the test DB.
+ *
+ * AUTH GATE: `authCookie` (a raw session token) is optional and, when given,
+ * is attached to the register/challenge calls too — the challenge MUST be
+ * bound to the exact same account/session the eventual /api/reports POST
+ * will carry (verifyDevicePassportAttestation rejects any mismatch, see
+ * lib/device-passport-server.ts), so a test that authenticates its POST via
+ * a custom `onReports` must pass the SAME cookie here or the challenge stays
+ * anonymously-bound and verification silently no-ops.
+ */
+function installRouteBackedFetch({ onReports, authCookie } = {}) {
   const original = globalThis.fetch;
   const calls = { register: [], challenge: [], reports: [] };
   let ipSeq = 0;
@@ -168,6 +209,7 @@ function installRouteBackedFetch({ onReports } = {}) {
     const ip = `dpc-${++ipSeq}`;
     await resetRateForTest(ip);
     const headers = { 'content-type': 'application/json', origin: 'http://localhost', host: 'localhost', 'x-forwarded-for': ip };
+    if (authCookie) headers.cookie = `tp_session_v1=${authCookie}`;
     if (u.endsWith('/api/device-passport/register')) {
       calls.register.push({ init });
       return registerRoute.POST(new Request('http://localhost/api/device-passport/register', { method: 'POST', headers, body: init.body }));
@@ -808,14 +850,16 @@ test('20d: a verified upload leaks no passport data back into the ordinary repor
   __resetDevicePassportStateForTests();
   __setDevicePassportStoreForTests(makeFakeStore());
   const restoreWindow = stubWindowLocalStorage();
+  const account = await createTestAccount();
   const { calls, restore } = installRouteBackedFetch({
+    authCookie: account.token,
     onReports: async (init) => {
       const ip = `dpc-report-${Math.random().toString(36).slice(2)}`;
       await resetRateForTest(ip);
       return reportsRoute.POST(new Request('http://localhost/api/reports', {
         method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-forwarded-for': ip, origin: 'http://localhost', host: 'localhost' },
-        body: init.body,
+        headers: { 'content-type': 'application/json', 'x-forwarded-for': ip, origin: 'http://localhost', host: 'localhost', cookie: `tp_session_v1=${account.token}` },
+        body: withRoom(init.body),
       }));
     },
   });
@@ -839,7 +883,10 @@ test('20d: a verified upload leaks no passport data back into the ordinary repor
 
     const ip1 = `dpc-list-${Math.random().toString(36).slice(2)}`;
     await resetRateForTest(ip1);
-    const listRes = await reportsRoute.GET(new Request(`http://localhost/api/reports?deviceKey=${encodeURIComponent(realDeviceKey)}`, { headers: { 'x-forwarded-for': ip1 } }));
+    // AUTH GATE: the report is now account-owned, so listing it back uses
+    // that SAME account's session — an anonymous device-key list would no
+    // longer include it at all.
+    const listRes = await reportsRoute.GET(new Request('http://localhost/api/reports', { headers: { 'x-forwarded-for': ip1, cookie: `tp_session_v1=${account.token}` } }));
     const listText = await listRes.text();
     for (const s of forbidden) assert.equal(listText.includes(s), false, `report list leaked: ${s.slice(0, 20)}`);
   } finally {
@@ -897,15 +944,17 @@ test('R6: a lost first-POST response (server actually saved it) — the retry is
   __resetDevicePassportStateForTests();
   __setDevicePassportStoreForTests(makeFakeStore());
   const restoreWindow = stubWindowLocalStorage();
+  const account = await createTestAccount();
   let dropNextReportsResponse = true;
   const { calls, restore } = installRouteBackedFetch({
+    authCookie: account.token,
     onReports: async (init) => {
       const ip = `dpc-r6-${Math.random().toString(36).slice(2)}`;
       await resetRateForTest(ip);
       const res = await reportsRoute.POST(new Request('http://localhost/api/reports', {
         method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-forwarded-for': ip, origin: 'http://localhost', host: 'localhost' },
-        body: init.body,
+        headers: { 'content-type': 'application/json', 'x-forwarded-for': ip, origin: 'http://localhost', host: 'localhost', cookie: `tp_session_v1=${account.token}` },
+        body: withRoom(init.body),
       }));
       if (dropNextReportsResponse) { dropNextReportsResponse = false; throw new TypeError('Failed to fetch'); } // response lost after the server processed it
       return res;

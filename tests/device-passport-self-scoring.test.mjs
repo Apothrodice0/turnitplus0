@@ -37,6 +37,7 @@ import {
 import * as reportsRoute from "../app/api/reports/route.ts";
 import * as reportIdRoute from "../app/api/reports/[id]/route.ts";
 import { resetRateForTest, resetReadRateForTest } from "../lib/rate-limit.ts";
+import { createSession, hashToken } from "../lib/auth-session.ts";
 import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
 
 /**
@@ -574,12 +575,32 @@ async function keyPair() {
   return { kp, spkiDer, spkiB64: spkiDer.toString("base64"), id: derivePassportId(spkiDer) };
 }
 
-async function postReportWithPassport({ deviceKey, reportId, text, k }) {
+// AUTH GATE (product requirement): a genuinely new report can no longer be
+// created anonymously at all (see app/api/reports/route.ts's own "AUTH GATE"
+// comment). The same-device SELF-scoring rule this file tests is orthogonal
+// to the CURRENT upload's auth state (it fires off the PASSPORT matching a
+// prior corpus backing, not off anonymous-vs-authenticated) — so a
+// lightweight direct session (createSession against a throwaway users row,
+// not a full signup flow) now authenticates every POST below.
+let selfScoringAccountSeq = 0;
+async function createTestAccount() {
+  selfScoringAccountSeq += 1;
+  const userId = `dps-account-${selfScoringAccountSeq}`;
+  await client.execute({
+    sql: "INSERT INTO users (id, email, username, password_hash) VALUES (?,?,?,?)",
+    args: [userId, `${userId}@example.test`, userId, "x"],
+  });
+  const token = await createSession(client, userId);
+  return { userId, token, session: { accountId: userId, sessionTokenHash: hashToken(token) } };
+}
+
+async function postReportWithPassport({ deviceKey, reportId, text, k, account }) {
   await client.execute({
     sql: `INSERT INTO device_passports (id, public_key_spki, algorithm, created_at, provenance_generation) VALUES (?,?,?,?,0) ON CONFLICT(id) DO NOTHING`,
     args: [k.id, k.spkiDer, DEVICE_PASSPORT_ALGORITHM, Date.now()],
   });
-  const { challengeId, nonce } = await createDevicePassportChallenge(client, { accountId: null, sessionTokenHash: null });
+  const resolvedAccount = account ?? await createTestAccount();
+  const { challengeId, nonce } = await createDevicePassportChallenge(client, resolvedAccount.session);
   const message = buildDevicePassportSignedMessage({
     nonceBase64: nonce, challengeId, method: "POST", path: "/api/reports",
     payloadTextSha256Hex: sha256Hex(Buffer.from(text, "utf8")), reportId,
@@ -587,16 +608,18 @@ async function postReportWithPassport({ deviceKey, reportId, text, k }) {
   const signature = Buffer.from(await webcrypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, k.kp.privateKey, message)).toString("base64");
   const ip = nextIp();
   await resetRateForTest(ip);
-  return reportsRoute.POST(new Request("http://localhost/api/reports", {
+  const res = await reportsRoute.POST(new Request("http://localhost/api/reports", {
     method: "POST",
-    headers: { "content-type": "application/json", "x-forwarded-for": ip, ...SAME_ORIGIN },
+    headers: { "content-type": "application/json", "x-forwarded-for": ip, cookie: `tp_session_v1=${resolvedAccount.token}`, ...SAME_ORIGIN },
     body: JSON.stringify({
       deviceKey, id: reportId, submissionId: "sub", title: "t.pdf", createdAt: new Date().toISOString(),
       wordCount: tokens(canonicalizeText(text)).length, archiveScore: 0, scoreBand: "Low",
+      room: 0,
       payload: { version: 11, id: 1, submissionId: "sub", title: "t.pdf", created: new Date().toISOString(), score: 0, archiveScore: 0, wordCount: tokens(canonicalizeText(text)).length, text },
       devicePassport: { challengeId, nonce, publicKeySpki: k.spkiB64, signature },
     }),
   }));
+  return { res, account: resolvedAccount };
 }
 
 async function persistedUnifiedScore(deviceKey, reportId) {
@@ -611,7 +634,7 @@ test("11: the FIRST-SAVE POST already applies the rule — no second POST or GET
   await seedExactCorpusSource(text, { backingPassportId: k.id });
 
   await withSelfScoring("true", async () => {
-    const res = await postReportWithPassport({ deviceKey, reportId, text, k });
+    const { res } = await postReportWithPassport({ deviceKey, reportId, text, k });
     assert.equal(res.status, 200);
     // exactly ONE POST has happened; no GET
     assert.equal(await persistedUnifiedScore(deviceKey, reportId), 0, "the first persisted unified score is already 0 — the passport verified in THIS request was available to write-time finalization");
@@ -627,7 +650,7 @@ test("11b: flag OFF — the same first-save POST persists the current 100% (regr
   await seedExactCorpusSource(text, { backingPassportId: k.id });
 
   await withSelfScoring(undefined, async () => {
-    const res = await postReportWithPassport({ deviceKey, reportId, text, k });
+    const { res } = await postReportWithPassport({ deviceKey, reportId, text, k });
     assert.equal(res.status, 200);
     assert.equal(await persistedUnifiedScore(deviceKey, reportId), 100, "flag OFF: current behaviour — an exact same-device corpus match still scores 100%");
   });
@@ -646,17 +669,23 @@ test("12: a Device Passport verification failure (bad signature) never triggers 
     sql: `INSERT INTO device_passports (id, public_key_spki, algorithm, created_at, provenance_generation) VALUES (?,?,?,?,0) ON CONFLICT(id) DO NOTHING`,
     args: [k.id, k.spkiDer, DEVICE_PASSPORT_ALGORITHM, Date.now()],
   });
-  const { challengeId, nonce } = await createDevicePassportChallenge(client, { accountId: null, sessionTokenHash: null });
+  // AUTH GATE: a genuinely new report can no longer be created anonymously
+  // at all — this scenario is about a BAD SIGNATURE failing verification
+  // (fail-safe, upload still succeeds), which is unaffected by using a real
+  // account/session for both the challenge binding and the POST itself.
+  const account = await createTestAccount();
+  const { challengeId, nonce } = await createDevicePassportChallenge(client, account.session);
 
   await withSelfScoring("true", async () => {
     const ip = nextIp();
     await resetRateForTest(ip);
     const res = await reportsRoute.POST(new Request("http://localhost/api/reports", {
       method: "POST",
-      headers: { "content-type": "application/json", "x-forwarded-for": ip, ...SAME_ORIGIN },
+      headers: { "content-type": "application/json", "x-forwarded-for": ip, cookie: `tp_session_v1=${account.token}`, ...SAME_ORIGIN },
       body: JSON.stringify({
         deviceKey, id: reportId, submissionId: "sub", title: "t.pdf", createdAt: new Date().toISOString(),
         wordCount: tokens(canonicalizeText(text)).length, archiveScore: 0, scoreBand: "Low",
+        room: 0,
         payload: { version: 11, id: 1, submissionId: "sub", title: "t.pdf", created: new Date().toISOString(), score: 0, archiveScore: 0, wordCount: tokens(canonicalizeText(text)).length, text },
         devicePassport: { challengeId, nonce, publicKeySpki: k.spkiB64, signature: Buffer.alloc(64).toString("base64") /* invalid */ },
       }),
@@ -680,13 +709,17 @@ test("13: with the rule active and the score downgraded to 0, the ordinary GET r
   await seedExactCorpusSource(text, { backingPassportId: k.id, sourceAccountId: srcAccount });
 
   await withSelfScoring("true", async () => {
-    const postRes = await postReportWithPassport({ deviceKey, reportId, text, k });
+    const { res: postRes, account } = await postReportWithPassport({ deviceKey, reportId, text, k });
     assert.equal(postRes.status, 200);
     assert.equal(await persistedUnifiedScore(deviceKey, reportId), 0, "sanity: the rule fired");
 
+    // AUTH GATE: the report is now account-owned, so reading it back as the
+    // "ordinary viewer" uses that SAME account's own session (a non-admin
+    // account reading its own report) rather than an anonymous device-key
+    // GET, which would no longer find it at all.
     await resetReadRateForTest(nextIp());
     const getRes = await reportIdRoute.GET(
-      new Request(`http://localhost/api/reports/${reportId}?deviceKey=${encodeURIComponent(deviceKey)}`, { headers: { "x-forwarded-for": nextIp() } }),
+      new Request(`http://localhost/api/reports/${reportId}`, { headers: { "x-forwarded-for": nextIp(), cookie: `tp_session_v1=${account.token}` } }),
       { params: Promise.resolve({ id: reportId }) },
     );
     assert.equal(getRes.status, 200);

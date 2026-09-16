@@ -167,9 +167,30 @@ async function logout(cookie) {
 
 // 6. An anonymous device's reports must not become attributed to an
 // unrelated account that never touched that device.
+//
+// AUTH GATE (product requirement): a genuinely NEW anonymous report can no
+// longer be created through the POST route (see
+// tests/report-creation-auth-required.test.mjs for that coverage) — this
+// fixture is inserted directly, exactly the way this codebase's other
+// "pre-existing legacy row" fixtures are (see
+// tests/report-write-time-finalization.test.mjs's own insertLegacyRow), to
+// keep proving the real invariant this block is about: an old, already-
+// persisted anonymous row must never leak to an unrelated account. Bypassing
+// the route here is deliberate, not an oversight — a POST through it can no
+// longer produce a first-ever anonymous row at all.
 {
   const anonymousDevice = 'lifecycle-device-anonymous';
-  const { id: anonymousReport } = await postReport(anonymousDevice, { title: 'anonymous-only.pdf' });
+  const anonymousReport = nextId();
+  const legacyClient = createClient({ url: `file:${dbFile}` });
+  await legacyClient.execute({
+    sql: reportsRoute.SAVE_REPORT_SQL,
+    args: [
+      anonymousReport, anonymousDevice, 'sub-' + anonymousReport, 'anonymous-only.pdf',
+      new Date().toISOString(), 10, 0, 'Low', null, null, null,
+      JSON.stringify({ note: 'anonymous-only.pdf' }), null, null,
+    ],
+  });
+  legacyClient.close();
 
   const { cookie: cookieCarol } = await signup('lifecycle-carol@example.com', 'lifecycle-device-carol');
   const carolList = await listReports({ cookie: cookieCarol });

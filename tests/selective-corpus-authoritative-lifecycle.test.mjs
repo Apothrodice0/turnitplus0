@@ -133,19 +133,40 @@ async function postReport(account, { id, text, aiStatus = 'ready', aiScore = 3, 
       // would. Absent (undefined) for every ordinary call site above.
       ...(forgedPayloadFields ?? {}),
     },
+    // AUTH GATE: a genuinely new report can no longer be created anonymously
+    // at all (see app/api/reports/route.ts). Every real `signUpAccount()`
+    // account here only ever creates exactly one first-save id (a resave of
+    // the same id, if any, ignores room), so a fixed room is safe; the
+    // fake `{ deviceKey, cookie: null, tag }` fixtures used elsewhere in this
+    // file are always a RESAVE of a row already seeded directly via
+    // seedReport/seedPendingReport (isFirstSaveOfThisReport is false there),
+    // which the auth gate never touches — so `room` is simply ignored for
+    // them, exactly as it already is for any other anonymous resave.
+    room: 0,
   };
   return reportsRoute.POST(new Request('http://localhost/api/reports', {
     method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-forwarded-for': account.tag + '-post' },
+    headers: {
+      'content-type': 'application/json',
+      'x-forwarded-for': account.tag + '-post',
+      ...(account.cookie ? { cookie: `tp_session_v1=${account.cookie}` } : {}),
+    },
     body: JSON.stringify(body),
   }));
 }
 
 async function getReport(account, id) {
   await resetReadRateForTest(account.tag + '-get');
-  const url = `http://localhost/api/reports/${id}?deviceKey=${encodeURIComponent(account.deviceKey)}`;
+  const url = account.cookie
+    ? `http://localhost/api/reports/${id}`
+    : `http://localhost/api/reports/${id}?deviceKey=${encodeURIComponent(account.deviceKey)}`;
   return reportIdRoute.GET(
-    new Request(url, { headers: { 'x-forwarded-for': account.tag + '-get' } }),
+    new Request(url, {
+      headers: {
+        'x-forwarded-for': account.tag + '-get',
+        ...(account.cookie ? { cookie: `tp_session_v1=${account.cookie}` } : {}),
+      },
+    }),
     { params: Promise.resolve({ id: String(id) }) },
   );
 }
@@ -432,7 +453,14 @@ test('23. resave after completed preserves the completed marker (and its score)'
     reportDeviceKey: deviceKey, reportId: id, accountId: null, shadowResult: completedShadowResult([]),
   });
   assert.equal(fin.outcome, 'finalized');
-  const account = { deviceKey, cookie: null, tag: uniq('sc-auth-resave-23') };
+  // AUTH GATE (tightened): a resave — like a first save — now requires a
+  // session; an anonymous resave of this pre-existing (never-claimed)
+  // legacy row is no longer possible at all. This resave is instead the
+  // real "claim by resave" path (a fresh account, authenticated, resaving
+  // the exact pre-existing device_key/id) — orthogonal to what this test
+  // actually proves (a terminal marker survives an ordinary resave).
+  const signedUp = await signUpAccount();
+  const account = { ...signedUp, deviceKey, tag: uniq('sc-auth-resave-23') };
 
   assert.equal((await postReport(account, { id, text: 'Authoritative fixture body text for a seeded lifecycle test.', aiStatus: 'ready', aiScore: 2 })).status, 200);
 
@@ -448,7 +476,10 @@ test('24. resave after incomplete preserves the incomplete marker', async () => 
     reportDeviceKey: deviceKey, reportId: id, accountId: null, shadowResult: timeoutShadowResult(),
   });
   assert.equal(fin.outcome, 'finalized');
-  const account = { deviceKey, cookie: null, tag: uniq('sc-auth-resave-24') };
+  // AUTH GATE (tightened): see test 23's own comment — this is now a real
+  // "claim by resave" from a fresh authenticated account, never anonymous.
+  const signedUp = await signUpAccount();
+  const account = { ...signedUp, deviceKey, tag: uniq('sc-auth-resave-24') };
 
   assert.equal((await postReport(account, { id, text: 'Authoritative fixture body text for a seeded lifecycle test.', aiStatus: 'ready', aiScore: 2 })).status, 200);
 
@@ -464,7 +495,10 @@ test('25. claimedAt is preserved by a normal resave while a claim is in flight',
     const id = uniq('r-25');
     const claimedAt = '2020-01-01 00:00:00';
     await seedPendingReport(deviceKey, id, { claimedAt });
-    const account = { deviceKey, cookie: null, tag: uniq('sc-auth-resave-25') };
+    // AUTH GATE (tightened): see test 23's own comment — a real "claim by
+    // resave" from a fresh authenticated account, never anonymous.
+    const signedUp = await signUpAccount();
+    const account = { ...signedUp, deviceKey, tag: uniq('sc-auth-resave-25') };
 
     assert.equal((await postReport(account, { id, text: '', aiStatus: 'ready', aiScore: 1 })).status, 200);
 
@@ -872,7 +906,11 @@ test('FORGERY 1: authoritative-pending first save — a forged client unifiedSim
     });
     assert.deepEqual(display, { status: 'pending' }, 'similarityStatus reads pending, never resolved, despite the forged submission');
 
-    const account2 = { deviceKey: account.deviceKey, cookie: null, tag: uniq('sc-auth-forge1-get') };
+    // AUTH GATE: this report is now account-owned (a genuinely new save
+    // requires authentication), so reading it back must use the SAME
+    // account's session — an anonymous device-key GET would no longer find
+    // it at all (the anonymous lookup excludes owned reports by design).
+    const account2 = { deviceKey: account.deviceKey, cookie: account.cookie, tag: uniq('sc-auth-forge1-get') };
     const getRes = await getReport(account2, id);
     const body = await getRes.json();
     assert.equal(body.payload?.unifiedSimilarity, undefined, 'GET never echoes the forged score back either');
@@ -886,7 +924,10 @@ test('FORGERY 2: authoritative-pending resave (AI/Wikipedia-style) — forged va
   const deviceKey = uniq('dk-forge-2');
   const id = uniq('r-forge-2');
   await seedPendingReport(deviceKey, id);
-  const account = { deviceKey, cookie: null, tag: uniq('sc-auth-forge2') };
+  // AUTH GATE (tightened): see test 23's own comment — a real "claim by
+  // resave" from a fresh authenticated account, never anonymous.
+  const signedUp = await signUpAccount();
+  const account = { ...signedUp, deviceKey, tag: uniq('sc-auth-forge2') };
 
   const res = await postReport(account, { id, text: '', aiStatus: 'ready', aiScore: 4, forgedPayloadFields: FORGED_SIMILARITY_FIELDS });
   assert.equal(res.status, 200);

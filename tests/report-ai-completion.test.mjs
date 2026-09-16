@@ -8,7 +8,9 @@ import { persistAiCompletion } from "../lib/report-ai-completion.ts";
 import { storeReportBestEffort } from "../lib/report-store.ts";
 import { applyMigrationsLibsql } from "../lib/ingest.js";
 import * as reportsRoute from "../app/api/reports/route.ts";
-import { resetRateForTest } from "../lib/rate-limit.js";
+import * as signupRoute from "../app/api/auth/signup/route.ts";
+import { resetRateForTest, resetAuthRateForTest } from "../lib/rate-limit.js";
+import { withTestIdentity } from "./helpers/test-signup.mjs";
 
 /**
  * Release-hardening audit finding LIFECYCLE-01: a report could get
@@ -316,13 +318,29 @@ test("directly rejected aiAnalysisPromise: the happy path is unaffected — a re
   await applyMigrationsLibsql(raceSetupClient, path.join(process.cwd(), "drizzle"));
   raceSetupClient.close();
 
+  // AUTH GATE: a genuinely new report can no longer be created anonymously
+  // at all (see app/api/reports/route.ts's own "AUTH GATE" comment) — this
+  // race is about the SAME account resaving from two different tabs/devices
+  // (per this block's own header comment), so one throwaway account is
+  // signed up once and reused for every postRaceReport call below.
+  await resetAuthRateForTest("race-signup");
+  const raceSignupRes = await signupRoute.POST(new Request("http://localhost/api/auth/signup", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-forwarded-for": "race-signup" },
+    body: JSON.stringify(withTestIdentity({ email: "race-ai-completion@example.com", password: "race-fixture-pw", username: "raceaicompletion", deviceKey: "race-device" })),
+  }));
+  const raceSetCookie = raceSignupRes.headers.get("set-cookie");
+  const raceCookieMatch = raceSetCookie ? raceSetCookie.match(/tp_session_v1=([^;]*)/) : null;
+  const raceCookie = raceCookieMatch ? raceCookieMatch[1] : null;
+
   let raceCounter = 0;
+  let raceRoomCounter = 0;
   async function postRaceReport(overrides) {
     raceCounter += 1;
     await resetRateForTest(`race-post-${raceCounter}`);
     const req = new Request("http://localhost/api/reports", {
       method: "POST",
-      headers: { "content-type": "application/json", "x-forwarded-for": `race-post-${raceCounter}` },
+      headers: { "content-type": "application/json", "x-forwarded-for": `race-post-${raceCounter}`, cookie: `tp_session_v1=${raceCookie}` },
       body: JSON.stringify({
         deviceKey: "race-device",
         submissionId: "race-sub",
@@ -331,6 +349,7 @@ test("directly rejected aiAnalysisPromise: the happy path is unaffected — a re
         wordCount: 10,
         archiveScore: 0,
         scoreBand: "Low",
+        room: raceRoomCounter++ % 10,
         payload: { note: "race" },
         ...overrides,
       }),

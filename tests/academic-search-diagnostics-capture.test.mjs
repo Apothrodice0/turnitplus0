@@ -5,7 +5,9 @@ import { createClient } from '@libsql/client';
 import { applyMigrationsLibsql } from '../lib/ingest.js';
 import * as reportsRoute from '../app/api/reports/route.ts';
 import * as academicEvidenceRoute from '../app/api/academic-evidence/route.ts';
-import { resetRateForTest } from '../lib/rate-limit.js';
+import * as signupRoute from '../app/api/auth/signup/route.ts';
+import { resetRateForTest, resetAuthRateForTest } from '../lib/rate-limit.js';
+import { withTestIdentity } from './helpers/test-signup.mjs';
 import {
   recordAcademicSearchRunDiagnostics,
   findAcademicSearchRunDiagnosticsByDocumentIdentityId,
@@ -87,12 +89,34 @@ function samplePayload(overrides = {}) {
   };
 }
 
-async function postReport(deviceKey, { id, payloadOverrides = {}, academicSearchDiagnosticsId } = {}) {
+// AUTH GATE (product requirement): a genuinely new report can no longer be
+// created anonymously at all (see app/api/reports/route.ts's own "AUTH GATE"
+// comment). These fixtures were never actually about anonymity — this now
+// signs up a fresh throwaway account for the given device key (unless a
+// `cookie` from a prior call is passed in, for a resave of the same report).
+let diagSignupCounter = 0;
+async function signupFor(deviceKey) {
+  diagSignupCounter += 1;
+  const tag = `diag-capture-signup-${diagSignupCounter}`;
+  await resetAuthRateForTest(tag);
+  const req = new Request('http://localhost/api/auth/signup', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-forwarded-for': tag },
+    body: JSON.stringify(withTestIdentity({ email: `${tag}@example.test`, password: 'diag-capture-fixture-pw', username: `diagcapture${diagSignupCounter}`, deviceKey })),
+  });
+  const res = await signupRoute.POST(req);
+  const setCookie = res.headers.get('set-cookie');
+  const match = setCookie ? setCookie.match(/tp_session_v1=([^;]*)/) : null;
+  return match ? match[1] : null;
+}
+
+async function postReport(deviceKey, { id, payloadOverrides = {}, academicSearchDiagnosticsId, cookie } = {}) {
   await resetRateForTest('diag-capture-test-client');
   const payload = samplePayload({ id: id ?? Date.now(), ...payloadOverrides });
+  const resolvedCookie = cookie ?? await signupFor(deviceKey);
   const req = new Request('http://localhost/api/reports', {
     method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-forwarded-for': 'diag-capture-test-client' },
+    headers: { 'content-type': 'application/json', 'x-forwarded-for': 'diag-capture-test-client', cookie: `tp_session_v1=${resolvedCookie}` },
     body: JSON.stringify({
       deviceKey,
       id: String(payload.id),
@@ -104,12 +128,13 @@ async function postReport(deviceKey, { id, payloadOverrides = {}, academicSearch
       scoreBand: 'Low',
       aiScore: null,
       aiTone: null,
+      room: 0,
       payload,
       academicSearchDiagnosticsId: academicSearchDiagnosticsId ?? null,
     }),
   });
   const res = await reportsRoute.POST(req);
-  return { res, payload };
+  return { res, payload, cookie: resolvedCookie };
 }
 
 // 0. /api/academic-evidence never includes the raw diagnostic bundle in its
@@ -209,8 +234,10 @@ async function postReport(deviceKey, { id, payloadOverrides = {}, academicSearch
   const id = Date.now();
   const firstDiagnosticsId = await recordUnlinkedDiagnostics();
   const secondDiagnosticsId = await recordUnlinkedDiagnostics({ status: 'FAILED' });
-  await postReport(deviceKey, { id, academicSearchDiagnosticsId: firstDiagnosticsId });
-  await postReport(deviceKey, { id, academicSearchDiagnosticsId: secondDiagnosticsId });
+  const { cookie } = await postReport(deviceKey, { id, academicSearchDiagnosticsId: firstDiagnosticsId });
+  // AUTH GATE: this is a RESAVE of the same (deviceKey, id) — the pre-existing
+  // ownership-conflict rule requires the SAME account's session.
+  await postReport(deviceKey, { id, academicSearchDiagnosticsId: secondDiagnosticsId, cookie });
 
   const client = createClient({ url: `file:${dbFile}` });
   const reportRow = await client.execute({ sql: 'SELECT document_identity_id FROM saved_reports WHERE device_key = ? AND id = ?', args: [deviceKey, String(id)] });

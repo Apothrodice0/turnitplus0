@@ -163,15 +163,21 @@ async function representationForText(text) {
 
 // --- The link itself is actually recorded -----------------------------------
 
-test('LINK: saving a report records saved_reports.document_identity_id, for both signed-in and anonymous saves', async () => {
+test('LINK: saving a report records saved_reports.document_identity_id, for different accounts alike', async () => {
   const { cookie } = await signup('deletion-link-a@example.test', 'deletion-device-link-a');
   const { id: signedInId } = await postReport('deletion-device-link-a', { cookie, text: 'Cartographers digitizing a nineteenth-century coastal survey georeferenced each hand-drawn sounding against a modern bathymetric chart.' });
   const signedInIdentity = await documentIdentityIdForReport('deletion-device-link-a', signedInId);
   assert.ok(signedInIdentity, 'a signed-in report must have its document_identity_id set');
 
-  const { id: anonId } = await postReport('deletion-device-link-anon', { text: 'Anonymous submission text used only to verify the identity link is captured regardless of account state.' });
+  // AUTH GATE: a genuinely new report can no longer be created anonymously
+  // at all (see app/api/reports/route.ts's own "AUTH GATE" comment) — this
+  // was never really testing anonymity itself (identity capture has no
+  // special-case for account state at all), so a second, independent account
+  // now proves the same "identity capture runs for every save" invariant.
+  const { cookie: cookieSecond } = await signup('deletion-link-anon@example.test', 'deletion-device-link-anon');
+  const { id: anonId } = await postReport('deletion-device-link-anon', { cookie: cookieSecond, text: 'Second-account submission text used only to verify the identity link is captured for every save.' });
   const anonIdentity = await documentIdentityIdForReport('deletion-device-link-anon', anonId);
-  assert.ok(anonIdentity, 'an anonymous report must also have its document_identity_id set — identity capture happens for both');
+  assert.ok(anonIdentity, 'a second account\'s report must also have its document_identity_id set — identity capture happens for every save');
 });
 
 // --- FULL CASCADE: identity, shingles, family, corpus all removed ----------

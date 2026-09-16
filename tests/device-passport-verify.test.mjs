@@ -5,7 +5,7 @@ import path from 'path';
 import { webcrypto, createHash } from 'node:crypto';
 import { createClient } from '@libsql/client';
 import { applyMigrationsLibsql } from '../lib/ingest.js';
-import { createSession } from '../lib/auth-session.ts';
+import { createSession, hashToken } from '../lib/auth-session.ts';
 import { resetRateForTest } from '../lib/rate-limit.js';
 import * as reportsRoute from '../app/api/reports/route.ts';
 import * as registerRoute from '../app/api/device-passport/register/route.ts';
@@ -98,8 +98,30 @@ async function callChallenge(headers) {
   return challengeRoute.POST(req('http://localhost/api/device-passport/challenge', { headers }));
 }
 
+// AUTH GATE (product requirement): a genuinely new report can no longer be
+// created anonymously at all (see app/api/reports/route.ts's own "AUTH GATE"
+// comment). Device Passport verification itself is orthogonal to auth state
+// (it is an attestation layered on top of ANY first save, and this file's own
+// "authenticated verified first save" scenarios elsewhere already prove it
+// works there too) — so every test below now authenticates via a lightweight
+// direct session (createSession against a throwaway users row), not a full
+// signup flow, and threads that account/session into both postReport (the
+// cookie) and fullAttestation (the challenge's own account/session binding,
+// which verifyDevicePassportAttestation requires to match exactly).
+let testAccountSeq = 0;
+async function createTestAccount() {
+  testAccountSeq += 1;
+  const userId = `dpv-account-${testAccountSeq}`;
+  await client.execute({
+    sql: 'INSERT INTO users (id, email, username, password_hash) VALUES (?,?,?,?)',
+    args: [userId, `${userId}@example.test`, userId, 'x'],
+  });
+  const token = await createSession(client, userId);
+  return { userId, token, session: { accountId: userId, sessionTokenHash: hashToken(token) } };
+}
+
 let reportSeq = 0;
-async function postReport({ deviceKey, token, devicePassport, text = 'the exact submitted document text', reportId } = {}) {
+async function postReport({ deviceKey, token, devicePassport, text = 'the exact submitted document text', reportId, room = 0 } = {}) {
   reportSeq += 1;
   const ip = nextIp();
   await resetRateForTest(ip);
@@ -111,7 +133,7 @@ async function postReport({ deviceKey, token, devicePassport, text = 'the exact 
     deviceKey, id, submissionId: 'sub', title: 't.pdf', createdAt: payload.created,
     wordCount: 5, archiveScore: 0, scoreBand: 'Low', payload,
   };
-  if (token) bodyObj.room = 0;
+  if (token) bodyObj.room = room;
   if (devicePassport) bodyObj.devicePassport = devicePassport;
   const res = await reportsRoute.POST(new Request('http://localhost/api/reports', { method: 'POST', headers, body: JSON.stringify(bodyObj) }));
   return { res, id, text };
@@ -234,17 +256,19 @@ test('POST /api/reports: flag OFF + devicePassport present -> upload unchanged, 
   setFlag('false');
   const kp = await generateKeyPair();
   await registerViaSql(kp);
+  const account = await createTestAccount();
   const deviceKey = `dk-off-${nextIp()}`;
-  const att = await fullAttestation({ kp, reportId: 'flagoff-1', text: 'doc text off' });
-  const { res } = await postReport({ deviceKey, devicePassport: att, text: 'doc text off', reportId: 'flagoff-1' });
+  const att = await fullAttestation({ kp, reportId: 'flagoff-1', text: 'doc text off', session: account.session });
+  const { res } = await postReport({ deviceKey, token: account.token, devicePassport: att, text: 'doc text off', reportId: 'flagoff-1' });
   assert.equal(res.status, 200);
   assert.equal(await passportIdOnReport(deviceKey, 'flagoff-1'), null);
 });
 
 test('POST /api/reports: flag ON, no devicePassport (a copied plain device_key alone) -> no provenance', async () => {
   setFlag('true');
+  const account = await createTestAccount();
   const deviceKey = `dk-plain-${nextIp()}`;
-  const { res } = await postReport({ deviceKey, reportId: 'plain-1', text: 'plain doc' });
+  const { res } = await postReport({ deviceKey, token: account.token, reportId: 'plain-1', text: 'plain doc' });
   assert.equal(res.status, 200);
   assert.equal(await passportIdOnReport(deviceKey, 'plain-1'), null, 'a device_key by itself never proves a passport');
 });
@@ -253,29 +277,31 @@ test('POST /api/reports: flag ON + valid attestation -> verified_device_passport
   setFlag('true');
   const kp = await generateKeyPair();
   await registerViaSql(kp);
+  const account = await createTestAccount();
   const deviceKey = `dk-ok-${nextIp()}`;
   const text = 'a genuine submitted document body for the attestation test';
-  const att = await fullAttestation({ kp, reportId: 'ok-1', text });
-  const { res } = await postReport({ deviceKey, devicePassport: att, text, reportId: 'ok-1' });
+  const att = await fullAttestation({ kp, reportId: 'ok-1', text, session: account.session });
+  const { res } = await postReport({ deviceKey, token: account.token, devicePassport: att, text, reportId: 'ok-1' });
   assert.equal(res.status, 200);
   assert.equal(await passportIdOnReport(deviceKey, 'ok-1'), kp.id);
-  assert.equal(await passportGeneration(kp.id), 1, 'first (passport, anonymous) association bumps once');
+  assert.equal(await passportGeneration(kp.id), 1, 'first (passport, account) association bumps once');
 
-  // a second anonymous report from the SAME passport -> stored, but NO extra bump
-  const att2 = await fullAttestation({ kp, reportId: 'ok-2', text: 'another doc' });
-  const r2 = await postReport({ deviceKey: `dk-ok2-${nextIp()}`, devicePassport: att2, text: 'another doc', reportId: 'ok-2' });
+  // a second report from the SAME passport AND SAME account -> stored, but NO extra bump
+  const att2 = await fullAttestation({ kp, reportId: 'ok-2', text: 'another doc', session: account.session });
+  const r2 = await postReport({ deviceKey: `dk-ok2-${nextIp()}`, token: account.token, devicePassport: att2, text: 'another doc', reportId: 'ok-2', room: 1 });
   assert.equal(r2.res.status, 200);
-  assert.equal(await passportGeneration(kp.id), 1, 'a repeat anonymous report does not bump again');
+  assert.equal(await passportGeneration(kp.id), 1, 'a repeat report from the same (passport, account) does not bump again');
 });
 
 test('POST /api/reports: flag ON + tampered signature -> upload STILL succeeds, no provenance', async () => {
   setFlag('true');
   const kp = await generateKeyPair();
   await registerViaSql(kp);
+  const account = await createTestAccount();
   const deviceKey = `dk-bad-${nextIp()}`;
   const text = 'doc for the tampered-signature case';
-  const att = await fullAttestation({ kp, reportId: 'bad-1', text, tamper: 'signature' });
-  const { res } = await postReport({ deviceKey, devicePassport: att, text, reportId: 'bad-1' });
+  const att = await fullAttestation({ kp, reportId: 'bad-1', text, session: account.session, tamper: 'signature' });
+  const { res } = await postReport({ deviceKey, token: account.token, devicePassport: att, text, reportId: 'bad-1' });
   assert.equal(res.status, 200, 'a bad attestation NEVER fails the upload');
   assert.equal(await passportIdOnReport(deviceKey, 'bad-1'), null);
   assert.equal(await passportGeneration(kp.id), 0, 'no bump on a failed verification');
@@ -284,10 +310,11 @@ test('POST /api/reports: flag ON + tampered signature -> upload STILL succeeds, 
 test('POST /api/reports: unregistered passport -> upload succeeds, no provenance', async () => {
   setFlag('true');
   const kp = await generateKeyPair(); // NOT registered
+  const account = await createTestAccount();
   const deviceKey = `dk-unreg-${nextIp()}`;
   const text = 'doc for the unregistered-passport case';
-  const att = await fullAttestation({ kp, reportId: 'unreg-1', text });
-  const { res } = await postReport({ deviceKey, devicePassport: att, text, reportId: 'unreg-1' });
+  const att = await fullAttestation({ kp, reportId: 'unreg-1', text, session: account.session });
+  const { res } = await postReport({ deviceKey, token: account.token, devicePassport: att, text, reportId: 'unreg-1' });
   assert.equal(res.status, 200);
   assert.equal(await passportIdOnReport(deviceKey, 'unreg-1'), null);
 });
@@ -296,18 +323,21 @@ test('POST /api/reports: verified_device_passport_id is immutable across a resav
   setFlag('true');
   const kp = await generateKeyPair();
   await registerViaSql(kp);
+  const account = await createTestAccount();
   const deviceKey = `dk-immut-${nextIp()}`;
   const text = 'doc for the immutability test';
-  const att = await fullAttestation({ kp, reportId: 'immut-1', text });
-  await postReport({ deviceKey, devicePassport: att, text, reportId: 'immut-1' });
+  const att = await fullAttestation({ kp, reportId: 'immut-1', text, session: account.session });
+  await postReport({ deviceKey, token: account.token, devicePassport: att, text, reportId: 'immut-1' });
   assert.equal(await passportIdOnReport(deviceKey, 'immut-1'), kp.id);
 
   // resave the same (deviceKey, id) — even with a fresh valid attestation, the
   // route gates verification on isFirstSaveOfThisReport, so nothing changes.
+  // AUTH GATE: a resave must carry the SAME account's session as the first
+  // save (the pre-existing ownership-conflict rule), so this reuses `account`.
   const kp2 = await generateKeyPair();
   await registerViaSql(kp2);
-  const att2 = await fullAttestation({ kp: kp2, reportId: 'immut-1', text });
-  const r = await postReport({ deviceKey, devicePassport: att2, text, reportId: 'immut-1' });
+  const att2 = await fullAttestation({ kp: kp2, reportId: 'immut-1', text, session: account.session });
+  const r = await postReport({ deviceKey, token: account.token, devicePassport: att2, text, reportId: 'immut-1' });
   assert.equal(r.res.status, 200);
   assert.equal(await passportIdOnReport(deviceKey, 'immut-1'), kp.id, 'still the ORIGINAL passport');
 });

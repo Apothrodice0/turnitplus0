@@ -316,8 +316,22 @@ test('CROSS-ACCOUNT VISIBILITY: B never sees A as a PRIOR_SUBMISSION, whether or
 
 test('ANONYMOUS: an anonymous submission is never indexed via the OLD direct-indexing path (no account exists for this now-inert consent field to apply to)', async () => {
   const text = 'Structural engineers retrofitting a mid-century concrete overpass installed fiber-reinforced polymer wrap across the most heavily corroded rebar sections identified by ground-penetrating radar survey.';
-  const { res } = await postReport('consent-device-anon', { text });
-  assert.equal(res.status, 200);
+  // AUTH GATE: a genuinely new report can no longer be created anonymously
+  // at all via POST /api/reports (see app/api/reports/route.ts's own "AUTH
+  // GATE" comment) — this scenario is specifically about an anonymous
+  // (user_id IS NULL) row's relationship to the OLD, dead direct-indexing
+  // path, so it is inserted directly instead, matching this codebase's own
+  // established "legacy row" pattern (see tests/report-write-time-
+  // finalization.test.mjs's own insertLegacyRow). The OLD path this test
+  // proves is unreached is dead code regardless of how the row was created
+  // (see this file's own header comment) — the assertion is unaffected.
+  const id = nextId();
+  const legacyClient = createClient({ url: `file:${dbFile}` });
+  await legacyClient.execute({
+    sql: reportsRoute.SAVE_REPORT_SQL,
+    args: [id, 'consent-device-anon', 'sub-' + id, 'consent.pdf', new Date().toISOString(), 10, 0, 'Low', null, null, null, JSON.stringify({ note: 'consent.pdf', text }), null, null],
+  });
+  legacyClient.close();
   assert.equal(await representationForText(text), null, 'anonymous saves remain SKIPPED_ANONYMOUS');
 });
 

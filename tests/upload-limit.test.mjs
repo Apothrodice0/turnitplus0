@@ -248,19 +248,68 @@ async function getUploadLimit(cookie) {
   console.log('resaving/updating an existing report never consumes a new upload, even at the limit');
 }
 
-// 5. Unauthenticated (anonymous) uploads are entirely unaffected by this quota.
+// 5. Unauthenticated (anonymous) uploads — AUTH GATE (tightened, product
+// requirement): a report save is now an authenticated-account action only,
+// full stop — first save AND resave alike (see app/api/reports/route.ts's
+// own "AUTH GATE" comment). "Anonymous uploads are entirely unaffected by
+// this quota" (this file's own header comment above) is no longer a
+// reachable public behavior at all: there is no such thing as an anonymous
+// upload (new or resaved) any more for the quota to be unaffected FOR. This
+// scenario now proves the auth gate itself rejects every anonymous write —
+// new or resave — before the quota system is ever consulted, and that the
+// quota's own "a resave never consumes a slot" semantics still hold for the
+// one write path that remains reachable: an AUTHENTICATED resave.
 {
   for (let i = 1; i <= DAILY_UPLOAD_LIMIT + 5; i++) {
     const { res } = await postReport('device-anon-1', { id: `anon-quota-${i}` });
-    assert.equal(res.status, 200, `anonymous upload ${i} (beyond the authenticated limit of ${DAILY_UPLOAD_LIMIT}) must succeed — no account to meter`);
+    assert.equal(res.status, 401, `a genuinely new anonymous upload ${i} must be rejected by the auth gate, never reach (or be limited by) the quota system`);
   }
+
+  // A pre-existing anonymous report — inserted directly via the real
+  // production SAVE_REPORT_SQL, matching this codebase's own established
+  // "legacy row" pattern (see tests/report-write-time-finalization.test.mjs's
+  // own insertLegacyRow).
+  const legacyId = 'anon-legacy-resave-report';
+  const legacyClient = createClient({ url: `file:${dbFile}` });
+  await legacyClient.execute({
+    sql: reportsRoute.SAVE_REPORT_SQL,
+    args: [legacyId, 'device-anon-legacy', 'sub-' + legacyId, 'legacy-anonymous.pdf', new Date().toISOString(), 10, 0, 'Low', null, null, null, JSON.stringify({ note: 'legacy-anonymous.pdf' }), null, null],
+  });
+  legacyClient.close();
+
+  // An ANONYMOUS resave of that pre-existing report is now rejected exactly
+  // like an anonymous first save — by the auth gate, at 401, never even
+  // reaching the (irrelevant here) quota check.
+  const anonResave = await postReport('device-anon-legacy', { id: legacyId, payloadOverrides: { title: 'ANON-REWRITE-ATTEMPT' } });
+  assert.equal(anonResave.res.status, 401, 'an anonymous resave of a pre-existing anonymous report must now be rejected — anonymous writes are gone entirely, not just anonymous creation');
+
+  // The only way left to touch that row is an AUTHENTICATED resave (which
+  // legitimately claims it — see tests/api-reports-account-scoping.test.mjs's
+  // own dedicated "claim by resave" coverage). Proving the quota's real
+  // subject — "a resave never consumes a slot" — now has to go through this
+  // path, since no anonymous write path survives at all. Fills a fresh
+  // account up to its daily limit first, so the resave-still-succeeds check
+  // is meaningful (not just coincidentally under the limit), mirroring
+  // scenario 4's own "resave at the limit" shape.
+  const legacyClaimSignupRes = await signup({ email: 'legacy-claim-quota@example.com', password: 'correct-horse-5', username: 'legacyclaimquota', deviceKey: 'device-legacy-claim' });
+  const legacyClaimCookie = extractCookie(legacyClaimSignupRes);
+  assert.ok(legacyClaimCookie);
+  for (let i = 1; i <= DAILY_UPLOAD_LIMIT; i++) {
+    const { res } = await postReport('device-legacy-claim', { id: `legacy-claim-new-${i}`, cookie: legacyClaimCookie, room: i - 1 });
+    assert.equal(res.status, 200);
+  }
+  const { res: blockedNewForClaimAccount } = await postReport('device-legacy-claim', { id: 'legacy-claim-new-11', cookie: legacyClaimCookie, room: 0 });
+  assert.equal(blockedNewForClaimAccount.status, 429, 'sanity: this account is genuinely at its daily limit');
+
+  const resaveAtLimitAuthed = await postReport('device-anon-legacy', { id: legacyId, cookie: legacyClaimCookie, payloadOverrides: { title: 'claimed-by-resave-while-at-limit.pdf' } });
+  assert.equal(resaveAtLimitAuthed.res.status, 200, 'an authenticated resave (claiming a pre-existing anonymous report) must still succeed even when the account is already at its daily limit — resaves are never metered');
 
   const statusRes = await getUploadLimit(null);
   assert.equal(statusRes.status, 200);
   const statusBody = await statusRes.json();
   assert.deepEqual(statusBody, { authenticated: false });
 
-  console.log('unauthenticated uploads are entirely unaffected by the daily quota');
+  console.log('unauthenticated new-upload AND resave attempts are both rejected by the auth gate; an authenticated resave remains exempt from the quota even at the daily limit');
 }
 
 for (const suffix of ['', '-wal', '-shm']) {

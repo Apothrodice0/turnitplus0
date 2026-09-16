@@ -5,7 +5,9 @@ import { createClient } from '@libsql/client';
 import { applyMigrationsLibsql } from '../lib/ingest.js';
 import * as reportsRoute from '../app/api/reports/route.ts';
 import * as reportIdRoute from '../app/api/reports/[id]/route.ts';
-import { resetRateForTest } from '../lib/rate-limit.js';
+import * as signupRoute from '../app/api/auth/signup/route.ts';
+import { resetRateForTest, resetAuthRateForTest } from '../lib/rate-limit.js';
+import { withTestIdentity } from './helpers/test-signup.mjs';
 
 const repo = path.resolve('.');
 const drizzleDir = path.join(repo, 'drizzle');
@@ -35,12 +37,43 @@ function samplePayload(overrides = {}) {
   };
 }
 
-async function postReport(deviceKey, { id, title = 'sample.pdf', payloadOverrides = {}, extra = {} } = {}) {
+function extractCookie(response) {
+  const setCookie = response.headers.get('set-cookie');
+  if (!setCookie) return null;
+  const match = setCookie.match(/tp_session_v1=([^;]*)/);
+  return match ? match[1] : null;
+}
+
+// AUTH GATE (product requirement): creating a genuinely NEW report is an
+// authenticated-account action only (see app/api/reports/route.ts's own
+// "AUTH GATE" comment) — every fixture below that creates a report now signs
+// up a fresh throwaway account first. This file's own assertions (round trip,
+// upsert, size limit, required-field validation) were never actually about
+// anonymity; they used an anonymous device-key save only as the easiest
+// vehicle to create a report, so authenticating the fixture changes nothing
+// about what each test proves.
+let signupCounter = 0;
+async function signup(deviceKey) {
+  signupCounter += 1;
+  const email = `api-reports-fixture-${signupCounter}@example.com`;
+  await resetAuthRateForTest('test-client-signup-' + signupCounter);
+  const req = new Request('http://localhost/api/auth/signup', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-forwarded-for': 'test-client-signup-' + signupCounter },
+    body: JSON.stringify(withTestIdentity({ email, password: 'api-reports-fixture-pw', username: 'apireportsfixture', deviceKey })),
+  });
+  const res = await signupRoute.POST(req);
+  return extractCookie(res);
+}
+
+async function postReport(deviceKey, { id, title = 'sample.pdf', payloadOverrides = {}, extra = {}, cookie, room = 0 } = {}) {
   await resetRateForTest('test-client-post');
   const payload = samplePayload({ id: id ?? Date.now(), title, ...payloadOverrides });
+  const headers = { 'content-type': 'application/json', 'x-forwarded-for': 'test-client-post' };
+  if (cookie) headers['cookie'] = `tp_session_v1=${cookie}`;
   const req = new Request('http://localhost/api/reports', {
     method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-forwarded-for': 'test-client-post' },
+    headers,
     body: JSON.stringify({
       deviceKey,
       id: String(payload.id),
@@ -52,6 +85,7 @@ async function postReport(deviceKey, { id, title = 'sample.pdf', payloadOverride
       scoreBand: 'Low',
       aiScore: 7,
       aiTone: 'low',
+      room,
       payload,
       ...extra,
     }),
@@ -60,27 +94,39 @@ async function postReport(deviceKey, { id, title = 'sample.pdf', payloadOverride
   return { res, payload };
 }
 
-async function listReports(deviceKey) {
+/** Convenience: signs up a fresh account for this device key, then saves a report as that account (a genuine first save requires authentication now). Returns the cookie alongside the usual save result so callers can keep using it for list/get/delete. */
+async function postReportAsFreshAccount(deviceKey, opts = {}) {
+  const cookie = await signup(deviceKey);
+  const { res, payload } = await postReport(deviceKey, { ...opts, cookie });
+  return { res, payload, cookie };
+}
+
+async function listReports(deviceKey, { cookie } = {}) {
   await resetRateForTest('test-client-list');
-  const req = new Request(`http://localhost/api/reports?deviceKey=${encodeURIComponent(deviceKey)}`, {
-    headers: { 'x-forwarded-for': 'test-client-list' },
-  });
+  const headers = { 'x-forwarded-for': 'test-client-list' };
+  if (cookie) headers['cookie'] = `tp_session_v1=${cookie}`;
+  const url = deviceKey ? `http://localhost/api/reports?deviceKey=${encodeURIComponent(deviceKey)}` : 'http://localhost/api/reports';
+  const req = new Request(url, { headers });
   return reportsRoute.GET(req);
 }
 
-async function getReport(deviceKey, id) {
+async function getReport(deviceKey, id, { cookie } = {}) {
   await resetRateForTest('test-client-get');
-  const req = new Request(`http://localhost/api/reports/${id}?deviceKey=${encodeURIComponent(deviceKey)}`, {
-    headers: { 'x-forwarded-for': 'test-client-get' },
-  });
+  const headers = { 'x-forwarded-for': 'test-client-get' };
+  if (cookie) headers['cookie'] = `tp_session_v1=${cookie}`;
+  const url = deviceKey ? `http://localhost/api/reports/${id}?deviceKey=${encodeURIComponent(deviceKey)}` : `http://localhost/api/reports/${id}`;
+  const req = new Request(url, { headers });
   return reportIdRoute.GET(req, { params: Promise.resolve({ id: String(id) }) });
 }
 
-async function deleteReport(deviceKey, id) {
+async function deleteReport(deviceKey, id, { cookie } = {}) {
   await resetRateForTest('test-client-delete');
-  const req = new Request(`http://localhost/api/reports/${id}?deviceKey=${encodeURIComponent(deviceKey)}`, {
+  const headers = { 'x-forwarded-for': 'test-client-delete' };
+  if (cookie) headers['cookie'] = `tp_session_v1=${cookie}`;
+  const url = deviceKey ? `http://localhost/api/reports/${id}?deviceKey=${encodeURIComponent(deviceKey)}` : `http://localhost/api/reports/${id}`;
+  const req = new Request(url, {
     method: 'DELETE',
-    headers: { 'x-forwarded-for': 'test-client-delete' },
+    headers,
   });
   return reportIdRoute.DELETE(req, { params: Promise.resolve({ id: String(id) }) });
 }
@@ -88,12 +134,12 @@ async function deleteReport(deviceKey, id) {
 // 1) Save -> list -> get -> delete round trip
 {
   const deviceKey = 'device-round-trip';
-  const { res: saveRes, payload } = await postReport(deviceKey, { title: 'roundtrip.pdf' });
+  const { res: saveRes, payload, cookie } = await postReportAsFreshAccount(deviceKey, { title: 'roundtrip.pdf' });
   assert.equal(saveRes.status, 200, 'save should succeed');
   const saveBody = await saveRes.json();
   assert.equal(saveBody.ok, true);
 
-  const listRes = await listReports(deviceKey);
+  const listRes = await listReports(deviceKey, { cookie });
   assert.equal(listRes.status, 200);
   const listBody = await listRes.json();
   assert.equal(listBody.reports.length, 1, 'list should contain exactly the saved report');
@@ -102,7 +148,7 @@ async function deleteReport(deviceKey, id) {
   assert.ok(!('payload_json' in listBody.reports[0]), 'list must not return full payload_json (summary only)');
   assert.ok(!('text' in listBody.reports[0]), 'list must not include full report text');
 
-  const getRes = await getReport(deviceKey, payload.id);
+  const getRes = await getReport(deviceKey, payload.id, { cookie });
   assert.equal(getRes.status, 200);
   const getBody = await getRes.json();
   // Phase E8C originally attached historicalSubmissionMatch as read-time
@@ -111,8 +157,13 @@ async function deleteReport(deviceKey, id) {
   // admin-only (app/api/reports/[id]/route.ts's GET handler, matching
   // matchClassification's own pre-existing gate) — see
   // tests/report-historical-match-visibility.test.mjs for the dedicated
-  // admin-vs-ordinary coverage. This save/fetch is anonymous (no session at
-  // all), so historicalSubmissionMatch must be entirely absent here, not a
+  // admin-vs-ordinary coverage. This save/fetch is an ordinary (non-admin)
+  // authenticated account — AUTH GATE: a genuinely new report can no longer
+  // be created anonymously at all (see app/api/reports/route.ts), so this
+  // fixture now signs up a fresh throwaway account instead; the assertions
+  // below are unaffected since historicalSubmissionMatch is gated on
+  // admin-vs-non-admin, not anonymous-vs-authenticated — so
+  // historicalSubmissionMatch must be entirely absent here, not a
   // NO_HISTORICAL_MATCH shape. Phase 6 adds unifiedSimilarity as its own
   // kind of read-time enrichment (lib/unified-similarity.ts, computed from
   // historicalSubmissionMatch plus this payload's own archiveMatchedPositions/
@@ -146,13 +197,13 @@ async function deleteReport(deviceKey, id) {
   assert.equal(viewerIsAdmin, false, 'REQUIRED: an anonymous/non-admin GET must always get an explicit false, never undefined/omitted — this is a real authorization signal, not optional enrichment');
   assert.deepEqual(getPayloadWithoutHistoricalMatch, payload, 'get must return the exact saved payload (aside from the new E8C/Phase 6/SIM-04/LIFECYCLE-06/viewerIsAdmin enrichment fields)');
 
-  const deleteRes = await deleteReport(deviceKey, payload.id);
+  const deleteRes = await deleteReport(deviceKey, payload.id, { cookie });
   assert.equal(deleteRes.status, 200);
 
-  const getAfterDeleteRes = await getReport(deviceKey, payload.id);
+  const getAfterDeleteRes = await getReport(deviceKey, payload.id, { cookie });
   assert.equal(getAfterDeleteRes.status, 404, 'report must be gone after delete');
 
-  const listAfterDeleteRes = await listReports(deviceKey);
+  const listAfterDeleteRes = await listReports(deviceKey, { cookie });
   const listAfterDeleteBody = await listAfterDeleteRes.json();
   assert.equal(listAfterDeleteBody.reports.length, 0, 'list must be empty after delete');
   console.log('save/list/get/delete round trip passed');
@@ -162,35 +213,49 @@ async function deleteReport(deviceKey, id) {
 {
   const deviceKey = 'device-upsert';
   const sharedId = Date.now() + 1;
-  await postReport(deviceKey, { id: sharedId, title: 'first-title.pdf' });
-  await postReport(deviceKey, { id: sharedId, title: 'second-title.pdf' });
+  // AUTH GATE: the first save is a genuine creation (authenticated); the
+  // second save is a RESAVE of the same (deviceKey, id) — the pre-existing
+  // ownership-conflict rule requires it to carry the SAME account's session,
+  // never a fresh one, so both saves reuse the one signed-up cookie.
+  const cookie = await signup(deviceKey);
+  await postReport(deviceKey, { id: sharedId, title: 'first-title.pdf', cookie });
+  await postReport(deviceKey, { id: sharedId, title: 'second-title.pdf', cookie });
 
-  const listRes = await listReports(deviceKey);
+  const listRes = await listReports(deviceKey, { cookie });
   const listBody = await listRes.json();
   assert.equal(listBody.reports.length, 1, 'upsert must not create a duplicate row');
   assert.equal(listBody.reports[0].title, 'second-title.pdf', 'upsert must overwrite the title');
   console.log('upsert semantics verified');
 }
 
-// 3) Device scoping: a different device key must not see or reach another device's reports
+// 3) Account scoping: a different account must not see or reach another
+// account's reports. (Originally written as anonymous "device scoping" —
+// AUTH GATE means a genuinely new report can no longer be created
+// anonymously at all, so this now uses two distinct authenticated accounts;
+// tests/api-reports-session-lifecycle.test.mjs's own account-scoping coverage
+// already proves the equivalent invariant this way too. The isolation being
+// proven — one identity can never see/reach another's reports — is
+// unchanged.)
 {
   const ownerKey = 'device-owner';
   const strangerKey = 'device-stranger';
-  const { payload } = await postReport(ownerKey, { title: 'owner-only.pdf' });
+  const ownerCookie = await signup(ownerKey);
+  const strangerCookie = await signup(strangerKey);
+  const { payload } = await postReport(ownerKey, { title: 'owner-only.pdf', cookie: ownerCookie });
 
-  const strangerList = await listReports(strangerKey);
+  const strangerList = await listReports(undefined, { cookie: strangerCookie });
   const strangerListBody = await strangerList.json();
-  assert.equal(strangerListBody.reports.length, 0, 'a different device key must not see another device\'s reports');
+  assert.equal(strangerListBody.reports.length, 0, 'a different account must not see another account\'s reports');
 
-  const strangerGet = await getReport(strangerKey, payload.id);
-  assert.equal(strangerGet.status, 404, 'a different device key must not be able to fetch another device\'s report by id');
+  const strangerGet = await getReport(undefined, payload.id, { cookie: strangerCookie });
+  assert.equal(strangerGet.status, 404, 'a different account must not be able to fetch another account\'s report by id');
 
-  const strangerDelete = await deleteReport(strangerKey, payload.id);
-  assert.equal(strangerDelete.status, 200, 'delete is a no-op (not an error) for a report the device key does not own');
+  const strangerDelete = await deleteReport(undefined, payload.id, { cookie: strangerCookie });
+  assert.equal(strangerDelete.status, 200, 'delete is a no-op (not an error) for a report the account does not own');
 
-  const ownerGetAfter = await getReport(ownerKey, payload.id);
-  assert.equal(ownerGetAfter.status, 200, 'the owning device key must still be able to fetch its report — the stranger delete must not have removed it');
-  console.log('device scoping verified');
+  const ownerGetAfter = await getReport(undefined, payload.id, { cookie: ownerCookie });
+  assert.equal(ownerGetAfter.status, 200, 'the owning account must still be able to fetch its report — the stranger delete must not have removed it');
+  console.log('account scoping verified');
 }
 
 // 4) Payload size limit

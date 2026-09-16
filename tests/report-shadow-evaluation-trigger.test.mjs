@@ -4,6 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import { tmpdir } from 'node:os';
 import { webcrypto, createHash, randomUUID } from 'node:crypto';
+import { hashToken } from '../lib/auth-session.ts';
 import { createClient } from '@libsql/client';
 import { applyMigrationsLibsql } from '../lib/ingest.js';
 import { resetRateForTest, resetReadRateForTest, resetAuthRateForTest } from '../lib/rate-limit.ts';
@@ -216,7 +217,7 @@ async function savedReport(deviceKey, id) {
 }
 
 /** A verified device-passport attestation for an anonymous POST /api/reports of `text` with `reportId`. */
-async function makeAttestation(text, reportId) {
+async function makeAttestation(text, reportId, session = { accountId: null, sessionTokenHash: null }) {
   const kp = await webcrypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
   const spkiDer = Buffer.from(await webcrypto.subtle.exportKey('spki', kp.publicKey));
   const passportId = derivePassportId(spkiDer);
@@ -225,7 +226,12 @@ async function makeAttestation(text, reportId) {
           VALUES (?,?,?,?,NULL,NULL,0) ON CONFLICT(id) DO NOTHING`,
     args: [passportId, spkiDer, DEVICE_PASSPORT_ALGORITHM, Date.now()],
   });
-  const { challengeId, nonce } = await createDevicePassportChallenge(client, { accountId: null, sessionTokenHash: null });
+  // AUTH GATE: the challenge must be bound to the SAME account/session the
+  // actual POST /api/reports will carry — verifyDevicePassportAttestation
+  // rejects any mismatch (see lib/device-passport-server.ts). Defaults to an
+  // anonymous binding for the raw-INSERT (never-live-verified) fixtures below
+  // that never call POST /api/reports at all.
+  const { challengeId, nonce } = await createDevicePassportChallenge(client, session);
   const message = buildDevicePassportSignedMessage({
     nonceBase64: nonce, challengeId, method: 'POST', path: '/api/reports',
     payloadTextSha256Hex: sha256Hex(Buffer.from(text, 'utf8')), reportId,
@@ -268,10 +274,15 @@ test('2. a POST-finalized report with a verified Device Passport schedules the d
   process.env.DEVICE_PASSPORT_ENABLED = 'true';
   try {
     const text = takeText();
-    const deviceKey = uniq('dpp-dev');
+    // AUTH GATE: a genuinely new report can no longer be created anonymously
+    // at all (see app/api/reports/route.ts) — device-passport verification
+    // itself is orthogonal to auth state (already proven authenticated
+    // elsewhere, e.g. tests/device-passport-actor-ledger.test.mjs), so this
+    // fixture now signs up a fresh throwaway account instead.
+    const account = await signUpAccount();
+    const { deviceKey } = account;
     const reportId = 'shadow-trigger-post-devicepassport';
-    const account = { deviceKey, cookie: null, tag: uniq('dpp') };
-    const { passportId, devicePassport } = await makeAttestation(text, reportId);
+    const { passportId, devicePassport } = await makeAttestation(text, reportId, { accountId: account.userId, sessionTokenHash: hashToken(account.cookie) });
 
     const res = await postReport(account, { id: reportId, text, aiStatus: 'ready', aiScore: 2, devicePassport, extraHeaders: SAME_ORIGIN });
     assert.equal(res.status, 200);
@@ -401,10 +412,13 @@ test('6. repeated POST + GET upsert the same policy row rather than duplicating 
   try {
     const text = takeText();
     await indexPriorSubmission(uniq('prior-acc'), text);
-    const deviceKey = uniq('idem-dev');
+    // AUTH GATE: a genuinely new report can no longer be created anonymously
+    // at all — this fixture now signs up a fresh throwaway account instead
+    // (see test 2's own comment above).
+    const account = await signUpAccount();
+    const { deviceKey } = account;
     const reportId = 'shadow-trigger-idempotent';
-    const account = { deviceKey, cookie: null, tag: uniq('idem') };
-    const { devicePassport } = await makeAttestation(text, reportId);
+    const { devicePassport } = await makeAttestation(text, reportId, { accountId: account.userId, sessionTokenHash: hashToken(account.cookie) });
 
     assert.equal((await postReport(account, { id: reportId, text, aiStatus: 'processing', aiScore: null, devicePassport, extraHeaders: SAME_ORIGIN })).status, 200);
     // resave (AI completes) — no fresh challenge, so no passport this time

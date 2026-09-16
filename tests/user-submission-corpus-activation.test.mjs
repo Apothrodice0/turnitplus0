@@ -226,10 +226,23 @@ test('SCENARIO D / NO LIVE-ROUTE INDEXING: a signed-in account uploading origina
 test('SCENARIO E: an anonymous submission is never indexed into the corpus (true both before and after corpus-admission hardening — signed-in submissions are now equally never indexed via the live route, see SCENARIO A-C/D above)', async () => {
   const text = 'Glaciologists surveying an alpine ice core extracted a two hundred meter sample revealing distinct annual layering that correlates with regional temperature reconstructions spanning several centuries of overlapping instrumental and proxy record.';
 
-  const { res } = await postReport('activation-device-anonymous', { text });
-  assert.equal(res.status, 200, 'anonymous save must still succeed');
-
+  // AUTH GATE: a genuinely new report can no longer be created anonymously
+  // at all via POST /api/reports (see app/api/reports/route.ts's own "AUTH
+  // GATE" comment) — this scenario is specifically about an anonymous
+  // (user_id IS NULL) row's relationship to the OLD, dead direct-indexing
+  // path, so it is inserted directly instead, matching this codebase's own
+  // established "legacy row" pattern (see tests/report-write-time-
+  // finalization.test.mjs's own insertLegacyRow). The OLD path this test
+  // proves is unreached is dead code regardless of how the row was created
+  // (see this test's own title: signed-in submissions are equally never
+  // indexed via the live route).
+  const id = nextId();
   const client = createClient({ url: `file:${dbFile}` });
+  await client.execute({
+    sql: reportsRoute.SAVE_REPORT_SQL,
+    args: [id, 'activation-device-anonymous', 'sub-' + id, 'activation.pdf', new Date().toISOString(), 100, 9, 'Low', null, null, null, JSON.stringify({ note: 'activation.pdf', text }), null, null],
+  });
+
   const representation = await representationForText(client, text);
   assert.equal(representation, null, 'SCENARIO E: an anonymous submission must never create a corpus representation');
   client.close();
@@ -418,20 +431,23 @@ test('AUTH: B cannot fetch A\'s report at all, even though B\'s own upload now c
 
 // --- REGRESSION ------------------------------------------------------------
 
-test('REGRESSION: anonymous save -> get -> delete round trip still works exactly as before', async () => {
+test('REGRESSION: save -> get -> delete round trip still works exactly as before (authenticated)', async () => {
+  // AUTH GATE: a genuinely new report can no longer be created anonymously
+  // at all — this round trip was never actually about anonymity.
   const deviceKey = 'activation-device-regression';
-  const { res: postRes, id } = await postReport(deviceKey, { title: 'regression.pdf', text: 'regression fixture text for the activation phase, unrelated to any other fixture in this file.' });
+  const { cookie } = await signup('activation-regression@example.test', deviceKey);
+  const { res: postRes, id } = await postReport(deviceKey, { cookie, title: 'regression.pdf', text: 'regression fixture text for the activation phase, unrelated to any other fixture in this file.' });
   assert.equal(postRes.status, 200);
 
-  const getRes = await getReport(id, { deviceKey });
+  const getRes = await getReport(id, { cookie });
   assert.equal(getRes.status, 200);
   const body = await getRes.json();
   assert.equal(body.payload.title, 'regression.pdf');
 
-  const deleteRes = await deleteReport(id, { deviceKey });
+  const deleteRes = await deleteReport(id, { cookie });
   assert.equal(deleteRes.status, 200);
 
-  const getAfterDelete = await getReport(id, { deviceKey });
+  const getAfterDelete = await getReport(id, { cookie });
   assert.equal(getAfterDelete.status, 404);
 });
 

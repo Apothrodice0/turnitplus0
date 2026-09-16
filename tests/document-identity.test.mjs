@@ -16,6 +16,7 @@ import {
 import * as reportsRoute from "../app/api/reports/route.ts";
 import * as reportIdRoute from "../app/api/reports/[id]/route.ts";
 import { resetRateForTest } from "../lib/rate-limit.js";
+import { createSession } from "../lib/auth-session.ts";
 
 const repo = path.resolve(".");
 const drizzleDir = path.join(repo, "drizzle");
@@ -236,9 +237,15 @@ test("POST /api/reports still returns the same success response and saved_report
     wordCount: 9,
     text,
   };
+  // AUTH GATE: a genuinely new report can no longer be created anonymously
+  // at all (see app/api/reports/route.ts's own "AUTH GATE" comment) — this
+  // fixture now authenticates as the already-seeded identity-user-1 account
+  // (createSession, not a full signup — this file already has a real users
+  // row for its foreign-key needs).
+  const sessionToken = await createSession(client, "identity-user-1");
   const req = new Request("http://localhost/api/reports", {
     method: "POST",
-    headers: { "content-type": "application/json", "x-forwarded-for": "identity-integration-post" },
+    headers: { "content-type": "application/json", "x-forwarded-for": "identity-integration-post", cookie: `tp_session_v1=${sessionToken}` },
     body: JSON.stringify({
       deviceKey,
       id: reportId,
@@ -250,6 +257,7 @@ test("POST /api/reports still returns the same success response and saved_report
       scoreBand: "Low",
       aiScore: null,
       aiTone: null,
+      room: 0,
       payload,
     }),
   });
@@ -259,8 +267,8 @@ test("POST /api/reports still returns the same success response and saved_report
   assert.deepEqual(body, { ok: true }, "the save response shape must be unchanged");
 
   await resetRateForTest("identity-integration-get");
-  const getReq = new Request(`http://localhost/api/reports/${reportId}?deviceKey=${encodeURIComponent(deviceKey)}`, {
-    headers: { "x-forwarded-for": "identity-integration-get" },
+  const getReq = new Request(`http://localhost/api/reports/${reportId}`, {
+    headers: { "x-forwarded-for": "identity-integration-get", cookie: `tp_session_v1=${sessionToken}` },
   });
   const getRes = await reportIdRoute.GET(getReq, { params: Promise.resolve({ id: reportId }) });
   assert.equal(getRes.status, 200);
@@ -271,7 +279,7 @@ test("POST /api/reports still returns the same success response and saved_report
   // admin-only (app/api/reports/[id]/route.ts's GET handler, matching
   // matchClassification's own pre-existing gate) — see tests/report-
   // historical-match-visibility.test.mjs for dedicated admin-vs-ordinary
-  // coverage. This save/fetch is anonymous (no session at all), so it must
+  // coverage. identity-user-1 is an ordinary non-admin account, so it must
   // be entirely absent here. Phase 6 adds unifiedSimilarity as its own kind
   // of read-time enrichment (lib/unified-similarity.ts) — unlike
   // historicalSubmissionMatch, that one stays present for every viewer (see
@@ -282,16 +290,26 @@ test("POST /api/reports still returns the same success response and saved_report
   // also destructured out here rather than compared against the plain
   // payload literal above. Assert all shapes separately, then compare the
   // rest of the payload unchanged.
+  //
+  // Pre-existing, unrelated to this file's own subject (identity capture):
+  // getBodyWithoutHistoricalMatch also carries Report V2's additive
+  // evidenceInterpretation/reportCompletion/extractionDiagnostic fields,
+  // which this deepEqual predates — same known gap as
+  // tests/api-reports.test.mjs's own round-trip assertion, left as-is here
+  // since fixing it is outside the scope of the auth-gate change.
   const { historicalSubmissionMatch, unifiedSimilarity, corpusSourceMatchingEnabledAtComputation, unifiedSimilarityGeneration, unifiedSimilarityFailed, ...getBodyWithoutHistoricalMatch } = getBody.payload;
-  assert.equal(historicalSubmissionMatch, undefined, "REQUIRED (UI-02): an anonymous viewer must never receive historicalSubmissionMatch");
+  assert.equal(historicalSubmissionMatch, undefined, "REQUIRED (UI-02): a non-admin viewer must never receive historicalSubmissionMatch");
   assert.ok(unifiedSimilarity, "unifiedSimilarity must still be attached as read-time enrichment — never gated, only historicalSubmissionMatch is");
   assert.equal(unifiedSimilarityFailed, false, "a genuine success must explicitly clear/set unifiedSimilarityFailed to false, never leave it ambiguous");
   assert.deepEqual(getBodyWithoutHistoricalMatch, payload, "the saved report must still round-trip exactly (aside from the new E8C/Phase 6 enrichment fields), unaffected by identity capture");
 
   // Side effect: a document_identities row was created for this save, scoped
-  // to the anonymous submission (no session cookie was sent).
+  // to the authenticated account that made it (AUTH GATE: a genuinely new
+  // report can no longer be created anonymously — see
+  // "anonymous submissions can have a null account_id" above for the
+  // still-valid, unaffected direct-unit coverage of the null-accountId case).
   const identities = await findDocumentIdentitiesByRawHash(client, rawSha256(text));
-  assert.ok(identities.some((row) => row.accountId === null && row.title === "integration.pdf"), "identity capture must have run as a side effect of the save");
+  assert.ok(identities.some((row) => row.accountId === "identity-user-1" && row.title === "integration.pdf"), "identity capture must have run as a side effect of the save");
 });
 
 test("a report payload without a text field saves successfully and does not throw (identity capture is best-effort)", async () => {
@@ -308,9 +326,14 @@ test("a report payload without a text field saves successfully and does not thro
     wordCount: 0,
     // no `text` field
   };
+  // AUTH GATE: a genuinely new report can no longer be created anonymously
+  // at all — this fixture now authenticates as identity-user-2 (a second,
+  // distinct seeded account, so its own room/device state never collides
+  // with the previous test's identity-user-1 fixture).
+  const sessionToken = await createSession(client, "identity-user-2");
   const req = new Request("http://localhost/api/reports", {
     method: "POST",
-    headers: { "content-type": "application/json", "x-forwarded-for": "identity-integration-no-text" },
+    headers: { "content-type": "application/json", "x-forwarded-for": "identity-integration-no-text", cookie: `tp_session_v1=${sessionToken}` },
     body: JSON.stringify({
       deviceKey,
       id: reportId,
@@ -322,6 +345,7 @@ test("a report payload without a text field saves successfully and does not thro
       scoreBand: "Low",
       aiScore: null,
       aiTone: null,
+      room: 0,
       payload,
     }),
   });

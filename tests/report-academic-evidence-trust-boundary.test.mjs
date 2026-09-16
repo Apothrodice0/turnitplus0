@@ -6,7 +6,9 @@ import { createClient } from '@libsql/client';
 import { applyMigrationsLibsql } from '../lib/ingest.ts';
 import * as reportsRoute from '../app/api/reports/route.ts';
 import * as reportIdRoute from '../app/api/reports/[id]/route.ts';
-import { resetRateForTest, resetReadRateForTest } from '../lib/rate-limit.ts';
+import * as signupRoute from '../app/api/auth/signup/route.ts';
+import { resetRateForTest, resetReadRateForTest, resetAuthRateForTest } from '../lib/rate-limit.ts';
+import { withTestIdentity } from './helpers/test-signup.mjs';
 import { canonicalSha256 } from '../lib/document-identity.ts';
 import { recordAcademicSearchRunDiagnostics, resolveVerifiedAcademicEvidence } from '../lib/academic-search-diagnostics-repo.ts';
 
@@ -67,29 +69,51 @@ function samplePayload(overrides = {}) {
   };
 }
 
+// AUTH GATE (product requirement): a genuinely new report can no longer be
+// created anonymously at all (see app/api/reports/route.ts's own "AUTH GATE"
+// comment). This file's fixtures were never actually about anonymity — they
+// use a fresh, per-test device key only as a unique namespace — so postReport
+// now signs up a fresh throwaway account for that device key first, and every
+// getReport call carries that same account's session.
+async function signupFor(deviceKey, tag) {
+  await resetAuthRateForTest(tag + '-signup');
+  const email = `${tag}@example.test`;
+  const req = new Request('http://localhost/api/auth/signup', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-forwarded-for': tag + '-signup' },
+    body: JSON.stringify(withTestIdentity({ email, password: 'tb-fixture-pw', username: tag.replace(/[^a-z0-9]/gi, '').slice(0, 24) || 'tbfixtureuser', deviceKey })),
+  });
+  const res = await signupRoute.POST(req);
+  const setCookie = res.headers.get('set-cookie');
+  const match = setCookie ? setCookie.match(/tp_session_v1=([^;]*)/) : null;
+  return match ? match[1] : null;
+}
+
 async function postReport(deviceKey, tag, { payloadOverrides = {}, academicSearchDiagnosticsId } = {}) {
   await resetRateForTest(tag);
   const payload = samplePayload(payloadOverrides);
+  const cookie = await signupFor(deviceKey, tag);
   const body = {
     deviceKey, id: String(payload.id), submissionId: payload.submissionId, title: payload.title,
     createdAt: payload.created, wordCount: payload.wordCount, archiveScore: payload.score, scoreBand: 'Low',
-    aiScore: null, aiTone: null, payload,
+    aiScore: null, aiTone: null, room: 0, payload,
   };
   if (academicSearchDiagnosticsId !== undefined) body.academicSearchDiagnosticsId = academicSearchDiagnosticsId;
   const req = new Request('http://localhost/api/reports', {
-    method: 'POST', headers: { 'content-type': 'application/json', 'x-forwarded-for': tag },
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-forwarded-for': tag, cookie: `tp_session_v1=${cookie}` },
     body: JSON.stringify(body),
   });
   const res = await reportsRoute.POST(req);
-  return { res, payload };
+  return { res, payload, cookie };
 }
 
-async function getReport(deviceKey, id, tag) {
+async function getReport(deviceKey, id, tag, cookie) {
   await resetRateForTest(tag);
   await resetReadRateForTest(tag);
-  const req = new Request(`http://localhost/api/reports/${id}?deviceKey=${encodeURIComponent(deviceKey)}`, {
-    headers: { 'x-forwarded-for': tag },
-  });
+  const url = cookie ? `http://localhost/api/reports/${id}` : `http://localhost/api/reports/${id}?deviceKey=${encodeURIComponent(deviceKey)}`;
+  const headers = { 'x-forwarded-for': tag };
+  if (cookie) headers.cookie = `tp_session_v1=${cookie}`;
+  const req = new Request(url, { headers });
   const res = await reportIdRoute.GET(req, { params: Promise.resolve({ id: String(id) }) });
   return (await res.json()).payload;
 }
@@ -220,14 +244,14 @@ test('5. deferred diagnostics->report link failure does NOT remove valid verifie
   const id = await seedDiagnostics(BODY, verified);
 
   const dk = 'tb-link-independent';
-  await postReport(dk, 'tb5', { academicSearchDiagnosticsId: Number(id), payloadOverrides: { externalAcademicEvidence: verified } });
+  const { cookie } = await postReport(dk, 'tb5', { academicSearchDiagnosticsId: Number(id), payloadOverrides: { externalAcademicEvidence: verified } });
   const rid = (await db.execute("SELECT id FROM saved_reports WHERE device_key='tb-link-independent'")).rows[0].id;
 
   // The row's report-link columns are still NULL (deferred callback may not have
   // run / may have failed). Force them to stay NULL and confirm GET still verifies.
   await db.execute({ sql: 'UPDATE academic_search_run_diagnostics SET report_device_key = NULL, report_id = NULL WHERE id = ?', args: [Number(id)] });
 
-  const body = await getReport(dk, rid, 'tb5b');
+  const body = await getReport(dk, rid, 'tb5b', cookie);
   assert.ok(body.unifiedSimilarity.liveAcademicOnlyWords >= 1, 'verified evidence still scores with NO report link');
   assert.equal(body.externalAcademicEvidence.length, 1);
 });
@@ -297,7 +321,7 @@ test('9. verifiedAcademicSearchDiagnosticsId: persisted in payload_json, NEVER i
   const diagId = Number(await seedDiagnostics(BODY, verified));
 
   const dk = 'tb-handle-strip';
-  const { res: postRes, payload } = await postReport(dk, 'tb9a', {
+  const { res: postRes, payload, cookie } = await postReport(dk, 'tb9a', {
     academicSearchDiagnosticsId: diagId,
     payloadOverrides: { externalAcademicEvidence: verified },
   });
@@ -312,7 +336,7 @@ test('9. verifiedAcademicSearchDiagnosticsId: persisted in payload_json, NEVER i
   assert.ok(liveWords0 >= 1, 'verified evidence scored on first save');
 
   // (b) never in the GET response
-  const getBody = await getReport(dk, rid, 'tb9b');
+  const getBody = await getReport(dk, rid, 'tb9b', cookie);
   assert.equal('verifiedAcademicSearchDiagnosticsId' in getBody, false, 'GET response must NOT carry the internal handle');
   assert.equal(getBody.externalAcademicEvidence.length, 1, 'but the verified evidence itself is still there');
   assert.ok(getBody.unifiedSimilarity.liveAcademicOnlyWords >= 1, 'and it still scores on GET recompute');
@@ -322,8 +346,11 @@ test('9. verifiedAcademicSearchDiagnosticsId: persisted in payload_json, NEVER i
   assert.equal('verifiedAcademicSearchDiagnosticsId' in getBody, false); // precondition: client genuinely has no handle
   const resavePayload = { ...getBody, aiAnalysis: { summary: 'x' }, aiScore: 10 };
   await resetRateForTest('tb9c');
+  // AUTH GATE: this is a RESAVE of the same (deviceKey, id) — the pre-existing
+  // ownership-conflict rule requires the SAME account's session, so this
+  // reuses the cookie from the original postReport above.
   const resaveReq = new Request('http://localhost/api/reports', {
-    method: 'POST', headers: { 'content-type': 'application/json', 'x-forwarded-for': 'tb9c' },
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-forwarded-for': 'tb9c', cookie: `tp_session_v1=${cookie}` },
     body: JSON.stringify({
       deviceKey: dk, id: rid, submissionId: payload.submissionId, title: payload.title,
       createdAt: payload.created, wordCount: payload.wordCount, archiveScore: payload.score, scoreBand: 'Low',
@@ -341,7 +368,7 @@ test('9. verifiedAcademicSearchDiagnosticsId: persisted in payload_json, NEVER i
   assert.ok(p1.unified.liveAcademicOnlyWords >= 1, 'verified evidence still scores after the resave');
 
   // (d) still no handle in the response after the resave
-  const getBody2 = await getReport(dk, rid, 'tb9d');
+  const getBody2 = await getReport(dk, rid, 'tb9d', cookie);
   assert.equal('verifiedAcademicSearchDiagnosticsId' in getBody2, false);
   assert.equal(getBody2.externalAcademicEvidence.length, 1);
 });

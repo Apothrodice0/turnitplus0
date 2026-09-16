@@ -114,7 +114,11 @@ async function postReport({ deviceKey, id, title = "activation.pdf", text, cooki
 test("saving a report still returns { ok: true }/200, and now also creates document_identities + document_identity_shingles rows as a side effect", async () => {
   const text = "Volcanologists analyzing satellite thermal imagery of an active stratovolcano detected a gradual increase in surface temperature anomalies over several months. Ground deformation sensors installed around the summit recorded slow but measurable inflation consistent with subsurface magma accumulation. These combined observations prompted regional authorities to raise the volcanic alert level.";
   const id = nextId();
-  const res = await postReport({ deviceKey: "activation-device-1", id, text });
+  // AUTH GATE: a genuinely new report can no longer be created anonymously
+  // at all (see app/api/reports/route.ts) — this fixture was never actually
+  // about anonymity, so it now signs up a fresh throwaway account instead.
+  const { cookie } = await signup("activation-1@example.com", "activation-device-1");
+  const res = await postReport({ deviceKey: "activation-device-1", id, text, cookie });
   assert.equal(res.status, 200);
   const body = await res.json();
   assert.deepEqual(body, { ok: true }, "the save response must be byte-for-byte identical to pre-Phase-C behavior");
@@ -132,9 +136,13 @@ test("a report with no text field still saves successfully and creates no identi
   const id = nextId();
   const rateKey = `activation-post-${id}`;
   await resetRateForTest(rateKey);
+  // AUTH GATE: a genuinely new report can no longer be created anonymously
+  // at all — this fixture was never actually about anonymity, so it now
+  // signs up a fresh throwaway account instead.
+  const { cookie } = await signup("activation-no-text@example.com", "activation-device-no-text");
   const req = new Request("http://localhost/api/reports", {
     method: "POST",
-    headers: { "content-type": "application/json", "x-forwarded-for": rateKey },
+    headers: { "content-type": "application/json", "x-forwarded-for": rateKey, cookie: `tp_session_v1=${cookie}` },
     body: JSON.stringify({
       deviceKey: "activation-device-no-text",
       id,
@@ -146,6 +154,7 @@ test("a report with no text field still saves successfully and creates no identi
       scoreBand: "Low",
       aiScore: null,
       aiTone: null,
+      room: nextRoom(),
       payload: { id, title: "no-text.pdf" }, // no `text`
     }),
   });

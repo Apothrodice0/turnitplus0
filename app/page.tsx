@@ -945,6 +945,19 @@ export default function Home() {
   }
 
   async function generateReport() {
+    // AUTH GATE: report creation (extraction, analysis, and the eventual
+    // POST /api/reports save) is an authenticated-account action only. This
+    // function is only ever wired to the anonymous Dashboard view's
+    // DocumentUploadPanel (an authenticated account's own check runs
+    // entirely through app/reports/rooms/[room]/room-page-shell.tsx's own
+    // runCheck instead), so this also guards against that view ever being
+    // reached without a signed-in account (see the view === "dashboard"
+    // render guard below).
+    if (!account) {
+      notify("Log in or create a free account to check a document.");
+      openAccountPage("login");
+      return;
+    }
     if (generationLockRef.current) {
       notify("Your current document is still being analyzed.");
       return;
@@ -1195,6 +1208,17 @@ export default function Home() {
   }
 
   function startNewCheck() {
+    // AUTH GATE: a new check (upload + generate) is an authenticated-account
+    // action only — see openAccountPage's own existing login/register flow,
+    // reused here rather than any new auth surface. This function is
+    // currently only wired to a button rendered for `!account` (the
+    // anonymous "reports" view's own "New check" action), so this guard is
+    // the actual behavior change; it also makes the function itself safe
+    // against any future anonymous call site.
+    if (!account) {
+      openAccountPage("login");
+      return;
+    }
     if (generationLockRef.current) {
       navigate("reports");
       notify("Please wait for the current report to finish before starting another check.");
@@ -1222,7 +1246,16 @@ export default function Home() {
    * behavior change at all.
    */
   function goToNewCheck() {
-    navigate(account ? "reports" : "dashboard");
+    // AUTH GATE: an unauthenticated visitor is never routed into the
+    // standalone (room-less) Dashboard upload flow any more — they are sent
+    // into the EXISTING login/register flow instead (openAccountPage), same
+    // as every other report/check CTA. A signed-in account keeps its
+    // existing "reports" (room-based new-check) destination unchanged.
+    if (!account) {
+      openAccountPage("login");
+      return;
+    }
+    navigate("reports");
   }
 
   async function clearHistory() {
@@ -1320,8 +1353,9 @@ export default function Home() {
               goToNewCheck's own comment), so for them this button would
               route to exactly the page "My reports" already does, doing
               nothing visible whenever that's already the current view.
-              Anonymous visitors are unaffected: the standalone Dashboard is
-              still their entire upload flow. */}
+              AUTH GATE: for an anonymous visitor, goToNewCheck no longer
+              opens the standalone Dashboard upload flow at all — it routes
+              into the existing login/register flow instead. */}
           {!account && (
             <button
               className={activeNavView === "dashboard" ? "active" : ""}
@@ -1368,7 +1402,7 @@ export default function Home() {
         {view !== "processing" && (
           <header className="topbar">
             <div>
-              <p className="eyebrow">{view === "legal" ? "TRUST CENTER" : view === "account" && accountLoaded && !account ? "OPTIONAL ACCOUNT" : "AI & SIMILARITY CHECKER"}</p>
+              <p className="eyebrow">{view === "legal" ? "TRUST CENTER" : view === "account" && accountLoaded && !account ? "ACCOUNT REQUIRED TO CHECK" : "AI & SIMILARITY CHECKER"}</p>
               <h1>
                 {view === "home" && "Overview"}
                 {view === "dashboard" && "Check AI writing and similarity"}
@@ -1445,67 +1479,91 @@ export default function Home() {
             </div>
 
             <div className="landing-bottom-cta">
-              <div><p className="section-label">READY WHEN YOU ARE</p><h2>Start with one document.</h2><p>No account is required for the local checking workflow.</p></div>
+              <div><p className="section-label">READY WHEN YOU ARE</p><h2>Start with one document.</h2><p>Log in or create a free account to run your first check.</p></div>
               <button className="button primary" type="button" onClick={goToNewCheck}><UploadCloud aria-hidden="true" /> Check a document</button>
             </div>
           </section>
         )}
 
         {view === "dashboard" && (
-          <section className="dashboard-grid">
-            <section className="upload-card surface-card">
-              <div className="card-heading">
-                <div>
-                  <p className="section-label">NEW CHECK</p>
-                  <h2>Upload your document</h2>
-                  <span>PDF, DOCX, TXT, MD, HTML, or CSV · up to 10 MB</span>
-                </div>
-                <span className="free-badge">FREE</span>
-              </div>
-
-              <DocumentUploadPanel
-                file={file}
-                isGeneratingReport={isGeneratingReport}
-                progress={progress}
-                processingLabel={processingLabel}
-                fileInputRef={fileInputRef}
-                onChooseFile={chooseFile}
-                onGenerate={generateReport}
-              />
-            </section>
-
-            <section className="dashboard-aside">
-              <article className="surface-card report-preview-card">
-                <p className="section-label">TWO REPORTS · ONE CHECK</p>
-                <h2>AI detection and similarity with clear evidence</h2>
-                <p>TurnitPlus checks AI-writing signals and measures similarity — searching millions of scholarly records across major academic indexes — then shows the passages behind each result.</p>
-                <div className="mini-report">
+          account ? (
+            <section className="dashboard-grid">
+              <section className="upload-card surface-card">
+                <div className="card-heading">
                   <div>
-                    <span>Similarity result</span>
-                    <strong>19%</strong>
-                    <small>Verified academic sources</small>
+                    <p className="section-label">NEW CHECK</p>
+                    <h2>Upload your document</h2>
+                    <span>PDF, DOCX, TXT, MD, HTML, or CSV · up to 10 MB</span>
                   </div>
-                  <div className="mini-lines">
-                    <i /><i /><i />
-                  </div>
+                  <span className="free-badge">FREE</span>
                 </div>
-                <ul className="feature-checks">
-                  <li><Check aria-hidden="true" /> AI-written content detection</li>
-                  <li><Check aria-hidden="true" /> Source similarity detection</li>
-                  <li><Check aria-hidden="true" /> Matched phrases highlighted in red</li>
-                  <li><Check aria-hidden="true" /> Downloadable full reports and receipt</li>
-                </ul>
-              </article>
 
-              <article className="surface-card privacy-card">
-                <ShieldCheck aria-hidden="true" />
-                <div>
-                  <strong>Private by design</strong>
-                  <p>No account is required to check a document. Reports stay on this device.</p>
-                </div>
-              </article>
+                <DocumentUploadPanel
+                  file={file}
+                  isGeneratingReport={isGeneratingReport}
+                  progress={progress}
+                  processingLabel={processingLabel}
+                  fileInputRef={fileInputRef}
+                  onChooseFile={chooseFile}
+                  onGenerate={generateReport}
+                />
+              </section>
+
+              <section className="dashboard-aside">
+                <article className="surface-card report-preview-card">
+                  <p className="section-label">TWO REPORTS · ONE CHECK</p>
+                  <h2>AI detection and similarity with clear evidence</h2>
+                  <p>TurnitPlus checks AI-writing signals and measures similarity — searching millions of scholarly records across major academic indexes — then shows the passages behind each result.</p>
+                  <div className="mini-report">
+                    <div>
+                      <span>Similarity result</span>
+                      <strong>19%</strong>
+                      <small>Verified academic sources</small>
+                    </div>
+                    <div className="mini-lines">
+                      <i /><i /><i />
+                    </div>
+                  </div>
+                  <ul className="feature-checks">
+                    <li><Check aria-hidden="true" /> AI-written content detection</li>
+                    <li><Check aria-hidden="true" /> Source similarity detection</li>
+                    <li><Check aria-hidden="true" /> Matched phrases highlighted in red</li>
+                    <li><Check aria-hidden="true" /> Downloadable full reports and receipt</li>
+                  </ul>
+                </article>
+
+                <article className="surface-card privacy-card">
+                  <ShieldCheck aria-hidden="true" />
+                  <div>
+                    <strong>Private by design</strong>
+                    <p>Documents are analyzed in your browser and never uploaded. Your report history is saved securely to your account.</p>
+                  </div>
+                </article>
+              </section>
             </section>
-          </section>
+          ) : (
+            // AUTH GATE (defense in depth): the "dashboard" view's upload
+            // controls are only ever navigated to for a signed-in account
+            // (see goToNewCheck/startNewCheck/generateReport's own guards) —
+            // this render-time fallback ensures that even if `view` state
+            // ever becomes "dashboard" without an account, no usable
+            // upload/check control is ever rendered, only a route into the
+            // existing login/register flow.
+            <section className="dashboard-grid">
+              <section className="upload-card surface-card auth-required-card">
+                <div className="card-heading">
+                  <div>
+                    <p className="section-label">LOG IN REQUIRED</p>
+                    <h2>Log in to start a check</h2>
+                    <span>Create a free account or log in to upload a document and generate a report.</span>
+                  </div>
+                </div>
+                <button className="button primary full" type="button" onClick={() => openAccountPage("login")}>
+                  <LogIn aria-hidden="true" /> Log in or create account
+                </button>
+              </section>
+            </section>
+          )
         )}
 
         {view === "account" && (
@@ -1935,7 +1993,10 @@ export default function Home() {
                 <FolderClock aria-hidden="true" />
                 <h3>No reports yet</h3>
                 <p>Your reports will appear here after you check a document.</p>
-                <button className="button primary" type="button" onClick={() => navigate("dashboard")}>Create a report</button>
+                {/* AUTH GATE: creating a new report is an authenticated-account
+                    action — routes into the existing login/register flow
+                    rather than the (now account-gated) standalone Dashboard. */}
+                <button className="button primary" type="button" onClick={() => openAccountPage("login")}>Log in to create a report</button>
               </div>
             ) : (
               <div className="report-history">

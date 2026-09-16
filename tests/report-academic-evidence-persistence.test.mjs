@@ -6,7 +6,9 @@ import { createClient } from '@libsql/client';
 import { applyMigrationsLibsql } from '../lib/ingest.ts';
 import * as reportsRoute from '../app/api/reports/route.ts';
 import * as reportIdRoute from '../app/api/reports/[id]/route.ts';
-import { resetRateForTest } from '../lib/rate-limit.ts';
+import * as signupRoute from '../app/api/auth/signup/route.ts';
+import { resetRateForTest, resetAuthRateForTest } from '../lib/rate-limit.ts';
+import { withTestIdentity } from './helpers/test-signup.mjs';
 
 /**
  * Phase 3 STEP 9 items 7, 8, 15 (persistence/round-trip aspects): proves
@@ -63,12 +65,33 @@ function samplePayload(overrides = {}) {
   };
 }
 
+// AUTH GATE (product requirement): a genuinely new report can no longer be
+// created anonymously at all (see app/api/reports/route.ts's own "AUTH GATE"
+// comment). This file's fixtures were never actually about anonymity — they
+// use a fresh, per-test device key only as a unique namespace — so postReport
+// now signs up a fresh throwaway account for that device key first, and every
+// getReport call carries that same account's session.
+async function signupFor(deviceKey, clientTag) {
+  await resetAuthRateForTest(clientTag + '-signup');
+  const email = `${clientTag}@example.test`;
+  const req = new Request('http://localhost/api/auth/signup', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-forwarded-for': clientTag + '-signup' },
+    body: JSON.stringify(withTestIdentity({ email, password: 'academic-evidence-fixture-pw', username: clientTag.replace(/[^a-z0-9]/gi, '').slice(0, 24) || 'academicevidenceuser', deviceKey })),
+  });
+  const res = await signupRoute.POST(req);
+  const setCookie = res.headers.get('set-cookie');
+  const match = setCookie ? setCookie.match(/tp_session_v1=([^;]*)/) : null;
+  return match ? match[1] : null;
+}
+
 async function postReport(deviceKey, clientTag, { payloadOverrides = {} } = {}) {
   await resetRateForTest(clientTag);
   const payload = samplePayload(payloadOverrides);
+  const cookie = await signupFor(deviceKey, clientTag);
   const req = new Request('http://localhost/api/reports', {
     method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-forwarded-for': clientTag },
+    headers: { 'content-type': 'application/json', 'x-forwarded-for': clientTag, cookie: `tp_session_v1=${cookie}` },
     body: JSON.stringify({
       deviceKey,
       id: String(payload.id),
@@ -80,27 +103,29 @@ async function postReport(deviceKey, clientTag, { payloadOverrides = {} } = {}) 
       scoreBand: 'Low',
       aiScore: null,
       aiTone: null,
+      room: 0,
       payload,
     }),
   });
   const res = await reportsRoute.POST(req);
-  return { res, payload };
+  return { res, payload, cookie };
 }
 
-async function getReport(deviceKey, id, clientTag) {
+async function getReport(deviceKey, id, clientTag, cookie) {
   await resetRateForTest(clientTag);
-  const req = new Request(`http://localhost/api/reports/${id}?deviceKey=${encodeURIComponent(deviceKey)}`, {
-    headers: { 'x-forwarded-for': clientTag },
-  });
+  const url = cookie ? `http://localhost/api/reports/${id}` : `http://localhost/api/reports/${id}?deviceKey=${encodeURIComponent(deviceKey)}`;
+  const headers = { 'x-forwarded-for': clientTag };
+  if (cookie) headers.cookie = `tp_session_v1=${cookie}`;
+  const req = new Request(url, { headers });
   return reportIdRoute.GET(req, { params: Promise.resolve({ id: String(id) }) });
 }
 
 test('STEP 9.15/7: a report saved WITHOUT externalAcademicEvidence round-trips with score/archiveScore untouched and the field absent', async () => {
   const deviceKey = 'device-no-evidence';
-  const { res: saveRes, payload } = await postReport(deviceKey, 'client-no-evidence');
+  const { res: saveRes, payload, cookie } = await postReport(deviceKey, 'client-no-evidence');
   assert.equal(saveRes.status, 200);
 
-  const getRes = await getReport(deviceKey, payload.id, 'client-no-evidence-get');
+  const getRes = await getReport(deviceKey, payload.id, 'client-no-evidence-get', cookie);
   assert.equal(getRes.status, 200);
   const body = await getRes.json();
 
@@ -109,15 +134,14 @@ test('STEP 9.15/7: a report saved WITHOUT externalAcademicEvidence round-trips w
   assert.equal('externalAcademicEvidence' in body.payload, false, 'the field must be entirely absent, not null/[]');
   // Phase D/E8C enrichments must still run normally — proves this phase's
   // change did not interfere with the existing read-time enrichment chain.
-  // matchClassification is undefined for an anonymous device-key report —
-  // no owning account to classify family membership against. Release-
-  // hardening audit finding UI-02: historicalSubmissionMatch is now
-  // admin-only (app/api/reports/[id]/route.ts's GET handler) — this
-  // anonymous request has no session at all, so it is undefined here too,
-  // for the same reason matchClassification already was, not a regression.
+  // Release-hardening audit finding UI-02: historicalSubmissionMatch is
+  // admin-only (app/api/reports/[id]/route.ts's GET handler) — this is an
+  // ordinary non-admin account (AUTH GATE: a genuinely new report can no
+  // longer be created anonymously at all), so it is undefined here for the
+  // same admin-gating reason, not a regression.
   // See tests/report-historical-match-visibility.test.mjs for dedicated
   // admin-vs-ordinary coverage.
-  assert.equal(body.payload.historicalSubmissionMatch, undefined, 'REQUIRED (UI-02): an anonymous viewer must never receive historicalSubmissionMatch');
+  assert.equal(body.payload.historicalSubmissionMatch, undefined, 'REQUIRED (UI-02): a non-admin viewer must never receive historicalSubmissionMatch');
 });
 
 test('STEP 9.7: a report saved WITH externalAcademicEvidence round-trips with the SAME score/archiveScore as an equivalent report without it', async () => {
@@ -125,15 +149,15 @@ test('STEP 9.7: a report saved WITH externalAcademicEvidence round-trips with th
   const deviceKeyB = 'device-without-evidence-cmp';
   const sharedOverrides = { title: 'compare.pdf', score: 41, archiveScore: 41, wordCount: 900 };
 
-  const { payload: payloadWith } = await postReport(deviceKeyA, 'client-with-evidence', {
+  const { payload: payloadWith, cookie: cookieWith } = await postReport(deviceKeyA, 'client-with-evidence', {
     payloadOverrides: { ...sharedOverrides, externalAcademicEvidence: EVIDENCE_FIXTURE },
   });
-  const { payload: payloadWithout } = await postReport(deviceKeyB, 'client-without-evidence-cmp', {
+  const { payload: payloadWithout, cookie: cookieWithout } = await postReport(deviceKeyB, 'client-without-evidence-cmp', {
     payloadOverrides: { ...sharedOverrides },
   });
 
-  const getWith = await getReport(deviceKeyA, payloadWith.id, 'client-with-evidence-get');
-  const getWithout = await getReport(deviceKeyB, payloadWithout.id, 'client-without-evidence-cmp-get');
+  const getWith = await getReport(deviceKeyA, payloadWith.id, 'client-with-evidence-get', cookieWith);
+  const getWithout = await getReport(deviceKeyB, payloadWithout.id, 'client-without-evidence-cmp-get', cookieWithout);
   const bodyWith = (await getWith.json()).payload;
   const bodyWithout = (await getWithout.json()).payload;
 
@@ -153,15 +177,15 @@ test('STEP 9.8: E8P-adjacent read-time fields (matchClassification, historicalSu
   const deviceKeyWithout = 'device-e8-without';
   const sharedText = 'identical submission text used to compare E8-adjacent enrichment behavior across both variants of this test';
 
-  const { payload: withEv } = await postReport(deviceKeyWith, 'client-e8-with', {
+  const { payload: withEv, cookie: cookieWith } = await postReport(deviceKeyWith, 'client-e8-with', {
     payloadOverrides: { text: sharedText, externalAcademicEvidence: EVIDENCE_FIXTURE },
   });
-  const { payload: withoutEv } = await postReport(deviceKeyWithout, 'client-e8-without', {
+  const { payload: withoutEv, cookie: cookieWithout } = await postReport(deviceKeyWithout, 'client-e8-without', {
     payloadOverrides: { text: sharedText },
   });
 
-  const getWith = await getReport(deviceKeyWith, withEv.id, 'client-e8-with-get');
-  const getWithout = await getReport(deviceKeyWithout, withoutEv.id, 'client-e8-without-get');
+  const getWith = await getReport(deviceKeyWith, withEv.id, 'client-e8-with-get', cookieWith);
+  const getWithout = await getReport(deviceKeyWithout, withoutEv.id, 'client-e8-without-get', cookieWithout);
   const envelopeWith = await getWith.json();
   const envelopeWithout = await getWithout.json();
   const bodyWith = envelopeWith.payload;

@@ -141,20 +141,23 @@ test('SAVE ROUTE: POST /api/reports does not import or call the historical match
 
 // --- REGRESSION: existing save/get/delete round trip still works -------------
 
-test('REGRESSION: save -> get -> delete round trip still works exactly as before (anonymous device path)', async () => {
+test('REGRESSION: save -> get -> delete round trip still works exactly as before (authenticated)', async () => {
+  // AUTH GATE: a genuinely new report can no longer be created anonymously
+  // at all — this round trip was never actually about anonymity.
   const deviceKey = 'ehist-device-regression';
-  const { res: postRes, id } = await postReport(deviceKey, { title: 'regression.pdf', text: 'regression fixture text' });
+  const { cookie } = await signup('ehist-regression@example.test', deviceKey);
+  const { res: postRes, id } = await postReport(deviceKey, { cookie, title: 'regression.pdf', text: 'regression fixture text' });
   assert.equal(postRes.status, 200);
 
-  const getRes = await getReport(id, { deviceKey });
+  const getRes = await getReport(id, { cookie });
   assert.equal(getRes.status, 200);
   const body = await getRes.json();
   assert.equal(body.payload.title, 'regression.pdf');
 
-  const deleteRes = await deleteReport(id, { deviceKey });
+  const deleteRes = await deleteReport(id, { cookie });
   assert.equal(deleteRes.status, 200);
 
-  const getAfterDelete = await getReport(id, { deviceKey });
+  const getAfterDelete = await getReport(id, { cookie });
   assert.equal(getAfterDelete.status, 404, 'REGRESSION: 404 must remain 404 after deletion');
 });
 
@@ -166,10 +169,13 @@ test('REGRESSION: 404 remains 404 for a nonexistent report id', async () => {
 // --- PRODUCTION SCORE UNCHANGED (section 26) ----------------------------------
 
 test('PRODUCTION SCORE: score and archiveScore in the GET response are exactly what was saved, unaffected by historicalSubmissionMatch', async () => {
+  // AUTH GATE: a genuinely new report can no longer be created anonymously
+  // at all — this was never actually about anonymity.
   const deviceKey = 'ehist-device-score';
-  const { id } = await postReport(deviceKey, { text: 'score fixture text with distinctive wording for this specific test case only', score: 19, archiveScore: 19 });
+  const { cookie } = await signup('ehist-score@example.test', deviceKey);
+  const { id } = await postReport(deviceKey, { cookie, text: 'score fixture text with distinctive wording for this specific test case only', score: 19, archiveScore: 19 });
 
-  const getRes = await getReport(id, { deviceKey });
+  const getRes = await getReport(id, { cookie });
   const body = await getRes.json();
   assert.equal(body.payload.score, 19, 'production score must remain exactly what was saved');
   assert.equal(body.payload.archiveScore, 19, 'archive overlap must remain exactly what was saved');
@@ -260,8 +266,27 @@ test('ANONYMOUS: an anonymous report still loads normally and, if a match exists
   await matureCorpusBackings(client); // Phase A: age the seeded backing so it is matchable "now"
   client.close();
 
+  // AUTH GATE: a genuinely new report can no longer be created anonymously
+  // at all via POST /api/reports (see app/api/reports/route.ts's own "AUTH
+  // GATE" comment) — and a genuine first save through that live route always
+  // runs write-time finalization with the REAL uploader's accountId, which
+  // would cache a snapshot classified against THAT account, not the null
+  // accountId this scenario is actually about. So this genuinely-anonymous
+  // (user_id IS NULL) fixture is inserted directly instead, matching this
+  // codebase's own established "legacy row" pattern (see
+  // tests/report-write-time-finalization.test.mjs's own insertLegacyRow) —
+  // it never goes through write-time finalization at all, so the direct
+  // getOrComputeHistoricalMatchSnapshot(accountId: null) call below is a
+  // genuine first computation, not a cache hit against some other account.
   const deviceKey = 'ehist-device-anonymous';
-  const { id } = await postReport(deviceKey, { text });
+  const id = nextId();
+  const legacyClient = createClient({ url: `file:${dbFile}` });
+  await legacyClient.execute({
+    sql: reportsRoute.SAVE_REPORT_SQL,
+    args: [id, deviceKey, 'sub-' + id, 'anonymous.pdf', new Date().toISOString(), 100, 9, 'Low', null, null, null, JSON.stringify({ version: 11, id: Date.now(), submissionId: 'sub-' + id, title: 'anonymous.pdf', author: '', assignment: '', created: new Date().toISOString(), score: 12, archiveScore: 9, text, wordCount: 100, characterCount: 500, pageCount: 1, fileSize: '1 KB', databaseSize: 230, corpusVersion: 'test', scoreBand: 'Low' }), null, null],
+  });
+  legacyClient.close();
+
   const getRes = await getReport(id, { deviceKey });
   assert.equal(getRes.status, 200, 'an anonymous report must still load normally');
   const body = await getRes.json();
