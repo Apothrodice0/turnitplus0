@@ -358,8 +358,13 @@ test("LIFECYCLE-06 CORRECTED REVEAL GATE (structural): revealState comes ONLY fr
   // (never a bare, unconditional render) — "revealed" no longer strictly
   // implies a numeric similarity result, since a genuine terminal failure
   // also reveals.
-  assert.match(shell, /revealState\.similarityUnavailable \? "Unavailable" : `\$\{primaryScore\}% \$\{primaryLabel\}`/, "the summary score chip must show literal Unavailable text, never a number, when similarity genuinely, terminally failed");
-  assert.match(shell, /revealState\.similarityUnavailable \? "—" : `\$\{primaryScore\}%`/, "the inspector score card must also suppress the numeric score when similarity genuinely, terminally failed");
+  // Report-redesign <1% rounding fix: both raw `${primaryScore}%` templates
+  // were replaced with formatSimilarityPercent(primaryScore, ...) so a
+  // genuine positive overlap that rounds to 0 reads as "<1%" rather than a
+  // false "0%" — the "Unavailable"/"—" branches (this assertion's real
+  // subject) are untouched.
+  assert.match(shell, /revealState\.similarityUnavailable \? "Unavailable" : `\$\{formatSimilarityPercent\(primaryScore, primaryMatchedWordCount\(report\)\)\} \$\{primaryLabel\}`/, "the summary score chip must show literal Unavailable text, never a number, when similarity genuinely, terminally failed");
+  assert.match(shell, /revealState\.similarityUnavailable \? "—" : formatSimilarityPercent\(primaryScore, primaryMatchedWordCount\(report\)\)/, "the inspector score card must also suppress the numeric score when similarity genuinely, terminally failed");
 
   // OverviewReport must be told the real (possibly "failed") similarity
   // status explicitly — "revealed" no longer strictly implies "resolved",

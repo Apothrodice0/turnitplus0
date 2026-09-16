@@ -8,6 +8,7 @@ import { analyzeArchive } from "@/lib/archive-analysis-runtime";
 import {
   hasUnifiedSimilarity,
   PRIMARY_SIMILARITY_BAND_LABELS,
+  primaryMatchedWordCount,
   primarySimilarityScore,
   unifiedEvidenceSummary,
   type SimilarityReport,
@@ -206,6 +207,17 @@ export async function analyzeText(
   fileName: string,
   fileSize: number,
   onProgress: (progress: number, label: string) => void,
+  /**
+   * Receipt/report presentation fix: the authenticated account's own
+   * identity (e.g. its email) — report writes require authentication (see
+   * app/api/reports/route.ts's POST auth gate), so both call sites
+   * (app/page.tsx's generateReport(), room-page-shell.tsx's runCheck()) always
+   * have a real signed-in account by the time this runs and must pass it
+   * here, rather than this function inventing the previous hardcoded
+   * "Guest submission" placeholder for every report regardless of who
+   * created it.
+   */
+  author: string,
 ): Promise<SimilarityReport> {
   // slice 2E: the archive engine (browser static-index worker vs server DB
   // matcher) is chosen inside analyzeArchive, once per page load, from
@@ -221,8 +233,15 @@ export async function analyzeText(
     id: Date.now(),
     submissionId: String(Date.now()).slice(-10),
     title: fileName,
-    author: "Guest submission",
-    assignment: "Personal similarity check",
+    author,
+    // Report-redesign receipt fix: there is no real "assignment" concept for
+    // a personal similarity check — an empty string (rather than the
+    // previous invented "Personal similarity check" label) lets every
+    // display site (lib/receipt-pdf.ts) omit the row entirely instead of
+    // showing a fabricated generic value. SimilarityReport.assignment stays
+    // a required string field — untouched elsewhere — this is the only
+    // producer that ever sets it to genuinely empty.
+    assignment: "",
     created: now.toISOString(),
     score: result.score,
     archiveScore: result.score,
@@ -505,7 +524,13 @@ export async function downloadReceipt(report: SimilarityReport) {
       evidenceSummary: unifiedEvidenceSummary(report.unifiedSimilarity),
     }
     : undefined;
-  const blob = await createReceiptPdf({ ...report, unified });
+  // Receipt presentation fix: report.matchedWordCount (spread from `report`
+  // below) is the raw archive-only count — the same "229 vs 333" mismatch
+  // class this redesign's authoritative-vs-legacy source split fixes
+  // elsewhere. Overridden explicitly with the SAME selector the report/
+  // screen use, so the receipt's own matched-word figure and <1% rounding
+  // policy never disagree with them.
+  const blob = await createReceiptPdf({ ...report, unified, matchedWordCount: primaryMatchedWordCount(report) });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   const baseName = report.title.replace(/\.[^.]+$/, "").replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "");

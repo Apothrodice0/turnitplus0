@@ -1,26 +1,36 @@
 "use client";
 
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import {
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   CircleCheck,
   CircleHelp,
+  Download,
   ExternalLink,
   Files,
   GitCompareArrows,
   LayoutTemplate,
+  Printer,
   Quote,
   Search,
   TriangleAlert,
 } from "lucide-react";
-import type { SimilarityReport } from "@/lib/report-types";
+import { similarityScoreBand } from "@/lib/ai-core";
+import { PRIMARY_SIMILARITY_BAND_LABELS, formatSimilarityPercent, type SimilarityReport } from "@/lib/report-types";
 import type { EvidenceInterpretationKind } from "@/lib/evidence-interpretation/kinds";
 import {
   buildReportV2ViewModel,
+  resolveWorkspacePassageSelection,
+  stepWorkspaceSelection,
   type ReportV2Filter,
   type ReportV2Passage,
   type ReportV2SourceCard,
   type ReportV2ViewModel,
+  type ReportV2WorkspaceSelection,
 } from "@/lib/report-v2-view";
+import { ReportPageFooter, ReportPageHeader } from "../report-page-chrome";
 
 /**
  * REPORT V2 UI — first screen + passage review + source cards, rendered from
@@ -177,7 +187,7 @@ function FirstScreen({ vm }: { vm: ReportV2ViewModel }) {
       <section className="rv2-section rv2-headline" aria-labelledby="rv2-headline-title">
         <h2 id="rv2-headline-title">{vm.headlineLabel}</h2>
         <p className="rv2-headline-value">
-          <strong>{verifiedSimilarityPercent}%</strong>
+          <strong>{formatSimilarityPercent(verifiedSimilarityPercent, matchedWordCount)}</strong>
         </p>
         <p className="rv2-headline-sub">
           {matchedWordCount.toLocaleString()} of {totalWordCount.toLocaleString()} matched words
@@ -497,26 +507,427 @@ export function ReportV2View({ report }: { report: SimilarityReport }) {
   );
 }
 
-/** Static, print-friendly variant — same content, no interactive filter bar. */
+/**
+ * Report-redesign PDF fix — PAGE 1 of the dedicated print/export sequence:
+ * the verified overview only (score, breakdown, top sources, completion).
+ * Deliberately excludes the old per-passage card catalogue that used to
+ * precede the manuscript in print (all N highlighted passages, one full card
+ * each) — that wall belongs on screen, inside the interactive "Overlap
+ * breakdown" tab (see PassageReview above), never duplicated into a static
+ * export where a reader cannot filter it. The manuscript itself (rendered
+ * immediately after this in the print bundle — see
+ * app/reports/[id]/report-detail-shell.tsx) already shows every matched
+ * passage in place, in context. Wrapped in the same `.report-paper` shell
+ * (and the shared TurnitPlus chrome) the legacy print papers use, so it
+ * picks up the exact same `.print-report-bundle .report-paper` pagination
+ * rules — one real page, real TurnitPlus branding, no "T+ integrity".
+ */
+export function ReportV2PrintOverview({ report }: { report: SimilarityReport }) {
+  const vm = buildReportV2ViewModel(report);
+  if (!vm) return null;
+  return (
+    <article className="report-paper rv2-print-paper">
+      <ReportPageHeader report={report} page={1} total={3} label="Similarity Overview" />
+      <div className="paper-content">
+        <div className="report-v2 report-v2-print">
+          <FirstScreen vm={vm} />
+        </div>
+      </div>
+      <ReportPageFooter report={report} page={1} total={3} label="Similarity Overview" />
+    </article>
+  );
+}
+
+/**
+ * Report-redesign PDF fix — FINAL page(s): a compact per-source appendix
+ * only (number, title, type, URL/DOI, matched words, match references) —
+ * never the full similarity overview a second time. Placed after the
+ * manuscript in the print bundle.
+ */
+export function ReportV2PrintSourceAppendix({ report }: { report: SimilarityReport }) {
+  const vm = buildReportV2ViewModel(report);
+  // Blank-page fix: SourceCards itself renders nothing for a zero-verified-
+  // source report (see its own vm.sources.length === 0 guard) — without this
+  // check the wrapping .report-paper chrome (header/footer, one physical
+  // page) would still print, leaving a near-empty final page for exactly the
+  // "0 matches" case this redesign's own test matrix calls out.
+  if (!vm || vm.sources.length === 0) return null;
+  return (
+    <article className="report-paper rv2-print-paper">
+      <ReportPageHeader report={report} page={3} total={3} label="Source Details" />
+      <div className="paper-content">
+        <div className="report-v2 report-v2-print">
+          <SourceCards vm={vm} />
+        </div>
+      </div>
+      <ReportPageFooter report={report} page={3} total={3} label="Source Details" />
+    </article>
+  );
+}
+
+/**
+ * Static, print-friendly variant — same content, no interactive filter bar,
+ * no passage-card catalogue. Kept as a single combined component for
+ * existing callers/tests; app/reports/[id]/report-detail-shell.tsx's own
+ * print bundle uses ReportV2PrintOverview/ReportV2PrintSourceAppendix
+ * directly instead, so the manuscript can render between them.
+ */
 export function ReportV2Print({ report }: { report: SimilarityReport }) {
   const vm = buildReportV2ViewModel(report);
   if (!vm) return null;
   return (
     <div className="report-v2 report-v2-print">
       <FirstScreen vm={vm} />
-      <section className="rv2-section" aria-label="Highlighted passages">
-        <h3>Passages to review ({vm.filterCounts.all})</h3>
-        {vm.hasPassages ? (
-          <ol className="rv2-passage-list">
-            {vm.passages.map((p) => (
-              <PassageRow key={p.id} passage={p} sources={vm.sources} />
-            ))}
-          </ol>
-        ) : (
-          <p className="rv2-empty">No passages were highlighted in your document.</p>
-        )}
-      </section>
       <SourceCards vm={vm} />
+    </div>
+  );
+}
+
+// ── interactive workspace (screen only) ─────────────────────────────────
+// A stable per-source colour identity, layered on top of (never replacing)
+// the existing per-KIND tone colouring findHighlightRanges/KIND_CLASS
+// already provide — the source NUMBER is always shown too (never colour
+// alone), matching this redesign's own accessibility requirement.
+const WORKSPACE_SOURCE_COLORS = ["#0f7ea8", "#7b3fe4", "#0f9d58", "#c2410c", "#be185d", "#4338ca", "#0d9488", "#a16207"];
+function workspaceSourceColor(index: number): string {
+  return WORKSPACE_SOURCE_COLORS[index % WORKSPACE_SOURCE_COLORS.length];
+}
+
+/** "...context [MATCHED] context..." around one passage's real, verified character range — never the source's own text (see ReportEvidencePassage's own comment: no such text exists in this payload). */
+function submittedContextAround(text: string, charStart: number, charEnd: number, pad = 70) {
+  return {
+    before: text.slice(Math.max(0, charStart - pad), charStart),
+    matched: text.slice(charStart, charEnd),
+    after: text.slice(charEnd, Math.min(text.length, charEnd + pad)),
+  };
+}
+
+/**
+ * The manuscript pane — the SAME char-range/tone/kind rendering
+ * HighlightedDocument (above) already uses for the interactive passage
+ * review, reused rather than reinvented so RTL/mixed-direction/typography
+ * behavior is byte-identical to what already ships. Adds only: a clickable
+ * mark (keyboard-reachable), a stable per-source number badge, and a
+ * stronger visual state for the currently active match.
+ */
+function WorkspaceManuscript({
+  report,
+  vm,
+  activePassageId,
+  onSelectPassage,
+}: {
+  report: SimilarityReport;
+  vm: ReportV2ViewModel;
+  activePassageId: number | null;
+  onSelectPassage: (passageId: number) => void;
+}) {
+  const text = report.text ?? "";
+  const sourceIndexById = useMemo(() => {
+    const map = new Map<string, number>();
+    vm.sources.forEach((source, index) => map.set(source.id, index));
+    return map;
+  }, [vm.sources]);
+  const runs = useMemo(
+    () => vm.passages.filter((p) => p.charStart !== null && p.charEnd !== null).sort((a, b) => a.charStart! - b.charStart!),
+    [vm.passages],
+  );
+
+  if (text.length === 0) {
+    return <p className="rv2-empty">Your submitted text is not available for inline highlighting.</p>;
+  }
+  if (runs.length === 0) {
+    return <div className="rv2-doc rv2-doc-plain rv2ws-manuscript">{text}</div>;
+  }
+
+  const pieces: ReactNode[] = [];
+  let cursor = 0;
+  runs.forEach((p, idx) => {
+    const start = Math.max(cursor, p.charStart!);
+    const end = Math.max(start, p.charEnd!);
+    if (start > cursor) pieces.push(<span key={`t-${idx}`}>{text.slice(cursor, start)}</span>);
+    const firstSourceId = p.sourceIds[0];
+    const sourceIndex = firstSourceId !== undefined ? sourceIndexById.get(firstSourceId) : undefined;
+    const isActive = p.id === activePassageId;
+    const markStyle: CSSProperties | undefined =
+      sourceIndex !== undefined ? { boxShadow: `inset 3px 0 0 ${workspaceSourceColor(sourceIndex)}` } : undefined;
+    pieces.push(
+      <mark
+        key={`m-${p.id}`}
+        id={`rv2ws-mark-${p.id}`}
+        className={`rv2-mark rv2-tone-${p.tone} ${KIND_CLASS[p.kind]} rv2ws-mark${isActive ? " rv2ws-mark-active" : ""}`}
+        style={markStyle}
+        role="button"
+        tabIndex={0}
+        aria-pressed={isActive}
+        aria-label={`${p.label}${sourceIndex !== undefined ? `, source ${sourceIndex + 1}` : ""}`}
+        onClick={() => onSelectPassage(p.id)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            onSelectPassage(p.id);
+          }
+        }}
+      >
+        {text.slice(start, end)}
+        {sourceIndex !== undefined && (
+          <sup className="rv2ws-mark-number" style={{ background: workspaceSourceColor(sourceIndex) }} aria-hidden="true">
+            {sourceIndex + 1}
+          </sup>
+        )}
+      </mark>,
+    );
+    cursor = end;
+  });
+  if (cursor < text.length) pieces.push(<span key="t-tail">{text.slice(cursor)}</span>);
+
+  return <div className="rv2-doc rv2ws-manuscript">{pieces}</div>;
+}
+
+/**
+ * REPORT REDESIGN — the canonical, single customer-facing similarity
+ * workspace for a report with a verified V2 payload: manuscript on the
+ * left, one authoritative score + source inspector + match navigation on
+ * the right. Derives everything from buildReportV2ViewModel — the same
+ * server-authoritative view model FirstScreen/SourceCards already use — and
+ * recomputes NO score, NO matched position. `onShowLegacy`, when provided
+ * (admin only — see app/reports/[id]/report-detail-shell.tsx's own call
+ * site), surfaces a single, unobtrusive link back to the old raw
+ * tab-per-view presentation for internal/compatibility use; an ordinary
+ * customer never sees it.
+ */
+export function ReportV2Workspace({
+  report,
+  onDownloadReport,
+  onDownloadReceipt,
+  isDownloadingReceipt = false,
+  onShowLegacy,
+}: {
+  report: SimilarityReport;
+  /** Existing window.print() mechanism, unchanged — this redesign task explicitly does not touch PDF export; this only relocates the same action into the compact workspace toolbar. */
+  onDownloadReport?: () => void;
+  onDownloadReceipt?: () => void;
+  isDownloadingReceipt?: boolean;
+  onShowLegacy?: () => void;
+}) {
+  const vm = useMemo(() => buildReportV2ViewModel(report), [report]);
+  const [selection, setSelection] = useState<ReportV2WorkspaceSelection>(null);
+  // Mobile/tablet only (see .rv2ws-panel's own CSS) — the desktop panel is
+  // always visible regardless of this flag.
+  const [panelOpen, setPanelOpen] = useState(false);
+
+  const selectedSource = vm && selection ? vm.sources.find((s) => s.id === selection.sourceId) ?? null : null;
+  const sortedRefs = useMemo(
+    () => (selectedSource ? [...selectedSource.passageRefs].sort((a, b) => a - b) : []),
+    [selectedSource],
+  );
+  const activePassageId = selectedSource && selection && sortedRefs.length > 0 ? sortedRefs[selection.passageIndex] ?? null : null;
+  const activePassage = vm && activePassageId != null ? vm.passages.find((p) => p.id === activePassageId) ?? null : null;
+  const matchContext =
+    activePassage && activePassage.charStart !== null && activePassage.charEnd !== null
+      ? submittedContextAround(report.text ?? "", activePassage.charStart, activePassage.charEnd)
+      : null;
+
+  // Selecting a match (from either the manuscript or the source panel)
+  // scrolls the manuscript to it — the source panel's own selected state
+  // needs no scroll, it is already on screen.
+  useEffect(() => {
+    if (activePassageId == null) return;
+    const el = document.getElementById(`rv2ws-mark-${activePassageId}`);
+    el?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [activePassageId]);
+
+  if (!vm) return null;
+
+  function selectSource(sourceId: string) {
+    setSelection({ sourceId, passageIndex: 0 });
+    setPanelOpen(true);
+  }
+
+  function selectPassage(passageId: number) {
+    const next = resolveWorkspacePassageSelection(vm!, passageId);
+    if (!next) return;
+    setSelection(next);
+    setPanelOpen(true);
+  }
+
+  function stepMatch(delta: number) {
+    setSelection((current) => stepWorkspaceSelection(current, sortedRefs.length, delta));
+  }
+
+  const verdict = similarityScoreBand(vm.summary.verifiedSimilarityPercent);
+  const percentDisplay = formatSimilarityPercent(vm.summary.verifiedSimilarityPercent, vm.summary.matchedWordCount);
+  const selectedSourceIndex = selectedSource ? vm.sources.findIndex((s) => s.id === selectedSource.id) : -1;
+  // Concise version of the SAME state CompletionStrip renders in full below
+  // — never a second, independently-derived completion computation.
+  const toolbarStatus = vm.summary.completion.state === "COMPLETED" ? "Completed" : "Needs attention";
+
+  return (
+    <div className="rv2ws">
+      {(onDownloadReport || onDownloadReceipt) && (
+        <div className="rv2ws-toolbar">
+          <span className={`rv2ws-toolbar-status${vm.summary.completion.state === "COMPLETED" ? "" : " rv2ws-toolbar-status-attention"}`}>{toolbarStatus}</span>
+          <span className="rv2ws-toolbar-actions">
+            {onDownloadReport && (
+              <button type="button" className="button secondary" onClick={onDownloadReport}>
+                <Printer aria-hidden="true" />
+                Download report
+              </button>
+            )}
+            {onDownloadReceipt && (
+              <button type="button" className="button secondary" onClick={onDownloadReceipt} disabled={isDownloadingReceipt}>
+                <Download aria-hidden="true" />
+                {isDownloadingReceipt ? "Preparing…" : "Download receipt"}
+              </button>
+            )}
+          </span>
+        </div>
+      )}
+      <div className="rv2ws-body">
+        <div className="rv2ws-manuscript-pane">
+          <WorkspaceManuscript report={report} vm={vm} activePassageId={activePassageId} onSelectPassage={selectPassage} />
+        </div>
+
+        <aside className={`rv2ws-panel${panelOpen ? " rv2ws-panel-open" : ""}`} aria-label="Similarity sources and matches">
+          <div className="rv2ws-panel-scroll">
+            <div className={`rv2ws-score${verdict ? ` rv2ws-score-${verdict.key}` : ""}`}>
+              <span>Similarity</span>
+              <strong>{percentDisplay}</strong>
+              {verdict && <em>{PRIMARY_SIMILARITY_BAND_LABELS[verdict.key]}</em>}
+              <div className="rv2ws-score-metrics">
+                <div><b>{vm.summary.matchedWordCount.toLocaleString()}</b><span>Matched words</span></div>
+                <div><b>{vm.summary.totalWordCount.toLocaleString()}</b><span>Analyzed</span></div>
+                <div><b>{vm.summary.distinctVerifiedSources}</b><span>Verified source{vm.summary.distinctVerifiedSources === 1 ? "" : "s"}</span></div>
+              </div>
+            </div>
+
+            <CompletionStrip vm={vm} />
+
+            <div className="rv2ws-sources">
+              <h3>Sources</h3>
+              {vm.sources.length === 0 ? (
+                <p className="rv2-empty">No verified sources for this submission.</p>
+              ) : (
+                <ul className="rv2ws-source-list">
+                  {vm.sources.map((source, index) => {
+                    const isSelected = selection?.sourceId === source.id;
+                    return (
+                      <li key={source.id}>
+                        <button
+                          type="button"
+                          className={`rv2ws-source-row${isSelected ? " is-active" : ""}`}
+                          aria-pressed={isSelected}
+                          onClick={() => (isSelected ? setSelection(null) : selectSource(source.id))}
+                        >
+                          <span className="rv2ws-source-number" style={{ background: workspaceSourceColor(index) }} aria-hidden="true">
+                            {index + 1}
+                          </span>
+                          <span className="rv2ws-source-body">
+                            <span className="rv2ws-source-title">{source.label}</span>
+                            <span className="rv2ws-source-meta">
+                              <span className="rv2ws-source-badge">{source.badge}</span>
+                              {source.matchedWords.toLocaleString()} words · {formatSimilarityPercent(source.contributionPercent, source.matchedWords)}
+                              {source.passageRefs.length > 0 ? ` · ${source.passageRefs.length} match${source.passageRefs.length === 1 ? "" : "es"}` : ""}
+                            </span>
+                          </span>
+                          <ChevronDown aria-hidden="true" className={`rv2ws-source-chevron${isSelected ? " is-open" : ""}`} />
+                        </button>
+
+                        {isSelected && (
+                          <div className="rv2ws-source-detail">
+                            {sortedRefs.length > 0 ? (
+                              <>
+                                <div className="rv2ws-match-nav">
+                                  <button type="button" onClick={() => stepMatch(-1)} disabled={selection!.passageIndex === 0} aria-label="Previous match">
+                                    <ChevronLeft aria-hidden="true" />
+                                  </button>
+                                  <span>Match {selection!.passageIndex + 1} of {sortedRefs.length}</span>
+                                  <button
+                                    type="button"
+                                    onClick={() => stepMatch(1)}
+                                    disabled={selection!.passageIndex === sortedRefs.length - 1}
+                                    aria-label="Next match"
+                                  >
+                                    <ChevronRight aria-hidden="true" />
+                                  </button>
+                                </div>
+
+                                {activePassage && (
+                                  <div className="rv2ws-match-detail">
+                                    <p className="rv2ws-match-detail-label">Submitted text</p>
+                                    <p className="rv2ws-match-detail-text">
+                                      {matchContext ? (
+                                        <>
+                                          <span className="rv2ws-context">…{matchContext.before}</span>
+                                          <mark className="rv2ws-match-highlight">{matchContext.matched}</mark>
+                                          <span className="rv2ws-context">{matchContext.after}…</span>
+                                        </>
+                                      ) : (
+                                        activePassage.excerpt
+                                      )}
+                                    </p>
+                                    <p className="rv2ws-match-detail-label">Supporting source</p>
+                                    {/* ReportEvidencePassage carries no source-side text at all
+                                        (see report-payload-types.ts's own comment) — never
+                                        fabricated here. */}
+                                    <p className="rv2ws-source-unavailable">Source passage unavailable.</p>
+                                  </div>
+                                )}
+                              </>
+                            ) : (
+                              <p className="rv2-empty">
+                                This source has no individually highlighted passage — its match covers the submission as a whole.
+                              </p>
+                            )}
+                            <p className="rv2ws-source-meaning">{source.meaning}</p>
+                            {source.link ? (
+                              <a href={source.link} target="_blank" rel="noreferrer" className="rv2ws-source-open">
+                                Open source <ExternalLink aria-hidden="true" />
+                              </a>
+                            ) : source.doi ? (
+                              <span className="rv2ws-source-doi">DOI: {source.doi}</span>
+                            ) : null}
+                          </div>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
+
+            {onShowLegacy && (
+              <button type="button" className="rv2ws-legacy-link" onClick={onShowLegacy}>
+                View legacy diagnostic views (admin)
+              </button>
+            )}
+          </div>
+        </aside>
+      </div>
+
+      {/* Mobile/tablet only — see .rv2ws-mobile-bar's own CSS (hidden at
+          desktop widths). Keeps the score, active match navigation, and a
+          way to open the source panel reachable without the permanent
+          360px side-by-side column the desktop layout uses. */}
+      <div className="rv2ws-mobile-bar">
+        <span className="rv2ws-mobile-score">
+          {percentDisplay}
+          {selectedSourceIndex >= 0 ? ` · Source ${selectedSourceIndex + 1}` : ""}
+        </span>
+        {selectedSource && sortedRefs.length > 0 && (
+          <span className="rv2ws-mobile-nav">
+            <button type="button" onClick={() => stepMatch(-1)} disabled={selection!.passageIndex === 0} aria-label="Previous match">
+              <ChevronLeft aria-hidden="true" />
+            </button>
+            Match {selection!.passageIndex + 1} of {sortedRefs.length}
+            <button type="button" onClick={() => stepMatch(1)} disabled={selection!.passageIndex === sortedRefs.length - 1} aria-label="Next match">
+              <ChevronRight aria-hidden="true" />
+            </button>
+          </span>
+        )}
+        <button type="button" className="rv2ws-mobile-toggle" onClick={() => setPanelOpen((open) => !open)} aria-expanded={panelOpen}>
+          {panelOpen ? "Close" : "Sources"}
+        </button>
+      </div>
     </div>
   );
 }

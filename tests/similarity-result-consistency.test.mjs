@@ -394,7 +394,12 @@ test('SIM-01/receipt cleanup RECEIPT (structural): downloadReceipt passes primar
   assert.match(pipeline, /hasUnifiedSimilarity\(report\)/);
 
   const receipt = await fs.promises.readFile(path.join(repo, 'lib/receipt-pdf.ts'), 'utf8');
-  assert.match(receipt, /rows\.push\(\{ label: "TurnitPlus Similarity", value: `\$\{report\.unified\.score\}% - \$\{report\.unified\.label\}` \}\);/, 'the receipt\'s headline row must be the unified/combined result when present');
+  // Report-redesign <1% rounding fix: report.unified.score is now passed
+  // through formatSimilarityPercent (same policy as the report/screen) so a
+  // genuine positive overlap that rounds to 0 reads "<1%" rather than a
+  // false "0%" — still the SAME unified/combined score, never a second,
+  // competing figure (this test's real subject, re-asserted below).
+  assert.match(receipt, /rows\.push\(\{ label: "TurnitPlus Similarity", value: `\$\{formatSimilarityPercent\(report\.unified\.score, report\.matchedWordCount \?\? 0\)\} - \$\{report\.unified\.label\}` \}\);/, 'the receipt\'s headline row must be the unified/combined result when present');
   // Receipt presentation fix: a second "Similarity result (component)" row
   // — the archive-only score, individually correct but presented directly
   // beneath the real TurnitPlus Similarity headline — read as the system
@@ -581,7 +586,12 @@ test('LIFECYCLE-04/06 SIDEBAR/WIRING (structural): the ENTIRE report render — 
   // The summary-strip chip and sidebar score render primaryScore only once
   // revealState.similarityUnavailable is ruled out — never a guessed
   // number for a similarity that genuinely, terminally failed.
-  assert.match(shell, /revealState\.similarityUnavailable \? "Unavailable" : `\$\{primaryScore\}% \$\{primaryLabel\}`/, 'the summary-strip score chip must show literal Unavailable text, never a number, when similarity genuinely, terminally failed');
+  // Report-redesign <1% rounding fix: the raw `${primaryScore}%` template
+  // was replaced with formatSimilarityPercent(primaryScore, ...) so a
+  // genuine positive overlap that rounds to 0 reads as "<1%" rather than a
+  // false "0%" — the "Unavailable" branch (this assertion's real subject)
+  // is untouched.
+  assert.match(shell, /revealState\.similarityUnavailable \? "Unavailable" : `\$\{formatSimilarityPercent\(primaryScore, primaryMatchedWordCount\(report\)\)\} \$\{primaryLabel\}`/, 'the summary-strip score chip must show literal Unavailable text, never a number, when similarity genuinely, terminally failed');
   assert.doesNotMatch(shell, /similarityStatusLabel/, 'the old pending/stale label variable must be gone entirely — revealState.similarityUnavailable is the only gate now');
 });
 

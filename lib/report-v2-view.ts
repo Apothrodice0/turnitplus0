@@ -433,3 +433,50 @@ export function buildReportV2ViewModel(report: SimilarityReport): ReportV2ViewMo
 export function reportV2MatchedWordCount(report: SimilarityReport): number {
   return report.evidenceInterpretation?.matchedWordCount ?? primaryMatchedWordCount(report);
 }
+
+// ── screen workspace selection (pure — no React) ─────────────────────────
+// Kept here, not inline in components/report/report-v2/report-v2-view.tsx,
+// so the manuscript-click / Previous-Next bounds logic the interactive
+// workspace depends on can be tested directly, the same way every other
+// derived value in this file already is — no component-render harness
+// needed for it.
+export type ReportV2WorkspaceSelection = { sourceId: string; passageIndex: number } | null;
+
+/**
+ * Resolves the {sourceId, passageIndex} a manuscript-passage click produces:
+ * the passage's own first source, positioned at that passage's sorted index
+ * within THAT source's own passageRefs (never a fresh, unrelated ordering) —
+ * so re-clicking the same highlighted passage always lands on the same
+ * match number. Returns null for a passage with no source (never happens
+ * for a real ReportV2Passage — sourceIds is always non-empty by
+ * construction — but kept total rather than throwing for a malformed/stale
+ * id) or a source id the view model no longer has.
+ */
+export function resolveWorkspacePassageSelection(vm: ReportV2ViewModel, passageId: number): ReportV2WorkspaceSelection {
+  const passage = vm.passages.find((p) => p.id === passageId);
+  const sourceId = passage?.sourceIds[0];
+  if (!sourceId) return null;
+  const source = vm.sources.find((s) => s.id === sourceId);
+  if (!source) return null;
+  const sorted = [...source.passageRefs].sort((a, b) => a - b);
+  const index = sorted.indexOf(passageId);
+  return { sourceId, passageIndex: index < 0 ? 0 : index };
+}
+
+/**
+ * Bounds-checked Previous (delta -1) / Next (delta +1) step. Returns the
+ * SAME selection value, unchanged, whenever delta would move outside
+ * [0, refCount - 1] — so a caller can wire this straight into a button's
+ * onClick without a separate "are we at the edge" check, and a
+ * disabled={...} attribute can use the identical boundary condition.
+ */
+export function stepWorkspaceSelection(
+  selection: ReportV2WorkspaceSelection,
+  refCount: number,
+  delta: number,
+): ReportV2WorkspaceSelection {
+  if (!selection) return selection;
+  const next = selection.passageIndex + delta;
+  if (next < 0 || next >= refCount) return selection;
+  return { ...selection, passageIndex: next };
+}

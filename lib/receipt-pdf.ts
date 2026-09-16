@@ -1,5 +1,6 @@
 import fontkit from "@pdf-lib/fontkit";
 import { PDFDocument, PDFFont, rgb } from "pdf-lib";
+import { formatSimilarityPercent } from "@/lib/report-types";
 
 export type ReceiptData = {
   title: string;
@@ -18,6 +19,8 @@ export type ReceiptData = {
   corpusVersion?: string;
   riskStatus?: string;
   riskTarget?: number;
+  /** Report-redesign receipt fix: lets the receipt apply the same "<1% for a genuine positive overlap that rounds to 0" display policy the report and screen already use — never changes score/archiveScore themselves. Omitted callers keep the old plain `${score}%` text (no positive-overlap-below-1% case to fix without it). */
+  matchedWordCount?: number;
   unified?: {
     score: number;
     label: string;
@@ -178,14 +181,27 @@ export async function createReceiptPdf(report: ReceiptData, suppliedFonts?: Rece
   page.drawText("Receipt", { x: CONTENT_LEFT, y: 632, size: 22, font: bold, color: colors.text });
   page.drawRectangle({ x: CONTENT_LEFT, y: 620, width: CONTENT_WIDTH, height: 1.5, color: colors.accent });
 
+  // Receipt presentation fix (report redesign, defect: "Guest submission" /
+  // "Personal similarity check" shown on new receipts even though report
+  // writes now require authentication): report.author is the real,
+  // authenticated account identity by construction for every report created
+  // from here on (see lib/document-check-pipeline.ts's analyzeText, which no
+  // longer hardcodes a placeholder) — "—" is a defensive fallback only, never
+  // a fabricated label. There is no real assignment concept for a personal
+  // similarity check, so the row is omitted entirely rather than shown with
+  // an invented generic value; a genuinely blank/whitespace-only assignment
+  // is treated the same as absent.
   const rows: Array<{ label: string; value: string; wrap?: boolean }> = [
-    { label: "Submission author", value: report.author ?? "Guest submission" },
-    { label: "Assignment title", value: report.assignment ?? "Personal similarity check" },
+    { label: "Submission author", value: report.author || "—" },
+    ...(report.assignment?.trim() ? [{ label: "Assignment title", value: report.assignment, wrap: true }] : []),
     { label: "Submission title", value: report.title, wrap: true },
     { label: "File name", value: report.title.replace(/\s+/g, "_"), wrap: true },
     { label: "File size", value: report.fileSize ?? "—" },
-    { label: "Page count", value: String(report.pageCount ?? Math.max(1, Math.ceil(report.wordCount / 450))) },
+    // Receipt presentation fix: explicitly "Original document pages" — never
+    // to be confused with this receipt's own (always single) page count.
+    { label: "Original document pages", value: String(report.pageCount ?? Math.max(1, Math.ceil(report.wordCount / 450))) },
     { label: "Word count", value: report.wordCount.toLocaleString("en-US") },
+    ...(typeof report.matchedWordCount === "number" ? [{ label: "Matched words", value: report.matchedWordCount.toLocaleString("en-US") }] : []),
     { label: "Character count", value: report.characterCount?.toLocaleString("en-US") ?? "—" },
   ];
   if (report.unified) {
@@ -201,7 +217,7 @@ export async function createReceiptPdf(report: ReceiptData, suppliedFonts?: Rece
     // receipt's second competing headline is removed. Exactly one
     // authoritative similarity result is shown on the receipt, same as the
     // room card and report detail page already show.
-    rows.push({ label: "TurnitPlus Similarity", value: `${report.unified.score}% - ${report.unified.label}` });
+    rows.push({ label: "TurnitPlus Similarity", value: `${formatSimilarityPercent(report.unified.score, report.matchedWordCount ?? 0)} - ${report.unified.label}` });
     // Ordinary-user simplification: the "Evidence sources" row (which
     // channel — own reference material, live academic sources, TurnitPlus
     // reference sources — contributed) is removed entirely. Which specific
@@ -221,7 +237,7 @@ export async function createReceiptPdf(report: ReceiptData, suppliedFonts?: Rece
     // unified branch above — "TurnitPlus Similarity," never "Similarity
     // result" — so every receipt shows exactly one similarity row under
     // exactly one label, regardless of which path produced the value.
-    rows.push({ label: "TurnitPlus Similarity", value: `${report.archiveScore ?? report.score}% - ${report.scoreBand} similarity` });
+    rows.push({ label: "TurnitPlus Similarity", value: `${formatSimilarityPercent(report.archiveScore ?? report.score, report.matchedWordCount ?? 0)} - ${report.scoreBand} similarity` });
   }
   rows.push(
     { label: "Submission date", value: created.toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" }) },

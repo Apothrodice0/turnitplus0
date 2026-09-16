@@ -466,7 +466,7 @@ export type HighlightRange = {
    * never highlighted these two evidence channels at all, even when they
    * were the majority (or entirety) of the unified similarity result.
    */
-  kind: "source" | "wikipedia" | "academic" | "reference-source";
+  kind: "source" | "wikipedia" | "academic" | "reference-source" | "v2-evidence";
   url?: string;
   wikipediaSources?: Array<{ pageId: number; title: string; url: string }>;
   /**
@@ -538,6 +538,20 @@ export function hasUnifiedSimilarity(report: SimilarityReport): boolean {
  */
 export function primaryMatchedWordCount(report: SimilarityReport): number {
   return report.unifiedSimilarity?.uniqueMatchedWords ?? archiveMatchedWordCount(report);
+}
+
+/**
+ * Report-redesign rounding fix: every upstream score is already a rounded
+ * whole-number percent (0-100) — this NEVER changes that stored/returned
+ * numeric value. It only fixes what genuine, nonzero overlap looks like once
+ * rounded to 0: "0%" reads as "nothing matched," which is false whenever
+ * matchedWords is actually positive. Purely a display-string decision, used
+ * identically on screen, in the PDF, and on the receipt (see this function's
+ * call sites) so the same report never shows "0%" in one place and "<1%" in
+ * another.
+ */
+export function formatSimilarityPercent(score: number, matchedWords: number): string {
+  return score === 0 && matchedWords > 0 ? "<1%" : `${score}%`;
 }
 
 /**

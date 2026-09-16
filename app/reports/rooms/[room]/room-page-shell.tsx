@@ -878,7 +878,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
 
     let report: SimilarityReport;
     try {
-      report = await analyzeText(text, submittedFile.name, submittedFile.size, (_value, label) => setProcessingLabel(label));
+      report = await analyzeText(text, submittedFile.name, submittedFile.size, (_value, label) => setProcessingLabel(label), accountEmail);
     } catch {
       notify("The private document corpus could not be loaded. Please try again.");
       window.clearInterval(progressTimerRef.current);

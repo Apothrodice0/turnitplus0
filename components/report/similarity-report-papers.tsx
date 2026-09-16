@@ -18,6 +18,7 @@ import { resolveCompletionView } from "@/lib/report-v2-view";
 import {
   PRIMARY_SIMILARITY_BAND_LABELS,
   archiveOverlapScore,
+  formatSimilarityPercent,
   hasUnifiedSimilarity,
   primaryMatchedWordCount,
   primaryResultLabel,
@@ -705,7 +706,7 @@ export function OverviewReport({ report, similarityStatus = "resolved" }: { repo
   const canSeeSourceBreakdown = Boolean(report.viewerIsAdmin);
   return (
     <article className="report-paper overview-paper">
-      <ReportPageHeader report={report} page={2} label="Integrity Overview" />
+      <ReportPageHeader report={report} page={1} total={3} label="Similarity Overview" />
       <div className="paper-content">
         {notResolved ? (
           <section
@@ -732,7 +733,7 @@ export function OverviewReport({ report, similarityStatus = "resolved" }: { repo
             aria-label={`${primaryScore}% ${primaryLabel}${similarityVerdict ? `, ${PRIMARY_SIMILARITY_BAND_LABELS[similarityVerdict.key]}` : ""}`}
           >
             <h2>
-              <span>{primaryScore}%</span> {primaryLabel}
+              <span>{formatSimilarityPercent(primaryScore, primaryMatchedWordCount(report))}</span> {primaryLabel}
               {similarityVerdict && <em>{PRIMARY_SIMILARITY_BAND_LABELS[similarityVerdict.key]}</em>}
             </h2>
             <aside className="archive-scope-note">
@@ -937,7 +938,7 @@ export function OverviewReport({ report, similarityStatus = "resolved" }: { repo
           <SourceList report={report} />
         </section>
       </div>
-      <ReportPageFooter report={report} page={2} label="Integrity Overview" />
+      <ReportPageFooter report={report} page={1} total={3} label="Similarity Overview" />
     </article>
   );
 }
@@ -1106,6 +1107,41 @@ export function findHighlightRanges(report: SimilarityReport, options: { include
     });
   }
 
+  // Report-redesign fix: this shared renderer (also the print bundle's
+  // manuscript, and the admin-only "Submission" tab for a V2 report) was
+  // blind to evidenceInterpretation entirely — a report whose ONLY
+  // evidence lives there (report.sources empty, the norm for a report
+  // saved since the V2 wiring — see this redesign's own
+  // SOURCE_COUNT_DIFFERENCE_CAUSE finding) rendered with NO highlights at
+  // all, even at a real, non-zero verified score. HighlightRange's own
+  // interpretationKind/tone/sourceRef/passageRef fields were already
+  // reserved for exactly this ("Set only by a Report-V2-aware builder" —
+  // see that type's own comment); this is that builder. Purely additive —
+  // never removes or recomputes a position, just also considers the SAME
+  // authoritative positions buildReportV2ViewModel already exposes to the
+  // interactive workspace, converted to character ranges the same way
+  // referenceSourcePositions already are, immediately above.
+  const v2Passages = report.evidenceInterpretation?.passages ?? [];
+  const v2Candidates: HighlightRange[] = [];
+  if (v2Passages.length > 0) {
+    const spans = tokenSpans(report.text);
+    v2Passages.forEach((passage) => {
+      if (passage.wordStart < 0 || passage.wordEnd >= spans.length || passage.wordEnd < passage.wordStart) return;
+      v2Candidates.push({
+        start: spans[passage.wordStart].start,
+        end: spans[passage.wordEnd].end,
+        sourceIndex: -200 - passage.id,
+        color: MATCHED_PASSAGE_COLOR,
+        label: "Matched passage",
+        kind: "v2-evidence",
+        interpretationKind: passage.interpretation.kind,
+        tone: passage.interpretation.tone,
+        sourceRef: passage.sourceIds[0],
+        passageRef: passage.id,
+      });
+    });
+  }
+
   const sourceCandidates = candidates
     .filter((candidate) => candidate.kind === "source")
     .sort((left, right) => left.sourceIndex - right.sourceIndex || left.start - right.start || right.end - left.end);
@@ -1134,16 +1170,21 @@ export function findHighlightRanges(report: SimilarityReport, options: { include
   const referenceSourceCandidates = candidates
     .filter((candidate) => candidate.kind === "reference-source")
     .sort((left, right) => left.start - right.start || right.end - left.end);
+  const sortedV2Candidates = [...v2Candidates].sort((left, right) => left.start - right.start || right.end - left.end);
 
-  // Precedence order: Wikipedia and archive (unchanged from before this
-  // fix) win first, then real named academic sources, and the generic
-  // "TurnitPlus reference sources" bucket last — it only ever fills
-  // positions no more specific, individually-identifiable highlight
-  // already claimed. This is what "if the same word position is matched by
-  // multiple source types, highlight/count it once" means at the render
-  // layer: one visible highlight per position, attributed to whichever
-  // eligible source is most specific.
-  [...wikipediaCandidates, ...mergedSources, ...academicCandidates, ...referenceSourceCandidates]
+  // Precedence order: Wikipedia, archive, real named academic sources, and
+  // the generic "TurnitPlus reference sources" bucket — all unchanged from
+  // before this fix — win first; the V2 evidenceInterpretation positions
+  // (see this fix's own comment above) come LAST, so they only ever fill a
+  // gap none of the existing, more specific legacy channels already cover
+  // (a required existing test locks in that a position already classified
+  // as e.g. "reference-source" must keep rendering under that exact
+  // classification, never be silently reclassified just because
+  // evidenceInterpretation also describes the same position). In practice
+  // this only ever activates for a report whose ONLY evidence lives in
+  // evidenceInterpretation (report.sources/academic/reference-source all
+  // empty) — the real gap this fix closes.
+  [...wikipediaCandidates, ...mergedSources, ...academicCandidates, ...referenceSourceCandidates, ...sortedV2Candidates]
     .forEach((candidate) => {
       const overlaps = accepted.some(
         (range) => candidate.start < range.end && candidate.end > range.start,
@@ -1253,7 +1294,13 @@ export function HighlightLegend({ report }: { report: SimilarityReport }) {
     ? dedupeExternalAcademicEvidence(report.externalAcademicEvidence).filter((item) => (item.matchedPassages ?? []).length > 0)
     : [];
   const hasReferenceSources = referenceSourceMatchedPositions(report).length > 0;
-  const hasMatchedPassages = report.sources.length > 0 || academicEvidence.length > 0 || hasReferenceSources;
+  // Report-redesign fix: matches findHighlightRanges' own new V2-evidence
+  // candidate source (see that function's own comment) — otherwise a report
+  // whose only evidence lives in evidenceInterpretation (report.sources
+  // empty, the norm since the V2 wiring) would show real highlighted marks
+  // in the body with an empty legend claiming none exist.
+  const hasV2Evidence = (report.evidenceInterpretation?.passages.length ?? 0) > 0;
+  const hasMatchedPassages = report.sources.length > 0 || academicEvidence.length > 0 || hasReferenceSources || hasV2Evidence;
   return (
     <div className="highlight-legend">
       <div>
@@ -1304,7 +1351,7 @@ export function HighlightLegend({ report }: { report: SimilarityReport }) {
 export function SubmissionReport({ report }: { report: SimilarityReport }) {
   return (
     <article className="report-paper submission-paper">
-      <ReportPageHeader report={report} page={3} label="Integrity Submission" />
+      <ReportPageHeader report={report} page={2} total={3} label="Manuscript" />
       <div className="paper-content">
         <div className="submission-title">
           <span>1</span>
@@ -1315,7 +1362,7 @@ export function SubmissionReport({ report }: { report: SimilarityReport }) {
           <HighlightedDocument report={report} />
         </div>
       </div>
-      <ReportPageFooter report={report} page={3} label="Integrity Submission" />
+      <ReportPageFooter report={report} page={2} total={3} label="Manuscript" />
     </article>
   );
 }
@@ -1323,7 +1370,7 @@ export function SubmissionReport({ report }: { report: SimilarityReport }) {
 export function SourcesReport({ report }: { report: SimilarityReport }) {
   return (
     <article className="report-paper sources-paper">
-      <ReportPageHeader report={report} page={4} label="Source Details" />
+      <ReportPageHeader report={report} page={3} total={3} label="Source Details" />
       <div className="paper-content">
         <section className="source-detail-heading">
           <p className="paper-kicker">SOURCE REVIEW</p>
@@ -1332,7 +1379,7 @@ export function SourcesReport({ report }: { report: SimilarityReport }) {
         </section>
         <SourceList report={report} detailed />
       </div>
-      <ReportPageFooter report={report} page={4} label="Source Details" />
+      <ReportPageFooter report={report} page={3} total={3} label="Source Details" />
     </article>
   );
 }

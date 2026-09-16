@@ -3,13 +3,15 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ArrowLeft, FileText, GraduationCap, Globe2, Printer } from "lucide-react";
+import { ArrowLeft, Download, FileText, GraduationCap, Globe2, Printer } from "lucide-react";
 import { similarityScoreBand } from "@/lib/ai-core";
 import { deleteRemoteReportChecked, fetchRemoteReport } from "@/lib/reports-remote";
 import { deleteStoredReport, getStoredReportById } from "@/lib/report-store";
+import { downloadReceipt } from "@/lib/document-check-pipeline";
 import {
   PRIMARY_SIMILARITY_BAND_LABELS,
   aiSignalDisplay,
+  formatSimilarityPercent,
   hasUnifiedSimilarity,
   primaryMatchedWordCount,
   primaryResultLabel,
@@ -26,7 +28,7 @@ import {
 } from "@/lib/report-detail-poll";
 import { AiReport } from "@/components/report/ai-report";
 import { CategorySummary, OverviewReport, SourcesReport, SubmissionReport, dedupeExternalAcademicEvidence } from "@/components/report/similarity-report-papers";
-import { ReportV2View, ReportV2Print } from "@/components/report/report-v2/report-v2-view";
+import { ReportV2View, ReportV2Workspace, ReportV2PrintOverview, ReportV2PrintSourceAppendix } from "@/components/report/report-v2/report-v2-view";
 import { ReportNotFoundPanel } from "@/components/report/report-not-found-panel";
 
 type LoadStatus = "loading" | "found" | "not-found";
@@ -132,6 +134,15 @@ export function ReportDetailShell({
   const effectiveResultTab: ResultTab = resultTab === "overlap" && !hasV2 ? "full" : resultTab;
   const [isDeleting, setIsDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  // Screen-redesign: an ordinary V2 customer never sees this — only an
+  // authorized viewer (canSeeSourceBreakdown, computed further below) can
+  // ever flip it, via ReportV2Workspace's own onShowLegacy affordance. False
+  // by default even for an admin: the modern workspace stays canonical, the
+  // old raw tab-per-view presentation is opt-in compatibility, not a second
+  // competing default.
+  const [showLegacyForAdmin, setShowLegacyForAdmin] = useState(false);
+  const [isDownloadingReceipt, setIsDownloadingReceipt] = useState(false);
+  const [receiptError, setReceiptError] = useState<string | null>(null);
   // Release-hardening audit finding LIFECYCLE-06: true once the bounded
   // poll budget below is exhausted without either pipeline reaching a real
   // terminal state. This is purely a "stop asking automatically, offer a
@@ -300,6 +311,26 @@ export function ReportDetailShell({
     };
   }, [id, requiresClientResolution, initialReport]);
 
+  // Screen-redesign: this report detail page already holds the freshest
+  // copy of `report` in state (poll-refreshed above) — unlike
+  // room-page-shell.tsx's own handleDownloadReceipt, which re-fetches
+  // because its own occupant.report can be a stale room-list snapshot,
+  // there is nothing stale to refetch here. Mirrors that same
+  // try/catch/finally shape (and its own user-visible failure notice)
+  // rather than failing silently.
+  async function handleDownloadReceipt() {
+    if (!report || isDownloadingReceipt) return;
+    setIsDownloadingReceipt(true);
+    setReceiptError(null);
+    try {
+      await downloadReceipt(report);
+    } catch {
+      setReceiptError("Couldn't generate the receipt. Please try again.");
+    } finally {
+      setIsDownloadingReceipt(false);
+    }
+  }
+
   async function handleDelete() {
     if (!report || isDeleting) return;
     if (!window.confirm("Delete this report? This can't be undone.")) return;
@@ -400,6 +431,18 @@ export function ReportDetailShell({
   // type percentage breakdown at all; only the authoritative score/word
   // count remain.
   const canSeeSourceBreakdown = Boolean(report.viewerIsAdmin);
+  // Screen redesign: for a report with a verified V2 payload, the modern
+  // workspace (ReportV2Workspace) is the ONE canonical similarity
+  // experience an ordinary customer ever sees — never a choice between it
+  // and the old raw tab-per-view presentation. Only an authorized viewer
+  // (the same signal every other admin-only surface in this file already
+  // uses) can flip showLegacyForAdmin, via the workspace's own
+  // onShowLegacy link, to reach the old views for internal/compatibility
+  // use — and even then, "Back to workspace" (below) returns to the
+  // canonical default. A report with no V2 payload at all is unaffected:
+  // isOrdinaryV2Workspace is false for it, so the existing tabs/content
+  // render exactly as before.
+  const isOrdinaryV2Workspace = mode === "similarity" && hasV2 && !(canSeeSourceBreakdown && showLegacyForAdmin);
   const primaryLabel = primaryResultLabel(report);
   const similarityVerdict = similarityScoreBand(primaryScore);
   // Resolve the AI headline from the authoritative flat columns first (the
@@ -437,6 +480,13 @@ export function ReportDetailShell({
         </div>
       )}
 
+      {receiptError && (
+        <div className="ai-analysis-message">
+          <strong>—</strong>
+          <p>{receiptError}</p>
+        </div>
+      )}
+
       {/* Production bug fix: a report reached directly by URL (bookmark,
           typed link) whose AI check genuinely failed must say so plainly,
           regardless of which tab is open — a real, persisted ai_status
@@ -466,40 +516,72 @@ export function ReportDetailShell({
         </section>
       )}
 
-      <div className="report-summary-strip">
-        <div>
-          <strong className={`summary-chip summary-score-chip ${mode === "ai" ? `ai-summary-chip ai-summary-${aiSignal.tone}` : revealState.similarityUnavailable ? "summary-verdict-pending" : similarityVerdict ? `summary-verdict-${similarityVerdict.key}` : ""}`}>
-            <span className={`score-dot ${mode === "ai" ? `ai-dot ai-dot-${aiSignal.tone}` : revealState.similarityUnavailable ? "score-dot-pending" : similarityVerdict ? `score-dot-${similarityVerdict.key}` : ""}`} />
-            {mode === "ai"
-              ? `${aiSignal.value === null ? "" : `${aiSignal.value}% · `}${aiSignal.label}`
-              : revealState.similarityUnavailable ? "Unavailable" : `${primaryScore}% ${primaryLabel}`}
-          </strong>
-          {mode === "similarity" && <span className="summary-chip">{report.sources.length} matched source{report.sources.length === 1 ? "" : "s"}</span>}
-          {mode === "similarity" && (report.webCheck?.phrasesMatched ?? 0) > 0 && <span className="summary-chip wikipedia-evidence-chip"><Globe2 aria-hidden="true" /> Separate Wikipedia evidence</span>}
-          {mode === "similarity" && academicEvidenceCount > 0 && (
-            <span className="summary-chip academic-evidence-chip">
-              <GraduationCap aria-hidden="true" /> {academicEvidenceCount} external academic {academicEvidenceCount === 1 ? "source" : "sources"}
-            </span>
-          )}
-          {mode === "ai" && <span className="summary-chip">English only</span>}
+      {/* Screen redesign: the old chip row repeated the same score/word-count
+          figures ReportV2Workspace's own score card already shows, more
+          prominently and without a second competing headline — suppressed
+          only for that canonical case. AI mode and any report without a V2
+          payload are completely unaffected. */}
+      {!isOrdinaryV2Workspace && (
+        <div className="report-summary-strip">
+          <div>
+            <strong className={`summary-chip summary-score-chip ${mode === "ai" ? `ai-summary-chip ai-summary-${aiSignal.tone}` : revealState.similarityUnavailable ? "summary-verdict-pending" : similarityVerdict ? `summary-verdict-${similarityVerdict.key}` : ""}`}>
+              <span className={`score-dot ${mode === "ai" ? `ai-dot ai-dot-${aiSignal.tone}` : revealState.similarityUnavailable ? "score-dot-pending" : similarityVerdict ? `score-dot-${similarityVerdict.key}` : ""}`} />
+              {mode === "ai"
+                ? `${aiSignal.value === null ? "" : `${aiSignal.value}% · `}${aiSignal.label}`
+                : revealState.similarityUnavailable ? "Unavailable" : `${formatSimilarityPercent(primaryScore, primaryMatchedWordCount(report))} ${primaryLabel}`}
+            </strong>
+            {mode === "similarity" && <span className="summary-chip">{report.sources.length} matched source{report.sources.length === 1 ? "" : "s"}</span>}
+            {mode === "similarity" && (report.webCheck?.phrasesMatched ?? 0) > 0 && <span className="summary-chip wikipedia-evidence-chip"><Globe2 aria-hidden="true" /> Separate Wikipedia evidence</span>}
+            {mode === "similarity" && academicEvidenceCount > 0 && (
+              <span className="summary-chip academic-evidence-chip">
+                <GraduationCap aria-hidden="true" /> {academicEvidenceCount} external academic {academicEvidenceCount === 1 ? "source" : "sources"}
+              </span>
+            )}
+            {mode === "ai" && <span className="summary-chip">English only</span>}
+          </div>
+          <div>
+            <span className="summary-chip">{report.wordCount.toLocaleString()} words</span>
+            <span className="summary-chip">{report.pageCount || Math.max(1, Math.ceil(report.wordCount / 450))} pages</span>
+            <span className="summary-chip">{report.characterCount ? report.characterCount.toLocaleString() : "—"} characters</span>
+          </div>
         </div>
-        <div>
-          <span className="summary-chip">{report.wordCount.toLocaleString()} words</span>
-          <span className="summary-chip">{report.pageCount || Math.max(1, Math.ceil(report.wordCount / 450))} pages</span>
-          <span className="summary-chip">{report.characterCount ? report.characterCount.toLocaleString() : "—"} characters</span>
-        </div>
-      </div>
+      )}
 
+      {isOrdinaryV2Workspace ? (
+        <ReportV2Workspace
+          report={report}
+          onDownloadReport={() => window.print()}
+          onDownloadReceipt={handleDownloadReceipt}
+          isDownloadingReceipt={isDownloadingReceipt}
+          onShowLegacy={canSeeSourceBreakdown ? () => setShowLegacyForAdmin(true) : undefined}
+        />
+      ) : (
+      <>
+      {hasV2 && canSeeSourceBreakdown && showLegacyForAdmin && (
+        <div className="rv2-legacy-banner" role="status">
+          <span>Viewing legacy diagnostic views (admin only) — the modern workspace is what ordinary customers see.</span>
+          <button type="button" className="button subtle" onClick={() => setShowLegacyForAdmin(false)}>Back to workspace</button>
+        </div>
+      )}
       <nav className="report-tabs" aria-label="Report sections">
         {mode === "ai" ? (
           <button className="active" type="button">AI report</button>
         ) : (
           <>
             {hasV2 && <button className={effectiveResultTab === "overlap" ? "active" : ""} type="button" onClick={() => setResultTab("overlap")}>Overlap breakdown</button>}
-            <button className={effectiveResultTab === "full" ? "active" : ""} type="button" onClick={() => setResultTab("full")}>Full report</button>
-            <button className={effectiveResultTab === "overview" ? "active" : ""} type="button" onClick={() => setResultTab("overview")}>Integrity overview</button>
+            {/* Report-redesign source-count-confusion fix: once a verified V2
+                result exists, these three legacy tabs still show the older,
+                pre-verification candidate-source view (report.sources — see
+                SourceList/SourcesReport) rather than the authoritative,
+                deduplicated evidenceInterpretation set "Overlap breakdown"
+                shows — different word/source counts are therefore expected,
+                not a bug. Labeled "(legacy)" only in that case so a reader
+                never mistakes the two for competing current results; a
+                report with no V2 payload has only ever had this one view. */}
+            <button className={effectiveResultTab === "full" ? "active" : ""} type="button" onClick={() => setResultTab("full")}>{hasV2 ? "Full report (legacy)" : "Full report"}</button>
+            <button className={effectiveResultTab === "overview" ? "active" : ""} type="button" onClick={() => setResultTab("overview")}>{hasV2 ? "Overview (legacy)" : "Overview"}</button>
             <button className={effectiveResultTab === "submission" ? "active" : ""} type="button" onClick={() => setResultTab("submission")}>Submission</button>
-            <button className={effectiveResultTab === "sources" ? "active" : ""} type="button" onClick={() => setResultTab("sources")}>Source details</button>
+            <button className={effectiveResultTab === "sources" ? "active" : ""} type="button" onClick={() => setResultTab("sources")}>{hasV2 ? "All candidate sources (legacy)" : "Source details"}</button>
           </>
         )}
       </nav>
@@ -531,7 +613,7 @@ export function ReportDetailShell({
               : revealState.similarityUnavailable ? "similarity unavailable" : `${primaryScore}% ${primaryLabel}${similarityVerdict ? `, ${PRIMARY_SIMILARITY_BAND_LABELS[similarityVerdict.key]}` : ""}`}
           >
             <span>{mode === "ai" ? "AI writing score" : revealState.similarityUnavailable ? "Similarity" : primaryLabel}</span>
-            <strong>{mode === "ai" ? (aiSignal.value === null ? "—" : `${aiSignal.value}%`) : revealState.similarityUnavailable ? "—" : `${primaryScore}%`}</strong>
+            <strong>{mode === "ai" ? (aiSignal.value === null ? "—" : `${aiSignal.value}%`) : revealState.similarityUnavailable ? "—" : formatSimilarityPercent(primaryScore, primaryMatchedWordCount(report))}</strong>
             {mode === "ai" && <p className="inspector-writing-estimate">{aiSignal.label}</p>}
             {mode === "similarity" && revealState.similarityUnavailable && <p className="inspector-writing-estimate">Unavailable</p>}
             {mode === "similarity" && !revealState.similarityUnavailable && similarityVerdict && <em>{PRIMARY_SIMILARITY_BAND_LABELS[similarityVerdict.key]}</em>}
@@ -575,26 +657,51 @@ export function ReportDetailShell({
           </div>
         </aside>
       </div>
+      </>
+      )}
 
+      {/* Report-redesign duplicate-render fix: the two branches below are
+          MUTUALLY EXCLUSIVE — a report either has a verified V2 payload or
+          it doesn't, so exactly one overview + one manuscript + one source
+          listing ever reaches this bundle, never both the V2 and legacy
+          presentations concatenated together (the prior cause of the
+          exported PDF repeating its own overview/source-count summary under
+          old "Integrity" branding after the V2 content). SubmissionReport —
+          the actual manuscript renderer — is shared by both branches
+          unchanged; only which overview/appendix wraps it differs. */}
       <div className="print-report-bundle">
-        {mode === "ai" ? <AiReport report={report} signal={aiSignal} printMode /> : <>
-          {hasV2 && <ReportV2Print report={report} />}
-          <OverviewReport report={report} similarityStatus={effectiveSimilarityStatus} />
-          <SubmissionReport report={report} />
-          <SourcesReport report={report} />
-        </>}
+        {mode === "ai" ? <AiReport report={report} signal={aiSignal} printMode /> : hasV2 ? (
+          <>
+            <ReportV2PrintOverview report={report} />
+            <SubmissionReport report={report} />
+            <ReportV2PrintSourceAppendix report={report} />
+          </>
+        ) : (
+          <>
+            <OverviewReport report={report} similarityStatus={effectiveSimilarityStatus} />
+            <SubmissionReport report={report} />
+            <SourcesReport report={report} />
+          </>
+        )}
       </div>
 
-      <div className="download-report-dock">
-        <div>
-          <strong>Full report</strong>
-          <span>Save a PDF copy</span>
+      {/* Screen redesign: ReportV2Workspace's own toolbar already offers
+          "Download report" front and center — this floating dock would
+          otherwise double up with it, especially awkward alongside the
+          workspace's own mobile bottom bar. Every other mode/case (AI,
+          legacy, admin viewing legacy) is unaffected. */}
+      {!isOrdinaryV2Workspace && (
+        <div className="download-report-dock">
+          <div>
+            <strong>Full report</strong>
+            <span>Save a PDF copy</span>
+          </div>
+          <button className="download-report-fab" type="button" onClick={() => window.print()}>
+            <Printer aria-hidden="true" />
+            Download
+          </button>
         </div>
-        <button className="download-report-fab" type="button" onClick={() => window.print()}>
-          <Printer aria-hidden="true" />
-          Download
-        </button>
-      </div>
+      )}
     </section>
   );
 }

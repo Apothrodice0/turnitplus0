@@ -6916,7 +6916,13 @@ main.report-main {
   .report-inspector,
   .report-workspace,
   .download-report-dock,
-  .toast {
+  .toast,
+  /* Report redesign: the interactive V2 workspace replaces .report-tabs/
+     .report-workspace on screen for an ordinary V2 customer — it must be
+     hidden during print exactly like those, so window.print() still only
+     ever shows .print-report-bundle's own dedicated content, never both. */
+  .rv2ws,
+  .rv2-legacy-banner {
     display: none !important;
   }
 
@@ -7825,5 +7831,601 @@ main.report-main {
   .report-v2-print .rv2-doc-wrap,
   .report-v2-print .rv2-filter-bar { display: none; }
   .report-v2-print .rv2-section { border: 1px solid #ccc; break-inside: avoid; }
+}
+
+/* ── Report redesign: canonical V2 screen workspace ──────────────────────
+   Scoped entirely to new .rv2ws-* classes (never .report-workspace/
+   .report-inspector, which AI mode and the legacy tab views still use) so
+   this addition cannot affect any other screen/print surface. Reuses this
+   file's existing navy/blue palette, radius, and shadow tokens — no new
+   design language. */
+.rv2ws {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: min(100%, 1240px);
+  margin: 0 auto;
+  padding: 24px 30px 40px;
+}
+
+.rv2ws-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.rv2ws-toolbar-status {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 12px;
+  border: 1px solid #9ed5b9;
+  border-radius: 999px;
+  background: #f0faf5;
+  color: #15754f;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.rv2ws-toolbar-status-attention {
+  border-color: #e9c66b;
+  background: #fff9e9;
+  color: #966200;
+}
+
+.rv2ws-toolbar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.rv2ws-toolbar-actions button svg {
+  width: 15px;
+  height: 15px;
+}
+
+.rv2-legacy-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 27px;
+  border-bottom: 1px solid #e9c66b;
+  background: #fff9e9;
+  color: #7a5400;
+  font-size: 12px;
+}
+
+.rv2ws-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 360px;
+  align-items: start;
+  gap: 24px;
+}
+
+.rv2ws-manuscript-pane {
+  min-width: 0;
+  padding: 28px 32px;
+  border: 1px solid #d9dee0;
+  border-radius: 14px;
+  background: white;
+  box-shadow: var(--small-shadow);
+}
+
+.rv2ws-manuscript {
+  font-size: 15px;
+  line-height: 1.85;
+  color: var(--ink);
+}
+
+.rv2ws-mark {
+  cursor: pointer;
+  transition: outline-color 120ms ease;
+}
+
+.rv2ws-mark:hover {
+  filter: brightness(0.98);
+}
+
+.rv2ws-mark:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+
+.rv2ws-mark-active {
+  outline: 2px solid var(--blue-dark);
+  outline-offset: 1px;
+  background: rgba(0, 127, 186, 0.16) !important;
+}
+
+.rv2ws-mark-number {
+  display: inline-grid;
+  min-width: 15px;
+  height: 15px;
+  margin-left: 3px;
+  place-items: center;
+  border-radius: 999px;
+  color: white;
+  font-size: 9px;
+  font-weight: 800;
+  vertical-align: text-top;
+}
+
+.rv2ws-panel {
+  position: sticky;
+  top: 24px;
+  overflow: hidden;
+  border: 1px solid #d0dadd;
+  border-radius: 14px;
+  background: white;
+  box-shadow: var(--small-shadow);
+}
+
+.rv2ws-panel-scroll {
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+}
+
+.rv2ws-score {
+  padding: 20px;
+  border-bottom: 1px solid var(--soft-line);
+  color: #0877a6;
+}
+
+.rv2ws-score > span {
+  display: block;
+  color: var(--muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.rv2ws-score > strong {
+  display: block;
+  margin-top: 5px;
+  color: inherit;
+  font-size: 38px;
+  letter-spacing: -0.04em;
+}
+
+.rv2ws-score > em {
+  display: inline-block;
+  margin-top: 8px;
+  padding: 5px 10px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 800;
+}
+
+.rv2ws-score-low { color: #0877a6; }
+.rv2ws-score-review { color: #966200; }
+.rv2ws-score-high { color: #b21255; }
+
+.rv2ws-score-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.rv2ws-score-metrics div {
+  display: grid;
+  gap: 2px;
+  padding: 8px 6px;
+  border-radius: 8px;
+  background: #f7f9fa;
+  text-align: center;
+}
+
+.rv2ws-score-metrics b {
+  color: var(--ink);
+  font-size: 15px;
+}
+
+.rv2ws-score-metrics span {
+  color: var(--muted);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.rv2ws-sources {
+  padding: 18px 20px;
+}
+
+.rv2ws-sources h3 {
+  margin: 0 0 10px;
+  font-size: 12px;
+}
+
+.rv2ws-source-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.rv2ws-source-row {
+  display: flex;
+  width: 100%;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.rv2ws-source-row:hover {
+  background: #f5f8f9;
+}
+
+.rv2ws-source-row.is-active {
+  border-color: #bcdfea;
+  background: #f0faff;
+}
+
+.rv2ws-source-row:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+
+.rv2ws-source-number {
+  display: grid;
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  border-radius: 999px;
+  color: white;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.rv2ws-source-body {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  gap: 3px;
+}
+
+.rv2ws-source-title {
+  overflow-wrap: anywhere;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.rv2ws-source-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.rv2ws-source-badge {
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: #eef2f3;
+  color: #47565d;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.rv2ws-source-chevron {
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  margin-top: 2px;
+  color: var(--muted);
+  transition: transform 150ms ease;
+}
+
+.rv2ws-source-chevron.is-open {
+  transform: rotate(180deg);
+}
+
+.rv2ws-source-detail {
+  display: grid;
+  gap: 10px;
+  padding: 4px 10px 14px 42px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.rv2ws-match-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--soft-line);
+  border-radius: 8px;
+  background: #f9fbfb;
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.rv2ws-match-nav button {
+  display: inline-grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  border: 1px solid #d6e1e5;
+  border-radius: 7px;
+  background: white;
+  color: var(--blue-dark);
+  cursor: pointer;
+}
+
+.rv2ws-match-nav button:disabled {
+  cursor: not-allowed;
+  opacity: 0.35;
+}
+
+.rv2ws-match-nav button svg {
+  width: 14px;
+  height: 14px;
+}
+
+.rv2ws-match-nav button:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+
+.rv2ws-match-detail {
+  display: grid;
+  gap: 4px;
+  padding: 10px;
+  border: 1px solid var(--soft-line);
+  border-radius: 8px;
+  background: #fcfdfd;
+}
+
+.rv2ws-match-detail-label {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.rv2ws-match-detail-label:first-child {
+  margin-top: 0;
+}
+
+.rv2ws-match-detail-text {
+  margin: 2px 0 0;
+  color: var(--ink);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.rv2ws-context {
+  color: var(--muted);
+}
+
+.rv2ws-match-highlight {
+  padding: 1px 3px;
+  border-radius: 3px;
+  background: rgba(0, 127, 186, 0.16);
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.rv2ws-source-unavailable {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-style: italic;
+}
+
+.rv2ws-source-meaning {
+  margin: 4px 0 0;
+  color: var(--muted);
+}
+
+.rv2ws-source-open {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--blue-dark);
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.rv2ws-source-open svg {
+  width: 13px;
+  height: 13px;
+}
+
+.rv2ws-source-doi {
+  color: var(--muted);
+}
+
+.rv2ws-legacy-link {
+  display: block;
+  width: 100%;
+  padding: 12px 20px;
+  border: 0;
+  border-top: 1px solid var(--soft-line);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 11px;
+  text-align: left;
+}
+
+.rv2ws-legacy-link:hover {
+  color: var(--ink);
+}
+
+.rv2ws-mobile-bar {
+  display: none;
+}
+
+@media (max-width: 1080px) {
+  .rv2ws-body {
+    grid-template-columns: minmax(0, 1fr) 320px;
+  }
+}
+
+/* Tablet-range fix: .result-toolbar (shared header, unchanged) switches to
+   a sticky `top: 68px` in this same range without gaining any extra
+   min-height for the 2-row wrap its own grid produces at this width — a
+   pre-existing position:sticky quirk where the toolbar PAINTS 68px lower
+   than the static flow position .rv2ws is laid out against, so the
+   workspace's own content started underneath it. `min-width: 761px`
+   excludes the ≤760px range, where .result-toolbar becomes position:static
+   (no sticky offset, nothing to compensate for). Scoped to .rv2ws only —
+   the shared header/legacy views are untouched. */
+@media (min-width: 761px) and (max-width: 920px) {
+  .rv2ws {
+    margin-top: 68px;
+  }
+}
+
+@media (max-width: 900px) {
+  .rv2ws {
+    padding: 16px 16px 88px;
+  }
+
+  .rv2ws-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .rv2ws-manuscript-pane {
+    padding: 20px;
+  }
+
+  .rv2ws-panel {
+    position: fixed;
+    z-index: 40;
+    right: 0;
+    /* Mobile-drawer fix: reserves the persistent mobile bar's own height
+       (~62px) below the sheet, rather than bottom: 0 — the bar sits at a
+       HIGHER z-index (below) specifically so it stays visible and
+       clickable (its own "Close" toggle) even while the sheet is open;
+       without this gap the open sheet painted directly over the bar and
+       intercepted every tap meant for it. */
+    bottom: 62px;
+    left: 0;
+    top: auto;
+    max-height: calc(78vh - 62px);
+    visibility: hidden;
+    border-radius: 16px 16px 0 0;
+    box-shadow: 0 -14px 40px rgba(16, 40, 50, 0.22);
+    transform: translateY(100%);
+    transition: transform 220ms ease, visibility 220ms ease;
+  }
+
+  .rv2ws-panel-open {
+    visibility: visible;
+    transform: translateY(0);
+  }
+
+  .rv2ws-panel-scroll {
+    max-height: calc(78vh - 62px);
+  }
+
+  .rv2ws-mobile-bar {
+    /* Mobile-drawer fix: fixed (not sticky) and ABOVE the sheet's own
+       z-index (40) — see .rv2ws-panel's own comment — so this bar,
+       including its Sources/Close toggle, is always visible and
+       clickable, whether the sheet is open or closed. */
+    position: fixed;
+    z-index: 45;
+    right: 0;
+    left: 0;
+    bottom: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 10px 14px;
+    border-top: 1px solid #d6e1e5;
+    background: rgba(255, 255, 255, 0.98);
+    backdrop-filter: blur(10px);
+    color: var(--ink);
+    font-size: 12px;
+    font-weight: 700;
+  }
+
+  .rv2ws-mobile-score {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
+  .rv2ws-mobile-nav {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--muted);
+    font-weight: 600;
+  }
+
+  /* Touch-target fix: 40px (was 24px, well under the ~44px reasonable
+     minimum for a thumb target) — the mobile bar's own height already
+     accounts for this (see .rv2ws-panel's 62px reservation above). */
+  .rv2ws-mobile-nav button {
+    display: inline-grid;
+    width: 40px;
+    height: 40px;
+    place-items: center;
+    border: 1px solid #d6e1e5;
+    border-radius: 8px;
+    background: white;
+    color: var(--blue-dark);
+  }
+
+  .rv2ws-mobile-nav button:disabled {
+    opacity: 0.35;
+  }
+
+  .rv2ws-mobile-nav button svg {
+    width: 16px;
+    height: 16px;
+  }
+
+  .rv2ws-mobile-toggle {
+    min-height: 40px;
+    padding: 7px 14px;
+    border: 0;
+    border-radius: 8px;
+    background: var(--blue);
+    color: white;
+    cursor: pointer;
+    font-weight: 800;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rv2ws-panel,
+  .rv2ws-mark,
+  .rv2ws-source-chevron {
+    transition: none !important;
+  }
+}
+
+@media print {
+  .rv2ws-toolbar,
+  .rv2ws-mobile-bar {
+    display: none !important;
+  }
 }
 

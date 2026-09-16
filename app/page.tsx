@@ -1067,7 +1067,7 @@ export default function Home() {
     try {
       report = await analyzeText(text, submittedFile.name, submittedFile.size, (_value, label) => {
         setProcessingLabel(label);
-      });
+      }, account.email);
     } catch {
       navigate("dashboard");
       notify("The private document corpus could not be loaded. Please try again.");
