@@ -525,12 +525,23 @@ export function ReportV2View({ report }: { report: SimilarityReport }) {
 export function ReportV2PrintOverview({ report }: { report: SimilarityReport }) {
   const vm = buildReportV2ViewModel(report);
   if (!vm) return null;
+  // Visual-correction pass: matches the screen workspace's own hero exactly
+  // (same component, same authoritative vm) instead of the older
+  // FirstScreen layout (headline + overlap-percentage bars + top-sources
+  // list) — the task's own print target is "SIMILARITY ANALYSIS / score /
+  // result band / metric cards / MATCH REVIEW," the same structure the
+  // screen now uses, not a second, differently-organized summary.
+  const toolbarStatus = vm.summary.completion.state === "COMPLETED" ? "Completed" : "Needs attention";
   return (
     <article className="report-paper rv2-print-paper">
       <ReportPageHeader report={report} page={1} total={3} label="Similarity Overview" />
       <div className="paper-content">
         <div className="report-v2 report-v2-print">
-          <FirstScreen vm={vm} />
+          <WorkspaceHero vm={vm} toolbarStatus={toolbarStatus} />
+          <div className="rv2ws-match-review-heading">
+            <p className="paper-kicker">MATCH REVIEW</p>
+            <h3>Highlighted manuscript</h3>
+          </div>
         </div>
       </div>
       <ReportPageFooter report={report} page={1} total={3} label="Similarity Overview" />
@@ -593,6 +604,75 @@ function workspaceSourceColor(index: number): string {
   return WORKSPACE_SOURCE_COLORS[index % WORKSPACE_SOURCE_COLORS.length];
 }
 
+/** Same fixed hex palette above, as an rgba() string — used for the manuscript's own translucent match background (a real fill, not a hairline accent), computed in JS rather than a CSS custom property so it works with zero new browser-support assumptions. */
+function workspaceSourceTint(index: number, alpha: number): string {
+  const hex = workspaceSourceColor(index).replace("#", "");
+  const r = parseInt(hex.slice(0, 2), 16);
+  const g = parseInt(hex.slice(2, 4), 16);
+  const b = parseInt(hex.slice(4, 6), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+/**
+ * Visual-correction pass — the LEFT report surface's own formal introduction,
+ * mirroring the AI Detection report's information hierarchy (kicker + big
+ * score heading, a tone-coloured result band, then a metric-card grid) one
+ * level up from components/report/ai-report.tsx's own AiReport, rather than
+ * literally reusing its `.ai-*` classes — this keeps the two report kinds'
+ * CSS independently tunable while matching the same visual rhythm, spacing,
+ * and typography scale byte-for-byte (see the matching .rv2ws-hero-* rules
+ * in app/globals.css, copied from the exact .ai-verdict-card/.ai-report-metrics
+ * values). Reads ONLY vm.summary — the identical authoritative numbers the
+ * right-side inspector panel renders — so the two can never disagree.
+ */
+function WorkspaceHero({ vm, toolbarStatus }: { vm: ReportV2ViewModel; toolbarStatus: string }) {
+  const { verifiedSimilarityPercent, matchedWordCount, totalWordCount, distinctVerifiedSources } = vm.summary;
+  const verdict = similarityScoreBand(verifiedSimilarityPercent);
+  const percentDisplay = formatSimilarityPercent(verifiedSimilarityPercent, matchedWordCount);
+  return (
+    <section className="rv2ws-hero" aria-labelledby="rv2ws-hero-title">
+      <p className="paper-kicker">SIMILARITY ANALYSIS</p>
+      <h2 id="rv2ws-hero-title" className="rv2ws-hero-title">
+        <span>{percentDisplay}</span> Similarity score
+      </h2>
+      <p className="rv2ws-hero-sub">
+        The percentage of analyzed words that overlap verified source text.
+      </p>
+
+      <div className={`rv2ws-hero-band${verdict ? ` rv2ws-hero-band-${verdict.key}` : ""}`}>
+        <div className="rv2ws-hero-band-score">
+          <span>Similarity score</span>
+          <strong>{percentDisplay}</strong>
+        </div>
+        <div className="rv2ws-hero-band-copy">
+          <span>Result band</span>
+          <strong>{verdict ? PRIMARY_SIMILARITY_BAND_LABELS[verdict.key] : "Similarity"}</strong>
+        </div>
+        {verdict && <span className="rv2ws-hero-band-range">{verdict.range}</span>}
+      </div>
+
+      <div className="rv2ws-hero-metrics">
+        <div>
+          <strong>{matchedWordCount.toLocaleString()}</strong>
+          <span>Matched words</span>
+        </div>
+        <div>
+          <strong>{totalWordCount.toLocaleString()}</strong>
+          <span>Words analyzed</span>
+        </div>
+        <div>
+          <strong>{distinctVerifiedSources}</strong>
+          <span>Verified source{distinctVerifiedSources === 1 ? "" : "s"}</span>
+        </div>
+        <div>
+          <strong>{toolbarStatus}</strong>
+          <span>Search status</span>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 /** "...context [MATCHED] context..." around one passage's real, verified character range — never the source's own text (see ReportEvidencePassage's own comment: no such text exists in this payload). */
 function submittedContextAround(text: string, charStart: number, charEnd: number, pad = 70) {
   return {
@@ -648,8 +728,22 @@ function WorkspaceManuscript({
     const firstSourceId = p.sourceIds[0];
     const sourceIndex = firstSourceId !== undefined ? sourceIndexById.get(firstSourceId) : undefined;
     const isActive = p.id === activePassageId;
-    const markStyle: CSSProperties | undefined =
-      sourceIndex !== undefined ? { boxShadow: `inset 3px 0 0 ${workspaceSourceColor(sourceIndex)}` } : undefined;
+    // Visual-correction fix: the matched WORDS themselves are now the
+    // primary visual cue (a real translucent source-colour background +
+    // a solid source-colour bottom border), not just the small numbered
+    // badge — the previous treatment (a 3px inset box-shadow only) was
+    // visually near-invisible next to plain text. Colour is per-SOURCE
+    // (workspaceSourceColor), matching the same stable palette the source
+    // list/badges already use, layered on top of (never replacing) the
+    // shared rv2-tone-*/KIND_CLASS classes that still drive the dashed/
+    // dotted/double border-style variation per evidence kind.
+    const color = sourceIndex !== undefined ? workspaceSourceColor(sourceIndex) : null;
+    const markStyle: CSSProperties | undefined = color
+      ? {
+        background: workspaceSourceTint(sourceIndex!, isActive ? 0.32 : 0.18),
+        borderBottomColor: color,
+      }
+      : undefined;
     pieces.push(
       <mark
         key={`m-${p.id}`}
@@ -784,6 +878,11 @@ export function ReportV2Workspace({
       )}
       <div className="rv2ws-body">
         <div className="rv2ws-manuscript-pane">
+          <WorkspaceHero vm={vm} toolbarStatus={toolbarStatus} />
+          <div className="rv2ws-match-review-heading">
+            <p className="paper-kicker">MATCH REVIEW</p>
+            <h3>Highlighted manuscript</h3>
+          </div>
           <WorkspaceManuscript report={report} vm={vm} activePassageId={activePassageId} onSelectPassage={selectPassage} />
         </div>
 

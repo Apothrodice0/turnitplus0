@@ -394,19 +394,27 @@ test('SIM-01/receipt cleanup RECEIPT (structural): downloadReceipt passes primar
   assert.match(pipeline, /hasUnifiedSimilarity\(report\)/);
 
   const receipt = await fs.promises.readFile(path.join(repo, 'lib/receipt-pdf.ts'), 'utf8');
-  // Report-redesign <1% rounding fix: report.unified.score is now passed
-  // through formatSimilarityPercent (same policy as the report/screen) so a
-  // genuine positive overlap that rounds to 0 reads "<1%" rather than a
-  // false "0%" — still the SAME unified/combined score, never a second,
-  // competing figure (this test's real subject, re-asserted below).
-  assert.match(receipt, /rows\.push\(\{ label: "TurnitPlus Similarity", value: `\$\{formatSimilarityPercent\(report\.unified\.score, report\.matchedWordCount \?\? 0\)\} - \$\{report\.unified\.label\}` \}\);/, 'the receipt\'s headline row must be the unified/combined result when present');
+  // Visual-correction pass: the receipt no longer builds a flat `rows`
+  // array — resultScore/resultLabel are computed once, then drawn in the
+  // Final Result card. Report-redesign <1% rounding fix (unchanged
+  // invariant): resultScore is still passed through formatSimilarityPercent
+  // (same policy as the report/screen) so a genuine positive overlap that
+  // rounds to 0 reads "<1%" rather than a false "0%" — still the SAME
+  // unified/combined score when present, never a second, competing figure
+  // (re-asserted below).
+  assert.match(receipt, /const resultScore = report\.unified \? report\.unified\.score : \(report\.archiveScore \?\? report\.score\);/, 'the authoritative score must be the unified/combined result when present, archive/legacy score only as a fallback');
+  assert.match(receipt, /const percentText = formatSimilarityPercent\(resultScore, report\.matchedWordCount \?\? 0\);/, 'the receipt\'s headline percent must go through the same <1% display policy as the report/screen');
+  // REQUIRED: exactly one draw call for the "TurnitPlus Similarity:" label —
+  // never a second, differently-labeled headline row for the same result.
+  const similarityLabelDraws = receipt.match(/drawText\("TurnitPlus Similarity:"/g) ?? [];
+  assert.equal(similarityLabelDraws.length, 1, 'REQUIRED: exactly one "TurnitPlus Similarity:" label draw call — never a second, competing headline');
   // Receipt presentation fix: a second "Similarity result (component)" row
   // — the archive-only score, individually correct but presented directly
   // beneath the real TurnitPlus Similarity headline — read as the system
-  // contradicting itself on an ordinary-user receipt. Removed entirely when
-  // the unified result exists; the archive component remains available
-  // elsewhere (UnifiedSimilaritySection's own admin-gated breakdown), just
-  // never as a second headline-shaped row on the receipt.
+  // contradicting itself on an ordinary-user receipt. The archive component
+  // remains available elsewhere (UnifiedSimilaritySection's own
+  // admin-gated breakdown), just never as a second headline-shaped row on
+  // the receipt.
   assert.doesNotMatch(receipt, /Similarity result \(component\)/, 'REQUIRED: no second, competing "similarity result" row may exist on the receipt once the authoritative unified result is available');
 });
 

@@ -1,5 +1,6 @@
 import fontkit from "@pdf-lib/fontkit";
 import { PDFDocument, PDFFont, rgb } from "pdf-lib";
+import { similarityScoreBand } from "@/lib/ai-core";
 import { formatSimilarityPercent } from "@/lib/report-types";
 
 export type ReceiptData = {
@@ -21,6 +22,8 @@ export type ReceiptData = {
   riskTarget?: number;
   /** Report-redesign receipt fix: lets the receipt apply the same "<1% for a genuine positive overlap that rounds to 0" display policy the report and screen already use — never changes score/archiveScore themselves. Omitted callers keep the old plain `${score}%` text (no positive-overlap-below-1% case to fix without it). */
   matchedWordCount?: number;
+  /** Visual-correction pass: the SAME "Completed" / "Needs attention" search-status text ReportV2Workspace's own toolbar already shows (vm.summary.completion.state), threaded through so the receipt's Final Result card never shows a second, independently-derived completion computation. Omitted (undefined) for a report with no V2 payload at all — there is no "search status" concept for it, so the row is left out entirely rather than guessed. */
+  completionStatus?: string;
   unified?: {
     score: number;
     label: string;
@@ -128,157 +131,179 @@ export async function createReceiptPdf(report: ReceiptData, suppliedFonts?: Rece
   const regular = await pdf.embedFont(fonts.regular, { subset: true });
   const bold = await pdf.embedFont(fonts.bold, { subset: true });
 
-  // Visual polish: a restrained, professional palette — dark neutral body
-  // text, a single subtle navy/blue accent (used sparingly: the title bar,
-  // the badge, and one thin rule — never as a large fill color the way the
-  // previous purple frame/heading/footer were), and muted gray for labels
-  // and borders. Replaces the previous purple-heavy scheme entirely.
+  // Visual-correction pass: restyled from a flat administrative-form list
+  // into the same light-card / navy-accent visual language the similarity
+  // report's own hero and metric cards use — modern light section cards,
+  // one restrained navy accent, muted-gray labels, no heavy dark fill
+  // anywhere on the page (the previous solid-navy footer bar is gone).
   const colors = {
     frame: rgb(0.95, 0.96, 0.97), card: rgb(1, 1, 1), border: rgb(0.85, 0.87, 0.89),
     accent: rgb(0.09, 0.24, 0.43), text: rgb(0.13, 0.15, 0.18), label: rgb(0.47, 0.49, 0.52),
-    muted: rgb(0.56, 0.58, 0.61), badgeFill: rgb(0.92, 0.95, 0.98), footer: rgb(0.09, 0.24, 0.43),
-    white: rgb(1, 1, 1),
+    muted: rgb(0.56, 0.58, 0.61), badgeFill: rgb(0.92, 0.95, 0.98),
   };
+  // Result-card tone, matching the exact low/moderate/high accents already
+  // used across the screen report and PDF (.similarity-heading/.ai-verdict-*
+  // in app/globals.css) — reused values, not a new palette.
+  const BAND_TONE = {
+    low: { text: rgb(0.03, 0.47, 0.65), fill: rgb(0.94, 0.97, 0.99), border: rgb(0.62, 0.81, 0.89) },
+    review: { text: rgb(0.59, 0.38, 0), fill: rgb(1, 0.98, 0.91), border: rgb(0.91, 0.78, 0.42) },
+    high: { text: rgb(0.7, 0.07, 0.33), fill: rgb(1, 0.95, 0.97), border: rgb(0.94, 0.71, 0.79) },
+  } as const;
+
   const isUnified = Boolean(report.unified);
   const created = report.created ? new Date(report.created) : new Date();
+  const resultScore = report.unified ? report.unified.score : (report.archiveScore ?? report.score);
+  const resultLabel = report.unified ? report.unified.label : `${report.scoreBand} similarity`;
+  const band = similarityScoreBand(resultScore);
+  const tone = band ? BAND_TONE[band.key] : BAND_TONE.low;
+  const percentText = formatSimilarityPercent(resultScore, report.matchedWordCount ?? 0);
 
-  // Layout bounds fix: every text draw below is placed and width-capped
-  // (fitText/wrapText) against this one content box, rather than scattered
-  // magic-number widths — CONTENT_RIGHT leaves a 24pt right margin inside
-  // the white card, matching the 24pt left margin from the card edge to
-  // CONTENT_LEFT, so nothing drawn at CONTENT_LEFT can ever reach the card
-  // edge, let alone the page edge.
+  // Layout bounds fix (unchanged from before this pass): every text draw
+  // below is placed and width-capped (fitText/wrapText) against this one
+  // content box — CONTENT_RIGHT leaves a 24pt right margin inside the white
+  // card, matching the 24pt left margin from the card edge to CONTENT_LEFT.
   const CONTENT_LEFT = 72;
   const CONTENT_RIGHT = 540;
   const CONTENT_WIDTH = CONTENT_RIGHT - CONTENT_LEFT;
-  const LABEL_WIDTH = 150;
-  const VALUE_X = CONTENT_LEFT + LABEL_WIDTH;
-  const VALUE_WIDTH = CONTENT_RIGHT - VALUE_X;
-  const FOOTER_TOP = 82;
 
   page.drawRectangle({ x: 36, y: 36, width: 540, height: 720, color: colors.frame });
   page.drawRectangle({ x: 48, y: 52, width: 516, height: 696, color: colors.card, borderColor: colors.border, borderWidth: 1 });
-  page.drawText(isUnified ? "TurnitPlus Similarity Report" : "TurnitPlus Source Overlap Report", { x: CONTENT_LEFT, y: 716, size: 14, font: bold, color: colors.accent });
+
+  // ── header: brand kicker + heading + a restrained status badge ──
+  page.drawText("TURNITPLUS", { x: CONTENT_LEFT, y: 716, size: 9, font: bold, color: colors.accent });
+  page.drawText("Submission Receipt", { x: CONTENT_LEFT, y: 694, size: 20, font: bold, color: colors.text });
 
   // Receipt presentation fix: a receipt can only ever be generated for a
-  // report that is already fully finalized — both entry points
-  // (app/reports/rooms/[room]/room-page-shell.tsx's handleDownloadReceipt,
-  // components/reports/report-history-row.tsx's own handler) gate the
-  // Receipt control itself behind isFullyRevealed (room) / a saved history
-  // entry (already-completed by construction), so this function never runs
-  // against a report that is still processing — always a finalized result.
-  // Restyled as a clean status pill (light navy-tinted fill, navy border and
-  // text) rather than the previous warning-yellow box, which read as an
-  // alert rather than a normal completed state. Width is measured against
-  // the actual label text instead of a fixed guess, so the badge is never
-  // needlessly oversized.
-  const badgeLabel = "FINAL RECEIPT";
-  const badgePaddingX = 14;
-  const badgeWidth = bold.widthOfTextAtSize(badgeLabel, 10) + badgePaddingX * 2;
-  page.drawRectangle({ x: CONTENT_LEFT, y: 672, width: badgeWidth, height: 24, color: colors.badgeFill, borderColor: colors.accent, borderWidth: 1 });
-  page.drawText(badgeLabel, { x: CONTENT_LEFT + badgePaddingX, y: 679, size: 10, font: bold, color: colors.accent });
+  // report that is already fully finalized (both entry points gate the
+  // Receipt control behind a completed result), so this function never runs
+  // against a still-processing report. Restyled as a compact top-right
+  // status pill (light navy-tinted fill, navy border and text) rather than
+  // a left-aligned block, so it reads as a corner status the way an
+  // invoice's "PAID" stamp does, instead of taking its own full row.
+  const badgeLabel = "FINALIZED";
+  const badgePaddingX = 12;
+  const badgeWidth = bold.widthOfTextAtSize(badgeLabel, 9) + badgePaddingX * 2;
+  const badgeX = CONTENT_RIGHT - badgeWidth;
+  page.drawRectangle({ x: badgeX, y: 700, width: badgeWidth, height: 22, color: colors.badgeFill, borderColor: colors.accent, borderWidth: 1 });
+  page.drawText(badgeLabel, { x: badgeX + badgePaddingX, y: 706.5, size: 9, font: bold, color: colors.accent });
 
-  page.drawText("Receipt", { x: CONTENT_LEFT, y: 632, size: 22, font: bold, color: colors.text });
-  page.drawRectangle({ x: CONTENT_LEFT, y: 620, width: CONTENT_WIDTH, height: 1.5, color: colors.accent });
+  page.drawRectangle({ x: CONTENT_LEFT, y: 678, width: CONTENT_WIDTH, height: 1, color: colors.border });
 
-  // Receipt presentation fix (report redesign, defect: "Guest submission" /
-  // "Personal similarity check" shown on new receipts even though report
-  // writes now require authentication): report.author is the real,
-  // authenticated account identity by construction for every report created
-  // from here on (see lib/document-check-pipeline.ts's analyzeText, which no
-  // longer hardcodes a placeholder) — "—" is a defensive fallback only, never
-  // a fabricated label. There is no real assignment concept for a personal
-  // similarity check, so the row is omitted entirely rather than shown with
-  // an invented generic value; a genuinely blank/whitespace-only assignment
-  // is treated the same as absent.
-  const rows: Array<{ label: string; value: string; wrap?: boolean }> = [
-    { label: "Submission author", value: report.author || "—" },
-    ...(report.assignment?.trim() ? [{ label: "Assignment title", value: report.assignment, wrap: true }] : []),
-    { label: "Submission title", value: report.title, wrap: true },
-    { label: "File name", value: report.title.replace(/\s+/g, "_"), wrap: true },
-    { label: "File size", value: report.fileSize ?? "—" },
-    // Receipt presentation fix: explicitly "Original document pages" — never
-    // to be confused with this receipt's own (always single) page count.
-    { label: "Original document pages", value: String(report.pageCount ?? Math.max(1, Math.ceil(report.wordCount / 450))) },
-    { label: "Word count", value: report.wordCount.toLocaleString("en-US") },
-    ...(typeof report.matchedWordCount === "number" ? [{ label: "Matched words", value: report.matchedWordCount.toLocaleString("en-US") }] : []),
-    { label: "Character count", value: report.characterCount?.toLocaleString("en-US") ?? "—" },
-  ];
-  if (report.unified) {
-    // Receipt presentation fix: report.archiveScore (the archive-only
-    // component) used to also be printed here as "Similarity result
-    // (component)" — a second, lower number directly beneath the real,
-    // authoritative TurnitPlus Similarity figure just above. Both were
-    // individually correct, but presenting two different "similarity
-    // result"-labeled percentages on one ordinary-user receipt reads as the
-    // system contradicting itself. The archive component is not dropped
-    // from the product — it stays available exactly where it already was
-    // (UnifiedSimilaritySection's own admin-gated breakdown) — only this
-    // receipt's second competing headline is removed. Exactly one
-    // authoritative similarity result is shown on the receipt, same as the
-    // room card and report detail page already show.
-    rows.push({ label: "TurnitPlus Similarity", value: `${formatSimilarityPercent(report.unified.score, report.matchedWordCount ?? 0)} - ${report.unified.label}` });
-    // Ordinary-user simplification: the "Evidence sources" row (which
-    // channel — own reference material, live academic sources, TurnitPlus
-    // reference sources — contributed) is removed entirely. Which specific
-    // matching channels/methods produced the result is no longer named
-    // anywhere on the ordinary-user receipt at all; report.unified.evidenceSummary
-    // is simply not read here any more (still computed/passed by
-    // lib/document-check-pipeline.ts's downloadReceipt for now, unused by
-    // this function — left as-is per this fix's own "do not change layout
-    // architecture" scope, not worth a wider signature change for one
-    // dropped read).
-  } else {
-    // No unified result exists for this report (a legacy/archive-only
-    // report predating unified similarity) — archiveScore/score IS the
-    // authoritative primary result here (primarySimilarityScore's own
-    // fallback rule, mirrored directly since ReceiptData carries the flat
-    // fields, not the full selector call). Labeled identically to the
-    // unified branch above — "TurnitPlus Similarity," never "Similarity
-    // result" — so every receipt shows exactly one similarity row under
-    // exactly one label, regardless of which path produced the value.
-    rows.push({ label: "TurnitPlus Similarity", value: `${formatSimilarityPercent(report.archiveScore ?? report.score, report.matchedWordCount ?? 0)} - ${report.scoreBand} similarity` });
-  }
-  rows.push(
-    { label: "Submission date", value: created.toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" }) },
-    { label: "Submission ID", value: report.submissionId ?? "—" },
-  );
-
-  // Layout overflow fix: rows previously advanced by a fixed spacing per
-  // row regardless of content, so a value could only ever render on the
-  // single line the fixed spacing assumed — the reason "Evidence sources"
-  // had to be silently ellipsized rather than wrapped. This cursor instead
-  // advances by however many lines a row actually needs (1 for a plain
-  // fitText value, up to 2 for a wrap: true value), so nothing overlaps
-  // and nothing needs a fixed line-count guess.
-  const LINE_HEIGHT = 13;
-  const ROW_GAP = 7;
-  let cursorY = 590;
-  rows.forEach(({ label, value, wrap }) => {
-    page.drawText(`${label}:`, { x: CONTENT_LEFT, y: cursorY, size: 10, font: regular, color: colors.label });
-    const lines = wrap ? wrapText(value, bold, 10, VALUE_WIDTH, 2) : [fitText(value, bold, 10, VALUE_WIDTH)];
-    lines.forEach((line, lineIndex) => {
-      page.drawText(line, { x: VALUE_X, y: cursorY - lineIndex * LINE_HEIGHT, size: 10, font: bold, color: colors.text });
-    });
-    cursorY -= lines.length * LINE_HEIGHT + ROW_GAP;
+  // ── submission title ──
+  const titleLines = wrapText(report.title, bold, 14, CONTENT_WIDTH, 2);
+  let cursorY = 656;
+  titleLines.forEach((line, lineIndex) => {
+    page.drawText(line, { x: CONTENT_LEFT, y: cursorY - lineIndex * 18, size: 14, font: bold, color: colors.text });
   });
+  cursorY -= titleLines.length * 18 + 34;
 
-  // Layout overflow fix (the reported bug): these two sentences previously
-  // rendered as single, unconstrained lines and could run past the right
-  // edge of the receipt frame with nothing to catch them. Still wrapped
-  // against the same CONTENT_WIDTH every other field respects, capped at 2
-  // lines each (comfortably enough for the fixed copy below).
+  // ── two-column information grid (SUBMISSION / DOCUMENT) ──
+  // Visual-correction pass: replaces the old single full-width label:value
+  // list (the direct cause of most of the receipt's wasted lower-page
+  // space) with the same "compact 2-column information grid" the task
+  // itself calls for. Every underlying VALUE below is exactly the same
+  // selector/expression the previous flat list used — only the drawn
+  // position changes; no field is dropped, relabeled data, or recomputed.
+  const COL_GAP = 26;
+  const COL_WIDTH = (CONTENT_WIDTH - COL_GAP) / 2;
+  const LEFT_X = CONTENT_LEFT;
+  const RIGHT_X = CONTENT_LEFT + COL_WIDTH + COL_GAP;
+  const LABEL_WIDTH_COL = 84;
+  const ROW_LINE_HEIGHT = 13;
+  const ROW_GAP = 13;
+  const gridTop = cursorY;
+
+  function drawColumnHeading(x: number, y: number, label: string): number {
+    page.drawText(label, { x, y, size: 8.5, font: bold, color: colors.accent });
+    return y - 17;
+  }
+
+  function drawGridRow(x: number, y: number, label: string, value: string, maxLines = 2): number {
+    page.drawText(label, { x, y, size: 8, font: regular, color: colors.label });
+    const valueWidth = COL_WIDTH - LABEL_WIDTH_COL;
+    const lines = wrapText(value, bold, 9.5, valueWidth, maxLines);
+    lines.forEach((line, lineIndex) => {
+      page.drawText(line, { x: x + LABEL_WIDTH_COL, y: y - lineIndex * ROW_LINE_HEIGHT, size: 9.5, font: bold, color: colors.text });
+    });
+    return y - lines.length * ROW_LINE_HEIGHT - ROW_GAP;
+  }
+
+  let leftY = drawColumnHeading(LEFT_X, gridTop, "SUBMISSION");
+  leftY = drawGridRow(LEFT_X, leftY, "Submission ID", report.submissionId ?? "—");
+  leftY = drawGridRow(LEFT_X, leftY, "Submitted", created.toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" }));
+  // Receipt presentation fix (report redesign, defect: "Guest submission"
+  // shown on new receipts even though report writes now require
+  // authentication): report.author is the real, authenticated account
+  // identity by construction for every report created from here on (see
+  // lib/document-check-pipeline.ts's analyzeText) — "—" is a defensive
+  // fallback only, never a fabricated label.
+  leftY = drawGridRow(LEFT_X, leftY, "Account", report.author || "—");
+  // There is no real assignment concept for a personal similarity check, so
+  // this row is omitted entirely (rather than shown with an invented
+  // generic value) whenever assignment is genuinely blank/whitespace-only.
+  if (report.assignment?.trim()) {
+    leftY = drawGridRow(LEFT_X, leftY, "Assignment", report.assignment, 3);
+  }
+
+  let rightY = drawColumnHeading(RIGHT_X, gridTop, "DOCUMENT");
+  rightY = drawGridRow(RIGHT_X, rightY, "Filename", report.title.replace(/\s+/g, "_"), 3);
+  // Explicitly "Original pages" — never to be confused with this receipt's
+  // own (always single) page count.
+  rightY = drawGridRow(RIGHT_X, rightY, "Original pages", String(report.pageCount ?? Math.max(1, Math.ceil(report.wordCount / 450))));
+  rightY = drawGridRow(RIGHT_X, rightY, "Words", report.wordCount.toLocaleString("en-US"));
+  rightY = drawGridRow(RIGHT_X, rightY, "Characters", report.characterCount?.toLocaleString("en-US") ?? "—");
+  rightY = drawGridRow(RIGHT_X, rightY, "File size", report.fileSize ?? "—");
+
+  cursorY = Math.min(leftY, rightY) - 18;
+
+  // ── final result card ──
+  // Visual-correction pass: the report's own authoritative similarity
+  // figure, now given the same "hero" prominence (one big tone-colored
+  // number in a light accent card) the on-screen workspace and main report
+  // surface use — instead of one more small line in the flat list above.
   //
-  // Ordinary-user simplification: this disclaimer previously named the
-  // specific matching channels ("live academic sources," "TurnitPlus
-  // reference sources," "verified academic sources") and differed by
-  // isUnified. Replaced with one neutral, channel-agnostic statement, the
-  // same regardless of isUnified — nothing on the ordinary-user receipt
-  // names own reference material, TurnitPlus reference sources, live
-  // academic sources, archive/corpus/provider channels, or any other
-  // matching method any more.
+  // Contract locked by tests/receipt-pdf-layout.test.mjs: a text item
+  // trimmed to exactly "TurnitPlus Similarity:" must appear exactly once,
+  // drawn immediately before a value string that starts with the exact
+  // score percent — so the label is kept as its own small caption, drawn
+  // right before the large percent value, with nothing drawn in between.
+  const CARD_HEIGHT = 158;
+  const cardTop = cursorY;
+  const cardBottom = cardTop - CARD_HEIGHT;
+  page.drawRectangle({ x: 48, y: cardBottom, width: 516, height: CARD_HEIGHT, color: tone.fill, borderColor: tone.border, borderWidth: 1 });
+  page.drawText("FINAL RESULT", { x: CONTENT_LEFT, y: cardTop - 24, size: 8.5, font: bold, color: colors.label });
+  page.drawText("TurnitPlus Similarity:", { x: CONTENT_LEFT, y: cardTop - 46, size: 9, font: regular, color: colors.label });
+  page.drawText(percentText, { x: CONTENT_LEFT, y: cardTop - 108, size: 54, font: bold, color: tone.text });
+
+  const detailX = CONTENT_LEFT + 190;
+  let detailY = cardTop - 52;
+  // Receipt presentation fix: report.matchedWordCount (when supplied) uses
+  // the same authoritative selector the report/screen already use — never a
+  // second, competing figure.
+  if (typeof report.matchedWordCount === "number") {
+    page.drawText(`${report.matchedWordCount.toLocaleString("en-US")} matched words`, { x: detailX, y: detailY, size: 11, font: bold, color: colors.text });
+    detailY -= 18;
+  }
+  page.drawText(resultLabel, { x: detailX, y: detailY, size: 11, font: bold, color: tone.text });
+  detailY -= 18;
+  // Concise search-status line — the SAME state ReportV2Workspace's own
+  // toolbar shows (vm.summary.completion.state), never independently
+  // recomputed here; omitted for a report with no V2 payload at all.
+  if (report.completionStatus) {
+    page.drawText(report.completionStatus, { x: detailX, y: detailY, size: 9.5, font: regular, color: colors.muted });
+  }
+
+  cursorY = cardBottom - 28;
+
+  // ── disclaimer ──
+  // Layout overflow fix (unchanged mechanism from before this pass): both
+  // sentences stay wrapped against CONTENT_WIDTH and capped at 2 lines each.
+  //
+  // Ordinary-user simplification (unchanged): one neutral, channel-agnostic
+  // statement — nothing on the ordinary-user receipt names own reference
+  // material, TurnitPlus reference sources, live academic sources,
+  // archive/corpus/provider channels, or any other matching method.
   const DISCLAIMER_LINE_HEIGHT = 11;
-  cursorY -= 3;
   const disclaimerHeadlineLines = wrapText(
     "TurnitPlus Similarity reflects matched text identified across the sources checked for this submission.",
     bold, 8, CONTENT_WIDTH, 2,
@@ -286,25 +311,24 @@ export async function createReceiptPdf(report: ReceiptData, suppliedFonts?: Rece
   disclaimerHeadlineLines.forEach((line, lineIndex) => {
     page.drawText(line, { x: CONTENT_LEFT, y: cursorY - lineIndex * DISCLAIMER_LINE_HEIGHT, size: 8, font: bold, color: colors.text });
   });
-  cursorY -= disclaimerHeadlineLines.length * DISCLAIMER_LINE_HEIGHT + 2;
+  cursorY -= disclaimerHeadlineLines.length * DISCLAIMER_LINE_HEIGHT + 3;
   const disclaimerDetailLines = wrapText("Review the report for the matched passages.", regular, 8, CONTENT_WIDTH, 2);
   disclaimerDetailLines.forEach((line, lineIndex) => {
     page.drawText(line, { x: CONTENT_LEFT, y: cursorY - lineIndex * DISCLAIMER_LINE_HEIGHT, size: 8, font: regular, color: colors.muted });
   });
   cursorY -= disclaimerDetailLines.length * DISCLAIMER_LINE_HEIGHT;
 
-  // Layout overflow fix: the footer bar stays fixed at the bottom of the
-  // card (matching this receipt's previous, familiar position) rather than
-  // trailing the dynamic content cursor — every field above is now capped
-  // (wrapText's own maximumLines, or fitText's single-line ellipsis), so
-  // the worst-case content height is bounded and never reaches down to
-  // FOOTER_TOP; verified directly in tests/receipt-pdf-layout.test.mjs
-  // against pathologically long real-world field values, not just assumed.
+  // ── sign-off ──
+  // Visual-correction pass: replaces the previous full-width solid-navy
+  // footer bar (the "giant dark footer bar" the task explicitly flagged)
+  // with a single thin rule and a small muted caption — same information,
+  // no heavy fill block.
+  const FOOTER_TOP = 80;
   if (cursorY < FOOTER_TOP) {
     throw new Error("Receipt content overflowed into the footer area — a field's wrap/fit bound needs tightening.");
   }
-  page.drawRectangle({ x: 48, y: 52, width: 516, height: 30, color: colors.footer });
-  page.drawText("Generated by TurnitPlus", { x: CONTENT_LEFT, y: 63, size: 8, font: regular, color: colors.white });
+  page.drawRectangle({ x: CONTENT_LEFT, y: 68, width: CONTENT_WIDTH, height: 1, color: colors.border });
+  page.drawText("Generated by TurnitPlus", { x: CONTENT_LEFT, y: 58, size: 8, font: regular, color: colors.muted });
 
   const bytes = await pdf.save();
   const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;

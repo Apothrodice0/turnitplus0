@@ -14,6 +14,7 @@ import {
   type SimilarityReport,
 } from "@/lib/report-types";
 import { withEvidenceInterpretation } from "@/lib/report-evidence-interpretation";
+import { buildReportV2ViewModel } from "@/lib/report-v2-view";
 import {
   extractionDiagnosticFromCounts,
   plainTextExtractionDiagnostic,
@@ -530,7 +531,16 @@ export async function downloadReceipt(report: SimilarityReport) {
   // elsewhere. Overridden explicitly with the SAME selector the report/
   // screen use, so the receipt's own matched-word figure and <1% rounding
   // policy never disagree with them.
-  const blob = await createReceiptPdf({ ...report, unified, matchedWordCount: primaryMatchedWordCount(report) });
+  //
+  // Visual-correction pass: completionStatus reads the SAME
+  // vm.summary.completion.state ReportV2Workspace's own toolbar already
+  // shows — never a second, independently-derived completion computation.
+  // buildReportV2ViewModel returns null for a report with no V2 payload at
+  // all, in which case the field is left undefined (no "search status"
+  // concept exists for it) rather than guessed.
+  const v2 = buildReportV2ViewModel(report);
+  const completionStatus = v2 ? (v2.summary.completion.state === "COMPLETED" ? "Completed" : "Needs attention") : undefined;
+  const blob = await createReceiptPdf({ ...report, unified, matchedWordCount: primaryMatchedWordCount(report), completionStatus });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   const baseName = report.title.replace(/\.[^.]+$/, "").replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "");

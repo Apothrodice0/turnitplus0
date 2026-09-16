@@ -671,11 +671,20 @@ export function ReportDetailShell({
           unchanged; only which overview/appendix wraps it differs. */}
       <div className="print-report-bundle">
         {mode === "ai" ? <AiReport report={report} signal={aiSignal} printMode /> : hasV2 ? (
-          <>
+          // Visual-correction pass: wrapped so the shared .report-paper
+          // print rule's forced min-height:11in + break-after:page (built
+          // for the legacy one-section-per-physical-page layout, and still
+          // exactly what AiReport/legacy print use, unchanged) can be
+          // overridden ONLY for the V2 sequence — see the matching
+          // ".rv2-print-flow .report-paper" rule in app/globals.css. Natural
+          // pagination: the manuscript now starts right after the overview
+          // if there is room on page 1, rather than being forced onto a
+          // dedicated physical page 2.
+          <div className="rv2-print-flow">
             <ReportV2PrintOverview report={report} />
             <SubmissionReport report={report} />
             <ReportV2PrintSourceAppendix report={report} />
-          </>
+          </div>
         ) : (
           <>
             <OverviewReport report={report} similarityStatus={effectiveSimilarityStatus} />
