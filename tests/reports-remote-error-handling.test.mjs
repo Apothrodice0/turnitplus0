@@ -292,6 +292,78 @@ test("saveReportRemote + classifySaveReportRemoteResult: a generic deterministic
   }
 });
 
+// One-current-report-per-room, hardening pass: roomReuseNotReady requires
+// BOTH status 503 AND body.code === "ROOM_REUSE_NOT_READY" — never status
+// alone, since a 503 can also come from a platform/infrastructure failure
+// that never reaches application code (a different or absent body).
+
+test("A. saveReportRemote + classifySaveReportRemoteResult: HTTP 503 WITH { code: 'ROOM_REUSE_NOT_READY' } sets roomReuseNotReady=true and classifies as TRANSIENT_OR_UNKNOWN, never conflated with roomOccupied's own distinct 409", async () => {
+  const restoreFetch = stubFetchOnce(async () =>
+    new Response(JSON.stringify({ error: "This room is finishing its previous check. Please try again shortly.", code: "ROOM_REUSE_NOT_READY" }), { status: 503 }),
+  );
+  const restoreWindow = stubWindowLocalStorage();
+  try {
+    const result = await saveReportRemote({}, MINIMAL_SUMMARY);
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 503);
+    assert.equal(result.roomReuseNotReady, true);
+    assert.equal(result.roomOccupied, false);
+    assert.equal(classifySaveReportRemoteResult(result), "TRANSIENT_OR_UNKNOWN");
+  } finally {
+    restoreFetch();
+    restoreWindow();
+  }
+});
+
+test("B. saveReportRemote: HTTP 503 with a generic/empty body (no code at all — e.g. a platform/infrastructure 503 that never reached application code) sets roomReuseNotReady=false, never misclassified", async () => {
+  const restoreFetch = stubFetchOnce(async () => new Response("", { status: 503 }));
+  const restoreWindow = stubWindowLocalStorage();
+  try {
+    const result = await saveReportRemote({}, MINIMAL_SUMMARY);
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 503);
+    assert.equal(result.roomReuseNotReady, false, "a bare 503 with no matching application code must never be treated as the room-reuse condition");
+    assert.equal(classifySaveReportRemoteResult(result), "TRANSIENT_OR_UNKNOWN");
+  } finally {
+    restoreFetch();
+    restoreWindow();
+  }
+});
+
+test("C. saveReportRemote: HTTP 503 with a DIFFERENT application code ({ code: 'SOME_OTHER_ERROR' }) sets roomReuseNotReady=false — the discriminator checks the exact code, not just that some code is present", async () => {
+  const restoreFetch = stubFetchOnce(async () => new Response(JSON.stringify({ error: "Something else entirely", code: "SOME_OTHER_ERROR" }), { status: 503 }));
+  const restoreWindow = stubWindowLocalStorage();
+  try {
+    const result = await saveReportRemote({}, MINIMAL_SUMMARY);
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 503);
+    assert.equal(result.roomReuseNotReady, false);
+    assert.equal(classifySaveReportRemoteResult(result), "TRANSIENT_OR_UNKNOWN");
+  } finally {
+    restoreFetch();
+    restoreWindow();
+  }
+});
+
+test("D. saveReportRemote: HTTP 409 ROOM_OCCUPIED semantics are unchanged by the roomReuseNotReady hardening — roomOccupied=true, roomReuseNotReady=false", async () => {
+  const restoreFetch = stubFetchOnce(async () =>
+    new Response(JSON.stringify({ error: "Room 1 already has an active report. It will be available again at 2026-01-01T00:00:00.000Z.", cycleEndsAt: "2026-01-01T00:00:00.000Z" }), { status: 409 }),
+  );
+  const restoreWindow = stubWindowLocalStorage();
+  try {
+    const result = await saveReportRemote({}, MINIMAL_SUMMARY);
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 409);
+    assert.equal(result.roomOccupied, true);
+    assert.equal(result.roomReuseNotReady, false);
+    assert.equal(result.cycleEndsAt, "2026-01-01T00:00:00.000Z");
+    assert.equal(classifySaveReportRemoteResult(result), "CLIENT_REJECTED");
+  } finally {
+    restoreFetch();
+    restoreWindow();
+  }
+});
+
 test("saveReportRemote + classifySaveReportRemoteResult: HTTP 500 classifies as TRANSIENT_OR_UNKNOWN", async () => {
   const restoreFetch = stubFetchOnce(async () => new Response(JSON.stringify({ error: "Internal error" }), { status: 500 }));
   const restoreWindow = stubWindowLocalStorage();
@@ -313,7 +385,7 @@ test("saveReportRemote + classifySaveReportRemoteResult: a thrown network/fetch 
   const restoreWindow = stubWindowLocalStorage();
   try {
     const result = await saveReportRemote({}, MINIMAL_SUMMARY);
-    assert.deepEqual(result, { ok: false, status: 0, quotaExceeded: false, roomOccupied: false });
+    assert.deepEqual(result, { ok: false, status: 0, quotaExceeded: false, roomOccupied: false, roomReuseNotReady: false });
     assert.equal(classifySaveReportRemoteResult(result), "TRANSIENT_OR_UNKNOWN");
   } finally {
     restoreFetch();

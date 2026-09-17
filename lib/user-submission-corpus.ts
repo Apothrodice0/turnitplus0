@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { Client } from "@libsql/client";
+import type { Client, Transaction } from "@libsql/client";
 import { tokens, grams, gramHash, informativeGram, containment } from "./similarity-core";
 import { canonicalizeText } from "./canonical-text";
 import { canonicalSha256, findDocumentIdentitiesByRawHash, findPriorSubmissionsForAccount } from "./document-identity";
@@ -1260,7 +1260,7 @@ export async function findCandidateCorpusRepresentations(
  * summarizeSubmissionOwnership — never returns decision_id, source_ref, or
  * any other corpus-admission-domain identifier.
  */
-export async function isRepresentationActivelyPromoted(client: Client, representationId: string): Promise<boolean> {
+export async function isRepresentationActivelyPromoted(client: Pick<Transaction, "execute">, representationId: string): Promise<boolean> {
   const result = await client.execute({
     sql: `SELECT EXISTS (
             SELECT 1 FROM corpus_admission_promotions p

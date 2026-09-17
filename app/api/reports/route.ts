@@ -21,7 +21,15 @@ import { checkUploadLimit } from '../../../lib/upload-limit';
 import { getRoomCountForRole, isWithinActiveCycle, roomCycleEndsAt } from '../../../lib/report-rooms';
 import { findRoomOccupant } from '../../../lib/reports-repo';
 import { runAfterResponse } from '../../../lib/run-after-response';
-import { createPendingReportAdmissionJob, processReportAdmissionJob } from '../../../lib/corpus-admission-report-integration';
+import {
+  createPendingReportAdmissionJob,
+  processReportAdmissionJob,
+  ensureRoomReuseAdmissionSafety,
+  isReportAdmissionSafeToReplace,
+  deleteReportCorpusAdmissionData,
+} from '../../../lib/corpus-admission-report-integration';
+import { deleteHistoricalMatchSnapshot } from '../../../lib/report-historical-match';
+import { deleteReportDocumentData } from '../../../lib/report-deletion';
 import { resolvePrimarySimilaritySummary } from '../../../lib/report-primary-similarity';
 import { withEvidenceInterpretation, stripClientEvidenceInterpretation } from '../../../lib/report-evidence-interpretation';
 import { sanitizeExtractionDiagnostic } from '../../../lib/evidence-interpretation';
@@ -153,6 +161,17 @@ function isSqliteBusyError(err: unknown): boolean {
 }
 
 /**
+ * One-current-report-per-room (Phase 2): 'inserted' is the ordinary
+ * empty-room or successful-replacement outcome; 'conflict' is the existing,
+ * unchanged active-room (<24h) rejection; 'notReady' is the new, rare
+ * straggler outcome — an expired occupant whose corpus-admission job has not
+ * yet reached a durable decision even after ensureRoomReuseAdmissionSafety's
+ * one synchronous recovery attempt. See insertReportWithRoomCheck's own
+ * comment for the full sequencing.
+ */
+type RoomClaimResult = { kind: 'inserted' } | { kind: 'conflict'; mostRecent: string } | { kind: 'notReady' };
+
+/**
  * The room-occupancy check and the insert as one atomic write transaction,
  * retried on SQLITE_BUSY with a genuinely fresh connection each attempt
  * (production audit fix for the concurrent-upload race — two different new
@@ -167,6 +186,22 @@ function isSqliteBusyError(err: unknown): boolean {
  * occupancy fresh, so a retry can never act on stale data from an earlier
  * attempt — either it observes the winner's row and returns a real
  * conflict, or it becomes the winner itself.
+ *
+ * One-current-report-per-room (Phase 2): when the freshly-read occupant's
+ * 24h cycle has already ended, this room is being reused — an account+room
+ * holds AT MOST one current customer report, so the prior occupant's report
+ * state is replaced, never accumulated alongside the new one. The caller
+ * (POST below) already ran ensureRoomReuseAdmissionSafety ONCE, outside any
+ * transaction, before ever reaching here; this function re-verifies that
+ * same safety fact fresh (isReportAdmissionSafeToReplace, read-only, no
+ * recovery attempt) against whatever occupant this exact transaction
+ * actually observes, since a concurrent request could have changed it since
+ * the outside check ran. Deleting the old report and inserting the new one
+ * happen inside this SAME write transaction as the occupancy check, so two
+ * simultaneous reuse attempts still cannot both succeed — the loser's retry
+ * (the SQLITE_BUSY path above) re-reads fresh and correctly lands on
+ * 'conflict' against the winner's brand-new row, exactly like the existing
+ * empty-room race this function was already built to close.
  */
 async function insertReportWithRoomCheck(params: {
   id: string; deviceKey: string; submissionId: string; title: string; createdAt: string;
@@ -199,7 +234,7 @@ async function insertReportWithRoomCheck(params: {
    * written best-effort AFTER commit.
    */
   actorObservation: ActorObservation | null;
-}): Promise<{ conflict: { mostRecent: string } | null }> {
+}): Promise<RoomClaimResult> {
   for (let attempt = 1; attempt <= MAX_ROOM_INSERT_BUSY_RETRIES; attempt++) {
     const txClient = await getReportsDbClient();
     try {
@@ -211,12 +246,58 @@ async function insertReportWithRoomCheck(params: {
         let conflict: { mostRecent: string } | null = null;
         if (params.roomNumberForInsert !== null && params.roomOwnerId !== null) {
           const occupant = await tx.execute({
-            sql: `SELECT report_created_at FROM saved_reports WHERE user_id = ? AND room_number = ? ORDER BY report_created_at DESC LIMIT 1`,
+            sql: `SELECT id, device_key, document_identity_id, report_created_at FROM saved_reports WHERE user_id = ? AND room_number = ? ORDER BY report_created_at DESC LIMIT 1`,
             args: [params.roomOwnerId, params.roomNumberForInsert],
           });
-          const mostRecent = occupant.rows[0]?.report_created_at as string | undefined;
-          if (mostRecent && isWithinActiveCycle(mostRecent)) {
-            conflict = { mostRecent };
+          const occupantRow = occupant.rows[0] as unknown as
+            | { id: string; device_key: string; document_identity_id: string | null; report_created_at: string }
+            | undefined;
+          if (occupantRow && isWithinActiveCycle(occupantRow.report_created_at)) {
+            conflict = { mostRecent: occupantRow.report_created_at };
+          } else if (occupantRow) {
+            // One-current-report-per-room (Phase 2): the prior occupant's
+            // 24h cycle has ended, so this room is being reused — the old
+            // customer report must be replaced, not accumulated alongside
+            // the new one. Re-verify admission safety FRESH, inside this
+            // transaction, rather than trusting the outside precheck's
+            // (necessarily pre-lock) snapshot — see
+            // isReportAdmissionSafeToReplace's own comment for why this is a
+            // read-only re-check, never a second recovery attempt: recovery
+            // already had its one synchronous chance, outside this
+            // transaction, in ensureRoomReuseAdmissionSafety.
+            const safeToReplace = await isReportAdmissionSafeToReplace(tx, {
+              accountId: params.roomOwnerId,
+              deviceKey: occupantRow.device_key,
+              reportId: occupantRow.id,
+            });
+            if (!safeToReplace) {
+              // Bounded, customer-safe retry — never delete the old report,
+              // never insert a second one, never wait or loop here. A fresh
+              // client request re-runs the outside recovery attempt.
+              await tx.rollback().catch(() => {});
+              return { kind: 'notReady' };
+            }
+            // Reuses the EXACT same per-report cleanup DELETE
+            // /api/reports/[id] already relies on (never a second definition
+            // of report cleanup) — see this route's own DELETE handler for
+            // the identical ordering. preserveActivelyPromotedRepresentations
+            // mirrors the developer rooms-reset tool's own use of this
+            // option: a live, non-revoked promoted corpus-matching
+            // representation must survive even if this report's own
+            // reference was its last one. Accepted admission decisions /
+            // retained content / fingerprints are already durable by
+            // deleteReportCorpusAdmissionData's own accepted-content guard.
+            await deleteHistoricalMatchSnapshot(tx, { reportDeviceKey: occupantRow.device_key, reportId: occupantRow.id });
+            await tx.execute({
+              sql: 'DELETE FROM saved_reports WHERE device_key = ? AND id = ?',
+              args: [occupantRow.device_key, occupantRow.id],
+            });
+            await deleteReportDocumentData(tx, occupantRow.document_identity_id, { preserveActivelyPromotedRepresentations: true });
+            await deleteReportCorpusAdmissionData(tx, {
+              accountId: params.roomOwnerId,
+              deviceKey: occupantRow.device_key,
+              reportId: occupantRow.id,
+            });
           }
         }
         if (!conflict) {
@@ -287,7 +368,7 @@ async function insertReportWithRoomCheck(params: {
             );
           }
         }
-        return { conflict };
+        return conflict ? { kind: 'conflict', mostRecent: conflict.mostRecent } : { kind: 'inserted' };
       } catch (err) {
         await tx.rollback().catch(() => {});
         throw err;
@@ -591,6 +672,41 @@ export async function POST(request: Request) {
         }
         roomNumberForInsert = room as number;
         roomOwnerId = sessionUser.id;
+
+        // One-current-report-per-room (Phase 1 — admission safety gate):
+        // checked here, BEFORE any of the expensive write-time work below
+        // (similarity finalization, evidence interpretation, etc.), so a
+        // rare NOT_READY room fails fast rather than after doing unrelated
+        // work for a save that cannot proceed yet. Read-only: this is a
+        // one-shot check (+ at most one synchronous admission-processing
+        // attempt) on the SAME connection already open for this request. The
+        // actual claim — re-validate the occupant fresh, delete it, and
+        // insert the replacement — happens later, atomically, inside
+        // insertReportWithRoomCheck's own write transaction (see that
+        // function's own comment), which never trusts this snapshot.
+        const outsideOccupant = await client.execute({
+          sql: `SELECT id, device_key, report_created_at FROM saved_reports WHERE user_id = ? AND room_number = ? ORDER BY report_created_at DESC LIMIT 1`,
+          args: [roomOwnerId, roomNumberForInsert],
+        });
+        const outsideOccupantRow = outsideOccupant.rows[0] as unknown as { id: string; device_key: string; report_created_at: string } | undefined;
+        if (outsideOccupantRow && !isWithinActiveCycle(outsideOccupantRow.report_created_at)) {
+          const safety = await ensureRoomReuseAdmissionSafety(client, {
+            accountId: roomOwnerId,
+            deviceKey: outsideOccupantRow.device_key,
+            reportId: outsideOccupantRow.id,
+            openConnection: () => getReportsDbClient(),
+          });
+          if (safety === 'NOT_READY') {
+            logReportSaveRejectedTelemetry({ reason: 'ROOM_REUSE_NOT_READY', status: 503, authMode: 'authenticated' });
+            return new NextResponse(
+              JSON.stringify({
+                error: 'This room is finishing its previous check. Please try again shortly.',
+                code: 'ROOM_REUSE_NOT_READY',
+              }),
+              { status: 503, headers: { 'Content-Type': 'application/json' } },
+            );
+          }
+        }
       }
 
       const reportPayload = payload as SimilarityReport;
@@ -1116,7 +1232,7 @@ export async function POST(request: Request) {
       // MOST one current report" (see lib/report-rooms.ts's own header
       // comment). See insertReportWithRoomCheck's own comment for why this
       // needs a real busy-retry loop, not just a transaction.
-      const { conflict: roomConflict } = await insertReportWithRoomCheck({
+      const roomClaim = await insertReportWithRoomCheck({
         id, deviceKey, submissionId, title, createdAt, wordCount, archiveScore, scoreBand,
         aiScore: aiScore ?? null, aiTone: aiTone ?? null, aiStatus: aiStatus ?? null,
         payloadJson: payloadJsonToPersist, userId, roomNumberForInsert, roomOwnerId,
@@ -1124,12 +1240,29 @@ export async function POST(request: Request) {
         actorObservation: actorObservationForLedger,
       });
 
-      if (roomConflict) {
+      // One-current-report-per-room (Phase 2): a fresh, in-transaction
+      // re-check found the expired occupant's admission job still not
+      // terminal even after the outside precheck's one recovery attempt (a
+      // genuinely rare race — see isReportAdmissionSafeToReplace's own
+      // comment). Nothing was deleted or inserted; a retry re-runs the whole
+      // precheck fresh.
+      if (roomClaim.kind === 'notReady') {
+        logReportSaveRejectedTelemetry({ reason: 'ROOM_REUSE_NOT_READY', status: 503, authMode: 'authenticated' });
+        return new NextResponse(
+          JSON.stringify({
+            error: 'This room is finishing its previous check. Please try again shortly.',
+            code: 'ROOM_REUSE_NOT_READY',
+          }),
+          { status: 503, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+
+      if (roomClaim.kind === 'conflict') {
         logReportSaveRejectedTelemetry({ reason: 'ROOM_OCCUPIED', status: 409, authMode: 'authenticated' });
         return new NextResponse(
           JSON.stringify({
-            error: `Room ${(roomNumberForInsert as number) + 1} already has an active report. It will be available again at ${roomCycleEndsAt(roomConflict.mostRecent)}.`,
-            cycleEndsAt: roomCycleEndsAt(roomConflict.mostRecent),
+            error: `Room ${(roomNumberForInsert as number) + 1} already has an active report. It will be available again at ${roomCycleEndsAt(roomClaim.mostRecent)}.`,
+            cycleEndsAt: roomCycleEndsAt(roomClaim.mostRecent),
           }),
           { status: 409, headers: { 'Content-Type': 'application/json' } },
         );

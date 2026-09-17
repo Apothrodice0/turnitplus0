@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { Client, InStatement } from "@libsql/client";
+import type { Client, InStatement, Transaction } from "@libsql/client";
 import { evaluateCorpusAdmissionCandidate, type CorpusAdmissionConnectionFactory, type CorpusAdmissionDecisionRecord } from "./corpus-admission-gate";
 import { isCorpusPromotionEnabled, stageAndClaimCorpusAdmissionPromotionForDecision, processCorpusAdmissionPromotion } from "./corpus-admission-promotion";
 // Imported (and re-exported below, unchanged, for every existing importer
@@ -568,7 +568,9 @@ export async function processReportAdmissionJob(client: Client, params: ProcessR
 }
 
 // ============================================================================
-// Retry sweep with atomic claiming (blocker 2)
+// Shared atomic job-claim primitives — used by BOTH the retry sweep's own
+// batch claim (below) and the room-reuse single-job claim (below). One
+// locking model, one stale-claim convention, never duplicated.
 // ============================================================================
 
 const MAX_CLAIM_BUSY_RETRIES = 10;
@@ -576,10 +578,219 @@ function claimBackoff(attempt: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 20 * attempt + Math.floor(Math.random() * 30)));
 }
 
+/** A claim older than this is considered abandoned (the process that made it likely died mid-attempt) and is reclaimable. The retry sweep's own long-standing default (unchanged); the room-reuse single-job claim reuses this exact value rather than defining its own. */
+const DEFAULT_STALE_CLAIM_MS = 5 * 60 * 1000;
+
+// ============================================================================
+// Room-reuse admission safety gate (one-current-report-per-room)
+// ============================================================================
+
+export type RoomReuseAdmissionSafety = "SAFE" | "NOT_READY";
+
+function isReportAdmissionJobTerminal(job: ReportAdmissionJobRow | null): boolean {
+  if (!job) return true;
+  if (job.status === "succeeded" || job.status === "cancelled") return true;
+  return job.status === "failed" && job.decisionId !== null;
+}
+
+/**
+ * Atomic single-job claim — exactly the same select-then-claim-inside-one-
+ * write-transaction primitive runReportAdmissionRetrySweep uses for its own
+ * batch claim (see that function's own comment below), narrowed to exactly
+ * one job by id rather than a batch. Identical eligibility predicate
+ * (status IN ('pending','failed') AND (claimed_at IS NULL OR stale)),
+ * identical staleClaimMs convention (DEFAULT_STALE_CLAIM_MS, the sweep's own
+ * long-standing 5-minute default — never a second duration constant),
+ * identical BEGIN IMMEDIATE / fresh-connection-per-retry SQLITE_BUSY
+ * handling. One locking model, reused, never reimplemented.
+ *
+ * Returns true only when THIS caller's own attempt is the one that actually
+ * set claimed_at — i.e. this caller, and no one else, may now call
+ * processReportAdmissionJob for this job. Returns false when the job is
+ * already terminal (nothing to claim) or when it is 'pending'/'failed' but
+ * currently held by someone else's not-yet-stale claim — meaning another
+ * request or worker is presumably already processing it right now. Never
+ * waits and never retries the eligibility decision itself (only genuine
+ * SQLITE_BUSY on the claim transaction itself is retried, exactly like the
+ * sweep) — a losing caller must not spin; see ensureRoomReuseAdmissionSafety
+ * for what it does instead.
+ */
+export async function claimReportAdmissionJobForProcessing(
+  openConnection: CorpusAdmissionConnectionFactory,
+  jobId: string,
+  options: { staleClaimMs?: number } = {},
+): Promise<boolean> {
+  const staleClaimMs = options.staleClaimMs ?? DEFAULT_STALE_CLAIM_MS;
+  const staleClaimSeconds = Math.max(1, Math.floor(staleClaimMs / 1000));
+
+  for (let attempt = 1; attempt <= MAX_CLAIM_BUSY_RETRIES; attempt += 1) {
+    const attemptClient = await openConnection();
+    try {
+      const tx = await attemptClient.transaction("write");
+      try {
+        const candidate = await tx.execute({
+          sql: `SELECT id FROM corpus_admission_report_jobs
+                WHERE id = ? AND status IN ('pending','failed') AND (claimed_at IS NULL OR claimed_at < datetime('now', ?))`,
+          args: [jobId, `-${staleClaimSeconds} seconds`],
+        });
+        const claimed = candidate.rows.length > 0;
+        if (claimed) {
+          await tx.execute({
+            sql: `UPDATE corpus_admission_report_jobs SET claimed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+            args: [jobId],
+          });
+        }
+        await tx.commit();
+        return claimed;
+      } catch (err) {
+        await tx.rollback().catch(() => {});
+        throw err;
+      } finally {
+        tx.close();
+      }
+    } catch (err) {
+      if (isSqliteBusyError(err) && attempt < MAX_CLAIM_BUSY_RETRIES) {
+        await claimBackoff(attempt);
+        continue;
+      }
+      throw err;
+    } finally {
+      attemptClient.close();
+    }
+  }
+  throw new Error("claimReportAdmissionJobForProcessing: exhausted retries without resolving");
+}
+
+/**
+ * Room-reuse safety gate for POST /api/reports's room-claim logic
+ * (app/api/reports/route.ts's insertReportWithRoomCheck): an expired room
+ * occupant is about to have its saved_reports row deleted so a new upload
+ * can take the slot. The ONLY thing that delete could ever lose is a report
+ * whose corpus-admission job has not yet reached a durable decision —
+ * processReportAdmissionJob's own fallback path re-derives rawText from
+ * saved_reports.payload_json (see that function's own comment above), so
+ * deleting the report before that job is done would permanently strand it.
+ * Once a decision exists, everything the 7-day maturity/matching pipeline
+ * needs (corpus_admission_decisions, corpus_admission_content_store,
+ * corpus_admission_accepted_representations, corpus_admission_promotions,
+ * corpus_document_representations/shingles) is independent of saved_reports
+ * — see this module's own header comment.
+ *
+ * SAFE (no recovery needed) when either:
+ *   A. no job row exists for this report at all (CORPUS_ADMISSION_ENABLED was
+ *      off at upload time, or this report predates the feature — the common
+ *      case today, since the flag defaults off), or
+ *   B. the job already reached a terminal outcome with its decision durably
+ *      recorded: status 'succeeded' / 'cancelled', or 'failed' with a
+ *      non-null decision_id (finalization is still owed — see
+ *      processReportAdmissionJob's own re-finalization fast path — but the
+ *      decision itself is already committed and durable).
+ *
+ * NOT_READY only for a genuine straggler: status 'pending', or 'failed' with
+ * no decision_id yet. This gives the EXISTING machinery
+ * (processReportAdmissionJob — never a second admission implementation)
+ * exactly one synchronous chance to finish, then re-reads the job once. If it
+ * is STILL not terminal, this returns NOT_READY and the caller must not
+ * delete the report or insert a replacement — no internal retry loop, no
+ * queue: the caller surfaces one bounded, retryable result to the client.
+ *
+ * Called OUTSIDE the room-claim write transaction — processReportAdmissionJob
+ * opens its own connections via openConnection and cannot safely run nested
+ * inside another open transaction. app/api/reports/route.ts's caller
+ * re-validates the occupant fresh, inside its own transaction, after this
+ * returns SAFE, exactly as every other room-claim re-check already does for
+ * the active-cycle case — so a concurrent replacement or a fresh upload that
+ * lands in between is still handled correctly by that re-read, never by this
+ * function's own (necessarily pre-lock) snapshot.
+ */
+export async function ensureRoomReuseAdmissionSafety(
+  client: Client,
+  params: { accountId: string; deviceKey: string; reportId: string; openConnection: CorpusAdmissionConnectionFactory },
+): Promise<RoomReuseAdmissionSafety> {
+  const sourceRef = buildReportAdmissionSourceRef(params);
+  const job = await fetchJobBySourceRef(client, sourceRef);
+  if (isReportAdmissionJobTerminal(job)) return "SAFE";
+
+  // job is non-null and non-terminal here. Two concurrent room-reuse
+  // requests can observe the exact same straggler at once (two different
+  // uploads both reusing the same expired room) — without a claim, both
+  // would call processReportAdmissionJob directly and both would run a full,
+  // duplicate evaluation, leaving the job's own decision_id bookkeeping a
+  // last-write-wins race between them (proven empirically: same corpus data
+  // either way — evaluateCorpusAdmissionCandidate's own UNIQUE-constraint
+  // dedup already makes that side fully safe — but which decision the JOB
+  // ROW ends up pointing at was non-deterministic). Claiming first, via the
+  // exact same primitive the retry sweep already uses, ensures at most one
+  // caller ever processes this job at all.
+  const claimed = await claimReportAdmissionJobForProcessing(params.openConnection, (job as ReportAdmissionJobRow).id).catch((err) => {
+    console.error(
+      "ensureRoomReuseAdmissionSafety: claimReportAdmissionJobForProcessing failed unexpectedly (non-fatal — treated as a lost claim, re-checked below):",
+      err instanceof Error ? err.message : String(err),
+    );
+    return false;
+  });
+
+  if (claimed) {
+    // Won the claim — give it its one synchronous chance, via the exact
+    // same machinery every other caller (the deferred first-save attempt, a
+    // manual retry, the sweep) already shares. Never called by a caller that
+    // did not win the claim, so this job can never be evaluated twice
+    // concurrently any more.
+    await processReportAdmissionJob(client, { jobId: (job as ReportAdmissionJobRow).id, openConnection: params.openConnection }).catch((err) => {
+      // processReportAdmissionJob's own contract is "never throws" (every
+      // real outcome is persisted and returned as a value) — this catch is
+      // only a defensive second layer, matching every other best-effort
+      // call site of it in this codebase.
+      console.error(
+        "ensureRoomReuseAdmissionSafety: processReportAdmissionJob failed unexpectedly (non-fatal — re-checked below):",
+        err instanceof Error ? err.message : String(err),
+      );
+    });
+  }
+  // Lost the claim (or the claim attempt itself errored): another request or
+  // worker is presumably already processing this exact job right now. Never
+  // spin, never wait indefinitely — one immediate, final re-read decides the
+  // outcome, exactly the same as the won-the-claim path above. If that other
+  // caller has already finished by the time this reads, this correctly
+  // returns SAFE; otherwise NOT_READY, and a fresh client request re-runs
+  // this whole gate (including a fresh claim attempt) later.
+
+  const rechecked = await fetchJobBySourceRef(client, sourceRef);
+  return isReportAdmissionJobTerminal(rechecked) ? "SAFE" : "NOT_READY";
+}
+
+/**
+ * Read-only, no-recovery counterpart to ensureRoomReuseAdmissionSafety, for
+ * re-validating INSIDE the room-claim write transaction (see that function's
+ * own comment for why the recovery attempt itself cannot run there — nested
+ * transactions/connections aren't safe). Accepts `Pick<Transaction,
+ * "execute">` so it can run on the exact same `tx` the delete + insert also
+ * run on. Never attempts recovery and never mutates anything — if this
+ * returns false, the caller must abort the whole claim (no delete, no
+ * insert, no internal retry) rather than loop or wait; a fresh client
+ * request re-runs ensureRoomReuseAdmissionSafety's own recovery attempt.
+ */
+export async function isReportAdmissionSafeToReplace(
+  client: Pick<Transaction, "execute">,
+  params: { accountId: string; deviceKey: string; reportId: string },
+): Promise<boolean> {
+  const sourceRef = buildReportAdmissionSourceRef(params);
+  const result = await client.execute({ sql: "SELECT * FROM corpus_admission_report_jobs WHERE source_ref = ?", args: [sourceRef] });
+  const row = result.rows[0] as unknown as RawJobRow | undefined;
+  return isReportAdmissionJobTerminal(row ? toJobRow(row) : null);
+}
+
+// ============================================================================
+// Retry sweep with atomic claiming (blocker 2)
+// ============================================================================
+// MAX_CLAIM_BUSY_RETRIES / claimBackoff / DEFAULT_STALE_CLAIM_MS now live
+// above, shared with claimReportAdmissionJobForProcessing's own single-job
+// claim — one locking model, never duplicated.
+
 export type RunReportAdmissionRetrySweepParams = {
   openConnection: CorpusAdmissionConnectionFactory;
   batchSize?: number;
-  /** A claim older than this is considered abandoned (the process that made it likely died mid-attempt) and is reclaimable by a later sweep. Default 5 minutes. */
+  /** A claim older than this is considered abandoned (the process that made it likely died mid-attempt) and is reclaimable by a later sweep. Default DEFAULT_STALE_CLAIM_MS (5 minutes). */
   staleClaimMs?: number;
 };
 
@@ -608,7 +819,7 @@ export type RunReportAdmissionRetrySweepResult = {
  */
 export async function runReportAdmissionRetrySweep(client: Client, params: RunReportAdmissionRetrySweepParams): Promise<RunReportAdmissionRetrySweepResult> {
   const batchSize = params.batchSize ?? 20;
-  const staleClaimMs = params.staleClaimMs ?? 5 * 60 * 1000;
+  const staleClaimMs = params.staleClaimMs ?? DEFAULT_STALE_CLAIM_MS;
   // Computed via SQLite's own datetime('now', ...) rather than JS
   // Date.toISOString(): CURRENT_TIMESTAMP (used to set claimed_at) produces
   // "YYYY-MM-DD HH:MM:SS" (space-separated, no fractional seconds); a JS
@@ -697,9 +908,17 @@ export async function runReportAdmissionRetrySweep(client: Client, params: RunRe
  * report/account deletion by design (see this module's own header
  * comment) — mirroring lib/report-deletion.ts's identical treatment of the
  * real corpus's own shared content.
+ *
+ * Accepts `Pick<Transaction, "execute">` rather than `Client` so
+ * app/api/reports/route.ts's room-reuse replacement (POST) can call this
+ * INSIDE the same write transaction that re-validates room occupancy and
+ * inserts the replacement (mirrors lib/device-passport-actor-ledger.ts's own
+ * recordDevicePassportActorUsage) — this function only ever calls
+ * `.execute()`, so every existing caller that passes a plain Client is
+ * unaffected.
  */
 export async function deleteReportCorpusAdmissionData(
-  client: Client,
+  client: Pick<Transaction, "execute">,
   params: { accountId: string; deviceKey: string; reportId: string },
 ): Promise<void> {
   const sourceRef = buildReportAdmissionSourceRef(params);

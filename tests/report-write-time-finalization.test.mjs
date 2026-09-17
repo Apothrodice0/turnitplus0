@@ -2019,7 +2019,7 @@ test('REPORT-LIFECYCLE CORRECTNESS FIX: revisiting/reloading an already-resolved
   assert.deepEqual(before.rows[0], after.rows[0], 'REQUIRED: three room reads must never write anything — the persisted row, including updated_at, must be byte-identical before and after');
 });
 
-test('LEGACY ROOM BUG: an explicit new upload to a room whose prior (legacy) occupant has cycled out replaces the occupant, and the prior legacy report/history row is preserved, never deleted', async () => {
+test('ONE-CURRENT-REPORT-PER-ROOM: an explicit new upload to a room whose prior (legacy) occupant has cycled out replaces the occupant, and the prior legacy report row is deleted, never left to accumulate', async () => {
   const account = await signUpConsentingAccount();
   const legacyId = 'legacy-room-history-report';
   // A room holds AT MOST one CURRENT report at a time (lib/report-rooms.ts's
@@ -2031,11 +2031,16 @@ test('LEGACY ROOM BUG: an explicit new upload to a room whose prior (legacy) occ
   // behind "only an explicit new upload replaces the room's occupant": not
   // "immediately, on demand," but "once legitimately available, never via
   // reload/relogin alone" — see the room-revisit test above for that half.
+  // One-current-report-per-room (Phase 2): this legacy row has no
+  // document_identity_id and no corpus-admission job (exactly the NO_JOB
+  // case — see tests/room-reuse-one-report-per-room.test.mjs for the full
+  // admission-safety-gated contract), so replacement proceeds without any
+  // recovery step.
   const expiredCreatedAt = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
   await insertLegacyRow(account, { id: legacyId, room: 6, aiStatus: 'ready', aiScore: 6, archiveScore: 44, text: DOCUMENT_A_TEXT, createdAt: expiredCreatedAt });
 
   const beforeUpload = await findRoomOccupant(client, account.userId, 6);
-  assert.equal(beforeUpload.status, 'empty', 'test setup sanity: a report whose own cycle has elapsed is no longer the room\'s CURRENT occupant, freeing the room for a new upload — it is not deleted, only no longer current (see the history assertion below)');
+  assert.equal(beforeUpload.status, 'empty', 'test setup sanity: a report whose own cycle has elapsed is no longer the room\'s CURRENT occupant, freeing the room for a new upload');
 
   // An explicit new upload — the ONLY thing that should ever replace a
   // room's occupant.
@@ -2047,7 +2052,7 @@ test('LEGACY ROOM BUG: an explicit new upload to a room whose prior (legacy) occ
   assert.equal(afterUpload.report.id, newId, 'REQUIRED: only an explicit new upload replaces the room\'s current occupant');
 
   const legacyRowStillExists = await client.execute({ sql: 'SELECT id FROM saved_reports WHERE device_key = ? AND id = ?', args: [account.deviceKey, legacyId] });
-  assert.equal(legacyRowStillExists.rows.length, 1, 'REQUIRED: the previous saved report/history must not be accidentally deleted by a new upload to the same room');
+  assert.equal(legacyRowStillExists.rows.length, 0, 'REQUIRED: one-current-report-per-room — reusing a room deletes the prior occupant\'s customer report row, it is never left to accumulate');
 });
 
 const NO_HISTORICAL_MATCH_FIX_TEXT =

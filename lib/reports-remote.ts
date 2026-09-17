@@ -75,11 +75,33 @@ export type SaveReportRemoteResult =
    * status 0 means the request never completed (network/DB error) — the
    * existing fail-soft case, where the local copy is the only signal that
    * matters and the caller has never needed to react to a value. status 429
-   * with quotaExceeded, and status 409 with roomOccupied, are surfaced to the
-   * user instead of being treated like every other silent remote-save
-   * failure — see generateReport() in app/page.tsx.
+   * with quotaExceeded, status 409 with roomOccupied, and status 503 with
+   * roomReuseNotReady are surfaced to the user instead of being treated like
+   * every other silent remote-save failure — see generateReport() in
+   * app/page.tsx and runCheck() in
+   * app/reports/rooms/[room]/room-page-shell.tsx.
+   *
+   * roomReuseNotReady (one-current-report-per-room, Phase 2): status 503 AND
+   * body.code === "ROOM_REUSE_NOT_READY" — unlike roomOccupied's own 409
+   * (never returned by this route for any other reason), 503 is a generic
+   * HTTP status a platform/infrastructure failure could also return before
+   * ever reaching application code, so the exact application-level code is
+   * required too; a bare 503 with no matching code is never treated as this
+   * condition. For the rare case where the room's prior occupant had expired
+   * but its corpus-admission processing had not yet finished. The selected
+   * file is never cleared on this path (see runCheck's own error handling);
+   * a plain retry re-runs the same upload.
    */
-  | { ok: false; status: number; quotaExceeded: boolean; roomOccupied: boolean; error?: string; resetsAt?: string; cycleEndsAt?: string };
+  | {
+      ok: false;
+      status: number;
+      quotaExceeded: boolean;
+      roomOccupied: boolean;
+      roomReuseNotReady: boolean;
+      error?: string;
+      resetsAt?: string;
+      cycleEndsAt?: string;
+    };
 
 /**
  * Pre-launch hardening fix: the smallest failure classification a caller
@@ -176,7 +198,7 @@ export async function saveReportRemote<T>(report: T, summary: ReportSummary, aca
     });
     if (!response.ok) {
       console.debug("Remote report save was rejected (local copy is unaffected).", { status: response.status });
-      const body = (await response.json().catch(() => null)) as { error?: string; resetsAt?: string; cycleEndsAt?: string } | null;
+      const body = (await response.json().catch(() => null)) as { error?: string; code?: string; resetsAt?: string; cycleEndsAt?: string } | null;
       // Distinguished from the IP rate limiter's own 429 (checkRate in
       // app/api/reports/route.ts, `{ error: 'Too many requests' }`, no
       // resetsAt) by the presence of resetsAt — only the daily upload quota
@@ -184,7 +206,15 @@ export async function saveReportRemote<T>(report: T, summary: ReportSummary, aca
       // (409), so it never needs a similar body-shape heuristic.
       const quotaExceeded = response.status === 429 && typeof body?.resetsAt === "string";
       const roomOccupied = response.status === 409;
-      return { ok: false, status: response.status, quotaExceeded, roomOccupied, error: body?.error, resetsAt: body?.resetsAt, cycleEndsAt: body?.cycleEndsAt };
+      // Deliberately NOT status-only (unlike roomOccupied's own 409, which
+      // this route never returns for any other reason): 503 is a generic
+      // HTTP status a platform/infrastructure failure can also return before
+      // ever reaching application code at all (a different body shape, or no
+      // JSON body). Requiring the exact application-level `code` too means a
+      // genuine unrelated 503 is never misclassified as this rare,
+      // specifically-recoverable condition.
+      const roomReuseNotReady = response.status === 503 && body?.code === "ROOM_REUSE_NOT_READY";
+      return { ok: false, status: response.status, quotaExceeded, roomOccupied, roomReuseNotReady, error: body?.error, resetsAt: body?.resetsAt, cycleEndsAt: body?.cycleEndsAt };
     }
     // The report is now durably saved server-side: any later resave of this id
     // (AI enrichment) is definitively not a first save, so Device Passport
@@ -195,7 +225,7 @@ export async function saveReportRemote<T>(report: T, summary: ReportSummary, aca
     console.debug("Remote report save failed (local copy is unaffected).", {
       error: error instanceof Error ? error.message : String(error),
     });
-    return { ok: false, status: 0, quotaExceeded: false, roomOccupied: false };
+    return { ok: false, status: 0, quotaExceeded: false, roomOccupied: false, roomReuseNotReady: false };
   }
 }
 

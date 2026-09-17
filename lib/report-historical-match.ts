@@ -1,4 +1,4 @@
-import type { Client } from "@libsql/client";
+import type { Client, Transaction } from "@libsql/client";
 import { createHash } from "node:crypto";
 import { canonicalizeText } from "./canonical-text";
 import { matchAgainstUserSubmissionCorpus, isCorpusSourceMatchingEnabled, USER_SUBMISSION_MATCHER_VERSION, USER_SUBMISSION_MATCH_THRESHOLDS } from "./user-submission-matching";
@@ -784,8 +784,10 @@ export async function getPersistedHistoricalMatchSnapshot(
   return applyCorpusSourceMatchingFlag(rowToResult(existingRow));
 }
 
-/** Deletes a report's historical-match snapshot, if any — see db/schema.ts's own comment on why this is an explicit application-level cascade rather than a DB-level FOREIGN KEY ... ON DELETE CASCADE. Called from app/api/reports/[id]/route.ts's DELETE handler, in the same request that deletes the report itself. */
-export async function deleteHistoricalMatchSnapshot(client: Client, params: { reportDeviceKey: string; reportId: string }): Promise<void> {
+/**
+ * Deletes a report's historical-match snapshot, if any — see db/schema.ts's own comment on why this is an explicit application-level cascade rather than a DB-level FOREIGN KEY ... ON DELETE CASCADE. Called from app/api/reports/[id]/route.ts's DELETE handler, in the same request that deletes the report itself, and from app/api/reports/route.ts's room-reuse replacement (POST), which runs this INSIDE the same write transaction that re-validates room occupancy and inserts the replacement — hence `Pick<Transaction, "execute">` rather than `Client`, the minimal shape both a plain Client and an open Transaction satisfy. This function only ever calls `.execute()`, so widening the accepted type changes nothing for any existing caller.
+ */
+export async function deleteHistoricalMatchSnapshot(client: Pick<Transaction, "execute">, params: { reportDeviceKey: string; reportId: string }): Promise<void> {
   await client.execute({
     sql: "DELETE FROM report_historical_match_snapshots WHERE report_device_key = ? AND report_id = ?",
     args: [params.reportDeviceKey, params.reportId],

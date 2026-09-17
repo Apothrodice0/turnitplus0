@@ -1030,6 +1030,13 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
           notify(saveResult.error ?? `Daily upload limit reached. This report is saved on this device only until the limit resets at ${resetLabel}.`);
         } else if (saveResult.roomOccupied) {
           notify(saveResult.error ?? "This room already has an active check. Refresh to see it, or wait for it to reset.");
+        } else if (saveResult.roomReuseNotReady) {
+          // One-current-report-per-room (Phase 2), rare straggler path: the
+          // selected file is intentionally left in place (no setFile(null)
+          // anywhere in this branch) so the user can simply try again in a
+          // moment without re-choosing their document. No corpus/admission/
+          // internal terminology surfaced to the customer.
+          notify(saveResult.error ?? "This room is finishing its previous check. Please try again shortly.");
         } else {
           notify("Your report was generated but could not be saved. Please try again.");
         }

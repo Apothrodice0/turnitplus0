@@ -328,8 +328,13 @@ async function getRoom(cookie, room) {
 // 7. The 24h cycle: a report older than 24h no longer occupies its room —
 // the room reports itself as "empty" (available for a new upload) both in
 // the index and in the room-scoped fetch, exactly matching "reset/reopen
-// for a new upload according to the 24-hour room cycle" — without deleting
-// the aged-out report itself.
+// for a new upload according to the 24-hour room cycle". One-current-
+// report-per-room: once a NEW upload actually reuses that slot, the old
+// occupant's customer-facing report row is replaced/deleted (an account+room
+// holds at most one current report — see tests/room-reuse-one-report-per-
+// room.test.mjs for the full admission-safety-gated replacement behavior);
+// merely aging past the cycle with no new upload yet does not delete
+// anything on its own.
 {
   const signupRes = await signup({ email: 'rooms-cycle@example.com', password: 'correct-horse-7', username: 'roomscycle', deviceKey: 'device-cycle-1' });
   const cookie = extractCookie(signupRes);
@@ -348,17 +353,21 @@ async function getRoom(cookie, room) {
   const room6 = indexBody.rooms.find((r) => r.room === 6);
   assert.equal(room6.status, 'empty');
 
-  // The room is genuinely available again — a new upload succeeds.
+  // The room is genuinely available again — a new upload succeeds, and this
+  // is what actually triggers the one-current-report-per-room replacement.
   const reopened = await postReport('device-cycle-1', 8000000000018, { cookie, room: 6 });
   assert.equal(reopened.status, 200, 'a room whose previous occupant has aged out of its cycle must accept a new upload');
 
-  // The aged-out report itself was never deleted — still reachable directly.
+  // One-current-report-per-room: reusing the room replaces the aged-out
+  // occupant — it is no longer a readable customer report (see
+  // tests/room-reuse-one-report-per-room.test.mjs for the full delete/
+  // replace/ingest-preservation contract this exercises).
   const client = createClient({ url: `file:${dbFile}` });
   const stillThere = await client.execute({ sql: 'SELECT id FROM saved_reports WHERE id = ?', args: [String(id)] });
-  assert.equal(stillThere.rows.length, 1, 'an aged-out report must never be deleted — only no longer its room\'s CURRENT occupant');
+  assert.equal(stillThere.rows.length, 0, 'an aged-out report must be replaced once its room is actually reused — no historical accumulation');
   client.close();
 
-  console.log('a report past its 24h cycle frees its room for a new upload without ever being deleted');
+  console.log('a report past its 24h cycle frees its room for a new upload, and reuse replaces the aged-out occupant rather than accumulating it');
 }
 
 // 8. "Processing": a room occupied by a report whose ai_score isn't

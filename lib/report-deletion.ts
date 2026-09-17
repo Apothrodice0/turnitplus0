@@ -1,4 +1,4 @@
-import type { Client } from "@libsql/client";
+import type { Transaction } from "@libsql/client";
 import { isRepresentationActivelyPromoted } from "./user-submission-corpus";
 
 /**
@@ -66,7 +66,7 @@ export type DeleteReportDocumentDataResult = {
 };
 
 export async function deleteReportDocumentData(
-  client: Client,
+  client: Pick<Transaction, "execute">,
   documentIdentityId: string | null,
   options: { preserveActivelyPromotedRepresentations?: boolean } = {},
 ): Promise<DeleteReportDocumentDataResult> {

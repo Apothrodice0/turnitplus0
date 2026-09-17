@@ -5,8 +5,8 @@
  *
  * PURPOSE: every intentional POST /api/reports rejection (rate limit,
  * transport-size guard, unauthenticated report creation, ownership conflict,
- * quota, room conflict, or an unexpected internal error) currently returns a
- * response with no
+ * quota, room conflict, room-reuse-not-ready, or an unexpected internal
+ * error) currently returns a response with no
  * server-side signal of WHY. This module builds and logs ONE small,
  * machine-queryable JSON event per rejection, so passive operational
  * monitoring (which rejection categories are firing, how often) is possible
@@ -38,6 +38,7 @@ export type ReportSaveRejectionReason =
   | "REFERENCE_TRANSPORT_BUDGET"
   | "PERSISTED_PAYLOAD_TOO_LARGE"
   | "ROOM_OCCUPIED"
+  | "ROOM_REUSE_NOT_READY"
   | "INTERNAL_ERROR";
 
 export type ReportSaveAuthMode = "anonymous" | "authenticated";

@@ -136,8 +136,28 @@ async function signup(email, deviceKey) {
 
 test('SAVE ROUTE: POST /api/reports does not import or call the historical matcher — structurally proven, not just by timing', () => {
   const source = fs.readFileSync(path.join(repo, 'app/api/reports/route.ts'), 'utf8');
-  const imports = source.split(/\r?\n/).filter((l) => /^\s*(?:import|export)\b.*\bfrom\b/.test(l)).join('\n');
-  assert.doesNotMatch(imports, /report-historical-match|user-submission-matching/);
+  const importLines = source.split(/\r?\n/).filter((l) => /^\s*(?:import|export)\b.*\bfrom\b/.test(l));
+  const imports = importLines.join('\n');
+  // lib/user-submission-matching.ts (the real matcher) must never be
+  // imported here, directly or otherwise, for any reason.
+  assert.doesNotMatch(imports, /user-submission-matching/);
+  // One-current-report-per-room: lib/report-historical-match.ts is now
+  // imported for exactly one, narrow reason — deleteHistoricalMatchSnapshot,
+  // a plain DELETE statement (see that function's own header comment), used
+  // by the room-reuse replacement path when an expired occupant is safely
+  // superseded — the exact same helper app/api/reports/[id]/route.ts's own
+  // DELETE handler already imports from this same module for the identical
+  // reason. Never the matcher itself (getOrComputeHistoricalMatchSnapshot /
+  // matchAgainstUserSubmissionCorpus) — structurally verified, not just by
+  // timing: the only named import from that module is the delete helper.
+  const historicalMatchImportLine = importLines.find((l) => l.includes('report-historical-match'));
+  if (historicalMatchImportLine) {
+    assert.match(
+      historicalMatchImportLine,
+      /^\s*import\s*\{\s*deleteHistoricalMatchSnapshot\s*\}\s*from/,
+      'the only sanctioned import from lib/report-historical-match.ts in the save route is the plain delete helper, never a matching function',
+    );
+  }
 });
 
 // --- REGRESSION: existing save/get/delete round trip still works -------------
