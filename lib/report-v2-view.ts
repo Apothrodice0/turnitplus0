@@ -480,3 +480,97 @@ export function stepWorkspaceSelection(
   if (next < 0 || next >= refCount) return selection;
   return { ...selection, passageIndex: next };
 }
+
+// ── manuscript pagination (pure — no React) ──────────────────────────────
+// Shared by the screen workspace (WorkspaceManuscript) and the paginated
+// print manuscript (ReportV2PrintManuscriptPages) so both render the exact
+// same page boundaries for the exact same report — never a screen page 3
+// that doesn't match what the PDF calls page 3.
+//
+// Tuned empirically against the real print typography (.submission-copy:
+// 11px/1.85 line-height serif body text) via a real rendered PDF page — not
+// the unrelated "~450 words per original document page" estimate used
+// elsewhere (e.g. the receipt's pageCount fallback), which describes a
+// different document's own typography, not this rendering's. 450 left a
+// large trailing gap (roughly a third of the page) on every manuscript
+// page without the page-1-only title/legend overhead; 700 fills a real
+// physical page comfortably without overflowing it.
+export const MANUSCRIPT_WORDS_PER_PAGE = 700;
+
+export type ManuscriptPageRange = { start: number; end: number };
+
+/**
+ * Splits [0, text.length) into MANUSCRIPT_WORDS_PER_PAGE-sized chunks, cut
+ * only at real word boundaries (via the same tokenSpans() the rest of this
+ * file already uses), and pushed forward past any occupiedRange whose own
+ * [start, end) would otherwise straddle the cut — so a single highlighted
+ * match is never split across two pages. occupiedRanges must be sorted
+ * ascending by start and mutually non-overlapping (true by construction for
+ * both callers: vm.passages' own resolved char ranges, and
+ * findHighlightRanges' own returned ranges).
+ *
+ * REQUIRED INVARIANT (byte/code-unit exact — verified directly in
+ * tests/report-v2-workspace.test.mjs): for every valid input,
+ * `result.map(p => text.slice(p.start, p.end)).join("")` reconstructs
+ * `text` exactly. No trimming, no normalization, no dropped or duplicated
+ * characters.
+ *
+ * Fixed defect (found in review): the loop used to be driven by
+ * `wordIndex < wordSpans.length` — but wordIndex tracks WORDS consumed, not
+ * TEXT covered. Whenever an occupied range's own end was pushed to or past
+ * the start of the very last word, the word-advancement step consumed
+ * every remaining word in one jump, wordIndex reached wordSpans.length, and
+ * the loop exited immediately — before text.length was ever emitted as a
+ * final boundary. Any trailing non-word content after the last word
+ * (closing punctuation, whitespace, a newline) was then silently absent
+ * from every page's range, and thus from the rendered manuscript. Fixed by
+ * two independent, complementary changes: (1) the loop's own termination
+ * condition is now driven by TEXT coverage (`boundaries[last] < text.length`),
+ * not word count, so it can never exit early regardless of how wordIndex
+ * moves; (2) once a cut would reach into (or past) the last word's own
+ * start — whether the plain word-count target landed there or an occupied-
+ * range push extended it there — there is no further word boundary left to
+ * anchor another cut against, so the whole remaining tail (through
+ * text.length) is folded into that same page in one step, rather than
+ * leaving a separate near-empty trailing page for just the closing
+ * punctuation/whitespace. Both changes together guarantee the invariant
+ * above while still never splitting a highlighted match (extending a page
+ * beyond wordsPerPage whenever correctness requires it) and never
+ * looping/failing to progress.
+ */
+export function paginateManuscriptText(
+  text: string,
+  occupiedRanges: ManuscriptPageRange[],
+  wordsPerPage: number = MANUSCRIPT_WORDS_PER_PAGE,
+): ManuscriptPageRange[] {
+  if (text.length === 0) return [];
+  const wordSpans = tokenSpans(text);
+  if (wordSpans.length === 0) return [{ start: 0, end: text.length }];
+  const lastWordStart = wordSpans[wordSpans.length - 1].start;
+
+  const boundaries: number[] = [0];
+  let wordIndex = 0;
+  while (boundaries[boundaries.length - 1] < text.length) {
+    const targetWordIndex = wordIndex + wordsPerPage;
+    let cut = targetWordIndex >= wordSpans.length ? text.length : wordSpans[targetWordIndex].start;
+    for (const range of occupiedRanges) {
+      if (cut > range.start && cut < range.end) cut = range.end;
+    }
+    // No word boundary remains beyond the last word's own start, so once a
+    // cut reaches that far there is nothing left to anchor a further page
+    // on — absorb the rest of the text (any trailing punctuation/
+    // whitespace after the last word) into this same, final page.
+    if (cut > lastWordStart) cut = text.length;
+    cut = Math.min(cut, text.length);
+    const previous = boundaries[boundaries.length - 1];
+    if (cut <= previous) cut = text.length; // safety: always make forward progress
+    boundaries.push(cut);
+    while (wordIndex < wordSpans.length && wordSpans[wordIndex].start < cut) wordIndex += 1;
+  }
+
+  const ranges: ManuscriptPageRange[] = [];
+  for (let i = 0; i < boundaries.length - 1; i += 1) {
+    ranges.push({ start: boundaries[i], end: boundaries[i + 1] });
+  }
+  return ranges;
+}

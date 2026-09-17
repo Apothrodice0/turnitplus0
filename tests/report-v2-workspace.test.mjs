@@ -5,7 +5,7 @@ import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { tokens } from "../lib/similarity-core.ts";
+import { tokens, tokenSpans } from "../lib/similarity-core.ts";
 import { primaryMatchedWordCount, primarySimilarityScore } from "../lib/report-types.ts";
 import {
   buildReportEvidenceInterpretation,
@@ -14,6 +14,8 @@ import {
 } from "../lib/evidence-interpretation/index.ts";
 import {
   buildReportV2ViewModel,
+  MANUSCRIPT_WORDS_PER_PAGE,
+  paginateManuscriptText,
   resolveWorkspacePassageSelection,
   stepWorkspaceSelection,
 } from "../lib/report-v2-view.ts";
@@ -133,6 +135,173 @@ test("G (next/previous bounds): stepWorkspaceSelection never moves outside [0, r
   assert.deepEqual(stepWorkspaceSelection(mid, 3, 1), { sourceId: "src-1", passageIndex: 2 }, "Next moves forward one match");
   const last = { sourceId: "src-1", passageIndex: 2 };
   assert.deepEqual(stepWorkspaceSelection(last, 3, 1), last, "Next at the last match must not move (this is what disables the button)");
+});
+
+// ── manuscript pagination: paginateManuscriptText (pure, no React) ───────
+// Every reconstruction assertion below checks BYTE/CODE-UNIT EXACT equality
+// (=== against the original string), never a normalized/trimmed comparison
+// — this is the invariant the review found genuinely broken (a real,
+// reproduced trailing-character-loss defect) and fixed.
+function reconstruct(text, resultRanges) {
+  return resultRanges.map((r) => text.slice(r.start, r.end)).join("");
+}
+
+function assertNoBoundaryInsideAnyRange(resultRanges, occupiedRanges, textLength) {
+  const boundaries = [0, ...resultRanges.map((r) => r.end)];
+  for (const b of boundaries) {
+    for (const occ of occupiedRanges) {
+      assert.ok(b <= occ.start || b >= occ.end, `boundary ${b} must not fall strictly inside occupied range [${occ.start}, ${occ.end}) — a highlighted match must never be split across two manuscript pages`);
+    }
+  }
+  assert.equal(boundaries[0], 0, "REQUIRED: pagination starts at 0");
+  assert.equal(boundaries[boundaries.length - 1], textLength, "REQUIRED: pagination ends at text.length");
+}
+
+// H. empty text
+test("PAGINATION (H): empty text returns no page ranges", () => {
+  assert.deepEqual(paginateManuscriptText("", []), []);
+});
+
+// I. short text
+test("PAGINATION (I): text shorter than one page's word budget returns exactly one range covering the whole text", () => {
+  const text = makeText(50);
+  const result = paginateManuscriptText(text, []);
+  assert.deepEqual(result, [{ start: 0, end: text.length }]);
+  assert.equal(reconstruct(text, result), text);
+});
+
+// A. exact reconstruction with no occupied ranges (multi-page)
+test("PAGINATION (A): exact byte-for-byte reconstruction across multiple pages with NO occupied ranges", () => {
+  const text = makeText(MANUSCRIPT_WORDS_PER_PAGE * 3 + 40);
+  const result = paginateManuscriptText(text, []);
+  assert.ok(result.length >= 3, "test setup sanity: enough words for multiple pages");
+  assert.equal(result[0].start, 0, "REQUIRED: the first range starts at 0");
+  assert.equal(result[result.length - 1].end, text.length, "REQUIRED: the last range ends at text.length");
+  for (let i = 0; i < result.length - 1; i += 1) {
+    assert.equal(result[i].end, result[i + 1].start, `REQUIRED: range ${i}'s end is exactly range ${i + 1}'s start — no gap, no overlap`);
+  }
+  assert.equal(reconstruct(text, result), text, "REQUIRED: concatenating every page slice reconstructs the original text exactly");
+});
+
+// B. exact reconstruction WITH occupied ranges (multiple, scattered, interior)
+test("PAGINATION (B): exact byte-for-byte reconstruction across multiple pages WITH several interior occupied (highlighted) ranges", () => {
+  const text = makeText(MANUSCRIPT_WORDS_PER_PAGE * 3 + 40);
+  const spans = tokenSpans(text);
+  const occupied = [
+    { start: spans[50].start, end: spans[55].end },
+    { start: spans[MANUSCRIPT_WORDS_PER_PAGE - 3].start, end: spans[MANUSCRIPT_WORDS_PER_PAGE + 3].end },
+    { start: spans[MANUSCRIPT_WORDS_PER_PAGE * 2 - 2].start, end: spans[MANUSCRIPT_WORDS_PER_PAGE * 2 + 2].end },
+  ];
+  const result = paginateManuscriptText(text, occupied);
+  assertNoBoundaryInsideAnyRange(result, occupied, text.length);
+  assert.equal(reconstruct(text, result), text, "REQUIRED: concatenating every page slice reconstructs the original text exactly, even with several highlighted ranges straddling natural cuts");
+});
+
+// K. no highlight splitting (single range straddling a natural cut)
+test("PAGINATION (K): a cut point that would fall inside an occupied (highlighted) range is pushed forward to that range's own end — a match is never split across two pages", () => {
+  const text = makeText(MANUSCRIPT_WORDS_PER_PAGE * 2);
+  const spans = tokenSpans(text);
+  const occ = { start: spans[MANUSCRIPT_WORDS_PER_PAGE - 2].start, end: spans[MANUSCRIPT_WORDS_PER_PAGE + 2].end };
+  const result = paginateManuscriptText(text, [occ]);
+  assertNoBoundaryInsideAnyRange(result, [occ], text.length);
+  assert.equal(reconstruct(text, result), text);
+});
+
+// G. oversized occupied range crossing the natural cut
+test("PAGINATION (G): an occupied range longer than one page's own word budget still never gets split — that one page is simply longer — and reconstruction stays exact", () => {
+  const text = makeText(MANUSCRIPT_WORDS_PER_PAGE * 2);
+  const hugeRange = { start: 10, end: text.length - 10 };
+  const result = paginateManuscriptText(text, [hugeRange]);
+  assertNoBoundaryInsideAnyRange(result, [hugeRange], text.length);
+  assert.equal(reconstruct(text, result), text);
+});
+
+// C. final highlighted range reaches the last word + trailing punctuation
+// (the EXACT defect found in review: the outer loop used to be driven by
+// word count, not text coverage, so it could exit before text.length was
+// ever emitted as a boundary once an occupied range consumed every
+// remaining word — silently dropping the trailing "." below.)
+test("PAGINATION (C, REQUIRED — the reported defect): an occupied range reaching the LAST word of the document, with trailing punctuation after it, is never dropped", () => {
+  const base = makeText(MANUSCRIPT_WORDS_PER_PAGE + 20);
+  const text = `${base}.`; // trailing period, no space, after the very last word
+  const spans = tokenSpans(text);
+  const occ = { start: spans[spans.length - 70].start, end: spans[spans.length - 1].end };
+  assert.ok(occ.start < spans[MANUSCRIPT_WORDS_PER_PAGE].start && occ.end > spans[MANUSCRIPT_WORDS_PER_PAGE].start, "test setup sanity: this occupied range genuinely straddles the natural word-count cut");
+  const result = paginateManuscriptText(text, [occ]);
+  assertNoBoundaryInsideAnyRange(result, [occ], text.length);
+  assert.equal(reconstruct(text, result), text, "REQUIRED: the trailing '.' after the last word must never be silently dropped");
+  assert.equal(result[result.length - 1].end, text.length);
+});
+
+// D. same case with trailing whitespace/newlines instead of punctuation
+test("PAGINATION (D): the same last-word-reaching occupied range, with trailing whitespace/newlines instead of punctuation, is never dropped", () => {
+  const base = makeText(MANUSCRIPT_WORDS_PER_PAGE + 20);
+  const text = `${base}  \n\n`; // trailing spaces + blank lines after the last word
+  const spans = tokenSpans(text);
+  const occ = { start: spans[spans.length - 70].start, end: spans[spans.length - 1].end };
+  const result = paginateManuscriptText(text, [occ]);
+  assertNoBoundaryInsideAnyRange(result, [occ], text.length);
+  assert.equal(reconstruct(text, result), text, "REQUIRED: trailing whitespace/newlines after the last word must never be silently dropped");
+});
+
+// E. Arabic-only multi-page text
+test("PAGINATION (E): Arabic-only multi-page text reconstructs exactly, including a last-word-reaching occupied range with trailing Arabic punctuation", () => {
+  const arWords = Array.from({ length: MANUSCRIPT_WORDS_PER_PAGE * 2 + 30 }, (_, i) => `كلمة${i}`);
+  const base = arWords.join(" ");
+  const text = `${base}۔`; // trailing Arabic full stop, no space, after the last word
+  const spans = tokenSpans(text);
+  assert.ok(spans.length >= MANUSCRIPT_WORDS_PER_PAGE * 2, "test setup sanity: enough Arabic words for multiple pages");
+  const plain = paginateManuscriptText(text, []);
+  assert.ok(plain.length >= 2, "test setup sanity: Arabic text alone paginates into multiple pages");
+  assert.equal(reconstruct(text, plain), text, "REQUIRED: plain (no-highlight) Arabic pagination reconstructs exactly");
+
+  const occ = { start: spans[spans.length - 60].start, end: spans[spans.length - 1].end };
+  const withOcc = paginateManuscriptText(text, [occ]);
+  assertNoBoundaryInsideAnyRange(withOcc, [occ], text.length);
+  assert.equal(reconstruct(text, withOcc), text, "REQUIRED: Arabic pagination with a last-word-reaching highlighted range still reconstructs exactly (trailing Arabic punctuation not dropped)");
+});
+
+// F. mixed Arabic/English multi-page text
+test("PAGINATION (F): mixed Arabic/English multi-page text reconstructs exactly, including a last-word-reaching occupied range with trailing punctuation", () => {
+  const words = [];
+  for (let i = 0; i < MANUSCRIPT_WORDS_PER_PAGE * 2 + 30; i += 1) {
+    words.push(i % 3 === 0 ? `كلمة${i}` : `word${i}`);
+  }
+  const base = words.join(" ");
+  const text = `${base}.`;
+  const spans = tokenSpans(text);
+  const occ = { start: spans[spans.length - 60].start, end: spans[spans.length - 1].end };
+  const result = paginateManuscriptText(text, [occ]);
+  assertNoBoundaryInsideAnyRange(result, [occ], text.length);
+  assert.equal(reconstruct(text, result), text, "REQUIRED: mixed RTL/LTR pagination with a last-word-reaching highlighted range still reconstructs exactly");
+});
+
+// J. no word splitting
+test("PAGINATION (J): cut points fall on real word boundaries (never mid-word)", () => {
+  const text = makeText(MANUSCRIPT_WORDS_PER_PAGE * 2 + 15);
+  const result = paginateManuscriptText(text, []);
+  const wordStarts = new Set(tokens(text).length ? Array.from(text.matchAll(/\bword\d+\b/g), (m) => m.index) : []);
+  for (let i = 0; i < result.length - 1; i += 1) {
+    assert.ok(wordStarts.has(result[i].end) || result[i].end === text.length, `boundary ${result[i].end} must be a real word-start offset`);
+  }
+  assert.equal(reconstruct(text, result), text);
+});
+
+test("PAGINATION: never loops or fails to progress even when many occupied ranges each individually reach the last word's own start", () => {
+  const base = makeText(MANUSCRIPT_WORDS_PER_PAGE + 5);
+  const text = `${base}   `;
+  const spans = tokenSpans(text);
+  // Several ranges, all independently extending to the very last word —
+  // stresses the "no next word boundary left" branch repeatedly, not just
+  // once.
+  const occupied = [
+    { start: spans[spans.length - 3].start, end: spans[spans.length - 1].end },
+    { start: spans[spans.length - 2].start, end: spans[spans.length - 1].end },
+  ];
+  const start = Date.now();
+  const result = paginateManuscriptText(text, occupied);
+  assert.ok(Date.now() - start < 1000, "REQUIRED: must terminate promptly, never loop");
+  assert.equal(reconstruct(text, result), text);
 });
 
 // ── A/C/D/H/I/L: rendered output of the canonical workspace ──────────────
@@ -258,6 +427,36 @@ test("K (RTL/mixed-direction preserved): a highlighted passage over Arabic text 
   const html = renderWorkspace(report);
   assert.ok(html.includes(expectedArabic), "REQUIRED: the exact Arabic substring renders unmodified — no re-encoding/reordering introduced by the workspace's own highlighter");
   assert.match(html, /class="rv2-doc rv2ws-manuscript"/, "REQUIRED: reuses the SAME .rv2-doc base class the existing (unchanged) V2 document renderer already uses, not a new one");
+});
+
+test("PAGINATION (render): a manuscript long enough to need multiple pages renders as SEVERAL separate .rv2ws-page cards, each with its own Manuscript page N of Total label, plus one more .rv2ws-page for the summary hero", () => {
+  const text = makeText(MANUSCRIPT_WORDS_PER_PAGE * 2 + 100);
+  const report = withV2(mkReport({
+    text,
+    archiveMatchedPositions: range(0, 60),
+    sources: [{ name: "Wikipedia — “Fixture”", type: "Internet", percent: 12, matches: 1, matchedWords: 61, phrases: [], color: "#0" }],
+    unifiedSimilarity: { matchedPositions: range(0, 60), previousUploadPositions: [], unifiedScore: 12, uniqueMatchedWords: 61 },
+    score: 12,
+  }));
+  const html = renderWorkspace(report);
+  const pageCards = html.match(/class="rv2ws-page"/g) ?? [];
+  assert.ok(pageCards.length >= 4, `REQUIRED: expected the summary card + at least 3 manuscript page cards for ~${MANUSCRIPT_WORDS_PER_PAGE * 2 + 100} words, got ${pageCards.length} .rv2ws-page cards — the manuscript must not render as one single block`);
+  assert.match(html, /Manuscript page 1 of \d+/, "REQUIRED: the first manuscript page is labeled, unambiguously scoped to the generated manuscript display (not the original document's own pages)");
+  assert.match(html, /Manuscript page 2 of \d+/, "REQUIRED: a second, separate manuscript page exists");
+  // REQUIRED (page-label ambiguity fix, found in review): every "page X of
+  // N" occurrence must be immediately qualified by "Manuscript" — a bare,
+  // unqualified one could be mistaken for a claim about the ORIGINAL
+  // uploaded document's own page count (shown separately, unrelated, as
+  // "Original document pages"). Checked case-insensitively and by scanning
+  // every match (not just the first two asserted above), rather than a
+  // single regex that could pass vacuously if the label's own casing ever
+  // drifted from what a simpler pattern happened to assume.
+  const pageOfMatches = [...html.matchAll(/page \d+ of \d+/gi)];
+  assert.ok(pageOfMatches.length >= 2, "test setup sanity: at least 2 'page X of N' occurrences must exist to check");
+  for (const m of pageOfMatches) {
+    const preceding = html.slice(Math.max(0, m.index - 20), m.index);
+    assert.match(preceding, /Manuscript\s*$/, `REQUIRED: every "page X of N" occurrence must be immediately preceded by "Manuscript" — found unqualified at "...${preceding}${m[0]}"`);
+  }
 });
 
 // ── B/J: structural (source/CSS) checks for what render-to-static-markup can't reach ──

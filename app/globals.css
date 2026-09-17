@@ -6995,17 +6995,28 @@ main.report-main {
     page-break-after: auto;
   }
 
-  /* Summary-first pass: the ONE deliberate forced break in this flow — the
-     overview/summary page (ReportV2PrintOverview, tagged with this class)
-     must never share a physical page with the manuscript that follows it,
-     per this pass's explicit requirement. Three classes on one selector
+  /* Summary-first pass: the overview/summary page (ReportV2PrintOverview,
+     tagged with this class) must never share a physical page with the
+     manuscript that follows it. Three classes on one selector
      (.report-paper.rv2-print-overview under .rv2-print-flow) so this wins
      over the natural-flow rule immediately above regardless of source
-     order, without needing !important. SubmissionReport/
-     ReportV2PrintSourceAppendix are NOT tagged with this class, so they
-     keep flowing naturally into each other and across as many physical
-     pages as their own content needs. */
+     order, without needing !important. */
   .rv2-print-flow .report-paper.rv2-print-overview {
+    break-after: page;
+    page-break-after: always;
+  }
+
+  /* Manuscript-pagination pass: ReportV2PrintManuscriptPages now renders
+     the manuscript as N separate .report-paper pages (each with its own
+     header/footer) instead of one continuously-flowing block that relied
+     on the browser's own print pagination to spill across physical pages
+     — under that old approach, only the block's own first/last physical
+     page ever carried real header/footer chrome, every page in between
+     was bare overflow with no framing. Each manuscript page now forces its
+     own break-after, so pages never silently re-merge into flowing
+     overflow; ReportV2PrintSourceAppendix (NOT tagged with this class)
+     still flows naturally after the last one. */
+  .rv2-print-flow .report-paper.rv2-print-manuscript-page {
     break-after: page;
     page-break-after: always;
   }
@@ -7970,16 +7981,34 @@ main.report-main {
   gap: 24px;
 }
 
+/* Pagination pass: this was previously ONE shared card wrapping the hero
+   and the entire (continuously-flowing) manuscript — now a plain column
+   layout, with the hero and every manuscript chunk each rendering as their
+   OWN .rv2ws-page card below (spacing between them via this gap), so the
+   screen reads as a real stack of separate document pages rather than one
+   long sheet. */
 .rv2ws-manuscript-pane {
   display: flex;
   min-width: 0;
   flex-direction: column;
-  gap: 26px;
+  gap: 20px;
+}
+
+.rv2ws-page {
   padding: 28px 32px;
   border: 1px solid #d9dee0;
   border-radius: 14px;
   background: white;
   box-shadow: var(--small-shadow);
+}
+
+.rv2ws-page-number {
+  margin: 0 0 16px;
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 /* ── Visual-correction pass: the left surface's own AI-report-style intro,
@@ -8107,9 +8136,12 @@ main.report-main {
   letter-spacing: 0.06em;
 }
 
+/* Pagination pass: now sits in the GAP between the summary page-card and
+   the stack of manuscript page-cards (previously a divider inside one
+   shared card) — a plain floating section label, no border, so it doesn't
+   read as an orphaned fragment on the bare canvas background. */
 .rv2ws-match-review-heading {
-  padding-top: 4px;
-  border-top: 1px solid #d2dadd;
+  padding: 4px 4px 0;
 }
 
 .rv2ws-match-review-heading h3 {
@@ -8516,7 +8548,15 @@ main.report-main {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .rv2ws-manuscript-pane {
+  /* Pagination-fix: padding used to live directly on .rv2ws-manuscript-pane
+     (the one shared card), so reducing it here at mobile/tablet widths gave
+     the hero/metrics content more room. That padding now lives on each
+     individual .rv2ws-page card instead (the pane itself is just a column
+     layout) — this override moved with it, so mobile width still gets the
+     same extra breathing room it always did (previously lost when the pane
+     stopped carrying its own padding, which visibly wrapped/truncated the
+     result-band and metric-card text at 390px). */
+  .rv2ws-page {
     padding: 20px;
   }
 

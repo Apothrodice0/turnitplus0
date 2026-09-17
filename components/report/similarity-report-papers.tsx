@@ -1195,26 +1195,32 @@ export function findHighlightRanges(report: SimilarityReport, options: { include
   return accepted.sort((left, right) => left.start - right.start);
 }
 
-function HighlightedDocument({ report }: { report: SimilarityReport }) {
-  // Task A correction: Wikipedia is auxiliary evidence that never
-  // contributes to unifiedScore/matchedPositions — the ordinary-user body
-  // highlight layer must represent only the canonical positions that
-  // contribute to the authoritative similarity result, so Wikipedia is
-  // excluded from the candidate pool entirely (not merely hidden after the
-  // fact) unless the viewer is explicitly authorized for admin/debug
-  // presentation. See findHighlightRanges's own header comment.
-  const canSeeSourceBreakdown = Boolean(report.viewerIsAdmin);
-  const ranges = findHighlightRanges(report, { includeWikipedia: canSeeSourceBreakdown });
-  if (ranges.length === 0) {
-    return <div className="submission-rendered-text">{report.text}</div>;
-  }
-
+/**
+ * Manuscript pagination pass: extracted verbatim from HighlightedDocument's
+ * own former inline loop so a page-bounded caller (the new paginated print
+ * manuscript, one .report-paper per page) can build the SAME red-highlight
+ * markup for just one [rangeStart, rangeEnd) window, without a second,
+ * divergent copy of this rendering logic. HighlightedDocument itself calls
+ * this with the full [0, text.length) window — its own output is
+ * byte-identical to before this extraction (same ranges, same cursor walk,
+ * same keys, since nothing outside [0, length) is ever filtered out for
+ * that call).
+ */
+export function buildHighlightedPieces(
+  text: string,
+  ranges: HighlightRange[],
+  rangeStart: number,
+  rangeEnd: number,
+): ReactNode[] {
   const pieces: ReactNode[] = [];
-  let cursor = 0;
+  let cursor = rangeStart;
+  const relevant = ranges.filter((range) => range.end > rangeStart && range.start < rangeEnd);
 
-  ranges.forEach((range, index) => {
-    if (range.start > cursor) {
-      pieces.push(report.text.slice(cursor, range.start));
+  relevant.forEach((range, index) => {
+    const start = Math.max(rangeStart, range.start);
+    const end = Math.min(rangeEnd, range.end);
+    if (start > cursor) {
+      pieces.push(text.slice(cursor, start));
     }
     const isWikipedia = range.kind === "wikipedia";
     // Ordinary-user simplification: every kind that feeds the authoritative
@@ -1242,7 +1248,7 @@ function HighlightedDocument({ report }: { report: SimilarityReport }) {
         }}
         title={title}
       >
-        {report.text.slice(range.start, range.end)}
+        {text.slice(start, end)}
         <span style={{ backgroundColor: displayColor }}>
           {isWikipedia ? "W" : ""}
         </span>
@@ -1255,14 +1261,31 @@ function HighlightedDocument({ report }: { report: SimilarityReport }) {
         ))}
       </mark>,
     );
-    cursor = range.end;
+    cursor = end;
   });
 
-  if (cursor < report.text.length) {
-    pieces.push(report.text.slice(cursor));
+  if (cursor < rangeEnd) {
+    pieces.push(text.slice(cursor, rangeEnd));
   }
 
-  return <div className="submission-rendered-text">{pieces}</div>;
+  return pieces;
+}
+
+function HighlightedDocument({ report }: { report: SimilarityReport }) {
+  // Task A correction: Wikipedia is auxiliary evidence that never
+  // contributes to unifiedScore/matchedPositions — the ordinary-user body
+  // highlight layer must represent only the canonical positions that
+  // contribute to the authoritative similarity result, so Wikipedia is
+  // excluded from the candidate pool entirely (not merely hidden after the
+  // fact) unless the viewer is explicitly authorized for admin/debug
+  // presentation. See findHighlightRanges's own header comment.
+  const canSeeSourceBreakdown = Boolean(report.viewerIsAdmin);
+  const ranges = findHighlightRanges(report, { includeWikipedia: canSeeSourceBreakdown });
+  if (ranges.length === 0) {
+    return <div className="submission-rendered-text">{report.text}</div>;
+  }
+
+  return <div className="submission-rendered-text">{buildHighlightedPieces(report.text, ranges, 0, report.text.length)}</div>;
 }
 
 export function HighlightLegend({ report }: { report: SimilarityReport }) {

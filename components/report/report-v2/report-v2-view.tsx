@@ -22,6 +22,7 @@ import { PRIMARY_SIMILARITY_BAND_LABELS, formatSimilarityPercent, type Similarit
 import type { EvidenceInterpretationKind } from "@/lib/evidence-interpretation/kinds";
 import {
   buildReportV2ViewModel,
+  paginateManuscriptText,
   resolveWorkspacePassageSelection,
   stepWorkspaceSelection,
   type ReportV2Filter,
@@ -31,6 +32,7 @@ import {
   type ReportV2WorkspaceSelection,
 } from "@/lib/report-v2-view";
 import { ReportPageFooter, ReportPageHeader } from "../report-page-chrome";
+import { buildHighlightedPieces, findHighlightRanges, HighlightLegend } from "../similarity-report-papers";
 
 /**
  * REPORT V2 UI — first screen + passage review + source cards, rendered from
@@ -551,6 +553,71 @@ export function ReportV2PrintOverview({ report }: { report: SimilarityReport }) 
 }
 
 /**
+ * Pagination pass — the manuscript, split into N .report-paper pages
+ * instead of one continuously-flowing block. Root cause this replaces: a
+ * single tall .submission-paper relied on the BROWSER's own print
+ * pagination to spill across physical pages, so only its first and last
+ * physical page ever carried real TurnitPlus header/footer chrome — every
+ * page in between was bare overflow with no framing at all. Each page here
+ * is its own real .report-paper (own ReportPageHeader/ReportPageFooter,
+ * own forced break-after so pages never silently re-merge into flowing
+ * overflow), computed from the exact same authoritative ranges
+ * (findHighlightRanges) and the exact same pagination function
+ * (paginateManuscriptText) the screen workspace uses — same boundaries,
+ * same red highlight treatment (buildHighlightedPieces, unchanged), same
+ * "never split a match across a page" guarantee. The document title and
+ * highlight legend appear once, on the first manuscript page only —
+ * matching how a real multi-page document's section opener works; every
+ * page still repeats the section header/footer via ReportPageHeader/
+ * ReportPageFooter, exactly like the summary and appendix pages already do.
+ */
+export function ReportV2PrintManuscriptPages({ report }: { report: SimilarityReport }) {
+  const text = report.text ?? "";
+  const canSeeSourceBreakdown = Boolean(report.viewerIsAdmin);
+  const ranges = findHighlightRanges(report, { includeWikipedia: canSeeSourceBreakdown });
+  const pageRanges = paginateManuscriptText(text, ranges.map((r) => ({ start: r.start, end: r.end })));
+  if (pageRanges.length === 0) {
+    return (
+      <article className="report-paper submission-paper">
+        <ReportPageHeader report={report} page={2} total={3} label="Manuscript" />
+        <div className="paper-content">
+          <div className="submission-title">
+            <span>1</span>
+            <h2>{report.title.replace(/\.[^.]+$/, "")}</h2>
+          </div>
+          <div className="submission-rendered-text">Your submitted text is not available for inline highlighting.</div>
+        </div>
+        <ReportPageFooter report={report} page={2} total={3} label="Manuscript" />
+      </article>
+    );
+  }
+  return (
+    <>
+      {pageRanges.map((range, index) => (
+        <article key={`${range.start}-${range.end}`} className="report-paper submission-paper rv2-print-manuscript-page">
+          <ReportPageHeader report={report} page={2} total={3} label="Manuscript" />
+          <div className="paper-content">
+            {index === 0 && (
+              <div className="submission-title">
+                <span>1</span>
+                <h2>{report.title.replace(/\.[^.]+$/, "")}</h2>
+              </div>
+            )}
+            {index === 0 && <HighlightLegend report={report} />}
+            <div className="submission-copy">
+              <div className="submission-rendered-text">
+                {buildHighlightedPieces(text, ranges, range.start, range.end)}
+              </div>
+            </div>
+          </div>
+          <ReportPageFooter report={report} page={2} total={3} label="Manuscript" />
+        </article>
+      ))}
+    </>
+  );
+}
+
+/**
  * Report-redesign PDF fix — FINAL page(s): a compact per-source appendix
  * only (number, title, type, URL/DOI, matched words, match references) —
  * never the full similarity overview a second time. Placed after the
@@ -702,47 +769,30 @@ function submittedContextAround(text: string, charStart: number, charEnd: number
 }
 
 /**
- * The manuscript pane — the SAME char-range/tone/kind rendering
- * HighlightedDocument (above) already uses for the interactive passage
- * review, reused rather than reinvented so RTL/mixed-direction/typography
- * behavior is byte-identical to what already ships. Adds only: a clickable
- * mark (keyboard-reachable), a stable per-source number badge, and a
- * stronger visual state for the currently active match.
+ * Builds the SAME char-range/tone/kind/red-highlight markup
+ * HighlightedDocument (similarity-report-papers.tsx) uses for the print
+ * manuscript, bounded to one [rangeStart, rangeEnd) page window — reused
+ * per-page by WorkspaceManuscript below rather than one continuous pass
+ * over the whole document, so RTL/mixed-direction/typography behavior
+ * stays byte-identical to what already ships, just windowed. Adds only: a
+ * clickable mark (keyboard-reachable), a stable per-source number badge,
+ * and a stronger visual state for the currently active match.
  */
-function WorkspaceManuscript({
-  report,
-  vm,
-  activePassageId,
-  onSelectPassage,
-}: {
-  report: SimilarityReport;
-  vm: ReportV2ViewModel;
-  activePassageId: number | null;
-  onSelectPassage: (passageId: number) => void;
-}) {
-  const text = report.text ?? "";
-  const sourceIndexById = useMemo(() => {
-    const map = new Map<string, number>();
-    vm.sources.forEach((source, index) => map.set(source.id, index));
-    return map;
-  }, [vm.sources]);
-  const runs = useMemo(
-    () => vm.passages.filter((p) => p.charStart !== null && p.charEnd !== null).sort((a, b) => a.charStart! - b.charStart!),
-    [vm.passages],
-  );
-
-  if (text.length === 0) {
-    return <p className="rv2-empty">Your submitted text is not available for inline highlighting.</p>;
-  }
-  if (runs.length === 0) {
-    return <div className="rv2-doc rv2-doc-plain rv2ws-manuscript">{text}</div>;
-  }
-
+function renderManuscriptWindow(
+  text: string,
+  runs: ReportV2Passage[],
+  rangeStart: number,
+  rangeEnd: number,
+  sourceIndexById: Map<string, number>,
+  activePassageId: number | null,
+  onSelectPassage: (passageId: number) => void,
+): ReactNode[] {
   const pieces: ReactNode[] = [];
-  let cursor = 0;
-  runs.forEach((p, idx) => {
+  let cursor = rangeStart;
+  const relevant = runs.filter((p) => p.charEnd! > rangeStart && p.charStart! < rangeEnd);
+  relevant.forEach((p, idx) => {
     const start = Math.max(cursor, p.charStart!);
-    const end = Math.max(start, p.charEnd!);
+    const end = Math.min(rangeEnd, Math.max(start, p.charEnd!));
     if (start > cursor) pieces.push(<span key={`t-${idx}`}>{text.slice(cursor, start)}</span>);
     const firstSourceId = p.sourceIds[0];
     const sourceIndex = firstSourceId !== undefined ? sourceIndexById.get(firstSourceId) : undefined;
@@ -796,9 +846,71 @@ function WorkspaceManuscript({
     );
     cursor = end;
   });
-  if (cursor < text.length) pieces.push(<span key="t-tail">{text.slice(cursor)}</span>);
+  if (cursor < rangeEnd) pieces.push(<span key="t-tail">{text.slice(cursor, rangeEnd)}</span>);
+  return pieces;
+}
 
-  return <div className="rv2-doc rv2ws-manuscript">{pieces}</div>;
+/**
+ * The manuscript — now rendered as N separate page-sized cards (one
+ * .rv2ws-page per paginateManuscriptText() range) instead of one
+ * continuously-flowing block, so the screen view reads as a real paginated
+ * document (matching the printed report's own per-page structure) rather
+ * than "one long sheet." Page boundaries are computed once from the exact
+ * same authoritative char ranges (vm.passages) the right-side panel and
+ * the print path already use — never a second, independent text analysis —
+ * and a boundary is always pushed past a passage's own [charStart, charEnd)
+ * rather than through it, so a single highlighted match is never split
+ * across two page cards.
+ */
+function WorkspaceManuscript({
+  report,
+  vm,
+  activePassageId,
+  onSelectPassage,
+}: {
+  report: SimilarityReport;
+  vm: ReportV2ViewModel;
+  activePassageId: number | null;
+  onSelectPassage: (passageId: number) => void;
+}) {
+  const text = report.text ?? "";
+  const sourceIndexById = useMemo(() => {
+    const map = new Map<string, number>();
+    vm.sources.forEach((source, index) => map.set(source.id, index));
+    return map;
+  }, [vm.sources]);
+  const runs = useMemo(
+    () => vm.passages.filter((p) => p.charStart !== null && p.charEnd !== null).sort((a, b) => a.charStart! - b.charStart!),
+    [vm.passages],
+  );
+  const pageRanges = useMemo(
+    () => paginateManuscriptText(text, runs.map((p) => ({ start: p.charStart!, end: p.charEnd! }))),
+    [text, runs],
+  );
+
+  if (text.length === 0) {
+    return <p className="rv2-empty">Your submitted text is not available for inline highlighting.</p>;
+  }
+
+  return (
+    <>
+      {pageRanges.map((range, pageIndex) => (
+        <article key={`${range.start}-${range.end}`} className="rv2ws-page">
+          {/* Page-label fix (found in review): "Page X of N" alone read as
+              though it could be the ORIGINAL uploaded document's own page
+              count (shown separately, unrelated, as "Original document
+              pages" elsewhere) — these are TurnitPlus's own generated
+              manuscript-display pages, not a claim about the source
+              document's pagination. "Manuscript page" makes that scope
+              explicit. */}
+          <p className="rv2ws-page-number">Manuscript page {pageIndex + 1} of {pageRanges.length}</p>
+          <div className="rv2-doc rv2ws-manuscript">
+            {renderManuscriptWindow(text, runs, range.start, range.end, sourceIndexById, activePassageId, onSelectPassage)}
+          </div>
+        </article>
+      ))}
+    </>
+  );
 }
 
 /**
@@ -901,8 +1013,16 @@ export function ReportV2Workspace({
         </div>
       )}
       <div className="rv2ws-body">
+        {/* Pagination pass: the summary hero is now ITS OWN page-1 card
+            (.rv2ws-page), matching the printed report's own page 1 exactly,
+            and the manuscript (WorkspaceManuscript) renders its own stack of
+            page-2+ cards below — .rv2ws-manuscript-pane is now a plain
+            column layout (spacing between cards), not one big shared card. */}
         <div className="rv2ws-manuscript-pane">
-          <WorkspaceHero vm={vm} toolbarStatus={toolbarStatus} />
+          <article className="rv2ws-page">
+            <p className="rv2ws-page-number">Page 1</p>
+            <WorkspaceHero vm={vm} toolbarStatus={toolbarStatus} />
+          </article>
           <div className="rv2ws-match-review-heading">
             <p className="paper-kicker">MATCH REVIEW</p>
             <h3>Highlighted manuscript</h3>
