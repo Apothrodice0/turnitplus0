@@ -6954,8 +6954,21 @@ main.report-main {
     padding: 0;
   }
 
+  /* Physical-sheet fix: this rule used to force `display: block`, which
+     silently defeated the screen layout's own `display: flex; flex-
+     direction: column` (see the non-print .report-paper rule) — under
+     block layout, `.paper-content { flex: 1 }` has no effect (its parent
+     isn't a flex container any more), so the footer simply sits right
+     after however tall the content happens to be instead of being pushed
+     to the bottom of the 8.5x11in sheet, leaving the rest of the physical
+     page blank below it. Restoring flex-column here (the same treatment
+     already proven correct for the V2 overview/manuscript pages just
+     below) makes every .report-paper — AiReport, the legacy Similarity
+     Overview/Sources pages, and the V2 pages alike — fill the declared
+     physical sheet and anchor its footer at the real bottom. */
   .print-report-bundle .report-paper {
-    display: block;
+    display: flex;
+    flex-direction: column;
     width: 8.5in;
     min-height: 11in;
     margin: 0;
@@ -6997,27 +7010,27 @@ main.report-main {
 
   /* Print-density fix — root cause of "small report inside a large blank
      page": the reset above is right for a page that flows naturally onto
-     however many physical sheets it needs (the appendix — still untouched,
-     never matches either class below), but the overview and manuscript
-     pages ALSO force `break-after: page` right below. A forced break after
-     a `min-height: 0` box that's also `display: block` (see the base
-     .print-report-bundle .report-paper rule above, which this class
-     combination outranks by specificity) means the box is exactly as tall
-     as its own header+content+footer text — so whenever that text doesn't
-     fill the physical sheet, the REST of that sheet prints blank before the
-     break takes effect, not after. These two classes are the only V2 print
-     pages with a forced break, so they're the only ones that need to
-     actually claim the full physical sheet: restoring `display: flex;
-     flex-direction: column` re-enables the column layout `.paper-content {
-     flex: 1 }` (declared with the shared legacy header/footer chrome
-     earlier in this file) was already written for, so the footer is pushed
-     to the bottom of a real 11in sheet instead of sitting wherever the
-     content happened to end, and `min-height: 11in` is what gives that
-     flex column a full sheet to distribute in the first place. */
+     however many physical sheets it needs, but the overview, manuscript,
+     and source-appendix pages ALSO force `break-after: page` right below
+     (directly, or via the base .report-paper rule's own forced break for
+     .rv2-print-paper). A forced break after a `min-height: 0` box means
+     the box is exactly as tall as its own header+content+footer text — so
+     whenever that text doesn't fill the physical sheet, the REST of that
+     sheet prints blank before the break takes effect, not after. These are
+     the only V2 print pages with a forced break, so they're the only ones
+     that need to actually claim the full physical sheet: restoring
+     `min-height: 11in` (display/flex-direction now already come from the
+     base .print-report-bundle .report-paper rule above) gives
+     `.paper-content { flex: 1 }` a full sheet to distribute, so the footer
+     is pushed to the bottom of a real 11in sheet instead of sitting
+     wherever the content happened to end. rv2-print-paper covers both the
+     overview (already also matched by rv2-print-overview below) and the
+     source appendix (ReportV2PrintSourceAppendix — no page-specific class
+     of its own), which previously stayed at the natural-flow min-height:0
+     above and printed its footer right after its own short content. */
+  .rv2-print-flow .report-paper.rv2-print-paper,
   .rv2-print-flow .report-paper.rv2-print-overview,
   .rv2-print-flow .report-paper.rv2-print-manuscript-page {
-    display: flex;
-    flex-direction: column;
     min-height: 11in;
   }
 
