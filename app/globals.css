@@ -6915,6 +6915,41 @@ main.report-main {
     margin: 0;
   }
 
+  /* Native-print root-canvas fix: a real customer's Chrome print output
+     showed the entire similarity report physically emitted at exactly 2/3
+     scale (PDF content-stream transform 2.0833335 instead of AI's correct
+     3.125 — a 1224x1584 logical print root instead of 816x1056) even
+     though every individual .report-paper box, measured directly, was
+     already the correct 8.5in wide. AI's print root never diverges from
+     8.5in because AI's print bundle has no extra ancestor between
+     .print-report-bundle and its one .report-paper; the similarity bundle
+     nests its pages one level deeper, inside .rv2-print-flow (see its own
+     rule below), and neither that wrapper nor any ancestor above
+     .print-report-bundle was ever pinned to a physical width in print —
+     they were left at their on-screen viewport width. Chromium's print
+     compositor determines its own logical page/tiling size from the
+     ROOT layout box, not from any one descendant's own width, so an
+     unconstrained html/body/.result-view chain is exactly the kind of gap
+     that can produce a root canvas wider than the declared 8.5in sheet
+     without showing up in any descendant's own getBoundingClientRect().
+     Pinning width/min-width/max-width to 8.5in at every level from html
+     down to .print-report-bundle removes that gap regardless of which
+     exact level the real compositor was reading from. :has(.print-report-
+     bundle) scopes this to pages that actually render the report print
+     bundle — .result-view/.report-detail-page are also reused, unprinted,
+     by unrelated error/loading states on other routes (room list,
+     not-found, the generic route-error panel), which must stay
+     unaffected. */
+  html:has(.print-report-bundle),
+  body:has(.print-report-bundle),
+  .result-view.report-detail-page:has(.print-report-bundle) {
+    width: 8.5in;
+    min-width: 8.5in;
+    max-width: 8.5in;
+    margin: 0;
+    padding: 0;
+  }
+
   html,
   body,
   .site-shell,
@@ -6948,10 +6983,25 @@ main.report-main {
 
   .print-report-bundle {
     display: block;
-    width: 100%;
-    max-width: none;
+    width: 8.5in;
+    min-width: 8.5in;
+    max-width: 8.5in;
     margin: 0;
     padding: 0;
+  }
+
+  /* Part of the native-print root-canvas fix above: removes this wrapper's
+     own generated box entirely (its .report-paper children become, for
+     layout purposes, direct children of the now width-pinned .print-
+     report-bundle) rather than merely resizing it, so there is no box at
+     this level left to disagree with the sheet width at all. DOM ancestry
+     is untouched, so every existing `.rv2-print-flow <descendant>` rule
+     below still matches exactly as before; break-after/page-break-after on
+     the children (not this wrapper) still fires the same way; nothing
+     here is reachable on screen (.rv2-print-flow only ever renders inside
+     .print-report-bundle, already hidden outside @media print). */
+  .rv2-print-flow {
+    display: contents;
   }
 
   /* Physical-sheet fix: this rule used to force `display: block`, which
