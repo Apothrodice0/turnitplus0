@@ -43,10 +43,21 @@ import { withTestIdentity } from './helpers/test-signup.mjs';
  *
  * Fix under test: POST /api/reports now schedules the SAME evaluators
  * (via the shared lib/report-shadow-evaluations.ts helper) in
- * runAfterResponse, after the report row is persisted — GET keeps its
- * trigger as a fallback/self-heal. Neither path recomputes or mutates the
- * production score; both are idempotent (UPSERT per
+ * runAfterResponse, after the report row is persisted. Never recomputes or
+ * mutates the production score; idempotent (UPSERT per
  * report_device_key + report_id + policy_version).
+ *
+ * REPORT-LIFECYCLE CORRECTNESS FIX (customer historical-GET purity):
+ * GET /api/reports/[id] no longer schedules these evaluations at all — its
+ * own former "fallback/self-heal" trigger was itself a DB write (an UPSERT
+ * into historical_match_shadow_evaluations / device_provenance_shadow_
+ * evaluations) reachable from an ordinary customer read, which is exactly
+ * the class of bug this fix removes ("NOT write any DB row" applies to
+ * every table, not only saved_reports). A report whose only view is ever a
+ * GET (never a fresh POST) now simply never gets shadow rows — accepted:
+ * these are admin-only telemetry/measurement systems, not customer-visible
+ * data, and their coverage is now POST-only. See tests 5/9c below, and the
+ * Task 5 report's own note on this trade-off.
  */
 
 const repoRoot = path.resolve('.');
@@ -368,10 +379,11 @@ test('4. a failure inside the deferred shadow work never rejects out of schedule
 });
 
 // ===========================================================================
-// 5. GET /api/reports/[id] still schedules the evaluations (fallback / self-heal)
+// 5. GET /api/reports/[id] no longer schedules either evaluation (customer
+//    read-path purity — see this file's own header comment)
 // ===========================================================================
 
-test('5. GET /api/reports/[id] still schedules both evaluations — the fallback path is unchanged by the refactor', async () => {
+test('5. GET /api/reports/[id] never schedules either evaluation any more — a customer GET is a pure read, so a legacy report only ever viewed (never re-POSTed) has no shadow rows', async () => {
   process.env.DEVICE_PASSPORT_ENABLED = 'true';
   try {
     const text = takeText();
@@ -394,10 +406,34 @@ test('5. GET /api/reports/[id] still schedules both evaluations — the fallback
     const account = { deviceKey, cookie: null, tag: uniq('legacy') };
     const res = await getReport(account, reportId);
     assert.equal(res.status, 200);
+    // A second view changes nothing either — GET is a pure read every time, not just the first.
+    assert.equal((await getReport(account, reportId)).status, 200);
 
     const rows = await shadowRows(deviceKey, reportId);
-    assert.ok(e8pRow(rows), 'GET still schedules the historical-match shadow evaluation');
-    assert.ok(deviceRow(rows), 'GET still schedules the device-provenance shadow evaluation');
+    assert.equal(e8pRow(rows), null, 'REQUIRED (customer-read purity): GET must never write the historical-match shadow row — only POST does');
+    assert.equal(deviceRow(rows), null, 'REQUIRED (customer-read purity): GET must never write the device-provenance shadow row — only POST does');
+
+    // The explicit recovery/backfill machinery this report's write-time
+    // finalization would have used still works when invoked directly (the
+    // same "explicit action, not a passive read" idiom this whole fix uses
+    // elsewhere) — proving the evaluators themselves are unaffected, only
+    // GET's own implicit trigger is gone.
+    const resolution = await resolvePrimarySimilaritySummary(client, {
+      reportDeviceKey: deviceKey, reportId, accountId: null, rawText: text,
+      wordCount, archiveMatchedPositions: null, externalAcademicEvidence: null, archiveScore: 0,
+    });
+    await scheduleReportShadowEvaluations({
+      reportDeviceKey: deviceKey, reportId, accountId: null, rawText: text,
+      productionResult: resolution.historicalSubmissionMatch,
+      authoritativeUnifiedSimilarity: resolution.unifiedSimilarity ?? null,
+      effectiveDeviceSelfRepresentationIds: resolution.effectiveDeviceSelfRepresentationIds,
+      authoritativeCorpusGeneration: resolution.corpusGeneration,
+      authoritativeArchiveMatchedPositions: null,
+      authoritativeExternalAcademicEvidence: null,
+    });
+    const rowsAfterExplicitSchedule = await shadowRows(deviceKey, reportId);
+    assert.ok(e8pRow(rowsAfterExplicitSchedule), 'the historical-match evaluator itself still works when explicitly invoked');
+    assert.ok(deviceRow(rowsAfterExplicitSchedule), 'the device-provenance evaluator itself still works when explicitly invoked');
   } finally {
     delete process.env.DEVICE_PASSPORT_ENABLED;
   }
@@ -664,7 +700,7 @@ test('9b. real POST /api/reports produces a Selective Corpus shadow diagnostics 
   }
 });
 
-test('9c. real GET /api/reports/[id] fallback: sibling evaluators still run, Selective Corpus does not (end-to-end)', async () => {
+test('9c. real GET /api/reports/[id]: NONE of the three evaluators run any more — GET is a pure read, not just Selective-Corpus-gated (end-to-end)', async () => {
   const dir = fs.mkdtempSync(path.join(tmpdir(), 'scv-gate-get-'));
   const diagDir = fs.mkdtempSync(path.join(tmpdir(), 'scv-gate-get-diag-'));
   writeMinimalSelectiveCorpusArtifactFixture(dir);
@@ -704,9 +740,9 @@ test('9c. real GET /api/reports/[id] fallback: sibling evaluators still run, Sel
     assert.equal(res.status, 200);
 
     const rows = await shadowRows(deviceKey, reportId);
-    assert.ok(e8pRow(rows), 'GET fallback: the historical-match shadow evaluator still ran');
-    assert.ok(deviceRow(rows), 'GET fallback: the device-provenance shadow evaluator still ran');
-    assert.equal(fs.existsSync(diagFile), false, 'GET fallback: Selective Corpus must NOT have run — no diagnostics artifact was produced');
+    assert.equal(e8pRow(rows), null, 'REQUIRED (customer-read purity): GET must never write the historical-match shadow row');
+    assert.equal(deviceRow(rows), null, 'REQUIRED (customer-read purity): GET must never write the device-provenance shadow row');
+    assert.equal(fs.existsSync(diagFile), false, 'Selective Corpus must NOT have run either — no diagnostics artifact was produced');
   } finally {
     for (const [k, v] of Object.entries(savedEnv)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
     delete process.env.DEVICE_PASSPORT_ENABLED;
@@ -716,4 +752,4 @@ test('9c. real GET /api/reports/[id] fallback: sibling evaluators still run, Sel
   }
 });
 
-console.log('report-shadow-evaluation-trigger: POST trigger + GET fallback + idempotency + score invariance + privacy + Selective-Corpus GET-gating passed');
+console.log('report-shadow-evaluation-trigger: POST trigger + GET purity (no fallback scheduling) + idempotency + score invariance + privacy + Selective-Corpus GET-gating passed');

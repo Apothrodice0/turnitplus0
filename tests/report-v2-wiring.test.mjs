@@ -29,7 +29,11 @@ import {
  * `extractionDiagnostic` contract is:
  *   - produced server-side on the real POST /api/reports write path and
  *     persisted inside payload_json (no migration),
- *   - recomputed server-side on the real GET /api/reports/[id] read path,
+ *   - restored verbatim (never recomputed) on the real GET /api/reports/[id]
+ *     read path from what write-time finalization already persisted —
+ *     REPORT-LIFECYCLE CORRECTNESS FIX (customer historical-GET purity): GET
+ *     used to recompute this on every read; it is now a pure read, exactly
+ *     like every other field this fix covers,
  *   - never authoritatively accepted from the client (same trust boundary as
  *     scholarly evidence),
  *   - purely additive — the authoritative unified similarity number and the
@@ -40,7 +44,9 @@ import {
  *   - dormant for POSSIBLE_SAME_WORK on historical evidence,
  *   - free of internal identifiers / hashes / filesystem paths in the ordinary
  *     (non-admin) response,
- *   - backward compatible: an old row with none of the fields still loads.
+ *   - backward compatible: an old row with none of the fields still loads,
+ *     simply without them (GET does not fabricate what write-time never
+ *     persisted).
  */
 
 const repo = path.resolve('.');
@@ -269,7 +275,7 @@ test('4: a resave (AI completion) keeps evidenceInterpretation + reportCompletio
 // ───────────────────────────────────────────────────────────────────────────
 // 5 — old report without the fields loads correctly
 // ───────────────────────────────────────────────────────────────────────────
-test('5: a legacy row with none of the new fields still loads (POST-compatible, GET recomputes, SSR read parses)', async () => {
+test('5: a legacy row with none of the new fields still loads (POST-compatible; GET restores nothing it was never given; SSR read parses)', async () => {
   const account = await signUpAccount();
   const id = 'rv2-legacy-1';
   await postReport(account, {
@@ -288,13 +294,18 @@ test('5: a legacy row with none of the new fields still loads (POST-compatible, 
   assert.equal(legacy.payload.evidenceInterpretation, undefined, 'sanity: the row is now legacy-shaped');
   assert.ok(legacy.payload.unifiedSimilarity, 'the authoritative similarity is untouched by the strip');
 
-  // GET still 200s and self-heals the interpretation onto the response.
+  // REPORT-LIFECYCLE CORRECTNESS FIX (customer historical-GET purity): GET
+  // no longer recomputes anything — it only restores what write-time
+  // finalization already persisted. A genuinely legacy row has nothing to
+  // restore, so GET must load it successfully WITHOUT fabricating these
+  // fields, exactly as it is on file — never a silent, on-the-fly backfill.
   const res = await getReport(account, id);
   assert.equal(res.status, 200, 'a legacy report must still load');
   const { payload } = await res.json();
-  assert.ok(payload.evidenceInterpretation, 'GET recomputes evidenceInterpretation for a legacy row');
-  assert.ok(payload.reportCompletion, 'GET recomputes reportCompletion for a legacy row');
-  assert.ok(reconciles(payload.evidenceInterpretation));
+  assert.equal(payload.evidenceInterpretation, undefined, 'REQUIRED: GET must not fabricate evidenceInterpretation for a legacy row that never had one persisted');
+  assert.equal(payload.reportCompletion, undefined, 'REQUIRED: GET must not fabricate reportCompletion for a legacy row that never had one persisted');
+  assert.ok(payload.unifiedSimilarity, 'the authoritative similarity itself is still returned, untouched');
+  assert.equal(payload.unifiedSimilarity.unifiedScore, legacy.payload.unifiedSimilarity.unifiedScore, 'GET must not recompute the score either');
 });
 
 // ───────────────────────────────────────────────────────────────────────────

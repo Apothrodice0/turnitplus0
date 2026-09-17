@@ -237,6 +237,27 @@ export function aggregateSimilaritySources(
  */
 export type DetectedLanguage = "Arabic" | "French" | "English" | "Spanish" | "Mixed";
 
+/**
+ * AI reproducibility metadata (report-lifecycle correctness fix): a plain
+ * version identifier for the CURRENT detectDominantLanguage/detectLanguage
+ * algorithm, bumped only when its classification logic materially changes
+ * (windowing, function-word sets, dominance thresholds — not cosmetic
+ * refactors). Exists so a persisted AI result can record which detector
+ * version decided its eligibility (see app/ai-detector-worker.ts's own
+ * analyze(), which threads this into every saved AiAnalysis alongside the
+ * detected language itself) — without it, two saved scores for the same
+ * document computed under different detector versions are indistinguishable
+ * after the fact, which is exactly the gap the "0% historically, 18% now"
+ * investigation ran into. 2 = the windowed, word-weighted dominant-language
+ * algorithm introduced in commit 668b1f7 ("fix: detect dominant document
+ * language"); 1 would retroactively label the whole-document, presence-only
+ * heuristic it replaced, had that era persisted this field at all (it
+ * didn't — this constant did not exist yet, so no report predating 668b1f7
+ * carries a value here, which is itself informative: absent means "before
+ * this metadata existed," never "version 1").
+ */
+export const LANGUAGE_DETECTOR_VERSION = 2;
+
 export type LanguageDetectionResult = {
   language: DetectedLanguage;
   /** [0,1]. The dominant language's own share of the DOCUMENT'S classified evidence (word-weighted across windows) — not a per-window score, not a stopword tally. See detectDominantLanguage's own comment for exactly what this does and doesn't mean. */

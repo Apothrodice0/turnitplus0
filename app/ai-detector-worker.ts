@@ -27,7 +27,7 @@ import {
   type AiPrepStage,
   type RawModelProgressEvent,
 } from "@/lib/ai-model-prep";
-import type { DetectedLanguage } from "@/lib/similarity-core";
+import { LANGUAGE_DETECTOR_VERSION, type DetectedLanguage } from "@/lib/similarity-core";
 
 type WorkerRequest = {
   id: number;
@@ -140,6 +140,11 @@ async function analyze(request: WorkerRequest) {
       eligibleWordCount,
       analyzedWordCount: 0,
       passages: [],
+      // AI reproducibility metadata — records exactly which language this
+      // request was gated on (and by which detector version), so an
+      // "unsupported" outcome is traceable rather than silently unexplained.
+      detectedLanguage: request.detectedLanguage,
+      languageDetectorVersion: LANGUAGE_DETECTOR_VERSION,
     };
   }
 
@@ -200,6 +205,11 @@ async function analyze(request: WorkerRequest) {
       logOdds: Math.round(passage.logOdds * 10000) / 10000,
       flagged: isAiPassageFlagged(passage.logOdds, AI_PASSAGE_LOG_ODDS_THRESHOLD),
     })),
+    // AI reproducibility metadata — see the "unsupported" branch's own
+    // comment above; recorded here too so a completed score is equally
+    // traceable back to the language/detector-version that admitted it.
+    detectedLanguage: request.detectedLanguage,
+    languageDetectorVersion: LANGUAGE_DETECTOR_VERSION,
   };
 }
 

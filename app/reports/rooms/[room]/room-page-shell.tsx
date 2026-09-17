@@ -80,29 +80,95 @@ let aiDetectorWorker: Worker | null = null;
 let aiWorkerRequestId = 0;
 let pendingAiReject: ((error: Error) => void) | null = null;
 
+/**
+ * AI WORKER TIMEOUT (report-lifecycle correctness fix, invariant D — "a real
+ * current AI run must terminate"): the worker round-trip previously had no
+ * timeout at all — if it never posted back a message of ANY kind, this
+ * promise stayed unsettled forever, and its caller (runAiAnalysis, which
+ * itself never rejects) had no way to ever reach a terminal ai_status,
+ * stranding a room in "processing" permanently.
+ *
+ * Bounded to an INACTIVITY timeout — reset on every message the worker
+ * sends, including the "prep"/"progress" download-progress ticks, not just
+ * the final id-matched response — rather than one flat overall deadline: a
+ * real, still-actively-downloading ~286MB fp16 model
+ * (lib/ai-core.ts's AI_MODEL_DTYPE) on a slow connection keeps emitting
+ * progress throughout and must never be falsely killed for simply taking a
+ * while; a worker that has gone genuinely silent — hung, crashed, or a lost
+ * WebGPU context with no error ever surfaced — has not, and that silence is
+ * exactly what this bounds. Two minutes is conservative relative to real
+ * progress cadence (the underlying @huggingface/transformers progress
+ * callback fires repeatedly through a multi-part download on any connection
+ * making progress at all — see app/ai-detector-worker.ts's own
+ * postPrep/handleModelProgress) while still bounding a genuinely wedged
+ * worker to a human-scale wait rather than forever.
+ */
+export const AI_WORKER_INACTIVITY_TIMEOUT_MS = 120_000;
+
 async function analyzeAiText(
   text: string,
   detectedLanguage: SimilarityReport["features"]["detectedLanguage"],
   onProgress: (stage: AiPrepStage) => void,
 ): Promise<AiAnalysis> {
   aiDetectorWorker ??= new Worker(new URL("../../../ai-detector-worker.ts", import.meta.url), { type: "module" });
+  const worker = aiDetectorWorker;
   const id = ++aiWorkerRequestId;
   return new Promise<AiAnalysis>((resolve, reject) => {
-    pendingAiReject = reject;
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout>;
+
+    // WORKER CLEANUP: shared by both the resolve and reject paths below, so
+    // a genuine response can never leave the timeout armed, and a timeout
+    // can never leave a stale listener/pendingAiReject entry behind for a
+    // request that will never resolve.
+    const cleanupListeners = () => {
+      clearTimeout(timer);
+      worker.removeEventListener("message", handleMessage);
+      if (pendingAiReject === rejectOnce) pendingAiReject = null;
+    };
+    const resolveOnce = (result: AiAnalysis) => {
+      if (settled) return;
+      settled = true;
+      cleanupListeners();
+      resolve(result);
+    };
+    const rejectOnce = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanupListeners();
+      reject(error);
+    };
+    const armTimeout = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        // Terminate the stuck worker and clear the module singleton so the
+        // NEXT call (the automatic post-upload pass, or a manual "Retry
+        // analysis") always gets a fresh, healthy Worker instance rather
+        // than one wedged mid-request forever. worker.terminate() plus
+        // removing this listener (inside rejectOnce -> cleanupListeners)
+        // means a stray late message from this now-terminated worker can
+        // never resolve/reject this — or any future — request.
+        worker.terminate();
+        if (aiDetectorWorker === worker) aiDetectorWorker = null;
+        rejectOnce(new Error("AI analysis timed out waiting for the model worker to respond."));
+      }, AI_WORKER_INACTIVITY_TIMEOUT_MS);
+    };
+
+    pendingAiReject = rejectOnce;
     const handleMessage = (event: MessageEvent) => {
+      armTimeout(); // any message at all — including prep/progress — counts as activity
       if (event.data.type === "prep") {
         onProgress(event.data.stage);
         return;
       }
       if (event.data.type === "progress") return;
       if (event.data.id !== id) return;
-      aiDetectorWorker?.removeEventListener("message", handleMessage);
-      if (pendingAiReject === reject) pendingAiReject = null;
-      if (event.data.ok) resolve(event.data.result as AiAnalysis);
-      else reject(new Error(event.data.error));
+      if (event.data.ok) resolveOnce(event.data.result as AiAnalysis);
+      else rejectOnce(new Error(event.data.error));
     };
-    aiDetectorWorker?.addEventListener("message", handleMessage);
-    aiDetectorWorker?.postMessage({ id, text, detectedLanguage });
+    worker.addEventListener("message", handleMessage);
+    armTimeout();
+    worker.postMessage({ id, text, detectedLanguage });
   });
 }
 
@@ -246,37 +312,32 @@ function aiMetricDisplay(report: ReportSummary): { value: string; label: string;
 }
 
 /**
- * Release-hardening audit finding LIFECYCLE-05: AI-writing detection and
- * unified similarity are independent PIPELINES (see the "processing"
- * branch's own LIFECYCLE-03 comment below for why they finalize on their
- * own schedules), but this room card DELIBERATELY presents their
- * completion as one atomic event: "reveal AI score, unified similarity
- * score, and receipt together." Real, if rare, orderings exist where
- * ai_status has already reached a terminal value (ready/failed) while
- * similarity is still "stale"/"pending" (a write-time finalization that
- * genuinely failed, or a corpus promotion landing after this report's own
- * save) — this occupant is NOT yet fully revealed either. An AI FAILURE
- * still counts as terminal on the AI side (occupant.status "failed" is a
- * real, final answer — "Unavailable," never a reason to keep waiting), so
- * only similarity's own tri-state gates the second half of this check.
- * `undefined` (a legacy summary predating this field) is treated as
- * resolved, matching SimilarityMetricTile's own identical convention just
- * below — there is exactly one interpretation of "absent" in this file,
- * not two that could quietly drift apart.
- */
-/**
- * Release-hardening audit finding LIFECYCLE-06 (extended): similarityStatus
- * can now also be "failed" — a real, persisted, reproducible
- * overall-computation failure (lib/report-primary-similarity.ts's own
- * resolution.failed) — which this check already treats as revealed
- * without any code change, since it is neither "stale" nor "pending".
- * SimilarityMetricTile below is the piece that actually renders it, as
- * "Unavailable" rather than a number.
+ * Report-lifecycle correctness fix: AI-writing detection and unified
+ * similarity are independent PIPELINES, and this room card presents each
+ * tile from its OWN persisted state — this function now only decides
+ * whether the room as a whole has stopped genuinely changing (used to gate
+ * polling and the room-header "Report ready" line), not whether either
+ * individual tile may show a real value. `occupant.status` (the AI half)
+ * must be terminal — "ready" or "failed"; an AI FAILURE still counts as
+ * terminal ("Unavailable," never a reason to keep waiting).
+ *
+ * similarityStatus's only remaining blocking value is "pending" — no
+ * similarity was ever successfully computed for this report at all (rare:
+ * a first save whose own write-time finalization hit a transient infra
+ * error). "stale" is deliberately NOT blocking here: lib/reports-repo.ts's
+ * findRoomOccupant already resolves a persisted-but-corpus-stale similarity
+ * to a displayable "resolved" similarityStatus before this ever runs (the
+ * primary fix — a completed historical report must show its saved result
+ * on a plain reopen, never wait on a recompute no read path triggers any
+ * more); treating "stale" as non-blocking here too is a second, defensive
+ * layer in case it is ever produced by another path. `undefined` (a legacy
+ * summary predating this field) is likewise treated as resolved, matching
+ * SimilarityMetricTile's own identical convention just below.
  */
 export function isFullyRevealed(occupant: RoomContents): boolean {
   if (occupant.status !== "ready" && occupant.status !== "failed") return false;
   const similarityStatus = occupant.report?.similarityStatus;
-  return similarityStatus !== "stale" && similarityStatus !== "pending";
+  return similarityStatus !== "pending";
 }
 
 export type PollTickResult =
@@ -398,13 +459,20 @@ export function SimilarityMetricTile({ report, room }: { report: ReportSummary; 
       </div>
     );
   }
-  const notResolved = report.similarityStatus === "stale" || report.similarityStatus === "pending";
-  if (notResolved) {
+  // Report-lifecycle correctness fix: "stale" is deliberately NOT treated
+  // as unresolved here — lib/reports-repo.ts's findRoomOccupant already
+  // resolves a persisted-but-corpus-stale similarity to a displayable
+  // "resolved" similarityStatus with the real saved score before this ever
+  // runs; a historical report's SAVED result must render as a real number
+  // on a plain reopen, never a perpetual "Updating…" that nothing is
+  // actually computing any more. Only "pending" (no similarity was ever
+  // successfully computed at all) still shows the neutral placeholder.
+  if (report.similarityStatus === "pending") {
     return (
       <Link href={`/reports/${report.id}?room=${room}`} className="room-metric room-metric-pending">
         <span className="room-metric-label">Similarity</span>
         <strong className="room-metric-value">···</strong>
-        <span className="room-metric-sub">{report.similarityStatus === "stale" ? "Updating…" : "Calculating…"}</span>
+        <span className="room-metric-sub">Calculating…</span>
       </Link>
     );
   }
@@ -583,6 +651,22 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
       const full = local ?? (await fetchRemoteReport<SimilarityReport>(reportId));
       if (!full) {
         notify("Could not load this report to retry AI analysis. Please try again.");
+        return;
+      }
+      // READY-AI RETRY PROTECTION (report-lifecycle correctness fix, second
+      // defensive layer — the room card's own `occupant.status !== "ready"`
+      // gate on the Retry button is the first, presentation-level layer).
+      // Even if that UI gate is ever bypassed or regresses, this function
+      // itself must refuse to re-run and overwrite an AI result that has
+      // already reached its genuine terminal READY state.
+      // full.aiAnalysis?.status === "complete" is the exact same signal
+      // saveEnrichedAiResult uses to persist ai_status "ready" (see its own
+      // aiStatus mapping above) — checked against freshly-fetched data
+      // (never a stale local component prop), and never against room
+      // number, so this protects the report itself no matter which room UI
+      // path reached it.
+      if (full.aiAnalysis?.status === "complete") {
+        notify("AI analysis for this report is already complete.");
         return;
       }
       const aiResult = await retryAiAnalysisWithFreshLanguage(full.text);
@@ -1061,35 +1145,49 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
               </div>
             </div>
 
-            {/* Release-hardening audit finding LIFECYCLE-05: AI-writing
-                detection and unified similarity are independent PIPELINES
-                (write-time finalization can persist a fully resolved
-                unifiedSimilarity before, after, or well before AI analysis
-                finishes — see app/api/reports/route.ts), but this room card
-                deliberately presents their completion as one atomic REVEAL:
-                neither tile shows a real number, and neither is a link,
-                until isFullyRevealed(occupant) is true — see that
-                function's own comment for the exact (AI terminal AND
-                similarity resolved) condition, which this branch is simply
-                the negation of. Reaching this branch at all, regardless of
-                whether occupant.status is "processing" or an already-
-                terminal "ready"/"failed" still waiting on similarity, means
-                at least one of the two is not yet ready — so both tiles
-                stay uniformly neutral rather than trying to distinguish
-                which pipeline is the reason. Receipt keeps its own
-                independent gate (a receipt bundles the complete picture,
-                so it has a real reason to stay "Preparing…" here too). */}
+            {/* Report-lifecycle correctness fix: AI-writing detection and
+                unified similarity are independent PIPELINES, and this room
+                card now presents them independently — each tile reflects
+                its OWN persisted state (occupant.status for AI,
+                report.similarityStatus for similarity), never a shared
+                "both Analyzing…" placeholder. This branch is reached
+                whenever isRoomSettled(occupant) is false — i.e. similarity
+                is still genuinely "pending" (never merely "stale": a stale-
+                relative-to-corpus similarity is resolved to a displayable
+                saved score upstream, in lib/reports-repo.ts's
+                findRoomOccupant, and never reaches this component at all) —
+                so an AI result that is already "ready"/"failed" is shown as
+                such here, real score and all, rather than masked as
+                "Analyzing…" merely because similarity hasn't finished.
+                Receipt keeps its own independent gate: a receipt bundles
+                the complete picture, so it has a real reason to stay
+                "Preparing…" until similarity also lands. */}
             <div className="room-report-metrics">
-              <div className="room-metric room-metric-pending">
-                <span className="room-metric-label">AI Detection</span>
-                <strong className="room-metric-value">···</strong>
-                <span className="room-metric-sub">Analyzing…</span>
-              </div>
-              <div className="room-metric room-metric-pending">
-                <span className="room-metric-label">Similarity</span>
-                <strong className="room-metric-value">···</strong>
-                <span className="room-metric-sub">Analyzing…</span>
-              </div>
+              {occupant.status === "ready" ? (
+                (() => {
+                  const ai = aiMetricDisplay(occupant.report);
+                  return (
+                    <Link href={`/reports/${occupant.report.id}?mode=ai&room=${room}`} className={`room-metric room-metric-${ai.toneClass}`}>
+                      <span className="room-metric-label">AI Detection</span>
+                      <strong className="room-metric-value">{ai.value}</strong>
+                      <span className="room-metric-sub">{ai.label}</span>
+                    </Link>
+                  );
+                })()
+              ) : occupant.status === "failed" ? (
+                <div className="room-metric room-metric-unavailable">
+                  <span className="room-metric-label">AI Detection</span>
+                  <strong className="room-metric-value">—</strong>
+                  <span className="room-metric-sub">Unavailable</span>
+                </div>
+              ) : (
+                <div className="room-metric room-metric-pending">
+                  <span className="room-metric-label">AI Detection</span>
+                  <strong className="room-metric-value">···</strong>
+                  <span className="room-metric-sub">Analyzing…</span>
+                </div>
+              )}
+              <SimilarityMetricTile report={occupant.report} room={room} />
               <button className="room-metric" type="button" disabled>
                 <span className="room-metric-label">Receipt</span>
                 <Download aria-hidden="true" className="room-metric-icon" />
@@ -1101,32 +1199,36 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
               <div className="ai-analysis-message" role="status">
                 <p>Analysis is taking longer than usual.</p>
                 <button className="button subtle" type="button" onClick={checkAgain}>Check again</button>
-                {/* Release-hardening audit finding LIFECYCLE-01, widened by
-                    LIFECYCLE-05: a room can reach this exhausted-poll state
-                    because AI analysis is genuinely still running elsewhere
-                    (another tab/device — "Check again" alone is correct
-                    there), because the session that started it closed/
-                    crashed/failed to save before ever writing "ready" or
-                    "failed," or because similarity itself is still "stale"/
-                    "pending" even though AI already finished — permanently
-                    stranding this room without ever reaching a full reveal.
-                    retryAiCheck is idempotent (re-runs AI analysis from the
-                    already-persisted text and resaves via the same UPSERT
-                    saveEnrichedAiResult uses), and every save re-runs
-                    write-time similarity finalization too (see
-                    app/api/reports/route.ts) — so offering it here is safe
-                    and is the one action that can recover a genuinely stuck
-                    room regardless of which pipeline is the actual cause. */}
-                <button className="button subtle" type="button" onClick={() => retryAiCheck(occupant.report!.id)} disabled={retryingAi}>
-                  {retryingAi ? "Checking…" : "Retry analysis"}
-                </button>
+                {/* READY-AI RETRY PROTECTION (report-lifecycle correctness
+                    fix): occupant.status === "ready" means AI itself has
+                    already completed — the ONLY reason this branch is still
+                    reached is that similarity is genuinely still pending, a
+                    state Retry analysis cannot help with (it only ever
+                    re-runs the AI worker — see retryAiCheck) and must never
+                    be offered for, since AI itself needs no recovery and a
+                    persisted READY ai_status must stay immutable on a mere
+                    reopen (see retryAiCheck's own defensive guard for the
+                    second layer of this same protection). Retry stays
+                    available for "processing" (AI itself may genuinely be
+                    stuck — the session that started it closed/crashed/timed
+                    out before ever writing "ready" or "failed") and
+                    "failed" (a genuine AI failure). */}
+                {occupant.status !== "ready" && (
+                  <button className="button subtle" type="button" onClick={() => retryAiCheck(occupant.report!.id)} disabled={retryingAi}>
+                    {retryingAi ? "Checking…" : "Retry analysis"}
+                  </button>
+                )}
               </div>
             ) : (
               <div className="ai-analysis-loading" role="status" aria-live="polite">
                 <span aria-hidden="true" />
                 <div>
                   <strong>Analysis in progress</strong>
-                  <p>Your AI-writing and similarity results will appear here together as soon as both are ready.</p>
+                  <p>
+                    {occupant.status === "processing"
+                      ? "Your AI-writing and similarity results will appear here together as soon as both are ready."
+                      : "Your similarity result will appear here as soon as it's ready."}
+                  </p>
                 </div>
               </div>
             )}

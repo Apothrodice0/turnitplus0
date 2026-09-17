@@ -744,6 +744,46 @@ export async function isHistoricalMatchSnapshotCurrent(
   }));
 }
 
+/**
+ * REPORT-LIFECYCLE CORRECTNESS FIX (customer historical-GET purity): the
+ * read-only twin of getOrComputeHistoricalMatchSnapshot, for callers that
+ * must NEVER recompute or write — app/api/reports/[id]/route.ts's GET
+ * handler in particular, which used to reach getOrComputeHistoricalMatchSnapshot
+ * indirectly through resolvePrimarySimilaritySummary on every request
+ * (the exact bug: a mere GET of a historical report could trigger a real
+ * matcher run and a write). Returns the already-persisted snapshot exactly
+ * as it is on file, or `undefined` when no snapshot has ever been computed
+ * for this report, which a pure caller must treat as "nothing to show,"
+ * never as a reason to compute one.
+ *
+ * Deliberately NOT gated by isSnapshotRowCurrent/generation/maturity the way
+ * getOrComputeHistoricalMatchSnapshot's own cache-hit check is (an earlier
+ * version of this function reused that check directly and was wrong to: a
+ * WRITE-CAPABLE caller asks "would recomputing right now find something
+ * different" — this function's only caller can never recompute at all, so
+ * that question is moot here. The one exception, NO_HISTORICAL_MATCH_FEATURE_DISABLED_STATUS,
+ * exists purely to keep that row ineligible as a recompute-skipping cache
+ * hit for a WRITE-CAPABLE caller if the corpus-source-matching flag later
+ * turns on (see that status's own comment: "Externally still an ordinary
+ * NO_HISTORICAL_MATCH") — rowToResult already collapses it to the ordinary
+ * external NO_HISTORICAL_MATCH shape below, exactly like a definitive one.
+ * Same "historical saved similarity is a snapshot, shown as-is even past
+ * its generation" rule this whole fix applies to unifiedSimilarity.
+ */
+export async function getPersistedHistoricalMatchSnapshot(
+  client: Client,
+  params: { reportDeviceKey: string; reportId: string },
+): Promise<ReportHistoricalSubmissionMatch | undefined> {
+  const existing = await client.execute({
+    sql: `SELECT status, matcher_version, fingerprint_version, canonicalization_version, result_json, candidate_count, processing_duration_ms, error_message, computed_at, is_partial, corpus_generation
+          FROM report_historical_match_snapshots WHERE report_device_key = ? AND report_id = ?`,
+    args: [params.reportDeviceKey, params.reportId],
+  });
+  const existingRow = existing.rows[0] as unknown as SnapshotRow | undefined;
+  if (!existingRow) return undefined;
+  return applyCorpusSourceMatchingFlag(rowToResult(existingRow));
+}
+
 /** Deletes a report's historical-match snapshot, if any — see db/schema.ts's own comment on why this is an explicit application-level cascade rather than a DB-level FOREIGN KEY ... ON DELETE CASCADE. Called from app/api/reports/[id]/route.ts's DELETE handler, in the same request that deletes the report itself. */
 export async function deleteHistoricalMatchSnapshot(client: Client, params: { reportDeviceKey: string; reportId: string }): Promise<void> {
   await client.execute({

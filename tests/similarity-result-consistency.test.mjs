@@ -297,24 +297,17 @@ test('SIM-04 ROOM TILE: a deterministic flag-off archive-only result shows 0% im
   assert.doesNotMatch(html, /Updating…|Calculating…/);
 });
 
-test('SIM-04 ROOM TILE: a generation-stale result shows neutral "Updating…" text — neither the old persisted 100% nor the archive-only 0% ever renders', () => {
-  // archiveScore=0, and this fixture also carries what the OLD persisted
-  // number would have been (primaryScore=100, isUnified=true) — simulating
-  // a caller that forgot to re-derive them for a stale status — to prove
-  // the tile itself never reads primaryScore/isUnified at all once
-  // similarityStatus isn't "resolved" (the discriminated union backing this
-  // means it structurally cannot, but this is the rendered proof of that).
+test('REPORT-LIFECYCLE CORRECTNESS FIX (room tile): a generation-stale result shows its SAVED score immediately, as a real working link — a historical report displays exactly what was saved when it completed, never a perpetual "Updating…" that nothing is computing any more (lib/reports-repo.ts\'s findRoomOccupant already resolves "stale" to a displayable "resolved" similarityStatus with the saved score before this tile ever renders)', () => {
   const html = renderSimilarityTile(baseRoomSummary({ archiveScore: 0, primaryScore: 100, isUnified: true, similarityStatus: 'stale' }));
-  assert.match(html, /Updating…/);
-  assert.doesNotMatch(html, /0%/, 'must never show the archive-only fallback while stale');
-  assert.doesNotMatch(html, /100%/, 'must never show the old persisted number while stale');
+  assert.match(html, /<strong class="room-metric-value">100%<\/strong>/, 'REQUIRED: the saved score must render as a real number, not a neutral placeholder');
+  assert.doesNotMatch(html, /Updating…|Calculating…/);
+  assert.match(html, /<a\b|href=/, 'REQUIRED: a displayable stale-but-saved result must still be a working link into the full report');
 });
 
-test('SIM-04 ROOM TILE: a flag-roll-forward stale result (CORPUS_SOURCE_MATCHING_ENABLED just turned back on) renders identically to a generation-stale one — every "stale" origin gets the same neutral treatment, never leaking which kind it was', () => {
+test('REPORT-LIFECYCLE CORRECTNESS FIX (room tile): a flag-roll-forward stale result (CORPUS_SOURCE_MATCHING_ENABLED just turned back on) also shows its SAVED score immediately — every "stale" origin renders its saved number identically, never a neutral placeholder', () => {
   const html = renderSimilarityTile(baseRoomSummary({ archiveScore: 0, primaryScore: 0, isUnified: false, similarityStatus: 'stale' }));
-  assert.match(html, /Updating…/);
-  assert.doesNotMatch(html, /0%/);
-  assert.doesNotMatch(html, /100%/);
+  assert.match(html, /<strong class="room-metric-value">0%<\/strong>/);
+  assert.doesNotMatch(html, /Updating…|Calculating…/);
 });
 
 test('SIM-04 ROOM TILE: a pending result (finalization never completed, e.g. a write-time timeout/failure) shows neutral "Calculating…" text — the save still succeeded, but nothing here pretends a number was ever computed', () => {
@@ -369,18 +362,10 @@ test('SIM-01 SIDEBAR (structural): the score card and the Report notes paragraph
   assert.match(shell, /const primaryLabel = primaryResultLabel\(report\);/);
 });
 
-test('SIM-04/LIFECYCLE-05 ROOM CARD (structural): only the fully-revealed "ready" and "failed" occupant states render Similarity through SimilarityMetricTile — the not-yet-revealed branch hardcodes its own neutral tile instead', async () => {
+test('REPORT-LIFECYCLE CORRECTNESS FIX/SIM-04/LIFECYCLE-05 ROOM CARD (structural): "ready", "failed", AND the not-yet-fully-revealed occupant state all render Similarity through the ONE shared SimilarityMetricTile component — similarity must be able to show its own real, resolved-or-stale saved result independently of whatever AI is still doing (see tests/room-processing-navigation.test.mjs for the dedicated coverage of this exact branch)', async () => {
   const shell = await fs.promises.readFile(path.join(repo, 'app/reports/rooms/[room]/room-page-shell.tsx'), 'utf8');
   const occurrences = shell.match(/<SimilarityMetricTile report=\{occupant\.report\} room=\{room\} \/>/g) ?? [];
-  // Release-hardening audit finding LIFECYCLE-05 (superseding LIFECYCLE-03):
-  // "reveal AI score, unified similarity score, and receipt together" —
-  // SimilarityMetricTile's own real percentage/link must never render until
-  // isFullyRevealed(occupant) is true, so it is back to exactly 2 call
-  // sites (the "ready" and "failed" branches, both now additionally gated
-  // on isFullyRevealed) — see tests/room-processing-navigation.test.mjs for
-  // the dedicated coverage of the not-revealed branch's own hardcoded,
-  // non-clickable placeholder.
-  assert.equal(occurrences.length, 2, 'expected exactly 2 call sites: the fully-revealed "ready" and "failed" occupant states');
+  assert.equal(occurrences.length, 3, 'expected exactly 3 call sites: the "ready" and "failed" fully-revealed branches, plus the not-yet-fully-revealed branch (report-lifecycle correctness fix — invariant B)');
   // The old inline `primaryScore ?? archiveScore` pattern must be gone from
   // the occupant-status blocks entirely — SimilarityMetricTile's own gating
   // on similarityStatus is now the ONLY place that decision is made (see the

@@ -183,3 +183,30 @@ test("no loading.tsx exists for this route segment, so notFound() can still prod
   const dir = fileURLToPath(new URL("../app/reports/[id]/", import.meta.url));
   assert.equal(existsSync(`${dir}loading.tsx`), false, "adding loading.tsx back here would silently break notFound()'s HTTP status code");
 });
+
+// REPORT-LIFECYCLE CORRECTNESS FIX (customer historical-GET purity):
+// structural counterpart to the extensive behavioral GET-purity coverage in
+// tests/report-write-time-finalization.test.mjs (which proves, against a
+// real seeded DB, that GET /api/reports/[id] performs zero writes/recompute
+// even for a generation-stale result). This SSR page loader was already
+// pure before that fix — findReportRowForUser is read-only and
+// resolvePersistedSimilarityDisplay never recomputes or writes (see that
+// function's own comment) — this pins it down permanently, structurally, so
+// a future change can't silently reintroduce a write/recompute call here.
+test("STRUCTURAL (customer historical-GET purity): the SSR loadOwnedReport loader never writes to saved_reports and never calls a recompute-capable resolver", async () => {
+  const route = await readFile(new URL("../app/reports/[id]/page.tsx", import.meta.url), "utf8");
+  const loaderMatch = route.match(/const loadOwnedReport = cache\(async[\s\S]*?\n\}\);/);
+  assert.ok(loaderMatch, "loadOwnedReport must be found");
+  const loaderBody = loaderMatch[0];
+  for (const forbidden of [
+    /UPDATE\s+saved_reports/i,
+    /INSERT\s+INTO\s+saved_reports/i,
+    /resolvePrimarySimilaritySummary/,
+    /persistRefreshedSimilarity/,
+    /selfHealUnifiedSimilarity/,
+    /getOrComputeHistoricalMatchSnapshot/,
+  ]) {
+    assert.doesNotMatch(loaderBody, forbidden, `REQUIRED: loadOwnedReport must not reach ${forbidden} — the SSR first paint must be a pure read, exactly like GET /api/reports/[id]`);
+  }
+  assert.match(loaderBody, /findReportRowForUser/, "loadOwnedReport must still use the plain, read-only row lookup");
+});

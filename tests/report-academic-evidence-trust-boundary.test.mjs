@@ -11,6 +11,7 @@ import { resetRateForTest, resetReadRateForTest, resetAuthRateForTest } from '..
 import { withTestIdentity } from './helpers/test-signup.mjs';
 import { canonicalSha256 } from '../lib/document-identity.ts';
 import { recordAcademicSearchRunDiagnostics, resolveVerifiedAcademicEvidence } from '../lib/academic-search-diagnostics-repo.ts';
+import { selfHealUnifiedSimilarity } from '../lib/report-primary-similarity.ts';
 
 /**
  * Scholarly evidence — SERVER TRUST BOUNDARY (drizzle/0052).
@@ -207,9 +208,12 @@ test('3. valid diagnostics + client adds EXTRA forged ranges -> only the verifie
   assert.equal(payload.verifiedAcademicSearchDiagnosticsId, Number(id));
 });
 
-test('4. GET recompute removes legacy unverified evidence', async () => {
+test('4. a legacy pre-fix row is now shown as-is by GET (a pure historical snapshot); the explicit recovery action still corrects the score', async () => {
   // Directly plant a "pre-fix" report row: persisted payload has fabricated
   // externalAcademicEvidence and a persisted unifiedSimilarity, no verified id.
+  // Nothing like this can be CREATED by today's POST /api/reports (test 7
+  // below proves that structurally) — this simulates a row that predates
+  // the trust-boundary fix itself, a narrow legacy-migration case.
   const dk = 'tb-legacy';
   const rid = `legacy-${Date.now()}`;
   const legacyPayload = samplePayload({
@@ -225,13 +229,30 @@ test('4. GET recompute removes legacy unverified evidence', async () => {
     args: [rid, dk, 'sub', 'x.pdf', legacyPayload.created, BODY_WORDS, 12, 'Low', null, null, null, JSON.stringify(legacyPayload), null, null],
   });
 
+  // REPORT-LIFECYCLE CORRECTNESS FIX (customer historical-GET purity): GET
+  // is now a pure read — it must NOT recompute this row, even though it
+  // predates the trust boundary and even though its score is inflated.
+  // "Historical saved similarity is a snapshot" applies uniformly; GET
+  // does not get to make a content-based exception for this one field.
   const body = await getReport(dk, rid, 'tb4');
-  assert.deepEqual(body.externalAcademicEvidence, [], 'GET drops the unverified evidence from the response');
-  assert.ok(body.unifiedSimilarity.liveAcademicOnlyWords === 0, 'recomputed score has 0 scholarly words');
-  assert.ok(body.unifiedSimilarity.unifiedScore < 99, 'the inflated legacy score is corrected downward on recompute');
+  assert.deepEqual(body.externalAcademicEvidence, forgedWholeDocEvidence(BODY_WORDS), 'REQUIRED: GET shows the persisted row as-is, unrecomputed, exactly like every other historical field');
+  assert.equal(body.unifiedSimilarity.unifiedScore, 99, 'REQUIRED: GET must not silently correct the persisted score either');
 
-  const { unified } = await persistedUnified(dk, rid);
-  assert.equal(unified.liveAcademicOnlyWords, 0, 'the corrected score is persisted');
+  const { unified: unifiedBeforeHeal } = await persistedUnified(dk, rid);
+  assert.equal(unifiedBeforeHeal.unifiedScore, 99, 'REQUIRED: the GET above must not have written anything back');
+
+  // The explicit recovery action (the same write-time-finalization
+  // machinery POST /api/reports and an admin/maintenance sweep would use)
+  // still re-resolves scholarly evidence from the server-verified source
+  // only, never from the forged payload.externalAcademicEvidence — the
+  // trust boundary itself is untouched, only GET's own former "recompute on
+  // every read" duty is gone.
+  const healed = await selfHealUnifiedSimilarity(db, { reportDeviceKey: dk, reportId: rid, accountId: null });
+  assert.equal(healed.attempted, true);
+
+  const { unified: unifiedAfterHeal } = await persistedUnified(dk, rid);
+  assert.equal(unifiedAfterHeal.liveAcademicOnlyWords, 0, 'the explicit recovery action corrects the score using only verified evidence');
+  assert.ok(unifiedAfterHeal.unifiedScore < 99, 'the inflated legacy score is corrected downward by the explicit recovery action');
 });
 
 test('5. deferred diagnostics->report link failure does NOT remove valid verified evidence', async () => {
@@ -272,24 +293,37 @@ test('6. client-supplied similarity / provider metadata cannot score on their ow
 });
 
 test('7. structural: authoritative scoring paths never pass payload.externalAcademicEvidence into resolvePrimarySimilaritySummary', () => {
-  const files = [
-    'app/api/reports/route.ts',
-    'app/api/reports/[id]/route.ts',
-    'lib/report-primary-similarity.ts',
-  ];
   const forbidden = [
     /externalAcademicEvidence:\s*reportPayload\.externalAcademicEvidence/,
     /externalAcademicEvidence:\s*payload\.externalAcademicEvidence/,
     /authoritativeExternalAcademicEvidence:\s*reportPayload\.externalAcademicEvidence/,
     /authoritativeExternalAcademicEvidence:\s*payload\.externalAcademicEvidence/,
   ];
-  for (const rel of files) {
+  // Every file that DOES resolve scholarly evidence into a score must do so
+  // only via resolveVerifiedAcademicEvidence, never a client/persisted value.
+  const scoringFiles = ['app/api/reports/route.ts', 'lib/report-primary-similarity.ts'];
+  for (const rel of scoringFiles) {
     const src = fs.readFileSync(path.join(repo, rel), 'utf8');
     for (const re of forbidden) {
       assert.doesNotMatch(src, re, `${rel} must not feed a client/persisted externalAcademicEvidence into scoring — use resolveVerifiedAcademicEvidence`);
     }
     assert.match(src, /resolveVerifiedAcademicEvidence/, `${rel} must resolve scholarly evidence via resolveVerifiedAcademicEvidence`);
   }
+  // REPORT-LIFECYCLE CORRECTNESS FIX (customer historical-GET purity): GET
+  // /api/reports/[id] no longer resolves scholarly evidence at all — no
+  // resolveVerifiedAcademicEvidence call, no resolvePrimarySimilaritySummary
+  // call, nothing computed. It restores the already-persisted, already-
+  // verified payload.externalAcademicEvidence exactly as write-time
+  // finalization wrote it (test 4 above), so the forbidden-pattern check
+  // above still meaningfully applies to it, but the "must call
+  // resolveVerifiedAcademicEvidence" requirement does not — there is
+  // nothing left for it to resolve.
+  const getRouteSrc = fs.readFileSync(path.join(repo, 'app/api/reports/[id]/route.ts'), 'utf8');
+  for (const re of forbidden) {
+    assert.doesNotMatch(getRouteSrc, re, 'GET must not feed a client/persisted externalAcademicEvidence into scoring either');
+  }
+  assert.doesNotMatch(getRouteSrc, /resolveVerifiedAcademicEvidence/, 'REQUIRED: GET must not resolve scholarly evidence at all any more — it only restores the already-persisted, already-verified value');
+  assert.doesNotMatch(getRouteSrc, /resolvePrimarySimilaritySummary\(/, 'REQUIRED: GET must never CALL the write-capable resolver (a comment mentioning it by name is fine)');
 });
 
 test('8. resolveVerifiedAcademicEvidence unit: every failure mode -> [] , never a throw', async () => {

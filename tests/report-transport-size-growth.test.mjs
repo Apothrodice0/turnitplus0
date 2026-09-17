@@ -13,7 +13,7 @@ import { matureCorpusBackings } from './helpers/corpus-maturity.mjs';
 import { withTestIdentity } from './helpers/test-signup.mjs';
 import * as signupRoute from '../app/api/auth/signup/route.ts';
 import { MAX_REPORT_SAVE_REQUEST_BYTES } from '../lib/report-transport-limits.ts';
-import { resolvePrimarySimilaritySummary } from '../lib/report-primary-similarity.ts';
+import { resolvePrimarySimilaritySummary, selfHealUnifiedSimilarity } from '../lib/report-primary-similarity.ts';
 import { withEvidenceInterpretation } from '../lib/report-evidence-interpretation.ts';
 import * as reportIdRoute from '../app/api/reports/[id]/route.ts';
 import {
@@ -713,6 +713,16 @@ test('REAL SERVER GROWTH: a request under MAX_REPORT_SAVE_REQUEST_BYTES as sent 
 // the MECHANISM (lib/report-primary-similarity.ts's persistRefreshedSimilarity
 // writes the compact representation when it self-heals a stale row, and a
 // subsequent GET still expands it correctly), not re-prove the 2MB crossing.
+//
+// REPORT-LIFECYCLE CORRECTNESS FIX (customer historical-GET purity): GET no
+// longer self-heals a stale row on its own — a corpus-generation bump no
+// longer forces GET to recompute anything (see tests/report-write-time-
+// finalization.test.mjs's own header comment for the full rationale). This
+// test now drives the SAME persistRefreshedSimilarity write path directly
+// via selfHealUnifiedSimilarity (the explicit write-time-finalization/
+// maintenance recovery action), which is the real, current way a stale row
+// ever gets re-resolved — then proves GET still expands whatever is on file
+// correctly, whether that is the original or the healed representation.
 test('SELF-HEAL COMPACTION: persistRefreshedSimilarity writes the compact representation when a stale row self-heals, and GET still expands it correctly', async (t) => {
   const SELF_HEAL_PASSAGE =
     'Ecologists surveying a recovering wetland habitat documented an unusually rapid return of native amphibian populations following a targeted invasive-species removal program, a recovery timeline substantially shorter than comparable restoration efforts elsewhere reported in the literature, prompting new interest in whether the removal method itself accelerated the surrounding food web relative to passive-recovery baselines used in prior comparable studies.';
@@ -748,12 +758,18 @@ test('SELF-HEAL COMPACTION: persistRefreshedSimilarity writes the compact repres
   // Bump the corpus generation (a real, independent promotion, exactly like
   // report-write-time-finalization.test.mjs's own "LEGACY ROOM BUG... a
   // later promotion bumped corpus_match_generation" precedent) so the
-  // already-persisted result becomes STALE, forcing the next GET's own
-  // self-heal (persistRefreshedSimilarity) to actually re-resolve and
-  // re-persist -- not merely re-serve the existing row unchanged.
+  // already-persisted result becomes STALE.
   await promoteDocumentIntoCorpus(
     'Geologists mapping an isolated basalt formation identified a mineral banding pattern inconsistent with the standard cooling-rate model typically used to date similar volcanic features in the region.',
   );
+
+  // GET is a pure read now (customer historical-GET purity) — it does NOT
+  // self-heal the now-stale row any more. The explicit recovery action
+  // (the same write-time-finalization machinery POST /api/reports and an
+  // admin/maintenance action would use) is what actually re-resolves and
+  // re-persists it.
+  const healed = await selfHealUnifiedSimilarity(client, { reportDeviceKey: account.deviceKey, reportId, accountId: account.userId });
+  assert.equal(healed.attempted, true, 'the explicit recovery action must actually run for this test to be meaningful');
 
   await resetRateForTest(account.tag + '-get-selfheal');
   const getReq = new Request(`http://localhost/api/reports/${reportId}`, {
@@ -763,14 +779,15 @@ test('SELF-HEAL COMPACTION: persistRefreshedSimilarity writes the compact repres
   assert.equal(getRes.status, 200);
   const getBody = await getRes.json();
   const getUnified = getBody.payload.unifiedSimilarity;
-  assert.ok(getUnified, 'GET must still return a real unifiedSimilarity after self-heal');
+  assert.ok(getUnified, 'GET must still return a real unifiedSimilarity after the explicit self-heal');
   assert.equal(getUnified.previousUploadPositionsEncoding, undefined, 'the customer-facing GET response must never expose the persistence-only marker, self-heal path included');
   assert.ok(Array.isArray(getUnified.previousUploadPositions), 'previousUploadPositions must be reconstructed as a real array');
   assert.deepEqual(getUnified.previousUploadPositions, getUnified.matchedPositions, 'this single-source fixture\'s previousUploadPositions must equal matchedPositions exactly, before and after self-heal');
 
   const rowAfter = await client.execute({ sql: 'SELECT payload_json FROM saved_reports WHERE device_key = ? AND id = ?', args: [account.deviceKey, reportId] });
   const parsedAfter = JSON.parse(String(rowAfter.rows[0].payload_json));
-  assert.notEqual(parsedAfter.unifiedSimilarityGeneration, generationBeforeStale, 'test setup sanity: the generation bump must have actually triggered a real self-heal re-persist, not a no-op read');
+  assert.notEqual(parsedAfter.unifiedSimilarityGeneration, generationBeforeStale, 'test setup sanity: the explicit self-heal above must have actually re-persisted a real result, not a no-op');
+  assert.equal(getUnified.unifiedScore, parsedAfter.unifiedSimilarity.unifiedScore, 'GET reflects exactly what selfHealUnifiedSimilarity persisted, not a second independent computation of its own');
 
   // The actual requirement: persistRefreshedSimilarity's own write, inspected
   // directly from the raw persisted row -- proves the SAME shared encoder

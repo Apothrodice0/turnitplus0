@@ -1,6 +1,6 @@
 import type { Client } from "@libsql/client";
 import { deriveRoomStatus, isWithinActiveCycle, roomCycleEndsAt } from "./report-rooms";
-import { resolvePersistedSimilarityDisplay, selfHealUnifiedSimilarity } from "./report-primary-similarity";
+import { resolvePersistedSimilarityDisplay } from "./report-primary-similarity";
 import type { ReportSummary } from "./reports-remote";
 
 // device_key added in Phase E8C, additively — every existing caller that
@@ -107,10 +107,10 @@ export type RoomOccupantResult =
  * similarity result.
  */
 export async function findRoomOccupant(client: Client, userId: string, room: number, asOf: Date = new Date()): Promise<RoomOccupantResult> {
-  // Phase A — one logical clock for this occupant resolution: the same instant
-  // is used for both the persisted-display currentness check and any self-heal
-  // recomputation it triggers, so a corpus-maturity boundary can't fall
-  // between them.
+  // Phase A — one logical clock for this occupant resolution: the same
+  // instant is used throughout the persisted-display currentness check
+  // below, so a corpus-maturity boundary can't be evaluated inconsistently
+  // within one call.
   const result = await client.execute({
     sql: `SELECT id, submission_id, title, report_created_at, word_count, archive_score, score_band, ai_score, ai_tone, ai_status, device_key,
                  json_extract(payload_json, '$.unifiedSimilarity.unifiedScore') AS unified_score,
@@ -165,113 +165,54 @@ export async function findRoomOccupant(client: Client, userId: string, room: num
       asOf,
     });
 
-  // Legacy-room bug fix (Preview regression, corrected): the self-heal
-  // trigger must never duplicate resolvePersistedSimilarityDisplay's own
-  // freshness rules (generation comparison, live-flag comparison,
-  // snapshot-currency check) as a second, parallel gate here. An earlier
-  // version of this fix gated self-heal on the RAW hasUnifiedSimilarity /
-  // unifiedSimilarityFailed flags (!hasUnifiedSimilarity &&
-  // !unifiedSimilarityFailed), which only ever covers "nothing was ever
-  // persisted." A real Preview row had an ALREADY-persisted unifiedSimilarity
-  // (a genuine, previously-computed 0%) that simply predated
-  // unifiedSimilarityGeneration/corpusSourceMatchingEnabledAtComputation
-  // existing at all: hasUnifiedSimilarity was true, so that gate never
-  // fired; resolvePersistedSimilarityDisplay correctly, honestly classified
-  // it "stale," but nothing ever acted on "stale" at the room layer, so the
-  // room polled it forever.
+  // REPORT-LIFECYCLE CORRECTNESS FIX (historical-reopen read-only
+  // invariant): this function backs BOTH the SSR room page load
+  // (app/reports/rooms/[room]/page.tsx) and every 3-second room-content
+  // poll (app/api/reports/route.ts's GET ?room=N) — i.e. every ordinary
+  // "open/reopen a room" action, not only a fresh upload's own write path.
+  // It must never recompute or persist anything merely because a customer
+  // looked at a room. This used to call selfHealUnifiedSimilarity (a real
+  // recompute-and-write) whenever resolvePersistedSimilarityDisplay
+  // reported "pending" or "stale" — on EVERY read, including a plain
+  // reopen of a report that finished long ago. That is exactly the proven
+  // defect: a completed report whose similarity generation drifted from
+  // the live corpus (an ordinary, ongoing effect of corpus
+  // admission/promotion) silently recomputed and rewrote its own saved
+  // result the instant someone opened its room, and — because the AI tile
+  // is only revealed once similarity is ALSO terminal — an already-"ready"
+  // AI score displayed as "Analyzing…" for as long as that recompute
+  // stayed non-terminal.
   //
-  // The fix: ask the canonical resolver for its verdict FIRST, and treat
-  // "pending" and "stale" identically as actionable, since both mean "the
-  // persisted state is not an authoritative answer right now" - whether
-  // because nothing was ever persisted, or because what was persisted no
-  // longer reflects current freshness metadata. "resolved" and "failed"
-  // are both already terminal and need no action ("failed" is a genuine,
-  // reproducible computation failure and must never be retried on every
-  // room read). Never inferred from room number, report age, a timeout, or
-  // text presence - see selfHealUnifiedSimilarity's own header comment for
-  // the full reasoning. Attempted at most once per still-non-terminal read:
-  // on success it persists a real result (or an explicit failure marker)
-  // using the same generation-guarded write write-time finalization and the
-  // detail page's own self-heal already use, so every subsequent
-  // findRoomOccupant call for this row - a reload, a logout/login, a later
-  // poll - sees an already-resolved (or already-failed) row and never
-  // re-enters this branch again. Never touches ai_score/ai_status: the AI
-  // pipeline is completely independent and is never rerun or restarted by
-  // this.
+  // selfHealUnifiedSimilarity itself is untouched and still exported/used
+  // for genuine write-time finalization (resolvePrimarySimilaritySummary,
+  // called synchronously from app/api/reports/route.ts's POST handler on
+  // every save) — only this READ path no longer calls it.
   //
-  // Backward-compatibility fix: resolvePersistedSimilarityDisplay's own
-  // "resolved" branch now ALSO requires hasPositionEvidence — a row
-  // self-healed before matchedPositions/previousUploadPositions existed
-  // (e.g. by the earlier legacy-room fix, commit 5225b83) can be fully
-  // current by generation/flag/snapshot and still return "stale" here for
-  // exactly that reason. This branch treats it identically to any other
-  // "stale" — the row above simply falls through to the same self-heal
-  // call, no separate trigger needed.
-  let display = await readDisplay();
-  if (display.status === "pending" || display.status === "stale") {
-    const healed = await selfHealUnifiedSimilarity(client, {
-      reportDeviceKey: occupant.device_key,
-      reportId: String(occupant.id),
-      accountId: userId,
-      asOf,
-    });
-    if (healed.attempted && healed.outcome === "resolved") {
-      hasUnifiedSimilarity = true;
-      unifiedSimilarityFailed = false;
-      unifiedScore = healed.unifiedSimilarity.unifiedScore;
-      corpusFlagAtComputation = healed.corpusSourceMatchingEnabled;
-      // computeUnifiedSimilarity always returns matchedPositions (see that
-      // function's own return shape) — a fresh resolution is therefore
-      // always presentation-complete, whether this row's OWN read reached
-      // here via missing metadata, a generation/flag change, or a missing
-      // matchedPositions field on an otherwise-current legacy result.
-      hasPositionEvidence = true;
-    } else if (healed.attempted && healed.outcome === "failed") {
-      hasUnifiedSimilarity = false;
-      unifiedSimilarityFailed = true;
-    }
-    // attempted:false (nothing to heal after all, or a genuine transient
-    // infra error during the attempt itself): local fields are left
-    // unchanged, so the re-read below returns the identical pending/stale
-    // verdict `display` already held - eligible for another attempt on the
-    // next room read, never a fabricated resolved/failed state.
-    display = await readDisplay();
-
-    // Non-converging NO_HISTORICAL_MATCH fix: this override still covers the
-    // cases where a genuinely correct "no historical match" verdict does not
-    // (yet) satisfy isHistoricalMatchSnapshotCurrent — the request that just
-    // wrote the very first snapshot row, and every no-match computed while
-    // CORPUS_SOURCE_MATCHING_ENABLED is off (stored under the feature-
-    // disabled marker, deliberately never a cache hit — see
-    // lib/report-historical-match.ts). In those cases the re-read above
-    // reports "stale" again even immediately after a successful
-    // recomputation that correctly found no match. Without this, such a
-    // report can never become presentable and polls forever. healed.presentationResolved
-    // (see SelfHealResult's own comment) is the request-scoped-only signal
-    // that THIS call's own recomputation is a fresh, current,
-    // non-partial, version-current NO_HISTORICAL_MATCH whose write actually
-    // landed — safe to show in THIS response only. This never touches
-    // the underlying report_historical_match_snapshots row (already
-    // written) and never persists anything — `display` here is a purely
-    // local, in-memory variable scoped to this one findRoomOccupant call.
-    // Once the underlying row IS a cache hit (flag on, first snapshot
-    // written, generation/version current), the normal "resolved" path
-    // above handles it and this override never fires.
-    if (display.status === "stale" && healed.attempted && healed.outcome === "resolved" && healed.presentationResolved) {
-      display = { status: "resolved", primaryScore: unifiedScore ?? archiveScore, isUnified: true };
-    }
-  }
-
-  // display.primaryScore/isUnified do not exist outside the "resolved"
-  // branch - the discriminated union itself is what prevents this call
-  // site from ever reading a fallback number out of "stale"/"pending" and
-  // rendering it as final; primaryScore/isUnified above simply keep their
-  // archive-only/false defaults otherwise, chosen explicitly right here,
-  // not smuggled out of the resolver.
-  const similarityStatus = display.status;
+  // "stale" now means something different to this read-only caller than it
+  // does to a self-healing one: resolvePersistedSimilarityDisplay only ever
+  // returns "stale" once hasUnifiedSimilarity is true (the "nothing was
+  // ever persisted" cases return "pending"/"failed" before any staleness
+  // check runs — see that function's own header), so a real, previously-
+  // computed number always exists here. Per this feature's product
+  // invariant — "opening a completed report displays what was saved; a
+  // customer who wants current evidence runs a NEW CHECK" — that saved
+  // number is exactly what a plain reopen must show: never silently
+  // withheld, never reinterpreted against today's corpus/generation. Only
+  // "pending" (nothing was ever successfully computed at all — rare: a
+  // first save whose own write-time finalization hit a transient infra
+  // error) and "failed" (a genuine, persisted, reproducible computation
+  // failure) stay non-numeric here, matching resolvePersistedSimilarityDisplay's
+  // own terminal semantics for both. Never touches ai_score/ai_status: the
+  // AI pipeline is completely independent and is never rerun or restarted
+  // by this function at all.
+  const display = await readDisplay();
+  const similarityStatus = display.status === "stale" ? "resolved" : display.status;
   if (display.status === "resolved") {
     primaryScore = display.primaryScore;
     isUnified = display.isUnified;
+  } else if (display.status === "stale") {
+    primaryScore = unifiedScore ?? archiveScore;
+    isUnified = true;
   }
 
   return {

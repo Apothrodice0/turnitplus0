@@ -9,6 +9,7 @@ import * as reportIdRoute from '../app/api/reports/[id]/route.ts';
 import * as signupRoute from '../app/api/auth/signup/route.ts';
 import { resetRateForTest, resetAuthRateForTest } from '../lib/rate-limit.js';
 import { getOrComputeHistoricalMatchSnapshot } from '../lib/report-historical-match.ts';
+import { selfHealUnifiedSimilarity } from '../lib/report-primary-similarity.ts';
 import { matureCorpusBackings } from './helpers/corpus-maturity.mjs';
 import { withTestIdentity } from './helpers/test-signup.mjs';
 
@@ -219,6 +220,24 @@ test('LIFECYCLE: a signed-in account viewing its own re-saved-equivalent content
   client.close();
 
   const { id: secondReportId } = await postReport('ehist-device-self', { cookie, text });
+
+  // KNOWN PRE-EXISTING WRITE-TIME GAP (confirmed present on origin/main
+  // 3d12d76, before this fix's GET-purity change): see
+  // tests/unified-similarity-relationship-integration.test.mjs's SCENARIO A
+  // for the full analysis. In short: write-time finalization for
+  // secondReportId excludes the account's own most-recent identity row with
+  // this exact canonical hash, meaning to exclude only its own trivial
+  // self-record — but its own identity capture is deferred to run after
+  // finalization, so the row it actually excludes is the one indexed just
+  // above, the genuine SELF backing. Previously papered over by GET's own
+  // (now-removed) self-heal-on-every-read; now requires the same explicit
+  // recovery action any other write-time gap in this codebase already
+  // needs.
+  const secondReportRow = await setupClient.execute({ sql: 'SELECT user_id FROM saved_reports WHERE id = ?', args: [secondReportId] });
+  const secondAccountId = secondReportRow.rows[0]?.user_id ? String(secondReportRow.rows[0].user_id) : null;
+  const healed = await selfHealUnifiedSimilarity(setupClient, { reportDeviceKey: 'ehist-device-self', reportId: secondReportId, accountId: secondAccountId });
+  assert.equal(healed.attempted, true, 'the explicit recovery action must actually run for this assertion to be meaningful');
+
   const secondGet = await getReport(secondReportId, { cookie });
   const secondBody = await secondGet.json();
   assert.equal(secondBody.payload.historicalSubmissionMatch?.status, 'MATCHED');

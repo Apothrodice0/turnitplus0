@@ -858,10 +858,10 @@ test("REQUIRED: a corpus-generation bump racing the heal (landing after the reco
   });
 });
 
-test("REQUIRED: one findRoomOccupant() invocation performs at most one historical recomputation — no recursive/non-converging retry within the same read", () => {
+test("REQUIRED (report-lifecycle correctness fix, supersedes the old at-most-once-self-heal invariant): findRoomOccupant performs ZERO historical recomputation on a read — no self-heal call at all, let alone a loop or recursive retry chasing convergence. A room read must never recompute or write; selfHealUnifiedSimilarity stays a real, tested function elsewhere (still used by write-time finalization), just never invoked from this read path.", () => {
   const source = fs.readFileSync(path.join(repoRoot, "lib", "reports-repo.ts"), "utf8");
   const selfHealCallCount = (source.match(/selfHealUnifiedSimilarity\(/g) || []).length;
-  assert.equal(selfHealCallCount, 1, "REQUIRED: findRoomOccupant must call selfHealUnifiedSimilarity exactly once per read — no loop, no recursive retry chasing convergence");
-  assert.doesNotMatch(source, /while\s*\(/, "REQUIRED: no while-loop retry construct around the self-heal/re-read sequence");
-  assert.doesNotMatch(source, /for\s*\(.*selfHeal/, "REQUIRED: no for-loop retry construct around the self-heal call");
+  assert.equal(selfHealCallCount, 0, "REQUIRED (HISTORICAL_ROOM_READ_WRITES = 0): findRoomOccupant must never call selfHealUnifiedSimilarity — a room read must never recompute or write");
+  assert.doesNotMatch(source, /while\s*\(/, "REQUIRED: no while-loop retry construct anywhere in this read path");
+  assert.doesNotMatch(source, /for\s*\(.*selfHeal/, "REQUIRED: no for-loop retry construct around any self-heal call");
 });

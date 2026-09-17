@@ -12,6 +12,7 @@ import { tokens } from '../lib/similarity-core.ts';
 import { computeUnifiedSimilarity } from '../lib/unified-similarity.ts';
 import { indexDocumentSubmissionIntoCorpus } from '../lib/user-submission-corpus.ts';
 import { getOrComputeHistoricalMatchSnapshot } from '../lib/report-historical-match.ts';
+import { selfHealUnifiedSimilarity } from '../lib/report-primary-similarity.ts';
 import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
 import { withTestIdentity } from './helpers/test-signup.mjs';
 
@@ -201,6 +202,39 @@ test('SCENARIO A (SELF): a real second upload of identical text by the same acco
 
   // The real second upload event — same account, same browser flow, same route.
   const { id: secondId } = await postReport('urel-device-a', { cookie, text, title: 'seismo-second.pdf' });
+
+  // KNOWN PRE-EXISTING WRITE-TIME GAP (confirmed present on origin/main
+  // 3d12d76, before this fix's GET-purity change): POST /api/reports's
+  // own write-time finalization (resolvePrimarySimilaritySummary, called
+  // synchronously) picks the account's own most-recent identity row with
+  // this exact canonical hash to EXCLUDE from candidate matching — meant to
+  // exclude only this report's own trivial self-record. But
+  // captureDocumentIdentityAndFamily for *this* (second) report runs later,
+  // in the deferred after-response block (app/api/reports/route.ts), so at
+  // the moment write-time finalization runs, this report's own identity row
+  // does not exist yet — the "most recent" row is still the FIRST report's,
+  // which is exactly the genuine SELF backing that should have been
+  // matched, and it is wrongly excluded instead. The corpus-source-matching
+  // flag is irrelevant here (SELF is flag-independent); this is a real,
+  // deterministic ordering gap, not a flaky race.
+  //   Before this fix, GET silently self-healed on every read (the exact
+  // bug this whole lifecycle fix removes), so a real viewer's first click
+  // into their own report happened to paper over this gap and never saw it.
+  // Now that GET is a pure read, the persisted snapshot from the first
+  // write-time attempt is what a customer would actually see, permanently,
+  // unless something explicitly re-resolves it. selfHealUnifiedSimilarity
+  // is that explicit recovery action — the same machinery an admin/
+  // maintenance path would use — and by the time it runs here (after
+  // postReport has fully returned), the deferred identity capture above has
+  // already landed, so this recomputation now correctly finds the SELF
+  // match. This is a pre-existing write-time gap, not something this test's
+  // subject (GET purity) is responsible for fixing; see the Task 5 report
+  // for the full analysis.
+  const secondReportRow = await setupClient.execute({ sql: 'SELECT user_id FROM saved_reports WHERE id = ?', args: [secondId] });
+  const secondAccountId = secondReportRow.rows[0]?.user_id ? String(secondReportRow.rows[0].user_id) : null;
+  const healed = await selfHealUnifiedSimilarity(setupClient, { reportDeviceKey: 'urel-device-a', reportId: secondId, accountId: secondAccountId });
+  assert.equal(healed.attempted, true, 'the explicit recovery action must actually run for this assertion to be meaningful');
+
   const secondMatch = await fetchRealHistoricalMatch(secondId, { cookie });
 
   assert.equal(secondMatch.status, 'MATCHED');

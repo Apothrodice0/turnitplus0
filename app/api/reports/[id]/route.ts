@@ -4,18 +4,12 @@ import { checkRate, checkReadRate } from '../../../../lib/rate-limit';
 import { clientIpFrom } from '../../../../lib/client-ip';
 import { findReportRowForDeviceKey, findReportRowForUser } from '../../../../lib/reports-repo';
 import { classifyReportMatches } from '../../../../lib/report-classification';
-import { deleteHistoricalMatchSnapshot } from '../../../../lib/report-historical-match';
-import { resolvePrimarySimilaritySummary, persistRefreshedSimilarity } from '../../../../lib/report-primary-similarity';
-import { withEvidenceInterpretation, stripClientEvidenceInterpretation, refreshSelectiveCorpusCompletionSignal } from '../../../../lib/report-evidence-interpretation';
+import { deleteHistoricalMatchSnapshot, getPersistedHistoricalMatchSnapshot } from '../../../../lib/report-historical-match';
+import { stripClientEvidenceInterpretation, refreshSelectiveCorpusCompletionSignal } from '../../../../lib/report-evidence-interpretation';
 import { sanitizeExtractionDiagnostic } from '../../../../lib/evidence-interpretation';
-import { admittedReferenceEvidenceForUnifiedSimilarity } from '../../../../lib/report-user-supplied-references';
 import { deleteReportDocumentData } from '../../../../lib/report-deletion';
 import { deleteReportCorpusAdmissionData } from '../../../../lib/corpus-admission-report-integration';
-import { scheduleReportShadowEvaluations } from '../../../../lib/report-shadow-evaluations';
-import { getExperimentalHistoricalMatchForDisplay } from '../../../../lib/e8p-visibility';
 import { getSessionUser } from '../../../../lib/auth-session';
-import { resolveVerifiedAcademicEvidence } from '../../../../lib/academic-search-diagnostics-repo';
-import { canonicalSha256 } from '../../../../lib/document-identity';
 import { stripServerInternalReportFields, type SimilarityReport } from '../../../../lib/report-types';
 import { expandUnifiedSimilarityFromPersistence } from '../../../../lib/unified-similarity-persistence';
 
@@ -90,14 +84,14 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
       // reference evidence + channel BEFORE the strip below. Written by THIS
       // report's own save (already server-verified then, from the actual
       // reference text — the raw text is never persisted), so it is trusted
-      // as-is on read and re-threaded through the unified-score recompute + the
-      // interpretation recompute, keeping the reference-augmented result stable
-      // across a reload. A pre-V1 report simply has none.
+      // as-is on read and restored verbatim below (report-lifecycle
+      // correctness fix — a GET must never recompute anything, so this is no
+      // longer re-threaded through any scoring/interpretation recompute,
+      // only restored exactly as saved). A pre-V1 report simply has none.
       const persistedReferenceEvidence = Array.isArray(payload.userSuppliedReferenceEvidence)
         ? payload.userSuppliedReferenceEvidence
         : null;
       const persistedReferenceChannel = payload.userSuppliedReferenceChannel ?? null;
-      const persistedReferenceEvidenceForScore = admittedReferenceEvidenceForUnifiedSimilarity(persistedReferenceEvidence);
       // AUTHORITATIVE PROMOTION — capture the persisted, already-server-computed
       // evidenceInterpretation/reportCompletion BEFORE the strip below, for the
       // SAME reason persistedExtractionDiagnostic captures extractionDiagnostic
@@ -114,10 +108,10 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
         (payload as Record<string, unknown>).reportCompletion;
       // Report V2 trust boundary: drop any persisted/forged
       // evidenceInterpretation / reportCompletion / extractionDiagnostic
-      // immediately after parsing. They are recomputed server-side below from
-      // the freshly-resolved authoritative report; if that recompute is skipped
-      // (a resolution failure), the response simply carries none rather than a
-      // stale or client-forged value.
+      // immediately after parsing — restored below (report-lifecycle
+      // correctness fix: from the already-captured PERSISTED value only,
+      // never recomputed) so a client can never smuggle a forged one past
+      // this route by round-tripping it back in.
       payload = stripClientEvidenceInterpretation(payload);
       // Task A correction: an explicit, unconditional authorization signal —
       // set here, once, directly from the authenticated session's own real
@@ -156,333 +150,111 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
           console.error('classifyReportMatches failed (non-fatal):', err instanceof Error ? err.message : String(err));
         }
       }
-      // Phase E8C: same read-time-enrichment discipline as Phase D just
-      // above, and the same non-fatal guarantee — see
-      // lib/report-historical-match.ts's own header comment. This one is
-      // already internally best-effort (it persists a "FAILED" snapshot
-      // rather than throwing), so this try/catch is a second, outer safety
-      // net for anything unexpected (e.g. a database error on the snapshot
-      // read/write itself), not the primary error handling.
-      try {
-        // AUTHORITATIVE PROMOTION — ANY persisted selectiveCorpusAuthoritativeStatus
-        // (not just "pending") means this report's final score is, or was,
-        // decided by the canonical Selective-Corpus-aware finalizer
-        // (lib/selective-corpus-authoritative.ts), never by this route's
-        // ordinary resolvePrimarySimilaritySummary call — which has no
-        // selectiveCorpusEvidence input at all. Letting it run here anyway
-        // would, for:
-        //   - "pending": compute and persist a premature, pre-V4 "final"
-        //     score the instant anyone views the report — the false-early-
-        //     finalization this whole design exists to prevent; and
-        //   - "completed" / "incomplete": silently REGRESS an already-final,
-        //     genuinely V4-inclusive score back down to a V4-less one on the
-        //     very next GET (the generation guard alone does not stop this —
-        //     same generation, <= still passes) — a real rollback-contract
-        //     violation ("already completed/incomplete reports remain
-        //     immutable as persisted"), not merely a missed-optimization.
-        // Skip this entire recompute/persist/telemetry block outright for
-        // every one of the three states: no compute, no write, no marker
-        // change. Only the deferred finalizer or the recovery sweep may ever
-        // change this report's score once it has entered this lifecycle.
-        // Mirrors selfHealUnifiedSimilarity's own identical short-circuit in
-        // lib/report-primary-similarity.ts (the room-card read path) — GET
-        // /api/reports/[id] has its own separate recompute here, so it needs
-        // its own separate guard.
-        if (payload.selectiveCorpusAuthoritativeStatus == null) {
-        // Scholarly evidence server trust boundary (drizzle/0052): re-resolve
-        // the authoritative scholarly evidence server-side from the verified
-        // diagnostics id POST stamped onto the payload (payload.text unchanged
-        // since — this route never reassigns it), gated on the diagnostics
-        // row's stored hash still matching canonicalSha256(payload.text). This
-        // does NOT read the deferred diagnostics->report link columns, so a
-        // link that never landed cannot cost this report its evidence. Any
-        // miss/mismatch/parse => []; the persisted payload.externalAcademicEvidence
-        // is NEVER trusted for scoring. Best-effort — a lookup failure just
-        // means no scholarly contribution this recompute.
-        const verifiedAcademicEvidence = typeof payload.text === 'string' && payload.text.length > 0
-          ? (await resolveVerifiedAcademicEvidence(client, {
-              diagnosticsId: typeof payload.verifiedAcademicSearchDiagnosticsId === 'number' && Number.isFinite(payload.verifiedAcademicSearchDiagnosticsId)
-                ? payload.verifiedAcademicSearchDiagnosticsId
-                : null,
-              submissionCanonicalSha256: canonicalSha256(payload.text),
-            })).evidence
-          : [];
-        // Keep the response's display field consistent with what actually
-        // scored, WITHOUT changing the "field absent for a report with no
-        // academic evidence" contract: only overwrite when there is verified
-        // evidence to show, or when a value is already present (a legacy report
-        // carrying an unverified externalAcademicEvidence now shows []).
-        if (verifiedAcademicEvidence.length > 0) {
-          payload.externalAcademicEvidence = verifiedAcademicEvidence;
-        } else if (payload.externalAcademicEvidence !== undefined) {
-          payload.externalAcademicEvidence = [];
-        }
-
-        // Release-hardening audit finding SIM-02: getOrComputeHistoricalMatchSnapshot
-        // + computeUnifiedSimilarity now run through the ONE shared
-        // lib/report-primary-similarity.ts helper — the same call
-        // lib/reports-repo.ts's findRoomOccupant makes for the room card, so
-        // the two surfaces can never disagree. Never touches
-        // payload.score/archiveScore/aiScore/E8S/E8P — see
-        // lib/unified-similarity.ts's own DECISION 3.
-        const resolution = await resolvePrimarySimilaritySummary(client, {
-          reportDeviceKey: row.device_key,
-          reportId: id,
-          accountId,
-          rawText: payload.text,
-          wordCount: payload.wordCount,
-          archiveMatchedPositions: payload.archiveMatchedPositions,
-          externalAcademicEvidence: verifiedAcademicEvidence,
-          userSuppliedReferenceEvidence: persistedReferenceEvidenceForScore,
-          archiveScore: payload.archiveScore ?? payload.score,
-        });
-        const historicalSubmissionMatch = resolution.historicalSubmissionMatch;
-        // Release-hardening audit finding UI-02: historicalSubmissionMatch
-        // carries the same class of internal diagnostic information as
-        // matchClassification just above (relationshipType,
-        // matchedRepresentationId, matcher/fingerprint/canonicalization
-        // versions, raw passage text) — never previously gated at all, so
-        // every viewer of their own report, ordinary or not, received it in
-        // the raw JSON response. Gated here the identical way: the
-        // AUTHENTICATED session's own `role` column, decided server-side,
-        // before this field is ever assigned onto `payload` — for every
-        // other viewer it is simply never set, so there is nothing on the
-        // response to strip or hide, matching matchClassification's own
-        // comment above. The local `historicalSubmissionMatch` variable
-        // itself stays fully populated regardless of role — it is still the
-        // required input to computeUnifiedSimilarity above (already run,
-        // via resolution) and to experimentalHistoricalMatch and the
-        // shadow-evaluation callback below; only whether it is ever
-        // SERIALIZED onto `payload` for THIS response is role-gated.
-        if (sessionUser?.role === 'admin') {
-          payload.historicalSubmissionMatch = historicalSubmissionMatch;
-        }
-        if (resolution.unifiedSimilarity) {
-          payload.unifiedSimilarity = resolution.unifiedSimilarity;
-          payload.corpusSourceMatchingEnabledAtComputation = resolution.corpusSourceMatchingEnabled;
-          payload.unifiedSimilarityGeneration = resolution.corpusGeneration;
-          payload.unifiedSimilarityFailed = false;
-          // Release-hardening audit finding SIM-04: "after the resolver
-          // recomputes, persist the refreshed result so room and detail
-          // agree." resolvePrimarySimilaritySummary above is cache-first —
-          // this write is therefore cheap on the common case (the freshly
-          // resolved generation already equals what is stored, so the
-          // WHERE clause's own comparison skips the write entirely) and
-          // only actually lands a new row when something genuinely
-          // changed. Guarded the identical way SAVE_REPORT_SQL's own
-          // generation CASE is (app/api/reports/route.ts) — never let an
-          // older-generation result stored here regress a newer one a
-          // concurrent request already persisted; COALESCE(...,-1) treats
-          // "never persisted a generation" as lower than any real one, so
-          // the very first successful resolution always writes. Deferred
-          // outside this response's own critical path would reintroduce
-          // exactly the ordering gap SIM-03's own header comment already
-          // rejected runAfterResponse for — so, like write-time
-          // finalization itself, this stays synchronous and awaited.
-          // Fresh-report aiAnalysis-loss fix (Room 5): persistRefreshedSimilarity
-          // applies json_set to only the four similarity-owned keys of the
-          // row's CURRENT payload_json, in one atomic statement — never a
-          // wholesale rebuild from a stale in-memory copy. That copy (built
-          // from row.payload_json read at the TOP of this handler, before
-          // classification/historical-match/etc. ran) can be arbitrarily
-          // behind by the time this write executes: a concurrent
-          // AI-completion SAVE_REPORT_SQL write could have added
-          // $.aiAnalysis/$.aiScore in the meantime, which a wholesale
-          // `SET payload_json = ?` would then erase while the flat ai_*
-          // columns (untouched here) stay 'ready' + numeric — exactly the
-          // Room-5 UI. json_set reads $.aiAnalysis back live and preserves
-          // it. The generation guard is unchanged (COALESCE(...,-1) <=
-          // resolution.corpusGeneration), so a newer-generation result a
-          // concurrent write already persisted still wins. matchClassification
-          // and experimentalHistoricalMatch (read-time-only display fields on
-          // the in-memory `payload`) were never persistable and still are not
-          // — json_set never touches them.
-          try {
-            await persistRefreshedSimilarity(client, { reportDeviceKey: row.device_key, reportId: id }, resolution);
-          } catch (err) {
-            console.error('persisting the refreshed similarity result failed (non-fatal, this response still reflects it):', err instanceof Error ? err.message : String(err));
-          }
-        } else if (resolution.failed) {
-          // Release-hardening audit finding LIFECYCLE-06 (corrected): the
-          // GET-side mirror of app/api/reports/route.ts's own POST-time
-          // failure persistence — a genuine, reproducible
-          // computeUnifiedSimilarity failure for this report's own data
-          // (resolution.failed's own comment), persisted here too so a
-          // report that was never resaved (only ever viewed) still gets an
-          // honest, actionable terminal state instead of polling forever.
-          // Same generation-guard discipline as the success branch above,
-          // for the same reason.
-          //
-          // Release-hardening audit finding LIFECYCLE-06 (approval-pass
-          // fix): unifiedSimilarity is explicitly cleared on BOTH the
-          // in-memory `payload` (built from row.payload_json at the top of
-          // this handler — already carries a PREVIOUS successful result if
-          // one was ever persisted) and the re-read `persistedPayload`
-          // below, for the identical reason app/api/reports/route.ts's own
-          // POST-time failure branch does — without this, a stale success
-          // would silently linger alongside the fresh failure marker, and
-          // resolvePersistedSimilarityDisplay's own hasUnifiedSimilarity
-          // check (deliberately prioritized so a REAL result always wins
-          // over a stale failure marker) would then mask this genuinely
-          // fresh failure behind that stale "resolved" score.
-          payload.unifiedSimilarity = undefined;
-          payload.unifiedSimilarityFailed = true;
-          payload.corpusSourceMatchingEnabledAtComputation = resolution.corpusSourceMatchingEnabled;
-          payload.unifiedSimilarityGeneration = resolution.corpusGeneration;
-          try {
-            // Same targeted-write reasoning as the success branch above:
-            // json_remove drops only $.unifiedSimilarity, json_set stamps the
-            // three failure-marker keys, on the current row — $.aiAnalysis/
-            // $.aiScore and every other field survive untouched.
-            await persistRefreshedSimilarity(client, { reportDeviceKey: row.device_key, reportId: id }, resolution);
-          } catch (err) {
-            console.error('persisting the terminal similarity failure marker failed (non-fatal, this response still reflects it):', err instanceof Error ? err.message : String(err));
-          }
-        }
-        // Release-hardening audit finding UI-02 (continued): unlike
-        // historicalSubmissionMatch above, unifiedSimilarity itself is NEVER
-        // gated — it is the finalized aggregate result (score, word counts,
-        // pass/fail evidence totals) every viewer must keep seeing
-        // immediately, admin or not. But contributions[] — a per-passage
-        // breakdown carrying the same internal representation id
-        // (sourceId) and relationshipType-shaped label
-        // (contributions[].relationship) as historicalSubmissionMatch's own
-        // matches[] — is not rendered by any production UI (see
-        // components/report/similarity-report-papers.tsx's own
-        // unifiedEvidenceBreakdown, which reads the flat archiveOnlyWords/
-        // liveAcademicOnlyWords/previousUploadOnlyWords/overlapWords
-        // counters, never contributions) and exists purely for internal/
-        // shadow-evaluation use. Stripped here for the same non-admin
-        // audience and the same reason as historicalSubmissionMatch — an
-        // ordinary viewer must never receive the internal id even nested
-        // inside the object this fix otherwise preserves untouched. Handles
-        // both the freshly-resolved case just above AND the passthrough
-        // case (resolution.unifiedSimilarity was falsy this request, so
-        // payload.unifiedSimilarity is whatever an earlier successful save
-        // already persisted).
-        if (payload.unifiedSimilarity && sessionUser?.role !== 'admin') {
-          payload.unifiedSimilarity = { ...payload.unifiedSimilarity, contributions: [] };
-        }
-        // Report V2 — recompute the additive, EXPLANATION-ONLY interpretation /
-        // completion / extraction diagnostic from THIS server-resolved payload
-        // (unifiedSimilarity merged, externalAcademicEvidence forced to the
-        // verified set). Replaces whatever payload_json carried. Never touches a
-        // score or a matched position; positionsByKind is a disjoint partition
-        // of payload.unifiedSimilarity.matchedPositions. Public-safe: opaque
-        // src-N ids + word indices into the user's own text only, so no extra
-        // non-admin stripping is required. historicalSubmissionMatch is the
-        // fully-populated local var (role-gating only affects whether IT is
-        // serialized, not this derivation) — and same-work stays dormant anyway.
+      // REPORT-LIFECYCLE CORRECTNESS FIX (customer historical-GET purity):
+      // this route used to call resolvePrimarySimilaritySummary and
+      // persistRefreshedSimilarity on EVERY request — recomputing against
+      // whatever the live corpus generation / CORPUS_SOURCE_MATCHING_ENABLED
+      // flag / scholarly-evidence state happens to be RIGHT NOW, and
+      // persisting the refreshed result back over the saved row whenever it
+      // differed. That is reachable from an ordinary customer via the
+      // detail page's own client poll, "Download receipt"
+      // (room-page-shell.tsx's handleDownloadReceipt), and retryAiCheck's
+      // local-copy-fallback fetch — none of which is "opening a room," but
+      // all of which are "reading an existing, possibly long-completed
+      // report." That is exactly the same class of bug findRoomOccupant
+      // (lib/reports-repo.ts) was fixed to stop: a completed historical
+      // report's similarity generation drifting behind a later corpus
+      // admission/promotion must never cause a bare GET to silently
+      // recompute and rewrite it.
+      //
+      // A saved report is a snapshot. Everything below only RESTORES the
+      // already-computed, already-persisted values that
+      // stripClientEvidenceInterpretation dropped above —
+      // evidenceInterpretation / reportCompletion / extractionDiagnostic /
+      // userSuppliedReferenceEvidence / userSuppliedReferenceChannel are all
+      // genuinely computed and persisted at POST time
+      // (app/api/reports/route.ts's own finalizeReportJson /
+      // withEvidenceInterpretation call, inside the SAME write that
+      // persists unifiedSimilarity) — never recomputed a second time here.
+      // unifiedSimilarity / unifiedSimilarityGeneration /
+      // corpusSourceMatchingEnabledAtComputation / unifiedSimilarityFailed
+      // are already correct on `payload` straight from the initial
+      // JSON.parse (already expanded from its compact persisted shape
+      // above) — nothing here ever reinterprets them against today's
+      // corpus generation or the live flag. A legacy report saved before
+      // Report V2 existed simply has none of the interpretation fields,
+      // exactly as it always did before ever being GET'd. Only the same
+      // non-admin contributions[] redaction still applies, operating on
+      // the persisted value directly instead of a freshly resolved one.
+      // The admin-only matchClassification enrichment above is untouched
+      // (independently read-only, no dependency on anything recomputed
+      // here).
+      //
+      // The Selective-Corpus-authoritative-promotion distinction this block
+      // used to make (pending/completed/incomplete never recompute; every
+      // other report does) is now moot — nothing recomputes any more, so
+      // every report, authoritative-tracked or not, is simply restored the
+      // same way.
+      if (persistedEvidenceInterpretationForAuthoritativeReport !== undefined) {
+        payload.evidenceInterpretation = persistedEvidenceInterpretationForAuthoritativeReport as SimilarityReport['evidenceInterpretation'];
+      }
+      if (persistedReportCompletionForAuthoritativeReport !== undefined) {
+        payload.reportCompletion = persistedReportCompletionForAuthoritativeReport as SimilarityReport['reportCompletion'];
+      }
+      if (persistedExtractionDiagnostic) {
+        payload.extractionDiagnostic = persistedExtractionDiagnostic;
+      }
+      if (persistedReferenceEvidence) {
+        payload.userSuppliedReferenceEvidence = persistedReferenceEvidence;
+      }
+      if (persistedReferenceChannel) {
+        payload.userSuppliedReferenceChannel = persistedReferenceChannel;
+      }
+      // Release-hardening audit finding UI-02: admin-only, exactly as
+      // before — but sourced from getPersistedHistoricalMatchSnapshot
+      // (lib/report-historical-match.ts), the pure read-only twin of
+      // getOrComputeHistoricalMatchSnapshot added for this same fix: it
+      // returns the already-persisted snapshot exactly as it is on file —
+      // whatever generation/corpus state it was computed under — or
+      // `undefined` only when no snapshot has ever been computed for this
+      // report at all, and never computes or writes anything itself either
+      // way. Same "shown as-is, never blocked by its own age" rule this
+      // whole fix applies to unifiedSimilarity: a plain GET shows exactly
+      // what is currently, genuinely on file, never a fresher answer it
+      // would have to compute to produce.
+      if (sessionUser?.role === 'admin') {
         try {
-          const v2 = withEvidenceInterpretation(payload, {
-            historicalSubmissionMatch,
-            selectiveCorpusBranch: null,
-            serverExtractionDiagnostic: persistedExtractionDiagnostic,
-            userSuppliedReferenceEvidence: persistedReferenceEvidence,
-            userSuppliedReferenceChannel: persistedReferenceChannel,
+          const persistedHistoricalSubmissionMatch = await getPersistedHistoricalMatchSnapshot(client, {
+            reportDeviceKey: row.device_key,
+            reportId: id,
           });
-          payload.evidenceInterpretation = v2.evidenceInterpretation;
-          payload.reportCompletion = v2.reportCompletion;
-          payload.extractionDiagnostic = v2.extractionDiagnostic;
-          if (v2.userSuppliedReferenceEvidence) payload.userSuppliedReferenceEvidence = v2.userSuppliedReferenceEvidence;
-          if (v2.userSuppliedReferenceChannel) payload.userSuppliedReferenceChannel = v2.userSuppliedReferenceChannel;
+          if (persistedHistoricalSubmissionMatch) {
+            payload.historicalSubmissionMatch = persistedHistoricalSubmissionMatch;
+          }
         } catch (err) {
-          console.error('report V2 interpretation (GET) failed (non-fatal, response omits it):', err instanceof Error ? err.message : String(err));
+          console.error('getPersistedHistoricalMatchSnapshot failed (non-fatal):', err instanceof Error ? err.message : String(err));
         }
-        // Phase E8P.3: the experimental, allowlist-gated display value — see
-        // lib/e8p-visibility.ts's own header comment. Synchronous (unlike the
-        // shadow telemetry write below) because it must be part of THIS
-        // response to render at all; isE8pVisibilityAllowlisted() is checked
-        // first inside that function and returns instantly for every
-        // non-allowlisted account, so this is a no-op for ordinary traffic.
-        // Never throws past this function; best-effort exactly like
-        // historicalSubmissionMatch's own read-time enrichment above.
-        payload.experimentalHistoricalMatch = await getExperimentalHistoricalMatchForDisplay(client, {
-          accountId,
-          rawText: payload.text,
-          productionResult: historicalSubmissionMatch,
-        }) ?? undefined;
-        // Phase E8P + Device Passport Phase 4: production shadow telemetry —
-        // measurement only, never changes historicalSubmissionMatch above
-        // (already resolved and reused as-is, never recomputed) or the
-        // unified score. This is the SELF-HEAL / FALLBACK trigger: the same
-        // scheduling now also runs on the successful POST /api/reports
-        // lifecycle (see lib/report-shadow-evaluations.ts and
-        // app/api/reports/route.ts) for reports whose similarity finalizes
-        // at write time and are then never fetched through this route. The
-        // shared helper defers via runAfterResponse on its own DB connection
-        // (this route's `client` is closed in `finally` before after()
-        // fires), is best-effort (a telemetry failure never fails this
-        // response), and is idempotent — both evaluators UPSERT their row per
-        // (device_key, id, policy_version), so a POST-scheduled run and a
-        // later GET-scheduled run converge on the same row. Local values (not
-        // `payload`) are passed so the deferred closure never retains the
-        // outer request's own object.
-        await scheduleReportShadowEvaluations({
-          reportDeviceKey: row.device_key,
-          reportId: id,
-          accountId,
-          rawText: payload.text,
-          productionResult: historicalSubmissionMatch,
-          // Phase B2 — the corpus-duplicate shadow evaluator's inputs, taken
-          // straight from the resolution this route already computed. null /
-          // empty when the authoritative unified result is unavailable.
-          authoritativeUnifiedSimilarity: resolution.unifiedSimilarity ?? null,
-          effectiveDeviceSelfRepresentationIds: resolution.effectiveDeviceSelfRepresentationIds,
-          authoritativeCorpusGeneration: resolution.corpusGeneration,
-          // The EXACT archive / live-academic scoring inputs passed into the
-          // resolvePrimarySimilaritySummary call above — the same in-memory
-          // `payload` fields, which this route never reassigns after parsing it
-          // from payload_json. Threaded through so the B2 counterfactual is
-          // measured against the authoritative scoring inputs, never a re-read.
-          authoritativeArchiveMatchedPositions: payload.archiveMatchedPositions ?? null,
-          // Trust boundary (drizzle/0052): the server-verified set (also now on
-          // payload.externalAcademicEvidence), never a client-supplied value.
-          authoritativeExternalAcademicEvidence: verifiedAcademicEvidence,
-          // GET-fallback idempotency fix: this is the generic self-heal path
-          // (a report whose POST-time schedule never ran) — every OTHER
-          // evaluator above still runs here unaffected, but Selective Corpus
-          // has no idempotent DB row of its own, so re-running its expensive
-          // remote-Blob-backed Stage A/B pass on every view (not just every
-          // save) has no completion record to show for it. POST's own call
-          // site (app/api/reports/route.ts) omits this and keeps running it.
-          // See lib/report-shadow-evaluations.ts's own doc comment on this flag.
-          includeSelectiveCorpus: false,
-        });
-        } else {
-          // AUTHORITATIVE PROMOTION — the recompute above was skipped for this
-          // pending/completed/incomplete report (see the guard's own comment).
-          // Restore, never recompute, the already-correct persisted
-          // evidenceInterpretation/reportCompletion captured before the strip
-          // above — a completed/incomplete report's explanation-only fields
-          // are final and never need recomputing again; a still-pending
-          // report simply carries forward whatever placeholder shape it had
-          // (harmless: no score is shown for it regardless).
-          if (persistedEvidenceInterpretationForAuthoritativeReport !== undefined) {
-            payload.evidenceInterpretation = persistedEvidenceInterpretationForAuthoritativeReport as SimilarityReport['evidenceInterpretation'];
-          }
-          if (persistedReportCompletionForAuthoritativeReport !== undefined) {
-            payload.reportCompletion = persistedReportCompletionForAuthoritativeReport as SimilarityReport['reportCompletion'];
-          }
-          if (persistedExtractionDiagnostic) {
-            payload.extractionDiagnostic = persistedExtractionDiagnostic;
-          }
-        } // end: payload.selectiveCorpusAuthoritativeStatus == null
-      } catch (err) {
-        console.error('resolvePrimarySimilaritySummary failed (non-fatal):', err instanceof Error ? err.message : String(err));
+      }
+      // Release-hardening audit finding UI-02 (continued): unifiedSimilarity
+      // itself is never gated — it is the finalized aggregate result every
+      // viewer must keep seeing, admin or not — but contributions[] (an
+      // internal per-passage representation id, not rendered by any
+      // production UI) is stripped for non-admins, exactly as before, now
+      // operating on the persisted value directly.
+      if (payload.unifiedSimilarity && sessionUser?.role !== 'admin') {
+        payload.unifiedSimilarity = { ...payload.unifiedSimilarity, contributions: [] };
       }
     } finally {
       client.close();
     }
 
     // Scholarly evidence server trust boundary (drizzle/0052): verifiedAcademicSearchDiagnosticsId
-    // is an INTERNAL re-lookup handle — POST stamps it into payload_json purely so this route's
-    // recompute above and selfHealUnifiedSimilarity can re-resolve the server-owned evidence_json
-    // by (id + canonical text hash). No UI ever renders it, admin or otherwise. It must not reach
-    // any client, so it is stripped from the response here — AFTER the resolve above has read it,
-    // and only from this outbound copy. The stored payload_json keeps it (SAVE_REPORT_SQL and
-    // persistRefreshedSimilarity's json_set never remove it; POST re-derives the handle server-side
-    // from the existing row on a resave, so a client that never sees it still round-trips fine).
+    // is an INTERNAL re-lookup handle — POST stamps it into payload_json purely so a resave (POST)
+    // can re-resolve the server-owned evidence_json by (id + canonical text hash) at write time. No
+    // UI ever renders it, admin or otherwise. It must not reach any client, so it is stripped from
+    // the response here, only from this outbound copy — the stored payload_json keeps it
+    // (SAVE_REPORT_SQL's own write never removes it, so a client that never sees it still round-trips
+    // fine on its next resave).
     if (payload) delete payload.verifiedAcademicSearchDiagnosticsId;
 
     // AUTHORITATIVE PROMOTION — response hygiene. Runs for EVERY response

@@ -543,7 +543,7 @@ test('MANDATORY 10 — ai_score = 0 with ai_status ready is a valid completed re
 // End-to-end convergence through the real read paths (findRoomOccupant, GET)
 // =========================================================================
 
-test('MANDATORY 8 — ordering AI completion -> newer similarity write: findRoomOccupant converges to newest similarity + completed AI', async () => {
+test('MANDATORY 8 — ordering AI completion -> newer similarity write: a real self-heal (report-lifecycle correctness fix: no longer triggered by a mere room read — see lib/reports-repo.ts\'s findRoomOccupant, which is now read-only) still converges to newest similarity + completed AI, and findRoomOccupant purely READS that already-converged result with no further write', async () => {
   await bumpCorpusMatchGeneration(client);
   const g = await getCurrentCorpusMatchGeneration(client);
   const userId = 'order-a-user-1';
@@ -559,13 +559,22 @@ test('MANDATORY 8 — ordering AI completion -> newer similarity write: findRoom
 
   // AI completes first (row now ready + aiAnalysis).
   await aiCompletionWrite({ id, deviceKey, userId, room: 0, similarityGeneration: g });
-  // Then a legitimate corpus change: the next room read self-heals similarity.
+  // Then a legitimate corpus change: a real self-heal (the same machinery a
+  // detail-page open would trigger — report-lifecycle correctness fix: a
+  // room read itself no longer triggers this) resolves similarity to the
+  // newest generation.
   await bumpCorpusMatchGeneration(client);
   const gAfter = await getCurrentCorpusMatchGeneration(client);
+  const healed = await selfHealUnifiedSimilarity(client, { reportDeviceKey: deviceKey, reportId: id, accountId: userId });
+  assert.equal(healed.attempted, true);
+  assert.equal(healed.outcome, 'resolved');
 
+  const rowBeforeRoomRead = await rowOf(deviceKey, id);
   const occupant = await findRoomOccupant(client, userId, 0);
   assert.equal(occupant.status, 'ready');
   assert.equal(occupant.report.aiScore, 0);
+  const rowAfterRoomRead = await rowOf(deviceKey, id);
+  assert.deepEqual(rowAfterRoomRead, rowBeforeRoomRead, 'REQUIRED (HISTORICAL_ROOM_READ_WRITES = 0): the room read itself must write nothing — it only observes the already-healed row');
 
   const row = await rowOf(deviceKey, id);
   assert.equal(row.payload.unifiedSimilarityGeneration, gAfter, 'similarity self-healed to newest generation');
@@ -576,7 +585,7 @@ test('MANDATORY 8 — ordering AI completion -> newer similarity write: findRoom
   assert.equal(d.passageWindows, 2);
 });
 
-test('MANDATORY 9 — reverse ordering newer similarity write (self-heal) -> AI completion: converges to newest similarity + completed AI', async () => {
+test('MANDATORY 9 — reverse ordering newer similarity write (self-heal) -> AI completion: converges to newest similarity + completed AI, with findRoomOccupant reads at every step performing no write of their own', async () => {
   await bumpCorpusMatchGeneration(client);
   const g = await getCurrentCorpusMatchGeneration(client);
   const userId = 'order-b-user-1';
@@ -590,11 +599,20 @@ test('MANDATORY 9 — reverse ordering newer similarity write (self-heal) -> AI 
     },
   });
 
-  // Similarity self-heals first (via a room read), then AI completes.
+  // Similarity self-heals first (report-lifecycle correctness fix: via a
+  // real, explicit self-heal call — never merely by a room read), then AI
+  // completes.
   await bumpCorpusMatchGeneration(client);
   const gAfter = await getCurrentCorpusMatchGeneration(client);
+  const healed = await selfHealUnifiedSimilarity(client, { reportDeviceKey: deviceKey, reportId: id, accountId: userId });
+  assert.equal(healed.attempted, true);
+  assert.equal(healed.outcome, 'resolved');
+
+  const rowBeforeRoomRead = await rowOf(deviceKey, id);
   const occupant1 = await findRoomOccupant(client, userId, 1);
   assert.equal(occupant1.status, 'processing', 'still processing AI-wise');
+  const rowAfterRoomRead = await rowOf(deviceKey, id);
+  assert.deepEqual(rowAfterRoomRead, rowBeforeRoomRead, 'REQUIRED (HISTORICAL_ROOM_READ_WRITES = 0): this room read must write nothing');
 
   const midRow = await rowOf(deviceKey, id);
   assert.equal(midRow.payload.unifiedSimilarityGeneration, gAfter, 'similarity already self-healed');
@@ -664,7 +682,7 @@ test('MANDATORY 2 — an incoming newer valid aiAnalysis DOES replace an older v
   assert.equal(row.ai_score, 4);
 });
 
-test('MANDATORY 7 (end to end) — a legitimate newer-generation similarity self-heal replaces every similarity-owned field on the real GET route, without touching AI-owned fields', async () => {
+test('MANDATORY 7 (end to end, report-lifecycle correctness fix — GET /api/reports/[id] is now pure): a legitimate newer-generation similarity self-heal (now only reachable via the explicit write-time-finalization machinery, never a plain GET) replaces every similarity-owned field, without touching AI-owned fields; the real GET route afterward purely reflects that already-persisted result and never recomputes or writes anything itself', async () => {
   await bumpCorpusMatchGeneration(client);
   const g = await getCurrentCorpusMatchGeneration(client);
   const { id, deviceKey } = await seedReport({
@@ -682,6 +700,29 @@ test('MANDATORY 7 (end to end) — a legitimate newer-generation similarity self
   const gAfter = await getCurrentCorpusMatchGeneration(client);
 
   await resetReadRateForTest('self-heal-get-1');
+
+  // REQUIRED (report-lifecycle correctness fix): a plain GET must NOT
+  // recompute or write — it shows the OLD generation's saved value exactly
+  // as persisted, byte-identical row before and after.
+  const rowBeforeGet = await client.execute({ sql: 'SELECT payload_json, updated_at FROM saved_reports WHERE device_key = ? AND id = ?', args: [deviceKey, id] });
+  const reqBeforeHeal = new Request(`http://localhost/api/reports/${id}?deviceKey=${encodeURIComponent(deviceKey)}`, {
+    headers: { 'x-forwarded-for': 'self-heal-get-1' },
+  });
+  const resBeforeHeal = await reportIdRoute.GET(reqBeforeHeal, { params: Promise.resolve({ id: String(id) }) });
+  assert.equal(resBeforeHeal.status, 200);
+  const bodyBeforeHeal = await resBeforeHeal.json();
+  assert.equal(bodyBeforeHeal.payload.unifiedSimilarityGeneration, g, 'REQUIRED: a plain GET must display the SAVED generation/score, never a freshly recomputed one');
+  assert.equal(bodyBeforeHeal.payload.unifiedSimilarity.unifiedScore, 77);
+  const rowAfterGet = await client.execute({ sql: 'SELECT payload_json, updated_at FROM saved_reports WHERE device_key = ? AND id = ?', args: [deviceKey, id] });
+  assert.deepEqual(rowBeforeGet.rows[0], rowAfterGet.rows[0], 'REQUIRED: a plain GET must write nothing');
+
+  // The real recovery path: an explicit write-time-finalization call (the
+  // same machinery POST /api/reports and an admin/maintenance action use).
+  const healed = await selfHealUnifiedSimilarity(client, { reportDeviceKey: deviceKey, reportId: id, accountId: null });
+  assert.equal(healed.attempted, true);
+  assert.equal(healed.outcome, 'resolved');
+
+  await resetReadRateForTest('self-heal-get-1');
   const req = new Request(`http://localhost/api/reports/${id}?deviceKey=${encodeURIComponent(deviceKey)}`, {
     headers: { 'x-forwarded-for': 'self-heal-get-1' },
   });
@@ -689,16 +730,27 @@ test('MANDATORY 7 (end to end) — a legitimate newer-generation similarity self
   assert.equal(res.status, 200);
   const body = await res.json();
 
-  // response reflects the refreshed similarity + the untouched AI analysis
+  // response reflects the refreshed similarity + the untouched AI analysis —
+  // now because selfHealUnifiedSimilarity already persisted it, never
+  // because this GET itself recomputed anything.
   assert.equal(body.payload.unifiedSimilarityGeneration, gAfter);
-  assert.equal(body.payload.unifiedSimilarity.unifiedScore, 0, 'recomputed (no matching source) — similarity-owned fields fully refreshed');
+  assert.equal(body.payload.unifiedSimilarity.unifiedScore, 0, 'recomputed (no matching source) — similarity-owned fields fully refreshed, by the explicit heal, not by this GET');
   assert.equal(body.payload.aiAnalysis.status, 'complete');
   assert.equal(body.payload.aiScore, 7.5);
+
+  const rowBeforeSecondGet = await client.execute({ sql: 'SELECT payload_json, updated_at FROM saved_reports WHERE device_key = ? AND id = ?', args: [deviceKey, id] });
+  await resetReadRateForTest('self-heal-get-1');
+  const req2 = new Request(`http://localhost/api/reports/${id}?deviceKey=${encodeURIComponent(deviceKey)}`, {
+    headers: { 'x-forwarded-for': 'self-heal-get-1' },
+  });
+  await reportIdRoute.GET(req2, { params: Promise.resolve({ id: String(id) }) });
+  const rowAfterSecondGet = await client.execute({ sql: 'SELECT payload_json, updated_at FROM saved_reports WHERE device_key = ? AND id = ?', args: [deviceKey, id] });
+  assert.deepEqual(rowBeforeSecondGet.rows[0], rowAfterSecondGet.rows[0], 'REQUIRED: a later GET of the now-healed report must still write nothing — it is a pure read either way');
 
   // persisted row: same
   const row = await rowOf(deviceKey, id);
   assert.equal(row.payload.unifiedSimilarityGeneration, gAfter);
-  assert.equal(row.payload.aiAnalysis.status, 'complete', 'GET-time self-heal did NOT erase aiAnalysis');
+  assert.equal(row.payload.aiAnalysis.status, 'complete', 'the explicit heal did NOT erase aiAnalysis');
   assert.equal(row.payload.aiScore, 7.5);
   assert.equal(row.ai_status, 'ready');
   assert.equal(row.ai_score, 0);

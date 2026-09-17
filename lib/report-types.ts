@@ -82,6 +82,23 @@ export type AiAnalysis = {
   populationPercentile?: number | null;
   scoringVersion?: 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10;
   error?: string;
+  /**
+   * AI reproducibility metadata (report-lifecycle correctness fix, no DB
+   * migration): the language this analysis was gated on — the exact value
+   * passed into app/ai-detector-worker.ts's analyze() as
+   * request.detectedLanguage — and the detector algorithm version
+   * (lib/similarity-core.ts's LANGUAGE_DETECTOR_VERSION) that produced it.
+   * Both optional and additive: they live inside payload_json's existing
+   * aiAnalysis object (no schema change), so an older persisted report
+   * simply lacks them — never treated as version 1 or any other implied
+   * value, only as "this metadata did not exist yet." Recorded on every
+   * analysis outcome (including "unsupported", where they explain exactly
+   * why AI detection did not run) so a future score difference for the
+   * same document can be traced back to a detector version change instead
+   * of being unexplainable, as the historical 0%-vs-18% investigation was.
+   */
+  detectedLanguage?: DetectedLanguage;
+  languageDetectorVersion?: number;
 };
 
 export type AiSignalTone = "low" | "review" | "high" | "unavailable";

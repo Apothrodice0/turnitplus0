@@ -13,6 +13,7 @@ import { bumpCorpusMatchGeneration } from "../lib/corpus-match-generation.ts";
 import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
 import { resetRateForTest, resetReadRateForTest, resetAuthRateForTest } from "../lib/rate-limit.ts";
 import { scheduleReportShadowEvaluations } from "../lib/report-shadow-evaluations.ts";
+import { resolvePrimarySimilaritySummary } from "../lib/report-primary-similarity.ts";
 import { SHADOW_POLICY } from "./helpers/corpus-duplicate-shadow.mjs";
 import * as reportsRoute from "../app/api/reports/route.ts";
 import * as reportIdRoute from "../app/api/reports/[id]/route.ts";
@@ -20,10 +21,16 @@ import * as signupRoute from "../app/api/auth/signup/route.ts";
 import { withTestIdentity } from './helpers/test-signup.mjs';
 
 /**
- * Phase B2a — POST + GET both schedule the corpus-duplicate suppression shadow
- * evaluator via the shared lib/report-shadow-evaluations.ts helper; the two
- * converge on ONE row; a failure never affects the response; and no B2 field
- * ever reaches an ordinary user's report payload.
+ * Phase B2a — POST /api/reports schedules the corpus-duplicate suppression
+ * shadow evaluator via the shared lib/report-shadow-evaluations.ts helper.
+ * A failure never affects the response; no B2 field ever reaches an
+ * ordinary user's report payload.
+ *
+ * REPORT-LIFECYCLE CORRECTNESS FIX (customer historical-GET purity):
+ * GET /api/reports/[id] no longer schedules this evaluator (or re-evaluates
+ * it on a corpus-generation bump) at all — see tests/report-shadow-
+ * evaluation-trigger.test.mjs's own header comment for the full rationale;
+ * the same "NOT write any DB row" rule applies to this shadow table too.
  */
 
 const repoRoot = path.resolve(".");
@@ -147,7 +154,7 @@ test("POST /api/reports schedules the corpus-duplicate shadow — a real promote
   assert.equal(Number(row.candidate_admitted_promotion_backing_count), 1);
 });
 
-test("GET /api/reports/[id] schedules it too (fallback) and converges on ONE row with the POST-scheduled run", async () => {
+test("GET /api/reports/[id] never adds a second row — POST's own row is the only one, and repeated GETs are pure reads", async () => {
   await promoteDocumentIntoCorpus(CORPUS_TEXT + " Second distinct promoted source.");
   const acc = await signUp();
   const reportId = "cds-postget-1";
@@ -159,10 +166,10 @@ test("GET /api/reports/[id] schedules it too (fallback) and converges on ONE row
     sql: "SELECT COUNT(*) n FROM corpus_duplicate_suppression_shadow_evaluations WHERE report_device_key = ? AND report_id = ?",
     args: [acc.deviceKey, reportId],
   });
-  assert.equal(Number(count.rows[0].n), 1, "exactly one B2 row after POST + 2 GETs");
+  assert.equal(Number(count.rows[0].n), 1, "exactly one B2 row after POST + 2 GETs — GET adds nothing, POST already wrote it");
 });
 
-test("a real corpus-generation bump between views forces re-evaluation", async () => {
+test("a real corpus-generation bump between views does NOT force re-evaluation any more — GET is a pure read of the row POST already wrote, stale generation and all", async () => {
   await promoteDocumentIntoCorpus(CORPUS_TEXT + " Third distinct promoted source.");
   const acc = await signUp();
   const reportId = "cds-gen-1";
@@ -174,6 +181,31 @@ test("a real corpus-generation bump between views forces re-evaluation", async (
   await bumpCorpusMatchGeneration(client);
   await new Promise((r) => setTimeout(r, 1100));
   assert.equal((await getReport(acc, reportId)).status, 200);
+
+  const afterGet = await b2Row(acc.deviceKey, reportId);
+  assert.equal(Number(afterGet.authoritative_corpus_generation), gen1, "REQUIRED (customer-read purity): the GET above must not have re-evaluated the stale row");
+  assert.equal(String(afterGet.computed_at), String(first.computed_at), "REQUIRED (customer-read purity): not recomputed");
+
+  // The explicit recovery machinery still works when invoked directly —
+  // same idiom as tests/report-shadow-evaluation-trigger.test.mjs's own
+  // test 5: the evaluator itself is unaffected, only GET's implicit trigger
+  // is gone. A real re-resolution (not a hand-crafted generation number)
+  // picks up the now-bumped generation exactly as write-time finalization
+  // itself would.
+  const rawText = CORPUS_TEXT + " Third distinct promoted source.";
+  const resolution = await resolvePrimarySimilaritySummary(client, {
+    reportDeviceKey: acc.deviceKey, reportId, accountId: acc.userId, rawText,
+    wordCount: tokens(canonicalizeText(rawText)).length, archiveMatchedPositions: null, externalAcademicEvidence: null, archiveScore: 0,
+  });
+  await scheduleReportShadowEvaluations({
+    reportDeviceKey: acc.deviceKey, reportId, accountId: acc.userId, rawText,
+    productionResult: resolution.historicalSubmissionMatch,
+    authoritativeUnifiedSimilarity: resolution.unifiedSimilarity ?? null,
+    effectiveDeviceSelfRepresentationIds: resolution.effectiveDeviceSelfRepresentationIds,
+    authoritativeCorpusGeneration: resolution.corpusGeneration,
+    authoritativeArchiveMatchedPositions: null, authoritativeExternalAcademicEvidence: null,
+    openConnection,
+  });
 
   const second = await b2Row(acc.deviceKey, reportId);
   assert.ok(Number(second.authoritative_corpus_generation) > gen1, "the B2 row picked up the new generation");

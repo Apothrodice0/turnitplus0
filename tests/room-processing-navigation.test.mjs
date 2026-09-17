@@ -49,11 +49,11 @@ function extractBranch(source, needle) {
   return source.slice(start, end);
 }
 
-test('isFullyRevealed (structural): gates on ai_status terminal (ready OR failed) AND similarity resolved — an AI failure alone is not held back, but a stale/pending similarity is', async () => {
+test('isFullyRevealed (structural, report-lifecycle correctness fix): gates on ai_status terminal (ready OR failed) AND similarity NOT genuinely pending — a "stale" similarity (corpus/generation drift since this report was scored) no longer blocks reveal, since lib/reports-repo.ts\'s findRoomOccupant already resolves it to a displayable saved score before this ever runs; only "pending" (nothing was ever computed at all) still does', async () => {
   const shell = await readRoomShell();
   assert.match(shell, /export function isFullyRevealed\(occupant: RoomContents\): boolean \{/);
   assert.match(shell, /if \(occupant\.status !== "ready" && occupant\.status !== "failed"\) return false;/, 'must require ai_status to be terminal (ready or failed) — never reveal while genuinely processing');
-  assert.match(shell, /return similarityStatus !== "stale" && similarityStatus !== "pending";/, 'must also require similarity to be resolved (or absent — the legacy convention) — an AI-terminal occupant with stale/pending similarity is still not fully revealed');
+  assert.match(shell, /return similarityStatus !== "pending";/, 'REQUIRED: "stale" must no longer block reveal (a historical report\'s saved similarity displays on reopen, never a perpetual "Updating…") — only genuinely "pending" similarity still does');
 });
 
 /**
@@ -103,8 +103,8 @@ test("isFullyRevealed (BEHAVIORAL): AI failed + similarity failed -> revealed to
   assert.equal(isFullyRevealed(roomFixture("failed", "failed")), true);
 });
 
-test("isFullyRevealed (BEHAVIORAL): AI ready + similarity stale -> NOT revealed (still updating, not a failure)", () => {
-  assert.equal(isFullyRevealed(roomFixture("ready", "stale")), false);
+test("isFullyRevealed (BEHAVIORAL, report-lifecycle correctness fix — the exact Room 4 reproducer): AI ready + similarity stale -> revealed (a completed historical report displays its saved result on reopen; 'stale' relative to today's corpus is not a reason to keep it hidden or to imply active recomputation)", () => {
+  assert.equal(isFullyRevealed(roomFixture("ready", "stale")), true);
 });
 
 test("isFullyRevealed (BEHAVIORAL, proves the poll-exhaustion case — item 6): similarity pending after the poll budget exhausts remains NOT revealed — pollExhausted is a purely client-side flag that never touches occupant.status/similarityStatus (see checkAgain's own body below), so exhaustion can only ever route to the 'Retry analysis' sub-view within the SAME not-revealed branch, never to Unavailable or a reveal", async () => {
@@ -117,33 +117,87 @@ test("isFullyRevealed (BEHAVIORAL, proves the poll-exhaustion case — item 6): 
   assert.match(shell, /function checkAgain\(\) \{[\s\S]*?pollAttemptsRef\.current = 0;\s*\n\s*setPollExhausted\(false\);\s*\n\s*\}/, "REQUIRED: checkAgain must reset the poll-attempt budget and the poll-exhaustion flag — and touch nothing else, never occupant, never similarityStatus");
   // The two poll-exhaustion sub-views (the "Check again"/"Retry analysis"
   // message vs. the plain "Analysis in progress" message) live INSIDE the
-  // same not-revealed branch, as siblings of the SAME two hardcoded neutral
-  // tiles proven by the "NOT REVEALED: AI Detection and Similarity..." test
-  // above — pollExhausted can only switch which text renders below those
-  // tiles, never the tiles themselves into an "Unavailable" state.
+  // same not-revealed branch. Report-lifecycle correctness fix: the AI tile
+  // in this branch now independently reflects occupant.status, so a GENUINE
+  // ai_status "failed" (a real, persisted terminal state, not the exhaustion
+  // flag) legitimately renders "Unavailable" for the AI tile even while
+  // similarity is still pending — pollExhausted itself must never be the
+  // thing that manufactures that text. Isolate just the pollExhausted
+  // message block (never the whole branch, which now legitimately can
+  // contain "Unavailable" via the independent AI tile) to prove exhaustion
+  // alone adds no fabricated terminal state.
   const notRevealedBranch = extractBranch(shell, NOT_REVEALED_NEEDLE);
-  assert.doesNotMatch(notRevealedBranch, /Unavailable/, "REQUIRED: the not-revealed branch (which pollExhausted's own sub-views live inside) must never render 'Unavailable' — a merely-exhausted poll is not a terminal failure");
+  const pollExhaustedMessage = notRevealedBranch.match(/<div className="ai-analysis-message" role="status">[\s\S]*?<\/div>\s*\) : \(/)?.[0] ?? "";
+  assert.ok(pollExhaustedMessage, "the pollExhausted message block must be found");
+  assert.doesNotMatch(pollExhaustedMessage, /Unavailable/, "REQUIRED: the pollExhausted message block itself must never render 'Unavailable' — a merely-exhausted poll is not a terminal failure; any 'Unavailable' text in this branch must come only from a real, independent ai_status \"failed\" tile, never from pollExhausted");
   assert.match(notRevealedBranch, /Analysis is taking longer than usual\./, "sanity: the pollExhausted sub-view (Retry analysis) is within this same branch");
 });
 
-test('NOT REVEALED: AI Detection and Similarity both show the identical neutral "Analyzing…" placeholder, and neither is a link — covers both genuinely-processing AI and an AI-terminal-but-similarity-still-catching-up occupant', async () => {
+test('NOT REVEALED (report-lifecycle correctness fix — invariant B): AI Detection and Similarity are rendered INDEPENDENTLY here — an occupant reaching this branch is, by construction (isFullyRevealed\'s own new formula), always similarity-pending, but AI may independently be "processing" (neutral placeholder), "ready" (real score, real link), or "failed" ("Unavailable"). AI must never show a neutral "Analyzing…" placeholder merely because similarity has not finished.', async () => {
   const branch = extractBranch(await readRoomShell(), NOT_REVEALED_NEEDLE);
-  assert.doesNotMatch(branch, /\{occupant\.report\.archiveScore\}%/, "no real similarity percentage may be inlined in this branch");
-  assert.doesNotMatch(branch, /\{occupant\.report\.primaryScore/, "no real similarity percentage — 0%, 100%, or anything in between — may render here");
-  assert.doesNotMatch(branch, /\{occupant\.report\.aiScore/, "AI Detection must never render a real score here");
-  assert.doesNotMatch(branch, /SimilarityMetricTile/, "the Similarity tile must not delegate to the resolved-aware component here — it is hardcoded neutral, matching AI Detection");
+  // The AI tile delegates to the SAME shared aiMetricDisplay helper the
+  // fully-revealed READY branch uses — one interpreter, never a second,
+  // possibly-drifting inline formula — conditioned on occupant.status, not
+  // hardcoded neutral.
+  assert.match(branch, /occupant\.status === "ready" \?/, "the AI tile must branch on occupant.status independently of similarity");
+  assert.match(branch, /const ai = aiMetricDisplay\(occupant\.report\);/, "when AI is ready, the tile must resolve through the same shared aiMetricDisplay helper the fully-revealed branch uses — never a duplicated formula");
+  assert.match(branch, /<Link href=\{`\/reports\/\$\{occupant\.report\.id\}\?mode=ai&room=\$\{room\}`\} className=\{`room-metric room-metric-\$\{ai\.toneClass\}`\}>/, "REQUIRED: an already-ready AI result must be a real, clickable link here too — never masked as non-clickable 'Analyzing…'");
+  assert.match(branch, /occupant\.status === "failed" \?/, "a genuine AI failure must be its own independent branch");
+  assert.match(branch, /<span className="room-metric-sub">Unavailable<\/span>/, "a genuine AI failure must render Unavailable here, exactly like the fully-revealed FAILED branch");
 
-  const aiTile = branch.match(/<div className="room-metric room-metric-pending">\s*<span className="room-metric-label">AI Detection<\/span>[\s\S]*?<\/div>/)?.[0] ?? "";
-  assert.ok(aiTile, "the AI Detection tile must be found");
-  assert.match(aiTile, /<strong className="room-metric-value">···<\/strong>/);
-  assert.match(aiTile, /<span className="room-metric-sub">Analyzing…<\/span>/);
-  assert.doesNotMatch(aiTile, /<Link\b|href=/, "AI Detection must not be a link here");
+  // Similarity delegates entirely to the shared, resolved-aware
+  // SimilarityMetricTile — the same component the fully-revealed branches
+  // use — so a persisted-but-"stale" saved score (which lib/reports-repo.ts's
+  // findRoomOccupant already resolves to "resolved" before this ever runs)
+  // renders as a real, clickable number here too, never a hardcoded neutral
+  // placeholder.
+  assert.match(branch, /<SimilarityMetricTile report=\{occupant\.report\} room=\{room\} \/>/, "REQUIRED: Similarity must delegate to the same shared, resolved-aware component the fully-revealed branches use");
 
-  const similarityTile = branch.match(/<div className="room-metric room-metric-pending">\s*<span className="room-metric-label">Similarity<\/span>[\s\S]*?<\/div>/)?.[0] ?? "";
-  assert.ok(similarityTile, "the Similarity tile must be found, hardcoded as a plain neutral div, not a link");
-  assert.match(similarityTile, /<strong className="room-metric-value">···<\/strong>/);
-  assert.match(similarityTile, /<span className="room-metric-sub">Analyzing…<\/span>/);
-  assert.doesNotMatch(similarityTile, /<Link\b|href=/, "REQUIRED: the partial similarity result must not be clickable while not fully revealed");
+  // The genuinely-processing AI sub-case (occupant.status === "processing")
+  // still falls back to the original neutral, non-clickable placeholder —
+  // there is truly nothing to reveal yet on that side.
+  const processingAiTile = branch.match(/<div className="room-metric room-metric-pending">\s*<span className="room-metric-label">AI Detection<\/span>[\s\S]*?<\/div>/)?.[0] ?? "";
+  assert.ok(processingAiTile, "the genuinely-processing AI Detection placeholder must still exist for occupant.status === \"processing\"");
+  assert.match(processingAiTile, /<strong className="room-metric-value">···<\/strong>/);
+  assert.match(processingAiTile, /<span className="room-metric-sub">Analyzing…<\/span>/);
+  assert.doesNotMatch(processingAiTile, /<Link\b|href=/, "the genuinely-processing AI placeholder must not be a link");
+});
+
+/**
+ * REPORT-LIFECYCLE CORRECTNESS FIX — task spec §14 (INDEPENDENT-STAGE UI):
+ * the two explicit combinations the fix must handle correctly. Combines the
+ * data-layer gate (isFullyRevealed) with the JSX rendering it feeds, in one
+ * place, so each combo is verifiable end to end without cross-referencing
+ * several other test files.
+ */
+test('INDEPENDENT-STAGE UI (§14, combo 1): AI = ready, Similarity = processing -> AI tile shows the saved score (real link, not "Analyzing…"), Similarity tile shows "Calculating…", Receipt stays "Preparing…", and Retry analysis is ABSENT (there is nothing wrong with AI to retry)', async () => {
+  assert.equal(isFullyRevealed(roomFixture("ready", "pending")), false, "similarity genuinely pending still keeps the room as a whole not-yet-settled");
+
+  const shell = await readRoomShell();
+  const branch = extractBranch(shell, NOT_REVEALED_NEEDLE);
+  // AI tile: real score, real link (occupant.status === "ready" branch).
+  assert.match(branch, /occupant\.status === "ready" \?[\s\S]*?const ai = aiMetricDisplay\(occupant\.report\);/, "AI must resolve through the shared aiMetricDisplay helper when ready");
+  assert.match(branch, /<Link href=\{`\/reports\/\$\{occupant\.report\.id\}\?mode=ai&room=\$\{room\}`\}/, "AI must be a real link when ready, even though similarity is still processing");
+  // Similarity tile: delegates to SimilarityMetricTile, which itself renders
+  // "Calculating…" for a genuinely "pending" similarityStatus (see
+  // tests/similarity-result-consistency.test.mjs for that component's own
+  // render proof).
+  assert.match(branch, /<SimilarityMetricTile report=\{occupant\.report\} room=\{room\} \/>/);
+  // Receipt: still Preparing.
+  assert.match(branch, /<span className="room-metric-label">Receipt<\/span>[\s\S]*?<span className="room-metric-sub">Preparing…<\/span>/);
+  // Retry analysis must be ABSENT when occupant.status is "ready" — the
+  // pollExhausted sub-view's own guard.
+  const pollExhaustedMessage = branch.match(/<div className="ai-analysis-message" role="status">[\s\S]*?<\/div>\s*\) : \(/)?.[0] ?? "";
+  assert.match(pollExhaustedMessage, /\{occupant\.status !== "ready" && \(/, "REQUIRED (READY_AI_CAN_BE_RETRIED = NO): the Retry analysis button must be conditioned on occupant.status !== \"ready\"");
+});
+
+test('INDEPENDENT-STAGE UI (§14, combo 2): AI = failed, Similarity = ready -> AI shows failed/retryable ("Unavailable" + Retry analysis available), Similarity displays its real, ready saved result', () => {
+  // This combination is already fully revealed (a genuine AI failure is
+  // terminal — see isFullyRevealed's own formula) — the FAILED branch (not
+  // the not-revealed branch) is what actually renders it; covered
+  // structurally by the pre-existing 'FAILED (fully revealed)' test above.
+  // This assertion pins the data-layer half of the same combination.
+  assert.equal(isFullyRevealed(roomFixture("failed", "resolved")), true, "an AI failure is terminal — the room reveals, with AI shown as Unavailable/retryable and similarity shown as its real, ready result");
 });
 
 test('NOT REVEALED: Receipt shows "Preparing…", genuinely disabled — its own independent state, untouched by the AI/similarity reveal gate', async () => {
@@ -152,10 +206,9 @@ test('NOT REVEALED: Receipt shows "Preparing…", genuinely disabled — its own
   assert.match(branch, /<span className="room-metric-sub">Preparing…<\/span>/);
 });
 
-test('NOT REVEALED: no separate "Open full report" escape hatch exists in this branch — there is no way into the full report while any result is still partial', async () => {
+test('NOT REVEALED: no separate, full-width "Open full report" escape hatch exists in this branch — a customer can only ever open the full report through a tile that itself already represents a real, terminal result (report-lifecycle correctness fix: the AI/Similarity tiles themselves may now legitimately link out once THEIR OWN piece is done — see the independent-tile test above — but there is still no separate blanket link that bypasses per-tile state)', async () => {
   const branch = extractBranch(await readRoomShell(), NOT_REVEALED_NEEDLE);
   assert.doesNotMatch(branch, /room-open-full/, "there must be no full-width 'Open full report' link");
-  assert.doesNotMatch(branch, /<Link href=\{`\/reports\/\$\{occupant\.report\.id\}/, "no Link into /reports/[id] of any kind may exist while not fully revealed");
 });
 
 test('NOT REVEALED: the loading message is pipeline-agnostic — "Analysis in progress," never claiming only AI is the reason', async () => {
@@ -201,6 +254,30 @@ test('FAILED (fully revealed): shows "AI analysis unavailable" framing and a rea
   assert.match(branch, /<SimilarityMetricTile report=\{occupant\.report\} room=\{room\} \/>/);
 });
 
+test('READY-AI RETRY PROTECTION (§15, structural, second defensive layer): retryAiCheck itself refuses to re-run AI analysis when the freshly-fetched report is already ai_status "ready" ("complete"), checked BEFORE calling the model — independent of, and in addition to, the room card\'s own occupant.status !== "ready" UI gate on the Retry button', async () => {
+  const shell = await readRoomShell();
+  const retryFnMatch = shell.match(/async function retryAiCheck\(reportId: string\) \{[\s\S]*?\n {2}\}/);
+  assert.ok(retryFnMatch, "retryAiCheck must be found");
+  const retryFn = retryFnMatch[0];
+
+  const guardIndex = retryFn.search(/if \(full\.aiAnalysis\?\.status === "complete"\) \{/);
+  assert.ok(guardIndex > -1, "REQUIRED (READY_AI_OVERWRITE_VIA_RETRY_BLOCKED = YES): retryAiCheck must refuse to proceed when the report's own already-fetched AI result is complete");
+
+  const modelCallIndex = retryFn.indexOf("await retryAiAnalysisWithFreshLanguage(full.text)");
+  assert.ok(modelCallIndex > -1, "the model call itself must still exist for the genuine-recovery case");
+  assert.ok(guardIndex < modelCallIndex, "REQUIRED: the ready-AI guard must run BEFORE the model is ever invoked, not after — this must be a refusal to start, never a discard-the-result-after-computing-it check");
+
+  const saveCallIndex = retryFn.indexOf("await saveEnrichedAiResult(full, aiResult)");
+  assert.ok(guardIndex < saveCallIndex, "REQUIRED: the guard must also precede the save — an already-ready result must never reach saveEnrichedAiResult at all via this path");
+
+  // The guard condition itself is keyed on the report's OWN already-fetched
+  // AI status, never on room number — "Do not key this by room number"
+  // (task requirement).
+  const guardCondition = retryFn.match(/if \(full\.aiAnalysis\?\.status === "complete"\) \{[\s\S]*?\n {6}\}/)?.[0] ?? "";
+  assert.ok(guardCondition, "the guard's own if-block must be found");
+  assert.doesNotMatch(guardCondition, /\broom\b/i, "REQUIRED: the guard condition/body must not reference room number — it protects the report itself, not a room slot");
+});
+
 /**
  * RECEIPT ATOMICITY (release-hardening audit finding LIFECYCLE-06,
  * approval-pass addition): Receipt must obey the SAME reveal boundary as
@@ -233,10 +310,10 @@ test('statusLine (structural): "Analysis in progress" for any not-yet-fully-reve
   assert.match(shell, /occupant\.report \? "Analysis in progress"/, 'REQUIRED: any occupant with a report that is not yet fully revealed must show "Analysis in progress"');
 });
 
-test('SIM-04/LIFECYCLE-05 ROOM CARD (structural): the "ready" and "failed" (fully-revealed) branches render Similarity through the shared SimilarityMetricTile component; the not-revealed branch never does', async () => {
+test('SIM-04/LIFECYCLE-05/report-lifecycle-correctness ROOM CARD (structural): the "ready" and "failed" (fully-revealed) branches AND the not-revealed branch (invariant B — similarity must render independently of AI) all render Similarity through the ONE shared SimilarityMetricTile component — never a second, hand-duplicated formula anywhere', async () => {
   const shell = await readRoomShell();
   const occurrences = shell.match(/<SimilarityMetricTile report=\{occupant\.report\} room=\{room\} \/>/g) ?? [];
-  assert.equal(occurrences.length, 2, 'expected exactly 2 call sites: the "ready" and "failed" fully-revealed branches — the not-revealed branch hardcodes its own neutral tile instead');
+  assert.equal(occurrences.length, 3, 'expected exactly 3 call sites: the "ready" and "failed" fully-revealed branches, plus the not-revealed branch (report-lifecycle correctness fix — similarity must be able to show its own real, resolved-or-stale saved result even while AI is still genuinely processing)');
   assert.doesNotMatch(shell, /occupant\.report\.primaryScore \?\? occupant\.report\.archiveScore/, 'the raw fallback expression must never appear inline at any call site');
 });
 
