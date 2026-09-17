@@ -6978,28 +6978,42 @@ main.report-main {
   }
 
   /* Visual-correction pass: the base .report-paper rule above forces every
-     print "page" to a fixed 11in min-height with a hard page-break after
-     it — built for (and still exactly right for) the legacy one-section-
-     per-physical-page layout AiReport/OverviewReport/SourcesReport still
-     use. For the V2 sequence specifically (wrapped in .rv2-print-flow —
-     see app/reports/[id]/report-detail-shell.tsx's own print bundle), this
-     is the direct cause of "an almost-empty page 1 followed by a forced
-     page 2 for the manuscript": the overview's own content is short, but
-     the page still reserved a full 11in and refused to let the manuscript
-     flow up onto the remaining blank space. Reset to natural flow here —
-     content now breaks only where the physical page actually runs out,
-     exactly like AiReport's own passage list already relies on
-     break-inside: avoid rather than a forced full-page reservation per
-     section. */
+     print "page" to a fixed 11in min-height — built for (and still exactly
+     right for) the legacy one-section-per-physical-page layout AiReport/
+     OverviewReport/SourcesReport still use. For the V2 sequence
+     specifically (wrapped in .rv2-print-flow — see
+     app/reports/[id]/report-detail-shell.tsx's own print bundle), a fixed
+     11in reservation is still wrong: it would pad a short summary page
+     with dead space regardless of its own real content height. Reset to
+     natural flow here — a page is exactly as tall as its own content, and
+     breaks only where the physical page actually runs out, exactly like
+     AiReport's own passage list already relies on break-inside: avoid
+     rather than a forced full-page reservation per section. */
   .rv2-print-flow .report-paper {
     min-height: 0;
     break-after: auto;
     page-break-after: auto;
   }
 
+  /* Summary-first pass: the ONE deliberate forced break in this flow — the
+     overview/summary page (ReportV2PrintOverview, tagged with this class)
+     must never share a physical page with the manuscript that follows it,
+     per this pass's explicit requirement. Three classes on one selector
+     (.report-paper.rv2-print-overview under .rv2-print-flow) so this wins
+     over the natural-flow rule immediately above regardless of source
+     order, without needing !important. SubmissionReport/
+     ReportV2PrintSourceAppendix are NOT tagged with this class, so they
+     keep flowing naturally into each other and across as many physical
+     pages as their own content needs. */
+  .rv2-print-flow .report-paper.rv2-print-overview {
+    break-after: page;
+    page-break-after: always;
+  }
+
   .rv2-print-flow .rv2ws-hero-band,
   .rv2-print-flow .rv2ws-hero-metrics,
   .rv2-print-flow .rv2-source-card,
+  .rv2-print-flow .rv2-top-source-link,
   .rv2-print-flow .submission-match {
     break-inside: avoid;
     page-break-inside: avoid;
@@ -7734,7 +7748,17 @@ main.report-main {
 .rv2-source-dot-reference-collection,
 .rv2-source-dot-prior-submission,
 .rv2-source-dot-selective-corpus { background: var(--rv2-neutral); }
-.rv2-top-source-figures { display: inline-flex; gap: 8px; align-items: baseline; white-space: nowrap; }
+/* Print-flow fix: this is a flex ITEM of .rv2-top-source-link (also flex),
+   sharing a row with the flexible/wrappable .rv2-top-source-name — without
+   flex-shrink: 0, this white-space: nowrap column could still be shrunk
+   narrower than its own text's natural width whenever the row was tight,
+   compressing the box while its glyphs kept painting at full size (visible
+   as "5%333 words" with no gap, found once this component was newly reused
+   on the print summary page's own narrower row width). flex-shrink: 0
+   guarantees it always renders at its full natural width; .rv2-top-source-
+   name's own min-width: 0 (already set, just above) is what lets the
+   wrappable title concede space to it instead. */
+.rv2-top-source-figures { display: inline-flex; flex-shrink: 0; gap: 8px; align-items: baseline; white-space: nowrap; }
 .rv2-top-source-figures b { font-size: 13px; }
 .rv2-top-source-figures span { color: var(--muted); font-size: 11px; }
 .rv2-see-all, .rv2-jump a { display: inline-block; margin-top: 10px; color: var(--blue-dark); font-weight: 600; }

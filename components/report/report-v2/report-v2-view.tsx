@@ -525,23 +525,24 @@ export function ReportV2View({ report }: { report: SimilarityReport }) {
 export function ReportV2PrintOverview({ report }: { report: SimilarityReport }) {
   const vm = buildReportV2ViewModel(report);
   if (!vm) return null;
-  // Visual-correction pass: matches the screen workspace's own hero exactly
-  // (same component, same authoritative vm) instead of the older
-  // FirstScreen layout (headline + overlap-percentage bars + top-sources
-  // list) — the task's own print target is "SIMILARITY ANALYSIS / score /
-  // result band / metric cards / MATCH REVIEW," the same structure the
-  // screen now uses, not a second, differently-organized summary.
+  // Summary-first pass: this page is now a standalone, self-contained
+  // summary — the same hero the screen workspace uses (score, result band,
+  // metric cards), PLUS a compact "Top sources" list (vm.summary.topSources
+  // — the same already-computed, bounded, authoritative subset the on-screen
+  // full view already shows via TopSources; no new computation), so a
+  // reader gets result + leading sources without turning a page. No "MATCH
+  // REVIEW" heading here any more — SubmissionReport (the next page, forced
+  // via the .rv2-print-overview class below) already carries its own
+  // "Manuscript" section header and highlight legend, so this page never
+  // ends on a heading that dangles in front of a guaranteed page break.
   const toolbarStatus = vm.summary.completion.state === "COMPLETED" ? "Completed" : "Needs attention";
   return (
-    <article className="report-paper rv2-print-paper">
+    <article className="report-paper rv2-print-paper rv2-print-overview">
       <ReportPageHeader report={report} page={1} total={3} label="Similarity Overview" />
       <div className="paper-content">
         <div className="report-v2 report-v2-print">
           <WorkspaceHero vm={vm} toolbarStatus={toolbarStatus} />
-          <div className="rv2ws-match-review-heading">
-            <p className="paper-kicker">MATCH REVIEW</p>
-            <h3>Highlighted manuscript</h3>
-          </div>
+          <TopSources vm={vm} />
         </div>
       </div>
       <ReportPageFooter report={report} page={1} total={3} label="Similarity Overview" />
@@ -611,6 +612,24 @@ function workspaceSourceTint(index: number, alpha: number): string {
   const g = parseInt(hex.slice(2, 4), 16);
   const b = parseInt(hex.slice(4, 6), 16);
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+/**
+ * Visual-correction pass #2: the SAME red the printed manuscript already
+ * uses (components/report/similarity-report-papers.tsx's own
+ * MATCHED_PASSAGE_COLOR, "#d7263d") — duplicated here as an identical
+ * literal rather than imported, since that constant is a private,
+ * unexported implementation detail of the print highlighter, and the two
+ * files already independently declare their own color constants elsewhere
+ * in this codebase (e.g. lib/receipt-pdf.ts's BAND_TONE vs app/globals.css).
+ * This is now the ONE color for the "this text is verified-similarity
+ * evidence" signal on screen, replacing the previous per-source rainbow
+ * background — per-source IDENTITY is still carried by the numbered badge
+ * alone (workspaceSourceColor), never by the highlight's own color.
+ */
+const RV2WS_MATCH_COLOR = "#d7263d";
+function rv2wsMatchTint(alpha: number): string {
+  return `rgba(215, 38, 61, ${alpha})`;
 }
 
 /**
@@ -728,22 +747,27 @@ function WorkspaceManuscript({
     const firstSourceId = p.sourceIds[0];
     const sourceIndex = firstSourceId !== undefined ? sourceIndexById.get(firstSourceId) : undefined;
     const isActive = p.id === activePassageId;
-    // Visual-correction fix: the matched WORDS themselves are now the
-    // primary visual cue (a real translucent source-colour background +
-    // a solid source-colour bottom border), not just the small numbered
-    // badge — the previous treatment (a 3px inset box-shadow only) was
-    // visually near-invisible next to plain text. Colour is per-SOURCE
-    // (workspaceSourceColor), matching the same stable palette the source
-    // list/badges already use, layered on top of (never replacing) the
-    // shared rv2-tone-*/KIND_CLASS classes that still drive the dashed/
-    // dotted/double border-style variation per evidence kind.
-    const color = sourceIndex !== undefined ? workspaceSourceColor(sourceIndex) : null;
-    const markStyle: CSSProperties | undefined = color
-      ? {
-        background: workspaceSourceTint(sourceIndex!, isActive ? 0.32 : 0.18),
-        borderBottomColor: color,
-      }
-      : undefined;
+    // Visual-correction pass #2: the matched WORDS themselves are the
+    // primary visual cue (a real translucent background + a solid bottom
+    // border), not just the small numbered badge — the previous treatment
+    // (a 3px inset box-shadow only) was visually near-invisible next to
+    // plain text. Now a single, consistent RED family (RV2WS_MATCH_COLOR —
+    // the same red the printed manuscript already uses) for every matched
+    // passage, regardless of source: this is the "verified similarity
+    // evidence" signal. Per-SOURCE identity moved to the numbered badge
+    // alone (still workspaceSourceColor, unchanged below) rather than the
+    // highlight's own color, so the manuscript now reads as a classic
+    // similarity/plagiarism-style red highlight while still letting a
+    // reader tell which numbered source each match belongs to. Applied
+    // unconditionally (not gated on sourceIndex like before) — a genuinely
+    // matched passage is still evidence even in the rare case its source
+    // can't be resolved to a numbered badge, and it should still look
+    // highlighted rather than silently falling back to the near-invisible
+    // tone-only background.
+    const markStyle: CSSProperties = {
+      background: rv2wsMatchTint(isActive ? 0.32 : 0.16),
+      borderBottomColor: RV2WS_MATCH_COLOR,
+    };
     pieces.push(
       <mark
         key={`m-${p.id}`}
