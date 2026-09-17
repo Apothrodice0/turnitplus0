@@ -487,15 +487,21 @@ export function stepWorkspaceSelection(
 // same page boundaries for the exact same report — never a screen page 3
 // that doesn't match what the PDF calls page 3.
 //
-// Tuned empirically against the real print typography (.submission-copy:
-// 11px/1.85 line-height serif body text) via a real rendered PDF page — not
-// the unrelated "~450 words per original document page" estimate used
-// elsewhere (e.g. the receipt's pageCount fallback), which describes a
-// different document's own typography, not this rendering's. 450 left a
-// large trailing gap (roughly a third of the page) on every manuscript
-// page without the page-1-only title/legend overhead; 700 fills a real
-// physical page comfortably without overflowing it.
-export const MANUSCRIPT_WORDS_PER_PAGE = 700;
+// Tuned empirically against the real print typography via a real rendered
+// PDF page — not the unrelated "~450 words per original document page"
+// estimate used elsewhere (e.g. the receipt's pageCount fallback), which
+// describes a different document's own typography, not this rendering's.
+//
+// Print-density fix (retune): .submission-copy grew from 11px/1.85
+// line-height to 14px/1.45 (the 11px print size measured too small —
+// roughly 8.25pt physically) — line-pitch is almost unchanged (11*1.85 ≈
+// 14*1.45), so page height wasn't the problem, but each 14px line now holds
+// noticeably fewer words than an 11px line did, so the OLD 700-word target
+// (last tuned against the smaller font) overflowed a real physical sheet by
+// 4-6% on every full page once measured again at the new size. 560 was
+// re-tuned the same way — against a real rendered print page, at the
+// current typography — to land in the ~85-95% fill range instead.
+export const MANUSCRIPT_WORDS_PER_PAGE = 560;
 
 export type ManuscriptPageRange = { start: number; end: number };
 

@@ -6995,6 +6995,32 @@ main.report-main {
     page-break-after: auto;
   }
 
+  /* Print-density fix — root cause of "small report inside a large blank
+     page": the reset above is right for a page that flows naturally onto
+     however many physical sheets it needs (the appendix — still untouched,
+     never matches either class below), but the overview and manuscript
+     pages ALSO force `break-after: page` right below. A forced break after
+     a `min-height: 0` box that's also `display: block` (see the base
+     .print-report-bundle .report-paper rule above, which this class
+     combination outranks by specificity) means the box is exactly as tall
+     as its own header+content+footer text — so whenever that text doesn't
+     fill the physical sheet, the REST of that sheet prints blank before the
+     break takes effect, not after. These two classes are the only V2 print
+     pages with a forced break, so they're the only ones that need to
+     actually claim the full physical sheet: restoring `display: flex;
+     flex-direction: column` re-enables the column layout `.paper-content {
+     flex: 1 }` (declared with the shared legacy header/footer chrome
+     earlier in this file) was already written for, so the footer is pushed
+     to the bottom of a real 11in sheet instead of sitting wherever the
+     content happened to end, and `min-height: 11in` is what gives that
+     flex column a full sheet to distribute in the first place. */
+  .rv2-print-flow .report-paper.rv2-print-overview,
+  .rv2-print-flow .report-paper.rv2-print-manuscript-page {
+    display: flex;
+    flex-direction: column;
+    min-height: 11in;
+  }
+
   /* Summary-first pass: the overview/summary page (ReportV2PrintOverview,
      tagged with this class) must never share a physical page with the
      manuscript that follows it. Three classes on one selector
@@ -7028,6 +7054,36 @@ main.report-main {
   .rv2-print-flow .submission-match {
     break-inside: avoid;
     page-break-inside: avoid;
+  }
+
+  /* Print-density fix: .submission-copy's 11px/1.85 sizing (shared with
+     legacy print AND the legacy on-screen "submission" tab — both untouched
+     by this rule, since neither one is ever inside .rv2-print-flow) prints
+     at roughly 8.25pt once physically rendered (96 CSS px = 1in), visibly
+     too small for a document body and part of why manuscript pages read as
+     mostly empty even before the page-geometry fix above: fewer, tinier
+     lines fit per sheet. Scoped to .rv2-print-flow only. */
+  .rv2-print-flow .submission-copy {
+    font-size: 14px;
+    line-height: 1.45;
+  }
+
+  /* Print-density fix: .submission-title/.highlight-legend (shared with
+     legacy print/screen SubmissionReport — both untouched, neither is ever
+     inside .rv2-print-flow) are ONLY added on the manuscript's first print
+     page, on top of the same wordsPerPage text budget every other
+     manuscript page gets — trimming their own padding/margin here (instead
+     of giving page 1 a separate, smaller text budget) keeps every page's
+     text boundaries exactly what paginateManuscriptText() computed, so
+     screen and print still agree on the same page N. */
+  .rv2-print-flow .submission-title {
+    padding: 0 36px 14px;
+  }
+
+  .rv2-print-flow .highlight-legend {
+    margin: 0 0 14px;
+    padding: 10px 15px;
+    gap: 8px;
   }
 
   .print-report-bundle .ai-report-print,
@@ -7892,6 +7948,79 @@ main.report-main {
 .rv2-empty { margin: 0; color: var(--muted); }
 .rv2-provenance { display: flex; gap: 8px; align-items: flex-start; color: var(--muted); font-size: 11px; }
 .rv2-provenance svg { width: 14px; height: 14px; flex: 0 0 auto; margin-top: 1px; }
+
+/* ---- print summary page: document / source / scope sections ---- */
+/* Only ever rendered by ReportV2PrintOverview (print), never on screen —
+   no @media print scoping needed, these class names exist nowhere else. */
+.rv2-print-doc-grid { display: grid; gap: 8px; margin: 0; }
+.rv2-print-doc-grid > div {
+  display: flex; justify-content: space-between; align-items: baseline; gap: 12px;
+  padding-bottom: 6px; border-bottom: 1px dashed var(--soft-line);
+}
+.rv2-print-doc-grid > div:last-child { border-bottom: 0; padding-bottom: 0; }
+.rv2-print-doc-grid dt { margin: 0; color: var(--muted); font-weight: 600; }
+.rv2-print-doc-grid dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
+
+.rv2-print-source-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.rv2-print-source-list > li {
+  display: flex; gap: 10px; align-items: flex-start;
+  padding-bottom: 10px; border-bottom: 1px solid var(--soft-line);
+}
+.rv2-print-source-list > li:last-child { border-bottom: 0; padding-bottom: 0; }
+.rv2-print-source-index {
+  display: inline-grid; flex: 0 0 auto; width: 20px; height: 20px; place-items: center;
+  border: 1px solid var(--line); border-radius: 50%; font-size: 11px; font-weight: 700;
+}
+.rv2-print-source-body { min-width: 0; }
+.rv2-print-source-title { margin: 0; font-weight: 600; overflow-wrap: anywhere; }
+.rv2-print-source-meta { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
+.rv2-print-source-link { display: inline-block; margin-top: 3px; color: var(--blue-dark); font-size: 12px; overflow-wrap: anywhere; }
+.rv2-print-source-more { margin: 10px 0 0; color: var(--muted); font-size: 12px; }
+
+.rv2-print-scope-status {
+  display: inline-block; margin: 0 0 6px; padding: 2px 10px;
+  border: 1px solid var(--line); border-radius: 999px;
+  font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em;
+}
+.rv2-print-scope-status-attention { border-color: #e9c66b; color: #966200; }
+.rv2-print-scope-line { margin-top: 6px; color: var(--muted); font-size: 12px; }
+.rv2-print-scope p { margin: 4px 0 0; }
+.rv2-print-scope p:first-of-type { margin-top: 0; }
+
+/* Compact density for these three print-summary sections specifically
+   (same specificity as, and declared after, the shared .rv2-section rule
+   above — so it wins here without touching .rv2-section's own padding/gap,
+   which the screen "overlap" tab and the source-details appendix still
+   use unchanged). Page 1 has four stacked sections (hero + these three)
+   competing for one physical sheet; tightened here rather than by shrinking
+   the shared WorkspaceHero. */
+.rv2-print-doc-summary,
+.rv2-print-source-summary,
+.rv2-print-scope {
+  padding: 10px 16px 12px;
+}
+.rv2-print-doc-summary h3,
+.rv2-print-source-summary h3,
+.rv2-print-scope h3 {
+  margin: 0 0 8px;
+}
+.rv2-print-doc-grid { gap: 5px; }
+.rv2-print-doc-grid > div { padding-bottom: 4px; }
+.rv2-print-source-list { gap: 6px; }
+.rv2-print-source-list > li { padding-bottom: 6px; }
+.rv2-print-source-meta { margin: 2px 0 0; }
+.rv2-print-overview .report-v2.report-v2-print { gap: 12px; }
+
+/* Document + Similarity sources side by side (rather than stacked) on the
+   summary page — the biggest single space saving available without
+   shrinking the shared WorkspaceHero or making either section's own text
+   smaller: two ~350px columns instead of one column half again as tall. */
+.rv2-print-summary-grid {
+  display: grid;
+  grid-template-columns: 1fr 1.2fr;
+  gap: 16px;
+  align-items: start;
+}
 
 @media (min-width: 900px) {
   .rv2-source-card-grid { grid-template-columns: repeat(2, 1fr); }

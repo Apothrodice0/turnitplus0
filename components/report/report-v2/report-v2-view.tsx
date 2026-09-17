@@ -509,6 +509,112 @@ export function ReportV2View({ report }: { report: SimilarityReport }) {
   );
 }
 
+function formatReportGeneratedDate(created: string): string | null {
+  const date = new Date(created);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" });
+}
+
+/**
+ * Print-density fix — page 1 used to end after WorkspaceHero + a bare
+ * "Top sources" list, leaving most of the physical sheet blank once the
+ * page-geometry bug (see the matching .rv2-print-flow CSS comment) was
+ * fixed. These three sections use ONLY fields the view model already
+ * computes (report.title/submissionId/pageCount/created, vm.summary.*) —
+ * no new similarity/score computation — to turn that leftover space into a
+ * genuinely useful compact document/source/scope summary instead of
+ * artificially stretching the existing cards.
+ */
+function PrintDocumentSummary({ report, vm }: { report: SimilarityReport; vm: ReportV2ViewModel }) {
+  const generated = formatReportGeneratedDate(report.created);
+  // Same fallback the existing summary chip (report-detail-shell.tsx) uses
+  // for a report saved before pageCount was always populated.
+  const pageCount = report.pageCount || Math.max(1, Math.ceil(vm.summary.totalWordCount / 450));
+  return (
+    <section className="rv2-section rv2-print-doc-summary" aria-labelledby="rv2-print-doc-title">
+      <h3 id="rv2-print-doc-title">Document</h3>
+      <dl className="rv2-print-doc-grid">
+        <div>
+          <dt>Title</dt>
+          <dd>{report.title.replace(/\.[^.]+$/, "")}</dd>
+        </div>
+        <div>
+          <dt>Submission ID</dt>
+          <dd>{report.submissionId}</dd>
+        </div>
+        <div>
+          <dt>Analyzed words</dt>
+          <dd>{vm.summary.totalWordCount.toLocaleString()}</dd>
+        </div>
+        <div>
+          <dt>Original document pages</dt>
+          <dd>{pageCount}</dd>
+        </div>
+        {generated && (
+          <div>
+            <dt>Generated</dt>
+            <dd>{generated}</dd>
+          </div>
+        )}
+      </dl>
+    </section>
+  );
+}
+
+// Print-only richer replacement for TopSources — same bounded, authoritative
+// vm.summary.topSources subset, plus badge/link fields TopSources itself
+// doesn't render (TopSources stays untouched; it's still used by the
+// screen-side "overlap" tab via ReportV2View/FirstScreen above).
+function PrintSourceSummary({ vm }: { vm: ReportV2ViewModel }) {
+  const { topSources, distinctVerifiedSources } = vm.summary;
+  if (topSources.length === 0) return null;
+  const remaining = distinctVerifiedSources - topSources.length;
+  return (
+    <section className="rv2-section rv2-print-source-summary" aria-labelledby="rv2-print-sources-title">
+      <h3 id="rv2-print-sources-title">Similarity sources</h3>
+      <ol className="rv2-print-source-list">
+        {topSources.map((s, i) => (
+          <li key={s.id}>
+            <span className="rv2-print-source-index" aria-hidden="true">{i + 1}</span>
+            <div className="rv2-print-source-body">
+              <p className="rv2-print-source-title">{s.label}</p>
+              <p className="rv2-print-source-meta">
+                {s.badge} · {s.matchedWords.toLocaleString()} matched words · {s.contributionPercent}% contribution
+              </p>
+              {s.link && (
+                <a className="rv2-print-source-link" href={s.link} target="_blank" rel="noreferrer">
+                  {hostAndPath(s.link)}
+                </a>
+              )}
+            </div>
+          </li>
+        ))}
+      </ol>
+      {remaining > 0 && (
+        <p className="rv2-print-source-more">
+          +{remaining} more verified source{remaining === 1 ? "" : "s"} — see Source Details.
+        </p>
+      )}
+    </section>
+  );
+}
+
+function PrintReportScope({ vm }: { vm: ReportV2ViewModel }) {
+  const c = vm.summary.completion;
+  const status = c.state === "COMPLETED" ? "Completed" : "Needs attention";
+  return (
+    <section className="rv2-section rv2-print-scope" aria-labelledby="rv2-print-scope-title">
+      <h3 id="rv2-print-scope-title">Report scope</h3>
+      <p className={`rv2-print-scope-status${c.state === "COMPLETED" ? "" : " rv2-print-scope-status-attention"}`}>
+        {status}
+      </p>
+      <p>{c.headline}</p>
+      {c.detail && <p>{c.detail}</p>}
+      <p className="rv2-print-scope-line">{c.scopeLine}</p>
+    </section>
+  );
+}
+
 /**
  * Report-redesign PDF fix — PAGE 1 of the dedicated print/export sequence:
  * the verified overview only (score, breakdown, top sources, completion).
@@ -529,14 +635,18 @@ export function ReportV2PrintOverview({ report }: { report: SimilarityReport }) 
   if (!vm) return null;
   // Summary-first pass: this page is now a standalone, self-contained
   // summary — the same hero the screen workspace uses (score, result band,
-  // metric cards), PLUS a compact "Top sources" list (vm.summary.topSources
-  // — the same already-computed, bounded, authoritative subset the on-screen
-  // full view already shows via TopSources; no new computation), so a
-  // reader gets result + leading sources without turning a page. No "MATCH
-  // REVIEW" heading here any more — SubmissionReport (the next page, forced
-  // via the .rv2-print-overview class below) already carries its own
-  // "Manuscript" section header and highlight legend, so this page never
-  // ends on a heading that dangles in front of a guaranteed page break.
+  // metric cards). No "MATCH REVIEW" heading here any more — SubmissionReport
+  // (the next page, forced via the .rv2-print-overview class below) already
+  // carries its own "Manuscript" section header and highlight legend, so
+  // this page never ends on a heading that dangles in front of a guaranteed
+  // page break.
+  //
+  // Print-density fix: the bare "Top sources" list used to be the only thing
+  // below the hero, leaving most of the physical sheet blank (see the
+  // matching .rv2-print-flow CSS comment for the geometry root cause).
+  // PrintDocumentSummary/PrintSourceSummary/PrintReportScope replace it with
+  // a genuinely useful compact document/source/scope summary — same
+  // authoritative vm fields, just more of them, never a new computation.
   const toolbarStatus = vm.summary.completion.state === "COMPLETED" ? "Completed" : "Needs attention";
   return (
     <article className="report-paper rv2-print-paper rv2-print-overview">
@@ -544,7 +654,11 @@ export function ReportV2PrintOverview({ report }: { report: SimilarityReport }) 
       <div className="paper-content">
         <div className="report-v2 report-v2-print">
           <WorkspaceHero vm={vm} toolbarStatus={toolbarStatus} />
-          <TopSources vm={vm} />
+          <div className="rv2-print-summary-grid">
+            <PrintDocumentSummary report={report} vm={vm} />
+            <PrintSourceSummary vm={vm} />
+          </div>
+          <PrintReportScope vm={vm} />
         </div>
       </div>
       <ReportPageFooter report={report} page={1} total={3} label="Similarity Overview" />
