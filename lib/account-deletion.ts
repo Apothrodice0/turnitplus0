@@ -1,7 +1,5 @@
 import type { Client } from "@libsql/client";
-import { deleteReportDocumentData } from "./report-deletion";
-import { deleteHistoricalMatchSnapshot } from "./report-historical-match";
-import { deleteReportCorpusAdmissionData } from "./corpus-admission-report-integration";
+import { buildReportAdmissionSourceRef } from "./corpus-admission-source-ref";
 
 /**
  * Account deletion (production audit fix — no such endpoint existed).
@@ -23,23 +21,53 @@ export type DeleteAccountDataResult = {
 };
 
 /**
+ * Reset-workspace performance fix: every statement below is SET-BASED or
+ * CHUNKED-BULK, never per-row. The original implementation (still exactly
+ * mirrored here, table for table, guard for guard — see each phase's own
+ * comment for the line-by-line correspondence) ran lib/report-deletion.ts's
+ * deleteReportDocumentData, lib/report-historical-match.ts's
+ * deleteHistoricalMatchSnapshot, and lib/corpus-admission-report-
+ * integration.ts's deleteReportCorpusAdmissionData once per report/identity
+ * — for an 83-report account that meant several hundred sequential Turso
+ * round trips (the confirmed cause of the reset-workspace 504). This
+ * function now performs the IDENTICAL set of checks and deletes, batched
+ * into CHUNK_SIZE-sized statements, so a normal account (a handful of rooms)
+ * completes in roughly a dozen round trips regardless of report count, and
+ * even a large legacy-accumulation account scales as reports/CHUNK_SIZE, not
+ * 1:1 with report count.
+ *
+ * RESET_BULK_CHUNK_SIZE (200) is deliberately conservative: even the
+ * two-column (device_key, report_id) row-value chunks below bind at most
+ * 400 parameters per statement, comfortably under every SQLite/libsql
+ * variable-count limit this project has ever run against (old and new), and
+ * every chunk is still small enough to stay well short of "one giant SQL
+ * statement."
+ *
  * Deletes everything the given account exclusively owns: every saved_reports
- * row it owns (+ that report's historical-match snapshot) and every
- * document_identities row attributed to it (+ cascaded shingles/family rows,
+ * row it owns (+ that report's historical-match snapshot + its corpus-
+ * admission job/decision bookkeeping) and every document_identities row
+ * attributed to it (+ cascaded shingles/family rows via PRAGMA foreign_keys,
  * and any corpus_document_representation that becomes fully unreferenced as
- * a result). Reuses the exact same per-identity cleanup DELETE
- * /api/reports/[id] already relies on (lib/report-deletion.ts's
- * deleteReportDocumentData), so account deletion and single-report deletion
- * can never disagree about what is safe to remove — in particular, a shared
- * corpus_document_representation is only ever deleted once its LAST
- * remaining corpus_submission_references row is gone, so another account's
- * still-live report keeps its evidence exactly as report-deletion.ts already
- * guarantees for the single-report case. Accepted/promoted corpus content is
- * likewise durable: deleteReportCorpusAdmissionData leaves an ACCEPTed
- * decision, its retained text, and its accepted_representations fingerprint
- * completely untouched (only the report's own job-tracking row and any
- * never-accepted decision go), so this function is safe to run against a
- * living account without ever eroding the corpus.
+ * a result). Preserves exactly what the original per-row implementation
+ * preserved:
+ *  - a corpus_document_representation is only ever deleted once its LAST
+ *    remaining corpus_submission_references row is gone (checked AFTER the
+ *    identities are deleted, using the representation ids collected BEFORE
+ *    that delete — the bulk equivalent of the original's per-identity
+ *    "remaining count === 0" check), so another account's still-live report
+ *    keeps its evidence exactly as lib/report-deletion.ts already guarantees
+ *    for the single-report case;
+ *  - a decision row (and its cascaded content/fingerprint) is removed ONLY
+ *    when it was never ACCEPTed with retained content (checked in bulk
+ *    against corpus_admission_content_store, mirroring
+ *    deleteReportCorpusAdmissionData's own per-row hasAcceptedContent check
+ *    exactly) — accepted/promoted corpus content is durable and this
+ *    function can never erode it;
+ *  - with options.preserveActivelyPromotedRepresentations set, an otherwise-
+ *    orphaned representation that is still a live, non-revoked 'indexed'
+ *    corpus-admission promotion survives (the bulk equivalent of
+ *    isRepresentationActivelyPromoted, mirroring lib/report-deletion.ts's own
+ *    per-representation check exactly).
  *
  * Goes further than saved_reports.document_identity_id alone: also queries
  * document_identities directly by account_id, which additionally reaches
@@ -65,15 +93,24 @@ export type DeleteAccountDataResult = {
  * the account, its sessions, and its consent exactly as they were and only
  * wants the report/room state cleared.
  *
- * Safe to retry: every statement here is a plain DELETE (a no-op, not an
- * error, against a row already gone), and both row sets are queried fresh on
- * every call rather than from a stale precomputed list — a retry after a
- * partial failure simply finds fewer remaining rows and finishes the job.
- * Calling it again once the account already has zero reports is a clean
- * no-op that returns { reportsDeleted: 0, identitiesProcessed: 0 }.
+ * Safe to retry: every statement here is a plain, set-based DELETE (a no-op,
+ * not an error, against rows already gone), and every row set — reports,
+ * identities, candidate representations, accepted/promoted status — is
+ * queried FRESH on every call rather than from a stale precomputed list, in
+ * the same dependency order the original per-row version used (historical
+ * snapshots and admission bookkeeping before saved_reports; candidate
+ * representation ids captured before document_identities so the cascade
+ * cannot hide them). A retry after a partial failure (e.g. the process died
+ * between phase 1 and phase 2) simply finds fewer remaining rows in whichever
+ * phase didn't finish and completes the job; nothing here holds a
+ * transaction open across phases, so a genuinely interrupted run leaves no
+ * torn intermediate state beyond "some of this account's rows are already
+ * gone," which the next call resolves correctly either way. Calling it again
+ * once the account already has zero reports is a clean no-op that returns
+ * { reportsDeleted: 0, identitiesProcessed: 0 }.
  *
  * options.preserveActivelyPromotedRepresentations is forwarded verbatim to
- * every deleteReportDocumentData call (see that function's header comment).
+ * the bulk orphan-representation check below (see that phase's own comment).
  * The developer rooms-reset endpoint sets it so a promoted corpus-matching
  * source is never removed as a side effect of clearing the developer's own
  * rooms; the account-deletion path (deleteAccountData below) deliberately
@@ -83,40 +120,141 @@ export type DeleteAccountDataResult = {
  * never reaches the representation-deletion branch this option guards
  * regardless.
  */
+const RESET_BULK_CHUNK_SIZE = 200;
+
+function chunksOf<T>(items: readonly T[], size: number): T[][] {
+  if (items.length === 0) return [];
+  const chunks: T[][] = [];
+  for (let i = 0; i < items.length; i += size) chunks.push(items.slice(i, i + size));
+  return chunks;
+}
+
 export async function deleteAllReportDataForAccount(
   client: Client,
   accountId: string,
   options: { preserveActivelyPromotedRepresentations?: boolean } = {},
 ): Promise<DeleteAccountDataResult> {
+  // ---- Phase 1: reports — historical snapshots, corpus-admission
+  // bookkeeping, then the saved_reports rows themselves. Order mirrors the
+  // original (snapshot + admission cleanup before the report row goes) even
+  // though none of these three ever depends on saved_reports still existing
+  // — each is keyed entirely by (device_key, report_id) / source_ref values
+  // already captured below, never by a live lookup against saved_reports.
   const reportsResult = await client.execute({
     sql: "SELECT device_key, id FROM saved_reports WHERE user_id = ?",
     args: [accountId],
   });
   const reports = reportsResult.rows as unknown as { device_key: string; id: string }[];
-  for (const report of reports) {
-    await deleteHistoricalMatchSnapshot(client, { reportDeviceKey: report.device_key, reportId: report.id });
+
+  // 1a. Historical-match snapshots — bulk delete by (device_key, report_id)
+  // pairs, the same composite key deleteHistoricalMatchSnapshot always used.
+  for (const chunk of chunksOf(reports, RESET_BULK_CHUNK_SIZE)) {
+    const valuesPlaceholders = chunk.map(() => "(?,?)").join(",");
     await client.execute({
-      sql: "DELETE FROM saved_reports WHERE device_key = ? AND id = ?",
-      args: [report.device_key, report.id],
+      sql: `DELETE FROM report_historical_match_snapshots WHERE (report_device_key, report_id) IN (VALUES ${valuesPlaceholders})`,
+      args: chunk.flatMap((r) => [r.device_key, r.id]),
     });
-    // Corpus-admission cleanup, scoped to this exact (account, deviceKey,
-    // report id) — see lib/corpus-admission-report-integration.ts's own
-    // comment for why source_ref is built this way, never from
-    // document_identity_id, so this can never remove a different report's
-    // (this account's or any other account's) retained admission data.
-    await deleteReportCorpusAdmissionData(client, { accountId, deviceKey: report.device_key, reportId: report.id });
   }
 
-  const identitiesResult = await client.execute({
-    sql: "SELECT id FROM document_identities WHERE account_id = ?",
-    args: [accountId],
-  });
-  const identities = identitiesResult.rows as unknown as { id: string }[];
-  for (const identity of identities) {
-    await deleteReportDocumentData(client, identity.id, options);
+  // 1b. Corpus-admission bookkeeping — same source_ref format
+  // deleteReportCorpusAdmissionData always used, same accepted-content guard
+  // (a decision survives iff it has a corpus_admission_content_store row),
+  // just resolved in bulk instead of once per report.
+  const sourceRefs = reports.map((r) => buildReportAdmissionSourceRef({ accountId, deviceKey: r.device_key, reportId: r.id }));
+  const acceptedSourceRefs = new Set<string>();
+  for (const chunk of chunksOf(sourceRefs, RESET_BULK_CHUNK_SIZE)) {
+    const placeholders = chunk.map(() => "?").join(",");
+    const result = await client.execute({
+      sql: `SELECT DISTINCT d.source_ref AS source_ref FROM corpus_admission_decisions d
+            JOIN corpus_admission_content_store cs ON cs.decision_id = d.id
+            WHERE d.source_ref IN (${placeholders})`,
+      args: chunk,
+    });
+    for (const row of result.rows as unknown as { source_ref: string }[]) acceptedSourceRefs.add(row.source_ref);
+  }
+  for (const chunk of chunksOf(sourceRefs, RESET_BULK_CHUNK_SIZE)) {
+    const placeholders = chunk.map(() => "?").join(",");
+    // The job-tracking row always goes — it exists only to track THIS
+    // report's own processing status, moot once the report is gone,
+    // regardless of whether its decision was accepted.
+    await client.execute({ sql: `DELETE FROM corpus_admission_report_jobs WHERE source_ref IN (${placeholders})`, args: chunk });
+    const nonAccepted = chunk.filter((ref) => !acceptedSourceRefs.has(ref));
+    if (nonAccepted.length > 0) {
+      const nonAcceptedPlaceholders = nonAccepted.map(() => "?").join(",");
+      await client.execute({ sql: `DELETE FROM corpus_admission_decisions WHERE source_ref IN (${nonAcceptedPlaceholders})`, args: nonAccepted });
+    }
   }
 
-  return { reportsDeleted: reports.length, identitiesProcessed: identities.length };
+  // 1c. The saved_reports rows themselves — one set-based statement,
+  // replacing what was previously one DELETE per report.
+  await client.execute({ sql: "DELETE FROM saved_reports WHERE user_id = ?", args: [accountId] });
+
+  // ---- Phase 2: document identities + orphaned, non-promoted
+  // representations. Candidate representation ids are captured BEFORE the
+  // identities are deleted (the delete cascades corpus_submission_references
+  // away with them via PRAGMA foreign_keys), exactly mirroring the original
+  // per-identity code's own "read representation_id, then delete the
+  // identity, then check what's left" ordering — just batched.
+  const identitiesResult = await client.execute({ sql: "SELECT id FROM document_identities WHERE account_id = ?", args: [accountId] });
+  const identityIds = (identitiesResult.rows as unknown as { id: string }[]).map((r) => r.id);
+
+  const candidateRepresentationIds = new Set<string>();
+  for (const chunk of chunksOf(identityIds, RESET_BULK_CHUNK_SIZE)) {
+    const placeholders = chunk.map(() => "?").join(",");
+    const result = await client.execute({
+      sql: `SELECT DISTINCT representation_id FROM corpus_submission_references WHERE document_identity_id IN (${placeholders})`,
+      args: chunk,
+    });
+    for (const row of result.rows as unknown as { representation_id: string }[]) candidateRepresentationIds.add(row.representation_id);
+  }
+
+  // One set-based delete for every document_identities row this account
+  // owns — PRAGMA foreign_keys=ON (lib/reports-db.ts) cascades
+  // document_identity_shingles, document_family_members, and
+  // corpus_submission_references automatically, replacing what was
+  // previously one DELETE per identity.
+  await client.execute({ sql: "DELETE FROM document_identities WHERE account_id = ?", args: [accountId] });
+
+  // Of the candidates, exclude any representation still referenced by
+  // ANOTHER account's still-live report — the bulk form of the original's
+  // per-identity "remaining count === 0" check.
+  const candidates = [...candidateRepresentationIds];
+  const stillReferenced = new Set<string>();
+  for (const chunk of chunksOf(candidates, RESET_BULK_CHUNK_SIZE)) {
+    const placeholders = chunk.map(() => "?").join(",");
+    const result = await client.execute({
+      sql: `SELECT DISTINCT representation_id FROM corpus_submission_references WHERE representation_id IN (${placeholders})`,
+      args: chunk,
+    });
+    for (const row of result.rows as unknown as { representation_id: string }[]) stillReferenced.add(row.representation_id);
+  }
+  const orphanCandidates = candidates.filter((id) => !stillReferenced.has(id));
+
+  // Of the truly-orphaned candidates, exclude any that are actively promoted
+  // when the caller asked to preserve them — the bulk form of
+  // isRepresentationActivelyPromoted.
+  let deletableRepresentationIds = orphanCandidates;
+  if (options.preserveActivelyPromotedRepresentations && orphanCandidates.length > 0) {
+    const promoted = new Set<string>();
+    for (const chunk of chunksOf(orphanCandidates, RESET_BULK_CHUNK_SIZE)) {
+      const placeholders = chunk.map(() => "?").join(",");
+      const result = await client.execute({
+        sql: `SELECT DISTINCT p.representation_id AS representation_id FROM corpus_admission_promotions p
+              JOIN corpus_admission_accepted_representations ar ON ar.id = p.accepted_representation_id
+              WHERE p.representation_id IN (${placeholders}) AND p.status = 'indexed' AND ar.revoked_at IS NULL`,
+        args: chunk,
+      });
+      for (const row of result.rows as unknown as { representation_id: string }[]) promoted.add(row.representation_id);
+    }
+    deletableRepresentationIds = orphanCandidates.filter((id) => !promoted.has(id));
+  }
+
+  for (const chunk of chunksOf(deletableRepresentationIds, RESET_BULK_CHUNK_SIZE)) {
+    const placeholders = chunk.map(() => "?").join(",");
+    await client.execute({ sql: `DELETE FROM corpus_document_representations WHERE id IN (${placeholders})`, args: chunk });
+  }
+
+  return { reportsDeleted: reports.length, identitiesProcessed: identityIds.length };
 }
 
 /**
