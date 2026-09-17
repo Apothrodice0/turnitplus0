@@ -8009,7 +8009,36 @@ main.report-main {
 .rv2-print-source-list { gap: 6px; }
 .rv2-print-source-list > li { padding-bottom: 6px; }
 .rv2-print-source-meta { margin: 2px 0 0; }
-.rv2-print-overview .report-v2.report-v2-print { gap: 12px; }
+
+/* Print-density fix (real-report follow-up): a report whose only verified
+   source has a short one-line title (so PrintDocumentSummary/
+   PrintSourceSummary/PrintReportScope are all shorter than the fixture this
+   slice was originally tuned against) left most of the trailing physical
+   sheet blank below REPORT SCOPE, before the footer — the fixed min-height:
+   11in sheet was still correct, but .report-v2.report-v2-print (a plain
+   block child of .paper-content, not itself stretched to the sheet's full
+   height) only ever took its own natural content height, so any leftover
+   room collected as one dead zone after the last section instead of being
+   used. .paper-content becomes a flex column here (page 1 only) so its one
+   child can stretch to fill it; that child already IS a flex column (see
+   the base .report-v2 rule) with a real `gap` between its 3 sections, so
+   justify-content: space-between now spreads any genuine leftover space
+   BETWEEN WorkspaceHero/the doc+source grid/REPORT SCOPE instead of leaving
+   it trail below all of them — REPORT SCOPE's own bottom edge lands flush
+   against the sheet's usable height, directly above the footer, with no
+   gap left over regardless of how short the source list is. `gap: 12px`
+   remains a floor: space-between only ever ADDS to it when there is
+   leftover room, so a report whose content already fills (or overflows)
+   the sheet renders exactly as it did before this rule (unaffected). */
+.rv2-print-overview .paper-content {
+  display: flex;
+  flex-direction: column;
+}
+.rv2-print-overview .report-v2.report-v2-print {
+  flex: 1;
+  gap: 12px;
+  justify-content: space-between;
+}
 
 /* Document + Similarity sources side by side (rather than stacked) on the
    summary page — the biggest single space saving available without
