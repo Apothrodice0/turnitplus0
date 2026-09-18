@@ -18,6 +18,15 @@ import {
  *  (unpruned) 5-gram sets, matching the frozen Slice 2D.3 prototype. */
 const ARCHIVE_SELF_EXCLUSION_CONTAINMENT = 0.75;
 
+/** Same batching bound as lib/archive-cosource.ts's LOOKUP_ANCHOR_CHUNK — one
+ *  bound SQL parameter per query 5-gram hash means a large full-text query
+ *  (tens of thousands of unique hashes) can exceed the driver's compiled
+ *  SQLITE_MAX_VARIABLE_NUMBER (32,766 on this local libsql build) in a single
+ *  IN (...) lookup. 400 is the same conservative ceiling already vetted
+ *  elsewhere in this matcher family, comfortably under that limit even
+ *  accounting for a smaller limit on a different libsql/Turso deployment. */
+const DISCOVERY_HASH_CHUNK = 400;
+
 /**
  * 100k-scale architecture — the server-side built-in-archive matcher. Slice 2B
  * replaces ONLY archive candidate DISCOVERY. The scoring algorithm
@@ -114,6 +123,17 @@ function queryHashSet(text: string): Set<string> {
  * Deterministic ORDER BY: shared count then representation_id, purely so the
  * candidateLimit cut is stable; final scoring re-orders by archive_order.
  */
+/**
+ * Chunked so a single IN (...) lookup never exceeds DISCOVERY_HASH_CHUNK bound
+ * parameters (see its own doc comment) — the ONLY change from a single query:
+ * each chunk's fingerprint_hash IN (...) set is a disjoint slice of the same
+ * hashList, so summing each chunk's per-representation_id COUNT(*) is exactly
+ * the same total COUNT(*) the unchunked query would have computed (every
+ * underlying row is counted in exactly one chunk, never zero, never twice).
+ * The final ORDER BY shared DESC, representation_id ASC and LIMIT are then
+ * applied once over the merged totals, reproducing the unchunked query's
+ * result byte-for-byte for any hashList size.
+ */
 async function compactDiscovery(
   client: ArchiveReadClient,
   queryHashes: Set<string>,
@@ -122,18 +142,30 @@ async function compactDiscovery(
 ): Promise<string[]> {
   const hashList = [...queryHashes];
   if (hashList.length === 0) return [];
-  const placeholders = hashList.map(() => "?").join(",");
-  const res = await client.execute({
-    sql: `SELECT representation_id, COUNT(*) AS shared
-            FROM archive_document_fingerprints
-           WHERE fingerprint_version = ? AND fingerprint_hash IN (${placeholders})
-           GROUP BY representation_id
-          HAVING COUNT(*) >= 1
-           ORDER BY shared DESC, representation_id ASC
-           LIMIT ?`,
-    args: [compactFingerprintVersion, ...hashList, candidateLimit],
-  });
-  return res.rows.map((r) => String((r as unknown as { representation_id: string }).representation_id));
+
+  const sharedByRepresentationId = new Map<string, number>();
+  for (let start = 0; start < hashList.length; start += DISCOVERY_HASH_CHUNK) {
+    const chunk = hashList.slice(start, start + DISCOVERY_HASH_CHUNK);
+    const placeholders = chunk.map(() => "?").join(",");
+    const res = await client.execute({
+      sql: `SELECT representation_id, COUNT(*) AS shared
+              FROM archive_document_fingerprints
+             WHERE fingerprint_version = ? AND fingerprint_hash IN (${placeholders})
+             GROUP BY representation_id`,
+      args: [compactFingerprintVersion, ...chunk],
+    });
+    for (const row of res.rows) {
+      const r = row as unknown as { representation_id: string; shared: number | bigint };
+      const id = String(r.representation_id);
+      sharedByRepresentationId.set(id, (sharedByRepresentationId.get(id) ?? 0) + Number(r.shared));
+    }
+  }
+
+  return [...sharedByRepresentationId.entries()]
+    .sort(([leftId, leftShared], [rightId, rightShared]) =>
+      leftShared !== rightShared ? rightShared - leftShared : leftId < rightId ? -1 : leftId > rightId ? 1 : 0)
+    .slice(0, candidateLimit)
+    .map(([id]) => id);
 }
 
 type ScoreOverCandidatesResult = {
