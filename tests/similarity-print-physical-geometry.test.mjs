@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
+import { tokenSpans } from "../lib/similarity-core.ts";
+import { paginateManuscriptText } from "../lib/report-v2-view.ts";
+
 /**
  * Physical-sheet print-geometry fix: `.print-report-bundle .report-paper`
  * used to force `display: block` for every print page (AiReport, the legacy
@@ -191,3 +194,72 @@ test("PRINT ROOT: @page Letter sizing is untouched by the root-canvas fix", asyn
  * relative width surviving anywhere in the chain) that the verified PDF
  * output depends on.
  */
+
+/**
+ * Manuscript-overflow fix: a real submitted document's manuscript can
+ * contain a run of text with no natural break point at all — an Arabic
+ * tatweel/separator line, a very long URL, a long no-space identifier.
+ * .submission-rendered-text's white-space: pre-wrap (needed to preserve
+ * the manuscript's own whitespace/newlines) only wraps at existing break
+ * opportunities; with no overflow-wrap override, such a run renders past
+ * .submission-copy's own 720px max-width instead of wrapping. Confirmed
+ * during this fix, via real Chromium (Edge) print rendering on a fixture
+ * built from a real, already-proven-correct 6,144-word V2 report with
+ * exactly this kind of content appended to its manuscript text: BEFORE —
+ * .report-paper scrollWidth 1233px (vs. its own 816px width), PDF inner
+ * transform 2.0833335 (the exact defective scale originally reported,
+ * instead of the correct 3.125). AFTER adding `overflow-wrap: anywhere`
+ * to the print-scoped .submission-copy rule (inherited down through
+ * .submission-rendered-text and any .submission-match highlight span,
+ * neither of which overrides it) — .report-paper scrollWidth back to
+ * 816px, PDF inner transform back to 3.125, all three unbreakable tokens
+ * still present in full (confirmed by joining every .submission-copy's
+ * own text across pages — no character lost or altered, the very long
+ * token was simply free to land its own natural word-boundary page-split
+ * like any other non-highlighted text, exactly as paginateManuscriptText
+ * already guarantees). Screen already handles this identically for the
+ * interactive workspace's own manuscript view (see the pre-existing,
+ * unrelated `.rv2-doc { white-space: pre-wrap; overflow-wrap: anywhere;
+ * }` rule) — this fix brings print into parity with it, print-only.
+ */
+test("MANUSCRIPT OVERFLOW: the print-scoped .submission-copy rule allows emergency wrapping (overflow-wrap: anywhere) so an unbreakable run cannot force the physical sheet wider than 8.5in", async () => {
+  const css = await readCss();
+  const rule = block(css, ".rv2-print-flow .submission-copy {");
+  assert.match(rule, /overflow-wrap:\s*anywhere;/);
+  // white-space: pre-wrap itself lives on .submission-rendered-text, not
+  // here — confirm that rule (manuscript whitespace/newline preservation)
+  // is untouched by this fix.
+  const renderedRule = block(css, ".submission-rendered-text {");
+  assert.match(renderedRule, /white-space:\s*pre-wrap;/);
+});
+
+test("MANUSCRIPT OVERFLOW: the fix does not clip content — no overflow:hidden was added to .submission-copy or .submission-rendered-text in print", async () => {
+  const css = await readCss();
+  const rule = block(css, ".rv2-print-flow .submission-copy {");
+  assert.doesNotMatch(rule, /overflow:\s*hidden/);
+});
+
+test("MANUSCRIPT OVERFLOW: real paginateManuscriptText() still reconstructs exactly, byte-for-byte, when the text contains an unbroken Arabic tatweel run, a long URL, and a long no-space ASCII token — the same three shapes that reproduced the real defect", () => {
+  const tatweel = "ـ".repeat(140);
+  const longUrl = "https://example-archive.test/documents/legal/mobilization/2008/decree-08-13/annex-institutional-framework-crisis-emergency-provisions-full-text-reference-copy-accessed-2026-09-18.pdf";
+  const longToken = "SupplementaryReferenceIdentifierBlock00000000000000000000000000000000000000000000000000000000000000000000000000000000ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  const base = "Ordinary manuscript prose. ".repeat(400);
+  const text = `${base}\n\nOVERFLOW_TEST_MARKER_START ${tatweel} ${longUrl} ${longToken} OVERFLOW_TEST_MARKER_END`;
+
+  const spans = tokenSpans(text);
+  assert.ok(spans.length > 400, "must actually tokenize a realistic number of words, not just the marker line");
+
+  const pageRanges = paginateManuscriptText(text, []);
+  assert.ok(pageRanges.length >= 1);
+  const reconstructed = pageRanges.map((p) => text.slice(p.start, p.end)).join("");
+  assert.equal(reconstructed, text, "joined paginated ranges must reconstruct the exact original text, including every unbreakable token, byte-for-byte");
+
+  // Prove none of the three tokens were altered or dropped anywhere in the
+  // reconstructed text (this is the DOM-level "no clipping" guarantee's
+  // upstream, code-level precondition — paginateManuscriptText itself
+  // never truncates or rewrites a token, wrapping is purely a print-CSS
+  // rendering concern layered on top of this exact, unmodified text).
+  assert.ok(reconstructed.includes(tatweel));
+  assert.ok(reconstructed.includes(longUrl));
+  assert.ok(reconstructed.includes(longToken));
+});

@@ -7125,10 +7125,32 @@ main.report-main {
      at roughly 8.25pt once physically rendered (96 CSS px = 1in), visibly
      too small for a document body and part of why manuscript pages read as
      mostly empty even before the page-geometry fix above: fewer, tinier
-     lines fit per sheet. Scoped to .rv2-print-flow only. */
+     lines fit per sheet. Scoped to .rv2-print-flow only.
+
+     Manuscript-overflow fix: a real submitted document can contain a run of
+     text with no natural break point at all for pre-wrap to wrap on — an
+     Arabic tatweel/separator line, a very long URL, a long no-space
+     identifier. .submission-rendered-text's white-space: pre-wrap (needed
+     to preserve the manuscript's own whitespace/newlines) only wraps at
+     existing break opportunities (spaces, hyphens); with no
+     overflow-wrap/word-break override, the CSS default
+     (overflow-wrap: normal) refuses to break inside such a run, so it
+     renders past .submission-copy's own 720px max-width instead of
+     wrapping — confirmed to inflate .report-paper's own scrollWidth well
+     past the physical 816px sheet, which is exactly what pushed Chromium's
+     print compositor to the 2.0833335 (instead of 3.125) inner PDF scale
+     this whole print-root investigation was chasing: the earlier ancestor-
+     width pinning fix could not, by itself, stop a descendant's own
+     unbroken content from visually overflowing past its box. overflow-wrap
+     inherits from this ancestor down through .submission-rendered-text and
+     any .submission-match highlight spans (neither overrides it), so one
+     declaration here is enough — the smallest rule that reproducibly fixed
+     the measured overflow; min-width/max-width/word-break were tested and
+     found unnecessary on top of it. */
   .rv2-print-flow .submission-copy {
     font-size: 14px;
     line-height: 1.45;
+    overflow-wrap: anywhere;
   }
 
   /* Print-density fix: .submission-title/.highlight-legend (shared with
