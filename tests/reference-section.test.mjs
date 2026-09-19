@@ -343,3 +343,179 @@ test("TERMINAL-FRACTION GUARD: FULLER-SHAPE regression — an early incidental h
   assert.equal(findReferenceSectionStart(text), -1, "no genuine terminal heading exists, so the whole document must be retained, not truncated at the early incidental mention");
   assert.equal(stripReferenceSection(text), text);
 });
+
+// --- CITATION-POINTER REJECTION (reference-strip-pointer-rule-audit 20260919T182220Z) ---
+//
+// findReferenceSectionStart now rejects a candidate — after the existing 50%
+// terminal-fraction guard and before the existing 700-char corroboration —
+// when its immediate (<=30 char, trimStart()-ed) lookahead matches one of
+// three closed, evidence-backed pointer phrases: /^see\b/i, /^of\s+the\b/i,
+// /^will\s+be\s+found\b/i. These fix two confirmed real false positives
+// (Lipset, one Archive769 document) while preserving all 411 known genuine
+// reference-section strips from the audit. Case 1 of the audit's own test
+// plan ("Fuller-shaped false case remains rejected") is already covered,
+// unmodified, by the existing "FULLER-SHAPE regression" test directly above
+// — the 50% guard rejects that candidate before the new gate is ever
+// reached, so no new assertion is needed for it.
+
+test("CITATION-POINTER: Fuller-shaped 'will be found' phrase moved PAST the 50% mark is rejected by the new gate (case 2 of the audit's test plan — not covered by the existing pre-50%-guard Fuller test)", () => {
+  const suffix =
+    "References will be found in my article in 71 Harvard Law Review 650 (1958). " +
+    "Graham v. Goodcell, 282 U.S. 409, 429 (1930).";
+  const { text, fraction } = fixtureAtFraction(suffix, 0.6);
+  assert.ok(fraction > 0.5, `test setup check: fraction ${fraction} must be past the terminal guard`);
+  assert.equal(findReferenceSectionStart(text), -1, "the 'will be found' pointer phrase must reject this candidate even past 50% (without the new gate, this exact shape passes the existing weak corroboration signal via its two parenthetical years)");
+  assert.equal(stripReferenceSection(text), text);
+});
+
+test("CITATION-POINTER: Lipset-shaped 'references see ...' past 50% is rejected", () => {
+  const suffix =
+    "References see S. M. Author and R. Coauthor, Some Title (City: Publisher, 1959). " +
+    "See also T. Other (Elsewhere, 1962), pp. 14, 111. 32 Next Footnote reference continues here " +
+    "discussing further work by Third, A. (1965) and Fourth, B. et al. (1970).";
+  const { text, fraction } = fixtureAtFraction(suffix, 0.6);
+  assert.ok(fraction > 0.5, `test setup check: fraction ${fraction} must be past 50%`);
+  assert.equal(findReferenceSectionStart(text), -1, "the 'see' pointer phrase must reject this candidate (without the new gate, this shape passes the existing weak corroboration signal via 4 years + 'et al.'/'pp.')");
+});
+
+test("CITATION-POINTER: Archive-shaped 'references of the ...' past 50% is rejected", () => {
+  const suffix =
+    "References of the Example Peace Conference, the some-principle, UN Resolutions 1397, 338, 242, " +
+    "discussed further in relation to events from 1991 and 1993 regarding regional diplomacy et al. (1995).";
+  const { text, fraction } = fixtureAtFraction(suffix, 0.6);
+  assert.ok(fraction > 0.5, `test setup check: fraction ${fraction} must be past 50%`);
+  assert.equal(findReferenceSectionStart(text), -1, "the 'of the' pointer phrase must reject this candidate (without the new gate, this shape passes the existing weak corroboration signal via 3 years + 'et al.')");
+});
+
+test("CITATION-POINTER: leading whitespace (newlines and extra spaces) between the heading and the pointer phrase is trimmed before matching", () => {
+  const suffix =
+    "References\n\n   see S. M. Author and R. Coauthor, Some Title (City: Publisher, 1959). " +
+    "See also T. Other (Elsewhere, 1962), discussing further work by Third, A. (1965) et al. (1970).";
+  const { text, fraction } = fixtureAtFraction(suffix, 0.6);
+  assert.ok(fraction > 0.5, `test setup check: fraction ${fraction} must be past 50%`);
+  assert.equal(findReferenceSectionStart(text), -1, "leading whitespace/newlines before the pointer phrase must not prevent rejection");
+});
+
+test("CITATION-POINTER: case-insensitive matching across all three pointer forms", () => {
+  const pointerCases = [
+    "SEE Author, A. Title (Place, 1988). Discussion continues et al. (1992) and 1995.",
+    "Of The Committee, the report notes years 1991 and 1993 discussed further et al. (1995).",
+    "WILL BE FOUND in the appendix, discussed further in years 1991 and 1993 et al. (1995).",
+  ];
+  const headingCases = ["REFERENCES", "References", "references"];
+  for (const heading of headingCases) {
+    for (const pointer of pointerCases) {
+      const suffix = `${heading} ${pointer}`;
+      const { text, fraction } = fixtureAtFraction(suffix, 0.6);
+      assert.ok(fraction > 0.5, `test setup check: fraction ${fraction} must be past 50%`);
+      assert.equal(findReferenceSectionStart(text), -1, `expected rejection for heading "${heading}" + pointer "${pointer.slice(0, 15)}..."`);
+    }
+  }
+});
+
+test("GENUINE PRESERVED: 'References list:' remains accepted (not in the closed pointer set)", () => {
+  const suffix =
+    "References list: Smith, J. (2020). A study of things. Journal of Studies, 12(3), 45-67.\n" +
+    "Doe, A. (2019). Another study. Publisher House.";
+  const { text, fraction, candidateStart } = fixtureAtFraction(suffix, 0.6);
+  assert.ok(fraction > 0.5, `test setup check: fraction ${fraction} must be past 50%`);
+  assert.equal(findReferenceSectionStart(text), candidateStart, "'list:' does not match any of the three closed pointer forms, so this genuine case must remain accepted");
+});
+
+test("GENUINE PRESERVED: 'Bibliography list:' remains accepted", () => {
+  const suffix =
+    "Bibliography list: Smith, J. (2020). A study of things. Journal of Studies, 12(3), 45-67.\n" +
+    "Doe, A. (2019). Another study. Publisher House.";
+  const { text, fraction, candidateStart } = fixtureAtFraction(suffix, 0.6);
+  assert.ok(fraction > 0.5, `test setup check: fraction ${fraction} must be past 50%`);
+  assert.equal(findReferenceSectionStart(text), candidateStart);
+});
+
+test("GENUINE PRESERVED: 'References used in the research:' remains accepted", () => {
+  const suffix =
+    "References used in the research: Smith, J. (2020). A study of things. Journal of Studies, 12(3), 45-67.\n" +
+    "Doe, A. (2019). Another study. Publisher House.";
+  const { text, fraction, candidateStart } = fixtureAtFraction(suffix, 0.6);
+  assert.ok(fraction > 0.5, `test setup check: fraction ${fraction} must be past 50%`);
+  assert.equal(findReferenceSectionStart(text), candidateStart);
+});
+
+test("GENUINE PRESERVED: 'References and Referrals' (no colon at all) remains accepted", () => {
+  const suffix =
+    "References and Referrals\nAuthor, A., Coauthor, B. (2020). Title one. Journal, 1, 1-10.\n" +
+    "Author, C. (2019). Title two. Publisher.";
+  const { text, fraction, candidateStart } = fixtureAtFraction(suffix, 0.6);
+  assert.ok(fraction > 0.5, `test setup check: fraction ${fraction} must be past 50%`);
+  assert.equal(findReferenceSectionStart(text), candidateStart);
+});
+
+test("NEAR-MISS PRESERVED: 'References of Modern Criticism' is NOT rejected merely because it starts with 'of' — only the 'of the' bigram is in the closed set", () => {
+  const suffix = "References of Modern Criticism\n\n[1] Author, A. Title. Journal, 2020.\n[2] Author, B. Title two. Journal, 2019.";
+  const { text, fraction, candidateStart } = fixtureAtFraction(suffix, 0.6);
+  assert.ok(fraction > 0.5, `test setup check: fraction ${fraction} must be past 50%`);
+  assert.equal(findReferenceSectionStart(text), candidateStart, "'of Modern' is not the 'of the' bigram, so this genuine heading must remain eligible");
+  assert.doesNotMatch(stripReferenceSection(text), /Author, A\. Title/);
+});
+
+test("GENUINE PRESERVED: standalone/running-header 'Bibliography' heading is unaffected by the pointer gate, with and without surrounding newlines (format-agnostic, per the module's own existing convention)", () => {
+  const withNewlines = fixtureAtFraction(
+    "Bibliography\n\n[1] Retz, Cardinal de. Memoires. Paris: Gallimard, 1717.\n[2] Other, A. Second Work. City: Publisher, 1716.",
+    0.6,
+  );
+  const withoutNewlines = fixtureAtFraction(
+    "Bibliography  [1] Retz, Cardinal de. Memoires. Paris: Gallimard, 1717. [2] Other, A. Second Work. City: Publisher, 1716.",
+    0.6,
+  );
+  assert.ok(withNewlines.fraction > 0.5 && withoutNewlines.fraction > 0.5, "test setup check: both fixtures must be past 50%");
+  assert.equal(findReferenceSectionStart(withNewlines.text), withNewlines.candidateStart);
+  assert.equal(findReferenceSectionStart(withoutNewlines.text), withoutNewlines.candidateStart);
+});
+
+test("LANGUAGE SCOPE (FRENCH): 'voir' (French for 'see') immediately after a French heading is NOT rejected — the pointer gate is English-lexeme-only by construction", () => {
+  const suffix =
+    "Références voir texte suivant pour plus de détails.\n\n" +
+    "[1] Un ouvrage. Presses, 2020.\n[2] Deuxième ouvrage, Presses, 2019.";
+  const { text, fraction, candidateStart } = fixtureAtFraction(suffix, 0.6);
+  assert.ok(fraction > 0.5, `test setup check: fraction ${fraction} must be past 50%`);
+  assert.equal(findReferenceSectionStart(text), candidateStart, "French 'voir' cannot match any of the three English-only pointer regexes");
+});
+
+test("LANGUAGE SCOPE (ARABIC): 'انظر' (Arabic for 'see') immediately after an Arabic heading is NOT rejected — disjoint script, cannot match any Latin-script pointer pattern", () => {
+  const suffix =
+    "المراجع انظر النص التالي لمزيد من التفاصيل.\n\n" +
+    "(2020) مؤلف، أ. عنوان العمل. مجلة العلوم.\n(2019) مؤلف، ب. عنوان آخر. دار النشر.";
+  const { text, fraction, candidateStart } = fixtureAtFraction(suffix, 0.6);
+  assert.ok(fraction > 0.5, `test setup check: fraction ${fraction} must be past 50%`);
+  assert.equal(findReferenceSectionStart(text), candidateStart);
+});
+
+test("BOUNDARY ORDERING: a pointer-shaped candidate immediately BELOW the 0.50 threshold is rejected by the pre-existing 50% guard alone, never reaching the new pointer gate", () => {
+  const suffix = "References of the Committee, the report continues with years 1991 and 1993 discussed further et al. (1995).";
+  const k = suffix.length;
+  const { text, fraction } = fixtureWithPrefixLength(suffix, k - 3);
+  assert.ok(fraction < 0.5, `test setup check: fraction ${fraction} must be < 0.5`);
+  assert.equal(findReferenceSectionStart(text), -1);
+});
+
+test("BOUNDARY ORDERING: a pointer-shaped candidate exactly AT the 0.50 threshold reaches the new gate and is rejected (contrast with the pre-existing genuine-candidate boundary test, which ACCEPTS at exactly 0.50)", () => {
+  const suffix = "References of the Committee, the report continues with years 1991 and 1993 discussed further et al. (1995).";
+  const k = suffix.length;
+  const { text, fraction } = fixtureWithPrefixLength(suffix, k - 2);
+  assert.equal(fraction, 0.5, `test setup check: fraction must be exactly 0.5, got ${fraction}`);
+  assert.equal(findReferenceSectionStart(text), -1, "at exactly 0.5 the candidate now reaches the pointer gate (guard is inclusive) and is rejected by 'of the'");
+});
+
+test("BOUNDARY ORDERING: a pointer-shaped candidate immediately ABOVE the 0.50 threshold reaches the new gate and is rejected", () => {
+  const suffix = "References of the Committee, the report continues with years 1991 and 1993 discussed further et al. (1995).";
+  const k = suffix.length;
+  const { text, fraction } = fixtureWithPrefixLength(suffix, k - 1);
+  assert.ok(fraction > 0.5, `test setup check: fraction ${fraction} must be > 0.5`);
+  assert.equal(findReferenceSectionStart(text), -1);
+});
+
+test("CITATION-POINTER: empty/no-candidate input remains safe and unaffected by the new pointer gate", () => {
+  assert.equal(findReferenceSectionStart(""), -1);
+  assert.equal(stripReferenceSection(""), "");
+  const noHeading = "This is a short document with no bibliography or reference list of any kind, just plain body prose from start to finish.";
+  assert.equal(findReferenceSectionStart(noHeading), -1);
+});
