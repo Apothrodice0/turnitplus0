@@ -89,6 +89,25 @@ const HEADING_PATTERN = new RegExp(`(?<![\\p{L}\\p{N}])(?:${HEADING_TERMS})(?![\
 /** How far past a candidate heading to look for corroborating reference-list-shaped content. Generous enough to skip a short "References" subtitle/byline before the first entry, small enough that unrelated later text can't accidentally corroborate an early false match. */
 const LOOKAHEAD_WINDOW = 700;
 
+/**
+ * TERMINAL-POSITION GUARD: a genuine reference/bibliography section is
+ * structurally the document's last major section. Book-scale text can
+ * contain an incidental heading-word occurrence (e.g. a prose mention of
+ * "references" followed by an unrelated footnote pair that happens to carry
+ * two adjacent years) far from the true end, which the year-clustering
+ * corroboration signal alone cannot distinguish from a real reference list.
+ * Audited against a 273-page book where such an incidental match at 22.4%
+ * through discarded 77.6% of substantive content, versus every confirmed
+ * genuine terminal reference section observed sitting at 55% or later.
+ * Candidates before this fraction of the document are rejected outright,
+ * without ever being corroborated — cheaper and simpler than adding
+ * position as a fourth corroboration signal, and strictly more conservative
+ * than the prior behavior (it only rejects candidates the old heuristic
+ * would have accepted, never the reverse). Character-offset fraction, matching
+ * this function's existing character-index representation throughout.
+ */
+const TERMINAL_FRACTION_THRESHOLD = 0.5;
+
 function looksLikeReferenceListStart(lookahead: string): boolean {
   const trimmed = lookahead.trimStart();
   // Strong signal alone: the very next thing is a numbered/bracketed list
@@ -149,6 +168,7 @@ export function findReferenceSectionStart(text: string): number {
   }));
   for (let index = candidates.length - 1; index >= 0; index -= 1) {
     const candidate = candidates[index];
+    if (candidate.start / text.length < TERMINAL_FRACTION_THRESHOLD) continue;
     const lookahead = text.slice(candidate.end, candidate.end + LOOKAHEAD_WINDOW);
     if (looksLikeReferenceListStart(lookahead)) {
       // Report the start of the heading word itself, not the text after it —

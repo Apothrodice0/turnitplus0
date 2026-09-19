@@ -7,11 +7,15 @@ import { applyMigrationsLibsql } from "../lib/ingest.js";
 import { tokens, grams, gramHash } from "../lib/similarity-core.ts";
 import {
   computeArchiveFingerprint,
+  computeFingerprintCap,
+  trimToHardCap,
   winnow,
   archiveShingleHashes,
   WINNOW_WINDOW,
   FINGERPRINT_SHINGLE_SIZE,
   MAX_FINGERPRINTS_PER_DOCUMENT,
+  MIN_FINGERPRINTS_PER_DOCUMENT_WHEN_LENGTH_PERMITS,
+  NUM_POSITIONAL_STRATA,
   ARCHIVE_COMPACT_FINGERPRINT_VERSION,
 } from "../lib/archive-fingerprint.ts";
 import { seedArchiveDocument } from "../lib/archive-corpus-seed.ts";
@@ -59,62 +63,15 @@ function filler(ns, wordCount, seed) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-// UNIT — no database
-// ══════════════════════════════════════════════════════════════════════════
-
-test("fingerprint: deterministic — same canonical text twice yields the identical fingerprint set", () => {
-  const text = `${distinctiveDoc(1, 400)} ${filler(1, 400, 7)}`;
-  const a = computeArchiveFingerprint(text);
-  const b = computeArchiveFingerprint(text);
-  assert.deepEqual(
-    a.fingerprints.map((f) => f.hash).sort(),
-    b.fingerprints.map((f) => f.hash).sort(),
-    "fingerprint hash set must be byte-identical across runs",
-  );
-  assert.equal(a.rawGramCount, b.rawGramCount);
-  assert.equal(a.trimmedByHardCap, b.trimmedByHardCap);
-});
-
-test("fingerprint: hard cap — a pathologically long document never exceeds MAX_FINGERPRINTS_PER_DOCUMENT", () => {
-  const veryLong = filler(2, 60_000, 42); // ~60k words → far past the cap's natural trigger
-  const fp = computeArchiveFingerprint(veryLong);
-  assert.ok(fp.fingerprints.length <= MAX_FINGERPRINTS_PER_DOCUMENT, `got ${fp.fingerprints.length} fingerprints, cap is ${MAX_FINGERPRINTS_PER_DOCUMENT}`);
-  assert.equal(fp.trimmedByHardCap, true, "a 60k-word document must trip the hard-cap trim");
-  // the trim is deterministic (lowest-hash-first), so two runs agree exactly
-  assert.deepEqual(fp.fingerprints.map((f) => f.hash), computeArchiveFingerprint(veryLong).fingerprints.map((f) => f.hash));
-});
-
-test("fingerprint: winnow selects the rightmost minimum and never the same position twice in a row", () => {
-  const seq = ["05", "05", "01", "09", "01", "01", "07"]; // ties at value "01"
-  const sel = winnow(seq, 3);
-  // every selection's hash equals the sequence value at its position
-  for (const s of sel) assert.equal(seq[s.position], s.hash);
-  for (let i = 1; i < sel.length; i += 1) assert.notEqual(sel[i].position, sel[i - 1].position);
-});
-
-test("fingerprint: the winnowing recall guarantee — a verbatim run of >= WINNOW_WINDOW + 4 words always contributes a shared fingerprint", () => {
-  // host kept well under the hard-cap trigger (~8k grams) so the guarantee,
-  // not the trim, is what's under test here.
-  const passage = distinctiveDoc(3, WINNOW_WINDOW + 200); // comfortably above the guarantee boundary
-  const doc = `${filler(30, 2800, 3)} ${passage} ${filler(31, 2800, 4)}`;
-  const fp = computeArchiveFingerprint(doc);
-  assert.equal(fp.trimmedByHardCap, false, "sanity: this host must not hit the hard cap");
-  const fpSet = new Set(fp.fingerprints.map((f) => f.hash));
-  const passageGramHashes = grams(tokens(passage), FINGERPRINT_SHINGLE_SIZE).map((g) => gramHash(g));
-  assert.ok(passageGramHashes.some((h) => fpSet.has(h)), "an above-threshold verbatim passage must intersect the document's fingerprint set");
-});
-
-test("reconstruction parity: archiveShingleHashes(canonicalText) == the exact 5-gram hash set an old full-shingle write would have stored", () => {
-  const text = `${distinctiveDoc(4, 300)} some shared common academic phrasing appears here ${distinctiveDoc(5, 300)}`;
-  const canonical = canonicalizeText(text);
-  const viaHelper = archiveShingleHashes(canonical);
-  const manual = new Set();
-  for (const gram of grams(tokens(canonical), FINGERPRINT_SHINGLE_SIZE)) manual.add(gramHash(gram));
-  assert.deepEqual([...viaHelper].sort(), [...manual].sort());
-});
-
-// ══════════════════════════════════════════════════════════════════════════
-// DB — synthetic archive, Baseline-B parity + bounds
+// DB SETUP — every top-level await here must resolve before the first test()
+// call below. node:test starts running a registered test as soon as it's
+// registered, concurrently with any later top-level await in this module; a
+// synchronous test body that runs while this setup is still in flight can
+// starve the event loop long enough that the runner decides the file is
+// finished before rebuildArchiveScalableIndex settles, and the client then
+// throws CLIENT_CLOSED when that stray work finally resumes. Keeping every
+// test() call below this block (not interleaved with it, as it used to be)
+// removes the race outright, independent of how expensive any given test is.
 // ══════════════════════════════════════════════════════════════════════════
 
 const dbFile = path.join(process.cwd(), "test_archive_scalable_index.db");
@@ -238,6 +195,211 @@ async function assertParity(label, text, matchingParameters = MATCHING) {
 const FRAME_PRE = "an unrelated opening about a different topic precedes this";
 const FRAME_POST = "an unrelated closing about another matter follows this today";
 const excerpt = (body, start, n) => tokens(body).slice(start, start + n).join(" ");
+
+// ══════════════════════════════════════════════════════════════════════════
+// UNIT — no database
+// ══════════════════════════════════════════════════════════════════════════
+
+test("fingerprint: deterministic — same canonical text twice yields the identical fingerprint set", () => {
+  const text = `${distinctiveDoc(1, 400)} ${filler(1, 400, 7)}`;
+  const a = computeArchiveFingerprint(text);
+  const b = computeArchiveFingerprint(text);
+  assert.deepEqual(
+    a.fingerprints.map((f) => f.hash).sort(),
+    b.fingerprints.map((f) => f.hash).sort(),
+    "fingerprint hash set must be byte-identical across runs",
+  );
+  assert.equal(a.rawGramCount, b.rawGramCount);
+  assert.equal(a.trimmedByHardCap, b.trimmedByHardCap);
+});
+
+test("fingerprint: hard cap — a pathologically long document never exceeds MAX_FINGERPRINTS_PER_DOCUMENT", () => {
+  const veryLong = filler(2, 60_000, 42); // ~60k words → far past the cap's natural trigger
+  const fp = computeArchiveFingerprint(veryLong);
+  assert.ok(fp.fingerprints.length <= MAX_FINGERPRINTS_PER_DOCUMENT, `got ${fp.fingerprints.length} fingerprints, cap is ${MAX_FINGERPRINTS_PER_DOCUMENT}`);
+  assert.equal(fp.trimmedByHardCap, true, "a 60k-word document must trip the hard-cap trim");
+  // the trim is deterministic (lowest-hash-first), so two runs agree exactly
+  assert.deepEqual(fp.fingerprints.map((f) => f.hash), computeArchiveFingerprint(veryLong).fingerprints.map((f) => f.hash));
+});
+
+// ── book-fingerprint-cap-audit 20260918T180119Z: length-scaled cap + stratified selection ──
+
+test("cap formula: computeFingerprintCap matches the audited clamp(floor, ceil(density*wordCount/1000), ceiling) formula at representative lengths and every tier boundary", () => {
+  const cases = [
+    [0, 64], [1, 64], [73, 64], // below the floor (e.g. the Law10 "dworkin" pamphlet)
+    [2881, 64], [2882, 65], // floor->linear boundary
+    [5617, 125], // Archive769 measured median -- essentially today's ~125-128 output
+    [46058, 1023], [46059, 1024], // linear->ceiling boundary
+    [60000, 1024], [724730, 1024], // book-scale (Blackstone), ceiling-bound
+  ];
+  for (const [wordCount, expected] of cases) {
+    assert.equal(computeFingerprintCap(wordCount), expected, `wordCount=${wordCount}`);
+  }
+});
+
+test("fingerprint: a small/normal document well under the floor's natural raw output is completely unaffected by the length-scaled cap (identical to the pre-existing behavior)", () => {
+  const text = `${distinctiveDoc(6, 1200)} ${filler(6, 1200, 17)}`; // ~2400 words; raw well under both the old 192 cap and the new 64 floor
+  const fp = computeArchiveFingerprint(text);
+  assert.equal(fp.fingerprintCap, MIN_FINGERPRINTS_PER_DOCUMENT_WHEN_LENGTH_PERMITS);
+  assert.ok(fp.rawWinnowSelectionCount < fp.fingerprintCap, "sanity: this fixture must not exercise the trim at all");
+  assert.equal(fp.trimmedByHardCap, false, "must be untrimmed under the new algorithm, exactly as it always was under the old flat 192 cap");
+  assert.equal(fp.fingerprints.length, fp.rawWinnowSelectionCount, "below the floor, every raw winnow selection survives unchanged");
+});
+
+test("fingerprint: selected count never exceeds the document's own computed cap, across representative length tiers", () => {
+  for (const size of [40, 2800, 60000]) {
+    const text = filler(8000 + size, size, size + 1);
+    const fp = computeArchiveFingerprint(text);
+    const wordCount = tokens(text).length;
+    assert.equal(fp.fingerprintCap, computeFingerprintCap(wordCount), `size=${size}`);
+    assert.ok(fp.fingerprints.length <= fp.fingerprintCap, `size=${size}: got ${fp.fingerprints.length}, cap ${fp.fingerprintCap}`);
+  }
+});
+
+// Shared book-scale fixture (90k words) for the stratified-trim unit tests below. Built
+// from the same exported primitives computeArchiveFingerprint itself uses, so
+// bookScaleUniqueByHash is exactly the raw (pre-trim) input trimToHardCap would see.
+// Computed lazily (not at module top-level) and memoized: this file's later "DB" section
+// does async setup (createClient/applyMigrationsLibsql) immediately after this point at
+// module-evaluation time, and this fixture's ~1s of synchronous winnow work delays that
+// in a way that made the libsql client's async setup get abandoned.
+const byHashAscending = (a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
+let bookScaleFixture = null;
+function getBookScaleFixture() {
+  if (bookScaleFixture) return bookScaleFixture;
+  const bookScaleWords = tokens(filler(7777, 90000, 777));
+  const bookScaleGramList = grams(bookScaleWords, FINGERPRINT_SHINGLE_SIZE);
+  const bookScaleHashSequence = bookScaleGramList.map((g) => gramHash(g));
+  const bookScaleSelections = winnow(bookScaleHashSequence, WINNOW_WINDOW);
+  const bookScaleUniqueByHash = new Map();
+  for (const { position, hash } of bookScaleSelections) {
+    if (!bookScaleUniqueByHash.has(hash)) bookScaleUniqueByHash.set(hash, position);
+  }
+  bookScaleFixture = { bookScaleGramList, bookScaleUniqueByHash };
+  return bookScaleFixture;
+}
+
+test("stratified trim: deterministic and insertion-order-independent — repeated calls, and a call against the same entries in reversed insertion order, produce the identical selected set", () => {
+  const { bookScaleGramList, bookScaleUniqueByHash } = getBookScaleFixture();
+  const cap = 128;
+  const a = trimToHardCap(bookScaleUniqueByHash, cap, bookScaleGramList.length);
+  const b = trimToHardCap(bookScaleUniqueByHash, cap, bookScaleGramList.length);
+  assert.deepEqual([...a.entries()], [...b.entries()], "repeated calls on the same Map must be byte-identical");
+
+  const reversed = new Map([...bookScaleUniqueByHash.entries()].reverse());
+  const c = trimToHardCap(reversed, cap, bookScaleGramList.length);
+  assert.deepEqual(
+    [...c.entries()].sort(byHashAscending),
+    [...a.entries()].sort(byHashAscending),
+    "the selected set must not depend on Map insertion order",
+  );
+});
+
+test("stratified trim: bounded by the requested cap, no duplicate hashes, and ties within a stratum break deterministically toward the lowest hash value", () => {
+  const { bookScaleGramList, bookScaleUniqueByHash } = getBookScaleFixture();
+  const cap = 128; // NUM_POSITIONAL_STRATA (32) divides 128 evenly -> every stratum gets exactly 4, no remainder redistribution needed
+  const trimmed = trimToHardCap(bookScaleUniqueByHash, cap, bookScaleGramList.length);
+  assert.equal(trimmed.size, cap, "cap is below the raw count, so exactly `cap` entries must be selected");
+  const hashes = [...trimmed.keys()];
+  assert.equal(new Set(hashes).size, hashes.length, "no duplicate hashes in the trimmed set");
+
+  const denom = bookScaleGramList.length;
+  const stratumOf = (position) => Math.min(NUM_POSITIONAL_STRATA - 1, Math.floor((position / denom) * NUM_POSITIONAL_STRATA));
+  const rawInStratum0 = [...bookScaleUniqueByHash.entries()].filter(([, p]) => stratumOf(p) === 0).sort(byHashAscending);
+  const selectedInStratum0 = [...trimmed.entries()].filter(([, p]) => stratumOf(p) === 0).sort(byHashAscending);
+  const expectedShare = Math.floor(cap / NUM_POSITIONAL_STRATA);
+  assert.equal(selectedInStratum0.length, expectedShare);
+  assert.deepEqual(
+    selectedInStratum0,
+    rawInStratum0.slice(0, expectedShare),
+    "within a stratum, selection keeps exactly the lowest-hash entries — a fixed, deterministic tie-break",
+  );
+});
+
+test("stratified trim: covers every one of the NUM_POSITIONAL_STRATA regions and bounds the worst-case coverage gap, unlike the old pure lowest-hash-value trim", () => {
+  const { bookScaleGramList, bookScaleUniqueByHash } = getBookScaleFixture();
+  const cap = 128;
+  const oldStyleSelected = [...bookScaleUniqueByHash.entries()].sort(byHashAscending).slice(0, cap);
+  const newSelected = [...trimToHardCap(bookScaleUniqueByHash, cap, bookScaleGramList.length).entries()];
+
+  const regionCoverage = (entries, numRegions) => {
+    const counts = new Array(numRegions).fill(0);
+    for (const [, position] of entries) {
+      const region = Math.min(numRegions - 1, Math.floor((position / bookScaleGramList.length) * numRegions));
+      counts[region] += 1;
+    }
+    return counts;
+  };
+  const oldCoverage = regionCoverage(oldStyleSelected, NUM_POSITIONAL_STRATA);
+  const newCoverage = regionCoverage(newSelected, NUM_POSITIONAL_STRATA);
+  assert.equal(
+    oldCoverage.filter((c) => c === 0).length,
+    1,
+    "sanity/regression pin: on this fixed fixture the OLD pure lowest-hash-value trim leaves exactly one of the 32 regions with zero surviving fingerprints",
+  );
+  assert.equal(newCoverage.filter((c) => c === 0).length, 0, "the NEW stratified trim leaves NO region uncovered");
+  assert.ok(
+    newCoverage.every((c) => c === Math.floor(cap / NUM_POSITIONAL_STRATA)),
+    "every region receives its exact proportional share",
+  );
+
+  const maxGap = (entries) => {
+    const positions = entries.map(([, p]) => p).sort((x, y) => x - y);
+    let g = positions[0];
+    for (let i = 1; i < positions.length; i += 1) g = Math.max(g, positions[i] - positions[i - 1]);
+    g = Math.max(g, bookScaleGramList.length - positions[positions.length - 1]);
+    return g;
+  };
+  const oldGap = maxGap(oldStyleSelected);
+  const newGap = maxGap(newSelected);
+  assert.ok(newGap < oldGap, `stratified trim must shrink the worst-case coverage gap: old=${oldGap} new=${newGap}`);
+});
+
+test("fingerprint: a planted verbatim passage at book scale can still survive the stratified trim (the winnowing recall guarantee itself is only over the pre-trim raw selections; this is a representative post-trim demonstration, not a re-assertion of the formal guarantee)", () => {
+  const passage = distinctiveDoc(3333, WINNOW_WINDOW + 200);
+  // frame the passage with enough surrounding filler that the whole document exceeds the
+  // new length-scaled cap (so this exercises the stratified trim, not the untrimmed path).
+  const doc = `${filler(3330, 60000, 31)} ${passage} ${filler(3331, 60000, 32)}`;
+  const fp = computeArchiveFingerprint(doc);
+  assert.equal(fp.trimmedByHardCap, true, "sanity: this book-scale host must exercise the stratified trim");
+  const fpSet = new Set(fp.fingerprints.map((f) => f.hash));
+  const passageGramHashes = grams(tokens(passage), FINGERPRINT_SHINGLE_SIZE).map((g) => gramHash(g));
+  assert.ok(passageGramHashes.some((h) => fpSet.has(h)), "on this fixed fixture, the planted passage's own stratum keeps at least one of its fingerprints");
+});
+
+test("fingerprint: winnow selects the rightmost minimum and never the same position twice in a row", () => {
+  const seq = ["05", "05", "01", "09", "01", "01", "07"]; // ties at value "01"
+  const sel = winnow(seq, 3);
+  // every selection's hash equals the sequence value at its position
+  for (const s of sel) assert.equal(seq[s.position], s.hash);
+  for (let i = 1; i < sel.length; i += 1) assert.notEqual(sel[i].position, sel[i - 1].position);
+});
+
+test("fingerprint: the winnowing recall guarantee — a verbatim run of >= WINNOW_WINDOW + 4 words always contributes a shared fingerprint", () => {
+  // host kept well under MIN_FINGERPRINTS_PER_DOCUMENT_WHEN_LENGTH_PERMITS's natural
+  // raw-output threshold (not just the old flat 192) so the guarantee, not either
+  // cap's trim, is what's under test here.
+  const passage = distinctiveDoc(3, WINNOW_WINDOW + 200); // comfortably above the guarantee boundary
+  const doc = `${filler(30, 600, 3)} ${passage} ${filler(31, 600, 4)}`;
+  const fp = computeArchiveFingerprint(doc);
+  assert.equal(fp.trimmedByHardCap, false, "sanity: this host must not hit the hard cap");
+  const fpSet = new Set(fp.fingerprints.map((f) => f.hash));
+  const passageGramHashes = grams(tokens(passage), FINGERPRINT_SHINGLE_SIZE).map((g) => gramHash(g));
+  assert.ok(passageGramHashes.some((h) => fpSet.has(h)), "an above-threshold verbatim passage must intersect the document's fingerprint set");
+});
+
+test("reconstruction parity: archiveShingleHashes(canonicalText) == the exact 5-gram hash set an old full-shingle write would have stored", () => {
+  const text = `${distinctiveDoc(4, 300)} some shared common academic phrasing appears here ${distinctiveDoc(5, 300)}`;
+  const canonical = canonicalizeText(text);
+  const viaHelper = archiveShingleHashes(canonical);
+  const manual = new Set();
+  for (const gram of grams(tokens(canonical), FINGERPRINT_SHINGLE_SIZE)) manual.add(gramHash(gram));
+  assert.deepEqual([...viaHelper].sort(), [...manual].sort());
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// DB — synthetic archive, Baseline-B parity + bounds
+// ══════════════════════════════════════════════════════════════════════════
 
 test("build summary: the deterministic rebuild produced compact fingerprints (not full shingles), an FTS entry per doc, and a bounded df-band table", () => {
   assert.equal(rebuildSummary.versions.compactFingerprint, ARCHIVE_COMPACT_FINGERPRINT_VERSION);
