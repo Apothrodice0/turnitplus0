@@ -108,6 +108,28 @@ const LOOKAHEAD_WINDOW = 700;
  */
 const TERMINAL_FRACTION_THRESHOLD = 0.5;
 
+/** How far past a candidate heading to look for a citation-pointer phrase. Deliberately much smaller than LOOKAHEAD_WINDOW: this check stays cheap and cannot accidentally match a pointer phrase appearing later inside a genuine citation entry's own text. */
+const POINTER_LOOKAHEAD_WINDOW = 30;
+
+/**
+ * CITATION-POINTER REJECTION: three closed, evidence-backed lexical forms
+ * ("see", "of the", "will be found") found to immediately follow a
+ * heading-term match in real false-positive cases — an in-prose sentence
+ * that happens to contain the word "references" but is pointing the reader
+ * elsewhere ("references see S. M. Author...", "references of the Madrid
+ * Peace Conference...", "references will be found in my article...") rather
+ * than opening an actual reference list. Evaluated only against the text
+ * immediately following an already-matched heading term, exactly like
+ * looksLikeReferenceListStart's own checks. English-only by construction —
+ * no French/Arabic equivalents were found in the audited evidence.
+ */
+const CITATION_POINTER_PATTERNS = [/^see\b/i, /^of\s+the\b/i, /^will\s+be\s+found\b/i];
+
+function isCitationPointer(lookahead: string): boolean {
+  const trimmed = lookahead.trimStart();
+  return CITATION_POINTER_PATTERNS.some((pattern) => pattern.test(trimmed));
+}
+
 function looksLikeReferenceListStart(lookahead: string): boolean {
   const trimmed = lookahead.trimStart();
   // Strong signal alone: the very next thing is a numbered/bracketed list
@@ -169,6 +191,7 @@ export function findReferenceSectionStart(text: string): number {
   for (let index = candidates.length - 1; index >= 0; index -= 1) {
     const candidate = candidates[index];
     if (candidate.start / text.length < TERMINAL_FRACTION_THRESHOLD) continue;
+    if (isCitationPointer(text.slice(candidate.end, candidate.end + POINTER_LOOKAHEAD_WINDOW))) continue;
     const lookahead = text.slice(candidate.end, candidate.end + LOOKAHEAD_WINDOW);
     if (looksLikeReferenceListStart(lookahead)) {
       // Report the start of the heading word itself, not the text after it —

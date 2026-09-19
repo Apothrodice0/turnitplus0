@@ -57,8 +57,18 @@ import { tokens, grams, gramHash } from "./similarity-core";
  *  full frozen Archive769 corpus (read-only copy): 0/769 documents change
  *  retention or trigger under this transform, so no currently-stored v2 row
  *  is stale as of this bump — the risk is prospective (future book-scale
- *  ingestion), not retroactive. */
-export const ARCHIVE_COMPACT_FINGERPRINT_VERSION = "archive-compact-fp-v3";
+ *  ingestion), not retroactive.
+ *
+ *  v4 (reference-strip-pointer-rule-audit 20260919T182220Z): findReferenceSectionStart
+ *  gained a narrow citation-pointer rejection gate — a candidate heading
+ *  already past the 50% terminal-fraction guard is further rejected when
+ *  immediately followed by "see" / "of the" / "will be found" (in-prose
+ *  pointer phrases, not the opening of an actual reference list), evaluated
+ *  before the existing 700-char corroboration. Fixes a live Archive769 false
+ *  positive (empirically confirmed: exactly 1/769 documents changes). Old v3
+ *  rows remain queryable under their existing tag until re-fingerprinted;
+ *  this file's own algorithm (winnow/cap/stratification) is unchanged. */
+export const ARCHIVE_COMPACT_FINGERPRINT_VERSION = "archive-compact-fp-v4";
 
 export const FINGERPRINT_SHINGLE_SIZE = 5;
 /** 5-gram size for every archive-index structure (fingerprints, phrase index,
