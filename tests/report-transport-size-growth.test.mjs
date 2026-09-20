@@ -88,6 +88,20 @@ test.after(() => {
   }
 });
 
+// R2 — compact persisted-report WRITES are an opt-in rollout gate (REPORT_COMPACT_PERSISTENCE_WRITE_ENABLED, default OFF). This file measures
+// the 2,000,000-byte persistence ceiling: the decisive near-ceiling save only fits when compact writes are enabled, and with the gate OFF the same
+// report must FAIL CLOSED (413, nothing persisted) — never be persisted as a score without its explanation. Returns the restore function.
+const COMPACT_GATE = "REPORT_COMPACT_PERSISTENCE_WRITE_ENABLED";
+function pinCompactWrites(value) {
+  const previous = process.env[COMPACT_GATE];
+  if (value === undefined) delete process.env[COMPACT_GATE];
+  else process.env[COMPACT_GATE] = value;
+  return () => {
+    if (previous === undefined) delete process.env[COMPACT_GATE];
+    else process.env[COMPACT_GATE] = previous;
+  };
+}
+
 // -- corpus promotion + account setup, copied verbatim in structure from
 // tests/report-write-time-finalization.test.mjs's own helpers (same schema,
 // same real promotion pipeline) --
@@ -308,7 +322,8 @@ test('REAL SERVER GROWTH: a request under MAX_REPORT_SAVE_REQUEST_BYTES as sent 
   }
   const account = await signUpConsentingAccount();
 
-  await t.test('main case (DECISIVE PASS): real POST now succeeds (200) because the measured exact-duplicate previousUploadPositions array is compacted at persistence, and GET returns the exact expanded pre-fix shape', async () => {
+  await t.test('main case (DECISIVE PASS): real POST now succeeds (200) because the measured exact-duplicate previousUploadPositions array is compacted at persistence, and GET returns the exact expanded pre-fix shape', async (st) => {
+    st.after(pinCompactWrites('true')); // R2: the near-ceiling report only fits with compact writes enabled
     const text = buildManuscript(TARGET_TEXT_CHARS, true);
     const body = buildRequestBody({ deviceKey: account.deviceKey, id: 'growth-main-1', text, unifiedSimilarityForgery: FORGED_UNIFIED_SIMILARITY, room: 0 });
     const serialized = JSON.stringify(body);
@@ -427,6 +442,24 @@ test('REAL SERVER GROWTH: a request under MAX_REPORT_SAVE_REQUEST_BYTES as sent 
     for (const passage of DISTINCTIVE_PASSAGES) {
       assert.ok(!resBodyText.includes(passage.slice(0, 40)), 'the POST response must never echo any source/manuscript excerpt');
     }
+  });
+
+  await t.test('R2 GATE OFF (the default): the SAME near-ceiling report FAILS CLOSED -- 413 and nothing persisted -- never saved as a score without its explanation', async (st) => {
+    st.after(pinCompactWrites(undefined));
+    const offAccount = await signUpConsentingAccount();
+    const text = buildManuscript(TARGET_TEXT_CHARS, true);
+    const body = buildRequestBody({ deviceKey: offAccount.deviceKey, id: 'growth-gate-off-1', text, unifiedSimilarityForgery: FORGED_UNIFIED_SIMILARITY, room: 0 });
+    assert.ok(Buffer.byteLength(JSON.stringify(body), 'utf8') < MAX_REPORT_SAVE_REQUEST_BYTES, 'the request itself passes the transport guard; the PERSISTENCE guard is what rejects it');
+    await resetRateForTest(offAccount.tag + '-post-off');
+    const res = await reportsRoute.POST(new Request('http://localhost/api/reports', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-forwarded-for': offAccount.tag + '-post-off', cookie: `tp_session_v1=${offAccount.cookie}` },
+      body: JSON.stringify(body),
+    }));
+    assert.equal(res.status, 413, 'gate OFF: the legacy explained report exceeds the ceiling -> fail closed');
+    assert.deepEqual(await res.json(), { error: 'Payload too large' });
+    const row = await client.execute({ sql: 'SELECT payload_json FROM saved_reports WHERE device_key = ? AND id = ?', args: [offAccount.deviceKey, 'growth-gate-off-1'] });
+    assert.equal(row.rows.length, 0, 'nothing persisted: no score without its explanation');
   });
 
   await t.test('TRUST BOUNDARY: a client cannot forge previousUploadPositionsEncoding="matchedPositions" (plus a large fake matchedPositions array) to manufacture trusted previous-upload evidence', async () => {

@@ -5,6 +5,7 @@ import { FileText, Percent, GitBranch, ShieldCheck, FileJson } from "lucide-reac
 import { loadDeveloperGate } from "@/lib/developer-gate";
 import { getReportsDbClient } from "@/lib/reports-db";
 import { getReportDeepDiveForDeveloper, getReportSimilarityDecisionTrace } from "@/lib/developer-repo";
+import { ReportPersistenceDecodeError, type ReportPersistenceFailureReason } from "@/lib/report-persistence";
 import { AdminHeader } from "@/components/admin/admin-header";
 import { MetricGrid, MetricTile } from "@/components/admin/metric-tile";
 import { AdminCollapsible } from "@/components/admin/collapsible";
@@ -41,7 +42,9 @@ export default async function DeveloperReportInspectPage({
   if (!deviceKey) notFound();
 
   const client = await getReportsDbClient();
-  let deepDive;
+  let deepDive: Awaited<ReturnType<typeof getReportDeepDiveForDeveloper>> | null = null;
+  // R2: set when the stored payload's persisted explanation/diagnostics cannot be decoded safely.
+  let unreadableReason: ReportPersistenceFailureReason | null = null;
   let similarityDecisionTrace: AdminSimilarityDecisionTrace | null = null;
   let previousReports: Array<{
     deviceKey: string;
@@ -86,12 +89,47 @@ export default async function DeveloperReportInspectPage({
         email: row.email === null ? null : String(row.email),
       }));
     }
+  } catch (err) {
+    // R2: an explicit admin-facing failure — never a payload with a silently
+    // emptied interpretation or an empty contributions list shown as "none".
+    if (!(err instanceof ReportPersistenceDecodeError)) throw err;
+    unreadableReason = err.reason;
   } finally {
     client.close();
   }
 
-  if (!deepDive.report) notFound();
-  const { report, documentIdentity, familyMembers, academicSearchRuns } = deepDive;
+  if (unreadableReason) {
+    return (
+      <main className="developer-page">
+        <AdminHeader
+          icon={FileText}
+          title="Report payload cannot be decoded"
+          description={`report ${id} · device ${deviceKey}`}
+          backHref="/admin/developer"
+          backLabel="Back to Developer"
+        />
+        <section className="admin-card">
+          <h2>
+            <FileJson size={17} className="admin-card-title-icon" aria-hidden="true" />
+            Unreadable persisted report
+          </h2>
+          <p>
+            <strong>This report is not shown.</strong> Its stored evidence explanation (or the internal per-passage
+            diagnostics) is in a persisted form this build cannot decode safely, so no score or evidence is rendered from
+            it — nothing is guessed, emptied or recomputed. Reason: <code>{unreadableReason}</code>.
+          </p>
+          <p className="admin-card-description">
+            <code>unsupported_compact_format</code> usually means this instance is older than the one that wrote the row
+            (a rolling deploy); it resolves once every instance runs the newer reader. Otherwise the stored row is damaged.
+          </p>
+        </section>
+      </main>
+    );
+  }
+
+  if (!deepDive || !deepDive.report) notFound();
+  const report = deepDive.report;
+  const { documentIdentity, familyMembers, academicSearchRuns } = deepDive;
 
   return (
     <main className="developer-page">

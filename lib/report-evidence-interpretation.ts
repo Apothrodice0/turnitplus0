@@ -16,6 +16,7 @@ import {
   type PersistedEvidenceInterpretation,
 } from "@/lib/evidence-interpretation/persistence";
 import { MAX_REPORT_SAVE_REQUEST_BYTES } from "@/lib/report-transport-limits";
+import { resolveCompactPersistenceWrites } from "@/lib/report-compact-persistence-flag";
 
 /**
  * Report V2 wiring — turn the already-FINAL authoritative SimilarityReport into
@@ -215,24 +216,32 @@ export type FinalizedReportEvidenceInterpretationOptions = {
    * only describe inputs the score actually had.
    */
   userSuppliedReferenceEvidence?: readonly SuppliedReferenceVerifiedEvidence[] | null;
-  /** Ceiling the ENCODED (compact) whole final report must fit. Defaults to the existing, unchanged MAX_REPORT_SAVE_REQUEST_BYTES — the same limit app/api/reports/route.ts's persisted-size checks enforce. */
+  /** Ceiling the ENCODED whole final report must fit. Defaults to the existing, unchanged MAX_REPORT_SAVE_REQUEST_BYTES — the same limit app/api/reports/route.ts's persisted-size checks enforce. */
   maxBytes?: number;
+  /**
+   * R2 write gate — pins whether the persisted form is compact. Omitted (the
+   * production case) it follows REPORT_COMPACT_PERSISTENCE_WRITE_ENABLED (default
+   * OFF => legacy). Resolved ONCE here and returned as `compactWrites`, so the size
+   * this builder measures is the size the caller's write then persists.
+   */
+  compactWrites?: boolean;
 };
 
 /**
  * Outcome of preparing the authoritative finalizer's interpretation.
  *
- *   ok: true  — `evidenceInterpretation` is the PERSISTED-FORM (compact when
- *               losslessly representable) interpretation of the final report, and
- *               the ENCODED whole final report fits the limit. Persist it in the
- *               SAME atomic write as the final score.
+ *   ok: true  — `evidenceInterpretation` is the PERSISTED-FORM (compact when compact
+ *               writes are enabled and it is losslessly representable; otherwise
+ *               the legacy full shape) interpretation of the final report, and the
+ *               ENCODED whole final report fits the limit. Persist it — with the
+ *               returned `compactWrites` — in the SAME atomic write as the final score.
  *   ok: false — the final score must NOT be persisted at all. There is no
  *               "persist the score and remove the explanation" outcome any more.
  *     BUILD_FAILED             the (pure) interpretation build threw / produced nothing.
- *     PERSISTED_SIZE_EXCEEDED  even the compact encoded whole report is over `maxBytes`.
+ *     PERSISTED_SIZE_EXCEEDED  the encoded whole report (compact when compact writes are enabled) is over `maxBytes`.
  */
 export type FinalizedReportInterpretationResult =
-  | { ok: true; evidenceInterpretation: PersistedEvidenceInterpretation }
+  | { ok: true; evidenceInterpretation: PersistedEvidenceInterpretation; compactWrites: boolean }
   | { ok: false; reason: "BUILD_FAILED" }
   | { ok: false; reason: "PERSISTED_SIZE_EXCEEDED"; persistedBytes: number; maxBytes: number };
 
@@ -264,15 +273,19 @@ export type FinalizedReportInterpretationResult =
  * explicit failure, and on failure the caller must not write the score.
  *
  * The size check measures exactly what the CAS write persists: the whole
- * final report with its compact `unifiedSimilarity` (previousUploadPositions
- * elision + compact contributions) and its compact `evidenceInterpretation`,
- * against the unchanged MAX_REPORT_SAVE_REQUEST_BYTES.
+ * final report with its `unifiedSimilarity` (previousUploadPositions elision +,
+ * when compact writes are enabled, compact contributions) and its
+ * `evidenceInterpretation` (compact when enabled), against the unchanged
+ * MAX_REPORT_SAVE_REQUEST_BYTES. R2: with compact writes OFF (the default) that
+ * is the legacy form, so the fail-closed size behavior holds unchanged — an
+ * explained report that does not fit is never persisted without its explanation.
  */
 export function buildFinalizedReportEvidenceInterpretation(
   finalReport: SimilarityReport,
   opts: FinalizedReportEvidenceInterpretationOptions = {},
 ): FinalizedReportInterpretationResult {
   const maxBytes = opts.maxBytes ?? MAX_REPORT_SAVE_REQUEST_BYTES;
+  const compactWrites = resolveCompactPersistenceWrites(opts);
   try {
     const interpretation = withEvidenceInterpretation(finalReport, {
       historicalSubmissionMatch: opts.historicalSubmissionMatch ?? null,
@@ -280,17 +293,17 @@ export function buildFinalizedReportEvidenceInterpretation(
       userSuppliedReferenceEvidence: opts.userSuppliedReferenceEvidence ?? null,
     }).evidenceInterpretation;
     if (!interpretation) return { ok: false, reason: "BUILD_FAILED" };
-    const persistedInterpretation = compactEvidenceInterpretationForPersistence(interpretation);
+    const persistedInterpretation = compactEvidenceInterpretationForPersistence(interpretation, { compactWrites });
     const persisted = {
       ...finalReport,
       ...(finalReport.unifiedSimilarity
-        ? { unifiedSimilarity: compactUnifiedSimilarityForPersistence(finalReport.unifiedSimilarity) }
+        ? { unifiedSimilarity: compactUnifiedSimilarityForPersistence(finalReport.unifiedSimilarity, { compactWrites }) }
         : {}),
       evidenceInterpretation: persistedInterpretation,
     };
     const persistedBytes = JSON.stringify(persisted).length;
     if (persistedBytes > maxBytes) return { ok: false, reason: "PERSISTED_SIZE_EXCEEDED", persistedBytes, maxBytes };
-    return { ok: true, evidenceInterpretation: persistedInterpretation };
+    return { ok: true, evidenceInterpretation: persistedInterpretation, compactWrites };
   } catch (err) {
     console.error(
       "report V2 finalized-report interpretation build failed:",

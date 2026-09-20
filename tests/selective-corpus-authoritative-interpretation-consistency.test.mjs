@@ -631,8 +631,10 @@ test("shared helper: builds via the SAME withEvidenceInterpretation as the write
   assert.equal(typeof build, "function", "the shared finalized-report interpretation helper must exist");
   const control = await flagsOffControl();
   const report = control.payload;
-  const viaHelper = build(report);
+  // R2 write gate: compact writes are opt-in; pin them ON to assert the compact persisted form (the default-OFF legacy form is asserted below)
+  const viaHelper = build(report, { compactWrites: true });
   assert.equal(viaHelper.ok, true);
+  assert.equal(viaHelper.compactWrites, true, "the builder reports the mode it measured, so the write persists the same form");
   const viaWriteTime = interpretationWiring.withEvidenceInterpretation(report, {
     historicalSubmissionMatch: null,
     selectiveCorpusBranch: null,
@@ -641,6 +643,12 @@ test("shared helper: builds via the SAME withEvidenceInterpretation as the write
   const expansion = expandEvidenceInterpretationFromPersistence(viaHelper.evidenceInterpretation);
   assert.equal(expansion.status, "expanded", "the helper hands back the PERSISTED (compact) form");
   assert.deepEqual(expansion.value, viaWriteTime, "no second builder: helper output (expanded) == withEvidenceInterpretation output");
+  // default (gate OFF): the same explanation, in the legacy persisted form
+  const viaDefault = build(report);
+  assert.equal(viaDefault.ok, true);
+  assert.equal(viaDefault.compactWrites, false, "compact writes are OFF by default");
+  assert.equal(expandEvidenceInterpretationFromPersistence(viaDefault.evidenceInterpretation).status, "legacy", "gate OFF: the helper hands back the legacy form");
+  assert.deepEqual(viaDefault.evidenceInterpretation, viaWriteTime, "and it is exactly the write-time interpretation");
   const tooSmall = build(report, { maxBytes: 10 });
   assert.deepEqual(
     { ok: tooSmall.ok, reason: tooSmall.reason, maxBytes: tooSmall.maxBytes },

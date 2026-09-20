@@ -4,6 +4,7 @@ import { checkRate } from '../../../../../lib/rate-limit';
 import { clientIpFrom } from '../../../../../lib/client-ip';
 import { getAdminSessionUser } from '../../../../../lib/auth-session';
 import { getReportDeepDiveForDeveloper, getReportSimilarityDecisionTrace } from '../../../../../lib/developer-repo';
+import { ReportPersistenceDecodeError } from '../../../../../lib/report-persistence';
 
 /**
  * Developer deep-dive for one saved report: the full report payload, its
@@ -36,7 +37,22 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
         return new NextResponse(null, { status: 404 });
       }
 
-      const deepDive = await getReportDeepDiveForDeveloper(client, deviceKey, id);
+      let deepDive;
+      try {
+        deepDive = await getReportDeepDiveForDeveloper(client, deviceKey, id);
+      } catch (err) {
+        // R2: an explicit, admin-only failure for a report whose persisted
+        // explanation/diagnostics cannot be decoded — never a payload with a
+        // silently emptied interpretation. `reason` is the decoder's bounded
+        // enum (no report content); the row itself is untouched.
+        if (err instanceof ReportPersistenceDecodeError) {
+          return new NextResponse(
+            JSON.stringify({ error: 'Report payload cannot be decoded safely', code: 'REPORT_PAYLOAD_UNREADABLE', reason: err.reason }),
+            { status: 503, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        throw err;
+      }
       if (!deepDive.report) {
         return new NextResponse(null, { status: 404 });
       }
