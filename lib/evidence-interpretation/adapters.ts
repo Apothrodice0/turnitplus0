@@ -149,6 +149,42 @@ export function normalizeUserSuppliedReferenceEvidence(
     .filter((s) => s.spans.length > 0);
 }
 
+// ── F. Imported Similarity Evidence V1 (verified third-party-report passages) ──
+// Every passage here is already SERVER-VERIFIED by
+// lib/imported-similarity-evidence/matcher.ts (exact normalized-anchor match +
+// score-mask projection) — never a client-authored value, never re-verified
+// here. sameWorkRelationship is ALWAYS null (same reasoning as user-supplied
+// references: an imported match must never activate POSSIBLE_SAME_WORK just
+// because it exists). importedSourceAttributionState is carried through for
+// internal audit only — never fed into labelParts, so a not-independently-owned
+// source can never surface as if it were independently verified.
+export function normalizeImportedSimilarityEvidence(
+  admittedSources: ReadonlyArray<{
+    key: string;
+    spans: ReadonlyArray<{ start: number; end: number; words: number }>;
+    sourceAttributionState?: NormalizedVerifiedSource["importedSourceAttributionState"];
+  }>,
+  submissionWordCount: number,
+): NormalizedVerifiedSource[] {
+  return admittedSources
+    .map((source) => {
+      const spans = [...source.spans].map((sp) => ({ start: sp.start, end: sp.end, words: sp.words })).sort((a, b) => a.start - b.start);
+      const matchedWordCount = sourcePositions({ spans }).size;
+      return {
+        key: source.key,
+        producer: "imported-similarity-evidence" as const,
+        sourceType: "imported-similarity-evidence" as const,
+        labelParts: { title: null, publication: null, hostname: null, year: null, doi: null, url: null },
+        spans,
+        matchedWordCount,
+        submissionCoverageFraction: coverage(matchedWordCount, submissionWordCount),
+        sameWorkRelationship: null,
+        importedSourceAttributionState: source.sourceAttributionState,
+      };
+    })
+    .filter((s) => s.spans.length > 0);
+}
+
 // ── D. Selective Corpus verified evidence ────────────────────────────────
 // Not on SimilarityReport today (it is a shadow slice). A caller that has the
 // selective-corpus admission results passes them here in the same shape the
