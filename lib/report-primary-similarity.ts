@@ -857,6 +857,20 @@ export type SelectiveCorpusAuthoritativeTerminalStatus = "completed" | "incomple
  * The claim field (selectiveCorpusAuthoritativeClaimedAt) is cleared on a
  * successful transition — a finalized report needs no further claim, and
  * clearing it keeps this server-internal field from lingering indefinitely.
+ *
+ * evidenceInterpretation (customer-visible explanation of the score): a report
+ * created in this mode is persisted while "pending" with NO unifiedSimilarity,
+ * so the interpretation POST built for it was derived from archive-only
+ * positions — it cannot explain anything that only exists in the FINAL score
+ * this write lands (imported evidence, Selective Corpus). The caller therefore
+ * derives it from that final unifiedSimilarity and passes it here, so it is
+ * replaced in the SAME single atomic, CAS-guarded statement as the score it
+ * explains: no reader can ever observe the new score beside the old
+ * explanation, and a CAS loser (rowsAffected 0) can never overwrite the
+ * winner's. `undefined` leaves the persisted key untouched (direct callers that
+ * do not manage it); `null` REMOVES it — the caller found no interpretation
+ * that fits, and a stale one must never be left beside a score it no longer
+ * describes.
  */
 export async function persistSelectiveCorpusAuthoritativeFinalization(
   client: Client,
@@ -866,17 +880,20 @@ export async function persistSelectiveCorpusAuthoritativeFinalization(
     corpusSourceMatchingEnabled: boolean;
     corpusGeneration: number;
     terminalStatus: SelectiveCorpusAuthoritativeTerminalStatus;
+    evidenceInterpretation?: SimilarityReport["evidenceInterpretation"] | null;
   },
 ): Promise<{ written: boolean; rowsAffected: number }> {
   const flagText = resolution.corpusSourceMatchingEnabled ? "true" : "false";
+  const interpretationToSet = resolution.evidenceInterpretation ?? null;
+  const removeInterpretation = resolution.evidenceInterpretation === null;
   const result = await client.execute({
     sql: `UPDATE saved_reports
           SET payload_json = json_set(
-                json_remove(payload_json, '$.selectiveCorpusAuthoritativeClaimedAt'),
+                json_remove(payload_json, '$.selectiveCorpusAuthoritativeClaimedAt'${removeInterpretation ? ", '$.evidenceInterpretation'" : ""}),
                 '$.unifiedSimilarity', json(?),
                 '$.corpusSourceMatchingEnabledAtComputation', json(?),
                 '$.unifiedSimilarityGeneration', ?,
-                '$.unifiedSimilarityFailed', json('false'),
+                '$.unifiedSimilarityFailed', json('false'),${interpretationToSet ? "\n                '$.evidenceInterpretation', json(?)," : ""}
                 '$.selectiveCorpusAuthoritativeStatus', ?
               )
           WHERE device_key = ? AND id = ? AND json_valid(payload_json)
@@ -890,6 +907,7 @@ export async function persistSelectiveCorpusAuthoritativeFinalization(
       JSON.stringify(compactUnifiedSimilarityForPersistence(resolution.unifiedSimilarity)),
       flagText,
       resolution.corpusGeneration,
+      ...(interpretationToSet ? [JSON.stringify(interpretationToSet)] : []),
       resolution.terminalStatus,
       params.reportDeviceKey,
       params.reportId,

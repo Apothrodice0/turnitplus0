@@ -51,6 +51,7 @@ export {
   normalizePriorSubmissionEvidence,
   normalizeSelectiveCorpusEvidence,
   normalizeUserSuppliedReferenceEvidence,
+  normalizeImportedSimilarityEvidence,
 } from "./adapters";
 
 export {

@@ -15,6 +15,7 @@ import {
   normalizeScholarlyEvidence,
   normalizePriorSubmissionEvidence,
   normalizeSelectiveCorpusEvidence,
+  normalizeImportedSimilarityEvidence,
   EVIDENCE_INTERPRETATION_KINDS,
   EVIDENCE_INTERPRETATION_VERSION,
 } from "../lib/evidence-interpretation/index.ts";
@@ -229,6 +230,116 @@ test("selective-corpus evidence: FAMILY_GUARD-flagged dominant span => FAMILY_BO
   assert.equal(r.sources[0].sourceType, "selective-corpus");
 });
 
+// ── imported similarity evidence (V1) ──────────────────────────────────
+test("imported similarity evidence: neutral label regardless of source-attribution state", () => {
+  for (const state of [
+    "ORIGINAL_SOURCE_VERIFIED",
+    "ORIGINAL_SOURCE_IDENTIFIED_BUT_NOT_OWNED",
+    "TURNITIN_SOURCE_MARKER_ONLY",
+    "REPORT_DERIVED_REFERENCE",
+  ]) {
+    const report = mkReport({
+      unifiedSimilarity: { matchedPositions: range(10, 40), previousUploadPositions: [] },
+    });
+    const r = buildReportEvidenceInterpretation(report, {
+      importedSimilarityAdmittedSources: [
+        { key: "imported-similarity-evidence:PU0001", spans: [{ start: 10, end: 40, words: 31 }], sourceAttributionState: state },
+      ],
+    });
+    assert.equal(r.sources.length, 1, `state=${state}`);
+    assert.equal(r.sources[0].label, "Imported reference match", `state=${state} must not overstate provenance`);
+    assert.equal(r.sources[0].sourceType, "imported-similarity-evidence");
+    assert.equal(r.sources[0].link, null);
+    assert.equal(r.sources[0].doi, null);
+    assert.equal(r.sources[0].year, null);
+    assert.equal(r.sources[0].namedSources, undefined);
+  }
+});
+
+test("imported similarity evidence: matched positions reconcile and are highlight-visible via passageRefs", () => {
+  const report = mkReport({
+    unifiedSimilarity: { matchedPositions: range(50, 90), previousUploadPositions: [] },
+  });
+  const r = buildReportEvidenceInterpretation(report, {
+    importedSimilarityAdmittedSources: [
+      { key: "imported-similarity-evidence:PU0001", spans: [{ start: 50, end: 90, words: 41 }], sourceAttributionState: "TURNITIN_SOURCE_MARKER_ONLY" },
+    ],
+  });
+  assert.ok(reconciles(r));
+  assert.equal(r.matchedWordCount, 41);
+  const card = r.sources[0];
+  assert.ok(card.passageRefs.length > 0, "card must reference at least one passage for highlighting");
+  const passage = r.passages.find((p) => card.passageRefs.includes(p.id));
+  assert.ok(passage, "referenced passage must exist");
+  assert.ok(passage.sourceIds.includes(card.id));
+});
+
+test("imported similarity evidence: multiple occurrences of the same unit produce ONE card with multiple spans", () => {
+  const report = mkReport({
+    unifiedSimilarity: { matchedPositions: [...range(5, 15), ...range(100, 110)], previousUploadPositions: [] },
+  });
+  const r = buildReportEvidenceInterpretation(report, {
+    importedSimilarityAdmittedSources: [
+      {
+        key: "imported-similarity-evidence:PU0001",
+        spans: [{ start: 5, end: 15, words: 11 }, { start: 100, end: 110, words: 11 }],
+        sourceAttributionState: "REPORT_DERIVED_REFERENCE",
+      },
+    ],
+  });
+  assert.equal(r.sources.length, 1, "one unit, one card, regardless of occurrence count");
+  assert.equal(r.matchedWordCount, 22);
+});
+
+test("imported similarity evidence: overlapping archive evidence unions positions once but both relationships remain explainable", () => {
+  const report = mkReport({
+    archiveMatchedPositions: range(0, 20),
+    sources: [{ name: "Archive Ref", type: "Internet", percent: 10, matches: 1, matchedWords: 21, phrases: [], color: "#0" }],
+    unifiedSimilarity: { matchedPositions: range(0, 20), previousUploadPositions: [] },
+  });
+  const r = buildReportEvidenceInterpretation(report, {
+    importedSimilarityAdmittedSources: [
+      { key: "imported-similarity-evidence:PU0001", spans: [{ start: 10, end: 20, words: 11 }], sourceAttributionState: "TURNITIN_SOURCE_MARKER_ONLY" },
+    ],
+  });
+  // SCORE_DOUBLE_COUNT = NO: overlapping positions still counted once in the headline union
+  assert.equal(r.matchedWordCount, 21);
+  assert.ok(reconciles(r));
+  // REPORT_CAN_EXPLAIN_IMPORTED_MATCH = YES: both sources still each get a card
+  // referencing the overlapping passage.
+  assert.equal(r.sources.length, 2);
+  const overlapPassage = r.passages.find((p) => p.wordStart <= 10 && p.wordEnd >= 10);
+  assert.ok(overlapPassage, "overlap passage must exist");
+  const cardIds = r.sources.map((s) => s.id);
+  assert.ok(cardIds.every((id) => overlapPassage.sourceIds.includes(id) || r.sources.find((s) => s.id === id).passageRefs.length > 0));
+});
+
+test("imported similarity evidence: no admitted sources => no card (byte-identical to before this channel existed)", () => {
+  const report = mkReport({
+    unifiedSimilarity: { matchedPositions: range(0, 10), previousUploadPositions: [] },
+  });
+  const withOpt = buildReportEvidenceInterpretation(report, { importedSimilarityAdmittedSources: [] });
+  const withoutOpt = buildReportEvidenceInterpretation(report);
+  assert.deepEqual(withOpt, withoutOpt);
+  assert.equal(withOpt.sources.length, 0);
+});
+
+test("imported similarity evidence: privacy — no evidence-unit id, evidence-set id, or attribution-state string reaches the customer payload", () => {
+  const report = mkReport({
+    unifiedSimilarity: { matchedPositions: range(0, 10), previousUploadPositions: [] },
+  });
+  const r = buildReportEvidenceInterpretation(report, {
+    importedSimilarityAdmittedSources: [
+      { key: "imported-similarity-evidence:PU0001-SECRET", spans: [{ start: 0, end: 10, words: 11 }], sourceAttributionState: "ORIGINAL_SOURCE_VERIFIED" },
+    ],
+  });
+  const blob = JSON.stringify(r);
+  for (const bad of ["PU0001-SECRET", "ORIGINAL_SOURCE_VERIFIED", "evidenceUnitId", "evidenceSetId", "reportSha256", "imported-similarity-evidence:"]) {
+    assert.equal(blob.includes(bad), false, `payload must not contain ${bad}`);
+  }
+  assert.match(r.sources[0].id, /^src-\d+$/);
+});
+
 // ── mixed-source report + reconciliation ───────────────────────────────
 test("mixed-source report: archive + scholarly + prior, positionsByKind is a disjoint partition", () => {
   const text = makeText(600, { quoteAt: [300, 340] });
@@ -347,6 +458,7 @@ test("adapters: empty channels produce zero normalized sources", () => {
   assert.equal(normalizeScholarlyEvidence(report).length, 0);
   assert.equal(normalizePriorSubmissionEvidence(report).length, 0);
   assert.equal(normalizeSelectiveCorpusEvidence([], 100).length, 0);
+  assert.equal(normalizeImportedSimilarityEvidence([], 100).length, 0);
   const r = buildReportEvidenceInterpretation(report);
   assert.equal(r.matchedWordCount, 0);
   assert.equal(r.sources.length, 0);
