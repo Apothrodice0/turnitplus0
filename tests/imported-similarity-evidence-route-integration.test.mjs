@@ -14,6 +14,7 @@ import * as signupRoute from "../app/api/auth/signup/route.ts";
 import { resetRateForTest, resetAuthRateForTest, resetReadRateForTest } from "../lib/rate-limit.ts";
 import { withTestIdentity } from "./helpers/test-signup.mjs";
 import { tokens } from "../lib/similarity-core.ts";
+import { decodeReportFromPersistence } from "../lib/report-persistence.ts";
 import { buildImportedSimilarityEvidencePackageFile } from "../lib/imported-similarity-evidence/package.ts";
 import {
   resetImportedSimilarityEvidencePackageCacheForTest,
@@ -114,7 +115,8 @@ async function post(acc, id, extra) {
 }
 async function readRow(deviceKey, id) {
   const r = await dbClient.execute({ sql: "SELECT payload_json FROM saved_reports WHERE device_key = ? AND id = ?", args: [deviceKey, id] });
-  return r.rows[0] ? JSON.parse(String(r.rows[0].payload_json)) : null;
+  // C2: persisted rows carry compact forms (contributions, evidenceInterpretation) — decode exactly as the read boundaries do.
+  return r.rows[0] ? decodeReportFromPersistence(JSON.parse(String(r.rows[0].payload_json))) : null;
 }
 
 // GENUINE FINDING (not assumed from stale notes): app/api/reports/route.ts's

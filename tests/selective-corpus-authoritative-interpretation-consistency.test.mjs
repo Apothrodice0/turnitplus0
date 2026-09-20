@@ -21,7 +21,8 @@ import {
 import { makeUnitRecord } from "./helpers/imported-similarity-evidence-fixtures.mjs";
 import { finalizeSelectiveCorpusAuthoritativeReport } from "../lib/selective-corpus-authoritative.ts";
 import { persistSelectiveCorpusAuthoritativeFinalization } from "../lib/report-primary-similarity.ts";
-import { expandUnifiedSimilarityFromPersistence } from "../lib/unified-similarity-persistence.ts";
+import { decodeReportFromPersistence } from "../lib/report-persistence.ts";
+import { expandEvidenceInterpretationFromPersistence } from "../lib/evidence-interpretation/persistence.ts";
 import { MAX_REPORT_SAVE_REQUEST_BYTES } from "../lib/report-transport-limits.ts";
 import { computeUnifiedSimilarity } from "../lib/unified-similarity.ts";
 // Namespace import on purpose: the shared finalized-report helper is read
@@ -174,16 +175,20 @@ async function post(acc, id, extra = {}, text = MANUSCRIPT) {
   }));
 }
 
+// C2: persisted rows carry compact forms (contributions, evidenceInterpretation) — both readers decode
+// exactly as the real GET/SSR boundaries do (lib/report-persistence.ts).
 async function readRow(deviceKey, id) {
   const r = await db.execute({ sql: "SELECT payload_json FROM saved_reports WHERE device_key = ? AND id = ?", args: [deviceKey, id] });
   if (!r.rows[0]) return null;
-  const payload = JSON.parse(String(r.rows[0].payload_json));
-  if (payload.unifiedSimilarity) payload.unifiedSimilarity = expandUnifiedSimilarityFromPersistence(payload.unifiedSimilarity);
-  return payload;
+  return decodeReportFromPersistence(JSON.parse(String(r.rows[0].payload_json)));
+}
+async function readRawRow(deviceKey, id) {
+  const r = await db.execute({ sql: "SELECT payload_json FROM saved_reports WHERE device_key = ? AND id = ?", args: [deviceKey, id] });
+  return r.rows[0] ? String(r.rows[0].payload_json) : null;
 }
 async function readFirstWrite(deviceKey, id) {
   const r = await db.execute({ sql: "SELECT payload_json FROM tp_test_first_write WHERE device_key = ? AND id = ?", args: [deviceKey, id] });
-  return r.rows[0] ? JSON.parse(String(r.rows[0].payload_json)) : null;
+  return r.rows[0] ? decodeReportFromPersistence(JSON.parse(String(r.rows[0].payload_json))) : null;
 }
 
 let seq = 0;
@@ -468,14 +473,21 @@ test("shared helper + USER-SUPPLIED REFERENCES: when the caller's score DID incl
     userSuppliedReferenceEvidence: [{ sourceId: "usr-ref:1", matchedPassages: refEvidence[0].verifiedPassages }],
   });
   const report = { ...structuredClone(control.payload), unifiedSimilarity };
-  const withRef = build(report, { userSuppliedReferenceEvidence: refEvidence });
+  // C2: the helper returns a result whose interpretation is in PERSISTED form (compact) — expand it as the read boundary does.
+  const interpretationOf = (result) => {
+    assert.equal(result.ok, true, "the helper produced a persistable interpretation");
+    const expansion = expandEvidenceInterpretationFromPersistence(result.evidenceInterpretation);
+    assert.notEqual(expansion.status, "unreadable");
+    return expansion.value;
+  };
+  const withRef = interpretationOf(build(report, { userSuppliedReferenceEvidence: refEvidence }));
   assertInterpretationMatchesFinalScore({ unifiedSimilarity, evidenceInterpretation: withRef }, "helper with reference evidence");
   const refCards = withRef.sources.filter((s) => s.sourceType === "user-supplied-reference");
   assert.equal(refCards.length, 1);
   assert.equal(refCards[0].label, "my-reference.pdf");
   assert.equal(refCards[0].matchedWords, 8);
   // Without being told the score had the channel, the helper explains none of it (the positions still reconcile via the partition).
-  const withoutRef = build(report);
+  const withoutRef = interpretationOf(build(report));
   assertInterpretationMatchesFinalScore({ unifiedSimilarity, evidenceInterpretation: withoutRef }, "helper without reference evidence");
   assert.equal(withoutRef.sources.filter((s) => s.sourceType === "user-supplied-reference").length, 0);
 });
@@ -563,7 +575,7 @@ test("RESAVE of a finalized report that carried REAL Selective Corpus evidence: 
 // ---------------------------------------------------------------------------
 // 8. persistSelectiveCorpusAuthoritativeFinalization write contract
 // ---------------------------------------------------------------------------
-test("persistSelectiveCorpusAuthoritativeFinalization: interpretation is written in the SAME atomic CAS write; undefined leaves it untouched, null removes it, a CAS loser can never overwrite it", async () => {
+test("persistSelectiveCorpusAuthoritativeFinalization: interpretation is written in the SAME atomic CAS write; undefined leaves it untouched, null is REJECTED (a score is never written while removing its explanation), a CAS loser can never overwrite it", async () => {
   const control = await flagsOffControl();
   const resolution = (extra) => ({
     unifiedSimilarity: control.payload.unifiedSimilarity,
@@ -595,43 +607,67 @@ test("persistSelectiveCorpusAuthoritativeFinalization: interpretation is written
   assert.equal(loser.written, false, "CAS: already-terminal row is a clean no-op");
   assert.equal((await readRow(b.deviceKey, b.id)).evidenceInterpretation.matchedWordCount, 123, "the loser's interpretation never landed");
 
-  // null -> the stale interpretation is REMOVED (never left behind), terminal transition still lands.
+  // C2 — null is REJECTED: this write must never land a new score while removing its explanation.
+  // Nothing is written: the pending row is byte-identical, still pending, no score, interpretation intact.
   const c = await seedPendingClone(control.payload);
-  assert.ok((await readRow(c.deviceKey, c.id)).evidenceInterpretation, "sanity: a stale interpretation exists before the write");
-  const wC = await persistSelectiveCorpusAuthoritativeFinalization(db, { reportDeviceKey: c.deviceKey, reportId: c.id }, resolution({ evidenceInterpretation: null }));
-  assert.equal(wC.written, true);
+  assert.ok((await readRow(c.deviceKey, c.id)).evidenceInterpretation, "sanity: an interpretation exists before the attempted write");
+  const rawBeforeNull = await readRawRow(c.deviceKey, c.id);
+  await assert.rejects(
+    () => persistSelectiveCorpusAuthoritativeFinalization(db, { reportDeviceKey: c.deviceKey, reportId: c.id }, resolution({ evidenceInterpretation: null })),
+    /refusing to write a final score while removing its evidenceInterpretation/,
+  );
+  assert.equal(await readRawRow(c.deviceKey, c.id), rawBeforeNull, "null is rejected before any write: the row is byte-identical");
   const rowC = await readRow(c.deviceKey, c.id);
-  assert.equal(rowC.evidenceInterpretation, undefined, "null = remove");
-  assert.equal(rowC.selectiveCorpusAuthoritativeStatus, "completed");
+  assert.equal(rowC.selectiveCorpusAuthoritativeStatus, "pending");
+  assert.equal(rowC.unifiedSimilarity, undefined, "no score was introduced without its explanation");
+  assert.ok(rowC.evidenceInterpretation, "the existing interpretation was not removed");
 });
 
 // ---------------------------------------------------------------------------
 // 9. Shared helper: one builder, and the existing 2,000,000-byte save limit
 // ---------------------------------------------------------------------------
-test("shared helper: builds via the SAME withEvidenceInterpretation as the write-time path (identical output) and yields null when the final report would not fit the existing save limit", async () => {
+test("shared helper: builds via the SAME withEvidenceInterpretation as the write-time path (identical output once expanded) and FAILS CLOSED — an explicit failure, never a null/'drop it' — when the ENCODED whole final report would not fit the existing save limit", async () => {
   const build = interpretationWiring.buildFinalizedReportEvidenceInterpretation;
   assert.equal(typeof build, "function", "the shared finalized-report interpretation helper must exist");
   const control = await flagsOffControl();
   const report = control.payload;
   const viaHelper = build(report);
+  assert.equal(viaHelper.ok, true);
   const viaWriteTime = interpretationWiring.withEvidenceInterpretation(report, {
     historicalSubmissionMatch: null,
     selectiveCorpusBranch: null,
     userSuppliedReferenceEvidence: null,
   }).evidenceInterpretation;
-  assert.deepEqual(viaHelper, viaWriteTime, "no second builder: helper output == withEvidenceInterpretation output");
-  assert.equal(build(report, { maxBytes: 10 }), null, "does not fit -> null (caller then persists none and removes any stale one), exactly the write-time soft-degrade semantics");
-  assert.notEqual(build(report, { maxBytes: MAX_REPORT_SAVE_REQUEST_BYTES }), null, "the default limit is the existing, unchanged MAX_REPORT_SAVE_REQUEST_BYTES");
+  const expansion = expandEvidenceInterpretationFromPersistence(viaHelper.evidenceInterpretation);
+  assert.equal(expansion.status, "expanded", "the helper hands back the PERSISTED (compact) form");
+  assert.deepEqual(expansion.value, viaWriteTime, "no second builder: helper output (expanded) == withEvidenceInterpretation output");
+  const tooSmall = build(report, { maxBytes: 10 });
+  assert.deepEqual(
+    { ok: tooSmall.ok, reason: tooSmall.reason, maxBytes: tooSmall.maxBytes },
+    { ok: false, reason: "PERSISTED_SIZE_EXCEEDED", maxBytes: 10 },
+    "does not fit -> an explicit failure; the caller must not write the score",
+  );
+  assert.ok(tooSmall.persistedBytes > 10, "the failure reports the measured encoded size");
+  assert.equal("evidenceInterpretation" in tooSmall, false, "a failure carries nothing to persist — there is no 'persist the score and drop the interpretation' outcome");
+  assert.equal(build(report, { maxBytes: MAX_REPORT_SAVE_REQUEST_BYTES }).ok, true, "the default limit is the existing, unchanged MAX_REPORT_SAVE_REQUEST_BYTES");
 });
 
-test("FLAGS ON, final report too large for the existing save limit: the terminal transition and score still land, and the stale pending-time interpretation is REMOVED rather than left inconsistent", async () => {
+test("FLAGS ON, final report too large for the existing save limit: FAIL CLOSED — the finalizer writes NOTHING (no new score, no explanation removed), reports persistence-limit-exceeded, and the pending row is byte-identical", async () => {
   const control = await flagsOffControl();
-  // A pending payload already ~100 bytes under the limit: the final score + any
-  // interpretation cannot fit, so the interpretation must be dropped.
+  // A pending payload already ~100 bytes under the limit: the final score + its
+  // interpretation cannot fit even in compact form.
   const clone = await seedPendingClone(control.payload, { padFor: (baseLen) => MAX_REPORT_SAVE_REQUEST_BYTES - 100 - baseLen });
-  assert.ok((await readRow(clone.deviceKey, clone.id)).evidenceInterpretation, "sanity: stale interpretation present before finalization");
-  const final = await finalize(clone, []);
-  assert.equal(final.selectiveCorpusAuthoritativeStatus, "completed");
-  assert.ok(final.unifiedSimilarity, "the score is never withheld because of the interpretation size");
-  assert.equal(final.evidenceInterpretation, undefined, "no stale interpretation survives when the fresh one cannot fit");
+  const before = await readRawRow(clone.deviceKey, clone.id);
+  assert.ok((await readRow(clone.deviceKey, clone.id)).evidenceInterpretation, "sanity: the pending row carries its (archive-only) interpretation");
+
+  const result = await finalizeSelectiveCorpusAuthoritativeReport(db, {
+    reportDeviceKey: clone.deviceKey, reportId: clone.id, accountId: null, shadowResult: completedShadowResult([]),
+  });
+  assert.deepEqual(result, { outcome: "persistence-limit-exceeded" });
+
+  assert.equal(await readRawRow(clone.deviceKey, clone.id), before, "nothing was written: the row is byte-identical");
+  const after = await readRow(clone.deviceKey, clone.id);
+  assert.equal(after.selectiveCorpusAuthoritativeStatus, "pending", "no terminal transition without an explainable score");
+  assert.equal(after.unifiedSimilarity, undefined, "no unexplained score was introduced");
+  assert.ok(after.evidenceInterpretation, "the prior interpretation was not removed");
 });

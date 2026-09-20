@@ -238,7 +238,7 @@ export default async function DeveloperReportInspectPage({
         <AdminCollapsible summary="Matched sources (evidence used in the final report)">
           <pre>{JSON.stringify(report.payload.externalAcademicEvidence ?? [], null, 2)}</pre>
         </AdminCollapsible>
-        <AdminCollapsible summary="Full report payload (raw payload_json)">
+        <AdminCollapsible summary="Full report payload (payload_json, decoded from its compact persisted form)">
           <pre>{JSON.stringify(report.payload, null, 2)}</pre>
         </AdminCollapsible>
       </section>

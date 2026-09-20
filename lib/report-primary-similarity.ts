@@ -5,6 +5,7 @@ import { CORPUS_FINGERPRINT_VERSION, CANONICALIZATION_VERSION } from "./user-sub
 import { computeUnifiedSimilarity, type UnifiedSimilarityResult } from "./unified-similarity";
 import { resolveImportedSimilarityEvidenceForUnifiedSimilarity } from "./imported-similarity-evidence";
 import { compactUnifiedSimilarityForPersistence } from "./unified-similarity-persistence";
+import type { PersistedEvidenceInterpretation } from "./evidence-interpretation/persistence";
 import type { ReportHistoricalSubmissionMatch, SimilarityReport } from "./report-types";
 import type { ExternalAcademicEvidence } from "./academic-search/types";
 import { canonicalSha256 } from "./document-identity";
@@ -867,10 +868,15 @@ export type SelectiveCorpusAuthoritativeTerminalStatus = "completed" | "incomple
  * replaced in the SAME single atomic, CAS-guarded statement as the score it
  * explains: no reader can ever observe the new score beside the old
  * explanation, and a CAS loser (rowsAffected 0) can never overwrite the
- * winner's. `undefined` leaves the persisted key untouched (direct callers that
- * do not manage it); `null` REMOVES it — the caller found no interpretation
- * that fits, and a stale one must never be left beside a score it no longer
- * describes.
+ * winner's. The value is in its PERSISTED form (the compact encoding from
+ * buildFinalizedReportEvidenceInterpretation, or any legacy full shape — both
+ * are valid persisted forms); this function only serialises it.
+ *
+ * `undefined` leaves the persisted key untouched (direct callers that do not
+ * manage it — the production finalizer never passes it). `null` is REJECTED
+ * (throws before any write): this write must never land a new score while
+ * removing its explanation — when no interpretation can be persisted the caller
+ * must not perform this write at all (C2 fail-closed invariant).
  */
 export async function persistSelectiveCorpusAuthoritativeFinalization(
   client: Client,
@@ -880,16 +886,20 @@ export async function persistSelectiveCorpusAuthoritativeFinalization(
     corpusSourceMatchingEnabled: boolean;
     corpusGeneration: number;
     terminalStatus: SelectiveCorpusAuthoritativeTerminalStatus;
-    evidenceInterpretation?: SimilarityReport["evidenceInterpretation"] | null;
+    evidenceInterpretation?: PersistedEvidenceInterpretation;
   },
 ): Promise<{ written: boolean; rowsAffected: number }> {
+  if ((resolution.evidenceInterpretation as unknown) === null) {
+    throw new Error(
+      "persistSelectiveCorpusAuthoritativeFinalization: refusing to write a final score while removing its evidenceInterpretation (the caller must not perform this write when no interpretation can be persisted)",
+    );
+  }
   const flagText = resolution.corpusSourceMatchingEnabled ? "true" : "false";
   const interpretationToSet = resolution.evidenceInterpretation ?? null;
-  const removeInterpretation = resolution.evidenceInterpretation === null;
   const result = await client.execute({
     sql: `UPDATE saved_reports
           SET payload_json = json_set(
-                json_remove(payload_json, '$.selectiveCorpusAuthoritativeClaimedAt'${removeInterpretation ? ", '$.evidenceInterpretation'" : ""}),
+                json_remove(payload_json, '$.selectiveCorpusAuthoritativeClaimedAt'),
                 '$.unifiedSimilarity', json(?),
                 '$.corpusSourceMatchingEnabledAtComputation', json(?),
                 '$.unifiedSimilarityGeneration', ?,

@@ -17,6 +17,7 @@ import {
 import { canonicalSha256 } from "../lib/document-identity.ts";
 import { computeUnifiedSimilarity } from "../lib/unified-similarity.ts";
 import { withEvidenceInterpretation } from "../lib/report-evidence-interpretation.ts";
+import { decodeReportFromPersistence } from "../lib/report-persistence.ts";
 import { resolveReportCompletion } from "../lib/evidence-interpretation/index.ts";
 import { buildReportV2ViewModel } from "../lib/report-v2-view.ts";
 import { tokens } from "../lib/similarity-core.ts";
@@ -396,7 +397,8 @@ async function post(acc, id, extra) {
 }
 async function readRow(deviceKey, id) {
   const r = await dbClient.execute({ sql: "SELECT payload_json FROM saved_reports WHERE device_key = ? AND id = ?", args: [deviceKey, id] });
-  return r.rows[0] ? JSON.parse(String(r.rows[0].payload_json)) : null;
+  // C2: persisted rows carry compact forms (contributions, evidenceInterpretation) — decode exactly as the read boundaries do.
+  return r.rows[0] ? decodeReportFromPersistence(JSON.parse(String(r.rows[0].payload_json))) : null;
 }
 async function get(acc, id) {
   await resetReadRateForTest(acc.tag + "-get");

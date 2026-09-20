@@ -1,4 +1,5 @@
-import type { UnifiedSimilarityResult } from "./unified-similarity";
+import type { UnifiedEvidenceContribution, UnifiedSimilarityResult } from "./unified-similarity";
+import { jsonValuesEqual } from "./json-values-equal";
 
 /**
  * Pre-launch hardening fix — measured 2 MB report-transport-ceiling
@@ -27,32 +28,209 @@ import type { UnifiedSimilarityResult } from "./unified-similarity";
  * interpretation, report-completion, highlighting, accessors) continues to
  * see the exact same fully-expanded shape it always has.
  *
- * Deliberately scoped to ONLY `previousUploadPositions` — the one field the
- * real measured fixture proved responsible for the 413. Does NOT touch
+ * Scope of the ORIGINAL fix: ONLY `previousUploadPositions` — the one field the
+ * real measured fixture proved responsible for the 413. It does NOT touch
  * `userSuppliedReferencePositions`/`selectiveCorpusPositions`/
  * `archiveMatchedPositions` (a repo-wide consumer audit found the first two
  * have no production readers at all today, and the third lives outside
- * `UnifiedSimilarityResult` entirely) — out of scope for this fix.
+ * `UnifiedSimilarityResult` entirely).
+ *
+ * C2 ADDITION — `contributions` (the admin-only per-passage attribution, ~39% of
+ * a fragment-heavy report) gets the same treatment as a second, independent
+ * persistence-only encoding: a versioned COMPACT form (string table + numeric
+ * rows) that is proven lossless before it is kept (VERIFY-THEN-COMPACT, see
+ * compactContributionsForPersistence) and expanded back to the exact array at
+ * the same two read boundaries. The scoring fields and every position array are
+ * untouched. Legacy rows (a plain `contributions` array) stay valid forever.
  */
 
 /** The one persistence-only marker this module introduces. Distinct from `UNIFIED_SIMILARITY_VERSION` (an unrelated, unbumped scoring-algorithm version) — this is a storage-representation flag only. */
 export const PREVIOUS_UPLOAD_POSITIONS_ENCODING_MATCHED_POSITIONS = "matchedPositions" as const;
 
+/** Format marker shared with the evidence-interpretation compact form (a legacy `contributions` value is an array, never an object). */
+export const COMPACT_CONTRIBUTIONS_FORMAT = "compact" as const;
+export const COMPACT_CONTRIBUTIONS_FORMAT_VERSION = 1 as const;
+
+/**
+ * Compact v1 `contributions`: every contribution becomes one numeric row
+ * `[sourceTypeRef, sourceIdRef, submittedWordStart, submittedWordEnd,
+ * matchedWordCount, evidenceStatusRef, importedSourceAttributionStateRef?,
+ * relationshipRef?, effectiveScoringRelationshipRef?, effectiveScoringReasonRef?]`
+ * where every `…Ref` indexes `strings`, `-1` marks an absent optional field, and
+ * trailing absent optionals are omitted. Every value is kept verbatim (nothing is
+ * derived), so it cannot drift if scoring code changes later.
+ */
+export type CompactContributions = {
+  format: typeof COMPACT_CONTRIBUTIONS_FORMAT;
+  formatVersion: typeof COMPACT_CONTRIBUTIONS_FORMAT_VERSION;
+  strings: string[];
+  rows: number[][];
+};
+
 /**
  * The on-disk (payload_json) shape: identical to `UnifiedSimilarityResult`
- * except `previousUploadPositions` may be OMITTED when
+ * except (1) `previousUploadPositions` may be OMITTED when
  * `previousUploadPositionsEncoding === "matchedPositions"` — in which case a
- * reader must reconstruct it as an exact copy of `matchedPositions`. Every
+ * reader must reconstruct it as an exact copy of `matchedPositions`, and
+ * (2) `contributions` may be the COMPACT form above instead of the array. Every
  * other field is always present, unchanged, exactly as computeUnifiedSimilarity
- * produces it. A row written before this fix existed has no
- * `previousUploadPositionsEncoding` key at all and its `previousUploadPositions`
- * array present in full — both shapes are valid, permanently, with no
- * migration ever required.
+ * produces it. A row written before either encoding existed has no
+ * `previousUploadPositionsEncoding` key, its `previousUploadPositions` array in
+ * full, and a plain `contributions` array — every shape is valid, permanently,
+ * with no migration ever required.
  */
-export type PersistedUnifiedSimilarity = Omit<UnifiedSimilarityResult, "previousUploadPositions"> & {
+export type PersistedUnifiedSimilarity = Omit<UnifiedSimilarityResult, "previousUploadPositions" | "contributions"> & {
   previousUploadPositions?: number[];
   previousUploadPositionsEncoding?: typeof PREVIOUS_UPLOAD_POSITIONS_ENCODING_MATCHED_POSITIONS;
+  contributions: UnifiedEvidenceContribution[] | CompactContributions;
 };
+
+function isCompactContributions(value: unknown): value is CompactContributions {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    (value as { format?: unknown }).format === COMPACT_CONTRIBUTIONS_FORMAT
+  );
+}
+
+const ABSENT_REF = -1;
+/** Optional contribution fields, in row order (slot 6..9). */
+const OPTIONAL_CONTRIBUTION_FIELDS = [
+  "importedSourceAttributionState",
+  "relationship",
+  "effectiveScoringRelationship",
+  "effectiveScoringReason",
+] as const;
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+/** Builds the compact form, or null when some contribution is not exactly representable. Does NOT verify. */
+function buildCompactContributions(contributions: readonly UnifiedEvidenceContribution[]): CompactContributions | null {
+  const strings: string[] = [];
+  const stringIndex = new Map<string, number>();
+  const intern = (value: unknown): number | null => {
+    if (typeof value !== "string") return null;
+    const existing = stringIndex.get(value);
+    if (existing !== undefined) return existing;
+    stringIndex.set(value, strings.length);
+    strings.push(value);
+    return strings.length - 1;
+  };
+
+  const rows: number[][] = [];
+  for (const contribution of contributions) {
+    if (typeof contribution !== "object" || contribution === null) return null;
+    const type = intern(contribution.sourceType);
+    const id = intern(contribution.sourceId);
+    const status = intern(contribution.evidenceStatus);
+    if (type === null || id === null || status === null) return null;
+    if (
+      !isFiniteNumber(contribution.submittedWordStart) ||
+      !isFiniteNumber(contribution.submittedWordEnd) ||
+      !isFiniteNumber(contribution.matchedWordCount)
+    ) {
+      return null;
+    }
+    const row = [type, id, contribution.submittedWordStart, contribution.submittedWordEnd, contribution.matchedWordCount, status];
+    for (const field of OPTIONAL_CONTRIBUTION_FIELDS) {
+      const value = contribution[field];
+      if (value === undefined) {
+        row.push(ABSENT_REF);
+        continue;
+      }
+      const ref = intern(value);
+      if (ref === null) return null;
+      row.push(ref);
+    }
+    while (row.length > 6 && row[row.length - 1] === ABSENT_REF) row.pop();
+    rows.push(row);
+  }
+  return { format: COMPACT_CONTRIBUTIONS_FORMAT, formatVersion: COMPACT_CONTRIBUTIONS_FORMAT_VERSION, strings, rows };
+}
+
+type ContributionsExpansion =
+  | { status: "expanded"; value: UnifiedEvidenceContribution[] }
+  | { status: "unreadable"; reason: string };
+
+function expandCompactContributions(compact: CompactContributions): ContributionsExpansion {
+  if (compact.formatVersion !== COMPACT_CONTRIBUTIONS_FORMAT_VERSION) return { status: "unreadable", reason: "UNSUPPORTED_FORMAT_VERSION" };
+  if (!Array.isArray(compact.strings) || !Array.isArray(compact.rows)) return { status: "unreadable", reason: "MALFORMED" };
+  const { strings, rows } = compact;
+  const ref = (value: unknown): string | undefined | null => {
+    if (value === ABSENT_REF || value === undefined) return undefined;
+    if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0 || value >= strings.length) return null;
+    const text = strings[value];
+    return typeof text === "string" ? text : null;
+  };
+
+  const value: UnifiedEvidenceContribution[] = [];
+  for (const row of rows) {
+    if (!Array.isArray(row) || row.length < 6) return { status: "unreadable", reason: "MALFORMED_ROW" };
+    const sourceType = ref(row[0]);
+    const sourceId = ref(row[1]);
+    const evidenceStatus = ref(row[5]);
+    if (sourceType == null || sourceId == null || evidenceStatus == null) return { status: "unreadable", reason: "BAD_REF" };
+    if (!isFiniteNumber(row[2]) || !isFiniteNumber(row[3]) || !isFiniteNumber(row[4])) return { status: "unreadable", reason: "BAD_NUMBER" };
+    const optional = OPTIONAL_CONTRIBUTION_FIELDS.map((_, slot) => ref(row[6 + slot]));
+    if (optional.some((entry) => entry === null)) return { status: "unreadable", reason: "BAD_REF" };
+    const [importedSourceAttributionState, relationship, effectiveScoringRelationship, effectiveScoringReason] = optional;
+    // Same key order computeUnifiedSimilarity emits (JSON order is not semantic, but a stable order keeps diffs readable).
+    value.push({
+      sourceType,
+      sourceId,
+      submittedWordStart: row[2],
+      submittedWordEnd: row[3],
+      matchedWordCount: row[4],
+      ...(relationship !== undefined ? { relationship } : {}),
+      ...(effectiveScoringRelationship !== undefined ? { effectiveScoringRelationship } : {}),
+      ...(effectiveScoringReason !== undefined ? { effectiveScoringReason } : {}),
+      evidenceStatus,
+      ...(importedSourceAttributionState !== undefined ? { importedSourceAttributionState } : {}),
+    } as UnifiedEvidenceContribution);
+  }
+  return { status: "expanded", value };
+}
+
+/**
+ * Returns the compact v1 form ONLY when it provably reconstructs
+ * `contributions` exactly (VERIFY-THEN-COMPACT); otherwise — including for an
+ * empty array, an unexpected extra field, or a non-finite number — returns the
+ * array unchanged. Never mutates, never throws, never drops a contribution.
+ */
+function compactContributionsForPersistence(
+  contributions: UnifiedEvidenceContribution[],
+): UnifiedEvidenceContribution[] | CompactContributions {
+  if (!Array.isArray(contributions) || contributions.length === 0) return contributions;
+  try {
+    const compact = buildCompactContributions(contributions);
+    if (!compact) return contributions;
+    const roundTrip = expandCompactContributions(compact);
+    if (roundTrip.status !== "expanded" || !jsonValuesEqual(roundTrip.value, contributions)) return contributions;
+    return compact;
+  } catch {
+    return contributions;
+  }
+}
+
+/**
+ * Inverse of compactContributionsForPersistence. A plain array (every legacy
+ * row) and an absent value are returned untouched. An UNKNOWN or corrupt compact
+ * value becomes `[]` — the same absence-compatible convention every consumer
+ * already uses (`contributions ?? []`) and the same value a non-admin receives —
+ * never a guessed array; the failure is logged (reason only, no report data).
+ */
+function expandContributionsFromPersistence(
+  persisted: UnifiedEvidenceContribution[] | CompactContributions | undefined,
+): UnifiedEvidenceContribution[] | undefined {
+  if (!isCompactContributions(persisted)) return persisted as UnifiedEvidenceContribution[] | undefined;
+  const expansion = expandCompactContributions(persisted);
+  if (expansion.status === "expanded") return expansion.value;
+  console.error(`persisted unifiedSimilarity.contributions is unreadable (${expansion.reason}); serving none`);
+  return [];
+}
 
 function isOrderedIdentical(a: readonly number[], b: readonly number[]): boolean {
   if (a.length !== b.length) return false;
@@ -85,9 +263,17 @@ function representationBytes(fieldName: string, value: unknown): number {
  * Whenever any condition fails, the expanded `previousUploadPositions` is
  * persisted completely unchanged (still a copy, never the original
  * reference) — this function never silently drops real data.
+ *
+ * INDEPENDENTLY, a non-empty `contributions` array is replaced by its compact v1
+ * form when (and only when) that form is proven to reconstruct it exactly — see
+ * compactContributionsForPersistence. The two encodings do not interact.
  */
 export function compactUnifiedSimilarityForPersistence(result: UnifiedSimilarityResult): PersistedUnifiedSimilarity {
-  const { matchedPositions, previousUploadPositions, ...rest } = result;
+  const { matchedPositions, previousUploadPositions, ...restWithContributions } = result;
+  // Overriding (never removing/re-adding) the key keeps `contributions` at its original position in the object.
+  const rest = Array.isArray(restWithContributions.contributions)
+    ? { ...restWithContributions, contributions: compactContributionsForPersistence(restWithContributions.contributions) }
+    : restWithContributions;
   const eligible =
     Array.isArray(matchedPositions) &&
     Array.isArray(previousUploadPositions) &&
@@ -126,9 +312,17 @@ export function compactUnifiedSimilarityForPersistence(result: UnifiedSimilarity
  * `previousUploadPositions` untouched if present, or `[]` if genuinely
  * absent — identical to today's existing behavior, a true no-op for the
  * "old expanded report" case.
+ *
+ * `contributions`: a COMPACT value is expanded to the exact array (an unknown /
+ * corrupt compact value becomes `[]`, see expandContributionsFromPersistence); a
+ * plain array or an absent value is left exactly as it was. The compact marker
+ * object never survives into the result.
  */
 export function expandUnifiedSimilarityFromPersistence(persisted: PersistedUnifiedSimilarity): UnifiedSimilarityResult {
-  const { previousUploadPositionsEncoding, previousUploadPositions, ...rest } = persisted;
+  const { previousUploadPositionsEncoding, previousUploadPositions, ...restWithContributions } = persisted;
+  const rest = isCompactContributions(restWithContributions.contributions)
+    ? { ...restWithContributions, contributions: expandContributionsFromPersistence(restWithContributions.contributions) }
+    : restWithContributions;
   if (previousUploadPositionsEncoding === PREVIOUS_UPLOAD_POSITIONS_ENCODING_MATCHED_POSITIONS) {
     const matchedPositions = Array.isArray(rest.matchedPositions) ? rest.matchedPositions : [];
     return { ...rest, matchedPositions, previousUploadPositions: [...matchedPositions] } as UnifiedSimilarityResult;

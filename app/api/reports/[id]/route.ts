@@ -11,7 +11,7 @@ import { deleteReportDocumentData } from '../../../../lib/report-deletion';
 import { deleteReportCorpusAdmissionData } from '../../../../lib/corpus-admission-report-integration';
 import { getSessionUser } from '../../../../lib/auth-session';
 import { stripServerInternalReportFields, type SimilarityReport } from '../../../../lib/report-types';
-import { expandUnifiedSimilarityFromPersistence } from '../../../../lib/unified-similarity-persistence';
+import { decodeReportFromPersistence } from '../../../../lib/report-persistence';
 
 // This response is per-session personalized (viewerIsAdmin and admin-gated
 // historical-match data) and MUST NOT be shared-cached. Every response from
@@ -57,18 +57,18 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
         return new NextResponse(JSON.stringify({ error: 'Report not found' }), { status: 404, headers: NO_STORE_JSON });
       }
 
-      payload = JSON.parse(String(row.payload_json)) as SimilarityReport;
-      // Pre-launch hardening fix (measured 2MB transport-ceiling fix):
-      // immediately expand a possibly-compact persisted unifiedSimilarity
-      // back to the full legacy shape every downstream consumer in this
-      // handler already expects (evidence interpretation, report-completion,
-      // non-admin filtering, response serialization) — BEFORE any of them
-      // run. A row with no compaction marker (every pre-existing report,
-      // permanently) round-trips through this as a true no-op. See
-      // lib/unified-similarity-persistence.ts's own header comment.
-      if (payload.unifiedSimilarity) {
-        payload.unifiedSimilarity = expandUnifiedSimilarityFromPersistence(payload.unifiedSimilarity);
-      }
+      // C2 — the ONE decode boundary: immediately expand the report's
+      // compact persisted forms (unifiedSimilarity's previousUploadPositions
+      // elision + compact contributions, and the compact evidenceInterpretation)
+      // back to the full public shape every downstream consumer in this
+      // handler already expects (evidence interpretation restore, report-
+      // completion, non-admin contributions redaction, response serialization)
+      // — BEFORE any of them run, so nothing below (and no customer response)
+      // ever sees a compact tuple or format marker. A row with no compact form
+      // anywhere (every pre-existing report, permanently) round-trips through
+      // this as a no-op; an unknown/corrupt compact interpretation is dropped,
+      // never guessed. See lib/report-persistence.ts.
+      payload = decodeReportFromPersistence(JSON.parse(String(row.payload_json)) as SimilarityReport);
       // DOCUMENT EXTRACTION V2 — capture the persisted extraction diagnostic
       // BEFORE the strip below. Unlike evidenceInterpretation / reportCompletion
       // (recomputed from the server's authoritative matched-position data),
