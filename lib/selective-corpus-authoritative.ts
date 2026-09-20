@@ -95,7 +95,17 @@ export type FinalizeSelectiveCorpusAuthoritativeReportResult =
   | { outcome: "already-finalized" }
   | { outcome: "not-pending" }
   | { outcome: "row-missing" }
-  | { outcome: "gave-up" };
+  | { outcome: "gave-up" }
+  /**
+   * C2 fail-closed: the ENCODED (compact) whole final report — score plus its
+   * explanation — exceeds the report persistence limit. NOTHING was written: the
+   * report keeps exactly the row it had ("pending", no final score), so a
+   * customer-visible score is never persisted without the interpretation that
+   * explains it. Deliberately NOT retried with less evidence (the zero-V4
+   * fallback below is for unexpected exceptions only): shrinking the score to
+   * make it fit would be a scoring-semantics decision this module does not make.
+   */
+  | { outcome: "persistence-limit-exceeded" };
 
 type ReadReportRowResult = { payload: SimilarityReport; archiveScoreColumn: number | bigint };
 
@@ -186,12 +196,29 @@ async function resolveAndPersist(
   // No user-supplied-reference evidence is passed, mirroring the score
   // resolution above (which deliberately gets none): the explanation never
   // describes evidence the final score does not contain.
-  // null (build failed / would not fit the existing save limit) makes the
-  // persist below REMOVE the stale interpretation instead of keeping it.
-  const evidenceInterpretation = buildFinalizedReportEvidenceInterpretation(
+  //
+  // C2 FAIL CLOSED: the score and its explanation are persisted together or not
+  // at all. There is no "land the score, remove the interpretation" outcome.
+  //   - BUILD_FAILED: an unexpected exception — thrown, so the existing
+  //     exception handling (best-effort zero-V4 fallback, else leave pending for
+  //     the recovery sweep) applies exactly as it does for any other failure.
+  //   - PERSISTED_SIZE_EXCEEDED: even the compact whole report does not fit the
+  //     persistence limit. Nothing is written and the pending row is left
+  //     untouched (see the outcome's own doc comment).
+  const prepared = buildFinalizedReportEvidenceInterpretation(
     { ...payload, externalAcademicEvidence: verifiedAcademicEvidence, unifiedSimilarity: resolution.unifiedSimilarity },
     { historicalSubmissionMatch: resolution.historicalSubmissionMatch },
   );
+  if (!prepared.ok) {
+    if (prepared.reason === "PERSISTED_SIZE_EXCEEDED") {
+      console.error(
+        "selective-corpus authoritative finalization: the final report cannot be persisted WITH its explanation within the persistence limit; leaving the report pending, nothing written:",
+        { reportId: params.reportId, persistedBytes: prepared.persistedBytes, maxBytes: prepared.maxBytes },
+      );
+      return { outcome: "persistence-limit-exceeded" };
+    }
+    throw new Error("selective-corpus authoritative finalization could not build the final report's evidenceInterpretation");
+  }
 
   const write = await persistSelectiveCorpusAuthoritativeFinalization(
     client,
@@ -201,7 +228,7 @@ async function resolveAndPersist(
       corpusSourceMatchingEnabled: resolution.corpusSourceMatchingEnabled,
       corpusGeneration: resolution.corpusGeneration,
       terminalStatus: evidenceSelection.terminalStatus,
-      evidenceInterpretation,
+      evidenceInterpretation: prepared.evidenceInterpretation,
     },
   );
   if (!write.written) {

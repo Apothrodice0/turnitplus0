@@ -38,7 +38,7 @@ import { sanitizeSuppliedReferenceInputs, admittedReferenceEvidenceForUnifiedSim
 import { referenceTransportBudgetError } from '../../../lib/user-supplied-reference-constants';
 import { MAX_REPORT_SAVE_REQUEST_BYTES } from '../../../lib/report-transport-limits';
 import { logReportSaveRejectedTelemetry } from '../../../lib/report-save-telemetry';
-import { compactUnifiedSimilarityForPersistence } from '../../../lib/unified-similarity-persistence';
+import { encodeReportForPersistence } from '../../../lib/report-persistence';
 import { scheduleReportShadowEvaluations } from '../../../lib/report-shadow-evaluations';
 import { effectiveSelectiveCorpusAuthoritativeEnabled } from '../../../lib/selective-corpus/flag';
 import type { SimilarityReport, ReportHistoricalSubmissionMatch } from '../../../lib/report-types';
@@ -1004,41 +1004,52 @@ export async function POST(request: Request) {
       // earlier successful save.
       // Report V2: attach the additive, EXPLANATION-ONLY evidenceInterpretation /
       // reportCompletion / extractionDiagnostic computed from THIS server-
-      // resolved payload. Never touches a score or a matched position. If the
-      // interpretation would push the blob over MAX_BYTES (a pathologically
-      // large fully-matched document), it is dropped rather than 413-ing a
-      // report that would otherwise save — GET recomputes it on read.
+      // resolved payload. Never touches a score or a matched position.
       //
-      // Pre-launch hardening fix (measured 2MB transport-ceiling
-      // characterization): compaction happens ONLY here — immediately before
-      // JSON.stringify, strictly AFTER withEvidenceInterpretation has already
-      // seen and built from the FULL EXPANDED unifiedSimilarity (that
-      // function reads report.unifiedSimilarity?.matchedPositions only,
-      // never previousUploadPositions — see
-      // lib/unified-similarity-persistence.ts's own header comment for the
-      // full audit trail). This preserves the exact existing soft-degrade
-      // ordering: the size check below (CHECK 4/5/6, identical either way)
-      // now measures the COMPACT representation, never changing which
-      // branch (enriched vs. plain obj) wins on its own merits.
-      const compactForPersistence = <T extends SimilarityReport>(obj: T): T =>
-        obj.unifiedSimilarity
-          ? ({ ...obj, unifiedSimilarity: compactUnifiedSimilarityForPersistence(obj.unifiedSimilarity) } as T)
-          : obj;
+      // C2 — SCORE-WITHOUT-EXPLANATION IS IMPOSSIBLE. This used to fall back to
+      // the interpretation-free report whenever the enriched blob would exceed
+      // MAX_BYTES, persisting the final score with its explanation silently
+      // removed (and nothing on read ever restores it: a saved report is a
+      // snapshot). It no longer does. The persisted blob is ALWAYS the ENCODED
+      // whole report (lib/report-persistence.ts — lossless compact forms of
+      // evidenceInterpretation and unifiedSimilarity.contributions, plus the
+      // older previousUploadPositions elision) WITH its interpretation, and that
+      // encoded string is what the persisted-size checks below (CHECK 4/5/6)
+      // measure. When even the compact whole report exceeds MAX_BYTES the
+      // over-limit string is returned as-is and those existing checks reject the
+      // save with the unchanged 413 PERSISTED_PAYLOAD_TOO_LARGE — the report save
+      // fails closed instead of persisting an unexplained score.
+      //
+      // The one remaining fallback is deliberate and narrow: if the (pure)
+      // interpretation build itself THROWS, a payload that carries NO final
+      // unifiedSimilarity (the initial pending payload, or the
+      // unifiedSimilarityFailed marker payload) is still persisted without it —
+      // there is no final score there for an explanation to be missing from. A
+      // payload that DOES carry a final unifiedSimilarity rethrows instead, which
+      // the write-time finalization's own try/catch below already treats as a
+      // transient failure (the report stays "pending", eligible for retry, with
+      // no final score persisted).
+      //
+      // Compaction still happens ONLY here — immediately before JSON.stringify,
+      // strictly AFTER withEvidenceInterpretation has built from the FULL
+      // EXPANDED unifiedSimilarity (see lib/unified-similarity-persistence.ts's
+      // header for why that ordering is safe).
       const finalizeReportJson = (obj: SimilarityReport, hsm?: ReportHistoricalSubmissionMatch | null): string => {
+        let enriched: SimilarityReport | null = null;
         try {
-          const enriched = JSON.stringify(compactForPersistence(withEvidenceInterpretation(obj, {
+          enriched = withEvidenceInterpretation(obj, {
             historicalSubmissionMatch: hsm ?? null,
             selectiveCorpusBranch: null,
             serverExtractionDiagnostic: clientExtractionDiagnostic,
             userSuppliedReferenceEvidence: suppliedReferenceEvidence,
             userSuppliedReferenceChannel: suppliedReferenceChannelState,
             userSuppliedReferenceGuard: suppliedReferenceGuard,
-          })));
-          if (enriched.length <= MAX_BYTES) return enriched;
+          });
         } catch (err) {
-          console.error('report V2 interpretation attach failed (non-fatal, report saved without it):', err instanceof Error ? err.message : String(err));
+          console.error('report V2 interpretation attach failed:', err instanceof Error ? err.message : String(err));
+          if (obj.unifiedSimilarity) throw err;
         }
-        return JSON.stringify(compactForPersistence(obj));
+        return JSON.stringify(encodeReportForPersistence(enriched ?? obj));
       };
       // Base = the SERVER-RESOLVED payload (client fields, but
       // externalAcademicEvidence forced to the verified set + the verified

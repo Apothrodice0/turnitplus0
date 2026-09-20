@@ -11,6 +11,10 @@ import {
 import type { SuppliedReferenceVerifiedEvidence } from "@/lib/user-supplied-references";
 import type { UnifiedEvidenceContribution } from "@/lib/unified-similarity";
 import { compactUnifiedSimilarityForPersistence } from "@/lib/unified-similarity-persistence";
+import {
+  compactEvidenceInterpretationForPersistence,
+  type PersistedEvidenceInterpretation,
+} from "@/lib/evidence-interpretation/persistence";
 import { MAX_REPORT_SAVE_REQUEST_BYTES } from "@/lib/report-transport-limits";
 
 /**
@@ -211,9 +215,26 @@ export type FinalizedReportEvidenceInterpretationOptions = {
    * only describe inputs the score actually had.
    */
   userSuppliedReferenceEvidence?: readonly SuppliedReferenceVerifiedEvidence[] | null;
-  /** Ceiling the WHOLE final persisted report must fit. Defaults to the existing, unchanged MAX_REPORT_SAVE_REQUEST_BYTES — the exact limit app/api/reports/route.ts's finalizeReportJson soft-degrades against. */
+  /** Ceiling the ENCODED (compact) whole final report must fit. Defaults to the existing, unchanged MAX_REPORT_SAVE_REQUEST_BYTES — the same limit app/api/reports/route.ts's persisted-size checks enforce. */
   maxBytes?: number;
 };
+
+/**
+ * Outcome of preparing the authoritative finalizer's interpretation.
+ *
+ *   ok: true  — `evidenceInterpretation` is the PERSISTED-FORM (compact when
+ *               losslessly representable) interpretation of the final report, and
+ *               the ENCODED whole final report fits the limit. Persist it in the
+ *               SAME atomic write as the final score.
+ *   ok: false — the final score must NOT be persisted at all. There is no
+ *               "persist the score and remove the explanation" outcome any more.
+ *     BUILD_FAILED             the (pure) interpretation build threw / produced nothing.
+ *     PERSISTED_SIZE_EXCEEDED  even the compact encoded whole report is over `maxBytes`.
+ */
+export type FinalizedReportInterpretationResult =
+  | { ok: true; evidenceInterpretation: PersistedEvidenceInterpretation }
+  | { ok: false; reason: "BUILD_FAILED" }
+  | { ok: false; reason: "PERSISTED_SIZE_EXCEEDED"; persistedBytes: number; maxBytes: number };
 
 /**
  * AUTHORITATIVE PROMOTION — the evidenceInterpretation for a report whose FINAL
@@ -235,40 +256,47 @@ export type FinalizedReportEvidenceInterpretationOptions = {
  * user-supplied-reference evidence the score was given is passed explicitly
  * through `opts` (see FinalizedReportEvidenceInterpretationOptions).
  *
- * Returns null — meaning "persist NO interpretation, and remove any earlier
- * one" — when building throws or when the final report would not fit `maxBytes`:
- * the same soft-degrade finalizeReportJson applies (a report that would
- * otherwise save is never failed for its explanation), except that here a stale
- * earlier interpretation must also go rather than be left inconsistent with the
- * new score. The size check measures the COMPACT persisted representation of the
- * whole final report, like finalizeReportJson's own.
+ * C2 — FAIL CLOSED. This used to return null — "persist NO interpretation, and
+ * remove any earlier one" — when building threw or the final report would not
+ * fit, so the caller landed the NEW final score with its explanation deleted.
+ * That outcome no longer exists: the result is either the persisted-form
+ * interpretation together with proof the encoded whole report fits, or an
+ * explicit failure, and on failure the caller must not write the score.
+ *
+ * The size check measures exactly what the CAS write persists: the whole
+ * final report with its compact `unifiedSimilarity` (previousUploadPositions
+ * elision + compact contributions) and its compact `evidenceInterpretation`,
+ * against the unchanged MAX_REPORT_SAVE_REQUEST_BYTES.
  */
 export function buildFinalizedReportEvidenceInterpretation(
   finalReport: SimilarityReport,
   opts: FinalizedReportEvidenceInterpretationOptions = {},
-): NonNullable<SimilarityReport["evidenceInterpretation"]> | null {
+): FinalizedReportInterpretationResult {
+  const maxBytes = opts.maxBytes ?? MAX_REPORT_SAVE_REQUEST_BYTES;
   try {
     const interpretation = withEvidenceInterpretation(finalReport, {
       historicalSubmissionMatch: opts.historicalSubmissionMatch ?? null,
       selectiveCorpusBranch: null,
       userSuppliedReferenceEvidence: opts.userSuppliedReferenceEvidence ?? null,
     }).evidenceInterpretation;
-    if (!interpretation) return null;
+    if (!interpretation) return { ok: false, reason: "BUILD_FAILED" };
+    const persistedInterpretation = compactEvidenceInterpretationForPersistence(interpretation);
     const persisted = {
       ...finalReport,
       ...(finalReport.unifiedSimilarity
         ? { unifiedSimilarity: compactUnifiedSimilarityForPersistence(finalReport.unifiedSimilarity) }
         : {}),
-      evidenceInterpretation: interpretation,
+      evidenceInterpretation: persistedInterpretation,
     };
-    if (JSON.stringify(persisted).length > (opts.maxBytes ?? MAX_REPORT_SAVE_REQUEST_BYTES)) return null;
-    return interpretation;
+    const persistedBytes = JSON.stringify(persisted).length;
+    if (persistedBytes > maxBytes) return { ok: false, reason: "PERSISTED_SIZE_EXCEEDED", persistedBytes, maxBytes };
+    return { ok: true, evidenceInterpretation: persistedInterpretation };
   } catch (err) {
     console.error(
-      "report V2 finalized-report interpretation build failed (non-fatal, terminal write proceeds without it):",
+      "report V2 finalized-report interpretation build failed:",
       err instanceof Error ? err.message : String(err),
     );
-    return null;
+    return { ok: false, reason: "BUILD_FAILED" };
   }
 }
 

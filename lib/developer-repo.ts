@@ -9,6 +9,7 @@ import { canonicalSha256 } from "./document-identity";
 import { summarizeSubmissionOwnership } from "./user-submission-corpus";
 import { summarizeSubmissionProvenance } from "./submission-provenance";
 import { resolvePrimarySimilaritySummary } from "./report-primary-similarity";
+import { decodeReportFromPersistence } from "./report-persistence";
 import { DEVICE_PROVENANCE_SHADOW_POLICY_VERSION } from "./device-provenance-shadow";
 import { CORPUS_DUPLICATE_SUPPRESSION_SHADOW_POLICY_VERSION } from "./corpus-duplicate-suppression-shadow";
 import {
@@ -204,7 +205,10 @@ export async function getReportDeepDiveForDeveloper(client: Client, deviceKey: s
     reportCreatedAt: raw.report_created_at,
     savedAt: raw.saved_at,
     updatedAt: raw.updated_at,
-    payload: JSON.parse(raw.payload_json) as SimilarityReport,
+    // C2: decode the compact persisted forms (contributions, evidenceInterpretation)
+    // back to the public shape — the admin/developer view must keep seeing the
+    // readable per-passage contributions it always did.
+    payload: decodeReportFromPersistence(JSON.parse(raw.payload_json) as SimilarityReport),
   };
 
   let documentIdentity: DeveloperDocumentIdentity | null = null;
@@ -503,7 +507,9 @@ export async function getReportSimilarityDecisionTrace(
 
   let payload: SimilarityReport;
   try {
-    payload = JSON.parse(raw.payload_json) as SimilarityReport;
+    // C2: decode the compact persisted forms — payload.unifiedSimilarity.contributions
+    // below feeds the admin decision trace whenever a fresh resolution is unavailable.
+    payload = decodeReportFromPersistence(JSON.parse(raw.payload_json) as SimilarityReport);
   } catch {
     return null;
   }

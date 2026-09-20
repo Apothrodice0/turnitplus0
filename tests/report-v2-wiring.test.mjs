@@ -11,6 +11,7 @@ import * as signupRoute from '../app/api/auth/signup/route.ts';
 import { resetRateForTest, resetAuthRateForTest, resetReadRateForTest } from '../lib/rate-limit.ts';
 import { withTestIdentity } from './helpers/test-signup.mjs';
 import { tokens } from '../lib/similarity-core.ts';
+import { decodeReportFromPersistence } from '../lib/report-persistence.ts';
 import {
   withEvidenceInterpretation,
   stripClientEvidenceInterpretation,
@@ -149,7 +150,8 @@ async function dbRow(deviceKey, id) {
     args: [deviceKey, id],
   });
   const row = result.rows[0];
-  return row ? { archiveScore: Number(row.archive_score), payload: JSON.parse(String(row.payload_json)), raw: String(row.payload_json) } : null;
+  // C2: persisted rows carry compact forms (contributions, evidenceInterpretation); `payload` is decoded exactly as the read boundaries do, `raw` stays the stored text.
+  return row ? { archiveScore: Number(row.archive_score), payload: decodeReportFromPersistence(JSON.parse(String(row.payload_json))), raw: String(row.payload_json) } : null;
 }
 
 const reconciles = (ei) => {
