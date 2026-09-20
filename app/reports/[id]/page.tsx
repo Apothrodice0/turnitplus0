@@ -12,7 +12,8 @@ import { deriveRoomStatus } from "@/lib/report-rooms";
 import { resolvePersistedSimilarityDisplay } from "@/lib/report-primary-similarity";
 import { archiveOverlapScore, hasUnifiedSimilarity, stripServerInternalReportFields, type SimilarityReport } from "@/lib/report-types";
 import { refreshSelectiveCorpusCompletionSignal } from "@/lib/report-evidence-interpretation";
-import { decodeReportFromPersistence } from "@/lib/report-persistence";
+import { tryDecodeReportFromPersistence } from "@/lib/report-persistence";
+import { ReportUnavailablePanel } from "@/components/report/report-unavailable-panel";
 import { ReportDetailShell } from "./report-detail-shell";
 
 export const dynamic = "force-dynamic";
@@ -55,6 +56,10 @@ type OwnedReportResult =
   // aiAnalysis-as-refinement, not from aiAnalysis alone.
   | { status: "found"; payload: SimilarityReport; aiStatus: "processing" | "ready" | "failed"; aiScore: number | null; aiTone: string | null; similarityStatus: "resolved" | "stale" | "pending" | "failed" }
   | { status: "not-found-for-session" }
+  // R2: the report exists and is this session's own, but its persisted explanation
+  // (evidenceInterpretation) cannot be decoded safely — never rendered as a score
+  // without cards/highlights. See tryDecodeReportFromPersistence.
+  | { status: "report-unavailable" }
   | { status: "no-session" }
   | { status: "rate-limited"; retryAfterSeconds: number };
 
@@ -98,7 +103,18 @@ const loadOwnedReport = cache(async (id: string): Promise<OwnedReportResult> => 
       // GET API's own and uses the SAME helper (lib/report-persistence.ts), so
       // the first-paint payload and the background fetch can never disagree. A
       // row with no compact form round-trips through this as a no-op.
-      const payload = decodeReportFromPersistence(JSON.parse(row.payload_json) as SimilarityReport);
+      //
+      // R2 — FAIL CLOSED, identically to the GET route: an interpretation that is
+      // persisted but cannot be decoded is NOT rendered as a score without cards
+      // and highlights; the page shows the generic unavailable state instead.
+      // (A payload_json that is not even JSON still falls through to the catch
+      // below, i.e. the existing not-found behaviour.) Admin contributions are
+      // required only for an admin session, exactly like the GET route.
+      const decoded = tryDecodeReportFromPersistence(JSON.parse(row.payload_json), {
+        requireContributions: sessionUser.role === "admin",
+      });
+      if (!decoded.ok) return { status: "report-unavailable" };
+      const payload = decoded.report;
       // Scholarly evidence server trust boundary (drizzle/0052): strip the
       // internal verifiedAcademicSearchDiagnosticsId re-lookup handle from the
       // server-rendered first-paint payload, exactly as
@@ -216,6 +232,18 @@ export default async function ReportDetailPage({
   const result = await loadOwnedReport(id);
 
   if (result.status === "not-found-for-session") notFound();
+
+  if (result.status === "report-unavailable") {
+    const backHref = backRoom !== null ? `/reports/rooms/${backRoom}` : "/#reports";
+    const backLabel = backRoom !== null ? `Back to Room ${backRoom + 1}` : "Back to my reports";
+    return (
+      <div className="result-view report-detail-page">
+        <div className="report-not-found-wrap">
+          <ReportUnavailablePanel backHref={backHref} backLabel={backLabel} />
+        </div>
+      </div>
+    );
+  }
 
   if (result.status === "rate-limited") {
     const backHref = backRoom !== null ? `/reports/rooms/${backRoom}` : "/#reports";

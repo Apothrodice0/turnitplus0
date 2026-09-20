@@ -796,7 +796,9 @@ export async function persistRefreshedSimilarity(
         // resolution.unifiedSimilarity itself (the in-memory
         // computeUnifiedSimilarity output every OTHER caller of this
         // function's result relies on) is never mutated — see
-        // lib/unified-similarity-persistence.ts's own header comment.
+        // lib/unified-similarity-persistence.ts's own header comment. R2: the
+        // C2 contributions compaction only applies under the compact-write gate
+        // (default OFF, so this self-heal write stays legacy until it is opened).
         JSON.stringify(compactUnifiedSimilarityForPersistence(resolution.unifiedSimilarity)),
         flagText,
         resolution.corpusGeneration,
@@ -887,6 +889,12 @@ export async function persistSelectiveCorpusAuthoritativeFinalization(
     corpusGeneration: number;
     terminalStatus: SelectiveCorpusAuthoritativeTerminalStatus;
     evidenceInterpretation?: PersistedEvidenceInterpretation;
+    /**
+     * R2 write gate. The mode buildFinalizedReportEvidenceInterpretation measured the
+     * size under (its `compactWrites`), so this write persists the same form it
+     * checked. Omitted (direct callers) => follows REPORT_COMPACT_PERSISTENCE_WRITE_ENABLED.
+     */
+    compactWrites?: boolean;
   },
 ): Promise<{ written: boolean; rowsAffected: number }> {
   if ((resolution.evidenceInterpretation as unknown) === null) {
@@ -913,8 +921,9 @@ export async function persistSelectiveCorpusAuthoritativeFinalization(
       // Pre-launch hardening fix — same shared compaction as
       // finalizeReportJson/persistRefreshedSimilarity above. The CAS/status
       // guard clauses above are untouched; only the persisted JSON value for
-      // '$.unifiedSimilarity' changes shape when eligible.
-      JSON.stringify(compactUnifiedSimilarityForPersistence(resolution.unifiedSimilarity)),
+      // '$.unifiedSimilarity' changes shape when eligible. R2: contributions are
+      // compacted only under the write gate, in the mode the caller measured.
+      JSON.stringify(compactUnifiedSimilarityForPersistence(resolution.unifiedSimilarity, { compactWrites: resolution.compactWrites })),
       flagText,
       resolution.corpusGeneration,
       ...(interpretationToSet ? [JSON.stringify(interpretationToSet)] : []),

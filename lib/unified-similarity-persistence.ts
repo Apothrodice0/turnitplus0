@@ -1,5 +1,6 @@
 import type { UnifiedEvidenceContribution, UnifiedSimilarityResult } from "./unified-similarity";
 import { jsonValuesEqual } from "./json-values-equal";
+import { resolveCompactPersistenceWrites, type CompactPersistenceWriteOptions } from "./report-compact-persistence-flag";
 
 /**
  * Pre-launch hardening fix — measured 2 MB report-transport-ceiling
@@ -42,6 +43,13 @@ import { jsonValuesEqual } from "./json-values-equal";
  * compactContributionsForPersistence) and expanded back to the exact array at
  * the same two read boundaries. The scoring fields and every position array are
  * untouched. Legacy rows (a plain `contributions` array) stay valid forever.
+ *
+ * R2 WRITE GATE — the C2 `contributions` compaction is an opt-in WRITE
+ * (lib/report-compact-persistence-flag.ts, default OFF): with it off,
+ * `contributions` is persisted as the plain array exactly as before C2, so a
+ * pre-C2 reader never meets the compact form. The older `previousUploadPositions`
+ * elision is NOT gated — it shipped (and is readable by the deployed fleet)
+ * before C2. The READ side always understands every form.
  */
 
 /** The one persistence-only marker this module introduces. Distinct from `UNIFIED_SIMILARITY_VERSION` (an unrelated, unbumped scoring-algorithm version) — this is a storage-representation flag only. */
@@ -215,23 +223,6 @@ function compactContributionsForPersistence(
   }
 }
 
-/**
- * Inverse of compactContributionsForPersistence. A plain array (every legacy
- * row) and an absent value are returned untouched. An UNKNOWN or corrupt compact
- * value becomes `[]` — the same absence-compatible convention every consumer
- * already uses (`contributions ?? []`) and the same value a non-admin receives —
- * never a guessed array; the failure is logged (reason only, no report data).
- */
-function expandContributionsFromPersistence(
-  persisted: UnifiedEvidenceContribution[] | CompactContributions | undefined,
-): UnifiedEvidenceContribution[] | undefined {
-  if (!isCompactContributions(persisted)) return persisted as UnifiedEvidenceContribution[] | undefined;
-  const expansion = expandCompactContributions(persisted);
-  if (expansion.status === "expanded") return expansion.value;
-  console.error(`persisted unifiedSimilarity.contributions is unreadable (${expansion.reason}); serving none`);
-  return [];
-}
-
 function isOrderedIdentical(a: readonly number[], b: readonly number[]): boolean {
   if (a.length !== b.length) return false;
   for (let index = 0; index < a.length; index += 1) {
@@ -265,15 +256,20 @@ function representationBytes(fieldName: string, value: unknown): number {
  * reference) — this function never silently drops real data.
  *
  * INDEPENDENTLY, a non-empty `contributions` array is replaced by its compact v1
- * form when (and only when) that form is proven to reconstruct it exactly — see
+ * form when (and only when) compact writes are enabled (R2 write gate, default
+ * OFF) AND that form is proven to reconstruct it exactly — see
  * compactContributionsForPersistence. The two encodings do not interact.
  */
-export function compactUnifiedSimilarityForPersistence(result: UnifiedSimilarityResult): PersistedUnifiedSimilarity {
+export function compactUnifiedSimilarityForPersistence(
+  result: UnifiedSimilarityResult,
+  options?: CompactPersistenceWriteOptions,
+): PersistedUnifiedSimilarity {
   const { matchedPositions, previousUploadPositions, ...restWithContributions } = result;
   // Overriding (never removing/re-adding) the key keeps `contributions` at its original position in the object.
-  const rest = Array.isArray(restWithContributions.contributions)
-    ? { ...restWithContributions, contributions: compactContributionsForPersistence(restWithContributions.contributions) }
-    : restWithContributions;
+  const rest =
+    resolveCompactPersistenceWrites(options) && Array.isArray(restWithContributions.contributions)
+      ? { ...restWithContributions, contributions: compactContributionsForPersistence(restWithContributions.contributions) }
+      : restWithContributions;
   const eligible =
     Array.isArray(matchedPositions) &&
     Array.isArray(previousUploadPositions) &&
@@ -295,6 +291,11 @@ export function compactUnifiedSimilarityForPersistence(result: UnifiedSimilarity
   };
 }
 
+/** Result of expanding a persisted `unifiedSimilarity` — see tryExpandUnifiedSimilarityFromPersistence. */
+export type UnifiedSimilarityExpansion =
+  | { status: "expanded"; value: UnifiedSimilarityResult }
+  | { status: "contributions-unreadable"; value: UnifiedSimilarityResult; reason: string };
+
 /**
  * Returns a COPY of `persisted` — never mutates the input — with the
  * legacy, fully-expanded shape every existing downstream consumer already
@@ -313,22 +314,59 @@ export function compactUnifiedSimilarityForPersistence(result: UnifiedSimilarity
  * absent — identical to today's existing behavior, a true no-op for the
  * "old expanded report" case.
  *
- * `contributions`: a COMPACT value is expanded to the exact array (an unknown /
- * corrupt compact value becomes `[]`, see expandContributionsFromPersistence); a
- * plain array or an absent value is left exactly as it was. The compact marker
- * object never survives into the result.
+ * `contributions`: a COMPACT value is expanded to the exact array; a plain array
+ * or an absent value is left exactly as it was. The compact marker object never
+ * survives into the result. A compact value that is unknown or corrupt — or any
+ * other non-array shape — is reported as `contributions-unreadable` (R2: this is
+ * admin/internal diagnostic data, so the CALLER decides whether serving without
+ * it is safe, see tryDecodeReportFromPersistence); the returned `value` then
+ * carries the absence-compatible `[]` and is never a guessed array.
+ */
+export function tryExpandUnifiedSimilarityFromPersistence(persisted: PersistedUnifiedSimilarity): UnifiedSimilarityExpansion {
+  const { previousUploadPositionsEncoding, previousUploadPositions, ...restWithContributions } = persisted;
+  let contributionsFailure: string | null = null;
+  let rest: typeof restWithContributions = restWithContributions;
+  const contributions = restWithContributions.contributions as unknown;
+  if (isCompactContributions(contributions)) {
+    const expansion = expandCompactContributions(contributions);
+    if (expansion.status === "expanded") {
+      rest = { ...restWithContributions, contributions: expansion.value };
+    } else {
+      contributionsFailure = expansion.reason;
+      rest = { ...restWithContributions, contributions: [] };
+    }
+  } else if (contributions !== undefined && contributions !== null && !Array.isArray(contributions)) {
+    // Neither the legacy array nor compact v1: a future compact family (a `format` marker we do not know) or plain garbage.
+    contributionsFailure =
+      typeof contributions === "object" && (contributions as { format?: unknown }).format !== undefined ? "UNSUPPORTED_FORMAT" : "MALFORMED";
+    rest = { ...restWithContributions, contributions: [] };
+  }
+  const value = (() => {
+    if (previousUploadPositionsEncoding === PREVIOUS_UPLOAD_POSITIONS_ENCODING_MATCHED_POSITIONS) {
+      const matchedPositions = Array.isArray(rest.matchedPositions) ? rest.matchedPositions : [];
+      return { ...rest, matchedPositions, previousUploadPositions: [...matchedPositions] } as UnifiedSimilarityResult;
+    }
+    return {
+      ...rest,
+      previousUploadPositions: Array.isArray(previousUploadPositions) ? previousUploadPositions : [],
+    } as UnifiedSimilarityResult;
+  })();
+  return contributionsFailure === null
+    ? { status: "expanded", value }
+    : { status: "contributions-unreadable", value, reason: contributionsFailure };
+}
+
+/**
+ * LENIENT expansion (the pre-R2 contract, kept for pure codec use and tests):
+ * unreadable `contributions` become `[]` and the failure is logged (reason only,
+ * no report data). Production READ boundaries must NOT use this — they go through
+ * tryDecodeReportFromPersistence (lib/report-persistence.ts), which decides
+ * whether serving without the diagnostics is safe for the viewer.
  */
 export function expandUnifiedSimilarityFromPersistence(persisted: PersistedUnifiedSimilarity): UnifiedSimilarityResult {
-  const { previousUploadPositionsEncoding, previousUploadPositions, ...restWithContributions } = persisted;
-  const rest = isCompactContributions(restWithContributions.contributions)
-    ? { ...restWithContributions, contributions: expandContributionsFromPersistence(restWithContributions.contributions) }
-    : restWithContributions;
-  if (previousUploadPositionsEncoding === PREVIOUS_UPLOAD_POSITIONS_ENCODING_MATCHED_POSITIONS) {
-    const matchedPositions = Array.isArray(rest.matchedPositions) ? rest.matchedPositions : [];
-    return { ...rest, matchedPositions, previousUploadPositions: [...matchedPositions] } as UnifiedSimilarityResult;
+  const expansion = tryExpandUnifiedSimilarityFromPersistence(persisted);
+  if (expansion.status === "contributions-unreadable") {
+    console.error(`persisted unifiedSimilarity.contributions is unreadable (${expansion.reason}); serving none`);
   }
-  return {
-    ...rest,
-    previousUploadPositions: Array.isArray(previousUploadPositions) ? previousUploadPositions : [],
-  } as UnifiedSimilarityResult;
+  return expansion.value;
 }

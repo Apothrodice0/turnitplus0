@@ -9,7 +9,7 @@ import { canonicalSha256 } from "./document-identity";
 import { summarizeSubmissionOwnership } from "./user-submission-corpus";
 import { summarizeSubmissionProvenance } from "./submission-provenance";
 import { resolvePrimarySimilaritySummary } from "./report-primary-similarity";
-import { decodeReportFromPersistence } from "./report-persistence";
+import { ReportPersistenceDecodeError, tryDecodeReportFromPersistence } from "./report-persistence";
 import { DEVICE_PROVENANCE_SHADOW_POLICY_VERSION } from "./device-provenance-shadow";
 import { CORPUS_DUPLICATE_SUPPRESSION_SHADOW_POLICY_VERSION } from "./corpus-duplicate-suppression-shadow";
 import {
@@ -179,6 +179,13 @@ export type ReportDeepDive = {
  * submission (any account) that document family resolved to, and every
  * academic-search diagnostics run captured for it — everything needed to
  * reproduce or explain a detection outcome without re-running the pipeline.
+ *
+ * R2: throws ReportPersistenceDecodeError (a bounded `reason`, no report content)
+ * when the stored payload's persisted explanation or its admin contributions
+ * cannot be decoded — never a payload whose corrupt interpretation was silently
+ * emptied, and never `[]` contributions presented as "none". Callers (the
+ * developer route and inspector page) turn it into an explicit admin-facing
+ * failure.
  */
 export async function getReportDeepDiveForDeveloper(client: Client, deviceKey: string, id: string): Promise<ReportDeepDive> {
   const reportResult = await client.execute({
@@ -196,6 +203,14 @@ export async function getReportDeepDiveForDeveloper(client: Client, deviceKey: s
     return { report: null, documentIdentity: null, familyMembers: [], family: null, academicSearchRuns: [] };
   }
 
+  // C2: decode the compact persisted forms (contributions, evidenceInterpretation)
+  // back to the public shape — the admin/developer view must keep seeing the
+  // readable per-passage contributions it always did. R2: the inspector serves
+  // contributions, so they are REQUIRED here (default): an unreadable payload is an
+  // explicit failure, not a silently emptied one.
+  const decoded = tryDecodeReportFromPersistence(JSON.parse(raw.payload_json), { requireContributions: true });
+  if (!decoded.ok) throw new ReportPersistenceDecodeError(decoded.reason);
+
   const report = {
     deviceKey: raw.device_key,
     id: raw.id,
@@ -205,10 +220,7 @@ export async function getReportDeepDiveForDeveloper(client: Client, deviceKey: s
     reportCreatedAt: raw.report_created_at,
     savedAt: raw.saved_at,
     updatedAt: raw.updated_at,
-    // C2: decode the compact persisted forms (contributions, evidenceInterpretation)
-    // back to the public shape — the admin/developer view must keep seeing the
-    // readable per-passage contributions it always did.
-    payload: decodeReportFromPersistence(JSON.parse(raw.payload_json) as SimilarityReport),
+    payload: decoded.report,
   };
 
   let documentIdentity: DeveloperDocumentIdentity | null = null;
@@ -509,7 +521,12 @@ export async function getReportSimilarityDecisionTrace(
   try {
     // C2: decode the compact persisted forms — payload.unifiedSimilarity.contributions
     // below feeds the admin decision trace whenever a fresh resolution is unavailable.
-    payload = decodeReportFromPersistence(JSON.parse(raw.payload_json) as SimilarityReport);
+    // R2: contributions are required (the trace consumes them) and an unreadable
+    // payload is "no trace" (the decoder has logged the bounded reason) — never a
+    // trace built from a silently emptied interpretation/contributions.
+    const decoded = tryDecodeReportFromPersistence(JSON.parse(raw.payload_json), { requireContributions: true });
+    if (!decoded.ok) return null;
+    payload = decoded.report;
   } catch {
     return null;
   }

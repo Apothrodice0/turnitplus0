@@ -11,7 +11,7 @@ import { deleteReportDocumentData } from '../../../../lib/report-deletion';
 import { deleteReportCorpusAdmissionData } from '../../../../lib/corpus-admission-report-integration';
 import { getSessionUser } from '../../../../lib/auth-session';
 import { stripServerInternalReportFields, type SimilarityReport } from '../../../../lib/report-types';
-import { decodeReportFromPersistence } from '../../../../lib/report-persistence';
+import { tryDecodeReportFromPersistence } from '../../../../lib/report-persistence';
 
 // This response is per-session personalized (viewerIsAdmin and admin-gated
 // historical-match data) and MUST NOT be shared-cached. Every response from
@@ -21,6 +21,15 @@ export const dynamic = 'force-dynamic';
 
 const MAX_DEVICE_KEY_LENGTH = 200;
 const NO_STORE_JSON = { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } as const;
+
+// R2 — the response for a stored report whose persisted explanation cannot be
+// decoded safely (unsupported compact version, corrupt interpretation, or —
+// only for a viewer who is served them — corrupt admin contributions). A 503 with
+// a generic code: NEVER the score without its explanation, never a decoder
+// internal (the bounded reason is logged server-side by the decoder, not sent).
+// Same `{ error, code }` 503 shape POST /api/reports already uses for
+// ROOM_REUSE_NOT_READY.
+const REPORT_UNAVAILABLE_BODY = JSON.stringify({ error: 'Report temporarily unavailable', code: 'REPORT_TEMPORARILY_UNAVAILABLE' });
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0;
@@ -66,9 +75,23 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
       // — BEFORE any of them run, so nothing below (and no customer response)
       // ever sees a compact tuple or format marker. A row with no compact form
       // anywhere (every pre-existing report, permanently) round-trips through
-      // this as a no-op; an unknown/corrupt compact interpretation is dropped,
-      // never guessed. See lib/report-persistence.ts.
-      payload = decodeReportFromPersistence(JSON.parse(String(row.payload_json)) as SimilarityReport);
+      // this as a no-op.
+      //
+      // R2 — FAIL CLOSED. A persisted interpretation that is unknown/corrupt is
+      // NOT dropped any more (that served the score with no cards and no
+      // highlights as a normal 200): the decode result says so and this route
+      // refuses with a generic 503 — never the score without its explanation,
+      // never a recompute. Admin contributions are diagnostics, not the customer
+      // explanation, so they are only REQUIRED for a viewer who is actually served
+      // them (an admin session); for everyone else a damaged `contributions` is
+      // moot (they are replaced by [] below regardless). See lib/report-persistence.ts.
+      const decoded = tryDecodeReportFromPersistence(JSON.parse(String(row.payload_json)), {
+        requireContributions: sessionUser?.role === 'admin',
+      });
+      if (!decoded.ok) {
+        return new NextResponse(REPORT_UNAVAILABLE_BODY, { status: 503, headers: NO_STORE_JSON });
+      }
+      payload = decoded.report;
       // DOCUMENT EXTRACTION V2 — capture the persisted extraction diagnostic
       // BEFORE the strip below. Unlike evidenceInterpretation / reportCompletion
       // (recomputed from the server's authoritative matched-position data),

@@ -229,6 +229,8 @@ async function resolveAndPersist(
       corpusGeneration: resolution.corpusGeneration,
       terminalStatus: evidenceSelection.terminalStatus,
       evidenceInterpretation: prepared.evidenceInterpretation,
+      // R2 write gate: persist in the exact mode the size check above measured.
+      compactWrites: prepared.compactWrites,
     },
   );
   if (!write.written) {

@@ -1,4 +1,5 @@
 import { jsonValuesEqual } from "../json-values-equal";
+import { resolveCompactPersistenceWrites, type CompactPersistenceWriteOptions } from "../report-compact-persistence-flag";
 import type { EvidenceInterpretationKind } from "./kinds";
 import type {
   ReportEvidenceInterpretation,
@@ -51,10 +52,15 @@ import type {
  * its ORIGINAL shape instead — never lossy, never dropped.
  *
  * READ SAFETY: the reader accepts the legacy full shape (every pre-existing row,
- * permanently, no migration) and compact v1. An unknown `formatVersion`, a
- * malformed table, or an expansion that does not reconcile with the kept
- * countsByKind is `unreadable` — the caller drops the interpretation rather
- * than fabricating evidence.
+ * permanently, no migration) and compact v1. An unknown `format`/`formatVersion`,
+ * a malformed table, or an expansion that does not reconcile with the kept
+ * countsByKind is `unreadable`. The caller must then FAIL CLOSED — it must not
+ * serve the report as a normal, explained one (R2: a score whose explanation was
+ * persisted but cannot be reconstructed must never be shown as if it had none;
+ * see tryDecodeReportFromPersistence in lib/report-persistence.ts).
+ *
+ * WRITE GATE (R2): compaction is an opt-in WRITE (lib/report-compact-persistence-
+ * flag.ts, default OFF). This module only reads, and always reads both forms.
  */
 
 /** Marker shared by every compact persistence format in this codebase. A legacy interpretation has no `format` key. */
@@ -185,14 +191,20 @@ function buildCompact(interpretation: ReportEvidenceInterpretation): CompactEvid
 }
 
 /**
- * Returns the compact v1 form when — and only when — it provably reconstructs
- * `interpretation` exactly; otherwise returns `interpretation` itself (the
- * legacy shape, still a valid persisted form). Never mutates, never throws,
- * never drops anything.
+ * Returns the compact v1 form when — and only when — compact writes are enabled
+ * AND it provably reconstructs `interpretation` exactly; otherwise returns
+ * `interpretation` itself (the legacy shape, still a valid persisted form).
+ * Never mutates, never throws, never drops anything.
+ *
+ * R2 write gate: with compact writes off (the default, see
+ * lib/report-compact-persistence-flag.ts) this is the identity function, so no
+ * compact interpretation is written until the fleet is known to read it.
  */
 export function compactEvidenceInterpretationForPersistence(
   interpretation: ReportEvidenceInterpretation,
+  options?: CompactPersistenceWriteOptions,
 ): PersistedEvidenceInterpretation {
+  if (!resolveCompactPersistenceWrites(options)) return interpretation;
   try {
     const compact = buildCompact(interpretation);
     if (!compact) return interpretation;
@@ -326,9 +338,20 @@ export type EvidenceInterpretationExpansion =
 /**
  * The single reader for a persisted `evidenceInterpretation`. Total: never
  * throws, never mutates its input. A legacy value is a strict no-op.
+ *
+ * "Persisted but not decodable" is `unreadable`, never silently legacy: an
+ * absent value (undefined / null) is the only "no interpretation" case. A value
+ * that is not an object, or that carries a `format` marker this reader does not
+ * know (a future compact family), is unreadable — it is neither a legacy
+ * interpretation (which has no `format` key) nor compact v1.
  */
 export function expandEvidenceInterpretationFromPersistence(persisted: unknown): EvidenceInterpretationExpansion {
+  if (persisted === undefined || persisted === null) {
+    return { status: "legacy", value: persisted as unknown as ReportEvidenceInterpretation };
+  }
+  if (typeof persisted !== "object" || Array.isArray(persisted)) return { status: "unreadable", reason: "NOT_AN_INTERPRETATION" };
   if (!isCompactEvidenceInterpretation(persisted)) {
+    if ((persisted as { format?: unknown }).format !== undefined) return { status: "unreadable", reason: "UNSUPPORTED_FORMAT" };
     return { status: "legacy", value: persisted as ReportEvidenceInterpretation };
   }
   try {

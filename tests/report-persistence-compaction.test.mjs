@@ -16,7 +16,7 @@ import { makeUnitRecord, makePackageFile } from "./helpers/imported-similarity-e
 import { tokens } from "../lib/similarity-core.ts";
 import { computeUnifiedSimilarity } from "../lib/unified-similarity.ts";
 import { withEvidenceInterpretation } from "../lib/report-evidence-interpretation.ts";
-import { encodeReportForPersistence, decodeReportFromPersistence } from "../lib/report-persistence.ts";
+import { encodeReportForPersistence, decodeReportFromPersistence, tryDecodeReportFromPersistence, ReportPersistenceDecodeError } from "../lib/report-persistence.ts";
 import {
   compactEvidenceInterpretationForPersistence,
   expandEvidenceInterpretationFromPersistence,
@@ -65,10 +65,14 @@ const ENV_KEYS = [
   "SELECTIVE_CORPUS_AUTHORITATIVE_ENABLED",
   "SELECTIVE_CORPUS_SHADOW_ENABLED",
   "SELECTIVE_CORPUS_ARTIFACT_PATH",
+  "REPORT_COMPACT_PERSISTENCE_WRITE_ENABLED",
 ];
 const savedEnv = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
 process.env.TURSO_DATABASE_URL = `file:${dbFile}`;
 process.env.CORPUS_SOURCE_MATCHING_ENABLED = "true";
+// R2: compact WRITES are an opt-in rollout gate (default OFF). This file is about the compact form, so it opens the gate
+// process-locally; the gate itself (default OFF, legacy writes, decoder independent of it) is tested in report-compact-read-safety.test.mjs.
+process.env.REPORT_COMPACT_PERSISTENCE_WRITE_ENABLED = "true";
 for (const k of ["IMPORTED_SIMILARITY_EVIDENCE_PACKAGE_PATH", "SELECTIVE_CORPUS_AUTHORITATIVE_ENABLED", "SELECTIVE_CORPUS_SHADOW_ENABLED", "SELECTIVE_CORPUS_ARTIFACT_PATH"]) delete process.env[k];
 
 const db = createClient({ url: `file:${dbFile}` });
@@ -328,25 +332,20 @@ test("A9. verify-then-compact: anything not EXACTLY representable is persisted i
   assert.deepEqual(FULL.evidenceInterpretation, expandEvidenceInterpretationFromPersistence(compactEvidenceInterpretationForPersistence(FULL.evidenceInterpretation)).value);
 });
 
-test("A10. UNKNOWN / CORRUPT compact forms fail SAFE: the interpretation is dropped (never fabricated), contributions become [], scores are untouched, and the reason is logged without report content", () => {
+test("A10. UNKNOWN / CORRUPT compact forms FAIL CLOSED (R2): the structured decode refuses, the strict decode throws, nothing is fabricated or emptied, scores are never returned without their explanation, and the log carries a bounded reason only", () => {
   const logged = [];
   const spy = mock.method(console, "error", (...args) => { logged.push(args.join(" ")); });
   try {
     const wire = () => viaWire(FULL).parsed;
 
+    // (1) an unsupported interpretation version: refused, with the bounded reason — not a report with the interpretation removed
     const futureVersion = wire();
     futureVersion.evidenceInterpretation.formatVersion = 2;
-    futureVersion.unifiedSimilarity.contributions.formatVersion = 99;
-    const decoded = decodeReportFromPersistence(futureVersion);
-    assert.equal("evidenceInterpretation" in decoded, false, "unsupported version -> no interpretation is fabricated");
-    assert.deepEqual(decoded.unifiedSimilarity.contributions, [], "unsupported contributions version -> absence-compatible []");
-    assert.equal(decoded.unifiedSimilarity.unifiedScore, FULL.unifiedSimilarity.unifiedScore, "the score is untouched");
-    assert.deepEqual(decoded.unifiedSimilarity.matchedPositions, FULL.unifiedSimilarity.matchedPositions);
-    assertNoCompactLeak(JSON.stringify(decoded), "unsupported-version decode");
-    assert.ok(logged.some((line) => /evidenceInterpretation is unreadable \(UNSUPPORTED_FORMAT_VERSION\)/.test(line)));
-    assert.ok(logged.some((line) => /contributions is unreadable \(UNSUPPORTED_FORMAT_VERSION\)/.test(line)));
-    assert.ok(logged.every((line) => !/w\d+x|my-reference|Photosynthesis/.test(line)), "logs carry a reason only, never report content");
+    assert.deepEqual(tryDecodeReportFromPersistence(futureVersion), { ok: false, reason: "unsupported_compact_format" });
+    assert.throws(() => decodeReportFromPersistence(futureVersion), (error) => error instanceof ReportPersistenceDecodeError && error.reason === "unsupported_compact_format");
+    assert.ok(logged.some((line) => /"event":"report_persistence_unreadable","reason":"unsupported_compact_format","detail":"UNSUPPORTED_FORMAT_VERSION","outcome":"refused"/.test(line)));
 
+    // (2) every corruption is a refusal too (never "drop and continue")
     const corruptions = {
       MALFORMED_PASSAGE_RANGE: (ei) => { ei.passages[0][0] = "x"; },
       COUNT_MISMATCH: (ei) => { ei.countsByKind.DISTINCTIVE_EXTERNAL_MATCH += 1; },
@@ -356,18 +355,60 @@ test("A10. UNKNOWN / CORRUPT compact forms fail SAFE: the interpretation is drop
       UNKNOWN_PASSAGE_KIND: (ei) => { ei.passageInterpretations[0].kind = "NOT_A_KIND"; },
       BAD_PASSAGE_INTERPRETATION_INDEX: (ei) => { ei.passages[0][2] = 50; },
     };
-    for (const [reason, corrupt] of Object.entries(corruptions)) {
+    for (const [detail, corrupt] of Object.entries(corruptions)) {
       const row = wire();
       corrupt(row.evidenceInterpretation);
       const expansion = expandEvidenceInterpretationFromPersistence(row.evidenceInterpretation);
-      assert.deepEqual({ status: expansion.status, reason: expansion.reason }, { status: "unreadable", reason }, reason);
-      assert.equal("evidenceInterpretation" in decodeReportFromPersistence(row), false, `${reason}: dropped, not guessed`);
+      assert.deepEqual({ status: expansion.status, reason: expansion.reason }, { status: "unreadable", reason: detail }, detail);
+      assert.deepEqual(tryDecodeReportFromPersistence(row), { ok: false, reason: "corrupt_evidence_interpretation" }, `${detail}: refused, not dropped`);
+      assert.throws(() => decodeReportFromPersistence(row), ReportPersistenceDecodeError, detail);
     }
-    for (const bad of [{ format: "compact", formatVersion: 1, strings: [], rows: [[0, 0, 1, 2, 3, 0]] }, { format: "compact", formatVersion: 1, strings: "x", rows: [] }, { format: "compact", formatVersion: 1, strings: ["a"], rows: [[0, 0, "a", 2, 3, 0]] }]) {
+
+    // (3) an interpretation that is neither legacy nor compact v1 is not silently accepted as a "legacy" one
+    for (const junk of ["not-an-object", 7, ["array"], { format: "packed", formatVersion: 1 }]) {
+      const row = wire();
+      row.evidenceInterpretation = junk;
+      assert.equal(tryDecodeReportFromPersistence(row).ok, false, `unknown/garbage interpretation ${JSON.stringify(junk)} is refused`);
+    }
+    // ... whereas ABSENT (legacy / pre-Report-V2) stays a valid, distinct case
+    const absent = wire();
+    delete absent.evidenceInterpretation;
+    const absentDecoded = tryDecodeReportFromPersistence(absent);
+    assert.equal(absentDecoded.ok, true);
+    assert.equal("evidenceInterpretation" in absentDecoded.report, false, "absent stays absent — nothing is fabricated");
+
+    // (4) contributions: a viewer that is SERVED them (default) is refused; a viewer that never receives them is not
+    const badContributions = [
+      { format: "compact", formatVersion: 99, strings: [], rows: [] },
+      { format: "compact", formatVersion: 1, strings: [], rows: [[0, 0, 1, 2, 3, 0]] },
+      { format: "compact", formatVersion: 1, strings: "x", rows: [] },
+      { format: "compact", formatVersion: 1, strings: ["a"], rows: [[0, 0, "a", 2, 3, 0]] },
+      { format: "packed", formatVersion: 1 },
+      "junk",
+    ];
+    for (const bad of badContributions) {
       const row = wire();
       row.unifiedSimilarity.contributions = bad;
-      assert.deepEqual(decodeReportFromPersistence(row).unifiedSimilarity.contributions, [], "malformed contributions -> []");
+      const required = tryDecodeReportFromPersistence(row);
+      assert.equal(required.ok, false, `contributions required: ${JSON.stringify(bad).slice(0, 40)} is refused`);
+      assert.match(required.reason, /^(unsupported_compact_format|corrupt_contributions)$/);
+      const optional = tryDecodeReportFromPersistence(row, { requireContributions: false });
+      assert.equal(optional.ok, true, "contributions not served: the customer-visible explanation is intact, so the report may be served");
+      assert.deepEqual(optional.report.unifiedSimilarity.contributions, [], "absence-compatible [] (what a non-admin receives anyway)");
+      assert.deepEqual(optional.report.evidenceInterpretation, jsonNormalised(FULL.evidenceInterpretation), "the explanation is exactly the intact one");
+      assert.equal(optional.report.unifiedSimilarity.unifiedScore, FULL.unifiedSimilarity.unifiedScore);
+      assertNoCompactLeak(JSON.stringify(optional.report), "contributions-optional decode");
     }
+    // ... and a corrupt INTERPRETATION is refused even when contributions are not required
+    const bothBad = wire();
+    bothBad.evidenceInterpretation.formatVersion = 2;
+    assert.equal(tryDecodeReportFromPersistence(bothBad, { requireContributions: false }).ok, false);
+
+    // (5) a non-object payload is a structured failure, not a TypeError
+    for (const junk of [null, [], "x", 7, undefined]) assert.deepEqual(tryDecodeReportFromPersistence(junk), { ok: false, reason: "invalid_persisted_report" });
+
+    assert.ok(logged.length > 0 && logged.every((line) => /^{"event":"report_persistence_unreadable","reason":"[a-z_]+","detail":"[A-Z_]+","outcome":"(refused|served_without_contributions)"}$/.test(line)), "every log line is the closed, bounded event");
+    assert.ok(logged.every((line) => !/wd+x|my-reference|Photosynthesis/.test(line)), "logs carry a reason only, never report content");
   } finally {
     spy.mock.restore();
   }
@@ -534,7 +575,8 @@ test("B4. GET/SSR PARITY: both read boundaries decode with the ONE shared helper
   const ssrSrc = fs.readFileSync("app/reports/[id]/page.tsx", "utf8");
   for (const [label, src, parseCall] of [["GET route", getSrc, /JSON\.parse\(String\(row\.payload_json\)\)/], ["SSR page", ssrSrc, /JSON\.parse\(row\.payload_json\)/]]) {
     assert.match(src, /from ['"](?:@\/lib|\.\.\/\.\.\/\.\.\/(?:\.\.\/)?lib)\/report-persistence['"]/, `${label} imports the shared decode helper`);
-    assert.match(src, /decodeReportFromPersistence\(JSON\.parse\(/, `${label} decodes at the point the row is parsed`);
+    assert.match(src, /tryDecodeReportFromPersistence\(JSON\.parse\(/, `${label} decodes (structured, fail-closed) at the point the row is parsed`);
+    assert.match(src, /if \(!decoded\.ok\)/, `${label} checks the structured decode result before using the report`);
     assert.match(src, parseCall);
     assert.equal(/expandUnifiedSimilarityFromPersistence/.test(src), false, `${label} no longer carries a second, partial decoder`);
   }
@@ -547,25 +589,30 @@ test("B4. GET/SSR PARITY: both read boundaries decode with the ONE shared helper
   assert.deepEqual(served.evidenceInterpretation, ssrEquivalent.evidenceInterpretation, "SSR-decoded interpretation === GET interpretation");
   assert.deepEqual({ ...served.unifiedSimilarity, contributions: [] }, { ...ssrEquivalent.unifiedSimilarity, contributions: [] });
   // the admin readers use the same helper too
-  assert.match(fs.readFileSync("lib/developer-repo.ts", "utf8").replace(/\r/g, ""), /decodeReportFromPersistence\(JSON\.parse\(raw\.payload_json\)/);
+  assert.match(fs.readFileSync("lib/developer-repo.ts", "utf8").replace(/\r/g, ""), /tryDecodeReportFromPersistence\(JSON\.parse\(raw\.payload_json\)/);
 });
 
-test("B5. an UNKNOWN compact version in a stored row fails safe through the real GET: 200, no fabricated interpretation, scores intact, no compact internals", async () => {
+test("B5. an UNKNOWN compact version in a stored row FAILS CLOSED through the real GET (R2): a generic 503, never a 200 with the score and no explanation, and no compact internals or score in the body", async () => {
+  const owner = await account();
   const admin = await account({ admin: true });
   const id = nextId("b5");
   const row = JSON.parse(JSON.stringify(encodeReportForPersistence(FULL_ROW)));
   row.evidenceInterpretation.formatVersion = 42;
   row.unifiedSimilarity.contributions.formatVersion = 42;
+  await seedRow(owner, id, JSON.stringify(row));
   await seedRow(admin, id, JSON.stringify(row));
   const spy = mock.method(console, "error", () => {});
   try {
-    const got = await get(admin, id);
-    assert.equal(got.status, 200);
-    assert.equal(got.payload.evidenceInterpretation, undefined, "nothing is invented in place of an unreadable interpretation");
-    assert.deepEqual(got.payload.unifiedSimilarity.contributions, []);
-    assert.equal(got.payload.unifiedSimilarity.unifiedScore, FULL.unifiedSimilarity.unifiedScore);
-    assert.deepEqual(got.payload.unifiedSimilarity.matchedPositions, FULL.unifiedSimilarity.matchedPositions);
-    assertNoCompactLeak(got.text, "unknown-version GET");
+    for (const [label, acc] of [["owner", owner], ["admin", admin]]) {
+      const got = await get(acc, id);
+      assert.equal(got.status, 503, `${label}: refused, not served`);
+      assert.deepEqual(JSON.parse(got.text), { error: "Report temporarily unavailable", code: "REPORT_TEMPORARILY_UNAVAILABLE" });
+      assert.equal(got.payload, null);
+      for (const leaked of ["unifiedScore", "evidenceInterpretation", "formatVersion", "unsupported_compact_format", "UNSUPPORTED", "passages", "matchedPositions"]) {
+        assert.equal(got.text.includes(leaked), false, `${label}: the refusal must not contain ${leaked}`);
+      }
+      assertNoCompactLeak(got.text, `unknown-version GET (${label})`);
+    }
   } finally {
     spy.mock.restore();
   }
