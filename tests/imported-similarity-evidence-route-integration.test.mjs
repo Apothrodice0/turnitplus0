@@ -9,8 +9,9 @@ import { createClient } from "@libsql/client";
 
 import { applyMigrationsLibsql } from "../lib/ingest.js";
 import * as reportsRoute from "../app/api/reports/route.ts";
+import * as reportIdRoute from "../app/api/reports/[id]/route.ts";
 import * as signupRoute from "../app/api/auth/signup/route.ts";
-import { resetRateForTest, resetAuthRateForTest } from "../lib/rate-limit.ts";
+import { resetRateForTest, resetAuthRateForTest, resetReadRateForTest } from "../lib/rate-limit.ts";
 import { withTestIdentity } from "./helpers/test-signup.mjs";
 import { tokens } from "../lib/similarity-core.ts";
 import { buildImportedSimilarityEvidencePackageFile } from "../lib/imported-similarity-evidence/package.ts";
@@ -137,6 +138,20 @@ test("Real report creation (authenticated, room slot 0): imported evidence is re
   assert.ok(p.unifiedSimilarity, "unified similarity was resolved for this room-scoped save");
   assert.equal(p.unifiedSimilarity.importedSimilarityEvidenceOnlyWords, MASK.length);
   assert.ok(p.unifiedSimilarity.matchedPositions.length >= MASK.length);
+
+  // ACTIVATION-GATE FIX: the score contribution above must now come with a
+  // real customer-facing explanation card, persisted on the SAME write.
+  assert.ok(p.evidenceInterpretation, "evidenceInterpretation must be persisted alongside the score");
+  const importedCard = p.evidenceInterpretation.sources.find((s) => s.sourceType === "imported-similarity-evidence");
+  assert.ok(importedCard, "a customer-facing imported-similarity-evidence card must exist");
+  assert.equal(importedCard.label, "Imported reference match");
+  assert.equal(importedCard.link, null, "no fabricated URL for a report-derived/marker-only source");
+  assert.equal(importedCard.doi, null);
+  assert.ok(importedCard.passageRefs.length > 0, "card must be associated with a highlightable passage");
+  const raw = JSON.stringify(p.evidenceInterpretation);
+  for (const bad of ["PU0001", "ES-TEST00000001", "a1b2c3d4e5f6a1b2c3d4e5f6", "TURNITIN_SOURCE_MARKER_ONLY"]) {
+    assert.equal(raw.includes(bad), false, `evidenceInterpretation must not leak internal identifier: ${bad}`);
+  }
 });
 
 test("Real report creation (authenticated, a DIFFERENT room slot): the same shared path is reachable regardless of which room slot is used", async () => {
@@ -153,10 +168,55 @@ test("Resave of an already-saved report (no room number required/re-sent): the s
   const id = "ise-resave-1";
   const first = await post(acc, id, { room: 0 });
   assert.equal(first.status, 200);
+  const firstRow = await readRow(acc.deviceKey, id);
+  const firstImportedCards = firstRow.evidenceInterpretation.sources.filter((s) => s.sourceType === "imported-similarity-evidence");
+  assert.equal(firstImportedCards.length, 1, "the first save already has exactly one imported card");
+
   const resave = await post(acc, id, {}); // no `room` on the resave — isFirstSaveOfThisReport is now false
   assert.equal(resave.status, 200);
   const p = await readRow(acc.deviceKey, id);
   assert.equal(p.unifiedSimilarity.importedSimilarityEvidenceOnlyWords, MASK.length);
+
+  // STEP 11 — persistence/resave: the card must still be there, and there
+  // must be exactly one of it, never a duplicate accumulated by the resave.
+  const importedCards = p.evidenceInterpretation.sources.filter((s) => s.sourceType === "imported-similarity-evidence");
+  assert.equal(importedCards.length, 1, "resave must not duplicate the imported card");
+  assert.equal(importedCards[0].label, "Imported reference match");
+});
+
+test("Real GET /api/reports/[id] (ordinary owner, non-admin): the customer response carries the neutral imported card and NO private provenance anywhere in the body", async () => {
+  const acc = await account();
+  const id = "ise-get-1";
+  const res = await post(acc, id, { room: 0 });
+  assert.equal(res.status, 200);
+
+  await resetReadRateForTest(acc.tag + "-get");
+  const getRes = await reportIdRoute.GET(
+    new Request(`http://localhost/api/reports/${id}?deviceKey=${encodeURIComponent(acc.deviceKey)}`, {
+      headers: { "x-forwarded-for": acc.tag + "-get", cookie: `tp_session_v1=${acc.cookie}` },
+    }),
+    { params: Promise.resolve({ id }) },
+  );
+  assert.equal(getRes.status, 200);
+  const bodyText = await getRes.text();
+  const { payload } = JSON.parse(bodyText);
+
+  // The card survives the read path verbatim (GET never recomputes it).
+  const card = payload.evidenceInterpretation.sources.find((s) => s.sourceType === "imported-similarity-evidence");
+  assert.ok(card, "the customer-facing GET response must include the imported card");
+  assert.equal(card.label, "Imported reference match");
+  assert.ok(card.passageRefs.length > 0);
+
+  // Score and explanation agree in the customer response.
+  assert.equal(payload.unifiedSimilarity.importedSimilarityEvidenceOnlyWords, MASK.length);
+  assert.equal(payload.evidenceInterpretation.matchedWordCount, payload.unifiedSimilarity.matchedPositions.length);
+
+  // contributions[] (which carries the unit id + attribution state) is blanked for a non-admin...
+  assert.deepEqual(payload.unifiedSimilarity.contributions, []);
+  // ...and NOTHING private appears anywhere in the ENTIRE response body — not just evidenceInterpretation.
+  for (const bad of ["PU0001", "ES-TEST00000001", "a1b2c3d4e5f6a1b2c3d4e5f6", "TURNITIN_SOURCE_MARKER_ONLY", "imported-similarity-evidence:", "reportSha256", "evidenceUnitId", "evidenceSetId", packagePath.replace(/\\/g, "\\\\")]) {
+    assert.equal(bodyText.includes(bad), false, `GET response must not contain: ${bad}`);
+  }
 });
 
 test("with the package UNCONFIGURED, the same route produces zero imported-evidence contribution (byte-identical to before the channel existed)", async () => {
@@ -171,6 +231,10 @@ test("with the package UNCONFIGURED, the same route produces zero imported-evide
     const p = await readRow(acc.deviceKey, id);
     assert.equal(p.unifiedSimilarity.importedSimilarityEvidenceOnlyWords, 0);
     assert.deepEqual(p.unifiedSimilarity.importedSimilarityEvidencePositions, []);
+    // NO_PACKAGE_BEHAVIOR_REGRESSION: no imported card, no warning/error visible,
+    // and no other source card is affected by this channel being unconfigured.
+    const importedCards = p.evidenceInterpretation.sources.filter((s) => s.sourceType === "imported-similarity-evidence");
+    assert.equal(importedCards.length, 0, "no package configured => no imported card, ever");
   } finally {
     process.env.IMPORTED_SIMILARITY_EVIDENCE_PACKAGE_PATH = packagePath;
     resetImportedSimilarityEvidencePackageCacheForTest();

@@ -5,6 +5,7 @@ import {
   type SelectiveCorpusAuthoritativeTerminalStatus,
 } from "./report-primary-similarity";
 import { resolveVerifiedAcademicEvidence } from "./academic-search-diagnostics-repo";
+import { buildFinalizedReportEvidenceInterpretation } from "./report-evidence-interpretation";
 import { canonicalSha256 } from "./document-identity";
 import type { SimilarityReport } from "./report-types";
 import type { SelectiveCorpusShadowResult } from "./selective-corpus/types";
@@ -173,6 +174,25 @@ async function resolveAndPersist(
     return { outcome: "gave-up" };
   }
 
+  // The FINAL unifiedSimilarity is now known — derive the customer-visible
+  // evidenceInterpretation from IT (through the shared write-time builder), so
+  // the score and its explanation can never disagree. A report created in this
+  // mode was persisted while "pending" with NO unifiedSimilarity, so the
+  // interpretation POST built for it came from archive-only positions and can
+  // explain none of the channels that only exist in this final score (imported
+  // evidence, Selective Corpus). Built over exactly the inputs that fed the
+  // score — the server-verified academic evidence re-resolved above, this
+  // resolution's historical match — never the persisted, possibly-stale ones.
+  // No user-supplied-reference evidence is passed, mirroring the score
+  // resolution above (which deliberately gets none): the explanation never
+  // describes evidence the final score does not contain.
+  // null (build failed / would not fit the existing save limit) makes the
+  // persist below REMOVE the stale interpretation instead of keeping it.
+  const evidenceInterpretation = buildFinalizedReportEvidenceInterpretation(
+    { ...payload, externalAcademicEvidence: verifiedAcademicEvidence, unifiedSimilarity: resolution.unifiedSimilarity },
+    { historicalSubmissionMatch: resolution.historicalSubmissionMatch },
+  );
+
   const write = await persistSelectiveCorpusAuthoritativeFinalization(
     client,
     { reportDeviceKey: params.reportDeviceKey, reportId: params.reportId },
@@ -181,6 +201,7 @@ async function resolveAndPersist(
       corpusSourceMatchingEnabled: resolution.corpusSourceMatchingEnabled,
       corpusGeneration: resolution.corpusGeneration,
       terminalStatus: evidenceSelection.terminalStatus,
+      evidenceInterpretation,
     },
   );
   if (!write.written) {

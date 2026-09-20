@@ -9,6 +9,9 @@ import {
   type BuildReportEvidenceInterpretationOptions,
 } from "@/lib/evidence-interpretation";
 import type { SuppliedReferenceVerifiedEvidence } from "@/lib/user-supplied-references";
+import type { UnifiedEvidenceContribution } from "@/lib/unified-similarity";
+import { compactUnifiedSimilarityForPersistence } from "@/lib/unified-similarity-persistence";
+import { MAX_REPORT_SAVE_REQUEST_BYTES } from "@/lib/report-transport-limits";
 
 /**
  * Report V2 wiring — turn the already-FINAL authoritative SimilarityReport into
@@ -90,6 +93,53 @@ export type ReportEvidenceInterpretationWiringOptions = {
 };
 
 /**
+ * IMPORTED SIMILARITY EVIDENCE V1 — the customer-facing explanation link this
+ * channel was missing: derives the same `{key, spans, sourceAttributionState}[]`
+ * shape buildReportEvidenceInterpretation's normalizeImportedSimilarityEvidence
+ * adapter already expects (lib/evidence-interpretation/adapters.ts), straight
+ * from the per-passage attribution resolvePrimarySimilaritySummary already
+ * wrote onto `report.unifiedSimilarity.contributions` (sourceType
+ * "imported_similarity_evidence") when computeUnifiedSimilarity resolved this
+ * channel — the SAME persisted data the score itself came from. No
+ * re-verification, no new resolution, no second pipeline: purely a read +
+ * group-by-sourceId of data already computed, exactly like
+ * normalizePriorSubmissionEvidence already does for previousUploadPositions.
+ * A unit matched at multiple occurrences contributes multiple entries with
+ * the same sourceId here, correctly producing one card with multiple spans.
+ *
+ * Absent/empty contributions (no package configured, corrupt package, or no
+ * match for this submission) yields `[]` —
+ * normalizeImportedSimilarityEvidence's own empty-input behavior — so a
+ * report with no imported evidence gets no card, byte-identical to before
+ * this wiring existed.
+ */
+function admittedImportedSimilaritySources(
+  report: SimilarityReport,
+): NonNullable<BuildReportEvidenceInterpretationOptions["importedSimilarityAdmittedSources"]> {
+  const byUnit = new Map<
+    string,
+    {
+      spans: { start: number; end: number; words: number }[];
+      sourceAttributionState?: UnifiedEvidenceContribution["importedSourceAttributionState"];
+    }
+  >();
+  for (const c of report.unifiedSimilarity?.contributions ?? []) {
+    if (c.sourceType !== "imported_similarity_evidence" || c.evidenceStatus !== "included") continue;
+    let entry = byUnit.get(c.sourceId);
+    if (!entry) {
+      entry = { spans: [], sourceAttributionState: c.importedSourceAttributionState };
+      byUnit.set(c.sourceId, entry);
+    }
+    entry.spans.push({ start: c.submittedWordStart, end: c.submittedWordEnd, words: c.matchedWordCount });
+  }
+  return [...byUnit.entries()].map(([key, v]) => ({
+    key,
+    spans: v.spans,
+    sourceAttributionState: v.sourceAttributionState,
+  }));
+}
+
+/**
  * Returns a shallow copy of `report` with `evidenceInterpretation`,
  * `reportCompletion` and `extractionDiagnostic` set from server-known evidence.
  * Any pre-existing (client) value is replaced.
@@ -117,6 +167,7 @@ export function withEvidenceInterpretation<T extends SimilarityReport>(
     historicalSubmissionMatch: opts.historicalSubmissionMatch,
     selectiveCorpusAdmittedSources: opts.selectiveCorpusAdmittedSources,
     userSuppliedReferences: admittedReferences,
+    importedSimilarityAdmittedSources: admittedImportedSimilaritySources(base as SimilarityReport),
   });
 
   const reportCompletion = resolveReportCompletion({
@@ -146,18 +197,95 @@ export function withEvidenceInterpretation<T extends SimilarityReport>(
   };
 }
 
+export type FinalizedReportEvidenceInterpretationOptions = {
+  /** The historical match the FINAL unifiedSimilarity was resolved with (POSSIBLE_SAME_WORK stays dormant, but this mirrors what the write-time path threads). */
+  historicalSubmissionMatch?: ReportHistoricalSubmissionMatch | null;
+  /**
+   * The SERVER-VERIFIED user-supplied-reference evidence that FED the final
+   * unifiedSimilarity — pass it only when the caller's score resolution
+   * included that channel (as finalizeReportJson's does). Omitted (the
+   * default) means the final score was resolved WITHOUT it — the authoritative
+   * finalizer's deliberate boundary — so no reference card is produced for
+   * evidence the score does not contain. Deliberately never inferred from the
+   * report's own persisted userSuppliedReferenceEvidence: the explanation may
+   * only describe inputs the score actually had.
+   */
+  userSuppliedReferenceEvidence?: readonly SuppliedReferenceVerifiedEvidence[] | null;
+  /** Ceiling the WHOLE final persisted report must fit. Defaults to the existing, unchanged MAX_REPORT_SAVE_REQUEST_BYTES — the exact limit app/api/reports/route.ts's finalizeReportJson soft-degrades against. */
+  maxBytes?: number;
+};
+
+/**
+ * AUTHORITATIVE PROMOTION — the evidenceInterpretation for a report whose FINAL
+ * unifiedSimilarity was just (re)computed OUTSIDE app/api/reports/route.ts's
+ * write-time finalizeReportJson: today, lib/selective-corpus-authoritative.ts's
+ * deferred pending -> terminal finalizer, whose raw json_set can only replace
+ * whole keys of the already-persisted row. A report created while that mode is
+ * on is persisted with NO unifiedSimilarity, so the interpretation POST built
+ * for it was derived from archive-only positions and could never carry any
+ * channel that only exists in the final score (imported evidence, Selective
+ * Corpus). This derives it from THAT FINAL report instead, through the very
+ * same withEvidenceInterpretation call finalizeReportJson makes (never a second
+ * builder) — pure, explanation only, no score or matched position changes.
+ *
+ * The interpretation is built from exactly the inputs that FED the final
+ * score, so it can never explain evidence the score does not contain:
+ * `finalReport` must carry the FINAL, fully-expanded unifiedSimilarity plus the
+ * server-verified externalAcademicEvidence that fed it, and any
+ * user-supplied-reference evidence the score was given is passed explicitly
+ * through `opts` (see FinalizedReportEvidenceInterpretationOptions).
+ *
+ * Returns null — meaning "persist NO interpretation, and remove any earlier
+ * one" — when building throws or when the final report would not fit `maxBytes`:
+ * the same soft-degrade finalizeReportJson applies (a report that would
+ * otherwise save is never failed for its explanation), except that here a stale
+ * earlier interpretation must also go rather than be left inconsistent with the
+ * new score. The size check measures the COMPACT persisted representation of the
+ * whole final report, like finalizeReportJson's own.
+ */
+export function buildFinalizedReportEvidenceInterpretation(
+  finalReport: SimilarityReport,
+  opts: FinalizedReportEvidenceInterpretationOptions = {},
+): NonNullable<SimilarityReport["evidenceInterpretation"]> | null {
+  try {
+    const interpretation = withEvidenceInterpretation(finalReport, {
+      historicalSubmissionMatch: opts.historicalSubmissionMatch ?? null,
+      selectiveCorpusBranch: null,
+      userSuppliedReferenceEvidence: opts.userSuppliedReferenceEvidence ?? null,
+    }).evidenceInterpretation;
+    if (!interpretation) return null;
+    const persisted = {
+      ...finalReport,
+      ...(finalReport.unifiedSimilarity
+        ? { unifiedSimilarity: compactUnifiedSimilarityForPersistence(finalReport.unifiedSimilarity) }
+        : {}),
+      evidenceInterpretation: interpretation,
+    };
+    if (JSON.stringify(persisted).length > (opts.maxBytes ?? MAX_REPORT_SAVE_REQUEST_BYTES)) return null;
+    return interpretation;
+  } catch (err) {
+    console.error(
+      "report V2 finalized-report interpretation build failed (non-fatal, terminal write proceeds without it):",
+      err instanceof Error ? err.message : String(err),
+    );
+    return null;
+  }
+}
+
 /**
  * AUTHORITATIVE PROMOTION — refreshes ONLY reportCompletion's selectiveCorpus
  * signal from the report's own persisted selectiveCorpusAuthoritativeStatus.
  * Called at RESPONSE time (GET / SSR first paint), never at write time: the
  * deferred finalizer's own CAS-guarded terminal write
- * (persistSelectiveCorpusAuthoritativeFinalization) deliberately touches only
- * unifiedSimilarity / its own generation+flag snapshot / the status marker
- * itself — never reportCompletion/evidenceInterpretation — so a report's
- * persisted reportCompletion still reflects whatever selectiveCorpusBranch
- * was true at the ORIGINAL pending-branch save (always null there, since the
- * search had not run yet). This is the one place that goes stale without a
- * response-time refresh; nothing else about reportCompletion needs one.
+ * (persistSelectiveCorpusAuthoritativeFinalization) replaces unifiedSimilarity
+ * and — atomically, in that same statement, see
+ * buildFinalizedReportEvidenceInterpretation above — evidenceInterpretation,
+ * plus its own generation+flag snapshot / the status marker itself, but
+ * deliberately never reportCompletion — so a report's persisted
+ * reportCompletion still reflects whatever selectiveCorpusBranch was true at
+ * the ORIGINAL pending-branch save (always null there, since the search had
+ * not run yet). This is the one place that goes stale without a response-time
+ * refresh; nothing else about reportCompletion needs one.
  *
  * PURE, no DB access, no score/matched-position change. Every other input is
  * read straight off the report's own already-persisted fields — the SAME
