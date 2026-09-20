@@ -20,6 +20,7 @@ import {
   normalizePriorSubmissionEvidence,
   normalizeSelectiveCorpusEvidence,
   normalizeUserSuppliedReferenceEvidence,
+  normalizeImportedSimilarityEvidence,
 } from "./adapters";
 import type {
   ReportEvidenceInterpretation,
@@ -75,6 +76,12 @@ export type BuildReportEvidenceInterpretationOptions = {
     safeLabel: string;
     verifiedPassages: ReadonlyArray<{ submittedWordStart: number; submittedWordEnd: number; matchedWordCount: number }>;
   }>;
+  /** Imported Similarity Evidence V1 admitted-unit spans (lib/imported-similarity-evidence/), when that channel verified at least one unit for this report. Absent unless a package was configured and matched. */
+  importedSimilarityAdmittedSources?: ReadonlyArray<{
+    key: string;
+    spans: ReadonlyArray<{ start: number; end: number; words: number }>;
+    sourceAttributionState?: NormalizedVerifiedSource["importedSourceAttributionState"];
+  }>;
 };
 
 // ── build the normalized evidence bundle ─────────────────────────────────
@@ -92,6 +99,9 @@ export function normalizeReportEvidence(
       ? normalizeSelectiveCorpusEvidence(opts.selectiveCorpusAdmittedSources, report.wordCount)
       : []),
     ...normalizeUserSuppliedReferenceEvidence(opts.userSuppliedReferences ?? [], report.wordCount),
+    ...(opts.importedSimilarityAdmittedSources
+      ? normalizeImportedSimilarityEvidence(opts.importedSimilarityAdmittedSources, report.wordCount)
+      : []),
   ];
   return {
     submissionText: report.text ?? "",
@@ -108,6 +118,7 @@ const PRODUCER_ORDER: Record<NormalizedVerifiedSource["producer"], number> = {
   "prior-submission": 2,
   "selective-corpus": 3,
   "user-supplied-reference": 4,
+  "imported-similarity-evidence": 5,
 };
 
 function assignOpaqueIds(sources: NormalizedVerifiedSource[]): Map<string, string> {
@@ -130,6 +141,7 @@ const GENERIC_LABEL: Record<NormalizedSourceType, string> = {
   "prior-submission": "Earlier submission",
   "selective-corpus": "TurnitPlus reference collection",
   "user-supplied-reference": "Supplied reference",
+  "imported-similarity-evidence": "Imported reference match",
 };
 
 function safeLabel(source: NormalizedVerifiedSource): string {

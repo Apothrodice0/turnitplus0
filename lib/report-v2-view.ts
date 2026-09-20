@@ -94,6 +94,7 @@ export const SOURCE_TYPE_BADGE: Record<ReportV2SourceType, string> = {
   "prior-submission": "TurnitPlus reference collection",
   "selective-corpus": "TurnitPlus reference collection",
   "user-supplied-reference": "Supplied reference",
+  "imported-similarity-evidence": "Imported reference match",
 };
 
 /** Non-attributable buckets — no external link, no named document, ever. */
@@ -101,7 +102,8 @@ export function isGenericReferenceSource(sourceType: ReportV2SourceType): boolea
   return (
     sourceType === "reference-collection" ||
     sourceType === "prior-submission" ||
-    sourceType === "selective-corpus"
+    sourceType === "selective-corpus" ||
+    sourceType === "imported-similarity-evidence"
   );
 }
 

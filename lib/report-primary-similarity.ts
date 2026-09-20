@@ -3,6 +3,7 @@ import { getOrComputeHistoricalMatchSnapshot, getCurrentCorpusMatchGeneration, i
 import { isCorpusSourceMatchingEnabled } from "./corpus-source-matching-flag";
 import { CORPUS_FINGERPRINT_VERSION, CANONICALIZATION_VERSION } from "./user-submission-corpus";
 import { computeUnifiedSimilarity, type UnifiedSimilarityResult } from "./unified-similarity";
+import { resolveImportedSimilarityEvidenceForUnifiedSimilarity } from "./imported-similarity-evidence";
 import { compactUnifiedSimilarityForPersistence } from "./unified-similarity-persistence";
 import type { ReportHistoricalSubmissionMatch, SimilarityReport } from "./report-types";
 import type { ExternalAcademicEvidence } from "./academic-search/types";
@@ -450,6 +451,20 @@ export async function resolvePrimarySimilaritySummary(
   // snapshot / UNAVAILABLE status, not an exception).
   try {
     const compute = params.testOnlyComputeUnifiedSimilarity ?? computeUnifiedSimilarity;
+    // IMPORTED SIMILARITY EVIDENCE V1 — resolved HERE, inside the one shared
+    // resolution every real upload path (standard + room, both via
+    // app/api/reports/route.ts's POST) already calls, rather than threaded in
+    // as a caller-supplied param like userSuppliedReferenceEvidence/
+    // selectiveCorpusEvidence: unlike those two, this channel needs nothing
+    // beyond the manuscript text already available right here (no client
+    // payload, no async job, no DB round trip) — a fast, local, in-memory
+    // candidate-lookup + exact-verification pass against an optional,
+    // externally-configured package (lib/imported-similarity-evidence/). Every
+    // caller of this function therefore gets this channel automatically, with
+    // no plumbing of its own; an unconfigured/absent/corrupt package makes
+    // this call return [] and this resolution's output byte-identical to
+    // before this channel existed.
+    const importedSimilarityEvidence = resolveImportedSimilarityEvidenceForUnifiedSimilarity(params.rawText);
     const unifiedSimilarity = compute({
       wordCount: params.wordCount,
       archiveMatchedPositions: params.archiveMatchedPositions,
@@ -458,6 +473,7 @@ export async function resolvePrimarySimilaritySummary(
       effectiveDeviceSelfRepresentationIds,
       userSuppliedReferenceEvidence: params.userSuppliedReferenceEvidence,
       selectiveCorpusEvidence: params.selectiveCorpusEvidence,
+      importedSimilarityEvidence,
     });
     return { historicalSubmissionMatch, unifiedSimilarity, primaryScore: unifiedSimilarity.unifiedScore, isUnified: true, corpusSourceMatchingEnabled, corpusGeneration, failed: false, effectiveDeviceSelfRepresentationIds, deviceSelfSharedGuard };
   } catch (err) {

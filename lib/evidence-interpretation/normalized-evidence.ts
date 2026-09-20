@@ -1,5 +1,6 @@
 import type { SameWorkRelationship } from "./kinds";
 import type { VerifiedSpan } from "./interpret";
+import type { ImportedSimilarityEvidenceSourceAttributionState } from "../imported-similarity-evidence/types";
 
 /**
  * PHASE 1 — one internal normalized shape for VERIFIED evidence, sufficient for
@@ -23,14 +24,17 @@ export type NormalizedSourceType =
   | "prior-submission"
   | "selective-corpus"
   /** a reference file the report's own author supplied for this check — see lib/user-supplied-references.ts. NOT a shared-corpus source. */
-  | "user-supplied-reference";
+  | "user-supplied-reference"
+  /** a passage-level evidence unit imported from a previously-issued third-party similarity report — see lib/imported-similarity-evidence/. Never a shared-corpus source and never "previous upload." */
+  | "imported-similarity-evidence";
 
 export type NormalizedEvidenceProducer =
   | "archive"
   | "scholarly"
   | "prior-submission"
   | "selective-corpus"
-  | "user-supplied-reference";
+  | "user-supplied-reference"
+  | "imported-similarity-evidence";
 
 /** Public-safe descriptive metadata for one matched source. Every field is
  *  optional and NON-authoritative. No internal id, hash, path, or provenance. */
@@ -63,6 +67,15 @@ export type NormalizedVerifiedSource = {
   /** OPTIONAL FAMILY_GUARD signal — only the selective-corpus adapter sets it. */
   familyGuardActivated?: boolean;
   dominantSpanBoilerplate?: boolean;
+  /**
+   * Only set for producer "imported-similarity-evidence" — the validated
+   * distinction of how confidently this unit's original source is known (see
+   * lib/imported-similarity-evidence/types.ts). Internal audit/debugging
+   * metadata only: never fed into labelParts/safeLabel/reasons, and never
+   * used to claim an original source is independently verified when it is
+   * not.
+   */
+  importedSourceAttributionState?: ImportedSimilarityEvidenceSourceAttributionState;
   /** OPTIONAL trusted same-work relationship — only the prior-submission adapter
    *  maps it, and only when an existing strong relationship signal exists
    *  (never from overlap %, Device Passport alone, same account/device alone). */

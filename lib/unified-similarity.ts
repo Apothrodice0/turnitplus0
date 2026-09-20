@@ -1,6 +1,7 @@
 import type { ExternalAcademicEvidence } from "./academic-search/types";
 import { combineMatchedWordPositions, type ExternalMatchedWordRange } from "./similarity-enrichment";
 import type { HistoricalSubmissionMatchEntry, ReportHistoricalSubmissionMatch } from "./report-types";
+import type { ImportedSimilarityEvidenceSourceAttributionState } from "./imported-similarity-evidence/types";
 
 /**
  * Phase 4A: the unified-similarity computation — EXPERIMENTAL, additive,
@@ -25,7 +26,7 @@ import type { HistoricalSubmissionMatchEntry, ReportHistoricalSubmissionMatch } 
 
 export const UNIFIED_SIMILARITY_VERSION = "unified-similarity-v1";
 
-export type UnifiedEvidenceSourceType = "archive" | "openaire" | "europe_pmc" | "previous_upload" | "user_supplied_reference" | "selective_corpus";
+export type UnifiedEvidenceSourceType = "archive" | "openaire" | "europe_pmc" | "previous_upload" | "user_supplied_reference" | "selective_corpus" | "imported_similarity_evidence";
 /**
  * "excluded_effective_device_self": a production-counted previous-upload
  * source the Preview-gated same-device SELF rule
@@ -91,6 +92,15 @@ export type UnifiedEvidenceContribution = {
    */
   effectiveScoringReason?: "SAME_DEVICE_EXACT_DOCUMENT" | "SAME_DEVICE_STRONG_TEXT_DOCUMENT";
   evidenceStatus: UnifiedEvidenceStatus;
+  /**
+   * Only present for sourceType "imported_similarity_evidence" — the
+   * validated distinction of how confidently this unit's original source is
+   * known (see lib/imported-similarity-evidence/types.ts). Internal
+   * audit/debugging metadata only: never used to decide whether/how a unit
+   * scores, and never surfaced to an ordinary end user as an independent
+   * source-verification claim it does not have.
+   */
+  importedSourceAttributionState?: ImportedSimilarityEvidenceSourceAttributionState;
 };
 
 export type UnifiedSimilarityResult = {
@@ -144,6 +154,20 @@ export type UnifiedSimilarityResult = {
    * classification.
    */
   selectiveCorpusOnlyWords: number;
+  /**
+   * IMPORTED SIMILARITY EVIDENCE V1 — words matched ONLY by an imported
+   * third-party-report evidence unit (no archive / live-academic / eligible-
+   * prior-upload / supplied-reference / selective-corpus overlap at that
+   * position). Always 0 when the caller passed no importedSimilarityEvidence
+   * (every configuration without a configured imported-evidence package),
+   * which keeps this function's output byte-identical to before this channel
+   * existed apart from this key being 0. See
+   * lib/imported-similarity-evidence/ — an independent, externally-built
+   * passage store, never a "previous upload," wired here as its own sibling
+   * channel exactly like Selective Corpus: it can never be excluded by (or
+   * itself trigger) SELF/UNKNOWN classification.
+   */
+  importedSimilarityEvidenceOnlyWords: number;
   /** Full per-passage attribution, including excluded entries (see evidenceStatus) — internal use (debugging, calibration, a future admin view), never rendered to an end user as-is. */
   contributions: UnifiedEvidenceContribution[];
   /**
@@ -192,6 +216,15 @@ export type UnifiedSimilarityResult = {
    * Empty when no selectiveCorpusEvidence was supplied.
    */
   selectiveCorpusPositions: number[];
+  /**
+   * IMPORTED SIMILARITY EVIDENCE V1 — the privacy-safe position subset
+   * attributable ONLY to imported third-party-report evidence. Word indices
+   * only — no report SHA, evidence set id, evidence unit id, or source
+   * attribution state — so the render layer can draw one generic bucket
+   * without touching per-contribution data. Empty when no
+   * importedSimilarityEvidence was supplied.
+   */
+  importedSimilarityEvidencePositions: number[];
 };
 
 export type ComputeUnifiedSimilarityParams = {
@@ -288,6 +321,28 @@ export type ComputeUnifiedSimilarityParams = {
     | ReadonlyArray<{
         sourceId: string;
         matchedPassages: ReadonlyArray<{ submittedWordStart: number; submittedWordEnd: number; matchedWordCount: number }>;
+      }>
+    | null;
+  /**
+   * IMPORTED SIMILARITY EVIDENCE V1 — verified imported third-party-report
+   * evidence, in the SAME shape selectiveCorpusEvidence already uses. Every
+   * passage here is already SERVER-VERIFIED by
+   * lib/imported-similarity-evidence/matcher.ts (exact normalized-anchor
+   * verification + score-mask projection) — this function only unions the
+   * positions, exactly as it does for every other channel; it never
+   * re-verifies, re-ranks, or re-derives anything, and never reads
+   * reportedSimilarityPercent or any report SHA as behavior logic. Absent /
+   * empty (no imported-evidence package configured, or nothing in it verified
+   * against this submission — the production default today) makes this
+   * function's output byte-identical to before this channel existed, apart
+   * from the always-present importedSimilarityEvidenceOnlyWords: 0 /
+   * importedSimilarityEvidencePositions: [] keys.
+   */
+  importedSimilarityEvidence?:
+    | ReadonlyArray<{
+        sourceId: string;
+        matchedPassages: ReadonlyArray<{ submittedWordStart: number; submittedWordEnd: number; matchedWordCount: number }>;
+        sourceAttributionState?: ImportedSimilarityEvidenceSourceAttributionState;
       }>
     | null;
 };
@@ -388,6 +443,7 @@ export function computeUnifiedSimilarity(params: ComputeUnifiedSimilarityParams)
   const liveSet = new Set<number>();
   const priorSet = new Set<number>();
   const referenceSet = new Set<number>();
+  const importedSet = new Set<number>();
   const contributions: UnifiedEvidenceContribution[] = [];
 
   // --- Source: user-supplied reference files -------------------------------
@@ -447,6 +503,37 @@ export function computeUnifiedSimilarity(params: ComputeUnifiedSimilarityParams)
       if (!clamped || !firstOccurrence) continue;
       const [start, end] = clamped;
       addRange(selectiveCorpusSet, start, end);
+      eligibleRanges.push({ wordStart: start, wordEnd: end + 1 });
+    }
+  }
+
+  // --- Source: Imported Similarity Evidence V1 (verified third-party-report passages) ---
+  // Independent, externally-built passage store — never a "previous upload,"
+  // so it is wired here as its own sibling channel, exactly like Selective
+  // Corpus above: it can never be excluded by SELF classification, and it can
+  // never itself trigger one. Every passage here is already SERVER-VERIFIED
+  // (exact normalized-anchor match + score-mask projection) — no discovery
+  // step, no re-verification, exactly the same "union only" role every other
+  // channel here plays.
+  const seenImported = new Set<string>();
+  for (const source of params.importedSimilarityEvidence ?? []) {
+    const identityKey = `imported-similarity-evidence:${source.sourceId}`;
+    const firstOccurrence = !seenImported.has(identityKey);
+    seenImported.add(identityKey);
+    for (const passage of source.matchedPassages ?? []) {
+      const clamped = clampedPositions(passage.submittedWordStart, passage.submittedWordEnd, wordCount);
+      contributions.push({
+        sourceType: "imported_similarity_evidence",
+        sourceId: identityKey,
+        submittedWordStart: passage.submittedWordStart,
+        submittedWordEnd: passage.submittedWordEnd,
+        matchedWordCount: passage.matchedWordCount,
+        evidenceStatus: "included",
+        ...(source.sourceAttributionState ? { importedSourceAttributionState: source.sourceAttributionState } : {}),
+      });
+      if (!clamped || !firstOccurrence) continue;
+      const [start, end] = clamped;
+      addRange(importedSet, start, end);
       eligibleRanges.push({ wordStart: start, wordEnd: end + 1 });
     }
   }
@@ -580,24 +667,28 @@ export function computeUnifiedSimilarity(params: ComputeUnifiedSimilarityParams)
   let previousUploadOnlyWords = 0;
   let userSuppliedReferenceOnlyWords = 0;
   let selectiveCorpusOnlyWords = 0;
+  let importedSimilarityEvidenceOnlyWords = 0;
   let overlapWords = 0;
   const previousUploadPositions: number[] = [];
   const userSuppliedReferencePositions: number[] = [];
   const selectiveCorpusPositions: number[] = [];
-  const allEligiblePositions = new Set<number>([...archiveSet, ...liveSet, ...priorSet, ...referenceSet, ...selectiveCorpusSet]);
+  const importedSimilarityEvidencePositions: number[] = [];
+  const allEligiblePositions = new Set<number>([...archiveSet, ...liveSet, ...priorSet, ...referenceSet, ...selectiveCorpusSet, ...importedSet]);
   for (const position of allEligiblePositions) {
     const sourcesHere =
       (archiveSet.has(position) ? 1 : 0) +
       (liveSet.has(position) ? 1 : 0) +
       (priorSet.has(position) ? 1 : 0) +
       (referenceSet.has(position) ? 1 : 0) +
-      (selectiveCorpusSet.has(position) ? 1 : 0);
+      (selectiveCorpusSet.has(position) ? 1 : 0) +
+      (importedSet.has(position) ? 1 : 0);
     if (sourcesHere > 1) { overlapWords += 1; continue; }
     if (archiveSet.has(position)) archiveOnlyWords += 1;
     else if (liveSet.has(position)) liveAcademicOnlyWords += 1;
     else if (priorSet.has(position)) { previousUploadOnlyWords += 1; previousUploadPositions.push(position); }
     else if (referenceSet.has(position)) { userSuppliedReferenceOnlyWords += 1; userSuppliedReferencePositions.push(position); }
-    else { selectiveCorpusOnlyWords += 1; selectiveCorpusPositions.push(position); }
+    else if (selectiveCorpusSet.has(position)) { selectiveCorpusOnlyWords += 1; selectiveCorpusPositions.push(position); }
+    else { importedSimilarityEvidenceOnlyWords += 1; importedSimilarityEvidencePositions.push(position); }
   }
 
   return {
@@ -614,10 +705,12 @@ export function computeUnifiedSimilarity(params: ComputeUnifiedSimilarityParams)
     deviceSelfExcludedWords,
     userSuppliedReferenceOnlyWords,
     selectiveCorpusOnlyWords,
+    importedSimilarityEvidenceOnlyWords,
     contributions,
     matchedPositions: [...allEligiblePositions].sort((left, right) => left - right),
     previousUploadPositions: previousUploadPositions.sort((left, right) => left - right),
     userSuppliedReferencePositions: userSuppliedReferencePositions.sort((left, right) => left - right),
     selectiveCorpusPositions: selectiveCorpusPositions.sort((left, right) => left - right),
+    importedSimilarityEvidencePositions: importedSimilarityEvidencePositions.sort((left, right) => left - right),
   };
 }
