@@ -38,6 +38,7 @@ import { sanitizeSuppliedReferenceInputs, admittedReferenceEvidenceForUnifiedSim
 import { referenceTransportBudgetError } from '../../../lib/user-supplied-reference-constants';
 import { MAX_REPORT_SAVE_REQUEST_BYTES } from '../../../lib/report-transport-limits';
 import { logReportSaveRejectedTelemetry } from '../../../lib/report-save-telemetry';
+import { isCompactAiAnalysis, validateCompactAiAnalysis } from '../../../lib/ai-passage-table';
 import { encodeReportForPersistence, isEvidenceInterpretationCustomerReadable } from '../../../lib/report-persistence';
 import { scheduleReportShadowEvaluations } from '../../../lib/report-shadow-evaluations';
 import { effectiveSelectiveCorpusAuthoritativeEnabled } from '../../../lib/selective-corpus/flag';
@@ -484,6 +485,21 @@ export async function POST(request: Request) {
     if (payloadJson.length > MAX_BYTES) {
       logReportSaveRejectedTelemetry({ reason: 'CLIENT_PAYLOAD_TOO_LARGE', status: 413 });
       return new NextResponse(JSON.stringify({ error: 'Payload too large' }), { status: 413 });
+    }
+
+    // ai-compact-v1 (lib/ai-passage-table.ts): an AI-enriched resave may carry its per-window passages as a compact
+    // table that points into THIS payload's own manuscript instead of a copy of every window (that copy is what put a
+    // large report's automatic AI resave over the ceiling above). Accepted whatever the client-side writer flag is —
+    // reader-first rollout — but only if it verifies against `payload.text` exactly (length + hash + every range/layout
+    // rule); the table is then persisted as validated, never expanded here. A legacy `aiAnalysis` (full `passages[]`)
+    // is not looked at, exactly as before.
+    const incomingAiAnalysis = typeof payload === 'object' && payload !== null ? (payload as { aiAnalysis?: unknown }).aiAnalysis : undefined;
+    if (isCompactAiAnalysis(incomingAiAnalysis)) {
+      const incomingText = (payload as { text?: unknown }).text;
+      if (typeof incomingText !== 'string' || !validateCompactAiAnalysis(incomingAiAnalysis, { text: incomingText }).ok) {
+        logReportSaveRejectedTelemetry({ reason: 'MALFORMED_REQUEST', status: 400 });
+        return new NextResponse(JSON.stringify({ error: 'Invalid AI result' }), { status: 400 });
+      }
     }
 
     const client = await getReportsDbClient();

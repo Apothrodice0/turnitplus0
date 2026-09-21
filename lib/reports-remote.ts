@@ -1,5 +1,6 @@
 import { getDeviceKey } from "./device-key";
 import { maybeAttestReportUpload, markDevicePassportReportSaved } from "./device-passport";
+import { prepareReportForTransport } from "./ai-passage-table";
 import type { RoomIndexEntry } from "./report-rooms";
 
 export type ReportSummary = {
@@ -193,13 +194,20 @@ export async function saveReportRemote<T>(report: T, summary: ReportSummary, aca
     // A future upload flow attaches `report.userSuppliedReferences`; until then
     // this is simply absent and the report behaves exactly as today.
     const userSuppliedReferences = (report as { userSuppliedReferences?: unknown } | null)?.userSuppliedReferences;
+    // ai-compact-v1 (lib/ai-passage-table.ts): an AI-enriched report (the automatic post-upload AI resave, shared by the
+    // room flow and app/page.tsx) carries the AI result's per-window passages — a decoded copy of every 240-token window
+    // at a 120-token stride, ~2.4x the manuscript on its own, which put a ~600k-character report's whole-report resave
+    // over MAX_REPORT_SAVE_REQUEST_BYTES. With the (default OFF) writer gate on, they leave the browser as a compact
+    // table that points into the manuscript this payload already carries. The report is otherwise sent exactly as
+    // given; with the gate off, or for a first save (no aiAnalysis yet), `report` is the very same object as before.
+    // `maybeAttestReportUpload` above deliberately saw the original: it only reads `report.text`, which is unchanged.
     const response = await fetch("/api/reports", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         deviceKey,
         ...summary,
-        payload: report,
+        payload: prepareReportForTransport(report),
         academicSearchDiagnosticsId: academicSearchDiagnosticsId ?? null,
         ...(room !== undefined ? { room } : {}),
         ...(devicePassport ? { devicePassport } : {}),
@@ -234,6 +242,54 @@ export async function saveReportRemote<T>(report: T, summary: ReportSummary, aca
     return { ok: true };
   } catch (error) {
     console.debug("Remote report save failed (local copy is unaffected).", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return { ok: false, status: 0, quotaExceeded: false, roomOccupied: false, roomReuseNotReady: false };
+  }
+}
+
+/**
+ * G2 — the one thing a manual AI-analysis RETRY has to tell the server: the AI result the browser just computed
+ * (the model runs in a browser Worker, so the server can never produce it) for an already-saved report.
+ * `aiStatus` / `aiScore` / `aiTone` are the flat room-status columns (`aiScore` is the calibrated DISPLAY value);
+ * `rawAiScore` + `aiAnalysis` are the two AI-owned fields of the saved payload. Nothing about similarity is
+ * (or can be) part of it, so its size follows the AI result — never the report's evidence.
+ */
+export type SaveAiRetryResultInput = {
+  id: string;
+  aiStatus: "ready" | "failed";
+  aiScore: number | null;
+  aiTone: string | null;
+  rawAiScore: number | null;
+  aiAnalysis: unknown;
+};
+
+/**
+ * Persists a manual AI retry's result via POST /api/reports/[id]/ai-retry — see that route's own header for why a
+ * retry must not re-POST the whole report through saveReportRemote. Report identity, ownership and room all come
+ * from the SERVER's stored row (found by id + session), so no device key, room, owner or report body is sent.
+ * Fail-soft exactly like saveReportRemote: resolves the same result shape and never throws.
+ */
+export async function saveAiRetryResultRemote(input: SaveAiRetryResultInput): Promise<SaveReportRemoteResult> {
+  try {
+    const response = await fetch(`/api/reports/${encodeURIComponent(input.id)}/ai-retry`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        aiStatus: input.aiStatus,
+        aiScore: input.aiScore,
+        aiTone: input.aiTone,
+        payload: { aiScore: input.rawAiScore, aiAnalysis: input.aiAnalysis },
+      }),
+    });
+    if (!response.ok) {
+      console.debug("Remote AI retry save was rejected (local copy is unaffected).", { status: response.status });
+      const body = (await response.json().catch(() => null)) as { error?: string } | null;
+      return { ok: false, status: response.status, quotaExceeded: false, roomOccupied: false, roomReuseNotReady: false, error: body?.error };
+    }
+    return { ok: true };
+  } catch (error) {
+    console.debug("Remote AI retry save failed (local copy is unaffected).", {
       error: error instanceof Error ? error.message : String(error),
     });
     return { ok: false, status: 0, quotaExceeded: false, roomOccupied: false, roomReuseNotReady: false };

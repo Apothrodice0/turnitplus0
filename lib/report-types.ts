@@ -6,6 +6,7 @@ import type { SuppliedReferenceVerifiedEvidence, SuppliedReferenceInput } from "
 import type { UserSuppliedReferenceGuard, UserSuppliedReferencePersistedChannel } from "@/lib/report-user-supplied-references";
 import { resolveAiDisplayState } from "@/lib/ai-display-state";
 import type { DetectedLanguage } from "@/lib/similarity-core";
+import type { CompactAiPassageTableV1 } from "@/lib/ai-passage-table";
 // Report V2 evidence-interpretation payload types. These are imported from
 // LEAF modules of lib/evidence-interpretation/ (report-payload-types /
 // completion / extraction) that never import back from this file, so there is
@@ -82,6 +83,13 @@ export type AiAnalysis = {
   populationPercentile?: number | null;
   scoringVersion?: 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10;
   error?: string;
+  /**
+   * ai-compact-v1 (lib/ai-passage-table.ts) — the lossless compact form of `passages`. Present ONLY on a result that
+   * was sent/persisted compact (the writer is gated, default OFF); then `passages` is `[]` and the per-window list is
+   * rebuilt on read from this table + the manuscript (`resolveAiPassages`). A legacy result — every result written
+   * before the gate — simply lacks it and keeps its full `passages`. Additive: no migration, nothing else reads it.
+   */
+  compactPassages?: CompactAiPassageTableV1;
   /**
    * AI reproducibility metadata (report-lifecycle correctness fix, no DB
    * migration): the language this analysis was gated on — the exact value

@@ -267,8 +267,10 @@ test('READY-AI RETRY PROTECTION (§15, structural, second defensive layer): retr
   assert.ok(modelCallIndex > -1, "the model call itself must still exist for the genuine-recovery case");
   assert.ok(guardIndex < modelCallIndex, "REQUIRED: the ready-AI guard must run BEFORE the model is ever invoked, not after — this must be a refusal to start, never a discard-the-result-after-computing-it check");
 
-  const saveCallIndex = retryFn.indexOf("await saveEnrichedAiResult(full, aiResult)");
-  assert.ok(guardIndex < saveCallIndex, "REQUIRED: the guard must also precede the save — an already-ready result must never reach saveEnrichedAiResult at all via this path");
+  // G2: the retry persists through saveRetriedAiResult (saveEnrichedAiResult's AI-only twin); the guard-before-save invariant is unchanged.
+  const saveCallIndex = retryFn.indexOf("await saveRetriedAiResult(full, aiResult)");
+  assert.ok(saveCallIndex > -1, "the retry's save call must exist");
+  assert.ok(guardIndex < saveCallIndex, "REQUIRED: the guard must also precede the save — an already-ready result must never reach saveRetriedAiResult at all via this path");
 
   // The guard condition itself is keyed on the report's OWN already-fetched
   // AI status, never on room number — "Do not key this by room number"
