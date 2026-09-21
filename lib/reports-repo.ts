@@ -1,6 +1,7 @@
 import type { Client } from "@libsql/client";
 import { deriveRoomStatus, isWithinActiveCycle, roomCycleEndsAt } from "./report-rooms";
 import { resolvePersistedSimilarityDisplay } from "./report-primary-similarity";
+import { isEvidenceInterpretationCustomerReadable } from "./report-persistence";
 import type { ReportSummary } from "./reports-remote";
 
 // device_key added in Phase E8C, additively — every existing caller that
@@ -66,6 +67,55 @@ export type RoomOccupantResult =
   | { status: "processing" | "ready" | "failed"; report: ReportSummary; cycleEndsAt: string };
 
 /**
+ * The interpretation, as JSON text, ONLY when it might be undecodable; otherwise NULL.
+ *
+ * NULL means "nothing persisted here can fail to decode" and is returned for exactly the
+ * values expandEvidenceInterpretationFromPersistence hands back untouched: absent, JSON
+ * null, and a plain legacy object with no `format` key. Everything else — a compact form,
+ * ANY `format` marker (including an unknown one or `format: null`), and any non-object
+ * (string, number, boolean, array) — is returned so the canonical decoder decides.
+ * Over-supplying is harmless (a legacy value simply decodes as legacy); under-supplying
+ * would be the one unsafe direction, which is why the branches are the complement of the
+ * decoder's own "legacy or absent" definition rather than a list of known-bad shapes.
+ * A container (object/array) comes back as the JSON text json_extract yields for it; a
+ * scalar is json_quote'd (json_extract would hand back the bare value), so the JS side
+ * always JSON.parses well-formed JSON without relying on JSON-subtype propagation.
+ * Shared by every customer-facing summary read (the room occupant below, and the
+ * generic list in app/api/reports/route.ts) so they cannot disagree.
+ */
+export const INTERPRETATION_TO_VERIFY_SQL = `CASE
+            WHEN json_type(payload_json, '$.evidenceInterpretation') IS NULL THEN NULL
+            WHEN json_type(payload_json, '$.evidenceInterpretation') = 'null' THEN NULL
+            WHEN json_type(payload_json, '$.evidenceInterpretation') = 'object'
+                 AND json_type(payload_json, '$.evidenceInterpretation.format') IS NULL THEN NULL
+            WHEN json_type(payload_json, '$.evidenceInterpretation') IN ('object', 'array')
+                 THEN json_extract(payload_json, '$.evidenceInterpretation')
+            ELSE json_quote(json_extract(payload_json, '$.evidenceInterpretation'))
+          END`;
+
+type WithholdableSummary = Pick<ReportSummary, "archiveScore" | "scoreBand" | "primaryScore" | "isUnified" | "similarityStatus">;
+
+/**
+ * R2 — the ONE definition of a customer-facing report summary whose persisted evidence
+ * interpretation cannot be decoded. Identity and every non-similarity field are kept (the
+ * report is still listed, still has its title, dates and AI result), while EVERY similarity
+ * figure is withheld: `archiveScore` and `scoreBand` become null (a band spells out its
+ * percentage range) and `primaryScore` / `isUnified` are removed. `similarityStatus` becomes
+ * "failed" — the existing terminal non-numeric state, rendered as "Unavailable" — except a
+ * "pending" summary, which stays "pending": that is a transient state (the first
+ * finalization has not landed yet), not a verdict, and it already renders no number. Never 0
+ * and never a fallback to another stored number: a customer must not be handed a percentage
+ * for a report whose detail page refuses to open, whatever the UI chooses to draw. Response
+ * shaping only — the stored score, band and payload are untouched, nothing is recomputed,
+ * and no reason string is added (the decoder logs it, reason only, server-side).
+ */
+export function withholdUnexplainedSimilarity<T extends WithholdableSummary>(summary: T) {
+  const { primaryScore: _primaryScore, isUnified: _isUnified, ...rest } = summary;
+  const similarityStatus = summary.similarityStatus === "pending" ? ("pending" as const) : ("failed" as const);
+  return { ...rest, archiveScore: null, scoreBand: null, similarityStatus };
+}
+
+/**
  * The single source of truth for "what does room N currently hold," shared
  * by app/api/reports/route.ts's GET ?room=N handler and
  * app/reports/rooms/[room]/page.tsx's Server Component — both need the
@@ -105,6 +155,21 @@ export type RoomOccupantResult =
  * it. Similarity and AI-writing detection are independent pipelines; a room
  * still mid-AI-analysis can have a fully finalized, immediately displayable
  * similarity result.
+ *
+ * R2 correction: "cheap scalar read" had one blind spot. A room tile could show
+ * "Similarity NN%" for a report whose persisted evidenceInterpretation can no
+ * longer be decoded (an unsupported compact version, a corrupt table) while the
+ * detail page — which decodes, and fails closed — refused the very same row: a
+ * score the customer can neither explain nor open. The summary now goes through
+ * the same readability decision as owner GET / SSR (lib/report-persistence.ts)
+ * and, when it fails, is shaped by withholdUnexplainedSimilarity: the existing
+ * terminal non-numeric state ("failed" → "Unavailable") AND no similarity figure
+ * in the response either (the tile is only what is DRAWN; the JSON is what the
+ * customer RECEIVES). Nothing is recomputed, written, deleted or exposed. The cost
+ * is bounded by INTERPRETATION_TO_VERIFY_SQL above: only a row whose
+ * interpretation is in a form the decoder could reject transfers that ONE
+ * subtree; every legacy row (and every report with no interpretation) still
+ * returns only its scalars, exactly as before.
  */
 export async function findRoomOccupant(client: Client, userId: string, room: number, asOf: Date = new Date()): Promise<RoomOccupantResult> {
   // Phase A — one logical clock for this occupant resolution: the same
@@ -117,7 +182,8 @@ export async function findRoomOccupant(client: Client, userId: string, room: num
                  json_extract(payload_json, '$.unifiedSimilarity') IS NOT NULL AS has_unified,
                  json_extract(payload_json, '$.corpusSourceMatchingEnabledAtComputation') AS corpus_flag_at_computation,
                  json_extract(payload_json, '$.unifiedSimilarityFailed') AS unified_failed,
-                 json_extract(payload_json, '$.unifiedSimilarity.matchedPositions') IS NOT NULL AS has_position_evidence
+                 json_extract(payload_json, '$.unifiedSimilarity.matchedPositions') IS NOT NULL AS has_position_evidence,
+                 ${INTERPRETATION_TO_VERIFY_SQL} AS interpretation_to_verify
           FROM saved_reports WHERE user_id = ? AND room_number = ?
           ORDER BY report_created_at DESC LIMIT 1`,
     args: [userId, room],
@@ -127,7 +193,7 @@ export async function findRoomOccupant(client: Client, userId: string, room: num
       id: string | number; submission_id: string; title: string; report_created_at: string; word_count: number; archive_score: number;
       score_band: string; ai_score: number | null; ai_tone: string | null; ai_status: string | null; device_key: string;
       unified_score: number | bigint | null; has_unified: number | bigint; corpus_flag_at_computation: number | bigint | null;
-      unified_failed: number | bigint | null; has_position_evidence: number | bigint;
+      unified_failed: number | bigint | null; has_position_evidence: number | bigint; interpretation_to_verify: string | null;
     }
     | undefined;
   if (!occupant || !isWithinActiveCycle(occupant.report_created_at)) {
@@ -215,22 +281,29 @@ export async function findRoomOccupant(client: Client, userId: string, room: num
     isUnified = true;
   }
 
+  // R2 — never hand a customer a similarity figure for a report whose persisted
+  // interpretation cannot be decoded (see this function's own R2 paragraph above),
+  // whatever the status: "pending"/"failed" are non-numeric TILES, but their JSON
+  // still carries archiveScore/primaryScore. Nothing is stored, recomputed or removed.
+  const explained = isEvidenceInterpretationCustomerReadable(occupant.interpretation_to_verify);
+  const report: ReportSummary = {
+    id: String(occupant.id),
+    submissionId: String(occupant.submission_id),
+    title: String(occupant.title),
+    createdAt: String(occupant.report_created_at),
+    wordCount: Number(occupant.word_count),
+    archiveScore,
+    primaryScore,
+    isUnified,
+    similarityStatus,
+    scoreBand: String(occupant.score_band),
+    aiScore: occupant.ai_score === null ? null : Number(occupant.ai_score),
+    aiTone: occupant.ai_tone === null ? null : String(occupant.ai_tone),
+  };
+
   return {
     status,
     cycleEndsAt: roomCycleEndsAt(occupant.report_created_at),
-    report: {
-      id: String(occupant.id),
-      submissionId: String(occupant.submission_id),
-      title: String(occupant.title),
-      createdAt: String(occupant.report_created_at),
-      wordCount: Number(occupant.word_count),
-      archiveScore,
-      primaryScore,
-      isUnified,
-      similarityStatus,
-      scoreBand: String(occupant.score_band),
-      aiScore: occupant.ai_score === null ? null : Number(occupant.ai_score),
-      aiTone: occupant.ai_tone === null ? null : String(occupant.ai_tone),
-    },
+    report: explained ? report : withholdUnexplainedSimilarity(report),
   };
 }

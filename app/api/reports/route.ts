@@ -19,7 +19,7 @@ import { linkAcademicSearchRunDiagnosticsToReport, resolveVerifiedAcademicEviden
 import { canonicalSha256 } from '../../../lib/document-identity';
 import { checkUploadLimit } from '../../../lib/upload-limit';
 import { getRoomCountForRole, isWithinActiveCycle, roomCycleEndsAt } from '../../../lib/report-rooms';
-import { findRoomOccupant } from '../../../lib/reports-repo';
+import { findRoomOccupant, INTERPRETATION_TO_VERIFY_SQL, withholdUnexplainedSimilarity } from '../../../lib/reports-repo';
 import { runAfterResponse } from '../../../lib/run-after-response';
 import {
   createPendingReportAdmissionJob,
@@ -38,7 +38,7 @@ import { sanitizeSuppliedReferenceInputs, admittedReferenceEvidenceForUnifiedSim
 import { referenceTransportBudgetError } from '../../../lib/user-supplied-reference-constants';
 import { MAX_REPORT_SAVE_REQUEST_BYTES } from '../../../lib/report-transport-limits';
 import { logReportSaveRejectedTelemetry } from '../../../lib/report-save-telemetry';
-import { encodeReportForPersistence } from '../../../lib/report-persistence';
+import { encodeReportForPersistence, isEvidenceInterpretationCustomerReadable } from '../../../lib/report-persistence';
 import { scheduleReportShadowEvaluations } from '../../../lib/report-shadow-evaluations';
 import { effectiveSelectiveCorpusAuthoritativeEnabled } from '../../../lib/selective-corpus/flag';
 import type { SimilarityReport, ReportHistoricalSubmissionMatch } from '../../../lib/report-types';
@@ -1573,8 +1573,15 @@ export async function GET(request: Request) {
           const occupant = await findRoomOccupant(client, sessionUser.id, room);
           return new NextResponse(JSON.stringify(occupant), { status: 200, headers: { 'Content-Type': 'application/json' } });
         }
+        // R2 — this authenticated list is a customer-facing summary too: it hands
+        // out each report's archive_score / score_band, so it must go through the
+        // same readability decision as the room occupant (lib/reports-repo.ts). The
+        // extra column is NULL for every legacy / interpretation-less row; only a
+        // row in a form the decoder could reject transfers its one interpretation
+        // subtree. (The anonymous device-key list below is deliberately untouched.)
         const result = await client.execute({
-          sql: `SELECT id, submission_id, title, report_created_at, word_count, archive_score, score_band, ai_score, ai_tone
+          sql: `SELECT id, submission_id, title, report_created_at, word_count, archive_score, score_band, ai_score, ai_tone,
+                       ${INTERPRETATION_TO_VERIFY_SQL} AS interpretation_to_verify
                 FROM saved_reports WHERE user_id = ? ORDER BY report_created_at DESC LIMIT ?`,
           args: [sessionUser.id, MAX_LISTED_REPORTS],
         });
@@ -1599,17 +1606,25 @@ export async function GET(request: Request) {
       client.close();
     }
 
-    const reports = rows.map((row) => ({
-      id: String(row.id),
-      submissionId: String(row.submission_id),
-      title: String(row.title),
-      createdAt: String(row.report_created_at),
-      wordCount: Number(row.word_count),
-      archiveScore: Number(row.archive_score),
-      scoreBand: String(row.score_band),
-      aiScore: row.ai_score === null ? null : Number(row.ai_score),
-      aiTone: row.ai_tone === null ? null : String(row.ai_tone),
-    }));
+    const reports = rows.map((row) => {
+      const summary = {
+        id: String(row.id),
+        submissionId: String(row.submission_id),
+        title: String(row.title),
+        createdAt: String(row.report_created_at),
+        wordCount: Number(row.word_count),
+        archiveScore: Number(row.archive_score),
+        scoreBand: String(row.score_band),
+        aiScore: row.ai_score === null ? null : Number(row.ai_score),
+        aiTone: row.ai_tone === null ? null : String(row.ai_tone),
+      };
+      // Only the authenticated query above selects interpretation_to_verify; a row
+      // without it (the anonymous device-key list) has nothing to verify and is unchanged.
+      const interpretation = row.interpretation_to_verify;
+      return isEvidenceInterpretationCustomerReadable(typeof interpretation === 'string' ? interpretation : null)
+        ? summary
+        : withholdUnexplainedSimilarity(summary);
+    });
 
     return new NextResponse(JSON.stringify({ reports }), { status: 200, headers: { 'Content-Type': 'application/json' } });
   } catch (err) {

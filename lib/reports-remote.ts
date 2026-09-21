@@ -8,8 +8,18 @@ export type ReportSummary = {
   title: string;
   createdAt: string;
   wordCount: number;
-  archiveScore: number;
-  scoreBand: string;
+  /**
+   * The archive-only similarity percentage — or `null` when the server deliberately
+   * WITHHOLDS it (R2): the report's persisted evidence interpretation cannot be decoded,
+   * so this number has no explanation a customer could ever be shown (the detail page
+   * refuses the very same report). `null` always comes with similarityStatus "failed"
+   * ("Unavailable") — or "pending" while a first finalization is still expected: render
+   * no number either way — never a fallback number, never 0. Valid reports are unaffected
+   * and always carry a number. See lib/reports-repo.ts's withholdUnexplainedSimilarity.
+   */
+  archiveScore: number | null;
+  /** The score-derived band label ("Low" | "Moderate" | "High" — each spells out a percentage range), `null` exactly when archiveScore is withheld. */
+  scoreBand: string | null;
   aiScore: number | null;
   aiTone: string | null;
   /**
@@ -37,7 +47,8 @@ export type ReportSummary = {
    * persisted column, e.g. lib/developer-repo.ts, depend on) — this is
    * purely an additive display hint. Absent, or similarityStatus below not
    * "resolved", means "do not trust this as final — fall back to
-   * archiveScore," never "zero."
+   * archiveScore," never "zero." (When archiveScore is itself null — R2,
+   * see its own comment — there is no number to fall back to at all.)
    */
   primaryScore?: number;
   /** True when primaryScore reflects the full unified result rather than the archive-only fallback — see primaryScore's own comment. Absent/false with primaryScore also absent means the same thing: nothing more precise than archiveScore is known at this call site. */
