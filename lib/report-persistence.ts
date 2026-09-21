@@ -207,3 +207,36 @@ export function decodeReportFromPersistence(persisted: PersistedSimilarityReport
   if (!result.ok) throw new ReportPersistenceDecodeError(result.reason);
   return result.report;
 }
+
+/**
+ * R2 — whether a report's CUSTOMER-visible explanation can be decoded, judged from ONLY the
+ * serialized `evidenceInterpretation` value rather than the whole `payload_json`.
+ *
+ * For a reader that must decide "may this report's score be shown as a normal, explained
+ * one?" but deliberately never loads the report body — the room occupant poll
+ * (lib/reports-repo.ts's findRoomOccupant, every few seconds, scalars through SQL
+ * json_extract). It re-implements NO decoding rule: the value is handed to
+ * tryDecodeReportFromPersistence, the very function owner GET and the SSR report page call,
+ * with the same customer options (`requireContributions: false` — a room summary never serves
+ * contributions, so admin-only contributions damage stays moot here exactly as it does for a
+ * non-admin GET). The two can therefore never disagree about the interpretation.
+ *
+ * `interpretationJson` is the JSON text of `$.evidenceInterpretation`, or `null` when the
+ * caller has established that nothing was persisted that could fail to decode — absent, JSON
+ * null, or a plain legacy object with no `format` key, i.e. exactly what
+ * expandEvidenceInterpretationFromPersistence returns untouched. A caller must over-supply,
+ * never under-supply: anything that MIGHT be undecodable (a compact form, an unknown `format`,
+ * a non-object) has to be passed in. A failure is logged by the decoder (reason only, never
+ * content), like every other read.
+ */
+export function isEvidenceInterpretationCustomerReadable(interpretationJson: string | null): boolean {
+  if (interpretationJson === null) return true;
+  let interpretation: unknown;
+  try {
+    interpretation = JSON.parse(interpretationJson);
+  } catch {
+    logUnreadable("corrupt_evidence_interpretation", "NOT_JSON", "refused");
+    return false;
+  }
+  return tryDecodeReportFromPersistence({ evidenceInterpretation: interpretation }, { requireContributions: false }).ok;
+}

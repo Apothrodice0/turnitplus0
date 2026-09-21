@@ -443,6 +443,13 @@ export function evaluateReconciliation(result: RoomContentsFetchResult, trackedR
  * treatment, not a new style.
  */
 export function SimilarityMetricTile({ report, room }: { report: ReportSummary; room: number }) {
+  const unavailable = (
+    <div className="room-metric room-metric-unavailable">
+      <span className="room-metric-label">Similarity</span>
+      <strong className="room-metric-value">—</strong>
+      <span className="room-metric-sub">Unavailable</span>
+    </div>
+  );
   // Release-hardening audit finding LIFECYCLE-06 (extended): a genuine,
   // persisted terminal failure — see lib/report-primary-similarity.ts's
   // own resolution.failed for what does/doesn't set this — renders exactly
@@ -450,15 +457,7 @@ export function SimilarityMetricTile({ report, room }: { report: ReportSummary; 
   // non-link, no further detail to click through to), never as a number
   // and never lumped in with the still-in-progress "···" placeholder
   // below.
-  if (report.similarityStatus === "failed") {
-    return (
-      <div className="room-metric room-metric-unavailable">
-        <span className="room-metric-label">Similarity</span>
-        <strong className="room-metric-value">—</strong>
-        <span className="room-metric-sub">Unavailable</span>
-      </div>
-    );
-  }
+  if (report.similarityStatus === "failed") return unavailable;
   // Report-lifecycle correctness fix: "stale" is deliberately NOT treated
   // as unresolved here — lib/reports-repo.ts's findRoomOccupant already
   // resolves a persisted-but-corpus-stale similarity to a displayable
@@ -477,6 +476,10 @@ export function SimilarityMetricTile({ report, room }: { report: ReportSummary; 
     );
   }
   const score = report.primaryScore ?? report.archiveScore;
+  // R2: the server withholds the number when it cannot be explained (archiveScore null
+  // with similarityStatus "failed", handled above) — and this never renders a number that
+  // is not there, whatever status arrives alongside a null.
+  if (score === null) return unavailable;
   const band = similarityScoreBand(score);
   return (
     <Link href={`/reports/${report.id}?room=${room}`} className={`room-metric room-metric-${band?.key ?? "low"}`}>

@@ -73,7 +73,9 @@ export function ReportHistoryRow({
   // report would show.
   const displayScore = report.primaryScore ?? report.archiveScore;
   const displayLabel = report.isUnified ? "TurnitPlus Similarity" : "Similarity result";
-  const similarityVerdict = similarityScoreBand(displayScore);
+  // R2: a summary the server withheld the number from (archiveScore null — its
+  // evidence cannot be decoded) shows no number here either.
+  const similarityVerdict = displayScore === null ? null : similarityScoreBand(displayScore);
   const aiRow = aiRowDisplay(report);
 
   async function handleDownloadReceipt() {
@@ -123,10 +125,10 @@ export function ReportHistoryRow({
           </span>
           <span className="history-open-cue" aria-hidden="true"><ChevronRight /></span>
         </Link>
-        <Link href={`/reports/${report.id}`} prefetch={false} className={`history-result history-similarity-result ${similarityVerdict ? `history-similarity-${similarityVerdict.key}` : ""}`} aria-label={`Open similarity report for ${report.title} — ${displayScore}% ${displayLabel}`}>
+        <Link href={`/reports/${report.id}`} prefetch={false} className={`history-result history-similarity-result ${similarityVerdict ? `history-similarity-${similarityVerdict.key}` : ""}`} aria-label={`Open similarity report for ${report.title} — ${displayScore === null ? "similarity unavailable" : `${displayScore}% ${displayLabel}`}`}>
           <span className="history-result-score">
-            <strong>{displayScore}%</strong>
-            <span>{displayLabel}</span>
+            <strong>{displayScore === null ? "—" : `${displayScore}%`}</strong>
+            <span>{displayScore === null ? "Unavailable" : displayLabel}</span>
           </span>
           <span className="history-open-cue" aria-hidden="true"><ChevronRight /></span>
         </Link>
