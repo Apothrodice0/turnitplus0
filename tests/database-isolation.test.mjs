@@ -36,6 +36,8 @@ const testsDir = path.resolve("tests");
 const TURSO_SENSITIVE_ROUTE_IMPORTS = [
   "app/api/reports/route",
   "app/api/reports/[id]/route",
+  // G2: the AI-retry route reads/writes saved_reports via getReportsDbClient() too.
+  "app/api/reports/[id]/ai-retry/route",
   "app/api/auth/signup/route",
   "app/api/auth/login/route",
   "app/api/auth/logout/route",

@@ -70,7 +70,11 @@ test("retryAiCheck re-runs AI analysis from the already-extracted text and never
   // Still reuses the already-extracted text, never a freshly chosen file.
   assert.match(body, /retryAiAnalysisWithFreshLanguage\(full\.text\)/, "retry must reuse the already-extracted text from the full stored report, recomputing language fresh rather than trusting a persisted value");
   assert.doesNotMatch(body, /extractFileText\(/, "retry must never re-extract from a freshly chosen file — that's the upload flow, not a retry");
-  assert.match(body, /saveEnrichedAiResult\(full, aiResult\)/, "retry must persist through the same save path as the automatic post-upload pass, so the two can never disagree on when a room is 'ready'");
+  // G2: the retry persists through saveRetriedAiResult — saveEnrichedAiResult's twin, which derives the AI status and applies the room-state
+  // transition identically (tests/report-ai-retry-large-report.test.mjs pins that equivalence) but sends ONLY the AI result to the server.
+  // Re-POSTing the whole (GET-expanded) report through saveEnrichedAiResult / persistAiCompletion / saveReportRemote is the bug it replaced.
+  assert.match(body, /saveRetriedAiResult\(full, aiResult\)/, "retry must persist through saveRetriedAiResult, so the two AI-save paths can never disagree on when a room is 'ready' while the retry never re-POSTs the whole report");
+  assert.doesNotMatch(body, /saveEnrichedAiResult\(|persistAiCompletion\(|saveReportRemote\(/, "retry must never re-POST the whole (possibly GET-expanded, >2MB) report through the ordinary report-save path");
 });
 
 test("the stale client-only aiUnavailable flag is gone — a genuine AI failure is now a real, persisted room status, not ephemeral React state", async () => {

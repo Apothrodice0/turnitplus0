@@ -209,16 +209,19 @@ test("refresh/reopen after failure, and pre-existing stranded reports: the room'
   );
 });
 
-test("successful retry: retryAiCheck persists through the same persistAiCompletion-backed saveEnrichedAiResult path as the automatic pass, so a retry after failure and the original attempt can never disagree on how a room becomes ready", async () => {
+test("successful retry: retryAiCheck persists through saveRetriedAiResult — saveEnrichedAiResult's AI-only twin (G2: only the AI result is sent, never the whole report) — while the automatic pass keeps its persistAiCompletion-backed save", async () => {
   const shell = await readFile(new URL("../app/reports/rooms/[room]/room-page-shell.tsx", import.meta.url), "utf8");
 
   const retryBody = shell.match(/async function retryAiCheck\([\s\S]*?\n {2}\}/)?.[0] ?? "";
   assert.ok(retryBody.length > 0, "retryAiCheck function body must be found");
   assert.match(retryBody, /if \(retryingAi\) return;/, "repeated retry/double-click must still be debounced client-side");
-  assert.match(retryBody, /saveEnrichedAiResult\(full, aiResult\)/, "retry must go through the same saveEnrichedAiResult helper — now persistAiCompletion-backed — as the automatic post-upload pass");
+  assert.match(retryBody, /saveRetriedAiResult\(full, aiResult\)/, "retry must go through saveRetriedAiResult, the AI-only twin of the automatic pass's saveEnrichedAiResult (tests/report-ai-retry-large-report.test.mjs pins that the two derive the AI status and the room transition identically)");
+  assert.doesNotMatch(retryBody, /saveEnrichedAiResult\(|persistAiCompletion\(/, "retry must never re-POST the whole (possibly GET-expanded, >2MB) report");
 
   const helperBody = shell.match(/async function saveEnrichedAiResult\([\s\S]*?\n {2}\}/)?.[0] ?? "";
-  assert.match(helperBody, /await persistAiCompletion\(enriched, enrichedSummary, room\)/);
+  assert.match(helperBody, /await persistAiCompletion\(enriched, enrichedSummary, room\)/, "the automatic post-upload pass is unchanged");
+  const retryHelperBody = shell.match(/async function saveRetriedAiResult\([\s\S]*?\n {2}\}/)?.[0] ?? "";
+  assert.match(retryHelperBody, /await persistAiRetryResult\(enriched, enrichedSummary\)/);
 });
 
 test("app/page.tsx's anonymous-flow twin of the same bug is fixed the same way: the AI-completion merge persists through persistAiCompletion and the chain ends in a real .catch()", async () => {

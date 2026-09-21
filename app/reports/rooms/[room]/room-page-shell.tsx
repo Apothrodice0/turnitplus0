@@ -7,7 +7,7 @@ import { fetchReportRoomContents, fetchRemoteReport, saveReportRemote, type Repo
 import { invalidateRoomCache } from "@/lib/report-rooms-cache";
 import { ROOM_CYCLE_MS } from "@/lib/report-rooms";
 import { storeReportBestEffort, getStoredReportById } from "@/lib/report-store";
-import { persistAiCompletion } from "@/lib/report-ai-completion";
+import { persistAiCompletion, persistAiRetryResult } from "@/lib/report-ai-completion";
 import { buildReportSummary, type AiAnalysis, type ReportExtractionDiagnostic, type SimilarityReport } from "@/lib/report-types";
 import { resolveAiDisplayState } from "@/lib/ai-display-state";
 import { similarityScoreBand } from "@/lib/ai-core";
@@ -639,12 +639,50 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
   }
 
   /**
+   * G2 — saveEnrichedAiResult's twin for a MANUAL retry (retryAiCheck below): the identical AI-status derivation
+   * and the identical room-state transition once the result is saved, but persisted through
+   * persistAiRetryResult (POST /api/reports/[id]/ai-retry — only the AI result leaves the browser) instead of a
+   * re-POST of the whole report.
+   *
+   * Why not saveEnrichedAiResult itself: `report` here is often the GET-EXPANDED report (no local IndexedDB copy
+   * in this browser), and persistAiCompletion would send all of it back through the ordinary report-save route.
+   * That request grows with the similarity evidence, not with the retry: past MAX_REPORT_SAVE_REQUEST_BYTES it is
+   * a deterministic 413 on a report that saved and opened fine — and even under the ceiling it makes the server
+   * treat the browser's copy as input to a fresh similarity finalization, which a retry must never do. The saved
+   * report's similarity, evidence, identity, owner and room are the server's own; a retry changes only the AI
+   * half. `similarityStatus: "pending"` is forced for the same reason as in saveEnrichedAiResult: this room's
+   * own poll is the only thing allowed to promote it, from a fresh server read.
+   */
+  async function saveRetriedAiResult(report: SimilarityReport, aiResult: { aiScore: number | null; aiAnalysis: AiAnalysis }): Promise<boolean> {
+    const enriched = { ...report, ...aiResult };
+    const enrichedSummary: ReportSummary = {
+      ...buildReportSummary(enriched),
+      aiStatus: aiResult.aiAnalysis.status === "complete" ? "ready" : "failed",
+      similarityStatus: "pending",
+    };
+    const retrySaveResult = await persistAiRetryResult(enriched, enrichedSummary);
+    if (!retrySaveResult.ok) return false;
+    invalidateRoomCache(accountEmail, room);
+    setOccupant({
+      status: enrichedSummary.aiStatus === "ready" ? "ready" : "failed",
+      report: enrichedSummary,
+      cycleEndsAt: new Date(Date.parse(enrichedSummary.createdAt) + ROOM_CYCLE_MS).toISOString(),
+    });
+    return true;
+  }
+
+  /**
    * Manual re-run for a room whose AI check genuinely failed (occupant.status
    * === "failed") — the similarity result is already saved and unaffected;
    * this only re-attempts the AI half, using the full report's own already-
    * extracted text (no re-upload needed). Language is always recomputed
    * fresh (retryAiAnalysisWithFreshLanguage), never taken from
    * full.features.detectedLanguage — see that function's own comment.
+   *
+   * G2: the result is saved through saveRetriedAiResult — only the AI result
+   * is sent to the server, never the (possibly GET-expanded, possibly >2MB)
+   * report itself, so a large report's Retry works the same whether or not
+   * this browser still holds its local copy.
    */
   async function retryAiCheck(reportId: string) {
     if (retryingAi) return;
@@ -673,7 +711,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
         return;
       }
       const aiResult = await retryAiAnalysisWithFreshLanguage(full.text);
-      const saved = await saveEnrichedAiResult(full, aiResult);
+      const saved = await saveRetriedAiResult(full, aiResult);
       notify(
         !saved
           ? "Could not save the updated AI result. Please try again."

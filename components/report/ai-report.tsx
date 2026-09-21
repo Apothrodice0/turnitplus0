@@ -1,11 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   AI_PASSAGE_LOG_ODDS_THRESHOLD,
   AI_REVIEW_PASSAGE_PERCENTILE,
   shouldSuppressAiScore,
 } from "@/lib/ai-core";
+import { resolveAiPassages } from "@/lib/ai-passage-table";
 import {
   aiFirstRunExplainer,
   aiPrepDetailLabel,
@@ -154,10 +155,21 @@ export function AiReport({
   const isSuppressed = rawScore !== null && shouldSuppressAiScore(rawScore);
   const analysis = report.aiAnalysis;
   const signal = signalProp ?? aiSignalDisplay(report);
+  // ai-compact-v1 (lib/ai-passage-table.ts): the per-window list is stored either
+  // as full `passages[]` (every legacy row, returned as is) or as a compact table
+  // that is rebuilt HERE, lazily and once, from this report's own manuscript —
+  // this component is the only place a window's text is ever needed. `passages`
+  // is null when a compact table cannot be verified against `report.text` (an
+  // unsupported version, a text hash/length mismatch, an out-of-range row): the
+  // headline and every count above it are unaffected, and only the per-window
+  // list is replaced by the existing "breakdown isn't available" message below —
+  // never by the false "0 passages exceeded the threshold" state.
+  const resolvedPassages = useMemo(() => resolveAiPassages(analysis, report.text), [analysis, report.text]);
+  const passages = resolvedPassages.status === "ok" ? resolvedPassages.passages : null;
   // The AI check is authoritatively finished (a real headline score exists —
   // from the persisted columns even if this payload's aiAnalysis was lost to
   // a stale-generation overwrite), just without the passage-level detail.
-  const completeWithoutDetail = signal.value !== null && !analysis;
+  const completeWithoutDetail = signal.value !== null && (!analysis || (analysis.status === "complete" && !passages));
 
   return (
     <article className={`report-paper ai-paper ${printMode ? "ai-report-print" : "ai-report-enter"} ai-signal-${signal.tone}`}>
@@ -196,7 +208,7 @@ export function AiReport({
           <div><strong>{signal.value}%</strong><span>AI writing score</span></div>
           <div><strong>{analysis?.analyzedWordCount.toLocaleString() ?? "—"}</strong><span>words analyzed</span></div>
           <div><strong>{analysis?.analyzedTokenCount?.toLocaleString() ?? "—"}</strong><span>tokens analyzed</span></div>
-          <div><strong>{analysis?.passages.length.toLocaleString() ?? "—"}</strong><span>passage windows</span></div>
+          <div><strong>{analysis && passages ? passages.length.toLocaleString() : "—"}</strong><span>passage windows</span></div>
         </section>}
 
         {isRunning && <AiPreparationPanel prepState={prepState} onCancel={onCancel} />}
@@ -208,7 +220,7 @@ export function AiReport({
           </section>
         )}
 
-        {!isRunning && analysis?.status === "complete" && !isSuppressed && (
+        {!isRunning && analysis?.status === "complete" && !isSuppressed && passages && (
           <section className="ai-passage-review">
             <div className="ai-passage-heading">
               <div>
@@ -216,13 +228,13 @@ export function AiReport({
                 <h3>Highlighted passage analysis</h3>
               </div>
               <span>
-                {analysis.flaggedPassageCount ?? analysis.passages.filter((passage) => passage.flagged).length}
-                /{analysis.passages.length} passages · {AI_REVIEW_PASSAGE_PERCENTILE}th-percentile cutoff {(analysis.thresholdLogOdds ?? AI_PASSAGE_LOG_ODDS_THRESHOLD).toFixed(3)}
+                {analysis.flaggedPassageCount ?? passages.filter((passage) => passage.flagged).length}
+                /{passages.length} passages · {AI_REVIEW_PASSAGE_PERCENTILE}th-percentile cutoff {(analysis.thresholdLogOdds ?? AI_PASSAGE_LOG_ODDS_THRESHOLD).toFixed(3)}
               </span>
             </div>
-            {analysis.passages.length > 0 ? (
+            {passages.length > 0 ? (
               <div className="ai-passage-list">
-                {analysis.passages.map((passage, index) => {
+                {passages.map((passage, index) => {
                   const isAi = passage.flagged ?? (
                     passage.logOdds != null
                       ? passage.logOdds >= (analysis.thresholdLogOdds ?? AI_PASSAGE_LOG_ODDS_THRESHOLD)
