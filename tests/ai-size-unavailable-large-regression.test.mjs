@@ -34,7 +34,10 @@ const roomShell = await import("../app/reports/rooms/[room]/room-page-shell.tsx"
  *   4. KNOWN BOUNDARY: with the ai-compact-v1 WRITER gate at its shipped default (OFF) a result whose legacy form exceeds the request
  *      ceiling cannot even be SENT — unchanged by this policy, and exactly what activating the writer resolves. Pinned so it is visible.
  *
- * The ai-compact-v1 writer gate is pinned ON (process-locally) for 1–3 — the activation configuration — and restored afterwards.
+ * Both writer gates — report-compact-persistence (C2) and ai-compact-v1 — are pinned ON (process-locally) for 1–3 — the full
+ * activation configuration — and restored afterwards. Dense evidence (case 2) needs C2 ON to fit the first save at all: under
+ * deterministic matching (matchAgainstUserSubmissionCorpus no longer wall-clock budgeted) the expanded persisted form of a full
+ * ten-source match reliably exceeds the persistence limit, where the compact form does not.
  * Set G2_SIZE_REGRESSION_OUT=<dir> to have the measurements written as JSON.
  */
 
@@ -46,7 +49,7 @@ const writeOut = (name, value) => { if (OUT) fs.writeFileSync(path.join(OUT, nam
 const env = await fx.createFixtureEnvironment("g2_size_large");
 process.env.TURSO_DATABASE_URL = `file:${env.dbFile}`;
 const kit = createKit(env);
-const restoreC2 = fx.pinCompactWrites(undefined);
+const restoreC2 = fx.pinCompactWrites("true");
 const restoreAi = fx.pinAiCompactWrites("true");
 test.after(() => {
   restoreAi();
