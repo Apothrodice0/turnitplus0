@@ -13,13 +13,20 @@ import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
 /**
  * TIMEOUT HONESTY, made concrete: dbQueryTimeoutMs is a real race against
  * genuine async I/O (proven here with an artificially slow client wrapper);
- * matchTimeBudgetMs is a soft, cooperative deadline that can only refuse to
- * start the NEXT candidate (proven by forcing it to 0 and confirming the
- * loop runs zero correspondence comparisons, returning partial:true rather
- * than throwing or hanging); maxCandidateWordCount is the real, hard
- * backstop for a single oversized candidate (proven by seeding one and
- * confirming it is skipped without ever reaching computeDocumentCorrespondence).
- * Every fixture is synthetic.
+ * maxCandidateWordCount is the real, hard backstop for a single oversized
+ * candidate (proven by seeding one and confirming it is skipped without
+ * ever reaching computeDocumentCorrespondence). Every fixture is synthetic.
+ *
+ * matchTimeBudgetMs — a soft, wall-clock cooperative deadline that used to
+ * gate the candidate loop between candidates — was REMOVED 2026-09-22: it
+ * made which candidates got compared (and therefore the matched-word-
+ * position set and the customer-facing similarity score) depend on how fast
+ * the executing machine/Node runtime happened to be, diagnosed via a
+ * reproducible Node22-vs-Node24 divergence for byte-identical input
+ * (D:\Github\turnitplus-work\tmp\node22-archive-divergence\20260922-135529\
+ * root-cause.md). See "DEADLINE REMOVED" below for the regression test that
+ * replaced the old matchTimeBudgetMs=0 test and proves no wall-clock
+ * mechanism remains in the loop.
  */
 
 const repoRoot = path.resolve(".");
@@ -115,27 +122,57 @@ test("a fast database (no timeout) still finds the real match — the timeout wr
   assert.notEqual(result.partial, true);
 });
 
-const TEXT_BUDGET =
-  "Expensive-correspondence fixture: paleontologists excavating a fossil bed uncovered several articulated skeletons " +
+const TEXT_MULTI_A =
+  "Deadline-removed fixture A: paleontologists excavating a fossil bed uncovered several articulated skeletons " +
   "belonging to a previously undescribed species of small theropod dinosaur, preserved in fine-grained volcanic ash " +
   "that captured unusually detailed soft-tissue impressions around the forelimbs.";
 
-test("EXPENSIVE CORRESPONDENCE WORK: a cooperative deadline already exceeded before the loop starts skips every candidate and returns partial:true — never throws, never hangs", async () => {
-  await indexSubmission("budget-account", "Budget fixture", TEXT_BUDGET);
+const TEXT_MULTI_B =
+  "Deadline-removed fixture B: oceanographers analyzing decades of tide-gauge records identified an unexpected " +
+  "acceleration in regional sea-level rise along a stretch of subsiding coastline, attributing part of the trend " +
+  "to groundwater extraction rather than thermal expansion alone.";
 
-  const result = await matchAgainstUserSubmissionCorpus(client, {
-    accountId: "some-other-account-3",
-    canonicalText: TEXT_BUDGET,
-    // 0ms budget: Date.now() >= deadline is true before the very first
-    // candidate is even considered, so this proves the deadline check
-    // itself works — see this file's own header comment for why a real
-    // slow computeDocumentCorrespondence can't be honestly simulated any
-    // other way (there's no way to interrupt it once started).
-    config: { ...USER_SUBMISSION_MATCH_THRESHOLDS, matchTimeBudgetMs: 0 },
+test("DEADLINE REMOVED: a slow candidate-loop pass (well past the old 2,500ms matchTimeBudgetMs default) still compares every deterministic candidate — no wall-clock mechanism truncates the loop", async () => {
+  await indexSubmission("deadline-removed-account-a", "Deadline-removed fixture A", TEXT_MULTI_A);
+  await indexSubmission("deadline-removed-account-b", "Deadline-removed fixture B", TEXT_MULTI_B);
+
+  // The 2,500ms value the removed matchTimeBudgetMs used to default to —
+  // kept as a local constant (the field itself no longer exists on
+  // UserSubmissionMatchConfig) purely so this test can prove it genuinely
+  // exceeded that old window.
+  const OLD_MATCH_TIME_BUDGET_MS_DEFAULT = 2_500;
+
+  // Delays EVERY client.execute() call. Candidate discovery alone issues
+  // several sequential DB round trips (a maturity-exemption check, the
+  // shingle-candidate query, the exact-hash fallback lookup, then per-
+  // candidate findRepresentationById/summarizeSubmissionOwnership calls) —
+  // with a 900ms delay on each, the whole pass takes several seconds,
+  // comfortably past the old matchTimeBudgetMs default (2,500ms) well
+  // before the loop even reaches its second candidate. Under the removed
+  // cooperative-deadline code this would have dropped candidates (up to
+  // all of them) and returned partial:true. dbQueryTimeoutMs is raised
+  // generously here because it wraps the ENTIRE (now multi-call, now-slow)
+  // discovery phase with a REAL timeout — legitimate and untouched by this
+  // fix, but not what this test is about, so it must not fire first. DF
+  // pruning is disabled so discovery's own query shape stays simple and
+  // predictable for this timing-sensitive test.
+  const wrapped = slowClient(client, 900);
+  const submissionText = `${TEXT_MULTI_A} ${TEXT_MULTI_B}`;
+  const startedAt = Date.now();
+  const result = await matchAgainstUserSubmissionCorpus(wrapped, {
+    accountId: "deadline-removed-querying-account",
+    canonicalText: submissionText,
+    config: { ...USER_SUBMISSION_MATCH_THRESHOLDS, maxCandidateShingleDocumentFrequency: null, dbQueryTimeoutMs: 10_000 },
   });
+  const elapsedMs = Date.now() - startedAt;
 
-  assert.equal(result.status, "NO_HISTORICAL_MATCH");
-  assert.equal(result.partial, true, "a budget-exceeded exit must be marked partial, distinguishing it from a genuinely confirmed absence of matches");
+  assert.ok(
+    elapsedMs > OLD_MATCH_TIME_BUDGET_MS_DEFAULT,
+    `test setup sanity: this run must genuinely exceed the old default budget window to prove anything (took ${elapsedMs}ms)`,
+  );
+  assert.equal(result.status, "MATCHED", "both candidates must still be found and matched despite the slow, budget-exceeding pass");
+  assert.equal(result.matches?.length, 2, "no candidate may be silently dropped — this is exactly what the removed wall-clock deadline used to do");
+  assert.notEqual(result.partial, true, "a slow-but-complete pass is not partial — no timeout (real or wall-clock) actually fired");
 });
 
 test("maxCandidateWordCount: an oversized candidate is skipped entirely, never reaching computeDocumentCorrespondence, regardless of the time budget", async () => {

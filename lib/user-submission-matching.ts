@@ -93,28 +93,19 @@ export type UserSubmissionMatchConfig = {
   /** This service's own algorithm/config identifier, independent of canonicalizationVersion and fingerprintVersion (this phase's own task description, section 30). */
   matcherVersion: string;
   /**
-   * HARD input limit, not a timeout: a candidate representation whose own
-   * word_count exceeds this is skipped entirely — computeDocumentCorrespondence
-   * is never called on it — before any correspondence work starts. This is
-   * the real backstop against a single pathologically large candidate
-   * document blowing the per-request time budget below; matchTimeBudgetMs
-   * cannot protect against that on its own (see this file's own comment on
-   * why a cooperative deadline can only refuse to START new work, never
-   * interrupt a single computeDocumentCorrespondence call already running).
+   * HARD input limit: a candidate representation whose own word_count
+   * exceeds this is skipped entirely — computeDocumentCorrespondence is
+   * never called on it — before any correspondence work starts. Combined
+   * with maxCandidates above, this deterministically bounds the whole
+   * correspondence loop's worst-case work (at most maxCandidates calls,
+   * each against a candidate no larger than this many words) using only
+   * input-derived quantities — no wall-clock read anywhere on this path.
+   * See matchAgainstUserSubmissionCorpus's own comment for why a wall-clock
+   * budget was deliberately removed from here (it produced a machine/
+   * runtime-speed-dependent candidate count for byte-identical input,
+   * fixed 2026-09-22).
    */
   maxCandidateWordCount: number;
-  /**
-   * SOFT, cooperative deadline for the whole matching pass — checked ONLY
-   * between candidates in the correspondence loop, never mid-computation.
-   * This can stop the loop from STARTING another candidate once the budget
-   * is spent; it cannot cancel, interrupt, or bound a single
-   * computeDocumentCorrespondence call already in flight (JS/Node has no
-   * built-in way to preempt synchronous CPU work). maxCandidateWordCount
-   * above is what actually bounds a single call's own worst case. See
-   * matchAgainstUserSubmissionCorpus's own comment for the full honesty
-   * disclosure this file's own review explicitly asked for.
-   */
-  matchTimeBudgetMs: number;
   /**
    * A REAL (not cooperative) timeout, legitimate specifically because this
    * wraps genuinely asynchronous I/O — the findCandidateCorpusRepresentations
@@ -241,7 +232,6 @@ export const USER_SUBMISSION_MATCH_THRESHOLDS: UserSubmissionMatchConfig = {
   // exists purely as a backstop against a single oversized/degenerate
   // corpus row.
   maxCandidateWordCount: 20_000,
-  matchTimeBudgetMs: 2_500,
   dbQueryTimeoutMs: 1_500,
   // 10k+-corpus scale hardening — see maxCandidateShingleDocumentFrequency's
   // own comment on UserSubmissionMatchConfig. 50 was chosen from direct
@@ -364,23 +354,35 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): 
  * setTimeout cannot fire, let alone preempt anything, until the current
  * synchronous stack yields on its own; a slow computeDocumentCorrespondence
  * call blocks the event loop regardless of any timer race around it).
- * There are two real mechanisms here, deliberately different in kind:
- *   1. dbQueryTimeoutMs — a REAL race, legitimate specifically because
- *      findCandidateCorpusRepresentations is genuine async I/O: the DB
- *      driver yields the event loop while waiting, so racing it against a
- *      timer can actually abandon a hung/slow query the caller stops
- *      waiting on (the underlying request may still complete server-side;
- *      this is a "give up waiting" bound, the same honest kind every HTTP
- *      client timeout is, not true cancellation).
- *   2. matchTimeBudgetMs — a SOFT, cooperative deadline, checked only
- *      between candidates in the loop below. It can refuse to START another
- *      candidate once the budget is spent; it CANNOT interrupt a single
- *      computeDocumentCorrespondence call already running. That is exactly
- *      why maxCandidateWordCount is a HARD input limit, not a timeout — it
- *      is the only thing that actually bounds one call's own worst case.
- * A budget-exceeded exit returns whatever matches were already found (never
- * wrong, only potentially incomplete) with partial:true, so callers can
- * choose to treat it as not-yet-final rather than a confirmed result.
+ * There is exactly one real timeout mechanism here:
+ *   dbQueryTimeoutMs — a REAL race, legitimate specifically because
+ *   findCandidateCorpusRepresentations is genuine async I/O: the DB driver
+ *   yields the event loop while waiting, so racing it against a timer can
+ *   actually abandon a hung/slow query the caller stops waiting on (the
+ *   underlying request may still complete server-side; this is a "give up
+ *   waiting" bound, the same honest kind every HTTP client timeout is, not
+ *   true cancellation). A dbQueryTimeoutMs exit returns whatever matches
+ *   were already found (never wrong, only potentially incomplete) with
+ *   partial:true, so callers can choose to treat it as not-yet-final rather
+ *   than a confirmed result.
+ *
+ * The correspondence loop below deliberately has NO wall-clock deadline.
+ * It previously had one (matchTimeBudgetMs, a soft cooperative check
+ * between candidates) — removed 2026-09-22 because a wall-clock read
+ * (Date.now()) makes which candidates get compared, and therefore the
+ * matched-word-position set and the customer-facing similarity score,
+ * depend on how fast the executing machine/Node runtime happens to be:
+ * diagnosed via a measured ~28% Node22-vs-Node24 slowdown in
+ * computeDocumentCorrespondence's per-call cost causing the SAME fixed
+ * budget to admit fewer candidates on the slower runtime for byte-identical
+ * input (D:\Github\turnitplus-work\tmp\node22-archive-divergence\
+ * 20260922-135529\root-cause.md). The loop is still fully bounded without
+ * it: boundedCandidates is already capped to maxCandidates entries before
+ * the loop starts, and maxCandidateWordCount skips any single oversized
+ * candidate before computeDocumentCorrespondence is ever called on it — so
+ * every candidate the deterministic ranked set offers, up to those two
+ * existing static caps, is now always processed, regardless of machine
+ * speed.
  */
 export async function matchAgainstUserSubmissionCorpus(
   client: Client,
@@ -434,7 +436,6 @@ export async function matchAgainstUserSubmissionCorpus(
   },
 ): Promise<UserSubmissionMatchResult> {
   const config = mergeConfig(params.config);
-  const deadline = Date.now() + config.matchTimeBudgetMs;
   // Resolved ONCE for this whole match — a single string handed to both
   // candidate discovery and the exact-hash fallback (never asOf separately),
   // so they cannot straddle a maturity boundary. Never null: matching always
@@ -528,19 +529,14 @@ export async function matchAgainstUserSubmissionCorpus(
   // its whole computation, is used verbatim; otherwise a single internal
   // env read, exactly as before.
   const corpusSourceMatchingEnabled = params.corpusSourceMatchingEnabled ?? isCorpusSourceMatchingEnabled();
-  let timedOut = dbTimedOut;
+  const timedOut = dbTimedOut;
 
   for (const candidate of boundedCandidates) {
-    // Cooperative deadline check — see this function's own TIMEOUT HONESTY
-    // comment: this can only decline to start the NEXT candidate, never
-    // interrupt one already in progress.
-    if (Date.now() >= deadline) {
-      timedOut = true;
-      break;
-    }
-
     // HARD input limit: never run correspondence comparison against an
-    // oversized candidate document at all, regardless of the time budget.
+    // oversized candidate document at all. See this function's own TIMEOUT
+    // HONESTY comment — this and maxCandidates (already applied to
+    // boundedCandidates above) are what deterministically bound this loop's
+    // worst-case work, with no wall-clock deadline involved.
     if (candidate.wordCount > config.maxCandidateWordCount) continue;
 
     const representation = await findRepresentationById(client, candidate.representationId);

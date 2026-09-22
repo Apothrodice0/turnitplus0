@@ -499,7 +499,6 @@ test("J: the pruning work changed no correspondence / matcher threshold", () => 
   assert.equal(USER_SUBMISSION_MATCH_THRESHOLDS.candidateShingleThreshold, 3);
   assert.equal(USER_SUBMISSION_MATCH_THRESHOLDS.maxCandidates, 10);
   assert.equal(USER_SUBMISSION_MATCH_THRESHOLDS.maxCandidateWordCount, 20_000);
-  assert.equal(USER_SUBMISSION_MATCH_THRESHOLDS.matchTimeBudgetMs, 2_500);
   assert.equal(USER_SUBMISSION_MATCH_THRESHOLDS.dbQueryTimeoutMs, 1_500);
   // The new knobs, asserted so a change is deliberate.
   assert.equal(USER_SUBMISSION_MATCH_THRESHOLDS.maxCandidateShingleDocumentFrequency, 50);
