@@ -203,7 +203,9 @@ test("G2 REMOTE FALLBACK: a large report that saves and opens no longer 413s on 
 
     // (a) The pre-fix mechanism is still what it was: re-POSTing that expanded report is refused 413 — and the row is untouched. The guard was NOT raised.
     // (Reproduced with the writer gate OFF: this is the legacy whole-report echo carrying the full, uncompacted AI result.)
-    const oldPath = await fx.withAiCompactWrites(undefined, () => persistAiCompletion(enriched, summary, 0));
+    // (The ORDINARY SAVE ROUTE itself, called directly: persistAiCompletion now answers a size 413 with a fallback to the narrow
+    // AI-result route — the G2 size policy, owned by tests/ai-size-unavailable-policy.test.mjs — so it no longer ends here.)
+    const oldPath = await fx.withAiCompactWrites(undefined, () => saveReportRemote(enriched, summary, undefined, 0));
     const oldRequest = route.requests.filter((r) => r.method === "POST" && r.path === "/api/reports").at(-1);
     assert.ok(oldRequest.bytes > MAX_REPORT_SAVE_REQUEST_BYTES, `fixture sanity: the old echo (${oldRequest.bytes} bytes) must exceed the ${MAX_REPORT_SAVE_REQUEST_BYTES}-byte ceiling to reproduce G2`);
     assert.equal(oldRequest.status, 413);
@@ -420,7 +422,7 @@ test("TRANSPORT GUARDS apply to the retry route too: a Content-Length over the c
   assert.equal(sha((await readRow(id)).payload_json), sha(before.payload_json));
 });
 
-test("PERSISTENCE CEILING fails closed: an AI result that would push the saved payload past MAX_REPORT_SAVE_REQUEST_BYTES is refused 413 and nothing is written; just under it succeeds", async () => {
+test("PERSISTENCE CEILING is not raised: an AI result that would push the saved payload past MAX_REPORT_SAVE_REQUEST_BYTES is never persisted (G2 size policy — the server writes its own tiny terminal 'AI unavailable' state instead of the old bare 413; the real result and the saved report's other fields are untouched); just under it succeeds", async () => {
   const account = accounts.guard;
   const insertRow = async (id, paddingChars, room) => {
     await env.client.execute({
@@ -434,10 +436,21 @@ test("PERSISTENCE CEILING fails closed: an AI result that would push the saved p
   await insertRow("g2-ceiling-over", MAX_REPORT_SAVE_REQUEST_BYTES - aiChars + 500, 8);
   const beforeOver = await readRow("g2-ceiling-over");
   const over = await callRetryRoute("g2-ceiling-over", { body, cookie: account.cookie });
-  assert.equal(over.status, 413);
-  assert.deepEqual(over.json, { error: "Payload too large" });
-  assert.equal(sha((await readRow("g2-ceiling-over")).payload_json), sha(beforeOver.payload_json), "nothing was written");
-  assert.equal((await readRow("g2-ceiling-over")).ai_status, "failed");
+  // G2 size policy (POLICY_B_KEEP_REPORT_AI_UNAVAILABLE_FOR_SIZE, tests/ai-size-unavailable-policy.test.mjs): the real result is
+  // still refused — never persisted, the ceiling is unchanged — but the report is not left processing/retrying behind a
+  // deterministic 413: the SERVER records the terminal, non-retryable "AI unavailable for this document" state and says so.
+  assert.equal(over.status, 200);
+  assert.deepEqual(over.json, { ok: true, aiOutcome: "SIZE_UNAVAILABLE" });
+  const afterOver = await readRow("g2-ceiling-over");
+  assert.equal(afterOver.ai_status, "failed");
+  assert.equal(afterOver.ai_score, null, "no AI score is persisted for the terminal state");
+  const overPayload = payloadOf(afterOver);
+  assert.equal(overPayload.aiAnalysis.unavailableReason, "REPORT_SIZE");
+  assert.deepEqual(overPayload.aiAnalysis.passages, [], "none of the oversized result's passages were persisted");
+  assert.ok(String(afterOver.payload_json).length <= MAX_REPORT_SAVE_REQUEST_BYTES, "and the saved report still fits the (unchanged) ceiling");
+  const { aiAnalysis: _overAi, aiScore: _overScore, ...overRest } = overPayload;
+  const { aiAnalysis: _beforeAi, aiScore: _beforeScore, ...beforeRest } = payloadOf(beforeOver);
+  assert.deepEqual(overRest, beforeRest, "every other field of the saved report is untouched");
 
   await insertRow("g2-ceiling-under", MAX_REPORT_SAVE_REQUEST_BYTES - aiChars - 500, 9);
   const under = await callRetryRoute("g2-ceiling-under", { body, cookie: account.cookie });
