@@ -1,6 +1,7 @@
 import { getDeviceKey } from "./device-key";
 import { maybeAttestReportUpload, markDevicePassportReportSaved } from "./device-passport";
 import { prepareReportForTransport } from "./ai-passage-table";
+import { AI_SAVE_OUTCOME_SIZE_UNAVAILABLE, type AiSaveOutcome, type AiUnavailableReason } from "./ai-unavailable-state";
 import type { RoomIndexEntry } from "./report-rooms";
 
 export type ReportSummary = {
@@ -34,6 +35,14 @@ export type ReportSummary = {
    * falls back cleanly when this is absent.
    */
   aiStatus?: "processing" | "ready" | "failed";
+  /**
+   * G2 (lib/ai-unavailable-state.ts): present ONLY when this report's AI half is the terminal, SERVER-authored "AI unavailable
+   * for this document" state (`aiStatus` is then always "failed"). It is the one thing that hides the room's "Retry analysis" —
+   * a re-run of the model would only hit the same wall. Read from the server's own persisted row by findRoomOccupant (never
+   * trusted from a browser) and set locally only from the server's own answer to the AI-result save. Absent for every
+   * ordinary report, including an ordinary AI failure (which keeps its Retry).
+   */
+  aiUnavailableReason?: AiUnavailableReason;
   /**
    * Release-hardening audit finding SIM-01, SIM-03: lib/report-types.ts's
    * buildReportSummary() sets this from primarySimilarityScore(report) —
@@ -82,7 +91,12 @@ export type ReportSummary = {
 // must never interrupt analysis or block the existing local (IndexedDB) flow.
 
 export type SaveReportRemoteResult =
-  | { ok: true }
+  /**
+   * `aiOutcome` is set ONLY by the AI-result route (saveAiRetryResultRemote), and only when the SERVER decided the real AI
+   * result cannot be stored next to the report and persisted the terminal size-unavailable state instead (see
+   * lib/ai-unavailable-state.ts). Absent = what the caller sent was persisted (or nothing needed writing).
+   */
+  | { ok: true; aiOutcome?: AiSaveOutcome }
   /**
    * status 0 means the request never completed (network/DB error) — the
    * existing fail-soft case, where the local copy is the only signal that
@@ -287,7 +301,10 @@ export async function saveAiRetryResultRemote(input: SaveAiRetryResultInput): Pr
       const body = (await response.json().catch(() => null)) as { error?: string } | null;
       return { ok: false, status: response.status, quotaExceeded: false, roomOccupied: false, roomReuseNotReady: false, error: body?.error };
     }
-    return { ok: true };
+    // G2: a 200 may carry the server's own decision that the real result could not be stored (see SaveReportRemoteResult).
+    // Only the one known literal is honoured; anything else — or an unreadable body — is the plain `{ ok: true }` it always was.
+    const okBody = (await Promise.resolve(response.json?.()).catch(() => null)) as { aiOutcome?: unknown } | null;
+    return okBody?.aiOutcome === AI_SAVE_OUTCOME_SIZE_UNAVAILABLE ? { ok: true, aiOutcome: AI_SAVE_OUTCOME_SIZE_UNAVAILABLE } : { ok: true };
   } catch (error) {
     console.debug("Remote AI retry save failed (local copy is unaffected).", {
       error: error instanceof Error ? error.message : String(error),

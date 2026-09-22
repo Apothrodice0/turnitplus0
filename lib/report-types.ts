@@ -5,6 +5,12 @@ import type { UnifiedSimilarityResult } from "@/lib/unified-similarity";
 import type { SuppliedReferenceVerifiedEvidence, SuppliedReferenceInput } from "@/lib/user-supplied-references";
 import type { UserSuppliedReferenceGuard, UserSuppliedReferencePersistedChannel } from "@/lib/report-user-supplied-references";
 import { resolveAiDisplayState } from "@/lib/ai-display-state";
+import {
+  AI_SIZE_UNAVAILABLE_MESSAGE,
+  AI_SIZE_UNAVAILABLE_RANGE,
+  isSizeUnavailableAiAnalysis,
+  type AiUnavailableReason,
+} from "@/lib/ai-unavailable-state";
 import type { DetectedLanguage } from "@/lib/similarity-core";
 import type { CompactAiPassageTableV1 } from "@/lib/ai-passage-table";
 // Report V2 evidence-interpretation payload types. These are imported from
@@ -107,6 +113,13 @@ export type AiAnalysis = {
    */
   detectedLanguage?: DetectedLanguage;
   languageDetectorVersion?: number;
+  /**
+   * G2 (lib/ai-unavailable-state.ts) — present ONLY on the terminal `error` result the SERVER persists when the real AI result
+   * cannot be stored next to this report inside the persisted-report ceiling. Never sent or set by a browser (the AI-retry route
+   * and POST /api/reports drop it from anything a client submits; a strictly-validated compact table carrying it is refused). It makes the failure non-retryable and non-transient in the UI;
+   * a reader that does not know it reads the result as an ordinary failed AI analysis. Additive: no migration, nothing scores from it.
+   */
+  unavailableReason?: AiUnavailableReason;
 };
 
 export type AiSignalTone = "low" | "review" | "high" | "unavailable";
@@ -766,6 +779,17 @@ export function aiSignalDisplay(
     };
   }
   if (resolution.state === "failed") {
+    // G2: a report the SERVER marked "AI unavailable for this document" (lib/ai-unavailable-state.ts) has nothing to try
+    // again — a re-run would just hit the same wall — so it never says "Try again", and its detail is the fixed neutral copy.
+    if (isSizeUnavailableAiAnalysis(report.aiAnalysis)) {
+      return {
+        value: null,
+        tone: "unavailable",
+        label: "Analysis unavailable",
+        detail: AI_SIZE_UNAVAILABLE_MESSAGE,
+        range: AI_SIZE_UNAVAILABLE_RANGE,
+      };
+    }
     return {
       value: null,
       tone: "unavailable",

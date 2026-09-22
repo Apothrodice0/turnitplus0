@@ -188,7 +188,9 @@ test('INDEPENDENT-STAGE UI (§14, combo 1): AI = ready, Similarity = processing 
   // Retry analysis must be ABSENT when occupant.status is "ready" — the
   // pollExhausted sub-view's own guard.
   const pollExhaustedMessage = branch.match(/<div className="ai-analysis-message" role="status">[\s\S]*?<\/div>\s*\) : \(/)?.[0] ?? "";
-  assert.match(pollExhaustedMessage, /\{occupant\.status !== "ready" && \(/, "REQUIRED (READY_AI_CAN_BE_RETRIED = NO): the Retry analysis button must be conditioned on occupant.status !== \"ready\"");
+  // (G2 size policy: the same guard, plus — and only plus — the one further condition that hides Retry for a report the server marked
+  // "AI unavailable for this document". The `occupant.status !== "ready"` requirement itself is unchanged.)
+  assert.match(pollExhaustedMessage, /\{occupant\.status !== "ready" && (?:isAiRetryOffered\(occupant\.report\) && )?\(/, "REQUIRED (READY_AI_CAN_BE_RETRIED = NO): the Retry analysis button must be conditioned on occupant.status !== \"ready\"");
 });
 
 test('INDEPENDENT-STAGE UI (§14, combo 2): AI = failed, Similarity = ready -> AI shows failed/retryable ("Unavailable" + Retry analysis available), Similarity displays its real, ready saved result', () => {

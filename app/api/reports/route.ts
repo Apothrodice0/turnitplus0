@@ -18,7 +18,8 @@ import { captureDocumentIdentityAndFamily } from '../../../lib/document-family';
 import { linkAcademicSearchRunDiagnosticsToReport, resolveVerifiedAcademicEvidence } from '../../../lib/academic-search-diagnostics-repo';
 import { canonicalSha256 } from '../../../lib/document-identity';
 import { checkUploadLimit } from '../../../lib/upload-limit';
-import { getRoomCountForRole, isWithinActiveCycle, roomCycleEndsAt } from '../../../lib/report-rooms';
+import { deriveRoomStatus, getRoomCountForRole, isWithinActiveCycle, roomCycleEndsAt } from '../../../lib/report-rooms';
+import { TERMINAL_AI_RESERVE_CHARS, withoutClientAiUnavailableReason } from '../../../lib/ai-unavailable-state';
 import { findRoomOccupant, INTERPRETATION_TO_VERIFY_SQL, withholdUnexplainedSimilarity } from '../../../lib/reports-repo';
 import { runAfterResponse } from '../../../lib/run-after-response';
 import {
@@ -36,7 +37,7 @@ import { sanitizeExtractionDiagnostic } from '../../../lib/evidence-interpretati
 import { verifySuppliedReferences } from '../../../lib/user-supplied-references';
 import { sanitizeSuppliedReferenceInputs, admittedReferenceEvidenceForUnifiedSimilarity, resolveUserSuppliedReferenceEvidenceForSave } from '../../../lib/report-user-supplied-references';
 import { referenceTransportBudgetError } from '../../../lib/user-supplied-reference-constants';
-import { MAX_REPORT_SAVE_REQUEST_BYTES } from '../../../lib/report-transport-limits';
+import { MAX_REPORT_SAVE_REQUEST_BYTES, persistedPayloadSize } from '../../../lib/report-transport-limits';
 import { logReportSaveRejectedTelemetry } from '../../../lib/report-save-telemetry';
 import { isCompactAiAnalysis, validateCompactAiAnalysis } from '../../../lib/ai-passage-table';
 import { encodeReportForPersistence, isEvidenceInterpretationCustomerReadable } from '../../../lib/report-persistence';
@@ -457,6 +458,19 @@ export async function POST(request: Request) {
       logReportSaveRejectedTelemetry({ reason: 'MALFORMED_REQUEST', status: 400 });
       return new NextResponse(JSON.stringify({ error: "aiStatus must be 'processing', 'ready', 'failed', or null" }), { status: 400 });
     }
+    // G2 — TERMINAL-AI RESERVE (lib/ai-unavailable-state.ts). A save whose AI half is NOT terminal (the first save of a report:
+    // AI still running) may not fill the persisted-report ceiling all the way: it must leave TERMINAL_AI_RESERVE_CHARS free, so
+    // that every accepted report can always hold the tiny "AI unavailable" marker and reach a terminal AI state even when its
+    // real AI result cannot fit. The ceiling itself is unchanged (MAX_BYTES); a save that already carries its AI result (the
+    // automatic AI resave) is checked against the full MAX_BYTES, exactly as before. "Terminal" is the repo's own derived
+    // definition (deriveRoomStatus), applied to the values THIS request declares. It never affects request-size checks. Every
+    // persisted-size comparison below uses persistedPayloadSize (lib/report-transport-limits.ts): UTF-16 code units of the serialized
+    // JSON — the SAME unit the AI-result route measures the terminal marker in, so "an accepted report can always hold the marker"
+    // holds for any content, astral characters included.
+    const persistedCeiling =
+      deriveRoomStatus(typeof aiScore === 'number' ? aiScore : null, typeof aiStatus === 'string' ? aiStatus : null) === 'processing'
+        ? MAX_BYTES - TERMINAL_AI_RESERVE_CHARS
+        : MAX_BYTES;
     if (payload === undefined) {
       logReportSaveRejectedTelemetry({ reason: 'MALFORMED_REQUEST', status: 400 });
       return new NextResponse(JSON.stringify({ error: 'payload is required' }), { status: 400 });
@@ -901,6 +915,10 @@ export async function POST(request: Request) {
           unifiedSimilarityFailed: undefined,
           unifiedSimilarityGeneration: undefined,
           corpusSourceMatchingEnabledAtComputation: undefined,
+          // G2 TRUST BOUNDARY: `aiAnalysis.unavailableReason` ("AI unavailable for this document") records a size decision only the
+          // server's AI-result route makes (lib/ai-unavailable-state.ts). A browser cannot declare it here either — whatever it
+          // sent is dropped, everything else in `aiAnalysis` (including a validated compact table) is kept exactly as sent.
+          ...(reportPayload.aiAnalysis !== undefined ? { aiAnalysis: withoutClientAiUnavailableReason(reportPayload.aiAnalysis) } : {}),
         }),
         ...(suppliedReferenceEvidence && suppliedReferenceGuard
           ? {
@@ -1074,7 +1092,7 @@ export async function POST(request: Request) {
       // payload.externalAcademicEvidence can never survive a save, even on the
       // transient-"pending" path that keeps this base value unchanged.
       let payloadJsonToPersist = finalizeReportJson(persistedReportPayload as SimilarityReport);
-      if (payloadJsonToPersist.length > MAX_BYTES) {
+      if (persistedPayloadSize(payloadJsonToPersist) > persistedCeiling) {
         logReportSaveRejectedTelemetry({ reason: 'PERSISTED_PAYLOAD_TOO_LARGE', status: 413, authMode: sessionUser ? 'authenticated' : 'anonymous' });
         return new NextResponse(JSON.stringify({ error: 'Payload too large' }), { status: 413 });
       }
@@ -1177,7 +1195,7 @@ export async function POST(request: Request) {
               // could otherwise still carry it forward).
               unifiedSimilarityFailed: false,
             } as SimilarityReport, resolution.historicalSubmissionMatch);
-            if (payloadJsonToPersist.length > MAX_BYTES) {
+            if (persistedPayloadSize(payloadJsonToPersist) > persistedCeiling) {
               logReportSaveRejectedTelemetry({ reason: 'PERSISTED_PAYLOAD_TOO_LARGE', status: 413, authMode: sessionUser ? 'authenticated' : 'anonymous' });
               return new NextResponse(JSON.stringify({ error: 'Payload too large' }), { status: 413 });
             }
@@ -1220,7 +1238,7 @@ export async function POST(request: Request) {
               corpusSourceMatchingEnabledAtComputation: resolution.corpusSourceMatchingEnabled,
               unifiedSimilarityGeneration: resolution.corpusGeneration,
             } as SimilarityReport, resolution.historicalSubmissionMatch);
-            if (payloadJsonToPersist.length > MAX_BYTES) {
+            if (persistedPayloadSize(payloadJsonToPersist) > persistedCeiling) {
               logReportSaveRejectedTelemetry({ reason: 'PERSISTED_PAYLOAD_TOO_LARGE', status: 413, authMode: sessionUser ? 'authenticated' : 'anonymous' });
               return new NextResponse(JSON.stringify({ error: 'Payload too large' }), { status: 413 });
             }
@@ -1596,7 +1614,7 @@ export async function GET(request: Request) {
         // row in a form the decoder could reject transfers its one interpretation
         // subtree. (The anonymous device-key list below is deliberately untouched.)
         const result = await client.execute({
-          sql: `SELECT id, submission_id, title, report_created_at, word_count, archive_score, score_band, ai_score, ai_tone,
+          sql: `SELECT id, submission_id, title, report_created_at, word_count, archive_score, score_band, ai_score, ai_tone, ai_status,
                        ${INTERPRETATION_TO_VERIFY_SQL} AS interpretation_to_verify
                 FROM saved_reports WHERE user_id = ? ORDER BY report_created_at DESC LIMIT ?`,
           args: [sessionUser.id, MAX_LISTED_REPORTS],
@@ -1633,6 +1651,12 @@ export async function GET(request: Request) {
         scoreBand: String(row.score_band),
         aiScore: row.ai_score === null ? null : Number(row.ai_score),
         aiTone: row.ai_tone === null ? null : String(row.ai_tone),
+        // G2: a terminal FAILED AI half (including the terminal "AI unavailable for this document" state) has a NULL score exactly
+        // like one still processing, so the flat score alone cannot tell them apart — without this a history row read "AI report
+        // pending" forever for a report that had in fact finished. Only that one state needs the column: 'ready' is already
+        // carried by the score and 'processing' by its absence, so every other row keeps its exact shape. Absent for the anonymous
+        // list (it never selects the column). No reason is exposed — history only needs "this finished, without an AI score".
+        ...(row.ai_status === 'failed' ? { aiStatus: 'failed' as const } : {}),
       };
       // Only the authenticated query above selects interpretation_to_verify; a row
       // without it (the anonymous device-key list) has nothing to verify and is unchanged.

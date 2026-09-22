@@ -15,6 +15,7 @@ import {
   type AiPrepUpdate,
 } from "@/lib/ai-model-prep";
 import { aiSignalDisplay, type AiSignalDisplay, type SimilarityReport } from "@/lib/report-types";
+import { isSizeUnavailableAiAnalysis } from "@/lib/ai-unavailable-state";
 import { ReportPageFooter, ReportPageHeader } from "./report-page-chrome";
 
 function AnimatedAiPercentage({
@@ -170,6 +171,9 @@ export function AiReport({
   // from the persisted columns even if this payload's aiAnalysis was lost to
   // a stale-generation overwrite), just without the passage-level detail.
   const completeWithoutDetail = signal.value !== null && (!analysis || (analysis.status === "complete" && !passages));
+  // G2: the terminal, server-authored "AI unavailable for this document" result (lib/ai-unavailable-state.ts). It states its own
+  // fixed neutral sentence — never the "ready to calculate" placeholder — and has nothing to run again, so no run/re-run button.
+  const sizeUnavailable = isSizeUnavailableAiAnalysis(analysis);
 
   return (
     <article className={`report-paper ai-paper ${printMode ? "ai-report-print" : "ai-report-enter"} ai-signal-${signal.tone}`}>
@@ -184,7 +188,7 @@ export function AiReport({
           <p>
             {signal.value !== null
               ? signal.detail
-              : analysis?.status === "unsupported"
+              : analysis?.status === "unsupported" || sizeUnavailable
                 ? signal.detail
                 : "The AI analysis is ready to calculate this document's writing score."}
           </p>
@@ -275,7 +279,7 @@ export function AiReport({
             <strong>—</strong>
             <div>
               <p>{analysis?.error ?? "This saved report has not completed local AI analysis yet."}</p>
-              {onRetry && <button className="button primary" type="button" onClick={onRetry}>Run AI analysis</button>}
+              {onRetry && !sizeUnavailable && <button className="button primary" type="button" onClick={onRetry}>Run AI analysis</button>}
             </div>
           </section>
         )}

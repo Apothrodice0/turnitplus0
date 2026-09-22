@@ -114,17 +114,30 @@ async function exerciseSize(chars, seed) {
 
 function assertSizeResult(result, label, { legacyRetryOverRequestCeiling, assertAutomaticSimilarity }) {
   const { automatic, retry } = result;
-  // BEFORE (gate OFF): the former dead end — both refused, nothing written, the report left as it was.
-  assert.equal(automatic.legacy.status, 413, `${label}: the legacy automatic AI save is refused 413`);
-  assert.equal(automatic.legacy.ok, false);
-  assert.equal(automatic.legacy.rowUnchanged, true, `${label}: and the saved report is byte-identical (nothing was written)`);
-  assert.equal(automatic.legacy.aiStatusAfter, "processing", `${label}: the room stays 'processing' — the dead end`);
+  // BEFORE (gate OFF): the ordinary whole-report resave is refused 413 for size, and the limits are untouched.
+  assert.equal(automatic.legacy.status, 413, `${label}: the legacy whole-report AI resave is refused 413`);
   assert.ok(automatic.legacy.bytes > CEILING, `${label}: the legacy request (${automatic.legacy.bytes}) is over the ceiling`);
-  assert.equal(retry.legacy.status, 413, `${label}: and so is the legacy Retry`);
-  assert.equal(retry.legacy.rowUnchanged, true);
   assert.ok(retry.legacy.projectedPersisted > CEILING, `${label}: the legacy Retry's projected persisted row (${retry.legacy.projectedPersisted}) is over the ceiling`);
-  if (legacyRetryOverRequestCeiling) assert.ok(retry.legacy.bytes > CEILING, `${label}: the legacy Retry REQUEST alone is over the ceiling`);
-  else assert.ok(retry.legacy.bytes < CEILING, `${label}: the legacy Retry REQUEST fits — it is the PERSISTED projection that refuses (the second dead end)`);
+  if (legacyRetryOverRequestCeiling) {
+    // The legacy AI result ALONE is over the request ceiling: it cannot be delivered to ANY route, so nothing can be decided — the
+    // former dead end, unchanged (the G2 size policy needs the compact writer for a result this large; see the policy tests).
+    assert.equal(automatic.legacy.ok, false);
+    assert.equal(automatic.legacy.rowUnchanged, true, `${label}: and the saved report is byte-identical (nothing was written)`);
+    assert.equal(automatic.legacy.aiStatusAfter, "processing", `${label}: the room stays 'processing' — the dead end`);
+    assert.equal(retry.legacy.status, 413, `${label}: and so is the legacy Retry`);
+    assert.equal(retry.legacy.rowUnchanged, true);
+    assert.ok(retry.legacy.bytes > CEILING, `${label}: the legacy Retry REQUEST alone is over the ceiling`);
+  } else {
+    // G2 size policy (tests/ai-size-unavailable-policy.test.mjs): the legacy result FITS the request ceiling, so the narrow route can
+    // decide — the projected persisted row is over the ceiling, so instead of the old bare 413 (report `processing` forever, Retry a
+    // deterministic 413) the SERVER writes its tiny terminal "AI unavailable" state. The limits are exactly as before.
+    assert.ok(retry.legacy.bytes < CEILING, `${label}: the legacy Retry REQUEST fits — it is the PERSISTED projection that refuses (the second dead end)`);
+    assert.equal(automatic.legacy.ok, true, `${label}: the automatic path now reaches a terminal state`);
+    assert.equal(automatic.legacy.aiStatusAfter, "failed", `${label}: terminal, no longer 'processing'`);
+    assert.equal(retry.legacy.status, 200, `${label}: the legacy Retry is answered 200 with the terminal state, not a 413`);
+    assert.equal(retry.legacy.aiStatusAfter, "failed");
+    assert.equal(retry.legacy.rowUnchanged, false);
+  }
   // AFTER (gate ON): both succeed, the limits untouched, the AI half persisted compact and exactly reproducible.
   assert.equal(automatic.compact.status, 200, `${label}: the compact automatic AI save succeeds`);
   assert.equal(automatic.compact.ok, true);

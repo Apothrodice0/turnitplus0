@@ -2,6 +2,7 @@ import type { Client } from "@libsql/client";
 import { deriveRoomStatus, isWithinActiveCycle, roomCycleEndsAt } from "./report-rooms";
 import { resolvePersistedSimilarityDisplay } from "./report-primary-similarity";
 import { isEvidenceInterpretationCustomerReadable } from "./report-persistence";
+import { AI_UNAVAILABLE_REASON_REPORT_SIZE } from "./ai-unavailable-state";
 import type { ReportSummary } from "./reports-remote";
 
 // device_key added in Phase E8C, additively — every existing caller that
@@ -183,6 +184,7 @@ export async function findRoomOccupant(client: Client, userId: string, room: num
                  json_extract(payload_json, '$.corpusSourceMatchingEnabledAtComputation') AS corpus_flag_at_computation,
                  json_extract(payload_json, '$.unifiedSimilarityFailed') AS unified_failed,
                  json_extract(payload_json, '$.unifiedSimilarity.matchedPositions') IS NOT NULL AS has_position_evidence,
+                 json_extract(payload_json, '$.aiAnalysis.unavailableReason') AS ai_unavailable_reason,
                  ${INTERPRETATION_TO_VERIFY_SQL} AS interpretation_to_verify
           FROM saved_reports WHERE user_id = ? AND room_number = ?
           ORDER BY report_created_at DESC LIMIT 1`,
@@ -193,7 +195,8 @@ export async function findRoomOccupant(client: Client, userId: string, room: num
       id: string | number; submission_id: string; title: string; report_created_at: string; word_count: number; archive_score: number;
       score_band: string; ai_score: number | null; ai_tone: string | null; ai_status: string | null; device_key: string;
       unified_score: number | bigint | null; has_unified: number | bigint; corpus_flag_at_computation: number | bigint | null;
-      unified_failed: number | bigint | null; has_position_evidence: number | bigint; interpretation_to_verify: string | null;
+      unified_failed: number | bigint | null; has_position_evidence: number | bigint; ai_unavailable_reason: string | null;
+      interpretation_to_verify: string | null;
     }
     | undefined;
   if (!occupant || !isWithinActiveCycle(occupant.report_created_at)) {
@@ -299,6 +302,9 @@ export async function findRoomOccupant(client: Client, userId: string, room: num
     scoreBand: String(occupant.score_band),
     aiScore: occupant.ai_score === null ? null : Number(occupant.ai_score),
     aiTone: occupant.ai_tone === null ? null : String(occupant.ai_tone),
+    // G2: the SERVER's own persisted marker (lib/ai-unavailable-state.ts) is what hides the room's Retry — surfaced only for a
+    // terminal failed AI half, whose `aiAnalysis.unavailableReason` is the one closed value. Nothing else (no size, no ceiling).
+    ...(status === "failed" && occupant.ai_unavailable_reason === AI_UNAVAILABLE_REASON_REPORT_SIZE ? { aiUnavailableReason: AI_UNAVAILABLE_REASON_REPORT_SIZE } : {}),
   };
 
   return {

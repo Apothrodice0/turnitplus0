@@ -336,6 +336,11 @@ test("Scope check: this fix adds no new import of any scoring/corpus-admission/r
     // actual boundary (the forbidden-substring list above).
     "@/lib/ai-display-state",
     "@/lib/ai-model-prep",
+    // G2 size policy (POLICY_B_KEEP_REPORT_AI_UNAVAILABLE_FOR_SIZE): the room hides "Retry analysis" and states the neutral
+    // "AI unavailable for this document" copy for a report the server marked terminally size-unavailable. The module is a
+    // dependency-light set of constants + pure predicates over the AI-result shape — no scoring, corpus admission, retention,
+    // or PDF work — so it does not cross this scope check's actual boundary (the forbidden-substring list above).
+    "@/lib/ai-unavailable-state",
     "@/lib/document-check-pipeline",
     "@/lib/extracted-text-normalization",
     "@/lib/report-ai-completion",

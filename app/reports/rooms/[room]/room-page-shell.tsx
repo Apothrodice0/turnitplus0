@@ -8,6 +8,7 @@ import { invalidateRoomCache } from "@/lib/report-rooms-cache";
 import { ROOM_CYCLE_MS } from "@/lib/report-rooms";
 import { storeReportBestEffort, getStoredReportById } from "@/lib/report-store";
 import { persistAiCompletion, persistAiRetryResult } from "@/lib/report-ai-completion";
+import { AI_SIZE_UNAVAILABLE_MESSAGE, AI_SIZE_UNAVAILABLE_ROOM_NOTE, isAiRetryOffered } from "@/lib/ai-unavailable-state";
 import { buildReportSummary, type AiAnalysis, type ReportExtractionDiagnostic, type SimilarityReport } from "@/lib/report-types";
 import { resolveAiDisplayState } from "@/lib/ai-display-state";
 import { similarityScoreBand } from "@/lib/ai-core";
@@ -505,6 +506,9 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
   const [isGeneratingReport, setIsGeneratingReport] = useState(false);
   const [downloadingReceipt, setDownloadingReceipt] = useState(false);
   const [retryingAi, setRetryingAi] = useState(false);
+  // G2: the summary the server last persisted for an AI result (saveEnrichedAiResult / saveRetriedAiResult) — the browser's own
+  // summary, unless the server wrote the terminal "AI unavailable for this document" state instead. Read only by retryAiCheck's message.
+  const savedAiSummaryRef = useRef<ReportSummary | null>(null);
   const [toast, setToast] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const generationLockRef = useRef(false);
@@ -630,10 +634,15 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
     const enrichedSaveResult = await persistAiCompletion(enriched, enrichedSummary, room);
     if (!enrichedSaveResult.ok) return false;
     invalidateRoomCache(accountEmail, room);
+    // G2: `savedSummary` is what the SERVER actually persisted — the browser's own summary, unless the server decided the real
+    // AI result cannot be stored next to this report and wrote the terminal "AI unavailable for this document" state instead
+    // (failed, no score, no Retry) — never the local, real-but-unsaved result. Also left in savedAiSummaryRef for retryAiCheck.
+    const savedSummary = enrichedSaveResult.summary;
+    savedAiSummaryRef.current = savedSummary;
     setOccupant({
-      status: enrichedSummary.aiStatus === "ready" ? "ready" : "failed",
-      report: enrichedSummary,
-      cycleEndsAt: new Date(Date.parse(enrichedSummary.createdAt) + ROOM_CYCLE_MS).toISOString(),
+      status: savedSummary.aiStatus === "ready" ? "ready" : "failed",
+      report: savedSummary,
+      cycleEndsAt: new Date(Date.parse(savedSummary.createdAt) + ROOM_CYCLE_MS).toISOString(),
     });
     return true;
   }
@@ -663,10 +672,15 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
     const retrySaveResult = await persistAiRetryResult(enriched, enrichedSummary);
     if (!retrySaveResult.ok) return false;
     invalidateRoomCache(accountEmail, room);
+    // G2: `savedSummary` is what the SERVER actually persisted — the browser's own summary, unless the server decided the real
+    // AI result cannot be stored next to this report and wrote the terminal "AI unavailable for this document" state instead
+    // (failed, no score, no Retry) — never the local, real-but-unsaved result. Also left in savedAiSummaryRef for retryAiCheck.
+    const savedSummary = retrySaveResult.summary;
+    savedAiSummaryRef.current = savedSummary;
     setOccupant({
-      status: enrichedSummary.aiStatus === "ready" ? "ready" : "failed",
-      report: enrichedSummary,
-      cycleEndsAt: new Date(Date.parse(enrichedSummary.createdAt) + ROOM_CYCLE_MS).toISOString(),
+      status: savedSummary.aiStatus === "ready" ? "ready" : "failed",
+      report: savedSummary,
+      cycleEndsAt: new Date(Date.parse(savedSummary.createdAt) + ROOM_CYCLE_MS).toISOString(),
     });
     return true;
   }
@@ -688,6 +702,9 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
     if (retryingAi) return;
     setRetryingAi(true);
     try {
+      // G2: a report the SERVER marked "AI unavailable for this document" has nothing a re-run could change — refuse before loading
+      // the report or running the model (the buttons are hidden for it too; this is the second layer, for any path that reaches here).
+      if (!isAiRetryOffered(occupant.report)) return;
       const local = await getStoredReportById<SimilarityReport>(reportId).catch(() => null);
       const full = local ?? (await fetchRemoteReport<SimilarityReport>(reportId));
       if (!full) {
@@ -715,9 +732,11 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
       notify(
         !saved
           ? "Could not save the updated AI result. Please try again."
-          : aiResult.aiAnalysis.status === "complete"
-            ? "AI analysis complete."
-            : "AI analysis is still unavailable for this document.",
+          : !isAiRetryOffered(savedAiSummaryRef.current)
+            ? AI_SIZE_UNAVAILABLE_MESSAGE
+            : aiResult.aiAnalysis.status === "complete"
+              ? "AI analysis complete."
+              : "AI analysis is still unavailable for this document.",
       );
     } finally {
       setRetryingAi(false);
@@ -1260,8 +1279,10 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
                     available for "processing" (AI itself may genuinely be
                     stuck — the session that started it closed/crashed/timed
                     out before ever writing "ready" or "failed") and
-                    "failed" (a genuine AI failure). */}
-                {occupant.status !== "ready" && (
+                    "failed" (a genuine AI failure) — but never for a report the
+                    server marked "AI unavailable for this document" (G2): a
+                    re-run would only hit the same wall. */}
+                {occupant.status !== "ready" && isAiRetryOffered(occupant.report) && (
                   <button className="button subtle" type="button" onClick={() => retryAiCheck(occupant.report!.id)} disabled={retryingAi}>
                     {retryingAi ? "Checking…" : "Retry analysis"}
                   </button>
@@ -1343,10 +1364,19 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
             </div>
 
             <div className="ai-analysis-message" role="status">
-              <p>AI-writing analysis was unavailable for this document. The similarity result above is complete and unaffected.</p>
-              <button className="button subtle" type="button" onClick={() => retryAiCheck(occupant.report!.id)} disabled={retryingAi}>
-                {retryingAi ? "Checking…" : "Retry analysis"}
-              </button>
+              {/* G2: a report the SERVER marked "AI unavailable for this document" is terminal, honest and non-retryable —
+                  no Retry (a re-run would only hit the same wall), and no storage detail of any kind. An ordinary AI failure
+                  keeps its copy and its Retry exactly as before. */}
+              {isAiRetryOffered(occupant.report) ? (
+                <>
+                  <p>AI-writing analysis was unavailable for this document. The similarity result above is complete and unaffected.</p>
+                  <button className="button subtle" type="button" onClick={() => retryAiCheck(occupant.report!.id)} disabled={retryingAi}>
+                    {retryingAi ? "Checking…" : "Retry analysis"}
+                  </button>
+                </>
+              ) : (
+                <p>{AI_SIZE_UNAVAILABLE_ROOM_NOTE}</p>
+              )}
             </div>
 
             <Link href={`/reports/${occupant.report.id}?room=${room}`} className="button secondary room-open-full">Open full report</Link>
