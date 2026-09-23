@@ -476,6 +476,48 @@ test("importedSimilarityEvidencePackagePath() falls back to the fixed materializ
   });
 });
 
+// --- Turbopack dynamic-fs-tracing fix: literal materialized-path branch ----
+test("loadImportedSimilarityEvidencePackage() loads through the literal materialized-path branch with no env override set", async () => {
+  await withEnv({ IMPORTED_SIMILARITY_EVIDENCE_PACKAGE_PATH: undefined }, () => {
+    assert.equal(existsSync(IMPORTED_SIMILARITY_EVIDENCE_MATERIALIZED_PACKAGE_PATH), false, "test precondition: nothing already materialized at the real fixed path");
+
+    const evidenceSetId = "set-materialized-branch";
+    const anchorText = "materialized path branch coverage anchor phrase repeated for length " + "padding word ".repeat(20);
+    const unitRecord = buildSyntheticUnitRecord(evidenceSetId, anchorText);
+    const file = buildImportedSimilarityEvidencePackageFile(
+      [
+        {
+          evidenceSetId,
+          provenanceType: "TURNITIN_REPORT_IMPORT",
+          reportSha256: "c".repeat(64),
+          reportedSimilarityPercent: 5,
+          normalizationVersion: IMPORTED_SIMILARITY_EVIDENCE_NORMALIZATION_VERSION,
+          manuscriptIdentitySha256: null,
+          createdAt: new Date(0).toISOString(),
+          unitCount: 1,
+          totalScoreMaskWords: unitRecord.scoreMaskWordCount,
+        },
+      ],
+      [unitRecord],
+    );
+
+    mkdirSync(join(IMPORTED_SIMILARITY_EVIDENCE_MATERIALIZED_PACKAGE_PATH, ".."), { recursive: true });
+    writeFileSync(IMPORTED_SIMILARITY_EVIDENCE_MATERIALIZED_PACKAGE_PATH, JSON.stringify(file));
+    resetImportedSimilarityEvidencePackageCacheForTest();
+    try {
+      assert.equal(importedSimilarityEvidencePackagePath(), IMPORTED_SIMILARITY_EVIDENCE_MATERIALIZED_PACKAGE_PATH);
+      const state = loadImportedSimilarityEvidencePackage();
+      assert.equal(state.status, "loaded", "the literal-constant readFileSync branch must actually read and load the file");
+      assert.equal(state.rejectedUnits.length, 0);
+      assert.equal(state.package.units.length, 1);
+    } finally {
+      rmSync(IMPORTED_SIMILARITY_EVIDENCE_MATERIALIZED_PACKAGE_PATH, { force: true });
+      resetImportedSimilarityEvidencePackageCacheForTest();
+    }
+    assert.equal(importedSimilarityEvidencePackagePath(), null, "removed again -> back to null");
+  });
+});
+
 test("an explicit IMPORTED_SIMILARITY_EVIDENCE_PACKAGE_PATH override always wins over the materialized fallback", async () => {
   await withEnv({ IMPORTED_SIMILARITY_EVIDENCE_PACKAGE_PATH: "/some/explicit/override/path.json" }, () => {
     assert.equal(importedSimilarityEvidencePackagePath(), "/some/explicit/override/path.json");
