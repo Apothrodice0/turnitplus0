@@ -68,3 +68,8 @@ next-env.d.ts
 
 # Generated Graphify knowledge graph (rebuild locally with `graphify update .`)
 /graphify-out/
+
+# Build-time-materialized imported-similarity-evidence package
+# (scripts/materialize-imported-similarity-evidence.mjs) — never real
+# package content committed to git.
+/.turnitplus/

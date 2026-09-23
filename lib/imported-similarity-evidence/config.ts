@@ -1,9 +1,10 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import {
   validateImportedSimilarityEvidencePackage,
   type ImportedSimilarityEvidencePackage,
   type RejectedUnit,
 } from "./package";
+import { IMPORTED_SIMILARITY_EVIDENCE_MATERIALIZED_PACKAGE_PATH } from "./materialized-path";
 
 /**
  * Internal-only configuration for the imported-similarity-evidence channel.
@@ -15,9 +16,33 @@ import {
  */
 const PACKAGE_PATH_ENV_VAR = "IMPORTED_SIMILARITY_EVIDENCE_PACKAGE_PATH";
 
+/**
+ * Resolution order (hosted build-time materialization —
+ * scripts/materialize-imported-similarity-evidence.mjs):
+ *   1. An explicit IMPORTED_SIMILARITY_EVIDENCE_PACKAGE_PATH override — set
+ *      unconditionally, e.g. for local development against a hand-placed
+ *      file. Always wins, exactly as before this change.
+ *   2. Otherwise, the fixed build-time-materialized path
+ *      (./materialized-path.ts) — but ONLY when a file actually exists
+ *      there. This is what lets a hosted deployment activate a package with
+ *      just the two build-time pointer vars
+ *      (IMPORTED_SIMILARITY_EVIDENCE_PACKAGE_BLOB_KEY /
+ *      _SHA256) and no separate runtime PATH var to keep in sync. Checking
+ *      existence (not just "materialization was configured") means an
+ *      unconfigured/failed materialization is indistinguishable from "no
+ *      package" — never a path pointing at nothing.
+ *   3. Otherwise null — today's exact no-package behavior, unchanged.
+ * The extra existsSync() call only runs when the explicit override is
+ * absent, mirrors the same "cheap enough to call unconditionally, no
+ * caching" discipline this function already had.
+ */
 export function importedSimilarityEvidencePackagePath(): string | null {
-  const value = process.env[PACKAGE_PATH_ENV_VAR];
-  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+  const explicit = process.env[PACKAGE_PATH_ENV_VAR];
+  if (typeof explicit === "string" && explicit.trim().length > 0) return explicit.trim();
+  if (existsSync(IMPORTED_SIMILARITY_EVIDENCE_MATERIALIZED_PACKAGE_PATH)) {
+    return IMPORTED_SIMILARITY_EVIDENCE_MATERIALIZED_PACKAGE_PATH;
+  }
+  return null;
 }
 
 export function isImportedSimilarityEvidenceConfigured(): boolean {
