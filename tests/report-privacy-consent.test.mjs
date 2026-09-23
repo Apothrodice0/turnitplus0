@@ -10,7 +10,7 @@ import * as signupRoute from '../app/api/auth/signup/route.ts';
 import * as loginRoute from '../app/api/auth/login/route.ts';
 import * as meRoute from '../app/api/auth/me/route.ts';
 import { resetRateForTest, resetAuthRateForTest } from '../lib/rate-limit.js';
-import { withTestIdentity } from './helpers/test-signup.mjs';
+import { withTestIdentity, markTestAccountEmailVerified } from './helpers/test-signup.mjs';
 import { buildReportAdmissionSourceRef } from '../lib/corpus-admission-report-integration.ts';
 
 /**
@@ -88,6 +88,7 @@ async function signup(email, deviceKey) {
   });
   const res = await signupRoute.POST(req);
   const body = await res.json();
+  if (res.status === 201) await markTestAccountEmailVerified(dbFile, email);
   return { res, cookie: extractCookie(res), body };
 }
 

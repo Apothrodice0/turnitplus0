@@ -23,7 +23,7 @@ import * as reportsRoute from "../app/api/reports/route.ts";
 import * as reportIdRoute from "../app/api/reports/[id]/route.ts";
 import * as signupRoute from "../app/api/auth/signup/route.ts";
 import { resetRateForTest, resetAuthRateForTest, resetReadRateForTest } from "../lib/rate-limit.ts";
-import { withTestIdentity } from './helpers/test-signup.mjs';
+import { withTestIdentity, markTestAccountEmailVerified } from './helpers/test-signup.mjs';
 
 /**
  * Task A, final correctness bug: the visible matched-word highlighting must
@@ -133,6 +133,7 @@ async function signup(email, deviceKey, tag) {
   });
   const res = await signupRoute.POST(req);
   assert.equal(res.status, 201, `signup must succeed for ${email}`);
+  await markTestAccountEmailVerified(dbFile, email);
   return { cookie: extractCookie(res) };
 }
 

@@ -11,7 +11,7 @@ import * as reportsRoute from "../app/api/reports/route.ts";
 import * as reportIdRoute from "../app/api/reports/[id]/route.ts";
 import * as signupRoute from "../app/api/auth/signup/route.ts";
 import { resetRateForTest, resetAuthRateForTest, resetReadRateForTest } from "../lib/rate-limit.ts";
-import { withTestIdentity } from "./helpers/test-signup.mjs";
+import { withTestIdentity, markTestAccountEmailVerified } from "./helpers/test-signup.mjs";
 import { tokens } from "../lib/similarity-core.ts";
 import { buildImportedSimilarityEvidencePackageFile } from "../lib/imported-similarity-evidence/package.ts";
 import {
@@ -152,6 +152,7 @@ async function account() {
     body: JSON.stringify(withTestIdentity({ email: `scai-${uc}@example.test`, password: "scai-pw-123456", username: `scaiu${uc}`, deviceKey: `scai-dev-${uc}` })),
   }));
   assert.equal(res.status, 201);
+  await markTestAccountEmailVerified(dbFile, `scai-${uc}@example.test`);
   return { deviceKey: `scai-dev-${uc}`, cookie: cookieOf(res), tag: `scai-${uc}` };
 }
 

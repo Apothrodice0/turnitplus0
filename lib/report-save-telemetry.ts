@@ -4,8 +4,9 @@
  * Production-proven by lib/selective-corpus/shadow-telemetry.ts.
  *
  * PURPOSE: every intentional POST /api/reports rejection (rate limit,
- * transport-size guard, unauthenticated report creation, ownership conflict,
- * quota, room conflict, room-reuse-not-ready, or an unexpected internal
+ * transport-size guard, unauthenticated report creation, unverified-email
+ * report creation, ownership conflict, quota, room conflict,
+ * room-reuse-not-ready, or an unexpected internal
  * error) currently returns a response with no
  * server-side signal of WHY. This module builds and logs ONE small,
  * machine-queryable JSON event per rejection, so passive operational
@@ -33,6 +34,7 @@ export type ReportSaveRejectionReason =
   | "MALFORMED_REQUEST"
   | "CLIENT_PAYLOAD_TOO_LARGE"
   | "AUTH_REQUIRED"
+  | "EMAIL_VERIFICATION_REQUIRED"
   | "OWNERSHIP_CONFLICT"
   | "DAILY_UPLOAD_QUOTA"
   | "REFERENCE_TRANSPORT_BUDGET"

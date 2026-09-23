@@ -15,7 +15,7 @@ import { indexDocumentSubmissionIntoCorpus } from '../lib/user-submission-corpus
 import { runCorpusAdmissionPromotionSweep } from '../lib/corpus-admission-promotion.ts';
 import { matchAgainstUserSubmissionCorpus } from '../lib/user-submission-matching.ts';
 import { matureCorpusBackings } from './helpers/corpus-maturity.mjs';
-import { withTestIdentity, grantTestAdmin } from './helpers/test-signup.mjs';
+import { withTestIdentity, grantTestAdmin, markTestAccountEmailVerified } from './helpers/test-signup.mjs';
 
 /**
  * BLOCKING REVIEW proof: "Clear my rooms" must NOT destroy an ACCEPTed +
@@ -86,6 +86,7 @@ async function signup(email, deviceKey) {
     body: JSON.stringify(withTestIdentity({ email, password: PASSWORD, username: email.split('@')[0].replace(/[^a-z0-9]/gi, ''), deviceKey })),
   }));
   assert.equal(res.status, 201, `signup ${email}`);
+  await markTestAccountEmailVerified(dbFile, email);
   return extractCookie(res);
 }
 

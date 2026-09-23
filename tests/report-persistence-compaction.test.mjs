@@ -11,7 +11,7 @@ import * as reportsRoute from "../app/api/reports/route.ts";
 import * as reportIdRoute from "../app/api/reports/[id]/route.ts";
 import * as signupRoute from "../app/api/auth/signup/route.ts";
 import { resetRateForTest, resetAuthRateForTest, resetReadRateForTest } from "../lib/rate-limit.ts";
-import { withTestIdentity, grantTestAdmin } from "./helpers/test-signup.mjs";
+import { withTestIdentity, grantTestAdmin, markTestAccountEmailVerified } from "./helpers/test-signup.mjs";
 import { makeUnitRecord, makePackageFile } from "./helpers/imported-similarity-evidence-fixtures.mjs";
 import { tokens } from "../lib/similarity-core.ts";
 import { computeUnifiedSimilarity } from "../lib/unified-similarity.ts";
@@ -450,6 +450,7 @@ async function account({ admin = false } = {}) {
   }));
   assert.equal(res.status, 201);
   if (admin) await grantTestAdmin(dbFile, email);
+  await markTestAccountEmailVerified(dbFile, email);
   const userId = String((await db.execute({ sql: "SELECT id FROM users WHERE email = ?", args: [email] })).rows[0].id);
   return { deviceKey: `c2-dev-${uc}`, cookie: cookieOf(res), tag: `c2-${uc}`, userId, email };
 }

@@ -7,7 +7,7 @@ import * as reportsRoute from '../app/api/reports/route.ts';
 import * as academicEvidenceRoute from '../app/api/academic-evidence/route.ts';
 import * as signupRoute from '../app/api/auth/signup/route.ts';
 import { resetRateForTest, resetAuthRateForTest } from '../lib/rate-limit.js';
-import { withTestIdentity } from './helpers/test-signup.mjs';
+import { withTestIdentity, markTestAccountEmailVerified } from './helpers/test-signup.mjs';
 import {
   recordAcademicSearchRunDiagnostics,
   findAcademicSearchRunDiagnosticsByDocumentIdentityId,
@@ -105,6 +105,7 @@ async function signupFor(deviceKey) {
     body: JSON.stringify(withTestIdentity({ email: `${tag}@example.test`, password: 'diag-capture-fixture-pw', username: `diagcapture${diagSignupCounter}`, deviceKey })),
   });
   const res = await signupRoute.POST(req);
+  await markTestAccountEmailVerified(dbFile, `${tag}@example.test`);
   const setCookie = res.headers.get('set-cookie');
   const match = setCookie ? setCookie.match(/tp_session_v1=([^;]*)/) : null;
   return match ? match[1] : null;

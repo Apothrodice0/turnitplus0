@@ -17,7 +17,7 @@ import { applyMigrationsLibsql } from "../lib/ingest.js";
 import * as reportsRoute from "../app/api/reports/route.ts";
 import * as signupRoute from "../app/api/auth/signup/route.ts";
 import { resetRateForTest, resetAuthRateForTest } from "../lib/rate-limit.ts";
-import { withTestIdentity } from "./helpers/test-signup.mjs";
+import { withTestIdentity, markTestAccountEmailVerified } from "./helpers/test-signup.mjs";
 
 // ── DB setup FIRST (before any test) — see tests/user-supplied-references.test.mjs ──
 const dbFile = path.join(path.resolve("."), "test_user_supplied_refs_notrunc.db");
@@ -56,6 +56,7 @@ async function account() {
     body: JSON.stringify(withTestIdentity({ email: `nt-${uc}@example.test`, password: "nt-pw-123456", username: `ntu${uc}`, deviceKey: `nt-dev-${uc}` })),
   }));
   assert.equal(res.status, 201);
+  await markTestAccountEmailVerified(dbFile, `nt-${uc}@example.test`);
   return { deviceKey: `nt-dev-${uc}`, cookie: cookieOf(res), tag: `nt-${uc}` };
 }
 async function post(acc, id, extra) {

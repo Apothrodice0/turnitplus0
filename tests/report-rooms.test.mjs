@@ -9,7 +9,7 @@ import * as reportsRoute from '../app/api/reports/route.ts';
 import * as roomsRoute from '../app/api/reports/rooms/route.ts';
 import { resetAuthRateForTest, resetRateForTest } from '../lib/rate-limit.js';
 import { NORMAL_ROOM_COUNT, ADMIN_ROOM_COUNT, ROOM_CYCLE_MS } from '../lib/report-rooms.ts';
-import { withTestIdentity, grantTestAdmin } from './helpers/test-signup.mjs';
+import { withTestIdentity, grantTestAdmin, markTestAccountEmailVerified } from './helpers/test-signup.mjs';
 
 // Verifies the room/slot architecture's server-side pieces: a room is a
 // real upload SLOT (at most one current report, an explicit fact recorded
@@ -51,7 +51,9 @@ async function signup(body) {
     headers: { 'content-type': 'application/json', 'x-forwarded-for': ip },
     body: JSON.stringify(withTestIdentity(body)),
   });
-  return signupRoute.POST(req);
+  const res = await signupRoute.POST(req);
+  if (res.status === 201 && body.email) await markTestAccountEmailVerified(dbFile, body.email);
+  return res;
 }
 
 async function login(body) {

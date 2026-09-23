@@ -335,6 +335,14 @@ test("directly rejected aiAnalysisPromise: the happy path is unaffected — a re
   const raceSetCookie = raceSignupRes.headers.get("set-cookie");
   const raceCookieMatch = raceSetCookie ? raceSetCookie.match(/tp_session_v1=([^;]*)/) : null;
   const raceCookie = raceCookieMatch ? raceCookieMatch[1] : null;
+  // A3 completion — POST /api/reports now also requires a verified email (see
+  // app/api/reports/route.ts's own EMAIL VERIFICATION GATE comment); this
+  // block is about the SAVE-RACE, not that gate, so the throwaway account is
+  // verified directly via the same raw-UPDATE convention this suite already
+  // uses elsewhere for direct DB setup.
+  const raceVerifyClient = createClient({ url: `file:${raceDbFile}` });
+  await raceVerifyClient.execute({ sql: "UPDATE users SET email_verified_at = ? WHERE email = ?", args: [Date.now(), "race-ai-completion@example.com"] });
+  raceVerifyClient.close();
 
   let raceCounter = 0;
   let raceRoomCounter = 0;

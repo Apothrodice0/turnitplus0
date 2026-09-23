@@ -13,7 +13,7 @@ import { resetRateForTest, resetAuthRateForTest } from '../lib/rate-limit.js';
 import { canonicalSha256 } from '../lib/document-identity.ts';
 import { ACCOUNT_DELETION_CONFIRMATION_PHRASE } from '../lib/account-deletion.ts';
 import { indexDocumentSubmissionIntoCorpus } from '../lib/user-submission-corpus.ts';
-import { withTestIdentity } from './helpers/test-signup.mjs';
+import { withTestIdentity, markTestAccountEmailVerified } from './helpers/test-signup.mjs';
 
 /**
  * Account deletion (production audit fix — no such endpoint existed
@@ -66,6 +66,7 @@ async function signup(email, deviceKey) {
   });
   const res = await signupRoute.POST(req);
   const body = await res.json();
+  await markTestAccountEmailVerified(dbFile, email);
   return { res, cookie: extractCookie(res), userId: null, body };
 }
 

@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { ChevronLeft, Download, FileText } from "lucide-react";
 import { fetchReportRoomContents, fetchRemoteReport, saveReportRemote, type ReportSummary, type RoomContents, type RoomContentsFetchResult } from "@/lib/reports-remote";
 import { invalidateRoomCache } from "@/lib/report-rooms-cache";
@@ -498,6 +499,7 @@ type Props = {
 };
 
 export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
+  const router = useRouter();
   const [occupant, setOccupant] = useState<RoomContents>(initialOccupant);
   const [pollExhausted, setPollExhausted] = useState(false);
   const [file, setFile] = useState<File | null>(null);
@@ -1097,6 +1099,24 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
           // moment without re-choosing their document. No corpus/admission/
           // internal terminology surfaced to the customer.
           notify(saveResult.error ?? "This room is finishing its previous check. Please try again shortly.");
+        } else if (saveResult.emailVerificationRequired) {
+          // EMAIL VERIFICATION GATE (A3 completion — app/api/reports/route.ts's
+          // own EMAIL VERIFICATION GATE comment): this is the REAL, day-to-day
+          // report-creation surface for a signed-in account, but it is a
+          // separate Next.js route tree from app/page.tsx (no shared React
+          // state/context), so the account page's own verification MODAL
+          // cannot be reused directly here. Routed into the EXISTING account
+          // page instead — the same "Verify email" control that page already
+          // renders — via the SAME "go to account" destination this route's
+          // own server component already uses for its "Sign in to view this
+          // room" prompt (app/reports/rooms/[room]/page.tsx) and the same
+          // imperative-navigation convention an already-existing sibling
+          // client component uses (app/reports/[id]/report-detail-shell.tsx's
+          // useRouter/router.push). Deliberately does NOT call the send-code
+          // endpoint from here — the account page's own existing "Verify
+          // email" button is the one place that ever does that.
+          notify(saveResult.error ?? "Verify your email to create a report. Go to your account to verify it.");
+          router.push("/#account");
         } else {
           notify("Your report was generated but could not be saved. Please try again.");
         }

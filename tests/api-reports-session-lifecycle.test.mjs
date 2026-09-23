@@ -8,7 +8,7 @@ import * as signupRoute from '../app/api/auth/signup/route.ts';
 import * as loginRoute from '../app/api/auth/login/route.ts';
 import * as logoutRoute from '../app/api/auth/logout/route.ts';
 import { resetRateForTest, resetAuthRateForTest } from '../lib/rate-limit.js';
-import { withTestIdentity } from './helpers/test-signup.mjs';
+import { withTestIdentity, markTestAccountEmailVerified } from './helpers/test-signup.mjs';
 
 // This file covers the session-lifecycle guarantees behind the logout/
 // report-history bug fix: logging out must never delete server-side data,
@@ -91,6 +91,7 @@ async function signup(email, deviceKey) {
     body: JSON.stringify(withTestIdentity({ email, password: 'lifecycle-password-1', username: 'lifecycleuser', deviceKey })),
   });
   const res = await signupRoute.POST(req);
+  await markTestAccountEmailVerified(dbFile, email);
   return { res, cookie: extractCookie(res) };
 }
 

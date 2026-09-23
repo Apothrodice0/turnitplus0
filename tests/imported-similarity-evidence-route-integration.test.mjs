@@ -12,7 +12,7 @@ import * as reportsRoute from "../app/api/reports/route.ts";
 import * as reportIdRoute from "../app/api/reports/[id]/route.ts";
 import * as signupRoute from "../app/api/auth/signup/route.ts";
 import { resetRateForTest, resetAuthRateForTest, resetReadRateForTest } from "../lib/rate-limit.ts";
-import { withTestIdentity } from "./helpers/test-signup.mjs";
+import { withTestIdentity, markTestAccountEmailVerified } from "./helpers/test-signup.mjs";
 import { tokens } from "../lib/similarity-core.ts";
 import { decodeReportFromPersistence } from "../lib/report-persistence.ts";
 import { buildImportedSimilarityEvidencePackageFile } from "../lib/imported-similarity-evidence/package.ts";
@@ -91,6 +91,7 @@ async function account() {
     body: JSON.stringify(withTestIdentity({ email: `ise-${uc}@example.test`, password: "ise-pw-123456", username: `iseu${uc}`, deviceKey: `ise-dev-${uc}` })),
   }));
   assert.equal(res.status, 201);
+  await markTestAccountEmailVerified(dbFile, `ise-${uc}@example.test`);
   return { deviceKey: `ise-dev-${uc}`, cookie: cookieOf(res), tag: `ise-${uc}` };
 }
 

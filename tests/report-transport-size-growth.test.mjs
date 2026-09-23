@@ -10,7 +10,7 @@ import { resetRateForTest, resetAuthRateForTest } from '../lib/rate-limit.ts';
 import { canonicalSha256 } from '../lib/document-identity.ts';
 import { runCorpusAdmissionPromotionSweep } from '../lib/corpus-admission-promotion.ts';
 import { matureCorpusBackings } from './helpers/corpus-maturity.mjs';
-import { withTestIdentity } from './helpers/test-signup.mjs';
+import { withTestIdentity, markTestAccountEmailVerified } from './helpers/test-signup.mjs';
 import * as signupRoute from '../app/api/auth/signup/route.ts';
 import { MAX_REPORT_SAVE_REQUEST_BYTES } from '../lib/report-transport-limits.ts';
 import { resolvePrimarySimilaritySummary, selfHealUnifiedSimilarity } from '../lib/report-primary-similarity.ts';
@@ -162,6 +162,7 @@ async function signUpConsentingAccount() {
   const row = await client.execute({ sql: 'SELECT id FROM users WHERE email = ?', args: [email] });
   const userId = row.rows[0].id;
   await client.execute({ sql: "UPDATE users SET corpus_reuse_consented_at = CURRENT_TIMESTAMP WHERE id = ?", args: [userId] });
+  await markTestAccountEmailVerified(dbFile, email);
   return { userId, deviceKey: `transport-size-growth-device-${userCounter}`, cookie, tag: `transport-size-growth-${userCounter}` };
 }
 

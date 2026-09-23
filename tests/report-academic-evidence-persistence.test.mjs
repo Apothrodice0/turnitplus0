@@ -8,7 +8,7 @@ import * as reportsRoute from '../app/api/reports/route.ts';
 import * as reportIdRoute from '../app/api/reports/[id]/route.ts';
 import * as signupRoute from '../app/api/auth/signup/route.ts';
 import { resetRateForTest, resetAuthRateForTest } from '../lib/rate-limit.ts';
-import { withTestIdentity } from './helpers/test-signup.mjs';
+import { withTestIdentity, markTestAccountEmailVerified } from './helpers/test-signup.mjs';
 
 /**
  * Phase 3 STEP 9 items 7, 8, 15 (persistence/round-trip aspects): proves
@@ -80,6 +80,7 @@ async function signupFor(deviceKey, clientTag) {
     body: JSON.stringify(withTestIdentity({ email, password: 'academic-evidence-fixture-pw', username: clientTag.replace(/[^a-z0-9]/gi, '').slice(0, 24) || 'academicevidenceuser', deviceKey })),
   });
   const res = await signupRoute.POST(req);
+  if (res.status === 201) await markTestAccountEmailVerified(dbFile, email);
   const setCookie = res.headers.get('set-cookie');
   const match = setCookie ? setCookie.match(/tp_session_v1=([^;]*)/) : null;
   return match ? match[1] : null;

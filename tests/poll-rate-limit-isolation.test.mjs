@@ -8,7 +8,7 @@ import * as signupRoute from '../app/api/auth/signup/route.ts';
 import * as reportsRoute from '../app/api/reports/route.ts';
 import * as logoutRoute from '../app/api/auth/logout/route.ts';
 import { resetAuthRateForTest, resetRateForTest, resetPollRateForTest, checkPollRate } from '../lib/rate-limit.ts';
-import { withTestIdentity } from './helpers/test-signup.mjs';
+import { withTestIdentity, markTestAccountEmailVerified } from './helpers/test-signup.mjs';
 
 /**
  * Production bug fix: app/reports/rooms/[room]/room-page-shell.tsx polls
@@ -86,7 +86,9 @@ async function signup(email, ip) {
     headers: { 'content-type': 'application/json', 'x-forwarded-for': ip },
     body: JSON.stringify(withTestIdentity({ email, password: 'correct-horse-poll-1', username: email.split('@')[0], deviceKey: `device-${email}` })),
   });
-  return signupRoute.POST(req);
+  const res = await signupRoute.POST(req);
+  if (res.status === 201) await markTestAccountEmailVerified(dbFile, email);
+  return res;
 }
 
 function roomPollRequest(cookie, ip, room) {

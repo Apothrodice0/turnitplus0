@@ -302,7 +302,7 @@ import * as reportsRoute from "../app/api/reports/route.ts";
 import * as reportIdRoute from "../app/api/reports/[id]/route.ts";
 import * as signupRoute from "../app/api/auth/signup/route.ts";
 import { resetRateForTest, resetAuthRateForTest, resetReadRateForTest } from "../lib/rate-limit.ts";
-import { withTestIdentity } from "./helpers/test-signup.mjs";
+import { withTestIdentity, markTestAccountEmailVerified } from "./helpers/test-signup.mjs";
 
 const dbFile = path.join(path.resolve("."), "test_extraction_v2.db");
 for (const s of ["", "-wal", "-shm"]) { try { fs.unlinkSync(`${dbFile}${s}`); } catch { /* ignore */ } }
@@ -329,6 +329,7 @@ async function account() {
     body: JSON.stringify(withTestIdentity({ email, password: "extraction-v2-pw-1", username: `exv2u${uc}`, deviceKey: `extraction-v2-dev-${uc}` })),
   }));
   assert.equal(res.status, 201);
+  await markTestAccountEmailVerified(dbFile, email);
   return { deviceKey: `extraction-v2-dev-${uc}`, cookie: cookieOf(res), tag: `extraction-v2-${uc}` };
 }
 const WC = 160;

@@ -10,7 +10,7 @@ import * as signupRoute from '../app/api/auth/signup/route.ts';
 import { resetRateForTest, resetAuthRateForTest } from '../lib/rate-limit.js';
 import { canonicalSha256 } from '../lib/document-identity.ts';
 import { indexDocumentSubmissionIntoCorpus } from '../lib/user-submission-corpus.ts';
-import { withTestIdentity } from './helpers/test-signup.mjs';
+import { withTestIdentity, markTestAccountEmailVerified } from './helpers/test-signup.mjs';
 
 /**
  * Privacy hardening (production audit fix, item 1): proves DELETE
@@ -68,6 +68,7 @@ async function signup(email, deviceKey) {
   // deletion cascade (identity + corpus rows), not just the identity-only
   // path — see tests/report-privacy-consent.test.mjs for the gate itself.
   await setupClient.execute({ sql: 'UPDATE users SET corpus_reuse_consented_at = CURRENT_TIMESTAMP WHERE email = ?', args: [email] });
+  await markTestAccountEmailVerified(dbFile, email);
   return { res, cookie: extractCookie(res) };
 }
 

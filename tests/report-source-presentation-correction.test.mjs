@@ -17,7 +17,7 @@ import * as reportsRoute from "../app/api/reports/route.ts";
 import * as reportIdRoute from "../app/api/reports/[id]/route.ts";
 import * as signupRoute from "../app/api/auth/signup/route.ts";
 import { resetRateForTest, resetAuthRateForTest, resetReadRateForTest } from "../lib/rate-limit.ts";
-import { withTestIdentity } from './helpers/test-signup.mjs';
+import { withTestIdentity, markTestAccountEmailVerified } from './helpers/test-signup.mjs';
 
 /**
  * Report-source presentation correction: a corpus/internal-only 100% match
@@ -170,6 +170,7 @@ async function uispcSignup(email, deviceKey, tag) {
   });
   const res = await signupRoute.POST(req);
   assert.equal(res.status, 201, `signup must succeed for ${email}`);
+  await markTestAccountEmailVerified(uispcDbFile, email);
   return { cookie: uispcExtractCookie(res) };
 }
 

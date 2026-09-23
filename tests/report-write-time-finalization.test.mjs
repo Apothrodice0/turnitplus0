@@ -37,7 +37,7 @@ import { extractPdfTextDocument } from '../lib/pdf-text-extraction.ts';
 // aliased so the new regression test below proves the actual deployed
 // function's behavior, not a parallel description of it.
 import { isFullyRevealed as isFullyRevealedReal } from '../app/reports/rooms/[room]/room-page-shell.tsx';
-import { withTestIdentity } from './helpers/test-signup.mjs';
+import { withTestIdentity, markTestAccountEmailVerified } from './helpers/test-signup.mjs';
 
 /**
  * Release-hardening audit finding SIM-03: the required end-to-end
@@ -147,6 +147,7 @@ async function signUpConsentingAccount() {
   // it in this product) — mirrors this exact session's own earlier,
   // established verification method for granting corpus-reuse consent.
   await client.execute({ sql: "UPDATE users SET corpus_reuse_consented_at = CURRENT_TIMESTAMP WHERE id = ?", args: [userId] });
+  await markTestAccountEmailVerified(dbFile, email);
   return { userId, deviceKey: `write-time-finalization-device-${userCounter}`, cookie, tag: `write-time-finalization-${userCounter}` };
 }
 

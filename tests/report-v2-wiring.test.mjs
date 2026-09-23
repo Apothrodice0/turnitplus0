@@ -9,7 +9,7 @@ import * as reportsRoute from '../app/api/reports/route.ts';
 import * as reportIdRoute from '../app/api/reports/[id]/route.ts';
 import * as signupRoute from '../app/api/auth/signup/route.ts';
 import { resetRateForTest, resetAuthRateForTest, resetReadRateForTest } from '../lib/rate-limit.ts';
-import { withTestIdentity } from './helpers/test-signup.mjs';
+import { withTestIdentity, markTestAccountEmailVerified } from './helpers/test-signup.mjs';
 import { tokens } from '../lib/similarity-core.ts';
 import { decodeReportFromPersistence } from '../lib/report-persistence.ts';
 import {
@@ -99,6 +99,7 @@ async function signUpAccount() {
   const res = await signupRoute.POST(req);
   assert.equal(res.status, 201, 'test setup sanity: signup must succeed');
   const cookie = extractCookie(res);
+  await markTestAccountEmailVerified(dbFile, email);
   const row = await client.execute({ sql: 'SELECT id FROM users WHERE email = ?', args: [email] });
   return { userId: row.rows[0].id, deviceKey: `report-v2-wiring-device-${userCounter}`, cookie, tag: `report-v2-wiring-${userCounter}` };
 }

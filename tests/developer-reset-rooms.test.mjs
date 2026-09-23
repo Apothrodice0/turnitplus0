@@ -14,7 +14,7 @@ import { resetRateForTest, resetAuthRateForTest } from '../lib/rate-limit.js';
 import { canonicalSha256 } from '../lib/document-identity.ts';
 import { indexDocumentSubmissionIntoCorpus } from '../lib/user-submission-corpus.ts';
 import { buildReportAdmissionSourceRef } from '../lib/corpus-admission-source-ref.ts';
-import { withTestIdentity, grantTestAdmin } from './helpers/test-signup.mjs';
+import { withTestIdentity, grantTestAdmin, markTestAccountEmailVerified } from './helpers/test-signup.mjs';
 
 /**
  * POST /api/developer/reset-rooms — "Clear my rooms". Real DB, real route
@@ -71,6 +71,7 @@ async function signup(email, deviceKey) {
   });
   const res = await signupRoute.POST(req);
   assert.equal(res.status, 201, `signup for ${email} should succeed`);
+  await markTestAccountEmailVerified(dbFile, email);
   return extractCookie(res);
 }
 

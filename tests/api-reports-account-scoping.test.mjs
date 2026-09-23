@@ -8,7 +8,7 @@ import * as reportIdRoute from '../app/api/reports/[id]/route.ts';
 import * as signupRoute from '../app/api/auth/signup/route.ts';
 import * as loginRoute from '../app/api/auth/login/route.ts';
 import { resetRateForTest, resetAuthRateForTest } from '../lib/rate-limit.js';
-import { withTestIdentity } from './helpers/test-signup.mjs';
+import { withTestIdentity, markTestAccountEmailVerified } from './helpers/test-signup.mjs';
 
 const repo = path.resolve('.');
 const drizzleDir = path.join(repo, 'drizzle');
@@ -104,6 +104,7 @@ async function signup(email, deviceKey) {
     body: JSON.stringify(withTestIdentity({ email, password: 'scoping-password-1', username: 'scopeuser', deviceKey })),
   });
   const res = await signupRoute.POST(req);
+  await markTestAccountEmailVerified(dbFile, email);
   return { res, cookie: extractCookie(res) };
 }
 

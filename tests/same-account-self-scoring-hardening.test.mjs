@@ -23,7 +23,7 @@ import * as reportIdRoute from "../app/api/reports/[id]/route.ts";
 import * as signupRoute from "../app/api/auth/signup/route.ts";
 import { resetRateForTest, resetReadRateForTest, resetAuthRateForTest } from "../lib/rate-limit.ts";
 import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
-import { withTestIdentity, grantTestAdmin } from './helpers/test-signup.mjs';
+import { withTestIdentity, grantTestAdmin, markTestAccountEmailVerified } from './helpers/test-signup.mjs';
 
 /**
  * FINAL SAME-ACCOUNT SELF HARDENING regression suite.
@@ -557,6 +557,7 @@ test("16: an ordinary GET response for a report whose own-history match was SELF
   const userRow = (await client.execute({ sql: "SELECT id FROM users WHERE email = ?", args: [email] })).rows[0];
   const accountId = String(userRow.id);
   await client.execute({ sql: "UPDATE users SET corpus_reuse_consented_at = CURRENT_TIMESTAMP WHERE id = ?", args: [accountId] });
+  await markTestAccountEmailVerified(dbFile, email);
 
   await indexOwnSubmission(accountId, base, "my-original.pdf");
   const otherAccount = "saself-leak-other-account";

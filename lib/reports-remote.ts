@@ -124,6 +124,15 @@ export type SaveReportRemoteResult =
       quotaExceeded: boolean;
       roomOccupied: boolean;
       roomReuseNotReady: boolean;
+      /**
+       * status 403 AND body.code === "EMAIL_VERIFICATION_REQUIRED" — the
+       * signed-in account's email is not yet verified (app/api/reports/
+       * route.ts's own EMAIL VERIFICATION GATE comment). Requires the exact
+       * application-level code, not status alone, since 403 is also the
+       * generic "forbidden" status a platform layer could return for other
+       * reasons.
+       */
+      emailVerificationRequired: boolean;
       error?: string;
       resetsAt?: string;
       cycleEndsAt?: string;
@@ -247,7 +256,8 @@ export async function saveReportRemote<T>(report: T, summary: ReportSummary, aca
       // genuine unrelated 503 is never misclassified as this rare,
       // specifically-recoverable condition.
       const roomReuseNotReady = response.status === 503 && body?.code === "ROOM_REUSE_NOT_READY";
-      return { ok: false, status: response.status, quotaExceeded, roomOccupied, roomReuseNotReady, error: body?.error, resetsAt: body?.resetsAt, cycleEndsAt: body?.cycleEndsAt };
+      const emailVerificationRequired = response.status === 403 && body?.code === "EMAIL_VERIFICATION_REQUIRED";
+      return { ok: false, status: response.status, quotaExceeded, roomOccupied, roomReuseNotReady, emailVerificationRequired, error: body?.error, resetsAt: body?.resetsAt, cycleEndsAt: body?.cycleEndsAt };
     }
     // The report is now durably saved server-side: any later resave of this id
     // (AI enrichment) is definitively not a first save, so Device Passport
@@ -258,7 +268,7 @@ export async function saveReportRemote<T>(report: T, summary: ReportSummary, aca
     console.debug("Remote report save failed (local copy is unaffected).", {
       error: error instanceof Error ? error.message : String(error),
     });
-    return { ok: false, status: 0, quotaExceeded: false, roomOccupied: false, roomReuseNotReady: false };
+    return { ok: false, status: 0, quotaExceeded: false, roomOccupied: false, roomReuseNotReady: false, emailVerificationRequired: false };
   }
 }
 
@@ -299,7 +309,7 @@ export async function saveAiRetryResultRemote(input: SaveAiRetryResultInput): Pr
     if (!response.ok) {
       console.debug("Remote AI retry save was rejected (local copy is unaffected).", { status: response.status });
       const body = (await response.json().catch(() => null)) as { error?: string } | null;
-      return { ok: false, status: response.status, quotaExceeded: false, roomOccupied: false, roomReuseNotReady: false, error: body?.error };
+      return { ok: false, status: response.status, quotaExceeded: false, roomOccupied: false, roomReuseNotReady: false, emailVerificationRequired: false, error: body?.error };
     }
     // G2: a 200 may carry the server's own decision that the real result could not be stored (see SaveReportRemoteResult).
     // Only the one known literal is honoured; anything else — or an unreadable body — is the plain `{ ok: true }` it always was.
@@ -309,7 +319,7 @@ export async function saveAiRetryResultRemote(input: SaveAiRetryResultInput): Pr
     console.debug("Remote AI retry save failed (local copy is unaffected).", {
       error: error instanceof Error ? error.message : String(error),
     });
-    return { ok: false, status: 0, quotaExceeded: false, roomOccupied: false, roomReuseNotReady: false };
+    return { ok: false, status: 0, quotaExceeded: false, roomOccupied: false, roomReuseNotReady: false, emailVerificationRequired: false };
   }
 }
 

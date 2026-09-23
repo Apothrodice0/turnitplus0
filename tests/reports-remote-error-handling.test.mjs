@@ -385,7 +385,7 @@ test("saveReportRemote + classifySaveReportRemoteResult: a thrown network/fetch 
   const restoreWindow = stubWindowLocalStorage();
   try {
     const result = await saveReportRemote({}, MINIMAL_SUMMARY);
-    assert.deepEqual(result, { ok: false, status: 0, quotaExceeded: false, roomOccupied: false, roomReuseNotReady: false });
+    assert.deepEqual(result, { ok: false, status: 0, quotaExceeded: false, roomOccupied: false, roomReuseNotReady: false, emailVerificationRequired: false });
     assert.equal(classifySaveReportRemoteResult(result), "TRANSIENT_OR_UNKNOWN");
   } finally {
     restoreFetch();

@@ -29,7 +29,7 @@ import {
 import * as reportsRoute from '../app/api/reports/route.ts';
 import * as reportIdRoute from '../app/api/reports/[id]/route.ts';
 import * as signupRoute from '../app/api/auth/signup/route.ts';
-import { withTestIdentity } from './helpers/test-signup.mjs';
+import { withTestIdentity, markTestAccountEmailVerified } from './helpers/test-signup.mjs';
 
 /**
  * Device Passport / historical-match shadow-telemetry trigger handoff for
@@ -151,6 +151,7 @@ async function signUpAccount() {
     body: JSON.stringify(withTestIdentity({ email, password: 'shadow-trigger-pw-1', username: `shtrig${userCounter}`, deviceKey })),
   }));
   assert.equal(res.status, 201, 'signup must succeed');
+  await markTestAccountEmailVerified(dbFile, email);
   const row = await client.execute({ sql: 'SELECT id FROM users WHERE email = ?', args: [email] });
   return { userId: String(row.rows[0].id), deviceKey, cookie: extractCookie(res), tag: `shadow-trigger-${userCounter}` };
 }

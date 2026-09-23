@@ -8,7 +8,7 @@ import * as reportsRoute from '../app/api/reports/route.ts';
 import * as reportIdRoute from '../app/api/reports/[id]/route.ts';
 import * as signupRoute from '../app/api/auth/signup/route.ts';
 import { resetRateForTest, resetReadRateForTest, resetAuthRateForTest } from '../lib/rate-limit.ts';
-import { withTestIdentity } from './helpers/test-signup.mjs';
+import { withTestIdentity, markTestAccountEmailVerified } from './helpers/test-signup.mjs';
 import { canonicalSha256 } from '../lib/document-identity.ts';
 import { recordAcademicSearchRunDiagnostics, resolveVerifiedAcademicEvidence } from '../lib/academic-search-diagnostics-repo.ts';
 import { selfHealUnifiedSimilarity } from '../lib/report-primary-similarity.ts';
@@ -85,6 +85,7 @@ async function signupFor(deviceKey, tag) {
     body: JSON.stringify(withTestIdentity({ email, password: 'tb-fixture-pw', username: tag.replace(/[^a-z0-9]/gi, '').slice(0, 24) || 'tbfixtureuser', deviceKey })),
   });
   const res = await signupRoute.POST(req);
+  if (res.status === 201) await markTestAccountEmailVerified(dbFile, email);
   const setCookie = res.headers.get('set-cookie');
   const match = setCookie ? setCookie.match(/tp_session_v1=([^;]*)/) : null;
   return match ? match[1] : null;

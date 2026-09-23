@@ -18,7 +18,7 @@ import * as reportsRoute from "../app/api/reports/route.ts";
 import * as reportIdRoute from "../app/api/reports/[id]/route.ts";
 import * as signupRoute from "../app/api/auth/signup/route.ts";
 import { resetRateForTest, resetAuthRateForTest, resetReadRateForTest, resetPollRateForTest } from "../lib/rate-limit.ts";
-import { withTestIdentity } from "./helpers/test-signup.mjs";
+import { withTestIdentity, markTestAccountEmailVerified } from "./helpers/test-signup.mjs";
 import { tokens } from "../lib/similarity-core.ts";
 import { similarityScoreBand } from "../lib/ai-core.ts";
 import { findRoomOccupant } from "../lib/reports-repo.ts";
@@ -132,6 +132,7 @@ async function account() {
     body: JSON.stringify(withTestIdentity({ email, password: "rcr-pw-123456", username: `rcru${uc}`, deviceKey: `rcr-dev-${uc}` })),
   }));
   assert.equal(res.status, 201);
+  await markTestAccountEmailVerified(dbFile, email);
   const userId = String((await db.execute({ sql: "SELECT id FROM users WHERE email = ?", args: [email] })).rows[0].id);
   return { deviceKey: `rcr-dev-${uc}`, cookie: cookieOf(res), tag: `rcr-${uc}`, userId, email };
 }

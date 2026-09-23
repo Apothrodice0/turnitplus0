@@ -10,7 +10,7 @@ import { resetRateForTest, resetAuthRateForTest } from "../lib/rate-limit.js";
 import { rawSha256 } from "../lib/document-identity.ts";
 import { findFamilyForIdentity } from "../lib/document-family.ts";
 import { classifyFamilyRelationships } from "../lib/document-relationship.ts";
-import { withTestIdentity } from './helpers/test-signup.mjs';
+import { withTestIdentity, markTestAccountEmailVerified } from './helpers/test-signup.mjs';
 
 // Phase C activation: POST /api/reports now runs the full identity +
 // fingerprint + family pipeline (lib/document-family.ts's
@@ -68,6 +68,7 @@ async function signup(email, deviceKey) {
   // tests/report-privacy-consent.test.mjs for the dedicated consent on/off
   // behavior this gate itself needs.
   await setupClient.execute({ sql: "UPDATE users SET corpus_reuse_consented_at = CURRENT_TIMESTAMP WHERE email = ?", args: [email] });
+  await markTestAccountEmailVerified(dbFile, email);
   return { res, cookie: extractCookie(res) };
 }
 

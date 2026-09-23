@@ -155,7 +155,7 @@ import * as reportsRoute from "../app/api/reports/route.ts";
 import * as reportIdRoute from "../app/api/reports/[id]/route.ts";
 import * as signupRoute from "../app/api/auth/signup/route.ts";
 import { resetRateForTest, resetAuthRateForTest, resetReadRateForTest } from "../lib/rate-limit.ts";
-import { withTestIdentity } from "./helpers/test-signup.mjs";
+import { withTestIdentity, markTestAccountEmailVerified } from "./helpers/test-signup.mjs";
 
 const dbFile = path.join(path.resolve("."), "test_user_supplied_refs_transport.db");
 for (const s of ["", "-wal", "-shm"]) { try { fs.unlinkSync(`${dbFile}${s}`); } catch { /* ignore */ } }
@@ -186,6 +186,7 @@ async function account() {
     body: JSON.stringify(withTestIdentity({ email: `trn-${uc}@example.test`, password: "trn-pw-123456", username: `trnu${uc}`, deviceKey: `trn-dev-${uc}` })),
   }));
   assert.equal(res.status, 201);
+  await markTestAccountEmailVerified(dbFile, `trn-${uc}@example.test`);
   return { deviceKey: `trn-dev-${uc}`, cookie: cookieOf(res), tag: `trn-${uc}` };
 }
 async function post(acc, id, extra) {

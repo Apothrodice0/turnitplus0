@@ -358,6 +358,14 @@ test("Scope check: this fix adds no new import of any scoring/corpus-admission/r
     "@/lib/similarity-core",
     "lucide-react",
     "next/link",
+    // A3 completion (EMAIL VERIFICATION GATE): a 403 EMAIL_VERIFICATION_REQUIRED
+    // save result routes the user to the existing account page via
+    // useRouter/router.push — the same standard Next.js navigation hook the
+    // sibling app/reports/[id]/report-detail-shell.tsx already uses for its
+    // own imperative post-action redirect. Pure navigation — no scoring,
+    // corpus admission, retention, or PDF work — so it does not violate this
+    // scope check's actual boundary (the forbidden-substring list above).
+    "next/navigation",
     "react",
   ].sort(), "REQUIRED: the import module list must be exactly the pre-existing set — no new dependency on any other subsystem");
 });

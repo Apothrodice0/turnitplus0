@@ -10,7 +10,7 @@ import * as signupRoute from '../app/api/auth/signup/route.ts';
 import { resetRateForTest, resetAuthRateForTest } from '../lib/rate-limit.ts';
 import { canonicalSha256 } from '../lib/document-identity.ts';
 import { recordAcademicSearchRunDiagnostics } from '../lib/academic-search-diagnostics-repo.ts';
-import { withTestIdentity } from './helpers/test-signup.mjs';
+import { withTestIdentity, markTestAccountEmailVerified } from './helpers/test-signup.mjs';
 
 /**
  * Phase 6: proves computeUnifiedSimilarity() is actually wired into the real
@@ -117,6 +117,7 @@ async function signupFor(deviceKey, clientTag) {
     body: JSON.stringify(withTestIdentity({ email, password: 'unified-sim-fixture-pw', username: clientTag.replace(/[^a-z0-9]/gi, '').slice(0, 24) || 'unifiedsimuser', deviceKey })),
   });
   const res = await signupRoute.POST(req);
+  if (res.status === 201) await markTestAccountEmailVerified(dbFile, email);
   const setCookie = res.headers.get('set-cookie');
   const match = setCookie ? setCookie.match(/tp_session_v1=([^;]*)/) : null;
   return match ? match[1] : null;

@@ -10,7 +10,7 @@ import * as signupRoute from '../app/api/auth/signup/route.ts';
 import { resetRateForTest, resetAuthRateForTest } from '../lib/rate-limit.js';
 import { canonicalSha256, createDocumentIdentity } from '../lib/document-identity.ts';
 import { indexDocumentSubmissionIntoCorpus } from '../lib/user-submission-corpus.ts';
-import { withTestIdentity } from './helpers/test-signup.mjs';
+import { withTestIdentity, markTestAccountEmailVerified } from './helpers/test-signup.mjs';
 
 /**
  * Phase E8D originally activated indexDocumentSubmissionIntoCorpus from the
@@ -98,6 +98,7 @@ async function signup(email, deviceKey) {
   // classification.test.mjs's own precedent; visibility itself is covered
   // separately in tests/report-historical-match-visibility.test.mjs.
   await setupClient.execute({ sql: "UPDATE users SET corpus_reuse_consented_at = CURRENT_TIMESTAMP, role = 'admin' WHERE email = ?", args: [email] });
+  await markTestAccountEmailVerified(dbFile, email);
   return { res, cookie: extractCookie(res) };
 }
 

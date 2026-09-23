@@ -13,7 +13,7 @@ import * as reportsRoute from "../app/api/reports/route.ts";
 import * as reportIdRoute from "../app/api/reports/[id]/route.ts";
 import * as signupRoute from "../app/api/auth/signup/route.ts";
 import { resetRateForTest, resetAuthRateForTest } from "../lib/rate-limit.js";
-import { withTestIdentity, grantTestAdmin } from './helpers/test-signup.mjs';
+import { withTestIdentity, grantTestAdmin, markTestAccountEmailVerified } from './helpers/test-signup.mjs';
 
 /**
  * Release-hardening audit finding UI-01: a signed-in account with no
@@ -344,6 +344,7 @@ async function signup(email, deviceKey, tag) {
     body: JSON.stringify(withTestIdentity({ email, password: "ui01-password-1", username: tag.replace(/[^a-z0-9]/gi, ""), deviceKey })),
   });
   const res = await signupRoute.POST(req);
+  if (res.status === 201) await markTestAccountEmailVerified(dbFile, email);
   return { res, cookie: extractCookie(res) };
 }
 

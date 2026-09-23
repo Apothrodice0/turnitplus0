@@ -24,7 +24,7 @@ import * as reportsRoute from "../app/api/reports/route.ts";
 import * as reportIdRoute from "../app/api/reports/[id]/route.ts";
 import * as developerReportIdRoute from "../app/api/developer/reports/[id]/route.ts";
 import { resetRateForTest, resetReadRateForTest, resetAuthRateForTest } from "../lib/rate-limit.ts";
-import { withTestIdentity, grantTestAdmin } from './helpers/test-signup.mjs';
+import { withTestIdentity, grantTestAdmin, markTestAccountEmailVerified } from './helpers/test-signup.mjs';
 
 /**
  * Integration coverage for the admin similarity decision trace:
@@ -431,6 +431,7 @@ async function signup(email, deviceKey, tag) {
     body: JSON.stringify(withTestIdentity({ email, password: "asdt-password-1", username: tag.replace(/[^a-z0-9]/gi, ""), deviceKey })),
   }));
   assert.equal(res.status, 201, `signup must succeed for ${email}`);
+  await markTestAccountEmailVerified(dbFile, email);
   return extractCookie(res);
 }
 

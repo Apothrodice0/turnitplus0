@@ -13,7 +13,7 @@ import * as resetAccountRoomsRoute from '../app/api/developer/reset-account-room
 import { resetRateForTest, resetAuthRateForTest, resetReadRateForTest } from '../lib/rate-limit.js';
 import { deleteAllReportDataForAccount } from '../lib/account-deletion.ts';
 import { statusLabel } from '../components/reports/report-rooms.tsx';
-import { withTestIdentity, grantTestAdmin } from './helpers/test-signup.mjs';
+import { withTestIdentity, grantTestAdmin, markTestAccountEmailVerified } from './helpers/test-signup.mjs';
 
 /**
  * BUG: after a report is deleted (developer "Clear account rooms" by email,
@@ -65,6 +65,7 @@ async function signup(email, deviceKey) {
     body: JSON.stringify(withTestIdentity({ email, password: PASSWORD, username: email.split('@')[0].replace(/[^a-z0-9]/gi, ''), deviceKey })),
   }));
   assert.equal(res.status, 201, `signup ${email}`);
+  await markTestAccountEmailVerified(dbFile, email);
   return extractCookie(res);
 }
 

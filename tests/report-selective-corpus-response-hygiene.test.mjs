@@ -13,7 +13,7 @@ import { finalizeSelectiveCorpusAuthoritativeReport } from '../lib/selective-cor
 import * as reportsRoute from '../app/api/reports/route.ts';
 import * as reportIdRoute from '../app/api/reports/[id]/route.ts';
 import * as signupRoute from '../app/api/auth/signup/route.ts';
-import { withTestIdentity } from './helpers/test-signup.mjs';
+import { withTestIdentity, markTestAccountEmailVerified } from './helpers/test-signup.mjs';
 
 /**
  * Selective Corpus authoritative RESPONSE HYGIENE — selectiveCorpusAuthoritativeStatus
@@ -74,6 +74,7 @@ async function signUpAccount() {
     body: JSON.stringify(withTestIdentity({ email, password: 'sc-hygiene-pw-1', username: `schyg${userCounter}`, deviceKey })),
   }));
   assert.equal(res.status, 201, 'signup must succeed');
+  await markTestAccountEmailVerified(dbFile, email);
   const row = await client.execute({ sql: 'SELECT id FROM users WHERE email = ?', args: [email] });
   return { userId: String(row.rows[0].id), deviceKey, cookie: extractCookie(res), tag: `sc-hygiene-${userCounter}` };
 }

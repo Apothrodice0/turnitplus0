@@ -1149,30 +1149,48 @@ export default function Home() {
     try {
       const saveResult = await saveReport(report, academicResult.academicSearchDiagnosticsId, suppliedReferenceInputs);
       if (saveResult.ok) setReferenceEntries((current) => markReferencesChecked(current));
-      navigate("reports");
-      // A network/DB hiccup here is silently tolerated since the local copy
-      // already succeeded (see saveReport/saveReportRemote's own comments) —
-      // there is no quota or room concept on this anonymous-only path.
-      //
-      // Pre-launch hardening fix: this used to claim "syncing to the server
-      // will retry automatically" for every failure shape — untrue, since no
-      // automatic retry mechanism exists anywhere in this codebase. The copy
-      // below states only what actually happened (local copy safe, server
-      // sync did not complete) and never promises a retry. REQUEST_TOO_LARGE
-      // gets its own truthful message because that cause is exactly known
-      // (see classifySaveReportRemoteResult's own comment); every other
-      // failure shape shares one honest, equally conservative message rather
-      // than fabricating a distinction the client cannot safely make.
-      const saveFailureClass = classifySaveReportRemoteResult(saveResult);
-      notify(
-        saveFailureClass === "REQUEST_TOO_LARGE"
-          ? "Your report is ready and saved on this device. It's too large to sync to the server, so only the local copy is available."
-          : saveFailureClass !== "SUCCESS"
-            ? "Your report is ready and saved on this device, but syncing to the server did not complete."
-            : academicResult.status === "FAILED"
-              ? "Your report is ready. External academic verification was unavailable this time."
-              : "Your report is ready. Choose AI or TurnitPlus Similarity.",
-      );
+      // EMAIL VERIFICATION GATE (A3 completion): the server refused this save
+      // with 403 EMAIL_VERIFICATION_REQUIRED (app/api/reports/route.ts's own
+      // EMAIL VERIFICATION GATE comment) — the local copy is still safe (see
+      // the fail-soft comment below), but the account itself must verify
+      // before it can sync any report. Routed into the EXISTING account-page
+      // verification modal/state (sendEmailVerification/emailVerifyModalOpen
+      // above) rather than the generic "did not sync" copy every other
+      // failure shape gets, so the user has a clear, immediate next action.
+      // Deliberately does NOT `return` here: the AI-analysis background chain
+      // below must still be attached (it was already kicked off before this
+      // save even ran), exactly as for every other failure shape.
+      const emailVerificationRequired = !saveResult.ok && saveResult.emailVerificationRequired;
+      if (emailVerificationRequired) {
+        navigate("account");
+        notify("Your report is ready and saved on this device. Verify your email to sync it to your account and create new reports.");
+        void sendEmailVerification();
+      } else {
+        navigate("reports");
+        // A network/DB hiccup here is silently tolerated since the local copy
+        // already succeeded (see saveReport/saveReportRemote's own comments) —
+        // there is no quota or room concept on this anonymous-only path.
+        //
+        // Pre-launch hardening fix: this used to claim "syncing to the server
+        // will retry automatically" for every failure shape — untrue, since no
+        // automatic retry mechanism exists anywhere in this codebase. The copy
+        // below states only what actually happened (local copy safe, server
+        // sync did not complete) and never promises a retry. REQUEST_TOO_LARGE
+        // gets its own truthful message because that cause is exactly known
+        // (see classifySaveReportRemoteResult's own comment); every other
+        // failure shape shares one honest, equally conservative message rather
+        // than fabricating a distinction the client cannot safely make.
+        const saveFailureClass = classifySaveReportRemoteResult(saveResult);
+        notify(
+          saveFailureClass === "REQUEST_TOO_LARGE"
+            ? "Your report is ready and saved on this device. It's too large to sync to the server, so only the local copy is available."
+            : saveFailureClass !== "SUCCESS"
+              ? "Your report is ready and saved on this device, but syncing to the server did not complete."
+              : academicResult.status === "FAILED"
+                ? "Your report is ready. External academic verification was unavailable this time."
+                : "Your report is ready. Choose AI or TurnitPlus Similarity.",
+        );
+      }
 
       // TASK 4: the AI-writing score merges into the ALREADY-shown,
       // ALREADY-saved report whenever it finishes — a separate axis

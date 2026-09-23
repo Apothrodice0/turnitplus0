@@ -9,7 +9,7 @@ import * as reportIdRoute from "../app/api/reports/[id]/route.ts";
 import * as signupRoute from "../app/api/auth/signup/route.ts";
 import { resetRateForTest, resetAuthRateForTest } from "../lib/rate-limit.js";
 import { classifyReportMatches } from "../lib/report-classification.ts";
-import { withTestIdentity } from './helpers/test-signup.mjs';
+import { withTestIdentity, markTestAccountEmailVerified } from './helpers/test-signup.mjs';
 
 // Phase D: connects the existing SELF/PRIOR_SUBMISSION classification
 // (lib/document-family.ts, lib/document-relationship.ts — Phases B/C) to the
@@ -91,6 +91,7 @@ async function signup(email, deviceKey) {
   // including the case this file cannot: an ordinary (non-admin) account
   // must receive nothing at all.
   await setupClient.execute({ sql: "UPDATE users SET corpus_reuse_consented_at = CURRENT_TIMESTAMP, role = 'admin' WHERE email = ?", args: [email] });
+  await markTestAccountEmailVerified(dbFile, email);
   return { res, cookie: extractCookie(res) };
 }
 

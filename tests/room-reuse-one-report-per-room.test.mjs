@@ -246,6 +246,11 @@ async function signedUpAccount(prefix) {
   const cookie = extractCookie(res);
   assert.ok(cookie, `signup must succeed for ${email}`);
   const userId = await userIdFor(email);
+  // A3 completion — POST /api/reports now also requires a verified email (see
+  // app/api/reports/route.ts's own EMAIL VERIFICATION GATE comment); this
+  // suite is about room-reuse mechanics, not that gate, so every fixture
+  // account created here is verified directly via a raw UPDATE.
+  await client.execute({ sql: 'UPDATE users SET email_verified_at = ? WHERE id = ?', args: [Date.now(), userId] });
   return { email, deviceKey, cookie, userId };
 }
 

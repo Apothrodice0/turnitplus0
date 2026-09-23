@@ -3,6 +3,7 @@ import { getReportsDbClient } from '../../../lib/reports-db';
 import { checkRate, checkPollRate, checkReadRate } from '../../../lib/rate-limit';
 import { clientIpFrom } from '../../../lib/client-ip';
 import { getSessionUser, parseCookie, hashToken, SESSION_COOKIE_NAME } from '../../../lib/auth-session';
+import { usersHaveEmailVerifiedAtColumn } from '../../../lib/email-verification';
 import {
   isDevicePassportEnabled,
   verifyDevicePassportAttestation,
@@ -542,6 +543,30 @@ export async function POST(request: Request) {
       if (!sessionUser) {
         logReportSaveRejectedTelemetry({ reason: 'AUTH_REQUIRED', status: 401, authMode: 'anonymous' });
         return new NextResponse(JSON.stringify({ error: 'Log in to save a report.' }), { status: 401 });
+      }
+
+      // EMAIL VERIFICATION GATE (A3 completion): a signed-in account whose
+      // login email is not yet verified may not create OR resave a report —
+      // checked immediately after the auth gate above, before the
+      // existing-row lookup or any other DB/matcher work, exactly like that
+      // gate's own placement. Uses the SAME deploy-ordering-safe migration-
+      // 0046 check already established by /api/auth/me and the account PATCH
+      // route (usersHaveEmailVerifiedAtColumn — lib/email-verification.ts):
+      // an environment where 0046 has not yet been applied here preserves
+      // today's behavior and lets the request through unchanged, rather than
+      // turning migration rollout into an outage. Queried by the
+      // authenticated session's own id — never by email — so this can never
+      // be used to probe another account's verification state.
+      if (await usersHaveEmailVerifiedAtColumn(client)) {
+        const verifiedRow = await client.execute({ sql: 'SELECT email_verified_at FROM users WHERE id = ?', args: [sessionUser.id] });
+        const verifiedAt = (verifiedRow.rows[0] as unknown as { email_verified_at: number | null } | undefined)?.email_verified_at ?? null;
+        if (verifiedAt == null) {
+          logReportSaveRejectedTelemetry({ reason: 'EMAIL_VERIFICATION_REQUIRED', status: 403, authMode: 'authenticated' });
+          return new NextResponse(
+            JSON.stringify({ error: 'Verify your email to create a report.', code: 'EMAIL_VERIFICATION_REQUIRED' }),
+            { status: 403 },
+          );
+        }
       }
 
       // Phase E8F: (device_key, id) is saved_reports' own composite primary

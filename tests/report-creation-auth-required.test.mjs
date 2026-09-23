@@ -10,7 +10,7 @@ import * as signupRoute from '../app/api/auth/signup/route.ts';
 import { resetRateForTest, resetAuthRateForTest } from '../lib/rate-limit.js';
 import { withTestIdentity } from './helpers/test-signup.mjs';
 import { buildReportSaveRejectedTelemetryEvent } from '../lib/report-save-telemetry.ts';
-import { claimAnonymousReports } from '../lib/auth-session.ts';
+import { claimAnonymousReports, newSession } from '../lib/auth-session.ts';
 
 // This checkout stores app/page.tsx with CRLF line endings — normalize to LF
 // so every structural regex below can use a plain \n regardless of the
@@ -37,6 +37,17 @@ async function readPage() {
 //   D. authenticated create succeeds
 //   E. authenticated update/resave succeeds
 //   F. claim-on-signup still works
+//
+// A3 COMPLETION coverage (added alongside the above, same file): an
+// authenticated account whose email is NOT YET verified (users.
+// email_verified_at IS NULL) is refused report creation with a distinct 403
+// EMAIL_VERIFICATION_REQUIRED — see app/api/reports/route.ts's own EMAIL
+// VERIFICATION GATE comment. Because every test above needs an authenticated
+// account that CAN create a report, signup() below now verifies the test
+// account's email by default (a raw users.email_verified_at UPDATE — the
+// send/verify challenge flow itself is already exhaustively covered by
+// tests/email-verification.test.mjs and is not re-tested here); tests that
+// need to exercise the gate itself opt out with { verifyEmail: false }.
 // G (Device Passport historical-row coverage) and H (SELF/UNKNOWN historical
 // classification) are proved in their own dedicated suites —
 // tests/device-passport-actor-ledger.test.mjs and
@@ -70,7 +81,17 @@ function extractCookie(response) {
   return match ? match[1] : null;
 }
 
-async function signup(email, deviceKey) {
+/** Directly sets users.email_verified_at for the given account — a raw UPDATE against the shared dbFile, bypassing the real send/verify challenge flow entirely (that flow is already exhaustively covered by tests/email-verification.test.mjs; this file's own job is the report-creation gate that reads the resulting column, not how the column gets set). */
+async function markEmailVerified(email) {
+  const raw = createClient({ url: `file:${dbFile}` });
+  try {
+    await raw.execute({ sql: 'UPDATE users SET email_verified_at = ? WHERE lower(email) = lower(?)', args: [Date.now(), email] });
+  } finally {
+    raw.close();
+  }
+}
+
+async function signup(email, deviceKey, { verifyEmail = true } = {}) {
   await resetAuthRateForTest('auth-gate-signup-' + email);
   const req = new Request('http://localhost/api/auth/signup', {
     method: 'POST',
@@ -78,7 +99,12 @@ async function signup(email, deviceKey) {
     body: JSON.stringify(withTestIdentity({ email, password: 'auth-gate-password-1', username: 'authgateuser', deviceKey })),
   });
   const res = await signupRoute.POST(req);
-  return { res, cookie: extractCookie(res) };
+  const cookie = extractCookie(res);
+  // Every EXISTING call site below needs an authenticated account that CAN
+  // create a report, so this defaults to true — see this file's own header
+  // comment. Only the dedicated email-verification-gate test opts out.
+  if (verifyEmail && cookie) await markEmailVerified(email);
+  return { res, cookie };
 }
 
 async function postReport(deviceKey, { cookie, id, title = 'auth-gate.pdf', room = 0, bucket = 'auth-gate-post' } = {}) {
@@ -133,6 +159,56 @@ async function insertLegacyAnonymousReport(deviceKey, id) {
 // ---------------------------------------------------------------------------
 // SERVER-SIDE ENFORCEMENT
 // ---------------------------------------------------------------------------
+
+// MUST be the first test registered in this file. usersHaveEmailVerifiedAtColumn
+// (lib/email-verification.ts) caches a positive "column present" result at
+// MODULE scope for the rest of this process the first time it observes the
+// column on any database — and signup() (used by every other test in this
+// file) triggers that observation against the fully-migrated dbFile above. A
+// genuine "column absent" observation can therefore only ever be proven here,
+// before any earlier test has had a chance to poison that cache.
+test('column-absent compatibility: an authenticated report POST proceeds unchanged when migration 0046 has not yet added users.email_verified_at', async () => {
+  const preDbFile = path.join(repo, 'test_report_creation_auth_required_pre0046.db');
+  for (const suffix of ['', '-wal', '-shm']) {
+    const candidate = `${preDbFile}${suffix}`;
+    if (fs.existsSync(candidate)) fs.unlinkSync(candidate);
+  }
+  // Apply the CURRENT full migration set MINUS migration 0046 itself (no
+  // later migration references email_verified_at or
+  // email_verification_challenges — confirmed by inspection — so this is a
+  // realistic "0046 not yet applied" deploy state, not a stale old schema).
+  const preClient = createClient({ url: `file:${preDbFile}` });
+  const migrationFiles = fs
+    .readdirSync(drizzleDir)
+    .filter((f) => f.endsWith('.sql') && f !== '0046_email_verification_challenges.sql')
+    .sort();
+  for (const file of migrationFiles) {
+    await preClient.executeMultiple(fs.readFileSync(path.join(drizzleDir, file), 'utf8'));
+  }
+  const tableInfo = await preClient.execute("PRAGMA table_info('users')");
+  assert.ok(
+    !tableInfo.rows.some((r) => String(r.name) === 'email_verified_at'),
+    'test setup sanity check: users.email_verified_at must genuinely be absent from this pre-0046 db',
+  );
+
+  const userId = 'pre0046-user';
+  await preClient.execute({
+    sql: 'INSERT INTO users (id, email, username, password_hash) VALUES (?, ?, ?, ?)',
+    args: [userId, 'pre0046@example.com', 'pre0046user', 'unused'],
+  });
+  const { token, statement } = newSession(userId);
+  await preClient.execute(statement);
+  preClient.close();
+
+  const originalUrl = process.env.TURSO_DATABASE_URL;
+  process.env.TURSO_DATABASE_URL = `file:${preDbFile}`;
+  try {
+    const { res } = await postReport('auth-gate-device-pre0046', { cookie: token, bucket: 'auth-gate-pre0046' });
+    assert.equal(res.status, 200, 'report creation must proceed unchanged (deploy-ordering safety) when migration 0046 has not been applied yet — this must never become a hard outage');
+  } finally {
+    process.env.TURSO_DATABASE_URL = originalUrl;
+  }
+});
 
 test('unauthenticated report POST is rejected: a first-ever save with no session is refused with 401 and creates no row', async () => {
   const deviceKey = 'auth-gate-device-anon-create';
@@ -277,6 +353,47 @@ test('report_save_rejected telemetry: AUTH_REQUIRED is a valid, correctly-shaped
 });
 
 // ---------------------------------------------------------------------------
+// A3 COMPLETION — EMAIL VERIFICATION GATE (see this file's own header comment)
+// ---------------------------------------------------------------------------
+
+test('email verification gate: an authenticated but unverified account is refused report creation with a distinct 403, no report is persisted, and the SAME account can create a report immediately after its email is verified (no forced logout, no new session)', async () => {
+  const email = 'auth-gate-unverified@example.com';
+  const deviceKey = 'auth-gate-device-email-unverified';
+  const { cookie } = await signup(email, deviceKey, { verifyEmail: false });
+
+  const blocked = await postReport(deviceKey, { cookie, bucket: 'auth-gate-email-unverified-blocked' });
+  assert.equal(blocked.res.status, 403, 'an authenticated but unverified account must be refused report creation');
+  const blockedBody = await blocked.res.json();
+  assert.equal(blockedBody.code, 'EMAIL_VERIFICATION_REQUIRED', 'the rejection must carry a distinct, stable machine-readable reason code');
+  assert.notEqual(blockedBody.error, 'Log in to save a report.', 'must be a distinct rejection from the plain 401 auth-required case, never reclassified as it');
+
+  // Gate runs before any report creation/persistence — the (device_key, id)
+  // this attempt would have used must never appear anywhere, exactly like
+  // the existing AUTH_REQUIRED "creates no row" assertions above.
+  const listBeforeVerify = await listReports({ cookie, bucket: 'auth-gate-email-unverified-list' });
+  assert.deepEqual((await listBeforeVerify.json()).reports, [], 'a blocked, unverified attempt must never persist a report');
+
+  await markEmailVerified(email);
+  const allowed = await postReport(deviceKey, { cookie, id: blocked.id, bucket: 'auth-gate-email-verified-after' });
+  assert.equal(allowed.res.status, 200, 'the SAME account, SAME session, must be able to create a report immediately after verifying its email');
+
+  const listAfterVerify = await listReports({ cookie, bucket: 'auth-gate-email-verified-after-list' });
+  assert.deepEqual((await listAfterVerify.json()).reports.map((r) => r.id), [blocked.id], 'the post-verification save must be the only report on the account');
+});
+
+test('email verification gate: a resave of an already-existing report by its verified owner is unaffected (existing verified-account behavior preserved)', async () => {
+  const deviceKey = 'auth-gate-device-email-verified-resave';
+  const { cookie } = await signup('auth-gate-verified-resave@example.com', deviceKey);
+  const { id } = await postReport(deviceKey, { cookie, room: 5, title: 'first-version.pdf', bucket: 'auth-gate-email-verified-resave-create' });
+  assert.equal((await postReport(deviceKey, { cookie, id, title: 'second-version.pdf', bucket: 'auth-gate-email-verified-resave-update' })).res.status, 200);
+});
+
+test('report_save_rejected telemetry: EMAIL_VERIFICATION_REQUIRED is a valid, correctly-shaped rejection reason, distinct from AUTH_REQUIRED', () => {
+  const event = buildReportSaveRejectedTelemetryEvent({ reason: 'EMAIL_VERIFICATION_REQUIRED', status: 403, authMode: 'authenticated' });
+  assert.deepEqual(event, { event: 'report_save_rejected', reason: 'EMAIL_VERIFICATION_REQUIRED', status: 403, authMode: 'authenticated' });
+});
+
+// ---------------------------------------------------------------------------
 // CLIENT-SIDE UI GATING (structural source assertions — matches this
 // codebase's own established pattern for app/page.tsx, e.g.
 // tests/reports-view-auth-flash.test.mjs, since Home() depends on browser-
@@ -311,6 +428,19 @@ test('generateReport(): refuses to run for an unauthenticated visitor, as its ve
   assert.ok(lockIndex !== -1, 'generateReport must still keep its generation-lock check');
   assert.ok(guardIndex < lockIndex, 'the auth gate must run before any other work in generateReport, including the existing generation-lock check');
   assert.match(body, /openAccountPage\("login"\);/, 'an unauthenticated attempt must be routed into the existing login/register flow');
+});
+
+test('generateReport(): a 403 EMAIL_VERIFICATION_REQUIRED save result routes into the EXISTING email-verification modal, not a generic failure message', async () => {
+  const page = await readPage();
+  const fnMatch = page.match(/async function generateReport\(\) \{[\s\S]*?\n  \}\n\n  function startNewCheck/);
+  assert.ok(fnMatch, 'generateReport must exist and precede startNewCheck');
+  const body = fnMatch[0];
+  const gateMatch = body.match(/if \(emailVerificationRequired\) \{[\s\S]*?\n {6}\} else \{/);
+  assert.ok(gateMatch, 'generateReport must branch on the emailVerificationRequired save result');
+  const gateBody = gateMatch[0];
+  assert.match(gateBody, /navigate\("account"\)/, 'must route into the existing account page, where the verification modal lives');
+  assert.match(gateBody, /sendEmailVerification\(\)/, 'must reuse the EXISTING sendEmailVerification/modal flow rather than inventing a new one');
+  assert.doesNotMatch(gateBody, /report was generated but could not be saved/i, 'must not show the generic failure message for this specific, actionable rejection');
 });
 
 test('direct navigation cannot bypass the gate: the "dashboard" view itself never renders upload/check controls without an authenticated account', async () => {

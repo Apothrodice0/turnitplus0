@@ -11,7 +11,7 @@ import { resetRateForTest, resetAuthRateForTest } from '../lib/rate-limit.js';
 import { getOrComputeHistoricalMatchSnapshot } from '../lib/report-historical-match.ts';
 import { selfHealUnifiedSimilarity } from '../lib/report-primary-similarity.ts';
 import { matureCorpusBackings } from './helpers/corpus-maturity.mjs';
-import { withTestIdentity } from './helpers/test-signup.mjs';
+import { withTestIdentity, markTestAccountEmailVerified } from './helpers/test-signup.mjs';
 
 const repo = path.resolve('.');
 const drizzleDir = path.join(repo, 'drizzle');
@@ -129,6 +129,7 @@ async function signup(email, deviceKey) {
   // session to promote at all — it calls the underlying snapshot function
   // directly instead, matching this same file's other real-matcher tests.
   await setupClient.execute({ sql: "UPDATE users SET corpus_reuse_consented_at = CURRENT_TIMESTAMP, role = 'admin' WHERE email = ?", args: [email] });
+  await markTestAccountEmailVerified(dbFile, email);
   return { res, cookie: extractCookie(res) };
 }
 

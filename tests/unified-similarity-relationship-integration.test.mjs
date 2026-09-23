@@ -14,7 +14,7 @@ import { indexDocumentSubmissionIntoCorpus } from '../lib/user-submission-corpus
 import { getOrComputeHistoricalMatchSnapshot } from '../lib/report-historical-match.ts';
 import { selfHealUnifiedSimilarity } from '../lib/report-primary-similarity.ts';
 import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
-import { withTestIdentity } from './helpers/test-signup.mjs';
+import { withTestIdentity, markTestAccountEmailVerified } from './helpers/test-signup.mjs';
 
 /**
  * Phase 4B, Part A: end-to-end proof that computeUnifiedSimilarity()'s
@@ -155,6 +155,7 @@ async function signup(email, deviceKey) {
   // tests/report-historical-match-visibility.test.mjs — including the case
   // this file cannot: a non-admin account must receive nothing at all.
   await setupClient.execute({ sql: "UPDATE users SET corpus_reuse_consented_at = CURRENT_TIMESTAMP, role = 'admin' WHERE email = ?", args: [email] });
+  await markTestAccountEmailVerified(dbFile, email);
   return { res, cookie: extractCookie(res) };
 }
 
