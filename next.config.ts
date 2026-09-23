@@ -124,6 +124,77 @@ const nextConfig: NextConfig = {
    */
   serverExternalPackages: ["pdfjs-dist"],
 
+  /**
+   * Hosted imported-similarity-evidence delivery
+   * (scripts/materialize-imported-similarity-evidence.mjs,
+   * lib/imported-similarity-evidence/config.ts): the materialized package
+   * path is read at RUNTIME from a value Next's own static output-file
+   * tracing cannot see (a build-time-written file, resolved dynamically via
+   * `existsSync`/`readFileSync` on a path computed in
+   * lib/imported-similarity-evidence/materialized-path.ts — never a static
+   * `import`/`require` literal tracing could follow on its own). Without
+   * this, a materialized file present at build time could still be pruned
+   * from the deployed serverless function output.
+   *
+   * Explicit per-route keys, one per confirmed real caller of
+   * resolvePrimarySimilaritySummary() (the only path into the loader),
+   * instead of a broad /api/**\/* catch-all — verified with Graphify +
+   * source against every export from lib/report-primary-similarity.ts,
+   * lib/developer-repo.ts, and lib/selective-corpus-authoritative.ts, and
+   * proven against real `.next/**\/*.nft.json` output:
+   *   - /api/reports              — app/api/reports/route.ts POST (report
+   *     create/resave)
+   *   - /api/developer/reports/*  — app/api/developer/reports/[id]/route.ts
+   *     GET -> getReportSimilarityDecisionTrace()
+   *   - /api/internal/selective-corpus-authoritative-sweep — ->
+   *     finalizeSelectiveCorpusAuthoritativeReport() ->
+   *     resolvePrimarySimilaritySummary()
+   *   - /admin/developer/reports/* — an App Router PAGE (force-dynamic,
+   *     Node runtime), not under /api/* at all — DeveloperReportInspectPage()
+   *     calls getReportSimilarityDecisionTrace() at render time. A prior
+   *     /api/**\/*-only version of this config silently missed this one
+   *     (proven via a real build's .nft.json trace containing zero
+   *     "turnitplus" entries for this route despite its own compiled SSR
+   *     chunk containing the path-resolution code) — this is why this route
+   *     is listed explicitly rather than assumed covered by a wildcard.
+   *
+   * A literal `[id]` dynamic-segment key (e.g. "/api/developer/reports/[id]")
+   * was tried first and DID NOT get traced by this project's actual
+   * `next build` (Next 16.3.2, Turbopack) — confirmed by a real build whose
+   * generated `.nft.json` for that exact route came back with zero
+   * "turnitplus" entries, even though a standalone simulation against Next's
+   * own bundled `picomatch` (next/dist/compiled/picomatch, the engine
+   * collect-build-traces.js calls) said it should match. Turbopack's actual
+   * route-trace matching evidently does not special-case bracket segments
+   * the same way. A single-path-segment `*` wildcard in that position
+   * (matching any one segment, not crossing `/`) was verified instead —
+   * re-built with it, re-inspected `.nft.json` for all 4 target routes,
+   * confirmed present in every one. Route-key correctness here is proven
+   * against real generated build output only, never assumed from config
+   * shape or JS-level glob-library behavior alone.
+   *
+   * Real-build side effect, also measured (not assumed): with `contains`-style
+   * matching and no right-side anchor, "/api/reports" also (harmlessly)
+   * matches its own dynamic children /api/reports/[id],
+   * /api/reports/[id]/ai-retry, and /api/reports/rooms, and
+   * "/api/developer/reports/*" also matches its own sibling list route
+   * /api/developer/reports (no [id]) — 4 extra Node routes total, all in the
+   * same two already-closely-related report-handling families, confirmed via
+   * a full scan of every generated `.nft.json` in the build (8 of 51 routes
+   * total carry the file, down from all 35 `/api/**` routes under the
+   * previous /api/**\/* -only config). Eliminating those 4 would need
+   * additional outputFileTracingExcludes entries for a cosmetic-only gain;
+   * left as the simplest config that is proven to cover every required
+   * route. Matches nothing (costs nothing) when the materializer is a
+   * no-op, which is every deployment today.
+   */
+  outputFileTracingIncludes: {
+    "/api/reports": [".turnitplus/imported-similarity-evidence/**/*"],
+    "/api/developer/reports/*": [".turnitplus/imported-similarity-evidence/**/*"],
+    "/api/internal/selective-corpus-authoritative-sweep": [".turnitplus/imported-similarity-evidence/**/*"],
+    "/admin/developer/reports/*": [".turnitplus/imported-similarity-evidence/**/*"],
+  },
+
   async headers() {
     return [
       {

@@ -8,6 +8,7 @@
   "scripts": {
     "install:ci": "bash scripts/install-ci.sh",
     "dev": "vite",
+    "prebuild": "node --import tsx scripts/materialize-imported-similarity-evidence.mjs",
     "build": "next build",
     "start": "next start",
     "test": "npm run build && node --import tsx --test tests/*.test.mjs",
