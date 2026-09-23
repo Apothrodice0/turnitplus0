@@ -78,7 +78,7 @@ export function loadImportedSimilarityEvidencePackage(): ImportedSimilarityEvide
 
   let state: ImportedSimilarityEvidenceLoadState;
   try {
-    const raw = JSON.parse(readFileSync(path, "utf8")) as unknown;
+    const raw = JSON.parse(readImportedSimilarityEvidencePackageFile(path)) as unknown;
     const result = validateImportedSimilarityEvidencePackage(raw);
     state = result.ok
       ? { status: "loaded", package: result.package, rejectedUnits: result.rejectedUnits }
@@ -98,6 +98,32 @@ export function loadImportedSimilarityEvidencePackage(): ImportedSimilarityEvide
   }
   cache = { path, state };
   return state;
+}
+
+/**
+ * Reads the resolved package file's raw text for
+ * loadImportedSimilarityEvidencePackage() below. Split into two call sites —
+ * rather than one `readFileSync(path, "utf8")` on the generic resolved
+ * `path` — so the hosted, build-materialized case keeps a literal reference
+ * to IMPORTED_SIMILARITY_EVIDENCE_MATERIALIZED_PACKAGE_PATH directly at its
+ * own readFileSync call: the same statically-analyzable form the
+ * existsSync() check above already uses without tripping Turbopack's
+ * output-file-tracing warning ("Dynamic filesystem access causes tracing of
+ * the whole project" — confirmed via a real Next 16.3.2 Turbopack build to
+ * fire specifically when the fs call's argument is an opaque local variable
+ * rather than a literal/imported-constant reference it can resolve). The
+ * explicit-override branch stays genuinely dynamic (an arbitrary env-supplied
+ * path) — expected, and scoped to local development only per this file's own
+ * precedence-order comment above, never part of a hosted deployment, so it
+ * needs no next.config.ts outputFileTracingIncludes entry and is safe to opt
+ * out of tracing with the ignore-comment syntax Turbopack's own warning
+ * documents.
+ */
+function readImportedSimilarityEvidencePackageFile(path: string): string {
+  if (path === IMPORTED_SIMILARITY_EVIDENCE_MATERIALIZED_PACKAGE_PATH) {
+    return readFileSync(IMPORTED_SIMILARITY_EVIDENCE_MATERIALIZED_PACKAGE_PATH, "utf8");
+  }
+  return readFileSync(/*turbopackIgnore: true*/ path, "utf8");
 }
 
 export function resetImportedSimilarityEvidencePackageCacheForTest(): void {
