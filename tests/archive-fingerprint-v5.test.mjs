@@ -23,14 +23,16 @@ import {
 } from "../lib/archive-fingerprint.ts";
 import { seedArchiveDocument } from "../lib/archive-corpus-seed.ts";
 import { rebuildArchiveCompactFingerprints } from "../lib/archive-index-build.ts";
-import { matchAgainstArchiveCorpus } from "../lib/archive-corpus-matching.ts";
+import { matchAgainstArchiveCorpus, ARCHIVE_MATCH_POLICY } from "../lib/archive-corpus-matching.ts";
 
 /**
  * archive-compact-fp-v5 — natural-overflow hard-ceiling cap policy
  * (archive-v4-rebuild-preflight cap-policy review 20260924T132939Z).
- * Synthetic fixtures only. v4 stays the default build/query generation.
+ * Synthetic fixtures only. v5 is the default build/query generation (archive-v5-default-switch);
+ * the v4 fixtures below name their generation explicitly.
  */
 
+const V1 = "archive-compact-fp-v1";
 const V4 = "archive-compact-fp-v4";
 const V5 = ARCHIVE_COMPACT_FINGERPRINT_VERSION_V5;
 const HARD_CEILING = "natural-overflow-hard-ceiling";
@@ -105,7 +107,7 @@ for (const [i, d] of DOCS.entries()) {
   const r = await seedArchiveDocument(
     client,
     { archiveArticleId: d.archiveArticleId, title: d.title, text: d.text, originalSimilarity: null, archiveOrder: i },
-    { corpusVersion: "test-v5", firstSeenAt: "2020-01-01 00:00:00" }, // default generation => v4 rows
+    { corpusVersion: "test-v5", firstSeenAt: "2020-01-01 00:00:00", fingerprintVersion: V4 },
   );
   representationIdByArticle.set(d.archiveArticleId, r.representationId);
 }
@@ -121,6 +123,7 @@ const regressionStart = undiscoverableWindows(ORDINARY, hashSet(computeArchiveFi
 const regressionPassage = ordinaryWords.slice(regressionStart, regressionStart + 90).join(" ");
 const probeText = `${randomDoc(501, 1200)} ${regressionPassage} ${randomDoc(502, 1200)}`;
 const matchV5BeforeBuild = await matchAgainstArchiveCorpus(client, probeText, { ...MATCHING, compactFingerprintVersion: V5 });
+const matchDefaultBeforeBuild = await matchAgainstArchiveCorpus(client, probeText, MATCHING);
 
 const v5Build = await rebuildArchiveCompactFingerprints(client, { fingerprintVersion: V5 });
 const v5RowsFirst = await rowsFor(V5);
@@ -131,8 +134,26 @@ const v5CountByRep = new Map((await client.execute({
   sql: `SELECT representation_id, COUNT(*) AS n FROM archive_document_fingerprints WHERE fingerprint_version = ? GROUP BY representation_id`,
   args: [V5],
 })).rows.map((r) => [String(r.representation_id), Number(r.n)]));
-const matchV4Default = await matchAgainstArchiveCorpus(client, probeText, MATCHING);
+const matchV4Explicit = await matchAgainstArchiveCorpus(client, probeText, { ...MATCHING, compactFingerprintVersion: V4 });
+const matchV1Explicit = await matchAgainstArchiveCorpus(client, probeText, { ...MATCHING, compactFingerprintVersion: V1 });
 const matchV5Explicit = await matchAgainstArchiveCorpus(client, probeText, { ...MATCHING, compactFingerprintVersion: V5 });
+const matchDefault = await matchAgainstArchiveCorpus(client, probeText, MATCHING);
+
+// Default builders: a no-option rebuild regenerates exactly the v5 generation,
+// and a default seed writes v5 rows (natural count) and no v4 rows.
+const defaultBuild = await rebuildArchiveCompactFingerprints(client);
+const v5RowsAfterDefaultBuild = await rowsFor(V5);
+const v4RowsAfterDefaultBuild = await rowsFor(V4);
+const DEFAULT_SEED_TEXT = randomDoc(31, 4000);
+const defaultSeed = await seedArchiveDocument(
+  client,
+  { archiveArticleId: "v5-default-seed", title: "V5 Default Seed", text: DEFAULT_SEED_TEXT, originalSimilarity: null, archiveOrder: DOCS.length },
+  { corpusVersion: "test-v5", firstSeenAt: "2020-01-01 00:00:00" },
+);
+const defaultSeedRowsByVersion = new Map((await client.execute({
+  sql: `SELECT fingerprint_version, COUNT(*) AS n FROM archive_document_fingerprints WHERE representation_id = ? GROUP BY fingerprint_version`,
+  args: [defaultSeed.representationId],
+})).rows.map((r) => [String(r.fingerprint_version), Number(r.n)]));
 
 test.after(() => {
   client.close();
@@ -140,8 +161,9 @@ test.after(() => {
 });
 
 // ── version / default safety ────────────────────────────────────────────────
-test("default build/query generation stays v4; v5 is a distinct tag selected only by name", () => {
-  assert.equal(ARCHIVE_COMPACT_FINGERPRINT_VERSION, V4);
+test("default build/query generation is v5; v4 and older tags stay selectable by name", () => {
+  assert.equal(ARCHIVE_COMPACT_FINGERPRINT_VERSION, V5);
+  assert.equal(ARCHIVE_MATCH_POLICY.compactFingerprintVersion, V5);
   assert.equal(V5, "archive-compact-fp-v5");
   assert.equal(archiveFingerprintCapPolicyForVersion(V5), HARD_CEILING);
   for (const tag of [V4, "archive-compact-fp-v3", "archive-compact-fp-v1", "some-other-tag"]) {
@@ -271,9 +293,33 @@ test("querying v5 never reads v4 rows: before any v5 rows exist, v5 compact disc
   assert.equal(matchV5BeforeBuild.sources.some((s) => s.name === "V5 Ordinary"), false);
 });
 
-test("regression passage: default (v4) query misses the source; explicit v5 query discovers and scores it", () => {
-  assert.equal(matchV4Default.archiveDiscovery.compactCandidateCount, 0);
-  assert.equal(matchV4Default.sources.some((s) => s.name === "V5 Ordinary"), false);
+test("default query never falls back to v4 rows: before any v5 rows exist, default compact discovery finds nothing", () => {
+  assert.equal(matchDefaultBeforeBuild.archiveDiscovery.compactCandidateCount, 0);
+  assert.equal(matchDefaultBeforeBuild.sources.some((s) => s.name === "V5 Ordinary"), false);
+});
+
+test("explicit v1 query reads only v1 rows (none here) — no fallback to the v4/v5 rows present", () => {
+  assert.equal(matchV1Explicit.archiveDiscovery.compactCandidateCount, 0);
+  assert.equal(matchV1Explicit.sources.some((s) => s.name === "V5 Ordinary"), false);
+});
+
+test("default query is the explicit v5 query, byte-for-byte", () => {
+  assert.deepEqual(matchDefault, matchV5Explicit);
+});
+
+test("default builders write v5: no-option rebuild reproduces the v5 rows; default seed writes natural v5 rows only", () => {
+  assert.equal(defaultBuild.documents, v5Build.documents);
+  assert.equal(defaultBuild.fingerprintRows, v5Build.fingerprintRows);
+  assert.deepEqual(v5RowsAfterDefaultBuild, v5RowsFirst);
+  assert.deepEqual(v4RowsAfterDefaultBuild, v4RowsBeforeV5, "default rebuild never touches v4 rows");
+  assert.equal(defaultSeed.status, "SEEDED");
+  assert.deepEqual([...defaultSeedRowsByVersion.keys()], [V5]);
+  assert.equal(defaultSeedRowsByVersion.get(V5), v5Of(DEFAULT_SEED_TEXT).rawWinnowSelectionCount);
+});
+
+test("regression passage: explicit v4 query misses the source; explicit v5 query discovers and scores it", () => {
+  assert.equal(matchV4Explicit.archiveDiscovery.compactCandidateCount, 0);
+  assert.equal(matchV4Explicit.sources.some((s) => s.name === "V5 Ordinary"), false);
   assert.equal(matchV5Explicit.archiveDiscovery.compactCandidateCount, 1);
   const source = matchV5Explicit.sources.find((s) => s.name === "V5 Ordinary");
   assert.ok(source, "v5 discovery must reach the source");
