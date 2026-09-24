@@ -13,7 +13,7 @@ import {
   countEmailVerificationChallengesSince,
   pruneExpiredEmailVerificationChallenges,
   usersHaveEmailVerifiedAtColumn,
-  emailVerificationCodeSecretConfigured,
+  emailVerificationConfigured,
   EMAIL_VERIFICATION_RESEND_COOLDOWN_MS,
   EMAIL_VERIFICATION_ISSUANCE_WINDOW_MS,
   EMAIL_VERIFICATION_MAX_ISSUANCE_PER_WINDOW,
@@ -61,13 +61,14 @@ export async function POST(request: Request) {
       }
 
       // Deploy-ordering / config safety: migration 0046 (users.email_verified_at
-      // + the challenge table) and EMAIL_VERIFICATION_CODE_SECRET (the keyed
-      // HMAC secret a code digest is computed with — see
-      // lib/email-verification.ts's hashEmailVerificationCode) are both
+      // + the challenge table) and the FULL verification config
+      // (lib/email-verification.ts's emailVerificationConfigured — every
+      // secret /verify needs to redeem, not just the code secret) are both
       // required before a challenge can be minted at all. Missing either fails
-      // closed with the same clean 503 rather than a 500 or a code nobody can
-      // ever verify.
-      if (!(await usersHaveEmailVerifiedAtColumn(client)) || !emailVerificationCodeSecretConfigured()) {
+      // closed with the same clean 503 — before any challenge row is written
+      // or any mail is sent — rather than a 500 or a code nobody can ever
+      // verify.
+      if (!(await usersHaveEmailVerifiedAtColumn(client)) || !emailVerificationConfigured()) {
         return json(
           { status: 'unavailable', error: 'Email verification is not available yet. Please try again later.' },
           503,

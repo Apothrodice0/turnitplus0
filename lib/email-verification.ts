@@ -1,6 +1,6 @@
 import { createHmac, randomInt, randomUUID, timingSafeEqual } from "node:crypto";
 import type { Client, InStatement } from "@libsql/client";
-import { accountIdentityFingerprint, ACCOUNT_IDENTITY_KEY_VERSION } from "./account-identity";
+import { accountIdentityFingerprint, getAccountIdentityHmacKey, ACCOUNT_IDENTITY_KEY_VERSION } from "./account-identity";
 
 /**
  * A3 / A3b / A3c — the email-verification challenge state machine (storage in
@@ -67,6 +67,26 @@ export function emailVerificationCodeSecretConfigured(): boolean {
 }
 
 /**
+ * THE shared configuration boundary for the whole verification round trip.
+ * True only when EVERY secret a successful redeem needs is present:
+ *   - EMAIL_VERIFICATION_CODE_SECRET — keys the code digest (issue AND check,
+ *     see hashEmailVerificationCode);
+ *   - ACCOUNT_IDENTITY_HMAC_KEY — keys the VERIFIED_EMAIL fingerprint the
+ *     verify route must write atomically with the consume (see
+ *     verifiedEmailFingerprintForChallenge). Read through the same
+ *     getAccountIdentityHmacKey() the fingerprint itself uses, so "blank"
+ *     means the same thing on both sides.
+ *
+ * Issuance (signup inline dispatch, /send) and redeem (/verify) all gate on
+ * this ONE predicate, so a partially configured deployment can never mint,
+ * persist or mail a code that verify would then be unable to redeem. Read at
+ * call time, never cached — same discipline as the per-secret check above.
+ */
+export function emailVerificationConfigured(): boolean {
+  return emailVerificationCodeSecretConfigured() && getAccountIdentityHmacKey() !== null;
+}
+
+/**
  * Keyed HMAC-SHA256 digest of a challenge's code — deliberately NOT a bare
  * SHA-256 hash. A 6-digit code has only ~20 bits of entropy (1e6
  * possibilities): a bare hash of the code alone would be brute-forceable
@@ -122,11 +142,12 @@ export type GeneratedEmailVerificationChallenge = {
 
 /**
  * Pure: mint a new challenge's identifiers + code. Does not touch the DB.
- * Throws if EMAIL_VERIFICATION_CODE_SECRET is not configured (see
- * hashEmailVerificationCode) — callers must gate on
- * emailVerificationCodeSecretConfigured() first.
+ * Throws unless emailVerificationConfigured() — callers must gate on it first
+ * (this throw is the backstop, so a missed gate still fails before any
+ * challenge row is written or any mail is dispatched).
  */
 export function generateEmailVerificationChallenge(now: number = Date.now()): GeneratedEmailVerificationChallenge {
+  if (!emailVerificationConfigured()) throw new Error("email verification is not fully configured");
   const id = randomUUID();
   const rawCode = generateRawCode();
   return {

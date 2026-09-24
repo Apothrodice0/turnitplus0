@@ -13,6 +13,7 @@ import {
   consumeEmailVerificationChallengeStatement,
   setUserEmailVerifiedIfChallengeConsumedStatement,
   usersHaveEmailVerifiedAtColumn,
+  emailVerificationConfigured,
   verifiedEmailFingerprintForChallenge,
   upsertVerifiedEmailFingerprintIfChallengeConsumedStatement,
   type EmailVerificationRejectReason,
@@ -124,6 +125,15 @@ export async function POST(request: Request) {
       const reject = classifyEmailVerificationChallenge(challenge, sessionUser.email, Date.now());
       if (reject) {
         return json({ error: REJECT_MESSAGE[reject] }, 400);
+      }
+
+      // Same shared config boundary as issuance (/send, signup): without every
+      // redeem secret no code can be checked or consumed. Fail closed with the
+      // same generic 500 as the fingerprint guard below, before touching the
+      // code digest or any write. Never logs which secret is missing.
+      if (!emailVerificationConfigured()) {
+        console.error('email verification: not fully configured; refusing to verify');
+        return json({ error: 'Something went wrong. Please try again.' }, 500);
       }
 
       if (!emailVerificationCodeMatches(challenge.id, code, challenge.codeDigest)) {

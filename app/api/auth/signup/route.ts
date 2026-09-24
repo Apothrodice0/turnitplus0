@@ -14,7 +14,7 @@ import {
   emailVerificationChallengeInsertStatement,
   revokeEmailVerificationChallengeByIdStatement,
   usersHaveEmailVerifiedAtColumn,
-  emailVerificationCodeSecretConfigured,
+  emailVerificationConfigured,
 } from '../../../../lib/email-verification';
 import { dispatchEmailVerificationMessage } from '../../../../lib/email-verification-dispatch';
 import { EmailDeliveryUnavailableError } from '../../../../lib/mail/email-delivery';
@@ -96,14 +96,14 @@ export async function POST(request: Request) {
       // leaves this handler except to the mail layer below.
       //
       // Deploy-ordering / config safety: migration 0046 (the challenge table +
-      // users.email_verified_at) AND EMAIL_VERIFICATION_CODE_SECRET (required
-      // to compute a code's digest — see generateEmailVerificationChallenge)
+      // users.email_verified_at) AND the full verification config (every
+      // secret a later redeem needs — see emailVerificationConfigured)
       // must both be ready before a challenge can even be generated, let alone
       // inserted. If either is missing, the challenge is simply omitted from
       // the batch — account creation must NEVER fail because email
       // verification is not yet wired. The account can request verification
       // later once both land.
-      const emailVerificationReady = (await usersHaveEmailVerifiedAtColumn(client)) && emailVerificationCodeSecretConfigured();
+      const emailVerificationReady = (await usersHaveEmailVerifiedAtColumn(client)) && emailVerificationConfigured();
       const verificationChallenge = emailVerificationReady ? generateEmailVerificationChallenge(now) : null;
 
       // ATOMIC account creation: the users row, the 1:1 account_identity_profiles

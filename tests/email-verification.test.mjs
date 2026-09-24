@@ -12,6 +12,8 @@ import { resetAuthRateForTest, resetRateForTest, resetEmailVerificationRateForTe
 import { __setEmailDeliveryProviderForTest } from '../lib/mail/email-delivery.ts';
 import {
   hashEmailVerificationCode,
+  emailVerificationConfigured,
+  generateEmailVerificationChallenge,
   revokeEmailVerificationChallengeByIdStatement,
   upsertVerifiedEmailFingerprintIfChallengeConsumedStatement,
   EMAIL_VERIFICATION_TTL_MS,
@@ -638,6 +640,130 @@ await test('absent EMAIL_VERIFICATION_CODE_SECRET fails closed: /send returns 50
     assert.equal(meBody.emailVerification.status, 'unverified');
   } finally {
     process.env.EMAIL_VERIFICATION_CODE_SECRET = saved;
+  }
+});
+
+// ---- config symmetry: issuance needs EVERY secret redeem needs ------
+
+// Full config, one sent code, cooldown cleared: the account is ready for a
+// /send that WOULD issue. Returns what a partial-config case needs to prove
+// nothing changed.
+async function readyForResend(email) {
+  sentMessages.length = 0;
+  const { cookie } = await signup(email);
+  const uid = await userIdByEmail(email);
+  assert.equal((await challengesFor(uid)).length, 1, 'precondition: full-config signup issued one challenge');
+  assert.equal(sentMessages.length, 1, 'precondition: full-config signup dispatched one code');
+  const code = codeFromLastMessage();
+  await clearCooldown(uid);
+  sentMessages.length = 0;
+  return { cookie, uid, code, before: await challengesFor(uid) };
+}
+
+async function assertSendUnavailableWithNoSideEffects(cookie, uid, before) {
+  const res = await callSend(cookie);
+  assert.equal(res.status, 503);
+  const body = await res.json();
+  assert.equal(body.status, 'unavailable');
+  const text = JSON.stringify(body).toLowerCase();
+  for (const leak of ['secret', 'hmac', 'account_identity', 'email_verification_code', 'key']) {
+    assert.equal(text.includes(leak), false, `${leak} must not leak in ${JSON.stringify(body)}`);
+  }
+  assert.equal(sentMessages.length, 0, 'the mail provider was never called');
+  assert.deepEqual(await challengesFor(uid), before, 'no challenge row created, and no existing row revoked or altered');
+}
+
+await test('CONFIG-A: full config — /send issues exactly one new challenge and dispatches exactly one code (unchanged behaviour)', async () => {
+  const { cookie, uid, before } = await readyForResend('cfg-full@example.com');
+  const res = await callSend(cookie);
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).status, 'sent');
+  assert.equal(sentMessages.length, 1);
+  const after = await challengesFor(uid);
+  assert.equal(after.length, before.length + 1);
+  assert.ok(after[0].revoked_at != null, 'the previous code was revoked by the resend, as before');
+});
+
+await test('CONFIG-B: code secret present, ACCOUNT_IDENTITY_HMAC_KEY absent (or blank) — signup + /send fail closed BEFORE persistence and BEFORE the provider', async () => {
+  const saved = process.env[ACCOUNT_IDENTITY_HMAC_KEY_ENV];
+  assert.ok(process.env.EMAIL_VERIFICATION_CODE_SECRET, 'precondition: code secret IS set');
+  const { cookie, uid, before } = await readyForResend('cfg-nohmac@example.com');
+  for (const partial of [undefined, '   ']) {
+    if (partial === undefined) delete process.env[ACCOUNT_IDENTITY_HMAC_KEY_ENV];
+    else process.env[ACCOUNT_IDENTITY_HMAC_KEY_ENV] = partial;
+    try {
+      // explicit resend on an existing account
+      await assertSendUnavailableWithNoSideEffects(cookie, uid, before);
+
+      // signup inline dispatch: account still created, but no challenge, no mail
+      sentMessages.length = 0;
+      const email = `cfg-nohmac-signup-${partial === undefined ? 'unset' : 'blank'}@example.com`;
+      const { res: signupRes } = await signup(email);
+      assert.equal(signupRes.status, 201, 'signup itself never fails on verification config');
+      assert.equal((await challengesFor(await userIdByEmail(email))).length, 0, 'signup persisted no challenge');
+      assert.equal(sentMessages.length, 0, 'signup called no provider');
+    } finally {
+      process.env[ACCOUNT_IDENTITY_HMAC_KEY_ENV] = saved;
+    }
+  }
+
+  // restored: the same account resends normally again
+  const res = await callSend(cookie);
+  assert.equal(res.status, 200);
+  assert.equal(sentMessages.length, 1);
+});
+
+await test('CONFIG-C: ACCOUNT_IDENTITY_HMAC_KEY present, code secret absent — /send fails closed BEFORE persistence and BEFORE the provider', async () => {
+  const saved = process.env.EMAIL_VERIFICATION_CODE_SECRET;
+  assert.ok(process.env[ACCOUNT_IDENTITY_HMAC_KEY_ENV], 'precondition: identity key IS set');
+  const { cookie, uid, before } = await readyForResend('cfg-nocode@example.com');
+  delete process.env.EMAIL_VERIFICATION_CODE_SECRET;
+  try {
+    await assertSendUnavailableWithNoSideEffects(cookie, uid, before);
+  } finally {
+    process.env.EMAIL_VERIFICATION_CODE_SECRET = saved;
+  }
+});
+
+await test('CONFIG-D: redeem with the code secret absent fails safe — generic 500, nothing consumed/verified/fingerprinted; the same code works once restored', async () => {
+  const saved = process.env.EMAIL_VERIFICATION_CODE_SECRET;
+  sentMessages.length = 0;
+  const { cookie } = await signup('cfg-redeem-nocode@example.com');
+  const uid = await userIdByEmail('cfg-redeem-nocode@example.com');
+  const code = codeFromLastMessage();
+  delete process.env.EMAIL_VERIFICATION_CODE_SECRET;
+  try {
+    const res = await callVerify(cookie, code, { userIdForAttemptReset: uid });
+    assert.equal(res.status, 500);
+    assert.equal((await res.json()).error, 'Something went wrong. Please try again.', 'generic message only');
+    assert.equal(await userEmailVerifiedAt(uid), null);
+    assert.equal((await challengesFor(uid))[0].consumed_at, null);
+    assert.equal((await fingerprintsFor(uid)).length, 0);
+  } finally {
+    process.env.EMAIL_VERIFICATION_CODE_SECRET = saved;
+  }
+  const ok = await callVerify(cookie, code, { userIdForAttemptReset: uid });
+  assert.equal(ok.status, 200);
+  // replay stays blocked
+  assert.equal((await callVerify(cookie, code, { userIdForAttemptReset: uid })).status, 400);
+});
+
+await test('CONFIG backstop: generateEmailVerificationChallenge itself refuses under partial config (a missed route gate still cannot mint)', async () => {
+  const savedKey = process.env[ACCOUNT_IDENTITY_HMAC_KEY_ENV];
+  const savedCode = process.env.EMAIL_VERIFICATION_CODE_SECRET;
+  assert.equal(emailVerificationConfigured(), true);
+  assert.ok(generateEmailVerificationChallenge().id);
+  try {
+    delete process.env[ACCOUNT_IDENTITY_HMAC_KEY_ENV];
+    assert.equal(emailVerificationConfigured(), false);
+    assert.throws(() => generateEmailVerificationChallenge());
+    process.env[ACCOUNT_IDENTITY_HMAC_KEY_ENV] = savedKey;
+    delete process.env.EMAIL_VERIFICATION_CODE_SECRET;
+    assert.equal(emailVerificationConfigured(), false);
+    assert.throws(() => generateEmailVerificationChallenge());
+  } finally {
+    process.env[ACCOUNT_IDENTITY_HMAC_KEY_ENV] = savedKey;
+    process.env.EMAIL_VERIFICATION_CODE_SECRET = savedCode;
   }
 });
 
