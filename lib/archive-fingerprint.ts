@@ -70,10 +70,12 @@ import { tokens, grams, gramHash } from "./similarity-core";
  *  this file's own algorithm (winnow/cap/stratification) is unchanged.
  *
  *  This constant is BOTH the builders' default generation and the matcher's
- *  default query generation. It deliberately stays at v4 while
- *  ARCHIVE_COMPACT_FINGERPRINT_VERSION_V5 exists: switching it before v5 rows
- *  are built would make primary compact discovery return zero candidates. */
-export const ARCHIVE_COMPACT_FINGERPRINT_VERSION = "archive-compact-fp-v4";
+ *  default query generation. It equals ARCHIVE_COMPACT_FINGERPRINT_VERSION_V5
+ *  (archive-v5-default-switch 20260924): v5 rows are built for every archive
+ *  source, and a database without them returns zero compact candidates —
+ *  there is no fallback to v4/v1 rows. v4 and older tags stay buildable and
+ *  queryable only when named explicitly. */
+export const ARCHIVE_COMPACT_FINGERPRINT_VERSION = "archive-compact-fp-v5";
 
 /** v5 (archive-v4-rebuild-preflight cap-policy review 20260924T132939Z):
  *  same shingles, hash, winnow window and v4 reference-section preprocessing,
@@ -82,8 +84,8 @@ export const ARCHIVE_COMPACT_FINGERPRINT_VERSION = "archive-compact-fp-v4";
  *  document's natural count exceeds MAX_FINGERPRINTS_PER_DOCUMENT. The v2-v4
  *  length-scaled budget (computeFingerprintCap) sits below the natural winnow
  *  density for ordinary-length documents, so it trimmed them and broke the
- *  winnowing recall guarantee for >= WINNOW_WINDOW + 4-word passages. Built
- *  and queried only when named explicitly; not the default (see above). */
+ *  winnowing recall guarantee for >= WINNOW_WINDOW + 4-word passages. The
+ *  default build/query generation as of the v5 default switch (see above). */
 export const ARCHIVE_COMPACT_FINGERPRINT_VERSION_V5 = "archive-compact-fp-v5";
 
 /** "length-scaled": computeFingerprintCap(wordCount) — the v2-v4 budget.
