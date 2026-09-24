@@ -67,8 +67,35 @@ import { tokens, grams, gramHash } from "./similarity-core";
  *  before the existing 700-char corroboration. Fixes a live Archive769 false
  *  positive (empirically confirmed: exactly 1/769 documents changes). Old v3
  *  rows remain queryable under their existing tag until re-fingerprinted;
- *  this file's own algorithm (winnow/cap/stratification) is unchanged. */
+ *  this file's own algorithm (winnow/cap/stratification) is unchanged.
+ *
+ *  This constant is BOTH the builders' default generation and the matcher's
+ *  default query generation. It deliberately stays at v4 while
+ *  ARCHIVE_COMPACT_FINGERPRINT_VERSION_V5 exists: switching it before v5 rows
+ *  are built would make primary compact discovery return zero candidates. */
 export const ARCHIVE_COMPACT_FINGERPRINT_VERSION = "archive-compact-fp-v4";
+
+/** v5 (archive-v4-rebuild-preflight cap-policy review 20260924T132939Z):
+ *  same shingles, hash, winnow window and v4 reference-section preprocessing,
+ *  but the natural-overflow hard-ceiling cap policy — every natural winnow
+ *  selection is kept, and the position-stratified trim runs only when a
+ *  document's natural count exceeds MAX_FINGERPRINTS_PER_DOCUMENT. The v2-v4
+ *  length-scaled budget (computeFingerprintCap) sits below the natural winnow
+ *  density for ordinary-length documents, so it trimmed them and broke the
+ *  winnowing recall guarantee for >= WINNOW_WINDOW + 4-word passages. Built
+ *  and queried only when named explicitly; not the default (see above). */
+export const ARCHIVE_COMPACT_FINGERPRINT_VERSION_V5 = "archive-compact-fp-v5";
+
+/** "length-scaled": computeFingerprintCap(wordCount) — the v2-v4 budget.
+ *  "natural-overflow-hard-ceiling": MAX_FINGERPRINTS_PER_DOCUMENT only — v5. */
+export type ArchiveFingerprintCapPolicy = "length-scaled" | "natural-overflow-hard-ceiling";
+
+/** The cap policy a stored generation tag was built with. Only v5 selects the
+ *  hard-ceiling policy; every other tag keeps the pre-v5 length-scaled
+ *  behaviour the builders have always applied. */
+export function archiveFingerprintCapPolicyForVersion(fingerprintVersion: string): ArchiveFingerprintCapPolicy {
+  return fingerprintVersion === ARCHIVE_COMPACT_FINGERPRINT_VERSION_V5 ? "natural-overflow-hard-ceiling" : "length-scaled";
+}
 
 export const FINGERPRINT_SHINGLE_SIZE = 5;
 /** 5-gram size for every archive-index structure (fingerprints, phrase index,
@@ -128,6 +155,11 @@ export const NUM_POSITIONAL_STRATA = 32;
 export function computeFingerprintCap(wordCount: number): number {
   const scaled = Math.ceil((TARGET_FINGERPRINT_DENSITY_PER_1000_WORDS * wordCount) / 1000);
   return Math.min(MAX_FINGERPRINTS_PER_DOCUMENT, Math.max(MIN_FINGERPRINTS_PER_DOCUMENT_WHEN_LENGTH_PERMITS, scaled));
+}
+
+/** Per-document fingerprint budget under `policy`. */
+export function fingerprintCapForPolicy(policy: ArchiveFingerprintCapPolicy, wordCount: number): number {
+  return policy === "natural-overflow-hard-ceiling" ? MAX_FINGERPRINTS_PER_DOCUMENT : computeFingerprintCap(wordCount);
 }
 
 export type WinnowSelection = { position: number; hash: string };
@@ -257,12 +289,18 @@ export type ArchiveFingerprintResult = {
   /** distinct winnowed hashes BEFORE the hard-cap trim — diagnostics only. */
   rawWinnowSelectionCount: number;
   trimmedByHardCap: boolean;
-  /** this document's computeFingerprintCap(wordCount) result — diagnostics only, never read by discovery/storage. */
+  /** this document's fingerprintCapForPolicy(capPolicy, wordCount) result — diagnostics only, never read by discovery/storage. */
   fingerprintCap: number;
 };
 
-/** Computes the compact fingerprint set for one archive document's canonical text. */
-export function computeArchiveFingerprint(canonicalText: string, window: number = WINNOW_WINDOW): ArchiveFingerprintResult {
+/** Computes the compact fingerprint set for one archive document's canonical text.
+ *  `capPolicy` defaults to the v2-v4 length-scaled budget; builders derive it
+ *  from the generation tag via archiveFingerprintCapPolicyForVersion. */
+export function computeArchiveFingerprint(
+  canonicalText: string,
+  window: number = WINNOW_WINDOW,
+  capPolicy: ArchiveFingerprintCapPolicy = "length-scaled",
+): ArchiveFingerprintResult {
   const words = tokens(canonicalText);
   const gramList = grams(words, FINGERPRINT_SHINGLE_SIZE);
   const hashSequence = gramList.map((gram) => gramHash(gram));
@@ -272,7 +310,7 @@ export function computeArchiveFingerprint(canonicalText: string, window: number 
   for (const { position, hash } of selections) {
     if (!uniqueByHash.has(hash)) uniqueByHash.set(hash, position);
   }
-  const fingerprintCap = computeFingerprintCap(words.length);
+  const fingerprintCap = fingerprintCapForPolicy(capPolicy, words.length);
   const trimmed = trimToHardCap(uniqueByHash, fingerprintCap, gramList.length);
 
   return {

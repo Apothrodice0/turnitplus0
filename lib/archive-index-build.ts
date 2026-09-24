@@ -1,6 +1,11 @@
 import type { Client, InStatement } from "@libsql/client";
 import { canonicalizeText } from "./canonical-text";
-import { computeArchiveFingerprint, ARCHIVE_COMPACT_FINGERPRINT_VERSION } from "./archive-fingerprint";
+import {
+  computeArchiveFingerprint,
+  archiveFingerprintCapPolicyForVersion,
+  ARCHIVE_COMPACT_FINGERPRINT_VERSION,
+  WINNOW_WINDOW,
+} from "./archive-fingerprint";
 import {
   phraseIndexInsertStatements,
   clearPhraseIndex,
@@ -56,7 +61,9 @@ export async function loadArchiveRepresentations(client: Client): Promise<Archiv
  * Same bounded-batch, idempotent-on-retry INSERT OR IGNORE shape
  * lib/archive-corpus-seed.ts's recordArchiveDocumentShingles used for the old
  * full-shingle table (against ux_archive_document_fingerprints_repr_version_
- * hash). ~120 rows, never thousands.
+ * hash). ~120 rows, never more than MAX_FINGERPRINTS_PER_DOCUMENT. The cap
+ * policy follows `fingerprintVersion` (archiveFingerprintCapPolicyForVersion),
+ * so rows stored under a tag are always computed the way that tag specifies.
  */
 export async function recordArchiveDocumentFingerprints(
   client: Client,
@@ -64,7 +71,11 @@ export async function recordArchiveDocumentFingerprints(
   canonicalText: string,
   fingerprintVersion: string = ARCHIVE_COMPACT_FINGERPRINT_VERSION,
 ): Promise<{ fingerprintCount: number; trimmedByHardCap: boolean }> {
-  const { fingerprints, trimmedByHardCap } = computeArchiveFingerprint(canonicalText);
+  const { fingerprints, trimmedByHardCap } = computeArchiveFingerprint(
+    canonicalText,
+    WINNOW_WINDOW,
+    archiveFingerprintCapPolicyForVersion(fingerprintVersion),
+  );
   const statements = fingerprints.map<InStatement>((f) => ({
     sql: `INSERT OR IGNORE INTO archive_document_fingerprints
           (representation_id, fingerprint_hash, optional_position, fingerprint_version, created_at)
@@ -93,6 +104,7 @@ export async function rebuildArchiveCompactFingerprints(
   options: { fingerprintVersion?: string } = {},
 ): Promise<{ documents: number; fingerprintRows: number; hardCapHits: number }> {
   const fingerprintVersion = options.fingerprintVersion ?? ARCHIVE_COMPACT_FINGERPRINT_VERSION;
+  const capPolicy = archiveFingerprintCapPolicyForVersion(fingerprintVersion);
   const reps = await loadArchiveRepresentations(client);
   await client.execute({
     sql: `DELETE FROM archive_document_fingerprints WHERE fingerprint_version = ?`,
@@ -107,7 +119,7 @@ export async function rebuildArchiveCompactFingerprints(
     batch = [];
   };
   for (const rep of reps) {
-    const { fingerprints, trimmedByHardCap } = computeArchiveFingerprint(rep.canonical_text);
+    const { fingerprints, trimmedByHardCap } = computeArchiveFingerprint(rep.canonical_text, WINNOW_WINDOW, capPolicy);
     if (trimmedByHardCap) hardCapHits += 1;
     for (const f of fingerprints) {
       batch.push({
