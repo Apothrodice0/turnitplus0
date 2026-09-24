@@ -26,10 +26,44 @@ test("removes a trailing references section", () => {
   // "Hidden source title" with no such markers no longer qualifies, which
   // is the intended fix for the PDF/DOCX parity investigation (an ordinary
   // prose sentence mentioning "references" must never be stripped either).
-  assert.deepEqual(
-    tokens("Useful article text.\n\nReferences\n[1] Hidden, S. Source title. Journal, 2020."),
-    ["useful", "article", "text"],
-  );
+  // The detector also only accepts a heading at or past 50% of the text
+  // (TERMINAL_FRACTION_THRESHOLD), so the body here is realistically longer
+  // than its reference list, as in a real document.
+  const body = "Useful article text. The tribunal examined jurisdiction over maritime disputes and concluded that regional courts share responsibility.";
+  const text = `${body}\n\nReferences\n[1] Hidden, S. Source title. Journal, 2020.`;
+  assert.ok(text.indexOf("References") / text.length >= 0.5, "test setup check: heading must start at or past 50% of the text");
+  assert.deepEqual(tokens(text), [
+    "useful", "article", "text", "the", "tribunal", "examined", "jurisdiction",
+    "over", "maritime", "disputes", "and", "concluded", "that", "regional",
+    "courts", "share", "responsibility",
+  ]);
+});
+
+test("keeps a references-like heading that starts before 50% of the text", () => {
+  // Same heading and list shape as above, but occupying most of a very short
+  // text: lib/reference-section.ts's TERMINAL_FRACTION_THRESHOLD rejects the
+  // candidate outright, so nothing is stripped.
+  const text = "Useful article text.\n\nReferences\n[1] Hidden, S. Source title. Journal, 2020.";
+  assert.ok(text.indexOf("References") / text.length < 0.5, "test setup check: heading must start before 50% of the text");
+  assert.deepEqual(tokens(text), [
+    "useful", "article", "text", "references", "1", "hidden", "s", "source",
+    "title", "journal", "2020",
+  ]);
+});
+
+test("keeps a trailing citation-pointer phrase such as \"references see ...\"", () => {
+  // Past 50% and followed by years plus a parenthetical year (which would
+  // otherwise corroborate a reference list), but "see" marks an in-prose
+  // pointer, so lib/reference-section.ts's citation-pointer gate keeps it.
+  const body = "Useful article text. The tribunal examined jurisdiction over maritime disputes and concluded that regional courts share responsibility.";
+  const text = `${body} For further references see Smith et al. (2020) and Doe (2019).`;
+  assert.ok(text.indexOf("references") / text.length >= 0.5, "test setup check: pointer phrase must start at or past 50% of the text");
+  assert.deepEqual(tokens(text), [
+    "useful", "article", "text", "the", "tribunal", "examined", "jurisdiction",
+    "over", "maritime", "disputes", "and", "concluded", "that", "regional",
+    "courts", "share", "responsibility", "for", "further", "references", "see",
+    "smith", "et", "al", "2020", "and", "doe", "2019",
+  ]);
 });
 
 test("creates consecutive five-word grams", () => {
