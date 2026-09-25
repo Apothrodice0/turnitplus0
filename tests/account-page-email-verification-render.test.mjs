@@ -203,7 +203,9 @@ await test('STRUCTURAL: page.tsx re-hydrates emailVerification from /api/auth/me
   const hydrateIdx = src.indexOf('async function hydrateAccountFromServer(');
   assert.ok(hydrateIdx >= 0, 'expected a hydrateAccountFromServer function');
   const hydrateBody = src.slice(hydrateIdx, hydrateIdx + 1200);
-  assert.match(hydrateBody, /fetch\("\/api\/auth\/me"\)/);
+  assert.match(hydrateBody, /await fetchAccountHydration\(\)/);
+  const sessionLib = fs.readFileSync(path.join(repo, 'lib/local-report-session.ts'), 'utf8');
+  assert.match(sessionLib, /fetchImpl\("\/api\/auth\/me"\)/);
   assert.match(hydrateBody, /setEmailVerification\(result\.emailVerification \?\? null\)/);
   assert.doesNotMatch(hydrateBody, /setAccountIdentity/, 'the identity board was removed — hydrateAccountFromServer must not reference it');
 

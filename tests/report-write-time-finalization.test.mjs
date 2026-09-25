@@ -1067,7 +1067,7 @@ test('RECEIPT PREVIEW REGRESSION: the downloaded receipt must show the server-fi
       const handlerBody = source.slice(handlerStart, handlerEnd);
       assert.match(
         handlerBody,
-        /const remote = await fetchRemoteReport[\s\S]{0,40}\n\s*const full = remote \?\? \(await getStoredReportById/,
+        /const remote = await fetchRemoteReport[\s\S]{0,40}\n\s*const full = remote \?\? \((?:localOwner \? )?await getStoredReportById/,
         `${file}'s handleDownloadReceipt must resolve the receipt's report as remote-first, local-fallback`,
       );
       assert.doesNotMatch(

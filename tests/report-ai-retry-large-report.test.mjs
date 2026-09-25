@@ -710,7 +710,7 @@ test("STRUCTURE: retryAiCheck persists through saveRetriedAiResult and can never
   assert.match(retryFn, /await saveRetriedAiResult\(full, aiResult\)/);
   assert.doesNotMatch(retryFn, /saveEnrichedAiResult\(|persistAiCompletion\(|saveReportRemote\(/, "retry never calls the whole-report save path");
   // The local-copy-first / remote-fallback load is unchanged, and both feed the same safe save.
-  assert.match(retryFn, /getStoredReportById<SimilarityReport>\(reportId\)/);
+  assert.match(retryFn, /getStoredReportById<SimilarityReport>\(reportId, localOwner\)/);
   assert.match(retryFn, /fetchRemoteReport<SimilarityReport>\(reportId\)/);
 
   const retrySave = shell.match(/async function saveRetriedAiResult\([\s\S]*?\n {2}\}/)?.[0] ?? "";

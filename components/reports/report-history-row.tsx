@@ -5,7 +5,7 @@ import Link from "next/link";
 import { ChevronRight, Download, FileText } from "lucide-react";
 import type { ReportSummary } from "@/lib/reports-remote";
 import { fetchRemoteReport } from "@/lib/reports-remote";
-import { getStoredReportById } from "@/lib/report-store";
+import { getStoredReportById, type LocalReportOwner } from "@/lib/report-store";
 import { similarityScoreBand } from "@/lib/ai-core";
 import { resolveAiDisplayState } from "@/lib/ai-display-state";
 import type { SimilarityReport } from "@/lib/report-types";
@@ -58,9 +58,12 @@ function aiRowDisplay(report: ReportSummary): { value: string; label: string; to
 
 export function ReportHistoryRow({
   report,
+  localOwner,
   onDownloadReceipt,
 }: {
   report: ReportSummary;
+  /** Whose browser-local copy the receipt's offline fallback may read — the list's own owner scope (anonymous for "ON THIS DEVICE"); null = no local fallback. */
+  localOwner: LocalReportOwner | null;
   onDownloadReceipt: (report: SimilarityReport) => Promise<void>;
 }) {
   const [downloading, setDownloading] = useState(false);
@@ -87,7 +90,7 @@ export function ReportHistoryRow({
       // fetch failed) used to be entirely silent — the button just flipped
       // back to "Receipt" with no indication anything went wrong.
       const remote = await fetchRemoteReport<SimilarityReport>(report.id);
-      const full = remote ?? (await getStoredReportById<SimilarityReport>(report.id).catch(() => null));
+      const full = remote ?? (localOwner ? await getStoredReportById<SimilarityReport>(report.id, localOwner).catch(() => null) : null);
       if (full) {
         await onDownloadReceipt(full);
       } else {

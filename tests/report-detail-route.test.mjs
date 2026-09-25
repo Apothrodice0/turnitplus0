@@ -95,7 +95,7 @@ test("the local IndexedDB lookup is never left unhandled — a rejection must fa
   // forward.
   assert.match(
     shell,
-    /const local = await getStoredReportById<SimilarityReport>\(id\)\.catch\(\(\) => null\);/,
+    /const local = await getStoredReportById<SimilarityReport>\(id, ANONYMOUS_LOCAL_REPORT_OWNER\)\.catch\(\(\) => null\);/,
     "getStoredReportById must be wrapped in the same .catch(() => null) used at every other call site of this function",
   );
 });
@@ -108,7 +108,7 @@ test("delete uses the checked remote-delete variant, not the fail-soft one used 
   assert.ok(named.includes("deleteRemoteReportChecked"), "must import the checked delete variant");
   assert.ok(named.includes("fetchRemoteReport"), "must import fetchRemoteReport");
   assert.ok(!named.includes("deleteRemoteReport"), "must NOT import the fail-soft deleteRemoteReport");
-  assert.match(shell, /import \{ deleteStoredReport, getStoredReportById \} from "@\/lib\/report-store";/);
+  assert.match(shell, /import \{ ANONYMOUS_LOCAL_REPORT_OWNER, deleteStoredReport, getStoredReportById \} from "@\/lib\/report-store";/);
   assert.match(shell, /await deleteStoredReport\(id\);/);
   assert.match(shell, /const ok = await deleteRemoteReportChecked\(id\);/);
   assert.match(shell, /window\.confirm\(/);

@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 import { ArrowLeft, Download, FileText, GraduationCap, Globe2, Printer } from "lucide-react";
 import { similarityScoreBand } from "@/lib/ai-core";
 import { deleteRemoteReportChecked, fetchRemoteReport } from "@/lib/reports-remote";
-import { deleteStoredReport, getStoredReportById } from "@/lib/report-store";
+import { ANONYMOUS_LOCAL_REPORT_OWNER, deleteStoredReport, getStoredReportById } from "@/lib/report-store";
 import { downloadReceipt } from "@/lib/document-check-pipeline";
 import {
   PRIMARY_SIMILARITY_BAND_LABELS,
@@ -276,7 +276,10 @@ export function ReportDetailShell({
       // this view on "Opening report…" forever with no error and no way
       // forward. A rejection now falls through to the same remote-fetch
       // fallback a local miss already takes, below.
-      const local = await getStoredReportById<SimilarityReport>(id).catch(() => null);
+      // Auth-report local-history isolation: this signed-out path may read
+      // ONLY an anonymous-owned local copy — never an account-owned or
+      // untagged legacy one (lib/report-store.ts refuses them).
+      const local = await getStoredReportById<SimilarityReport>(id, ANONYMOUS_LOCAL_REPORT_OWNER).catch(() => null);
       if (cancelled) return;
       if (local) {
         setReport(local);

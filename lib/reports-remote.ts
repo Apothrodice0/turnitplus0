@@ -486,6 +486,52 @@ export async function fetchRemoteReport<T>(id: string): Promise<T | null> {
   }
 }
 
+/**
+ * Auth-report local-history isolation fix — the signed-out, device-scoped
+ * restore (app/page.tsx's loadAnonymousReports) must only ever receive this
+ * browser's still-UNCLAIMED reports. listRemoteReportSummaries/
+ * fetchRemoteReport send the session cookie, and both routes answer a valid
+ * session from the ACCOUNT branch and ignore deviceKey — so a restore that
+ * ran while a session was still valid (e.g. /api/auth/me failed transiently)
+ * used to copy the account's full reports into this browser's anonymous
+ * history. These twins send NO credentials (`credentials: "omit"`), so the
+ * server can only answer from its `device_key = ? AND user_id IS NULL`
+ * branch, whatever the cookie jar holds.
+ */
+export async function listAnonymousDeviceReportSummaries(): Promise<ReportSummary[]> {
+  try {
+    const deviceKey = getDeviceKey();
+    const response = await fetch(`/api/reports?deviceKey=${encodeURIComponent(deviceKey)}`, { cache: "no-store", credentials: "omit" });
+    if (!response.ok) return [];
+    const data = (await response.json()) as { reports?: ReportSummary[] };
+    return Array.isArray(data.reports) ? data.reports : [];
+  } catch (error) {
+    console.debug("Anonymous device report list fetch failed.", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return [];
+  }
+}
+
+/** Credential-less twin of fetchRemoteReport for the signed-out restore — see listAnonymousDeviceReportSummaries. */
+export async function fetchAnonymousDeviceReport<T>(id: string): Promise<T | null> {
+  try {
+    const deviceKey = getDeviceKey();
+    const response = await fetch(`/api/reports/${encodeURIComponent(id)}?deviceKey=${encodeURIComponent(deviceKey)}`, {
+      cache: "no-store",
+      credentials: "omit",
+    });
+    if (!response.ok) return null;
+    const data = (await response.json()) as { payload?: T };
+    return (data.payload ?? null) as T | null;
+  } catch (error) {
+    console.debug("Anonymous device report fetch failed.", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
+}
+
 export async function deleteRemoteReport(id: string): Promise<void> {
   try {
     const deviceKey = getDeviceKey();

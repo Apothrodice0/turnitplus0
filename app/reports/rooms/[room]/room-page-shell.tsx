@@ -6,7 +6,7 @@ import { ChevronLeft, Download, FileText } from "lucide-react";
 import { fetchReportRoomContents, fetchRemoteReport, saveReportRemote, type ReportSummary, type RoomContents, type RoomContentsFetchResult } from "@/lib/reports-remote";
 import { invalidateRoomCache } from "@/lib/report-rooms-cache";
 import { ROOM_CYCLE_MS } from "@/lib/report-rooms";
-import { storeReportBestEffort, getStoredReportById } from "@/lib/report-store";
+import { accountLocalReportOwner, storeReportBestEffort, getStoredReportById } from "@/lib/report-store";
 import { persistAiCompletion, persistAiRetryResult } from "@/lib/report-ai-completion";
 import { AI_SIZE_UNAVAILABLE_MESSAGE, AI_SIZE_UNAVAILABLE_ROOM_NOTE, isAiRetryOffered } from "@/lib/ai-unavailable-state";
 import { buildReportSummary, type AiAnalysis, type ReportExtractionDiagnostic, type SimilarityReport } from "@/lib/report-types";
@@ -543,6 +543,11 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
   // const into a ref so the reconciliation watchdog (a separate effect, with
   // no access to runCheck()'s own local variables) can tear it down too.
   const progressTimerRef = useRef(0);
+  // Auth-report local-history isolation: every browser-local copy this room
+  // writes or reads is owned by THIS signed-in account (lib/report-store.ts's
+  // LocalReportOwner) — never anonymous, never another account's. null (no
+  // usable account identifier) means no local copy at all.
+  const localOwner = accountLocalReportOwner(accountEmail);
 
   function notify(message: string) {
     setToast(message);
@@ -575,7 +580,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
       // local copy is used only as an offline fallback when the network
       // fetch itself fails.
       const remote = await fetchRemoteReport<SimilarityReport>(reportId);
-      const full = remote ?? (await getStoredReportById<SimilarityReport>(reportId).catch(() => null));
+      const full = remote ?? (localOwner ? await getStoredReportById<SimilarityReport>(reportId, localOwner).catch(() => null) : null);
       if (full) {
         await downloadReceipt(full);
       } else {
@@ -631,6 +636,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
       aiStatus: aiResult.aiAnalysis.status === "complete" ? "ready" : "failed",
       similarityStatus: "pending",
     };
+    await storeReportBestEffort(enriched, localOwner);
     const enrichedSaveResult = await persistAiCompletion(enriched, enrichedSummary, room);
     if (!enrichedSaveResult.ok) return false;
     invalidateRoomCache(accountEmail, room);
@@ -669,6 +675,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
       aiStatus: aiResult.aiAnalysis.status === "complete" ? "ready" : "failed",
       similarityStatus: "pending",
     };
+    await storeReportBestEffort(enriched, localOwner);
     const retrySaveResult = await persistAiRetryResult(enriched, enrichedSummary);
     if (!retrySaveResult.ok) return false;
     invalidateRoomCache(accountEmail, room);
@@ -705,7 +712,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
       // G2: a report the SERVER marked "AI unavailable for this document" has nothing a re-run could change — refuse before loading
       // the report or running the model (the buttons are hidden for it too; this is the second layer, for any path that reaches here).
       if (!isAiRetryOffered(occupant.report)) return;
-      const local = await getStoredReportById<SimilarityReport>(reportId).catch(() => null);
+      const local = localOwner ? await getStoredReportById<SimilarityReport>(reportId, localOwner).catch(() => null) : null;
       const full = local ?? (await fetchRemoteReport<SimilarityReport>(reportId));
       if (!full) {
         notify("Could not load this report to retry AI analysis. Please try again.");
@@ -1074,7 +1081,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
       // leaves as the save request's `userSuppliedReferences` sibling (never
       // persisted locally, never mixed into the long-lived report object, so an
       // ordinary resave / AI-completion pass never re-sends it).
-      await storeReportBestEffort(report);
+      await storeReportBestEffort(report, localOwner);
       const reportForRemote =
         suppliedReferenceInputs.length > 0 ? { ...report, userSuppliedReferences: suppliedReferenceInputs } : report;
       // The upload request always names its room explicitly — the server

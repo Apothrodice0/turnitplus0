@@ -56,11 +56,17 @@ test("existing account/report loading and authorization logic is unchanged — o
 
   // Same auth-then-exactly-one-loader sequencing as before; still the only
   // place accountLoaded/account/reports get set from the network.
-  assert.match(
-    page,
-    /fetch\("\/api\/auth\/me"\)\s*\n\s*\.then\(\(response\) => \(response\.ok \? response\.json\(\) : Promise\.resolve\(\{ user: null \}\)\)\)/,
-  );
-  assert.match(page, /await loadAccountReports\(\);/);
-  assert.match(page, /await loadAnonymousReports\(\);/);
-  assert.match(page, /\.finally\(\(\) => setAccountLoaded\(true\)\);/);
+  //
+  // Auth-report local-history isolation (privacy fix): the expectation that
+  // used to sit here — a non-2xx /api/auth/me treated as { user: null } — is
+  // precisely what let a still-valid session's reports be restored into the
+  // signed-out history. Only an explicit `user: null` is signed out now;
+  // anything indeterminate fails closed (lib/local-report-session.ts; dynamic
+  // proof in tests/report-local-ownership-isolation.test.mjs).
+  const sessionLib = await readFile(new URL("../lib/local-report-session.ts", import.meta.url), "utf8");
+  assert.match(sessionLib, /const response = await fetchImpl\("\/api\/auth\/me"\);\s*\n\s*if \(!response\.ok\) return \{ status: "error" \};/);
+  assert.match(sessionLib, /if \(user === null\) return \{ status: "signed-out" \};/);
+  assert.doesNotMatch(page, /Promise\.resolve\(\{ user: null \}\)/);
+  assert.match(page, /hydrate: hydrateAccountFromServer,\s*\n\s*loadAccountReports,\s*\n\s*loadAnonymousReports,/);
+  assert.match(page, /\} finally \{\s*\n\s*setAccountLoaded\(true\);/);
 });

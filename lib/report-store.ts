@@ -3,7 +3,57 @@ import type { DetectedLanguage } from "./similarity-core";
 const DATABASE = "turnitplus";
 const STORE = "reports";
 const SUMMARY_STORE = "report_summaries";
-const VERSION = 2;
+// v3 — browser-local report OWNERSHIP (auth-report local-history isolation fix).
+// Every record written from v3 on carries an explicit `localOwner` tag. v1/v2
+// records carry none: nothing in them says whether they came from an anonymous
+// device or from a signed-in account (and before this fix, account reports DID
+// land here — the anonymous auth-error restore, room uploads, AI completion,
+// AI retry and the dashboard all wrote them). Ownership is never guessed: the
+// v2 -> v3 upgrade PURGES both stores, and every reader below additionally
+// refuses any record without a matching tag (defense in depth, e.g. a record
+// written by a stale pre-v3 tab after the upgrade).
+const VERSION = 3;
+
+/**
+ * Who a browser-local report record belongs to.
+ *
+ * - `anonymous`: a report this browser holds for the signed-out, device-scoped
+ *   history ("ON THIS DEVICE"). The only writer is the signed-out restore of
+ *   this device key's still-unclaimed server reports (app/page.tsx).
+ * - `account`: a report owned by the signed-in account identified by
+ *   `accountKey` — its normalized email, the one stable, non-secret account
+ *   identifier this client already receives (/api/auth/me, login/signup; the
+ *   same identifier lib/report-rooms-cache.ts already scopes its keys by). It
+ *   is only a partition label for data already on this device, never a
+ *   credential: reading a record still requires the caller to name the owner
+ *   it is acting for, and every auth transition purges the other owners.
+ */
+export type LocalReportOwner =
+  | { readonly scope: "anonymous" }
+  | { readonly scope: "account"; readonly accountKey: string };
+
+export const ANONYMOUS_LOCAL_REPORT_OWNER: LocalReportOwner = Object.freeze({ scope: "anonymous" as const });
+
+export function normalizeLocalAccountKey(accountEmail: string): string {
+  return accountEmail.trim().toLowerCase();
+}
+
+/** The owner for a signed-in account, or null when no usable account identifier is known (callers must then skip the local write). */
+export function accountLocalReportOwner(accountEmail: string | null | undefined): LocalReportOwner | null {
+  if (typeof accountEmail !== "string") return null;
+  const accountKey = normalizeLocalAccountKey(accountEmail);
+  if (!accountKey) return null;
+  return Object.freeze({ scope: "account" as const, accountKey });
+}
+
+/** The persisted tag. Throws for anything that is not a well-formed owner — a local write/read with no owner must fail closed, never default to anonymous. */
+export function localReportOwnerTag(owner: LocalReportOwner): string {
+  if (owner && owner.scope === "anonymous") return "anonymous";
+  if (owner && owner.scope === "account" && typeof owner.accountKey === "string" && owner.accountKey.length > 0) {
+    return `account:${owner.accountKey}`;
+  }
+  throw new Error("A browser-local report owner is required.");
+}
 
 type StoredReportLike = {
   id: number;
@@ -47,20 +97,38 @@ type ReportHistorySummary = StoredReportLike & {
   text: string;
 };
 
+/** What the full-report store actually holds from v3 on: the report body wrapped with its owner tag, keyed by the report id. */
+type OwnedReportRecord = { id: number; localOwner: string; report: unknown };
+type OwnedSummaryRecord = ReportHistorySummary & { localOwner: string };
+
 function openDatabase() {
   return new Promise<IDBDatabase>((resolve, reject) => {
     const request = indexedDB.open(DATABASE, VERSION);
-    request.onupgradeneeded = () => {
+    request.onupgradeneeded = (event) => {
       const database = request.result;
+      const oldVersion = (event as IDBVersionChangeEvent).oldVersion ?? 0;
       if (!database.objectStoreNames.contains(STORE)) {
         database.createObjectStore(STORE, { keyPath: "id" });
+      } else if (oldVersion < 3) {
+        // Legacy (pre-ownership) records: ownership unknown -> purged, never guessed.
+        request.transaction?.objectStore(STORE).clear();
       }
       if (!database.objectStoreNames.contains(SUMMARY_STORE)) {
         database.createObjectStore(SUMMARY_STORE, { keyPath: "id" });
+      } else if (oldVersion < 3) {
+        request.transaction?.objectStore(SUMMARY_STORE).clear();
       }
     };
-    request.onsuccess = () => resolve(request.result);
+    request.onsuccess = () => {
+      const database = request.result;
+      // Never hold an old connection open across a future schema upgrade in another tab.
+      database.onversionchange = () => database.close();
+      resolve(database);
+    };
     request.onerror = () => reject(request.error);
+    // A still-open pre-v3 tab blocks the upgrade: fail (callers already treat
+    // local storage as best-effort) rather than leave every caller hanging.
+    request.onblocked = () => reject(new Error("Local report storage upgrade is blocked by another open tab."));
   });
 }
 
@@ -112,13 +180,19 @@ function toHistorySummary(report: StoredReportLike): ReportHistorySummary {
   };
 }
 
-export async function loadStoredReports<T>(reportVersion: number): Promise<T[]> {
+/** The history summaries `owner` may see — never another owner's, never an untagged legacy record. */
+export async function loadStoredReports<T>(reportVersion: number, owner: LocalReportOwner): Promise<T[]> {
+  const tag = localReportOwnerTag(owner);
   const database = await openDatabase();
   return new Promise((resolve, reject) => {
     const request = database.transaction(SUMMARY_STORE, "readonly").objectStore(SUMMARY_STORE).getAll();
     request.onsuccess = () => resolve(
-      (request.result as Array<ReportHistorySummary>)
-        .filter((report) => report.version === reportVersion)
+      (request.result as Array<Partial<OwnedSummaryRecord>>)
+        .filter((record) => record.localOwner === tag && record.version === reportVersion)
+        .map((record) => {
+          const { localOwner: _owner, ...summary } = record;
+          return summary as ReportHistorySummary;
+        })
         .sort((left, right) => right.created.localeCompare(left.created))
         .slice(0, 50) as unknown as T[],
     );
@@ -127,18 +201,23 @@ export async function loadStoredReports<T>(reportVersion: number): Promise<T[]> 
 }
 
 // Full reports remain in the primary store and are only fetched when an
-// individual report room needs them.
-export async function getStoredReportById<T>(id: string): Promise<T | null> {
+// individual report room needs them — and only for the owner that wrote them.
+export async function getStoredReportById<T>(id: string, owner: LocalReportOwner): Promise<T | null> {
+  const tag = localReportOwnerTag(owner);
   const key = Number(id);
   if (!Number.isFinite(key)) return null;
   const database = await openDatabase();
   return new Promise((resolve, reject) => {
     const request = database.transaction(STORE, "readonly").objectStore(STORE).get(key);
-    request.onsuccess = () => resolve((request.result as T | undefined) ?? null);
+    request.onsuccess = () => {
+      const record = request.result as Partial<OwnedReportRecord> | undefined;
+      resolve(record && record.localOwner === tag && record.report !== undefined ? (record.report as T) : null);
+    };
     request.onerror = () => reject(request.error);
   });
 }
 
+// Removal only (never exposes anything), so it is deliberately owner-agnostic.
 export async function deleteStoredReport(id: string) {
   const key = Number(id);
   if (!Number.isFinite(key)) return;
@@ -153,7 +232,8 @@ export async function deleteStoredReport(id: string) {
   });
 }
 
-export async function storeReport<T>(report: T) {
+export async function storeReport<T>(report: T, owner: LocalReportOwner) {
+  const tag = localReportOwnerTag(owner);
   // Remote/history-only placeholders are deliberately not persisted as full
   // reports. They are summaries, not report-room payloads.
   if (report && typeof report === "object" && "__summaryOnly" in report && (report as { __summaryOnly?: unknown }).__summaryOnly === true) {
@@ -162,10 +242,11 @@ export async function storeReport<T>(report: T) {
 
   const database = await openDatabase();
   const fullReport = report as unknown as StoredReportLike;
-  const summary = toHistorySummary(fullReport);
+  const summary: OwnedSummaryRecord = { ...toHistorySummary(fullReport), localOwner: tag };
+  const record: OwnedReportRecord = { id: fullReport.id, localOwner: tag, report };
   return new Promise<void>((resolve, reject) => {
     const transaction = database.transaction([STORE, SUMMARY_STORE], "readwrite");
-    transaction.objectStore(STORE).put(report);
+    transaction.objectStore(STORE).put(record);
     transaction.objectStore(SUMMARY_STORE).put(summary);
     transaction.oncomplete = () => resolve();
     transaction.onerror = () => reject(transaction.error);
@@ -187,25 +268,58 @@ export async function storeReport<T>(report: T) {
  * "a best-effort side effect must never block the primary action" pattern
  * (e.g. claimAnonymousReports, maybePromoteToAdmin in lib/admin-role.ts).
  *
+ * `owner` is required: a caller with no known owner (e.g. no signed-in
+ * account email) passes null and nothing is written — never an anonymous
+ * record by default.
+ *
  * `store` is injectable (defaults to the real storeReport) purely so tests
  * can supply a deterministic stub without needing a real/fake IndexedDB.
  */
-export async function storeReportBestEffort<T>(report: T, store: (report: T) => Promise<void> = storeReport): Promise<void> {
+export async function storeReportBestEffort<T>(
+  report: T,
+  owner: LocalReportOwner | null,
+  store: (report: T, owner: LocalReportOwner) => Promise<void> = storeReport,
+): Promise<void> {
+  if (!owner) return;
   try {
-    await store(report);
+    await store(report, owner);
   } catch (error) {
     console.error("Local IndexedDB report save failed (non-fatal — the remote save is authoritative):", error instanceof Error ? error.message : String(error));
   }
 }
 
-export async function clearStoredReports() {
+async function deleteRecordsWhere(shouldDelete: (localOwner: unknown) => boolean) {
   const database = await openDatabase();
   return new Promise<void>((resolve, reject) => {
     const transaction = database.transaction([STORE, SUMMARY_STORE], "readwrite");
-    transaction.objectStore(STORE).clear();
-    transaction.objectStore(SUMMARY_STORE).clear();
+    for (const storeName of [STORE, SUMMARY_STORE]) {
+      const objectStore = transaction.objectStore(storeName);
+      const request = objectStore.getAll();
+      request.onsuccess = () => {
+        for (const record of request.result as Array<{ id: number; localOwner?: unknown }>) {
+          if (shouldDelete(record.localOwner)) objectStore.delete(record.id);
+        }
+      };
+    }
     transaction.oncomplete = () => resolve();
     transaction.onerror = () => reject(transaction.error);
-    transaction.onabort = () => reject(transaction.error ?? new Error("Report history clear transaction aborted."));
+    transaction.onabort = () => reject(transaction.error ?? new Error("Report purge transaction aborted."));
   });
+}
+
+/** "Clear history" for one owner: removes only that owner's local records. */
+export async function clearStoredReports(owner: LocalReportOwner) {
+  const tag = localReportOwnerTag(owner);
+  return deleteRecordsWhere((localOwner) => localOwner === tag);
+}
+
+/**
+ * Auth-transition purge: deletes every local record NOT owned by `keep` —
+ * including untagged records. `keep: null` deletes everything. Sign-out /
+ * definitive signed-out hydration keep only anonymous records; a signed-in
+ * hydration or a fresh login keeps only that account's records.
+ */
+export async function purgeStoredReportsExcept(keep: LocalReportOwner | null) {
+  const keepTag = keep ? localReportOwnerTag(keep) : null;
+  return deleteRecordsWhere((localOwner) => keepTag === null || localOwner !== keepTag);
 }

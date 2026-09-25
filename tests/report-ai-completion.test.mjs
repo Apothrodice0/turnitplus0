@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { createClient } from "@libsql/client";
 import { persistAiCompletion } from "../lib/report-ai-completion.ts";
-import { storeReportBestEffort } from "../lib/report-store.ts";
+import { accountLocalReportOwner, storeReportBestEffort } from "../lib/report-store.ts";
 import { applyMigrationsLibsql } from "../lib/ingest.js";
 import * as reportsRoute from "../app/api/reports/route.ts";
 import * as signupRoute from "../app/api/auth/signup/route.ts";
@@ -57,19 +57,26 @@ const fakeSummary = {
   aiStatus: "ready",
 };
 
+// Auth-report local-history isolation: the local copy is owner-scoped, so
+// storeReportBestEffort takes the owner second and the injectable store third.
+const TEST_OWNER = accountLocalReportOwner("owner@example.test");
+
 test("IndexedDB persistence rejection: storeReportBestEffort never throws, even when the underlying store rejects", async () => {
   const rejecting = async () => { throw new Error("QuotaExceededError: simulated IndexedDB failure"); };
-  await assert.doesNotReject(storeReportBestEffort(fakeReport, rejecting));
+  await assert.doesNotReject(storeReportBestEffort(fakeReport, TEST_OWNER, rejecting));
 });
 
 test("IndexedDB persistence rejection: storeReportBestEffort still calls through and resolves when the store succeeds", async () => {
   let received = null;
-  const succeeding = async (report) => { received = report; };
-  await storeReportBestEffort(fakeReport, succeeding);
+  let receivedOwner = null;
+  const succeeding = async (report, owner) => { received = report; receivedOwner = owner; };
+  await storeReportBestEffort(fakeReport, TEST_OWNER, succeeding);
   assert.deepEqual(received, fakeReport);
+  assert.deepEqual(receivedOwner, TEST_OWNER);
 });
 
-test("IndexedDB persistence rejection: persistAiCompletion's own local cache write can never block the authoritative remote save — proven against the REAL storeReport, which genuinely rejects here (no indexedDB global in Node)", async () => {
+test("IndexedDB persistence rejection: the REAL storeReportBestEffort never blocks the save pipeline — it rejects internally here (no indexedDB global in Node) and is swallowed; persistAiCompletion (remote-only now) still resolves", async () => {
+  await assert.doesNotReject(storeReportBestEffort(fakeReport, TEST_OWNER));
   const okRemote = async () => ({ ok: true });
   const result = await persistAiCompletion(fakeReport, fakeSummary, undefined, okRemote);
   assert.deepEqual(result, { ok: true, summary: fakeSummary });
@@ -219,17 +226,17 @@ test("successful retry: retryAiCheck persists through saveRetriedAiResult — sa
   assert.doesNotMatch(retryBody, /saveEnrichedAiResult\(|persistAiCompletion\(/, "retry must never re-POST the whole (possibly GET-expanded, >2MB) report");
 
   const helperBody = shell.match(/async function saveEnrichedAiResult\([\s\S]*?\n {2}\}/)?.[0] ?? "";
-  assert.match(helperBody, /await persistAiCompletion\(enriched, enrichedSummary, room\)/, "the automatic post-upload pass is unchanged");
+  assert.match(helperBody, /await storeReportBestEffort\(enriched, localOwner\);\s*\n\s*const enrichedSaveResult = await persistAiCompletion\(enriched, enrichedSummary, room\)/, "the automatic post-upload pass is unchanged (plus its owner-scoped local copy)");
   const retryHelperBody = shell.match(/async function saveRetriedAiResult\([\s\S]*?\n {2}\}/)?.[0] ?? "";
-  assert.match(retryHelperBody, /await persistAiRetryResult\(enriched, enrichedSummary\)/);
+  assert.match(retryHelperBody, /await storeReportBestEffort\(enriched, localOwner\);\s*\n\s*const retrySaveResult = await persistAiRetryResult\(enriched, enrichedSummary\)/);
 });
 
 test("app/page.tsx's anonymous-flow twin of the same bug is fixed the same way: the AI-completion merge persists through persistAiCompletion and the chain ends in a real .catch()", async () => {
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
 
   assert.match(page, /import \{ persistAiCompletion \} from "@\/lib\/report-ai-completion";/);
-  assert.match(page, /await persistAiCompletion\(enriched, enrichedSummary\);/);
-  assert.doesNotMatch(page, /await storeReport\(enriched\)/, "the AI-completion merge must no longer call storeReport directly — persistAiCompletion owns that now");
+  assert.match(page, /await storeReportBestEffort\(enriched, localOwner\);\s*\n\s*await persistAiCompletion\(enriched, enrichedSummary\);/, "owner-scoped, never-throwing local copy, then the remote save");
+  assert.doesNotMatch(page, /await storeReport\(enriched/, "the AI-completion merge must never call the throwing storeReport directly");
 
   const aiMergeBlockStart = page.indexOf("void aiAnalysisPromise");
   const aiMergeBlockEnd = page.indexOf("});", aiMergeBlockStart);
@@ -242,7 +249,7 @@ test("app/page.tsx's anonymous-flow twin of the same bug is fixed the same way: 
   // runs. USER-SUPPLIED REFERENCES V1: the local copy stays the clean
   // `report`; the remote save gets `reportForRemote` (report + optional
   // `userSuppliedReferences` sibling).
-  assert.match(page, /await storeReportBestEffort\(report\);\s*\n\s*const reportForRemote =[\s\S]{0,200}?return await saveReportRemote\(reportForRemote, summary, academicSearchDiagnosticsId\);/);
+  assert.match(page, /await storeReportBestEffort\(report, accountLocalReportOwner\(account\?\.email\)\);\s*\n\s*const reportForRemote =[\s\S]{0,200}?return await saveReportRemote\(reportForRemote, summary, academicSearchDiagnosticsId\);/);
 });
 
 /**

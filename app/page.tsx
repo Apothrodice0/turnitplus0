@@ -35,11 +35,19 @@ import {
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { getDeviceKey } from "@/lib/device-key";
-import { clearStoredReports, loadStoredReports, storeReport, storeReportBestEffort } from "@/lib/report-store";
-import { deleteRemoteReport, fetchAllReportSummariesAcrossRooms, fetchRemoteReport, fetchUploadLimitStatus, listRemoteReportSummaries, saveReportRemote, type ReportSummary, type UploadLimitStatus } from "@/lib/reports-remote";
+import { ANONYMOUS_LOCAL_REPORT_OWNER, accountLocalReportOwner, clearStoredReports, storeReportBestEffort } from "@/lib/report-store";
+import { deleteRemoteReport, fetchAllReportSummariesAcrossRooms, fetchUploadLimitStatus, saveReportRemote, type ReportSummary, type UploadLimitStatus } from "@/lib/reports-remote";
 import { classifySaveReportRemoteResult } from "@/lib/reports-remote";
 import { persistAiCompletion } from "@/lib/report-ai-completion";
 import { clearAllReportRoomCaches } from "@/lib/report-rooms-cache";
+import {
+  fetchAccountHydration,
+  hydrateHomeReports,
+  loadAnonymousLocalHistory,
+  purgeLocalReportStateForAccount,
+  purgeLocalReportStateForSignedOut,
+  type AccountHydrationResult,
+} from "@/lib/local-report-session";
 import { ReportRoomsBrowser } from "@/components/reports/report-rooms";
 import { ReportHistoryRow } from "@/components/reports/report-history-row";
 import { DocumentUploadPanel } from "@/components/reports/document-upload-panel";
@@ -273,6 +281,11 @@ export default function Home() {
   const [emailVerifyResendCooldown, setEmailVerifyResendCooldown] = useState(0);
   const [emailVerifyResending, setEmailVerifyResending] = useState(false);
   const [accountLoaded, setAccountLoaded] = useState(false);
+  // Auth-report local-history isolation: /api/auth/me could not give a
+  // definitive answer (network error, non-2xx, unreadable body). Neither
+  // report source is shown — never the anonymous one — until a retry
+  // resolves it; the session cookie itself is left untouched.
+  const [authHydrationFailed, setAuthHydrationFailed] = useState(false);
   const signupIdentityRef = useRef<IdentityFieldsHandle>(null);
   const [uploadLimitStatus, setUploadLimitStatus] = useState<UploadLimitStatus | null>(null);
   const [isEditingProfile, setIsEditingProfile] = useState(false);
@@ -307,38 +320,23 @@ export default function Home() {
     return () => window.clearInterval(timer);
   }, [emailVerifyModalOpen, emailVerifyResendCooldown > 0]);
 
-  // Anonymous/device-scoped report loading (no authenticated session).
-  // Unchanged from the pre-Phase-2A behavior: IndexedDB is the primary
-  // source, with a one-time remote (device_key-scoped) fallback only when
-  // local storage is genuinely empty. The 10-room architecture (see
-  // ReportRoomsBrowser) is an authenticated-account concern only — an
-  // anonymous device's history is already local-first and typically far
-  // smaller, so this keeps loading the full local objects as before, only
-  // converting to lightweight summaries at the very end for display.
+  // Anonymous/device-scoped report loading — ONLY after a definitive
+  // signed-out hydration (see resolveAuthAndReports below). IndexedDB is the
+  // primary source, but only records explicitly owned by the anonymous scope
+  // (lib/report-store.ts's LocalReportOwner); the one-time remote
+  // (device_key-scoped) fallback when that is empty is fetched WITHOUT
+  // credentials, so a still-valid session can never turn it into a copy of
+  // the account's reports (lib/local-report-session.ts).
   async function loadAnonymousReports() {
     try {
-      // loadStoredReports now reads from IndexedDB's own lightweight summary
-      // store (see lib/report-store.ts), not full report bodies — it
-      // returns fields shaped like LocalReportHistoryEntry below, not a real
-      // SimilarityReport, so this converts directly rather than calling
-      // buildReportSummary() (which would read report.aiAnalysis — absent
-      // here — and silently produce the wrong AI label despite a perfectly
-      // good aiScore already being available).
-      const localEntries = await loadStoredReports<LocalReportHistoryEntry>(11);
-      setReports(localEntries.map(localHistoryEntryToSummary));
-      if (localEntries.length > 0) return;
-      const summaries = await listRemoteReportSummaries();
-      if (summaries.length === 0) return;
-      const restored: SimilarityReport[] = [];
-      for (const summary of summaries) {
-        const full = await fetchRemoteReport<SimilarityReport>(summary.id);
-        if (full) restored.push(full);
-      }
-      if (restored.length === 0) return;
-      setReports(restored.map(buildReportSummary));
-      for (const report of restored) {
-        await storeReport(report);
-      }
+      // The local branch reads IndexedDB's own lightweight summary store (see
+      // lib/report-store.ts), not full report bodies — shaped like
+      // LocalReportHistoryEntry below, not a real SimilarityReport, so it
+      // converts directly rather than calling buildReportSummary() (which
+      // would read report.aiAnalysis — absent here — and silently produce the
+      // wrong AI label despite a perfectly good aiScore already being available).
+      const history = await loadAnonymousLocalHistory<LocalReportHistoryEntry, SimilarityReport>();
+      setReports(history.kind === "local" ? history.entries.map(localHistoryEntryToSummary) : history.reports.map(buildReportSummary));
     } catch {
       setReports([]);
     }
@@ -370,45 +368,47 @@ export default function Home() {
   //
   // On success it populates both; it NEVER clears them on a transient failure
   // (a caller that already set `account` from a fresh auth response must not
-  // have it wiped by a flaky follow-up request).
-  async function hydrateAccountFromServer(): Promise<"signed-in" | "signed-out" | "error"> {
-    let result: {
-      user?: LocalAccount | null;
-      emailVerification?: EmailVerificationView | null;
-    } | null;
-    try {
-      const response = await fetch("/api/auth/me");
-      if (!response.ok) return "error";
-      result = (await response.json()) as typeof result;
-    } catch {
-      return "error";
-    }
-    if (result && result.user) {
+  // have it wiped by a flaky follow-up request). "signed-out" only for an
+  // explicit `user: null` (lib/local-report-session.ts's fetchAccountHydration);
+  // anything indeterminate is "error".
+  async function hydrateAccountFromServer(): Promise<AccountHydrationResult> {
+    const result = await fetchAccountHydration();
+    if (result.status === "signed-in") {
       setAccount(result.user);
       setEmailVerification(result.emailVerification ?? null);
-      return "signed-in";
     }
-    return "signed-out";
+    return result;
+  }
+
+  // Authentication state is resolved first, then exactly one of the two
+  // report sources is used — never both — so a previous session's reports
+  // can never linger into a different auth state at hydration. Only a
+  // DEFINITIVE signed-out answer reaches the anonymous history; an
+  // indeterminate one fails closed (no anonymous history, no restore, no
+  // purge, no sign-out) and offers a retry. Local records belonging to any
+  // other owner are purged at the same time (lib/local-report-session.ts).
+  async function resolveAuthAndReports() {
+    setAuthHydrationFailed(false);
+    try {
+      await hydrateHomeReports({
+        hydrate: hydrateAccountFromServer,
+        loadAccountReports,
+        loadAnonymousReports,
+        onIndeterminate: () => {
+          setReports([]);
+          setAuthHydrationFailed(true);
+        },
+      });
+    } finally {
+      setAccountLoaded(true);
+    }
   }
 
   useEffect(() => {
     queueMicrotask(() => {
       setSidebarCollapsed(window.localStorage.getItem("tp_sidebar_collapsed") === "true");
     });
-    // Authentication state is resolved first, then exactly one of the two
-    // report sources is used — never both — so a previous session's
-    // reports can never linger into a different auth state at hydration.
-    (async () => {
-      try {
-        const state = await hydrateAccountFromServer();
-        if (state === "signed-in") await loadAccountReports();
-        else await loadAnonymousReports();
-      } catch {
-        await loadAnonymousReports();
-      } finally {
-        setAccountLoaded(true);
-      }
-    })();
+    void resolveAuthAndReports();
   }, []);
 
   // Cross-tab sign-out (production audit fix): the "storage" event fires in
@@ -417,12 +417,14 @@ export default function Home() {
   // only way a tab that did NOT initiate the sign-out learns about it.
   // Deliberately does not repeat the /api/auth/logout network call (the
   // initiating tab's own call already cleared the session cookie for real)
-  // and does not touch IndexedDB/Turso, matching clearAccountDisplayState's
-  // own scope.
+  // and never touches Turso. It does repeat the browser-local purge
+  // (auth-report local-history isolation): idempotent, and it covers the
+  // case where the initiating tab's own purge never completed.
   useEffect(() => {
     function handleStorage(event: StorageEvent) {
       if (event.key !== SIGNED_OUT_BROADCAST_KEY || event.newValue === null) return;
       clearAccountDisplayState();
+      void purgeLocalReportStateForSignedOut();
       window.history.replaceState({ turnitPlusView: "account" }, "", VIEW_HASH.account);
       setView("account");
       notify("You were signed out in another tab.");
@@ -563,7 +565,12 @@ export default function Home() {
     setAuthLoadingLabel("Loading your report history");
     // Replaces (never merges with) whatever was previously displayed —
     // signing in as a different account, or into an account after browsing
-    // anonymously, must not show the prior view's reports.
+    // anonymously, must not show the prior view's reports. The same holds
+    // for browser-local records: every one not owned by this account (a
+    // previous account's, and the anonymous ones this login just claimed
+    // server-side) is purged before the account view loads.
+    setAuthHydrationFailed(false);
+    await purgeLocalReportStateForAccount((data.user as LocalAccount).email);
     await loadAccountReports();
 
     setAuthLoadingLabel("Almost ready");
@@ -748,6 +755,9 @@ export default function Home() {
   // to make and nothing remote left to keep in sync with.
   function completeAccountDeletion() {
     if (account) clearAllReportRoomCaches(account.email);
+    // The deleted account's browser-local report copies and every account's
+    // room caches go too — nothing of it may remain readable on this device.
+    void purgeLocalReportStateForSignedOut();
     setReports([]);
     setCurrentReport(null);
     setAccount(null);
@@ -843,9 +853,11 @@ export default function Home() {
 
   // Shared by signOutAccount (this tab) and the cross-tab storage listener
   // below (production audit fix) — only the in-memory display state, never
-  // IndexedDB/Turso; the account's remote reports and this device's local
-  // cache are both left exactly as they were, so the same account signing
-  // back in on this device still benefits from them.
+  // Turso (the account's remote reports stay exactly as they were). Both
+  // callers ALSO run purgeLocalReportStateForSignedOut right after it: the
+  // account's browser-local report copies and room caches must not outlive
+  // the session (auth-report local-history isolation — they used to, and
+  // the signed-out "ON THIS DEVICE" history then showed them).
   function clearAccountDisplayState() {
     setReports([]);
     setCurrentReport(null);
@@ -864,6 +876,9 @@ export default function Home() {
     // sidebar badge and report list never keep showing the previous
     // account's data during (or after a failure of) the logout request.
     clearAccountDisplayState();
+    // Browser-local report copies and room caches of the account are purged
+    // too (never Turso, never "Clear history"'s remote deletes).
+    void purgeLocalReportStateForSignedOut();
     fetch("/api/auth/logout", { method: "POST" }).catch(() => {});
     // A same-origin localStorage write fires the "storage" event in every
     // OTHER open tab (never this one) — see the listener below. The value
@@ -936,7 +951,9 @@ export default function Home() {
     // The local IndexedDB copy and the summary stay clean — the raw reference
     // text only ever leaves as the save request's `userSuppliedReferences`
     // sibling (server strips any in-payload copy), never persisted locally.
-    await storeReportBestEffort(report);
+    // generateReport() is account-gated, so the local copy is owned by that
+    // account (never anonymous); with no signed-in account nothing is written.
+    await storeReportBestEffort(report, accountLocalReportOwner(account?.email));
     const reportForRemote =
       userSuppliedReferences && userSuppliedReferences.length > 0
         ? { ...report, userSuppliedReferences }
@@ -968,6 +985,9 @@ export default function Home() {
     }
 
     const submittedFile = file;
+    // The owner of every browser-local copy this check writes (auth-report
+    // local-history isolation): the signed-in account, captured once here.
+    const localOwner = accountLocalReportOwner(account.email);
     generationLockRef.current = true;
     setIsGeneratingReport(true);
     navigate("reports");
@@ -1196,6 +1216,7 @@ export default function Home() {
           const enrichedSummary = buildReportSummary(enriched);
           setCurrentReport((current) => current?.id === enriched.id ? { ...current, ...aiResult } : current);
           setReports((current) => current.map((item) => item.id === enrichedSummary.id ? enrichedSummary : item));
+          await storeReportBestEffort(enriched, localOwner);
           await persistAiCompletion(enriched, enrichedSummary);
         })
         .catch((error) => {
@@ -1276,7 +1297,10 @@ export default function Home() {
       clearAllReportRoomCaches(account.email);
       setRoomsBrowserKey((key) => key + 1);
     }
-    await clearStoredReports();
+    // Only the current owner's browser-local records (auth transitions already
+    // purge every other owner's — lib/local-report-session.ts).
+    const localOwner = account ? accountLocalReportOwner(account.email) : ANONYMOUS_LOCAL_REPORT_OWNER;
+    if (localOwner) await clearStoredReports(localOwner);
     await Promise.all(idsToDelete.map((id) => deleteRemoteReport(id)));
     notify("Report history cleared.");
   }
@@ -1988,6 +2012,15 @@ export default function Home() {
                 <h3>Loading your reports…</h3>
                 <p>Checking this device for saved reports.</p>
               </div>
+            ) : authHydrationFailed ? (
+              // Indeterminate sign-in state: fail closed — neither the
+              // account's reports nor this device's anonymous history.
+              <div className="empty-reports" role="alert">
+                <FolderClock aria-hidden="true" />
+                <h3>We couldn&apos;t confirm your sign-in</h3>
+                <p>Your reports are hidden until your session is confirmed.</p>
+                <button className="button primary" type="button" onClick={() => void resolveAuthAndReports()}>Try again</button>
+              </div>
             ) : reports.length === 0 && !isGeneratingReport ? (
               <div className="empty-reports">
                 <FolderClock aria-hidden="true" />
@@ -2001,7 +2034,7 @@ export default function Home() {
             ) : (
               <div className="report-history">
                 {reports.map((report) => (
-                  <ReportHistoryRow key={report.id} report={report} onDownloadReceipt={downloadReceipt} />
+                  <ReportHistoryRow key={report.id} report={report} localOwner={ANONYMOUS_LOCAL_REPORT_OWNER} onDownloadReceipt={downloadReceipt} />
                 ))}
               </div>
             )}

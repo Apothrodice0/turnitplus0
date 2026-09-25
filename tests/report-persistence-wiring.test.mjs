@@ -11,27 +11,35 @@ import test from "node:test";
 test("existing local report persistence (IndexedDB) is still wired at every save/clear site", async () => {
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
 
-  assert.match(page, /import \{ clearStoredReports, loadStoredReports, storeReport, storeReportBestEffort \} from "@\/lib\/report-store";/);
+  assert.match(page, /import \{ ANONYMOUS_LOCAL_REPORT_OWNER, accountLocalReportOwner, clearStoredReports, storeReportBestEffort \} from "@\/lib\/report-store";/);
 
   // Release-hardening audit finding LIFECYCLE-01: saveReport and the
-  // Wikipedia-enrichment callback now go through storeReportBestEffort (an
-  // IndexedDB failure must never block the authoritative remote save, or
-  // become an unhandled rejection — see lib/report-ai-completion.ts and
-  // lib/report-store.ts's own header comments). The anonymous remote-restore
-  // loop is unchanged: it's already inside its own try/catch, so a failure
-  // there was never able to escape as an unhandled rejection in the first
-  // place, and stays on the raw storeReport.
-  const storeReportCalls = page.match(/await storeReport\(/g) ?? [];
-  assert.equal(storeReportCalls.length, 1, "the remote-restore loop should still be storeReport's one remaining direct call site");
-  const storeReportBestEffortCalls = page.match(/await storeReportBestEffort\(/g) ?? [];
-  assert.equal(storeReportBestEffortCalls.length, 1, "saveReport's own local cache write should go through storeReportBestEffort");
+  // AI-completion merge go through storeReportBestEffort (an IndexedDB
+  // failure must never block the authoritative remote save, or become an
+  // unhandled rejection — see lib/report-ai-completion.ts and
+  // lib/report-store.ts's own header comments).
+  //
+  // Auth-report local-history isolation: every local write names its OWNER
+  // (lib/report-store.ts's LocalReportOwner). This flow is account-gated, so
+  // both writes are the signed-in account's; the page never calls the raw
+  // storeReport any more — the one anonymous writer, the signed-out restore,
+  // lives in lib/local-report-session.ts.
+  assert.equal((page.match(/await storeReport\(/g) ?? []).length, 0, "no raw storeReport call site left in the page");
+  assert.match(page, /await storeReportBestEffort\(report, accountLocalReportOwner\(account\?\.email\)\);/, "saveReport's local copy is the account's");
+  assert.match(page, /await storeReportBestEffort\(enriched, localOwner\);/, "the AI-completion merge's local copy is the account's");
+  assert.equal((page.match(/await storeReportBestEffort\(/g) ?? []).length, 2);
 
-  assert.match(page, /await clearStoredReports\(\);/);
-  // loadStoredReports now reads IndexedDB's lightweight summary store (see
+  // "Clear history" clears only the current owner's local records.
+  assert.match(page, /if \(localOwner\) await clearStoredReports\(localOwner\);/);
+  // loadStoredReports reads IndexedDB's lightweight summary store (see
   // lib/report-store.ts), not full SimilarityReport bodies — the caller
   // reads it as LocalReportHistoryEntry and converts via
-  // localHistoryEntryToSummary rather than buildReportSummary().
-  assert.match(page, /loadStoredReports<LocalReportHistoryEntry>\(11\)/);
+  // localHistoryEntryToSummary rather than buildReportSummary(); only the
+  // anonymous owner's summaries are ever loaded for the signed-out history.
+  assert.match(page, /loadAnonymousLocalHistory<LocalReportHistoryEntry, SimilarityReport>\(\)/);
+  assert.match(page, /history\.kind === "local" \? history\.entries\.map\(localHistoryEntryToSummary\)/);
+  const sessionLib = await readFile(new URL("../lib/local-report-session.ts", import.meta.url), "utf8");
+  assert.match(sessionLib, /loadLocal: \(\) => loadStoredReports<TEntry>\(11, ANONYMOUS_LOCAL_REPORT_OWNER\)/);
 });
 
 test("remote report persistence (Turso) is layered alongside local storage, not in place of it", async () => {
@@ -39,7 +47,7 @@ test("remote report persistence (Turso) is layered alongside local storage, not 
 
   assert.match(
     page,
-    /import \{ deleteRemoteReport, fetchAllReportSummariesAcrossRooms, fetchRemoteReport, fetchUploadLimitStatus, listRemoteReportSummaries, saveReportRemote, type ReportSummary, type UploadLimitStatus \} from "@\/lib\/reports-remote";/,
+    /import \{ deleteRemoteReport, fetchAllReportSummariesAcrossRooms, fetchUploadLimitStatus, saveReportRemote, type ReportSummary, type UploadLimitStatus \} from "@\/lib\/reports-remote";/,
   );
 
   // Release-hardening audit finding LIFECYCLE-01: the local cache write no
@@ -58,7 +66,7 @@ test("remote report persistence (Turso) is layered alongside local storage, not 
   // `report` (raw reference text is never persisted locally); the remote save
   // gets `reportForRemote`, which is `report` plus an optional
   // `userSuppliedReferences` sibling for that one request only.
-  assert.match(page, /await storeReportBestEffort\(report\);\s*\n\s*const reportForRemote =[\s\S]{0,200}?return await saveReportRemote\(reportForRemote, summary, academicSearchDiagnosticsId\);/);
+  assert.match(page, /await storeReportBestEffort\(report, accountLocalReportOwner\(account\?\.email\)\);\s*\n\s*const reportForRemote =[\s\S]{0,200}?return await saveReportRemote\(reportForRemote, summary, academicSearchDiagnosticsId\);/);
   assert.doesNotMatch(page, /\bstoreReportBestEffort\(reportForRemote\)/, "the local IndexedDB copy must never carry the raw supplied-reference text");
   assert.match(page, /await persistAiCompletion\(enriched, enrichedSummary\);/);
 
@@ -66,15 +74,23 @@ test("remote report persistence (Turso) is layered alongside local storage, not 
   // remote copies — never the other way around.
   assert.match(
     page,
-    /await clearStoredReports\(\);\s*\n\s*await Promise\.all\(idsToDelete\.map\(\(id\) => deleteRemoteReport\(id\)\)\);/,
+    /if \(localOwner\) await clearStoredReports\(localOwner\);\s*\n\s*await Promise\.all\(idsToDelete\.map\(\(id\) => deleteRemoteReport\(id\)\)\);/,
   );
 
-  // Mount-time hydration must only reach for the remote copy when local
-  // storage is genuinely empty, and must never leave `reports` populated
-  // with anything less than full SimilarityReport objects.
-  assert.match(page, /if \(localEntries\.length > 0\) return;/);
-  assert.match(page, /const summaries = await listRemoteReportSummaries\(\);/);
-  assert.match(page, /const full = await fetchRemoteReport<SimilarityReport>\(summary\.id\);/);
+  // The signed-out history (lib/local-report-session.ts) must only reach for
+  // the remote copy when the anonymous local store is genuinely empty, must
+  // hand back full SimilarityReport objects, and must fetch them WITHOUT
+  // credentials (the device-key-only twins), so a still-valid session can
+  // never return the account's reports into anonymous storage.
+  const sessionLib = await readFile(new URL("../lib/local-report-session.ts", import.meta.url), "utf8");
+  assert.match(sessionLib, /if \(entries\.length > 0\) return \{ kind: "local", entries \};/);
+  assert.match(sessionLib, /const summaries = await deps\.listRemote\(\);/);
+  assert.match(sessionLib, /const full = await deps\.fetchRemote\(summary\.id\);/);
+  assert.match(sessionLib, /listRemote: \(\) => listAnonymousDeviceReportSummaries\(\)/);
+  assert.match(sessionLib, /fetchRemote: \(id\) => fetchAnonymousDeviceReport<TReport>\(id\)/);
+  const remoteLib = await readFile(new URL("../lib/reports-remote.ts", import.meta.url), "utf8");
+  assert.match(remoteLib, /export async function listAnonymousDeviceReportSummaries[\s\S]*?credentials: "omit"/);
+  assert.match(remoteLib, /export async function fetchAnonymousDeviceReport[\s\S]*?credentials: "omit"/);
 });
 
 test("the room page's occupant state is only ever set to processing/ready/failed once the remote save is confirmed to have actually succeeded", async () => {
@@ -107,12 +123,12 @@ test("the room page's occupant state is only ever set to processing/ready/failed
 
   const helperBody = shell.match(/async function saveEnrichedAiResult\([\s\S]*?\n {2}\}/)?.[0] ?? "";
   assert.ok(helperBody.length > 0, "saveEnrichedAiResult function body must be found");
-  assert.match(helperBody, /await persistAiCompletion\(enriched, enrichedSummary, room\)/, "the local IndexedDB write and the remote save must both go through persistAiCompletion, not a raw unguarded storeReport/saveReportRemote pair");
+  assert.match(helperBody, /await persistAiCompletion\(enriched, enrichedSummary, room\)/, "the remote save must go through persistAiCompletion, not a raw unguarded saveReportRemote (the owner-scoped local copy goes through the never-throwing storeReportBestEffort right before it)");
   assert.match(helperBody, /if \(!enrichedSaveResult\.ok\) return false;/, "a failed remote save must never reach setOccupant");
   assert.match(helperBody, /setOccupant\(\{\s*\n\s*status: enrichedSummary\.aiStatus === "ready" \? "ready" : "failed",\s*\n\s*report: enrichedSummary,/);
 });
 
-test("logout clears account-scoped report state immediately, and never touches IndexedDB or Turso", async () => {
+test("logout clears account-scoped report state immediately, purges the account's BROWSER-LOCAL copies, and never touches Turso", async () => {
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
 
   // clearAccountDisplayState() (shared with the cross-tab storage listener
@@ -121,7 +137,7 @@ test("logout clears account-scoped report state immediately, and never touches I
   // account's data during or after a failed logout.
   assert.match(
     page,
-    /function signOutAccount\(\) \{\s*\n(?:\s*\/\/.*\r?\n)*\s*clearAccountDisplayState\(\);\s*\n\s*fetch\("\/api\/auth\/logout"/,
+    /function signOutAccount\(\) \{\s*\n(?:\s*\/\/.*\r?\n)*\s*clearAccountDisplayState\(\);\s*\n(?:\s*\/\/.*\r?\n)*\s*void purgeLocalReportStateForSignedOut\(\);\s*\n\s*fetch\("\/api\/auth\/logout"/,
   );
 
   const displayStateBody = page.match(/function clearAccountDisplayState\(\) \{[\s\S]*?\n {2}\}/)?.[0] ?? "";
@@ -129,14 +145,27 @@ test("logout clears account-scoped report state immediately, and never touches I
   assert.match(displayStateBody, /setReports\(\[\]\);/);
   assert.match(displayStateBody, /setCurrentReport\(null\);/);
 
-  // signOutAccount must never call clearStoredReports or deleteRemoteReport
-  // — those belong only to the explicit "Clear history" action, not to
-  // signing out. Extract just this function's body to check that in
-  // isolation, rather than asserting on the whole file (clearHistory
-  // legitimately calls both, elsewhere).
+  // Auth-report local-history isolation (privacy fix): the previous
+  // expectation here — sign-out leaves IndexedDB untouched — is exactly what
+  // let an account's reports surface in the signed-out "ON THIS DEVICE"
+  // history afterwards. Sign-out now purges the BROWSER-LOCAL account copies
+  // and every account's room caches (lib/local-report-session.ts; proven
+  // dynamically in tests/report-local-ownership-isolation.test.mjs).
+  //
+  // It must still never call deleteRemoteReport (server data is only ever
+  // removed by the explicit "Clear history" action) nor clearStoredReports
+  // (that is "Clear history"'s own per-owner wipe, not the auth purge).
+  // Extract just this function's body to check that in isolation, rather
+  // than asserting on the whole file (clearHistory legitimately calls both).
   const signOutBody = page.match(/function signOutAccount\(\) \{[\s\S]*?\n {2}\}/)?.[0] ?? "";
   assert.ok(signOutBody.length > 0, "signOutAccount function body must be found");
+  assert.match(signOutBody, /void purgeLocalReportStateForSignedOut\(\);/);
   assert.doesNotMatch(signOutBody, /clearStoredReports|deleteRemoteReport/);
+  const sessionLib = await readFile(new URL("../lib/local-report-session.ts", import.meta.url), "utf8");
+  const purgeBody = sessionLib.match(/export async function purgeLocalReportStateForSignedOut\([\s\S]*?\n\}/)?.[0] ?? "";
+  assert.match(purgeBody, /deps\.clearAllAccountsReportRoomCaches\(\);/);
+  assert.match(purgeBody, /await deps\.purgeStoredReportsExcept\(ANONYMOUS_LOCAL_REPORT_OWNER\);/);
+  assert.doesNotMatch(purgeBody, /deleteRemoteReport|fetch\(/, "the purge is browser-local only — never Turso");
 });
 
 test("signing out broadcasts to other open tabs via a real storage-event listener, without repeating the network call there (production audit fix)", async () => {
@@ -189,11 +218,20 @@ test("authentication state is resolved before choosing anonymous vs. account-sco
   assert.match(accountLoaderBody, /fetchUploadLimitStatus\(\)/);
 
   // The mount effect must check the session first, then call exactly one of
-  // the two loaders depending on the result — never both, never neither.
-  assert.match(
-    page,
-    /if \(result && result\.user\) \{\s*\n\s*setAccount\(result\.user\);\s*\n\s*await loadAccountReports\(\);\s*\n\s*\} else \{\s*\n\s*await loadAnonymousReports\(\);\s*\n\s*\}/,
-  );
+  // the two loaders depending on the result — never both, never neither —
+  // and the anonymous one ONLY for a definitive signed-out answer: an
+  // indeterminate one (network error, non-2xx, unreadable body) fails closed
+  // (auth-report local-history isolation; dynamic proof in
+  // tests/report-local-ownership-isolation.test.mjs).
+  const resolverBody = page.match(/async function resolveAuthAndReports\(\) \{[\s\S]*?\n {2}\}/)?.[0] ?? "";
+  assert.match(resolverBody, /hydrate: hydrateAccountFromServer,\s*\n\s*loadAccountReports,\s*\n\s*loadAnonymousReports,/);
+  assert.match(page, /useEffect\(\(\) => \{[\s\S]{0,200}?void resolveAuthAndReports\(\);\s*\n\s*\}, \[\]\);/);
+  const sessionLib = await readFile(new URL("../lib/local-report-session.ts", import.meta.url), "utf8");
+  const machine = sessionLib.match(/export async function hydrateHomeReports\([\s\S]*?\n\}/)?.[0] ?? "";
+  assert.match(machine, /if \(result\.status === "signed-in"\) \{\s*\n\s*await purgeForAccount\(result\.user\.email\);\s*\n\s*await deps\.loadAccountReports\(\);/);
+  assert.match(machine, /if \(result\.status === "signed-out"\) \{\s*\n\s*await purgeForSignedOut\(\);\s*\n\s*await deps\.loadAnonymousReports\(\);/);
+  assert.match(machine, /deps\.onIndeterminate\(\);\s*\n\s*return "error";/);
+  assert.equal((machine.match(/deps\.loadAnonymousReports\(\)/g) ?? []).length, 1, "exactly one anonymous-load site: the definitive signed-out branch");
 
   // The actual account-scoping enforcement for an authenticated user's own
   // report list now lives in ReportRoomsBrowser: rendered only when
@@ -214,6 +252,6 @@ test("a successful login/signup replaces the visible report list with the newly 
   // replacing rather than appending to whatever was previously displayed.
   assert.match(
     page,
-    /setAccount\(data\.user as LocalAccount\);\s*\n\s*setAuthLoadingLabel\("Loading your report history"\);\s*\n(?:\s*\/\/.*\r?\n)*\s*await loadAccountReports\(\);/,
+    /setAccount\(data\.user as LocalAccount\);\s*\n(?:\s*\/\/.*\r?\n)*\s*await hydrateAccountFromServer\(\);\s*\n\s*setAuthLoadingLabel\("Loading your report history"\);\s*\n(?:\s*\/\/.*\r?\n)*\s*setAuthHydrationFailed\(false\);\s*\n\s*await purgeLocalReportStateForAccount\(\(data\.user as LocalAccount\)\.email\);\s*\n\s*await loadAccountReports\(\);/,
   );
 });

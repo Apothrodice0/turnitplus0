@@ -104,8 +104,37 @@ export function invalidateRoomCache(accountEmail: string, room: number): void {
   remove(indexKey(accountEmail));
 }
 
-/** Called on sign-out/account switch so a different account can never read a previous account's cached room data (defense in depth alongside the per-email key). */
+/** Clears one account's cached index and room contents ("Clear history"). Prefix-based, so every room is covered — including an admin account's rooms 10-39 (ADMIN_ROOM_COUNT), which a fixed 0-9 loop used to miss. */
 export function clearAllReportRoomCaches(accountEmail: string): void {
+  const prefix = `tp_report_rooms_v${CACHE_VERSION}:${accountEmail}:`;
   remove(indexKey(accountEmail));
   for (let room = 0; room < 10; room++) remove(roomKey(accountEmail, room));
+  removeKeysWhere((key) => key.startsWith(prefix));
+}
+
+/**
+ * Sign-out / cross-tab sign-out / account deletion / account switch: removes
+ * EVERY account's cached room data on this browser (optionally keeping one
+ * account's — the account that is signing in right now). Unlike
+ * clearAllReportRoomCaches it needs no email, so it also reaches a previous
+ * account's entries (another tab's account, or an email changed since).
+ */
+export function clearAllAccountsReportRoomCaches(exceptAccountEmail?: string): void {
+  const keepPrefix = exceptAccountEmail ? `tp_report_rooms_v${CACHE_VERSION}:${exceptAccountEmail}:` : null;
+  removeKeysWhere((key) => key.startsWith("tp_report_rooms_v") && (keepPrefix === null || !key.startsWith(keepPrefix)));
+}
+
+function removeKeysWhere(predicate: (key: string) => boolean): void {
+  const storage = safeLocalStorage();
+  if (!storage || typeof storage.key !== "function" || typeof storage.length !== "number") return;
+  try {
+    const keys: string[] = [];
+    for (let index = 0; index < storage.length; index++) {
+      const key = storage.key(index);
+      if (key !== null && predicate(key)) keys.push(key);
+    }
+    for (const key of keys) storage.removeItem(key);
+  } catch {
+    // ignore — storage unavailable/private-mode
+  }
 }
