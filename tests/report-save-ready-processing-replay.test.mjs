@@ -31,7 +31,8 @@ import { isCompactAiAnalysis } from "../lib/ai-passage-table.ts";
  * whenever the stored similarity generation was not newer — the complete AI result gone, every read back to "processing" — for
  * an explicit ready row, a legacy-derived-ready row and an explicit ready row without a calibrated score alike.
  *
- * THE FIX. The guard's incoming side is "the incoming AI state is not a result": 'failed' or 'processing'. Its stored side is
+ * THE FIX. The guard's incoming side is "the incoming AI state is not a result": 'failed' or 'processing' (and, since the
+ * statusless-resave fix, NULL — tests/report-save-ready-null-replay.test.mjs; test 0 below covers it). Its stored side is
  * unchanged (explicit 'ready' OR derived ready). Nothing else changes — asserted below: complete -> complete replacement, the
  * automatic completion, a new report's first save, a failed row's recovery and a failed row receiving 'processing' all behave as
  * before, with the similarity half byte-identical.
@@ -373,8 +374,15 @@ function assertReadyPreserved(c, label) {
 test("0. MATRIX: SAVE_REPORT_SQL keeps the stored AI half exactly when it is protected-ready (ai_status 'ready' OR deriveRoomStatus 'ready') and the incoming AI state is 'failed' or 'processing'; an incoming 'ready' always replaces it; the SQL protection predicate equals the JS one for every stored state", async (t) => {
   const client = createClient({ url: `file:${env.dbFile}` });
   const { SAVE_REPORT_SQL } = fx.reportsRoute;
-  // [ai_score, ai_tone] each incoming state carries (the room page's first save sends buildReportSummary's no-AI tone).
-  const INCOMING = { processing: [null, "unavailable"], failed: [null, "unavailable"], ready: [77, "high"] };
+  // [ai_status, ai_score, ai_tone] each incoming state carries (the room page's first save sends buildReportSummary's no-AI
+  // tone; a statusless save is app/page.tsx's / the pre-0028 room page's — without an AI result, or with a legacy complete one).
+  const INCOMING = {
+    processing: ["processing", null, "unavailable"],
+    failed: ["failed", null, "unavailable"],
+    ready: ["ready", 77, "high"],
+    null: [null, null, "unavailable"],
+    "null+score": [null, 77, "high"],
+  };
   const args = (id, aiScore, aiTone, aiStatus, note) => [id, "matrix-device", `sub-${id}`, "matrix", new Date().toISOString(), 10, 0, "Low", aiScore, aiTone, aiStatus, JSON.stringify({ note }), null, null];
   const cells = [];
   try {
@@ -382,18 +390,18 @@ test("0. MATRIX: SAVE_REPORT_SQL keeps the stored AI half exactly when it is pro
     for (const storedStatus of [null, "processing", "ready", "failed"]) {
       for (const storedScore of [null, 0, 42]) {
         const jsProtected = storedStatus === "ready" || deriveRoomStatus(storedScore, storedStatus) === "ready";
-        for (const [incoming, [inScore, inTone]] of Object.entries(INCOMING)) {
+        for (const [incoming, [inStatus, inScore, inTone]] of Object.entries(INCOMING)) {
           const id = `matrix-${n++}`;
           await client.execute({ sql: SAVE_REPORT_SQL, args: args(id, storedScore, storedScore === null ? null : "low", storedStatus, "stored") }); // the stored row, written by the real upsert
           const sqlProtected = num((await client.execute({
             sql: `SELECT CASE WHEN (saved_reports.ai_status = 'ready' OR ${derivedAiReadySql("saved_reports")}) THEN 1 ELSE 0 END AS p FROM saved_reports WHERE id = ?`,
             args: [id],
           })).rows[0].p) === 1;
-          await client.execute({ sql: SAVE_REPORT_SQL, args: args(id, inScore, inTone, incoming, "incoming") });
+          await client.execute({ sql: SAVE_REPORT_SQL, args: args(id, inScore, inTone, inStatus, "incoming") });
           const row = (await client.execute({ sql: "SELECT ai_status, ai_score, ai_tone, payload_json FROM saved_reports WHERE id = ?", args: [id] })).rows[0];
           const kept = row.ai_status === storedStatus && num(row.ai_score) === storedScore && JSON.parse(row.payload_json).note === "stored";
-          const replaced = row.ai_status === incoming && num(row.ai_score) === inScore && row.ai_tone === inTone && JSON.parse(row.payload_json).note === "incoming";
-          cells.push({ storedStatus, storedScore, incoming, sqlProtected, jsProtected, kept, replaced });
+          const replaced = row.ai_status === inStatus && num(row.ai_score) === inScore && row.ai_tone === inTone && JSON.parse(row.payload_json).note === "incoming";
+          cells.push({ storedStatus, storedScore, incoming, inStatus, sqlProtected, jsProtected, kept, replaced });
         }
       }
     }
@@ -402,12 +410,12 @@ test("0. MATRIX: SAVE_REPORT_SQL keeps the stored AI half exactly when it is pro
     t.diagnostic(`MATRIX ${JSON.stringify(cells.map((c) => `${c.storedStatus}/${c.storedScore} <- ${c.incoming}: ${c.kept ? "PRESERVE_STORED_AI" : c.replaced ? "ACCEPT_INCOMING_AI" : "MIXED"}`))}`);
     client.close();
   }
-  assert.equal(cells.length, 36);
+  assert.equal(cells.length, 60);
   for (const c of cells) {
     const cell = `stored ${c.storedStatus}/${c.storedScore} <- ${c.incoming}`;
     assert.equal(c.sqlProtected, c.jsProtected, `${cell}: SQL and JS protected-ready predicates agree`);
     assert.ok(c.kept || c.replaced, `${cell}: all-or-nothing, never a partial AI half`);
-    assert.equal(c.kept, c.jsProtected && (c.incoming === "failed" || c.incoming === "processing"), `${cell}: kept iff the stored AI half is protected-ready and the incoming one is not a result`);
+    assert.equal(c.kept, c.jsProtected && (c.inStatus === null || c.inStatus === "failed" || c.inStatus === "processing"), `${cell}: kept iff the stored AI half is protected-ready and the incoming one is not a declared result`);
   }
 });
 
