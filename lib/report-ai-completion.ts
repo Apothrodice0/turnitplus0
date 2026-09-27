@@ -1,4 +1,4 @@
-import { saveReportRemote, saveAiRetryResultRemote, classifySaveReportRemoteResult, type ReportSummary } from "./reports-remote";
+import { saveReportRemote, saveAiRetryResultRemote, classifySaveReportRemoteResult, type ReportSummary, type SaveReportRemoteResult } from "./reports-remote";
 import { prepareAiAnalysisForTransport } from "./ai-passage-table";
 import { AI_SAVE_OUTCOME_SIZE_UNAVAILABLE, withSizeUnavailableAi } from "./ai-unavailable-state";
 
@@ -7,8 +7,19 @@ import { AI_SAVE_OUTCOME_SIZE_UNAVAILABLE, withSizeUnavailableAi } from "./ai-un
  * server decided the real AI result cannot be stored next to the report (G2, lib/ai-unavailable-state.ts) and persisted the
  * terminal "AI unavailable" state instead, in which case it is that state (failed, no score, `aiUnavailableReason`). Callers
  * that update the room must use it rather than the summary they built from their own, real AI result.
+ *
+ * LOST-RESPONSE RECONCILIATION: `ambiguous` is set ONLY on a failure after which the server MAY have committed the save — the
+ * request got no response (status 0), got a 5xx (classifySaveReportRemoteResult's TRANSIENT_OR_UNKNOWN), or threw unexpectedly
+ * (an unknown outcome). Both AI-save routes answer every 4xx before writing anything, so a 4xx — like a result that was never
+ * sent — is a definite failure and carries no flag. On an ambiguous failure the room asks the server what it actually holds
+ * before calling the save failed (room-page-shell.tsx's reconcileAmbiguousAiSave); nothing here ever re-sends.
  */
-export type AiCompletionSaveResult = { ok: boolean; summary: ReportSummary };
+export type AiCompletionSaveResult = { ok: boolean; summary: ReportSummary; ambiguous?: true };
+
+/** A failed save; `ambiguous` when the server may still have committed it (see AiCompletionSaveResult). `null` = the outcome is unknown. */
+function failedSave(summary: ReportSummary, result: SaveReportRemoteResult | null): AiCompletionSaveResult {
+  return result === null || classifySaveReportRemoteResult(result) === "TRANSIENT_OR_UNKNOWN" ? { ok: false, summary, ambiguous: true } : { ok: false, summary };
+}
 
 /**
  * Sends ONLY the AI result of `enrichedReport` to the narrow AI-result route (POST /api/reports/[id]/ai-retry) and folds the
@@ -32,7 +43,7 @@ async function saveAiResultViaNarrowRoute(
     rawAiScore: enrichedReport.aiScore ?? null,
     aiAnalysis: prepareAiAnalysisForTransport(enrichedReport.aiAnalysis, enrichedReport.text),
   });
-  if (!result.ok) return { ok: false, summary };
+  if (!result.ok) return failedSave(summary, result);
   return { ok: true, summary: result.aiOutcome === AI_SAVE_OUTCOME_SIZE_UNAVAILABLE ? withSizeUnavailableAi(summary) : summary };
 }
 
@@ -83,11 +94,11 @@ export async function persistAiCompletion<T extends Record<string, unknown>>(
   try {
     const result = await saveRemote(enrichedReport, summary, undefined, room);
     if (result.ok) return { ok: true, summary };
-    if (classifySaveReportRemoteResult(result) !== "REQUEST_TOO_LARGE") return { ok: false, summary };
+    if (classifySaveReportRemoteResult(result) !== "REQUEST_TOO_LARGE") return failedSave(summary, result);
     return await saveAiResultViaNarrowRoute(enrichedReport as { aiScore?: number | null; aiAnalysis?: unknown; text?: string }, summary, saveNarrow);
   } catch (error) {
     console.error("Remote save of AI-enriched report failed unexpectedly (non-fatal):", error instanceof Error ? error.message : String(error));
-    return { ok: false, summary };
+    return failedSave(summary, null);
   }
 }
 
@@ -126,6 +137,6 @@ export async function persistAiRetryResult<T extends { aiScore?: number | null; 
     return await saveAiResultViaNarrowRoute(enrichedReport, summary, saveRemote);
   } catch (error) {
     console.error("Remote save of AI retry result failed unexpectedly (non-fatal):", error instanceof Error ? error.message : String(error));
-    return { ok: false, summary };
+    return failedSave(summary, null);
   }
 }

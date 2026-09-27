@@ -514,21 +514,25 @@ test("RETRY GENUINELY FAILS (model throws before a result): one model run, one s
   });
 });
 
-test("SAVE COMMITTED BUT THE RESPONSE WAS LOST: the persisted ready result is never re-run or overwritten — the next Retry is told it is complete, from the server's copy", async () => {
+test("SAVE COMMITTED BUT THE RESPONSE WAS LOST: the persisted ready result is never re-run or overwritten — the room reconciles to it from the server's own answer (tests/ai-save-lost-response-reconciliation.test.mjs), and a stale tab's Retry is told it is complete, from the server's copy", async () => {
   await scenario(async ({ account, b, room }) => {
     const id = await seedRoom(account, b, { room, analysis: "failed" });
     const before = await serverState(id);
+    const staleOccupant = await findRoomOccupant(env.client, account.userId, room);
     const host = await mount(account, room);
     worker.script.push("complete");
     b.fault("POST /api/reports/:id/ai-retry", "drop-after-commit");
     await clickRetry(host);
-    assert.equal(host.toasts.at(-1), "Could not save the updated AI result. Please try again.");
+    assert.equal(host.toasts.at(-1), "AI analysis complete.", "the lost answer is reconciled against the server, which holds the ready result");
+    assert.equal(retryButtonOf(host.tree), null, "the room is ready: no Retry");
     assert.deepEqual(await writesFor(id), ["ready/complete"], "the server committed exactly once");
     const committed = await serverState(id);
 
+    // A tab of this browser profile still showing the stale failed room.
+    const stale = mountRoom({ room, accountEmail: account.email, initialOccupant: staleOccupant });
     worker.script.push("error"); // would be a stale failure if it ever ran
-    await clickRetry(host);
-    assert.equal(host.toasts.at(-1), "AI analysis for this report is already complete.");
+    await clickRetry(stale);
+    assert.equal(stale.toasts.at(-1), "AI analysis for this report is already complete.");
     assert.equal(worker.runs.length, 1, "no second model run");
     assert.deepEqual(retryPosts(b, id), ["200-RESPONSE-LOST"], "no second save");
     assert.deepEqual(await writesFor(id), ["ready/complete"], "still exactly one persistence transition");
@@ -536,6 +540,7 @@ test("SAVE COMMITTED BUT THE RESPONSE WAS LOST: the persisted ready result is ne
     assert.deepEqual(after, committed, "the ready result is exactly as committed");
     assert.equal(after.similarity, before.similarity);
     host.unmount();
+    stale.unmount();
   });
 });
 

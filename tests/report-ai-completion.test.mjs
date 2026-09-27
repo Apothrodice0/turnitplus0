@@ -131,7 +131,8 @@ test("mixed-language retry recovery: retryAiCheck calls retryAiAnalysisWithFresh
 test("report-save/network rejection: persistAiCompletion resolves {ok:false} when the remote save reports a normal, documented failure, never throwing", async () => {
   const failRemote = async () => ({ ok: false, status: 0, quotaExceeded: false, roomOccupied: false });
   const result = await persistAiCompletion(fakeReport, fakeSummary, 3, failRemote);
-  assert.deepEqual(result, { ok: false, summary: fakeSummary });
+  // status 0 (no response) is AMBIGUOUS — the server may have committed it; see tests/ai-save-lost-response-reconciliation.test.mjs.
+  assert.deepEqual(result, { ok: false, summary: fakeSummary, ambiguous: true });
 });
 
 test("report-save/network rejection: persistAiCompletion resolves {ok:false} even if the remote save throws unexpectedly (defense in depth — saveReportRemote is documented fail-soft, but this boundary must hold regardless)", async () => {

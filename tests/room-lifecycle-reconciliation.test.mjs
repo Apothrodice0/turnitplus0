@@ -270,9 +270,9 @@ test("Room-number mapping: the raw, zero-based `room` value is used identically 
   // resave never re-sends reference text). The room argument — this test's
   // actual concern — is still the raw, zero-based `room` prop.
   assert.match(shell, /saveReportRemote\((?:report|reportForRemote), summary, academicResult\.academicSearchDiagnosticsId, room\)/, "the save must pass the raw room prop");
-  assert.match(shell, /fetchReportRoomContents\(room\)/, "must appear for both the completion poll and the reconciliation watchdog");
+  assert.match(shell, /fetchReportRoomContents\(room\)/, "must appear for the completion poll, the reconciliation watchdog and the lost-response AI-save reconciliation");
   const fetchOccurrences = shell.match(/fetchReportRoomContents\(room\)/g) ?? [];
-  assert.equal(fetchOccurrences.length, 2, "expected exactly 2 call sites: the completion poll and the reconciliation watchdog");
+  assert.equal(fetchOccurrences.length, 3, "expected exactly 3 call sites: the completion poll, the reconciliation watchdog, and reconcileAmbiguousAiSave (tests/ai-save-lost-response-reconciliation.test.mjs)");
 
   // Every `room + 1` (or equivalent) occurrence must be inside literal
   // display text, never passed as an argument to a save/fetch/key.

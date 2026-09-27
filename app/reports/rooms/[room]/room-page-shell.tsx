@@ -424,6 +424,20 @@ export function evaluateReconciliation(result: RoomContentsFetchResult, trackedR
 }
 
 /**
+ * LOST-RESPONSE RECONCILIATION's own pure decision (see RoomPageShell's reconcileAmbiguousAiSave), extracted for the same
+ * testability reason as evaluateReconciliation above. After an AI save whose answer never arrived, given the server's current
+ * view of this room and the id of the report that save was for: the server's occupant when it IS that report and its AI half
+ * is "ready" (deriveRoomStatus, decided server-side) — otherwise null: the read failed or was refused, the room is empty or
+ * holds another report, or the AI half is still processing/failed. Never a ready state the server did not report. Similarity
+ * still "pending" server-side does not block it: the AI half is final, and the completion poll keeps waiting for similarity
+ * exactly as it does after a confirmed save.
+ */
+export function reconciledAiSaveOccupant(result: RoomContentsFetchResult, reportId: string): Extract<RoomContents, { status: "ready" }> | null {
+  if (!result.ok || result.contents.status !== "ready" || result.contents.report.id !== reportId) return null;
+  return result.contents;
+}
+
+/**
  * Release-hardening audit finding SIM-04 (acceptance-check hardening): the
  * room card's own Similarity tile — for both the "ready" and "failed"
  * occupant states below — previously rendered the occupant's own
@@ -594,12 +608,32 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
   }
 
   /**
+   * LOST-RESPONSE RECONCILIATION — shared by both AI saves (saveEnrichedAiResult, saveRetriedAiResult). A save whose outcome is
+   * AMBIGUOUS (lib/report-ai-completion.ts's AiCompletionSaveResult: no response or a 5xx — the server may have committed it)
+   * used to leave the room failed/processing with a "could not be saved" message while the server already held the ready
+   * result: a reload showed ready, and Retry only said "already complete". So before such a save is called failed, the room
+   * asks the server — the SAME read the completion poll and the room's SSR use (fetchReportRoomContents -> findRoomOccupant) —
+   * and adopts the server's answer as is, only when it says THIS report's AI is ready (reconciledAiSaveOccupant). One read:
+   * never a re-run of the model, never a second save. Anything else (not ready, another report, the read itself failing) is
+   * the save failure it was, handled exactly as before.
+   */
+  async function reconcileAmbiguousAiSave(reportId: string): Promise<boolean> {
+    const serverOccupant = reconciledAiSaveOccupant(await fetchReportRoomContents(room), reportId);
+    if (!serverOccupant) return false;
+    invalidateRoomCache(accountEmail, room);
+    savedAiSummaryRef.current = serverOccupant.report;
+    setOccupant(serverOccupant);
+    return true;
+  }
+
+  /**
    * Persists an AI result (success or genuine failure) onto an already-saved
    * report and updates this room's occupant to match — the one place that
    * ever marks a room "ready" or "failed", used by both the automatic
    * post-upload pass (runCheck below) and the manual retry (retryAiCheck).
-   * Returns whether the save itself succeeded; the caller decides what to
-   * tell the user.
+   * Returns whether the save itself succeeded (including one whose answer was
+   * lost but whose ready result the server confirms — reconcileAmbiguousAiSave);
+   * the caller decides what to tell the user.
    *
    * Release-hardening audit finding LIFECYCLE-06 (Preview regression fix):
    * `report` here is the SAME client-generated SimilarityReport object
@@ -638,7 +672,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
     };
     await storeReportBestEffort(enriched, localOwner);
     const enrichedSaveResult = await persistAiCompletion(enriched, enrichedSummary, room);
-    if (!enrichedSaveResult.ok) return false;
+    if (!enrichedSaveResult.ok) return enrichedSaveResult.ambiguous ? reconcileAmbiguousAiSave(enrichedSummary.id) : false;
     invalidateRoomCache(accountEmail, room);
     // G2: `savedSummary` is what the SERVER actually persisted — the browser's own summary, unless the server decided the real
     // AI result cannot be stored next to this report and wrote the terminal "AI unavailable for this document" state instead
@@ -677,7 +711,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
     };
     await storeReportBestEffort(enriched, localOwner);
     const retrySaveResult = await persistAiRetryResult(enriched, enrichedSummary);
-    if (!retrySaveResult.ok) return false;
+    if (!retrySaveResult.ok) return retrySaveResult.ambiguous ? reconcileAmbiguousAiSave(enrichedSummary.id) : false;
     invalidateRoomCache(accountEmail, room);
     // G2: `savedSummary` is what the SERVER actually persisted — the browser's own summary, unless the server decided the real
     // AI result cannot be stored next to this report and wrote the terminal "AI unavailable for this document" state instead
