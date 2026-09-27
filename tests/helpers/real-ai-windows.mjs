@@ -105,9 +105,9 @@ export function simulateSignals(count, seed = 900, flaggedRate = 0.03) {
   return signals;
 }
 
-// The real calculateAiLogOddsDiagnostics spreads a per-token array into Math.max and throws RangeError above ~105k tokens
-// (a separate, recorded finding — NOT fixed here). This loop clone is field-for-field identical (asserted against the real
-// function wherever the real one survives) so the largest fixtures can still be assembled.
+// calculateAiLogOddsDiagnostics used to spread a per-token array into Math.max and throw RangeError above ~105k tokens
+// (fixed in lib/ai-core.ts; see tests/ai-large-array-extrema.test.mjs). This loop clone is field-for-field identical and is
+// kept as an INDEPENDENT reference for the largest fixtures (asserted against the real function below 100k tokens).
 function diagnosticsLoop(chunks, threshold) {
   let totalWords = 0;
   for (const chunk of chunks) if (chunk.wordEnd > totalWords) totalWords = chunk.wordEnd;

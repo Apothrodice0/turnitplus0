@@ -364,8 +364,17 @@ type AiProbabilityWindow = Pick<AiScoredChunk, "wordStart" | "wordEnd" | "probab
 type AiLogOddsWindow = Pick<AiScoredChunk, "logOdds">;
 type AiLogOddsPositionWindow = Pick<AiScoredChunk, "wordStart" | "wordEnd" | "logOdds">;
 
+// Math.max(floor, ...values) without the spread: a spread passes every element as a call argument and throws
+// "RangeError: Maximum call stack size exceeded" past ~125k elements — the per-token arrays below reach that on large
+// documents. Folding pairwise through Math.max returns the identical value (NaN still propagates, -0/+0 unchanged).
+function maxWithFloor(floor: number, values: readonly number[]) {
+  let maximum = floor;
+  for (const value of values) maximum = Math.max(maximum, value);
+  return maximum;
+}
+
 export function calculateAiDiagnostics(chunks: AiProbabilityWindow[], threshold = AI_PASSAGE_THRESHOLD) {
-  const totalWords = Math.max(0, ...chunks.map((chunk) => chunk.wordEnd));
+  const totalWords = maxWithFloor(0, chunks.map((chunk) => chunk.wordEnd));
   const wordProbabilities = Array.from({ length: totalWords }, () => 0);
   chunks.forEach((chunk) => {
     for (let word = chunk.wordStart; word < chunk.wordEnd; word += 1) {
@@ -381,7 +390,7 @@ export function calculateAiDiagnostics(chunks: AiProbabilityWindow[], threshold 
     flaggedWords,
     percentFlagged: totalWords === 0 ? 0 : Math.round((flaggedWords / totalWords) * 100),
     meanProbability: Math.round(meanProbability * 1000) / 1000,
-    maxProbability: Math.round(Math.max(0, ...wordProbabilities) * 1000) / 1000,
+    maxProbability: Math.round(maxWithFloor(0, wordProbabilities) * 1000) / 1000,
   };
 }
 
@@ -400,7 +409,7 @@ export function calculateAiLogOddsDiagnostics(
   chunks: AiLogOddsPositionWindow[],
   threshold = AI_PASSAGE_LOG_ODDS_THRESHOLD,
 ) {
-  const totalWords = Math.max(0, ...chunks.map((chunk) => chunk.wordEnd));
+  const totalWords = maxWithFloor(0, chunks.map((chunk) => chunk.wordEnd));
   const wordLogOdds = Array.from({ length: totalWords }, () => Number.NEGATIVE_INFINITY);
   chunks.forEach((chunk) => {
     for (let word = chunk.wordStart; word < chunk.wordEnd; word += 1) {
@@ -418,7 +427,7 @@ export function calculateAiLogOddsDiagnostics(
     flaggedPassages: chunks.filter((chunk) => isAiPassageFlagged(chunk.logOdds, threshold)).length,
     percentFlagged: totalWords === 0 ? 0 : Math.round((flaggedWords / totalWords) * 100),
     meanProbability: Math.round(meanProbability * 1000) / 1000,
-    maxProbability: Math.round(Math.max(0, ...wordProbabilities) * 1000) / 1000,
+    maxProbability: Math.round(maxWithFloor(0, wordProbabilities) * 1000) / 1000,
   };
 }
 
