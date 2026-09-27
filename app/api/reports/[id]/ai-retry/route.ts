@@ -81,7 +81,8 @@ import { logAiSizeUnavailableTelemetry } from '../../../../../lib/ai-size-unavai
  *        TERMINAL_AI_RESERVE_CHARS for exactly this. A request body over the ceiling is still refused before it is read
  *        (the size of an unread body proves nothing the server could safely record).
  *  - Same AI-column semantics as SAVE_REPORT_SQL (LIFECYCLE-02): once a report is 'ready', an incoming
- *    'failed' leaves it exactly as it was.
+ *    'failed' leaves it exactly as it was. "Ready" is the derived definition (deriveRoomStatus), so a legacy complete
+ *    row (ai_status NULL, a score) is protected exactly like an explicit 'ready' one.
  *  - Never scheduled: no similarity finalization, no shadow evaluation, no corpus admission, no
  *    document-identity capture runs here — none of them is part of an AI retry.
  *  - Compact AI passages (ai-compact-v1, lib/ai-passage-table.ts): a result may arrive with its per-window list as a
@@ -218,15 +219,19 @@ async function persistAiRetry(txClient: ReportsDbClient, sessionUser: SessionUse
       return new NextResponse(REPORT_UNAVAILABLE_BODY, { status: 503, headers: NO_STORE_JSON });
     }
 
-    // LIFECYCLE-02 parity with SAVE_REPORT_SQL: a genuine 'ready' result is never displaced by a late 'failed' one.
-    if (row.ai_status === 'ready' && retry.aiStatus === 'failed') {
+    // What the stored row already IS, from the server's own row. "Ready" is the repo's own derived definition — the one every
+    // read of this report uses (rooms index, room occupant, detail page) — so a legacy row with no ai_status but a score is
+    // complete too, and neither a late failure nor the size policy below can displace a legitimate result.
+    const storedIsReady = deriveRoomStatus(row.ai_score === null ? null : Number(row.ai_score), row.ai_status) === 'ready';
+
+    // LIFECYCLE-02 (the rule SAVE_REPORT_SQL applies to an explicit 'ready' row): a genuine 'ready' result is never displaced by
+    // a late 'failed' one. Read from storedIsReady, not the raw column: a legacy complete row (ai_status NULL) must not be
+    // downgraded by a direct Retry request the room itself would never offer.
+    if (storedIsReady && retry.aiStatus === 'failed') {
       await tx.rollback().catch(() => {});
       return json(200, { ok: true });
     }
 
-    // G2 — what the stored row already IS, from the server's own row. "Ready" is the repo's own derived definition
-    // (a legacy row with no ai_status but a score is complete too), so the size policy can never displace a legitimate result.
-    const storedIsReady = deriveRoomStatus(row.ai_score === null ? null : Number(row.ai_score), row.ai_status) === 'ready';
     const storedIsSizeUnavailable = row.ai_status === 'failed' && row.stored_unavailable_reason === AI_UNAVAILABLE_REASON_REPORT_SIZE;
     // Already terminally "AI unavailable for this document": an ordinary failure adds nothing and must not erase that
     // determination (a stale bundle's Retry that failed again) — idempotent, the same terminal answer, nothing written.
