@@ -18,7 +18,7 @@ import { captureDocumentIdentityAndFamily } from '../../../lib/document-family';
 import { linkAcademicSearchRunDiagnosticsToReport, resolveVerifiedAcademicEvidence } from '../../../lib/academic-search-diagnostics-repo';
 import { canonicalSha256 } from '../../../lib/document-identity';
 import { checkUploadLimit } from '../../../lib/upload-limit';
-import { deriveRoomStatus, getRoomCountForRole, isWithinActiveCycle, roomCycleEndsAt } from '../../../lib/report-rooms';
+import { deriveRoomStatus, derivedAiReadySql, getRoomCountForRole, isWithinActiveCycle, roomCycleEndsAt } from '../../../lib/report-rooms';
 import { TERMINAL_AI_RESERVE_CHARS, withoutClientAiUnavailableReason } from '../../../lib/ai-unavailable-state';
 import { findRoomOccupant, INTERPRETATION_TO_VERIFY_SQL, withholdUnexplainedSimilarity } from '../../../lib/reports-repo';
 import { runAfterResponse } from '../../../lib/run-after-response';
@@ -74,9 +74,13 @@ function isNonEmptyString(value: unknown): value is string {
 // persisted "ready" result (a real ai_score) with a later-arriving "failed"
 // one, discarding real data. The three CASE guards below make "ready" a
 // one-way, sticky terminal state with respect to a "failed" write
-// specifically: once ai_status is already 'ready', an incoming 'failed'
+// specifically: once the stored AI half is ready, an incoming 'failed'
 // write leaves ai_score/ai_tone/ai_status/payload_json exactly as they
-// were (every other column — title, word_count, etc. — still updates
+// were. "Ready" is ai_status 'ready' OR the repo's own derived definition
+// (deriveRoomStatus, evaluated in the statement by derivedAiReadySql — the
+// one every read of the report uses), so a legacy row with no ai_status but
+// a recorded score is protected exactly like an explicit 'ready' one (every
+// other column — title, word_count, etc. — still updates
 // normally, since both a 'ready' and a 'failed' resave carry the same
 // underlying similarity data). Every other transition is untouched: ready
 // can still be reached from processing or failed (a late genuine success
@@ -131,6 +135,11 @@ function isNonEmptyString(value: unknown): value is string {
 // concurrency-guard test can exercise this EXACT SQL text directly — never a
 // hand-copied duplicate that could silently drift from what production
 // actually runs.
+// LIFECYCLE-02's one condition, shared by all four CASEs (SQLite evaluates every SET expression against the row as it was
+// before this statement, so they always agree). The stored AI half is kept when it is explicitly 'ready' — which includes a
+// complete analysis whose score could not be calibrated (ai_score NULL, lib/ai-display-state.ts) — OR ready by the derived
+// definition (a legacy row with no ai_status but a recorded score).
+const KEEP_STORED_READY_AI_SQL = `(saved_reports.ai_status = 'ready' OR ${derivedAiReadySql('saved_reports')}) AND excluded.ai_status = 'failed'`;
 export const SAVE_REPORT_SQL = `INSERT INTO saved_reports (id, device_key, submission_id, title, report_created_at, word_count, archive_score, score_band, ai_score, ai_tone, ai_status, payload_json, user_id, room_number, updated_at)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
       ON CONFLICT(device_key, id) DO UPDATE SET
@@ -140,11 +149,11 @@ export const SAVE_REPORT_SQL = `INSERT INTO saved_reports (id, device_key, submi
         word_count = excluded.word_count,
         archive_score = excluded.archive_score,
         score_band = excluded.score_band,
-        ai_score = CASE WHEN saved_reports.ai_status = 'ready' AND excluded.ai_status = 'failed' THEN saved_reports.ai_score ELSE excluded.ai_score END,
-        ai_tone = CASE WHEN saved_reports.ai_status = 'ready' AND excluded.ai_status = 'failed' THEN saved_reports.ai_tone ELSE excluded.ai_tone END,
-        ai_status = CASE WHEN saved_reports.ai_status = 'ready' AND excluded.ai_status = 'failed' THEN saved_reports.ai_status ELSE excluded.ai_status END,
+        ai_score = CASE WHEN ${KEEP_STORED_READY_AI_SQL} THEN saved_reports.ai_score ELSE excluded.ai_score END,
+        ai_tone = CASE WHEN ${KEEP_STORED_READY_AI_SQL} THEN saved_reports.ai_tone ELSE excluded.ai_tone END,
+        ai_status = CASE WHEN ${KEEP_STORED_READY_AI_SQL} THEN saved_reports.ai_status ELSE excluded.ai_status END,
         payload_json = CASE
-          WHEN saved_reports.ai_status = 'ready' AND excluded.ai_status = 'failed' THEN saved_reports.payload_json
+          WHEN ${KEEP_STORED_READY_AI_SQL} THEN saved_reports.payload_json
           WHEN COALESCE(json_extract(saved_reports.payload_json, '$.unifiedSimilarityGeneration'), -1) > COALESCE(json_extract(excluded.payload_json, '$.unifiedSimilarityGeneration'), -1)
             THEN CASE
               WHEN json_extract(excluded.payload_json, '$.aiAnalysis') IS NOT NULL

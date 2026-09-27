@@ -111,6 +111,17 @@ export function deriveRoomStatus(aiScore: number | null, aiStatus: string | null
   return aiScore === null ? "processing" : "ready";
 }
 
+/**
+ * deriveRoomStatus(ai_score, ai_status) === "ready", as a SQL predicate over the row `table` names — for the one decision
+ * that has to be made INSIDE a statement, against the row exactly as stored when it runs: SAVE_REPORT_SQL's LIFECYCLE-02
+ * guard (app/api/reports/route.ts). The same rule, not a second one: 'failed' wins, otherwise a recorded score means ready
+ * (a legacy row with no ai_status included). tests/report-save-legacy-derived-ready.test.mjs checks the two against each
+ * other for every stored combination.
+ */
+export function derivedAiReadySql(table: string): string {
+  return `(${table}.ai_status IS NOT 'failed' AND ${table}.ai_score IS NOT NULL)`;
+}
+
 /** One row of the lightweight room index — never the report itself, just enough to render one room row. */
 export type RoomIndexEntry = {
   room: number;

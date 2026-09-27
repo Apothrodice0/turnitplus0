@@ -81,8 +81,8 @@ import { logAiSizeUnavailableTelemetry } from '../../../../../lib/ai-size-unavai
  *        TERMINAL_AI_RESERVE_CHARS for exactly this. A request body over the ceiling is still refused before it is read
  *        (the size of an unread body proves nothing the server could safely record).
  *  - Same AI-column semantics as SAVE_REPORT_SQL (LIFECYCLE-02): once a report is 'ready', an incoming
- *    'failed' leaves it exactly as it was. "Ready" is the derived definition (deriveRoomStatus), so a legacy complete
- *    row (ai_status NULL, a score) is protected exactly like an explicit 'ready' one.
+ *    'failed' leaves it exactly as it was. "Ready" is ai_status 'ready' OR the derived definition (deriveRoomStatus), so a
+ *    legacy complete row (ai_status NULL, a score) is protected exactly like an explicit 'ready' one.
  *  - Never scheduled: no similarity finalization, no shadow evaluation, no corpus admission, no
  *    document-identity capture runs here — none of them is part of an AI retry.
  *  - Compact AI passages (ai-compact-v1, lib/ai-passage-table.ts): a result may arrive with its per-window list as a
@@ -224,10 +224,11 @@ async function persistAiRetry(txClient: ReportsDbClient, sessionUser: SessionUse
     // complete too, and neither a late failure nor the size policy below can displace a legitimate result.
     const storedIsReady = deriveRoomStatus(row.ai_score === null ? null : Number(row.ai_score), row.ai_status) === 'ready';
 
-    // LIFECYCLE-02 (the rule SAVE_REPORT_SQL applies to an explicit 'ready' row): a genuine 'ready' result is never displaced by
-    // a late 'failed' one. Read from storedIsReady, not the raw column: a legacy complete row (ai_status NULL) must not be
-    // downgraded by a direct Retry request the room itself would never offer.
-    if (storedIsReady && retry.aiStatus === 'failed') {
+    // LIFECYCLE-02, exactly as SAVE_REPORT_SQL applies it: a genuine 'ready' result is never displaced by a late 'failed' one.
+    // "Ready" is the explicit column — which includes a complete analysis whose score could not be calibrated (ai_score NULL,
+    // lib/ai-display-state.ts) — OR storedIsReady: a legacy complete row (ai_status NULL) must not be downgraded by a direct
+    // Retry request the room itself would never offer.
+    if ((row.ai_status === 'ready' || storedIsReady) && retry.aiStatus === 'failed') {
       await tx.rollback().catch(() => {});
       return json(200, { ok: true });
     }
