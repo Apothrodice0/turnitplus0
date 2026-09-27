@@ -713,7 +713,11 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
       // the report or running the model (the buttons are hidden for it too; this is the second layer, for any path that reaches here).
       if (!isAiRetryOffered(occupant.report)) return;
       const local = localOwner ? await getStoredReportById<SimilarityReport>(reportId, localOwner).catch(() => null) : null;
-      const full = local ?? (await fetchRemoteReport<SimilarityReport>(reportId));
+      // AI-RETRY DOUBLE FAILURE: both AI saves write this local copy BEFORE the server confirms the save (saveEnrichedAiResult,
+      // saveRetriedAiResult), so a "complete" AI result in it may be one the server never persisted. Trusted by the guard below,
+      // one failed save made every later Retry in this browser stop at "already complete" while the room stayed failed/processing.
+      // Only the server's copy may say the AI result is complete: a local copy that claims it is replaced by the server's copy.
+      const full = local && local.aiAnalysis?.status !== "complete" ? local : await fetchRemoteReport<SimilarityReport>(reportId);
       if (!full) {
         notify("Could not load this report to retry AI analysis. Please try again.");
         return;
@@ -726,8 +730,9 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
       // already reached its genuine terminal READY state.
       // full.aiAnalysis?.status === "complete" is the exact same signal
       // saveEnrichedAiResult uses to persist ai_status "ready" (see its own
-      // aiStatus mapping above) — checked against freshly-fetched data
-      // (never a stale local component prop), and never against room
+      // aiStatus mapping above) — checked against the server's copy whenever
+      // it says "complete" (see `full` above; never a stale local component
+      // prop, never an unconfirmed local cache write), and never against room
       // number, so this protects the report itself no matter which room UI
       // path reached it.
       if (full.aiAnalysis?.status === "complete") {
