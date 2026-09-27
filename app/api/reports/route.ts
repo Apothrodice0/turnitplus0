@@ -76,7 +76,9 @@ function isNonEmptyString(value: unknown): value is string {
 // one-way, sticky terminal state with respect to a "failed" write
 // specifically: once the stored AI half is ready, an incoming 'failed'
 // write leaves ai_score/ai_tone/ai_status/payload_json exactly as they
-// were. "Ready" is ai_status 'ready' OR the repo's own derived definition
+// were. A stale 'processing' write (a re-sent first save) is refused the
+// same way — see KEEP_STORED_READY_AI_SQL. "Ready" is ai_status 'ready' OR
+// the repo's own derived definition
 // (deriveRoomStatus, evaluated in the statement by derivedAiReadySql — the
 // one every read of the report uses), so a legacy row with no ai_status but
 // a recorded score is protected exactly like an explicit 'ready' one (every
@@ -126,11 +128,11 @@ function isNonEmptyString(value: unknown): value is string {
 // never a re-quoted string). An incoming payload WITHOUT an aiAnalysis
 // (a similarity-only resave, or the still-processing first save) hits the
 // inner ELSE and leaves the retained payload — including any existing
-// aiAnalysis — completely untouched. The first WHEN (a 'failed' resave
-// against an already-'ready' row) is unchanged and never merges: that
-// incoming aiAnalysis is a genuine failure result that must not clobber
-// the good one, exactly as the ai_score/ai_tone/ai_status CASEs above
-// already refuse it.
+// aiAnalysis — completely untouched. The first WHEN (a 'failed' or stale
+// 'processing' resave against an already-'ready' row) never merges: that
+// incoming AI half is a failure result, or no result at all, that must not
+// clobber the good one, exactly as the ai_score/ai_tone/ai_status CASEs
+// above already refuse it.
 // Exported so tests/report-write-time-finalization.test.mjs's own SIM-04
 // concurrency-guard test can exercise this EXACT SQL text directly — never a
 // hand-copied duplicate that could silently drift from what production
@@ -138,8 +140,12 @@ function isNonEmptyString(value: unknown): value is string {
 // LIFECYCLE-02's one condition, shared by all four CASEs (SQLite evaluates every SET expression against the row as it was
 // before this statement, so they always agree). The stored AI half is kept when it is explicitly 'ready' — which includes a
 // complete analysis whose score could not be calibrated (ai_score NULL, lib/ai-display-state.ts) — OR ready by the derived
-// definition (a legacy row with no ai_status but a recorded score).
-const KEEP_STORED_READY_AI_SQL = `(saved_reports.ai_status = 'ready' OR ${derivedAiReadySql('saved_reports')}) AND excluded.ai_status = 'failed'`;
+// definition (a legacy row with no ai_status but a recorded score), and the incoming AI half is not a result: 'failed', or
+// 'processing'. 'processing' is only ever the room page's first save (runCheck: no score, no aiAnalysis yet); reaching this
+// upsert's conflict branch means that request was re-sent for a report that already exists (a duplicated/replayed request, a
+// stale tab or bundle, a direct call), and without this it erased the complete AI result. An incoming 'ready' still replaces
+// a ready AI half (complete -> complete), and nothing but a ready stored AI half is ever kept.
+const KEEP_STORED_READY_AI_SQL = `(saved_reports.ai_status = 'ready' OR ${derivedAiReadySql('saved_reports')}) AND excluded.ai_status IN ('failed', 'processing')`;
 export const SAVE_REPORT_SQL = `INSERT INTO saved_reports (id, device_key, submission_id, title, report_created_at, word_count, archive_score, score_band, ai_score, ai_tone, ai_status, payload_json, user_id, room_number, updated_at)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
       ON CONFLICT(device_key, id) DO UPDATE SET
