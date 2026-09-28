@@ -684,7 +684,7 @@ test("CARD (structural): /admin loads the Archive figures only after the admin g
   assert.match(page, /<ArchiveCardMetrics metrics=\{archiveMetrics\} \/>/);
   assert.match(page, /href="\/admin\/archive"/);
   const card = codeOf("components/admin/archive/archive-card-metrics.tsx");
-  for (const label of ["Active", "This week", "Maturing", "Rejected · 7d"]) assert.ok(card.includes(`label="${label}"`), label);
+  for (const label of ["Eligible", "This week", "Maturing", "Rejected · 7d"]) assert.ok(card.includes(`label="${label}"`), label);
   assert.doesNotMatch(card, /value=\{\d/, "no hardcoded figure");
   assert.match(card, /unavailable/, "a failed load says so instead of showing zeros");
 });

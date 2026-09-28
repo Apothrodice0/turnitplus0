@@ -51,7 +51,7 @@ export default async function AdminArchivePage() {
       <AdminHeader
         icon={Archive}
         title="Archive"
-        description="Every source the hosted runtime can match against — reference archive and prior submissions — with maturity, eligibility, provenance and growth. Read-only; not visible to ordinary accounts."
+        description="Reference sources and prior submissions available to the hosted runtime, with maturity, eligibility, provenance and growth. Read-only; not visible to ordinary accounts."
       />
       {summary && <ArchiveRuntimePills summary={summary} />}
 

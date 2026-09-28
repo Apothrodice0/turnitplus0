@@ -13,7 +13,7 @@ export function ArchiveCardMetrics({ metrics }: { metrics: ArchiveExplorerCardMe
   }
   return (
     <dl className="admin-archive-card-metrics">
-      <Figure label="Active" value={metrics.active} emphasis />
+      <Figure label="Eligible" value={metrics.active} emphasis />
       <Figure label="This week" value={metrics.addedLast7Days} signed />
       <Figure label="Maturing" value={metrics.maturing} />
       <Figure label="Rejected · 7d" value={metrics.rejectedOrDuplicateLast7Days} />

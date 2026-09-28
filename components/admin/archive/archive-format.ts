@@ -21,7 +21,7 @@ export const SOURCE_CLASS_PLURAL: Record<ArchiveExplorerSourceClass, string> = {
 };
 
 export const STATE_LABEL: Record<ArchiveExplorerState, string> = {
-  active: "Active",
+  active: "Eligible",
   maturing: "Maturing",
   stored: "Awaiting index",
   removed: "Removed",

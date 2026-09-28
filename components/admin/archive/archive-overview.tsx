@@ -4,10 +4,12 @@ import type { ArchiveExplorerSummary } from "./archive-types";
 import { formatCount } from "./archive-format";
 
 /**
- * Top of /admin/archive — the headline "active matching sources" figure,
+ * Top of /admin/archive — the headline "match-eligible sources" figure,
  * the supporting stat tiles, and the admission lifecycle (Stored → Maturing
- * → Active). Purely presentational over getArchiveExplorerSummary's output;
- * the page gates and loads it.
+ * → Eligible). Purely presentational over getArchiveExplorerSummary's output;
+ * the page gates and loads it. Eligibility is per-source state; whether
+ * runtime matching actually uses eligible sources is the runtime flags'
+ * call (ArchiveRuntimePills).
  */
 export function ArchiveOverview({ summary }: { summary: ArchiveExplorerSummary }) {
   const { activeMatchingSources: active, referenceArchive, admissions, added, rejectedOrDuplicate } = summary;
@@ -17,9 +19,9 @@ export function ArchiveOverview({ summary }: { summary: ArchiveExplorerSummary }
     <>
       <section className="admin-archive-summary" aria-label="Corpus totals">
         <div className="admin-archive-hero">
-          <div className="admin-archive-eyebrow">Active matching sources</div>
+          <div className="admin-archive-eyebrow">Match-eligible sources</div>
           <div className="admin-archive-hero-value">{formatCount(active.total)}</div>
-          <p className="admin-archive-hero-caption">Distinct sources that can contribute a match right now, under each matcher&apos;s own eligibility rule.</p>
+          <p className="admin-archive-hero-caption">Distinct sources that pass their matcher&apos;s own eligibility rule. Whether report matching uses them depends on the runtime flags above.</p>
           {active.total > 0 && (
             <div className="admin-archive-composition" role="img" aria-label={`${active.referenceArchive} reference archive, ${active.priorSubmissions} prior submissions`}>
               {active.referenceArchive > 0 && <span className="admin-archive-composition-seg admin-archive-composition-seg--reference" style={{ flexGrow: referenceShare }} />}
@@ -74,7 +76,7 @@ function StatTile({ label, value, sub }: { label: string; value: number; sub: st
 /**
  * The admission lifecycle as the policy actually runs it: an accepted upload
  * is Stored and Maturing at once; when its window elapses it leaves
- * Maturing, and becomes Active only if it is also indexed into the matching
+ * Maturing, and becomes Eligible only if it is also indexed into the matching
  * corpus — otherwise it waits in Awaiting index.
  */
 export function ArchiveLifecycle({ summary }: { summary: ArchiveExplorerSummary }) {
@@ -86,12 +88,12 @@ export function ArchiveLifecycle({ summary }: { summary: ArchiveExplorerSummary 
         <ArrowRight size={18} className="admin-archive-flow-arrow" aria-hidden="true" />
         <FlowStage icon={Hourglass} label="Maturing" value={admissions.maturing} hint={`${maturityWindowDays}-day window`} tone="maturing" />
         <ArrowRight size={18} className="admin-archive-flow-arrow" aria-hidden="true" />
-        <FlowStage icon={CircleCheck} label="Active" value={admissions.active} hint="Match-eligible" tone="active" />
+        <FlowStage icon={CircleCheck} label="Eligible" value={admissions.active} hint="Mature & indexed" tone="active" />
         <FlowStage icon={Timer} label="Awaiting index" value={admissions.awaitingIndex} hint="Mature, not indexed" tone="waiting" />
       </div>
       <p className="admin-archive-lifecycle-rule">
         A new accepted upload counts <strong>Stored +1</strong> and <strong>Maturing +1</strong>. After {maturityWindowDays} days it leaves
-        Maturing — <strong>Active +1</strong> once it is indexed into the matching corpus, otherwise <strong>Awaiting index +1</strong>.
+        Maturing — <strong>Eligible +1</strong> once it is indexed into the matching corpus, otherwise <strong>Awaiting index +1</strong>.
       </p>
       <dl className="admin-archive-outcomes">
         <div><dt>Duplicate</dt><dd>{formatCount(admissions.duplicate)}</dd></div>
@@ -103,12 +105,12 @@ export function ArchiveLifecycle({ summary }: { summary: ArchiveExplorerSummary 
       </dl>
       {!flags.promotionEnabled && (
         <p className="admin-archive-callout" role="note">
-          Promotion is off in this environment, so accepted uploads are stored but cannot become Active.
+          Promotion is off in this environment, so accepted uploads are stored but cannot become Eligible.
         </p>
       )}
       {!flags.sourceMatchingEnabled && (
         <p className="admin-archive-callout" role="note">
-          Corpus source matching is off: matches from admitted submissions are withheld from reports. Eligibility shown here is unaffected.
+          Corpus source matching is off: eligible admitted submissions are withheld from report matching. Eligibility shown here is unaffected.
         </p>
       )}
     </div>

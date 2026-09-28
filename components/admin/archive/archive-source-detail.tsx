@@ -20,7 +20,7 @@ function eligibilityExplanation(detail: ArchiveExplorerDetail): string {
       const needsIndex = detail.sourceClass === "admitted_submission" && detail.promotionStatus !== "indexed";
       const base = `Inside the ${detail.maturityWindowDays}-day maturity window until ${formatDateTime(detail.maturesAt)} — not eligible for cross-account matching yet.`;
       const alsoEligible = detail.matchEligible ? " The same content is already match-eligible through another corpus backing." : "";
-      return `${base}${needsIndex ? " It must also be indexed before it can become Active." : ""}${alsoEligible}`;
+      return `${base}${needsIndex ? " It must also be indexed before it can become Eligible." : ""}${alsoEligible}`;
     }
     case "stored":
       return detail.sourceClass === "admitted_submission"
