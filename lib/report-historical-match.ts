@@ -1,6 +1,7 @@
 import type { Client, Transaction } from "@libsql/client";
 import { createHash } from "node:crypto";
 import { canonicalizeText } from "./canonical-text";
+import { mapCanonicalTokensToRawTokens, projectCanonicalPassagesToRaw } from "./canonical-token-position-map";
 import { matchAgainstUserSubmissionCorpus, isCorpusSourceMatchingEnabled, USER_SUBMISSION_MATCHER_VERSION, USER_SUBMISSION_MATCH_THRESHOLDS } from "./user-submission-matching";
 import {
   CORPUS_FINGERPRINT_VERSION,
@@ -219,13 +220,25 @@ const MATCH_CONFIG_DIGEST = createHash("sha256")
   .digest("hex")
   .slice(0, 12);
 
+// The position space of a stored row's passages. Rows written before the
+// canonical->raw projection (lib/canonical-token-position-map.ts) hold
+// tokens(canonicalText) indices that every consumer reads as tokens(rawText)
+// indices — shifted onto unverified raw words whenever a zero-width mark was
+// stripped. Carrying this in the tag below makes every such row fail
+// isCurrentVersion, so the next write-capable resolution recomputes it lazily
+// and rewrites it under this tag — the same no-column, no-migration
+// invalidation a thresholds change gets. The matcher itself is unchanged, so
+// USER_SUBMISSION_MATCHER_VERSION stays as it is.
+const SNAPSHOT_PASSAGE_POSITIONS_VERSION = "raw-token-v1";
+
 /**
  * The matcher identity a snapshot is validated against: the hand-maintained
- * matcher version PLUS the config digest above. Exported so
- * lib/report-primary-similarity.ts's isFreshCurrentNoHistoricalMatch checks
- * against the exact same value a stored row's matcher_version column holds.
+ * matcher version PLUS the stored-passage position space PLUS the config
+ * digest above. Exported so lib/report-primary-similarity.ts's
+ * isFreshCurrentNoHistoricalMatch checks against the exact same value a
+ * stored row's matcher_version column holds.
  */
-export const SNAPSHOT_MATCHER_VERSION = `${USER_SUBMISSION_MATCHER_VERSION}+cfg.${MATCH_CONFIG_DIGEST}`;
+export const SNAPSHOT_MATCHER_VERSION = `${USER_SUBMISSION_MATCHER_VERSION}+pos.${SNAPSHOT_PASSAGE_POSITIONS_VERSION}+cfg.${MATCH_CONFIG_DIGEST}`;
 
 /**
  * Written to a snapshot row's status column (instead of "NO_HISTORICAL_MATCH")
@@ -603,7 +616,18 @@ export async function getOrComputeHistoricalMatchSnapshot(
     isPartial = matchResult.partial === true;
     if (matchResult.status === "MATCHED") {
       status = "MATCHED";
-      const serialized = serializeMatchesForStorage(matchResult.matches);
+      // The matcher's passages index tokens(canonicalText); every consumer of
+      // this snapshot (lib/unified-similarity.ts's union, highlighting) reads
+      // them as tokens(rawText) indices. Re-express them through the explicit
+      // canonical->raw token mapping so a zero-width mark stripped by
+      // canonicalizeText can never shift credit onto an unverified raw word
+      // (see lib/canonical-token-position-map.ts). Match-level statistics
+      // (containment, matchedWordCount, longestMatchWords, passageCount) stay
+      // the matcher's own.
+      const rawTokenMapping = mapCanonicalTokensToRawTokens(params.rawText, canonicalText);
+      const serialized = serializeMatchesForStorage(
+        matchResult.matches.map((match) => ({ ...match, passages: projectCanonicalPassagesToRaw(match.passages, rawTokenMapping) })),
+      );
       resultJson = JSON.stringify(serialized);
       candidateCount = serialized.length;
     } else if (isPartial || corpusSourceMatchingEnabledAtComputation) {
