@@ -482,7 +482,8 @@ export async function POST(request: Request) {
     // AI still running) may not fill the persisted-report ceiling all the way: it must leave TERMINAL_AI_RESERVE_CHARS free, so
     // that every accepted report can always hold the tiny "AI unavailable" marker and reach a terminal AI state even when its
     // real AI result cannot fit. The ceiling itself is unchanged (MAX_BYTES); a save that already carries its AI result (the
-    // automatic AI resave) is checked against the full MAX_BYTES, exactly as before. "Terminal" is the repo's own derived
+    // automatic AI resave — an explicit 'ready' whose score could not be calibrated included: it is settled, see the
+    // explicit-ready check below) is checked against the full MAX_BYTES, exactly as before. "Terminal" is the repo's own derived
     // definition (deriveRoomStatus), applied to the values THIS request declares. It never affects request-size checks. Every
     // persisted-size comparison below uses persistedPayloadSize (lib/report-transport-limits.ts): UTF-16 code units of the serialized
     // JSON — the SAME unit the AI-result route measures the terminal marker in, so "an accepted report can always hold the marker"
@@ -531,6 +532,27 @@ export async function POST(request: Request) {
     if (isCompactAiAnalysis(incomingAiAnalysis)) {
       const incomingText = (payload as { text?: unknown }).text;
       if (typeof incomingText !== 'string' || !validateCompactAiAnalysis(incomingAiAnalysis, { text: incomingText }).ok) {
+        logReportSaveRejectedTelemetry({ reason: 'MALFORMED_REQUEST', status: 400 });
+        return new NextResponse(JSON.stringify({ error: 'Invalid AI result' }), { status: 400 });
+      }
+    }
+
+    // EXPLICIT READY => COMPLETE ANALYSIS. ai_status 'ready' means the AI analysis is COMPLETE: deriveRoomStatus
+    // (lib/report-rooms.ts) settles the room on it even when no score could be calibrated (ai_score NULL), so it must never
+    // be stored without one. Every product writer pairs them (room-page-shell.tsx saveEnrichedAiResult: complete -> 'ready')
+    // and the AI-result route refuses an unpaired 'ready' (app/api/reports/[id]/ai-retry/route.ts parseAiRetryRequest); this
+    // applies the same checks that route makes of a 'ready' result: `payload.aiAnalysis` is an object, its status is
+    // 'complete', and its `passages`, when present, is an array. A missing analysis, an error / unsupported / processing one
+    // and the size-unavailable marker (an 'error' analysis) are all refused 400 here, before anything is read or written.
+    // Only the explicit 'ready' declaration is checked: 'processing', 'failed' and a statusless (legacy) save are accepted
+    // exactly as before.
+    if (aiStatus === 'ready') {
+      const readyAnalysis = incomingAiAnalysis as { status?: unknown; passages?: unknown } | null | undefined;
+      const isCompleteAnalysis =
+        typeof readyAnalysis === 'object' && readyAnalysis !== null && !Array.isArray(readyAnalysis) &&
+        readyAnalysis.status === 'complete' &&
+        (readyAnalysis.passages === undefined || Array.isArray(readyAnalysis.passages));
+      if (!isCompleteAnalysis) {
         logReportSaveRejectedTelemetry({ reason: 'MALFORMED_REQUEST', status: 400 });
         return new NextResponse(JSON.stringify({ error: 'Invalid AI result' }), { status: 400 });
       }

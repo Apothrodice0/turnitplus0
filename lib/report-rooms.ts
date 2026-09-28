@@ -13,12 +13,17 @@
  *
  * A room's status is a pure function of its most recent report (if any):
  *  - "ready"      — a report exists, is still within its active 24h cycle,
- *                   AND its AI analysis has actually finished (ai_score is
- *                   recorded). The room shows that report; a new upload into
+ *                   AND its AI analysis has actually finished: ai_status is
+ *                   explicitly 'ready' (a complete analysis — POST
+ *                   /api/reports refuses an explicit 'ready' without one —
+ *                   whose score may legitimately be NULL when it could not be
+ *                   calibrated), or, for a row with no explicit status, ai_score
+ *                   is recorded. The room shows that report; a new upload into
  *                   this room is refused (both client- and server-side —
  *                   see app/api/reports/route.ts) until the cycle ends.
  *  - "processing" — a report exists and is within its active 24h cycle, but
- *                   ai_score is still NULL: app/page.tsx's generateReport()
+ *                   no AI result is recorded yet (no explicit 'ready', and
+ *                   ai_score is still NULL): app/page.tsx's generateReport()
  *                   deliberately saves the similarity result first and
  *                   merges the AI score in via a second save once analysis
  *                   finishes (see that file's own TASK 4 comment — this is
@@ -102,24 +107,29 @@ export type RoomStatus = "empty" | "processing" | "ready" | "failed";
  * findRoomOccupant (a single room's own occupant, shared with the SSR room
  * page) derive this — kept here, not duplicated, so the two can never
  * disagree. `aiStatus` is whatever the client last wrote at save time (see
- * this file's own header comment); NULL means either a legacy pre-0028 row
- * or a report still mid-analysis, and `aiScore` alone (the pre-existing
- * signal) still correctly resolves that case to "processing".
+ * this file's own header comment). Precedence: an explicit 'failed' wins;
+ * an explicit 'ready' is a complete analysis and is ready whether or not a
+ * score could be calibrated (ai_score NULL — lib/ai-display-state.ts);
+ * otherwise (NULL: a legacy pre-0028 row or a report still mid-analysis;
+ * 'processing') `aiScore` alone, the pre-existing signal, decides — a
+ * recorded score is ready, none is "processing".
  */
 export function deriveRoomStatus(aiScore: number | null, aiStatus: string | null): "processing" | "ready" | "failed" {
   if (aiStatus === "failed") return "failed";
+  if (aiStatus === "ready") return "ready";
   return aiScore === null ? "processing" : "ready";
 }
 
 /**
  * deriveRoomStatus(ai_score, ai_status) === "ready", as a SQL predicate over the row `table` names — for the one decision
  * that has to be made INSIDE a statement, against the row exactly as stored when it runs: SAVE_REPORT_SQL's LIFECYCLE-02
- * guard (app/api/reports/route.ts). The same rule, not a second one: 'failed' wins, otherwise a recorded score means ready
- * (a legacy row with no ai_status included). tests/report-save-legacy-derived-ready.test.mjs checks the two against each
- * other for every stored combination.
+ * guard (app/api/reports/route.ts). The same rule, not a second one: 'failed' wins, an explicit 'ready' is ready, otherwise
+ * a recorded score means ready (a legacy row with no ai_status included). `IS` (never `=`) so a NULL ai_status yields 0,
+ * not NULL. tests/ai-ready-null-room-state.test.mjs checks the predicate alone against deriveRoomStatus, and
+ * tests/report-save-legacy-derived-ready.test.mjs the guard built on it, for every stored combination.
  */
 export function derivedAiReadySql(table: string): string {
-  return `(${table}.ai_status IS NOT 'failed' AND ${table}.ai_score IS NOT NULL)`;
+  return `(${table}.ai_status IS 'ready' OR (${table}.ai_status IS NOT 'failed' AND ${table}.ai_score IS NOT NULL))`;
 }
 
 /** One row of the lightweight room index — never the report itself, just enough to render one room row. */

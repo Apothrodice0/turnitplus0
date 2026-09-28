@@ -436,7 +436,7 @@ for (const [num_, shape, title] of [
       t.diagnostic(`CAPTURE shape=${shape} via=${label} ${JSON.stringify(summarize(c))}`);
       assert.equal(c.before.state.protectedReady, true, "fixture sanity: protected-ready before");
       if (shape === "explicitReadyCompact") assert.equal(c.before.ai.aiAnalysisCompact, true, "fixture sanity: the stored AI result is the compact table");
-      if (shape === "explicitReadyNullScore") assert.equal(c.before.state.derived, "processing", "fixture sanity: the derived rule alone would not protect this row");
+      if (shape === "explicitReadyNullScore") assert.equal(c.before.state.derived, "ready", "fixture sanity: explicit ready is authoritative — derived ready without a score");
       assertReadyPreserved(c, `${shape} <- ${label}`);
     });
   }

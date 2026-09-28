@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { completeAiAnalysis } from "./helpers/complete-ai-analysis.mjs";
 import test from "node:test";
 import fs from "node:fs";
 import path from "node:path";
@@ -168,7 +169,7 @@ async function post(acc, id, extra = {}, text = MANUSCRIPT) {
       payload: {
         version: 11, id, submissionId: "sub-" + id, title: "scai fixture", author: "", assignment: "",
         created: new Date().toISOString(), score: 0, archiveScore: 0, wordCount, scoreBand: "Low",
-        matchedWordCount: 0, sources: [], repeats: [], text,
+        matchedWordCount: 0, sources: [], repeats: [], text, aiAnalysis: completeAiAnalysis(),
       },
       ...extra,
     }),

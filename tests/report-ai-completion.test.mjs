@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { completeAiAnalysis } from "./helpers/complete-ai-analysis.mjs";
 import { readFile } from "node:fs/promises";
 import fs from "node:fs";
 import path from "node:path";
@@ -386,7 +387,7 @@ test("directly rejected aiAnalysisPromise: the happy path is unaffected — a re
     const first = await postRaceReport({ id, aiScore: null, aiTone: null, aiStatus: "processing" });
     assert.equal(first.status, 200);
 
-    const readyRes = await postRaceReport({ id, aiScore: 88, aiTone: "high", aiStatus: "ready", payload: { note: "ready-payload" } });
+    const readyRes = await postRaceReport({ id, aiScore: 88, aiTone: "high", aiStatus: "ready", payload: { note: "ready-payload", aiAnalysis: completeAiAnalysis() } });
     assert.equal(readyRes.status, 200);
 
     const lateFailedRes = await postRaceReport({ id, aiScore: null, aiTone: null, aiStatus: "failed", payload: { note: "failed-payload" } });
@@ -396,7 +397,7 @@ test("directly rejected aiAnalysisPromise: the happy path is unaffected — a re
     assert.equal(row.ai_status, "ready", "a late-arriving 'failed' must never downgrade an already-'ready' row");
     assert.equal(Number(row.ai_score), 88, "the real AI score must survive the late failure");
     assert.equal(row.ai_tone, "high");
-    assert.deepEqual(JSON.parse(row.payload_json), { note: "ready-payload" }, "payload_json must also stay the ready version — a partial downgrade (columns preserved, payload overwritten) would still corrupt what /reports/[id] renders");
+    assert.deepEqual(JSON.parse(row.payload_json), { note: "ready-payload", aiAnalysis: completeAiAnalysis() }, "payload_json must also stay the ready version — a partial downgrade (columns preserved, payload overwritten) would still corrupt what /reports/[id] renders");
   });
 
   test("concurrent opposite outcomes: failed arrives first, ready arrives second (a genuine late success) — ready must still win, matching normal retry behavior", async () => {
@@ -407,13 +408,13 @@ test("directly rejected aiAnalysisPromise: the happy path is unaffected — a re
     const failedRes = await postRaceReport({ id, aiScore: null, aiTone: null, aiStatus: "failed", payload: { note: "failed-payload" } });
     assert.equal(failedRes.status, 200);
 
-    const readyRes = await postRaceReport({ id, aiScore: 55, aiTone: "low", aiStatus: "ready", payload: { note: "ready-payload" } });
+    const readyRes = await postRaceReport({ id, aiScore: 55, aiTone: "low", aiStatus: "ready", payload: { note: "ready-payload", aiAnalysis: completeAiAnalysis() } });
     assert.equal(readyRes.status, 200);
 
     const row = await readRaceRow(id);
     assert.equal(row.ai_status, "ready", "a genuine later success (e.g. a manual retry) must still be able to upgrade a failed row to ready");
     assert.equal(Number(row.ai_score), 55);
-    assert.deepEqual(JSON.parse(row.payload_json), { note: "ready-payload" });
+    assert.deepEqual(JSON.parse(row.payload_json), { note: "ready-payload", aiAnalysis: completeAiAnalysis() });
   });
 
   test("concurrent opposite outcomes: every other transition is untouched by the guard (processing->failed, failed->failed, ready->ready)", async () => {
@@ -425,8 +426,8 @@ test("directly rejected aiAnalysisPromise: the happy path is unaffected — a re
 
     const readyToReadyId = "race-report-ready-to-ready";
     await postRaceReport({ id: readyToReadyId, aiScore: null, aiTone: null, aiStatus: "processing" });
-    await postRaceReport({ id: readyToReadyId, aiScore: 10, aiTone: "low", aiStatus: "ready", payload: { note: "first-ready" } });
-    await postRaceReport({ id: readyToReadyId, aiScore: 20, aiTone: "moderate", aiStatus: "ready", payload: { note: "second-ready" } });
+    await postRaceReport({ id: readyToReadyId, aiScore: 10, aiTone: "low", aiStatus: "ready", payload: { note: "first-ready", aiAnalysis: completeAiAnalysis() } });
+    await postRaceReport({ id: readyToReadyId, aiScore: 20, aiTone: "moderate", aiStatus: "ready", payload: { note: "second-ready", aiAnalysis: completeAiAnalysis() } });
     const readyToReadyRow = await readRaceRow(readyToReadyId);
     assert.equal(readyToReadyRow.ai_status, "ready");
     assert.equal(Number(readyToReadyRow.ai_score), 20, "a second genuine ready result (e.g. re-running retry after an already-ready state) must still be able to update the score normally — the guard only protects against a 'failed' downgrade");

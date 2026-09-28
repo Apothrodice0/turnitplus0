@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { completeAiAnalysis } from "./helpers/complete-ai-analysis.mjs";
 import test from "node:test";
 import fs from "node:fs";
 import path from "node:path";
@@ -196,7 +197,7 @@ async function post(acc, id, extra) {
     body: JSON.stringify({
       deviceKey: acc.deviceKey, id, submissionId: "sub-" + id, title: "trn fixture", createdAt: new Date().toISOString(),
       wordCount: RWC, archiveScore: 0, scoreBand: "Low", aiScore: 2, aiTone: "low", aiStatus: "ready", room: 0,
-      payload: { version: 11, id, submissionId: "sub-" + id, title: "trn fixture", author: "", assignment: "", created: new Date().toISOString(), score: 0, archiveScore: 0, wordCount: RWC, scoreBand: "Low", matchedWordCount: 0, sources: [], repeats: [], text: MANUSCRIPT },
+      payload: { version: 11, id, submissionId: "sub-" + id, title: "trn fixture", author: "", assignment: "", created: new Date().toISOString(), score: 0, archiveScore: 0, wordCount: RWC, scoreBand: "Low", matchedWordCount: 0, sources: [], repeats: [], text: MANUSCRIPT, aiAnalysis: completeAiAnalysis() },
       ...extra,
     }),
   }));

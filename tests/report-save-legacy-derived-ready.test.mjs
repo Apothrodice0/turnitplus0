@@ -498,16 +498,16 @@ test("8. TERMINAL SIZE: an automatic result too large for the whole-report save 
     assert.deepEqual(writes.rowWrites, 0, `${shape}: nothing written`);
     assert.deepEqual(await aiHalf(r.id), before, `${shape}: the ready result is untouched`);
     assert.equal(model.runs, 1, `${shape}: exactly one model run`);
-    // deriveRoomStatus(NULL, 'ready') is "processing" (test 9) — unchanged here: only the stored result's preservation is pinned.
-    assert.equal((await effectiveState(r)).derived, shape === "explicitReadyNullScore" ? "processing" : "ready", `${shape}: derived status unchanged`);
+    // deriveRoomStatus(NULL, 'ready') is "ready" (test 9): an explicit 'ready' is a complete analysis, with or without a score.
+    assert.equal((await effectiveState(r)).derived, "ready", `${shape}: derived status unchanged — ready`);
   }
 });
 
 // ---------------------------------------------------------------------------------------------------------------------
 // 9. EXPLICIT READY WITHOUT A CALIBRATED SCORE — ai_status 'ready', ai_score NULL: a complete analysis whose median could not
 //    be calibrated (e.g. a stale worker's scoringVersion; lib/ai-display-state.ts rule 4). deriveRoomStatus calls it
-//    "processing", but it holds a genuine complete result and LIFECYCLE-02 has always kept it against a late failure. Both write
-//    paths must keep doing so: the guard is "explicitly ready OR derived ready", never the derived rule alone. The AI-retry
+//    "ready" (explicit 'ready' is authoritative), it holds a genuine complete result and LIFECYCLE-02 has always kept it against
+//    a late failure. Both write paths must keep doing so: the guard is "explicitly ready OR derived ready". The AI-retry
 //    route's G2 size policy uses the same guard: an oversized complete result is answered 200 with nothing written — never the
 //    REPORT_SIZE marker over the stored result (on 3aa0e38 it wrote the tentative candidate, then the marker: terminal failed).
 // ---------------------------------------------------------------------------------------------------------------------
@@ -525,7 +525,7 @@ async function seedReadyWithoutScore() {
 }
 
 test("9. EXPLICIT READY WITHOUT A CALIBRATED SCORE keeps its complete result against a late failure on BOTH write paths — the whole-report save and the AI-retry route — and against an oversized result sent to the AI-retry route", async (t) => {
-  assert.equal(deriveRoomStatus(null, "ready"), "processing", "the derived rule alone would not protect this row");
+  assert.equal(deriveRoomStatus(null, "ready"), "ready", "explicit ready is authoritative: a complete analysis without a calibrated score is ready");
   const viaSave = await seedReadyWithoutScore();
   const beforeSave = await aiHalf(viaSave.id);
   assert.deepEqual(await FAILED_SAVES["automatic-pass failure (client helper)"](viaSave), { ok: true, http: ["/api/reports:200"] });

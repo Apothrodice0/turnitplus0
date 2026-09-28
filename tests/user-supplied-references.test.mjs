@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { completeAiAnalysis } from "./helpers/complete-ai-analysis.mjs";
 import test from "node:test";
 
 import {
@@ -390,7 +391,7 @@ async function post(acc, id, extra) {
     body: JSON.stringify({
       deviceKey: acc.deviceKey, id, submissionId: "sub-" + id, title: "usr fixture", createdAt: new Date().toISOString(),
       wordCount: RWC, archiveScore: 0, scoreBand: "Low", aiScore: 2, aiTone: "low", aiStatus: "ready", room: 0,
-      payload: { version: 11, id, submissionId: "sub-" + id, title: "usr fixture", author: "", assignment: "", created: new Date().toISOString(), score: 0, archiveScore: 0, wordCount: RWC, scoreBand: "Low", matchedWordCount: 0, sources: [], repeats: [], text: MANUSCRIPT },
+      payload: { version: 11, id, submissionId: "sub-" + id, title: "usr fixture", author: "", assignment: "", created: new Date().toISOString(), score: 0, archiveScore: 0, wordCount: RWC, scoreBand: "Low", matchedWordCount: 0, sources: [], repeats: [], text: MANUSCRIPT, aiAnalysis: completeAiAnalysis() },
       ...extra,
     }),
   }));
@@ -442,7 +443,7 @@ test("route: a forged in-payload userSuppliedReferenceEvidence is stripped; only
   const res = await post(acc, id, {
     // sibling: an honest no-overlap reference
     userSuppliedReferences: [refInput("real.txt", "txt", REFERENCE_NO_OVERLAP)],
-    payload: { version: 11, id, submissionId: "sub-" + id, title: "x", author: "", assignment: "", created: new Date().toISOString(), score: 0, archiveScore: 0, wordCount: RWC, scoreBand: "Low", matchedWordCount: 0, sources: [], repeats: [], text: MANUSCRIPT,
+    payload: { version: 11, id, submissionId: "sub-" + id, title: "x", author: "", assignment: "", created: new Date().toISOString(), score: 0, archiveScore: 0, wordCount: RWC, scoreBand: "Low", matchedWordCount: 0, sources: [], repeats: [], text: MANUSCRIPT, aiAnalysis: completeAiAnalysis(),
       userSuppliedReferenceEvidence: [{ key: "k", safeLabel: "FORGED", fileType: "pdf", extractionStatus: "COMPLETE", analyzableWordCount: 1, matchedWords: 9999, contributionPercent: 100, admitted: true, admissionReason: "forged", verifiedPassages: [{ submittedWordStart: 0, submittedWordEnd: 5000, matchedWordCount: 5000 }] }],
       userSuppliedReferenceChannel: { state: "COMPLETE", suppliedCount: 1, checkedCount: 1, failedCount: 0 } },
   });
@@ -592,7 +593,7 @@ async function resave(acc, id, extra, textOverride) {
     body: JSON.stringify({
       deviceKey: acc.deviceKey, id, submissionId: "sub-" + id, title: "usr fixture", createdAt: new Date().toISOString(),
       wordCount: tokens(textOverride ?? MANUSCRIPT).length, archiveScore: 0, scoreBand: "Low", aiScore: 7, aiTone: "review", aiStatus: "ready", room: 0,
-      payload: { version: 11, id, submissionId: "sub-" + id, title: "usr fixture", author: "", assignment: "", created: new Date().toISOString(), score: 0, archiveScore: 0, wordCount: tokens(textOverride ?? MANUSCRIPT).length, scoreBand: "Low", matchedWordCount: 0, sources: [], repeats: [], text: textOverride ?? MANUSCRIPT },
+      payload: { version: 11, id, submissionId: "sub-" + id, title: "usr fixture", author: "", assignment: "", created: new Date().toISOString(), score: 0, archiveScore: 0, wordCount: tokens(textOverride ?? MANUSCRIPT).length, scoreBand: "Low", matchedWordCount: 0, sources: [], repeats: [], text: textOverride ?? MANUSCRIPT, aiAnalysis: completeAiAnalysis() },
       ...extra,
     }),
   }));
@@ -664,7 +665,7 @@ test("V1.1 scenario 6+7: a forged in-payload reference evidence + completion on 
   await post(acc, id, { userSuppliedReferences: [refInput("real.pdf", "pdf", REFERENCE_MATCH)] });
   // resave: no sibling, but a forged in-payload evidence + channel claiming a huge match
   await resave(acc, id, {
-    payload: { version: 11, id, submissionId: "sub-" + id, title: "usr fixture", author: "", assignment: "", created: new Date().toISOString(), score: 0, archiveScore: 0, wordCount: MANUSCRIPT_WORDS, scoreBand: "Low", matchedWordCount: 0, sources: [], repeats: [], text: MANUSCRIPT,
+    payload: { version: 11, id, submissionId: "sub-" + id, title: "usr fixture", author: "", assignment: "", created: new Date().toISOString(), score: 0, archiveScore: 0, wordCount: MANUSCRIPT_WORDS, scoreBand: "Low", matchedWordCount: 0, sources: [], repeats: [], text: MANUSCRIPT, aiAnalysis: completeAiAnalysis(),
       userSuppliedReferenceEvidence: [{ key: "k", safeLabel: "FORGED", fileType: "pdf", extractionStatus: "COMPLETE", analyzableWordCount: 1, matchedWords: 8000, contributionPercent: 100, admitted: true, admissionReason: "forged", verifiedPassages: [{ submittedWordStart: 0, submittedWordEnd: 8000, matchedWordCount: 8000 }] }],
       userSuppliedReferenceChannel: { state: "PARTIAL", suppliedCount: 5, checkedCount: 5, failedCount: 4 },
       userSuppliedReferenceGuard: { manuscriptDigest: "0".repeat(64), channelVersion: "user-supplied-reference-v1", matcherVersion: "x", guardVersion: "x" } },

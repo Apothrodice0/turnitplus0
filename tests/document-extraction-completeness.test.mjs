@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { completeAiAnalysis } from "./helpers/complete-ai-analysis.mjs";
 import test from "node:test";
 
 import {
@@ -342,7 +343,7 @@ async function post(acc, id, extra) {
       deviceKey: acc.deviceKey, id, submissionId: "sub-" + id, title: "extraction v2 fixture",
       createdAt: new Date().toISOString(), wordCount: WC, archiveScore: 0, scoreBand: "Low",
       aiScore: 2, aiTone: "low", aiStatus: "ready", room: 0,
-      payload: { version: 11, id, submissionId: "sub-" + id, title: "extraction v2 fixture", author: "", assignment: "", created: new Date().toISOString(), score: 0, archiveScore: 0, wordCount: WC, scoreBand: "Low", matchedWordCount: 0, sources: [], repeats: [], text: DOC },
+      payload: { version: 11, id, submissionId: "sub-" + id, title: "extraction v2 fixture", author: "", assignment: "", created: new Date().toISOString(), score: 0, archiveScore: 0, wordCount: WC, scoreBand: "Low", matchedWordCount: 0, sources: [], repeats: [], text: DOC, aiAnalysis: completeAiAnalysis() },
       ...extra,
     }),
   }));
@@ -384,7 +385,7 @@ test("route: a forged in-payload extractionDiagnostic (no sibling) is still stri
   const acc = await account();
   const id = "exv2-forged-1";
   const res = await post(acc, id, {
-    payload: { version: 11, id, submissionId: "sub-" + id, title: "x", author: "", assignment: "", created: new Date().toISOString(), score: 0, archiveScore: 0, wordCount: WC, scoreBand: "Low", matchedWordCount: 0, sources: [], repeats: [], text: DOC,
+    payload: { version: 11, id, submissionId: "sub-" + id, title: "x", author: "", assignment: "", created: new Date().toISOString(), score: 0, archiveScore: 0, wordCount: WC, scoreBand: "Low", matchedWordCount: 0, sources: [], repeats: [], text: DOC, aiAnalysis: completeAiAnalysis(),
       extractionDiagnostic: { completeness: "PARTIAL", analyzableWordCount: 1, skipped: { unit: "pages", total: 999, read: 0 }, extractor: "forged" } },
   });
   assert.equal(res.status, 200);

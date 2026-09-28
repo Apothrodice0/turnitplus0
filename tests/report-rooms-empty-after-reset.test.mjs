@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { completeAiAnalysis } from './helpers/complete-ai-analysis.mjs';
 import test from 'node:test';
 import fs from 'fs';
 import path from 'path';
@@ -85,7 +86,7 @@ async function postReadyReport(deviceKey, cookie, room, text) {
         version: 11, id: Date.now(), submissionId: 'sub-' + reportId, title: reportId + '.pdf', author: '',
         assignment: '', created: new Date().toISOString(), score: 4, archiveScore: 4, text,
         wordCount: 90, characterCount: 700, pageCount: 1, fileSize: '1 KB', databaseSize: 230,
-        corpusVersion: 'test', scoreBand: 'Low', aiScore: 12,
+        corpusVersion: 'test', scoreBand: 'Low', aiScore: 12, aiAnalysis: completeAiAnalysis(),
       },
     }),
   }));

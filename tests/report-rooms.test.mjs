@@ -1,4 +1,5 @@
 import assert from 'node:assert';
+import { completeAiAnalysis } from './helpers/complete-ai-analysis.mjs';
 import fs from 'fs';
 import path from 'path';
 import { createClient } from '@libsql/client';
@@ -109,7 +110,7 @@ async function postReport(deviceKey, id, { cookie, room, payloadOverrides = {}, 
       aiTone,
       aiStatus,
       room,
-      payload,
+      payload: aiStatus === 'ready' ? { ...payload, aiAnalysis: completeAiAnalysis() } : payload,
     }),
   });
   return reportsRoute.POST(req);

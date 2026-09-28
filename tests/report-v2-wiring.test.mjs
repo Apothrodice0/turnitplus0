@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { completeAiAnalysis } from './helpers/complete-ai-analysis.mjs';
 import test from 'node:test';
 import fs from 'fs';
 import path from 'path';
@@ -129,7 +130,7 @@ async function postReport(account, { id, room = 0, aiStatus = 'ready', payloadOv
       title: 'Report V2 wiring fixture', createdAt: new Date().toISOString(),
       wordCount: WORD_COUNT, archiveScore: 0, scoreBand: 'Low',
       aiScore: aiStatus === 'ready' ? 2 : null, aiTone: aiStatus === 'ready' ? 'low' : null, aiStatus, room,
-      payload: { ...basePayload(id), ...payloadOverrides },
+      payload: { ...basePayload(id), ...(aiStatus === 'ready' ? { aiAnalysis: completeAiAnalysis() } : {}), ...payloadOverrides },
     }),
   });
   return reportsRoute.POST(req);

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { completeAiAnalysis } from './helpers/complete-ai-analysis.mjs';
 import test from 'node:test';
 import fs from 'fs';
 import path from 'path';
@@ -124,6 +125,7 @@ async function postReport(account, { id, text, aiStatus = 'ready', aiScore = 3, 
       author: '', assignment: '', created: new Date().toISOString(),
       score: 0, archiveScore: 0, wordCount, scoreBand: 'Low', matchedWordCount: 0,
       sources: [], repeats: [], text,
+      ...(aiStatus === 'ready' ? { aiAnalysis: completeAiAnalysis() } : {}),
       // CLIENT FORGERY TESTS — a real attacker/buggy client can put ANY key
       // into their own submitted `payload` object; this is exactly that raw,
       // untrusted shape, spread in last so a test-supplied forged value for

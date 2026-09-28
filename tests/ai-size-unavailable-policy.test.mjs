@@ -22,6 +22,7 @@ import * as unavailable from "../lib/ai-unavailable-state.ts";
 import { buildAiSizeUnavailableTelemetryEvent } from "../lib/ai-size-unavailable-telemetry.ts";
 import { resolveAiDisplayState } from "../lib/ai-display-state.ts";
 import { deriveRoomStatus } from "../lib/report-rooms.ts";
+import { AI_SCORING_VERSION } from "../lib/ai-core.ts";
 import { computeDetailRevealState } from "../lib/report-detail-poll.ts";
 
 const roomShell = await import("../app/reports/rooms/[room]/room-page-shell.tsx");
@@ -640,6 +641,29 @@ test("E3 THE RESERVE ONLY GUARDS AN UNRESOLVED-AI SAVE: a save that already carr
     assert.ok(p2 > MAX - unavailable.TERMINAL_AI_RESERVE_CHARS && p2 <= MAX);
     assert.equal((await aiHalf(id)).ai_status, "ready");
   });
+});
+
+test("E4 EXPLICIT READY WITHOUT A CALIBRATED SCORE IS SETTLED: a save declaring ai_status 'ready' with a complete analysis and ai_score NULL gets the ready-state allowance (the whole ceiling), never the first-save reserve — the same rule as any other ready save; a processing save keeps the reserve", async () => {
+  // A complete analysis the client cannot calibrate (a stale worker's scoringVersion): buildReportSummary yields aiScore null.
+  const uncalibratable = { ...fx.syntheticAiAnalysis(PAD_TEXT), scoringVersion: AI_SCORING_VERSION - 1 };
+  assert.equal(buildReportSummary({ ...fx.buildFirstSaveBody({ deviceKey: "d", id: "1", text: PAD_TEXT }).payload, aiScore: null, aiAnalysis: uncalibratable }).aiScore, null, "fixture sanity: a complete analysis with no calibrated score");
+  assert.equal(deriveRoomStatus(null, "ready"), "ready", "explicit ready without a score is settled");
+
+  const insideBand = await landPersisted({ target: MAX - unavailable.TERMINAL_AI_RESERVE_CHARS + 1, aiStatus: "ready", aiAnalysis: uncalibratable });
+  assert.equal(insideBand.ok, true, "one unit into the reserve band is accepted for ready + NULL + complete");
+  assert.equal(insideBand.persisted, MAX - unavailable.TERMINAL_AI_RESERVE_CHARS + 1);
+  const atCeiling = await landPersisted({ target: MAX, aiStatus: "ready", aiAnalysis: uncalibratable });
+  assert.equal(atCeiling.ok, true, "ready + NULL + complete may use the whole ceiling, exactly like any other ready save");
+  assert.equal(atCeiling.persisted, MAX);
+  const stored = await aiHalf(atCeiling.id);
+  assert.deepEqual({ ai_status: stored.ai_status, ai_score: stored.ai_score, aiAnalysis: stored.aiAnalysis.status }, { ai_status: "ready", ai_score: null, aiAnalysis: "complete" }, "stored as explicit ready, no score, complete");
+  const overCeiling = await landPersisted({ target: MAX + 1, aiStatus: "ready", aiAnalysis: uncalibratable });
+  assert.equal(overCeiling.status, 413, "the ceiling itself is unchanged");
+  assert.equal(overCeiling.persisted, null);
+
+  // Control: the reserve still guards a save whose AI half is unresolved.
+  const processing = await landPersisted({ target: MAX - unavailable.TERMINAL_AI_RESERVE_CHARS + 1 });
+  assert.equal(processing.status, 413, "a processing first save one unit into the reserve is still refused");
 });
 
 // ----------------------------------------------------------------------------------------------------------------

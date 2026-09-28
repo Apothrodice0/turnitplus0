@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { completeAiAnalysis } from "./helpers/complete-ai-analysis.mjs";
 import test, { mock } from "node:test";
 import fs from "node:fs";
 import path from "node:path";
@@ -155,6 +156,7 @@ function reportRequestBody(acc, id, { text, archiveMatchedPositions, padding, ro
       score: archiveScore, archiveScore, wordCount, scoreBand, matchedWordCount: 0,
       sources: archiveMatchedPositions ? [{ name: "Src", type: "Internet", percent: 50, matches: 1, matchedWords: archiveMatchedPositions.length, phrases: [], color: "#000" }] : [],
       repeats: [], text,
+      ...(aiStatus === "ready" ? { aiAnalysis: completeAiAnalysis() } : {}),
       ...(archiveMatchedPositions ? { archiveMatchedPositions } : {}),
       ...(padding !== undefined ? { testPadding: padding } : {}),
     },

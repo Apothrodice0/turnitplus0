@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { completeAiAnalysis } from "./helpers/complete-ai-analysis.mjs";
 import test from "node:test";
 import fs from "fs";
 import path from "path";
@@ -572,7 +573,7 @@ test("16: an ordinary GET response for a report whose own-history match was SELF
       deviceKey: "saself-leak-device", id: reportId, submissionId: "sub", title: "edited-final.pdf",
       createdAt: new Date().toISOString(), wordCount: tokens(canonicalizeText(edited)).length, archiveScore: 0, scoreBand: "Low",
       aiScore: null, aiTone: null, aiStatus: "ready", room: 0,
-      payload: { version: 11, id: 1, submissionId: "sub", title: "edited-final.pdf", created: new Date().toISOString(), score: 0, archiveScore: 0, wordCount: tokens(canonicalizeText(edited)).length, text: edited },
+      payload: { version: 11, id: 1, submissionId: "sub", title: "edited-final.pdf", created: new Date().toISOString(), score: 0, archiveScore: 0, wordCount: tokens(canonicalizeText(edited)).length, text: edited, aiAnalysis: completeAiAnalysis() },
     }),
   }));
   assert.equal(postRes.status, 200);

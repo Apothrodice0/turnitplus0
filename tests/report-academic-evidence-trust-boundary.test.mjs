@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { completeAiAnalysis } from './helpers/complete-ai-analysis.mjs';
 import test from 'node:test';
 import fs from 'fs';
 import path from 'path';
@@ -378,7 +379,7 @@ test('9. verifiedAcademicSearchDiagnosticsId: persisted in payload_json, NEVER i
   // (c) a resave built from the GET response (no handle, no body academicSearchDiagnosticsId)
   //     — mirrors saveEnrichedAiResult's {...report, ...aiResult} — must not lose the evidence
   assert.equal('verifiedAcademicSearchDiagnosticsId' in getBody, false); // precondition: client genuinely has no handle
-  const resavePayload = { ...getBody, aiAnalysis: { summary: 'x' }, aiScore: 10 };
+  const resavePayload = { ...getBody, aiAnalysis: { ...completeAiAnalysis(), summary: 'x' }, aiScore: 10 };
   await resetRateForTest('tb9c');
   // AUTH GATE: this is a RESAVE of the same (deviceKey, id) — the pre-existing
   // ownership-conflict rule requires the SAME account's session, so this

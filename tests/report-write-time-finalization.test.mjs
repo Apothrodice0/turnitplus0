@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { completeAiAnalysis } from './helpers/complete-ai-analysis.mjs';
 import test from 'node:test';
 import fs from 'fs';
 import path from 'path';
@@ -173,6 +174,7 @@ async function postReport(account, { id, room, aiStatus, aiScore, text = DOCUMEN
         author: '', assignment: '', created: new Date().toISOString(),
         score: archiveScore, archiveScore, wordCount,
         scoreBand: 'Low', matchedWordCount: 0, sources: [], repeats: [], text,
+        ...(aiStatus === 'ready' ? { aiAnalysis: completeAiAnalysis() } : {}),
         // Release-hardening audit finding LIFECYCLE-06 (Preview regression):
         // lets a caller submit exactly what a real client resave would —
         // e.g. a stale, client-computed unifiedSimilarity — so a test can
@@ -544,7 +546,7 @@ test('REPORT-LIFECYCLE CORRECTNESS FIX: a report saved with no text at all (fina
       payload: {
         version: 11, id: reportId, submissionId: 'sub-' + reportId, title: 'No-text fixture',
         author: '', assignment: '', created: new Date().toISOString(),
-        score: 42, archiveScore: 42, wordCount: 40, scoreBand: 'Low', matchedWordCount: 0, sources: [], repeats: [],
+        score: 42, archiveScore: 42, wordCount: 40, scoreBand: 'Low', matchedWordCount: 0, sources: [], repeats: [], aiAnalysis: completeAiAnalysis(),
         // No `text` field at all — the real shape of a legacy report saved
         // before text capture existed, and the same gate
         // (isNonEmptyString(reportPayload?.text)) a genuine finalization

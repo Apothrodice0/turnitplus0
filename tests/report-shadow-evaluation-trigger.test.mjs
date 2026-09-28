@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { completeAiAnalysis } from './helpers/complete-ai-analysis.mjs';
 import test from 'node:test';
 import fs from 'fs';
 import path from 'path';
@@ -175,6 +176,7 @@ async function postReport(account, { id, text, room = 0, aiStatus = 'ready', aiS
       author: '', assignment: '', created: new Date().toISOString(),
       score: 0, archiveScore: 0, wordCount, scoreBand: 'Low', matchedWordCount: 0,
       sources: [], repeats: [], text,
+      ...(aiStatus === 'ready' ? { aiAnalysis: completeAiAnalysis() } : {}),
     },
   };
   if (account.cookie) body.room = room;

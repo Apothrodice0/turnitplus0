@@ -224,8 +224,9 @@ async function persistAiRetry(txClient: ReportsDbClient, sessionUser: SessionUse
     // complete too, and neither a late failure nor the size policy below can displace a legitimate result.
     const storedIsReady = deriveRoomStatus(row.ai_score === null ? null : Number(row.ai_score), row.ai_status) === 'ready';
     // "Ready" is the explicit column — which includes a complete analysis whose score could not be calibrated (ai_score NULL,
-    // lib/ai-display-state.ts), a row deriveRoomStatus calls "processing" — OR storedIsReady: a legacy complete row (ai_status
-    // NULL) must not be downgraded by a direct Retry request the room itself would never offer. Both guards below use this.
+    // lib/ai-display-state.ts; deriveRoomStatus now calls it "ready" too, but this guard names it explicitly rather than depend
+    // on that) — OR storedIsReady: a legacy complete row (ai_status NULL) must not be downgraded by a direct Retry request the
+    // room itself would never offer. Both guards below use this.
     const storedHasReadyResult = row.ai_status === 'ready' || storedIsReady;
 
     // LIFECYCLE-02, exactly as SAVE_REPORT_SQL applies it: a genuine 'ready' result is never displaced by a late 'failed' one.

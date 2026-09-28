@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { completeAiAnalysis } from "./helpers/complete-ai-analysis.mjs";
 import test from "node:test";
 import fs from "node:fs";
 import path from "node:path";
@@ -119,7 +120,7 @@ async function postReport(acc, { id, text }) {
     body: JSON.stringify({
       deviceKey: acc.deviceKey, id, submissionId: "sub-" + id, title: "t", createdAt: new Date().toISOString(),
       wordCount, archiveScore: 0, scoreBand: "Low", aiScore: 2, aiTone: "low", aiStatus: "ready", room: 0,
-      payload: { version: 11, id: 1, submissionId: "sub-" + id, title: "t", author: "", assignment: "", created: new Date().toISOString(), score: 0, archiveScore: 0, wordCount, scoreBand: "Low", matchedWordCount: 0, sources: [], repeats: [], text },
+      payload: { version: 11, id: 1, submissionId: "sub-" + id, title: "t", author: "", assignment: "", created: new Date().toISOString(), score: 0, archiveScore: 0, wordCount, scoreBand: "Low", matchedWordCount: 0, sources: [], repeats: [], text, aiAnalysis: completeAiAnalysis() },
     }),
   }));
 }

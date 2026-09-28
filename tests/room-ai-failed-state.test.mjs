@@ -26,9 +26,33 @@ test("deriveRoomStatus: legacy/unset ai_status (null) falls back to the original
   assert.equal(deriveRoomStatus(87, null), "ready");
 });
 
-test("deriveRoomStatus: an explicit 'processing' or 'ready' ai_status behaves exactly like the legacy null case", () => {
+test("deriveRoomStatus: an explicit 'processing' ai_status behaves exactly like the legacy null case; an explicit 'ready' with a score is ready", () => {
   assert.equal(deriveRoomStatus(null, "processing"), "processing");
   assert.equal(deriveRoomStatus(20, "ready"), "ready");
+});
+
+// Explicit 'ready' is authoritative: it means the AI analysis is COMPLETE (POST /api/reports refuses an explicit 'ready'
+// without a complete analysis). A score is optional — a complete analysis whose median could not be calibrated is stored
+// ai_status 'ready' + ai_score NULL, and it is settled, never "processing". The full stored matrix, pinned cell by cell.
+test("deriveRoomStatus: precedence is explicit 'failed', then explicit 'ready' (with or without a score), then the legacy ai_score rule — every stored combination", () => {
+  const expected = [
+    // [ai_status, ai_score, room status]
+    ["failed", null, "failed"],
+    ["failed", 0, "failed"],
+    ["failed", 42, "failed"],
+    ["ready", null, "ready"],
+    ["ready", 0, "ready"],
+    ["ready", 42, "ready"],
+    ["processing", null, "processing"],
+    ["processing", 0, "ready"],
+    ["processing", 42, "ready"],
+    [null, null, "processing"],
+    [null, 0, "ready"],
+    [null, 42, "ready"],
+  ];
+  for (const [aiStatus, aiScore, status] of expected) {
+    assert.equal(deriveRoomStatus(aiScore, aiStatus), status, `(${aiStatus}, ${aiScore})`);
+  }
 });
 
 test("My Reports room-list label distinguishes 'failed' from 'processing' and 'ready'", async () => {

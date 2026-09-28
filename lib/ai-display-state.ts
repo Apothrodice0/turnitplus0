@@ -128,8 +128,9 @@ export function resolveAiDisplayState(input: AiDisplayInput): AiDisplayResolutio
       return { state: "complete", score: aiScore, tone: normalizeTone(aiTone, aiScore) };
     }
     // Completed, but no authoritative number was ever produced (the document
-    // median could not be calibrated). Not 0%, not a hard failure — surfaced
-    // as pending so a re-run is offered.
+    // median could not be calibrated). Not 0%, not a hard failure — no number
+    // to show. It IS complete: no model re-run is offered for it (the room,
+    // settled as ready, shows it as "— Unscored").
     return { state: "pending", score: null, tone: "unavailable" };
   }
 

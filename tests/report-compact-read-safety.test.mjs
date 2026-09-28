@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { completeAiAnalysis } from "./helpers/complete-ai-analysis.mjs";
 import test, { mock } from "node:test";
 import fs from "node:fs";
 import path from "node:path";
@@ -217,7 +218,7 @@ function reportRequestBody(acc, id, { text, archiveMatchedPositions, padding, ro
       version: 11, id, submissionId: "sub-" + id, title: "r2 fixture", author: "", assignment: "", created: new Date().toISOString(),
       score: 0, archiveScore: 0, wordCount, scoreBand: "Low", matchedWordCount: 0,
       sources: archiveMatchedPositions ? [{ name: "Src", type: "Internet", percent: 50, matches: 1, matchedWords: archiveMatchedPositions.length, phrases: [], color: "#000" }] : [],
-      repeats: [], text,
+      repeats: [], text, aiAnalysis: completeAiAnalysis(),
       ...(archiveMatchedPositions ? { archiveMatchedPositions } : {}),
       ...(padding !== undefined ? { testPadding: padding } : {}),
       ...payloadExtra,

@@ -47,7 +47,9 @@ import { DocumentUploadPanel } from "@/components/reports/document-upload-panel"
  * completion" polling (when a report exists but analysis hasn't finished).
  *
  * "Ready" must actually mean ready: this component never presents a report
- * as complete while report.aiScore is still null, and (production audit
+ * as complete before its AI analysis is (an explicit 'ready' whose score
+ * could not be calibrated is complete — "— Unscored", never a number or a
+ * spinner — see aiMetricDisplay), and (production audit
  * fix) never presents a genuinely failed AI check as either "still
  * processing" or silently "ready" with a blank score — see
  * saveEnrichedAiResult and lib/report-rooms.ts's deriveRoomStatus, the
@@ -298,18 +300,22 @@ function formatDateTime(iso: string): string {
  * interpreter (lib/ai-display-state.ts) so it can never disagree with the
  * My Reports list row or the report detail page. Only ever rendered inside
  * the `occupant.status === "ready"` branch, where deriveRoomStatus has
- * already established a genuine, non-null completed score — so aiStatus is
- * passed as "ready" and a missing score falls to a neutral "Pending" label
- * rather than ever rendering as "0%".
+ * already established that the analysis is COMPLETE — so aiStatus is passed
+ * as "ready". A complete analysis whose score could not be calibrated
+ * (explicit 'ready', ai_score NULL) has no number: it is settled, shown as
+ * "— Unscored" with `note` saying so — never "0%", never "Pending" (nothing
+ * is still running, and no re-run is offered for it).
  */
-function aiMetricDisplay(report: ReportSummary): { value: string; label: string; toneClass: string } {
+export const AI_UNSCORED_LABEL = "Unscored";
+export const AI_UNSCORED_NOTE = "Analysis complete; score unavailable.";
+function aiMetricDisplay(report: ReportSummary): { value: string; label: string; toneClass: string; note: string | null } {
   const ai = resolveAiDisplayState({ aiStatus: "ready", aiScore: report.aiScore, aiTone: report.aiTone });
   if (ai.state === "complete" && ai.score !== null) {
     const label =
       ai.tone === "low" ? "Low AI indicators" : ai.tone === "review" ? "Moderate AI indicators" : "Strong AI indicators";
-    return { value: `${ai.score}%`, label, toneClass: ai.tone };
+    return { value: `${ai.score}%`, label, toneClass: ai.tone, note: null };
   }
-  return { value: "—", label: "Pending", toneClass: "unavailable" };
+  return { value: "—", label: AI_UNSCORED_LABEL, toneClass: "unavailable", note: AI_UNSCORED_NOTE };
 }
 
 /**
@@ -1378,6 +1384,11 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
                 <span className="room-metric-sub">{downloadingReceipt ? "Preparing…" : "Download"}</span>
               </button>
             </div>
+
+            {(() => {
+              const note = aiMetricDisplay(occupant.report).note;
+              return note ? <p className="room-cycle-note">{note}</p> : null;
+            })()}
 
             <p className="room-cycle-note">
               This room becomes available again: {formatDateTime(occupant.cycleEndsAt)}.
