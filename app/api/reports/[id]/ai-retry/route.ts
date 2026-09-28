@@ -223,12 +223,13 @@ async function persistAiRetry(txClient: ReportsDbClient, sessionUser: SessionUse
     // read of this report uses (rooms index, room occupant, detail page) — so a legacy row with no ai_status but a score is
     // complete too, and neither a late failure nor the size policy below can displace a legitimate result.
     const storedIsReady = deriveRoomStatus(row.ai_score === null ? null : Number(row.ai_score), row.ai_status) === 'ready';
+    // "Ready" is the explicit column — which includes a complete analysis whose score could not be calibrated (ai_score NULL,
+    // lib/ai-display-state.ts), a row deriveRoomStatus calls "processing" — OR storedIsReady: a legacy complete row (ai_status
+    // NULL) must not be downgraded by a direct Retry request the room itself would never offer. Both guards below use this.
+    const storedHasReadyResult = row.ai_status === 'ready' || storedIsReady;
 
     // LIFECYCLE-02, exactly as SAVE_REPORT_SQL applies it: a genuine 'ready' result is never displaced by a late 'failed' one.
-    // "Ready" is the explicit column — which includes a complete analysis whose score could not be calibrated (ai_score NULL,
-    // lib/ai-display-state.ts) — OR storedIsReady: a legacy complete row (ai_status NULL) must not be downgraded by a direct
-    // Retry request the room itself would never offer.
-    if ((row.ai_status === 'ready' || storedIsReady) && retry.aiStatus === 'failed') {
+    if (storedHasReadyResult && retry.aiStatus === 'failed') {
       await tx.rollback().catch(() => {});
       return json(200, { ok: true });
     }
@@ -283,7 +284,7 @@ async function persistAiRetry(txClient: ReportsDbClient, sessionUser: SessionUse
       // The real result cannot be stored next to this report. Never at the expense of a legitimate stored result, and never as
       // a 413 the customer could only hit again: a stored 'ready' stays exactly as it is; a report already marked keeps its mark.
       // (Rolling back discards the tentative write above: the row is exactly as it was.)
-      if (storedIsReady || storedIsSizeUnavailable) {
+      if (storedHasReadyResult || storedIsSizeUnavailable) {
         await tx.rollback().catch(() => {});
         return json(200, storedIsSizeUnavailable ? { ok: true, aiOutcome: AI_SAVE_OUTCOME_SIZE_UNAVAILABLE } : { ok: true });
       }

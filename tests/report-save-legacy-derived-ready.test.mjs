@@ -162,6 +162,13 @@ const SEEDS = {
     assert.equal((await automaticResave(account, report, room, completeResult())).ok, true, "fixture sanity: explicit ready resave");
     return report;
   },
+  /** Explicit ready without a calibrated score (test 9): the same automatic resave from a stale worker — ai_status 'ready', ai_score NULL. */
+  async explicitReadyNullScore(account, id, room) {
+    const report = await kit.firstSave(account, id, TEXT, room);
+    const aiAnalysis = { ...fx.syntheticAiAnalysis(TEXT, { seed: 11 }), scoringVersion: 9 }; // a stale worker: not calibratable
+    assert.equal((await automaticResave(account, report, room, { aiScore: aiAnalysis.score, aiAnalysis })).ok, true, "fixture sanity: explicit ready resave without a calibrated score");
+    return report;
+  },
   async failed(account, id, room) {
     const report = await kit.firstSave(account, id, TEXT, room);
     assert.equal((await automaticResave(account, report, room, roomShell.aiAnalysisErrorResult(new Error("worker crashed"), "analyzing"))).ok, true);
@@ -481,14 +488,18 @@ test("8. TERMINAL SIZE: an automatic result too large for the whole-report save 
   assert.deepEqual((await writesFor(processing.id)).aiChanges, ["ready/complete", `failed/error/${AI_UNAVAILABLE_REASON_REPORT_SIZE}`], "one transaction: tentative candidate, then the marker");
   assert.equal((await effectiveState(processing)).derived, "failed");
 
-  for (const shape of ["legacyReady", "explicitReady"]) {
+  for (const shape of ["legacyReady", "explicitReady", "explicitReadyNullScore"]) {
     const r = await seed(shape);
     const before = await aiHalf(r.id);
     const result = await automaticPass(r, "oversized");
+    const writes = await writesFor(r.id);
+    t.diagnostic(`CAPTURE oversized-${shape} ${JSON.stringify({ result, modelRuns: model.runs, writes })}`);
     assert.deepEqual(result.http, ["/api/reports:413", `/api/reports/${r.id}/ai-retry:200`], `${shape}: same fallback path`);
-    assert.deepEqual((await writesFor(r.id)).rowWrites, 0, `${shape}: nothing written`);
+    assert.deepEqual(writes.rowWrites, 0, `${shape}: nothing written`);
     assert.deepEqual(await aiHalf(r.id), before, `${shape}: the ready result is untouched`);
-    assert.equal((await effectiveState(r)).derived, "ready");
+    assert.equal(model.runs, 1, `${shape}: exactly one model run`);
+    // deriveRoomStatus(NULL, 'ready') is "processing" (test 9) — unchanged here: only the stored result's preservation is pinned.
+    assert.equal((await effectiveState(r)).derived, shape === "explicitReadyNullScore" ? "processing" : "ready", `${shape}: derived status unchanged`);
   }
 });
 
@@ -496,19 +507,16 @@ test("8. TERMINAL SIZE: an automatic result too large for the whole-report save 
 // 9. EXPLICIT READY WITHOUT A CALIBRATED SCORE — ai_status 'ready', ai_score NULL: a complete analysis whose median could not
 //    be calibrated (e.g. a stale worker's scoringVersion; lib/ai-display-state.ts rule 4). deriveRoomStatus calls it
 //    "processing", but it holds a genuine complete result and LIFECYCLE-02 has always kept it against a late failure. Both write
-//    paths must keep doing so: the guard is "explicitly ready OR derived ready", never the derived rule alone.
+//    paths must keep doing so: the guard is "explicitly ready OR derived ready", never the derived rule alone. The AI-retry
+//    route's G2 size policy uses the same guard: an oversized complete result is answered 200 with nothing written — never the
+//    REPORT_SIZE marker over the stored result (on 3aa0e38 it wrote the tentative candidate, then the marker: terminal failed).
 // ---------------------------------------------------------------------------------------------------------------------
 
 async function seedReadyWithoutScore() {
   const account = await env.signUpAccount();
   const id = String(nextId++);
   const room = nextRoom++ % 10;
-  const report = await asAccount(account, async () => {
-    const first = await kit.firstSave(account, id, TEXT, room);
-    const aiAnalysis = { ...fx.syntheticAiAnalysis(TEXT, { seed: 11 }), scoringVersion: 9 }; // a stale worker: not calibratable
-    assert.equal((await automaticResave(account, first, room, { aiScore: aiAnalysis.score, aiAnalysis })).ok, true);
-    return first;
-  });
+  const report = await asAccount(account, () => SEEDS.explicitReadyNullScore(account, id, room));
   REPORTS.set(id, { report, room });
   await env.client.execute("DELETE FROM test_row_write_log");
   const ai = await aiHalf(id);
@@ -516,7 +524,7 @@ async function seedReadyWithoutScore() {
   return { account, id, room, report };
 }
 
-test("9. EXPLICIT READY WITHOUT A CALIBRATED SCORE keeps its complete result against a late failure on BOTH write paths — the whole-report save and the AI-retry route", async (t) => {
+test("9. EXPLICIT READY WITHOUT A CALIBRATED SCORE keeps its complete result against a late failure on BOTH write paths — the whole-report save and the AI-retry route — and against an oversized result sent to the AI-retry route", async (t) => {
   assert.equal(deriveRoomStatus(null, "ready"), "processing", "the derived rule alone would not protect this row");
   const viaSave = await seedReadyWithoutScore();
   const beforeSave = await aiHalf(viaSave.id);
@@ -532,11 +540,44 @@ test("9. EXPLICIT READY WITHOUT A CALIBRATED SCORE keeps its complete result aga
   });
   const afterRetry = await aiHalf(viaRetry.id);
   const retryChanges = (await writesFor(viaRetry.id)).aiChanges;
-  t.diagnostic(`CAPTURE ready-null-score ${JSON.stringify({ save: { before: beforeSave, after: afterSave, aiChanges: saveChanges }, retry: { response: { status: retryResponse.status, json: retryResponse.json }, before: beforeRetry, after: afterRetry, aiChanges: retryChanges } })}`);
+
+  // A structurally valid COMPLETE result that fits the request ceiling but not beside the report, straight to the AI-retry route.
+  const viaOversized = await seedReadyWithoutScore();
+  const beforeOversized = await aiHalf(viaOversized.id);
+  const oversizedResponse = await kit.callRetryRoute(viaOversized.id, { body: kit.retryBodyFor(oversizedAnalysis()), cookie: viaOversized.account.cookie });
+  const afterOversized = await aiHalf(viaOversized.id);
+  const oversizedWrites = await writesFor(viaOversized.id);
+  const oversizedStoredReason = JSON.parse(String((await rawRow(viaOversized.id)).payload_json)).aiAnalysis?.unavailableReason ?? null;
+
+  // Control: the same narrow request without aiScore is malformed — refused before the row is read.
+  const viaMissingScore = await seedReadyWithoutScore();
+  const beforeMissingScore = await aiHalf(viaMissingScore.id);
+  const { aiScore: _omitted, ...withoutAiScore } = kit.retryBodyFor(oversizedAnalysis());
+  const missingScoreResponse = await kit.callRetryRoute(viaMissingScore.id, { body: withoutAiScore, cookie: viaMissingScore.account.cookie });
+  const afterMissingScore = await aiHalf(viaMissingScore.id);
+  const missingScoreWrites = await writesFor(viaMissingScore.id);
+
+  t.diagnostic(`CAPTURE ready-null-score ${JSON.stringify({
+    save: { before: beforeSave, after: afterSave, aiChanges: saveChanges },
+    retry: { response: { status: retryResponse.status, json: retryResponse.json }, before: beforeRetry, after: afterRetry, aiChanges: retryChanges },
+    oversized: { response: { status: oversizedResponse.status, json: oversizedResponse.json }, before: beforeOversized, after: afterOversized, writes: oversizedWrites, storedUnavailableReason: oversizedStoredReason },
+    missingAiScore: { response: { status: missingScoreResponse.status, json: missingScoreResponse.json }, before: beforeMissingScore, after: afterMissingScore, writes: missingScoreWrites },
+  })}`);
 
   assert.deepEqual(afterSave, beforeSave, "whole-report save: the complete result is kept");
   assert.deepEqual(saveChanges, []);
   assert.deepEqual({ status: retryResponse.status, json: retryResponse.json }, { status: 200, json: { ok: true } });
   assert.deepEqual(afterRetry, beforeRetry, "AI-retry route: the complete result is kept");
   assert.deepEqual(retryChanges, []);
+
+  assert.deepEqual({ status: oversizedResponse.status, json: oversizedResponse.json }, { status: 200, json: { ok: true } }, "oversized AI-retry: the protected no-op answer, never SIZE_UNAVAILABLE");
+  assert.deepEqual(oversizedWrites, { rowWrites: 0, aiChanges: [] }, "oversized AI-retry: nothing written — no tentative candidate, no REPORT_SIZE marker, no 'failed'");
+  assert.deepEqual(afterOversized, beforeOversized, "oversized AI-retry: the complete result is kept");
+  assert.equal(afterOversized.ai_status, "ready");
+  assert.equal(afterOversized.ai_score, null);
+  assert.equal(oversizedStoredReason, null, "oversized AI-retry: no REPORT_SIZE marker stored");
+
+  assert.deepEqual({ status: missingScoreResponse.status, json: missingScoreResponse.json }, { status: 400, json: { error: "Invalid AI result" } }, "missing aiScore: still refused");
+  assert.deepEqual(missingScoreWrites, { rowWrites: 0, aiChanges: [] }, "missing aiScore: nothing written");
+  assert.deepEqual(afterMissingScore, beforeMissingScore, "missing aiScore: the stored state is unchanged");
 });
