@@ -59,7 +59,9 @@ const EXPECTED_APP_FILES_USING_THE_DOOR = [
 // their own right; this generic "no direct import of the raw gate or its
 // siblings" check must recognize both by name rather than treat the admin
 // door as a bypass of the report-integration one.
-const ADMIN_DASHBOARD_DOOR_MODULES = ["corpus-admission-admin-repo", "corpus-admission-admin-actions"];
+// lib/corpus-admission-archive-explorer.ts (the read-only /admin/archive
+// explorer) is part of that same admin door — see ADMIN_DASHBOARD_MODULES below.
+const ADMIN_DASHBOARD_DOOR_MODULES = ["corpus-admission-admin-repo", "corpus-admission-admin-actions", "corpus-admission-archive-explorer"];
 // Third door: lib/corpus-admission-promotion.ts, its own closed surface —
 // promotes an ACCEPTed decision's retained text into the shared matching
 // index (corpus_document_representations/shingles). Deliberately its own
@@ -296,7 +298,7 @@ test("lib/corpus-admission-policy.ts and lib/corpus-hard-gates.ts stay free of @
 // comment).
 // ============================================================================
 
-const ADMIN_DASHBOARD_MODULES = ["corpus-admission-admin-repo", "corpus-admission-admin-actions"];
+const ADMIN_DASHBOARD_MODULES = ["corpus-admission-admin-repo", "corpus-admission-admin-actions", "corpus-admission-archive-explorer"];
 // app/admin/corpus/[id]/page.tsx (the detail page) never imports these
 // modules directly — it renders the "use client" component
 // (components/admin/corpus-detail.tsx), which fetches its own API route
@@ -317,6 +319,19 @@ const EXPECTED_ADMIN_DASHBOARD_IMPORTERS = [
   // Operational status strip's own data source — getCorpusAdmissionOperationalSummary,
   // called directly server-side (see the comment above).
   "app/admin/corpus/page.tsx",
+  // Read-only Archive / Corpus Explorer (/admin/archive): its two admin-gated
+  // GET routes, the page (summary + first page loaded server-side, same
+  // precedent as app/admin/corpus/page.tsx), the explorer module itself
+  // (reuses getCorpusAdmissionStatusCounts from the admin repo), and a
+  // type-only re-export for its "use client" components (erased at build).
+  "app/api/admin/archive/route.ts",
+  "app/api/admin/archive/[id]/route.ts",
+  "app/admin/archive/page.tsx",
+  "lib/corpus-admission-archive-explorer.ts",
+  "components/admin/archive/archive-types.ts",
+  // The /admin launcher reads the Archive card figures (getArchiveExplorerCardMetrics)
+  // directly, server-side, after its own loadAdminGate()/notFound() check.
+  "app/admin/page.tsx",
 ];
 
 function walkSourceFiles(rootDir, visit) {
@@ -356,8 +371,8 @@ test("no file outside app/admin/* or app/api/admin/corpus/* imports lib/admin-ga
   assert.deepEqual(offenders, [], `these files import lib/admin-gate.ts from outside the admin surface: ${offenders.join(", ")}`);
 });
 
-test("both app/admin/corpus pages' generateMetadata() calls loadAdminGate() and returns {} before ever constructing a page-identifying title — no title leak to a non-admin", () => {
-  for (const relativePath of ["app/admin/corpus/page.tsx", "app/admin/corpus/[id]/page.tsx"]) {
+test("every corpus-reading app/admin page's (launcher, corpus, archive) generateMetadata() calls loadAdminGate() and returns {} before ever constructing a page-identifying title — no title leak to a non-admin", () => {
+  for (const relativePath of ["app/admin/page.tsx", "app/admin/corpus/page.tsx", "app/admin/corpus/[id]/page.tsx", "app/admin/archive/page.tsx"]) {
     const source = fs.readFileSync(path.join(repoRoot, relativePath), "utf8");
     const metadataFnMatch = source.match(/export async function generateMetadata\([^)]*\)[^{]*\{([\s\S]*?)\n\}/);
     assert.ok(metadataFnMatch, `expected to find generateMetadata() in ${relativePath}`);
@@ -375,8 +390,8 @@ test("both app/admin/corpus pages' generateMetadata() calls loadAdminGate() and 
   }
 });
 
-test("both app/admin/corpus pages' default export calls loadAdminGate() and calls notFound() (never returns page content) when it resolves null", () => {
-  for (const relativePath of ["app/admin/corpus/page.tsx", "app/admin/corpus/[id]/page.tsx"]) {
+test("every corpus-reading app/admin page's (launcher, corpus, archive) default export calls loadAdminGate() and calls notFound() (never returns page content) when it resolves null", () => {
+  for (const relativePath of ["app/admin/page.tsx", "app/admin/corpus/page.tsx", "app/admin/corpus/[id]/page.tsx", "app/admin/archive/page.tsx"]) {
     const source = fs.readFileSync(path.join(repoRoot, relativePath), "utf8");
     assert.match(importLines(source), /notFound/, `${relativePath} must import notFound from next/navigation`);
     const bodyMatch = source.match(/export default async function \w+\([^)]*\)[^{]*\{([\s\S]*)\}\s*$/);

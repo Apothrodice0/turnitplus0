@@ -8920,3 +8920,311 @@ main.report-main {
   }
 }
 
+
+/* Admin Archive / Corpus Explorer (app/admin/archive, components/admin/archive/*).
+   Builds on the .developer-page / .admin-* admin language above, on a wider
+   canvas so the table and its detail pane sit side by side on desktop. The
+   three --archive-viz-* hues are the page's entity colors (prior
+   submissions / reference archive / not stored), validated as a set for
+   colorblind separation and contrast on the white surface; text never wears
+   them. */
+/* width: 100% — the body lays pages out shrink-to-fit, so max-width alone
+   would leave this canvas at its content width. */
+.admin-archive-page {
+  width: 100%;
+  max-width: 1440px;
+  --archive-viz-submissions: #007fba;
+  --archive-viz-reference: #1baf7a;
+  --archive-viz-not-stored: #eb6834;
+}
+.admin-archive-page .admin-header { margin-bottom: 16px; }
+
+.admin-archive-runtime { list-style: none; margin: 0 0 20px; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+.admin-archive-runtime li {
+  display: inline-flex; align-items: center; gap: 6px; padding: 4px 11px; border-radius: 999px;
+  background: var(--surface); border: 1px solid var(--line); font-size: 12.5px; color: var(--muted);
+}
+.admin-archive-runtime strong { color: var(--ink); font-weight: 600; }
+.admin-archive-runtime-dot { width: 7px; height: 7px; border-radius: 50%; background: #b8c2c8; flex-shrink: 0; }
+.admin-archive-runtime li.is-on .admin-archive-runtime-dot { background: var(--green); }
+
+.admin-archive-summary { display: grid; grid-template-columns: minmax(300px, 5fr) minmax(0, 8fr); gap: 16px; align-items: stretch; }
+.admin-archive-hero {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 22px 24px;
+  box-shadow: var(--small-shadow); display: flex; flex-direction: column; gap: 10px; min-width: 0;
+}
+.admin-archive-eyebrow { font-size: 11.5px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); font-weight: 600; }
+.admin-archive-hero-value { font-size: 56px; font-weight: 650; line-height: 1; color: var(--sidebar); letter-spacing: -.02em; }
+.admin-archive-hero-caption { margin: 0; font-size: 13px; color: var(--muted); line-height: 1.5; max-width: 46ch; }
+.admin-archive-composition { display: flex; gap: 2px; height: 10px; margin-top: auto; border-radius: 999px; overflow: hidden; background: var(--soft-line); }
+.admin-archive-composition-seg { display: block; min-width: 4px; flex-basis: 0; }
+.admin-archive-composition-seg--reference { background: var(--archive-viz-reference); }
+.admin-archive-composition-seg--submissions { background: var(--archive-viz-submissions); }
+
+.admin-archive-legend { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 13px; color: var(--muted); }
+.admin-archive-legend li { display: inline-flex; align-items: center; gap: 7px; }
+.admin-archive-legend strong { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+.admin-archive-key { display: inline-block; width: 10px; height: 10px; border-radius: 3px; flex-shrink: 0; }
+.admin-archive-key--reference { background: var(--archive-viz-reference); }
+.admin-archive-key--submissions { background: var(--archive-viz-submissions); }
+.admin-archive-key--not-stored { background: var(--archive-viz-not-stored); }
+
+.admin-archive-tiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.admin-archive-tile {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px;
+  box-shadow: var(--small-shadow); min-width: 0; display: flex; flex-direction: column; gap: 4px;
+}
+.admin-archive-tile-label { font-size: 11.5px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); font-weight: 600; }
+.admin-archive-tile-value { font-size: 28px; font-weight: 650; color: var(--sidebar); line-height: 1.15; }
+.admin-archive-tile-sub { font-size: 12px; color: var(--muted); line-height: 1.4; overflow-wrap: anywhere; }
+.admin-archive-scope-note { display: flex; align-items: center; gap: 6px; margin: 10px 2px 0; font-size: 12.5px; color: var(--muted); }
+
+.admin-archive-band { display: grid; grid-template-columns: minmax(0, 7fr) minmax(0, 5fr); gap: 20px; margin-top: 20px; align-items: stretch; }
+.admin-archive-band > .admin-card { margin-top: 0; }
+.developer-page .admin-archive-subhead { margin: 24px 0 10px; }
+
+.admin-archive-flow { display: flex; flex-wrap: wrap; align-items: stretch; gap: 8px; margin: 4px 0 12px; }
+.admin-archive-flow-arrow { align-self: center; color: var(--muted); flex-shrink: 0; }
+.admin-archive-stage {
+  flex: 1 1 110px; min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr);
+  grid-template-areas: "icon label" "value value" "hint hint"; gap: 2px 7px; align-items: center;
+  padding: 12px; border-radius: 10px; border: 1px solid var(--soft-line); background: var(--canvas);
+}
+.admin-archive-stage-icon { grid-area: icon; display: inline-flex; color: var(--muted); }
+.admin-archive-stage-label { grid-area: label; font-size: 12.5px; font-weight: 600; color: var(--sidebar); }
+.admin-archive-stage-value { grid-area: value; margin-top: 4px; font-size: 26px; font-weight: 650; line-height: 1.15; color: var(--sidebar); }
+.admin-archive-stage-hint { grid-area: hint; font-size: 11.5px; color: var(--muted); }
+.admin-archive-stage--maturing .admin-archive-stage-icon { color: #a15a1f; }
+.admin-archive-stage--active { background: var(--blue-soft); border-color: rgba(0, 127, 186, .25); }
+.admin-archive-stage--active .admin-archive-stage-icon { color: var(--blue-dark); }
+.admin-archive-stage--waiting { background: var(--surface); border-style: dashed; border-color: var(--line); margin-left: 6px; }
+.admin-archive-lifecycle-rule { margin: 0; font-size: 13px; line-height: 1.55; color: var(--muted); }
+.admin-archive-lifecycle-rule strong { color: var(--ink); font-weight: 600; }
+.admin-archive-outcomes { display: grid; grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); gap: 8px; margin: 14px 0 0; }
+.admin-archive-outcomes div { padding: 8px 10px; border-radius: 8px; background: var(--canvas); min-width: 0; }
+.admin-archive-outcomes dt { font-size: 11.5px; color: var(--muted); }
+.admin-archive-outcomes dd { margin: 2px 0 0; font-size: 16px; font-weight: 600; color: var(--sidebar); }
+.admin-archive-callout {
+  margin: 12px 0 0; padding: 10px 12px; border-radius: 8px; font-size: 13px; line-height: 1.5; color: var(--ink);
+  background: rgba(245, 138, 59, .08); border: 1px solid rgba(245, 138, 59, .3);
+}
+
+.admin-archive-chart-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; margin-bottom: 14px; }
+.admin-archive-chart-note { font-size: 12px; color: var(--muted); }
+.admin-archive-chart-plot { position: relative; height: 176px; margin-left: 30px; }
+.admin-archive-chart-grid, .admin-archive-chart-columns { position: absolute; left: 0; right: 0; top: 0; bottom: 22px; }
+.admin-archive-chart-grid { pointer-events: none; }
+.admin-archive-chart-grid span { position: absolute; left: 0; right: 0; border-top: 1px solid var(--soft-line); }
+.admin-archive-chart-grid em { position: absolute; right: calc(100% + 6px); top: -7px; font-style: normal; font-size: 10.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.admin-archive-chart-columns { display: flex; }
+.admin-archive-chart-col {
+  flex: 1 1 0; min-width: 0; height: 100%; display: flex; align-items: flex-end; justify-content: center;
+  padding: 0 1px; border: 0; border-radius: 4px; background: transparent; cursor: default;
+}
+.admin-archive-chart-col.is-hovered { background: rgba(16, 40, 50, .05); }
+.admin-archive-chart-col:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
+.admin-archive-chart-stack { display: flex; flex-direction: column-reverse; gap: 2px; width: 100%; max-width: 18px; height: 100%; }
+.admin-archive-chart-seg { display: block; width: 100%; min-height: 3px; }
+.admin-archive-chart-seg:last-child { border-radius: 4px 4px 0 0; }
+.admin-archive-chart-seg--submissions { background: var(--archive-viz-submissions); }
+.admin-archive-chart-seg--not-stored { background: var(--archive-viz-not-stored); }
+.admin-archive-chart-axis { position: absolute; left: 0; right: 0; bottom: 0; display: flex; justify-content: space-between; font-size: 10.5px; color: var(--muted); }
+.admin-archive-chart-tooltip {
+  position: absolute; top: 0; z-index: 2; min-width: 168px; padding: 10px 12px; border-radius: 10px; pointer-events: none;
+  background: var(--surface); border: 1px solid var(--line); box-shadow: var(--small-shadow); transform: translateX(14px);
+}
+.admin-archive-chart-tooltip[data-side="left"] { transform: translateX(calc(-100% - 14px)); }
+.admin-archive-chart-tooltip-day { font-size: 12px; font-weight: 600; color: var(--sidebar); margin-bottom: 6px; }
+.admin-archive-chart-tooltip-row { display: grid; grid-template-columns: 14px auto minmax(0, 1fr); align-items: center; gap: 6px; font-size: 12px; color: var(--muted); line-height: 1.6; }
+.admin-archive-chart-tooltip-row strong { color: var(--ink); font-variant-numeric: tabular-nums; min-width: 2ch; text-align: right; }
+.admin-archive-chart-tooltip-row span:last-child { white-space: nowrap; }
+.admin-archive-line-key { display: inline-block; width: 12px; height: 2px; border-radius: 2px; background: var(--muted); }
+.admin-archive-line-key--submissions { background: var(--archive-viz-submissions); }
+.admin-archive-line-key--not-stored { background: var(--archive-viz-not-stored); }
+.admin-archive-line-key--reference { background: var(--archive-viz-reference); }
+.admin-archive-chart-table { margin-top: 14px; font-size: 13px; }
+.admin-archive-chart-table summary { cursor: pointer; color: var(--blue); font-weight: 600; font-size: 12.5px; }
+.admin-archive-chart-table .admin-table-scroll { margin-top: 8px; }
+.admin-archive-compact-table { min-width: 560px; font-size: 12.5px; }
+.admin-archive-compact-table th, .admin-archive-compact-table td { padding: 7px 10px; }
+
+/* The activity card matches the lifecycle card's height; the feed scrolls inside it. */
+.admin-archive-panel { display: flex; flex-direction: column; }
+.admin-archive-feed { list-style: none; margin: 0; padding: 0; flex: 1 1 0; min-height: 260px; overflow-y: auto; }
+.admin-archive-feed li + li { border-top: 1px solid var(--soft-line); }
+.admin-archive-feed-row {
+  box-sizing: border-box; width: 100%; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center;
+  gap: 10px; padding: 10px 6px; border: 0; border-radius: 8px; background: transparent; text-align: left;
+  font: inherit; color: inherit;
+}
+button.admin-archive-feed-row { cursor: pointer; }
+button.admin-archive-feed-row:hover { background: var(--canvas); }
+button.admin-archive-feed-row:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
+.admin-archive-feed-icon { width: 30px; height: 30px; border-radius: 8px; display: inline-flex; align-items: center; justify-content: center; background: var(--soft-line); color: var(--sidebar); }
+.admin-archive-feed-icon--admitted, .admin-archive-feed-icon--matured, .admin-archive-feed-icon--indexed { background: var(--blue-soft); color: var(--blue-dark); }
+.admin-archive-feed-icon--duplicate, .admin-archive-feed-icon--rejected { background: rgba(232, 79, 99, .1); color: var(--red); }
+.admin-archive-feed-icon--review { background: rgba(245, 138, 59, .14); color: #a15a1f; }
+.admin-archive-feed-icon--reference_added { background: rgba(27, 175, 122, .12); color: #0f7a54; }
+.admin-archive-feed-text { display: flex; flex-direction: column; min-width: 0; }
+.admin-archive-feed-title { font-size: 13px; font-weight: 600; color: var(--ink); }
+.admin-archive-feed-subject { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.admin-archive-feed-time { font-size: 11.5px; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+.admin-archive-sources { margin-top: 20px; }
+/* The detail pane opens beside the table only once a row is selected; until
+   then the table has the full card width. */
+.admin-archive-explorer { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; align-items: start; }
+.admin-archive-explorer.has-selection { grid-template-columns: minmax(0, 1fr) 380px; }
+.admin-archive-explorer:not(.has-selection) .admin-archive-detail-pane { display: none; }
+.admin-archive-explorer-list { min-width: 0; }
+.admin-archive-detail-pane { position: sticky; top: 16px; max-height: calc(100vh - 32px); overflow-y: auto; }
+.admin-archive-scrim { display: none; }
+
+.admin-archive-toolbar { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 12px; margin: 4px 0 12px; }
+.admin-archive-search { position: relative; flex: 1 1 280px; display: flex; align-items: center; }
+.admin-archive-search svg { position: absolute; left: 12px; color: var(--muted); pointer-events: none; }
+.admin-archive-search input,
+.admin-archive-toolbar-selects select {
+  border: 1px solid var(--line); border-radius: 9px; font-size: 13.5px; font-family: var(--font-geist-sans), sans-serif;
+  color: var(--ink); background: var(--surface);
+}
+.admin-archive-search input { width: 100%; padding: 9px 12px 9px 36px; }
+.admin-archive-toolbar-selects { display: flex; flex-wrap: wrap; gap: 10px; }
+.admin-archive-toolbar-selects label { display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; font-weight: 600; color: var(--muted); }
+.admin-archive-toolbar-selects select { padding: 8px 10px; min-width: 150px; }
+.admin-archive-search input:focus, .admin-archive-toolbar-selects select:focus { outline: none; border-color: var(--blue); box-shadow: 0 0 0 3px var(--blue-soft); }
+.admin-archive-chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 14px; }
+.admin-archive-chips button {
+  display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 999px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--surface); font: inherit; font-size: 13px; color: var(--ink);
+}
+.admin-archive-chips button span { color: var(--muted); font-variant-numeric: tabular-nums; }
+.admin-archive-chips button:hover { border-color: var(--blue); }
+.admin-archive-chips button.is-selected { border-color: var(--blue); background: var(--blue-soft); color: var(--blue-dark); font-weight: 600; }
+.admin-archive-chips button:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+
+.admin-table-scroll.is-refreshing, .admin-archive-detail-body.is-refreshing { opacity: .55; transition: opacity .15s ease; }
+.admin-archive-table { min-width: 760px; }
+.admin-archive-table td { vertical-align: top; }
+.admin-archive-table tbody tr { cursor: pointer; }
+.admin-archive-table tbody tr:hover { background: var(--canvas); }
+.admin-archive-table tbody tr.is-selected { background: var(--blue-soft); box-shadow: inset 3px 0 0 var(--blue); }
+.admin-archive-table .is-numeric { text-align: right; font-variant-numeric: tabular-nums; }
+.admin-archive-source-cell button {
+  display: flex; flex-direction: column; gap: 2px; max-width: 300px; padding: 0; border: 0; background: transparent;
+  font: inherit; color: inherit; text-align: left; cursor: pointer;
+}
+.admin-archive-source-cell button:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; border-radius: 4px; }
+.admin-archive-source-name { font-weight: 600; color: var(--sidebar); white-space: normal; overflow-wrap: anywhere; line-height: 1.35; }
+.admin-archive-source-id { max-width: 290px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-geist-mono), monospace; font-size: 11px; color: var(--muted); }
+.developer-table td.admin-archive-provenance { color: var(--muted); font-size: 12.5px; white-space: normal; min-width: 150px; max-width: 220px; line-height: 1.4; }
+.admin-archive-explorer-list .admin-corpus-pager button { display: inline-flex; align-items: center; gap: 4px; }
+.admin-archive-eligible-yes { display: inline-flex; align-items: center; gap: 4px; color: var(--green); font-weight: 600; }
+.admin-archive-eligible-no, .admin-archive-muted { color: var(--muted); }
+
+.admin-archive-detail { border: 1px solid var(--line); border-radius: 12px; background: var(--surface); padding: 16px 18px 18px; }
+.admin-archive-detail--empty { border-style: dashed; background: var(--canvas); padding: 32px 22px; text-align: center; }
+.admin-archive-detail--empty p { margin: 0; font-size: 13.5px; line-height: 1.5; color: var(--muted); }
+.admin-archive-detail-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.admin-archive-detail-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.admin-archive-class-chip { padding: 3px 9px; border-radius: 999px; background: var(--soft-line); color: var(--sidebar); font-size: 11.5px; font-weight: 600; }
+.admin-archive-icon-button {
+  width: 30px; height: 30px; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--muted); cursor: pointer;
+}
+.admin-archive-icon-button:hover { color: var(--ink); border-color: var(--muted); }
+.developer-page .admin-archive-detail-title { margin: 14px 0 4px; font-size: 17px; color: var(--sidebar); text-transform: none; letter-spacing: 0; line-height: 1.35; overflow-wrap: anywhere; }
+.admin-archive-detail-id { display: block; font-size: 11.5px; color: var(--muted); overflow-wrap: anywhere; }
+.admin-archive-eligibility {
+  display: flex; gap: 10px; margin: 14px 0; padding: 12px 14px; border-radius: 10px;
+  background: var(--canvas); border: 1px solid var(--soft-line); color: var(--muted);
+}
+.admin-archive-eligibility > svg { flex-shrink: 0; margin-top: 1px; }
+.admin-archive-eligibility.is-eligible { background: rgba(8, 125, 85, .06); border-color: rgba(8, 125, 85, .25); color: var(--green); }
+.admin-archive-eligibility strong { display: block; font-size: 14px; color: var(--ink); }
+.admin-archive-eligibility-mode { display: block; margin-top: 1px; font-size: 11.5px; color: var(--muted); }
+.admin-archive-eligibility p { margin: 6px 0 0; font-size: 12.5px; line-height: 1.5; color: var(--ink); }
+.admin-archive-timeline { margin: 0 0 4px; }
+.admin-archive-timeline-labels { display: flex; justify-content: space-between; gap: 12px; font-size: 11.5px; color: var(--muted); }
+.admin-archive-timeline-labels span { display: flex; flex-direction: column; gap: 2px; }
+.admin-archive-timeline-labels span:last-child { text-align: right; }
+.admin-archive-timeline-labels strong { font-size: 12px; font-weight: 600; color: var(--ink); }
+.admin-archive-timeline-track { height: 6px; margin: 8px 0 4px; border-radius: 999px; background: var(--soft-line); overflow: hidden; }
+.admin-archive-timeline-track span { display: block; height: 100%; border-radius: 999px; background: var(--orange); }
+.admin-archive-timeline-track.is-complete span { background: var(--blue); }
+.admin-archive-timeline-caption { font-size: 11.5px; color: var(--muted); }
+.admin-archive-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 14px; margin: 14px 0 0; }
+.admin-archive-fact { min-width: 0; }
+.admin-archive-fact dt { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.admin-archive-fact dd { margin: 2px 0 0; font-size: 13px; color: var(--ink); overflow-wrap: anywhere; }
+.admin-archive-fact dd.is-mono { font-family: var(--font-geist-mono), monospace; font-size: 12px; }
+.developer-page .admin-archive-detail-section {
+  margin: 20px 0 0; padding-top: 14px; border-top: 1px solid var(--soft-line);
+  font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--sidebar);
+}
+.admin-archive-codes { margin-top: 12px; font-size: 11.5px; color: var(--muted); }
+.admin-archive-codes ul { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 5px; }
+.admin-archive-codes li { padding: 2px 8px; border-radius: 6px; background: var(--soft-line); color: var(--ink); font-family: var(--font-geist-mono), monospace; font-size: 11px; }
+
+@media (max-width: 1200px) {
+  .admin-archive-explorer, .admin-archive-explorer.has-selection { grid-template-columns: minmax(0, 1fr); }
+  .admin-archive-explorer:not(.has-selection) .admin-archive-detail-pane { display: block; }
+  .admin-archive-detail-pane {
+    position: fixed; top: 0; right: 0; bottom: 0; z-index: 60; width: min(420px, 100vw); max-height: none;
+    padding: 12px; background: var(--canvas); box-shadow: var(--shadow);
+    transform: translateX(100%); visibility: hidden; transition: transform .2s ease, visibility .2s;
+  }
+  .admin-archive-explorer.has-selection .admin-archive-detail-pane { transform: none; visibility: visible; }
+  .admin-archive-explorer.has-selection .admin-archive-scrim {
+    display: block; position: fixed; inset: 0; z-index: 55; border: 0; background: rgba(16, 40, 50, .28); cursor: default;
+  }
+}
+@media (max-width: 1080px) {
+  .admin-archive-summary, .admin-archive-band { grid-template-columns: minmax(0, 1fr); }
+  .admin-archive-feed { flex: none; max-height: 480px; }
+}
+@media (max-width: 720px) {
+  .admin-archive-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .admin-archive-hero-value { font-size: 46px; }
+  .admin-archive-flow-arrow { display: none; }
+  .admin-archive-stage--waiting { margin-left: 0; }
+  .admin-archive-facts { grid-template-columns: minmax(0, 1fr); }
+  .admin-archive-toolbar-selects { width: 100%; }
+  .admin-archive-toolbar-selects label { flex: 1 1 140px; }
+  .admin-archive-toolbar-selects select { min-width: 0; width: 100%; }
+}
+@media (max-width: 420px) {
+  .admin-archive-tiles { grid-template-columns: minmax(0, 1fr); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .admin-archive-detail-pane, .admin-table-scroll.is-refreshing, .admin-archive-detail-body.is-refreshing { transition: none; }
+}
+
+/* /admin launcher — the Archive card's four live figures. The arrow row is
+   pushed to the bottom of every launcher card so all four line up when the
+   Archive card sets a taller grid row. Figures use formatCompactCount
+   (never wider than ~6 glyphs), so they stay on one line at every width. */
+.admin-launcher-grid .admin-workspace-card-arrow { margin-top: auto; display: inline-flex; align-items: center; gap: 4px; }
+.admin-workspace-card-cta { font-size: 13.5px; font-weight: 600; }
+.admin-archive-card-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 6px 0 4px; }
+.admin-archive-card-metrics > div {
+  display: flex; flex-direction: column-reverse; justify-content: flex-end; gap: 3px; min-width: 0;
+  padding: 9px 10px; border-radius: 10px; background: var(--canvas); border: 1px solid var(--soft-line);
+}
+.admin-archive-card-metrics > div.is-emphasis { background: var(--blue-soft); border-color: rgba(0, 127, 186, .22); }
+.admin-archive-card-metrics dd { margin: 0; font-size: 22px; font-weight: 650; line-height: 1.1; color: var(--sidebar); white-space: nowrap; }
+.admin-archive-card-metrics > div.is-emphasis dd { color: var(--blue-dark); }
+.admin-archive-card-metrics dt { font-size: 11.5px; line-height: 1.25; color: var(--muted); overflow-wrap: anywhere; }
+.admin-archive-card-unavailable { margin: 4px 0 0; font-size: 12.5px; color: var(--muted); }
+/* width: 100% — the body lays pages out shrink-to-fit, which left the
+   launcher grid at its content width (3 + 1 cards at ~1024px). Scoped to the
+   launcher only. */
+.admin-launcher-page { width: 100%; }
+/* The metric grid sizes its figures to its own width, so the narrowest
+   four-column card still fits "+12.3K" / "Rejected · 7d" without clipping. */
+.admin-archive-card-metrics { container-type: inline-size; }
+@container (max-width: 200px) {
+  .admin-archive-card-metrics > div { padding: 8px 9px; }
+  .admin-archive-card-metrics dd { font-size: 19px; }
+  .admin-archive-card-metrics dt { font-size: 11px; }
+}

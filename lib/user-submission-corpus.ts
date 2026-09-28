@@ -1320,6 +1320,67 @@ export async function isRepresentationEligibleForMatching(
   return row !== undefined && Number(row.eligible) === 1;
 }
 
+/** One SQL fragment plus its positional bind values, in the fragment's own fixed `?` order. */
+export type BoundEligibilityPredicate = { sql: string; args: (string | null)[] };
+
+export type AdminEligibilityPredicates = {
+  /** The single cutoff (asOf - CORPUS_ACTIVATION_DELAY_DAYS) every MATCHING-mode fragment below is bound to. */
+  maturityCutoff: string;
+  /** admissionEligibilitySql("MATCHING") — the exact matcher predicate, over alias `r`, with NO account exclusion. */
+  matching: BoundEligibilityPredicate;
+  /** admissionEligibilitySql("ARCHIVE") — the exact archive-matcher predicate, over alias `r`. */
+  archive: BoundEligibilityPredicate;
+  /** Arm 2's own per-backing maturity term, over a corpus_admission_decisions alias `d`, bound to the same cutoff and exemption list. */
+  admissionBackingMaturity: BoundEligibilityPredicate;
+};
+
+/**
+ * Admin Archive / Corpus Explorer (lib/corpus-admission-archive-explorer.ts)
+ * — READ-ONLY diagnostics. Hands the explorer the SAME eligibility
+ * fragments the matchers run, resolved ONCE for one logical `asOf` (one
+ * cutoff, one exemption list), so the admin view can count, filter and label
+ * sources without a second definition of "active source":
+ *
+ *   matching — admissionEligibilitySql("MATCHING") bound with a null
+ *     excludeAccountPrefix: "is this representation match-eligible for a
+ *     query from any account other than its owner" (the matcher binds the
+ *     querying account instead; a null prefix makes that term vacuous, exactly
+ *     as for an anonymous query).
+ *   archive — admissionEligibilitySql("ARCHIVE"), no binds.
+ *   admissionBackingMaturity — the maturity term arm 2 above applies to ONE
+ *     admission backing (`d.created_at <= cutoff` OR the decision's
+ *     source_ref starts with an exempt account's prefix). Written out here,
+ *     next to arm 2, because the explorer must show MATURING for an accepted
+ *     admission that is not (yet) indexed — a case the representation-level
+ *     predicate cannot express. tests/corpus-admission-archive-explorer.test.mjs
+ *     pins it to the real predicate's behavior at the inclusive boundary and
+ *     for an exempt account; keep the two textually in step.
+ *
+ * Never used by any matching, scoring, admission or promotion path, and it
+ * takes no mode argument, so it can neither widen nor bypass the maturity gate.
+ */
+export async function resolveAdminEligibilityPredicates(client: Client, asOf: Date): Promise<AdminEligibilityPredicates> {
+  const maturityCutoff = corpusMaturityCutoff(asOf);
+  const exemptAccountPrefixesJson = JSON.stringify(await resolveExemptAccountPrefixes(client, "MATCHING"));
+  return {
+    maturityCutoff,
+    matching: {
+      sql: admissionEligibilitySql("MATCHING"),
+      args: admissionEligibilityBindArgs(null, "MATCHING", maturityCutoff, exemptAccountPrefixesJson),
+    },
+    archive: {
+      sql: admissionEligibilitySql("ARCHIVE"),
+      args: admissionEligibilityBindArgs(null, "ARCHIVE", null, "[]"),
+    },
+    admissionBackingMaturity: {
+      sql: `(d.created_at <= ? OR EXISTS (
+        SELECT 1 FROM json_each(?) exempt WHERE substr(d.source_ref, 1, length(exempt.value)) = exempt.value
+      ))`,
+      args: [maturityCutoff, exemptAccountPrefixesJson],
+    },
+  };
+}
+
 // ===========================================================================
 // Slice 2H — bounded admission-family maxDF recovery helpers.
 //
