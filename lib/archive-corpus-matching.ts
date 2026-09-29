@@ -46,6 +46,8 @@ const DISCOVERY_HASH_CHUNK = 400;
  *     → scoreAgainstArchive (global-DF-pruned postings)                → primary result
  *     → discovery-gap regions of the query
  *     → bounded FTS phrase fallback (budget 16, discovery-only)         → additional candidate IDs
+ *       + corroborated rare-seed nominations (DF <= 3, whole-document
+ *         coverage funded by group-tested DF checks, discovery-only)    → additional candidate IDs
  *     → deduplicated candidate union
  *     → reconstruct union's full grams from canonical_text
  *     → scoreAgainstArchive (SAME pruned postings)                     → final result
@@ -297,6 +299,12 @@ export type MatchAgainstArchiveCorpusResult = ArchiveScoringResult & {
     admittedPhraseProbeCount: number;
     maxAdmittedPhraseFanOut: number;
     dfResolveChecks: number;
+    /** FTS queries the DF-resolution pass issued (per-gram checks + group existence queries). */
+    dfResolveQueries: number;
+    /** rare seeds (unmatched-region 5-grams with archive DF 1..3) found by the DF checks. */
+    rareSeedCount: number;
+    /** NEW candidates nominated by corroborated rare seeds (then verified by the scorer). */
+    rareSeedCandidateCount: number;
     /**
      * Co-source (G1s) expansion diagnostics — present ONLY when
      * isArchiveCosourceExpansionEnabled() (absent entirely when the flag is
@@ -345,6 +353,9 @@ export async function matchAgainstArchiveCorpus(
     admittedPhraseProbeCount: 0,
     maxAdmittedPhraseFanOut: 0,
     dfResolveChecks: 0,
+    dfResolveQueries: 0,
+    rareSeedCount: 0,
+    rareSeedCandidateCount: 0,
   };
 
   if (queryHashes.size === 0 || documentCount === 0) {
@@ -407,6 +418,9 @@ export async function matchAgainstArchiveCorpus(
     admittedPhraseProbeCount: admitted.length,
     maxAdmittedPhraseFanOut: admitted.reduce((m, p) => Math.max(m, p.fanOut), 0),
     dfResolveChecks: fallback.dfResolveChecks,
+    dfResolveQueries: fallback.dfResolveQueries,
+    rareSeedCount: fallback.rareSeedCount,
+    rareSeedCandidateCount: fallback.rareSeedCandidateIds.length,
   };
 
   // ── committed-B behaviour — the ONLY path when the flag is off ────────────

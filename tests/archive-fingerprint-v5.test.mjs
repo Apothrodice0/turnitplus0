@@ -288,19 +288,30 @@ test("v5 build leaves v4 rows untouched", () => {
   assert.deepEqual(v4RowsAfterV5, v4RowsBeforeV5);
 });
 
+// archive-phrase-fallback-v2: the fingerprint-generation-independent rare-seed pass
+// (lib/archive-phrase-fallback.ts) now also reaches this late (token 1,200) verbatim copy when
+// compact discovery cannot. It must be the ONLY path that added the source — no compact row,
+// no phrase probe — and the unchanged scorer must verify the same 90 words v5 compact
+// discovery yields.
+function assertFoundOnlyByRareSeeds(match) {
+  assert.equal(match.archiveDiscovery.phraseCandidateCount, 0);
+  assert.equal(match.archiveDiscovery.rareSeedCandidateCount, 1);
+  assert.deepEqual(match.sources.map((s) => [s.name, s.matchedWords]), [["V5 Ordinary", 90]]);
+}
+
 test("querying v5 never reads v4 rows: before any v5 rows exist, v5 compact discovery finds nothing", () => {
   assert.equal(matchV5BeforeBuild.archiveDiscovery.compactCandidateCount, 0);
-  assert.equal(matchV5BeforeBuild.sources.some((s) => s.name === "V5 Ordinary"), false);
+  assertFoundOnlyByRareSeeds(matchV5BeforeBuild);
 });
 
 test("default query never falls back to v4 rows: before any v5 rows exist, default compact discovery finds nothing", () => {
   assert.equal(matchDefaultBeforeBuild.archiveDiscovery.compactCandidateCount, 0);
-  assert.equal(matchDefaultBeforeBuild.sources.some((s) => s.name === "V5 Ordinary"), false);
+  assertFoundOnlyByRareSeeds(matchDefaultBeforeBuild);
 });
 
 test("explicit v1 query reads only v1 rows (none here) — no fallback to the v4/v5 rows present", () => {
   assert.equal(matchV1Explicit.archiveDiscovery.compactCandidateCount, 0);
-  assert.equal(matchV1Explicit.sources.some((s) => s.name === "V5 Ordinary"), false);
+  assertFoundOnlyByRareSeeds(matchV1Explicit);
 });
 
 test("default query is the explicit v5 query, byte-for-byte", () => {
@@ -317,10 +328,11 @@ test("default builders write v5: no-option rebuild reproduces the v5 rows; defau
   assert.equal(defaultSeedRowsByVersion.get(V5), v5Of(DEFAULT_SEED_TEXT).rawWinnowSelectionCount);
 });
 
-test("regression passage: explicit v4 query misses the source; explicit v5 query discovers and scores it", () => {
+test("regression passage: explicit v4 compact discovery misses the source (only rare seeds reach it); explicit v5 compact discovery discovers and scores it", () => {
   assert.equal(matchV4Explicit.archiveDiscovery.compactCandidateCount, 0);
-  assert.equal(matchV4Explicit.sources.some((s) => s.name === "V5 Ordinary"), false);
+  assertFoundOnlyByRareSeeds(matchV4Explicit);
   assert.equal(matchV5Explicit.archiveDiscovery.compactCandidateCount, 1);
+  assert.equal(matchV5Explicit.archiveDiscovery.rareSeedCandidateCount, 0, "compact discovery found it, so rare seeds add nothing");
   const source = matchV5Explicit.sources.find((s) => s.name === "V5 Ordinary");
   assert.ok(source, "v5 discovery must reach the source");
   assert.equal(source.matchedWords, 90);

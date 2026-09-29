@@ -96,6 +96,27 @@ export async function phraseSearch(client: ArchiveReadClient, phraseWords: strin
 }
 
 /**
+ * Group existence test: does ANY archive document contain ANY of these exact
+ * phrases? One query whose MATCH string ORs the phrases, each still ONE
+ * quoted run (`"a b c d e" OR "f g h i j"`), joined through the map exactly
+ * like phraseSearch — so it is false iff phraseSearch would return [] for
+ * every phrase. Lets the DF-resolution pass settle a whole block of DF-0
+ * grams (the vast majority of novel text) in one round-trip.
+ */
+export async function phraseAnyPresent(client: ArchiveReadClient, phrases: string[][]): Promise<boolean> {
+  if (phrases.length === 0) return false;
+  const res = await client.execute({
+    sql: `SELECT 1 AS hit
+            FROM ${ARCHIVE_PHRASE_FTS_TABLE} f
+            JOIN ${ARCHIVE_PHRASE_FTS_MAP_TABLE} m ON m.fts_rowid = f.rowid
+           WHERE f.${ARCHIVE_PHRASE_FTS_TABLE} MATCH ?
+           LIMIT 1`,
+    args: [phrases.map(toPhraseMatch).join(" OR ")],
+  });
+  return res.rows.length > 0;
+}
+
+/**
  * Fan-out count for a phrase without materialising the id list. For an exact
  * 5-word run this IS that 5-gram's archive-wide document frequency (modulo the
  * same hash-collision tolerance the scorer already accepts) — the FTS index

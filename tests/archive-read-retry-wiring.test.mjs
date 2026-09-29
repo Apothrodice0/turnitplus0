@@ -103,8 +103,8 @@ test("archive-server-analysis builds ONE retry wrapper and runs the matcher on i
 test("the matcher and every read helper it calls take the narrow ArchiveReadClient, not a full Client", () => {
   const targets = [
     ["lib/archive-corpus-matching.ts", ["matchAgainstArchiveCorpus", "compactDiscovery", "scoreOverCandidates"]],
-    ["lib/archive-phrase-fallback.ts", ["phraseFallbackDiscovery", "runPhraseProbes", "resolveQueryGramDf"]],
-    ["lib/archive-phrase-index.ts", ["phraseSearch", "phraseFanOut"]],
+    ["lib/archive-phrase-fallback.ts", ["phraseFallbackDiscovery", "runPhraseProbes", "resolveQueryGramDf", "resolveQueryGramDfWithRareSeeds"]],
+    ["lib/archive-phrase-index.ts", ["phraseSearch", "phraseFanOut", "phraseAnyPresent"]],
     ["lib/archive-df-bands.ts", ["loadDfBandMap"]],
     ["lib/archive-cosource.ts", ["loadCosources"]],
   ];
