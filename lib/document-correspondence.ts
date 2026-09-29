@@ -52,7 +52,7 @@ const GENERIC_ACADEMIC_REGISTER_WORDS = new Set([
   "standard", "study", "taken", "terms", "that", "these", "this", "throughout", "topic", "treatment",
   "used", "using", "with", "within", "work",
 ]);
-const GENERIC_ACADEMIC_REGISTER_DENSITY_LIMIT = 0.4;
+export const GENERIC_ACADEMIC_REGISTER_DENSITY_LIMIT = 0.4;
 
 /**
  * Fraction of the passage's own words (length >= 4, the same floor
@@ -64,7 +64,7 @@ const GENERIC_ACADEMIC_REGISTER_DENSITY_LIMIT = 0.4;
  * comment for the measured numbers) rather than being a second, stricter
  * per-word blocklist layered on top of informativeGram.
  */
-function genericAcademicRegisterDensity(words: string[]): number {
+export function genericAcademicRegisterDensity(words: string[]): number {
   const longWords = words.filter((word) => word.length >= 4);
   if (longWords.length === 0) return 1; // no real content at all -> treat as maximally generic, never distinctive
   const genericCount = longWords.filter((word) => GENERIC_ACADEMIC_REGISTER_WORDS.has(word)).length;

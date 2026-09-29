@@ -472,6 +472,13 @@ export type PhraseFallbackDiscovery = {
   rareSeedCount: number;
   /** NEW candidates nominated by corroborated rare seeds */
   rareSeedCandidateIds: string[];
+  /**
+   * gramHash of every query 5-gram this pass resolved to an exact archive DF
+   * of 1..rareSeedMaxDf: the rare seeds plus the matched-region grams step 1
+   * resolved. Read only by the verification-side span extension's seed gate
+   * (lib/archive-corpus-matching.ts); never a candidate input, never scored.
+   */
+  rareGramHashes: string[];
   /** deduplicated union of compact + phrase + rare-seed candidates */
   unionCandidateIds: string[];
   dfResolveChecks: number;
@@ -555,6 +562,10 @@ export async function phraseFallbackDiscovery(
     { minSupport: opts.rareSeedMinSupport, window: opts.rareSeedWindow, maxCandidates: opts.rareSeedMaxCandidates },
   );
   const unionCandidateIds = [...new Set([...compactCandidateIds, ...phraseCandidateIds, ...rareSeedCandidateIds])];
+  const rareSeedMaxDf = opts.rareSeedMaxDf ?? RARE_SEED_MAX_DF;
+  const rareGramHashes = new Set<string>();
+  for (const [hash, df] of resolved) if (df >= 1 && df <= rareSeedMaxDf) rareGramHashes.add(hash);
+  for (const seed of resolution.rareSeeds) rareGramHashes.add(gramHash(queryWords.slice(seed.position, seed.position + S).join(" ")));
   return {
     regions,
     probes,
@@ -562,6 +573,7 @@ export async function phraseFallbackDiscovery(
     phraseCandidateIds,
     rareSeedCount: resolution.rareSeeds.length,
     rareSeedCandidateIds,
+    rareGramHashes: [...rareGramHashes],
     unionCandidateIds,
     dfResolveChecks: resolved.size,
     dfResolveQueries: resolution.queries,

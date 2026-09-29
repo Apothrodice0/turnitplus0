@@ -1,6 +1,7 @@
 import type { ArchiveReadClient } from "./archive-read-retry";
-import { tokens, grams, gramHash, containment } from "./similarity-core";
+import { tokens, grams, gramHash, containment, similarityScore } from "./similarity-core";
 import { scoreAgainstArchive, type ArchiveScoringResult, type ArchiveScoringMatchingParameters } from "./archive-similarity-scoring";
+import { seedExtendVerifiedPositions, SEED_EXTEND_ALIGNMENT_POLICY_VERSION } from "./seed-extend-alignment";
 import { ARCHIVE_FINGERPRINT_VERSION } from "./archive-corpus-seed";
 import { ARCHIVE_SHINGLE_SIZE, ARCHIVE_COMPACT_FINGERPRINT_VERSION, archiveShingleHashes } from "./archive-fingerprint";
 import { loadDfBandMap, deriveStopHashSet, ARCHIVE_DF_BAND_POLICY_VERSION } from "./archive-df-bands";
@@ -51,6 +52,25 @@ const DISCOVERY_HASH_CHUNK = 400;
  *     → deduplicated candidate union
  *     → reconstruct union's full grams from canonical_text
  *     → scoreAgainstArchive (SAME pruned postings)                     → final result
+ *     → bounded span extension (verification only, additive)           → final positions
+ *
+ * SPAN EXTENSION (applySpanExtension) runs after the unchanged scorer and only
+ * against the sources that scorer ACCEPTED (self-exclusion, the source minimum
+ * and the contributing-source cap already applied — none of them is re-run or
+ * changed). From each exact seed — an informative, non-stop query 5-gram the
+ * phrase-fallback pass resolved to an exact archive DF of 1..RARE_SEED_MAX_DF,
+ * found verbatim in the source's retrieved canonical_text — it aligns the
+ * submission against that text in a bounded window (lib/seed-extend-alignment.ts)
+ * and admits an aligned passage only under that module's controls. It adds
+ * ONLY submission positions whose token is exactly equal to the aligned source
+ * token inside an exact island, and only next to an edit inside the passage
+ * (a token at least one of whose 5-grams that edit broke) — a verbatim copy is
+ * left exactly as the exact path scored it. The exact result's positions are
+ * kept as-is and the score is the same unique-positions formula over the
+ * enlarged set. The
+ * scorer's gram-frequency gate still applies: a copied token whose every exact
+ * aligned 5-gram is frequency-gated (stop set, or in more retrieved candidates
+ * than the runtime cap) is not evidence and never scores.
  *
  * GLOBAL DF PRUNING is independent of how many candidates were discovered:
  * a hash is pruned iff it is in the precomputed archive-global stop set
@@ -83,6 +103,7 @@ export const ARCHIVE_MATCH_POLICY = {
   phraseFallbackPolicyVersion: ARCHIVE_PHRASE_FALLBACK_POLICY_VERSION,
   phraseFallbackBudget: PHRASE_FALLBACK_BUDGET,
   cosourcePolicyVersion: ARCHIVE_COSOURCE_POLICY_VERSION,
+  spanExtensionPolicyVersion: SEED_EXTEND_ALIGNMENT_POLICY_VERSION,
 } as const;
 
 export type MatchAgainstArchiveCorpusOptions = {
@@ -109,6 +130,8 @@ export type MatchAgainstArchiveCorpusOptions = {
    */
   maturityCutoff?: string;
   asOf?: Date;
+  /** false = the exact-only result (no span extension). Defaults to on. */
+  spanExtension?: boolean;
 };
 
 type CandidateOrderRow = { representation_id: string; title: string; archive_order: number | bigint | null };
@@ -177,6 +200,19 @@ type ScoreOverCandidatesResult = {
    *  ARCHIVE_SELF_EXCLUSION_CONTAINMENT — the same set scoreAgainstArchive
    *  excludes. Used ONLY by the G1s gate; unordered. */
   selfExcludedRepresentationIds: string[];
+  /** canonical_text of the sources the scorer returned in `result.sources`
+   *  (keyed by sourceIndex) — the retrieved text the span extension aligns
+   *  against. */
+  sourceTextByIndex: Map<number, string>;
+  /** For each source in `sourceTextByIndex`: the query 5-gram hashes it
+   *  contains — lets the span extension skip a source holding no seed gram
+   *  without tokenizing its text. */
+  sharedQueryHashesByIndex: Map<number, Set<string>>;
+  /** For each query 5-gram hash present in any retrieved candidate: how many
+   *  retrieved candidates contain it (self-excluded ones included, so it is
+   *  never below the count the scorer's own runtime cap tests). Lets the span
+   *  extension apply the scorer's gram-frequency gate. */
+  candidateGramFrequency: Map<string, number>;
 };
 
 /**
@@ -209,6 +245,9 @@ async function scoreOverCandidates(
       result: scoreAgainstArchive(submittedText, emptyIndex, matchingParameters),
       candidateIds: [],
       selfExcludedRepresentationIds: [],
+      sourceTextByIndex: new Map(),
+      sharedQueryHashesByIndex: new Map(),
+      candidateGramFrequency: new Map(),
     };
   }
 
@@ -286,7 +325,146 @@ async function scoreOverCandidates(
     { shingleSize: ARCHIVE_SHINGLE_SIZE, documentCount, maximumDocumentFrequency, articles, getPostings },
     matchingParameters,
   );
-  return { result, candidateIds, selfExcludedRepresentationIds };
+  const returnedSourceIndexes = new Set(result.sources.map((source) => source.sourceIndex));
+  const sourceTextByIndex = new Map<number, string>();
+  const sharedQueryHashesByIndex = new Map<number, Set<string>>();
+  for (const row of textResult.rows) {
+    const r = row as unknown as { id: string; canonical_text: string };
+    const sourceIndex = sourceIndexByRepresentationId.get(String(r.id));
+    if (sourceIndex === undefined || !returnedSourceIndexes.has(sourceIndex)) continue;
+    sourceTextByIndex.set(sourceIndex, String(r.canonical_text));
+    const hashSet = hashSetByRepresentationId.get(String(r.id));
+    const shared = new Set<string>();
+    if (hashSet) for (const hash of queryHashes) if (hashSet.has(hash)) shared.add(hash);
+    sharedQueryHashesByIndex.set(sourceIndex, shared);
+  }
+  const candidateGramFrequency = new Map<string, number>();
+  for (const hash of queryHashes) {
+    const count = postingsByHash.get(hash)?.length ?? 0;
+    if (count > 0) candidateGramFrequency.set(hash, count);
+  }
+  return { result, candidateIds, selfExcludedRepresentationIds, sourceTextByIndex, sharedQueryHashesByIndex, candidateGramFrequency };
+}
+
+export type ArchiveSpanExtensionDiagnostics = {
+  /** false when disabled by option or when the source weighting is not "raw"
+   *  (the unique-positions score identity below holds only for raw). */
+  enabled: boolean;
+  /** rare (DF 1..RARE_SEED_MAX_DF), non-stop resolved query grams available as seeds */
+  seedGramCount: number;
+  /** submission positions whose 5-gram passed the seed gate */
+  seedPositionCount: number;
+  /** accepted sources holding at least one seed gram (their retrieved text was aligned against) */
+  extendedSourceCount: number;
+  alignmentCount: number;
+  admittedAlignmentCount: number;
+  /** token-pair equality checks the bounded extension performed */
+  comparisonCount: number;
+  /** SEED_EXTEND_MAX_ALIGNMENTS was reached */
+  truncated: boolean;
+  /** positions added to archiveMatchedPositions (none were in the exact result) */
+  addedPositionCount: number;
+};
+
+function emptySpanExtension(enabled: boolean, seedGramCount = 0): ArchiveSpanExtensionDiagnostics {
+  return {
+    enabled,
+    seedGramCount,
+    seedPositionCount: 0,
+    extendedSourceCount: 0,
+    alignmentCount: 0,
+    admittedAlignmentCount: 0,
+    comparisonCount: 0,
+    truncated: false,
+    addedPositionCount: 0,
+  };
+}
+
+/**
+ * The additive verification step (see the SPAN EXTENSION note in the header).
+ * `scored.result` is the UNCHANGED exact result. The extension aligns only
+ * against result.sources (the scorer's accepted sources, in its order) and each
+ * new position is attributed to the first of those sources whose admitted
+ * alignment contains it. When nothing is added the exact result object is
+ * returned as-is. Otherwise every exact position stays, and the new ones are
+ * added to archiveMatchedPositions / matchedWordCount, to their source's
+ * matchedWords / percent (same floor formula; sources re-sorted by the scorer's
+ * own comparator), and the score is similarityScore(unique positions, words) —
+ * exactly aggregateSimilaritySources' raw-weighting score, since per-source
+ * positions stay disjoint. matches / phrases / longestMatchedSpan /
+ * containment features remain exact-span derived.
+ */
+function applySpanExtension(
+  scored: ScoreOverCandidatesResult,
+  submissionWords: string[],
+  seedGramHashes: ReadonlySet<string>,
+  frequencyGate: { stopHashSet: ReadonlySet<string>; runtimeMaximumDocumentFrequency: number },
+  enabled: boolean,
+): { result: ArchiveScoringResult; diagnostics: ArchiveSpanExtensionDiagnostics } {
+  const { result } = scored;
+  if (!enabled || seedGramHashes.size === 0 || result.sources.length === 0) {
+    return { result, diagnostics: emptySpanExtension(enabled, seedGramHashes.size) };
+  }
+  // A source holding no seed gram can never launch an alignment: skip it
+  // before paying for its tokenization.
+  const sources = result.sources.flatMap((source) => {
+    const text = scored.sourceTextByIndex.get(source.sourceIndex);
+    const shared = scored.sharedQueryHashesByIndex.get(source.sourceIndex);
+    if (text === undefined || !shared || ![...seedGramHashes].some((hash) => shared.has(hash))) return [];
+    return [{ key: source.sourceIndex, words: tokens(text) }];
+  });
+  // The scorer's own gram-frequency gate (stop set, or more retrieved
+  // candidates than the runtime cap): archive-common text such as licence
+  // boilerplate is non-evidence for the extension exactly as for the exact path.
+  const isFrequencyGatedGram = (hash: string) =>
+    frequencyGate.stopHashSet.has(hash)
+    || (scored.candidateGramFrequency.get(hash) ?? 0) > frequencyGate.runtimeMaximumDocumentFrequency;
+  const { positionsBySource, stats } = seedExtendVerifiedPositions(submissionWords, sources, seedGramHashes, { isFrequencyGatedGram });
+
+  const claimed = new Set(result.archiveMatchedPositions);
+  const addedBySource = new Map<number, number>();
+  for (const source of result.sources) {
+    let added = 0;
+    for (const position of positionsBySource.get(source.sourceIndex) ?? []) {
+      if (claimed.has(position)) continue;
+      claimed.add(position);
+      added += 1;
+    }
+    if (added > 0) addedBySource.set(source.sourceIndex, added);
+  }
+  const addedPositionCount = claimed.size - result.archiveMatchedPositions.length;
+  const diagnostics: ArchiveSpanExtensionDiagnostics = {
+    enabled,
+    seedGramCount: seedGramHashes.size,
+    seedPositionCount: stats.seedPositions,
+    extendedSourceCount: sources.length,
+    alignmentCount: stats.alignments,
+    admittedAlignmentCount: stats.admittedAlignments,
+    comparisonCount: stats.comparisons,
+    truncated: stats.truncated,
+    addedPositionCount,
+  };
+  if (addedPositionCount === 0) return { result, diagnostics };
+
+  const archiveMatchedPositions = [...claimed].sort((left, right) => left - right);
+  const extendedSources = result.sources
+    .map((source) => {
+      const added = addedBySource.get(source.sourceIndex) ?? 0;
+      if (added === 0) return source;
+      const matchedWords = source.matchedWords + added;
+      return { ...source, matchedWords, percent: Math.floor((matchedWords / Math.max(result.wordCount, 1)) * 100) };
+    })
+    .sort((left, right) => right.percent - left.percent || right.matches - left.matches);
+  return {
+    result: {
+      ...result,
+      matchedWordCount: archiveMatchedPositions.length,
+      archiveMatchedPositions,
+      score: similarityScore(archiveMatchedPositions.length, result.wordCount),
+      sources: extendedSources,
+    },
+    diagnostics,
+  };
 }
 
 export type MatchAgainstArchiveCorpusResult = ArchiveScoringResult & {
@@ -327,6 +505,8 @@ export type MatchAgainstArchiveCorpusResult = ArchiveScoringResult & {
       finalCandidateCount: number;
     };
   };
+  /** Span-extension diagnostics — server/test-only, never serialised. */
+  archiveSpanExtension: ArchiveSpanExtensionDiagnostics;
 };
 
 export async function matchAgainstArchiveCorpus(
@@ -344,6 +524,8 @@ export async function matchAgainstArchiveCorpus(
   const documentCount = Number((documentCountResult.rows[0] as unknown as { total: number | bigint }).total);
 
   const queryHashes = queryHashSet(submittedText);
+  const spanExtensionEnabled = options.spanExtension !== false
+    && (options.matchingParameters?.sourceWeighting ?? "raw") === "raw";
 
   const emptyDiscovery = {
     compactCandidateCount: 0,
@@ -364,7 +546,7 @@ export async function matchAgainstArchiveCorpus(
       { shingleSize: ARCHIVE_SHINGLE_SIZE, documentCount, maximumDocumentFrequency: options.maximumDocumentFrequency, articles: [], getPostings: () => [] },
       options.matchingParameters,
     );
-    return { ...empty, archiveDiscovery: emptyDiscovery };
+    return { ...empty, archiveDiscovery: emptyDiscovery, archiveSpanExtension: emptySpanExtension(spanExtensionEnabled) };
   }
 
   // Archive-global DF metadata — the only DF data read directly.
@@ -409,6 +591,18 @@ export async function matchAgainstArchiveCorpus(
         queryHashes,
       );
 
+  // 4) span extension (verification only) — seeds are the rare, non-stop grams
+  //    the fallback pass resolved; applied to whichever scored result is returned.
+  const submissionWords = tokens(submittedText);
+  const seedGramHashes = new Set(fallback.rareGramHashes.filter((hash) => !stopHashSet.has(hash)));
+  // scoreAgainstArchive's own runtime cap: min(index cap, matchingParameters cap)
+  const runtimeMaximumDocumentFrequency = Math.min(
+    options.maximumDocumentFrequency,
+    options.matchingParameters?.maximumDocumentFrequency ?? options.maximumDocumentFrequency,
+  );
+  const extend = (scored: ScoreOverCandidatesResult) =>
+    applySpanExtension(scored, submissionWords, seedGramHashes, { stopHashSet, runtimeMaximumDocumentFrequency }, spanExtensionEnabled);
+
   const admitted = fallback.perProbe.filter((p) => p.admitted);
   const baseDiscovery = {
     compactCandidateCount: compactCandidateIds.length,
@@ -426,7 +620,8 @@ export async function matchAgainstArchiveCorpus(
   // ── committed-B behaviour — the ONLY path when the flag is off ────────────
   // (byte-identical to the pre-2D.4 matcher: no `cosource` diagnostics field)
   if (!isArchiveCosourceExpansionEnabled()) {
-    return { ...final.result, archiveDiscovery: baseDiscovery };
+    const extended = extend(final);
+    return { ...extended.result, archiveDiscovery: baseDiscovery, archiveSpanExtension: extended.diagnostics };
   }
 
   // ── G1s gate (frozen Slice 2D.3 semantics) ──────────────────────────────
@@ -453,7 +648,8 @@ export async function matchAgainstArchiveCorpus(
   };
 
   if (!g1sEligible) {
-    return { ...final.result, archiveDiscovery: { ...baseDiscovery, cosource: cosourceBase } };
+    const extended = extend(final);
+    return { ...extended.result, archiveDiscovery: { ...baseDiscovery, cosource: cosourceBase }, archiveSpanExtension: extended.diagnostics };
   }
 
   // Anchors → bounded adjacency lookup → union/dedupe with the primary
@@ -465,12 +661,14 @@ export async function matchAgainstArchiveCorpus(
 
   if (expandedUnionIds.length === fallback.unionCandidateIds.length) {
     // adjacency added no new candidate — committed-B result stands unchanged
+    const extended = extend(final);
     return {
-      ...final.result,
+      ...extended.result,
       archiveDiscovery: {
         ...baseDiscovery,
         cosource: { ...cosourceBase, anchorCount: selfExcludedIds.length, neighborCount: cosourceNeighborIds.length },
       },
+      archiveSpanExtension: extended.diagnostics,
     };
   }
 
@@ -484,8 +682,10 @@ export async function matchAgainstArchiveCorpus(
     stopHashSet,
     queryHashes,
   );
+  const extended = extend(expanded);
   return {
-    ...expanded.result,
+    ...extended.result,
+    archiveSpanExtension: extended.diagnostics,
     archiveDiscovery: {
       ...baseDiscovery,
       cosource: {

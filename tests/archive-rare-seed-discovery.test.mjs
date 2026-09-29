@@ -125,9 +125,9 @@ const ftsQueryCount = (log) => log.filter((e) => /archive_phrase_fts\s+MATCH/i.t
 const MAX_DF_RESOLVE_QUERIES = PHRASE_FALLBACK_DF_RESOLVE_MAX_CHECKS + Math.ceil(PHRASE_FALLBACK_DF_RESOLVE_MAX_CHECKS / DF_RESOLVE_GROUP_SIZE);
 const MAX_FTS_QUERIES = MAX_DF_RESOLVE_QUERIES + 2 * PHRASE_FALLBACK_BUDGET;
 
-async function runMatcher(text, matchingParameters = MATCHING) {
+async function runMatcher(text, matchingParameters = MATCHING, extra = {}) {
   const c = spy(client);
-  const m = await matchAgainstArchiveCorpus(c, text, { maximumDocumentFrequency: MDF, matchingParameters });
+  const m = await matchAgainstArchiveCorpus(c, text, { maximumDocumentFrequency: MDF, matchingParameters, ...extra });
   return { m, log: c.log };
 }
 
@@ -230,6 +230,12 @@ const late = {
   insert: await runMatcher(TEXT_LATE_INSERT),
   delete: await runMatcher(TEXT_LATE_DELETE),
   punct: await runMatcher(TEXT_LATE_PUNCT),
+};
+// The same edited runs through the exact path alone (the verification-side
+// span extension, tests/archive-span-extension.test.mjs, switched off).
+const lateExactOnly = {
+  insert: await runMatcher(TEXT_LATE_INSERT, MATCHING, { spanExtension: false }),
+  delete: await runMatcher(TEXT_LATE_DELETE, MATCHING, { spanExtension: false }),
 };
 const early = await runMatcher(TEXT_EARLY_EXACT);
 const fpSharedInsert = await sharedFingerprints(TEXT_LATE_INSERT, lateSrcId);
@@ -369,14 +375,18 @@ test("late edited passages: the source is retrieved and ONLY its exact verified 
       assert.ok(p >= LATE_START && p < LATE_START + len, `${label}: no host position scores`);
       assert.ok(!q[p].startsWith("ins"), `${label}: an inserted word is never scored`);
     }
-    // The ONLY route to positions is the unchanged scorer over the retrieved set.
+    // Seeds never score: the exact path's positions come ONLY from the unchanged
+    // scorer over the retrieved set; the span extension may only add copied
+    // tokens on top of them (never host or inserted words — checked above).
+    const exactOnly = lateExactOnly[label === "insert1per5" ? "insert" : "delete"].m;
     const independent = await scoreOverIds(text, finalCandidateIds(log));
-    assert.deepEqual(normalizeArchiveResult(m), normalizeArchiveResult(independent), `${label}: positions == scorer(retrieved candidates)`);
+    assert.deepEqual(normalizeArchiveResult(exactOnly), normalizeArchiveResult(independent), `${label}: exact-path positions == scorer(retrieved candidates)`);
+    assert.ok(exactOnly.archiveMatchedPositions.every((p) => m.archiveMatchedPositions.includes(p)), `${label}: every exact-path position is kept`);
   }
   assert.equal(
-    inPassage(late.delete.m.archiveMatchedPositions, LATE_START, deleteLen).length,
+    inPassage(lateExactOnly.delete.m.archiveMatchedPositions, LATE_START, deleteLen).length,
     deleteVerifiableWords,
-    "delete1per8: every surviving copied token in a >= 5-word source run is verified, and nothing else",
+    "delete1per8: the exact path verifies every surviving copied token in a >= 5-word source run, and nothing else",
   );
 });
 
