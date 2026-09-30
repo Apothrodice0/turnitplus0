@@ -28,7 +28,37 @@ export function tokens(value: string) {
   return normalize(comparisonText(value)).split(" ").filter(Boolean);
 }
 
+/** `word` is the ORIGINAL text slice [start, end) — never a normalized form. */
 export type TokenSpan = { word: string; start: number; end: number };
+
+/**
+ * What normalize() turns ONE code point into, before whitespace collapsing:
+ * "" when it is deleted outright (a combining mark), text containing " "
+ * where it is (or yields) a word boundary. Derived from normalize() itself
+ * between two "a" sentinels, so it can never drift from the scoring
+ * normalization; null if the sentinels do not survive (never today).
+ */
+function normalizedCodePoint(codePoint: string): string | null {
+  const bracketed = normalize(`a${codePoint}a`);
+  if (bracketed.length < 2 || bracketed[0] !== "a" || bracketed[bracketed.length - 1] !== "a") return null;
+  return bracketed.slice(1, -1);
+}
+
+/**
+ * normalize() lowercases the WHOLE string, so a capital sigma becomes final
+ * "ς" or medial "σ" depending on its neighbours; one code point on its own
+ * always becomes "σ". That is the only context-dependent step (NFKD's
+ * canonical reordering only moves combining marks, which are deleted), so it
+ * is the only difference accepted between the two.
+ */
+function sameScoringToken(derived: string, scored: string) {
+  if (derived === scored) return true;
+  if (derived.length !== scored.length) return false;
+  for (let index = 0; index < derived.length; index += 1) {
+    if (derived[index] !== scored[index] && !(derived[index] === "σ" && scored[index] === "ς")) return false;
+  }
+  return true;
+}
 
 /**
  * Unified-similarity highlighting fix: the same word sequence tokens(value)
@@ -39,29 +69,79 @@ export type TokenSpan = { word: string; start: number; end: number };
  * start)`), never reorders or edits the prefix any of these offsets fall
  * within.
  *
- * Scans the ORIGINAL (comparison) text directly with a maximal-run-of-
- * letters-or-digits regex, rather than re-deriving offsets from
- * normalize()'s destructively-transformed string. This produces the exact
- * same word sequence as tokens() because normalize()'s only
- * boundary-relevant step is `replace(/[^\p{L}\p{N}\s]/gu, " ")` — every
- * non-letter/non-digit/non-whitespace character becomes a boundary, exactly
- * what \p{L}\p{N}+ already treats as a boundary when matched directly
- * against the original text. NFKD decomposition and \p{M} (combining mark)
- * stripping change a letter's internal representation, never whether it
- * counts as a letter, so they never shift a word boundary either. Verified
- * empirically (word sequence equality against tokens()) across this
- * codebase's own realistic fixture texts — see
- * tests/unified-similarity-highlighting.test.mjs.
+ * Display-token span alignment: a raw letters-or-digits scan is NOT the same
+ * word sequence as tokens() — a combining mark inside a word (NFD accents,
+ * Arabic harakat) splits the raw run but is deleted by normalize(), and a
+ * compatibility symbol (™ ℃ ½ ⓐ) is a raw boundary but NFKD turns it into
+ * letters/digits — so every scored position after such a character used to
+ * highlight a neighbouring word. Instead, each ORIGINAL code point is run
+ * through normalize() on its own (normalizedCodePoint) and the resulting
+ * words are carried with the raw offsets of the code points that produced
+ * them:
+ *   - a word spans from its first contributing code point to its last,
+ *     plus any deleted code points (combining marks) directly after it, so
+ *     a mark stays with its base; one before a word's first letter (at the
+ *     text start, or after a boundary) belongs to no word;
+ *   - a code point that yields several words (½ → "1 2") gives each of them
+ *     that same code point's range.
+ *
+ * FAIL CLOSED: every derived word is checked against the real tokens(value)
+ * at the same index (sameScoringToken). At the first word that does not
+ * match, mapping stops and the array ends there: callers already treat an
+ * index past the end as "no character range" (no highlight), so an
+ * unprovable position is never shifted onto a neighbouring word.
+ *
+ * Linear in the text length; normalize() runs once per DISTINCT code point.
  */
 export function tokenSpans(value: string): TokenSpan[] {
-  const text = comparisonText(value);
+  return alignTokenSpans(comparisonText(value), tokens(value));
+}
+
+/**
+ * tokenSpans()' mapping of `text` onto an already-computed scoring token
+ * list (`scored` must be tokens() of that same text for a full result; any
+ * other list just ends the array at the first disagreement).
+ */
+export function alignTokenSpans(text: string, scored: readonly string[]): TokenSpan[] {
   const spans: TokenSpan[] = [];
-  const pattern = /[\p{L}\p{N}]+/gu;
-  let match = pattern.exec(text);
-  while (match) {
-    spans.push({ word: match[0], start: match.index, end: match.index + match[0].length });
-    match = pattern.exec(text);
+  const pieces = new Map<string, string | null>();
+  let word = "";
+  let start = -1;
+  let end = -1;
+  let offset = 0;
+  const closeWord = () => {
+    if (start < 0) return true;
+    const expected = scored[spans.length];
+    if (expected === undefined || !sameScoringToken(word, expected)) return false;
+    spans.push({ word: text.slice(start, end), start, end });
+    word = "";
+    start = -1;
+    return true;
+  };
+  for (const codePoint of text) {
+    let piece = pieces.get(codePoint);
+    if (piece === undefined) {
+      piece = normalizedCodePoint(codePoint);
+      pieces.set(codePoint, piece);
+    }
+    if (piece === null) return spans;
+    const next = offset + codePoint.length;
+    if (piece === "") {
+      if (start >= 0) end = next;
+    } else {
+      for (const character of piece) {
+        if (character === " ") {
+          if (!closeWord()) return spans;
+        } else {
+          if (start < 0) start = offset;
+          word += character;
+          end = next;
+        }
+      }
+    }
+    offset = next;
   }
+  closeWord();
   return spans;
 }
 

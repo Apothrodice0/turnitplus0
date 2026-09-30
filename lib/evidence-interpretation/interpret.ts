@@ -4,6 +4,7 @@ import {
   type EvidenceInterpretationConfidence,
   type SameWorkRelationship,
 } from "./kinds";
+import { tokenSpans } from "../similarity-core";
 
 /**
  * Evidence Interpretation Layer — the PURE classifier (V1, high-confidence).
@@ -79,23 +80,12 @@ export type InterpretationResult = {
 };
 
 // ---------------------------------------------------------------------------
-// Offset-preserving tokenisation — same word sequence as lib/similarity-core
-// tokens(), plus each word's char offset, so quotation marks / citations that
-// tokens() strips are visible. Local re-derivation (same maximal-run scan
-// lib/similarity-core.ts tokenSpans() documents) — no scoring-core import cycle.
+// Offset-preserving tokenisation — lib/similarity-core tokenSpans(), the same
+// word → char geometry the report highlighter uses: tokens()' word sequence
+// plus each word's char offset, so quotation marks / citations that tokens()
+// strips are visible. It ends at the first word it cannot prove.
 // ---------------------------------------------------------------------------
 type WordSpan = { start: number; end: number };
-
-function wordSpans(text: string): WordSpan[] {
-  const spans: WordSpan[] = [];
-  const re = /[\p{L}\p{N}]+/gu;
-  let m = re.exec(text);
-  while (m) {
-    spans.push({ start: m.index, end: m.index + m[0].length });
-    m = re.exec(text);
-  }
-  return spans;
-}
 
 // ---------------------------------------------------------------------------
 // Typographic quotation regions. V1 trusts ONLY curly quotes (" " and ' '):
@@ -154,8 +144,13 @@ function citationNear(text: string, regionStart: number, regionEnd: number): Cit
 }
 
 function spanQuotation(text: string, words: WordSpan[], span: VerifiedSpan, regions: QuoteRegion[]) {
-  const cs = words[span.start]?.start ?? 0;
-  const ce = words[Math.min(span.end, words.length - 1)]?.end ?? text.length;
+  // A span whose first or last word has no proven char range is never read
+  // as quoted — never clamped onto a neighbouring word or the whole text.
+  const first = words[span.start];
+  const last = words[span.end];
+  if (!first || !last) return { quoted: false as const };
+  const cs = first.start;
+  const ce = last.end;
   const len = Math.max(1, ce - cs);
   let best: QuoteRegion | null = null;
   let bestOverlap = 0;
@@ -198,7 +193,7 @@ export function interpretVerifiedEvidence(input: InterpretationInput): Interpret
   };
   const bySource = new Map<string, EvidenceSpanInterpretation[]>();
 
-  const words = wordSpans(input.submissionText);
+  const words = tokenSpans(input.submissionText);
   const regions = quotationRegions(input.submissionText);
 
   const positionsByKey = new Map<string, Set<number>>();
