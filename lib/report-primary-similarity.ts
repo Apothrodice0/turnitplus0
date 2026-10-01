@@ -1,5 +1,7 @@
 import type { Client } from "@libsql/client";
-import { getOrComputeHistoricalMatchSnapshot, getCurrentCorpusMatchGeneration, isHistoricalMatchSnapshotCurrent, SNAPSHOT_MATCHER_VERSION } from "./report-historical-match";
+import { getOrComputeHistoricalMatchSnapshot, getCurrentCorpusMatchGeneration, isHistoricalMatchSnapshotCurrent, snapshotMatcherVersion } from "./report-historical-match";
+import { reportScoringNormalizationVersion, type ScoringNormalizationVersion } from "./similarity-core";
+import { runWithScoringNormalization } from "./scoring-normalization-scope";
 import { isCorpusSourceMatchingEnabled } from "./corpus-source-matching-flag";
 import { CORPUS_FINGERPRINT_VERSION, CANONICALIZATION_VERSION } from "./user-submission-corpus";
 import { computeUnifiedSimilarity, type UnifiedSimilarityResult } from "./unified-similarity";
@@ -135,6 +137,13 @@ export type PrimarySimilarityResolution = {
    * never persisted, never returned to an ordinary user.
    */
   deviceSelfSharedGuard: DeviceSelfSharedGuardResult | null;
+  /**
+   * The scoring-normalization contract this whole resolution was computed
+   * under — the report's own (see resolvePrimarySimilaritySummary's param).
+   * Carried on the result so a write of it (persistRefreshedSimilarity) can
+   * refuse to land on a row whose stamp says anything else.
+   */
+  scoringNormalizationVersion: ScoringNormalizationVersion;
 };
 
 /**
@@ -366,7 +375,33 @@ export async function resolvePrimarySimilaritySummary(
      * maturity-crossing cache check. Defaults to server time; tests inject it.
      */
     asOf?: Date;
+    /**
+     * The scoring-normalization contract of THE REPORT being resolved — the
+     * one its wordCount, archiveMatchedPositions, externalAcademicEvidence and
+     * userSuppliedReferenceEvidence index: its persisted stamp
+     * (reportScoringNormalizationVersion), or on a first save the contract the
+     * server has just proven (app/api/reports/route.ts). Never the build's
+     * active contract. Everything this function computes itself — the
+     * prior-submission snapshot, imported evidence — is computed natively
+     * under it (runWithScoringNormalization), so every position that meets in
+     * the union is in the one space and nothing is ever translated. Required
+     * of every typed caller; a direct test call without it is v1, the same
+     * rule an unstamped report follows.
+     */
+    scoringNormalizationVersion: ScoringNormalizationVersion;
   },
+): Promise<PrimarySimilarityResolution> {
+  const scoringNormalizationVersion: ScoringNormalizationVersion = params.scoringNormalizationVersion === 2 ? 2 : 1;
+  return runWithScoringNormalization(scoringNormalizationVersion, () =>
+    resolvePrimarySimilaritySummaryUnderContract(client, params, scoringNormalizationVersion),
+  );
+}
+
+/** resolvePrimarySimilaritySummary's body — always entered inside the report's own scoring-normalization scope. */
+async function resolvePrimarySimilaritySummaryUnderContract(
+  client: Client,
+  params: Parameters<typeof resolvePrimarySimilaritySummary>[1],
+  scoringNormalizationVersion: ScoringNormalizationVersion,
 ): Promise<PrimarySimilarityResolution> {
   const corpusSourceMatchingEnabled = isCorpusSourceMatchingEnabled();
   const corpusGeneration = await getCurrentCorpusMatchGeneration(client);
@@ -417,6 +452,9 @@ export async function resolvePrimarySimilaritySummary(
     corpusSourceMatchingEnabled,
     // Phase A: one logical clock for the whole resolution.
     asOf,
+    // The snapshot is computed under, tagged with, and only ever reused for
+    // the report's own contract.
+    scoringNormalizationVersion,
   });
 
   // Preview-gated same-device SELF rule (flag DEVICE_PASSPORT_SELF_ENABLED —
@@ -476,10 +514,10 @@ export async function resolvePrimarySimilaritySummary(
       selectiveCorpusEvidence: params.selectiveCorpusEvidence,
       importedSimilarityEvidence,
     });
-    return { historicalSubmissionMatch, unifiedSimilarity, primaryScore: unifiedSimilarity.unifiedScore, isUnified: true, corpusSourceMatchingEnabled, corpusGeneration, failed: false, effectiveDeviceSelfRepresentationIds, deviceSelfSharedGuard };
+    return { historicalSubmissionMatch, unifiedSimilarity, primaryScore: unifiedSimilarity.unifiedScore, isUnified: true, corpusSourceMatchingEnabled, corpusGeneration, failed: false, effectiveDeviceSelfRepresentationIds, deviceSelfSharedGuard, scoringNormalizationVersion };
   } catch (err) {
     console.error("resolvePrimarySimilaritySummary: computeUnifiedSimilarity failed (genuine overall-computation failure — persisted as a terminal 'failed' state by the caller, see this function's own failed field):", err instanceof Error ? err.message : String(err));
-    return { historicalSubmissionMatch, unifiedSimilarity: undefined, primaryScore: params.archiveScore, isUnified: false, corpusSourceMatchingEnabled, corpusGeneration, failed: true, effectiveDeviceSelfRepresentationIds, deviceSelfSharedGuard };
+    return { historicalSubmissionMatch, unifiedSimilarity: undefined, primaryScore: params.archiveScore, isUnified: false, corpusSourceMatchingEnabled, corpusGeneration, failed: true, effectiveDeviceSelfRepresentationIds, deviceSelfSharedGuard, scoringNormalizationVersion };
   }
 }
 
@@ -605,6 +643,12 @@ export async function resolvePersistedSimilarityDisplay(
      * tests inject/freeze it.
      */
     asOf?: Date;
+    /**
+     * payload.scoringNormalizationVersion (or its json_extract equivalent) —
+     * anything but 2 is v1. The snapshot-currency check below asks whether
+     * the report's snapshot is current FOR THE REPORT'S OWN CONTRACT.
+     */
+    scoringNormalizationVersion?: unknown;
   },
 ): Promise<PersistedSimilarityDisplay> {
   if (!params.hasUnifiedSimilarity) {
@@ -632,6 +676,7 @@ export async function resolvePersistedSimilarityDisplay(
     reportDeviceKey: params.reportDeviceKey,
     reportId: params.reportId,
     asOf: params.asOf,
+    scoringNormalizationVersion: Number(params.scoringNormalizationVersion) === 2 ? 2 : 1,
   });
   if (!current) {
     return { status: "stale" };
@@ -674,17 +719,20 @@ export async function resolvePersistedSimilarityDisplay(
  * trusting the caller — matching the task's own required regression
  * coverage for "version-mismatched" / "partial" / "generation-behind"
  * NO_HISTORICAL_MATCH results. matcherVersion is compared against
- * SNAPSHOT_MATCHER_VERSION (base label + candidate-discovery config digest)
- * — the exact value a fresh snapshot row's matcher_version column holds.
+ * snapshotMatcherVersion(the report's contract) (base label + position
+ * space + scoring normalization + candidate-discovery config digest) — the
+ * exact value a fresh snapshot row's matcher_version column holds for that
+ * report. Omitted is v1, the same rule an unstamped report follows.
  */
 export function isFreshCurrentNoHistoricalMatch(
   match: ReportHistoricalSubmissionMatch,
   generationAtComputation: number,
   liveGenerationAfterWrite: number,
+  scoringNormalizationVersion: ScoringNormalizationVersion = 1,
 ): boolean {
   return (
     match.status === "NO_HISTORICAL_MATCH" &&
-    match.matcherVersion === SNAPSHOT_MATCHER_VERSION &&
+    match.matcherVersion === snapshotMatcherVersion(scoringNormalizationVersion) &&
     match.fingerprintVersion === CORPUS_FINGERPRINT_VERSION &&
     match.canonicalizationVersion === CANONICALIZATION_VERSION &&
     match.partial !== true &&
@@ -761,14 +809,31 @@ export type SelfHealResult =
 const SIMILARITY_GENERATION_GUARD_SQL =
   "COALESCE(json_extract(payload_json, '$.unifiedSimilarityGeneration'), -1) <= ?";
 
+/**
+ * The second guard every similarity write-back carries: the row's persisted
+ * scoring-normalization stamp (absent = 1) must still be the contract the
+ * resolution being written was computed under. A resolution is a set of word
+ * positions in ONE contract's space; landing it on a row stamped with the
+ * other would put two position spaces in one report. A report's contract
+ * never changes once it is saved, so in practice this never fails — it is
+ * what makes "never mixed" a property of the write itself rather than of
+ * every caller having read the right row.
+ */
+const SIMILARITY_SCORING_NORMALIZATION_GUARD_SQL =
+  "COALESCE(json_extract(payload_json, '$.scoringNormalizationVersion'), 1) = ?";
+
 export async function persistRefreshedSimilarity(
   client: Client,
   params: { reportDeviceKey: string; reportId: string },
   resolution: Pick<
     PrimarySimilarityResolution,
     "unifiedSimilarity" | "failed" | "corpusSourceMatchingEnabled" | "corpusGeneration"
-  >,
+  > & {
+    /** The contract the resolution was computed under (PrimarySimilarityResolution.scoringNormalizationVersion). Omitted is v1. */
+    scoringNormalizationVersion?: ScoringNormalizationVersion;
+  },
 ): Promise<{ written: "resolved" | "failed" | "none"; rowsAffected: number }> {
+  const scoringNormalizationVersion: ScoringNormalizationVersion = resolution.scoringNormalizationVersion === 2 ? 2 : 1;
   // json(?) with the literal 'true'/'false' text inserts a real JSON boolean
   // (SQLite has no native boolean), keeping the persisted shape identical to
   // what JSON.stringify(resolution.corpusSourceMatchingEnabled) writes
@@ -787,7 +852,8 @@ export async function persistRefreshedSimilarity(
                   '$.unifiedSimilarityGeneration', ?,
                   '$.unifiedSimilarityFailed', json('false')
                 )
-            WHERE device_key = ? AND id = ? AND json_valid(payload_json) AND ${SIMILARITY_GENERATION_GUARD_SQL}`,
+            WHERE device_key = ? AND id = ? AND json_valid(payload_json) AND ${SIMILARITY_GENERATION_GUARD_SQL}
+              AND ${SIMILARITY_SCORING_NORMALIZATION_GUARD_SQL}`,
       args: [
         // Pre-launch hardening fix — same shared compaction as
         // app/api/reports/route.ts's finalizeReportJson (measured 2MB
@@ -805,6 +871,7 @@ export async function persistRefreshedSimilarity(
         params.reportDeviceKey,
         params.reportId,
         resolution.corpusGeneration,
+        scoringNormalizationVersion,
       ],
     });
     return { written: "resolved", rowsAffected: Number(result.rowsAffected) };
@@ -818,13 +885,15 @@ export async function persistRefreshedSimilarity(
                   '$.unifiedSimilarityGeneration', ?,
                   '$.unifiedSimilarityFailed', json('true')
                 )
-            WHERE device_key = ? AND id = ? AND json_valid(payload_json) AND ${SIMILARITY_GENERATION_GUARD_SQL}`,
+            WHERE device_key = ? AND id = ? AND json_valid(payload_json) AND ${SIMILARITY_GENERATION_GUARD_SQL}
+              AND ${SIMILARITY_SCORING_NORMALIZATION_GUARD_SQL}`,
       args: [
         flagText,
         resolution.corpusGeneration,
         params.reportDeviceKey,
         params.reportId,
         resolution.corpusGeneration,
+        scoringNormalizationVersion,
       ],
     });
     return { written: "failed", rowsAffected: Number(result.rowsAffected) };
@@ -895,6 +964,12 @@ export async function persistSelectiveCorpusAuthoritativeFinalization(
      * checked. Omitted (direct callers) => follows REPORT_COMPACT_PERSISTENCE_WRITE_ENABLED.
      */
     compactWrites?: boolean;
+    /**
+     * The contract unifiedSimilarity (and evidenceInterpretation) were computed
+     * under — the same additional guard persistRefreshedSimilarity carries
+     * (SIMILARITY_SCORING_NORMALIZATION_GUARD_SQL). Omitted is v1.
+     */
+    scoringNormalizationVersion?: ScoringNormalizationVersion;
   },
 ): Promise<{ written: boolean; rowsAffected: number }> {
   if ((resolution.evidenceInterpretation as unknown) === null) {
@@ -916,7 +991,8 @@ export async function persistSelectiveCorpusAuthoritativeFinalization(
               )
           WHERE device_key = ? AND id = ? AND json_valid(payload_json)
             AND json_extract(payload_json, '$.selectiveCorpusAuthoritativeStatus') = 'pending'
-            AND ${SIMILARITY_GENERATION_GUARD_SQL}`,
+            AND ${SIMILARITY_GENERATION_GUARD_SQL}
+            AND ${SIMILARITY_SCORING_NORMALIZATION_GUARD_SQL}`,
     args: [
       // Pre-launch hardening fix — same shared compaction as
       // finalizeReportJson/persistRefreshedSimilarity above. The CAS/status
@@ -931,6 +1007,7 @@ export async function persistSelectiveCorpusAuthoritativeFinalization(
       params.reportDeviceKey,
       params.reportId,
       resolution.corpusGeneration,
+      resolution.scoringNormalizationVersion === 2 ? 2 : 1,
     ],
   });
   const rowsAffected = Number(result.rowsAffected);
@@ -1072,6 +1149,14 @@ export async function selfHealUnifiedSimilarity(
       return { attempted: false };
     }
 
+    // The report's own persisted contract. A self-heal recomputes only the
+    // server-resolved part of the report (prior-submission, imported evidence,
+    // the union); the archive positions and wordCount it unions them with stay
+    // exactly as persisted. So it recomputes under THAT contract and never
+    // re-stamps — recomputing under the build's active contract instead would
+    // put two position spaces in one report.
+    const scoringNormalizationVersion = reportScoringNormalizationVersion(payload);
+
     // Scholarly evidence server trust boundary (drizzle/0052): re-resolve the
     // authoritative scholarly evidence server-side from the verified diagnostics
     // id POST stamped onto the payload, gated on the diagnostics row's stored
@@ -1085,6 +1170,7 @@ export async function selfHealUnifiedSimilarity(
             ? payload.verifiedAcademicSearchDiagnosticsId
             : null,
           submissionCanonicalSha256: safeCanonicalSha256(payload.text),
+          scoringNormalizationVersion,
         })).evidence
       : [];
 
@@ -1095,6 +1181,7 @@ export async function selfHealUnifiedSimilarity(
       rawText: payload.text,
       wordCount: payload.wordCount,
       archiveMatchedPositions: payload.archiveMatchedPositions,
+      scoringNormalizationVersion,
       // Trust boundary (drizzle/0052): server-verified scholarly evidence only.
       externalAcademicEvidence: verifiedAcademicEvidence,
       archiveScore: payload.archiveScore ?? payload.score ?? Number(raw.archive_score),
@@ -1127,7 +1214,7 @@ export async function selfHealUnifiedSimilarity(
       if (writeLanded) {
         if (params.testOnlyAfterWriteBeforeGenerationRecheck) await params.testOnlyAfterWriteBeforeGenerationRecheck();
         const generationAfterWrite = await getCurrentCorpusMatchGeneration(client);
-        presentationResolved = isFreshCurrentNoHistoricalMatch(resolution.historicalSubmissionMatch, resolution.corpusGeneration, generationAfterWrite);
+        presentationResolved = isFreshCurrentNoHistoricalMatch(resolution.historicalSubmissionMatch, resolution.corpusGeneration, generationAfterWrite, scoringNormalizationVersion);
       }
       return {
         attempted: true,

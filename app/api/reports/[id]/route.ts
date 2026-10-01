@@ -12,6 +12,7 @@ import { deleteReportCorpusAdmissionData } from '../../../../lib/corpus-admissio
 import { getSessionUser } from '../../../../lib/auth-session';
 import { stripServerInternalReportFields, type SimilarityReport } from '../../../../lib/report-types';
 import { tryDecodeReportFromPersistence } from '../../../../lib/report-persistence';
+import { reportScoringNormalizationVersion } from '../../../../lib/similarity-core';
 
 // This response is per-session personalized (viewerIsAdmin and admin-gated
 // historical-match data) and MUST NOT be shared-cached. Every response from
@@ -247,9 +248,15 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
       // would have to compute to produce.
       if (sessionUser?.role === 'admin') {
         try {
+          // The snapshot's passages are word positions the admin view renders
+          // against THIS report's text under THIS report's contract. Only a
+          // snapshot computed under that same contract is attached; one tagged
+          // with the other contract is left out rather than shown in the wrong
+          // position space (this GET never recomputes).
           const persistedHistoricalSubmissionMatch = await getPersistedHistoricalMatchSnapshot(client, {
             reportDeviceKey: row.device_key,
             reportId: id,
+            scoringNormalizationVersion: reportScoringNormalizationVersion(payload),
           });
           if (persistedHistoricalSubmissionMatch) {
             payload.historicalSubmissionMatch = persistedHistoricalSubmissionMatch;

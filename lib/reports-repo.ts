@@ -185,6 +185,7 @@ export async function findRoomOccupant(client: Client, userId: string, room: num
                  json_extract(payload_json, '$.unifiedSimilarityFailed') AS unified_failed,
                  json_extract(payload_json, '$.unifiedSimilarity.matchedPositions') IS NOT NULL AS has_position_evidence,
                  json_extract(payload_json, '$.aiAnalysis.unavailableReason') AS ai_unavailable_reason,
+                 json_extract(payload_json, '$.scoringNormalizationVersion') AS scoring_normalization_version,
                  ${INTERPRETATION_TO_VERIFY_SQL} AS interpretation_to_verify
           FROM saved_reports WHERE user_id = ? AND room_number = ?
           ORDER BY report_created_at DESC LIMIT 1`,
@@ -196,6 +197,7 @@ export async function findRoomOccupant(client: Client, userId: string, room: num
       score_band: string; ai_score: number | null; ai_tone: string | null; ai_status: string | null; device_key: string;
       unified_score: number | bigint | null; has_unified: number | bigint; corpus_flag_at_computation: number | bigint | null;
       unified_failed: number | bigint | null; has_position_evidence: number | bigint; ai_unavailable_reason: string | null;
+      scoring_normalization_version: number | bigint | null;
       interpretation_to_verify: string | null;
     }
     | undefined;
@@ -232,6 +234,7 @@ export async function findRoomOccupant(client: Client, userId: string, room: num
       unifiedSimilarityFailed,
       hasPositionEvidence,
       asOf,
+      scoringNormalizationVersion: occupant.scoring_normalization_version,
     });
 
   // REPORT-LIFECYCLE CORRECTNESS FIX (historical-reopen read-only

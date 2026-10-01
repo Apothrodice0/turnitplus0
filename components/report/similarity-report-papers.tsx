@@ -13,7 +13,7 @@ import {
 } from "lucide-react";
 import type { ExternalAcademicEvidence } from "@/lib/academic-search/types";
 import { similarityScoreBand } from "@/lib/ai-core";
-import { mergeAdjacentPositions, tokenSpans } from "@/lib/similarity-core";
+import { mergeAdjacentPositions, reportScoringNormalizationVersion, tokenSpans } from "@/lib/similarity-core";
 import { resolveCompletionView } from "@/lib/report-v2-view";
 import {
   PRIMARY_SIMILARITY_BAND_LABELS,
@@ -1093,7 +1093,7 @@ export function findHighlightRanges(report: SimilarityReport, options: { include
 
   const referenceSourcePositions = referenceSourceMatchedPositions(report);
   if (referenceSourcePositions.length > 0) {
-    const spans = tokenSpans(report.text);
+    const spans = tokenSpans(report.text, reportScoringNormalizationVersion(report));
     mergeAdjacentPositions(referenceSourcePositions).forEach(([wordStart, wordEnd]) => {
       if (wordStart < 0 || wordEnd >= spans.length) return;
       candidates.push({
@@ -1124,7 +1124,7 @@ export function findHighlightRanges(report: SimilarityReport, options: { include
   const v2Passages = report.evidenceInterpretation?.passages ?? [];
   const v2Candidates: HighlightRange[] = [];
   if (v2Passages.length > 0) {
-    const spans = tokenSpans(report.text);
+    const spans = tokenSpans(report.text, reportScoringNormalizationVersion(report));
     v2Passages.forEach((passage) => {
       if (passage.wordStart < 0 || passage.wordEnd >= spans.length || passage.wordEnd < passage.wordStart) return;
       v2Candidates.push({

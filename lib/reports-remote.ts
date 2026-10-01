@@ -1,6 +1,7 @@
 import { getDeviceKey } from "./device-key";
 import { maybeAttestReportUpload, markDevicePassportReportSaved } from "./device-passport";
 import { prepareReportForTransport } from "./ai-passage-table";
+import { reportScoringNormalizationVersion } from "./similarity-core";
 import { AI_SAVE_OUTCOME_SIZE_UNAVAILABLE, type AiSaveOutcome, type AiUnavailableReason } from "./ai-unavailable-state";
 import type { RoomIndexEntry } from "./report-rooms";
 
@@ -186,6 +187,14 @@ export function classifySaveReportRemoteResult(result: SaveReportRemoteResult): 
  * server sanitises this value and uses it for the report-completion banner;
  * the in-payload `report.extractionDiagnostic` stays on the untrusted-key strip
  * list. Read off the report here so no call site has to thread it.
+ *
+ * SCORING NORMALIZATION — `scoringNormalization` is likewise a sibling of
+ * `payload`: the contract THIS REPORT's positions were computed under, read
+ * off the report object (a fresh check: what analyzeText recorded; a report
+ * loaded from the server: its persisted stamp) — never this bundle's own
+ * constant, which says nothing about a report computed by another build. It is
+ * a declaration, not the stamp: the server checks the positions against it
+ * and writes the persisted value itself (app/api/reports/route.ts).
  */
 export async function saveReportRemote<T>(report: T, summary: ReportSummary, academicSearchDiagnosticsId?: number | null, room?: number): Promise<SaveReportRemoteResult> {
   try {
@@ -222,6 +231,7 @@ export async function saveReportRemote<T>(report: T, summary: ReportSummary, aca
         deviceKey,
         ...summary,
         payload: prepareReportForTransport(report),
+        scoringNormalization: reportScoringNormalizationVersion(report as { scoringNormalizationVersion?: unknown } | null),
         academicSearchDiagnosticsId: academicSearchDiagnosticsId ?? null,
         ...(room !== undefined ? { room } : {}),
         ...(devicePassport ? { devicePassport } : {}),

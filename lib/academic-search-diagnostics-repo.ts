@@ -1,4 +1,6 @@
 import type { Client } from "@libsql/client";
+import { createHash } from "node:crypto";
+import type { ScoringNormalizationVersion } from "./similarity-core";
 import type {
   AcademicSearchCandidate,
   AcademicSearchQuery,
@@ -37,6 +39,33 @@ const MAX_STORED_VERIFIED_EVIDENCE = 20;
 const CANONICAL_SHA256_RE = /^[0-9a-f]{64}$/;
 
 /**
+ * What a row's submission_canonical_sha256 column holds — the value
+ * resolveVerifiedAcademicEvidence requires an exact match on. It binds the
+ * stored evidence to the submission text AND to the scoring-normalization
+ * contract (lib/similarity-core.ts) its matchedPassages word positions were
+ * computed under, so evidence computed under one contract can never be scored
+ * on a report whose positions are in the other:
+ *
+ *   v1 — canonicalSha256(text) itself: exactly what every row written before
+ *        the contract had a number already holds, so none is invalidated and
+ *        the column is byte-identical for a v1 run.
+ *   v2 — sha256("scoring-normalization:v2:" + canonicalSha256(text)).
+ *
+ * The contract is therefore recorded by the server that ran the matcher, in a
+ * column no client can write, and a reader that does not ask for the same
+ * contract — including a build older than this binding, which only ever asks
+ * for the plain hash — gets a mismatch and no evidence, never v2 positions.
+ */
+export function academicEvidenceSubmissionBinding(
+  submissionCanonicalSha256: string,
+  scoringNormalizationVersion: ScoringNormalizationVersion,
+): string {
+  return scoringNormalizationVersion === 2
+    ? createHash("sha256").update(`scoring-normalization:v2:${submissionCanonicalSha256}`).digest("hex")
+    : submissionCanonicalSha256;
+}
+
+/**
  * documentIdentityId/reportDeviceKey/reportId are all optional here (unlike
  * a normal repository insert) because this is called from
  * app/api/academic-evidence/route.ts — BEFORE a report id or document
@@ -73,6 +102,13 @@ export type RecordAcademicSearchRunDiagnosticsParams = {
    * Optional/absent-safe like `evidence` above.
    */
   submissionCanonicalSha256?: string | null;
+  /**
+   * The contract `evidence` was computed under — the one
+   * app/api/academic-evidence/route.ts ran the matcher in
+   * (runWithScoringNormalization). Folded into the stored binding, see
+   * academicEvidenceSubmissionBinding. Omitted is v1.
+   */
+  scoringNormalizationVersion?: ScoringNormalizationVersion;
 };
 
 /** Inserts one unlinked diagnostics row and returns its id — the only thing app/api/academic-evidence/route.ts ever sends back to the client. */
@@ -81,7 +117,7 @@ export async function recordAcademicSearchRunDiagnostics(client: Client, params:
   const boundedEvidence = Array.isArray(params.evidence) ? params.evidence.slice(0, MAX_STORED_VERIFIED_EVIDENCE) : null;
   const canonicalHash =
     typeof params.submissionCanonicalSha256 === "string" && CANONICAL_SHA256_RE.test(params.submissionCanonicalSha256)
-      ? params.submissionCanonicalSha256
+      ? academicEvidenceSubmissionBinding(params.submissionCanonicalSha256, params.scoringNormalizationVersion === 2 ? 2 : 1)
       : null;
   const result = await client.execute({
     sql: `INSERT INTO academic_search_run_diagnostics
@@ -122,6 +158,13 @@ export type ResolveVerifiedAcademicEvidenceParams = {
    * a different document.
    */
   submissionCanonicalSha256: string;
+  /**
+   * The contract of THE REPORT the evidence is about to be scored on (its
+   * persisted stamp, or on a first save the contract the server has just
+   * proven). The row must have been computed under the same one
+   * (academicEvidenceSubmissionBinding) or the result is []. Omitted is v1.
+   */
+  scoringNormalizationVersion?: ScoringNormalizationVersion;
 };
 
 export type ResolveVerifiedAcademicEvidenceResult = {
@@ -143,7 +186,9 @@ const EMPTY_VERIFIED: ResolveVerifiedAcademicEvidenceResult = { evidence: [], ve
  *
  * TRUST ANCHOR (all three required):
  *   1. a real academic_search_run_diagnostics row (server-owned, client cannot write it),
- *   2. its submission_canonical_sha256 == canonicalSha256(the report's own text), and
+ *   2. its submission_canonical_sha256 == the binding of canonicalSha256(the
+ *      report's own text) under the report's scoring-normalization contract
+ *      (academicEvidenceSubmissionBinding), and
  *   3. its evidence_json parses to a well-formed ExternalAcademicEvidence[].
  *
  * It NEVER reads the report-link columns (report_device_key / report_id) — those
@@ -170,7 +215,8 @@ export async function resolveVerifiedAcademicEvidence(
     });
     const raw = result.rows[0] as unknown as { id: number; evidence_json: string | null; submission_canonical_sha256: string | null } | undefined;
     if (!raw) return EMPTY_VERIFIED;
-    if (typeof raw.submission_canonical_sha256 !== "string" || raw.submission_canonical_sha256 !== params.submissionCanonicalSha256) return EMPTY_VERIFIED;
+    const expectedBinding = academicEvidenceSubmissionBinding(params.submissionCanonicalSha256, params.scoringNormalizationVersion === 2 ? 2 : 1);
+    if (typeof raw.submission_canonical_sha256 !== "string" || raw.submission_canonical_sha256 !== expectedBinding) return EMPTY_VERIFIED;
     if (typeof raw.evidence_json !== "string") return EMPTY_VERIFIED;
 
     let parsed: unknown;

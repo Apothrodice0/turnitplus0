@@ -18,7 +18,7 @@ import type {
   EvidenceInterpretationTone,
 } from "@/lib/evidence-interpretation/kinds";
 import { EVIDENCE_INTERPRETATION_KINDS } from "@/lib/evidence-interpretation/kinds";
-import { tokenSpans } from "@/lib/similarity-core";
+import { reportScoringNormalizationVersion, tokenSpans, type ScoringNormalizationVersion } from "@/lib/similarity-core";
 
 /**
  * REPORT V2 — pure view-model.
@@ -371,7 +371,7 @@ export function buildReportV2ViewModel(report: SimilarityReport): ReportV2ViewMo
     }));
 
   // passages — map word indices to char offsets in report.text
-  const spans = tokenSpans(report.text ?? "");
+  const spans = tokenSpans(report.text ?? "", reportScoringNormalizationVersion(report));
   const passages: ReportV2Passage[] = [...ei.passages]
     .sort((a, b) => a.wordStart - b.wordStart || a.id - b.id)
     .map((p: ReportEvidencePassage) => {
@@ -545,14 +545,21 @@ export type ManuscriptPageRange = { start: number; end: number };
  * above while still never splitting a highlighted match (extending a page
  * beyond wordsPerPage whenever correctness requires it) and never
  * looping/failing to progress.
+ *
+ * `scoringNormalizationVersion` is the report's own contract
+ * (reportScoringNormalizationVersion): the words counted per page are the
+ * same words its highlights are placed by, so a report paginates exactly as
+ * it did when its positions were computed. Omitted => the contract in force
+ * (tokenSpans' own default).
  */
 export function paginateManuscriptText(
   text: string,
   occupiedRanges: ManuscriptPageRange[],
   wordsPerPage: number = MANUSCRIPT_WORDS_PER_PAGE,
+  scoringNormalizationVersion?: ScoringNormalizationVersion,
 ): ManuscriptPageRange[] {
   if (text.length === 0) return [];
-  const wordSpans = tokenSpans(text);
+  const wordSpans = tokenSpans(text, scoringNormalizationVersion);
   if (wordSpans.length === 0) return [{ start: 0, end: text.length }];
   const lastWordStart = wordSpans[wordSpans.length - 1].start;
 

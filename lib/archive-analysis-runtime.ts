@@ -1,4 +1,5 @@
 import type { ArchiveAnalysisResult } from "./archive-result-framing";
+import { ACTIVE_SCORING_NORMALIZATION_VERSION } from "./similarity-core";
 
 /**
  * 100k-scale architecture, slice 2E / 2G — the ONE place the real
@@ -71,14 +72,22 @@ async function runViaServer(text: string, onProgress: ArchiveProgress): Promise<
   const response = await fetch("/api/archive/match", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text }),
+    // The contract this bundle computes a check under — the server matcher
+    // runs under it, exactly as the browser worker would have.
+    body: JSON.stringify({ text, scoringNormalization: ACTIVE_SCORING_NORMALIZATION_VERSION }),
   });
   if (!response.ok) {
     throw new Error(`The archive comparison service returned ${response.status}.`);
   }
-  const data = (await response.json().catch(() => null)) as { result?: ArchiveAnalysisResult } | null;
+  const data = (await response.json().catch(() => null)) as { result?: ArchiveAnalysisResult; scoringNormalization?: unknown } | null;
   if (!data || typeof data !== "object" || !data.result || typeof data.result !== "object") {
     throw new Error("The archive comparison service returned an unexpected response.");
+  }
+  // Fail closed: positions computed under another contract than the one this
+  // bundle is about to build the report on must never be used. A server that
+  // does not say (one older than the declaration) computed v1.
+  if ((data.scoringNormalization ?? 1) !== ACTIVE_SCORING_NORMALIZATION_VERSION) {
+    throw new Error("The archive comparison service computed under a different scoring normalization than requested.");
   }
   onProgress(88, "Calculating similarity result");
   return data.result;

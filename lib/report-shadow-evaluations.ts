@@ -7,6 +7,8 @@ import { runCorpusDuplicateSuppressionShadowEvaluation } from "./corpus-duplicat
 import { runPmcCoverageShadowEvaluation } from "./pmc-coverage-shadow";
 import { runSelectiveCorpusShadowEvaluation } from "./selective-corpus/shadow-evaluation";
 import { finalizeSelectiveCorpusAuthoritativeReport } from "./selective-corpus-authoritative";
+import type { ScoringNormalizationVersion } from "./similarity-core";
+import { runWithScoringNormalization } from "./scoring-normalization-scope";
 import type { ReportHistoricalSubmissionMatch } from "./report-types";
 import type { UnifiedSimilarityResult } from "./unified-similarity";
 import type { ExternalAcademicEvidence } from "./academic-search/types";
@@ -82,6 +84,16 @@ export type ScheduleReportShadowEvaluationsParams = {
   accountId: string | null;
   /** The report's own submitted text — reused as-is; never re-fetched, never re-matched. */
   rawText: string;
+  /**
+   * The report's own scoring-normalization contract — the one production's
+   * result (productionResult / authoritativeUnifiedSimilarity /
+   * authoritative*Positions) was computed under. Every evaluator below
+   * re-tokenizes rawText, so the whole deferred run happens under it: the
+   * telemetry is measured in the same position space as the result it is
+   * compared with, and the Selective Corpus evidence handed to the
+   * authoritative finalizer is in the report's own space. Omitted is v1.
+   */
+  scoringNormalizationVersion?: ScoringNormalizationVersion;
   /**
    * Production's already-computed historical-match result — normally
    * resolvePrimarySimilaritySummary(...).historicalSubmissionMatch, reused
@@ -196,7 +208,10 @@ export async function scheduleReportShadowEvaluations(
     selectiveCorpusAuthoritativePending = false,
   } = params;
   const openConnection = params.openConnection ?? getReportsDbClient;
-  await runAfterResponse(async () => {
+  const scoringNormalizationVersion: ScoringNormalizationVersion = params.scoringNormalizationVersion === 2 ? 2 : 1;
+  // The scope is entered INSIDE the deferred callback — a callback run after
+  // the response must never depend on inheriting one from the request.
+  await runAfterResponse(() => runWithScoringNormalization(scoringNormalizationVersion, async () => {
     let deferredClient: Client | null = null;
     try {
       deferredClient = await openConnection();
@@ -279,6 +294,7 @@ export async function scheduleReportShadowEvaluations(
             reportId,
             accountId,
             shadowResult: selectiveCorpusResult,
+            shadowScoringNormalizationVersion: scoringNormalizationVersion,
           });
         }
       }
@@ -295,5 +311,5 @@ export async function scheduleReportShadowEvaluations(
     } finally {
       deferredClient?.close();
     }
-  });
+  }));
 }

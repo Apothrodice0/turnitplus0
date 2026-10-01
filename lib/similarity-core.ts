@@ -9,9 +9,154 @@ export const COMMON_WORDS = new Set([
   "لا", "ما", "هو", "هي", "هم", "كما", "بين", "بعد", "قبل", "كل", "أي", "اي",
 ]);
 
-export function normalize(value: string) {
+/**
+ * The scoring-normalization contract: which normalize() a set of matched word
+ * positions was computed under. Every position this product persists is an
+ * index into tokens() of the report's own text, so a change to what
+ * normalize() does to a character changes what an existing index points at.
+ *
+ *   v1 — NFKD, lowercase, strip \p{M}, every non-letter/digit a boundary.
+ *        Frozen as normalizeScoringV1.
+ *   v2 — v1, plus the invisible format characters below are deleted with no
+ *        boundary, so "pla<U+200B>giarism" is the one word it reads as.
+ *        Frozen as normalizeScoringV2.
+ *
+ * Both are always available. A computation runs under exactly one of them:
+ *   - the contract in force for the current server computation
+ *     (lib/scoring-normalization-scope.ts runWithScoringNormalization) —
+ *     a saved report's own contract, or the one a check request declared;
+ *   - otherwise ACTIVE_SCORING_NORMALIZATION_VERSION, the contract this build
+ *     computes a NEW check under (a browser has no scope, so it always
+ *     computes under the constant of the bundle it loaded).
+ *
+ * A report with no stamp (SimilarityReport.scoringNormalizationVersion) is
+ * v1 — see reportScoringNormalizationVersion.
+ */
+export type ScoringNormalizationVersion = 1 | 2;
+
+/**
+ * The contract a NEW check is computed under by this build. Every reader of
+ * persisted positions takes the report's own contract instead, so changing
+ * this value changes nothing about a report that already exists.
+ */
+export const ACTIVE_SCORING_NORMALIZATION_VERSION: ScoringNormalizationVersion = 1;
+
+/**
+ * The contract a request DECLARES its positions were (or are to be) computed
+ * under — POST /api/reports, /api/academic-evidence and /api/archive/match
+ * all read it with this. Absent is v1: a browser bundle older than the
+ * declaration never sends one and only ever computed v1. Anything else that
+ * is not exactly 1 or 2 is null (the route answers 400) — never a guess.
+ */
+export function requestedScoringNormalizationVersion(value: unknown): ScoringNormalizationVersion | null {
+  if (value === undefined || value === null) return 1;
+  return value === 1 || value === 2 ? value : null;
+}
+
+/**
+ * The 138 code points that are BOTH General_Category=Cf and
+ * Default_Ignorable_Code_Point in Unicode 17.0 — soft hyphen, zero-width
+ * space/joiners, word joiner, BOM, the bidi marks/embeddings/overrides/
+ * isolates, the invisible math operators, the deprecated format characters,
+ * the shorthand and musical format controls, and the tag characters. All of
+ * them render as nothing, so inside a word they hid it from every matcher.
+ *
+ * FROZEN: an explicit list, never a \p{Cf} / Unicode-property test — the set
+ * must not move when the runtime's Unicode data does (this runs in browsers
+ * too), and a visible Cf (U+0600–0605, U+06DD, …) must stay a boundary. A
+ * change here is a new ScoringNormalizationVersion.
+ */
+export const SCORING_IGNORABLE_FORMAT_RANGES: ReadonlyArray<readonly [number, number]> = [
+  [0x00ad, 0x00ad],
+  [0x061c, 0x061c],
+  [0x180e, 0x180e],
+  [0x200b, 0x200f],
+  [0x202a, 0x202e],
+  [0x2060, 0x2064],
+  [0x2066, 0x206f],
+  [0xfeff, 0xfeff],
+  [0x1bca0, 0x1bca3],
+  [0x1d173, 0x1d17a],
+  [0xe0001, 0xe0001],
+  [0xe0020, 0xe007f],
+];
+
+const SCORING_IGNORABLE_FORMAT_CLASS = `[${SCORING_IGNORABLE_FORMAT_RANGES
+  .map(([first, last]) => (first === last ? `\\u{${first.toString(16)}}` : `\\u{${first.toString(16)}}-\\u{${last.toString(16)}}`))
+  .join("")}]`;
+const SCORING_IGNORABLE_FORMAT = new RegExp(SCORING_IGNORABLE_FORMAT_CLASS, "gu");
+const ANY_SCORING_IGNORABLE_FORMAT = new RegExp(SCORING_IGNORABLE_FORMAT_CLASS, "u");
+
+/** Whether `value` holds any SCORING_IGNORABLE_FORMAT_RANGES code point — without one, v1 and v2 normalize it identically. */
+export function hasScoringIgnorableFormatCharacter(value: string) {
+  return ANY_SCORING_IGNORABLE_FORMAT.test(value);
+}
+
+/** `value` with every SCORING_IGNORABLE_FORMAT_RANGES code point removed and nothing put in its place. */
+export function stripScoringIgnorableFormatCharacters(value: string) {
+  return value.replace(SCORING_IGNORABLE_FORMAT, "");
+}
+
+/** Scoring normalization v1, frozen exactly as it was before the contract had a number. */
+export function normalizeScoringV1(value: string) {
   return value.normalize("NFKD").toLowerCase().replace(/\p{M}/gu, "")
     .replace(/[^\p{L}\p{N}\s]/gu, " ").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Scoring normalization v2, frozen. The deletion runs after the mark strip
+ * and before the boundary replacement — U+FEFF is whitespace to `\s`, so it
+ * has to go before the whitespace collapse, never after.
+ */
+export function normalizeScoringV2(value: string) {
+  return value.normalize("NFKD").toLowerCase().replace(/\p{M}/gu, "")
+    .replace(SCORING_IGNORABLE_FORMAT, "")
+    .replace(/[^\p{L}\p{N}\s]/gu, " ").replace(/\s+/g, " ").trim();
+}
+
+function normalizeForScoringVersion(version: ScoringNormalizationVersion) {
+  return version === 2 ? normalizeScoringV2 : normalizeScoringV1;
+}
+
+/**
+ * Where lib/scoring-normalization-scope.ts (server only — it needs
+ * node:async_hooks, which this module, shared with browsers and workers, must
+ * not import) publishes the store holding the contract of the computation in
+ * progress. Read off globalThis so every copy of this module a bundler makes
+ * sees the one scope, whichever copy the scope module itself was linked to.
+ */
+const SCORING_NORMALIZATION_SCOPE_KEY = Symbol.for("turnitplus.scoring-normalization-scope");
+type ScoringNormalizationScope = { getStore(): ScoringNormalizationVersion | undefined };
+let scoringNormalizationScope: ScoringNormalizationScope | undefined;
+
+/**
+ * The contract in force right here: the enclosing runWithScoringNormalization
+ * scope's, else ACTIVE_SCORING_NORMALIZATION_VERSION.
+ */
+export function currentScoringNormalizationVersion(): ScoringNormalizationVersion {
+  scoringNormalizationScope ??= (globalThis as { [SCORING_NORMALIZATION_SCOPE_KEY]?: ScoringNormalizationScope })[SCORING_NORMALIZATION_SCOPE_KEY];
+  return scoringNormalizationScope?.getStore() ?? ACTIVE_SCORING_NORMALIZATION_VERSION;
+}
+
+/**
+ * The scoring normalization everything matched, fingerprinted or scored goes
+ * through — under the contract in force (currentScoringNormalizationVersion),
+ * so one matcher implementation serves both contracts natively.
+ */
+export function normalize(value: string) {
+  return currentScoringNormalizationVersion() === 2 ? normalizeScoringV2(value) : normalizeScoringV1(value);
+}
+
+/**
+ * The contract a report's persisted positions were computed under. The stamp
+ * is written by the server, after it has computed and checked those positions
+ * under that contract (app/api/reports/route.ts); a report without one
+ * predates the stamp and is v1. Anything but the literal 2 is v1.
+ */
+export function reportScoringNormalizationVersion(
+  report: { scoringNormalizationVersion?: unknown } | null | undefined,
+): ScoringNormalizationVersion {
+  return report?.scoringNormalizationVersion === 2 ? 2 : 1;
 }
 
 /**
@@ -28,13 +173,50 @@ export function tokens(value: string) {
   return normalize(comparisonText(value)).split(" ").filter(Boolean);
 }
 
+/** tokens() under a named contract — the word sequence a report stamped `version` indexes into. */
+export function tokensForScoringNormalization(value: string, version: ScoringNormalizationVersion) {
+  return normalizeForScoringVersion(version)(comparisonText(value)).split(" ").filter(Boolean);
+}
+
+/**
+ * Which contract a report's own word count is evidence of, judged from the
+ * report's text alone — what lets a server that did not compute a report's
+ * archive positions (the browser did, in the same pass that counted the
+ * words: lib/archive-similarity-scoring.ts `wordCount: words.length`) still
+ * establish the position space they are in before it stamps the report.
+ *
+ * v2 only ever JOINS consecutive v1 words (it deletes characters v1 turns
+ * into a boundary, and nothing else), so the two word sequences are equal
+ * exactly when their lengths are:
+ *
+ *   "either" — the text reads the same under both contracts (no invisible
+ *              format character splits a word). Every position is the same
+ *              index in both spaces, so neither stamp could mislead a reader.
+ *   1 | 2    — the sequences differ and `wordCount` is exactly that
+ *              contract's length (and so is not the other's).
+ *   null     — the sequences differ and `wordCount` is neither length.
+ *
+ * A text with none of SCORING_IGNORABLE_FORMAT_RANGES is "either" without
+ * being tokenized: no code point outside the set normalizes into one.
+ */
+export function scoringNormalizationEvidence(value: string, wordCount: unknown): ScoringNormalizationVersion | "either" | null {
+  if (!hasScoringIgnorableFormatCharacter(value)) return "either";
+  const v1Count = tokensForScoringNormalization(value, 1).length;
+  const v2Count = tokensForScoringNormalization(value, 2).length;
+  if (v1Count === v2Count) return "either";
+  if (wordCount === v1Count) return 1;
+  if (wordCount === v2Count) return 2;
+  return null;
+}
+
 /** `word` is the ORIGINAL text slice [start, end) — never a normalized form. */
 export type TokenSpan = { word: string; start: number; end: number };
 
 /**
  * What normalize() turns ONE code point into, before whitespace collapsing:
- * "" when it is deleted outright (a combining mark), text containing " "
- * where it is (or yields) a word boundary. Derived from normalize() itself
+ * "" when it is deleted outright (a combining mark; under v2 also an
+ * invisible format character), text containing " " where it is (or yields) a
+ * word boundary. Derived from the contract's own normalizer (`normalizeText`)
  * between two "a" sentinels, so it can never drift from the scoring
  * normalization; null if the sentinels do not survive (never today).
  *
@@ -44,9 +226,9 @@ export type TokenSpan = { word: string; start: number; end: number };
  * produces. The mapping cannot be proven from there, so it stops (fail
  * closed) instead of risking a neighbouring word's range.
  */
-function normalizedCodePoint(codePoint: string): string | null {
+function normalizedCodePoint(codePoint: string, normalizeText: (value: string) => string): string | null {
   if (/^[\uD800-\uDFFF]$/.test(codePoint)) return null;
-  const bracketed = normalize(`a${codePoint}a`);
+  const bracketed = normalizeText(`a${codePoint}a`);
   if (bracketed.length < 2 || bracketed[0] !== "a" || bracketed[bracketed.length - 1] !== "a") return null;
   return bracketed.slice(1, -1);
 }
@@ -101,17 +283,30 @@ function sameScoringToken(derived: string, scored: string) {
  * surrogate (ill-formed UTF-16) also ends the array, at that code unit.
  *
  * Linear in the text length; normalize() runs once per DISTINCT code point.
+ *
+ * `version` is the scoring-normalization contract the word INDICES being
+ * mapped were computed under. Text with nothing persisted against it is the
+ * contract in force (the default); a saved report passes its own
+ * (reportScoringNormalizationVersion) — a v1 report's positions index the v1
+ * word sequence, in which an invisible format character still splits a word,
+ * so reading them against the v2 sequence would highlight a later word, and
+ * the reverse for a v2 report read against the v1 sequence.
  */
-export function tokenSpans(value: string): TokenSpan[] {
-  return alignTokenSpans(comparisonText(value), tokens(value));
+export function tokenSpans(value: string, version: ScoringNormalizationVersion = currentScoringNormalizationVersion()): TokenSpan[] {
+  return alignTokenSpans(comparisonText(value), tokensForScoringNormalization(value, version), version);
 }
 
 /**
  * tokenSpans()' mapping of `text` onto an already-computed scoring token
- * list (`scored` must be tokens() of that same text for a full result; any
- * other list just ends the array at the first disagreement).
+ * list (`scored` must be that contract's tokens of the same text for a full
+ * result; any other list just ends the array at the first disagreement).
  */
-export function alignTokenSpans(text: string, scored: readonly string[]): TokenSpan[] {
+export function alignTokenSpans(
+  text: string,
+  scored: readonly string[],
+  version: ScoringNormalizationVersion = currentScoringNormalizationVersion(),
+): TokenSpan[] {
+  const normalizeText = normalizeForScoringVersion(version);
   const spans: TokenSpan[] = [];
   const pieces = new Map<string, string | null>();
   let word = "";
@@ -130,7 +325,7 @@ export function alignTokenSpans(text: string, scored: readonly string[]): TokenS
   for (const codePoint of text) {
     let piece = pieces.get(codePoint);
     if (piece === undefined) {
-      piece = normalizedCodePoint(codePoint);
+      piece = normalizedCodePoint(codePoint, normalizeText);
       pieces.set(codePoint, piece);
     }
     if (piece === null) return spans;

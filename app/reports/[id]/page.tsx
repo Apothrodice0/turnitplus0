@@ -157,6 +157,7 @@ const loadOwnedReport = cache(async (id: string): Promise<OwnedReportResult> => 
         hasUnifiedSimilarity: hasUnifiedSimilarity(payload),
         corpusSourceMatchingEnabledAtComputation: payload.corpusSourceMatchingEnabledAtComputation ?? null,
         unifiedSimilarityFailed: payload.unifiedSimilarityFailed ?? false,
+        scoringNormalizationVersion: payload.scoringNormalizationVersion,
         // Backward-compatibility fix: a report self-healed before
         // matchedPositions existed (see lib/unified-similarity.ts's own
         // comment) must not render as "resolved" here with nothing for the

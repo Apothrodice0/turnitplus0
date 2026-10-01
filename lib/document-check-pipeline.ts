@@ -5,6 +5,7 @@ import { combineMatchedWordPositions } from "@/lib/similarity-enrichment";
 import { computeUnifiedSimilarity } from "@/lib/unified-similarity";
 import { similarityScoreBand } from "@/lib/ai-core";
 import { analyzeArchive } from "@/lib/archive-analysis-runtime";
+import { ACTIVE_SCORING_NORMALIZATION_VERSION } from "@/lib/similarity-core";
 import {
   hasUnifiedSimilarity,
   PRIMARY_SIMILARITY_BAND_LABELS,
@@ -261,6 +262,13 @@ export async function analyzeText(
     excludedDocuments: result.excludedDocuments,
     matchedWordCount: result.matchedWordCount,
     archiveMatchedPositions: result.archiveMatchedPositions,
+    // The contract this check's positions were computed under, so this browser
+    // can render the report before (and without) a server copy, and can
+    // declare it when it saves (lib/reports-remote.ts). It is NOT the
+    // persisted stamp: the server ignores this field and writes its own after
+    // checking the positions (app/api/reports/route.ts). v1 is the absent
+    // field, as on every report that predates the stamp.
+    ...(ACTIVE_SCORING_NORMALIZATION_VERSION === 2 ? { scoringNormalizationVersion: 2 as const } : {}),
     sources: result.sources,
     repeats: result.repeats,
     text,
@@ -325,7 +333,9 @@ export async function analyzeAcademicEvidence(text: string): Promise<AcademicEvi
     const response = await fetch("/api/academic-evidence", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text }),
+      // The contract this check is computed under — the same one analyzeText
+      // records on the report and saveReportRemote declares at save time.
+      body: JSON.stringify({ text, scoringNormalization: ACTIVE_SCORING_NORMALIZATION_VERSION }),
     });
     if (!response.ok) throw new Error(`academic evidence request failed (${response.status})`);
     const data = (await response.json()) as {

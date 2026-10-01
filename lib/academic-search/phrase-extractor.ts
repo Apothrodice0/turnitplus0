@@ -1,5 +1,5 @@
 import { canonicalizeText } from "../canonical-text";
-import { COMMON_WORDS, tokens } from "../similarity-core";
+import { COMMON_WORDS, currentScoringNormalizationVersion, stripScoringIgnorableFormatCharacters, tokens } from "../similarity-core";
 import type { AcademicSearchQuery } from "./types";
 
 /**
@@ -142,8 +142,19 @@ const BARE_WWW_PATTERN = /\bwww\.[^\s<>"']+/gi;
  */
 const NUMBERED_LINK_MARKER_PATTERN = /\bhttps?\d+\b/gi;
 
+/**
+ * Under scoring normalization v2 this also deletes the invisible format
+ * characters that contract ignores (lib/similarity-core.ts
+ * SCORING_IGNORABLE_FORMAT_RANGES) — first, so the patterns below see the
+ * text as it reads. A query is a raw slice of this text: with a soft hyphen
+ * or word joiner left inside a word, the provider was searched for a string
+ * no source contains, and a source that v2 verification would have matched
+ * was never retrieved. Discovery only — a query never scores; verification
+ * runs on the untouched submission text. Under v1 nothing changes: a v1 check
+ * is discovered exactly as it always was.
+ */
 export function sanitizeExtractionArtifacts(rawText: string): string {
-  return rawText
+  return (currentScoringNormalizationVersion() === 2 ? stripScoringIgnorableFormatCharacters(rawText) : rawText)
     .replace(MARKUP_TAG_PATTERN, " ")
     .replace(URL_PATTERN, " ")
     .replace(BARE_WWW_PATTERN, " ")

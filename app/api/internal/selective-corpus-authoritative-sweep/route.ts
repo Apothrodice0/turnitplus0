@@ -8,6 +8,7 @@ import {
   claimStaleSelectiveCorpusAuthoritativePendingReports,
   finalizeSelectiveCorpusAuthoritativeReport,
 } from '../../../../lib/selective-corpus-authoritative';
+import { runWithScoringNormalization } from '../../../../lib/scoring-normalization-scope';
 
 /**
  * Selective Corpus V4 AUTHORITATIVE PROMOTION — durability backstop.
@@ -72,7 +73,7 @@ function isAuthorizedSweepRequest(request: Request): boolean {
   return timingSafeEqual(providedBuf, secretBuf);
 }
 
-type ReportTextRow = { user_id: string | null; text: string | null };
+type ReportTextRow = { user_id: string | null; text: string | null; scoring_normalization_version: number | bigint | null };
 
 async function handleSweepRequest(request: Request): Promise<Response> {
   try {
@@ -99,7 +100,9 @@ async function handleSweepRequest(request: Request): Promise<Response> {
       for (const report of claimed) {
         try {
           const row = await client.execute({
-            sql: `SELECT user_id, json_extract(payload_json, '$.text') AS text FROM saved_reports WHERE device_key = ? AND id = ?`,
+            sql: `SELECT user_id, json_extract(payload_json, '$.text') AS text,
+                         json_extract(payload_json, '$.scoringNormalizationVersion') AS scoring_normalization_version
+                  FROM saved_reports WHERE device_key = ? AND id = ?`,
             args: [report.reportDeviceKey, report.reportId],
           });
           const raw = row.rows[0] as unknown as ReportTextRow | undefined;
@@ -115,21 +118,30 @@ async function handleSweepRequest(request: Request): Promise<Response> {
           // via their own existing triggers) for this report independently;
           // this sweep exists solely to recover an abandoned V4 AUTHORITATIVE
           // finalization, never to re-run unrelated telemetry.
-          const shadowResult = await runSelectiveCorpusShadowEvaluation({
-            reportId: report.reportId,
-            rawText: raw.text,
-            authoritativeUnifiedSimilarity: null,
-            // See this option's own doc comment in lib/selective-corpus/
-            // shadow.ts — only this sweep and the deferred POST-triggered
-            // finalizer may ever set it true.
-            requiredForAuthoritativePendingReport: true,
-          });
+          //
+          // It runs under the report's own persisted scoring-normalization
+          // contract — never the build's active one — so its evidence is in
+          // the position space the report's own positions are in.
+          const scoringNormalizationVersion = Number(raw.scoring_normalization_version) === 2 ? 2 : 1;
+          const reportText = raw.text;
+          const shadowResult = await runWithScoringNormalization(scoringNormalizationVersion, () =>
+            runSelectiveCorpusShadowEvaluation({
+              reportId: report.reportId,
+              rawText: reportText,
+              authoritativeUnifiedSimilarity: null,
+              // See this option's own doc comment in lib/selective-corpus/
+              // shadow.ts — only this sweep and the deferred POST-triggered
+              // finalizer may ever set it true.
+              requiredForAuthoritativePendingReport: true,
+            }),
+          );
 
           const result = await finalizeSelectiveCorpusAuthoritativeReport(client, {
             reportDeviceKey: report.reportDeviceKey,
             reportId: report.reportId,
             accountId,
             shadowResult,
+            shadowScoringNormalizationVersion: scoringNormalizationVersion,
           });
           outcomeSummary[result.outcome] = (outcomeSummary[result.outcome] ?? 0) + 1;
         } catch (err) {

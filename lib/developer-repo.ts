@@ -9,6 +9,7 @@ import { canonicalSha256 } from "./document-identity";
 import { summarizeSubmissionOwnership } from "./user-submission-corpus";
 import { summarizeSubmissionProvenance } from "./submission-provenance";
 import { resolvePrimarySimilaritySummary } from "./report-primary-similarity";
+import { reportScoringNormalizationVersion } from "./similarity-core";
 import { ReportPersistenceDecodeError, tryDecodeReportFromPersistence } from "./report-persistence";
 import { DEVICE_PROVENANCE_SHADOW_POLICY_VERSION } from "./device-provenance-shadow";
 import { CORPUS_DUPLICATE_SUPPRESSION_SHADOW_POLICY_VERSION } from "./corpus-duplicate-suppression-shadow";
@@ -547,6 +548,8 @@ export async function getReportSimilarityDecisionTrace(
       rawText: payload.text,
       wordCount: payload.wordCount,
       archiveMatchedPositions: payload.archiveMatchedPositions,
+      // The report's own persisted contract — a trace never re-stamps.
+      scoringNormalizationVersion: reportScoringNormalizationVersion(payload),
       externalAcademicEvidence: payload.externalAcademicEvidence,
       archiveScore,
     });

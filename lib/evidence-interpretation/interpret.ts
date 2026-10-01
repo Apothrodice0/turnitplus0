@@ -4,7 +4,7 @@ import {
   type EvidenceInterpretationConfidence,
   type SameWorkRelationship,
 } from "./kinds";
-import { tokenSpans } from "../similarity-core";
+import { tokenSpans, type ScoringNormalizationVersion } from "../similarity-core";
 
 /**
  * Evidence Interpretation Layer — the PURE classifier (V1, high-confidence).
@@ -69,6 +69,13 @@ export type InterpretationInput = {
   submissionText: string;
   submissionWordCount: number;
   sources: readonly InterpretationSourceInput[];
+  /**
+   * The scoring normalization the spans' word indices were computed under —
+   * a saved report's own stamp. A span is located in the raw text (and so
+   * tested against the quotation regions) through that contract's word
+   * sequence. Omitted => the contract in force (tokenSpans' own default).
+   */
+  scoringNormalizationVersion?: ScoringNormalizationVersion;
 };
 
 export type InterpretationResult = {
@@ -193,7 +200,7 @@ export function interpretVerifiedEvidence(input: InterpretationInput): Interpret
   };
   const bySource = new Map<string, EvidenceSpanInterpretation[]>();
 
-  const words = tokenSpans(input.submissionText);
+  const words = tokenSpans(input.submissionText, input.scoringNormalizationVersion);
   const regions = quotationRegions(input.submissionText);
 
   const positionsByKey = new Map<string, Set<number>>();

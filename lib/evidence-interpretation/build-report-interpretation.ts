@@ -1,5 +1,5 @@
 import type { SimilarityReport, ReportHistoricalSubmissionMatch } from "@/lib/report-types";
-import { tokens } from "@/lib/similarity-core";
+import { reportScoringNormalizationVersion, tokensForScoringNormalization } from "@/lib/similarity-core";
 import {
   EVIDENCE_INTERPRETATION_VERSION,
   TONE_BY_KIND,
@@ -164,10 +164,14 @@ export function buildReportEvidenceInterpretation(
 ): ReportEvidenceInterpretation {
   const evidence = normalizeReportEvidence(report, opts);
   const authoritativeSet = new Set(evidence.authoritativeMatchedPositions);
+  // Every position below indexes the word sequence of the report's OWN
+  // scoring normalization, not necessarily the current one.
+  const scoringNormalizationVersion = reportScoringNormalizationVersion(report);
 
   const interp = interpretVerifiedEvidence({
     submissionText: evidence.submissionText,
     submissionWordCount: evidence.submissionWordCount,
+    scoringNormalizationVersion,
     sources: evidence.sources.map((s) => ({
       key: s.key,
       spans: s.spans,
@@ -207,7 +211,7 @@ export function buildReportEvidenceInterpretation(
   const matchedWordCount = evidence.authoritativeMatchedPositions.length;
 
   // ── passages: contiguous runs of same kind + same source-set ──────────
-  const tokenList = tokens(evidence.submissionText);
+  const tokenList = tokensForScoringNormalization(evidence.submissionText, scoringNormalizationVersion);
   const passages: ReportEvidencePassage[] = [];
   const idMap = assignOpaqueIds(evidence.sources);
   const keyToId = (key: string) => idMap.get(key) ?? "src-?";

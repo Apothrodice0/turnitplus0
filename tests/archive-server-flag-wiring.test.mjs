@@ -69,6 +69,17 @@ function installFetch(handler) {
     return handler({ url, method, init });
   };
 }
+/**
+ * What POST /api/archive/match answers: the frozen result, and beside it the scoring-normalization contract it computed
+ * under — the one the request declared (absent = 1). The client refuses a result computed under any other contract
+ * than its own, so a faithful mock has to say.
+ */
+function archiveMatchResponse() {
+  // installFetch records the request before it asks the handler for an answer.
+  const body = fetchCalls[fetchCalls.length - 1]?.body;
+  const declared = body ? JSON.parse(body).scoringNormalization : undefined;
+  return jsonResponse({ result: FROZEN_RESULT, scoringNormalization: declared ?? 1 });
+}
 function jsonResponse(obj, status = 200) {
   return { ok: status >= 200 && status < 300, status, json: async () => obj, text: async () => JSON.stringify(obj) };
 }
@@ -115,7 +126,7 @@ test("explicit false => the similarity worker IS spawned and returns its result"
 test("explicit true => the browser worker is NEVER spawned; result comes from POST /api/archive/match", async () => {
   installFetch(({ url, method }) => {
     if (method === "GET") return jsonResponse({ archiveServerSide: true });
-    if (method === "POST" && url === "/api/archive/match") return jsonResponse({ result: FROZEN_RESULT });
+    if (method === "POST" && url === "/api/archive/match") return archiveMatchResponse();
     throw new Error(`unexpected fetch ${method} ${url}`);
   });
   const out = await analyzeArchive("submission", "doc.txt", () => {});
@@ -165,7 +176,7 @@ test("GET response with a non-boolean archiveServerSide => resolveArchiveEngine 
 test("a failed discovery is NOT memoised — the next call re-attempts", async () => {
   let call = 0;
   installFetch(({ method }) => {
-    if (method !== "GET") return jsonResponse({ result: FROZEN_RESULT });
+    if (method !== "GET") return archiveMatchResponse();
     call += 1;
     return call === 1 ? jsonResponse({}, 500) : jsonResponse({ archiveServerSide: true });
   });
@@ -193,7 +204,7 @@ test("server POST malformed response => analyzeArchive REJECTS, worker never spa
 test("Phase 9: server engine fetches NO packed-archive asset (.bin / meta / risk-calibration / /data/)", async () => {
   installFetch(({ url, method }) => {
     if (method === "GET" && url === "/api/archive/match") return jsonResponse({ archiveServerSide: true });
-    if (method === "POST" && url === "/api/archive/match") return jsonResponse({ result: FROZEN_RESULT });
+    if (method === "POST" && url === "/api/archive/match") return archiveMatchResponse();
     throw new Error(`unexpected fetch ${method} ${url}`);
   });
   await analyzeArchive("submission", "doc.txt", () => {});
@@ -211,7 +222,7 @@ test("a successful resolution is memoised — GET /api/archive/match runs once p
   let getCount = 0;
   installFetch(({ method }) => {
     if (method === "GET") { getCount += 1; return jsonResponse({ archiveServerSide: true }); }
-    return jsonResponse({ result: FROZEN_RESULT });
+    return archiveMatchResponse();
   });
   await analyzeArchive("a", "a.txt", () => {});
   await analyzeArchive("b", "b.txt", () => {});
@@ -262,7 +273,7 @@ test("2G #2: analyzeArchive with explicit false DOES request the browser runtime
 test("2G #3: explicit true never requests the legacy browser runtime", async () => {
   installFetch(({ url, method }) => {
     if (method === "GET") return jsonResponse({ archiveServerSide: true });
-    if (method === "POST" && url === "/api/archive/match") return jsonResponse({ result: FROZEN_RESULT });
+    if (method === "POST" && url === "/api/archive/match") return archiveMatchResponse();
     throw new Error(`unexpected fetch ${method} ${url}`);
   });
   await analyzeArchive("submission", "doc.txt", () => {});
@@ -290,7 +301,7 @@ test("2G #5: every ambiguous discovery (non-2xx / non-JSON / missing / non-boole
     __resetArchiveEngineForTests();
     fetchCalls = [];
     workerCtorCalls = [];
-    installFetch(({ method }) => (method === "GET" ? handler() : jsonResponse({ result: FROZEN_RESULT })));
+    installFetch(({ method }) => (method === "GET" ? handler() : archiveMatchResponse()));
     await assert.rejects(() => analyzeArchive("submission", "doc.txt", () => {}));
     assert.equal(__getArchiveRuntimeTestState().browserRuntimeRequested, false, "ambiguous discovery must not import the browser runtime");
     assert.equal(workerCtorCalls.length, 0);
@@ -307,7 +318,7 @@ test("2G #6: server POST failure never requests the legacy browser runtime and n
 test("2G #7: server mode fetches ONLY GET + POST /api/archive/match — no .bin / meta / risk / data asset, no browser runtime", async () => {
   installFetch(({ url, method }) => {
     if (method === "GET" && url === "/api/archive/match") return jsonResponse({ archiveServerSide: true });
-    if (method === "POST" && url === "/api/archive/match") return jsonResponse({ result: FROZEN_RESULT });
+    if (method === "POST" && url === "/api/archive/match") return archiveMatchResponse();
     throw new Error(`unexpected fetch ${method} ${url}`);
   });
   await analyzeArchive("submission", "doc.txt", () => {});

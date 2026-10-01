@@ -2,6 +2,8 @@ import type { Client, Transaction } from "@libsql/client";
 import { createHash } from "node:crypto";
 import { canonicalizeText } from "./canonical-text";
 import { mapCanonicalTokensToRawTokens, projectCanonicalPassagesToRaw } from "./canonical-token-position-map";
+import type { ScoringNormalizationVersion } from "./similarity-core";
+import { runWithScoringNormalization } from "./scoring-normalization-scope";
 import { matchAgainstUserSubmissionCorpus, isCorpusSourceMatchingEnabled, USER_SUBMISSION_MATCHER_VERSION, USER_SUBMISSION_MATCH_THRESHOLDS } from "./user-submission-matching";
 import {
   CORPUS_FINGERPRINT_VERSION,
@@ -237,8 +239,34 @@ const SNAPSHOT_PASSAGE_POSITIONS_VERSION = "raw-token-v1";
  * digest above. Exported so lib/report-primary-similarity.ts's
  * isFreshCurrentNoHistoricalMatch checks against the exact same value a
  * stored row's matcher_version column holds.
+ *
+ * This is the tag of a snapshot computed under scoring normalization v1 — the
+ * value every row written before the contract had a number already holds, so
+ * none of those rows is invalidated. See snapshotMatcherVersion for v2.
  */
 export const SNAPSHOT_MATCHER_VERSION = `${USER_SUBMISSION_MATCHER_VERSION}+pos.${SNAPSHOT_PASSAGE_POSITIONS_VERSION}+cfg.${MATCH_CONFIG_DIGEST}`;
+
+// The scoring normalization (lib/similarity-core.ts) a stored row's passages
+// — tokens(rawText) indices — and the match itself were computed under. A
+// snapshot belongs to ONE report, and a report's contract never changes, so
+// the tag is derived from the report's contract: a v1 report's row keeps the
+// tag above byte-for-byte, a v2 report's row carries "+norm.v2". A row whose
+// tag is not the one its report's contract yields fails isCurrentVersion and
+// is recomputed lazily under that contract — it is never read across
+// contracts, in either direction.
+const SNAPSHOT_SCORING_NORMALIZATION_V2_TAG = "norm.v2";
+
+/** The matcher_version tag of a snapshot computed under `version`. */
+export function snapshotMatcherVersion(version: ScoringNormalizationVersion): string {
+  return version === 2
+    ? `${USER_SUBMISSION_MATCHER_VERSION}+pos.${SNAPSHOT_PASSAGE_POSITIONS_VERSION}+${SNAPSHOT_SCORING_NORMALIZATION_V2_TAG}+cfg.${MATCH_CONFIG_DIGEST}`
+    : SNAPSHOT_MATCHER_VERSION;
+}
+
+/** The contract a stored matcher_version tag says its row was computed under — anything without the v2 segment is v1. */
+export function snapshotScoringNormalizationVersion(matcherVersion: string | null | undefined): ScoringNormalizationVersion {
+  return typeof matcherVersion === "string" && matcherVersion.split("+").includes(SNAPSHOT_SCORING_NORMALIZATION_V2_TAG) ? 2 : 1;
+}
 
 /**
  * Written to a snapshot row's status column (instead of "NO_HISTORICAL_MATCH")
@@ -270,9 +298,9 @@ type SnapshotRow = {
   corpus_generation: number | bigint;
 };
 
-function isCurrentVersion(row: SnapshotRow): boolean {
+function isCurrentVersion(row: SnapshotRow, scoringNormalizationVersion: ScoringNormalizationVersion): boolean {
   return (
-    row.matcher_version === CURRENT_VERSIONS.matcherVersion &&
+    row.matcher_version === snapshotMatcherVersion(scoringNormalizationVersion) &&
     row.fingerprint_version === CURRENT_VERSIONS.fingerprintVersion &&
     row.canonicalization_version === CURRENT_VERSIONS.canonicalizationVersion
   );
@@ -299,10 +327,14 @@ function isCurrentVersion(row: SnapshotRow): boolean {
  * evaluation and must not survive the flag being switched on (this phase's
  * own task description, section 9).
  */
-function isSnapshotRowCurrent(row: SnapshotRow | undefined, currentGeneration: number): boolean {
+function isSnapshotRowCurrent(
+  row: SnapshotRow | undefined,
+  currentGeneration: number,
+  scoringNormalizationVersion: ScoringNormalizationVersion,
+): boolean {
   return Boolean(
     row &&
-    isCurrentVersion(row) &&
+    isCurrentVersion(row, scoringNormalizationVersion) &&
     row.status !== NO_HISTORICAL_MATCH_FEATURE_DISABLED_STATUS &&
     Number(row.is_partial) !== 1 &&
     Number(row.corpus_generation) >= currentGeneration,
@@ -522,8 +554,21 @@ export async function getOrComputeHistoricalMatchSnapshot(
      * `new Date()` (server time). Tests inject/freeze it.
      */
     asOf?: Date;
+    /**
+     * The scoring-normalization contract of THE REPORT this snapshot belongs
+     * to (reportScoringNormalizationVersion — its persisted stamp, or on a
+     * first save the contract the server has just proven). The matcher and
+     * the canonical->raw projection below run under exactly this contract
+     * (runWithScoringNormalization), and the row is tagged with it, so the
+     * tag is a statement about how these passages were computed, made by the
+     * code that computed them. Omitted (direct test callers) is v1, the same
+     * rule an unstamped report follows.
+     */
+    scoringNormalizationVersion?: ScoringNormalizationVersion;
   },
 ): Promise<ReportHistoricalSubmissionMatch> {
+  const scoringNormalizationVersion: ScoringNormalizationVersion = params.scoringNormalizationVersion === 2 ? 2 : 1;
+  const matcherVersion = snapshotMatcherVersion(scoringNormalizationVersion);
   // Read fresh, before the cache-hit decision — see this file's own header
   // comment (corpus-source matching addendum, point 1): this is compared
   // against a stored row's own corpus_generation exactly like the
@@ -564,7 +609,7 @@ export async function getOrComputeHistoricalMatchSnapshot(
   // otherwise-current row is reused only when NO corpus backing crossed
   // maturity in (row.computed_at, asOf] — see corpusBackingMaturedInWindow.
   if (
-    isSnapshotRowCurrent(existingRow, currentGeneration) &&
+    isSnapshotRowCurrent(existingRow, currentGeneration, scoringNormalizationVersion) &&
     !(await corpusBackingMaturedInWindow(client, {
       snapshotComputedAt: (existingRow as SnapshotRow).computed_at,
       maturityCutoff,
@@ -579,6 +624,11 @@ export async function getOrComputeHistoricalMatchSnapshot(
   let candidateCount: number | null = null;
   let errorMessage: string | null = null;
   let isPartial = false;
+
+  // Everything below that tokenizes the submission — the matcher and the
+  // canonical->raw projection — runs under the report's own contract, the one
+  // the row is tagged with.
+  const underReportContract = <T>(compute: () => T): T => runWithScoringNormalization(scoringNormalizationVersion, compute);
 
   try {
     const canonicalText = canonicalizeText(params.rawText);
@@ -604,7 +654,7 @@ export async function getOrComputeHistoricalMatchSnapshot(
     // corpusSourceMatchingEnabledAtComputation (captured once, above) governs
     // classification here — never a fresh env read inside the matcher — so
     // it and the status choice below can never disagree across a flag flip.
-    const matchResult = await matchAgainstUserSubmissionCorpus(client, {
+    const matchResult = await underReportContract(() => matchAgainstUserSubmissionCorpus(client, {
       accountId: params.accountId,
       documentIdentityId,
       canonicalText,
@@ -612,7 +662,7 @@ export async function getOrComputeHistoricalMatchSnapshot(
       corpusSourceMatchingEnabled: corpusSourceMatchingEnabledAtComputation,
       // Phase A: the SAME cutoff the maturity-crossing cache check above uses.
       maturityCutoff,
-    });
+    }));
     isPartial = matchResult.partial === true;
     if (matchResult.status === "MATCHED") {
       status = "MATCHED";
@@ -624,10 +674,12 @@ export async function getOrComputeHistoricalMatchSnapshot(
       // (see lib/canonical-token-position-map.ts). Match-level statistics
       // (containment, matchedWordCount, longestMatchWords, passageCount) stay
       // the matcher's own.
-      const rawTokenMapping = mapCanonicalTokensToRawTokens(params.rawText, canonicalText);
-      const serialized = serializeMatchesForStorage(
-        matchResult.matches.map((match) => ({ ...match, passages: projectCanonicalPassagesToRaw(match.passages, rawTokenMapping) })),
-      );
+      const serialized = underReportContract(() => {
+        const rawTokenMapping = mapCanonicalTokensToRawTokens(params.rawText, canonicalText);
+        return serializeMatchesForStorage(
+          matchResult.matches.map((match) => ({ ...match, passages: projectCanonicalPassagesToRaw(match.passages, rawTokenMapping) })),
+        );
+      });
       resultJson = JSON.stringify(serialized);
       candidateCount = serialized.length;
     } else if (isPartial || corpusSourceMatchingEnabledAtComputation) {
@@ -687,7 +739,7 @@ export async function getOrComputeHistoricalMatchSnapshot(
       params.reportDeviceKey,
       params.reportId,
       status,
-      CURRENT_VERSIONS.matcherVersion,
+      matcherVersion,
       CURRENT_VERSIONS.fingerprintVersion,
       CURRENT_VERSIONS.canonicalizationVersion,
       resultJson,
@@ -709,7 +761,7 @@ export async function getOrComputeHistoricalMatchSnapshot(
 
   return applyCorpusSourceMatchingFlag(rowToResult({
     status,
-    matcher_version: CURRENT_VERSIONS.matcherVersion,
+    matcher_version: matcherVersion,
     fingerprint_version: CURRENT_VERSIONS.fingerprintVersion,
     canonicalization_version: CURRENT_VERSIONS.canonicalizationVersion,
     result_json: resultJson,
@@ -747,8 +799,11 @@ export async function isHistoricalMatchSnapshotCurrent(
      * Defaults to server time; tests inject/freeze it.
      */
     asOf?: Date;
+    /** The report's own contract — see getOrComputeHistoricalMatchSnapshot. Omitted is v1. */
+    scoringNormalizationVersion?: ScoringNormalizationVersion;
   },
 ): Promise<boolean> {
+  const scoringNormalizationVersion: ScoringNormalizationVersion = params.scoringNormalizationVersion === 2 ? 2 : 1;
   const currentGeneration = await getCurrentCorpusMatchGeneration(client);
   const existing = await client.execute({
     sql: `SELECT status, matcher_version, fingerprint_version, canonicalization_version, candidate_count, processing_duration_ms, error_message, computed_at, is_partial, corpus_generation
@@ -756,7 +811,7 @@ export async function isHistoricalMatchSnapshotCurrent(
     args: [params.reportDeviceKey, params.reportId],
   });
   const existingRow = existing.rows[0] as unknown as SnapshotRow | undefined;
-  if (!isSnapshotRowCurrent(existingRow, currentGeneration)) return false;
+  if (!isSnapshotRowCurrent(existingRow, currentGeneration, scoringNormalizationVersion)) return false;
   // Phase A: an otherwise-current row is stale the moment a corpus backing
   // crosses maturity after it was computed — the SAME check
   // getOrComputeHistoricalMatchSnapshot's own cache-hit branch applies, so a
@@ -793,10 +848,24 @@ export async function isHistoricalMatchSnapshotCurrent(
  * external NO_HISTORICAL_MATCH shape below, exactly like a definitive one.
  * Same "historical saved similarity is a snapshot, shown as-is even past
  * its generation" rule this whole fix applies to unifiedSimilarity.
+ *
+ * The ONE thing it does check is the position space: the row's passages are
+ * word indices under the contract its own tag names
+ * (snapshotScoringNormalizationVersion), and the caller renders them against
+ * the report's text under the REPORT's contract. A row tagged with the other
+ * contract is therefore not shown at all (`undefined`, exactly like "no
+ * snapshot yet") — never returned to be read in the wrong space. It cannot be
+ * re-expressed here either: this function never computes. The next
+ * write-capable resolution replaces it under the report's contract.
  */
 export async function getPersistedHistoricalMatchSnapshot(
   client: Client,
-  params: { reportDeviceKey: string; reportId: string },
+  params: {
+    reportDeviceKey: string;
+    reportId: string;
+    /** The report's own contract (reportScoringNormalizationVersion of its payload). Omitted is v1. */
+    scoringNormalizationVersion?: ScoringNormalizationVersion;
+  },
 ): Promise<ReportHistoricalSubmissionMatch | undefined> {
   const existing = await client.execute({
     sql: `SELECT status, matcher_version, fingerprint_version, canonicalization_version, result_json, candidate_count, processing_duration_ms, error_message, computed_at, is_partial, corpus_generation
@@ -805,6 +874,8 @@ export async function getPersistedHistoricalMatchSnapshot(
   });
   const existingRow = existing.rows[0] as unknown as SnapshotRow | undefined;
   if (!existingRow) return undefined;
+  const reportContract: ScoringNormalizationVersion = params.scoringNormalizationVersion === 2 ? 2 : 1;
+  if (snapshotScoringNormalizationVersion(existingRow.matcher_version) !== reportContract) return undefined;
   return applyCorpusSourceMatchingFlag(rowToResult(existingRow));
 }
 

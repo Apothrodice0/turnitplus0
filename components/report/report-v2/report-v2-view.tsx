@@ -33,6 +33,7 @@ import {
 } from "@/lib/report-v2-view";
 import { ReportPageFooter, ReportPageHeader } from "../report-page-chrome";
 import { buildHighlightedPieces, findHighlightRanges, HighlightLegend } from "../similarity-report-papers";
+import { reportScoringNormalizationVersion } from "@/lib/similarity-core";
 
 /**
  * REPORT V2 UI — first screen + passage review + source cards, rendered from
@@ -689,7 +690,12 @@ export function ReportV2PrintManuscriptPages({ report }: { report: SimilarityRep
   const text = report.text ?? "";
   const canSeeSourceBreakdown = Boolean(report.viewerIsAdmin);
   const ranges = findHighlightRanges(report, { includeWikipedia: canSeeSourceBreakdown });
-  const pageRanges = paginateManuscriptText(text, ranges.map((r) => ({ start: r.start, end: r.end })));
+  const pageRanges = paginateManuscriptText(
+    text,
+    ranges.map((r) => ({ start: r.start, end: r.end })),
+    undefined,
+    reportScoringNormalizationVersion(report),
+  );
   if (pageRanges.length === 0) {
     return (
       <article className="report-paper submission-paper">
@@ -997,9 +1003,10 @@ function WorkspaceManuscript({
     () => vm.passages.filter((p) => p.charStart !== null && p.charEnd !== null).sort((a, b) => a.charStart! - b.charStart!),
     [vm.passages],
   );
+  const scoringNormalizationVersion = reportScoringNormalizationVersion(report);
   const pageRanges = useMemo(
-    () => paginateManuscriptText(text, runs.map((p) => ({ start: p.charStart!, end: p.charEnd! }))),
-    [text, runs],
+    () => paginateManuscriptText(text, runs.map((p) => ({ start: p.charStart!, end: p.charEnd! })), undefined, scoringNormalizationVersion),
+    [text, runs, scoringNormalizationVersion],
   );
 
   if (text.length === 0) {

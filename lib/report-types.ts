@@ -481,6 +481,26 @@ export type SimilarityReport = {
   excludedDocuments: number;
   matchedWordCount: number;
   archiveMatchedPositions?: number[];
+  /**
+   * The scoring normalization (lib/similarity-core.ts
+   * ScoringNormalizationVersion) every word position on this report —
+   * archiveMatchedPositions, unifiedSimilarity, evidenceInterpretation's
+   * passages, wordCount — was COMPUTED under. It is not "the build that last
+   * saved this report", nor the bundle that is rendering it.
+   *
+   * On a PERSISTED report it is written by the server alone
+   * (app/api/reports/route.ts): on the first save, after it has checked the
+   * client-relayed positions against the declared contract and computed its
+   * own under it; never again afterwards — every resave and every server-side
+   * recomputation carries the persisted value forward and computes under it.
+   * On a report object that has not been saved yet it is what the check
+   * itself recorded (lib/document-check-pipeline.ts analyzeText), used to
+   * render it locally and declared — not trusted — at save time.
+   *
+   * Absent means v1 (every report older than the stamp). Read it only through
+   * reportScoringNormalizationVersion.
+   */
+  scoringNormalizationVersion?: 2;
   wikipediaMatchedWordCount?: number;
   sources: SourceMatch[];
   repeats: [string, number][];

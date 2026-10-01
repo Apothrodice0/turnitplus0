@@ -46,6 +46,8 @@ import { effectiveSelectiveCorpusAuthoritativeEnabled } from '../../../lib/selec
 import type { SimilarityReport, ReportHistoricalSubmissionMatch } from '../../../lib/report-types';
 import type { UnifiedSimilarityResult } from '../../../lib/unified-similarity';
 import type { ExternalAcademicEvidence } from '../../../lib/academic-search/types';
+import { requestedScoringNormalizationVersion, scoringNormalizationEvidence, type ScoringNormalizationVersion } from '../../../lib/similarity-core';
+import { runWithScoringNormalization } from '../../../lib/scoring-normalization-scope';
 
 // Reports carry derived data (AI passages, matched phrases, extracted text)
 // on top of the ingest pipeline's raw text, so this cap is larger than
@@ -428,7 +430,7 @@ export async function POST(request: Request) {
       return new NextResponse(JSON.stringify({ error: 'Invalid JSON' }), { status: 400 });
     }
 
-    const { deviceKey, id, submissionId, title, createdAt, wordCount, archiveScore, scoreBand, aiScore, aiTone, aiStatus, payload, academicSearchDiagnosticsId, room, devicePassport, extractionCompleteness, userSuppliedReferences } = body as Record<string, unknown>;
+    const { deviceKey, id, submissionId, title, createdAt, wordCount, archiveScore, scoreBand, aiScore, aiTone, aiStatus, payload, academicSearchDiagnosticsId, room, devicePassport, extractionCompleteness, userSuppliedReferences, scoringNormalization } = body as Record<string, unknown>;
 
     // device_key is part of saved_reports' composite primary key, so it is
     // always required regardless of authentication state — unlike the list/
@@ -495,6 +497,17 @@ export async function POST(request: Request) {
     if (payload === undefined) {
       logReportSaveRejectedTelemetry({ reason: 'MALFORMED_REQUEST', status: 400 });
       return new NextResponse(JSON.stringify({ error: 'payload is required' }), { status: 400 });
+    }
+    // The scoring-normalization contract the client DECLARES this report's
+    // positions were computed under (lib/reports-remote.ts) — a sibling of
+    // `payload`, never read from inside it. Absent (a bundle older than the
+    // declaration) is v1; anything else that is not 1 or 2 is refused. It is a
+    // request-level claim only — see SCORING-NORMALIZATION CONTRACT below for
+    // what the server does with it before anything is stamped.
+    const declaredScoringNormalizationVersion = requestedScoringNormalizationVersion(scoringNormalization);
+    if (declaredScoringNormalizationVersion === null) {
+      logReportSaveRejectedTelemetry({ reason: 'MALFORMED_REQUEST', status: 400 });
+      return new NextResponse(JSON.stringify({ error: 'scoringNormalization must be 1 or 2' }), { status: 400 });
     }
     // Developer-diagnostics addition: optional, never required — an older
     // client build, or a run where /api/academic-evidence never produced a
@@ -615,7 +628,8 @@ export async function POST(request: Request) {
                      json_extract(payload_json, '$.userSuppliedReferenceGuard') AS supplied_reference_guard,
                      json_extract(payload_json, '$.text') AS persisted_manuscript_text,
                      json_extract(payload_json, '$.selectiveCorpusAuthoritativeStatus') AS selective_corpus_authoritative_status,
-                     json_extract(payload_json, '$.selectiveCorpusAuthoritativeClaimedAt') AS selective_corpus_authoritative_claimed_at
+                     json_extract(payload_json, '$.selectiveCorpusAuthoritativeClaimedAt') AS selective_corpus_authoritative_claimed_at,
+                     json_extract(payload_json, '$.scoringNormalizationVersion') AS scoring_normalization_version
               FROM saved_reports WHERE device_key = ? AND id = ?`,
         args: [deviceKey, id],
       });
@@ -783,6 +797,59 @@ export async function POST(request: Request) {
 
       const reportPayload = payload as SimilarityReport;
 
+      // SCORING-NORMALIZATION CONTRACT — which normalization this report's
+      // persisted word positions index (lib/similarity-core.ts). The stamp
+      // means exactly "these persisted positions were computed under this
+      // contract" — never the bundle that sent the request, the build that is
+      // running, or the latest save. The positions come from more than one
+      // place, so each is tied to ONE contract before the stamp is written:
+      //
+      //   1. WHICH contract. A first save: the one the request declared
+      //      (absent = v1). A resave: the report's OWN persisted stamp, read
+      //      back above — the declaration is then not consulted at all, so an
+      //      AI-enrichment resave, a metadata/status resave, a claim-by-resave
+      //      or a stale tab can never move an existing report to another
+      //      contract. A report's contract is fixed when it is created.
+      //   2. The CLIENT-RELAYED positions. wordCount and archiveMatchedPositions
+      //      are one pass over one word sequence (the browser worker's, or
+      //      /api/archive/match's under the contract it was asked for), so
+      //      wordCount is checked against the text this server holds:
+      //      scoringNormalizationEvidence. Where the two contracts read the
+      //      text differently, wordCount must be the count under THIS contract
+      //      for a v2 report, and must not be the v2 count for a v1 report (an
+      //      unstamped report is otherwise accepted as it always was). A save
+      //      that fails is refused whole — nothing is written, so a stamp can
+      //      never be attached to positions from the other space. Where they
+      //      read it identically, every position is the same index in both
+      //      spaces and neither stamp could mislead. (These positions were
+      //      already the client's to report; what the server no longer does is
+      //      take the client's word for which space they are in.)
+      //   3. Everything the SERVER resolves — supplied references, the
+      //      prior-submission snapshot, imported evidence, the union, the
+      //      interpretation — is computed natively under this contract
+      //      (runWithScoringNormalization), and scholarly evidence is accepted
+      //      only from a diagnostics row the server itself computed under it
+      //      (academicEvidenceSubmissionBinding).
+      //   4. Only then is the stamp written, by this route, from this value —
+      //      whatever the payload's own field says is discarded.
+      const persistedScoringNormalizationVersion: ScoringNormalizationVersion | null = isFirstSaveOfThisReport
+        ? null
+        : (Number(existingReportRow.rows[0]?.scoring_normalization_version) === 2 ? 2 : 1);
+      const reportScoringVersion: ScoringNormalizationVersion = persistedScoringNormalizationVersion ?? declaredScoringNormalizationVersion;
+      if (isNonEmptyString(reportPayload?.text)) {
+        const evidence = scoringNormalizationEvidence(reportPayload.text, reportPayload.wordCount);
+        const positionsAreInReportContract =
+          evidence === 'either' || evidence === reportScoringVersion || (reportScoringVersion === 1 && evidence === null);
+        if (!positionsAreInReportContract) {
+          logReportSaveRejectedTelemetry({ reason: 'SCORING_NORMALIZATION_MISMATCH', status: 422, authMode: sessionUser ? 'authenticated' : 'anonymous' });
+          return new NextResponse(
+            JSON.stringify({ error: 'This report could not be saved. Please run the check again.', code: 'SCORING_NORMALIZATION_MISMATCH' }),
+            { status: 422, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+      }
+      const underReportContract = <T,>(compute: () => T): T => runWithScoringNormalization(reportScoringVersion, compute);
+
       // USER-SUPPLIED REFERENCES V1 — the trust boundary. The client sends the
       // reference files' ALREADY-EXTRACTED text as an `userSuppliedReferences`
       // sibling (never trusted from inside `payload` — that key is stripped).
@@ -809,7 +876,7 @@ export async function POST(request: Request) {
         return new NextResponse(JSON.stringify({ error: 'Payload too large' }), { status: 413 });
       }
       const freshSuppliedReferenceChannel = isNonEmptyString(reportPayload?.text) && suppliedReferenceInputs.length > 0
-        ? verifySuppliedReferences(reportPayload.text, suppliedReferenceInputs, reportPayload.wordCount)
+        ? underReportContract(() => verifySuppliedReferences(reportPayload.text, suppliedReferenceInputs, reportPayload.wordCount))
         : null;
       // V1.1 RULE 3 — FRESH (new refs) / CARRY_FORWARD (same manuscript, compatible
       // version) / DROPPED (manuscript changed, or version moved on) / NONE.
@@ -854,6 +921,9 @@ export async function POST(request: Request) {
         ? await resolveVerifiedAcademicEvidence(client, {
             diagnosticsId: academicEvidenceLookupHandle,
             submissionCanonicalSha256: canonicalSha256(reportPayload.text),
+            // Accepted only from a row the server computed under this report's
+            // own contract — otherwise [] (see SCORING-NORMALIZATION CONTRACT).
+            scoringNormalizationVersion: reportScoringVersion,
           })
         : { evidence: [], verifiedDiagnosticsId: null };
       // The payload actually persisted: the client's fields, but with
@@ -931,6 +1001,11 @@ export async function POST(request: Request) {
           ...reportPayload,
           externalAcademicEvidence: persistedExternalAcademicEvidence,
           verifiedAcademicSearchDiagnosticsId: verifiedAcademicDiagnosticsId ?? undefined,
+          // SERVER-AUTHORITATIVE STAMP (see SCORING-NORMALIZATION CONTRACT
+          // above): written from the contract this route decided and checked,
+          // overriding whatever the resubmitted payload carries. v1 is the
+          // absent field, exactly as on every report that predates the stamp.
+          scoringNormalizationVersion: reportScoringVersion === 2 ? 2 : undefined,
           // TRUST BOUNDARY (final-review finding, authoritative promotion):
           // unifiedSimilarity / unifiedSimilarityFailed / unifiedSimilarityGeneration /
           // corpusSourceMatchingEnabledAtComputation are SERVER-AUTHORITATIVE —
@@ -1113,14 +1188,14 @@ export async function POST(request: Request) {
       const finalizeReportJson = (obj: SimilarityReport, hsm?: ReportHistoricalSubmissionMatch | null): string => {
         let enriched: SimilarityReport | null = null;
         try {
-          enriched = withEvidenceInterpretation(obj, {
+          enriched = underReportContract(() => withEvidenceInterpretation(obj, {
             historicalSubmissionMatch: hsm ?? null,
             selectiveCorpusBranch: null,
             serverExtractionDiagnostic: clientExtractionDiagnostic,
             userSuppliedReferenceEvidence: suppliedReferenceEvidence,
             userSuppliedReferenceChannel: suppliedReferenceChannelState,
             userSuppliedReferenceGuard: suppliedReferenceGuard,
-          });
+          }));
         } catch (err) {
           console.error('report V2 interpretation attach failed:', err instanceof Error ? err.message : String(err));
           if (obj.unifiedSimilarity) throw err;
@@ -1174,6 +1249,9 @@ export async function POST(request: Request) {
             rawText: reportPayload.text,
             wordCount: reportPayload.wordCount,
             archiveMatchedPositions: reportPayload.archiveMatchedPositions,
+            // The report's contract, as decided and checked above — never the
+            // build's active one.
+            scoringNormalizationVersion: reportScoringVersion,
             // Trust boundary (drizzle/0052): the SERVER-VERIFIED scholarly
             // evidence only — never reportPayload.externalAcademicEvidence.
             externalAcademicEvidence: verifiedAcademicEvidence,
@@ -1557,6 +1635,7 @@ export async function POST(request: Request) {
           reportId: id,
           accountId: userId,
           rawText: reportPayload.text,
+          scoringNormalizationVersion: reportScoringVersion,
           productionResult: shadowEvaluationInputs.historicalSubmissionMatch,
           authoritativeUnifiedSimilarity: shadowEvaluationInputs.unifiedSimilarity,
           effectiveDeviceSelfRepresentationIds: shadowEvaluationInputs.effectiveDeviceSelfRepresentationIds,

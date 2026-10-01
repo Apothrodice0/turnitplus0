@@ -5,6 +5,8 @@ import { getExternalAcademicEvidence } from '../../../lib/academic-evidence-inte
 import { getReportsDbClient } from '../../../lib/reports-db';
 import { recordAcademicSearchRunDiagnostics } from '../../../lib/academic-search-diagnostics-repo';
 import { canonicalSha256 } from '../../../lib/document-identity';
+import { requestedScoringNormalizationVersion } from '../../../lib/similarity-core';
+import { runWithScoringNormalization } from '../../../lib/scoring-normalization-scope';
 
 /**
  * Phase 3: the one server endpoint the academic-search subsystem is reached
@@ -59,8 +61,18 @@ export async function POST(request: Request) {
     const body = await request.json().catch(() => null);
     if (!body || typeof body !== 'object') return new NextResponse(JSON.stringify({ error: 'Invalid JSON' }), { status: 400 });
 
-    const { text } = body as Record<string, unknown>;
+    const { text, scoringNormalization } = body as Record<string, unknown>;
     if (!isNonEmptyString(text)) return new NextResponse(JSON.stringify({ error: 'text is required' }), { status: 400 });
+    // The scoring-normalization contract the caller's check is being computed
+    // under (lib/similarity-core.ts) — the same one it will declare when it
+    // saves the report. Absent (a bundle older than the declaration) is v1.
+    // The matcher below runs under exactly this contract, and the stored row
+    // is bound to it, so /api/reports can only ever score this evidence on a
+    // report of the same contract.
+    const scoringNormalizationVersion = requestedScoringNormalizationVersion(scoringNormalization);
+    if (scoringNormalizationVersion === null) {
+      return new NextResponse(JSON.stringify({ error: 'scoringNormalization must be 1 or 2' }), { status: 400 });
+    }
     if (text.length < MIN_TEXT_LENGTH) {
       // Nothing worth querying for — a property of the input, not a
       // provider outage, so this is COMPLETE_NO_MATCHES, not FAILED. See
@@ -72,7 +84,10 @@ export async function POST(request: Request) {
       return new NextResponse(JSON.stringify({ error: 'text is too long' }), { status: 413 });
     }
 
-    const { evidence, stats, status, candidates, queries, retrievalDiagnostics } = await getExternalAcademicEvidence(text);
+    const { evidence, stats, status, candidates, queries, retrievalDiagnostics } = await runWithScoringNormalization(
+      scoringNormalizationVersion,
+      () => getExternalAcademicEvidence(text),
+    );
 
     // Scholarly evidence server trust boundary (drizzle/0052): bind the
     // matcher-produced evidence to THIS submission's canonical text hash and
@@ -91,7 +106,7 @@ export async function POST(request: Request) {
     if (stats) {
       const client = await getReportsDbClient();
       try {
-        academicSearchDiagnosticsId = await recordAcademicSearchRunDiagnostics(client, { status, stats, queries, candidates, retrievalDiagnostics, evidence, submissionCanonicalSha256 });
+        academicSearchDiagnosticsId = await recordAcademicSearchRunDiagnostics(client, { status, stats, queries, candidates, retrievalDiagnostics, evidence, submissionCanonicalSha256, scoringNormalizationVersion });
       } catch (err) {
         console.error('recordAcademicSearchRunDiagnostics failed (non-fatal):', err instanceof Error ? err.message : String(err));
       } finally {

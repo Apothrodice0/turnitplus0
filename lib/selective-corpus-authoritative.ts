@@ -7,6 +7,7 @@ import {
 import { resolveVerifiedAcademicEvidence } from "./academic-search-diagnostics-repo";
 import { buildFinalizedReportEvidenceInterpretation } from "./report-evidence-interpretation";
 import { canonicalSha256 } from "./document-identity";
+import { reportScoringNormalizationVersion, type ScoringNormalizationVersion } from "./similarity-core";
 import type { SimilarityReport } from "./report-types";
 import type { SelectiveCorpusShadowResult } from "./selective-corpus/types";
 
@@ -88,6 +89,16 @@ export type FinalizeSelectiveCorpusAuthoritativeReportParams = {
   accountId: string | null;
   /** Already-computed by the caller — this module never runs Stage A/B itself. */
   shadowResult: SelectiveCorpusShadowResult;
+  /**
+   * The scoring-normalization contract `shadowResult`'s verifiedEvidence word
+   * positions were computed under (the scope the caller ran
+   * runSelectiveCorpusShadowEvaluation in). They are unioned with the
+   * report's own positions, so they are used ONLY when this equals the
+   * report's persisted contract; otherwise this attempt writes nothing and
+   * the report stays pending for a run under the right contract. Omitted is
+   * v1.
+   */
+  shadowScoringNormalizationVersion?: ScoringNormalizationVersion;
 };
 
 export type FinalizeSelectiveCorpusAuthoritativeReportResult =
@@ -96,6 +107,11 @@ export type FinalizeSelectiveCorpusAuthoritativeReportResult =
   | { outcome: "not-pending" }
   | { outcome: "row-missing" }
   | { outcome: "gave-up" }
+  /**
+   * shadowResult was computed under another scoring-normalization contract
+   * than the report's own. NOTHING was written; the report stays pending.
+   */
+  | { outcome: "scoring-normalization-mismatch" }
   /**
    * C2 fail-closed: the ENCODED (compact) whole final report — score plus its
    * explanation — exceeds the report persistence limit. NOTHING was written: the
@@ -148,6 +164,9 @@ async function resolveAndPersist(
   evidenceSelection: SelectiveCorpusFinalizationEvidenceSelection,
 ): Promise<FinalizeSelectiveCorpusAuthoritativeReportResult> {
   const { payload, archiveScoreColumn } = row;
+  // The report's own persisted contract — this finalizer never re-stamps. It
+  // resolves under it, and its write is guarded on the row still carrying it.
+  const scoringNormalizationVersion = reportScoringNormalizationVersion(payload);
 
   // Scholarly evidence server trust boundary (drizzle/0052) — same
   // re-verification selfHealUnifiedSimilarity already performs: the
@@ -161,6 +180,7 @@ async function resolveAndPersist(
                 ? payload.verifiedAcademicSearchDiagnosticsId
                 : null,
             submissionCanonicalSha256: safeCanonicalSha256Text(payload.text),
+            scoringNormalizationVersion,
           })
         ).evidence
       : [];
@@ -172,6 +192,7 @@ async function resolveAndPersist(
     rawText: payload.text,
     wordCount: payload.wordCount,
     archiveMatchedPositions: payload.archiveMatchedPositions,
+    scoringNormalizationVersion,
     externalAcademicEvidence: verifiedAcademicEvidence,
     selectiveCorpusEvidence: evidenceSelection.evidence,
     archiveScore: payload.archiveScore ?? payload.score ?? Number(archiveScoreColumn),
@@ -231,6 +252,7 @@ async function resolveAndPersist(
       evidenceInterpretation: prepared.evidenceInterpretation,
       // R2 write gate: persist in the exact mode the size check above measured.
       compactWrites: prepared.compactWrites,
+      scoringNormalizationVersion,
     },
   );
   if (!write.written) {
@@ -273,6 +295,13 @@ export async function finalizeSelectiveCorpusAuthoritativeReport(
     if (!row) return { outcome: "row-missing" };
     if (row.payload.selectiveCorpusAuthoritativeStatus !== "pending") {
       return { outcome: "not-pending" };
+    }
+    // Evidence computed under another contract than the report's must never be
+    // unioned with the report's positions — and must not be traded for a
+    // zero-evidence "incomplete" finalization either. Nothing is written: the
+    // report stays pending and the recovery sweep reruns it under its contract.
+    if ((params.shadowScoringNormalizationVersion === 2 ? 2 : 1) !== reportScoringNormalizationVersion(row.payload)) {
+      return { outcome: "scoring-normalization-mismatch" };
     }
     const evidenceSelection = selectSelectiveCorpusFinalizationEvidence(params.shadowResult);
     const result = await resolveAndPersist(client, params, row, evidenceSelection);

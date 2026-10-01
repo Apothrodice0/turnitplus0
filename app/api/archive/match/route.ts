@@ -4,6 +4,8 @@ import { clientIpFrom } from "../../../../lib/client-ip";
 import { getReportsDbClient } from "../../../../lib/reports-db";
 import { isArchiveServerSideEnabled } from "../../../../lib/archive-server-flag";
 import { analyzeArchiveOnServer } from "../../../../lib/archive-server-analysis";
+import { requestedScoringNormalizationVersion } from "../../../../lib/similarity-core";
+import { runWithScoringNormalization } from "../../../../lib/scoring-normalization-scope";
 
 /**
  * 100k-scale architecture, slice 2E — the one server endpoint the real
@@ -86,9 +88,17 @@ export async function POST(request: Request) {
     if (!body || typeof body !== "object") {
       return new NextResponse(JSON.stringify({ error: "Invalid JSON" }), { status: 400 });
     }
-    const { text } = body as Record<string, unknown>;
+    const { text, scoringNormalization } = body as Record<string, unknown>;
     if (!isNonEmptyString(text)) {
       return new NextResponse(JSON.stringify({ error: "text is required" }), { status: 400 });
+    }
+    // The scoring-normalization contract the caller's check is being computed
+    // under (lib/similarity-core.ts); absent — a bundle older than the
+    // declaration — is v1. The matcher runs under exactly that contract and
+    // the response says which one it was, beside the (frozen) result shape.
+    const scoringNormalizationVersion = requestedScoringNormalizationVersion(scoringNormalization);
+    if (scoringNormalizationVersion === null) {
+      return new NextResponse(JSON.stringify({ error: "scoringNormalization must be 1 or 2" }), { status: 400 });
     }
     if (text.length > MAX_TEXT_LENGTH) {
       return new NextResponse(JSON.stringify({ error: "text is too long" }), { status: 413 });
@@ -96,8 +106,10 @@ export async function POST(request: Request) {
 
     const client = await getReportsDbClient();
     try {
-      const { result } = await analyzeArchiveOnServer(client, text);
-      return new NextResponse(JSON.stringify({ result }), { status: 200, headers: { "Content-Type": "application/json" } });
+      const { result } = await runWithScoringNormalization(scoringNormalizationVersion, async () => {
+        return await analyzeArchiveOnServer(client, text);
+      });
+      return new NextResponse(JSON.stringify({ result, scoringNormalization: scoringNormalizationVersion }), { status: 200, headers: { "Content-Type": "application/json" } });
     } finally {
       client.close();
     }

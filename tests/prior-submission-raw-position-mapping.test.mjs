@@ -8,6 +8,7 @@ import { applyMigrationsLibsql } from "../lib/ingest.js";
 import { createDocumentIdentity } from "../lib/document-identity.ts";
 import { canonicalizeText } from "../lib/canonical-text.ts";
 import { tokens } from "../lib/similarity-core.ts";
+import { runWithScoringNormalization } from "../lib/scoring-normalization-scope.ts";
 import {
   indexDocumentSubmissionIntoCorpus,
   CORPUS_ACTIVATION_DELAY_DAYS,
@@ -15,7 +16,7 @@ import {
   CANONICALIZATION_VERSION,
 } from "../lib/user-submission-corpus.ts";
 import { matchAgainstUserSubmissionCorpus, USER_SUBMISSION_MATCHER_VERSION, USER_SUBMISSION_MATCH_THRESHOLDS } from "../lib/user-submission-matching.ts";
-import { getOrComputeHistoricalMatchSnapshot, getCurrentCorpusMatchGeneration, SNAPSHOT_MATCHER_VERSION } from "../lib/report-historical-match.ts";
+import { getOrComputeHistoricalMatchSnapshot, getCurrentCorpusMatchGeneration, SNAPSHOT_MATCHER_VERSION, snapshotMatcherVersion } from "../lib/report-historical-match.ts";
 import { resolvePrimarySimilaritySummary } from "../lib/report-primary-similarity.ts";
 import { computeUnifiedSimilarity } from "../lib/unified-similarity.ts";
 import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
@@ -36,6 +37,13 @@ import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
  * token range of the genuinely copied text is known independently of the
  * code under test: novel intro/outro words are never in the source, so any
  * credited raw position outside the copied range is a non-source token.
+ *
+ * That drift is a property of scoring normalization v1 — the contract of
+ * every report saved so far, and of any v1 report resolved by any build. So
+ * these tests run under v1 by name (testV1), not under whichever contract the
+ * build computes new checks under. Under v2 the same marks are deleted by the
+ * tokenizer on both sides and there is nothing to drift; the v2 counterparts
+ * are at the end of the file.
  */
 
 const repoRoot = path.resolve(".");
@@ -63,6 +71,10 @@ const ZWJ = String.fromCharCode(0x200d);
 const BOM = String.fromCharCode(0xfeff);
 const NBSP = String.fromCharCode(0xa0);
 const SOFT_HYPHEN = String.fromCharCode(0xad);
+const WORD_JOINER = String.fromCharCode(0x2060);
+
+const testV1 = (name, body) => test(name, () => runWithScoringNormalization(1, body));
+const testV2 = (name, body) => test(name, () => runWithScoringNormalization(2, body));
 
 const knownUsers = new Set();
 async function ensureUser(accountId) {
@@ -89,12 +101,13 @@ async function indexSource(accountId, rawText) {
 }
 
 let reportCounter = 0;
-async function snapshotFor(viewerAccountId, rawText) {
+/** `scoringNormalizationVersion` is the report's contract; omitted is v1, as for every report with no stamp. */
+async function snapshotFor(viewerAccountId, rawText, scoringNormalizationVersion) {
   reportCounter += 1;
   const deviceKey = `device-raw-pos-${reportCounter}`;
   const reportId = `report-raw-pos-${reportCounter}`;
   await ensureSavedReport(deviceKey, reportId, viewerAccountId);
-  return getOrComputeHistoricalMatchSnapshot(client, { reportDeviceKey: deviceKey, reportId, accountId: viewerAccountId, rawText });
+  return getOrComputeHistoricalMatchSnapshot(client, { reportDeviceKey: deviceKey, reportId, accountId: viewerAccountId, rawText, ...(scoringNormalizationVersion ? { scoringNormalizationVersion } : {}) });
 }
 
 /** Unified similarity for the prior channel alone, in tokens(raw) space — exactly how the save path calls it. */
@@ -151,7 +164,7 @@ await indexSource("zw-source-account", GLACIER_COPIED);
 
 // --- 1. Baseline ordinary behaviour must remain identical --------------------
 
-test("PLAIN TEXT: a prior-submission STRONG match without zero-width marks stores exactly the canonical passages, on exactly the copied raw tokens", async () => {
+testV1("PLAIN TEXT: a prior-submission STRONG match without zero-width marks stores exactly the canonical passages, on exactly the copied raw tokens", async () => {
   const copied = "Horologists restoring an eighteenth-century marine chronometer discovered that its brass escapement had been hand-filed to compensate for thermal expansion, a refinement previously attributed only to later Parisian workshops operating under royal patronage.";
   const intro = "Volunteer lifeguards patrolling crowded municipal beaches recorded jellyfish sightings every morning before opening designated swimming zones.";
   const { rawText, copiedPositions } = compose([{ text: intro, copied: false }, { text: copied, copied: true }]);
@@ -172,7 +185,7 @@ test("PLAIN TEXT: a prior-submission STRONG match without zero-width marks store
   assert.deepEqual(unifiedFor(rawText, snapshot).previousUploadPositions, sorted(copiedPositions));
 });
 
-test("EXACT MATCH: an exact canonical prior-submission match keeps its exact-match entry shape and full-document credit", async () => {
+testV1("EXACT MATCH: an exact canonical prior-submission match keeps its exact-match entry shape and full-document credit", async () => {
   const text = "Numismatists cataloguing a hoard of Byzantine gold solidi unearthed beneath a collapsed Anatolian granary dated the burial by die-linking obverse portraits to a short-lived regional mint.";
   await indexSource("exact-source-account", text);
 
@@ -203,7 +216,7 @@ test("EXACT MATCH: an exact canonical prior-submission match keeps its exact-mat
 
 // --- 2. The zero-width drift repro ------------------------------------------
 
-test("ZERO-WIDTH REPRO: in-word zero-width marks before and inside a copied passage never shift credit onto non-copied raw tokens", async () => {
+testV1("ZERO-WIDTH REPRO: in-word zero-width marks before and inside a copied passage never shift credit onto non-copied raw tokens", async () => {
   // 17 in-word marks in the novel intro, plus marks (including a repeated run
   // and every stripped code point) inside copied words.
   const intro = markInsideWords(GLACIER_INTRO, 17);
@@ -242,7 +255,7 @@ test("ZERO-WIDTH REPRO: in-word zero-width marks before and inside a copied pass
   assert.equal(unified.uniqueMatchedWords, copiedPositions.size);
 });
 
-test("MULTIPLE ZERO-WIDTH MARKS: marks between two copied passages cannot move the later passage's credit", async () => {
+testV1("MULTIPLE ZERO-WIDTH MARKS: marks between two copied passages cannot move the later passage's credit", async () => {
   const first = "Archivists digitizing wartime telegraph ledgers reconstructed a coded convoy schedule by correlating operator initials with surviving harbor manifests from Halifax and Liverpool shipping offices.";
   const second = "Conservators stabilizing the waterlogged ledgers froze each volume before vacuum sublimation, preventing iron-gall ink from bleeding through fragile rag paper during the lengthy drying process.";
   const between = markInsideWords("Orchestra musicians rehearsing unfamiliar contemporary compositions requested additional sectional practice sessions before the premiere concert, citing complicated rhythmic transitions throughout movements.", 12);
@@ -263,7 +276,7 @@ test("MULTIPLE ZERO-WIDTH MARKS: marks between two copied passages cannot move t
   assert.deepEqual(unifiedFor(rawText, snapshot).previousUploadPositions, sorted(copiedPositions));
 });
 
-test("SUBSTITUTED / INSERTED TOKENS: a substituted word and an inserted word inside the copied passage are never credited, even with zero-width marks before them", async () => {
+testV1("SUBSTITUTED / INSERTED TOKENS: a substituted word and an inserted word inside the copied passage are never credited, even with zero-width marks before them", async () => {
   const words = "Volcanologists sampling fumarole gases on the flanks of Mount Erebus measured sulfur dioxide fluxes that doubled within hours of each lava-lake overturn, suggesting convective magma pulses rather than episodic degassing drive the persistent Antarctic plume observed from orbit since the late seventies.".split(" ");
   // Three in-word marks before the passage: on the pre-fix reading, the
   // canonical span right after each edit would have been read 3 raw tokens
@@ -294,7 +307,7 @@ test("SUBSTITUTED / INSERTED TOKENS: a substituted word and an inserted word ins
 
 // --- 4. Punctuation / whitespace normalization keeps raw identity ------------
 
-test("PUNCTUATION / WHITESPACE / NBSP / SOFT HYPHEN / BETWEEN-WORD ZERO-WIDTH: raw position identity is unchanged", async () => {
+testV1("PUNCTUATION / WHITESPACE / NBSP / SOFT HYPHEN / BETWEEN-WORD ZERO-WIDTH: raw position identity is unchanged", async () => {
   const copied = "Mycologists surveying old-growth hemlock stands documented a previously undescribed truffle species whose spores germinated only after passing through the digestive tract of northern flying squirrels.";
   const copiedFormatted = copied
     .replace("hemlock stands", `hemlock${NBSP}${NBSP}stands`)
@@ -320,7 +333,7 @@ test("PUNCTUATION / WHITESPACE / NBSP / SOFT HYPHEN / BETWEEN-WORD ZERO-WIDTH: r
 
 // --- 5. Only verified raw positions ------------------------------------------
 
-test("ONLY VERIFIED: every stored raw run spells exactly the verified canonical words, fragment for fragment", async () => {
+testV1("ONLY VERIFIED: every stored raw run spells exactly the verified canonical words, fragment for fragment", async () => {
   const copied = "Paleobotanists examining amber inclusions from Myanmar identified pollen grains clinging to a beetle's mandibles, the earliest direct evidence of insect pollination among cycad-like gymnosperms of the mid-Cretaceous.";
   const intro = markInsideWords("Commuters waiting beneath flickering platform lights complained loudly about delayed trains and overcrowded carriages yesterday.", 9, ZWJ);
   const copiedMarked = markInsideWords(copied, 7, ZWSP);
@@ -346,7 +359,7 @@ test("ONLY VERIFIED: every stored raw run spells exactly the verified canonical 
 
 // --- 6. Overlapping mapped runs deduplicate downstream -----------------------
 
-test("OVERLAP: two prior sources covering overlapping parts of one copied passage are unioned once per raw position", async () => {
+testV1("OVERLAP: two prior sources covering overlapping parts of one copied passage are unioned once per raw position", async () => {
   const words = "Ornithologists banding migrating warblers along the Gulf coast recorded individuals carrying radio transmitters that revealed nonstop overwater flights exceeding eighty hours, challenging assumptions about fat reserves and navigation during spring migration across open ocean.".split(" ");
   const sourceOne = words.slice(0, 24).join(" ");
   const sourceTwo = words.slice(12).join(" ");
@@ -373,7 +386,7 @@ test("OVERLAP: two prior sources covering overlapping parts of one copied passag
 
 // --- 7. Determinism ------------------------------------------------------------
 
-test("DETERMINISM: recomputing the zero-width fixture yields identical raw passages and positions", async () => {
+testV1("DETERMINISM: recomputing the zero-width fixture yields identical raw passages and positions", async () => {
   const intro = markInsideWords(GLACIER_INTRO, 17);
   const { rawText } = compose([{ text: intro, copied: false }, { text: GLACIER_COPIED, copied: true }, { text: GLACIER_OUTRO, copied: false }]);
   const first = await snapshotFor("zw-viewer-account", rawText);
@@ -385,7 +398,7 @@ test("DETERMINISM: recomputing the zero-width fixture yields identical raw passa
 
 // --- 8. Score changes only where the old projection credited wrong tokens ----
 
-test("SCORE ATTRIBUTION: the unified score moves only by positions the canonical-as-raw reading got wrong", async () => {
+testV1("SCORE ATTRIBUTION: the unified score moves only by positions the canonical-as-raw reading got wrong", async () => {
   const intro = markInsideWords(GLACIER_INTRO, 17);
   const { rawText, copiedPositions } = compose([{ text: intro, copied: false }, { text: GLACIER_COPIED, copied: true }, { text: GLACIER_OUTRO, copied: false }]);
   const snapshot = await snapshotFor("zw-viewer-account", rawText);
@@ -484,7 +497,7 @@ async function zeroWidthReport(label) {
   return { ...fixture, deviceKey, reportId, viewerAccountId: "zw-viewer-account" };
 }
 
-test("SNAPSHOT VERSION: the new tag differs from the pre-fix tag only by the position-space segment", () => {
+testV1("SNAPSHOT VERSION: the new tag differs from the pre-fix tag only by the position-space segment", () => {
   assert.match(PRE_FIX_SNAPSHOT_MATCHER_VERSION, /^user-submission-match-v1\+cfg\.[0-9a-f]{12}$/);
   assert.notEqual(SNAPSHOT_MATCHER_VERSION, PRE_FIX_SNAPSHOT_MATCHER_VERSION);
   // Same matcher label, same thresholds/maturity config digest: no threshold,
@@ -492,7 +505,7 @@ test("SNAPSHOT VERSION: the new tag differs from the pre-fix tag only by the pos
   assert.equal(SNAPSHOT_MATCHER_VERSION.replace("+pos.raw-token-v1", ""), PRE_FIX_SNAPSHOT_MATCHER_VERSION);
 });
 
-test("SNAPSHOT VERSION: a pre-fix snapshot is not reused — it is recomputed with raw positions and persisted in place under the new version", async () => {
+testV1("SNAPSHOT VERSION: a pre-fix snapshot is not reused — it is recomputed with raw positions and persisted in place under the new version", async () => {
   const fx = await zeroWidthReport("stale");
   const sentinelComputedAt = new Date(Date.now() - 60_000).toISOString();
   const columnsBefore = await snapshotColumns();
@@ -540,7 +553,7 @@ test("SNAPSHOT VERSION: a pre-fix snapshot is not reused — it is recomputed wi
   assert.deepEqual(await snapshotColumns(), columnsBefore);
 });
 
-test("SNAPSHOT VERSION: a version-current row is reused as-is — why pre-fix rows needed a new version to stop being trusted", async () => {
+testV1("SNAPSHOT VERSION: a version-current row is reused as-is — why pre-fix rows needed a new version to stop being trusted", async () => {
   const fx = await zeroWidthReport("current-tag-control");
   const sentinelComputedAt = new Date(Date.now() - 60_000).toISOString();
   // The same pre-fix row, stamped with the tag the running code writes — what
@@ -551,7 +564,7 @@ test("SNAPSHOT VERSION: a version-current row is reused as-is — why pre-fix ro
   assert.deepEqual(snapshot.matches, preFix);
 });
 
-test("SNAPSHOT VERSION: a corrected snapshot is then reused without recompute, and repeated reads are deterministic", async () => {
+testV1("SNAPSHOT VERSION: a corrected snapshot is then reused without recompute, and repeated reads are deterministic", async () => {
   const fx = await zeroWidthReport("reuse");
   await seedPreFixSnapshot({ ...fx, matcherVersion: PRE_FIX_SNAPSHOT_MATCHER_VERSION, computedAt: new Date(Date.now() - 60_000).toISOString() });
   const params = { reportDeviceKey: fx.deviceKey, reportId: fx.reportId, accountId: fx.viewerAccountId, rawText: fx.rawText };
@@ -570,7 +583,7 @@ test("SNAPSHOT VERSION: a corrected snapshot is then reused without recompute, a
   assert.deepEqual(fresh.matches, recomputed.matches);
 });
 
-test("SNAPSHOT VERSION: the score-resolution write path cannot consume a pre-fix snapshot", async () => {
+testV1("SNAPSHOT VERSION: the score-resolution write path cannot consume a pre-fix snapshot", async () => {
   const fx = await zeroWidthReport("resolution");
   await seedPreFixSnapshot({ ...fx, matcherVersion: PRE_FIX_SNAPSHOT_MATCHER_VERSION, computedAt: new Date(Date.now() - 60_000).toISOString() });
   const resolution = await resolvePrimarySimilaritySummary(client, {
@@ -588,4 +601,99 @@ test("SNAPSHOT VERSION: the score-resolution write path cannot consume a pre-fix
   assert.deepEqual(resolution.unifiedSimilarity.previousUploadPositions, sorted(fx.copiedPositions));
   assert.deepEqual(resolution.unifiedSimilarity.matchedPositions, sorted(fx.copiedPositions));
   assert.equal((await snapshotRow(fx.deviceKey, fx.reportId)).matcher_version, SNAPSHOT_MATCHER_VERSION);
+});
+
+// --- scoring normalization v2 ------------------------------------------------
+// The same kind of manuscript resolved as a v2 report. The tokenizer deletes the invisible characters on both sides, so
+// raw and canonical positions coincide, and marks v1 could never see through (soft hyphen, word joiner) no longer hide a
+// copied word from the matcher.
+
+const V2_INTRO = markInsideWords(GLACIER_INTRO, 17);
+const V2_COPIED = GLACIER_COPIED
+  .replace("Glaciologists", `Glacio${ZWSP}logists`)
+  .replace("volcanic", `vol${SOFT_HYPHEN}canic`)
+  .replace("stratigraphic", `strati${ZWSP}${ZWSP}gra${ZWJ}phic`)
+  .replace("uncertainty", `uncer${WORD_JOINER}tainty`);
+const V2_PARTS = [
+  { text: V2_INTRO, copied: false },
+  { text: V2_COPIED, copied: true },
+  { text: GLACIER_OUTRO, copied: false },
+];
+
+testV2("V2 ZERO-WIDTH REPRO: resolved as a v2 report, the marked passage is credited as exactly the words it reads as — no fragment, no neighbour", async () => {
+  const { rawText, ranges, copiedPositions } = compose(V2_PARTS);
+  // v2 reads the marked passage as the clean one: the same number of words as the source passage.
+  assert.deepEqual(tokens(V2_COPIED), tokens(GLACIER_COPIED));
+  assert.deepEqual(tokens(rawText), tokens(canonicalizeText(rawText)), "raw and canonical positions coincide under v2");
+
+  const snapshot = await snapshotFor("zw-v2-viewer-account", rawText, 2);
+  assert.equal(snapshot.status, "MATCHED");
+  assert.equal(snapshot.matcherVersion, snapshotMatcherVersion(2), "computed under, and tagged with, the report's contract");
+  const [match] = snapshot.matches;
+  assert.equal(match.relationshipType, "PRIOR_SUBMISSION");
+  assert.equal(match.matchType, "STRONG_TEXT_MATCH");
+  assert.deepEqual(match.passages.map((p) => [p.submittedWordStart, p.submittedWordEnd]), [[ranges[1].start, ranges[1].end]]);
+  assert.equal(match.passages[0].matchedWordCount, tokens(GLACIER_COPIED).length);
+  assert.deepEqual(sorted(passagePositions(match.passages)), sorted(copiedPositions));
+  const unified = unifiedFor(rawText, snapshot);
+  assert.deepEqual(unified.previousUploadPositions, sorted(copiedPositions));
+  assert.equal(unified.uniqueMatchedWords, copiedPositions.size);
+});
+
+test("V1 vs V2: one manuscript resolved under each contract — two position spaces, each credited only on copied words, v2 seeing the words v1 cannot", async () => {
+  const resolve = (version, viewer) => runWithScoringNormalization(version, async () => {
+    const composed = compose(V2_PARTS);
+    const snapshot = await snapshotFor(viewer, composed.rawText, version);
+    assert.equal(snapshot.status, "MATCHED", `v${version}`);
+    assert.equal(snapshot.matcherVersion, snapshotMatcherVersion(version), `v${version}`);
+    const credited = passagePositions(snapshot.matches[0].passages);
+    const rawTokens = tokens(composed.rawText);
+    assert.deepEqual(sorted(credited).filter((p) => !composed.copiedPositions.has(p)).map((p) => `${p}:${rawTokens[p]}`), [], `v${version}: nothing credited outside the copied text`);
+    // A stored passage's own words are spelled by the raw words at its positions (v1: a zero-width-split word is two
+    // raw fragments of one verified word, so the spelling is compared without the fragment boundaries).
+    for (const passage of snapshot.matches[0].passages) {
+      assert.equal(rawTokens.slice(passage.submittedWordStart, passage.submittedWordEnd + 1).join(""), passage.submittedText.replace(/ /g, ""), `v${version}: a stored passage's words are the words at its positions`);
+    }
+    return { credited, copied: composed.copiedPositions, range: composed.ranges[1] };
+  });
+  const v1 = await resolve(1, "contrast-v1-viewer-account");
+  const v2 = await resolve(2, "contrast-v2-viewer-account");
+  // 17 in-word marks in the intro: the passage starts 17 words later in v1 space.
+  assert.equal(v1.range.start, v2.range.start + 17);
+  // v2 credits the whole passage. v1 cannot verify the two words a soft hyphen / word joiner still splits.
+  assert.deepEqual(sorted(v2.credited), sorted(v2.copied));
+  assert.ok(v1.credited.size < v1.copied.size, "v1 leaves the soft-hyphen and word-joiner fragments uncredited");
+});
+
+test("SNAPSHOT CONTRACT: a stored snapshot is reused only for the contract it was computed under, and recomputed in place for the other", async () => {
+  const { rawText } = runWithScoringNormalization(1, () => compose(V2_PARTS));
+  const deviceKey = "device-raw-pos-contract";
+  const reportId = "report-raw-pos-contract";
+  await ensureSavedReport(deviceKey, reportId, "contract-viewer-account");
+  const ask = (scoringNormalizationVersion) => getOrComputeHistoricalMatchSnapshot(client, { reportDeviceKey: deviceKey, reportId, accountId: "contract-viewer-account", rawText, scoringNormalizationVersion });
+  const stored = async () => {
+    const row = (await client.execute({ sql: "SELECT matcher_version, result_json, computed_at FROM report_historical_match_snapshots WHERE report_device_key = ? AND report_id = ?", args: [deviceKey, reportId] })).rows[0];
+    return { tag: String(row.matcher_version), start: Math.min(...JSON.parse(String(row.result_json))[0].passages.map((p) => p.submittedWordStart)) };
+  };
+
+  const first = await ask(1);
+  assert.equal(first.matcherVersion, SNAPSHOT_MATCHER_VERSION);
+  const v1Row = await stored();
+  assert.equal(v1Row.tag, snapshotMatcherVersion(1));
+
+  // The same call again is a cache hit: the row is returned as it is.
+  assert.deepEqual(await ask(1), first);
+
+  // Asked for as a v2 report, the v1 row is not current: recomputed under v2 and replaced.
+  const second = await ask(2);
+  assert.equal(second.matcherVersion, snapshotMatcherVersion(2));
+  const v2Row = await stored();
+  assert.equal(v2Row.tag, snapshotMatcherVersion(2));
+  assert.equal(v2Row.start, v1Row.start - 17, "the passage starts 17 words earlier in v2 space");
+
+  // …and the other way round.
+  const third = await ask(1);
+  assert.equal(third.matcherVersion, snapshotMatcherVersion(1));
+  assert.deepEqual((await stored()).start, v1Row.start);
+  assert.deepEqual(third.matches, first.matches);
 });
