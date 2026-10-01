@@ -1,0 +1,235 @@
+{
+  "name": "Rule B2",
+  "candidateExtractorVersion": "pdf-text-extraction-v2",
+  "status": "FROZEN FOR FRESH VALIDATION - not implemented in the repo",
+  "source": "Rule B (RULE_B.json sha256 e5ca57a721260ced10b7773a8a751bb197f2b2302ad68c12683e52e996466808, ruleB-frozen.mjs sha256 b36764af96f89b8d7d26b6803b9e4058377bf9eb8fe52ce00ea0edb97adacafd) plus predicate 7b; reference implementation ruleB2-frozen.mjs",
+  "precedence": "Where the prose of DECISION.md and the measured predicate differ in wording, the measured predicate (this file, ruleB-frozen.mjs) governs. Known wording differences are listed under 'clarificationsOfDecisionProse'.",
+  "units": "pdf.js user-space units as delivered by getTextContent(): transform[4] = x, transform[5] = baseline y, width; font size em = |transform[0]| or, if that is 0, |transform[3]|",
+  "rounding": {
+    "segmentGeometry": "x0, x1, y, em, firstEm, lastEm are rounded to 0.1 unit (Math.round(v*10)/10) when the segment is built",
+    "ratios": "dyEm, pitchDev, dx0Em, emRatio, rightGapEm, fitGapEm are rounded to 2 decimals (Number(v.toFixed(2))) before comparison"
+  },
+  "v1Base": {
+    "itemText": "String(item.str ?? '') when item is an object with a 'str' key, else ''",
+    "itemGeometry": "left = transform[4]; baseline = transform[5]; right = left + width; em = |transform[0]| || |transform[3]|; null when any is not finite or em <= 0",
+    "glue": "two consecutive items are concatenated with '' when |baselineDiff| < 0.15*max(em) AND |next.left - prev.right| < 0.15*max(em); otherwise with ' '"
+  },
+  "segments": {
+    "definition": "consecutive items in pdf.js emission order, closed by an item whose hasEOL is true; a run whose joined text is only white space is not a segment (its text is carried as separator of the next segment)",
+    "text": "exactly the v1 join of the segment's items",
+    "ink": "items with non-blank text and non-null itemGeometry; a segment with no ink item takes no part in the rule",
+    "fields": {
+      "x0": "min left over ink items",
+      "x1": "max right over ink items",
+      "y": "baseline of the widest ink item",
+      "em": "em of the widest ink item",
+      "firstEm": "em of first ink item",
+      "lastEm": "em of last ink item",
+      "firstDir": "dir of first ink item",
+      "lastDir": "dir of last ink item",
+      "rot": "true when any ink item has |transform[1]| > 1e-6 or |transform[2]| > 1e-6"
+    }
+  },
+  "printedLines": {
+    "definition": "segment i continues the printed line of segment i-1 (same page) when |y_i - y_(i-1)| <= 0.35*max(em_i, em_(i-1)) AND x0_i >= x1_(i-1) - 0.5*em_i",
+    "gx0": "min x0 over the segments of the printed line",
+    "gx1": "max x1 over the segments of the printed line"
+  },
+  "pageLinePitch": {
+    "samples": "for consecutive segments i, i+1 of the page: dy = y_i - y_(i+1), kept when dy > 0 AND |x0_i - x0_(i+1)| < 3*em_i AND dy < 3*em_i",
+    "value": "the element at index floor(n/2) of the ascending-sorted samples; null when there are none"
+  },
+  "evidence": {
+    "builtFrom": "the ORIGINAL unrepaired segment texts of every extracted page, once, before any decision; never updated",
+    "hyphenLikeAtSegmentEnd": [
+      "U+002D",
+      "U+00AD",
+      "U+2010",
+      "U+2011",
+      "U+2012",
+      "U+2013",
+      "U+2014",
+      "U+2212"
+    ],
+    "exclusions": [
+      "if the right-trimmed segment text ends with <letter run><hyphen-like>, its last white-space-delimited token is removed before counting",
+      "if the previous segment ON THE SAME PAGE ends that way, the first white-space-delimited token of this segment is removed before counting"
+    ],
+    "tokenisation": "lower-cased text; every match of \\p{L}+(?:[-\\u2010\\u2011]\\p{L}+)* ; split at '-', U+2010, U+2011 into parts",
+    "words": "count of every part",
+    "pairs": "count of every adjacent pair 'part_k-part_(k+1)' (joined with U+002D)"
+  },
+  "candidateSite": {
+    "A_B": "segment A and the next segment B in emission order ON THE SAME PAGE",
+    "a": "A.text right-trimmed",
+    "b": "B.text left-trimmed",
+    "endMatch": "(\\p{L}[\\p{L}\\p{M}]*)([hyphen-like])$ on a  ->  L = group 1, hy = group 2",
+    "startMatch": "^(\\p{L}[\\p{L}\\p{M}]*) on b  ->  R = group 1",
+    "tokL": "last white-space-delimited token of a",
+    "tokR": "first white-space-delimited token of b",
+    "em": "max(A.lastEm || A.em, 1)"
+  },
+  "predicatesAllRequired": [
+    {
+      "id": 1,
+      "name": "same-page",
+      "test": "A and B are consecutive segments of one page; a page-boundary pair is never joined"
+    },
+    {
+      "id": 2,
+      "name": "hyphen-is-U+002D",
+      "test": "hy === U+002D (HYPHEN-MINUS). U+00AD, U+2010, U+2011, U+2012, U+2013, U+2014, U+2212 never qualify"
+    },
+    {
+      "id": 3,
+      "name": "lowercase-at-break",
+      "test": "last character of L matches \\p{Ll} AND first character of R matches \\p{Ll}"
+    },
+    {
+      "id": 4,
+      "name": "latin-fragments",
+      "test": "L and R each match ^[\\p{Script=Latin}\\p{M}]+$"
+    },
+    {
+      "id": 5,
+      "name": "fragment-length",
+      "test": "L.length >= 2 AND R.length >= 2 (UTF-16 code units)"
+    },
+    {
+      "id": 6,
+      "name": "left-token-shape",
+      "test": "(?:^|\\s)[\\p{Ps}\\p{Pi}\"']*(\\p{L}[\\p{L}\\p{M}]*)-$ matches ' ' + tokL  (opening punctuation or quotes, letters, one final hyphen; no digit, slash, inner hyphen or dash)"
+    },
+    {
+      "id": 7,
+      "name": "right-token-shape",
+      "test": "^(\\p{L}[\\p{L}\\p{M}]*)(?=$|\\s|[\\p{Pe}\\p{Pf}.,;:!?\"']) matches tokR  (letters, then end, white space or closing punctuation; not a hyphen, digit or slash)"
+    },
+    {
+      "id": "7b",
+      "name": "no-url-structure",
+      "test": "NOT ( URL_STRUCTURE matches tokL OR URL_STRUCTURE matches tokR ), where URL_STRUCTURE = [/@]|[.:][\\p{L}\\p{N}]"
+    },
+    {
+      "id": 8,
+      "name": "upright-not-rtl",
+      "test": "A.rot is false AND B.rot is false AND A.lastDir !== 'rtl' AND B.firstDir !== 'rtl'"
+    },
+    {
+      "id": 9,
+      "name": "next-line-below-at-body-pitch",
+      "test": "dyEm = (A.y - B.y)/em;  dyEm > 0.5 AND dyEm <= 4 AND ( dyEm <= 2.6 OR ( pitch !== null AND |(A.y - B.y) - pitch| / pitch <= 0.25 ) )"
+    },
+    {
+      "id": 10,
+      "name": "same-column",
+      "test": "dx0Em = (gx0(B) - gx0(A))/em;  -6 <= dx0Em <= 3 AND gx0(B) < A.x1"
+    },
+    {
+      "id": 11,
+      "name": "font-size-ratio",
+      "test": "emRatio = (B.firstEm || B.em)/em;  0.70 <= emRatio <= 1.45"
+    },
+    {
+      "id": 12,
+      "name": "right-edge-would-not-fit",
+      "test": "neighbours = segments j within i-6..i+6 on the page, not rot, with |gx0(j) - gx0(A)| <= 3*em AND |y_j - A.y| <= 10*em (A itself included for the maximum); blockRight = max gx1 over them; neigh = number of them on a different printed line than A; REQUIRE neigh >= 1 AND fitGapEm < 0.5 where avgChar = (B.x1 - B.x0)/max(1, length of b right-trimmed), chunk = tokR up to its first '-', U+2010 or U+2011 (whole tokR if none or if at index 0), fitGapEm = (blockRight - (A.x1 - 0.33*em + avgChar*chunk.length))/em"
+    },
+    {
+      "id": 13,
+      "name": "joined-word-inline",
+      "test": "evidence.words[(L + R) lower-cased] >= 1"
+    },
+    {
+      "id": 14,
+      "name": "pair-never-inline",
+      "test": "evidence.pairs[(L + '-' + R) lower-cased] is 0 or absent"
+    }
+  ],
+  "action": "remove exactly the final U+002D of A (right-trimmed) and append B (left-trimmed) with nothing between; every other character of the page is emitted exactly as v1 emits it",
+  "neverJoined": [
+    "across pages",
+    "any hyphen-like character other than U+002D",
+    "a fragment whose boundary letter is not lower case",
+    "non-Latin fragments (Arabic, Persian, Cyrillic, Greek, CJK, mixed script)",
+    "rotated or skewed text, or text whose direction is rtl",
+    "a break whose left or right white-space-delimited token contains '/', '@', or a '.' or ':' immediately followed by a letter or digit (URL, domain, e-mail, DOI, scheme:identifier), or a left token with a digit or a second hyphen",
+    "one-letter fragments",
+    "a next line that is not directly below within the same column (column change, footer, caption, table cell row change)",
+    "a line that does not reach the right edge of its block",
+    "a word whose joined form is not written inline elsewhere in the same extraction, or whose hyphenated pair is written inline anywhere",
+    "any format other than PDF; any already-extracted stored text"
+  ],
+  "noDictionary": true,
+  "noStopList": true,
+  "noLanguageInput": true,
+  "clarificationsOfDecisionProse": [
+    "direction: the measured predicate is 'not rtl' (DECISION.md says dir = ltr)",
+    "vertical clause above 2.6 em: the measured predicate requires the gap to be within 25% of the page pitch on both sides (DECISION.md says 'at most 1.25 x the pitch')",
+    "fragment width: the measured predicate uses the first token of B up to its first hyphen, trailing punctuation included (DECISION.md says 'B's first fragment')",
+    "the previous-segment exclusion in the evidence is applied within a page only",
+    "geometry is rounded as stated under 'rounding'"
+  ],
+  "baseRule": {
+    "name": "Rule B",
+    "ruleDescriptionSha256": "e5ca57a721260ced10b7773a8a751bb197f2b2302ad68c12683e52e996466808",
+    "referenceImplementationSha256": "b36764af96f89b8d7d26b6803b9e4058377bf9eb8fe52ce00ea0edb97adacafd"
+  },
+  "onlyDifferenceFromRuleB": "predicate 7b (whole-token URL / domain / address restriction). Every other definition, predicate and threshold is copied unchanged.",
+  "urlStructure": {
+    "appliesTo": [
+      "tokL: the last white-space-delimited token of segment A, right-trimmed, including its final hyphen",
+      "tokR: the first white-space-delimited token of segment B, left-trimmed, in full (not only the fragment R)"
+    ],
+    "regex": "[/@]|[.:][\\p{L}\\p{N}]   (flag u)",
+    "meaning": [
+      "the token contains U+002F SOLIDUS (this covers '://', URL paths, 'doi.org/10.x/y', 'a/b')",
+      "the token contains U+0040 COMMERCIAL AT",
+      "the token contains U+002E FULL STOP immediately followed by a letter (\\p{L}) or a digit (\\p{N})",
+      "the token contains U+003A COLON immediately followed by a letter or a digit"
+    ],
+    "notRejected": [
+      "a full stop, colon, comma, semicolon, bracket or quote at the END of the token or followed by other punctuation ('word.', 'word:', 'word.)', 'word.”')",
+      "an apostrophe followed by letters (aujourd’hui, government’s)",
+      "any character other than the four listed"
+    ],
+    "asciiOnly": "only U+002F, U+0040, U+002E and U+003A are tested; full-width or other look-alike characters are not",
+    "whyWholeToken": "Rule B's predicate 7 inspects only the character that follows the right fragment and allows '.' and ':' there, so 'ps://doi.org/...' and 'zin.de' passed. Predicate 6 already confines the left token to opening punctuation, letters and the final hyphen, so in practice 7b can only fire on the right token; it is stated for both tokens so that the property does not depend on predicate 6."
+  },
+  "orderedPseudocode": [
+    "EVIDENCE (built once from the ORIGINAL segments of all extracted pages; never updated by any decision)",
+    "  for each segment S on each page:",
+    "    body = lowercase(S.text)",
+    "    if rtrim(S.text) ends with <letter run><hyphen-like>:   remove the last white-space token of body",
+    "    if the previous segment ON THIS PAGE ends that way:     remove the first white-space token of body",
+    "    for each match of \\p{L}+(?:[-\\u2010\\u2011]\\p{L}+)* in body:",
+    "      split at '-', U+2010, U+2011; WORDS[part] += 1 for every part; PAIRS[part_k + '-' + part_(k+1)] += 1",
+    "  hyphen-like = U+002D U+00AD U+2010 U+2011 U+2012 U+2013 U+2014 U+2212",
+    "FOR each pair of consecutive segments A, B in pdf.js emission order:",
+    "  a = rtrim(A.text); b = ltrim(B.text)",
+    "  (L, hy) = match of (\\p{L}[\\p{L}\\p{M}]*)(hyphen-like)$ in a        else: no join",
+    "  R       = match of ^(\\p{L}[\\p{L}\\p{M}]*) in b                     else: no join",
+    "  tokL = last white-space token of a; tokR = first white-space token of b; em = max(A.lastEm or A.em, 1)",
+    "  JOIN only if ALL hold, tested in this order:",
+    "   1  A and B are on the same page",
+    "   2  hy is U+002D",
+    "   3  last character of L is \\p{Ll} and first character of R is \\p{Ll}",
+    "   4  L and R each match ^[\\p{Script=Latin}\\p{M}]+$",
+    "   5  length(L) >= 2 and length(R) >= 2",
+    "   6  ' ' + tokL matches (?:^|\\s)[\\p{Ps}\\p{Pi}\"']*(\\p{L}[\\p{L}\\p{M}]*)-$",
+    "   7  tokR matches ^(\\p{L}[\\p{L}\\p{M}]*)(?=$|\\s|[\\p{Pe}\\p{Pf}.,;:!?\"'])",
+    "   7b neither tokL nor tokR matches [/@]|[.:][\\p{L}\\p{N}]",
+    "   8  A.rot and B.rot are false; A.lastDir != 'rtl'; B.firstDir != 'rtl'",
+    "   9  d = round2((A.y - B.y)/em);  d > 0.5 and d <= 4 and ( d <= 2.6 or ( pitch != null and round2(|A.y - B.y - pitch|/pitch) <= 0.25 ) )",
+    "  10  x = round2((gx0(B) - gx0(A))/em);  -6 <= x <= 3  and  gx0(B) < A.x1",
+    "  11  r = round2((B.firstEm or B.em)/em);  0.70 <= r <= 1.45",
+    "  12  N = segments j in i-6..i+6 of the page, not rot, |gx0(j) - gx0(A)| <= 3*em and |y_j - A.y| <= 10*em (A included);",
+    "      at least one member of N is on another printed line than A; blockRight = max gx1 over N;",
+    "      chunk = tokR up to its first '-', U+2010 or U+2011 (whole tokR if none or if at index 0);",
+    "      round2((blockRight - (A.x1 - 0.33*em + ((B.x1 - B.x0)/max(1, length(rtrim(b)))) * length(chunk)))/em) < 0.5",
+    "  13  WORDS[lowercase(L + R)] >= 1",
+    "  14  PAIRS[lowercase(L + '-' + R)] is 0 or absent",
+    "  ACTION: remove exactly the final U+002D of a and append b with nothing between; emit every other character as v1 does",
+    "segment geometry (x0, x1, y, em, firstEm, lastEm) is rounded to 0.1 unit when the segment is built; round2 = round to 2 decimals"
+  ]
+}

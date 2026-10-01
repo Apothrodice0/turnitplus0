@@ -89,7 +89,7 @@ test("2. retrieval failure case #2 (PDF-only repository, e.g. RePEc/MPRA): a rea
   const result = await retriever.retrieve({ url: "https://example.test/paper.pdf" });
   assert.equal(result.status, "SUCCESS");
   assert.equal(result.contentType, "application/pdf");
-  assert.equal(result.extractorVersion, "pdf-text-extraction-v1");
+  assert.equal(result.extractorVersion, "pdf-text-extraction-v2");
   assert.ok(result.extractedText.includes("corporate social responsibility"));
   assert.ok(result.extractedText.includes("Page 1"));
   assert.ok(result.extractedText.includes("Page 2"));

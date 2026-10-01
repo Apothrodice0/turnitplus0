@@ -1,5 +1,5 @@
 import { createReceiptPdf } from "@/lib/receipt-pdf";
-import { extractPdfTextDocument, extractPdfTextDocumentWithCompleteness, PDF_EXTRACTOR_VERSION, type PdfExtractionCompleteness } from "@/lib/pdf-text-extraction";
+import { assertPdfjsContractVersion, extractPdfTextDocument, extractPdfTextDocumentWithCompleteness, PDF_EXTRACTOR_VERSION, type PdfExtractionCompleteness } from "@/lib/pdf-text-extraction";
 import { extractDocxTextDocument, extractDocxTextDocumentWithCompleteness } from "@/lib/docx-text-extraction";
 import { combineMatchedWordPositions } from "@/lib/similarity-enrichment";
 import { computeUnifiedSimilarity } from "@/lib/unified-similarity";
@@ -370,6 +370,10 @@ export async function extractFileText(file: File, onProgress: (progress: number,
   }
   if (extension === "pdf") {
     const pdfjs = await import("pdfjs-dist");
+    // The extractor contract is defined against one exact pdf.js release;
+    // any other build is refused before a worker is requested or a byte of
+    // the file is parsed (see assertPdfjsContractVersion).
+    assertPdfjsContractVersion(pdfjs.version);
     pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
     // Release-hardening audit (DEP-01): enableScripting is NOT a
     // getDocument() option in this pdfjs-dist version (belongs only to
@@ -440,6 +444,7 @@ export async function extractFileTextWithDiagnostics(
 
   if (extension === "pdf") {
     const pdfjs = await import("pdfjs-dist");
+    assertPdfjsContractVersion(pdfjs.version);
     pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
     const document = await loadPdfDocument(pdfjs, await file.arrayBuffer());
     const result = await extractPdfTextDocumentWithCompleteness(document, (pageNumber, pageCount) => {
@@ -457,6 +462,8 @@ export async function extractFileTextWithDiagnostics(
         total: result.totalPages,
         read: result.parsedPages,
         analyzableWordCount: result.extractedWordCount,
+        engineVersion: pdfjs.version,
+        lineBreakJoins: result.lineBreakJoins,
       }),
     };
   }

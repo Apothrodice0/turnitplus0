@@ -30,6 +30,17 @@ export type ReportExtractionDiagnostic = {
   skipped: { unit: "pages" | "sections" | "characters"; total: number; read: number } | null;
   /** non-sensitive extractor tag (e.g. "pdf-text-extraction-v1", "plain-text"). */
   extractor: string | null;
+  /**
+   * PDF only, and only on reports extracted by "pdf-text-extraction-v2" or
+   * later — absent everywhere else, including every older stored report.
+   * The pdf.js release the extractor ran on.
+   */
+  engineVersion?: string;
+  /**
+   * PDF only, same availability as `engineVersion`. How many line-break
+   * hyphenations the extractor repaired — a count, never the words.
+   */
+  lineBreakJoins?: number;
 };
 
 export function unknownExtractionDiagnostic(): ReportExtractionDiagnostic {
@@ -43,6 +54,8 @@ export function extractionDiagnosticFromCounts(input: {
   total: number;
   read: number;
   analyzableWordCount?: number | null;
+  engineVersion?: string;
+  lineBreakJoins?: number;
 }): ReportExtractionDiagnostic {
   const partial = Number.isFinite(input.total) && Number.isFinite(input.read) && input.read < input.total;
   return {
@@ -50,6 +63,8 @@ export function extractionDiagnosticFromCounts(input: {
     analyzableWordCount: input.analyzableWordCount ?? null,
     skipped: input.total > 0 ? { unit: input.unit, total: input.total, read: input.read } : null,
     extractor: input.extractor,
+    ...(input.engineVersion !== undefined ? { engineVersion: input.engineVersion } : {}),
+    ...(input.lineBreakJoins !== undefined ? { lineBreakJoins: input.lineBreakJoins } : {}),
   };
 }
 
@@ -86,8 +101,14 @@ export function skippedUnitCount(d: ReportExtractionDiagnostic): number {
  * caps `skipped.total` so a forged value cannot render an absurd "about
  * 999999999 pages were skipped" banner, and drops every other key. Returns
  * `null` for input that is not a plain object.
+ *
+ * `engineVersion` / `lineBreakJoins` (pdf-text-extraction-v2) are kept only
+ * when the client sent a well-formed value — a short version-shaped string, a
+ * bounded count — and are otherwise left out entirely, so the sanitised shape
+ * of every report that never carried them is unchanged.
  */
 const MAX_SKIPPED_UNIT_TOTAL = 100_000;
+const ENGINE_VERSION_PATTERN = /^[0-9A-Za-z][0-9A-Za-z.+-]{0,31}$/;
 
 export function sanitizeExtractionDiagnostic(raw: unknown): ReportExtractionDiagnostic | null {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
@@ -123,5 +144,16 @@ export function sanitizeExtractionDiagnostic(raw: unknown): ReportExtractionDiag
       ? r.extractor
       : null;
 
-  return { completeness, analyzableWordCount, skipped, extractor };
+  const engineVersion =
+    typeof r.engineVersion === "string" && ENGINE_VERSION_PATTERN.test(r.engineVersion) ? r.engineVersion : null;
+  const lineBreakJoins = clampCount(r.lineBreakJoins);
+
+  return {
+    completeness,
+    analyzableWordCount,
+    skipped,
+    extractor,
+    ...(engineVersion !== null ? { engineVersion } : {}),
+    ...(lineBreakJoins !== null ? { lineBreakJoins } : {}),
+  };
 }
