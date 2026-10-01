@@ -37,8 +37,15 @@ export type TokenSpan = { word: string; start: number; end: number };
  * where it is (or yields) a word boundary. Derived from normalize() itself
  * between two "a" sentinels, so it can never drift from the scoring
  * normalization; null if the sentinels do not survive (never today).
+ *
+ * Also null for a LONE surrogate (ill-formed UTF-16): once normalize()
+ * deletes the combining marks between a lone high and a lone low surrogate,
+ * the two code units join into one astral letter that no single code point
+ * produces. The mapping cannot be proven from there, so it stops (fail
+ * closed) instead of risking a neighbouring word's range.
  */
 function normalizedCodePoint(codePoint: string): string | null {
+  if (/^[\uD800-\uDFFF]$/.test(codePoint)) return null;
   const bracketed = normalize(`a${codePoint}a`);
   if (bracketed.length < 2 || bracketed[0] !== "a" || bracketed[bracketed.length - 1] !== "a") return null;
   return bracketed.slice(1, -1);
@@ -47,9 +54,10 @@ function normalizedCodePoint(codePoint: string): string | null {
 /**
  * normalize() lowercases the WHOLE string, so a capital sigma becomes final
  * "ς" or medial "σ" depending on its neighbours; one code point on its own
- * always becomes "σ". That is the only context-dependent step (NFKD's
- * canonical reordering only moves combining marks, which are deleted), so it
- * is the only difference accepted between the two.
+ * always becomes "σ". In well-formed text that is the only context-dependent
+ * step (NFKD's canonical reordering only moves combining marks, which are
+ * deleted; lone surrogates stop the mapping in normalizedCodePoint), so it is
+ * the only difference accepted between the two.
  */
 function sameScoringToken(derived: string, scored: string) {
   if (derived === scored) return true;
@@ -89,7 +97,8 @@ function sameScoringToken(derived: string, scored: string) {
  * at the same index (sameScoringToken). At the first word that does not
  * match, mapping stops and the array ends there: callers already treat an
  * index past the end as "no character range" (no highlight), so an
- * unprovable position is never shifted onto a neighbouring word.
+ * unprovable position is never shifted onto a neighbouring word. A lone
+ * surrogate (ill-formed UTF-16) also ends the array, at that code unit.
  *
  * Linear in the text length; normalize() runs once per DISTINCT code point.
  */
