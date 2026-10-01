@@ -40,8 +40,8 @@ const ACTIVE = ACTIVE_SCORING_NORMALIZATION_VERSION;
 const OTHER = ACTIVE === 1 ? 2 : 1;
 
 // ── THE PIN ───────────────────────────────────────────────────────────────
-test("THIS BUILD computes a new check under scoring normalization v1", () => {
-  assert.equal(ACTIVE_SCORING_NORMALIZATION_VERSION, 1);
+test("THIS BUILD computes a new check under scoring normalization v2", () => {
+  assert.equal(ACTIVE_SCORING_NORMALIZATION_VERSION, 2);
 });
 
 // A manuscript both contracts read differently: three in-word invisible characters in the copied sentence.

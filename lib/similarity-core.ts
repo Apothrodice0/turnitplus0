@@ -38,8 +38,18 @@ export type ScoringNormalizationVersion = 1 | 2;
  * The contract a NEW check is computed under by this build. Every reader of
  * persisted positions takes the report's own contract instead, so changing
  * this value changes nothing about a report that already exists.
+ *
+ * v2 is active: a check started by this build's browser bundle is computed,
+ * declared, verified and stamped as v2. A check from a bundle that still
+ * computes v1 (or declares nothing) is served as v1, exactly as before.
+ *
+ * ROLLBACK FLOOR: once this build has been live, v2 reports exist. They are
+ * only read, re-resolved and resaved correctly by a build that has this
+ * dual-contract support — so this build may be rolled back to the build in
+ * which this constant is 1 (the same code with v1 active), and never to
+ * anything older.
  */
-export const ACTIVE_SCORING_NORMALIZATION_VERSION: ScoringNormalizationVersion = 1;
+export const ACTIVE_SCORING_NORMALIZATION_VERSION: ScoringNormalizationVersion = 2;
 
 /**
  * The contract a request DECLARES its positions were (or are to be) computed
