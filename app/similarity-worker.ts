@@ -125,7 +125,7 @@ function loadRiskCalibration() {
       value.schema !== "turnitplus-risk-calibration"
       || !Number.isInteger(value.version)
       || value.version < 1
-      || value.version > 8
+      || value.version > 9
     ) {
       throw new Error("The risk calibration uses an unsupported schema.");
     }

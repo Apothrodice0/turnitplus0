@@ -413,13 +413,21 @@ export type SimilaritySpan = [start: number, end: number];
 export type SourceWeighting = "raw" | "containment";
 export type SourceAggregationParameters = {
   minimumSourceContribution: number;
+  /** Presentation only: bounds the returned sourceContributions list. It never
+   *  removes a position from the score. */
   maximumContributingSources: number | null;
   sourceWeighting: SourceWeighting;
 };
 export type SimilaritySourceEvidence = {
   sourceIndex: number;
+  /** The source's OWN verified positions, before any cross-source attribution
+   *  (sources may overlap). */
   positions: Set<number>;
   containment: number;
+  /** Winner-take-all weight of each own position (presentation only): the
+   *  highest weight owns the position, ties go to the lower sourceIndex.
+   *  Absent = equal weights. */
+  attributionWeights?: Map<number, number>;
 };
 
 export const DEFAULT_SOURCE_AGGREGATION: SourceAggregationParameters = {
@@ -427,6 +435,30 @@ export const DEFAULT_SOURCE_AGGREGATION: SourceAggregationParameters = {
   maximumContributingSources: null,
   sourceWeighting: "raw",
 };
+
+/** Per submission position, per source: the document frequency of each of
+ *  that source's evidence grams covering the position. */
+export type GramCoverage = Map<number, Map<number, number[]>>;
+
+/** Records one evidence gram starting at `start` and held by `sourceIndexes`
+ *  (its document frequency is sourceIndexes.length). */
+export function addGramCoverage(
+  coverage: GramCoverage,
+  start: number,
+  shingleSize: number,
+  sourceIndexes: ArrayLike<number>,
+) {
+  const documentFrequency = sourceIndexes.length;
+  for (let position = start; position < start + shingleSize; position += 1) {
+    const bySource = coverage.get(position) ?? new Map<number, number[]>();
+    for (let index = 0; index < sourceIndexes.length; index += 1) {
+      const frequencies = bySource.get(sourceIndexes[index]);
+      if (frequencies) frequencies.push(documentFrequency);
+      else bySource.set(sourceIndexes[index], [documentFrequency]);
+    }
+    coverage.set(position, bySource);
+  }
+}
 
 export function acceptedSimilaritySpans(
   matchedBySource: Map<number, Set<number>>,
@@ -467,11 +499,85 @@ export function acceptedSimilaritySpans(
   return { acceptedPositions, acceptedGlobalSpans, spansBySource };
 }
 
+/**
+ * Each source's OWN verified evidence: every position one of its evidence
+ * grams covers, kept only inside a span of the union of all sources' evidence
+ * that reaches minimumMatchedWords (acceptedSimilaritySpans' rule). Nothing is
+ * attributed here, so sources overlap freely.
+ *
+ * Each position also carries its attribution weight, the sum of its covering
+ * grams' IDFs ln((eligibleCount + 1) / (df + 1)) + 1. Floating-point addition
+ * depends on order, so the terms are added in ascending-DF order: the same DF
+ * multiset always gives a bit-identical weight (an exact tie), whatever the
+ * document order of the grams and whatever eligibleCount is.
+ */
+export function verifiedSourceEvidence(
+  coverage: GramCoverage,
+  minimumMatchedWords: number,
+  eligibleCount: number,
+  containmentOf: (sourceIndex: number) => number,
+): SimilaritySourceEvidence[] {
+  const idfByFrequency = new Map<number, number>();
+  const idf = (documentFrequency: number) => {
+    let value = idfByFrequency.get(documentFrequency);
+    if (value === undefined) {
+      value = Math.log((eligibleCount + 1) / (documentFrequency + 1)) + 1;
+      idfByFrequency.set(documentFrequency, value);
+    }
+    return value;
+  };
+  const ownPositions = new Map<number, Set<number>>();
+  const weights = new Map<number, Map<number, number>>();
+  coverage.forEach((bySource, position) => {
+    bySource.forEach((frequencies, sourceIndex) => {
+      const weight = [...frequencies].sort((left, right) => left - right)
+        .reduce((total, documentFrequency) => total + idf(documentFrequency), 0);
+      const positions = ownPositions.get(sourceIndex) ?? new Set<number>();
+      positions.add(position);
+      ownPositions.set(sourceIndex, positions);
+      const sourceWeights = weights.get(sourceIndex) ?? new Map<number, number>();
+      sourceWeights.set(position, weight);
+      weights.set(sourceIndex, sourceWeights);
+    });
+  });
+  const { spansBySource } = acceptedSimilaritySpans(ownPositions, minimumMatchedWords);
+  return [...spansBySource.entries()].map(([sourceIndex, spans]) => {
+    const positions = new Set<number>();
+    spans.forEach(([start, end]) => {
+      for (let position = start; position <= end; position += 1) positions.add(position);
+    });
+    return { sourceIndex, positions, containment: containmentOf(sourceIndex), attributionWeights: weights.get(sourceIndex) };
+  });
+}
+
+/**
+ * Scoring and presentation are separate steps:
+ *
+ *   1. admission: a source is admitted when its OWN verified evidence reaches
+ *      minimumSourceContribution, measured before any cross-source
+ *      attribution, so overlap with another source can never push an admitted
+ *      source under the floor;
+ *   2. scoring: the union of every admitted source's positions, each position
+ *      counted once, re-checked against minimumMatchedWords so a source
+ *      dropped by the floor cannot leave a shorter fragment behind;
+ *   3. attribution: each scored position goes to the admitted source with the
+ *      highest attribution weight there, then the lower sourceIndex. It never
+ *      adds or removes a position;
+ *   4. presentation: admitted sources ranked by their attributed share;
+ *      maximumContributingSources bounds only the returned list.
+ *
+ * With raw weighting the score is the unique scored positions over totalWords;
+ * containment weighting scales each source's attributed positions instead.
+ */
 export function aggregateSimilaritySources(
   evidence: SimilaritySourceEvidence[],
   totalWords: number,
   parameters: SourceAggregationParameters = DEFAULT_SOURCE_AGGREGATION,
+  minimumMatchedWords = 1,
 ) {
+  if (!Number.isInteger(minimumMatchedWords) || minimumMatchedWords < 1) {
+    throw new Error("minimumMatchedWords must be a positive integer.");
+  }
   if (!Number.isFinite(parameters.minimumSourceContribution) || parameters.minimumSourceContribution < 0) {
     throw new Error("minimumSourceContribution must be a non-negative percentage.");
   }
@@ -484,32 +590,58 @@ export function aggregateSimilaritySources(
   if (parameters.sourceWeighting !== "raw" && parameters.sourceWeighting !== "containment") {
     throw new Error("sourceWeighting must be raw or containment.");
   }
-  const ranked = evidence.map((source) => {
-    const rawContribution = (source.positions.size / Math.max(1, totalWords)) * 100;
+  const admitted = evidence.filter((source) =>
+    (source.positions.size / Math.max(1, totalWords)) * 100 + Number.EPSILON >= parameters.minimumSourceContribution);
+
+  const unionPositions = new Set<number>();
+  admitted.forEach((source) => source.positions.forEach((position) => unionPositions.add(position)));
+  const acceptedPositions = new Set<number>();
+  mergeAdjacentPositions(unionPositions).forEach(([start, end]) => {
+    if (end - start + 1 < minimumMatchedWords) return;
+    for (let position = start; position <= end; position += 1) acceptedPositions.add(position);
+  });
+
+  const weightAt = (source: SimilaritySourceEvidence, position: number) => source.attributionWeights?.get(position) ?? 0;
+  const owners = new Map<number, SimilaritySourceEvidence>();
+  admitted.forEach((source) => source.positions.forEach((position) => {
+    if (!acceptedPositions.has(position)) return;
+    const owner = owners.get(position);
+    if (
+      !owner
+      || weightAt(source, position) > weightAt(owner, position)
+      || (weightAt(source, position) === weightAt(owner, position) && source.sourceIndex < owner.sourceIndex)
+    ) owners.set(position, source);
+  }));
+  const attributedBySource = new Map(admitted.map((source) => [source.sourceIndex, new Set<number>()]));
+  owners.forEach((source, position) => attributedBySource.get(source.sourceIndex)?.add(position));
+
+  const admittedSources = admitted.map((source) => {
+    const attributedPositions = attributedBySource.get(source.sourceIndex) ?? new Set<number>();
+    const rawContribution = (attributedPositions.size / Math.max(1, totalWords)) * 100;
     const boundedContainment = Math.max(0, Math.min(1, source.containment));
     return {
       ...source,
+      attributedPositions,
       rawContribution,
-      weightedWords: source.positions.size * (
+      weightedWords: attributedPositions.size * (
         parameters.sourceWeighting === "containment" ? boundedContainment : 1
       ),
     };
-  }).filter((source) => source.rawContribution + Number.EPSILON >= parameters.minimumSourceContribution)
-    .sort((left, right) =>
-      right.rawContribution - left.rawContribution
-      || right.containment - left.containment
-      || left.sourceIndex - right.sourceIndex,
-    );
+  }).sort((left, right) =>
+    right.rawContribution - left.rawContribution
+    || right.containment - left.containment
+    || left.sourceIndex - right.sourceIndex,
+  );
+  const presented = admittedSources.filter((source) => source.attributedPositions.size > 0);
   const sourceContributions = parameters.maximumContributingSources === null
-    ? ranked
-    : ranked.slice(0, parameters.maximumContributingSources);
-  const acceptedPositions = new Set<number>();
-  sourceContributions.forEach((source) => source.positions.forEach((position) => acceptedPositions.add(position)));
-  const matchedWordEquivalent = sourceContributions.reduce((total, source) => total + source.weightedWords, 0);
+    ? presented
+    : presented.slice(0, parameters.maximumContributingSources);
+  const matchedWordEquivalent = admittedSources.reduce((total, source) => total + source.weightedWords, 0);
   return {
     score: similarityScore(matchedWordEquivalent, totalWords),
     matchedWordEquivalent,
     acceptedPositions,
+    admittedSources,
     sourceContributions,
   };
 }

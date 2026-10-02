@@ -34,10 +34,17 @@ if (HAVE) {
   const MP = RISK.matchingParameters;
   const MDF = META.maximumDocumentFrequency;
   const CUTOFF = RISK.archiveCutoff;
-  // Baseline A (exhaustive) + committed B(16) for the exact 2,462-probe set —
-  // produced once by the Slice-2D characterization harness, checked in as a
-  // fixture (id -> {aScore, bScore}). This suite compares the FLAG-ON in-repo
-  // matcher against those, never recomputes them.
+  // Reference A (exhaustive) + reference B for the exact 2,462-probe set,
+  // checked in as a fixture (id -> {aScore, bScore}). This suite compares the
+  // FLAG-ON in-repo matcher against those, never recomputes them.
+  //   aScore = scoreAgainstArchive over the full static index (every archive
+  //            document a candidate): what unbounded discovery would score;
+  //   bScore = the in-repo matcher with the co-source flag OFF.
+  // Regenerated 2026-10-02 for the stable-union scorer (a source is admitted
+  // on its own verified evidence and the score is the union of every admitted
+  // source) at risk-calibration v9 (floor 0.5, cutoff 8). The Slice-2D
+  // characterization values they replace were computed while the top-10 cap
+  // and the floor on winner-take-all shares still decided the score.
   const baseById = new Map(JSON.parse(fs.readFileSync(BASELINE_ROWS_PATH, "utf8")).map((r) => [r.id, r]));
 
   const dbFile = path.join(process.cwd(), "test_archive_cosource_acceptance.db");
@@ -119,18 +126,25 @@ if (HAVE) {
     assert.equal(downwardReg_vsB.length, 0, `downward cutoff regressions vs B must be 0 — got ${JSON.stringify(downwardReg_vsB.map((r) => r.id))}`);
     assert.equal(noMatchPos.length, 0, "no-match positives must be 0");
     assert.equal(erNewReg.length, 0, "exact-reupload new material regressions must be 0");
-    assert.ok(materialFN_vsA.length <= 32, `material FN vs exhaustive A must be <= 32 (2D.3 M2/K24) — got ${materialFN_vsA.length}`);
+    // DISCOVERY COMPLETENESS DEBT. A probe counted here scores at or above the
+    // cutoff when every archive document is a candidate, and below it through
+    // budgeted discovery. The bound was 32 (30 measured) while the top-10 cap
+    // also truncated the exhaustive reference. With every admitted source
+    // scoring, the reference rises and the same, unchanged discovery misses 49
+    // (26 long-500, 23 exact-reupload). This is a discovery figure, not a
+    // scoring one: it must not grow, and only better discovery brings it down.
+    assert.ok(materialFN_vsA.length <= 49, `material FN vs exhaustive A must be <= 49 (discovery completeness debt) — got ${materialFN_vsA.length}`);
     assert.equal(NEAR_DUP.filter((id) => R.get(id).fixScore >= CUTOFF).length, 4, "all 4 near-duplicate catastrophes recovered above the cutoff");
 
     // watch probes
     for (const id of OVERSHOOT8) {
       const r = R.get(id);
-      if (r.aScore < CUTOFF) assert.ok(r.fixScore < CUTOFF, `${id}: A=${r.aScore} < 7, so FIX (${r.fixScore}) must also stay < 7`);
+      if (r.aScore < CUTOFF) assert.ok(r.fixScore < CUTOFF, `${id}: A=${r.aScore} < ${CUTOFF}, so FIX (${r.fixScore}) must also stay < ${CUTOFF}`);
     }
     for (const id of ["L500-o311", "L500-o314"]) {
       const r = R.get(id);
       assert.ok(r.fixScore >= r.bScore, `${id}: FIX (${r.fixScore}) must not regress below committed B (${r.bScore})`);
     }
-    for (const id of NEAR_DUP) assert.ok(R.get(id).fixScore >= CUTOFF, `${id}: FIX (${R.get(id).fixScore}) must be >= 7`);
+    for (const id of NEAR_DUP) assert.ok(R.get(id).fixScore >= CUTOFF, `${id}: FIX (${R.get(id).fixScore}) must be >= ${CUTOFF}`);
   });
 }

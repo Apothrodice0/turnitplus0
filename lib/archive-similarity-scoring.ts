@@ -1,11 +1,14 @@
 import {
-  acceptedSimilaritySpans,
+  addGramCoverage,
   aggregateSimilaritySources,
   containment,
   gramHash,
   grams,
   informativeGram,
+  mergeAdjacentPositions,
   tokens,
+  verifiedSourceEvidence,
+  type GramCoverage,
   type SourceWeighting,
 } from "./similarity-core";
 
@@ -103,6 +106,27 @@ export function scoreAgainstArchive(
    */
   onProgress?: (percent: number, label: string) => void,
 ): ArchiveScoringResult {
+  return scoreAgainstArchiveDetailed(text, index, matchingParameters, onProgress).result;
+}
+
+/**
+ * scoreAgainstArchive plus `admittedSourceIndexes`: every source admitted to
+ * the score (self-exclusion and minimumSourceContribution applied, never the
+ * display cap), in presentation-rank order. `result.sources` is only the
+ * displayed top maximumContributingSources of them; the archive matcher uses
+ * the full list so verification after scoring is never limited by the display.
+ *
+ * `result.archiveMatchedPositions` / `score` are the union of every admitted
+ * source's verified positions. Winner-take-all attribution only decides which
+ * source a position is listed under, so which source owns a position and how
+ * many sources are displayed never change the score.
+ */
+export function scoreAgainstArchiveDetailed(
+  text: string,
+  index: ArchiveScoringIndex,
+  matchingParameters: ArchiveScoringMatchingParameters = {},
+  onProgress?: (percent: number, label: string) => void,
+): { result: ArchiveScoringResult; admittedSourceIndexes: number[] } {
   const words = tokens(text);
   const documentGrams = grams(words, index.shingleSize);
   const uniqueDocumentGrams = new Set(documentGrams);
@@ -134,7 +158,7 @@ export function scoreAgainstArchive(
     index.maximumDocumentFrequency,
     matchingParameters.maximumDocumentFrequency ?? index.maximumDocumentFrequency,
   );
-  const positionScores = new Map<number, Map<number, number>>();
+  const coverage: GramCoverage = new Map();
   documentGrams.forEach((gram, start) => {
     const sourceIndexes = index.getPostings(gramHash(gram)).filter(
       (sourceIndex) => !excluded.has(sourceIndex),
@@ -144,55 +168,28 @@ export function scoreAgainstArchive(
       || sourceIndexes.length > runtimeMaximumDocumentFrequency
       || !informativeGram(gram)
     ) return;
-    const idf = Math.log((eligibleCount + 1) / (sourceIndexes.length + 1)) + 1;
-    sourceIndexes.forEach((sourceIndex) => {
-      for (let position = start; position < start + index.shingleSize; position += 1) {
-        const scores = positionScores.get(position) ?? new Map<number, number>();
-        scores.set(sourceIndex, (scores.get(sourceIndex) ?? 0) + idf);
-        positionScores.set(position, scores);
-      }
-    });
+    addGramCoverage(coverage, start, index.shingleSize, sourceIndexes);
   });
 
-  const matchedBySource = new Map<number, Set<number>>();
-  positionScores.forEach((scores, position) => {
-    const best = [...scores.entries()].sort(
-      (left, right) => right[1] - left[1] || left[0] - right[0],
-    )[0]?.[0];
-    if (best === undefined) return;
-    const positions = matchedBySource.get(best) ?? new Set<number>();
-    positions.add(position);
-    matchedBySource.set(best, positions);
-  });
-
-  const { spansBySource } = acceptedSimilaritySpans(matchedBySource, minimumMatchedWords);
-  const evidence = [...spansBySource.entries()].map(([sourceIndex, spans]) => {
-    const positions = new Set<number>();
-    spans.forEach(([start, end]) => {
-      for (let position = start; position <= end; position += 1) positions.add(position);
-    });
-    return {
-      sourceIndex,
-      positions,
-      containment: containment(
-        sharedBySource.get(sourceIndex) ?? 0,
-        uniqueDocumentGrams.size,
-        index.articles[sourceIndex].uniqueShingleCount,
-      ),
-    };
-  });
+  const evidence = verifiedSourceEvidence(coverage, minimumMatchedWords, eligibleCount, (sourceIndex) => containment(
+    sharedBySource.get(sourceIndex) ?? 0,
+    uniqueDocumentGrams.size,
+    index.articles[sourceIndex].uniqueShingleCount,
+  ));
   const aggregation = aggregateSimilaritySources(evidence, words.length, {
     minimumSourceContribution: matchingParameters.minimumSourceContribution ?? 0,
     maximumContributingSources: matchingParameters.maximumContributingSources ?? null,
     sourceWeighting: matchingParameters.sourceWeighting ?? "raw",
-  });
-  const acceptedSourceIndexes = new Set(aggregation.sourceContributions.map((source) => source.sourceIndex));
+  }, minimumMatchedWords);
   const allMatchedPositions = aggregation.acceptedPositions;
 
-  const sources: ArchiveScoringSource[] = [...matchedBySource.entries()]
-    .filter(([sourceIndex]) => acceptedSourceIndexes.has(sourceIndex))
-    .map(([sourceIndex]) => {
-      const validSpans = spansBySource.get(sourceIndex) ?? [];
+  // Displayed sources, each with the positions attributed to it. A tie on
+  // percent and matches keeps winner-take-all's historical order (the source
+  // owning the earlier position first) and ends in the stable sourceIndex, so
+  // the listed order never depends on the order sources were handed in.
+  const sources: ArchiveScoringSource[] = aggregation.sourceContributions
+    .map(({ sourceIndex, attributedPositions }) => {
+      const validSpans = mergeAdjacentPositions(attributedPositions);
       const acceptedSourcePositions = new Set<number>();
       validSpans.forEach(([start, end]) => {
         for (let position = start; position <= end; position += 1) acceptedSourcePositions.add(position);
@@ -206,19 +203,27 @@ export function scoreAgainstArchive(
         return chunks;
       });
       return {
-        sourceIndex,
-        name: index.articles[sourceIndex].title,
-        type: "Publication" as const,
-        color: "#d7263d",
-        matches: validSpans.length,
-        matchedWords: acceptedSourcePositions.size,
-        phrases,
-        percent: Math.floor((acceptedSourcePositions.size / Math.max(words.length, 1)) * 100),
+        firstPosition: validSpans[0]?.[0] ?? 0,
+        source: {
+          sourceIndex,
+          name: index.articles[sourceIndex].title,
+          type: "Publication" as const,
+          color: "#d7263d",
+          matches: validSpans.length,
+          matchedWords: acceptedSourcePositions.size,
+          phrases,
+          percent: Math.floor((acceptedSourcePositions.size / Math.max(words.length, 1)) * 100),
+        },
       };
     })
-    .filter((source) => source.matches > 0)
-    .sort((left, right) => right.percent - left.percent || right.matches - left.matches)
-    .slice(0, 20);
+    .filter(({ source }) => source.matches > 0)
+    .sort((left, right) =>
+      right.source.percent - left.source.percent
+      || right.source.matches - left.source.matches
+      || left.firstPosition - right.firstPosition
+      || left.source.sourceIndex - right.source.sourceIndex)
+    .slice(0, 20)
+    .map(({ source }) => source);
 
   onProgress?.(88, "Calculating similarity result");
   const score = aggregation.score;
@@ -238,15 +243,18 @@ export function scoreAgainstArchive(
   );
 
   return {
-    wordCount: words.length,
-    databaseSize: eligibleCount,
-    excludedDocuments: excluded.size,
-    matchedWordCount: allMatchedPositions.size,
-    archiveMatchedPositions: [...allMatchedPositions].sort((left, right) => left - right),
-    score,
-    sources,
-    maxSourceContainment: Math.round(maxSourceContainment * 1000) / 1000,
-    longestMatchedSpan,
-    highFrequencyShingleCount,
+    result: {
+      wordCount: words.length,
+      databaseSize: eligibleCount,
+      excludedDocuments: excluded.size,
+      matchedWordCount: allMatchedPositions.size,
+      archiveMatchedPositions: [...allMatchedPositions].sort((left, right) => left - right),
+      score,
+      sources,
+      maxSourceContainment: Math.round(maxSourceContainment * 1000) / 1000,
+      longestMatchedSpan,
+      highFrequencyShingleCount,
+    },
+    admittedSourceIndexes: aggregation.admittedSources.map((source) => source.sourceIndex),
   };
 }

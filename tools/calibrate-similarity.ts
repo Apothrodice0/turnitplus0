@@ -1,13 +1,15 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { gunzipSync } from "node:zlib";
 import {
-  acceptedSimilaritySpans,
+  addGramCoverage,
   aggregateSimilaritySources,
   containment,
   gramHash,
   grams,
   informativeGram,
   tokens,
+  verifiedSourceEvidence,
+  type GramCoverage,
   type SourceAggregationParameters,
 } from "../lib/similarity-core";
 import { bootstrapAuc, bootstrapAucByGroup, loadCorpus, rocAuc } from "./calibration-utils";
@@ -124,51 +126,30 @@ function scoreDocument(
       }
     }
   });
-  const positionScores = new Map<number, Map<number, number>>();
+  const coverage: GramCoverage = new Map();
   const eligibleDocumentCount = search.articles.length - excludedIndexes.size;
   documentGrams.forEach((gram, start) => {
     if (!informativeGram(gram)) return;
     const sources = (search.invertedIndex[gramHash(gram)] ?? []).filter((index) => !excludedIndexes.has(index));
     if (!sources.length || sources.length > matchingParameters.maximumDocumentFrequency) return;
-    const idf = Math.log((eligibleDocumentCount + 1) / (sources.length + 1)) + 1;
-    sources.forEach((sourceIndex) => {
-      for (let position = start; position < start + search.shingleSize; position += 1) {
-        const scores = positionScores.get(position) ?? new Map<number, number>();
-        scores.set(sourceIndex, (scores.get(sourceIndex) ?? 0) + idf);
-        positionScores.set(position, scores);
-      }
-    });
+    addGramCoverage(coverage, start, search.shingleSize, sources);
   });
-  const matchedBySource = new Map<number, Set<number>>();
-  positionScores.forEach((scores, position) => {
-    const bestSource = [...scores.entries()].sort(
-      (left, right) => right[1] - left[1] || left[0] - right[0],
-    )[0]?.[0];
-    if (bestSource === undefined) return;
-    const positions = matchedBySource.get(bestSource) ?? new Set<number>();
-    positions.add(position);
-    matchedBySource.set(bestSource, positions);
-  });
-  const { spansBySource } = acceptedSimilaritySpans(
-    matchedBySource,
+  const evidence = verifiedSourceEvidence(
+    coverage,
+    matchingParameters.minimumMatchedWords,
+    eligibleDocumentCount,
+    (sourceIndex) => containment(
+      sharedBySource.get(sourceIndex) ?? 0,
+      uniqueDocumentGrams.size,
+      search.articles[sourceIndex].uniqueShingleCount,
+    ),
+  );
+  const aggregation = aggregateSimilaritySources(
+    evidence,
+    words.length,
+    matchingParameters,
     matchingParameters.minimumMatchedWords,
   );
-  const evidence = [...spansBySource.entries()].map(([sourceIndex, spans]) => {
-    const positions = new Set<number>();
-    spans.forEach(([start, end]) => {
-      for (let position = start; position <= end; position += 1) positions.add(position);
-    });
-    return {
-      sourceIndex,
-      positions,
-      containment: containment(
-        sharedBySource.get(sourceIndex) ?? 0,
-        uniqueDocumentGrams.size,
-        search.articles[sourceIndex].uniqueShingleCount,
-      ),
-    };
-  });
-  const aggregation = aggregateSimilaritySources(evidence, words.length, matchingParameters);
   return {
     score: aggregation.score,
     excludedClusterMembers: excludedIds.filter((id) => id !== document.id),
@@ -284,7 +265,9 @@ if (existsSync(openAlexObservationPath)) {
 }
 const output = {
   schema: "turnitplus-risk-calibration",
-  version: 8,
+  // 9: the scorer admits a source on its own verified evidence and scores the
+  // union of every admitted source (maximumContributingSources is display-only).
+  version: 9,
   generatedBy: "tools/calibrate-similarity.ts",
   generatedAt: new Date().toISOString(),
   evaluation: "cluster-aware-strict-leave-one-out-against-full-index",

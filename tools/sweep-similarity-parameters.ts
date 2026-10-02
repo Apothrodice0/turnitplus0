@@ -1,13 +1,15 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { gunzipSync } from "node:zlib";
 import {
-  acceptedSimilaritySpans,
+  addGramCoverage,
   aggregateSimilaritySources,
   containment,
   gramHash,
   grams,
   informativeGram,
   tokens,
+  verifiedSourceEvidence,
+  type GramCoverage,
   type SimilaritySourceEvidence,
   type SourceAggregationParameters,
 } from "../lib/similarity-core";
@@ -31,7 +33,7 @@ type DuplicateClusters = {
 type BaseParameters = { minimumMatchedWords: number; maximumDocumentFrequency: number };
 type Parameters = BaseParameters & SourceAggregationParameters;
 type Prediction = { id: string; actual: number; score: number; group: string };
-type Evidence = { totalWords: number; sources: SimilaritySourceEvidence[] };
+type Evidence = { totalWords: number; minimumMatchedWords: number; sources: SimilaritySourceEvidence[] };
 
 const search = JSON.parse(gunzipSync(readFileSync("public/data/document-index.json.gz")).toString("utf8")) as SearchIndex;
 const duplicateClusters = JSON.parse(readFileSync("corpus/duplicate-clusters.json", "utf8")) as DuplicateClusters;
@@ -61,46 +63,20 @@ function documentEvidence(document: (typeof documents)[number], parameters: Base
       if (!excluded.has(sourceIndex)) sharedBySource.set(sourceIndex, (sharedBySource.get(sourceIndex) ?? 0) + 1);
     }
   });
-  const positionScores = new Map<number, Map<number, number>>();
+  const coverage: GramCoverage = new Map();
   const eligibleCount = search.articles.length - excluded.size;
   documentGrams.forEach((gram, start) => {
     if (!informativeGram(gram)) return;
     const postings = (search.invertedIndex[gramHash(gram)] ?? []).filter((index) => !excluded.has(index));
     if (!postings.length || postings.length > parameters.maximumDocumentFrequency) return;
-    const idf = Math.log((eligibleCount + 1) / (postings.length + 1)) + 1;
-    for (const sourceIndex of postings) {
-      for (let position = start; position < start + search.shingleSize; position += 1) {
-        const scores = positionScores.get(position) ?? new Map<number, number>();
-        scores.set(sourceIndex, (scores.get(sourceIndex) ?? 0) + idf);
-        positionScores.set(position, scores);
-      }
-    }
+    addGramCoverage(coverage, start, search.shingleSize, postings);
   });
-  const matchedBySource = new Map<number, Set<number>>();
-  positionScores.forEach((scores, position) => {
-    const sourceIndex = [...scores.entries()].sort((left, right) => right[1] - left[1] || left[0] - right[0])[0]?.[0];
-    if (sourceIndex === undefined) return;
-    const positions = matchedBySource.get(sourceIndex) ?? new Set<number>();
-    positions.add(position);
-    matchedBySource.set(sourceIndex, positions);
-  });
-  const { spansBySource } = acceptedSimilaritySpans(matchedBySource, parameters.minimumMatchedWords);
-  const sources = [...spansBySource.entries()].map(([sourceIndex, spans]) => {
-    const positions = new Set<number>();
-    spans.forEach(([start, end]) => {
-      for (let position = start; position <= end; position += 1) positions.add(position);
-    });
-    return {
-      sourceIndex,
-      positions,
-      containment: containment(
-        sharedBySource.get(sourceIndex) ?? 0,
-        uniqueDocumentGrams.size,
-        search.articles[sourceIndex].uniqueShingleCount,
-      ),
-    };
-  }).filter((source) => source.positions.size > 0);
-  return { totalWords: words.length, sources };
+  const sources = verifiedSourceEvidence(coverage, parameters.minimumMatchedWords, eligibleCount, (sourceIndex) => containment(
+    sharedBySource.get(sourceIndex) ?? 0,
+    uniqueDocumentGrams.size,
+    search.articles[sourceIndex].uniqueShingleCount,
+  ));
+  return { totalWords: words.length, minimumMatchedWords: parameters.minimumMatchedWords, sources };
 }
 
 function evaluate(predictions: Prediction[]) {
@@ -158,7 +134,7 @@ for (const maximumDocumentFrequency of maximumDocumentFrequencies) {
       return {
         id: document.id,
         actual: Number(document.turnitinScore),
-        score: aggregateSimilaritySources(evidence.sources, evidence.totalWords).score,
+        score: aggregateSimilaritySources(evidence.sources, evidence.totalWords, undefined, evidence.minimumMatchedWords).score,
         group: document.revisionGroupId ?? document.id,
       };
     });
@@ -168,7 +144,10 @@ for (const maximumDocumentFrequency of maximumDocumentFrequencies) {
 const selectedBase = select(baseResults);
 const fixedEvidence = new Map(documents.map((document) => [document.id, documentEvidence(document, selectedBase.parameters)]));
 const minimumSourceContributions = [0, 0.25, 0.5, 1, 1.5, 2];
-const maximumContributingSources: Array<number | null> = [null, 20, 10, 5, 3];
+// Presentation only: aggregateSimilaritySources never lets it change a score,
+// so every value would score identically. It is carried at the existing
+// display limit instead of being swept.
+const maximumContributingSources: Array<number | null> = [10];
 const sourceWeightings = ["raw", "containment"] as const;
 const sourceResults = [];
 for (const sourceWeighting of sourceWeightings) {
@@ -185,7 +164,7 @@ for (const sourceWeighting of sourceWeightings) {
         return {
           id: document.id,
           actual: Number(document.turnitinScore),
-          score: aggregateSimilaritySources(evidence.sources, evidence.totalWords, aggregation).score,
+          score: aggregateSimilaritySources(evidence.sources, evidence.totalWords, aggregation, evidence.minimumMatchedWords).score,
           group: document.revisionGroupId ?? document.id,
         };
       });

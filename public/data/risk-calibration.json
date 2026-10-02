@@ -1,8 +1,8 @@
 {
   "schema": "turnitplus-risk-calibration",
-  "version": 8,
+  "version": 9,
   "generatedBy": "tools/calibrate-similarity.ts",
-  "generatedAt": "2026-08-26T11:59:36.486Z",
+  "generatedAt": "2026-10-02T14:33:22.692Z",
   "evaluation": "cluster-aware-strict-leave-one-out-against-full-index",
   "positiveDefinition": ">= 15",
   "corpusVersion": "archive-v5-321-48e64e70ec",
@@ -11,26 +11,26 @@
   "totalLabelledReports": 294,
   "independentCalibrationRows": 284,
   "targetThreshold": 15,
-  "archiveCutoff": 7,
+  "archiveCutoff": 8,
   "matchingParameters": {
     "minimumMatchedWords": 5,
     "maximumDocumentFrequency": 6,
-    "minimumSourceContribution": 0.25,
+    "minimumSourceContribution": 0.5,
     "maximumContributingSources": 10,
     "sourceWeighting": "raw"
   },
   "parameterSweep": {
     "artifact": "corpus/audit/similarity-parameter-sweep.json",
     "selectionPolicy": "Choose the base span/DF configuration first. Then, among source-aggregation configurations within 0.005 AUC of the maximum, select the lowest MAE, smallest absolute mean error, then higher precision.",
-    "selectedAuc": 0.782,
-    "selectedMeanError": -4.6162,
-    "selectedMae": 6.0317,
-    "selectedRmse": 8.5701
+    "selectedAuc": 0.7867,
+    "selectedMeanError": -3.8451,
+    "selectedMae": 5.7254,
+    "selectedRmse": 8.2244
   },
   "errorMetrics": {
-    "meanError": -4.6162,
-    "mae": 6.0317,
-    "rmse": 8.5701
+    "meanError": -3.8451,
+    "mae": 5.7254,
+    "rmse": 8.2244
   },
   "clusterExclusion": true,
   "revisionGroupExclusion": true,
@@ -48,30 +48,30 @@
     0.0359,
     0.0336
   ],
-  "auc": 0.782,
+  "auc": 0.7867,
   "aucCi95": [
-    0.7035,
-    0.8459
+    0.7146,
+    0.8497
   ],
   "aucCiMethod": "revision-group bootstrap, 2,000 rounds",
-  "precision": 0.4815,
-  "recall": 0.7324,
-  "truePositives": 52,
+  "precision": 0.4955,
+  "recall": 0.7746,
+  "truePositives": 55,
   "falsePositives": 56,
-  "falseNegatives": 19,
+  "falseNegatives": 16,
   "trueNegatives": 157,
   "selectionMetric": "F2 subject to a minimum precision constraint",
   "precisionFloor": 0.45,
   "operatingPointPolicy": "Choose the highest-F2 cutoff among operating points with precision >= 0.45. Preserve the unconstrained F2 optimum as a sensitivity result.",
   "unconstrainedF2Comparison": {
-    "archiveCutoff": 5,
-    "precision": 0.3831,
-    "recall": 0.831,
-    "truePositives": 59,
-    "falsePositives": 95,
-    "falseNegatives": 12,
-    "trueNegatives": 118,
-    "f2": 0.6735
+    "archiveCutoff": 8,
+    "precision": 0.4955,
+    "recall": 0.7746,
+    "truePositives": 55,
+    "falsePositives": 56,
+    "falseNegatives": 16,
+    "trueNegatives": 157,
+    "f2": 0.6962
   },
   "wikipediaSignal": {
     "provider": "Wikipedia",
@@ -92,8 +92,8 @@
       "reason": "Wikipedia match count has zero variance across the 60 labeled papers; its coefficient and standard error cannot be estimated.",
       "formula": "predicted = intercept + archiveScoreCoefficient*archiveScore + wikipediaMatchCoefficient*wikipediaMatches",
       "coefficients": {
-        "intercept": 5.080008,
-        "archiveScore": 1.12438,
+        "intercept": 5.733069,
+        "archiveScore": 0.840409,
         "wikipediaMatches": null
       },
       "standardErrors": {
@@ -102,7 +102,7 @@
         "wikipediaMatches": null
       },
       "rank": 2,
-      "rSquared": 0.3127
+      "rSquared": 0.2876
     },
     "leaveOneOut": {
       "evaluation": "not run because the Wikipedia predictor is unidentifiable",
@@ -113,10 +113,10 @@
     "archiveOnlySensitivity": {
       "evaluation": "cluster-aware strict leave-one-out archive score on the same Wikipedia-observed subset",
       "sampleSize": 60,
-      "auc": 0.863,
+      "auc": 0.8519,
       "aucCi95": [
-        0.74,
-        0.9573
+        0.7352,
+        0.9447
       ]
     },
     "deltaAuc": null,
@@ -139,50 +139,50 @@
   },
   "naiveComparison": {
     "evaluation": "self-only-leave-one-out",
-    "auc": 0.8046,
+    "auc": 0.806,
     "aucCi95": [
-      0.7427,
-      0.8599
+      0.7424,
+      0.8597
     ],
-    "archiveCutoff": 7,
-    "precision": 0.4662,
-    "recall": 0.8732,
-    "truePositives": 62,
+    "archiveCutoff": 8,
+    "precision": 0.4741,
+    "recall": 0.9014,
+    "truePositives": 64,
     "falsePositives": 71,
-    "falseNegatives": 9,
+    "falseNegatives": 7,
     "trueNegatives": 142
   },
   "sensitivityWithoutDuplicateRows": {
     "evaluation": "all-members-of-near-duplicate-clusters-removed",
     "sampleSize": 278,
-    "auc": 0.7904,
+    "auc": 0.7947,
     "aucCi95": [
-      0.7169,
-      0.8569
+      0.7224,
+      0.8595
     ],
-    "archiveCutoff": 7,
-    "precision": 0.4712,
-    "recall": 0.7424,
-    "truePositives": 49,
+    "archiveCutoff": 8,
+    "precision": 0.486,
+    "recall": 0.7879,
+    "truePositives": 52,
     "falsePositives": 55,
-    "falseNegatives": 17,
+    "falseNegatives": 14,
     "trueNegatives": 157
   },
   "sensitivityOneRowPerRevisionGroup": {
     "evaluation": "one labelled observation retained per revision group",
     "sampleSize": 229,
-    "auc": 0.8122,
+    "auc": 0.815,
     "aucCi95": [
-      0.7307,
-      0.8787
+      0.7372,
+      0.8811
     ],
-    "archiveCutoff": 8,
-    "precision": 0.4833,
-    "recall": 0.6744,
-    "truePositives": 29,
-    "falsePositives": 31,
-    "falseNegatives": 14,
-    "trueNegatives": 155
+    "archiveCutoff": 9,
+    "precision": 0.4627,
+    "recall": 0.7209,
+    "truePositives": 31,
+    "falsePositives": 36,
+    "falseNegatives": 12,
+    "trueNegatives": 150
   },
   "perDocument": [
     {
@@ -206,8 +206,8 @@
     {
       "id": "arbitration-in-algerian-labor-law-under-the-labor-disputes-act-no-3b7f7f1e3c5b99e6",
       "actual": 8,
-      "score": 6,
-      "naiveScore": 6,
+      "score": 8,
+      "naiveScore": 8,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-4f30f4da33a9",
       "heldOutIndexPresent": true
@@ -269,8 +269,8 @@
     {
       "id": "constitutional-reform-and-the-rationalization-of-the-exercise-of-power-in-the-algerian-political-system-after-2020-18a86bd4d8b7aae1",
       "actual": 18,
-      "score": 10,
-      "naiveScore": 10,
+      "score": 13,
+      "naiveScore": 13,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-abc65709849d",
       "heldOutIndexPresent": true
@@ -278,8 +278,8 @@
     {
       "id": "decision-making-in-the-digital-age-a-sociological-reading-of-power-and-information-relations-be9e20e8de4cc991",
       "actual": 2,
-      "score": 0,
-      "naiveScore": 0,
+      "score": 1,
+      "naiveScore": 1,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-e1018fb1a5db",
       "heldOutIndexPresent": true
@@ -296,8 +296,8 @@
     {
       "id": "electronic-management-as-a-contemporary-approach-to-human-resource-management-46323184679bd996",
       "actual": 8,
-      "score": 2,
-      "naiveScore": 2,
+      "score": 0,
+      "naiveScore": 0,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-1bfac2b7917d",
       "heldOutIndexPresent": true
@@ -314,8 +314,8 @@
     {
       "id": "environmental-governance-performance-of-local-authorities-311e32f1c316226b",
       "actual": 7,
-      "score": 5,
-      "naiveScore": 5,
+      "score": 6,
+      "naiveScore": 6,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-b2d59fea1282",
       "heldOutIndexPresent": true
@@ -341,8 +341,8 @@
     {
       "id": "financing-challenges-in-startups-adopting-the-modern-legal-1907274ea51d33c6",
       "actual": 17,
-      "score": 10,
-      "naiveScore": 10,
+      "score": 11,
+      "naiveScore": 11,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-28a77c58ded5",
       "heldOutIndexPresent": true
@@ -359,8 +359,8 @@
     {
       "id": "from-the-right-to-education-to-the-freedom-of-education-e835cdc4ca8f46fb",
       "actual": 14,
-      "score": 6,
-      "naiveScore": 6,
+      "score": 5,
+      "naiveScore": 5,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-5a00acf00b90",
       "heldOutIndexPresent": true
@@ -368,8 +368,8 @@
     {
       "id": "general-mobilization-from-the-perspective-of-algerian-law-no.-e970de0c06564bd6",
       "actual": 5,
-      "score": 6,
-      "naiveScore": 6,
+      "score": 9,
+      "naiveScore": 9,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-3f0f9a727c26",
       "heldOutIndexPresent": true
@@ -377,8 +377,8 @@
     {
       "id": "good-governance-in-the-age-of-artificial-intelligence-as-a-mechanism-for-achieving-sustainable-development-0589f2d1a11befb2",
       "actual": 16,
-      "score": 8,
-      "naiveScore": 8,
+      "score": 12,
+      "naiveScore": 12,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-fb80a432f546",
       "heldOutIndexPresent": true
@@ -413,8 +413,8 @@
     {
       "id": "institutionalizing-international-intervention-through-the-f4274a1787daf180",
       "actual": 7,
-      "score": 1,
-      "naiveScore": 1,
+      "score": 0,
+      "naiveScore": 0,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-b9626f298d68",
       "heldOutIndexPresent": true
@@ -449,8 +449,8 @@
     {
       "id": "newly-established-institutional-mechanisms-under-the-algerian-839c64ebc1e76d4e",
       "actual": 3,
-      "score": 9,
-      "naiveScore": 9,
+      "score": 14,
+      "naiveScore": 14,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-bbbde319a4f2",
       "heldOutIndexPresent": true
@@ -458,8 +458,8 @@
     {
       "id": "protection-and-supporting-the-objectives-of-sustainable-devel…-d396b68c0a99aa04",
       "actual": 15,
-      "score": 9,
-      "naiveScore": 9,
+      "score": 11,
+      "naiveScore": 11,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-0b16d8065382",
       "heldOutIndexPresent": true
@@ -468,7 +468,7 @@
       "id": "quantifying-investor-sentiment-in-the-chinese-equity-market-a-9bf628c52efa45f7",
       "actual": 48,
       "score": 3,
-      "naiveScore": 42,
+      "naiveScore": 43,
       "excludedClusterMembers": [
         "quantifying-investor-sentiment-in-the-chinese-equity-market-a-dcc-garch-approach-(2010–2020)-f049dbfaceb9ff4f"
       ],
@@ -516,8 +516,8 @@
     {
       "id": "the-crime-of-infringement-upon-a-wife’s-financial-resources-cb93bf0f36e59ed0",
       "actual": 10,
-      "score": 7,
-      "naiveScore": 7,
+      "score": 12,
+      "naiveScore": 12,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-a6990ebcc159",
       "heldOutIndexPresent": true
@@ -525,8 +525,8 @@
     {
       "id": "the-criminalization-of-hate-speech-from-an-international-52d705f76bd074b3",
       "actual": 19,
-      "score": 5,
-      "naiveScore": 5,
+      "score": 6,
+      "naiveScore": 6,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-8cf9384d5ea7",
       "heldOutIndexPresent": true
@@ -534,8 +534,8 @@
     {
       "id": "the-development-of-literary-vision-from-tradition-to-modernity-in-modern-arab-thought-37ce9fe01a649065",
       "actual": 3,
-      "score": 1,
-      "naiveScore": 1,
+      "score": 0,
+      "naiveScore": 0,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-be1ad9023982",
       "heldOutIndexPresent": true
@@ -543,8 +543,8 @@
     {
       "id": "the-digital-taxation-of-large-foreign-investments-within-the-framework-of-the-digital-economy-fedf0900021eaf44",
       "actual": 3,
-      "score": 4,
-      "naiveScore": 4,
+      "score": 5,
+      "naiveScore": 5,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-5eda1c94caec",
       "heldOutIndexPresent": true
@@ -561,8 +561,8 @@
     {
       "id": "the-green-economy-as-a-mechanism-for-environmental-a27d2ffdddc0411a",
       "actual": 9,
-      "score": 8,
-      "naiveScore": 8,
+      "score": 11,
+      "naiveScore": 11,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-976bafa9bdd5",
       "heldOutIndexPresent": true
@@ -570,8 +570,8 @@
     {
       "id": "the-impact-of-agricultural-loan-development-34b4ed16ce8dab7e",
       "actual": 15,
-      "score": 9,
-      "naiveScore": 9,
+      "score": 10,
+      "naiveScore": 10,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-6545e6c4911f",
       "heldOutIndexPresent": true
@@ -579,8 +579,8 @@
     {
       "id": "the-impact-of-digital-transformation-on-human-resources-30c0685661a6b35d",
       "actual": 34,
-      "score": 13,
-      "naiveScore": 81,
+      "score": 20,
+      "naiveScore": 84,
       "excludedClusterMembers": [
         "the-impact-of-digital-transformation-on-human-resources-59d675c1d5d55e3d"
       ],
@@ -590,8 +590,8 @@
     {
       "id": "the-impact-of-digital-transformation-on-human-resources-59d675c1d5d55e3d",
       "actual": 14,
-      "score": 10,
-      "naiveScore": 75,
+      "score": 14,
+      "naiveScore": 76,
       "excludedClusterMembers": [
         "the-impact-of-digital-transformation-on-human-resources-30c0685661a6b35d"
       ],
@@ -601,8 +601,8 @@
     {
       "id": "the-impact-of-employee-empowerment-e4880b7acf4446f5",
       "actual": 17,
-      "score": 8,
-      "naiveScore": 8,
+      "score": 12,
+      "naiveScore": 12,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-80b0e2a38dff",
       "heldOutIndexPresent": true
@@ -610,7 +610,7 @@
     {
       "id": "the-impact-of-mobile-marketing-on-purchase-decision-making-among-algerian-university-students-9b66a6df96e59c4d",
       "actual": 19,
-      "score": 13,
+      "score": 14,
       "naiveScore": 82,
       "excludedClusterMembers": [
         "the-impact-of-mobile-marketing-on-purchase-decision-making-among-algerian-university-students-daa56897f8935122"
@@ -621,8 +621,8 @@
     {
       "id": "the-impact-of-mobile-marketing-on-purchase-decision-making-among-algerian-university-students-daa56897f8935122",
       "actual": 24,
-      "score": 17,
-      "naiveScore": 90,
+      "score": 19,
+      "naiveScore": 91,
       "excludedClusterMembers": [
         "the-impact-of-mobile-marketing-on-purchase-decision-making-among-algerian-university-students-9b66a6df96e59c4d"
       ],
@@ -632,8 +632,8 @@
     {
       "id": "the-impact-of-social-media-marketing-on-the-purchase-decision-of-the-algerian-consumer-2c6e3eac5dc68135",
       "actual": 22,
-      "score": 16,
-      "naiveScore": 16,
+      "score": 17,
+      "naiveScore": 17,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-585015c22893",
       "heldOutIndexPresent": true
@@ -641,8 +641,8 @@
     {
       "id": "the-impact-of-the-penal-order-on-the-principles-of-a-fair-trial-dc03f162faa1fcdc",
       "actual": 5,
-      "score": 3,
-      "naiveScore": 3,
+      "score": 4,
+      "naiveScore": 4,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-c068b22d48e7",
       "heldOutIndexPresent": true
@@ -659,8 +659,8 @@
     {
       "id": "the-legal-framework-of-the-national-agency-for-renewable-0b10927a6019097a",
       "actual": 12,
-      "score": 8,
-      "naiveScore": 8,
+      "score": 13,
+      "naiveScore": 13,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-0ca0a508ba0d",
       "heldOutIndexPresent": true
@@ -695,8 +695,8 @@
     {
       "id": "the-role-of-press-freedom-in-enhancing-tourism-services-78f834db2f07a2d3",
       "actual": 4,
-      "score": 3,
-      "naiveScore": 3,
+      "score": 1,
+      "naiveScore": 1,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-27802b9abe1b",
       "heldOutIndexPresent": true
@@ -704,8 +704,8 @@
     {
       "id": "the-song-as-a-cultural-text-of-protest-a90539bd5c26bd82",
       "actual": 1,
-      "score": 1,
-      "naiveScore": 1,
+      "score": 0,
+      "naiveScore": 0,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-0bc42b9d404d",
       "heldOutIndexPresent": true
@@ -713,8 +713,8 @@
     {
       "id": "the-strategy-of-algerian-economic-diplomacy-in-strengthening-5a32ce124e45c337",
       "actual": 4,
-      "score": 3,
-      "naiveScore": 3,
+      "score": 2,
+      "naiveScore": 2,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-d9dcde44f4bd",
       "heldOutIndexPresent": true
@@ -740,8 +740,8 @@
     {
       "id": "turnitin-a-comparative-study-of-some-physical-attributes-of-football-players-across-different-age-groups--9e8993430889",
       "actual": 9,
-      "score": 2,
-      "naiveScore": 2,
+      "score": 3,
+      "naiveScore": 3,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-50d6c1b447ca",
       "heldOutIndexPresent": true
@@ -749,8 +749,8 @@
     {
       "id": "turnitin-a-qualitative-study-on-the-applications-of-artificial-neural-networks-in-the-banking-sector-8a406914910a",
       "actual": 13,
-      "score": 4,
-      "naiveScore": 4,
+      "score": 3,
+      "naiveScore": 3,
       "excludedClusterMembers": [
         "turnitin-a-qualitative-study-on-the-applications-of-artificial-neural-networks-in-the-banking-sector01-8fa0a8d9e488"
       ],
@@ -771,8 +771,8 @@
     {
       "id": "turnitin-a-quantitative-study-of-the-impact-of-business-climate-on-tourism-investment-in-algeria-11a5b51264bd",
       "actual": 14,
-      "score": 9,
-      "naiveScore": 86,
+      "score": 12,
+      "naiveScore": 87,
       "excludedClusterMembers": [
         "turnitin-a-quantitative-study-of-the-impact-of-business-climate-on-tourism-investment-in-algeria-cb80c140ef9c"
       ],
@@ -782,8 +782,8 @@
     {
       "id": "turnitin-a-quantitative-study-of-the-impact-of-business-climate-on-tourism-investment-in-algeria-cb80c140ef9c",
       "actual": 28,
-      "score": 10,
-      "naiveScore": 10,
+      "score": 14,
+      "naiveScore": 14,
       "excludedClusterMembers": [
         "turnitin-a-quantitative-study-of-the-impact-of-business-climate-on-tourism-investment-in-algeria-11a5b51264bd"
       ],
@@ -837,8 +837,8 @@
     {
       "id": "turnitin-a-study-on-the-readiness-and-willingness-of-employers-affiliated-with-the-national-social-securi-9b13fac56796",
       "actual": 9,
-      "score": 12,
-      "naiveScore": 12,
+      "score": 15,
+      "naiveScore": 15,
       "excludedClusterMembers": [
         "turnitin-a-study-on-the-readiness-and-willingness-of-employers-affiliated-with-the-national-social-securi-ad7a22fe2a6f"
       ],
@@ -848,8 +848,8 @@
     {
       "id": "turnitin-a-study-on-the-readiness-and-willingness-of-employers-affiliated-with-the-national-social-securi-ad7a22fe2a6f",
       "actual": 14,
-      "score": 14,
-      "naiveScore": 87,
+      "score": 17,
+      "naiveScore": 89,
       "excludedClusterMembers": [
         "turnitin-a-study-on-the-readiness-and-willingness-of-employers-affiliated-with-the-national-social-securi-9b13fac56796"
       ],
@@ -868,8 +868,8 @@
     {
       "id": "turnitin-achieving-sensory-agility-through-the-integration-of-competitor-intelligence-69de74b4431c",
       "actual": 5,
-      "score": 2,
-      "naiveScore": 2,
+      "score": 3,
+      "naiveScore": 3,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-57f9b90468ea",
       "heldOutIndexPresent": true
@@ -877,8 +877,8 @@
     {
       "id": "turnitin-affective-balance-among-primary-school-teachers-70564a31937b",
       "actual": 8,
-      "score": 2,
-      "naiveScore": 2,
+      "score": 3,
+      "naiveScore": 3,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-fcc51a1e771a",
       "heldOutIndexPresent": true
@@ -904,8 +904,8 @@
     {
       "id": "turnitin-an-analytical-reading-of-the-powers-of-the-national-authority-64d421d6564d",
       "actual": 28,
-      "score": 17,
-      "naiveScore": 17,
+      "score": 21,
+      "naiveScore": 21,
       "excludedClusterMembers": [
         "turnitin-an-analytical-reading-of-the-powers-of-the-national-authority-a4d741feb57f",
         "turnitin-an-analytical-reading-of-the-powers-of-the-national-authority-d04eb12ce65c"
@@ -916,7 +916,7 @@
     {
       "id": "turnitin-an-analytical-reading-of-the-powers-of-the-national-authority-a4d741feb57f",
       "actual": 28,
-      "score": 17,
+      "score": 21,
       "naiveScore": 98,
       "excludedClusterMembers": [
         "turnitin-an-analytical-reading-of-the-powers-of-the-national-authority-64d421d6564d",
@@ -928,8 +928,8 @@
     {
       "id": "turnitin-an-analytical-reading-of-the-powers-of-the-national-authority-d04eb12ce65c",
       "actual": 17,
-      "score": 12,
-      "naiveScore": 42,
+      "score": 14,
+      "naiveScore": 44,
       "excludedClusterMembers": [
         "turnitin-an-analytical-reading-of-the-powers-of-the-national-authority-64d421d6564d",
         "turnitin-an-analytical-reading-of-the-powers-of-the-national-authority-a4d741feb57f"
@@ -940,8 +940,8 @@
     {
       "id": "turnitin-an-analytical-study-of-the-current-state-of-local-development-in-the-province-of-el-tarf-algeria-6308cb34f94c",
       "actual": 1,
-      "score": 5,
-      "naiveScore": 5,
+      "score": 6,
+      "naiveScore": 6,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-b903eac88a50",
       "heldOutIndexPresent": true
@@ -949,8 +949,8 @@
     {
       "id": "turnitin-an-analytical-study-of-the-evolution-of-migrant-remittances-in-developing-countries-a-case-study-11623181160a",
       "actual": 12,
-      "score": 5,
-      "naiveScore": 5,
+      "score": 6,
+      "naiveScore": 6,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-59455266dfd2",
       "heldOutIndexPresent": true
@@ -967,8 +967,8 @@
     {
       "id": "turnitin-analysis-of-the-attractiveness-of-the-algerian-banking-sector-using-the-swot-model-0bf3d21ef4d5",
       "actual": 11,
-      "score": 7,
-      "naiveScore": 93,
+      "score": 9,
+      "naiveScore": 94,
       "excludedClusterMembers": [
         "turnitin-analysis-of-the-attractiveness-of-the-algerian-banking-sector-using-the-swot-model-c98871c0ce3b"
       ],
@@ -978,8 +978,8 @@
     {
       "id": "turnitin-analysis-of-the-attractiveness-of-the-algerian-banking-sector-using-the-swot-model-c98871c0ce3b",
       "actual": 8,
-      "score": 8,
-      "naiveScore": 8,
+      "score": 9,
+      "naiveScore": 9,
       "excludedClusterMembers": [
         "turnitin-analysis-of-the-attractiveness-of-the-algerian-banking-sector-using-the-swot-model-0bf3d21ef4d5"
       ],
@@ -989,8 +989,8 @@
     {
       "id": "turnitin-analysis-of-the-current-state-of-desert-tourism-in-algeria-in-light-of-available-resources-and-i-5e06c6789b32",
       "actual": 9,
-      "score": 6,
-      "naiveScore": 6,
+      "score": 10,
+      "naiveScore": 10,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-e7af58f4840c",
       "heldOutIndexPresent": true
@@ -998,8 +998,8 @@
     {
       "id": "turnitin-analytical-study-of-the-reality-of-unemployment-and-inflation-in-algeria-during-the-period-1990--c54e45b70010",
       "actual": 9,
-      "score": 7,
-      "naiveScore": 7,
+      "score": 11,
+      "naiveScore": 11,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-7c1cc6e57193",
       "heldOutIndexPresent": true
@@ -1007,8 +1007,8 @@
     {
       "id": "turnitin-anticipating-the-future-of-digital-transformation-in-algeria-617ad8fc7397",
       "actual": 8,
-      "score": 4,
-      "naiveScore": 4,
+      "score": 5,
+      "naiveScore": 5,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-b3df14df254d",
       "heldOutIndexPresent": true
@@ -1016,8 +1016,8 @@
     {
       "id": "turnitin-article-mch-8870ddac8418",
       "actual": 21,
-      "score": 7,
-      "naiveScore": 74,
+      "score": 9,
+      "naiveScore": 75,
       "excludedClusterMembers": [
         "turnitin-article-mch-9bdf3c51b478"
       ],
@@ -1027,8 +1027,8 @@
     {
       "id": "turnitin-article-mch-9bdf3c51b478",
       "actual": 12,
-      "score": 7,
-      "naiveScore": 7,
+      "score": 8,
+      "naiveScore": 8,
       "excludedClusterMembers": [
         "turnitin-article-mch-8870ddac8418"
       ],
@@ -1038,8 +1038,8 @@
     {
       "id": "turnitin-artificial-intelligence-and-the-formation-of-will-in-contract-e7d2af570bbe",
       "actual": 2,
-      "score": 3,
-      "naiveScore": 3,
+      "score": 4,
+      "naiveScore": 4,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-ce4dbb433ae8",
       "heldOutIndexPresent": true
@@ -1060,8 +1060,8 @@
     {
       "id": "turnitin-artificial-intelligence-in-human-resource-management-e35e7bb8bcfb",
       "actual": 25,
-      "score": 5,
-      "naiveScore": 37,
+      "score": 6,
+      "naiveScore": 38,
       "excludedClusterMembers": [
         "turnitin-artificial-intelligence-in-human-resource-management-14ab607c19a0",
         "turnitin-artificial-intelligence-in-human-resource-management-14ab607c19a0-2",
@@ -1073,8 +1073,8 @@
     {
       "id": "turnitin-assessment-of-sustainable-development-indicators-in-algeria-progress-challenges-and-implications-cc515d3a3167",
       "actual": 8,
-      "score": 4,
-      "naiveScore": 4,
+      "score": 5,
+      "naiveScore": 5,
       "excludedClusterMembers": [
         "turnitin-assessment-of-sustainable-development-indicators-in-algeria-progress-challenges-and-implications-e9ea181d3b28"
       ],
@@ -1084,7 +1084,7 @@
     {
       "id": "turnitin-assessment-of-sustainable-development-indicators-in-algeria-progress-challenges-and-implications-e9ea181d3b28",
       "actual": 6,
-      "score": 3,
+      "score": 5,
       "naiveScore": 80,
       "excludedClusterMembers": [
         "turnitin-assessment-of-sustainable-development-indicators-in-algeria-progress-challenges-and-implications-cc515d3a3167"
@@ -1104,8 +1104,8 @@
     {
       "id": "turnitin-between-arabic-rhetoric-and-western-studies-044e1ec50508",
       "actual": 1,
-      "score": 1,
-      "naiveScore": 1,
+      "score": 0,
+      "naiveScore": 0,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-c330c966399a",
       "heldOutIndexPresent": true
@@ -1113,8 +1113,8 @@
     {
       "id": "turnitin-between-independence-and-dependence-in-light-of-law-no-23-19-df5c0affd530",
       "actual": 10,
-      "score": 5,
-      "naiveScore": 68,
+      "score": 6,
+      "naiveScore": 69,
       "excludedClusterMembers": [
         "turnitin-the-written-press-and-electronic-press-regulatory-authority-between-independence-and-dependence--8f0beaef63cc"
       ],
@@ -1146,8 +1146,8 @@
     {
       "id": "turnitin-chronic-illnesses-and-mindfulness-meditation-c9ab4c98a0bb",
       "actual": 4,
-      "score": 1,
-      "naiveScore": 1,
+      "score": 0,
+      "naiveScore": 0,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-ff6cca00783b",
       "heldOutIndexPresent": true
@@ -1155,8 +1155,8 @@
     {
       "id": "turnitin-commitment-to-ensuring-tourist-safety-in-the-tourism-62420cd58f7f",
       "actual": 7,
-      "score": 7,
-      "naiveScore": 7,
+      "score": 10,
+      "naiveScore": 10,
       "excludedClusterMembers": [
         "turnitin-the-obligation-to-ensure-safety-in-tourism-contracts-96be2e285d29"
       ],
@@ -1166,8 +1166,8 @@
     {
       "id": "turnitin-conditions-governing-the-authority-of-the-criminal-judge-to-e51b678872c1",
       "actual": 16,
-      "score": 10,
-      "naiveScore": 10,
+      "score": 12,
+      "naiveScore": 12,
       "excludedClusterMembers": [
         "turnitin-conditions-governing-the-authority-of-the-criminal-judge-to-ee0f23eb8a18"
       ],
@@ -1177,8 +1177,8 @@
     {
       "id": "turnitin-conditions-governing-the-authority-of-the-criminal-judge-to-ee0f23eb8a18",
       "actual": 11,
-      "score": 7,
-      "naiveScore": 96,
+      "score": 9,
+      "naiveScore": 97,
       "excludedClusterMembers": [
         "turnitin-conditions-governing-the-authority-of-the-criminal-judge-to-e51b678872c1"
       ],
@@ -1188,8 +1188,8 @@
     {
       "id": "turnitin-constitutional-controls-on-the-power-to-dissolve-the-national-people-s-assembly-in-algeria-and-i-1558434b8600",
       "actual": 4,
-      "score": 14,
-      "naiveScore": 14,
+      "score": 15,
+      "naiveScore": 15,
       "excludedClusterMembers": [
         "turnitin-constitutional-controls-on-the-power-to-dissolve-the-national-people-s-assembly-in-algeria-and-i-369e07e07820"
       ],
@@ -1199,8 +1199,8 @@
     {
       "id": "turnitin-constitutional-controls-on-the-power-to-dissolve-the-national-people-s-assembly-in-algeria-and-i-369e07e07820",
       "actual": 16,
-      "score": 17,
-      "naiveScore": 97,
+      "score": 19,
+      "naiveScore": 98,
       "excludedClusterMembers": [
         "turnitin-constitutional-controls-on-the-power-to-dissolve-the-national-people-s-assembly-in-algeria-and-i-1558434b8600"
       ],
@@ -1210,8 +1210,8 @@
     {
       "id": "turnitin-constitutional-court-tradition-and-transformation-under-the-2020-constitution-298e66c80784",
       "actual": 17,
-      "score": 12,
-      "naiveScore": 12,
+      "score": 16,
+      "naiveScore": 16,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-98f0e6393733",
       "heldOutIndexPresent": true
@@ -1219,8 +1219,8 @@
     {
       "id": "turnitin-contemporary-criminal-policy-for-the-prevention-of-narcotic-945c94afde11",
       "actual": 3,
-      "score": 5,
-      "naiveScore": 5,
+      "score": 4,
+      "naiveScore": 4,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-45ffe6278d72",
       "heldOutIndexPresent": true
@@ -1228,8 +1228,8 @@
     {
       "id": "turnitin-crime-prevention-mechanisms-in-algerian-legislation-5d82946219cc",
       "actual": 7,
-      "score": 4,
-      "naiveScore": 4,
+      "score": 6,
+      "naiveScore": 6,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-1759803f7075",
       "heldOutIndexPresent": true
@@ -1246,8 +1246,8 @@
     {
       "id": "turnitin-demographic-changes-and-the-reproduction-of-health-risks-in-62faf2b0a701",
       "actual": 6,
-      "score": 1,
-      "naiveScore": 1,
+      "score": 0,
+      "naiveScore": 0,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-bebf90bff8c5",
       "heldOutIndexPresent": true
@@ -1255,8 +1255,8 @@
     {
       "id": "turnitin-determinants-of-banking-sector-development-evidence-from-arab-maghreb-countries-099af4cdc439",
       "actual": 12,
-      "score": 4,
-      "naiveScore": 4,
+      "score": 5,
+      "naiveScore": 5,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-66f87a62c994",
       "heldOutIndexPresent": true
@@ -1275,8 +1275,8 @@
     {
       "id": "turnitin-dg-hadjadj-zenagui-7ca7b1d48e42",
       "actual": 27,
-      "score": 13,
-      "naiveScore": 13,
+      "score": 12,
+      "naiveScore": 12,
       "excludedClusterMembers": [
         "turnitin-dg-hadjadj-zenagui-0beb0b45c9ff"
       ],
@@ -1297,7 +1297,7 @@
     {
       "id": "turnitin-diaspora-investments-as-a-mechanism-for-financing-developing-economies-a-review-of-the-nigerian--cbc3736ae2dc",
       "actual": 30,
-      "score": 0,
+      "score": 1,
       "naiveScore": 75,
       "excludedClusterMembers": [
         "turnitin-diaspora-investments-as-a-mechanism-for-financing-developing-economies-a-review-of-the-nigerian--acd162b920e4"
@@ -1308,8 +1308,8 @@
     {
       "id": "turnitin-digital-transformation-between-theoretical-foundations-and-548377657224",
       "actual": 11,
-      "score": 4,
-      "naiveScore": 4,
+      "score": 3,
+      "naiveScore": 3,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-2f165a3d76df",
       "heldOutIndexPresent": true
@@ -1317,8 +1317,8 @@
     {
       "id": "turnitin-digital-transformation-in-education-and-its-impact-on-b0bc776bda10",
       "actual": 20,
-      "score": 7,
-      "naiveScore": 7,
+      "score": 11,
+      "naiveScore": 11,
       "excludedClusterMembers": [
         "turnitin-digital-transformation-in-education-and-its-impact-on-f8386b76950b"
       ],
@@ -1328,7 +1328,7 @@
     {
       "id": "turnitin-digital-transformation-in-education-and-its-impact-on-f8386b76950b",
       "actual": 18,
-      "score": 6,
+      "score": 9,
       "naiveScore": 95,
       "excludedClusterMembers": [
         "turnitin-digital-transformation-in-education-and-its-impact-on-b0bc776bda10"
@@ -1339,8 +1339,8 @@
     {
       "id": "turnitin-discrimination-and-hate-speech-a-comparative-study-of-alger-3b19c37b5236",
       "actual": 34,
-      "score": 11,
-      "naiveScore": 83,
+      "score": 15,
+      "naiveScore": 84,
       "excludedClusterMembers": [
         "turnitin-discrimination-and-hate-speech-a-comparative-study-of-alger-541ae2506544"
       ],
@@ -1350,8 +1350,8 @@
     {
       "id": "turnitin-discrimination-and-hate-speech-a-comparative-study-of-alger-541ae2506544",
       "actual": 18,
-      "score": 8,
-      "naiveScore": 8,
+      "score": 10,
+      "naiveScore": 10,
       "excludedClusterMembers": [
         "turnitin-discrimination-and-hate-speech-a-comparative-study-of-alger-3b19c37b5236"
       ],
@@ -1370,8 +1370,8 @@
     {
       "id": "turnitin-eng-dd438f58f655",
       "actual": 7,
-      "score": 7,
-      "naiveScore": 7,
+      "score": 8,
+      "naiveScore": 8,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-810ed0ac604d",
       "heldOutIndexPresent": true
@@ -1481,8 +1481,8 @@
     {
       "id": "turnitin-gangs-in-residential-complexes-what-confrontation-a-study-of-presidential-decree-no-2003-6d8a838166b2",
       "actual": 4,
-      "score": 5,
-      "naiveScore": 5,
+      "score": 3,
+      "naiveScore": 3,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-325b62f143ed",
       "heldOutIndexPresent": true
@@ -1490,8 +1490,8 @@
     {
       "id": "turnitin-good-governance-and-the-problem-of-building-consensual-democracy-and-societal-security-the-f7611eea1c76",
       "actual": 15,
-      "score": 2,
-      "naiveScore": 2,
+      "score": 1,
+      "naiveScore": 1,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-ed027fae5713",
       "heldOutIndexPresent": true
@@ -1511,7 +1511,7 @@
       "id": "turnitin-green-jobs-mechanism-for-green-economy-and-sustainable-development-c5830001a532",
       "actual": 14,
       "score": 8,
-      "naiveScore": 87,
+      "naiveScore": 89,
       "excludedClusterMembers": [
         "turnitin-green-jobs-mechanism-for-green-economy-and-sustainable-development-34518daa3585"
       ],
@@ -1521,8 +1521,8 @@
     {
       "id": "turnitin-hotel-investment-in-algeria-between-prospects-for-1eefb4689dbb",
       "actual": 6,
-      "score": 5,
-      "naiveScore": 5,
+      "score": 6,
+      "naiveScore": 6,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-817e0d665803",
       "heldOutIndexPresent": true
@@ -1539,8 +1539,8 @@
     {
       "id": "turnitin-identity-and-citizenship-in-the-contemporary-context-a-98e09fbd64e8",
       "actual": 8,
-      "score": 3,
-      "naiveScore": 3,
+      "score": 2,
+      "naiveScore": 2,
       "excludedClusterMembers": [
         "turnitin-identity-and-citizenship-in-the-contemporary-context-a-98e09fbd64e8-2"
       ],
@@ -1568,8 +1568,8 @@
     {
       "id": "turnitin-individual-international-criminal-responsibility-provisions-4209a1dd132d",
       "actual": 9,
-      "score": 2,
-      "naiveScore": 2,
+      "score": 1,
+      "naiveScore": 1,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-161d2b77fc26",
       "heldOutIndexPresent": true
@@ -1586,8 +1586,8 @@
     {
       "id": "turnitin-internal-mechanisms-for-the-settlement-of-medical-disputes-in-deeb9184549d",
       "actual": 7,
-      "score": 5,
-      "naiveScore": 5,
+      "score": 6,
+      "naiveScore": 6,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-676f6e8ae8a0",
       "heldOutIndexPresent": true
@@ -1595,8 +1595,8 @@
     {
       "id": "turnitin-irrigated-oceans-as-a-mechanism-to-enhance-agricultural-5b6392edeb4a",
       "actual": 17,
-      "score": 9,
-      "naiveScore": 90,
+      "score": 10,
+      "naiveScore": 91,
       "excludedClusterMembers": [
         "turnitin-irrigated-oceans-as-a-mechanism-to-enhance-agricultural-a4ae3d583195"
       ],
@@ -1617,8 +1617,8 @@
     {
       "id": "turnitin-islamic-banking-in-algeria-regulation-reality-and-challenges-4ab225322b85",
       "actual": 15,
-      "score": 9,
-      "naiveScore": 9,
+      "score": 10,
+      "naiveScore": 10,
       "excludedClusterMembers": [
         "turnitin-islamic-banking-in-algeria-regulation-reality-and-challenges-eb29f104ee30"
       ],
@@ -1628,8 +1628,8 @@
     {
       "id": "turnitin-islamic-banking-in-algeria-regulation-reality-and-challenges-eb29f104ee30",
       "actual": 10,
-      "score": 8,
-      "naiveScore": 95,
+      "score": 10,
+      "naiveScore": 96,
       "excludedClusterMembers": [
         "turnitin-islamic-banking-in-algeria-regulation-reality-and-challenges-4ab225322b85"
       ],
@@ -1648,8 +1648,8 @@
     {
       "id": "turnitin-knowledge-management-as-a-mediating-variable-in-the-relationship-between-digital-transformation--e0dbc5f1c94e",
       "actual": 12,
-      "score": 15,
-      "naiveScore": 15,
+      "score": 17,
+      "naiveScore": 17,
       "excludedClusterMembers": [
         "turnitin-knowledge-management-as-a-mediating-variable-in-the-relationship-between-digital-transformation--ed55d8e225af"
       ],
@@ -1659,8 +1659,8 @@
     {
       "id": "turnitin-knowledge-management-as-a-mediating-variable-in-the-relationship-between-digital-transformation--ed55d8e225af",
       "actual": 28,
-      "score": 19,
-      "naiveScore": 84,
+      "score": 21,
+      "naiveScore": 86,
       "excludedClusterMembers": [
         "turnitin-knowledge-management-as-a-mediating-variable-in-the-relationship-between-digital-transformation--e0dbc5f1c94e"
       ],
@@ -1670,8 +1670,8 @@
     {
       "id": "turnitin-legal-confrontation-of-cyber-terrorism-6814846da3fd",
       "actual": 9,
-      "score": 7,
-      "naiveScore": 7,
+      "score": 9,
+      "naiveScore": 9,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-5c0db3685093",
       "heldOutIndexPresent": true
@@ -1679,8 +1679,8 @@
     {
       "id": "turnitin-legal-protections-for-victims-under-law-no-24-06-amending-the-algerian-penal-code-f9f3c59966a7",
       "actual": 7,
-      "score": 4,
-      "naiveScore": 4,
+      "score": 5,
+      "naiveScore": 5,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-a514a7886d27",
       "heldOutIndexPresent": true
@@ -1688,7 +1688,7 @@
     {
       "id": "turnitin-limits-of-the-effectiveness-of-legal-responsibility-in-reducing-artificial-intelligence-deviance-fd184a772031",
       "actual": 0,
-      "score": 1,
+      "score": 0,
       "naiveScore": 92,
       "excludedClusterMembers": [
         "turnitin-the-extent-of-legal-responsibility-s-effectiveness-in-curbing-the-misconduct-of-artificial-intel-7a47f996dee4"
@@ -1699,8 +1699,8 @@
     {
       "id": "turnitin-local-authorities-and-local-tax-reforms-in-algeria-reforms-aimed-at-improving-local-finances-and-24dc4e91c16e",
       "actual": 3,
-      "score": 12,
-      "naiveScore": 12,
+      "score": 13,
+      "naiveScore": 13,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-180ee66fbcb1",
       "heldOutIndexPresent": true
@@ -1708,8 +1708,8 @@
     {
       "id": "turnitin-management-leadership-strategies-and-their-impact-on-organizational-commitment-a-field-study-25c698ca7137",
       "actual": 19,
-      "score": 7,
-      "naiveScore": 7,
+      "score": 11,
+      "naiveScore": 11,
       "excludedClusterMembers": [
         "turnitin-management-leadership-strategies-and-their-impact-on-organizational-commitment-a-field-study-e40ea26fc7ec"
       ],
@@ -1719,8 +1719,8 @@
     {
       "id": "turnitin-management-leadership-strategies-and-their-impact-on-organizational-commitment-a-field-study-e40ea26fc7ec",
       "actual": 14,
-      "score": 5,
-      "naiveScore": 87,
+      "score": 10,
+      "naiveScore": 89,
       "excludedClusterMembers": [
         "turnitin-management-leadership-strategies-and-their-impact-on-organizational-commitment-a-field-study-25c698ca7137"
       ],
@@ -1730,8 +1730,8 @@
     {
       "id": "turnitin-measuring-the-requirements-for-the-success-of-human-9d38538811b1",
       "actual": 12,
-      "score": 6,
-      "naiveScore": 6,
+      "score": 8,
+      "naiveScore": 8,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-43051ba10ce7",
       "heldOutIndexPresent": true
@@ -1739,8 +1739,8 @@
     {
       "id": "turnitin-mechanisms-for-implementing-participatory-democracy-at-the-local-level-the-tunisian-experience-a-a47d948ea7a2",
       "actual": 7,
-      "score": 6,
-      "naiveScore": 6,
+      "score": 7,
+      "naiveScore": 7,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-86c05f7ac02e",
       "heldOutIndexPresent": true
@@ -1748,8 +1748,8 @@
     {
       "id": "turnitin-mechanisms-for-mitigating-the-risks-of-agricultural-pesticides-in-algerian-legislation-43b4636be1ee",
       "actual": 3,
-      "score": 1,
-      "naiveScore": 1,
+      "score": 0,
+      "naiveScore": 0,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-a02d4e4452fb",
       "heldOutIndexPresent": true
@@ -1757,8 +1757,8 @@
     {
       "id": "turnitin-mechanisms-for-purification-of-private-real-estate-ownership-between-legislation-and-judiciary-8940e227bd9a",
       "actual": 1,
-      "score": 4,
-      "naiveScore": 4,
+      "score": 5,
+      "naiveScore": 5,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-422da5c108e7",
       "heldOutIndexPresent": true
@@ -1775,8 +1775,8 @@
     {
       "id": "turnitin-mechanisms-of-participatory-democracy-in-the-2020-algerian-4129f5c2a7c1",
       "actual": 3,
-      "score": 5,
-      "naiveScore": 5,
+      "score": 4,
+      "naiveScore": 4,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-b55577ac3898",
       "heldOutIndexPresent": true
@@ -1811,8 +1811,8 @@
     {
       "id": "turnitin-modeling-and-analyzing-stock-price-volatility-in-stock-exchanges-of-selected-islamic-545a8e1b8c29",
       "actual": 9,
-      "score": 4,
-      "naiveScore": 4,
+      "score": 5,
+      "naiveScore": 5,
       "excludedClusterMembers": [
         "turnitin-modeling-and-analyzing-stock-price-volatility-in-stock-exchanges-of-selected-islamic-a97da6c476f8"
       ],
@@ -1823,7 +1823,7 @@
       "id": "turnitin-modeling-and-analyzing-stock-price-volatility-in-stock-exchanges-of-selected-islamic-a97da6c476f8",
       "actual": 23,
       "score": 5,
-      "naiveScore": 79,
+      "naiveScore": 81,
       "excludedClusterMembers": [
         "turnitin-modeling-and-analyzing-stock-price-volatility-in-stock-exchanges-of-selected-islamic-545a8e1b8c29"
       ],
@@ -1842,8 +1842,8 @@
     {
       "id": "turnitin-ms-word-2003-the-impact-of-accessibility-of-financial-services-indicators-on-economic-growth-in--338e9fc22b4e",
       "actual": 15,
-      "score": 8,
-      "naiveScore": 8,
+      "score": 10,
+      "naiveScore": 10,
       "excludedClusterMembers": [
         "turnitin-ms-word-2003-the-impact-of-accessibility-of-financial-services-indicators-on-economic-growth-in--338e9fc22b4e-2"
       ],
@@ -1853,8 +1853,8 @@
     {
       "id": "turnitin-non-financial-guarantees-for-attracting-foreign-investment-enshrined-in-the-recent-provisions-of-766e54cc6dad",
       "actual": 5,
-      "score": 9,
-      "naiveScore": 9,
+      "score": 14,
+      "naiveScore": 14,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-51d431df17fa",
       "heldOutIndexPresent": true
@@ -1862,8 +1862,8 @@
     {
       "id": "turnitin-parliamentary-immunity-and-its-impact-on-the-criminal-prosecution-of-members-of-parliament-a-com-86421cdab840",
       "actual": 8,
-      "score": 15,
-      "naiveScore": 15,
+      "score": 16,
+      "naiveScore": 16,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-881735b052e3",
       "heldOutIndexPresent": true
@@ -1871,8 +1871,8 @@
     {
       "id": "turnitin-psychometric-properties-of-the-scale-measuring-teachers-attitudes-towards-inclusive-education-27fd31c1b978",
       "actual": 17,
-      "score": 13,
-      "naiveScore": 13,
+      "score": 14,
+      "naiveScore": 14,
       "excludedClusterMembers": [
         "turnitin-psychometric-properties-of-the-scale-measuring-teachers-attitudes-towards-inclusive-education-27fd31c1b978-2"
       ],
@@ -1882,8 +1882,8 @@
     {
       "id": "turnitin-punishment-outside-prison-in-modern-penal-policy-545b2c81bf8d",
       "actual": 1,
-      "score": 3,
-      "naiveScore": 3,
+      "score": 2,
+      "naiveScore": 2,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-01c07892e23a",
       "heldOutIndexPresent": true
@@ -1900,8 +1900,8 @@
     {
       "id": "turnitin-scientific-thinking-and-its-obstacles-9f79ab0c2605",
       "actual": 1,
-      "score": 8,
-      "naiveScore": 8,
+      "score": 7,
+      "naiveScore": 7,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-0fc68381946a",
       "heldOutIndexPresent": true
@@ -1927,8 +1927,8 @@
     {
       "id": "turnitin-social-support-and-its-relationship-with-life-satisfaction-among-women-with-breast-cancer-3f2a63085cb3",
       "actual": 15,
-      "score": 6,
-      "naiveScore": 6,
+      "score": 9,
+      "naiveScore": 9,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-935f0b9440c0",
       "heldOutIndexPresent": true
@@ -1936,8 +1936,8 @@
     {
       "id": "turnitin-socialization-of-children-between-reality-and-aspiration-99e6572fef53",
       "actual": 6,
-      "score": 1,
-      "naiveScore": 1,
+      "score": 0,
+      "naiveScore": 0,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-ee33d53da9c7",
       "heldOutIndexPresent": true
@@ -1946,7 +1946,7 @@
       "id": "turnitin-socialization-of-children-in-the-age-of-communicative-globalization-challenges-and-protection-me-4dce4d8e30cc",
       "actual": 4,
       "score": 9,
-      "naiveScore": 92,
+      "naiveScore": 93,
       "excludedClusterMembers": [
         "turnitin-the-impact-of-the-cancellation-of-the-professional-activity-tax-on-local-6c61188c823c"
       ],
@@ -1956,8 +1956,8 @@
     {
       "id": "turnitin-specificity-of-the-plastic-surgeon-s-commitment-74f3e3585932",
       "actual": 5,
-      "score": 3,
-      "naiveScore": 3,
+      "score": 4,
+      "naiveScore": 4,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-aa6b126681be",
       "heldOutIndexPresent": true
@@ -1965,8 +1965,8 @@
     {
       "id": "turnitin-starvation-practices-in-gaza-are-an-international-crime-a971fbca47ab",
       "actual": 17,
-      "score": 9,
-      "naiveScore": 9,
+      "score": 10,
+      "naiveScore": 10,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-4aecfb8ead56",
       "heldOutIndexPresent": true
@@ -1974,8 +1974,8 @@
     {
       "id": "turnitin-students-attitudes-towards-the-use-of-the-moodle-e-learning-platform-a-field-study-at-the-facult-3599ccfed0e4",
       "actual": 31,
-      "score": 15,
-      "naiveScore": 60,
+      "score": 18,
+      "naiveScore": 62,
       "excludedClusterMembers": [
         "turnitin-students-attitudes-towards-the-use-of-the-moodle-e-learning-platform-a-field-study-at-the-facult-7bbd375b8c02"
       ],
@@ -1985,8 +1985,8 @@
     {
       "id": "turnitin-students-attitudes-towards-the-use-of-the-moodle-e-learning-platform-a-field-study-at-the-facult-7bbd375b8c02",
       "actual": 19,
-      "score": 12,
-      "naiveScore": 12,
+      "score": 14,
+      "naiveScore": 14,
       "excludedClusterMembers": [
         "turnitin-students-attitudes-towards-the-use-of-the-moodle-e-learning-platform-a-field-study-at-the-facult-3599ccfed0e4"
       ],
@@ -1996,8 +1996,8 @@
     {
       "id": "turnitin-teaching-arabic-to-specialists-in-the-digital-age-strategies-and-challenges-60722f6a543e",
       "actual": 4,
-      "score": 2,
-      "naiveScore": 2,
+      "score": 1,
+      "naiveScore": 1,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-2feb30bc8def",
       "heldOutIndexPresent": true
@@ -2005,8 +2005,8 @@
     {
       "id": "turnitin-the-alert-procedure-as-a-mechanism-for-safeguarding-14d2c502328a",
       "actual": 10,
-      "score": 4,
-      "naiveScore": 4,
+      "score": 5,
+      "naiveScore": 5,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-44b25f99a16a",
       "heldOutIndexPresent": true
@@ -2014,8 +2014,8 @@
     {
       "id": "turnitin-the-analysis-of-quantitative-structure-activity-relationships-qsar-of-halogenated-hydrocarbons-3d2edfee25a1",
       "actual": 13,
-      "score": 3,
-      "naiveScore": 3,
+      "score": 4,
+      "naiveScore": 4,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-768108ce323c",
       "heldOutIndexPresent": true
@@ -2041,8 +2041,8 @@
     {
       "id": "turnitin-the-contribution-of-digital-financing-in-enhancing-financial-inclusion-from-the-perspective-of-i-33addd0edb9a",
       "actual": 12,
-      "score": 10,
-      "naiveScore": 93,
+      "score": 13,
+      "naiveScore": 95,
       "excludedClusterMembers": [
         "turnitin-the-contribution-of-digital-financing-in-enhancing-financial-inclusion-from-the-perspective-of-i-bb9cd70564d8"
       ],
@@ -2052,8 +2052,8 @@
     {
       "id": "turnitin-the-contribution-of-digital-financing-in-enhancing-financial-inclusion-from-the-perspective-of-i-bb9cd70564d8",
       "actual": 10,
-      "score": 10,
-      "naiveScore": 10,
+      "score": 12,
+      "naiveScore": 12,
       "excludedClusterMembers": [
         "turnitin-the-contribution-of-digital-financing-in-enhancing-financial-inclusion-from-the-perspective-of-i-33addd0edb9a"
       ],
@@ -2063,8 +2063,8 @@
     {
       "id": "turnitin-the-contribution-of-drug-abuse-to-the-spread-of-smuggling-crime-b431699459ef",
       "actual": 8,
-      "score": 0,
-      "naiveScore": 0,
+      "score": 1,
+      "naiveScore": 1,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-79045c269d62",
       "heldOutIndexPresent": true
@@ -2072,8 +2072,8 @@
     {
       "id": "turnitin-the-contributions-of-the-tax-advisor-in-reducing-the-risks-of-tax-control-921b18d5a104",
       "actual": 4,
-      "score": 23,
-      "naiveScore": 23,
+      "score": 25,
+      "naiveScore": 25,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-b729650620e2",
       "heldOutIndexPresent": true
@@ -2090,8 +2090,8 @@
     {
       "id": "turnitin-the-cultural-image-of-algeria-through-documentary-films-on-al-jazeera-documentary-channel-9d56a4b2bab9",
       "actual": 3,
-      "score": 1,
-      "naiveScore": 1,
+      "score": 0,
+      "naiveScore": 0,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-ffb2b1b7a7d3",
       "heldOutIndexPresent": true
@@ -2099,8 +2099,8 @@
     {
       "id": "turnitin-the-effect-of-ramadan-fasting-on-maximum-aerobic-speed-and-fat-mass-in-football-players-under-19-84144da75663",
       "actual": 30,
-      "score": 12,
-      "naiveScore": 89,
+      "score": 14,
+      "naiveScore": 90,
       "excludedClusterMembers": [
         "turnitin-the-effect-of-ramadan-fasting-on-maximum-aerobic-speed-and-fat-mass-in-football-players-under-19-ae4ad89198ee"
       ],
@@ -2110,8 +2110,8 @@
     {
       "id": "turnitin-the-effect-of-ramadan-fasting-on-maximum-aerobic-speed-and-fat-mass-in-football-players-under-19-ae4ad89198ee",
       "actual": 17,
-      "score": 8,
-      "naiveScore": 8,
+      "score": 9,
+      "naiveScore": 9,
       "excludedClusterMembers": [
         "turnitin-the-effect-of-ramadan-fasting-on-maximum-aerobic-speed-and-fat-mass-in-football-players-under-19-84144da75663"
       ],
@@ -2121,8 +2121,8 @@
     {
       "id": "turnitin-the-effect-of-static-stretching-exercises-on-improving-speed-and-agility-in-soccer-players-5884c1e8e7c7",
       "actual": 24,
-      "score": 7,
-      "naiveScore": 7,
+      "score": 8,
+      "naiveScore": 8,
       "excludedClusterMembers": [
         "turnitin-the-effect-of-static-stretching-exercises-on-improving-speed-and-agility-in-soccer-players-8b5615d9362c"
       ],
@@ -2132,8 +2132,8 @@
     {
       "id": "turnitin-the-effect-of-static-stretching-exercises-on-improving-speed-and-agility-in-soccer-players-8b5615d9362c",
       "actual": 20,
-      "score": 7,
-      "naiveScore": 90,
+      "score": 8,
+      "naiveScore": 91,
       "excludedClusterMembers": [
         "turnitin-the-effect-of-static-stretching-exercises-on-improving-speed-and-agility-in-soccer-players-5884c1e8e7c7"
       ],
@@ -2154,8 +2154,8 @@
     {
       "id": "turnitin-the-ethics-of-civil-society-work-is-a-basic-pillar-for-achieving-community-security-868f296b3135",
       "actual": 8,
-      "score": 8,
-      "naiveScore": 8,
+      "score": 10,
+      "naiveScore": 10,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-0dcd1e3b6bc5",
       "heldOutIndexPresent": true
@@ -2172,7 +2172,7 @@
     {
       "id": "turnitin-the-exclusive-legislative-power-of-the-head-of-state-by-8a105631e2f9",
       "actual": 15,
-      "score": 17,
+      "score": 18,
       "naiveScore": 95,
       "excludedClusterMembers": [
         "turnitin-the-exclusive-legislative-power-of-the-head-of-state-by-ordinances-in-normal-circumstances-accor-d69190fe87d9"
@@ -2183,8 +2183,8 @@
     {
       "id": "turnitin-the-exclusive-legislative-power-of-the-head-of-state-by-ordinances-in-normal-circumstances-accor-d69190fe87d9",
       "actual": 8,
-      "score": 15,
-      "naiveScore": 15,
+      "score": 16,
+      "naiveScore": 16,
       "excludedClusterMembers": [
         "turnitin-the-exclusive-legislative-power-of-the-head-of-state-by-8a105631e2f9"
       ],
@@ -2194,7 +2194,7 @@
     {
       "id": "turnitin-the-exploitation-and-granting-of-economic-real-estate-according-to-the-law-no-23-17-8128a03cc5f1",
       "actual": 5,
-      "score": 14,
+      "score": 15,
       "naiveScore": 98,
       "excludedClusterMembers": [
         "turnitin-the-exploitation-and-granting-of-economic-real-estate-according-to-the-law-no-23-17-8128a03cc5f1-2",
@@ -2207,8 +2207,8 @@
     {
       "id": "turnitin-the-exploitation-and-granting-of-economic-real-estate-according-to-the-law-no-23-17-96c90b914101",
       "actual": 8,
-      "score": 15,
-      "naiveScore": 15,
+      "score": 17,
+      "naiveScore": 17,
       "excludedClusterMembers": [
         "turnitin-the-exploitation-and-granting-of-economic-real-estate-according-to-the-law-no-23-17-8128a03cc5f1",
         "turnitin-the-exploitation-and-granting-of-economic-real-estate-according-to-the-law-no-23-17-8128a03cc5f1-2",
@@ -2220,8 +2220,8 @@
     {
       "id": "turnitin-the-extent-of-legal-responsibility-s-effectiveness-in-curbing-the-misconduct-of-artificial-intel-7a47f996dee4",
       "actual": 1,
-      "score": 1,
-      "naiveScore": 1,
+      "score": 0,
+      "naiveScore": 0,
       "excludedClusterMembers": [
         "turnitin-limits-of-the-effectiveness-of-legal-responsibility-in-reducing-artificial-intelligence-deviance-fd184a772031"
       ],
@@ -2312,8 +2312,8 @@
     {
       "id": "turnitin-the-impact-of-electronic-management-on-the-financial-performance-of-algerian-municipality-studyi-1fc7e78c83f4",
       "actual": 15,
-      "score": 7,
-      "naiveScore": 7,
+      "score": 8,
+      "naiveScore": 8,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-a7f9446c5d5b",
       "heldOutIndexPresent": true
@@ -2332,8 +2332,8 @@
     {
       "id": "turnitin-the-impact-of-off-balance-sheet-items-on-the-technical-efficiency-of-private-banks-in-algeria-e448b02b0cfb",
       "actual": 12,
-      "score": 5,
-      "naiveScore": 5,
+      "score": 6,
+      "naiveScore": 6,
       "excludedClusterMembers": [
         "turnitin-the-impact-of-off-balance-sheet-items-on-the-technical-efficiency-of-private-banks-in-algeria-b607b178f5e7"
       ],
@@ -2343,7 +2343,7 @@
     {
       "id": "turnitin-the-impact-of-playing-electronic-games-on-linguistic-intelligence-and-social-intelligence-in-chi-8c4878db5a29",
       "actual": 7,
-      "score": 2,
+      "score": 1,
       "naiveScore": 45,
       "excludedClusterMembers": [
         "turnitin-the-impact-of-playing-electronic-games-on-linguistic-intelligence-and-social-intelligence-in-chi-8f86441fcb06"
@@ -2354,8 +2354,8 @@
     {
       "id": "turnitin-the-impact-of-playing-electronic-games-on-linguistic-intelligence-and-social-intelligence-in-chi-8f86441fcb06",
       "actual": 11,
-      "score": 2,
-      "naiveScore": 2,
+      "score": 3,
+      "naiveScore": 3,
       "excludedClusterMembers": [
         "turnitin-the-impact-of-playing-electronic-games-on-linguistic-intelligence-and-social-intelligence-in-chi-8c4878db5a29"
       ],
@@ -2365,8 +2365,8 @@
     {
       "id": "turnitin-the-impact-of-the-cancellation-of-the-professional-activity-tax-on-local-6c61188c823c",
       "actual": 2,
-      "score": 9,
-      "naiveScore": 9,
+      "score": 10,
+      "naiveScore": 10,
       "excludedClusterMembers": [
         "turnitin-socialization-of-children-in-the-age-of-communicative-globalization-challenges-and-protection-me-4dce4d8e30cc"
       ],
@@ -2398,8 +2398,8 @@
     {
       "id": "turnitin-the-importance-of-archaeological-evidence-in-writing-the-history-of-the-numidia-region-6921e00ee747",
       "actual": 3,
-      "score": 1,
-      "naiveScore": 1,
+      "score": 0,
+      "naiveScore": 0,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-5f33b8b0b88e",
       "heldOutIndexPresent": true
@@ -2407,8 +2407,8 @@
     {
       "id": "turnitin-the-inadequacy-of-traditional-foundations-of-international-9cb9aa501d18",
       "actual": 5,
-      "score": 3,
-      "naiveScore": 3,
+      "score": 4,
+      "naiveScore": 4,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-2e550300a723",
       "heldOutIndexPresent": true
@@ -2425,8 +2425,8 @@
     {
       "id": "turnitin-the-internal-regulations-of-the-council-of-the-nation-of-2017-a-study-of-the-concept-and-content-d2ef56af9e17",
       "actual": 13,
-      "score": 13,
-      "naiveScore": 13,
+      "score": 14,
+      "naiveScore": 14,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-d2f6f388a5b2",
       "heldOutIndexPresent": true
@@ -2434,8 +2434,8 @@
     {
       "id": "turnitin-the-international-employee-conceptual-challenges-and-the-dialectical-relationship-with-internati-b8cdad77e8df",
       "actual": 9,
-      "score": 2,
-      "naiveScore": 74,
+      "score": 1,
+      "naiveScore": 75,
       "excludedClusterMembers": [
         "turnitin-the-international-employee-conceptual-challenges-and-the-dialectical-relationship-with-internati-f167ddf99fb3"
       ],
@@ -2445,8 +2445,8 @@
     {
       "id": "turnitin-the-international-employee-conceptual-challenges-and-the-dialectical-relationship-with-internati-f167ddf99fb3",
       "actual": 17,
-      "score": 2,
-      "naiveScore": 2,
+      "score": 1,
+      "naiveScore": 1,
       "excludedClusterMembers": [
         "turnitin-the-international-employee-conceptual-challenges-and-the-dialectical-relationship-with-internati-b8cdad77e8df"
       ],
@@ -2465,8 +2465,8 @@
     {
       "id": "turnitin-the-licensing-system-as-a-mechanism-for-regulating-economic-concentrations-6c78abf15f97",
       "actual": 1,
-      "score": 7,
-      "naiveScore": 7,
+      "score": 8,
+      "naiveScore": 8,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-1273c541fc00",
       "heldOutIndexPresent": true
@@ -2483,7 +2483,7 @@
     {
       "id": "turnitin-the-obligation-to-ensure-safety-in-tourism-contracts-96be2e285d29",
       "actual": 6,
-      "score": 7,
+      "score": 9,
       "naiveScore": 90,
       "excludedClusterMembers": [
         "turnitin-commitment-to-ensuring-tourist-safety-in-the-tourism-62420cd58f7f"
@@ -2494,8 +2494,8 @@
     {
       "id": "turnitin-the-obligations-arising-from-the-mandatory-insurance-contract-against-natural-disasters-in-alger-9d750f9a8363",
       "actual": 4,
-      "score": 6,
-      "naiveScore": 6,
+      "score": 4,
+      "naiveScore": 4,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-9862f0c1bfcf",
       "heldOutIndexPresent": true
@@ -2503,8 +2503,8 @@
     {
       "id": "turnitin-the-outcome-of-empowerment-on-the-development-of-intellectual-capital-a-case-study-of-the-algeri-5f7be8372477",
       "actual": 12,
-      "score": 9,
-      "naiveScore": 9,
+      "score": 12,
+      "naiveScore": 12,
       "excludedClusterMembers": [
         "turnitin-the-outcome-of-empowerment-on-the-development-of-intellectual-capital-a-case-study-of-the-algeri-f7862a954cdb"
       ],
@@ -2514,8 +2514,8 @@
     {
       "id": "turnitin-the-outcome-of-empowerment-on-the-development-of-intellectual-capital-a-case-study-of-the-algeri-f7862a954cdb",
       "actual": 16,
-      "score": 10,
-      "naiveScore": 93,
+      "score": 13,
+      "naiveScore": 94,
       "excludedClusterMembers": [
         "turnitin-the-outcome-of-empowerment-on-the-development-of-intellectual-capital-a-case-study-of-the-algeri-5f7be8372477"
       ],
@@ -2525,8 +2525,8 @@
     {
       "id": "turnitin-the-path-of-digitization-for-public-healthcare-institutions-in-the-province-of-annaba-eastern-al-4ab488f8cd69",
       "actual": 3,
-      "score": 5,
-      "naiveScore": 5,
+      "score": 6,
+      "naiveScore": 6,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-3550c8ded9d7",
       "heldOutIndexPresent": true
@@ -2561,8 +2561,8 @@
     {
       "id": "turnitin-the-reality-efforts-and-obstacles-of-local-development-in-algeria-the-case-of-815896f1b365",
       "actual": 7,
-      "score": 8,
-      "naiveScore": 8,
+      "score": 10,
+      "naiveScore": 10,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-42db743932cf",
       "heldOutIndexPresent": true
@@ -2591,7 +2591,7 @@
       "id": "turnitin-the-reality-of-gender-equality-in-the-management-of-joint-stock-companies-f5bd19e09478",
       "actual": 18,
       "score": 8,
-      "naiveScore": 94,
+      "naiveScore": 95,
       "excludedClusterMembers": [
         "turnitin-the-reality-of-gender-equality-in-the-management-of-joint-stock-companies-917388b1917b"
       ],
@@ -2601,8 +2601,8 @@
     {
       "id": "turnitin-the-relationship-between-electronic-auditing-and-external-0d13bfff3bfb",
       "actual": 12,
-      "score": 3,
-      "naiveScore": 3,
+      "score": 4,
+      "naiveScore": 4,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-c66ebade5a20",
       "heldOutIndexPresent": true
@@ -2610,8 +2610,8 @@
     {
       "id": "turnitin-the-relationship-between-sports-marketing-and-increasing-revenues-for-sports-institutions-6c717a9b545f",
       "actual": 12,
-      "score": 6,
-      "naiveScore": 6,
+      "score": 7,
+      "naiveScore": 7,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-2cd1b2fd24be",
       "heldOutIndexPresent": true
@@ -2628,8 +2628,8 @@
     {
       "id": "turnitin-the-restrictions-on-media-activity-under-the-2020-constitutional-amendment-the-case-of-press-fre-c295b1f99f2c",
       "actual": 9,
-      "score": 7,
-      "naiveScore": 7,
+      "score": 9,
+      "naiveScore": 9,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-819a82c08f3e",
       "heldOutIndexPresent": true
@@ -2637,8 +2637,8 @@
     {
       "id": "turnitin-the-rhetoric-of-concision-in-the-two-mu-awwidhatan-6996a6b4ce5c",
       "actual": 8,
-      "score": 2,
-      "naiveScore": 2,
+      "score": 1,
+      "naiveScore": 1,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-9a013b8d7fde",
       "heldOutIndexPresent": true
@@ -2669,7 +2669,7 @@
       "id": "turnitin-the-right-to-human-dignity-and-moral-integrity-in-the-workplace-between-the-idealism-of-laws-and-f82711b82f12",
       "actual": 11,
       "score": 2,
-      "naiveScore": 93,
+      "naiveScore": 94,
       "excludedClusterMembers": [
         "turnitin-the-right-to-human-dignity-and-moral-integrity-in-the-workplace-between-the-idealism-of-laws-and-f65f6d579b70"
       ],
@@ -2691,7 +2691,7 @@
       "id": "turnitin-the-role-of-artificial-intelligence-in-financial-decision-making-opportunities-and-risks-e11cb7f96633",
       "actual": 32,
       "score": 3,
-      "naiveScore": 65,
+      "naiveScore": 66,
       "excludedClusterMembers": [
         "turnitin-the-role-of-artificial-intelligence-in-financial-decision-making-opportunities-and-risks-d2d519930356"
       ],
@@ -2701,8 +2701,8 @@
     {
       "id": "turnitin-the-role-of-artificial-intelligence-in-reducing-banking-fraud-and-enhancing-cybersecurity-d2e7078a0a20",
       "actual": 16,
-      "score": 2,
-      "naiveScore": 2,
+      "score": 3,
+      "naiveScore": 3,
       "excludedClusterMembers": [
         "turnitin-the-role-of-artificial-intelligence-in-reducing-banking-fraud-and-enhancing-cybersecurity-d2e7078a0a20-2",
         "turnitin-the-role-of-artificial-intelligence-in-reducing-banking-fraud-and-enhancing-cybersecurity-ea668980d2d7",
@@ -2714,7 +2714,7 @@
     {
       "id": "turnitin-the-role-of-artificial-intelligence-in-reducing-banking-fraud-and-enhancing-cybersecurity-ea668980d2d7",
       "actual": 23,
-      "score": 2,
+      "score": 3,
       "naiveScore": 89,
       "excludedClusterMembers": [
         "turnitin-the-role-of-artificial-intelligence-in-reducing-banking-fraud-and-enhancing-cybersecurity-d2e7078a0a20",
@@ -2738,8 +2738,8 @@
     {
       "id": "turnitin-the-role-of-internal-communication-in-activating-knowledge-management-processes-a-study-of-the-o-f8af9d1c0ed9",
       "actual": 12,
-      "score": 4,
-      "naiveScore": 4,
+      "score": 3,
+      "naiveScore": 3,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-4797cd609797",
       "heldOutIndexPresent": true
@@ -2747,8 +2747,8 @@
     {
       "id": "turnitin-the-role-of-interpretation-in-business-criminal-law-e5c73aedcdc5",
       "actual": 1,
-      "score": 1,
-      "naiveScore": 1,
+      "score": 0,
+      "naiveScore": 0,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-5becf6624840",
       "heldOutIndexPresent": true
@@ -2756,8 +2756,8 @@
     {
       "id": "turnitin-the-role-of-the-algerian-customs-administration-in-combating-counterfeiting-0713361f6c89",
       "actual": 4,
-      "score": 2,
-      "naiveScore": 2,
+      "score": 1,
+      "naiveScore": 1,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-d7584e63b862",
       "heldOutIndexPresent": true
@@ -2765,8 +2765,8 @@
     {
       "id": "turnitin-the-role-of-the-judiciary-in-resolving-the-plea-of-unconstitutionality-under-organic-law-22-19-147eea83f414",
       "actual": 10,
-      "score": 10,
-      "naiveScore": 10,
+      "score": 12,
+      "naiveScore": 12,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-a90a629390b2",
       "heldOutIndexPresent": true
@@ -2774,8 +2774,8 @@
     {
       "id": "turnitin-the-role-of-the-national-agency-for-industrial-26f1edc3bb51",
       "actual": 19,
-      "score": 16,
-      "naiveScore": 16,
+      "score": 21,
+      "naiveScore": 21,
       "excludedClusterMembers": [
         "turnitin-the-role-of-the-national-agency-for-industrial-26f1edc3bb51-2",
         "turnitin-the-role-of-the-national-agency-for-industrial-real-estate-in-the-management-and-development-of--0fd691dbfd8b",
@@ -2788,8 +2788,8 @@
     {
       "id": "turnitin-the-role-of-the-national-agency-for-industrial-26f1edc3bb51-2",
       "actual": 19,
-      "score": 16,
-      "naiveScore": 99,
+      "score": 21,
+      "naiveScore": 100,
       "excludedClusterMembers": [
         "turnitin-the-role-of-the-national-agency-for-industrial-26f1edc3bb51",
         "turnitin-the-role-of-the-national-agency-for-industrial-real-estate-in-the-management-and-development-of--0fd691dbfd8b",
@@ -2802,7 +2802,7 @@
     {
       "id": "turnitin-the-role-of-the-national-agency-for-industrial-real-estate-in-the-management-and-development-of--0fd691dbfd8b",
       "actual": 18,
-      "score": 15,
+      "score": 19,
       "naiveScore": 98,
       "excludedClusterMembers": [
         "turnitin-the-role-of-the-national-agency-for-industrial-26f1edc3bb51",
@@ -2816,8 +2816,8 @@
     {
       "id": "turnitin-the-role-of-the-national-agency-for-industrial-real-estate-in-the-management-and-development-of--86488496339f",
       "actual": 19,
-      "score": 16,
-      "naiveScore": 97,
+      "score": 20,
+      "naiveScore": 98,
       "excludedClusterMembers": [
         "turnitin-the-role-of-the-national-agency-for-industrial-26f1edc3bb51",
         "turnitin-the-role-of-the-national-agency-for-industrial-26f1edc3bb51-2",
@@ -2830,8 +2830,8 @@
     {
       "id": "turnitin-the-role-of-the-national-agency-for-industrial-real-estate-in-the-management-and-development-of--86488496339f-2",
       "actual": 19,
-      "score": 16,
-      "naiveScore": 97,
+      "score": 20,
+      "naiveScore": 98,
       "excludedClusterMembers": [
         "turnitin-the-role-of-the-national-agency-for-industrial-26f1edc3bb51",
         "turnitin-the-role-of-the-national-agency-for-industrial-26f1edc3bb51-2",
@@ -2853,8 +2853,8 @@
     {
       "id": "turnitin-the-self-and-the-other-in-digital-literature-virtual-identities-and-their-interactions-bb6ab7c1bc85",
       "actual": 1,
-      "score": 6,
-      "naiveScore": 6,
+      "score": 7,
+      "naiveScore": 7,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-f613880c3ebf",
       "heldOutIndexPresent": true
@@ -2889,8 +2889,8 @@
     {
       "id": "turnitin-the-use-of-smart-agriculture-technologies-as-a-mechanism-for-75dbc8c06bb1",
       "actual": 20,
-      "score": 9,
-      "naiveScore": 91,
+      "score": 10,
+      "naiveScore": 92,
       "excludedClusterMembers": [
         "turnitin-the-use-of-smart-agriculture-technologies-as-a-mechanism-for-d5cfa2e32c73"
       ],
@@ -2911,8 +2911,8 @@
     {
       "id": "turnitin-the-written-press-and-electronic-press-regulatory-authority-between-independence-and-dependence--8f0beaef63cc",
       "actual": 32,
-      "score": 6,
-      "naiveScore": 6,
+      "score": 8,
+      "naiveScore": 8,
       "excludedClusterMembers": [
         "turnitin-between-independence-and-dependence-in-light-of-law-no-23-19-df5c0affd530"
       ],
@@ -2922,8 +2922,8 @@
     {
       "id": "turnitin-tourism-as-a-strategic-option-for-promoting-economic-diversification-in-algeria-4d4142c3bb5c",
       "actual": 8,
-      "score": 7,
-      "naiveScore": 7,
+      "score": 9,
+      "naiveScore": 9,
       "excludedClusterMembers": [],
       "revisionGroupId": "revision-7ca882512869",
       "heldOutIndexPresent": true
@@ -2931,8 +2931,8 @@
     {
       "id": "turnitin-towards-regulating-freelance-work-and-the-informal-economy-in-algeria-2b595d83e559",
       "actual": 8,
-      "score": 2,
-      "naiveScore": 2,
+      "score": 1,
+      "naiveScore": 1,
       "excludedClusterMembers": [
         "turnitin-towards-regulating-freelance-work-and-the-informal-economy-in-algeria-2b595d83e559-2",
         "turnitin-towards-regulating-freelance-work-and-the-informal-economy-in-algeria-will-the-self-employed-law-94c466362aea",
@@ -2944,7 +2944,7 @@
     {
       "id": "turnitin-towards-regulating-freelance-work-and-the-informal-economy-in-algeria-2b595d83e559-2",
       "actual": 8,
-      "score": 2,
+      "score": 1,
       "naiveScore": 100,
       "excludedClusterMembers": [
         "turnitin-towards-regulating-freelance-work-and-the-informal-economy-in-algeria-2b595d83e559",
@@ -2957,8 +2957,8 @@
     {
       "id": "turnitin-towards-regulating-freelance-work-and-the-informal-economy-in-algeria-will-the-self-employed-law-94c466362aea",
       "actual": 7,
-      "score": 2,
-      "naiveScore": 93,
+      "score": 1,
+      "naiveScore": 94,
       "excludedClusterMembers": [
         "turnitin-towards-regulating-freelance-work-and-the-informal-economy-in-algeria-2b595d83e559",
         "turnitin-towards-regulating-freelance-work-and-the-informal-economy-in-algeria-2b595d83e559-2",
@@ -2971,7 +2971,7 @@
       "id": "turnitin-towards-regulating-freelance-work-and-the-informal-economy-in-algeria-will-the-self-employed-law-e8cb1ddd7e73",
       "actual": 11,
       "score": 2,
-      "naiveScore": 90,
+      "naiveScore": 91,
       "excludedClusterMembers": [
         "turnitin-towards-regulating-freelance-work-and-the-informal-economy-in-algeria-2b595d83e559",
         "turnitin-towards-regulating-freelance-work-and-the-informal-economy-in-algeria-2b595d83e559-2",

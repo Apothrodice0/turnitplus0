@@ -106,8 +106,11 @@ if (HAVE_CORPUS) {
     }
   });
 
-  test("Phase 7: exact-reupload watch probes — locked (== committed B, all < 7)", async () => {
-    const expected = { 2: 3, 53: 1, 54: 5, 74: 4, 134: 6, 167: 2, 176: 5, 219: 6 };
+  // Values under the stable-union scorer at risk-calibration v9 (floor 0.5 on a
+  // source's own evidence): x-o2 3 -> 2, x-o54 5 -> 4, x-o167 2 -> 1, the rest
+  // as before.
+  test("Phase 7: exact-reupload watch probes — locked, all below the archive cutoff", async () => {
+    const expected = { 2: 2, 53: 1, 54: 4, 74: 4, 134: 6, 167: 1, 176: 5, 219: 6 };
     for (const [o, want] of Object.entries(expected)) {
       const got = await score(byOrder.get(Number(o)).text);
       assert.equal(got, want, `x-o${o}`);
