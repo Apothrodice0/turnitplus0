@@ -2,17 +2,29 @@ import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { basename, resolve } from "node:path";
 import { writeFileSync } from "node:fs";
-import { extractPdfTextDocument } from "../lib/pdf-text-extraction";
+import { assertPdfjsContractVersion, extractPdfTextDocument, PDF_EXTRACTOR_VERSION } from "../lib/pdf-text-extraction";
+import {
+  AI_NEGATIVE_EXTRACTION_METHOD,
+  assertExtractionContractReplacementAcknowledged,
+  extractionContractsBeingReplaced,
+  reextractedProvenance,
+  REPLACE_EXTRACTION_CONTRACT_FLAG,
+} from "./ai-negative-extraction-provenance";
 import { loadManifest, type CorpusManifestEntry } from "./calibration-utils";
 
-const EXTRACTION_CONTRACT_VERSION = 3;
-const EXTRACTION_METHOD = "shared-pdfjs-text-layer-v3";
 const REPORT_PATH = "corpus/ai-extraction-parity-report.json";
 
 function argument(name: string) {
   const index = process.argv.indexOf(name);
   if (index < 0 || !process.argv[index + 1]) throw new Error(`Missing ${name} <zip-path>.`);
   return resolve(process.argv[index + 1]);
+}
+
+function optionalValue(name: string) {
+  const index = process.argv.indexOf(name);
+  if (index < 0) return null;
+  if (!process.argv[index + 1]) throw new Error(`Missing a value for ${name}.`);
+  return process.argv[index + 1];
 }
 
 const archives: Record<string, string> = {
@@ -50,8 +62,13 @@ const negatives = manifest.filter((entry) => entry.roles.includes("ai-negative")
 if (negatives.length !== 88) {
   throw new Error(`Expected the locked 88-document negative set; found ${negatives.length}.`);
 }
+// Before anything is read or written: text recorded under another extraction
+// contract is only replaced when the operator names the new one.
+const replacedContracts = extractionContractsBeingReplaced(negatives);
+assertExtractionContractReplacementAcknowledged(negatives, optionalValue(REPLACE_EXTRACTION_CONTRACT_FLAG));
 
 const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+assertPdfjsContractVersion(pdfjs.version);
 const updates = new Map<string, { text: string; textSha256: string; pdfSha256: string; sourceFileName: string }>();
 
 for (let index = 0; index < negatives.length; index += 1) {
@@ -83,14 +100,12 @@ const updatedManifest = manifest.map((entry) => {
   writeFileSync(resolve("corpus", entry.textPath), update.text);
   return {
     ...entry,
-    provenance: {
-      ...entry.provenance,
-      sha256: update.textSha256,
+    provenance: reextractedProvenance(entry.provenance, {
+      textSha256: update.textSha256,
       pdfSha256: update.pdfSha256,
       sourceFileName: update.sourceFileName,
-      extractionMethod: EXTRACTION_METHOD,
-      textExtractionContractVersion: EXTRACTION_CONTRACT_VERSION,
-    },
+      pdfjsVersion: pdfjs.version,
+    }),
   };
 });
 writeFileSync("corpus/manifest.json", `${JSON.stringify(updatedManifest, null, 2)}\n`);
@@ -102,12 +117,16 @@ const perArchive = Object.entries(archives).map(([source, path]) => ({
 }));
 const report = {
   schema: "turnitplus-ai-extraction-parity",
-  version: 2,
+  // 3: the integer extractionContractVersion gave way to the extractor's own
+  // tag and pdf.js release, and the contracts a run replaced are recorded.
+  version: 3,
   generatedBy: "tools/reextract-ai-negatives-pdfjs.ts",
   generatedAt: new Date().toISOString(),
   status: "passed",
-  extractionContractVersion: EXTRACTION_CONTRACT_VERSION,
-  extractionMethod: EXTRACTION_METHOD,
+  extractionMethod: AI_NEGATIVE_EXTRACTION_METHOD,
+  pdfExtractorVersion: PDF_EXTRACTOR_VERSION,
+  pdfjsVersion: pdfjs.version,
+  replacedExtractionContracts: replacedContracts,
   verifiedDocumentCount: negatives.length,
   verifiedPdfHashCount: negatives.length,
   sourceArchives: perArchive,

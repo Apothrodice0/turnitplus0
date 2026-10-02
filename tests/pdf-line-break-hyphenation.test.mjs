@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   extractPdfTextDocument,
@@ -623,6 +624,75 @@ test("table: across a row change the geometry no longer separates the cells of o
   assertRefused([table("senate")], ["13-joined-word-inline"]);
   const withEvidence = [...table("ment"), item("The word government was used above.", { y: 640 })];
   assertJoined([withEvidence], "govern+ment");
+});
+
+// -----------------------------------------------------------------------------
+// Tables as pdf.js really reports them: the recorded pdf.js 6.2.108 item
+// streams of seven small table PDFs (pdf-lib, standard Helvetica, invented
+// text). pdf.js emits a whole printed table row as ONE line — the cells of a
+// row are not separated by an end-of-line — so the only table boundary the
+// rule can meet is a ROW CHANGE: the last cell's wrapped line, then the first
+// cell's next line.
+//
+// T5 and T7 are a KNOWN COUNTEREXAMPLE, pinned so that it stays visible — not
+// endorsed. The frozen rule joins across that boundary when the row reaches
+// the right edge of its block and left + right fragment happen to spell a word
+// the document writes inline: "provides the in-" (which continues "ternal
+// audit report" in its own cell) + the first cell's "formation of the
+// committee" becomes "information". It is a wrong join at a structural
+// boundary. Nothing geometric refuses it; only the evidence predicates can
+// (T6: the same table, "information" not written anywhere, is left alone).
+// -----------------------------------------------------------------------------
+const tables = JSON.parse(readFileSync(new URL("./fixtures/pdf-line-break/table-fixtures.json", import.meta.url), "utf8"));
+const tableCase = (id) => {
+  const fixture = tables.fixtures.find((candidate) => candidate.id === id);
+  assert.ok(fixture, `table fixture ${id}`);
+  return { fixture, result: repair(fixture.pages) };
+};
+
+test("real pdf.js table, same row: a hyphen at the end of a cell is not at the end of a line, so it is not even a candidate", () => {
+  const { fixture, result } = tableCase("T1");
+  assert.equal(result.sites.length, 0);
+  assert.equal(result.lineBreakJoins, 0);
+  assert.deepEqual(result.pages, fixture.pages.map(v1PageText));
+  assert.ok(result.pages[0].includes("Registry provides the in- formation desk"), "the row is one line; the cell hyphen stays");
+});
+
+test("real pdf.js table, row change in a table narrower than the text block: refused, the row does not reach the block's right edge", () => {
+  for (const [id, failed] of [
+    ["T2", ["12-right-edge-would-not-fit", "13-joined-word-inline"]],
+    ["T3", ["12-right-edge-would-not-fit"]], // "information" IS written inline here; geometry alone refuses
+    ["T4", ["12-right-edge-would-not-fit", "13-joined-word-inline"]],
+  ]) {
+    const { fixture, result } = tableCase(id);
+    assert.deepEqual(onlySite(result).failed, failed, id);
+    assert.equal(result.lineBreakJoins, 0, id);
+    assert.deepEqual(result.pages, fixture.pages.map(v1PageText), id);
+  }
+});
+
+test("real pdf.js table, row change in a full-width table, joined word not written anywhere: refused by the evidence predicate alone", () => {
+  const { fixture, result } = tableCase("T6");
+  const site = onlySite(result);
+  assert.equal(`${site.leftFragment}+${site.rightFragment}`, "in+formation");
+  assert.deepEqual(site.failed, ["13-joined-word-inline"], "every geometric predicate passes at this row change");
+  assert.equal(result.lineBreakJoins, 0);
+  assert.deepEqual(result.pages, fixture.pages.map(v1PageText));
+});
+
+test("KNOWN COUNTEREXAMPLE (wrong join, pinned, not endorsed): a row change in a full-width table IS joined when the fragments happen to spell an inline word", () => {
+  for (const id of ["T5", "T7"]) {
+    const { fixture, result } = tableCase(id);
+    const site = onlySite(result);
+    assert.equal(`${site.leftFragment}+${site.rightFragment}`, "in+formation", id);
+    assert.deepEqual(site.failed, [], id);
+    assert.equal(site.join, true, id);
+    assert.equal(site.measurements.joinedInline, 1, `${id}: "information" is written once, elsewhere on the page`);
+    assert.equal(result.lineBreakJoins, 1, id);
+    // v1 kept the two cells apart; v2 fuses the last cell of one line with the first cell of the next
+    assert.ok(v1PageText(fixture.pages[0]).includes("provides the in- formation of the committee ternal audit report"), id);
+    assert.ok(result.pages[0].includes("provides the information of the committee ternal audit report"), id);
+  }
 });
 
 // =============================================================================

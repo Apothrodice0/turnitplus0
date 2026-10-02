@@ -192,6 +192,16 @@ npm run reextract:ai-negatives -- \
 This command refuses any source PDF whose SHA-256 differs from the manifest and
 writes `corpus/ai-extraction-parity-report.json` before calibration continues.
 
+The text it writes is labelled with the extractor that produced it
+(`shared-pdfjs-text-layer-<PDF_EXTRACTOR_VERSION>`, today
+`shared-pdfjs-text-layer-pdf-text-extraction-v2`). The 88 calibrated documents
+are recorded as `shared-pdfjs-text-layer-v3`, an earlier extraction contract,
+so the command stops without reading or writing anything unless it is told to
+replace them: add
+`--replace-extraction-contract shared-pdfjs-text-layer-pdf-text-extraction-v2`.
+Doing so changes the text the AI calibration was measured on; repeat the AI
+calibration afterwards.
+
 ```sh
 npm run validate:corpus
 npm run build:index
