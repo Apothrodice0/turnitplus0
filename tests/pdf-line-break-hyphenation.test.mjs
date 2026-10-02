@@ -10,7 +10,7 @@ import { compareWithReference, reference, v1PageText } from "./fixtures/pdf-line
 
 /**
  * pdf-text-extraction-v2 — FOCUSED FIXTURES for the line-break hyphenation
- * repair (Rule B2). One test per predicate and per boundary of each numeric
+ * repair (Rule B3). One test per predicate and per boundary of each numeric
  * threshold.
  *
  * These pin what the frozen rule DOES, not what one might wish it did: a few
@@ -20,7 +20,7 @@ import { compareWithReference, reference, v1PageText } from "./fixtures/pdf-line
  * rule changed, which is a new extractor version.
  *
  * Every page built here is also run through the frozen reference
- * (tests/fixtures/pdf-line-break/rule-b2-reference.mjs); production must agree
+ * (tests/fixtures/pdf-line-break/rule-b3-reference.mjs); production must agree
  * with it site by site and character by character.
  */
 
@@ -69,7 +69,7 @@ const LAST = "the presiding judge.";
 /** Runs production, checks it against the frozen reference, returns the result. */
 function repair(pages) {
   const { actual, differences } = compareWithReference(pages, inspectPdfLineBreakRepair);
-  assert.deepEqual(differences, [], "production must equal the frozen Rule B2 reference");
+  assert.deepEqual(differences, [], "production must equal the frozen Rule B3 reference");
   return actual;
 }
 
@@ -593,7 +593,9 @@ test("multi-column: two columns emitted side by side on one baseline are one pri
     ["the first column then simply goes on and", "so does the second column beside it"],
   ];
   const items = rows.flatMap(([a, b], index) => [item(a, { x: 72, y: 700 - index * 12, width: 230 }), item(b, { x: 330, y: 700 - index * 12, width: 230 })]);
-  assertRefused([items], ["9-next-line-below-at-body-pitch", "12-right-edge-would-not-fit"]);
+  // the second column is on the same baseline (9), the printed line goes on to
+  // the right (12), and the 2.8 em between the two columns is a gutter (12b)
+  assertRefused([items], ["9-next-line-below-at-body-pitch", "12-right-edge-would-not-fit", "12b-no-column-gutter"]);
 });
 
 test("table: a cell that ends with a hyphen is not continued in the next cell of its row", () => {
@@ -605,43 +607,199 @@ test("table: a cell that ends with a hyphen is not continued in the next cell of
     item("The word example was already used in the header of the table.", { y: 640 }),
   ];
   // the cells of a row are one printed line: the next cell is on the same
-  // baseline (9), and the "line" it belongs to goes on to the right (12)
-  assertRefused([items], ["9-next-line-below-at-body-pitch", "12-right-edge-would-not-fit"]);
+  // baseline (9), the "line" it belongs to goes on to the right (12), and it
+  // holds the gutters of the table (12b)
+  assertRefused([items], ["9-next-line-below-at-body-pitch", "12-right-edge-would-not-fit", "12b-no-column-gutter"]);
 });
 
-test("table: across a row change the geometry no longer separates the cells of one printed row — only the inline evidence does", () => {
+test("table: across a row change the cells of one printed row are kept apart by its gutters, with or without inline evidence", () => {
   // The last cell of a row ends "govern-"; the first cell of the next row
   // starts "ment". The cells of a row merge into one printed line, so the next
-  // row IS directly below in the same column: predicates 9-12 pass. Rule B2
-  // refuses this break only when the joined word is not written inline.
+  // row IS directly below in the same column: predicates 9-12 pass. The row
+  // holds two gutters of several em: predicate 12b refuses the break, even
+  // when "government" is written inline.
   const row = (cells, y) => cells.map(([str, x, width]) => item(str, { x, y, width }));
   const table = (firstCellOfNextRow) => [
     ...row([["Body", 72, 80], ["Seat", 200, 90], ["Type of body", 400, 100]], 700),
     ...row([["Council", 72, 80], ["Capital", 200, 90], ["local govern-", 400, 100]], 686),
     ...row([[firstCellOfNextRow, 72, 80], ["Capital", 200, 90], ["agency", 400, 100]], 672),
   ];
-  assertRefused([table("Senate")], ["3-lowercase-at-break", "13-joined-word-inline"]);
-  assertRefused([table("senate")], ["13-joined-word-inline"]);
+  assertRefused([table("Senate")], ["3-lowercase-at-break", "12b-no-column-gutter", "13-joined-word-inline"]);
+  assertRefused([table("senate")], ["12b-no-column-gutter", "13-joined-word-inline"]);
   const withEvidence = [...table("ment"), item("The word government was used above.", { y: 640 })];
-  assertJoined([withEvidence], "govern+ment");
+  const site = onlySite(assertRefused([withEvidence], ["12b-no-column-gutter"]));
+  assert.equal(site.measurements.joinedInline, 1, "the evidence predicates would have allowed the join");
+  assert.equal(site.measurements.widestGapEm, 11);
+  assert.equal(site.measurements.sharedGutter, true);
+});
+
+// =============================================================================
+// Predicate 12b — the hyphenated line holds no column gutter
+// =============================================================================
+
+// A printed line made of several text items: each cell is [text, x, width];
+// only the last one closes the line, as pdf.js reports a table row or two
+// columns set side by side.
+const cells = (y, ...parts) => parts.map(([str, x, width], index) => item(str, { x, y, width, eol: index === parts.length - 1 }));
+
+test("wide gutter: a gap of 2 em or more between two items of the hyphenated line refuses the break (1.99 em is joined, 2.00 em is not)", () => {
+  // "exam-" still ends at the right edge of the block (x = 372): only 12b can refuse
+  const page = (secondCellX) => [[
+    item(used("example"), { y: 700, width: WIDTH }),
+    ...cells(688, ["the committee then asked", 72, 120], ["for one further exam-", secondCellX, 372 - secondCellX]),
+    item(NEXT, { y: 676, width: WIDTH }),
+    item(LAST, { y: 664 }),
+  ]];
+  const joined = onlySite(assertJoined(page(211.9), "exam+ple"));
+  assert.equal(joined.measurements.widestGapEm, 1.99);
+  assert.equal(joined.measurements.gutterGaps, 1);
+  assert.equal(joined.measurements.sharedGutter, false, "the next line is a single run: nothing to share");
+  const refused = onlySite(assertRefused(page(212), ["12b-no-column-gutter"]));
+  assert.equal(refused.measurements.widestGapEm, 2);
+  assert.equal(refused.measurements.sharedGutter, false);
+});
+
+test("repeated gutter: a gap of 0.6 em or more that the next line repeats at the same position refuses the break (0.59 em is joined, 0.60 em is not)", () => {
+  // both lines are two cells; the second cell of the next line starts at x = 198
+  const page = (secondCellX) => [[
+    item(used("example"), { y: 700, width: WIDTH }),
+    ...cells(688, ["the committee then asked", 72, 120], ["for one further exam-", secondCellX, 372 - secondCellX]),
+    ...cells(676, ["ple before the session", 72, 110], ["was closed for the day by", 198, 174]),
+    item(LAST, { y: 664 }),
+  ]];
+  const refused = onlySite(assertRefused(page(198), ["12b-no-column-gutter"]));
+  assert.equal(refused.measurements.widestGapEm, 0.6);
+  assert.equal(refused.measurements.gutterGaps, 1);
+  assert.equal(refused.measurements.sharedGutter, true);
+  const joined = onlySite(assertJoined(page(197.9), "exam+ple"));
+  assert.equal(joined.measurements.widestGapEm, 0.59);
+  assert.equal(joined.measurements.gutterGaps, 0, "a gap under 0.6 em is a word space, not a gutter");
+  assert.equal(joined.measurements.sharedGutter, false);
+});
+
+test("repeated gutter: 'the same position' is within 0.1 em (0.10 em apart is refused, 0.11 em is joined)", () => {
+  const page = (nextLineCellX) => [[
+    item(used("example"), { y: 700, width: WIDTH }),
+    ...cells(688, ["the committee then asked", 72, 120], ["for one further exam-", 202, 170]),
+    ...cells(676, ["ple before the session", 72, 110], ["was closed for the day by", nextLineCellX, 372 - nextLineCellX]),
+    item(LAST, { y: 664 }),
+  ]];
+  assert.equal(onlySite(assertRefused(page(203), ["12b-no-column-gutter"])).measurements.sharedGutter, true);
+  assert.equal(onlySite(assertRefused(page(201), ["12b-no-column-gutter"])).measurements.sharedGutter, true);
+  const joined = onlySite(assertJoined(page(203.1), "exam+ple"));
+  assert.equal(joined.measurements.widestGapEm, 1, "a 1 em gap on the hyphenated line, repeated nowhere");
+  assert.equal(joined.measurements.sharedGutter, false);
+});
+
+test("repeated gutter: sizes are in em of the hyphenated line — the same 6pt gap is a gutter at 10pt and a word space at 12pt", () => {
+  const sized = (entries, em) => entries.map((entry) => ({ ...entry, height: em, transform: [em, 0, 0, em, entry.transform[4], entry.transform[5]] }));
+  const page = (em) => [[
+    item(used("example"), { y: 700, width: WIDTH, em }),
+    ...sized(cells(686, ["the committee then asked", 72, 120], ["for one further exam-", 198, 174]), em),
+    ...sized(cells(672, ["ple before the session", 72, 110], ["was closed for the day by", 198, 174]), em),
+    item(LAST, { y: 658, em }),
+  ]];
+  assert.equal(onlySite(assertRefused(page(10), ["12b-no-column-gutter"])).measurements.widestGapEm, 0.6);
+  assert.equal(onlySite(assertJoined(page(12), "exam+ple")).measurements.widestGapEm, 0.5);
+});
+
+test("repeated gutter: a line with more than five such gaps is word-per-item text, not columns (five shared gaps are refused, six are joined)", () => {
+  // every word group is its own item, 1 em apart, at the same positions on both lines
+  const spread = (y, words) => {
+    const step = (WIDTH + 10) / words.length;
+    return words.map((str, index) => item(str, { x: LEFT + index * step, y, width: step - 10, eol: index === words.length - 1 }));
+  };
+  const page = (a, b) => [[item(used("example"), { y: 700, width: WIDTH }), ...spread(688, a), ...spread(676, b), item(LAST, { y: 664 })]];
+  const five = onlySite(assertRefused(
+    page(["the", "committee", "then asked", "for one", "further", "exam-"], ["ple", "before", "the session", "was closed", "for the", "day by"]),
+    ["12b-no-column-gutter"],
+  ));
+  assert.equal(five.measurements.gutterGaps, 5);
+  assert.equal(five.measurements.widestGapEm, 1);
+  assert.equal(five.measurements.sharedGutter, true);
+  const six = onlySite(assertJoined(
+    page(["the", "committee", "then", "asked", "for one", "further", "exam-"], ["ple", "before", "the", "session", "was closed", "for the", "day by"]),
+    "exam+ple",
+  ));
+  assert.equal(six.measurements.gutterGaps, 6);
+  assert.equal(six.measurements.widestGapEm, 1);
+  assert.equal(six.measurements.sharedGutter, false, "the same six positions on both lines, and still not a shared gutter");
+});
+
+test("wide gutter: the 2 em test has no such exemption — word-per-item text with one 2 em gap is refused", () => {
+  // seven items 1 em apart, except that the first three sit 1 em further left: the gap after the third is 2 em
+  const step = (WIDTH + 10) / 7;
+  const words = ["the", "committee", "then", "asked", "for one", "further", "exam-"];
+  const line = words.map((str, index) => item(str, { x: LEFT + index * step + (index < 3 ? -10 : 0), y: 688, width: step - 10, eol: index === words.length - 1 }));
+  const page = [[item(used("example"), { x: LEFT - 10, y: 700, width: WIDTH + 10 }), ...line, item(NEXT, { x: LEFT - 10, y: 676, width: WIDTH + 10 }), item(LAST, { x: LEFT - 10, y: 664 })]];
+  const site = onlySite(assertRefused(page, ["12b-no-column-gutter"]));
+  assert.equal(site.measurements.widestGapEm, 2);
+  assert.equal(site.measurements.gutterGaps, 6);
+  assert.equal(site.measurements.sharedGutter, false);
+});
+
+test("a gutter is found across the segments of one printed line: pdf.js may end a segment at the gap itself", () => {
+  // the first cell closes its own segment (hasEOL); the two segments share a baseline and are one printed line
+  const page = [[
+    item(used("example"), { y: 700, width: WIDTH }),
+    item("the committee then asked", { y: 688, width: 120 }),
+    item("for one further exam-", { x: 212, y: 688, width: 160 }),
+    item(NEXT, { y: 676, width: WIDTH }),
+    item(LAST, { y: 664 }),
+  ]];
+  const site = onlySite(assertRefused(page, ["12b-no-column-gutter"]));
+  assert.equal(site.measurements.widestGapEm, 2);
+});
+
+test("overlapping or touching items are not a gap: a line split into abutting runs with a separate hyphen item is left alone by 12b", () => {
+  const page = [[
+    item(used("example"), { y: 700, width: WIDTH }),
+    ...cells(688, ["the committee then asked for one", 72, 215], [" further", 285, 60], [" exam", 345, 23], ["-", 368, 4]),
+    item(NEXT, { y: 676, width: WIDTH }),
+    item(LAST, { y: 664 }),
+  ]];
+  const site = onlySite(assertJoined(page, "exam+ple"));
+  assert.equal(site.measurements.widestGapEm, 0);
+  assert.equal(site.measurements.gutterGaps, 0);
+});
+
+test("KNOWN LIMIT (frozen, not a protection): a 0.6 to 2 em gutter that the next line does not repeat is not detected", () => {
+  // two cells 1.2 em apart; the line below is a single run, so nothing is shared and the break is joined
+  const page = [[
+    item(used("example"), { y: 700, width: WIDTH }),
+    ...cells(688, ["the committee then asked", 72, 120], ["for one further exam-", 204, 168]),
+    item(NEXT, { y: 676, width: WIDTH }),
+    item(LAST, { y: 664 }),
+  ]];
+  const site = onlySite(assertJoined(page, "exam+ple"));
+  assert.equal(site.measurements.widestGapEm, 1.2);
+  assert.equal(site.measurements.gutterGaps, 1);
+});
+
+test("KNOWN LIMIT (frozen, not a protection): a gutter that exists only on the NEXT line is not tested", () => {
+  const page = [[
+    item(used("example"), { y: 700, width: WIDTH }),
+    item(BREAK, { y: 688, width: WIDTH }),
+    ...cells(676, ["ple before the session", 72, 110], ["was closed for the day by", 252, 120]),
+    item(LAST, { y: 664 }),
+  ]];
+  const site = onlySite(assertJoined(page, "exam+ple"));
+  assert.equal(site.measurements.widestGapEm, 0, "the hyphenated line is a single run");
 });
 
 // -----------------------------------------------------------------------------
 // Tables as pdf.js really reports them: the recorded pdf.js 6.2.108 item
-// streams of seven small table PDFs (pdf-lib, standard Helvetica, invented
-// text). pdf.js emits a whole printed table row as ONE line — the cells of a
-// row are not separated by an end-of-line — so the only table boundary the
-// rule can meet is a ROW CHANGE: the last cell's wrapped line, then the first
-// cell's next line.
+// streams of twenty small PDFs (pdf-lib, standard Helvetica, invented text).
+// pdf.js emits a whole printed table row as ONE line — the cells of a row are
+// not separated by an end-of-line — so the table boundary the rule meets is a
+// ROW CHANGE: the last cell's wrapped line, then the first cell's next line.
+// "provides the in-" (which continues "ternal audit report" in its own cell)
+// followed by the first cell's "formation of the committee" must not become
+// "information".
 //
-// T5 and T7 are a KNOWN COUNTEREXAMPLE, pinned so that it stays visible — not
-// endorsed. The frozen rule joins across that boundary when the row reaches
-// the right edge of its block and left + right fragment happen to spell a word
-// the document writes inline: "provides the in-" (which continues "ternal
-// audit report" in its own cell) + the first cell's "formation of the
-// committee" becomes "information". It is a wrong join at a structural
-// boundary. Nothing geometric refuses it; only the evidence predicates can
-// (T6: the same table, "information" not written anywhere, is left alone).
+// Every fixture carries `joiningIsWrong` and `outcome`. A wrong join that the
+// rule refuses is a protection. T13 is NOT one: it is an accepted residual —
+// see its own test below.
 // -----------------------------------------------------------------------------
 const tables = JSON.parse(readFileSync(new URL("./fixtures/pdf-line-break/table-fixtures.json", import.meta.url), "utf8"));
 const tableCase = (id) => {
@@ -649,6 +807,28 @@ const tableCase = (id) => {
   assert.ok(fixture, `table fixture ${id}`);
   return { fixture, result: repair(fixture.pages) };
 };
+
+test("the table fixture set: 20 recorded streams, each run against its recorded outcome; T13 is the only accepted residual", () => {
+  assert.equal(tables.count, 20);
+  assert.deepEqual(tables.fixtures.map((fixture) => fixture.id), ["T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "T10", "T11", "T12", "T13", "T14", "T15", "C1", "C2", "C3", "C4", "C5"]);
+  for (const fixture of tables.fixtures) {
+    const { result } = tableCase(fixture.id);
+    const candidates = result.sites.filter((site) => site.measurements !== null);
+    assert.equal(result.lineBreakJoins, fixture.joins, fixture.id);
+    assert.deepEqual(result.sites.filter((site) => site.join).map((site) => `${site.leftFragment}+${site.rightFragment}`), fixture.joined, fixture.id);
+    assert.equal(candidates.length, fixture.candidateSites, fixture.id);
+    assert.deepEqual([...new Set(candidates.flatMap((site) => site.failed))], fixture.failed, fixture.id);
+    if (fixture.joins === 0) assert.deepEqual(result.pages, fixture.pages.map(v1PageText), `${fixture.id}: nothing joined, v1's own text`);
+  }
+  // how the fixtures count: a wrong join still made is a residual, never a protection
+  const wrongJoins = tables.fixtures.filter((fixture) => fixture.joiningIsWrong && fixture.joins > 0).map((fixture) => fixture.id);
+  assert.deepEqual(wrongJoins, ["T13"]);
+  assert.deepEqual(tables.acceptedResidual, ["T13"]);
+  assert.deepEqual(tables.fixtures.filter((fixture) => fixture.outcome === "ACCEPTED-RESIDUAL-wrong-join").map((fixture) => fixture.id), ["T13"]);
+  const protections = tables.fixtures.filter((fixture) => fixture.joiningIsWrong && fixture.outcome === "refused").map((fixture) => fixture.id);
+  assert.deepEqual(protections, ["T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "T10", "T11", "T12", "T14"]);
+  assert.ok(!protections.includes("T13"), "T13 is not a passing structural protection case");
+});
 
 test("real pdf.js table, same row: a hyphen at the end of a cell is not at the end of a line, so it is not even a candidate", () => {
   const { fixture, result } = tableCase("T1");
@@ -658,11 +838,11 @@ test("real pdf.js table, same row: a hyphen at the end of a cell is not at the e
   assert.ok(result.pages[0].includes("Registry provides the in- formation desk"), "the row is one line; the cell hyphen stays");
 });
 
-test("real pdf.js table, row change in a table narrower than the text block: refused, the row does not reach the block's right edge", () => {
+test("real pdf.js table, row change in a table narrower than the text block: refused twice over — the row stops short of the block's right edge, and it holds a gutter", () => {
   for (const [id, failed] of [
-    ["T2", ["12-right-edge-would-not-fit", "13-joined-word-inline"]],
-    ["T3", ["12-right-edge-would-not-fit"]], // "information" IS written inline here; geometry alone refuses
-    ["T4", ["12-right-edge-would-not-fit", "13-joined-word-inline"]],
+    ["T2", ["12-right-edge-would-not-fit", "12b-no-column-gutter", "13-joined-word-inline"]],
+    ["T3", ["12-right-edge-would-not-fit", "12b-no-column-gutter"]], // "information" IS written inline here; geometry alone refuses
+    ["T4", ["12-right-edge-would-not-fit", "12b-no-column-gutter", "13-joined-word-inline"]],
   ]) {
     const { fixture, result } = tableCase(id);
     assert.deepEqual(onlySite(result).failed, failed, id);
@@ -671,27 +851,122 @@ test("real pdf.js table, row change in a table narrower than the text block: ref
   }
 });
 
-test("real pdf.js table, row change in a full-width table, joined word not written anywhere: refused by the evidence predicate alone", () => {
+test("real pdf.js table, row change in a full-width table, joined word not written anywhere: refused by the gutter and by the evidence", () => {
   const { fixture, result } = tableCase("T6");
   const site = onlySite(result);
   assert.equal(`${site.leftFragment}+${site.rightFragment}`, "in+formation");
-  assert.deepEqual(site.failed, ["13-joined-word-inline"], "every geometric predicate passes at this row change");
+  assert.deepEqual(site.failed, ["12b-no-column-gutter", "13-joined-word-inline"]);
   assert.equal(result.lineBreakJoins, 0);
   assert.deepEqual(result.pages, fixture.pages.map(v1PageText));
 });
 
-test("KNOWN COUNTEREXAMPLE (wrong join, pinned, not endorsed): a row change in a full-width table IS joined when the fragments happen to spell an inline word", () => {
+test("real pdf.js table, T5 and T7: a row change in a full-width table is REFUSED although the fragments spell a word the document writes inline", () => {
+  // The counterexample that blocked Rule B2: every other predicate passes —
+  // the row reaches the right edge of its block and "information" is written
+  // elsewhere on the page. The 17.6 em gutter of the row refuses the break.
   for (const id of ["T5", "T7"]) {
     const { fixture, result } = tableCase(id);
     const site = onlySite(result);
+    assert.equal(fixture.joiningIsWrong, true, id);
+    assert.equal(`${site.leftFragment}+${site.rightFragment}`, "in+formation", id);
+    assert.deepEqual(site.failed, ["12b-no-column-gutter"], `${id}: the gutter is the only thing that refuses`);
+    assert.equal(site.join, false, id);
+    assert.equal(site.measurements.joinedInline, 1, `${id}: "information" is written once, elsewhere on the page`);
+    assert.equal(site.measurements.pairInline, 0, id);
+    assert.equal(site.measurements.widestGapEm, 17.57, id);
+    assert.equal(site.measurements.sharedGutter, true, id);
+    assert.equal(result.lineBreakJoins, 0, id);
+    assert.deepEqual(result.pages, fixture.pages.map(v1PageText), `${id}: the page is v1's own text`);
+    assert.ok(result.pages[0].includes("provides the in- formation of the committee ternal audit report"), id);
+    assert.ok(!result.pages[0].includes("the information of the committee"), id);
+  }
+});
+
+test("real pdf.js tables, tight and unusual gutters: 1.2 em gutters, three and five columns, a centred last column, a narrow wrapped first column — all refused by 12b alone", () => {
+  for (const [id, fragments, widestGapEm, sharedGutter] of [
+    ["T8", "in+formation", 1.19, true], // 1.2 em gutter, the first cell's second line is short
+    ["T9", "in+formation", 1.19, true], // 1.2 em gutter on both lines
+    ["T10", "in+formation", 10.39, true], // three columns
+    ["T11", "in+formation", 13.28, false], // centred last column: nothing repeats, the gutter is simply wide
+    ["T12", "pre+vention", 2.07, true], // narrow first column with a wrapped label
+    ["T14", "in+formation", 1.2, true], // five columns, 1.2 em gutters
+  ]) {
+    const { fixture, result } = tableCase(id);
+    const site = onlySite(result);
+    assert.equal(fixture.joiningIsWrong, true, id);
+    assert.equal(`${site.leftFragment}+${site.rightFragment}`, fragments, id);
+    assert.deepEqual(site.failed, ["12b-no-column-gutter"], id);
+    assert.ok(site.measurements.joinedInline >= 1, `${id}: the joined word is written inline`);
+    assert.equal(site.measurements.widestGapEm, widestGapEm, id);
+    assert.equal(site.measurements.sharedGutter, sharedGutter, id);
+    assert.equal(result.lineBreakJoins, 0, id);
+    assert.deepEqual(result.pages, fixture.pages.map(v1PageText), id);
+  }
+});
+
+test("ACCEPTED RESIDUAL — T13, NOT a passing structural protection case: a table row with a 0.4 em gutter is still joined across its cells", () => {
+  // Rule B3 still joins this synthetic narrow-gutter cross-cell case.
+  //   - The gutter is 0.4 em.
+  //   - pdf.js getTextContent geometry cannot reliably distinguish it from
+  //     ordinary word spacing: pdf.js folds an advance under 0.6 em into the
+  //     text of ONE item, as a plain space. The row reaches the rule as a
+  //     single run with no gap between items at all (widestGapEm = 0) — the
+  //     same shape as a line of prose.
+  //   - This is accepted for pdf-text-extraction-v2 (owner decision,
+  //     2026-10-02): no operator-list parsing, no table reconstruction.
+  //   - It must not be counted as a passing structural protection case. The
+  //     join below is WRONG; this test pins it so that it stays visible, and
+  //     so that a change in behaviour here — either way — is noticed.
+  const { fixture, result } = tableCase("T13");
+  assert.equal(fixture.joiningIsWrong, true);
+  assert.equal(fixture.outcome, "ACCEPTED-RESIDUAL-wrong-join");
+  assert.match(fixture.acceptedResidual, /still joins/);
+  assert.match(fixture.acceptedResidual, /0\.4 em/);
+  assert.match(fixture.acceptedResidual, /cannot be reliably distinguished from ordinary word spacing/);
+  assert.match(fixture.acceptedResidual, /Accepted for pdf-text-extraction-v2/);
+  assert.match(fixture.acceptedResidual, /must not be counted as a passing structural protection case/);
+
+  const site = onlySite(result);
+  assert.equal(`${site.leftFragment}+${site.rightFragment}`, "in+formation");
+  assert.deepEqual(site.failed, [], "no predicate refuses — 12b included");
+  assert.equal(site.join, true);
+  assert.equal(result.lineBreakJoins, 1);
+  assert.equal(site.measurements.widestGapEm, 0, "pdf.js reports the row as one run: there is no gap for 12b to measure");
+  assert.equal(site.measurements.gutterGaps, 0);
+  assert.equal(site.measurements.sharedGutter, false);
+  // the wrong text, as emitted: the last cell of one printed line fused with the first cell of the next
+  const v1 = v1PageText(fixture.pages[0]);
+  assert.equal(v1.split("in- formation").length, 2, "v1 kept the two cells apart, once");
+  assert.equal(result.pages[0], v1.replace("in- formation", "information"), "v2 differs from v1 by exactly this one wrong join");
+});
+
+test("real pdf.js, joining is RIGHT and 12b stays out of the way: a wrap inside one cell, a justified paragraph, a loose word-per-item paragraph", () => {
+  for (const [id, gutterGaps] of [
+    ["T15", 0], // only the last column has text on the two lines: a same-cell wrap
+    ["C1", 8], // justified paragraph: eight word gaps of 0.6 em or more, none 2 em wide — more than five, so no shared test
+    ["C2", 6], // loose narrow paragraph, one item per word, gaps of 1 em
+  ]) {
+    const { fixture, result } = tableCase(id);
+    const site = onlySite(result);
+    assert.equal(fixture.joiningIsWrong, false, id);
     assert.equal(`${site.leftFragment}+${site.rightFragment}`, "in+formation", id);
     assert.deepEqual(site.failed, [], id);
-    assert.equal(site.join, true, id);
-    assert.equal(site.measurements.joinedInline, 1, `${id}: "information" is written once, elsewhere on the page`);
+    assert.equal(site.measurements.gutterGaps, gutterGaps, id);
+    assert.ok(site.measurements.widestGapEm < 2, id);
+    assert.equal(site.measurements.sharedGutter, false, id);
     assert.equal(result.lineBreakJoins, 1, id);
-    // v1 kept the two cells apart; v2 fuses the last cell of one line with the first cell of the next
-    assert.ok(v1PageText(fixture.pages[0]).includes("provides the in- formation of the committee ternal audit report"), id);
-    assert.ok(result.pages[0].includes("provides the information of the committee ternal audit report"), id);
+  }
+});
+
+test("real pdf.js, list items and a numbered heading: the gap after the label is not what refuses them (predicate 12 does, as before)", () => {
+  for (const id of ["C3", "C4", "C5"]) {
+    const { fixture, result } = tableCase(id);
+    const site = onlySite(result);
+    assert.deepEqual(site.failed, ["12-right-edge-would-not-fit"], id);
+    assert.equal(site.measurements.sharedGutter, false, id);
+    assert.ok(site.measurements.widestGapEm >= 1 && site.measurements.widestGapEm < 2, id);
+    assert.equal(result.lineBreakJoins, 0, id);
+    assert.deepEqual(result.pages, fixture.pages.map(v1PageText), id);
   }
 });
 

@@ -1,18 +1,18 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import * as reference from "./rule-b2-reference.mjs";
+import * as reference from "./rule-b3-reference.mjs";
 
 /**
  * Test support for pdf-text-extraction-v2: compares the production line-break
- * repair (lib/pdf-text-extraction.ts) with the FROZEN Rule B2 reference kept
+ * repair (lib/pdf-text-extraction.ts) with the FROZEN Rule B3 reference kept
  * beside this file.
  *
- * rule-b2-reference.mjs and RULE_B2.json are byte-for-byte copies of the
- * contract audit's frozen files (2026-10-01). They are never edited: if
+ * rule-b3-reference.mjs and RULE_B3.json are byte-for-byte copies of the
+ * contract audit's frozen files (2026-10-02). They are never edited: if
  * production and the reference disagree, production is wrong.
  */
-export const RULE_B2_SHA256 = "d8a72df27b11cbcad26dc9c9b8c5b38a3970f7114e15931bdd9d4bf7005eff87";
-export const RULE_B2_REFERENCE_SHA256 = "591b5bb58e1ca071632e0f06133c184444078076856fbb3461846c238933d5bb";
+export const RULE_B3_SHA256 = "e5c03787be91d3180ddd551d3cfa6e41c1bf393510865dda767f6f5ca4bc7ccc";
+export const RULE_B3_REFERENCE_SHA256 = "83cbdc7ca216075edbab0675a35b294be701feccb7203b62cc891f77c04d7eeb";
 
 /** SHA-256 of a fixture as committed (LF); a Windows checkout may hand it back with CRLF. */
 export function committedSha256(fileName) {
@@ -32,6 +32,7 @@ function referenceSite(site) {
     lowercaseLeft: site.lowL === 1, lowercaseRight: site.lowR === 1, latin: site.latin === 1,
     dyEm: site.dyEm, pitchDeviation: site.pitchDev, dx0Em: site.dx0Em, nextStartsLeftOfLineEnd: site.bLeftOfAEnd === 1,
     emRatio: site.emRatio, rightGapEm: site.rightGapEm, neighbours: site.neigh, fitGapEm: site.fitGapEm,
+    widestGapEm: site.gapEm, gutterGaps: site.gapsA, sharedGutter: site.sharedGutter === 1,
     rotated: site.rot === 1, dirLeft: site.dirA, dirRight: site.dirB, joinedInline: site.jd, pairInline: site.pd,
     join: site.join, failed: site.failed,
   };
@@ -48,6 +49,7 @@ function productionSite(site) {
     lowercaseLeft: m.lowercaseLeft, lowercaseRight: m.lowercaseRight, latin: m.latin,
     dyEm: m.dyEm, pitchDeviation: m.pitchDeviation, dx0Em: m.dx0Em, nextStartsLeftOfLineEnd: m.nextStartsLeftOfLineEnd,
     emRatio: m.emRatio, rightGapEm: m.rightGapEm, neighbours: m.neighbours, fitGapEm: m.fitGapEm,
+    widestGapEm: m.widestGapEm, gutterGaps: m.gutterGaps, sharedGutter: m.sharedGutter,
     rotated: m.rotated, dirLeft: m.dirLeft, dirRight: m.dirRight, joinedInline: m.joinedInline, pairInline: m.pairInline,
     join: site.join, failed: site.failed,
   };
@@ -57,7 +59,7 @@ function productionSite(site) {
  * Runs the reference and the production repair on the same pdf.js item
  * arrays. `differences` lists every disagreement — sites (count, order, every
  * measurement, every failed predicate, the decision) and the emitted text of
- * every page; it is empty when production is exactly Rule B2.
+ * every page; it is empty when production is exactly Rule B3.
  */
 export function compareWithReference(pagesOfItems, inspectPdfLineBreakRepair) {
   const expected = reference.ruleB(pagesOfItems);

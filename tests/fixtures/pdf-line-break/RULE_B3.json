@@ -1,13 +1,13 @@
 {
-  "name": "Rule B2",
+  "name": "Rule B3",
   "candidateExtractorVersion": "pdf-text-extraction-v2",
   "status": "FROZEN FOR FRESH VALIDATION - not implemented in the repo",
-  "source": "Rule B (RULE_B.json sha256 e5ca57a721260ced10b7773a8a751bb197f2b2302ad68c12683e52e996466808, ruleB-frozen.mjs sha256 b36764af96f89b8d7d26b6803b9e4058377bf9eb8fe52ce00ea0edb97adacafd) plus predicate 7b; reference implementation ruleB2-frozen.mjs",
-  "precedence": "Where the prose of DECISION.md and the measured predicate differ in wording, the measured predicate (this file, ruleB-frozen.mjs) governs. Known wording differences are listed under 'clarificationsOfDecisionProse'.",
+  "source": "Rule B2 (RULE_B2.json sha256 d8a72df27b11cbcad26dc9c9b8c5b38a3970f7114e15931bdd9d4bf7005eff87, ruleB2-frozen.mjs sha256 591b5bb58e1ca071632e0f06133c184444078076856fbb3461846c238933d5bb) plus predicate 12b; reference implementation ruleB3-frozen.mjs",
+  "precedence": "Where the prose of DECISION.md and the measured predicate differ in wording, the measured predicate (this file, ruleB3-frozen.mjs) governs. Known wording differences are listed under 'clarificationsOfDecisionProse'.",
   "units": "pdf.js user-space units as delivered by getTextContent(): transform[4] = x, transform[5] = baseline y, width; font size em = |transform[0]| or, if that is 0, |transform[3]|",
   "rounding": {
-    "segmentGeometry": "x0, x1, y, em, firstEm, lastEm are rounded to 0.1 unit (Math.round(v*10)/10) when the segment is built",
-    "ratios": "dyEm, pitchDev, dx0Em, emRatio, rightGapEm, fitGapEm are rounded to 2 decimals (Number(v.toFixed(2))) before comparison"
+    "segmentGeometry": "x0, x1, y, em, firstEm, lastEm and the ink extents are rounded to 0.1 unit (Math.round(v*10)/10) when the segment is built",
+    "ratios": "dyEm, pitchDev, dx0Em, emRatio, rightGapEm, fitGapEm, gapEm and the gap widths and alignment distances of predicate 12b are rounded to 2 decimals (Number(v.toFixed(2))) before comparison"
   },
   "v1Base": {
     "itemText": "String(item.str ?? '') when item is an object with a 'str' key, else ''",
@@ -27,7 +27,8 @@
       "lastEm": "em of last ink item",
       "firstDir": "dir of first ink item",
       "lastDir": "dir of last ink item",
-      "rot": "true when any ink item has |transform[1]| > 1e-6 or |transform[2]| > 1e-6"
+      "rot": "true when any ink item has |transform[1]| > 1e-6 or |transform[2]| > 1e-6",
+      "inkExtents": "for every ink item of the segment, in pdf.js emission order: [left, right], each rounded to 0.1 unit"
     }
   },
   "printedLines": {
@@ -136,6 +137,11 @@
       "test": "neighbours = segments j within i-6..i+6 on the page, not rot, with |gx0(j) - gx0(A)| <= 3*em AND |y_j - A.y| <= 10*em (A itself included for the maximum); blockRight = max gx1 over them; neigh = number of them on a different printed line than A; REQUIRE neigh >= 1 AND fitGapEm < 0.5 where avgChar = (B.x1 - B.x0)/max(1, length of b right-trimmed), chunk = tokR up to its first '-', U+2010 or U+2011 (whole tokR if none or if at index 0), fitGapEm = (blockRight - (A.x1 - 0.33*em + avgChar*chunk.length))/em"
     },
     {
+      "id": "12b",
+      "name": "no-column-gutter",
+      "test": "A and B on the same page: gapEm < 2 AND NOT sharedGutter (see 'columnGutter'). gapEm = widest positive gap between consecutive ink items of A's printed line, in em. sharedGutter = a gap of at least 0.6 em in A's printed line and one in B's printed line whose right edges are within 0.1 em, when neither line has more than five such gaps."
+    },
+    {
       "id": 13,
       "name": "joined-word-inline",
       "test": "evidence.words[(L + R) lower-cased] >= 1"
@@ -157,6 +163,7 @@
     "one-letter fragments",
     "a next line that is not directly below within the same column (column change, footer, caption, table cell row change)",
     "a line that does not reach the right edge of its block",
+    "a line that holds a column gutter before its final fragment: a gap of 2 em or more between two of its text items, or a gap of 0.6 em or more repeated at the same position on the next line (table cells of one printed row, columns emitted side by side)",
     "a word whose joined form is not written inline elsewhere in the same extraction, or whose hyphenated pair is written inline anywhere",
     "any format other than PDF; any already-extracted stored text"
   ],
@@ -171,11 +178,15 @@
     "geometry is rounded as stated under 'rounding'"
   ],
   "baseRule": {
-    "name": "Rule B",
-    "ruleDescriptionSha256": "e5ca57a721260ced10b7773a8a751bb197f2b2302ad68c12683e52e996466808",
-    "referenceImplementationSha256": "b36764af96f89b8d7d26b6803b9e4058377bf9eb8fe52ce00ea0edb97adacafd"
+    "name": "Rule B2",
+    "ruleDescriptionSha256": "d8a72df27b11cbcad26dc9c9b8c5b38a3970f7114e15931bdd9d4bf7005eff87",
+    "referenceImplementationSha256": "591b5bb58e1ca071632e0f06133c184444078076856fbb3461846c238933d5bb",
+    "itsBaseRule": {
+      "name": "Rule B",
+      "ruleDescriptionSha256": "e5ca57a721260ced10b7773a8a751bb197f2b2302ad68c12683e52e996466808",
+      "referenceImplementationSha256": "b36764af96f89b8d7d26b6803b9e4058377bf9eb8fe52ce00ea0edb97adacafd"
+    }
   },
-  "onlyDifferenceFromRuleB": "predicate 7b (whole-token URL / domain / address restriction). Every other definition, predicate and threshold is copied unchanged.",
   "urlStructure": {
     "appliesTo": [
       "tokL: the last white-space-delimited token of segment A, right-trimmed, including its final hyphen",
@@ -227,9 +238,36 @@
     "      at least one member of N is on another printed line than A; blockRight = max gx1 over N;",
     "      chunk = tokR up to its first '-', U+2010 or U+2011 (whole tokR if none or if at index 0);",
     "      round2((blockRight - (A.x1 - 0.33*em + ((B.x1 - B.x0)/max(1, length(rtrim(b)))) * length(chunk)))/em) < 0.5",
+    "  12b gaps(X) = positive widths q.left - p.right over consecutive ink items p, q of printed line X (emission order), each with edge = q.left;",
+    "      round2(max width in gaps(A) / em) < 2   (0 when A has no gap)",
+    "      and NOT ( W(A) and W(B) have at most 5 members each and some a in W(A), b in W(B) have round2(|a.edge - b.edge|/em) <= 0.1 ),",
+    "      where W(X) = the gaps of X with round2(width/em) >= 0.6, and em is A's em for both lines",
     "  13  WORDS[lowercase(L + R)] >= 1",
     "  14  PAIRS[lowercase(L + '-' + R)] is 0 or absent",
     "  ACTION: remove exactly the final U+002D of a and append b with nothing between; emit every other character as v1 does",
-    "segment geometry (x0, x1, y, em, firstEm, lastEm) is rounded to 0.1 unit when the segment is built; round2 = round to 2 decimals"
-  ]
+    "segment geometry (x0, x1, y, em, firstEm, lastEm, ink extents) is rounded to 0.1 unit when the segment is built; round2 = round to 2 decimals"
+  ],
+  "columnGutter": {
+    "purpose": "A printed table row reaches the extractor as ONE line (pdf.js puts no end-of-line between the cells of a row), and so do two columns emitted side by side. The end of such a line is the end of its LAST cell; the line emitted next starts with the FIRST cell of the next printed line. Predicates 9-12 compare the two lines as wholes and cannot see this. Predicate 12b refuses the join when the hyphenated line holds a column gutter.",
+    "inkSequence": "the ink items of every segment of the printed line (segments i' with the same printed-line group as the segment), concatenated in segment order, each segment's items in pdf.js emission order",
+    "gap": "for consecutive ink items p, q of that sequence: width = q.left - p.right, kept when width > 0; its edge = q.left (the left edge of the item after the gap)",
+    "em": "the em of the candidate site: max(A.lastEm || A.em, 1), for both lines",
+    "gapEm": "round2( widest gap of A's printed line / em ), 0 when it has no gap",
+    "wide": "gapEm >= 2",
+    "repeated": "W(X) = the gaps of printed line X with round2(width/em) >= 0.6. sharedGutter is true when |W(A)| <= 5 AND |W(B)| <= 5 AND there is a in W(A), b in W(B) with round2(|a.edge - b.edge| / em) <= 0.1",
+    "constants": {
+      "WIDE_GUTTER_EM": 2,
+      "REPEATED_GUTTER_EM": 0.6,
+      "GUTTER_ALIGN_EM": 0.1,
+      "REPEATED_GUTTER_MAX": 5
+    },
+    "notLexical": "No word, prefix, vocabulary, dictionary, document, file name, publisher or coordinate is tested. The predicate reads only item extents.",
+    "knownLimits": [
+      "a gutter narrower than 0.6 em is not a gap for this predicate (it is not distinguishable from a word space)",
+      "a gutter between 0.6 and 2 em that is not repeated at the same position on the next printed line (for instance a centred or right-aligned last column) is not detected",
+      "lines with more than five gaps of 0.6 em or more are treated as word-per-item text; only the 2 em test applies to them",
+      "a gutter that exists only on the NEXT line (the hyphenated line being a single run) is not tested"
+    ]
+  },
+  "onlyDifferenceFromRuleB2": "predicate 12b (no column gutter in the hyphenated printed line). Every other definition, predicate and threshold is copied unchanged, including 7b."
 }

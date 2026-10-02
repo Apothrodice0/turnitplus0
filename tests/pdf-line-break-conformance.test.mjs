@@ -6,27 +6,43 @@ import {
   committedSha256,
   compareWithReference,
   reference,
-  RULE_B2_REFERENCE_SHA256,
-  RULE_B2_SHA256,
+  RULE_B3_REFERENCE_SHA256,
+  RULE_B3_SHA256,
   v1PageText,
 } from "./fixtures/pdf-line-break/conformance.mjs";
 
 /**
  * pdf-text-extraction-v2 CONFORMANCE: lib/pdf-text-extraction.ts must be
- * exactly the frozen Rule B2. The rule description and its reference
+ * exactly the frozen Rule B3. The rule description and its reference
  * implementation are committed under tests/fixtures/pdf-line-break/ and pinned
  * here by hash, so neither side of the comparison can drift quietly:
  * changing the rule means a new extractor version and a new frozen reference,
  * never an edit to these files.
  */
 
-test("the frozen Rule B2 description and reference implementation are the audited files, unedited", () => {
-  assert.equal(committedSha256("RULE_B2.json"), RULE_B2_SHA256);
-  assert.equal(committedSha256("rule-b2-reference.mjs"), RULE_B2_REFERENCE_SHA256);
+const rule = JSON.parse(readFileSync(new URL("./fixtures/pdf-line-break/RULE_B3.json", import.meta.url), "utf8"));
+
+test("the frozen Rule B3 description and reference implementation are the audited files, unedited", () => {
+  assert.equal(RULE_B3_SHA256, "e5c03787be91d3180ddd551d3cfa6e41c1bf393510865dda767f6f5ca4bc7ccc");
+  assert.equal(RULE_B3_REFERENCE_SHA256, "83cbdc7ca216075edbab0675a35b294be701feccb7203b62cc891f77c04d7eeb");
+  assert.equal(committedSha256("RULE_B3.json"), RULE_B3_SHA256);
+  assert.equal(committedSha256("rule-b3-reference.mjs"), RULE_B3_REFERENCE_SHA256);
+  assert.equal(rule.name, "Rule B3");
 });
 
-test("the production predicate list is the ordered predicate list of RULE_B2.json", () => {
-  const rule = JSON.parse(readFileSync(new URL("./fixtures/pdf-line-break/RULE_B2.json", import.meta.url), "utf8"));
+test("Rule B3 is Rule B2 plus predicate 12b: its constants are the production constants, and its known limits are on record", () => {
+  assert.deepEqual(rule.columnGutter.constants, { WIDE_GUTTER_EM: 2, REPEATED_GUTTER_EM: 0.6, GUTTER_ALIGN_EM: 0.1, REPEATED_GUTTER_MAX: 5 });
+  const source = readFileSync(new URL("../lib/pdf-text-extraction.ts", import.meta.url), "utf8");
+  for (const [name, value] of Object.entries(rule.columnGutter.constants)) {
+    assert.ok(source.includes(`const ${name} = ${value};`), `lib/pdf-text-extraction.ts must declare ${name} = ${value}`);
+  }
+  // The rule does NOT promise "no cross-cell join": the frozen description
+  // lists what predicate 12b cannot see, first of all a gutter under 0.6 em.
+  assert.equal(rule.columnGutter.knownLimits.length, 4);
+  assert.match(rule.columnGutter.knownLimits[0], /narrower than 0\.6 em .* not distinguishable from a word space/);
+});
+
+test("the production predicate list is the ordered predicate list of RULE_B3.json", () => {
   assert.equal(rule.candidateExtractorVersion, "pdf-text-extraction-v2");
   assert.deepEqual(
     PDF_LINE_BREAK_PREDICATES.map((name) => name.split("-")[0]),
@@ -85,8 +101,9 @@ for (const fixture of structural.fixtures) {
 // Seeded differential. Random pages built from the shapes the rule separates
 // (soft breaks, compounds, URLs, other scripts, look-alike hyphens, columns,
 // font-size and pitch changes, rotated and right-to-left runs, lines split
-// into several items, items without geometry) — production and the reference
-// must agree on every site and every character.
+// into several items, items without geometry, rows of cells at tab stops,
+// lines with gaps between their items, word-per-item lines) — production and
+// the reference must agree on every site and every character.
 // ---------------------------------------------------------------------------
 function mulberry32(seed) {
   let state = seed >>> 0;
@@ -115,6 +132,12 @@ const BREAKS = [
   ["pré", "vention"], ["قانون", "دستوري"],
 ];
 const HYPHENS = ["-", "-", "-", "-", "-", "-", "-", "­", "‐", "‑", "‒", "–", "—", "−"];
+// Predicate 12b: gaps between the items of a printed line, in em, on both
+// sides of its two width thresholds; and the offset of a cell from its tab
+// stop, in pt, on both sides of the 0.1 em alignment tolerance at 10pt.
+const GAPS = [0.4, 0.59, 0.6, 0.61, 1, 1.2, 1.99, 2, 2.01, 5];
+const TAB_OFFSETS = [0, 0, 0, 0, 1, 1.1, 4];
+const LINE_STYLES = ["text", "text", "text", "cells", "cells", "spaced", "words"];
 
 function randomDocument(seed) {
   const random = mulberry32(seed);
@@ -130,6 +153,11 @@ function randomDocument(seed) {
     for (const columnX of columns) {
       let y = 700;
       const lineCount = 4 + Math.floor(random() * 18);
+      // how this column's lines are cut into items: "text" abutting runs,
+      // "cells" items at the column's tab stops (a table), "spaced" a gap
+      // before every item, "words" one item per word
+      const columnStyle = pick(LINE_STYLES);
+      const tabStops = [columnX + 90, columnX + 170];
       for (let line = 0; line < lineCount; line += 1) {
         const em = pick([10, 10, 10, 10, 10, 10, 7, 6.9, 14.5, 14.6, 12, 6.96]);
         const words = [];
@@ -150,19 +178,35 @@ function randomDocument(seed) {
 
         // one printed line = 1..3 items; a cut either falls on a space (a real
         // gap follows) or inside a word (the next item is geometrically adjacent)
-        const cuts = chance(0.4) ? 1 + Math.floor(random() * 2) : 0;
+        const style = chance(0.75) ? columnStyle : "text";
         const pieces = [];
-        let rest = text;
-        for (let c = 0; c < cuts && rest.length > 4; c += 1) {
-          const at = 2 + Math.floor(random() * (rest.length - 3));
-          pieces.push(rest.slice(0, at));
-          rest = rest.slice(at);
+        if (style === "text") {
+          const cuts = chance(0.4) ? 1 + Math.floor(random() * 2) : 0;
+          let rest = text;
+          for (let c = 0; c < cuts && rest.length > 4; c += 1) {
+            const at = 2 + Math.floor(random() * (rest.length - 3));
+            pieces.push(rest.slice(0, at));
+            rest = rest.slice(at);
+          }
+          pieces.push(rest);
+        } else if (style === "words") {
+          pieces.push(...words);
+        } else {
+          // two or three cells, cut between words
+          const cellCount = Math.min(words.length, 2 + Math.floor(random() * 2));
+          const perCell = Math.ceil(words.length / cellCount);
+          for (let c = 0; c < words.length; c += perCell) pieces.push(words.slice(c, c + perCell).join(" "));
         }
-        pieces.push(rest);
         let cursor = x;
         const perChar = width / Math.max(1, text.length);
+        const lineGap = pick(GAPS) * em;
         pieces.forEach((piece, index) => {
-          const pieceWidth = piece.length * perChar;
+          let pieceWidth = piece.length * perChar;
+          if (index > 0 && style === "cells") cursor = tabStops[Math.min(index, tabStops.length) - 1] + pick(TAB_OFFSETS);
+          if (index > 0 && style === "spaced") cursor += pick(GAPS) * em;
+          if (index > 0 && style === "words") cursor += lineGap;
+          // the last cell of a row usually runs to the right edge of its column
+          if (style !== "text" && index === pieces.length - 1 && chance(0.75) && columnX + columnWidth - cursor > 1) pieceWidth = columnX + columnWidth - cursor;
           const withoutGeometry = chance(0.02);
           const entry = withoutGeometry
             ? { str: piece }
@@ -189,6 +233,8 @@ test("seeded differential: 400 random documents, production equals the frozen re
   let skipped = 0;
   let pageBoundarySites = 0;
   let nonLetterSites = 0;
+  // predicate 12b, by the branch that decided
+  const gutter = { onlyFailure: 0, wideNotShared: 0, sharedNotWide: 0, overFiveGaps: 0, joinedDespiteGaps: 0 };
   for (let seed = 1; seed <= 400; seed += 1) {
     const pages = randomDocument(seed);
     const { expected, actual, differences } = compareWithReference(pages, inspectPdfLineBreakRepair);
@@ -207,6 +253,20 @@ test("seeded differential: 400 random documents, production equals the frozen re
       }
       if (site.measurements === null) nonLetterSites += 1;
       for (const name of site.failed) failedSeen.set(name, (failedSeen.get(name) ?? 0) + 1);
+      const m = site.measurements;
+      if (m !== null && site.kind === "same-page") {
+        const refused = site.failed.includes("12b-no-column-gutter");
+        assert.equal(refused, m.widestGapEm >= 2 || m.sharedGutter, `seed ${seed}: 12b is exactly "a wide gutter or a shared one"`);
+        if (m.sharedGutter) assert.ok(m.gutterGaps >= 1 && m.gutterGaps <= 5, `seed ${seed}: a shared gutter needs one to five gaps`);
+        if (refused && site.failed.length === 1) gutter.onlyFailure += 1;
+        if (m.widestGapEm >= 2 && !m.sharedGutter) gutter.wideNotShared += 1;
+        if (m.widestGapEm < 2 && m.sharedGutter) gutter.sharedNotWide += 1;
+        if (m.gutterGaps > 5) gutter.overFiveGaps += 1;
+        if (site.join && m.widestGapEm > 0) gutter.joinedDespiteGaps += 1;
+      } else if (m !== null) {
+        assert.deepEqual([m.widestGapEm, m.gutterGaps, m.sharedGutter], [null, null, false], `seed ${seed}: 12b is not measured across a page boundary`);
+        assert.ok(!site.failed.includes("12b-no-column-gutter"), `seed ${seed}`);
+      }
     }
     joins += actual.lineBreakJoins;
     skipped += expected.skippedNonAdjacent;
@@ -218,6 +278,8 @@ test("seeded differential: 400 random documents, production equals the frozen re
   assert.ok(skipped > 0, `skipped non-adjacent joins=${skipped}`);
   assert.ok(pageBoundarySites > 20, `page-boundary sites=${pageBoundarySites}`);
   assert.ok(nonLetterSites > 0, `sites followed by a non-letter line=${nonLetterSites}`);
+  // ... and both branches of 12b decided, alone, with the others staying out of the way
+  for (const [branch, count] of Object.entries(gutter)) assert.ok(count > 10, `predicate 12b, ${branch}=${count}`);
 });
 
 test("the reference's own v1 replica is what a no-join page emits (zero-join text is v1 text)", () => {

@@ -17,7 +17,7 @@ export type PdfExtractionProgress = (pageNumber: number, pageCount: number) => v
  * Phase 5 addition — mirrors lib/html-text-extraction.ts's HTML_EXTRACTOR_VERSION convention, for callers (lib/http-content-retriever.ts) that record which extractor produced a given RetrievedSource.extractedText.
  *
  * v2 = the v1 page assembly (joinPageTextItems below, unchanged) + the frozen
- * line-break hyphenation repair "Rule B2" (see repairLineBreakHyphenation).
+ * line-break hyphenation repair "Rule B3" (see repairLineBreakHyphenation).
  * Text extracted under v1 stays v1: the repair needs the page geometry, which
  * no stored text carries, so nothing already extracted is ever rewritten.
  */
@@ -25,7 +25,7 @@ export const PDF_EXTRACTOR_VERSION = "pdf-text-extraction-v2";
 
 /**
  * The exact pdf.js release {@link PDF_EXTRACTOR_VERSION} is defined against.
- * Rule B2 reads pdf.js's own item stream (item order, `hasEOL`, `transform`,
+ * Rule B3 reads pdf.js's own item stream (item order, `hasEOL`, `transform`,
  * `width`, `dir`), so a different pdf.js build is a different extractor: the
  * package pin is exact, and the browser path — the only one whose worker is
  * fetched at run time — refuses to extract on any other version.
@@ -185,11 +185,12 @@ function joinPageTextItems(items: unknown[]): string {
 }
 
 /**
- * LINE-BREAK HYPHENATION REPAIR — "Rule B2", the frozen contract of
- * {@link PDF_EXTRACTOR_VERSION} (contract audit 2026-10-01: rule description
- * sha256 d8a72df27b11cbcad26dc9c9b8c5b38a3970f7114e15931bdd9d4bf7005eff87,
+ * LINE-BREAK HYPHENATION REPAIR — "Rule B3", the frozen contract of
+ * {@link PDF_EXTRACTOR_VERSION} (contract audit 2026-10-02: rule description
+ * sha256 e5c03787be91d3180ddd551d3cfa6e41c1bf393510865dda767f6f5ca4bc7ccc,
  * reference implementation sha256
- * 591b5bb58e1ca071632e0f06133c184444078076856fbb3461846c238933d5bb).
+ * 83cbdc7ca216075edbab0675a35b294be701feccb7203b62cc891f77c04d7eeb).
+ * B and B2 were earlier candidates of the same audit; none of them shipped.
  *
  * A typeset word broken across two lines ("exam-" / "ple") reaches the page
  * text as "exam- ple" and never matches "example" again. The repair removes
@@ -215,9 +216,28 @@ function joinPageTextItems(items: unknown[]): string {
  *
  * Deliberately NOT repaired: a break across a page boundary, any hyphen-like
  * character other than U+002D, non-Latin or upper-case fragments, rotated or
- * right-to-left text, a URL / e-mail / DOI token, and a break to a line that
- * is not directly below in the same column. No dictionary, no stop list, no
- * language input.
+ * right-to-left text, a URL / e-mail / DOI token, a break to a line that is
+ * not directly below in the same column, and a break at the end of a line
+ * that holds a column gutter (predicate 12b, below). No dictionary, no stop
+ * list, no language input.
+ *
+ * COLUMN GUTTERS. pdf.js puts no end-of-line between the cells of a printed
+ * table row, nor between two columns drawn side by side: the whole row is
+ * one line here. Its end is the end of the LAST cell, and the line emitted
+ * next starts with the FIRST cell, so "…provides the in-" followed by
+ * "formation of the committee…" would be joined across the column boundary
+ * whenever "information" is written somewhere inline. Predicate 12b refuses a
+ * hyphenated line that holds a gutter: a gap between two of its text items
+ * that is 2 em wide or more, or 0.6 em or more and repeated at the same
+ * position on the next line.
+ *
+ * KNOWN RESIDUAL, accepted for this extractor version: a gutter narrower than
+ * 0.6 em is not a gap this predicate can see — pdf.js's text items do not
+ * distinguish it from an ordinary word space — so such a table row can still
+ * be joined across cells (pinned by the T13 fixture). The same holds for a
+ * 0.6–2 em gutter that is not repeated on the next line. The real validation
+ * sets hold no structural join; "no cross-cell join is possible" is NOT a
+ * property of this rule.
  *
  * FROZEN: every regular expression, threshold and rounding step below is the
  * measured rule. Changing any of them is a new extractor version, not a fix.
@@ -237,6 +257,8 @@ type PdfSegmentLine = {
   lastEm: number;
   lastDir: string;
   rotated: boolean;
+  /** left and right edge of every ink item, in emission order, as flat pairs */
+  ink: number[];
 };
 
 type PdfPageLayout = {
@@ -260,6 +282,7 @@ function measureSegment(segmentIndex: number, text: string, items: unknown[]): P
   let x0 = Infinity;
   let x1 = -Infinity;
   let rotated = false;
+  const extents: number[] = [];
   for (const item of items) {
     if (itemStr(item).trim() === "") continue;
     const geometry = itemGeometry(item);
@@ -271,6 +294,7 @@ function measureSegment(segmentIndex: number, text: string, items: unknown[]): P
     if (!widest || geometry.right - geometry.left > widest.geometry.right - widest.geometry.left) widest = ink;
     x0 = Math.min(x0, geometry.left);
     x1 = Math.max(x1, geometry.right);
+    extents.push(roundToTenth(geometry.left), roundToTenth(geometry.right));
     const matrix = transform as unknown[];
     if (Math.abs(Number(matrix[1])) > 1e-6 || Math.abs(Number(matrix[2])) > 1e-6) rotated = true;
   }
@@ -287,6 +311,7 @@ function measureSegment(segmentIndex: number, text: string, items: unknown[]): P
     lastEm: roundToTenth(last.geometry.emSize),
     lastDir: last.dir,
     rotated,
+    ink: extents,
   };
 }
 
@@ -338,17 +363,27 @@ const EMPTY_PAGE_LAYOUT: PdfPageLayout = { text: "", segments: [], lines: [], ta
 // U+002D and the look-alikes a line may end with. Only U+002D is ever removed
 // (predicate 2); the others are recognised so that such a line end is still
 // kept out of the inline evidence.
-const LINE_END_FRAGMENT = /(\p{L}[\p{L}\p{M}]*)([\-­‐‑‒–—−])$/u;
+const LINE_END_FRAGMENT = /(\p{L}[\p{L}\p{M}]*)([\-\u00AD\u2010\u2011\u2012\u2013\u2014\u2212])$/u;
 const LINE_START_FRAGMENT = /^(\p{L}[\p{L}\p{M}]*)/u;
 const LATIN_FRAGMENT = /^[\p{Script=Latin}\p{M}]+$/u;
-const INLINE_WORD = /\p{L}+(?:[-‐‑]\p{L}+)*/gu;
-const INLINE_HYPHEN = /[-‐‑]/u;
+const INLINE_WORD = /\p{L}+(?:[-\u2010\u2011]\p{L}+)*/gu;
+const INLINE_HYPHEN = /[-\u2010\u2011]/u;
 const LEFT_TOKEN_SHAPE = /(?:^|\s)[\p{Ps}\p{Pi}"']*(\p{L}[\p{L}\p{M}]*)-$/u;
 const RIGHT_TOKEN_SHAPE = /^(\p{L}[\p{L}\p{M}]*)(?=$|\s|[\p{Pe}\p{Pf}.,;:!?"'])/u;
 // A slash, an at-sign, or a full stop / colon immediately followed by a letter
 // or digit, anywhere in the white-space-delimited token: URL, domain, e-mail,
 // DOI, scheme:identifier.
 const URL_STRUCTURE = /[/@]|[.:][\p{L}\p{N}]/u;
+
+// Column gutters (predicate 12b), in em of the hyphenated line.
+/** A gap between two text items this wide is never a word space. */
+const WIDE_GUTTER_EM = 2;
+/** pdf.js itself stops treating a wider advance as an in-flow space. */
+const REPEATED_GUTTER_EM = 0.6;
+/** "The same position" on two consecutive printed lines. */
+const GUTTER_ALIGN_EM = 0.1;
+/** A line with more such gaps is word-per-item text (an OCR layer), not columns. */
+const REPEATED_GUTTER_MAX = 5;
 
 type PdfInlineEvidence = { words: ReadonlyMap<string, number>; pairs: ReadonlyMap<string, number> };
 
@@ -381,7 +416,7 @@ function buildInlineEvidence(pages: readonly PdfPageLayout[]): PdfInlineEvidence
   return { words, pairs };
 }
 
-/** The ordered predicates of Rule B2. A site is joined only when none of them fails. */
+/** The ordered predicates of Rule B3. A site is joined only when none of them fails. */
 export const PDF_LINE_BREAK_PREDICATES = [
   "1-same-page",
   "2-hyphen-is-U+002D",
@@ -396,6 +431,7 @@ export const PDF_LINE_BREAK_PREDICATES = [
   "10-same-column",
   "11-font-size-ratio",
   "12-right-edge-would-not-fit",
+  "12b-no-column-gutter",
   "13-joined-word-inline",
   "14-pair-never-inline",
 ] as const;
@@ -420,6 +456,12 @@ export type PdfLineBreakMeasurements = {
   neighbours: number;
   /** room left on this line had the next fragment stayed on it, in em; null without a block */
   fitGapEm: number | null;
+  /** widest gap between two consecutive text items of this printed line, in em; null across a page boundary */
+  widestGapEm: number | null;
+  /** gaps of at least 0.6 em on this printed line; null across a page boundary */
+  gutterGaps: number | null;
+  /** one of those gaps is repeated at the same position on the next printed line */
+  sharedGutter: boolean;
   rotated: boolean;
   dirLeft: string;
   dirRight: string;
@@ -499,6 +541,37 @@ function decideLineBreakSites(pages: readonly PdfPageLayout[]): PdfLineBreakSite
       groupX1[i] = x1;
     }
 
+    // Predicate 12b: the positive horizontal gaps between consecutive ink
+    // items of a printed line (all its segments, in emission order) — each
+    // with its width and its edge, the left edge of the item after it. A
+    // group is a run of consecutive lines, so each printed line is walked
+    // once and kept for every site that asks for it, widest gap first.
+    type LineGaps = { widths: number[]; edges: number[] };
+    const gapsOfGroup = new Map<number, LineGaps>();
+    const lineGaps = (i: number): LineGaps => {
+      const known = gapsOfGroup.get(group[i]);
+      if (known) return known;
+      let first = i;
+      while (first > 0 && group[first - 1] === group[i]) first -= 1;
+      const widths: number[] = [];
+      const edges: number[] = [];
+      let previousRight: number | null = null;
+      for (let j = first; j < lines.length && group[j] === group[i]; j += 1) {
+        const ink = lines[j].ink;
+        for (let q = 0; q < ink.length; q += 2) {
+          if (previousRight !== null && ink[q] - previousRight > 0) {
+            widths.push(ink[q] - previousRight);
+            edges.push(ink[q]);
+          }
+          previousRight = ink[q + 1];
+        }
+      }
+      const widestFirst = widths.map((_, q) => q).sort((p, q) => widths[q] - widths[p]);
+      const gaps: LineGaps = { widths: widestFirst.map((q) => widths[q]), edges: widestFirst.map((q) => edges[q]) };
+      gapsOfGroup.set(group[i], gaps);
+      return gaps;
+    };
+
     // Every consecutive pair of the page, then the pair that straddles the
     // page boundary — recorded so predicate 1 refuses it explicitly.
     const candidates: Array<[PdfSegmentLine, PdfSegmentLine, number, PdfLineBreakSite["kind"]]> = [];
@@ -548,6 +621,37 @@ function decideLineBreakSites(pages: readonly PdfPageLayout[]): PdfLineBreakSite
       const rightChunkWidth = averageCharWidth * rightChunk.length;
       const dy = lineA.y - lineB.y;
 
+      let widestGapEm: number | null = null;
+      let gutterGaps: number | null = null;
+      let sharedGutter = false;
+      if (kind === "same-page") {
+        const gapsA = lineGaps(i);
+        const gapsB = lineGaps(i + 1);
+        widestGapEm = roundToHundredth((gapsA.widths[0] ?? 0) / em);
+        // How many gaps of a line are at least REPEATED_GUTTER_EM wide: they
+        // are the first ones, the rounded width never grows down the list.
+        const guttersOf = (gaps: LineGaps): number => {
+          let low = 0;
+          let high = gaps.widths.length;
+          while (low < high) {
+            const middle = (low + high) >> 1;
+            if (roundToHundredth(gaps.widths[middle] / em) >= REPEATED_GUTTER_EM) low = middle + 1;
+            else high = middle;
+          }
+          return low;
+        };
+        const guttersA = guttersOf(gapsA);
+        const guttersB = guttersOf(gapsB);
+        gutterGaps = guttersA;
+        if (guttersA <= REPEATED_GUTTER_MAX && guttersB <= REPEATED_GUTTER_MAX) {
+          for (let p = 0; p < guttersA && !sharedGutter; p += 1) {
+            for (let q = 0; q < guttersB && !sharedGutter; q += 1) {
+              sharedGutter = roundToHundredth(Math.abs(gapsA.edges[p] - gapsB.edges[q]) / em) <= GUTTER_ALIGN_EM;
+            }
+          }
+        }
+      }
+
       const m: PdfLineBreakMeasurements = {
         lowercaseLeft: /\p{Ll}$/u.test(left),
         lowercaseRight: /^\p{Ll}/u.test(right),
@@ -560,6 +664,9 @@ function decideLineBreakSites(pages: readonly PdfPageLayout[]): PdfLineBreakSite
         rightGapEm: blockRight === null ? null : roundToHundredth((blockRight - lineA.x1) / em),
         neighbours,
         fitGapEm: blockRight === null ? null : roundToHundredth((blockRight - (lineA.x1 - 0.33 * em + rightChunkWidth)) / em),
+        widestGapEm,
+        gutterGaps,
+        sharedGutter,
         rotated: lineA.rotated || lineB.rotated,
         dirLeft: lineA.lastDir,
         dirRight: lineB.firstDir,
@@ -584,6 +691,9 @@ function decideLineBreakSites(pages: readonly PdfPageLayout[]): PdfLineBreakSite
       if (!(m.emRatio >= 0.7 && m.emRatio <= 1.45)) failed.push("11-font-size-ratio");
       if (!(m.rightGapEm !== null && m.neighbours >= 1 && m.fitGapEm !== null && m.fitGapEm < 0.5)) {
         failed.push("12-right-edge-would-not-fit");
+      }
+      if (kind === "same-page" && !(m.widestGapEm !== null && m.widestGapEm < WIDE_GUTTER_EM && !m.sharedGutter)) {
+        failed.push("12b-no-column-gutter");
       }
       if (!(m.joinedInline >= 1)) failed.push("13-joined-word-inline");
       if (!(m.pairInline === 0)) failed.push("14-pair-never-inline");
