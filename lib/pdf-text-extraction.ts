@@ -745,13 +745,19 @@ function repairLineBreakHyphenation(layouts: readonly PdfPageLayout[]): PdfLineB
   const pages = layouts.map((layout, pageIndex) => {
     const joinAfter = joinAfterByPage.get(pageIndex);
     if (!joinAfter) return layout.text;
+    // Each segment is trimmed on its own, as it is emitted — never the page
+    // built so far, which would cost the length of the page once per join. A
+    // segment's text always holds ink, so the end of the page text is the end
+    // of the segment just emitted and both give the same string.
     let text = "";
-    let joinNext = false;
+    let joinedToPrevious = false;
     for (let index = 0; index < layout.segments.length; index += 1) {
       const segment = layout.segments[index];
-      if (joinNext) text = text.trimEnd().slice(0, -1) + segment.text.trimStart();
-      else text += segment.separatorBefore + segment.text;
-      joinNext = joinAfter.has(index);
+      const joinNext = index + 1 < layout.segments.length && joinAfter.has(index);
+      let own = joinedToPrevious ? segment.text.trimStart() : segment.separatorBefore + segment.text;
+      if (joinNext) own = own.trimEnd().slice(0, -1);
+      text += own;
+      joinedToPrevious = joinNext;
     }
     return text + layout.tail;
   });

@@ -1065,3 +1065,85 @@ test("only the joined pair changes on a page: every other separator, including w
   assert.equal(result.pages[0], v1.replace(removed[0], "example"));
   assert.ok(result.pages[0].endsWith("the  presiding   judge."));
 });
+
+test("consecutive joins: a line joined to the line above and to the line below is trimmed at both ends, and white space inside either segment goes with the break", () => {
+  const MIDDLE = "ple and then asked for one more illustrative exam-";
+  const expected = `${used("example")} the committee then asked for one further example and then asked for one more illustrative example before the session was closed for the day by ${LAST}`;
+
+  const plain = repair([column([used("example"), BREAK, MIDDLE, NEXT, LAST])]);
+  assert.equal(plain.lineBreakJoins, 2);
+  assert.equal(plain.pages[0], expected);
+
+  // The same page with white space where a join has to cut: after the hyphen
+  // inside the upper segment, a white-space-only run between the two segments,
+  // and at the start of the lower segment. All of it belongs to the break.
+  const y = (line) => TOP - line * PITCH;
+  const spaced = [[
+    item(used("example"), { y: y(0), width: WIDTH }),
+    item(BREAK, { y: y(1), width: WIDTH, eol: false }), item("  ", { x: LEFT + WIDTH, y: y(1), width: 5 }),
+    item(" ", { x: LEFT, y: y(2), width: 3 }),
+    item(" ", { x: LEFT - 3, y: y(2), width: 3, eol: false }), item(MIDDLE, { y: y(2), width: WIDTH }),
+    item(NEXT, { y: y(3), width: WIDTH }),
+    item(LAST, { y: y(4) }),
+  ]];
+  // v1: two characters after the hyphen, a run of its own, one before "ple", and the three separators between them
+  assert.equal(/exam-( +)ple and then/u.exec(v1PageText(spaced[0]))?.[1].length, 6, "v1 carries the white space of all three places");
+  const result = repair(spaced);
+  assert.equal(result.lineBreakJoins, 2);
+  assert.equal(result.pages[0], expected);
+});
+
+test("applying joins does not rescan the page: the string work per character of page text stays flat from 1,000 to 16,000 joins on one page", () => {
+  // Counted, not timed: the characters handed to String.prototype.trimEnd and
+  // String.prototype.slice while the repair runs. Trimming the page built so
+  // far once per join makes that count grow with joins x page length — about
+  // one character per join for every character of the page. Trimming each
+  // segment on its own keeps it at a few characters per character of the page.
+  const repairCountingStringWork = (pages) => {
+    const { trimEnd, slice } = String.prototype;
+    let characters = 0;
+    String.prototype.trimEnd = function () { characters += this.length; return trimEnd.call(this); };
+    String.prototype.slice = function (...args) { characters += this.length; return slice.apply(this, args); };
+    try {
+      const result = inspectPdfLineBreakRepair(pages);
+      return { result, characters };
+    } finally {
+      String.prototype.trimEnd = trimEnd;
+      String.prototype.slice = slice;
+    }
+  };
+  const line = (str, index, count) => item(str, { y: 20 + PITCH * (count - index), width: WIDTH });
+  const CHAINED = "ple and the committee then asked for one further exam-";
+  const UPPER = "the committee then asked for one further exam-";
+  const LOWER = "ple before the session was closed for the day by";
+  const shapes = {
+    // every line ends "exam-" and starts "ple": each joined line is itself joined to the next
+    chain: (joins) => ({
+      pages: [[line(used("example"), 0, joins + 2), ...Array.from({ length: joins + 1 }, (_, k) => line(CHAINED, k + 1, joins + 2))]],
+      text: `${used("example")} ${CHAINED.slice(0, -1).repeat(joins)}${CHAINED}`,
+    }),
+    // a broken line, then a line that ends on a full word: no join touches the next
+    pairs: (joins) => ({
+      pages: [[line(used("example"), 0, 2 * joins + 1), ...Array.from({ length: joins }, (_, k) => [line(UPPER, 2 * k + 1, 2 * joins + 1), line(LOWER, 2 * k + 2, 2 * joins + 1)]).flat()]],
+      text: `${used("example")}${` ${UPPER.slice(0, -1)}${LOWER}`.repeat(joins)}`,
+    }),
+  };
+
+  for (const [name, build] of Object.entries(shapes)) {
+    const work = new Map();
+    for (const joins of [1000, 2000, 4000, 8000, 16000]) {
+      const { pages, text } = build(joins);
+      const { result, characters } = repairCountingStringWork(pages);
+      assert.equal(result.lineBreakJoins, joins, `${name} ${joins}`);
+      assert.equal(result.pages[0] === text, true, `${name} ${joins}: the page text is the lines with every break closed`);
+      const perPageCharacter = characters / text.length;
+      assert.ok(perPageCharacter < 16, `${name} ${joins}: ${perPageCharacter.toFixed(1)} characters of string work per character of page text`);
+      work.set(joins, characters);
+    }
+    const growth = work.get(16000) / work.get(1000);
+    assert.ok(growth < 17, `${name}: 16 times the joins cost ${growth.toFixed(1)} times the string work`);
+  }
+
+  // and at the smallest size the frozen reference, which trims the whole page per join, emits the same text
+  for (const build of Object.values(shapes)) repair(build(1000).pages);
+});
