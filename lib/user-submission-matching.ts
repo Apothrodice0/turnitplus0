@@ -6,12 +6,13 @@ import {
   findCandidateCorpusRepresentations,
   findReusableRepresentationByCanonicalHash,
   findRepresentationById,
-  summarizeSubmissionOwnership,
+  summarizeSubmissionOwnershipForRepresentations,
   isRepresentationActivelyPromoted,
   isRepresentationEligibleForMatching,
   corpusMaturityCutoff,
   CORPUS_FINGERPRINT_VERSION,
   type CandidateCorpusRepresentation,
+  type SubmissionOwnershipSummary,
 } from "./user-submission-corpus";
 import {
   computeDocumentCorrespondence,
@@ -56,11 +57,12 @@ export { isCorpusSourceMatchingEnabled };
  * ever appears anywhere in this module's output.
  *
  * Account-safety is structural (this phase's own task description, section
- * 15): the only function anywhere that looks at which accounts submitted a
- * representation is lib/user-submission-corpus.ts's
- * summarizeSubmissionOwnership, and its own return type has no room for an
- * account id — only a boolean and a count. This module never queries
- * document_identities.account_id, users, or emails directly.
+ * 15): the only functions anywhere that look at which accounts submitted a
+ * representation are lib/user-submission-corpus.ts's
+ * summarizeSubmissionOwnership and its batch form
+ * summarizeSubmissionOwnershipForRepresentations, and their return type has
+ * no room for an account id — only a boolean and a count. This module never
+ * queries document_identities.account_id, users, or emails directly.
  */
 
 /** Reuses lib/document-family.ts's FamilyMatchType vocabulary values deliberately (this phase's own task description, section 12) — not imported directly, since family membership and corpus-match evidence are different concerns that happen to share the same two meaningful values; SEED does not apply here. */
@@ -87,7 +89,34 @@ export type UserSubmissionMatchConfig = {
   correspondence: DocumentCorrespondenceThresholds;
   /** Coarse candidate-generation filter — how many shared indexed shingles before a representation is even worth loading and locally comparing. Deliberately looser than the correspondence thresholds above, which do the real meaningful-overlap decision. */
   candidateShingleThreshold: number;
+  /**
+   * A budget PER RELATIONSHIP CLASS, applied after a candidate's
+   * relationship is known — never a LIMIT on raw discovered rows:
+   *   - scoring candidates (PRIOR_SUBMISSION, TURNITPLUS_CORPUS_SOURCE): at
+   *     most this many VERIFIED matches are reported. A candidate that fails
+   *     verification does not consume the budget.
+   *   - candidates that can never score (SELF, UNKNOWN_RELATIONSHIP): at
+   *     most this many, in rank order, are verified and reported; the rest
+   *     are passed over without loading their text.
+   *   - a candidate that would be dropped outright (no real ownership for a
+   *     signed-in viewer) is never verified and consumes nothing.
+   * So a result carries at most 2 × maxCandidates matches. See
+   * matchAgainstUserSubmissionCorpus's own CANDIDATE BUDGET comment.
+   */
   maxCandidates: number;
+  /**
+   * How many ranked candidate rows one discovery round trip returns —
+   * transport batching, NOT a cap on what is examined: a full page is
+   * followed by the next one (same total order) until the candidate list is
+   * exhausted, the scoring budget above is full, or a time budget stops the
+   * pass. No value of it changes which candidates are examined on a quiet
+   * database, only how many round trips that takes. Optional, and
+   * deliberately absent from USER_SUBMISSION_MATCH_THRESHOLDS (default
+   * USER_SUBMISSION_CANDIDATE_PAGE_SIZE): lib/report-historical-match.ts
+   * digests that object into every snapshot's matcher_version tag, and a
+   * batching size is not a reason to recompute stored snapshots.
+   */
+  candidatePageSize?: number;
   /** Which corpus_document_shingles generation to query — see lib/user-submission-corpus.ts's own fingerprint_version comment. */
   fingerprintVersion: string;
   /** This service's own algorithm/config identifier, independent of canonicalizationVersion and fingerprintVersion (this phase's own task description, section 30). */
@@ -105,7 +134,8 @@ export type UserSubmissionMatchConfig = {
   maxCandidateWordCount: number;
   /**
    * SOFT, cooperative deadline for the whole matching pass — checked ONLY
-   * between candidates in the correspondence loop, never mid-computation.
+   * between candidates in the correspondence loop (and before each further
+   * page of candidates is requested), never mid-computation.
    * This can stop the loop from STARTING another candidate once the budget
    * is spent; it cannot cancel, interrupt, or bound a single
    * computeDocumentCorrespondence call already in flight (JS/Node has no
@@ -180,6 +210,20 @@ export type UserSubmissionMatchConfig = {
  * compared against its own published source does.
  */
 export const USER_SUBMISSION_MATCHER_VERSION = "user-submission-match-v1";
+
+/**
+ * Default UserSubmissionMatchConfig.candidatePageSize. One page is one run
+ * of the candidate aggregate, whose cost is the posting lists it reads, not
+ * the rows it returns — measured ~1.6 s for 200 same-account drafts of a
+ * 600-word document whether 10 or 250 rows come back, and a further page
+ * pays that again. So the page is sized to hold every realistic candidate
+ * list in a single round trip (an author with hundreds of earlier drafts, a
+ * cohort sharing a passage): paging is the exception that keeps the pass
+ * exhaustive, not the normal path. Rows are five scalar columns each, and
+ * the per-candidate total-shingle query is skipped (omitContainment), so a
+ * full page costs little beyond the aggregate itself.
+ */
+export const USER_SUBMISSION_CANDIDATE_PAGE_SIZE = 500;
 
 export const USER_SUBMISSION_MATCH_THRESHOLDS: UserSubmissionMatchConfig = {
   correspondence: {
@@ -301,6 +345,40 @@ export type UserSubmissionMatchResult =
   | { status: "NO_HISTORICAL_MATCH"; partial?: boolean }
   | { status: "MATCHED"; matches: UserSubmissionMatch[]; partial?: boolean };
 
+/**
+ * Developer/test-only diagnostics for one matching pass. Populated in place
+ * when matchAgainstUserSubmissionCorpus is handed a `diagnostics` sink —
+ * never part of any return value, never reachable from a similarity report,
+ * and carrying no corpus identifiers (counts, durations and one enum), the
+ * same discipline as lib/user-submission-corpus.ts's
+ * CandidateDiscoveryDiagnostics.
+ */
+export type UserSubmissionMatchDiagnostics = {
+  /** Ranked candidate rows read from discovery across every page (plus the exact-canonical fallback candidate, if it was added), before any relationship is known. */
+  rawCandidatesConsidered: number;
+  /** Of those, candidates whose relationship can contribute to the score (PRIOR_SUBMISSION, TURNITPLUS_CORPUS_SOURCE). */
+  eligibleCandidatesConsidered: number;
+  /** computeDocumentCorrespondence calls actually made, for scoring and non-scoring candidates alike. */
+  candidatesVerified: number;
+  candidatePagesFetched: number;
+  /** Wall-clock time spent in candidate discovery (every page, including its high-frequency probe). */
+  queryTimeMs: number;
+  /** Wall-clock time of the whole pass. */
+  matchTimeMs: number;
+  /**
+   * Why the pass stopped reading candidates:
+   *   CANDIDATES_EXHAUSTED — every discovered candidate was examined.
+   *   SCORING_BUDGET_FULL  — maxCandidates scoring matches were verified while
+   *                          lower-ranked candidates remained unexamined. The
+   *                          result is complete only down to that rank; it is
+   *                          NOT flagged partial (see the CANDIDATE BUDGET
+   *                          comment on matchAgainstUserSubmissionCorpus).
+   *   TIME_BUDGET          — matchTimeBudgetMs ran out (result is partial).
+   *   QUERY_FAILED         — a discovery query timed out or errored (result is partial).
+   */
+  stopReason: "CANDIDATES_EXHAUSTED" | "SCORING_BUDGET_FULL" | "TIME_BUDGET" | "QUERY_FAILED";
+};
+
 function mergeConfig(overrides?: Partial<UserSubmissionMatchConfig>): UserSubmissionMatchConfig {
   if (!overrides) return USER_SUBMISSION_MATCH_THRESHOLDS;
   return {
@@ -330,6 +408,53 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): 
     timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
   });
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * The relationship a candidate would be reported under, or null when it
+ * would not be reported at all. Depends only on who submitted the
+ * representation and how it is backed — never on the text comparison — which
+ * is what lets matchAgainstUserSubmissionCorpus decide it BEFORE spending
+ * verification budget on the candidate.
+ */
+function classifyRelationship(
+  ownership: SubmissionOwnershipSummary,
+  isActivelyPromoted: boolean,
+  accountId: string | null,
+  corpusSourceMatchingEnabled: boolean,
+): RelationshipType | null {
+  const hasNoRealOwnership = !ownership.hasSameAccountSubmission && ownership.otherAccountSubmissionCount === 0;
+  if (hasNoRealOwnership && isActivelyPromoted && corpusSourceMatchingEnabled) {
+    // The fix this file's own review required: previously, zero real
+    // ownership meant "drop for a signed-in account, UNKNOWN_RELATIONSHIP
+    // for anonymous" unconditionally — silently hiding every
+    // promoted-corpus-only match for any signed-in viewer, since a
+    // promoted representation structurally never has a submission
+    // reference. Applies identically regardless of accountId (this
+    // describes the SOURCE, not the viewer) — see
+    // matchAgainstUserSubmissionCorpus's own header comment.
+    return "TURNITPLUS_CORPUS_SOURCE";
+  }
+  if (hasNoRealOwnership) {
+    // Phase E8D: once a caller excludes the current submission's own
+    // just-indexed reference (documentIdentityId), a representation whose
+    // ONLY submitter was that excluded reference now correctly shows no
+    // ownership at all — this is not "no relationship," it is "nothing to
+    // report a relationship against," since the sole evidence was the
+    // current submission matching itself. Before E8D this was unreachable
+    // (nothing was ever indexed before its own report was first viewed);
+    // now that save-time indexing is live, a signed-in account's very
+    // first-ever upload of new content would otherwise be misreported as
+    // PRIOR_SUBMISSION against no one. Drop it exactly like NO_HISTORICAL_MATCH.
+    return accountId !== null ? null : "UNKNOWN_RELATIONSHIP";
+  }
+  if (accountId === null) return "UNKNOWN_RELATIONSHIP";
+  return ownership.hasSameAccountSubmission ? "SELF" : "PRIOR_SUBMISSION";
+}
+
+/** The relationships lib/unified-similarity.ts counts toward the score — SELF and UNKNOWN_RELATIONSHIP are always excluded there (its DECISION 1 / DECISION 2). */
+function isScoringRelationship(relationshipType: RelationshipType): boolean {
+  return relationshipType === "PRIOR_SUBMISSION" || relationshipType === "TURNITPLUS_CORPUS_SOURCE";
 }
 
 /**
@@ -381,6 +506,32 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): 
  * A budget-exceeded exit returns whatever matches were already found (never
  * wrong, only potentially incomplete) with partial:true, so callers can
  * choose to treat it as not-yet-final rather than a confirmed result.
+ *
+ * CANDIDATE BUDGET. Candidates are read in one total order (shared shingles
+ * descending, then representation id), a page at a time, and each one's
+ * relationship is resolved BEFORE any budget is charged:
+ *   - the candidate list is never cut at a row count. An earlier build took
+ *     `ORDER BY shared DESC LIMIT maxCandidates` first and classified
+ *     afterwards, so ten of an author's own earlier drafts — SELF, never
+ *     scored — occupied all ten slots and a genuine cross-account source of a
+ *     copied passage was never verified: adding the author's own documents
+ *     to the corpus took the score from 20 % to 0 %;
+ *   - a scoring candidate (PRIOR_SUBMISSION / TURNITPLUS_CORPUS_SOURCE) is
+ *     charged only when it VERIFIES. Higher-ranked candidates that share many
+ *     scattered shingles but fail verification therefore cannot displace a
+ *     verified source either; they cost time, and time is bounded by
+ *     matchTimeBudgetMs with an honest partial:true;
+ *   - SELF / UNKNOWN_RELATIONSHIP candidates have their own budget of
+ *     maxCandidates verification attempts, so they are still reported as
+ *     before but can neither take a scoring candidate's place nor spend
+ *     unbounded time on text that cannot change the score;
+ *   - a candidate that would be dropped outright is never loaded.
+ * The pass ends when the list is exhausted, when maxCandidates scoring
+ * matches have been verified, or when a time budget stops it. The second is
+ * the one remaining rank cut: an eleventh verified scoring source is not
+ * read, and the result does not say so (partial stays unset — recomputing
+ * would not change it). params.diagnostics.stopReason records which of the
+ * three it was.
  */
 export async function matchAgainstUserSubmissionCorpus(
   client: Client,
@@ -431,10 +582,13 @@ export async function matchAgainstUserSubmissionCorpus(
     maturityCutoff?: string;
     /** Fallback logical clock when no explicit maturityCutoff is threaded in. Tests inject/freeze it; production leaves it undefined (=> server time). */
     asOf?: Date;
+    /** Developer/test diagnostics sink — populated in place, never returned. See UserSubmissionMatchDiagnostics. */
+    diagnostics?: Partial<UserSubmissionMatchDiagnostics>;
   },
 ): Promise<UserSubmissionMatchResult> {
   const config = mergeConfig(params.config);
-  const deadline = Date.now() + config.matchTimeBudgetMs;
+  const startedAt = Date.now();
+  const deadline = startedAt + config.matchTimeBudgetMs;
   // Resolved ONCE for this whole match — a single string handed to both
   // candidate discovery and the exact-hash fallback (never asOf separately),
   // so they cannot straddle a maturity boundary. Never null: matching always
@@ -445,175 +599,234 @@ export async function matchAgainstUserSubmissionCorpus(
   if (queryWordCount === 0) return { status: "NO_HISTORICAL_MATCH" };
 
   const queryShingles = corpusShingleHashes(params.canonicalText, config.correspondence.shingleSize);
-
-  let shingleCandidates: CandidateCorpusRepresentation[];
-  let dbTimedOut = false;
-  try {
-    shingleCandidates = await withTimeout(
-      findCandidateCorpusRepresentations(client, queryShingles, {
-        fingerprintVersion: config.fingerprintVersion,
-        minSharedShingles: config.candidateShingleThreshold,
-        limit: config.maxCandidates,
-        excludeAccountId: params.excludeAccountId,
-        // 10k+-corpus scale hardening — candidate DISCOVERY only. See
-        // maxCandidateShingleDocumentFrequency on UserSubmissionMatchConfig
-        // and lib/user-submission-corpus.ts's applyHighFrequencyShinglePruning.
-        // null => no pruning and no extra DB round trip (exact prior behavior).
-        maxDocumentFrequency: config.maxCandidateShingleDocumentFrequency ?? undefined,
-        minDiscriminativeShingles: config.minDiscriminativeShingles,
-        // Phase A: an explicit MATCHING call with the resolved cutoff;
-        // findCandidateCorpusRepresentations forwards both to its DF probe.
-        eligibilityMode: "MATCHING",
-        maturityCutoff,
-      }),
-      config.dbQueryTimeoutMs,
-      "findCandidateCorpusRepresentations",
-    );
-  } catch {
-    // Real I/O timeout or a genuine query error — either way, failure
-    // isolation means this returns a normal (non-throwing) result rather
-    // than propagating: the caller (lib/report-historical-match.ts) already
-    // has its own outer try/catch for anything unexpected, but a slow
-    // corpus should degrade to "nothing found this time," not an error.
-    shingleCandidates = [];
-    dbTimedOut = true;
-  }
-
-  // Defensive guarantee for exact/formatting-only duplicates (sections
-  // 10/11): an identical canonical text always has identical shingles and
-  // would ordinarily be found by the search above anyway, but a very short
-  // document could have fewer shingles than candidateShingleThreshold —
-  // this makes the exact-duplicate case correct regardless of that knob.
-  // Skipped entirely if the shingle search above already timed out — no
-  // point spending another DB round trip against a corpus that just proved
-  // slow.
-  const candidateById = new Map<string, CandidateCorpusRepresentation>(shingleCandidates.map((c) => [c.representationId, c]));
-  if (!dbTimedOut) {
-    const exactHash = canonicalSha256(params.canonicalText);
-    const exactRepresentation = await findReusableRepresentationByCanonicalHash(client, exactHash);
-    if (exactRepresentation && !candidateById.has(exactRepresentation.id)) {
-      // Own-submission exclusion fix: findReusableRepresentationByCanonicalHash is a
-      // plain hash lookup with no eligibility awareness of its own (it is
-      // also used by lib/corpus-admission-promotion.ts's own find-or-create
-      // dedup logic, where eligibility is irrelevant) — this fallback must
-      // apply the SAME eligibility rule findCandidateCorpusRepresentations'
-      // own WHERE clause already enforces for its shingle-based candidates.
-      // A byte-identical self-upload of a just-promoted document is exactly
-      // an exact-hash match, so leaving this fallback ungated would make
-      // excludeAccountId above a no-op for the precise scenario it exists
-      // to close. Phase A: the SAME MATCHING gate and resolved cutoff too — an
-      // exact-canonical duplicate of an immature corpus source must not slip in
-      // via this fallback when the shingle search already correctly excluded it.
-      const eligible = await isRepresentationEligibleForMatching(client, exactRepresentation.id, {
-        excludeAccountId: params.excludeAccountId,
-        eligibilityMode: "MATCHING",
-        maturityCutoff,
-      });
-      if (eligible) {
-        candidateById.set(exactRepresentation.id, {
-          representationId: exactRepresentation.id,
-          canonicalSha256: exactRepresentation.canonicalSha256,
-          wordCount: exactRepresentation.wordCount,
-          sharedShingleCount: queryShingles.size,
-          containment: 1,
-          isActivelyPromoted: await isRepresentationActivelyPromoted(client, exactRepresentation.id),
-        });
-      }
-    }
-  }
-
-  const boundedCandidates = [...candidateById.values()].slice(0, config.maxCandidates);
-  const matches: UserSubmissionMatch[] = [];
+  const candidatePageSize = config.candidatePageSize ?? USER_SUBMISSION_CANDIDATE_PAGE_SIZE;
   // params.corpusSourceMatchingEnabled, when the caller captured it once for
   // its whole computation, is used verbatim; otherwise a single internal
   // env read, exactly as before.
   const corpusSourceMatchingEnabled = params.corpusSourceMatchingEnabled ?? isCorpusSourceMatchingEnabled();
-  let timedOut = dbTimedOut;
 
-  for (const candidate of boundedCandidates) {
-    // Cooperative deadline check — see this function's own TIMEOUT HONESTY
-    // comment: this can only decline to start the NEXT candidate, never
-    // interrupt one already in progress.
-    if (Date.now() >= deadline) {
+  const matches: UserSubmissionMatch[] = [];
+  const examined = new Set<string>();
+  let scoringMatchCount = 0;
+  let nonScoringAttemptCount = 0;
+  let timedOut = false;
+  let stopReason: UserSubmissionMatchDiagnostics["stopReason"] = "CANDIDATES_EXHAUSTED";
+  let rawCandidatesConsidered = 0;
+  let eligibleCandidatesConsidered = 0;
+  let candidatesVerified = 0;
+  let candidatePagesFetched = 0;
+  let queryTimeMs = 0;
+
+  let offset = 0;
+  let stopped = false;
+  while (!stopped) {
+    const isFirstPage = candidatePagesFetched === 0;
+    let page: CandidateCorpusRepresentation[];
+    const queryStartedAt = Date.now();
+    try {
+      page = await withTimeout(
+        findCandidateCorpusRepresentations(client, queryShingles, {
+          fingerprintVersion: config.fingerprintVersion,
+          minSharedShingles: config.candidateShingleThreshold,
+          limit: candidatePageSize,
+          offset,
+          // Verification below recomputes containment from full text; the
+          // candidate's own index-level estimate is never read here.
+          omitContainment: true,
+          excludeAccountId: params.excludeAccountId,
+          // The requester's own earlier submissions are SELF and never score,
+          // so they must not make a passage look common and prune its one
+          // genuine cross-account source out of discovery.
+          requesterAccountId: params.accountId,
+          // 10k+-corpus scale hardening — candidate DISCOVERY only. See
+          // maxCandidateShingleDocumentFrequency on UserSubmissionMatchConfig
+          // and lib/user-submission-corpus.ts's applyHighFrequencyShinglePruning.
+          // null => no pruning and no extra DB round trip (exact prior behavior).
+          maxDocumentFrequency: config.maxCandidateShingleDocumentFrequency ?? undefined,
+          minDiscriminativeShingles: config.minDiscriminativeShingles,
+          // Phase A: an explicit MATCHING call with the resolved cutoff;
+          // findCandidateCorpusRepresentations forwards both to its DF probe.
+          eligibilityMode: "MATCHING",
+          maturityCutoff,
+        }),
+        // The first page keeps the whole dbQueryTimeoutMs, exactly as the
+        // single query always did. A further page may only use what is left
+        // of the pass's own budget, so paging never extends the pass.
+        isFirstPage ? config.dbQueryTimeoutMs : Math.max(1, Math.min(config.dbQueryTimeoutMs, deadline - Date.now())),
+        "findCandidateCorpusRepresentations",
+      );
+    } catch {
+      // Real I/O timeout or a genuine query error — either way, failure
+      // isolation means this returns a normal (non-throwing) result rather
+      // than propagating: the caller (lib/report-historical-match.ts) already
+      // has its own outer try/catch for anything unexpected, but a slow
+      // corpus should degrade to "nothing more found this time," not an
+      // error. Whatever earlier pages already verified is kept.
+      queryTimeMs += Date.now() - queryStartedAt;
       timedOut = true;
+      stopReason = "QUERY_FAILED";
       break;
     }
+    queryTimeMs += Date.now() - queryStartedAt;
+    candidatePagesFetched += 1;
+    offset += page.length;
+    const exhausted = page.length < candidatePageSize;
 
-    // HARD input limit: never run correspondence comparison against an
-    // oversized candidate document at all, regardless of the time budget.
-    if (candidate.wordCount > config.maxCandidateWordCount) continue;
-
-    const representation = await findRepresentationById(client, candidate.representationId);
-    if (!representation) continue; // defensive: representation was removed between the two queries
-
-    const correspondence = computeDocumentCorrespondence(params.canonicalText, representation.canonicalText, config.correspondence);
-    // Section 19/20: textual evidence is required — title/author alone,
-    // and weak/common-phrase overlap alone, never produce a match here.
-    // Phase 6.6 PART 2: distinctivePassageMatch is a THIRD, independent
-    // acceptance path alongside the pre-existing two — a single
-    // sufficiently long, contiguous, exact/near-exact passage is now
-    // reportable evidence on its own even when the source document's
-    // overall containment ratio is low (see USER_SUBMISSION_MATCH_THRESHOLDS's
-    // own minimumDistinctivePassageWords comment). Fragmented evidence
-    // (several short spans that never individually reach the threshold) is
-    // still rejected here exactly as before — distinctivePassageMatch is
-    // computed from the SINGLE longest span, never a sum across spans.
-    if (!correspondence.exactCanonicalMatch && !correspondence.strongCorrespondence && !correspondence.distinctivePassageMatch) continue;
-
-    const ownership = await summarizeSubmissionOwnership(client, representation.id, {
-      accountId: params.accountId,
-      excludeDocumentIdentityId: params.documentIdentityId ?? null,
-    });
-    const hasNoRealOwnership = !ownership.hasSameAccountSubmission && ownership.otherAccountSubmissionCount === 0;
-
-    let relationshipType: RelationshipType;
-    if (hasNoRealOwnership && candidate.isActivelyPromoted && corpusSourceMatchingEnabled) {
-      // The fix this file's own review required: previously, zero real
-      // ownership meant "drop for a signed-in account, UNKNOWN_RELATIONSHIP
-      // for anonymous" unconditionally — silently hiding every
-      // promoted-corpus-only match for any signed-in viewer, since a
-      // promoted representation structurally never has a submission
-      // reference. Applies identically regardless of accountId (this
-      // describes the SOURCE, not the viewer) — see this function's own
-      // header comment.
-      relationshipType = "TURNITPLUS_CORPUS_SOURCE";
-    } else if (hasNoRealOwnership) {
-      // Phase E8D: once a caller excludes the current submission's own
-      // just-indexed reference (documentIdentityId), a representation whose
-      // ONLY submitter was that excluded reference now correctly shows no
-      // ownership at all — this is not "no relationship," it is "nothing to
-      // report a relationship against," since the sole evidence was the
-      // current submission matching itself. Before E8D this was unreachable
-      // (nothing was ever indexed before its own report was first viewed);
-      // now that save-time indexing is live, a signed-in account's very
-      // first-ever upload of new content would otherwise be misreported as
-      // PRIOR_SUBMISSION against no one. Drop it exactly like NO_HISTORICAL_MATCH.
-      if (params.accountId !== null) continue;
-      relationshipType = "UNKNOWN_RELATIONSHIP";
-    } else if (params.accountId === null) {
-      relationshipType = "UNKNOWN_RELATIONSHIP";
-    } else if (ownership.hasSameAccountSubmission) {
-      relationshipType = "SELF";
-    } else {
-      relationshipType = "PRIOR_SUBMISSION";
+    let ordered = page;
+    if (isFirstPage) {
+      // Defensive guarantee for exact/formatting-only duplicates (sections
+      // 10/11): an identical canonical text always has identical shingles and
+      // would ordinarily be found by the search above anyway, but a very short
+      // document could have fewer shingles than candidateShingleThreshold —
+      // this makes the exact-duplicate case correct regardless of that knob.
+      // Never reached if the shingle search above already timed out — no
+      // point spending another DB round trip against a corpus that just
+      // proved slow. It is examined FIRST, ahead of the ranked list, so no
+      // number of equally-ranked candidates can keep it from being verified.
+      const exactHash = canonicalSha256(params.canonicalText);
+      const exactRepresentation = await findReusableRepresentationByCanonicalHash(client, exactHash);
+      const exactInPage = exactRepresentation ? page.find((c) => c.representationId === exactRepresentation.id) : undefined;
+      if (exactInPage) {
+        ordered = [exactInPage, ...page.filter((c) => c !== exactInPage)];
+      } else if (exactRepresentation) {
+        // Own-submission exclusion fix: findReusableRepresentationByCanonicalHash is a
+        // plain hash lookup with no eligibility awareness of its own (it is
+        // also used by lib/corpus-admission-promotion.ts's own find-or-create
+        // dedup logic, where eligibility is irrelevant) — this fallback must
+        // apply the SAME eligibility rule findCandidateCorpusRepresentations'
+        // own WHERE clause already enforces for its shingle-based candidates.
+        // A byte-identical self-upload of a just-promoted document is exactly
+        // an exact-hash match, so leaving this fallback ungated would make
+        // excludeAccountId above a no-op for the precise scenario it exists
+        // to close. Phase A: the SAME MATCHING gate and resolved cutoff too — an
+        // exact-canonical duplicate of an immature corpus source must not slip in
+        // via this fallback when the shingle search already correctly excluded it.
+        const eligible = await isRepresentationEligibleForMatching(client, exactRepresentation.id, {
+          excludeAccountId: params.excludeAccountId,
+          eligibilityMode: "MATCHING",
+          maturityCutoff,
+        });
+        if (eligible) {
+          ordered = [
+            {
+              representationId: exactRepresentation.id,
+              canonicalSha256: exactRepresentation.canonicalSha256,
+              wordCount: exactRepresentation.wordCount,
+              sharedShingleCount: queryShingles.size,
+              containment: 1,
+              isActivelyPromoted: await isRepresentationActivelyPromoted(client, exactRepresentation.id),
+            },
+            ...page,
+          ];
+        }
+      }
     }
 
-    matches.push({
-      relationshipType,
-      matchedRepresentationId: representation.id,
-      matchType: correspondence.exactCanonicalMatch ? "EXACT_CANONICAL_MATCH" : "STRONG_TEXT_MATCH",
-      containment: correspondence.containment,
-      matchedWordCount: correspondence.matchedWordCount,
-      passageCount: correspondence.passages.length,
-      longestMatchWords: correspondence.longestMatchWords,
-      passages: correspondence.passages,
-      historicalSubmissionCount: ownership.otherAccountSubmissionCount,
-      evidenceVersion: {
-        canonicalizationVersion: representation.canonicalizationVersion,
-        fingerprintVersion: config.fingerprintVersion,
-        matcherVersion: config.matcherVersion,
-      },
-    });
+    // A later page can repeat a row (the exact-canonical candidate above, or
+    // a row shifted by a concurrent corpus write) — examine each once.
+    const candidates = ordered.filter((c) => !examined.has(c.representationId));
+    for (const candidate of candidates) examined.add(candidate.representationId);
+    rawCandidatesConsidered += candidates.length;
+
+    // One round trip resolves who submitted every candidate on this page, so
+    // each candidate's relationship is known before any text is loaded.
+    const ownershipById = await summarizeSubmissionOwnershipForRepresentations(
+      client,
+      candidates.map((c) => c.representationId),
+      { accountId: params.accountId, excludeDocumentIdentityId: params.documentIdentityId ?? null },
+    );
+
+    for (let index = 0; index < candidates.length; index += 1) {
+      const candidate = candidates[index];
+      const ownership = ownershipById.get(candidate.representationId) ?? { hasSameAccountSubmission: false, otherAccountSubmissionCount: 0 };
+      const relationshipType = classifyRelationship(ownership, candidate.isActivelyPromoted, params.accountId, corpusSourceMatchingEnabled);
+      if (relationshipType === null) continue; // would be dropped whatever the text comparison said — never loaded
+      const scoring = isScoringRelationship(relationshipType);
+      if (scoring) eligibleCandidatesConsidered += 1;
+      // SELF / UNKNOWN_RELATIONSHIP beyond their own budget: passed over
+      // without loading — they cannot change the score, and must not spend
+      // the time a scoring candidate further down the list still needs.
+      else if (nonScoringAttemptCount >= config.maxCandidates) continue;
+
+      // HARD input limit: never run correspondence comparison against an
+      // oversized candidate document at all, regardless of the time budget.
+      if (candidate.wordCount > config.maxCandidateWordCount) continue;
+
+      // Cooperative deadline check — see this function's own TIMEOUT HONESTY
+      // comment: this can only decline to start the NEXT candidate, never
+      // interrupt one already in progress.
+      if (Date.now() >= deadline) {
+        timedOut = true;
+        stopReason = "TIME_BUDGET";
+        stopped = true;
+        break;
+      }
+      if (!scoring) nonScoringAttemptCount += 1;
+
+      const representation = await findRepresentationById(client, candidate.representationId);
+      if (!representation) continue; // defensive: representation was removed between the two queries
+
+      const correspondence = computeDocumentCorrespondence(params.canonicalText, representation.canonicalText, config.correspondence);
+      candidatesVerified += 1;
+      // Section 19/20: textual evidence is required — title/author alone,
+      // and weak/common-phrase overlap alone, never produce a match here.
+      // Phase 6.6 PART 2: distinctivePassageMatch is a THIRD, independent
+      // acceptance path alongside the pre-existing two — a single
+      // sufficiently long, contiguous, exact/near-exact passage is now
+      // reportable evidence on its own even when the source document's
+      // overall containment ratio is low (see USER_SUBMISSION_MATCH_THRESHOLDS's
+      // own minimumDistinctivePassageWords comment). Fragmented evidence
+      // (several short spans that never individually reach the threshold) is
+      // still rejected here exactly as before — distinctivePassageMatch is
+      // computed from the SINGLE longest span, never a sum across spans.
+      if (!correspondence.exactCanonicalMatch && !correspondence.strongCorrespondence && !correspondence.distinctivePassageMatch) continue;
+
+      matches.push({
+        relationshipType,
+        matchedRepresentationId: representation.id,
+        matchType: correspondence.exactCanonicalMatch ? "EXACT_CANONICAL_MATCH" : "STRONG_TEXT_MATCH",
+        containment: correspondence.containment,
+        matchedWordCount: correspondence.matchedWordCount,
+        passageCount: correspondence.passages.length,
+        longestMatchWords: correspondence.longestMatchWords,
+        passages: correspondence.passages,
+        historicalSubmissionCount: ownership.otherAccountSubmissionCount,
+        evidenceVersion: {
+          canonicalizationVersion: representation.canonicalizationVersion,
+          fingerprintVersion: config.fingerprintVersion,
+          matcherVersion: config.matcherVersion,
+        },
+      });
+
+      if (scoring) {
+        scoringMatchCount += 1;
+        if (scoringMatchCount >= config.maxCandidates) {
+          // Only a cut if something is actually left unread below this rank.
+          if (index < candidates.length - 1 || !exhausted) stopReason = "SCORING_BUDGET_FULL";
+          stopped = true;
+          break;
+        }
+      }
+    }
+
+    if (stopped || exhausted) break;
+    if (Date.now() >= deadline) {
+      timedOut = true;
+      stopReason = "TIME_BUDGET";
+      break;
+    }
+  }
+
+  if (params.diagnostics) {
+    Object.assign(params.diagnostics, {
+      rawCandidatesConsidered,
+      eligibleCandidatesConsidered,
+      candidatesVerified,
+      candidatePagesFetched,
+      queryTimeMs,
+      matchTimeMs: Date.now() - startedAt,
+      stopReason,
+    } satisfies UserSubmissionMatchDiagnostics);
   }
 
   const partial = timedOut ? true : undefined;

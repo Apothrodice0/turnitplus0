@@ -286,28 +286,47 @@ test("A/B: boilerplate fanout collapses, the genuine distinctive source survives
 });
 
 // =========================================================================
-// A2: at real scale pruning RESCUES a genuine source that boilerplate
-// otherwise evicts past the ranked candidate limit.
+// A2: at real scale boilerplate out-ranks a genuine source in the unpruned
+// candidate ranking; pruning puts it back at the top. The matcher verifies
+// it either way, because it no longer cuts the list at a row count.
 // =========================================================================
-test("A2: with many boilerplate reps, an unpruned search evicts the genuine source past maxCandidates; pruning restores it", async () => {
+test("A2: with many boilerplate reps, the genuine source falls outside the first maxCandidates ranked rows unpruned; pruning restores it — and the matcher verifies it either way", async () => {
   const c = await freshCorpus();
   try {
     const sourceText = `${filler("a2src")} ${DISTINCTIVE_PASSAGE} ${filler("a2tail")}`;
     const sourceId = await c.indexRealSubmission("a2-owner", "S", sourceText);
     // 70 boilerplate reps: every STOCK hash now has DF 70 > maxDF(50), and
     // each noise rep shares MORE stock hashes with the query than the source
-    // shares distinctive ones -> the real default maxCandidates: 10 evicts
-    // the source unpruned.
+    // shares distinctive ones -> the source ranks below all 70 unpruned.
     await c.seedBoilerplate(70, STOCK_HASHES);
 
     const queryText = canonicalizeText(`${filler("a2q")} ${DISTINCTIVE_PASSAGE} ${filler("a2qmid", 20)} ${STOCK_TEXT}`);
+    const queryShingles = corpusShingleHashes(queryText, 5);
+
+    // The ranking itself: the first maxCandidates rows, pruning off vs on.
+    const firstRows = USER_SUBMISSION_MATCH_THRESHOLDS.maxCandidates;
+    const rankedOff = await findCandidateCorpusRepresentations(c.client, queryShingles, {
+      fingerprintVersion: CORPUS_FINGERPRINT_VERSION, minSharedShingles: 3, limit: firstRows,
+    });
+    const rankedOn = await findCandidateCorpusRepresentations(c.client, queryShingles, {
+      fingerprintVersion: CORPUS_FINGERPRINT_VERSION, minSharedShingles: 3, limit: firstRows, maxDocumentFrequency: 50,
+    });
+    assert.equal(rankedOff.length, firstRows);
+    assert.ok(!rankedOff.some((x) => x.representationId === sourceId), "unpruned: boilerplate noise out-ranks the genuine source — it is not among the first maxCandidates ranked rows");
+    assert.ok(rankedOn.some((x) => x.representationId === sourceId), "pruned: the genuine source is back inside the first ranked rows");
 
     // Real production defaults (maxCandidates: 10) — only the pruning knob differs.
     const off = await matchAgainstUserSubmissionCorpus(c.client, { accountId: "a2-reader", canonicalText: queryText, config: { maxCandidateShingleDocumentFrequency: null } });
     const on = await matchAgainstUserSubmissionCorpus(c.client, { accountId: "a2-reader", canonicalText: queryText, config: { maxCandidateShingleDocumentFrequency: 50 } });
 
-    assert.ok(!entryFor(off, sourceId), "unpruned: the genuine source is evicted past maxCandidates by boilerplate noise (the bug this hardening fixes)");
-    assert.ok(entryFor(on, sourceId), "pruned: the genuine source is restored to the candidate set and verified");
+    // The 70 noise reps have no real ownership, so for a signed-in reader
+    // they would be dropped whatever their text said: they are passed over
+    // without consuming any candidate budget, and the source below them is
+    // still reached. This used to assert the opposite — the source evicted
+    // past a LIMIT of ten raw rows.
+    assert.ok(entryFor(off, sourceId), "unpruned: ineligible noise ranked above the genuine source does not keep it from being verified");
+    assert.ok(entryFor(on, sourceId), "pruned: the genuine source is verified");
+    assert.deepEqual(verifiedShape(entryFor(on, sourceId)), verifiedShape(entryFor(off, sourceId)));
     assert.equal(on.matches[0].matchType, entryFor(on, sourceId).matchType);
   } finally { c.close(); }
 });

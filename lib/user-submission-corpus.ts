@@ -522,11 +522,52 @@ export async function summarizeSubmissionOwnership(
     args: [representationId, options.excludeDocumentIdentityId ?? null, options.excludeDocumentIdentityId ?? null],
   });
   const accountIds = (result.rows as unknown as { account_id: string | null }[]).map((row) => row.account_id);
+  return ownershipSummaryFromAccountIds(accountIds, options.accountId);
+}
+
+/** The one reduction from "which accounts submitted this representation" to the bounded summary — shared by the single and batch forms so they can never disagree. */
+function ownershipSummaryFromAccountIds(accountIds: (string | null)[], accountId: string | null): SubmissionOwnershipSummary {
   const distinctOtherAccounts = new Set(
-    accountIds.filter((id): id is string => id !== null && id !== options.accountId),
+    accountIds.filter((id): id is string => id !== null && id !== accountId),
   );
-  const hasSameAccountSubmission = options.accountId !== null && accountIds.includes(options.accountId);
+  const hasSameAccountSubmission = accountId !== null && accountIds.includes(accountId);
   return { hasSameAccountSubmission, otherAccountSubmissionCount: distinctOtherAccounts.size };
+}
+
+/**
+ * Batch form of summarizeSubmissionOwnership: the same rule and the same
+ * bounded return shape (a same-account boolean and an other-accounts count,
+ * never an account id) for many representations in ONE round trip. Exists so
+ * lib/user-submission-matching.ts can resolve the relationship of a whole
+ * page of ranked candidates BEFORE it spends its verification budget — a
+ * candidate that can never score (SELF) must be recognisable without first
+ * loading and comparing its text. Every requested id is present in the
+ * result; one with no submission reference at all summarizes to
+ * { false, 0 }, exactly as the single form does.
+ */
+export async function summarizeSubmissionOwnershipForRepresentations(
+  client: Client,
+  representationIds: string[],
+  options: { accountId: string | null; excludeDocumentIdentityId?: string | null },
+): Promise<Map<string, SubmissionOwnershipSummary>> {
+  const accountIdsByRepresentation = new Map<string, (string | null)[]>(representationIds.map((id) => [id, []]));
+  if (representationIds.length > 0) {
+    const placeholders = representationIds.map(() => "?").join(",");
+    const result = await client.execute({
+      sql: `SELECT sr.representation_id AS representation_id, di.account_id AS account_id
+            FROM corpus_submission_references sr
+            JOIN document_identities di ON di.id = sr.document_identity_id
+            WHERE sr.representation_id IN (${placeholders})
+              AND (? IS NULL OR sr.document_identity_id != ?)`,
+      args: [...representationIds, options.excludeDocumentIdentityId ?? null, options.excludeDocumentIdentityId ?? null],
+    });
+    for (const row of result.rows as unknown as { representation_id: string; account_id: string | null }[]) {
+      accountIdsByRepresentation.get(String(row.representation_id))?.push(row.account_id);
+    }
+  }
+  return new Map(
+    [...accountIdsByRepresentation].map(([id, accountIds]) => [id, ownershipSummaryFromAccountIds(accountIds, options.accountId)]),
+  );
 }
 
 export type CandidateCorpusRepresentation = {
@@ -534,6 +575,7 @@ export type CandidateCorpusRepresentation = {
   canonicalSha256: string;
   wordCount: number;
   sharedShingleCount: number;
+  /** NaN when the caller asked findCandidateCorpusRepresentations to omit it (options.omitContainment). */
   containment: number;
   /** True iff an 'indexed' corpus_admission_promotions row exists for this representation whose own accepted_representation is not revoked — same EXISTS check this query's own eligibility filter already runs, exposed as a column so lib/user-submission-matching.ts can distinguish this from a real submission reference without a second query. See lib/corpus-admission-promotion.ts's own header comment. */
   isActivelyPromoted: boolean;
@@ -635,6 +677,11 @@ export type CandidateDiscoveryDiagnostics = {
  *     source that shares the same passage. options.excludeAccountId is
  *     threaded in and bound into admissionEligibilitySql identically to
  *     findCandidateCorpusRepresentations — never a second rule.
+ *   - not a count that includes representations the requester's own account
+ *     SUBMITTED (options.requesterAccountId). Unlike the promotion case
+ *     above these DO stay candidates — the matcher reports them as SELF —
+ *     but SELF never scores, so an author's own drafts must not be able to
+ *     prune a legitimate cross-account source of the same passage.
  *   - null excludeAccountId => plain global eligibility (every existing
  *     non-account-scoped caller is unchanged).
  *
@@ -714,6 +761,29 @@ export async function applyHighFrequencyShinglePruning(
      */
     excludeAccountId?: string;
     /**
+     * The account whose OWN earlier submissions must not count toward a
+     * shingle's document frequency, forwarded verbatim from
+     * findCandidateCorpusRepresentations. A representation this account
+     * itself submitted (a corpus_submission_references row through one of
+     * its document_identities) is classified SELF by the matcher and can
+     * never contribute to that account's score — so it is not evidence that
+     * a phrase is common, only that the author kept their own drafts. Left
+     * counted, fifty drafts of one paper push every passage they contain
+     * past maxDf and prune the one legitimate cross-account source of that
+     * passage out of discovery: the score falls because the author uploaded
+     * more of their own work. Same reasoning excludeAccountId already
+     * applies to the account's own admission promotions.
+     *
+     * DF ONLY: those representations stay candidates (they are still
+     * reported as SELF); this never changes which rows the candidate query
+     * returns. Under-counting DF can only prune LESS. The cost is the
+     * documented unbounded-walk case above, now also reached by an account
+     * holding thousands of its own copies of one phrase — bounded, as
+     * before, by the caller's dbQueryTimeoutMs. Omitted/null => the probe
+     * SQL is byte-identical to before.
+     */
+    requesterAccountId?: string | null;
+    /**
      * Phase A — 7-day corpus maturity. "MATCHING" (default) => the DF probe
      * counts a shingle only against representations the candidate query would
      * also treat as mature and eligible. "ADMISSION_DEDUP" => no maturity gate.
@@ -780,6 +850,19 @@ export async function applyHighFrequencyShinglePruning(
   const maturityCutoff = resolveMaturityCutoff(eligibilityMode, options);
   const exemptAccountPrefixesJson = options.exemptAccountPrefixesJson ?? JSON.stringify(await resolveExemptAccountPrefixes(client, eligibilityMode));
   const eligibilitySql = admissionEligibilitySql(eligibilityMode);
+  // See options.requesterAccountId: the requester's own submissions are not
+  // evidence of commonness. Emitted only when an account is supplied, so
+  // every other caller's probe SQL stays byte-identical.
+  const requesterAccountId = options.requesterAccountId ?? null;
+  const notOwnSubmissionSql = requesterAccountId === null
+    ? ""
+    : `
+                        AND NOT EXISTS (
+                          SELECT 1 FROM corpus_submission_references own_sr
+                          JOIN document_identities own_di ON own_di.id = own_sr.document_identity_id
+                          WHERE own_sr.representation_id = r.id AND own_di.account_id = ?
+                        )`;
+  const notOwnSubmissionArgs = requesterAccountId === null ? [] : [requesterAccountId];
 
   const eligibleDocumentFrequency = new Map<string, number>();
   for (const hash of hashList) eligibleDocumentFrequency.set(hash, 0);
@@ -792,7 +875,8 @@ export async function applyHighFrequencyShinglePruning(
     // ?, bound in textual order: fingerprint_version, then
     // admissionEligibilityBindArgs (account-prefix ×3 for ADMISSION_DEDUP, or
     // cutoff + account-prefix ×3 + cutoff + exempt-json + cutoff for MATCHING —
-    // see that function's own doc comment), then LIMIT, then the json_each array.
+    // see that function's own doc comment), then the requester's account id
+    // (only when supplied), then LIMIT, then the json_each array.
     const result = await client.execute({
       sql: `SELECT j.value AS shingle_hash,
                    (SELECT COUNT(*) FROM (
@@ -801,11 +885,11 @@ export async function applyHighFrequencyShinglePruning(
                       JOIN corpus_document_representations r ON r.id = s.representation_id
                       WHERE s.fingerprint_version = ?
                         AND s.shingle_hash = j.value
-                        AND ${eligibilitySql}
+                        AND ${eligibilitySql}${notOwnSubmissionSql}
                       LIMIT ?
                     )) AS eligible_document_frequency
             FROM json_each(?) j`,
-      args: [options.fingerprintVersion, ...admissionEligibilityBindArgs(excludeAccountPrefix, eligibilityMode, maturityCutoff, exemptAccountPrefixesJson), probeLimit, JSON.stringify(chunk)],
+      args: [options.fingerprintVersion, ...admissionEligibilityBindArgs(excludeAccountPrefix, eligibilityMode, maturityCutoff, exemptAccountPrefixesJson), ...notOwnSubmissionArgs, probeLimit, JSON.stringify(chunk)],
     });
     for (const row of result.rows as unknown as { shingle_hash: string; eligible_document_frequency: number | bigint }[]) {
       eligibleDocumentFrequency.set(String(row.shingle_hash), Number(row.eligible_document_frequency));
@@ -1060,7 +1144,35 @@ export async function findCandidateCorpusRepresentations(
     fingerprintVersion?: string;
     minSharedShingles?: number;
     limit?: number;
+    /**
+     * How many ranked rows to skip before `limit` applies (default 0). The
+     * order is total — shared shingles descending, then representation id —
+     * so successive (offset, limit) windows over an unchanged corpus are
+     * disjoint and together enumerate every candidate exactly once. This is
+     * what lets lib/user-submission-matching.ts keep reading past a full
+     * window instead of treating `limit` as the end of the candidate list.
+     */
+    offset?: number;
     excludeAccountId?: string;
+    /**
+     * Candidate DISCOVERY PRUNING only — see applyHighFrequencyShinglePruning's
+     * own requesterAccountId: this account's own submissions do not count
+     * toward a shingle's document frequency. It never changes which
+     * representations are candidates. Consulted only when
+     * maxDocumentFrequency is set.
+     */
+    requesterAccountId?: string | null;
+    /**
+     * Skip the per-candidate total-shingle query below and report every
+     * candidate's `containment` as NaN. That query reads each returned
+     * candidate's WHOLE posting list, so its cost grows with the page —
+     * negligible for ten rows, the dominant term for a page of several
+     * hundred large documents. For a caller that never reads `containment`
+     * (lib/user-submission-matching.ts recomputes it from full text) and
+     * reads the candidate list far past the first few rows. Default false:
+     * every other caller is unchanged.
+     */
+    omitContainment?: boolean;
     /**
      * Query-time high-frequency shingle pruning ceiling for candidate
      * DISCOVERY only (see applyHighFrequencyShinglePruning's own comment and
@@ -1102,6 +1214,7 @@ export async function findCandidateCorpusRepresentations(
   const fingerprintVersion = options.fingerprintVersion ?? CORPUS_FINGERPRINT_VERSION;
   const minSharedShingles = options.minSharedShingles ?? 1;
   const limit = options.limit ?? 50;
+  const offset = options.offset ?? 0;
   const excludeAccountPrefix = options.excludeAccountId ? buildReportAdmissionAccountPrefix(options.excludeAccountId) : null;
   const eligibilityMode: CorpusEligibilityMode = options.eligibilityMode ?? "MATCHING";
   // Resolved ONCE for the whole call — the DF probe below is handed this exact
@@ -1126,6 +1239,9 @@ export async function findCandidateCorpusRepresentations(
   // every chunk it appears in. The common case (a single chunk) runs the
   // exact same one query as before, with HAVING / ORDER BY / LIMIT still
   // applied server-side — no behavioral or performance change for it.
+  // Both paths rank identically — shared shingles descending, then
+  // representation id — so equal counts never fall back to row order and
+  // the same corpus always yields the same candidate order.
   const SHINGLE_IN_CHUNK_SIZE = 20_000;
 
   // Query-time high-frequency shingle pruning (candidate DISCOVERY only —
@@ -1143,6 +1259,7 @@ export async function findCandidateCorpusRepresentations(
     // Account-aware DF: the DF probe must count only representations the
     // candidate query below would also consider eligible for this requester.
     excludeAccountId: options.excludeAccountId,
+    requesterAccountId: options.requesterAccountId,
     // Phase A: the DF probe must apply the SAME maturity gate the candidate
     // query does — same mode, same already-resolved cutoff string (one clock),
     // so an immature representation cannot inflate a shingle's document
@@ -1173,15 +1290,15 @@ export async function findCandidateCorpusRepresentations(
               AND ${eligibilitySql}
             GROUP BY s.representation_id
             HAVING COUNT(*) >= ?
-            ORDER BY shared DESC
-            LIMIT ?`,
-      args: [fingerprintVersion, ...hashList, ...eligibilityArgs(), minSharedShingles, limit],
+            ORDER BY shared DESC, s.representation_id ASC
+            LIMIT ? OFFSET ?`,
+      args: [fingerprintVersion, ...hashList, ...eligibilityArgs(), minSharedShingles, limit, offset],
     });
     sharedRows = sharedResult.rows as unknown as RawSharedRow[];
   } else {
     const accumulatorById = new Map<string, RawSharedRow>();
-    for (let offset = 0; offset < hashList.length; offset += SHINGLE_IN_CHUNK_SIZE) {
-      const chunk = hashList.slice(offset, offset + SHINGLE_IN_CHUNK_SIZE);
+    for (let chunkStart = 0; chunkStart < hashList.length; chunkStart += SHINGLE_IN_CHUNK_SIZE) {
+      const chunk = hashList.slice(chunkStart, chunkStart + SHINGLE_IN_CHUNK_SIZE);
       const placeholders = chunk.map(() => "?").join(",");
       const chunkResult = await client.execute({
         sql: `SELECT s.representation_id AS representation_id, COUNT(*) AS shared, r.canonical_sha256 AS canonical_sha256, r.word_count AS word_count,
@@ -1205,9 +1322,22 @@ export async function findCandidateCorpusRepresentations(
         Number(b.shared) - Number(a.shared) ||
         (a.representation_id < b.representation_id ? -1 : a.representation_id > b.representation_id ? 1 : 0),
       )
-      .slice(0, limit);
+      .slice(offset, offset + limit);
   }
   if (sharedRows.length === 0) return [];
+
+  // See options.omitContainment: the caller reads far down the candidate
+  // list and never reads `containment`, so the total-shingle query is not run.
+  if (options.omitContainment) {
+    return sharedRows.map((row) => ({
+      representationId: row.representation_id,
+      canonicalSha256: row.canonical_sha256,
+      wordCount: Number(row.word_count),
+      sharedShingleCount: Number(row.shared),
+      containment: Number.NaN,
+      isActivelyPromoted: Number(row.is_actively_promoted) === 1,
+    }));
+  }
 
   // containment() needs each candidate's own total shingle count under this
   // fingerprint_version — a second, bounded query for exactly the candidate
