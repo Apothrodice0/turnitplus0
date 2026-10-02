@@ -87,7 +87,7 @@ const COUNTED_RELATIONSHIPS = new Set(["PRIOR_SUBMISSION", "TURNITPLUS_CORPUS_SO
 
 export const DEFAULT_SHARED_DEVICE_RECENT_LIMIT = 25;
 export const MAX_SHARED_DEVICE_RECENT_LIMIT = 100;
-/** Defensive ceiling on how many candidates are fully analysed in one call — mirrors lib/report-primary-similarity.ts's MAX_DEVICE_SELF_REPRESENTATIONS discipline. */
+/** Defensive ceiling on how many candidates are fully analysed in one call (a measurement tool's own bound — scoring's SELF classification in lib/report-primary-similarity.ts has none). */
 export const MAX_SHARED_DEVICE_CANDIDATES = 500;
 
 export type SharedDeviceRiskRecentRow = {

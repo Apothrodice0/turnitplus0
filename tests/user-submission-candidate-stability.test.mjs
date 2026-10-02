@@ -20,25 +20,40 @@ import {
   matchAgainstUserSubmissionCorpus,
   USER_SUBMISSION_MATCH_THRESHOLDS,
   USER_SUBMISSION_CANDIDATE_PAGE_SIZE,
+  USER_SUBMISSION_MATCHER_VERSION,
 } from "../lib/user-submission-matching.ts";
-import { getOrComputeHistoricalMatchSnapshot, getCurrentCorpusMatchGeneration, SNAPSHOT_MATCHER_VERSION } from "../lib/report-historical-match.ts";
+import {
+  getOrComputeHistoricalMatchSnapshot,
+  getPersistedHistoricalMatchSnapshot,
+  isHistoricalMatchSnapshotCurrent,
+  getCurrentCorpusMatchGeneration,
+  SNAPSHOT_MATCHER_VERSION,
+} from "../lib/report-historical-match.ts";
+import { resolvePersistedSimilarityDisplay, resolvePrimarySimilaritySummary, selfHealUnifiedSimilarity } from "../lib/report-primary-similarity.ts";
+import { DEVICE_PASSPORT_ALGORITHM } from "../lib/device-passport-server.ts";
 import { computeUnifiedSimilarity } from "../lib/unified-similarity.ts";
 import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
 
 /**
  * Prior-submission candidate stability.
  *
- * The defect: the matcher took the ten highest-ranked candidate rows first
- * and worked out each one's relationship afterwards. An author's own earlier
- * drafts share almost every shingle with their new submission, so ten of
- * them filled all ten slots, were then classified SELF and excluded from the
- * score — and the one genuine cross-account source of a copied passage was
- * never verified. Adding the author's OWN documents to the corpus took the
- * score from 20 % to 0 %.
+ * Two defects, one shape — the corpus grew and the score fell:
  *
- * The invariant under test: a candidate that cannot score never keeps a
- * candidate that can from being verified — however many there are, by rank
- * or by making the copied passage look common.
+ *  1. The matcher took the ten highest-ranked candidate rows first and worked
+ *     out each one's relationship afterwards. An author's own earlier drafts
+ *     share almost every shingle with their new submission, so ten of them
+ *     filled all ten slots, were then classified SELF and excluded from the
+ *     score — and the one genuine cross-account source of a copied passage
+ *     was never verified. Adding the author's OWN documents took 20 % to 0 %.
+ *
+ *  2. At most ten VERIFIED scoring sources were kept. A source plus nine
+ *     documents sharing another block scored 42 %; a tenth such document
+ *     pushed the source out and took it to 22 %.
+ *
+ * The invariants under test: a candidate that cannot score never keeps a
+ * candidate that can from being verified; every verified scoring source the
+ * pass reaches contributes its positions to the union, however many there
+ * are; and a pass that could not verify everything it discovered says so.
  *
  * Every corpus is synthetic and in memory.
  */
@@ -76,8 +91,14 @@ async function freshCorpus() {
       const row = await client.execute({ sql: "SELECT representation_id FROM corpus_submission_references WHERE document_identity_id = ?", args: [identity.id] });
       return String(row.rows[0].representation_id);
     },
-    /** A representation backed only by an active admission promotion from `accountId` — a TurnitPlus corpus source. */
-    async promote(accountId, rawText) {
+    async ensurePassport(passportId) {
+      await client.execute({
+        sql: "INSERT OR IGNORE INTO device_passports (id, public_key_spki, algorithm, created_at, provenance_generation) VALUES (?,?,?,?,0)",
+        args: [passportId, Buffer.from(`spki-${passportId}`), DEVICE_PASSPORT_ALGORITHM, Date.now()],
+      });
+    },
+    /** A representation backed only by an active admission promotion from `accountId` — a TurnitPlus corpus source. `passportId` records the verified device that backing was made on. */
+    async promote(accountId, rawText, { passportId = null } = {}) {
       const canonicalText = canonicalizeText(rawText);
       const rep = await createReusableDocumentRepresentation(client, { canonicalText });
       await recordCorpusShingles(client, rep.id, canonicalText);
@@ -95,7 +116,31 @@ async function freshCorpus() {
         sql: `INSERT INTO corpus_admission_promotions (id, decision_id, accepted_representation_id, representation_id, link_type, fingerprint_version, status, attempt_count) VALUES (?,?,?,?,?,?,'indexed',1)`,
         args: [randomUUID(), decisionId, acceptedId, rep.id, "NEW_CONTENT_REPRESENTATION", CORPUS_FINGERPRINT_VERSION],
       });
+      if (passportId) {
+        await api.ensurePassport(passportId);
+        await client.execute({
+          sql: "INSERT INTO corpus_admission_decision_device_provenance (decision_id, device_passport_id, verified_at) VALUES (?,?,?)",
+          args: [decisionId, passportId, Date.now()],
+        });
+      }
       return rep.id;
+    },
+    /** A representation nobody submitted and nothing promoted — eligible for discovery, never reportable to a signed-in reader. */
+    async legacy(rawText) {
+      const canonicalText = canonicalizeText(rawText);
+      const rep = await createReusableDocumentRepresentation(client, { canonicalText });
+      await recordCorpusShingles(client, rep.id, canonicalText);
+      return rep.id;
+    },
+    /** A saved report of the submission by the submitter. `payload` becomes its payload_json; `passportId` is the verified device it was uploaded from. */
+    async saveReport(deviceKey, reportId, payload = {}, passportId = null) {
+      await api.ensureUser(SUBMITTER);
+      if (passportId) await api.ensurePassport(passportId);
+      await client.execute({
+        sql: `INSERT INTO saved_reports (id, device_key, submission_id, title, report_created_at, word_count, archive_score, score_band, payload_json, user_id, verified_device_passport_id)
+              VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+        args: [reportId, deviceKey, `sub-${reportId}`, "Fixture Report", new Date().toISOString(), WORD_COUNT, 0, "Low", JSON.stringify(payload), SUBMITTER, passportId],
+      });
     },
     mature: () => matureCorpusBackings(client),
     close() { client.close(); },
@@ -146,6 +191,23 @@ function fragmentDocument(seed) {
 
 /** A cross-account document holding the first 130 words of the submission verbatim: 126 shared 5-grams, it out-ranks X and VERIFIES. */
 const headBlockDocument = (seed) => `${words(200, seed * 13)} ${HEAD.split(" ").slice(0, 130).join(" ")} ${words(200, seed * 17)}`;
+const HEAD_BLOCK_POSITIONS = Array.from({ length: 130 }, (_, i) => i);
+
+/**
+ * Twelve cross-account documents, each holding a DIFFERENT 40-word slice of
+ * the submitter's own text (HEAD + TAIL = 480 words = 12 slices). Each
+ * verifies on its own; together with source X they cover all 600 words.
+ */
+const OWN_TEXT_WORDS = `${HEAD} ${TAIL}`.split(" ");
+const SLICE_COUNT = 12;
+const sliceDocument = (k) => `${words(150, 9000 + k)} ${OWN_TEXT_WORDS.slice(k * 40, k * 40 + 40).join(" ")} ${words(150, 9500 + k)}`;
+const ALL_POSITIONS = Array.from({ length: WORD_COUNT }, (_, i) => i);
+const sortedUnique = (positions) => [...new Set(positions)].sort((a, b) => a - b);
+/** Every position credited exactly once: the union is a set, never a sum. */
+function assertNoDoubleCount(unified, label) {
+  assert.equal(new Set(unified.matchedPositions).size, unified.matchedPositions.length, `${label}: no position listed twice`);
+  assert.equal(unified.uniqueMatchedWords, unified.matchedPositions.length, `${label}: matched words = distinct positions`);
+}
 
 async function evaluate(corpus, overrides = {}) {
   const diagnostics = {};
@@ -304,17 +366,171 @@ test("a time budget that stops the pass early is reported as partial, never as a
   } finally { corpus.close(); }
 });
 
-test("the one remaining rank cut: once maxCandidates scoring sources have verified, lower-ranked candidates are not read — and the diagnostics say so", async () => {
+test("an oversized scoring candidate cannot be verified, so the result is partial; an oversized SELF candidate changes nothing", async () => {
   const corpus = await freshCorpus();
   try {
     const xId = await corpus.index("other-account", "source-x", SOURCE_X);
-    for (let k = 1; k <= MAX; k += 1) await corpus.index(`block-account-${k}`, `block-${k}`, headBlockDocument(k));
+    const secondSourceId = await corpus.index("second-account", "second-source", `${words(300, 41)} ${PASSAGE} ${words(300, 42)}`);
+    const draftId = await corpus.index(SUBMITTER, "draft", ownDraft(1));
     await corpus.mature();
-    const evaluation = await evaluate(corpus);
-    assert.deepEqual(relationshipCounts(evaluation.matches), { PRIOR_SUBMISSION: MAX });
-    assert.equal(entryFor(evaluation.matches, xId), undefined, "the eleventh verified source is below the cut");
-    assert.equal(evaluation.diagnostics.stopReason, "SCORING_BUDGET_FULL", "this is where a truncation signal for the report has to originate");
-    assert.notEqual(evaluation.result.partial, true, "not partial: recomputing would give the same answer");
+    const inflate = (id) => corpus.client.execute({ sql: "UPDATE corpus_document_representations SET word_count = 999999 WHERE id = ?", args: [id] });
+
+    await inflate(draftId);
+    const selfOversized = await evaluate(corpus);
+    assert.notEqual(selfOversized.result.partial, true, "a SELF candidate that is never compared cannot change the score — not partial");
+    assert.equal(selfOversized.diagnostics.oversizedScoringCandidatesSkipped, 0);
+    assert.equal(selfOversized.unified.unifiedScore, 20);
+
+    await inflate(secondSourceId);
+    const scoringOversized = await evaluate(corpus);
+    assert.equal(scoringOversized.result.partial, true, "a discovered scoring candidate went unverified — the score is a lower bound and must say so");
+    assert.equal(scoringOversized.diagnostics.oversizedScoringCandidatesSkipped, 1);
+    assert.equal(scoringOversized.diagnostics.stopReason, "CANDIDATES_EXHAUSTED", "the pass itself still read every candidate");
+    assert.ok(entryFor(scoringOversized.matches, xId), "what could be verified is still reported");
+    assert.equal(entryFor(scoringOversized.matches, secondSourceId), undefined);
+  } finally { corpus.close(); }
+});
+
+// ---------------------------------------------------------------------------
+// The verified-source cap: adding a verified source never lowers the score
+// ---------------------------------------------------------------------------
+
+test("the verified-source cap is gone: a source plus 9, 10 and 30 documents sharing another block all score 42 %", async () => {
+  const corpus = await freshCorpus();
+  try {
+    const xId = await corpus.index("other-account", "source-x", SOURCE_X);
+    let blocks = 0;
+    const growTo = async (count) => {
+      for (; blocks < count; blocks += 1) await corpus.index(`block-account-${blocks + 1}`, `block-${blocks + 1}`, headBlockDocument(blocks + 1));
+      await corpus.mature();
+      return evaluate(corpus);
+    };
+    const expectedPositions = sortedUnique([...HEAD_BLOCK_POSITIONS, ...PASSAGE_POSITIONS]);
+
+    const nine = await growTo(9);
+    assert.equal(nine.unified.unifiedScore, 42, "250 of 600 words");
+    assert.deepEqual(nine.unified.matchedPositions, expectedPositions);
+
+    // The tenth block document used to be the tenth verified source: X, the
+    // eleventh, was never read and the score fell to 22 %.
+    const ten = await growTo(10);
+    assert.ok(entryFor(ten.matches, xId), "the source is still verified");
+    assert.equal(ten.unified.unifiedScore, 42);
+    assert.deepEqual(ten.unified.matchedPositions, expectedPositions, "no verified position is lost");
+    assert.deepEqual(relationshipCounts(ten.matches), { PRIOR_SUBMISSION: 11 });
+    assert.equal(ten.diagnostics.verifiedScoringSources, 11);
+    assert.equal(ten.diagnostics.stopReason, "CANDIDATES_EXHAUSTED");
+    assert.notEqual(ten.result.partial, true);
+
+    const thirty = await growTo(30);
+    assert.equal(thirty.unified.unifiedScore, 42);
+    assert.deepEqual(thirty.unified.matchedPositions, expectedPositions);
+    assert.equal(thirty.diagnostics.verifiedScoringSources, 31);
+    assertNoDoubleCount(thirty.unified, "31 overlapping sources");
+    assert.notEqual(thirty.result.partial, true, "an exhausted pass is complete, however many sources verified");
+  } finally { corpus.close(); }
+});
+
+test("a verified source covering positions already matched leaves the score unchanged; one covering new positions raises it", async () => {
+  const corpus = await freshCorpus();
+  try {
+    await corpus.index("other-account", "source-x", SOURCE_X);
+    await corpus.mature();
+    const base = await evaluate(corpus);
+    assert.equal(base.unified.unifiedScore, 20);
+
+    // A second account's document holding the SAME passage: old positions.
+    await corpus.index("second-account", "second-source", `${words(300, 41)} ${PASSAGE} ${words(300, 42)}`);
+    await corpus.mature();
+    const samePositions = await evaluate(corpus);
+    assert.deepEqual(relationshipCounts(samePositions.matches), { PRIOR_SUBMISSION: 2 });
+    assert.equal(samePositions.unified.unifiedScore, 20, "two sources of one passage are one passage, not two");
+    assert.deepEqual(samePositions.unified.matchedPositions, PASSAGE_POSITIONS);
+    assertNoDoubleCount(samePositions.unified, "two sources, same passage");
+
+    // A third account's document holding a different block: new positions.
+    await corpus.index("third-account", "third-source", headBlockDocument(1));
+    await corpus.mature();
+    const newPositions = await evaluate(corpus);
+    assert.equal(newPositions.unified.unifiedScore, 42);
+    assert.deepEqual(newPositions.unified.matchedPositions, sortedUnique([...HEAD_BLOCK_POSITIONS, ...PASSAGE_POSITIONS]));
+    assertNoDoubleCount(newPositions.unified, "three sources");
+    for (const position of base.unified.matchedPositions) assert.ok(newPositions.unified.matchedPositions.includes(position), "every earlier position is still credited");
+  } finally { corpus.close(); }
+});
+
+test("more than ten verified sources all reach the union, in whatever order they were added", async () => {
+  // Thirteen sources: X holds the passage, twelve documents each hold a
+  // different 40-word slice of the rest. Together they cover every word.
+  async function build(order) {
+    const corpus = await freshCorpus();
+    for (const step of order) {
+      if (step === "x") await corpus.index("other-account", "source-x", SOURCE_X);
+      else await corpus.index(`slice-account-${step}`, `slice-${step}`, sliceDocument(step));
+    }
+    await corpus.mature();
+    return corpus;
+  }
+  const slices = Array.from({ length: SLICE_COUNT }, (_, k) => k);
+  const forward = await build(["x", ...slices]);
+  const reversed = await build([...slices].reverse().concat("x"));
+  try {
+    const a = await evaluate(forward);
+    assert.deepEqual(relationshipCounts(a.matches), { PRIOR_SUBMISSION: 13 });
+    assert.equal(a.diagnostics.verifiedScoringSources, 13);
+    assert.equal(a.unified.unifiedScore, 100, "ten sources would have covered 480 of 600 words");
+    assert.deepEqual(a.unified.matchedPositions, ALL_POSITIONS);
+    assertNoDoubleCount(a.unified, "13 sources");
+    assert.equal(a.diagnostics.stopReason, "CANDIDATES_EXHAUSTED");
+    assert.notEqual(a.result.partial, true);
+
+    // The twelve slice documents tie on shared shingles, and representation
+    // ids are random — so the two corpora rank them differently.
+    const b = await evaluate(reversed);
+    assert.equal(b.unified.unifiedScore, a.unified.unifiedScore);
+    assert.deepEqual(b.unified.matchedPositions, a.unified.matchedPositions, "insertion and tie order cannot change a complete score");
+    assert.equal(b.matches.length, a.matches.length);
+  } finally { forward.close(); reversed.close(); }
+});
+
+test("a display limit is applied after scoring: the stored snapshot holds every verified source and the headline comes from all of them", async () => {
+  const corpus = await freshCorpus();
+  try {
+    await corpus.index("other-account", "source-x", SOURCE_X);
+    for (let k = 0; k < SLICE_COUNT; k += 1) await corpus.index(`slice-account-${k}`, `slice-${k}`, sliceDocument(k));
+    await corpus.mature();
+    await corpus.saveReport("device-display", "report-display");
+    const snapshot = await getOrComputeHistoricalMatchSnapshot(corpus.client, { reportDeviceKey: "device-display", reportId: "report-display", accountId: SUBMITTER, rawText: SUBMISSION, excludeAccountId: SUBMITTER });
+    assert.equal(snapshot.status, "MATCHED");
+    assert.equal(snapshot.matches.length, 13, "nothing is cut before the snapshot is stored");
+    assert.notEqual(snapshot.partial, true);
+
+    const headline = computeUnifiedSimilarity({ wordCount: WORD_COUNT, historicalSubmissionMatch: snapshot });
+    assert.equal(headline.unifiedScore, 100);
+    assert.deepEqual(headline.matchedPositions, ALL_POSITIONS);
+
+    // What the admin report view lists (components/report/similarity-report-papers.tsx:
+    // `matches.slice(0, 5)`) is a slice of this result. Scoring that slice instead
+    // would lose evidence — which is exactly why the slice is never a scoring input.
+    const listed = { ...snapshot, matches: snapshot.matches.slice(0, 5) };
+    assert.ok(computeUnifiedSimilarity({ wordCount: WORD_COUNT, historicalSubmissionMatch: listed }).unifiedScore < 100);
+  } finally { corpus.close(); }
+});
+
+test("candidates that are never reportable (no real ownership) ranked above the source do not lower the score", async () => {
+  const corpus = await freshCorpus();
+  try {
+    const xId = await corpus.index("other-account", "source-x", SOURCE_X);
+    await corpus.mature();
+    const before = await evaluate(corpus);
+    for (let k = 1; k <= 15; k += 1) await corpus.legacy(ownDraft(100 + k));
+    await corpus.mature();
+    const after = await evaluate(corpus);
+    assertPassageScored(after, xId, "after 15 unowned representations");
+    assert.deepEqual(after.unified.matchedPositions, before.unified.matchedPositions);
+    assert.deepEqual(relationshipCounts(after.matches), { PRIOR_SUBMISSION: 1 });
+    assert.equal(after.diagnostics.rawCandidatesConsidered, 16);
+    assert.equal(after.diagnostics.candidatesVerified, 1, "an unowned representation is never loaded");
   } finally { corpus.close(); }
 });
 
@@ -437,51 +653,196 @@ test("candidate order is total: equal shared-shingle counts are ordered by repre
     const paged = await evaluate(corpus, { config: { candidatePageSize: 3 } });
     assert.deepEqual(second.result, first.result);
     assert.deepEqual(paged.result, first.result);
-    assert.deepEqual(first.matches.map((m) => m.matchedRepresentationId), [...ids].sort().slice(0, MAX), "the ten verified are the ten lowest ids among the tie");
+    assert.deepEqual(first.matches.map((m) => m.matchedRepresentationId), [...ids].sort(), "all fourteen verify and are reported, in id order among the tie");
   } finally { corpus.close(); }
 });
 
 // ---------------------------------------------------------------------------
-// 10. Stored reports
+// Device SELF: decided after the matcher, so it must see every scoring source
 // ---------------------------------------------------------------------------
 
-test("stored snapshots are not recomputed: the snapshot tag's inputs are untouched and a version-current row is served as stored", async () => {
-  // lib/report-historical-match.ts digests USER_SUBMISSION_MATCH_THRESHOLDS
-  // into every snapshot's matcher_version. This change adds no key to that
-  // object and changes no value in it, so no stored row is invalidated.
-  assert.equal(USER_SUBMISSION_MATCH_THRESHOLDS.maxCandidates, 10);
-  assert.ok(!("candidatePageSize" in USER_SUBMISSION_MATCH_THRESHOLDS));
+test("device SELF: every same-device scoring source is excluded, however many verify, and an independent source still scores", async () => {
+  const corpus = await freshCorpus();
+  const originalFlag = process.env.DEVICE_PASSPORT_SELF_ENABLED;
+  process.env.DEVICE_PASSPORT_SELF_ENABLED = "true";
+  try {
+    const PASSPORT = "passport-of-this-report";
+    await corpus.index("other-account", "source-x", SOURCE_X);
+    // Thirty near-copies of the submission, each admitted to the corpus from
+    // the SAME verified device the report is uploaded from: scoring sources for
+    // the matcher (TURNITPLUS_CORPUS_SOURCE), effective SELF for the score.
+    const sameDeviceIds = [];
+    for (let k = 1; k <= 30; k += 1) sameDeviceIds.push(await corpus.promote(`earlier-account-${k}`, ownDraft(200 + k), { passportId: PASSPORT }));
+    await corpus.mature();
+    await corpus.saveReport("device-self", "report-self", { text: SUBMISSION, wordCount: WORD_COUNT }, PASSPORT);
+
+    const resolution = await resolvePrimarySimilaritySummary(corpus.client, {
+      reportDeviceKey: "device-self", reportId: "report-self", accountId: SUBMITTER, rawText: SUBMISSION, wordCount: WORD_COUNT, archiveScore: 0, scoringNormalizationVersion: 1,
+    });
+    assert.equal(resolution.historicalSubmissionMatch.matches.length, 31, "all thirty verify as corpus sources, plus the independent one");
+    assert.deepEqual([...resolution.effectiveDeviceSelfRepresentationIds].sort(), [...sameDeviceIds].sort(), "every one of the thirty is classified — there is no ceiling past which a same-device source is scored unchecked");
+    assert.equal(resolution.unifiedSimilarity.unifiedScore, 20, "only the independent cross-account source scores");
+    assert.deepEqual(resolution.unifiedSimilarity.matchedPositions, PASSAGE_POSITIONS);
+    assert.ok(resolution.unifiedSimilarity.deviceSelfExcludedWords > 0);
+  } finally {
+    if (originalFlag === undefined) delete process.env.DEVICE_PASSPORT_SELF_ENABLED;
+    else process.env.DEVICE_PASSPORT_SELF_ENABLED = originalFlag;
+    corpus.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Matcher version: what the v1 -> v2 bump does to stored snapshots and reports
+// ---------------------------------------------------------------------------
+
+test("matcher version: a snapshot written by the v1 matcher is never reused — a plain read shows it as stored, a write-capable resolution recomputes and retags it", async () => {
+  // The tag the v1 matcher actually wrote on every v1-normalization snapshot
+  // row (read off origin/main 10e57bf and 25211b7). The matcher label sits
+  // inside the digested thresholds object too, so the bump moves both the
+  // label segment and the cfg digest.
+  const V1_TAG = "user-submission-match-v1+pos.raw-token-v1+cfg.f371a81a8c59";
+  assert.equal(USER_SUBMISSION_MATCHER_VERSION, "user-submission-match-v2");
+  assert.match(SNAPSHOT_MATCHER_VERSION, /^user-submission-match-v2\+pos\.raw-token-v1\+cfg\.[0-9a-f]{12}$/);
+  assert.notEqual(SNAPSHOT_MATCHER_VERSION, V1_TAG);
 
   const corpus = await freshCorpus();
+  const { client } = corpus;
   try {
     const xId = await corpus.index("other-account", "source-x", SOURCE_X);
-    for (let k = 1; k <= 10; k += 1) await corpus.index(SUBMITTER, `draft-${k}`, ownDraft(k));
+    for (let k = 1; k <= 10; k += 1) await corpus.index(`block-account-${k}`, `block-${k}`, headBlockDocument(k));
     await corpus.mature();
-    const saveReport = (deviceKey, reportId) => corpus.client.execute({
-      sql: `INSERT INTO saved_reports (id, device_key, submission_id, title, report_created_at, word_count, archive_score, score_band, payload_json, user_id)
-            VALUES (?,?,?,?,?,?,?,?,?,?)`,
-      args: [reportId, deviceKey, `sub-${reportId}`, "Fixture Report", new Date().toISOString(), WORD_COUNT, 0, "Low", "{}", SUBMITTER],
-    });
 
-    // A report whose snapshot was stored earlier, complete and current.
-    await saveReport("device-stored", "report-stored");
+    // What the v1 matcher stored for this report: the ten block documents, with
+    // the source cut off as the eleventh verified one — 22 %.
+    const complete = await evaluate(corpus);
+    const v1Matches = complete.matches
+      .filter((m) => m.matchedRepresentationId !== xId)
+      .map((m) => ({
+        relationshipType: m.relationshipType,
+        matchedRepresentationId: m.matchedRepresentationId,
+        matchType: m.matchType,
+        containment: m.containment,
+        matchedWordCount: m.matchedWordCount,
+        passageCount: m.passageCount,
+        longestMatchWords: m.longestMatchWords,
+        passages: m.passages.map((p) => ({ submittedText: p.submittedText, submittedWordStart: p.submittedWordStart, submittedWordEnd: p.submittedWordEnd, matchedWordCount: p.matchedWordCount })),
+        historicalSubmissionCount: m.historicalSubmissionCount,
+      }));
+    assert.equal(v1Matches.length, 10);
+    const v1Unified = computeUnifiedSimilarity({ wordCount: WORD_COUNT, historicalSubmissionMatch: { status: "MATCHED", matches: v1Matches } });
+    assert.equal(v1Unified.unifiedScore, 22);
+
+    const report = { reportDeviceKey: "device-v1", reportId: "report-v1" };
+    const generation = await getCurrentCorpusMatchGeneration(client);
+    await corpus.saveReport(report.reportDeviceKey, report.reportId, {
+      title: "Fixture Report",
+      text: SUBMISSION,
+      wordCount: WORD_COUNT,
+      score: 0,
+      archiveScore: 0,
+      archiveMatchedPositions: [],
+      unifiedSimilarity: v1Unified,
+      unifiedSimilarityGeneration: generation,
+      corpusSourceMatchingEnabledAtComputation: true,
+      aiAnalysis: { marker: "not owned by a similarity refresh" },
+    });
     const storedComputedAt = new Date(Date.now() - 60_000).toISOString();
-    await corpus.client.execute({
+    await client.execute({
       sql: `INSERT INTO report_historical_match_snapshots
               (report_device_key, report_id, status, matcher_version, fingerprint_version, canonicalization_version, result_json, candidate_count, processing_duration_ms, error_message, computed_at, is_partial, corpus_generation, created_at)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`,
-      args: ["device-stored", "report-stored", "NO_HISTORICAL_MATCH", SNAPSHOT_MATCHER_VERSION, CORPUS_FINGERPRINT_VERSION, CANONICALIZATION_VERSION, null, null, 7, null, storedComputedAt, 0, await getCurrentCorpusMatchGeneration(corpus.client)],
+      args: [report.reportDeviceKey, report.reportId, "MATCHED", V1_TAG, CORPUS_FINGERPRINT_VERSION, CANONICALIZATION_VERSION, JSON.stringify(v1Matches), v1Matches.length, 7, null, storedComputedAt, 0, generation],
     });
-    const stored = await getOrComputeHistoricalMatchSnapshot(corpus.client, { reportDeviceKey: "device-stored", reportId: "report-stored", accountId: SUBMITTER, rawText: SUBMISSION, excludeAccountId: SUBMITTER });
-    assert.equal(stored.status, "NO_HISTORICAL_MATCH", "the stored result is returned as stored");
-    assert.equal(stored.computedAt, storedComputedAt, "and was not recomputed");
 
-    // A report with no stored snapshot gets the corrected computation.
-    await saveReport("device-fresh", "report-fresh");
-    const fresh = await getOrComputeHistoricalMatchSnapshot(corpus.client, { reportDeviceKey: "device-fresh", reportId: "report-fresh", accountId: SUBMITTER, rawText: SUBMISSION, excludeAccountId: SUBMITTER });
-    assert.equal(fresh.status, "MATCHED");
-    assert.equal(fresh.matcherVersion, SNAPSHOT_MATCHER_VERSION);
-    assert.equal(entryFor(fresh.matches, xId).relationshipType, "PRIOR_SUBMISSION");
-    assert.notEqual(fresh.partial, true);
+    const snapshotRow = async () => (await client.execute({
+      sql: "SELECT matcher_version, computed_at, result_json FROM report_historical_match_snapshots WHERE report_device_key = ? AND report_id = ?",
+      args: [report.reportDeviceKey, report.reportId],
+    })).rows[0];
+    const payload = async () => JSON.parse(String((await client.execute({
+      sql: "SELECT payload_json FROM saved_reports WHERE device_key = ? AND id = ?",
+      args: [report.reportDeviceKey, report.reportId],
+    })).rows[0].payload_json));
+    const persistedDisplay = async () => {
+      const current = await payload();
+      return resolvePersistedSimilarityDisplay(client, {
+        ...report,
+        archiveScore: 0,
+        unifiedScore: current.unifiedSimilarity?.unifiedScore ?? null,
+        hasUnifiedSimilarity: Boolean(current.unifiedSimilarity),
+        corpusSourceMatchingEnabledAtComputation: current.corpusSourceMatchingEnabledAtComputation ?? null,
+        unifiedSimilarityFailed: current.unifiedSimilarityFailed ?? false,
+        hasPositionEvidence: current.unifiedSimilarity?.matchedPositions !== undefined,
+      });
+    };
+
+    // 1. The row is current in every respect but the matcher label: same
+    //    corpus generation, complete, nothing matured since — and not current.
+    assert.equal(await isHistoricalMatchSnapshotCurrent(client, report), false, "a v1-tagged snapshot fails the matcher-version identity");
+    assert.deepEqual(await persistedDisplay(), { status: "stale" });
+
+    // 2. A plain reopen never recomputes. The read-only path returns the v1
+    //    row exactly as stored, and nothing is written.
+    const reopened = await getPersistedHistoricalMatchSnapshot(client, report);
+    assert.equal(reopened.matcherVersion, V1_TAG);
+    assert.equal(reopened.matches.length, 10);
+    assert.equal((await snapshotRow()).computed_at, storedComputedAt);
+    assert.equal((await payload()).unifiedSimilarity.unifiedScore, 22, "the saved report still shows what was saved");
+
+    // 3. A write-capable resolution — in production every POST /api/reports
+    //    save of this report; here the same resolver through the exported
+    //    self-heal — does not trust the v1 row. It recomputes, retags, and
+    //    rewrites the similarity-owned keys of the report, nothing else.
+    const healed = await selfHealUnifiedSimilarity(client, { ...report, accountId: SUBMITTER });
+    assert.equal(healed.attempted, true);
+    assert.equal(healed.outcome, "resolved");
+    assert.equal(healed.unifiedSimilarity.unifiedScore, 42, "the source the v1 cap dropped is back in the union");
+    const healedRow = await snapshotRow();
+    assert.equal(healedRow.matcher_version, SNAPSHOT_MATCHER_VERSION, "the recomputed snapshot is tagged with the new matcher version");
+    assert.notEqual(healedRow.computed_at, storedComputedAt);
+    const healedMatches = JSON.parse(String(healedRow.result_json));
+    assert.equal(healedMatches.length, 11);
+    assert.ok(healedMatches.some((m) => m.matchedRepresentationId === xId));
+    const healedPayload = await payload();
+    assert.equal(healedPayload.unifiedSimilarity.unifiedScore, 42);
+    assert.equal(healedPayload.text, SUBMISSION, "the report's own text is not rewritten");
+    assert.equal(healedPayload.title, "Fixture Report");
+    assert.deepEqual(healedPayload.aiAnalysis, { marker: "not owned by a similarity refresh" });
+
+    // 4. The new row is current and is reused — recomputed once, not on every read.
+    assert.equal(await isHistoricalMatchSnapshotCurrent(client, report), true);
+    assert.deepEqual(await persistedDisplay(), { status: "resolved", primaryScore: 42, isUnified: true });
+    const again = await getOrComputeHistoricalMatchSnapshot(client, { ...report, accountId: SUBMITTER, rawText: SUBMISSION, excludeAccountId: SUBMITTER });
+    assert.equal(again.matcherVersion, SNAPSHOT_MATCHER_VERSION);
+    assert.equal(again.computedAt, String(healedRow.computed_at), "a version-current snapshot is a cache hit");
+  } finally { corpus.close(); }
+});
+
+test("a partial snapshot is stored as partial and is never treated as current", async () => {
+  const corpus = await freshCorpus();
+  const { client } = corpus;
+  try {
+    const xId = await corpus.index("other-account", "source-x", SOURCE_X);
+    const oversizedId = await corpus.index("second-account", "second-source", `${words(300, 41)} ${PASSAGE} ${words(300, 42)}`);
+    await corpus.mature();
+    await client.execute({ sql: "UPDATE corpus_document_representations SET word_count = 999999 WHERE id = ?", args: [oversizedId] });
+
+    const report = { reportDeviceKey: "device-partial", reportId: "report-partial" };
+    await corpus.saveReport(report.reportDeviceKey, report.reportId);
+    const params = { ...report, accountId: SUBMITTER, rawText: SUBMISSION, excludeAccountId: SUBMITTER };
+    const first = await getOrComputeHistoricalMatchSnapshot(client, params);
+    assert.equal(first.status, "MATCHED");
+    assert.equal(first.partial, true, "the matcher's partial flag reaches the report-level result");
+    assert.ok(entryFor(first.matches, xId));
+    const row = (await client.execute({ sql: "SELECT is_partial FROM report_historical_match_snapshots WHERE report_device_key = ? AND report_id = ?", args: [report.reportDeviceKey, report.reportId] })).rows[0];
+    assert.equal(Number(row.is_partial), 1, "and is stored on the snapshot row");
+    assert.equal(await isHistoricalMatchSnapshotCurrent(client, report), false, "a partial snapshot is never a settled answer");
+    assert.equal((await getPersistedHistoricalMatchSnapshot(client, report)).partial, true, "a read-only reopen still carries the flag");
+
+    // Once the candidate can be verified, the next resolution completes it.
+    await client.execute({ sql: "UPDATE corpus_document_representations SET word_count = 720 WHERE id = ?", args: [oversizedId] });
+    const second = await getOrComputeHistoricalMatchSnapshot(client, params);
+    assert.notEqual(second.partial, true);
+    assert.equal(second.matches.length, 2);
+    assert.equal(await isHistoricalMatchSnapshotCurrent(client, report), true);
   } finally { corpus.close(); }
 });

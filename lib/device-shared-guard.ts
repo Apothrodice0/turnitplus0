@@ -106,7 +106,7 @@ import {
 const SOURCE_REF_ACCOUNT_PREFIX = "report-upload:account=";
 const SOURCE_REF_DEVICE_DELIM = ":device=";
 
-/** Defensive ceiling on how many effective-SELF representation ids the guard will resolve backings for — mirrors lib/report-primary-similarity.ts's MAX_DEVICE_SELF_REPRESENTATIONS. */
+/** Defensive ceiling on how many effective-SELF representation ids the guard will resolve backings for. Telemetry only: lib/report-primary-similarity.ts's own SELF classification has no ceiling (every production-counted match is classified), so a longer list is measured here on its first 25 ids and scored there in full. */
 const MAX_GUARD_REPRESENTATIONS = 25;
 
 export type DeviceSelfSharedGuardResult = {

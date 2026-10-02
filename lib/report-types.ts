@@ -199,7 +199,7 @@ export type ReportHistoricalSubmissionMatch = {
   matcherVersion: string;
   fingerprintVersion: string;
   canonicalizationVersion: string;
-  /** True when the underlying matchAgainstUserSubmissionCorpus call hit its soft time budget before finishing every candidate — see that function's own TIMEOUT HONESTY comment. A partial result is treated as never-final (see lib/report-historical-match.ts's own isCurrentVersion caller) — always recomputed on next view, the same "never cache the incomplete case as settled" rule NO_HISTORICAL_MATCH already gets. Absent/undefined means the computation ran to completion. */
+  /** True when the underlying matchAgainstUserSubmissionCorpus call could not verify every scoring candidate it discovered: it hit its soft time budget, a candidate query timed out or failed, or a candidate was over the per-candidate size limit — see that function's own TIMEOUT HONESTY and CANDIDATE BUDGET comments. `matches` is then a lower bound, never wrong. A partial result is treated as never-final (see lib/report-historical-match.ts's own isCurrentVersion caller) — recomputed by the next write-capable resolution, the same "never cache the incomplete case as settled" rule NO_HISTORICAL_MATCH already gets. Absent/undefined means every discovered candidate was examined; no count of verified sources ever truncates `matches`. */
   partial?: boolean;
 };
 

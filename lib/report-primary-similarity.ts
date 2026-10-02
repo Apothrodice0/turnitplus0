@@ -146,15 +146,6 @@ export type PrimarySimilarityResolution = {
   scoringNormalizationVersion: ScoringNormalizationVersion;
 };
 
-/**
- * Defensive cap on how many distinct matched representations the same-device
- * SELF rule will fetch provenance evidence for in one resolution — mirrors
- * lib/developer-repo.ts's MAX_TRACE_REPRESENTATIONS. The matcher itself
- * already bounds matches[]; this is a belt-and-braces ceiling so a
- * pathological result can never fan out into an unbounded query loop.
- */
-const MAX_DEVICE_SELF_REPRESENTATIONS = 25;
-
 type ReportDeviceProvenanceRow = {
   verified_device_passport_id: string | null;
   document_identity_id: string | null;
@@ -236,14 +227,21 @@ async function resolveEffectiveDeviceSelfRepresentationIds(
     if (!reportPassportId) return { representationIds: [], guard: guardNotApplied(sharedGuardEnabled) };
 
     const reportCanonicalSha256 = safeCanonicalSha256(params.rawText);
+    // Every production-counted match is classified — there is deliberately no
+    // ceiling on how many. The matcher returns ALL verified scoring sources
+    // (lib/user-submission-matching.ts's CANDIDATE BUDGET), and each of them
+    // reaches the union unless this loop names it an effective SELF. A
+    // ceiling here (there used to be one, at 25 distinct representations)
+    // would leave every source past it counted in the score without ever
+    // being checked against the report's own device — a same-device document
+    // scored as someone else's. The loop is bounded by matches[] itself,
+    // which the matcher's own time budget bounds; one provenance query per
+    // production-counted match.
     const seen = new Set<string>();
     const baselineEffective: string[] = [];
-    let processed = 0;
     for (const match of matches) {
       if (seen.has(match.matchedRepresentationId)) continue;
       seen.add(match.matchedRepresentationId);
-      if (processed >= MAX_DEVICE_SELF_REPRESENTATIONS) break;
-      processed += 1;
 
       // Cheap pre-filter — only a production-counted source whose matchType is
       // an EXACT_CANONICAL_MATCH or a STRONG_TEXT_MATCH can ever qualify, so

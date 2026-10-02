@@ -70,9 +70,9 @@ export const CORPUS_DUPLICATE_SUPPRESSION_SHADOW_POLICY_VERSION = "document-loca
  * Defensive cap on how many distinct matched representations the shadow
  * evaluator will classify (and, for the ones that pass the cheap pre-filter,
  * run one bounded provenance query for) in a single evaluation. The matcher
- * already bounds matches[] (USER_SUBMISSION_MATCH_THRESHOLDS.maxCandidates = 10);
- * this is a belt-and-braces ceiling so a pathological result can never fan out
- * into an unbounded query loop. Exceeding it yields status 'BOUNDED' +
+ * returns every verified scoring source, with no count bound of its own, so
+ * this ceiling is what keeps this SHADOW evaluation from fanning out into an
+ * unbounded query loop. Exceeding it yields status 'BOUNDED' +
  * evaluation_truncated = 1 — never a silent truncation reported as 'OK'.
  */
 export const MAX_SHADOW_CANDIDATE_REPRESENTATIONS = 10;

@@ -90,26 +90,25 @@ export type UserSubmissionMatchConfig = {
   /** Coarse candidate-generation filter — how many shared indexed shingles before a representation is even worth loading and locally comparing. Deliberately looser than the correspondence thresholds above, which do the real meaningful-overlap decision. */
   candidateShingleThreshold: number;
   /**
-   * A budget PER RELATIONSHIP CLASS, applied after a candidate's
-   * relationship is known — never a LIMIT on raw discovered rows:
-   *   - scoring candidates (PRIOR_SUBMISSION, TURNITPLUS_CORPUS_SOURCE): at
-   *     most this many VERIFIED matches are reported. A candidate that fails
-   *     verification does not consume the budget.
-   *   - candidates that can never score (SELF, UNKNOWN_RELATIONSHIP): at
-   *     most this many, in rank order, are verified and reported; the rest
-   *     are passed over without loading their text.
+   * How many candidates that can NEVER score (SELF, UNKNOWN_RELATIONSHIP)
+   * are verified and reported, in rank order; the rest are passed over
+   * without loading their text. Nothing else:
+   *   - it is not a LIMIT on raw discovered rows;
+   *   - it does NOT bound scoring candidates (PRIOR_SUBMISSION,
+   *     TURNITPLUS_CORPUS_SOURCE). Every one the pass reaches is verified,
+   *     and every one that verifies is reported and reaches the union — a
+   *     count of verified sources never caps scoring evidence;
    *   - a candidate that would be dropped outright (no real ownership for a
    *     signed-in viewer) is never verified and consumes nothing.
-   * So a result carries at most 2 × maxCandidates matches. See
-   * matchAgainstUserSubmissionCorpus's own CANDIDATE BUDGET comment.
+   * See matchAgainstUserSubmissionCorpus's own CANDIDATE BUDGET comment.
    */
   maxCandidates: number;
   /**
    * How many ranked candidate rows one discovery round trip returns —
    * transport batching, NOT a cap on what is examined: a full page is
    * followed by the next one (same total order) until the candidate list is
-   * exhausted, the scoring budget above is full, or a time budget stops the
-   * pass. No value of it changes which candidates are examined on a quiet
+   * exhausted or a time budget stops the pass. No value of it changes which
+   * candidates are examined on a quiet
    * database, only how many round trips that takes. Optional, and
    * deliberately absent from USER_SUBMISSION_MATCH_THRESHOLDS (default
    * USER_SUBMISSION_CANDIDATE_PAGE_SIZE): lib/report-historical-match.ts
@@ -130,6 +129,8 @@ export type UserSubmissionMatchConfig = {
    * cannot protect against that on its own (see this file's own comment on
    * why a cooperative deadline can only refuse to START new work, never
    * interrupt a single computeDocumentCorrespondence call already running).
+   * A scoring candidate skipped by this limit was discovered but never
+   * verified, so the result is returned with partial:true.
    */
   maxCandidateWordCount: number;
   /**
@@ -209,7 +210,14 @@ export type UserSubmissionMatchConfig = {
  * individually-edited copies) plausibly diverge more than a submission
  * compared against its own published source does.
  */
-export const USER_SUBMISSION_MATCHER_VERSION = "user-submission-match-v1";
+// v2: which candidates are verified and reported changed (v1 cut the ranked
+// list at ten rows before classifying them, then at ten verified scoring
+// sources). A v1 result can be missing verified sources, so it must not be
+// reused: lib/report-historical-match.ts folds this label into every
+// snapshot's matcher_version, and a row tagged v1 is recomputed by the next
+// write-capable resolution instead of being trusted. USER_SUBMISSION_MATCH_THRESHOLDS
+// is unchanged, so the label is the only thing that tells the two apart.
+export const USER_SUBMISSION_MATCHER_VERSION = "user-submission-match-v2";
 
 /**
  * Default UserSubmissionMatchConfig.candidatePageSize. One page is one run
@@ -360,23 +368,24 @@ export type UserSubmissionMatchDiagnostics = {
   eligibleCandidatesConsidered: number;
   /** computeDocumentCorrespondence calls actually made, for scoring and non-scoring candidates alike. */
   candidatesVerified: number;
+  /** Scoring candidates that verified — every one of them is in the result. */
+  verifiedScoringSources: number;
+  /** Scoring candidates skipped unverified because their stored word_count exceeds maxCandidateWordCount. Any at all makes the result partial. */
+  oversizedScoringCandidatesSkipped: number;
   candidatePagesFetched: number;
   /** Wall-clock time spent in candidate discovery (every page, including its high-frequency probe). */
   queryTimeMs: number;
   /** Wall-clock time of the whole pass. */
   matchTimeMs: number;
   /**
-   * Why the pass stopped reading candidates:
+   * Why the pass stopped reading candidates. There is no count-based stop:
    *   CANDIDATES_EXHAUSTED — every discovered candidate was examined.
-   *   SCORING_BUDGET_FULL  — maxCandidates scoring matches were verified while
-   *                          lower-ranked candidates remained unexamined. The
-   *                          result is complete only down to that rank; it is
-   *                          NOT flagged partial (see the CANDIDATE BUDGET
-   *                          comment on matchAgainstUserSubmissionCorpus).
    *   TIME_BUDGET          — matchTimeBudgetMs ran out (result is partial).
    *   QUERY_FAILED         — a discovery query timed out or errored (result is partial).
    */
-  stopReason: "CANDIDATES_EXHAUSTED" | "SCORING_BUDGET_FULL" | "TIME_BUDGET" | "QUERY_FAILED";
+  stopReason: "CANDIDATES_EXHAUSTED" | "TIME_BUDGET" | "QUERY_FAILED";
+  /** The `partial` flag of the returned result, as a plain boolean. */
+  partial: boolean;
 };
 
 function mergeConfig(overrides?: Partial<UserSubmissionMatchConfig>): UserSubmissionMatchConfig {
@@ -509,29 +518,36 @@ function isScoringRelationship(relationshipType: RelationshipType): boolean {
  *
  * CANDIDATE BUDGET. Candidates are read in one total order (shared shingles
  * descending, then representation id), a page at a time, and each one's
- * relationship is resolved BEFORE any budget is charged:
- *   - the candidate list is never cut at a row count. An earlier build took
+ * relationship is resolved BEFORE anything is spent on it:
+ *   - the candidate list is never cut at a row count. v1 took
  *     `ORDER BY shared DESC LIMIT maxCandidates` first and classified
  *     afterwards, so ten of an author's own earlier drafts — SELF, never
  *     scored — occupied all ten slots and a genuine cross-account source of a
  *     copied passage was never verified: adding the author's own documents
  *     to the corpus took the score from 20 % to 0 %;
- *   - a scoring candidate (PRIOR_SUBMISSION / TURNITPLUS_CORPUS_SOURCE) is
- *     charged only when it VERIFIES. Higher-ranked candidates that share many
- *     scattered shingles but fail verification therefore cannot displace a
- *     verified source either; they cost time, and time is bounded by
- *     matchTimeBudgetMs with an honest partial:true;
+ *   - NO COUNT CAPS SCORING EVIDENCE. Every scoring candidate
+ *     (PRIOR_SUBMISSION / TURNITPLUS_CORPUS_SOURCE) the pass reaches is
+ *     verified, and every one that verifies is returned, so
+ *     lib/unified-similarity.ts unions the positions of all of them. A cap
+ *     of ten verified sources used to sit here: a submission matching a
+ *     source and nine documents sharing another block scored 42 %, and a
+ *     tenth such document pushed the source out and took it to 22 %. Adding
+ *     a verified source can now only add positions to the union. Whatever
+ *     list a view chooses to show is cut from this result afterwards and
+ *     never feeds back into the score;
  *   - SELF / UNKNOWN_RELATIONSHIP candidates have their own budget of
  *     maxCandidates verification attempts, so they are still reported as
  *     before but can neither take a scoring candidate's place nor spend
  *     unbounded time on text that cannot change the score;
  *   - a candidate that would be dropped outright is never loaded.
- * The pass ends when the list is exhausted, when maxCandidates scoring
- * matches have been verified, or when a time budget stops it. The second is
- * the one remaining rank cut: an eleventh verified scoring source is not
- * read, and the result does not say so (partial stays unset — recomputing
- * would not change it). params.diagnostics.stopReason records which of the
- * three it was.
+ * The pass ends when the list is exhausted or when a time budget stops it —
+ * nothing else. An exhausted pass is complete for this matcher's contract
+ * (candidates sharing at least candidateShingleThreshold searched shingles).
+ * `partial: true` is returned whenever a scoring candidate that was
+ * discovered could NOT be verified: the time budget ran out, a discovery
+ * query failed, or the candidate is over maxCandidateWordCount and was
+ * skipped. The SELF/UNKNOWN budget never sets it — those candidates cannot
+ * change the score. params.diagnostics records the stop reason and counts.
  */
 export async function matchAgainstUserSubmissionCorpus(
   client: Client,
@@ -607,7 +623,8 @@ export async function matchAgainstUserSubmissionCorpus(
 
   const matches: UserSubmissionMatch[] = [];
   const examined = new Set<string>();
-  let scoringMatchCount = 0;
+  let verifiedScoringSources = 0;
+  let oversizedScoringCandidatesSkipped = 0;
   let nonScoringAttemptCount = 0;
   let timedOut = false;
   let stopReason: UserSubmissionMatchDiagnostics["stopReason"] = "CANDIDATES_EXHAUSTED";
@@ -736,8 +753,7 @@ export async function matchAgainstUserSubmissionCorpus(
       { accountId: params.accountId, excludeDocumentIdentityId: params.documentIdentityId ?? null },
     );
 
-    for (let index = 0; index < candidates.length; index += 1) {
-      const candidate = candidates[index];
+    for (const candidate of candidates) {
       const ownership = ownershipById.get(candidate.representationId) ?? { hasSameAccountSubmission: false, otherAccountSubmissionCount: 0 };
       const relationshipType = classifyRelationship(ownership, candidate.isActivelyPromoted, params.accountId, corpusSourceMatchingEnabled);
       if (relationshipType === null) continue; // would be dropped whatever the text comparison said — never loaded
@@ -750,7 +766,13 @@ export async function matchAgainstUserSubmissionCorpus(
 
       // HARD input limit: never run correspondence comparison against an
       // oversized candidate document at all, regardless of the time budget.
-      if (candidate.wordCount > config.maxCandidateWordCount) continue;
+      // A scoring candidate skipped this way is evidence that was discovered
+      // and never verified, so the result is partial — it must not read as a
+      // complete score.
+      if (candidate.wordCount > config.maxCandidateWordCount) {
+        if (scoring) oversizedScoringCandidatesSkipped += 1;
+        continue;
+      }
 
       // Cooperative deadline check — see this function's own TIMEOUT HONESTY
       // comment: this can only decline to start the NEXT candidate, never
@@ -798,15 +820,9 @@ export async function matchAgainstUserSubmissionCorpus(
         },
       });
 
-      if (scoring) {
-        scoringMatchCount += 1;
-        if (scoringMatchCount >= config.maxCandidates) {
-          // Only a cut if something is actually left unread below this rank.
-          if (index < candidates.length - 1 || !exhausted) stopReason = "SCORING_BUDGET_FULL";
-          stopped = true;
-          break;
-        }
-      }
+      // No count ends the pass here: every verified scoring source is kept,
+      // and the next candidate is read.
+      if (scoring) verifiedScoringSources += 1;
     }
 
     if (stopped || exhausted) break;
@@ -817,19 +833,27 @@ export async function matchAgainstUserSubmissionCorpus(
     }
   }
 
+  // Partial whenever a discovered scoring candidate went unverified: the pass
+  // was stopped by a time budget / failed query, or a candidate was over the
+  // size limit. Never set by the SELF/UNKNOWN budget.
+  const isPartial = timedOut || oversizedScoringCandidatesSkipped > 0;
+
   if (params.diagnostics) {
     Object.assign(params.diagnostics, {
       rawCandidatesConsidered,
       eligibleCandidatesConsidered,
       candidatesVerified,
+      verifiedScoringSources,
+      oversizedScoringCandidatesSkipped,
       candidatePagesFetched,
       queryTimeMs,
       matchTimeMs: Date.now() - startedAt,
       stopReason,
+      partial: isPartial,
     } satisfies UserSubmissionMatchDiagnostics);
   }
 
-  const partial = timedOut ? true : undefined;
+  const partial = isPartial ? true : undefined;
   if (matches.length === 0) return { status: "NO_HISTORICAL_MATCH", partial };
 
   matches.sort(compareMatches);

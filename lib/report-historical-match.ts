@@ -185,7 +185,8 @@ export { getCurrentCorpusMatchGeneration, bumpCorpusMatchGeneration };
 /**
  * A stable digest of every value in USER_SUBMISSION_MATCH_THRESHOLDS —
  * folded into the snapshot's own matcher_version tag below. USER_SUBMISSION_MATCHER_VERSION
- * ("user-submission-match-v1") is a hand-maintained label that, by its own
+ * is a hand-maintained label (it moves when the matcher's ALGORITHM changes —
+ * "v1" to "v2" when the candidate/source caps were removed) that, by its own
  * history, does NOT reliably move when the matcher's config does: the maxDF
  * candidate-discovery hardening (maxCandidateShingleDocumentFrequency,
  * minDiscriminativeShingles) shipped without touching it. That was harmless

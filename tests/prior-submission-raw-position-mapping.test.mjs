@@ -498,7 +498,10 @@ async function zeroWidthReport(label) {
 }
 
 testV1("SNAPSHOT VERSION: the new tag differs from the pre-fix tag only by the position-space segment", () => {
-  assert.match(PRE_FIX_SNAPSHOT_MATCHER_VERSION, /^user-submission-match-v1\+cfg\.[0-9a-f]{12}$/);
+  // The matcher label itself has since moved (v1 -> v2, when the candidate and
+  // verified-source caps were removed); what this section pins is the tag
+  // WITHOUT a position-space segment, whatever the label.
+  assert.match(PRE_FIX_SNAPSHOT_MATCHER_VERSION, /^user-submission-match-v\d+\+cfg\.[0-9a-f]{12}$/);
   assert.notEqual(SNAPSHOT_MATCHER_VERSION, PRE_FIX_SNAPSHOT_MATCHER_VERSION);
   // Same matcher label, same thresholds/maturity config digest: no threshold,
   // scoring or discovery config moved — only the stored position space.
