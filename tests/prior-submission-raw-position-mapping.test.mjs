@@ -57,7 +57,15 @@ const client = createClient({ url: `file:${dbFile}` });
 await client.execute("PRAGMA foreign_keys = ON");
 await applyMigrationsLibsql(client, drizzleDir);
 
+// Position spaces under the production corpus-source state (on), whose tag
+// SNAPSHOT_MATCHER_VERSION is. The flag's own effect on the tag ("csm.off")
+// is covered by tests/report-historical-match-kill-switch.test.mjs.
+const priorCorpusSourceFlag = process.env.CORPUS_SOURCE_MATCHING_ENABLED;
+process.env.CORPUS_SOURCE_MATCHING_ENABLED = "true";
+
 test.after(() => {
+  if (priorCorpusSourceFlag === undefined) delete process.env.CORPUS_SOURCE_MATCHING_ENABLED;
+  else process.env.CORPUS_SOURCE_MATCHING_ENABLED = priorCorpusSourceFlag;
   client.close();
   for (const suffix of ["", "-wal", "-shm"]) {
     const candidate = `${dbFile}${suffix}`;

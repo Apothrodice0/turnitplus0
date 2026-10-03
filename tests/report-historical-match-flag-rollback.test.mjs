@@ -4,26 +4,32 @@ import fs from "fs";
 import path from "path";
 import { createClient } from "@libsql/client";
 import { applyMigrationsLibsql } from "../lib/ingest.js";
-import { getOrComputeHistoricalMatchSnapshot } from "../lib/report-historical-match.ts";
+import { getOrComputeHistoricalMatchSnapshot, getPersistedHistoricalMatchSnapshot, snapshotMatcherVersion } from "../lib/report-historical-match.ts";
 // SNAPSHOT_MATCHER_VERSION (base matcher label + candidate-discovery config
-// digest) is the exact value CURRENT_VERSIONS.matcherVersion holds, so a row
-// inserted with it takes the cache-hit path rather than a fresh recompute —
-// which is what every test here relies on (see this file's own header
-// comment). Imported directly to avoid hardcoding a version string that
-// could silently drift.
+// digest) is the exact tag of a row computed with corpus-source matching ON,
+// so with the flag on a row inserted with it takes the cache-hit path rather
+// than a fresh recompute. Imported directly to avoid hardcoding a version
+// string that could silently drift.
 import { SNAPSHOT_MATCHER_VERSION } from "../lib/report-historical-match.ts";
 const USER_SUBMISSION_MATCHER_VERSION = SNAPSHOT_MATCHER_VERSION;
 import { CORPUS_FINGERPRINT_VERSION, CANONICALIZATION_VERSION } from "../lib/user-submission-corpus.ts";
 
 /**
  * "Clearing the flag must immediately hide cached corpus matches" — proves
- * this is a READ-TIME filter (getOrComputeHistoricalMatchSnapshot's own
- * applyCorpusSourceMatchingFlag), never a database mutation: a snapshot row
- * computed/cached while CORPUS_SOURCE_MATCHING_ENABLED was "true" is
- * inspected with the flag off, on, and off again, and the STORED row is
- * asserted byte-identical throughout — only what the function RETURNS
- * changes. Mirrors lib/e8p-visibility.ts's own "no code change, no matcher
- * change, no database change" rollback story. Every fixture is synthetic.
+ * this is a READ-TIME filter (applyCorpusSourceMatchingFlag), never a
+ * database mutation: a snapshot row computed/cached while
+ * CORPUS_SOURCE_MATCHING_ENABLED was "true" is read with the flag off, on,
+ * and off again, and the STORED row is asserted byte-identical throughout —
+ * only what is RETURNED changes.
+ *
+ * The flag-off reads go through getPersistedHistoricalMatchSnapshot, the
+ * read-only twin that never recomputes: since the corpus-source state became
+ * part of a snapshot's identity, a WRITE-CAPABLE read
+ * (getOrComputeHistoricalMatchSnapshot) does not reuse a row computed with the
+ * flag on once it is off — it recomputes under the off state (last test
+ * below; tests/report-historical-match-kill-switch.test.mjs covers why). The
+ * filter is what still hides the corpus entries on every read that cannot
+ * recompute. Every fixture is synthetic.
  */
 
 const repoRoot = path.resolve(".");
@@ -54,6 +60,10 @@ function withEnv(name, value, fn) {
     else process.env[name] = original;
   });
 }
+
+/** A read that can never recompute or write, with the flag off. */
+const readOff = (reportDeviceKey, reportId) =>
+  withEnv("CORPUS_SOURCE_MATCHING_ENABLED", undefined, () => getPersistedHistoricalMatchSnapshot(client, { reportDeviceKey, reportId }));
 
 async function rawSnapshotRow(reportDeviceKey, reportId) {
   const result = await client.execute({
@@ -127,8 +137,7 @@ test("FLAG-OFF ROLLBACK: a cached snapshot whose ONLY entry is TURNITPLUS_CORPUS
   const reportId = "flag-rollback-report-1";
   await insertOnlyCorpusSourceSnapshot(reportDeviceKey, reportId);
 
-  const off1 = await withEnv("CORPUS_SOURCE_MATCHING_ENABLED", undefined, () =>
-    getOrComputeHistoricalMatchSnapshot(client, { reportDeviceKey, reportId, accountId: null, rawText: "irrelevant on a cache hit" }));
+  const off1 = await readOff(reportDeviceKey, reportId);
   assert.equal(off1.status, "NO_HISTORICAL_MATCH", "the only entry was corpus-source; stripping it must drop status to NO_HISTORICAL_MATCH, not an empty MATCHED array");
 
   const on = await withEnv("CORPUS_SOURCE_MATCHING_ENABLED", "true", () =>
@@ -137,8 +146,7 @@ test("FLAG-OFF ROLLBACK: a cached snapshot whose ONLY entry is TURNITPLUS_CORPUS
   assert.equal(on.matches.length, 1);
   assert.equal(on.matches[0].relationshipType, "TURNITPLUS_CORPUS_SOURCE");
 
-  const off2 = await withEnv("CORPUS_SOURCE_MATCHING_ENABLED", undefined, () =>
-    getOrComputeHistoricalMatchSnapshot(client, { reportDeviceKey, reportId, accountId: null, rawText: "irrelevant on a cache hit" }));
+  const off2 = await readOff(reportDeviceKey, reportId);
   assert.equal(off2.status, "NO_HISTORICAL_MATCH");
 
   // The stored row itself must never have been touched by any of the three
@@ -154,8 +162,7 @@ test("FLAG-OFF ROLLBACK: a mixed snapshot keeps its real PRIOR_SUBMISSION entry 
   const reportId = "flag-rollback-report-2";
   await insertMixedSnapshot(reportDeviceKey, reportId);
 
-  const off = await withEnv("CORPUS_SOURCE_MATCHING_ENABLED", undefined, () =>
-    getOrComputeHistoricalMatchSnapshot(client, { reportDeviceKey, reportId, accountId: null, rawText: "irrelevant on a cache hit" }));
+  const off = await readOff(reportDeviceKey, reportId);
   assert.equal(off.status, "MATCHED", "the real PRIOR_SUBMISSION entry must still be shown even with the flag off");
   assert.equal(off.matches.length, 1);
   assert.equal(off.matches[0].relationshipType, "PRIOR_SUBMISSION");
@@ -238,8 +245,7 @@ test("RECOMPUTED COUNTS: a rich 4-entry mixed snapshot strips exactly the two co
   const reportId = "flag-rollback-report-3";
   await insertRichMixedSnapshot(reportDeviceKey, reportId);
 
-  const off = await withEnv("CORPUS_SOURCE_MATCHING_ENABLED", undefined, () =>
-    getOrComputeHistoricalMatchSnapshot(client, { reportDeviceKey, reportId, accountId: null, rawText: "irrelevant on a cache hit" }));
+  const off = await readOff(reportDeviceKey, reportId);
 
   assert.equal(off.status, "MATCHED");
   assert.equal(off.matches.length, 2, "exactly the two real entries must remain — both corpus-source entries stripped, not just one");
@@ -274,10 +280,25 @@ test("RECOMPUTED STATUS: a corpus-only match becomes a clean NO_HISTORICAL_MATCH
   });
 
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const off = await withEnv("CORPUS_SOURCE_MATCHING_ENABLED", undefined, () =>
-      getOrComputeHistoricalMatchSnapshot(client, { reportDeviceKey, reportId, accountId: null, rawText: "irrelevant on a cache hit" }));
+    const off = await readOff(reportDeviceKey, reportId);
     assert.equal(off.status, "NO_HISTORICAL_MATCH");
     assert.ok(!("matches" in off), "a NO_HISTORICAL_MATCH result must never carry a matches key, empty or otherwise");
     assert.equal(off.computedAt, "2026-01-01T00:00:00.000Z", "the recomputed status must still come from the ORIGINAL cached row (a cache hit), not trigger a fresh live computation");
   }
+});
+
+test("WRITE-CAPABLE: with the flag off, a row computed with it on is not reused — it is recomputed and stored under the off state", async () => {
+  const reportDeviceKey = "flag-rollback-device-5";
+  const reportId = "flag-rollback-report-5";
+  await insertMixedSnapshot(reportDeviceKey, reportId);
+
+  const off = await withEnv("CORPUS_SOURCE_MATCHING_ENABLED", undefined, () =>
+    getOrComputeHistoricalMatchSnapshot(client, { reportDeviceKey, reportId, accountId: null, rawText: "text that matches nothing in this corpus" }));
+  assert.equal(off.status, "NO_HISTORICAL_MATCH", "a fresh off-state computation, not the stripped on-state row");
+  assert.equal(off.matcherVersion, snapshotMatcherVersion(1, false));
+  const stored = await client.execute({
+    sql: "SELECT status, matcher_version FROM report_historical_match_snapshots WHERE report_device_key = ? AND report_id = ?",
+    args: [reportDeviceKey, reportId],
+  });
+  assert.equal(stored.rows[0].matcher_version, snapshotMatcherVersion(1, false), "stored under the off-state tag");
 });

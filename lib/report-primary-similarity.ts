@@ -731,6 +731,9 @@ export async function resolvePersistedSimilarityDisplay(
     reportId: params.reportId,
     asOf: params.asOf,
     scoringNormalizationVersion: Number(params.scoringNormalizationVersion) === 2 ? 2 : 1,
+    // The same single live read the marker comparison above used: a snapshot
+    // computed under the other state is not current (snapshotMatcherVersion).
+    corpusSourceMatchingEnabled: liveFlag,
   });
   if (!current) {
     return { status: "stale" };
@@ -783,10 +786,12 @@ export function isFreshCurrentNoHistoricalMatch(
   generationAtComputation: number,
   liveGenerationAfterWrite: number,
   scoringNormalizationVersion: ScoringNormalizationVersion = 1,
+  /** The corpus-source-matching state the match was computed under (PrimarySimilarityResolution.corpusSourceMatchingEnabled) — part of the tag. */
+  corpusSourceMatchingEnabled = true,
 ): boolean {
   return (
     match.status === "NO_HISTORICAL_MATCH" &&
-    match.matcherVersion === snapshotMatcherVersion(scoringNormalizationVersion) &&
+    match.matcherVersion === snapshotMatcherVersion(scoringNormalizationVersion, corpusSourceMatchingEnabled) &&
     match.fingerprintVersion === CORPUS_FINGERPRINT_VERSION &&
     match.canonicalizationVersion === CANONICALIZATION_VERSION &&
     match.partial !== true &&
@@ -1268,7 +1273,7 @@ export async function selfHealUnifiedSimilarity(
       if (writeLanded) {
         if (params.testOnlyAfterWriteBeforeGenerationRecheck) await params.testOnlyAfterWriteBeforeGenerationRecheck();
         const generationAfterWrite = await getCurrentCorpusMatchGeneration(client);
-        presentationResolved = isFreshCurrentNoHistoricalMatch(resolution.historicalSubmissionMatch, resolution.corpusGeneration, generationAfterWrite, scoringNormalizationVersion);
+        presentationResolved = isFreshCurrentNoHistoricalMatch(resolution.historicalSubmissionMatch, resolution.corpusGeneration, generationAfterWrite, scoringNormalizationVersion, resolution.corpusSourceMatchingEnabled);
       }
       return {
         attempted: true,

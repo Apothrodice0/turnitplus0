@@ -159,20 +159,28 @@ export { getCurrentCorpusMatchGeneration, bumpCorpusMatchGeneration };
  *      reference the representation yet, which a targeted search can never
  *      find in the first place) — generation bump alone, for those two.
  *
- *   3. The CORPUS_SOURCE_MATCHING_ENABLED flag changing — NEVER invalidation
- *      (an env var flip is not a database event this process can hook), a
- *      read-time FILTER instead (applyCorpusSourceMatchingFlag below):
- *      getOrComputeHistoricalMatchSnapshot always strips
- *      TURNITPLUS_CORPUS_SOURCE entries from whatever it is about to
- *      return — freshly computed OR loaded from cache — whenever the flag
- *      reads false at that moment, RECOMPUTING status (not just filtering
- *      the array) so a corpus-only match cleanly becomes NO_HISTORICAL_MATCH
- *      rather than an empty-but-"MATCHED" result a caller could
- *      misinterpret. This is what makes "clearing the flag immediately
- *      hides cached corpus matches" true without touching a single row —
- *      the same "no code change, no matcher change, no database change"
- *      rollback story lib/e8p-visibility.ts's own E8P_VISIBILITY_ALLOWLIST
- *      already proves for this exact codebase.
+ *   3. The CORPUS_SOURCE_MATCHING_ENABLED flag changing — no database event
+ *      this process can hook, so two things together:
+ *      (a) the state a row was computed under is part of its matcher_version
+ *          tag (snapshotMatcherVersion's "csm.off" segment), so a row
+ *          computed under the other state is never current: the next
+ *          write-capable resolution recomputes it under the state it runs
+ *          under. A filter alone was not enough — the flag decides which
+ *          holder settles a common block, so stripping an ON row's corpus
+ *          source left the block with no holder at all, and an OFF row,
+ *          reused after the flag turned on, had never looked for corpus
+ *          sources. (Earlier, this point said "never invalidation, a
+ *          read-time filter instead".)
+ *      (b) a read-time FILTER (applyCorpusSourceMatchingFlag below), kept:
+ *          getOrComputeHistoricalMatchSnapshot strips
+ *          TURNITPLUS_CORPUS_SOURCE entries from whatever it is about to
+ *          return whenever the flag reads false at that moment, RECOMPUTING
+ *          status (not just filtering the array) so a corpus-only match
+ *          cleanly becomes NO_HISTORICAL_MATCH rather than an
+ *          empty-but-"MATCHED" result a caller could misinterpret. It is
+ *          what still hides corpus matches immediately on the read-only path
+ *          (getPersistedHistoricalMatchSnapshot never recomputes) and across
+ *          a flip that lands mid-computation.
  *
  * A "partial" result (lib/user-submission-matching.ts's own soft time
  * budget was exceeded, or its candidate DB query timed out / errored — see
@@ -257,11 +265,28 @@ export const SNAPSHOT_MATCHER_VERSION = `${USER_SUBMISSION_MATCHER_VERSION}+pos.
 // contracts, in either direction.
 const SNAPSHOT_SCORING_NORMALIZATION_V2_TAG = "norm.v2";
 
-/** The matcher_version tag of a snapshot computed under `version`. */
-export function snapshotMatcherVersion(version: ScoringNormalizationVersion): string {
-  return version === 2
-    ? `${USER_SUBMISSION_MATCHER_VERSION}+pos.${SNAPSHOT_PASSAGE_POSITIONS_VERSION}+${SNAPSHOT_SCORING_NORMALIZATION_V2_TAG}+cfg.${MATCH_CONFIG_DIGEST}`
-    : SNAPSHOT_MATCHER_VERSION;
+// The CORPUS_SOURCE_MATCHING_ENABLED state a row was computed under, when it
+// was OFF. The flag decides which candidates can be scoring evidence at all
+// (classifyRelationship in lib/user-submission-matching.ts), and therefore
+// which holder settles a common block — so a row computed under one state is
+// a different evidence set, not a filterable superset, of the other: a block
+// an ON row credits to a corpus source is held by nothing once that source is
+// stripped, and an OFF row has never looked for corpus sources. Carrying the
+// state here makes a row computed under the other state fail isCurrentVersion
+// in either direction, recomputed lazily by the next write-capable
+// resolution — no column, no migration, the same mechanism as norm.v2. The
+// segment is added only for OFF, so every row computed with the flag on (the
+// production state) keeps its tag byte-for-byte.
+const SNAPSHOT_CORPUS_SOURCE_MATCHING_OFF_TAG = "csm.off";
+
+/** The matcher_version tag of a snapshot computed under `version` with corpus-source matching on or off. */
+export function snapshotMatcherVersion(version: ScoringNormalizationVersion, corpusSourceMatchingEnabled: boolean): string {
+  if (version !== 2 && corpusSourceMatchingEnabled !== false) return SNAPSHOT_MATCHER_VERSION;
+  const segments = [USER_SUBMISSION_MATCHER_VERSION, `pos.${SNAPSHOT_PASSAGE_POSITIONS_VERSION}`];
+  if (version === 2) segments.push(SNAPSHOT_SCORING_NORMALIZATION_V2_TAG);
+  if (corpusSourceMatchingEnabled === false) segments.push(SNAPSHOT_CORPUS_SOURCE_MATCHING_OFF_TAG);
+  segments.push(`cfg.${MATCH_CONFIG_DIGEST}`);
+  return segments.join("+");
 }
 
 /** The contract a stored matcher_version tag says its row was computed under — anything without the v2 segment is v1. */
@@ -299,9 +324,9 @@ type SnapshotRow = {
   corpus_generation: number | bigint;
 };
 
-function isCurrentVersion(row: SnapshotRow, scoringNormalizationVersion: ScoringNormalizationVersion): boolean {
+function isCurrentVersion(row: SnapshotRow, scoringNormalizationVersion: ScoringNormalizationVersion, corpusSourceMatchingEnabled: boolean): boolean {
   return (
-    row.matcher_version === snapshotMatcherVersion(scoringNormalizationVersion) &&
+    row.matcher_version === snapshotMatcherVersion(scoringNormalizationVersion, corpusSourceMatchingEnabled) &&
     row.fingerprint_version === CURRENT_VERSIONS.fingerprintVersion &&
     row.canonicalization_version === CURRENT_VERSIONS.canonicalizationVersion
   );
@@ -320,7 +345,8 @@ function isCurrentVersion(row: SnapshotRow, scoringNormalizationVersion: Scoring
  *
  * A MATCHED, a definitive NO_HISTORICAL_MATCH, and a FAILED row are all
  * reusable on equal terms: current version tags (SNAPSHOT_MATCHER_VERSION,
- * which now folds in the whole candidate-discovery config), not a partial
+ * which now folds in the whole candidate-discovery config, and the
+ * corpus-source-matching state — see snapshotMatcherVersion), not a partial
  * result, and a corpus_generation still at or ahead of the current global
  * value. The ONLY no-match-shaped row that is never a cache hit is the
  * feature-disabled one (NO_HISTORICAL_MATCH_FEATURE_DISABLED_STATUS): it was
@@ -332,10 +358,11 @@ function isSnapshotRowCurrent(
   row: SnapshotRow | undefined,
   currentGeneration: number,
   scoringNormalizationVersion: ScoringNormalizationVersion,
+  corpusSourceMatchingEnabled: boolean,
 ): boolean {
   return Boolean(
     row &&
-    isCurrentVersion(row, scoringNormalizationVersion) &&
+    isCurrentVersion(row, scoringNormalizationVersion, corpusSourceMatchingEnabled) &&
     row.status !== NO_HISTORICAL_MATCH_FEATURE_DISABLED_STATUS &&
     Number(row.is_partial) !== 1 &&
     Number(row.corpus_generation) >= currentGeneration,
@@ -592,7 +619,6 @@ export async function getOrComputeHistoricalMatchSnapshot(
   },
 ): Promise<ReportHistoricalSubmissionMatch> {
   const scoringNormalizationVersion: ScoringNormalizationVersion = params.scoringNormalizationVersion === 2 ? 2 : 1;
-  const matcherVersion = snapshotMatcherVersion(scoringNormalizationVersion);
   // Read fresh, before the cache-hit decision — see this file's own header
   // comment (corpus-source matching addendum, point 1): this is compared
   // against a stored row's own corpus_generation exactly like the
@@ -612,6 +638,9 @@ export async function getOrComputeHistoricalMatchSnapshot(
   // read stores a reusable "NO_HISTORICAL_MATCH" for what was really an
   // incomplete evaluation).
   const corpusSourceMatchingEnabledAtComputation = params.corpusSourceMatchingEnabled ?? isCorpusSourceMatchingEnabled();
+  // The tag a row computed right now carries, and the one a stored row must
+  // carry to be reused: the flag state is part of it (snapshotMatcherVersion).
+  const matcherVersion = snapshotMatcherVersion(scoringNormalizationVersion, corpusSourceMatchingEnabledAtComputation);
 
   const existing = await client.execute({
     sql: `SELECT status, matcher_version, fingerprint_version, canonicalization_version, result_json, candidate_count, processing_duration_ms, error_message, computed_at, is_partial, corpus_generation
@@ -633,7 +662,7 @@ export async function getOrComputeHistoricalMatchSnapshot(
   // otherwise-current row is reused only when NO corpus backing crossed
   // maturity in (row.computed_at, asOf] — see corpusBackingMaturedInWindow.
   if (
-    isSnapshotRowCurrent(existingRow, currentGeneration, scoringNormalizationVersion) &&
+    isSnapshotRowCurrent(existingRow, currentGeneration, scoringNormalizationVersion, corpusSourceMatchingEnabledAtComputation) &&
     !(await corpusBackingMaturedInWindow(client, {
       snapshotComputedAt: (existingRow as SnapshotRow).computed_at,
       maturityCutoff,
@@ -831,9 +860,16 @@ export async function isHistoricalMatchSnapshotCurrent(
     asOf?: Date;
     /** The report's own contract — see getOrComputeHistoricalMatchSnapshot. Omitted is v1. */
     scoringNormalizationVersion?: ScoringNormalizationVersion;
+    /**
+     * The corpus-source-matching state a call right now would compute under —
+     * a row computed under the other state is not current. Omitted reads the
+     * live flag, exactly as getOrComputeHistoricalMatchSnapshot would.
+     */
+    corpusSourceMatchingEnabled?: boolean;
   },
 ): Promise<boolean> {
   const scoringNormalizationVersion: ScoringNormalizationVersion = params.scoringNormalizationVersion === 2 ? 2 : 1;
+  const corpusSourceMatchingEnabled = params.corpusSourceMatchingEnabled ?? isCorpusSourceMatchingEnabled();
   const currentGeneration = await getCurrentCorpusMatchGeneration(client);
   const existing = await client.execute({
     sql: `SELECT status, matcher_version, fingerprint_version, canonicalization_version, candidate_count, processing_duration_ms, error_message, computed_at, is_partial, corpus_generation
@@ -841,7 +877,7 @@ export async function isHistoricalMatchSnapshotCurrent(
     args: [params.reportDeviceKey, params.reportId],
   });
   const existingRow = existing.rows[0] as unknown as SnapshotRow | undefined;
-  if (!isSnapshotRowCurrent(existingRow, currentGeneration, scoringNormalizationVersion)) return false;
+  if (!isSnapshotRowCurrent(existingRow, currentGeneration, scoringNormalizationVersion, corpusSourceMatchingEnabled)) return false;
   // Phase A: an otherwise-current row is stale the moment a corpus backing
   // crosses maturity after it was computed — the SAME check
   // getOrComputeHistoricalMatchSnapshot's own cache-hit branch applies, so a

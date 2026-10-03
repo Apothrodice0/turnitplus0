@@ -517,16 +517,21 @@ test("BARRIER ON->OFF: computation runs with the flag ON and genuinely finds not
       "REQUIRED: a complete ON-semantics no-match stays the reusable status even though the environment read OFF at the write instant",
     );
     assert.equal(
-      await isHistoricalMatchSnapshotCurrent(client, { reportDeviceKey: deviceKey, reportId }),
+      await isHistoricalMatchSnapshotCurrent(client, { reportDeviceKey: deviceKey, reportId, corpusSourceMatchingEnabled: true }),
       true,
-      "REQUIRED: it is a genuine cache hit — the later OFF does not retroactively make it non-current",
+      "REQUIRED: it is a genuine cache hit for the ON state it was computed under — the late OFF read did not relabel it",
+    );
+    assert.equal(
+      await isHistoricalMatchSnapshotCurrent(client, { reportDeviceKey: deviceKey, reportId }),
+      false,
+      "and, with the flag now OFF, not current for an OFF-state resolution (the corpus-source state is part of the snapshot's identity)",
     );
   } finally {
     setFlag("true");
   }
 });
 
-test("BARRIER ON->OFF (matched): computation runs with the flag ON and matches a corpus source; the flag flips OFF before the write; the stored row stays MATCHED and read-time filtering (live OFF) hides it — the existing rollback story, unaffected", async () => {
+test("BARRIER ON->OFF (matched): computation runs with the flag ON and matches a corpus source; the flag flips OFF before the write; the stored row stays MATCHED under the ON tag, read-time filtering (live OFF) hides it, and it is current again once the flag is back on", async () => {
   const { deviceKey, reportId } = await ensureSavedReport("nomatch-cache-barrier-onoff-b");
   const text =
     "Palaeoceanographers reconstructing bottom-water oxygenation from benthic foraminiferal assemblages identified a millennial-scale ventilation collapse coincident with a known meltwater pulse.";
@@ -546,7 +551,8 @@ test("BARRIER ON->OFF (matched): computation runs with the flag ON and matches a
 
     const row = await snapshotRow(deviceKey, reportId);
     assert.equal(row.status, "MATCHED", "REQUIRED: the stored row reflects the ON computation — MATCHED, filtered at read time, never rewritten to a no-match");
-    assert.equal(await isHistoricalMatchSnapshotCurrent(client, { reportDeviceKey: deviceKey, reportId }), true, "a MATCHED row stays a cache hit regardless of the live flag");
+    assert.equal(await isHistoricalMatchSnapshotCurrent(client, { reportDeviceKey: deviceKey, reportId, corpusSourceMatchingEnabled: true }), true, "current for the ON state it was computed under");
+    assert.equal(await isHistoricalMatchSnapshotCurrent(client, { reportDeviceKey: deviceKey, reportId }), false, "not current for an OFF-state resolution while the flag is off");
 
     // Flag back ON -> the same cached MATCHED row surfaces, no recompute.
     setFlag("true");
