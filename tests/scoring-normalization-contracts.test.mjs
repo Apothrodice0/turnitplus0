@@ -612,11 +612,12 @@ test("query cleanup never contributes score: a query is text only, and only the 
 test("the prior-submission snapshot tag: the contract adds no segment to a v1 report's tag; a v2 report's carries norm.v2", () => {
   // Pinned: the normalization contract adds NOTHING to a v1 report's tag — it is exactly
   // matcher label + position space + config digest, so the contract itself invalidates no row.
-  // (The matcher label is "v2" since the candidate and verified-source caps were removed; that
-  // deliberate bump, not the contract, is what makes rows written by the v1 matcher recompute.)
-  assert.match(SNAPSHOT_MATCHER_VERSION, /^user-submission-match-v2\+pos\.raw-token-v1\+cfg\.[0-9a-f]{12}$/);
+  // (The matcher label moves when the matcher's algorithm does — "v3" since common blocks are
+  // resolved past maxDF pruning; those deliberate bumps, not the contract, are what make rows
+  // written by an older matcher recompute.)
+  assert.match(SNAPSHOT_MATCHER_VERSION, /^user-submission-match-v3\+pos\.raw-token-v1\+cfg\.[0-9a-f]{12}$/);
   assert.equal(snapshotMatcherVersion(1), SNAPSHOT_MATCHER_VERSION);
-  assert.match(snapshotMatcherVersion(2), /^user-submission-match-v2\+pos\.raw-token-v1\+norm\.v2\+cfg\.[0-9a-f]{12}$/);
+  assert.match(snapshotMatcherVersion(2), /^user-submission-match-v3\+pos\.raw-token-v1\+norm\.v2\+cfg\.[0-9a-f]{12}$/);
   assert.equal(snapshotMatcherVersion(2).replace("+norm.v2", ""), SNAPSHOT_MATCHER_VERSION, "same matcher, position space and config — only the contract differs");
   assert.equal(snapshotScoringNormalizationVersion(snapshotMatcherVersion(1)), 1);
   assert.equal(snapshotScoringNormalizationVersion(snapshotMatcherVersion(2)), 2);

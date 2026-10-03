@@ -1,21 +1,27 @@
 import type { Client } from "@libsql/client";
-import { tokens } from "./similarity-core";
+import { tokens, grams, gramHash, informativeGram } from "./similarity-core";
 import { canonicalSha256 } from "./document-identity";
 import {
   corpusShingleHashes,
   findCandidateCorpusRepresentations,
   findReusableRepresentationByCanonicalHash,
   findRepresentationById,
+  findRepresentationOwnersForShingle,
+  describeEligibleRepresentations,
   summarizeSubmissionOwnershipForRepresentations,
   isRepresentationActivelyPromoted,
   isRepresentationEligibleForMatching,
   corpusMaturityCutoff,
   CORPUS_FINGERPRINT_VERSION,
   type CandidateCorpusRepresentation,
+  type CandidateDiscoveryDiagnostics,
+  type EligibleRepresentationSummary,
   type SubmissionOwnershipSummary,
 } from "./user-submission-corpus";
 import {
   computeDocumentCorrespondence,
+  genericAcademicRegisterDensity,
+  GENERIC_ACADEMIC_REGISTER_DENSITY_LIMIT,
   type DocumentCorrespondenceThresholds,
   type CorrespondencePassage,
 } from "./document-correspondence";
@@ -173,11 +179,16 @@ export type UserSubmissionMatchConfig = {
    * computeDocumentCorrespondence from full canonical text below, so
    * passages, matchedWordCount, longestMatchWords, the matched-word union
    * and the final unified score are identical to an unpruned run for every
-   * candidate that survives — and a candidate only fails to survive if it
-   * shares solely common-register shingles, which computeDocumentCorrespondence
-   * already refuses to accept as a match. Exact-canonical duplicates are
-   * additionally protected by this file's own canonical-hash fallback,
-   * independent of DF.
+   * candidate that survives. A candidate whose only overlap is pruned
+   * shingles is not lost either when that overlap could be evidence: a long,
+   * distinctive run of pruned shingles in the submission is resolved from
+   * its own posting lists after the search (COMMON BLOCKS, see
+   * matchAgainstUserSubmissionCorpus) — so this ceiling decides what is a
+   * cheap discovery seed, never whether verified overlap counts. Generic
+   * register and blocks too short or fragmented to be a distinctive passage
+   * stay pruned; computeDocumentCorrespondence would refuse them anyway.
+   * Exact-canonical duplicates are additionally protected by this file's own
+   * canonical-hash fallback, independent of DF.
    *
    * null disables pruning entirely (findCandidateCorpusRepresentations then
    * runs the exact query every prior build ran, with no extra DB round
@@ -215,9 +226,14 @@ export type UserSubmissionMatchConfig = {
 // sources). A v1 result can be missing verified sources, so it must not be
 // reused: lib/report-historical-match.ts folds this label into every
 // snapshot's matcher_version, and a row tagged v1 is recomputed by the next
-// write-capable resolution instead of being trusted. USER_SUBMISSION_MATCH_THRESHOLDS
-// is unchanged, so the label is the only thing that tells the two apart.
-export const USER_SUBMISSION_MATCHER_VERSION = "user-submission-match-v2";
+// write-capable resolution instead of being trusted.
+// v3: long distinctive blocks whose shingles maxDF pruning removed from the
+// search are resolved from their own posting lists (COMMON BLOCKS in
+// matchAgainstUserSubmissionCorpus's comment). A v2 result can be missing a
+// block held by more than maxCandidateShingleDocumentFrequency documents.
+// USER_SUBMISSION_MATCH_THRESHOLDS is unchanged, so the label is the only
+// thing that tells these generations apart.
+export const USER_SUBMISSION_MATCHER_VERSION = "user-submission-match-v3";
 
 /**
  * Default UserSubmissionMatchConfig.candidatePageSize. One page is one run
@@ -232,6 +248,75 @@ export const USER_SUBMISSION_MATCHER_VERSION = "user-submission-match-v2";
  * full page costs little beyond the aggregate itself.
  */
 export const USER_SUBMISSION_CANDIDATE_PAGE_SIZE = 500;
+
+/**
+ * Raw posting rows per cursor page when a common block is resolved from its
+ * own posting list (COMMON BLOCKS in matchAgainstUserSubmissionCorpus's
+ * comment). Transport batching, not a cap: a page that does not settle the
+ * block is followed by the next one, until the list ends or the pass's time
+ * budget stops it. The same page size as the admission gate's Slice 2H
+ * recovery (ADMISSION_RECOVERY_OWNER_SCAN_CAP), over the same bounded
+ * rowid-cursor seek (findRepresentationOwnersForShingle).
+ */
+export const USER_SUBMISSION_COMMON_BLOCK_OWNER_PAGE_SIZE = 256;
+
+/** One maximal run of maxDF-pruned query shingles, as gram positions in the submission. */
+type CommonBlockRun = {
+  /** The pruned grams of the run, in submission order, each with the submission word positions it spans. */
+  grams: { hash: string; positions: number[] }[];
+  /** Every submission word position the run's pruned grams span, ascending. */
+  positions: number[];
+};
+
+/**
+ * The common blocks worth resolving. A block is a maximal run of CONTIGUOUS
+ * submission word positions covered by informative query 5-grams that maxDF
+ * pruning removed from the search — contiguous exactly the way
+ * lib/document-correspondence.ts joins matched positions into a passage, so a
+ * gap the verifier would split on splits a block too. A block is kept only
+ * when it could be evidence under the EXISTING distinctive-passage rule: at
+ * least minimumDistinctivePassageWords words, and generic-academic-register
+ * density under GENERIC_ACADEMIC_REGISTER_DENSITY_LIMIT — the very two tests
+ * the verifier applies to a passage before accepting it. A generic
+ * boilerplate block, or one too short to be a distinctive passage, stays
+ * pruned exactly as before. Pure.
+ */
+function findCommonBlockRuns(
+  canonicalText: string,
+  shingleSize: number,
+  prunedHashes: ReadonlySet<string>,
+  minimumDistinctivePassageWords: number,
+): CommonBlockRun[] {
+  const words = tokens(canonicalText);
+  const prunedGrams: CommonBlockRun["grams"] = [];
+  grams(words, shingleSize).forEach((gram, index) => {
+    if (!informativeGram(gram)) return;
+    const hash = gramHash(gram);
+    if (prunedHashes.has(hash)) prunedGrams.push({ hash, positions: Array.from({ length: shingleSize }, (_, offset) => index + offset) });
+  });
+
+  const runs: CommonBlockRun[] = [];
+  let current: CommonBlockRun["grams"] = [];
+  let currentEnd = -2;
+  const close = () => {
+    if (current.length === 0) return;
+    const positions = [...new Set(current.flatMap((gram) => gram.positions))].sort((a, b) => a - b);
+    const spanWords = words.slice(positions[0], positions[positions.length - 1] + 1);
+    if (positions.length >= minimumDistinctivePassageWords && genericAcademicRegisterDensity(spanWords) < GENERIC_ACADEMIC_REGISTER_DENSITY_LIMIT) {
+      runs.push({ grams: current, positions });
+    }
+    current = [];
+  };
+  // prunedGrams is in submission order, so a gram either touches the current
+  // block (starts at or before the word after its end) or begins a new one.
+  for (const gram of prunedGrams) {
+    if (gram.positions[0] > currentEnd + 1) close();
+    current.push(gram);
+    currentEnd = Math.max(currentEnd, gram.positions[gram.positions.length - 1]);
+  }
+  close();
+  return runs;
+}
 
 export const USER_SUBMISSION_MATCH_THRESHOLDS: UserSubmissionMatchConfig = {
   correspondence: {
@@ -386,6 +471,16 @@ export type UserSubmissionMatchDiagnostics = {
   stopReason: "CANDIDATES_EXHAUSTED" | "TIME_BUDGET" | "QUERY_FAILED";
   /** The `partial` flag of the returned result, as a plain boolean. */
   partial: boolean;
+  /** Query shingles maxDF pruning removed from the candidate search (first discovery page). */
+  highDfPrunedShingles: number;
+  /** Long distinctive runs of pruned shingles found in the submission (COMMON BLOCKS). */
+  commonBlockRuns: number;
+  /** Of those, runs the candidate search left uncovered that common-block resolution then covered. */
+  commonBlockRunsRecovered: number;
+  /** Raw posting rows read while resolving common blocks. */
+  commonBlockPostingRowsExamined: number;
+  /** Scoring sources verified through common-block resolution. */
+  commonBlockSourcesVerified: number;
 };
 
 function mergeConfig(overrides?: Partial<UserSubmissionMatchConfig>): UserSubmissionMatchConfig {
@@ -541,13 +636,43 @@ function isScoringRelationship(relationshipType: RelationshipType): boolean {
  *     unbounded time on text that cannot change the score;
  *   - a candidate that would be dropped outright is never loaded.
  * The pass ends when the list is exhausted or when a time budget stops it —
- * nothing else. An exhausted pass is complete for this matcher's contract
- * (candidates sharing at least candidateShingleThreshold searched shingles).
- * `partial: true` is returned whenever a scoring candidate that was
- * discovered could NOT be verified: the time budget ran out, a discovery
- * query failed, or the candidate is over maxCandidateWordCount and was
- * skipped. The SELF/UNKNOWN budget never sets it — those candidates cannot
- * change the score. params.diagnostics records the stop reason and counts.
+ * nothing else.
+ *
+ * COMMON BLOCKS. The search above leaves out every query shingle more than
+ * maxCandidateShingleDocumentFrequency eligible documents hold. Left at
+ * that, a block of copied text disappeared from the score the moment one
+ * more document held it: a 130-word block held by 50 documents was credited
+ * (42 %), the 51st holder pushed all its shingles over the ceiling, no holder
+ * shared a searched shingle any more, and the score fell to 20 %. So after
+ * the search, each contiguous block of pruned shingles in the submission that
+ * could be evidence under the EXISTING distinctive-passage rule (at least
+ * minimumDistinctivePassageWords words, generic-register density under
+ * GENERIC_ACADEMIC_REGISTER_DENSITY_LIMIT — findCommonBlockRuns) and that no
+ * verified scoring source already covers is resolved from its own posting
+ * lists: the holders of one of its shingles are read in rowid order, a
+ * bounded cursor page at a time (findRepresentationOwnersForShingle, the
+ * admission gate's Slice 2H primitive; each lookup bounded and isolated as a
+ * further candidate page is), filtered by the same MATCHING
+ * eligibility, classified by the same ownership rule, and verified by the
+ * same verifier until a scoring holder's verified passages cover that
+ * shingle; then the next uncovered shingle of the block, until the block is
+ * covered or its holders run out. One verified holder covering the block
+ * credits all of it — the union counts a position once however many
+ * documents hold it — so a block held by 51 or 5,000 documents costs about
+ * one posting page and one comparison. SELF and UNKNOWN_RELATIONSHIP holders
+ * never cover a block. A document met in the walk earns positions only by
+ * verifying, exactly as a searched candidate does. What this does not
+ * restore: overlap a holder has OUTSIDE the block, when that holder is not
+ * otherwise discoverable and was not the one that covered the block.
+ *
+ * An exhausted pass is complete for this matcher's contract (candidates
+ * sharing at least candidateShingleThreshold searched shingles, plus every
+ * common block resolved). `partial: true` is returned whenever a scoring
+ * candidate that was discovered could NOT be verified: the time budget ran
+ * out (in the search or while resolving a common block), a discovery query
+ * failed, or the candidate is over maxCandidateWordCount and was skipped. The
+ * SELF/UNKNOWN budget never sets it — those candidates cannot change the
+ * score. params.diagnostics records the stop reason and counts.
  */
 export async function matchAgainstUserSubmissionCorpus(
   client: Client,
@@ -623,6 +748,17 @@ export async function matchAgainstUserSubmissionCorpus(
 
   const matches: UserSubmissionMatch[] = [];
   const examined = new Set<string>();
+  // Submission positions already credited by a verified SCORING source —
+  // read the same way lib/unified-similarity.ts reads a match (its passages,
+  // or the whole submission for an exact canonical match).
+  const scoringCovered = new Set<number>();
+  const creditCoverage = (match: UserSubmissionMatch) => {
+    if (match.passages.length > 0) {
+      for (const passage of match.passages) for (let p = passage.submittedWordStart; p <= passage.submittedWordEnd; p += 1) scoringCovered.add(p);
+    } else if (match.matchType === "EXACT_CANONICAL_MATCH") {
+      for (let p = 0; p < queryWordCount; p += 1) scoringCovered.add(p);
+    }
+  };
   let verifiedScoringSources = 0;
   let oversizedScoringCandidatesSkipped = 0;
   let nonScoringAttemptCount = 0;
@@ -633,6 +769,68 @@ export async function matchAgainstUserSubmissionCorpus(
   let candidatesVerified = 0;
   let candidatePagesFetched = 0;
   let queryTimeMs = 0;
+  let commonBlockRuns = 0;
+  let commonBlockRunsRecovered = 0;
+  let commonBlockPostingRowsExamined = 0;
+  let commonBlockSourcesVerified = 0;
+  // Filled by the first discovery page: the query shingles maxDF pruning
+  // removed, in gram order (CandidateDiscoveryDiagnostics' opt-in capture).
+  const discoveryDiagnostics: CandidateDiscoveryDiagnostics = {
+    inputShingleCount: 0,
+    survivingShingleCount: 0,
+    highDfPrunedCount: 0,
+    fallbackUsed: false,
+    appliedMaxDocumentFrequency: null,
+    prunedShingleHashes: [],
+  };
+
+  /**
+   * Loads one candidate's text and verifies it with the unchanged
+   * correspondence rules. Returns the match it adds to `matches`, or null
+   * when it does not verify (or vanished between queries).
+   */
+  const verify = async (
+    representationId: string,
+    relationshipType: RelationshipType,
+    ownership: SubmissionOwnershipSummary,
+  ): Promise<UserSubmissionMatch | null> => {
+    const representation = await findRepresentationById(client, representationId);
+    if (!representation) return null; // defensive: representation was removed between the two queries
+
+    const correspondence = computeDocumentCorrespondence(params.canonicalText, representation.canonicalText, config.correspondence);
+    candidatesVerified += 1;
+    // Section 19/20: textual evidence is required — title/author alone,
+    // and weak/common-phrase overlap alone, never produce a match here.
+    // Phase 6.6 PART 2: distinctivePassageMatch is a THIRD, independent
+    // acceptance path alongside the pre-existing two — a single
+    // sufficiently long, contiguous, exact/near-exact passage is now
+    // reportable evidence on its own even when the source document's
+    // overall containment ratio is low (see USER_SUBMISSION_MATCH_THRESHOLDS's
+    // own minimumDistinctivePassageWords comment). Fragmented evidence
+    // (several short spans that never individually reach the threshold) is
+    // still rejected here exactly as before — distinctivePassageMatch is
+    // computed from the SINGLE longest span, never a sum across spans.
+    if (!correspondence.exactCanonicalMatch && !correspondence.strongCorrespondence && !correspondence.distinctivePassageMatch) return null;
+
+    const match: UserSubmissionMatch = {
+      relationshipType,
+      matchedRepresentationId: representation.id,
+      matchType: correspondence.exactCanonicalMatch ? "EXACT_CANONICAL_MATCH" : "STRONG_TEXT_MATCH",
+      containment: correspondence.containment,
+      matchedWordCount: correspondence.matchedWordCount,
+      passageCount: correspondence.passages.length,
+      longestMatchWords: correspondence.longestMatchWords,
+      passages: correspondence.passages,
+      historicalSubmissionCount: ownership.otherAccountSubmissionCount,
+      evidenceVersion: {
+        canonicalizationVersion: representation.canonicalizationVersion,
+        fingerprintVersion: config.fingerprintVersion,
+        matcherVersion: config.matcherVersion,
+      },
+    };
+    matches.push(match);
+    return match;
+  };
 
   let offset = 0;
   let stopped = false;
@@ -665,6 +863,7 @@ export async function matchAgainstUserSubmissionCorpus(
           // findCandidateCorpusRepresentations forwards both to its DF probe.
           eligibilityMode: "MATCHING",
           maturityCutoff,
+          diagnostics: isFirstPage ? discoveryDiagnostics : undefined,
         }),
         // The first page keeps the whole dbQueryTimeoutMs, exactly as the
         // single query always did. A further page may only use what is left
@@ -785,44 +984,13 @@ export async function matchAgainstUserSubmissionCorpus(
       }
       if (!scoring) nonScoringAttemptCount += 1;
 
-      const representation = await findRepresentationById(client, candidate.representationId);
-      if (!representation) continue; // defensive: representation was removed between the two queries
-
-      const correspondence = computeDocumentCorrespondence(params.canonicalText, representation.canonicalText, config.correspondence);
-      candidatesVerified += 1;
-      // Section 19/20: textual evidence is required — title/author alone,
-      // and weak/common-phrase overlap alone, never produce a match here.
-      // Phase 6.6 PART 2: distinctivePassageMatch is a THIRD, independent
-      // acceptance path alongside the pre-existing two — a single
-      // sufficiently long, contiguous, exact/near-exact passage is now
-      // reportable evidence on its own even when the source document's
-      // overall containment ratio is low (see USER_SUBMISSION_MATCH_THRESHOLDS's
-      // own minimumDistinctivePassageWords comment). Fragmented evidence
-      // (several short spans that never individually reach the threshold) is
-      // still rejected here exactly as before — distinctivePassageMatch is
-      // computed from the SINGLE longest span, never a sum across spans.
-      if (!correspondence.exactCanonicalMatch && !correspondence.strongCorrespondence && !correspondence.distinctivePassageMatch) continue;
-
-      matches.push({
-        relationshipType,
-        matchedRepresentationId: representation.id,
-        matchType: correspondence.exactCanonicalMatch ? "EXACT_CANONICAL_MATCH" : "STRONG_TEXT_MATCH",
-        containment: correspondence.containment,
-        matchedWordCount: correspondence.matchedWordCount,
-        passageCount: correspondence.passages.length,
-        longestMatchWords: correspondence.longestMatchWords,
-        passages: correspondence.passages,
-        historicalSubmissionCount: ownership.otherAccountSubmissionCount,
-        evidenceVersion: {
-          canonicalizationVersion: representation.canonicalizationVersion,
-          fingerprintVersion: config.fingerprintVersion,
-          matcherVersion: config.matcherVersion,
-        },
-      });
-
+      const match = await verify(candidate.representationId, relationshipType, ownership);
       // No count ends the pass here: every verified scoring source is kept,
       // and the next candidate is read.
-      if (scoring) verifiedScoringSources += 1;
+      if (match && scoring) {
+        verifiedScoringSources += 1;
+        creditCoverage(match);
+      }
     }
 
     if (stopped || exhausted) break;
@@ -830,6 +998,114 @@ export async function matchAgainstUserSubmissionCorpus(
       timedOut = true;
       stopReason = "TIME_BUDGET";
       break;
+    }
+  }
+
+  // COMMON BLOCKS — see this function's own comment.
+  const minimumDistinctivePassageWords = config.correspondence.minimumDistinctivePassageWords;
+  if (!timedOut && discoveryDiagnostics.prunedShingleHashes.length > 0 && minimumDistinctivePassageWords !== undefined) {
+    const runs = findCommonBlockRuns(
+      params.canonicalText,
+      config.correspondence.shingleSize,
+      new Set(discoveryDiagnostics.prunedShingleHashes),
+      minimumDistinctivePassageWords,
+    );
+    commonBlockRuns = runs.length;
+    const isCovered = (positions: readonly number[]) => positions.every((p) => scoringCovered.has(p));
+
+    for (const run of runs) {
+      if (stopped) break;
+      if (isCovered(run.positions)) continue;
+      const anchorsTried = new Set<string>();
+      for (const anchor of run.grams) {
+        if (stopped || isCovered(run.positions)) break;
+        if (anchorsTried.has(anchor.hash) || isCovered(anchor.positions)) continue;
+        anchorsTried.add(anchor.hash);
+        // Walk this shingle's posting list in rowid order, a bounded page at
+        // a time, until a verified holder covers it or the list ends.
+        let afterId = 0;
+        while (!stopped && !isCovered(anchor.positions)) {
+          if (Date.now() >= deadline) {
+            timedOut = true;
+            stopReason = "TIME_BUDGET";
+            stopped = true;
+            break;
+          }
+          // Both lookups are discovery queries, bounded and isolated exactly as
+          // a further candidate page is: never past dbQueryTimeoutMs nor the
+          // pass's own budget, and a failure keeps what was already verified.
+          let ownerPage: Awaited<ReturnType<typeof findRepresentationOwnersForShingle>>;
+          let holders: EligibleRepresentationSummary[] = [];
+          try {
+            ownerPage = await withTimeout(
+              findRepresentationOwnersForShingle(client, anchor.hash, {
+                afterId,
+                limit: USER_SUBMISSION_COMMON_BLOCK_OWNER_PAGE_SIZE,
+                fingerprintVersion: config.fingerprintVersion,
+              }),
+              Math.max(1, Math.min(config.dbQueryTimeoutMs, deadline - Date.now())),
+              "findRepresentationOwnersForShingle",
+            );
+            commonBlockPostingRowsExamined += ownerPage.examinedRowCount;
+            const fresh = [...new Set(ownerPage.owners.map((owner) => owner.representationId))].filter((id) => !examined.has(id));
+            if (fresh.length > 0) {
+              // The same MATCHING eligibility the candidate query applies
+              // (maturity, revocation, the requester's own promotions).
+              holders = await withTimeout(
+                describeEligibleRepresentations(client, fresh, { excludeAccountId: params.excludeAccountId, maturityCutoff }),
+                Math.max(1, Math.min(config.dbQueryTimeoutMs, deadline - Date.now())),
+                "describeEligibleRepresentations",
+              );
+              // Ineligible now is ineligible for the rest of the pass.
+              const eligibleIds = new Set(holders.map((holder) => holder.representationId));
+              for (const id of fresh) if (!eligibleIds.has(id)) examined.add(id);
+            }
+          } catch {
+            timedOut = true;
+            stopReason = "QUERY_FAILED";
+            stopped = true;
+            break;
+          }
+          if (holders.length > 0) {
+            const ownershipById = await summarizeSubmissionOwnershipForRepresentations(
+              client,
+              holders.map((holder) => holder.representationId),
+              { accountId: params.accountId, excludeDocumentIdentityId: params.documentIdentityId ?? null },
+            );
+            for (const holder of holders) {
+              // Marked only once reached: a holder this anchor no longer needs
+              // stays available to a later block it may be the only cover of.
+              examined.add(holder.representationId);
+              rawCandidatesConsidered += 1;
+              const ownership = ownershipById.get(holder.representationId) ?? { hasSameAccountSubmission: false, otherAccountSubmissionCount: 0 };
+              const relationshipType = classifyRelationship(ownership, holder.isActivelyPromoted, params.accountId, corpusSourceMatchingEnabled);
+              // Only a source that can score can cover a block.
+              if (relationshipType === null || !isScoringRelationship(relationshipType)) continue;
+              eligibleCandidatesConsidered += 1;
+              if (holder.wordCount > config.maxCandidateWordCount) {
+                oversizedScoringCandidatesSkipped += 1;
+                continue;
+              }
+              if (Date.now() >= deadline) {
+                timedOut = true;
+                stopReason = "TIME_BUDGET";
+                stopped = true;
+                break;
+              }
+              const match = await verify(holder.representationId, relationshipType, ownership);
+              if (match) {
+                verifiedScoringSources += 1;
+                commonBlockSourcesVerified += 1;
+                creditCoverage(match);
+                if (isCovered(anchor.positions)) break;
+              }
+            }
+          }
+          if (ownerPage.nextAfterId === null) break; // posting list exhausted
+          afterId = ownerPage.nextAfterId;
+        }
+      }
+      if (isCovered(run.positions)) commonBlockRunsRecovered += 1;
     }
   }
 
@@ -850,6 +1126,11 @@ export async function matchAgainstUserSubmissionCorpus(
       matchTimeMs: Date.now() - startedAt,
       stopReason,
       partial: isPartial,
+      highDfPrunedShingles: discoveryDiagnostics.highDfPrunedCount,
+      commonBlockRuns,
+      commonBlockRunsRecovered,
+      commonBlockPostingRowsExamined,
+      commonBlockSourcesVerified,
     } satisfies UserSubmissionMatchDiagnostics);
   }
 

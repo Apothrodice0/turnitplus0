@@ -653,11 +653,13 @@ export type CandidateDiscoveryDiagnostics = {
  * NOT verification-affecting: lib/user-submission-matching.ts recomputes
  * computeDocumentCorrespondence from full canonical text for every surviving
  * candidate, so passages, matched-word union and the final unified score are
- * byte-identical to an unpruned run for every candidate that survives — and
- * the only representations that fail to survive are ones sharing solely
- * common-register shingles, which computeDocumentCorrespondence's own
- * containment / distinctive-passage / generic-academic-register gates
- * already refuse to accept as a match.
+ * byte-identical to an unpruned run for every candidate that survives. A
+ * representation whose only overlap is pruned shingles does not survive the
+ * search; when that overlap is a block the verifier could accept (long and
+ * distinctive, not common register) the matcher resolves it afterwards from
+ * the block's own posting lists — see COMMON BLOCKS in
+ * lib/user-submission-matching.ts. That is what keeps a block from leaving
+ * the score when one more document holds it and its DF crosses the ceiling.
  *
  * WHAT "DF" MEANS HERE — DF(hash, requester) = the number of DISTINCT
  * representations that contain the hash AND are eligible to participate in
@@ -1137,6 +1139,13 @@ function admissionEligibilityBindArgs(
   return [maturityCutoff, excludeAccountPrefix, excludeAccountPrefix, excludeAccountPrefix, maturityCutoff, exemptAccountPrefixesJson, maturityCutoff];
 }
 
+/** CandidateCorpusRepresentation.isActivelyPromoted as a select-list column, correlated on `r.id` — shared by every query that reports it. */
+const IS_ACTIVELY_PROMOTED_SELECT = `CASE WHEN EXISTS (
+              SELECT 1 FROM corpus_admission_promotions p
+              JOIN corpus_admission_accepted_representations ar ON ar.id = p.accepted_representation_id
+              WHERE p.representation_id = r.id AND p.status = 'indexed' AND ar.revoked_at IS NULL
+            ) THEN 1 ELSE 0 END AS is_actively_promoted`;
+
 export async function findCandidateCorpusRepresentations(
   client: Client,
   shingleHashes: Set<string>,
@@ -1272,11 +1281,7 @@ export async function findCandidateCorpusRepresentations(
   if (effectiveHashes.size === 0) return [];
 
   const hashList = [...effectiveHashes];
-  const isActivelyPromotedCase = `CASE WHEN EXISTS (
-              SELECT 1 FROM corpus_admission_promotions p
-              JOIN corpus_admission_accepted_representations ar ON ar.id = p.accepted_representation_id
-              WHERE p.representation_id = r.id AND p.status = 'indexed' AND ar.revoked_at IS NULL
-            ) THEN 1 ELSE 0 END AS is_actively_promoted`;
+  const isActivelyPromotedCase = IS_ACTIVELY_PROMOTED_SELECT;
 
   let sharedRows: RawSharedRow[];
   if (hashList.length <= SHINGLE_IN_CHUNK_SIZE) {
@@ -1448,6 +1453,71 @@ export async function isRepresentationEligibleForMatching(
   });
   const row = result.rows[0] as unknown as { eligible: number | bigint } | undefined;
   return row !== undefined && Number(row.eligible) === 1;
+}
+
+/** A representation that passed the matching eligibility check, with what a matcher needs before loading its text. */
+export type EligibleRepresentationSummary = {
+  representationId: string;
+  canonicalSha256: string;
+  wordCount: number;
+  /** Same meaning as CandidateCorpusRepresentation.isActivelyPromoted. */
+  isActivelyPromoted: boolean;
+};
+
+/**
+ * Batch form of isRepresentationEligibleForMatching for a BOUNDED id list
+ * (one posting-cursor page's worth): the subset that satisfies the exact
+ * admissionEligibilitySql predicate candidate discovery applies — MATCHING
+ * mode, same maturity cutoff, same requester exclusion, never a second rule —
+ * with the columns findCandidateCorpusRepresentations reports for a candidate.
+ * Input order is preserved; duplicates are dropped. One query.
+ *
+ * MATCHING only, by construction: there is no mode parameter, so the
+ * ADMISSION_DEDUP maturity bypass cannot reach this path.
+ *
+ * Used by lib/user-submission-matching.ts to resolve a maxDF-pruned common
+ * block from its own posting list (findRepresentationOwnersForShingle), where
+ * the owners come back raw and unfiltered.
+ */
+export async function describeEligibleRepresentations(
+  client: Client,
+  representationIds: string[],
+  options: {
+    excludeAccountId?: string;
+    maturityCutoff?: string;
+    asOf?: Date;
+  } = {},
+): Promise<EligibleRepresentationSummary[]> {
+  const uniqueInOrder = [...new Set(representationIds)];
+  if (uniqueInOrder.length === 0) return [];
+  const excludeAccountPrefix = options.excludeAccountId ? buildReportAdmissionAccountPrefix(options.excludeAccountId) : null;
+  const eligibilityMode: CorpusEligibilityMode = "MATCHING";
+  const maturityCutoff = resolveMaturityCutoff(eligibilityMode, options);
+  const exemptAccountPrefixesJson = JSON.stringify(await resolveExemptAccountPrefixes(client, eligibilityMode));
+  const placeholders = uniqueInOrder.map(() => "?").join(",");
+  const result = await client.execute({
+    sql: `SELECT r.id AS representation_id, r.canonical_sha256 AS canonical_sha256, r.word_count AS word_count,
+            ${IS_ACTIVELY_PROMOTED_SELECT}
+          FROM corpus_document_representations r
+          WHERE r.id IN (${placeholders})
+            AND ${admissionEligibilitySql(eligibilityMode)}`,
+    args: [...uniqueInOrder, ...admissionEligibilityBindArgs(excludeAccountPrefix, eligibilityMode, maturityCutoff, exemptAccountPrefixesJson)],
+  });
+  const byId = new Map(
+    (result.rows as unknown as { representation_id: string; canonical_sha256: string; word_count: number | bigint; is_actively_promoted: number | bigint }[]).map((row) => [
+      String(row.representation_id),
+      {
+        representationId: String(row.representation_id),
+        canonicalSha256: row.canonical_sha256,
+        wordCount: Number(row.word_count),
+        isActivelyPromoted: Number(row.is_actively_promoted) === 1,
+      },
+    ]),
+  );
+  return uniqueInOrder.flatMap((id) => {
+    const row = byId.get(id);
+    return row ? [row] : [];
+  });
 }
 
 /** One SQL fragment plus its positional bind values, in the fragment's own fixed `?` order. */
