@@ -22,21 +22,11 @@
 // whether the real 230-document production corpus has coverage of any
 // particular topic. Results from this lane must be reported as "synthetic
 // test-corpus" numbers, never conflated with production archive coverage.
-import {
-  acceptedSimilaritySpans,
-  aggregateSimilaritySources,
-  containment,
-  DEFAULT_SOURCE_AGGREGATION,
-  gramHash,
-  grams,
-  informativeGram,
-  tokens,
-} from "../../lib/similarity-core";
+import { DEFAULT_SOURCE_AGGREGATION, gramHash, grams, tokens } from "../../lib/similarity-core";
+import { scoreAgainstArchive } from "../../lib/archive-similarity-scoring";
 
 const SHINGLE_SIZE = 5;
 const MINIMUM_MATCHED_WORDS = SHINGLE_SIZE;
-/** Same self-matching-document exclusion real-archive-analyze.mjs uses — a document that IS itself the source shouldn't be treated as "containing" itself for scoring purposes when submitted verbatim; kept anyway for parity with production behavior. */
-const SELF_EXCLUSION_CONTAINMENT = 0.75;
 
 export type SyntheticArchiveDocument = { id: string; title: string; text: string };
 
@@ -91,89 +81,34 @@ export type SyntheticArchiveResult = {
   sources: SyntheticArchiveSourceMatch[];
 };
 
-/** Faithful port of scripts/validation/real-archive-analyze.mjs's realArchiveAnalyze() against an in-memory index instead of the packed binary files — same algorithm, same lib/similarity-core.ts primitives, no risk-calibration file (uses the library's own DEFAULT_SOURCE_AGGREGATION and a fixed minimumMatchedWords = shingleSize, matching that file's own fallback when no calibration override is present). */
+/** scripts/validation/real-archive-analyze.mjs's realArchiveAnalyze() against an in-memory index instead of the packed binary files: the same lib/archive-similarity-scoring.ts scoreAgainstArchive the shipped worker calls, with no risk-calibration file (the library's own DEFAULT_SOURCE_AGGREGATION and a fixed minimumMatchedWords = shingleSize, matching that file's own fallback when no calibration override is present). */
 export function analyzeSyntheticArchive(text: string, index: SyntheticArchiveIndex): SyntheticArchiveResult {
-  const words = tokens(text);
-  const documentGrams = grams(words, SHINGLE_SIZE);
-  const uniqueDocumentGrams = new Set(documentGrams);
-  const sharedBySource = new Map<number, number>();
-  uniqueDocumentGrams.forEach((gram) => {
-    const sourceIndexes = index.postings.get(gramHash(gram)) ?? [];
-    sourceIndexes.forEach((sourceIndex) => {
-      sharedBySource.set(sourceIndex, (sharedBySource.get(sourceIndex) ?? 0) + 1);
-    });
-  });
-
-  const excluded = new Set<number>();
-  index.documents.forEach((document, sourceIndex) => {
-    const shared = sharedBySource.get(sourceIndex) ?? 0;
-    if (containment(shared, uniqueDocumentGrams.size, document.uniqueShingleCount) >= SELF_EXCLUSION_CONTAINMENT) {
-      excluded.add(sourceIndex);
-    }
-  });
-
-  const eligibleCount = index.documents.length - excluded.size;
-  const positionScores = new Map<number, Map<number, number>>();
-  documentGrams.forEach((gram, start) => {
-    const sourceIndexes = (index.postings.get(gramHash(gram)) ?? []).filter((sourceIndex) => !excluded.has(sourceIndex));
-    if (sourceIndexes.length === 0 || sourceIndexes.length > index.maximumDocumentFrequency || !informativeGram(gram)) return;
-    const idf = Math.log((eligibleCount + 1) / (sourceIndexes.length + 1)) + 1;
-    sourceIndexes.forEach((sourceIndex) => {
-      for (let position = start; position < start + SHINGLE_SIZE; position += 1) {
-        const scores = positionScores.get(position) ?? new Map<number, number>();
-        scores.set(sourceIndex, (scores.get(sourceIndex) ?? 0) + idf);
-        positionScores.set(position, scores);
-      }
-    });
-  });
-
-  const matchedBySource = new Map<number, Set<number>>();
-  positionScores.forEach((scores, position) => {
-    const best = [...scores.entries()].sort((left, right) => right[1] - left[1] || left[0] - right[0])[0]?.[0];
-    if (best === undefined) return;
-    const positions = matchedBySource.get(best) ?? new Set<number>();
-    positions.add(position);
-    matchedBySource.set(best, positions);
-  });
-
-  const { spansBySource } = acceptedSimilaritySpans(matchedBySource, MINIMUM_MATCHED_WORDS);
-  const evidence = [...spansBySource.entries()].map(([sourceIndex, spans]) => {
-    const positions = new Set<number>();
-    spans.forEach(([start, end]) => {
-      for (let position = start; position <= end; position += 1) positions.add(position);
-    });
-    return {
-      sourceIndex,
-      positions,
-      containment: containment(sharedBySource.get(sourceIndex) ?? 0, uniqueDocumentGrams.size, index.documents[sourceIndex].uniqueShingleCount),
-    };
-  });
-  const aggregation = aggregateSimilaritySources(evidence, words.length, DEFAULT_SOURCE_AGGREGATION);
-  const acceptedSourceIndexes = new Set(aggregation.sourceContributions.map((source) => source.sourceIndex));
-
-  const sources: SyntheticArchiveSourceMatch[] = [...matchedBySource.entries()]
-    .filter(([sourceIndex]) => acceptedSourceIndexes.has(sourceIndex))
-    .map(([sourceIndex]) => {
-      const validSpans = spansBySource.get(sourceIndex) ?? [];
-      const positions = new Set<number>();
-      validSpans.forEach(([start, end]) => {
-        for (let position = start; position <= end; position += 1) positions.add(position);
-      });
-      return {
-        id: index.documents[sourceIndex].id,
-        title: index.documents[sourceIndex].title,
-        matchedWords: positions.size,
-        percent: Math.floor((positions.size / Math.max(words.length, 1)) * 100),
-      };
-    })
-    .filter((source) => source.matchedWords > 0)
-    .sort((left, right) => right.percent - left.percent);
+  const result = scoreAgainstArchive(
+    text,
+    {
+      shingleSize: SHINGLE_SIZE,
+      documentCount: index.documents.length,
+      maximumDocumentFrequency: index.maximumDocumentFrequency,
+      articles: index.documents.map((document) => ({
+        title: document.title,
+        sourceType: "Publication" as const,
+        uniqueShingleCount: document.uniqueShingleCount,
+      })),
+      getPostings: (hash) => index.postings.get(hash) ?? [],
+    },
+    { minimumMatchedWords: MINIMUM_MATCHED_WORDS, ...DEFAULT_SOURCE_AGGREGATION },
+  );
 
   return {
-    wordCount: words.length,
-    matchedWordCount: aggregation.acceptedPositions.size,
-    archiveMatchedPositions: [...aggregation.acceptedPositions].sort((left, right) => left - right),
-    score: aggregation.score,
-    sources,
+    wordCount: result.wordCount,
+    matchedWordCount: result.matchedWordCount,
+    archiveMatchedPositions: result.archiveMatchedPositions,
+    score: result.score,
+    sources: result.sources.map((source) => ({
+      id: index.documents[source.sourceIndex].id,
+      title: index.documents[source.sourceIndex].title,
+      matchedWords: source.matchedWords,
+      percent: source.percent,
+    })),
   };
 }

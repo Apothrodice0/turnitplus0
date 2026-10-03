@@ -68,16 +68,14 @@ import { gunzipSync } from "node:zlib";
 import mammoth from "mammoth";
 import {
   DEFAULT_SOURCE_AGGREGATION,
-  acceptedSimilaritySpans,
-  aggregateSimilaritySources,
   containment,
   detectDominantLanguage,
   gramHash,
   grams,
-  informativeGram,
   tokens,
   type SourceAggregationParameters,
 } from "../lib/similarity-core";
+import { scoreAgainstArchive } from "../lib/archive-similarity-scoring";
 import {
   ARCHIVE_LEAKAGE_CONTAINMENT,
   FINAL_TEST_MINIMUM_WORDS,
@@ -296,68 +294,24 @@ function archiveContainment(gramHashes: Set<string>) {
   };
 }
 
-/** The real runtime archive-overlap score for this text — the exact algorithm from app/similarity-worker.ts / tools/evaluate-similarity-final-test.ts, run against the shipped index + matching parameters. Answers "is 0% a coverage artifact?" directly. */
+/** The real runtime archive-overlap score for this text — app/similarity-worker.ts's own scorer (lib/archive-similarity-scoring.ts scoreAgainstArchive), run against the shipped index + matching parameters. Answers "is 0% a coverage artifact?" directly. */
+const scoringArticles = index.articles.map((article) => ({
+  title: article.title,
+  sourceType: "Publication" as const,
+  uniqueShingleCount: article.uniqueShingleCount,
+}));
 function predictedArchiveOverlapPercent(text: string): number {
-  const words = tokens(text);
-  const documentGrams = grams(words, index.shingleSize);
-  const uniqueDocumentGrams = new Set(documentGrams);
-
-  const sharedBySource = new Map<number, number>();
-  uniqueDocumentGrams.forEach((gram) => {
-    for (const source of index.invertedIndex[gramHash(gram)] ?? []) {
-      sharedBySource.set(source, (sharedBySource.get(source) ?? 0) + 1);
-    }
-  });
-
-  const excluded = new Set<number>();
-  index.articles.forEach((article, sourceIndex) => {
-    if (containment(sharedBySource.get(sourceIndex) ?? 0, uniqueDocumentGrams.size, article.uniqueShingleCount) >= 0.75) {
-      excluded.add(sourceIndex);
-    }
-  });
-
-  const positionScores = new Map<number, Map<number, number>>();
-  const eligibleCount = index.articles.length - excluded.size;
-  documentGrams.forEach((gram, start) => {
-    if (!informativeGram(gram)) return;
-    const postings = (index.invertedIndex[gramHash(gram)] ?? []).filter((source) => !excluded.has(source));
-    if (!postings.length || postings.length > matchingParameters.maximumDocumentFrequency) return;
-    const idf = Math.log((eligibleCount + 1) / (postings.length + 1)) + 1;
-    postings.forEach((sourceIndex) => {
-      for (let position = start; position < start + index.shingleSize; position += 1) {
-        const scores = positionScores.get(position) ?? new Map<number, number>();
-        scores.set(sourceIndex, (scores.get(sourceIndex) ?? 0) + idf);
-        positionScores.set(position, scores);
-      }
-    });
-  });
-
-  const matchedBySource = new Map<number, Set<number>>();
-  positionScores.forEach((scores, position) => {
-    const best = [...scores.entries()].sort((left, right) => right[1] - left[1] || left[0] - right[0])[0]?.[0];
-    if (best === undefined) return;
-    const positions = matchedBySource.get(best) ?? new Set<number>();
-    positions.add(position);
-    matchedBySource.set(best, positions);
-  });
-
-  const { spansBySource } = acceptedSimilaritySpans(matchedBySource, matchingParameters.minimumMatchedWords);
-  const evidence = [...spansBySource.entries()].map(([sourceIndex, spans]) => {
-    const positions = new Set<number>();
-    spans.forEach(([start, end]) => {
-      for (let position = start; position <= end; position += 1) positions.add(position);
-    });
-    return {
-      sourceIndex,
-      positions,
-      containment: containment(
-        sharedBySource.get(sourceIndex) ?? 0,
-        uniqueDocumentGrams.size,
-        index.articles[sourceIndex].uniqueShingleCount,
-      ),
-    };
-  });
-  return aggregateSimilaritySources(evidence, words.length, matchingParameters).score;
+  return scoreAgainstArchive(
+    text,
+    {
+      shingleSize: index.shingleSize,
+      documentCount: index.articles.length,
+      maximumDocumentFrequency: index.maximumDocumentFrequency,
+      articles: scoringArticles,
+      getPostings: (hash) => index.invertedIndex[hash] ?? [],
+    },
+    matchingParameters,
+  ).score;
 }
 
 // ---------------------------------------------------------------------------

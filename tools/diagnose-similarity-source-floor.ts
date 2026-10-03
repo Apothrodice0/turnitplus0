@@ -31,6 +31,19 @@ type DuplicateClusters = {
 type Evidence = { totalWords: number; sources: SimilaritySourceEvidence[] };
 type Prediction = { id: string; actual: number; predicted: number };
 
+// HISTORICAL, calibration v8 only. This diagnostic measures the v8 source floor: a floor on each
+// source's winner-take-all SHARE, with the source cap inside the score. Since risk-calibration v9 the
+// shared aggregator admits a source on its OWN verified evidence and the cap is display-only, so feeding
+// it this file's winner-take-all evidence would give numbers that are neither v8 nor v9. It therefore
+// refuses to run against the v9 aggregator; own-evidence floors are swept by
+// tools/sweep-similarity-parameters.ts (npm run calibrate:similarity).
+if ("admittedSources" in aggregateSimilaritySources([], 1)) {
+  throw new Error(
+    "diagnose-similarity-source-floor is a historical calibration-v8 diagnostic and lib/similarity-core.ts implements "
+    + "the calibration-v9 aggregation; its numbers would be neither. Own-evidence floors: npm run calibrate:similarity.",
+  );
+}
+
 const OUTPUT_PATH = "corpus/audit/similarity-source-floor-diagnostic.json";
 const FLOORS = [0, 0.05, 0.1, 0.15, 0.25] as const;
 const BASE_PARAMETERS = { minimumMatchedWords: 5, maximumDocumentFrequency: 6 };

@@ -50,6 +50,19 @@ const MANIFEST_PATH = join(ROOT, "manifest.json");
 const AUDIT_PATH = join(ROOT, "intake-audit.json");
 const OUTPUT_PATH = "corpus/audit/similarity-final-test-evaluation.json";
 
+// HISTORICAL, calibration v8 only. The one permitted opening of the sealed cohort was defined for the
+// v8 Archive scorer (winner-take-all evidence, the source floor on that share, the source cap inside the
+// score). Since risk-calibration v9 the shared aggregator admits a source on its OWN verified evidence and
+// the cap is display-only, so this file's evidence fed to it would give numbers that are neither v8 nor
+// v9 — and would spend the opening on them. Refuse before touching the cohort, whatever calibration
+// file is present.
+if ("admittedSources" in aggregateSimilaritySources([], 1)) {
+  throw new Error(
+    "evaluate-similarity-final-test is a historical calibration-v8 evaluator and lib/similarity-core.ts implements "
+    + "the calibration-v9 aggregation; its numbers would be neither. The sealed cohort was not read.",
+  );
+}
+
 if (existsSync(OUTPUT_PATH)) throw new Error(`The sealed evaluation has already been opened: ${OUTPUT_PATH}`);
 
 const manifest = JSON.parse(readFileSync(MANIFEST_PATH, "utf8")) as SealedDocument[];
