@@ -701,12 +701,14 @@ test("matcher version: a snapshot written by the v1 matcher is never reused — 
   // inside the digested thresholds object too, so the bump moves both the
   // label segment and the cfg digest.
   const V1_TAG = "user-submission-match-v1+pos.raw-token-v1+cfg.f371a81a8c59";
-  // ...and the tag the v2 matcher (91b67ee, f046e24) wrote.
+  // ...the tag the v2 matcher (91b67ee, f046e24) wrote, and the v3 one (6f121db).
   const V2_TAG = "user-submission-match-v2+pos.raw-token-v1+cfg.bfa3e3fa3030";
-  assert.equal(USER_SUBMISSION_MATCHER_VERSION, "user-submission-match-v3");
-  assert.match(SNAPSHOT_MATCHER_VERSION, /^user-submission-match-v3\+pos\.raw-token-v1\+cfg\.[0-9a-f]{12}$/);
+  const V3_TAG = "user-submission-match-v3+pos.raw-token-v1+cfg.b4a070c32bed";
+  assert.equal(USER_SUBMISSION_MATCHER_VERSION, "user-submission-match-v4");
+  assert.match(SNAPSHOT_MATCHER_VERSION, /^user-submission-match-v4\+pos\.raw-token-v1\+cfg\.[0-9a-f]{12}$/);
   assert.notEqual(SNAPSHOT_MATCHER_VERSION, V1_TAG);
   assert.notEqual(SNAPSHOT_MATCHER_VERSION, V2_TAG);
+  assert.notEqual(SNAPSHOT_MATCHER_VERSION, V3_TAG);
 
   const corpus = await freshCorpus();
   const { client } = corpus;
@@ -818,16 +820,23 @@ test("matcher version: a snapshot written by the v1 matcher is never reused — 
     assert.equal(again.matcherVersion, SNAPSHOT_MATCHER_VERSION);
     assert.equal(again.computedAt, String(healedRow.computed_at), "a version-current snapshot is a cache hit");
 
-    // 5. A row the v2 matcher wrote fails the identity the same way and is recomputed under v3.
-    await client.execute({
-      sql: "UPDATE report_historical_match_snapshots SET matcher_version = ?, computed_at = ? WHERE report_device_key = ? AND report_id = ?",
-      args: [V2_TAG, storedComputedAt, report.reportDeviceKey, report.reportId],
-    });
-    assert.equal(await isHistoricalMatchSnapshotCurrent(client, report), false, "a v2-tagged snapshot fails the matcher-version identity");
-    const fromV2 = await getOrComputeHistoricalMatchSnapshot(client, { ...report, accountId: SUBMITTER, rawText: SUBMISSION, excludeAccountId: SUBMITTER });
-    assert.equal(fromV2.matcherVersion, SNAPSHOT_MATCHER_VERSION);
-    assert.notEqual(fromV2.computedAt, storedComputedAt, "recomputed, not reused");
-    assert.equal((await snapshotRow()).matcher_version, SNAPSHOT_MATCHER_VERSION);
+    // 5. Rows the v2 and v3 matchers wrote fail the identity the same way: a
+    //    plain reopen still returns them as stored, and a write-capable
+    //    resolution recomputes them under the current matcher.
+    for (const [tag, label] of [[V2_TAG, "v2"], [V3_TAG, "v3"]]) {
+      await client.execute({
+        sql: "UPDATE report_historical_match_snapshots SET matcher_version = ?, computed_at = ? WHERE report_device_key = ? AND report_id = ?",
+        args: [tag, storedComputedAt, report.reportDeviceKey, report.reportId],
+      });
+      assert.equal(await isHistoricalMatchSnapshotCurrent(client, report), false, `a ${label}-tagged snapshot fails the matcher-version identity`);
+      const reopenedOld = await getPersistedHistoricalMatchSnapshot(client, report);
+      assert.equal(reopenedOld.matcherVersion, tag, `a plain reopen returns the ${label} row as stored`);
+      assert.equal((await snapshotRow()).computed_at, storedComputedAt, "and writes nothing");
+      const recomputed = await getOrComputeHistoricalMatchSnapshot(client, { ...report, accountId: SUBMITTER, rawText: SUBMISSION, excludeAccountId: SUBMITTER });
+      assert.equal(recomputed.matcherVersion, SNAPSHOT_MATCHER_VERSION);
+      assert.notEqual(recomputed.computedAt, storedComputedAt, `${label}: recomputed, not reused`);
+      assert.equal((await snapshotRow()).matcher_version, SNAPSHOT_MATCHER_VERSION);
+    }
   } finally { corpus.close(); }
 });
 

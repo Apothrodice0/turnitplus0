@@ -231,9 +231,12 @@ export type UserSubmissionMatchConfig = {
 // search are resolved from their own posting lists (COMMON BLOCKS in
 // matchAgainstUserSubmissionCorpus's comment). A v2 result can be missing a
 // block held by more than maxCandidateShingleDocumentFrequency documents.
+// v4: a holder the caller excludes after matching (same-device SELF) no longer
+// settles a common block, so the walk goes on to a holder that counts. A v3
+// result can have let such a holder stand for the block alone.
 // USER_SUBMISSION_MATCH_THRESHOLDS is unchanged, so the label is the only
 // thing that tells these generations apart.
-export const USER_SUBMISSION_MATCHER_VERSION = "user-submission-match-v3";
+export const USER_SUBMISSION_MATCHER_VERSION = "user-submission-match-v4";
 
 /**
  * Default UserSubmissionMatchConfig.candidatePageSize. One page is one run
@@ -481,6 +484,8 @@ export type UserSubmissionMatchDiagnostics = {
   commonBlockPostingRowsExamined: number;
   /** Scoring sources verified through common-block resolution. */
   commonBlockSourcesVerified: number;
+  /** Verified scoring sources reaching into a common block that params.excludedAfterMatching said will not count, so they settled nothing. */
+  commonBlockHoldersExcludedAfterMatching: number;
 };
 
 function mergeConfig(overrides?: Partial<UserSubmissionMatchConfig>): UserSubmissionMatchConfig {
@@ -660,7 +665,11 @@ function isScoringRelationship(relationshipType: RelationshipType): boolean {
  * credits all of it — the union counts a position once however many
  * documents hold it — so a block held by 51 or 5,000 documents costs about
  * one posting page and one comparison. SELF and UNKNOWN_RELATIONSHIP holders
- * never cover a block. A document met in the walk earns positions only by
+ * never cover a block, and neither does a scoring source the caller will
+ * still exclude from the score after matching (params.excludedAfterMatching —
+ * same-device SELF): it is verified and returned as usual, but the walk goes
+ * on to the next holder, so a same-device copy can never stand in for an
+ * eligible one. A document met in the walk earns positions only by
  * verifying, exactly as a searched candidate does. What this does not
  * restore: overlap a holder has OUTSIDE the block, when that holder is not
  * otherwise discoverable and was not the one that covered the block.
@@ -669,8 +678,9 @@ function isScoringRelationship(relationshipType: RelationshipType): boolean {
  * sharing at least candidateShingleThreshold searched shingles, plus every
  * common block resolved). `partial: true` is returned whenever a scoring
  * candidate that was discovered could NOT be verified: the time budget ran
- * out (in the search or while resolving a common block), a discovery query
- * failed, or the candidate is over maxCandidateWordCount and was skipped. The
+ * out (in the search or while resolving a common block), a discovery query or
+ * the excludedAfterMatching check failed, or the candidate is over
+ * maxCandidateWordCount and was skipped. The
  * SELF/UNKNOWN budget never sets it — those candidates cannot change the
  * score. params.diagnostics records the stop reason and counts.
  */
@@ -723,6 +733,16 @@ export async function matchAgainstUserSubmissionCorpus(
     maturityCutoff?: string;
     /** Fallback logical clock when no explicit maturityCutoff is threaded in. Tests inject/freeze it; production leaves it undefined (=> server time). */
     asOf?: Date;
+    /**
+     * True for a verified scoring match the caller will still exclude from the
+     * score after matching — lib/report-primary-similarity.ts passes the
+     * same-device SELF rule here. Asked only about a match that reaches into
+     * a common block, before that match may settle the block (COMMON BLOCKS
+     * in this function's comment); the match itself is returned unchanged
+     * either way. Bounded like a discovery query; a failure stops the pass
+     * as partial. Omitted => every verified scoring match counts.
+     */
+    excludedAfterMatching?: (match: UserSubmissionMatch) => Promise<boolean>;
     /** Developer/test diagnostics sink — populated in place, never returned. See UserSubmissionMatchDiagnostics. */
     diagnostics?: Partial<UserSubmissionMatchDiagnostics>;
   },
@@ -748,9 +768,9 @@ export async function matchAgainstUserSubmissionCorpus(
 
   const matches: UserSubmissionMatch[] = [];
   const examined = new Set<string>();
-  // Submission positions already credited by a verified SCORING source —
-  // read the same way lib/unified-similarity.ts reads a match (its passages,
-  // or the whole submission for an exact canonical match).
+  // Submission positions already credited by a verified SCORING source that
+  // will count — read the same way lib/unified-similarity.ts reads a match
+  // (its passages, or the whole submission for an exact canonical match).
   const scoringCovered = new Set<number>();
   const creditCoverage = (match: UserSubmissionMatch) => {
     if (match.passages.length > 0) {
@@ -759,6 +779,10 @@ export async function matchAgainstUserSubmissionCorpus(
       for (let p = 0; p < queryWordCount; p += 1) scoringCovered.add(p);
     }
   };
+  // Scoring matches the search verified, not yet credited: whether one counts
+  // is asked (params.excludedAfterMatching) only where a common block needs it.
+  const unsettledScoringMatches: UserSubmissionMatch[] = [];
+  let commonBlockHoldersExcludedAfterMatching = 0;
   let verifiedScoringSources = 0;
   let oversizedScoringCandidatesSkipped = 0;
   let nonScoringAttemptCount = 0;
@@ -989,7 +1013,7 @@ export async function matchAgainstUserSubmissionCorpus(
       // and the next candidate is read.
       if (match && scoring) {
         verifiedScoringSources += 1;
-        creditCoverage(match);
+        unsettledScoringMatches.push(match);
       }
     }
 
@@ -1013,7 +1037,66 @@ export async function matchAgainstUserSubmissionCorpus(
     commonBlockRuns = runs.length;
     const isCovered = (positions: readonly number[]) => positions.every((p) => scoringCovered.has(p));
 
+    // A verified scoring match covers a block only once it is known to count:
+    // a source excluded after matching (same-device SELF) leaves the block to
+    // the next holder. Asked once per source; when the answer cannot be had
+    // in time, the pass stops as partial rather than assume either way.
+    const counts = new Map<string, boolean>();
+    const settle = async (match: UserSubmissionMatch): Promise<void> => {
+      let matchCounts = counts.get(match.matchedRepresentationId);
+      if (matchCounts === undefined) {
+        if (params.excludedAfterMatching) {
+          if (Date.now() >= deadline) {
+            timedOut = true;
+            stopReason = "TIME_BUDGET";
+            stopped = true;
+            return;
+          }
+          try {
+            matchCounts = !(await withTimeout(
+              params.excludedAfterMatching(match),
+              Math.max(1, Math.min(config.dbQueryTimeoutMs, deadline - Date.now())),
+              "excludedAfterMatching",
+            ));
+          } catch {
+            timedOut = true;
+            stopReason = "QUERY_FAILED";
+            stopped = true;
+            return;
+          }
+        } else {
+          matchCounts = true;
+        }
+        counts.set(match.matchedRepresentationId, matchCounts);
+        if (!matchCounts) commonBlockHoldersExcludedAfterMatching += 1;
+      }
+      if (matchCounts) creditCoverage(match);
+    };
+    const reaches = (match: UserSubmissionMatch, positions: ReadonlySet<number>) =>
+      match.passages.length > 0
+        ? match.passages.some((passage) => {
+            for (let p = passage.submittedWordStart; p <= passage.submittedWordEnd; p += 1) if (positions.has(p)) return true;
+            return false;
+          })
+        : match.matchType === "EXACT_CANONICAL_MATCH";
+    // Settles, in verification order, the search's matches that reach into
+    // these positions, until they are covered.
+    const settleSearchMatches = async (positions: readonly number[]) => {
+      const wanted = new Set(positions);
+      for (let i = 0; i < unsettledScoringMatches.length && !stopped && !isCovered(positions); ) {
+        const match = unsettledScoringMatches[i];
+        if (!reaches(match, wanted)) {
+          i += 1;
+          continue;
+        }
+        unsettledScoringMatches.splice(i, 1);
+        await settle(match);
+      }
+    };
+
     for (const run of runs) {
+      if (stopped) break;
+      await settleSearchMatches(run.positions);
       if (stopped) break;
       if (isCovered(run.positions)) continue;
       const anchorsTried = new Set<string>();
@@ -1096,8 +1179,8 @@ export async function matchAgainstUserSubmissionCorpus(
               if (match) {
                 verifiedScoringSources += 1;
                 commonBlockSourcesVerified += 1;
-                creditCoverage(match);
-                if (isCovered(anchor.positions)) break;
+                await settle(match);
+                if (stopped || isCovered(anchor.positions)) break;
               }
             }
           }
@@ -1131,6 +1214,7 @@ export async function matchAgainstUserSubmissionCorpus(
       commonBlockRunsRecovered,
       commonBlockPostingRowsExamined,
       commonBlockSourcesVerified,
+      commonBlockHoldersExcludedAfterMatching,
     } satisfies UserSubmissionMatchDiagnostics);
   }
 

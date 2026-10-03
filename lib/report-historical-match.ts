@@ -4,7 +4,7 @@ import { canonicalizeText } from "./canonical-text";
 import { mapCanonicalTokensToRawTokens, projectCanonicalPassagesToRaw } from "./canonical-token-position-map";
 import type { ScoringNormalizationVersion } from "./similarity-core";
 import { runWithScoringNormalization } from "./scoring-normalization-scope";
-import { matchAgainstUserSubmissionCorpus, isCorpusSourceMatchingEnabled, USER_SUBMISSION_MATCHER_VERSION, USER_SUBMISSION_MATCH_THRESHOLDS } from "./user-submission-matching";
+import { matchAgainstUserSubmissionCorpus, isCorpusSourceMatchingEnabled, USER_SUBMISSION_MATCHER_VERSION, USER_SUBMISSION_MATCH_THRESHOLDS, type UserSubmissionMatch } from "./user-submission-matching";
 import {
   CORPUS_FINGERPRINT_VERSION,
   CANONICALIZATION_VERSION,
@@ -566,6 +566,12 @@ export async function getOrComputeHistoricalMatchSnapshot(
      * rule an unstamped report follows.
      */
     scoringNormalizationVersion?: ScoringNormalizationVersion;
+    /**
+     * Passed straight through to matchAgainstUserSubmissionCorpus — see its
+     * own excludedAfterMatching comment. lib/report-primary-similarity.ts
+     * passes the same-device SELF rule; omitted by direct test callers.
+     */
+    excludedAfterMatching?: (match: UserSubmissionMatch) => Promise<boolean>;
   },
 ): Promise<ReportHistoricalSubmissionMatch> {
   const scoringNormalizationVersion: ScoringNormalizationVersion = params.scoringNormalizationVersion === 2 ? 2 : 1;
@@ -663,6 +669,7 @@ export async function getOrComputeHistoricalMatchSnapshot(
       corpusSourceMatchingEnabled: corpusSourceMatchingEnabledAtComputation,
       // Phase A: the SAME cutoff the maturity-crossing cache check above uses.
       maturityCutoff,
+      excludedAfterMatching: params.excludedAfterMatching,
     }));
     isPartial = matchResult.partial === true;
     if (matchResult.status === "MATCHED") {

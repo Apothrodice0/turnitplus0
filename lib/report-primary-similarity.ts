@@ -158,6 +158,75 @@ type ResolvedDeviceSelf = {
   guard: DeviceSelfSharedGuardResult | null;
 };
 
+/** The report-side inputs of the same-device SELF rule, read once per resolution. */
+type DeviceSelfReportContext = {
+  /** The report's verified upload Device Passport, or null (then nothing is ever an effective SELF). */
+  passportId: string | null;
+  documentIdentityId: string | null;
+  canonicalSha256: string;
+};
+
+/** What the rule reads of one historical match. */
+type DeviceSelfMatchFacts = { matchedRepresentationId: string; relationshipType: string; matchType: string };
+
+async function resolveDeviceSelfReportContext(
+  client: Client,
+  params: { reportDeviceKey: string; reportId: string; rawText: string; verifiedDevicePassportIdOverride: string | null | undefined },
+): Promise<DeviceSelfReportContext> {
+  if (params.verifiedDevicePassportIdOverride !== undefined) {
+    // First-save POST: the row and its document identity are written after
+    // this call, and the report's own submission is not yet an admission
+    // backing — nothing of its own to exclude.
+    return { passportId: params.verifiedDevicePassportIdOverride, documentIdentityId: null, canonicalSha256: safeCanonicalSha256(params.rawText) };
+  }
+  const row = await client.execute({
+    sql: `SELECT verified_device_passport_id, document_identity_id FROM saved_reports WHERE device_key = ? AND id = ?`,
+    args: [params.reportDeviceKey, params.reportId],
+  });
+  const provenance = row.rows[0] as unknown as ReportDeviceProvenanceRow | undefined;
+  return {
+    passportId: provenance?.verified_device_passport_id ?? null,
+    documentIdentityId: provenance?.document_identity_id ?? null,
+    canonicalSha256: safeCanonicalSha256(params.rawText),
+  };
+}
+
+/**
+ * The same-device SELF rule for ONE historical match: a production-counted
+ * EXACT_CANONICAL_MATCH or STRONG_TEXT_MATCH backed by the report's own
+ * verified passport with zero independent backing
+ * (lib/device-self-scoring-rule.ts). One provenance query, and only for a
+ * match that can qualify at all.
+ */
+async function isEffectiveDeviceSelfMatch(
+  client: Client,
+  match: DeviceSelfMatchFacts,
+  context: DeviceSelfReportContext,
+  accountId: string | null,
+): Promise<boolean> {
+  // Condition 3 of the rule: the target report must carry a verified
+  // cryptographic Device Passport.
+  if (!context.passportId) return false;
+  // Cheap pre-filter — only a production-counted source whose matchType is
+  // an EXACT_CANONICAL_MATCH or a STRONG_TEXT_MATCH can ever qualify, so
+  // skip the provenance query for anything else.
+  if (!productionCountsRelationship(match.relationshipType)) return false;
+  if (!isDeviceSelfEligibleMatchType(match.matchType)) return false;
+  const provenance = await summarizeSubmissionProvenance(client, match.matchedRepresentationId, {
+    accountId,
+    excludeDocumentIdentityId: context.documentIdentityId,
+    reportVerifiedDevicePassportId: context.passportId,
+    reportCanonicalSha256: context.canonicalSha256,
+    reportDocumentIdentityId: context.documentIdentityId,
+  });
+  return classifyDeviceSelfMatch({
+    relationshipType: match.relationshipType,
+    matchType: match.matchType,
+    sameVerifiedDeviceBacking: provenance.sameVerifiedDeviceBacking,
+    independentBackingCount: provenance.independentBackingCount,
+  }).isEffectiveDeviceSelf;
+}
+
 /**
  * Resolves — from the report's OWN immutable verified upload Device Passport
  * plus the deterministic per-backing provenance evidence (never from
@@ -204,29 +273,13 @@ async function resolveEffectiveDeviceSelfRepresentationIds(
     const matches = params.historicalSubmissionMatch.matches ?? [];
     if (matches.length === 0) return { representationIds: [], guard: guardNotApplied(sharedGuardEnabled) };
 
-    let reportPassportId: string | null;
-    let reportDocumentIdentityId: string | null;
-    if (params.verifiedDevicePassportIdOverride !== undefined) {
-      reportPassportId = params.verifiedDevicePassportIdOverride;
-      // First-save POST: the row and its document identity are written after
-      // this call, and the report's own submission is not yet an admission
-      // backing — nothing of its own to exclude.
-      reportDocumentIdentityId = null;
-    } else {
-      const row = await client.execute({
-        sql: `SELECT verified_device_passport_id, document_identity_id FROM saved_reports WHERE device_key = ? AND id = ?`,
-        args: [params.reportDeviceKey, params.reportId],
-      });
-      const provenance = row.rows[0] as unknown as ReportDeviceProvenanceRow | undefined;
-      reportPassportId = provenance?.verified_device_passport_id ?? null;
-      reportDocumentIdentityId = provenance?.document_identity_id ?? null;
-    }
+    const context = await resolveDeviceSelfReportContext(client, params);
+    const reportPassportId = context.passportId;
 
     // Condition 3 of the rule: the target report must carry a verified
     // cryptographic Device Passport. No passport -> current scoring, unchanged.
     if (!reportPassportId) return { representationIds: [], guard: guardNotApplied(sharedGuardEnabled) };
 
-    const reportCanonicalSha256 = safeCanonicalSha256(params.rawText);
     // Every production-counted match is classified — there is deliberately no
     // ceiling on how many. The matcher returns ALL verified scoring sources
     // (lib/user-submission-matching.ts's CANDIDATE BUDGET), and each of them
@@ -242,27 +295,7 @@ async function resolveEffectiveDeviceSelfRepresentationIds(
     for (const match of matches) {
       if (seen.has(match.matchedRepresentationId)) continue;
       seen.add(match.matchedRepresentationId);
-
-      // Cheap pre-filter — only a production-counted source whose matchType is
-      // an EXACT_CANONICAL_MATCH or a STRONG_TEXT_MATCH can ever qualify, so
-      // skip the provenance query for anything else.
-      if (!productionCountsRelationship(match.relationshipType)) continue;
-      if (!isDeviceSelfEligibleMatchType(match.matchType)) continue;
-
-      const provenance = await summarizeSubmissionProvenance(client, match.matchedRepresentationId, {
-        accountId: params.accountId,
-        excludeDocumentIdentityId: reportDocumentIdentityId,
-        reportVerifiedDevicePassportId: reportPassportId,
-        reportCanonicalSha256,
-        reportDocumentIdentityId,
-      });
-      const classification = classifyDeviceSelfMatch({
-        relationshipType: match.relationshipType,
-        matchType: match.matchType,
-        sameVerifiedDeviceBacking: provenance.sameVerifiedDeviceBacking,
-        independentBackingCount: provenance.independentBackingCount,
-      });
-      if (classification.isEffectiveDeviceSelf) baselineEffective.push(match.matchedRepresentationId);
+      if (await isEffectiveDeviceSelfMatch(client, match, context, params.accountId)) baselineEffective.push(match.matchedRepresentationId);
     }
 
     // Guard OFF (the production default while DEVICE_PASSPORT_SELF_ENABLED is
@@ -359,8 +392,10 @@ export async function resolvePrimarySimilaritySummary(
      * freshly-verified passport from THIS POST /api/reports first-save request,
      * whose saved_reports row does not exist yet — passing it here is what
      * lets the FIRST persisted score already reflect the same-device SELF
-     * downgrade, with no second POST or GET. Ignored entirely when the flag is
-     * off (not even read).
+     * downgrade, with no second POST or GET. With the flag off it is never
+     * used for scoring; it is still read, lazily, when the matcher asks
+     * whether a source covering a common block is same-device (see
+     * excludedAfterMatching in this function's body).
      */
     verifiedDevicePassportId?: string | null;
     /** Test-only override, mirroring getOrComputeHistoricalMatchSnapshot's own testOnlyPauseBeforeWrite convention — lets a test force the "unified matching genuinely failed" branch without fighting computeUnifiedSimilarity's own deliberately defensive, never-throws-on-malformed-input contract. Always undefined in production. */
@@ -422,6 +457,8 @@ async function resolvePrimarySimilaritySummaryUnderContract(
   // used solely as a SQL comparison value, never appears in anything this
   // function (or any of its callers) returns.
   const excludeAccountId = params.accountId ?? undefined;
+  // Read at most once, and only if the matcher asks (excludedAfterMatching below).
+  let deviceSelfContext: Promise<DeviceSelfReportContext> | undefined;
   // Mandatory cross-account corpus lookup: this call is deliberately NOT
   // gated on users.corpus_reuse_consented_at (or any other per-account
   // preference) — every authenticated report performs this lookup, subject
@@ -453,12 +490,31 @@ async function resolvePrimarySimilaritySummaryUnderContract(
     // The snapshot is computed under, tagged with, and only ever reused for
     // the report's own contract.
     scoringNormalizationVersion,
+    // A source the same-device SELF rule below would take out of the score
+    // must not be the one that settles a common block in the matcher, or an
+    // eligible holder of the same block is never tried. Asked of the same
+    // rule, through the same code, but WHATEVER the SELF flag says: the
+    // snapshot is reused across flips of that flag (it is not part of
+    // snapshot currency), so its coverage has to hold for both states. With
+    // the flag off this only means a block such a source covers is also
+    // verified against the next holder; nothing is excluded.
+    excludedAfterMatching: async (match) => {
+      deviceSelfContext ??= resolveDeviceSelfReportContext(client, {
+        reportDeviceKey: params.reportDeviceKey,
+        reportId: params.reportId,
+        rawText: params.rawText,
+        verifiedDevicePassportIdOverride: params.verifiedDevicePassportId,
+      });
+      return isEffectiveDeviceSelfMatch(client, match, await deviceSelfContext, params.accountId);
+    },
   });
 
   // Preview-gated same-device SELF rule (flag DEVICE_PASSPORT_SELF_ENABLED —
-  // OFF by default). Triple-gated so an off flag is a byte-identical no-op
-  // with NOT ONE extra query: the flag, a real MATCHED result, and at least
-  // one match. Never re-runs the matcher or mutates the historical-match
+  // OFF by default). Triple-gated so an off flag excludes nothing and runs
+  // none of this resolution's queries: the flag, a real MATCHED result, and
+  // at least one match. (The matcher's common-block coverage check above is
+  // the rule's one flag-independent use, and it never excludes anything.)
+  // Never re-runs the matcher or mutates the historical-match
   // snapshot; only decides which counted representations
   // computeUnifiedSimilarity should treat as an EFFECTIVE SELF for the score.
   let effectiveDeviceSelfRepresentationIds: string[] = [];
