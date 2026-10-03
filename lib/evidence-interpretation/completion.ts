@@ -27,6 +27,17 @@ export type SelectiveCorpusBranchState = "COMPLETED" | "PARTIAL" | "DISABLED" | 
  *  text (the report is still produced; this contributes a PARTIAL completion). */
 export type UserSuppliedReferenceBranchState = "COMPLETE" | "PARTIAL" | null;
 
+/** The previous-submission (TurnitPlus corpus) check's own state.
+ *  null = the check did not run for this report, or its outcome is unknown.
+ *  "COMPLETE" = every discovered candidate that could score was examined —
+ *  including when nothing matched, or when every match was the author's own
+ *  (SELF) or of unknown ownership: those are correct exclusions, not gaps.
+ *  "PARTIAL" = a candidate that could have scored was discovered but never
+ *  verified (time budget, failed candidate query, over-size document), or the
+ *  check itself failed. The similarity shown is then a lower bound.
+ *  See lib/report-evidence-interpretation.ts's priorSubmissionBranchState. */
+export type PriorSubmissionBranchState = "COMPLETE" | "PARTIAL" | null;
+
 export type ReportCompletion = {
   state: ReportCompletionState;
   /** short line for the top of the report. */
@@ -43,6 +54,9 @@ export type ReportCompletion = {
     unverifiedCandidateCount: number;
     /** USER-SUPPLIED REFERENCES V1 — null when no reference files were supplied. */
     userSuppliedReference: UserSuppliedReferenceBranchState;
+    /** The previous-submission check. Absent on every report saved before this
+     *  signal existed — read as null (unknown), never inferred. */
+    priorSubmission?: PriorSubmissionBranchState;
   };
 };
 
@@ -54,6 +68,8 @@ export type ResolveReportCompletionInput = {
   /** USER-SUPPLIED REFERENCES V1 — the reference-file channel state, or null when
    *  no reference files were supplied (channel ABSENT — never a failure). */
   userSuppliedReference?: UserSuppliedReferenceBranchState;
+  /** The previous-submission check's state, or null when it did not run / is unknown. */
+  priorSubmission?: PriorSubmissionBranchState;
   /** for the PARTIAL/SOURCE_UNAVAILABLE detail sentence. */
   verifiedSimilarityPercent?: number;
 };
@@ -71,6 +87,7 @@ export function resolveReportCompletion(input: ResolveReportCompletionInput): Re
   const extraction: ReportExtractionCompleteness = input.extraction?.completeness ?? "UNKNOWN";
   const unverifiedCandidateCount = Math.max(0, input.unverifiedCandidateCount ?? 0);
   const userSuppliedReference: UserSuppliedReferenceBranchState = input.userSuppliedReference ?? null;
+  const priorSubmission: PriorSubmissionBranchState = input.priorSubmission ?? null;
   const pct = input.verifiedSimilarityPercent;
 
   const reasons: string[] = [];
@@ -79,6 +96,7 @@ export function resolveReportCompletion(input: ResolveReportCompletionInput): Re
   if (selectiveCorpus === "PARTIAL") reasons.push("part of the TurnitPlus reference index was unavailable at search time");
   if (selectiveCorpus === "UNAVAILABLE") reasons.push("the TurnitPlus reference index could not be loaded");
   if (userSuppliedReference === "PARTIAL") reasons.push("one or more supplied reference files could not be read");
+  if (priorSubmission === "PARTIAL") reasons.push("the previous-submission check could not examine every candidate");
   if (unverifiedCandidateCount > 0) {
     reasons.push(`${unverifiedCandidateCount} candidate source${unverifiedCandidateCount === 1 ? "" : "s"} could not be text-verified`);
   }
@@ -89,7 +107,8 @@ export function resolveReportCompletion(input: ResolveReportCompletionInput): Re
     academicSearch === "FAILED" ||
     selectiveCorpus === "PARTIAL" ||
     selectiveCorpus === "UNAVAILABLE" ||
-    userSuppliedReference === "PARTIAL"
+    userSuppliedReference === "PARTIAL" ||
+    priorSubmission === "PARTIAL"
   ) state = "PARTIAL";
   else if (unverifiedCandidateCount > 0) state = "SOURCE_UNAVAILABLE";
 
@@ -113,6 +132,6 @@ export function resolveReportCompletion(input: ResolveReportCompletionInput): Re
     headline: HEADLINE[state],
     detail,
     reasons,
-    signals: { academicSearch, selectiveCorpus, extraction, unverifiedCandidateCount, userSuppliedReference },
+    signals: { academicSearch, selectiveCorpus, extraction, unverifiedCandidateCount, userSuppliedReference, priorSubmission },
   };
 }

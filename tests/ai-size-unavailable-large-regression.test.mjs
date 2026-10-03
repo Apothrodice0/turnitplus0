@@ -216,7 +216,12 @@ test("REGRESSION DENSE ~1M: a dense-evidence report inside the production matche
     const fullBefore = await fetchRemoteReport(id);
     const matched = fullBefore.unifiedSimilarity.matchedPositions?.length ?? 0;
     assert.ok(matched > 10_000, `dense evidence: ${matched} matched positions`);
-    assert.equal(fullBefore.reportCompletion?.state, "COMPLETED");
+    // The prior-submission check is wall-clock budgeted too (see below), and on this ~1M manuscript it can stop before every
+    // candidate is verified; the completion state then says so (PARTIAL, priorSubmission PARTIAL) and nothing else is affected.
+    assert.equal(
+      fullBefore.reportCompletion?.state,
+      fullBefore.reportCompletion?.signals?.priorSubmission === "PARTIAL" ? "PARTIAL" : "COMPLETED",
+    );
     assert.ok(first.chars > 1_500_000, `the persisted report is dominated by evidence (${first.chars}, ${(first.chars / MAX * 100).toFixed(1)} % of the ceiling)`);
     assert.ok(first.chars <= MAX - unavailable.TERMINAL_AI_RESERVE_CHARS);
 

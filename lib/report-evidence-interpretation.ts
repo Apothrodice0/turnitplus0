@@ -15,6 +15,7 @@ import {
   compactEvidenceInterpretationForPersistence,
   type PersistedEvidenceInterpretation,
 } from "@/lib/evidence-interpretation/persistence";
+import type { PriorSubmissionBranchState } from "@/lib/evidence-interpretation/completion";
 import { MAX_REPORT_SAVE_REQUEST_BYTES } from "@/lib/report-transport-limits";
 import { resolveCompactPersistenceWrites } from "@/lib/report-compact-persistence-flag";
 
@@ -68,8 +69,10 @@ export function stripClientEvidenceInterpretation<T extends Partial<SimilarityRe
 
 export type ReportEvidenceInterpretationWiringOptions = {
   /** admin-gated on the ordinary GET — a server caller that still has it passes
-   *  it. Same-work is dormant regardless, so this only affects nothing today,
-   *  but it is threaded for the future explicit-version signal. */
+   *  it (the write-time finalization passes the one the final score was
+   *  resolved with). It decides reportCompletion's priorSubmission signal (see
+   *  priorSubmissionBranchState); same-work is dormant regardless. Absent ->
+   *  priorSubmission null: the check is not claimed either way. */
   historicalSubmissionMatch?: ReportHistoricalSubmissionMatch | null;
   /** Selective Corpus branch state — pass `null` (the default) when that branch
    *  did NOT run as a report search (it is a flag-OFF shadow today). Pass
@@ -145,6 +148,30 @@ function admittedImportedSimilaritySources(
 }
 
 /**
+ * reportCompletion's priorSubmission signal, read off the historical match the
+ * final score was resolved with — status propagation only, nothing re-derived:
+ *   - `partial: true` -> "PARTIAL". lib/user-submission-matching.ts sets it
+ *     exactly when a discovered candidate that could have scored went
+ *     unverified (time budget, failed candidate query, over-size document); a
+ *     SELF or UNKNOWN_RELATIONSHIP match, a capped display list, or a source
+ *     excluded by ownership never sets it.
+ *   - status UNAVAILABLE (the check itself failed and was stored as FAILED)
+ *     -> "PARTIAL": nothing from this channel is in the score, the same way a
+ *     failed academic search makes the report PARTIAL.
+ *   - any other result -> "COMPLETE", including no match at all.
+ *   - no historical match supplied -> null: the check is not claimed to have
+ *     run (a client-side or pending save).
+ */
+export function priorSubmissionBranchState(
+  historicalSubmissionMatch: ReportHistoricalSubmissionMatch | null | undefined,
+): PriorSubmissionBranchState {
+  if (!historicalSubmissionMatch) return null;
+  if (historicalSubmissionMatch.partial === true) return "PARTIAL";
+  if (historicalSubmissionMatch.status === "UNAVAILABLE") return "PARTIAL";
+  return "COMPLETE";
+}
+
+/**
  * Returns a shallow copy of `report` with `evidenceInterpretation`,
  * `reportCompletion` and `extractionDiagnostic` set from server-known evidence.
  * Any pre-existing (client) value is replaced.
@@ -183,6 +210,7 @@ export function withEvidenceInterpretation<T extends SimilarityReport>(
     extraction: extractionDiagnostic,
     unverifiedCandidateCount: opts.unverifiedCandidateCount ?? 0,
     userSuppliedReference: referenceChannel ? referenceChannel.state : null,
+    priorSubmission: priorSubmissionBranchState(opts.historicalSubmissionMatch),
     verifiedSimilarityPercent: primarySimilarityScore(report),
   });
 
@@ -335,10 +363,11 @@ export function buildFinalizedReportEvidenceInterpretation(
  * — so this reproduces exactly what a fresh withEvidenceInterpretation call
  * would have computed had the real terminal selectiveCorpusBranch been known
  * at save time, without re-deriving evidenceInterpretation or touching
- * anything score-related. unverifiedCandidateCount has no such primary field
- * on SimilarityReport (see ReportEvidenceInterpretationWiringOptions's own
- * comment on it), so it is the one signal carried forward from the already-
- * persisted reportCompletion.signals — the exact value that produced it.
+ * anything score-related. unverifiedCandidateCount and priorSubmission have no
+ * such primary field on SimilarityReport (the historical match is not part of
+ * the persisted report), so they are carried forward from the already-
+ * persisted reportCompletion.signals — the exact values that produced it. A
+ * report saved before priorSubmission existed carries none and stays null.
  *
  * No-op when there is no persisted reportCompletion to refresh (a pre-Report-V2
  * report), when the marker is absent (historical/non-authoritative — never
@@ -362,6 +391,7 @@ export function refreshSelectiveCorpusCompletionSignal(report: SimilarityReport)
     extraction: report.extractionDiagnostic ?? unknownExtractionDiagnostic(),
     unverifiedCandidateCount: report.reportCompletion.signals.unverifiedCandidateCount,
     userSuppliedReference: report.userSuppliedReferenceChannel ? report.userSuppliedReferenceChannel.state : null,
+    priorSubmission: report.reportCompletion.signals.priorSubmission ?? null,
     verifiedSimilarityPercent: primarySimilarityScore(report),
   });
 }
