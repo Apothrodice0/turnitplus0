@@ -10,6 +10,7 @@ import { canonicalSha256 } from "./document-identity";
 import { reportScoringNormalizationVersion, type ScoringNormalizationVersion } from "./similarity-core";
 import type { SimilarityReport } from "./report-types";
 import type { SelectiveCorpusShadowResult } from "./selective-corpus/types";
+import type { SelectiveCorpusIncompleteReason } from "./evidence-interpretation/completion";
 
 /**
  * Selective Corpus V4 AUTHORITATIVE PROMOTION — the canonical, single
@@ -40,6 +41,8 @@ export type SelectiveCorpusFinalizationEvidenceSelection = {
       }>
     | null;
   terminalStatus: SelectiveCorpusAuthoritativeTerminalStatus;
+  /** Why terminalStatus is "incomplete" (null for "completed") — persisted with it, surfaced only as a completion diagnostic. */
+  incompleteReason: SelectiveCorpusIncompleteReason | null;
 };
 
 /**
@@ -72,15 +75,15 @@ export function selectSelectiveCorpusFinalizationEvidence(
   };
 
   if (shadowResult.state === "COMPLETED") {
-    return { evidence: toEvidence(shadowResult.verifiedEvidence), terminalStatus: "completed" };
+    return { evidence: toEvidence(shadowResult.verifiedEvidence), terminalStatus: "completed", incompleteReason: null };
   }
   if (shadowResult.state === "PARTIAL") {
-    return { evidence: toEvidence(shadowResult.verifiedEvidence), terminalStatus: "incomplete" };
+    return { evidence: toEvidence(shadowResult.verifiedEvidence), terminalStatus: "incomplete", incompleteReason: "PARTIAL_INDEX" };
   }
   // TIMEOUT, ARTIFACT_UNAVAILABLE, FAILED, DISABLED (defensive — the two
   // callers of this module always pass requiredForAuthoritativePendingReport,
   // so a genuine DISABLED should never actually reach here in practice).
-  return { evidence: null, terminalStatus: "incomplete" };
+  return { evidence: null, terminalStatus: "incomplete", incompleteReason: shadowResult.state };
 }
 
 export type FinalizeSelectiveCorpusAuthoritativeReportParams = {
@@ -249,6 +252,7 @@ async function resolveAndPersist(
       corpusSourceMatchingEnabled: resolution.corpusSourceMatchingEnabled,
       corpusGeneration: resolution.corpusGeneration,
       terminalStatus: evidenceSelection.terminalStatus,
+      incompleteReason: evidenceSelection.incompleteReason,
       evidenceInterpretation: prepared.evidenceInterpretation,
       // R2 write gate: persist in the exact mode the size check above measured.
       compactWrites: prepared.compactWrites,
@@ -318,7 +322,7 @@ export async function finalizeSelectiveCorpusAuthoritativeReport(
       if (row.payload.selectiveCorpusAuthoritativeStatus !== "pending") {
         return { outcome: "not-pending" };
       }
-      const fallback = await resolveAndPersist(client, params, row, { evidence: null, terminalStatus: "incomplete" });
+      const fallback = await resolveAndPersist(client, params, row, { evidence: null, terminalStatus: "incomplete", incompleteReason: "FINALIZER_ERROR" });
       return fallback;
     } catch (fallbackErr) {
       console.error(

@@ -214,6 +214,30 @@ export type AcademicSearchRunStats = {
 export type AcademicSearchStatus = "COMPLETE_WITH_MATCHES" | "COMPLETE_NO_MATCHES" | "FAILED";
 
 /**
+ * Why a FAILED academic search failed — SCORE-NEUTRAL, diagnostics only (it
+ * feeds the report-completion diagnostics, never a score or matched position).
+ * FAILED used to be the only signal, so a total provider outage, a rate-limited
+ * request and a route timeout were indistinguishable on a saved report.
+ *
+ * Produced server-side, when the search pipeline itself ran:
+ *  - ALL_PROVIDER_CALLS_FAILED: every attempted (query, provider) call errored.
+ *  - SEARCH_PIPELINE_ERROR: the pipeline threw before a status was computed.
+ * Produced client-side, when /api/academic-evidence delivered no result:
+ *  - RATE_LIMITED (HTTP 429), ROUTE_TIMEOUT (HTTP 408/504), SERVER_ERROR (any
+ *    other 5xx), REQUEST_REJECTED (any other non-2xx), NETWORK_ERROR (the
+ *    request itself failed), MALFORMED_RESPONSE (a 2xx without a usable body).
+ */
+export type AcademicSearchFailureReason =
+  | "ALL_PROVIDER_CALLS_FAILED"
+  | "SEARCH_PIPELINE_ERROR"
+  | "RATE_LIMITED"
+  | "ROUTE_TIMEOUT"
+  | "SERVER_ERROR"
+  | "REQUEST_REJECTED"
+  | "NETWORK_ERROR"
+  | "MALFORMED_RESPONSE";
+
+/**
  * Developer-diagnostics addition: one entry per candidate orchestrator.ts
  * actually attempted text retrieval for (config.maxCandidatesToRetrieve of
  * them, in rank order) — recorded regardless of outcome, unlike `evidence`

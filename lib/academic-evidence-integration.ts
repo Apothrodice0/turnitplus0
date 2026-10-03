@@ -10,6 +10,7 @@ import { createEuropePmcAcademicSearchProvider } from "./academic-search/provide
 import { createOpenAireAcademicSearchProvider } from "./academic-search/providers/openaire";
 import type {
   AcademicSearchCandidate,
+  AcademicSearchFailureReason,
   AcademicSearchQuery,
   AcademicSearchRetrievalDiagnostic,
   AcademicSearchRunStats,
@@ -127,6 +128,8 @@ export type AcademicEvidenceResult = {
    * result."
    */
   status: AcademicSearchStatus;
+  /** Why `status` is FAILED (null otherwise) — the two FAILED sources above, kept apart. Diagnostics only. */
+  failureReason: AcademicSearchFailureReason | null;
   /**
    * Developer-diagnostics addition: the full ranked candidate list, every
    * generated query, and per-candidate retrieval/comparison detail —
@@ -188,6 +191,7 @@ export async function getExternalAcademicEvidence(
       evidence: result.evidence,
       stats: result.stats,
       status: result.status,
+      failureReason: result.status === "FAILED" ? "ALL_PROVIDER_CALLS_FAILED" : null,
       candidates: result.candidates,
       queries: result.queries,
       retrievalDiagnostics: result.retrievalDiagnostics,
@@ -197,6 +201,6 @@ export async function getExternalAcademicEvidence(
     // see e.g. lib/user-submission-corpus.ts's identical rule) — only the
     // error message, which describes the failure, not the document.
     console.error("getExternalAcademicEvidence failed (non-fatal):", error instanceof Error ? error.message : String(error));
-    return { evidence: [], stats: null, status: "FAILED", candidates: null, queries: null, retrievalDiagnostics: null };
+    return { evidence: [], stats: null, status: "FAILED", failureReason: "SEARCH_PIPELINE_ERROR", candidates: null, queries: null, retrievalDiagnostics: null };
   }
 }

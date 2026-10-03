@@ -216,7 +216,7 @@ test('unit: refreshSelectiveCorpusCompletionSignal upgrades to PARTIAL for incom
   refreshSelectiveCorpusCompletionSignal(report);
   assert.equal(report.reportCompletion.signals.selectiveCorpus, 'PARTIAL');
   assert.equal(report.reportCompletion.state, 'PARTIAL');
-  assert.match(report.reportCompletion.headline, /source searches were unavailable/i);
+  assert.match(report.reportCompletion.headline, /some sources were unavailable/i);
   assert.ok(report.reportCompletion.reasons.some((r) => /TurnitPlus reference index/.test(r)));
 });
 
@@ -291,7 +291,7 @@ test('3. incomplete report GET: resolved score present, internal fields not expo
   assert.ok(body.payload?.reportCompletion, 'reportCompletion is present');
   assert.equal(body.payload.reportCompletion.state, 'PARTIAL', 'the safe derived "some source checks incomplete" signal');
   assert.equal(body.payload.reportCompletion.signals.selectiveCorpus, 'PARTIAL');
-  assert.match(body.payload.reportCompletion.headline, /source searches were unavailable/i);
+  assert.match(body.payload.reportCompletion.headline, /some sources were unavailable/i);
   // neutral product language only — no internal enum/state-machine/digest/retry vocabulary leaked into the copy
   const raw = JSON.stringify(body.payload.reportCompletion);
   for (const forbidden of ['TIMEOUT', 'ARTIFACT_UNAVAILABLE', 'FAILED', 'claimedAt', 'digest', 'retry', 'recovery', 'sweep']) {

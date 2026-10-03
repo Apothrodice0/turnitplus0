@@ -138,7 +138,7 @@ const loadOwnedReport = cache(async (id: string): Promise<OwnedReportResult> => 
       // claim timestamp from this server-rendered first-paint payload — the
       // stored payload_json keeps them. See each function's own doc comment.
       refreshSelectiveCorpusCompletionSignal(payload);
-      stripServerInternalReportFields(payload);
+      stripServerInternalReportFields(payload, { viewerIsAdmin: sessionUser.role === "admin" });
       // Task A correction: the same explicit, unconditional authorization
       // signal app/api/reports/[id]/route.ts's GET handler sets for the
       // client-side background re-fetch — this is the server-rendered FIRST

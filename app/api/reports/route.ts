@@ -33,7 +33,7 @@ import { deleteHistoricalMatchSnapshot } from '../../../lib/report-historical-ma
 import { deleteReportDocumentData } from '../../../lib/report-deletion';
 import { resolvePrimarySimilaritySummary } from '../../../lib/report-primary-similarity';
 import { withEvidenceInterpretation, stripClientEvidenceInterpretation } from '../../../lib/report-evidence-interpretation';
-import { sanitizeExtractionDiagnostic } from '../../../lib/evidence-interpretation';
+import { sanitizeAcademicSearchFailureReason, sanitizeExtractionDiagnostic, sanitizeSelectiveCorpusIncompleteReason } from '../../../lib/evidence-interpretation';
 import { verifySuppliedReferences } from '../../../lib/user-supplied-references';
 import { sanitizeSuppliedReferenceInputs, admittedReferenceEvidenceForUnifiedSimilarity, resolveUserSuppliedReferenceEvidenceForSave } from '../../../lib/report-user-supplied-references';
 import { referenceTransportBudgetError } from '../../../lib/user-supplied-reference-constants';
@@ -629,6 +629,7 @@ export async function POST(request: Request) {
                      json_extract(payload_json, '$.text') AS persisted_manuscript_text,
                      json_extract(payload_json, '$.selectiveCorpusAuthoritativeStatus') AS selective_corpus_authoritative_status,
                      json_extract(payload_json, '$.selectiveCorpusAuthoritativeClaimedAt') AS selective_corpus_authoritative_claimed_at,
+                     json_extract(payload_json, '$.selectiveCorpusAuthoritativeIncompleteReason') AS selective_corpus_authoritative_incomplete_reason,
                      json_extract(payload_json, '$.scoringNormalizationVersion') AS scoring_normalization_version
               FROM saved_reports WHERE device_key = ? AND id = ?`,
         args: [deviceKey, id],
@@ -664,6 +665,9 @@ export async function POST(request: Request) {
       const persistedSelectiveCorpusAuthoritativeClaimedAt = typeof existingReportRow.rows[0]?.selective_corpus_authoritative_claimed_at === 'string'
         ? (existingReportRow.rows[0].selective_corpus_authoritative_claimed_at as string)
         : null;
+      const persistedSelectiveCorpusAuthoritativeIncompleteReason = sanitizeSelectiveCorpusIncompleteReason(
+        existingReportRow.rows[0]?.selective_corpus_authoritative_incomplete_reason,
+      );
       const persistedVerifiedAcademicDiagnosticsId = ((): number | null => {
         const v = existingReportRow.rows[0]?.verified_academic_diagnostics_id as number | bigint | null | undefined;
         if (typeof v === 'bigint') return Number(v);
@@ -1032,6 +1036,12 @@ export async function POST(request: Request) {
           unifiedSimilarityFailed: undefined,
           unifiedSimilarityGeneration: undefined,
           corpusSourceMatchingEnabledAtComputation: undefined,
+          // Score-neutral, browser-reported diagnostic (like academicEvidenceStatus
+          // itself): persisted only as a known code, and only beside the FAILED
+          // status it explains.
+          academicEvidenceFailureReason: reportPayload.academicEvidenceStatus === 'FAILED'
+            ? (sanitizeAcademicSearchFailureReason(reportPayload.academicEvidenceFailureReason) ?? undefined)
+            : undefined,
           // G2 TRUST BOUNDARY: `aiAnalysis.unavailableReason` ("AI unavailable for this document") records a size decision only the
           // server's AI-result route makes (lib/ai-unavailable-state.ts). A browser cannot declare it here either — whatever it
           // sent is dropped, everything else in `aiAnalysis` (including a validated compact table) is kept exactly as sent.
@@ -1046,6 +1056,12 @@ export async function POST(request: Request) {
           : {}),
         selectiveCorpusAuthoritativeStatus: selectiveCorpusAuthoritativeStatusToPersist,
         selectiveCorpusAuthoritativeClaimedAt: selectiveCorpusAuthoritativeClaimedAtToPersist,
+        // Same carry-forward as the status it explains: only the finalizer's
+        // terminal write sets it, so a first save never has one and a resave
+        // keeps the persisted value (a client-sent value is always overridden).
+        selectiveCorpusAuthoritativeIncompleteReason: isFirstSaveOfThisReport
+          ? undefined
+          : (persistedSelectiveCorpusAuthoritativeIncompleteReason ?? undefined),
       };
 
       // Device Passport (Phase 2/4): cryptographically verify an optional

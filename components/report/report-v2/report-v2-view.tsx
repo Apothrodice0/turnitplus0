@@ -25,9 +25,12 @@ import {
   paginateManuscriptText,
   resolveWorkspacePassageSelection,
   stepWorkspaceSelection,
+  UNCERTAIN_MATCH_LEGEND,
+  VERIFIED_MATCH_LEGEND,
   type ReportV2Filter,
   type ReportV2Passage,
   type ReportV2SourceCard,
+  type ReportV2UncertainPassage,
   type ReportV2ViewModel,
   type ReportV2WorkspaceSelection,
 } from "@/lib/report-v2-view";
@@ -93,7 +96,12 @@ function ConfidenceDots({ level, label }: { level: "high" | "medium" | "low"; la
 }
 
 // ── first screen ─────────────────────────────────────────────────────────
-function CompletionStrip({ vm }: { vm: ReportV2ViewModel }) {
+/**
+ * `showDiagnostics` (admin only — report.viewerIsAdmin) adds the exact
+ * machine-readable channel + reason behind a non-COMPLETED state; ordinary
+ * customers get the concise headline/detail only.
+ */
+function CompletionStrip({ vm, showDiagnostics = false }: { vm: ReportV2ViewModel; showDiagnostics?: boolean }) {
   const c = vm.summary.completion;
   const ok = c.state === "COMPLETED";
   return (
@@ -105,8 +113,27 @@ function CompletionStrip({ vm }: { vm: ReportV2ViewModel }) {
         <p className="rv2-completion-headline">{c.headline}</p>
         {c.detail && <p className="rv2-completion-detail">{c.detail}</p>}
         <p className="rv2-completion-scope">{c.scopeLine}</p>
+        {showDiagnostics && c.diagnostics.length > 0 && (
+          <ul className="rv2-completion-diagnostics" aria-label="Search diagnostics (admin)">
+            {c.diagnostics.map((d) => (
+              <li key={`${d.channel}-${d.reason}`}>
+                <code>{d.channel}</code> · <code>{d.reason}</code>
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
     </div>
+  );
+}
+
+/** Shown only when a report actually has possible (yellow) matches — a report without them renders exactly as before. */
+function MatchColorLegend() {
+  return (
+    <ul className="rv2-match-legend" aria-label="Highlight colors">
+      <li><i className="rv2-match-legend-swatch rv2-match-legend-verified" aria-hidden="true" />{VERIFIED_MATCH_LEGEND}</li>
+      <li><i className="rv2-match-legend-swatch rv2-match-legend-uncertain" aria-hidden="true" />{UNCERTAIN_MATCH_LEGEND}</li>
+    </ul>
   );
 }
 
@@ -183,7 +210,7 @@ function TopSources({ vm }: { vm: ReportV2ViewModel }) {
   );
 }
 
-function FirstScreen({ vm }: { vm: ReportV2ViewModel }) {
+function FirstScreen({ vm, showDiagnostics = false }: { vm: ReportV2ViewModel; showDiagnostics?: boolean }) {
   const { verifiedSimilarityPercent, matchedWordCount, totalWordCount, distinctVerifiedSources } = vm.summary;
   return (
     <div className="rv2-first-screen">
@@ -201,7 +228,7 @@ function FirstScreen({ vm }: { vm: ReportV2ViewModel }) {
           The share of your document that word-for-word matches a source we retrieved and checked. It is
           not a judgement about your work.
         </p>
-        <CompletionStrip vm={vm} />
+        <CompletionStrip vm={vm} showDiagnostics={showDiagnostics} />
       </section>
 
       <OverlapBreakdown vm={vm} />
@@ -493,7 +520,7 @@ export function ReportV2View({ report }: { report: SimilarityReport }) {
   if (!vm) return null;
   return (
     <div className="report-v2" data-interpretation-version={vm.interpretationVersion}>
-      <FirstScreen vm={vm} />
+      <FirstScreen vm={vm} showDiagnostics={Boolean(report.viewerIsAdmin)} />
       <PassageReview report={report} vm={vm} />
       <SourceCards vm={vm} />
       <p className="rv2-provenance">
@@ -602,7 +629,7 @@ function PrintSourceSummary({ vm }: { vm: ReportV2ViewModel }) {
 
 function PrintReportScope({ vm }: { vm: ReportV2ViewModel }) {
   const c = vm.summary.completion;
-  const status = c.state === "COMPLETED" ? "Completed" : "Needs attention";
+  const status = c.statusLabel;
   return (
     <section className="rv2-section rv2-print-scope" aria-labelledby="rv2-print-scope-title">
       <h3 id="rv2-print-scope-title">Report scope</h3>
@@ -648,7 +675,7 @@ export function ReportV2PrintOverview({ report }: { report: SimilarityReport }) 
   // PrintDocumentSummary/PrintSourceSummary/PrintReportScope replace it with
   // a genuinely useful compact document/source/scope summary — same
   // authoritative vm fields, just more of them, never a new computation.
-  const toolbarStatus = vm.summary.completion.state === "COMPLETED" ? "Completed" : "Needs attention";
+  const toolbarStatus = vm.summary.completion.statusLabel;
   return (
     <article className="report-paper rv2-print-paper rv2-print-overview">
       <ReportPageHeader report={report} page={1} total={3} label="Similarity Overview" />
@@ -818,6 +845,14 @@ const RV2WS_MATCH_COLOR = "#d7263d";
 function rv2wsMatchTint(alpha: number): string {
   return `rgba(215, 38, 61, ${alpha})`;
 }
+/**
+ * POSSIBLE MATCH (yellow, never scored) — the --yellow design token (#f3d477,
+ * app/globals.css) as a fill, with a darker amber dashed underline (the
+ * .rv2ws-mark-uncertain rule) so the distinction never rests on colour alone.
+ * Same literal as similarity-report-papers.tsx's UNCERTAIN_PASSAGE_COLOR.
+ */
+const RV2WS_UNCERTAIN_TINT = "rgba(243, 212, 119, 0.55)";
+const RV2WS_UNCERTAIN_BORDER = "#b88a00";
 
 /**
  * Visual-correction pass — the LEFT report surface's own formal introduction,
@@ -906,11 +941,41 @@ function renderManuscriptWindow(
   sourceIndexById: Map<string, number>,
   activePassageId: number | null,
   onSelectPassage: (passageId: number) => void,
+  uncertain: ReportV2UncertainPassage[] = [],
 ): ReactNode[] {
   const pieces: ReactNode[] = [];
   let cursor = rangeStart;
-  const relevant = runs.filter((p) => p.charEnd! > rangeStart && p.charStart! < rangeEnd);
-  relevant.forEach((p, idx) => {
+  // Verified (red) runs and possible (yellow) runs interleaved by position.
+  // resolveUncertainPassages never lets a yellow run cover a verified word, so
+  // with no uncertain runs this is exactly the verified-only walk it was.
+  type Segment = { passage: ReportV2Passage; uncertain?: undefined; start: number } | { passage?: undefined; uncertain: ReportV2UncertainPassage; start: number };
+  const relevant: Segment[] = [
+    ...runs.filter((p) => p.charEnd! > rangeStart && p.charStart! < rangeEnd).map((p) => ({ passage: p, start: p.charStart! })),
+    ...uncertain.filter((u) => u.charEnd > rangeStart && u.charStart < rangeEnd).map((u) => ({ uncertain: u, start: u.charStart })),
+  ].sort((a, b) => a.start - b.start);
+  relevant.forEach((segment, idx) => {
+    if (segment.uncertain) {
+      const u = segment.uncertain;
+      const start = Math.max(cursor, u.charStart);
+      const end = Math.min(rangeEnd, Math.max(start, u.charEnd));
+      if (start > cursor) pieces.push(<span key={`t-${idx}`}>{text.slice(cursor, start)}</span>);
+      if (end > start) {
+        pieces.push(
+          <mark
+            key={`u-${u.wordStart}`}
+            className="rv2ws-mark-uncertain"
+            style={{ background: RV2WS_UNCERTAIN_TINT, borderBottomColor: RV2WS_UNCERTAIN_BORDER }}
+            title={UNCERTAIN_MATCH_LEGEND}
+          >
+            {text.slice(start, end)}
+            <span className="rv2-sr-only"> ({UNCERTAIN_MATCH_LEGEND})</span>
+          </mark>,
+        );
+      }
+      cursor = Math.max(cursor, end);
+      return;
+    }
+    const p = segment.passage;
     const start = Math.max(cursor, p.charStart!);
     const end = Math.min(rangeEnd, Math.max(start, p.charEnd!));
     if (start > cursor) pieces.push(<span key={`t-${idx}`}>{text.slice(cursor, start)}</span>);
@@ -1004,9 +1069,20 @@ function WorkspaceManuscript({
     [vm.passages],
   );
   const scoringNormalizationVersion = reportScoringNormalizationVersion(report);
+  const uncertain = vm.uncertainPassages;
+  // Possible (yellow) runs are kept whole across page cuts too; with none, the
+  // occupied ranges are exactly the verified runs, as before.
   const pageRanges = useMemo(
-    () => paginateManuscriptText(text, runs.map((p) => ({ start: p.charStart!, end: p.charEnd! })), undefined, scoringNormalizationVersion),
-    [text, runs, scoringNormalizationVersion],
+    () => paginateManuscriptText(
+      text,
+      [
+        ...runs.map((p) => ({ start: p.charStart!, end: p.charEnd! })),
+        ...uncertain.map((u) => ({ start: u.charStart, end: u.charEnd })),
+      ].sort((a, b) => a.start - b.start),
+      undefined,
+      scoringNormalizationVersion,
+    ),
+    [text, runs, uncertain, scoringNormalizationVersion],
   );
 
   if (text.length === 0) {
@@ -1026,7 +1102,7 @@ function WorkspaceManuscript({
               explicit. */}
           <p className="rv2ws-page-number">Manuscript page {pageIndex + 1} of {pageRanges.length}</p>
           <div className="rv2-doc rv2ws-manuscript">
-            {renderManuscriptWindow(text, runs, range.start, range.end, sourceIndexById, activePassageId, onSelectPassage)}
+            {renderManuscriptWindow(text, runs, range.start, range.end, sourceIndexById, activePassageId, onSelectPassage, uncertain)}
           </div>
         </article>
       ))}
@@ -1110,7 +1186,7 @@ export function ReportV2Workspace({
   const selectedSourceIndex = selectedSource ? vm.sources.findIndex((s) => s.id === selectedSource.id) : -1;
   // Concise version of the SAME state CompletionStrip renders in full below
   // — never a second, independently-derived completion computation.
-  const toolbarStatus = vm.summary.completion.state === "COMPLETED" ? "Completed" : "Needs attention";
+  const toolbarStatus = vm.summary.completion.statusLabel;
 
   return (
     <div className="rv2ws">
@@ -1147,6 +1223,7 @@ export function ReportV2Workspace({
           <div className="rv2ws-match-review-heading">
             <p className="paper-kicker">MATCH REVIEW</p>
             <h3>Highlighted manuscript</h3>
+            {vm.uncertainPassages.length > 0 && <MatchColorLegend />}
           </div>
           <WorkspaceManuscript report={report} vm={vm} activePassageId={activePassageId} onSelectPassage={selectPassage} />
         </div>
@@ -1164,7 +1241,7 @@ export function ReportV2Workspace({
               </div>
             </div>
 
-            <CompletionStrip vm={vm} />
+            <CompletionStrip vm={vm} showDiagnostics={Boolean(report.viewerIsAdmin)} />
 
             <div className="rv2ws-sources">
               <h3>Sources</h3>

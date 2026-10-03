@@ -1,7 +1,9 @@
 import {
   primaryMatchedWordCount,
   primarySimilarityScore,
+  unifiedMatchedPositions,
   type SimilarityReport,
+  type UncertainEvidenceReason,
 } from "@/lib/report-types";
 import type {
   ReportEvidenceInterpretation,
@@ -9,7 +11,13 @@ import type {
   ReportEvidencePassage,
   ReportEvidenceSource,
 } from "@/lib/evidence-interpretation/report-payload-types";
-import type { ReportCompletion } from "@/lib/evidence-interpretation/completion";
+import {
+  completionDiagnosticsFromSignals,
+  partialCompletionDetail,
+  REPORT_COMPLETION_HEADLINE,
+  type ReportCompletion,
+  type ReportCompletionDiagnostic,
+} from "@/lib/evidence-interpretation/completion";
 import type { ReportExtractionDiagnostic } from "@/lib/evidence-interpretation/extraction";
 import { skippedUnitCount } from "@/lib/evidence-interpretation/extraction";
 import type {
@@ -116,6 +124,30 @@ export function isGenericReferenceSource(sourceType: ReportV2SourceType): boolea
 export const COMPLETION_SCOPE_LINE =
   "Compared against TurnitPlus’s reference collection and available live academic sources. Exact Wikipedia phrase matches are listed separately and do not change this result.";
 
+/**
+ * The concise search-status label (toolbar, hero metric, print scope, receipt)
+ * for each completion state — one mapping shared by every surface so the
+ * browser, the printed report and the receipt never disagree. A partial search
+ * is a precise, non-fatal state, never the vague "Needs attention".
+ */
+export const COMPLETION_STATUS_LABEL: Record<ReportCompletion["state"], string> = {
+  COMPLETED: "Completed",
+  PARTIAL: "Partial search",
+  SOURCE_UNAVAILABLE: "Source not verified",
+  EXTRACTION_PARTIAL: "Partial document",
+};
+
+export function completionStatusLabel(state: ReportCompletion["state"]): string {
+  return COMPLETION_STATUS_LABEL[state] ?? COMPLETION_STATUS_LABEL.PARTIAL;
+}
+
+// ── highlight legend copy ────────────────────────────────────────────────
+// RED = verified source-text overlap that counts toward the headline.
+// YELLOW = a possible match that does NOT count (SimilarityReport.uncertainEvidence).
+// TurnitPlus's yellow means uncertainty — never "missing citation".
+export const VERIFIED_MATCH_LEGEND = "Verified match — counted in the similarity score.";
+export const UNCERTAIN_MATCH_LEGEND = "Possible match — source could not be fully verified; not counted in the similarity score.";
+
 // ── filter taxonomy ──────────────────────────────────────────────────────
 export type ReportV2Filter = "all" | "review" | "quotations" | "other";
 
@@ -198,12 +230,25 @@ export type ReportV2Passage = {
 
 export type ReportV2Completion = {
   state: ReportCompletion["state"];
+  /** concise status label — completionStatusLabel(state). */
+  statusLabel: string;
   headline: string;
   detail: string | null;
   /** true only for a genuine EXTRACTION_PARTIAL — never for completeness "UNKNOWN". */
   extractionPartial: boolean;
   scopeLine: string;
   signals: ReportCompletion["signals"];
+  /** machine-readable channel + reason per contributing channel (admin diagnostics); empty for COMPLETED. */
+  diagnostics: ReportCompletionDiagnostic[];
+};
+
+/** A possible (yellow, never scored) match run, resolved to character offsets in report.text. */
+export type ReportV2UncertainPassage = {
+  wordStart: number;
+  wordEnd: number;
+  charStart: number;
+  charEnd: number;
+  reason: UncertainEvidenceReason;
 };
 
 export type ReportV2ViewModel = {
@@ -223,6 +268,8 @@ export type ReportV2ViewModel = {
   };
   sources: ReportV2SourceCard[];
   passages: ReportV2Passage[];
+  /** yellow, NON-SCORING possible matches — never overlapping a verified word; empty for every report without uncertainEvidence. */
+  uncertainPassages: ReportV2UncertainPassage[];
   filterCounts: Record<ReportV2Filter, number>;
   /** true when the document had matched positions but none produced a passage row. */
   hasPassages: boolean;
@@ -243,21 +290,18 @@ export function resolveCompletionView(
   // Prefer the server-authored headline/detail; fall back to deterministic copy
   // so a legacy/oddly-shaped completion object still renders sane, non-alarming
   // text (and never the EXTRACTION_PARTIAL wording when completeness is UNKNOWN).
-  const HEADLINE: Record<ReportCompletion["state"], string> = {
-    COMPLETED: "Search completed within the available TurnitPlus source scope.",
-    PARTIAL: "Some source searches were unavailable. Results may be incomplete.",
-    SOURCE_UNAVAILABLE: "A candidate source was identified but its text could not be verified.",
-    EXTRACTION_PARTIAL: "Part of the uploaded document could not be analyzed.",
-  };
+  // PARTIAL is the exception: its copy is always the CURRENT partial-search
+  // wording (verified lower bound; completed searches still count; unreachable
+  // sources are not counted), so a report saved under the older, vaguer
+  // "Some source searches were unavailable" copy reads the same as a new one.
   const effectiveState: ReportCompletion["state"] =
     state === "EXTRACTION_PARTIAL" && !extractionPartial ? "PARTIAL" : state;
 
   let detail = completion?.detail ?? null;
   if (effectiveState === "COMPLETED") detail = null;
+  else if (effectiveState === "PARTIAL") detail = partialCompletionDetail(verifiedSimilarityPercent);
   else if (!detail) {
-    if (effectiveState === "PARTIAL") {
-      detail = `The ${verifiedSimilarityPercent}% shown is a lower bound — a source we could not reach may add more.`;
-    } else if (effectiveState === "SOURCE_UNAVAILABLE") {
+    if (effectiveState === "SOURCE_UNAVAILABLE") {
       const n = Math.max(1, completion?.signals.unverifiedCandidateCount ?? 1);
       detail = `${n} possible source${n === 1 ? " is" : "s are"} listed separately as “identified, not verified” and ${n === 1 ? "is" : "are"} not included in the ${verifiedSimilarityPercent}%.`;
     } else if (effectiveState === "EXTRACTION_PARTIAL") {
@@ -269,20 +313,81 @@ export function resolveCompletionView(
     }
   }
 
+  const signals: ReportCompletion["signals"] = completion?.signals ?? {
+    academicSearch: null,
+    selectiveCorpus: null,
+    extraction: extraction?.completeness ?? "UNKNOWN",
+    unverifiedCandidateCount: 0,
+    userSuppliedReference: null,
+  };
   return {
     state: effectiveState,
-    headline: completion?.headline?.trim() || HEADLINE[effectiveState],
+    statusLabel: completionStatusLabel(effectiveState),
+    headline: effectiveState === "PARTIAL"
+      ? REPORT_COMPLETION_HEADLINE.PARTIAL
+      : completion?.headline?.trim() || REPORT_COMPLETION_HEADLINE[effectiveState],
     detail,
     extractionPartial,
     scopeLine: COMPLETION_SCOPE_LINE,
-    signals: completion?.signals ?? {
-      academicSearch: null,
-      selectiveCorpus: null,
-      extraction: extraction?.completeness ?? "UNKNOWN",
-      unverifiedCandidateCount: 0,
-      userSuppliedReference: null,
-    },
+    signals,
+    // A completion persisted before diagnostics existed: derived from its own
+    // signals, every reason NOT_RECORDED — the channel is known, the cause is not.
+    diagnostics: effectiveState === "COMPLETED" ? [] : completion?.diagnostics ?? completionDiagnosticsFromSignals(signals),
   };
+}
+
+/**
+ * The verified word set a possible match must never overlap: the authoritative
+ * unified matched positions, the archive positions (a report without
+ * unifiedSimilarity), and every position the evidence interpretation explains.
+ * Red always wins — a word that is verified anywhere is never painted yellow.
+ */
+function verifiedWordSet(report: SimilarityReport): Set<number> {
+  const words = new Set<number>(unifiedMatchedPositions(report));
+  for (const p of report.archiveMatchedPositions ?? []) words.add(p);
+  const byKind = report.evidenceInterpretation?.positionsByKind;
+  if (byKind) for (const positions of Object.values(byKind)) for (const p of positions ?? []) words.add(p);
+  return words;
+}
+
+/**
+ * Resolves report.uncertainEvidence into yellow runs: clipped to the report's
+ * own token table (its scoring-normalization contract), with every verified
+ * word removed (a passage that straddles verified text is split around it),
+ * then merged and sorted. Pure presentation — reads no score and changes none.
+ * [] for every report without uncertainEvidence (all reports today).
+ */
+export function resolveUncertainPassages(
+  report: SimilarityReport,
+  tokenSpanTable?: ReturnType<typeof tokenSpans>,
+): ReportV2UncertainPassage[] {
+  const passages = report.uncertainEvidence?.passages ?? [];
+  if (passages.length === 0) return [];
+  const spans = tokenSpanTable ?? tokenSpans(report.text ?? "", reportScoringNormalizationVersion(report));
+  if (spans.length === 0) return [];
+  const verified = verifiedWordSet(report);
+  const reasonByWord = new Map<number, UncertainEvidenceReason>();
+  for (const p of passages) {
+    if (!Number.isInteger(p.wordStart) || !Number.isInteger(p.wordEnd) || p.wordEnd < p.wordStart) continue;
+    const start = Math.max(0, p.wordStart);
+    const end = Math.min(spans.length - 1, p.wordEnd);
+    for (let w = start; w <= end; w += 1) {
+      if (!verified.has(w) && !reasonByWord.has(w)) reasonByWord.set(w, p.reason);
+    }
+  }
+  const words = [...reasonByWord.keys()].sort((a, b) => a - b);
+  const runs: ReportV2UncertainPassage[] = [];
+  for (const w of words) {
+    const last = runs[runs.length - 1];
+    const reason = reasonByWord.get(w)!;
+    if (last && last.wordEnd === w - 1 && last.reason === reason) {
+      last.wordEnd = w;
+      last.charEnd = spans[w].end;
+    } else {
+      runs.push({ wordStart: w, wordEnd: w, charStart: spans[w].start, charEnd: spans[w].end, reason });
+    }
+  }
+  return runs;
 }
 
 // ── passage geometry ─────────────────────────────────────────────────────
@@ -426,6 +531,7 @@ export function buildReportV2ViewModel(report: SimilarityReport): ReportV2ViewMo
     },
     sources,
     passages,
+    uncertainPassages: resolveUncertainPassages(report, spans),
     filterCounts,
     hasPassages: passages.length > 0,
   };

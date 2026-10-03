@@ -3,6 +3,7 @@ import { primarySimilarityScore } from "@/lib/report-types";
 import {
   buildReportEvidenceInterpretation,
   resolveReportCompletion,
+  sanitizeSelectiveCorpusIncompleteReason,
   unknownExtractionDiagnostic,
   type SelectiveCorpusBranchState,
   type ReportExtractionDiagnostic,
@@ -55,6 +56,9 @@ export const CLIENT_UNTRUSTED_EVIDENCE_INTERPRETATION_KEYS = [
   // V1.1 — the internal carry-forward guard is server-set only; a client value
   // here is dropped (and it is stripped again from every outbound response).
   "userSuppliedReferenceGuard",
+  // Possible (yellow, never scored) matches are server-authored only: a client
+  // can never paint its own "possible match" regions onto a saved report.
+  "uncertainEvidence",
 ] as const;
 
 /** Drop any client-supplied interpretation/completion/extraction values so the
@@ -206,6 +210,7 @@ export function withEvidenceInterpretation<T extends SimilarityReport>(
     // Only claim the academic branch ran if the report actually carries its
     // status (COMPLETE_*/FAILED). Absent -> null (not run / not configured).
     academicSearch: report.academicEvidenceStatus ?? null,
+    academicSearchFailureReason: report.academicEvidenceFailureReason,
     selectiveCorpus: opts.selectiveCorpusBranch ?? null,
     extraction: extractionDiagnostic,
     unverifiedCandidateCount: opts.unverifiedCandidateCount ?? 0,
@@ -369,11 +374,17 @@ export function buildFinalizedReportEvidenceInterpretation(
  * persisted reportCompletion.signals — the exact values that produced it. A
  * report saved before priorSubmission existed carries none and stays null.
  *
+ * The persisted selectiveCorpusAuthoritativeIncompleteReason (written by that
+ * same terminal write) is read here too, so the refreshed completion's
+ * diagnostics name WHY the branch is incomplete — this runs before
+ * stripServerInternalReportFields removes the raw field from the response.
+ *
  * No-op when there is no persisted reportCompletion to refresh (a pre-Report-V2
  * report), when the marker is absent (historical/non-authoritative — never
  * touched), still "pending" (no terminal branch to report yet — the
  * customer-facing similarityStatus="pending" mechanism is what matters there),
- * or when the signal is already correct.
+ * or when the signal (and, for an incomplete branch, its diagnostic) is already
+ * correct.
  */
 export function refreshSelectiveCorpusCompletionSignal(report: SimilarityReport): void {
   if (!report.reportCompletion) return;
@@ -384,10 +395,16 @@ export function refreshSelectiveCorpusCompletionSignal(report: SimilarityReport)
         ? "PARTIAL"
         : null;
   if (selectiveCorpusBranch === null) return;
-  if (report.reportCompletion.signals.selectiveCorpus === selectiveCorpusBranch) return;
+  const incompleteReason = sanitizeSelectiveCorpusIncompleteReason(report.selectiveCorpusAuthoritativeIncompleteReason) ?? "NOT_RECORDED";
+  const diagnosticCurrent =
+    selectiveCorpusBranch !== "PARTIAL" ||
+    (report.reportCompletion.diagnostics ?? []).some((d) => d.channel === "SELECTIVE_CORPUS" && d.reason === incompleteReason);
+  if (report.reportCompletion.signals.selectiveCorpus === selectiveCorpusBranch && diagnosticCurrent) return;
   report.reportCompletion = resolveReportCompletion({
     academicSearch: report.academicEvidenceStatus ?? null,
+    academicSearchFailureReason: report.academicEvidenceFailureReason,
     selectiveCorpus: selectiveCorpusBranch,
+    selectiveCorpusIncompleteReason: report.selectiveCorpusAuthoritativeIncompleteReason,
     extraction: report.extractionDiagnostic ?? unknownExtractionDiagnostic(),
     unverifiedCandidateCount: report.reportCompletion.signals.unverifiedCandidateCount,
     userSuppliedReference: report.userSuppliedReferenceChannel ? report.userSuppliedReferenceChannel.state : null,

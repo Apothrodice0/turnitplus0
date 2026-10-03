@@ -78,7 +78,8 @@ test("B: PARTIAL shows the existing customer-safe PARTIAL wording", () => {
   assert.equal(completion.state, "PARTIAL");
   const html = render(baseReport({ reportCompletion: completion, score: 14, archiveScore: 14 }));
   assert.match(html, /report-completion-notice/, "the notice renders for a non-COMPLETED state");
-  assert.match(html, /Some source searches were unavailable\. Results may be incomplete\./);
+  assert.match(html, /Partial search: some sources were unavailable\./);
+  assert.match(html, /verified lower bound/);
 });
 
 // ── C: SOURCE_UNAVAILABLE ───────────────────────────────────────────────────

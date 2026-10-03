@@ -22,7 +22,7 @@ export type ReceiptData = {
   riskTarget?: number;
   /** Report-redesign receipt fix: lets the receipt apply the same "<1% for a genuine positive overlap that rounds to 0" display policy the report and screen already use — never changes score/archiveScore themselves. Omitted callers keep the old plain `${score}%` text (no positive-overlap-below-1% case to fix without it). */
   matchedWordCount?: number;
-  /** Visual-correction pass: the SAME "Completed" / "Needs attention" search-status text ReportV2Workspace's own toolbar already shows (vm.summary.completion.state), threaded through so the receipt's Final Result card never shows a second, independently-derived completion computation. Omitted (undefined) for a report with no V2 payload at all — there is no "search status" concept for it, so the row is left out entirely rather than guessed. */
+  /** Visual-correction pass: the SAME search-status label ReportV2Workspace's own toolbar already shows (completionStatusLabel(vm.summary.completion.state) — "Completed", "Partial search", …), threaded through so the receipt's Final Result card never shows a second, independently-derived completion computation. Omitted (undefined) for a report with no V2 payload at all — there is no "search status" concept for it, so the row is left out entirely rather than guessed. */
   completionStatus?: string;
   unified?: {
     score: number;

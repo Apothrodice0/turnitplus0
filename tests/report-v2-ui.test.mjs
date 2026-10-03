@@ -297,7 +297,7 @@ test("PARTIAL report: attention completion strip + lower-bound detail, still no 
   assert.equal(vm.summary.completion.extractionPartial, false);
 
   const html = renderView(report);
-  assert.match(html, /Some source searches were unavailable/);
+  assert.match(html, /Partial search: some sources were unavailable/);
   assert.match(html, /lower bound/);
   assert.match(html, /rv2-completion-attention/);
   assertCleanCopy(html, "partial");

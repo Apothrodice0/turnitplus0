@@ -322,6 +322,7 @@ test('16. deferred COMPLETED finalizes: real verifiedEvidence merges in, marker 
   assert.equal(row.payload.selectiveCorpusAuthoritativeClaimedAt, undefined, 'claim marker cleared on terminal transition');
   assert.ok(row.payload.unifiedSimilarity, 'a real final score was persisted');
   assert.ok(row.payload.unifiedSimilarity.selectiveCorpusOnlyWords > 0, 'the verified V4 evidence actually contributed to the persisted score');
+  assert.equal(row.payload.selectiveCorpusAuthoritativeIncompleteReason, undefined, 'a completed run records no incomplete reason');
 });
 
 test('17. deferred PARTIAL finalizes with its real lower-bound evidence, marker pending -> incomplete', async () => {
@@ -338,6 +339,7 @@ test('17. deferred PARTIAL finalizes with its real lower-bound evidence, marker 
   const row = await savedReportRow(deviceKey, id);
   assert.equal(row.payload.selectiveCorpusAuthoritativeStatus, 'incomplete');
   assert.ok(row.payload.unifiedSimilarity.selectiveCorpusOnlyWords > 0, 'PARTIAL still contributes its genuine, already-verified lower-bound evidence — never treated as zero');
+  assert.equal(row.payload.selectiveCorpusAuthoritativeIncompleteReason, 'PARTIAL_INDEX', 'the reason is written by the same terminal write as the marker');
 });
 
 for (const [label, resultFn] of [
@@ -358,6 +360,7 @@ for (const [label, resultFn] of [
     const row = await savedReportRow(deviceKey, id);
     assert.equal(row.payload.selectiveCorpusAuthoritativeStatus, 'incomplete');
     assert.equal(row.payload.unifiedSimilarity.selectiveCorpusOnlyWords, 0, `${label} must contribute exactly zero`);
+    assert.equal(row.payload.selectiveCorpusAuthoritativeIncompleteReason, label, `the persisted reason names the terminal ${label} state`);
 
     const display = await resolvePersistedSimilarityDisplay(client, {
       reportDeviceKey: deviceKey, reportId: id, archiveScore: 0,
@@ -399,6 +402,7 @@ test('21. unexpected finalizer exception falls back to best-effort zero-V4 incom
   const row = await savedReportRow(deviceKey, id);
   assert.equal(row.payload.selectiveCorpusAuthoritativeStatus, 'incomplete');
   assert.equal(row.payload.unifiedSimilarity.selectiveCorpusOnlyWords, 0, 'the fallback never uses the evidence the failed primary attempt might have picked');
+  assert.equal(row.payload.selectiveCorpusAuthoritativeIncompleteReason, 'FINALIZER_ERROR', 'the fallback records its own reason, never the primary attempt\'s state');
 });
 
 test('21b. if the fallback ALSO fails, the report is left pending for the recovery sweep — never a false result', async () => {
@@ -487,6 +491,17 @@ test('24. resave after incomplete preserves the incomplete marker', async () => 
 
   const row = await savedReportRow(deviceKey, id);
   assert.equal(row.payload.selectiveCorpusAuthoritativeStatus, 'incomplete', 'incomplete is preserved exactly like completed — resave never silently upgrades or drops it');
+  assert.equal(row.payload.selectiveCorpusAuthoritativeIncompleteReason, 'TIMEOUT', 'its reason is carried forward with it');
+
+  // The customer GET still shows a PARTIAL completion, but the raw reason and
+  // the internal channel/reason diagnostics never leave the server.
+  const res = await getReport(account, id);
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.payload.selectiveCorpusAuthoritativeIncompleteReason, undefined);
+  assert.equal(body.payload.reportCompletion?.state, 'PARTIAL');
+  assert.equal(body.payload.reportCompletion?.diagnostics, undefined, 'diagnostics are admin-only');
+  assert.doesNotMatch(JSON.stringify(body.payload.reportCompletion), /TIMEOUT/);
 });
 
 test('25. claimedAt is preserved by a normal resave while a claim is in flight', async () => {
@@ -991,16 +1006,15 @@ test('FORGERY 4: an existing skip/edge path (empty-text save, no legitimate serv
 test('bonus: selectSelectiveCorpusFinalizationEvidence maps every terminal state to the documented evidence/status policy', () => {
   assert.deepEqual(
     selectSelectiveCorpusFinalizationEvidence(completedShadowResult([{ sourceLabel: 'S1', matchedPassages: [{ submittedWordStart: 0, submittedWordEnd: 1, matchedWordCount: 2 }] }])),
-    { evidence: [{ sourceId: 'S1', matchedPassages: [{ submittedWordStart: 0, submittedWordEnd: 1, matchedWordCount: 2 }] }], terminalStatus: 'completed' },
+    { evidence: [{ sourceId: 'S1', matchedPassages: [{ submittedWordStart: 0, submittedWordEnd: 1, matchedWordCount: 2 }] }], terminalStatus: 'completed', incompleteReason: null },
   );
-  assert.deepEqual(selectSelectiveCorpusFinalizationEvidence(completedShadowResult([])), { evidence: null, terminalStatus: 'completed' });
-  assert.deepEqual(
-    selectSelectiveCorpusFinalizationEvidence(partialShadowResult([{ sourceLabel: 'S1', matchedPassages: [{ submittedWordStart: 0, submittedWordEnd: 1, matchedWordCount: 2 }] }])).terminalStatus,
-    'incomplete',
-  );
-  assert.deepEqual(selectSelectiveCorpusFinalizationEvidence(timeoutShadowResult()), { evidence: null, terminalStatus: 'incomplete' });
-  assert.deepEqual(selectSelectiveCorpusFinalizationEvidence(artifactUnavailableShadowResult()), { evidence: null, terminalStatus: 'incomplete' });
-  assert.deepEqual(selectSelectiveCorpusFinalizationEvidence(failedShadowResult()), { evidence: null, terminalStatus: 'incomplete' });
+  assert.deepEqual(selectSelectiveCorpusFinalizationEvidence(completedShadowResult([])), { evidence: null, terminalStatus: 'completed', incompleteReason: null });
+  const partial = selectSelectiveCorpusFinalizationEvidence(partialShadowResult([{ sourceLabel: 'S1', matchedPassages: [{ submittedWordStart: 0, submittedWordEnd: 1, matchedWordCount: 2 }] }]));
+  assert.deepEqual(partial.terminalStatus, 'incomplete');
+  assert.deepEqual(partial.incompleteReason, 'PARTIAL_INDEX');
+  assert.deepEqual(selectSelectiveCorpusFinalizationEvidence(timeoutShadowResult()), { evidence: null, terminalStatus: 'incomplete', incompleteReason: 'TIMEOUT' });
+  assert.deepEqual(selectSelectiveCorpusFinalizationEvidence(artifactUnavailableShadowResult()), { evidence: null, terminalStatus: 'incomplete', incompleteReason: 'ARTIFACT_UNAVAILABLE' });
+  assert.deepEqual(selectSelectiveCorpusFinalizationEvidence(failedShadowResult()), { evidence: null, terminalStatus: 'incomplete', incompleteReason: 'FAILED' });
 });
 
 console.log('selective-corpus-authoritative-lifecycle: lifecycle + resave + creation-policy + CAS + recovery + historical/UX + client-forgery trust-boundary tests passed');

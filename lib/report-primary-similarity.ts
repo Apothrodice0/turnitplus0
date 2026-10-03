@@ -8,6 +8,7 @@ import { computeUnifiedSimilarity, type UnifiedSimilarityResult } from "./unifie
 import { resolveImportedSimilarityEvidenceForUnifiedSimilarity } from "./imported-similarity-evidence";
 import { compactUnifiedSimilarityForPersistence } from "./unified-similarity-persistence";
 import type { PersistedEvidenceInterpretation } from "./evidence-interpretation/persistence";
+import type { SelectiveCorpusIncompleteReason } from "./evidence-interpretation/completion";
 import type { ReportHistoricalSubmissionMatch, SimilarityReport } from "./report-types";
 import type { ExternalAcademicEvidence } from "./academic-search/types";
 import { canonicalSha256 } from "./document-identity";
@@ -1016,6 +1017,13 @@ export async function persistSelectiveCorpusAuthoritativeFinalization(
     corpusSourceMatchingEnabled: boolean;
     corpusGeneration: number;
     terminalStatus: SelectiveCorpusAuthoritativeTerminalStatus;
+    /**
+     * Why terminalStatus is "incomplete" — set in the SAME statement as the
+     * status ('$.selectiveCorpusAuthoritativeIncompleteReason'), so a reader
+     * never sees the marker without its reason. Ignored for "completed";
+     * omitted/null (direct callers) leaves the key untouched.
+     */
+    incompleteReason?: SelectiveCorpusIncompleteReason | null;
     evidenceInterpretation?: PersistedEvidenceInterpretation;
     /**
      * R2 write gate. The mode buildFinalizedReportEvidenceInterpretation measured the
@@ -1038,6 +1046,7 @@ export async function persistSelectiveCorpusAuthoritativeFinalization(
   }
   const flagText = resolution.corpusSourceMatchingEnabled ? "true" : "false";
   const interpretationToSet = resolution.evidenceInterpretation ?? null;
+  const incompleteReasonToSet = resolution.terminalStatus === "incomplete" ? (resolution.incompleteReason ?? null) : null;
   const result = await client.execute({
     sql: `UPDATE saved_reports
           SET payload_json = json_set(
@@ -1045,7 +1054,7 @@ export async function persistSelectiveCorpusAuthoritativeFinalization(
                 '$.unifiedSimilarity', json(?),
                 '$.corpusSourceMatchingEnabledAtComputation', json(?),
                 '$.unifiedSimilarityGeneration', ?,
-                '$.unifiedSimilarityFailed', json('false'),${interpretationToSet ? "\n                '$.evidenceInterpretation', json(?)," : ""}
+                '$.unifiedSimilarityFailed', json('false'),${interpretationToSet ? "\n                '$.evidenceInterpretation', json(?)," : ""}${incompleteReasonToSet ? "\n                '$.selectiveCorpusAuthoritativeIncompleteReason', ?," : ""}
                 '$.selectiveCorpusAuthoritativeStatus', ?
               )
           WHERE device_key = ? AND id = ? AND json_valid(payload_json)
@@ -1062,6 +1071,7 @@ export async function persistSelectiveCorpusAuthoritativeFinalization(
       flagText,
       resolution.corpusGeneration,
       ...(interpretationToSet ? [JSON.stringify(interpretationToSet)] : []),
+      ...(incompleteReasonToSet ? [incompleteReasonToSet] : []),
       resolution.terminalStatus,
       params.reportDeviceKey,
       params.reportId,

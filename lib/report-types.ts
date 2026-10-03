@@ -1,6 +1,6 @@
 import type { WebCheckResult } from "@/lib/web-check-core";
 import type { ReportSummary } from "@/lib/reports-remote";
-import type { AcademicSearchStatus, ExternalAcademicEvidence } from "@/lib/academic-search/types";
+import type { AcademicSearchFailureReason, AcademicSearchStatus, ExternalAcademicEvidence } from "@/lib/academic-search/types";
 import type { UnifiedSimilarityResult } from "@/lib/unified-similarity";
 import type { SuppliedReferenceVerifiedEvidence, SuppliedReferenceInput } from "@/lib/user-supplied-references";
 import type { UserSuppliedReferenceGuard, UserSuppliedReferencePersistedChannel } from "@/lib/report-user-supplied-references";
@@ -24,7 +24,7 @@ import type {
   ReportEvidenceSource,
   ReportEvidencePassage,
 } from "@/lib/evidence-interpretation/report-payload-types";
-import type { ReportCompletion } from "@/lib/evidence-interpretation/completion";
+import type { ReportCompletion, SelectiveCorpusIncompleteReason } from "@/lib/evidence-interpretation/completion";
 import type { ReportExtractionDiagnostic } from "@/lib/evidence-interpretation/extraction";
 import type { EvidenceInterpretationKind, EvidenceInterpretationTone } from "@/lib/evidence-interpretation/kinds";
 
@@ -315,6 +315,13 @@ export type SimilarityReport = {
    */
   academicEvidenceStatus?: AcademicSearchStatus;
   /**
+   * Why academicEvidenceStatus is FAILED (absent otherwise, and absent on any
+   * report saved before this field) — see AcademicSearchFailureReason.
+   * SCORE-NEUTRAL: feeds only reportCompletion.diagnostics, and is sanitized to
+   * a known code there (it is reported by the browser, like the status itself).
+   */
+  academicEvidenceFailureReason?: AcademicSearchFailureReason;
+  /**
    * Phase 4A — EXPERIMENTAL, additive only. Output of
    * lib/unified-similarity.ts's computeUnifiedSimilarity(), which is NOT
    * called anywhere in report generation yet (see that file's own header
@@ -406,6 +413,15 @@ export type SimilarityReport = {
    */
   selectiveCorpusAuthoritativeClaimedAt?: string;
   /**
+   * AUTHORITATIVE PROMOTION — SERVER-INTERNAL ONLY. Why the terminal write set
+   * selectiveCorpusAuthoritativeStatus to "incomplete" (absent for "completed",
+   * and on any report finalized before this field). Written by the same atomic
+   * CAS write as the status, carried forward on resave exactly like it, read by
+   * refreshSelectiveCorpusCompletionSignal into reportCompletion.diagnostics, and
+   * stripped from every outbound report (stripServerInternalReportFields).
+   */
+  selectiveCorpusAuthoritativeIncompleteReason?: SelectiveCorpusIncompleteReason;
+  /**
    * Report V2 — ADDITIVE, EXPLANATION ONLY. The Evidence Interpretation Layer's
    * classification of the report's ALREADY-VERIFIED evidence
    * (lib/evidence-interpretation/). NEVER read by, or written into,
@@ -432,6 +448,18 @@ export type SimilarityReport = {
    * percentage is never invented. Feeds reportCompletion above.
    */
   extractionDiagnostic?: ReportExtractionDiagnostic;
+  /**
+   * POSSIBLE MATCHES — ADDITIVE, SERVER-AUTHORED, NEVER SCORED. Word ranges with
+   * a defensible evidence basis that does NOT count toward the headline: the
+   * source could not be fully verified, or the evidence is explicitly
+   * non-scoring. Rendered YELLOW ("Possible match … not counted in the
+   * similarity score"), never red. Nothing in scoring reads this field — it
+   * never enters matchedWordCount, the similarity %, the matched-position
+   * union or evidenceInterpretation — and a client-supplied value is dropped
+   * on save (CLIENT_UNTRUSTED_EVIDENCE_INTERPRETATION_KEYS). No server producer
+   * sets it yet, so a report renders exactly as before unless one does.
+   */
+  uncertainEvidence?: ReportUncertainEvidence;
   /**
    * USER-SUPPLIED REFERENCES V1 — ADDITIVE, SERVER-AUTHORITATIVE. The safe,
    * per-reference verified evidence for reference files the report's own author
@@ -514,6 +542,20 @@ export type SimilarityReport = {
   text: string;
 };
 
+/** Why a possible match is not counted — see SimilarityReport.uncertainEvidence. */
+export type UncertainEvidenceReason = "SOURCE_TEXT_UNVERIFIED" | "NON_SCORING_EVIDENCE";
+
+export type ReportUncertainEvidencePassage = {
+  /** inclusive word indices into report.text under the report's own scoring-normalization contract (tokenSpans). */
+  wordStart: number;
+  wordEnd: number;
+  reason: UncertainEvidenceReason;
+};
+
+export type ReportUncertainEvidence = {
+  passages: ReportUncertainEvidencePassage[];
+};
+
 export type HighlightRange = {
   start: number;
   end: number;
@@ -531,7 +573,7 @@ export type HighlightRange = {
    * never highlighted these two evidence channels at all, even when they
    * were the majority (or entirety) of the unified similarity result.
    */
-  kind: "source" | "wikipedia" | "academic" | "reference-source" | "v2-evidence";
+  kind: "source" | "wikipedia" | "academic" | "reference-source" | "v2-evidence" | "uncertain";
   url?: string;
   wikipediaSources?: Array<{ pageId: number; title: string; url: string }>;
   /**
@@ -736,18 +778,19 @@ export function hasIncompleteSelectiveCorpusCheck(report: SimilarityReport): boo
 }
 
 /**
- * AUTHORITATIVE PROMOTION — response hygiene: selectiveCorpusAuthoritativeStatus
- * and selectiveCorpusAuthoritativeClaimedAt are SERVER-INTERNAL lifecycle/
- * recovery control state (see their own doc comments above) — never meant to
- * reach an ordinary client. Mutates the given report in place, deleting only
- * these two keys; every other field is untouched. Call this ONLY on an
+ * AUTHORITATIVE PROMOTION — response hygiene: selectiveCorpusAuthoritativeStatus,
+ * selectiveCorpusAuthoritativeClaimedAt and selectiveCorpusAuthoritativeIncompleteReason
+ * are SERVER-INTERNAL lifecycle/recovery control state (see their own doc
+ * comments above) — never meant to reach an ordinary client (the reason reaches
+ * it only as a reportCompletion diagnostic). Mutates the given report in place,
+ * deleting only these keys; every other field is untouched. Call this ONLY on an
  * already-loaded, about-to-be-serialized outbound copy — never on anything
  * still headed for persistence (server-side lifecycle/recovery code, and the
  * two persist paths in lib/report-primary-similarity.ts and
  * lib/selective-corpus-authoritative.ts, read/write payload_json directly and
  * never call this).
  *
- * This is the ONE shared boundary for these two fields specifically, used at
+ * This is the ONE shared boundary for these fields specifically, used at
  * both existing outbound-report-serialization sites
  * (app/api/reports/[id]/route.ts's GET response and app/reports/[id]/page.tsx's
  * server-rendered first paint) — mirroring, rather than duplicating a third
@@ -755,9 +798,17 @@ export function hasIncompleteSelectiveCorpusCheck(report: SimilarityReport): boo
  * pattern each of those already uses for verifiedAcademicSearchDiagnosticsId /
  * userSuppliedReferenceGuard.
  */
-export function stripServerInternalReportFields(report: SimilarityReport): void {
+export function stripServerInternalReportFields(report: SimilarityReport, opts: { viewerIsAdmin?: boolean } = {}): void {
   delete report.selectiveCorpusAuthoritativeStatus;
   delete report.selectiveCorpusAuthoritativeClaimedAt;
+  delete report.selectiveCorpusAuthoritativeIncompleteReason;
+  // reportCompletion.diagnostics carry internal channel/reason codes (admin
+  // diagnostics). An ordinary viewer gets the customer-safe state, headline,
+  // detail and signals only — the same neutral completion it always got.
+  if (!opts.viewerIsAdmin && report.reportCompletion && "diagnostics" in report.reportCompletion) {
+    const { diagnostics: _adminOnly, ...customerSafe } = report.reportCompletion;
+    report.reportCompletion = customerSafe;
+  }
 }
 
 export function archiveMatchedWordCount(report: SimilarityReport) {

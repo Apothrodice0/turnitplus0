@@ -6081,6 +6081,23 @@ main.report-main {
   box-shadow: inset 3px 0 0 #0784b4 !important;
 }
 
+/* POSSIBLE MATCH (yellow, never scored): a dashed amber underline and a "?"
+   badge, so it never relies on colour alone — on screen or in print. */
+.submission-uncertain-match {
+  border-bottom-style: dashed;
+}
+
+.highlight-legend-item.uncertain-legend-item {
+  max-width: none;
+  color: #6b5200;
+  font-weight: 650;
+}
+
+.highlight-legend-item.uncertain-legend-item i {
+  border: 1px solid;
+  color: #4d3b00;
+}
+
 .wikipedia-source-link {
   display: inline-flex;
   align-items: center;
@@ -7852,10 +7869,22 @@ main.report-main {
   border: 1px solid var(--line); background: var(--canvas);
 }
 .rv2-completion-ok { border-color: #bfe6d5; background: #f2fbf7; }
-.rv2-completion-attention { border-color: #f6d8b6; background: #fff6ec; }
+/* Partial / not-fully-checked states use the same yellow warning treatment as
+   the toolbar status pill (.rv2ws-toolbar-status-attention) — a warning, never
+   a fatal error. */
+.rv2-completion-attention { border-color: #e9c66b; background: #fff9e9; }
 .rv2-completion-icon { flex: 0 0 auto; display: inline-flex; }
 .rv2-completion-ok .rv2-completion-icon { color: var(--green); }
-.rv2-completion-attention .rv2-completion-icon { color: var(--orange); }
+.rv2-completion-attention .rv2-completion-icon { color: #966200; }
+.rv2-completion-diagnostics { margin: 6px 0 0; padding: 0; list-style: none; color: var(--muted); font-size: 11px; }
+.rv2-completion-diagnostics code { font-size: 11px; overflow-wrap: anywhere; }
+
+/* Highlight colour legend — rendered only when a report has possible (yellow) matches. */
+.rv2-match-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 8px 0 0; padding: 0; list-style: none; color: var(--muted); font-size: 12px; }
+.rv2-match-legend li { display: inline-flex; align-items: center; gap: 6px; }
+.rv2-match-legend-swatch { display: inline-block; flex: 0 0 auto; width: 14px; height: 10px; border-radius: 2px; border-bottom: 2px solid; }
+.rv2-match-legend-verified { background: rgba(215, 38, 61, 0.16); border-bottom-color: #d7263d; }
+.rv2-match-legend-uncertain { background: rgba(243, 212, 119, 0.55); border-bottom-style: dashed; border-bottom-color: #b88a00; }
 .rv2-completion-icon svg { width: 18px; height: 18px; }
 .rv2-completion-headline { margin: 0; font-weight: 600; }
 .rv2-completion-detail { margin: 4px 0 0; color: var(--ink); }
@@ -8420,6 +8449,15 @@ main.report-main {
 .rv2ws-mark-active {
   outline: 2px solid var(--blue-dark);
   outline-offset: 1px;
+}
+
+/* Possible match (yellow, never scored) — not a source match, so not clickable. */
+.rv2ws-mark-uncertain {
+  padding: 0 2px;
+  border-bottom: 2px dashed;
+  border-radius: 2px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
 }
 
 .rv2ws-mark-number {

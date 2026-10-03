@@ -14,7 +14,7 @@ import {
 import type { ExternalAcademicEvidence } from "@/lib/academic-search/types";
 import { similarityScoreBand } from "@/lib/ai-core";
 import { mergeAdjacentPositions, reportScoringNormalizationVersion, tokenSpans } from "@/lib/similarity-core";
-import { resolveCompletionView } from "@/lib/report-v2-view";
+import { resolveCompletionView, resolveUncertainPassages, UNCERTAIN_MATCH_LEGEND } from "@/lib/report-v2-view";
 import {
   PRIMARY_SIMILARITY_BAND_LABELS,
   archiveOverlapScore,
@@ -967,6 +967,14 @@ const REFERENCE_SOURCE_HIGHLIGHT_COLOR = "#0f9d58";
  * the admin-only detailed legend/Source Details views).
  */
 const MATCHED_PASSAGE_COLOR = "#d7263d";
+/**
+ * POSSIBLE MATCH (SimilarityReport.uncertainEvidence) — yellow, NEVER scored:
+ * the --yellow design token (#f3d477, app/globals.css), with a darker amber
+ * dashed underline (.submission-uncertain-match) so it never relies on colour
+ * alone. Distinct from the red verified treatment above in screen and print.
+ */
+const UNCERTAIN_PASSAGE_COLOR = "#f3d477";
+const UNCERTAIN_PASSAGE_BORDER = "#b88a00";
 
 /**
  * Highlighting fix (Task A, final correctness bug): the report body
@@ -1142,6 +1150,18 @@ export function findHighlightRanges(report: SimilarityReport, options: { include
     });
   }
 
+  // Possible (yellow, never scored) matches — already split around every
+  // verified word by resolveUncertainPassages, and placed LAST in precedence
+  // below, so a yellow run can only ever fill text no red channel claimed.
+  const uncertainCandidates: HighlightRange[] = resolveUncertainPassages(report).map((run) => ({
+    start: run.charStart,
+    end: run.charEnd,
+    sourceIndex: -300 - run.wordStart,
+    color: UNCERTAIN_PASSAGE_COLOR,
+    label: "Possible match",
+    kind: "uncertain",
+  }));
+
   const sourceCandidates = candidates
     .filter((candidate) => candidate.kind === "source")
     .sort((left, right) => left.sourceIndex - right.sourceIndex || left.start - right.start || right.end - left.end);
@@ -1184,7 +1204,7 @@ export function findHighlightRanges(report: SimilarityReport, options: { include
   // this only ever activates for a report whose ONLY evidence lives in
   // evidenceInterpretation (report.sources/academic/reference-source all
   // empty) — the real gap this fix closes.
-  [...wikipediaCandidates, ...mergedSources, ...academicCandidates, ...referenceSourceCandidates, ...sortedV2Candidates]
+  [...wikipediaCandidates, ...mergedSources, ...academicCandidates, ...referenceSourceCandidates, ...sortedV2Candidates, ...uncertainCandidates]
     .forEach((candidate) => {
       const overlaps = accepted.some(
         (range) => candidate.start < range.end && candidate.end > range.start,
@@ -1223,6 +1243,26 @@ export function buildHighlightedPieces(
       pieces.push(text.slice(cursor, start));
     }
     const isWikipedia = range.kind === "wikipedia";
+    if (range.kind === "uncertain") {
+      // Possible match: yellow, never scored, no source badge or link.
+      pieces.push(
+        <mark
+          className="submission-match submission-uncertain-match"
+          key={`${range.start}-${range.end}-${index}`}
+          style={{
+            backgroundColor: `${UNCERTAIN_PASSAGE_COLOR}b3`,
+            borderBottomColor: UNCERTAIN_PASSAGE_BORDER,
+            boxShadow: `inset 3px 0 0 ${UNCERTAIN_PASSAGE_BORDER}`,
+          }}
+          title={UNCERTAIN_MATCH_LEGEND}
+        >
+          {text.slice(start, end)}
+          <span style={{ backgroundColor: UNCERTAIN_PASSAGE_BORDER }}>?</span>
+        </mark>,
+      );
+      cursor = end;
+      return;
+    }
     // Ordinary-user simplification: every kind that feeds the authoritative
     // unified score (source/academic/reference-source) renders with ONE
     // consistent red/magenta treatment — no color/badge difference based on
@@ -1324,11 +1364,19 @@ export function HighlightLegend({ report }: { report: SimilarityReport }) {
   // in the body with an empty legend claiming none exist.
   const hasV2Evidence = (report.evidenceInterpretation?.passages.length ?? 0) > 0;
   const hasMatchedPassages = report.sources.length > 0 || academicEvidence.length > 0 || hasReferenceSources || hasV2Evidence;
+  // Possible (yellow) matches change the legend only when the body actually
+  // shows one — a report without them keeps exactly its previous legend.
+  const hasUncertainPassages = resolveUncertainPassages(report).length > 0;
+  const legendLead = hasUncertainPassages
+    ? `Red marks verified text counted in the similarity score; yellow marks possible matches that are not counted${visibleWikipediaSources.length > 0 ? "; blue W marks separate Wikipedia evidence that does not change the similarity result" : ""}`
+    : visibleWikipediaSources.length > 0
+      ? "Red marks matched passages; blue W marks separate Wikipedia evidence that does not change the similarity result"
+      : "Red marks the text contributing to the similarity result";
   return (
     <div className="highlight-legend">
       <div>
-        <strong>{visibleWikipediaSources.length > 0 ? "Matched passages" : "Red matched passages"}</strong>
-        <span>{visibleWikipediaSources.length > 0 ? "Red marks matched passages; blue W marks separate Wikipedia evidence that does not change the similarity result" : "Red marks the text contributing to the similarity result"}</span>
+        <strong>{visibleWikipediaSources.length > 0 || hasUncertainPassages ? "Matched passages" : "Red matched passages"}</strong>
+        <span>{legendLead}</span>
       </div>
       <div className="highlight-legend-items">
         {canSeeSourceBreakdown ? (
@@ -1359,6 +1407,12 @@ export function HighlightLegend({ report }: { report: SimilarityReport }) {
               Matched passages
             </span>
           )
+        )}
+        {hasUncertainPassages && (
+          <span className="highlight-legend-item uncertain-legend-item" key="uncertain-legend" title={UNCERTAIN_MATCH_LEGEND}>
+            <i style={{ backgroundColor: UNCERTAIN_PASSAGE_COLOR, borderColor: UNCERTAIN_PASSAGE_BORDER }}>?</i>
+            {UNCERTAIN_MATCH_LEGEND}
+          </span>
         )}
         {visibleWikipediaSources.map((source) => (
           <a className="highlight-legend-item wikipedia-legend-item" key={`wiki-${source.pageId}`} href={source.url} target="_blank" rel="noreferrer">

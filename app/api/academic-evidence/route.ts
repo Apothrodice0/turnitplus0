@@ -84,7 +84,7 @@ export async function POST(request: Request) {
       return new NextResponse(JSON.stringify({ error: 'text is too long' }), { status: 413 });
     }
 
-    const { evidence, stats, status, candidates, queries, retrievalDiagnostics } = await runWithScoringNormalization(
+    const { evidence, stats, status, failureReason, candidates, queries, retrievalDiagnostics } = await runWithScoringNormalization(
       scoringNormalizationVersion,
       () => getExternalAcademicEvidence(text),
     );
@@ -114,7 +114,10 @@ export async function POST(request: Request) {
       }
     }
 
-    return new NextResponse(JSON.stringify({ evidence, status, academicSearchDiagnosticsId }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    // failureReason (FAILED only) tells the caller WHICH FAILED this is — a
+    // total provider outage vs the pipeline throwing — so the saved report's
+    // completion diagnostics can name it. A generic code, never provider text.
+    return new NextResponse(JSON.stringify({ evidence, status, academicSearchDiagnosticsId, ...(failureReason ? { failureReason } : {}) }), { status: 200, headers: { 'Content-Type': 'application/json' } });
   } catch (err) {
     // getExternalAcademicEvidence is itself non-throwing (best-effort) — this
     // catch only guards request parsing/rate-limiting above it. Even here,

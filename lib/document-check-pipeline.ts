@@ -15,14 +15,15 @@ import {
   type SimilarityReport,
 } from "@/lib/report-types";
 import { withEvidenceInterpretation } from "@/lib/report-evidence-interpretation";
-import { buildReportV2ViewModel } from "@/lib/report-v2-view";
+import { buildReportV2ViewModel, completionStatusLabel } from "@/lib/report-v2-view";
 import {
   extractionDiagnosticFromCounts,
   plainTextExtractionDiagnostic,
   type ReportExtractionDiagnostic,
 } from "@/lib/evidence-interpretation";
 import type { WebCheckResult } from "@/lib/web-check-core";
-import type { AcademicSearchStatus, ExternalAcademicEvidence } from "@/lib/academic-search/types";
+import type { AcademicSearchFailureReason, AcademicSearchStatus, ExternalAcademicEvidence } from "@/lib/academic-search/types";
+import { sanitizeAcademicSearchFailureReason } from "@/lib/evidence-interpretation/completion";
 import {
   setReferenceEntryStatus,
   MAX_REFERENCE_TEXT_CHARS,
@@ -315,7 +316,17 @@ export type AcademicEvidenceCheckResult = {
    * network failure before the check ran, or text under MIN_TEXT_LENGTH).
    */
   academicSearchDiagnosticsId: number | null;
+  /** Why `status` is FAILED (see AcademicSearchFailureReason); null/absent otherwise. Diagnostics only — never scored. */
+  failureReason?: AcademicSearchFailureReason | null;
 };
+
+/** The client-side failure classes for a non-2xx /api/academic-evidence response. */
+export function academicFailureReasonForHttpStatus(status: number): AcademicSearchFailureReason {
+  if (status === 429) return "RATE_LIMITED";
+  if (status === 408 || status === 504) return "ROUTE_TIMEOUT";
+  if (status >= 500) return "SERVER_ERROR";
+  return "REQUEST_REJECTED";
+}
 
 // Phase 3: unlike analyzeWikipediaText above, this cannot run in a Worker —
 // lib/academic-search/'s HTTP-fallback text retrieval needs Node's
@@ -328,33 +339,50 @@ export type AcademicEvidenceCheckResult = {
 // Must never throw — every failure path (network error, non-2xx response,
 // malformed body) resolves to a well-formed FAILED result instead, exactly
 // like getExternalAcademicEvidence's own never-throws contract server-side.
+// Each path carries its own failureReason, so a saved report can say WHICH
+// failure made its live academic search unavailable instead of one bare FAILED.
 export async function analyzeAcademicEvidence(text: string): Promise<AcademicEvidenceCheckResult> {
+  const failed = (failureReason: AcademicSearchFailureReason, detail: string): AcademicEvidenceCheckResult => {
+    console.debug("Academic evidence check failed.", { outcome: "failed", failureReason, error: detail });
+    return { evidence: [], status: "FAILED", academicSearchDiagnosticsId: null, failureReason };
+  };
+  let response: Response;
   try {
-    const response = await fetch("/api/academic-evidence", {
+    response = await fetch("/api/academic-evidence", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       // The contract this check is computed under — the same one analyzeText
       // records on the report and saveReportRemote declares at save time.
       body: JSON.stringify({ text, scoringNormalization: ACTIVE_SCORING_NORMALIZATION_VERSION }),
     });
-    if (!response.ok) throw new Error(`academic evidence request failed (${response.status})`);
-    const data = (await response.json()) as {
-      evidence?: ExternalAcademicEvidence[];
-      status?: AcademicSearchStatus;
-      academicSearchDiagnosticsId?: number | null;
-    };
-    return {
-      evidence: Array.isArray(data.evidence) ? data.evidence : [],
-      status: data.status ?? "FAILED",
-      academicSearchDiagnosticsId: data.academicSearchDiagnosticsId ?? null,
-    };
   } catch (error) {
-    console.debug("Academic evidence check failed.", {
-      outcome: "failed",
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return { evidence: [], status: "FAILED", academicSearchDiagnosticsId: null };
+    return failed("NETWORK_ERROR", error instanceof Error ? error.message : String(error));
   }
+  if (!response.ok) {
+    return failed(academicFailureReasonForHttpStatus(response.status), `academic evidence request failed (${response.status})`);
+  }
+  let data: {
+    evidence?: ExternalAcademicEvidence[];
+    status?: AcademicSearchStatus;
+    academicSearchDiagnosticsId?: number | null;
+    failureReason?: unknown;
+  };
+  try {
+    data = await response.json();
+  } catch (error) {
+    return failed("MALFORMED_RESPONSE", error instanceof Error ? error.message : String(error));
+  }
+  if (!data || typeof data !== "object" || !data.status) {
+    return failed("MALFORMED_RESPONSE", "academic evidence response had no status");
+  }
+  return {
+    evidence: Array.isArray(data.evidence) ? data.evidence : [],
+    status: data.status,
+    academicSearchDiagnosticsId: data.academicSearchDiagnosticsId ?? null,
+    // A server that predates failureReason sends none: left null (recorded as
+    // NOT_RECORDED), never guessed.
+    failureReason: data.status === "FAILED" ? sanitizeAcademicSearchFailureReason(data.failureReason) : null,
+  };
 }
 
 export async function extractFileText(file: File, onProgress: (progress: number, label: string) => void) {
@@ -556,7 +584,7 @@ export async function downloadReceipt(report: SimilarityReport) {
   // all, in which case the field is left undefined (no "search status"
   // concept exists for it) rather than guessed.
   const v2 = buildReportV2ViewModel(report);
-  const completionStatus = v2 ? (v2.summary.completion.state === "COMPLETED" ? "Completed" : "Needs attention") : undefined;
+  const completionStatus = v2 ? completionStatusLabel(v2.summary.completion.state) : undefined;
   const blob = await createReceiptPdf({ ...report, unified, matchedWordCount: primaryMatchedWordCount(report), completionStatus });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
@@ -596,7 +624,15 @@ export function enrichReportWithWikipedia(report: SimilarityReport, webCheck: We
 // FAILED check is never rendered identically to a genuine zero-result
 // COMPLETE_NO_MATCHES.
 export function enrichReportWithAcademicEvidence(report: SimilarityReport, result: AcademicEvidenceCheckResult): SimilarityReport {
-  return { ...report, externalAcademicEvidence: result.evidence, academicEvidenceStatus: result.status };
+  // academicEvidenceFailureReason always describes THIS status: dropped first,
+  // so a re-check that succeeds never keeps an earlier failure's reason.
+  const { academicEvidenceFailureReason: _previousReason, ...rest } = report;
+  return {
+    ...rest,
+    externalAcademicEvidence: result.evidence,
+    academicEvidenceStatus: result.status,
+    ...(result.status === "FAILED" && result.failureReason ? { academicEvidenceFailureReason: result.failureReason } : {}),
+  };
 }
 
 /**

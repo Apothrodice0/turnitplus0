@@ -1,4 +1,4 @@
-import type { AcademicSearchStatus } from "@/lib/academic-search/types";
+import type { AcademicSearchFailureReason, AcademicSearchStatus } from "@/lib/academic-search/types";
 import type { ReportExtractionCompleteness, ReportExtractionDiagnostic } from "./extraction";
 import { skippedUnitCount } from "./extraction";
 
@@ -20,6 +20,21 @@ export type ReportCompletionState = "COMPLETED" | "PARTIAL" | "SOURCE_UNAVAILABL
 
 export type SelectiveCorpusBranchState = "COMPLETED" | "PARTIAL" | "DISABLED" | "UNAVAILABLE";
 
+/**
+ * Why a Selective Corpus authoritative run finalized "incomplete" — the
+ * terminal shadow-result state that produced it (PARTIAL_INDEX = the PARTIAL
+ * state: one or more index shards unavailable at query time), or
+ * FINALIZER_ERROR when the finalizer's own fallback path landed it.
+ * Server-internal on the saved row; surfaces only as a completion diagnostic.
+ */
+export type SelectiveCorpusIncompleteReason =
+  | "PARTIAL_INDEX"
+  | "TIMEOUT"
+  | "ARTIFACT_UNAVAILABLE"
+  | "FAILED"
+  | "DISABLED"
+  | "FINALIZER_ERROR";
+
 /** USER-SUPPLIED REFERENCES V1 — the reference-file channel's own state.
  *  null / absent = no reference files were supplied (channel ABSENT, NOT failed).
  *  "COMPLETE" = every supplied reference was extracted and matcher-checked.
@@ -38,6 +53,35 @@ export type UserSuppliedReferenceBranchState = "COMPLETE" | "PARTIAL" | null;
  *  See lib/report-evidence-interpretation.ts's priorSubmissionBranchState. */
 export type PriorSubmissionBranchState = "COMPLETE" | "PARTIAL" | null;
 
+/** The channel a completion diagnostic is about. */
+export type ReportCompletionChannel =
+  | "DOCUMENT_EXTRACTION"
+  | "LIVE_ACADEMIC_SEARCH"
+  | "SELECTIVE_CORPUS"
+  | "USER_SUPPLIED_REFERENCES"
+  | "SOURCE_TEXT_VERIFICATION";
+
+/**
+ * MACHINE-READABLE completion diagnostics: one entry per channel that kept the
+ * report from COMPLETED, with the most precise reason the saved report records.
+ * NOT_RECORDED = the channel's state is known but the report predates reason
+ * capture (or the reason was not a known code) — never a guessed reason.
+ * Generic codes only: never a provider name, URL, path or document identity.
+ */
+export type ReportCompletionDiagnosticReason =
+  | AcademicSearchFailureReason
+  | SelectiveCorpusIncompleteReason
+  | "INDEX_UNAVAILABLE"
+  | "REFERENCE_FILE_UNREADABLE"
+  | "CONTENT_UNREAD"
+  | "CANDIDATE_TEXT_UNAVAILABLE"
+  | "NOT_RECORDED";
+
+export type ReportCompletionDiagnostic = {
+  channel: ReportCompletionChannel;
+  reason: ReportCompletionDiagnosticReason;
+};
+
 export type ReportCompletion = {
   state: ReportCompletionState;
   /** short line for the top of the report. */
@@ -46,6 +90,13 @@ export type ReportCompletion = {
   detail: string | null;
   /** every contributing reason, preserved even though one primary state is chosen. */
   reasons: string[];
+  /**
+   * Machine-readable channel + reason for every contributing channel (empty for
+   * COMPLETED). Optional: a completion persisted before diagnostics existed has
+   * none — readers derive NOT_RECORDED entries from `signals` (see
+   * completionDiagnosticsFromSignals).
+   */
+  diagnostics?: ReportCompletionDiagnostic[];
   signals: {
     academicSearch: AcademicSearchStatus | null;
     selectiveCorpus: SelectiveCorpusBranchState | null;
@@ -62,7 +113,11 @@ export type ReportCompletion = {
 
 export type ResolveReportCompletionInput = {
   academicSearch?: AcademicSearchStatus | null;
+  /** why academicSearch is FAILED — client-reported, so sanitized here to a known code. */
+  academicSearchFailureReason?: unknown;
   selectiveCorpus?: SelectiveCorpusBranchState | null;
+  /** why selectiveCorpus is PARTIAL — sanitized here to a known code. */
+  selectiveCorpusIncompleteReason?: unknown;
   extraction?: ReportExtractionDiagnostic | null;
   unverifiedCandidateCount?: number;
   /** USER-SUPPLIED REFERENCES V1 — the reference-file channel state, or null when
@@ -74,12 +129,82 @@ export type ResolveReportCompletionInput = {
   verifiedSimilarityPercent?: number;
 };
 
-const HEADLINE: Record<ReportCompletionState, string> = {
+export const REPORT_COMPLETION_HEADLINE: Record<ReportCompletionState, string> = {
   COMPLETED: "Search completed within the available TurnitPlus source scope.",
-  PARTIAL: "Some source searches were unavailable. Results may be incomplete.",
+  PARTIAL: "Partial search: some sources were unavailable.",
   SOURCE_UNAVAILABLE: "A candidate source was identified but its text could not be verified.",
   EXTRACTION_PARTIAL: "Part of the uploaded document could not be analyzed.",
 };
+
+/** The PARTIAL detail sentence: the verified score is a lower bound, completed channels still count, unavailable ones do not. */
+export function partialCompletionDetail(verifiedSimilarityPercent: number | null | undefined): string {
+  const shown = verifiedSimilarityPercent != null ? `The ${verifiedSimilarityPercent}% shown` : "The result shown";
+  return `${shown} is a verified lower bound. Completed searches still produced valid evidence; sources we could not reach are not counted.`;
+}
+
+const ACADEMIC_SEARCH_FAILURE_REASONS: ReadonlySet<string> = new Set<AcademicSearchFailureReason>([
+  "ALL_PROVIDER_CALLS_FAILED",
+  "SEARCH_PIPELINE_ERROR",
+  "RATE_LIMITED",
+  "ROUTE_TIMEOUT",
+  "SERVER_ERROR",
+  "REQUEST_REJECTED",
+  "NETWORK_ERROR",
+  "MALFORMED_RESPONSE",
+]);
+
+const SELECTIVE_CORPUS_INCOMPLETE_REASONS: ReadonlySet<string> = new Set<SelectiveCorpusIncompleteReason>([
+  "PARTIAL_INDEX",
+  "TIMEOUT",
+  "ARTIFACT_UNAVAILABLE",
+  "FAILED",
+  "DISABLED",
+  "FINALIZER_ERROR",
+]);
+
+/** A known AcademicSearchFailureReason, else null — the value reaches the report from the browser, so it is never trusted verbatim. */
+export function sanitizeAcademicSearchFailureReason(value: unknown): AcademicSearchFailureReason | null {
+  return typeof value === "string" && ACADEMIC_SEARCH_FAILURE_REASONS.has(value) ? (value as AcademicSearchFailureReason) : null;
+}
+
+/** A known SelectiveCorpusIncompleteReason, else null. */
+export function sanitizeSelectiveCorpusIncompleteReason(value: unknown): SelectiveCorpusIncompleteReason | null {
+  return typeof value === "string" && SELECTIVE_CORPUS_INCOMPLETE_REASONS.has(value) ? (value as SelectiveCorpusIncompleteReason) : null;
+}
+
+/**
+ * The diagnostics a completion's own `signals` imply, with the per-channel
+ * reasons when known (NOT_RECORDED otherwise). Order is fixed (extraction,
+ * academic, Selective Corpus, references, source verification) so the same
+ * signals always produce the same list.
+ */
+export function completionDiagnosticsFromSignals(
+  signals: ReportCompletion["signals"],
+  reasons: { academicSearchFailureReason?: unknown; selectiveCorpusIncompleteReason?: unknown } = {},
+): ReportCompletionDiagnostic[] {
+  const diagnostics: ReportCompletionDiagnostic[] = [];
+  if (signals.extraction === "PARTIAL") diagnostics.push({ channel: "DOCUMENT_EXTRACTION", reason: "CONTENT_UNREAD" });
+  if (signals.academicSearch === "FAILED") {
+    diagnostics.push({
+      channel: "LIVE_ACADEMIC_SEARCH",
+      reason: sanitizeAcademicSearchFailureReason(reasons.academicSearchFailureReason) ?? "NOT_RECORDED",
+    });
+  }
+  if (signals.selectiveCorpus === "PARTIAL") {
+    diagnostics.push({
+      channel: "SELECTIVE_CORPUS",
+      reason: sanitizeSelectiveCorpusIncompleteReason(reasons.selectiveCorpusIncompleteReason) ?? "NOT_RECORDED",
+    });
+  }
+  if (signals.selectiveCorpus === "UNAVAILABLE") diagnostics.push({ channel: "SELECTIVE_CORPUS", reason: "INDEX_UNAVAILABLE" });
+  if (signals.userSuppliedReference === "PARTIAL") {
+    diagnostics.push({ channel: "USER_SUPPLIED_REFERENCES", reason: "REFERENCE_FILE_UNREADABLE" });
+  }
+  if (signals.unverifiedCandidateCount > 0) {
+    diagnostics.push({ channel: "SOURCE_TEXT_VERIFICATION", reason: "CANDIDATE_TEXT_UNAVAILABLE" });
+  }
+  return diagnostics;
+}
 
 export function resolveReportCompletion(input: ResolveReportCompletionInput): ReportCompletion {
   const academicSearch = input.academicSearch ?? null;
@@ -114,9 +239,7 @@ export function resolveReportCompletion(input: ResolveReportCompletionInput): Re
 
   let detail: string | null = null;
   if (state === "PARTIAL") {
-    detail = pct != null
-      ? `The ${pct}% shown is a lower bound — a source we could not reach may add more.`
-      : "The result shown is a lower bound — a source we could not reach may add more.";
+    detail = partialCompletionDetail(pct);
   } else if (state === "SOURCE_UNAVAILABLE") {
     detail = `${unverifiedCandidateCount} possible source${unverifiedCandidateCount === 1 ? " is" : "s are"} listed separately as “identified, not verified” and ${unverifiedCandidateCount === 1 ? "is" : "are"} not included${pct != null ? ` in the ${pct}%` : ""}.`;
   } else if (state === "EXTRACTION_PARTIAL") {
@@ -127,11 +250,16 @@ export function resolveReportCompletion(input: ResolveReportCompletionInput): Re
       : "Some of the file could not be read and was skipped. Re-upload a text-based copy for a complete result.";
   }
 
+  const signals: ReportCompletion["signals"] = { academicSearch, selectiveCorpus, extraction, unverifiedCandidateCount, userSuppliedReference, priorSubmission };
   return {
     state,
-    headline: HEADLINE[state],
+    headline: REPORT_COMPLETION_HEADLINE[state],
     detail,
     reasons,
-    signals: { academicSearch, selectiveCorpus, extraction, unverifiedCandidateCount, userSuppliedReference, priorSubmission },
+    diagnostics: completionDiagnosticsFromSignals(signals, {
+      academicSearchFailureReason: input.academicSearchFailureReason,
+      selectiveCorpusIncompleteReason: input.selectiveCorpusIncompleteReason,
+    }),
+    signals,
   };
 }

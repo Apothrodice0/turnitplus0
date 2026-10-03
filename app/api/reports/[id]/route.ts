@@ -297,7 +297,9 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
     // exactly like verifiedAcademicSearchDiagnosticsId above.
     if (payload) {
       refreshSelectiveCorpusCompletionSignal(payload);
-      stripServerInternalReportFields(payload);
+      // viewerIsAdmin was set above from the session's own role: only an admin
+      // keeps reportCompletion's channel/reason diagnostics.
+      stripServerInternalReportFields(payload, { viewerIsAdmin: payload.viewerIsAdmin === true });
     }
 
     return new NextResponse(JSON.stringify({ payload }), { status: 200, headers: NO_STORE_JSON });

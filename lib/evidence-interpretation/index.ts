@@ -76,9 +76,14 @@ export {
 
 export {
   resolveReportCompletion,
+  completionDiagnosticsFromSignals,
+  sanitizeAcademicSearchFailureReason,
+  sanitizeSelectiveCorpusIncompleteReason,
   type ReportCompletion,
+  type ReportCompletionDiagnostic,
   type ReportCompletionState,
   type SelectiveCorpusBranchState,
+  type SelectiveCorpusIncompleteReason,
   type UserSuppliedReferenceBranchState,
   type ResolveReportCompletionInput,
 } from "./completion";
