@@ -19,6 +19,7 @@ import {
   finalizeSelectiveCorpusAuthoritativeReport,
   claimStaleSelectiveCorpusAuthoritativePendingReports,
   selectSelectiveCorpusFinalizationEvidence,
+  MAX_SELECTIVE_CORPUS_AUTHORITATIVE_ATTEMPTS,
 } from '../lib/selective-corpus-authoritative.ts';
 import * as reportsRoute from '../app/api/reports/route.ts';
 import * as reportIdRoute from '../app/api/reports/[id]/route.ts';
@@ -352,9 +353,15 @@ for (const [label, resultFn] of [
     const id = uniq(`r-term-${label}`);
     await seedPendingReport(deviceKey, id);
 
-    const result = await finalizeSelectiveCorpusAuthoritativeReport(client, {
-      reportDeviceKey: deviceKey, reportId: id, accountId: null, shadowResult: resultFn(),
-    });
+    // A TIMEOUT is retried (tests/selective-corpus-timeout-retry.test.mjs): it
+    // is terminal only once every allowed attempt has timed out.
+    const attempts = label === 'TIMEOUT' ? MAX_SELECTIVE_CORPUS_AUTHORITATIVE_ATTEMPTS : 1;
+    let result;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      result = await finalizeSelectiveCorpusAuthoritativeReport(client, {
+        reportDeviceKey: deviceKey, reportId: id, accountId: null, shadowResult: resultFn(),
+      });
+    }
     assert.deepEqual(result, { outcome: 'finalized', status: 'incomplete' });
 
     const row = await savedReportRow(deviceKey, id);
@@ -478,10 +485,13 @@ test('24. resave after incomplete preserves the incomplete marker', async () => 
   const deviceKey = uniq('dk-24');
   const id = uniq('r-24');
   await seedPendingReport(deviceKey, id);
-  const fin = await finalizeSelectiveCorpusAuthoritativeReport(client, {
-    reportDeviceKey: deviceKey, reportId: id, accountId: null, shadowResult: timeoutShadowResult(),
-  });
-  assert.equal(fin.outcome, 'finalized');
+  let fin;
+  for (let attempt = 0; attempt < MAX_SELECTIVE_CORPUS_AUTHORITATIVE_ATTEMPTS; attempt += 1) {
+    fin = await finalizeSelectiveCorpusAuthoritativeReport(client, {
+      reportDeviceKey: deviceKey, reportId: id, accountId: null, shadowResult: timeoutShadowResult(),
+    });
+  }
+  assert.equal(fin.outcome, 'finalized', 'incomplete once every allowed TIMEOUT attempt is spent');
   // AUTH GATE (tightened): see test 23's own comment — this is now a real
   // "claim by resave" from a fresh authenticated account, never anonymous.
   const signedUp = await signUpAccount();

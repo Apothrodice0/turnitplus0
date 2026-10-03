@@ -422,6 +422,18 @@ export type SimilarityReport = {
    */
   selectiveCorpusAuthoritativeIncompleteReason?: SelectiveCorpusIncompleteReason;
   /**
+   * AUTHORITATIVE PROMOTION — SERVER-INTERNAL ONLY. How many authoritative
+   * Selective Corpus attempts for this still-pending report ended TIMEOUT and
+   * were left pending for the recovery sweep to retry (absent = none). A
+   * timeout is a transient work-limit result, so it only becomes the terminal
+   * "incomplete" (reason TIMEOUT) once MAX_SELECTIVE_CORPUS_AUTHORITATIVE_ATTEMPTS
+   * attempts have timed out (lib/selective-corpus-authoritative.ts). Written by
+   * the finalizer's own CAS write, carried forward on resave exactly like
+   * selectiveCorpusAuthoritativeClaimedAt, never accepted from a client, and
+   * stripped from every outbound report (stripServerInternalReportFields).
+   */
+  selectiveCorpusAuthoritativeTimedOutAttempts?: number;
+  /**
    * Report V2 — ADDITIVE, EXPLANATION ONLY. The Evidence Interpretation Layer's
    * classification of the report's ALREADY-VERIFIED evidence
    * (lib/evidence-interpretation/). NEVER read by, or written into,
@@ -779,8 +791,8 @@ export function hasIncompleteSelectiveCorpusCheck(report: SimilarityReport): boo
 
 /**
  * AUTHORITATIVE PROMOTION — response hygiene: selectiveCorpusAuthoritativeStatus,
- * selectiveCorpusAuthoritativeClaimedAt and selectiveCorpusAuthoritativeIncompleteReason
- * are SERVER-INTERNAL lifecycle/recovery control state (see their own doc
+ * selectiveCorpusAuthoritativeClaimedAt, selectiveCorpusAuthoritativeIncompleteReason
+ * and selectiveCorpusAuthoritativeTimedOutAttempts are SERVER-INTERNAL lifecycle/recovery control state (see their own doc
  * comments above) — never meant to reach an ordinary client (the reason reaches
  * it only as a reportCompletion diagnostic). Mutates the given report in place,
  * deleting only these keys; every other field is untouched. Call this ONLY on an
@@ -802,6 +814,7 @@ export function stripServerInternalReportFields(report: SimilarityReport, opts: 
   delete report.selectiveCorpusAuthoritativeStatus;
   delete report.selectiveCorpusAuthoritativeClaimedAt;
   delete report.selectiveCorpusAuthoritativeIncompleteReason;
+  delete report.selectiveCorpusAuthoritativeTimedOutAttempts;
   // reportCompletion.diagnostics carry internal channel/reason codes (admin
   // diagnostics). An ordinary viewer gets the customer-safe state, headline,
   // detail and signals only — the same neutral completion it always got.

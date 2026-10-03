@@ -62,7 +62,9 @@ export type SelectiveCorpusFinalizationEvidenceSelection = {
  *     construction — TIMEOUT/ARTIFACT_UNAVAILABLE/FAILED return bare
  *     failure-code objects with no evidence fields whatsoever), so zero
  *     contribution here is simply what the result object contains, not a
- *     choice this function makes; marker -> "incomplete".
+ *     choice this function makes; marker -> "incomplete". (A TIMEOUT only
+ *     reaches this mapping once its retries are exhausted — see
+ *     finalizeSelectiveCorpusAuthoritativeReport.)
  */
 export function selectSelectiveCorpusFinalizationEvidence(
   shadowResult: SelectiveCorpusShadowResult,
@@ -124,7 +126,75 @@ export type FinalizeSelectiveCorpusAuthoritativeReportResult =
    * fallback below is for unexpected exceptions only): shrinking the score to
    * make it fit would be a scoring-semantics decision this module does not make.
    */
-  | { outcome: "persistence-limit-exceeded" };
+  | { outcome: "persistence-limit-exceeded" }
+  /**
+   * The attempt ended TIMEOUT with retries left: NO final score was written.
+   * The report stays "pending" with its timed-out attempt recorded and its
+   * claim released, so the recovery sweep runs it again.
+   */
+  | { outcome: "timeout-retry-scheduled"; timedOutAttempts: number }
+  /**
+   * Another finalizer advanced this report first (a terminal write, or a newer
+   * timed-out attempt record) between this attempt's read and its write.
+   * Nothing written; a clean no-op, like "already-finalized".
+   */
+  | { outcome: "stale-attempt" };
+
+/**
+ * Bounded TIMEOUT retry. A Selective Corpus TIMEOUT is a transient work-limit
+ * result (the same report can complete moments later on a warmer instance), so
+ * it does not finalize the report: the report stays "pending" and the recovery
+ * sweep runs it again. Only when this many authoritative attempts have ALL
+ * timed out does the report finalize "incomplete" with reason TIMEOUT.
+ *
+ * Same convention as lib/corpus-admission-promotion.ts's MAX_PROMOTION_ATTEMPTS
+ * (5): counts completed attempts, including the initial automatic one (here,
+ * the first save's deferred run), so up to 4 sweep retries; the counter moves
+ * only on a completed timed-out attempt — never on a claim — so a worker that
+ * dies mid-attempt costs no attempt (its claim goes stale and is reclaimed); no
+ * backoff column, the sweep cadence is the backoff (a released claim is picked
+ * up by the next 5-minute run once the report is older than the sweep's 10-minute
+ * minimum age). Every other state keeps its existing semantics.
+ */
+export const MAX_SELECTIVE_CORPUS_AUTHORITATIVE_ATTEMPTS = 5;
+
+/**
+ * The persisted timed-out attempt count: a non-negative integer, 0 when
+ * absent, or null when the stored value is not a valid count (never written by
+ * this module — treated as exhausted, so a corrupt counter can never keep a
+ * report retrying without bound).
+ */
+function persistedTimedOutAttempts(payload: SimilarityReport): number | null {
+  const value = (payload as { selectiveCorpusAuthoritativeTimedOutAttempts?: unknown }).selectiveCorpusAuthoritativeTimedOutAttempts;
+  if (value === undefined || value === null) return 0;
+  return Number.isInteger(value) && (value as number) >= 0 ? (value as number) : null;
+}
+
+/**
+ * Records one more timed-out attempt on a still-pending report and releases its
+ * sweep claim, in ONE CAS write: it lands only if the report is still pending
+ * AND still carries the count this attempt read, so two racing finalizers can
+ * never both record the same attempt, and a report another finalizer already
+ * made terminal is never touched. Returns whether it was written.
+ */
+async function recordSelectiveCorpusTimedOutAttempt(
+  client: Client,
+  params: FinalizeSelectiveCorpusAuthoritativeReportParams,
+  priorAttempts: number,
+): Promise<boolean> {
+  const result = await client.execute({
+    sql: `UPDATE saved_reports
+          SET payload_json = json_set(
+                json_remove(payload_json, '$.selectiveCorpusAuthoritativeClaimedAt'),
+                '$.selectiveCorpusAuthoritativeTimedOutAttempts', ?
+              )
+          WHERE device_key = ? AND id = ? AND json_valid(payload_json)
+            AND json_extract(payload_json, '$.selectiveCorpusAuthoritativeStatus') = 'pending'
+            AND COALESCE(json_extract(payload_json, '$.selectiveCorpusAuthoritativeTimedOutAttempts'), 0) = ?`,
+    args: [priorAttempts + 1, params.reportDeviceKey, params.reportId, priorAttempts],
+  });
+  return Number(result.rowsAffected) > 0;
+}
 
 type ReadReportRowResult = { payload: SimilarityReport; archiveScoreColumn: number | bigint };
 
@@ -289,6 +359,11 @@ async function resolveAndPersist(
  * sweep (app/api/internal/selective-corpus-authoritative-sweep) is the
  * durable backstop that will retry it later. This function itself never
  * throws.
+ *
+ * A TIMEOUT result is not terminal until MAX_SELECTIVE_CORPUS_AUTHORITATIVE_ATTEMPTS
+ * attempts have timed out: before that the attempt is recorded, the claim is
+ * released and the report stays "pending" ("timeout-retry-scheduled") for the
+ * sweep to run again.
  */
 export async function finalizeSelectiveCorpusAuthoritativeReport(
   client: Client,
@@ -306,6 +381,29 @@ export async function finalizeSelectiveCorpusAuthoritativeReport(
     // report stays pending and the recovery sweep reruns it under its contract.
     if ((params.shadowScoringNormalizationVersion === 2 ? 2 : 1) !== reportScoringNormalizationVersion(row.payload)) {
       return { outcome: "scoring-normalization-mismatch" };
+    }
+    // Bounded TIMEOUT retry (see MAX_SELECTIVE_CORPUS_AUTHORITATIVE_ATTEMPTS):
+    // with attempts left, record this one and leave the report pending for the
+    // sweep — no score, no completion signal, nothing terminal. The last
+    // allowed timeout falls through to the ordinary terminal policy below
+    // (incomplete, reason TIMEOUT).
+    if (params.shadowResult.state === "TIMEOUT") {
+      const priorAttempts = persistedTimedOutAttempts(row.payload);
+      if (priorAttempts !== null && priorAttempts + 1 < MAX_SELECTIVE_CORPUS_AUTHORITATIVE_ATTEMPTS) {
+        try {
+          return (await recordSelectiveCorpusTimedOutAttempt(client, params, priorAttempts))
+            ? { outcome: "timeout-retry-scheduled", timedOutAttempts: priorAttempts + 1 }
+            : { outcome: "stale-attempt" };
+        } catch (recordErr) {
+          // Not a reason to finalize: the report stays pending (claim, if any,
+          // goes stale and is reclaimed) and this attempt is simply not counted.
+          console.error(
+            "finalizeSelectiveCorpusAuthoritativeReport: could not record a timed-out attempt — report remains pending for the recovery sweep:",
+            recordErr instanceof Error ? recordErr.message : String(recordErr),
+          );
+          return { outcome: "gave-up" };
+        }
+      }
     }
     const evidenceSelection = selectSelectiveCorpusFinalizationEvidence(params.shadowResult);
     const result = await resolveAndPersist(client, params, row, evidenceSelection);

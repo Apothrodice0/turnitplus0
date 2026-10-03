@@ -10,7 +10,7 @@ import { tokens } from '../lib/similarity-core.ts';
 import { canonicalizeText } from '../lib/canonical-text.ts';
 import { stripServerInternalReportFields } from '../lib/report-types.ts';
 import { refreshSelectiveCorpusCompletionSignal } from '../lib/report-evidence-interpretation.ts';
-import { finalizeSelectiveCorpusAuthoritativeReport } from '../lib/selective-corpus-authoritative.ts';
+import { finalizeSelectiveCorpusAuthoritativeReport, MAX_SELECTIVE_CORPUS_AUTHORITATIVE_ATTEMPTS } from '../lib/selective-corpus-authoritative.ts';
 import * as reportsRoute from '../app/api/reports/route.ts';
 import * as reportIdRoute from '../app/api/reports/[id]/route.ts';
 import * as signupRoute from '../app/api/auth/signup/route.ts';
@@ -153,6 +153,17 @@ function completedShadowResult(verifiedEvidence = []) {
 function timeoutShadowResult() {
   return { state: 'TIMEOUT', evaluatorVersion: EVALUATOR_VERSION, failureCode: 'TIMEOUT', failureMessage: 'stage budget exceeded' };
 }
+/** A TIMEOUT is retried (the report stays pending) until every allowed attempt
+ *  has timed out; only then is the report incomplete with reason TIMEOUT. */
+async function finalizeTimeoutUntilTerminal(deviceKey, id) {
+  let result;
+  for (let attempt = 0; attempt < MAX_SELECTIVE_CORPUS_AUTHORITATIVE_ATTEMPTS; attempt += 1) {
+    result = await finalizeSelectiveCorpusAuthoritativeReport(client, {
+      reportDeviceKey: deviceKey, reportId: id, accountId: null, shadowResult: timeoutShadowResult(),
+    });
+  }
+  return result;
+}
 
 /** Creates a genuinely authoritative-pending report via the REAL POST route
  *  (empty text -> shadowEvaluationInputs stays null -> the deferred
@@ -277,9 +288,7 @@ test('2. completed report GET: resolved score present, internal fields not expos
 test('3. incomplete report GET: resolved score present, internal fields not exposed, safe derived incomplete signal present', async () => {
   const id = uniq('r-hyg-3');
   const account = await createPendingFixture(id);
-  const fin = await finalizeSelectiveCorpusAuthoritativeReport(client, {
-    reportDeviceKey: account.deviceKey, reportId: id, accountId: null, shadowResult: timeoutShadowResult(),
-  });
+  const fin = await finalizeTimeoutUntilTerminal(account.deviceKey, id);
   assert.deepEqual(fin, { outcome: 'finalized', status: 'incomplete' });
 
   const res = await getReport(account, id);
@@ -365,9 +374,7 @@ test('5. a forged client payload cannot control the persisted or public authorit
 test('6. an ordinary resave preserves the internal persisted status even though it is never exposed in either response', async () => {
   const id = uniq('r-hyg-6');
   const account = await createPendingFixture(id);
-  await finalizeSelectiveCorpusAuthoritativeReport(client, {
-    reportDeviceKey: account.deviceKey, reportId: id, accountId: null, shadowResult: timeoutShadowResult(),
-  });
+  await finalizeTimeoutUntilTerminal(account.deviceKey, id);
   const beforeResave = await rawPersistedPayload(account.deviceKey, id);
   assert.equal(beforeResave.selectiveCorpusAuthoritativeStatus, 'incomplete');
 

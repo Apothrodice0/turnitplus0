@@ -630,6 +630,7 @@ export async function POST(request: Request) {
                      json_extract(payload_json, '$.selectiveCorpusAuthoritativeStatus') AS selective_corpus_authoritative_status,
                      json_extract(payload_json, '$.selectiveCorpusAuthoritativeClaimedAt') AS selective_corpus_authoritative_claimed_at,
                      json_extract(payload_json, '$.selectiveCorpusAuthoritativeIncompleteReason') AS selective_corpus_authoritative_incomplete_reason,
+                     json_extract(payload_json, '$.selectiveCorpusAuthoritativeTimedOutAttempts') AS selective_corpus_authoritative_timed_out_attempts,
                      json_extract(payload_json, '$.scoringNormalizationVersion') AS scoring_normalization_version
               FROM saved_reports WHERE device_key = ? AND id = ?`,
         args: [deviceKey, id],
@@ -668,6 +669,13 @@ export async function POST(request: Request) {
       const persistedSelectiveCorpusAuthoritativeIncompleteReason = sanitizeSelectiveCorpusIncompleteReason(
         existingReportRow.rows[0]?.selective_corpus_authoritative_incomplete_reason,
       );
+      // The bounded-TIMEOUT-retry counter is carried forward the same way, so a
+      // resave of a still-pending report can never reset its retry budget.
+      const persistedSelectiveCorpusAuthoritativeTimedOutAttempts = ((): number | null => {
+        const v = existingReportRow.rows[0]?.selective_corpus_authoritative_timed_out_attempts as number | bigint | null | undefined;
+        const n = typeof v === 'bigint' ? Number(v) : v;
+        return typeof n === 'number' && Number.isInteger(n) && n >= 0 ? n : null;
+      })();
       const persistedVerifiedAcademicDiagnosticsId = ((): number | null => {
         const v = existingReportRow.rows[0]?.verified_academic_diagnostics_id as number | bigint | null | undefined;
         if (typeof v === 'bigint') return Number(v);
@@ -1062,6 +1070,11 @@ export async function POST(request: Request) {
         selectiveCorpusAuthoritativeIncompleteReason: isFirstSaveOfThisReport
           ? undefined
           : (persistedSelectiveCorpusAuthoritativeIncompleteReason ?? undefined),
+        // Only the finalizer records timed-out attempts: never from a client,
+        // carried forward on resave.
+        selectiveCorpusAuthoritativeTimedOutAttempts: isFirstSaveOfThisReport
+          ? undefined
+          : (persistedSelectiveCorpusAuthoritativeTimedOutAttempts ?? undefined),
       };
 
       // Device Passport (Phase 2/4): cryptographically verify an optional
