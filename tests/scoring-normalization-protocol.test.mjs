@@ -238,13 +238,21 @@ const BROWSERS = {
   "Phase-B": { computes: 2, declares: true, recordsOnReport: true },
 };
 
+/**
+ * When every fixture report of this run is created: the moment the file starts. A room holds its report for 24 hours
+ * from that time (lib/report-rooms.ts isWithinActiveCycle), and the room tile is read below, so a fixed calendar date
+ * here would make the room read "empty" once the date is a day old. One value for the whole run keeps the reports of
+ * different browsers comparable.
+ */
+const FIXTURE_CREATED_AT = new Date().toISOString();
+
 /** The report object a browser of `kind` holds after checking `text`: its worker's word count and archive positions (the last two words of the copied passage). */
 function browserReport(kind, id, text = MANUSCRIPT, overrides = {}) {
   const browser = BROWSERS[kind];
   const passage = blockRange(text, text === MANUSCRIPT ? PASSAGE : PASSAGE_WORDS, browser.computes);
   return {
     version: 11, id, submissionId: `sub-${id}`, title: "protocol fixture", author: "", assignment: "",
-    created: "2026-10-01T00:00:00.000Z", score: 0, archiveScore: 0,
+    created: FIXTURE_CREATED_AT, score: 0, archiveScore: 0,
     wordCount: wordCountOf(text, browser.computes), scoreBand: "Low",
     matchedWordCount: 2, archiveMatchedPositions: [passage.end - 1, passage.end], sources: [], repeats: [], text,
     aiAnalysis: completeAiAnalysis(),
@@ -259,7 +267,7 @@ async function post(acc, id, payload, extra = {}) {
     method: "POST",
     headers: { "content-type": "application/json", "x-forwarded-for": `${acc.tag}-post`, cookie: `tp_session_v1=${acc.cookie}` },
     body: JSON.stringify({
-      deviceKey: acc.deviceKey, id, submissionId: `sub-${id}`, title: "protocol fixture", createdAt: "2026-10-01T00:00:00.000Z",
+      deviceKey: acc.deviceKey, id, submissionId: `sub-${id}`, title: "protocol fixture", createdAt: FIXTURE_CREATED_AT,
       wordCount: payload?.wordCount ?? 0, archiveScore: 0, scoreBand: "Low", aiScore: 2, aiTone: "low", aiStatus: "ready",
       payload, ...extra,
     }),
