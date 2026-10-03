@@ -701,14 +701,13 @@ test("matcher version: a snapshot written by the v1 matcher is never reused — 
   // inside the digested thresholds object too, so the bump moves both the
   // label segment and the cfg digest.
   const V1_TAG = "user-submission-match-v1+pos.raw-token-v1+cfg.f371a81a8c59";
-  // ...the tag the v2 matcher (91b67ee, f046e24) wrote, and the v3 one (6f121db).
+  // ...the tags the v2 (91b67ee, f046e24), v3 (6f121db) and v4 (41d2de3) matchers wrote.
   const V2_TAG = "user-submission-match-v2+pos.raw-token-v1+cfg.bfa3e3fa3030";
   const V3_TAG = "user-submission-match-v3+pos.raw-token-v1+cfg.b4a070c32bed";
-  assert.equal(USER_SUBMISSION_MATCHER_VERSION, "user-submission-match-v4");
-  assert.match(SNAPSHOT_MATCHER_VERSION, /^user-submission-match-v4\+pos\.raw-token-v1\+cfg\.[0-9a-f]{12}$/);
-  assert.notEqual(SNAPSHOT_MATCHER_VERSION, V1_TAG);
-  assert.notEqual(SNAPSHOT_MATCHER_VERSION, V2_TAG);
-  assert.notEqual(SNAPSHOT_MATCHER_VERSION, V3_TAG);
+  const V4_TAG = "user-submission-match-v4+pos.raw-token-v1+cfg.9bb2ed2b3049";
+  assert.equal(USER_SUBMISSION_MATCHER_VERSION, "user-submission-match-v5");
+  assert.match(SNAPSHOT_MATCHER_VERSION, /^user-submission-match-v5\+pos\.raw-token-v1\+cfg\.[0-9a-f]{12}$/);
+  for (const tag of [V1_TAG, V2_TAG, V3_TAG, V4_TAG]) assert.notEqual(SNAPSHOT_MATCHER_VERSION, tag);
 
   const corpus = await freshCorpus();
   const { client } = corpus;
@@ -820,10 +819,10 @@ test("matcher version: a snapshot written by the v1 matcher is never reused — 
     assert.equal(again.matcherVersion, SNAPSHOT_MATCHER_VERSION);
     assert.equal(again.computedAt, String(healedRow.computed_at), "a version-current snapshot is a cache hit");
 
-    // 5. Rows the v2 and v3 matchers wrote fail the identity the same way: a
-    //    plain reopen still returns them as stored, and a write-capable
+    // 5. Rows the v2, v3 and v4 matchers wrote fail the identity the same way:
+    //    a plain reopen still returns them as stored, and a write-capable
     //    resolution recomputes them under the current matcher.
-    for (const [tag, label] of [[V2_TAG, "v2"], [V3_TAG, "v3"]]) {
+    for (const [tag, label] of [[V2_TAG, "v2"], [V3_TAG, "v3"], [V4_TAG, "v4"]]) {
       await client.execute({
         sql: "UPDATE report_historical_match_snapshots SET matcher_version = ?, computed_at = ? WHERE report_device_key = ? AND report_id = ?",
         args: [tag, storedComputedAt, report.reportDeviceKey, report.reportId],

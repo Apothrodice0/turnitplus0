@@ -437,6 +437,7 @@ function serializeMatchesForStorage(matches: Array<{
   passageCount: number;
   longestMatchWords: number;
   passages: Array<{ submittedText: string; submittedWordStart: number; submittedWordEnd: number; matchedWordCount: number }>;
+  additionalPassageRanges?: Array<[number, number]>;
   historicalSubmissionCount: number;
 }>): HistoricalSubmissionMatchEntry[] {
   return matches.map((m) => ({
@@ -453,8 +454,24 @@ function serializeMatchesForStorage(matches: Array<{
       submittedWordEnd: p.submittedWordEnd,
       matchedWordCount: p.matchedWordCount,
     })),
+    // Only when the source has more verified passages than `passages` shows:
+    // a source with at most maxPassages stores exactly what it did before.
+    ...(m.additionalPassageRanges && m.additionalPassageRanges.length > 0
+      ? { additionalPassageRanges: m.additionalPassageRanges.map(([start, end]): [number, number] => [start, end]) }
+      : {}),
     historicalSubmissionCount: m.historicalSubmissionCount,
   }));
+}
+
+/** projectCanonicalPassagesToRaw for bare [start, end] ranges. */
+function projectCanonicalRangesToRaw(
+  ranges: ReadonlyArray<readonly [number, number]>,
+  rawTokenMapping: ReturnType<typeof mapCanonicalTokensToRawTokens>,
+): Array<[number, number]> {
+  return projectCanonicalPassagesToRaw(
+    ranges.map(([start, end]) => ({ submittedWordStart: start, submittedWordEnd: end, matchedWordCount: end - start + 1 })),
+    rawTokenMapping,
+  ).map((passage): [number, number] => [passage.submittedWordStart, passage.submittedWordEnd]);
 }
 
 /**
@@ -681,11 +698,16 @@ export async function getOrComputeHistoricalMatchSnapshot(
       // canonicalizeText can never shift credit onto an unverified raw word
       // (see lib/canonical-token-position-map.ts). Match-level statistics
       // (containment, matchedWordCount, longestMatchWords, passageCount) stay
-      // the matcher's own.
+      // the matcher's own. additionalPassageRanges are positions too and go
+      // through the same mapping.
       const serialized = underReportContract(() => {
         const rawTokenMapping = mapCanonicalTokensToRawTokens(params.rawText, canonicalText);
         return serializeMatchesForStorage(
-          matchResult.matches.map((match) => ({ ...match, passages: projectCanonicalPassagesToRaw(match.passages, rawTokenMapping) })),
+          matchResult.matches.map((match) => ({
+            ...match,
+            passages: projectCanonicalPassagesToRaw(match.passages, rawTokenMapping),
+            ...(match.additionalPassageRanges ? { additionalPassageRanges: projectCanonicalRangesToRaw(match.additionalPassageRanges, rawTokenMapping) } : {}),
+          })),
         );
       });
       resultJson = JSON.stringify(serialized);

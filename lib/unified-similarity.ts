@@ -376,12 +376,19 @@ function addRange(target: Set<number>, start: number, end: number): void {
  * means the ENTIRE submission matched) rather than inventing new matching
  * logic — lib/document-correspondence.ts and lib/user-submission-matching.ts
  * are not modified.
+ *
+ * `passages` holds only the longest verified passages (a display bound);
+ * additionalPassageRanges holds every verified passage beyond them, and both
+ * are scored — the count of displayed passages never decides what reaches
+ * the union. Mirrors lib/user-submission-matching.ts's matchScoringRanges.
  */
 function previousUploadPassageRanges(
   match: HistoricalSubmissionMatchEntry,
   wordCount: number,
 ): Array<{ submittedWordStart: number; submittedWordEnd: number; matchedWordCount: number }> {
-  if (match.passages && match.passages.length > 0) return match.passages;
+  const ranges: Array<{ submittedWordStart: number; submittedWordEnd: number; matchedWordCount: number }> = [...(match.passages ?? [])];
+  for (const [start, end] of match.additionalPassageRanges ?? []) ranges.push({ submittedWordStart: start, submittedWordEnd: end, matchedWordCount: end - start + 1 });
+  if (ranges.length > 0) return ranges;
   if (match.matchType === "EXACT_CANONICAL_MATCH" && match.matchedWordCount > 0 && wordCount > 0) {
     return [{ submittedWordStart: 0, submittedWordEnd: wordCount - 1, matchedWordCount: match.matchedWordCount }];
   }

@@ -178,7 +178,14 @@ export type HistoricalSubmissionMatchEntry = {
   matchedWordCount: number;
   passageCount: number;
   longestMatchWords: number;
+  /** The longest verified passages (at most the matcher's maxPassages), for display. */
   passages: HistoricalMatchPassage[];
+  /**
+   * Report word ranges [start, end] (inclusive) of every verified passage
+   * beyond `passages`, when there are more — scored exactly like `passages`,
+   * never displayed. Absent on snapshots written before matcher v5.
+   */
+  additionalPassageRanges?: Array<[number, number]>;
   /** How many OTHER accounts (never which ones) have also submitted this content. */
   historicalSubmissionCount: number;
 };

@@ -234,9 +234,12 @@ export type UserSubmissionMatchConfig = {
 // v4: a holder the caller excludes after matching (same-device SELF) no longer
 // settles a common block, so the walk goes on to a holder that counts. A v3
 // result can have let such a holder stand for the block alone.
+// v5: every verified passage of a source is scored, not only the longest
+// maxPassages kept for display (additionalPassageRanges). A v4 result is
+// missing the positions of a source's 11th and later passages.
 // USER_SUBMISSION_MATCH_THRESHOLDS is unchanged, so the label is the only
 // thing that tells these generations apart.
-export const USER_SUBMISSION_MATCHER_VERSION = "user-submission-match-v4";
+export const USER_SUBMISSION_MATCHER_VERSION = "user-submission-match-v5";
 
 /**
  * Default UserSubmissionMatchConfig.candidatePageSize. One page is one run
@@ -430,12 +433,46 @@ export type UserSubmissionMatch = {
   matchedWordCount: number;
   passageCount: number;
   longestMatchWords: number;
-  /** Bounded excerpts of the CURRENT submission's own text only — never the historical document's text. See this file's own header comment. */
+  /**
+   * Bounded excerpts of the CURRENT submission's own text only — never the
+   * historical document's text. See this file's own header comment. The
+   * longest maxPassages verified passages, for display; passageCount is
+   * their count.
+   */
   passages: CorrespondencePassage[];
+  /**
+   * Submission word ranges [start, end] (inclusive, ascending) of every
+   * verified passage beyond `passages` — present only when the source has
+   * more than maxPassages. Ranges, not excerpts: scoring needs where the
+   * words are, not their text. `passages` plus these are every position the
+   * verifier accepted (matchedWordCount); see matchScoringRanges.
+   */
+  additionalPassageRanges?: Array<[number, number]>;
   /** How many OTHER accounts (never which ones) have also submitted this representation, excluding the current submission itself. */
   historicalSubmissionCount: number;
   evidenceVersion: EvidenceVersion;
 };
+
+/**
+ * Every verified submission range of a match: its displayed passages plus
+ * additionalPassageRanges, or the whole submission for an exact canonical
+ * match without passages. What common-block coverage reads; mirrors
+ * lib/unified-similarity.ts's previousUploadPassageRanges, which builds the
+ * union — so no display bound ever decides what is scored.
+ */
+export function matchScoringRanges(
+  match: {
+    matchType: string;
+    passages?: ReadonlyArray<{ submittedWordStart: number; submittedWordEnd: number }> | null;
+    additionalPassageRanges?: ReadonlyArray<readonly [number, number]> | null;
+  },
+  wordCount: number,
+): Array<[number, number]> {
+  const ranges: Array<[number, number]> = (match.passages ?? []).map((passage) => [passage.submittedWordStart, passage.submittedWordEnd]);
+  for (const [start, end] of match.additionalPassageRanges ?? []) ranges.push([start, end]);
+  if (ranges.length === 0 && match.matchType === "EXACT_CANONICAL_MATCH" && wordCount > 0) ranges.push([0, wordCount - 1]);
+  return ranges;
+}
 
 export type UserSubmissionMatchResult =
   | { status: "NO_HISTORICAL_MATCH"; partial?: boolean }
@@ -770,14 +807,10 @@ export async function matchAgainstUserSubmissionCorpus(
   const examined = new Set<string>();
   // Submission positions already credited by a verified SCORING source that
   // will count — read the same way lib/unified-similarity.ts reads a match
-  // (its passages, or the whole submission for an exact canonical match).
+  // (matchScoringRanges).
   const scoringCovered = new Set<number>();
   const creditCoverage = (match: UserSubmissionMatch) => {
-    if (match.passages.length > 0) {
-      for (const passage of match.passages) for (let p = passage.submittedWordStart; p <= passage.submittedWordEnd; p += 1) scoringCovered.add(p);
-    } else if (match.matchType === "EXACT_CANONICAL_MATCH") {
-      for (let p = 0; p < queryWordCount; p += 1) scoringCovered.add(p);
-    }
+    for (const [start, end] of matchScoringRanges(match, queryWordCount)) for (let p = start; p <= end; p += 1) scoringCovered.add(p);
   };
   // Scoring matches the search verified, not yet credited: whether one counts
   // is asked (params.excludedAfterMatching) only where a common block needs it.
@@ -836,6 +869,13 @@ export async function matchAgainstUserSubmissionCorpus(
     // computed from the SINGLE longest span, never a sum across spans.
     if (!correspondence.exactCanonicalMatch && !correspondence.strongCorrespondence && !correspondence.distinctivePassageMatch) return null;
 
+    // `passages` is the display bound (the longest maxPassages); every
+    // verified passage past it is still evidence and is kept as a range.
+    const additionalPassageRanges = correspondence.allMatchedPassages
+      .slice(correspondence.passages.length)
+      .map((passage): [number, number] => [passage.submittedWordStart, passage.submittedWordEnd])
+      .sort((a, b) => a[0] - b[0]);
+
     const match: UserSubmissionMatch = {
       relationshipType,
       matchedRepresentationId: representation.id,
@@ -845,6 +885,7 @@ export async function matchAgainstUserSubmissionCorpus(
       passageCount: correspondence.passages.length,
       longestMatchWords: correspondence.longestMatchWords,
       passages: correspondence.passages,
+      ...(additionalPassageRanges.length > 0 ? { additionalPassageRanges } : {}),
       historicalSubmissionCount: ownership.otherAccountSubmissionCount,
       evidenceVersion: {
         canonicalizationVersion: representation.canonicalizationVersion,
@@ -1073,12 +1114,10 @@ export async function matchAgainstUserSubmissionCorpus(
       if (matchCounts) creditCoverage(match);
     };
     const reaches = (match: UserSubmissionMatch, positions: ReadonlySet<number>) =>
-      match.passages.length > 0
-        ? match.passages.some((passage) => {
-            for (let p = passage.submittedWordStart; p <= passage.submittedWordEnd; p += 1) if (positions.has(p)) return true;
-            return false;
-          })
-        : match.matchType === "EXACT_CANONICAL_MATCH";
+      matchScoringRanges(match, queryWordCount).some(([start, end]) => {
+        for (let p = start; p <= end; p += 1) if (positions.has(p)) return true;
+        return false;
+      });
     // Settles, in verification order, the search's matches that reach into
     // these positions, until they are covered.
     const settleSearchMatches = async (positions: readonly number[]) => {
