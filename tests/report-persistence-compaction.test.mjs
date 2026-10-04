@@ -867,7 +867,10 @@ test("D4. STRUCTURAL: the silent 'drop the interpretation, keep the score' fallb
   const routeSrc = fs.readFileSync("app/api/reports/route.ts", "utf8");
   assert.equal(/report saved without it/.test(routeSrc), false, "no 'saved without it' fallback in the write-time path");
   assert.equal(/enriched\.length\s*<=\s*MAX_BYTES/.test(routeSrc), false, "no silent size-based interpretation drop");
-  assert.match(routeSrc, /JSON\.stringify\(encodeReportForPersistence\(enriched \?\? obj\)\)/, "the persisted JSON is always the encoded (compact) report");
+  // encodeReportJsonForPersistence is JSON.stringify(encodeReportForPersistence(report)) measured against the route's
+  // own ceiling (lib/report-persistence.ts; tests/report-compact-positions.test.mjs pins what it returns).
+  assert.match(routeSrc, /return encodeReportJsonForPersistence\(enriched \?\? obj, \{ ceiling: persistedCeiling \}\);/, "the persisted JSON is always the encoded (compact) report");
+  assert.match(fs.readFileSync("lib/report-persistence.ts", "utf8"), /const json = JSON\.stringify\(encodeReportForPersistence\(report, \{ compactWrites, compactPositions \}\)\);/, "…which is the encoded report");
   assert.match(routeSrc, /PERSISTED_PAYLOAD_TOO_LARGE/, "the existing 413 failure semantics are kept");
   const wiring = fs.readFileSync("lib/report-evidence-interpretation.ts", "utf8");
   assert.match(wiring, /FinalizedReportInterpretationResult/, "the finalizer helper returns an explicit result");

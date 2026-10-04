@@ -6,6 +6,7 @@ import {
 } from "./report-primary-similarity";
 import { resolveVerifiedAcademicEvidence } from "./academic-search-diagnostics-repo";
 import { buildFinalizedReportEvidenceInterpretation, priorSubmissionBranchState } from "./report-evidence-interpretation";
+import { readPersistedArchiveMatchedPositions } from "./report-persistence";
 import { canonicalSha256 } from "./document-identity";
 import { reportScoringNormalizationVersion, type ScoringNormalizationVersion } from "./similarity-core";
 import type { SimilarityReport } from "./report-types";
@@ -236,7 +237,15 @@ async function resolveAndPersist(
   row: ReadReportRowResult,
   evidenceSelection: SelectiveCorpusFinalizationEvidenceSelection,
 ): Promise<FinalizeSelectiveCorpusAuthoritativeReportResult> {
-  const { payload, archiveScoreColumn } = row;
+  const { archiveScoreColumn } = row;
+  // `row.payload` is the stored row as parsed, so its archive positions may be in
+  // the compact persisted form (lib/position-runs-persistence.ts). Everything
+  // below scores and explains from the array they stand for; a row whose compact
+  // list cannot be read exactly throws here, before anything is resolved or
+  // written. An array (every earlier row) is used as it is, the same object.
+  const archiveMatchedPositions = readPersistedArchiveMatchedPositions(row.payload);
+  const payload: SimilarityReport =
+    archiveMatchedPositions === row.payload.archiveMatchedPositions ? row.payload : { ...row.payload, archiveMatchedPositions };
   // The report's own persisted contract — this finalizer never re-stamps. It
   // resolves under it, and its write is guarded on the row still carrying it.
   const scoringNormalizationVersion = reportScoringNormalizationVersion(payload);
@@ -301,7 +310,12 @@ async function resolveAndPersist(
   //     untouched (see the outcome's own doc comment).
   const prepared = buildFinalizedReportEvidenceInterpretation(
     { ...payload, externalAcademicEvidence: verifiedAcademicEvidence, unifiedSimilarity: resolution.unifiedSimilarity },
-    { historicalSubmissionMatch: resolution.historicalSubmissionMatch },
+    {
+      historicalSubmissionMatch: resolution.historicalSubmissionMatch,
+      // The write below never rewrites the row's archive positions, so the size
+      // is measured with them exactly as stored, not as expanded above.
+      storedArchiveMatchedPositions: (row.payload as { archiveMatchedPositions?: unknown }).archiveMatchedPositions,
+    },
   );
   if (!prepared.ok) {
     if (prepared.reason === "PERSISTED_SIZE_EXCEEDED") {
@@ -329,6 +343,7 @@ async function resolveAndPersist(
       evidenceInterpretation: prepared.evidenceInterpretation,
       // R2 write gate: persist in the exact mode the size check above measured.
       compactWrites: prepared.compactWrites,
+      compactPositions: prepared.compactPositions,
       scoringNormalizationVersion,
     },
   );

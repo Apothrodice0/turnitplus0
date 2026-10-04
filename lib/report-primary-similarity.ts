@@ -7,6 +7,7 @@ import { CORPUS_FINGERPRINT_VERSION, CANONICALIZATION_VERSION } from "./user-sub
 import { computeUnifiedSimilarity, type UnifiedSimilarityResult } from "./unified-similarity";
 import { resolveImportedSimilarityEvidenceForUnifiedSimilarity } from "./imported-similarity-evidence";
 import { compactUnifiedSimilarityForPersistence } from "./unified-similarity-persistence";
+import { readPersistedArchiveMatchedPositions } from "./report-persistence";
 import type { PersistedEvidenceInterpretation } from "./evidence-interpretation/persistence";
 import type { PriorSubmissionBranchState, SelectiveCorpusIncompleteReason } from "./evidence-interpretation/completion";
 import type { ReportHistoricalSubmissionMatch, SimilarityReport } from "./report-types";
@@ -1045,6 +1046,11 @@ export async function persistSelectiveCorpusAuthoritativeFinalization(
      */
     compactWrites?: boolean;
     /**
+     * The compact-positions write gate, likewise the mode the size was measured
+     * under (its `compactPositions`). Omitted => follows REPORT_COMPACT_POSITIONS_WRITE_ENABLED.
+     */
+    compactPositions?: boolean;
+    /**
      * The contract unifiedSimilarity (and evidenceInterpretation) were computed
      * under — the same additional guard persistRefreshedSimilarity carries
      * (SIMILARITY_SCORING_NORMALIZATION_GUARD_SQL). Omitted is v1.
@@ -1080,8 +1086,9 @@ export async function persistSelectiveCorpusAuthoritativeFinalization(
       // finalizeReportJson/persistRefreshedSimilarity above. The CAS/status
       // guard clauses above are untouched; only the persisted JSON value for
       // '$.unifiedSimilarity' changes shape when eligible. R2: contributions are
-      // compacted only under the write gate, in the mode the caller measured.
-      JSON.stringify(compactUnifiedSimilarityForPersistence(resolution.unifiedSimilarity, { compactWrites: resolution.compactWrites })),
+      // compacted only under the write gate, in the mode the caller measured —
+      // and the position arrays likewise, under theirs.
+      JSON.stringify(compactUnifiedSimilarityForPersistence(resolution.unifiedSimilarity, { compactWrites: resolution.compactWrites, compactPositions: resolution.compactPositions })),
       flagText,
       resolution.corpusGeneration,
       ...(interpretationToSet ? [JSON.stringify(interpretationToSet)] : []),
@@ -1264,7 +1271,10 @@ export async function selfHealUnifiedSimilarity(
       accountId: params.accountId,
       rawText: payload.text,
       wordCount: payload.wordCount,
-      archiveMatchedPositions: payload.archiveMatchedPositions,
+      // `payload` is the stored row as parsed, so its archive positions may be in
+      // the compact persisted form: read as the array they stand for (a row that
+      // cannot be read exactly throws, and this self-heal writes nothing).
+      archiveMatchedPositions: readPersistedArchiveMatchedPositions(payload),
       scoringNormalizationVersion,
       // Trust boundary (drizzle/0052): server-verified scholarly evidence only.
       externalAcademicEvidence: verifiedAcademicEvidence,

@@ -1,6 +1,7 @@
 import type { UnifiedEvidenceContribution, UnifiedSimilarityResult } from "./unified-similarity";
 import { jsonValuesEqual } from "./json-values-equal";
-import { resolveCompactPersistenceWrites, type CompactPersistenceWriteOptions } from "./report-compact-persistence-flag";
+import { resolveCompactPersistenceWrites, resolveCompactPositionWrites, type CompactPersistenceWriteOptions } from "./report-compact-persistence-flag";
+import { compactPositionsForPersistence, expandPositionsFromPersistence, isFormatMarkedPositions, type PersistedPositions } from "./position-runs-persistence";
 
 /**
  * Pre-launch hardening fix — measured 2 MB report-transport-ceiling
@@ -50,6 +51,19 @@ import { resolveCompactPersistenceWrites, type CompactPersistenceWriteOptions } 
  * pre-C2 reader never meets the compact form. The older `previousUploadPositions`
  * elision is NOT gated — it shipped (and is readable by the deployed fleet)
  * before C2. The READ side always understands every form.
+ *
+ * COMPACT POSITIONS — the position arrays themselves (`matchedPositions` and the
+ * four exclusive per-channel subsets) were the one part of this object still
+ * persisted as one number per matched word, so the persisted report grew with
+ * how MUCH of the document matched. Each may now be persisted as its exact
+ * run-length form (lib/position-runs-persistence.ts: verbatim, verify-then-
+ * compact, versioned) under a separate write gate
+ * (REPORT_COMPACT_POSITIONS_WRITE_ENABLED, default OFF), and is expanded to the
+ * identical array at the same read boundaries. It composes with the elision
+ * above: the elision is decided on the arrays first, and a reader expands
+ * `matchedPositions` before copying it. A compact position list that cannot be
+ * expanded exactly makes the whole value unreadable — positions are the
+ * credited evidence, never served short.
  */
 
 /** The one persistence-only marker this module introduces. Distinct from `UNIFIED_SIMILARITY_VERSION` (an unrelated, unbumped scoring-algorithm version) — this is a storage-representation flag only. */
@@ -85,13 +99,28 @@ export type CompactContributions = {
  * produces it. A row written before either encoding existed has no
  * `previousUploadPositionsEncoding` key, its `previousUploadPositions` array in
  * full, and a plain `contributions` array — every shape is valid, permanently,
- * with no migration ever required.
+ * with no migration ever required. (3) Any position array may be its compact
+ * run-length form instead (see COMPACT POSITIONS above).
  */
-export type PersistedUnifiedSimilarity = Omit<UnifiedSimilarityResult, "previousUploadPositions" | "contributions"> & {
-  previousUploadPositions?: number[];
+export type PersistedUnifiedSimilarity = Omit<UnifiedSimilarityResult, "contributions" | PositionArrayKey> & {
+  matchedPositions: PersistedPositions;
+  previousUploadPositions?: PersistedPositions;
   previousUploadPositionsEncoding?: typeof PREVIOUS_UPLOAD_POSITIONS_ENCODING_MATCHED_POSITIONS;
+  userSuppliedReferencePositions: PersistedPositions;
+  selectiveCorpusPositions: PersistedPositions;
+  importedSimilarityEvidencePositions: PersistedPositions;
   contributions: UnifiedEvidenceContribution[] | CompactContributions;
 };
+
+/** Every position array of a unified result, in the order computeUnifiedSimilarity emits them. */
+const POSITION_ARRAY_KEYS = [
+  "matchedPositions",
+  "previousUploadPositions",
+  "userSuppliedReferencePositions",
+  "selectiveCorpusPositions",
+  "importedSimilarityEvidencePositions",
+] as const;
+type PositionArrayKey = (typeof POSITION_ARRAY_KEYS)[number];
 
 function isCompactContributions(value: unknown): value is CompactContributions {
   return (
@@ -259,6 +288,10 @@ function representationBytes(fieldName: string, value: unknown): number {
  * form when (and only when) compact writes are enabled (R2 write gate, default
  * OFF) AND that form is proven to reconstruct it exactly — see
  * compactContributionsForPersistence. The two encodings do not interact.
+ *
+ * LAST, and only when compact POSITION writes are enabled (their own gate,
+ * default OFF), every position array still present is replaced by its
+ * run-length form where that is exact and smaller — see withCompactPositions.
  */
 export function compactUnifiedSimilarityForPersistence(
   result: UnifiedSimilarityResult,
@@ -277,24 +310,63 @@ export function compactUnifiedSimilarityForPersistence(
     representationBytes("previousUploadPositionsEncoding", PREVIOUS_UPLOAD_POSITIONS_ENCODING_MATCHED_POSITIONS) <
       representationBytes("previousUploadPositions", previousUploadPositions);
 
-  if (eligible) {
-    return {
-      ...rest,
-      matchedPositions,
-      previousUploadPositionsEncoding: PREVIOUS_UPLOAD_POSITIONS_ENCODING_MATCHED_POSITIONS,
-    };
+  const persisted: PersistedUnifiedSimilarity = eligible
+    ? {
+        ...rest,
+        matchedPositions,
+        previousUploadPositionsEncoding: PREVIOUS_UPLOAD_POSITIONS_ENCODING_MATCHED_POSITIONS,
+      }
+    : {
+        ...rest,
+        matchedPositions,
+        ...(previousUploadPositions !== undefined ? { previousUploadPositions } : {}),
+      };
+  return resolveCompactPositionWrites(options) ? withCompactPositions(persisted) : persisted;
+}
+
+/**
+ * A copy of `persisted` whose position arrays are in their compact run-length
+ * form wherever compactPositionsForPersistence proves that form exact and
+ * smaller. Assigning to the existing keys keeps every key where it was.
+ */
+function withCompactPositions(persisted: PersistedUnifiedSimilarity): PersistedUnifiedSimilarity {
+  const copy = { ...persisted };
+  for (const key of POSITION_ARRAY_KEYS) {
+    const positions = copy[key];
+    if (Array.isArray(positions)) copy[key] = compactPositionsForPersistence(positions);
   }
-  return {
-    ...rest,
-    matchedPositions,
-    ...(previousUploadPositions !== undefined ? { previousUploadPositions } : {}),
-  };
+  return copy;
+}
+
+type PositionArraysExpansion =
+  | { status: "expanded"; value: PersistedUnifiedSimilarity }
+  | { status: "unreadable"; reason: string };
+
+/**
+ * A copy of `persisted` in which every position list that carries a `format`
+ * marker is its exact array again, or `unreadable` when one of them cannot be
+ * expanded. Anything without a marker — the array every earlier row holds, an
+ * absent key — is left exactly as it is for the code below, as before.
+ */
+function expandPositionArrays(persisted: PersistedUnifiedSimilarity): PositionArraysExpansion {
+  let copy: PersistedUnifiedSimilarity | null = null;
+  for (const key of POSITION_ARRAY_KEYS) {
+    const positions = persisted[key];
+    if (!isFormatMarkedPositions(positions)) continue;
+    const expansion = expandPositionsFromPersistence(positions);
+    if (expansion.status === "unreadable") return { status: "unreadable", reason: expansion.reason };
+    copy ??= { ...persisted };
+    copy[key] = expansion.value;
+  }
+  return { status: "expanded", value: copy ?? persisted };
 }
 
 /** Result of expanding a persisted `unifiedSimilarity` — see tryExpandUnifiedSimilarityFromPersistence. */
 export type UnifiedSimilarityExpansion =
   | { status: "expanded"; value: UnifiedSimilarityResult }
-  | { status: "contributions-unreadable"; value: UnifiedSimilarityResult; reason: string };
+  | { status: "contributions-unreadable"; value: UnifiedSimilarityResult; reason: string }
+  /** A compact position list that cannot be expanded exactly. There is no `value`: the credited positions are never guessed or served short. */
+  | { status: "positions-unreadable"; reason: string };
 
 /**
  * Returns a COPY of `persisted` — never mutates the input — with the
@@ -321,9 +393,17 @@ export type UnifiedSimilarityExpansion =
  * admin/internal diagnostic data, so the CALLER decides whether serving without
  * it is safe, see tryDecodeReportFromPersistence); the returned `value` then
  * carries the absence-compatible `[]` and is never a guessed array.
+ *
+ * COMPACT POSITIONS: a position list in its run-length form is expanded to the
+ * exact array first, so everything above sees the same arrays it always did. One
+ * that cannot be expanded (an unknown version, a damaged table) is reported as
+ * `positions-unreadable` with NO value — unlike contributions these are the
+ * positions the score is made of, so the caller must refuse the report.
  */
 export function tryExpandUnifiedSimilarityFromPersistence(persisted: PersistedUnifiedSimilarity): UnifiedSimilarityExpansion {
-  const { previousUploadPositionsEncoding, previousUploadPositions, ...restWithContributions } = persisted;
+  const positions = expandPositionArrays(persisted);
+  if (positions.status === "unreadable") return { status: "positions-unreadable", reason: positions.reason };
+  const { previousUploadPositionsEncoding, previousUploadPositions, ...restWithContributions } = positions.value;
   let contributionsFailure: string | null = null;
   let rest: typeof restWithContributions = restWithContributions;
   const contributions = restWithContributions.contributions as unknown;
@@ -362,9 +442,15 @@ export function tryExpandUnifiedSimilarityFromPersistence(persisted: PersistedUn
  * no report data). Production READ boundaries must NOT use this — they go through
  * tryDecodeReportFromPersistence (lib/report-persistence.ts), which decides
  * whether serving without the diagnostics is safe for the viewer.
+ *
+ * Lenient about contributions only: an unreadable compact POSITION list throws,
+ * because there is no result to return that would not misstate the evidence.
  */
 export function expandUnifiedSimilarityFromPersistence(persisted: PersistedUnifiedSimilarity): UnifiedSimilarityResult {
   const expansion = tryExpandUnifiedSimilarityFromPersistence(persisted);
+  if (expansion.status === "positions-unreadable") {
+    throw new Error(`persisted unifiedSimilarity positions are unreadable (${expansion.reason})`);
+  }
   if (expansion.status === "contributions-unreadable") {
     console.error(`persisted unifiedSimilarity.contributions is unreadable (${expansion.reason}); serving none`);
   }

@@ -9,7 +9,14 @@ import {
   expandEvidenceInterpretationFromPersistence,
   type PersistedEvidenceInterpretation,
 } from "./evidence-interpretation/persistence";
-import { resolveCompactPersistenceWrites, type CompactPersistenceWriteOptions } from "./report-compact-persistence-flag";
+import { resolveCompactPersistenceWrites, resolveCompactPositionWrites, type CompactPersistenceWriteOptions } from "./report-compact-persistence-flag";
+import {
+  compactPositionsForPersistence,
+  expandPositionsFromPersistence,
+  isFormatMarkedPositions,
+  type PersistedPositions,
+} from "./position-runs-persistence";
+import { persistedPayloadSize } from "./report-transport-limits";
 
 /**
  * C2 — THE report persistence boundary.
@@ -21,7 +28,7 @@ import { resolveCompactPersistenceWrites, type CompactPersistenceWriteOptions } 
  * ENCODED form (what actually lands in `payload_json`), and every reader that
  * hands a stored report to anything that understands the public shape (GET,
  * SSR first paint, admin readers) decodes it first. Compaction knowledge lives
- * ONLY in the two codecs this file composes — never in matcher, scoring, or UI
+ * ONLY in the codecs this file composes — never in matcher, scoring, or UI
  * code — so the customer-facing report is unaware persistence is compact.
  *
  * Both codecs are lossless and versioned; both accept every legacy row
@@ -44,12 +51,26 @@ import { resolveCompactPersistenceWrites, type CompactPersistenceWriteOptions } 
  *     REPORT_COMPACT_PERSISTENCE_WRITE_ENABLED is "true" (default OFF) — see
  *     lib/report-compact-persistence-flag.ts. DECODING always understands both
  *     forms, whatever the flag says.
+ *
+ * COMPACT POSITIONS — a third lossless, versioned encoding at this same boundary
+ * (lib/position-runs-persistence.ts), under its own write gate
+ * (REPORT_COMPACT_POSITIONS_WRITE_ENABLED, default OFF): the matched-word
+ * position arrays — `unifiedSimilarity`'s, and the report's own
+ * `archiveMatchedPositions` — persisted as exact run-length ranges instead of
+ * one number per matched word, so the persisted size no longer grows with how
+ * much of the document matched. Decoding returns the identical arrays. A compact
+ * position list that cannot be expanded exactly makes the report unreadable for
+ * EVERY viewer: those positions are the credited evidence itself, so there is no
+ * "serve it without them" outcome. Because readers are still sent the expanded
+ * arrays, a report the ranges alone would admit must also be servable — see
+ * MAX_SERVED_REPORT_BYTES / encodeReportJsonForPersistence.
  */
 
-/** `SimilarityReport` as it may sit in `payload_json`: the same fields, but `unifiedSimilarity` and `evidenceInterpretation` may be in their compact persisted forms. */
-export type PersistedSimilarityReport = Omit<SimilarityReport, "unifiedSimilarity" | "evidenceInterpretation"> & {
+/** `SimilarityReport` as it may sit in `payload_json`: the same fields, but `unifiedSimilarity`, `evidenceInterpretation` and `archiveMatchedPositions` may be in their compact persisted forms. */
+export type PersistedSimilarityReport = Omit<SimilarityReport, "unifiedSimilarity" | "evidenceInterpretation" | "archiveMatchedPositions"> & {
   unifiedSimilarity?: PersistedUnifiedSimilarity;
   evidenceInterpretation?: PersistedEvidenceInterpretation;
+  archiveMatchedPositions?: PersistedPositions;
 };
 
 /**
@@ -61,16 +82,70 @@ export type PersistedSimilarityReport = Omit<SimilarityReport, "unifiedSimilarit
  * `contributions` as the plain array, `evidenceInterpretation` in full — plus the
  * older, already-shipped `previousUploadPositions` elision. Pass `compactWrites`
  * to pin the mode (a caller that measures and then writes resolves it once).
+ *
+ * Independently, when compact POSITION writes are enabled (their own gate,
+ * default OFF; `compactPositions` pins it) the position arrays are persisted as
+ * run-length ranges: `unifiedSimilarity`'s through its codec, and
+ * `archiveMatchedPositions` here. Only a real array is ever replaced, and only
+ * by a form proven to expand back to it.
  */
 export function encodeReportForPersistence(report: SimilarityReport, options?: CompactPersistenceWriteOptions): PersistedSimilarityReport {
   const compactWrites = resolveCompactPersistenceWrites(options);
+  const compactPositions = resolveCompactPositionWrites(options);
   return {
     ...report,
-    ...(report.unifiedSimilarity ? { unifiedSimilarity: compactUnifiedSimilarityForPersistence(report.unifiedSimilarity, { compactWrites }) } : {}),
+    ...(report.unifiedSimilarity
+      ? { unifiedSimilarity: compactUnifiedSimilarityForPersistence(report.unifiedSimilarity, { compactWrites, compactPositions }) }
+      : {}),
     ...(report.evidenceInterpretation
       ? { evidenceInterpretation: compactEvidenceInterpretationForPersistence(report.evidenceInterpretation, { compactWrites }) }
       : {}),
+    ...(compactPositions && Array.isArray(report.archiveMatchedPositions)
+      ? { archiveMatchedPositions: compactPositionsForPersistence(report.archiveMatchedPositions) }
+      : {}),
   };
+}
+
+/**
+ * COMPACT POSITIONS SERVING BOUND — the most a report admitted ONLY because its
+ * positions are stored as ranges may weigh when it is SERVED: the decoded report,
+ * which is what GET and the SSR first paint send, in UTF-8 bytes.
+ *
+ * With arrays, the persisted ceiling also bounded what a reader is sent: GET and
+ * SSR re-expand the position lists (and the interpretation's positionsByKind), and
+ * an admitted report was served at ~4 MB at most. Ranges cut that link — a
+ * 200,000-word exact resubmission stores at ~1.4 MB but is served at ~5.2 MB, past
+ * the 4.5 MB response-body limit Vercel documents for a function response that is
+ * not streamed. Until serving is shown not to be bound by that limit, such a report
+ * is refused exactly as it was before ranges (413), never saved and then
+ * unopenable. A report whose ARRAY form fits the persisted ceiling is never subject
+ * to this: it was accepted before ranges existed, and still is.
+ */
+export const MAX_SERVED_REPORT_BYTES = 4_000_000;
+
+/** UTF-8 bytes of `report` as a reader is sent it (its decoded, runtime shape). Server-only. */
+export function servedReportBytes(report: SimilarityReport): number {
+  return Buffer.byteLength(JSON.stringify(report), "utf8");
+}
+
+/**
+ * THE `payload_json` text for `report`, for a writer that then checks it against
+ * `ceiling` (app/api/reports/route.ts's persisted-size checks): exactly
+ * `JSON.stringify(encodeReportForPersistence(report))`, except for the one report
+ * compact positions would newly admit while it cannot be served within
+ * MAX_SERVED_REPORT_BYTES — for that one the ARRAY form is returned, which is over
+ * `ceiling`, so the caller's existing check refuses it (413) as it always did.
+ * Nothing the array form admits is ever refused, and with compact position writes
+ * off this is the plain encoding.
+ */
+export function encodeReportJsonForPersistence(report: SimilarityReport, options: CompactPersistenceWriteOptions & { ceiling: number }): string {
+  const compactWrites = resolveCompactPersistenceWrites(options);
+  const compactPositions = resolveCompactPositionWrites(options);
+  const json = JSON.stringify(encodeReportForPersistence(report, { compactWrites, compactPositions }));
+  if (!compactPositions || persistedPayloadSize(json) > options.ceiling) return json;
+  const arrays = JSON.stringify(encodeReportForPersistence(report, { compactWrites, compactPositions: false }));
+  if (persistedPayloadSize(arrays) <= options.ceiling) return json;
+  return servedReportBytes(report) <= MAX_SERVED_REPORT_BYTES ? json : arrays;
 }
 
 /**
@@ -85,6 +160,8 @@ export type ReportPersistenceFailureReason =
   | "corrupt_evidence_interpretation"
   /** `unifiedSimilarity.contributions` (admin/internal diagnostics) that is malformed — only fatal when the viewer receives contributions */
   | "corrupt_contributions"
+  /** a compact matched-position list (`unifiedSimilarity`'s, or `archiveMatchedPositions`) that is malformed or does not add up to its own count — fatal for every viewer */
+  | "corrupt_matched_positions"
   /** the parsed payload is not even a JSON object */
   | "invalid_persisted_report";
 
@@ -143,6 +220,42 @@ function logUnreadable(reason: ReportPersistenceFailureReason, detail: string, o
 
 const isUnsupportedFormat = (detail: string): boolean => detail.startsWith("UNSUPPORTED_FORMAT");
 
+/** The one refusal a position list that cannot be expanded produces, logged like every other (decoder code only, never content). */
+function refuseUnreadablePositions(detail: string): { ok: false; reason: ReportPersistenceFailureReason } {
+  const reason: ReportPersistenceFailureReason = isUnsupportedFormat(detail) ? "unsupported_compact_format" : "corrupt_matched_positions";
+  logUnreadable(reason, detail, "refused");
+  return { ok: false, reason };
+}
+
+/**
+ * A stored `archiveMatchedPositions` as the array it stands for. A value with no
+ * `format` marker — the array every earlier row holds, or nothing — is left
+ * exactly as it is (`expanded: false`); the compact form is expanded; one that
+ * cannot be expanded exactly is refused.
+ */
+function expandArchiveMatchedPositions(
+  stored: unknown,
+): { ok: true; expanded: false } | { ok: true; expanded: true; value: number[] } | { ok: false; reason: ReportPersistenceFailureReason } {
+  if (!isFormatMarkedPositions(stored)) return { ok: true, expanded: false };
+  const expansion = expandPositionsFromPersistence(stored);
+  return expansion.status === "unreadable" ? refuseUnreadablePositions(expansion.reason) : { ok: true, expanded: true, value: expansion.value };
+}
+
+/**
+ * `archiveMatchedPositions` of a parsed `payload_json`, as the array every
+ * scorer takes. For the internal readers that feed a stored report's own fields
+ * straight back into scoring without decoding the whole report (the deferred
+ * Selective Corpus finalizer, the self-heal): the same rule as the decoder
+ * below, except that a value that cannot be expanded THROWS
+ * (ReportPersistenceDecodeError), so the caller's existing failure handling
+ * leaves the row untouched instead of scoring it without its archive evidence.
+ */
+export function readPersistedArchiveMatchedPositions(persisted: { archiveMatchedPositions?: unknown }): number[] | undefined {
+  const expansion = expandArchiveMatchedPositions(persisted.archiveMatchedPositions);
+  if (!expansion.ok) throw new ReportPersistenceDecodeError(expansion.reason);
+  return expansion.expanded ? expansion.value : (persisted.archiveMatchedPositions as number[] | undefined);
+}
+
 /**
  * Decodes a parsed `payload_json` to the exact runtime/public shape —
  * `unifiedSimilarity` fully expanded, `evidenceInterpretation` expanded, and no
@@ -178,8 +291,14 @@ export function tryDecodeReportFromPersistence(persisted: unknown, options: Repo
     decoded.evidenceInterpretation = expansion.value;
   }
 
+  // The credited positions next: like the explanation, a report is never served with them missing, short or guessed.
+  const archivePositions = expandArchiveMatchedPositions(source.archiveMatchedPositions);
+  if (!archivePositions.ok) return archivePositions;
+  if (archivePositions.expanded) decoded.archiveMatchedPositions = archivePositions.value;
+
   if (source.unifiedSimilarity) {
     const expansion = tryExpandUnifiedSimilarityFromPersistence(source.unifiedSimilarity);
+    if (expansion.status === "positions-unreadable") return refuseUnreadablePositions(expansion.reason);
     decoded.unifiedSimilarity = expansion.value;
     if (expansion.status === "contributions-unreadable") {
       const reason: ReportPersistenceFailureReason = isUnsupportedFormat(expansion.reason) ? "unsupported_compact_format" : "corrupt_contributions";

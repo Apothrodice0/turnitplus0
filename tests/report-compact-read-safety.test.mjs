@@ -608,14 +608,20 @@ test("W4. STRUCTURAL — no persistence path can bypass the gate: the two compac
     ["lib/evidence-interpretation/persistence.ts", 1],       // definition (its own round-trip verification uses expand, not compact)
     ["lib/unified-similarity-persistence.ts", 1],            // definition
     ["lib/report-persistence.ts", 2],                        // encodeReportForPersistence — the gate-aware boundary
-    ["lib/report-evidence-interpretation.ts", 2],            // buildFinalizedReportEvidenceInterpretation — resolves the mode ONCE
+    ["lib/report-evidence-interpretation.ts", 3],            // buildFinalizedReportEvidenceInterpretation — resolves the mode ONCE; the third call only MEASURES the array form for the compact-positions serving bound, with that same resolved mode, and is never persisted
     ["lib/report-primary-similarity.ts", 2],                 // persistRefreshedSimilarity + persistSelectiveCorpusAuthoritativeFinalization
   ]);
   assert.deepEqual([...callers.entries()].sort(), [...expected.entries()].sort(), "an unreviewed caller of a compact codec appeared — it must go through the gate");
   for (const [file] of callers) assert.equal(file.startsWith("app/"), false, "no route calls a compact codec directly");
 
   const routeSrc = fs.readFileSync("app/api/reports/route.ts", "utf8");
-  assert.match(routeSrc, /JSON\.stringify\(encodeReportForPersistence\(enriched \?\? obj\)\)/, "the route persists only the encoded (gated) report");
+  // The route hands the report to encodeReportJsonForPersistence, which only ever returns JSON.stringify of
+  // encodeReportForPersistence's output (the gated encoding, or its array-position form for the serving bound).
+  assert.match(routeSrc, /return encodeReportJsonForPersistence\(enriched \?\? obj, \{ ceiling: persistedCeiling \}\);/, "the route persists only the encoded (gated) report");
+  const persistenceSrc = fs.readFileSync("lib/report-persistence.ts", "utf8");
+  const boundedEncoder = persistenceSrc.match(/export function encodeReportJsonForPersistence[\s\S]*?\n\}\r?\n/)?.[0] ?? "";
+  assert.equal((boundedEncoder.match(/JSON\.stringify\(encodeReportForPersistence\(report, \{ compactWrites, compactPositions(?:: false)? \}\)\)/g) ?? []).length, 2, "both forms it can return are the gated encoding, with the resolved compactWrites");
+  assert.equal((boundedEncoder.match(/\breturn\b/g) ?? []).length, 3, "and it returns nothing else");
   // the gate is consulted inside the codecs by default and the finalizer hands its resolved mode to the writer
   assert.match(fs.readFileSync("lib/selective-corpus-authoritative.ts", "utf8"), /compactWrites:\s*prepared\.compactWrites/);
   assert.match(fs.readFileSync("lib/report-evidence-interpretation.ts", "utf8"), /const compactWrites = resolveCompactPersistenceWrites\(opts\)/);

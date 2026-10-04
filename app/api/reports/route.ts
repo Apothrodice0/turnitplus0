@@ -40,7 +40,8 @@ import { referenceTransportBudgetError } from '../../../lib/user-supplied-refere
 import { MAX_REPORT_SAVE_REQUEST_BYTES, persistedPayloadSize } from '../../../lib/report-transport-limits';
 import { logReportSaveRejectedTelemetry } from '../../../lib/report-save-telemetry';
 import { isCompactAiAnalysis, validateCompactAiAnalysis } from '../../../lib/ai-passage-table';
-import { encodeReportForPersistence, isEvidenceInterpretationCustomerReadable } from '../../../lib/report-persistence';
+import { encodeReportJsonForPersistence, isEvidenceInterpretationCustomerReadable } from '../../../lib/report-persistence';
+import { isFormatMarkedPositions } from '../../../lib/position-runs-persistence';
 import { scheduleReportShadowEvaluations } from '../../../lib/report-shadow-evaluations';
 import { effectiveSelectiveCorpusAuthoritativeEnabled } from '../../../lib/selective-corpus/flag';
 import type { SimilarityReport, ReportHistoricalSubmissionMatch } from '../../../lib/report-types';
@@ -558,6 +559,16 @@ export async function POST(request: Request) {
         logReportSaveRejectedTelemetry({ reason: 'MALFORMED_REQUEST', status: 400 });
         return new NextResponse(JSON.stringify({ error: 'Invalid AI result' }), { status: 400 });
       }
+    }
+
+    // COMPACT POSITIONS TRUST BOUNDARY (lib/position-runs-persistence.ts). The run-length form of a position list is a
+    // PERSISTENCE-only representation that only this server writes, from an array it holds. A browser relays its archive
+    // positions as that array and nothing else: a `format`-marked value here is refused before anything is read or
+    // written, so a few bytes of request can never be stored as a list that every later read must expand to millions of
+    // positions. (`unifiedSimilarity` needs no such check — whatever the client sent for it is discarded below.)
+    if (typeof payload === 'object' && payload !== null && isFormatMarkedPositions((payload as { archiveMatchedPositions?: unknown }).archiveMatchedPositions)) {
+      logReportSaveRejectedTelemetry({ reason: 'MALFORMED_REQUEST', status: 400 });
+      return new NextResponse(JSON.stringify({ error: 'Invalid matched positions' }), { status: 400 });
     }
 
     // EXPLICIT READY => COMPLETE ANALYSIS. ai_status 'ready' means the AI analysis is COMPLETE: deriveRoomStatus
@@ -1215,7 +1226,12 @@ export async function POST(request: Request) {
       // strictly AFTER withEvidenceInterpretation has built from the FULL
       // EXPANDED unifiedSimilarity (see lib/unified-similarity-persistence.ts's
       // header for why that ordering is safe).
-      const finalizeReportJson = (obj: SimilarityReport, hsm?: ReportHistoricalSubmissionMatch | null): string => {
+      //
+      // COMPACT POSITIONS: encoded against `persistedCeiling` so that a report
+      // the ranges alone would admit is also servable (lib/report-persistence.ts
+      // MAX_SERVED_REPORT_BYTES); one that is not comes back in its over-limit
+      // array form and the same checks refuse it, as they did before ranges.
+      const finalizeReportJson =(obj: SimilarityReport, hsm?: ReportHistoricalSubmissionMatch | null): string => {
         let enriched: SimilarityReport | null = null;
         try {
           enriched = underReportContract(() => withEvidenceInterpretation(obj, {
@@ -1230,7 +1246,7 @@ export async function POST(request: Request) {
           console.error('report V2 interpretation attach failed:', err instanceof Error ? err.message : String(err));
           if (obj.unifiedSimilarity) throw err;
         }
-        return JSON.stringify(encodeReportForPersistence(enriched ?? obj));
+        return encodeReportJsonForPersistence(enriched ?? obj, { ceiling: persistedCeiling });
       };
       // Base = the SERVER-RESOLVED payload (client fields, but
       // externalAcademicEvidence forced to the verified set + the verified
