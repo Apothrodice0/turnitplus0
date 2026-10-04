@@ -46,7 +46,8 @@ import {
 import { MAX_REPORT_SAVE_REQUEST_BYTES } from "../lib/report-transport-limits.ts";
 import { TERMINAL_AI_RESERVE_CHARS } from "../lib/ai-unavailable-state.ts";
 import { finalizeSelectiveCorpusAuthoritativeReport } from "../lib/selective-corpus-authoritative.ts";
-import { selfHealUnifiedSimilarity } from "../lib/report-primary-similarity.ts";
+import { selfHealUnifiedSimilarity, persistSelectiveCorpusAuthoritativeUnstorable } from "../lib/report-primary-similarity.ts";
+import { refreshSelectiveCorpusCompletionSignal } from "../lib/report-evidence-interpretation.ts";
 import { findRoomOccupant } from "../lib/reports-repo.ts";
 
 /**
@@ -278,6 +279,26 @@ const completedShadowResult = (ranges) => ({
   state: "COMPLETED",
   ...(ranges.length > 0 ? { verifiedEvidence: [{ sourceLabel: "S1", matchedPassages: ranges.map(([s, e]) => ({ submittedWordStart: s, submittedWordEnd: e, matchedWordCount: e - s + 1 })) }] } : {}),
 });
+
+/**
+ * A pending report whose FINAL form cannot be stored ends terminally with no score — "incomplete", reason
+ * PERSISTENCE_LIMIT, unifiedSimilarityFailed, no unifiedSimilarity — with every other stored field exactly as it was,
+ * the row within the ceiling, and a later finalizer run (what the recovery sweep would do) a clean no-op.
+ */
+async function assertFinalizedUnstorable(key, before, label) {
+  const afterText = await rawRow(key.deviceKey, key.id);
+  assert.ok(afterText.length <= MAX, `${label}: the terminal row (${afterText.length}) is within the ceiling`);
+  const after = JSON.parse(afterText);
+  assert.equal(after.selectiveCorpusAuthoritativeStatus, "incomplete", `${label}: terminal, no longer pending`);
+  assert.equal(after.selectiveCorpusAuthoritativeIncompleteReason, "PERSISTENCE_LIMIT", label);
+  assert.equal(after.unifiedSimilarityFailed, true, `${label}: similarity unavailable`);
+  assert.equal("unifiedSimilarity" in after, false, `${label}: no score and no truncated evidence`);
+  const rest = ({ selectiveCorpusAuthoritativeStatus, selectiveCorpusAuthoritativeIncompleteReason, selectiveCorpusAuthoritativeClaimedAt, unifiedSimilarityFailed, ...others }) => others;
+  assert.deepEqual(rest(after), rest(JSON.parse(before)), `${label}: every other stored field exactly as it was`);
+  const again = await finalizeSelectiveCorpusAuthoritativeReport(db, { reportDeviceKey: key.deviceKey, reportId: key.id, accountId: null, shadowResult: completedShadowResult([]) });
+  assert.deepEqual(again, { outcome: "not-pending" }, `${label}: a later attempt finds nothing to do`);
+  assert.equal(await rawRow(key.deviceKey, key.id), afterText, `${label}: and writes nothing`);
+}
 
 /** A unified result with every shape at once, from the real scorer: archive + two prior sources (one with 12 passages = 10 displayed + 2 additional ranges, overlapping/adjacent to the archive), a SELF source that is excluded, and user-supplied-reference + Selective Corpus channels. */
 function richUnifiedSimilarity() {
@@ -756,7 +777,7 @@ test("DEFERRED FINALIZER: a pending row whose archive positions are stored as ra
   assert.equal(outcomes.ranges.selectiveCorpusAuthoritativeStatus, "completed");
 });
 
-test("DEFERRED FINALIZER size check: the final report is measured AS STORED — a near-ceiling row whose archive positions are stored as ranges is finalized, and is left pending and untouched when the final union would be written as arrays", async () => {
+test("DEFERRED FINALIZER size check: the final report is measured AS STORED — a near-ceiling row whose archive positions are stored as ranges is finalized, and ends with no score (incomplete, PERSISTENCE_LIMIT) when the final union would be written as arrays", async () => {
   // A 60,000-word document that is entirely an archive match, with other content bringing the stored pending row to
   // 3,000 characters under the ceiling. Its archive positions cost ~349,000 characters as an array and ~60 as ranges.
   const text = words(60_000, 61).join(" ");
@@ -784,7 +805,8 @@ test("DEFERRED FINALIZER size check: the final report is measured AS STORED — 
   assert.ok(JSON.stringify(final).length > MAX + 600_000, "expanded, the same report is far over the ceiling: only the stored form is what the check may measure");
 
   // the same row finalized with the positions gate OFF would add the union as a ~349,000-character array: it does not
-  // fit, so NOTHING is written — the row stays pending, byte for byte, with no score and no truncated evidence
+  // fit, so no score is written — the report ends "incomplete" (PERSISTENCE_LIMIT), similarity unavailable, with no
+  // truncated evidence, instead of staying pending for the recovery sweep to re-run forever
   const refused = { deviceKey: "cp-fin-near-2", id: "fin-near-2" };
   await seed(refused);
   const before = await rawRow(refused.deviceKey, refused.id);
@@ -796,8 +818,8 @@ test("DEFERRED FINALIZER size check: the final report is measured AS STORED — 
   } finally {
     console.error = silenced;
   }
-  assert.deepEqual(outcome, { outcome: "persistence-limit-exceeded" });
-  assert.equal(await rawRow(refused.deviceKey, refused.id), before, "the pending row is untouched");
+  assert.deepEqual(outcome, { outcome: "persistence-limit-exceeded", status: "incomplete" });
+  await assertFinalizedUnstorable(refused, before, "arrays over the ceiling");
 
   // and the measurement itself: with the stored (range) form it is the stored size plus the new keys; without it, the expanded size
   const stored = JSON.parse(before);
@@ -909,7 +931,7 @@ test("SERVING BOUND (route): the POST route encodes through the bounded encoder 
   assert.doesNotMatch(source, /JSON\.stringify\(encodeReportForPersistence\(/, "no unbounded encoding path is left in the route");
 });
 
-test("SERVING BOUND (deferred finalizer): a final report only its ranges let fit is finalized when it can be served, and left pending and untouched when it cannot", async () => {
+test("SERVING BOUND (deferred finalizer): a final report only its ranges let fit is finalized when it can be served, and ends with no score (incomplete, PERSISTENCE_LIMIT) when it cannot", async () => {
   // Two-letter words keep the manuscript short while every word matches, so the report's evidence (one number per
   // matched word in each expanded list) dwarfs its text — the shape that lets ranges admit more than readers can be sent.
   const twoLetterText = (n) => Array.from({ length: n }, (_, i) => String.fromCharCode(97 + (i % 26), 97 + ((i * 7 + 3) % 26))).join(" ");
@@ -936,14 +958,138 @@ test("SERVING BOUND (deferred finalizer): a final report only its ranges let fit
       const served = servedReportBytes(final);
       assert.ok(served <= MAX_SERVED_REPORT_BYTES && served > MAX, `served ${served}: past the persisted ceiling, within the serving bound`);
 
-      // 200,000 words: the served report would be ~4.8 MB -> nothing written, the row stays pending, byte for byte
+      // 200,000 words: the served report would be ~4.8 MB -> no score is written; the report ends terminally,
+      // similarity unavailable, instead of staying pending for the recovery sweep to re-run forever
       const tooBig = { deviceKey: "cp-serve-2", id: "serve-2" };
       const before = await seed(tooBig, 200_000);
       const refused = await finalizeSelectiveCorpusAuthoritativeReport(db, { reportDeviceKey: tooBig.deviceKey, reportId: tooBig.id, accountId: null, shadowResult: completedShadowResult([]) });
-      assert.deepEqual(refused, { outcome: "persistence-limit-exceeded" });
-      assert.equal(await rawRow(tooBig.deviceKey, tooBig.id), before, "the pending row is untouched: no score, no truncated evidence");
+      assert.deepEqual(refused, { outcome: "persistence-limit-exceeded", status: "incomplete" });
+      await assertFinalizedUnstorable(tooBig, before, "over the serving bound");
     });
   } finally {
     console.error = silenced;
   }
+});
+
+// ===============================================================================================================
+// 6. an authoritative report whose final form cannot be stored ends terminally — never pending forever
+// ===============================================================================================================
+test("AUTHORITATIVE OVERFLOW IS TERMINAL through the REAL POST: the deferred finalizer ends the report 'incomplete' (PERSISTENCE_LIMIT) with no score — the owner's GET and room show it unavailable, a later whole-report resave cannot land a partial score — and with ranges the same report is finalized with its full score", async () => {
+  const previous = { a: process.env.SELECTIVE_CORPUS_AUTHORITATIVE_ENABLED, s: process.env.SELECTIVE_CORPUS_SHADOW_ENABLED };
+  process.env.SELECTIVE_CORPUS_AUTHORITATIVE_ENABLED = "true";
+  process.env.SELECTIVE_CORPUS_SHADOW_ENABLED = "true";
+  const silenced = console.error;
+  console.error = () => {};
+  try {
+    // the 12,000-word exact resubmission padded to within 20,000 characters of the ceiling (see THE CASE THIS FIXES):
+    // POST stores the pending row (no score yet); its final report adds the union as an array and cannot be stored.
+    const control = await account();
+    assert.equal((await withGates({ positions: undefined }, () => post(control, requestBody(control, "auth-ctl", { text: RESUBMITTED })))).status, 200);
+    const controlRaw = JSON.parse(await rawRow(control.deviceKey, "auth-ctl"));
+    const pad = MAX - 20_000 - JSON.stringify({ ...controlRaw, unifiedSimilarity: undefined }).length;
+    const body = (acc, id) => requestBody(acc, id, { text: RESUBMITTED, assignment: "x".repeat(pad) });
+
+    const arrays = await account();
+    const res = await withGates({ positions: undefined }, () => post(arrays, body(arrays, "auth-over")));
+    assert.equal(res.status, 200, "the pending row fits: the save itself is accepted");
+    const row = JSON.parse(await rawRow(arrays.deviceKey, "auth-over"));
+    assert.equal(row.selectiveCorpusAuthoritativeStatus, "incomplete", "the deferred finalizer ran (inline here) and ended it — not pending");
+    assert.equal(row.selectiveCorpusAuthoritativeIncompleteReason, "PERSISTENCE_LIMIT");
+    assert.equal(row.unifiedSimilarityFailed, true);
+    assert.equal("unifiedSimilarity" in row, false, "no score");
+
+    const got = await get(arrays, "auth-over");
+    assert.equal(got.status, 200, "the report opens");
+    assert.equal(got.json.payload.unifiedSimilarity, undefined, "no score is served");
+    assert.equal(got.json.payload.unifiedSimilarityFailed, true, "the reader shows 'Similarity unavailable'");
+    assert.equal(got.json.payload.reportCompletion.signals.selectiveCorpus, "PARTIAL", "and the completion says the check did not complete");
+    for (const internal of ["selectiveCorpusAuthoritativeStatus", "selectiveCorpusAuthoritativeIncompleteReason"]) assert.equal(internal in got.json.payload, false, `${internal} stays server-internal`);
+    const occupant = await findRoomOccupant(db, arrays.userId, 0);
+    // the room decides its similarity tile from similarityStatus alone: "failed" renders "— Unavailable", never a number
+    // (app/reports/rooms/[room]/room-page-shell.tsx) — the same persisted terminal state as any other failed similarity
+    assert.equal(occupant.report?.similarityStatus, "failed", "the room shows it unavailable");
+
+    // the client's whole-report resave (what the automatic AI save sends) recomputes without the Selective Corpus and,
+    // as arrays, is still over the ceiling: refused, the terminal row unchanged — never a partial score
+    const stored = await rawRow(arrays.deviceKey, "auth-over");
+    const resave = await withGates({ positions: undefined }, () => post(arrays, body(arrays, "auth-over")));
+    assert.equal(resave.status, 413);
+    assert.equal(await rawRow(arrays.deviceKey, "auth-over"), stored);
+
+    // with ranges the very same report fits and is finalized with its full score
+    const ranges = await account();
+    assert.equal((await withGates({ positions: "true" }, () => post(ranges, body(ranges, "auth-ranges")))).status, 200);
+    const finalRow = JSON.parse(await rawRow(ranges.deviceKey, "auth-ranges"));
+    assert.equal(finalRow.unifiedSimilarityFailed, false);
+    const finalUnified = decodeReportFromPersistence(finalRow).unifiedSimilarity;
+    assert.equal(finalUnified.unifiedScore, 100);
+    assertSamePositions(finalUnified.matchedPositions, range(0, RESUBMITTED_WORDS - 1));
+  } finally {
+    console.error = silenced;
+    for (const [key, value] of [["SELECTIVE_CORPUS_AUTHORITATIVE_ENABLED", previous.a], ["SELECTIVE_CORPUS_SHADOW_ENABLED", previous.s]]) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test("TERMINAL WRITE edges: compare-and-swap on the exact stored text, measured before it is written — a changed row is left alone, a row at the ceiling loses only the explanation of the score it will never show, a row that cannot take the terminal fields at all is left pending", async () => {
+  const text = words(2000, 91).join(" ");
+  const seedPending = async (key, extra = {}) => {
+    await seedRow(key.deviceKey, key.id, pendingPayload({ text, wordCount: 2000, archiveMatchedPositions: range(10, 60), compactPositions: true, extra }));
+    return rawRow(key.deviceKey, key.id);
+  };
+  const ids = (key) => ({ reportDeviceKey: key.deviceKey, reportId: key.id });
+
+  // a row that changed after it was read: nothing written
+  const changed = { deviceKey: "cp-term-1", id: "term-1" };
+  const readText = await seedPending(changed);
+  await db.execute({ sql: "UPDATE saved_reports SET payload_json = json_set(payload_json, '$.aiScore', 4) WHERE device_key = ? AND id = ?", args: [changed.deviceKey, changed.id] });
+  const current = await rawRow(changed.deviceKey, changed.id);
+  assert.deepEqual(await persistSelectiveCorpusAuthoritativeUnstorable(db, ids(changed), { payloadJson: readText }), { written: false, rowsAffected: 0 });
+  assert.equal(await rawRow(changed.deviceKey, changed.id), current);
+
+  // a row that is not pending: nothing written
+  const done = { deviceKey: "cp-term-2", id: "term-2" };
+  const doneText = await seedPending(done, { selectiveCorpusAuthoritativeStatus: "completed" });
+  assert.equal((await persistSelectiveCorpusAuthoritativeUnstorable(db, ids(done), { payloadJson: doneText })).written, false);
+  assert.equal(await rawRow(done.deviceKey, done.id), doneText);
+
+  // a pending row exactly at the ceiling: the three terminal fields only fit without the (now meaningless) explanation
+  const full = { deviceKey: "cp-term-3", id: "term-3" };
+  const payload = pendingPayload({ text, wordCount: 2000, archiveMatchedPositions: range(10, 60), compactPositions: true, extra: { testPadding: "" } });
+  payload.testPadding = "x".repeat(MAX - JSON.stringify(payload).length);
+  assert.equal(JSON.stringify(payload).length, MAX);
+  await seedRow(full.deviceKey, full.id, payload);
+  const fullText = await rawRow(full.deviceKey, full.id);
+  assert.equal((await persistSelectiveCorpusAuthoritativeUnstorable(db, ids(full), { payloadJson: fullText })).written, true);
+  const after = JSON.parse(await rawRow(full.deviceKey, full.id));
+  assert.ok(JSON.stringify(after).length <= MAX);
+  assert.equal(after.selectiveCorpusAuthoritativeStatus, "incomplete");
+  assert.equal(after.unifiedSimilarityFailed, true);
+  assert.equal("evidenceInterpretation" in after, false, "only the explanation is left out");
+  assert.equal(after.testPadding, payload.testPadding);
+  assert.equal(after.text, text);
+
+  // the same at the ceiling with no explanation to leave out: nothing written, the row stays pending (the sweep may retry)
+  const bare = { deviceKey: "cp-term-4", id: "term-4" };
+  const { evidenceInterpretation: _ei, ...noExplanation } = payload;
+  noExplanation.testPadding = "x".repeat(payload.testPadding.length + (MAX - JSON.stringify({ ...noExplanation }).length));
+  assert.equal(JSON.stringify(noExplanation).length, MAX);
+  await seedRow(bare.deviceKey, bare.id, noExplanation);
+  const bareText = await rawRow(bare.deviceKey, bare.id);
+  assert.equal((await persistSelectiveCorpusAuthoritativeUnstorable(db, ids(bare), { payloadJson: bareText })).written, false);
+  assert.equal(await rawRow(bare.deviceKey, bare.id), bareText);
+});
+
+test("THE NEW REASON reaches the completion diagnostics only: PERSISTENCE_LIMIT is a known Selective Corpus incomplete reason, refreshed into the customer completion as PARTIAL and named for an admin", () => {
+  const report = {
+    selectiveCorpusAuthoritativeStatus: "incomplete",
+    selectiveCorpusAuthoritativeIncompleteReason: "PERSISTENCE_LIMIT",
+    academicEvidenceStatus: "COMPLETE_NO_MATCHES",
+    reportCompletion: { state: "COMPLETED", signals: { academicSearch: "COMPLETE_NO_MATCHES", selectiveCorpus: null, extraction: "UNKNOWN", userSuppliedReferences: null, unverifiedCandidateCount: 0, priorSubmission: null }, diagnostics: [] },
+  };
+  refreshSelectiveCorpusCompletionSignal(report);
+  assert.equal(report.reportCompletion.signals.selectiveCorpus, "PARTIAL");
+  assert.ok(report.reportCompletion.diagnostics.some((d) => d.channel === "SELECTIVE_CORPUS" && d.reason === "PERSISTENCE_LIMIT"), JSON.stringify(report.reportCompletion.diagnostics));
 });

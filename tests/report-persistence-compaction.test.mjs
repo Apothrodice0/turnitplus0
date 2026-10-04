@@ -817,7 +817,7 @@ test("D1. WRITE-TIME over the limit fails closed: a save whose plain report fits
   assert.ok(stillThere.payload.evidenceInterpretation && stillThere.payload.unifiedSimilarity, "the prior report is still complete (score AND explanation)");
 });
 
-test("D2. AUTHORITATIVE FINALIZER over the limit fails closed: nothing is written (no new score, no removed explanation), the outcome is explicit, and the pending row is byte-identical", async () => {
+test("D2. AUTHORITATIVE FINALIZER over the limit fails closed: no score is ever written, the outcome is explicit, and the report ends 'incomplete' (PERSISTENCE_LIMIT), similarity unavailable — never pending forever", async () => {
   const acc = await account();
   const id = nextId("d2");
   const text = makeText(200);
@@ -833,11 +833,18 @@ test("D2. AUTHORITATIVE FINALIZER over the limit fails closed: nothing is writte
     reportDeviceKey: acc.deviceKey, reportId: id, accountId: acc.userId,
     shadowResult: { state: "COMPLETED", verifiedEvidence: [{ sourceLabel: "S1", matchedPassages: [{ submittedWordStart: 100, submittedWordEnd: 120, matchedWordCount: 21 }] }] },
   });
-  assert.deepEqual(result, { outcome: "persistence-limit-exceeded" });
-  assert.equal(await rawRow(acc, id), before, "byte-identical: the CAS was never attempted");
-  const after = JSON.parse(await rawRow(acc, id));
-  assert.equal(after.selectiveCorpusAuthoritativeStatus, "pending");
+  assert.deepEqual(result, { outcome: "persistence-limit-exceeded", status: "incomplete" });
+  const afterText = await rawRow(acc, id);
+  assert.ok(afterText.length <= MAX_REPORT_SAVE_REQUEST_BYTES, "the terminal row is within the ceiling");
+  const after = JSON.parse(afterText);
+  const stored = JSON.parse(before);
   assert.equal(after.unifiedSimilarity, undefined, "AUTHORITATIVE_SCORE_WITHOUT_EXPLANATION is impossible");
+  assert.equal(after.unifiedSimilarityFailed, true, "similarity unavailable");
+  assert.equal(after.selectiveCorpusAuthoritativeStatus, "incomplete", "terminal: the sweep never takes it again");
+  assert.equal(after.selectiveCorpusAuthoritativeIncompleteReason, "PERSISTENCE_LIMIT");
+  assert.equal(after.text, stored.text);
+  assert.equal(after.testPadding, stored.testPadding, "nothing else is touched");
+  assert.deepEqual(await finalizeSelectiveCorpusAuthoritativeReport(db, { reportDeviceKey: acc.deviceKey, reportId: id, accountId: acc.userId, shadowResult: { state: "COMPLETED" } }), { outcome: "not-pending" });
 });
 
 test("D3. the CAS-guarded persist keeps its guarantees with a COMPACT interpretation: exactly one winner, the loser can never overwrite it, and `null` (remove the explanation) is rejected", async () => {

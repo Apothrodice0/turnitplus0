@@ -661,7 +661,7 @@ test("shared helper: builds via the SAME withEvidenceInterpretation as the write
   assert.equal(build(report, { maxBytes: MAX_REPORT_SAVE_REQUEST_BYTES }).ok, true, "the default limit is the existing, unchanged MAX_REPORT_SAVE_REQUEST_BYTES");
 });
 
-test("FLAGS ON, final report too large for the existing save limit: FAIL CLOSED — the finalizer writes NOTHING (no new score, no explanation removed), reports persistence-limit-exceeded, and the pending row is byte-identical", async () => {
+test("FLAGS ON, final report too large for the existing save limit: FAIL CLOSED — the finalizer writes NO score, reports persistence-limit-exceeded, and ends the report 'incomplete' (PERSISTENCE_LIMIT), similarity unavailable, instead of leaving it pending", async () => {
   const control = await flagsOffControl();
   // A pending payload already ~100 bytes under the limit: the final score + its
   // interpretation cannot fit even in compact form.
@@ -672,11 +672,18 @@ test("FLAGS ON, final report too large for the existing save limit: FAIL CLOSED 
   const result = await finalizeSelectiveCorpusAuthoritativeReport(db, {
     reportDeviceKey: clone.deviceKey, reportId: clone.id, accountId: null, shadowResult: completedShadowResult([]),
   });
-  assert.deepEqual(result, { outcome: "persistence-limit-exceeded" });
+  assert.deepEqual(result, { outcome: "persistence-limit-exceeded", status: "incomplete" });
 
-  assert.equal(await readRawRow(clone.deviceKey, clone.id), before, "nothing was written: the row is byte-identical");
+  const afterText = await readRawRow(clone.deviceKey, clone.id);
+  assert.ok(afterText.length <= MAX_REPORT_SAVE_REQUEST_BYTES, "the terminal row is within the ceiling");
   const after = await readRow(clone.deviceKey, clone.id);
-  assert.equal(after.selectiveCorpusAuthoritativeStatus, "pending", "no terminal transition without an explainable score");
+  const stored = JSON.parse(before);
   assert.equal(after.unifiedSimilarity, undefined, "no unexplained score was introduced");
-  assert.ok(after.evidenceInterpretation, "the prior interpretation was not removed");
+  assert.equal(after.unifiedSimilarityFailed, true, "similarity unavailable — never a score");
+  assert.equal(after.selectiveCorpusAuthoritativeStatus, "incomplete", "terminal: not left pending for the sweep to re-run forever");
+  assert.equal(after.selectiveCorpusAuthoritativeIncompleteReason, "PERSISTENCE_LIMIT");
+  // ~100 under the ceiling: the three terminal fields fit only without the (archive-only) explanation of a score that
+  // will never be shown; it is left out only then, and is otherwise exactly the stored one
+  if (after.evidenceInterpretation !== undefined) assert.deepEqual(JSON.parse(afterText).evidenceInterpretation, stored.evidenceInterpretation);
+  assert.equal(JSON.parse(afterText).text, stored.text);
 });

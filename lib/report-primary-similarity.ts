@@ -8,6 +8,7 @@ import { computeUnifiedSimilarity, type UnifiedSimilarityResult } from "./unifie
 import { resolveImportedSimilarityEvidenceForUnifiedSimilarity } from "./imported-similarity-evidence";
 import { compactUnifiedSimilarityForPersistence } from "./unified-similarity-persistence";
 import { readPersistedArchiveMatchedPositions } from "./report-persistence";
+import { MAX_REPORT_SAVE_REQUEST_BYTES, persistedPayloadSize } from "./report-transport-limits";
 import type { PersistedEvidenceInterpretation } from "./evidence-interpretation/persistence";
 import type { PriorSubmissionBranchState, SelectiveCorpusIncompleteReason } from "./evidence-interpretation/completion";
 import type { ReportHistoricalSubmissionMatch, SimilarityReport } from "./report-types";
@@ -965,8 +966,10 @@ export async function persistRefreshedSimilarity(
 export type SelectiveCorpusAuthoritativeTerminalStatus = "completed" | "incomplete";
 
 /**
- * AUTHORITATIVE PROMOTION — the ONE write path that ever transitions a
- * report's selectiveCorpusAuthoritativeStatus away from "pending". Deliberately
+ * AUTHORITATIVE PROMOTION — the write path that transitions a report's
+ * selectiveCorpusAuthoritativeStatus away from "pending" WITH a final score
+ * (the only other one, persistSelectiveCorpusAuthoritativeUnstorable below,
+ * lands a terminal state with no score at all). Deliberately
  * NOT a variant of persistRefreshedSimilarity's ordinary "resolved" branch:
  * this write requires an ADDITIONAL, independent condition on top of the same
  * existing generation guard — see CRITICAL CAS below — that ordinary similarity
@@ -1100,6 +1103,57 @@ export async function persistSelectiveCorpusAuthoritativeFinalization(
       resolution.corpusGeneration,
       resolution.scoringNormalizationVersion === 2 ? 2 : 1,
     ],
+  });
+  const rowsAffected = Number(result.rowsAffected);
+  return { written: rowsAffected > 0, rowsAffected };
+}
+
+/**
+ * AUTHORITATIVE PROMOTION — the terminal write for a pending report whose FINAL
+ * form (score plus explanation) cannot be stored within the persistence limit
+ * (buildFinalizedReportEvidenceInterpretation's PERSISTED_SIZE_EXCEEDED). That
+ * outcome is deterministic — the same report overflows on every attempt — so
+ * leaving the row "pending" only made the recovery sweep re-run Stage A+B for
+ * it forever while the customer saw "Calculating similarity…".
+ *
+ * The row becomes "incomplete" (reason PERSISTENCE_LIMIT) with NO score:
+ * unifiedSimilarityFailed true and no unifiedSimilarity, the persisted state
+ * every reader already shows as "Similarity unavailable"
+ * (resolvePersistedSimilarityDisplay "failed"). It never lands a partial or
+ * reduced score and never "completed"; the recovery sweep claims only
+ * "pending", so the report is not taken again.
+ *
+ * Compare-and-swap on the exact stored text the caller read, so it can never
+ * overwrite a concurrent write (a resave, another finalizer, a sweep claim):
+ * rowsAffected 0 means the row changed and nothing was written. The new row is
+ * measured in the persisted-size unit before it is written; if the three
+ * terminal fields would take a row that sits at the ceiling over it, the
+ * explanation of the score that will never be shown (evidenceInterpretation)
+ * is left out, and if even that does not fit nothing is written.
+ */
+export async function persistSelectiveCorpusAuthoritativeUnstorable(
+  client: Client,
+  params: { reportDeviceKey: string; reportId: string },
+  stored: { payloadJson: string },
+): Promise<{ written: boolean; rowsAffected: number }> {
+  const payload = JSON.parse(stored.payloadJson) as Record<string, unknown>;
+  if (payload.selectiveCorpusAuthoritativeStatus !== "pending") return { written: false, rowsAffected: 0 };
+  const { selectiveCorpusAuthoritativeClaimedAt: _claim, unifiedSimilarity: _noScore, ...rest } = payload;
+  const terminal: Record<string, unknown> = {
+    ...rest,
+    unifiedSimilarityFailed: true,
+    selectiveCorpusAuthoritativeIncompleteReason: "PERSISTENCE_LIMIT" satisfies SelectiveCorpusIncompleteReason,
+    selectiveCorpusAuthoritativeStatus: "incomplete",
+  };
+  let payloadJson = JSON.stringify(terminal);
+  if (persistedPayloadSize(payloadJson) > MAX_REPORT_SAVE_REQUEST_BYTES) {
+    const { evidenceInterpretation: _unshown, ...withoutExplanation } = terminal;
+    payloadJson = JSON.stringify(withoutExplanation);
+    if (persistedPayloadSize(payloadJson) > MAX_REPORT_SAVE_REQUEST_BYTES) return { written: false, rowsAffected: 0 };
+  }
+  const result = await client.execute({
+    sql: "UPDATE saved_reports SET payload_json = ? WHERE device_key = ? AND id = ? AND payload_json = ?",
+    args: [payloadJson, params.reportDeviceKey, params.reportId, stored.payloadJson],
   });
   const rowsAffected = Number(result.rowsAffected);
   return { written: rowsAffected > 0, rowsAffected };

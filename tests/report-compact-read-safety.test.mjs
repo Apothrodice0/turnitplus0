@@ -716,13 +716,29 @@ test("L2. a fragment-heavy report whose LEGACY form exceeds the limit: gate OFF 
   }
 });
 
-test("L3. the AUTHORITATIVE FINALIZER over the limit fails closed with the gate OFF (legacy too large) and ON (padded): outcome persistence-limit-exceeded, pending row byte-identical, no score", async () => {
+/**
+ * The finalizer's terminal outcome for a final report that cannot be stored: no score is written — "incomplete",
+ * reason PERSISTENCE_LIMIT, unifiedSimilarityFailed (similarity unavailable) — and nothing else changes, except that a
+ * row at the very ceiling may lose the explanation of the score it will never show.
+ */
+function assertTerminalNoScore(beforeText, afterText, label) {
+  const before = JSON.parse(beforeText);
+  const after = JSON.parse(afterText);
+  assert.ok(afterText.length <= MAX_REPORT_SAVE_REQUEST_BYTES, `${label}: within the ceiling`);
+  assert.equal(after.unifiedSimilarity, undefined, `${label}: no score without its explanation`);
+  assert.equal(after.unifiedSimilarityFailed, true, `${label}: similarity unavailable`);
+  assert.equal(after.selectiveCorpusAuthoritativeStatus, "incomplete", `${label}: terminal, not left pending`);
+  assert.equal(after.selectiveCorpusAuthoritativeIncompleteReason, "PERSISTENCE_LIMIT", label);
+  const rest = ({ selectiveCorpusAuthoritativeStatus, selectiveCorpusAuthoritativeIncompleteReason, selectiveCorpusAuthoritativeClaimedAt, unifiedSimilarityFailed, evidenceInterpretation, ...others }) => others;
+  assert.deepEqual(rest(after), rest(before), `${label}: everything else exactly as stored`);
+  if ("evidenceInterpretation" in after) assert.deepEqual(after.evidenceInterpretation, before.evidenceInterpretation, `${label}: the stored explanation untouched`);
+}
+
+test("L3. the AUTHORITATIVE FINALIZER over the limit fails closed with the gate OFF (legacy too large) and ON (padded): no score is ever written — the report ends 'incomplete' (PERSISTENCE_LIMIT), similarity unavailable, instead of staying pending", async () => {
   // OFF: a big fragment-heavy report only fits compact
   const off = await finalizePending({ units: 1500, gate: undefined });
-  assert.deepEqual(off.result, { outcome: "persistence-limit-exceeded" });
-  assert.equal(off.after, off.before, "byte-identical: nothing written");
-  assert.equal(JSON.parse(off.after).unifiedSimilarity, undefined, "no score without its explanation");
-  assert.equal(JSON.parse(off.after).selectiveCorpusAuthoritativeStatus, "pending");
+  assert.deepEqual(off.result, { outcome: "persistence-limit-exceeded", status: "incomplete" });
+  assertTerminalNoScore(off.before, off.after, "gate OFF");
 
   // (the same report finalizes with the gate ON)
   const on = await finalizePending({ units: 1500, gate: "true" });
@@ -741,8 +757,8 @@ test("L3. the AUTHORITATIVE FINALIZER over the limit fails closed with the gate 
     reportDeviceKey: acc.deviceKey, reportId: id, accountId: acc.userId,
     shadowResult: { state: "COMPLETED", verifiedEvidence: [{ sourceLabel: "S1", matchedPassages: [{ submittedWordStart: 100, submittedWordEnd: 120, matchedWordCount: 21 }] }] },
   }));
-  assert.deepEqual(result, { outcome: "persistence-limit-exceeded" });
-  assert.equal(await rawRowJson(acc, id), before);
+  assert.deepEqual(result, { outcome: "persistence-limit-exceeded", status: "incomplete" });
+  assertTerminalNoScore(before, await rawRowJson(acc, id), "gate ON, padded to 100 under the ceiling");
 });
 
 test("L4. the finalizer's size check measures the mode its write then persists: the builder resolves the gate ONCE and reports it", () => {

@@ -24,7 +24,9 @@ export type SelectiveCorpusBranchState = "COMPLETED" | "PARTIAL" | "DISABLED" | 
  * Why a Selective Corpus authoritative run finalized "incomplete" — the
  * terminal shadow-result state that produced it (PARTIAL_INDEX = the PARTIAL
  * state: one or more index shards unavailable at query time), or
- * FINALIZER_ERROR when the finalizer's own fallback path landed it.
+ * FINALIZER_ERROR when the finalizer's own fallback path landed it, or
+ * PERSISTENCE_LIMIT when the final report could not be stored within the
+ * persistence limit and was finalized with no score (similarity unavailable).
  * Server-internal on the saved row; surfaces only as a completion diagnostic.
  */
 export type SelectiveCorpusIncompleteReason =
@@ -33,7 +35,8 @@ export type SelectiveCorpusIncompleteReason =
   | "ARTIFACT_UNAVAILABLE"
   | "FAILED"
   | "DISABLED"
-  | "FINALIZER_ERROR";
+  | "FINALIZER_ERROR"
+  | "PERSISTENCE_LIMIT";
 
 /** USER-SUPPLIED REFERENCES V1 — the reference-file channel's own state.
  *  null / absent = no reference files were supplied (channel ABSENT, NOT failed).
@@ -163,6 +166,7 @@ const SELECTIVE_CORPUS_INCOMPLETE_REASONS: ReadonlySet<string> = new Set<Selecti
   "FAILED",
   "DISABLED",
   "FINALIZER_ERROR",
+  "PERSISTENCE_LIMIT",
 ]);
 
 /** A known AcademicSearchFailureReason, else null — the value reaches the report from the browser, so it is never trusted verbatim. */

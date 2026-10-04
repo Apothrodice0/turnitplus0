@@ -2,6 +2,7 @@ import type { Client } from "@libsql/client";
 import {
   resolvePrimarySimilaritySummary,
   persistSelectiveCorpusAuthoritativeFinalization,
+  persistSelectiveCorpusAuthoritativeUnstorable,
   type SelectiveCorpusAuthoritativeTerminalStatus,
 } from "./report-primary-similarity";
 import { resolveVerifiedAcademicEvidence } from "./academic-search-diagnostics-repo";
@@ -120,14 +121,17 @@ export type FinalizeSelectiveCorpusAuthoritativeReportResult =
   | { outcome: "scoring-normalization-mismatch" }
   /**
    * C2 fail-closed: the ENCODED (compact) whole final report — score plus its
-   * explanation — exceeds the report persistence limit. NOTHING was written: the
-   * report keeps exactly the row it had ("pending", no final score), so a
-   * customer-visible score is never persisted without the interpretation that
+   * explanation — exceeds the report persistence limit, so NO score is written:
+   * a customer-visible score is never persisted without the interpretation that
    * explains it. Deliberately NOT retried with less evidence (the zero-V4
    * fallback below is for unexpected exceptions only): shrinking the score to
    * make it fit would be a scoring-semantics decision this module does not make.
+   * The overflow is deterministic, so instead of staying "pending" for the
+   * recovery sweep to re-run forever, the report is finalized "incomplete"
+   * (reason PERSISTENCE_LIMIT) with no score — "Similarity unavailable" — by
+   * persistSelectiveCorpusAuthoritativeUnstorable.
    */
-  | { outcome: "persistence-limit-exceeded" }
+  | { outcome: "persistence-limit-exceeded"; status: "incomplete" }
   /**
    * The attempt ended TIMEOUT with retries left: NO final score was written.
    * The report stays "pending" with its timed-out attempt recorded and its
@@ -136,8 +140,10 @@ export type FinalizeSelectiveCorpusAuthoritativeReportResult =
   | { outcome: "timeout-retry-scheduled"; timedOutAttempts: number }
   /**
    * Another finalizer advanced this report first (a terminal write, or a newer
-   * timed-out attempt record) between this attempt's read and its write.
-   * Nothing written; a clean no-op, like "already-finalized".
+   * timed-out attempt record) between this attempt's read and its write — or,
+   * for the PERSISTENCE_LIMIT terminal write, any other write changed the row.
+   * Nothing written; a clean no-op, like "already-finalized" (a row that is
+   * still pending stays eligible for the recovery sweep).
    */
   | { outcome: "stale-attempt" };
 
@@ -197,7 +203,7 @@ async function recordSelectiveCorpusTimedOutAttempt(
   return Number(result.rowsAffected) > 0;
 }
 
-type ReadReportRowResult = { payload: SimilarityReport; archiveScoreColumn: number | bigint };
+type ReadReportRowResult = { payload: SimilarityReport; payloadJson: string; archiveScoreColumn: number | bigint };
 
 async function readReportRow(client: Client, reportDeviceKey: string, reportId: string): Promise<ReadReportRowResult | null> {
   const row = await client.execute({
@@ -206,8 +212,9 @@ async function readReportRow(client: Client, reportDeviceKey: string, reportId: 
   });
   const raw = row.rows[0] as unknown as { payload_json: string; archive_score: number | bigint } | undefined;
   if (!raw) return null;
-  const payload = JSON.parse(String(raw.payload_json)) as SimilarityReport;
-  return { payload, archiveScoreColumn: raw.archive_score };
+  const payloadJson = String(raw.payload_json);
+  const payload = JSON.parse(payloadJson) as SimilarityReport;
+  return { payload, payloadJson, archiveScoreColumn: raw.archive_score };
 }
 
 function safeCanonicalSha256Text(text: string): string {
@@ -306,8 +313,9 @@ async function resolveAndPersist(
   //     exception handling (best-effort zero-V4 fallback, else leave pending for
   //     the recovery sweep) applies exactly as it does for any other failure.
   //   - PERSISTED_SIZE_EXCEEDED: even the compact whole report does not fit the
-  //     persistence limit. Nothing is written and the pending row is left
-  //     untouched (see the outcome's own doc comment).
+  //     persistence limit. No score is written; the report is finalized
+  //     "incomplete" (PERSISTENCE_LIMIT), similarity unavailable (see the
+  //     outcome's own doc comment).
   const prepared = buildFinalizedReportEvidenceInterpretation(
     { ...payload, externalAcademicEvidence: verifiedAcademicEvidence, unifiedSimilarity: resolution.unifiedSimilarity },
     {
@@ -320,10 +328,18 @@ async function resolveAndPersist(
   if (!prepared.ok) {
     if (prepared.reason === "PERSISTED_SIZE_EXCEEDED") {
       console.error(
-        "selective-corpus authoritative finalization: the final report cannot be persisted WITH its explanation within the persistence limit; leaving the report pending, nothing written:",
+        "selective-corpus authoritative finalization: the final report cannot be persisted WITH its explanation within the persistence limit; finalizing it incomplete (PERSISTENCE_LIMIT) with no score:",
         { reportId: params.reportId, persistedBytes: prepared.persistedBytes, maxBytes: prepared.maxBytes },
       );
-      return { outcome: "persistence-limit-exceeded" };
+      const terminal = await persistSelectiveCorpusAuthoritativeUnstorable(
+        client,
+        { reportDeviceKey: params.reportDeviceKey, reportId: params.reportId },
+        { payloadJson: row.payloadJson },
+      );
+      // Not written: the row changed since it was read (or, at the ceiling with no
+      // explanation to leave out, the terminal fields themselves do not fit).
+      // Nothing is lost — a still-pending row is taken again by the sweep.
+      return terminal.written ? { outcome: "persistence-limit-exceeded", status: "incomplete" } : { outcome: "stale-attempt" };
     }
     throw new Error("selective-corpus authoritative finalization could not build the final report's evidenceInterpretation");
   }
