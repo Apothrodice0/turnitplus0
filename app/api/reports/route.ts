@@ -153,6 +153,12 @@ function isNonEmptyString(value: unknown): value is string {
 // complete AI result. Only an explicit 'ready' replaces a ready AI half (complete -> complete), and nothing but a ready
 // stored AI half is ever kept. (SQL: `excluded.ai_status IN (...)` alone is NULL, not true, for a NULL ai_status.)
 const KEEP_STORED_READY_AI_SQL = `(saved_reports.ai_status = 'ready' OR ${derivedAiReadySql('saved_reports')}) AND (excluded.ai_status IS NULL OR excluded.ai_status IN ('failed', 'processing'))`;
+// The Selective Corpus timed-out attempt count is server-owned: only the
+// finalizer's CAS write ever changes it. When an update replaces payload_json
+// with the request's payload, the STORED value is kept (or kept absent) in the
+// same statement, so neither a client value nor a resave built from an older
+// read can lower or raise it — the count only ever moves forward.
+const SERVER_OWNED_TIMED_OUT_ATTEMPTS_KEY = 'selectiveCorpusAuthoritativeTimedOutAttempts';
 export const SAVE_REPORT_SQL = `INSERT INTO saved_reports (id, device_key, submission_id, title, report_created_at, word_count, archive_score, score_band, ai_score, ai_tone, ai_status, payload_json, user_id, room_number, updated_at)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
       ON CONFLICT(device_key, id) DO UPDATE SET
@@ -173,7 +179,11 @@ export const SAVE_REPORT_SQL = `INSERT INTO saved_reports (id, device_key, submi
                 THEN json_set(saved_reports.payload_json, '$.aiAnalysis', json_extract(excluded.payload_json, '$.aiAnalysis'), '$.aiScore', json_extract(excluded.payload_json, '$.aiScore'))
               ELSE saved_reports.payload_json
             END
-          ELSE excluded.payload_json
+          ELSE CASE
+            WHEN json_type(saved_reports.payload_json, '$.${SERVER_OWNED_TIMED_OUT_ATTEMPTS_KEY}') IS NOT NULL
+              THEN json_set(excluded.payload_json, '$.${SERVER_OWNED_TIMED_OUT_ATTEMPTS_KEY}', json_extract(saved_reports.payload_json, '$.${SERVER_OWNED_TIMED_OUT_ATTEMPTS_KEY}'))
+            ELSE json_remove(excluded.payload_json, '$.${SERVER_OWNED_TIMED_OUT_ATTEMPTS_KEY}')
+          END
         END,
         user_id = COALESCE(excluded.user_id, saved_reports.user_id),
         updated_at = CURRENT_TIMESTAMP`;
@@ -630,7 +640,6 @@ export async function POST(request: Request) {
                      json_extract(payload_json, '$.selectiveCorpusAuthoritativeStatus') AS selective_corpus_authoritative_status,
                      json_extract(payload_json, '$.selectiveCorpusAuthoritativeClaimedAt') AS selective_corpus_authoritative_claimed_at,
                      json_extract(payload_json, '$.selectiveCorpusAuthoritativeIncompleteReason') AS selective_corpus_authoritative_incomplete_reason,
-                     json_extract(payload_json, '$.selectiveCorpusAuthoritativeTimedOutAttempts') AS selective_corpus_authoritative_timed_out_attempts,
                      json_extract(payload_json, '$.scoringNormalizationVersion') AS scoring_normalization_version
               FROM saved_reports WHERE device_key = ? AND id = ?`,
         args: [deviceKey, id],
@@ -669,13 +678,6 @@ export async function POST(request: Request) {
       const persistedSelectiveCorpusAuthoritativeIncompleteReason = sanitizeSelectiveCorpusIncompleteReason(
         existingReportRow.rows[0]?.selective_corpus_authoritative_incomplete_reason,
       );
-      // The bounded-TIMEOUT-retry counter is carried forward the same way, so a
-      // resave of a still-pending report can never reset its retry budget.
-      const persistedSelectiveCorpusAuthoritativeTimedOutAttempts = ((): number | null => {
-        const v = existingReportRow.rows[0]?.selective_corpus_authoritative_timed_out_attempts as number | bigint | null | undefined;
-        const n = typeof v === 'bigint' ? Number(v) : v;
-        return typeof n === 'number' && Number.isInteger(n) && n >= 0 ? n : null;
-      })();
       const persistedVerifiedAcademicDiagnosticsId = ((): number | null => {
         const v = existingReportRow.rows[0]?.verified_academic_diagnostics_id as number | bigint | null | undefined;
         if (typeof v === 'bigint') return Number(v);
@@ -1070,11 +1072,10 @@ export async function POST(request: Request) {
         selectiveCorpusAuthoritativeIncompleteReason: isFirstSaveOfThisReport
           ? undefined
           : (persistedSelectiveCorpusAuthoritativeIncompleteReason ?? undefined),
-        // Only the finalizer records timed-out attempts: never from a client,
-        // carried forward on resave.
-        selectiveCorpusAuthoritativeTimedOutAttempts: isFirstSaveOfThisReport
-          ? undefined
-          : (persistedSelectiveCorpusAuthoritativeTimedOutAttempts ?? undefined),
+        // Server-owned (only the finalizer records timed-out attempts): never
+        // taken from the client or from this request's earlier read —
+        // SAVE_REPORT_SQL keeps the stored value at write time.
+        selectiveCorpusAuthoritativeTimedOutAttempts: undefined,
       };
 
       // Device Passport (Phase 2/4): cryptographically verify an optional

@@ -479,7 +479,7 @@ test('resave of a retry-pending report keeps it pending with its attempt count a
     assert.equal((await postReport(account, id, { forgedPayloadFields: { selectiveCorpusAuthoritativeTimedOutAttempts: 0 } })).status, 200);
     const resaved = await rawPayload(deviceKey, id);
     assert.equal(resaved.selectiveCorpusAuthoritativeStatus, 'pending', 'still pending: the resave scheduled no second finalization (it would have run inline here)');
-    assert.equal(resaved.selectiveCorpusAuthoritativeTimedOutAttempts, 1, 'the retry budget is carried forward, and a client value cannot reset it');
+    assert.equal(resaved.selectiveCorpusAuthoritativeTimedOutAttempts, 1, 'the stored retry count survives the resave, and a client value cannot reset it');
 
     // first save: a forged count is dropped
     const fresh = await signUpAccount();
@@ -489,6 +489,93 @@ test('resave of a retry-pending report keeps it pending with its attempt count a
   } finally {
     restoreFlags();
   }
+});
+
+// ===========================================================================
+// MONOTONIC, SERVER-OWNED COUNT — a save can never move it, in either direction
+// ===========================================================================
+
+/** Executes the REAL upsert a resave performs, with a payload built from an
+ *  earlier read of the row (the narrow race: a retry write landed in between). */
+async function upsertResavePayload(deviceKey, id, payloadObject) {
+  await client.execute({
+    sql: reportsRoute.SAVE_REPORT_SQL,
+    args: [id, deviceKey, 'sub-' + id, 'Timeout retry fixture', new Date().toISOString(), tokens(canonicalizeText(BODY_TEXT)).length, 1, 'Low', null, null, null, JSON.stringify(payloadObject), null, null],
+  });
+}
+
+test('A1. a stale resave carrying an older count (2) cannot lower the stored count (3)', async () => {
+  const deviceKey = uniq('dk-mono-1');
+  const id = uniq('r-mono-1');
+  await seedPendingReport(deviceKey, id, { payloadExtra: { selectiveCorpusAuthoritativeTimedOutAttempts: 3 } });
+  const staleRead = { ...(await rawPayload(deviceKey, id)), selectiveCorpusAuthoritativeTimedOutAttempts: 2, resaveMarker: 'replaced' };
+  await upsertResavePayload(deviceKey, id, staleRead);
+  const payload = await rawPayload(deviceKey, id);
+  assert.equal(payload.resaveMarker, 'replaced', 'the resave did replace the payload');
+  assert.equal(payload.selectiveCorpusAuthoritativeTimedOutAttempts, 3, 'but the server-owned count kept its stored value');
+  assert.equal(payload.selectiveCorpusAuthoritativeStatus, 'pending');
+});
+
+for (const [label, clientValue] of [['A2', 0], ['A3', 99]]) {
+  test(`${label}. stored count 3 + a real resave whose client payload sends ${clientValue} -> stays 3`, async () => {
+    const deviceKey = uniq(`dk-mono-${label}`);
+    const id = uniq(`r-mono-${label}`);
+    await seedPendingReport(deviceKey, id, { payloadExtra: { selectiveCorpusAuthoritativeTimedOutAttempts: 3 } });
+    const signedUp = await signUpAccount();
+    const account = { ...signedUp, deviceKey, tag: uniq(`sc-timeout-mono-${label}`) };
+    assert.equal((await postReport(account, id, { forgedPayloadFields: { selectiveCorpusAuthoritativeTimedOutAttempts: clientValue } })).status, 200);
+    const payload = await rawPayload(deviceKey, id);
+    assert.equal(payload.selectiveCorpusAuthoritativeTimedOutAttempts, 3);
+    assert.equal(payload.selectiveCorpusAuthoritativeStatus, 'pending');
+  });
+}
+
+test('A3b. a resave can never create a count where the server recorded none', async () => {
+  // through the real route
+  const deviceKey = uniq('dk-mono-3b');
+  const id = uniq('r-mono-3b');
+  await seedPendingReport(deviceKey, id);
+  const signedUp = await signUpAccount();
+  const account = { ...signedUp, deviceKey, tag: uniq('sc-timeout-mono-3b') };
+  assert.equal((await postReport(account, id, { forgedPayloadFields: { selectiveCorpusAuthoritativeTimedOutAttempts: 4 } })).status, 200);
+  assert.equal('selectiveCorpusAuthoritativeTimedOutAttempts' in (await rawPayload(deviceKey, id)), false);
+
+  // through the upsert itself, on a row whose payload it replaces
+  const rawKey = uniq('dk-mono-3c');
+  const rawId = uniq('r-mono-3c');
+  await seedPendingReport(rawKey, rawId);
+  await upsertResavePayload(rawKey, rawId, { ...(await rawPayload(rawKey, rawId)), selectiveCorpusAuthoritativeTimedOutAttempts: 4, resaveMarker: 'replaced' });
+  const replaced = await rawPayload(rawKey, rawId);
+  assert.equal(replaced.resaveMarker, 'replaced');
+  assert.equal('selectiveCorpusAuthoritativeTimedOutAttempts' in replaced, false);
+});
+
+test('A4/A5. a retry moves 3 -> 4 exactly once; a duplicate finalizer recording the same attempt does not make it 5', async () => {
+  const deviceKey = uniq('dk-mono-4');
+  const id = uniq('r-mono-4');
+  await seedPendingReport(deviceKey, id, { payloadExtra: { selectiveCorpusAuthoritativeTimedOutAttempts: 3 } });
+  const racing = interleavingClient(async () => {
+    assert.deepEqual(await finalize(deviceKey, id, timeoutShadowResult()), { outcome: 'timeout-retry-scheduled', timedOutAttempts: 4 });
+  });
+  assert.deepEqual(await finalize(deviceKey, id, timeoutShadowResult(), racing), { outcome: 'stale-attempt' });
+  const payload = await rawPayload(deviceKey, id);
+  assert.equal(payload.selectiveCorpusAuthoritativeTimedOutAttempts, 4, 'exactly one increment');
+  assert.equal(payload.selectiveCorpusAuthoritativeStatus, 'pending');
+});
+
+test('A6. a terminal COMPLETED stands against a stale TIMEOUT and a later resave, and the count stays put', async () => {
+  const deviceKey = uniq('dk-mono-6');
+  const id = uniq('r-mono-6');
+  await seedPendingReport(deviceKey, id, { payloadExtra: { selectiveCorpusAuthoritativeTimedOutAttempts: 3 } });
+  assert.deepEqual(await finalize(deviceKey, id, completedShadowResult([])), { outcome: 'finalized', status: 'completed' });
+  assert.deepEqual(await finalize(deviceKey, id, timeoutShadowResult()), { outcome: 'not-pending' });
+  const signedUp = await signUpAccount();
+  const account = { ...signedUp, deviceKey, tag: uniq('sc-timeout-mono-6') };
+  assert.equal((await postReport(account, id, { forgedPayloadFields: { selectiveCorpusAuthoritativeTimedOutAttempts: 0 } })).status, 200);
+  const payload = await rawPayload(deviceKey, id);
+  assert.equal(payload.selectiveCorpusAuthoritativeStatus, 'completed');
+  assert.ok(payload.unifiedSimilarity, 'the final score stands');
+  assert.equal(payload.selectiveCorpusAuthoritativeTimedOutAttempts, 3);
 });
 
 console.log('selective-corpus-timeout-retry: bounded TIMEOUT retry tests passed');

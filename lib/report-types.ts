@@ -427,10 +427,12 @@ export type SimilarityReport = {
    * were left pending for the recovery sweep to retry (absent = none). A
    * timeout is a transient work-limit result, so it only becomes the terminal
    * "incomplete" (reason TIMEOUT) once MAX_SELECTIVE_CORPUS_AUTHORITATIVE_ATTEMPTS
-   * attempts have timed out (lib/selective-corpus-authoritative.ts). Written by
-   * the finalizer's own CAS write, carried forward on resave exactly like
-   * selectiveCorpusAuthoritativeClaimedAt, never accepted from a client, and
-   * stripped from every outbound report (stripServerInternalReportFields).
+   * attempts have timed out (lib/selective-corpus-authoritative.ts).
+   * Server-owned and monotonic: written ONLY by the finalizer's CAS write; a
+   * save/resave never takes it from the client or from an earlier read —
+   * app/api/reports/route.ts's SAVE_REPORT_SQL keeps the stored value at write
+   * time — and it is stripped from every outbound report
+   * (stripServerInternalReportFields).
    */
   selectiveCorpusAuthoritativeTimedOutAttempts?: number;
   /**
