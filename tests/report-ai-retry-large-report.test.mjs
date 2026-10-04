@@ -4,7 +4,9 @@ import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import * as fx from "./helpers/large-report-retry-fixture.mjs";
 import * as aiRetryRoute from "../app/api/reports/[id]/ai-retry/route.ts";
-import { saveReportRemote, fetchRemoteReport, fetchReportRoomContents, saveAiRetryResultRemote } from "../lib/reports-remote.ts";
+import { saveReportRemote, fetchRemoteReport, fetchReportRoomContents, saveAiRetryResultRemote, withoutServerOwnedReportFields } from "../lib/reports-remote.ts";
+import { getDeviceKey } from "../lib/device-key.ts";
+import { reportScoringNormalizationVersion } from "../lib/similarity-core.ts";
 import { persistAiCompletion, persistAiRetryResult } from "../lib/report-ai-completion.ts";
 import { buildReportSummary } from "../lib/report-types.ts";
 import { MAX_REPORT_SAVE_REQUEST_BYTES } from "../lib/report-transport-limits.ts";
@@ -205,11 +207,24 @@ test("G2 REMOTE FALLBACK: a large report that saves and opens no longer 413s on 
     // (Reproduced with the writer gate OFF: this is the legacy whole-report echo carrying the full, uncompacted AI result.)
     // (The ORDINARY SAVE ROUTE itself, called directly: persistAiCompletion now answers a size 413 with a fallback to the narrow
     // AI-result route — the G2 size policy, owned by tests/ai-size-unavailable-policy.test.mjs — so it no longer ends here.)
-    const oldPath = await fx.withAiCompactWrites(undefined, () => saveReportRemote(enriched, summary, undefined, 0));
+    // The echo is the request saveReportRemote built BEFORE it stopped sending the server-owned fields
+    // (lib/reports-remote.ts SERVER_OWNED_REPORT_PAYLOAD_KEYS): the expanded report as is, the browser's view of the
+    // server's unifiedSimilarity / evidenceInterpretation / reportCompletion included. It is POSTed through the same
+    // routed fetch, so it meets the same unchanged guard.
+    const legacyEcho = {
+      deviceKey: getDeviceKey(), ...summary, payload: enriched,
+      scoringNormalization: reportScoringNormalizationVersion(enriched), academicSearchDiagnosticsId: null, room: 0,
+      ...(enriched.extractionDiagnostic && typeof enriched.extractionDiagnostic === "object" ? { extractionCompleteness: enriched.extractionDiagnostic } : {}),
+    };
+    const oldResponse = await fetch("/api/reports", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(legacyEcho) });
     const oldRequest = route.requests.filter((r) => r.method === "POST" && r.path === "/api/reports").at(-1);
     assert.ok(oldRequest.bytes > MAX_REPORT_SAVE_REQUEST_BYTES, `fixture sanity: the old echo (${oldRequest.bytes} bytes) must exceed the ${MAX_REPORT_SAVE_REQUEST_BYTES}-byte ceiling to reproduce G2`);
     assert.equal(oldRequest.status, 413);
-    assert.equal(oldPath.ok, false);
+    assert.equal(oldResponse.ok, false);
+    // Today's client sends the same report without the server-owned fields — measured here, not sent, so the AI half is
+    // still the failed one (b) retries. Those fields were most of the echo's evidence weight.
+    const currentEchoBytes = byteLength({ ...legacyEcho, payload: withoutServerOwnedReportFields(enriched) });
+    assert.ok(currentEchoBytes < oldRequest.bytes - byteLength(full.unifiedSimilarity), `today's echo (${currentEchoBytes}) leaves out at least the expanded unifiedSimilarity (old ${oldRequest.bytes})`);
     const afterRejected = await readRow(id);
     assert.equal(sha(afterRejected.payload_json), sha(before.payload_json), "the rejected echo left the saved report byte-identical");
     assert.equal(MAX_REPORT_SAVE_REQUEST_BYTES, 2_000_000, "the request ceiling constant is unchanged");
@@ -725,11 +740,12 @@ test("STRUCTURE: retryAiCheck persists through saveRetriedAiResult and can never
   assert.match(shell, /completeAiAnalysisWithRecovery\(aiAnalysisPromise, \(aiResult\) => saveEnrichedAiResult\(report, aiResult\)\)/, "the automatic post-upload pass is unchanged");
   assert.match(page, /await persistAiCompletion\(enriched, enrichedSummary\);/, "the anonymous flow's AI resave is unchanged");
   // saveReportRemote still posts the whole report to the ordinary save route — its payload differs from the client's report
-  // only by the ai-compact-v1 transport step (a no-op unless the writer gate is on and the report carries an AI result).
+  // only by the ai-compact-v1 transport step (a no-op unless the writer gate is on and the report carries an AI result) and
+  // by leaving out the server-owned fields the route discards (tests/report-save-server-owned-fields-transport.test.mjs).
   const saveRemoteFn = remote.match(/export async function saveReportRemote[\s\S]*?\n\}\r?\n/)?.[0] ?? "";
   assert.ok(saveRemoteFn.length > 500, "saveReportRemote found");
   assert.match(saveRemoteFn, /fetch\("\/api\/reports", \{/);
-  assert.match(saveRemoteFn, /payload: prepareReportForTransport\(report\),/);
+  assert.match(saveRemoteFn, /payload: withoutServerOwnedReportFields\(prepareReportForTransport\(report\)\),/);
   assert.match(remote, /import \{ prepareReportForTransport \} from "\.\/ai-passage-table";/);
   assert.doesNotMatch(saveRemoteFn, /ai-retry/);
 });

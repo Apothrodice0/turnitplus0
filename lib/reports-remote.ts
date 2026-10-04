@@ -1,6 +1,7 @@
 import { getDeviceKey } from "./device-key";
 import { maybeAttestReportUpload, markDevicePassportReportSaved } from "./device-passport";
 import { prepareReportForTransport } from "./ai-passage-table";
+import { CLIENT_UNTRUSTED_EVIDENCE_INTERPRETATION_KEYS } from "./report-evidence-interpretation";
 import { reportScoringNormalizationVersion } from "./similarity-core";
 import { AI_SAVE_OUTCOME_SIZE_UNAVAILABLE, type AiSaveOutcome, type AiUnavailableReason } from "./ai-unavailable-state";
 import type { RoomIndexEntry } from "./report-rooms";
@@ -166,6 +167,54 @@ export function classifySaveReportRemoteResult(result: SaveReportRemoteResult): 
 }
 
 /**
+ * SERVER-OWNED REPORT FIELDS — never sent in a save request.
+ *
+ * Before saving, the browser attaches its own `unifiedSimilarity` (archive +
+ * live-academic only) and its own `evidenceInterpretation` / `reportCompletion`
+ * to the report it shows straight away (lib/document-check-pipeline.ts's
+ * attachUnifiedSimilarity / attachEvidenceInterpretation). POST /api/reports
+ * never reads them: it resets the four similarity keys below and strips
+ * CLIENT_UNTRUSTED_EVIDENCE_INTERPRETATION_KEYS from every payload, then
+ * computes its own (app/api/reports/route.ts's persistedReportPayload). But they
+ * count against MAX_REPORT_SAVE_REQUEST_BYTES like everything else, and they are
+ * large: the matched positions a second time (the browser's union), a third
+ * time (the interpretation's positionsByKind) and an excerpt of every passage.
+ * A long document with much archive evidence was therefore refused at the
+ * request (413) for content the server throws away, although what the server
+ * would have stored fits. (`userSuppliedReferences` rode along twice the same
+ * way: as the request's sibling — the only copy the server reads — and inside
+ * the payload.)
+ *
+ * Only the request leaves them out. The object the caller holds, and the
+ * browser's local copy of it, keep every field.
+ * tests/report-save-server-owned-fields-transport.test.mjs proves that the row
+ * the real route persists has the same content and the same size whether these
+ * keys are sent, forged or absent — which is what makes omitting them safe. (The
+ * one thing that can differ is where `unifiedSimilarity` sits among the row's
+ * JSON keys: the server writes its own value at the position the client's key
+ * had, or after the client's keys when there was none.)
+ */
+export const SERVER_OWNED_REPORT_PAYLOAD_KEYS: readonly string[] = [
+  ...CLIENT_UNTRUSTED_EVIDENCE_INTERPRETATION_KEYS,
+  "unifiedSimilarity",
+  "unifiedSimilarityFailed",
+  "unifiedSimilarityGeneration",
+  "corpusSourceMatchingEnabledAtComputation",
+];
+
+/** `report` without the server-owned fields: a shallow copy when it carries any, otherwise the very same object. Never mutates. */
+export function withoutServerOwnedReportFields<R>(report: R): R {
+  if (typeof report !== "object" || report === null || Array.isArray(report)) return report;
+  let copy: Record<string, unknown> | null = null;
+  for (const key of SERVER_OWNED_REPORT_PAYLOAD_KEYS) {
+    if (!(key in report)) continue;
+    copy ??= { ...(report as Record<string, unknown>) };
+    delete copy[key];
+  }
+  return (copy ?? report) as R;
+}
+
+/**
  * `academicSearchDiagnosticsId` is sent as a sibling of `payload`, never
  * nested inside it — it must never become part of SimilarityReport/
  * saved_reports.payload_json. It is only ever a bare row id (see
@@ -224,13 +273,15 @@ export async function saveReportRemote<T>(report: T, summary: ReportSummary, aca
     // table that points into the manuscript this payload already carries. The report is otherwise sent exactly as
     // given; with the gate off, or for a first save (no aiAnalysis yet), `report` is the very same object as before.
     // `maybeAttestReportUpload` above deliberately saw the original: it only reads `report.text`, which is unchanged.
+    // The server-owned fields are then left out of the payload (SERVER_OWNED_REPORT_PAYLOAD_KEYS above): everything the
+    // server reads from a report — and the siblings just read off the original — travels exactly as before.
     const response = await fetch("/api/reports", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         deviceKey,
         ...summary,
-        payload: prepareReportForTransport(report),
+        payload: withoutServerOwnedReportFields(prepareReportForTransport(report)),
         scoringNormalization: reportScoringNormalizationVersion(report as { scoringNormalizationVersion?: unknown } | null),
         academicSearchDiagnosticsId: academicSearchDiagnosticsId ?? null,
         ...(room !== undefined ? { room } : {}),
