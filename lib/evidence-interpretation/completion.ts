@@ -59,13 +59,16 @@ export type ReportCompletionChannel =
   | "LIVE_ACADEMIC_SEARCH"
   | "SELECTIVE_CORPUS"
   | "USER_SUPPLIED_REFERENCES"
+  | "PRIOR_SUBMISSION"
   | "SOURCE_TEXT_VERIFICATION";
 
 /**
  * MACHINE-READABLE completion diagnostics: one entry per channel that kept the
  * report from COMPLETED, with the most precise reason the saved report records.
  * NOT_RECORDED = the channel's state is known but the report predates reason
- * capture (or the reason was not a known code) — never a guessed reason.
+ * capture (or the reason was not a known code), or the channel records no
+ * reason at all (the previous-submission check stores only that it was
+ * partial) — never a guessed reason.
  * Generic codes only: never a provider name, URL, path or document identity.
  */
 export type ReportCompletionDiagnosticReason =
@@ -175,8 +178,8 @@ export function sanitizeSelectiveCorpusIncompleteReason(value: unknown): Selecti
 /**
  * The diagnostics a completion's own `signals` imply, with the per-channel
  * reasons when known (NOT_RECORDED otherwise). Order is fixed (extraction,
- * academic, Selective Corpus, references, source verification) so the same
- * signals always produce the same list.
+ * academic, Selective Corpus, references, previous submissions, source
+ * verification) so the same signals always produce the same list.
  */
 export function completionDiagnosticsFromSignals(
   signals: ReportCompletion["signals"],
@@ -200,6 +203,7 @@ export function completionDiagnosticsFromSignals(
   if (signals.userSuppliedReference === "PARTIAL") {
     diagnostics.push({ channel: "USER_SUPPLIED_REFERENCES", reason: "REFERENCE_FILE_UNREADABLE" });
   }
+  if (signals.priorSubmission === "PARTIAL") diagnostics.push({ channel: "PRIOR_SUBMISSION", reason: "NOT_RECORDED" });
   if (signals.unverifiedCandidateCount > 0) {
     diagnostics.push({ channel: "SOURCE_TEXT_VERIFICATION", reason: "CANDIDATE_TEXT_UNAVAILABLE" });
   }

@@ -5,7 +5,7 @@ import {
   type SelectiveCorpusAuthoritativeTerminalStatus,
 } from "./report-primary-similarity";
 import { resolveVerifiedAcademicEvidence } from "./academic-search-diagnostics-repo";
-import { buildFinalizedReportEvidenceInterpretation } from "./report-evidence-interpretation";
+import { buildFinalizedReportEvidenceInterpretation, priorSubmissionBranchState } from "./report-evidence-interpretation";
 import { canonicalSha256 } from "./document-identity";
 import { reportScoringNormalizationVersion, type ScoringNormalizationVersion } from "./similarity-core";
 import type { SimilarityReport } from "./report-types";
@@ -323,6 +323,9 @@ async function resolveAndPersist(
       corpusGeneration: resolution.corpusGeneration,
       terminalStatus: evidenceSelection.terminalStatus,
       incompleteReason: evidenceSelection.incompleteReason,
+      // The previous-submission check THIS final score was resolved with: the
+      // pending save had none, so it is recorded with the terminal status.
+      priorSubmission: priorSubmissionBranchState(resolution.historicalSubmissionMatch),
       evidenceInterpretation: prepared.evidenceInterpretation,
       // R2 write gate: persist in the exact mode the size check above measured.
       compactWrites: prepared.compactWrites,

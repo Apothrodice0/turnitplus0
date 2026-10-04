@@ -170,6 +170,8 @@ async function storedPayload(account, id) {
   const row = await client.execute({ sql: 'SELECT payload_json FROM saved_reports WHERE device_key = ? AND id = ?', args: [account.deviceKey, id] });
   return decodeReportFromPersistence(JSON.parse(String(row.rows[0].payload_json)));
 }
+/** A stored completion as an ordinary (non-admin) viewer receives it: the admin-only diagnostics are stripped (stripServerInternalReportFields). */
+const customerView = ({ diagnostics: _adminOnly, ...completion }) => completion;
 
 // ===========================================================================
 // The mapping itself
@@ -189,18 +191,20 @@ test('priorSubmissionBranchState: partial or a failed check is PARTIAL; any othe
   assert.equal(priorSubmissionBranchState({ ...base, status: 'UNAVAILABLE' }), 'PARTIAL', 'a failed check contributes nothing to the score');
 });
 
-test('resolveReportCompletion: priorSubmission PARTIAL makes the report PARTIAL with the existing lower-bound copy; COMPLETE and null do not', () => {
+test('resolveReportCompletion: priorSubmission PARTIAL makes the report PARTIAL with the partial-search lower-bound copy; COMPLETE and null do not', () => {
   const partial = resolveReportCompletion({ priorSubmission: 'PARTIAL', verifiedSimilarityPercent: 20, extraction: unknownExtractionDiagnostic() });
   assert.equal(partial.state, 'PARTIAL');
   assert.equal(partial.signals.priorSubmission, 'PARTIAL');
-  assert.equal(partial.headline, 'Some source searches were unavailable. Results may be incomplete.');
-  assert.equal(partial.detail, 'The 20% shown is a lower bound — a source we could not reach may add more.');
+  assert.equal(partial.headline, 'Partial search: some sources were unavailable.');
+  assert.equal(partial.detail, 'The 20% shown is a verified lower bound. Completed searches still produced valid evidence; sources we could not reach are not counted.');
   assert.ok(partial.reasons.includes('the previous-submission check could not examine every candidate'));
+  assert.deepEqual(partial.diagnostics, [{ channel: 'PRIOR_SUBMISSION', reason: 'NOT_RECORDED' }], 'the admin diagnostic names the channel; the report stores no reason');
 
   for (const priorSubmission of ['COMPLETE', null, undefined]) {
     const c = resolveReportCompletion({ priorSubmission, verifiedSimilarityPercent: 20, extraction: unknownExtractionDiagnostic() });
     assert.equal(c.state, 'COMPLETED', String(priorSubmission));
     assert.equal(c.signals.priorSubmission, priorSubmission ?? null);
+    assert.deepEqual(c.diagnostics, [], String(priorSubmission));
   }
 
   // Precedence is unchanged: unread document content still outranks a partial search.
@@ -363,13 +367,14 @@ test('8+9: the real POST persists PARTIAL for a partial prior-submission check; 
   assert.equal(saved.unifiedSimilarity.unifiedScore, 20, 'the verified source still scores');
   assert.equal(saved.reportCompletion.state, 'PARTIAL', 'initial report creation carries the partial check into the completion state');
   assert.equal(saved.reportCompletion.signals.priorSubmission, 'PARTIAL');
-  assert.equal(saved.reportCompletion.detail, 'The 20% shown is a lower bound — a source we could not reach may add more.');
+  assert.equal(saved.reportCompletion.detail, 'The 20% shown is a verified lower bound. Completed searches still produced valid evidence; sources we could not reach are not counted.');
+  assert.deepEqual(saved.reportCompletion.diagnostics, [{ channel: 'PRIOR_SUBMISSION', reason: 'NOT_RECORDED' }]);
 
   // Reopen: GET restores the persisted completion; it never recomputes it.
   const res = await getReport(account, id);
   assert.equal(res.status, 200);
   const { payload } = await res.json();
-  assert.deepEqual(payload.reportCompletion, saved.reportCompletion);
+  assert.deepEqual(payload.reportCompletion, customerView(saved.reportCompletion));
 
   // AI-completion resave: the check runs again and is still partial.
   assert.equal((await postReport(account, fx, { id, aiStatus: 'ready' })).status, 200);
@@ -440,7 +445,7 @@ test('10: a report saved before priorSubmission existed still opens, and nothing
   const res = await getReport(account, id);
   assert.equal(res.status, 200, 'an old report must still open');
   const { payload } = await res.json();
-  assert.deepEqual(payload.reportCompletion, stored.reportCompletion, 'returned exactly as stored — no migration, no backfill');
+  assert.deepEqual(payload.reportCompletion, customerView(stored.reportCompletion), 'returned exactly as stored — no migration, no backfill');
   assert.equal(resolveCompletionView(payload.reportCompletion, payload.extractionDiagnostic, payload.unifiedSimilarity.unifiedScore).state, 'COMPLETED');
 });
 

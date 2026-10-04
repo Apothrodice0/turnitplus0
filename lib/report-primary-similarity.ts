@@ -8,7 +8,7 @@ import { computeUnifiedSimilarity, type UnifiedSimilarityResult } from "./unifie
 import { resolveImportedSimilarityEvidenceForUnifiedSimilarity } from "./imported-similarity-evidence";
 import { compactUnifiedSimilarityForPersistence } from "./unified-similarity-persistence";
 import type { PersistedEvidenceInterpretation } from "./evidence-interpretation/persistence";
-import type { SelectiveCorpusIncompleteReason } from "./evidence-interpretation/completion";
+import type { PriorSubmissionBranchState, SelectiveCorpusIncompleteReason } from "./evidence-interpretation/completion";
 import type { ReportHistoricalSubmissionMatch, SimilarityReport } from "./report-types";
 import type { ExternalAcademicEvidence } from "./academic-search/types";
 import { canonicalSha256 } from "./document-identity";
@@ -1024,6 +1024,19 @@ export async function persistSelectiveCorpusAuthoritativeFinalization(
      * omitted/null (direct callers) leaves the key untouched.
      */
     incompleteReason?: SelectiveCorpusIncompleteReason | null;
+    /**
+     * reportCompletion.signals.priorSubmission of the historical match THIS
+     * final score was resolved with (priorSubmissionBranchState). The pending
+     * save that created the report had no such result (its completion carries
+     * priorSubmission: null), and the response-time refresh carries the
+     * persisted value forward, so without this a partial previous-submission
+     * check would read COMPLETED once the Selective Corpus completes. Set in the
+     * SAME statement as the status, with json_replace: it only fills a key the
+     * persisted completion already has — a report without a completion, or one
+     * saved before this signal existed, is left exactly as stored, never given
+     * an invented value. Omitted/null (direct callers) leaves it untouched.
+     */
+    priorSubmission?: PriorSubmissionBranchState;
     evidenceInterpretation?: PersistedEvidenceInterpretation;
     /**
      * R2 write gate. The mode buildFinalizedReportEvidenceInterpretation measured the
@@ -1047,16 +1060,17 @@ export async function persistSelectiveCorpusAuthoritativeFinalization(
   const flagText = resolution.corpusSourceMatchingEnabled ? "true" : "false";
   const interpretationToSet = resolution.evidenceInterpretation ?? null;
   const incompleteReasonToSet = resolution.terminalStatus === "incomplete" ? (resolution.incompleteReason ?? null) : null;
+  const priorSubmissionToSet = resolution.priorSubmission ?? null;
   const result = await client.execute({
     sql: `UPDATE saved_reports
-          SET payload_json = json_set(
+          SET payload_json = ${priorSubmissionToSet ? "json_replace(\n              " : ""}json_set(
                 json_remove(payload_json, '$.selectiveCorpusAuthoritativeClaimedAt'),
                 '$.unifiedSimilarity', json(?),
                 '$.corpusSourceMatchingEnabledAtComputation', json(?),
                 '$.unifiedSimilarityGeneration', ?,
                 '$.unifiedSimilarityFailed', json('false'),${interpretationToSet ? "\n                '$.evidenceInterpretation', json(?)," : ""}${incompleteReasonToSet ? "\n                '$.selectiveCorpusAuthoritativeIncompleteReason', ?," : ""}
                 '$.selectiveCorpusAuthoritativeStatus', ?
-              )
+              )${priorSubmissionToSet ? ",\n              '$.reportCompletion.signals.priorSubmission', ?\n            )" : ""}
           WHERE device_key = ? AND id = ? AND json_valid(payload_json)
             AND json_extract(payload_json, '$.selectiveCorpusAuthoritativeStatus') = 'pending'
             AND ${SIMILARITY_GENERATION_GUARD_SQL}
@@ -1073,6 +1087,7 @@ export async function persistSelectiveCorpusAuthoritativeFinalization(
       ...(interpretationToSet ? [JSON.stringify(interpretationToSet)] : []),
       ...(incompleteReasonToSet ? [incompleteReasonToSet] : []),
       resolution.terminalStatus,
+      ...(priorSubmissionToSet ? [priorSubmissionToSet] : []),
       params.reportDeviceKey,
       params.reportId,
       resolution.corpusGeneration,
