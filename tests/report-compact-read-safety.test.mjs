@@ -31,7 +31,8 @@ import {
   ReportPersistenceDecodeError,
 } from "../lib/report-persistence.ts";
 import { isCompactEvidenceInterpretation } from "../lib/evidence-interpretation/persistence.ts";
-import { isReportCompactPersistenceWriteEnabled } from "../lib/report-compact-persistence-flag.ts";
+import { isReportCompactPersistenceWriteEnabled, isReportCompactPositionsWriteEnabled } from "../lib/report-compact-persistence-flag.ts";
+import { compactPositionsForPersistence, expandPositionsFromPersistence } from "../lib/position-runs-persistence.ts";
 import { buildReportV2ViewModel } from "../lib/report-v2-view.ts";
 import { MAX_REPORT_SAVE_REQUEST_BYTES } from "../lib/report-transport-limits.ts";
 import { finalizeSelectiveCorpusAuthoritativeReport } from "../lib/selective-corpus-authoritative.ts";
@@ -326,6 +327,29 @@ function writePackage(units, name) {
 const SMALL_PACKAGE = writePackage(UNITS, "small-package.json");
 const importedOpts = (over = {}) => ({ text: importedManuscript(UNITS), ...over });
 
+// Matched-position lists have their OWN write gate (REPORT_COMPACT_POSITIONS_WRITE_ENABLED, lib/position-runs-persistence.ts),
+// independent of the one this file is about: a C2 marker scan looks at the row WITHOUT them, and the lists are checked on
+// their own terms by assertStoredPositionsFollowTheirGate.
+const UNIFIED_POSITION_KEYS = ["matchedPositions", "previousUploadPositions", "userSuppliedReferencePositions", "selectiveCorpusPositions", "importedSimilarityEvidencePositions"];
+function withoutPositionLists(row) {
+  const { archiveMatchedPositions: _archive, ...rest } = row;
+  if (!rest.unifiedSimilarity) return rest;
+  const unifiedSimilarity = { ...rest.unifiedSimilarity };
+  for (const key of UNIFIED_POSITION_KEYS) delete unifiedSimilarity[key];
+  return { ...rest, unifiedSimilarity };
+}
+/** Every stored position list is the array the reader serves (gate off) or the codec's own choice for it (gate on), and decodes to it exactly. */
+function assertStoredPositionsFollowTheirGate(row, served) {
+  const pairs = [[row.archiveMatchedPositions, served.archiveMatchedPositions, "archiveMatchedPositions"]];
+  for (const key of UNIFIED_POSITION_KEYS) pairs.push([row.unifiedSimilarity?.[key], served.unifiedSimilarity?.[key], key]);
+  for (const [stored, value, key] of pairs) {
+    if (stored === undefined) continue; // absent, or an elided duplicate (previousUploadPositionsEncoding) the reader rebuilds
+    assert.ok(Array.isArray(value), `${key}: served as an array`);
+    assert.deepEqual(stored, isReportCompactPositionsWriteEnabled() ? compactPositionsForPersistence(value) : value, `${key}: stored in the form its own gate allows`);
+    assert.deepEqual(expandPositionsFromPersistence(stored), { status: "expanded", value }, `${key}: decodes to exactly what is served`);
+  }
+}
+
 const viewCounts = (payload) => {
   const view = buildReportV2ViewModel(payload);
   return { cards: view?.sources?.length ?? 0, highlights: view?.passages?.length ?? 0 };
@@ -370,10 +394,13 @@ test("F2. FLAG OFF: a real POST persists the LEGACY form (full interpretation, p
       assert.equal(raw.evidenceInterpretation.format, undefined);
       assert.ok(Array.isArray(raw.evidenceInterpretation.passages) && Array.isArray(raw.evidenceInterpretation.sources) && raw.evidenceInterpretation.passages.length > 0, "the full legacy interpretation is what was written");
       assert.ok(Array.isArray(raw.unifiedSimilarity.contributions) && raw.unifiedSimilarity.contributions.length > 0, "contributions are the plain (non-empty) array");
-      for (const marker of ['"format":"compact"', "formatVersion", "passageInterpretations", "sourceShapes", '"strings":', '"rows":']) assert.equal(rawText.includes(marker), false, `no ${marker} in the stored row`);
+      const c2Text = JSON.stringify(withoutPositionLists(raw));
+      for (const marker of ['"format":"compact"', "formatVersion", "passageInterpretations", "sourceShapes", '"strings":', '"rows":']) assert.equal(c2Text.includes(marker), false, `no ${marker} in the stored row (position lists aside)`);
+      if (!isReportCompactPositionsWriteEnabled()) assert.equal(rawText.includes('"format":"compact"'), false, "with both gates off, no compact marker anywhere");
 
       const asOwner = await get(owner, id);
       assert.equal(asOwner.status, 200);
+      assertStoredPositionsFollowTheirGate(raw, asOwner.payload);
       assert.ok(asOwner.payload.evidenceInterpretation.passages.length > 0);
       assert.deepEqual(asOwner.payload.unifiedSimilarity.contributions, [], "non-admin: stripped as ever");
 
@@ -560,7 +587,9 @@ test("W2. the AUTHORITATIVE FINALIZER obeys the gate: OFF persists the legacy in
   assert.equal(isCompactEvidenceInterpretation(offRow.evidenceInterpretation), false, "flag OFF: legacy interpretation");
   assert.ok(Array.isArray(offRow.evidenceInterpretation.passages) && offRow.evidenceInterpretation.passages.length > 0);
   assert.ok(Array.isArray(offRow.unifiedSimilarity.contributions) && offRow.unifiedSimilarity.contributions.length > 0, "flag OFF: plain contributions array");
-  assert.equal(off.after.includes('"format":"compact"'), false);
+  assert.equal(JSON.stringify(withoutPositionLists(offRow)).includes('"format":"compact"'), false, "flag OFF: no C2 compact marker (position lists aside)");
+  if (!isReportCompactPositionsWriteEnabled()) assert.equal(off.after.includes('"format":"compact"'), false, "with both gates off, no compact marker anywhere");
+  assertStoredPositionsFollowTheirGate(offRow, decodeReportFromPersistence(offRow));
 
   const on = await finalizePending({ units: UNITS, gate: "true" });
   assert.deepEqual(on.result, { outcome: "finalized", status: "completed" });

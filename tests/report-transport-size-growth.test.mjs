@@ -20,6 +20,19 @@ import {
   compactUnifiedSimilarityForPersistence,
   PREVIOUS_UPLOAD_POSITIONS_ENCODING_MATCHED_POSITIONS,
 } from '../lib/unified-similarity-persistence.ts';
+import { compactPositionsForPersistence, expandPositionsFromPersistence } from '../lib/position-runs-persistence.ts';
+import { isReportCompactPositionsWriteEnabled } from '../lib/report-compact-persistence-flag.ts';
+
+/**
+ * The stored matchedPositions in full: the array itself with the positions write gate off; with it on, the codec's own
+ * choice for that array (the exact range form when smaller). Returns the decoded array — exactly what readers are served.
+ */
+function storedMatchedPositionsInFull(stored, message) {
+  const decoded = expandPositionsFromPersistence(stored);
+  assert.equal(decoded.status, 'expanded', message);
+  assert.deepEqual(stored, isReportCompactPositionsWriteEnabled() ? compactPositionsForPersistence(decoded.value) : decoded.value, `${message}: stored in the form the positions write gate allows`);
+  return decoded.value;
+}
 
 /**
  * Pre-launch hardening audit follow-up (long-document/2MB-ceiling
@@ -409,8 +422,9 @@ test('REAL SERVER GROWTH: a request under MAX_REPORT_SAVE_REQUEST_BYTES as sent 
     assert.ok(MAX_REPORT_SAVE_REQUEST_BYTES - rawPersistedBytes > 20_000, `requirement D: the compact size must clear the ceiling with a meaningful safety margin, not by a handful of bytes (margin: ${MAX_REPORT_SAVE_REQUEST_BYTES - rawPersistedBytes})`);
 
     const rawParsed = JSON.parse(rawPayloadJson);
-    assert.ok(Array.isArray(rawParsed.unifiedSimilarity?.matchedPositions), 'requirement G: matchedPositions must remain persisted in full');
-    assert.ok(rawParsed.unifiedSimilarity.matchedPositions.length > 0);
+    const storedMatchedPositions = storedMatchedPositionsInFull(rawParsed.unifiedSimilarity?.matchedPositions, 'requirement G: matchedPositions must remain persisted in full');
+    assert.ok(storedMatchedPositions.length > 0);
+    assert.deepEqual(storedMatchedPositions, referenceResolution.unifiedSimilarity.matchedPositions, 'requirement G: exactly the positions the independent reference computation credited');
     assert.equal(rawParsed.unifiedSimilarity.previousUploadPositionsEncoding, PREVIOUS_UPLOAD_POSITIONS_ENCODING_MATCHED_POSITIONS, 'requirement G: the raw persisted row must carry the compaction marker');
     assert.equal('previousUploadPositions' in rawParsed.unifiedSimilarity, false, 'requirement G: the raw persisted row must NOT also carry the now-redundant duplicate array');
 
@@ -426,7 +440,7 @@ test('REAL SERVER GROWTH: a request under MAX_REPORT_SAVE_REQUEST_BYTES as sent 
     const getUnified = getBody.payload.unifiedSimilarity;
     assert.ok(getUnified, 'requirement I: GET must return a real unifiedSimilarity');
     assert.equal(getUnified.previousUploadPositionsEncoding, undefined, 'requirement I: the customer-facing GET response must NEVER expose the persistence-only encoding marker');
-    assert.deepEqual(getUnified.matchedPositions, rawParsed.unifiedSimilarity.matchedPositions, 'requirement I: matchedPositions must be unchanged by expansion');
+    assert.deepEqual(getUnified.matchedPositions, storedMatchedPositions, 'requirement I: matchedPositions must be unchanged by expansion');
     assert.ok(Array.isArray(getUnified.previousUploadPositions), 'requirement I: previousUploadPositions must be reconstructed as a real array');
     assert.deepEqual(getUnified.previousUploadPositions, getUnified.matchedPositions, 'requirement I: the reconstructed array must exactly equal matchedPositions -- this fixture\'s compaction was only ever eligible because the two were identical to begin with');
 
@@ -825,7 +839,9 @@ test('SELF-HEAL COMPACTION: persistRefreshedSimilarity writes the compact repres
   // The actual requirement: persistRefreshedSimilarity's own write, inspected
   // directly from the raw persisted row -- proves the SAME shared encoder
   // used by the POST path is also applied on the self-heal write path.
-  assert.ok(Array.isArray(parsedAfter.unifiedSimilarity?.matchedPositions) && parsedAfter.unifiedSimilarity.matchedPositions.length > 0);
+  const healedMatchedPositions = storedMatchedPositionsInFull(parsedAfter.unifiedSimilarity?.matchedPositions, 'the self-heal write persists matchedPositions in full');
+  assert.ok(healedMatchedPositions.length > 0);
+  assert.deepEqual(getUnified.matchedPositions, healedMatchedPositions, 'GET serves exactly what the self-heal persisted');
   assert.equal(parsedAfter.unifiedSimilarity.previousUploadPositionsEncoding, PREVIOUS_UPLOAD_POSITIONS_ENCODING_MATCHED_POSITIONS, 'persistRefreshedSimilarity (the self-heal write path) must persist the compact marker when eligible, exactly like the POST write path');
   assert.equal('previousUploadPositions' in parsedAfter.unifiedSimilarity, false, 'persistRefreshedSimilarity must OMIT the now-redundant duplicate array when compacting');
 });

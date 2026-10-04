@@ -5,6 +5,8 @@ import {
   expandUnifiedSimilarityFromPersistence,
   PREVIOUS_UPLOAD_POSITIONS_ENCODING_MATCHED_POSITIONS,
 } from "../lib/unified-similarity-persistence.ts";
+import { compactPositionsForPersistence, expandPositionsFromPersistence } from "../lib/position-runs-persistence.ts";
+import { isReportCompactPositionsWriteEnabled } from "../lib/report-compact-persistence-flag.ts";
 
 /**
  * Pre-launch hardening fix — measured 2MB report-transport-ceiling
@@ -44,16 +46,42 @@ function largeSortedArray(length) {
   return Array.from({ length }, (_, i) => i * 3 + 1);
 }
 
+/**
+ * A persisted position list holds exactly `expected`, in the form the write gates allow: the array itself with the
+ * positions write gate off (what 88df45d stores and reads); with it on, the codec's own choice — the exact range form
+ * when that is smaller, else the array. Either way it decodes to `expected`.
+ */
+function assertPersistedPositions(persisted, expected, message) {
+  assert.deepEqual(persisted, isReportCompactPositionsWriteEnabled() ? compactPositionsForPersistence(expected) : expected, message);
+  assert.deepEqual(expandPositionsFromPersistence(persisted), { status: "expanded", value: expected }, `${message} (decoded)`);
+}
+
 test("1. large identical arrays -> compacts", () => {
   const positions = largeSortedArray(5000);
   const result = baseResult({ matchedPositions: positions, previousUploadPositions: [...positions] });
   const compacted = compactUnifiedSimilarityForPersistence(result);
   assert.equal(compacted.previousUploadPositionsEncoding, PREVIOUS_UPLOAD_POSITIONS_ENCODING_MATCHED_POSITIONS);
   assert.equal("previousUploadPositions" in compacted, false, "the duplicate array must be OMITTED, not merely nulled");
-  assert.deepEqual(compacted.matchedPositions, positions, "matchedPositions itself is never altered");
+  assertPersistedPositions(compacted.matchedPositions, positions, "matchedPositions itself is never altered");
   const compactedBytes = Buffer.byteLength(JSON.stringify(compacted), "utf8");
   const expandedBytes = Buffer.byteLength(JSON.stringify(result), "utf8");
   assert.ok(compactedBytes < expandedBytes, `compaction must actually shrink the payload (${compactedBytes} vs ${expandedBytes})`);
+});
+
+test("1b. the positions write gate chooses only the physical form: gate off writes the arrays, gate on writes ranges where smaller, and both decode to the same result", () => {
+  const positions = largeSortedArray(5000);
+  const distinct = positions.map((p) => p + 1);
+  const result = baseResult({ matchedPositions: positions, previousUploadPositions: [...positions], userSuppliedReferencePositions: distinct, selectiveCorpusPositions: [7, 3] });
+  const off = compactUnifiedSimilarityForPersistence(result, { compactPositions: false });
+  const on = compactUnifiedSimilarityForPersistence(result, { compactPositions: true });
+  assert.deepEqual(off.matchedPositions, positions, "gate off: the array itself");
+  assert.deepEqual(off.userSuppliedReferencePositions, distinct);
+  assert.equal(on.matchedPositions.format, "compact", "gate on: the range form, smaller here");
+  assert.equal(on.userSuppliedReferencePositions.format, "compact");
+  assert.deepEqual(on.selectiveCorpusPositions, [7, 3], "an out-of-order list has no exact range form and stays the array");
+  assert.ok(JSON.stringify(on).length < JSON.stringify(off).length);
+  assert.deepEqual(expandUnifiedSimilarityFromPersistence(on), expandUnifiedSimilarityFromPersistence(off), "the same unified result from either form");
+  assert.deepEqual(expandUnifiedSimilarityFromPersistence(on).previousUploadPositions, positions);
 });
 
 test("2. different arrays -> does NOT compact", () => {
@@ -62,7 +90,7 @@ test("2. different arrays -> does NOT compact", () => {
   const result = baseResult({ matchedPositions, previousUploadPositions });
   const compacted = compactUnifiedSimilarityForPersistence(result);
   assert.equal(compacted.previousUploadPositionsEncoding, undefined);
-  assert.deepEqual(compacted.previousUploadPositions, previousUploadPositions, "the real, distinct array must be persisted unchanged");
+  assertPersistedPositions(compacted.previousUploadPositions, previousUploadPositions, "the real, distinct array must be persisted unchanged");
 });
 
 test("3. proper subset -> does NOT compact", () => {
@@ -71,7 +99,7 @@ test("3. proper subset -> does NOT compact", () => {
   const result = baseResult({ matchedPositions, previousUploadPositions });
   const compacted = compactUnifiedSimilarityForPersistence(result);
   assert.equal(compacted.previousUploadPositionsEncoding, undefined, "a proper subset is NOT the same value as matchedPositions -- must never be compacted (this is the ordinary, common case)");
-  assert.deepEqual(compacted.previousUploadPositions, previousUploadPositions);
+  assertPersistedPositions(compacted.previousUploadPositions, previousUploadPositions, "the subset is persisted as itself");
 });
 
 test("4. same values but different ordering -> does NOT compact", () => {

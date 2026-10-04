@@ -17,6 +17,7 @@ import { MAX_REPORT_SAVE_REQUEST_BYTES, persistedPayloadSize } from "../lib/repo
 import { prepareAiAnalysisForTransport } from "../lib/ai-passage-table.ts";
 import * as unavailable from "../lib/ai-unavailable-state.ts";
 import { computeDetailRevealState } from "../lib/report-detail-poll.ts";
+import { expandPositionsFromPersistence } from "../lib/position-runs-persistence.ts";
 
 const roomShell = await import("../app/reports/rooms/[room]/room-page-shell.tsx");
 
@@ -196,11 +197,35 @@ test("REGRESSION 1.85M: a ~1.85M-character report (first save accepted, similari
 // 2. DENSE EVIDENCE (~1M matcher regime)
 // ----------------------------------------------------------------------------------------------------------------
 
-test("REGRESSION DENSE ~1M: a dense-evidence report inside the production matcher regime (<= 1,000,000 chars) whose persisted evidence leaves no room for the real compact AI result gets the terminal marker — similarity byte-identical, report opens, Retry hidden", async () => {
-  const W = 13_000;
-  const corpus = fx.buildCorpusPassages(W);
-  for (const passage of corpus) await env.promoteDocumentIntoCorpus(passage);
-  const text = fx.buildMatchedManuscript(corpus.map((p) => p.split(/\s+/).slice(0, W).join(" ")));
+// The matched-position lists have their own write gate (lib/position-runs-persistence.ts). Dense evidence leaves no room
+// for the AI result only while those lists are stored as arrays — the gate off, the shipped default and every row written
+// before it is turned on — so the regression below pins that storage; the test after it is the same report with ranges.
+const POSITIONS_GATE = "REPORT_COMPACT_POSITIONS_WRITE_ENABLED";
+function pinPositionsWrites(value) {
+  const previous = process.env[POSITIONS_GATE];
+  if (value === undefined) delete process.env[POSITIONS_GATE];
+  else process.env[POSITIONS_GATE] = value;
+  return () => {
+    if (previous === undefined) delete process.env[POSITIONS_GATE];
+    else process.env[POSITIONS_GATE] = previous;
+  };
+}
+const DENSE_W = 13_000;
+let denseCorpus = null;
+/** The dense manuscript: ten promoted corpus passages embedded verbatim (promoted once per process). */
+async function denseManuscript() {
+  if (!denseCorpus) {
+    const corpus = fx.buildCorpusPassages(DENSE_W);
+    for (const passage of corpus) await env.promoteDocumentIntoCorpus(passage);
+    denseCorpus = corpus;
+  }
+  return fx.buildMatchedManuscript(denseCorpus.map((p) => p.split(/\s+/).slice(0, DENSE_W).join(" ")));
+}
+
+test("REGRESSION DENSE ~1M: a dense-evidence report inside the production matcher regime (<= 1,000,000 chars) whose persisted evidence leaves no room for the real compact AI result gets the terminal marker — similarity byte-identical, report opens, Retry hidden", async (t) => {
+  t.after(pinPositionsWrites(undefined)); // array storage — see POSITIONS_GATE above
+  const W = DENSE_W;
+  const text = await denseManuscript();
   assert.ok(text.length <= 1_000_000, `fixture sanity: inside the server archive engine's own cap (${text.length})`);
   const account = await env.signUpAccount();
   const ai = fx.syntheticAiAnalysis(text);
@@ -279,6 +304,42 @@ test("REGRESSION DENSE ~1M: a dense-evidence report inside the production matche
   });
   out.result = { DENSE_1M_SIZE_UNAVAILABLE: "PASS" };
   writeOut("dense-1m-regression.json", out);
+});
+
+test("DENSE ~1M WITH RANGES: the same dense-evidence report stored with the positions write gate on keeps every credited position, and its real compact AI result now fits — ready, scored, never the marker, similarity untouched", async (t) => {
+  t.after(pinPositionsWrites("true"));
+  const text = await denseManuscript();
+  const account = await env.signUpAccount();
+  const ai = fx.syntheticAiAnalysis(text);
+  await kit.asBrowser(account, async (route) => {
+    const id = "lgdense-ranges";
+    const report = await kit.firstSave(account, id, text, 0);
+    assert.equal(lastPost(route).status, 200, "the first save fits");
+    const first = await rowStats(id);
+    const stored = payloadOf(await kit.readRow(id)).unifiedSimilarity;
+    const served = (await fetchRemoteReport(id)).unifiedSimilarity;
+    assert.ok(served.matchedPositions.length > 10_000, `dense evidence: ${served.matchedPositions.length} matched positions`);
+    assert.equal(stored.matchedPositions.format, "compact", "stored as exact ranges");
+    assert.deepEqual(expandPositionsFromPersistence(stored.matchedPositions), { status: "expanded", value: served.matchedPositions }, "the ranges decode to exactly the positions served");
+    assert.equal(stored.unifiedScore, served.unifiedScore);
+    assert.ok(first.chars < 1_500_000, `no longer dominated by evidence (${first.chars}; the array-storage regression above needs > 1,500,000)`);
+    assert.ok(first.chars + JSON.stringify(prepareAiAnalysisForTransport(ai, text, { compactWrites: true })).length < MAX, "room left for the real compact AI result");
+
+    const { enriched, summary } = enrich(report, ai);
+    const subtreesBefore = await subtrees(id);
+    const saved = await persistAiCompletion(enriched, summary, 0);
+    const after = await rowStats(id);
+    assert.equal(saved.ok, true);
+    assert.equal(route.requests.filter((r) => r.path === `/api/reports/${id}/ai-retry`).length, 0, "the whole-report resave fits: no fallback");
+    assert.equal(after.ai_status, "ready");
+    assert.equal(after.ai_score, summary.aiScore);
+    const payload = payloadOf(await kit.readRow(id));
+    assert.equal(payload.aiAnalysis.status, "complete");
+    assert.equal("unavailableReason" in payload.aiAnalysis, false, "not the marker");
+    assert.equal(await subtrees(id), subtreesBefore, "similarity / evidence / completion untouched");
+    assert.ok(after.chars <= MAX);
+    writeOut("dense-1m-ranges.json", { manuscriptChars: text.length, firstSaveChars: first.chars, matchedPositions: served.matchedPositions.length, unifiedScore: served.unifiedScore, aiStatusAfter: after.ai_status, persistedCharsAfter: after.chars });
+  });
 });
 
 // ----------------------------------------------------------------------------------------------------------------
