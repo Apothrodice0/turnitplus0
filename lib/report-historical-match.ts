@@ -4,7 +4,14 @@ import { canonicalizeText } from "./canonical-text";
 import { mapCanonicalTokensToRawTokens, projectCanonicalPassagesToRaw } from "./canonical-token-position-map";
 import type { ScoringNormalizationVersion } from "./similarity-core";
 import { runWithScoringNormalization } from "./scoring-normalization-scope";
-import { matchAgainstUserSubmissionCorpus, isCorpusSourceMatchingEnabled, USER_SUBMISSION_MATCHER_VERSION, USER_SUBMISSION_MATCH_THRESHOLDS, type UserSubmissionMatch } from "./user-submission-matching";
+import {
+  matchAgainstUserSubmissionCorpus,
+  isCorpusSourceMatchingEnabled,
+  USER_SUBMISSION_MATCHER_VERSION,
+  USER_SUBMISSION_MATCH_THRESHOLDS,
+  type UserSubmissionMatch,
+  type UserSubmissionMatchDiagnostics,
+} from "./user-submission-matching";
 import {
   CORPUS_FINGERPRINT_VERSION,
   CANONICALIZATION_VERSION,
@@ -188,6 +195,16 @@ export { getCurrentCorpusMatchGeneration, bumpCorpusMatchGeneration };
  * recomputed on next view (is_partial column, drizzle/0035) — an incomplete
  * computation must never be mistaken for a settled one, whichever status it
  * happened to carry.
+ *
+ * "Next view" stopped being true when the read paths became read-only: only a
+ * write-capable resolution recomputes (a report save, the Selective Corpus
+ * finalizer, the admin decision trace). A pass cut short by a slow query on a
+ * first save therefore stayed on the report — "Partial search", and a score
+ * without the sources that pass never reached — until the browser happened to
+ * save the report again. So a pass that was CUT SHORT is run again inside the
+ * same resolution, a bounded number of times
+ * (PRIOR_SUBMISSION_MATCH_MAX_ATTEMPTS); what is stored and returned is the
+ * outcome of those passes together, so no later save is needed to heal it.
  */
 
 /**
@@ -539,6 +556,90 @@ function applyCorpusSourceMatchingFlag(result: ReportHistoricalSubmissionMatch):
   return { ...result, matches: filtered };
 }
 
+/**
+ * How many matching passes ONE resolution may run for a report: the first,
+ * plus re-runs of a pass that was cut short. Counted inside the resolution and
+ * held in no stored state — nothing a client can send, and nothing a resave or
+ * another channel's retry can reset.
+ *
+ * Which passes are run again, and why — by how the pass ended
+ * (lib/user-submission-matching.ts's stop reasons), never all alike:
+ *   - QUERY_FAILED, or a thrown error: a query was slow or failed. That
+ *     describes THIS RUN, not the report or the corpus, so the identical pass,
+ *     issued again, can complete. Seen on the hosted Preview: a first save's
+ *     pass gave up waiting for its first candidate page (stored as partial
+ *     after 1,615 ms; dbQueryTimeoutMs is 1,500), and the identical pass on the
+ *     next save of the same report completed in 1,046 ms with nothing changed.
+ *     Run again up to the bound.
+ *   - TIME_BUDGET: the pass ran out of time. On a cold instance that is the
+ *     run; on a document with more candidates than fit in the budget it is the
+ *     work, and every pass would end the same way. So it is run again once, and
+ *     again after that only while a re-run got further than the pass before
+ *     it: two passes in a row that run out of time at the same point are
+ *     work-bound, and the passes stop there.
+ *   - a pass that examined every candidate and is partial only because a
+ *     scoring candidate is over maxCandidateWordCount is NOT run again: that is
+ *     a defined work limit and gives the same answer every time. It stays
+ *     partial — a truthful lower bound.
+ * Every pass keeps the matcher's own, unchanged budgets (matchTimeBudgetMs,
+ * dbQueryTimeoutMs): the work is re-issued, no wait is lengthened, and
+ * USER_SUBMISSION_MATCH_THRESHOLDS — digested into every snapshot's tag — is
+ * untouched. When every allowed pass is cut short the result is partial exactly
+ * as a single cut-short pass was before.
+ */
+export const PRIOR_SUBMISSION_MATCH_MAX_ATTEMPTS = 3;
+
+/** One matching pass, as the values the snapshot row stores plus how it ended. */
+type PriorSubmissionMatchPass = {
+  status: "MATCHED" | "NO_HISTORICAL_MATCH" | typeof NO_HISTORICAL_MATCH_FEATURE_DISABLED_STATUS | "FAILED";
+  resultJson: string | null;
+  candidateCount: number | null;
+  errorMessage: string | null;
+  isPartial: boolean;
+  /** The matcher's stop reason; "ERROR" when the pass threw; null when the matcher reported none (an empty submission). */
+  stop: UserSubmissionMatchDiagnostics["stopReason"] | "ERROR" | null;
+  /** Ended by something a re-run can clear — see PRIOR_SUBMISSION_MATCH_MAX_ATTEMPTS. */
+  cutShort: boolean;
+  /** How far the pass got: candidates it compared against the submission. */
+  candidatesVerified: number;
+  oversizedScoringCandidatesSkipped: number;
+};
+
+/**
+ * Of two cut-short passes, whether `next` should replace `kept`. Every match a
+ * cut-short pass returns was verified, so each is a valid lower bound; the one
+ * with more verified sources is kept (candidates are read in one total order,
+ * so a pass that got further verified the earlier pass's sources too). A pass
+ * that threw holds nothing.
+ */
+function holdsMoreVerifiedEvidence(next: PriorSubmissionMatchPass, kept: PriorSubmissionMatchPass): boolean {
+  if (next.status === "FAILED") return false;
+  if (kept.status === "FAILED") return true;
+  return (next.candidateCount ?? 0) > (kept.candidateCount ?? 0);
+}
+
+/**
+ * One structured log line for a previous-submission check that did not simply
+ * complete on its first pass. The only record of WHY a check was partial: the
+ * snapshot row and the report store that it was, not the reason. Counts,
+ * durations and enums only, like the matcher's own diagnostics — no report,
+ * account or corpus identifier. Best-effort: never throws.
+ */
+function logPriorSubmissionCheck(event: {
+  result: "recovered" | "partial" | "unavailable";
+  attempts: number;
+  maxAttempts: number;
+  stops: PriorSubmissionMatchPass["stop"][];
+  oversizedScoringCandidatesSkipped: number;
+  durationMs: number;
+}): void {
+  try {
+    console.warn(JSON.stringify({ event: "prior_submission_check", ...event }));
+  } catch {
+    // Best-effort only. Never rethrow.
+  }
+}
+
 export async function getOrComputeHistoricalMatchSnapshot(
   client: Client,
   params: {
@@ -672,96 +773,158 @@ export async function getOrComputeHistoricalMatchSnapshot(
   }
 
   const startedAt = Date.now();
-  let status: "MATCHED" | "NO_HISTORICAL_MATCH" | typeof NO_HISTORICAL_MATCH_FEATURE_DISABLED_STATUS | "FAILED";
-  let resultJson: string | null = null;
-  let candidateCount: number | null = null;
-  let errorMessage: string | null = null;
-  let isPartial = false;
 
   // Everything below that tokenizes the submission — the matcher and the
   // canonical->raw projection — runs under the report's own contract, the one
   // the row is tagged with.
   const underReportContract = <T>(compute: () => T): T => runWithScoringNormalization(scoringNormalizationVersion, compute);
 
-  try {
-    const canonicalText = canonicalizeText(params.rawText);
-    // Phase E8D: now that save-time indexing is live, this exact report's
-    // own submission is typically already present in the corpus under
-    // params.accountId by the time this ever runs — matchAgainstUserSubmissionCorpus's
-    // own documentIdentityId parameter exists precisely for this ("relevant
-    // only if the caller already indexed this exact submission into the
-    // corpus before calling this function" — see that file's own comment).
-    // Before E8D this was genuinely unreachable (nothing indexed the
-    // current submission before its own report was ever viewed), so
-    // omitting it was harmless; leaving it omitted now would make every
-    // signed-in viewer's own representation membership look like a SELF
-    // match against itself, even for another account's prior content. The
-    // exact document_identities row is not stored on saved_reports (no
-    // schema change here), so this picks the account's own most recent
-    // identity row for this canonical hash — sufficient because excluding
-    // any one of an account's own rows from ownership counting still
-    // leaves a genuine repeat's earlier row counted, and leaves nothing
-    // counted when this is that account's only submission of the content.
-    const ownIdentities = params.accountId ? await findPriorSubmissionsForAccount(client, params.accountId, canonicalSha256(params.rawText)) : [];
-    const documentIdentityId = ownIdentities.length > 0 ? ownIdentities[ownIdentities.length - 1].id : null;
-    // corpusSourceMatchingEnabledAtComputation (captured once, above) governs
-    // classification here — never a fresh env read inside the matcher — so
-    // it and the status choice below can never disagree across a flag flip.
-    const matchResult = await underReportContract(() => matchAgainstUserSubmissionCorpus(client, {
-      accountId: params.accountId,
-      documentIdentityId,
-      canonicalText,
-      excludeAccountId: params.excludeAccountId,
-      corpusSourceMatchingEnabled: corpusSourceMatchingEnabledAtComputation,
-      // Phase A: the SAME cutoff the maturity-crossing cache check above uses.
-      maturityCutoff,
-      excludedAfterMatching: params.excludedAfterMatching,
-    }));
-    isPartial = matchResult.partial === true;
-    if (matchResult.status === "MATCHED") {
-      status = "MATCHED";
-      // The matcher's passages index tokens(canonicalText); every consumer of
-      // this snapshot (lib/unified-similarity.ts's union, highlighting) reads
-      // them as tokens(rawText) indices. Re-express them through the explicit
-      // canonical->raw token mapping so a zero-width mark stripped by
-      // canonicalizeText can never shift credit onto an unverified raw word
-      // (see lib/canonical-token-position-map.ts). Match-level statistics
-      // (containment, matchedWordCount, longestMatchWords, passageCount) stay
-      // the matcher's own. additionalPassageRanges are positions too and go
-      // through the same mapping.
-      const serialized = underReportContract(() => {
-        const rawTokenMapping = mapCanonicalTokensToRawTokens(params.rawText, canonicalText);
-        return serializeMatchesForStorage(
-          matchResult.matches.map((match) => ({
-            ...match,
-            passages: projectCanonicalPassagesToRaw(match.passages, rawTokenMapping),
-            ...(match.additionalPassageRanges ? { additionalPassageRanges: projectCanonicalRangesToRaw(match.additionalPassageRanges, rawTokenMapping) } : {}),
-          })),
-        );
-      });
-      resultJson = JSON.stringify(serialized);
-      candidateCount = serialized.length;
-    } else if (isPartial || corpusSourceMatchingEnabledAtComputation) {
-      // A complete no-match evaluated with corpus-source matching ON — the
-      // reusable kind. Chosen from the SAME captured value the matcher just
-      // ran under, never a re-read of the live environment. (A partial
-      // no-match also lands here but is_partial keeps it out of the cache
-      // regardless of status.)
-      status = "NO_HISTORICAL_MATCH";
-    } else {
-      // Computed with corpus-source matching off: promoted-corpus-source
-      // candidates were never classified, so this is not a complete
-      // evaluation. Stored under a distinct status so isSnapshotRowCurrent
-      // never reuses it and the flag turning on forces a real recompute
-      // (section 9). Externally still an ordinary NO_HISTORICAL_MATCH.
-      status = NO_HISTORICAL_MATCH_FEATURE_DISABLED_STATUS;
+  // One complete matching pass, from the submission text to the values the
+  // snapshot row stores. Reads only — the single write is the upsert below —
+  // so running it again is safe. Never throws: a failure is the FAILED pass.
+  const runMatchPass = async (): Promise<PriorSubmissionMatchPass> => {
+    let status: PriorSubmissionMatchPass["status"];
+    let resultJson: string | null = null;
+    let candidateCount: number | null = null;
+    // The matcher's own account of how the pass ended (counts, durations and
+    // one enum — no identifier). Read here only to tell a pass that was cut
+    // short from one that examined everything; never stored, never returned.
+    const diagnostics: Partial<UserSubmissionMatchDiagnostics> = {};
+    try {
+      const canonicalText = canonicalizeText(params.rawText);
+      // Phase E8D: now that save-time indexing is live, this exact report's
+      // own submission is typically already present in the corpus under
+      // params.accountId by the time this ever runs — matchAgainstUserSubmissionCorpus's
+      // own documentIdentityId parameter exists precisely for this ("relevant
+      // only if the caller already indexed this exact submission into the
+      // corpus before calling this function" — see that file's own comment).
+      // Before E8D this was genuinely unreachable (nothing indexed the
+      // current submission before its own report was ever viewed), so
+      // omitting it was harmless; leaving it omitted now would make every
+      // signed-in viewer's own representation membership look like a SELF
+      // match against itself, even for another account's prior content. The
+      // exact document_identities row is not stored on saved_reports (no
+      // schema change here), so this picks the account's own most recent
+      // identity row for this canonical hash — sufficient because excluding
+      // any one of an account's own rows from ownership counting still
+      // leaves a genuine repeat's earlier row counted, and leaves nothing
+      // counted when this is that account's only submission of the content.
+      const ownIdentities = params.accountId ? await findPriorSubmissionsForAccount(client, params.accountId, canonicalSha256(params.rawText)) : [];
+      const documentIdentityId = ownIdentities.length > 0 ? ownIdentities[ownIdentities.length - 1].id : null;
+      // corpusSourceMatchingEnabledAtComputation (captured once, above) governs
+      // classification here — never a fresh env read inside the matcher — so
+      // it and the status choice below can never disagree across a flag flip.
+      const matchResult = await underReportContract(() => matchAgainstUserSubmissionCorpus(client, {
+        accountId: params.accountId,
+        documentIdentityId,
+        canonicalText,
+        excludeAccountId: params.excludeAccountId,
+        corpusSourceMatchingEnabled: corpusSourceMatchingEnabledAtComputation,
+        // Phase A: the SAME cutoff the maturity-crossing cache check above uses.
+        maturityCutoff,
+        excludedAfterMatching: params.excludedAfterMatching,
+        diagnostics,
+      }));
+      const isPartial = matchResult.partial === true;
+      if (matchResult.status === "MATCHED") {
+        status = "MATCHED";
+        // The matcher's passages index tokens(canonicalText); every consumer of
+        // this snapshot (lib/unified-similarity.ts's union, highlighting) reads
+        // them as tokens(rawText) indices. Re-express them through the explicit
+        // canonical->raw token mapping so a zero-width mark stripped by
+        // canonicalizeText can never shift credit onto an unverified raw word
+        // (see lib/canonical-token-position-map.ts). Match-level statistics
+        // (containment, matchedWordCount, longestMatchWords, passageCount) stay
+        // the matcher's own. additionalPassageRanges are positions too and go
+        // through the same mapping.
+        const serialized = underReportContract(() => {
+          const rawTokenMapping = mapCanonicalTokensToRawTokens(params.rawText, canonicalText);
+          return serializeMatchesForStorage(
+            matchResult.matches.map((match) => ({
+              ...match,
+              passages: projectCanonicalPassagesToRaw(match.passages, rawTokenMapping),
+              ...(match.additionalPassageRanges ? { additionalPassageRanges: projectCanonicalRangesToRaw(match.additionalPassageRanges, rawTokenMapping) } : {}),
+            })),
+          );
+        });
+        resultJson = JSON.stringify(serialized);
+        candidateCount = serialized.length;
+      } else if (isPartial || corpusSourceMatchingEnabledAtComputation) {
+        // A complete no-match evaluated with corpus-source matching ON — the
+        // reusable kind. Chosen from the SAME captured value the matcher just
+        // ran under, never a re-read of the live environment. (A partial
+        // no-match also lands here but is_partial keeps it out of the cache
+        // regardless of status.)
+        status = "NO_HISTORICAL_MATCH";
+      } else {
+        // Computed with corpus-source matching off: promoted-corpus-source
+        // candidates were never classified, so this is not a complete
+        // evaluation. Stored under a distinct status so isSnapshotRowCurrent
+        // never reuses it and the flag turning on forces a real recompute
+        // (section 9). Externally still an ordinary NO_HISTORICAL_MATCH.
+        status = NO_HISTORICAL_MATCH_FEATURE_DISABLED_STATUS;
+      }
+      const stop = diagnostics.stopReason ?? null;
+      return {
+        status,
+        resultJson,
+        candidateCount,
+        errorMessage: null,
+        isPartial,
+        stop,
+        // Partial because the pass was stopped, not because of what it found.
+        cutShort: isPartial && (stop === "TIME_BUDGET" || stop === "QUERY_FAILED"),
+        candidatesVerified: diagnostics.candidatesVerified ?? 0,
+        oversizedScoringCandidatesSkipped: diagnostics.oversizedScoringCandidatesSkipped ?? 0,
+      };
+    } catch (error) {
+      return {
+        status: "FAILED",
+        resultJson: null,
+        candidateCount: null,
+        errorMessage: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500),
+        isPartial: false,
+        stop: "ERROR",
+        cutShort: true,
+        candidatesVerified: 0,
+        oversizedScoringCandidatesSkipped: 0,
+      };
     }
-  } catch (error) {
-    status = "FAILED";
-    errorMessage = error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500);
-  }
+  };
 
+  // A pass that examined every candidate ends the loop and is the result,
+  // whether it is complete or partial for a reason no re-run changes. While
+  // passes keep being cut short, the one holding the most verified evidence is
+  // kept, so a later pass that got less far never replaces an earlier one.
+  // See PRIOR_SUBMISSION_MATCH_MAX_ATTEMPTS.
+  let pass = await runMatchPass();
+  let previous = pass;
+  const stops: PriorSubmissionMatchPass["stop"][] = [pass.stop];
+  while (pass.cutShort && stops.length < PRIOR_SUBMISSION_MATCH_MAX_ATTEMPTS) {
+    const next = await runMatchPass();
+    stops.push(next.stop);
+    // Out of time again, no further than the pass before: bound by the work,
+    // not by a slow run. Another pass would end the same way.
+    const workBound =
+      next.cutShort && next.stop === "TIME_BUDGET" && previous.stop === "TIME_BUDGET" && next.candidatesVerified <= previous.candidatesVerified;
+    if (!next.cutShort || holdsMoreVerifiedEvidence(next, pass)) pass = next;
+    previous = next;
+    if (workBound) break;
+  }
+  const { status, resultJson, candidateCount, errorMessage, isPartial } = pass;
+
+  // Every pass together: how long this resolution spent on the check.
   const processingDurationMs = Date.now() - startedAt;
+  if (stops.length > 1 || isPartial || status === "FAILED") {
+    logPriorSubmissionCheck({
+      result: status === "FAILED" ? "unavailable" : isPartial ? "partial" : "recovered",
+      attempts: stops.length,
+      maxAttempts: PRIOR_SUBMISSION_MATCH_MAX_ATTEMPTS,
+      stops,
+      oversizedScoringCandidatesSkipped: pass.oversizedScoringCandidatesSkipped,
+      durationMs: processingDurationMs,
+    });
+  }
   // Phase A: stamp the snapshot with the LOGICAL instant this computation
   // reasoned "as of" (== asOf), NOT wall-clock now. In production the two are
   // the same (asOf defaults to `new Date()`), so this is byte-identical there.

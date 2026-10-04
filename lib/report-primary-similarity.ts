@@ -502,11 +502,17 @@ async function resolvePrimarySimilaritySummaryUnderContract(
     // the flag off this only means a block such a source covers is also
     // verified against the next holder; nothing is excluded.
     excludedAfterMatching: async (match) => {
+      // A read that FAILED is not kept: the matching pass it cut short is run
+      // again (PRIOR_SUBMISSION_MATCH_MAX_ATTEMPTS), and that pass must ask
+      // again rather than meet the same stored rejection.
       deviceSelfContext ??= resolveDeviceSelfReportContext(client, {
         reportDeviceKey: params.reportDeviceKey,
         reportId: params.reportId,
         rawText: params.rawText,
         verifiedDevicePassportIdOverride: params.verifiedDevicePassportId,
+      }).catch((error) => {
+        deviceSelfContext = undefined;
+        throw error;
       });
       return isEffectiveDeviceSelfMatch(client, match, await deviceSelfContext, params.accountId);
     },

@@ -360,6 +360,39 @@ test("5: the budget running out while looking past a same-device holder is PARTI
   } finally { corpus.close(); }
 });
 
+test("5a: a coverage check whose device read fails once is asked again by the re-run pass -> the block is credited, complete", async () => {
+  const corpus = await freshCorpus();
+  try {
+    const self = await corpus.sameDevice(blockHolder(1000));
+    await corpus.index("other-account", SOURCE_X);
+    const eligible = await addBlockHolders(corpus, 1, 55);
+    const reportId = await corpus.report();
+    // The report's own device provenance cannot be read the first time it is
+    // asked for; nothing else fails, and nothing in the corpus changes.
+    let failedReads = 0;
+    const flaky = {
+      execute: (stmt) => {
+        const sql = typeof stmt === "string" ? stmt : stmt.sql;
+        if (failedReads === 0 && /SELECT verified_device_passport_id, document_identity_id FROM saved_reports/.test(sql)) {
+          failedReads += 1;
+          return Promise.reject(new Error("simulated transient read failure"));
+        }
+        return corpus.client.execute(stmt);
+      },
+      batch: (...args) => corpus.client.batch(...args),
+      transaction: (...args) => corpus.client.transaction(...args),
+      close: () => {},
+    };
+    const on = await resolve(flaky, reportId, { selfScoring: true });
+    assert.equal(failedReads, 1, "the first pass met the failed read");
+    assert.deepEqual(on.effectiveDeviceSelfRepresentationIds, [self]);
+    assert.ok(matchedIds(on).has(eligible[0]), "the re-run pass looked past the same-device holder");
+    assert.equal(on.unifiedSimilarity.unifiedScore, 42);
+    assert.deepEqual(on.unifiedSimilarity.matchedPositions, BLOCK_AND_PASSAGE);
+    assertCompleteThroughToCompletion(on);
+  } finally { corpus.close(); }
+});
+
 test("5b: a coverage check that cannot answer in time stops the pass as PARTIAL, never assuming either way", async () => {
   const corpus = await freshCorpus();
   try {
