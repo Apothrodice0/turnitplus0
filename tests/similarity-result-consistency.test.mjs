@@ -453,6 +453,20 @@ test('SIM-02 (2): while pending, OverviewReport never renders the archive-only s
   assert.doesNotMatch(html, /TurnitPlus Similarity|Previously submitted content|corpus reference source/);
 });
 
+test('pending copy is duration-neutral: it still says "Calculating similarity…", promises an automatic update, and no time — a Selective Corpus retry can keep a report pending for many minutes', () => {
+  const pending = renderPending(baseReport({ archiveScore: 0, matchedWordCount: 0 }), 'pending');
+  const headingSection = pending.match(/<section class="similarity-heading[^>]*>[\s\S]*?<\/section>/)?.[0] ?? '';
+  assert.match(headingSection, /Calculating similarity…/);
+  assert.match(headingSection, /This report will update automatically when it’s ready\./);
+  assert.doesNotMatch(headingSection, /second|minute|few moments/i, 'no duration promise while pending');
+
+  // the other states keep their own copy
+  const failed = renderPending(baseReport({ archiveScore: 0 }), 'failed');
+  assert.match(failed, /TurnitPlus could not complete a similarity check for this submission\./);
+  const resolved = renderPending(baseReport({ archiveScore: 0, unifiedSimilarity: unified() }), 'resolved');
+  assert.doesNotMatch(resolved, /Calculating similarity…|update automatically when it’s ready/, 'a completed report never shows the pending copy');
+});
+
 test('SIM-04: while stale, OverviewReport shows "Updating similarity…" — never the old persisted score alongside it, and never the pending wording', () => {
   const html = renderPending(baseReport({
     archiveScore: 0,

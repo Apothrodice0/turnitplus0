@@ -724,7 +724,7 @@ export function OverviewReport({ report, similarityStatus = "resolved" }: { repo
                 ? "TurnitPlus's reference sources changed since this result was last computed. Refreshing now — this can take a few seconds."
                 : similarityStatus === "failed"
                   ? "TurnitPlus could not complete a similarity check for this submission."
-                  : "TurnitPlus is still checking this submission against every reference source. This can take a few seconds."}
+                  : "TurnitPlus is still checking this submission against every reference source. This report will update automatically when it’s ready."}
             </p>
           </section>
         ) : (<>
