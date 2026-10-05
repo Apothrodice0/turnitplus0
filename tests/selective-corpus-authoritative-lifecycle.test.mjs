@@ -8,6 +8,7 @@ import { applyMigrationsLibsql } from '../lib/ingest.js';
 import { resetRateForTest, resetReadRateForTest, resetAuthRateForTest } from '../lib/rate-limit.ts';
 import { tokens } from '../lib/similarity-core.ts';
 import { canonicalizeText } from '../lib/canonical-text.ts';
+import { withEvidenceInterpretation } from '../lib/report-evidence-interpretation.ts';
 import {
   selfHealUnifiedSimilarity,
   resolvePersistedSimilarityDisplay,
@@ -484,7 +485,16 @@ test('23. resave after completed preserves the completed marker (and its score)'
 test('24. resave after incomplete preserves the incomplete marker', async () => {
   const deviceKey = uniq('dk-24');
   const id = uniq('r-24');
-  await seedPendingReport(deviceKey, id);
+  // Seeded WITH the reportCompletion a real pending save always writes
+  // (withEvidenceInterpretation): this file's minimal row has none, and a
+  // save no longer rebuilds the payload of a terminal report — the completion
+  // the customer reads below is the stored one, refreshed at response time.
+  const text = 'Authoritative fixture body text for a seeded lifecycle test.';
+  const { reportCompletion } = withEvidenceInterpretation({
+    version: 11, id: 1, submissionId: 'sub-' + id, title: 'Authoritative fixture',
+    text, wordCount: tokens(canonicalizeText(text)).length, score: 0, archiveScore: 0, scoreBand: 'Low', matchedWordCount: 0, sources: [], repeats: [],
+  }, { selectiveCorpusBranch: null });
+  await seedPendingReport(deviceKey, id, { payloadExtra: { reportCompletion } });
   let fin;
   for (let attempt = 0; attempt < MAX_SELECTIVE_CORPUS_AUTHORITATIVE_ATTEMPTS; attempt += 1) {
     fin = await finalizeSelectiveCorpusAuthoritativeReport(client, {

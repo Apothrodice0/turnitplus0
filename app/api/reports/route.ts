@@ -37,7 +37,7 @@ import { sanitizeAcademicSearchFailureReason, sanitizeExtractionDiagnostic, sani
 import { verifySuppliedReferences } from '../../../lib/user-supplied-references';
 import { sanitizeSuppliedReferenceInputs, admittedReferenceEvidenceForUnifiedSimilarity, resolveUserSuppliedReferenceEvidenceForSave } from '../../../lib/report-user-supplied-references';
 import { referenceTransportBudgetError } from '../../../lib/user-supplied-reference-constants';
-import { MAX_REPORT_SAVE_REQUEST_BYTES, persistedPayloadSize } from '../../../lib/report-transport-limits';
+import { MAX_REPORT_SAVE_REQUEST_BYTES, persistedFitFromSqlBounds, persistedPayloadSize } from '../../../lib/report-transport-limits';
 import { logReportSaveRejectedTelemetry } from '../../../lib/report-save-telemetry';
 import { isCompactAiAnalysis, validateCompactAiAnalysis } from '../../../lib/ai-passage-table';
 import { encodeReportJsonForPersistence, isEvidenceInterpretationCustomerReadable } from '../../../lib/report-persistence';
@@ -153,7 +153,25 @@ function isNonEmptyString(value: unknown): value is string {
 // or bundle, a direct call, a claim-by-resave of a legacy anonymous report), and without this it erased or downgraded the
 // complete AI result. Only an explicit 'ready' replaces a ready AI half (complete -> complete), and nothing but a ready
 // stored AI half is ever kept. (SQL: `excluded.ai_status IN (...)` alone is NULL, not true, for a NULL ai_status.)
-const KEEP_STORED_READY_AI_SQL = `(saved_reports.ai_status = 'ready' OR ${derivedAiReadySql('saved_reports')}) AND (excluded.ai_status IS NULL OR excluded.ai_status IN ('failed', 'processing'))`;
+const keepStoredReadyAiSql = (incomingAiStatus: string) =>
+  `(saved_reports.ai_status = 'ready' OR ${derivedAiReadySql('saved_reports')}) AND (${incomingAiStatus} IS NULL OR ${incomingAiStatus} IN ('failed', 'processing'))`;
+const KEEP_STORED_READY_AI_SQL = keepStoredReadyAiSql('excluded.ai_status');
+// The stored payload with the incoming payload's AI half ($.aiAnalysis and its paired raw $.aiScore) merged in — what this
+// statement persists whenever it keeps the stored similarity. Shared with POST's persisted-size check
+// (STORED_PAYLOAD_WITH_INCOMING_AI_SIZE_SQL), so what is measured is what is written.
+const storedPayloadWithIncomingAiSql = (incomingPayloadJson: string) =>
+  `json_set(saved_reports.payload_json, '$.aiAnalysis', json_extract(${incomingPayloadJson}, '$.aiAnalysis'), '$.aiScore', json_extract(${incomingPayloadJson}, '$.aiScore'))`;
+// SELECTIVE CORPUS FINAL SIMILARITY IS SERVER-OWNED. Once the deferred authoritative finalizer
+// (lib/selective-corpus-authoritative.ts) has made a report terminal — selectiveCorpusAuthoritativeStatus 'completed' or
+// 'incomplete' — the unifiedSimilarity it wrote (with the Selective Corpus evidence only the finalizer ever has), its
+// evidenceInterpretation, reportCompletion and generation/flag stamps ARE that report's similarity, for good: the finalizer
+// never writes it again (its CAS needs 'pending') and selfHealUnifiedSimilarity refuses such a report. A save is not a
+// similarity resolution for it — every such save (the automatic AI resave, a stale tab, a replayed request) recomputes the
+// score without that evidence, and at the SAME corpus generation the generation guard below lets it through (that is how
+// an AI resave turned a finalized 10 % into 0 %). So for a terminal row the stored payload is kept whatever the incoming
+// payload carries — only its AI half is merged — exactly as for a newer-generation row. The marker itself is server-owned
+// (POST carries the persisted value forward; a client value is overridden) and only the finalizer moves it off 'pending'.
+const STORED_SELECTIVE_CORPUS_FINAL_SQL = `json_extract(saved_reports.payload_json, '$.selectiveCorpusAuthoritativeStatus') IN ('completed', 'incomplete')`;
 // The Selective Corpus timed-out attempt count is server-owned: only the
 // finalizer's CAS write ever changes it. When an update replaces payload_json
 // with the request's payload, the STORED value is kept (or kept absent) in the
@@ -174,10 +192,11 @@ export const SAVE_REPORT_SQL = `INSERT INTO saved_reports (id, device_key, submi
         ai_status = CASE WHEN ${KEEP_STORED_READY_AI_SQL} THEN saved_reports.ai_status ELSE excluded.ai_status END,
         payload_json = CASE
           WHEN ${KEEP_STORED_READY_AI_SQL} THEN saved_reports.payload_json
-          WHEN COALESCE(json_extract(saved_reports.payload_json, '$.unifiedSimilarityGeneration'), -1) > COALESCE(json_extract(excluded.payload_json, '$.unifiedSimilarityGeneration'), -1)
+          WHEN ${STORED_SELECTIVE_CORPUS_FINAL_SQL}
+            OR COALESCE(json_extract(saved_reports.payload_json, '$.unifiedSimilarityGeneration'), -1) > COALESCE(json_extract(excluded.payload_json, '$.unifiedSimilarityGeneration'), -1)
             THEN CASE
               WHEN json_extract(excluded.payload_json, '$.aiAnalysis') IS NOT NULL
-                THEN json_set(saved_reports.payload_json, '$.aiAnalysis', json_extract(excluded.payload_json, '$.aiAnalysis'), '$.aiScore', json_extract(excluded.payload_json, '$.aiScore'))
+                THEN ${storedPayloadWithIncomingAiSql('excluded.payload_json')}
               ELSE saved_reports.payload_json
             END
           ELSE CASE
@@ -188,6 +207,17 @@ export const SAVE_REPORT_SQL = `INSERT INTO saved_reports (id, device_key, submi
         END,
         user_id = COALESCE(excluded.user_id, saved_reports.user_id),
         updated_at = CURRENT_TIMESTAMP`;
+
+// The payload SAVE_REPORT_SQL's kept-similarity branch will persist for one request, for POST's persisted-size check: the
+// stored payload with the request's AI half merged in, or NULL when the statement keeps the stored payload untouched (a stored
+// ready AI half the request may not replace, or a request that carries no aiAnalysis). ?1 = the request's ai_status,
+// ?2 = the payload_json it persists, ?3/?4 = device_key/id. The size query measures it in SQL bounds without moving it.
+const STORED_PAYLOAD_WITH_INCOMING_AI_SQL = `SELECT CASE
+          WHEN (${keepStoredReadyAiSql('?1')}) OR json_extract(?2, '$.aiAnalysis') IS NULL THEN NULL
+          ELSE ${storedPayloadWithIncomingAiSql('?2')}
+        END AS merged
+      FROM saved_reports WHERE device_key = ?3 AND id = ?4`;
+const STORED_PAYLOAD_WITH_INCOMING_AI_SIZE_SQL = `SELECT length(merged) AS code_points, length(CAST(merged AS BLOB)) AS utf8_bytes FROM (${STORED_PAYLOAD_WITH_INCOMING_AI_SQL})`;
 
 const MAX_ROOM_INSERT_BUSY_RETRIES = 5;
 
@@ -1012,6 +1042,16 @@ export async function POST(request: Request) {
       // that ever persists this report's real, final unifiedSimilarity.
       const selectiveCorpusAuthoritativeMustDeferFinalScore =
         selectiveCorpusAuthoritativeStatusToPersist === 'pending';
+      // The other half of "the finalizer is the ONE writer": once it has made
+      // this report terminal ("completed" / "incomplete"), the final
+      // unifiedSimilarity it persisted — with the Selective Corpus evidence
+      // only it ever has — stays this report's similarity. This save's own
+      // resolution below has no such evidence (persisting it is how an AI
+      // resave erased a finalized 10 % to 0 %), so it is withheld exactly like
+      // a pending report's; SAVE_REPORT_SQL keeps the stored payload and merges
+      // only this request's AI half (STORED_SELECTIVE_CORPUS_FINAL_SQL).
+      const selectiveCorpusAuthoritativeFinalScoreWritten =
+        persistedSelectiveCorpusAuthoritativeStatus === 'completed' || persistedSelectiveCorpusAuthoritativeStatus === 'incomplete';
       // Narrower than the flag above: true ONLY for a genuine first save that
       // just entered "pending" THIS request. A resave of an ALREADY-pending
       // report must still defer its final score (handled above), but must
@@ -1346,8 +1386,11 @@ export async function POST(request: Request) {
           // finalizer (lib/selective-corpus-authoritative.ts, scheduled
           // below) is the ONE place that will ever persist this report's
           // real, final unifiedSimilarity.
-          if (selectiveCorpusAuthoritativeMustDeferFinalScore) {
-            // no-op: leave payloadJsonToPersist exactly as initialized above
+          if (selectiveCorpusAuthoritativeMustDeferFinalScore || selectiveCorpusAuthoritativeFinalScoreWritten) {
+            // no-op: leave payloadJsonToPersist exactly as initialized above.
+            // Pending: the finalizer has not written the final score yet.
+            // Terminal: it has, and SAVE_REPORT_SQL keeps it (see
+            // selectiveCorpusAuthoritativeFinalScoreWritten's own comment).
           } else if (resolution.unifiedSimilarity) {
             payloadJsonToPersist = finalizeReportJson({
               ...persistedReportPayload,
@@ -1411,6 +1454,35 @@ export async function POST(request: Request) {
           }
         } catch (err) {
           console.error('write-time similarity finalization failed unexpectedly (non-fatal, report save proceeds without it):', err instanceof Error ? err.message : String(err));
+        }
+      }
+
+      // SELECTIVE CORPUS FINAL SIMILARITY IS SERVER-OWNED (SAVE_REPORT_SQL): for
+      // a report the finalizer made terminal, the row this save persists is the
+      // STORED payload with this request's AI half merged in — not
+      // payloadJsonToPersist, which is all the size checks above measured. So
+      // that row is measured here, in the same unit and the same way the
+      // AI-result route measures its own merge (app/api/reports/[id]/ai-retry/
+      // route.ts): SQL bounds first, the text itself only when they cannot
+      // settle it. Over the ceiling is the same 413 as above and nothing is
+      // written; the browser then saves the AI result through that route
+      // (lib/report-ai-completion.ts), whose size policy decides.
+      if (selectiveCorpusAuthoritativeFinalScoreWritten) {
+        const mergeArgs = [typeof aiStatus === 'string' ? aiStatus : null, payloadJsonToPersist, deviceKey, id];
+        const sized = await client.execute({ sql: STORED_PAYLOAD_WITH_INCOMING_AI_SIZE_SQL, args: mergeArgs });
+        const measured = sized.rows[0] as unknown as { code_points: number | bigint | null; utf8_bytes: number | bigint | null } | undefined;
+        // NULL: the statement keeps the stored payload untouched — nothing new to fit.
+        if (measured && measured.code_points !== null) {
+          let verdict = persistedFitFromSqlBounds(Number(measured.code_points), Number(measured.utf8_bytes), persistedCeiling);
+          if (verdict === 'AMBIGUOUS') {
+            const merged = await client.execute({ sql: STORED_PAYLOAD_WITH_INCOMING_AI_SQL, args: mergeArgs });
+            const mergedJson = String((merged.rows[0] as unknown as { merged?: unknown } | undefined)?.merged ?? '');
+            verdict = persistedPayloadSize(mergedJson) <= persistedCeiling ? 'FITS' : 'EXCEEDS';
+          }
+          if (verdict === 'EXCEEDS') {
+            logReportSaveRejectedTelemetry({ reason: 'PERSISTED_PAYLOAD_TOO_LARGE', status: 413, authMode: sessionUser ? 'authenticated' : 'anonymous' });
+            return new NextResponse(JSON.stringify({ error: 'Payload too large' }), { status: 413 });
+          }
         }
       }
 
