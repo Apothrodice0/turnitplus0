@@ -63,8 +63,9 @@ export type BuildReportEvidenceInterpretationOptions = {
   /** admin-gated on the ordinary GET — a server-side caller that still has it
    *  passes it here so POSSIBLE_SAME_WORK can be produced before stripping. */
   historicalSubmissionMatch?: ReportHistoricalSubmissionMatch | null;
-  /** Selective Corpus admitted-source spans, when that channel is a real report
-   *  evidence producer for this report (not on SimilarityReport today). */
+  /** Selective Corpus admitted-source spans, one entry per verified source, when
+   *  that channel put evidence into this report's score (the wiring derives them
+   *  from unifiedSimilarity.contributions — lib/report-evidence-interpretation.ts). */
   selectiveCorpusAdmittedSources?: ReadonlyArray<
     Pick<InterpretationSourceInput, "spans" | "familyGuardActivated" | "dominantSpanBoilerplate"> & { key?: string }
   >;

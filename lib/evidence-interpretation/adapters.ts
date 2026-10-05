@@ -186,9 +186,12 @@ export function normalizeImportedSimilarityEvidence(
 }
 
 // ── D. Selective Corpus verified evidence ────────────────────────────────
-// Not on SimilarityReport today (it is a shadow slice). A caller that has the
-// selective-corpus admission results passes them here in the same shape the
-// interpreter's own input uses.
+// One entry per verified source, in the same shape the interpreter's own input
+// uses. lib/report-evidence-interpretation.ts reads them off the final score's
+// own per-source attribution (unifiedSimilarity.contributions); a caller that
+// holds the admission results itself may pass them instead. A Selective Corpus
+// source has no title, link, DOI or date, so labelParts stays empty and the
+// card shows the generic reference-collection label.
 export function normalizeSelectiveCorpusEvidence(
   admittedSources: ReadonlyArray<
     Pick<InterpretationSourceInput, "spans" | "familyGuardActivated" | "dominantSpanBoilerplate"> & { key?: string }

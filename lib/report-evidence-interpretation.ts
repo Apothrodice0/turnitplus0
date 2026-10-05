@@ -2,6 +2,7 @@ import type { SimilarityReport, ReportHistoricalSubmissionMatch } from "@/lib/re
 import { primarySimilarityScore } from "@/lib/report-types";
 import {
   buildReportEvidenceInterpretation,
+  positionsToSpans,
   resolveReportCompletion,
   sanitizeSelectiveCorpusIncompleteReason,
   unknownExtractionDiagnostic,
@@ -16,6 +17,7 @@ import {
   compactEvidenceInterpretationForPersistence,
   type PersistedEvidenceInterpretation,
 } from "@/lib/evidence-interpretation/persistence";
+import type { ReportEvidenceInterpretation, ReportEvidenceSource } from "@/lib/evidence-interpretation/report-payload-types";
 import type { PriorSubmissionBranchState } from "@/lib/evidence-interpretation/completion";
 import { MAX_REPORT_SAVE_REQUEST_BYTES } from "@/lib/report-transport-limits";
 import { resolveCompactPersistenceWrites, resolveCompactPositionWrites } from "@/lib/report-compact-persistence-flag";
@@ -89,8 +91,9 @@ export type ReportEvidenceInterpretationWiringOptions = {
   /** a SERVER-TRUSTED extraction diagnostic, when one exists. Absent -> UNKNOWN
    *  (never inferred to EXTRACTION_PARTIAL). A client-supplied value is ignored. */
   serverExtractionDiagnostic?: ReportExtractionDiagnostic | null;
-  /** Selective Corpus admitted-source spans when that channel is a real report
-   *  evidence producer (not on SimilarityReport today). */
+  /** Selective Corpus admitted-source spans, for a caller that holds them itself.
+   *  Omitted (every caller today), they are read off the report's own
+   *  unifiedSimilarity.contributions — see admittedSelectiveCorpusSources. */
   selectiveCorpusAdmittedSources?: BuildReportEvidenceInterpretationOptions["selectiveCorpusAdmittedSources"];
   /**
    * USER-SUPPLIED REFERENCES V1 — the SERVER-VERIFIED per-reference evidence
@@ -153,6 +156,66 @@ function admittedImportedSimilaritySources(
 }
 
 /**
+ * SELECTIVE CORPUS — the same explanation link for the one channel that still
+ * had none. The authoritative finalizer (lib/selective-corpus-authoritative.ts)
+ * unions verified Selective Corpus passages into the final score, and every
+ * such passage is recorded on `report.unifiedSimilarity.contributions`
+ * (sourceType "selective_corpus", one sourceId per verified source). Nothing
+ * turned them into source cards, so a report could read 26 % or 80 % from real
+ * Selective Corpus evidence, with its passages highlighted, beside "0 verified
+ * sources".
+ *
+ * This derives the `{key, spans}[]` shape normalizeSelectiveCorpusEvidence
+ * (lib/evidence-interpretation/adapters.ts) already expects from that same
+ * persisted attribution: a read + group-by-sourceId, exactly like
+ * admittedImportedSimilaritySources above. No re-verification, no second
+ * resolution, and nothing fed back into the score.
+ *
+ *   - One entry per sourceId, so one card per verified source however often its
+ *     passages are listed.
+ *   - A source's spans are the words it put into the score: its recorded
+ *     passages restricted to `unifiedSimilarity.matchedPositions`. A passage the
+ *     score clamped to the document, or did not take at all (malformed, or a
+ *     repeated listing — lib/unified-similarity.ts unions a source's first
+ *     listing only), therefore adds nothing to the card either.
+ *   - `key` is the contribution's internal sourceId. It only orders the cards
+ *     and is never surfaced: a card gets a report-local `src-N` id.
+ *   - A Selective Corpus source carries no title, link, DOI or date
+ *     (lib/selective-corpus/types.ts verifiedEvidence: a label and passages),
+ *     so the adapter gives it the generic reference-collection label and
+ *     nothing else. Nothing is invented here.
+ *   - The per-source FAMILY_GUARD verdict is not part of the stored score, so
+ *     it is not claimed: a Selective Corpus span is classified from the
+ *     manuscript text like any other source's.
+ *
+ * No Selective Corpus contribution (every report that is not finalized with
+ * such evidence) yields `[]` — no card, and an explanation byte-identical to
+ * before this wiring existed.
+ */
+function admittedSelectiveCorpusSources(
+  report: SimilarityReport,
+): NonNullable<BuildReportEvidenceInterpretationOptions["selectiveCorpusAdmittedSources"]> {
+  const unified = report.unifiedSimilarity;
+  if (!unified) return [];
+  const scored = new Set<number>(Array.isArray(unified.matchedPositions) ? unified.matchedPositions : []);
+  const bySource = new Map<string, Set<number>>();
+  for (const c of unified.contributions ?? []) {
+    if (c.sourceType !== "selective_corpus" || c.evidenceStatus !== "included") continue;
+    if (!Number.isInteger(c.submittedWordStart) || !Number.isInteger(c.submittedWordEnd)) continue;
+    let positions = bySource.get(c.sourceId);
+    if (!positions) {
+      positions = new Set<number>();
+      bySource.set(c.sourceId, positions);
+    }
+    const last = Math.min(c.submittedWordEnd, unified.wordCount - 1);
+    for (let p = Math.max(0, c.submittedWordStart); p <= last; p += 1) if (scored.has(p)) positions.add(p);
+  }
+  return [...bySource.entries()]
+    .filter(([, positions]) => positions.size > 0)
+    .map(([key, positions]) => ({ key, spans: positionsToSpans(positions), familyGuardActivated: false, dominantSpanBoilerplate: false }));
+}
+
+/**
  * reportCompletion's priorSubmission signal, read off the historical match the
  * final score was resolved with — status propagation only, nothing re-derived:
  *   - `partial: true` -> "PARTIAL". lib/user-submission-matching.ts sets it
@@ -202,7 +265,7 @@ export function withEvidenceInterpretation<T extends SimilarityReport>(
 
   const evidenceInterpretation = buildReportEvidenceInterpretation(base as SimilarityReport, {
     historicalSubmissionMatch: opts.historicalSubmissionMatch,
-    selectiveCorpusAdmittedSources: opts.selectiveCorpusAdmittedSources,
+    selectiveCorpusAdmittedSources: opts.selectiveCorpusAdmittedSources ?? admittedSelectiveCorpusSources(base as SimilarityReport),
     userSuppliedReferences: admittedReferences,
     importedSimilarityAdmittedSources: admittedImportedSimilaritySources(base as SimilarityReport),
   });
@@ -338,13 +401,15 @@ export function buildFinalizedReportEvidenceInterpretation(
   const maxBytes = opts.maxBytes ?? MAX_REPORT_SAVE_REQUEST_BYTES;
   const compactWrites = resolveCompactPersistenceWrites(opts);
   const compactPositions = resolveCompactPositionWrites(opts);
-  try {
-    const interpretation = withEvidenceInterpretation(finalReport, {
+  const build = (selectiveCorpusAdmittedSources?: ReportEvidenceInterpretationWiringOptions["selectiveCorpusAdmittedSources"]) =>
+    withEvidenceInterpretation(finalReport, {
       historicalSubmissionMatch: opts.historicalSubmissionMatch ?? null,
       selectiveCorpusBranch: null,
       userSuppliedReferenceEvidence: opts.userSuppliedReferenceEvidence ?? null,
+      ...(selectiveCorpusAdmittedSources ? { selectiveCorpusAdmittedSources } : {}),
     }).evidenceInterpretation;
-    if (!interpretation) return { ok: false, reason: "BUILD_FAILED" };
+  /** The size decision for ONE candidate interpretation: fits (with its persisted form), or by how much it does not. */
+  const measure = (interpretation: ReportEvidenceInterpretation): FinalizedReportInterpretationResult => {
     const persistedInterpretation = compactEvidenceInterpretationForPersistence(interpretation, { compactWrites });
     const persisted = {
       ...finalReport,
@@ -373,6 +438,26 @@ export function buildFinalizedReportEvidenceInterpretation(
       }
     }
     return { ok: true, evidenceInterpretation: persistedInterpretation, compactWrites, compactPositions };
+  };
+  try {
+    const interpretation = build();
+    if (!interpretation) return { ok: false, reason: "BUILD_FAILED" };
+    const full = measure(interpretation);
+    if (full.ok || !interpretation.sources.some(isSelectiveCorpusSourceCard)) return full;
+    // SIMILARITY TAKES PRIORITY OVER SOURCE-CARD DETAIL. Attributing Selective Corpus words to their source cards makes
+    // the explanation larger (a card per source, and a source reference on every passage it covers), and the limits it
+    // is measured against have not moved. A report that could be stored before those cards existed must not end
+    // "Similarity unavailable" because of them, so the attribution yields first, in two steps, and only what remains
+    // decides the outcome:
+    //   1. the cards without their passage links: each source still shows as a verified source with the words it put
+    //      into the score; its highlighted passages just do not open it (as before the cards existed);
+    //   2. no Selective Corpus cards at all — exactly the explanation this function produced before they existed, so a
+    //      report that fit then fits now, and one that did not fails with the same measurement.
+    // Nothing else is ever left out, and the score and its matched positions are the same in every step.
+    const withoutLinks = measure(withoutSelectiveCorpusPassageLinks(interpretation));
+    if (withoutLinks.ok) return withoutLinks;
+    const withoutCards = build([]);
+    return withoutCards ? measure(withoutCards) : { ok: false, reason: "BUILD_FAILED" };
   } catch (err) {
     console.error(
       "report V2 finalized-report interpretation build failed:",
@@ -380,6 +465,25 @@ export function buildFinalizedReportEvidenceInterpretation(
     );
     return { ok: false, reason: "BUILD_FAILED" };
   }
+}
+
+const isSelectiveCorpusSourceCard = (source: ReportEvidenceSource): boolean => source.sourceType === "selective-corpus";
+
+/**
+ * `interpretation` with every Selective Corpus card kept but unlinked: the card
+ * lists no passages and no passage names it. Its label, matched words and
+ * percentage — and every position, kind and count — are untouched. A copy;
+ * never mutates.
+ */
+function withoutSelectiveCorpusPassageLinks(interpretation: ReportEvidenceInterpretation): ReportEvidenceInterpretation {
+  const unlinked = new Set(interpretation.sources.filter(isSelectiveCorpusSourceCard).map((source) => source.id));
+  return {
+    ...interpretation,
+    sources: interpretation.sources.map((source) => (unlinked.has(source.id) ? { ...source, passageRefs: [] } : source)),
+    passages: interpretation.passages.map((passage) =>
+      passage.sourceIds.some((id) => unlinked.has(id)) ? { ...passage, sourceIds: passage.sourceIds.filter((id) => !unlinked.has(id)) } : passage,
+    ),
+  };
 }
 
 /**

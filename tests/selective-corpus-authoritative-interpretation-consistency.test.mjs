@@ -391,7 +391,7 @@ test("FLAGS OFF: write-time path unchanged (imported card, exact score, no marke
 // ---------------------------------------------------------------------------
 // 5. Selective Corpus ONLY (no imported evidence)
 // ---------------------------------------------------------------------------
-test("SELECTIVE-CORPUS-ONLY (no imported package): score, positions and interpretation stay internally consistent; no card is fabricated for the unattributed passages", async () => {
+test("SELECTIVE-CORPUS-ONLY (no imported package): score, positions and interpretation stay internally consistent; the verified source has its one card, and nothing about it is fabricated", async () => {
   configurePackage(false);
   try {
     await withAuthoritativeFlags(async () => {
@@ -408,7 +408,14 @@ test("SELECTIVE-CORPUS-ONLY (no imported package): score, positions and interpre
       assertInterpretationMatchesFinalScore(final, "sc-only final");
       assert.equal(final.evidenceInterpretation.matchedWordCount, 10);
       assert.equal(importedCards(final).length, 0);
-      assert.equal(final.evidenceInterpretation.sources.length, 0, "Selective Corpus is not a report card producer today: its positions are explained by the partition only — no invented source card");
+      // Was "no card at all": the report then read "0 verified sources" beside a score made of Selective Corpus words.
+      // The source is real and verified, so it has a card; what the card may say is only what is known of it
+      // (tests/selective-corpus-source-cards.test.mjs).
+      assert.deepEqual(
+        final.evidenceInterpretation.sources.map((s) => ({ sourceType: s.sourceType, label: s.label, link: s.link, doi: s.doi, year: s.year, matchedWords: s.matchedWords })),
+        [{ sourceType: "selective-corpus", label: "TurnitPlus reference collection", link: null, doi: null, year: null, matchedWords: 10 }],
+        "one card for the one verified Selective Corpus source: the generic reference-collection label, no invented title or link",
+      );
     });
   } finally {
     configurePackage(true);
