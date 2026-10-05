@@ -88,7 +88,9 @@ function isNonEmptyString(value: unknown): value is string {
 // a recorded score is protected exactly like an explicit 'ready' one (every
 // other column — title, word_count, etc. — still updates
 // normally, since both a 'ready' and a 'failed' resave carry the same
-// underlying similarity data). Every other transition is untouched: ready
+// underlying similarity data; the flat similarity columns of a terminal
+// Selective Corpus report are held by their own rule,
+// serverOwnedFlatSimilaritySql below). Every other transition is untouched: ready
 // can still be reached from processing or failed (a late genuine success
 // is exactly what a retry is for), and processing/failed/failed all behave
 // exactly as before.
@@ -172,6 +174,18 @@ const storedPayloadWithIncomingAiSql = (incomingPayloadJson: string) =>
 // payload carries — only its AI half is merged — exactly as for a newer-generation row. The marker itself is server-owned
 // (POST carries the persisted value forward; a client value is overridden) and only the finalizer moves it off 'pending'.
 const STORED_SELECTIVE_CORPUS_FINAL_SQL = `json_extract(saved_reports.payload_json, '$.selectiveCorpusAuthoritativeStatus') IN ('completed', 'incomplete')`;
+// ...AND SO ARE THE FLAT COLUMNS THAT SUMMARISE IT. word_count, archive_score and score_band are the copy of a report's
+// similarity summary the lists read without parsing payload_json (GET /api/reports, the room tile's archive fallback, the
+// developer listing). They were written with the payload they describe, by the save(s) made while the report was still
+// pending; the finalizer never touches them. For a terminal row the statement keeps that payload, so it keeps them too:
+// taking them from the request stored whatever a save claimed (a forged `archiveScore: 99`) beside a payload that says
+// otherwise. Retained from the stored row, not re-derived from anything the request carries. Same condition, same
+// pre-statement row as the payload CASE below, so the two always agree — including a save that read the row while it was
+// pending and writes after the finalizer landed. Every other row (pending, or never authoritative) takes them from the
+// request with the payload, exactly as before. The identity columns (submission_id, title, report_created_at) are not
+// similarity state and are unchanged by this.
+const serverOwnedFlatSimilaritySql = (column: string) =>
+  `CASE WHEN ${STORED_SELECTIVE_CORPUS_FINAL_SQL} THEN saved_reports.${column} ELSE excluded.${column} END`;
 // The Selective Corpus timed-out attempt count is server-owned: only the
 // finalizer's CAS write ever changes it. When an update replaces payload_json
 // with the request's payload, the STORED value is kept (or kept absent) in the
@@ -184,9 +198,9 @@ export const SAVE_REPORT_SQL = `INSERT INTO saved_reports (id, device_key, submi
         submission_id = excluded.submission_id,
         title = excluded.title,
         report_created_at = excluded.report_created_at,
-        word_count = excluded.word_count,
-        archive_score = excluded.archive_score,
-        score_band = excluded.score_band,
+        word_count = ${serverOwnedFlatSimilaritySql('word_count')},
+        archive_score = ${serverOwnedFlatSimilaritySql('archive_score')},
+        score_band = ${serverOwnedFlatSimilaritySql('score_band')},
         ai_score = CASE WHEN ${KEEP_STORED_READY_AI_SQL} THEN saved_reports.ai_score ELSE excluded.ai_score END,
         ai_tone = CASE WHEN ${KEEP_STORED_READY_AI_SQL} THEN saved_reports.ai_tone ELSE excluded.ai_tone END,
         ai_status = CASE WHEN ${KEEP_STORED_READY_AI_SQL} THEN saved_reports.ai_status ELSE excluded.ai_status END,
