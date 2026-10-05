@@ -1009,12 +1009,18 @@ test("AUTHORITATIVE OVERFLOW IS TERMINAL through the REAL POST: the deferred fin
     // (app/reports/rooms/[room]/room-page-shell.tsx) — the same persisted terminal state as any other failed similarity
     assert.equal(occupant.report?.similarityStatus, "failed", "the room shows it unavailable");
 
-    // the client's whole-report resave (what the automatic AI save sends) recomputes without the Selective Corpus and,
-    // as arrays, is still over the ceiling: refused, the terminal row unchanged — never a partial score
+    // the client's whole-report resave (what the automatic AI save sends) is not a similarity resolution for a terminal
+    // report (tests/selective-corpus-finalized-resave.test.mjs): nothing is recomputed, so there is nothing over the
+    // ceiling to refuse — accepted, only its AI half is merged, and the terminal row is otherwise exactly as it was —
+    // never a partial score
+    const withoutAi = (json) => { const { aiAnalysis: _a, aiScore: _s, ...rest } = JSON.parse(json); return JSON.stringify(rest); };
     const stored = await rawRow(arrays.deviceKey, "auth-over");
     const resave = await withGates({ positions: undefined }, () => post(arrays, body(arrays, "auth-over")));
-    assert.equal(resave.status, 413);
-    assert.equal(await rawRow(arrays.deviceKey, "auth-over"), stored);
+    assert.equal(resave.status, 200);
+    const resaved = await rawRow(arrays.deviceKey, "auth-over");
+    assert.ok(withoutAi(resaved) === withoutAi(stored), "every stored key but the AI half is unchanged");
+    assert.equal(JSON.parse(resaved).unifiedSimilarity, undefined, "still no score");
+    assert.equal(JSON.parse(resaved).selectiveCorpusAuthoritativeIncompleteReason, "PERSISTENCE_LIMIT");
 
     // with ranges the very same report fits and is finalized with its full score
     const ranges = await account();

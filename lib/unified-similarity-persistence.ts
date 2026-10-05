@@ -113,7 +113,7 @@ export type PersistedUnifiedSimilarity = Omit<UnifiedSimilarityResult, "contribu
 };
 
 /** Every position array of a unified result, in the order computeUnifiedSimilarity emits them. */
-const POSITION_ARRAY_KEYS = [
+export const POSITION_ARRAY_KEYS = [
   "matchedPositions",
   "previousUploadPositions",
   "userSuppliedReferencePositions",

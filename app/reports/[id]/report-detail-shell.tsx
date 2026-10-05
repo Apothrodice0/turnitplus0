@@ -127,7 +127,14 @@ export function ReportDetailShell({
   // tab is shown and is the default view. An older report without that payload
   // never shows the tab and opens on "Full report" exactly as before — the
   // existing report UI/fallback path is completely untouched for it.
-  const hasV2 = Boolean((report ?? initialReport)?.evidenceInterpretation);
+  // A report whose similarity is unavailable ("failed": no score was ever
+  // stored — a reproducible computation failure, or an authoritative report
+  // whose final result could not be stored) is shown the established
+  // "Similarity unavailable" presentation instead (OverviewReport's failed
+  // state, the inspector's "—"): the V2 views headline a percentage, and for
+  // such a report that would be the archive-only fallback presented as its
+  // similarity score.
+  const hasV2 = Boolean((report ?? initialReport)?.evidenceInterpretation) && similarityStatus !== "failed";
   const [resultTab, setResultTab] = useState<ResultTab>(
     initialReport?.evidenceInterpretation ? "overlap" : "full",
   );

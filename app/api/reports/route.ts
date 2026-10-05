@@ -40,7 +40,7 @@ import { referenceTransportBudgetError } from '../../../lib/user-supplied-refere
 import { MAX_REPORT_SAVE_REQUEST_BYTES, persistedFitFromSqlBounds, persistedPayloadSize } from '../../../lib/report-transport-limits';
 import { logReportSaveRejectedTelemetry } from '../../../lib/report-save-telemetry';
 import { isCompactAiAnalysis, validateCompactAiAnalysis } from '../../../lib/ai-passage-table';
-import { encodeReportJsonForPersistence, isEvidenceInterpretationCustomerReadable } from '../../../lib/report-persistence';
+import { encodeReportJsonForPersistence, isEvidenceInterpretationCustomerReadable, storedRowExceedsServingBound, storesCompactPositionsSql } from '../../../lib/report-persistence';
 import { isFormatMarkedPositions } from '../../../lib/position-runs-persistence';
 import { scheduleReportShadowEvaluations } from '../../../lib/report-shadow-evaluations';
 import { effectiveSelectiveCorpusAuthoritativeEnabled } from '../../../lib/selective-corpus/flag';
@@ -1050,6 +1050,12 @@ export async function POST(request: Request) {
       // resave erased a finalized 10 % to 0 %), so it is withheld exactly like
       // a pending report's; SAVE_REPORT_SQL keeps the stored payload and merges
       // only this request's AI half (STORED_SELECTIVE_CORPUS_FINAL_SQL).
+      // For the same reason the resolution is not RUN for such a report at all
+      // (see the write-time finalization below): a save of a terminal report is
+      // an AI/metadata save, and re-running the previous-submission check would
+      // rewrite its snapshot row — and, through the shadow evaluators, their
+      // tables — after the fact, beside a stored score that does not contain
+      // what that rewrite found.
       const selectiveCorpusAuthoritativeFinalScoreWritten =
         persistedSelectiveCorpusAuthoritativeStatus === 'completed' || persistedSelectiveCorpusAuthoritativeStatus === 'incomplete';
       // Narrower than the flag above: true ONLY for a genuine first save that
@@ -1326,7 +1332,13 @@ export async function POST(request: Request) {
             externalAcademicEvidence: ExternalAcademicEvidence[] | null;
           }
         | null = null;
-      if (isNonEmptyString(reportPayload?.text)) {
+      // Not for a report the Selective Corpus finalizer has made terminal: its
+      // similarity is final and server-owned (SAVE_REPORT_SQL keeps it), so this
+      // save resolves nothing — no previous-submission check, no snapshot write,
+      // no shadow evaluation (shadowEvaluationInputs stays null). Those ran for
+      // it already, at its first save and in the finalizer. A pending report and
+      // every report that is not authoritative are resolved exactly as before.
+      if (isNonEmptyString(reportPayload?.text) && !selectiveCorpusAuthoritativeFinalScoreWritten) {
         try {
           const resolution = await resolvePrimarySimilaritySummary(client, {
             reportDeviceKey: deviceKey,
@@ -1478,6 +1490,22 @@ export async function POST(request: Request) {
             const merged = await client.execute({ sql: STORED_PAYLOAD_WITH_INCOMING_AI_SQL, args: mergeArgs });
             const mergedJson = String((merged.rows[0] as unknown as { merged?: unknown } | undefined)?.merged ?? '');
             verdict = persistedPayloadSize(mergedJson) <= persistedCeiling ? 'FITS' : 'EXCEEDS';
+          }
+          // COMPACT POSITIONS SERVING BOUND (lib/report-persistence.ts
+          // storedRowExceedsServingBound): the merged row must also stay a report
+          // a reader can be sent. Only a row that stores a compact position list
+          // can fail it, so only such a row is read back. Over it is the same 413;
+          // the AI-result route then settles the AI half by the same rule.
+          if (verdict !== 'EXCEEDS') {
+            const marked = await client.execute({
+              sql: `SELECT ${storesCompactPositionsSql('payload_json')} AS marked FROM saved_reports WHERE device_key = ? AND id = ?`,
+              args: [deviceKey, id],
+            });
+            if (Number((marked.rows[0] as unknown as { marked?: unknown } | undefined)?.marked) === 1) {
+              const merged = await client.execute({ sql: STORED_PAYLOAD_WITH_INCOMING_AI_SQL, args: mergeArgs });
+              const mergedJson = (merged.rows[0] as unknown as { merged?: unknown } | undefined)?.merged;
+              if (typeof mergedJson === 'string' && storedRowExceedsServingBound(mergedJson, persistedCeiling)) verdict = 'EXCEEDS';
+            }
           }
           if (verdict === 'EXCEEDS') {
             logReportSaveRejectedTelemetry({ reason: 'PERSISTED_PAYLOAD_TOO_LARGE', status: 413, authMode: sessionUser ? 'authenticated' : 'anonymous' });

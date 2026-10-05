@@ -4,7 +4,7 @@ import { checkRate } from '../../../../../lib/rate-limit';
 import { clientIpFrom } from '../../../../../lib/client-ip';
 import { getSessionUser } from '../../../../../lib/auth-session';
 import { INTERPRETATION_TO_VERIFY_SQL } from '../../../../../lib/reports-repo';
-import { isEvidenceInterpretationCustomerReadable } from '../../../../../lib/report-persistence';
+import { isEvidenceInterpretationCustomerReadable, storedRowExceedsServingBound, storesCompactPositionsSql } from '../../../../../lib/report-persistence';
 import { MAX_REPORT_SAVE_REQUEST_BYTES, persistedFitFromSqlBounds, persistedPayloadSize } from '../../../../../lib/report-transport-limits';
 import { isCompactAiAnalysis, validateCompactAiAnalysis } from '../../../../../lib/ai-passage-table';
 import { deriveRoomStatus } from '../../../../../lib/report-rooms';
@@ -52,7 +52,9 @@ import { logAiSizeUnavailableTelemetry } from '../../../../../lib/ai-size-unavai
  *    "repair" it, or turn it into a normal score-bearing report.
  *  - Persisted-size ceiling: the size of the payload AFTER the merge (measured, not projected — see the G2 size policy below) is checked against
  *    MAX_REPORT_SAVE_REQUEST_BYTES (the same ceiling every other persistence check uses — not raised). Check and write
- *    share one write transaction. What happens OVER the ceiling is the G2 size policy, next.
+ *    share one write transaction. What happens OVER the ceiling is the G2 size policy, next. A merged row that only its compact
+ *    position lists admit is also held to the serving bound (MAX_SERVED_REPORT_BYTES, storedPayloadExceedsServingBound) and
+ *    over it is treated exactly like over the ceiling: an AI result never makes a servable report unservable.
  *  - G2 SIZE POLICY (POLICY_B_KEEP_REPORT_AI_UNAVAILABLE_FOR_SIZE, lib/ai-unavailable-state.ts). AI is enrichment on a report
  *    that is already valid; a report must not be left `processing` forever because its AI result does not fit beside it. THIS
  *    route is the one place that can decide, exactly, from the SERVER's own stored row. The question it answers is "what would
@@ -187,6 +189,24 @@ async function storedPayloadFitsCeiling(tx: ReportsTx, deviceKey: string, id: st
 }
 
 /**
+ * COMPACT POSITIONS SERVING BOUND (lib/report-persistence.ts storedRowExceedsServingBound): is the payload this transaction
+ * CURRENTLY holds a report only its compact position lists admit that could not be SERVED within MAX_SERVED_REPORT_BYTES?
+ * Asked of the merged row, beside the ceiling, so an AI result can never turn a report a reader could be sent into one it
+ * cannot; over it is handled exactly like over the ceiling (the G2 size policy). Only a row that stores a compact position
+ * list is read back — every other row (all of them with the compact-positions gate OFF) is answered by one SQL test that
+ * moves no payload.
+ */
+async function storedPayloadExceedsServingBound(tx: ReportsTx, deviceKey: string, id: string, userId: string): Promise<boolean> {
+  const marked = await tx.execute({
+    sql: `SELECT ${storesCompactPositionsSql('payload_json')} AS marked FROM saved_reports WHERE device_key = ? AND id = ? AND user_id = ?`,
+    args: [deviceKey, id, userId],
+  });
+  if (Number((marked.rows[0] as unknown as { marked?: unknown } | undefined)?.marked) !== 1) return false;
+  const text = await tx.execute({ sql: `SELECT payload_json FROM saved_reports WHERE device_key = ? AND id = ? AND user_id = ?`, args: [deviceKey, id, userId] });
+  return storedRowExceedsServingBound(String((text.rows[0] as unknown as { payload_json?: unknown } | undefined)?.payload_json ?? ''), MAX_BYTES);
+}
+
+/**
  * ONE attempt of the write: a write transaction on the caller's OWN connection (the same shape insertReportWithRoomCheck
  * uses) in which the ownership read, the readability / validity / size decisions and the UPDATE all see one consistent
  * row. Returns the response to send; throws only on an infrastructure error (the caller retries SQLITE_BUSY on a fresh
@@ -281,7 +301,10 @@ async function persistAiRetry(txClient: ReportsDbClient, sessionUser: SessionUse
       });
     let sizeUnavailable = false;
     await applyWrite({ aiStatus: retry.aiStatus, aiScore: retry.aiScore, aiTone: retry.aiTone, rawAiScore: retry.rawAiScore, aiAnalysisJson: JSON.stringify(retry.aiAnalysis) });
-    if (!(await storedPayloadFitsCeiling(tx, row.device_key, id, sessionUser.id))) {
+    if (
+      !(await storedPayloadFitsCeiling(tx, row.device_key, id, sessionUser.id)) ||
+      (await storedPayloadExceedsServingBound(tx, row.device_key, id, sessionUser.id))
+    ) {
       // The real result cannot be stored next to this report. Never at the expense of a legitimate stored result, and never as
       // a 413 the customer could only hit again: a stored 'ready' stays exactly as it is; a report already marked keeps its mark.
       // (Rolling back discards the tentative write above: the row is exactly as it was.)
@@ -292,6 +315,9 @@ async function persistAiRetry(txClient: ReportsDbClient, sessionUser: SessionUse
       // Replace the tentative candidate with the server-authored marker (same statement, same transaction, still uncommitted) and
       // measure THAT the same way — the marker is held to exactly the same unit and rule as any other result.
       await applyWrite({ aiStatus: 'failed', aiScore: null, aiTone: 'unavailable', rawAiScore: null, aiAnalysisJson: JSON.stringify(buildSizeUnavailableAiAnalysis()) });
+      // The marker is held to the ceiling only, not to the serving bound: it replaces the real result, so the row is the report
+      // as it was admitted (within the bound) plus the marker's own few hundred characters (TERMINAL_AI_RESERVE_CHARS' measured
+      // need), and refusing it would leave the AI half `processing` for good.
       // Only a legacy row saved before the first-save reserve can be too full for even the marker: the unchanged 413.
       if (!(await storedPayloadFitsCeiling(tx, row.device_key, id, sessionUser.id))) {
         await tx.rollback().catch(() => {});

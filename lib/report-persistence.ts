@@ -2,6 +2,7 @@ import type { SimilarityReport } from "./report-types";
 import {
   compactUnifiedSimilarityForPersistence,
   tryExpandUnifiedSimilarityFromPersistence,
+  POSITION_ARRAY_KEYS,
   type PersistedUnifiedSimilarity,
 } from "./unified-similarity-persistence";
 import {
@@ -146,6 +147,55 @@ export function encodeReportJsonForPersistence(report: SimilarityReport, options
   const arrays = JSON.stringify(encodeReportForPersistence(report, { compactWrites, compactPositions: false }));
   if (persistedPayloadSize(arrays) <= options.ceiling) return json;
   return servedReportBytes(report) <= MAX_SERVED_REPORT_BYTES ? json : arrays;
+}
+
+/**
+ * SQL test, on the stored payload column `payloadColumn`, for "this row holds at least one compact position list" — the
+ * only rows storedRowExceedsServingBound below can say yes for. Lets a writer skip reading back the payload of every other
+ * row (everything written with the compact-positions gate OFF).
+ */
+export function storesCompactPositionsSql(payloadColumn: string): string {
+  const paths = ["$.archiveMatchedPositions", ...POSITION_ARRAY_KEYS.map((key) => `$.unifiedSimilarity.${key}`)];
+  return `(${paths.map((p) => `json_type(${payloadColumn}, '${p}') = 'object'`).join(" OR ")})`;
+}
+
+/**
+ * COMPACT POSITIONS SERVING BOUND for a write that MERGES into a row that is already stored — an AI result: the AI-result
+ * route (app/api/reports/[id]/ai-retry/route.ts), and POST /api/reports' merge onto a report the Selective Corpus finalizer
+ * made terminal. `payloadJson` is the row exactly as that write would leave it.
+ *
+ * True when that row is one only its compact position lists admit — written out with its position lists as arrays it would
+ * be over `ceiling` — AND the report a reader is sent would be over MAX_SERVED_REPORT_BYTES. It is the rule
+ * encodeReportJsonForPersistence applies when a report is written whole, applied to the merged row, so attaching an AI
+ * result can never turn a report that was served within the bound into one that is not (that is how a report served at
+ * ~3.77 MB became ~4.06 MB). A row with no compact position list — every row written with the gate OFF — is never subject
+ * to it, exactly as before ranges.
+ *
+ * The array form is the stored text with each compact list replaced by the array it stands for, measured in the persisted
+ * unit; the served size is servedReportBytes of the decoded row, the same measure the writers use. Never throws: a row that
+ * cannot be parsed or decoded is not this check's to judge — every reader refuses it on its own.
+ */
+export function storedRowExceedsServingBound(payloadJson: string, ceiling: number): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(payloadJson);
+  } catch {
+    return false;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return false;
+  const row = parsed as { archiveMatchedPositions?: unknown; unifiedSimilarity?: Record<string, unknown> };
+  const unified = typeof row.unifiedSimilarity === "object" && row.unifiedSimilarity !== null ? row.unifiedSimilarity : {};
+  const compactLists = [row.archiveMatchedPositions, ...POSITION_ARRAY_KEYS.map((key) => unified[key])].filter(isFormatMarkedPositions);
+  if (compactLists.length === 0) return false;
+  let arrayFormUnits = persistedPayloadSize(payloadJson);
+  for (const list of compactLists) {
+    const expansion = expandPositionsFromPersistence(list);
+    if (expansion.status !== "expanded") return false;
+    arrayFormUnits += JSON.stringify(expansion.value).length - JSON.stringify(list).length;
+  }
+  if (arrayFormUnits <= ceiling) return false;
+  const decoded = tryDecodeReportFromPersistence(parsed);
+  return decoded.ok && servedReportBytes(decoded.report) > MAX_SERVED_REPORT_BYTES;
 }
 
 /**

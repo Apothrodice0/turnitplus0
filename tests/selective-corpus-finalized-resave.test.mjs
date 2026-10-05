@@ -820,6 +820,19 @@ test('15b. a save whose AI half the upsert will not merge is not refused for a s
 });
 
 test('15c. the size of the merged report is measured in the persistence unit even when SQL bounds cannot settle it: astral text that only fits by code points is refused, accented text that only overflows in bytes is stored', async () => {
+  // The persistence UNIT is a property of the ceiling, which a row stored as arrays meets (compact positions OFF, the
+  // default). A row stored as ranges is first held to the serving bound (tests/terminal-report-ai-completion.test.mjs), and
+  // this fixture's accented AI result would take its served size past it — so the fixture is pinned to arrays.
+  const positionsGate = process.env.REPORT_COMPACT_POSITIONS_WRITE_ENABLED;
+  delete process.env.REPORT_COMPACT_POSITIONS_WRITE_ENABLED;
+  try {
+    await sizeUnitCase();
+  } finally {
+    if (positionsGate === undefined) delete process.env.REPORT_COMPACT_POSITIONS_WRITE_ENABLED;
+    else process.env.REPORT_COMPACT_POSITIONS_WRITE_ENABLED = positionsGate;
+  }
+});
+async function sizeUnitCase() {
   const id = 'fr-size-unit';
   const { owner, report, before } = await largeFinalizedReport(id, 33);
   const stored = persistedPayloadSize(before.json);
@@ -841,7 +854,7 @@ test('15c. the size of the merged report is measured in the persistence unit eve
   assert.equal(after.raw.aiAnalysis.passages[0].text.length, accented.length, 'the AI result is stored whole');
   assert.deepEqual(changedSimilarityKeys(before, after), [], 'and the similarity is exactly as finalized');
   assert.equal(after.raw.unifiedSimilarity.unifiedScore, 50);
-});
+}
 
 // ===========================================================================
 // 16. the whole lifecycle through the routes

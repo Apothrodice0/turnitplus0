@@ -15,6 +15,8 @@ import {
   completionDiagnosticsFromSignals,
   partialCompletionDetail,
   REPORT_COMPLETION_HEADLINE,
+  SIMILARITY_NOT_FINALIZED_DETAIL,
+  SIMILARITY_NOT_FINALIZED_HEADLINE,
   type ReportCompletion,
   type ReportCompletionDiagnostic,
 } from "@/lib/evidence-interpretation/completion";
@@ -136,6 +138,9 @@ export const COMPLETION_STATUS_LABEL: Record<ReportCompletion["state"], string> 
   SOURCE_UNAVAILABLE: "Source not verified",
   EXTRACTION_PARTIAL: "Partial document",
 };
+
+/** The status label of a report that has no similarity result (see resolveCompletionView). */
+export const SIMILARITY_UNAVAILABLE_STATUS_LABEL = "Similarity unavailable";
 
 export function completionStatusLabel(state: ReportCompletion["state"]): string {
   return COMPLETION_STATUS_LABEL[state] ?? COMPLETION_STATUS_LABEL.PARTIAL;
@@ -296,9 +301,15 @@ export function resolveCompletionView(
   // "Some source searches were unavailable" copy reads the same as a new one.
   const effectiveState: ReportCompletion["state"] =
     state === "EXTRACTION_PARTIAL" && !extractionPartial ? "PARTIAL" : state;
+  // The one PARTIAL completion that must keep the server's own copy: a report whose similarity result could not be stored
+  // (lib/evidence-interpretation/completion.ts SIMILARITY_NOT_FINALIZED_HEADLINE). It has no score, so the partial-search
+  // wording ("the N% shown is a verified lower bound") would be false. The headline is the server-authored marker of that
+  // case — the reason code itself is admin-only and not in a customer's completion.
+  const similarityNotFinalized = effectiveState === "PARTIAL" && completion?.headline === SIMILARITY_NOT_FINALIZED_HEADLINE;
 
   let detail = completion?.detail ?? null;
   if (effectiveState === "COMPLETED") detail = null;
+  else if (similarityNotFinalized) detail = SIMILARITY_NOT_FINALIZED_DETAIL;
   else if (effectiveState === "PARTIAL") detail = partialCompletionDetail(verifiedSimilarityPercent);
   else if (!detail) {
     if (effectiveState === "SOURCE_UNAVAILABLE") {
@@ -322,10 +333,12 @@ export function resolveCompletionView(
   };
   return {
     state: effectiveState,
-    statusLabel: completionStatusLabel(effectiveState),
-    headline: effectiveState === "PARTIAL"
-      ? REPORT_COMPLETION_HEADLINE.PARTIAL
-      : completion?.headline?.trim() || REPORT_COMPLETION_HEADLINE[effectiveState],
+    statusLabel: similarityNotFinalized ? SIMILARITY_UNAVAILABLE_STATUS_LABEL : completionStatusLabel(effectiveState),
+    headline: similarityNotFinalized
+      ? SIMILARITY_NOT_FINALIZED_HEADLINE
+      : effectiveState === "PARTIAL"
+        ? REPORT_COMPLETION_HEADLINE.PARTIAL
+        : completion?.headline?.trim() || REPORT_COMPLETION_HEADLINE[effectiveState],
     detail,
     extractionPartial,
     scopeLine: COMPLETION_SCOPE_LINE,

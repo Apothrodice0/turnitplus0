@@ -142,6 +142,17 @@ export const REPORT_COMPLETION_HEADLINE: Record<ReportCompletionState, string> =
   EXTRACTION_PARTIAL: "Part of the uploaded document could not be analyzed.",
 };
 
+/**
+ * A Selective Corpus run finalized "incomplete" with reason PERSISTENCE_LIMIT: the finished report could not be stored, so
+ * the report has NO similarity score at all ("Similarity unavailable"). The PARTIAL wording would be false for it — there is
+ * no percentage to be a lower bound, and no source was unreachable — so it carries its own, customer-safe copy (no byte
+ * figure, no internal name). The machine-readable reason stays in the admin diagnostics.
+ */
+export const SIMILARITY_NOT_FINALIZED_HEADLINE = "Similarity unavailable: this report could not be finalized.";
+export const SIMILARITY_NOT_FINALIZED_DETAIL =
+  "No similarity percentage is shown, and this is not a 0% result. The finished report was too large to process, so its similarity result could not be saved.";
+const SIMILARITY_NOT_FINALIZED_REASON = "the finished report was too large to process, so no similarity result could be saved";
+
 /** The PARTIAL detail sentence: the verified score is a lower bound, completed channels still count, unavailable ones do not. */
 export function partialCompletionDetail(verifiedSimilarityPercent: number | null | undefined): string {
   const shown = verifiedSimilarityPercent != null ? `The ${verifiedSimilarityPercent}% shown` : "The result shown";
@@ -222,11 +233,16 @@ export function resolveReportCompletion(input: ResolveReportCompletionInput): Re
   const userSuppliedReference: UserSuppliedReferenceBranchState = input.userSuppliedReference ?? null;
   const priorSubmission: PriorSubmissionBranchState = input.priorSubmission ?? null;
   const pct = input.verifiedSimilarityPercent;
+  // See SIMILARITY_NOT_FINALIZED_HEADLINE: no score exists, so none of the PARTIAL wording applies.
+  const similarityNotFinalized =
+    selectiveCorpus === "PARTIAL" && sanitizeSelectiveCorpusIncompleteReason(input.selectiveCorpusIncompleteReason) === "PERSISTENCE_LIMIT";
 
   const reasons: string[] = [];
   if (extraction === "PARTIAL") reasons.push("document extraction reported unread content");
   if (academicSearch === "FAILED") reasons.push("the live academic-source search could not complete");
-  if (selectiveCorpus === "PARTIAL") reasons.push("part of the TurnitPlus reference index was unavailable at search time");
+  if (selectiveCorpus === "PARTIAL") {
+    reasons.push(similarityNotFinalized ? SIMILARITY_NOT_FINALIZED_REASON : "part of the TurnitPlus reference index was unavailable at search time");
+  }
   if (selectiveCorpus === "UNAVAILABLE") reasons.push("the TurnitPlus reference index could not be loaded");
   if (userSuppliedReference === "PARTIAL") reasons.push("one or more supplied reference files could not be read");
   if (priorSubmission === "PARTIAL") reasons.push("the previous-submission check could not examine every candidate");
@@ -247,7 +263,7 @@ export function resolveReportCompletion(input: ResolveReportCompletionInput): Re
 
   let detail: string | null = null;
   if (state === "PARTIAL") {
-    detail = partialCompletionDetail(pct);
+    detail = similarityNotFinalized ? SIMILARITY_NOT_FINALIZED_DETAIL : partialCompletionDetail(pct);
   } else if (state === "SOURCE_UNAVAILABLE") {
     detail = `${unverifiedCandidateCount} possible source${unverifiedCandidateCount === 1 ? " is" : "s are"} listed separately as “identified, not verified” and ${unverifiedCandidateCount === 1 ? "is" : "are"} not included${pct != null ? ` in the ${pct}%` : ""}.`;
   } else if (state === "EXTRACTION_PARTIAL") {
@@ -261,7 +277,7 @@ export function resolveReportCompletion(input: ResolveReportCompletionInput): Re
   const signals: ReportCompletion["signals"] = { academicSearch, selectiveCorpus, extraction, unverifiedCandidateCount, userSuppliedReference, priorSubmission };
   return {
     state,
-    headline: REPORT_COMPLETION_HEADLINE[state],
+    headline: similarityNotFinalized && state === "PARTIAL" ? SIMILARITY_NOT_FINALIZED_HEADLINE : REPORT_COMPLETION_HEADLINE[state],
     detail,
     reasons,
     diagnostics: completionDiagnosticsFromSignals(signals, {
