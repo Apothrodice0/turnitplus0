@@ -115,6 +115,34 @@ function pinCompactWrites(value) {
   };
 }
 
+// How far a prior-submission pass gets is bounded by its time budget (USER_SUBMISSION_MATCH_THRESHOLDS.matchTimeBudgetMs,
+// 2.5 s of Date.now, checked before each candidate), and how many of the ten sources it verifies decides every size this file
+// measures. On wall time that depth follows machine load — and a pass cut short is run again (PRIOR_SUBMISSION_MATCH_MAX_ATTEMPTS),
+// getting further when warm — so the route and the independent reference could credit different (valid) amounts. While this
+// is installed, Date.now is a virtual clock that stands still except when a candidate's text is loaded for verification, which
+// costs MATCHER_STEP_MS: every pass verifies exactly three sources and stops on TIME_BUDGET. Three is the depth this fixture is
+// calibrated at — with two, the gate-OFF report still fits (R2 needs it not to); with four, the compact one loses its required
+// margin under the ceiling. Nothing an assertion compares is changed; only how far a pass gets is no longer up to the machine.
+// Returns the restore.
+const MATCHER_STEP_MS = 1_000;
+const CANDIDATE_TEXT_LOAD = /SELECT id, canonical_sha256, canonical_text,[\s\S]*FROM corpus_document_representations WHERE id = \?/;
+function installMatcherClock() {
+  const clientClass = Object.getPrototypeOf(client);
+  const realExecute = clientClass.execute;
+  const realNow = Date.now;
+  let virtualNow = realNow();
+  Date.now = () => virtualNow;
+  clientClass.execute = function execute(stmt, ...rest) {
+    const sql = typeof stmt === 'string' ? stmt : stmt?.sql;
+    if (typeof sql === 'string' && CANDIDATE_TEXT_LOAD.test(sql)) virtualNow += MATCHER_STEP_MS;
+    return realExecute.call(this, stmt, ...rest);
+  };
+  return () => {
+    clientClass.execute = realExecute;
+    Date.now = realNow;
+  };
+}
+
 // -- corpus promotion + account setup, copied verbatim in structure from
 // tests/report-write-time-finalization.test.mjs's own helpers (same schema,
 // same real promotion pipeline) --
@@ -337,6 +365,7 @@ test('REAL SERVER GROWTH: a request under MAX_REPORT_SAVE_REQUEST_BYTES as sent 
 
   await t.test('main case (DECISIVE PASS): real POST now succeeds (200) because the measured exact-duplicate previousUploadPositions array is compacted at persistence, and GET returns the exact expanded pre-fix shape', async (st) => {
     st.after(pinCompactWrites('true')); // R2: the near-ceiling report only fits with compact writes enabled
+    st.after(installMatcherClock());
     const text = buildManuscript(TARGET_TEXT_CHARS, true);
     const body = buildRequestBody({ deviceKey: account.deviceKey, id: 'growth-main-1', text, unifiedSimilarityForgery: FORGED_UNIFIED_SIMILARITY, room: 0 });
     const serialized = JSON.stringify(body);
@@ -460,6 +489,7 @@ test('REAL SERVER GROWTH: a request under MAX_REPORT_SAVE_REQUEST_BYTES as sent 
 
   await t.test('R2 GATE OFF (the default): the SAME near-ceiling report FAILS CLOSED -- 413 and nothing persisted -- never saved as a score without its explanation', async (st) => {
     st.after(pinCompactWrites(undefined));
+    st.after(installMatcherClock());
     const offAccount = await signUpConsentingAccount();
     const text = buildManuscript(TARGET_TEXT_CHARS, true);
     const body = buildRequestBody({ deviceKey: offAccount.deviceKey, id: 'growth-gate-off-1', text, unifiedSimilarityForgery: FORGED_UNIFIED_SIMILARITY, room: 0 });
@@ -555,7 +585,8 @@ test('REAL SERVER GROWTH: a request under MAX_REPORT_SAVE_REQUEST_BYTES as sent 
     assert.equal(res.status, 200, 'the same-size document without independently-corroborating server-side evidence must save normally, not 413 -- proving document size alone is not the trigger');
   });
 
-  await t.test('STAGE ATTRIBUTION (counterfactual): which exact server-side stage would first cross MAX_REPORT_SAVE_REQUEST_BYTES WITHOUT this fix\'s compaction, for the same evidence density', async () => {
+  await t.test('STAGE ATTRIBUTION (counterfactual): which exact server-side stage would first cross MAX_REPORT_SAVE_REQUEST_BYTES WITHOUT this fix\'s compaction, for the same evidence density', async (st) => {
+    st.after(installMatcherClock());
     // Reuses the SAME text-building fixture and the SAME already-promoted
     // ten sources / already-signed-up account from the main case above --
     // no redesign, no second corpus, no second account.
