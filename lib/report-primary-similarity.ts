@@ -1,4 +1,4 @@
-import type { Client } from "@libsql/client";
+import type { Client, InValue } from "@libsql/client";
 import { getOrComputeHistoricalMatchSnapshot, getCurrentCorpusMatchGeneration, isHistoricalMatchSnapshotCurrent, snapshotMatcherVersion } from "./report-historical-match";
 import { reportScoringNormalizationVersion, type ScoringNormalizationVersion } from "./similarity-core";
 import { runWithScoringNormalization } from "./scoring-normalization-scope";
@@ -9,6 +9,7 @@ import { resolveImportedSimilarityEvidenceForUnifiedSimilarity } from "./importe
 import { compactUnifiedSimilarityForPersistence } from "./unified-similarity-persistence";
 import { readPersistedArchiveMatchedPositions } from "./report-persistence";
 import { MAX_REPORT_SAVE_REQUEST_BYTES, persistedPayloadSize } from "./report-transport-limits";
+import { buildSizeUnavailableAiAnalysis } from "./ai-unavailable-state";
 import type { PersistedEvidenceInterpretation } from "./evidence-interpretation/persistence";
 import type { PriorSubmissionBranchState, SelectiveCorpusIncompleteReason } from "./evidence-interpretation/completion";
 import type { ReportHistoricalSubmissionMatch, SimilarityReport } from "./report-types";
@@ -1022,7 +1023,107 @@ export type SelectiveCorpusAuthoritativeTerminalStatus = "completed" | "incomple
 export async function persistSelectiveCorpusAuthoritativeFinalization(
   client: Client,
   params: { reportDeviceKey: string; reportId: string },
-  resolution: {
+  resolution: SelectiveCorpusAuthoritativeFinalizationWrite & {
+    /**
+     * Compare-and-swap on the exact stored text the caller read and measured
+     * (in addition to the guards above): the write lands only on that row. Used
+     * when the caller has decided the AI half from the exact row this write
+     * leaves (previewSelectiveCorpusAuthoritativeFinalization).
+     */
+    expectedPayloadJson?: string;
+  },
+): Promise<{ written: boolean; rowsAffected: number }> {
+  if ((resolution.evidenceInterpretation as unknown) === null) {
+    throw new Error(
+      "persistSelectiveCorpusAuthoritativeFinalization: refusing to write a final score while removing its evidenceInterpretation (the caller must not perform this write when no interpretation can be persisted)",
+    );
+  }
+  const payload = finalizationPayloadSql(resolution);
+  const aiColumns = resolution.aiSizeUnavailable
+    ? `, ai_status = 'failed', ai_score = NULL, ai_tone = '${AI_SIZE_UNAVAILABLE_TONE}'`
+    : "";
+  const result = await client.execute({
+    sql: `UPDATE saved_reports
+          SET payload_json = ${payload.sql}${aiColumns}
+          WHERE device_key = ? AND id = ? AND json_valid(payload_json)
+            AND json_extract(payload_json, '$.selectiveCorpusAuthoritativeStatus') = 'pending'
+            AND ${SIMILARITY_GENERATION_GUARD_SQL}
+            AND ${SIMILARITY_SCORING_NORMALIZATION_GUARD_SQL}${resolution.expectedPayloadJson !== undefined ? "\n            AND payload_json = ?" : ""}`,
+    args: [
+      ...payload.args,
+      params.reportDeviceKey,
+      params.reportId,
+      resolution.corpusGeneration,
+      resolution.scoringNormalizationVersion === 2 ? 2 : 1,
+      ...(resolution.expectedPayloadJson !== undefined ? [resolution.expectedPayloadJson] : []),
+    ],
+  });
+  const rowsAffected = Number(result.rowsAffected);
+  return { written: rowsAffected > 0, rowsAffected };
+}
+
+/**
+ * The exact `payload_json` persistSelectiveCorpusAuthoritativeFinalization would
+ * leave for this report — the same SQL expression, evaluated by a SELECT on the
+ * stored row, so nothing is written. null when there is no such row. Lets the
+ * finalizer decide the AI half from the real row (SIMILARITY TAKES PRIORITY OVER
+ * AI, lib/selective-corpus-authoritative.ts) and then land exactly that row with
+ * an `expectedPayloadJson` compare-and-swap.
+ */
+export async function previewSelectiveCorpusAuthoritativeFinalization(
+  client: Client,
+  params: { reportDeviceKey: string; reportId: string },
+  resolution: SelectiveCorpusAuthoritativeFinalizationWrite,
+): Promise<string | null> {
+  const payload = finalizationPayloadSql(resolution);
+  const result = await client.execute({
+    sql: `SELECT ${payload.sql} AS next FROM saved_reports WHERE device_key = ? AND id = ?`,
+    args: [...payload.args, params.reportDeviceKey, params.reportId],
+  });
+  const next = (result.rows[0] as unknown as { next?: unknown } | undefined)?.next;
+  return typeof next === "string" ? next : null;
+}
+
+/** The AI tone of the server-authored "AI unavailable for this document" state (lib/ai-unavailable-state.ts). */
+const AI_SIZE_UNAVAILABLE_TONE = "unavailable";
+
+/** The finalization payload expression and its arguments, shared by the write and its preview. */
+function finalizationPayloadSql(resolution: SelectiveCorpusAuthoritativeFinalizationWrite): { sql: string; args: InValue[] } {
+  const flagText = resolution.corpusSourceMatchingEnabled ? "true" : "false";
+  const interpretationToSet = resolution.evidenceInterpretation ?? null;
+  const incompleteReasonToSet = resolution.terminalStatus === "incomplete" ? (resolution.incompleteReason ?? null) : null;
+  const priorSubmissionToSet = resolution.priorSubmission ?? null;
+  const aiSizeUnavailable = resolution.aiSizeUnavailable === true;
+  return {
+    sql: `${priorSubmissionToSet ? "json_replace(\n              " : ""}json_set(
+                json_remove(payload_json, '$.selectiveCorpusAuthoritativeClaimedAt'),
+                '$.unifiedSimilarity', json(?),
+                '$.corpusSourceMatchingEnabledAtComputation', json(?),
+                '$.unifiedSimilarityGeneration', ?,
+                '$.unifiedSimilarityFailed', json('false'),${interpretationToSet ? "\n                '$.evidenceInterpretation', json(?)," : ""}${incompleteReasonToSet ? "\n                '$.selectiveCorpusAuthoritativeIncompleteReason', ?," : ""}${aiSizeUnavailable ? "\n                '$.aiAnalysis', json(?),\n                '$.aiScore', json('null')," : ""}
+                '$.selectiveCorpusAuthoritativeStatus', ?
+              )${priorSubmissionToSet ? ",\n              '$.reportCompletion.signals.priorSubmission', ?\n            )" : ""}`,
+    args: [
+      // Pre-launch hardening fix — same shared compaction as
+      // finalizeReportJson/persistRefreshedSimilarity above. The CAS/status
+      // guard clauses are untouched; only the persisted JSON value for
+      // '$.unifiedSimilarity' changes shape when eligible. R2: contributions are
+      // compacted only under the write gate, in the mode the caller measured —
+      // and the position arrays likewise, under theirs.
+      JSON.stringify(compactUnifiedSimilarityForPersistence(resolution.unifiedSimilarity, { compactWrites: resolution.compactWrites, compactPositions: resolution.compactPositions })),
+      flagText,
+      resolution.corpusGeneration,
+      ...(interpretationToSet ? [JSON.stringify(interpretationToSet)] : []),
+      ...(incompleteReasonToSet ? [incompleteReasonToSet] : []),
+      ...(aiSizeUnavailable ? [JSON.stringify(buildSizeUnavailableAiAnalysis())] : []),
+      resolution.terminalStatus,
+      ...(priorSubmissionToSet ? [priorSubmissionToSet] : []),
+    ],
+  };
+}
+
+/** What persistSelectiveCorpusAuthoritativeFinalization writes (and its preview evaluates). */
+export type SelectiveCorpusAuthoritativeFinalizationWrite = {
     unifiedSimilarity: UnifiedSimilarityResult;
     corpusSourceMatchingEnabled: boolean;
     corpusGeneration: number;
@@ -1065,54 +1166,17 @@ export async function persistSelectiveCorpusAuthoritativeFinalization(
      * (SIMILARITY_SCORING_NORMALIZATION_GUARD_SQL). Omitted is v1.
      */
     scoringNormalizationVersion?: ScoringNormalizationVersion;
-  },
-): Promise<{ written: boolean; rowsAffected: number }> {
-  if ((resolution.evidenceInterpretation as unknown) === null) {
-    throw new Error(
-      "persistSelectiveCorpusAuthoritativeFinalization: refusing to write a final score while removing its evidenceInterpretation (the caller must not perform this write when no interpretation can be persisted)",
-    );
-  }
-  const flagText = resolution.corpusSourceMatchingEnabled ? "true" : "false";
-  const interpretationToSet = resolution.evidenceInterpretation ?? null;
-  const incompleteReasonToSet = resolution.terminalStatus === "incomplete" ? (resolution.incompleteReason ?? null) : null;
-  const priorSubmissionToSet = resolution.priorSubmission ?? null;
-  const result = await client.execute({
-    sql: `UPDATE saved_reports
-          SET payload_json = ${priorSubmissionToSet ? "json_replace(\n              " : ""}json_set(
-                json_remove(payload_json, '$.selectiveCorpusAuthoritativeClaimedAt'),
-                '$.unifiedSimilarity', json(?),
-                '$.corpusSourceMatchingEnabledAtComputation', json(?),
-                '$.unifiedSimilarityGeneration', ?,
-                '$.unifiedSimilarityFailed', json('false'),${interpretationToSet ? "\n                '$.evidenceInterpretation', json(?)," : ""}${incompleteReasonToSet ? "\n                '$.selectiveCorpusAuthoritativeIncompleteReason', ?," : ""}
-                '$.selectiveCorpusAuthoritativeStatus', ?
-              )${priorSubmissionToSet ? ",\n              '$.reportCompletion.signals.priorSubmission', ?\n            )" : ""}
-          WHERE device_key = ? AND id = ? AND json_valid(payload_json)
-            AND json_extract(payload_json, '$.selectiveCorpusAuthoritativeStatus') = 'pending'
-            AND ${SIMILARITY_GENERATION_GUARD_SQL}
-            AND ${SIMILARITY_SCORING_NORMALIZATION_GUARD_SQL}`,
-    args: [
-      // Pre-launch hardening fix — same shared compaction as
-      // finalizeReportJson/persistRefreshedSimilarity above. The CAS/status
-      // guard clauses above are untouched; only the persisted JSON value for
-      // '$.unifiedSimilarity' changes shape when eligible. R2: contributions are
-      // compacted only under the write gate, in the mode the caller measured —
-      // and the position arrays likewise, under theirs.
-      JSON.stringify(compactUnifiedSimilarityForPersistence(resolution.unifiedSimilarity, { compactWrites: resolution.compactWrites, compactPositions: resolution.compactPositions })),
-      flagText,
-      resolution.corpusGeneration,
-      ...(interpretationToSet ? [JSON.stringify(interpretationToSet)] : []),
-      ...(incompleteReasonToSet ? [incompleteReasonToSet] : []),
-      resolution.terminalStatus,
-      ...(priorSubmissionToSet ? [priorSubmissionToSet] : []),
-      params.reportDeviceKey,
-      params.reportId,
-      resolution.corpusGeneration,
-      resolution.scoringNormalizationVersion === 2 ? 2 : 1,
-    ],
-  });
-  const rowsAffected = Number(result.rowsAffected);
-  return { written: rowsAffected > 0, rowsAffected };
-}
+    /**
+     * SIMILARITY TAKES PRIORITY OVER AI. true when the AI result already stored
+     * beside this pending report cannot be stored beside its final similarity:
+     * the same statement replaces it with the server-authored "AI unavailable for
+     * this document" state ($.aiAnalysis = buildSizeUnavailableAiAnalysis(),
+     * $.aiScore null; ai_status 'failed', ai_score NULL, ai_tone 'unavailable') —
+     * exactly what the AI-result route writes when the AI result arrives after
+     * the finalization. Decided by the caller from the previewed row.
+     */
+    aiSizeUnavailable?: boolean;
+};
 
 /**
  * AUTHORITATIVE PROMOTION — the terminal write for a pending report whose FINAL

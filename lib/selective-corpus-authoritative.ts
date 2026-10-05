@@ -3,11 +3,16 @@ import {
   resolvePrimarySimilaritySummary,
   persistSelectiveCorpusAuthoritativeFinalization,
   persistSelectiveCorpusAuthoritativeUnstorable,
+  previewSelectiveCorpusAuthoritativeFinalization,
+  type SelectiveCorpusAuthoritativeFinalizationWrite,
   type SelectiveCorpusAuthoritativeTerminalStatus,
 } from "./report-primary-similarity";
 import { resolveVerifiedAcademicEvidence } from "./academic-search-diagnostics-repo";
 import { buildFinalizedReportEvidenceInterpretation, priorSubmissionBranchState } from "./report-evidence-interpretation";
-import { readPersistedArchiveMatchedPositions } from "./report-persistence";
+import { readPersistedArchiveMatchedPositions, storedRowExceedsServingBound } from "./report-persistence";
+import { MAX_REPORT_SAVE_REQUEST_BYTES, persistedPayloadSize } from "./report-transport-limits";
+import { buildSizeUnavailableAiAnalysis, isSizeUnavailableAiAnalysis } from "./ai-unavailable-state";
+import { logAiSizeUnavailableTelemetry } from "./ai-size-unavailable-telemetry";
 import { canonicalSha256 } from "./document-identity";
 import { reportScoringNormalizationVersion, type ScoringNormalizationVersion } from "./similarity-core";
 import type { SimilarityReport } from "./report-types";
@@ -316,8 +321,26 @@ async function resolveAndPersist(
   //     persistence limit. No score is written; the report is finalized
   //     "incomplete" (PERSISTENCE_LIMIT), similarity unavailable (see the
   //     outcome's own doc comment).
+  //
+  // SIMILARITY TAKES PRIORITY OVER AI (release decision, 2026-10-05). An AI
+  // result can already be stored beside this pending report (its AI save landed
+  // first — e.g. while a timed-out Selective Corpus attempt waited for the
+  // recovery sweep). Whether the final similarity fits is decided WITHOUT that
+  // result, with the AI half as the "AI unavailable for this document" state
+  // would leave it — the same decision as when no AI result has arrived yet —
+  // so an AI result can never cost a report its similarity: only a similarity
+  // that cannot fit on its own ends PERSISTENCE_LIMIT. Whether the AI result
+  // then stays is decided below on the exact row this write leaves, by the
+  // AI-result route's own rule, so the outcome does not depend on which
+  // arrived first.
+  const storedAiResult = holdsAiResult(row.payload);
   const prepared = buildFinalizedReportEvidenceInterpretation(
-    { ...payload, externalAcademicEvidence: verifiedAcademicEvidence, unifiedSimilarity: resolution.unifiedSimilarity },
+    {
+      ...payload,
+      ...(storedAiResult ? { aiAnalysis: buildSizeUnavailableAiAnalysis(), aiScore: null } : {}),
+      externalAcademicEvidence: verifiedAcademicEvidence,
+      unifiedSimilarity: resolution.unifiedSimilarity,
+    },
     {
       historicalSubmissionMatch: resolution.historicalSubmissionMatch,
       // The write below never rewrites the row's archive positions, so the size
@@ -344,25 +367,26 @@ async function resolveAndPersist(
     throw new Error("selective-corpus authoritative finalization could not build the final report's evidenceInterpretation");
   }
 
-  const write = await persistSelectiveCorpusAuthoritativeFinalization(
-    client,
-    { reportDeviceKey: params.reportDeviceKey, reportId: params.reportId },
-    {
-      unifiedSimilarity: resolution.unifiedSimilarity,
-      corpusSourceMatchingEnabled: resolution.corpusSourceMatchingEnabled,
-      corpusGeneration: resolution.corpusGeneration,
-      terminalStatus: evidenceSelection.terminalStatus,
-      incompleteReason: evidenceSelection.incompleteReason,
-      // The previous-submission check THIS final score was resolved with: the
-      // pending save had none, so it is recorded with the terminal status.
-      priorSubmission: priorSubmissionBranchState(resolution.historicalSubmissionMatch),
-      evidenceInterpretation: prepared.evidenceInterpretation,
-      // R2 write gate: persist in the exact mode the size check above measured.
-      compactWrites: prepared.compactWrites,
-      compactPositions: prepared.compactPositions,
-      scoringNormalizationVersion,
-    },
-  );
+  const ids = { reportDeviceKey: params.reportDeviceKey, reportId: params.reportId };
+  const finalization: SelectiveCorpusAuthoritativeFinalizationWrite = {
+    unifiedSimilarity: resolution.unifiedSimilarity,
+    corpusSourceMatchingEnabled: resolution.corpusSourceMatchingEnabled,
+    corpusGeneration: resolution.corpusGeneration,
+    terminalStatus: evidenceSelection.terminalStatus,
+    incompleteReason: evidenceSelection.incompleteReason,
+    // The previous-submission check THIS final score was resolved with: the
+    // pending save had none, so it is recorded with the terminal status.
+    priorSubmission: priorSubmissionBranchState(resolution.historicalSubmissionMatch),
+    evidenceInterpretation: prepared.evidenceInterpretation,
+    // R2 write gate: persist in the exact mode the size check above measured.
+    compactWrites: prepared.compactWrites,
+    compactPositions: prepared.compactPositions,
+    scoringNormalizationVersion,
+  };
+
+  if (storedAiResult) return persistBesideStoredAiResult(client, ids, row, finalization);
+
+  const write = await persistSelectiveCorpusAuthoritativeFinalization(client, ids, finalization);
   if (!write.written) {
     // rowsAffected === 0: some other finalizer (a duplicate deferred run, or
     // a racing sweep claim) already won the pending -> terminal transition.
@@ -370,6 +394,60 @@ async function resolveAndPersist(
     return { outcome: "already-finalized" };
   }
   return { outcome: "finalized", status: evidenceSelection.terminalStatus };
+}
+
+/** A real AI result is stored beside the report (not the size-unavailable state, which is already as small as it gets). */
+function holdsAiResult(payload: SimilarityReport): boolean {
+  const aiAnalysis = (payload as { aiAnalysis?: unknown }).aiAnalysis;
+  return aiAnalysis !== undefined && aiAnalysis !== null && !isSizeUnavailableAiAnalysis(aiAnalysis);
+}
+
+/**
+ * SIMILARITY TAKES PRIORITY OVER AI — the write for a pending report that already
+ * holds an AI result. The final similarity has been decided without it (see
+ * resolveAndPersist). The AI half is decided on the EXACT row this finalization
+ * would leave (previewSelectiveCorpusAuthoritativeFinalization), by the rule the
+ * AI-result route applies when the AI result arrives after the finalization
+ * (app/api/reports/[id]/ai-retry/route.ts): it stays when that row fits the
+ * persistence ceiling and the compact-positions serving bound; otherwise it is
+ * replaced, in the same statement, by the "AI unavailable for this document"
+ * state the route writes. Finalizer-first and AI-first therefore end in the same
+ * report.
+ *
+ * The write is a compare-and-swap on the exact stored text that was read and
+ * measured: a row that changed meanwhile (a later AI save, another finalizer) is
+ * left as it is — "already-finalized" when it is no longer pending, otherwise
+ * "stale-attempt" (the recovery sweep takes it again).
+ */
+async function persistBesideStoredAiResult(
+  client: Client,
+  ids: { reportDeviceKey: string; reportId: string },
+  row: ReadReportRowResult,
+  finalization: SelectiveCorpusAuthoritativeFinalizationWrite,
+): Promise<FinalizeSelectiveCorpusAuthoritativeReportResult> {
+  const fitsBeside = (next: string | null) =>
+    next !== null && persistedPayloadSize(next) <= MAX_REPORT_SAVE_REQUEST_BYTES && !storedRowExceedsServingBound(next, MAX_REPORT_SAVE_REQUEST_BYTES);
+  const aiSizeUnavailable = !fitsBeside(await previewSelectiveCorpusAuthoritativeFinalization(client, ids, finalization));
+  if (aiSizeUnavailable) {
+    // The state that replaces it is held to the ceiling, as on the AI-result route. Measured on the row it leaves: if
+    // even that does not fit, the similarity cannot be stored at all — the existing PERSISTENCE_LIMIT outcome.
+    const settled = await previewSelectiveCorpusAuthoritativeFinalization(client, ids, { ...finalization, aiSizeUnavailable: true });
+    if (settled === null || persistedPayloadSize(settled) > MAX_REPORT_SAVE_REQUEST_BYTES) {
+      const terminal = await persistSelectiveCorpusAuthoritativeUnstorable(client, ids, { payloadJson: row.payloadJson });
+      return terminal.written ? { outcome: "persistence-limit-exceeded", status: "incomplete" } : { outcome: "stale-attempt" };
+    }
+  }
+  const write = await persistSelectiveCorpusAuthoritativeFinalization(client, ids, {
+    ...finalization,
+    aiSizeUnavailable,
+    expectedPayloadJson: row.payloadJson,
+  });
+  if (!write.written) {
+    const now = await readReportRow(client, ids.reportDeviceKey, ids.reportId);
+    return now?.payload.selectiveCorpusAuthoritativeStatus === "pending" ? { outcome: "stale-attempt" } : { outcome: "already-finalized" };
+  }
+  if (aiSizeUnavailable) logAiSizeUnavailableTelemetry();
+  return { outcome: "finalized", status: finalization.terminalStatus };
 }
 
 /**
