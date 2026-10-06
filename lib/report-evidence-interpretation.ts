@@ -401,13 +401,6 @@ export function buildFinalizedReportEvidenceInterpretation(
   const maxBytes = opts.maxBytes ?? MAX_REPORT_SAVE_REQUEST_BYTES;
   const compactWrites = resolveCompactPersistenceWrites(opts);
   const compactPositions = resolveCompactPositionWrites(opts);
-  const build = (selectiveCorpusAdmittedSources?: ReportEvidenceInterpretationWiringOptions["selectiveCorpusAdmittedSources"]) =>
-    withEvidenceInterpretation(finalReport, {
-      historicalSubmissionMatch: opts.historicalSubmissionMatch ?? null,
-      selectiveCorpusBranch: null,
-      userSuppliedReferenceEvidence: opts.userSuppliedReferenceEvidence ?? null,
-      ...(selectiveCorpusAdmittedSources ? { selectiveCorpusAdmittedSources } : {}),
-    }).evidenceInterpretation;
   /** The size decision for ONE candidate interpretation: fits (with its persisted form), or by how much it does not. */
   const measure = (interpretation: ReportEvidenceInterpretation): FinalizedReportInterpretationResult => {
     const persistedInterpretation = compactEvidenceInterpretationForPersistence(interpretation, { compactWrites });
@@ -440,24 +433,30 @@ export function buildFinalizedReportEvidenceInterpretation(
     return { ok: true, evidenceInterpretation: persistedInterpretation, compactWrites, compactPositions };
   };
   try {
-    const interpretation = build();
+    const interpretation = withEvidenceInterpretation(finalReport, {
+      historicalSubmissionMatch: opts.historicalSubmissionMatch ?? null,
+      selectiveCorpusBranch: null,
+      userSuppliedReferenceEvidence: opts.userSuppliedReferenceEvidence ?? null,
+    }).evidenceInterpretation;
     if (!interpretation) return { ok: false, reason: "BUILD_FAILED" };
     const full = measure(interpretation);
     if (full.ok || !interpretation.sources.some(isSelectiveCorpusSourceCard)) return full;
-    // SIMILARITY TAKES PRIORITY OVER SOURCE-CARD DETAIL. Attributing Selective Corpus words to their source cards makes
-    // the explanation larger (a card per source, and a source reference on every passage it covers), and the limits it
-    // is measured against have not moved. A report that could be stored before those cards existed must not end
-    // "Similarity unavailable" because of them, so the attribution yields first, in two steps, and only what remains
-    // decides the outcome:
-    //   1. the cards without their passage links: each source still shows as a verified source with the words it put
-    //      into the score; its highlighted passages just do not open it (as before the cards existed);
-    //   2. no Selective Corpus cards at all — exactly the explanation this function produced before they existed, so a
-    //      report that fit then fits now, and one that did not fails with the same measurement.
-    // Nothing else is ever left out, and the score and its matched positions are the same in every step.
-    const withoutLinks = measure(withoutSelectiveCorpusPassageLinks(interpretation));
-    if (withoutLinks.ok) return withoutLinks;
-    const withoutCards = build([]);
-    return withoutCards ? measure(withoutCards) : { ok: false, reason: "BUILD_FAILED" };
+    // A SCORE THAT CONTAINS SELECTIVE CORPUS WORDS IS NEVER STORED WITHOUT A CARD FOR EACH SOURCE THEY CAME FROM.
+    // Attributing those words makes the explanation larger (a card per source, and a source reference on every
+    // passage it covers), and the limits it is measured against have not moved. Under size pressure the attribution
+    // gives up DETAIL, in this order, and never the cards themselves:
+    //   1. the passage links: each card stays, with the words it put into the score; its highlighted passages just do
+    //      not open it;
+    //   2. the optional card text as well (minimalSelectiveCorpusSourceCard): what is left is the least the card
+    //      contract can carry and still be true — which source, how many matched words, what share.
+    // If the report does not fit even so, it does not fit: the caller ends it PERSISTENCE_LIMIT ("Similarity
+    // unavailable"), exactly as for any other report too large to store. There is deliberately no step that drops the
+    // cards and keeps the percentage — that would put "0 verified sources" back beside a score made of their words.
+    // The score and its matched positions are the same in every step.
+    const withoutLinks = withoutSelectiveCorpusPassageLinks(interpretation);
+    const unlinked = measure(withoutLinks);
+    if (unlinked.ok) return unlinked;
+    return measure({ ...withoutLinks, sources: withoutLinks.sources.map((source) => (isSelectiveCorpusSourceCard(source) ? minimalSelectiveCorpusSourceCard(source) : source)) });
   } catch (err) {
     console.error(
       "report V2 finalized-report interpretation build failed:",
@@ -468,6 +467,31 @@ export function buildFinalizedReportEvidenceInterpretation(
 }
 
 const isSelectiveCorpusSourceCard = (source: ReportEvidenceSource): boolean => source.sourceType === "selective-corpus";
+
+/**
+ * The least a Selective Corpus card can say and still be a truthful card under
+ * the existing card contract (ReportEvidenceSource): WHICH source (its
+ * report-local id, the generic reference-collection label, its type), and WHAT
+ * it contributed (matched words and their share of the document), with the kind
+ * and confidence the contract requires. Everything optional is empty: no
+ * passage links, no explanation phrases, no secondary kinds — and no link, DOI
+ * or year, which such a source never has. Nothing is invented and no number is
+ * changed.
+ */
+function minimalSelectiveCorpusSourceCard(source: ReportEvidenceSource): ReportEvidenceSource {
+  return {
+    id: source.id,
+    label: source.label,
+    sourceType: source.sourceType,
+    link: null,
+    doi: null,
+    year: null,
+    contributionPercent: source.contributionPercent,
+    matchedWords: source.matchedWords,
+    interpretation: { primaryKind: source.interpretation.primaryKind, confidence: source.interpretation.confidence, reasons: [], mixedKinds: [] },
+    passageRefs: [],
+  };
+}
 
 /**
  * `interpretation` with every Selective Corpus card kept but unlinked: the card

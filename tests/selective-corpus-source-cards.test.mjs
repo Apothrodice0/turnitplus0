@@ -17,8 +17,9 @@ import { computeUnifiedSimilarity } from '../lib/unified-similarity.ts';
 import { buildFinalizedReportEvidenceInterpretation, withEvidenceInterpretation } from '../lib/report-evidence-interpretation.ts';
 import { decodeReportFromPersistence, encodeReportForPersistence } from '../lib/report-persistence.ts';
 import { isFormatMarkedPositions } from '../lib/position-runs-persistence.ts';
-import { expandEvidenceInterpretationFromPersistence, isCompactEvidenceInterpretation } from '../lib/evidence-interpretation/persistence.ts';
+import { compactEvidenceInterpretationForPersistence, expandEvidenceInterpretationFromPersistence, isCompactEvidenceInterpretation } from '../lib/evidence-interpretation/persistence.ts';
 import { MAX_REPORT_SAVE_REQUEST_BYTES } from '../lib/report-transport-limits.ts';
+import { SIMILARITY_NOT_FINALIZED_HEADLINE } from '../lib/evidence-interpretation/completion.ts';
 import { buildReportV2ViewModel } from '../lib/report-v2-view.ts';
 import { finalizeSelectiveCorpusAuthoritativeReport, MAX_SELECTIVE_CORPUS_AUTHORITATIVE_ATTEMPTS } from '../lib/selective-corpus-authoritative.ts';
 
@@ -36,8 +37,8 @@ import { finalizeSelectiveCorpusAuthoritativeReport, MAX_SELECTIVE_CORPUS_AUTHOR
  *   - the score, the matched positions and every other channel are what they were without the card;
  *   - a save (the AI result) and every reload show the same cards, under both compact write gates;
  *   - no Selective Corpus evidence, no card;
- *   - the cards never cost a report its score: one too large to carry them keeps the score and drops card detail
- *     first, down to exactly the explanation it had before the cards existed.
+ *   - under size pressure a card loses detail (its passage links, then its optional text) and never its existence: a
+ *     report too large for even the minimum cards is not stored with a score at all.
  * Every corpus is synthetic.
  */
 
@@ -532,7 +533,7 @@ test('8c. the explanation builder gives a report without Selective Corpus contri
 });
 
 // ===========================================================================
-// 9-10. the cards never cost a report its score
+// 9-10. under size pressure the cards lose detail, never their existence
 // ===========================================================================
 
 const expanded = (result) => {
@@ -554,52 +555,82 @@ function smallestLimit(build, accept, high) {
 }
 const withoutLinks = (card) => { const { passageRefs: _passageRefs, ...rest } = card; return rest; };
 const withoutSources = (passage) => { const { sourceIds: _sourceIds, ...rest } = passage; return rest; };
+const isSelective = (card) => card.sourceType === 'selective-corpus';
+/** The minimum card: which source, what it contributed, and nothing optional. */
+const minimalCardOf = (card) => ({
+  id: card.id, label: card.label, sourceType: card.sourceType, link: null, doi: null, year: null,
+  contributionPercent: card.contributionPercent, matchedWords: card.matchedWords,
+  interpretation: { primaryKind: card.interpretation.primaryKind, confidence: card.interpretation.confidence, reasons: [], mixedKinds: [] },
+  passageRefs: [],
+});
+/** The stored size of an explanation in the form a gate writes. */
+const storedSize = (interpretation, compactWrites) => JSON.stringify(compactEvidenceInterpretationForPersistence(interpretation, { compactWrites })).length;
 
 for (const [compactWrites, compactPositions] of [[true, false], [true, true], [false, false]]) {
-  test(`9. a report with less room than its Selective Corpus cards need keeps its score and gives up card detail first: the passage links, then the cards — never anything else [compact explanation ${compactWrites ? 'on' : 'off'}, compact positions ${compactPositions ? 'on' : 'off'}]`, () => {
+  test(`9. a report with less room than its Selective Corpus cards need gives up their passage links, then their optional text — and never a card: below the minimum card it is not stored at all [compact explanation ${compactWrites ? 'on' : 'off'}, compact positions ${compactPositions ? 'on' : 'off'}]`, () => {
     const report = localReport('sc-ladder', words(3000, 3911), { archiveMatchedPositions: range(350, 449), sources: [{ name: 'Archive Source A', type: 'Publication', percent: 3, matchedWords: 100 }] });
     const evidence = [['S1', Array.from({ length: 20 }, (_, i) => [600 + i * 20, 609 + i * 20])], ['S2', [[1500, 1599]]], ['S3', [[300, 379]]]];
     const finalReport = { ...report, unifiedSimilarity: scoreOf(report, evidence) };
     const build = (maxBytes) => buildFinalizedReportEvidenceInterpretation(finalReport, { maxBytes, compactWrites, compactPositions });
-    const selectiveOf = (result) => (result.ok ? expanded(result).sources.filter((s) => s.sourceType === 'selective-corpus') : []);
+    const selectiveOf = (result) => (result.ok ? expanded(result).sources.filter(isSelective) : []);
     const HIGH = MAX_REPORT_SAVE_REQUEST_BYTES;
 
     const everything = withEvidenceInterpretation(finalReport, { selectiveCorpusBranch: null }).evidenceInterpretation;
-    // What this report's explanation was before Selective Corpus sources had cards.
-    const asBefore = withEvidenceInterpretation(finalReport, { selectiveCorpusBranch: null, selectiveCorpusAdmittedSources: [] }).evidenceInterpretation;
-    assert.equal(everything.sources.filter((s) => s.sourceType === 'selective-corpus').length, 3, 'test setup sanity: three Selective cards');
-    assert.equal(asBefore.sources.length, 1, 'test setup sanity: before, the archive card alone');
+    assert.equal(everything.sources.filter(isSelective).length, 3, 'test setup sanity: three Selective Corpus sources contribute');
+    assert.ok(everything.sources.filter(isSelective).every((c) => c.interpretation.reasons.length > 0), 'test setup sanity: a full card carries its explanation');
 
     const fits = smallestLimit(build, (r) => r.ok, HIGH);
-    const fitsWithCards = smallestLimit(build, (r) => selectiveOf(r).length > 0, HIGH);
+    const fitsWithText = smallestLimit(build, (r) => selectiveOf(r).some((c) => c.interpretation.reasons.length > 0), HIGH);
     const fitsWithLinks = smallestLimit(build, (r) => selectiveOf(r).some((c) => c.passageRefs.length > 0), HIGH);
-    assert.ok(fits < fitsWithCards && fitsWithCards < fitsWithLinks, `three distinct sizes: ${fits} < ${fitsWithCards} < ${fitsWithLinks}`);
+    assert.ok(fits < fitsWithText && fitsWithText < fitsWithLinks, `three distinct sizes: ${fits} < ${fitsWithText} < ${fitsWithLinks}`);
 
     // Room for everything.
     assert.deepEqual(expanded(build(HIGH)), everything);
     assert.deepEqual(expanded(build(fitsWithLinks)), everything, 'exactly enough room: every card and every passage link');
 
-    // One unit short of that: the cards stay, unlinked.
+    // One unit short of that: every card stays, unlinked.
     const unlinked = expanded(build(fitsWithLinks - 1));
     assertExplainsExactlyTheScore({ unifiedSimilarity: finalReport.unifiedSimilarity, evidenceInterpretation: unlinked }, 'cards without links', { unlinkedSelectiveCards: true });
-    assert.deepEqual(unlinked.sources.map(withoutLinks), everything.sources.map(withoutLinks), 'the same cards: sources, labels, matched words and percentages');
-    assert.deepEqual(unlinked.sources.filter((s) => s.sourceType !== 'selective-corpus'), everything.sources.filter((s) => s.sourceType !== 'selective-corpus'), 'every other card keeps its links');
+    assert.deepEqual(unlinked.sources.map(withoutLinks), everything.sources.map(withoutLinks), 'the same cards: sources, labels, matched words, percentages and explanation');
+    assert.deepEqual(unlinked.sources.filter((s) => !isSelective(s)), everything.sources.filter((s) => !isSelective(s)), 'every other card keeps its links');
     assert.deepEqual(unlinked.passages.map(withoutSources), everything.passages.map(withoutSources), 'the same highlighted passages');
-    const selectiveIds = unlinked.sources.filter((s) => s.sourceType === 'selective-corpus').map((s) => s.id);
+    const selectiveIds = unlinked.sources.filter(isSelective).map((s) => s.id);
     assert.ok(unlinked.passages.every((p) => !p.sourceIds.some((id) => selectiveIds.includes(id))), 'no passage names a Selective card');
+    assert.deepEqual(expanded(build(fitsWithText)), unlinked, 'down to exactly enough room for the unlinked cards');
+
+    // One unit short of THAT: the minimum card — which source, how many words, what share — and nothing optional.
+    const minimal = expanded(build(fitsWithText - 1));
+    assertExplainsExactlyTheScore({ unifiedSimilarity: finalReport.unifiedSimilarity, evidenceInterpretation: minimal }, 'minimum cards', { unlinkedSelectiveCards: true });
+    assert.deepEqual(minimal.sources.filter(isSelective), everything.sources.filter(isSelective).map(minimalCardOf), 'each Selective card is exactly the minimum card of its source');
+    assert.deepEqual(minimal.sources.filter((s) => !isSelective(s)), everything.sources.filter((s) => !isSelective(s)), 'every other card is untouched');
+    assert.deepEqual(minimal.sources.map((c) => [c.id, c.matchedWords, c.contributionPercent]), everything.sources.map((c) => [c.id, c.matchedWords, c.contributionPercent]), 'no source and no number is lost');
+    assert.deepEqual({ ...minimal, sources: null }, { ...unlinked, sources: null }, 'nothing but the cards\' optional text differs from the unlinked form');
     assert.deepEqual(
-      { positionsByKind: unlinked.positionsByKind, countsByKind: unlinked.countsByKind, matchedWordCount: unlinked.matchedWordCount },
+      { positionsByKind: minimal.positionsByKind, countsByKind: minimal.countsByKind, matchedWordCount: minimal.matchedWordCount },
       { positionsByKind: everything.positionsByKind, countsByKind: everything.countsByKind, matchedWordCount: everything.matchedWordCount },
     );
-    assert.deepEqual(expanded(build(fitsWithCards)), unlinked, 'down to exactly enough room for the cards');
-    assert.equal(buildReportV2ViewModel({ ...finalReport, evidenceInterpretation: unlinked }).summary.distinctVerifiedSources, 4, 'the report still counts every verified source');
+    assert.deepEqual(expanded(build(fits)), minimal, 'down to exactly enough room for the minimum cards');
+    const vm = buildReportV2ViewModel({ ...finalReport, evidenceInterpretation: minimal });
+    assert.equal(vm.summary.distinctVerifiedSources, 4, 'the report still counts every verified source');
+    assert.deepEqual(vm.sources.filter(isSelective).map((c) => [c.label, c.link, c.doi, c.year, c.matchedWords]), everything.sources.filter(isSelective).map((c) => [GENERIC_LABEL, null, null, null, c.matchedWords]));
 
-    // One unit short of the cards: the explanation is the one from before the cards existed.
-    assert.deepEqual(expanded(build(fitsWithCards - 1)), asBefore);
-    assert.deepEqual(expanded(build(fits)), asBefore);
-
-    // One unit short of THAT: the report does not fit, as it never did, measured as it always was.
+    // One unit short of the minimum cards: the report is not stored. There is no smaller form that keeps the percentage.
     assert.deepEqual(build(fits - 1), { ok: false, reason: 'PERSISTED_SIZE_EXCEEDED', persistedBytes: fits, maxBytes: fits - 1 });
+    // The explanation without any Selective card WOULD fit a little lower down — and is never chosen.
+    const cardless = withEvidenceInterpretation(finalReport, { selectiveCorpusBranch: null, selectiveCorpusAdmittedSources: [] }).evidenceInterpretation;
+    const cardBytes = storedSize(minimal, compactWrites) - storedSize(cardless, compactWrites);
+    assert.ok(cardBytes > 0, 'test setup sanity: the minimum cards take room');
+    for (const limit of [fits - 1, fits - Math.ceil(cardBytes / 2), fits - cardBytes, fits - cardBytes - 1, Math.floor(fits / 2), 1]) {
+      const result = build(limit);
+      assert.equal(result.ok, false, `limit ${limit}: not stored`);
+      assert.equal(result.reason, 'PERSISTED_SIZE_EXCEEDED');
+    }
+    // Whatever the limit: stored means every contributing Selective source has its card.
+    for (let limit = fits - 200; limit <= fitsWithLinks + 200; limit += 37) {
+      const result = build(limit);
+      if (result.ok) assert.equal(selectiveOf(result).length, 3, `limit ${limit}: a stored score names all three Selective sources`);
+      else assert.ok(limit < fits, `limit ${limit}: only a limit under the minimum cards is refused`);
+    }
 
     // A report without Selective Corpus evidence has nothing to give up: one size, nothing in between.
     const plain = { ...report, unifiedSimilarity: scoreOf(report, []) };
@@ -610,12 +641,12 @@ for (const [compactWrites, compactPositions] of [[true, false], [true, true], [f
   });
 }
 
-test('10. through the finalizer: a report with no room for the passage links is finalized with its score and its sources; one with no room for the report itself ends "Similarity unavailable", as before', async () => {
-  // The legacy stored form (both compact gates off), where the links are largest.
+test('10. through the finalizer, near the limit: no room for the passage links -> finalized with its score and every source card; no room for even the minimum cards -> "Similarity unavailable", never a score with no Selective source', async () => {
+  // The legacy stored form (both compact gates off), where the sizes are largest and easiest to place.
   await withFlag('REPORT_COMPACT_PERSISTENCE_WRITE_ENABLED', false, () => withPositionsGate(false, async () => {
     const text = words(30_000, 4011);
-    // Four sources, 375 ten-word passages each: 15,000 of 30,000 words.
-    const evidence = [1, 2, 3, 4].map((n) => [`S${n}`, Array.from({ length: 375 }, (_, i) => { const start = (n - 1) * 7500 + i * 20; return [start, start + 9]; })]);
+    // Twenty sources, 75 ten-word passages each: 15,000 of 30,000 words.
+    const evidence = Array.from({ length: 20 }, (_, n) => [`S${n + 1}`, Array.from({ length: 75 }, (_, i) => { const start = n * 1500 + i * 20; return [start, start + 9]; })]);
     const finalizePadded = async (id, padding) => {
       const owner = await signUpOwner();
       await seedPending(owner, { ...localReport(id, text), testPadding: 'x'.repeat(padding) });
@@ -627,41 +658,49 @@ test('10. through the finalizer: a report with no room for the passage links is 
     assert.deepEqual(roomy.outcome, { outcome: 'finalized', status: 'completed' });
     const full = await row(roomy.owner, 'sc-room');
     assert.equal(full.report.unifiedSimilarity.unifiedScore, 50);
-    assert.equal(selectiveCards(full.report).length, 4);
-    assert.ok(selectiveCards(full.report).every((c) => c.passageRefs.length === 375), 'test setup sanity: every card links its 375 passages');
+    assert.equal(selectiveCards(full.report).length, 20);
+    assert.ok(selectiveCards(full.report).every((c) => c.passageRefs.length === 75), 'test setup sanity: every card links its 75 passages');
     assertExplainsExactlyTheScore(full.report, 'with room');
 
-    // How much of the stored report the links are.
+    // How much of the stored report each layer of card detail is.
     const ei = full.raw.evidenceInterpretation;
-    const ids = ei.sources.filter((s) => s.sourceType === 'selective-corpus').map((s) => s.id);
-    const unlinkedSize = JSON.stringify({
-      ...ei,
-      sources: ei.sources.map((s) => (ids.includes(s.id) ? { ...s, passageRefs: [] } : s)),
-      passages: ei.passages.map((p) => ({ ...p, sourceIds: p.sourceIds.filter((id) => !ids.includes(id)) })),
-    }).length;
-    const links = JSON.stringify(ei).length - unlinkedSize;
-    assert.ok(links > 8_000, `test setup sanity: the links are a measurable part of the report (${links})`);
+    const size = (interpretation) => JSON.stringify(interpretation).length;
+    const ids = ei.sources.filter(isSelective).map((s) => s.id);
+    const unlinkedForm = { ...ei, sources: ei.sources.map((s) => (ids.includes(s.id) ? { ...s, passageRefs: [] } : s)), passages: ei.passages.map((p) => ({ ...p, sourceIds: p.sourceIds.filter((id) => !ids.includes(id)) })) };
+    const minimalForm = { ...unlinkedForm, sources: unlinkedForm.sources.map((s) => (ids.includes(s.id) ? minimalCardOf(s) : s)) };
+    const cardlessForm = { ...minimalForm, sources: minimalForm.sources.filter((s) => !ids.includes(s.id)) };
+    const links = size(ei) - size(unlinkedForm), optionalText = size(unlinkedForm) - size(minimalForm), cards = size(minimalForm) - size(cardlessForm);
+    assert.ok(links > 8_000 && cards > 3_000, `test setup sanity: links ${links}, optional text ${optionalText}, minimum cards ${cards}`);
     const room = MAX_REPORT_SAVE_REQUEST_BYTES - full.json.length;
     assert.ok(room > 0, 'test setup sanity: the unpadded report fits');
 
-    // Padded so that the report with its links is over the limit by half their size, and without them under it by the other half.
+    // ADVERSARIAL NEAR-LIMIT: with its links the report is over the limit by half their size; without them it is under by the other half.
     const tight = await finalizePadded('sc-tight', room + Math.floor(links / 2));
     assert.deepEqual(tight.outcome, { outcome: 'finalized', status: 'completed' }, 'the report is finalized, not left without a score');
     const kept = await row(tight.owner, 'sc-tight');
     assert.ok(kept.json.length <= MAX_REPORT_SAVE_REQUEST_BYTES, 'what was stored is within the limit');
     assert.deepEqual(kept.report.unifiedSimilarity, full.report.unifiedSimilarity, 'the same score, positions and attribution');
     assertExplainsExactlyTheScore(kept.report, 'no room for links', { unlinkedSelectiveCards: true });
-    assert.deepEqual(selectiveCards(kept.report).map(withoutLinks), selectiveCards(full.report).map(withoutLinks), 'the same four sources with the same matched words');
+    assert.deepEqual(selectiveCards(kept.report).map(withoutLinks), selectiveCards(full.report).map(withoutLinks), 'the same twenty sources with the same matched words');
     const seen = buildReportV2ViewModel((await served(tight.owner, 'sc-tight')).payload);
     assert.equal(seen.summary.verifiedSimilarityPercent, 50);
-    assert.equal(seen.summary.distinctVerifiedSources, 4, 'the customer sees four verified sources, not none');
+    assert.equal(seen.summary.distinctVerifiedSources, 20, 'the customer sees twenty verified sources, not none');
 
-    // Padded so that not even the report without any card fits: the unchanged terminal state, no score.
-    const over = await finalizePadded('sc-over', room + links + 30_000);
+    // TIGHTER STILL: not even the minimum cards fit (over by half their size) — while the report WITHOUT any Selective card
+    // would fit (under by the other half). It must not be stored that way: no score, the existing terminal state.
+    const noCards = await finalizePadded('sc-no-cards', room + links + optionalText + Math.floor(cards / 2));
+    assert.deepEqual(noCards.outcome, { outcome: 'persistence-limit-exceeded', status: 'incomplete' }, 'not finalized with a score and no Selective source');
+    const refused = await row(noCards.owner, 'sc-no-cards');
+    assert.equal(refused.raw.selectiveCorpusAuthoritativeStatus, 'incomplete');
+    assert.equal(refused.raw.selectiveCorpusAuthoritativeIncompleteReason, 'PERSISTENCE_LIMIT');
+    assert.equal(refused.raw.unifiedSimilarity, undefined, 'no score is stored');
+    const refusedView = (await served(noCards.owner, 'sc-no-cards')).payload;
+    assert.equal(refusedView.unifiedSimilarity, undefined, 'the customer is shown no percentage');
+    assert.equal(refusedView.reportCompletion.headline, SIMILARITY_NOT_FINALIZED_HEADLINE, 'and is told the similarity is unavailable');
+
+    // Far over the limit: the same terminal state, as before.
+    const over = await finalizePadded('sc-over', room + links + cards + 30_000);
     assert.deepEqual(over.outcome, { outcome: 'persistence-limit-exceeded', status: 'incomplete' });
-    const unstorable = await row(over.owner, 'sc-over');
-    assert.equal(unstorable.raw.selectiveCorpusAuthoritativeStatus, 'incomplete');
-    assert.equal(unstorable.raw.selectiveCorpusAuthoritativeIncompleteReason, 'PERSISTENCE_LIMIT');
-    assert.equal(unstorable.raw.unifiedSimilarity, undefined, 'no score is stored');
+    assert.equal((await row(over.owner, 'sc-over')).raw.unifiedSimilarity, undefined);
   }));
 });
