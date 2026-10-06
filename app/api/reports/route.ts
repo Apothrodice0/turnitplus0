@@ -86,11 +86,11 @@ function isNonEmptyString(value: unknown): value is string {
 // (deriveRoomStatus, evaluated in the statement by derivedAiReadySql — the
 // one every read of the report uses), so a legacy row with no ai_status but
 // a recorded score is protected exactly like an explicit 'ready' one (every
-// other column — title, word_count, etc. — still updates
+// other content column — title, word_count, etc. — still updates
 // normally, since both a 'ready' and a 'failed' resave carry the same
-// underlying similarity data; the flat similarity columns of a terminal
-// Selective Corpus report are held by their own rule,
-// serverOwnedFlatSimilaritySql below). Every other transition is untouched: ready
+// underlying similarity data; those of a terminal Selective Corpus report are
+// held by their own rules, TITLE_SQL and serverOwnedFlatSimilaritySql below,
+// and submission_id / report_created_at are never updated at all). Every other transition is untouched: ready
 // can still be reached from processing or failed (a late genuine success
 // is exactly what a retry is for), and processing/failed/failed all behave
 // exactly as before.
@@ -182,10 +182,27 @@ const STORED_SELECTIVE_CORPUS_FINAL_SQL = `json_extract(saved_reports.payload_js
 // otherwise. Retained from the stored row, not re-derived from anything the request carries. Same condition, same
 // pre-statement row as the payload CASE below, so the two always agree — including a save that read the row while it was
 // pending and writes after the finalizer landed. Every other row (pending, or never authoritative) takes them from the
-// request with the payload, exactly as before. The identity columns (submission_id, title, report_created_at) are not
-// similarity state and are unchanged by this.
+// request with the payload, exactly as before.
 const serverOwnedFlatSimilaritySql = (column: string) =>
   `CASE WHEN ${STORED_SELECTIVE_CORPUS_FINAL_SQL} THEN saved_reports.${column} ELSE excluded.${column} END`;
+// WHICH REPORT THIS IS, AND WHEN IT WAS CREATED, IS FIXED BY ITS FIRST SAVE. submission_id and report_created_at are
+// written by the INSERT and are not in the DO UPDATE list below — like room_number, saved_at and
+// verified_device_passport_id — so a later save of the same (device_key, id) cannot move them, whatever it carries:
+//   - report_created_at is the report's lifecycle clock. The room's 24-hour cycle (isWithinActiveCycle: this route's
+//     own room claim, the room index, findRoomOccupant), which report a room's replacement deletes, and the Selective
+//     Corpus recovery sweep's minimum age are all read from it. While a save could rewrite it, a save of an existing
+//     report could end its cycle at once (the room read "empty", and the next upload deleted and replaced it), extend
+//     the cycle indefinitely, or keep a pending report out of the sweep.
+//   - submission_id is the reference a report is listed, printed and looked up under.
+// A save updates a report's content and AI result, never its identity: every product writer resends these two
+// unchanged, so nothing a legitimate save does depends on them being writable. (The first save still takes them from the
+// request.)
+//
+// title is different: it is content, the name of the document a save relays, and it travels with the payload. A save
+// whose payload is stored (a report that is not terminal: a re-analysis, a claimed legacy report) stores its title with
+// it, as it always did. For a terminal Selective Corpus report the stored payload is kept, so its title is kept too
+// (TITLE_SQL) — otherwise a save could leave the list showing a name the report itself does not carry.
+const TITLE_SQL = `CASE WHEN ${STORED_SELECTIVE_CORPUS_FINAL_SQL} THEN saved_reports.title ELSE excluded.title END`;
 // The Selective Corpus timed-out attempt count is server-owned: only the
 // finalizer's CAS write ever changes it. When an update replaces payload_json
 // with the request's payload, the STORED value is kept (or kept absent) in the
@@ -195,9 +212,7 @@ const SERVER_OWNED_TIMED_OUT_ATTEMPTS_KEY = 'selectiveCorpusAuthoritativeTimedOu
 export const SAVE_REPORT_SQL = `INSERT INTO saved_reports (id, device_key, submission_id, title, report_created_at, word_count, archive_score, score_band, ai_score, ai_tone, ai_status, payload_json, user_id, room_number, updated_at)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
       ON CONFLICT(device_key, id) DO UPDATE SET
-        submission_id = excluded.submission_id,
-        title = excluded.title,
-        report_created_at = excluded.report_created_at,
+        title = ${TITLE_SQL},
         word_count = ${serverOwnedFlatSimilaritySql('word_count')},
         archive_score = ${serverOwnedFlatSimilaritySql('archive_score')},
         score_band = ${serverOwnedFlatSimilaritySql('score_band')},
