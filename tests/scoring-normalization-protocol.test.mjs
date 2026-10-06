@@ -13,6 +13,7 @@ import * as signupRoute from "../app/api/auth/signup/route.ts";
 import { resetRateForTest, resetAuthRateForTest, resetPollRateForTest, resetReadRateForTest } from "../lib/rate-limit.ts";
 import { withTestIdentity } from "./helpers/test-signup.mjs";
 import { completeAiAnalysis } from "./helpers/complete-ai-analysis.mjs";
+import { atServerTime } from "./helpers/report-clock.mjs";
 import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
 import { makeUnitRecord } from "./helpers/imported-similarity-evidence-fixtures.mjs";
 import { buildImportedSimilarityEvidencePackageFile } from "../lib/imported-similarity-evidence/package.ts";
@@ -438,14 +439,17 @@ test("SKEW — a pre-Phase-A browser (computes v1, declares nothing): the report
 });
 
 test("SKEW — a Phase-A browser (computes v1, declares 1): the report is v1, unstamped — and identical to what the pre-Phase-A browser saved", async () => {
+  // The two saved reports are compared whole below, creation time included — which is the server's clock at each
+  // report's first save, not anything the request says. Both are therefore created at one instant of it.
+  const createdAt = new Date().toISOString();
   const acc = await account();
-  const { res } = await firstSave(acc, "Phase-A", "snp-skew-a");
+  const { res } = await atServerTime(createdAt, () => firstSave(acc, "Phase-A", "snp-skew-a"));
   assert.equal(res.status, 200);
   const { saved } = await assertSavedInContract(acc, "snp-skew-a", 1, "Phase-A browser");
 
   // The declaration of 1 changes nothing: the same check from a bundle that cannot declare persists the same report.
   const other = await account();
-  assert.equal((await firstSave(other, "pre-Phase-A", "snp-skew-a")).res.status, 200);
+  assert.equal((await atServerTime(createdAt, () => firstSave(other, "pre-Phase-A", "snp-skew-a"))).res.status, 200);
   const undeclared = await rawRow(other, "snp-skew-a");
   const comparable = ({ verifiedAcademicSearchDiagnosticsId: _id, ...rest }) => rest;
   assert.deepEqual(comparable(saved), comparable(undeclared));

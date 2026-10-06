@@ -255,7 +255,7 @@ test('4: an incoming payload without an aiAnalysis cannot erase an existing aiAn
   assert.equal(row.payload.unifiedSimilarityGeneration, 7);
 });
 
-test('5: a newer legitimate similarity write still lands verbatim — the ELSE branch is byte-for-byte unchanged', async () => {
+test('5: a newer legitimate similarity write still lands verbatim — the ELSE branch stores the incoming payload, with the creation time and submission id of the stored row', async () => {
   const id = `case-${++counter}`;
   await exec(args({
     id, aiScore: 5, aiTone: 'low', aiStatus: 'ready',
@@ -279,7 +279,15 @@ test('5: a newer legitimate similarity write still lands verbatim — the ELSE b
   await exec(args({ id, aiScore: 3, aiTone: 'low', aiStatus: 'ready', payload: incomingPayload }));
 
   const row = await rowOf(id);
-  assert.deepEqual(row.payload, incomingPayload, 'a genuinely newer-generation write replaces payload_json wholesale, exactly as before this fix');
+  // The payload's copies of the report's identity are the stored row's (SAVE_REPORT_SQL canonicalIdentitySql): a save
+  // cannot give an existing report another creation time or submission id, in its row or in the report it stores.
+  const identity = (await client.execute({ sql: 'SELECT submission_id, report_created_at FROM saved_reports WHERE device_key = ? AND id = ?', args: [DEVICE, id] })).rows[0];
+  assert.deepEqual(
+    row.payload,
+    { ...incomingPayload, created: String(identity.report_created_at), submissionId: String(identity.submission_id) },
+    'a genuinely newer-generation write replaces payload_json wholesale — everything it carries but the identity copies',
+  );
+  assert.equal(identity.submission_id, 'sub-' + id, 'test setup sanity: the stored submission id is the one the first write gave it');
   assert.equal(row.payload.unifiedSimilarityGeneration, 9);
   assert.equal(row.payload.aiAnalysis.passages[0].text, 'NEW');
 });

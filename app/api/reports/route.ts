@@ -190,19 +190,26 @@ const serverOwnedFlatSimilaritySql = (column: string) =>
 // verified_device_passport_id — so a later save of the same (device_key, id) cannot move them, whatever it carries:
 //   - report_created_at is the report's lifecycle clock. The room's 24-hour cycle (isWithinActiveCycle: this route's
 //     own room claim, the room index, findRoomOccupant), which report a room's replacement deletes, and the Selective
-//     Corpus recovery sweep's minimum age are all read from it. While a save could rewrite it, a save of an existing
-//     report could end its cycle at once (the room read "empty", and the next upload deleted and replaced it), extend
-//     the cycle indefinitely, or keep a pending report out of the sweep.
-//   - submission_id is the reference a report is listed, printed and looked up under.
-// A save updates a report's content and AI result, never its identity: every product writer resends these two
-// unchanged, so nothing a legitimate save does depends on them being writable. (The first save still takes them from the
-// request.)
+//     Corpus recovery sweep's minimum age are all read from it. It is the SERVER's clock at the moment the report was
+//     created (POST below) — never a value from the request, which could otherwise create a report already outside its
+//     cycle, extend a cycle indefinitely, or keep a pending report out of the sweep.
+//   - submission_id is the reference a report is listed, printed and looked up under. The first save establishes it.
+// A save updates a report's content and AI result, never its identity.
+//
+// THE PAYLOAD'S OWN COPIES FOLLOW THE ROW. `$.created` and `$.submissionId` are what the report page and the receipt
+// print. POST writes the row's values into the payload it stores (the server time on a first save, the stored values
+// afterwards), and canonicalIdentitySql below sets them again from the stored row whenever this statement replaces
+// the payload of an existing report — so the stored report can never show a creation date or a submission id its own
+// row does not carry, whichever request wrote last. (A payload the statement KEEPS is left exactly as stored.)
 //
 // title is different: it is content, the name of the document a save relays, and it travels with the payload. A save
 // whose payload is stored (a report that is not terminal: a re-analysis, a claimed legacy report) stores its title with
 // it, as it always did. For a terminal Selective Corpus report the stored payload is kept, so its title is kept too
 // (TITLE_SQL) — otherwise a save could leave the list showing a name the report itself does not carry.
 const TITLE_SQL = `CASE WHEN ${STORED_SELECTIVE_CORPUS_FINAL_SQL} THEN saved_reports.title ELSE excluded.title END`;
+/** `payloadJson` (a JSON text expression) with its identity copies set from the stored row. */
+const canonicalIdentitySql = (payloadJson: string) =>
+  `json_set(${payloadJson}, '$.created', saved_reports.report_created_at, '$.submissionId', saved_reports.submission_id)`;
 // The Selective Corpus timed-out attempt count is server-owned: only the
 // finalizer's CAS write ever changes it. When an update replaces payload_json
 // with the request's payload, the STORED value is kept (or kept absent) in the
@@ -228,11 +235,11 @@ export const SAVE_REPORT_SQL = `INSERT INTO saved_reports (id, device_key, submi
                 THEN ${storedPayloadWithIncomingAiSql('excluded.payload_json')}
               ELSE saved_reports.payload_json
             END
-          ELSE CASE
+          ELSE ${canonicalIdentitySql(`CASE
             WHEN json_type(saved_reports.payload_json, '$.${SERVER_OWNED_TIMED_OUT_ATTEMPTS_KEY}') IS NOT NULL
               THEN json_set(excluded.payload_json, '$.${SERVER_OWNED_TIMED_OUT_ATTEMPTS_KEY}', json_extract(saved_reports.payload_json, '$.${SERVER_OWNED_TIMED_OUT_ATTEMPTS_KEY}'))
             ELSE json_remove(excluded.payload_json, '$.${SERVER_OWNED_TIMED_OUT_ATTEMPTS_KEY}')
-          END
+          END`)}
         END,
         user_id = COALESCE(excluded.user_id, saved_reports.user_id),
         updated_at = CURRENT_TIMESTAMP`;
@@ -701,7 +708,7 @@ export async function POST(request: Request) {
         // guard, and the persisted manuscript text, so a resave that omits raw
         // reference inputs can carry the trusted evidence forward IFF the
         // manuscript identity is unchanged (see resolveUserSuppliedReferenceEvidenceForSave).
-        sql: `SELECT user_id,
+        sql: `SELECT user_id, submission_id AS stored_submission_id, report_created_at AS stored_report_created_at,
                      json_extract(payload_json, '$.verifiedAcademicSearchDiagnosticsId') AS verified_academic_diagnostics_id,
                      json_extract(payload_json, '$.userSuppliedReferenceEvidence') AS supplied_reference_evidence,
                      json_extract(payload_json, '$.userSuppliedReferenceChannel') AS supplied_reference_channel,
@@ -715,6 +722,17 @@ export async function POST(request: Request) {
         args: [deviceKey, id],
       });
       const isFirstSaveOfThisReport = existingReportRow.rows.length === 0;
+
+      // THE REPORT'S CREATION TIME AND SUBMISSION ID ARE THE ROW'S (see SAVE_REPORT_SQL's own comment). A report is
+      // created when THIS server first stores it: its lifecycle clock is the server's current time, read once here —
+      // the request's `createdAt` is accepted for compatibility (every client sends it) and is never used. For a
+      // report that already exists both values are the stored row's, whatever this request carries. The same values
+      // are written into the payload this save stores (persistedReportPayload below), so the report a reader is served
+      // shows the creation date and submission id of its own row.
+      const reportCreatedAt = isFirstSaveOfThisReport
+        ? new Date(Date.now()).toISOString()
+        : String(existingReportRow.rows[0].stored_report_created_at);
+      const reportSubmissionId = isFirstSaveOfThisReport ? submissionId : String(existingReportRow.rows[0].stored_submission_id);
 
       const parseJsonExtract = (v: unknown): unknown => {
         if (typeof v !== 'string' || v.length === 0) return null;
@@ -1099,6 +1117,9 @@ export async function POST(request: Request) {
       const persistedReportPayload = {
         ...stripClientEvidenceInterpretation({
           ...reportPayload,
+          // The row's creation time and submission id, never the request's (see reportCreatedAt above).
+          created: reportCreatedAt,
+          submissionId: reportSubmissionId,
           externalAcademicEvidence: persistedExternalAcademicEvidence,
           verifiedAcademicSearchDiagnosticsId: verifiedAcademicDiagnosticsId ?? undefined,
           // SERVER-AUTHORITATIVE STAMP (see SCORING-NORMALIZATION CONTRACT
@@ -1573,7 +1594,7 @@ export async function POST(request: Request) {
       // comment). See insertReportWithRoomCheck's own comment for why this
       // needs a real busy-retry loop, not just a transaction.
       const roomClaim = await insertReportWithRoomCheck({
-        id, deviceKey, submissionId, title, createdAt, wordCount, archiveScore, scoreBand,
+        id, deviceKey, submissionId: reportSubmissionId, title, createdAt: reportCreatedAt, wordCount, archiveScore, scoreBand,
         aiScore: aiScore ?? null, aiTone: aiTone ?? null, aiStatus: aiStatus ?? null,
         payloadJson: payloadJsonToPersist, userId, roomNumberForInsert, roomOwnerId,
         verifiedDevicePassportId,

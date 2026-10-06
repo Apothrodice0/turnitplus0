@@ -8,6 +8,7 @@ import * as reportIdRoute from '../app/api/reports/[id]/route.ts';
 import * as signupRoute from '../app/api/auth/signup/route.ts';
 import { resetRateForTest, resetAuthRateForTest } from '../lib/rate-limit.js';
 import { withTestIdentity } from './helpers/test-signup.mjs';
+import { atServerTime } from './helpers/report-clock.mjs';
 
 const repo = path.resolve('.');
 const drizzleDir = path.join(repo, 'drizzle');
@@ -90,7 +91,9 @@ async function postReport(deviceKey, { id, title = 'sample.pdf', payloadOverride
       ...extra,
     }),
   });
-  const res = await reportsRoute.POST(req);
+  // A report's creation time is the server's clock at its first save, not the request's `createdAt`. This file compares
+  // saved reports whole against what it sent, so each save runs at the instant its own payload says it was created.
+  const res = await atServerTime(payload.created, () => reportsRoute.POST(req));
   return { res, payload };
 }
 

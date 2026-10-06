@@ -606,9 +606,10 @@ export async function claimStaleSelectiveCorpusAuthoritativePendingReports(
   const minAgeSeconds = Math.max(1, Math.floor((params.minAgeMs ?? 10 * 60 * 1000) / 1000));
   const staleClaimSeconds = Math.max(1, Math.floor((params.staleClaimMs ?? 10 * 60 * 1000) / 1000));
   // report_created_at is NOT a SQLite CURRENT_TIMESTAMP-style column — it is
-  // always populated from the client's own `createdAt` field
+  // the server's own clock at the report's first save, as a JS ISO string
   // (new Date().toISOString(), "YYYY-MM-DDTHH:MM:SS.sssZ", see
-  // app/api/reports/route.ts's SAVE_REPORT_SQL), unlike
+  // app/api/reports/route.ts's reportCreatedAt; rows saved before that was
+  // server-owned carry whatever their client sent), unlike
   // selectiveCorpusAuthoritativeClaimedAt below, which THIS module sets via
   // SQLite's own datetime('now') (space-separated). Comparing an ISO 'T'
   // string against a datetime('now', ...) threshold hits exactly the

@@ -14,6 +14,7 @@ import { resetRateForTest, resetAuthRateForTest } from "../lib/rate-limit.ts";
 import { withTestIdentity, grantTestAdmin } from "./helpers/test-signup.mjs";
 import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
 import { completeAiAnalysis } from "./helpers/complete-ai-analysis.mjs";
+import { atServerTime } from "./helpers/report-clock.mjs";
 import { tokens } from "../lib/similarity-core.ts";
 import { createDocumentIdentity } from "../lib/document-identity.ts";
 import { indexDocumentSubmissionIntoCorpus } from "../lib/user-submission-corpus.ts";
@@ -540,8 +541,11 @@ test("REAL POST + GET: the same manuscript saved with the gate OFF and ON return
   const id = "real-match-1";
   const save = (acc) => post(acc, requestBody(acc, id, { text: MANUSCRIPT, archiveMatchedPositions: ARCHIVE_POSITIONS }));
 
-  assert.equal((await withGates({ positions: undefined }, () => save(off))).status, 200);
-  assert.equal((await withGates({ positions: "true" }, () => save(on))).status, 200);
+  // The two reports are compared whole below, creation time included — and that is the server's clock at each report's
+  // first save, not anything the request says. Both are therefore created at one instant of it.
+  const createdAt = new Date().toISOString();
+  assert.equal((await atServerTime(createdAt, () => withGates({ positions: undefined }, () => save(off)))).status, 200);
+  assert.equal((await atServerTime(createdAt, () => withGates({ positions: "true" }, () => save(on)))).status, 200);
 
   const rawOff = JSON.parse(await rawRow(off.deviceKey, id));
   const rawOn = JSON.parse(await rawRow(on.deviceKey, id));

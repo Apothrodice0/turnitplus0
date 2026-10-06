@@ -12,6 +12,7 @@ import * as signupRoute from "../app/api/auth/signup/route.ts";
 import { resetRateForTest, resetAuthRateForTest } from "../lib/rate-limit.ts";
 import { withTestIdentity } from "./helpers/test-signup.mjs";
 import { completeAiAnalysis } from "./helpers/complete-ai-analysis.mjs";
+import { atServerTime } from "./helpers/report-clock.mjs";
 import { tokens } from "../lib/similarity-core.ts";
 import { computeUnifiedSimilarity } from "../lib/unified-similarity.ts";
 import { CLIENT_UNTRUSTED_EVIDENCE_INTERPRETATION_KEYS, withEvidenceInterpretation } from "../lib/report-evidence-interpretation.ts";
@@ -280,9 +281,12 @@ test("THE SERVER CANNOT TELL: with every server-owned key sent, forged or absent
     await withEnv(scenario.env, async () => {
       const id = `800${index}`;
       const rows = {};
+      // The three rows are compared whole, creation time included — and that is the server's clock at each report's
+      // first save, not anything the request says. All three are therefore created at one instant of it.
+      const createdAt = new Date().toISOString();
       for (const [variant, build] of [["sent as today", sentAsToday], ["forged", forged], ["lean", lean]]) {
         const acc = await account();
-        const res = await post(acc, build(id), { ai: scenario.ai });
+        const res = await atServerTime(createdAt, () => post(acc, build(id), { ai: scenario.ai }));
         assert.equal(res.status, 200, `${scenario.name} / ${variant}`);
         rows[variant] = await rawRow(acc.deviceKey, id);
         assert.ok(rows[variant], `${scenario.name} / ${variant}: persisted`);

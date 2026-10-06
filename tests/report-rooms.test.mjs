@@ -11,6 +11,7 @@ import * as roomsRoute from '../app/api/reports/rooms/route.ts';
 import { resetAuthRateForTest, resetRateForTest } from '../lib/rate-limit.js';
 import { NORMAL_ROOM_COUNT, ADMIN_ROOM_COUNT, ROOM_CYCLE_MS } from '../lib/report-rooms.ts';
 import { withTestIdentity, grantTestAdmin } from './helpers/test-signup.mjs';
+import { setReportCreatedAt } from './helpers/report-clock.mjs';
 
 // Verifies the room/slot architecture's server-side pieces: a room is a
 // real upload SLOT (at most one current report, an explicit fact recorded
@@ -341,9 +342,13 @@ async function getRoom(cookie, room) {
   const cookie = extractCookie(signupRes);
   const id = 8000000000008;
 
-  const oldCreatedAt = new Date(Date.now() - ROOM_CYCLE_MS - 60_000).toISOString();
-  const first = await postReport('device-cycle-1', id, { cookie, room: 6, createdAt: oldCreatedAt });
+  // A report's creation time is the server's clock at its first save — a save cannot choose it — so the occupant is
+  // aged the way a report really ages: its stored creation time moves back (tests/helpers/report-clock.mjs).
+  const first = await postReport('device-cycle-1', id, { cookie, room: 6 });
   assert.equal(first.status, 200);
+  const agingClient = createClient({ url: `file:${dbFile}` });
+  await setReportCreatedAt(agingClient, { deviceKey: 'device-cycle-1', id }, new Date(Date.now() - ROOM_CYCLE_MS - 60_000).toISOString());
+  agingClient.close();
 
   const roomRes = await getRoom(cookie, 6);
   const roomBody = await roomRes.json();

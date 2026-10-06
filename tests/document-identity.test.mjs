@@ -17,6 +17,7 @@ import * as reportsRoute from "../app/api/reports/route.ts";
 import * as reportIdRoute from "../app/api/reports/[id]/route.ts";
 import { resetRateForTest } from "../lib/rate-limit.js";
 import { createSession } from "../lib/auth-session.ts";
+import { atServerTime } from "./helpers/report-clock.mjs";
 
 const repo = path.resolve(".");
 const drizzleDir = path.join(repo, "drizzle");
@@ -261,7 +262,9 @@ test("POST /api/reports still returns the same success response and saved_report
       payload,
     }),
   });
-  const res = await reportsRoute.POST(req);
+  // A report's creation time is the server's clock at its first save, not the request's `createdAt`; the saved report
+  // is compared whole below, so the save runs at the instant its payload says it was created.
+  const res = await atServerTime(payload.created, () => reportsRoute.POST(req));
   assert.equal(res.status, 200, "save must still succeed exactly as before");
   const body = await res.json();
   assert.deepEqual(body, { ok: true }, "the save response shape must be unchanged");

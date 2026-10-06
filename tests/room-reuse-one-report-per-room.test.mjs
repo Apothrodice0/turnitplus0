@@ -9,6 +9,7 @@ import * as reportsRoute from '../app/api/reports/route.ts';
 import * as reportIdRoute from '../app/api/reports/[id]/route.ts';
 import { resetAuthRateForTest, resetRateForTest } from '../lib/rate-limit.js';
 import { ROOM_CYCLE_MS } from '../lib/report-rooms.ts';
+import { setReportCreatedAt } from './helpers/report-clock.mjs';
 import { withTestIdentity } from './helpers/test-signup.mjs';
 import {
   createPendingReportAdmissionJob,
@@ -102,6 +103,11 @@ function samplePayload(id, overrides = {}) {
   };
 }
 
+/**
+ * `createdAt` is the age the saved report is GIVEN, not something the save says: a report's creation time is the
+ * server's clock at its first save, so an expired occupant is made the way a report really expires — the stored
+ * creation time of the report this call just saved is moved back (tests/helpers/report-clock.mjs).
+ */
 async function postReport(deviceKey, id, { cookie, room, payloadOverrides = {}, createdAt } = {}) {
   const ip = `room-reuse-post-${++ipCounter}`;
   await resetRateForTest(ip);
@@ -116,7 +122,7 @@ async function postReport(deviceKey, id, { cookie, room, payloadOverrides = {}, 
       id: String(id),
       submissionId: payload.submissionId,
       title: payload.title,
-      createdAt: createdAt ?? payload.created,
+      createdAt: payload.created,
       wordCount: payload.wordCount,
       archiveScore: payload.score,
       scoreBand: 'Low',
@@ -126,7 +132,9 @@ async function postReport(deviceKey, id, { cookie, room, payloadOverrides = {}, 
       payload,
     }),
   });
-  return reportsRoute.POST(req);
+  const res = await reportsRoute.POST(req);
+  if (createdAt !== undefined && res.status === 200) await setReportCreatedAt(client, { deviceKey, id }, createdAt);
+  return res;
 }
 
 async function getReportById(id, cookie) {
