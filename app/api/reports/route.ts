@@ -17,7 +17,7 @@ import {
 import { captureDocumentIdentityAndFamily } from '../../../lib/document-family';
 import { linkAcademicSearchRunDiagnosticsToReport, resolveVerifiedAcademicEvidence } from '../../../lib/academic-search-diagnostics-repo';
 import { canonicalSha256 } from '../../../lib/document-identity';
-import { checkUploadLimit } from '../../../lib/upload-limit';
+import { checkUploadLimit, type UploadLimitCheck } from '../../../lib/upload-limit';
 import { deriveRoomStatus, derivedAiReadySql, getRoomCountForRole, isWithinActiveCycle, roomCycleEndsAt } from '../../../lib/report-rooms';
 import { TERMINAL_AI_RESERVE_CHARS, withoutClientAiUnavailableReason } from '../../../lib/ai-unavailable-state';
 import { findRoomOccupant, INTERPRETATION_TO_VERIFY_SQL, withholdUnexplainedSimilarity } from '../../../lib/reports-repo';
@@ -268,9 +268,30 @@ function isSqliteBusyError(err: unknown): boolean {
  * straggler outcome — an expired occupant whose corpus-admission job has not
  * yet reached a durable decision even after ensureRoomReuseAdmissionSafety's
  * one synchronous recovery attempt. See insertReportWithRoomCheck's own
- * comment for the full sequencing.
+ * comment for the full sequencing. 'quotaExceeded' is the daily upload quota,
+ * re-checked inside the same transaction (see dailyQuotaUserId): nothing was
+ * deleted or inserted.
  */
-type RoomClaimResult = { kind: 'inserted' } | { kind: 'conflict'; mostRecent: string } | { kind: 'notReady' };
+type UploadLimitExceeded = Extract<UploadLimitCheck, { allowed: false }>;
+type RoomClaimResult =
+  | { kind: 'inserted' }
+  | { kind: 'conflict'; mostRecent: string }
+  | { kind: 'notReady' }
+  | { kind: 'quotaExceeded'; limit: UploadLimitExceeded };
+
+/** The daily-upload-quota refusal, the same from the early check and from the one inside the insert transaction. */
+function dailyUploadLimitResponse(limit: UploadLimitExceeded): NextResponse {
+  logReportSaveRejectedTelemetry({ reason: 'DAILY_UPLOAD_QUOTA', status: 429, authMode: 'authenticated' });
+  return new NextResponse(
+    JSON.stringify({
+      error: `Daily upload limit reached (${limit.uploadsToday}/${limit.limit}). Try again after the limit resets.`,
+      limit: limit.limit,
+      uploadsToday: limit.uploadsToday,
+      resetsAt: limit.resetsAt,
+    }),
+    { status: 429, headers: { 'Content-Type': 'application/json', 'Retry-After': String(limit.retryAfterSeconds) } },
+  );
+}
 
 /**
  * The room-occupancy check and the insert as one atomic write transaction,
@@ -335,6 +356,18 @@ async function insertReportWithRoomCheck(params: {
    * written best-effort AFTER commit.
    */
   actorObservation: ActorObservation | null;
+  /**
+   * Daily upload quota (lib/upload-limit.ts): the account whose quota a NEW
+   * report from this save consumes, or null when none applies (an admin, a
+   * resave). POST's early check already refused an account that was over its
+   * limit; but two new uploads can both pass it while one slot is left. The
+   * check is therefore repeated HERE, inside the write transaction — where no
+   * other save can interleave — and only when this transaction is about to
+   * insert the row: a save that finds its report already stored (the retry of
+   * an upload the server accepted a moment ago) adds no upload and is not
+   * refused for one.
+   */
+  dailyQuotaUserId: string | null;
 }): Promise<RoomClaimResult> {
   for (let attempt = 1; attempt <= MAX_ROOM_INSERT_BUSY_RETRIES; attempt++) {
     const txClient = await getReportsDbClient();
@@ -344,6 +377,19 @@ async function insertReportWithRoomCheck(params: {
       let legacyActorLedgerWrite: { devicePassportId: string; observation: ActorObservation } | null = null;
       const tx = await txClient.transaction('write');
       try {
+        if (params.dailyQuotaUserId !== null) {
+          const alreadyStored = await tx.execute({
+            sql: 'SELECT 1 FROM saved_reports WHERE device_key = ? AND id = ?',
+            args: [params.deviceKey, params.id],
+          });
+          if (alreadyStored.rows.length === 0) {
+            const limit = await checkUploadLimit(tx, params.dailyQuotaUserId);
+            if (!limit.allowed) {
+              await tx.rollback().catch(() => {});
+              return { kind: 'quotaExceeded', limit };
+            }
+          }
+        }
         let conflict: { mostRecent: string } | null = null;
         if (params.roomNumberForInsert !== null && params.roomOwnerId !== null) {
           const occupant = await tx.execute({
@@ -820,24 +866,17 @@ export async function POST(request: Request) {
       // limiter above): applies only to authenticated, non-admin accounts,
       // and only to a genuinely new upload — never a resave of an
       // already-saved report (see lib/upload-limit.ts's own header comment
-      // for why isFirstSaveOfThisReport is the right gate, and why
-      // saved_reports.saved_at is what "genuinely new" means). Anonymous
+      // for why isFirstSaveOfThisReport is the right gate, and what is
+      // counted: every upload accepted today, deleted or not). Anonymous
       // requests (sessionUser === null) are entirely unaffected — they have
       // no account to meter and remain governed only by checkRate above.
-      if (sessionUser && sessionUser.role !== 'admin' && isFirstSaveOfThisReport) {
-        const limitCheck = await checkUploadLimit(client, sessionUser.id);
-        if (!limitCheck.allowed) {
-          logReportSaveRejectedTelemetry({ reason: 'DAILY_UPLOAD_QUOTA', status: 429, authMode: 'authenticated' });
-          return new NextResponse(
-            JSON.stringify({
-              error: `Daily upload limit reached (${limitCheck.uploadsToday}/${limitCheck.limit}). Try again after the limit resets.`,
-              limit: limitCheck.limit,
-              uploadsToday: limitCheck.uploadsToday,
-              resetsAt: limitCheck.resetsAt,
-            }),
-            { status: 429, headers: { 'Content-Type': 'application/json', 'Retry-After': String(limitCheck.retryAfterSeconds) } },
-          );
-        }
+      // This early check refuses an account already over its limit before any
+      // of the save's work; the decisive one is repeated inside the insert
+      // transaction (insertReportWithRoomCheck's dailyQuotaUserId).
+      const dailyQuotaUserId = sessionUser && sessionUser.role !== 'admin' && isFirstSaveOfThisReport ? sessionUser.id : null;
+      if (dailyQuotaUserId !== null) {
+        const limitCheck = await checkUploadLimit(client, dailyQuotaUserId);
+        if (!limitCheck.allowed) return dailyUploadLimitResponse(limitCheck);
       }
 
       // Room/slot ownership: a genuinely new, authenticated upload must name
@@ -1599,7 +1638,13 @@ export async function POST(request: Request) {
         payloadJson: payloadJsonToPersist, userId, roomNumberForInsert, roomOwnerId,
         verifiedDevicePassportId,
         actorObservation: actorObservationForLedger,
+        dailyQuotaUserId,
       });
+
+      // Daily upload quota, decided inside the insert transaction: another new
+      // upload from this account took the last slot after the early check
+      // above. Nothing was deleted or inserted.
+      if (roomClaim.kind === 'quotaExceeded') return dailyUploadLimitResponse(roomClaim.limit);
 
       // One-current-report-per-room (Phase 2): a fresh, in-transaction
       // re-check found the expired occupant's admission job still not

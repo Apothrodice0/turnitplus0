@@ -282,11 +282,18 @@ export async function deleteAccountData(client: Client, accountId: string): Prom
  * corpus_reuse_consented_at (the account's consent state) needs no separate
  * cleanup step — it is a column on the users row itself, removed the moment
  * that row is.
+ *
+ * upload_usage_tombstones (drizzle/0054) is removed here and not in
+ * deleteAllReportDataForAccount: that function also backs the developer rooms
+ * reset, where the daily upload quota must stay used — and its own report
+ * deletes are what write the account's last tombstones. The table has no
+ * foreign key to cascade, so this is its only cleanup.
  */
 export async function invalidateSessionsAndDeleteUser(client: Client, accountId: string): Promise<void> {
   const tx = await client.transaction("write");
   try {
     await tx.execute({ sql: "DELETE FROM sessions WHERE user_id = ?", args: [accountId] });
+    await tx.execute({ sql: "DELETE FROM upload_usage_tombstones WHERE user_id = ?", args: [accountId] });
     await tx.execute({ sql: "DELETE FROM users WHERE id = ?", args: [accountId] });
     await tx.commit();
   } catch (err) {
