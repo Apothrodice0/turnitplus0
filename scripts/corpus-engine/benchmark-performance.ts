@@ -169,21 +169,46 @@ async function main() {
 
     // ── a larger budget, warm, one pass: how the cost moves with K ──
     const warmLarge: Measurement[] = [];
-    for (const query of queries) warmLarge.push(await measure(reader, query, 500, verifierPath));
+    const largeBudget = Number(args["large-budget"] ?? 500);
+    for (const query of queries) warmLarge.push(await measure(reader, query, largeBudget, verifierPath));
 
     // ── load: a small fixed number in flight ──
-    const concurrency = Number(args.concurrency ?? 4);
-    const pending = [...queries, ...queries];
-    const loaded: Measurement[] = [];
-    const loadStarted = performance.now();
-    await Promise.all(Array.from({ length: concurrency }, async () => {
-      for (;;) {
-        const query = pending.shift();
-        if (!query) return;
-        loaded.push(await measure(reader, query, budget, verifierPath));
-      }
-    }));
-    const loadSeconds = (performance.now() - loadStarted) / 1000;
+    // `--concurrency 1,4,8` measures each level in turn; the last one is also reported as `load`.
+    // Everything runs on this one thread, so in-flight submissions queue behind each other's CPU work:
+    // a level's latency includes that wait, which is the queueing behaviour being measured.
+    const levels = String(args.concurrency ?? "4").split(",").map(Number);
+    const loadLevels: Array<Record<string, unknown>> = [];
+    let concurrency = levels[0];
+    let loaded: Measurement[] = [];
+    let loadSeconds = 0;
+    for (const level of levels) {
+      concurrency = level;
+      const pending = [...queries, ...queries];
+      loaded = [];
+      const cpuStarted = process.cpuUsage();
+      const loadStarted = performance.now();
+      await Promise.all(Array.from({ length: level }, async () => {
+        for (;;) {
+          const query = pending.shift();
+          if (!query) return;
+          loaded.push(await measure(reader, query, budget, verifierPath));
+        }
+      }));
+      loadSeconds = (performance.now() - loadStarted) / 1000;
+      const cpu = process.cpuUsage(cpuStarted);
+      const latencies = loaded.map((sample) => sample.totalMs);
+      loadLevels.push({
+        concurrency: level,
+        submissions: loaded.length,
+        wallSeconds: round(loadSeconds),
+        submissionsPerSecond: round(loaded.length / loadSeconds, 3),
+        latencyMs: { p50: round(percentile(latencies, 0.5)), p95: round(percentile(latencies, 0.95)), max: round(Math.max(...latencies)) },
+        cpuSeconds: round((cpu.user + cpu.system) / 1e6),
+        cpuCoresUsed: round((cpu.user + cpu.system) / 1e6 / loadSeconds, 2),
+        rssBytes: process.memoryUsage.rss(),
+      });
+      logLine(`load x${level}: ${loaded.length} submissions in ${round(loadSeconds)} s — ${round(loaded.length / loadSeconds, 3)}/s, latency p50 ${round(percentile(latencies, 0.5))} ms, p95 ${round(percentile(latencies, 0.95))} ms`);
+    }
 
     const documentCount = reader.manifest.documentCount;
     const heaviest = [...warm].sort((left, right) => right.touchedDocuments - left.touchedDocuments)[0];
@@ -195,8 +220,10 @@ async function main() {
       workload: { submissions: queries.length, wordsMin: Math.min(...warm.map((sample) => sample.submissionWords)), wordsMax: Math.max(...warm.map((sample) => sample.submissionWords)), wordsP50: percentile(warm.map((sample) => sample.submissionWords), 0.5) },
       cold: { note: "fresh process per submission; engine caches cold; OS file cache not controlled (probably warm)", generationOpenMs: { p50: round(percentile(openTimes, 0.5), 2), p95: round(percentile(openTimes, 0.95), 2) }, processRssBytes: { p50: percentile(coldRss, 0.5), max: Math.max(...coldRss) }, ...summarize(cold) },
       warm: summarize(warm),
-      warmAtBudget500: summarize(warmLarge),
+      warmAtLargeBudget: { budget: largeBudget, ...summarize(warmLarge) },
       load: { concurrency, submissions: loaded.length, wallSeconds: round(loadSeconds), submissionsPerSecond: round(loaded.length / loadSeconds), ...summarize(loaded) },
+      loadLevels,
+      peakRssBytes: process.resourceUsage().maxRSS * 1024,
       scaleSignals: {
         heaviestQuery: heaviest.queryId,
         maxTouchedDocuments: heaviest.touchedDocuments,

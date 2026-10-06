@@ -130,7 +130,20 @@ async function main() {
     const started = Date.now();
     const { manifest: _manifest, ...result } = await compactPartition({ corpusRoot: root, generationId: requireArgument(args, "generation"), partition: Number(requireArgument(args, "partition")) });
     void _manifest;
-    output = { ...result, compactionMs: Date.now() - started };
+    const directoryBytes = (segmentId: string) => {
+      const directory = path.join(root, ...segmentPrefix(segmentId).split("/"));
+      return readdirSync(directory).reduce((total, file) => total + statSync(path.join(directory, file)).size, 0);
+    };
+    const outputBytes = directoryBytes(result.compactedSegmentId);
+    output = {
+      ...result,
+      compactionMs: Date.now() - started,
+      inputBytes: result.replacedSegmentIds.reduce((total, segmentId) => total + directoryBytes(segmentId), 0),
+      outputBytes,
+      // The new segment is written into a temporary directory and renamed; nothing else is staged.
+      temporaryDiskBytes: outputBytes,
+      peakRssBytes: process.resourceUsage().maxRSS * 1024,
+    };
     logLine(`compacted partition ${result.partition}: ${result.replacedSegmentIds.length} segment(s) -> ${result.compactedSegmentId}; ${result.documentsKept} documents kept, ${result.documentsPhysicallyRemoved} physically removed; candidate generation ${result.generationId}`);
   } else {
     throw new Error(`unknown command ${JSON.stringify(command)}; expected validate | publish | active | describe | revoke | compact`);

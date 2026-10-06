@@ -53,7 +53,9 @@ export type BenchmarkQuery = {
     | "legal-boilerplate"
     | "duplicate-alias"
     | "crowded-by-near-duplicates"
-    | "multilingual-mix";
+    | "multilingual-mix"
+    | "natural-near-duplicate"
+    | "recurring-public-notice";
   language: "en" | "fr" | "ar" | "mixed";
   description: string;
   /** What the construction intends: a source the text was copied from, or none. */

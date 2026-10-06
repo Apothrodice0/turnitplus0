@@ -11,6 +11,7 @@ import { logLine, parseArguments, pick, prng, readJson, requireArgument, wordsOf
  *
  *   benchmark-queries.ts catalog --root R --generation G --out catalog.json
  *   benchmark-queries.ts build   --root R --generation G --catalog catalog.json --out queries.json
+ *   benchmark-queries.ts build-100k --root R --generation G --catalog catalog.json --out queries.json --out-exhaustive-sample sample.json
  *
  * Every positive submission is assembled from passages read back OUT OF THE
  * GENERATION (the stored source text), so the source document ids it should
@@ -297,6 +298,194 @@ async function buildQueries(reader: CorpusGenerationReader, catalog: CatalogEntr
   return queries;
 }
 
+/**
+ * The 100k known-source set: about forty submissions whose sources are known
+ * by construction, drawn from every provider of the 100k generation
+ * (Wikipedia en/fr/ar, PMC, Federal Register, and the 10k material), plus the
+ * ids of the small sample that is also verified against EVERY document.
+ *
+ * Two categories exist only because the 100k corpus is real enough to have
+ * them: an article held in two independent editions (the 2023 Wikipedia dump
+ * and the older Selective copy — a natural near-duplicate pair), and Federal
+ * Register notices whose title recurs many times (a natural family of
+ * documents sharing most of their wording).
+ */
+const SEED_100K = 20261106;
+const EXHAUSTIVE_SAMPLE_100K = [
+  "exact-en-small", "passage-fr-500", "passage-ar-500", "passage-fedreg-600", "mosaic-en-25x80", "dominant-pmc-plus-small",
+  "long-en-12k", "neardup-wiki-1", "recurring-fedreg-1", "negative-en-1500", "multilingual-mix",
+];
+
+async function buildQueries100k(reader: CorpusGenerationReader, catalog: CatalogEntry[]): Promise<BenchmarkQuery[]> {
+  const random = prng(SEED_100K);
+  const used = new Set<string>();
+  const real = catalog.filter((entry) => !entry.syntheticLoadOnly);
+  const pools = {
+    enWiki: real.filter((entry) => entry.provider === "wikimedia" && entry.dataset.endsWith(".en")),
+    fr: real.filter((entry) => entry.language === "fr"),
+    ar: real.filter((entry) => entry.language === "ar"),
+    pmc: real.filter((entry) => entry.provider === "nih-nlm-pmc"),
+    fedreg: real.filter((entry) => entry.provider === "us-gpo-govinfo"),
+    selective: real.filter((entry) => entry.dataset === "selective-corpus-clean-v4"),
+  };
+  for (const [name, pool] of Object.entries(pools)) if (pool.length < 100) throw new Error(`the generation holds only ${pool.length} ${name} documents; this query set needs the 100k corpus`);
+  const anyEnglish = [...pools.enWiki, ...pools.pmc, ...pools.fedreg, ...pools.selective];
+
+  const choose = (pool: CatalogEntry[], minimum: number, maximum: number, filter: (entry: CatalogEntry) => boolean = () => true): CatalogEntry => {
+    const eligible = pool.filter((entry) => entry.tokenCount >= minimum && entry.tokenCount <= maximum && !used.has(entry.docId) && filter(entry));
+    if (eligible.length === 0) throw new Error(`no unused document with ${minimum}-${maximum} tokens in the requested pool`);
+    const chosen = pick(eligible, random);
+    used.add(chosen.docId);
+    return chosen;
+  };
+  const textOf = async (entry: CatalogEntry): Promise<string> => {
+    const fetched = await reader.fetchText(docIdFromDecimal(entry.docId));
+    if (fetched.state !== "OK") throw new Error(`cannot read source text of ${entry.docId}: ${fetched.state}`);
+    return fetched.text;
+  };
+  const passageFrom = async (entry: CatalogEntry, count: number, edit: IntendedSource["edit"] = "verbatim"): Promise<Passage> => {
+    const words = wordsOf(await textOf(entry));
+    const latestStart = Math.max(0, Math.floor(words.length * 0.6) - count);
+    const start = Math.floor(random() * (latestStart + 1));
+    const slice = words.slice(start, start + count);
+    if (slice.length < count) throw new Error(`source ${entry.docId} is too short for a ${count}-word passage`);
+    if (edit !== "verbatim") {
+      const replacements = inventedWords(Math.floor(random() * 1e9), Math.ceil(count / 40) + 1);
+      for (let index = 39, replaced = 0; index < slice.length; index += 40, replaced += 1) slice[index] = replacements[replaced];
+    }
+    return { docId: entry.docId, words: slice, edit };
+  };
+  const queries: BenchmarkQuery[] = [];
+  const add = (query: Omit<BenchmarkQuery, "intendedSources" | "text"> & { builder: QueryBuilder }) => {
+    const { builder, ...rest } = query;
+    queries.push({ ...rest, intendedSources: builder.intended, text: builder.text() });
+  };
+  const sizeFor = (words: number) => words * 2 + 400;
+  type Language = "en" | "fr" | "ar";
+
+  // 1. whole documents
+  for (const [id, pool, language, minimum, maximum] of [
+    ["exact-en-small", pools.enWiki, "en", 300, 600], ["exact-en-large", pools.enWiki, "en", 6000, 9000], ["exact-fr", pools.fr, "fr", 1500, 4000],
+    ["exact-ar", pools.ar, "ar", 1500, 4000], ["exact-pmc", pools.pmc, "en", 3000, 6000], ["exact-fedreg", pools.fedreg, "en", 800, 2000],
+  ] as Array<[string, CatalogEntry[], Language, number, number]>) {
+    const entry = choose(pool, minimum, maximum);
+    const builder = new QueryBuilder(language, random).passage({ docId: entry.docId, words: wordsOf(await textOf(entry)), edit: "verbatim" });
+    add({ id, category: "exact-document", language, description: `the entire stored text of one ${entry.provider}/${entry.dataset} document (${entry.tokenCount} tokens)`, expectation: "positive", builder });
+  }
+
+  // 2. one copied passage inside original text, verbatim and lightly edited
+  for (const [id, pool, language, length, edit] of [
+    ["passage-en-600", pools.enWiki, "en", 600, "verbatim"], ["passage-fr-500", pools.fr, "fr", 500, "verbatim"], ["passage-ar-500", pools.ar, "ar", 500, "verbatim"],
+    ["passage-pmc-600", pools.pmc, "en", 600, "verbatim"], ["passage-fedreg-600", pools.fedreg, "en", 600, "verbatim"],
+    ["near-exact-en", pools.enWiki, "en", 600, "every-40th-word-replaced"], ["near-exact-fr", pools.fr, "fr", 600, "every-40th-word-replaced"], ["near-exact-pmc", pools.pmc, "en", 600, "every-40th-word-replaced"],
+  ] as Array<[string, CatalogEntry[], Language, number, IntendedSource["edit"]]>) {
+    const builder = new QueryBuilder(language, random).filler(300).passage(await passageFrom(choose(pool, sizeFor(length), 40000), length, edit)).filler(300);
+    add({ id, category: "near-exact-passage", language, description: `${length} words from one source (${edit}) inside 600 words of original text`, expectation: "positive", builder });
+  }
+
+  // 3. short excerpts
+  for (const [id, pool, language, length] of [
+    ["excerpt-en-120", pools.enWiki, "en", 120], ["excerpt-en-080", pools.enWiki, "en", 80], ["excerpt-fr-080", pools.fr, "fr", 80],
+    ["excerpt-ar-080", pools.ar, "ar", 80], ["excerpt-pmc-100", pools.pmc, "en", 100], ["excerpt-fedreg-100", pools.fedreg, "en", 100],
+  ] as Array<[string, CatalogEntry[], Language, number]>) {
+    const builder = new QueryBuilder(language, random).filler(400).passage(await passageFrom(choose(pool, sizeFor(length), 40000), length)).filler(400);
+    add({ id, category: "short-excerpt", language, description: `${length} verbatim words from one source inside 800 words of original text`, expectation: "positive", builder });
+  }
+
+  // 4. mosaics: many sources contributing a little each
+  for (const [id, pool, language, count, length, gap] of [
+    ["mosaic-en-25x80", anyEnglish, "en", 25, 80, 60], ["mosaic-en-40x70", anyEnglish, "en", 40, 70, 40], ["mosaic-fr-12x120", pools.fr, "fr", 12, 120, 60],
+    ["mosaic-ar-12x120", pools.ar, "ar", 12, 120, 60], ["mosaic-pmc-15x100", pools.pmc, "en", 15, 100, 60], ["mosaic-fedreg-20x90", pools.fedreg, "en", 20, 90, 50],
+  ] as Array<[string, CatalogEntry[], Language, number, number, number]>) {
+    const builder = new QueryBuilder(language, random).filler(gap);
+    for (let source = 0; source < count; source += 1) builder.passage(await passageFrom(choose(pool, sizeFor(length), 40000), length)).filler(gap);
+    add({ id, category: "many-small-sources", language, description: `${count} different sources contributing ${length} words each, ${gap} original words between them`, expectation: "positive", builder });
+  }
+
+  // 5. one dominant source plus small ones
+  for (const [id, dominantPool, smallPool] of [["dominant-pmc-plus-small", pools.pmc, pools.enWiki], ["dominant-fedreg-plus-small", pools.fedreg, pools.fedreg]] as Array<[string, CatalogEntry[], CatalogEntry[]]>) {
+    const builder = new QueryBuilder("en", random).filler(80).passage(await passageFrom(choose(dominantPool, 6500, 60000), 3000)).filler(80);
+    for (let source = 0; source < 6; source += 1) builder.passage(await passageFrom(choose(smallPool, sizeFor(80), 40000), 80)).filler(80);
+    add({ id, category: "dominant-plus-small", language: "en", description: "3,000 words from one source, then six other sources contributing 80 words each", expectation: "positive", builder });
+  }
+
+  // 6. long submissions
+  {
+    const builder = new QueryBuilder("en", random).filler(700);
+    for (let source = 0; source < 10; source += 1) builder.passage(await passageFrom(choose(anyEnglish, sizeFor(500), 40000), 500)).filler(700);
+    add({ id: "long-en-12k", category: "long-submission", language: "en", description: "a 12,700-word submission with ten sources from four providers contributing 500 words each", expectation: "positive", builder });
+  }
+  {
+    const builder = new QueryBuilder("fr", random).filler(500);
+    for (let source = 0; source < 8; source += 1) builder.passage(await passageFrom(choose(pools.fr, sizeFor(400), 40000), 400)).filler(500);
+    add({ id: "long-fr-7k", category: "long-submission", language: "fr", description: "a 7,700-word French submission with eight sources contributing 400 words each", expectation: "positive", builder });
+  }
+
+  // 7. natural near-duplicates: an article the corpus holds in two independent editions
+  {
+    const selectiveTitles = new Set(pools.selective.filter((entry) => entry.title && entry.tokenCount >= 1500).map((entry) => entry.title as string));
+    const twins = pools.enWiki.filter((entry) => entry.title && entry.tokenCount >= 1500 && entry.tokenCount <= 40000 && selectiveTitles.has(entry.title));
+    logLine(`${twins.length} English Wikipedia articles are also held as an older Selective edition`);
+    for (const index of [1, 2]) {
+      const entry = choose(twins, 1500, 40000);
+      const builder = new QueryBuilder("en", random).filler(250).passage(await passageFrom(entry, 500)).filler(250);
+      add({ id: `neardup-wiki-${index}`, category: "natural-near-duplicate", language: "en", description: `500 words from the 2023 edition of "${entry.title}", which the corpus also holds as an older edition from another dataset`, expectation: "positive", builder });
+    }
+  }
+
+  // 8. recurring public notices: a Federal Register title that many documents share
+  {
+    const byTitle = new Map<string, CatalogEntry[]>();
+    for (const entry of pools.fedreg) if (entry.title) byTitle.set(entry.title, [...(byTitle.get(entry.title) ?? []), entry]);
+    const recurring = [...byTitle.values()].filter((group) => group.length >= 12).sort((left, right) => right.length - left.length || ((left[0].title as string) < (right[0].title as string) ? -1 : 1));
+    logLine(`${recurring.length} Federal Register titles recur in at least 12 documents (largest: ${recurring[0]?.length ?? 0} x ${JSON.stringify(recurring[0]?.[0].title ?? null)})`);
+    for (const index of [1, 2]) {
+      const group = recurring[Math.floor(random() * Math.min(recurring.length, 30))];
+      const entry = choose(group, 500, 40000);
+      const builder = new QueryBuilder("en", random).filler(250).passage(await passageFrom(entry, 250)).filler(250);
+      add({ id: `recurring-fedreg-${index}`, category: "recurring-public-notice", language: "en", description: `250 words from one of ${group.length} Federal Register documents titled "${entry.title}"`, expectation: "positive", builder });
+    }
+  }
+
+  // 9. common language only
+  for (const [id, language, length] of [["negative-en-1500", "en", 1500], ["negative-en-4000", "en", 4000], ["negative-fr-800", "fr", 800], ["negative-ar-800", "ar", 800]] as Array<[string, Language, number]>) {
+    add({ id, category: "common-language-negative", language, description: `${length} words of original common-language prose; nothing copied`, expectation: "negative", builder: new QueryBuilder(language, random).filler(length) });
+  }
+
+  // 10. the labelled synthetic stress fixtures the 10k checkpoint used, now inside the 100k corpus
+  {
+    const family = catalog.filter((entry) => entry.syntheticLoadOnly && entry.sourceType === "synthetic-load-only");
+    const entry = pick(family, random);
+    const words = wordsOf(await textOf(entry));
+    const blockAt = words.indexOf("This");
+    const start = blockAt > 400 ? 60 : blockAt + wordsOf(SYNTHETIC_LEGAL_BOILERPLATE).length + 40;
+    const builder = new QueryBuilder("en", random).filler(200).raw(wordsOf(SYNTHETIC_LEGAL_BOILERPLATE)).filler(60)
+      .passage({ docId: entry.docId, words: words.slice(start, start + 250), edit: "verbatim" }).filler(200);
+    add({ id: "boilerplate-plus-specific", category: "legal-boilerplate", language: "en", description: "the synthetic shared boilerplate block plus 250 source-specific words of one member of the synthetic family", expectation: "positive", builder });
+  }
+  {
+    const familySize = catalog.filter((entry) => entry.sourceType === SYNTHETIC_NEAR_DUPLICATE_FAMILY.sourceType).length;
+    const builder = new QueryBuilder("en", random).filler(80).raw(syntheticNearDuplicateBaseWords().slice(100, 1600)).filler(80);
+    for (let source = 0; source < 6; source += 1) builder.passage(await passageFrom(choose(anyEnglish, sizeFor(80), 40000), 80)).filler(80);
+    add({ id: "crowded-en", category: "crowded-by-near-duplicates", language: "en", description: `1,500 words shared by all ${familySize} members of the synthetic near-duplicate family, then six real sources contributing 80 words each`, expectation: "positive", builder });
+  }
+  {
+    const entry = choose(pools.selective, sizeFor(500), 20000, (candidate) => candidate.aliasCount > 0);
+    const builder = new QueryBuilder("en", random).filler(200).passage(await passageFrom(entry, 500)).filler(200);
+    add({ id: "duplicate-alias-en", category: "duplicate-alias", language: "en", description: "500 words from a document supplied by two providers (one logical document, one alias)", expectation: "positive", builder });
+  }
+
+  // 11. three languages in one submission
+  {
+    const builder = new QueryBuilder("en", random).filler(150)
+      .passage(await passageFrom(choose(pools.pmc, sizeFor(200), 40000), 200)).filler(150)
+      .passage(await passageFrom(choose(pools.fr, sizeFor(200), 40000), 200)).filler(150, "fr")
+      .passage(await passageFrom(choose(pools.ar, sizeFor(200), 40000), 200)).filler(150, "ar");
+    add({ id: "multilingual-mix", category: "multilingual-mix", language: "mixed", description: "one English (PMC), one French and one Arabic source contributing 200 words each in one submission", expectation: "positive", builder });
+  }
+  return queries;
+}
+
 async function main() {
   const [command, ...rest] = process.argv.slice(2);
   const args = parseArguments(rest);
@@ -320,7 +509,18 @@ async function main() {
         logLine(`${query.id.padEnd(28)} ${query.expectation.padEnd(26)} ${String(wordsOf(query.text).length).padStart(6)} words, ${query.intendedSources.length} intended source(s)`);
       }
       logLine(`${queries.length} queries; ${queries.filter((query) => query.expectation === "positive").length} positive, ${queries.filter((query) => query.expectation === "negative").length} negative, ${queries.filter((query) => query.expectation === "below-verifier-threshold").length} below the verifier threshold`);
-    } else throw new Error(`unknown command ${JSON.stringify(command)}; expected catalog | build`);
+    } else if (command === "build-100k") {
+      const { catalog } = readJson<{ catalog: CatalogEntry[] }>(requireArgument(args, "catalog"));
+      const queries = await buildQueries100k(reader, catalog);
+      writeJson(requireArgument(args, "out"), { identity: reader.identity(), seed: SEED_100K, queries });
+      const sample = queries.filter((query) => EXHAUSTIVE_SAMPLE_100K.includes(query.id));
+      if (sample.length !== EXHAUSTIVE_SAMPLE_100K.length) throw new Error("the exhaustive sample names a query that was not built");
+      writeJson(requireArgument(args, "out-exhaustive-sample"), { identity: reader.identity(), seed: SEED_100K, queries: sample });
+      for (const query of queries) {
+        logLine(`${query.id.padEnd(28)} ${query.expectation.padEnd(10)} ${String(wordsOf(query.text).length).padStart(6)} words, ${String(query.intendedSources.length).padStart(2)} intended source(s)${EXHAUSTIVE_SAMPLE_100K.includes(query.id) ? "  [exhaustive sample]" : ""}`);
+      }
+      logLine(`${queries.length} queries; ${sample.length} in the full-corpus exhaustive sample`);
+    } else throw new Error(`unknown command ${JSON.stringify(command)}; expected catalog | build | build-100k`);
   } finally {
     await store.close();
   }
