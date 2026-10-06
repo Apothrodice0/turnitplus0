@@ -15,7 +15,11 @@ import { verifyCandidatesWithExistingVerifier, type CorpusVerificationResult } f
  *     -> candidate source text -> EXISTING verifier -> EXISTING union -> EXISTING score
  *
  * It decides which source documents are worth verifying. It never decides
- * that a position is verified or what a similarity score is.
+ * that a position is verified or what a similarity score is: those are the
+ * existing verifier's answers. (By default the engine runs that verifier with
+ * the submission prepared once per query — ./prepared-verifier.ts, a
+ * restatement held equal to the unmodified functions by an exact-equality
+ * gate; see ./verifier-adapter.ts.)
  *
  * Offline tooling (scripts/corpus-engine/*) uses the modules directly. An
  * application caller uses only runCorpusEngineCandidateVerification below,

@@ -4,7 +4,7 @@ import path from "node:path";
 import { docIdFromDecimal } from "../../lib/corpus-engine/ids";
 import { admitCandidates, createVerifierArtifactView, finalizeVerification, type CandidateAdmission, type VerifierAdapterFailure } from "../../lib/corpus-engine/verifier-adapter";
 import { selectiveCorpusSubmissionWords } from "../../lib/selective-corpus/verify";
-import { openGeneration, toRanges, type BenchmarkQuery, type ReferenceResult } from "./benchmark-common";
+import { openGeneration, toRanges, verifierPathArgument, type BenchmarkQuery, type ReferenceResult } from "./benchmark-common";
 import { logLine, parseArguments, readJson, requireArgument, round, writeJson } from "./common";
 
 /**
@@ -12,6 +12,7 @@ import { logLine, parseArguments, readJson, requireArgument, round, writeJson } 
  * of the generation, for every benchmark submission.
  *
  *   benchmark-exhaustive.ts --root R --generation G --queries queries.json --out-dir DIR [--workers 10]
+ *                           [--verifier-path oracle | prepared-submission]
  *
  * No retrieval is involved. Each worker process takes every N-th document and
  * runs the unmodified admission (admitSelectiveCorpusCandidate, via the same
@@ -22,6 +23,10 @@ import { logLine, parseArguments, readJson, requireArgument, round, writeJson } 
  *
  * Nothing is skipped on a shortcut such as "shares no fingerprint": a document
  * is verified whether or not any index says it could match.
+ *
+ * The reference is the yardstick, so it runs the unmodified admission (verifier
+ * path "oracle") unless --verifier-path says otherwise; reference.json records
+ * which path produced it.
  */
 
 type WorkerOutput = {
@@ -42,7 +47,7 @@ async function runWorker(args: Record<string, string>) {
       const failures: VerifierAdapterFailure[] = [];
       const artifact = createVerifierArtifactView(reader, failures);
       const started = process.cpuUsage();
-      const pass = await admitCandidates(reader, query.text, mine, { artifact, failures, submissionWords: selectiveCorpusSubmissionWords(query.text) });
+      const pass = await admitCandidates(reader, query.text, mine, { artifact, failures, submissionWords: selectiveCorpusSubmissionWords(query.text) }, { verifierPath: verifierPathArgument(args, "oracle") });
       const cpu = process.cpuUsage(started);
       output.results[query.id] = {
         // Only documents that reached STRICT_SPAN carry spans worth keeping; the rest are "no match".
@@ -61,6 +66,7 @@ async function runWorker(args: Record<string, string>) {
 async function runParent(args: Record<string, string>) {
   const outDirectory = requireArgument(args, "out-dir");
   const workers = Number(args.workers ?? 10);
+  const verifierPath = verifierPathArgument(args, "oracle");
   const { queries } = readJson<{ queries: BenchmarkQuery[] }>(requireArgument(args, "queries"));
   const started = Date.now();
   logLine(`exhaustive reference: ${queries.length} submissions x every document, ${workers} worker processes`);
@@ -88,7 +94,7 @@ async function runParent(args: Record<string, string>) {
       const failures = outputs.flatMap((output) => output.results[query.id].failures);
       const verified = outputs.reduce((total, output) => total + output.results[query.id].verified, 0);
       const submissionWordCount = selectiveCorpusSubmissionWords(query.text).length;
-      const final = finalizeVerification(reader.identity(), submissionWordCount, admissions, failures);
+      const final = finalizeVerification(reader.identity(), submissionWordCount, admissions, failures, { verifierPath });
       references.push({
         queryId: query.id,
         submissionWordCount,
@@ -107,6 +113,7 @@ async function runParent(args: Record<string, string>) {
     if (references.some((reference) => reference.documentsVerified !== documents)) throw new Error("a submission was not verified against every document");
     writeJson(path.join(outDirectory, "reference.json"), {
       identity: reader.identity(),
+      verifierPath,
       documentsInGeneration: documents,
       workers,
       wallSeconds: round((Date.now() - started) / 1000),

@@ -2,14 +2,15 @@ import { fork } from "node:child_process";
 import { performance } from "node:perf_hooks";
 import type { CorpusGenerationReader } from "../../lib/corpus-engine/reader";
 import { retrieveCandidates } from "../../lib/corpus-engine/retrieval";
-import { verifyCandidatesWithExistingVerifier } from "../../lib/corpus-engine/verifier-adapter";
-import { openGeneration, type BenchmarkQuery } from "./benchmark-common";
+import { verifyCandidatesWithExistingVerifier, type VerifierPath } from "../../lib/corpus-engine/verifier-adapter";
+import { openGeneration, verifierPathArgument, type BenchmarkQuery } from "./benchmark-common";
 import { logLine, mean, parseArguments, percentile, readJson, requireArgument, round, writeJson } from "./common";
 
 /**
  * Bounded workload / latency profile of retrieval + verification.
  *
  *   benchmark-performance.ts --root R --generation G --queries queries.json --out performance.json [--budget 100]
+ *                            [--verifier-path oracle | prepared-submission]
  *
  * The workload is the benchmark's own submissions (300 to ~12,700 words,
  * sources from a few hundred to tens of thousands of words).
@@ -23,6 +24,10 @@ import { logLine, mean, parseArguments, percentile, readJson, requireArgument, r
  *   load   the warm process with a small fixed number of submissions in flight.
  *
  * This is a profile, not a load test.
+ *
+ * verifierMs is the whole verifier cost of a query: the once-per-query
+ * submission preparation (prepareMs; 0 on the oracle path) plus the
+ * per-candidate verification summed (candidateVerifyMs).
  */
 
 type Measurement = {
@@ -44,6 +49,8 @@ type Measurement = {
   textReadMs: number;
   textDecodeMs: number;
   verifierMs: number;
+  prepareMs: number;
+  candidateVerifyMs: number;
   verificationWallMs: number;
   totalMs: number;
   textCompressedBytesRead: number;
@@ -52,11 +59,11 @@ type Measurement = {
   score: number;
 };
 
-async function measure(reader: CorpusGenerationReader, query: BenchmarkQuery, budget: number): Promise<Measurement> {
+async function measure(reader: CorpusGenerationReader, query: BenchmarkQuery, budget: number, verifierPath: VerifierPath): Promise<Measurement> {
   const started = performance.now();
   const retrieval = await retrieveCandidates(reader, query.text, { candidateBudget: budget });
   const retrieved = performance.now();
-  const verification = await verifyCandidatesWithExistingVerifier(reader, query.text, retrieval.candidates.map((candidate) => candidate.docId));
+  const verification = await verifyCandidatesWithExistingVerifier(reader, query.text, retrieval.candidates.map((candidate) => candidate.docId), { verifierPath });
   const finished = performance.now();
   return {
     queryId: query.id,
@@ -76,7 +83,9 @@ async function measure(reader: CorpusGenerationReader, query: BenchmarkQuery, bu
     retrievalMs: retrieved - started,
     textReadMs: verification.totals.textReadMs,
     textDecodeMs: verification.totals.textDecodeMs,
-    verifierMs: verification.totals.verifyMs,
+    verifierMs: verification.totals.prepareMs + verification.totals.verifyMs,
+    prepareMs: verification.totals.prepareMs,
+    candidateVerifyMs: verification.totals.verifyMs,
     verificationWallMs: finished - retrieved,
     totalMs: finished - started,
     textCompressedBytesRead: verification.totals.textCompressedBytesRead,
@@ -86,7 +95,7 @@ async function measure(reader: CorpusGenerationReader, query: BenchmarkQuery, bu
   };
 }
 
-const TIMED_FIELDS = ["totalMs", "retrievalMs", "fingerprintMs", "lookupMs", "accumulateMs", "mergeMs", "textReadMs", "textDecodeMs", "verifierMs"] as const;
+const TIMED_FIELDS = ["totalMs", "retrievalMs", "fingerprintMs", "lookupMs", "accumulateMs", "mergeMs", "textReadMs", "textDecodeMs", "verifierMs", "prepareMs", "candidateVerifyMs"] as const;
 
 function summarize(samples: readonly Measurement[]) {
   const result: Record<string, unknown> = { samples: samples.length };
@@ -105,6 +114,7 @@ function summarize(samples: readonly Measurement[]) {
     textReadMs: round(mean(withCandidates.map((sample) => sample.textReadMs / sample.candidates)), 4),
     textDecodeMs: round(mean(withCandidates.map((sample) => sample.textDecodeMs / sample.candidates)), 4),
     verifierMs: round(mean(withCandidates.map((sample) => sample.verifierMs / sample.candidates)), 3),
+    candidateVerifyMs: round(mean(withCandidates.map((sample) => sample.candidateVerifyMs / sample.candidates)), 3),
   };
   return result;
 }
@@ -116,7 +126,7 @@ async function coldChild(args: Record<string, string>) {
   const opening = performance.now();
   const { store, reader } = await openGeneration(requireArgument(args, "root"), requireArgument(args, "generation"));
   const openMs = performance.now() - opening;
-  const measurement = await measure(reader, query, Number(args.budget ?? 100));
+  const measurement = await measure(reader, query, Number(args.budget ?? 100), verifierPathArgument(args));
   await store.close();
   process.send?.({ openMs, measurement, rssBytes: process.memoryUsage.rss() });
 }
@@ -125,6 +135,7 @@ async function main() {
   const args = parseArguments(process.argv.slice(2));
   if (args["cold-child"]) return coldChild(args);
   const budget = Number(args.budget ?? 100);
+  const verifierPath = verifierPathArgument(args);
   const { queries } = readJson<{ queries: BenchmarkQuery[] }>(requireArgument(args, "queries"));
 
   // ── cold: one fresh process per submission ──
@@ -150,14 +161,15 @@ async function main() {
   // ── warm: one process ──
   const { store, reader } = await openGeneration(requireArgument(args, "root"), requireArgument(args, "generation"));
   try {
-    for (const query of queries) await measure(reader, query, budget);
+    for (const query of queries) await measure(reader, query, budget, verifierPath);
     const warm: Measurement[] = [];
-    for (let repetition = 0; repetition < 3; repetition += 1) for (const query of queries) warm.push(await measure(reader, query, budget));
+    for (let repetition = 0; repetition < 3; repetition += 1) for (const query of queries) warm.push(await measure(reader, query, budget, verifierPath));
+    logLine(`verifier path: ${verifierPath}`);
     logLine(`warm: ${warm.length} runs — total p50 ${round(percentile(warm.map((sample) => sample.totalMs), 0.5))} ms, p95 ${round(percentile(warm.map((sample) => sample.totalMs), 0.95))} ms`);
 
     // ── a larger budget, warm, one pass: how the cost moves with K ──
     const warmLarge: Measurement[] = [];
-    for (const query of queries) warmLarge.push(await measure(reader, query, 500));
+    for (const query of queries) warmLarge.push(await measure(reader, query, 500, verifierPath));
 
     // ── load: a small fixed number in flight ──
     const concurrency = Number(args.concurrency ?? 4);
@@ -168,7 +180,7 @@ async function main() {
       for (;;) {
         const query = pending.shift();
         if (!query) return;
-        loaded.push(await measure(reader, query, budget));
+        loaded.push(await measure(reader, query, budget, verifierPath));
       }
     }));
     const loadSeconds = (performance.now() - loadStarted) / 1000;
@@ -177,6 +189,7 @@ async function main() {
     const heaviest = [...warm].sort((left, right) => right.touchedDocuments - left.touchedDocuments)[0];
     writeJson(requireArgument(args, "out"), {
       identity: reader.identity(),
+      verifierPath,
       budget,
       documentCount,
       workload: { submissions: queries.length, wordsMin: Math.min(...warm.map((sample) => sample.submissionWords)), wordsMax: Math.max(...warm.map((sample) => sample.submissionWords)), wordsP50: percentile(warm.map((sample) => sample.submissionWords), 0.5) },
@@ -195,7 +208,7 @@ async function main() {
       warmProcessRssBytes: process.memoryUsage.rss(),
       perQueryWarm: queries.map((query) => {
         const samples = warm.filter((sample) => sample.queryId === query.id);
-        return { ...samples[0], totalMs: round(percentile(samples.map((sample) => sample.totalMs), 0.5), 2), retrievalMs: round(percentile(samples.map((sample) => sample.retrievalMs), 0.5), 2), verifierMs: round(percentile(samples.map((sample) => sample.verifierMs), 0.5), 2) };
+        return { ...samples[0], totalMs: round(percentile(samples.map((sample) => sample.totalMs), 0.5), 2), retrievalMs: round(percentile(samples.map((sample) => sample.retrievalMs), 0.5), 2), verifierMs: round(percentile(samples.map((sample) => sample.verifierMs), 0.5), 2), prepareMs: round(percentile(samples.map((sample) => sample.prepareMs), 0.5), 2), candidateVerifyMs: round(percentile(samples.map((sample) => sample.candidateVerifyMs), 0.5), 2) };
       }),
       perQueryCold: cold,
     });

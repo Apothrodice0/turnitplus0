@@ -1,15 +1,17 @@
 import { computeQueryFingerprints, documentFingerprintHexes, normalizeForCorpus } from "../../lib/corpus-engine/fingerprints";
 import { docIdFromDecimal } from "../../lib/corpus-engine/ids";
+import { prepareSubmissionForVerification } from "../../lib/corpus-engine/prepared-verifier";
 import { retrieveCandidates, type CandidateRankingPolicy } from "../../lib/corpus-engine/retrieval";
 import { admitCandidates, createVerifierArtifactView, finalizeVerification, type CandidateAdmission, type VerifierAdapterFailure } from "../../lib/corpus-engine/verifier-adapter";
 import { selectiveCorpusSubmissionWords } from "../../lib/selective-corpus/verify";
-import { fromRanges, openGeneration, type BenchmarkQuery, type ReferenceResult } from "./benchmark-common";
+import { fromRanges, openGeneration, verifierPathArgument, type BenchmarkQuery, type ReferenceResult } from "./benchmark-common";
 import { logLine, mean, parseArguments, percentile, readJson, requireArgument, round, writeJson } from "./common";
 
 /**
  * Engine retrieval -> existing verifier, compared with the exhaustive reference.
  *
  *   benchmark-engine.ts --root R --generation G --queries queries.json --reference reference.json --out engine.json
+ *                       [--verifier-path oracle | prepared-submission]
  *
  * For every submission and every candidate budget K it reports whether
  * retrieval changed what the existing verifier concludes:
@@ -23,6 +25,10 @@ import { logLine, mean, parseArguments, percentile, readJson, requireArgument, r
  * A candidate's verification does not depend on how it was retrieved, so each
  * (submission, document) pair is verified once and reused across variants and
  * budgets.
+ *
+ * --verifier-path selects the admission implementation (default: the engine's).
+ * Apart from the recorded path and the retrieval timings, the output of a run
+ * on each path must be identical.
  */
 
 const BUDGETS = [50, 100, 250, 500];
@@ -60,6 +66,7 @@ type Comparison = {
 
 async function main() {
   const args = parseArguments(process.argv.slice(2));
+  const verifierPath = verifierPathArgument(args);
   const { queries } = readJson<{ queries: BenchmarkQuery[] }>(requireArgument(args, "queries"));
   const referenceFile = readJson<{ identity: { generationId: string; logicalManifestSha256: string }; references: Array<Omit<ReferenceResult, "matchedPositions"> & { matchedPositions: Array<[number, number]> }> }>(requireArgument(args, "reference"));
   const references = new Map(referenceFile.references.map((reference) => [reference.queryId, { ...reference, matchedPositions: fromRanges(reference.matchedPositions) }]));
@@ -84,6 +91,8 @@ async function main() {
       const submissionWords = selectiveCorpusSubmissionWords(query.text);
       const failures: VerifierAdapterFailure[] = [];
       const artifact = createVerifierArtifactView(reader, failures);
+      // one preparation per submission, shared by every pass over it
+      const preparedSubmission = verifierPath === "prepared-submission" ? prepareSubmissionForVerification(query.text) : undefined;
       const cache = new Map<string, CandidateAdmission>();
       const queryRecord: Record<string, unknown> = {
         id: query.id, category: query.category, language: query.language, expectation: query.expectation, description: query.description,
@@ -96,7 +105,7 @@ async function main() {
         const retrieval = await retrieveCandidates(reader, query.text, { ...variant.policy, candidateBudget: MAX_BUDGET });
         const missing = retrieval.candidates.filter((candidate) => !cache.has(candidate.docIdDecimal)).map((candidate) => candidate.docId);
         if (missing.length > 0) {
-          const pass = await admitCandidates(reader, query.text, missing, { artifact, failures, submissionWords });
+          const pass = await admitCandidates(reader, query.text, missing, { artifact, failures, submissionWords, preparedSubmission }, { verifierPath });
           for (const admission of pass.admissions) cache.set(admission.docId, admission);
         }
         retrievalStats.push({ queryId: query.id, variant: variant.id, state: retrieval.state, candidates: retrieval.candidates.length, ...retrieval.stats });
@@ -106,7 +115,7 @@ async function main() {
           const top = retrieval.candidates.slice(0, k);
           const topIds = new Set(top.map((candidate) => candidate.docIdDecimal));
           const admissions = top.map((candidate, order) => ({ ...(cache.get(candidate.docIdDecimal) as CandidateAdmission), order }));
-          const final = finalizeVerification(reader.identity(), submissionWords.length, admissions, failures);
+          const final = finalizeVerification(reader.identity(), submissionWords.length, admissions, failures, { verifierPath });
           const enginePositions = new Set(final.matchedPositions);
           let shared = 0;
           for (const position of enginePositions) if (referencePositions.has(position)) shared += 1;
@@ -238,6 +247,7 @@ async function main() {
 
     writeJson(requireArgument(args, "out"), {
       identity: reader.identity(),
+      verifierPath,
       budgets: BUDGETS,
       variants: VARIANTS,
       counts: {

@@ -1,5 +1,6 @@
 import { CorpusGenerationReader } from "../../lib/corpus-engine/reader";
 import { LocalDirectoryObjectStore } from "../../lib/corpus-engine/storage";
+import { DEFAULT_VERIFIER_PATH, type VerifierPath } from "../../lib/corpus-engine/verifier-adapter";
 
 /**
  * Corpus Engine v1 — shared types of the 10k correctness benchmark.
@@ -78,6 +79,18 @@ export type ReferenceResult = {
   failures: unknown[];
   verifyCpuMs: number;
 };
+
+/**
+ * `--verifier-path oracle | prepared-submission`: which implementation of the
+ * admission step a benchmark runs. Both must give the same result; running a
+ * benchmark once on each is how that is checked on a real corpus.
+ */
+export function verifierPathArgument(args: Record<string, string>, fallback: VerifierPath = DEFAULT_VERIFIER_PATH): VerifierPath {
+  const value = args["verifier-path"];
+  if (value === undefined) return fallback;
+  if (value !== "oracle" && value !== "prepared-submission") throw new Error(`--verifier-path must be "oracle" or "prepared-submission", not ${JSON.stringify(value)}`);
+  return value;
+}
 
 export async function openGeneration(root: string, generationId: string, options: { dictionaryBlockCacheBlocks?: number } = {}) {
   const store = new LocalDirectoryObjectStore(root);

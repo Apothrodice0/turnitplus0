@@ -11,6 +11,13 @@ import { currentScoringNormalizationVersion, mergeAdjacentPositions } from "../s
 import { computeUnifiedSimilarity } from "../unified-similarity";
 import type { HighDocumentFrequencyTable } from "./generation";
 import { docIdToDecimal, fingerprintFromHex } from "./ids";
+import {
+  assertPreparedSubmissionForAdmission,
+  prepareSubmissionForVerification,
+  PreparedSubmissionContractError,
+  verifyPreparedSubmissionAgainstCandidate,
+  type PreparedSubmission,
+} from "./prepared-verifier";
 import type { CorpusGenerationReader, CorpusReaderIdentity } from "./reader";
 import { toSegmentError, type SegmentReader } from "./segment";
 
@@ -24,10 +31,25 @@ import { toSegmentError, type SegmentReader } from "./segment";
  *     -> disambiguateSelectiveCorpusCoSources  lib/selective-corpus/co-source.ts (UNCHANGED)
  *     -> computeUnifiedSimilarity              lib/unified-similarity.ts        (UNCHANGED)
  *
- * There is no matching logic in this file. It fetches text, calls those three
- * functions in the order lib/selective-corpus/shadow.ts already calls them,
- * and reports what they returned. Positions and the score come from them and
- * from nowhere else.
+ * There is no matching logic in this file. It fetches text, runs the admission
+ * step, calls co-source attribution and the union/score in the order
+ * lib/selective-corpus/shadow.ts already calls them, and reports what they
+ * returned. Positions and the score come from them and from nowhere else.
+ *
+ * THE ADMISSION STEP HAS TWO PATHS WITH ONE BEHAVIOUR (VerifierPath):
+ *
+ *   "oracle"               admitSelectiveCorpusCandidate itself, once per
+ *                          candidate. It re-derives everything it needs from
+ *                          the submission on every call.
+ *   "prepared-submission"  (default) the submission is prepared once per
+ *                          query and each candidate is verified against that
+ *                          (./prepared-verifier.ts, which restates the same
+ *                          statements over the same primitives).
+ *
+ * The oracle defines the result. The prepared path is only allowed to be
+ * faster: tests/corpus-engine-prepared-verifier.test.mjs requires its output to
+ * be identical, and the oracle stays selectable so that can be re-checked on
+ * any corpus.
  *
  * The one thing the verifier needs from a corpus is FAMILY_GUARD's evidence:
  * "is this fingerprint common corpus-wide" and "which documents hold it". The
@@ -162,42 +184,76 @@ export type CandidateAdmission = {
   verifyMs: number;
 };
 
+/** Which implementation of the admission step ran. Both must produce the same result; see this file's header. */
+export type VerifierPath = "prepared-submission" | "oracle";
+
+export const DEFAULT_VERIFIER_PATH: VerifierPath = "prepared-submission";
+
 export type AdmissionPass = {
   identity: CorpusReaderIdentity;
   submissionWordCount: number;
   admissions: CandidateAdmission[];
   failures: VerifierAdapterFailure[];
+  verifierPath: VerifierPath;
+  /** Time spent preparing the submission in THIS pass: 0 on the oracle path, and 0 when the caller handed in a prepared submission. */
+  prepareMs: number;
 };
 
 /**
  * Fetches each candidate's text and runs the existing admission on it, in the
  * order given. A candidate whose text cannot be fetched is recorded as a
  * failure — it is never treated as "verified and did not match".
+ *
+ * On the prepared path the submission is prepared once here, before the first
+ * candidate. A caller that makes several passes over one submission prepares
+ * it itself and hands it in as `shared.preparedSubmission`; `submissionWords`
+ * is then not consulted (the prepared submission carries the same words).
  */
 export async function admitCandidates(
   reader: CorpusGenerationReader,
   submissionText: string,
   candidateDocIds: readonly bigint[],
-  shared?: { artifact: SelectiveCorpusArtifact; failures: VerifierAdapterFailure[]; submissionWords?: string[] },
+  shared?: { artifact: SelectiveCorpusArtifact; failures: VerifierAdapterFailure[]; submissionWords?: string[]; preparedSubmission?: PreparedSubmission },
+  options: { verifierPath?: VerifierPath } = {},
 ): Promise<AdmissionPass> {
   const failures = shared?.failures ?? [];
   const identity = reader.identity();
+  const verifierPath = options.verifierPath ?? DEFAULT_VERIFIER_PATH;
+  const refused = (): AdmissionPass => ({ identity, submissionWordCount: 0, admissions: [], failures, verifierPath, prepareMs: 0 });
   const ambient = currentScoringNormalizationVersion();
   if (ambient !== reader.manifest.processing.normalization.version) {
     failures.push({
       stage: "contract", docId: null, partition: null, segmentId: null, code: "NORMALIZATION_CONTRACT_MISMATCH",
       message: `the verifier would tokenize under scoring normalization v${ambient}; generation ${reader.generationId} was built under v${reader.manifest.processing.normalization.version}`,
     });
-    return { identity, submissionWordCount: 0, admissions: [], failures };
+    return refused();
   }
   let artifact: SelectiveCorpusArtifact;
   try {
     artifact = shared?.artifact ?? createVerifierArtifactView(reader, failures);
   } catch (error) {
     failures.push({ stage: "contract", docId: null, partition: null, segmentId: null, code: "DF_ARTIFACT_UNAVAILABLE", message: error instanceof Error ? error.message : String(error) });
-    return { identity, submissionWordCount: 0, admissions: [], failures };
+    return refused();
   }
-  const submissionWords = shared?.submissionWords ?? selectiveCorpusSubmissionWords(submissionText);
+  let prepared: PreparedSubmission | null = null;
+  let prepareMs = 0;
+  if (verifierPath === "prepared-submission") {
+    if (shared?.preparedSubmission) {
+      try {
+        assertPreparedSubmissionForAdmission(shared.preparedSubmission, submissionText);
+      } catch (error) {
+        if (!(error instanceof PreparedSubmissionContractError)) throw error;
+        failures.push({ stage: "contract", docId: null, partition: null, segmentId: null, code: error.code, message: error.message });
+        return refused();
+      }
+      prepared = shared.preparedSubmission;
+    } else if (candidateDocIds.length > 0) {
+      const prepareStarted = performance.now();
+      prepared = prepareSubmissionForVerification(submissionText);
+      prepareMs = performance.now() - prepareStarted;
+    }
+  }
+  const submissionWords: readonly string[] = prepared ? prepared.words : shared?.submissionWords ?? selectiveCorpusSubmissionWords(submissionText);
 
   const admissions: CandidateAdmission[] = [];
   for (let order = 0; order < candidateDocIds.length; order += 1) {
@@ -220,7 +276,9 @@ export async function admitCandidates(
       continue;
     }
     const verifyStarted = performance.now();
-    const result = await admitSelectiveCorpusCandidate(submissionText, submissionWords, fetched.text, artifact);
+    const result = prepared
+      ? await verifyPreparedSubmissionAgainstCandidate(prepared, fetched.text, artifact)
+      : await admitSelectiveCorpusCandidate(submissionText, submissionWords, fetched.text, artifact);
     admissions.push({
       docId: decimal,
       order,
@@ -239,7 +297,7 @@ export async function admitCandidates(
       verifyMs: performance.now() - verifyStarted,
     });
   }
-  return { identity, submissionWordCount: submissionWords.length, admissions, failures };
+  return { identity, submissionWordCount: submissionWords.length, admissions, failures, verifierPath, prepareMs };
 }
 
 export type VerifiedSource = {
@@ -268,7 +326,10 @@ export type CorpusVerificationResult = {
   coSourceActivations: number;
   familyGuardActivations: number;
   failures: VerifierAdapterFailure[];
-  totals: { textCompressedBytesRead: number; textDecompressedBytes: number; textReadMs: number; textDecodeMs: number; verifyMs: number };
+  /** The admission path that produced `verifiedSources`; null when the caller merged passes and did not say. */
+  verifierPath: VerifierPath | null;
+  /** verifyMs is the per-candidate verification time summed; prepareMs is the once-per-query submission preparation (0 on the oracle path). */
+  totals: { textCompressedBytesRead: number; textDecompressedBytes: number; textReadMs: number; textDecodeMs: number; verifyMs: number; prepareMs: number };
 };
 
 /**
@@ -282,8 +343,9 @@ export function finalizeVerification(
   submissionWordCount: number,
   admissions: readonly CandidateAdmission[],
   failures: readonly VerifierAdapterFailure[],
+  pass: { verifierPath?: VerifierPath; prepareMs?: number } = {},
 ): CorpusVerificationResult {
-  const totals = { textCompressedBytesRead: 0, textDecompressedBytes: 0, textReadMs: 0, textDecodeMs: 0, verifyMs: 0 };
+  const totals = { textCompressedBytesRead: 0, textDecompressedBytes: 0, textReadMs: 0, textDecodeMs: 0, verifyMs: 0, prepareMs: pass.prepareMs ?? 0 };
   let familyGuardActivations = 0;
   const admittedSpans = new Map<string, SelectiveCorpusVerifiedSpan[]>();
   const admittedByKey = new Map<string, CandidateAdmission>();
@@ -331,16 +393,23 @@ export function finalizeVerification(
     coSourceActivations: coSource.activations,
     familyGuardActivations,
     failures: [...failures],
+    verifierPath: pass.verifierPath ?? null,
     totals,
   };
 }
 
-/** Candidates (in rank order) -> source text -> existing verifier -> existing union and score. */
+/**
+ * Candidates (in rank order) -> source text -> existing verifier -> existing
+ * union and score. The submission is prepared once for the whole candidate
+ * list unless `verifierPath: "oracle"` asks for the unmodified per-candidate
+ * call.
+ */
 export async function verifyCandidatesWithExistingVerifier(
   reader: CorpusGenerationReader,
   submissionText: string,
   candidateDocIds: readonly bigint[],
+  options: { verifierPath?: VerifierPath } = {},
 ): Promise<CorpusVerificationResult> {
-  const pass = await admitCandidates(reader, submissionText, candidateDocIds);
-  return finalizeVerification(pass.identity, pass.submissionWordCount, pass.admissions, pass.failures);
+  const pass = await admitCandidates(reader, submissionText, candidateDocIds, undefined, options);
+  return finalizeVerification(pass.identity, pass.submissionWordCount, pass.admissions, pass.failures, { verifierPath: pass.verifierPath, prepareMs: pass.prepareMs });
 }
