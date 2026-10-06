@@ -1,5 +1,5 @@
-import { closeSync, existsSync, fsyncSync, openSync, readFileSync, readSync, truncateSync, writeSync } from "node:fs";
-import { nodeBytes, type Bytes } from "./bytes";
+import { closeSync, existsSync, fstatSync, fsyncSync, openSync, readSync, truncateSync, writeSync } from "node:fs";
+import type { Bytes } from "./bytes";
 import { BUILD_LEDGER_VERSION } from "./versions";
 
 /**
@@ -103,6 +103,9 @@ export type LedgerSourceEntry = {
   lineLength: number;
 };
 
+/** How much of the ledger file is read at a time when it is replayed. */
+const LEDGER_REPLAY_CHUNK_BYTES = 4 << 20;
+
 export class BuildLedger {
   start: LedgerStartRecord | null = null;
   readonly sources = new Map<string, LedgerSourceEntry>();
@@ -123,22 +126,20 @@ export class BuildLedger {
   /** Opens (or creates) the ledger, replays it, and cuts off anything after the last durable record. */
   static open(file: string, options: { keepSourceRecords?: boolean } = {}): BuildLedger {
     const ledger = new BuildLedger(file);
-    const bytes: Bytes = existsSync(file) ? nodeBytes(readFileSync(file)) : Buffer.alloc(0);
-    let offset = 0;
     let durableEnd = 0;
+    let fileBytes = 0;
     let pending: Array<{ record: LedgerSourceRecord; offset: number; length: number }> = [];
-    while (offset < bytes.length) {
-      const newline = bytes.indexOf(0x0a, offset);
-      if (newline < 0) break; // torn final line
+    // Returns false when replay must stop: nothing after a torn or misplaced record is trusted.
+    const replayLine = (line: Bytes, offset: number): boolean => {
       let record: LedgerRecord;
       try {
-        record = JSON.parse(bytes.toString("utf8", offset, newline)) as LedgerRecord;
+        record = JSON.parse(line.toString("utf8", 0, line.length - 1)) as LedgerRecord;
       } catch {
-        break; // torn or damaged line: nothing after it is trusted
+        return false;
       }
-      const lineLength = newline + 1 - offset;
       if (record.type === "source") {
-        pending.push({ record, offset, length: lineLength });
+        // The alias/provenance payload stays on disk; it is re-read per document at finalize.
+        pending.push({ record: { ...record, alias: {} }, offset, length: line.length });
       } else if (record.type === "commit") {
         for (const item of pending) {
           ledger.sources.set(item.record.sourceKey, {
@@ -148,28 +149,65 @@ export class BuildLedger {
             lineOffset: item.offset,
             lineLength: item.length,
           });
-          // The alias/provenance payload stays on disk; it is re-read per document at finalize.
-          if (options.keepSourceRecords !== false) ledger.committedSourceRecords.push({ ...item.record, alias: {} });
+          if (options.keepSourceRecords !== false) ledger.committedSourceRecords.push(item.record);
         }
         pending = [];
         ledger.runs.push(...record.runs);
         ledger.commitCount = record.sequence;
         ledger.stagingBytes = record.stagingBytes;
-        durableEnd = newline + 1;
+        durableEnd = offset + line.length;
       } else {
-        if (pending.length > 0) break; // a non-source record can only follow a commit
+        if (pending.length > 0) return false; // a non-source record can only follow a commit
         if (record.type === "build-start") ledger.start = record;
         else if (record.type === "segment-committed") ledger.segments.set(record.partition, record);
         else if (record.type === "generation-built") ledger.generation = record;
-        durableEnd = newline + 1;
+        durableEnd = offset + line.length;
       }
-      offset = newline + 1;
+      return true;
+    };
+    if (existsSync(file)) {
+      // Streamed: the file is never held whole, so its size is not bounded by what one buffer can hold.
+      const descriptor = openSync(file, "r");
+      try {
+        const chunk: Bytes = Buffer.allocUnsafe(LEDGER_REPLAY_CHUNK_BYTES);
+        let carry: Bytes = Buffer.alloc(0);
+        let carryOffset = 0;
+        let position = 0;
+        replay: for (;;) {
+          const read = readSync(descriptor, chunk, 0, chunk.length, position);
+          if (read === 0) break; // whatever is left in `carry` is a torn final line
+          let start = 0;
+          for (;;) {
+            const newline = chunk.indexOf(0x0a, start);
+            if (newline < 0 || newline >= read) break;
+            const piece = chunk.subarray(start, newline + 1);
+            const line: Bytes = carry.length > 0 ? Buffer.concat([carry, piece]) : piece;
+            const lineOffset = carry.length > 0 ? carryOffset : position + start;
+            carry = Buffer.alloc(0);
+            if (!replayLine(line, lineOffset)) break replay;
+            start = newline + 1;
+          }
+          if (start < read) {
+            if (carry.length === 0) carryOffset = position + start;
+            carry = Buffer.concat([carry, chunk.subarray(start, read)]);
+          }
+          position += read;
+        }
+        fileBytes = fstatSync(descriptor).size;
+      } finally {
+        closeSync(descriptor);
+      }
     }
-    ledger.discardedTailBytes = bytes.length - durableEnd;
+    ledger.discardedTailBytes = fileBytes - durableEnd;
     if (ledger.discardedTailBytes > 0) truncateSync(file, durableEnd);
     ledger.length = durableEnd;
     ledger.descriptor = openSync(file, "a");
     return ledger;
+  }
+
+  /** Durable bytes of the ledger file. */
+  get byteLength() {
+    return this.length;
   }
 
   /** Appends records as one write and makes them durable before returning. */

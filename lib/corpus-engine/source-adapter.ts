@@ -226,6 +226,113 @@ export class SelectiveBulkManifestSourceAdapter implements SourceAdapter {
   }
 }
 
+/**
+ * Text extractors a bundle row may name. Each turns the provider's own bytes
+ * (kept verbatim as the raw content) into the text handed to normalization,
+ * and is versioned by its name: changing what one does needs a new name.
+ */
+export const BUNDLE_EXTRACTORS: Record<string, (raw: string) => string | null> = {
+  /** The provider supplied plain text; it is used as is. */
+  "utf8-text-v1": (raw) => raw,
+  /**
+   * PMC Article Datasets `.txt`: a JOURNAL INFORMATION block and an ARTICLE
+   * INFORMATION block, each under a rule line, then a third rule line, then
+   * the article. The text is everything after that third rule. (The third
+   * rule is usually wrapped in U+009F control characters; they are allowed
+   * around a rule, and nothing else is dropped.)
+   */
+  "pmc-oa-txt-body-v1": (raw) => {
+    const rule = /^[ \t\u0080-\u009f]*={10,}[ \t\u0080-\u009f]*\r?$/gm;
+    let match: RegExpExecArray | null = null;
+    for (let seen = 0; seen < 3; seen += 1) {
+      match = rule.exec(raw);
+      if (!match) return null;
+    }
+    return raw.slice((match as RegExpExecArray).index + (match as RegExpExecArray)[0].length).replace(/^\s+/, "");
+  },
+  /**
+   * One Federal Register document element (RULE, PRORULE, NOTICE, PRESDOCU) of
+   * a govinfo bulk-data issue file: block elements end a line, every other tag
+   * is dropped, and the five XML entities plus numeric references are decoded.
+   */
+  "govinfo-fr-xml-text-v1": (raw) => raw
+    .replace(/<\/(?:P|HD|FP|SUBJECT|AGENCY|SUBAGY|DEPDOC|CFR|RIN|FRDOC|BILCOD|ROW|TTITLE|TDESC|GPOTABLE|EXTRACT|LI|NAME|TITLE|DATE|SIG|FTNT|AMDPAR|SECTNO|STARS|PRTPAGE|AUTH)>/g, "\n")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&#x([0-9a-fA-F]+);/g, (_all, hex: string) => String.fromCodePoint(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_all, decimal: string) => String.fromCodePoint(Number(decimal)))
+    .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, "\"").replace(/&apos;/g, "'").replace(/&amp;/g, "&")
+    .replace(/[ \t]+/g, " ")
+    .replace(/ ?\n ?/g, "\n")
+    .replace(/\n{2,}/g, "\n")
+    .trim(),
+};
+
+/**
+ * The bulk adapter: one JSON-lines file in which each row is a whole
+ * SourceDocument — its metadata, `raw` (exactly what the provider supplied,
+ * as a string) and `extraction` (which BUNDLE_EXTRACTORS entry turns `raw`
+ * into text). The file is streamed, so a provider of any size costs one
+ * document of memory, and there is no file per document.
+ *
+ * Order is the file's: whoever stages a bundle writes it sorted by
+ * externalId. The adapter checks that as it reads and refuses a bundle that
+ * is not strictly ascending, which also refuses a repeated externalId.
+ */
+export class JsonLinesBundleSourceAdapter implements SourceAdapter {
+  readonly adapterId: string;
+
+  constructor(private readonly bundlePath: string, adapterId?: string) {
+    this.adapterId = adapterId ?? `jsonl-bundle:${path.basename(bundlePath)}`;
+  }
+
+  async *documents(): AsyncGenerator<SourceDocument> {
+    let previous: string | null = null;
+    for await (const row of readJsonLines(this.bundlePath)) {
+      const externalId = String(row.externalId);
+      if (previous !== null && !(previous < externalId)) {
+        throw new Error(`bundle ${this.bundlePath} is not strictly ascending by externalId at ${JSON.stringify(externalId)}`);
+      }
+      previous = externalId;
+      const extraction = String(row.extraction);
+      const extractor = BUNDLE_EXTRACTORS[extraction];
+      if (!extractor) throw new Error(`bundle ${this.bundlePath} names an unknown extraction ${JSON.stringify(extraction)}`);
+      if (typeof row.raw !== "string") throw new Error(`bundle ${this.bundlePath} row ${JSON.stringify(externalId)} has no raw content`);
+      const text = extractor(row.raw);
+      if (text === null) throw new Error(`bundle ${this.bundlePath} row ${JSON.stringify(externalId)} could not be extracted by ${extraction}`);
+      const rights = (row.rights ?? {}) as Record<string, unknown>;
+      const provenance = (row.provenance ?? {}) as Record<string, unknown>;
+      yield {
+        provider: String(row.provider),
+        dataset: String(row.dataset),
+        datasetVersion: stringOrNull(row.datasetVersion),
+        externalId,
+        canonicalUrl: stringOrNull(row.canonicalUrl),
+        title: stringOrNull(row.title),
+        authors: Array.isArray(row.authors) && row.authors.length > 0 ? row.authors.map(String) : null,
+        publishedDate: stringOrNull(row.publishedDate),
+        sourceType: String(row.sourceType ?? "unspecified"),
+        language: stringOrNull(row.language),
+        rights: {
+          license: stringOrNull(rights.license),
+          licenseUrl: stringOrNull(rights.licenseUrl),
+          usage: stringOrNull(rights.usage),
+          attribution: stringOrNull(rights.attribution),
+        },
+        provenance: {
+          acquisitionSource: stringOrNull(provenance.acquisitionSource),
+          retrievedAt: stringOrNull(provenance.retrievedAt),
+          sourceVersion: stringOrNull(provenance.sourceVersion),
+          notes: stringOrNull(provenance.notes),
+        },
+        extractionVersion: extraction,
+        rawContent: Buffer.from(row.raw, "utf8"),
+        text,
+        syntheticLoadOnly: false,
+      };
+    }
+  }
+}
+
 /** Wraps in-memory documents (tests, generated load-only material). Order is the array's. */
 export class InMemorySourceAdapter implements SourceAdapter {
   constructor(readonly adapterId: string, private readonly items: readonly SourceDocument[]) {}

@@ -161,6 +161,8 @@ export type CorpusBuildMetrics = {
   newImmutableBytes: number;
   peakRssBytes: number;
   runBufferBytes: number;
+  /** The build ledger as it stood when ingestion ended: its file, and what the builder keeps resident from it. */
+  ledger: { fileBytes: number; sourceEntries: number; documentTableEntries: number; heapUsedAfterIngestBytes: number; rssAfterIngestBytes: number };
   timingsMs: {
     read: number;
     normalize: number;
@@ -443,6 +445,7 @@ export async function runCorpusBuild(config: CorpusBuildConfig, adapters: readon
       stagingBytes: ledger.stagingBytes, mergeIntermediateBytes: 0, mergePasses: 0, mergeMaxFanIn: 0,
       peakTemporaryBytes: 0, peakBuildDiskBytes: 0, newImmutableBytes: 0, peakRssBytes: 0,
       runBufferBytes: runBufferTuples * 16,
+      ledger: { fileBytes: 0, sourceEntries: 0, documentTableEntries: 0, heapUsedAfterIngestBytes: 0, rssAfterIngestBytes: 0 },
       timingsMs: { read: 0, normalize: 0, fingerprint: 0, compress: 0, spill: 0, mergeAndIndex: 0, pack: 0, documentFrequency: 0, total: 0 },
       documentsPerSecond: 0,
     };
@@ -609,6 +612,16 @@ export async function runCorpusBuild(config: CorpusBuildConfig, adapters: readon
         }
       }
       commit();
+      // Measurement only: with --expose-gc the heap figure is live data, not garbage awaiting collection.
+      (globalThis as { gc?: () => void }).gc?.();
+      const memoryAfterIngest = process.memoryUsage();
+      metrics.ledger = {
+        fileBytes: ledger.byteLength,
+        sourceEntries: ledger.sources.size,
+        documentTableEntries: documents.size,
+        heapUsedAfterIngestBytes: memoryAfterIngest.heapUsed,
+        rssAfterIngestBytes: memoryAfterIngest.rss,
+      };
       for (const run of ledger.runs) {
         metrics.runFiles += 1;
         metrics.runBytes += run.bytes;

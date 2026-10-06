@@ -1,5 +1,6 @@
 import { normalizeForCorpus } from "../../lib/corpus-engine/fingerprints";
 import {
+  JsonLinesBundleSourceAdapter,
   LocalFixtureSourceAdapter,
   SelectiveBulkManifestSourceAdapter,
   sourceDocumentFromText,
@@ -174,6 +175,7 @@ class SyntheticMirrorAliasAdapter implements SourceAdapter {
 export type SourceSpec =
   | { kind: "selective-bulk"; directory: string; dataset: string; from?: number; to?: number }
   | { kind: "local-fixture"; manifest: string }
+  | { kind: "jsonl-bundle"; bundle: string }
   | { kind: "synthetic-boilerplate"; count: number; seed: number }
   | { kind: "synthetic-near-duplicate-family"; count: number }
   | { kind: "synthetic-mirror"; of: SourceSpec; every: number; limit: number };
@@ -184,6 +186,8 @@ export function adapterFor(spec: SourceSpec): SourceAdapter {
       return new SelectiveBulkManifestSourceAdapter(spec.directory, { dataset: spec.dataset, from: spec.from, to: spec.to });
     case "local-fixture":
       return new LocalFixtureSourceAdapter(spec.manifest);
+    case "jsonl-bundle":
+      return new JsonLinesBundleSourceAdapter(spec.bundle);
     case "synthetic-boilerplate":
       return new SyntheticBoilerplateFamilyAdapter(spec.count, spec.seed);
     case "synthetic-near-duplicate-family":
