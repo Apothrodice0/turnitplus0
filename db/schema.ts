@@ -2057,6 +2057,26 @@ export const pmc_coverage_shadow_evaluations = sqliteTable(
   ],
 );
 
+// ── Daily upload quota: usage that outlives its report (drizzle/0054) ────────
+// One row per report an account uploaded today (UTC) whose saved_reports row no
+// longer exists, so that deleting a report does not give its upload back:
+// lib/upload-limit.ts counts today's saved_reports rows PLUS today's rows here.
+// Written only by drizzle/0054's AFTER DELETE trigger on saved_reports (never
+// by application code; the trigger lives in the migration only, like 0053's),
+// so no way of removing a report can skip it. used_at is the deleted row's own
+// saved_at. user_id is deliberately not a foreign key — a report deletion must
+// never fail on it — and account deletion removes an account's rows explicitly
+// (lib/account-deletion.ts). No report or device identifier is kept.
+export const upload_usage_tombstones = sqliteTable(
+  "upload_usage_tombstones",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    user_id: text("user_id").notNull(),
+    used_at: text("used_at").notNull(),
+  },
+  (table) => [index("idx_upload_usage_tombstones_user_used_at").on(table.user_id, table.used_at)],
+);
+
 // Export nothing else — Drizzle will consume these definitions for migrations.
 export {};
 
