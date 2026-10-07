@@ -5,19 +5,21 @@ import { prepareSubmissionForVerification } from "../../lib/corpus-engine/prepar
 import { retrieveCandidates, type CandidateRankingPolicy } from "../../lib/corpus-engine/retrieval";
 import { admitCandidates, createVerifierArtifactView, finalizeVerification, type CandidateAdmission, type VerifierAdapterFailure } from "../../lib/corpus-engine/verifier-adapter";
 import { selectiveCorpusSubmissionWords } from "../../lib/selective-corpus/verify";
-import { fromRanges, openGeneration, verifierPathArgument, type BenchmarkQuery, type ReferenceResult } from "./benchmark-common";
+import { familyPolicyArgument, fromRanges, openGeneration, verifierPathArgument, type BenchmarkQuery, type ReferenceResult } from "./benchmark-common";
 import { logLine, mean, parseArguments, percentile, readJson, requireArgument, round, writeJson } from "./common";
 
 /**
  * Engine retrieval -> existing verifier, compared with the exhaustive reference.
  *
  *   benchmark-engine.ts --root R --generation G --queries queries.json --reference reference.json --out engine.json
- *                       [--verifier-path oracle | prepared-submission] [--sidecars] [--variants a,b]
+ *                       [--verifier-path oracle | prepared-submission] [--sidecars] [--variants a,b] [--family-policy P]
  *
  * The family admission policy is the engine's default; compare against a
  * reference computed under the same policy (compare-family-policies.ts
  * --out-references). --sidecars verifies from the derived-source sidecar
- * (same results, faster); --variants limits the ranking variants run.
+ * (same results, faster); --variants limits the ranking variants run;
+ * --family-policy replays a benchmark under a named policy (e.g. the one an
+ * older accepted run used).
  *
  * For every submission and every candidate budget K it reports whether
  * retrieval changed what the existing verifier concludes:
@@ -73,6 +75,7 @@ type Comparison = {
 async function main() {
   const args = parseArguments(process.argv.slice(2));
   const verifierPath = verifierPathArgument(args);
+  const familyPolicy = familyPolicyArgument(args);
   const { queries } = readJson<{ queries: BenchmarkQuery[] }>(requireArgument(args, "queries"));
   const referenceFile = readJson<{ identity: { generationId: string; logicalManifestSha256: string }; references: Array<Omit<ReferenceResult, "matchedPositions"> & { matchedPositions: Array<[number, number]> }> }>(requireArgument(args, "reference"));
   const references = new Map(referenceFile.references.map((reference) => [reference.queryId, { ...reference, matchedPositions: fromRanges(reference.matchedPositions) }]));
@@ -114,7 +117,7 @@ async function main() {
         const retrieval = await retrieveCandidates(reader, query.text, { ...variant.policy, candidateBudget: MAX_BUDGET });
         const missing = retrieval.candidates.filter((candidate) => !cache.has(candidate.docIdDecimal)).map((candidate) => candidate.docId);
         if (missing.length > 0) {
-          const pass = await admitCandidates(reader, query.text, missing, { artifact, failures, submissionWords, preparedSubmission }, { verifierPath, sidecars });
+          const pass = await admitCandidates(reader, query.text, missing, { artifact, failures, submissionWords, preparedSubmission }, { verifierPath, sidecars, familyPolicy });
           for (const admission of pass.admissions) cache.set(admission.docId, admission);
         }
         retrievalStats.push({ queryId: query.id, variant: variant.id, state: retrieval.state, candidates: retrieval.candidates.length, ...retrieval.stats });
@@ -124,7 +127,7 @@ async function main() {
           const top = retrieval.candidates.slice(0, k);
           const topIds = new Set(top.map((candidate) => candidate.docIdDecimal));
           const admissions = top.map((candidate, order) => ({ ...(cache.get(candidate.docIdDecimal) as CandidateAdmission), order }));
-          const final = finalizeVerification(reader.identity(), submissionWords.length, admissions, failures, { verifierPath });
+          const final = finalizeVerification(reader.identity(), submissionWords.length, admissions, failures, { verifierPath, familyPolicy });
           const enginePositions = new Set(final.matchedPositions);
           let shared = 0;
           for (const position of enginePositions) if (referencePositions.has(position)) shared += 1;
@@ -257,6 +260,7 @@ async function main() {
     writeJson(requireArgument(args, "out"), {
       identity: reader.identity(),
       verifierPath,
+      ...(familyPolicy !== undefined ? { familyPolicy } : {}),
       budgets: BUDGETS,
       variants,
       counts: {

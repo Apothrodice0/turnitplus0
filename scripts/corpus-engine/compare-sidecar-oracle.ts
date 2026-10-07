@@ -4,7 +4,7 @@ import { docIdFromDecimal } from "../../lib/corpus-engine/ids";
 import { comparePreparedSubmissionToCandidate, comparePreparedSubmissionToDerived, prepareSubmissionForVerification } from "../../lib/corpus-engine/prepared-verifier";
 import { retrieveCandidates } from "../../lib/corpus-engine/retrieval";
 import { verifyCandidatesWithExistingVerifier } from "../../lib/corpus-engine/verifier-adapter";
-import { openGeneration, type BenchmarkQuery, type CatalogEntry, type ReferenceResult } from "./benchmark-common";
+import { openGeneration, readCatalog, type BenchmarkQuery, type CatalogEntry, type ReferenceResult } from "./benchmark-common";
 import { logLine, parseArguments, prng, readJson, requireArgument, writeJson } from "./common";
 
 /**
@@ -39,7 +39,7 @@ async function main() {
   const args = parseArguments(process.argv.slice(2));
   const { queries } = readJson<{ queries: BenchmarkQuery[] }>(requireArgument(args, "queries"));
   const references = new Map(readJson<{ references: Array<Omit<ReferenceResult, "matchedPositions">> }>(requireArgument(args, "reference")).references.map((reference) => [reference.queryId, reference]));
-  const catalog = readJson<{ catalog: CatalogEntry[] }>(requireArgument(args, "catalog")).catalog;
+  const catalog = await readCatalog(requireArgument(args, "catalog"));
   const { store, reader } = await openGeneration(requireArgument(args, "root"), requireArgument(args, "generation"));
   const sidecars = await DerivedSourceSidecarSet.open(reader);
   if (sidecars.refusals.length > 0) throw new Error(`sidecar refused: ${JSON.stringify(sidecars.refusals.slice(0, 3))}`);

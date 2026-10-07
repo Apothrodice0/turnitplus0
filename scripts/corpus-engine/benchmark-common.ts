@@ -1,5 +1,8 @@
+import { createReadStream, createWriteStream, readFileSync } from "node:fs";
+import { createInterface } from "node:readline";
 import { CorpusGenerationReader } from "../../lib/corpus-engine/reader";
 import { LocalDirectoryObjectStore } from "../../lib/corpus-engine/storage";
+import { FAMILY_ADMISSION_POLICIES, type FamilyAdmissionPolicyId } from "../../lib/corpus-engine/family-admission";
 import { DEFAULT_VERIFIER_PATH, type VerifierPath } from "../../lib/corpus-engine/verifier-adapter";
 
 /**
@@ -26,6 +29,26 @@ export type CatalogEntry = {
   partition: number;
   segmentId: string;
 };
+
+/**
+ * A catalog file is either `{ catalog: [...] }` JSON or, for a corpus too large to hold as one JSON string
+ * (1M entries), JSON lines with one entry per line (`.jsonl`).
+ */
+export async function readCatalog(file: string): Promise<CatalogEntry[]> {
+  if (!file.endsWith(".jsonl")) return (JSON.parse(readFileSync(file, "utf8")) as { catalog: CatalogEntry[] }).catalog;
+  const entries: CatalogEntry[] = [];
+  for await (const line of createInterface({ input: createReadStream(file, { encoding: "utf8" }), crlfDelay: Infinity })) {
+    if (line.length > 0) entries.push(JSON.parse(line) as CatalogEntry);
+  }
+  return entries;
+}
+
+export async function writeCatalogJsonLines(file: string, entries: readonly CatalogEntry[]) {
+  const stream = createWriteStream(file, { encoding: "utf8" });
+  for (const entry of entries) if (!stream.write(`${JSON.stringify(entry)}
+`)) await new Promise<void>((resolve) => stream.once("drain", () => resolve()));
+  await new Promise<void>((resolve) => stream.end(() => resolve()));
+}
 
 export type IntendedSource = {
   docId: string;
@@ -60,6 +83,8 @@ export type BenchmarkQuery = {
   description: string;
   /** What the construction intends: a source the text was copied from, or none. */
   intendedSources: IntendedSource[];
+  /** Known sources of a reused submission that the generation no longer holds (e.g. revoked); not expected. */
+  excludedIntendedSources?: IntendedSource[];
   /** positive = at least one intended source is long enough for the verifier to admit. */
   expectation: "positive" | "negative" | "below-verifier-threshold";
   text: string;
@@ -92,6 +117,18 @@ export function verifierPathArgument(args: Record<string, string>, fallback: Ver
   if (value === undefined) return fallback;
   if (value !== "oracle" && value !== "prepared-submission") throw new Error(`--verifier-path must be "oracle" or "prepared-submission", not ${JSON.stringify(value)}`);
   return value;
+}
+
+/**
+ * `--family-policy <id>`: run a benchmark or reference under a named family admission policy instead of the
+ * engine's default (undefined). A reference meant to be re-verified under several policies is built under
+ * `strict-span-only-measurement`, so every STRICT_SPAN pair is recorded whatever a policy would make of it.
+ */
+export function familyPolicyArgument(args: Record<string, string>): FamilyAdmissionPolicyId | undefined {
+  const value = args["family-policy"];
+  if (value === undefined) return undefined;
+  if (!FAMILY_ADMISSION_POLICIES.includes(value as FamilyAdmissionPolicyId)) throw new Error(`unknown family policy ${JSON.stringify(value)}`);
+  return value as FamilyAdmissionPolicyId;
 }
 
 export async function openGeneration(root: string, generationId: string, options: { dictionaryBlockCacheBlocks?: number; dictionaryCacheBytes?: number } = {}) {

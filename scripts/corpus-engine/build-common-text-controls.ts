@@ -1,6 +1,6 @@
 import { computeQueryFingerprints, normalizeForCorpus } from "../../lib/corpus-engine/fingerprints";
 import { docIdFromDecimal, fingerprintFromHex } from "../../lib/corpus-engine/ids";
-import { openGeneration, type BenchmarkQuery, type CatalogEntry } from "./benchmark-common";
+import { openGeneration, readCatalog, type BenchmarkQuery, type CatalogEntry } from "./benchmark-common";
 import { logLine, parseArguments, percentile, readJson, requireArgument, writeJson } from "./common";
 
 /**
@@ -32,7 +32,7 @@ async function main() {
   const passagesPerControl = Number(args.passages ?? 4);
   const passageWords = Number(args["passage-words"] ?? 80);
   const { queries } = readJson<{ queries: BenchmarkQuery[] }>(requireArgument(args, "queries"));
-  const entries = readJson<{ catalog: CatalogEntry[] }>(requireArgument(args, "catalog")).catalog.filter((entry) => !entry.syntheticLoadOnly);
+  const entries = (await readCatalog(requireArgument(args, "catalog"))).filter((entry) => !entry.syntheticLoadOnly);
   const { store, reader } = await openGeneration(requireArgument(args, "root"), requireArgument(args, "generation"));
   if (!reader.highDf) throw new Error(`document-frequency artifact unavailable: ${reader.highDfFailure}`);
   const highDf = reader.highDf;

@@ -2,7 +2,7 @@ import { fork } from "node:child_process";
 import path from "node:path";
 import { retrieveCandidates } from "../../lib/corpus-engine/retrieval";
 import { admitCandidates, createVerifierArtifactView, finalizeVerification, type VerifierAdapterFailure } from "../../lib/corpus-engine/verifier-adapter";
-import { openGeneration, toRanges, verifierPathArgument, type BenchmarkQuery, type ReferenceResult } from "./benchmark-common";
+import { familyPolicyArgument, openGeneration, toRanges, verifierPathArgument, type BenchmarkQuery, type ReferenceResult } from "./benchmark-common";
 import { logLine, parseArguments, readJson, requireArgument, round, writeJson } from "./common";
 
 /**
@@ -10,7 +10,7 @@ import { logLine, parseArguments, readJson, requireArgument, round, writeJson } 
  * every document that shares at least one fingerprint with it — however many
  * that is, with no candidate budget and no ranking.
  *
- *   benchmark-touched-reference.ts --root R --generation G --queries queries.json --out-dir DIR [--workers 8]
+ *   benchmark-touched-reference.ts --root R --generation G --queries queries.json --out-dir DIR [--workers 8] [--family-policy P]
  *
  * It is what a retrieval layer with an unlimited budget would hand to the
  * verifier, so comparing a budgeted retrieval against it isolates exactly the
@@ -30,6 +30,7 @@ async function runWorker(args: Record<string, string>) {
   const worker = Number(requireArgument(args, "worker"));
   const workers = Number(requireArgument(args, "workers"));
   const verifierPath = verifierPathArgument(args);
+  const familyPolicy = familyPolicyArgument(args);
   const { queries } = readJson<{ queries: BenchmarkQuery[] }>(requireArgument(args, "queries"));
   const { store, reader } = await openGeneration(requireArgument(args, "root"), requireArgument(args, "generation"));
   const output: WorkerOutput = { worker, references: [] };
@@ -43,8 +44,8 @@ async function runWorker(args: Record<string, string>) {
       const touched = retrieval.candidates.map((candidate) => candidate.docId).sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
       const failures: VerifierAdapterFailure[] = [];
       const artifact = createVerifierArtifactView(reader, failures);
-      const pass = await admitCandidates(reader, query.text, touched, { artifact, failures }, { verifierPath });
-      const final = finalizeVerification(pass.identity, pass.submissionWordCount, pass.admissions, pass.failures, { verifierPath });
+      const pass = await admitCandidates(reader, query.text, touched, { artifact, failures }, { verifierPath, familyPolicy });
+      const final = finalizeVerification(pass.identity, pass.submissionWordCount, pass.admissions, pass.failures, { verifierPath, familyPolicy });
       const cpu = process.cpuUsage(cpuStarted);
       output.references.push({
         queryId: query.id,
@@ -95,6 +96,7 @@ async function runParent(args: Record<string, string>) {
       identity: reader.identity(),
       referenceKind: "all-touched-documents",
       verifierPath,
+      ...(familyPolicyArgument(args) !== undefined ? { familyPolicy: familyPolicyArgument(args) } : {}),
       documentsInGeneration: reader.manifest.documentCount,
       workers,
       wallSeconds: round((Date.now() - started) / 1000),

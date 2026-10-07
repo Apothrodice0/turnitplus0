@@ -4,7 +4,7 @@ import path from "node:path";
 import { docIdFromDecimal } from "../../lib/corpus-engine/ids";
 import { admitCandidates, createVerifierArtifactView, finalizeVerification, type CandidateAdmission, type VerifierAdapterFailure } from "../../lib/corpus-engine/verifier-adapter";
 import { selectiveCorpusSubmissionWords } from "../../lib/selective-corpus/verify";
-import { openGeneration, toRanges, verifierPathArgument, type BenchmarkQuery, type ReferenceResult } from "./benchmark-common";
+import { familyPolicyArgument, openGeneration, toRanges, verifierPathArgument, type BenchmarkQuery, type ReferenceResult } from "./benchmark-common";
 import { logLine, parseArguments, readJson, requireArgument, round, writeJson } from "./common";
 
 /**
@@ -12,7 +12,7 @@ import { logLine, parseArguments, readJson, requireArgument, round, writeJson } 
  * of the generation, for every benchmark submission.
  *
  *   benchmark-exhaustive.ts --root R --generation G --queries queries.json --out-dir DIR [--workers 10]
- *                           [--verifier-path oracle | prepared-submission]
+ *                           [--verifier-path oracle | prepared-submission] [--family-policy P]
  *
  * No retrieval is involved. Each worker process takes every N-th document and
  * runs the unmodified admission (admitSelectiveCorpusCandidate, via the same
@@ -47,7 +47,7 @@ async function runWorker(args: Record<string, string>) {
       const failures: VerifierAdapterFailure[] = [];
       const artifact = createVerifierArtifactView(reader, failures);
       const started = process.cpuUsage();
-      const pass = await admitCandidates(reader, query.text, mine, { artifact, failures, submissionWords: selectiveCorpusSubmissionWords(query.text) }, { verifierPath: verifierPathArgument(args, "oracle") });
+      const pass = await admitCandidates(reader, query.text, mine, { artifact, failures, submissionWords: selectiveCorpusSubmissionWords(query.text) }, { verifierPath: verifierPathArgument(args, "oracle"), familyPolicy: familyPolicyArgument(args) });
       const cpu = process.cpuUsage(started);
       output.results[query.id] = {
         // Only documents that reached STRICT_SPAN carry spans worth keeping; the rest are "no match".
@@ -94,7 +94,7 @@ async function runParent(args: Record<string, string>) {
       const failures = outputs.flatMap((output) => output.results[query.id].failures);
       const verified = outputs.reduce((total, output) => total + output.results[query.id].verified, 0);
       const submissionWordCount = selectiveCorpusSubmissionWords(query.text).length;
-      const final = finalizeVerification(reader.identity(), submissionWordCount, admissions, failures, { verifierPath });
+      const final = finalizeVerification(reader.identity(), submissionWordCount, admissions, failures, { verifierPath, familyPolicy: familyPolicyArgument(args) });
       references.push({
         queryId: query.id,
         submissionWordCount,
@@ -114,6 +114,7 @@ async function runParent(args: Record<string, string>) {
     writeJson(path.join(outDirectory, "reference.json"), {
       identity: reader.identity(),
       verifierPath,
+      ...(familyPolicyArgument(args) !== undefined ? { familyPolicy: familyPolicyArgument(args) } : {}),
       documentsInGeneration: documents,
       workers,
       wallSeconds: round((Date.now() - started) / 1000),
