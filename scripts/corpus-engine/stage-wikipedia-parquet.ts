@@ -23,6 +23,9 @@ import { logLine, parseArguments, requireArgument, wordsOf, writeJson } from "./
  * sha256(language + ":" + page id), first `--count`. So the sample does not
  * depend on row order and is not the shard's first N (which are the oldest,
  * longest articles). The bundle is written sorted by externalId.
+ *
+ * `--skip N` takes ranks N .. N+count-1 instead, so a later bundle of the same
+ * shard holds only articles an earlier one (`--skip 0`, same count rule) did not.
  */
 
 type Row = { id: string; url: string; title: string; text: string };
@@ -37,6 +40,7 @@ async function main() {
   const revision = requireArgument(args, "revision");
   const out = requireArgument(args, "out");
   const minimumWords = Number(args["min-words"] ?? 300);
+  const skip = Number(args.skip ?? 0);
   const toolDirectory = requireArgument(args, "hyparquet-dir");
   const load = (name: string, entry: string) => import(pathToFileURL(path.join(toolDirectory, "node_modules", name, entry)).href);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -67,7 +71,7 @@ async function main() {
   }
   eligible.sort((left, right) => (left.rank < right.rank ? -1 : left.rank > right.rank ? 1 : 0));
   const chosen = new Map<number, Set<number>>();
-  for (const item of eligible.slice(0, count)) {
+  for (const item of eligible.slice(skip, skip + count)) {
     if (!chosen.has(item.group)) chosen.set(item.group, new Set());
     (chosen.get(item.group) as Set<number>).add(item.index);
   }
@@ -103,7 +107,7 @@ async function main() {
             acquisitionSource: `huggingface.co/datasets/wikimedia/wikipedia:${shard}`,
             retrievedAt,
             sourceVersion: `dump:${dump}; dataset-revision:${revision}; page-id:${row.id}`,
-            notes: `bulk parquet shard; articles of >= ${minimumWords} words ordered by sha256("${language}:" + page id), first ${count}`,
+            notes: `bulk parquet shard; articles of >= ${minimumWords} words ordered by sha256("${language}:" + page id), ${skip > 0 ? `ranks ${skip}..${skip + count - 1}` : `first ${count}`}`,
           },
           extraction: "utf8-text-v1",
           raw: row.text,
@@ -115,7 +119,7 @@ async function main() {
   const stream = createWriteStream(out, { encoding: "utf8" });
   for (const item of lines) if (!stream.write(`${item.line}\n`)) await new Promise<void>((resolve) => stream.once("drain", () => resolve()));
   await new Promise<void>((resolve) => stream.end(() => resolve()));
-  const report = { language, parquet, shard, dump, revision, articlesInShard: total, eligible: eligible.length, minimumWords, staged: lines.length, words, out, retrievedAt };
+  const report = { language, parquet, shard, dump, revision, articlesInShard: total, eligible: eligible.length, minimumWords, skip, staged: lines.length, words, out, retrievedAt };
   writeJson(`${out}.stats.json`, report);
   logLine(`${language}: staged ${lines.length} of ${eligible.length} eligible (${total} in the shard), ${words} words -> ${out}`);
 }

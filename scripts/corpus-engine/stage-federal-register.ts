@@ -116,55 +116,54 @@ async function main() {
     (chosen.get(item.date) as Set<number>).add(item.index);
   }
 
+  // Rows are streamed in (issue date, element index) order, which is exactly externalId order
+  // (`FR-<date>-<4-digit index>`), so the bundle is sorted without holding it in memory.
   const retrievedAt = new Date().toISOString();
-  const rows: Array<{ externalId: string; line: string }> = [];
+  const stream = createWriteStream(out, { encoding: "utf8" });
+  let staged = 0;
   for (const issue of issues) {
     const wanted = chosen.get(issue.date);
     if (!wanted) continue;
     const elements = elementsOf(issue.file);
-    for (const index of wanted) {
+    for (const index of [...wanted].sort((left, right) => left - right)) {
       const element = elements[index];
       const type = /^<([A-Z]+)>/.exec(element)?.[1] ?? "NOTICE";
       byType[type] = (byType[type] ?? 0) + 1;
       const documentNumber = /<FRDOC>\[FR Doc\.\s*([A-Za-z0-9-]+)/.exec(element)?.[1] ?? null;
       const externalId = `FR-${issue.date}-${String(index).padStart(4, "0")}`;
-      rows.push({
+      const line = JSON.stringify({
+        provider: "us-gpo-govinfo",
+        dataset: "federal-register-bulk-xml",
+        datasetVersion: null,
         externalId,
-        line: JSON.stringify({
-          provider: "us-gpo-govinfo",
-          dataset: "federal-register-bulk-xml",
-          datasetVersion: null,
-          externalId,
-          canonicalUrl: documentNumber && /^\d{4}-\d+$/.test(documentNumber) ? `https://www.federalregister.gov/d/${documentNumber}` : `https://www.govinfo.gov/app/details/FR-${issue.date}`,
-          title: first(element, "SUBJECT"),
-          authors: first(element, "AGENCY") ? [first(element, "AGENCY") as string] : null,
-          publishedDate: issue.date,
-          sourceType: SOURCE_TYPE[type] ?? "federal-notice",
-          language: "en",
-          rights: {
-            license: "Public domain (United States Government work)",
-            licenseUrl: "https://www.govinfo.gov/about/policies",
-            usage: "Federal Register documents are works of the United States Government (17 U.S.C. 105) published by GPO as bulk data for reuse; storing and indexing the text is unrestricted.",
-            attribution: `Federal Register, ${issue.date}${documentNumber ? `, FR Doc. ${documentNumber}` : ""}; U.S. Government Publishing Office, govinfo.gov`,
-          },
-          provenance: {
-            acquisitionSource: `https://www.govinfo.gov/bulkdata/FR/${issue.date.slice(0, 4)}/${issue.date.slice(5, 7)}/FR-${issue.date}.xml`,
-            retrievedAt,
-            sourceVersion: `issue:FR-${issue.date}; element:${type}#${index}; fr-doc:${documentNumber ?? "none"}`,
-            notes: `documents of >= ${minimumWords} words ordered by sha256("FR-<date>:<element index>"), first ${count}`,
-          },
-          extraction: EXTRACTION,
-          raw: element,
-        }),
+        canonicalUrl: documentNumber && /^\d{4}-\d+$/.test(documentNumber) ? `https://www.federalregister.gov/d/${documentNumber}` : `https://www.govinfo.gov/app/details/FR-${issue.date}`,
+        title: first(element, "SUBJECT"),
+        authors: first(element, "AGENCY") ? [first(element, "AGENCY") as string] : null,
+        publishedDate: issue.date,
+        sourceType: SOURCE_TYPE[type] ?? "federal-notice",
+        language: "en",
+        rights: {
+          license: "Public domain (United States Government work)",
+          licenseUrl: "https://www.govinfo.gov/about/policies",
+          usage: "Federal Register documents are works of the United States Government (17 U.S.C. 105) published by GPO as bulk data for reuse; storing and indexing the text is unrestricted.",
+          attribution: `Federal Register, ${issue.date}${documentNumber ? `, FR Doc. ${documentNumber}` : ""}; U.S. Government Publishing Office, govinfo.gov`,
+        },
+        provenance: {
+          acquisitionSource: `https://www.govinfo.gov/bulkdata/FR/${issue.date.slice(0, 4)}/${issue.date.slice(5, 7)}/FR-${issue.date}.xml`,
+          retrievedAt,
+          sourceVersion: `issue:FR-${issue.date}; element:${type}#${index}; fr-doc:${documentNumber ?? "none"}`,
+          notes: `documents of >= ${minimumWords} words ordered by sha256("FR-<date>:<element index>"), first ${count}`,
+        },
+        extraction: EXTRACTION,
+        raw: element,
       });
+      staged += 1;
+      if (!stream.write(`${line}\n`)) await new Promise<void>((resolve) => stream.once("drain", () => resolve()));
     }
   }
-  rows.sort((left, right) => (left.externalId < right.externalId ? -1 : left.externalId > right.externalId ? 1 : 0));
-  const stream = createWriteStream(out, { encoding: "utf8" });
-  for (const row of rows) if (!stream.write(`${row.line}\n`)) await new Promise<void>((resolve) => stream.once("drain", () => resolve()));
   await new Promise<void>((resolve) => stream.end(() => resolve()));
-  writeJson(`${out}.stats.json`, { from, to, issues: issues.length, documentsInIssues: total, eligible: eligible.length, minimumWords, staged: rows.length, byType, out, retrievedAt });
-  logLine(`staged ${rows.length} of ${eligible.length} eligible (${total} documents in ${issues.length} issues) -> ${out}; ${JSON.stringify(byType)}`);
+  writeJson(`${out}.stats.json`, { from, to, issues: issues.length, documentsInIssues: total, eligible: eligible.length, minimumWords, staged, byType, out, retrievedAt });
+  logLine(`staged ${staged} of ${eligible.length} eligible (${total} documents in ${issues.length} issues) -> ${out}; ${JSON.stringify(byType)}`);
 }
 
 main().catch((error) => {

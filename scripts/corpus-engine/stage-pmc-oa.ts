@@ -24,6 +24,9 @@ import { logLine, parseArguments, requireArgument, wordsOf, writeJson } from "./
  *
  * "CC BY-NC*", "TDM" (text mining only) and a missing licence code are not
  * taken: they do not clearly permit storing the text in a commercial corpus.
+ * Only the latest version of an article in a listing page is examined; earlier
+ * versions are recorded as SKIP_SUPERSEDED_VERSION, so one article never
+ * supplies two near-identical documents.
  *
  * Resumable: every accepted article is appended to `<work>/accepted.jsonl` and
  * every examined key to `<work>/examined.log` as it completes; a re-run skips
@@ -51,6 +54,12 @@ async function get(url: string): Promise<string> {
 async function listMetadataKeys(startAfter: string, maximum: number): Promise<string[]> {
   const body = await get(`${BUCKET}/?list-type=2&max-keys=${maximum}&prefix=metadata/&start-after=${encodeURIComponent(startAfter)}`);
   return [...body.matchAll(/<Key>([^<]+)<\/Key>/g)].map((match) => match[1]);
+}
+
+/** `metadata/PMC123.2.json` -> ["PMC123", 2]. */
+function articleVersionOf(key: string): [string, number] {
+  const match = /^metadata\/(PMC\d+)\.(\d+)\.json$/.exec(key);
+  return match ? [match[1], Number(match[2])] : [key, 0];
 }
 
 function headerField(raw: string, name: string): string | null {
@@ -148,6 +157,16 @@ async function main() {
       const keys = await listMetadataKeys(cursor, 1000);
       if (keys.length === 0) break;
       cursor = keys[keys.length - 1];
+      // One version per article: a key is superseded when the same listing page holds a later version of its PMCID.
+      const latestVersion = new Map<string, number>();
+      for (const key of keys) {
+        const [pmcid, version] = articleVersionOf(key);
+        latestVersion.set(pmcid, Math.max(latestVersion.get(pmcid) ?? 0, version));
+      }
+      for (const key of keys) {
+        const [pmcid, version] = articleVersionOf(key);
+        if (!examined.has(key) && version < (latestVersion.get(pmcid) as number)) record(anchor, key, "SKIP_SUPERSEDED_VERSION");
+      }
       const pending = keys.filter((key) => !examined.has(key));
       let next = 0;
       await Promise.all(Array.from({ length: concurrency }, async () => {
@@ -193,7 +212,9 @@ async function main() {
   }
   await new Promise<void>((resolve) => stream.end(() => resolve()));
   closeSync(accepted);
-  writeJson(`${out}.stats.json`, { anchors, perAnchor, minimumWords, acceptedLicenses: [...ACCEPTED_LICENSES], staged: rows.length, acceptedPerAnchor, outcomes, out });
+  // A version split across two listing pages would leave two versions of one article: count them, never hide them.
+  const articles = new Set(rows.map((row) => row.externalId.replace(/\.\d+$/, "")));
+  writeJson(`${out}.stats.json`, { anchors, perAnchor, minimumWords, acceptedLicenses: [...ACCEPTED_LICENSES], staged: rows.length, distinctArticles: articles.size, articlesWithTwoStagedVersions: rows.length - articles.size, acceptedPerAnchor, outcomes, out });
   logLine(`staged ${rows.length} articles -> ${out}; outcomes ${JSON.stringify(outcomes)}`);
 }
 

@@ -172,10 +172,33 @@ class SyntheticMirrorAliasAdapter implements SourceAdapter {
   }
 }
 
+/**
+ * Rows [from, to) of a JSON-lines bundle (row numbers in the bundle's own sorted order), so one large staged
+ * bundle can feed several bounded increments without being copied. Skipped rows are not yielded at all.
+ */
+class JsonLinesBundleRangeAdapter implements SourceAdapter {
+  readonly adapterId: string;
+  private readonly inner: JsonLinesBundleSourceAdapter;
+  constructor(bundle: string, private readonly from: number, private readonly to: number) {
+    this.inner = new JsonLinesBundleSourceAdapter(bundle);
+    this.adapterId = `${this.inner.adapterId}[${from},${Number.isFinite(to) ? to : "end"})`;
+  }
+
+  async *documents(): AsyncGenerator<SourceDocument> {
+    let row = -1;
+    for await (const document of this.inner.documents()) {
+      row += 1;
+      if (row < this.from) continue;
+      if (row >= this.to) break;
+      yield document;
+    }
+  }
+}
+
 export type SourceSpec =
   | { kind: "selective-bulk"; directory: string; dataset: string; from?: number; to?: number }
   | { kind: "local-fixture"; manifest: string }
-  | { kind: "jsonl-bundle"; bundle: string }
+  | { kind: "jsonl-bundle"; bundle: string; from?: number; to?: number }
   | { kind: "synthetic-boilerplate"; count: number; seed: number }
   | { kind: "synthetic-near-duplicate-family"; count: number }
   | { kind: "synthetic-mirror"; of: SourceSpec; every: number; limit: number };
@@ -187,7 +210,9 @@ export function adapterFor(spec: SourceSpec): SourceAdapter {
     case "local-fixture":
       return new LocalFixtureSourceAdapter(spec.manifest);
     case "jsonl-bundle":
-      return new JsonLinesBundleSourceAdapter(spec.bundle);
+      return spec.from === undefined && spec.to === undefined
+        ? new JsonLinesBundleSourceAdapter(spec.bundle)
+        : new JsonLinesBundleRangeAdapter(spec.bundle, spec.from ?? 0, spec.to ?? Number.POSITIVE_INFINITY);
     case "synthetic-boilerplate":
       return new SyntheticBoilerplateFamilyAdapter(spec.count, spec.seed);
     case "synthetic-near-duplicate-family":
