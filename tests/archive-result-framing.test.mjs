@@ -72,6 +72,9 @@ function legacyFraming(text, result, search, risk) {
     },
     corpusVersion: search.corpusVersion,
     sources: result.sources.map(({ sourceIndex: _sourceIndex, ...source }) => source),
+    // Not in the pre-2E tail: the one additive field of the Gold-gap source
+    // accounting (lib/archive-result-framing.ts), passed through verbatim.
+    verifiedSourceCount: result.verifiedSourceCount,
     repeats,
   };
 }
@@ -88,6 +91,7 @@ function scoringResult(overrides = {}) {
       { sourceIndex: 7, name: "Some Journal Article", type: "Publication", color: "#d7263d", matches: 2, matchedWords: 30, phrases: ["a distinctive shared phrase here"], percent: 3 },
       { sourceIndex: 21, name: "Another Publication", type: "Publication", color: "#d7263d", matches: 1, matchedWords: 10, phrases: ["second distinctive phrase"], percent: 1 },
     ],
+    verifiedSourceCount: 2,
     maxSourceContainment: 0.123,
     longestMatchedSpan: 7,
     highFrequencyShingleCount: 4,
