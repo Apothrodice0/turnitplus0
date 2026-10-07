@@ -208,3 +208,84 @@ export function stripReferenceSection(text: string): string {
   const start = findReferenceSectionStart(text);
   return start >= 0 ? text.slice(0, start) : text;
 }
+
+/**
+ * GOLD GAP — footnotes/endnotes placed after the bibliography by extraction.
+ *
+ * lib/docx-text-extraction.ts converts a DOCX through mammoth.convertToHtml,
+ * whose writeNotes() appends every footnote and endnote AFTER the body, as
+ * `<li id="footnote-N"><p>…</p><p>… <a href="#footnote-ref-N">↑</a></p></li>`,
+ * and marks each reference in the body as `<sup><a …>[N]</a></sup>`.
+ * lib/html-text-extraction.ts turns that into plain text in which:
+ *   - the body carries the anchors "[1]", "[2]", …;
+ *   - every note ends with the back-link "↑";
+ *   - consecutive notes are separated by a blank line (`</p></li>`), while the
+ *     paragraphs inside one note, and the last body paragraph before the first
+ *     note, are separated by a single line break.
+ * So a paper whose body ends with "Bibliography:" has all its notes AFTER the
+ * bibliography, and findReferenceSectionStart's cut discarded every one of
+ * them (confirmed on the Gold case: 32 footnotes, ~880 words).
+ *
+ * This reads that extraction structure — never prose — and returns where the
+ * trailing note block begins, or -1:
+ *   - the text must end with a note back-link;
+ *   - walking back over blank-line-separated blocks, every block of the run
+ *     must end with a back-link (a block that does not ends the run, so the
+ *     notes before it stay wherever they are today);
+ *   - the earliest block of the run can also hold the body/bibliography lines
+ *     just before the first note (one line break apart), so only its LAST
+ *     line is taken as the first note's start (a multi-paragraph first note
+ *     keeps only its last paragraph — conservative);
+ *   - the text before the block must carry the first note's anchor "[1]".
+ * Repeated running headers are never part of this block: DOCX extraction never
+ * reads header/footer parts, and PDF page furniture is stripped earlier
+ * (lib/pdf-page-furniture.ts).
+ */
+const NOTE_BACKLINK = "↑";
+const BLANK_LINE = /\n[^\S\n]*\n/g;
+
+export function findAppendedNotesStart(text: string): number {
+  const end = text.trimEnd().length;
+  if (end === 0 || text[end - 1] !== NOTE_BACKLINK) return -1;
+  // [start, end) of every blank-line-separated block, in document order.
+  const blocks: Array<{ start: number; end: number }> = [];
+  let blockStart = 0;
+  for (const separator of text.slice(0, end).matchAll(BLANK_LINE)) {
+    blocks.push({ start: blockStart, end: separator.index });
+    blockStart = separator.index + separator[0].length;
+  }
+  blocks.push({ start: blockStart, end });
+  let earliest = -1;
+  for (let index = blocks.length - 1; index >= 0; index -= 1) {
+    if (!text.slice(blocks[index].start, blocks[index].end).trimEnd().endsWith(NOTE_BACKLINK)) break;
+    earliest = index;
+  }
+  if (earliest < 0) return -1;
+  const first = blocks[earliest];
+  const lastLineBreak = text.lastIndexOf("\n", text.slice(first.start, first.end).trimEnd().length + first.start - 1);
+  const notesStart = lastLineBreak >= first.start ? lastLineBreak + 1 : first.start;
+  return text.slice(0, notesStart).includes("[1]") ? notesStart : -1;
+}
+
+/**
+ * The similarity-analysis view of `text`: BODY and legitimate FOOTNOTE/ENDNOTE
+ * text stay, the BIBLIOGRAPHY/REFERENCES list does not.
+ *
+ * The bibliography is found exactly as before (findReferenceSectionStart, on
+ * the whole text). When a trailing note block (findAppendedNotesStart) starts
+ * AFTER it, the bibliography between the two is replaced by the same number of
+ * spaces instead of the notes being cut with it. Otherwise this is
+ * stripReferenceSection(text), unchanged.
+ *
+ * Same-length blanking keeps every character offset an offset into `text`
+ * (tokenSpans' contract), and the word sequence is the previous one with the
+ * note words appended: every word index computed before this change still
+ * names the same word.
+ */
+export function stripReferenceSectionKeepingNotes(text: string): string {
+  const referenceStart = findReferenceSectionStart(text);
+  if (referenceStart < 0) return text;
+  const notesStart = findAppendedNotesStart(text);
+  if (notesStart <= referenceStart) return text.slice(0, referenceStart);
+  return text.slice(0, referenceStart) + " ".repeat(notesStart - referenceStart) + text.slice(notesStart);
+}

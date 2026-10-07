@@ -1,4 +1,4 @@
-import { stripReferenceSection } from "./reference-section";
+import { stripReferenceSection, stripReferenceSectionKeepingNotes } from "./reference-section";
 
 export const COMMON_WORDS = new Set([
   "a", "an", "and", "are", "as", "at", "be", "by", "de", "des", "du", "en",
@@ -174,9 +174,13 @@ export function reportScoringNormalizationVersion(
  * lib/reference-section.ts's shared, format-agnostic detector — see that
  * file's own header comment for why the previous newline-anchored regex
  * here silently never fired for PDF-extracted text.
+ *
+ * GOLD GAP: footnotes/endnotes that extraction appended after the
+ * bibliography stay in (stripReferenceSectionKeepingNotes); the bibliography
+ * itself is still excluded.
  */
 export function comparisonText(value: string) {
-  return stripReferenceSection(value);
+  return stripReferenceSectionKeepingNotes(value);
 }
 
 export function tokens(value: string) {
@@ -211,8 +215,20 @@ export function tokensForScoringNormalization(value: string, version: ScoringNor
  */
 export function scoringNormalizationEvidence(value: string, wordCount: unknown): ScoringNormalizationVersion | "either" | null {
   if (!hasScoringIgnorableFormatCharacter(value)) return "either";
-  const v1Count = tokensForScoringNormalization(value, 1).length;
-  const v2Count = tokensForScoringNormalization(value, 2).length;
+  const analysed = comparisonText(value);
+  const evidence = wordCountEvidence(analysed, wordCount);
+  const beforeNotes = stripReferenceSection(value);
+  if (evidence !== null || beforeNotes === analysed) return evidence;
+  // GOLD GAP: a report counted before appended footnotes/endnotes were part of
+  // the analysed text (its saved wordCount, or a browser still on the previous
+  // bundle). That word sequence is a prefix of this one, so its positions
+  // still name the same words; judge its count in the space it was taken in.
+  return wordCountEvidence(beforeNotes, wordCount);
+}
+
+function wordCountEvidence(analysed: string, wordCount: unknown): ScoringNormalizationVersion | "either" | null {
+  const v1Count = normalizeForScoringVersion(1)(analysed).split(" ").filter(Boolean).length;
+  const v2Count = normalizeForScoringVersion(2)(analysed).split(" ").filter(Boolean).length;
   if (v1Count === v2Count) return "either";
   if (wordCount === v1Count) return 1;
   if (wordCount === v2Count) return 2;
@@ -264,10 +280,10 @@ function sameScoringToken(derived: string, scored: string) {
  * Unified-similarity highlighting fix: the same word sequence tokens(value)
  * produces, but each entry additionally carries its character [start, end)
  * offset into comparisonText(value) — and therefore into `value` itself
- * too, since stripReferenceSection only ever removes a trailing suffix (see
- * lib/reference-section.ts's own stripReferenceSection: `text.slice(0,
- * start)`), never reorders or edits the prefix any of these offsets fall
- * within.
+ * too, since comparisonText only ever removes a trailing suffix or blanks a
+ * bibliography to the same number of spaces (see lib/reference-section.ts's
+ * stripReferenceSectionKeepingNotes), never reorders, shortens or edits the
+ * text any of these offsets fall within.
  *
  * Display-token span alignment: a raw letters-or-digits scan is NOT the same
  * word sequence as tokens() — a combining mark inside a word (NFD accents,

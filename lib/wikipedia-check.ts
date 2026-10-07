@@ -38,7 +38,9 @@ export async function runWikipediaCheck(
   const fetcher = options.fetcher ?? fetch;
   const bodyText = comparisonText(text);
   const phrases = selectPhrases(bodyText, bodyText, count);
-  const referenceSectionRemoved = bodyText.trim().length < text.trim().length;
+  // Non-whitespace count, not length: comparisonText can blank a bibliography
+  // to spaces (keeping appended notes) instead of cutting it off.
+  const referenceSectionRemoved = bodyText.replace(/\s+/g, "").length < text.replace(/\s+/g, "").length;
   const normalizedSubmissionTitle = normalize(
     (options.submissionTitle ?? "").replace(/\.[a-z0-9]{1,8}$/i, ""),
   );
