@@ -72,15 +72,18 @@ export type CandidateRankingPolicy = {
 };
 
 /**
- * Engineering defaults for the 10k checkpoint — NOT production constants. The
- * budget, the region width and the suppression threshold are all measured at
- * each checkpoint and are expected to move before the 100k format freeze.
+ * The measured defaults (100k checkpoint, re-checked under
+ * corpus-family-admission-v2 in the pre-1M hardening): region-aware, 200-word
+ * regions, 25 per region, K = 250 — the smallest budget with no matched
+ * position or score difference against the all-touched reference. The
+ * algorithm (candidate-ranking-v1) is frozen; these parameters are query-time
+ * and every request may name its own.
  */
 export const DEFAULT_CANDIDATE_RANKING_POLICY: CandidateRankingPolicy = {
   version: CANDIDATE_RANKING_POLICY_VERSION,
   regionWords: 200,
   regionListDepth: 25,
-  candidateBudget: 500,
+  candidateBudget: 250,
   maxDiscoveryDocumentFrequency: null,
   minimumFingerprintHits: 1,
   regionAware: true,

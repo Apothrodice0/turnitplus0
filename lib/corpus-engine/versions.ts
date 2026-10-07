@@ -21,13 +21,49 @@ import {
  * stores the whole CorpusProcessingIdentity, and a reader refuses a generation
  * whose identity this build cannot reproduce (assertProcessingIdentitySupported).
  *
- * STATUS: candidate formats. They are deliberately NOT frozen at the 10k
- * checkpoint — the intended freeze point is the 100k checkpoint, after real
- * measurements. Any change to a byte layout or to a rule below is a new
- * version string, never an edit in place.
+ * STATUS: FROZEN (2026-10-07, after the 100k checkpoint and the pre-1M
+ * hardening). The core formats below — corpus layout and generation manifest,
+ * index segment, postings codec, record pack, retrieval protocol and the
+ * candidate-ranking algorithm — are frozen as v1. Their bytes and rules are
+ * never edited in place: tests/corpus-engine-format-freeze.test.mjs pins the
+ * bytes a fixed build produces, and any incompatible change is a new "-v2"
+ * version string that readers of v1 refuse.
+ *
+ * NOT part of the frozen core, and versioned on their own:
+ *   - the family admission policy (lib/corpus-engine/family-admission.ts),
+ *     which is query-time and never changes stored bytes;
+ *   - the derived-source sidecar (lib/corpus-engine/derived-source.ts), an
+ *     optional, rebuildable artifact beside the segments;
+ *   - the ranking policy's parameters (budget K, region width), which every
+ *     request names; the measured default is K = 250.
+ *
+ * Generations built before the freeze record "candidate-unfrozen". The
+ * status is not compared when a generation is opened (the formats did not
+ * change), so they stay servable.
  */
 
-export const CORPUS_FORMAT_STATUS = "candidate-unfrozen" as const;
+export const CORPUS_FORMAT_STATUS = "frozen" as const;
+
+/** The core formats CORPUS_FORMAT_STATUS covers. */
+export const FROZEN_CORE_FORMATS = [
+  "corpus-engine-format-v1",
+  "index-segment-v1",
+  "postings-delta-varint-v1",
+  "record-pack-v1",
+  /** The manifest shape (manifestKind "turnitplus-corpus-generation"), defined by corpus-engine-format-v1. */
+  "generation-manifest-v1",
+  "retrieval-protocol-v1",
+  "candidate-ranking-v1",
+] as const;
+
+/**
+ * The physical layout chosen for the 1M root: 16 document partitions
+ * (~62.5k documents each at 1M, ~312.5k at 5M). partitionBits is fixed when a
+ * root generation is built and inherited by every increment; the 100k root
+ * keeps its 2 bits. One more bit later splits each partition in two without
+ * moving any document of another partition (partition-docid-prefix-v1).
+ */
+export const CORPUS_1M_ROOT_PARTITION_BITS = 4;
 
 /** Directory layout, generation manifest shape, segment/generation identity rules. */
 export const CORPUS_FORMAT_VERSION = "corpus-engine-format-v1";
