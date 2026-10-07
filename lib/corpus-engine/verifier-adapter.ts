@@ -1,18 +1,37 @@
 import { performance } from "node:perf_hooks";
+import { compareSubmissionToExternalText } from "../academic-search/comparator";
 import type { SelectiveCorpusArtifact } from "../selective-corpus/artifact";
 import { disambiguateSelectiveCorpusCoSources } from "../selective-corpus/co-source";
 import { SELECTIVE_CORPUS_STOP_DF } from "../selective-corpus/constants";
 import {
   admitSelectiveCorpusCandidate,
   selectiveCorpusSubmissionWords,
+  type SelectiveCorpusAdmissionResult,
   type SelectiveCorpusVerifiedSpan,
 } from "../selective-corpus/verify";
 import { currentScoringNormalizationVersion, mergeAdjacentPositions } from "../similarity-core";
 import { computeUnifiedSimilarity } from "../unified-similarity";
+import {
+  admitFamilyAware,
+  admitOnStrictSpanOnly,
+  createFamilyAdmissionContext,
+  DEFAULT_FAMILY_ADMISSION_POLICY,
+  FAMILY_ADMISSION_POLICY_AWARE_V2,
+  FAMILY_ADMISSION_POLICY_GUARD_V1,
+  resolveFamilyRepresentatives,
+  spansOfMatchedPassages,
+  type CorpusFamilyEvidence,
+  type FamilyAdmissionContext,
+  type FamilyAdmissionPolicyId,
+  type FamilyResolution,
+  type FamilyRole,
+  type SpanFamilyClass,
+} from "./family-admission";
 import type { HighDocumentFrequencyTable } from "./generation";
 import { docIdToDecimal, fingerprintFromHex } from "./ids";
 import {
   assertPreparedSubmissionForAdmission,
+  comparePreparedSubmissionToCandidate,
   prepareSubmissionForVerification,
   PreparedSubmissionContractError,
   verifyPreparedSubmissionAgainstCandidate,
@@ -65,6 +84,25 @@ import { toSegmentError, type SegmentReader } from "./segment";
  *
  * Both thresholds stay the verifier's own constants. Discovery-time
  * suppression in the ranking policy never reaches this file.
+ *
+ * THE FAMILY RULE IS A NAMED POLICY (FamilyAdmissionPolicyId, ./family-admission.ts),
+ * separate from the matcher and from the path above:
+ *
+ *   "selective-family-guard-v1"     the release candidate's FAMILY_GUARD, as
+ *                                   described above and exactly as verify.ts
+ *                                   applies it.
+ *   "corpus-family-admission-v2"    (default) the same matcher and STRICT_SPAN,
+ *                                   then family-aware admission: a passage held
+ *                                   by a family of sources is attributed to one
+ *                                   representative instead of to nobody. It
+ *                                   reads the generation through
+ *                                   createFamilyEvidenceView — every holder of a
+ *                                   fingerprint, with no stop set.
+ *
+ * Under v2 a candidate can come out of admission as a FAMILY_MEMBER. Whether a
+ * member is attributed depends on the other candidates of the query, so it is
+ * decided in finalizeVerification, immediately before the unchanged co-source
+ * attribution, union and score.
  */
 
 export type VerifierAdapterFailure = { stage: "text-fetch" | "family-guard" | "contract"; docId: string | null; partition: number | null; segmentId: string | null; code: string; message: string };
@@ -81,16 +119,12 @@ class GenerationStopHashes extends Set<string> {
 }
 
 /**
- * The pinned generation, presented as the artifact shape the existing verifier
- * reads. Documents are identified to the verifier by a dense uint32 that is
- * stable for the life of the view (it only counts distinct documents).
+ * Every non-revoked document of the pinned generation holding a fingerprint,
+ * as a dense uint32 that is stable for the life of the lookup (it only counts
+ * distinct documents). A segment that cannot answer is reported once, as a
+ * family-guard failure, and skipped — the verification is then PARTIAL.
  */
-export function createVerifierArtifactView(reader: CorpusGenerationReader, failures: VerifierAdapterFailure[]): SelectiveCorpusArtifact {
-  if (!reader.highDf) throw new Error(`the generation's document-frequency artifact is unavailable: ${reader.highDfFailure ?? "unknown"}`);
-  if (reader.highDf.recordFloor > SELECTIVE_CORPUS_STOP_DF) {
-    throw new Error(`the generation records df only from ${reader.highDf.recordFloor}; the verifier's stop test needs df >= ${SELECTIVE_CORPUS_STOP_DF}`);
-  }
-  const stopHashes = new GenerationStopHashes(reader.highDf);
+function createHolderLookup(reader: CorpusGenerationReader, failures: VerifierAdapterFailure[]) {
   const bases: number[] = [];
   let total = 0;
   for (const slot of reader.slots) {
@@ -98,10 +132,8 @@ export function createVerifierArtifactView(reader: CorpusGenerationReader, failu
     total += slot.reader?.documentCount ?? reader.manifest.segments[slot.segmentId].documentCount;
   }
   const reportedSlots = new Set<number>();
-  const memo = new Map<string, Promise<Uint32Array | undefined>>();
 
-  const lookup = async (hex: string): Promise<Uint32Array | undefined> => {
-    if (stopHashes.has(hex)) return undefined;
+  const holdersOf = async (hex: string): Promise<Uint32Array | undefined> => {
     const key = fingerprintFromHex(hex);
     const holders: number[] = [];
     for (let index = 0; index < reader.slots.length; index += 1) {
@@ -130,6 +162,44 @@ export function createVerifierArtifactView(reader: CorpusGenerationReader, failu
     }
     return holders.length > 0 ? Uint32Array.from(holders) : undefined;
   };
+  return { holdersOf, reportedSlots };
+}
+
+/**
+ * The pinned generation as the evidence corpus-family-admission-v2 reads:
+ * every holder of a fingerprint, common ones included. Answers are kept for
+ * the life of the view, which is one query.
+ */
+export function createFamilyEvidenceView(reader: CorpusGenerationReader, failures: VerifierAdapterFailure[]): CorpusFamilyEvidence {
+  const { holdersOf } = createHolderLookup(reader, failures);
+  const memo = new Map<string, Promise<Uint32Array | undefined>>();
+  return {
+    documentCount: reader.manifest.documentCount,
+    holders(fingerprintHex: string) {
+      let pending = memo.get(fingerprintHex);
+      if (!pending) {
+        pending = holdersOf(fingerprintHex);
+        memo.set(fingerprintHex, pending);
+      }
+      return pending;
+    },
+  };
+}
+
+/**
+ * The pinned generation, presented as the artifact shape the existing verifier
+ * reads (FAMILY_GUARD v1): stop fingerprints have no postings, as in the
+ * packed artifact.
+ */
+export function createVerifierArtifactView(reader: CorpusGenerationReader, failures: VerifierAdapterFailure[]): SelectiveCorpusArtifact {
+  if (!reader.highDf) throw new Error(`the generation's document-frequency artifact is unavailable: ${reader.highDfFailure ?? "unknown"}`);
+  if (reader.highDf.recordFloor > SELECTIVE_CORPUS_STOP_DF) {
+    throw new Error(`the generation records df only from ${reader.highDf.recordFloor}; the verifier's stop test needs df >= ${SELECTIVE_CORPUS_STOP_DF}`);
+  }
+  const stopHashes = new GenerationStopHashes(reader.highDf);
+  const { holdersOf, reportedSlots } = createHolderLookup(reader, failures);
+  const memo = new Map<string, Promise<Uint32Array | undefined>>();
+  const lookup = async (hex: string): Promise<Uint32Array | undefined> => (stopHashes.has(hex) ? undefined : holdersOf(hex));
 
   return {
     artifactPath: `corpus-engine:${reader.generationId}`,
@@ -169,9 +239,21 @@ export type CandidateAdmission = {
   docId: string;
   /** Position in the order the candidates were handed in (0-based). */
   order: number;
-  outcome: "ADMITTED" | "NOT_ADMITTED" | "TEXT_REVOKED" | "TEXT_NOT_FOUND" | "TEXT_FAILED";
+  /**
+   * FAMILY_MEMBER occurs only under corpus-family-admission-v2: the candidate
+   * holds verified, non-generic text that a family of sources shares, and
+   * finalizeVerification decides whether it stands for that family.
+   */
+  outcome: "ADMITTED" | "FAMILY_MEMBER" | "NOT_ADMITTED" | "TEXT_REVOKED" | "TEXT_NOT_FOUND" | "TEXT_FAILED";
   reason: string;
+  /** Every span the matcher verified, longest first. */
   spans: SelectiveCorpusVerifiedSpan[];
+  /** The spans this candidate brings to the union if it is attributed (all of them, or a family member's non-generic ones). */
+  creditedSpans: SelectiveCorpusVerifiedSpan[];
+  /** v2 only: the candidate's role, and what the generation holds of its dominant span. Null under the other policies. */
+  familyRole: FamilyRole | null;
+  dominantSpanClass: SpanFamilyClass | null;
+  dominantSpanHolders: number | null;
   totalMatchedWords: number;
   longestSpan: number;
   strictSpanPass: boolean;
@@ -195,6 +277,7 @@ export type AdmissionPass = {
   admissions: CandidateAdmission[];
   failures: VerifierAdapterFailure[];
   verifierPath: VerifierPath;
+  familyPolicy: FamilyAdmissionPolicyId;
   /** Time spent preparing the submission in THIS pass: 0 on the oracle path, and 0 when the caller handed in a prepared submission. */
   prepareMs: number;
 };
@@ -208,18 +291,24 @@ export type AdmissionPass = {
  * candidate. A caller that makes several passes over one submission prepares
  * it itself and hands it in as `shared.preparedSubmission`; `submissionWords`
  * is then not consulted (the prepared submission carries the same words).
+ *
+ * `familyPolicy` names the family rule (default: the engine's). A caller that
+ * makes several passes over one submission under v2 hands in one
+ * `shared.familyContext`, so each distinct span is classified once.
  */
 export async function admitCandidates(
   reader: CorpusGenerationReader,
   submissionText: string,
   candidateDocIds: readonly bigint[],
-  shared?: { artifact: SelectiveCorpusArtifact; failures: VerifierAdapterFailure[]; submissionWords?: string[]; preparedSubmission?: PreparedSubmission },
-  options: { verifierPath?: VerifierPath } = {},
+  shared?: { artifact?: SelectiveCorpusArtifact; familyContext?: FamilyAdmissionContext; failures: VerifierAdapterFailure[]; submissionWords?: string[]; preparedSubmission?: PreparedSubmission },
+  options: { verifierPath?: VerifierPath; familyPolicy?: FamilyAdmissionPolicyId } = {},
 ): Promise<AdmissionPass> {
   const failures = shared?.failures ?? [];
   const identity = reader.identity();
   const verifierPath = options.verifierPath ?? DEFAULT_VERIFIER_PATH;
-  const refused = (): AdmissionPass => ({ identity, submissionWordCount: 0, admissions: [], failures, verifierPath, prepareMs: 0 });
+  const familyPolicy = options.familyPolicy ?? DEFAULT_FAMILY_ADMISSION_POLICY;
+  const guardV1 = familyPolicy === FAMILY_ADMISSION_POLICY_GUARD_V1;
+  const refused = (): AdmissionPass => ({ identity, submissionWordCount: 0, admissions: [], failures, verifierPath, familyPolicy, prepareMs: 0 });
   const ambient = currentScoringNormalizationVersion();
   if (ambient !== reader.manifest.processing.normalization.version) {
     failures.push({
@@ -228,12 +317,15 @@ export async function admitCandidates(
     });
     return refused();
   }
-  let artifact: SelectiveCorpusArtifact;
-  try {
-    artifact = shared?.artifact ?? createVerifierArtifactView(reader, failures);
-  } catch (error) {
-    failures.push({ stage: "contract", docId: null, partition: null, segmentId: null, code: "DF_ARTIFACT_UNAVAILABLE", message: error instanceof Error ? error.message : String(error) });
-    return refused();
+  // The v1 guard reads the generation through the artifact view (it needs the df artifact); the other policies do not.
+  let artifact: SelectiveCorpusArtifact | null = null;
+  if (guardV1) {
+    try {
+      artifact = shared?.artifact ?? createVerifierArtifactView(reader, failures);
+    } catch (error) {
+      failures.push({ stage: "contract", docId: null, partition: null, segmentId: null, code: "DF_ARTIFACT_UNAVAILABLE", message: error instanceof Error ? error.message : String(error) });
+      return refused();
+    }
   }
   let prepared: PreparedSubmission | null = null;
   let prepareMs = 0;
@@ -254,12 +346,15 @@ export async function admitCandidates(
     }
   }
   const submissionWords: readonly string[] = prepared ? prepared.words : shared?.submissionWords ?? selectiveCorpusSubmissionWords(submissionText);
+  const familyContext = familyPolicy === FAMILY_ADMISSION_POLICY_AWARE_V2
+    ? shared?.familyContext ?? createFamilyAdmissionContext(submissionWords, createFamilyEvidenceView(reader, failures))
+    : null;
 
   const admissions: CandidateAdmission[] = [];
   for (let order = 0; order < candidateDocIds.length; order += 1) {
     const docId = candidateDocIds[order];
     const decimal = docIdToDecimal(docId);
-    const blank = { docId: decimal, order, spans: [], totalMatchedWords: 0, longestSpan: 0, strictSpanPass: false, familyGuardActivated: false, dominantSpanBoilerplate: false, textCompressedBytesRead: 0, textDecompressedBytes: 0, textReadMs: 0, textDecodeMs: 0, verifyMs: 0 };
+    const blank = { docId: decimal, order, spans: [], creditedSpans: [], familyRole: null, dominantSpanClass: null, dominantSpanHolders: null, totalMatchedWords: 0, longestSpan: 0, strictSpanPass: false, familyGuardActivated: false, dominantSpanBoilerplate: false, textCompressedBytesRead: 0, textDecompressedBytes: 0, textReadMs: 0, textDecodeMs: 0, verifyMs: 0 };
     const fetched = await reader.fetchText(docId);
     if (fetched.state === "REVOKED") {
       admissions.push({ ...blank, outcome: "TEXT_REVOKED", reason: "document is revoked; its text is not served" });
@@ -276,15 +371,39 @@ export async function admitCandidates(
       continue;
     }
     const verifyStarted = performance.now();
-    const result = prepared
-      ? await verifyPreparedSubmissionAgainstCandidate(prepared, fetched.text, artifact)
-      : await admitSelectiveCorpusCandidate(submissionText, submissionWords, fetched.text, artifact);
+    let result: SelectiveCorpusAdmissionResult;
+    let creditedSpans: SelectiveCorpusVerifiedSpan[];
+    let familyRole: FamilyRole | null = null;
+    let dominantSpanClass: SpanFamilyClass | null = null;
+    let dominantSpanHolders: number | null = null;
+    if (guardV1) {
+      result = prepared
+        ? await verifyPreparedSubmissionAgainstCandidate(prepared, fetched.text, artifact as SelectiveCorpusArtifact)
+        : await admitSelectiveCorpusCandidate(submissionText, submissionWords, fetched.text, artifact as SelectiveCorpusArtifact);
+      creditedSpans = result.admitted ? result.spans : [];
+    } else {
+      // The matcher is the same one on both paths; only the family rule after it differs from v1.
+      const comparison = prepared ? comparePreparedSubmissionToCandidate(prepared, fetched.text) : compareSubmissionToExternalText(submissionText, fetched.text);
+      const spans = spansOfMatchedPassages(comparison.matchedPassages);
+      const aware = familyContext ? await admitFamilyAware(familyContext, spans) : admitOnStrictSpanOnly(spans);
+      result = aware;
+      creditedSpans = aware.creditedSpans;
+      if (familyContext) {
+        familyRole = aware.role;
+        dominantSpanClass = aware.spanFamilies[0]?.class ?? null;
+        dominantSpanHolders = aware.spanFamilies[0]?.holders ?? null;
+      }
+    }
     admissions.push({
       docId: decimal,
       order,
-      outcome: result.admitted ? "ADMITTED" : "NOT_ADMITTED",
+      outcome: result.admitted ? "ADMITTED" : familyRole === "FAMILY_MEMBER" ? "FAMILY_MEMBER" : "NOT_ADMITTED",
       reason: result.reason,
       spans: result.spans,
+      creditedSpans,
+      familyRole,
+      dominantSpanClass,
+      dominantSpanHolders,
       totalMatchedWords: result.totalMatchedWords,
       longestSpan: result.longestSpan,
       strictSpanPass: result.strictSpanPass,
@@ -297,7 +416,7 @@ export async function admitCandidates(
       verifyMs: performance.now() - verifyStarted,
     });
   }
-  return { identity, submissionWordCount: submissionWords.length, admissions, failures, verifierPath, prepareMs };
+  return { identity, submissionWordCount: submissionWords.length, admissions, failures, verifierPath, familyPolicy, prepareMs };
 }
 
 export type VerifiedSource = {
@@ -308,6 +427,10 @@ export type VerifiedSource = {
   totalMatchedWords: number;
   longestSpan: number;
   familyGuardActivated: boolean;
+  /** True when this source is attributed as the representative of a family of sources holding the same passage (v2). */
+  familyRepresentative: boolean;
+  /** v2: documents of the generation holding this source's dominant span; null under the other policies. */
+  dominantSpanHolders: number | null;
   matchedPassages: Array<{ submittedWordStart: number; submittedWordEnd: number; matchedWordCount: number }>;
 };
 
@@ -325,6 +448,10 @@ export type CorpusVerificationResult = {
   unifiedScore: number;
   coSourceActivations: number;
   familyGuardActivations: number;
+  /** The family rule that produced the admissions; null when the caller merged passes and did not say. */
+  familyPolicy: FamilyAdmissionPolicyId | null;
+  /** v2: one entry per family member, in the canonical order they were resolved in. Empty under the other policies. */
+  familyResolutions: FamilyResolution[];
   failures: VerifierAdapterFailure[];
   /** The admission path that produced `verifiedSources`; null when the caller merged passes and did not say. */
   verifierPath: VerifierPath | null;
@@ -337,13 +464,19 @@ export type CorpusVerificationResult = {
  * that may have been produced by several admitCandidates passes (the
  * exhaustive reference runs them in parallel workers). `admissions` must be in
  * candidate order: co-source attribution is order-sensitive on ties.
+ *
+ * Family members (v2) are resolved here, over the whole query: a member is
+ * attributed when it is its family's representative and collapsed otherwise
+ * (resolveFamilyRepresentatives). The attributed set — sources and
+ * representatives, in candidate order — is what co-source attribution, the
+ * union and the score then see.
  */
 export function finalizeVerification(
   identity: CorpusReaderIdentity,
   submissionWordCount: number,
   admissions: readonly CandidateAdmission[],
   failures: readonly VerifierAdapterFailure[],
-  pass: { verifierPath?: VerifierPath; prepareMs?: number } = {},
+  pass: { verifierPath?: VerifierPath; prepareMs?: number; familyPolicy?: FamilyAdmissionPolicyId } = {},
 ): CorpusVerificationResult {
   const totals = { textCompressedBytesRead: 0, textDecompressedBytes: 0, textReadMs: 0, textDecodeMs: 0, verifyMs: 0, prepareMs: pass.prepareMs ?? 0 };
   let familyGuardActivations = 0;
@@ -356,8 +489,16 @@ export function finalizeVerification(
     totals.textDecodeMs += admission.textDecodeMs;
     totals.verifyMs += admission.verifyMs;
     if (admission.familyGuardActivated) familyGuardActivations += 1;
-    if (admission.outcome === "ADMITTED") {
-      admittedSpans.set(admission.docId, admission.spans);
+  }
+  const credited = (admission: CandidateAdmission) => admission.creditedSpans ?? admission.spans;
+  const familyResolutions = resolveFamilyRepresentatives(
+    admissions.filter((admission) => admission.outcome === "ADMITTED").map((admission) => ({ docId: admission.docId, creditedSpans: credited(admission) })),
+    admissions.filter((admission) => admission.outcome === "FAMILY_MEMBER").map((admission) => ({ docId: admission.docId, creditedSpans: credited(admission) })),
+  );
+  const representatives = new Set(familyResolutions.filter((resolution) => resolution.role === "REPRESENTATIVE").map((resolution) => resolution.docId));
+  for (const admission of admissions) {
+    if (admission.outcome === "ADMITTED" || representatives.has(admission.docId)) {
+      admittedSpans.set(admission.docId, credited(admission));
       admittedByKey.set(admission.docId, admission);
     }
   }
@@ -373,6 +514,8 @@ export function finalizeVerification(
       totalMatchedWords: admission.totalMatchedWords,
       longestSpan: admission.longestSpan,
       familyGuardActivated: admission.familyGuardActivated,
+      familyRepresentative: representatives.has(docId),
+      dominantSpanHolders: admission.dominantSpanHolders ?? null,
       matchedPassages: mergeAdjacentPositions(positions).map(([start, end]) => ({ submittedWordStart: start, submittedWordEnd: end, matchedWordCount: end - start + 1 })),
     });
   }
@@ -385,13 +528,15 @@ export function finalizeVerification(
     state: contractFailure ? "FAILED" : failures.length > 0 ? "PARTIAL" : "COMPLETE",
     identity,
     submissionWordCount,
-    candidatesVerified: admissions.filter((admission) => admission.outcome === "ADMITTED" || admission.outcome === "NOT_ADMITTED").length,
+    candidatesVerified: admissions.filter((admission) => admission.outcome === "ADMITTED" || admission.outcome === "FAMILY_MEMBER" || admission.outcome === "NOT_ADMITTED").length,
     verifiedSources,
     matchedPositions: unified.matchedPositions,
     matchedWordCount: unified.uniqueMatchedWords,
     unifiedScore: unified.unifiedScore,
     coSourceActivations: coSource.activations,
     familyGuardActivations,
+    familyPolicy: pass.familyPolicy ?? null,
+    familyResolutions,
     failures: [...failures],
     verifierPath: pass.verifierPath ?? null,
     totals,
@@ -408,8 +553,8 @@ export async function verifyCandidatesWithExistingVerifier(
   reader: CorpusGenerationReader,
   submissionText: string,
   candidateDocIds: readonly bigint[],
-  options: { verifierPath?: VerifierPath } = {},
+  options: { verifierPath?: VerifierPath; familyPolicy?: FamilyAdmissionPolicyId } = {},
 ): Promise<CorpusVerificationResult> {
   const pass = await admitCandidates(reader, submissionText, candidateDocIds, undefined, options);
-  return finalizeVerification(pass.identity, pass.submissionWordCount, pass.admissions, pass.failures, { verifierPath: pass.verifierPath, prepareMs: pass.prepareMs });
+  return finalizeVerification(pass.identity, pass.submissionWordCount, pass.admissions, pass.failures, { verifierPath: pass.verifierPath, prepareMs: pass.prepareMs, familyPolicy: pass.familyPolicy });
 }

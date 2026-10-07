@@ -24,6 +24,7 @@ import { retrieveCandidates } from '../lib/corpus-engine/retrieval.ts';
 import { InMemorySourceAdapter } from '../lib/corpus-engine/source-adapter.ts';
 import { LocalDirectoryObjectStore } from '../lib/corpus-engine/storage.ts';
 import { admitCandidates, createVerifierArtifactView, DEFAULT_VERIFIER_PATH, finalizeVerification, verifyCandidatesWithExistingVerifier } from '../lib/corpus-engine/verifier-adapter.ts';
+import { FAMILY_ADMISSION_POLICY_AWARE_V2, FAMILY_ADMISSION_POLICY_GUARD_V1 } from '../lib/corpus-engine/family-admission.ts';
 import { NORMALIZATION_PROBE_TEXT } from '../lib/corpus-engine/versions.ts';
 import { computeDocumentCorrespondence, DEFAULT_DOCUMENT_CORRESPONDENCE_THRESHOLDS } from '../lib/document-correspondence.ts';
 import { documentShingleHashes } from '../lib/document-family.ts';
@@ -606,11 +607,15 @@ test('a prepared submission cannot be used outside the contract it was prepared 
 const untimedAdmission = ({ textReadMs, textDecodeMs, verifyMs, ...rest }) => rest;
 const untimedResult = ({ totals, verifierPath, ...rest }) => ({ ...rest, bytes: [totals.textCompressedBytesRead, totals.textDecompressedBytes] });
 
+// The release candidate's FAMILY_GUARD is the policy this gate proves the prepared path against
+// (admitSelectiveCorpusCandidate is its oracle); the engine's default family policy is checked separately below.
+const GUARD_V1 = { familyPolicy: FAMILY_ADMISSION_POLICY_GUARD_V1 };
+
 test('engine: every document of a generation, admitted on both paths, gives the same admissions and the same final result', async () => {
   assert.equal(everyDocument.length, library.size);
   for (const [name, submission] of [['family + own words', submissionX3PlusOwn], ['stop-hash family', submissionX14], ['four sources, three languages', submissionManySources]]) {
-    const oracle = await admitCandidates(reader, submission, everyDocument, undefined, { verifierPath: 'oracle' });
-    const prepared = await admitCandidates(reader, submission, everyDocument, undefined, { verifierPath: 'prepared-submission' });
+    const oracle = await admitCandidates(reader, submission, everyDocument, undefined, { verifierPath: 'oracle', ...GUARD_V1 });
+    const prepared = await admitCandidates(reader, submission, everyDocument, undefined, { verifierPath: 'prepared-submission', ...GUARD_V1 });
     assert.equal(oracle.verifierPath, 'oracle');
     assert.equal(prepared.verifierPath, 'prepared-submission');
     assert.equal(oracle.prepareMs, 0);
@@ -636,6 +641,16 @@ test('engine: every document of a generation, admitted on both paths, gives the 
     bump('enginePairs', everyDocument.length);
     bump('engineAdmitted', oracle.admissions.filter((admission) => admission.outcome === 'ADMITTED').length);
     bump('engineFamilyGuardActivations', oracleFinal.familyGuardActivations);
+
+    // the same equality under the engine's default family policy (the unmodified comparator on the oracle path)
+    const oracleV2 = await admitCandidates(reader, submission, everyDocument, undefined, { verifierPath: 'oracle', familyPolicy: FAMILY_ADMISSION_POLICY_AWARE_V2 });
+    const preparedV2 = await admitCandidates(reader, submission, everyDocument, undefined, { verifierPath: 'prepared-submission', familyPolicy: FAMILY_ADMISSION_POLICY_AWARE_V2 });
+    assert.deepStrictEqual(preparedV2.admissions.map(untimedAdmission), oracleV2.admissions.map(untimedAdmission), `${name} (v2)`);
+    assert.deepStrictEqual(
+      untimedResult(finalizeVerification(preparedV2.identity, preparedV2.submissionWordCount, preparedV2.admissions, preparedV2.failures, preparedV2)),
+      untimedResult(finalizeVerification(oracleV2.identity, oracleV2.submissionWordCount, oracleV2.admissions, oracleV2.failures, oracleV2)),
+      `${name} (v2)`,
+    );
   }
 });
 
@@ -701,17 +716,17 @@ test('engine: the submission is normalized once per query on the prepared path, 
 test('engine: a prepared submission handed to a pass is used as is, and refused if it belongs to another text', async () => {
   const submission = submissionX3PlusOwn;
   const candidates = holdersOf('x3').map(docIdOf);
-  const own = await admitCandidates(reader, submission, candidates);
+  const own = await admitCandidates(reader, submission, candidates, undefined, GUARD_V1);
   const failures = [];
   const artifact = createVerifierArtifactView(reader, failures);
   const preparedSubmission = prepareSubmissionForVerification(submission);
-  const shared = await admitCandidates(reader, submission, candidates, { artifact, failures, preparedSubmission });
+  const shared = await admitCandidates(reader, submission, candidates, { artifact, failures, preparedSubmission }, GUARD_V1);
   assert.equal(shared.prepareMs, 0, 'the pass prepared the submission again');
   assert.deepStrictEqual(shared.admissions.map(untimedAdmission), own.admissions.map(untimedAdmission));
   assert.deepStrictEqual(own.admissions.map((admission) => admission.outcome), ['ADMITTED', 'NOT_ADMITTED', 'NOT_ADMITTED']);
   assert.deepStrictEqual(own.admissions.map((admission) => admission.familyGuardActivated), [true, true, true]);
   // on the oracle path a handed-in prepared submission is simply not used
-  const oracle = await admitCandidates(reader, submission, candidates, { artifact, failures, preparedSubmission }, { verifierPath: 'oracle' });
+  const oracle = await admitCandidates(reader, submission, candidates, { artifact, failures, preparedSubmission }, { verifierPath: 'oracle', ...GUARD_V1 });
   assert.deepStrictEqual(oracle.admissions.map(untimedAdmission), own.admissions.map(untimedAdmission));
   assert.deepStrictEqual(failures, []);
 
