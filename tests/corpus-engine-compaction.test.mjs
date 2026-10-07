@@ -4,7 +4,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { corpusEngineScratch, fixtureSource, hashTree, inventedText, removeScratch, sliceWords } from './helpers/corpus-engine-fixtures.mjs';
 import { runCorpusBuild } from '../lib/corpus-engine/builder.ts';
-import { compactPartition } from '../lib/corpus-engine/compaction.ts';
+import { assembleCompactedGeneration, compactPartition, compactPartitionSegment } from '../lib/corpus-engine/compaction.ts';
 import { normalizeForCorpus } from '../lib/corpus-engine/fingerprints.ts';
 import { publishGeneration, validateGeneration } from '../lib/corpus-engine/generation.ts';
 import { deriveDocId, partitionOfDocId } from '../lib/corpus-engine/ids.ts';
@@ -57,6 +57,12 @@ const compactedBoth = await compactPartition({ corpusRoot: root, generationId: c
 const validation = await validateGeneration(store, compactedBoth.generationId);
 const after = await CorpusGenerationReader.open({ store, generationId: compactedBoth.generationId, verify: 'sha256' });
 
+// the same two partitions as independent segment compactions (any order) + ONE generation
+const segmentOne = await compactPartitionSegment({ corpusRoot: root, generationId: incrementalGenerationId, partition: 1 });
+const segmentZero = await compactPartitionSegment({ corpusRoot: root, generationId: incrementalGenerationId, partition: 0 });
+const assembled = await assembleCompactedGeneration({ corpusRoot: root, generationId: incrementalGenerationId, compacted: [segmentOne, segmentZero] });
+const assembledValidation = await validateGeneration(store, assembled.generationId);
+
 // revoke one document, then compact its partition again: it must be physically gone
 const victim = docIdOf(texts[20]);
 const victimPartition = partitionOfDocId(victim, 1);
@@ -80,6 +86,22 @@ test('compaction turns a partition\'s incremental segments into one, as a new ca
   assert.equal(compactedBoth.manifest.tokenCount, before.manifest.tokenCount);
   assert.equal(compactedZero.documentsPhysicallyRemoved + compactedBoth.documentsPhysicallyRemoved, 0);
   assert.equal(validation.ok, true, validation.errors.join(' | '));
+});
+
+test('partitions compacted independently and assembled once equal the partition-by-partition chain', async () => {
+  assert.equal(assembledValidation.ok, true, assembledValidation.errors.join('; '));
+  assert.equal(assembled.parentGenerationId, incrementalGenerationId);
+  assert.deepEqual(assembled.manifest.partitions.map((partition) => partition.segmentIds), compactedBoth.manifest.partitions.map((partition) => partition.segmentIds));
+  assert.deepEqual(assembled.manifest.segments, compactedBoth.manifest.segments);
+  assert.deepEqual(assembled.manifest.documentFrequency, compactedBoth.manifest.documentFrequency);
+  for (const key of ['documentCount', 'aliasCount', 'logicalSourceCount', 'tokenCount', 'distinctFingerprintCount', 'postingsCount', 'maxPostingsLength']) {
+    assert.equal(assembled.manifest[key], compactedBoth.manifest[key], key);
+  }
+  // a segment compacted from another generation is refused, not grafted
+  await assert.rejects(
+    assembleCompactedGeneration({ corpusRoot: root, generationId: compactedBoth.generationId, compacted: [segmentZero] }),
+    (error) => error.code === 'PARTITION_MISMATCH',
+  );
 });
 
 test('compaction leaves the input generation and every one of its segments untouched', async () => {

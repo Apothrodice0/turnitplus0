@@ -64,6 +64,12 @@ import { INDEX_FORMAT_VERSION } from "./versions";
  *
  * Bounded memory: the dictionaries are merged as streams (one batch of
  * postings per input segment in memory), and one document's text at a time.
+ *
+ * The work is two steps, so several partitions can be compacted at once:
+ * compactPartitionSegment writes one partition's segment (independent of every
+ * other partition), and assembleCompactedGeneration writes ONE generation in
+ * which every listed partition is replaced, with one document-frequency pass.
+ * compactPartition is both steps for a single partition.
  */
 
 export type CompactionResult = {
@@ -76,6 +82,32 @@ export type CompactionResult = {
   documentsKept: number;
   documentsPhysicallyRemoved: number;
   postingsKept: number;
+  manifest: GenerationManifest;
+};
+
+/** One partition's compacted segment, before any generation names it. */
+export type CompactedPartitionSegment = {
+  partition: number;
+  compactedSegmentId: string;
+  segmentManifestSha256: string;
+  replacedSegmentIds: string[];
+  documentsKept: number;
+  documentsPhysicallyRemoved: number;
+  postingsKept: number;
+  keyCount: number;
+  fileCount: number;
+  bytes: number;
+  tokenCountBefore: number;
+  tokenCountAfter: number;
+  aliasesBefore: number;
+  aliasesAfter: number;
+};
+
+export type MultiPartitionCompactionResult = {
+  generationId: string;
+  logicalManifestSha256: string;
+  parentGenerationId: string;
+  partitions: CompactedPartitionSegment[];
   manifest: GenerationManifest;
 };
 
@@ -130,9 +162,36 @@ export async function compactPartition(config: {
   partition: number;
   textPackMaxBytes?: number;
 }): Promise<CompactionResult> {
+  const segment = await compactPartitionSegment(config);
+  const generation = await assembleCompactedGeneration({
+    corpusRoot: config.corpusRoot,
+    generationId: config.generationId,
+    compacted: [segment],
+    temporaryName: `.tmp-compact-${config.generationId}-p${String(config.partition).padStart(4, "0")}`,
+  });
+  return {
+    generationId: generation.generationId,
+    logicalManifestSha256: generation.logicalManifestSha256,
+    parentGenerationId: config.generationId,
+    partition: config.partition,
+    compactedSegmentId: segment.compactedSegmentId,
+    replacedSegmentIds: segment.replacedSegmentIds,
+    documentsKept: segment.documentsKept,
+    documentsPhysicallyRemoved: segment.documentsPhysicallyRemoved,
+    postingsKept: segment.postingsKept,
+    manifest: generation.manifest,
+  };
+}
+
+/** Writes partition `partition`'s compacted segment from generation `generationId`; no generation is written. */
+export async function compactPartitionSegment(config: {
+  corpusRoot: string;
+  generationId: string;
+  partition: number;
+  textPackMaxBytes?: number;
+}): Promise<CompactedPartitionSegment> {
   const store = new LocalDirectoryObjectStore(config.corpusRoot);
   const temporaryDirectory = path.join(config.corpusRoot, "segments", `.tmp-compact-${config.generationId}-p${String(config.partition).padStart(4, "0")}`);
-  const generationTemporary = path.join(config.corpusRoot, "generations", `.tmp-compact-${config.generationId}-p${String(config.partition).padStart(4, "0")}`);
   try {
     const { manifest } = await loadGenerationManifest(store, config.generationId);
     const entry = manifest.partitions[config.partition];
@@ -287,20 +346,68 @@ export async function compactPartition(config: {
     } else {
       renameSync(temporaryDirectory, finalDirectory);
     }
-
-    // ── the new generation: this partition's segments replaced by the compacted one ──
-    const segments = { ...manifest.segments };
-    for (const segmentId of entry.segmentIds) delete segments[segmentId];
-    segments[compactedSegmentId] = {
+    return {
       partition: config.partition,
-      manifestSha256: sha256Hex(segmentManifestBytes),
-      documentCount: kept.length,
+      compactedSegmentId,
+      segmentManifestSha256: sha256Hex(segmentManifestBytes),
+      replacedSegmentIds: [...entry.segmentIds],
+      documentsKept: kept.length,
+      documentsPhysicallyRemoved: removed,
+      postingsKept: indexStats.postingsCount,
       keyCount: indexStats.keyCount,
-      postingsCount: indexStats.postingsCount,
       fileCount: Object.keys(files).length + 1,
       bytes: Object.values(files).reduce((total, file) => total + file.bytes, 0),
+      tokenCountBefore: readers.reduce((total, reader) => total + reader.manifest.tokenCount, 0),
+      tokenCountAfter: tokenCount,
+      aliasesBefore,
+      aliasesAfter,
     };
-    const partitions = manifest.partitions.map((item) => (item.partition === config.partition ? { partition: item.partition, segmentIds: [compactedSegmentId] } : item));
+  } finally {
+    await store.close();
+  }
+}
+
+/**
+ * Writes ONE generation: `generationId` with every listed partition's segments replaced by its compacted
+ * segment. Each compacted segment must exist with the manifest its result names and must replace exactly
+ * that partition's segments in `generationId`.
+ */
+export async function assembleCompactedGeneration(config: {
+  corpusRoot: string;
+  generationId: string;
+  compacted: readonly CompactedPartitionSegment[];
+  temporaryName?: string;
+}): Promise<MultiPartitionCompactionResult> {
+  const store = new LocalDirectoryObjectStore(config.corpusRoot);
+  const generationTemporary = path.join(config.corpusRoot, "generations", config.temporaryName ?? `.tmp-compact-${config.generationId}-multi`);
+  try {
+    const { manifest } = await loadGenerationManifest(store, config.generationId);
+    const compacted = [...config.compacted].sort((left, right) => left.partition - right.partition);
+    const segments = { ...manifest.segments };
+    const replaced = new Map<number, string>();
+    for (const item of compacted) {
+      if (replaced.has(item.partition)) throw new CorpusCompactionError("DUPLICATE_PARTITION", `partition ${item.partition} is listed twice`);
+      const entry = manifest.partitions[item.partition];
+      if (!entry || entry.segmentIds.join(",") !== item.replacedSegmentIds.join(",")) {
+        throw new CorpusCompactionError("PARTITION_MISMATCH", `the compacted segment of partition ${item.partition} was not made from generation ${config.generationId}`);
+      }
+      const segmentManifestBytes = nodeBytes(readFileSync(path.join(config.corpusRoot, "segments", item.compactedSegmentId, SEGMENT_FILE_MANIFEST)));
+      if (sha256Hex(segmentManifestBytes) !== item.segmentManifestSha256 || segmentIdFromManifestBytes(segmentManifestBytes) !== item.compactedSegmentId) {
+        throw new CorpusCompactionError("SEGMENT_MANIFEST_MISMATCH", `segment ${item.compactedSegmentId} does not have the manifest its compaction result names`);
+      }
+      for (const segmentId of entry.segmentIds) delete segments[segmentId];
+      segments[item.compactedSegmentId] = {
+        partition: item.partition,
+        manifestSha256: item.segmentManifestSha256,
+        documentCount: item.documentsKept,
+        keyCount: item.keyCount,
+        postingsCount: item.postingsKept,
+        fileCount: item.fileCount,
+        bytes: item.bytes,
+      };
+      replaced.set(item.partition, item.compactedSegmentId);
+    }
+    const partitions = manifest.partitions.map((item) => (replaced.has(item.partition) ? { partition: item.partition, segmentIds: [replaced.get(item.partition) as string] } : item));
 
     rmSync(generationTemporary, { recursive: true, force: true });
     mkdirSync(generationTemporary, { recursive: true });
@@ -313,14 +420,14 @@ export async function compactPartition(config: {
     const documentFrequency = await writeDocumentFrequencyArtifact(active, generationTemporary, manifest.documentFrequency.recordFloor);
     const dfFile = (name: string): SegmentFileEntry => ({ bytes: statSync(path.join(generationTemporary, name)).size, sha256: sha256Hex(nodeBytes(readFileSync(path.join(generationTemporary, name)))) });
     const documentCount = Object.values(segments).reduce((total, item) => total + item.documentCount, 0);
-    const aliasCount = manifest.aliasCount - aliasesBefore + aliasesAfter;
-    const compacted: GenerationManifest = {
+    const aliasCount = manifest.aliasCount - compacted.reduce((total, item) => total + item.aliasesBefore - item.aliasesAfter, 0);
+    const compactedManifest: GenerationManifest = {
       ...manifest,
       parentGenerationId: config.generationId,
       documentCount,
       aliasCount,
       logicalSourceCount: documentCount + aliasCount,
-      tokenCount: manifest.tokenCount - readers.reduce((total, reader) => total + reader.manifest.tokenCount, 0) + tokenCount,
+      tokenCount: manifest.tokenCount - compacted.reduce((total, item) => total + item.tokenCountBefore - item.tokenCountAfter, 0),
       distinctFingerprintCount: documentFrequency.distinctFingerprintCount,
       postingsCount: documentFrequency.postingsCount,
       maxPostingsLength: documentFrequency.maxDocumentFrequency,
@@ -332,25 +439,14 @@ export async function compactPartition(config: {
         files: { [DF_HIGH_FILE]: dfFile(DF_HIGH_FILE), [DF_STATS_FILE]: dfFile(DF_STATS_FILE) },
       },
     };
-    const manifestBytes: Bytes = Buffer.from(canonicalJson(compacted), "utf8");
+    const manifestBytes: Bytes = Buffer.from(canonicalJson(compactedManifest), "utf8");
     const generationId = generationIdFromManifestBytes(manifestBytes);
     writeFileSync(path.join(generationTemporary, GENERATION_MANIFEST_FILE), manifestBytes);
     const generationDirectory = path.join(config.corpusRoot, "generations", generationId);
     if (existsSync(generationDirectory)) rmSync(generationTemporary, { recursive: true, force: true });
     else renameSync(generationTemporary, generationDirectory);
 
-    return {
-      generationId,
-      logicalManifestSha256: sha256Hex(manifestBytes),
-      parentGenerationId: config.generationId,
-      partition: config.partition,
-      compactedSegmentId,
-      replacedSegmentIds: [...entry.segmentIds],
-      documentsKept: kept.length,
-      documentsPhysicallyRemoved: removed,
-      postingsKept: indexStats.postingsCount,
-      manifest: compacted,
-    };
+    return { generationId, logicalManifestSha256: sha256Hex(manifestBytes), parentGenerationId: config.generationId, partitions: compacted, manifest: compactedManifest };
   } finally {
     await store.close();
   }

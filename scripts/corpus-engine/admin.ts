@@ -1,6 +1,7 @@
-import { readdirSync, statSync } from "node:fs";
+import { fork } from "node:child_process";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
-import { compactPartition } from "../../lib/corpus-engine/compaction";
+import { assembleCompactedGeneration, compactPartition, compactPartitionSegment, type CompactedPartitionSegment } from "../../lib/corpus-engine/compaction";
 import { loadGenerationManifest, publishGeneration, readActivePointer, segmentPrefix, validateGeneration } from "../../lib/corpus-engine/generation";
 import { docIdFromDecimal } from "../../lib/corpus-engine/ids";
 import { appendRevocation } from "../../lib/corpus-engine/revocation";
@@ -18,6 +19,8 @@ import { logLine, parseArguments, requireArgument, writeJson } from "./common";
  *   admin.ts describe --root R --generation G [--out file]     storage breakdown + file counts
  *   admin.ts revoke   --root R --doc-id <decimal> --reason "..." [--content-sha256 H]
  *   admin.ts compact  --root R --generation G --partition P       one partition -> one segment, new candidate generation
+ *   admin.ts compact-all --root R --generation G --work DIR [--workers 4] [--partitions 0,1]
+ *                                                              every multi-segment partition, in parallel -> ONE candidate generation
  */
 
 function classify(file: string): string {
@@ -145,8 +148,60 @@ async function main() {
       peakRssBytes: process.resourceUsage().maxRSS * 1024,
     };
     logLine(`compacted partition ${result.partition}: ${result.replacedSegmentIds.length} segment(s) -> ${result.compactedSegmentId}; ${result.documentsKept} documents kept, ${result.documentsPhysicallyRemoved} physically removed; candidate generation ${result.generationId}`);
+  } else if (command === "compact-segment") {
+    // worker of compact-all: one partition's segment, result written for the parent
+    const started = Date.now();
+    const result = await compactPartitionSegment({ corpusRoot: root, generationId: requireArgument(args, "generation"), partition: Number(requireArgument(args, "partition")) });
+    output = { ...result, compactionMs: Date.now() - started, peakRssBytes: process.resourceUsage().maxRSS * 1024 };
+    logLine(`partition ${result.partition}: ${result.replacedSegmentIds.length} segment(s) -> ${result.compactedSegmentId}, ${result.documentsKept} documents, ${Math.round((Date.now() - started) / 1000)} s`);
+  } else if (command === "compact-all") {
+    // every partition with more than one segment (or --partitions), --workers at a time, then ONE candidate generation
+    const generationId = requireArgument(args, "generation");
+    const workDirectory = requireArgument(args, "work");
+    const workers = Number(args.workers ?? 4);
+    const store = new LocalDirectoryObjectStore(root);
+    const { manifest } = await loadGenerationManifest(store, generationId);
+    await store.close();
+    const partitions = args.partitions
+      ? args.partitions.split(",").map(Number)
+      : manifest.partitions.filter((entry) => entry.segmentIds.length > 1).map((entry) => entry.partition);
+    const started = Date.now();
+    let next = 0;
+    await Promise.all(Array.from({ length: Math.min(workers, partitions.length) }, async () => {
+      while (next < partitions.length) {
+        const partition = partitions[next];
+        next += 1;
+        const out = path.join(workDirectory, `compact-p${String(partition).padStart(2, "0")}.json`);
+        await new Promise<void>((resolve, reject) => {
+          const child = fork(process.argv[1], ["compact-segment", "--root", root, "--generation", generationId, "--partition", String(partition), "--out", out], { execArgv: process.execArgv });
+          child.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`compaction of partition ${partition} exited with code ${code}`))));
+          child.on("error", reject);
+        });
+      }
+    }));
+    const segmentsMs = Date.now() - started;
+    const results = partitions.map((partition) => JSON.parse(readFileSync(path.join(workDirectory, `compact-p${String(partition).padStart(2, "0")}.json`), "utf8")) as CompactedPartitionSegment & { compactionMs: number; peakRssBytes: number });
+    const assembled = await assembleCompactedGeneration({ corpusRoot: root, generationId, compacted: results });
+    const directoryBytes = (segmentId: string) => {
+      const directory = path.join(root, ...segmentPrefix(segmentId).split("/"));
+      return readdirSync(directory).reduce((total, file) => total + statSync(path.join(directory, file)).size, 0);
+    };
+    output = {
+      parentGenerationId: generationId,
+      generationId: assembled.generationId,
+      logicalManifestSha256: assembled.logicalManifestSha256,
+      workers,
+      partitions: results.map((result) => ({
+        ...result,
+        inputBytes: result.replacedSegmentIds.reduce((total, segmentId) => total + directoryBytes(segmentId), 0),
+        outputBytes: directoryBytes(result.compactedSegmentId),
+      })),
+      segmentsWallMs: segmentsMs,
+      totalWallMs: Date.now() - started,
+    };
+    logLine(`compacted ${partitions.length} partition(s) with ${workers} workers in ${Math.round(segmentsMs / 1000)} s (+ ${Math.round((Date.now() - started - segmentsMs) / 1000)} s generation); candidate generation ${assembled.generationId}`);
   } else {
-    throw new Error(`unknown command ${JSON.stringify(command)}; expected validate | publish | active | describe | revoke | compact`);
+    throw new Error(`unknown command ${JSON.stringify(command)}; expected validate | publish | active | describe | revoke | compact | compact-all`);
   }
   if (args.out) writeJson(args.out, output);
 }
