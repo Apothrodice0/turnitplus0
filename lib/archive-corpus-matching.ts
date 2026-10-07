@@ -1,5 +1,5 @@
 import type { ArchiveReadClient } from "./archive-read-retry";
-import { tokens, grams, gramHash, containment, similarityScore } from "./similarity-core";
+import { tokens, grams, gramHash, containment, mergeAdjacentPositions, similarityScore } from "./similarity-core";
 import { scoreAgainstArchive, scoreAgainstArchiveDetailed, type ArchiveScoringResult, type ArchiveScoringMatchingParameters } from "./archive-similarity-scoring";
 import { seedExtendVerifiedPositions, SEED_EXTEND_ALIGNMENT_POLICY_VERSION } from "./seed-extend-alignment";
 import { ARCHIVE_FINGERPRINT_VERSION } from "./archive-corpus-seed";
@@ -210,6 +210,8 @@ type ScoreOverCandidatesResult = {
   /** Every source the scorer admitted, in its presentation-rank order — a
    *  superset of `result.sources`, independent of the display cap. */
   admittedSourceIndexes: number[];
+  /** The admitted sources that own at least one scored position. */
+  contributingSourceIndexes: number[];
   /** canonical_text of the admitted sources (keyed by sourceIndex) — the
    *  retrieved text the span extension aligns against. */
   sourceTextByIndex: Map<number, string>;
@@ -255,6 +257,7 @@ async function scoreOverCandidates(
       candidateIds: [],
       selfExcludedRepresentationIds: [],
       admittedSourceIndexes: [],
+      contributingSourceIndexes: [],
       sourceTextByIndex: new Map(),
       sharedQueryHashesByIndex: new Map(),
       candidateGramFrequency: new Map(),
@@ -330,7 +333,7 @@ async function scoreOverCandidates(
     return postingsByHash.get(hash) ?? [];
   };
 
-  const { result, admittedSourceIndexes } = scoreAgainstArchiveDetailed(
+  const { result, admittedSourceIndexes, contributingSourceIndexes } = scoreAgainstArchiveDetailed(
     submittedText,
     { shingleSize: ARCHIVE_SHINGLE_SIZE, documentCount, maximumDocumentFrequency, articles, getPostings },
     matchingParameters,
@@ -353,7 +356,7 @@ async function scoreOverCandidates(
     const count = postingsByHash.get(hash)?.length ?? 0;
     if (count > 0) candidateGramFrequency.set(hash, count);
   }
-  return { result, candidateIds, selfExcludedRepresentationIds, admittedSourceIndexes, sourceTextByIndex, sharedQueryHashesByIndex, candidateGramFrequency };
+  return { result, candidateIds, selfExcludedRepresentationIds, admittedSourceIndexes, contributingSourceIndexes, sourceTextByIndex, sharedQueryHashesByIndex, candidateGramFrequency };
 }
 
 export type ArchiveSpanExtensionDiagnostics = {
@@ -433,15 +436,15 @@ function applySpanExtension(
   const { positionsBySource, stats } = seedExtendVerifiedPositions(submissionWords, sources, seedGramHashes, { isFrequencyGatedGram });
 
   const claimed = new Set(result.archiveMatchedPositions);
-  const addedBySource = new Map<number, number>();
+  const addedBySource = new Map<number, number[]>();
   for (const sourceIndex of scored.admittedSourceIndexes) {
-    let added = 0;
+    const added: number[] = [];
     for (const position of positionsBySource.get(sourceIndex) ?? []) {
       if (claimed.has(position)) continue;
       claimed.add(position);
-      added += 1;
+      added.push(position);
     }
-    if (added > 0) addedBySource.set(sourceIndex, added);
+    if (added.length > 0) addedBySource.set(sourceIndex, added);
   }
   const addedPositionCount = claimed.size - result.archiveMatchedPositions.length;
   const diagnostics: ArchiveSpanExtensionDiagnostics = {
@@ -460,10 +463,16 @@ function applySpanExtension(
   const archiveMatchedPositions = [...claimed].sort((left, right) => left - right);
   const extendedSources = result.sources
     .map((source) => {
-      const added = addedBySource.get(source.sourceIndex) ?? 0;
-      if (added === 0) return source;
-      const matchedWords = source.matchedWords + added;
-      return { ...source, matchedWords, percent: Math.floor((matchedWords / Math.max(result.wordCount, 1)) * 100) };
+      const added = addedBySource.get(source.sourceIndex) ?? [];
+      if (added.length === 0) return source;
+      const matchedWords = source.matchedWords + added.length;
+      const attributed = source.attributedRanges.flatMap(([start, end]) => Array.from({ length: end - start + 1 }, (_, offset) => start + offset));
+      return {
+        ...source,
+        matchedWords,
+        attributedRanges: mergeAdjacentPositions([...attributed, ...added]),
+        percent: Math.floor((matchedWords / Math.max(result.wordCount, 1)) * 100),
+      };
     })
     .sort((left, right) => right.percent - left.percent || right.matches - left.matches);
   return {
@@ -473,6 +482,8 @@ function applySpanExtension(
       archiveMatchedPositions,
       score: similarityScore(archiveMatchedPositions.length, result.wordCount),
       sources: extendedSources,
+      // A source can come to own scored words only through the extension.
+      verifiedSourceCount: new Set([...scored.contributingSourceIndexes, ...addedBySource.keys()]).size,
     },
     diagnostics,
   };

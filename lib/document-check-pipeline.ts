@@ -271,6 +271,8 @@ export async function analyzeText(
     // field, as on every report that predates the stamp.
     ...(ACTIVE_SCORING_NORMALIZATION_VERSION === 2 ? { scoringNormalizationVersion: 2 as const } : {}),
     sources: result.sources,
+    // A server still on the previous build answers without it.
+    ...(Number.isInteger(result.verifiedSourceCount) ? { archiveVerifiedSourceCount: result.verifiedSourceCount } : {}),
     repeats: result.repeats,
     text,
   };

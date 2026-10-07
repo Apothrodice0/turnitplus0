@@ -28,6 +28,7 @@ import type {
   EvidenceInterpretationTone,
 } from "@/lib/evidence-interpretation/kinds";
 import { EVIDENCE_INTERPRETATION_KINDS } from "@/lib/evidence-interpretation/kinds";
+import { archiveSourceAccounting, archiveSourceCountLabel } from "@/lib/evidence-interpretation/archive-source-accounting";
 import { reportScoringNormalizationVersion, tokenSpans, type ScoringNormalizationVersion } from "@/lib/similarity-core";
 
 /**
@@ -264,7 +265,11 @@ export type ReportV2ViewModel = {
     verifiedSimilarityPercent: number;
     matchedWordCount: number;
     totalWordCount: number;
+    /** verified sources the evidence came from — an Archive card that stands
+     *  for several documents counts as each of them (archiveSourceAccounting). */
     distinctVerifiedSources: number;
+    /** true when the report only proves "at least" distinctVerifiedSources */
+    distinctVerifiedSourcesIsLowerBound: boolean;
     completion: ReportV2Completion;
     topSources: ReportV2TopSource[];
     breakdown: ReportV2BreakdownRow[];
@@ -474,6 +479,32 @@ export function buildReportV2ViewModel(report: SimilarityReport): ReportV2ViewMo
     if (s.namedSources && s.namedSources.length > 0) sources[i].namedSources = s.namedSources;
   });
 
+  // GOLD GAP — source accounting. The Archive's cards are either one card per
+  // listed source (+ one for the display-capped rest) or, on a report without
+  // per-source attribution, one aggregate card: both stand for
+  // archive.verifiedSourceCount documents. The aggregate card (the only card
+  // with namedSources) is named for that count here too, so a report saved
+  // while it still carried its top source's title reads truthfully. Which
+  // shape the stored interpretation has is read off the cards themselves (an
+  // aggregate card may have been stored by an older build).
+  const archive = archiveSourceAccounting(report);
+  let archiveCardCount = 0;
+  let archiveSourceCount = 0;
+  let distinctVerifiedSourcesIsLowerBound = false;
+  if (archive.mode !== "none") {
+    const aggregateIndex = sources.findIndex((s) => s.namedSources.length > 0);
+    if (aggregateIndex >= 0) {
+      const label = archiveSourceCountLabel(archive.verifiedSourceCount, archive.verifiedSourceCountIsExact);
+      sources[aggregateIndex].label = label.charAt(0).toUpperCase() + label.slice(1);
+      archiveCardCount = 1;
+    } else {
+      archiveCardCount = archive.mode === "per-source" ? archive.listed.length + (archive.unlistedPositions.length > 0 ? 1 : 0) : 1;
+    }
+    archiveSourceCount = archive.verifiedSourceCount;
+    distinctVerifiedSourcesIsLowerBound = !archive.verifiedSourceCountIsExact;
+  }
+  const distinctVerifiedSources = sources.length + Math.max(0, archiveSourceCount - archiveCardCount);
+
   const topSources: ReportV2TopSource[] = [...sources]
     .sort((a, b) => b.matchedWords - a.matchedWords || a.id.localeCompare(b.id))
     .slice(0, 4)
@@ -536,7 +567,8 @@ export function buildReportV2ViewModel(report: SimilarityReport): ReportV2ViewMo
       verifiedSimilarityPercent,
       matchedWordCount,
       totalWordCount,
-      distinctVerifiedSources: sources.length,
+      distinctVerifiedSources,
+      distinctVerifiedSourcesIsLowerBound,
       completion: resolveCompletionView(report.reportCompletion, report.extractionDiagnostic, verifiedSimilarityPercent),
       topSources,
       breakdown,
@@ -548,6 +580,11 @@ export function buildReportV2ViewModel(report: SimilarityReport): ReportV2ViewMo
     filterCounts,
     hasPassages: passages.length > 0,
   };
+}
+
+/** "10", or "11+" when the report only proves a lower bound. */
+export function verifiedSourceCountText(summary: Pick<ReportV2ViewModel["summary"], "distinctVerifiedSources" | "distinctVerifiedSourcesIsLowerBound">): string {
+  return `${summary.distinctVerifiedSources}${summary.distinctVerifiedSourcesIsLowerBound ? "+" : ""}`;
 }
 
 // convenience for tests / callers wanting just the matched-words invariant

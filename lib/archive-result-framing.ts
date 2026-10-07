@@ -23,6 +23,10 @@ import type { ArchiveScoringResult, ArchiveScoringSource } from "./archive-simil
  * (lib/document-check-pipeline.ts's analyzeText, and through it every
  * SimilarityReport field). Nothing here adds, removes, or renames a field —
  * a change to this shape is a change to that contract.
+ *
+ * GOLD GAP (additive, presentation only): each source's `attributedRanges`
+ * and the result's `verifiedSourceCount`, so a report can show one card per
+ * verified Archive source instead of one aggregate card.
  */
 
 export type ArchiveScoreBand = { label: "Low" | "Moderate" | "High"; minimum: number; maximum: number };
@@ -70,6 +74,8 @@ export type ArchiveAnalysisResult = {
   };
   corpusVersion: string;
   sources: ArchiveAnalysisSource[];
+  /** ArchiveScoringResult.verifiedSourceCount — `sources` is capped for display. */
+  verifiedSourceCount: number;
   repeats: [string, number][];
 };
 
@@ -135,6 +141,7 @@ export function frameArchiveResult(
     },
     corpusVersion: config.corpusVersion,
     sources: result.sources.map(({ sourceIndex: _sourceIndex, ...source }) => source),
+    verifiedSourceCount: result.verifiedSourceCount,
     repeats,
   };
 }

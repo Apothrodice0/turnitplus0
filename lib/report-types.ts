@@ -46,6 +46,11 @@ export type SourceMatch = {
   percent: number;
   matches: number;
   matchedWords?: number;
+  /** Archive sources only: the scored positions attributed to this source
+   *  (inclusive word ranges; matchedWords is their size). Absent on reports
+   *  made before it existed. Read it only through lib/evidence-interpretation/
+   *  archive-source-accounting.ts, which checks it against the report. */
+  attributedRanges?: Array<[number, number]>;
   phrases: string[];
   color: string;
 };
@@ -552,6 +557,9 @@ export type SimilarityReport = {
   scoringNormalizationVersion?: 2;
   wikipediaMatchedWordCount?: number;
   sources: SourceMatch[];
+  /** How many verified Archive sources own matched words; `sources` lists at
+   *  most the display cap of them. Absent on reports made before it existed. */
+  archiveVerifiedSourceCount?: number;
   repeats: [string, number][];
   text: string;
 };

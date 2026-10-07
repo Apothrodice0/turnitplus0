@@ -27,6 +27,7 @@ import {
   stepWorkspaceSelection,
   UNCERTAIN_MATCH_LEGEND,
   VERIFIED_MATCH_LEGEND,
+  verifiedSourceCountText,
   type ReportV2Filter,
   type ReportV2Passage,
   type ReportV2SourceCard,
@@ -203,7 +204,7 @@ function TopSources({ vm }: { vm: ReportV2ViewModel }) {
       </ul>
       {distinctVerifiedSources > topSources.length && (
         <a className="rv2-see-all" href="#rv2-sources">
-          See all {distinctVerifiedSources} sources
+          See all {verifiedSourceCountText(vm.summary)} sources
         </a>
       )}
     </section>
@@ -222,7 +223,7 @@ function FirstScreen({ vm, showDiagnostics = false }: { vm: ReportV2ViewModel; s
         <p className="rv2-headline-sub">
           {matchedWordCount.toLocaleString()} of {totalWordCount.toLocaleString()} matched words
           {" · "}
-          {distinctVerifiedSources} verified source{distinctVerifiedSources === 1 ? "" : "s"}
+          {verifiedSourceCountText(vm.summary)} verified source{distinctVerifiedSources === 1 ? "" : "s"}
         </p>
         <p className="rv2-headline-hint">
           The share of your document that word-for-word matches a source we retrieved and checked. It is
@@ -902,7 +903,7 @@ function WorkspaceHero({ vm, toolbarStatus }: { vm: ReportV2ViewModel; toolbarSt
           <span>Words analyzed</span>
         </div>
         <div>
-          <strong>{distinctVerifiedSources}</strong>
+          <strong>{verifiedSourceCountText(vm.summary)}</strong>
           <span>Verified source{distinctVerifiedSources === 1 ? "" : "s"}</span>
         </div>
         <div>
@@ -1237,7 +1238,7 @@ export function ReportV2Workspace({
               <div className="rv2ws-score-metrics">
                 <div><b>{vm.summary.matchedWordCount.toLocaleString()}</b><span>Matched words</span></div>
                 <div><b>{vm.summary.totalWordCount.toLocaleString()}</b><span>Analyzed</span></div>
-                <div><b>{vm.summary.distinctVerifiedSources}</b><span>Verified source{vm.summary.distinctVerifiedSources === 1 ? "" : "s"}</span></div>
+                <div><b>{verifiedSourceCountText(vm.summary)}</b><span>Verified source{vm.summary.distinctVerifiedSources === 1 ? "" : "s"}</span></div>
               </div>
             </div>
 

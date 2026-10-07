@@ -76,6 +76,11 @@ export type ArchiveScoringSource = {
   color: string;
   matches: number;
   matchedWords: number;
+  /** The scored positions attributed to this source (aggregateSimilaritySources'
+   *  winner-take-all), as inclusive [start, end] word ranges: matchedWords is
+   *  their size. Disjoint across sources; never adds or removes a scored
+   *  position. Presentation only — lets a report show one card per source. */
+  attributedRanges: Array<[number, number]>;
   phrases: string[];
   percent: number;
 };
@@ -88,6 +93,9 @@ export type ArchiveScoringResult = {
   archiveMatchedPositions: number[];
   score: number;
   sources: ArchiveScoringSource[];
+  /** How many admitted sources own at least one scored position — the verified
+   *  contributing sources, of which `sources` lists at most the display cap. */
+  verifiedSourceCount: number;
   maxSourceContainment: number;
   longestMatchedSpan: number;
   highFrequencyShingleCount: number;
@@ -115,6 +123,8 @@ export function scoreAgainstArchive(
  * display cap), in presentation-rank order. `result.sources` is only the
  * displayed top maximumContributingSources of them; the archive matcher uses
  * the full list so verification after scoring is never limited by the display.
+ * `contributingSourceIndexes` is the subset that owns at least one scored
+ * position (`result.verifiedSourceCount` is its size).
  *
  * `result.archiveMatchedPositions` / `score` are the union of every admitted
  * source's verified positions. Winner-take-all attribution only decides which
@@ -126,7 +136,7 @@ export function scoreAgainstArchiveDetailed(
   index: ArchiveScoringIndex,
   matchingParameters: ArchiveScoringMatchingParameters = {},
   onProgress?: (percent: number, label: string) => void,
-): { result: ArchiveScoringResult; admittedSourceIndexes: number[] } {
+): { result: ArchiveScoringResult; admittedSourceIndexes: number[]; contributingSourceIndexes: number[] } {
   const words = tokens(text);
   const documentGrams = grams(words, index.shingleSize);
   const uniqueDocumentGrams = new Set(documentGrams);
@@ -211,6 +221,7 @@ export function scoreAgainstArchiveDetailed(
           color: "#d7263d",
           matches: validSpans.length,
           matchedWords: acceptedSourcePositions.size,
+          attributedRanges: validSpans,
           phrases,
           percent: Math.floor((acceptedSourcePositions.size / Math.max(words.length, 1)) * 100),
         },
@@ -231,6 +242,9 @@ export function scoreAgainstArchiveDetailed(
     (maximum, source) => Math.max(maximum, ...source.phrases.map((phrase) => phrase.split(" ").length), 0),
     0,
   );
+  const contributingSourceIndexes = aggregation.admittedSources
+    .filter((source) => source.attributedPositions.size > 0)
+    .map((source) => source.sourceIndex);
   const maxSourceContainment = Math.max(
     0,
     ...[...sharedBySource.entries()]
@@ -251,10 +265,12 @@ export function scoreAgainstArchiveDetailed(
       archiveMatchedPositions: [...allMatchedPositions].sort((left, right) => left - right),
       score,
       sources,
+      verifiedSourceCount: contributingSourceIndexes.length,
       maxSourceContainment: Math.round(maxSourceContainment * 1000) / 1000,
       longestMatchedSpan,
       highFrequencyShingleCount,
     },
     admittedSourceIndexes: aggregation.admittedSources.map((source) => source.sourceIndex),
+    contributingSourceIndexes,
   };
 }

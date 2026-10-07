@@ -780,3 +780,24 @@ test("only the Archive matcher imports the extension; imported evidence and prio
     assert.ok(!/from\s+["'][^"']*(seed-extend-alignment|archive-corpus-matching)["']/.test(fs.readFileSync(path.join(root, f), "utf8")), `${f} does not import the extension or the Archive matcher`);
   }
 });
+
+// ══ GOLD GAP: per-source attribution survives the extension ════════════════
+test("extension: every added position is listed under the source it was attributed to — ranges stay disjoint, inside the union, matchedWords in size", () => {
+  for (const [name, run] of Object.entries({ insertRun, insertExactOnly, distinctRun, commonRun })) {
+    const { m } = run;
+    const union = new Set(m.archiveMatchedPositions);
+    const seen = new Set();
+    for (const source of m.sources) {
+      const own = source.attributedRanges.flatMap(([s, e]) => [...Array(e - s + 1).keys()].map((k) => s + k));
+      assert.equal(own.length, source.matchedWords, `${name}: ${source.name}`);
+      for (const p of own) {
+        assert.ok(union.has(p), `${name}: ${p} outside the union`);
+        assert.ok(!seen.has(p), `${name}: ${p} listed twice`);
+        seen.add(p);
+      }
+    }
+    assert.ok(m.verifiedSourceCount >= m.sources.length, name);
+    if (m.verifiedSourceCount === m.sources.length) assert.equal(seen.size, union.size, `${name}: every scored word is listed when every source is`);
+  }
+  assert.ok(insertRun.m.archiveSpanExtension.addedPositionCount > 0, "the extension really added positions in this fixture");
+});
