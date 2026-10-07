@@ -27,11 +27,13 @@ import {
   type FamilyRole,
   type SpanFamilyClass,
 } from "./family-admission";
+import { DerivedSourceError, type DerivedSourceSidecarSet, type SidecarReadMetrics } from "./derived-source";
 import type { HighDocumentFrequencyTable } from "./generation";
 import { docIdToDecimal, fingerprintFromHex } from "./ids";
 import {
   assertPreparedSubmissionForAdmission,
   comparePreparedSubmissionToCandidate,
+  comparePreparedSubmissionToDerived,
   prepareSubmissionForVerification,
   PreparedSubmissionContractError,
   verifyPreparedSubmissionAgainstCandidate,
@@ -103,6 +105,14 @@ import { toSegmentError, type SegmentReader } from "./segment";
  * member is attributed depends on the other candidates of the query, so it is
  * decided in finalizeVerification, immediately before the unchanged co-source
  * attribution, union and score.
+ *
+ * DERIVED SOURCE SIDECAR (./derived-source.ts, optional). On the prepared path,
+ * under any policy but v1, a candidate whose segment has a sidecar is verified
+ * from its sidecar entry — what the verifier derives from the text, stored —
+ * and its text is not fetched. Revocation and location are checked first,
+ * exactly as fetchText checks them. A missing, refused or damaged entry falls
+ * back to the text, so the sidecar can make a verification faster and never
+ * different.
  */
 
 export type VerifierAdapterFailure = { stage: "text-fetch" | "family-guard" | "contract"; docId: string | null; partition: number | null; segmentId: string | null; code: string; message: string };
@@ -263,6 +273,11 @@ export type CandidateAdmission = {
   textDecompressedBytes: number;
   textReadMs: number;
   textDecodeMs: number;
+  /** Where the candidate side came from: its stored text, or its derived-source sidecar entry. */
+  sourceFrom: "text" | "sidecar" | null;
+  sidecarReadMs: number;
+  sidecarDecodeMs: number;
+  sidecarBytesRead: number;
   verifyMs: number;
 };
 
@@ -301,13 +316,14 @@ export async function admitCandidates(
   submissionText: string,
   candidateDocIds: readonly bigint[],
   shared?: { artifact?: SelectiveCorpusArtifact; familyContext?: FamilyAdmissionContext; failures: VerifierAdapterFailure[]; submissionWords?: string[]; preparedSubmission?: PreparedSubmission },
-  options: { verifierPath?: VerifierPath; familyPolicy?: FamilyAdmissionPolicyId } = {},
+  options: { verifierPath?: VerifierPath; familyPolicy?: FamilyAdmissionPolicyId; sidecars?: DerivedSourceSidecarSet | null } = {},
 ): Promise<AdmissionPass> {
   const failures = shared?.failures ?? [];
   const identity = reader.identity();
   const verifierPath = options.verifierPath ?? DEFAULT_VERIFIER_PATH;
   const familyPolicy = options.familyPolicy ?? DEFAULT_FAMILY_ADMISSION_POLICY;
   const guardV1 = familyPolicy === FAMILY_ADMISSION_POLICY_GUARD_V1;
+  const sidecars = options.sidecars ?? null;
   const refused = (): AdmissionPass => ({ identity, submissionWordCount: 0, admissions: [], failures, verifierPath, familyPolicy, prepareMs: 0 });
   const ambient = currentScoringNormalizationVersion();
   if (ambient !== reader.manifest.processing.normalization.version) {
@@ -354,7 +370,48 @@ export async function admitCandidates(
   for (let order = 0; order < candidateDocIds.length; order += 1) {
     const docId = candidateDocIds[order];
     const decimal = docIdToDecimal(docId);
-    const blank = { docId: decimal, order, spans: [], creditedSpans: [], familyRole: null, dominantSpanClass: null, dominantSpanHolders: null, totalMatchedWords: 0, longestSpan: 0, strictSpanPass: false, familyGuardActivated: false, dominantSpanBoilerplate: false, textCompressedBytesRead: 0, textDecompressedBytes: 0, textReadMs: 0, textDecodeMs: 0, verifyMs: 0 };
+    const blank = { docId: decimal, order, spans: [], creditedSpans: [], familyRole: null, dominantSpanClass: null, dominantSpanHolders: null, totalMatchedWords: 0, longestSpan: 0, strictSpanPass: false, familyGuardActivated: false, dominantSpanBoilerplate: false, textCompressedBytesRead: 0, textDecompressedBytes: 0, textReadMs: 0, textDecodeMs: 0, sourceFrom: null, sidecarReadMs: 0, sidecarDecodeMs: 0, sidecarBytesRead: 0, verifyMs: 0 };
+
+    // The sidecar path: same revocation rule as fetchText, then the stored derivation instead of the text.
+    if (sidecars && prepared && !guardV1 && !reader.revocations.has(docId)) {
+      const location = reader.locate(docId);
+      const sidecarMetrics: SidecarReadMetrics = { readMs: 0, decodeMs: 0, bytesRead: 0 };
+      let derived = null;
+      if (location) {
+        try {
+          derived = await sidecars.read(location, sidecarMetrics);
+        } catch (error) {
+          if (!(error instanceof DerivedSourceError)) throw error;
+          derived = null; // a damaged entry: verify from the text below
+        }
+      }
+      if (derived) {
+        const verifyStarted = performance.now();
+        const spans = spansOfMatchedPassages(comparePreparedSubmissionToDerived(prepared, derived, sidecars.identity).matchedPassages);
+        const aware = familyContext ? await admitFamilyAware(familyContext, spans) : admitOnStrictSpanOnly(spans);
+        admissions.push({
+          ...blank,
+          outcome: aware.admitted ? "ADMITTED" : aware.role === "FAMILY_MEMBER" && familyContext ? "FAMILY_MEMBER" : "NOT_ADMITTED",
+          reason: aware.reason,
+          spans: aware.spans,
+          creditedSpans: aware.creditedSpans,
+          familyRole: familyContext ? aware.role : null,
+          dominantSpanClass: familyContext ? aware.spanFamilies[0]?.class ?? null : null,
+          dominantSpanHolders: familyContext ? aware.spanFamilies[0]?.holders ?? null : null,
+          totalMatchedWords: aware.totalMatchedWords,
+          longestSpan: aware.longestSpan,
+          strictSpanPass: aware.strictSpanPass,
+          familyGuardActivated: aware.familyGuardActivated,
+          dominantSpanBoilerplate: aware.dominantSpanBoilerplate,
+          sourceFrom: "sidecar",
+          sidecarReadMs: sidecarMetrics.readMs,
+          sidecarDecodeMs: sidecarMetrics.decodeMs,
+          sidecarBytesRead: sidecarMetrics.bytesRead,
+          verifyMs: performance.now() - verifyStarted,
+        });
+        continue;
+      }
+    }
     const fetched = await reader.fetchText(docId);
     if (fetched.state === "REVOKED") {
       admissions.push({ ...blank, outcome: "TEXT_REVOKED", reason: "document is revoked; its text is not served" });
@@ -413,6 +470,10 @@ export async function admitCandidates(
       textDecompressedBytes: fetched.metrics.decompressedBytes,
       textReadMs: fetched.metrics.readMs,
       textDecodeMs: fetched.metrics.decodeMs,
+      sourceFrom: "text",
+      sidecarReadMs: 0,
+      sidecarDecodeMs: 0,
+      sidecarBytesRead: 0,
       verifyMs: performance.now() - verifyStarted,
     });
   }
@@ -456,7 +517,7 @@ export type CorpusVerificationResult = {
   /** The admission path that produced `verifiedSources`; null when the caller merged passes and did not say. */
   verifierPath: VerifierPath | null;
   /** verifyMs is the per-candidate verification time summed; prepareMs is the once-per-query submission preparation (0 on the oracle path). */
-  totals: { textCompressedBytesRead: number; textDecompressedBytes: number; textReadMs: number; textDecodeMs: number; verifyMs: number; prepareMs: number };
+  totals: { textCompressedBytesRead: number; textDecompressedBytes: number; textReadMs: number; textDecodeMs: number; verifyMs: number; prepareMs: number; sidecarReadMs: number; sidecarDecodeMs: number; sidecarBytesRead: number; candidatesFromSidecar: number };
 };
 
 /**
@@ -478,7 +539,7 @@ export function finalizeVerification(
   failures: readonly VerifierAdapterFailure[],
   pass: { verifierPath?: VerifierPath; prepareMs?: number; familyPolicy?: FamilyAdmissionPolicyId } = {},
 ): CorpusVerificationResult {
-  const totals = { textCompressedBytesRead: 0, textDecompressedBytes: 0, textReadMs: 0, textDecodeMs: 0, verifyMs: 0, prepareMs: pass.prepareMs ?? 0 };
+  const totals = { textCompressedBytesRead: 0, textDecompressedBytes: 0, textReadMs: 0, textDecodeMs: 0, verifyMs: 0, prepareMs: pass.prepareMs ?? 0, sidecarReadMs: 0, sidecarDecodeMs: 0, sidecarBytesRead: 0, candidatesFromSidecar: 0 };
   let familyGuardActivations = 0;
   const admittedSpans = new Map<string, SelectiveCorpusVerifiedSpan[]>();
   const admittedByKey = new Map<string, CandidateAdmission>();
@@ -488,6 +549,10 @@ export function finalizeVerification(
     totals.textReadMs += admission.textReadMs;
     totals.textDecodeMs += admission.textDecodeMs;
     totals.verifyMs += admission.verifyMs;
+    totals.sidecarReadMs += admission.sidecarReadMs ?? 0;
+    totals.sidecarDecodeMs += admission.sidecarDecodeMs ?? 0;
+    totals.sidecarBytesRead += admission.sidecarBytesRead ?? 0;
+    if (admission.sourceFrom === "sidecar") totals.candidatesFromSidecar += 1;
     if (admission.familyGuardActivated) familyGuardActivations += 1;
   }
   const credited = (admission: CandidateAdmission) => admission.creditedSpans ?? admission.spans;
@@ -553,7 +618,7 @@ export async function verifyCandidatesWithExistingVerifier(
   reader: CorpusGenerationReader,
   submissionText: string,
   candidateDocIds: readonly bigint[],
-  options: { verifierPath?: VerifierPath; familyPolicy?: FamilyAdmissionPolicyId } = {},
+  options: { verifierPath?: VerifierPath; familyPolicy?: FamilyAdmissionPolicyId; sidecars?: DerivedSourceSidecarSet | null } = {},
 ): Promise<CorpusVerificationResult> {
   const pass = await admitCandidates(reader, submissionText, candidateDocIds, undefined, options);
   return finalizeVerification(pass.identity, pass.submissionWordCount, pass.admissions, pass.failures, { verifierPath: pass.verifierPath, prepareMs: pass.prepareMs, familyPolicy: pass.familyPolicy });

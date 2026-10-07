@@ -14,6 +14,7 @@ import { canonicalSha256 } from "../document-identity";
 import type { SelectiveCorpusArtifact } from "../selective-corpus/artifact";
 import { SELECTIVE_CORPUS_FAMILY_GUARD, SELECTIVE_CORPUS_STRICT_SPAN } from "../selective-corpus/constants";
 import { winnowWordSpanHashes } from "../selective-corpus/fingerprint";
+import { derivedHolds, type DerivedSource, type DerivedSourceIdentity } from "./derived-source";
 import type { SelectiveCorpusFailureCollector } from "../selective-corpus/shard-reader";
 import type { SelectiveCorpusAdmissionResult, SelectiveCorpusVerifiedSpan } from "../selective-corpus/verify";
 import {
@@ -280,7 +281,25 @@ export function correspondPreparedSubmission(prepared: PreparedSubmission, exter
     if (!externalShingles.has(hash)) continue;
     for (let position = index; position < index + thresholds.shingleSize; position += 1) matchedPositions.add(position);
   }
+  return finishCorrespondence(prepared, externalWordCount, sharedCount, externalShingles.size, matchedPositions);
+}
 
+/**
+ * The rest of computeDocumentCorrespondence once the shared shingles and the
+ * matched positions are known — identical whichever way the candidate side
+ * was obtained (from its text, or from its derived-source sidecar entry).
+ */
+function finishCorrespondence(
+  prepared: PreparedSubmission,
+  externalWordCount: number,
+  sharedCount: number,
+  externalShingleCount: number,
+  matchedPositions: Set<number>,
+): DocumentCorrespondenceResult {
+  const { thresholds } = prepared;
+  const submittedWords = prepared.words;
+  const submittedWordCount = submittedWords.length;
+  const submittedShingles = prepared.shingles;
   const { acceptedGlobalSpans, acceptedPositions } = acceptedSimilaritySpans(
     new Map([[0, matchedPositions]]),
     thresholds.minimumPassageLengthWords,
@@ -306,8 +325,8 @@ export function correspondPreparedSubmission(prepared: PreparedSubmission, exter
     if (length > max) longestSpan = span;
     return Math.max(max, length);
   }, 0);
-  const overallContainment = containment(sharedCount, submittedShingles.size, externalShingles.size);
-  const sourceConcentration = sharedCount / Math.max(1, externalShingles.size);
+  const overallContainment = containment(sharedCount, submittedShingles.size, externalShingleCount);
+  const sourceConcentration = sharedCount / Math.max(1, externalShingleCount);
   const strongCorrespondence = overallContainment >= thresholds.strongContainmentThreshold
     && acceptedPositions.size >= thresholds.minimumMatchedWords;
   const longestSpanWords = longestSpan ? submittedWords.slice(longestSpan[0], longestSpan[1] + 1) : [];
@@ -334,12 +353,101 @@ export function correspondPreparedSubmission(prepared: PreparedSubmission, exter
   };
 }
 
+/** The submission's informative hashes as uint32 halves, computed once per prepared submission (for the sidecar path). */
+type NumericHashes = { informativeHi: Float64Array; informativeLo: Float64Array; informativePresent: Uint8Array; shingleHi: Float64Array; shingleLo: Float64Array };
+const numericHashesOf = new WeakMap<PreparedSubmission, NumericHashes>();
+
+function numericHashes(prepared: PreparedSubmission): NumericHashes {
+  let numeric = numericHashesOf.get(prepared);
+  if (numeric) return numeric;
+  const count = prepared.informativeHashes.length;
+  numeric = { informativeHi: new Float64Array(count), informativeLo: new Float64Array(count), informativePresent: new Uint8Array(count), shingleHi: new Float64Array(prepared.shingles.size), shingleLo: new Float64Array(prepared.shingles.size) };
+  for (let index = 0; index < count; index += 1) {
+    const hash = prepared.informativeHashes[index];
+    if (hash === null) continue;
+    numeric.informativePresent[index] = 1;
+    numeric.informativeHi[index] = parseInt(hash.slice(0, 8), 16);
+    numeric.informativeLo[index] = parseInt(hash.slice(8, 16), 16);
+  }
+  let cursor = 0;
+  for (const hash of prepared.shingles) {
+    numeric.shingleHi[cursor] = parseInt(hash.slice(0, 8), 16);
+    numeric.shingleLo[cursor] = parseInt(hash.slice(8, 16), 16);
+    cursor += 1;
+  }
+  numericHashesOf.set(prepared, numeric);
+  return numeric;
+}
+
+/**
+ * correspondPreparedSubmission with the candidate side read from its
+ * derived-source sidecar entry instead of derived from its text. The entry
+ * holds exactly tokens(text).length, canonicalSha256(text) and
+ * documentShingleHashes(text, shingleSize) — so every statement below sees the
+ * values the text path computes, and the result is the same object.
+ *
+ * Refused unless the sidecar was derived under the normalization in force and
+ * with the n-gram size the submission was prepared with.
+ */
+export function correspondPreparedSubmissionToDerived(prepared: PreparedSubmission, derived: DerivedSource, identity: Pick<DerivedSourceIdentity, "normalization" | "shingleSize">): DocumentCorrespondenceResult {
+  assertPreparedSubmissionContract(prepared);
+  if (identity.normalization.version !== prepared.identity.normalizationVersion) {
+    throw new PreparedSubmissionContractError("PREPARED_NORMALIZATION_MISMATCH", `the sidecar was derived under scoring normalization v${identity.normalization.version}; the submission was prepared under v${prepared.identity.normalizationVersion}`);
+  }
+  if (identity.shingleSize !== prepared.thresholds.shingleSize) {
+    throw new PreparedSubmissionContractError("PREPARED_SHINGLE_SIZE_MISMATCH", `the sidecar holds ${identity.shingleSize}-grams; the submission is compared with ${prepared.thresholds.shingleSize}-grams`);
+  }
+  const { thresholds } = prepared;
+  const submittedWordCount = prepared.words.length;
+  const externalWordCount = derived.wordCount;
+
+  if (submittedWordCount === 0 || externalWordCount === 0) {
+    return emptyResult("shingle_containment", submittedWordCount, externalWordCount, thresholds);
+  }
+
+  if (prepared.canonicalSha256 === derived.canonicalSha256) {
+    return emptyResult("canonical_hash", submittedWordCount, externalWordCount, thresholds, {
+      containment: 1,
+      sourceConcentration: 1,
+      matchedWordCount: submittedWordCount,
+      longestMatchWords: submittedWordCount,
+      exactCanonicalMatch: true,
+      strongCorrespondence: true,
+    });
+  }
+
+  const externalShingleCount = derived.hi.length;
+  if (prepared.shingles.size === 0 || externalShingleCount === 0) {
+    return emptyResult("shingle_containment", submittedWordCount, externalWordCount, thresholds);
+  }
+
+  const numeric = numericHashes(prepared);
+  let sharedCount = 0;
+  for (let index = 0; index < numeric.shingleHi.length; index += 1) if (derivedHolds(derived, numeric.shingleHi[index], numeric.shingleLo[index])) sharedCount += 1;
+
+  const matchedPositions = new Set<number>();
+  for (let index = 0; index < numeric.informativePresent.length; index += 1) {
+    if (numeric.informativePresent[index] === 0) continue;
+    if (!derivedHolds(derived, numeric.informativeHi[index], numeric.informativeLo[index])) continue;
+    for (let position = index; position < index + thresholds.shingleSize; position += 1) matchedPositions.add(position);
+  }
+  return finishCorrespondence(prepared, externalWordCount, sharedCount, externalShingleCount, matchedPositions);
+}
+
 /** lib/academic-search/comparator.ts's module-private constant of the same name and value. */
 const EXACT_MATCH_PASSAGE_PREVIEW_WORDS = 60;
 
 /** compareSubmissionToExternalText(prepared.submissionText, externalText, prepared.thresholds). */
 export function comparePreparedSubmissionToCandidate(prepared: PreparedSubmission, externalText: string): ComparisonResult {
-  const result = correspondPreparedSubmission(prepared, externalText);
+  return toComparison(prepared, correspondPreparedSubmission(prepared, externalText));
+}
+
+/** comparePreparedSubmissionToCandidate with the candidate's derived-source sidecar entry in place of its text. */
+export function comparePreparedSubmissionToDerived(prepared: PreparedSubmission, derived: DerivedSource, identity: Pick<DerivedSourceIdentity, "normalization" | "shingleSize">): ComparisonResult {
+  return toComparison(prepared, correspondPreparedSubmissionToDerived(prepared, derived, identity));
+}
+
+function toComparison(prepared: PreparedSubmission, result: DocumentCorrespondenceResult): ComparisonResult {
   const matchedPassages: MatchedPassage[] = result.allMatchedPassages.length > 0
     ? result.allMatchedPassages.map((passage) => ({
       submittedText: passage.submittedText,

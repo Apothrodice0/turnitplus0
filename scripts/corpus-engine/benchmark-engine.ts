@@ -1,3 +1,4 @@
+import { DerivedSourceSidecarSet } from "../../lib/corpus-engine/derived-source";
 import { computeQueryFingerprints, documentFingerprintHexes, normalizeForCorpus } from "../../lib/corpus-engine/fingerprints";
 import { docIdFromDecimal } from "../../lib/corpus-engine/ids";
 import { prepareSubmissionForVerification } from "../../lib/corpus-engine/prepared-verifier";
@@ -11,7 +12,12 @@ import { logLine, mean, parseArguments, percentile, readJson, requireArgument, r
  * Engine retrieval -> existing verifier, compared with the exhaustive reference.
  *
  *   benchmark-engine.ts --root R --generation G --queries queries.json --reference reference.json --out engine.json
- *                       [--verifier-path oracle | prepared-submission]
+ *                       [--verifier-path oracle | prepared-submission] [--sidecars] [--variants a,b]
+ *
+ * The family admission policy is the engine's default; compare against a
+ * reference computed under the same policy (compare-family-policies.ts
+ * --out-references). --sidecars verifies from the derived-source sidecar
+ * (same results, faster); --variants limits the ranking variants run.
  *
  * For every submission and every candidate budget K it reports whether
  * retrieval changed what the existing verifier concludes:
@@ -71,6 +77,9 @@ async function main() {
   const referenceFile = readJson<{ identity: { generationId: string; logicalManifestSha256: string }; references: Array<Omit<ReferenceResult, "matchedPositions"> & { matchedPositions: Array<[number, number]> }> }>(requireArgument(args, "reference"));
   const references = new Map(referenceFile.references.map((reference) => [reference.queryId, { ...reference, matchedPositions: fromRanges(reference.matchedPositions) }]));
   const { store, reader } = await openGeneration(requireArgument(args, "root"), requireArgument(args, "generation"));
+  const sidecars = args.sidecars === "true" ? await DerivedSourceSidecarSet.open(reader) : null;
+  if (sidecars && sidecars.refusals.length > 0) throw new Error(`sidecars refused: ${JSON.stringify(sidecars.refusals.slice(0, 3))}`);
+  const variants = args.variants ? VARIANTS.filter((variant) => args.variants.split(",").includes(variant.id)) : VARIANTS;
   if (reader.generationId !== referenceFile.identity.generationId || reader.logicalManifestSha256 !== referenceFile.identity.logicalManifestSha256) {
     throw new Error("the reference was computed for a different generation");
   }
@@ -101,11 +110,11 @@ async function main() {
         variants: {},
       };
 
-      for (const variant of VARIANTS) {
+      for (const variant of variants) {
         const retrieval = await retrieveCandidates(reader, query.text, { ...variant.policy, candidateBudget: MAX_BUDGET });
         const missing = retrieval.candidates.filter((candidate) => !cache.has(candidate.docIdDecimal)).map((candidate) => candidate.docId);
         if (missing.length > 0) {
-          const pass = await admitCandidates(reader, query.text, missing, { artifact, failures, submissionWords, preparedSubmission }, { verifierPath });
+          const pass = await admitCandidates(reader, query.text, missing, { artifact, failures, submissionWords, preparedSubmission }, { verifierPath, sidecars });
           for (const admission of pass.admissions) cache.set(admission.docId, admission);
         }
         retrievalStats.push({ queryId: query.id, variant: variant.id, state: retrieval.state, candidates: retrieval.candidates.length, ...retrieval.stats });
@@ -180,12 +189,12 @@ async function main() {
       perQuery.push(queryRecord);
       const at = (variant: string, k: number) => rows.find((row) => row.queryId === query.id && row.variant === variant && row.comparison.k === k)?.comparison as Comparison;
       const best = at("region-aware", 500);
-      logLine(`${query.id.padEnd(28)} ref ${String(reference.matchedWordCount).padStart(5)}w ${String(reference.unifiedScore).padStart(3)}% | region-aware@50/100/250/500 coverage ${BUDGETS.map((k) => at("region-aware", k).coverage.toFixed(3)).join("/")} score diff ${BUDGETS.map((k) => at("region-aware", k).scoreDifference).join("/")} | contributing ${best.contributingRetrieved}/${best.contributingTotal} | global-only@50 cov ${at("global-only", 50).coverage.toFixed(3)}`);
+      logLine(`${query.id.padEnd(28)} ref ${String(reference.matchedWordCount).padStart(5)}w ${String(reference.unifiedScore).padStart(3)}% | region-aware@50/100/250/500 coverage ${BUDGETS.map((k) => at("region-aware", k).coverage.toFixed(3)).join("/")} score diff ${BUDGETS.map((k) => at("region-aware", k).scoreDifference).join("/")} | contributing ${best.contributingRetrieved}/${best.contributingTotal} ${at("global-only", 50) ? `| global-only@50 cov ${at("global-only", 50).coverage.toFixed(3)}` : ""}`);
     }
 
     // ── aggregates ──────────────────────────────────────────────────────────
     const summary: Array<Record<string, unknown>> = [];
-    for (const variant of VARIANTS) {
+    for (const variant of variants) {
       for (const k of BUDGETS) {
         const selected = rows.filter((row) => row.variant === variant.id && row.comparison.k === k).map((row) => ({ ...row.comparison, queryId: row.queryId, expectation: row.expectation }));
         const sum = (field: keyof Comparison) => selected.reduce((total, item) => total + (item[field] as number), 0);
@@ -213,7 +222,7 @@ async function main() {
       }
     }
 
-    const suppression = VARIANTS.map((variant) => {
+    const suppression = variants.map((variant) => {
       const stats = retrievalStats.filter((item) => item.variant === variant.id);
       const total = (field: string) => stats.reduce((sum, item) => sum + (item[field] as number), 0);
       return {
@@ -249,7 +258,7 @@ async function main() {
       identity: reader.identity(),
       verifierPath,
       budgets: BUDGETS,
-      variants: VARIANTS,
+      variants,
       counts: {
         queries: queries.length,
         positive: queries.filter((query) => query.expectation === "positive").length,

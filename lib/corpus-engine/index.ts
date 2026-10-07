@@ -1,3 +1,4 @@
+import { DerivedSourceSidecarSet } from "./derived-source";
 import { isCorpusEngineV1Enabled } from "./flag";
 import { CorpusGenerationError } from "./generation";
 import { CorpusGenerationReader, type CorpusReaderIdentity } from "./reader";
@@ -43,6 +44,12 @@ export type CorpusEngineRequest = {
   revocationAnchor?: RevocationAnchor | null;
   submissionText: string;
   rankingPolicy?: Partial<CandidateRankingPolicy>;
+  /**
+   * Verify candidates from the generation's derived-source sidecar where one is
+   * present and accepted (same result, no text read). Off unless asked: opening
+   * the sidecar index costs a read per segment.
+   */
+  useDerivedSourceSidecar?: boolean;
 };
 
 export type CorpusEngineResponse =
@@ -84,7 +91,8 @@ export async function runCorpusEngineCandidateVerification(request: CorpusEngine
     if (retrieval.state === "FAILED") {
       return { state: "FAILED", failureCode: retrieval.failures[0]?.code ?? "RETRIEVAL_FAILED", failureMessage: retrieval.failures[0]?.message ?? "retrieval failed", identity: reader.identity() };
     }
-    const verification = await verifyCandidatesWithExistingVerifier(reader, request.submissionText, retrieval.candidates.map((candidate) => candidate.docId));
+    const sidecars = request.useDerivedSourceSidecar ? await DerivedSourceSidecarSet.open(reader) : null;
+    const verification = await verifyCandidatesWithExistingVerifier(reader, request.submissionText, retrieval.candidates.map((candidate) => candidate.docId), { sidecars });
     if (verification.state === "FAILED") {
       return { state: "FAILED", failureCode: verification.failures[0]?.code ?? "VERIFICATION_FAILED", failureMessage: verification.failures[0]?.message ?? "verification failed", identity: reader.identity() };
     }

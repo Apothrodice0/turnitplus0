@@ -1,5 +1,6 @@
 import { fork } from "node:child_process";
 import { performance } from "node:perf_hooks";
+import { DerivedSourceSidecarSet } from "../../lib/corpus-engine/derived-source";
 import type { CorpusGenerationReader } from "../../lib/corpus-engine/reader";
 import { retrieveCandidates } from "../../lib/corpus-engine/retrieval";
 import { verifyCandidatesWithExistingVerifier, type VerifierPath } from "../../lib/corpus-engine/verifier-adapter";
@@ -10,7 +11,11 @@ import { logLine, mean, parseArguments, percentile, readJson, requireArgument, r
  * Bounded workload / latency profile of retrieval + verification.
  *
  *   benchmark-performance.ts --root R --generation G --queries queries.json --out performance.json [--budget 100]
- *                            [--verifier-path oracle | prepared-submission]
+ *                            [--verifier-path oracle | prepared-submission] [--sidecars] [--dictionary-cache-mb N]
+ *
+ * --sidecars verifies candidates from the generation's derived-source sidecar
+ * where one exists; --dictionary-cache-mb sets the reader's dictionary cache
+ * budget (0 = the original per-segment block cache; default: the reader's).
  *
  * The workload is the benchmark's own submissions (300 to ~12,700 words,
  * sources from a few hundred to tens of thousands of words).
@@ -48,6 +53,9 @@ type Measurement = {
   retrievalMs: number;
   textReadMs: number;
   textDecodeMs: number;
+  sidecarReadMs: number;
+  sidecarDecodeMs: number;
+  candidatesFromSidecar: number;
   verifierMs: number;
   prepareMs: number;
   candidateVerifyMs: number;
@@ -59,11 +67,11 @@ type Measurement = {
   score: number;
 };
 
-async function measure(reader: CorpusGenerationReader, query: BenchmarkQuery, budget: number, verifierPath: VerifierPath): Promise<Measurement> {
+async function measure(reader: CorpusGenerationReader, query: BenchmarkQuery, budget: number, verifierPath: VerifierPath, sidecars: DerivedSourceSidecarSet | null = null): Promise<Measurement> {
   const started = performance.now();
   const retrieval = await retrieveCandidates(reader, query.text, { candidateBudget: budget });
   const retrieved = performance.now();
-  const verification = await verifyCandidatesWithExistingVerifier(reader, query.text, retrieval.candidates.map((candidate) => candidate.docId), { verifierPath });
+  const verification = await verifyCandidatesWithExistingVerifier(reader, query.text, retrieval.candidates.map((candidate) => candidate.docId), { verifierPath, sidecars });
   const finished = performance.now();
   return {
     queryId: query.id,
@@ -83,6 +91,9 @@ async function measure(reader: CorpusGenerationReader, query: BenchmarkQuery, bu
     retrievalMs: retrieved - started,
     textReadMs: verification.totals.textReadMs,
     textDecodeMs: verification.totals.textDecodeMs,
+    sidecarReadMs: verification.totals.sidecarReadMs,
+    sidecarDecodeMs: verification.totals.sidecarDecodeMs,
+    candidatesFromSidecar: verification.totals.candidatesFromSidecar,
     verifierMs: verification.totals.prepareMs + verification.totals.verifyMs,
     prepareMs: verification.totals.prepareMs,
     candidateVerifyMs: verification.totals.verifyMs,
@@ -95,7 +106,18 @@ async function measure(reader: CorpusGenerationReader, query: BenchmarkQuery, bu
   };
 }
 
-const TIMED_FIELDS = ["totalMs", "retrievalMs", "fingerprintMs", "lookupMs", "accumulateMs", "mergeMs", "textReadMs", "textDecodeMs", "verifierMs", "prepareMs", "candidateVerifyMs"] as const;
+const TIMED_FIELDS = ["totalMs", "retrievalMs", "fingerprintMs", "lookupMs", "accumulateMs", "mergeMs", "textReadMs", "textDecodeMs", "sidecarReadMs", "sidecarDecodeMs", "verifierMs", "prepareMs", "candidateVerifyMs"] as const;
+
+function readerOptions(args: Record<string, string>) {
+  return args["dictionary-cache-mb"] === undefined ? {} : { dictionaryCacheBytes: Number(args["dictionary-cache-mb"]) * 1024 * 1024 };
+}
+
+async function openSidecars(args: Record<string, string>, reader: CorpusGenerationReader): Promise<DerivedSourceSidecarSet | null> {
+  if (args.sidecars !== "true") return null;
+  const sidecars = await DerivedSourceSidecarSet.open(reader);
+  if (sidecars.refusals.length > 0) throw new Error(`sidecars refused: ${JSON.stringify(sidecars.refusals.slice(0, 3))}`);
+  return sidecars;
+}
 
 function summarize(samples: readonly Measurement[]) {
   const result: Record<string, unknown> = { samples: samples.length };
@@ -103,7 +125,7 @@ function summarize(samples: readonly Measurement[]) {
     const values = samples.map((sample) => sample[field]);
     result[field] = { p50: round(percentile(values, 0.5), 3), p95: round(percentile(values, 0.95), 3), mean: round(mean(values), 3), max: round(Math.max(...values), 3) };
   }
-  for (const field of ["touchedDocuments", "candidates", "postingsDecoded", "indexBytesRead", "textCompressedBytesRead", "textDecompressedBytes"] as const) {
+  for (const field of ["touchedDocuments", "candidates", "candidatesFromSidecar", "postingsDecoded", "indexBytesRead", "textCompressedBytesRead", "textDecompressedBytes"] as const) {
     const values = samples.map((sample) => sample[field]);
     result[field] = { p50: percentile(values, 0.5), p95: percentile(values, 0.95), max: Math.max(...values) };
   }
@@ -124,9 +146,10 @@ async function coldChild(args: Record<string, string>) {
   const query = queries.find((candidate) => candidate.id === args["cold-child"]);
   if (!query) throw new Error(`unknown query ${args["cold-child"]}`);
   const opening = performance.now();
-  const { store, reader } = await openGeneration(requireArgument(args, "root"), requireArgument(args, "generation"));
+  const { store, reader } = await openGeneration(requireArgument(args, "root"), requireArgument(args, "generation"), readerOptions(args));
+  const sidecars = await openSidecars(args, reader);
   const openMs = performance.now() - opening;
-  const measurement = await measure(reader, query, Number(args.budget ?? 100), verifierPathArgument(args));
+  const measurement = await measure(reader, query, Number(args.budget ?? 100), verifierPathArgument(args), sidecars);
   await store.close();
   process.send?.({ openMs, measurement, rssBytes: process.memoryUsage.rss() });
 }
@@ -159,18 +182,21 @@ async function main() {
   logLine(`cold: ${cold.length} fresh processes — total p50 ${round(percentile(cold.map((sample) => sample.totalMs), 0.5))} ms, p95 ${round(percentile(cold.map((sample) => sample.totalMs), 0.95))} ms; generation open p50 ${round(percentile(openTimes, 0.5))} ms`);
 
   // ── warm: one process ──
-  const { store, reader } = await openGeneration(requireArgument(args, "root"), requireArgument(args, "generation"));
+  const { store, reader } = await openGeneration(requireArgument(args, "root"), requireArgument(args, "generation"), readerOptions(args));
+  const sidecars = await openSidecars(args, reader);
   try {
-    for (const query of queries) await measure(reader, query, budget, verifierPath);
+    // first warm pass: every submission once, timed separately (the cache fills here)
+    const firstWarm: Measurement[] = [];
+    for (const query of queries) firstWarm.push(await measure(reader, query, budget, verifierPath, sidecars));
     const warm: Measurement[] = [];
-    for (let repetition = 0; repetition < 3; repetition += 1) for (const query of queries) warm.push(await measure(reader, query, budget, verifierPath));
+    for (let repetition = 0; repetition < 3; repetition += 1) for (const query of queries) warm.push(await measure(reader, query, budget, verifierPath, sidecars));
     logLine(`verifier path: ${verifierPath}`);
     logLine(`warm: ${warm.length} runs — total p50 ${round(percentile(warm.map((sample) => sample.totalMs), 0.5))} ms, p95 ${round(percentile(warm.map((sample) => sample.totalMs), 0.95))} ms`);
 
     // ── a larger budget, warm, one pass: how the cost moves with K ──
     const warmLarge: Measurement[] = [];
     const largeBudget = Number(args["large-budget"] ?? 500);
-    for (const query of queries) warmLarge.push(await measure(reader, query, largeBudget, verifierPath));
+    for (const query of queries) warmLarge.push(await measure(reader, query, largeBudget, verifierPath, sidecars));
 
     // ── load: a small fixed number in flight ──
     // `--concurrency 1,4,8` measures each level in turn; the last one is also reported as `load`.
@@ -191,7 +217,7 @@ async function main() {
         for (;;) {
           const query = pending.shift();
           if (!query) return;
-          loaded.push(await measure(reader, query, budget, verifierPath));
+          loaded.push(await measure(reader, query, budget, verifierPath, sidecars));
         }
       }));
       loadSeconds = (performance.now() - loadStarted) / 1000;
@@ -215,10 +241,13 @@ async function main() {
     writeJson(requireArgument(args, "out"), {
       identity: reader.identity(),
       verifierPath,
+      sidecars: sidecars ? { identitySha256: sidecars.identitySha256, segmentsServed: sidecars.segmentsServed } : null,
+      dictionaryCache: reader.dictionaryCache?.stats() ?? null,
       budget,
       documentCount,
       workload: { submissions: queries.length, wordsMin: Math.min(...warm.map((sample) => sample.submissionWords)), wordsMax: Math.max(...warm.map((sample) => sample.submissionWords)), wordsP50: percentile(warm.map((sample) => sample.submissionWords), 0.5) },
       cold: { note: "fresh process per submission; engine caches cold; OS file cache not controlled (probably warm)", generationOpenMs: { p50: round(percentile(openTimes, 0.5), 2), p95: round(percentile(openTimes, 0.95), 2) }, processRssBytes: { p50: percentile(coldRss, 0.5), max: Math.max(...coldRss) }, ...summarize(cold) },
+      firstWarm: summarize(firstWarm),
       warm: summarize(warm),
       warmAtLargeBudget: { budget: largeBudget, ...summarize(warmLarge) },
       load: { concurrency, submissions: loaded.length, wallSeconds: round(loadSeconds), submissionsPerSecond: round(loaded.length / loadSeconds), ...summarize(loaded) },
