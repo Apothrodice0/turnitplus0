@@ -7,6 +7,7 @@ import {
   segmentPrefix,
   type GenerationManifest,
 } from "./generation";
+import { DEFAULT_DICTIONARY_CACHE_BYTES, DictionaryBlockCache } from "./dictionary-cache";
 import { docIdToDecimal, partitionOfDocId } from "./ids";
 import type { RecordReadMetrics } from "./record-pack";
 import { CorpusRevocationError, RevocationList, type RevocationAnchor } from "./revocation";
@@ -67,6 +68,8 @@ export class CorpusGenerationReader {
     /** null when df-high.bin could not be loaded; `highDfFailure` says why. */
     readonly highDf: HighDocumentFrequencyTable | null,
     readonly highDfFailure: string | null,
+    /** The dictionary block cache this reader serves through; null when it runs uncached (dictionaryCacheBytes 0). */
+    readonly dictionaryCache: DictionaryBlockCache | null,
   ) {}
 
   static async open(options: {
@@ -77,7 +80,16 @@ export class CorpusGenerationReader {
     verify?: SegmentVerifyLevel;
     /** Held outside the list (e.g. from the activation pointer): the list must contain this history. */
     revocationAnchor?: RevocationAnchor | null;
+    /** Legacy per-segment decoded-block cache, used only when the reader runs without a dictionary cache. */
     dictionaryBlockCacheBlocks?: number;
+    /**
+     * A dictionary cache the caller owns and may hand from one generation to
+     * the next: opening binds it to THIS generation, which empties it if it
+     * served another.
+     */
+    dictionaryCache?: DictionaryBlockCache;
+    /** Without `dictionaryCache`: the byte budget of a cache this reader creates for itself. 0 = no cache. */
+    dictionaryCacheBytes?: number;
   }): Promise<CorpusGenerationReader> {
     const { store, generationId } = options;
     const { manifest, logicalManifestSha256 } = await loadGenerationManifest(store, generationId);
@@ -88,6 +100,12 @@ export class CorpusGenerationReader {
     if (mismatches.length > 0) {
       throw new CorpusGenerationError("UNSUPPORTED_PROCESSING_IDENTITY", `generation ${generationId} cannot be served by this build: ${mismatches.join("; ")}`);
     }
+    const cacheIdentity = DictionaryBlockCache.identityOf(generationId, logicalManifestSha256);
+    let dictionaryCache: DictionaryBlockCache | null = null;
+    if (options.dictionaryCache) dictionaryCache = options.dictionaryCache;
+    else if ((options.dictionaryCacheBytes ?? DEFAULT_DICTIONARY_CACHE_BYTES) > 0) dictionaryCache = new DictionaryBlockCache(options.dictionaryCacheBytes ?? DEFAULT_DICTIONARY_CACHE_BYTES);
+    dictionaryCache?.bind(cacheIdentity);
+    const sharedDictionaryCache = dictionaryCache ? { cache: dictionaryCache, identity: cacheIdentity } : null;
     let revocations: RevocationList;
     try {
       revocations = await RevocationList.load(store, options.revocationAnchor ?? null);
@@ -104,6 +122,7 @@ export class CorpusGenerationReader {
           slot.reader = await SegmentReader.open(store, segmentPrefix(segmentId), segmentId, manifest.segments[segmentId].manifestSha256, {
             verify: options.verify ?? "size",
             dictionaryBlockCacheBlocks: options.dictionaryBlockCacheBlocks,
+            sharedDictionaryCache,
           });
         } catch (error) {
           const failure = error instanceof CorpusSegmentError ? error : toSegmentError(error, "segment");
@@ -132,7 +151,7 @@ export class CorpusGenerationReader {
       highDfFailure = error instanceof Error ? error.message : String(error);
     }
 
-    return new CorpusGenerationReader(store, generationId, logicalManifestSha256, manifest, revocations, slots, highDf, highDfFailure);
+    return new CorpusGenerationReader(store, generationId, logicalManifestSha256, manifest, revocations, slots, highDf, highDfFailure, dictionaryCache);
   }
 
   identity(): CorpusReaderIdentity {

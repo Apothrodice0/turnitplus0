@@ -2,6 +2,7 @@ import { closeSync, fsyncSync, openSync, writeSync } from "node:fs";
 import path from "node:path";
 import zlib from "node:zlib";
 import { ByteReader, ByteWriter, CorpusIntegrityError, decodePostings, encodePostings, readUint48BE, sha256Hex, writeUint48BE, type Bytes } from "./bytes";
+import { compactDictionaryBlock, findInCompactBlock, keyHalves, type DictionaryBlockCache } from "./dictionary-cache";
 import { fingerprintToHex } from "./ids";
 import { readPackedRecord, type RecordReadMetrics } from "./record-pack";
 import { CorpusStorageError, type CorpusObjectStore } from "./storage";
@@ -340,6 +341,9 @@ export type SegmentVerifyLevel = "size" | "sha256";
 
 type DecodedBlock = { keys: bigint[]; dfs: Uint32Array; offsets: Float64Array; lengths: Uint32Array };
 
+/** A generation-bound cache shared by every segment of one reader (see ./dictionary-cache.ts). */
+export type SharedDictionaryCache = { cache: DictionaryBlockCache; identity: string };
+
 const RANGE_COALESCE_GAP_BYTES = 4096;
 const RANGE_COALESCE_MAX_BYTES = 4 * 1024 * 1024;
 
@@ -354,6 +358,7 @@ export class SegmentReader {
     rangeReads: 0,
   };
   private readonly blockCache = new Map<number, DecodedBlock>();
+  private sharedCache: SharedDictionaryCache | null = null;
 
   private constructor(
     private readonly store: CorpusObjectStore,
@@ -386,7 +391,7 @@ export class SegmentReader {
     prefix: string,
     segmentId: string,
     expectedManifestSha256: string,
-    options: { verify?: SegmentVerifyLevel; dictionaryBlockCacheBlocks?: number } = {},
+    options: { verify?: SegmentVerifyLevel; dictionaryBlockCacheBlocks?: number; sharedDictionaryCache?: SharedDictionaryCache | null } = {},
   ): Promise<SegmentReader> {
     const verify = options.verify ?? "size";
     let manifest: SegmentManifest;
@@ -464,11 +469,13 @@ export class SegmentReader {
       blockPostingsOffsets[block] = readUint48BE(indexBytes, offset + 18);
     }
 
-    return new SegmentReader(
+    const reader = new SegmentReader(
       store, prefix, segmentId, manifest, docIds, tokenCounts, fingerprintCounts,
       blockFirstKeys, blockOffsets, blockLengths, blockPostingsOffsets,
       options.dictionaryBlockCacheBlocks ?? 2048,
     );
+    reader.sharedCache = options.sharedDictionaryCache ?? null;
+    return reader;
   }
 
   /** The ordinal of `docId` in this segment, or -1. */
@@ -592,8 +599,96 @@ export class SegmentReader {
     return loaded;
   }
 
+  /**
+   * With a shared cache: the compact form of the `blocks` (ascending,
+   * distinct), from the cache or from one coalesced range read per run of
+   * neighbours. A block read from storage is verified and decoded exactly as
+   * on the uncached path (decodeBlock) before it is cached or used.
+   */
+  private async loadCompactBlocks(blocks: number[], shared: SharedDictionaryCache): Promise<Map<number, Uint32Array | DecodedBlock>> {
+    const loaded = new Map<number, Uint32Array | DecodedBlock>();
+    const missing: number[] = [];
+    for (const block of blocks) {
+      const cached = shared.cache.get(shared.identity, this.segmentId, block);
+      if (cached) {
+        loaded.set(block, cached);
+        this.counters.dictionaryBlockCacheHits += 1;
+      } else missing.push(block);
+    }
+    let index = 0;
+    while (index < missing.length) {
+      const first = missing[index];
+      const rangeStart = this.blockOffsets[first];
+      let rangeEnd = rangeStart + this.blockLengths[first];
+      let last = index;
+      while (
+        last + 1 < missing.length
+        && this.blockOffsets[missing[last + 1]] - rangeEnd <= RANGE_COALESCE_GAP_BYTES
+        && this.blockOffsets[missing[last + 1]] + this.blockLengths[missing[last + 1]] - rangeStart <= RANGE_COALESCE_MAX_BYTES
+      ) {
+        last += 1;
+        rangeEnd = this.blockOffsets[missing[last]] + this.blockLengths[missing[last]];
+      }
+      let bytes: Bytes;
+      try {
+        bytes = await this.store.readRange(`${this.prefix}/${SEGMENT_FILE_DICT}`, rangeStart, rangeEnd - rangeStart);
+      } catch (error) {
+        throw toSegmentError(error, SEGMENT_FILE_DICT);
+      }
+      this.counters.rangeReads += 1;
+      this.counters.dictionaryBytesRead += bytes.length;
+      for (let cursor = index; cursor <= last; cursor += 1) {
+        const block = missing[cursor];
+        let decoded: DecodedBlock;
+        try {
+          decoded = this.decodeBlock(block, bytes, this.blockOffsets[block] - rangeStart);
+        } catch (error) {
+          throw toSegmentError(error, SEGMENT_FILE_DICT);
+        }
+        this.counters.dictionaryBlocksRead += 1;
+        const compact = compactDictionaryBlock(decoded.keys, decoded.dfs, decoded.offsets, decoded.lengths, this.blockPostingsOffsets[block]);
+        if (compact) {
+          shared.cache.set(shared.identity, this.segmentId, block, compact);
+          loaded.set(block, compact);
+        } else loaded.set(block, decoded);
+      }
+      index = last + 1;
+    }
+    return loaded;
+  }
+
+  /** The shared-cache lookup: same answer as the uncached one, keys compared as uint32 halves by binary search. */
+  private async lookupWithSharedCache(sortedKeys: readonly bigint[], shared: SharedDictionaryCache): Promise<Array<DictionaryHit | null>> {
+    const result = new Array<DictionaryHit | null>(sortedKeys.length).fill(null);
+    const blockOfKey = new Int32Array(sortedKeys.length);
+    const needed: number[] = [];
+    for (let index = 0; index < sortedKeys.length; index += 1) {
+      const block = this.blockFor(sortedKeys[index]);
+      blockOfKey[index] = block;
+      if (block >= 0 && needed[needed.length - 1] !== block) needed.push(block);
+    }
+    const blocks = await this.loadCompactBlocks(needed, shared);
+    const { hi, lo } = keyHalves(sortedKeys);
+    for (let index = 0; index < sortedKeys.length; index += 1) {
+      const block = blockOfKey[index];
+      if (block < 0) continue;
+      const loaded = blocks.get(block) as Uint32Array | DecodedBlock;
+      if (loaded instanceof Uint32Array) {
+        const entry = findInCompactBlock(loaded, hi[index], lo[index]);
+        if (entry < 0) continue;
+        const n = loaded.length / 5;
+        result[index] = { fingerprint: sortedKeys[index], df: loaded[2 * n + entry], postingsOffset: this.blockPostingsOffsets[block] + loaded[3 * n + entry], postingsLength: loaded[4 * n + entry] };
+      } else {
+        const entry = loaded.keys.indexOf(sortedKeys[index]);
+        if (entry >= 0) result[index] = { fingerprint: sortedKeys[index], df: loaded.dfs[entry], postingsOffset: loaded.offsets[entry], postingsLength: loaded.lengths[entry] };
+      }
+    }
+    return result;
+  }
+
   /** `sortedKeys` ascending and distinct. Result is aligned to it; null = the segment does not hold that fingerprint. */
   async lookupDictionary(sortedKeys: readonly bigint[]): Promise<Array<DictionaryHit | null>> {
+    if (this.sharedCache && this.blockFirstKeys.length > 0 && sortedKeys.length > 0) return this.lookupWithSharedCache(sortedKeys, this.sharedCache);
     const result = new Array<DictionaryHit | null>(sortedKeys.length).fill(null);
     if (this.blockFirstKeys.length === 0 || sortedKeys.length === 0) return result;
     const blockOfKey = new Int32Array(sortedKeys.length);

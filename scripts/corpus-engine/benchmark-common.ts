@@ -94,9 +94,9 @@ export function verifierPathArgument(args: Record<string, string>, fallback: Ver
   return value;
 }
 
-export async function openGeneration(root: string, generationId: string, options: { dictionaryBlockCacheBlocks?: number } = {}) {
+export async function openGeneration(root: string, generationId: string, options: { dictionaryBlockCacheBlocks?: number; dictionaryCacheBytes?: number } = {}) {
   const store = new LocalDirectoryObjectStore(root);
-  const reader = await CorpusGenerationReader.open({ store, generationId, dictionaryBlockCacheBlocks: options.dictionaryBlockCacheBlocks });
+  const reader = await CorpusGenerationReader.open({ store, generationId, dictionaryBlockCacheBlocks: options.dictionaryBlockCacheBlocks, dictionaryCacheBytes: options.dictionaryCacheBytes });
   return { store, reader };
 }
 
