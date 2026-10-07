@@ -528,7 +528,7 @@ export type MatchAgainstArchiveCorpusResult = ArchiveScoringResult & {
       /** self-excluded compact candidates (the potential G1s anchors). */
       selfExcludedCandidateCount: number;
       /** did the G1s gate open (>=1 self-excluded AND (all self-excluded OR
-       *  primary produced no non-self-excluded contributing source))? */
+       *  no non-self-excluded candidate has verified evidence, before admission))? */
       eligible: boolean;
       /** anchors actually queried for co-sources (0 unless eligible). */
       anchorCount: number;
@@ -661,19 +661,30 @@ export async function matchAgainstArchiveCorpus(
     return { ...extended.result, archiveDiscovery: baseDiscovery, archiveSpanExtension: extended.diagnostics };
   }
 
-  // ── G1s gate (frozen Slice 2D.3 semantics) ──────────────────────────────
+  // ── G1s gate (Slice 2D.3 semantics, read from pre-admission evidence) ────
   // Expansion is eligible iff at least one discovered candidate self-excludes
-  // AND ( every discovered candidate self-excludes OR primary scoring produced
-  // zero non-self-excluded contributing sources ). Only self-excluded
-  // candidates may be adjacency anchors; with no self-excluded candidate there
-  // is no adjacency lookup at all.
+  // AND ( every discovered candidate self-excludes OR no non-self-excluded
+  // candidate has ANY verified evidence ). Only self-excluded candidates may
+  // be adjacency anchors; with no self-excluded candidate there is no
+  // adjacency lookup at all.
+  //
+  // The second clause used to read the primary pass's ADMITTED sources
+  // (result.sources). The per-source minimum is relative to the analysed word
+  // count, so one independent source falling below it (a longer text) opened
+  // the gate and pulled co-sources in, while the same verified evidence in a
+  // shorter text kept it closed. It reads the primary pass's verified evidence
+  // before admission instead (self-excluded candidates never contribute to it),
+  // so whether a source clears the minimum never decides which documents are
+  // searched (see DISCOVERY vs ADMISSION). The near-duplicate collapse it
+  // exists for — nothing but self-excluded candidates verified anything —
+  // opens it exactly as before.
   const selfExcludedIds = primary.selfExcludedRepresentationIds;
   const everyDiscoveredCandidateSelfExcludes =
     selfExcludedIds.length >= 1 && selfExcludedIds.length === compactCandidateIds.length;
-  const primaryHasNoNonSelfExcludedContributingSource = primary.result.sources.length === 0;
+  const primaryHasNoNonSelfExcludedVerifiedEvidence = primary.verifiedEvidencePositions.length === 0;
   const g1sEligible =
     selfExcludedIds.length >= 1
-    && (everyDiscoveredCandidateSelfExcludes || primaryHasNoNonSelfExcludedContributingSource);
+    && (everyDiscoveredCandidateSelfExcludes || primaryHasNoNonSelfExcludedVerifiedEvidence);
 
   const cosourceBase = {
     selfExcludedCandidateCount: selfExcludedIds.length,
