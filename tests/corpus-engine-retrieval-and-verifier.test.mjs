@@ -337,6 +337,13 @@ test('feature flag: default OFF returns DISABLED before anything is opened; only
     assert.deepEqual(enabled.identity, reader.identity());
     assert.deepEqual(enabled.verification.matchedPositions, exhaustive.matchedPositions);
     assert.equal(enabled.verification.unifiedScore, exhaustive.unifiedScore);
+    // the reader's dictionary cache budget is a runtime setting of the request; it never changes an answer
+    for (const dictionaryCacheBytes of [0, 1024 * 1024 * 1024]) {
+      const configured = await runCorpusEngineCandidateVerification({ ...request, dictionaryCacheBytes });
+      assert.equal(configured.state, 'COMPLETE');
+      assert.deepEqual(configured.retrieval.candidates.map((candidate) => candidate.docIdDecimal), enabled.retrieval.candidates.map((candidate) => candidate.docIdDecimal));
+      assert.deepEqual(configured.verification.matchedPositions, enabled.verification.matchedPositions);
+    }
     // a request must pin a real generation; "latest" is not a thing
     const unpinned = await runCorpusEngineCandidateVerification({ ...request, generationId: 'latest' });
     assert.equal(unpinned.state, 'FAILED');

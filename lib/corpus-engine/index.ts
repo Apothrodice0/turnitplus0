@@ -50,6 +50,12 @@ export type CorpusEngineRequest = {
    * the sidecar index costs a read per segment.
    */
   useDerivedSourceSidecar?: boolean;
+  /**
+   * Byte budget of the reader's dictionary block cache (default DEFAULT_DICTIONARY_CACHE_BYTES, 512 MiB;
+   * 0 = uncached). Measured on the 1M launch generation: 512 MiB holds ~0.67 of a varied workload's
+   * blocks, 1 GiB ~0.91 (recommended for a 1M generation). The cache never changes an answer.
+   */
+  dictionaryCacheBytes?: number;
 };
 
 export type CorpusEngineResponse =
@@ -77,6 +83,7 @@ export async function runCorpusEngineCandidateVerification(request: CorpusEngine
       generationId: request.generationId,
       expectedLogicalManifestSha256: request.logicalManifestSha256,
       revocationAnchor: request.revocationAnchor,
+      dictionaryCacheBytes: request.dictionaryCacheBytes,
     });
   } catch (error) {
     return {
