@@ -8,6 +8,7 @@ import {
   PMC_STAGE_A_MAX_CANDIDATES,
 } from "../pmc-coverage/constants";
 import { DEFAULT_DOCUMENT_CORRESPONDENCE_THRESHOLDS } from "../document-correspondence";
+import type { ArtifactNormalizationIdentity } from "../scoring-normalization-artifacts";
 
 /**
  * Selective Corpus V1 SHADOW slice — frozen version constants and hard bounds.
@@ -198,5 +199,28 @@ export const SELECTIVE_CORPUS_EXPECTED_DIGEST =
  */
 export const SELECTIVE_CORPUS_DEV_REGRESSION_DIGEST =
   "5a234fa33fa9403059a14726bb169703444614c3aca7bb08fb20d37f6646581a";
+
+/**
+ * The scoring-normalization identity of each pinned artifact, by
+ * corpusIdentityDigest (lib/scoring-normalization-artifacts.ts). The packed
+ * index records no build contract, so each entry is a proof over the
+ * artifact's own source texts (in docmap order, sha256 over
+ * "rawId\tsha256(bytes)\n"), re-run by
+ * tests/scoring-normalization-artifacts.local.test.mjs whenever the artifact is
+ * on disk. runSelectiveCorpusShadow reads an artifact only under a compatible
+ * contract; an unlisted digest is UNKNOWN and the run is ARTIFACT_UNAVAILABLE
+ * (NORMALIZATION_INCOMPATIBLE). A new artifact needs its own entry.
+ */
+export const SELECTIVE_CORPUS_NORMALIZATION_IDENTITY: Readonly<Record<string, ArtifactNormalizationIdentity>> = {
+  [SELECTIVE_CORPUS_EXPECTED_DIGEST]: {
+    kind: "CONTRACT_INDEPENDENT",
+    proof: "9,176 source texts (sha256 0c5ff774d59fc633d280de967839909104508fb7d5a71511fdb72543c463d032): 14 hold a scoring-ignorable code point, none tokenizes differently under v1 and v2",
+  },
+  [SELECTIVE_CORPUS_DEV_REGRESSION_DIGEST]: {
+    kind: "BUILT_UNDER",
+    version: 1,
+    proof: "9,443 source texts (sha256 16cf5151f0dc57daf30a7dd3c18a0f50a28e8cd8b8d59948d99f96262d3f74e3): only fixture:A-wiki-112 (ordinal 9293) tokenizes differently; its 3 v1-only fingerprints are posted to it and its 2 v2-only fingerprints are not",
+  },
+};
 
 export const SELECTIVE_CORPUS_VERSION = "selective-corpus-v1";

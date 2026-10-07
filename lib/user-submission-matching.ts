@@ -1,9 +1,11 @@
 import type { Client } from "@libsql/client";
-import { tokens, grams, gramHash, informativeGram } from "./similarity-core";
+import { tokens, grams, gramHash, informativeGram, currentScoringNormalizationVersion } from "./similarity-core";
 import { canonicalSha256 } from "./document-identity";
+import { artifactNormalizationCompatibility } from "./scoring-normalization-artifacts";
 import {
   corpusShingleHashes,
   findCandidateCorpusRepresentations,
+  findContractDependentCorpusRepresentations,
   findReusableRepresentationByCanonicalHash,
   findRepresentationById,
   findRepresentationOwnersForShingle,
@@ -474,9 +476,16 @@ export function matchScoringRanges(
   return ranges;
 }
 
+/**
+ * `indexNormalizationIncompatible` — set (with partial) when an eligible
+ * corpus representation's stored shingles cannot be read under the report's
+ * scoring-normalization contract (findContractDependentCorpusRepresentations):
+ * discovery for it is not exact under that contract, so the result is a
+ * lower bound, never a complete no-match.
+ */
 export type UserSubmissionMatchResult =
-  | { status: "NO_HISTORICAL_MATCH"; partial?: boolean }
-  | { status: "MATCHED"; matches: UserSubmissionMatch[]; partial?: boolean };
+  | { status: "NO_HISTORICAL_MATCH"; partial?: boolean; indexNormalizationIncompatible?: true }
+  | { status: "MATCHED"; matches: UserSubmissionMatch[]; partial?: boolean; indexNormalizationIncompatible?: true };
 
 /**
  * Developer/test-only diagnostics for one matching pass. Populated in place
@@ -511,6 +520,8 @@ export type UserSubmissionMatchDiagnostics = {
   stopReason: "CANDIDATES_EXHAUSTED" | "TIME_BUDGET" | "QUERY_FAILED";
   /** The `partial` flag of the returned result, as a plain boolean. */
   partial: boolean;
+  /** Eligible representations whose stored shingles are not readable under the report's scoring-normalization contract (any => partial). */
+  indexNormalizationIncompatibleRepresentations: number;
   /** Query shingles maxDF pruning removed from the candidate search (first discovery page). */
   highDfPrunedShingles: number;
   /** Long distinctive runs of pruned shingles found in the submission (COMMON BLOCKS). */
@@ -840,6 +851,34 @@ export async function matchAgainstUserSubmissionCorpus(
     appliedMaxDocumentFrequency: null,
     prunedShingleHashes: [],
   };
+
+  // INDEX NORMALIZATION IDENTITY. The stored shingles discovery reads were
+  // built under the contract active at index time; this pass runs under the
+  // report's own (the enclosing runWithScoringNormalization). Every eligible
+  // representation that tokenizes differently under v1 and v2 must have rows
+  // proven built under this contract; any that is not makes the pass partial
+  // (indexNormalizationIncompatible), never a complete result. A failed check
+  // is a failed discovery query.
+  let indexNormalizationIncompatibleRepresentations = 0;
+  try {
+    const scoringNormalizationVersion = currentScoringNormalizationVersion();
+    const dependent = await withTimeout(
+      findContractDependentCorpusRepresentations(client, {
+        fingerprintVersion: config.fingerprintVersion,
+        excludeAccountId: params.excludeAccountId,
+        eligibilityMode: "MATCHING",
+        maturityCutoff,
+      }),
+      config.dbQueryTimeoutMs,
+      "findContractDependentCorpusRepresentations",
+    );
+    indexNormalizationIncompatibleRepresentations = dependent
+      .filter((representation) => !artifactNormalizationCompatibility(scoringNormalizationVersion, representation.identity).compatible)
+      .length;
+  } catch {
+    timedOut = true;
+    stopReason = "QUERY_FAILED";
+  }
 
   /**
    * Loads one candidate's text and verifies it with the unchanged
@@ -1233,8 +1272,9 @@ export async function matchAgainstUserSubmissionCorpus(
 
   // Partial whenever a discovered scoring candidate went unverified: the pass
   // was stopped by a time budget / failed query, or a candidate was over the
-  // size limit. Never set by the SELF/UNKNOWN budget.
-  const isPartial = timedOut || oversizedScoringCandidatesSkipped > 0;
+  // size limit, or discovery read shingles not built under the report's
+  // scoring-normalization contract. Never set by the SELF/UNKNOWN budget.
+  const isPartial = timedOut || oversizedScoringCandidatesSkipped > 0 || indexNormalizationIncompatibleRepresentations > 0;
 
   if (params.diagnostics) {
     Object.assign(params.diagnostics, {
@@ -1248,6 +1288,7 @@ export async function matchAgainstUserSubmissionCorpus(
       matchTimeMs: Date.now() - startedAt,
       stopReason,
       partial: isPartial,
+      indexNormalizationIncompatibleRepresentations,
       highDfPrunedShingles: discoveryDiagnostics.highDfPrunedCount,
       commonBlockRuns,
       commonBlockRunsRecovered,
@@ -1258,8 +1299,9 @@ export async function matchAgainstUserSubmissionCorpus(
   }
 
   const partial = isPartial ? true : undefined;
-  if (matches.length === 0) return { status: "NO_HISTORICAL_MATCH", partial };
+  const incompatible = indexNormalizationIncompatibleRepresentations > 0 ? { indexNormalizationIncompatible: true as const } : {};
+  if (matches.length === 0) return { status: "NO_HISTORICAL_MATCH", partial, ...incompatible };
 
   matches.sort(compareMatches);
-  return { status: "MATCHED", matches, partial };
+  return { status: "MATCHED", matches, partial, ...incompatible };
 }

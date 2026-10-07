@@ -32,6 +32,7 @@ import {
 import { loadSelectiveCorpusCandidateText, clearSelectiveCorpusSourceCache } from "../lib/selective-corpus/source-loader.ts";
 import { selectiveCorpusStageA } from "../lib/selective-corpus/stage-a.ts";
 import { runSelectiveCorpusShadow } from "../lib/selective-corpus/shadow.ts";
+import { runWithScoringNormalization } from "../lib/scoring-normalization-scope.ts";
 import { getSelectiveCorpusStorageMode } from "../lib/selective-corpus/config.ts";
 import { parseSelectiveCorpusIntegrityManifest } from "../lib/selective-corpus/integrity.ts";
 import { SELECTIVE_CORPUS_EXPECTED_DIGEST, SELECTIVE_CORPUS_DEV_REGRESSION_DIGEST } from "../lib/selective-corpus/constants.ts";
@@ -754,8 +755,10 @@ test(
         expectedDigest: SELECTIVE_CORPUS_DEV_REGRESSION_DIGEST,
       });
 
-      const resultLocal = await runSelectiveCorpusShadow({ canonicalSubmissionText: sub, authoritative, artifactOverride: artifactLocal });
-      const resultBlob = await runSelectiveCorpusShadow({ canonicalSubmissionText: sub, authoritative, artifactOverride: artifactBlob });
+      // The dev/regression artifact was built under scoring normalization v1
+      // (SELECTIVE_CORPUS_NORMALIZATION_IDENTITY), so it is read under v1.
+      const resultLocal = await runWithScoringNormalization(1, () => runSelectiveCorpusShadow({ canonicalSubmissionText: sub, authoritative, artifactOverride: artifactLocal }));
+      const resultBlob = await runWithScoringNormalization(1, () => runSelectiveCorpusShadow({ canonicalSubmissionText: sub, authoritative, artifactOverride: artifactBlob }));
 
       assert.equal(resultBlob.state, resultLocal.state);
       assert.equal(resultBlob.candidateCount, resultLocal.candidateCount);

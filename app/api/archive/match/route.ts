@@ -6,6 +6,7 @@ import { isArchiveServerSideEnabled } from "../../../../lib/archive-server-flag"
 import { analyzeArchiveOnServer } from "../../../../lib/archive-server-analysis";
 import { requestedScoringNormalizationVersion } from "../../../../lib/similarity-core";
 import { runWithScoringNormalization } from "../../../../lib/scoring-normalization-scope";
+import { ArtifactNormalizationIncompatibleError } from "../../../../lib/scoring-normalization-artifacts";
 
 /**
  * 100k-scale architecture, slice 2E — the one server endpoint the real
@@ -114,6 +115,11 @@ export async function POST(request: Request) {
       client.close();
     }
   } catch (err) {
+    // The archive index cannot be read under the declared contract: an
+    // explicit refusal the client fails closed on, never a zero-match result.
+    if (err instanceof ArtifactNormalizationIncompatibleError) {
+      return new NextResponse(JSON.stringify({ error: err.message, code: err.code }), { status: 409, headers: { "Content-Type": "application/json" } });
+    }
     return new NextResponse(JSON.stringify({ error: err instanceof Error ? err.message : "Internal error" }), { status: 500 });
   }
 }

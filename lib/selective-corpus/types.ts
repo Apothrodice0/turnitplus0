@@ -138,6 +138,8 @@ export type SelectiveCorpusShadowResult = {
   degradedDetail?: string;
 
   /** Set when state is ARTIFACT_UNAVAILABLE / FAILED / TIMEOUT. */
-  failureCode?: SelectiveCorpusArtifactErrorCode | "TIMEOUT" | "UNEXPECTED";
+  /** NORMALIZATION_INCOMPATIBLE: the artifact cannot be read under the
+   *  report's scoring-normalization contract (SELECTIVE_CORPUS_NORMALIZATION_IDENTITY). */
+  failureCode?: SelectiveCorpusArtifactErrorCode | "TIMEOUT" | "UNEXPECTED" | "NORMALIZATION_INCOMPATIBLE";
   failureMessage?: string;
 };

@@ -603,6 +603,8 @@ type PriorSubmissionMatchPass = {
   /** How far the pass got: candidates it compared against the submission. */
   candidatesVerified: number;
   oversizedScoringCandidatesSkipped: number;
+  /** Partial for a reason no re-run clears: discovery read shingles not built under the report's contract. */
+  indexNormalizationIncompatibleRepresentations: number;
 };
 
 /**
@@ -631,6 +633,8 @@ function logPriorSubmissionCheck(event: {
   maxAttempts: number;
   stops: PriorSubmissionMatchPass["stop"][];
   oversizedScoringCandidatesSkipped: number;
+  /** Eligible representations whose stored shingles are not readable under the report's contract. */
+  indexNormalizationIncompatibleRepresentations: number;
   durationMs: number;
 }): void {
   try {
@@ -876,6 +880,7 @@ export async function getOrComputeHistoricalMatchSnapshot(
         cutShort: isPartial && (stop === "TIME_BUDGET" || stop === "QUERY_FAILED"),
         candidatesVerified: diagnostics.candidatesVerified ?? 0,
         oversizedScoringCandidatesSkipped: diagnostics.oversizedScoringCandidatesSkipped ?? 0,
+        indexNormalizationIncompatibleRepresentations: diagnostics.indexNormalizationIncompatibleRepresentations ?? 0,
       };
     } catch (error) {
       return {
@@ -888,6 +893,7 @@ export async function getOrComputeHistoricalMatchSnapshot(
         cutShort: true,
         candidatesVerified: 0,
         oversizedScoringCandidatesSkipped: 0,
+        indexNormalizationIncompatibleRepresentations: 0,
       };
     }
   };
@@ -922,6 +928,7 @@ export async function getOrComputeHistoricalMatchSnapshot(
       maxAttempts: PRIOR_SUBMISSION_MATCH_MAX_ATTEMPTS,
       stops,
       oversizedScoringCandidatesSkipped: pass.oversizedScoringCandidatesSkipped,
+      indexNormalizationIncompatibleRepresentations: pass.indexNormalizationIncompatibleRepresentations,
       durationMs: processingDurationMs,
     });
   }

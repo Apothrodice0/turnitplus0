@@ -15,6 +15,7 @@ import { loadSelectiveCorpusCandidateText } from "../lib/selective-corpus/source
 import { admitSelectiveCorpusCandidate } from "../lib/selective-corpus/verify.ts";
 import { runSelectiveCorpusShadow } from "../lib/selective-corpus/shadow.ts";
 import { SELECTIVE_CORPUS_DEV_REGRESSION_DIGEST } from "../lib/selective-corpus/constants.ts";
+import { runWithScoringNormalization } from "../lib/scoring-normalization-scope.ts";
 
 const ARTIFACT = "D:/TurnitPlusTemp/selective-corpus-bulk-v1/run-20260909-224038";
 const TRACKC = "D:/TurnitPlusTemp/selective-corpus-v1/run-20260909-211001";
@@ -306,7 +307,9 @@ test("shadow result: interpretationBreakdown is present, safe-labelled, and does
     // alone can never select a non-production digest (shadow.ts's env-var
     // branch never passes expectedDigest).
     const artifact = await loadSelectiveCorpusArtifact(ARTIFACT, { expectedDigest: SELECTIVE_CORPUS_DEV_REGRESSION_DIGEST });
-    return runSelectiveCorpusShadow({ canonicalSubmissionText: sub, authoritative, artifactOverride: artifact });
+    // That artifact was built under scoring normalization v1
+    // (SELECTIVE_CORPUS_NORMALIZATION_IDENTITY), so it is read under v1.
+    return runWithScoringNormalization(1, () => runSelectiveCorpusShadow({ canonicalSubmissionText: sub, authoritative, artifactOverride: artifact }));
   });
   assert.ok(r.state === "COMPLETED" || r.state === "PARTIAL");
   assert.equal(r.interpretationVersion, SELECTIVE_CORPUS_INTERPRETATION_VERSION);

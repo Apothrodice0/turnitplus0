@@ -1,5 +1,6 @@
 import { performance } from "node:perf_hooks";
-import { tokens } from "../similarity-core";
+import { tokens, currentScoringNormalizationVersion } from "../similarity-core";
+import { artifactNormalizationCompatibility } from "../scoring-normalization-artifacts";
 import { isSelectiveCorpusShadowEnabled } from "./flag";
 import { getSelectiveCorpusArtifactPath, getSelectiveCorpusStorageMode, getSelectiveCorpusBlobPrefix } from "./config";
 import {
@@ -17,6 +18,7 @@ import {
   SELECTIVE_CORPUS_SHADOW_EVALUATOR_VERSION,
   SELECTIVE_CORPUS_TIME_BUDGET_MS,
   SELECTIVE_CORPUS_STAGE_B_SOURCE_FETCH_CONCURRENCY,
+  SELECTIVE_CORPUS_NORMALIZATION_IDENTITY,
 } from "./constants";
 import { createSelectiveCorpusFailureCollector, type SelectiveCorpusShardFailure } from "./shard-reader";
 import type { SelectiveCorpusShadowResult } from "./types";
@@ -134,6 +136,25 @@ export async function runSelectiveCorpusShadow(
         }
         return { state: "ARTIFACT_UNAVAILABLE", failureCode: "UNEXPECTED", failureMessage: err instanceof Error ? err.message : String(err), ...base };
       }
+    }
+
+    // The packed index was built under one scoring-normalization contract and
+    // this run is under the report's: read it only when the artifact's
+    // declared identity is compatible (SELECTIVE_CORPUS_NORMALIZATION_IDENTITY);
+    // otherwise unavailable, never a COMPLETED no-match.
+    const scoringNormalizationVersion = currentScoringNormalizationVersion();
+    const normalization = artifactNormalizationCompatibility(
+      scoringNormalizationVersion,
+      SELECTIVE_CORPUS_NORMALIZATION_IDENTITY[artifact.corpusDigest]
+        ?? { kind: "UNKNOWN", reason: `no scoring-normalization identity is declared for artifact ${artifact.corpusDigest}` },
+    );
+    if (!normalization.compatible) {
+      return {
+        state: "ARTIFACT_UNAVAILABLE",
+        failureCode: "NORMALIZATION_INCOMPATIBLE",
+        failureMessage: `artifact cannot be read under scoring normalization v${scoringNormalizationVersion}: ${normalization.reason} (${normalization.detail})`,
+        ...base,
+      };
     }
 
     // per-submission time budget starts here (after the one-time artifact load)

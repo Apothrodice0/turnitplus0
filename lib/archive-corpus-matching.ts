@@ -1,5 +1,13 @@
 import type { ArchiveReadClient } from "./archive-read-retry";
-import { tokens, grams, gramHash, containment, mergeAdjacentPositions, similarityScore } from "./similarity-core";
+import { tokens, grams, gramHash, containment, mergeAdjacentPositions, similarityScore, currentScoringNormalizationVersion } from "./similarity-core";
+import {
+  artifactNormalizationCompatibility,
+  scoringContractsAgreeOnText,
+  ArtifactNormalizationIncompatibleError,
+  SCORING_IGNORABLE_TEXT_GLOB,
+  SCORING_NORMALIZATION_ARTIFACT_POLICY_VERSION,
+  type ArtifactNormalizationIdentity,
+} from "./scoring-normalization-artifacts";
 import { scoreAgainstArchive, scoreAgainstArchiveDetailed, type ArchiveScoringResult, type ArchiveScoringMatchingParameters } from "./archive-similarity-scoring";
 import { seedExtendVerifiedPositions, SEED_EXTEND_ALIGNMENT_POLICY_VERSION } from "./seed-extend-alignment";
 import { ARCHIVE_FINGERPRINT_VERSION } from "./archive-corpus-seed";
@@ -110,6 +118,14 @@ const DISCOVERY_HASH_CHUNK = 400;
  * (and the risk calibration) always did. Candidate limit, order, retrieval
  * route and display cap therefore never change a gram's DF.
  *
+ * INDEX NORMALIZATION IDENTITY: a request runs under one scoring-normalization
+ * contract (the one it declared; lib/scoring-normalization-scope.ts), but the
+ * index was built under whatever contract was active at build time and does
+ * not record it. The matcher reads the index only when it is proven
+ * compatible with the request's contract (archiveIndexNormalizationIdentity,
+ * lib/scoring-normalization-artifacts.ts) and otherwise throws
+ * ArtifactNormalizationIncompatibleError — never a zero-match result.
+ *
  * NO FULL corpus_document_shingles PERSISTENCE is required for the archive:
  * discovery reads compact fingerprints, postings are reconstructed
  * request-locally from canonical_text, DF comes from the compact df-band
@@ -134,6 +150,7 @@ export const ARCHIVE_RUNTIME_DF_POLICY_VERSION = "archive-runtime-df-global-v1";
  *  diagnostics / tests so a policy change is a visible, reviewed edit. */
 export const ARCHIVE_MATCH_POLICY = {
   runtimeDfPolicyVersion: ARCHIVE_RUNTIME_DF_POLICY_VERSION,
+  normalizationArtifactPolicyVersion: SCORING_NORMALIZATION_ARTIFACT_POLICY_VERSION,
   compactFingerprintVersion: ARCHIVE_COMPACT_FINGERPRINT_VERSION,
   dfBandPolicyVersion: ARCHIVE_DF_BAND_POLICY_VERSION,
   phraseFallbackPolicyVersion: ARCHIVE_PHRASE_FALLBACK_POLICY_VERSION,
@@ -171,6 +188,39 @@ export type MatchAgainstArchiveCorpusOptions = {
 };
 
 type CandidateOrderRow = { representation_id: string; title: string; archive_order: number | bigint | null };
+
+/**
+ * The archive index's scoring-normalization identity, proven from the archive
+ * texts themselves (lib/scoring-normalization-artifacts.ts): the fingerprints,
+ * DF bands, FTS phrase index and co-source graph are all functions of each
+ * document's tokens(canonical_text), so when every archive document tokenizes
+ * identically under v1 and v2 the whole index is CONTRACT_INDEPENDENT. The
+ * index records no build contract, so a document that tokenizes differently
+ * makes it UNKNOWN. Only texts holding a scoring-ignorable code point leave
+ * the database (GLOB), and only those are tokenized twice.
+ */
+export async function archiveIndexNormalizationIdentity(client: ArchiveReadClient): Promise<ArtifactNormalizationIdentity> {
+  const res = await client.execute({
+    sql: `SELECT c.id AS id, c.canonical_text AS canonical_text
+            FROM archive_document_representations a
+            JOIN corpus_document_representations c ON c.id = a.representation_id
+           WHERE a.fingerprint_version = ? AND c.canonical_text GLOB ?`,
+    args: [ARCHIVE_FINGERPRINT_VERSION, SCORING_IGNORABLE_TEXT_GLOB],
+  });
+  const dependent = res.rows
+    .map((row) => row as unknown as { id: string; canonical_text: string })
+    .filter((row) => !scoringContractsAgreeOnText(String(row.canonical_text)));
+  if (dependent.length === 0) {
+    return {
+      kind: "CONTRACT_INDEPENDENT",
+      proof: `${res.rows.length} archive document(s) hold a scoring-ignorable code point; each tokenizes identically under every contract`,
+    };
+  }
+  return {
+    kind: "UNKNOWN",
+    reason: `${dependent.length} archive document(s) tokenize differently under v1 and v2 and the archive index records no build contract`,
+  };
+}
 
 function queryHashSet(text: string): Set<string> {
   const set = new Set<string>();
@@ -646,6 +696,15 @@ export async function matchAgainstArchiveCorpus(
       options.matchingParameters,
     );
     return { ...empty, archiveDiscovery: emptyDiscovery, archiveSpanExtension: emptySpanExtension(spanExtensionEnabled) };
+  }
+
+  // Every discovery structure below was built under the contract active at
+  // build time; read it only under a compatible contract (INDEX NORMALIZATION
+  // IDENTITY in the header). A refusal is an error, never an empty result.
+  const scoringNormalizationVersion = currentScoringNormalizationVersion();
+  const indexCompatibility = artifactNormalizationCompatibility(scoringNormalizationVersion, await archiveIndexNormalizationIdentity(client));
+  if (!indexCompatibility.compatible) {
+    throw new ArtifactNormalizationIncompatibleError("archive index", scoringNormalizationVersion, indexCompatibility);
   }
 
   // Archive-global DF metadata — the only DF data read directly.

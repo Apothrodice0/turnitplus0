@@ -1,6 +1,11 @@
 import { randomUUID } from "node:crypto";
 import type { Client, Transaction } from "@libsql/client";
-import { tokens, grams, gramHash, informativeGram, containment } from "./similarity-core";
+import { tokens, grams, gramHash, informativeGram, containment, tokensForScoringNormalization, type ScoringNormalizationVersion } from "./similarity-core";
+import {
+  scoringContractsAgreeOnText,
+  SCORING_IGNORABLE_TEXT_GLOB,
+  type ArtifactNormalizationIdentity,
+} from "./scoring-normalization-artifacts";
 import { canonicalizeText } from "./canonical-text";
 import { canonicalSha256, findDocumentIdentitiesByRawHash, findPriorSubmissionsForAccount } from "./document-identity";
 import { buildReportAdmissionAccountPrefix } from "./corpus-admission-source-ref";
@@ -1382,6 +1387,81 @@ export async function findCandidateCorpusRepresentations(
       isActivelyPromoted: Number(row.is_actively_promoted) === 1,
     };
   });
+}
+
+export type ContractDependentCorpusRepresentation = {
+  representationId: string;
+  /** The contract its stored corpus_document_shingles rows were built under, proven from the rows. */
+  identity: ArtifactNormalizationIdentity;
+};
+
+/** corpusShingleHashes(canonicalText) as it would be computed under `version`. */
+function corpusShingleHashesUnder(canonicalText: string, version: ScoringNormalizationVersion): Set<string> {
+  const hashes = new Set<string>();
+  for (const gram of grams(tokensForScoringNormalization(canonicalText, version), DEFAULT_SHINGLE_SIZE)) {
+    if (informativeGram(gram)) hashes.add(gramHash(gram));
+  }
+  return hashes;
+}
+
+/**
+ * The scoring-normalization identity of the corpus_document_shingles rows a
+ * discovery pass would read (lib/scoring-normalization-artifacts.ts). Rows are
+ * written by recordCorpusShingles outside any scope, under the contract active
+ * at index time, and record none. A representation whose canonical text
+ * tokenizes identically under v1 and v2 has the same rows under both, so only
+ * the ELIGIBLE representations (the same predicate and binds as
+ * findCandidateCorpusRepresentations) whose text tokenizes differently are
+ * returned, each with the contract its stored rows prove: BUILT_UNDER v when
+ * they equal the rows derived under v alone, CONTRACT_INDEPENDENT when they
+ * equal both derivations (the difference touches no informative gram), UNKNOWN
+ * otherwise (e.g. a partially written set). Only texts holding a
+ * scoring-ignorable code point leave the database (GLOB).
+ */
+export async function findContractDependentCorpusRepresentations(
+  client: Client,
+  options: {
+    fingerprintVersion?: string;
+    excludeAccountId?: string;
+    eligibilityMode?: CorpusEligibilityMode;
+    maturityCutoff?: string;
+    asOf?: Date;
+  } = {},
+): Promise<ContractDependentCorpusRepresentation[]> {
+  const fingerprintVersion = options.fingerprintVersion ?? CORPUS_FINGERPRINT_VERSION;
+  const excludeAccountPrefix = options.excludeAccountId ? buildReportAdmissionAccountPrefix(options.excludeAccountId) : null;
+  const eligibilityMode: CorpusEligibilityMode = options.eligibilityMode ?? "MATCHING";
+  const maturityCutoff = resolveMaturityCutoff(eligibilityMode, options);
+  const exemptAccountPrefixesJson = JSON.stringify(await resolveExemptAccountPrefixes(client, eligibilityMode));
+  const result = await client.execute({
+    sql: `SELECT r.id AS representation_id, r.canonical_text AS canonical_text
+            FROM corpus_document_representations r
+           WHERE r.canonical_text GLOB ?
+             AND EXISTS (SELECT 1 FROM corpus_document_shingles s WHERE s.representation_id = r.id AND s.fingerprint_version = ?)
+             AND ${admissionEligibilitySql(eligibilityMode)}
+           ORDER BY r.id`,
+    args: [SCORING_IGNORABLE_TEXT_GLOB, fingerprintVersion, ...admissionEligibilityBindArgs(excludeAccountPrefix, eligibilityMode, maturityCutoff, exemptAccountPrefixesJson)],
+  });
+  const dependent: ContractDependentCorpusRepresentation[] = [];
+  for (const row of result.rows as unknown as { representation_id: string; canonical_text: string }[]) {
+    const canonicalText = String(row.canonical_text);
+    if (scoringContractsAgreeOnText(canonicalText)) continue;
+    const storedResult = await client.execute({
+      sql: "SELECT shingle_hash FROM corpus_document_shingles WHERE representation_id = ? AND fingerprint_version = ?",
+      args: [row.representation_id, fingerprintVersion],
+    });
+    const stored = new Set(storedResult.rows.map((stored) => String((stored as unknown as { shingle_hash: string }).shingle_hash)));
+    const sameSet = (derived: Set<string>) => derived.size === stored.size && [...derived].every((hash) => stored.has(hash));
+    const underV1 = sameSet(corpusShingleHashesUnder(canonicalText, 1));
+    const underV2 = sameSet(corpusShingleHashesUnder(canonicalText, 2));
+    const identity: ArtifactNormalizationIdentity = underV1 && underV2
+      ? { kind: "CONTRACT_INDEPENDENT", proof: "stored shingles equal the v1 and the v2 derivation" }
+      : underV1 || underV2
+        ? { kind: "BUILT_UNDER", version: underV1 ? 1 : 2, proof: `stored shingles equal the v${underV1 ? 1 : 2} derivation only` }
+        : { kind: "UNKNOWN", reason: "stored shingles equal neither the v1 nor the v2 derivation" };
+    dependent.push({ representationId: String(row.representation_id), identity });
+  }
+  return dependent;
 }
 
 /**

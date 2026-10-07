@@ -22,6 +22,7 @@ import {
   SelectiveCorpusIntegrityMismatchError,
 } from "../lib/selective-corpus/integrity.ts";
 import { createSimulatedRemoteStorageAdapter } from "../lib/selective-corpus/testing/simulated-remote-storage-adapter.ts";
+import { runWithScoringNormalization } from "../lib/scoring-normalization-scope.ts";
 import { winnowSubmissionFingerprints } from "../lib/selective-corpus/fingerprint.ts";
 import {
   SELECTIVE_CORPUS_EXPECTED_DIGEST,
@@ -921,16 +922,18 @@ test(
       });
       assert.ok(artifactRemote.integrity);
 
-      const resultLocal = await runSelectiveCorpusShadow({
+      // The dev/regression artifact was built under scoring normalization v1
+      // (SELECTIVE_CORPUS_NORMALIZATION_IDENTITY), so it is read under v1.
+      const resultLocal = await runWithScoringNormalization(1, () => runSelectiveCorpusShadow({
         canonicalSubmissionText: sub,
         authoritative,
         artifactOverride: artifactLocal,
-      });
-      const resultRemote = await runSelectiveCorpusShadow({
+      }));
+      const resultRemote = await runWithScoringNormalization(1, () => runSelectiveCorpusShadow({
         canonicalSubmissionText: sub,
         authoritative,
         artifactOverride: artifactRemote,
-      });
+      }));
 
       assert.equal(resultRemote.state, resultLocal.state);
       assert.equal(resultRemote.candidateCount, resultLocal.candidateCount);
