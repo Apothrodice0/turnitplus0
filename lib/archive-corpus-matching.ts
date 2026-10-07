@@ -6,6 +6,7 @@ import { ARCHIVE_FINGERPRINT_VERSION } from "./archive-corpus-seed";
 import { ARCHIVE_SHINGLE_SIZE, ARCHIVE_COMPACT_FINGERPRINT_VERSION, archiveShingleHashes } from "./archive-fingerprint";
 import { loadDfBandMap, deriveStopHashSet, ARCHIVE_DF_BAND_POLICY_VERSION } from "./archive-df-bands";
 import { phraseFallbackDiscovery, ARCHIVE_PHRASE_FALLBACK_POLICY_VERSION, PHRASE_FALLBACK_BUDGET } from "./archive-phrase-fallback";
+import { phraseHolders } from "./archive-phrase-index";
 import {
   loadCosources,
   isArchiveCosourceExpansionEnabled,
@@ -85,8 +86,8 @@ const DISCOVERY_HASH_CHUNK = 400;
  * kept as-is and the score is the same unique-positions formula over the
  * enlarged set. The
  * scorer's gram-frequency gate still applies: a copied token whose every exact
- * aligned 5-gram is frequency-gated (stop set, or in more retrieved candidates
- * than the runtime cap) is not evidence and never scores.
+ * aligned 5-gram is frequency-gated (stop set, or held by more archive
+ * documents than the runtime cap) is not evidence and never scores.
  *
  * GLOBAL DF PRUNING is independent of how many candidates were discovered:
  * a hash is pruned iff it is in the precomputed archive-global stop set
@@ -95,6 +96,19 @@ const DISCOVERY_HASH_CHUNK = 400;
  * with compact discovery the candidate set is small, so the browser static
  * index's build-time exclusion cannot be reproduced by a candidate-relative
  * posting-length check.
+ *
+ * ARCHIVE-WIDE RUNTIME DF (ARCHIVE_RUNTIME_DF_POLICY_VERSION): the same holds
+ * for the scorer's runtime cap (matchingParameters.maximumDocumentFrequency),
+ * its IDF attribution weights and the span extension's frequency gate. The
+ * postings cover only the retrieved candidates, so their length is NOT the
+ * DF: a 7th retrieved holder of a shared passage used to push its grams over
+ * the cap and remove evidence that 6 retrieved holders left standing. Each
+ * non-stop query 5-gram a retrieved candidate holds is resolved once per
+ * request to its holder set over the WHOLE archive from the FTS phrase index
+ * (exact for DF 0..12, which is every non-stop gram), and the scorer counts
+ * that set, less the self-excluded holders, exactly as the full static index
+ * (and the risk calibration) always did. Candidate limit, order, retrieval
+ * route and display cap therefore never change a gram's DF.
  *
  * NO FULL corpus_document_shingles PERSISTENCE is required for the archive:
  * discovery reads compact fingerprints, postings are reconstructed
@@ -111,9 +125,15 @@ const DISCOVERY_HASH_CHUNK = 400;
  * structurally unreachable by any account/SELF concept.
  */
 
+/** Runtime-DF generation: v1 = the archive-wide holder count (see ARCHIVE-WIDE
+ *  RUNTIME DF above). Before it the runtime DF was the retrieved-candidate
+ *  count, with no identity of its own. */
+export const ARCHIVE_RUNTIME_DF_POLICY_VERSION = "archive-runtime-df-global-v1";
+
 /** The version constants this matcher's behaviour is pinned to — surfaced for
  *  diagnostics / tests so a policy change is a visible, reviewed edit. */
 export const ARCHIVE_MATCH_POLICY = {
+  runtimeDfPolicyVersion: ARCHIVE_RUNTIME_DF_POLICY_VERSION,
   compactFingerprintVersion: ARCHIVE_COMPACT_FINGERPRINT_VERSION,
   dfBandPolicyVersion: ARCHIVE_DF_BAND_POLICY_VERSION,
   phraseFallbackPolicyVersion: ARCHIVE_PHRASE_FALLBACK_POLICY_VERSION,
@@ -156,6 +176,34 @@ function queryHashSet(text: string): Set<string> {
   const set = new Set<string>();
   for (const gram of grams(tokens(text), ARCHIVE_SHINGLE_SIZE)) set.add(gramHash(gram));
   return set;
+}
+
+/** Request-scoped archive-wide holder sets of query 5-grams (see ARCHIVE-WIDE
+ *  RUNTIME DF). A holder set does not depend on the candidates, so every
+ *  scoring pass of one request shares it and resolves each gram at most once. */
+type ArchiveGramHolders = {
+  /** The words of each query 5-gram, by hash (first occurrence). */
+  gramWordsByHash: Map<string, string[]>;
+  /** representation_ids of every archive document holding the gram. */
+  holdersByHash: Map<string, string[]>;
+};
+
+function archiveGramHolders(text: string): ArchiveGramHolders {
+  const words = tokens(text);
+  const gramWordsByHash = new Map<string, string[]>();
+  grams(words, ARCHIVE_SHINGLE_SIZE).forEach((gram, start) => {
+    const hash = gramHash(gram);
+    if (!gramWordsByHash.has(hash)) gramWordsByHash.set(hash, words.slice(start, start + ARCHIVE_SHINGLE_SIZE));
+  });
+  return { gramWordsByHash, holdersByHash: new Map() };
+}
+
+/** Resolves the holder sets of `hashes` not resolved yet, in their order. */
+async function resolveArchiveGramHolders(client: ArchiveReadClient, holders: ArchiveGramHolders, hashes: string[]) {
+  const pending = hashes.filter((hash) => !holders.holdersByHash.has(hash));
+  if (pending.length === 0) return;
+  const resolved = await phraseHolders(client, pending.map((hash) => holders.gramWordsByHash.get(hash) ?? []));
+  pending.forEach((hash, index) => holders.holdersByHash.set(hash, resolved[index]));
 }
 
 /**
@@ -231,11 +279,11 @@ type ScoreOverCandidatesResult = {
    *  contains — lets the span extension skip a source holding no seed gram
    *  without tokenizing its text. */
   sharedQueryHashesByIndex: Map<number, Set<string>>;
-  /** For each query 5-gram hash present in any retrieved candidate: how many
-   *  retrieved candidates contain it (self-excluded ones included, so it is
-   *  never below the count the scorer's own runtime cap tests). Lets the span
+  /** For each non-stop query 5-gram hash present in any retrieved candidate:
+   *  how many ARCHIVE documents contain it (self-excluded ones included, so it
+   *  is never below the DF the scorer's own runtime cap tests). Lets the span
    *  extension apply the scorer's gram-frequency gate. */
-  candidateGramFrequency: Map<string, number>;
+  gramDocumentFrequency: Map<string, number>;
 };
 
 /**
@@ -244,7 +292,8 @@ type ScoreOverCandidatesResult = {
  * read), assign sourceIndex by archive_order (the browser static index's
  * fixed, query-independent order — reproduces its winner-take-all tie-break),
  * build a getPostings that prunes iff the hash is in the archive-global stop
- * set, then call scoreAgainstArchive UNMODIFIED.
+ * set and a getDocumentFrequency that counts archive-wide holders (see
+ * ARCHIVE-WIDE RUNTIME DF), then call scoreAgainstArchive UNMODIFIED.
  */
 async function scoreOverCandidates(
   client: ArchiveReadClient,
@@ -255,6 +304,7 @@ async function scoreOverCandidates(
   matchingParameters: ArchiveScoringMatchingParameters | undefined,
   stopHashSet: Set<string>,
   queryHashes: Set<string>,
+  gramHolders: ArchiveGramHolders,
 ): Promise<ScoreOverCandidatesResult> {
   const emptyIndex = {
     shingleSize: ARCHIVE_SHINGLE_SIZE,
@@ -273,7 +323,7 @@ async function scoreOverCandidates(
       verifiedEvidencePositions: [],
       sourceTextByIndex: new Map(),
       sharedQueryHashesByIndex: new Map(),
-      candidateGramFrequency: new Map(),
+      gramDocumentFrequency: new Map(),
     };
   }
 
@@ -339,16 +389,34 @@ async function scoreOverCandidates(
 
   // Global-DF pruning: pruned iff in the precomputed archive-global stop set,
   // NEVER based on the discovered candidate count. scoreAgainstArchive's own
-  // internal `sourceIndexes.length > runtimeMaximumDocumentFrequency` check
-  // still applies on top (a stricter, query-time cap from matchingParameters).
+  // runtime cap (a stricter, query-time cap from matchingParameters) still
+  // applies on top, to the archive-wide DF below.
   const getPostings = (hash: string): number[] => {
     if (stopHashSet.has(hash)) return [];
     return postingsByHash.get(hash) ?? [];
   };
 
+  // Archive-wide DF of every non-stop query gram a candidate holds: its
+  // archive holders (FTS phrase index), plus the candidates holding the hash
+  // so the value is never below the postings length.
+  const heldQueryHashes = [...queryHashes].filter((hash) => postingsByHash.has(hash) && !stopHashSet.has(hash));
+  await resolveArchiveGramHolders(client, gramHolders, heldQueryHashes);
+  const representationIdBySourceIndex = orderedCandidates.map((row) => row.representation_id);
+  const gramDocumentFrequency = new Map<string, number>();
+  for (const hash of heldQueryHashes) {
+    const holders = new Set(gramHolders.holdersByHash.get(hash));
+    for (const sourceIndex of postingsByHash.get(hash) ?? []) holders.add(representationIdBySourceIndex[sourceIndex]);
+    gramDocumentFrequency.set(hash, holders.size);
+  }
+  const getDocumentFrequency = (hash: string): number => {
+    const frequency = gramDocumentFrequency.get(hash);
+    if (frequency === undefined) throw new Error("archive matcher: a scored 5-gram has no resolved archive-wide DF");
+    return frequency;
+  };
+
   const { result, admittedSourceIndexes, contributingSourceIndexes, verifiedEvidencePositions } = scoreAgainstArchiveDetailed(
     submittedText,
-    { shingleSize: ARCHIVE_SHINGLE_SIZE, documentCount, maximumDocumentFrequency, articles, getPostings },
+    { shingleSize: ARCHIVE_SHINGLE_SIZE, documentCount, maximumDocumentFrequency, articles, getPostings, getDocumentFrequency },
     matchingParameters,
   );
   const admittedSourceIndexSet = new Set(admittedSourceIndexes);
@@ -364,12 +432,7 @@ async function scoreOverCandidates(
     if (hashSet) for (const hash of queryHashes) if (hashSet.has(hash)) shared.add(hash);
     sharedQueryHashesByIndex.set(sourceIndex, shared);
   }
-  const candidateGramFrequency = new Map<string, number>();
-  for (const hash of queryHashes) {
-    const count = postingsByHash.get(hash)?.length ?? 0;
-    if (count > 0) candidateGramFrequency.set(hash, count);
-  }
-  return { result, candidateIds, selfExcludedRepresentationIds, admittedSourceIndexes, contributingSourceIndexes, verifiedEvidencePositions, sourceTextByIndex, sharedQueryHashesByIndex, candidateGramFrequency };
+  return { result, candidateIds, selfExcludedRepresentationIds, admittedSourceIndexes, contributingSourceIndexes, verifiedEvidencePositions, sourceTextByIndex, sharedQueryHashesByIndex, gramDocumentFrequency };
 }
 
 export type ArchiveSpanExtensionDiagnostics = {
@@ -440,12 +503,12 @@ function applySpanExtension(
     if (text === undefined || !shared || ![...seedGramHashes].some((hash) => shared.has(hash))) return [];
     return [{ key: sourceIndex, words: tokens(text) }];
   });
-  // The scorer's own gram-frequency gate (stop set, or more retrieved
-  // candidates than the runtime cap): archive-common text such as licence
-  // boilerplate is non-evidence for the extension exactly as for the exact path.
+  // The scorer's own gram-frequency gate (stop set, or more archive documents
+  // than the runtime cap): archive-common text such as licence boilerplate is
+  // non-evidence for the extension exactly as for the exact path.
   const isFrequencyGatedGram = (hash: string) =>
     frequencyGate.stopHashSet.has(hash)
-    || (scored.candidateGramFrequency.get(hash) ?? 0) > frequencyGate.runtimeMaximumDocumentFrequency;
+    || (scored.gramDocumentFrequency.get(hash) ?? 0) > frequencyGate.runtimeMaximumDocumentFrequency;
   const { positionsBySource, stats } = seedExtendVerifiedPositions(submissionWords, sources, seedGramHashes, { isFrequencyGatedGram });
 
   const claimed = new Set(result.archiveMatchedPositions);
@@ -559,6 +622,7 @@ export async function matchAgainstArchiveCorpus(
   const documentCount = Number((documentCountResult.rows[0] as unknown as { total: number | bigint }).total);
 
   const queryHashes = queryHashSet(submittedText);
+  const gramHolders = archiveGramHolders(submittedText);
   const spanExtensionEnabled = options.spanExtension !== false
     && (options.matchingParameters?.sourceWeighting ?? "raw") === "raw";
 
@@ -599,6 +663,7 @@ export async function matchAgainstArchiveCorpus(
     options.matchingParameters,
     stopHashSet,
     queryHashes,
+    gramHolders,
   );
 
   // 2) bounded phrase fallback — discovery only. Fed the primary pass's
@@ -626,6 +691,7 @@ export async function matchAgainstArchiveCorpus(
         options.matchingParameters,
         stopHashSet,
         queryHashes,
+        gramHolders,
       );
 
   // 4) span extension (verification only) — seeds are the rare, non-stop grams
@@ -729,6 +795,7 @@ export async function matchAgainstArchiveCorpus(
     options.matchingParameters,
     stopHashSet,
     queryHashes,
+    gramHolders,
   );
   const extended = extend(expanded);
   return {

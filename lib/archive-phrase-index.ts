@@ -130,3 +130,31 @@ export async function phraseFanOut(client: ArchiveReadClient, phraseWords: strin
   });
   return Number((res.rows[0] as unknown as { n: number | bigint }).n);
 }
+
+/** Phrases per phraseHolders statement: one bound parameter and one compound
+ *  SELECT member each, far under SQLite's 500-member compound limit. */
+export const PHRASE_HOLDER_BATCH = 64;
+
+/**
+ * Every archive document holding each phrase as a contiguous run —
+ * phraseSearch for many phrases, one statement per PHRASE_HOLDER_BATCH
+ * (a UNION ALL of per-phrase lookups, each row tagged with its phrase's
+ * index). Returns one representation_id list per phrase, in input order.
+ * For an exact 5-word run this is the 5-gram's archive-wide holder set.
+ */
+export async function phraseHolders(client: ArchiveReadClient, phrases: string[][]): Promise<string[][]> {
+  const holders = phrases.map(() => [] as string[]);
+  for (let start = 0; start < phrases.length; start += PHRASE_HOLDER_BATCH) {
+    const batch = phrases.slice(start, start + PHRASE_HOLDER_BATCH);
+    const sql = batch.map((_, offset) => `SELECT ${start + offset} AS k, m.representation_id AS representation_id
+            FROM ${ARCHIVE_PHRASE_FTS_TABLE} f
+            JOIN ${ARCHIVE_PHRASE_FTS_MAP_TABLE} m ON m.fts_rowid = f.rowid
+           WHERE f.${ARCHIVE_PHRASE_FTS_TABLE} MATCH ?`).join("\n UNION ALL\n");
+    const res = await client.execute({ sql, args: batch.map(toPhraseMatch) });
+    for (const row of res.rows) {
+      const r = row as unknown as { k: number | bigint; representation_id: string };
+      holders[Number(r.k)].push(String(r.representation_id));
+    }
+  }
+  return holders;
+}

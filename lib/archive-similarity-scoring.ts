@@ -67,6 +67,17 @@ export type ArchiveScoringIndex = {
   /** Indexed 0..documentCount-1; a posting's sourceIndex is this array's index. */
   articles: ArchiveScoringArticle[];
   getPostings: (hash: string) => ArchivePostings;
+  /**
+   * How many archive documents hold `hash`, over the WHOLE archive (self-
+   * excluded documents included). Absent = getPostings' length, which is
+   * exact when the postings cover every archive document (the browser's
+   * static index). A caller whose postings cover only the retrieved
+   * candidates (lib/archive-corpus-matching.ts) must supply it, or the
+   * runtime DF cap and IDF would depend on which candidates were retrieved.
+   * Called only for a hash getPostings returns postings for, and never below
+   * that postings length.
+   */
+  getDocumentFrequency?: (hash: string) => number;
 };
 
 export type ArchiveScoringSource = {
@@ -147,9 +158,14 @@ export function scoreAgainstArchiveDetailed(
   const sharedBySource = new Map<number, number>();
   let highFrequencyShingleCount = 0;
 
+  // Archive-wide holder count of a hash with postings (see getDocumentFrequency).
+  const archiveDocumentFrequency = (hash: string, postings: ArchivePostings) =>
+    postings.length === 0 ? 0 : index.getDocumentFrequency?.(hash) ?? postings.length;
+
   uniqueDocumentGrams.forEach((gram) => {
-    const sourceIndexes = index.getPostings(gramHash(gram));
-    if (sourceIndexes.length >= Math.max(3, Math.ceil(index.maximumDocumentFrequency * 0.75))) {
+    const hash = gramHash(gram);
+    const sourceIndexes = index.getPostings(hash);
+    if (archiveDocumentFrequency(hash, sourceIndexes) >= Math.max(3, Math.ceil(index.maximumDocumentFrequency * 0.75))) {
       highFrequencyShingleCount += 1;
     }
     sourceIndexes.forEach((sourceIndex) => {
@@ -172,17 +188,23 @@ export function scoreAgainstArchiveDetailed(
     index.maximumDocumentFrequency,
     matchingParameters.maximumDocumentFrequency ?? index.maximumDocumentFrequency,
   );
+  // A gram's DF is its archive-wide holder count less the self-excluded
+  // holders, so the runtime cap and IDF never depend on how many candidates
+  // were retrieved. Self-exclusion is decided on the documents scored here.
   const coverage: GramCoverage = new Map();
   documentGrams.forEach((gram, start) => {
-    const sourceIndexes = index.getPostings(gramHash(gram)).filter(
+    const hash = gramHash(gram);
+    const postings = index.getPostings(hash);
+    const sourceIndexes = postings.filter(
       (sourceIndex) => !excluded.has(sourceIndex),
     );
+    if (sourceIndexes.length === 0) return;
+    const documentFrequency = archiveDocumentFrequency(hash, postings) - (postings.length - sourceIndexes.length);
     if (
-      sourceIndexes.length === 0
-      || sourceIndexes.length > runtimeMaximumDocumentFrequency
+      documentFrequency > runtimeMaximumDocumentFrequency
       || !informativeGram(gram)
     ) return;
-    addGramCoverage(coverage, start, index.shingleSize, sourceIndexes);
+    addGramCoverage(coverage, start, index.shingleSize, sourceIndexes, documentFrequency);
   });
 
   const evidence = verifiedSourceEvidence(coverage, minimumMatchedWords, eligibleCount, (sourceIndex) => containment(

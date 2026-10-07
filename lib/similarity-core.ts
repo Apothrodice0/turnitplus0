@@ -456,15 +456,17 @@ export const DEFAULT_SOURCE_AGGREGATION: SourceAggregationParameters = {
  *  that source's evidence grams covering the position. */
 export type GramCoverage = Map<number, Map<number, number[]>>;
 
-/** Records one evidence gram starting at `start` and held by `sourceIndexes`
- *  (its document frequency is sourceIndexes.length). */
+/** Records one evidence gram starting at `start` and held by `sourceIndexes`.
+ *  Its document frequency defaults to sourceIndexes.length (postings over the
+ *  whole corpus); a caller holding postings for only part of the corpus passes
+ *  the corpus-wide value. */
 export function addGramCoverage(
   coverage: GramCoverage,
   start: number,
   shingleSize: number,
   sourceIndexes: ArrayLike<number>,
+  documentFrequency: number = sourceIndexes.length,
 ) {
-  const documentFrequency = sourceIndexes.length;
   for (let position = start; position < start + shingleSize; position += 1) {
     const bySource = coverage.get(position) ?? new Map<number, number[]>();
     for (let index = 0; index < sourceIndexes.length; index += 1) {
