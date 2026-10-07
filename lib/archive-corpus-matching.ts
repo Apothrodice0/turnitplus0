@@ -58,8 +58,17 @@ const DISCOVERY_HASH_CHUNK = 400;
  * ADMITTED source's verified positions (self-exclusion and the per-source
  * minimum, measured on the source's own evidence). The contributing-source cap
  * only bounds the displayed `sources` list: it never removes a position, never
- * restricts the span extension, and never reaches the phrase fallback, which
- * is fed the primary result's full union.
+ * restricts the span extension, and never reaches the phrase fallback.
+ *
+ * DISCOVERY vs ADMISSION: the phrase fallback is fed the primary pass's
+ * verified evidence BEFORE admission (every candidate's own verified
+ * positions), not the admitted union. The per-source minimum is relative to
+ * the analysed word count, so a longer text (e.g. footnotes now analysed) can
+ * drop source A below it; with the admitted union, A's verified words became
+ * discovery gaps whose probes took the fixed probe budget, and an unrelated
+ * source B that clears the minimum on its own evidence was never retrieved
+ * (Gold case). Discovery now never depends on another source's admission.
+ * Admission itself, and what scores, are unchanged.
  *
  * SPAN EXTENSION (applySpanExtension) runs after the unchanged scorer and
  * against every source that scorer ADMITTED (self-exclusion and the source
@@ -212,6 +221,9 @@ type ScoreOverCandidatesResult = {
   admittedSourceIndexes: number[];
   /** The admitted sources that own at least one scored position. */
   contributingSourceIndexes: number[];
+  /** Every candidate's own verified evidence before admission, unioned — what
+   *  candidate discovery reads (see matchAgainstArchiveCorpus step 2). */
+  verifiedEvidencePositions: number[];
   /** canonical_text of the admitted sources (keyed by sourceIndex) — the
    *  retrieved text the span extension aligns against. */
   sourceTextByIndex: Map<number, string>;
@@ -258,6 +270,7 @@ async function scoreOverCandidates(
       selfExcludedRepresentationIds: [],
       admittedSourceIndexes: [],
       contributingSourceIndexes: [],
+      verifiedEvidencePositions: [],
       sourceTextByIndex: new Map(),
       sharedQueryHashesByIndex: new Map(),
       candidateGramFrequency: new Map(),
@@ -333,7 +346,7 @@ async function scoreOverCandidates(
     return postingsByHash.get(hash) ?? [];
   };
 
-  const { result, admittedSourceIndexes, contributingSourceIndexes } = scoreAgainstArchiveDetailed(
+  const { result, admittedSourceIndexes, contributingSourceIndexes, verifiedEvidencePositions } = scoreAgainstArchiveDetailed(
     submittedText,
     { shingleSize: ARCHIVE_SHINGLE_SIZE, documentCount, maximumDocumentFrequency, articles, getPostings },
     matchingParameters,
@@ -356,7 +369,7 @@ async function scoreOverCandidates(
     const count = postingsByHash.get(hash)?.length ?? 0;
     if (count > 0) candidateGramFrequency.set(hash, count);
   }
-  return { result, candidateIds, selfExcludedRepresentationIds, admittedSourceIndexes, contributingSourceIndexes, sourceTextByIndex, sharedQueryHashesByIndex, candidateGramFrequency };
+  return { result, candidateIds, selfExcludedRepresentationIds, admittedSourceIndexes, contributingSourceIndexes, verifiedEvidencePositions, sourceTextByIndex, sharedQueryHashesByIndex, candidateGramFrequency };
 }
 
 export type ArchiveSpanExtensionDiagnostics = {
@@ -588,12 +601,13 @@ export async function matchAgainstArchiveCorpus(
     queryHashes,
   );
 
-  // 2) bounded phrase fallback — discovery only. Fed the primary result's full
-  //    admitted union, so the display cap never influences discovery.
+  // 2) bounded phrase fallback — discovery only. Fed the primary pass's
+  //    pre-admission verified evidence, so neither the display cap nor any
+  //    source's admission influences discovery (see DISCOVERY vs ADMISSION).
   const fallback = await phraseFallbackDiscovery(
     client,
     submittedText,
-    primary.result.archiveMatchedPositions,
+    primary.verifiedEvidencePositions,
     compactCandidateIds,
     { stopHashSet, bandByHash },
   );

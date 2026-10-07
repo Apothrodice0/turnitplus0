@@ -125,6 +125,10 @@ export function scoreAgainstArchive(
  * the full list so verification after scoring is never limited by the display.
  * `contributingSourceIndexes` is the subset that owns at least one scored
  * position (`result.verifiedSourceCount` is its size).
+ * `verifiedEvidencePositions` is every source's own verified evidence BEFORE
+ * admission (minimumSourceContribution), unioned: real verified text, but
+ * not the score. Candidate discovery reads it, so whether one source clears
+ * the per-source floor never changes which other sources get discovered.
  *
  * `result.archiveMatchedPositions` / `score` are the union of every admitted
  * source's verified positions. Winner-take-all attribution only decides which
@@ -136,7 +140,7 @@ export function scoreAgainstArchiveDetailed(
   index: ArchiveScoringIndex,
   matchingParameters: ArchiveScoringMatchingParameters = {},
   onProgress?: (percent: number, label: string) => void,
-): { result: ArchiveScoringResult; admittedSourceIndexes: number[]; contributingSourceIndexes: number[] } {
+): { result: ArchiveScoringResult; admittedSourceIndexes: number[]; contributingSourceIndexes: number[]; verifiedEvidencePositions: number[] } {
   const words = tokens(text);
   const documentGrams = grams(words, index.shingleSize);
   const uniqueDocumentGrams = new Set(documentGrams);
@@ -272,5 +276,6 @@ export function scoreAgainstArchiveDetailed(
     },
     admittedSourceIndexes: aggregation.admittedSources.map((source) => source.sourceIndex),
     contributingSourceIndexes,
+    verifiedEvidencePositions: [...new Set(evidence.flatMap((source) => [...source.positions]))].sort((left, right) => left - right),
   };
 }
