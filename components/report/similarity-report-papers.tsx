@@ -1021,8 +1021,37 @@ const MATCHED_PASSAGE_COLOR = "#d7263d";
 export function findHighlightRanges(report: SimilarityReport, options: { includeWikipedia?: boolean } = {}) {
   const includeWikipedia = options.includeWikipedia ?? true;
   const candidates: HighlightRange[] = [];
+  // GOLD HIGHLIGHT EXACTNESS: an Archive source that carries its scorer-
+  // attributed word ranges is drawn from exactly those positions. Its phrases
+  // are a lossy re-derivation of them: none exists for a stable-union
+  // remainder shorter than one shingle, none follows the tolerant span
+  // extension's added words, and a phrase regex also paints every other
+  // occurrence of the same wording. Those scored words went unhighlighted
+  // (Gold: 3 of 360). Phrases stay the fallback for reports saved before
+  // attributedRanges existed.
+  const sourceSpans = report.sources.some((source) => (source.attributedRanges?.length ?? 0) > 0)
+    ? tokenSpans(report.text ?? "", reportScoringNormalizationVersion(report))
+    : [];
+  const attributedSourceCandidates: HighlightRange[] = [];
 
   report.sources.forEach((source, sourceIndex) => {
+    const attributed = source.attributedRanges ?? [];
+    if (
+      attributed.length > 0
+      && attributed.every(([wordStart, wordEnd]) => Number.isInteger(wordStart) && Number.isInteger(wordEnd) && wordStart >= 0 && wordStart <= wordEnd && wordEnd < sourceSpans.length)
+    ) {
+      attributed.forEach(([wordStart, wordEnd]) => {
+        attributedSourceCandidates.push({
+          start: sourceSpans[wordStart].start,
+          end: sourceSpans[wordEnd].end,
+          sourceIndex,
+          color: source.color,
+          label: source.name,
+          kind: "source",
+        });
+      });
+      return;
+    }
     source.phrases.slice(0, 140).forEach((phrase) => {
       const pattern = phrasePattern(phrase);
       if (!pattern) return;
@@ -1159,6 +1188,11 @@ export function findHighlightRanges(report: SimilarityReport, options: { include
     }
     mergedSources.push({ ...candidate });
   });
+  // Attributed ranges are already maximal runs and never overlap across
+  // sources, so they skip the 3-character merge (which would also paint an
+  // unscored short word between two runs of one source).
+  mergedSources.push(...attributedSourceCandidates);
+  mergedSources.sort((left, right) => left.sourceIndex - right.sourceIndex || left.start - right.start);
 
   const accepted: HighlightRange[] = [];
   const wikipediaCandidates = candidates
