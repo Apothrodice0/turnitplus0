@@ -1,4 +1,5 @@
 import { DerivedSourceSidecarSet } from "./derived-source";
+import type { DictionaryBlockCache } from "./dictionary-cache";
 import { isCorpusEngineV1Enabled } from "./flag";
 import { CorpusGenerationError } from "./generation";
 import { CorpusGenerationReader, type CorpusReaderIdentity } from "./reader";
@@ -56,6 +57,13 @@ export type CorpusEngineRequest = {
    * blocks, 1 GiB ~0.91 (recommended for a 1M generation). The cache never changes an answer.
    */
   dictionaryCacheBytes?: number;
+  /**
+   * A dictionary block cache the caller owns and keeps across requests (a serving process holds one,
+   * sized from its own configuration). Takes precedence over dictionaryCacheBytes; opening binds it to
+   * this request's generation, which empties it if it served another. Without it every request starts
+   * from an empty cache of dictionaryCacheBytes.
+   */
+  dictionaryCache?: DictionaryBlockCache;
 };
 
 export type CorpusEngineResponse =
@@ -84,6 +92,7 @@ export async function runCorpusEngineCandidateVerification(request: CorpusEngine
       expectedLogicalManifestSha256: request.logicalManifestSha256,
       revocationAnchor: request.revocationAnchor,
       dictionaryCacheBytes: request.dictionaryCacheBytes,
+      dictionaryCache: request.dictionaryCache,
     });
   } catch (error) {
     return {
