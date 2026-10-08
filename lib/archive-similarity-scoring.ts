@@ -73,6 +73,11 @@ export type ArchiveScoringSource = {
   color: string;
   matches: number;
   matchedWords: number;
+  /** The scored positions attributed to this source (winner-take-all over
+   *  the accepted spans), as inclusive [start, end] word ranges: matchedWords
+   *  is their size. Disjoint across sources; never adds or removes a scored
+   *  position. Presentation only — lets a report highlight exactly these words. */
+  attributedRanges: Array<[number, number]>;
   phrases: string[];
   percent: number;
 };
@@ -212,6 +217,7 @@ export function scoreAgainstArchive(
         color: "#d7263d",
         matches: validSpans.length,
         matchedWords: acceptedSourcePositions.size,
+        attributedRanges: validSpans,
         phrases,
         percent: Math.floor((acceptedSourcePositions.size / Math.max(words.length, 1)) * 100),
       };

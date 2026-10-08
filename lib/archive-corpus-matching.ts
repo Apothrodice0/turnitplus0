@@ -1,5 +1,5 @@
 import type { ArchiveReadClient } from "./archive-read-retry";
-import { tokens, grams, gramHash, containment, similarityScore } from "./similarity-core";
+import { tokens, grams, gramHash, containment, mergeAdjacentPositions, similarityScore } from "./similarity-core";
 import { scoreAgainstArchive, type ArchiveScoringResult, type ArchiveScoringMatchingParameters } from "./archive-similarity-scoring";
 import { seedExtendVerifiedPositions, SEED_EXTEND_ALIGNMENT_POLICY_VERSION } from "./seed-extend-alignment";
 import { ARCHIVE_FINGERPRINT_VERSION } from "./archive-corpus-seed";
@@ -422,15 +422,15 @@ function applySpanExtension(
   const { positionsBySource, stats } = seedExtendVerifiedPositions(submissionWords, sources, seedGramHashes, { isFrequencyGatedGram });
 
   const claimed = new Set(result.archiveMatchedPositions);
-  const addedBySource = new Map<number, number>();
+  const addedBySource = new Map<number, number[]>();
   for (const source of result.sources) {
-    let added = 0;
+    const added: number[] = [];
     for (const position of positionsBySource.get(source.sourceIndex) ?? []) {
       if (claimed.has(position)) continue;
       claimed.add(position);
-      added += 1;
+      added.push(position);
     }
-    if (added > 0) addedBySource.set(source.sourceIndex, added);
+    if (added.length > 0) addedBySource.set(source.sourceIndex, added);
   }
   const addedPositionCount = claimed.size - result.archiveMatchedPositions.length;
   const diagnostics: ArchiveSpanExtensionDiagnostics = {
@@ -449,10 +449,16 @@ function applySpanExtension(
   const archiveMatchedPositions = [...claimed].sort((left, right) => left - right);
   const extendedSources = result.sources
     .map((source) => {
-      const added = addedBySource.get(source.sourceIndex) ?? 0;
-      if (added === 0) return source;
-      const matchedWords = source.matchedWords + added;
-      return { ...source, matchedWords, percent: Math.floor((matchedWords / Math.max(result.wordCount, 1)) * 100) };
+      const added = addedBySource.get(source.sourceIndex) ?? [];
+      if (added.length === 0) return source;
+      const matchedWords = source.matchedWords + added.length;
+      const attributed = source.attributedRanges.flatMap(([start, end]) => Array.from({ length: end - start + 1 }, (_, offset) => start + offset));
+      return {
+        ...source,
+        matchedWords,
+        attributedRanges: mergeAdjacentPositions([...attributed, ...added]),
+        percent: Math.floor((matchedWords / Math.max(result.wordCount, 1)) * 100),
+      };
     })
     .sort((left, right) => right.percent - left.percent || right.matches - left.matches);
   return {

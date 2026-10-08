@@ -46,6 +46,11 @@ export type SourceMatch = {
   percent: number;
   matches: number;
   matchedWords?: number;
+  /** Archive sources only, on reports made since the scorer exposed it: the
+   *  scored word positions attributed to this source, as inclusive
+   *  [start, end] ranges (disjoint across sources). Absent on older reports,
+   *  which keep highlighting from `phrases`. */
+  attributedRanges?: Array<[number, number]>;
   phrases: string[];
   color: string;
 };
