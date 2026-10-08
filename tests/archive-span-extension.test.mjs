@@ -695,6 +695,27 @@ test("matcher: insert-1-per-5 copy — the extension adds only exact, edit-broke
   }
 });
 
+test("matcher: every extension-added word is listed in its source's attributedRanges; ranges stay disjoint and partition the union", () => {
+  const expand = (ranges) => ranges.flatMap(([a, b]) => Array.from({ length: b - a + 1 }, (_, k) => a + k));
+  for (const run of [insertRun.m, insertExactOnly.m]) {
+    const owner = new Map();
+    for (const s of run.sources) {
+      const listed = expand(s.attributedRanges);
+      assert.equal(listed.length, s.matchedWords, `${s.name}: ranges size = matchedWords`);
+      for (const p of listed) {
+        assert.ok(!owner.has(p), `position ${p} listed under two sources`);
+        owner.set(p, s.name);
+      }
+    }
+    assert.deepEqual([...owner.keys()].sort((x, y) => x - y), run.archiveMatchedPositions);
+  }
+  const exactOwners = new Set(insertExactOnly.m.sources.flatMap((s) => expand(s.attributedRanges)));
+  const added = insertRun.m.archiveMatchedPositions.filter((p) => !exactOwners.has(p));
+  assert.ok(added.length > 0, "precondition: the extension added words");
+  const extendedListed = new Set(insertRun.m.sources.flatMap((s) => expand(s.attributedRanges)));
+  assert.ok(added.every((p) => extendedListed.has(p)), "extension-added words are attributed");
+});
+
 test("matcher: discovery is untouched — same candidate set, same discovery diagnostics, no extra query", () => {
   assert.deepEqual(finalCandidateIds(insertRun.log), finalCandidateIds(insertExactOnly.log));
   assert.deepEqual(insertRun.m.archiveDiscovery, insertExactOnly.m.archiveDiscovery);
