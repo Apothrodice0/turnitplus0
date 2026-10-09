@@ -385,6 +385,23 @@ export function evaluatePollTick(result: RoomContentsFetchResult, attemptsSoFar:
   return { outcome: "continue" };
 }
 
+/**
+ * ROOM STATUS AUTO-REFRESH: the completion poll's answer while the server still says "processing" (the AI half is not done)
+ * used to be thrown away whole, so a similarity result the server had already finalized stayed "Calculating…" until AI also
+ * finished. Returns the current occupant with ONLY its similarity fields taken from the server's own read — when both are
+ * "processing", for the SAME report, and the server's similarity is no longer "pending" — otherwise the current occupant
+ * itself (same object, so an unchanged answer never re-renders). The AI half is never touched: a stale "processing" read can
+ * never undo an AI result this room already holds (the current occupant must itself still be "processing").
+ */
+export function withServerSimilarity(current: RoomContents, server: RoomContents): RoomContents {
+  if (current.status !== "processing" || server.status !== "processing" || current.report.id !== server.report.id) return current;
+  const next = server.report;
+  const prev = current.report;
+  if (next.similarityStatus === "pending") return current;
+  if (next.similarityStatus === prev.similarityStatus && next.primaryScore === prev.primaryScore && next.isUnified === prev.isUnified && next.archiveScore === prev.archiveScore && next.scoreBand === prev.scoreBand) return current;
+  return { ...current, report: { ...prev, archiveScore: next.archiveScore, scoreBand: next.scoreBand, primaryScore: next.primaryScore, isUnified: next.isUnified, similarityStatus: next.similarityStatus } };
+}
+
 export type ReconciliationDecision = { action: "adopt"; occupant: RoomContents } | { action: "wait" };
 
 /**
@@ -549,6 +566,9 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
   // intentional "new polling lifecycle" points called out below (never
   // implicitly, never by occupant churn alone).
   const pollAttemptsRef = useRef(0);
+  // ROOM STATUS AUTO-REFRESH: set by checkAgain() so the poll lifecycle it starts reads the server immediately; consumed (reset)
+  // by the poll effect the next time it schedules its first tick.
+  const pollImmediatelyRef = useRef(false);
   // Defect #3: identity of the report THIS session's own in-flight
   // runCheck() is for — the one fact the reconciliation watchdog effect
   // needs to tell "the terminal report the server just showed me is MY OWN
@@ -629,6 +649,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
     invalidateRoomCache(accountEmail, room);
     savedAiSummaryRef.current = serverOccupant.report;
     setOccupant(serverOccupant);
+    checkAgain(); // ROOM STATUS AUTO-REFRESH: an AI result landing starts a fresh poll lifecycle (see checkAgain)
     return true;
   }
 
@@ -690,6 +711,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
       report: savedSummary,
       cycleEndsAt: new Date(Date.parse(savedSummary.createdAt) + ROOM_CYCLE_MS).toISOString(),
     });
+    checkAgain(); // ROOM STATUS AUTO-REFRESH: an AI result landing starts a fresh poll lifecycle (see checkAgain)
     return true;
   }
 
@@ -729,6 +751,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
       report: savedSummary,
       cycleEndsAt: new Date(Date.parse(savedSummary.createdAt) + ROOM_CYCLE_MS).toISOString(),
     });
+    checkAgain(); // ROOM STATUS AUTO-REFRESH: an AI result landing starts a fresh poll lifecycle (see checkAgain)
     return true;
   }
 
@@ -841,6 +864,8 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
       if (cancelled) return;
       const tick = evaluatePollTick(result, pollAttemptsRef.current, MAX_POLL_ATTEMPTS);
       if (tick.occupant) setOccupant(tick.occupant);
+      // ROOM STATUS AUTO-REFRESH: a "processing" answer still carries the server's own similarity (see withServerSimilarity).
+      else if (result.ok) setOccupant((current) => withServerSimilarity(current, result.contents));
       if (tick.outcome === "revealed") {
         pollAttemptsRef.current = 0;
         return;
@@ -858,12 +883,26 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
       }
       timer = window.setTimeout(poll, POLL_INTERVAL_MS);
     }
-    timer = window.setTimeout(poll, POLL_INTERVAL_MS);
+    // ROOM STATUS AUTO-REFRESH: a lifecycle started by checkAgain() reads the server at once (see pollImmediatelyRef).
+    timer = window.setTimeout(poll, pollImmediatelyRef.current ? 0 : POLL_INTERVAL_MS);
+    pollImmediatelyRef.current = false;
     return () => {
       cancelled = true;
       window.clearTimeout(timer);
     };
   }, [occupant, room, isGeneratingReport, pollExhausted]);
+
+  // ROOM STATUS AUTO-REFRESH: a room whose bounded poll gave up while the tab was in the background (timers there are throttled
+  // and nothing redraws) gets one fresh poll lifecycle when the customer comes back to it — never more than one per return, since
+  // checkAgain() clears pollExhausted and this listener goes with it.
+  useEffect(() => {
+    if (!pollExhausted || isFullyRevealed(occupant) || typeof document === "undefined") return;
+    function onVisibilityChange() {
+      if (document.visibilityState === "visible") checkAgain();
+    }
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
+  }, [pollExhausted, occupant]);
 
   /**
    * Defect #3: authoritative-server-wins reconciliation for the in-flight
@@ -946,6 +985,13 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
     // immediately see the count still at MAX_POLL_ATTEMPTS from the
     // exhausted run and re-exhaust after a single attempt, making "Check
     // again" a no-op.
+    //
+    // ROOM STATUS AUTO-REFRESH (Preview Room 8, 2026-10-09): also the lifecycle every AI-result save starts
+    // (saveEnrichedAiResult, saveRetriedAiResult, reconcileAmbiguousAiSave), and its first read is immediate rather than one
+    // interval later. Each of those saves sets similarity back to "pending" (only a fresh server read may resolve it), but a
+    // slow in-browser model (minutes, on a first model download) routinely outlasts the poll's bounded budget, which had then
+    // already given up: the room sat at "Calculating…" / "Preparing…" with the server row long complete, until a reload.
+    pollImmediatelyRef.current = true;
     pollAttemptsRef.current = 0;
     setPollExhausted(false);
   }
@@ -1199,8 +1245,16 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
       // future, regardless of whether this attempt lands — is the
       // "processing" branch's own "Retry analysis" action below; the
       // notify() calls here are only a same-tab courtesy.
+      //
+      // ROOM STATUS AUTO-REFRESH: retryingAi (the Retry button's own busy flag) is held for as long as THIS automatic pass is
+      // still running. The poll-exhausted view offers "Retry analysis" for a "processing" room, and on Preview a customer
+      // waiting out a slow first model download pressed it: a second model run and a second AI save for the same report,
+      // racing the first. While this tab's own pass is in flight the button shows "Checking…" disabled, and retryAiCheck's
+      // existing busy guard refuses; once the pass settles (saved or not) Retry is exactly what it was before.
+      setRetryingAi(true);
       void completeAiAnalysisWithRecovery(aiAnalysisPromise, (aiResult) => saveEnrichedAiResult(report, aiResult)).then((saved) => {
         if (!saved) notify("AI analysis finished but could not be saved. Retry analysis once it settles, or reopen this room.");
+        setRetryingAi(false);
       });
     } finally {
       generationLockRef.current = false;
