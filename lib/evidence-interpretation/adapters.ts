@@ -8,6 +8,7 @@ import {
   safeHostname,
 } from "./normalized-evidence";
 import type { InterpretationSourceInput } from "./interpret";
+import { archiveSourceAccounting, archiveSourceCountLabel } from "./archive-source-accounting";
 
 /**
  * PHASE 1 — adapters that normalise each existing verified-evidence producer
@@ -21,30 +22,69 @@ function coverage(matched: number, total: number): number {
 }
 
 // ── A. archive / corpus source matches ────────────────────────────────────
-// The report payload carries the archive matched-position UNION
-// (archiveMatchedPositions) but NOT per-SourceMatch position spans, so this
-// adapter emits ONE aggregate archive source. Per-source archive spans would
-// need the archive matcher to emit per-source positions — see implementation
-// notes.
+// PER-SOURCE ATTRIBUTION — one source per verified Archive document. The
+// Archive scorer attributes every scored position to exactly one source; a
+// report made since then lists those positions on each of its `report.sources`
+// (archiveSourceAccounting checks them against the union). Each listed source
+// becomes its own card with only its own words, and the words of sources the
+// display cap left unlisted become one card that says so — together exactly
+// the union, nothing counted twice. A report without that attribution keeps
+// ONE aggregate card for the union, named for how many verified sources it
+// holds (it used to carry the top source's title, which credited every
+// Archive word to that one document).
+export const ARCHIVE_AGGREGATE_KEY = "archive:aggregate";
+export const ARCHIVE_UNLISTED_KEY = "archive:unlisted";
+const ARCHIVE_DISJOINT_GROUP = "archive";
+
+function archiveLabelParts(title: string | null): NormalizedVerifiedSource["labelParts"] {
+  return { title, publication: null, hostname: null, year: null, doi: null, url: null };
+}
+
 export function normalizeArchiveEvidence(report: SimilarityReport): NormalizedVerifiedSource[] {
   const positions = report.archiveMatchedPositions ?? [];
   if (positions.length === 0) return [];
+  const accounting = archiveSourceAccounting(report);
+
+  if (accounting.mode === "per-source") {
+    const sources: NormalizedVerifiedSource[] = accounting.listed.map((source, index) => ({
+      key: `archive:${index}`,
+      producer: "archive",
+      sourceType: source.type === "Publication" ? "publication" : "internet",
+      labelParts: archiveLabelParts(source.name?.trim() || null),
+      spans: positionsToSpans(source.positions),
+      matchedWordCount: source.positions.length,
+      submissionCoverageFraction: coverage(source.positions.length, report.wordCount),
+      disjointAttributionGroup: ARCHIVE_DISJOINT_GROUP,
+    }));
+    if (accounting.unlistedPositions.length > 0) {
+      const unlisted = accounting.verifiedSourceCount - accounting.listed.length;
+      sources.push({
+        key: ARCHIVE_UNLISTED_KEY,
+        producer: "archive",
+        sourceType: "publication",
+        labelParts: archiveLabelParts(
+          accounting.verifiedSourceCountIsExact
+            ? `${unlisted} more verified Archive source${unlisted === 1 ? "" : "s"} (not listed individually)`
+            : "More verified Archive sources (not listed individually)",
+        ),
+        spans: positionsToSpans(accounting.unlistedPositions),
+        matchedWordCount: accounting.unlistedPositions.length,
+        submissionCoverageFraction: coverage(accounting.unlistedPositions.length, report.wordCount),
+        disjointAttributionGroup: ARCHIVE_DISJOINT_GROUP,
+      });
+    }
+    return sources;
+  }
+
   const topSource = [...(report.sources ?? [])].sort((a, b) => b.percent - a.percent)[0] ?? null;
-  const spans = positionsToSpans(positions);
+  const count = accounting.mode === "aggregate" ? accounting : { verifiedSourceCount: 1, verifiedSourceCountIsExact: false };
   return [
     {
-      key: "archive:aggregate",
+      key: ARCHIVE_AGGREGATE_KEY,
       producer: "archive",
       sourceType: topSource?.type === "Publication" ? "publication" : "internet",
-      labelParts: {
-        title: topSource?.name ?? null,
-        publication: null,
-        hostname: null,
-        year: null,
-        doi: null,
-        url: null,
-      },
-      spans,
+      labelParts: archiveLabelParts(archiveSourceCountLabel(count.verifiedSourceCount, count.verifiedSourceCountIsExact)),
+      spans: positionsToSpans(positions),
       matchedWordCount: positions.length,
       submissionCoverageFraction: coverage(positions.length, report.wordCount),
     },

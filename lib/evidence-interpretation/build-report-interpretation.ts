@@ -15,6 +15,7 @@ import {
   safeHostname,
 } from "./normalized-evidence";
 import {
+  ARCHIVE_AGGREGATE_KEY,
   normalizeArchiveEvidence,
   normalizeScholarlyEvidence,
   normalizePriorSubmissionEvidence,
@@ -179,6 +180,7 @@ export function buildReportEvidenceInterpretation(
       dominantSpanBoilerplate: s.dominantSpanBoilerplate ?? false,
       submissionCoverageFraction: s.submissionCoverageFraction,
       sameWorkRelationship: s.sameWorkRelationship ?? null,
+      ...(s.disjointAttributionGroup !== undefined ? { disjointAttributionGroup: s.disjointAttributionGroup } : {}),
     })),
   });
 
@@ -280,8 +282,10 @@ export function buildReportEvidenceInterpretation(
       );
     const passageRefs = passages.filter((pg) => pg.sourceIds.includes(id)).map((pg) => pg.id);
 
+    // The aggregate Archive card only (a report without per-source attribution):
+    // a per-source card IS one of these names.
     const namedSources: ReportEvidenceNamedSource[] | undefined =
-      src.producer === "archive"
+      src.key === ARCHIVE_AGGREGATE_KEY
         ? (report.sources ?? []).map((s) => ({
             label: s.name?.trim() || GENERIC_LABEL.internet,
             contributionPercent: Math.round(s.percent),

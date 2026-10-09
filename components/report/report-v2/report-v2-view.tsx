@@ -22,6 +22,7 @@ import { PRIMARY_SIMILARITY_BAND_LABELS, formatSimilarityPercent, type Similarit
 import type { EvidenceInterpretationKind } from "@/lib/evidence-interpretation/kinds";
 import {
   buildReportV2ViewModel,
+  matchingEvidenceEntriesLabel,
   paginateManuscriptText,
   resolveWorkspacePassageSelection,
   stepWorkspaceSelection,
@@ -153,7 +154,7 @@ function OverlapBreakdown({ vm }: { vm: ReportV2ViewModel }) {
 }
 
 function TopSources({ vm }: { vm: ReportV2ViewModel }) {
-  const { topSources, distinctVerifiedSources } = vm.summary;
+  const { topSources, matchingEvidenceEntries } = vm.summary;
   if (topSources.length === 0) return null;
   return (
     <section className="rv2-section rv2-top-sources" aria-labelledby="rv2-top-sources-title">
@@ -174,9 +175,9 @@ function TopSources({ vm }: { vm: ReportV2ViewModel }) {
           </li>
         ))}
       </ul>
-      {distinctVerifiedSources > topSources.length && (
+      {matchingEvidenceEntries > topSources.length && (
         <a className="rv2-see-all" href="#rv2-sources">
-          See all {distinctVerifiedSources} sources
+          See all {matchingEvidenceEntriesLabel(matchingEvidenceEntries)}
         </a>
       )}
     </section>
@@ -184,7 +185,7 @@ function TopSources({ vm }: { vm: ReportV2ViewModel }) {
 }
 
 function FirstScreen({ vm }: { vm: ReportV2ViewModel }) {
-  const { verifiedSimilarityPercent, matchedWordCount, totalWordCount, distinctVerifiedSources } = vm.summary;
+  const { verifiedSimilarityPercent, matchedWordCount, totalWordCount, matchingEvidenceEntries } = vm.summary;
   return (
     <div className="rv2-first-screen">
       <section className="rv2-section rv2-headline" aria-labelledby="rv2-headline-title">
@@ -195,11 +196,11 @@ function FirstScreen({ vm }: { vm: ReportV2ViewModel }) {
         <p className="rv2-headline-sub">
           {matchedWordCount.toLocaleString()} of {totalWordCount.toLocaleString()} matched words
           {" · "}
-          {distinctVerifiedSources} verified source{distinctVerifiedSources === 1 ? "" : "s"}
+          {matchingEvidenceEntriesLabel(matchingEvidenceEntries)}
         </p>
         <p className="rv2-headline-hint">
-          The share of your document that word-for-word matches a source we retrieved and checked. It is
-          not a judgement about your work.
+          The share of your document that word-for-word matches checked sources or imported reference
+          matches. It is not a judgement about your work.
         </p>
         <CompletionStrip vm={vm} />
       </section>
@@ -363,7 +364,7 @@ function PassageReview({
 }
 
 // ── source cards ─────────────────────────────────────────────────────────
-function SourceCard({ card, verifiedPercent }: { card: ReportV2SourceCard; verifiedPercent: number }) {
+function SourceCard({ card, verifiedPercent, expanded = false }: { card: ReportV2SourceCard; verifiedPercent: number; expanded?: boolean }) {
   const multiSource = card.mixedKindLabels.length > 0;
   return (
     <article className={`rv2-source-card ${KIND_CLASS[card.primaryKind]}`} id={`rv2-source-${card.id}`}>
@@ -408,7 +409,7 @@ function SourceCard({ card, verifiedPercent }: { card: ReportV2SourceCard; verif
       ) : null}
 
       {card.namedSources.length > 0 && (
-        <details className="rv2-disclose">
+        <details className="rv2-disclose" open={expanded}>
           <summary>Named sources ({card.namedSources.length})</summary>
           <ul className="rv2-named-sources">
             {card.namedSources.map((n, i) => (
@@ -473,14 +474,14 @@ function hostAndPath(url: string): string {
   }
 }
 
-function SourceCards({ vm }: { vm: ReportV2ViewModel }) {
+function SourceCards({ vm, expanded = false }: { vm: ReportV2ViewModel; expanded?: boolean }) {
   if (vm.sources.length === 0) return null;
   return (
     <section className="rv2-section rv2-source-cards" id="rv2-sources" aria-labelledby="rv2-sources-title">
       <h3 id="rv2-sources-title">Source details</h3>
       <div className="rv2-source-card-grid">
         {vm.sources.map((card) => (
-          <SourceCard key={card.id} card={card} verifiedPercent={vm.summary.verifiedSimilarityPercent} />
+          <SourceCard key={card.id} card={card} verifiedPercent={vm.summary.verifiedSimilarityPercent} expanded={expanded} />
         ))}
       </div>
     </section>
@@ -567,9 +568,9 @@ function PrintDocumentSummary({ report, vm }: { report: SimilarityReport; vm: Re
 // doesn't render (TopSources stays untouched; it's still used by the
 // screen-side "overlap" tab via ReportV2View/FirstScreen above).
 function PrintSourceSummary({ vm }: { vm: ReportV2ViewModel }) {
-  const { topSources, distinctVerifiedSources } = vm.summary;
+  const { topSources, matchingEvidenceEntries } = vm.summary;
   if (topSources.length === 0) return null;
-  const remaining = distinctVerifiedSources - topSources.length;
+  const remaining = matchingEvidenceEntries - topSources.length;
   return (
     <section className="rv2-section rv2-print-source-summary" aria-labelledby="rv2-print-sources-title">
       <h3 id="rv2-print-sources-title">Similarity sources</h3>
@@ -593,7 +594,7 @@ function PrintSourceSummary({ vm }: { vm: ReportV2ViewModel }) {
       </ol>
       {remaining > 0 && (
         <p className="rv2-print-source-more">
-          +{remaining} more verified source{remaining === 1 ? "" : "s"} — see Source Details.
+          +{remaining} more matching evidence entr{remaining === 1 ? "y" : "ies"} — see Source Details.
         </p>
       )}
     </section>
@@ -756,7 +757,7 @@ export function ReportV2PrintSourceAppendix({ report }: { report: SimilarityRepo
       <ReportPageHeader report={report} page={3} total={3} label="Source Details" />
       <div className="paper-content">
         <div className="report-v2 report-v2-print">
-          <SourceCards vm={vm} />
+          <SourceCards vm={vm} expanded />
         </div>
       </div>
       <ReportPageFooter report={report} page={3} total={3} label="Source Details" />
@@ -832,7 +833,7 @@ function rv2wsMatchTint(alpha: number): string {
  * right-side inspector panel renders — so the two can never disagree.
  */
 function WorkspaceHero({ vm, toolbarStatus }: { vm: ReportV2ViewModel; toolbarStatus: string }) {
-  const { verifiedSimilarityPercent, matchedWordCount, totalWordCount, distinctVerifiedSources } = vm.summary;
+  const { verifiedSimilarityPercent, matchedWordCount, totalWordCount, matchingEvidenceEntries } = vm.summary;
   const verdict = similarityScoreBand(verifiedSimilarityPercent);
   const percentDisplay = formatSimilarityPercent(verifiedSimilarityPercent, matchedWordCount);
   return (
@@ -842,7 +843,7 @@ function WorkspaceHero({ vm, toolbarStatus }: { vm: ReportV2ViewModel; toolbarSt
         <span>{percentDisplay}</span> Similarity score
       </h2>
       <p className="rv2ws-hero-sub">
-        The percentage of analyzed words that overlap verified source text.
+        The percentage of analyzed words that overlap matching evidence.
       </p>
 
       <div className={`rv2ws-hero-band${verdict ? ` rv2ws-hero-band-${verdict.key}` : ""}`}>
@@ -867,8 +868,8 @@ function WorkspaceHero({ vm, toolbarStatus }: { vm: ReportV2ViewModel; toolbarSt
           <span>Words analyzed</span>
         </div>
         <div>
-          <strong>{distinctVerifiedSources}</strong>
-          <span>Verified source{distinctVerifiedSources === 1 ? "" : "s"}</span>
+          <strong>{matchingEvidenceEntries}</strong>
+          <span>Matching evidence entr{matchingEvidenceEntries === 1 ? "y" : "ies"}</span>
         </div>
         <div>
           <strong>{toolbarStatus}</strong>
@@ -1160,7 +1161,7 @@ export function ReportV2Workspace({
               <div className="rv2ws-score-metrics">
                 <div><b>{vm.summary.matchedWordCount.toLocaleString()}</b><span>Matched words</span></div>
                 <div><b>{vm.summary.totalWordCount.toLocaleString()}</b><span>Analyzed</span></div>
-                <div><b>{vm.summary.distinctVerifiedSources}</b><span>Verified source{vm.summary.distinctVerifiedSources === 1 ? "" : "s"}</span></div>
+                <div><b>{vm.summary.matchingEvidenceEntries}</b><span>Matching evidence entr{vm.summary.matchingEvidenceEntries === 1 ? "y" : "ies"}</span></div>
               </div>
             </div>
 
@@ -1169,7 +1170,7 @@ export function ReportV2Workspace({
             <div className="rv2ws-sources">
               <h3>Sources</h3>
               {vm.sources.length === 0 ? (
-                <p className="rv2-empty">No verified sources for this submission.</p>
+                <p className="rv2-empty">No matching evidence for this submission.</p>
               ) : (
                 <ul className="rv2ws-source-list">
                   {vm.sources.map((source, index) => {

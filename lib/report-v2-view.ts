@@ -214,7 +214,12 @@ export type ReportV2ViewModel = {
     verifiedSimilarityPercent: number;
     matchedWordCount: number;
     totalWordCount: number;
+    /** @deprecated same value as matchingEvidenceEntries; it counts evidence cards (imported reference matches and
+     *  remainder cards included), not verified publications — kept only for existing readers. */
     distinctVerifiedSources: number;
+    /** Number of evidence cards (one per attributed Archive source, imported reference match, scholarly source,
+     *  remainder card, ...). The overview labels this "matching evidence entries", never "verified sources". */
+    matchingEvidenceEntries: number;
     completion: ReportV2Completion;
     topSources: ReportV2TopSource[];
     breakdown: ReportV2BreakdownRow[];
@@ -419,6 +424,7 @@ export function buildReportV2ViewModel(report: SimilarityReport): ReportV2ViewMo
       matchedWordCount,
       totalWordCount,
       distinctVerifiedSources: sources.length,
+      matchingEvidenceEntries: sources.length,
       completion: resolveCompletionView(report.reportCompletion, report.extractionDiagnostic, verifiedSimilarityPercent),
       topSources,
       breakdown,
@@ -429,6 +435,11 @@ export function buildReportV2ViewModel(report: SimilarityReport): ReportV2ViewMo
     filterCounts,
     hasPassages: passages.length > 0,
   };
+}
+
+/** "1 matching evidence entry" / "10 matching evidence entries". */
+export function matchingEvidenceEntriesLabel(count: number): string {
+  return `${count} matching evidence entr${count === 1 ? "y" : "ies"}`;
 }
 
 // convenience for tests / callers wanting just the matched-words invariant

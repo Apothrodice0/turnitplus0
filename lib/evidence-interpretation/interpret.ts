@@ -62,6 +62,11 @@ export type InterpretationSourceInput = {
   /** An EXISTING trusted work/version relationship. When absent/null,
    *  POSSIBLE_SAME_WORK is NOT emitted for this source. */
   sameWorkRelationship?: SameWorkRelationship | null;
+  /** Sources sharing this tag were attributed disjoint words by one scorer
+   *  (the Archive's per-source cards): neither covers the other's passage, so
+   *  they are never compared for LEGITIMATE_ALTERNATE_SOURCE — word adjacency
+   *  across an attribution boundary is not a second source for the passage. */
+  disjointAttributionGroup?: string;
 };
 
 export type InterpretationInput = {
@@ -214,6 +219,7 @@ export function interpretVerifiedEvidence(input: InterpretationInput): Interpret
     if (!sameWork) {
       for (const other of input.sources) {
         if (other.key === src.key) continue;
+        if (src.disjointAttributionGroup !== undefined && other.disjointAttributionGroup === src.disjointAttributionGroup) continue;
         if (other.submissionCoverageFraction >= 0.55) continue; // don't treat a twin as the "primary"
         const otherPositions = positionsByKey.get(other.key)!;
         if (otherPositions.size <= myPositions.size) continue;

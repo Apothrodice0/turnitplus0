@@ -64,6 +64,8 @@ export type NormalizedVerifiedSource = {
   matchedWordCount: number;
   /** matchedWordCount / submissionWordCount (0..1). */
   submissionCoverageFraction: number;
+  /** OPTIONAL — see InterpretationSourceInput.disjointAttributionGroup (Archive per-source cards). */
+  disjointAttributionGroup?: string;
   /** OPTIONAL FAMILY_GUARD signal — only the selective-corpus adapter sets it. */
   familyGuardActivated?: boolean;
   dominantSpanBoilerplate?: boolean;

@@ -508,6 +508,11 @@ export type SimilarityReport = {
   scoringNormalizationVersion?: 2;
   wikipediaMatchedWordCount?: number;
   sources: SourceMatch[];
+  /** How many verified Archive sources own matched words, when the build that
+   *  made the report wrote it (`sources` lists at most the display cap of
+   *  them). Read it only through lib/evidence-interpretation/
+   *  archive-source-accounting.ts. */
+  archiveVerifiedSourceCount?: number;
   repeats: [string, number][];
   text: string;
 };
