@@ -285,7 +285,16 @@ export async function completeAiAnalysisWithRecovery(
 // exhaustion happens at exactly the real, current policy rather than a
 // magic literal that could silently drift from it.
 export const POLL_INTERVAL_MS = 3000;
-export const MAX_POLL_ATTEMPTS = 10;
+// ROOM NO-CLICK COMPLETION (Room 9 follow-up): the budget used to be 10 reads 3 s apart (~30 s), far shorter than a real
+// in-browser AI pass (~1 min on Room 9, ~4.5 min with a first model download on Room 8) or a late similarity finalization —
+// so the room said "taking longer than usual" while everything was still progressing, and stalled for good when nothing in
+// this tab would ever restart it (a re-entered room, a late similarity). Now the same bounded loop backs off instead:
+// 10 reads every 3 s, 10 every 6 s, 10 every 15 s, then 10 every 30 s — about 9 minutes, 40 reads, never more than 20 in any
+// minute (the poll bucket allows 30) — before the manual "Check again" fallback.
+export const MAX_POLL_ATTEMPTS = 40;
+export function pollDelayMs(attempt: number): number {
+  return attempt <= 10 ? POLL_INTERVAL_MS : attempt <= 20 ? 6_000 : attempt <= 30 ? 15_000 : 30_000;
+}
 
 function formatDate(iso: string): string {
   return new Date(iso).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
@@ -881,10 +890,11 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
         setPollExhausted(true);
         return;
       }
-      timer = window.setTimeout(poll, POLL_INTERVAL_MS);
+      timer = window.setTimeout(poll, pollDelayMs(pollAttemptsRef.current + 1));
     }
-    // ROOM STATUS AUTO-REFRESH: a lifecycle started by checkAgain() reads the server at once (see pollImmediatelyRef).
-    timer = window.setTimeout(poll, pollImmediatelyRef.current ? 0 : POLL_INTERVAL_MS);
+    // ROOM STATUS AUTO-REFRESH: a lifecycle started by checkAgain() reads the server at once (see pollImmediatelyRef); any
+    // other (re-)run keeps the backed-off pace of the attempt it is at (pollDelayMs).
+    timer = window.setTimeout(poll, pollImmediatelyRef.current ? 0 : pollDelayMs(pollAttemptsRef.current + 1));
     pollImmediatelyRef.current = false;
     return () => {
       cancelled = true;
@@ -1371,6 +1381,15 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
             {pollExhausted ? (
               <div className="ai-analysis-message" role="status">
                 <p>Analysis is taking longer than usual.</p>
+                {/* ROOM NO-CLICK COMPLETION: say what is still pending — never something that reads as a failure. retryingAi is
+                    held while THIS tab's own AI pass runs (see runCheck), whose landing restarts the watch by itself. */}
+                <p>
+                  {occupant.status === "processing" && retryingAi
+                    ? "AI-writing analysis is still running in this browser tab. Your report will appear here automatically when it finishes."
+                    : occupant.status === "processing"
+                      ? "AI-writing analysis has not finished yet. Check again to look for the latest result."
+                      : "Your similarity result is still being finalized. Check again to look for it now."}
+                </p>
                 <button className="button subtle" type="button" onClick={checkAgain}>Check again</button>
                 {/* READY-AI RETRY PROTECTION (report-lifecycle correctness
                     fix): occupant.status === "ready" means AI itself has
@@ -1400,7 +1419,9 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
                 <div>
                   <strong>Analysis in progress</strong>
                   <p>
-                    {occupant.status === "processing"
+                    {occupant.status === "processing" && occupant.report.similarityStatus !== "pending"
+                      ? "AI-writing analysis is still running — this can take a few minutes for a long document. Your full report will appear here automatically."
+                      : occupant.status === "processing"
                       ? "Your AI-writing and similarity results will appear here together as soon as both are ready."
                       : "Your similarity result will appear here as soon as it's ready."}
                   </p>

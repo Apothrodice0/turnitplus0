@@ -80,6 +80,17 @@ async function runNextTimer() {
 async function runTimers({ until = () => false, max = 200 } = {}) {
   for (let i = 0; i < max && !until(); i += 1) if (!(await runNextTimer())) return;
 }
+/** Lets `ms` of virtual time pass: every window timer due by then runs, in order (stops early once `until()` holds). */
+async function advance(ms, until = () => false) {
+  const target = clock.now + ms;
+  for (;;) {
+    if (until()) return;
+    const next = [...clock.timers.values()].sort((a, b) => a.due - b.due)[0];
+    if (!next || next.due > target) break;
+    await runNextTimer();
+  }
+  clock.now = Math.max(clock.now, target);
+}
 async function waitFor(condition, what, max = 4000) {
   for (let i = 0; i < max && !condition(); i += 1) await realDelay(2);
   assert.ok(condition(), `timed out waiting for ${what}`);
@@ -593,6 +604,158 @@ test("EXISTING COMPLETED REPORT: opens ready, no poll, no room read", async () =
     assert.ok(isReadyUi(uiOf(reopened)));
     assert.equal(b.roomReads().length, reads);
     reopened.unmount();
+  });
+});
+
+// =================================================================================================================================
+// 2. NO-CLICK completion (Room 9 follow-up): nothing in these tests ever presses a button or reloads.
+// =================================================================================================================================
+
+const MINUTE = 60_000;
+/** The busiest 60 s window of a list of room reads (virtual time). */
+const peakReadsPerMinute = (reads) => Math.max(0, ...reads.map((r) => reads.filter((x) => x.at >= r.at && x.at < r.at + MINUTE).length));
+const isFailedRevealedUi = (ui) => ui.statusLine === "Report ready · AI analysis unavailable" && ui.aiTile === "—Unavailable" && /^\d+%/.test(ui.similarityTile ?? "") && ui.receiptTile === "Download" && ui.receiptEnabled === true;
+
+test("NO-CLICK, ROOM 9 TIME SCALE: AI lands ~63 s after the first save -> Report ready with similarity and Receipt, zero clicks", async (t) => {
+  await scenario(async ({ account, b, room }) => {
+    const host = await mount(account, room);
+    await upload(host, account, "complete-held");
+    const mark = b.log.length;
+    await advance(63_000);
+    assert.match(uiOf(host).similarityTile, /^\d+%/, "similarity is already visible while AI runs");
+    await finishModel(host);
+    await advance(10_000, () => isReadyUi(uiOf(host)));
+    capture(t, "no-click/room9", { reads: b.roomReads(mark).length, ui: uiOf(host) });
+    assert.ok(isReadyUi(uiOf(host)), JSON.stringify(uiOf(host)));
+    assert.equal(worker.runs.length, 1);
+    assert.deepEqual(b.aiSaves(mark).map((e) => e.key), ["POST /api/reports"]);
+    host.unmount();
+  });
+});
+
+test("NO-CLICK, LONG AI (5 minutes of model work): the page keeps watching at a backed-off pace, never shows a failure, and reveals the moment AI lands; one model run, one AI save, request rate bounded", async (t) => {
+  await scenario(async ({ account, b, room }) => {
+    const host = await mount(account, room);
+    await upload(host, account, "complete-held");
+    const mark = b.log.length;
+    await advance(5 * MINUTE);
+    const during = uiOf(host);
+    const readsDuring = b.roomReads(mark);
+    await finishModel(host);
+    await advance(MINUTE, () => isReadyUi(uiOf(host)));
+    const reads = b.roomReads(mark);
+    capture(t, "no-click/long-ai", { during, readsDuring: readsDuring.length, totalReads: reads.length, peakPerMinute: peakReadsPerMinute(reads), ui: uiOf(host) });
+    assert.match(during.aiTile, /Analyzing/);
+    assert.equal(during.exhausted, false, "no 'taking longer than usual' while the model is still legitimately working");
+    assert.equal(during.checkAgain, false);
+    assert.match(during.similarityTile, /^\d+%/, "similarity stays visible");
+    assert.ok(isReadyUi(uiOf(host)), JSON.stringify(uiOf(host)));
+    assert.equal(worker.runs.length, 1, "one model run");
+    assert.deepEqual(b.aiSaves(mark).map((e) => e.key), ["POST /api/reports"], "one AI save");
+    assert.ok(peakReadsPerMinute(reads) <= 20, `at most 20 reads in any minute (the poll bucket allows 30): ${peakReadsPerMinute(reads)}`);
+    assert.ok(reads.length <= 40, `bounded: ${reads.length} reads`);
+    host.unmount();
+  });
+});
+
+test("NO-CLICK, SIMILARITY FINALIZED LATE: the server still finalizes similarity 2 minutes after AI lands -> the page keeps watching and reveals by itself", async (t) => {
+  await scenario(async ({ account, b, room }) => {
+    const host = await mount(account, room);
+    await upload(host, account, "complete-held");
+    b.server.similarityPending = true;
+    await finishModel(host);
+    await advance(2 * MINUTE);
+    const mid = uiOf(host);
+    b.server.similarityPending = false;
+    await advance(2 * MINUTE, () => isReadyUi(uiOf(host)));
+    capture(t, "no-click/late-similarity", { mid, ui: uiOf(host) });
+    assert.match(mid.aiTile, /^\d+%/);
+    assert.equal(mid.similarityTile, "···Calculating…");
+    assert.ok(isReadyUi(uiOf(host)), `revealed with no click: ${JSON.stringify(uiOf(host))}`);
+    host.unmount();
+  });
+});
+
+test("NO-CLICK, NAVIGATION DURING AI: leaving and re-entering the room while the model still runs -> the re-entered room reveals by itself when AI lands minutes later", async (t) => {
+  await scenario(async ({ account, b, room }) => {
+    const first = await mount(account, room);
+    const id = await upload(first, account, "complete-held");
+    await advance(10_000);
+    first.unmount(); // navigation away; the page's own AI pass keeps running
+    const back = await mount(account, room); // re-entry (SSR read: processing)
+    await advance(3 * MINUTE);
+    assert.match(uiOf(back).aiTile, /Analyzing/);
+    worker.held.shift()(); // the model finishes; the (unmounted) pass saves it
+    for (let i = 0; i < 1000; i += 1) {
+      if ((await env.client.execute({ sql: "SELECT ai_status FROM saved_reports WHERE id = ?", args: [id] })).rows[0].ai_status === "ready") break;
+      await realDelay(3);
+    }
+    await advance(2 * MINUTE, () => isReadyUi(uiOf(back)));
+    capture(t, "no-click/navigation", { ui: uiOf(back), modelRuns: worker.runs.length });
+    assert.ok(isReadyUi(uiOf(back)), `revealed with no click: ${JSON.stringify(uiOf(back))}`);
+    assert.equal(worker.runs.length, 1);
+    back.unmount();
+  });
+});
+
+test("NO-CLICK, AI FAILS: a genuine model failure settles the room by itself — AI Unavailable, similarity shown, Receipt available", async (t) => {
+  await scenario(async ({ account, b, room }) => {
+    const host = await mount(account, room);
+    await upload(host, account, "error-held");
+    await advance(90_000);
+    worker.held.shift()();
+    await waitFor(() => uiOf(host).aiTile === "—Unavailable", "the failed AI result to be saved");
+    await advance(10_000, () => isFailedRevealedUi(uiOf(host)));
+    capture(t, "no-click/ai-failed", { ui: uiOf(host) });
+    assert.ok(isFailedRevealedUi(uiOf(host)), JSON.stringify(uiOf(host)));
+    assert.equal(uiOf(host).retry, "Retry analysis", "the existing recovery is offered");
+    host.unmount();
+  });
+});
+
+test("BOUNDED: a room that genuinely never completes stops polling after a finite horizon (>= 8 minutes of watching), with a non-failure explanation and Check again", async (t) => {
+  await scenario(async ({ account, b, room }) => {
+    const host = await mount(account, room);
+    await upload(host, account, "complete-held");
+    b.server.similarityPending = true; // the server never resolves similarity
+    await finishModel(host);
+    const mark = b.log.length;
+    const start = clock.now;
+    await advance(30 * MINUTE, () => uiOf(host).exhausted);
+    const reads = b.roomReads(mark);
+    const horizon = reads.at(-1).at - start;
+    const ui = uiOf(host);
+    const notice = [...walk(host.tree)].filter((el) => el.type === "p").map((el) => textOf(el.props.children)).join(" | ");
+    capture(t, "bounded", { reads: reads.length, horizonMs: horizon, peakPerMinute: peakReadsPerMinute(reads), ui, notice });
+    assert.equal(ui.exhausted, true);
+    assert.ok(horizon >= 8 * MINUTE, `watched for ${horizon} ms`);
+    assert.ok(reads.length <= 40 && peakReadsPerMinute(reads) <= 20, `bounded: ${reads.length} reads, peak ${peakReadsPerMinute(reads)}/min`);
+    assert.match(notice, /similarity result is still being finalized/i, "explains what is still pending, not a failure");
+    assert.doesNotMatch(notice, /fail|error/i);
+    assert.equal(ui.checkAgain, true);
+    const after = b.roomReads().length;
+    await advance(30 * MINUTE);
+    assert.equal(b.roomReads().length, after, "no polling once the horizon is reached");
+    host.unmount();
+  });
+});
+
+test("COPY: while THIS tab's own AI pass is still running, an exhausted room says AI is still running here and will appear automatically — never a failure", async (t) => {
+  await scenario(async ({ account, b, room }) => {
+    const host = await mount(account, room);
+    await upload(host, account, "complete-held");
+    await advance(30 * MINUTE, () => uiOf(host).exhausted); // an extremely long model run outlasts even the long horizon
+    const notice = [...walk(host.tree)].filter((el) => el.type === "p").map((el) => textOf(el.props.children)).join(" | ");
+    capture(t, "copy/own-ai", { ui: uiOf(host), notice });
+    assert.equal(uiOf(host).exhausted, true);
+    assert.match(notice, /still running in this browser tab/i);
+    assert.match(notice, /appear here automatically/i);
+    assert.doesNotMatch(notice, /fail|error/i);
+    assert.equal(uiOf(host).retry, "Checking… (disabled)");
+    await finishModel(host);
+    await advance(10_000, () => isReadyUi(uiOf(host)));
+    assert.ok(isReadyUi(uiOf(host)), "and it does");
+    host.unmount();
   });
 });
 
