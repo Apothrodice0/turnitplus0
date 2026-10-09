@@ -13,9 +13,11 @@ import {
   buildImportedSimilarityEvidencePackageFile,
   sha256Hex,
   validateImportedSimilarityEvidenceUnitRecord,
+  type ImportedSimilarityEvidencePackageFile,
   type ImportedSimilarityEvidenceUnitRecord,
   type RejectedUnit,
 } from "../lib/imported-similarity-evidence/package";
+import { mergeImportedSimilarityEvidencePackageFiles } from "../lib/imported-similarity-evidence/merge";
 
 /**
  * IMPORTED SIMILARITY EVIDENCE — generic local importer/builder.
@@ -35,12 +37,23 @@ import {
  *   node --import tsx tools/import-similarity-evidence.ts \
  *     --input <path-to-production-import-units.jsonl> \
  *     --output <output-directory> \
- *     [--manuscript <path-to-manuscript-text-file>]
+ *     [--manuscript <path-to-manuscript-text-file>] \
+ *     [--base-package <existing-package.json>]...
+ *
+ * --base-package (repeatable) adds the newly imported report to an existing
+ * package — the deployed one first — through
+ * lib/imported-similarity-evidence/merge.ts: every deployed unit keeps its
+ * id, the new report's ids are namespaced by its evidence set, and each set
+ * keeps its own manuscriptIdentitySha256. Without it the output is the new
+ * report alone, exactly as before.
  */
 
 function arg(name: string): string | null {
   const index = process.argv.indexOf(name);
   return index >= 0 && process.argv[index + 1] ? process.argv[index + 1] : null;
+}
+function argAll(name: string): string[] {
+  return process.argv.flatMap((value, index) => (value === name && process.argv[index + 1] ? [process.argv[index + 1]] : []));
 }
 function requireArg(name: string): string {
   const value = arg(name);
@@ -231,7 +244,16 @@ async function main() {
       totalScoreMaskWords: scoreMaskWordsBySet.get(evidenceSetId) ?? 0,
     }));
 
-  const packageFile = buildImportedSimilarityEvidencePackageFile(evidenceSets, acceptedRecords);
+  const reportPackageFile = buildImportedSimilarityEvidencePackageFile(evidenceSets, acceptedRecords);
+  const basePackagePaths = argAll("--base-package").map((path) => resolve(path));
+  const basePackages = basePackagePaths.map((path) => JSON.parse(readFileSync(path, "utf8")) as ImportedSimilarityEvidencePackageFile);
+  const merged = basePackages.length > 0 ? mergeImportedSimilarityEvidencePackageFiles([...basePackages, reportPackageFile]) : null;
+  const packageFile = merged ? merged.file : reportPackageFile;
+  if (merged) {
+    const outputIds = new Set(packageFile.units.map((unit) => unit.evidenceUnitId));
+    const lostBaseIds = basePackages.flatMap((base) => base.units.map((unit) => unit.evidenceUnitId)).filter((id) => !outputIds.has(id));
+    if (lostBaseIds.length > 0) throw new Error(`base package unit ids would change: ${lostBaseIds.slice(0, 5).join(", ")}${lostBaseIds.length > 5 ? " …" : ""}`);
+  }
   mkdirSync(outputDir, { recursive: true });
   const outputPath = join(outputDir, "imported-similarity-evidence-package.json");
   mkdirSync(dirname(outputPath), { recursive: true });
@@ -253,6 +275,7 @@ async function main() {
     packageContentSha256: packageFile.metadata.contentSha256,
     normalizationVersion: IMPORTED_SIMILARITY_EVIDENCE_NORMALIZATION_VERSION,
     manuscriptIdentitySha256,
+    ...(merged ? { basePackages: basePackagePaths, packageUnits: packageFile.units.length, packageEvidenceSets: packageFile.evidenceSets.length, merge: merged.perSet } : {}),
   };
   writeFileSync(join(outputDir, "import-summary.json"), JSON.stringify(summary, null, 2));
   console.log(JSON.stringify(summary, null, 2));
