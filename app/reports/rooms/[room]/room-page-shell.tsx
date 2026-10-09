@@ -489,7 +489,22 @@ export function reconciledAiSaveOccupant(result: RoomContentsFetchResult, report
  * tile above already uses (see the JSX below) — same neutral visual
  * treatment, not a new style.
  */
-export function SimilarityMetricTile({ report, room }: { report: ReportSummary; room: number }) {
+export function SimilarityMetricTile({ report: incoming, room }: { report: ReportSummary; room: number }) {
+  // ROOM SIMILARITY TILE FLICKER (Preview Room 11, 2026-10-09): the moment AI lands, saveEnrichedAiResult /
+  // saveRetriedAiResult hand the room a summary whose similarityStatus is forced back to "pending" (LIFECYCLE-06: only a
+  // fresh server read may confirm it), so a tile already showing the server's 23 % flashed "Calculating…" for the one round
+  // trip until that read confirmed it again. The server never changes a finalized similarity when AI finishes (pinned in
+  // tests/report-write-time-finalization.test.mjs), so this tile keeps the last result the server confirmed for the SAME
+  // submission across such a momentary "pending". Display only: the room's own reveal (isFullyRevealed, the Receipt) still
+  // waits for that fresh read. A different submission never inherits it, and any newer confirmed result always wins.
+  const lastConfirmedRef = useRef<ReportSummary | null>(null);
+  let report = incoming;
+  if (incoming.similarityStatus !== "pending") lastConfirmedRef.current = incoming;
+  else if (lastConfirmedRef.current?.id !== incoming.id) lastConfirmedRef.current = null;
+  else {
+    const kept = lastConfirmedRef.current;
+    report = { ...incoming, archiveScore: kept.archiveScore, scoreBand: kept.scoreBand, primaryScore: kept.primaryScore, isUnified: kept.isUnified, similarityStatus: kept.similarityStatus };
+  }
   const unavailable = (
     <div className="room-metric room-metric-unavailable">
       <span className="room-metric-label">Similarity</span>

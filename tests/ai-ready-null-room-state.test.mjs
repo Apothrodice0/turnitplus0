@@ -256,9 +256,11 @@ function* walk(node) {
     return;
   }
   if (typeof node !== "object" || !node.props) return;
-  // SimilarityMetricTile is a hook-free child component the host does not expand: expand it (pure) so its text is visible.
+  // SimilarityMetricTile is a child component the host does not expand: expand it so its text is visible. It holds one ref
+  // (the last confirmed similarity of the same submission — tests/room-status-auto-refresh.test.mjs); a fresh one per call
+  // here, i.e. exactly its stateless output.
   if (node.type === roomShell.SimilarityMetricTile) {
-    yield* walk(node.type(node.props));
+    yield* walk(renderTile(node));
     return;
   }
   yield node;
@@ -268,9 +270,18 @@ const textOf = (node) => {
   if (node === null || node === undefined || typeof node === "boolean") return "";
   if (typeof node === "string" || typeof node === "number") return String(node);
   if (Array.isArray(node)) return node.map(textOf).join("");
-  if (typeof node === "object" && node.type === roomShell.SimilarityMetricTile) return textOf(node.type(node.props));
+  if (typeof node === "object" && node.type === roomShell.SimilarityMetricTile) return textOf(renderTile(node));
   return node.props ? textOf(node.props.children) : "";
 };
+function renderTile(node) {
+  const previous = internals.H;
+  internals.H = { useRef: (initial) => ({ current: initial }) };
+  try {
+    return node.type(node.props);
+  } finally {
+    internals.H = previous;
+  }
+}
 function toastOf(tree) {
   for (const container of walk(tree)) {
     if (container.props.className !== "room-page-container") continue;

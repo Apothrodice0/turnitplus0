@@ -199,6 +199,39 @@ function mountRoom(props) {
       }
     },
   };
+  // Child components the shell renders (SimilarityMetricTile) are rendered here too, on EVERY render, with React's identity
+  // rule: the same component type at the same position in the tree keeps its hook state; anything else mounts fresh.
+  const childInstances = new Map();
+  const similarityHistory = [];
+  function renderChild(node, path, seen) {
+    let instance = childInstances.get(path);
+    if (!instance || instance.type !== node.type) childInstances.set(path, (instance = { type: node.type, slots: [] }));
+    seen.add(path);
+    let childCursor = 0;
+    const childDispatcher = {
+      useRef(initial) { const i = childCursor++; if (!instance.slots[i]) instance.slots[i] = { current: initial }; return instance.slots[i]; },
+      useState(initial) { const i = childCursor++; if (!instance.slots[i]) instance.slots[i] = { value: typeof initial === "function" ? initial() : initial }; return [instance.slots[i].value, () => {}]; },
+      useEffect() { childCursor++; },
+    };
+    const previous = internals.H;
+    internals.H = childDispatcher;
+    try {
+      return node.type(node.props);
+    } finally {
+      internals.H = previous;
+    }
+  }
+  function expand(node, path, seen) {
+    if (node === null || node === undefined || typeof node !== "object") return node;
+    if (Array.isArray(node)) return node.map((child, i) => expand(child, `${path}.${i}`, seen));
+    if (node.type === roomShell.SimilarityMetricTile) {
+      const out = renderChild(node, path, seen);
+      similarityHistory.push({ reportId: node.props.report.id, text: textOf(out.props.children).slice("Similarity".length) });
+      return out;
+    }
+    if (!node.props || node.props.children === undefined) return node;
+    return { ...node, props: { ...node.props, children: expand(node.props.children, `${path}>`, seen) } };
+  }
   function render() {
     cursor = 0;
     const previous = internals.H;
@@ -208,6 +241,9 @@ function mountRoom(props) {
     } finally {
       internals.H = previous;
     }
+    const seen = new Set();
+    tree = expand(tree, "root", seen);
+    for (const path of [...childInstances.keys()]) if (!seen.has(path)) childInstances.delete(path); // unmounted
     const toast = toastOf(tree);
     if (toast && toast !== toasts.at(-1)) toasts.push(toast);
     const effects = pendingEffects;
@@ -230,6 +266,8 @@ function mountRoom(props) {
   return {
     get tree() { return tree; },
     toasts,
+    /** The Similarity tile's text on every single render, in order (a flicker lasts exactly one render). */
+    similarityHistory,
     unmount() {
       unmounted = true;
       for (const slot of slots) slot?.cleanup?.();
@@ -274,9 +312,7 @@ function uploadPanelOf(tree) {
 /** What the customer sees: status line, the three tiles, the exhausted notice, Check again, Retry. */
 function uiOf(host) {
   const ui = { statusLine: null, aiTile: null, similarityTile: null, receiptTile: null, receiptEnabled: null, exhausted: false };
-  for (const node of walk(host.tree)) {
-    // SimilarityMetricTile is a child component the hook host does not render: render it (a pure function of its props) here.
-    const el = node.type === roomShell.SimilarityMetricTile ? node.type(node.props) : node;
+  for (const el of walk(host.tree)) { // host.tree already has SimilarityMetricTile rendered (mountRoom's expand)
     const cls = el.props.className;
     const text = textOf(el.props.children);
     if (cls === "room-page-status") ui.statusLine = text;
@@ -757,6 +793,142 @@ test("COPY: while THIS tab's own AI pass is still running, an exhausted room say
     assert.ok(isReadyUi(uiOf(host)), "and it does");
     host.unmount();
   });
+});
+
+// =================================================================================================================================
+// 3. SIMILARITY TILE NEVER FLICKERS BACK (Room 11, 2026-10-09): once the tile shows a confirmed percentage for a submission, it
+//    never shows "Calculating…" again for that same submission — checked on EVERY render (a flicker lasts exactly one render).
+// =================================================================================================================================
+
+function assertNoSimilarityRegression(host, label) {
+  const confirmed = new Set();
+  host.similarityHistory.forEach((entry, i) => {
+    if (/^\d+%/.test(entry.text) || /Unavailable/.test(entry.text)) confirmed.add(entry.reportId);
+    else if (confirmed.has(entry.reportId)) assert.fail(`${label}: render #${i} showed "${entry.text}" for ${entry.reportId} after a confirmed result (${JSON.stringify(host.similarityHistory.slice(Math.max(0, i - 2), i + 2))})`);
+  });
+}
+
+test("NO FLICKER, Room 11: Similarity 23% -> AI lands -> Report ready, and no render in between shows Calculating", async (t) => {
+  await scenario(async ({ account, b, room }) => {
+    const host = await mount(account, room);
+    await upload(host, account, "complete-held");
+    await advance(30_000, () => /^\d+%/.test(uiOf(host).similarityTile ?? ""));
+    assert.match(uiOf(host).similarityTile, /^\d+%/, "similarity first");
+    const mark = b.log.length;
+    await finishModel(host);
+    await advance(10_000, () => isReadyUi(uiOf(host)));
+    const renders = host.similarityHistory.map((e) => e.text);
+    capture(t, "flicker/room11", { renders: renders.slice(-6), reads: b.roomReads(mark).length, ui: uiOf(host) });
+    assertNoSimilarityRegression(host, "room11");
+    assert.ok(isReadyUi(uiOf(host)));
+    assert.equal(worker.runs.length, 1);
+    assert.deepEqual(b.aiSaves(mark).map((e) => e.key), ["POST /api/reports"]);
+    host.unmount();
+  });
+});
+
+test("NO FLICKER, AI before similarity: Calculating -> % exactly once, never back", async () => {
+  await scenario(async ({ account, b, room }) => {
+    const host = await mount(account, room);
+    await upload(host, account, "complete-held");
+    b.server.similarityPending = true;
+    await finishModel(host);
+    await advance(20_000);
+    b.server.similarityPending = false;
+    await advance(MINUTE, () => isReadyUi(uiOf(host)));
+    assertNoSimilarityRegression(host, "ai-first");
+    assert.ok(isReadyUi(uiOf(host)));
+    host.unmount();
+  });
+});
+
+test("NO FLICKER, stale / out-of-order 'pending' answers after similarity was confirmed (before and after AI lands) never reset the tile", async () => {
+  await scenario(async ({ account, b, room }) => {
+    const host = await mount(account, room);
+    await upload(host, account, "complete-held");
+    await advance(30_000, () => /^\d+%/.test(uiOf(host).similarityTile ?? ""));
+    b.server.similarityPending = true; // stale reads while AI still runs
+    await advance(30_000);
+    await finishModel(host); // AI lands while the server read still says pending
+    await advance(20_000);
+    b.server.similarityPending = false;
+    await advance(MINUTE, () => isReadyUi(uiOf(host)));
+    assertNoSimilarityRegression(host, "stale");
+    assert.ok(isReadyUi(uiOf(host)));
+    host.unmount();
+  });
+});
+
+test("NO FLICKER, background tab returning during completion", async () => {
+  await scenario(async ({ account, b, room }) => {
+    const host = await mount(account, room);
+    await upload(host, account, "complete-held");
+    await advance(30_000, () => /^\d+%/.test(uiOf(host).similarityTile ?? ""));
+    setVisibility("hidden");
+    await finishModel(host);
+    await advance(2_000);
+    setVisibility("visible");
+    await settle();
+    await advance(10_000, () => isReadyUi(uiOf(host)));
+    assertNoSimilarityRegression(host, "background");
+    assert.ok(isReadyUi(uiOf(host)));
+    host.unmount();
+  });
+});
+
+test("NO FLICKER, AI fails with similarity already complete: the % stays through the failed-AI reveal", async () => {
+  await scenario(async ({ account, b, room }) => {
+    const host = await mount(account, room);
+    await upload(host, account, "error-held");
+    await advance(30_000, () => /^\d+%/.test(uiOf(host).similarityTile ?? ""));
+    worker.held.shift()();
+    await waitFor(() => uiOf(host).aiTile === "—Unavailable", "the failed AI result");
+    await advance(10_000, () => isFailedRevealedUi(uiOf(host)));
+    assertNoSimilarityRegression(host, "ai-failed");
+    assert.ok(isFailedRevealedUi(uiOf(host)));
+    host.unmount();
+  });
+});
+
+test("NO FLICKER, existing completed report: opens at its %, never Calculating", async () => {
+  await scenario(async ({ account, b, room }) => {
+    const host = await mount(account, room);
+    await upload(host, account, "complete-held");
+    await finishModel(host);
+    await advance(10_000, () => isReadyUi(uiOf(host)));
+    host.unmount();
+    const reopened = await mount(account, room);
+    await advance(MINUTE);
+    assert.ok(reopened.similarityHistory.length > 0 && reopened.similarityHistory.every((e) => /^\d+%/.test(e.text)), JSON.stringify(reopened.similarityHistory));
+    reopened.unmount();
+  });
+});
+
+test("UNIT SimilarityMetricTile: keeps the last confirmed result for the SAME submission across a momentary 'pending'; never for another submission; a newer confirmed result always wins", () => {
+  // One persistent tile instance (React keeps hook state for the same component at the same position).
+  const slots = [];
+  const show = (report) => {
+    let i = 0;
+    const previous = internals.H;
+    internals.H = { useRef(init) { const k = i++; if (!slots[k]) slots[k] = { current: init }; return slots[k]; } };
+    try {
+      return textOf(roomShell.SimilarityMetricTile({ report, room: 0 }).props.children).slice("Similarity".length);
+    } finally {
+      internals.H = previous;
+    }
+  };
+  const a = summary({ id: "A", similarityStatus: "resolved", primaryScore: 23, archiveScore: 6, scoreBand: "Moderate" });
+  assert.match(show(a), /^23%/);
+  assert.match(show({ ...a, aiStatus: "ready", aiScore: 0, similarityStatus: "pending", primaryScore: undefined }), /^23%/, "same submission, momentary pending -> keeps 23%");
+  assert.match(show({ ...a, similarityStatus: "resolved", primaryScore: 25 }), /^25%/, "a newer confirmed result wins");
+  assert.match(show(summary({ id: "B", similarityStatus: "pending" })), /Calculating/, "another submission never inherits A's result");
+  assert.match(show(summary({ id: "A", similarityStatus: "pending" })), /Calculating/, "and coming back to A after B starts fresh");
+  const w = summary({ id: "W", similarityStatus: "failed", archiveScore: null, scoreBand: null });
+  assert.match(show(w), /Unavailable/);
+  assert.match(show({ ...w, similarityStatus: "pending" }), /Unavailable/, "a confirmed Unavailable also stays");
+  // A fresh tile instance with a pending report is simply Calculating (no memory without a confirmed render first).
+  slots.length = 0;
+  assert.match(show(summary({ id: "C", similarityStatus: "pending" })), /Calculating/);
 });
 
 // =================================================================================================================================
