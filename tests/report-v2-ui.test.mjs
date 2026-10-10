@@ -132,7 +132,8 @@ test("low similarity report: headline == primarySimilarityScore, one DISTINCTIVE
   assert.match(html, /Verified Similarity/);
   assert.match(html, />8%</);
   assert.match(html, /51 of 600 matched words/);
-  assert.match(html, /Verified source overlap/);
+  assert.match(html, /Source overlap/);
+  assert.doesNotMatch(html, /[Vv]erified source overlap/); // imported references are never called verified
   assert.match(html, /Search completed within the available TurnitPlus source scope/);
   assertCleanCopy(html, "low");
   assertNoInternalIds(html, "low");
@@ -417,7 +418,7 @@ test("a11y: kind labels are real text, filter controls are <button> with aria-pr
   assert.match(html, /<button[^>]+aria-pressed="true"[^>]*>All \(/);
   assert.match(html, /aria-label="\d+ percent, [^"]+"/);
   // the passage <mark> carries an aria-label naming the kind (not colour)
-  assert.match(html, /<mark[^>]+aria-label="Verified source overlap/);
+  assert.match(html, /<mark[^>]+aria-label="Source overlap/);
   // every kind chip label is present as literal text
   assert.match(html, new RegExp(KIND_PASSAGE_LABEL.DISTINCTIVE_EXTERNAL_MATCH));
 });

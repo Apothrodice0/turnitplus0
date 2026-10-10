@@ -45,20 +45,22 @@ import { reportScoringNormalizationVersion, tokenSpans, type ScoringNormalizatio
  */
 
 // ── copy ─────────────────────────────────────────────────────────────────
+// The kind labels apply to every evidence card — Archive documents AND imported
+// Turnitin-report references — so they never call the matched source "verified".
 export const KIND_SUMMARY_LABEL: Record<EvidenceInterpretationKind, string> = {
-  DISTINCTIVE_EXTERNAL_MATCH: "Verified source overlap",
+  DISTINCTIVE_EXTERNAL_MATCH: "Source overlap",
   ATTRIBUTED_QUOTATION: "Quoted — with attribution",
   DECLARED_QUOTATION: "Quoted — attribution not confirmed",
-  LEGITIMATE_ALTERNATE_SOURCE: "Also in another verified source",
+  LEGITIMATE_ALTERNATE_SOURCE: "Also in another matched source",
   POSSIBLE_SAME_WORK: "Possible same-work or prior-publication match",
   FAMILY_BOILERPLATE: "Repeated template / family wording",
 };
 
 export const KIND_PASSAGE_LABEL: Record<EvidenceInterpretationKind, string> = {
-  DISTINCTIVE_EXTERNAL_MATCH: "Verified source overlap",
+  DISTINCTIVE_EXTERNAL_MATCH: "Source overlap",
   ATTRIBUTED_QUOTATION: "Quoted passage with nearby attribution",
   DECLARED_QUOTATION: "Quoted passage — attribution not confirmed",
-  LEGITIMATE_ALTERNATE_SOURCE: "Same text appears in another verified source",
+  LEGITIMATE_ALTERNATE_SOURCE: "Same text appears in another matched source",
   POSSIBLE_SAME_WORK: "Possible same-work or prior-publication match",
   FAMILY_BOILERPLATE: "Repeated template / family wording",
 };
@@ -412,7 +414,7 @@ export function buildReportV2ViewModel(report: SimilarityReport): ReportV2ViewMo
   };
 
   const deferredNote = ei.deferredKindsFolded
-    ? "Common definitions and standard academic phrasing are not separated out in this version and are included above under “Verified source overlap”."
+    ? `Common definitions and standard academic phrasing are not separated out in this version and are included above under “${KIND_SUMMARY_LABEL.DISTINCTIVE_EXTERNAL_MATCH}”.`
     : null;
 
   return {
