@@ -19,6 +19,10 @@ import type {
 } from "@/lib/evidence-interpretation/kinds";
 import { EVIDENCE_INTERPRETATION_KINDS } from "@/lib/evidence-interpretation/kinds";
 import { reportScoringNormalizationVersion, tokenSpans, type ScoringNormalizationVersion } from "@/lib/similarity-core";
+import {
+  sanitizeUnverifiedPublicationNotice,
+  unverifiedPublicationDoiUrl,
+} from "@/lib/academic-search/unverified-publication";
 
 /**
  * REPORT V2 — pure view-model.
@@ -233,7 +237,51 @@ export type ReportV2ViewModel = {
   filterCounts: Record<ReportV2Filter, number>;
   /** true when the document had matched positions but none produced a passage row. */
   hasPassages: boolean;
+  /** FIX C — "possible related publication, not verified"; null when the report carries none (every legacy report). Never a source card, never counted in matchingEvidenceEntries. */
+  unverifiedPublications: ReportV2UnverifiedPublicationNotice | null;
 };
+
+export type ReportV2UnverifiedPublication = {
+  title: string;
+  venue: string;
+  year: number;
+  doi: string;
+  /** Always https://doi.org/<doi> — never a provider or publisher URL. */
+  doiUrl: string;
+};
+
+export type ReportV2UnverifiedPublicationNotice = {
+  heading: string;
+  body: string;
+  publications: ReportV2UnverifiedPublication[];
+};
+
+// ── unverified-publication notice copy (FIX C) ──────────────────────────
+// Neutral by construction: it says the text was NOT compared, never that it
+// matches; no hosts, status codes or retrieval internals. There is
+// deliberately no "provide it as a reference file" line: the Reference files
+// upload is not offered in the customer upload flow (dcb55f4), so the report
+// must not point to it.
+export function resolveUnverifiedPublicationNoticeView(
+  notice: SimilarityReport["unverifiedPublicationNotice"],
+): ReportV2UnverifiedPublicationNotice | null {
+  const clean = sanitizeUnverifiedPublicationNotice(notice);
+  if (!clean) return null;
+  const one = clean.publications.length === 1;
+  return {
+    heading: one ? "Possible related publication — not verified" : "Possible related publications — not verified",
+    body: one
+      ? "A potentially related published article was identified, but its text could not be retrieved for comparison. This publication is not included in your similarity score."
+      : "Potentially related published articles were identified, but their text could not be retrieved for comparison. These publications are not included in your similarity score.",
+    publications: clean.publications.map((p) => ({
+      title: p.title,
+      venue: p.venue,
+      year: p.year,
+      doi: p.doi,
+      doiUrl: unverifiedPublicationDoiUrl(p.doi),
+    })),
+  };
+}
 
 // ── completion copy ──────────────────────────────────────────────────────
 // Exported so the legacy/full report views (components/report/similarity-
@@ -436,6 +484,7 @@ export function buildReportV2ViewModel(report: SimilarityReport): ReportV2ViewMo
     passages,
     filterCounts,
     hasPassages: passages.length > 0,
+    unverifiedPublications: resolveUnverifiedPublicationNoticeView(report.unverifiedPublicationNotice),
   };
 }
 

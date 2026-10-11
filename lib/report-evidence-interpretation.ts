@@ -9,6 +9,10 @@ import {
   type BuildReportEvidenceInterpretationOptions,
 } from "@/lib/evidence-interpretation";
 import type { SuppliedReferenceVerifiedEvidence } from "@/lib/user-supplied-references";
+import {
+  sanitizeUnverifiedPublicationNotice,
+  type UnverifiedPublicationNotice,
+} from "@/lib/academic-search/unverified-publication";
 import type { UnifiedEvidenceContribution } from "@/lib/unified-similarity";
 import { compactUnifiedSimilarityForPersistence } from "@/lib/unified-similarity-persistence";
 import {
@@ -54,6 +58,10 @@ export const CLIENT_UNTRUSTED_EVIDENCE_INTERPRETATION_KEYS = [
   // V1.1 — the internal carry-forward guard is server-set only; a client value
   // here is dropped (and it is stripped again from every outbound response).
   "userSuppliedReferenceGuard",
+  // FIX C — the "possible related publication, not verified" notice is derived
+  // server-side from the verified academic-search row only; a client value is
+  // dropped and the server value (if any) is set by withEvidenceInterpretation.
+  "unverifiedPublicationNotice",
 ] as const;
 
 /** Drop any client-supplied interpretation/completion/extraction values so the
@@ -75,9 +83,16 @@ export type ReportEvidenceInterpretationWiringOptions = {
    *  did NOT run as a report search (it is a flag-OFF shadow today). Pass
    *  "PARTIAL"/"COMPLETED" only when it is genuinely a configured report branch. */
   selectiveCorpusBranch?: SelectiveCorpusBranchState | null;
-  /** candidate sources identified but whose text could not be verified. 0 until
-   *  a real signal is threaded (retrieval diagnostics are server-only today). */
+  /** candidate sources identified but whose text could not be verified. Ignored
+   *  when `unverifiedPublicationNotice` is passed (its publication count wins). */
   unverifiedCandidateCount?: number;
+  /**
+   * FIX C — the SERVER-computed notice (lib/academic-search-diagnostics-repo.ts
+   * resolveUnverifiedPublicationNotice). Stamped onto the output and drives
+   * reportCompletion's unverifiedCandidateCount. Never read by scoring or by the
+   * interpretation partition: it carries no matched position.
+   */
+  unverifiedPublicationNotice?: UnverifiedPublicationNotice | null;
   /** a SERVER-TRUSTED extraction diagnostic, when one exists. Absent -> UNKNOWN
    *  (never inferred to EXTRACTION_PARTIAL). A client-supplied value is ignored. */
   serverExtractionDiagnostic?: ReportExtractionDiagnostic | null;
@@ -168,6 +183,9 @@ export function withEvidenceInterpretation<T extends SimilarityReport>(
     .filter((r) => r.admitted && (r.verifiedPassages?.length ?? 0) > 0)
     .map((r) => ({ key: r.key, safeLabel: r.safeLabel, verifiedPassages: r.verifiedPassages }));
 
+  // FIX C — server-set only (on the strip list, so `base` never carries one).
+  const unverifiedPublicationNotice = sanitizeUnverifiedPublicationNotice(opts.unverifiedPublicationNotice ?? null);
+
   const evidenceInterpretation = buildReportEvidenceInterpretation(base as SimilarityReport, {
     historicalSubmissionMatch: opts.historicalSubmissionMatch,
     selectiveCorpusAdmittedSources: opts.selectiveCorpusAdmittedSources,
@@ -181,7 +199,9 @@ export function withEvidenceInterpretation<T extends SimilarityReport>(
     academicSearch: report.academicEvidenceStatus ?? null,
     selectiveCorpus: opts.selectiveCorpusBranch ?? null,
     extraction: extractionDiagnostic,
-    unverifiedCandidateCount: opts.unverifiedCandidateCount ?? 0,
+    unverifiedCandidateCount: unverifiedPublicationNotice
+      ? unverifiedPublicationNotice.publications.length
+      : (opts.unverifiedCandidateCount ?? 0),
     userSuppliedReference: referenceChannel ? referenceChannel.state : null,
     verifiedSimilarityPercent: primarySimilarityScore(report),
   });
@@ -199,6 +219,7 @@ export function withEvidenceInterpretation<T extends SimilarityReport>(
     ...(referenceEvidence.length > 0 ? { userSuppliedReferenceEvidence: [...referenceEvidence] } : {}),
     ...(referenceChannel ? { userSuppliedReferenceChannel: referenceChannel } : {}),
     ...(referenceGuard && referenceEvidence.length > 0 ? { userSuppliedReferenceGuard: referenceGuard } : {}),
+    ...(unverifiedPublicationNotice ? { unverifiedPublicationNotice } : {}),
   };
 }
 

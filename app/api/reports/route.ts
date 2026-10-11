@@ -15,7 +15,7 @@ import {
   type ActorObservation,
 } from '../../../lib/device-passport-actor-ledger';
 import { captureDocumentIdentityAndFamily } from '../../../lib/document-family';
-import { linkAcademicSearchRunDiagnosticsToReport, resolveVerifiedAcademicEvidence } from '../../../lib/academic-search-diagnostics-repo';
+import { linkAcademicSearchRunDiagnosticsToReport, resolveUnverifiedPublicationNotice, resolveVerifiedAcademicEvidence } from '../../../lib/academic-search-diagnostics-repo';
 import { canonicalSha256 } from '../../../lib/document-identity';
 import { checkUploadLimit } from '../../../lib/upload-limit';
 import { deriveRoomStatus, derivedAiReadySql, getRoomCountForRole, isWithinActiveCycle, roomCycleEndsAt } from '../../../lib/report-rooms';
@@ -926,6 +926,22 @@ export async function POST(request: Request) {
             scoringNormalizationVersion: reportScoringVersion,
           })
         : { evidence: [], verifiedDiagnosticsId: null };
+      // FIX C — "possible related publication, not verified". Derived ONLY from
+      // the same server-owned row the verified evidence above came from (it is
+      // looked up only when that row verified), under the same id + binding
+      // trust anchor. A NOTICE, never evidence: it is threaded into
+      // withEvidenceInterpretation below (completion state + the server-set
+      // payload field) and never into resolvePrimarySimilaritySummary — no
+      // score, matched word, highlight or source card can change. Rows recorded
+      // before retrieval diagnostics v1 never yield a notice.
+      const unverifiedPublicationNotice = verifiedAcademicDiagnosticsId !== null && isNonEmptyString(reportPayload?.text)
+        ? await resolveUnverifiedPublicationNotice(client, {
+            diagnosticsId: verifiedAcademicDiagnosticsId,
+            submissionCanonicalSha256: canonicalSha256(reportPayload.text),
+            scoringNormalizationVersion: reportScoringVersion,
+            manuscriptText: reportPayload.text,
+          })
+        : null;
       // The payload actually persisted: the client's fields, but with
       // externalAcademicEvidence forced to the server-verified set and the
       // verified diagnostics id stamped on so later reads can re-verify.
@@ -1195,6 +1211,7 @@ export async function POST(request: Request) {
             userSuppliedReferenceEvidence: suppliedReferenceEvidence,
             userSuppliedReferenceChannel: suppliedReferenceChannelState,
             userSuppliedReferenceGuard: suppliedReferenceGuard,
+            unverifiedPublicationNotice,
           }));
         } catch (err) {
           console.error('report V2 interpretation attach failed:', err instanceof Error ? err.message : String(err));

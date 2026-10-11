@@ -1,6 +1,7 @@
 import type { WebCheckResult } from "@/lib/web-check-core";
 import type { ReportSummary } from "@/lib/reports-remote";
 import type { AcademicSearchStatus, ExternalAcademicEvidence } from "@/lib/academic-search/types";
+import type { UnverifiedPublicationNotice } from "@/lib/academic-search/unverified-publication";
 import type { UnifiedSimilarityResult } from "@/lib/unified-similarity";
 import type { SuppliedReferenceVerifiedEvidence, SuppliedReferenceInput } from "@/lib/user-supplied-references";
 import type { UserSuppliedReferenceGuard, UserSuppliedReferencePersistedChannel } from "@/lib/report-user-supplied-references";
@@ -463,6 +464,18 @@ export type SimilarityReport = {
    * filename / storage id / account id; never on a source card.
    */
   userSuppliedReferenceGuard?: UserSuppliedReferenceGuard;
+  /**
+   * FIX C — ADDITIVE, SERVER-AUTHORITATIVE NOTICE, never evidence. Publications
+   * the academic search identified (strong identity, lib/academic-search/
+   * unverified-publication.ts) whose text could not be retrieved for comparison.
+   * Public bibliographic metadata only (DOI, title, venue, year). Zero similarity
+   * credit: no matched word, highlight, source card or percentage ever derives
+   * from it. Computed by POST /api/reports from the server-verified search row;
+   * any client value is stripped (CLIENT_UNTRUSTED_EVIDENCE_INTERPRETATION_KEYS).
+   * Absent on every report saved before it existed — consumers render exactly as
+   * before.
+   */
+  unverifiedPublicationNotice?: UnverifiedPublicationNotice;
   wordCount: number;
   characterCount: number;
   pageCount: number;

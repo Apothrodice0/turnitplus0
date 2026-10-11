@@ -7861,6 +7861,20 @@ main.report-main {
 .rv2-completion-detail { margin: 4px 0 0; color: var(--ink); }
 .rv2-completion-scope { margin: 6px 0 0; color: var(--muted); font-size: 11px; }
 
+/* ---- FIX C: possible related publication, not verified (a notice, never a source card) ---- */
+.rv2-unverified {
+  margin-top: 10px; padding: 10px 12px; border-radius: 10px;
+  border: 1px dashed #e9c66b; background: #fffaf0;
+}
+.rv2-unverified-heading { margin: 0; font-weight: 600; }
+.rv2-unverified-body { margin: 4px 0 0; color: var(--ink); }
+.rv2-unverified-list { margin: 6px 0 0; padding: 0; list-style: none; display: grid; gap: 6px; }
+.rv2-unverified-title { display: block; font-weight: 600; overflow-wrap: anywhere; }
+.rv2-unverified-meta { display: block; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.rv2-unverified-meta a { color: var(--blue-dark); }
+.rv2-unverified-print { margin-top: 8px; padding: 8px 10px; font-size: 12px; break-inside: avoid; }
+.rv2-unverified-print .rv2-unverified-meta { font-size: 11px; }
+
 /* ---- overlap breakdown bars ---- */
 .rv2-breakdown-lead { margin: 0 0 10px; color: var(--muted); }
 .rv2-bars { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }

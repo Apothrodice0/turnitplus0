@@ -111,6 +111,35 @@ function CompletionStrip({ vm }: { vm: ReportV2ViewModel }) {
   );
 }
 
+/**
+ * FIX C — "Possible related publication — not verified". A NOTICE beside the
+ * completion state, never a source card: it is not in vm.sources, carries no
+ * percentage, word count or highlight, and its only link is the DOI resolver.
+ * The SAME copy (vm.unverifiedPublications) renders on screen and in the
+ * printed PDF.
+ */
+function UnverifiedPublicationNotice({ vm, variant }: { vm: ReportV2ViewModel; variant: "screen" | "print" }) {
+  const notice = vm.unverifiedPublications;
+  if (!notice) return null;
+  return (
+    <div className={`rv2-unverified rv2-unverified-${variant}`} role="note" aria-label={notice.heading}>
+      <p className="rv2-unverified-heading">{notice.heading}</p>
+      <p className="rv2-unverified-body">{notice.body}</p>
+      <ul className="rv2-unverified-list">
+        {notice.publications.map((p) => (
+          <li key={p.doi}>
+            <span className="rv2-unverified-title">{p.title}</span>
+            <span className="rv2-unverified-meta">
+              {p.venue} · {p.year} ·{" "}
+              <a href={p.doiUrl} target="_blank" rel="noreferrer">doi:{p.doi}</a>
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function OverlapBreakdown({ vm }: { vm: ReportV2ViewModel }) {
   const { verifiedSimilarityPercent, breakdown, deferredNote, matchedWordCount } = vm.summary;
   if (matchedWordCount === 0) {
@@ -203,6 +232,7 @@ function FirstScreen({ vm }: { vm: ReportV2ViewModel }) {
           matches. It is not a judgement about your work.
         </p>
         <CompletionStrip vm={vm} />
+        <UnverifiedPublicationNotice vm={vm} variant="screen" />
       </section>
 
       <OverlapBreakdown vm={vm} />
@@ -613,6 +643,7 @@ function PrintReportScope({ vm }: { vm: ReportV2ViewModel }) {
       <p>{c.headline}</p>
       {c.detail && <p>{c.detail}</p>}
       <p className="rv2-print-scope-line">{c.scopeLine}</p>
+      <UnverifiedPublicationNotice vm={vm} variant="print" />
     </section>
   );
 }
@@ -1166,6 +1197,7 @@ export function ReportV2Workspace({
             </div>
 
             <CompletionStrip vm={vm} />
+            <UnverifiedPublicationNotice vm={vm} variant="screen" />
 
             <div className="rv2ws-sources">
               <h3>Sources</h3>

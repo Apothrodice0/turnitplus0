@@ -6,6 +6,7 @@ import { findReportRowForDeviceKey, findReportRowForUser } from '../../../../lib
 import { classifyReportMatches } from '../../../../lib/report-classification';
 import { deleteHistoricalMatchSnapshot, getPersistedHistoricalMatchSnapshot } from '../../../../lib/report-historical-match';
 import { stripClientEvidenceInterpretation, refreshSelectiveCorpusCompletionSignal } from '../../../../lib/report-evidence-interpretation';
+import { sanitizeUnverifiedPublicationNotice } from '../../../../lib/academic-search/unverified-publication';
 import { sanitizeExtractionDiagnostic } from '../../../../lib/evidence-interpretation';
 import { deleteReportDocumentData } from '../../../../lib/report-deletion';
 import { deleteReportCorpusAdmissionData } from '../../../../lib/corpus-admission-report-integration';
@@ -116,6 +117,11 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
         ? payload.userSuppliedReferenceEvidence
         : null;
       const persistedReferenceChannel = payload.userSuppliedReferenceChannel ?? null;
+      // FIX C — the server-computed "possible related publication, not verified"
+      // notice written by THIS report's own save. Captured before the strip and
+      // restored verbatim (shape-checked) below; never recomputed here. A report
+      // saved before the notice existed simply has none.
+      const persistedUnverifiedPublicationNotice = sanitizeUnverifiedPublicationNotice(payload.unverifiedPublicationNotice);
       // AUTHORITATIVE PROMOTION — capture the persisted, already-server-computed
       // evidenceInterpretation/reportCompletion BEFORE the strip below, for the
       // SAME reason persistedExtractionDiagnostic captures extractionDiagnostic
@@ -233,6 +239,9 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
       }
       if (persistedReferenceChannel) {
         payload.userSuppliedReferenceChannel = persistedReferenceChannel;
+      }
+      if (persistedUnverifiedPublicationNotice) {
+        payload.unverifiedPublicationNotice = persistedUnverifiedPublicationNotice;
       }
       // Release-hardening audit finding UI-02: admin-only, exactly as
       // before — but sourced from getPersistedHistoricalMatchSnapshot

@@ -9,6 +9,7 @@ import type {
   AcademicSearchStatus,
   ExternalAcademicEvidence,
 } from "./academic-search/types";
+import { evaluateUnverifiedPublications, type UnverifiedPublicationNotice } from "./academic-search/unverified-publication";
 
 /**
  * Repository for academic_search_run_diagnostics (see db/schema.ts's own
@@ -248,6 +249,52 @@ export async function resolveVerifiedAcademicEvidence(
   } catch (err) {
     console.error("resolveVerifiedAcademicEvidence failed (non-fatal — verified scholarly evidence = []):", err instanceof Error ? err.message : String(err));
     return EMPTY_VERIFIED;
+  }
+}
+
+/**
+ * FIX C — the "possible related publication, not verified" notice for one
+ * report, derived ONLY from the server-owned search row under the SAME trust
+ * anchor as resolveVerifiedAcademicEvidence (row id + the report's own
+ * canonical-text binding under its scoring contract). The candidates and
+ * retrieval diagnostics are written by /api/academic-evidence on the server; a
+ * client never supplies any of them.
+ *
+ * Explanation only — the result is never read by scoring. Any failure (no id,
+ * no row, binding mismatch, unparseable JSON, DB error) resolves to null, never
+ * throws, and never affects the save.
+ */
+export async function resolveUnverifiedPublicationNotice(
+  client: Client,
+  params: ResolveVerifiedAcademicEvidenceParams & { manuscriptText: string },
+): Promise<UnverifiedPublicationNotice | null> {
+  try {
+    const id = params.diagnosticsId;
+    if (typeof id !== "number" || !Number.isInteger(id) || id <= 0) return null;
+    if (!CANONICAL_SHA256_RE.test(params.submissionCanonicalSha256)) return null;
+    const result = await client.execute({
+      sql: "SELECT candidates_json, retrieval_diagnostics_json, evidence_json, submission_canonical_sha256 FROM academic_search_run_diagnostics WHERE id = ?",
+      args: [id],
+    });
+    const raw = result.rows[0] as unknown as
+      | { candidates_json: string | null; retrieval_diagnostics_json: string | null; evidence_json: string | null; submission_canonical_sha256: string | null }
+      | undefined;
+    if (!raw) return null;
+    const expectedBinding = academicEvidenceSubmissionBinding(params.submissionCanonicalSha256, params.scoringNormalizationVersion === 2 ? 2 : 1);
+    if (typeof raw.submission_canonical_sha256 !== "string" || raw.submission_canonical_sha256 !== expectedBinding) return null;
+    if (typeof raw.candidates_json !== "string" || typeof raw.retrieval_diagnostics_json !== "string") return null;
+    const candidates = JSON.parse(raw.candidates_json) as unknown;
+    const retrievalDiagnostics = JSON.parse(raw.retrieval_diagnostics_json) as unknown;
+    const evidence = typeof raw.evidence_json === "string" ? (JSON.parse(raw.evidence_json) as unknown) : [];
+    if (!Array.isArray(candidates) || !Array.isArray(retrievalDiagnostics)) return null;
+    return evaluateUnverifiedPublications(params.manuscriptText, {
+      candidates: candidates as AcademicSearchCandidate[],
+      retrievalDiagnostics: retrievalDiagnostics as AcademicSearchRetrievalDiagnostic[],
+      verifiedEvidence: Array.isArray(evidence) ? (evidence as ExternalAcademicEvidence[]) : [],
+    }).notice;
+  } catch (err) {
+    console.error("resolveUnverifiedPublicationNotice failed (non-fatal — no notice):", err instanceof Error ? err.message : String(err));
+    return null;
   }
 }
 
