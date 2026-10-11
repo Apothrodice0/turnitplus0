@@ -1,3 +1,5 @@
+import type { RetrievalFailureStage, RetrievalSafetyFailure, RetrievalTraceHop } from "../retrieval-types";
+
 /**
  * Live academic search — Phase 1 (provider-agnostic POC). Data shapes only;
  * the provider interface itself lives in provider.ts.
@@ -242,6 +244,73 @@ export type AcademicSearchRetrievalDiagnostic = {
   comparisonSimilarity: number | null;
   /** True only for a candidate that made it into `evidence` above. */
   includedAsEvidence: boolean;
+  // ---- Retrieval diagnostics v1 (2026-10-11). Every field below is optional: rows recorded before it have none. ----
+  /** ACADEMIC_RETRIEVAL_DIAGNOSTICS_VERSION when the fields below are present. */
+  diagnosticsVersion?: number;
+  /** True when text was obtained (provider or HTTP fallback). */
+  textRetrieved?: boolean;
+  /** True when the comparator ran; false = the candidate was found but could not be evaluated. */
+  candidateEvaluated?: boolean;
+} & Partial<AcademicRetrievalDetail>;
+
+/** Version stamp written on every retrieval-diagnostics entry that carries AcademicRetrievalDetail. */
+export const ACADEMIC_RETRIEVAL_DIAGNOSTICS_VERSION = 1;
+
+/** One contributing provider's getText() attempt for a candidate. */
+export type AcademicProviderTextAttempt = {
+  providerId: string;
+  /** TEXT = usable text returned; NO_TEXT = null/empty (including a budget stop); ERROR = getText threw. */
+  outcome: "TEXT" | "NO_TEXT" | "ERROR";
+};
+
+/** Why a candidate yielded no text, as a closed vocabulary (null when text was retrieved). */
+export type AcademicRetrievalErrorCategory =
+  | "NO_TEXT_SOURCE" // no provider supplied text and the candidate has no URL to fetch
+  | "HTTP_401_UNAUTHORIZED"
+  | "HTTP_403_FORBIDDEN"
+  | "HTTP_404_NOT_FOUND"
+  | "HTTP_429_RATE_LIMITED"
+  | "HTTP_4XX_OTHER"
+  | "HTTP_5XX_SERVER_ERROR"
+  | "HTTP_3XX_NO_LOCATION"
+  | "HTTP_OTHER"
+  | "TIMEOUT"
+  | "NETWORK_ERROR"
+  | "UNSAFE_URL" // the candidate's own URL was refused by lib/retrieval-safety.ts
+  | "UNSAFE_REDIRECT_TARGET" // a redirect or citation_pdf_url target was refused by lib/retrieval-safety.ts
+  | "REDIRECT_LIMIT_EXCEEDED"
+  | "REDIRECT_LOCATION_INVALID"
+  | "REDIRECT_BLOCKED" // a REDIRECT_BLOCKED from a retriever that keeps no trace
+  | "UNSUPPORTED_CONTENT_TYPE"
+  | "CONTENT_TOO_LARGE"
+  | "NO_CONTENT"
+  | "MALFORMED_CONTENT"
+  | "EXTRACTION_FAILED";
+
+/**
+ * Per-candidate retrieval detail recorded by text-retriever.ts — diagnostics only, never read by comparison, ranking or
+ * scoring. Bounded (hops <= MAX_RECORDED_HOPS, provider attempts <= MAX_RECORDED_PROVIDER_TEXT_ATTEMPTS) and private by
+ * construction: hosts, status codes and closed categories only — no path, query string, header, cookie, body text,
+ * resolved IP address or free-text error message.
+ */
+export type AcademicRetrievalDetail = {
+  providerTextAttempts: AcademicProviderTextAttempt[];
+  /** All getText() attempts made, even beyond the recorded cap. */
+  providerTextAttemptCount: number;
+  httpFallbackAttempted: boolean;
+  /** Host of the candidate URL the HTTP fallback started from. */
+  attemptedHost: string | null;
+  /** Host of the last URL requested (after redirects / citation_pdf_url). */
+  finalHost: string | null;
+  /** Status of the last HTTP response received; null when none arrived. */
+  httpStatusCode: number | null;
+  errorCategory: AcademicRetrievalErrorCategory | null;
+  failureStage: RetrievalFailureStage | null;
+  redirectCount: number;
+  citationPdfFollowed: boolean;
+  hops: RetrievalTraceHop[];
+  networkErrorCode: string | null;
+  safetyFailure: RetrievalSafetyFailure | null;
 };
 
 export type AcademicSearchRunResult = {

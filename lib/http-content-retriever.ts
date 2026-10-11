@@ -9,7 +9,15 @@ import {
   type DnsLookupFn,
   type RetrievalSafetyConfig,
 } from "./retrieval-safety";
-import type { RetrievalStatus, RetrievedSource, SourceContentRetriever } from "./retrieval-types";
+import {
+  retrievalTraceHost,
+  type RetrievalFailureStage,
+  type RetrievalSafetyFailure,
+  type RetrievalStatus,
+  type RetrievalTraceHop,
+  type RetrievedSource,
+  type SourceContentRetriever,
+} from "./retrieval-types";
 
 /**
  * Phase E6C: the first real (network-capable) SourceContentRetriever.
@@ -129,6 +137,25 @@ async function readBodyWithLimit(response: Response, maxBytes: number): Promise<
   return { bytes: combined, tooLarge: false };
 }
 
+/** Maps lib/retrieval-safety.ts's free-text refusal reason (which can carry hostnames and resolved IPs) to a closed category for RetrievalTrace. */
+function classifySafetyFailure(reason: string): RetrievalSafetyFailure {
+  if (reason === "malformed URL") return "MALFORMED_URL";
+  if (reason.startsWith("protocol ")) return "DISALLOWED_PROTOCOL";
+  if (reason.startsWith("URLs with embedded credentials")) return "EMBEDDED_CREDENTIALS";
+  if (reason === "URL has no hostname") return "NO_HOSTNAME";
+  if (reason.startsWith("hostname ")) return "DENIED_HOSTNAME";
+  if (reason.startsWith("literal IP address ") || reason.startsWith("resolved address ")) return "BLOCKED_ADDRESS";
+  if (reason === "DNS resolution returned no addresses") return "DNS_NO_ADDRESSES";
+  if (reason.startsWith("DNS resolution failed")) return "DNS_FAILED";
+  return "OTHER";
+}
+
+/** A fetch failure's system error code for RetrievalTrace — only a bare upper-case token, never the message text. */
+function networkErrorCodeOf(error: unknown): string | null {
+  const candidate = (error as { cause?: { code?: unknown } } | null)?.cause?.code ?? (error as { code?: unknown } | null)?.code;
+  return typeof candidate === "string" && /^[A-Z][A-Z0-9_]{1,39}$/.test(candidate) ? candidate : null;
+}
+
 function makeResult(originalUrl: string, status: RetrievalStatus, overrides: Partial<RetrievedSource> = {}): RetrievedSource {
   return {
     originalUrl,
@@ -157,15 +184,25 @@ export function createHttpContentRetriever(config: Partial<HttpContentRetrieverC
   return {
     id: "http-content-retriever",
 
-    async retrieve({ url }) {
+    async retrieve({ url, trace }) {
       let currentUrl = url;
       let redirectCount = 0;
       let citationPdfFollowed = false;
+      // Observability only (RetrievalTrace in lib/retrieval-types.ts): the trace is written here and never read back,
+      // so it cannot change which URL is fetched, how often, or what is returned.
+      let hopKind: RetrievalTraceHop["kind"] = "initial";
+      const stopAt = (stage: RetrievalFailureStage, result: RetrievedSource): RetrievedSource => {
+        if (trace) trace.failureStage = stage;
+        return result;
+      };
 
       while (true) {
+        const hop: RetrievalTraceHop = { kind: hopKind, host: retrievalTraceHost(currentUrl), httpStatus: null };
+        trace?.hops.push(hop);
         const safety = await validateUrlForRetrieval(currentUrl, resolved.safety, resolved.lookup);
         if (!safety.safe) {
-          return makeResult(url, "REDIRECT_BLOCKED", { finalUrl: currentUrl, errorMessage: safety.reason });
+          if (trace) trace.safetyFailure = classifySafetyFailure(safety.reason);
+          return stopAt("SAFETY_CHECK", makeResult(url, "REDIRECT_BLOCKED", { finalUrl: currentUrl, errorMessage: safety.reason }));
         }
 
         const controller = new AbortController();
@@ -179,53 +216,59 @@ export function createHttpContentRetriever(config: Partial<HttpContentRetrieverC
           });
         } catch (error) {
           const timedOut = controller.signal.aborted || isAbortError(error);
-          return makeResult(url, timedOut ? "TIMEOUT" : "NETWORK_ERROR", {
+          if (trace && !timedOut) trace.networkErrorCode = networkErrorCodeOf(error);
+          return stopAt("REQUEST", makeResult(url, timedOut ? "TIMEOUT" : "NETWORK_ERROR", {
             finalUrl: currentUrl,
             errorMessage: timedOut
               ? `retrieval timed out after ${resolved.timeoutMs} ms`
               : error instanceof Error ? error.message : String(error),
-          });
+          }));
         } finally {
           clearTimeout(timeout);
         }
+        hop.httpStatus = response.status;
 
         if (response.status >= 300 && response.status < 400) {
           const location = response.headers.get("location");
           redirectCount += 1;
           if (!location) {
-            return makeResult(url, "HTTP_ERROR", { finalUrl: currentUrl, httpStatus: response.status, errorMessage: `HTTP ${response.status} redirect with no Location header` });
+            if (trace) trace.redirectFailure = "NO_LOCATION";
+            return stopAt("REDIRECT", makeResult(url, "HTTP_ERROR", { finalUrl: currentUrl, httpStatus: response.status, errorMessage: `HTTP ${response.status} redirect with no Location header` }));
           }
           if (redirectCount > resolved.safety.maxRedirects) {
-            return makeResult(url, "REDIRECT_BLOCKED", { finalUrl: currentUrl, errorMessage: `exceeded maximum of ${resolved.safety.maxRedirects} redirects` });
+            if (trace) trace.redirectFailure = "LIMIT_EXCEEDED";
+            return stopAt("REDIRECT", makeResult(url, "REDIRECT_BLOCKED", { finalUrl: currentUrl, errorMessage: `exceeded maximum of ${resolved.safety.maxRedirects} redirects` }));
           }
           const target = resolveRedirectTarget(location, currentUrl);
           if (!target) {
-            return makeResult(url, "REDIRECT_BLOCKED", { finalUrl: currentUrl, errorMessage: "redirect Location header could not be resolved to a URL" });
+            if (trace) trace.redirectFailure = "UNRESOLVABLE_LOCATION";
+            return stopAt("REDIRECT", makeResult(url, "REDIRECT_BLOCKED", { finalUrl: currentUrl, errorMessage: "redirect Location header could not be resolved to a URL" }));
           }
           currentUrl = target;
+          hopKind = "redirect";
           continue; // re-validate the new target at the top of the loop
         }
 
         if (!response.ok) {
-          return makeResult(url, "HTTP_ERROR", { finalUrl: currentUrl, httpStatus: response.status, errorMessage: `HTTP ${response.status}` });
+          return stopAt("RESPONSE_STATUS", makeResult(url, "HTTP_ERROR", { finalUrl: currentUrl, httpStatus: response.status, errorMessage: `HTTP ${response.status}` }));
         }
 
         const contentType = contentTypeMedia(response.headers.get("content-type"));
         if (!contentType || !resolved.allowedContentTypes.includes(contentType)) {
-          return makeResult(url, "UNSUPPORTED_CONTENT_TYPE", {
+          return stopAt("CONTENT_TYPE", makeResult(url, "UNSUPPORTED_CONTENT_TYPE", {
             finalUrl: currentUrl,
             httpStatus: response.status,
             contentType,
             errorMessage: `content type "${contentType ?? "unknown"}" is not supported`,
-          });
+          }));
         }
 
         const { bytes, tooLarge } = await readBodyWithLimit(response, resolved.maxResponseBytes);
         if (tooLarge) {
-          return makeResult(url, "CONTENT_TOO_LARGE", { finalUrl: currentUrl, httpStatus: response.status, contentType, errorMessage: `response exceeded ${resolved.maxResponseBytes} bytes` });
+          return stopAt("BODY", makeResult(url, "CONTENT_TOO_LARGE", { finalUrl: currentUrl, httpStatus: response.status, contentType, errorMessage: `response exceeded ${resolved.maxResponseBytes} bytes` }));
         }
         if (bytes.length === 0) {
-          return makeResult(url, "NO_CONTENT", { finalUrl: currentUrl, httpStatus: response.status, contentType });
+          return stopAt("BODY", makeResult(url, "NO_CONTENT", { finalUrl: currentUrl, httpStatus: response.status, contentType }));
         }
 
         let extracted: string;
@@ -241,18 +284,18 @@ export function createHttpContentRetriever(config: Partial<HttpContentRetrieverC
             const document = await loadPdf(bytes);
             extracted = await extractPdfTextDocument(document, undefined, resolved.maxPdfPages);
           } catch (error) {
-            return makeResult(url, "MALFORMED_CONTENT", {
+            return stopAt("PARSE", makeResult(url, "MALFORMED_CONTENT", {
               finalUrl: currentUrl,
               httpStatus: response.status,
               contentType,
               errorMessage: `PDF parsing failed: ${error instanceof Error ? error.message : String(error)}`,
-            });
+            }));
           }
           extractorVersion = PDF_EXTRACTOR_VERSION;
         } else {
           const decoded = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
           if (!decoded.includes("<")) {
-            return makeResult(url, "MALFORMED_CONTENT", { finalUrl: currentUrl, httpStatus: response.status, contentType, errorMessage: "response claimed text/html but contained no markup" });
+            return stopAt("PARSE", makeResult(url, "MALFORMED_CONTENT", { finalUrl: currentUrl, httpStatus: response.status, contentType, errorMessage: "response claimed text/html but contained no markup" }));
           }
 
           // "Investigate two production issues" ISSUE 1: an HTML page that
@@ -275,6 +318,7 @@ export function createHttpContentRetriever(config: Partial<HttpContentRetrieverC
             if (pdfTarget && pdfTarget !== currentUrl) {
               citationPdfFollowed = true;
               currentUrl = pdfTarget;
+              hopKind = "citation_pdf";
               continue;
             }
           }
@@ -284,7 +328,7 @@ export function createHttpContentRetriever(config: Partial<HttpContentRetrieverC
         }
 
         if (!extracted.trim()) {
-          return makeResult(url, "EXTRACTION_FAILED", { finalUrl: currentUrl, httpStatus: response.status, contentType, errorMessage: "no extractable text content found" });
+          return stopAt("EXTRACTION", makeResult(url, "EXTRACTION_FAILED", { finalUrl: currentUrl, httpStatus: response.status, contentType, errorMessage: "no extractable text content found" }));
         }
 
         const bounded = extracted.length > resolved.maxExtractedTextLength ? extracted.slice(0, resolved.maxExtractedTextLength) : extracted;

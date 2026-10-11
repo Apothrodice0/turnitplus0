@@ -8,14 +8,15 @@ import { DEFAULT_PHRASE_EXTRACTION_CONFIG, extractCandidatePhrases, type PhraseE
 import { classifyAcademicSearchError, sanitizeAcademicSearchResults, type AcademicSearchProvider } from "./provider";
 import { normalizeAcademicResults } from "./result-normalizer";
 import { createAcademicSearchContentRetriever, retrieveCandidateText } from "./text-retriever";
-import type {
-  AcademicSearchProviderError,
-  AcademicSearchResult,
-  AcademicSearchRetrievalDiagnostic,
-  AcademicSearchRunResult,
-  AcademicSearchRunStats,
-  AcademicSearchStatus,
-  ExternalAcademicEvidence,
+import {
+  ACADEMIC_RETRIEVAL_DIAGNOSTICS_VERSION,
+  type AcademicSearchProviderError,
+  type AcademicSearchResult,
+  type AcademicSearchRetrievalDiagnostic,
+  type AcademicSearchRunResult,
+  type AcademicSearchRunStats,
+  type AcademicSearchStatus,
+  type ExternalAcademicEvidence,
 } from "./types";
 
 /**
@@ -168,6 +169,11 @@ export async function runAcademicSearch(
         retrievedTextLength: null,
         comparisonSimilarity: null,
         includedAsEvidence: false,
+        // Retrieval diagnostics v1: found, but no text, so it could not be evaluated. Observability only.
+        diagnosticsVersion: ACADEMIC_RETRIEVAL_DIAGNOSTICS_VERSION,
+        textRetrieved: false,
+        candidateEvaluated: false,
+        ...retrieval.detail,
       });
       continue;
     }
@@ -191,6 +197,10 @@ export async function runAcademicSearch(
       retrievedTextLength: retrieval.text.length,
       comparisonSimilarity: comparison.similarity,
       includedAsEvidence,
+      diagnosticsVersion: ACADEMIC_RETRIEVAL_DIAGNOSTICS_VERSION,
+      textRetrieved: true,
+      candidateEvaluated: true,
+      ...retrieval.detail,
     });
 
     if (!includedAsEvidence) continue;

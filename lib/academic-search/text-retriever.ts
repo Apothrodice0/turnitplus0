@@ -1,7 +1,14 @@
 import { createHttpContentRetriever } from "../http-content-retriever";
-import type { RetrievalStatus, SourceContentRetriever } from "../retrieval-types";
+import {
+  createRetrievalTrace,
+  retrievalTraceHost,
+  type RetrievalStatus,
+  type RetrievalTrace,
+  type RetrievedSource,
+  type SourceContentRetriever,
+} from "../retrieval-types";
 import type { AcademicSearchProvider } from "./provider";
-import type { AcademicSearchCandidate } from "./types";
+import type { AcademicProviderTextAttempt, AcademicRetrievalDetail, AcademicRetrievalErrorCategory, AcademicSearchCandidate } from "./types";
 
 /**
  * Phase 5: academic-search's own retriever, distinct from
@@ -62,7 +69,95 @@ export type TextRetrievalResult = {
   latencyMs: number;
   /** Only set when source is "http-fallback" or the fallback was attempted and failed. */
   httpRetrievalStatus?: RetrievalStatus;
+  /** Retrieval diagnostics v1 — observability only, never read by comparison or scoring (see AcademicRetrievalDetail). */
+  detail: AcademicRetrievalDetail;
 };
+
+const MAX_RECORDED_PROVIDER_TEXT_ATTEMPTS = 8;
+const MAX_RECORDED_HOPS = 12;
+
+/** Closed-vocabulary reason a non-SUCCESS HTTP fallback produced no text. */
+function httpErrorCategory(retrieved: RetrievedSource, trace: RetrievalTrace): AcademicRetrievalErrorCategory {
+  const code = retrieved.httpStatus;
+  switch (retrieved.status) {
+    case "HTTP_ERROR":
+      if (code !== null && code >= 300 && code <= 399) return "HTTP_3XX_NO_LOCATION";
+      if (code === 401) return "HTTP_401_UNAUTHORIZED";
+      if (code === 403) return "HTTP_403_FORBIDDEN";
+      if (code === 404) return "HTTP_404_NOT_FOUND";
+      if (code === 429) return "HTTP_429_RATE_LIMITED";
+      if (code !== null && code >= 500 && code <= 599) return "HTTP_5XX_SERVER_ERROR";
+      if (code !== null && code >= 400 && code <= 499) return "HTTP_4XX_OTHER";
+      return "HTTP_OTHER";
+    case "TIMEOUT":
+      return "TIMEOUT";
+    case "NETWORK_ERROR":
+      return "NETWORK_ERROR";
+    case "REDIRECT_BLOCKED": {
+      if (trace.redirectFailure === "LIMIT_EXCEEDED") return "REDIRECT_LIMIT_EXCEEDED";
+      if (trace.redirectFailure === "UNRESOLVABLE_LOCATION") return "REDIRECT_LOCATION_INVALID";
+      if (trace.failureStage === "SAFETY_CHECK") {
+        const failedHop = trace.hops[trace.hops.length - 1];
+        return failedHop && failedHop.kind !== "initial" ? "UNSAFE_REDIRECT_TARGET" : "UNSAFE_URL";
+      }
+      return "REDIRECT_BLOCKED";
+    }
+    case "UNSUPPORTED_CONTENT_TYPE":
+    case "CONTENT_TOO_LARGE":
+    case "NO_CONTENT":
+    case "MALFORMED_CONTENT":
+    case "EXTRACTION_FAILED":
+      return retrieved.status;
+    case "SUCCESS":
+      return "NO_CONTENT"; // SUCCESS without text — the shared retriever never returns this; defensive only
+  }
+}
+
+function emptyDetail(providerTextAttempts: AcademicProviderTextAttempt[], providerTextAttemptCount: number): AcademicRetrievalDetail {
+  return {
+    providerTextAttempts,
+    providerTextAttemptCount,
+    httpFallbackAttempted: false,
+    attemptedHost: null,
+    finalHost: null,
+    httpStatusCode: null,
+    errorCategory: null,
+    failureStage: null,
+    redirectCount: 0,
+    citationPdfFollowed: false,
+    hops: [],
+    networkErrorCode: null,
+    safetyFailure: null,
+  };
+}
+
+function httpFallbackDetail(
+  candidateUrl: string,
+  retrieved: RetrievedSource,
+  trace: RetrievalTrace,
+  succeeded: boolean,
+  providerTextAttempts: AcademicProviderTextAttempt[],
+  providerTextAttemptCount: number,
+): AcademicRetrievalDetail {
+  // A retriever that ignores the trace (e.g. a test double) leaves hops empty; RetrievedSource still gives the
+  // final URL and status, so the detail stays meaningful either way.
+  const hops = trace.hops.slice(0, MAX_RECORDED_HOPS).map((hop) => ({ ...hop }));
+  return {
+    providerTextAttempts,
+    providerTextAttemptCount,
+    httpFallbackAttempted: true,
+    attemptedHost: retrievalTraceHost(candidateUrl),
+    finalHost: retrievalTraceHost(retrieved.finalUrl) ?? hops[hops.length - 1]?.host ?? null,
+    httpStatusCode: retrieved.httpStatus,
+    errorCategory: succeeded ? null : httpErrorCategory(retrieved, trace),
+    failureStage: succeeded ? null : trace.failureStage,
+    redirectCount: trace.hops.filter((hop) => hop.kind === "redirect").length,
+    citationPdfFollowed: trace.hops.some((hop) => hop.kind === "citation_pdf"),
+    hops,
+    networkErrorCode: trace.networkErrorCode,
+    safetyFailure: trace.safetyFailure,
+  };
+}
 
 export async function retrieveCandidateText(
   candidate: AcademicSearchCandidate,
@@ -70,22 +165,34 @@ export async function retrieveCandidateText(
   contentRetriever: SourceContentRetriever = createAcademicSearchContentRetriever(),
 ): Promise<TextRetrievalResult> {
   const start = Date.now();
+  // Diagnostics only: recording an attempt never changes which providers are asked, in what order, or what is returned.
+  const providerTextAttempts: AcademicProviderTextAttempt[] = [];
+  let providerTextAttemptCount = 0;
+  const recordAttempt = (providerId: string, outcome: AcademicProviderTextAttempt["outcome"]) => {
+    providerTextAttemptCount += 1;
+    if (providerTextAttempts.length < MAX_RECORDED_PROVIDER_TEXT_ATTEMPTS) providerTextAttempts.push({ providerId, outcome });
+  };
 
   for (const contributor of candidate.contributors) {
     const provider = providers[contributor.providerId];
     if (!provider?.getText) continue;
+    let outcome: AcademicProviderTextAttempt["outcome"] = "NO_TEXT";
     try {
       const text = await provider.getText(contributor.externalId);
       if (text && text.trim()) {
-        return { text, source: "provider", providerId: contributor.providerId, latencyMs: Date.now() - start };
+        recordAttempt(contributor.providerId, "TEXT");
+        return { text, source: "provider", providerId: contributor.providerId, latencyMs: Date.now() - start, detail: emptyDetail(providerTextAttempts, providerTextAttemptCount) };
       }
     } catch {
       // Not fatal: fall through to the next contributing provider, or the HTTP fallback below.
+      outcome = "ERROR";
     }
+    recordAttempt(contributor.providerId, outcome);
   }
 
   if (candidate.url) {
-    const retrieved = await contentRetriever.retrieve({ url: candidate.url });
+    const trace = createRetrievalTrace();
+    const retrieved = await contentRetriever.retrieve({ url: candidate.url, trace });
     if (retrieved.status === "SUCCESS" && retrieved.extractedText) {
       return {
         text: retrieved.extractedText,
@@ -93,10 +200,24 @@ export async function retrieveCandidateText(
         providerId: null,
         latencyMs: Date.now() - start,
         httpRetrievalStatus: retrieved.status,
+        detail: httpFallbackDetail(candidate.url, retrieved, trace, true, providerTextAttempts, providerTextAttemptCount),
       };
     }
-    return { text: null, source: "unavailable", providerId: null, latencyMs: Date.now() - start, httpRetrievalStatus: retrieved.status };
+    return {
+      text: null,
+      source: "unavailable",
+      providerId: null,
+      latencyMs: Date.now() - start,
+      httpRetrievalStatus: retrieved.status,
+      detail: httpFallbackDetail(candidate.url, retrieved, trace, false, providerTextAttempts, providerTextAttemptCount),
+    };
   }
 
-  return { text: null, source: "unavailable", providerId: null, latencyMs: Date.now() - start };
+  return {
+    text: null,
+    source: "unavailable",
+    providerId: null,
+    latencyMs: Date.now() - start,
+    detail: { ...emptyDetail(providerTextAttempts, providerTextAttemptCount), errorCategory: "NO_TEXT_SOURCE" },
+  };
 }

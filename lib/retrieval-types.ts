@@ -54,8 +54,56 @@ export type RetrievedSource = {
   errorMessage: string | null;
 };
 
+/**
+ * Retrieval trace (academic-search retrieval diagnostics, 2026-10-11): an optional, caller-owned sink for ONE retrieve()
+ * call. A retriever that supports it fills it in as it goes and never reads it back, so passing one cannot change which
+ * URL is fetched, how often, or what is returned. It holds hosts, HTTP status codes and closed-vocabulary categories
+ * only — never a path, query string, header, cookie, body, resolved IP address or free-text error message.
+ */
+export type RetrievalTraceHop = {
+  /** "initial" = the requested URL; "redirect" = an HTTP 3xx Location target; "citation_pdf" = a landing page's citation_pdf_url. */
+  kind: "initial" | "redirect" | "citation_pdf";
+  /** The URL's host (hostname[:port]); null if it could not be parsed. */
+  host: string | null;
+  /** The status this hop answered with; null when no response arrived (safety refusal, timeout, network error). */
+  httpStatus: number | null;
+};
+
+/** Where a failed retrieve() stopped. */
+export type RetrievalFailureStage = "SAFETY_CHECK" | "REQUEST" | "REDIRECT" | "RESPONSE_STATUS" | "CONTENT_TYPE" | "BODY" | "PARSE" | "EXTRACTION";
+
+/** lib/retrieval-safety.ts refusals as a closed vocabulary (its free-text reason can carry hostnames and resolved IPs). */
+export type RetrievalSafetyFailure = "MALFORMED_URL" | "DISALLOWED_PROTOCOL" | "EMBEDDED_CREDENTIALS" | "NO_HOSTNAME" | "DENIED_HOSTNAME" | "BLOCKED_ADDRESS" | "DNS_FAILED" | "DNS_NO_ADDRESSES" | "OTHER";
+
+export type RetrievalRedirectFailure = "NO_LOCATION" | "LIMIT_EXCEEDED" | "UNRESOLVABLE_LOCATION";
+
+export type RetrievalTrace = {
+  hops: RetrievalTraceHop[];
+  failureStage: RetrievalFailureStage | null;
+  safetyFailure: RetrievalSafetyFailure | null;
+  redirectFailure: RetrievalRedirectFailure | null;
+  /** A system error code (ECONNRESET, ENOTFOUND, UND_ERR_CONNECT_TIMEOUT, ...) — only ever a bare upper-case token. */
+  networkErrorCode: string | null;
+};
+
+export function createRetrievalTrace(): RetrievalTrace {
+  return { hops: [], failureStage: null, safetyFailure: null, redirectFailure: null, networkErrorCode: null };
+}
+
+/** hostname[:port] of a URL — never its path, query string or embedded credentials. */
+export function retrievalTraceHost(url: string | null | undefined): string | null {
+  if (!url) return null;
+  try {
+    return new URL(url).host || null;
+  } catch {
+    return null;
+  }
+}
+
 export type SourceContentRetrieverRequest = {
   url: string;
+  /** Optional observability sink — see RetrievalTrace. Retrievers that do not support it simply ignore it. */
+  trace?: RetrievalTrace;
 };
 
 export interface SourceContentRetriever {
