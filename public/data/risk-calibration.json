@@ -13,7 +13,7 @@
   "targetThreshold": 15,
   "archiveCutoff": 7,
   "matchingParameters": {
-    "minimumMatchedWords": 5,
+    "minimumMatchedWords": 6,
     "maximumDocumentFrequency": 6,
     "minimumSourceContribution": 0.25,
     "maximumContributingSources": 10,
