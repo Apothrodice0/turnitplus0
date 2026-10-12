@@ -60,6 +60,23 @@ test("malformed or overlapping ranges fall back to the aggregate card (never a w
   assert.equal(normalizeArchiveEvidence(overlapping).length, 1);
 });
 
+test("the source count comes from the attribution alone; a stray client-sent count field changes nothing", () => {
+  const listedAll = report([source("A", [[0, 19]]), source("B", [[30, 39]])]);
+  const accounting = archiveSourceAccounting(listedAll);
+  assert.equal(accounting.verifiedSourceCount, 2);
+  assert.equal(accounting.verifiedSourceCountIsExact, true);
+
+  const withRemainder = report([source("A", [[0, 9]]), source("B", [[10, 19]])]);
+  const legacyAggregate = report([{ name: "Top", type: "Publication", matchedWords: 20, percent: 20 }, { name: "Other", type: "Publication", matchedWords: 5, percent: 5 }]);
+  for (const r of [listedAll, withRemainder, legacyAggregate]) {
+    const stray = { ...r, archiveVerifiedSourceCount: 7 };
+    assert.deepEqual(archiveSourceAccounting(stray), archiveSourceAccounting(r));
+    assert.deepEqual(normalizeArchiveEvidence(stray), normalizeArchiveEvidence(r));
+  }
+  assert.equal(normalizeArchiveEvidence(withRemainder)[2].labelParts.title, "More verified Archive sources (not listed individually)");
+  assert.equal(normalizeArchiveEvidence(legacyAggregate)[0].labelParts.title, archiveSourceCountLabel(3, false));
+});
+
 test("no Archive positions -> no Archive card", () => {
   assert.deepEqual(normalizeArchiveEvidence({ wordCount: 10, archiveMatchedPositions: [], sources: [] }), []);
 });

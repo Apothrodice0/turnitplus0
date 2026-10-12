@@ -9,11 +9,11 @@ import type { SimilarityReport, SourceMatch } from "@/lib/report-types";
  * to exactly one admitted source (winner-take-all). `report.sources` lists at
  * most the display cap of those sources, each with its attributed word count,
  * and — on reports made since the scorer exposed them — the attributed
- * positions themselves (`attributedRanges`). A report may also say how many
- * sources contributed (`archiveVerifiedSourceCount`, written only by builds
- * that list more sources than they display). Those fields travel through the
+ * positions themselves (`attributedRanges`). Those ranges travel through the
  * client like `archiveMatchedPositions` does, so they are checked here against
- * the report before anything is shown:
+ * the report before anything is shown. How many sources contributed is
+ * derived from the attribution alone (exact when the listed sources own every
+ * union word, otherwise a lower bound):
  *
  *   "per-source" — every listed source has well-formed ranges inside the
  *                  Archive union, no position is listed under two sources, and
@@ -46,7 +46,7 @@ export type ArchiveSourceAccounting =
       unlistedPositions: number[];
       /** verified contributing sources, listed or not */
       verifiedSourceCount: number;
-      /** false when the report does not say how many sources it left out: verifiedSourceCount is then a lower bound */
+      /** false when union words fall outside every listed source: verifiedSourceCount is then a lower bound */
       verifiedSourceCountIsExact: boolean;
     }
   | {
@@ -81,17 +81,11 @@ function listedPositions(source: SourceMatch, union: ReadonlySet<number>, claime
   return positions.sort((a, b) => a - b);
 }
 
-function reportedSourceCount(report: SimilarityReport): number | null {
-  const count = report.archiveVerifiedSourceCount;
-  return Number.isInteger(count) && (count as number) >= 0 ? (count as number) : null;
-}
-
 export function archiveSourceAccounting(report: SimilarityReport): ArchiveSourceAccounting {
   const union = archiveUnion(report);
   if (union.length === 0) return { mode: "none" };
   const sources = Array.isArray(report.sources) ? report.sources : [];
   const unionSet = new Set(union);
-  const reported = reportedSourceCount(report);
 
   const claimed = new Set<number>();
   const listed: ArchiveListedSource[] = [];
@@ -109,16 +103,13 @@ export function archiveSourceAccounting(report: SimilarityReport): ArchiveSource
     const minimum = listed.length + (unlistedPositions.length > 0 ? 1 : 0);
     // When the listed sources own every union word, they are all the
     // contributing sources (a contributing source owns at least one word), so
-    // the count is exact even without a reported one.
-    const exact = unlistedPositions.length === 0
-      ? reported === null || reported === listed.length
-      : reported !== null && reported >= minimum;
+    // the count is exact.
     return {
       mode: "per-source",
       listed,
       unlistedPositions,
-      verifiedSourceCount: exact ? (reported as number) : minimum,
-      verifiedSourceCountIsExact: exact,
+      verifiedSourceCount: minimum,
+      verifiedSourceCountIsExact: unlistedPositions.length === 0,
     };
   }
 
@@ -130,10 +121,7 @@ export function archiveSourceAccounting(report: SimilarityReport): ArchiveSource
     : null;
   let verifiedSourceCount = Math.max(1, sources.length);
   let verifiedSourceCountIsExact = false;
-  if (reported !== null && reported >= verifiedSourceCount) {
-    verifiedSourceCount = reported;
-    verifiedSourceCountIsExact = true;
-  } else if (listedWords !== null && listedWords === union.length) {
+  if (listedWords !== null && listedWords === union.length) {
     verifiedSourceCountIsExact = true;
   } else if (listedWords !== null && listedWords < union.length) {
     verifiedSourceCount = sources.length + 1;
