@@ -73,21 +73,35 @@ function isAuthorizedSweepRequest(request: Request): boolean {
   return timingSafeEqual(providedBuf, secretBuf);
 }
 
+/**
+ * Which step of one sweep run is executing. Every step up to and including
+ * 'claim' runs before any claimed report is touched, so a failure there is
+ * answered with a 500 and changes nothing; it is recorded in the failure
+ * line below so an intermittent 500 can be attributed to its step.
+ */
+type SweepStage = 'rate-limit' | 'authorize' | 'open-database' | 'claim' | 'finalize' | 'respond';
+
 type ReportTextRow = { user_id: string | null; text: string | null; scoring_normalization_version: number | bigint | null };
 
 async function handleSweepRequest(request: Request): Promise<Response> {
+  const startedAt = Date.now();
+  let stage: SweepStage = 'rate-limit';
   try {
     const rate = await checkAuthRate(clientIpFrom(request));
     if (!rate.allowed) {
       return new NextResponse(JSON.stringify({ error: 'Too many requests' }), { status: 429, headers: { 'Retry-After': String(rate.retryAfter) } });
     }
 
+    stage = 'authorize';
     if (!isAuthorizedSweepRequest(request)) {
       return new NextResponse(null, { status: 404 });
     }
 
+    stage = 'open-database';
     const client = await getReportsDbClient({ requestTimeoutMs: SELECTIVE_CORPUS_DB_REQUEST_TIMEOUT_MS });
     try {
+      stage = 'claim';
+      const claimStartedAt = Date.now();
       // Atomic claim — see lib/selective-corpus-authoritative.ts's own header
       // comment for exactly why this must be a real write transaction, and
       // why it uses SQLite's own datetime('now', ...) rather than a
@@ -96,6 +110,9 @@ async function handleSweepRequest(request: Request): Promise<Response> {
         openConnection: () => getReportsDbClient({ requestTimeoutMs: SELECTIVE_CORPUS_DB_REQUEST_TIMEOUT_MS }),
       });
 
+      const claimMs = Date.now() - claimStartedAt;
+
+      stage = 'finalize';
       const outcomeSummary: Record<string, number> = {};
       for (const report of claimed) {
         try {
@@ -158,6 +175,16 @@ async function handleSweepRequest(request: Request): Promise<Response> {
         }
       }
 
+      stage = 'respond';
+      // One line per run: the claimed count and timings are otherwise only in
+      // the response body, which Vercel Cron discards.
+      console.log(JSON.stringify({
+        event: 'selective_corpus_authoritative_sweep',
+        claimedCount: claimed.length,
+        outcomeSummary,
+        claimMs,
+        elapsedMs: Date.now() - startedAt,
+      }));
       return new NextResponse(
         JSON.stringify({ ok: true, claimedCount: claimed.length, outcomeSummary }),
         { status: 200, headers: { 'Content-Type': 'application/json' } },
@@ -166,6 +193,17 @@ async function handleSweepRequest(request: Request): Promise<Response> {
       client.close();
     }
   } catch (err) {
+    // This 500 used to be returned without any log line, and Vercel Cron
+    // discards the response body, so an intermittent failure left no trace
+    // of its step, duration or error.
+    console.error(JSON.stringify({
+      event: 'selective_corpus_authoritative_sweep_failed',
+      stage,
+      elapsedMs: Date.now() - startedAt,
+      errorName: err instanceof Error ? err.name : typeof err,
+      errorCode: typeof (err as { code?: unknown } | null)?.code === 'string' ? (err as { code: string }).code : null,
+      message: (err instanceof Error ? err.message : String(err)).slice(0, 500),
+    }));
     return new NextResponse(JSON.stringify({ error: err instanceof Error ? err.message : 'Internal error' }), { status: 500 });
   }
 }
