@@ -1,6 +1,6 @@
 import type { ArchiveReadClient } from "./archive-read-retry";
 import { tokens, grams, gramHash, containment, mergeAdjacentPositions, similarityScore } from "./similarity-core";
-import { scoreAgainstArchive, type ArchiveScoringResult, type ArchiveScoringMatchingParameters } from "./archive-similarity-scoring";
+import { scoreAgainstArchive, normalizedArchiveTitle, type ArchiveScoringResult, type ArchiveScoringMatchingParameters } from "./archive-similarity-scoring";
 import { seedExtendVerifiedPositions, SEED_EXTEND_ALIGNMENT_POLICY_VERSION } from "./seed-extend-alignment";
 import { ARCHIVE_FINGERPRINT_VERSION } from "./archive-corpus-seed";
 import { ARCHIVE_SHINGLE_SIZE, ARCHIVE_COMPACT_FINGERPRINT_VERSION, archiveShingleHashes } from "./archive-fingerprint";
@@ -197,8 +197,9 @@ type ScoreOverCandidatesResult = {
   result: ArchiveScoringResult;
   candidateIds: string[];
   /** Candidates whose whole-query 5-gram containment reached
-   *  ARCHIVE_SELF_EXCLUSION_CONTAINMENT — the same set scoreAgainstArchive
-   *  excludes. Used ONLY by the G1s gate; unordered. */
+   *  ARCHIVE_SELF_EXCLUSION_CONTAINMENT — the set scoreAgainstArchive
+   *  self-excludes (its same-title version records are excluded there too,
+   *  but are never adjacency anchors). Used ONLY by the G1s gate; unordered. */
   selfExcludedRepresentationIds: string[];
   /** canonical_text of the sources the scorer returned in `result.sources`
    *  (keyed by sourceIndex) — the retrieved text the span extension aligns
@@ -213,6 +214,10 @@ type ScoreOverCandidatesResult = {
    *  never below the count the scorer's own runtime cap tests). Lets the span
    *  extension apply the scorer's gram-frequency gate. */
   candidateGramFrequency: Map<string, number>;
+  /** Some candidate shares its normalized title with a self-excluded one — the
+   *  only case in which the same-work version rule can exclude anything, i.e.
+   *  in which scoring with and without it can differ. */
+  hasSameTitleCandidate: boolean;
 };
 
 /**
@@ -232,6 +237,7 @@ async function scoreOverCandidates(
   matchingParameters: ArchiveScoringMatchingParameters | undefined,
   stopHashSet: Set<string>,
   queryHashes: Set<string>,
+  excludeSameWorkVersions: boolean,
 ): Promise<ScoreOverCandidatesResult> {
   const emptyIndex = {
     shingleSize: ARCHIVE_SHINGLE_SIZE,
@@ -248,6 +254,7 @@ async function scoreOverCandidates(
       sourceTextByIndex: new Map(),
       sharedQueryHashesByIndex: new Map(),
       candidateGramFrequency: new Map(),
+      hasSameTitleCandidate: false,
     };
   }
 
@@ -291,6 +298,14 @@ async function scoreOverCandidates(
   });
   const sourceIndexByRepresentationId = new Map(orderedCandidates.map((row, index) => [row.representation_id, index]));
   const titleByRepresentationId = new Map(orderedCandidates.map((row) => [row.representation_id, row.title]));
+  // The scorer's own self-excluded set (pruned postings) is a subset of this
+  // full-set one, so "no candidate shares a title with these" means the
+  // version rule cannot exclude anything in this scoring.
+  const selfExcludedTitles = new Set(
+    selfExcludedRepresentationIds.map((id) => normalizedArchiveTitle(titleByRepresentationId.get(id) ?? "")).filter(Boolean),
+  );
+  const hasSameTitleCandidate = orderedCandidates.some((row) =>
+    !selfExcludedRepresentationIds.includes(row.representation_id) && selfExcludedTitles.has(normalizedArchiveTitle(row.title ?? "")));
 
   const postingsByHash = new Map<string, number[]>();
   const uniqueShingleCountByRepresentationId = new Map<string, number>();
@@ -324,6 +339,8 @@ async function scoreOverCandidates(
     submittedText,
     { shingleSize: ARCHIVE_SHINGLE_SIZE, documentCount, maximumDocumentFrequency, articles, getPostings },
     matchingParameters,
+    undefined,
+    { excludeSameWorkVersions },
   );
   const returnedSourceIndexes = new Set(result.sources.map((source) => source.sourceIndex));
   const sourceTextByIndex = new Map<number, string>();
@@ -343,7 +360,7 @@ async function scoreOverCandidates(
     const count = postingsByHash.get(hash)?.length ?? 0;
     if (count > 0) candidateGramFrequency.set(hash, count);
   }
-  return { result, candidateIds, selfExcludedRepresentationIds, sourceTextByIndex, sharedQueryHashesByIndex, candidateGramFrequency };
+  return { result, candidateIds, selfExcludedRepresentationIds, sourceTextByIndex, sharedQueryHashesByIndex, candidateGramFrequency, hasSameTitleCandidate };
 }
 
 export type ArchiveSpanExtensionDiagnostics = {
@@ -559,7 +576,10 @@ export async function matchAgainstArchiveCorpus(
   const { bandByHash } = await loadDfBandMap(client, { policyVersion: options.dfBandPolicyVersion });
   const stopHashSet = deriveStopHashSet(bandByHash, options.maximumDocumentFrequency);
 
-  // 1) primary discovery + score
+  // 1) primary discovery + score — scored WITHOUT the same-work version rule:
+  //    the phrase fallback aims its probes at the text this pass leaves
+  //    uncovered, and the G1s gate reads its sources, so both stay exactly as
+  //    they were. Every result returned below is scored WITH the rule.
   const compactCandidateIds = await compactDiscovery(client, queryHashes, compactFingerprintVersion, candidateLimit);
   const primary = await scoreOverCandidates(
     client,
@@ -570,6 +590,7 @@ export async function matchAgainstArchiveCorpus(
     options.matchingParameters,
     stopHashSet,
     queryHashes,
+    false,
   );
 
   // 2) bounded phrase fallback — discovery only
@@ -582,9 +603,10 @@ export async function matchAgainstArchiveCorpus(
   );
 
   // 3) final score over the deduplicated union (unchanged when the fallback
-  //    added nothing — the union is then exactly the compact set)
+  //    added nothing — the union is then exactly the compact set — and no
+  //    candidate is a same-title version the rule could exclude)
   const noNewCandidates = fallback.unionCandidateIds.length === compactCandidateIds.length;
-  const final = noNewCandidates
+  const final = noNewCandidates && !primary.hasSameTitleCandidate
     ? primary
     : await scoreOverCandidates(
         client,
@@ -595,6 +617,7 @@ export async function matchAgainstArchiveCorpus(
         options.matchingParameters,
         stopHashSet,
         queryHashes,
+        true,
       );
 
   // 4) span extension (verification only) — seeds are the rare, non-stop grams
@@ -687,6 +710,7 @@ export async function matchAgainstArchiveCorpus(
     options.matchingParameters,
     stopHashSet,
     queryHashes,
+    true,
   );
   const extended = extend(expanded);
   return {

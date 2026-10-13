@@ -95,6 +95,22 @@ export type ArchiveScoringResult = {
   highFrequencyShingleCount: number;
 };
 
+/** Whole-document containment a same-titled archive record must still reach
+ *  to be treated as another version of a self-excluded record. */
+export const ARCHIVE_VERSION_MINIMUM_CONTAINMENT = 0.5;
+
+/** An archive title as a version-family key: case/diacritic/punctuation-
+ *  insensitive; titles under three words never form a family. */
+export function normalizedArchiveTitle(title: string): string {
+  const normalized = String(title ?? "")
+    .normalize("NFKD")
+    .toLowerCase()
+    .replace(/\p{M}/gu, "")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+  return normalized.split(" ").length >= 3 ? normalized : "";
+}
+
 export function scoreAgainstArchive(
   text: string,
   index: ArchiveScoringIndex,
@@ -107,6 +123,13 @@ export function scoreAgainstArchive(
    * lib/archive-corpus-matching.ts).
    */
   onProgress?: (percent: number, label: string) => void,
+  /**
+   * excludeSameWorkVersions (default true) applies the same-work version rule
+   * below. Only lib/archive-corpus-matching.ts turns it off, for its
+   * discovery-only primary pass, so candidate discovery (which aims its probes
+   * at the text that pass leaves uncovered) stays exactly what it was.
+   */
+  options: { excludeSameWorkVersions?: boolean } = {},
 ): ArchiveScoringResult {
   const words = tokens(text);
   const documentGrams = grams(words, index.shingleSize);
@@ -131,6 +154,25 @@ export function scoreAgainstArchive(
       excluded.add(sourceIndex);
     }
   });
+  // Same-work versions: an archive record carrying the same normalized title
+  // as a record the submission self-excludes (the archive's own metadata says
+  // it is another version of that work) AND still sharing a substantial part
+  // of the submission is an earlier/later draft of the same work — excluded
+  // like the record itself. Title alone never excludes (the containment floor
+  // guards title collisions), and containment alone never does either (no
+  // similarity-only same-work inference).
+  const selfExcludedTitles = new Set(
+    [...excluded].map((sourceIndex) => normalizedArchiveTitle(index.articles[sourceIndex].title)).filter(Boolean),
+  );
+  if (options.excludeSameWorkVersions !== false && selfExcludedTitles.size > 0) {
+    index.articles.forEach((article, sourceIndex) => {
+      if (excluded.has(sourceIndex) || !selfExcludedTitles.has(normalizedArchiveTitle(article.title))) return;
+      const shared = sharedBySource.get(sourceIndex) ?? 0;
+      if (containment(shared, uniqueDocumentGrams.size, article.uniqueShingleCount) >= ARCHIVE_VERSION_MINIMUM_CONTAINMENT) {
+        excluded.add(sourceIndex);
+      }
+    });
+  }
 
   onProgress?.(68, "Comparing distinctive passages");
   const eligibleCount = index.documentCount - excluded.size;
