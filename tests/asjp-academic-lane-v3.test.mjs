@@ -35,16 +35,20 @@ const C = [inventedText(120, 400), PC, inventedText(121, 400)].join(' ');
 const D1 = [inventedText(130, 400), PC, inventedText(131, 400)].join(' ');
 const E = [inventedText(140, 400), PE, inventedText(141, 400)].join(' ');
 const L = [inventedText(150, 400), LAW, inventedText(151, 400)].join(' ');
+// a short covenant provision (under 60 words) that four indexed articles quote: common, but primary-source text
+const COVENANT = 'all persons shall be equal before the courts and tribunals in the determination of any criminal charge against him everyone shall be entitled to a fair and public hearing by a competent independent and impartial tribunal established by law';
+const COVENANT2 = 'no one shall be held guilty of any criminal offence on account of any act or omission which did not constitute a criminal offence under national or international law at the time when it was committed';
+const quoters = Array.from({ length: 4 }, (_, k) => [inventedText(160 + k, 400), `article 14 of the covenant provides that "${COVENANT}" and article 15 adds "${COVENANT2}"`, inventedText(170 + k, 400)].join(' '));
 const OWN_TITLE = 'vanoleri pastu mekorin tavisa';
 
 const root = path.join(scratch, 'corpus');
 const built = await runCorpusBuild({ corpusRoot: root, buildId: 'fixture', parentGenerationId: null, partitionBits: 2, runBufferTuples: 20_000 }, [new InMemorySourceAdapter('fixture', [
-  asjp(3001, OWN, OWN_TITLE), asjp(3002, B), asjp(3003, C), asjp(3004, D1), asjp(3005, E), asjp(3007, L),
+  asjp(3001, OWN, OWN_TITLE), asjp(3002, B), asjp(3003, C), asjp(3004, D1), asjp(3005, E), asjp(3007, L), ...quoters.map((text, k) => asjp(3010 + k, text)),
   ...Array.from({ length: 20 }, (_, index) => fixtureSource(`noise-${index}`, inventedText(300 + index, 500))),
 ])]);
 const store = new LocalDirectoryObjectStore(root);
 const entry = (id, title) => ({ articleId: String(id), canonicalUrl: url(id), title, authors: ['Author, A.'], journal: 'J', issn: null, publicationDate: '2024-01-01', doi: null, license: 'CC BY', licenseBasis: 'ARTICLE_PDF', licenceStatus: 'PERMITTED', reusePermitted: true, withdrawn: false });
-const catalog = (id) => (Number(id) === 3001 ? entry(id, OWN_TITLE) : Number(id) >= 3002 && Number(id) <= 3007 ? entry(id, `title ${id}`) : null);
+const catalog = (id) => (Number(id) === 3001 ? entry(id, OWN_TITLE) : Number(id) >= 3002 && Number(id) <= 3013 ? entry(id, `title ${id}`) : null);
 const run = (text, extra = {}) => runAsjpAcademicLane({ store, generationId: built.generationId, submissionText: text, catalog, ignoreFlag: true, ...extra });
 const filler = (seed, n) => inventedText(70_000 + seed, n);
 const at = (parts, index) => wordsOf(parts.slice(0, index).join(' ')).length;
@@ -52,7 +56,7 @@ const range = (start, n) => Array.from({ length: n }, (_, i) => start + i);
 test.after(() => removeScratch(scratch));
 
 // manuscript: 400 words of its own published version, then PB, the citation, PC, PE and the quoted statute between fillers
-const parts = [sliceWords(OWN, 100, 400), filler(1, 200), PB, filler(2, 200), CITATION, filler(3, 200), PC, filler(4, 200), PE, filler(5, 200), `"${LAW}"`, filler(6, 200)];
+const parts = [sliceWords(OWN, 100, 400), filler(1, 200), PB, filler(2, 200), CITATION, filler(3, 200), PC, filler(4, 200), PE, filler(5, 200), `"${LAW}"`, filler(6, 200), `Article 14 of the Covenant provides that "${COVENANT}" The same instrument, in article 15, states "${COVENANT2}"`, filler(7, 200)];
 const manuscript = parts.join(' ');
 const v3 = await run(manuscript, { submissionTitle: OWN_TITLE });
 const v2 = await run(manuscript, { submissionTitle: OWN_TITLE, corrections: { verbatimRescue: false, runMerge: false, structuralFilter: false, annotations: false } });
@@ -120,6 +124,20 @@ test('v3 legal annotation: a quoted provision stays in the score, annotated, and
   assert.ok(v3.legalAnnotatedPositions.length >= 60 && v3.legalAnnotatedPositions.every((q) => v3.creditedPositions.includes(q)));
   const card = asjpSourceCards(v3).find((c) => c.sourceId === 'asjp:3007');
   assert.ok(card.legalWords >= 60);
+});
+
+test('v3 legal provision quoted by several articles: never removed as common text, annotated legal + shared', () => {
+  const range14 = range(at(parts, 12) + 6, wordsOf(COVENANT).length);
+  assert.ok(range14.every((q) => v3.creditedPositions.includes(q)), 'the quoted provision stays in the score');
+  const holders = v3.sources.filter((s) => s.credited && /^asjp:301[0-3]$/.test(s.sourceId));
+  assert.ok(holders.length >= 1);
+  for (const s of holders) {
+    assert.equal(s.genericWords, 0, 'not removed for being common');
+    assert.ok(s.annotations.some((a) => a.kind === 'LEGAL_PRIMARY_TEXT' && a.quoted));
+    assert.ok(s.annotations.some((a) => a.kind === 'SHARED_TEXT' && a.otherArticles >= 3), 'recorded as text other articles also hold');
+  }
+  const v2Holders = v2.sources.filter((s) => /^asjp:301[0-3]$/.test(s.sourceId));
+  assert.ok(v2Holders.every((s) => !s.credited), 'v2 removed it as generic');
 });
 
 test('v3 with every v3 correction off: no rescue, no structural clusters, no annotations', () => {

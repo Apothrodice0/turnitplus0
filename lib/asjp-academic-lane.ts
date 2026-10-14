@@ -401,6 +401,8 @@ export function repetitionForm(tokens: readonly string[]): { category: AsjpStruc
 export const ASJP_LEGAL_MAX_CLUSTER_WORDS = 150;
 /** v3 legal annotation: manuscript words before a cluster searched for the instrument it quotes */
 export const ASJP_LEGAL_CONTEXT_WORDS = 40;
+/** v3 legal annotation: an UNQUOTED cluster counts as reproduced statutory text only up to this many credited words */
+export const ASJP_LEGAL_UNQUOTED_MAX_WORDS = 80;
 /** A legal instrument referred to: "Article 11", "Art. 30(1)", or an instrument noun (constitution, covenant, …). */
 const INSTRUMENT_REFERENCE = /\b(?:art(?:icle)?s?\.?\s*\(?\d+|constitution|covenant|declaration|statute|convention|charter|treaty|protocol|code|decree|ordinance|law\s+(?:no|n°|number)\.?\s*\d|act\s+(?:no|of)\b)/i;
 
@@ -743,11 +745,25 @@ async function runLane(request: AsjpLaneRequest): Promise<AsjpLaneResult> {
       // v2 generic filter: corpus-grounded, per cluster
       let genericWords = 0;
       const genericClusters: AsjpLaneSource["genericClusters"] = [];
+      // v3: the legal form of a cluster (an instrument referred to + quoted or statutory text), or null
+      const legalOf = (cluster: AsjpMatchedPassage[]) => {
+        if (corrections.annotations === false) return null;
+        const start = cluster[0].submittedWordStart, end = cluster[cluster.length - 1].submittedWordEnd;
+        const words = cluster.reduce((total, passage) => total + passage.matchedWordCount, 0);
+        if (words > ASJP_LEGAL_MAX_CLUSTER_WORDS) return null;
+        const tokens = cluster.flatMap((passage) => submission.slice(passage.submittedWordStart, passage.submittedWordEnd + 1));
+        const legal = legalForm(tokens, gapText(start - 1, start), gapText(end, end + 1), originalOf(Math.max(0, start - ASJP_LEGAL_CONTEXT_WORDS), Math.max(0, start - 1)) + " " + originalOf(start, end));
+        // without quotation marks, only a short cluster is taken as reproduced statutory text (a long one is analysis)
+        return legal && (legal.quoted || words <= ASJP_LEGAL_UNQUOTED_MAX_WORDS) ? legal : null;
+      };
       if (corrections.genericFilter !== false) {
         const kept: AsjpMatchedPassage[] = [];
         for (const cluster of clusterPassages(passages)) {
           const longest = cluster.reduce((best, passage) => (passage.matchedWordCount > best.matchedWordCount ? passage : best), cluster[0]);
           if (longest.matchedWordCount >= ASJP_GENERIC_MAX_RUN) { kept.push(...cluster); continue; }
+          // v3: a quoted / statutory legal provision is shared primary-source text, never removed for being common;
+          // it stays credited and is annotated (legal + the number of other articles holding it)
+          if (legalOf(cluster)) { kept.push(...cluster); continue; }
           const others = await otherArticlesHolding(reader, submission.slice(longest.submittedWordStart, longest.submittedWordEnd + 1), docId, genericCache);
           if (others >= ASJP_GENERIC_MIN_OTHER_ARTICLES) {
             const words = cluster.reduce((total, passage) => total + passage.matchedWordCount, 0);
@@ -781,10 +797,7 @@ async function runLane(request: AsjpLaneRequest): Promise<AsjpLaneResult> {
         for (const cluster of clusterPassages(passages)) {
           const start = cluster[0].submittedWordStart, end = cluster[cluster.length - 1].submittedWordEnd;
           const words = cluster.reduce((total, passage) => total + passage.matchedWordCount, 0);
-          const tokens = cluster.flatMap((passage) => submission.slice(passage.submittedWordStart, passage.submittedWordEnd + 1));
-          const legal = words <= ASJP_LEGAL_MAX_CLUSTER_WORDS
-            ? legalForm(tokens, gapText(start - 1, start), gapText(end, end + 1), originalOf(Math.max(0, start - ASJP_LEGAL_CONTEXT_WORDS), Math.max(0, start - 1)) + " " + originalOf(start, end))
-            : null;
+          const legal = legalOf(cluster);
           if (legal) annotations.push({ submittedWordStart: start, submittedWordEnd: end, words, kind: "LEGAL_PRIMARY_TEXT", quoted: legal.quoted, markers: legal.markers });
           const longest = cluster.reduce((best, passage) => (passage.matchedWordCount > best.matchedWordCount ? passage : best), cluster[0]);
           if (longest.matchedWordCount < ASJP_GENERIC_MAX_RUN || legal) {
