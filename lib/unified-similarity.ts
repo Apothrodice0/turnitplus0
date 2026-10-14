@@ -26,7 +26,7 @@ import type { ImportedSimilarityEvidenceSourceAttributionState } from "./importe
 
 export const UNIFIED_SIMILARITY_VERSION = "unified-similarity-v1";
 
-export type UnifiedEvidenceSourceType = "archive" | "openaire" | "europe_pmc" | "previous_upload" | "user_supplied_reference" | "selective_corpus" | "imported_similarity_evidence";
+export type UnifiedEvidenceSourceType = "archive" | "openaire" | "europe_pmc" | "previous_upload" | "user_supplied_reference" | "selective_corpus" | "imported_similarity_evidence" | "asjp_publication";
 /**
  * "excluded_effective_device_self": a production-counted previous-upload
  * source the Preview-gated same-device SELF rule
@@ -225,6 +225,13 @@ export type UnifiedSimilarityResult = {
    * importedSimilarityEvidence was supplied.
    */
   importedSimilarityEvidencePositions: number[];
+  /**
+   * ASJP ACADEMIC PUBLICATIONS — words matched ONLY by a verified ASJP article (no other channel at that position),
+   * and those positions. Present ONLY when the caller passed asjpPublicationEvidence with at least one source: a
+   * result computed without the ASJP lane has neither key, so it is byte-identical to before this channel existed.
+   */
+  asjpPublicationOnlyWords?: number;
+  asjpPublicationPositions?: number[];
 };
 
 export type ComputeUnifiedSimilarityParams = {
@@ -343,6 +350,20 @@ export type ComputeUnifiedSimilarityParams = {
         sourceId: string;
         matchedPassages: ReadonlyArray<{ submittedWordStart: number; submittedWordEnd: number; matchedWordCount: number }>;
         sourceAttributionState?: ImportedSimilarityEvidenceSourceAttributionState;
+      }>
+    | null;
+  /**
+   * ASJP ACADEMIC PUBLICATIONS — verified published-article evidence from lib/asjp-academic-lane.ts
+   * (asjpPublicationEvidenceOf), in the SAME shape selectiveCorpusEvidence uses. Every passage is already verified
+   * against the article's indexed text, identity- and licence-checked there; this function only unions the
+   * positions. It is its own sibling channel: never a previous upload, never an imported evidence unit, never an
+   * Archive record, so SELF / UNKNOWN classification cannot exclude it and it cannot trigger one. Absent or empty
+   * (every report today) leaves this function's output byte-identical, with no ASJP key in it.
+   */
+  asjpPublicationEvidence?:
+    | ReadonlyArray<{
+        sourceId: string;
+        matchedPassages: ReadonlyArray<{ submittedWordStart: number; submittedWordEnd: number; matchedWordCount: number }>;
       }>
     | null;
 };
@@ -538,6 +559,32 @@ export function computeUnifiedSimilarity(params: ComputeUnifiedSimilarityParams)
     }
   }
 
+  // --- Source: ASJP academic publications (verified published-article passages) ---
+  // Its own sibling channel, exactly like Selective Corpus and imported evidence above: union only.
+  const asjpSources = params.asjpPublicationEvidence ?? [];
+  const asjpSet = new Set<number>();
+  const seenAsjp = new Set<string>();
+  for (const source of asjpSources) {
+    const identityKey = `asjp-publication:${source.sourceId}`;
+    const firstOccurrence = !seenAsjp.has(identityKey);
+    seenAsjp.add(identityKey);
+    for (const passage of source.matchedPassages ?? []) {
+      const clamped = clampedPositions(passage.submittedWordStart, passage.submittedWordEnd, wordCount);
+      contributions.push({
+        sourceType: "asjp_publication",
+        sourceId: identityKey,
+        submittedWordStart: passage.submittedWordStart,
+        submittedWordEnd: passage.submittedWordEnd,
+        matchedWordCount: passage.matchedWordCount,
+        evidenceStatus: "included",
+      });
+      if (!clamped || !firstOccurrence) continue;
+      const [start, end] = clamped;
+      addRange(asjpSet, start, end);
+      eligibleRanges.push({ wordStart: start, wordEnd: end + 1 });
+    }
+  }
+
   // --- Source: live academic evidence (OpenAIRE / Europe PMC) ---------------
   const seenAcademic = new Set<string>();
   for (const evidence of params.externalAcademicEvidence ?? []) {
@@ -673,7 +720,9 @@ export function computeUnifiedSimilarity(params: ComputeUnifiedSimilarityParams)
   const userSuppliedReferencePositions: number[] = [];
   const selectiveCorpusPositions: number[] = [];
   const importedSimilarityEvidencePositions: number[] = [];
-  const allEligiblePositions = new Set<number>([...archiveSet, ...liveSet, ...priorSet, ...referenceSet, ...selectiveCorpusSet, ...importedSet]);
+  let asjpPublicationOnlyWords = 0;
+  const asjpPublicationPositions: number[] = [];
+  const allEligiblePositions = new Set<number>([...archiveSet, ...liveSet, ...priorSet, ...referenceSet, ...selectiveCorpusSet, ...importedSet, ...asjpSet]);
   for (const position of allEligiblePositions) {
     const sourcesHere =
       (archiveSet.has(position) ? 1 : 0) +
@@ -681,14 +730,16 @@ export function computeUnifiedSimilarity(params: ComputeUnifiedSimilarityParams)
       (priorSet.has(position) ? 1 : 0) +
       (referenceSet.has(position) ? 1 : 0) +
       (selectiveCorpusSet.has(position) ? 1 : 0) +
-      (importedSet.has(position) ? 1 : 0);
+      (importedSet.has(position) ? 1 : 0) +
+      (asjpSet.has(position) ? 1 : 0);
     if (sourcesHere > 1) { overlapWords += 1; continue; }
     if (archiveSet.has(position)) archiveOnlyWords += 1;
     else if (liveSet.has(position)) liveAcademicOnlyWords += 1;
     else if (priorSet.has(position)) { previousUploadOnlyWords += 1; previousUploadPositions.push(position); }
     else if (referenceSet.has(position)) { userSuppliedReferenceOnlyWords += 1; userSuppliedReferencePositions.push(position); }
     else if (selectiveCorpusSet.has(position)) { selectiveCorpusOnlyWords += 1; selectiveCorpusPositions.push(position); }
-    else { importedSimilarityEvidenceOnlyWords += 1; importedSimilarityEvidencePositions.push(position); }
+    else if (importedSet.has(position)) { importedSimilarityEvidenceOnlyWords += 1; importedSimilarityEvidencePositions.push(position); }
+    else { asjpPublicationOnlyWords += 1; asjpPublicationPositions.push(position); }
   }
 
   return {
@@ -712,5 +763,8 @@ export function computeUnifiedSimilarity(params: ComputeUnifiedSimilarityParams)
     userSuppliedReferencePositions: userSuppliedReferencePositions.sort((left, right) => left - right),
     selectiveCorpusPositions: selectiveCorpusPositions.sort((left, right) => left - right),
     importedSimilarityEvidencePositions: importedSimilarityEvidencePositions.sort((left, right) => left - right),
+    ...(asjpSources.length > 0
+      ? { asjpPublicationOnlyWords, asjpPublicationPositions: asjpPublicationPositions.sort((left, right) => left - right) }
+      : {}),
   };
 }
