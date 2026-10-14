@@ -73,11 +73,12 @@ export const ASJP_CONTEXT_GAP_WORDS = 50;
  */
 export type AsjpMatchingCorrections = { selfOverlapLabels?: boolean; genericFilter?: boolean; verbatimCompletion?: boolean; verbatimRescue?: boolean; rescueMinVerifiedWords?: number; runMerge?: boolean; structuralFilter?: boolean; annotations?: boolean };
 /**
- * v3 rescue pre-filter: only a candidate in which the verifier itself verified at least this many words is re-read
- * (the rescue still needs >= 60 exact verbatim words with a 25-word run). Every rescue seen on the 563 manuscripts and
- * the splice tests had >= 42 verified words; the pre-filter's answers are checked equal to an unfiltered scan.
+ * v3 rescue pre-filter: only a candidate in which the verifier itself verified at least two minimum verbatim runs
+ * (2 x 6 words) is re-read; the rescue still needs >= 60 exact verbatim words with a 25-word run. A pre-filter of 30
+ * was answer-identical on the 563 manuscripts but lost a 90-word copied passage the verifier had verified only 19
+ * words of (B054 splice), so the bar is set by the run size, not by the cases seen.
  */
-export const ASJP_RESCUE_MIN_VERIFIED_WORDS = 30;
+export const ASJP_RESCUE_MIN_VERIFIED_WORDS = 2 * 6;
 /**
  * v3 CORRECTIONS (on by default):
  *   verbatimRescue    a candidate the verifier verified spans in but did not admit is admitted when the lane's own exact
