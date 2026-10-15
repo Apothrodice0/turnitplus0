@@ -35,6 +35,28 @@ const ENTRY_SQL = `SELECT a.article_id, a.canonical_url, a.title, a.authors_json
   FROM article_versions v JOIN articles a USING(article_id) JOIN journals j USING(journal_id)
   WHERE v.article_id = ? AND v.indexed = 1`;
 
+/** A catalog row (ENTRY_SQL / ALL_ENTRIES_SQL columns) as the lane's entry. */
+export function catalogRowToEntry(row: Record<string, unknown>): AsjpCatalogEntry {
+  return {
+    articleId: String(row.article_id),
+    canonicalUrl: String(row.canonical_url),
+    title: (row.title as string | null) ?? null,
+    authors: row.authors_json ? (JSON.parse(String(row.authors_json)) as string[]) : null,
+    journal: (row.journal as string | null) ?? null,
+    issn: (row.eissn as string | null) ?? null,
+    publicationDate: (row.publication_date as string | null) ?? null,
+    doi: (row.doi as string | null) ?? null,
+    license: row.licence == null ? null : `${row.licence}${row.licence_version ? ` ${row.licence_version}` : ""}`,
+    licenseBasis: (row.licence_basis as string | null) ?? null,
+    licenceStatus: (row.licence_status as AsjpLicenceStatus | null) ?? undefined,
+    reusePermitted: row.reuse_permitted === 1,
+    withdrawn: row.withdrawn === 1,
+  };
+}
+
+/** Every indexed article's row (for an in-memory snapshot). */
+export const ALL_ENTRIES_SQL = ENTRY_SQL.replace("WHERE v.article_id = ? AND v.indexed = 1", "WHERE v.indexed = 1");
+
 /** True for SQLITE_BUSY (5) / SQLITE_LOCKED (6) and their extended codes. */
 export function isSqliteBusy(error: unknown): boolean {
   const code = (error as { errcode?: number } | null)?.errcode;
@@ -86,21 +108,7 @@ export function openAsjpCatalog(
   const entry = (articleId: string): AsjpCatalogEntry | null => {
     const row = withRetry(() => statement.get(Number(articleId))) as Record<string, unknown> | undefined;
     if (!row) return null;
-    return {
-      articleId: String(row.article_id),
-      canonicalUrl: String(row.canonical_url),
-      title: (row.title as string | null) ?? null,
-      authors: row.authors_json ? (JSON.parse(String(row.authors_json)) as string[]) : null,
-      journal: (row.journal as string | null) ?? null,
-      issn: (row.eissn as string | null) ?? null,
-      publicationDate: (row.publication_date as string | null) ?? null,
-      doi: (row.doi as string | null) ?? null,
-      license: row.licence == null ? null : `${row.licence}${row.licence_version ? ` ${row.licence_version}` : ""}`,
-      licenseBasis: (row.licence_basis as string | null) ?? null,
-      licenceStatus: (row.licence_status as AsjpLicenceStatus | null) ?? undefined,
-      reusePermitted: row.reuse_permitted === 1,
-      withdrawn: row.withdrawn === 1,
-    };
+    return catalogRowToEntry(row);
   };
   return { mode, entry, busyRetries: () => retries, close: () => db.close() };
 }
