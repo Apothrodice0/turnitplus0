@@ -687,6 +687,9 @@ async function runLane(request: AsjpLaneRequest): Promise<AsjpLaneResult> {
     return { version, state: "FAILED", failureCode: error instanceof CorpusGenerationError ? error.code : "UNEXPECTED", failureMessage: error instanceof Error ? error.message : String(error) };
   }
   try {
+    if (request.referenceDate != null && !/^\d{4}-\d{2}-\d{2}$/.test(request.referenceDate)) {
+      return { version, state: "FAILED", failureCode: "INVALID_REFERENCE_DATE", failureMessage: `referenceDate must be YYYY-MM-DD, got ${JSON.stringify(request.referenceDate)}` };
+    }
     const opened = performance.now();
     const retrieval = await retrieveCandidates(reader, request.submissionText);
     if (retrieval.state === "FAILED") {
@@ -723,7 +726,7 @@ async function runLane(request: AsjpLaneRequest): Promise<AsjpLaneResult> {
     const numericNominated = new Set<string>();
     if (corrections.numericTables === true && request.session?.numericIndex) for (const c of request.session.numericIndex.candidates(submission)) numericNominated.add(c.docId);
     const admissions: Array<(typeof pass.admissions)[number] & { numericCandidate?: boolean }> = pass.admissions.map((a) => (numericNominated.has(String(a.docId)) ? { ...a, numericCandidate: true } : a));
-    for (const docId of numericNominated) if (!pass.admissions.some((a) => String(a.docId) === docId)) admissions.push({ docId: BigInt(docId), outcome: "NOT_ADMITTED", reason: "numeric-table candidate", totalMatchedWords: 0, longestSpan: 0, spans: [], numericCandidate: true } as any);
+    for (const docId of numericNominated) if (/^\d+$/.test(docId) && !pass.admissions.some((a) => String(a.docId) === docId)) admissions.push({ docId: BigInt(docId), outcome: "NOT_ADMITTED", reason: "numeric-table candidate", totalMatchedWords: 0, longestSpan: 0, spans: [], numericCandidate: true } as any);
     for (const admission of admissions) {
       if (admission.spans.length === 0 && !admission.numericCandidate) continue; // nothing verified in this candidate: not a finding
       const docId = String(admission.docId);
@@ -896,7 +899,7 @@ async function runLane(request: AsjpLaneRequest): Promise<AsjpLaneResult> {
           const words = cluster.reduce((total, passage) => total + passage.matchedWordCount, 0);
           const start = cluster[0].submittedWordStart, end = cluster[cluster.length - 1].submittedWordEnd;
           const tokens = cluster.flatMap((passage) => submission.slice(passage.submittedWordStart, passage.submittedWordEnd + 1));
-          const form = repetitionForm(submission.slice(start, end + 1))
+          const form = repetitionForm(tokens)
             ?? (words < ASJP_GENERIC_MAX_RUN ? structuralForm(tokens, cluster.map((passage) => originalOf(passage.submittedWordStart, passage.submittedWordEnd)).join(" ")) : null);
           if (form && form.category === "PLACEHOLDER_REPETITION") { structuralWords += words; structuralClusters.push({ submittedWordStart: start, submittedWordEnd: end, words, category: form.category, evidence: form.evidence }); }
           else { kept.push(...cluster); if (form) structuralForms.push({ submittedWordStart: start, submittedWordEnd: end, words, kind: "STRUCTURAL_FORM", category: form.category, evidence: form.evidence }); }
@@ -983,17 +986,24 @@ async function runLane(request: AsjpLaneRequest): Promise<AsjpLaneResult> {
 /** The lane's credited sources in the shape computeUnifiedSimilarity's asjpPublicationEvidence channel takes. */
 export function asjpPublicationEvidenceOf(result: AsjpLaneResult): Array<{ sourceId: string; matchedPassages: Array<{ submittedWordStart: number; submittedWordEnd: number; matchedWordCount: number }> }> {
   if (result.state !== "COMPLETE" && result.state !== "PARTIAL") return [];
-  return result.sources.filter((source) => source.credited).map((source) => ({
-    sourceId: source.sourceId,
-    matchedPassages: source.matchedPassages.map(({ submittedWordStart, submittedWordEnd, matchedWordCount }) => ({ submittedWordStart, submittedWordEnd, matchedWordCount })),
-  }));
+  // one entry per article: two indexed versions (or an alias) of one article are merged, because the union keeps only
+  // the first occurrence of a sourceId and would otherwise drop the second version's words
+  const bySource = new Map<string, Array<{ submittedWordStart: number; submittedWordEnd: number; matchedWordCount: number }>>();
+  for (const source of result.sources) {
+    if (!source.credited) continue;
+    const list = bySource.get(source.sourceId) ?? [];
+    for (const { submittedWordStart, submittedWordEnd, matchedWordCount } of source.matchedPassages) list.push({ submittedWordStart, submittedWordEnd, matchedWordCount });
+    bySource.set(source.sourceId, list);
+  }
+  return [...bySource].map(([sourceId, passages]) => ({ sourceId, matchedPassages: passages.sort((left, right) => left.submittedWordStart - right.submittedWordStart) }));
 }
 
 export type AsjpSourceCard = {
   kind: "asjp_publication";
   sourceId: string;
   /** The publication title, exactly as the catalog holds it. */
-  title: string;
+  /** null when the catalog holds no title: the card is still shown (its words are scored), never with an invented title. */
+  title: string | null;
   journal: string | null;
   publicationDate: string | null;
   doi: string | null;
@@ -1027,7 +1037,7 @@ export function asjpSourceCards(result: AsjpLaneResult): AsjpSourceCard[] {
   const cards: AsjpSourceCard[] = [];
   for (const source of result.sources) {
     const shown = source.credited || source.notCreditedReason === "SAME_WORK_EXCLUDED_BY_POLICY";
-    if (!shown || !source.publication || !source.relationship || !source.publication.title) continue;
+    if (!shown || !source.publication || !source.relationship) continue;
     cards.push({
       kind: "asjp_publication",
       sourceId: source.sourceId,

@@ -2,7 +2,7 @@ import { existsSync, statSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import type { AsjpCatalogEntry } from "./asjp-academic-lane";
-import { ALL_ENTRIES_SQL, catalogRowToEntry, isSqliteBusy } from "./asjp-catalog-store";
+import { ALL_ENTRIES_SQL, isSqliteBusy, mergeCatalogRows } from "./asjp-catalog-store";
 
 /**
  * The serving catalog: an in-memory snapshot of every indexed article's entry. A lookup never touches SQLite, so it
@@ -26,8 +26,10 @@ export async function loadAsjpCatalogSnapshot(path: string, options: { immutable
     try {
       db = options.immutable ? new DatabaseSync(`${pathToFileURL(path).href}?immutable=1`, { readOnly: true }) : new DatabaseSync(path, { readOnly: true, timeout: 0 });
       const rows = db.prepare(ALL_ENTRIES_SQL).all();
+      const byArticle = new Map<string, Array<Record<string, unknown>>>();
+      for (const row of rows) { const k = String(row.article_id); const l = byArticle.get(k); if (l) l.push(row); else byArticle.set(k, [row]); }
       const entries = new Map<string, AsjpCatalogEntry>();
-      for (const row of rows) { const e = catalogRowToEntry(row); entries.set(e.articleId, e); }
+      for (const [k, list] of byArticle) entries.set(k, mergeCatalogRows(list)!);
       return { entries, loadedAt: new Date().toISOString(), busyRetries: attempt - 1, loadMs: Math.round(performance.now() - t0) };
     } catch (error) {
       if (!isSqliteBusy(error) || attempt >= attempts) throw error;

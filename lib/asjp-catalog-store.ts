@@ -54,6 +54,20 @@ export function catalogRowToEntry(row: Record<string, unknown>): AsjpCatalogEntr
   };
 }
 
+/**
+ * One entry per ARTICLE from its indexed versions' rows (the schema allows several versions per article): withdrawn if any
+ * version is withdrawn; the most restrictive licence status (CONFLICTING > RESTRICTED > UNKNOWN > PERMITTED);
+ * reuse permitted only if every version permits it; bibliographic fields from the first row in a fixed order.
+ */
+export function mergeCatalogRows(rows: ReadonlyArray<Record<string, unknown>>): AsjpCatalogEntry | null {
+  if (rows.length === 0) return null;
+  const entries = rows.map(catalogRowToEntry).sort((a, b) => String(a.license).localeCompare(String(b.license)));
+  if (entries.length === 1) return entries[0];
+  const rank = (s?: AsjpLicenceStatus) => ({ CONFLICTING: 3, RESTRICTED: 2, UNKNOWN: 1, PERMITTED: 0 } as Record<string, number>)[s ?? "UNKNOWN"] ?? 1;
+  const worst = entries.reduce((w, e) => (rank(e.licenceStatus) > rank(w.licenceStatus) ? e : w), entries[0]);
+  return { ...entries[0], license: worst.license, licenseBasis: worst.licenseBasis, licenceStatus: worst.licenceStatus, reusePermitted: entries.every((e) => e.reusePermitted), withdrawn: entries.some((e) => e.withdrawn) };
+}
+
 /** Every indexed article's row (for an in-memory snapshot). */
 export const ALL_ENTRIES_SQL = ENTRY_SQL.replace("WHERE v.article_id = ? AND v.indexed = 1", "WHERE v.indexed = 1");
 
@@ -106,9 +120,7 @@ export function openAsjpCatalog(
     }
   });
   const entry = (articleId: string): AsjpCatalogEntry | null => {
-    const row = withRetry(() => statement.get(Number(articleId))) as Record<string, unknown> | undefined;
-    if (!row) return null;
-    return catalogRowToEntry(row);
+    return mergeCatalogRows(withRetry(() => statement.all(Number(articleId))) as Array<Record<string, unknown>>);
   };
   return { mode, entry, busyRetries: () => retries, close: () => db.close() };
 }
