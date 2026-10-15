@@ -164,10 +164,10 @@ test('ASJP lane: the manuscript\'s own published version counts, attributed as p
   // v5: a card also carries its passages (exact source offsets), labels and admission path
   assert.ok(cards[0].passages.length > 0 && cards[0].passages.every((p) => p.sourceCharStart >= 0 && p.sourceCharEnd > p.sourceCharStart));
   assert.equal(cards[0].admittedBy, 'VERIFIER');
-  assert.deepEqual({ ...cards[0], matchedWordCount: undefined, passages: undefined, labels: undefined, admittedBy: undefined }, {
+  assert.deepEqual({ ...cards[0], matchedWordCount: undefined, passages: undefined, labels: undefined, admittedBy: undefined, evidence: undefined }, {
     kind: 'asjp_publication', sourceId: 'asjp:1001', title: TITLE_1001, journal: 'Fixture Journal', publicationDate: '2024-06-30', doi: '10.1234/own.1001',
     url: url(1001), authors: ['Author, A.'], license: 'CC BY 4.0', licenceStatus: 'PERMITTED', matchedWordCount: undefined, relationship: 'SAME_WORK_PUBLISHED_VERSION', scored: false, attribution: 'PREVIOUSLY_PUBLISHED_WORK',
-    passages: undefined, labels: undefined, admittedBy: undefined,
+    passages: undefined, labels: undefined, admittedBy: undefined, evidence: undefined,
   });
   const scored = await run(manuscript, { sameWorkPolicy: 'credit' });
   assert.equal(byId(scored, 'asjp:1001').credited, true);

@@ -259,16 +259,16 @@ export function normalizeSelectiveCorpusEvidence(
 // evidence the score does not hold. Metadata (title, journal, date, DOI, canonical ASJP URL, licence, attribution,
 // labels) comes from the report's persisted ASJP record. sameWorkRelationship stays null: the lane's
 // "previously published version" is a text + title signal, which this layer's hardening rule does not accept as an
-// independent work/version relationship — the card states it through asjpPresentation.attribution instead.
+// independent work/version relationship. Phase 7 (owner decision 3): the card states only facts — its label is
+// PUBLISHED_ARTICLE or (index fact) SHARED_TEXT_ORIGIN_NOT_ESTABLISHED, and observations go in notes.
 export function normalizeAsjpPublicationEvidence(
   admittedSources: ReadonlyArray<{
     key: string;
     spans: ReadonlyArray<{ start: number; end: number; words: number }>;
-    card: { title: string | null; journal: string | null; publicationDate: string | null; doi: string | null; url: string | null; license: string | null; attribution: string; labels: ReadonlyArray<{ kind: string; submittedWordStart: number; submittedWordEnd: number }> } | null;
+    card: { title: string | null; journal: string | null; publicationDate: string | null; doi: string | null; url: string | null; license: string | null; attribution: string; labels: ReadonlyArray<{ kind: string; submittedWordStart: number; submittedWordEnd: number }>; evidence?: { documentShare: number; titleMatch: boolean; authorNamesInByline: number } } | null;
   }>,
   submissionWordCount: number,
 ): NormalizedVerifiedSource[] {
-  const ATTRIBUTIONS = new Set(["PREVIOUSLY_PUBLISHED_WORK", "SELF_OVERLAP_SAME_AUTHORS", "QUOTES_PRIMARY_SOURCE", "SHARED_TEXT_ORIGIN_NOT_ESTABLISHED", "PUBLISHED_SOURCE"]);
   return admittedSources
     .map((source) => {
       const spans = [...source.spans].map((sp) => ({ start: sp.start, end: sp.end, words: sp.words })).sort((a, b) => a.start - b.start);
@@ -286,17 +286,24 @@ export function normalizeAsjpPublicationEvidence(
         matchedWordCount,
         submissionCoverageFraction: coverage(matchedWordCount, submissionWordCount),
         sameWorkRelationship: null,
-        asjpPresentation: {
-          provider: "ASJP" as const,
-          attribution: (card && ATTRIBUTIONS.has(card.attribution) ? card.attribution : "PUBLISHED_SOURCE") as ReportEvidenceAsjpPresentation["attribution"],
-          journal: card?.journal ?? null,
-          publicationDate: card?.publicationDate ?? null,
-          licence: card?.license ?? null,
-          sharedWords: wordsIn(["SHARED_ACADEMIC_TEXT", "SHARED_QUOTATION"]),
-          repeatedFormWords: wordsIn(["REPEATED_FORM"]),
-          primarySourceWords: wordsIn(["LEGAL_PRIMARY_TEXT", "RELIGIOUS_TEXT"]),
-        },
+        asjpPresentation: asjpPresentationOf(card, matchedWordCount, submissionWordCount, wordsIn(["SHARED_ACADEMIC_TEXT", "SHARED_QUOTATION"]), wordsIn(["REPEATED_FORM"]), wordsIn(["LEGAL_PRIMARY_TEXT", "RELIGIOUS_TEXT"])),
       };
     })
     .filter((s) => s.spans.length > 0);
+}
+
+/** Phase 7 — the factual card: a label that is established, and observations as notes (no claimed relationship). */
+function asjpPresentationOf(
+  card: { journal: string | null; publicationDate: string | null; license: string | null; attribution: string; evidence?: { documentShare: number; titleMatch: boolean; authorNamesInByline: number } } | null,
+  matchedWordCount: number, submissionWordCount: number, sharedWords: number, repeatedFormWords: number, primarySourceWords: number,
+): ReportEvidenceAsjpPresentation {
+  const label = card?.attribution === "SHARED_TEXT_ORIGIN_NOT_ESTABLISHED" ? "SHARED_TEXT_ORIGIN_NOT_ESTABLISHED" as const : "PUBLISHED_ARTICLE" as const;
+  const notes: string[] = [];
+  const share = submissionWordCount > 0 ? matchedWordCount / submissionWordCount : 0;
+  if (share >= 0.3) notes.push(`This article contains ${Math.round(share * 100)}% of your document's words, in the same order.`);
+  if (card?.evidence?.titleMatch) notes.push("The article's title closely matches your document's title or opening.");
+  if ((card?.evidence?.authorNamesInByline ?? 0) > 0) notes.push("An author name listed for this article appears near the start of your document.");
+  if (primarySourceWords > 0) notes.push(`${primarySourceWords} matched words have the form of a quoted law or scripture.`);
+  if (sharedWords > 0 && label !== "SHARED_TEXT_ORIGIN_NOT_ESTABLISHED") notes.push(`${sharedWords} matched words also appear in other published articles.`);
+  return { provider: "ASJP", label, notes, journal: card?.journal ?? null, publicationDate: card?.publicationDate ?? null, licence: card?.license ?? null, sharedWords, repeatedFormWords, primarySourceWords };
 }

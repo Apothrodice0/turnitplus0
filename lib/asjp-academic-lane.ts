@@ -1082,6 +1082,13 @@ export type AsjpSourceCard = {
   labels: Array<{ kind: AsjpAnnotationKind; submittedWordStart: number; submittedWordEnd: number; words: number; otherArticles?: number; namedSource?: string | null; category?: AsjpStructuralCategory; quoted?: boolean }>;
   admittedBy: "VERIFIER" | "VERBATIM_RESCUE" | null;
   candidateBy?: "NUMERIC_TABLE";
+  /**
+   * Phase 7: the OBSERVATIONS behind the relationship (no relationship claim of their own): the share of the
+   * manuscript's words this article's credited words make up, whether the article title agreed with the manuscript's
+   * title / opening (only known where the same-work test reached the title), and how many author surnames of the
+   * article stand in the manuscript's opening. A report shows these as facts, never as an established relationship.
+   */
+  evidence: { documentShare: number; titleMatch: boolean; authorNamesInByline: number };
 };
 
 /**
@@ -1114,6 +1121,7 @@ export function asjpSourceCards(result: AsjpLaneResult): AsjpSourceCard[] {
       labels: source.annotations.map((a) => ({ kind: a.kind, submittedWordStart: a.submittedWordStart, submittedWordEnd: a.submittedWordEnd, words: a.words, ...(a.otherArticles !== undefined ? { otherArticles: a.otherArticles } : {}), ...(a.namedSource !== undefined ? { namedSource: a.namedSource } : {}), ...(a.category ? { category: a.category } : {}), ...(a.quoted !== undefined ? { quoted: a.quoted } : {}) })),
       admittedBy: source.admittedBy,
       ...(source.candidateBy ? { candidateBy: source.candidateBy } : {}),
+      evidence: { documentShare: +Math.min(1, Math.max(0, source.containmentOfSubmission ?? 0)).toFixed(4), titleMatch: source.sameWorkBasis === "TITLE" || source.sameWorkBasis === "TITLE_AND_CONTAINMENT", authorNamesInByline: (source.authorMatches ?? []).length },
       attribution: source.relationship === "SAME_WORK_PUBLISHED_VERSION" ? "PREVIOUSLY_PUBLISHED_WORK" : source.relationship === "SAME_AUTHORS_OTHER_WORK" ? "SELF_OVERLAP_SAME_AUTHORS"
         : sharedShare(source, ["LEGAL_PRIMARY_TEXT", "RELIGIOUS_TEXT"]) >= 0.9 ? "QUOTES_PRIMARY_SOURCE"
         : sharedShare(source) >= 0.9 ? "SHARED_TEXT_ORIGIN_NOT_ESTABLISHED" : "PUBLISHED_SOURCE",

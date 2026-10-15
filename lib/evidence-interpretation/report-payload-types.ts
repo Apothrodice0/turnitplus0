@@ -46,16 +46,18 @@ export type ReportEvidenceSource = {
 };
 
 /**
- * ASJP (Phase 6.5) — the presentation of one verified ASJP article. Descriptive only; the words are scored either way.
- *   PREVIOUSLY_PUBLISHED_WORK            the article is this manuscript's own published version
- *   SELF_OVERLAP_SAME_AUTHORS            an article by the manuscript's own authors
- *   QUOTES_PRIMARY_SOURCE                the article quotes the same law / scripture the manuscript quotes
- *   SHARED_TEXT_ORIGIN_NOT_ESTABLISHED   other indexed articles hold the same text; which one it came from is not known
- *   PUBLISHED_SOURCE                     an independent published article
+ * ASJP — the presentation of one verified ASJP article. Descriptive only; the words are scored either way.
+ * Phase 7 (owner decision 3): a card states ONLY what is established. Its label is one of
+ *   PUBLISHED_ARTICLE                    the matched text stands verbatim in this published ASJP article (a fact)
+ *   SHARED_TEXT_ORIGIN_NOT_ESTABLISHED   >= 90 % of it also stands in other indexed articles (a fact about the index)
+ * and `notes` are observations (share of the document's words, title agreement, an author name in the document's
+ * opening, quoted-law form, words other articles hold) — never a claimed relationship such as "your own earlier
+ * version" or "same authors", which the lane can only infer heuristically.
  */
 export type ReportEvidenceAsjpPresentation = {
   provider: "ASJP";
-  attribution: "PREVIOUSLY_PUBLISHED_WORK" | "SELF_OVERLAP_SAME_AUTHORS" | "QUOTES_PRIMARY_SOURCE" | "SHARED_TEXT_ORIGIN_NOT_ESTABLISHED" | "PUBLISHED_SOURCE";
+  label: "PUBLISHED_ARTICLE" | "SHARED_TEXT_ORIGIN_NOT_ESTABLISHED";
+  notes: string[];
   journal: string | null;
   publicationDate: string | null;
   licence: string | null;

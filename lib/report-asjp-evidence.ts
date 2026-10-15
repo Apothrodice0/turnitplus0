@@ -51,26 +51,28 @@ const CAS = `json_valid(payload_json)
   AND json_extract(payload_json, '$.asjpEvidence.status') = ?
   AND json_extract(payload_json, '$.selectiveCorpusAuthoritativeStatus') IS NULL`;
 
-type Loaded = { payload: SimilarityReport; archiveScore: number; record: AsjpPersistedEvidence };
+type Loaded = { payload: SimilarityReport; archiveScore: number; record: AsjpPersistedEvidence; binding: { reportDeviceKey: string; reportId: string; accountId: string | null } };
 async function loadEligible(client: Client, params: { reportDeviceKey: string; reportId: string }): Promise<Loaded | { outcome: "NOT_ELIGIBLE"; reason: string }> {
-  const row = await client.execute({ sql: "SELECT payload_json, archive_score FROM saved_reports WHERE device_key = ? AND id = ?", args: [params.reportDeviceKey, params.reportId] });
-  const raw = row.rows[0] as unknown as { payload_json: string; archive_score: number | bigint } | undefined;
+  const row = await client.execute({ sql: "SELECT payload_json, archive_score, user_id FROM saved_reports WHERE device_key = ? AND id = ?", args: [params.reportDeviceKey, params.reportId] });
+  const raw = row.rows[0] as unknown as { payload_json: string; archive_score: number | bigint; user_id: string | null } | undefined;
   if (!raw) return { outcome: "NOT_ELIGIBLE", reason: "NO_REPORT" };
+  // the record is bound to the report's OWN owner (never the caller's claim)
+  const binding = { reportDeviceKey: params.reportDeviceKey, reportId: params.reportId, accountId: raw.user_id ?? null };
   const decoded = tryDecodeReportFromPersistence(JSON.parse(String(raw.payload_json)), { requireContributions: false });
   if (!decoded.ok) return { outcome: "NOT_ELIGIBLE", reason: "UNREADABLE_REPORT" };
   const payload = decoded.report as SimilarityReport;
   if (payload.selectiveCorpusAuthoritativeStatus != null) return { outcome: "NOT_ELIGIBLE", reason: "SELECTIVE_CORPUS_OWNED" };
   if ((payload.userSuppliedReferenceEvidence ?? []).some((r) => r?.admitted)) return { outcome: "NOT_ELIGIBLE", reason: "HAS_SUPPLIED_REFERENCES" };
   if (typeof payload.text !== "string" || !payload.text) return { outcome: "NOT_ELIGIBLE", reason: "NO_TEXT" };
-  const record = trustedAsjpRecord(payload.asjpEvidence, params);
+  const record = trustedAsjpRecord(payload.asjpEvidence, binding);
   if (!record) return { outcome: "NOT_ELIGIBLE", reason: payload.asjpEvidence ? "UNVERIFIED_RECORD" : "NO_ASJP_RECORD" };
-  return { payload, archiveScore: Number(raw.archive_score), record };
+  return { payload, archiveScore: Number(raw.archive_score), record, binding };
 }
 
 /** Lands `next` (unsigned) for the report, recomputing score + explanation with it, CAS on `prev`. */
 async function rewriteWithScore(client: Client, params: { reportDeviceKey: string; reportId: string; accountId: string | null }, loaded: Loaded, next: AsjpPersistedEvidence): Promise<"WRITTEN" | "LOST_RACE" | { failed: string }> {
   const { payload, record } = loaded;
-  const signed = signAsjpRecord(next, params, asjpSigningKey());
+  const signed = signAsjpRecord(next, loaded.binding, asjpSigningKey());
   const scoringNormalizationVersion = reportScoringNormalizationVersion(payload);
   const verifiedAcademicEvidence = (await resolveVerifiedAcademicEvidence(client, {
     diagnosticsId: typeof payload.verifiedAcademicSearchDiagnosticsId === "number" && Number.isFinite(payload.verifiedAcademicSearchDiagnosticsId) ? payload.verifiedAcademicSearchDiagnosticsId : null,
@@ -78,7 +80,7 @@ async function rewriteWithScore(client: Client, params: { reportDeviceKey: strin
     scoringNormalizationVersion,
   })).evidence;
   const resolution = await resolvePrimarySimilaritySummary(client, {
-    reportDeviceKey: params.reportDeviceKey, reportId: params.reportId, accountId: params.accountId,
+    reportDeviceKey: params.reportDeviceKey, reportId: params.reportId, accountId: loaded.binding.accountId,
     rawText: payload.text, wordCount: payload.wordCount, archiveMatchedPositions: payload.archiveMatchedPositions,
     scoringNormalizationVersion, externalAcademicEvidence: verifiedAcademicEvidence,
     asjpReportEvidence: signed,
@@ -133,7 +135,7 @@ export async function retryAsjpEvidenceForReport(
       // still unavailable: only the attempt is recorded (score unchanged — it never had ASJP)
       const written = await client.execute({
         sql: `UPDATE saved_reports SET payload_json = json_set(payload_json, '$.asjpEvidence', json(?)) WHERE device_key = ? AND id = ? AND ${CAS}`,
-        args: [JSON.stringify(signAsjpRecord(next, params, asjpSigningKey())), params.reportDeviceKey, params.reportId, record.checkedAt, record.status],
+        args: [JSON.stringify(signAsjpRecord(next, loaded.binding, asjpSigningKey())), params.reportDeviceKey, params.reportId, record.checkedAt, record.status],
       });
       return Number(written.rowsAffected) === 0 ? { outcome: "LOST_RACE" } : { outcome: "STILL_UNAVAILABLE", reason: next.reason, attempts: next.attempts };
     }

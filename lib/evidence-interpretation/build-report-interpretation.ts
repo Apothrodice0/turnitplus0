@@ -151,13 +151,10 @@ const GENERIC_LABEL: Record<NormalizedSourceType, string> = {
   "imported-similarity-evidence": "Imported reference match",
 };
 
-/** ASJP (Phase 6.5) — the card's first reason, stating how the published article relates to the manuscript. */
-const ASJP_REASON: Record<ReportEvidenceAsjpPresentation["attribution"], string> = {
-  PREVIOUSLY_PUBLISHED_WORK: "this text matches a published version of this manuscript (ASJP)",
-  SELF_OVERLAP_SAME_AUTHORS: "this text matches an earlier article by the same authors (ASJP)",
-  QUOTES_PRIMARY_SOURCE: "this article quotes the same primary source (a law or scripture) — the source is the quoted text, not this article",
+/** ASJP — the card's first reason: only what is established (Phase 7, owner decision 3); observations follow as notes. */
+const ASJP_REASON: Record<ReportEvidenceAsjpPresentation["label"], string> = {
+  PUBLISHED_ARTICLE: "this text matches a published article (ASJP), word for word",
   SHARED_TEXT_ORIGIN_NOT_ESTABLISHED: "this text also appears in other published articles; its original source is not established",
-  PUBLISHED_SOURCE: "this text matches a published article (ASJP)",
 };
 
 function safeLabel(source: NormalizedVerifiedSource): string {
@@ -289,7 +286,7 @@ export function buildReportEvidenceInterpretation(
       src.producer === "user-supplied-reference"
         ? ["this text also appears in a reference file you supplied", ...baseReasons.filter((r) => r !== "distinctive text that matches this source")]
         : src.producer === "asjp-publication" && src.asjpPresentation
-          ? [ASJP_REASON[src.asjpPresentation.attribution], ...baseReasons.filter((r) => r !== "distinctive text that matches this source")]
+          ? [ASJP_REASON[src.asjpPresentation.label], ...baseReasons.filter((r) => r !== "distinctive text that matches this source")]
           : baseReasons;
     const repConfidence = spanInterps
       .filter((s) => s.kind === primaryKind)

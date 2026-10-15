@@ -50,7 +50,7 @@ const card = (id, start, end, extra = {}) => ({
   labels: [], ...extra,
 });
 const answerFor = (n, mode) => {
-  const cards = [card(101, 10, 79), card(202, 50, 119, { attribution: 'SHARED_TEXT_ORIGIN_NOT_ESTABLISHED', labels: [{ kind: 'SHARED_ACADEMIC_TEXT', submittedWordStart: 50, submittedWordEnd: 119, words: 70, otherArticles: 1 }] })];
+  const cards = mode === 'own' ? [card(404, 0, 269, { attribution: 'PREVIOUSLY_PUBLISHED_WORK', relationship: 'SAME_WORK_PUBLISHED_VERSION', evidence: { documentShare: 0.9, titleMatch: true, authorNamesInByline: 1 } })] : [card(101, 10, 79), card(202, 50, 119, { attribution: 'SHARED_TEXT_ORIGIN_NOT_ESTABLISHED', labels: [{ kind: 'SHARED_ACADEMIC_TEXT', submittedWordStart: 50, submittedWordEnd: 119, words: 70, otherArticles: 1 }] })];
   const evidence = cards.map((c) => ({ sourceId: c.sourceId, matchedPassages: c.passages.map((p) => ({ submittedWordStart: p.submittedWordStart, submittedWordEnd: p.submittedWordEnd, matchedWordCount: p.submittedWordEnd - p.submittedWordStart + 1 })) }));
   if (mode === 'mismatch') evidence[0].matchedPassages[0].submittedWordEnd = 90;
   if (mode === 'badurl') cards[0].url = 'javascript:alert(1)';
@@ -150,7 +150,7 @@ test('accepted answer: pinned record persisted; union counts each word once; sou
   const cards = payload.evidenceInterpretation.sources.filter((s) => s.asjp);
   assert.equal(cards.length, 2);
   const shared = cards.find((c) => c.link === 'https://asjp.cerist.dz/en/article/202');
-  assert.equal(shared.asjp.attribution, 'SHARED_TEXT_ORIGIN_NOT_ESTABLISHED'); assert.equal(shared.doi, '10.1000/202'); assert.equal(shared.year, 2021); assert.equal(shared.asjp.sharedWords, 70);
+  assert.equal(shared.asjp.label, 'SHARED_TEXT_ORIGIN_NOT_ESTABLISHED'); assert.equal(shared.doi, '10.1000/202'); assert.equal(shared.year, 2021); assert.equal(shared.asjp.sharedWords, 70);
   assert.match(shared.interpretation.reasons[0], /original source is not established/);
   assert.equal(payload.evidenceInterpretation.matchedWordCount, 110, 'the explanation reconciles with the score');
   // outbound: no record (pins, offsets, research), only the check status
@@ -158,7 +158,7 @@ test('accepted answer: pinned record persisted; union counts each word once; sou
   assert.equal(out.asjpEvidence, undefined); assert.deepEqual(out.asjpCheck, { status: 'INCLUDED', sources: 2 });
   assert.ok(!JSON.stringify(out).includes('UNSCORED_RESEARCH_SIGNAL'), 'the research signal never reaches an ordinary client');
   const vm = buildReportV2ViewModel(out);
-  assert.deepEqual(vm.sources.filter((s) => s.asjp).map((s) => s.asjp.label).sort(), ['Published article', 'Shared text — original source not established']);
+  assert.deepEqual(vm.sources.filter((s) => s.asjp).map((s) => s.asjp.label).sort(), ['Published article (ASJP)', 'Shared text — original source not established']);
   assert.equal(vm.asjpUnavailableNotice, null);
 });
 
@@ -247,7 +247,7 @@ test('migration: legacy rows, unknown-schema records and v1 reports are never gi
   // an unknown record schema is not applied (and not an error)
   await post(acc, 'asjp-legacy-1', manuscript(0));
   const rec = (await row(acc, 'asjp-legacy-1')).payload.asjpEvidence;
-  const binding = { reportDeviceKey: acc.deviceKey, reportId: 'asjp-legacy-1' };
+  const binding = { reportDeviceKey: acc.deviceKey, reportId: 'asjp-legacy-1', accountId: acc.userId };
   assert.equal(asjpChannelOf(rec, { wordCount: rec.wordCount, scoringNormalizationVersion: 2, binding: { ...binding, reportId: 'another-report' } }).reason, 'UNVERIFIED_RECORD', 'a record never applies to another report');
   await client.execute({ sql: "UPDATE saved_reports SET payload_json = json_set(payload_json, '$.asjpEvidence', json(?)) WHERE device_key = ? AND id = ?", args: [JSON.stringify({ ...rec, schema: 'asjp-report-evidence-v0' }), acc.deviceKey, 'asjp-legacy-1'] });
   const healed = await selfHealUnifiedSimilarity(client, { reportDeviceKey: acc.deviceKey, reportId: 'asjp-legacy-1', accountId: acc.userId });
@@ -374,4 +374,45 @@ test('review 6/8/12: unsafe card content refused; research signal capped; miscon
     const p = (await row(acc, 'asjp-misconfigured-1')).payload;
     assert.equal(stub.calls, calls); assert.equal(p.asjpEvidence.reason, 'CLIENT_MISCONFIGURED'); assert.deepEqual(p.unifiedSimilarity.matchedPositions, []);
   } finally { process.env.ASJP_EVIDENCE_SIGNING_KEY = key; }
+});
+
+test('Phase 7 C: a signed record cannot be substituted into another user\'s report, replayed into another report, or read by a client', async () => {
+  setAsjp(true); stub.mode = 'accept';
+  const alice = await account(), bob = await account();
+  await post(alice, 'asjp-owner-a', manuscript(0));
+  setAsjp(false);
+  await post(bob, 'asjp-owner-b', manuscript(0)); // same manuscript, saved without ASJP
+  await post(alice, 'asjp-owner-a2', manuscript(0)); // alice's second report, same manuscript, no ASJP
+  const signed = (await row(alice, 'asjp-owner-a')).payload.asjpEvidence;
+  assert.equal(typeof signed.signature, 'string');
+  // substitute alice's signed record into bob's report (another owner) and into alice's other report (replay)
+  for (const [acc, id] of [[bob, 'asjp-owner-b'], [alice, 'asjp-owner-a2']]) {
+    await client.execute({ sql: "UPDATE saved_reports SET payload_json = json_set(payload_json, '$.asjpEvidence', json(?)) WHERE device_key = ? AND id = ?", args: [JSON.stringify(signed), acc.deviceKey, id] });
+    const healed = await selfHealUnifiedSimilarity(client, { reportDeviceKey: acc.deviceKey, reportId: id, accountId: acc.userId });
+    assert.deepEqual(healed.unifiedSimilarity.matchedPositions, [], `${id}: not applied`);
+    const out = await getPayload(acc, id);
+    assert.equal(out.asjpEvidence, undefined);
+  }
+  // the owner itself: applied; the owner's reload never exposes the signature, pins or offsets
+  const healedA = await selfHealUnifiedSimilarity(client, { reportDeviceKey: alice.deviceKey, reportId: 'asjp-owner-a', accountId: alice.userId });
+  assert.deepEqual(healedA.unifiedSimilarity.matchedPositions, range(10, 119));
+  const body = JSON.stringify(await getPayload(alice, 'asjp-owner-a'));
+  for (const secret of [signed.signature, signed.textSha256, G1, '"sourceCharStart"']) assert.ok(!body.includes(secret), `outbound copy never contains ${secret.slice(0, 20)}`);
+  // even with the owner claimed by the caller, a mismatching account fails verification (the binding is the row's owner)
+  const wrongOwner = await resolvePrimarySimilaritySummary(client, { reportDeviceKey: alice.deviceKey, reportId: 'asjp-owner-a', accountId: bob.userId, rawText: manuscript(0), wordCount: wordsOf(manuscript(0)), archiveMatchedPositions: [], scoringNormalizationVersion: 2, archiveScore: 0, asjpReportEvidence: signed });
+  assert.equal(wrongOwner.unifiedSimilarity.asjpPublicationOnlyWords, undefined);
+});
+
+test('Phase 7 decision 3: cards state only facts — no claimed relationship, observations as notes', async () => {
+  setAsjp(true); stub.mode = 'own';
+  const acc = await account();
+  await post(acc, 'asjp-facts-1', manuscript(0));
+  const p = (await row(acc, 'asjp-facts-1')).payload;
+  const card = p.evidenceInterpretation.sources.find((s) => s.asjp);
+  assert.equal(card.asjp.label, 'PUBLISHED_ARTICLE');
+  assert.ok(card.asjp.notes.some((n) => /contains \d+% of your document's words/.test(n)));
+  assert.ok(card.asjp.notes.some((n) => /title closely matches/.test(n)));
+  assert.ok(card.asjp.notes.some((n) => /author name listed for this article appears/.test(n)));
+  const text = JSON.stringify(card) + JSON.stringify(buildReportV2ViewModel(await getPayload(acc, 'asjp-facts-1')).sources);
+  for (const claim of [/published version of this manuscript/i, /same authors/i, /your own/i, /previously published/i]) assert.ok(!claim.test(text), `no claimed relationship: ${claim}`);
 });

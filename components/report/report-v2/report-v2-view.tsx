@@ -410,6 +410,13 @@ function SourceCard({ card, verifiedPercent, expanded = false }: { card: ReportV
           <span className="rv2-source-card-provider"> · ASJP</span>
         </p>
       )}
+      {card.asjp && card.asjp.notes.length > 0 && (
+        <ul className="rv2-source-card-asjp-notes">
+          {card.asjp.notes.map((n, i) => (
+            <li key={i}>{n}</li>
+          ))}
+        </ul>
+      )}
 
       <p className="rv2-source-card-figures">
         <b>{card.contributionPercent}% contribution</b>

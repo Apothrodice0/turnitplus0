@@ -868,7 +868,7 @@ export async function POST(request: Request) {
               persistedRecord: existingReportRow.rows[0]?.asjp_evidence ?? null,
               persistedText: persistedManuscriptText,
               // review finding 1: records are signed for, and only trusted on, this report
-              binding: { reportDeviceKey: deviceKey, reportId: id },
+              binding: { reportDeviceKey: deviceKey, reportId: id, accountId: userId ?? null },
             },
             () => checkAsjpForReport({ text: reportPayload.text, wordCount: reportPayload.wordCount }),
           ).catch(() => null)

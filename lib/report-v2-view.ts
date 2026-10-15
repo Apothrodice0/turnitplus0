@@ -181,7 +181,7 @@ export type ReportV2SourceCard = {
   /** archive aggregate card only — the individual public-safe source names. */
   namedSources: ReportEvidenceNamedSource[];
   /** ASJP (Phase 6.5) — a published ASJP article card: how it relates to the manuscript; null on every other card. */
-  asjp: { label: string; journal: string | null; publicationDate: string | null; licence: string | null } | null;
+  asjp: { label: string; notes: string[]; journal: string | null; publicationDate: string | null; licence: string | null } | null;
 };
 
 export type ReportV2Passage = {
@@ -245,13 +245,10 @@ export type ReportV2ViewModel = {
   asjpUnavailableNotice: string | null;
 };
 
-/** ASJP (Phase 6.5) — the card line for each attribution (descriptive; the words are counted either way). */
-export const ASJP_ATTRIBUTION_LABEL: Record<string, string> = {
-  PREVIOUSLY_PUBLISHED_WORK: "Published version of this manuscript",
-  SELF_OVERLAP_SAME_AUTHORS: "Earlier article by the same authors",
-  QUOTES_PRIMARY_SOURCE: "Quotes the same primary source",
+/** ASJP — the card line: only an established fact (Phase 7, owner decision 3); observations are the card's notes. */
+export const ASJP_CARD_LABEL: Record<string, string> = {
+  PUBLISHED_ARTICLE: "Published article (ASJP)",
   SHARED_TEXT_ORIGIN_NOT_ESTABLISHED: "Shared text — original source not established",
-  PUBLISHED_SOURCE: "Published article",
 };
 export const ASJP_UNAVAILABLE_NOTICE = "The published-articles (ASJP) check was unavailable for this report, so its similarity does not include ASJP articles.";
 
@@ -418,7 +415,7 @@ export function buildReportV2ViewModel(report: SimilarityReport): ReportV2ViewMo
       namedSources: s.sourceType === "internet" || s.sourceType === "publication"
         ? []
         : (s.namedSources ?? []),
-      asjp: s.asjp ? { label: ASJP_ATTRIBUTION_LABEL[s.asjp.attribution] ?? ASJP_ATTRIBUTION_LABEL.PUBLISHED_SOURCE, journal: s.asjp.journal, publicationDate: s.asjp.publicationDate, licence: s.asjp.licence } : null,
+      asjp: s.asjp ? { label: ASJP_CARD_LABEL[s.asjp.label] ?? ASJP_CARD_LABEL.PUBLISHED_ARTICLE, notes: Array.isArray(s.asjp.notes) ? s.asjp.notes.slice(0, 5) : [], journal: s.asjp.journal, publicationDate: s.asjp.publicationDate, licence: s.asjp.licence } : null,
     };
   });
   // archive aggregate card DOES carry namedSources — keep them regardless of type

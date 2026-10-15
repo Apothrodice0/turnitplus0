@@ -55,6 +55,8 @@ export type AsjpPersistedCard = {
   sourceId: string; title: string | null; journal: string | null; publicationDate: string | null; doi: string | null; url: string; authors: string[] | null;
   license: string | null; licenceStatus: string; relationship: string; attribution: string; scored: boolean; matchedWordCount: number;
   admittedBy: string | null; candidateBy?: string; passages: AsjpPersistedPassage[]; labels: AsjpPersistedLabel[];
+  /** Phase 7: observations only (see AsjpSourceCard.evidence); never shown as an established relationship. */
+  evidence?: { documentShare: number; titleMatch: boolean; authorNamesInByline: number };
 };
 export type AsjpEvidencePins = {
   generationId: string; logicalManifestSha256: string; catalogDigest: string | null; catalogLoadedAt: string | null; laneVersion: string | null;
@@ -82,7 +84,13 @@ export type AsjpPersistedEvidence = {
   signature?: string;
 };
 export type AsjpChannel = Array<{ sourceId: string; matchedPassages: Array<{ submittedWordStart: number; submittedWordEnd: number; matchedWordCount: number }> }>;
-export type AsjpRecordBinding = { reportDeviceKey: string; reportId: string };
+/**
+ * Phase 7 (review C): what a signed record is bound to — the report (device key + report id) AND its owner (the account
+ * id; null only for a legacy anonymous report). The manuscript (textSha256, wordCount), the index generation, manifest,
+ * catalog digest, lane version, licence policy, normalization and features are inside the signed body. A record copied
+ * to another report, another owner, another manuscript or edited in any field never verifies.
+ */
+export type AsjpRecordBinding = { reportDeviceKey: string; reportId: string; accountId: string | null };
 
 export function asjpReportEvidenceEnabled(env: Record<string, string | undefined> = process.env): boolean { return env.ASJP_REPORT_EVIDENCE_ENABLED === "true"; }
 
@@ -105,7 +113,7 @@ function stableJson(value: unknown): string {
 }
 const macOf = (record: AsjpPersistedEvidence, binding: AsjpRecordBinding, key: string) => {
   const { signature: _ignored, ...body } = record;
-  return createHmac("sha256", key).update(stableJson([ASJP_REPORT_EVIDENCE_SCHEMA, binding.reportDeviceKey, binding.reportId, body])).digest("hex");
+  return createHmac("sha256", key).update(stableJson([ASJP_REPORT_EVIDENCE_SCHEMA, binding.reportDeviceKey, binding.reportId, binding.accountId ?? null, body])).digest("hex");
 };
 export function signAsjpRecord(record: AsjpPersistedEvidence, binding: AsjpRecordBinding, key: string | null = asjpSigningKey()): AsjpPersistedEvidence {
   if (!key) return { ...record, signature: undefined };
@@ -151,6 +159,10 @@ function wellFormedCard(card: any, wordCount: number): card is AsjpPersistedCard
     if (!l || !LABEL_KINDS.has(l.kind) || !isInt(l.submittedWordStart) || !isInt(l.submittedWordEnd) || !isInt(l.words)) return false;
     if (l.submittedWordStart < 0 || l.submittedWordEnd < l.submittedWordStart || l.submittedWordEnd >= wordCount) return false;
     if (l.otherArticles !== undefined && !(isInt(l.otherArticles) && l.otherArticles >= 0)) return false;
+  }
+  if (card.evidence !== undefined) {
+    const e = card.evidence;
+    if (!e || typeof e.documentShare !== "number" || !(e.documentShare >= 0 && e.documentShare <= 1) || typeof e.titleMatch !== "boolean" || !(isInt(e.authorNamesInByline) && e.authorNamesInByline >= 0)) return false;
   }
   return card.passages.length > 0 || !card.scored;
 }

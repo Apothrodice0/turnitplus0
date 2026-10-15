@@ -529,7 +529,7 @@ async function resolvePrimarySimilaritySummaryUnderContract(
     const asjpChannel = params.asjpPublicationEvidence?.length
       ? params.asjpPublicationEvidence
       : params.asjpReportEvidence != null
-        ? asjpChannelOf(params.asjpReportEvidence, { wordCount: params.wordCount, scoringNormalizationVersion, text: params.rawText, binding: { reportDeviceKey: params.reportDeviceKey, reportId: params.reportId } }).channel
+        ? asjpChannelOf(params.asjpReportEvidence, { wordCount: params.wordCount, scoringNormalizationVersion, text: params.rawText, binding: { reportDeviceKey: params.reportDeviceKey, reportId: params.reportId, accountId: params.accountId ?? null } }).channel
         : null;
     const unifiedSimilarity = compute({
       wordCount: params.wordCount,
