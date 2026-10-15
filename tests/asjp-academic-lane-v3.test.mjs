@@ -75,7 +75,7 @@ test('v3 multi-source: two articles holding the same passage are both credited a
   const c = source(v3, 3003), d = source(v3, 3004);
   assert.equal(c.credited, true);
   assert.equal(d.credited, true);
-  for (const s of [c, d]) assert.ok(s.annotations.some((a) => a.kind === 'SHARED_TEXT' && a.otherArticles >= 1) || s.matchedWordCount >= 60, 'shared or long');
+  for (const s of [c, d]) assert.ok(s.annotations.some((a) => /^SHARED_/.test(a.kind) && a.otherArticles >= 1 && a.originEstablished === false) || s.matchedWordCount >= 60, 'shared or long');
   const pc = range(at(parts, 6), 80);
   assert.equal(pc.filter((q) => v3.creditedPositions.includes(q)).length, 80, 'counted once in the union');
 });
@@ -99,14 +99,15 @@ test('v3 verbatim rescue keeps the frozen thresholds: two 24-word verbatim piece
   assert.ok(r.sources.every((s) => s.admittedBy !== 'VERBATIM_RESCUE'));
 });
 
-test('v3 structural filter: a short citation-form cluster is set aside with evidence; without the filter it is credited', async () => {
+test('v4 structural form: a short citation-form cluster stays in the score, labelled with its evidence', async () => {
   const b3 = source(v3, 3002), b2 = source(await run(manuscript, { submissionTitle: OWN_TITLE, corrections: { structuralFilter: false } }), 3002);
   const start = at(parts, 4), n = wordsOf(CITATION).length;
-  const sc = b3.structuralClusters.find((c) => c.submittedWordStart >= start && c.submittedWordEnd < start + n);
-  assert.ok(sc, 'the citation cluster is classified');
+  const sc = b3.annotations.find((a) => a.kind === 'STRUCTURAL_FORM' && a.submittedWordStart >= start && a.submittedWordEnd < start + n);
+  assert.ok(sc, 'the citation cluster is labelled');
   assert.equal(sc.category, 'BIBLIOGRAPHIC_CITATION');
   assert.ok(sc.evidence.numbers >= 2 && sc.evidence.bibliographicWords >= 2);
-  assert.ok(!v3.creditedPositions.includes(start + 2));
+  assert.deepEqual(b3.structuralClusters, [], 'v4 removes only repeated placeholder text');
+  assert.ok(range(start, n).every((q) => v3.creditedPositions.includes(q)), 'the citation stays credited');
   assert.ok(b2.matchedPassages.some((p) => p.submittedWordStart === start && p.submittedWordEnd === start + n - 1), 'run merge makes it one anchored run');
   assert.equal(source(v2, 3002).isolatedWords, n - 1, 'v2: the verifier returned it in pieces too short to anchor');
   assert.ok(range(at(parts, 2), 80).every((q) => v3.creditedPositions.includes(q)), 'the copied passage of the same source stays credited');
@@ -134,7 +135,8 @@ test('v3 legal provision quoted by several articles: never removed as common tex
   for (const s of holders) {
     assert.equal(s.genericWords, 0, 'not removed for being common');
     assert.ok(s.annotations.some((a) => a.kind === 'LEGAL_PRIMARY_TEXT' && a.quoted));
-    assert.ok(s.annotations.some((a) => a.kind === 'SHARED_TEXT' && a.otherArticles >= 3), 'recorded as text other articles also hold');
+    assert.ok(s.annotations.some((a) => a.kind === 'LEGAL_PRIMARY_TEXT' && a.otherArticles >= 3 && a.originEstablished === false), 'recorded as text other articles also hold, origin not established');
+    assert.equal(asjpSourceCards(v3).find((c) => c.sourceId === s.sourceId).attribution, 'QUOTES_PRIMARY_SOURCE');
   }
   const v2Holders = v2.sources.filter((s) => /^asjp:301[0-3]$/.test(s.sourceId));
   assert.ok(v2Holders.every((s) => !s.credited), 'v2 removed it as generic');

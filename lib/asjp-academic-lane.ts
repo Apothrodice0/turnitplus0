@@ -41,7 +41,7 @@ import { tokensForScoringNormalization, tokenSpans } from "./similarity-core";
  * their passages. Without referenceDate (a new submission today) every indexed article was published already.
  */
 
-export const ASJP_ACADEMIC_LANE_VERSION = "asjp-academic-lane-v3";
+export const ASJP_ACADEMIC_LANE_VERSION = "asjp-academic-lane-v4";
 export const ASJP_PROVIDER = "cerist-asjp";
 
 /** Same-work thresholds: the Archive lane's self threshold (0.75), and a lower one when the titles agree. */
@@ -96,7 +96,18 @@ export const ASJP_RESCUE_MIN_VERIFIED_WORDS = 2 * 6;
  *                     SHARED_TEXT with their number, so neither is presented as the article's unique origin.
  */
 export type AsjpStructuralCategory = "PLACEHOLDER_REPETITION" | "BIBLIOGRAPHIC_CITATION" | "NAME_OR_TITLE" | "ABBREVIATION_LEGEND";
-export type AsjpAnnotation = { submittedWordStart: number; submittedWordEnd: number; words: number; kind: "LEGAL_PRIMARY_TEXT" | "SHARED_TEXT"; quoted?: boolean; markers?: string[]; otherArticles?: number };
+/**
+ * v4 labels of credited clusters (no score change):
+ *   LEGAL_PRIMARY_TEXT    the form of a legal provision: a legal instrument named around it + quoted or statutory text
+ *   RELIGIOUS_TEXT        the form of a scripture quotation: a scripture named around it + quoted or short
+ *   SHARED_QUOTATION      quoted text other indexed articles also hold (not legal / religious)
+ *   SHARED_ACADEMIC_TEXT  unquoted text other indexed articles also hold: common academic wording, origin not known
+ *   STRUCTURAL_FORM       a citation / title / acronym-legend form (no longer removed: v4 removes repetition only)
+ * namedSource is the instrument or scripture as the manuscript names it (or null); originEstablished is always false:
+ * the lane knows where the words stand in the index, never which text they first came from.
+ */
+export type AsjpAnnotationKind = "LEGAL_PRIMARY_TEXT" | "RELIGIOUS_TEXT" | "SHARED_QUOTATION" | "SHARED_ACADEMIC_TEXT" | "STRUCTURAL_FORM";
+export type AsjpAnnotation = { submittedWordStart: number; submittedWordEnd: number; words: number; kind: AsjpAnnotationKind; quoted?: boolean; markers?: string[]; otherArticles?: number; namedSource?: string | null; originEstablished?: false; category?: AsjpStructuralCategory; evidence?: Record<string, number | string> };
 export const ASJP_SAME_WORK_TITLE_MIN_CONTAINMENT = 0.05;
 export const ASJP_BYLINE_WORDS = 120;
 export const ASJP_GENERIC_MAX_RUN = 60;
@@ -333,16 +344,17 @@ export function publicationTimingOf(publicationDate: string | null | undefined, 
 }
 
 /** v3 card fields, present only when the source carries annotations (v1/v2 card shapes are unchanged otherwise). */
-function annotationWordsOf(source: AsjpLaneSource): { legalWords?: number; sharedWords?: number } {
+function annotationWordsOf(source: AsjpLaneSource): { legalWords?: number; religiousWords?: number; sharedWords?: number; structuralFormWords?: number } {
   if (!source.annotations?.length) return {};
-  return { legalWords: source.annotations.filter((a) => a.kind === "LEGAL_PRIMARY_TEXT").reduce((t, a) => t + a.words, 0), sharedWords: source.annotations.filter((a) => a.kind === "SHARED_TEXT").reduce((t, a) => t + a.words, 0) };
+  const sum = (kinds: string[]) => source.annotations.filter((a) => kinds.includes(a.kind)).reduce((t, a) => t + a.words, 0);
+  return { legalWords: sum(["LEGAL_PRIMARY_TEXT"]), religiousWords: sum(["RELIGIOUS_TEXT"]), sharedWords: sum(["SHARED_QUOTATION", "SHARED_ACADEMIC_TEXT"]) + source.annotations.filter((a) => (a.kind === "LEGAL_PRIMARY_TEXT" || a.kind === "RELIGIOUS_TEXT") && (a.otherArticles ?? 0) > 0).reduce((t, a) => t + a.words, 0), structuralFormWords: sum(["STRUCTURAL_FORM"]) };
 }
 
-/** Share of a source's credited words in clusters annotated legal text or held by other indexed articles. */
-function sharedShare(source: AsjpLaneSource): number {
+/** Share of a source's credited words in clusters labelled with one of `kinds` (all primary-source / shared kinds by default). */
+function sharedShare(source: AsjpLaneSource, kinds: string[] = ["LEGAL_PRIMARY_TEXT", "RELIGIOUS_TEXT", "SHARED_QUOTATION", "SHARED_ACADEMIC_TEXT"]): number {
   if (!source.matchedWordCount) return 0;
   const covered = new Set<number>();
-  for (const a of source.annotations) for (let q = a.submittedWordStart; q <= a.submittedWordEnd; q += 1) covered.add(q);
+  for (const a of source.annotations) if (kinds.includes(a.kind)) for (let q = a.submittedWordStart; q <= a.submittedWordEnd; q += 1) covered.add(q);
   let words = 0;
   for (const p of source.matchedPassages) for (let q = p.submittedWordStart; q <= p.submittedWordEnd; q += 1) if (covered.has(q)) words += 1;
   return words / source.matchedWordCount;
@@ -404,7 +416,23 @@ export const ASJP_LEGAL_CONTEXT_WORDS = 40;
 /** v3 legal annotation: an UNQUOTED cluster counts as reproduced statutory text only up to this many credited words */
 export const ASJP_LEGAL_UNQUOTED_MAX_WORDS = 80;
 /** A legal instrument referred to: "Article 11", "Art. 30(1)", or an instrument noun (constitution, covenant, …). */
-const INSTRUMENT_REFERENCE = /\b(?:art(?:icle)?s?\.?\s*\(?\d+|constitution|covenant|declaration|statute|convention|charter|treaty|protocol|code|decree|ordinance|law\s+(?:no|n°|number)\.?\s*\d|act\s+(?:no|of)\b)/i;
+const INSTRUMENT_REFERENCE = /\b(?:art(?:icle)?s?\.?\s*\(?\d+|constitution|covenant|declaration|statute|convention|charter|treaty|protocol|code|decree|ordinance|law\s+(?:no|n°|number)\.?\s*\d+|act\s+(?:no|of))(?![\p{L}])/iu;
+/** v4: a scripture referred to (category vocabulary, not phrases of any manuscript). */
+const SCRIPTURE_REFERENCE = /\b(?:qur['’\s]?an|koran|surah?|sura|ayah|hadith|sunnah|bible|biblical|gospel|psalms?|torah|scripture)(?![\p{L}])/iu;
+/** v4: words after a cluster searched for the source it quotes ("… (Qur'an 5:32)") */
+export const ASJP_PRIMARY_SOURCE_AFTER_WORDS = 15;
+
+/**
+ * v4: the form of a scripture quotation (label only): a scripture is named in the cluster or around it, and the
+ * cluster is quoted or at most ASJP_LEGAL_UNQUOTED_MAX_WORDS credited words. Checked before the legal form.
+ */
+export function religiousForm(words: number, before: string, after: string, context: string): { markers: string[]; quoted: boolean } | null {
+  const scripture = context.match(SCRIPTURE_REFERENCE);
+  if (!scripture) return null;
+  const quoted = QUOTATION_MARK.test(before) || QUOTATION_MARK.test(after);
+  if (!quoted && words > ASJP_LEGAL_UNQUOTED_MAX_WORDS) return null;
+  return { markers: [scripture[0].toLowerCase().replace(/\s+/g, " ")], quoted };
+}
 
 /**
  * The form of a quoted or verbatim legal provision (annotation only; nothing is removed from the score):
@@ -801,15 +829,20 @@ async function runLane(request: AsjpLaneRequest): Promise<AsjpLaneResult> {
       let genericWords = 0;
       const genericClusters: AsjpLaneSource["genericClusters"] = [];
       // v3: the legal form of a cluster (an instrument referred to + quoted or statutory text), or null
-      const legalOf = (cluster: AsjpMatchedPassage[]) => {
+      // v4: the primary-source form of a cluster — religious (scripture named) or legal (instrument named) — or null
+      const legalOf = (cluster: AsjpMatchedPassage[]): { kind: "LEGAL_PRIMARY_TEXT" | "RELIGIOUS_TEXT"; markers: string[]; quoted: boolean } | null => {
         if (corrections.annotations === false) return null;
         const start = cluster[0].submittedWordStart, end = cluster[cluster.length - 1].submittedWordEnd;
         const words = cluster.reduce((total, passage) => total + passage.matchedWordCount, 0);
         if (words > ASJP_LEGAL_MAX_CLUSTER_WORDS) return null;
         const tokens = cluster.flatMap((passage) => submission.slice(passage.submittedWordStart, passage.submittedWordEnd + 1));
-        const legal = legalForm(tokens, gapText(start - 1, start), gapText(end, end + 1), originalOf(Math.max(0, start - ASJP_LEGAL_CONTEXT_WORDS), Math.max(0, start - 1)) + " " + originalOf(start, end));
+        const before = gapText(start - 1, start), after = gapText(end, end + 1);
+        const context = originalOf(Math.max(0, start - ASJP_LEGAL_CONTEXT_WORDS), Math.max(0, start - 1)) + " " + originalOf(start, end) + " " + originalOf(Math.min(submission.length - 1, end + 1), Math.min(submission.length - 1, end + ASJP_PRIMARY_SOURCE_AFTER_WORDS));
+        const religious = religiousForm(words, before, after, context);
+        if (religious) return { kind: "RELIGIOUS_TEXT", ...religious };
+        const legal = legalForm(tokens, before, after, context);
         // without quotation marks, only a short cluster is taken as reproduced statutory text (a long one is analysis)
-        return legal && (legal.quoted || words <= ASJP_LEGAL_UNQUOTED_MAX_WORDS) ? legal : null;
+        return legal && (legal.quoted || words <= ASJP_LEGAL_UNQUOTED_MAX_WORDS) ? { kind: "LEGAL_PRIMARY_TEXT", ...legal } : null;
       };
       if (corrections.genericFilter !== false) {
         const kept: AsjpMatchedPassage[] = [];
@@ -833,6 +866,7 @@ async function runLane(request: AsjpLaneRequest): Promise<AsjpLaneResult> {
       // forms only for clusters of fewer than ASJP_GENERIC_MAX_RUN credited words
       let structuralWords = 0;
       const structuralClusters: AsjpLaneSource["structuralClusters"] = [];
+      const structuralForms: AsjpAnnotation[] = [];
       if (corrections.structuralFilter !== false) {
         const kept: AsjpMatchedPassage[] = [];
         for (const cluster of clusterPassages(passages)) {
@@ -841,23 +875,26 @@ async function runLane(request: AsjpLaneRequest): Promise<AsjpLaneResult> {
           const tokens = cluster.flatMap((passage) => submission.slice(passage.submittedWordStart, passage.submittedWordEnd + 1));
           const form = repetitionForm(submission.slice(start, end + 1))
             ?? (words < ASJP_GENERIC_MAX_RUN ? structuralForm(tokens, cluster.map((passage) => originalOf(passage.submittedWordStart, passage.submittedWordEnd)).join(" ")) : null);
-          if (form) { structuralWords += words; structuralClusters.push({ submittedWordStart: start, submittedWordEnd: end, words, category: form.category, evidence: form.evidence }); }
-          else kept.push(...cluster);
+          if (form && form.category === "PLACEHOLDER_REPETITION") { structuralWords += words; structuralClusters.push({ submittedWordStart: start, submittedWordEnd: end, words, category: form.category, evidence: form.evidence }); }
+          else { kept.push(...cluster); if (form) structuralForms.push({ submittedWordStart: start, submittedWordEnd: end, words, kind: "STRUCTURAL_FORM", category: form.category, evidence: form.evidence }); }
         }
         passages = kept;
       }
       // v3 annotations (no score change)
-      const annotations: AsjpAnnotation[] = [];
+      const annotations: AsjpAnnotation[] = [...structuralForms];
       if (corrections.annotations !== false) {
         for (const cluster of clusterPassages(passages)) {
           const start = cluster[0].submittedWordStart, end = cluster[cluster.length - 1].submittedWordEnd;
           const words = cluster.reduce((total, passage) => total + passage.matchedWordCount, 0);
-          const legal = legalOf(cluster);
-          if (legal) annotations.push({ submittedWordStart: start, submittedWordEnd: end, words, kind: "LEGAL_PRIMARY_TEXT", quoted: legal.quoted, markers: legal.markers });
+          const primary = legalOf(cluster);
           const longest = cluster.reduce((best, passage) => (passage.matchedWordCount > best.matchedWordCount ? passage : best), cluster[0]);
-          if (longest.matchedWordCount < ASJP_GENERIC_MAX_RUN || legal) {
-            const others = await otherArticlesHolding(reader, submission.slice(longest.submittedWordStart, longest.submittedWordEnd + 1), docId, genericCache);
-            if (others > 0) annotations.push({ submittedWordStart: start, submittedWordEnd: end, words, kind: "SHARED_TEXT", otherArticles: others });
+          const others = longest.matchedWordCount < ASJP_GENERIC_MAX_RUN || primary
+            ? await otherArticlesHolding(reader, submission.slice(longest.submittedWordStart, longest.submittedWordEnd + 1), docId, genericCache)
+            : 0;
+          if (primary) annotations.push({ submittedWordStart: start, submittedWordEnd: end, words, kind: primary.kind, quoted: primary.quoted, markers: primary.markers, otherArticles: others, namedSource: primary.markers[0] ?? null, originEstablished: false });
+          else if (others > 0) {
+            const quoted = QUOTATION_MARK.test(gapText(start - 1, start)) || QUOTATION_MARK.test(gapText(end, end + 1));
+            annotations.push({ submittedWordStart: start, submittedWordEnd: end, words, kind: quoted ? "SHARED_QUOTATION" : "SHARED_ACADEMIC_TEXT", quoted, otherArticles: others, namedSource: null, originEstablished: false });
           }
         }
       }
@@ -947,10 +984,14 @@ export type AsjpSourceCard = {
   /** False only for an article shown but not scored (a benchmark reproduction that excludes it). */
   scored: boolean;
   /** How the match is presented: the manuscript's own previously published work, or another publication. */
-  attribution: "PREVIOUSLY_PUBLISHED_WORK" | "SELF_OVERLAP_SAME_AUTHORS" | "SHARED_PRIMARY_OR_COMMON_TEXT" | "PUBLISHED_SOURCE";
+  /** v4: QUOTES_PRIMARY_SOURCE = >= 90 % of its credited words are legal / religious quotations; the article quotes the
+   *  text, it is not named as the text's origin. SHARED_TEXT_ORIGIN_NOT_ESTABLISHED = >= 90 % also held by other articles. */
+  attribution: "PREVIOUSLY_PUBLISHED_WORK" | "SELF_OVERLAP_SAME_AUTHORS" | "QUOTES_PRIMARY_SOURCE" | "SHARED_TEXT_ORIGIN_NOT_ESTABLISHED" | "PUBLISHED_SOURCE";
   /** v3: words in legal-provision clusters and in clusters other indexed articles also hold. */
   legalWords?: number;
+  religiousWords?: number;
   sharedWords?: number;
+  structuralFormWords?: number;
 };
 
 /**
@@ -980,7 +1021,8 @@ export function asjpSourceCards(result: AsjpLaneResult): AsjpSourceCard[] {
       relationship: source.relationship,
       scored: source.credited,
       attribution: source.relationship === "SAME_WORK_PUBLISHED_VERSION" ? "PREVIOUSLY_PUBLISHED_WORK" : source.relationship === "SAME_AUTHORS_OTHER_WORK" ? "SELF_OVERLAP_SAME_AUTHORS"
-        : sharedShare(source) >= 0.9 ? "SHARED_PRIMARY_OR_COMMON_TEXT" : "PUBLISHED_SOURCE",
+        : sharedShare(source, ["LEGAL_PRIMARY_TEXT", "RELIGIOUS_TEXT"]) >= 0.9 ? "QUOTES_PRIMARY_SOURCE"
+        : sharedShare(source) >= 0.9 ? "SHARED_TEXT_ORIGIN_NOT_ESTABLISHED" : "PUBLISHED_SOURCE",
     });
   }
   return cards;
