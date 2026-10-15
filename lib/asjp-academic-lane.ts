@@ -836,6 +836,8 @@ async function runLane(request: AsjpLaneRequest): Promise<AsjpLaneResult> {
         const words = cluster.reduce((total, passage) => total + passage.matchedWordCount, 0);
         if (words > ASJP_LEGAL_MAX_CLUSTER_WORDS) return null;
         const tokens = cluster.flatMap((passage) => submission.slice(passage.submittedWordStart, passage.submittedWordEnd + 1));
+        // a citation describes a source; it is not the quoted text of that source
+        if (words < ASJP_GENERIC_MAX_RUN && structuralForm(tokens, cluster.map((passage) => originalOf(passage.submittedWordStart, passage.submittedWordEnd)).join(" "))?.category === "BIBLIOGRAPHIC_CITATION") return null;
         const before = gapText(start - 1, start), after = gapText(end, end + 1);
         const context = originalOf(Math.max(0, start - ASJP_LEGAL_CONTEXT_WORDS), Math.max(0, start - 1)) + " " + originalOf(start, end) + " " + originalOf(Math.min(submission.length - 1, end + 1), Math.min(submission.length - 1, end + ASJP_PRIMARY_SOURCE_AFTER_WORDS));
         const religious = religiousForm(words, before, after, context);

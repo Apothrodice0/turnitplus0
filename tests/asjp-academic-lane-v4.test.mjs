@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { legalForm, religiousForm, repetitionForm } from '../lib/asjp-academic-lane.ts';
+import { legalForm, religiousForm, repetitionForm, structuralForm } from '../lib/asjp-academic-lane.ts';
+const structuralFormOf = (t) => structuralForm(t, t.join(' '))?.category;
 import { tokensForScoringNormalization } from '../lib/similarity-core.ts';
 
 /** ASJP lane v4 label forms: religious vs legal, the instrument word boundary, repetition still removed. */
@@ -28,4 +29,10 @@ test('v4: no scripture named, no religious form; an unquoted long cluster is not
 test('v4: repeated placeholder text is still recognised at any length', () => {
   const unit = 'enter your abstract here an abstract is a brief comprehensive summary of the contents of the article';
   assert.equal(repetitionForm(tok(Array.from({ length: 8 }, () => unit).join(' ')))?.category, 'PLACEHOLDER_REPETITION');
+});
+
+test('v4: a citation of a legal source is a citation form, not legal primary text', () => {
+  // the lane checks the citation form first; here the form itself
+  const cite = tokensForScoringNormalization('journal of law and human sciences university of djelfa vol 19 no 2 2026 p 340 decree no 21 of the code', 2);
+  assert.equal(structuralFormOf(cite), 'BIBLIOGRAPHIC_CITATION');
 });
