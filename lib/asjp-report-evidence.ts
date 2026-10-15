@@ -262,11 +262,11 @@ export function acceptAsjpAnswer(answer: AsjpServiceAnswer | null | undefined, e
 }
 
 /** The service call, with a client-side deadline; never throws (a failure is an UNAVAILABLE answer). */
-export async function requestAsjpAnswer(url: string, token: string, body: { text: string; title?: string | null; referenceDate?: string | null }, timeoutMs = 8000): Promise<AsjpServiceAnswer> {
+export async function requestAsjpAnswer(url: string, token: string, body: { text: string; title?: string | null; referenceDate?: string | null }, timeoutMs = 8000, extraHeaders: Record<string, string> = {}): Promise<AsjpServiceAnswer> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(`${url}/match`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${token}` }, body: JSON.stringify(body), signal: controller.signal });
+    const res = await fetch(`${url}/match`, { method: "POST", headers: { ...extraHeaders, "content-type": "application/json", authorization: `Bearer ${token}` }, body: JSON.stringify(body), signal: controller.signal });
     return (await res.json()) as AsjpServiceAnswer;
   } catch (error) {
     return { state: "UNAVAILABLE", failureCode: (error as Error)?.name === "AbortError" ? "CLIENT_TIMEOUT" : "SERVICE_UNREACHABLE" };
@@ -282,7 +282,12 @@ export async function requestAsjpAnswer(url: string, token: string, body: { text
  * Review finding 12: with ASJP on, an incomplete configuration is reported (asjpReportClientConfigProblem) and recorded
  * as UNAVAILABLE("CLIENT_MISCONFIGURED") — never silently skipped.
  */
-export type AsjpReportClientConfig = { url: string; token: string; generationId: string; logicalManifestSha256: string; laneVersion: string | null; timeoutMs: number; allowLocalResearchPolicy: boolean };
+/**
+ * Phase 7 (hosting): when the service sits behind a Cloudflare Tunnel protected by Cloudflare Access, the report path
+ * also sends the Access service-token headers (ASJP_SERVICE_ACCESS_CLIENT_ID / ASJP_SERVICE_ACCESS_CLIENT_SECRET, both
+ * or neither). Environment only, never logged; the bearer token is still required by the service itself.
+ */
+export type AsjpReportClientConfig = { url: string; token: string; generationId: string; logicalManifestSha256: string; laneVersion: string | null; timeoutMs: number; allowLocalResearchPolicy: boolean; accessHeaders: Record<string, string> };
 export function asjpReportClientConfigProblem(env: Record<string, string | undefined> = process.env): string | null {
   if (!asjpReportEvidenceEnabled(env)) return null;
   if (!env.ASJP_SERVICE_URL || !/^https?:\/\//.test(env.ASJP_SERVICE_URL)) return "ASJP_SERVICE_URL";
@@ -290,20 +295,21 @@ export function asjpReportClientConfigProblem(env: Record<string, string | undef
   else if (!(env.ASJP_SERVICE_TOKEN ?? "").trim()) return "ASJP_SERVICE_TOKEN";
   if (!env.ASJP_PINNED_GENERATION_ID || !env.ASJP_PINNED_MANIFEST_SHA256) return "ASJP_PINNED_GENERATION";
   if (!asjpSigningKey(env)) return "ASJP_EVIDENCE_SIGNING_KEY";
+  if (!!env.ASJP_SERVICE_ACCESS_CLIENT_ID !== !!env.ASJP_SERVICE_ACCESS_CLIENT_SECRET) return "ASJP_SERVICE_ACCESS_CLIENT";
   return null;
 }
 export function asjpReportClientConfig(env: Record<string, string | undefined> = process.env): AsjpReportClientConfig | null {
   if (!asjpReportEvidenceEnabled(env) || asjpReportClientConfigProblem(env)) return null;
   const token = env.ASJP_SERVICE_TOKEN_FILE ? readFileSync(env.ASJP_SERVICE_TOKEN_FILE, "utf8").trim() : (env.ASJP_SERVICE_TOKEN ?? "").trim();
   const timeout = Number(env.ASJP_SERVICE_TIMEOUT_MS ?? 8000);
-  return { url: env.ASJP_SERVICE_URL!, token, generationId: env.ASJP_PINNED_GENERATION_ID!, logicalManifestSha256: env.ASJP_PINNED_MANIFEST_SHA256!, laneVersion: env.ASJP_PINNED_LANE_VERSION || null, timeoutMs: Number.isFinite(timeout) ? Math.min(30_000, Math.max(1_000, timeout)) : 8_000, allowLocalResearchPolicy: env.ASJP_ALLOW_LOCAL_RESEARCH_POLICY === "true" };
+  return { url: env.ASJP_SERVICE_URL!, token, generationId: env.ASJP_PINNED_GENERATION_ID!, logicalManifestSha256: env.ASJP_PINNED_MANIFEST_SHA256!, laneVersion: env.ASJP_PINNED_LANE_VERSION || null, timeoutMs: Number.isFinite(timeout) ? Math.min(30_000, Math.max(1_000, timeout)) : 8_000, allowLocalResearchPolicy: env.ASJP_ALLOW_LOCAL_RESEARCH_POLICY === "true", accessHeaders: env.ASJP_SERVICE_ACCESS_CLIENT_ID && env.ASJP_SERVICE_ACCESS_CLIENT_SECRET ? { "CF-Access-Client-Id": env.ASJP_SERVICE_ACCESS_CLIENT_ID, "CF-Access-Client-Secret": env.ASJP_SERVICE_ACCESS_CLIENT_SECRET } : {} };
 }
 
 /** Query the service once for a report and return the (unsigned) record to persist (never throws; null when ASJP is off). */
 export async function checkAsjpForReport(
   input: { text: string; wordCount: number; title?: string | null },
   config: AsjpReportClientConfig | null = asjpReportClientConfig(),
-  fetchAnswer: (config: AsjpReportClientConfig, body: { text: string; title?: string | null }) => Promise<AsjpServiceAnswer> = (c, body) => requestAsjpAnswer(c.url, c.token, body, c.timeoutMs),
+  fetchAnswer: (config: AsjpReportClientConfig, body: { text: string; title?: string | null }) => Promise<AsjpServiceAnswer> = (c, body) => requestAsjpAnswer(c.url, c.token, body, c.timeoutMs, c.accessHeaders),
   attempts = 0,
   env: Record<string, string | undefined> = process.env,
 ): Promise<AsjpPersistedEvidence | null> {
