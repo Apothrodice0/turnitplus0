@@ -197,3 +197,26 @@ test('Phase 7: a serving host can require golden answers (ASJP_GOLDEN_FILE / ASJ
   assert.throws(() => asjpServiceConfigFromEnv({ ...env, ASJP_GOLDEN_FILE: bad }), /non-empty array/);
   assert.equal(asjpServiceConfigFromEnv({ ...env, ASJP_GOLDEN_FILE: goldenFile, ASJP_REQUIRE_GOLDEN: 'true' }).golden.length, 1);
 });
+
+test('Phase 7 PC hosting: signed-only /match (replay refused) and admin endpoints refused through a tunnel', async () => {
+  const p = ++port;
+  const key = 'request-signing-key-'.padEnd(48, 'q');
+  const svc = await startAsjpService({ ...base, workers: 1, port: p, requestSigningKey: key, adminLocalOnly: true });
+  try {
+    const u = `http://127.0.0.1:${p}`;
+    const unsigned = await requestAsjpAnswer(u, token, { text: manuscript }, 60_000);
+    assert.equal(unsigned.error, 'unauthorized', 'a bearer token alone is not enough when signing is required');
+    const signed = await requestAsjpAnswer(u, token, { text: manuscript }, 60_000, {}, key);
+    assert.equal(signed.state, 'COMPLETE');
+    // a captured request replayed verbatim is refused (same nonce)
+    const raw = JSON.stringify({ text: 'x' }); const ts = String(Date.now()); const nonce = 'f'.repeat(32);
+    const { createHash, createHmac } = await import('node:crypto');
+    const headers = { 'content-type': 'application/json', authorization: `Bearer ${token}`, 'x-asjp-timestamp': ts, 'x-asjp-nonce': nonce, 'x-asjp-signature': createHmac('sha256', key).update(`${ts}\n${nonce}\n${createHash('sha256').update(raw).digest('hex')}`).digest('hex') };
+    assert.equal((await fetch(`${u}/match`, { method: 'POST', headers, body: raw })).status, 200);
+    assert.equal((await fetch(`${u}/match`, { method: 'POST', headers, body: raw })).status, 401, 'replay refused');
+    // admin: allowed locally, refused when the request came through a tunnel/proxy
+    assert.equal((await fetch(`${u}/admin/refresh`, { method: 'POST', headers: admin })).status, 200);
+    assert.equal((await fetch(`${u}/admin/refresh`, { method: 'POST', headers: { ...admin, 'cf-connecting-ip': '203.0.113.9' } })).status, 403);
+    assert.equal((await fetch(`${u}/admin/refresh`, { method: 'POST', headers: { ...admin, 'x-forwarded-for': '203.0.113.9' } })).status, 403);
+  } finally { svc.close(); }
+});

@@ -14,7 +14,7 @@
 // compared in constant time, are never logged or echoed, and are removed from the workers' environment.
 import http from "node:http";
 import { readFileSync } from "node:fs";
-import { timingSafeEqual, createHash } from "node:crypto";
+import { timingSafeEqual, createHash, createHmac } from "node:crypto";
 import { fork, type ChildProcess } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -23,6 +23,13 @@ import type { AsjpWorkerConfig } from "./worker";
 export type AsjpServiceConfig = {
   port: number; token: string; adminToken: string; workers: number; queueLimit: number; deadlineMs: number; maxWords: number;
   maxBodyBytes?: number; generation: AsjpWorkerConfig; golden?: Array<{ text: string; title?: string | null; digest: string }>;
+  /**
+   * Phase 7 (PC / quick-tunnel hosting): when set, every /match request must ALSO carry an HMAC-SHA256 signature of
+   * "<timestamp>\n<nonce>\n<sha256(body)>" under this key, a timestamp within ±requestMaxSkewMs and a nonce never
+   * seen before (replay protection); the bearer token is still required. adminLocalOnly refuses /admin/* for any request
+   * that arrived through a tunnel or proxy (cloudflared adds cf-connecting-ip / x-forwarded-for).
+   */
+  requestSigningKey?: string; requestMaxSkewMs?: number; adminLocalOnly?: boolean;
   allowedRoots: string[]; allowLocalResearchPolicy?: boolean; maxRestartsPerMinute?: number; refreshDeadlineMs?: number; drainMs?: number;
 };
 type Pending = { id: number; message: any; resolve: (r: any) => void; enqueuedAt: number; timer?: NodeJS.Timeout; settled?: boolean };
@@ -182,6 +189,7 @@ export async function startAsjpService(config: AsjpServiceConfig): Promise<{ ser
   const server = http.createServer(async (req, res) => {
     try {
       const admin = req.url?.startsWith("/admin/");
+      if (admin && config.adminLocalOnly && (req.headers["cf-connecting-ip"] || req.headers["x-forwarded-for"] || req.headers["forwarded"])) return json(res, 403, { error: "forbidden" });
       if (!bearerMatches(req.headers.authorization, admin ? config.adminToken : config.token)) return json(res, 401, { error: "unauthorized" });
       if (req.method === "GET" && req.url === "/health") {
         const ready = pool.workers.filter((w) => w.ready).length;
@@ -191,7 +199,9 @@ export async function startAsjpService(config: AsjpServiceConfig): Promise<{ ser
       if (req.method === "POST" && req.url === "/match") {
         if (!pool.goldenOk) return json(res, 503, { state: "UNAVAILABLE", failureCode: "GOLDEN_MISMATCH" });
         if (pool.degraded) return json(res, 503, { state: "UNAVAILABLE", failureCode: pool.degraded });
-        const body = JSON.parse(await read(req));
+        const raw = await read(req);
+        if (config.requestSigningKey && !signatureValid(req, raw, config.requestSigningKey, config.requestMaxSkewMs ?? 300_000)) return json(res, 401, { error: "unauthorized" });
+        const body = JSON.parse(raw);
         if (typeof body.text !== "string") return json(res, 400, { error: "text required" });
         if (body.referenceDate != null && !/^\d{4}-\d{2}-\d{2}$/.test(String(body.referenceDate))) return json(res, 400, { error: "referenceDate must be YYYY-MM-DD" });
         if (body.text.split(/\s+/).length > config.maxWords) return json(res, 413, { state: "REJECTED", failureCode: "TOO_LONG" });
@@ -248,6 +258,8 @@ export function asjpServiceConfigFromEnv(env: Record<string, string | undefined>
   };
   return {
     port: Number(env.ASJP_SERVICE_PORT ?? 47_500), token: secret("ASJP_SERVICE_TOKEN"), adminToken: secret("ASJP_ADMIN_TOKEN"),
+    ...(env.ASJP_REQUEST_SIGNING_KEY || env.ASJP_REQUEST_SIGNING_KEY_FILE ? { requestSigningKey: secret("ASJP_REQUEST_SIGNING_KEY") } : {}),
+    adminLocalOnly: env.ASJP_ADMIN_LOCAL_ONLY === "true",
     workers: Number(env.ASJP_SERVICE_WORKERS ?? 4), queueLimit: Number(env.ASJP_SERVICE_QUEUE ?? 32), deadlineMs: Number(env.ASJP_SERVICE_DEADLINE_MS ?? 7_000) /* below the report client 8 s timeout: abandoned work never holds a worker */, maxWords: 60_000,
     generation, allowedRoots: (env.ASJP_ALLOWED_ROOTS ?? "").split(";").filter(Boolean), allowLocalResearchPolicy: env.ASJP_ALLOW_LOCAL_RESEARCH_POLICY === "true",
     ...goldenFromEnv(env),
@@ -262,4 +274,19 @@ function goldenFromEnv(env: Record<string, string | undefined>): { golden?: Asjp
   const valid = Array.isArray(golden) && golden.length > 0 && golden.every((g: any) => typeof g?.text === "string" && typeof g?.digest === "string" && /^[0-9a-f]{64}$/.test(g.digest));
   if (!valid) throw new Error("ASJP_GOLDEN_FILE must be a non-empty array of {text, title?, digest}");
   return { golden };
+}
+
+/** Nonces seen inside the skew window (replay protection); entries expire after twice the window. */
+const seenNonces = new Map<string, number>();
+/** Phase 7: HMAC request signature over "<timestamp>\n<nonce>\n<sha256(body)>", fresh timestamp, single-use nonce. */
+export function signatureValid(req: http.IncomingMessage, rawBody: string, key: string, maxSkewMs: number, now = Date.now()): boolean {
+  const ts = String(req.headers["x-asjp-timestamp"] ?? ""), nonce = String(req.headers["x-asjp-nonce"] ?? ""), sig = String(req.headers["x-asjp-signature"] ?? "");
+  if (!/^\d{13}$/.test(ts) || !/^[0-9a-f]{32}$/.test(nonce) || !/^[0-9a-f]{64}$/.test(sig)) return false;
+  if (Math.abs(now - Number(ts)) > maxSkewMs) return false;
+  for (const [n, at] of seenNonces) if (now - at > 2 * maxSkewMs) seenNonces.delete(n);
+  if (seenNonces.has(nonce)) return false;
+  const expected = createHmac("sha256", key).update(`${ts}\n${nonce}\n${createHash("sha256").update(rawBody).digest("hex")}`).digest();
+  if (!timingSafeEqual(expected, Buffer.from(sig, "hex"))) return false;
+  seenNonces.set(nonce, now);
+  return true;
 }

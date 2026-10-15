@@ -29,7 +29,7 @@
  * Union scoring is computeUnifiedSimilarity's own: a word ASJP shares with another channel counts once, and
  * asjpPublicationPositions lists only the words no other channel holds, so a highlight is never double counted.
  */
-import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 
 export const ASJP_REPORT_EVIDENCE_SCHEMA = "asjp-report-evidence-v1";
@@ -262,11 +262,19 @@ export function acceptAsjpAnswer(answer: AsjpServiceAnswer | null | undefined, e
 }
 
 /** The service call, with a client-side deadline; never throws (a failure is an UNAVAILABLE answer). */
-export async function requestAsjpAnswer(url: string, token: string, body: { text: string; title?: string | null; referenceDate?: string | null }, timeoutMs = 8000, extraHeaders: Record<string, string> = {}): Promise<AsjpServiceAnswer> {
+export async function requestAsjpAnswer(url: string, token: string, body: { text: string; title?: string | null; referenceDate?: string | null }, timeoutMs = 8000, extraHeaders: Record<string, string> = {}, requestSigningKey: string | null = null): Promise<AsjpServiceAnswer> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(`${url}/match`, { method: "POST", headers: { ...extraHeaders, "content-type": "application/json", authorization: `Bearer ${token}` }, body: JSON.stringify(body), signal: controller.signal });
+    const raw = JSON.stringify(body);
+    const signed: Record<string, string> = {};
+    if (requestSigningKey) {
+      // Phase 7: HMAC over "<timestamp>\n<nonce>\n<sha256(body)>" with a fresh single-use nonce (the service refuses replays)
+      const ts = String(Date.now()), nonce = randomUUID().replace(/-/g, "");
+      signed["x-asjp-timestamp"] = ts; signed["x-asjp-nonce"] = nonce;
+      signed["x-asjp-signature"] = createHmac("sha256", requestSigningKey).update(`${ts}\n${nonce}\n${createHash("sha256").update(raw).digest("hex")}`).digest("hex");
+    }
+    const res = await fetch(`${url}/match`, { method: "POST", headers: { ...extraHeaders, ...signed, "content-type": "application/json", authorization: `Bearer ${token}` }, body: raw, signal: controller.signal });
     return (await res.json()) as AsjpServiceAnswer;
   } catch (error) {
     return { state: "UNAVAILABLE", failureCode: (error as Error)?.name === "AbortError" ? "CLIENT_TIMEOUT" : "SERVICE_UNREACHABLE" };
@@ -287,7 +295,7 @@ export async function requestAsjpAnswer(url: string, token: string, body: { text
  * also sends the Access service-token headers (ASJP_SERVICE_ACCESS_CLIENT_ID / ASJP_SERVICE_ACCESS_CLIENT_SECRET, both
  * or neither). Environment only, never logged; the bearer token is still required by the service itself.
  */
-export type AsjpReportClientConfig = { url: string; token: string; generationId: string; logicalManifestSha256: string; laneVersion: string | null; timeoutMs: number; allowLocalResearchPolicy: boolean; accessHeaders: Record<string, string> };
+export type AsjpReportClientConfig = { url: string; token: string; generationId: string; logicalManifestSha256: string; laneVersion: string | null; timeoutMs: number; allowLocalResearchPolicy: boolean; accessHeaders: Record<string, string>; requestSigningKey: string | null };
 export function asjpReportClientConfigProblem(env: Record<string, string | undefined> = process.env): string | null {
   if (!asjpReportEvidenceEnabled(env)) return null;
   if (!env.ASJP_SERVICE_URL || !/^https?:\/\//.test(env.ASJP_SERVICE_URL)) return "ASJP_SERVICE_URL";
@@ -302,14 +310,14 @@ export function asjpReportClientConfig(env: Record<string, string | undefined> =
   if (!asjpReportEvidenceEnabled(env) || asjpReportClientConfigProblem(env)) return null;
   const token = env.ASJP_SERVICE_TOKEN_FILE ? readFileSync(env.ASJP_SERVICE_TOKEN_FILE, "utf8").trim() : (env.ASJP_SERVICE_TOKEN ?? "").trim();
   const timeout = Number(env.ASJP_SERVICE_TIMEOUT_MS ?? 8000);
-  return { url: env.ASJP_SERVICE_URL!, token, generationId: env.ASJP_PINNED_GENERATION_ID!, logicalManifestSha256: env.ASJP_PINNED_MANIFEST_SHA256!, laneVersion: env.ASJP_PINNED_LANE_VERSION || null, timeoutMs: Number.isFinite(timeout) ? Math.min(30_000, Math.max(1_000, timeout)) : 8_000, allowLocalResearchPolicy: env.ASJP_ALLOW_LOCAL_RESEARCH_POLICY === "true", accessHeaders: env.ASJP_SERVICE_ACCESS_CLIENT_ID && env.ASJP_SERVICE_ACCESS_CLIENT_SECRET ? { "CF-Access-Client-Id": env.ASJP_SERVICE_ACCESS_CLIENT_ID, "CF-Access-Client-Secret": env.ASJP_SERVICE_ACCESS_CLIENT_SECRET } : {} };
+  return { url: env.ASJP_SERVICE_URL!, token, generationId: env.ASJP_PINNED_GENERATION_ID!, logicalManifestSha256: env.ASJP_PINNED_MANIFEST_SHA256!, laneVersion: env.ASJP_PINNED_LANE_VERSION || null, timeoutMs: Number.isFinite(timeout) ? Math.min(30_000, Math.max(1_000, timeout)) : 8_000, allowLocalResearchPolicy: env.ASJP_ALLOW_LOCAL_RESEARCH_POLICY === "true", accessHeaders: env.ASJP_SERVICE_ACCESS_CLIENT_ID && env.ASJP_SERVICE_ACCESS_CLIENT_SECRET ? { "CF-Access-Client-Id": env.ASJP_SERVICE_ACCESS_CLIENT_ID, "CF-Access-Client-Secret": env.ASJP_SERVICE_ACCESS_CLIENT_SECRET } : {}, requestSigningKey: (env.ASJP_SERVICE_REQUEST_SIGNING_KEY ?? "").trim() || null };
 }
 
 /** Query the service once for a report and return the (unsigned) record to persist (never throws; null when ASJP is off). */
 export async function checkAsjpForReport(
   input: { text: string; wordCount: number; title?: string | null },
   config: AsjpReportClientConfig | null = asjpReportClientConfig(),
-  fetchAnswer: (config: AsjpReportClientConfig, body: { text: string; title?: string | null }) => Promise<AsjpServiceAnswer> = (c, body) => requestAsjpAnswer(c.url, c.token, body, c.timeoutMs, c.accessHeaders),
+  fetchAnswer: (config: AsjpReportClientConfig, body: { text: string; title?: string | null }) => Promise<AsjpServiceAnswer> = (c, body) => requestAsjpAnswer(c.url, c.token, body, c.timeoutMs, c.accessHeaders, c.requestSigningKey),
   attempts = 0,
   env: Record<string, string | undefined> = process.env,
 ): Promise<AsjpPersistedEvidence | null> {
