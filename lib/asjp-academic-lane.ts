@@ -43,7 +43,7 @@ import { tokensForScoringNormalization, tokenSpans } from "./similarity-core";
  * their passages. Without referenceDate (a new submission today) every indexed article was published already.
  */
 
-export const ASJP_ACADEMIC_LANE_VERSION = "asjp-academic-lane-v4";
+export const ASJP_ACADEMIC_LANE_VERSION = "asjp-academic-lane-v5";
 export const ASJP_PROVIDER = "cerist-asjp";
 
 /** Same-work thresholds: the Archive lane's self threshold (0.75), and a lower one when the titles agree. */
@@ -73,7 +73,7 @@ export const ASJP_CONTEXT_GAP_WORDS = 50;
  *                       ASJP_CONTEXT_ANCHOR_WORDS words between the manuscript and the article's indexed text that the
  *                       verifier did not return (numeric tables it does not anchor on) is added.
  */
-export type AsjpMatchingCorrections = { selfOverlapLabels?: boolean; genericFilter?: boolean; verbatimCompletion?: boolean; verbatimRescue?: boolean; rescueMinVerifiedWords?: number; rescueFastPath?: boolean; numericTables?: boolean; runMerge?: boolean; structuralFilter?: boolean; annotations?: boolean };
+export type AsjpMatchingCorrections = { selfOverlapLabels?: boolean; genericFilter?: boolean; verbatimCompletion?: boolean; verbatimRescue?: boolean; rescueMinVerifiedWords?: number; rescueFastPath?: boolean; numericTables?: boolean; runMerge?: boolean; structuralFilter?: boolean; annotations?: boolean; repetitionRemoval?: boolean };
 /**
  * v3 rescue pre-filter: only a candidate in which the verifier itself verified at least two minimum verbatim runs
  * (2 x 6 words) is re-read; the rescue still needs >= 60 exact verbatim words with a 25-word run. A pre-filter of 30
@@ -105,10 +105,16 @@ export type AsjpStructuralCategory = "PLACEHOLDER_REPETITION" | "BIBLIOGRAPHIC_C
  *   SHARED_QUOTATION      quoted text other indexed articles also hold (not legal / religious)
  *   SHARED_ACADEMIC_TEXT  unquoted text other indexed articles also hold: common academic wording, origin not known
  *   STRUCTURAL_FORM       a citation / title / acronym-legend form (no longer removed: v4 removes repetition only)
+ *   REPEATED_FORM         v5: the credited words repeat one 4-word pattern (a list of hypotheses, research questions,
+ *                         template filler). A description of the form only: the words stay credited (v4 removed them,
+ *                         and on the second independent evaluation 14 of its 18 removals were genuine copied lists)
+ * v5: SHARED_* labels are measured for clusters of ANY length (v4: only under ASJP_GENERIC_MAX_RUN words), so a long
+ * passage several articles hold (a journal's author guidelines) is labelled shared instead of credited as one article's
+ * own text. otherArticles counts the other holders found, up to ASJP_GENERIC_MIN_OTHER_ARTICLES ("at least").
  * namedSource is the instrument or scripture as the manuscript names it (or null); originEstablished is always false:
  * the lane knows where the words stand in the index, never which text they first came from.
  */
-export type AsjpAnnotationKind = "LEGAL_PRIMARY_TEXT" | "RELIGIOUS_TEXT" | "SHARED_QUOTATION" | "SHARED_ACADEMIC_TEXT" | "STRUCTURAL_FORM";
+export type AsjpAnnotationKind = "LEGAL_PRIMARY_TEXT" | "RELIGIOUS_TEXT" | "SHARED_QUOTATION" | "SHARED_ACADEMIC_TEXT" | "STRUCTURAL_FORM" | "REPEATED_FORM";
 export type AsjpAnnotation = { submittedWordStart: number; submittedWordEnd: number; words: number; kind: AsjpAnnotationKind; quoted?: boolean; markers?: string[]; otherArticles?: number; namedSource?: string | null; originEstablished?: false; category?: AsjpStructuralCategory; evidence?: Record<string, number | string> };
 export const ASJP_SAME_WORK_TITLE_MIN_CONTAINMENT = 0.05;
 export const ASJP_BYLINE_WORDS = 120;
@@ -182,7 +188,9 @@ export type AsjpNotCreditedReason =
   | "SAME_WORK_EXCLUDED_BY_POLICY"
   | "PUBLISHED_AFTER_REFERENCE_DATE"
   | "PUBLICATION_DATE_UNCERTAIN"
-  | "SOURCE_TEXT_UNAVAILABLE";
+  | "SOURCE_TEXT_UNAVAILABLE"
+  /** v5: a passage's source character offsets could not be aligned (never observed; the source is not credited). */
+  | "SOURCE_OFFSETS_UNAVAILABLE";
 
 export type AsjpLaneSource = {
   /** `asjp:<article id>` — the id the union deduplicates on. */
@@ -348,10 +356,10 @@ export function publicationTimingOf(publicationDate: string | null | undefined, 
 }
 
 /** v3 card fields, present only when the source carries annotations (v1/v2 card shapes are unchanged otherwise). */
-function annotationWordsOf(source: AsjpLaneSource): { legalWords?: number; religiousWords?: number; sharedWords?: number; structuralFormWords?: number } {
+function annotationWordsOf(source: AsjpLaneSource): { legalWords?: number; religiousWords?: number; sharedWords?: number; structuralFormWords?: number; repeatedFormWords?: number } {
   if (!source.annotations?.length) return {};
   const sum = (kinds: string[]) => source.annotations.filter((a) => kinds.includes(a.kind)).reduce((t, a) => t + a.words, 0);
-  return { legalWords: sum(["LEGAL_PRIMARY_TEXT"]), religiousWords: sum(["RELIGIOUS_TEXT"]), sharedWords: sum(["SHARED_QUOTATION", "SHARED_ACADEMIC_TEXT"]) + source.annotations.filter((a) => (a.kind === "LEGAL_PRIMARY_TEXT" || a.kind === "RELIGIOUS_TEXT") && (a.otherArticles ?? 0) > 0).reduce((t, a) => t + a.words, 0), structuralFormWords: sum(["STRUCTURAL_FORM"]) };
+  return { legalWords: sum(["LEGAL_PRIMARY_TEXT"]), religiousWords: sum(["RELIGIOUS_TEXT"]), sharedWords: sum(["SHARED_QUOTATION", "SHARED_ACADEMIC_TEXT"]) + source.annotations.filter((a) => (a.kind === "LEGAL_PRIMARY_TEXT" || a.kind === "RELIGIOUS_TEXT") && (a.otherArticles ?? 0) > 0).reduce((t, a) => t + a.words, 0), structuralFormWords: sum(["STRUCTURAL_FORM"]), ...(source.annotations.some((a) => a.kind === "REPEATED_FORM") ? { repeatedFormWords: sum(["REPEATED_FORM"]) } : {}) };
 }
 
 /** Share of a source's credited words in clusters labelled with one of `kinds` (all primary-source / shared kinds by default). */
@@ -565,7 +573,7 @@ export function maximalVerbatimRuns(submission: readonly string[], source: reado
  * text, read in rank order (up to ASJP_GENERIC_CANDIDATES_CHECKED), stopping once ASJP_GENERIC_MIN_OTHER_ARTICLES
  * holders are found.
  */
-async function otherArticlesHolding(reader: CorpusGenerationReader, run: readonly string[], ownDocId: string, cache: Map<string, number>): Promise<number> {
+async function otherArticlesHolding(reader: CorpusGenerationReader, run: readonly string[], ownDocId: string, cache: Map<string, number>, laneTokens?: LaneTokenStore | null): Promise<number> {
   const key = run.join(" ");
   const cached = cache.get(key);
   if (cached !== undefined) return cached;
@@ -576,9 +584,15 @@ async function otherArticlesHolding(reader: CorpusGenerationReader, run: readonl
     if (String(candidate.docId) === ownDocId) continue;
     if (checked >= ASJP_GENERIC_CANDIDATES_CHECKED || holders >= ASJP_GENERIC_MIN_OTHER_ARTICLES) break;
     checked += 1;
-    const fetched = await reader.fetchText(docIdFromDecimal(String(candidate.docId)));
-    if (fetched.state !== "OK") continue;
-    if (` ${tokensForScoringNormalization(fetched.text, ASJP_LANE_SCORING_NORMALIZATION).join(" ")} `.includes(` ${key} `)) holders += 1;
+    // v5 (exact): the prepared lane tokens of the article when the session holds them, else its text tokenized here
+    const prepared = laneTokens?.read(String(candidate.docId)) ?? null;
+    let tokens = prepared;
+    if (!tokens) {
+      const fetched = await reader.fetchText(docIdFromDecimal(String(candidate.docId)));
+      if (fetched.state !== "OK") continue;
+      tokens = tokensForScoringNormalization(fetched.text, ASJP_LANE_SCORING_NORMALIZATION);
+    }
+    if (` ${tokens.join(" ")} `.includes(` ${key} `)) holders += 1;
   }
   cache.set(key, holders);
   return holders;
@@ -878,7 +892,7 @@ async function runLane(request: AsjpLaneRequest): Promise<AsjpLaneResult> {
           // v3: a quoted / statutory legal provision is shared primary-source text, never removed for being common;
           // it stays credited and is annotated (legal + the number of other articles holding it)
           if (legalOf(cluster)) { kept.push(...cluster); continue; }
-          const others = await otherArticlesHolding(reader, submission.slice(longest.submittedWordStart, longest.submittedWordEnd + 1), docId, genericCache);
+          const others = await otherArticlesHolding(reader, submission.slice(longest.submittedWordStart, longest.submittedWordEnd + 1), docId, genericCache, request.session?.laneTokens);
           if (others >= ASJP_GENERIC_MIN_OTHER_ARTICLES) {
             const words = cluster.reduce((total, passage) => total + passage.matchedWordCount, 0);
             genericWords += words;
@@ -901,8 +915,8 @@ async function runLane(request: AsjpLaneRequest): Promise<AsjpLaneResult> {
           const tokens = cluster.flatMap((passage) => submission.slice(passage.submittedWordStart, passage.submittedWordEnd + 1));
           const form = repetitionForm(tokens)
             ?? (words < ASJP_GENERIC_MAX_RUN ? structuralForm(tokens, cluster.map((passage) => originalOf(passage.submittedWordStart, passage.submittedWordEnd)).join(" ")) : null);
-          if (form && form.category === "PLACEHOLDER_REPETITION") { structuralWords += words; structuralClusters.push({ submittedWordStart: start, submittedWordEnd: end, words, category: form.category, evidence: form.evidence }); }
-          else { kept.push(...cluster); if (form) structuralForms.push({ submittedWordStart: start, submittedWordEnd: end, words, kind: "STRUCTURAL_FORM", category: form.category, evidence: form.evidence }); }
+          if (form && form.category === "PLACEHOLDER_REPETITION" && corrections.repetitionRemoval === true) { structuralWords += words; structuralClusters.push({ submittedWordStart: start, submittedWordEnd: end, words, category: form.category, evidence: form.evidence }); }
+          else { kept.push(...cluster); if (form) structuralForms.push({ submittedWordStart: start, submittedWordEnd: end, words, kind: form.category === "PLACEHOLDER_REPETITION" ? "REPEATED_FORM" : "STRUCTURAL_FORM", category: form.category, evidence: form.evidence }); }
         }
         passages = kept;
       }
@@ -914,9 +928,8 @@ async function runLane(request: AsjpLaneRequest): Promise<AsjpLaneResult> {
           const words = cluster.reduce((total, passage) => total + passage.matchedWordCount, 0);
           const primary = legalOf(cluster);
           const longest = cluster.reduce((best, passage) => (passage.matchedWordCount > best.matchedWordCount ? passage : best), cluster[0]);
-          const others = longest.matchedWordCount < ASJP_GENERIC_MAX_RUN || primary
-            ? await otherArticlesHolding(reader, submission.slice(longest.submittedWordStart, longest.submittedWordEnd + 1), docId, genericCache)
-            : 0;
+          // v5: measured for every cluster (v4: only below ASJP_GENERIC_MAX_RUN words, or a primary source)
+          const others = await otherArticlesHolding(reader, submission.slice(longest.submittedWordStart, longest.submittedWordEnd + 1), docId, genericCache, request.session?.laneTokens);
           if (primary) annotations.push({ submittedWordStart: start, submittedWordEnd: end, words, kind: primary.kind, quoted: primary.quoted, markers: primary.markers, otherArticles: others, namedSource: primary.markers[0] ?? null, originEstablished: false });
           else if (others > 0) {
             const quoted = QUOTATION_MARK.test(gapText(start - 1, start)) || QUOTATION_MARK.test(gapText(end, end + 1));
@@ -938,6 +951,9 @@ async function runLane(request: AsjpLaneRequest): Promise<AsjpLaneResult> {
       };
       if (supportedPassages.length === 0) { sources.push({ ...supported, notCreditedReason: "NO_VERBATIM_SOURCE_SUPPORT" }); continue; }
       if (passages.length === 0) { sources.push({ ...supported, notCreditedReason: structuralWords > 0 ? "STRUCTURAL_BOILERPLATE" : genericWords > 0 ? "GENERIC_COMMON_TEXT" : "ONLY_ISOLATED_SHORT_PASSAGES" }); continue; }
+      // v5: every credited passage carries exact source character offsets, or the source is not credited (an offset
+      // of -1 would be a link to nowhere; never observed)
+      if (passages.some((passage) => !(passage.sourceCharStart >= 0 && passage.sourceCharEnd > passage.sourceCharStart))) { sources.push({ ...supported, notCreditedReason: "SOURCE_OFFSETS_UNAVAILABLE" }); continue; }
 
       // same work: the article is this manuscript's published version
       const sourceTitleWords = entry.title ? tokensForScoringNormalization(entry.title, ASJP_LANE_SCORING_NORMALIZATION) : [];
@@ -960,6 +976,36 @@ async function runLane(request: AsjpLaneRequest): Promise<AsjpLaneResult> {
       supported.credited = true;
       for (const passage of passages) for (let position = passage.submittedWordStart; position <= passage.submittedWordEnd; position += 1) credited.add(position);
       sources.push(supported);
+    }
+    // v5 CO-CREDITED SHARED TEXT (labels only): words this answer credits verbatim to two or more different articles are
+    // held by each of them — exact evidence that the text is shared, whatever extraction differences kept the
+    // index probe (the cluster's longest run, character for character) from finding the others. A credited cluster
+    // half or more of whose words other credited articles also hold is labelled SHARED (origin not established), with
+    // otherArticles raised to the number of those articles; nothing is removed or re-scored.
+    if (corrections.annotations !== false) {
+      const holdersAt = new Map<number, Set<string>>();
+      for (const source of sources) if (source.credited) for (const passage of source.matchedPassages) for (let q = passage.submittedWordStart; q <= passage.submittedWordEnd; q += 1) { const set = holdersAt.get(q) ?? new Set<string>(); set.add(source.sourceId); holdersAt.set(q, set); }
+      for (const source of sources) {
+        if (!source.credited) continue;
+        for (const cluster of clusterPassages(source.matchedPassages)) {
+          const start = cluster[0].submittedWordStart, end = cluster[cluster.length - 1].submittedWordEnd;
+          const words = cluster.reduce((total, passage) => total + passage.matchedWordCount, 0);
+          const others = new Map<string, number>();
+          let coHeld = 0;
+          for (const passage of cluster) for (let q = passage.submittedWordStart; q <= passage.submittedWordEnd; q += 1) {
+            const set = holdersAt.get(q)!;
+            if (set.size > 1) coHeld += 1;
+            for (const id of set) if (id !== source.sourceId) others.set(id, (others.get(id) ?? 0) + 1);
+          }
+          if (coHeld * 2 < words) continue;
+          const coCredited = [...others.values()].filter((n) => n * 2 >= words).length;
+          if (coCredited === 0) continue;
+          const existing = source.annotations.find((a) => a.submittedWordStart <= end && a.submittedWordEnd >= start && (a.kind === "SHARED_ACADEMIC_TEXT" || a.kind === "SHARED_QUOTATION" || a.kind === "LEGAL_PRIMARY_TEXT" || a.kind === "RELIGIOUS_TEXT"));
+          if (existing) { existing.otherArticles = Math.max(existing.otherArticles ?? 0, coCredited); continue; }
+          const quoted = QUOTATION_MARK.test(gapText(start - 1, start)) || QUOTATION_MARK.test(gapText(end, end + 1));
+          source.annotations.push({ submittedWordStart: start, submittedWordEnd: end, words, kind: quoted ? "SHARED_QUOTATION" : "SHARED_ACADEMIC_TEXT", quoted, otherArticles: coCredited, namedSource: null, originEstablished: false });
+        }
+      }
     }
     const supportedAt = performance.now();
     sources.sort((left, right) => Number(right.credited) - Number(left.credited) || right.matchedWordCount - left.matchedWordCount || (left.sourceId < right.sourceId ? -1 : 1));
@@ -1025,6 +1071,13 @@ export type AsjpSourceCard = {
   religiousWords?: number;
   sharedWords?: number;
   structuralFormWords?: number;
+  repeatedFormWords?: number;
+  /** v5: the credited passages with exact source offsets (token indices inclusive, characters end-exclusive). */
+  passages: Array<{ submittedWordStart: number; submittedWordEnd: number; sourceWordStart: number; sourceWordEnd: number; sourceCharStart: number; sourceCharEnd: number }>;
+  /** v5: the labels of the credited clusters (descriptive; no score change). */
+  labels: Array<{ kind: AsjpAnnotationKind; submittedWordStart: number; submittedWordEnd: number; words: number; otherArticles?: number; namedSource?: string | null; category?: AsjpStructuralCategory; quoted?: boolean }>;
+  admittedBy: "VERIFIER" | "VERBATIM_RESCUE" | null;
+  candidateBy?: "NUMERIC_TABLE";
 };
 
 /**
@@ -1053,6 +1106,10 @@ export function asjpSourceCards(result: AsjpLaneResult): AsjpSourceCard[] {
       matchedWordCount: source.matchedWordCount,
       relationship: source.relationship,
       scored: source.credited,
+      passages: source.matchedPassages.map(({ submittedWordStart, submittedWordEnd, sourceWordStart, sourceWordEnd, sourceCharStart, sourceCharEnd }) => ({ submittedWordStart, submittedWordEnd, sourceWordStart, sourceWordEnd, sourceCharStart, sourceCharEnd })),
+      labels: source.annotations.map((a) => ({ kind: a.kind, submittedWordStart: a.submittedWordStart, submittedWordEnd: a.submittedWordEnd, words: a.words, ...(a.otherArticles !== undefined ? { otherArticles: a.otherArticles } : {}), ...(a.namedSource !== undefined ? { namedSource: a.namedSource } : {}), ...(a.category ? { category: a.category } : {}), ...(a.quoted !== undefined ? { quoted: a.quoted } : {}) })),
+      admittedBy: source.admittedBy,
+      ...(source.candidateBy ? { candidateBy: source.candidateBy } : {}),
       attribution: source.relationship === "SAME_WORK_PUBLISHED_VERSION" ? "PREVIOUSLY_PUBLISHED_WORK" : source.relationship === "SAME_AUTHORS_OTHER_WORK" ? "SELF_OVERLAP_SAME_AUTHORS"
         : sharedShare(source, ["LEGAL_PRIMARY_TEXT", "RELIGIOUS_TEXT"]) >= 0.9 ? "QUOTES_PRIMARY_SOURCE"
         : sharedShare(source) >= 0.9 ? "SHARED_TEXT_ORIGIN_NOT_ESTABLISHED" : "PUBLISHED_SOURCE",

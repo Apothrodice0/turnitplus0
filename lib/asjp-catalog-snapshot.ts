@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { DatabaseSync } from "node:sqlite";
@@ -13,7 +14,13 @@ import { ALL_ENTRIES_SQL, isSqliteBusy, mergeCatalogRows } from "./asjp-catalog-
  *   refresh   loads a new snapshot the same way and swaps it in atomically; on failure the current snapshot stays
  *             and the error is reported (a takedown written to the catalog becomes effective at the next refresh)
  */
-export type AsjpCatalogSnapshot = { readonly entries: ReadonlyMap<string, AsjpCatalogEntry>; readonly loadedAt: string; readonly busyRetries: number; readonly loadMs: number };
+/** digest: sha256 over the merged entries in article order — the catalog state an answer was produced under (a takedown changes it). */
+export type AsjpCatalogSnapshot = { readonly entries: ReadonlyMap<string, AsjpCatalogEntry>; readonly loadedAt: string; readonly busyRetries: number; readonly loadMs: number; readonly digest: string };
+export function catalogDigestOf(entries: ReadonlyMap<string, AsjpCatalogEntry>): string {
+  const hash = createHash("sha256");
+  for (const key of [...entries.keys()].sort()) hash.update(JSON.stringify([key, entries.get(key)])).update("\n");
+  return hash.digest("hex");
+}
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 export async function loadAsjpCatalogSnapshot(path: string, options: { immutable?: boolean; attempts?: number; backoffMs?: number } = {}): Promise<AsjpCatalogSnapshot> {
@@ -30,7 +37,7 @@ export async function loadAsjpCatalogSnapshot(path: string, options: { immutable
       for (const row of rows) { const k = String(row.article_id); const l = byArticle.get(k); if (l) l.push(row); else byArticle.set(k, [row]); }
       const entries = new Map<string, AsjpCatalogEntry>();
       for (const [k, list] of byArticle) entries.set(k, mergeCatalogRows(list)!);
-      return { entries, loadedAt: new Date().toISOString(), busyRetries: attempt - 1, loadMs: Math.round(performance.now() - t0) };
+      return { entries, loadedAt: new Date().toISOString(), busyRetries: attempt - 1, loadMs: Math.round(performance.now() - t0), digest: catalogDigestOf(entries) };
     } catch (error) {
       if (!isSqliteBusy(error) || attempt >= attempts) throw error;
       await sleep(backoff * 2 ** (attempt - 1) + Math.floor(Math.random() * backoff));

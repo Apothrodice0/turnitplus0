@@ -7,9 +7,9 @@ import { corpusEngineScratch, fixtureSource, inventedText, removeScratch, sliceW
 import { runCorpusBuild } from '../lib/corpus-engine/builder.ts';
 import { InMemorySourceAdapter } from '../lib/corpus-engine/source-adapter.ts';
 import { LocalDirectoryObjectStore } from '../lib/corpus-engine/storage.ts';
-import { ASJP_PROVIDER, asjpPublicationEvidenceOf, runAsjpAcademicLane } from '../lib/asjp-academic-lane.ts';
+import { ASJP_PROVIDER, asjpPublicationEvidenceOf, asjpSourceCards, runAsjpAcademicLane } from '../lib/asjp-academic-lane.ts';
 import { openAsjpCatalog } from '../lib/asjp-catalog-store.ts';
-import { startAsjpService } from '../services/asjp-matching/server.ts';
+import { startAsjpService, asjpServiceConfigFromEnv, workerEnv, ASJP_SECRET_ENV } from '../services/asjp-matching/server.ts';
 import { acceptAsjpAnswer, requestAsjpAnswer } from '../lib/asjp-report-evidence.ts';
 import { computeUnifiedSimilarity } from '../lib/unified-similarity.ts';
 
@@ -122,13 +122,15 @@ test('takedown: a withdrawn article stops being credited after a catalog refresh
 });
 
 test('report adapter: only a complete, pinned answer is accepted; union scoring counts a shared word once; flag off changes nothing', () => {
-  const answer = { state: 'COMPLETE', licencePolicy: 'permitted-only', normalization: 2, generationId: built.generationId, logicalManifestSha256: built.logicalManifestSha256, wordCount: direct.submissionWordCount, asjpPublicationEvidence: asjpPublicationEvidenceOf(direct), cards: [] };
+  const answer = { state: 'COMPLETE', licencePolicy: 'permitted-only', normalization: 2, generationId: built.generationId, logicalManifestSha256: built.logicalManifestSha256, wordCount: direct.submissionWordCount, asjpPublicationEvidence: asjpPublicationEvidenceOf(direct), cards: asjpSourceCards(direct) };
   const expected = { generationId: built.generationId, logicalManifestSha256: built.logicalManifestSha256, wordCount: direct.submissionWordCount };
   assert.equal(acceptAsjpAnswer(answer, expected, false).status, 'DISABLED');
   assert.equal(acceptAsjpAnswer({ ...answer, generationId: 'gen-other' }, expected, true).reason, 'GENERATION_MISMATCH');
   assert.equal(acceptAsjpAnswer({ state: 'TIMEOUT', failureCode: 'ASJP_TIMEOUT' }, expected, true).reason, 'ASJP_TIMEOUT');
   assert.equal(acceptAsjpAnswer({ ...answer, licencePolicy: 'local-research-all' }, expected, true).reason, 'LICENCE_POLICY_NOT_ALLOWED');
   assert.equal(acceptAsjpAnswer({ ...answer, wordCount: null }, expected, true).reason, 'WORD_COUNT_MISMATCH');
+  // Phase 6.5: the evidence is derived from the cards — an answer whose cards do not carry it is refused
+  assert.equal(acceptAsjpAnswer({ ...answer, cards: [] }, expected, true).reason, 'EVIDENCE_CARD_MISMATCH');
   const accepted = acceptAsjpAnswer(answer, expected, true);
   assert.equal(accepted.status, 'INCLUDED');
   // the Archive also holds the first 50 ASJP-credited words: they count once
@@ -139,4 +141,29 @@ test('report adapter: only a complete, pinned answer is accepted; union scoring 
   assert.equal(withAsjp.asjpPublicationOnlyWords, direct.creditedPositions.length - 50);
   assert.deepEqual(withAsjp.asjpPublicationPositions, direct.creditedPositions.slice(50));
   assert.equal(JSON.stringify(computeUnifiedSimilarity({ wordCount: direct.submissionWordCount, archiveMatchedPositions: archive, asjpPublicationEvidence: null })), JSON.stringify(without), 'no channel: byte-identical');
+});
+
+test('Phase 6.5 credentials: tokens only from the environment / token files, never in a worker env, an answer or health', async () => {
+  const tokenFile = path.join(scratch, 'svc.token'), adminFile = path.join(scratch, 'adm.token'), genFile = path.join(scratch, 'gen.json');
+  fs.writeFileSync(tokenFile, 'file-service-token-123\n'); fs.writeFileSync(adminFile, 'file-admin-token-456\n'); fs.writeFileSync(genFile, JSON.stringify(generation));
+  const p = ++port;
+  const env = { ASJP_SERVICE_TOKEN_FILE: tokenFile, ASJP_ADMIN_TOKEN_FILE: adminFile, ASJP_GENERATION_CONFIG: genFile, ASJP_ALLOWED_ROOTS: scratch, ASJP_SERVICE_PORT: String(p), ASJP_SERVICE_WORKERS: '1' };
+  const config = asjpServiceConfigFromEnv(env);
+  assert.equal(config.token, 'file-service-token-123'); assert.equal(config.adminToken, 'file-admin-token-456');
+  assert.deepEqual(config.generation.features, { numericTables: false, shortSignal: null }, 'both experiments default off');
+  assert.throws(() => asjpServiceConfigFromEnv({ ...env, ASJP_SERVICE_TOKEN_FILE: undefined }), /ASJP_SERVICE_TOKEN/);
+  // a worker never receives a credential
+  const saved = Object.fromEntries(ASJP_SECRET_ENV.map((k) => [k, process.env[k]]));
+  for (const k of ASJP_SECRET_ENV) process.env[k] = 'secret-value';
+  try { for (const k of ASJP_SECRET_ENV) assert.equal(workerEnv()[k], undefined); } finally { for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } }
+  const svc = await startAsjpService(config);
+  try {
+    const u = `http://127.0.0.1:${p}`;
+    assert.equal((await fetch(`${u}/health`, { headers: { authorization: 'Bearer file-service-token-12' } })).status, 401, 'a token prefix is refused');
+    assert.equal((await fetch(`${u}/admin/refresh`, { method: 'POST', headers: { authorization: 'Bearer file-service-token-123' } })).status, 401, 'the service token is not an admin token');
+    const health = await (await fetch(`${u}/health`, { headers: { authorization: 'Bearer file-service-token-123' } })).text();
+    const answer = JSON.stringify(await requestAsjpAnswer(u, 'file-service-token-123', { text: manuscript }));
+    for (const body of [health, answer]) assert.ok(!body.includes('file-service-token-123') && !body.includes('file-admin-token-456'));
+    assert.deepEqual(JSON.parse(health).features, { numericTables: false, shortSignal: false });
+  } finally { svc.close(); }
 });

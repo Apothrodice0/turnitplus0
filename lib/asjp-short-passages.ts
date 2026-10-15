@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
-import { tokensForScoringNormalization } from "./similarity-core";
+import { tokensForScoringNormalization, tokenSpans } from "./similarity-core";
+import { docIdFromDecimal } from "./corpus-engine/ids";
 import { retrieveCandidates } from "./corpus-engine/retrieval";
 import { runWithScoringNormalization } from "./scoring-normalization-scope";
 import type { CorpusGenerationReader } from "./corpus-engine/reader";
@@ -22,7 +23,7 @@ import { repetitionForm, structuralForm } from "./asjp-academic-lane";
  *   15–24  otherHolders 0, rareWords >= rule.b.rare, contentShare >= rule.b.content, no form
  *   6–14   as 15–24 with rule.c, AND at least rule.c.sameSource other qualifying runs from the same article
  */
-export const ASJP_SHORT_PASSAGES_VERSION = "asjp-short-passages-experiment-v1";
+export const ASJP_SHORT_PASSAGES_VERSION = "asjp-short-passages-experiment-v2";
 export type ShortRule = { rareDf: number; a: { rare: number; content: number }; b: { rare: number; content: number }; c: { rare: number; content: number; sameSource: number } | null };
 /**
  * FROZEN for the Phase-6 second independent evaluation, chosen on development data only (evidence/phase6/135-short-grid.json:
@@ -82,7 +83,7 @@ export async function shortPassageRuns(options: {
       for (const c of (r.candidates ?? []).slice(0, 25)) {
         const id = String(c.docId);
         const t = options.laneTokens.read(id);
-        if (t && t.join(" ").includes(key)) set.add(id);
+        if (t && ` ${t.join(" ")} `.includes(` ${key} `)) set.add(id);
       }
       holdersCache.set(key, set);
     }
@@ -123,4 +124,42 @@ export async function shortPassageRuns(options: {
   const words = new Set<number>();
   for (const e of out) if (e.decision === "DISTINCTIVE") for (let q = e.submittedWordStart; q <= e.submittedWordEnd; q += 1) words.add(q);
   return { version: ASJP_SHORT_PASSAGES_VERSION, runs: out, distinctiveWords: [...words].sort((x, y) => x - y) };
+}
+
+/**
+ * Phase 6.5: the 25–59-word SHORT-PASSAGE SIGNAL — a separate, UNSCORED research signal for an isolated research /
+ * debug view. It is the DISTINCTIVE 25–59-word runs of shortPassageRuns (the frozen SHORT_RULE tier a), each with its
+ * source and exact source offsets; 6–24-word runs stay research-only (shortPassageRuns) and are never in the signal.
+ * Its positions are never scored highlights: they are outside the lane's credited words by construction and must
+ * never be passed to computeUnifiedSimilarity or counted in a similarity percentage.
+ */
+export type AsjpShortPassageSignal = {
+  version: string;
+  scored: false;
+  label: "UNSCORED_RESEARCH_SIGNAL";
+  passages: Array<{
+    sourceId: string; docId: string; band: "25-39" | "40-59"; words: number;
+    submittedWordStart: number; submittedWordEnd: number;
+    sourceWordStart: number; sourceWordEnd: number; sourceCharStart: number; sourceCharEnd: number;
+    rareWords: number; contentShare: number;
+  }>;
+};
+export async function asjpShortPassageSignal(options: Parameters<typeof shortPassageRuns>[0]): Promise<AsjpShortPassageSignal> {
+  const { runs } = await shortPassageRuns(options);
+  const passages: AsjpShortPassageSignal["passages"] = [];
+  const spansOf = new Map<string, ReturnType<typeof tokenSpans> | null>();
+  for (const r of runs) {
+    if (r.decision !== "DISTINCTIVE" || r.tier !== "25-59") continue;
+    if (!spansOf.has(r.docId)) {
+      const fetched = await options.reader.fetchText(docIdFromDecimal(r.docId));
+      spansOf.set(r.docId, fetched.state === "OK" ? tokenSpans(fetched.text, 2) : null);
+    }
+    const spans = spansOf.get(r.docId);
+    const sourceWordEnd = r.sourceWordStart + r.words - 1;
+    const start = spans?.[r.sourceWordStart]?.start, end = spans?.[sourceWordEnd]?.end;
+    // exact source offsets or no passage (never a link to nowhere)
+    if (start === undefined || end === undefined || !(end > start)) continue;
+    passages.push({ sourceId: r.sourceId, docId: r.docId, band: r.words >= 40 ? "40-59" : "25-39", words: r.words, submittedWordStart: r.submittedWordStart, submittedWordEnd: r.submittedWordEnd, sourceWordStart: r.sourceWordStart, sourceWordEnd, sourceCharStart: start, sourceCharEnd: end, rareWords: r.rareWords, contentShare: r.contentShare });
+  }
+  return { version: ASJP_SHORT_PASSAGES_VERSION, scored: false, label: "UNSCORED_RESEARCH_SIGNAL", passages };
 }

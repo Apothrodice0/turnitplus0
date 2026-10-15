@@ -10,7 +10,11 @@
 // Enabled only with ASJP_SERVICE_ENABLED=true. /match and /health need the service token; /admin/* the admin token.
 // A switch is accepted only for generation roots / catalogs under config.allowedRoots and the service's own licence
 // policy (a serving service refuses the local-research policy unless config.allowLocalResearchPolicy).
+// Credentials (Phase 6.5): tokens come from the caller or asjpServiceConfigFromEnv (environment / token files), are
+// compared in constant time, are never logged or echoed, and are removed from the workers' environment.
 import http from "node:http";
+import { readFileSync } from "node:fs";
+import { timingSafeEqual, createHash } from "node:crypto";
 import { fork, type ChildProcess } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -25,6 +29,14 @@ type Pending = { id: number; message: any; resolve: (r: any) => void; enqueuedAt
 type Worker = { child: ChildProcess; ready: boolean; busy: Pending | null; info?: any; refresh: Map<number, (m: any) => void> };
 
 const here = path.dirname(fileURLToPath(import.meta.url));
+/** Environment variables a worker never receives (credentials). */
+export const ASJP_SECRET_ENV = ["ASJP_SERVICE_TOKEN", "ASJP_ADMIN_TOKEN", "ASJP_SERVICE_TOKEN_FILE", "ASJP_ADMIN_TOKEN_FILE"];
+export function workerEnv(): NodeJS.ProcessEnv { const env = { ...process.env }; for (const k of ASJP_SECRET_ENV) delete env[k]; return env; }
+/** Constant-time bearer check (hash first, so lengths never leak). */
+function bearerMatches(header: string | undefined, token: string): boolean {
+  const digest = (v: string) => createHash("sha256").update(v).digest();
+  return timingSafeEqual(digest(header ?? ""), digest(`Bearer ${token}`));
+}
 let seq = 0;
 const settle = (p: Pending, r: any) => { if (p.settled) return; p.settled = true; clearTimeout(p.timer); p.resolve(r); };
 
@@ -39,7 +51,7 @@ class Pool {
   private restartTimes: number[] = [];
   constructor(readonly config: AsjpServiceConfig, readonly generation: AsjpWorkerConfig) {}
   private spawn(): Worker {
-    const child = fork(path.join(here, "worker.ts"), [], { execArgv: ["--import", "tsx", "--max-old-space-size=4096"], env: { ...process.env, ASJP_WORKER_CONFIG: JSON.stringify(this.generation) }, stdio: ["ignore", "ignore", "inherit", "ipc"] });
+    const child = fork(path.join(here, "worker.ts"), [], { execArgv: ["--import", "tsx", "--max-old-space-size=4096"], env: { ...workerEnv(), ASJP_WORKER_CONFIG: JSON.stringify(this.generation) }, stdio: ["ignore", "ignore", "inherit", "ipc"] });
     const w: Worker = { child, ready: false, busy: null, refresh: new Map() };
     child.on("error", () => { this.counters.sendErrors += 1; w.ready = false; });
     child.on("message", (m: any) => {
@@ -140,7 +152,7 @@ class Pool {
 function validGeneration(config: AsjpServiceConfig, g: AsjpWorkerConfig): string | null {
   if (!g || typeof g.root !== "string" || typeof g.catalogPath !== "string" || !g.generationId || !g.logicalManifestSha256) return "incomplete generation config";
   const inside = (p: string) => config.allowedRoots.some((r) => path.resolve(p).toLowerCase().startsWith(path.resolve(r).toLowerCase() + path.sep));
-  if (!inside(g.root) || !inside(g.catalogPath) || (g.laneTokensDir && !inside(g.laneTokensDir)) || (g.numericIndexDir && !inside(g.numericIndexDir))) return "a path is outside the allowed roots";
+  if (!inside(g.root) || !inside(g.catalogPath) || (g.laneTokensDir && !inside(g.laneTokensDir)) || (g.numericIndexDir && !inside(g.numericIndexDir)) || (g.features?.shortSignal?.wordDfPath && !inside(g.features.shortSignal.wordDfPath))) return "a path is outside the allowed roots";
   if (g.licencePolicy !== config.generation.licencePolicy) return "the licence policy differs from the service's";
   return null;
 }
@@ -165,11 +177,11 @@ export async function startAsjpService(config: AsjpServiceConfig): Promise<{ ser
   const server = http.createServer(async (req, res) => {
     try {
       const admin = req.url?.startsWith("/admin/");
-      if (req.headers.authorization !== `Bearer ${admin ? config.adminToken : config.token}`) return json(res, 401, { error: "unauthorized" });
+      if (!bearerMatches(req.headers.authorization, admin ? config.adminToken : config.token)) return json(res, 401, { error: "unauthorized" });
       if (req.method === "GET" && req.url === "/health") {
         const ready = pool.workers.filter((w) => w.ready).length;
         const ok = ready === pool.workers.length && pool.goldenOk && !pool.degraded;
-        return json(res, ok ? 200 : 503, { ok, workersReady: ready, workers: pool.workers.length, goldenOk: pool.goldenOk, degraded: pool.degraded, generationId: pool.generation.generationId, logicalManifestSha256: pool.generation.logicalManifestSha256, licencePolicy: pool.generation.licencePolicy, queue: pool.queue.length, counters: pool.counters, workerInfo: pool.workers.map((w) => w.info ?? null) });
+        return json(res, ok ? 200 : 503, { ok, workersReady: ready, workers: pool.workers.length, goldenOk: pool.goldenOk, degraded: pool.degraded, generationId: pool.generation.generationId, logicalManifestSha256: pool.generation.logicalManifestSha256, licencePolicy: pool.generation.licencePolicy, features: pool.workers[0]?.info?.features ?? null, queue: pool.queue.length, counters: pool.counters, workerInfo: pool.workers.map((w) => w.info ?? null) });
       }
       if (req.method === "POST" && req.url === "/match") {
         if (!pool.goldenOk) return json(res, 503, { state: "UNAVAILABLE", failureCode: "GOLDEN_MISMATCH" });
@@ -201,4 +213,33 @@ export async function startAsjpService(config: AsjpServiceConfig): Promise<{ ser
   });
   await new Promise<void>((resolve) => server.listen(config.port, "127.0.0.1", resolve));
   return { server, close: () => { server.close(); pool.close(); }, pool: () => pool };
+}
+
+/**
+ * The service configuration from the environment — the only place credentials enter (never source code):
+ *   ASJP_SERVICE_TOKEN / ASJP_SERVICE_TOKEN_FILE, ASJP_ADMIN_TOKEN / ASJP_ADMIN_TOKEN_FILE   (a file wins; trimmed)
+ *   ASJP_GENERATION_CONFIG   path of a JSON AsjpWorkerConfig (generation, catalog, token store, licence policy)
+ *   ASJP_ALLOWED_ROOTS       ";"-separated roots every path must stay inside
+ *   ASJP_SERVICE_PORT, ASJP_SERVICE_WORKERS, ASJP_SERVICE_QUEUE, ASJP_SERVICE_DEADLINE_MS
+ *   ASJP_NUMERIC_TABLES_ENABLED=true (+ numericIndexDir in the generation config)   number-table path
+ *   ASJP_SHORT_SIGNAL_ENABLED=true + ASJP_WORD_DF_PATH                               UNSCORED short-passage signal
+ */
+export function asjpServiceConfigFromEnv(env: Record<string, string | undefined> = process.env): AsjpServiceConfig {
+  const secret = (name: string): string => {
+    const file = env[`${name}_FILE`];
+    const value = file ? readFileSync(file, "utf8").trim() : (env[name] ?? "").trim();
+    if (!value) throw new Error(`${name} (or ${name}_FILE) is required`);
+    return value;
+  };
+  if (!env.ASJP_GENERATION_CONFIG) throw new Error("ASJP_GENERATION_CONFIG is required");
+  const generation = JSON.parse(readFileSync(env.ASJP_GENERATION_CONFIG, "utf8")) as AsjpWorkerConfig;
+  generation.features = {
+    numericTables: env.ASJP_NUMERIC_TABLES_ENABLED === "true",
+    shortSignal: env.ASJP_SHORT_SIGNAL_ENABLED === "true" && env.ASJP_WORD_DF_PATH ? { wordDfPath: env.ASJP_WORD_DF_PATH } : null,
+  };
+  return {
+    port: Number(env.ASJP_SERVICE_PORT ?? 47_500), token: secret("ASJP_SERVICE_TOKEN"), adminToken: secret("ASJP_ADMIN_TOKEN"),
+    workers: Number(env.ASJP_SERVICE_WORKERS ?? 4), queueLimit: Number(env.ASJP_SERVICE_QUEUE ?? 32), deadlineMs: Number(env.ASJP_SERVICE_DEADLINE_MS ?? 15_000), maxWords: 60_000,
+    generation, allowedRoots: (env.ASJP_ALLOWED_ROOTS ?? "").split(";").filter(Boolean), allowLocalResearchPolicy: env.ASJP_ALLOW_LOCAL_RESEARCH_POLICY === "true",
+  };
 }
