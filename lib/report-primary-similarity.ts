@@ -350,6 +350,18 @@ export async function resolvePrimarySimilaritySummary(
           matchedPassages: ReadonlyArray<{ submittedWordStart: number; submittedWordEnd: number; matchedWordCount: number }>;
         }>
       | null;
+    /**
+     * ASJP ACADEMIC PUBLICATIONS (local prototype, Phase 6) — the report's ACCEPTED ASJP channel
+     * (lib/asjp-report-evidence.ts acceptAsjpAnswer), threaded straight through like selectiveCorpusEvidence.
+     * Absent / null / empty leaves this resolution byte-identical to before (no ASJP key in the result). A recompute
+     * must pass the same persisted channel again; it is never re-queried here.
+     */
+    asjpPublicationEvidence?:
+      | ReadonlyArray<{
+          sourceId: string;
+          matchedPassages: ReadonlyArray<{ submittedWordStart: number; submittedWordEnd: number; matchedWordCount: number }>;
+        }>
+      | null;
     /** The archive-only fallback value — never mutated, never persisted by this function; see this module's own header comment. */
     archiveScore: number;
     /**
@@ -513,6 +525,7 @@ async function resolvePrimarySimilaritySummaryUnderContract(
       userSuppliedReferenceEvidence: params.userSuppliedReferenceEvidence,
       selectiveCorpusEvidence: params.selectiveCorpusEvidence,
       importedSimilarityEvidence,
+      ...(params.asjpPublicationEvidence?.length ? { asjpPublicationEvidence: params.asjpPublicationEvidence } : {}),
     });
     return { historicalSubmissionMatch, unifiedSimilarity, primaryScore: unifiedSimilarity.unifiedScore, isUnified: true, corpusSourceMatchingEnabled, corpusGeneration, failed: false, effectiveDeviceSelfRepresentationIds, deviceSelfSharedGuard, scoringNormalizationVersion };
   } catch (err) {
