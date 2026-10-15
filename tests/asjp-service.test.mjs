@@ -186,3 +186,14 @@ test('review 9/13: a worker env is an allowlist (no other secret reaches it); a 
     assert.deepEqual(health.features, { numericTables: false, shortSignal: false }, 'the switch kept the service features');
   } finally { svc.close(); }
 });
+
+test('Phase 7: a serving host can require golden answers (ASJP_GOLDEN_FILE / ASJP_REQUIRE_GOLDEN)', () => {
+  const tokenFile = path.join(scratch, 'g.token'), adminFile = path.join(scratch, 'g-admin.token'), genFile = path.join(scratch, 'g-gen.json'), goldenFile = path.join(scratch, 'golden.json'), bad = path.join(scratch, 'golden-bad.json');
+  fs.writeFileSync(tokenFile, 'a'.repeat(40)); fs.writeFileSync(adminFile, 'b'.repeat(40)); fs.writeFileSync(genFile, JSON.stringify(generation));
+  fs.writeFileSync(goldenFile, JSON.stringify([{ text: 'x', title: null, digest: 'c'.repeat(64) }])); fs.writeFileSync(bad, JSON.stringify([{ text: 'x' }]));
+  const env = { ASJP_SERVICE_TOKEN_FILE: tokenFile, ASJP_ADMIN_TOKEN_FILE: adminFile, ASJP_GENERATION_CONFIG: genFile, ASJP_ALLOWED_ROOTS: scratch };
+  assert.equal(asjpServiceConfigFromEnv(env).golden, undefined);
+  assert.throws(() => asjpServiceConfigFromEnv({ ...env, ASJP_REQUIRE_GOLDEN: 'true' }), /ASJP_GOLDEN_FILE is required/);
+  assert.throws(() => asjpServiceConfigFromEnv({ ...env, ASJP_GOLDEN_FILE: bad }), /non-empty array/);
+  assert.equal(asjpServiceConfigFromEnv({ ...env, ASJP_GOLDEN_FILE: goldenFile, ASJP_REQUIRE_GOLDEN: 'true' }).golden.length, 1);
+});

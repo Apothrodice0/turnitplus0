@@ -230,6 +230,8 @@ export async function startAsjpService(config: AsjpServiceConfig): Promise<{ ser
  *   ASJP_SERVICE_PORT, ASJP_SERVICE_WORKERS, ASJP_SERVICE_QUEUE, ASJP_SERVICE_DEADLINE_MS
  *   ASJP_NUMERIC_TABLES_ENABLED=true (+ numericIndexDir in the generation config)   number-table path
  *   ASJP_SHORT_SIGNAL_ENABLED=true + ASJP_WORD_DF_PATH                               UNSCORED short-passage signal
+ *   ASJP_GOLDEN_FILE   JSON [{text, title, digest}] every worker must reproduce before /health reports ready (Phase 7;
+ *                      required whenever ASJP_REQUIRE_GOLDEN=true, so a serving host can never report healthy without it)
  */
 export function asjpServiceConfigFromEnv(env: Record<string, string | undefined> = process.env): AsjpServiceConfig {
   const secret = (name: string): string => {
@@ -248,5 +250,16 @@ export function asjpServiceConfigFromEnv(env: Record<string, string | undefined>
     port: Number(env.ASJP_SERVICE_PORT ?? 47_500), token: secret("ASJP_SERVICE_TOKEN"), adminToken: secret("ASJP_ADMIN_TOKEN"),
     workers: Number(env.ASJP_SERVICE_WORKERS ?? 4), queueLimit: Number(env.ASJP_SERVICE_QUEUE ?? 32), deadlineMs: Number(env.ASJP_SERVICE_DEADLINE_MS ?? 7_000) /* below the report client 8 s timeout: abandoned work never holds a worker */, maxWords: 60_000,
     generation, allowedRoots: (env.ASJP_ALLOWED_ROOTS ?? "").split(";").filter(Boolean), allowLocalResearchPolicy: env.ASJP_ALLOW_LOCAL_RESEARCH_POLICY === "true",
+    ...goldenFromEnv(env),
   };
+}
+
+/** Golden answers from ASJP_GOLDEN_FILE; with ASJP_REQUIRE_GOLDEN=true a missing / empty / malformed file refuses to start. */
+function goldenFromEnv(env: Record<string, string | undefined>): { golden?: AsjpServiceConfig["golden"] } {
+  const required = env.ASJP_REQUIRE_GOLDEN === "true";
+  if (!env.ASJP_GOLDEN_FILE) { if (required) throw new Error("ASJP_GOLDEN_FILE is required (ASJP_REQUIRE_GOLDEN=true)"); return {}; }
+  const golden = JSON.parse(readFileSync(env.ASJP_GOLDEN_FILE, "utf8"));
+  const valid = Array.isArray(golden) && golden.length > 0 && golden.every((g: any) => typeof g?.text === "string" && typeof g?.digest === "string" && /^[0-9a-f]{64}$/.test(g.digest));
+  if (!valid) throw new Error("ASJP_GOLDEN_FILE must be a non-empty array of {text, title?, digest}");
+  return { golden };
 }
