@@ -71,7 +71,7 @@ export const ASJP_CONTEXT_GAP_WORDS = 50;
  *                       ASJP_CONTEXT_ANCHOR_WORDS words between the manuscript and the article's indexed text that the
  *                       verifier did not return (numeric tables it does not anchor on) is added.
  */
-export type AsjpMatchingCorrections = { selfOverlapLabels?: boolean; genericFilter?: boolean; verbatimCompletion?: boolean; verbatimRescue?: boolean; rescueMinVerifiedWords?: number; runMerge?: boolean; structuralFilter?: boolean; annotations?: boolean };
+export type AsjpMatchingCorrections = { selfOverlapLabels?: boolean; genericFilter?: boolean; verbatimCompletion?: boolean; verbatimRescue?: boolean; rescueMinVerifiedWords?: number; rescueFastPath?: boolean; runMerge?: boolean; structuralFilter?: boolean; annotations?: boolean };
 /**
  * v3 rescue pre-filter: only a candidate in which the verifier itself verified at least two minimum verbatim runs
  * (2 x 6 words) is re-read; the rescue still needs >= 60 exact verbatim words with a 25-word run. A pre-filter of 30
@@ -452,6 +452,54 @@ export function clusterPassages<P extends { submittedWordStart: number; submitte
   return clusters;
 }
 
+/**
+ * v3.1 rescue fast path (exact). For a candidate the verifier did not admit, the full search (maximalVerbatimRuns over
+ * the whole manuscript) is needed only if the verbatim runs could still reach STRICT_SPAN. A necessary condition:
+ *   every maximal verbatim run of >= ASJP_MINIMUM_VERBATIM_RUN words is a chain of 6-word groups the source holds, so
+ *   (a) the manuscript words covered by groups the source holds >= the words the kept (disjoint) runs can total, and
+ *   (b) the longest chain of consecutive held groups + 5 >= the longest run.
+ * Groups are compared as hashes of per-request integer word ids; a collision can only make a group look held, i.e.
+ * loosen the bound, never reject a candidate the full search would admit. When the bound passes, nothing changes.
+ */
+export type RescueSubmissionIndex = { ids: Map<string, number>; keys: Float64Array; keySet: Set<number> };
+const GROUP = ASJP_MINIMUM_VERBATIM_RUN;
+function groupKey(ids: ArrayLike<number>, at: number): number {
+  let a = 0x811c9dc5, b = 0x9747b28c;
+  for (let k = 0; k < GROUP; k += 1) { a = Math.imul(a ^ ids[at + k], 0x01000193); b = Math.imul(b ^ ids[at + k], 0x5bd1e995); b ^= b >>> 15; }
+  return (a >>> 0) * 2097152 + ((b >>> 0) & 0x1fffff);
+}
+export function rescueSubmissionIndex(submission: readonly string[]): RescueSubmissionIndex {
+  const ids = new Map<string, number>();
+  const seq = new Int32Array(submission.length);
+  for (let i = 0; i < submission.length; i += 1) { let id = ids.get(submission[i]); if (id === undefined) { id = ids.size; ids.set(submission[i], id); } seq[i] = id; }
+  const keys = new Float64Array(Math.max(0, submission.length - GROUP + 1));
+  const keySet = new Set<number>();
+  for (let i = 0; i + GROUP <= submission.length; i += 1) { keys[i] = groupKey(seq, i); keySet.add(keys[i]); }
+  return { ids, keys, keySet };
+}
+export function rescueCanAdmit(index: RescueSubmissionIndex, source: readonly string[]): boolean {
+  const seq = new Int32Array(source.length);
+  for (let i = 0; i < source.length; i += 1) seq[i] = index.ids.get(source[i]) ?? -1;
+  const held = new Set<number>();
+  let unknownAt = -1; // last source position holding a word the manuscript never uses
+  for (let i = 0; i < source.length; i += 1) {
+    if (seq[i] < 0) unknownAt = i;
+    if (i + 1 < GROUP || unknownAt > i - GROUP) continue;
+    const key = groupKey(seq, i - GROUP + 1);
+    if (index.keySet.has(key)) held.add(key);
+  }
+  if (held.size === 0) return false;
+  let covered = 0, coveredTo = -1, chain = 0, longestChain = 0;
+  for (let i = 0; i < index.keys.length; i += 1) {
+    if (!held.has(index.keys[i])) { chain = 0; continue; }
+    chain += 1; longestChain = Math.max(longestChain, chain);
+    const end = i + GROUP - 1;
+    covered += end - Math.max(coveredTo, i - 1);
+    coveredTo = end;
+  }
+  return covered >= SELECTIVE_CORPUS_STRICT_SPAN.minMatchedWords && longestChain + GROUP - 1 >= SELECTIVE_CORPUS_STRICT_SPAN.minLongestContiguousSpan;
+}
+
 /** Every maximal verbatim run of at least minWords words between the whole manuscript and the source. */
 export function maximalVerbatimRuns(submission: readonly string[], source: readonly string[], sourceGrams: Map<string, number[]>, minWords: number) {
   const runs: Array<{ submittedWordStart: number; submittedWordEnd: number; sourceWordStart: number; sourceWordEnd: number }> = [];
@@ -619,6 +667,8 @@ async function runLane(request: AsjpLaneRequest): Promise<AsjpLaneResult> {
 
     const submission = tokensForScoringNormalization(request.submissionText, ASJP_LANE_SCORING_NORMALIZATION);
     const submissionWordCount = submission.length;
+    let submissionIndexMemo: RescueSubmissionIndex | null = null;
+    const submissionIndex = () => (submissionIndexMemo ??= rescueSubmissionIndex(submission));
     const titleWords = request.submissionTitle ? tokensForScoringNormalization(request.submissionTitle, ASJP_LANE_SCORING_NORMALIZATION) : null;
     const submissionSpans = tokenSpans(request.submissionText, ASJP_LANE_SCORING_NORMALIZATION);
     const originalOf = (start: number, end: number) => request.submissionText.slice(submissionSpans[start]?.start ?? 0, submissionSpans[end]?.end ?? 0);
@@ -661,7 +711,12 @@ async function runLane(request: AsjpLaneRequest): Promise<AsjpLaneResult> {
       const fetched = await reader.fetchText(docIdFromDecimal(docId));
       if (fetched.state !== "OK") { sources.push({ ...base, notCreditedReason: admitted ? "SOURCE_TEXT_UNAVAILABLE" : "NOT_ADMITTED_BY_VERIFIER" }); continue; }
       const source = tokensForScoringNormalization(fetched.text, ASJP_LANE_SCORING_NORMALIZATION);
-      const sourceSpans = tokenSpans(fetched.text, ASJP_LANE_SCORING_NORMALIZATION);
+      // v3.1 (exact): a rescue candidate is first tested against a necessary condition on integer word ids; only one
+      // that can still meet STRICT_SPAN reaches the full search below, which is unchanged. Character spans are built
+      // only when a passage needs source offsets.
+      if (!admitted && corrections.rescueFastPath !== false && !rescueCanAdmit(submissionIndex(), source)) { sources.push({ ...base, notCreditedReason: "NOT_ADMITTED_BY_VERIFIER" }); continue; }
+      let sourceSpansMemo: ReturnType<typeof tokenSpans> | null = null;
+      const sourceSpans = () => (sourceSpansMemo ??= tokenSpans(fetched.text, ASJP_LANE_SCORING_NORMALIZATION));
       const sourceGrams = gramStarts(source, ASJP_MINIMUM_VERBATIM_RUN);
       const supportedPassages: AsjpMatchedPassage[] = [];
       let verifierWords = 0;
@@ -672,7 +727,7 @@ async function runLane(request: AsjpLaneRequest): Promise<AsjpLaneResult> {
         const total = runs.reduce((sum, run) => sum + run.submittedWordEnd - run.submittedWordStart + 1, 0);
         const longest = runs.reduce((max, run) => Math.max(max, run.submittedWordEnd - run.submittedWordStart + 1), 0);
         if (total < SELECTIVE_CORPUS_STRICT_SPAN.minMatchedWords || longest < SELECTIVE_CORPUS_STRICT_SPAN.minLongestContiguousSpan) { sources.push({ ...base, notCreditedReason: "NOT_ADMITTED_BY_VERIFIER" }); continue; }
-        rescuePassages = runs.map((run) => ({ ...run, matchedWordCount: run.submittedWordEnd - run.submittedWordStart + 1, sourceCharStart: sourceSpans[run.sourceWordStart]?.start ?? -1, sourceCharEnd: sourceSpans[run.sourceWordEnd]?.end ?? -1 }));
+        rescuePassages = runs.map((run) => ({ ...run, matchedWordCount: run.submittedWordEnd - run.submittedWordStart + 1, sourceCharStart: sourceSpans()[run.sourceWordStart]?.start ?? -1, sourceCharEnd: sourceSpans()[run.sourceWordEnd]?.end ?? -1 }));
       }
       if (rescuePassages) supportedPassages.push(...rescuePassages);
       for (const passage of admitted?.matchedPassages ?? []) {
@@ -681,8 +736,8 @@ async function runLane(request: AsjpLaneRequest): Promise<AsjpLaneResult> {
           supportedPassages.push({
             ...run,
             matchedWordCount: run.submittedWordEnd - run.submittedWordStart + 1,
-            sourceCharStart: sourceSpans[run.sourceWordStart]?.start ?? -1,
-            sourceCharEnd: sourceSpans[run.sourceWordEnd]?.end ?? -1,
+            sourceCharStart: sourceSpans()[run.sourceWordStart]?.start ?? -1,
+            sourceCharEnd: sourceSpans()[run.sourceWordEnd]?.end ?? -1,
           });
         }
       }
@@ -705,7 +760,7 @@ async function runLane(request: AsjpLaneRequest): Promise<AsjpLaneResult> {
             if (at <= run.submittedWordEnd && end - at + 1 >= ASJP_MINIMUM_VERBATIM_RUN) {
               const sourceStart = run.sourceWordStart + (at - run.submittedWordStart);
               const sourceEnd = sourceStart + (end - at);
-              supportedPassages.push({ submittedWordStart: at, submittedWordEnd: end, sourceWordStart: sourceStart, sourceWordEnd: sourceEnd, matchedWordCount: end - at + 1, sourceCharStart: sourceSpans[sourceStart]?.start ?? -1, sourceCharEnd: sourceSpans[sourceEnd]?.end ?? -1 });
+              supportedPassages.push({ submittedWordStart: at, submittedWordEnd: end, sourceWordStart: sourceStart, sourceWordEnd: sourceEnd, matchedWordCount: end - at + 1, sourceCharStart: sourceSpans()[sourceStart]?.start ?? -1, sourceCharEnd: sourceSpans()[sourceEnd]?.end ?? -1 });
               for (let q = at; q <= end; q += 1) covered.add(q);
               completionWords += end - at + 1;
             }
@@ -729,7 +784,7 @@ async function runLane(request: AsjpLaneRequest): Promise<AsjpLaneResult> {
             if (at <= run.submittedWordEnd) {
               const sourceStart = run.sourceWordStart + (at - run.submittedWordStart);
               const sourceEnd = sourceStart + (end - at);
-              supportedPassages.push({ submittedWordStart: at, submittedWordEnd: end, sourceWordStart: sourceStart, sourceWordEnd: sourceEnd, matchedWordCount: end - at + 1, sourceCharStart: sourceSpans[sourceStart]?.start ?? -1, sourceCharEnd: sourceSpans[sourceEnd]?.end ?? -1 });
+              supportedPassages.push({ submittedWordStart: at, submittedWordEnd: end, sourceWordStart: sourceStart, sourceWordEnd: sourceEnd, matchedWordCount: end - at + 1, sourceCharStart: sourceSpans()[sourceStart]?.start ?? -1, sourceCharEnd: sourceSpans()[sourceEnd]?.end ?? -1 });
               for (let q = at; q <= end; q += 1) covered.add(q);
               completionWords += end - at + 1;
               mergeFillWords += end - at + 1;
