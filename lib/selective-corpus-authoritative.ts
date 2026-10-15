@@ -195,6 +195,8 @@ async function resolveAndPersist(
     scoringNormalizationVersion,
     externalAcademicEvidence: verifiedAcademicEvidence,
     selectiveCorpusEvidence: evidenceSelection.evidence,
+    // ASJP (Phase 6.5): the record persisted at upload — the final score carries the same ASJP evidence
+    asjpReportEvidence: payload.asjpEvidence,
     archiveScore: payload.archiveScore ?? payload.score ?? Number(archiveScoreColumn),
   });
 

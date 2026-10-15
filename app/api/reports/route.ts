@@ -48,6 +48,7 @@ import type { UnifiedSimilarityResult } from '../../../lib/unified-similarity';
 import type { ExternalAcademicEvidence } from '../../../lib/academic-search/types';
 import { requestedScoringNormalizationVersion, scoringNormalizationEvidence, type ScoringNormalizationVersion } from '../../../lib/similarity-core';
 import { runWithScoringNormalization } from '../../../lib/scoring-normalization-scope';
+import { asjpEvidenceForSave, checkAsjpForReport, type AsjpPersistedEvidence } from '../../../lib/asjp-report-evidence';
 
 // Reports carry derived data (AI passages, matched phrases, extracted text)
 // on top of the ingest pipeline's raw text, so this cap is larger than
@@ -629,7 +630,8 @@ export async function POST(request: Request) {
                      json_extract(payload_json, '$.text') AS persisted_manuscript_text,
                      json_extract(payload_json, '$.selectiveCorpusAuthoritativeStatus') AS selective_corpus_authoritative_status,
                      json_extract(payload_json, '$.selectiveCorpusAuthoritativeClaimedAt') AS selective_corpus_authoritative_claimed_at,
-                     json_extract(payload_json, '$.scoringNormalizationVersion') AS scoring_normalization_version
+                     json_extract(payload_json, '$.scoringNormalizationVersion') AS scoring_normalization_version,
+                     json_extract(payload_json, '$.asjpEvidence') AS asjp_evidence
               FROM saved_reports WHERE device_key = ? AND id = ?`,
         args: [deviceKey, id],
       });
@@ -850,6 +852,24 @@ export async function POST(request: Request) {
       }
       const underReportContract = <T,>(compute: () => T): T => runWithScoringNormalization(reportScoringVersion, compute);
 
+      // ASJP (Phase 6.5, LOCAL PROTOTYPE — ASJP_REPORT_EVIDENCE_ENABLED, default off): the report's generation-pinned
+      // ASJP record. A resave of the SAME manuscript carries the persisted record forward unchanged (never re-queried,
+      // whatever the flag says now, so a saved report never changes); a first save, or a changed manuscript, asks the
+      // matching service once — started here so it runs alongside the verification below. Never throws; with ASJP off
+      // and no persisted record it resolves to null without any network call, and the save is byte-identical.
+      const asjpEvidencePromise: Promise<AsjpPersistedEvidence | null> = isNonEmptyString(reportPayload?.text)
+        ? asjpEvidenceForSave(
+            {
+              text: reportPayload.text,
+              wordCount: reportPayload.wordCount,
+              scoringNormalizationVersion: reportScoringVersion,
+              persistedRecord: existingReportRow.rows[0]?.asjp_evidence ?? null,
+              persistedText: persistedManuscriptText,
+            },
+            () => checkAsjpForReport({ text: reportPayload.text, wordCount: reportPayload.wordCount }),
+          ).catch(() => null)
+        : Promise.resolve(null);
+
       // USER-SUPPLIED REFERENCES V1 — the trust boundary. The client sends the
       // reference files' ALREADY-EXTRACTED text as an `userSuppliedReferences`
       // sibling (never trusted from inside `payload` — that key is stripped).
@@ -1012,6 +1032,7 @@ export async function POST(request: Request) {
       const selectiveCorpusAuthoritativeNewlyPending =
         isFirstSaveOfThisReport && selectiveCorpusAuthoritativeStatusToPersist === 'pending';
 
+      const asjpEvidenceRecord = await asjpEvidencePromise;
       const persistedReportPayload = {
         ...stripClientEvidenceInterpretation({
           ...reportPayload,
@@ -1048,6 +1069,10 @@ export async function POST(request: Request) {
           unifiedSimilarityFailed: undefined,
           unifiedSimilarityGeneration: undefined,
           corpusSourceMatchingEnabledAtComputation: undefined,
+          // ASJP TRUST BOUNDARY: the record is server-owned; a client value (or an outbound asjpCheck echoed back by a
+          // resave) is dropped here and only the server's record below can survive a save.
+          asjpEvidence: undefined,
+          asjpCheck: undefined,
           // G2 TRUST BOUNDARY: `aiAnalysis.unavailableReason` ("AI unavailable for this document") records a size decision only the
           // server's AI-result route makes (lib/ai-unavailable-state.ts). A browser cannot declare it here either — whatever it
           // sent is dropped, everything else in `aiAnalysis` (including a validated compact table) is kept exactly as sent.
@@ -1062,6 +1087,7 @@ export async function POST(request: Request) {
           : {}),
         selectiveCorpusAuthoritativeStatus: selectiveCorpusAuthoritativeStatusToPersist,
         selectiveCorpusAuthoritativeClaimedAt: selectiveCorpusAuthoritativeClaimedAtToPersist,
+        ...(asjpEvidenceRecord ? { asjpEvidence: asjpEvidenceRecord } : {}),
       };
 
       // Device Passport (Phase 2/4): cryptographically verify an optional
@@ -1285,6 +1311,8 @@ export async function POST(request: Request) {
             // row exists, so pass undefined and let the resolver read the
             // persisted, immutable upload passport itself.
             verifiedDevicePassportId: isFirstSaveOfThisReport ? verifiedDevicePassportId : undefined,
+            // ASJP (Phase 6.5): the record this save persists (carried forward or just accepted) — never a re-query
+            asjpReportEvidence: asjpEvidenceRecord,
           });
           // Reused as-is by the deferred shadow evaluators below — the SAME
           // resolvePrimarySimilaritySummary output the GET route hands them,

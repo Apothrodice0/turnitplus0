@@ -16,6 +16,7 @@ import type {
   DecisionTraceDeviceSelfSharedGuard,
   DecisionTraceSource,
 } from "@/lib/admin-similarity-decision-trace";
+import type { SimilarityReport } from "@/lib/report-types";
 
 export const dynamic = "force-dynamic";
 
@@ -266,6 +267,9 @@ export default async function DeveloperReportInspectPage({
 
       {/* ================= Device Passport & internal diagnostics ================= */}
       <DevicePassportDiagnosticsSection trace={similarityDecisionTrace} />
+
+      {/* ================= ASJP (Phase 6.5 local prototype) ================= */}
+      <AsjpDebugSection record={report.payload.asjpEvidence} />
 
       {/* ================= Raw data ================= */}
       <section className="admin-card">
@@ -621,5 +625,43 @@ function SourceEvidenceDetails({ source }: { source: DecisionTraceSource }) {
         </>
       )}
     </AdminCollapsible>
+  );
+}
+
+/**
+ * ASJP (Phase 6.5, LOCAL PROTOTYPE) — admin/debug view of the report's server-owned ASJP record: status, pins, every
+ * card with its attribution, labels and exact source offsets, and the UNSCORED short-passage research signal. The
+ * research signal is shown ONLY here: it is never a scored highlight, never in the similarity percentage, and never
+ * sent to an ordinary user (stripServerInternalReportFields removes the whole record from customer responses).
+ */
+function AsjpDebugSection({ record }: { record: SimilarityReport["asjpEvidence"] | undefined }) {
+  if (!record) return null;
+  const research = (record.research?.shortPassages ?? null) as { passages?: Array<Record<string, unknown>> } | null;
+  return (
+    <section className="admin-card">
+      <h2>
+        <FileJson size={17} className="admin-card-title-icon" aria-hidden="true" />
+        ASJP published articles (local prototype)
+      </h2>
+      <p>
+        Status: <b>{record.status}</b>
+        {record.reason ? ` (${record.reason})` : ""} · checked {record.checkedAt} · attempts {record.attempts}
+      </p>
+      {record.pins ? (
+        <p>
+          Generation {record.pins.generationId} · manifest {record.pins.logicalManifestSha256.slice(0, 12)}… · catalog{" "}
+          {record.pins.catalogDigest?.slice(0, 12) ?? "?"}… · {record.pins.laneVersion} · {record.pins.licencePolicy} · number
+          tables {record.pins.features.numericTables ? "on" : "off"}
+        </p>
+      ) : null}
+      <AdminCollapsible summary={`Cards (${record.cards.length}) — attribution, labels, exact source offsets`}>
+        <pre>{JSON.stringify(record.cards, null, 2)}</pre>
+      </AdminCollapsible>
+      {research ? (
+        <AdminCollapsible summary={`UNSCORED research signal — 25–59-word distinctive passages (${research.passages?.length ?? 0}); not highlighted, not in the similarity percentage`}>
+          <pre>{JSON.stringify(research, null, 2)}</pre>
+        </AdminCollapsible>
+      ) : null}
+    </section>
   );
 }

@@ -180,6 +180,8 @@ export type ReportV2SourceCard = {
   passageRefs: number[];
   /** archive aggregate card only — the individual public-safe source names. */
   namedSources: ReportEvidenceNamedSource[];
+  /** ASJP (Phase 6.5) — a published ASJP article card: how it relates to the manuscript; null on every other card. */
+  asjp: { label: string; journal: string | null; publicationDate: string | null; licence: string | null } | null;
 };
 
 export type ReportV2Passage = {
@@ -239,7 +241,19 @@ export type ReportV2ViewModel = {
   hasPassages: boolean;
   /** FIX C — "possible related publication, not verified"; null when the report carries none (every legacy report). Never a source card, never counted in matchingEvidenceEntries. */
   unverifiedPublications: ReportV2UnverifiedPublicationNotice | null;
+  /** ASJP (Phase 6.5) — set only when the published-articles check ran for this report and was UNAVAILABLE. */
+  asjpUnavailableNotice: string | null;
 };
+
+/** ASJP (Phase 6.5) — the card line for each attribution (descriptive; the words are counted either way). */
+export const ASJP_ATTRIBUTION_LABEL: Record<string, string> = {
+  PREVIOUSLY_PUBLISHED_WORK: "Published version of this manuscript",
+  SELF_OVERLAP_SAME_AUTHORS: "Earlier article by the same authors",
+  QUOTES_PRIMARY_SOURCE: "Quotes the same primary source",
+  SHARED_TEXT_ORIGIN_NOT_ESTABLISHED: "Shared text — original source not established",
+  PUBLISHED_SOURCE: "Published article",
+};
+export const ASJP_UNAVAILABLE_NOTICE = "The published-articles (ASJP) check was unavailable for this report, so its similarity does not include ASJP articles.";
 
 export type ReportV2UnverifiedPublication = {
   title: string;
@@ -404,6 +418,7 @@ export function buildReportV2ViewModel(report: SimilarityReport): ReportV2ViewMo
       namedSources: s.sourceType === "internet" || s.sourceType === "publication"
         ? []
         : (s.namedSources ?? []),
+      asjp: s.asjp ? { label: ASJP_ATTRIBUTION_LABEL[s.asjp.attribution] ?? ASJP_ATTRIBUTION_LABEL.PUBLISHED_SOURCE, journal: s.asjp.journal, publicationDate: s.asjp.publicationDate, licence: s.asjp.licence } : null,
     };
   });
   // archive aggregate card DOES carry namedSources — keep them regardless of type
@@ -485,6 +500,7 @@ export function buildReportV2ViewModel(report: SimilarityReport): ReportV2ViewMo
     filterCounts,
     hasPassages: passages.length > 0,
     unverifiedPublications: resolveUnverifiedPublicationNoticeView(report.unverifiedPublicationNotice),
+    asjpUnavailableNotice: report.asjpCheck?.status === "UNAVAILABLE" || report.asjpEvidence?.status === "UNAVAILABLE" ? ASJP_UNAVAILABLE_NOTICE : null,
   };
 }
 

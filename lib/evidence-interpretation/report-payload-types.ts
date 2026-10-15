@@ -41,6 +41,28 @@ export type ReportEvidenceSource = {
   passageRefs: number[];
   /** archive aggregate card only — the individual named archive sources (public-safe names). */
   namedSources?: ReportEvidenceNamedSource[];
+  /** ASJP publication card only (Phase 6.5) — how the published article relates to this manuscript. */
+  asjp?: ReportEvidenceAsjpPresentation;
+};
+
+/**
+ * ASJP (Phase 6.5) — the presentation of one verified ASJP article. Descriptive only; the words are scored either way.
+ *   PREVIOUSLY_PUBLISHED_WORK            the article is this manuscript's own published version
+ *   SELF_OVERLAP_SAME_AUTHORS            an article by the manuscript's own authors
+ *   QUOTES_PRIMARY_SOURCE                the article quotes the same law / scripture the manuscript quotes
+ *   SHARED_TEXT_ORIGIN_NOT_ESTABLISHED   other indexed articles hold the same text; which one it came from is not known
+ *   PUBLISHED_SOURCE                     an independent published article
+ */
+export type ReportEvidenceAsjpPresentation = {
+  provider: "ASJP";
+  attribution: "PREVIOUSLY_PUBLISHED_WORK" | "SELF_OVERLAP_SAME_AUTHORS" | "QUOTES_PRIMARY_SOURCE" | "SHARED_TEXT_ORIGIN_NOT_ESTABLISHED" | "PUBLISHED_SOURCE";
+  journal: string | null;
+  publicationDate: string | null;
+  licence: string | null;
+  /** words of this card in text other articles also hold / in repeated patterns / in quoted laws or scripture */
+  sharedWords: number;
+  repeatedFormWords: number;
+  primarySourceWords: number;
 };
 
 export type ReportEvidencePassage = {

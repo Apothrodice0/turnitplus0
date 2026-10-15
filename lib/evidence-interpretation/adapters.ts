@@ -8,6 +8,7 @@ import {
   safeHostname,
 } from "./normalized-evidence";
 import type { InterpretationSourceInput } from "./interpret";
+import type { ReportEvidenceAsjpPresentation } from "./report-payload-types";
 import { archiveSourceAccounting, archiveSourceCountLabel } from "./archive-source-accounting";
 
 /**
@@ -250,4 +251,52 @@ export function normalizeSelectiveCorpusEvidence(
       dominantSpanBoilerplate: s.dominantSpanBoilerplate,
     };
   });
+}
+
+// ── G. ASJP published articles (Phase 6.5, local prototype) ──────────────
+// Spans are the passages the FINAL score actually contains (unifiedSimilarity.contributions of sourceType
+// "asjp_publication", grouped per article — never the persisted record's own claim), so a card can never explain
+// evidence the score does not hold. Metadata (title, journal, date, DOI, canonical ASJP URL, licence, attribution,
+// labels) comes from the report's persisted ASJP record. sameWorkRelationship stays null: the lane's
+// "previously published version" is a text + title signal, which this layer's hardening rule does not accept as an
+// independent work/version relationship — the card states it through asjpPresentation.attribution instead.
+export function normalizeAsjpPublicationEvidence(
+  admittedSources: ReadonlyArray<{
+    key: string;
+    spans: ReadonlyArray<{ start: number; end: number; words: number }>;
+    card: { title: string | null; journal: string | null; publicationDate: string | null; doi: string | null; url: string | null; license: string | null; attribution: string; labels: ReadonlyArray<{ kind: string; submittedWordStart: number; submittedWordEnd: number }> } | null;
+  }>,
+  submissionWordCount: number,
+): NormalizedVerifiedSource[] {
+  const ATTRIBUTIONS = new Set(["PREVIOUSLY_PUBLISHED_WORK", "SELF_OVERLAP_SAME_AUTHORS", "QUOTES_PRIMARY_SOURCE", "SHARED_TEXT_ORIGIN_NOT_ESTABLISHED", "PUBLISHED_SOURCE"]);
+  return admittedSources
+    .map((source) => {
+      const spans = [...source.spans].map((sp) => ({ start: sp.start, end: sp.end, words: sp.words })).sort((a, b) => a.start - b.start);
+      const positions = sourcePositions({ spans });
+      const matchedWordCount = positions.size;
+      const card = source.card;
+      const wordsIn = (kinds: string[]) => { const s = new Set<number>(); for (const l of card?.labels ?? []) if (kinds.includes(l.kind)) for (let q = l.submittedWordStart; q <= l.submittedWordEnd; q += 1) if (positions.has(q)) s.add(q); return s.size; };
+      const year = card?.publicationDate && /^\d{4}/.test(card.publicationDate) ? Number(card.publicationDate.slice(0, 4)) : null;
+      return {
+        key: source.key,
+        producer: "asjp-publication" as const,
+        sourceType: "publication" as const,
+        labelParts: { title: card?.title ?? null, publication: card?.journal ?? null, hostname: safeHostname(card?.url), year, doi: card?.doi ?? null, url: card?.url ?? null },
+        spans,
+        matchedWordCount,
+        submissionCoverageFraction: coverage(matchedWordCount, submissionWordCount),
+        sameWorkRelationship: null,
+        asjpPresentation: {
+          provider: "ASJP" as const,
+          attribution: (card && ATTRIBUTIONS.has(card.attribution) ? card.attribution : "PUBLISHED_SOURCE") as ReportEvidenceAsjpPresentation["attribution"],
+          journal: card?.journal ?? null,
+          publicationDate: card?.publicationDate ?? null,
+          licence: card?.license ?? null,
+          sharedWords: wordsIn(["SHARED_ACADEMIC_TEXT", "SHARED_QUOTATION"]),
+          repeatedFormWords: wordsIn(["REPEATED_FORM"]),
+          primarySourceWords: wordsIn(["LEGAL_PRIMARY_TEXT", "RELIGIOUS_TEXT"]),
+        },
+      };
+    })
+    .filter((s) => s.spans.length > 0);
 }

@@ -160,6 +160,25 @@ function admittedImportedSimilaritySources(
 }
 
 /**
+ * ASJP (Phase 6.5) — the verified ASJP articles the FINAL score contains: spans from the per-passage contributions
+ * computeUnifiedSimilarity wrote (sourceType "asjp_publication", sourceId `asjp-publication:<sourceId>`), grouped per
+ * article, plus that article's card from the report's persisted ASJP record. No contribution -> no card (an ASJP
+ * record the score was not computed with explains nothing), so a report without ASJP is byte-identical.
+ */
+function admittedAsjpPublicationSources(report: SimilarityReport): NonNullable<BuildReportEvidenceInterpretationOptions["asjpPublicationSources"]> {
+  const byArticle = new Map<string, { start: number; end: number; words: number }[]>();
+  for (const c of report.unifiedSimilarity?.contributions ?? []) {
+    if (c.sourceType !== "asjp_publication" || c.evidenceStatus !== "included") continue;
+    const list = byArticle.get(c.sourceId) ?? [];
+    list.push({ start: c.submittedWordStart, end: c.submittedWordEnd, words: c.matchedWordCount });
+    byArticle.set(c.sourceId, list);
+  }
+  if (byArticle.size === 0) return [];
+  const cards = new Map((report.asjpEvidence?.status === "ACCEPTED" ? report.asjpEvidence.cards : []).map((card) => [`asjp-publication:${card.sourceId}`, card]));
+  return [...byArticle].map(([key, spans]) => ({ key, spans, card: cards.get(key) ?? null }));
+}
+
+/**
  * Returns a shallow copy of `report` with `evidenceInterpretation`,
  * `reportCompletion` and `extractionDiagnostic` set from server-known evidence.
  * Any pre-existing (client) value is replaced.
@@ -191,6 +210,7 @@ export function withEvidenceInterpretation<T extends SimilarityReport>(
     selectiveCorpusAdmittedSources: opts.selectiveCorpusAdmittedSources,
     userSuppliedReferences: admittedReferences,
     importedSimilarityAdmittedSources: admittedImportedSimilaritySources(base as SimilarityReport),
+    asjpPublicationSources: admittedAsjpPublicationSources(base as SimilarityReport),
   });
 
   const reportCompletion = resolveReportCompletion({

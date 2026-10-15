@@ -22,12 +22,14 @@ import {
   normalizeSelectiveCorpusEvidence,
   normalizeUserSuppliedReferenceEvidence,
   normalizeImportedSimilarityEvidence,
+  normalizeAsjpPublicationEvidence,
 } from "./adapters";
 import type {
   ReportEvidenceInterpretation,
   ReportEvidenceSource,
   ReportEvidenceNamedSource,
   ReportEvidencePassage,
+  ReportEvidenceAsjpPresentation,
 } from "./report-payload-types";
 
 export type {
@@ -83,6 +85,8 @@ export type BuildReportEvidenceInterpretationOptions = {
     spans: ReadonlyArray<{ start: number; end: number; words: number }>;
     sourceAttributionState?: NormalizedVerifiedSource["importedSourceAttributionState"];
   }>;
+  /** ASJP (Phase 6.5): the verified ASJP articles the FINAL score contains (spans from its contributions) + their persisted cards. */
+  asjpPublicationSources?: Parameters<typeof normalizeAsjpPublicationEvidence>[0];
 };
 
 // ── build the normalized evidence bundle ─────────────────────────────────
@@ -103,6 +107,7 @@ export function normalizeReportEvidence(
     ...(opts.importedSimilarityAdmittedSources
       ? normalizeImportedSimilarityEvidence(opts.importedSimilarityAdmittedSources, report.wordCount)
       : []),
+    ...(opts.asjpPublicationSources?.length ? normalizeAsjpPublicationEvidence(opts.asjpPublicationSources, report.wordCount) : []),
   ];
   return {
     submissionText: report.text ?? "",
@@ -120,6 +125,7 @@ const PRODUCER_ORDER: Record<NormalizedVerifiedSource["producer"], number> = {
   "selective-corpus": 3,
   "user-supplied-reference": 4,
   "imported-similarity-evidence": 5,
+  "asjp-publication": 6,
 };
 
 function assignOpaqueIds(sources: NormalizedVerifiedSource[]): Map<string, string> {
@@ -143,6 +149,15 @@ const GENERIC_LABEL: Record<NormalizedSourceType, string> = {
   "selective-corpus": "TurnitPlus reference collection",
   "user-supplied-reference": "Supplied reference",
   "imported-similarity-evidence": "Imported reference match",
+};
+
+/** ASJP (Phase 6.5) — the card's first reason, stating how the published article relates to the manuscript. */
+const ASJP_REASON: Record<ReportEvidenceAsjpPresentation["attribution"], string> = {
+  PREVIOUSLY_PUBLISHED_WORK: "this text matches a published version of this manuscript (ASJP)",
+  SELF_OVERLAP_SAME_AUTHORS: "this text matches an earlier article by the same authors (ASJP)",
+  QUOTES_PRIMARY_SOURCE: "this article quotes the same primary source (a law or scripture) — the source is the quoted text, not this article",
+  SHARED_TEXT_ORIGIN_NOT_ESTABLISHED: "this text also appears in other published articles; its original source is not established",
+  PUBLISHED_SOURCE: "this text matches a published article (ASJP)",
 };
 
 function safeLabel(source: NormalizedVerifiedSource): string {
@@ -273,7 +288,9 @@ export function buildReportEvidenceInterpretation(
     const repReasons =
       src.producer === "user-supplied-reference"
         ? ["this text also appears in a reference file you supplied", ...baseReasons.filter((r) => r !== "distinctive text that matches this source")]
-        : baseReasons;
+        : src.producer === "asjp-publication" && src.asjpPresentation
+          ? [ASJP_REASON[src.asjpPresentation.attribution], ...baseReasons.filter((r) => r !== "distinctive text that matches this source")]
+          : baseReasons;
     const repConfidence = spanInterps
       .filter((s) => s.kind === primaryKind)
       .reduce<EvidenceInterpretationConfidence>(
@@ -313,6 +330,7 @@ export function buildReportEvidenceInterpretation(
       },
       passageRefs,
       ...(namedSources && namedSources.length > 0 ? { namedSources } : {}),
+      ...(src.asjpPresentation ? { asjp: src.asjpPresentation } : {}),
     };
   });
   sources.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));

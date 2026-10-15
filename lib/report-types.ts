@@ -5,6 +5,7 @@ import type { UnverifiedPublicationNotice } from "@/lib/academic-search/unverifi
 import type { UnifiedSimilarityResult } from "@/lib/unified-similarity";
 import type { SuppliedReferenceVerifiedEvidence, SuppliedReferenceInput } from "@/lib/user-supplied-references";
 import type { UserSuppliedReferenceGuard, UserSuppliedReferencePersistedChannel } from "@/lib/report-user-supplied-references";
+import type { AsjpPersistedEvidence } from "@/lib/asjp-report-evidence";
 import { resolveAiDisplayState } from "@/lib/ai-display-state";
 import {
   AI_SIZE_UNAVAILABLE_MESSAGE,
@@ -465,6 +466,16 @@ export type SimilarityReport = {
    */
   userSuppliedReferenceGuard?: UserSuppliedReferenceGuard;
   /**
+   * ASJP (Phase 6.5, LOCAL PROTOTYPE) — SERVER-OWNED, generation-pinned record of this report's ASJP check
+   * (lib/asjp-report-evidence.ts): pins, cards with exact source offsets and labels, or UNAVAILABLE with a reason.
+   * Every recompute derives the ASJP channel from it (never a fresh query). A client value is never accepted (the
+   * save route replaces it), and it never reaches an ordinary client: outbound copies carry `asjpCheck` instead
+   * (stripServerInternalReportFields). Absent on every report saved while ASJP is off.
+   */
+  asjpEvidence?: AsjpPersistedEvidence;
+  /** ASJP — the client-safe projection of asjpEvidence on an OUTBOUND copy only (never persisted, never trusted). */
+  asjpCheck?: { status: "INCLUDED" | "UNAVAILABLE"; sources: number };
+  /**
    * FIX C — ADDITIVE, SERVER-AUTHORITATIVE NOTICE, never evidence. Publications
    * the academic search identified (strong identity, lib/academic-search/
    * unverified-publication.ts) whose text could not be retrieved for comparison.
@@ -769,6 +780,15 @@ export function hasIncompleteSelectiveCorpusCheck(report: SimilarityReport): boo
 export function stripServerInternalReportFields(report: SimilarityReport): void {
   delete report.selectiveCorpusAuthoritativeStatus;
   delete report.selectiveCorpusAuthoritativeClaimedAt;
+  // ASJP (Phase 6.5): the server-owned record (pins, source offsets, the UNSCORED research signal) never leaves the
+  // server; the outbound copy carries only whether the ASJP check is included or unavailable. The source cards and
+  // highlights reach the client through evidenceInterpretation, like every other channel's.
+  const asjp = report.asjpEvidence as { status?: string; cards?: Array<{ scored?: boolean }> } | undefined;
+  delete report.asjpEvidence;
+  delete report.asjpCheck;
+  if (asjp && (asjp.status === "ACCEPTED" || asjp.status === "UNAVAILABLE")) {
+    report.asjpCheck = { status: asjp.status === "ACCEPTED" ? "INCLUDED" : "UNAVAILABLE", sources: (asjp.cards ?? []).filter((c) => c?.scored === true).length };
+  }
 }
 
 export function archiveMatchedWordCount(report: SimilarityReport) {

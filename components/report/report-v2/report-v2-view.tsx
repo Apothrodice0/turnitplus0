@@ -233,6 +233,7 @@ function FirstScreen({ vm }: { vm: ReportV2ViewModel }) {
         </p>
         <CompletionStrip vm={vm} />
         <UnverifiedPublicationNotice vm={vm} variant="screen" />
+        {vm.asjpUnavailableNotice ? <p className="rv2-asjp-unavailable" role="note">{vm.asjpUnavailableNotice}</p> : null}
       </section>
 
       <OverlapBreakdown vm={vm} />
@@ -402,6 +403,13 @@ function SourceCard({ card, verifiedPercent, expanded = false }: { card: ReportV
         <h4 className="rv2-source-card-title">{card.label}</h4>
         <span className={`rv2-source-badge rv2-source-badge-${card.sourceType}`}>{card.badge}</span>
       </header>
+      {card.asjp && (
+        <p className="rv2-source-card-asjp">
+          <span className="rv2-chip">{card.asjp.label}</span>
+          {card.asjp.journal ? <span className="rv2-source-card-journal"> {card.asjp.journal}</span> : null}
+          <span className="rv2-source-card-provider"> · ASJP</span>
+        </p>
+      )}
 
       <p className="rv2-source-card-figures">
         <b>{card.contributionPercent}% contribution</b>

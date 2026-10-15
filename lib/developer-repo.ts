@@ -551,6 +551,8 @@ export async function getReportSimilarityDecisionTrace(
       // The report's own persisted contract — a trace never re-stamps.
       scoringNormalizationVersion: reportScoringNormalizationVersion(payload),
       externalAcademicEvidence: payload.externalAcademicEvidence,
+      // ASJP (Phase 6.5): the persisted record — the trace reproduces the saved ASJP evidence
+      asjpReportEvidence: payload.asjpEvidence,
       archiveScore,
     });
   } catch (err) {

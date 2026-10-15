@@ -68,7 +68,7 @@ export const COMPACT_PERSISTENCE_FORMAT = "compact" as const;
 export const COMPACT_EVIDENCE_INTERPRETATION_FORMAT_VERSION = 1 as const;
 
 type PassageInterpretation = ReportEvidencePassage["interpretation"];
-type SourceShape = Pick<ReportEvidenceSource, "label" | "sourceType" | "link" | "doi" | "year" | "interpretation">;
+type SourceShape = Pick<ReportEvidenceSource, "label" | "sourceType" | "link" | "doi" | "year" | "interpretation"> & Partial<Pick<ReportEvidenceSource, "asjp">>;
 
 /** [id, shapeIndex, contributionPercent, matchedWords, namedSources?] */
 export type CompactEvidenceSourceTuple =
@@ -166,6 +166,8 @@ function buildCompact(interpretation: ReportEvidenceInterpretation): CompactEvid
       doi: card.doi,
       year: card.year,
       interpretation: card.interpretation,
+      // ASJP (Phase 6.5): an ASJP card's presentation travels in its shape (absent on every other card)
+      ...(card.asjp !== undefined ? { asjp: card.asjp } : {}),
     };
     const shapeIndex = internIndex(sourceShapes, sourceShapeIndex, shape);
     if (shapeIndex === null) return null;
@@ -313,6 +315,7 @@ function expandCompact(compact: CompactEvidenceInterpretation): ReportEvidenceIn
       interpretation: shape.interpretation,
       passageRefs: passageRefsBySource[index],
       ...(namedSources !== undefined ? { namedSources } : {}),
+      ...(shape.asjp !== undefined ? { asjp: shape.asjp } : {}),
     });
   }
 

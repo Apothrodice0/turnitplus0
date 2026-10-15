@@ -12,6 +12,7 @@ import type { ReportHistoricalSubmissionMatch, SimilarityReport } from "./report
 import type { ExternalAcademicEvidence } from "./academic-search/types";
 import { canonicalSha256 } from "./document-identity";
 import { resolveVerifiedAcademicEvidence } from "./academic-search-diagnostics-repo";
+import { asjpChannelOf } from "./asjp-report-evidence";
 import { summarizeSubmissionProvenance } from "./submission-provenance";
 import { classifyDeviceSelfMatch, productionCountsRelationship, isDeviceSelfEligibleMatchType } from "./device-self-scoring-rule";
 import {
@@ -362,6 +363,15 @@ export async function resolvePrimarySimilaritySummary(
           matchedPassages: ReadonlyArray<{ submittedWordStart: number; submittedWordEnd: number; matchedWordCount: number }>;
         }>
       | null;
+    /**
+     * ASJP (Phase 6.5) — the report's PERSISTED ASJP record (payload_json `$.asjpEvidence`, lib/asjp-report-evidence.ts),
+     * or on a first save the record just accepted for this request. The channel is derived from it by asjpChannelOf —
+     * only an ACCEPTED record for this report's word count / manuscript / normalization-2 contract applies — and is
+     * never re-queried here, so every recompute of a saved report reproduces the same ASJP evidence. Absent / null /
+     * not applicable leaves this resolution byte-identical to before (no ASJP key in the result). An explicit
+     * asjpPublicationEvidence above takes precedence (direct callers / tests).
+     */
+    asjpReportEvidence?: unknown;
     /** The archive-only fallback value — never mutated, never persisted by this function; see this module's own header comment. */
     archiveScore: number;
     /**
@@ -516,6 +526,11 @@ async function resolvePrimarySimilaritySummaryUnderContract(
     // this call return [] and this resolution's output byte-identical to
     // before this channel existed.
     const importedSimilarityEvidence = resolveImportedSimilarityEvidenceForUnifiedSimilarity(params.rawText);
+    const asjpChannel = params.asjpPublicationEvidence?.length
+      ? params.asjpPublicationEvidence
+      : params.asjpReportEvidence != null
+        ? asjpChannelOf(params.asjpReportEvidence, { wordCount: params.wordCount, scoringNormalizationVersion, text: params.rawText }).channel
+        : null;
     const unifiedSimilarity = compute({
       wordCount: params.wordCount,
       archiveMatchedPositions: params.archiveMatchedPositions,
@@ -525,7 +540,7 @@ async function resolvePrimarySimilaritySummaryUnderContract(
       userSuppliedReferenceEvidence: params.userSuppliedReferenceEvidence,
       selectiveCorpusEvidence: params.selectiveCorpusEvidence,
       importedSimilarityEvidence,
-      ...(params.asjpPublicationEvidence?.length ? { asjpPublicationEvidence: params.asjpPublicationEvidence } : {}),
+      ...(asjpChannel?.length ? { asjpPublicationEvidence: asjpChannel } : {}),
     });
     return { historicalSubmissionMatch, unifiedSimilarity, primaryScore: unifiedSimilarity.unifiedScore, isUnified: true, corpusSourceMatchingEnabled, corpusGeneration, failed: false, effectiveDeviceSelfRepresentationIds, deviceSelfSharedGuard, scoringNormalizationVersion };
   } catch (err) {
@@ -1197,6 +1212,8 @@ export async function selfHealUnifiedSimilarity(
       scoringNormalizationVersion,
       // Trust boundary (drizzle/0052): server-verified scholarly evidence only.
       externalAcademicEvidence: verifiedAcademicEvidence,
+      // ASJP (Phase 6.5): the persisted record, never a fresh query — a self-heal reproduces the saved ASJP evidence
+      asjpReportEvidence: payload.asjpEvidence,
       archiveScore: payload.archiveScore ?? payload.score ?? Number(raw.archive_score),
       asOf: params.asOf,
     });

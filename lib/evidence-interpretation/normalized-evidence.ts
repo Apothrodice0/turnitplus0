@@ -1,6 +1,7 @@
 import type { SameWorkRelationship } from "./kinds";
 import type { VerifiedSpan } from "./interpret";
 import type { ImportedSimilarityEvidenceSourceAttributionState } from "../imported-similarity-evidence/types";
+import type { ReportEvidenceAsjpPresentation } from "./report-payload-types";
 
 /**
  * PHASE 1 — one internal normalized shape for VERIFIED evidence, sufficient for
@@ -34,7 +35,9 @@ export type NormalizedEvidenceProducer =
   | "prior-submission"
   | "selective-corpus"
   | "user-supplied-reference"
-  | "imported-similarity-evidence";
+  | "imported-similarity-evidence"
+  /** ASJP (Phase 6.5): a verified published ASJP article (lib/asjp-academic-lane.ts, persisted record lib/asjp-report-evidence.ts). */
+  | "asjp-publication";
 
 /** Public-safe descriptive metadata for one matched source. Every field is
  *  optional and NON-authoritative. No internal id, hash, path, or provenance. */
@@ -82,6 +85,8 @@ export type NormalizedVerifiedSource = {
    *  maps it, and only when an existing strong relationship signal exists
    *  (never from overlap %, Device Passport alone, same account/device alone). */
   sameWorkRelationship?: SameWorkRelationship | null;
+  /** ASJP (Phase 6.5) — only the asjp-publication adapter sets it: the card's descriptive presentation. */
+  asjpPresentation?: ReportEvidenceAsjpPresentation;
 };
 
 export type NormalizedVerifiedEvidence = {
