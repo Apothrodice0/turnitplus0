@@ -251,6 +251,25 @@ export const ASJP_CARD_LABEL: Record<string, string> = {
   SHARED_TEXT_ORIGIN_NOT_ESTABLISHED: "Shared text — original source not established",
 };
 export const ASJP_UNAVAILABLE_NOTICE = "The published-articles (ASJP) check was unavailable for this report, so its similarity does not include ASJP articles.";
+/** B1: the ASJP result could not be stored within the report's size limit, so it was left out whole (never truncated). */
+export const ASJP_DOES_NOT_FIT_NOTICE = "The published-articles (ASJP) results could not be stored with this report because the report is at its size limit, so its similarity does not include ASJP articles.";
+/** A5: a signed ASJP record this server cannot verify now — the saved report is shown unchanged and says so. */
+export const ASJP_UNVERIFIED_NOTICE = "The published-articles (ASJP) evidence saved with this report cannot currently be verified. The report is shown exactly as it was saved and will not be recalculated until verification is restored.";
+/** B3: articles withdrawn from this report (takedown / retraction) are never credited; the report says how many. */
+export const asjpWithdrawnNotice = (n: number) => `${n} published ${n === 1 ? "article was" : "articles were"} withdrawn from the ASJP check and ${n === 1 ? "is" : "are"} not included in this report's similarity.`;
+/**
+ * The one ASJP notice a report shows (or null), from the server-verified outbound projection (asjpCheck). Server-side
+ * renderers (admin, tests) holding the raw record pass it through asjpCheckOf first; an unverified raw record is never
+ * read here (A4).
+ */
+export function asjpNoticeOf(check: { status: string; reason?: string | null; withdrawn?: number } | null | undefined): string | null {
+  if (!check) return null;
+  if (check.status === "UNVERIFIED") return ASJP_UNVERIFIED_NOTICE;
+  if (check.status === "WITHDRAWN") return asjpWithdrawnNotice(Math.max(1, check.withdrawn ?? 1));
+  if (check.status === "UNAVAILABLE") return check.reason === "RECORD_DOES_NOT_FIT" ? ASJP_DOES_NOT_FIT_NOTICE : ASJP_UNAVAILABLE_NOTICE;
+  if (check.status === "INCLUDED" && (check.withdrawn ?? 0) > 0) return asjpWithdrawnNotice(check.withdrawn!);
+  return null;
+}
 
 export type ReportV2UnverifiedPublication = {
   title: string;
@@ -497,7 +516,8 @@ export function buildReportV2ViewModel(report: SimilarityReport): ReportV2ViewMo
     filterCounts,
     hasPassages: passages.length > 0,
     unverifiedPublications: resolveUnverifiedPublicationNoticeView(report.unverifiedPublicationNotice),
-    asjpUnavailableNotice: report.asjpCheck?.status === "UNAVAILABLE" || report.asjpEvidence?.status === "UNAVAILABLE" ? ASJP_UNAVAILABLE_NOTICE : null,
+    // A4: only the server-verified projection is read (never the raw record, which this client-safe module cannot verify)
+    asjpUnavailableNotice: asjpNoticeOf(report.asjpCheck),
   };
 }
 

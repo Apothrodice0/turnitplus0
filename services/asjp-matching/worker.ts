@@ -47,7 +47,10 @@ async function main() {
     try {
       // one catalog snapshot for the whole answer: a refresh swapping in mid-query cannot mix two catalog states
       const snapshot = catalog.current;
-      const lookup = (articleId: string) => snapshot.entries.get(articleId) ?? null;
+      // B3 (Phase 7 remediation): the report's withdrawn articles are treated exactly like catalog-withdrawn ones, so the
+      // lane never credits them and can still credit any other article for the same words
+      const excluded = new Set<string>(Array.isArray(m.excludeSourceIds) ? m.excludeSourceIds : []);
+      const lookup = (articleId: string) => { const e = snapshot.entries.get(articleId) ?? null; return e && excluded.has(`asjp:${articleId}`) ? { ...e, withdrawn: true } : e; };
       // the lane's own flag gate is enforced by the service (ASJP_SERVICE_ENABLED), so the worker passes ignoreFlag
       const r: any = await runAsjpAcademicLane({ store, generationId: config.generationId, logicalManifestSha256: config.logicalManifestSha256, submissionText: m.text, submissionTitle: m.title ?? null, referenceDate: m.referenceDate ?? undefined, catalog: lookup, ignoreFlag: true, licencePolicy: config.licencePolicy, corrections, session });
       const cards = r.state === "COMPLETE" ? asjpSourceCards(r) : [];
@@ -67,4 +70,7 @@ async function main() {
     }
   });
 }
+// review E3: an unexpected error never prints a stack (which could quote input) — a code only, then the pool replaces the worker
+process.on("unhandledRejection", () => { process.send?.({ type: "fatal", error: "UNHANDLED_REJECTION" }); process.exit(1); });
+process.on("uncaughtException", () => { process.send?.({ type: "fatal", error: "UNCAUGHT_EXCEPTION" }); process.exit(1); });
 main().catch((error) => { process.send?.({ type: "fatal", error: String(error?.message ?? error) }); process.exit(1); });

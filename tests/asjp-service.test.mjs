@@ -35,8 +35,10 @@ const catalogPath = path.join(scratch, 'catalog.sqlite');
 }
 const generation = { root, generationId: built.generationId, logicalManifestSha256: built.logicalManifestSha256, catalogPath, catalogImmutable: false, licencePolicy: 'permitted-only' };
 const manuscript = [inventedText(70_001, 300), sliceWords(texts[5001], 200, 120), inventedText(70_002, 300), sliceWords(texts[5002], 400, 90), inventedText(70_003, 200)].join(' ');
-const token = 'test-token';
-const adminToken = 'admin-token';
+// Phase 7 remediation: every service credential must be strong (>= 32 characters, >= 12 distinct)
+const { randomBytes } = await import('node:crypto');
+const token = randomBytes(32).toString('hex');
+const adminToken = randomBytes(32).toString('hex');
 const admin = { authorization: `Bearer ${adminToken}` };
 const base = { token, adminToken, workers: 2, queueLimit: 32, deadlineMs: 30_000, maxWords: 60_000, generation, allowedRoots: [scratch] };
 process.env.ASJP_SERVICE_ENABLED = 'true';
@@ -51,6 +53,10 @@ test('disabled unless ASJP_SERVICE_ENABLED=true; distinct tokens; the local-rese
   process.env.ASJP_SERVICE_ENABLED = 'true';
   await assert.rejects(() => startAsjpService({ ...base, port: ++port, adminToken: token }), /distinct/);
   await assert.rejects(() => startAsjpService({ ...base, port: ++port, generation: { ...generation, licencePolicy: 'local-research-all' } }), /local-research/);
+  // A1: weak credentials refuse to start
+  await assert.rejects(() => startAsjpService({ ...base, port: ++port, token: 'test-token' }), /service token is too weak/);
+  await assert.rejects(() => startAsjpService({ ...base, port: ++port, adminToken: 'b'.repeat(40) }), /admin token is too weak/);
+  await assert.rejects(() => startAsjpService({ ...base, port: ++port, requestSigningKey: 'x' }), /request-signing key is too weak/);
 });
 
 test('answers equal the direct lane, under 8 concurrent requests; health, auth, busy, timeout with worker replacement', async () => {
@@ -145,11 +151,12 @@ test('report adapter: only a complete, pinned answer is accepted; union scoring 
 
 test('Phase 6.5 credentials: tokens only from the environment / token files, never in a worker env, an answer or health', async () => {
   const tokenFile = path.join(scratch, 'svc.token'), adminFile = path.join(scratch, 'adm.token'), genFile = path.join(scratch, 'gen.json');
-  fs.writeFileSync(tokenFile, 'file-service-token-123\n'); fs.writeFileSync(adminFile, 'file-admin-token-456\n'); fs.writeFileSync(genFile, JSON.stringify(generation));
+  const fileToken = `file-service-${randomBytes(24).toString('hex')}`, fileAdmin = `file-admin-${randomBytes(24).toString('hex')}`;
+  fs.writeFileSync(tokenFile, `${fileToken}\n`); fs.writeFileSync(adminFile, `${fileAdmin}\n`); fs.writeFileSync(genFile, JSON.stringify(generation));
   const p = ++port;
   const env = { ASJP_SERVICE_TOKEN_FILE: tokenFile, ASJP_ADMIN_TOKEN_FILE: adminFile, ASJP_GENERATION_CONFIG: genFile, ASJP_ALLOWED_ROOTS: scratch, ASJP_SERVICE_PORT: String(p), ASJP_SERVICE_WORKERS: '1' };
   const config = asjpServiceConfigFromEnv(env);
-  assert.equal(config.token, 'file-service-token-123'); assert.equal(config.adminToken, 'file-admin-token-456');
+  assert.equal(config.token, fileToken); assert.equal(config.adminToken, fileAdmin);
   assert.deepEqual(config.generation.features, { numericTables: false, shortSignal: null }, 'both experiments default off');
   assert.throws(() => asjpServiceConfigFromEnv({ ...env, ASJP_SERVICE_TOKEN_FILE: undefined }), /ASJP_SERVICE_TOKEN/);
   // a worker never receives a credential
@@ -159,11 +166,11 @@ test('Phase 6.5 credentials: tokens only from the environment / token files, nev
   const svc = await startAsjpService(config);
   try {
     const u = `http://127.0.0.1:${p}`;
-    assert.equal((await fetch(`${u}/health`, { headers: { authorization: 'Bearer file-service-token-12' } })).status, 401, 'a token prefix is refused');
-    assert.equal((await fetch(`${u}/admin/refresh`, { method: 'POST', headers: { authorization: 'Bearer file-service-token-123' } })).status, 401, 'the service token is not an admin token');
-    const health = await (await fetch(`${u}/health`, { headers: { authorization: 'Bearer file-service-token-123' } })).text();
-    const answer = JSON.stringify(await requestAsjpAnswer(u, 'file-service-token-123', { text: manuscript }));
-    for (const body of [health, answer]) assert.ok(!body.includes('file-service-token-123') && !body.includes('file-admin-token-456'));
+    assert.equal((await fetch(`${u}/health`, { headers: { authorization: `Bearer ${fileToken.slice(0, -1)}` } })).status, 401, 'a token prefix is refused');
+    assert.equal((await fetch(`${u}/admin/refresh`, { method: 'POST', headers: { authorization: `Bearer ${fileToken}` } })).status, 401, 'the service token is not an admin token');
+    const health = await (await fetch(`${u}/health`, { headers: { authorization: `Bearer ${fileToken}` } })).text();
+    const answer = JSON.stringify(await requestAsjpAnswer(u, fileToken, { text: manuscript }));
+    for (const body of [health, answer]) assert.ok(!body.includes(fileToken) && !body.includes(fileAdmin));
     assert.deepEqual(JSON.parse(health).features, { numericTables: false, shortSignal: false });
   } finally { svc.close(); }
 });
@@ -200,24 +207,96 @@ test('Phase 7: a serving host can require golden answers (ASJP_GOLDEN_FILE / ASJ
 
 test('Phase 7 PC hosting: signed-only /match (replay refused) and admin endpoints refused through a tunnel', async () => {
   const p = ++port;
-  const key = 'request-signing-key-'.padEnd(48, 'q');
+  const key = randomBytes(32).toString('hex');
   const svc = await startAsjpService({ ...base, workers: 1, port: p, requestSigningKey: key, adminLocalOnly: true });
   try {
     const u = `http://127.0.0.1:${p}`;
     const unsigned = await requestAsjpAnswer(u, token, { text: manuscript }, 60_000);
     assert.equal(unsigned.error, 'unauthorized', 'a bearer token alone is not enough when signing is required');
+    // protocol v2: attest (no manuscript, no bearer), then the signed match, whose signed answer the client verifies
     const signed = await requestAsjpAnswer(u, token, { text: manuscript }, 60_000, {}, key);
     assert.equal(signed.state, 'COMPLETE');
+    assert.deepEqual(signed.creditedPositions, direct.creditedPositions);
+    assert.equal((await requestAsjpAnswer(u, token, { text: manuscript }, 60_000, {}, randomBytes(32).toString('hex'))).failureCode, 'SERVICE_NOT_AUTHENTICATED', 'a client with another key gets nothing');
     // a captured request replayed verbatim is refused (same nonce)
+    const { asjpRequestMac, sha256Hex } = await import('../lib/asjp-service-protocol.ts');
     const raw = JSON.stringify({ text: 'x' }); const ts = String(Date.now()); const nonce = 'f'.repeat(32);
-    const { createHash, createHmac } = await import('node:crypto');
-    const headers = { 'content-type': 'application/json', authorization: `Bearer ${token}`, 'x-asjp-timestamp': ts, 'x-asjp-nonce': nonce, 'x-asjp-signature': createHmac('sha256', key).update(`${ts}\n${nonce}\n${createHash('sha256').update(raw).digest('hex')}`).digest('hex') };
-    assert.equal((await fetch(`${u}/match`, { method: 'POST', headers, body: raw })).status, 200);
+    const headers = { 'content-type': 'application/json', authorization: `Bearer ${token}`, 'x-asjp-timestamp': ts, 'x-asjp-nonce': nonce, 'x-asjp-signature': asjpRequestMac(key, { method: 'POST', path: '/match', host: `127.0.0.1:${p}`, ts, nonce, bodySha256: sha256Hex(raw) }) };
+    const first = await fetch(`${u}/match`, { method: 'POST', headers, body: raw });
+    assert.equal(first.status, 200); assert.match(first.headers.get('x-asjp-response-signature') ?? '', /^[0-9a-f]{64}$/, 'the answer is signed');
     assert.equal((await fetch(`${u}/match`, { method: 'POST', headers, body: raw })).status, 401, 'replay refused');
-    // admin: allowed locally, refused when the request came through a tunnel/proxy
+    // admin: allowed locally, refused when the request came through a tunnel/proxy — A3: even an EMPTY proxy header
     assert.equal((await fetch(`${u}/admin/refresh`, { method: 'POST', headers: admin })).status, 200);
     assert.equal((await fetch(`${u}/admin/refresh`, { method: 'POST', headers: { ...admin, 'cf-connecting-ip': '203.0.113.9' } })).status, 403);
     assert.equal((await fetch(`${u}/admin/refresh`, { method: 'POST', headers: { ...admin, 'x-forwarded-for': '203.0.113.9' } })).status, 403);
+    assert.equal((await fetch(`${u}/admin/refresh`, { method: 'POST', headers: { ...admin, 'x-forwarded-for': '' } })).status, 403, 'A3: an empty forwarded header');
+    assert.equal((await fetch(`${u}/admin/refresh`, { method: 'POST', headers: { ...admin, 'cf-connecting-ip': '' } })).status, 403, 'A3: an empty cf-connecting-ip');
+  } finally { svc.close(); }
+});
+
+test('E1: the deadline counts queue time; a queued request whose client left is dropped; degradation settles the queue', async () => {
+  // A. the only worker is killed, so the request waits in the queue for its replacement: it is answered ASJP_TIMEOUT at
+  //    the deadline (counted from arrival), never served late
+  const a = await startAsjpService({ ...base, workers: 1, port: ++port, deadlineMs: 500 });
+  try {
+    a.pool().workers[0].child.kill();
+    await new Promise((r) => setTimeout(r, 20));
+    const t0 = Date.now();
+    const r = await requestAsjpAnswer(`http://127.0.0.1:${port}`, token, { text: manuscript }, 30_000);
+    assert.equal(r.failureCode, 'ASJP_TIMEOUT');
+    assert.ok(Date.now() - t0 < 2_000, `answered at the deadline, not after the worker restart (${Date.now() - t0} ms)`);
+    assert.equal(a.pool().counters.queueTimeouts, 1);
+  } finally { a.close(); }
+  // B. a client that disconnects while its request is queued: the request is removed (never processed)
+  const b = await startAsjpService({ ...base, workers: 1, port: ++port, deadlineMs: 30_000 });
+  try {
+    b.pool().workers[0].child.kill();
+    await new Promise((r) => setTimeout(r, 20));
+    const ctrl = new AbortController();
+    const gone = fetch(`http://127.0.0.1:${port}/match`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ text: manuscript }), signal: ctrl.signal }).catch(() => null);
+    for (let i = 0; i < 100 && b.pool().queue.length === 0; i += 1) await new Promise((r) => setTimeout(r, 10));
+    ctrl.abort(); await gone;
+    for (let i = 0; i < 100 && b.pool().queue.length > 0; i += 1) await new Promise((r) => setTimeout(r, 10));
+    assert.equal(b.pool().queue.length, 0); assert.equal(b.pool().counters.cancelled, 1);
+  } finally { b.close(); }
+});
+
+test('E1: RESTART_LIMIT is recovered after a cooldown (fresh workers, golden answers re-checked), bounded per hour; reports never wait on it', async () => {
+  const probe = await startAsjpService({ ...base, workers: 1, port: ++port });
+  const digest = (await requestAsjpAnswer(`http://127.0.0.1:${port}`, token, { text: manuscript })).digest;
+  probe.close();
+  // deadline 1 ms: every request times out and its worker is killed -> RESTART_LIMIT after maxRestartsPerMinute
+  const svc = await startAsjpService({ ...base, workers: 1, port: ++port, deadlineMs: 1, maxRestartsPerMinute: 2, recoveryCooldownMs: 1_500, maxRecoveriesPerHour: 2, golden: [] });
+  const u = `http://127.0.0.1:${port}`;
+  try {
+    for (let i = 0; i < 20 && !svc.pool().degraded; i += 1) { await requestAsjpAnswer(u, token, { text: manuscript }, 10_000); await new Promise((r) => setTimeout(r, 300)); }
+    assert.equal(svc.pool().degraded, 'RESTART_LIMIT');
+    const t0 = Date.now();
+    const during = await requestAsjpAnswer(u, token, { text: manuscript }, 10_000);
+    assert.equal(during.failureCode, 'RESTART_LIMIT'); assert.ok(Date.now() - t0 < 1_000, 'answered at once while degraded');
+    // the pool recovers by itself (cooldown, fresh workers); with a normal deadline it would then serve again
+    svc.pool().config.deadlineMs = 30_000;
+    svc.pool().config.golden = [{ text: manuscript, digest }];
+    for (let i = 0; i < 300 && svc.pool().degraded; i += 1) await new Promise((r) => setTimeout(r, 50));
+    assert.equal(svc.pool().degraded, null, 'recovered without restarting the service');
+    assert.equal(svc.pool().counters.recoveries, 1);
+    const after = await requestAsjpAnswer(u, token, { text: manuscript }, 30_000);
+    assert.equal(after.state, 'COMPLETE'); assert.equal(after.digest, digest);
+  } finally { svc.close(); }
+});
+
+test('B3: excludeSourceIds — a report\'s withdrawn article is treated as withdrawn by the lane (never credited); malformed lists refused', async () => {
+  const svc = await startAsjpService({ ...base, workers: 1, port: ++port });
+  const u = `http://127.0.0.1:${port}`;
+  try {
+    const all = await requestAsjpAnswer(u, token, { text: manuscript });
+    assert.ok(all.cards.some((c) => c.sourceId === 'asjp:5002'));
+    const without = await requestAsjpAnswer(u, token, { text: manuscript, excludeSourceIds: ['asjp:5002'] });
+    assert.equal(without.state, 'COMPLETE');
+    assert.ok(!without.cards.some((c) => c.sourceId === 'asjp:5002'), 'the excluded article is not credited');
+    assert.ok(without.cards.some((c) => c.sourceId === 'asjp:5001'), 'the others still are');
+    const bad = await fetch(`${u}/match`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ text: 'a b', excludeSourceIds: ['DROP TABLE'] }) });
+    assert.equal(bad.status, 400);
   } finally { svc.close(); }
 });
 

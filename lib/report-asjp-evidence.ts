@@ -13,7 +13,9 @@ import {
   retryUnavailableAsjpRecord,
   signAsjpRecord,
   trustedAsjpRecord,
-  asjpSigningKey,
+  asjpKeyring,
+  asjpWithdrawnOf,
+  normalizeWithdrawn,
   type AsjpPersistedEvidence,
 } from "./asjp-report-evidence";
 
@@ -28,7 +30,17 @@ import {
  *                                 once per call; only an ACCEPTED answer changes the score (an UNAVAILABLE retry only
  *                                 records the attempt). Retries stop after maxAttempts. NOT WIRED to any route or job.
  *   retractAsjpEvidenceForReport  an ACCEPTED record is withdrawn (rollback, takedown of a cited article): the record
- *                                 becomes RETRACTED and the score + explanation are recomputed without it.
+ *                                 becomes RETRACTED and the score + explanation are recomputed without it. With
+ *                                 `sourceIds` (B3, per-article takedown) only those articles' cards are removed and the
+ *                                 record stays ACCEPTED for the rest. EITHER WAY the withdrawn articles are listed in the
+ *                                 record (withdrawnSourceIds): no later save of this report — a changed manuscript, a
+ *                                 revert, a retry — ever credits them again (they are excluded at the service and here).
+ *
+ * TAKEDOWN RUNBOOK (B3). A per-report retraction is the BACKFILL for reports already saved. The takedown itself is
+ * index-level, so no new report can credit the article: (1) mark the article withdrawn in the service catalog and
+ * /admin/refresh (the lane never credits a withdrawn article), and (2) add it to ASJP_WITHDRAWN_SOURCE_IDS in the app
+ * environment (excluded from every new record, belt and braces), then (3) retract it from the saved reports that cite it.
+ * A report shows how many articles were withdrawn from it; their words are no longer highlighted or scored.
  *
  * Eligibility (review findings 2 and 4): only reports the ordinary finalization owns — never a Selective-Corpus-
  * authoritative report (pending, completed or incomplete: its finalizer owns the score) and never one whose score
@@ -72,7 +84,7 @@ async function loadEligible(client: Client, params: { reportDeviceKey: string; r
 /** Lands `next` (unsigned) for the report, recomputing score + explanation with it, CAS on `prev`. */
 async function rewriteWithScore(client: Client, params: { reportDeviceKey: string; reportId: string; accountId: string | null }, loaded: Loaded, next: AsjpPersistedEvidence): Promise<"WRITTEN" | "LOST_RACE" | { failed: string }> {
   const { payload, record } = loaded;
-  const signed = signAsjpRecord(next, loaded.binding, asjpSigningKey());
+  const signed = signAsjpRecord(next, loaded.binding, asjpKeyring());
   const scoringNormalizationVersion = reportScoringNormalizationVersion(payload);
   const verifiedAcademicEvidence = (await resolveVerifiedAcademicEvidence(client, {
     diagnosticsId: typeof payload.verifiedAcademicSearchDiagnosticsId === "number" && Number.isFinite(payload.verifiedAcademicSearchDiagnosticsId) ? payload.verifiedAcademicSearchDiagnosticsId : null,
@@ -122,20 +134,22 @@ async function rewriteWithScore(client: Client, params: { reportDeviceKey: strin
 export async function retryAsjpEvidenceForReport(
   client: Client,
   params: { reportDeviceKey: string; reportId: string; accountId: string | null; maxAttempts?: number },
-  check: (input: { text: string; wordCount: number }, attempts: number) => Promise<AsjpPersistedEvidence | null> = (input, attempts) => checkAsjpForReport(input, asjpReportClientConfig(), undefined, attempts),
+  check: (input: { text: string; wordCount: number }, attempts: number, withdrawn: string[]) => Promise<AsjpPersistedEvidence | null> = (input, attempts, withdrawn) => checkAsjpForReport(input, asjpReportClientConfig(), undefined, attempts, undefined, withdrawn),
 ): Promise<AsjpRewriteOutcome> {
   try {
     const loaded = await loadEligible(client, params);
     if ("outcome" in loaded) return loaded;
     const { payload, record } = loaded;
     if (record.status !== "UNAVAILABLE") return { outcome: "NOT_ELIGIBLE", reason: record.status === "ACCEPTED" ? "ALREADY_ACCEPTED" : record.status };
-    const next = await retryUnavailableAsjpRecord(record, { text: payload.text, wordCount: payload.wordCount }, (attempts) => check({ text: payload.text, wordCount: payload.wordCount }, attempts), params.maxAttempts ?? 3);
+    // B3: a retry never credits an article already withdrawn from this report
+    const withdrawn = asjpWithdrawnOf(record);
+    const next = await retryUnavailableAsjpRecord(record, { text: payload.text, wordCount: payload.wordCount }, (attempts) => check({ text: payload.text, wordCount: payload.wordCount }, attempts, withdrawn), params.maxAttempts ?? 3);
     if (!next) return { outcome: "NOT_ELIGIBLE", reason: "ATTEMPTS_EXHAUSTED_OR_MISMATCH" };
     if (next.status !== "ACCEPTED") {
       // still unavailable: only the attempt is recorded (score unchanged — it never had ASJP)
       const written = await client.execute({
         sql: `UPDATE saved_reports SET payload_json = json_set(payload_json, '$.asjpEvidence', json(?)) WHERE device_key = ? AND id = ? AND ${CAS}`,
-        args: [JSON.stringify(signAsjpRecord(next, loaded.binding, asjpSigningKey())), params.reportDeviceKey, params.reportId, record.checkedAt, record.status],
+        args: [JSON.stringify(signAsjpRecord(next, loaded.binding, asjpKeyring())), params.reportDeviceKey, params.reportId, record.checkedAt, record.status],
       });
       return Number(written.rowsAffected) === 0 ? { outcome: "LOST_RACE" } : { outcome: "STILL_UNAVAILABLE", reason: next.reason, attempts: next.attempts };
     }
@@ -152,14 +166,25 @@ export async function retryAsjpEvidenceForReport(
 /** Review finding 7 — the per-report kill switch / takedown: an ACCEPTED record becomes RETRACTED and the score loses it. */
 export async function retractAsjpEvidenceForReport(
   client: Client,
-  params: { reportDeviceKey: string; reportId: string; accountId: string | null; reason: string },
+  params: { reportDeviceKey: string; reportId: string; accountId: string | null; reason: string; sourceIds?: string[] },
 ): Promise<AsjpRewriteOutcome> {
   try {
     const loaded = await loadEligible(client, params);
     if ("outcome" in loaded) return loaded;
     if (loaded.record.status !== "ACCEPTED") return { outcome: "NOT_ELIGIBLE", reason: `NOT_ACCEPTED:${loaded.record.status}` };
-    const { signature: _old, ...base } = loaded.record;
-    const next: AsjpPersistedEvidence = { ...base, status: "RETRACTED", reason: String(params.reason).slice(0, 64), checkedAt: new Date().toISOString() };
+    const { signature: _old, keyId: _oldId, ...base } = loaded.record;
+    const reason = String(params.reason).replace(/[^A-Za-z0-9_:-]/g, "").slice(0, 64) || "RETRACTED";
+    const targets = params.sourceIds === undefined ? null : normalizeWithdrawn(params.sourceIds);
+    if (targets !== null && targets.length === 0) return { outcome: "NOT_ELIGIBLE", reason: "NO_VALID_SOURCE_IDS" };
+    // B3: the withdrawn articles are recorded (sticky): the whole record's articles, or only the named ones
+    const withdrawnSourceIds = normalizeWithdrawn([...(base.withdrawnSourceIds ?? []), ...(targets ?? base.cards.map((c) => c.sourceId))]);
+    const gone = new Set(withdrawnSourceIds);
+    const next: AsjpPersistedEvidence = targets === null
+      ? { ...base, status: "RETRACTED", reason, checkedAt: new Date().toISOString(), withdrawnSourceIds }
+      : {
+          ...base, checkedAt: new Date().toISOString(), withdrawnSourceIds, cards: base.cards.filter((c) => !gone.has(c.sourceId)),
+          ...(base.research ? { research: { shortPassages: { ...base.research.shortPassages, passages: base.research.shortPassages.passages.filter((p) => !gone.has(p.sourceId)) } } } : {}),
+        };
     const result = await rewriteWithScore(client, params, loaded, next);
     if (result === "LOST_RACE") return { outcome: "LOST_RACE" };
     if (typeof result === "object") return { outcome: "FAILED", reason: result.failed };

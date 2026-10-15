@@ -11,6 +11,7 @@ import { findReportRowForUser } from "@/lib/reports-repo";
 import { deriveRoomStatus } from "@/lib/report-rooms";
 import { resolvePersistedSimilarityDisplay } from "@/lib/report-primary-similarity";
 import { archiveOverlapScore, hasUnifiedSimilarity, stripServerInternalReportFields, type SimilarityReport } from "@/lib/report-types";
+import { asjpCheckOf } from "@/lib/asjp-report-evidence";
 import { refreshSelectiveCorpusCompletionSignal } from "@/lib/report-evidence-interpretation";
 import { tryDecodeReportFromPersistence } from "@/lib/report-persistence";
 import { ReportUnavailablePanel } from "@/components/report/report-unavailable-panel";
@@ -138,7 +139,8 @@ const loadOwnedReport = cache(async (id: string): Promise<OwnedReportResult> => 
       // claim timestamp from this server-rendered first-paint payload — the
       // stored payload_json keeps them. See each function's own doc comment.
       refreshSelectiveCorpusCompletionSignal(payload);
-      stripServerInternalReportFields(payload);
+      // A4: only a server-VERIFIED ASJP record (bound to this row's device key, id and owner) is described to the client
+      stripServerInternalReportFields(payload, asjpCheckOf(payload.asjpEvidence, { reportDeviceKey: String(row.device_key), reportId: id, accountId: sessionUser.id }));
       // Task A correction: the same explicit, unconditional authorization
       // signal app/api/reports/[id]/route.ts's GET handler sets for the
       // client-side background re-fetch — this is the server-rendered FIRST

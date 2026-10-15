@@ -5,7 +5,7 @@ import type { UnverifiedPublicationNotice } from "@/lib/academic-search/unverifi
 import type { UnifiedSimilarityResult } from "@/lib/unified-similarity";
 import type { SuppliedReferenceVerifiedEvidence, SuppliedReferenceInput } from "@/lib/user-supplied-references";
 import type { UserSuppliedReferenceGuard, UserSuppliedReferencePersistedChannel } from "@/lib/report-user-supplied-references";
-import type { AsjpPersistedEvidence } from "@/lib/asjp-report-evidence";
+import type { AsjpPersistedEvidence, AsjpCheck } from "@/lib/asjp-report-evidence";
 import { resolveAiDisplayState } from "@/lib/ai-display-state";
 import {
   AI_SIZE_UNAVAILABLE_MESSAGE,
@@ -473,8 +473,8 @@ export type SimilarityReport = {
    * (stripServerInternalReportFields). Absent on every report saved while ASJP is off.
    */
   asjpEvidence?: AsjpPersistedEvidence;
-  /** ASJP — the client-safe projection of asjpEvidence on an OUTBOUND copy only (never persisted, never trusted). */
-  asjpCheck?: { status: "INCLUDED" | "UNAVAILABLE"; sources: number };
+  /** ASJP — the client-safe, server-VERIFIED projection of asjpEvidence on an OUTBOUND copy only (asjpCheckOf; never persisted, never trusted). */
+  asjpCheck?: AsjpCheck;
   /**
    * FIX C — ADDITIVE, SERVER-AUTHORITATIVE NOTICE, never evidence. Publications
    * the academic search identified (strong identity, lib/academic-search/
@@ -675,6 +675,9 @@ export function unifiedEvidenceSummary(unified: UnifiedSimilarityResult): string
   if (unified.liveAcademicOnlyWords > 0) parts.push("live academic sources");
   if (unified.previousUploadOnlyWords > 0) parts.push("TurnitPlus reference sources");
   if (unified.selectiveCorpusOnlyWords > 0) parts.push("supplementary reference sources");
+  // B2 (Phase 7 remediation): the ASJP keys exist only when the channel credited at least one article, so ASJP is named
+  // whenever ASJP words are in the score — also when every one of them overlaps another channel (the cards show it too)
+  if (unified.asjpPublicationOnlyWords !== undefined) parts.push("published articles (ASJP)");
   if (parts.length === 0) return "no matched sources";
   return parts.join(", ");
 }
@@ -777,20 +780,18 @@ export function hasIncompleteSelectiveCorpusCheck(report: SimilarityReport): boo
  * pattern each of those already uses for verifiedAcademicSearchDiagnosticsId /
  * userSuppliedReferenceGuard.
  */
-export function stripServerInternalReportFields(report: SimilarityReport): void {
+export function stripServerInternalReportFields(report: SimilarityReport, asjpCheck: AsjpCheck | null = null): void {
   delete report.selectiveCorpusAuthoritativeStatus;
   delete report.selectiveCorpusAuthoritativeClaimedAt;
   // ASJP (Phase 6.5): the server-owned record (pins, source offsets, the UNSCORED research signal) never leaves the
-  // server; the outbound copy carries only whether the ASJP check is included or unavailable. The source cards and
-  // highlights reach the client through evidenceInterpretation, like every other channel's.
-  // Only a record carrying a server signature is reflected (this module cannot verify it; an unsigned / client-planted
-  // value is never applied by the server and is not described to the client either). RETRACTED records show nothing.
-  const asjp = report.asjpEvidence as { status?: string; signature?: unknown; cards?: Array<{ scored?: boolean }> } | undefined;
+  // server; the outbound copy carries only the ASJP check's state. The source cards and highlights reach the client
+  // through evidenceInterpretation, like every other channel's.
+  // A4 (Phase 7 remediation): this client-safe module cannot verify a record, so it never describes one itself — the
+  // server caller passes the VERIFIED projection (lib/asjp-report-evidence.ts asjpCheckOf, bound to the row's device
+  // key, id and owner). Without it nothing is described: a forged or unsigned record never becomes an outbound state.
   delete report.asjpEvidence;
   delete report.asjpCheck;
-  if (asjp && typeof asjp.signature === "string" && (asjp.status === "ACCEPTED" || asjp.status === "UNAVAILABLE")) {
-    report.asjpCheck = { status: asjp.status === "ACCEPTED" ? "INCLUDED" : "UNAVAILABLE", sources: (asjp.cards ?? []).filter((c) => c?.scored === true).length };
-  }
+  if (asjpCheck) report.asjpCheck = asjpCheck;
 }
 
 export function archiveMatchedWordCount(report: SimilarityReport) {

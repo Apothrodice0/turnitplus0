@@ -48,7 +48,7 @@ import type { UnifiedSimilarityResult } from '../../../lib/unified-similarity';
 import type { ExternalAcademicEvidence } from '../../../lib/academic-search/types';
 import { requestedScoringNormalizationVersion, scoringNormalizationEvidence, type ScoringNormalizationVersion } from '../../../lib/similarity-core';
 import { runWithScoringNormalization } from '../../../lib/scoring-normalization-scope';
-import { asjpEvidenceForSave, checkAsjpForReport, type AsjpPersistedEvidence } from '../../../lib/asjp-report-evidence';
+import { asjpSaveDecision, asjpRecordDoesNotFit, asjpRecordOccupiesSpace, checkAsjpForReport, type AsjpPersistedEvidence, type AsjpSaveDecision } from '../../../lib/asjp-report-evidence';
 
 // Reports carry derived data (AI passages, matched phrases, extracted text)
 // on top of the ingest pipeline's raw text, so this cap is larger than
@@ -857,8 +857,10 @@ export async function POST(request: Request) {
       // unchanged, or none (never re-queried, whatever the flag says now, so a saved report never changes); a first
       // save, or a changed manuscript, asks the matching service once — started here so it runs alongside the verification below. Never throws; with ASJP off
       // and no persisted record it resolves to null without any network call, and the save is byte-identical.
-      const asjpEvidencePromise: Promise<AsjpPersistedEvidence | null> = isNonEmptyString(reportPayload?.text)
-        ? asjpEvidenceForSave(
+      const asjpBinding = { reportDeviceKey: deviceKey, reportId: id, accountId: userId ?? null };
+      const noAsjpDecision: AsjpSaveDecision = { record: null, preserveStored: false, reason: null };
+      const asjpDecisionPromise: Promise<AsjpSaveDecision> = isNonEmptyString(reportPayload?.text)
+        ? asjpSaveDecision(
             {
               text: reportPayload.text,
               wordCount: reportPayload.wordCount,
@@ -868,11 +870,12 @@ export async function POST(request: Request) {
               persistedRecord: existingReportRow.rows[0]?.asjp_evidence ?? null,
               persistedText: persistedManuscriptText,
               // review finding 1: records are signed for, and only trusted on, this report
-              binding: { reportDeviceKey: deviceKey, reportId: id, accountId: userId ?? null },
+              binding: asjpBinding,
             },
-            () => checkAsjpForReport({ text: reportPayload.text, wordCount: reportPayload.wordCount }),
-          ).catch(() => null)
-        : Promise.resolve(null);
+            // B3: the report's withdrawn articles (from its verified previous record) are excluded by the service
+            (withdrawn) => checkAsjpForReport({ text: reportPayload.text, wordCount: reportPayload.wordCount }, undefined, undefined, 0, undefined, withdrawn),
+          ).catch(() => noAsjpDecision)
+        : Promise.resolve(noAsjpDecision);
 
       // USER-SUPPLIED REFERENCES V1 — the trust boundary. The client sends the
       // reference files' ALREADY-EXTRACTED text as an `userSuppliedReferences`
@@ -1036,8 +1039,11 @@ export async function POST(request: Request) {
       const selectiveCorpusAuthoritativeNewlyPending =
         isFirstSaveOfThisReport && selectiveCorpusAuthoritativeStatusToPersist === 'pending';
 
-      const asjpEvidenceRecord = await asjpEvidencePromise;
-      const persistedReportPayload = {
+      const asjpDecision = await asjpDecisionPromise;
+      // The ASJP record this save persists. B1: it may be replaced ONCE below by its signed RECORD_DOES_NOT_FIT marker
+      // (asjpRecordDoesNotFit) when — and only when — the report with ASJP exceeds the persisted ceiling.
+      let asjpEvidenceRecord: AsjpPersistedEvidence | null = asjpDecision.record;
+      const buildPersistedReportPayload = (asjpRecord: AsjpPersistedEvidence | null) => ({
         ...stripClientEvidenceInterpretation({
           ...reportPayload,
           externalAcademicEvidence: persistedExternalAcademicEvidence,
@@ -1091,8 +1097,9 @@ export async function POST(request: Request) {
           : {}),
         selectiveCorpusAuthoritativeStatus: selectiveCorpusAuthoritativeStatusToPersist,
         selectiveCorpusAuthoritativeClaimedAt: selectiveCorpusAuthoritativeClaimedAtToPersist,
-        ...(asjpEvidenceRecord ? { asjpEvidence: asjpEvidenceRecord } : {}),
-      };
+        ...(asjpRecord ? { asjpEvidence: asjpRecord } : {}),
+      });
+      let persistedReportPayload = buildPersistedReportPayload(asjpEvidenceRecord);
 
       // Device Passport (Phase 2/4): cryptographically verify an optional
       // upload-time device attestation. ORDERING (Preview same-device SELF
@@ -1255,11 +1262,28 @@ export async function POST(request: Request) {
       // below spreads persistedReportPayload, so a fabricated
       // payload.externalAcademicEvidence can never survive a save, even on the
       // transient-"pending" path that keeps this base value unchanged.
+      // B1 (Phase 7 remediation) — ASJP NEVER MAKES A SAVE FAIL. When the report WITH its ASJP record is over the
+      // persisted ceiling, the ASJP contribution is left out whole — never truncated: (tier 2) the record becomes its
+      // signed RECORD_DOES_NOT_FIT marker (status UNAVAILABLE: the report shows "ASJP check unavailable") and the score
+      // is recomputed without the ASJP channel; (tier 3) only if even that marker does not fit, no record at all, logged
+      // as asjp_record_dropped_at_ceiling — the report then saves exactly as it would with ASJP off. Only a report that
+      // does not fit WITHOUT any ASJP is refused, with the unchanged 413. Deterministic: the same inputs take the same tier.
+      const overCeiling = (json: string) => persistedPayloadSize(json) > persistedCeiling;
+      const shrinkAsjp = (): boolean => {
+        if (asjpRecordOccupiesSpace(asjpEvidenceRecord)) asjpEvidenceRecord = asjpRecordDoesNotFit(asjpEvidenceRecord!, asjpBinding);
+        else if (asjpEvidenceRecord) { asjpEvidenceRecord = null; console.warn(JSON.stringify({ event: 'asjp_record_dropped_at_ceiling' })); }
+        else return false;
+        persistedReportPayload = buildPersistedReportPayload(asjpEvidenceRecord);
+        return true;
+      };
       let payloadJsonToPersist = finalizeReportJson(persistedReportPayload as SimilarityReport);
-      if (persistedPayloadSize(payloadJsonToPersist) > persistedCeiling) {
+      while (overCeiling(payloadJsonToPersist) && shrinkAsjp()) payloadJsonToPersist = finalizeReportJson(persistedReportPayload as SimilarityReport);
+      if (overCeiling(payloadJsonToPersist)) {
         logReportSaveRejectedTelemetry({ reason: 'PERSISTED_PAYLOAD_TOO_LARGE', status: 413, authMode: sessionUser ? 'authenticated' : 'anonymous' });
         return new NextResponse(JSON.stringify({ error: 'Payload too large' }), { status: 413 });
       }
+      /** B1: after a shrink inside finalization, the base payload is rebuilt (and still fits: it only got smaller). */
+      const rebaseAfterShrink = () => { payloadJsonToPersist = finalizeReportJson(persistedReportPayload as SimilarityReport); };
       // Shadow-telemetry handoff. ONE request-local object, function-local to
       // POST() and set exactly once (inside the try block below, immediately
       // after resolvePrimarySimilaritySummary returns) — never module scope,
@@ -1289,6 +1313,9 @@ export async function POST(request: Request) {
         | null = null;
       if (isNonEmptyString(reportPayload?.text)) {
         try {
+          // B1: at most three passes (full ASJP record -> its marker -> no record); each pass is the same deterministic
+          // resolution, fed the record this save will actually persist, so score, cards and record always agree
+          for (;;) {
           const resolution = await resolvePrimarySimilaritySummary(client, {
             reportDeviceKey: deviceKey,
             reportId: id,
@@ -1351,6 +1378,14 @@ export async function POST(request: Request) {
           // real, final unifiedSimilarity.
           if (selectiveCorpusAuthoritativeMustDeferFinalScore) {
             // no-op: leave payloadJsonToPersist exactly as initialized above
+          } else if (asjpDecision.preserveStored) {
+            // A5 (Phase 7 remediation): a same-manuscript resave of a report whose SIGNED ASJP record this server cannot
+            // verify now (its key is not configured, retired without a verify copy, or changed). Recomputing here would
+            // silently drop the ASJP words the saved, server-verified score holds (23 % -> 0 %). Instead no new score is
+            // persisted: the base payload carries no unifiedSimilarityGeneration, so SAVE_REPORT_SQL's generation guard
+            // keeps the stored report exactly as it was (score, cards, record; only a ready aiAnalysis is merged), and
+            // GET / SSR describe the record as UNVERIFIED ("cannot currently be verified"). Restoring the key restores
+            // normal behaviour with no data lost.
           } else if (resolution.unifiedSimilarity) {
             payloadJsonToPersist = finalizeReportJson({
               ...persistedReportPayload,
@@ -1364,7 +1399,9 @@ export async function POST(request: Request) {
               // could otherwise still carry it forward).
               unifiedSimilarityFailed: false,
             } as SimilarityReport, resolution.historicalSubmissionMatch);
-            if (persistedPayloadSize(payloadJsonToPersist) > persistedCeiling) {
+            if (overCeiling(payloadJsonToPersist)) {
+              // B1: leave the ASJP contribution out (marker, then none) and recompute; never a 413 caused by ASJP
+              if (shrinkAsjp()) { rebaseAfterShrink(); continue; }
               logReportSaveRejectedTelemetry({ reason: 'PERSISTED_PAYLOAD_TOO_LARGE', status: 413, authMode: sessionUser ? 'authenticated' : 'anonymous' });
               return new NextResponse(JSON.stringify({ error: 'Payload too large' }), { status: 413 });
             }
@@ -1407,10 +1444,13 @@ export async function POST(request: Request) {
               corpusSourceMatchingEnabledAtComputation: resolution.corpusSourceMatchingEnabled,
               unifiedSimilarityGeneration: resolution.corpusGeneration,
             } as SimilarityReport, resolution.historicalSubmissionMatch);
-            if (persistedPayloadSize(payloadJsonToPersist) > persistedCeiling) {
+            if (overCeiling(payloadJsonToPersist)) {
+              if (shrinkAsjp()) { rebaseAfterShrink(); continue; }
               logReportSaveRejectedTelemetry({ reason: 'PERSISTED_PAYLOAD_TOO_LARGE', status: 413, authMode: sessionUser ? 'authenticated' : 'anonymous' });
               return new NextResponse(JSON.stringify({ error: 'Payload too large' }), { status: 413 });
             }
+          }
+          break;
           }
         } catch (err) {
           console.error('write-time similarity finalization failed unexpectedly (non-fatal, report save proceeds without it):', err instanceof Error ? err.message : String(err));

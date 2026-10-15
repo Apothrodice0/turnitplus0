@@ -372,6 +372,11 @@ export async function resolvePrimarySimilaritySummary(
      * asjpPublicationEvidence above takes precedence (direct callers / tests).
      */
     asjpReportEvidence?: unknown;
+    /**
+     * A7 (Phase 7 remediation): the owner the ASJP record is bound to — the ROW's own user_id. Callers that read the row
+     * (self-heal) pass it; otherwise accountId is used (POST: the saving owner; retry / retraction already pass the row's).
+     */
+    asjpRecordAccountId?: string | null;
     /** The archive-only fallback value — never mutated, never persisted by this function; see this module's own header comment. */
     archiveScore: number;
     /**
@@ -529,7 +534,7 @@ async function resolvePrimarySimilaritySummaryUnderContract(
     const asjpChannel = params.asjpPublicationEvidence?.length
       ? params.asjpPublicationEvidence
       : params.asjpReportEvidence != null
-        ? asjpChannelOf(params.asjpReportEvidence, { wordCount: params.wordCount, scoringNormalizationVersion, text: params.rawText, binding: { reportDeviceKey: params.reportDeviceKey, reportId: params.reportId, accountId: params.accountId ?? null } }).channel
+        ? asjpChannelOf(params.asjpReportEvidence, { wordCount: params.wordCount, scoringNormalizationVersion, text: params.rawText, binding: { reportDeviceKey: params.reportDeviceKey, reportId: params.reportId, accountId: params.asjpRecordAccountId !== undefined ? params.asjpRecordAccountId : params.accountId ?? null } }).channel
         : null;
     const unifiedSimilarity = compute({
       wordCount: params.wordCount,
@@ -1159,10 +1164,10 @@ export async function selfHealUnifiedSimilarity(
 ): Promise<SelfHealResult> {
   try {
     const row = await client.execute({
-      sql: "SELECT payload_json, archive_score FROM saved_reports WHERE device_key = ? AND id = ?",
+      sql: "SELECT payload_json, archive_score, user_id FROM saved_reports WHERE device_key = ? AND id = ?",
       args: [params.reportDeviceKey, params.reportId],
     });
-    const raw = row.rows[0] as unknown as { payload_json: string; archive_score: number | bigint } | undefined;
+    const raw = row.rows[0] as unknown as { payload_json: string; archive_score: number | bigint; user_id: string | null } | undefined;
     if (!raw) return { attempted: false };
     const payload = JSON.parse(String(raw.payload_json)) as SimilarityReport;
 
@@ -1228,6 +1233,8 @@ export async function selfHealUnifiedSimilarity(
       externalAcademicEvidence: verifiedAcademicEvidence,
       // ASJP (Phase 6.5): the persisted record, never a fresh query — a self-heal reproduces the saved ASJP evidence
       asjpReportEvidence: payload.asjpEvidence,
+      // A7: the record is bound to the ROW's owner, never to whatever account the caller passed
+      asjpRecordAccountId: raw.user_id ?? null,
       archiveScore: payload.archiveScore ?? payload.score ?? Number(raw.archive_score),
       asOf: params.asOf,
     });

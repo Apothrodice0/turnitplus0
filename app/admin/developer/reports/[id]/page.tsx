@@ -17,7 +17,7 @@ import type {
   DecisionTraceSource,
 } from "@/lib/admin-similarity-decision-trace";
 import type { SimilarityReport } from "@/lib/report-types";
-import { parseAsjpEvidenceRecord } from "@/lib/asjp-report-evidence";
+import { parseAsjpEvidenceRecord, verifyAsjpRecordDetailed, type AsjpRecordBinding } from "@/lib/asjp-report-evidence";
 
 export const dynamic = "force-dynamic";
 
@@ -270,7 +270,7 @@ export default async function DeveloperReportInspectPage({
       <DevicePassportDiagnosticsSection trace={similarityDecisionTrace} />
 
       {/* ================= ASJP (Phase 6.5 local prototype) ================= */}
-      <AsjpDebugSection record={report.payload.asjpEvidence} />
+      <AsjpDebugSection record={report.payload.asjpEvidence} binding={{ reportDeviceKey: report.deviceKey, reportId: report.id, accountId: report.userId ?? null }} />
 
       {/* ================= Raw data ================= */}
       <section className="admin-card">
@@ -635,7 +635,7 @@ function SourceEvidenceDetails({ source }: { source: DecisionTraceSource }) {
  * research signal is shown ONLY here: it is never a scored highlight, never in the similarity percentage, and never
  * sent to an ordinary user (stripServerInternalReportFields removes the whole record from customer responses).
  */
-function AsjpDebugSection({ record: raw }: { record: SimilarityReport["asjpEvidence"] | undefined }) {
+function AsjpDebugSection({ record: raw, binding }: { record: SimilarityReport["asjpEvidence"] | undefined; binding: AsjpRecordBinding }) {
   if (!raw) return null;
   // defensive: a malformed stored value is shown raw, never dereferenced
   const record = parseAsjpEvidenceRecord(raw);
@@ -658,7 +658,11 @@ function AsjpDebugSection({ record: raw }: { record: SimilarityReport["asjpEvide
       <p>
         Status: <b>{record.status}</b>
         {record.reason ? ` (${record.reason})` : ""} · checked {String(record.checkedAt)} · attempts {String(record.attempts)} ·{" "}
-        {typeof record.signature === "string" ? "signed" : "UNSIGNED (never applied)"}
+        {(() => {
+          // A4 (Phase 7 remediation): VERIFIED against this row's device key, id and owner — a signature string alone proves nothing
+          const v = verifyAsjpRecordDetailed(record, binding);
+          return v === "OK" ? `verified (key ${String(record.keyId ?? "legacy")})` : v === "UNSIGNED" ? "UNSIGNED (never applied)" : `UNVERIFIED: ${v} (never applied)`;
+        })()}
       </p>
       {record.pins ? (
         <p>

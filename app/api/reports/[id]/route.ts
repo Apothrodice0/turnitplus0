@@ -12,6 +12,7 @@ import { deleteReportDocumentData } from '../../../../lib/report-deletion';
 import { deleteReportCorpusAdmissionData } from '../../../../lib/corpus-admission-report-integration';
 import { getSessionUser } from '../../../../lib/auth-session';
 import { stripServerInternalReportFields, type SimilarityReport } from '../../../../lib/report-types';
+import { asjpCheckOf } from '../../../../lib/asjp-report-evidence';
 import { tryDecodeReportFromPersistence } from '../../../../lib/report-persistence';
 import { reportScoringNormalizationVersion } from '../../../../lib/similarity-core';
 
@@ -50,9 +51,13 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
     const client = await getReportsDbClient();
     let row;
     let payload: SimilarityReport | undefined;
+    // A4: the owner the row was found for (session account, or NULL for an anonymous device-key report) — the binding
+    // the outbound ASJP projection is verified against
+    let asjpOwnerId: string | null = null;
     try {
       const sessionUser = await getSessionUser(request, client);
       const accountId = sessionUser ? sessionUser.id : null;
+      asjpOwnerId = accountId;
       if (sessionUser) {
         row = await findReportRowForUser(client, id, sessionUser.id);
       } else {
@@ -306,7 +311,9 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
     // exactly like verifiedAcademicSearchDiagnosticsId above.
     if (payload) {
       refreshSelectiveCorpusCompletionSignal(payload);
-      stripServerInternalReportFields(payload);
+      // A4: only a server-VERIFIED record (bound to this row's device key, id and owner) is described to the client
+      const asjpCheck = row ? asjpCheckOf(payload.asjpEvidence, { reportDeviceKey: String(row.device_key), reportId: id, accountId: asjpOwnerId }) : null;
+      stripServerInternalReportFields(payload, asjpCheck);
     }
 
     return new NextResponse(JSON.stringify({ payload }), { status: 200, headers: NO_STORE_JSON });
