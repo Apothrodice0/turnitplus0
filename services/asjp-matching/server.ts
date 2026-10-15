@@ -226,7 +226,12 @@ export async function startAsjpService(config: AsjpServiceConfig): Promise<{ ser
         return json(res, 200, { switched: true, generationId: next.generation.generationId });
       }
       return json(res, 404, { error: "not found" });
-    } catch (error) { return json(res, (error as any)?.code === 413 ? 413 : 500, { error: String((error as Error).message) }); }
+    } catch (error) {
+      // Phase 7 (no-leak): never echo an error message — a JSON parse error quotes the request body (manuscript text)
+      if ((error as any)?.code === 413) return json(res, 413, { error: "too large" });
+      if (error instanceof SyntaxError) return json(res, 400, { error: "bad request" });
+      return json(res, 500, { error: "internal error" });
+    }
   });
   await new Promise<void>((resolve) => server.listen(config.port, "127.0.0.1", resolve));
   return { server, close: () => { server.close(); pool.close(); }, pool: () => pool };

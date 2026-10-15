@@ -220,3 +220,17 @@ test('Phase 7 PC hosting: signed-only /match (replay refused) and admin endpoint
     assert.equal((await fetch(`${u}/admin/refresh`, { method: 'POST', headers: { ...admin, 'x-forwarded-for': '203.0.113.9' } })).status, 403);
   } finally { svc.close(); }
 });
+
+test('Phase 7 no-leak: a malformed or oversized request gets a generic error that never quotes the body', async () => {
+  const p = ++port;
+  const svc = await startAsjpService({ ...base, workers: 1, port: p, maxBodyBytes: 10_000 });
+  try {
+    const u = `http://127.0.0.1:${p}`;
+    const secretText = 'CONTROLLED-MANUSCRIPT-FRAGMENT-' + 'z'.repeat(40);
+    const bad = await fetch(`${u}/match`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: `{"text": "${secretText}` });
+    const badBody = await bad.text();
+    assert.equal(bad.status, 400); assert.equal(badBody.includes('CONTROLLED-MANUSCRIPT'), false);
+    const big = await fetch(`${u}/match`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ text: secretText.repeat(400) }) }).catch(() => null);
+    if (big) { const t = await big.text(); assert.equal(t.includes('CONTROLLED-MANUSCRIPT'), false); }
+  } finally { svc.close(); }
+});

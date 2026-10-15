@@ -62,7 +62,8 @@ async function main() {
       }
       send({ type: "result", id: m.id, ...out, digest: answerDigest(out), generationId: config.generationId, logicalManifestSha256: config.logicalManifestSha256, laneVersion: ASJP_ACADEMIC_LANE_VERSION, licencePolicy: config.licencePolicy, normalization: 2, catalogLoadedAt: snapshot.loadedAt, catalogDigest: snapshot.digest, features, ...(research ? { research } : {}), workerMs: Math.round(performance.now() - t0), laneTimings: r.timings ?? null, rssMb: Math.round(process.memoryUsage().rss / 1048576) });
     } catch (error) {
-      send({ type: "result", id: m.id, state: "FAILED", failureCode: "WORKER_EXCEPTION", failureMessage: String((error as Error)?.message ?? error) });
+      // no-leak: a code only, never the exception message (it could quote input)
+      send({ type: "result", id: m.id, state: "FAILED", failureCode: "WORKER_EXCEPTION" });
     }
   });
 }
