@@ -112,3 +112,26 @@ test('refuses a token store that changed after the build', () => {
   fs.writeFileSync(path.join(copy, 'identity.json'), JSON.stringify(id));
   assert.throws(() => SixwordIndex.open(copy), /index.json changed/);
 });
+
+test('evidence: every holder of a shared sequence is listed, shared text is never eligible, scoring is off by default', async () => {
+  const { sixwordMatches, shortEligibility, isSixwordShortScoringEnabled, P15_STRICT, sixwordClusters } = await import('../lib/asjp-sixword-evidence.ts');
+  const { tokenSpans } = await import('../lib/similarity-core.ts');
+  const idx = SixwordIndex.open(indexDir);
+  const text = `${inventedText(4242, 30)} ${inventedText(999, 18)} ${inventedText(4243, 30)} ${tokensForScoringNormalization(docs[9].text, 2).slice(40, 57).join(' ')} ${inventedText(4244, 30)}`;
+  const words = tokensForScoringNormalization(text, 2);
+  const matches = sixwordMatches(idx, words, findSixwordRuns(idx, words), { original: text, spans: tokenSpans(text, 2), wordDf: { documents: 40, df: {} } });
+  const shared = matches.find((m) => m.s === 30);
+  assert.equal(shared.holderCount, 2);
+  assert.deepEqual(shared.holders.map((h) => h.docId).sort(), [docs[5].docId, docs[6].docId]);
+  assert.equal(shared.commonness, 'SHARED');
+  assert.match(shortEligibility(shared, P15_STRICT).reason, /origin not established/);
+  const unique = matches.find((m) => m.s === 78);
+  assert.equal(unique.holderCount, 1);
+  assert.equal(unique.words, 17);
+  assert.deepEqual(idx.readTokens(unique.holders[0].ord, unique.holders[0].p, unique.holders[0].q + 1), words.slice(78, 95));
+  assert.equal(shortEligibility(unique, P15_STRICT).eligible, true);
+  assert.equal(isSixwordShortScoringEnabled({}), false);
+  assert.equal(isSixwordShortScoringEnabled({ ASJP_SIXWORD_SHORT_SCORING_ENABLED: 'true' }), true);
+  assert.deepEqual(sixwordClusters(matches), []);
+  idx.close();
+});
