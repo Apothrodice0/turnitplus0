@@ -36,7 +36,7 @@ export const bandOf = (words: number): SixwordBand => (words <= 9 ? "6-9" : word
 
 const FUNCTION_WORDS = new Set("a an and are as at be been being but by can could did do does for from had has have he her his i if in into is it its may might more most must no nor not of on or our she should so such than that the their them then there these they this those to was we were what when where which while who will with would you your also between both each other only same very within without about after before during over under upon whose whom".split(" "));
 
-export type SixwordHolder = { ord: number; docId: string; p: number; q: number; occurrences: number };
+export type SixwordHolder = { ord: number; docId: string; p: number; q: number; occurrences: number; gate?: { eligible: boolean; reason: string | null } };
 export type SixwordMatch = {
   s: number; e: number; words: number; band: SixwordBand;
   holders: SixwordHolder[]; holderCount: number; commonness: "UNIQUE" | "SHARED" | "COMMON";
@@ -150,6 +150,7 @@ export type ShortScoringRule = {
 export function shortEligibility(m: SixwordMatch, rule: ShortScoringRule, all?: readonly SixwordMatch[]): { eligible: boolean; reason: string } {
   if (m.words >= 25) return { eligible: false, reason: "25+ words: governed by the existing lane, not this rule" };
   if (m.holderCount !== 1) return { eligible: false, reason: m.holderCount === 0 ? "no holder" : `held by ${m.holderCount} articles: origin not established` };
+  if (m.holders[0].gate && !m.holders[0].gate.eligible) return { eligible: false, reason: `holder not eligible: ${m.holders[0].gate.reason}` };
   if (m.features.form) return { eligible: false, reason: `structural form ${m.features.form}` };
   const st = rule.standalone;
   const partialOk = (p: SixwordMatch["features"]["partial"], g3?: number, half?: number) => (g3 === undefined || (p?.grams3 ?? Infinity) <= g3) && (half === undefined || (p?.half ?? Infinity) <= half);
@@ -216,4 +217,17 @@ export function sixwordClusters(matches: readonly SixwordMatch[], rule = CLUSTER
     flush();
   }
   return out;
+}
+
+/**
+ * Source gates (added after the frozen hold-out; with every holder eligible nothing changes). The caller supplies the
+ * lane's own gates for an article ord — identity, catalog, withdrawal, licence policy, publication before the
+ * reference date — and every holder is annotated. Commonness and holder counts keep using the WHOLE index (they
+ * describe how common the wording is); only an ELIGIBLE single holder can ever be attributed or scored, and an
+ * ineligible holder is never shown as a source.
+ */
+export function applyHolderGates(matches: SixwordMatch[], gate: (ord: number) => { eligible: boolean; reason: string | null }): SixwordMatch[] {
+  const memo = new Map<number, { eligible: boolean; reason: string | null }>();
+  for (const m of matches) for (const h of m.holders) { if (!memo.has(h.ord)) memo.set(h.ord, gate(h.ord)); h.gate = memo.get(h.ord)!; }
+  return matches;
 }

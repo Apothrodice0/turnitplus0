@@ -135,3 +135,19 @@ test('evidence: every holder of a shared sequence is listed, shared text is neve
   assert.deepEqual(sixwordClusters(matches), []);
   idx.close();
 });
+
+test('evidence: an ineligible holder (gate) is never scored; an all-eligible gate changes nothing', async () => {
+  const { sixwordMatches, shortEligibility, applyHolderGates, P15_STRICT } = await import('../lib/asjp-sixword-evidence.ts');
+  const { tokenSpans } = await import('../lib/similarity-core.ts');
+  const idx = SixwordIndex.open(indexDir);
+  const text = `${inventedText(4245, 30)} ${tokensForScoringNormalization(docs[9].text, 2).slice(40, 57).join(' ')} ${inventedText(4246, 30)}`;
+  const words = tokensForScoringNormalization(text, 2);
+  const make = () => sixwordMatches(idx, words, findSixwordRuns(idx, words), { original: text, spans: tokenSpans(text, 2), wordDf: { documents: 40, df: {} } });
+  const open = applyHolderGates(make(), () => ({ eligible: true, reason: null }));
+  const unique = open.find((m) => m.s === 30);
+  assert.equal(shortEligibility(unique, P15_STRICT).eligible, true);
+  const later = applyHolderGates(make(), () => ({ eligible: false, reason: 'PUBLISHED_AFTER_REFERENCE_DATE' })).find((m) => m.s === 30);
+  assert.deepEqual(shortEligibility(later, P15_STRICT), { eligible: false, reason: 'holder not eligible: PUBLISHED_AFTER_REFERENCE_DATE' });
+  assert.equal(later.holderCount, 1);
+  idx.close();
+});
