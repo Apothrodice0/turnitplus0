@@ -1,5 +1,6 @@
 import { DerivedSourceSidecarSet } from "./corpus-engine/derived-source";
 import { LaneTokenStore } from "./asjp-lane-tokens";
+import { NumericIndex } from "./asjp-numeric-index";
 import { CorpusGenerationError } from "./corpus-engine/generation";
 import { docIdFromDecimal } from "./corpus-engine/ids";
 import { CorpusGenerationReader } from "./corpus-engine/reader";
@@ -72,14 +73,14 @@ export const ASJP_CONTEXT_GAP_WORDS = 50;
  *                       ASJP_CONTEXT_ANCHOR_WORDS words between the manuscript and the article's indexed text that the
  *                       verifier did not return (numeric tables it does not anchor on) is added.
  */
-export type AsjpMatchingCorrections = { selfOverlapLabels?: boolean; genericFilter?: boolean; verbatimCompletion?: boolean; verbatimRescue?: boolean; rescueMinVerifiedWords?: number; rescueFastPath?: boolean; runMerge?: boolean; structuralFilter?: boolean; annotations?: boolean };
+export type AsjpMatchingCorrections = { selfOverlapLabels?: boolean; genericFilter?: boolean; verbatimCompletion?: boolean; verbatimRescue?: boolean; rescueMinVerifiedWords?: number; rescueFastPath?: boolean; numericTables?: boolean; runMerge?: boolean; structuralFilter?: boolean; annotations?: boolean };
 /**
  * v3 rescue pre-filter: only a candidate in which the verifier itself verified at least two minimum verbatim runs
  * (2 x 6 words) is re-read; the rescue still needs >= 60 exact verbatim words with a 25-word run. A pre-filter of 30
  * was answer-identical on the 563 manuscripts but lost a 90-word copied passage the verifier had verified only 19
  * words of (B054 splice), so the bar is set by the run size, not by the cases seen.
  */
-export const ASJP_RESCUE_MIN_VERIFIED_WORDS = 2 * 6;
+export const ASJP_RESCUE_MIN_VERIFIED_WORDS = 2 * ASJP_MINIMUM_VERBATIM_RUN;
 /**
  * v3 CORRECTIONS (on by default):
  *   verbatimRescue    a candidate the verifier verified spans in but did not admit is admitted when the lane's own exact
@@ -209,6 +210,8 @@ export type AsjpLaneSource = {
   genericClusters: Array<{ submittedWordStart: number; submittedWordEnd: number; words: number; otherArticles: number }>;
   /** v3: admitted by the lane's verbatim runs after the verifier did not admit it. */
   admittedBy: "VERIFIER" | "VERBATIM_RESCUE" | null;
+  /** v4.3: the candidate was nominated by the number-table index, not by the verifier. */
+  candidateBy?: "NUMERIC_TABLE";
   /** v3: clusters set aside as structural boilerplate / bibliographic text, with the evidence. */
   structuralClusters: Array<{ submittedWordStart: number; submittedWordEnd: number; words: number; category: AsjpStructuralCategory; evidence: Record<string, number | string> }>;
   structuralWords: number;
@@ -650,18 +653,20 @@ export async function runAsjpAcademicLane(request: AsjpLaneRequest): Promise<Asj
   return runWithScoringNormalization(ASJP_LANE_SCORING_NORMALIZATION, () => runLane(request));
 }
 
-export type AsjpLaneSession = { reader: CorpusGenerationReader; sidecars: DerivedSourceSidecarSet | null; laneTokens?: LaneTokenStore | null };
+/** A lane session: one per process. pinned = opened against an expected logical manifest (serving requires it). */
+export type AsjpLaneSession = { reader: CorpusGenerationReader; sidecars: DerivedSourceSidecarSet | null; laneTokens?: LaneTokenStore | null; numericIndex?: NumericIndex | null; pinned?: boolean; close?: () => void };
 
 /**
  * Opens a generation once for many requests. useDerivedSourceSidecar: verify candidates from the generation's
  * derived-source sidecar (no stored text read) where one is present and its identity matches the running code;
  * a segment without an accepted sidecar is verified from its text exactly as before.
  */
-export async function openAsjpLaneSession(options: { store: CorpusObjectStore; generationId: string; logicalManifestSha256?: string; dictionaryCacheBytes?: number; useDerivedSourceSidecar?: boolean; laneTokensDir?: string }): Promise<AsjpLaneSession> {
+export async function openAsjpLaneSession(options: { store: CorpusObjectStore; generationId: string; logicalManifestSha256?: string; dictionaryCacheBytes?: number; useDerivedSourceSidecar?: boolean; laneTokensDir?: string; numericIndexDir?: string }): Promise<AsjpLaneSession> {
   const reader = await CorpusGenerationReader.open({ store: options.store, generationId: options.generationId, expectedLogicalManifestSha256: options.logicalManifestSha256, dictionaryCacheBytes: options.dictionaryCacheBytes });
   const sidecars = options.useDerivedSourceSidecar ? await DerivedSourceSidecarSet.open(reader) : null;
   const laneTokens = options.laneTokensDir ? LaneTokenStore.open(options.laneTokensDir, ASJP_LANE_SCORING_NORMALIZATION) : null;
-  return { reader, sidecars, laneTokens };
+  const numericIndex = options.numericIndexDir ? NumericIndex.open(options.numericIndexDir) : null;
+  return { reader, sidecars, laneTokens, numericIndex, pinned: !!options.logicalManifestSha256, close: () => laneTokens?.close() };
 }
 
 async function runLane(request: AsjpLaneRequest): Promise<AsjpLaneResult> {
@@ -712,8 +717,15 @@ async function runLane(request: AsjpLaneRequest): Promise<AsjpLaneResult> {
     const sources: AsjpLaneSource[] = [];
     const credited = new Set<number>();
 
-    for (const admission of pass.admissions) {
-      if (admission.spans.length === 0) continue; // nothing verified in this candidate: not a finding
+    // v4.3 experiment (corrections.numericTables, off by default): articles nominated by rare ordered number groups,
+    // which the verifier cannot see (number-only text has no informative shingle), join the rescue path; they are
+    // verified exactly like any rescue candidate and admitted only under the frozen STRICT_SPAN rule
+    const numericNominated = new Set<string>();
+    if (corrections.numericTables === true && request.session?.numericIndex) for (const c of request.session.numericIndex.candidates(submission)) numericNominated.add(c.docId);
+    const admissions: Array<(typeof pass.admissions)[number] & { numericCandidate?: boolean }> = pass.admissions.map((a) => (numericNominated.has(String(a.docId)) ? { ...a, numericCandidate: true } : a));
+    for (const docId of numericNominated) if (!pass.admissions.some((a) => String(a.docId) === docId)) admissions.push({ docId: BigInt(docId), outcome: "NOT_ADMITTED", reason: "numeric-table candidate", totalMatchedWords: 0, longestSpan: 0, spans: [], numericCandidate: true } as any);
+    for (const admission of admissions) {
+      if (admission.spans.length === 0 && !admission.numericCandidate) continue; // nothing verified in this candidate: not a finding
       const docId = String(admission.docId);
       const admitted = admittedByDoc.get(docId) ?? null;
       const base: AsjpLaneSource = {
@@ -722,6 +734,7 @@ async function runLane(request: AsjpLaneRequest): Promise<AsjpLaneResult> {
         containmentOfSubmission: submissionWordCount ? admission.totalMatchedWords / submissionWordCount : 0, unsupportedWords: 0, isolatedWords: 0, genericWords: 0, completionWords: 0, genericClusters: [], admittedBy: null, structuralClusters: [], structuralWords: 0, annotations: [], authorMatches: [], sameWorkBasis: null, publicationTiming: null,
       };
 
+      if (admission.numericCandidate && !admitted) base.candidateBy = "NUMERIC_TABLE";
       // identity: the generation's own record must name an ASJP article, and the catalog must know that article
       const metadata = await reader.fetchMetadata(docIdFromDecimal(docId));
       const identity = metadata.state === "OK" ? asjpIdentityOf(metadata.metadata, metadata.laterAliases) : null;
@@ -735,7 +748,7 @@ async function runLane(request: AsjpLaneRequest): Promise<AsjpLaneResult> {
       if (entry.articleId !== externalId || !recordUrl || recordUrl !== entry.canonicalUrl) { sources.push({ ...base, notCreditedReason: "UNVERIFIED_SOURCE_IDENTITY" }); continue; }
       if (entry.withdrawn) { sources.push({ ...base, notCreditedReason: "WITHDRAWN" }); continue; }
       if ((request.licencePolicy ?? "permitted-only") === "permitted-only" && licenceStatusOf(entry) !== "PERMITTED") { sources.push({ ...base, notCreditedReason: "LICENCE_NOT_PERMITTING" }); continue; }
-      if (!admitted && (corrections.verbatimRescue === false || admission.totalMatchedWords < (corrections.rescueMinVerifiedWords ?? ASJP_RESCUE_MIN_VERIFIED_WORDS))) { sources.push({ ...base, notCreditedReason: "NOT_ADMITTED_BY_VERIFIER" }); continue; }
+      if (!admitted && (corrections.verbatimRescue === false || (!admission.numericCandidate && admission.totalMatchedWords < (corrections.rescueMinVerifiedWords ?? ASJP_RESCUE_MIN_VERIFIED_WORDS)))) { sources.push({ ...base, notCreditedReason: "NOT_ADMITTED_BY_VERIFIER" }); continue; }
 
       // v3.2 (exact): with prepared lane tokens, a rescue candidate is tested against the bound before its text is
       // fetched; a candidate the bound passes (or one the store does not hold) takes the unchanged path below
