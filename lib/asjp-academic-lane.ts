@@ -978,29 +978,33 @@ async function runLane(request: AsjpLaneRequest): Promise<AsjpLaneResult> {
       sources.push(supported);
     }
     // v5 CO-CREDITED SHARED TEXT (labels only): words this answer credits verbatim to two or more different articles are
-    // held by each of them — exact evidence that the text is shared, whatever extraction differences kept the
-    // index probe (the cluster's longest run, character for character) from finding the others. A credited cluster
-    // half or more of whose words other credited articles also hold is labelled SHARED (origin not established), with
-    // otherArticles raised to the number of those articles; nothing is removed or re-scored.
+    // held by each of them — exact evidence that the text is shared, whatever extraction differences kept the index
+    // probe (a cluster's longest run, character for character) from finding the others. Each maximal run of such
+    // co-held words (>= ASJP_MINIMUM_VERBATIM_RUN) is labelled SHARED (origin not established) over exactly that run,
+    // with otherArticles = the other credited articles holding at least half of it; an existing SHARED / primary-source
+    // label covering the run has its otherArticles raised instead. Nothing is removed or re-scored.
     if (corrections.annotations !== false) {
       const holdersAt = new Map<number, Set<string>>();
       for (const source of sources) if (source.credited) for (const passage of source.matchedPassages) for (let q = passage.submittedWordStart; q <= passage.submittedWordEnd; q += 1) { const set = holdersAt.get(q) ?? new Set<string>(); set.add(source.sourceId); holdersAt.set(q, set); }
+      const SHARED_KINDS = new Set(["SHARED_ACADEMIC_TEXT", "SHARED_QUOTATION", "LEGAL_PRIMARY_TEXT", "RELIGIOUS_TEXT"]);
       for (const source of sources) {
         if (!source.credited) continue;
-        for (const cluster of clusterPassages(source.matchedPassages)) {
-          const start = cluster[0].submittedWordStart, end = cluster[cluster.length - 1].submittedWordEnd;
-          const words = cluster.reduce((total, passage) => total + passage.matchedWordCount, 0);
-          const others = new Map<string, number>();
-          let coHeld = 0;
-          for (const passage of cluster) for (let q = passage.submittedWordStart; q <= passage.submittedWordEnd; q += 1) {
-            const set = holdersAt.get(q)!;
-            if (set.size > 1) coHeld += 1;
-            for (const id of set) if (id !== source.sourceId) others.set(id, (others.get(id) ?? 0) + 1);
+        const runs: Array<[number, number]> = [];
+        for (const passage of [...source.matchedPassages].sort((x, y) => x.submittedWordStart - y.submittedWordStart)) {
+          for (let q = passage.submittedWordStart; q <= passage.submittedWordEnd; q += 1) {
+            if (holdersAt.get(q)!.size < 2) continue;
+            const last = runs[runs.length - 1];
+            if (last && last[1] === q - 1) last[1] = q; else runs.push([q, q]);
           }
-          if (coHeld * 2 < words) continue;
+        }
+        for (const [start, end] of runs) {
+          const words = end - start + 1;
+          if (words < ASJP_MINIMUM_VERBATIM_RUN) continue;
+          const others = new Map<string, number>();
+          for (let q = start; q <= end; q += 1) for (const id of holdersAt.get(q)!) if (id !== source.sourceId) others.set(id, (others.get(id) ?? 0) + 1);
           const coCredited = [...others.values()].filter((n) => n * 2 >= words).length;
           if (coCredited === 0) continue;
-          const existing = source.annotations.find((a) => a.submittedWordStart <= end && a.submittedWordEnd >= start && (a.kind === "SHARED_ACADEMIC_TEXT" || a.kind === "SHARED_QUOTATION" || a.kind === "LEGAL_PRIMARY_TEXT" || a.kind === "RELIGIOUS_TEXT"));
+          const existing = source.annotations.find((x) => SHARED_KINDS.has(x.kind) && x.submittedWordStart <= start && x.submittedWordEnd >= end);
           if (existing) { existing.otherArticles = Math.max(existing.otherArticles ?? 0, coCredited); continue; }
           const quoted = QUOTATION_MARK.test(gapText(start - 1, start)) || QUOTATION_MARK.test(gapText(end, end + 1));
           source.annotations.push({ submittedWordStart: start, submittedWordEnd: end, words, kind: quoted ? "SHARED_QUOTATION" : "SHARED_ACADEMIC_TEXT", quoted, otherArticles: coCredited, namedSource: null, originEstablished: false });

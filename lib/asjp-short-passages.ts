@@ -148,17 +148,24 @@ export async function asjpShortPassageSignal(options: Parameters<typeof shortPas
   const { runs } = await shortPassageRuns(options);
   const passages: AsjpShortPassageSignal["passages"] = [];
   const spansOf = new Map<string, ReturnType<typeof tokenSpans> | null>();
+  const submission = tokensForScoringNormalization(options.submissionText, 2);
   for (const r of runs) {
     if (r.decision !== "DISTINCTIVE" || r.tier !== "25-59") continue;
     if (!spansOf.has(r.docId)) {
       const fetched = await options.reader.fetchText(docIdFromDecimal(r.docId));
-      spansOf.set(r.docId, fetched.state === "OK" ? tokenSpans(fetched.text, 2) : null);
+      // review finding 11: offsets only when the fetched text's token spans align with the prepared lane tokens the
+      // run was found in (same count, and the run's tokens equal) — never offsets into a different token list
+      const spans = fetched.state === "OK" ? tokenSpans(fetched.text, 2) : null;
+      const prepared = options.laneTokens.read(r.docId);
+      spansOf.set(r.docId, spans && prepared && spans.length === prepared.length ? spans : null);
     }
     const spans = spansOf.get(r.docId);
     const sourceWordEnd = r.sourceWordStart + r.words - 1;
     const start = spans?.[r.sourceWordStart]?.start, end = spans?.[sourceWordEnd]?.end;
     // exact source offsets or no passage (never a link to nowhere)
     if (start === undefined || end === undefined || !(end > start)) continue;
+    const prepared = options.laneTokens.read(r.docId)!;
+    if (prepared.slice(r.sourceWordStart, sourceWordEnd + 1).join(" ") !== submission.slice(r.submittedWordStart, r.submittedWordEnd + 1).join(" ")) continue;
     passages.push({ sourceId: r.sourceId, docId: r.docId, band: r.words >= 40 ? "40-59" : "25-39", words: r.words, submittedWordStart: r.submittedWordStart, submittedWordEnd: r.submittedWordEnd, sourceWordStart: r.sourceWordStart, sourceWordEnd, sourceCharStart: start, sourceCharEnd: end, rareWords: r.rareWords, contentShare: r.contentShare });
   }
   return { version: ASJP_SHORT_PASSAGES_VERSION, scored: false, label: "UNSCORED_RESEARCH_SIGNAL", passages };
