@@ -610,6 +610,7 @@ test("W4. STRUCTURAL — no persistence path can bypass the gate: the two compac
     ["lib/report-persistence.ts", 2],                        // encodeReportForPersistence — the gate-aware boundary
     ["lib/report-evidence-interpretation.ts", 2],            // buildFinalizedReportEvidenceInterpretation — resolves the mode ONCE
     ["lib/report-primary-similarity.ts", 2],                 // persistRefreshedSimilarity + persistSelectiveCorpusAuthoritativeFinalization
+    ["lib/report-asjp-evidence.ts", 1],                      // ASJP retry / retraction writer (Phase 6.5, reviewed): passes the mode buildFinalizedReportEvidenceInterpretation resolved
   ]);
   assert.deepEqual([...callers.entries()].sort(), [...expected.entries()].sort(), "an unreviewed caller of a compact codec appeared — it must go through the gate");
   for (const [file] of callers) assert.equal(file.startsWith("app/"), false, "no route calls a compact codec directly");

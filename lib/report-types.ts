@@ -783,10 +783,12 @@ export function stripServerInternalReportFields(report: SimilarityReport): void 
   // ASJP (Phase 6.5): the server-owned record (pins, source offsets, the UNSCORED research signal) never leaves the
   // server; the outbound copy carries only whether the ASJP check is included or unavailable. The source cards and
   // highlights reach the client through evidenceInterpretation, like every other channel's.
-  const asjp = report.asjpEvidence as { status?: string; cards?: Array<{ scored?: boolean }> } | undefined;
+  // Only a record carrying a server signature is reflected (this module cannot verify it; an unsigned / client-planted
+  // value is never applied by the server and is not described to the client either). RETRACTED records show nothing.
+  const asjp = report.asjpEvidence as { status?: string; signature?: unknown; cards?: Array<{ scored?: boolean }> } | undefined;
   delete report.asjpEvidence;
   delete report.asjpCheck;
-  if (asjp && (asjp.status === "ACCEPTED" || asjp.status === "UNAVAILABLE")) {
+  if (asjp && typeof asjp.signature === "string" && (asjp.status === "ACCEPTED" || asjp.status === "UNAVAILABLE")) {
     report.asjpCheck = { status: asjp.status === "ACCEPTED" ? "INCLUDED" : "UNAVAILABLE", sources: (asjp.cards ?? []).filter((c) => c?.scored === true).length };
   }
 }

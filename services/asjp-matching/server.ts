@@ -31,7 +31,12 @@ type Worker = { child: ChildProcess; ready: boolean; busy: Pending | null; info?
 const here = path.dirname(fileURLToPath(import.meta.url));
 /** Environment variables a worker never receives (credentials). */
 export const ASJP_SECRET_ENV = ["ASJP_SERVICE_TOKEN", "ASJP_ADMIN_TOKEN", "ASJP_SERVICE_TOKEN_FILE", "ASJP_ADMIN_TOKEN_FILE"];
-export function workerEnv(): NodeJS.ProcessEnv { const env = { ...process.env }; for (const k of ASJP_SECRET_ENV) delete env[k]; return env; }
+/**
+ * Review finding 13: a worker gets an ALLOWLISTED environment (what Node / tsx / the OS need) — never the service's
+ * other variables, whatever secrets they hold. Its configuration travels in ASJP_WORKER_CONFIG (no credential in it).
+ */
+const WORKER_ENV_ALLOW = new Set(["PATH", "PATHEXT", "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "TEMP", "TMP", "TMPDIR", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA", "PROGRAMFILES", "PROGRAMFILES(X86)", "COMMONPROGRAMFILES", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE", "OS", "LANG", "LC_ALL", "TZ", "NODE_OPTIONS", "NODE_NO_WARNINGS", "NODE_ENV", "TSX_TSCONFIG_PATH"]);
+export function workerEnv(): NodeJS.ProcessEnv { const env = {} as NodeJS.ProcessEnv; for (const [k, v] of Object.entries(process.env)) if (WORKER_ENV_ALLOW.has(k.toUpperCase()) && !ASJP_SECRET_ENV.includes(k)) env[k] = v; return env; }
 /** Constant-time bearer check (hash first, so lengths never leak). */
 function bearerMatches(header: string | undefined, token: string): boolean {
   const digest = (v: string) => createHash("sha256").update(v).digest();
@@ -201,7 +206,9 @@ export async function startAsjpService(config: AsjpServiceConfig): Promise<{ ser
         const next = JSON.parse(await read(req));
         const why = validGeneration(config, next.generation);
         if (why) return json(res, 400, { switched: false, error: why });
-        const candidate = new Pool({ ...config, golden: next.golden ?? config.golden }, next.generation);
+        // review finding 9: a switch changes the GENERATION only — features and corrections stay the service's own (set
+        // from its environment), never a request's
+        const candidate = new Pool({ ...config, golden: next.golden ?? config.golden }, { ...next.generation, features: config.generation.features, corrections: config.generation.corrections });
         try { await candidate.start(); } catch (error) { candidate.close(); return json(res, 500, { switched: false, error: String((error as Error).message) }); }
         if (!candidate.goldenOk) { candidate.close(); return json(res, 409, { switched: false, error: "the new generation does not reproduce its golden answers" }); }
         const old = pool; pool = candidate;
@@ -239,7 +246,7 @@ export function asjpServiceConfigFromEnv(env: Record<string, string | undefined>
   };
   return {
     port: Number(env.ASJP_SERVICE_PORT ?? 47_500), token: secret("ASJP_SERVICE_TOKEN"), adminToken: secret("ASJP_ADMIN_TOKEN"),
-    workers: Number(env.ASJP_SERVICE_WORKERS ?? 4), queueLimit: Number(env.ASJP_SERVICE_QUEUE ?? 32), deadlineMs: Number(env.ASJP_SERVICE_DEADLINE_MS ?? 15_000), maxWords: 60_000,
+    workers: Number(env.ASJP_SERVICE_WORKERS ?? 4), queueLimit: Number(env.ASJP_SERVICE_QUEUE ?? 32), deadlineMs: Number(env.ASJP_SERVICE_DEADLINE_MS ?? 7_000) /* below the report client 8 s timeout: abandoned work never holds a worker */, maxWords: 60_000,
     generation, allowedRoots: (env.ASJP_ALLOWED_ROOTS ?? "").split(";").filter(Boolean), allowLocalResearchPolicy: env.ASJP_ALLOW_LOCAL_RESEARCH_POLICY === "true",
   };
 }

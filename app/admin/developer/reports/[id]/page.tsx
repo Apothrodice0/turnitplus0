@@ -17,6 +17,7 @@ import type {
   DecisionTraceSource,
 } from "@/lib/admin-similarity-decision-trace";
 import type { SimilarityReport } from "@/lib/report-types";
+import { parseAsjpEvidenceRecord } from "@/lib/asjp-report-evidence";
 
 export const dynamic = "force-dynamic";
 
@@ -634,8 +635,19 @@ function SourceEvidenceDetails({ source }: { source: DecisionTraceSource }) {
  * research signal is shown ONLY here: it is never a scored highlight, never in the similarity percentage, and never
  * sent to an ordinary user (stripServerInternalReportFields removes the whole record from customer responses).
  */
-function AsjpDebugSection({ record }: { record: SimilarityReport["asjpEvidence"] | undefined }) {
-  if (!record) return null;
+function AsjpDebugSection({ record: raw }: { record: SimilarityReport["asjpEvidence"] | undefined }) {
+  if (!raw) return null;
+  // defensive: a malformed stored value is shown raw, never dereferenced
+  const record = parseAsjpEvidenceRecord(raw);
+  if (!record) {
+    return (
+      <section className="admin-card">
+        <h2>ASJP published articles (local prototype)</h2>
+        <p>Stored ASJP value is not a readable record (never applied).</p>
+        <AdminCollapsible summary="Raw value"><pre>{JSON.stringify(raw, null, 2)}</pre></AdminCollapsible>
+      </section>
+    );
+  }
   const research = (record.research?.shortPassages ?? null) as { passages?: Array<Record<string, unknown>> } | null;
   return (
     <section className="admin-card">
@@ -645,13 +657,14 @@ function AsjpDebugSection({ record }: { record: SimilarityReport["asjpEvidence"]
       </h2>
       <p>
         Status: <b>{record.status}</b>
-        {record.reason ? ` (${record.reason})` : ""} · checked {record.checkedAt} · attempts {record.attempts}
+        {record.reason ? ` (${record.reason})` : ""} · checked {String(record.checkedAt)} · attempts {String(record.attempts)} ·{" "}
+        {typeof record.signature === "string" ? "signed" : "UNSIGNED (never applied)"}
       </p>
       {record.pins ? (
         <p>
-          Generation {record.pins.generationId} · manifest {record.pins.logicalManifestSha256.slice(0, 12)}… · catalog{" "}
-          {record.pins.catalogDigest?.slice(0, 12) ?? "?"}… · {record.pins.laneVersion} · {record.pins.licencePolicy} · number
-          tables {record.pins.features.numericTables ? "on" : "off"}
+          Generation {String(record.pins.generationId)} · manifest {String(record.pins.logicalManifestSha256 ?? "").slice(0, 12)}… · catalog{" "}
+          {String(record.pins.catalogDigest ?? "?").slice(0, 12)}… · {String(record.pins.laneVersion)} · {String(record.pins.licencePolicy)} · number
+          tables {record.pins.features?.numericTables ? "on" : "off"}
         </p>
       ) : null}
       <AdminCollapsible summary={`Cards (${record.cards.length}) — attribution, labels, exact source offsets`}>

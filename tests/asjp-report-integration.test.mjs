@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import fs from 'fs';
+import crypto from 'node:crypto';
 import path from 'path';
 import http from 'node:http';
 import { createClient } from '@libsql/client';
@@ -10,7 +11,7 @@ import * as reportIdRoute from '../app/api/reports/[id]/route.ts';
 import * as signupRoute from '../app/api/auth/signup/route.ts';
 import { resetRateForTest, resetAuthRateForTest, resetReadRateForTest } from '../lib/rate-limit.ts';
 import { resolvePrimarySimilaritySummary, selfHealUnifiedSimilarity } from '../lib/report-primary-similarity.ts';
-import { retryAsjpEvidenceForReport } from '../lib/report-asjp-evidence.ts';
+import { retryAsjpEvidenceForReport, retractAsjpEvidenceForReport } from '../lib/report-asjp-evidence.ts';
 import { asjpChannelOf, ASJP_REPORT_EVIDENCE_SCHEMA } from '../lib/asjp-report-evidence.ts';
 import { buildReportV2ViewModel, ASJP_UNAVAILABLE_NOTICE } from '../lib/report-v2-view.ts';
 import { tokensForScoringNormalization } from '../lib/similarity-core.ts';
@@ -52,11 +53,13 @@ const answerFor = (n, mode) => {
   const cards = [card(101, 10, 79), card(202, 50, 119, { attribution: 'SHARED_TEXT_ORIGIN_NOT_ESTABLISHED', labels: [{ kind: 'SHARED_ACADEMIC_TEXT', submittedWordStart: 50, submittedWordEnd: 119, words: 70, otherArticles: 1 }] })];
   const evidence = cards.map((c) => ({ sourceId: c.sourceId, matchedPassages: c.passages.map((p) => ({ submittedWordStart: p.submittedWordStart, submittedWordEnd: p.submittedWordEnd, matchedWordCount: p.submittedWordEnd - p.submittedWordStart + 1 })) }));
   if (mode === 'mismatch') evidence[0].matchedPassages[0].submittedWordEnd = 90;
+  if (mode === 'badurl') cards[0].url = 'javascript:alert(1)';
+  if (mode === 'badlabel') cards[1].labels[0].kind = 'BOGUS';
   return {
     state: 'COMPLETE', failureCode: null, wordCount: n, creditedPositions: [], asjpPublicationEvidence: evidence, cards,
     generationId: mode === 'gen2' ? G2 : G1, logicalManifestSha256: M1, laneVersion: 'asjp-academic-lane-v5', licencePolicy: 'permitted-only', normalization: 2,
     catalogLoadedAt: '2026-10-15T00:00:00.000Z', catalogDigest: 'c'.repeat(64), features: { numericTables: false, shortSignal: true },
-    research: { shortPassages: { scored: false, label: 'UNSCORED_RESEARCH_SIGNAL', passages: [{ sourceId: 'asjp:303', submittedWordStart: 200, submittedWordEnd: 229 }] } },
+    research: { shortPassages: { scored: false, label: 'UNSCORED_RESEARCH_SIGNAL', passages: Array.from({ length: mode === 'bigresearch' ? 5000 : 1 }, () => ({ sourceId: 'asjp:303', band: '25-39', submittedWordStart: 200, submittedWordEnd: 229, sourceWordStart: 10, sourceWordEnd: 39, sourceCharStart: 50, sourceCharEnd: 260, title: 'x'.repeat(mode === 'bigresearch' ? 2000 : 5), url: 'https://asjp.cerist.dz/en/article/303' })) } },
   };
 };
 const server = http.createServer((req, res) => {
@@ -73,6 +76,8 @@ const server = http.createServer((req, res) => {
 });
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const ASJP_ENV = { ASJP_REPORT_EVIDENCE_ENABLED: 'true', ASJP_SERVICE_URL: `http://127.0.0.1:${server.address().port}`, ASJP_SERVICE_TOKEN: 'stub-token', ASJP_PINNED_GENERATION_ID: G1, ASJP_PINNED_MANIFEST_SHA256: M1, ASJP_SERVICE_TIMEOUT_MS: '3000' };
+// the signing key is server configuration, independent of the flag: records stay verifiable after ASJP is switched off
+process.env.ASJP_EVIDENCE_SIGNING_KEY = 'k'.repeat(48);
 const setAsjp = (on) => { for (const [k, v] of Object.entries(ASJP_ENV)) { if (on) process.env[k] = v; else delete process.env[k]; } };
 
 test.after(() => { server.close(); client.close(); setAsjp(false); for (const suffix of ['', '-wal', '-shm']) { try { fs.unlinkSync(`${dbFile}${suffix}`); } catch { /* none */ } } });
@@ -242,14 +247,16 @@ test('migration: legacy rows, unknown-schema records and v1 reports are never gi
   // an unknown record schema is not applied (and not an error)
   await post(acc, 'asjp-legacy-1', manuscript(0));
   const rec = (await row(acc, 'asjp-legacy-1')).payload.asjpEvidence;
+  const binding = { reportDeviceKey: acc.deviceKey, reportId: 'asjp-legacy-1' };
+  assert.equal(asjpChannelOf(rec, { wordCount: rec.wordCount, scoringNormalizationVersion: 2, binding: { ...binding, reportId: 'another-report' } }).reason, 'UNVERIFIED_RECORD', 'a record never applies to another report');
   await client.execute({ sql: "UPDATE saved_reports SET payload_json = json_set(payload_json, '$.asjpEvidence', json(?)) WHERE device_key = ? AND id = ?", args: [JSON.stringify({ ...rec, schema: 'asjp-report-evidence-v0' }), acc.deviceKey, 'asjp-legacy-1'] });
   const healed = await selfHealUnifiedSimilarity(client, { reportDeviceKey: acc.deviceKey, reportId: 'asjp-legacy-1', accountId: acc.userId });
   assert.deepEqual(healed.unifiedSimilarity.matchedPositions, []);
-  assert.equal(asjpChannelOf({ ...rec, schema: 'asjp-report-evidence-v0' }, { wordCount: rec.wordCount, scoringNormalizationVersion: 2 }).reason, 'UNREADABLE_RECORD');
+  assert.equal(asjpChannelOf({ ...rec, schema: 'asjp-report-evidence-v0' }, { wordCount: rec.wordCount, scoringNormalizationVersion: 2, binding }).reason, 'UNREADABLE_RECORD');
   // a record never applies to another manuscript (text digest) or word count
-  assert.equal(asjpChannelOf(rec, { wordCount: rec.wordCount, scoringNormalizationVersion: 2, text: manuscript(1) }).reason, 'TEXT_MISMATCH');
-  assert.equal(asjpChannelOf(rec, { wordCount: rec.wordCount + 1, scoringNormalizationVersion: 2 }).reason, 'WORD_COUNT_MISMATCH');
-  assert.equal(asjpChannelOf(rec, { wordCount: rec.wordCount, scoringNormalizationVersion: 1 }).reason, 'REPORT_NOT_NORMALIZATION_2');
+  assert.equal(asjpChannelOf(rec, { wordCount: rec.wordCount, scoringNormalizationVersion: 2, text: manuscript(1), binding }).reason, 'TEXT_MISMATCH');
+  assert.equal(asjpChannelOf(rec, { wordCount: rec.wordCount + 1, scoringNormalizationVersion: 2, binding }).reason, 'WORD_COUNT_MISMATCH');
+  assert.equal(asjpChannelOf(rec, { wordCount: rec.wordCount, scoringNormalizationVersion: 1, binding }).reason, 'REPORT_NOT_NORMALIZATION_2');
 });
 
 test('a changed manuscript under the same report id is re-checked (the old record never applies to new text)', async () => {
@@ -261,4 +268,110 @@ test('a changed manuscript under the same report id is re-checked (the old recor
   const second = (await row(acc, 'asjp-changed-1')).payload.asjpEvidence;
   assert.equal(stub.calls, calls + 1);
   assert.notEqual(second.textSha256, first.textSha256);
+});
+
+function plantedRecord(text) {
+  const n = wordsOf(text); const a = answerFor(n, 'accept');
+  return { schema: ASJP_REPORT_EVIDENCE_SCHEMA, status: 'ACCEPTED', reason: null, checkedAt: '2026-01-01T00:00:00.000Z', wordCount: n, textSha256: crypto.createHash('sha256').update(text).digest('hex'), pins: { generationId: G1, logicalManifestSha256: M1, catalogDigest: null, catalogLoadedAt: null, laneVersion: 'x', licencePolicy: 'permitted-only', normalization: 2, features: { numericTables: false, shortSignal: false } }, cards: a.cards, attempts: 0 };
+}
+
+test('review 1: a planted (unsigned) or forged record is never applied, carried forward or described to the client', async () => {
+  setAsjp(false);
+  const acc = await account();
+  await post(acc, 'asjp-planted-1', manuscript(0));
+  const forged = plantedRecord(manuscript(0));
+  for (const record of [forged, { ...forged, signature: 'f'.repeat(64) }]) {
+    await client.execute({ sql: "UPDATE saved_reports SET payload_json = json_set(payload_json, '$.asjpEvidence', json(?)) WHERE device_key = ? AND id = ?", args: [JSON.stringify(record), acc.deviceKey, 'asjp-planted-1'] });
+    const healed = await selfHealUnifiedSimilarity(client, { reportDeviceKey: acc.deviceKey, reportId: 'asjp-planted-1', accountId: acc.userId });
+    assert.deepEqual(healed.unifiedSimilarity.matchedPositions, [], 'not applied');
+  }
+  const out = await getPayload(acc, 'asjp-planted-1');
+  assert.equal(out.asjpEvidence, undefined);
+  // a resave of the same manuscript drops it (and asks nothing)
+  setAsjp(true); stub.mode = 'accept'; const calls = stub.calls;
+  await post(acc, 'asjp-planted-1', manuscript(0));
+  assert.equal(stub.calls, calls); assert.equal((await row(acc, 'asjp-planted-1')).payload.asjpEvidence, undefined);
+  // a record planted through the POST payload is replaced by the server record
+  await post(acc, 'asjp-planted-2', manuscript(0), { payloadOverrides: { asjpEvidence: forged } });
+  const p2 = (await row(acc, 'asjp-planted-2')).payload;
+  assert.equal(p2.asjpEvidence.cards.length, 2); assert.equal(typeof p2.asjpEvidence.signature, 'string', 'the server record replaced it');
+});
+
+test('review 5: a report saved without ASJP never gains ASJP on a same-manuscript resave', async () => {
+  setAsjp(false);
+  const acc = await account();
+  await post(acc, 'asjp-legacy-resave-1', manuscript(0));
+  setAsjp(true); stub.mode = 'accept'; const calls = stub.calls;
+  await post(acc, 'asjp-legacy-resave-1', manuscript(0));
+  assert.equal(stub.calls, calls, 'no service call');
+  const p = (await row(acc, 'asjp-legacy-resave-1')).payload;
+  assert.equal(p.asjpEvidence, undefined); assert.deepEqual(p.unifiedSimilarity.matchedPositions, []);
+});
+
+test('review 7: retraction (kill switch / takedown) removes ASJP from score and explanation atomically; RETRACTED is final', async () => {
+  setAsjp(true); stub.mode = 'accept';
+  const acc = await account();
+  await post(acc, 'asjp-retract-1', manuscript(0));
+  const r = await retractAsjpEvidenceForReport(client, { reportDeviceKey: acc.deviceKey, reportId: 'asjp-retract-1', accountId: acc.userId, reason: 'TAKEDOWN' });
+  assert.deepEqual(r, { outcome: 'RETRACTED' });
+  const p = (await row(acc, 'asjp-retract-1')).payload;
+  assert.equal(p.asjpEvidence.status, 'RETRACTED'); assert.equal(p.asjpEvidence.reason, 'TAKEDOWN');
+  assert.deepEqual(p.unifiedSimilarity.matchedPositions, []);
+  assert.equal(p.evidenceInterpretation.sources.filter((s) => s.asjp).length, 0, 'no ASJP card left');
+  assert.equal((await getPayload(acc, 'asjp-retract-1')).asjpCheck, undefined);
+  assert.equal((await retryAsjpEvidenceForReport(client, { reportDeviceKey: acc.deviceKey, reportId: 'asjp-retract-1', accountId: acc.userId })).outcome, 'NOT_ELIGIBLE');
+  const healed = await selfHealUnifiedSimilarity(client, { reportDeviceKey: acc.deviceKey, reportId: 'asjp-retract-1', accountId: acc.userId });
+  assert.deepEqual(healed.unifiedSimilarity.matchedPositions, [], 'a recompute keeps it retracted');
+});
+
+test('review 3: a self-heal that read the UNAVAILABLE record cannot overwrite a retry that landed meanwhile', async () => {
+  setAsjp(true); stub.mode = 'busy';
+  const acc = await account();
+  await post(acc, 'asjp-race-1', manuscript(0));
+  stub.mode = 'accept';
+  const healed = await selfHealUnifiedSimilarity(client, {
+    reportDeviceKey: acc.deviceKey, reportId: 'asjp-race-1', accountId: acc.userId,
+    testOnlyBeforePersist: async () => {
+      assert.equal((await retryAsjpEvidenceForReport(client, { reportDeviceKey: acc.deviceKey, reportId: 'asjp-race-1', accountId: acc.userId })).outcome, 'ACCEPTED');
+    },
+  });
+  assert.equal(healed.outcome, 'resolved'); assert.equal(healed.presentationResolved, false, 'the stale self-heal write did not land');
+  const p = (await row(acc, 'asjp-race-1')).payload;
+  assert.deepEqual(p.unifiedSimilarity.matchedPositions, range(10, 119), 'the retry result stands');
+  assert.equal(p.evidenceInterpretation.matchedWordCount, 110);
+});
+
+test('review 2/4: Selective-owned reports and reports with supplied references are never retried', async () => {
+  setAsjp(true); stub.mode = 'busy';
+  const acc = await account();
+  await post(acc, 'asjp-selective-1', manuscript(0));
+  await client.execute({ sql: "UPDATE saved_reports SET payload_json = json_set(payload_json, '$.selectiveCorpusAuthoritativeStatus', 'pending') WHERE device_key = ? AND id = ?", args: [acc.deviceKey, 'asjp-selective-1'] });
+  stub.mode = 'accept';
+  assert.deepEqual(await retryAsjpEvidenceForReport(client, { reportDeviceKey: acc.deviceKey, reportId: 'asjp-selective-1', accountId: acc.userId }), { outcome: 'NOT_ELIGIBLE', reason: 'SELECTIVE_CORPUS_OWNED' });
+  stub.mode = 'busy';
+  await post(acc, 'asjp-refs-1', manuscript(0));
+  await client.execute({ sql: "UPDATE saved_reports SET payload_json = json_set(payload_json, '$.userSuppliedReferenceEvidence', json(?)) WHERE device_key = ? AND id = ?", args: [JSON.stringify([{ key: 'r1', admitted: true, verifiedPassages: [] }]), acc.deviceKey, 'asjp-refs-1'] });
+  stub.mode = 'accept';
+  assert.deepEqual(await retryAsjpEvidenceForReport(client, { reportDeviceKey: acc.deviceKey, reportId: 'asjp-refs-1', accountId: acc.userId }), { outcome: 'NOT_ELIGIBLE', reason: 'HAS_SUPPLIED_REFERENCES' });
+});
+
+test('review 6/8/12: unsafe card content refused; research signal capped; misconfiguration recorded', async () => {
+  setAsjp(true);
+  const acc = await account();
+  for (const mode of ['badurl', 'badlabel']) {
+    stub.mode = mode; await post(acc, `asjp-strict-${mode}`, manuscript(0));
+    const p = (await row(acc, `asjp-strict-${mode}`)).payload;
+    assert.equal(p.asjpEvidence.status, 'UNAVAILABLE', mode); assert.equal(p.asjpEvidence.reason, 'MALFORMED_EVIDENCE', mode);
+  }
+  stub.mode = 'bigresearch'; await post(acc, 'asjp-big-1', manuscript(0));
+  const big = (await row(acc, 'asjp-big-1')).payload.asjpEvidence;
+  assert.equal(big.status, 'ACCEPTED'); assert.equal(big.research.shortPassages.passages.length, 100); assert.equal(big.research.shortPassages.truncated, true);
+  assert.ok(Buffer.byteLength(JSON.stringify(big)) < 256 * 1024);
+  const key = process.env.ASJP_EVIDENCE_SIGNING_KEY; delete process.env.ASJP_EVIDENCE_SIGNING_KEY;
+  try {
+    stub.mode = 'accept'; const calls = stub.calls;
+    await post(acc, 'asjp-misconfigured-1', manuscript(0));
+    const p = (await row(acc, 'asjp-misconfigured-1')).payload;
+    assert.equal(stub.calls, calls); assert.equal(p.asjpEvidence.reason, 'CLIENT_MISCONFIGURED'); assert.deepEqual(p.unifiedSimilarity.matchedPositions, []);
+  } finally { process.env.ASJP_EVIDENCE_SIGNING_KEY = key; }
 });

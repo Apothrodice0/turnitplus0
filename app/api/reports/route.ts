@@ -852,10 +852,10 @@ export async function POST(request: Request) {
       }
       const underReportContract = <T,>(compute: () => T): T => runWithScoringNormalization(reportScoringVersion, compute);
 
-      // ASJP (Phase 6.5, LOCAL PROTOTYPE — ASJP_REPORT_EVIDENCE_ENABLED, default off): the report's generation-pinned
-      // ASJP record. A resave of the SAME manuscript carries the persisted record forward unchanged (never re-queried,
-      // whatever the flag says now, so a saved report never changes); a first save, or a changed manuscript, asks the
-      // matching service once — started here so it runs alongside the verification below. Never throws; with ASJP off
+      // ASJP (Phase 6.5, LOCAL PROTOTYPE — ASJP_REPORT_EVIDENCE_ENABLED, default off): the report's generation-pinned,
+      // server-signed ASJP record. A resave of the SAME manuscript carries this report's signed record forward
+      // unchanged, or none (never re-queried, whatever the flag says now, so a saved report never changes); a first
+      // save, or a changed manuscript, asks the matching service once — started here so it runs alongside the verification below. Never throws; with ASJP off
       // and no persisted record it resolves to null without any network call, and the save is byte-identical.
       const asjpEvidencePromise: Promise<AsjpPersistedEvidence | null> = isNonEmptyString(reportPayload?.text)
         ? asjpEvidenceForSave(
@@ -863,8 +863,12 @@ export async function POST(request: Request) {
               text: reportPayload.text,
               wordCount: reportPayload.wordCount,
               scoringNormalizationVersion: reportScoringVersion,
+              // review finding 5: the service is asked only on a first save or a changed manuscript
+              isFirstSave: isFirstSaveOfThisReport,
               persistedRecord: existingReportRow.rows[0]?.asjp_evidence ?? null,
               persistedText: persistedManuscriptText,
+              // review finding 1: records are signed for, and only trusted on, this report
+              binding: { reportDeviceKey: deviceKey, reportId: id },
             },
             () => checkAsjpForReport({ text: reportPayload.text, wordCount: reportPayload.wordCount }),
           ).catch(() => null)

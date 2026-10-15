@@ -167,3 +167,22 @@ test('Phase 6.5 credentials: tokens only from the environment / token files, nev
     assert.deepEqual(JSON.parse(health).features, { numericTables: false, shortSignal: false });
   } finally { svc.close(); }
 });
+
+test('review 9/13: a worker env is an allowlist (no other secret reaches it); a switch never changes features or corrections', async () => {
+  const saved = { OTHER_SECRET: process.env.OTHER_SECRET, DATABASE_PASSWORD: process.env.DATABASE_PASSWORD };
+  process.env.OTHER_SECRET = 'x'; process.env.DATABASE_PASSWORD = 'y';
+  try {
+    const env = workerEnv();
+    assert.equal(env.OTHER_SECRET, undefined); assert.equal(env.DATABASE_PASSWORD, undefined);
+    for (const k of ASJP_SECRET_ENV) assert.equal(env[k], undefined);
+    assert.ok(env.PATH || env.Path, 'what Node needs is kept');
+  } finally { for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } }
+  const p = ++port; const svc = await startAsjpService({ ...base, workers: 1, port: p });
+  try {
+    const u = `http://127.0.0.1:${p}`;
+    const r = await fetch(`${u}/admin/switch`, { method: 'POST', headers: { ...admin, 'content-type': 'application/json' }, body: JSON.stringify({ generation: { ...generation, features: { numericTables: true, shortSignal: { wordDfPath: path.join(scratch, 'x.json') } }, corrections: { repetitionRemoval: true } } }) });
+    assert.equal(r.status, 200);
+    const health = await (await fetch(`${u}/health`, { headers: { authorization: `Bearer ${token}` } })).json();
+    assert.deepEqual(health.features, { numericTables: false, shortSignal: false }, 'the switch kept the service features');
+  } finally { svc.close(); }
+});

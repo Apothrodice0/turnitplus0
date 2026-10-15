@@ -529,7 +529,7 @@ async function resolvePrimarySimilaritySummaryUnderContract(
     const asjpChannel = params.asjpPublicationEvidence?.length
       ? params.asjpPublicationEvidence
       : params.asjpReportEvidence != null
-        ? asjpChannelOf(params.asjpReportEvidence, { wordCount: params.wordCount, scoringNormalizationVersion, text: params.rawText }).channel
+        ? asjpChannelOf(params.asjpReportEvidence, { wordCount: params.wordCount, scoringNormalizationVersion, text: params.rawText, binding: { reportDeviceKey: params.reportDeviceKey, reportId: params.reportId } }).channel
         : null;
     const unifiedSimilarity = compute({
       wordCount: params.wordCount,
@@ -859,8 +859,16 @@ export async function persistRefreshedSimilarity(
   > & {
     /** The contract the resolution was computed under (PrimarySimilarityResolution.scoringNormalizationVersion). Omitted is v1. */
     scoringNormalizationVersion?: ScoringNormalizationVersion;
+    /**
+     * ASJP (Phase 6.5, review finding 3): the checkedAt of the report's ASJP record as the resolution READ it ("" for
+     * none). When given, the write lands only if the row still carries that same record, so a self-heal that read an
+     * UNAVAILABLE record can never overwrite a retry's ASJP-inclusive score with a stale one. Omitted: no ASJP guard.
+     */
+    asjpEvidenceCheckedAt?: string;
   },
 ): Promise<{ written: "resolved" | "failed" | "none"; rowsAffected: number }> {
+  const asjpGuard = resolution.asjpEvidenceCheckedAt !== undefined ? " AND COALESCE(json_extract(payload_json, '$.asjpEvidence.checkedAt'), '') = ?" : "";
+  const asjpArgs = resolution.asjpEvidenceCheckedAt !== undefined ? [resolution.asjpEvidenceCheckedAt] : [];
   const scoringNormalizationVersion: ScoringNormalizationVersion = resolution.scoringNormalizationVersion === 2 ? 2 : 1;
   // json(?) with the literal 'true'/'false' text inserts a real JSON boolean
   // (SQLite has no native boolean), keeping the persisted shape identical to
@@ -881,7 +889,7 @@ export async function persistRefreshedSimilarity(
                   '$.unifiedSimilarityFailed', json('false')
                 )
             WHERE device_key = ? AND id = ? AND json_valid(payload_json) AND ${SIMILARITY_GENERATION_GUARD_SQL}
-              AND ${SIMILARITY_SCORING_NORMALIZATION_GUARD_SQL}`,
+              AND ${SIMILARITY_SCORING_NORMALIZATION_GUARD_SQL}${asjpGuard}`,
       args: [
         // Pre-launch hardening fix — same shared compaction as
         // app/api/reports/route.ts's finalizeReportJson (measured 2MB
@@ -900,6 +908,7 @@ export async function persistRefreshedSimilarity(
         params.reportId,
         resolution.corpusGeneration,
         scoringNormalizationVersion,
+        ...asjpArgs,
       ],
     });
     return { written: "resolved", rowsAffected: Number(result.rowsAffected) };
@@ -914,7 +923,7 @@ export async function persistRefreshedSimilarity(
                   '$.unifiedSimilarityFailed', json('true')
                 )
             WHERE device_key = ? AND id = ? AND json_valid(payload_json) AND ${SIMILARITY_GENERATION_GUARD_SQL}
-              AND ${SIMILARITY_SCORING_NORMALIZATION_GUARD_SQL}`,
+              AND ${SIMILARITY_SCORING_NORMALIZATION_GUARD_SQL}${asjpGuard}`,
       args: [
         flagText,
         resolution.corpusGeneration,
@@ -922,6 +931,7 @@ export async function persistRefreshedSimilarity(
         params.reportId,
         resolution.corpusGeneration,
         scoringNormalizationVersion,
+        ...asjpArgs,
       ],
     });
     return { written: "failed", rowsAffected: Number(result.rowsAffected) };
@@ -1184,6 +1194,10 @@ export async function selfHealUnifiedSimilarity(
     // re-stamps — recomputing under the build's active contract instead would
     // put two position spaces in one report.
     const scoringNormalizationVersion = reportScoringNormalizationVersion(payload);
+    // ASJP (review finding 3): the record this self-heal computes with; its write lands only if the row still has it
+    // (the raw stored value, whatever the record's schema, so the guard always matches the row it was read from)
+    const storedAsjpCheckedAt = (payload.asjpEvidence as { checkedAt?: unknown } | undefined)?.checkedAt;
+    const asjpEvidenceCheckedAt = payload.asjpEvidence == null ? "" : typeof storedAsjpCheckedAt === "string" ? storedAsjpCheckedAt : undefined;
 
     // Scholarly evidence server trust boundary (drizzle/0052): re-resolve the
     // authoritative scholarly evidence server-side from the verified diagnostics
@@ -1229,7 +1243,7 @@ export async function selfHealUnifiedSimilarity(
       const write = await persistRefreshedSimilarity(
         client,
         { reportDeviceKey: params.reportDeviceKey, reportId: params.reportId },
-        resolution,
+        { ...resolution, asjpEvidenceCheckedAt },
       );
       const writeLanded = write.rowsAffected > 0;
       // Fresh, live re-read taken AFTER the write above has committed —
@@ -1262,7 +1276,7 @@ export async function selfHealUnifiedSimilarity(
       await persistRefreshedSimilarity(
         client,
         { reportDeviceKey: params.reportDeviceKey, reportId: params.reportId },
-        resolution,
+        { ...resolution, asjpEvidenceCheckedAt },
       );
       return { attempted: true, outcome: "failed" };
     }
