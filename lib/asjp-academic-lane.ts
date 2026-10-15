@@ -1,4 +1,5 @@
 import { DerivedSourceSidecarSet } from "./corpus-engine/derived-source";
+import { LaneTokenStore } from "./asjp-lane-tokens";
 import { CorpusGenerationError } from "./corpus-engine/generation";
 import { docIdFromDecimal } from "./corpus-engine/ids";
 import { CorpusGenerationReader } from "./corpus-engine/reader";
@@ -649,17 +650,18 @@ export async function runAsjpAcademicLane(request: AsjpLaneRequest): Promise<Asj
   return runWithScoringNormalization(ASJP_LANE_SCORING_NORMALIZATION, () => runLane(request));
 }
 
-export type AsjpLaneSession = { reader: CorpusGenerationReader; sidecars: DerivedSourceSidecarSet | null };
+export type AsjpLaneSession = { reader: CorpusGenerationReader; sidecars: DerivedSourceSidecarSet | null; laneTokens?: LaneTokenStore | null };
 
 /**
  * Opens a generation once for many requests. useDerivedSourceSidecar: verify candidates from the generation's
  * derived-source sidecar (no stored text read) where one is present and its identity matches the running code;
  * a segment without an accepted sidecar is verified from its text exactly as before.
  */
-export async function openAsjpLaneSession(options: { store: CorpusObjectStore; generationId: string; logicalManifestSha256?: string; dictionaryCacheBytes?: number; useDerivedSourceSidecar?: boolean }): Promise<AsjpLaneSession> {
+export async function openAsjpLaneSession(options: { store: CorpusObjectStore; generationId: string; logicalManifestSha256?: string; dictionaryCacheBytes?: number; useDerivedSourceSidecar?: boolean; laneTokensDir?: string }): Promise<AsjpLaneSession> {
   const reader = await CorpusGenerationReader.open({ store: options.store, generationId: options.generationId, expectedLogicalManifestSha256: options.logicalManifestSha256, dictionaryCacheBytes: options.dictionaryCacheBytes });
   const sidecars = options.useDerivedSourceSidecar ? await DerivedSourceSidecarSet.open(reader) : null;
-  return { reader, sidecars };
+  const laneTokens = options.laneTokensDir ? LaneTokenStore.open(options.laneTokensDir, ASJP_LANE_SCORING_NORMALIZATION) : null;
+  return { reader, sidecars, laneTokens };
 }
 
 async function runLane(request: AsjpLaneRequest): Promise<AsjpLaneResult> {
@@ -735,6 +737,12 @@ async function runLane(request: AsjpLaneRequest): Promise<AsjpLaneResult> {
       if ((request.licencePolicy ?? "permitted-only") === "permitted-only" && licenceStatusOf(entry) !== "PERMITTED") { sources.push({ ...base, notCreditedReason: "LICENCE_NOT_PERMITTING" }); continue; }
       if (!admitted && (corrections.verbatimRescue === false || admission.totalMatchedWords < (corrections.rescueMinVerifiedWords ?? ASJP_RESCUE_MIN_VERIFIED_WORDS))) { sources.push({ ...base, notCreditedReason: "NOT_ADMITTED_BY_VERIFIER" }); continue; }
 
+      // v3.2 (exact): with prepared lane tokens, a rescue candidate is tested against the bound before its text is
+      // fetched; a candidate the bound passes (or one the store does not hold) takes the unchanged path below
+      if (!admitted && corrections.rescueFastPath !== false && request.session?.laneTokens) {
+        const prepared = request.session.laneTokens.read(docId);
+        if (prepared && !rescueCanAdmit(submissionIndex(), prepared)) { sources.push({ ...base, notCreditedReason: "NOT_ADMITTED_BY_VERIFIER" }); continue; }
+      }
       // verbatim support: every credited position must be found again in the article's indexed text
       const fetched = await reader.fetchText(docIdFromDecimal(docId));
       if (fetched.state !== "OK") { sources.push({ ...base, notCreditedReason: admitted ? "SOURCE_TEXT_UNAVAILABLE" : "NOT_ADMITTED_BY_VERIFIER" }); continue; }
