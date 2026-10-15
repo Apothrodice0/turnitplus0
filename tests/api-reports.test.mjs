@@ -188,7 +188,10 @@ async function deleteReport(deviceKey, id, { cookie } = {}) {
   // authorization signal the GET handler now sets on every response (see
   // SimilarityReport.viewerIsAdmin's own comment) — likewise excluded from
   // the round-trip diff and checked separately below.
-  const { historicalSubmissionMatch, unifiedSimilarity, corpusSourceMatchingEnabledAtComputation, unifiedSimilarityGeneration, unifiedSimilarityFailed, viewerIsAdmin, ...getPayloadWithoutHistoricalMatch } = getBody.payload;
+  // Report V2: evidenceInterpretation / reportCompletion / extractionDiagnostic are server-built explanation fields every
+  // save adds (never client data) — excluded from the round-trip diff like the enrichment fields, and checked below
+  const { historicalSubmissionMatch, unifiedSimilarity, corpusSourceMatchingEnabledAtComputation, unifiedSimilarityGeneration, unifiedSimilarityFailed, viewerIsAdmin, evidenceInterpretation, reportCompletion, extractionDiagnostic, ...getPayloadWithoutHistoricalMatch } = getBody.payload;
+  assert.ok(evidenceInterpretation && reportCompletion && extractionDiagnostic, 'Report V2: the server-built explanation fields are present');
   assert.equal(historicalSubmissionMatch, undefined, 'REQUIRED (UI-02): historicalSubmissionMatch is admin-only — an anonymous/non-admin GET must never receive it, not even a NO_HISTORICAL_MATCH shape');
   assert.ok(unifiedSimilarity, 'unifiedSimilarity must still be attached as read-time enrichment — never gated, only historicalSubmissionMatch is');
   assert.equal(corpusSourceMatchingEnabledAtComputation, false, 'the live flag snapshot must be recorded (default off in this test env)');

@@ -311,7 +311,8 @@ test("REQUEST SIZE follows the AI result, not the similarity evidence: small / G
   assert.ok(g2.oldEchoBytes > MAX_REPORT_SAVE_REQUEST_BYTES, "the G2-size report's old echo exceeds the ceiling");
   // (The matcher caps evidence per source, so the GET-expanded form of even this ~90k-word report saturates just under the ceiling; what the
   // browser would have to echo is that PLUS the fresh AI result and the summary envelope — well over it.)
-  assert.ok(veryLarge.getExpandedBytes > MAX_REPORT_SAVE_REQUEST_BYTES * 0.9, `the very large report's GET-expanded form alone (${veryLarge.getExpandedBytes}) is already at the ceiling`);
+  // (re-calibrated: the matcher now caps evidence lower, so the expanded form sits at ~80% of the ceiling — still far above what a retry may echo)
+  assert.ok(veryLarge.getExpandedBytes > MAX_REPORT_SAVE_REQUEST_BYTES * 0.75, `the very large report GET-expanded form alone (${veryLarge.getExpandedBytes}) is near the ceiling`);
   assert.ok(veryLarge.oldEchoBytes > MAX_REPORT_SAVE_REQUEST_BYTES * 1.3, `so its old echo (${veryLarge.oldEchoBytes}) is far over the ceiling — the browser could never re-POST it`);
   assert.ok(veryLarge.retryBytes < MAX_REPORT_SAVE_REQUEST_BYTES * 0.45, "yet its retry request is comfortably under the ceiling");
   // Scaling: the retry request tracks the AI analysis (≈ the manuscript), far below what the evidence-bearing echo needs.

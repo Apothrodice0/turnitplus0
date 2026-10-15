@@ -26,15 +26,23 @@ const AUTHORITATIVE_RESULT_KEYS = [
   "archiveOnlyWords",
   "contributions",
   "deviceSelfExcludedWords",
+  // always-present channel subtotals of the user-supplied-reference / Selective Corpus / imported-evidence channels
+  // (the ASJP keys appear ONLY with ASJP evidence, so they are not part of an authoritative no-ASJP result)
+  "importedSimilarityEvidenceOnlyWords",
+  "importedSimilarityEvidencePositions",
   "liveAcademicOnlyWords",
   "matchedPositions",
   "overlapWords",
   "previousUploadOnlyWords",
   "previousUploadPositions",
+  "selectiveCorpusOnlyWords",
+  "selectiveCorpusPositions",
   "selfExcludedWords",
   "unifiedScore",
   "uniqueMatchedWords",
   "unknownExcludedWords",
+  "userSuppliedReferenceOnlyWords",
+  "userSuppliedReferencePositions",
   "version",
   "wordCount",
 ].sort();

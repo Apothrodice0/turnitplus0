@@ -1,7 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import fs from "node:fs";
+import path from "node:path";
+import { createClient } from "@libsql/client";
+import { applyMigrationsLibsql } from "../lib/ingest.js";
 import * as reportsRoute from "../app/api/reports/route.ts";
+
+// The 413 tests below reach checkRate (POST's first statement), which needs the reports database: give this file its
+// own migrated file database, exactly like every other route-level test file (the 500 tests override the URL).
+const dbFile = path.join(path.resolve("."), "test_report_save_500_response.db");
+for (const suffix of ["", "-wal", "-shm"]) { try { fs.unlinkSync(`${dbFile}${suffix}`); } catch { /* none */ } }
+{ const client = createClient({ url: `file:${dbFile}` }); await applyMigrationsLibsql(client, path.join(path.resolve("."), "drizzle")); client.close(); }
+process.env.TURSO_DATABASE_URL = `file:${dbFile}`;
+test.after(() => { for (const suffix of ["", "-wal", "-shm"]) { try { fs.unlinkSync(`${dbFile}${suffix}`); } catch { /* none */ } } });
 
 /**
  * POST /api/reports outer-catch security/privacy hardening regression.

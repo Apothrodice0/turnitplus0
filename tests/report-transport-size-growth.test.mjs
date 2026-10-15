@@ -447,7 +447,9 @@ test('REAL SERVER GROWTH: a request under MAX_REPORT_SAVE_REQUEST_BYTES as sent 
   await t.test('R2 GATE OFF (the default): the SAME near-ceiling report FAILS CLOSED -- 413 and nothing persisted -- never saved as a score without its explanation', async (st) => {
     st.after(pinCompactWrites(undefined));
     const offAccount = await signUpConsentingAccount();
-    const text = buildManuscript(TARGET_TEXT_CHARS, true);
+    // re-calibrated: the server now persists this report ~1 character under the ceiling, so the fail-closed case uses a
+    // slightly larger manuscript (the request itself is still asserted to pass the transport guard just below)
+    const text = buildManuscript(TARGET_TEXT_CHARS + 30_000, true);
     const body = buildRequestBody({ deviceKey: offAccount.deviceKey, id: 'growth-gate-off-1', text, unifiedSimilarityForgery: FORGED_UNIFIED_SIMILARITY, room: 0 });
     assert.ok(Buffer.byteLength(JSON.stringify(body), 'utf8') < MAX_REPORT_SAVE_REQUEST_BYTES, 'the request itself passes the transport guard; the PERSISTENCE guard is what rejects it');
     await resetRateForTest(offAccount.tag + '-post-off');
