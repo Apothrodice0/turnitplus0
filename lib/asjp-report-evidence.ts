@@ -16,6 +16,7 @@
  */
 export type AsjpServiceAnswer = {
   state: string; failureCode?: string | null; wordCount?: number | null; generationId?: string; logicalManifestSha256?: string; laneVersion?: string; catalogLoadedAt?: string;
+  licencePolicy?: string; normalization?: number;
   asjpPublicationEvidence?: Array<{ sourceId: string; matchedPassages: Array<{ submittedWordStart: number; submittedWordEnd: number; matchedWordCount: number }> }>;
   cards?: Array<Record<string, unknown>>;
 };
@@ -27,12 +28,16 @@ export type AsjpReportEvidenceDecision = { evidence: AsjpReportEvidence | null; 
 
 export function asjpReportEvidenceEnabled(env: Record<string, string | undefined> = process.env): boolean { return env.ASJP_REPORT_EVIDENCE_ENABLED === "true"; }
 
-export function acceptAsjpAnswer(answer: AsjpServiceAnswer | null | undefined, expected: { generationId: string; logicalManifestSha256: string; wordCount: number }, enabled = asjpReportEvidenceEnabled()): AsjpReportEvidenceDecision {
+export function acceptAsjpAnswer(answer: AsjpServiceAnswer | null | undefined, expected: { generationId: string; logicalManifestSha256: string; wordCount: number; normalization?: number; allowLocalResearchPolicy?: boolean }, enabled = asjpReportEvidenceEnabled()): AsjpReportEvidenceDecision {
   if (!enabled) return { evidence: null, status: "DISABLED", reason: null };
   if (!answer) return { evidence: null, status: "UNAVAILABLE", reason: "NO_ANSWER" };
   if (answer.state !== "COMPLETE") return { evidence: null, status: "UNAVAILABLE", reason: answer.failureCode ?? answer.state };
   if (answer.generationId !== expected.generationId || answer.logicalManifestSha256 !== expected.logicalManifestSha256) return { evidence: null, status: "UNAVAILABLE", reason: "GENERATION_MISMATCH" };
-  if (answer.wordCount != null && answer.wordCount !== expected.wordCount) return { evidence: null, status: "UNAVAILABLE", reason: "WORD_COUNT_MISMATCH" };
+  // a report may only carry evidence from articles whose licence permits it, tokenized the way the report is
+  if (answer.licencePolicy !== "permitted-only" && !(expected.allowLocalResearchPolicy && answer.licencePolicy === "local-research-all")) return { evidence: null, status: "UNAVAILABLE", reason: "LICENCE_POLICY_NOT_ALLOWED" };
+  if (answer.normalization !== (expected.normalization ?? 2)) return { evidence: null, status: "UNAVAILABLE", reason: "NORMALIZATION_MISMATCH" };
+  if (answer.wordCount == null || answer.wordCount !== expected.wordCount) return { evidence: null, status: "UNAVAILABLE", reason: "WORD_COUNT_MISMATCH" };
+  if (!Array.isArray(answer.asjpPublicationEvidence) || answer.asjpPublicationEvidence.some((x) => typeof x?.sourceId !== "string" || !Array.isArray(x.matchedPassages) || x.matchedPassages.some((p) => !Number.isInteger(p?.submittedWordStart) || !Number.isInteger(p?.submittedWordEnd)))) return { evidence: null, status: "UNAVAILABLE", reason: "MALFORMED_EVIDENCE" };
   const evidence = (answer.asjpPublicationEvidence ?? []).map((s) => ({
     sourceId: s.sourceId,
     matchedPassages: s.matchedPassages.filter((p) => p.submittedWordStart >= 0 && p.submittedWordEnd >= p.submittedWordStart && p.submittedWordEnd < expected.wordCount),

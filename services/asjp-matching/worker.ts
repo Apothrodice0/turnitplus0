@@ -33,7 +33,7 @@ async function main() {
       const r: any = await runAsjpAcademicLane({ store, generationId: config.generationId, logicalManifestSha256: config.logicalManifestSha256, submissionText: m.text, submissionTitle: m.title ?? null, referenceDate: m.referenceDate ?? undefined, catalog: catalog.entry, ignoreFlag: true, licencePolicy: config.licencePolicy, corrections: config.corrections, session });
       const cards = r.state === "COMPLETE" ? asjpSourceCards(r) : [];
       const out = { state: r.state, failureCode: (r as any).failureCode ?? null, wordCount: r.submissionWordCount ?? null, creditedPositions: r.creditedPositions ?? [], asjpPublicationEvidence: r.state === "COMPLETE" ? asjpPublicationEvidenceOf(r) : [], cards };
-      send({ type: "result", id: m.id, ...out, digest: answerDigest(out), generationId: config.generationId, logicalManifestSha256: config.logicalManifestSha256, laneVersion: ASJP_ACADEMIC_LANE_VERSION, catalogLoadedAt: catalog.current.loadedAt, workerMs: Math.round(performance.now() - t0), laneTimings: r.timings ?? null });
+      send({ type: "result", id: m.id, ...out, digest: answerDigest(out), generationId: config.generationId, logicalManifestSha256: config.logicalManifestSha256, laneVersion: ASJP_ACADEMIC_LANE_VERSION, licencePolicy: config.licencePolicy, normalization: 2, catalogLoadedAt: catalog.current.loadedAt, workerMs: Math.round(performance.now() - t0), laneTimings: r.timings ?? null, rssMb: Math.round(process.memoryUsage().rss / 1048576) });
     } catch (error) {
       send({ type: "result", id: m.id, state: "FAILED", failureCode: "WORKER_EXCEPTION", failureMessage: String((error as Error)?.message ?? error) });
     }
