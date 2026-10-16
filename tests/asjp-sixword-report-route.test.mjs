@@ -77,7 +77,7 @@ async function seedReport({ deviceKey, reportId, owner, withAsjp = true, created
   const answer = { state: 'COMPLETE', failureCode: null, wordCount: 400, creditedPositions: [], asjpPublicationEvidence: [{ sourceId: 'asjp:777', matchedPassages: [{ submittedWordStart: 100, submittedWordEnd: 160, matchedWordCount: 61 }] }], cards: [card], generationId: G1, logicalManifestSha256: M1, laneVersion: 'asjp-academic-lane-v5', licencePolicy: 'local-research-all', normalization: 2, catalogDigest: 'e'.repeat(64), catalogLoadedAt: '2026-01-01T00:00:00Z', features: { numericTables: false, shortSignal: false } };
   const record = asjpEvidenceRecordFromAnswer(answer, { generationId: G1, logicalManifestSha256: M1, wordCount: 400, text: TEXT, allowLocalResearchPolicy: true }, true);
   assert.equal(record.status, 'ACCEPTED');
-  const payload = { version: 11, id: 1, submissionId: `sub-${reportId}`, title: 't.pdf', text: TEXT, wordCount: 400, score: 15, archiveScore: 15, sources: [], repeats: [], ...(withAsjp ? { asjpEvidence: signAsjpRecord(record, binding, KEY) } : {}) };
+  const payload = { version: 11, id: 1, scoringNormalizationVersion: 2, submissionId: `sub-${reportId}`, title: 't.pdf', text: TEXT, wordCount: 400, score: 15, archiveScore: 15, sources: [], repeats: [], ...(withAsjp ? { asjpEvidence: signAsjpRecord(record, binding, KEY) } : {}) };
   await client.execute({
     sql: `INSERT INTO saved_reports (id, device_key, submission_id, title, report_created_at, word_count, archive_score, score_band, payload_json, user_id) VALUES (?,?,?,?,?,?,?,?,?,?)`,
     args: [reportId, deviceKey, `sub-${reportId}`, 't.pdf', createdAt, 400, 15, 'Low', JSON.stringify(payload), owner],
@@ -231,4 +231,13 @@ test('review L3/L4: a failed re-run keeps the good result; matches found but not
   stub.mode = 'unlisted';
   const v = (await call('POST', { id: 'rep-b', deviceKey: 'dev-b', token: admin.token })).body.view;
   assert.equal(v.outcome, 'COMPLETE'); assert.deepEqual(v.items, []); assert.match(v.message, /does NOT mean zero matches/);
+});
+
+test('review I7/I9: a normalization-1 report is refused with a clear code; the experiment never runs in Vercel Production', async () => {
+  await client.execute({ sql: `INSERT INTO saved_reports (id, device_key, submission_id, title, report_created_at, word_count, archive_score, score_band, payload_json, user_id) VALUES (?,?,?,?,?,?,?,?,?,?)`, args: ['rep-v1', 'dev-v1', 'sub-v1', 't.pdf', '2025-01-01T00:00:00.000Z', 400, 0, 'Low', JSON.stringify({ version: 11, id: 1, submissionId: 'sub-v1', title: 't.pdf', text: TEXT, wordCount: 400, score: 0, archiveScore: 0, sources: [], repeats: [] }), owner.id] });
+  const r = await call('POST', { id: 'rep-v1', deviceKey: 'dev-v1', token: admin.token });
+  assert.deepEqual([r.body.outcome, r.body.reason], ['NOT_ELIGIBLE', 'NORMALIZATION_1_REPORT']);
+  process.env.VERCEL_ENV = 'production';
+  try { assert.equal((await call('GET', { id: 'rep-b', deviceKey: 'dev-b', token: admin.token })).status, 404); }
+  finally { delete process.env.VERCEL_ENV; }
 });

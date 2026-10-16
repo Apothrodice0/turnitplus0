@@ -25,7 +25,8 @@ import {
  */
 export const ASJP_SIXWORD_RECORD_SCHEMA = "asjp-sixword-overlap-record-v1";
 /** Report-side display flag (default off): compute nothing new, only allow an admin view of a trusted record. */
-export function asjpSixwordOverlapDisplayEnabled(env: Record<string, string | undefined> = process.env): boolean { return env.ASJP_SIXWORD_OVERLAP_DISPLAY_ENABLED === "true"; }
+/** Off unless set — and refused outright in a Vercel Production environment until a release decision (review I9). */
+export function asjpSixwordOverlapDisplayEnabled(env: Record<string, string | undefined> = process.env): boolean { return env.ASJP_SIXWORD_OVERLAP_DISPLAY_ENABLED === "true" && env.VERCEL_ENV !== "production"; }
 
 export type AsjpSixwordRecord = {
   schema: typeof ASJP_SIXWORD_RECORD_SCHEMA; contract: typeof ASJP_SIXWORD_CONTRACT_VERSION;

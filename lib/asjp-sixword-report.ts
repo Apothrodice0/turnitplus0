@@ -2,6 +2,7 @@ import type { Client } from "@libsql/client";
 import { randomUUID } from "node:crypto";
 import { tryDecodeReportFromPersistence } from "./report-persistence";
 import type { SimilarityReport } from "./report-types";
+import { reportScoringNormalizationVersion } from "./similarity-core";
 import {
   asjpChannelFromCards, asjpGlobalWithdrawn, asjpKeyring, asjpReportClientConfig, asjpReportClientConfigProblem, asjpTextSha256, asjpWithdrawnOf, normalizeWithdrawn, trustedAsjpRecord,
   type AsjpKeyMaterial, type AsjpRecordBinding, type AsjpReportClientConfig,
@@ -39,6 +40,8 @@ async function loadReport(client: Client, key: SixwordReportKey, keys: AsjpKeyMa
   if (!decoded.ok) return { failure: "UNREADABLE_REPORT" };
   const payload = decoded.report as SimilarityReport;
   if (typeof payload.text !== "string" || !payload.text || !Number.isInteger(payload.wordCount)) return { failure: "NO_TEXT" };
+  // review I7: positions are normalization-2 word indices; a v1 report says so instead of failing as malformed
+  if (reportScoringNormalizationVersion(payload) !== 2) return { failure: "NORMALIZATION_1_REPORT" };
   const scored = trustedAsjpRecord(payload.asjpEvidence, binding, keys);
   const creditedPositions: number[] = [];
   for (const source of scored && scored.status === "ACCEPTED" ? asjpChannelFromCards(scored.cards) : []) for (const p of source.matchedPassages) for (let q = p.submittedWordStart; q <= p.submittedWordEnd; q += 1) creditedPositions.push(q);

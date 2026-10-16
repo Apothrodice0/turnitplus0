@@ -129,7 +129,7 @@ test('scoring isolation: lane-credited words are reported, the score and the sco
   const a = asjpEvidenceRecordFromAnswer(answer, expected, true), b = asjpEvidenceRecordFromAnswer({ ...answer, research: { sixwordOverlap: r } }, expected, true);
   assert.deepEqual({ ...a, checkedAt: 0 }, { ...b, checkedAt: 0 }, 'the scored record never carries the six-word block');
   assert.equal(score(), before);
-  for (const f of ['lib/unified-similarity.ts', 'lib/report-primary-similarity.ts', 'lib/asjp-report-evidence.ts', 'lib/report-asjp-evidence.ts', 'lib/asjp-academic-lane.ts']) assert.ok(!/sixword/i.test(fs.readFileSync(f, 'utf8')), `${f} never reads six-word data`);
+  for (const f of ['lib/unified-similarity.ts', 'lib/report-primary-similarity.ts', 'lib/asjp-report-evidence.ts', 'lib/report-asjp-evidence.ts', 'lib/asjp-academic-lane.ts']) assert.ok(!/sixword/i.test(fs.readFileSync(new URL(`../${f}`, import.meta.url), 'utf8')), `${f} never reads six-word data`);
 });
 
 test('outage: missing index, other generation, pair and time budgets — coded, never partial', async () => {
