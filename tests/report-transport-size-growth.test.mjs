@@ -13,6 +13,7 @@ import { matureCorpusBackings } from './helpers/corpus-maturity.mjs';
 import { withTestIdentity } from './helpers/test-signup.mjs';
 import * as signupRoute from '../app/api/auth/signup/route.ts';
 import { MAX_REPORT_SAVE_REQUEST_BYTES } from '../lib/report-transport-limits.ts';
+import { USER_SUBMISSION_MATCH_THRESHOLDS } from '../lib/user-submission-matching.ts';
 import { resolvePrimarySimilaritySummary, selfHealUnifiedSimilarity } from '../lib/report-primary-similarity.ts';
 import { withEvidenceInterpretation } from '../lib/report-evidence-interpretation.ts';
 import * as reportIdRoute from '../app/api/reports/[id]/route.ts';
@@ -314,7 +315,25 @@ const FORGED_UNIFIED_SIMILARITY = {
 // real matcher's bounded (tens-of-KB) growth to cross it.
 const TARGET_TEXT_CHARS = 1_850_000;
 
+/**
+ * V4 (Phase 7 final follow-up, test-only): DETERMINISM. This fixture's sizes were calibrated on the prior-submission
+ * matcher's SOFT TIME BUDGET (matchTimeBudgetMs 2,500, checked between candidates) stopping after 2 of the 10 promoted
+ * candidates (~1.4 s each): every passing run measured partial=1, candidates=2, ~2.8 s. Right at that boundary a faster
+ * or slower moment processes 3 or 1 candidates instead, so two computations of the same report (the reference and the
+ * POST) could disagree — reproduced deterministically on Production 1df8762 AND on the ASJP branch alike ("8 !== 5":
+ * reference 2 candidates, POST 3), and under CPU contention the size assertions failed too. The matcher processes
+ * candidates in ranked order (slice(0, maxCandidates)), so pinning maxCandidates to 2 with generous time limits
+ * selects EXACTLY the 2 candidates the budget used to reach — the same evidence, now independent of machine speed.
+ * Production configuration is untouched; the pin is scoped to this test and restored after it.
+ */
+function pinMatcherForDeterminism() {
+  const saved = { maxCandidates: USER_SUBMISSION_MATCH_THRESHOLDS.maxCandidates, matchTimeBudgetMs: USER_SUBMISSION_MATCH_THRESHOLDS.matchTimeBudgetMs, dbQueryTimeoutMs: USER_SUBMISSION_MATCH_THRESHOLDS.dbQueryTimeoutMs };
+  Object.assign(USER_SUBMISSION_MATCH_THRESHOLDS, { maxCandidates: 2, matchTimeBudgetMs: 600_000, dbQueryTimeoutMs: 60_000 });
+  return () => Object.assign(USER_SUBMISSION_MATCH_THRESHOLDS, saved);
+}
+
 test('REAL SERVER GROWTH: a request under MAX_REPORT_SAVE_REQUEST_BYTES as sent is rejected 413 once real server-side write-time finalization (real historical-submission matcher against real promoted corpus sources) grows the persisted payload past the ceiling', async (t) => {
+  t.after(pinMatcherForDeterminism());
   // Ten independent, genuine, server-trusted sources -- the client cannot
   // forge or influence which promoted documents the matcher finds.
   for (const passage of EXTENDED_PASSAGES) {
