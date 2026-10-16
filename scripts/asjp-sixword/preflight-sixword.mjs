@@ -70,7 +70,8 @@ if (serviceEnvFile) {
     let sameStore = false;
     try { sameStore = createHash("sha256").update(readFileSync(path.join(generation.laneTokensDir, "index.json"))).digest("hex") === identity?.laneTokens?.indexJsonSha256 && statSync(path.join(generation.laneTokensDir, "tokens.bin")).size === identity?.laneTokens?.tokensBinBytes; } catch { sameStore = false; }
     // final review L-A: the SAME directory (the service opens only that one), not just equal content
-    const samePath = !!identity?.laneTokens?.dir && path.resolve(identity.laneTokens.dir).toLowerCase() === path.resolve(generation.laneTokensDir ?? "").toLowerCase();
+    const fold = (p) => (process.platform === "win32" ? path.resolve(p).toLowerCase() : path.resolve(p)); // as the service compares
+    const samePath = !!identity?.laneTokens?.dir && fold(identity.laneTokens.dir) === fold(generation.laneTokensDir ?? "");
     check("S3 index built from the generation's lane token store (same directory, same content)", sameStore && samePath);
     check("S4 every path inside ASJP_ALLOWED_ROOTS", inside(dir) && inside(df) && inside(identity?.laneTokens?.dir) && inside(generation.laneTokensDir));
   }

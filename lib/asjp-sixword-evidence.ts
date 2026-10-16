@@ -116,6 +116,7 @@ export function sixwordMatches(index: SixwordIndex, tokens: readonly string[], f
   }
   matches.sort((x, y) => x.s - y.s || x.e - y.e);
   for (const m of matches) {
+    if (overDeadline()) throw new SixwordBudgetExceeded("TIME_BUDGET", {});
     if (m.holderCount !== 1 || m.words < 10) continue;
     const own = m.holders[0].ord, held = new Map<number, number>();
     for (let i = m.s; i <= m.e - SIXWORD_N + 1; i += 1) for (const o of found.gramDocs[i] ?? []) if (o !== own) held.set(o, (held.get(o) ?? 0) + 1);
@@ -129,9 +130,12 @@ export function sixwordMatches(index: SixwordIndex, tokens: readonly string[], f
   for (const m of matches) if (m.holderCount === 1) { const o = m.holders[0].ord; const l = uniqueByOrd.get(o); if (l) l.push(m); else uniqueByOrd.set(o, [m]); }
   for (const list of uniqueByOrd.values()) {
     for (const m of list) {
+      // review R2 N1: O(U²) per article, so the deadline is checked here too; no spread into Math.min (RangeError)
+      if (overDeadline()) throw new SixwordBudgetExceeded("TIME_BUDGET", {});
       const others = list.filter((x) => x !== m && (x.e < m.s || x.s > m.e));
       const inOrder = others.filter((x) => Math.sign(x.s - m.s) === Math.sign(x.holders[0].p - m.holders[0].p)).length;
-      const nearest = others.length ? Math.min(...others.map((x) => (x.s > m.e ? x.s - m.e : m.s - x.e))) : null;
+      let nearest: number | null = null;
+      for (const x of others) { const d = x.s > m.e ? x.s - m.e : m.s - x.e; if (nearest === null || d < nearest) nearest = d; }
       m.features.corroboration = { matches: others.length, words: others.reduce((t, x) => t + x.words, 0), inOrder, nearest };
     }
   }
