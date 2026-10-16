@@ -229,6 +229,14 @@ function validGeneration(config: AsjpServiceConfig, g: AsjpWorkerConfig): string
   if (!g || typeof g.root !== "string" || typeof g.catalogPath !== "string" || !g.generationId || !g.logicalManifestSha256) return "incomplete generation config";
   const inside = (p: string) => config.allowedRoots.some((r) => path.resolve(p).toLowerCase().startsWith(path.resolve(r).toLowerCase() + path.sep));
   if (!inside(g.root) || !inside(g.catalogPath) || (g.laneTokensDir && !inside(g.laneTokensDir)) || (g.numericIndexDir && !inside(g.numericIndexDir)) || (g.features?.shortSignal?.wordDfPath && !inside(g.features.shortSignal.wordDfPath))) return "a path is outside the allowed roots";
+  // six-word overlap: the index, the word-frequency table and the token store the index reads must stay inside too
+  const six = g.features?.sixwordOverlap;
+  if (six) {
+    if (!inside(six.indexDir) || !inside(six.wordDfPath)) return "a path is outside the allowed roots";
+    let tokensDir: string | null = null;
+    try { tokensDir = JSON.parse(readFileSync(path.join(six.indexDir, "identity.json"), "utf8"))?.laneTokens?.dir ?? null; } catch { /* unreadable: the worker reports the feature UNAVAILABLE */ }
+    if (tokensDir && !inside(tokensDir)) return "a path is outside the allowed roots";
+  }
   if (g.licencePolicy !== config.generation.licencePolicy) return "the licence policy differs from the service's";
   return null;
 }
@@ -272,6 +280,7 @@ export async function startAsjpService(config: AsjpServiceConfig): Promise<{ ser
   const invalid = validGeneration(config, config.generation);
   if (invalid) throw new Error(`generation config refused: ${invalid}`);
   const startedAt = Date.now();
+  let sixwordInFlight = 0;
   const verifyRequest = config.requestSigningKey ? asjpRequestVerifier(config.requestSigningKey, config.requestMaxSkewMs ?? 120_000, startedAt) : null;
   let pool = new Pool(config, config.generation);
   try { await pool.start(); } catch (error) { pool.close(); throw error; }
@@ -333,6 +342,38 @@ export async function startAsjpService(config: AsjpServiceConfig): Promise<{ ser
         if (r.state === "COMPLETE") current.counters.served += 1; else current.counters.failed += 1;
         return reply(r.state === "BUSY" || r.state === "UNAVAILABLE" ? 503 : r.state === "TIMEOUT" ? 504 : 200, { ...r, totalMs: Date.now() - t0 });
       }
+      // INFORMATIONAL six-word overlap (contract asjp-sixword-overlap-contract-v1): an explicit developer request only. The
+      // same protocol-v2 verification and signed answers, golden / degraded gates, body, word and takedown limits as
+      // /match; absent (404) unless the service was started with the feature. Never scored, never part of /match.
+      if (req.method === "POST" && req.url === "/sixword") {
+        if (!pool.generation.features?.sixwordOverlap) return json(res, 404, { error: "not found" });
+        const raw = await read(req);
+        let ctx: AsjpRequestContext | null = null;
+        if (verifyRequest) { ctx = verifyRequest(req, raw); if (!ctx) return json(res, 401, { error: "unauthorized" }); }
+        const reply = (code: number, body: unknown) => (ctx ? signedJson(res, code, body, ctx) : json(res, code, body));
+        if (!pool.goldenOk) return reply(503, { state: "UNAVAILABLE", failureCode: "GOLDEN_MISMATCH" });
+        if (pool.degraded) return reply(503, { state: "UNAVAILABLE", failureCode: pool.degraded });
+        let body: any;
+        try { body = JSON.parse(utf8.decode(raw)); } catch { return reply(400, { error: "bad request" }); }
+        if (!body || typeof body.text !== "string") return reply(400, { error: "text required" });
+        if (body.referenceDate != null && !/^\d{4}-\d{2}-\d{2}$/.test(String(body.referenceDate))) return reply(400, { error: "referenceDate must be YYYY-MM-DD" });
+        const exclude = body.excludeSourceIds ?? [];
+        if (!Array.isArray(exclude) || exclude.length > 1000 || !exclude.every((x: unknown) => typeof x === "string" && SOURCE_ID.test(x))) return reply(400, { error: "excludeSourceIds must be up to 1000 asjp:<id> values" });
+        const credited = body.creditedPositions ?? [];
+        if (!Array.isArray(credited) || credited.length > config.maxWords || !credited.every((q: unknown) => Number.isInteger(q) && (q as number) >= 0)) return reply(400, { error: "creditedPositions must be word positions" });
+        if (body.text.split(/\s+/).length > config.maxWords) return reply(413, { state: "REJECTED", failureCode: "TOO_LONG" });
+        // review L7: at most ONE developer search at a time, so /sixword can never hold more than one worker that /match
+        // traffic needs; a second request is refused at once (never queued behind or ahead of report checks)
+        if (sixwordInFlight >= 1) return reply(503, { state: "BUSY", failureCode: "SIXWORD_BUSY" });
+        sixwordInFlight += 1;
+        try {
+          const t0 = Date.now();
+          const job = pool.submit({ type: "sixword", text: body.text, referenceDate: body.referenceDate ?? null, excludeSourceIds: exclude, creditedPositions: credited });
+          res.on("close", () => { if (!res.writableFinished) job.cancel(); });
+          const r = await job.promise;
+          return reply(r.state === "BUSY" || (r.state === "UNAVAILABLE" && !r.contract) ? 503 : r.state === "TIMEOUT" ? 504 : 200, { ...r, totalMs: Date.now() - t0 });
+        } finally { sixwordInFlight -= 1; }
+      }
       if (req.method === "POST" && req.url === "/admin/refresh") return json(res, 200, { workers: await pool.refresh() });
       if (req.method === "POST" && req.url === "/admin/switch") {
         const rawSwitch = await read(req);
@@ -373,6 +414,8 @@ export async function startAsjpService(config: AsjpServiceConfig): Promise<{ ser
  *   ASJP_RECOVERY_COOLDOWN_MS, ASJP_MAX_RECOVERIES_PER_HOUR   bounded recovery after RESTART_LIMIT (60000, 3)
  *   ASJP_NUMERIC_TABLES_ENABLED=true (+ numericIndexDir in the generation config)   number-table path
  *   ASJP_SHORT_SIGNAL_ENABLED=true + ASJP_WORD_DF_PATH                               UNSCORED short-passage signal
+ *   ASJP_SIXWORD_OVERLAP_ENABLED=true + ASJP_SIXWORD_INDEX_DIR + ASJP_WORD_DF_PATH   INFORMATIONAL six-word overlap
+ *                      (POST /sixword, contract asjp-sixword-overlap-contract-v1; never scored, never part of /match)
  *   ASJP_GOLDEN_FILE   JSON [{text, title, digest}] every worker must reproduce before /health reports ready (Phase 7;
  *                      required whenever ASJP_REQUIRE_GOLDEN=true, so a serving host can never report healthy without it)
  */
@@ -384,10 +427,13 @@ export function asjpServiceConfigFromEnv(env: Record<string, string | undefined>
     return value;
   };
   if (!env.ASJP_GENERATION_CONFIG) throw new Error("ASJP_GENERATION_CONFIG is required");
-  const generation = JSON.parse(readFileSync(env.ASJP_GENERATION_CONFIG, "utf8")) as AsjpWorkerConfig;
+  // a leading BOM is ignored: Windows PowerShell 5.1 `Set-Content -Encoding utf8` (198-pc-preview-start.ps1) writes one
+  const generation = JSON.parse(readFileSync(env.ASJP_GENERATION_CONFIG, "utf8").replace(/^\uFEFF/, "")) as AsjpWorkerConfig;
   generation.features = {
     numericTables: env.ASJP_NUMERIC_TABLES_ENABLED === "true",
     shortSignal: env.ASJP_SHORT_SIGNAL_ENABLED === "true" && env.ASJP_WORD_DF_PATH ? { wordDfPath: env.ASJP_WORD_DF_PATH } : null,
+    // informational six-word overlap (POST /sixword only); absent unless explicitly enabled, so defaults stay identical
+    ...(env.ASJP_SIXWORD_OVERLAP_ENABLED === "true" && env.ASJP_SIXWORD_INDEX_DIR && env.ASJP_WORD_DF_PATH ? { sixwordOverlap: { indexDir: env.ASJP_SIXWORD_INDEX_DIR, wordDfPath: env.ASJP_WORD_DF_PATH } } : {}),
   };
   const num = (v: string | undefined, d: number) => (v !== undefined && Number.isFinite(Number(v)) ? Number(v) : d);
   return {

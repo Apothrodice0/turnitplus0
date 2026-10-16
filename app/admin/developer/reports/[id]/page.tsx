@@ -18,6 +18,8 @@ import type {
 } from "@/lib/admin-similarity-decision-trace";
 import type { SimilarityReport } from "@/lib/report-types";
 import { parseAsjpEvidenceRecord, verifyAsjpRecordDetailed, type AsjpRecordBinding } from "@/lib/asjp-report-evidence";
+import { AsjpSixwordSection } from "@/components/developer/asjp-sixword-section";
+import { asjpSixwordOverlapDisplayEnabled } from "@/lib/report-asjp-sixword-evidence";
 
 export const dynamic = "force-dynamic";
 
@@ -271,6 +273,9 @@ export default async function DeveloperReportInspectPage({
 
       {/* ================= ASJP (Phase 6.5 local prototype) ================= */}
       <AsjpDebugSection record={report.payload.asjpEvidence} binding={{ reportDeviceKey: report.deviceKey, reportId: report.id, accountId: report.userId ?? null }} />
+
+      {/* ================= Six-word exact overlap (informational, unscored; only with ASJP_SIXWORD_OVERLAP_DISPLAY_ENABLED) ================= */}
+      {asjpSixwordOverlapDisplayEnabled() ? <AsjpSixwordSection reportId={report.id} deviceKey={report.deviceKey} text={typeof report.payload.text === "string" ? report.payload.text : ""} /> : null}
 
       {/* ================= Raw data ================= */}
       <section className="admin-card">
