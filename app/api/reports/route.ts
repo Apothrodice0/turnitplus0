@@ -1270,7 +1270,11 @@ export async function POST(request: Request) {
       // does not fit WITHOUT any ASJP is refused, with the unchanged 413. Deterministic: the same inputs take the same tier.
       const overCeiling = (json: string) => persistedPayloadSize(json) > persistedCeiling;
       const shrinkAsjp = (): boolean => {
-        if (asjpRecordOccupiesSpace(asjpEvidenceRecord)) asjpEvidenceRecord = asjpRecordDoesNotFit(asjpEvidenceRecord!, asjpBinding);
+        // re-review N3: only a record this save verified becomes a signed marker; an unverified (preserved) one is left out
+        if (asjpRecordOccupiesSpace(asjpEvidenceRecord) && !asjpDecision.preserveStored) {
+          asjpEvidenceRecord = asjpRecordDoesNotFit(asjpEvidenceRecord!, asjpBinding);
+          if (!asjpEvidenceRecord) console.warn(JSON.stringify({ event: 'asjp_record_dropped_at_ceiling' }));
+        }
         else if (asjpEvidenceRecord) { asjpEvidenceRecord = null; console.warn(JSON.stringify({ event: 'asjp_record_dropped_at_ceiling' })); }
         else return false;
         persistedReportPayload = buildPersistedReportPayload(asjpEvidenceRecord);

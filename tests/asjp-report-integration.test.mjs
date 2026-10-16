@@ -12,7 +12,7 @@ import * as signupRoute from '../app/api/auth/signup/route.ts';
 import { resetRateForTest, resetAuthRateForTest, resetReadRateForTest } from '../lib/rate-limit.ts';
 import { resolvePrimarySimilaritySummary, selfHealUnifiedSimilarity } from '../lib/report-primary-similarity.ts';
 import { retryAsjpEvidenceForReport, retractAsjpEvidenceForReport } from '../lib/report-asjp-evidence.ts';
-import { asjpChannelOf, ASJP_REPORT_EVIDENCE_SCHEMA } from '../lib/asjp-report-evidence.ts';
+import { asjpChannelOf, asjpRecordDoesNotFit, signAsjpRecord, ASJP_REPORT_EVIDENCE_SCHEMA } from '../lib/asjp-report-evidence.ts';
 import { buildReportV2ViewModel, ASJP_UNAVAILABLE_NOTICE, ASJP_DOES_NOT_FIT_NOTICE, ASJP_UNVERIFIED_NOTICE } from '../lib/report-v2-view.ts';
 import { unifiedEvidenceSummary } from '../lib/report-types.ts';
 import { tokensForScoringNormalization } from '../lib/similarity-core.ts';
@@ -625,6 +625,32 @@ test('A1 at the report path: an expired tunnel URL held by someone else gets nei
     assert.ok(seen.every((s) => s.auth === null && !s.body.includes(WORDS[0])), 'no bearer token, no manuscript');
     assert.equal(buildReportV2ViewModel(await getPayload(acc, 'a1-expired-1')).asjpUnavailableNotice, ASJP_UNAVAILABLE_NOTICE);
   } finally { process.env.ASJP_SERVICE_URL = savedUrl; delete process.env.ASJP_SERVICE_REQUEST_SIGNING_KEY; impostor.close(); }
+});
+
+test('re-review N1: with ASJP OFF a planted signed-looking record never freezes a report — the resave recomputes exactly as Production does', async () => {
+  const key = process.env.ASJP_EVIDENCE_SIGNING_KEY;
+  for (const [label, withKey] of [['key configured', true], ['no key (Production today)', false]]) {
+    setAsjp(false);
+    if (!withKey) delete process.env.ASJP_EVIDENCE_SIGNING_KEY;
+    try {
+      const acc = await account();
+      const id = `n1-${withKey ? 'k' : 'nk'}`;
+      await post(acc, id, manuscript(0));
+      await client.execute({ sql: "UPDATE saved_reports SET payload_json = json_set(payload_json, '$.asjpEvidence', json(?)) WHERE device_key = ? AND id = ?", args: [JSON.stringify({ ...plantedRecord(manuscript(0)), signature: 'f'.repeat(64) }), acc.deviceKey, id] });
+      await post(acc, id, manuscript(0), { payloadOverrides: { archiveMatchedPositions: range(0, 149) } });
+      const p = (await row(acc, id)).payload;
+      assert.equal(p.asjpEvidence, undefined, `${label}: the planted key is dropped`);
+      assert.deepEqual(p.unifiedSimilarity.matchedPositions, range(0, 149), `${label}: the resave's new score lands`);
+    } finally { process.env.ASJP_EVIDENCE_SIGNING_KEY = key; }
+  }
+});
+
+test('re-review N3: the size fallback never turns an unverified record into a server-signed marker', () => {
+  const binding = { reportDeviceKey: 'd', reportId: 'r', accountId: 'u' };
+  const planted = { ...plantedRecord(manuscript(0)), withdrawnSourceIds: ['asjp:101'], signature: 'f'.repeat(64) };
+  assert.equal(asjpRecordDoesNotFit(planted, binding), null, 'unverified: left out, never re-signed');
+  const genuine = signAsjpRecord(plantedRecord(manuscript(0)), binding);
+  assert.equal(asjpRecordDoesNotFit(genuine, binding).reason, 'RECORD_DOES_NOT_FIT', 'a verified record becomes the signed marker');
 });
 
 test('concurrent outages: many simultaneous first saves while the service drops connections all complete, each with the notice and no ASJP', async () => {

@@ -543,6 +543,7 @@ export async function asjpSaveDecision(
   input: { text: string; wordCount: number; scoringNormalizationVersion: number; isFirstSave: boolean; persistedRecord: unknown; persistedText: string | null; binding: AsjpRecordBinding },
   check: (withdrawn: string[]) => Promise<AsjpPersistedEvidence | null>,
   keys: AsjpKeyMaterial = asjpKeyring(),
+  env: Record<string, string | undefined> = process.env,
 ): Promise<AsjpSaveDecision> {
   const ring = ringOf(keys);
   const stored = input.isFirstSave ? null : parseAsjpEvidenceRecord(input.persistedRecord);
@@ -552,7 +553,13 @@ export async function asjpSaveDecision(
     if (!stored) return { record: null, preserveStored: false, reason: null };
     if (verification === "OK") return stored.textSha256 === asjpTextSha256(input.text) ? { record: stored, preserveStored: false, reason: null } : { record: null, preserveStored: false, reason: "TEXT_MISMATCH" };
     if (verification === "UNSIGNED") return stored.status === "UNAVAILABLE" && stored.reason === "CLIENT_MISCONFIGURED" && !ring.current ? { record: stored, preserveStored: false, reason: "CLIENT_MISCONFIGURED" } : { record: null, preserveStored: false, reason: "UNSIGNED_RECORD" };
-    return { record: stored, preserveStored: true, reason: verification };
+    // A5, narrowed by the re-review (N1 / N4): the stored report is preserved ONLY where ASJP is on in this deployment
+    // and the record is an ACCEPTED one (it put ASJP words in the saved score). With ASJP off (Production today) an
+    // unverifiable record is dropped and the report recomputed exactly as 1df8762 does; an unverifiable UNAVAILABLE /
+    // RETRACTED record carried no ASJP words, so dropping it changes no score. MISMATCH stays preserved on purpose:
+    // the owner rule is that a key changed under the same id never silently moves a score (23 % -> 0 %).
+    if (asjpReportEvidenceEnabled(env) && stored.status === "ACCEPTED") return { record: stored, preserveStored: true, reason: verification };
+    return { record: null, preserveStored: false, reason: verification };
   }
   if (input.scoringNormalizationVersion !== 2 || !input.text) return { record: null, preserveStored: false, reason: null };
   const withdrawn = verification === "OK" ? asjpWithdrawnOf(stored) : [];
@@ -578,7 +585,10 @@ export function asjpRecordOccupiesSpace(record: AsjpPersistedEvidence | null): b
  * UNAVAILABLE, reason RECORD_DOES_NOT_FIT, no cards, no research (nothing is truncated: the whole ASJP contribution is
  * left out and the report says the check is unavailable). The withdrawn list is kept (B3).
  */
-export function asjpRecordDoesNotFit(record: AsjpPersistedEvidence, binding: AsjpRecordBinding, keys: AsjpKeyMaterial = asjpKeyring()): AsjpPersistedEvidence {
+export function asjpRecordDoesNotFit(record: AsjpPersistedEvidence, binding: AsjpRecordBinding, keys: AsjpKeyMaterial = asjpKeyring()): AsjpPersistedEvidence | null {
+  // re-review N3: only a record that VERIFIES is ever re-signed — an unverified one (a preserved or planted record) is
+  // never turned into a server-signed marker (its withdrawn list would become trusted); null = leave it out entirely
+  if (!verifyAsjpRecord(record, binding, keys)) return null;
   const { signature: _s, keyId: _k, research: _r, ...base } = record;
   return signAsjpRecord({ ...base, status: "UNAVAILABLE", reason: "RECORD_DOES_NOT_FIT", checkedAt: new Date().toISOString(), cards: [] }, binding, keys);
 }
