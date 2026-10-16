@@ -5,7 +5,7 @@ import { sha256Hex } from "./asjp-service-protocol";
 import { docIdFromDecimal } from "./corpus-engine/ids";
 import type { CorpusGenerationReader } from "./corpus-engine/reader";
 import { ASJP_PROVIDER, publicationTimingOf, type AsjpCatalogEntry, type AsjpLicencePolicy } from "./asjp-academic-lane";
-import { ASJP_SIXWORD_INDEX_FORMAT, SixwordIndex } from "./asjp-sixword-index";
+import { ASJP_SIXWORD_INDEX_FORMAT, SixwordIndex, SixwordTokenDirMismatch } from "./asjp-sixword-index";
 import { findSixwordRuns, SixwordBudgetExceeded } from "./asjp-sixword-match";
 import { applyHolderGates, ASJP_SIXWORD_EVIDENCE_VERSION, holderOffsets, sixwordMatches, type SixwordMatch, type WordDf } from "./asjp-sixword-evidence";
 import {
@@ -31,7 +31,9 @@ export type SixwordOverlapSession = {
 export async function openSixwordOverlapSession(options: { indexDir: string; reader: CorpusGenerationReader; generationId: string; logicalManifestSha256: string; wordDf: WordDf; laneTokensDir?: string | null }): Promise<SixwordOverlapSession> {
   const t0 = performance.now();
   let index: SixwordIndex;
-  try { index = SixwordIndex.open(options.indexDir); } catch { throw new SixwordOverlapUnavailable("INDEX_UNAVAILABLE"); }
+  // final review L-A: with a lane token store, the index opens exactly that (validated) directory or is refused
+  try { index = SixwordIndex.open(options.indexDir, options.laneTokensDir ? { tokensDir: options.laneTokensDir } : {}); }
+  catch (error) { throw new SixwordOverlapUnavailable(error instanceof SixwordTokenDirMismatch ? "INDEX_TOKEN_STORE_MISMATCH" : "INDEX_UNAVAILABLE"); }
   const pin = index.identity.generation;
   if (pin.generationId !== options.generationId || pin.logicalManifestSha256 !== options.logicalManifestSha256 || options.reader.identity().generationId !== options.generationId) {
     index.close(); throw new SixwordOverlapUnavailable("GENERATION_MISMATCH");
@@ -113,7 +115,8 @@ export async function computeSixwordOverlap(session: SixwordOverlapSession, requ
     const found = findSixwordRuns(index, words, { budget: { maxPairs: limits.maxPairs, deadlineAt } });
     runs = found.runs.length;
     t1 = performance.now();
-    matches = sixwordMatches(index, words, found, { original: request.text, spans: tokenSpans(request.text, 2), wordDf: session.wordDf });
+    // final review L-B: the evidence step stops at the same deadline (a coded INCOMPLETE_BUDGET, never a worker kill)
+    matches = sixwordMatches(index, words, found, { original: request.text, spans: tokenSpans(request.text, 2), wordDf: session.wordDf, deadlineAt });
     t2 = performance.now();
     if (t2 > deadlineAt) return unavailableSixwordOverlap("INCOMPLETE_BUDGET", "TIME_BUDGET", pins, words.length);
   } catch (error) {

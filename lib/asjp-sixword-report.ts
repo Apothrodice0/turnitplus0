@@ -43,8 +43,10 @@ async function loadReport(client: Client, key: SixwordReportKey, keys: AsjpKeyMa
   // review I7: positions are normalization-2 word indices; a v1 report says so instead of failing as malformed
   if (reportScoringNormalizationVersion(payload) !== 2) return { failure: "NORMALIZATION_1_REPORT" };
   const scored = trustedAsjpRecord(payload.asjpEvidence, binding, keys);
-  const creditedPositions: number[] = [];
-  for (const source of scored && scored.status === "ACCEPTED" ? asjpChannelFromCards(scored.cards) : []) for (const p of source.matchedPassages) for (let q = p.submittedWordStart; q <= p.submittedWordEnd; q += 1) creditedPositions.push(q);
+  // final review L-D: each credited word once (several sources may credit the same words), ascending
+  const credited = new Set<number>();
+  for (const source of scored && scored.status === "ACCEPTED" ? asjpChannelFromCards(scored.cards) : []) for (const p of source.matchedPassages) for (let q = p.submittedWordStart; q <= p.submittedWordEnd; q += 1) credited.add(q);
+  const creditedPositions = [...credited].sort((a, b) => a - b);
   // L2: never later than the server's own first-save time (the client-supplied date can only make it earlier)
   const dates = [isoDay(raw.saved_at), isoDay(raw.report_created_at)].filter((d): d is string => !!d).sort();
   return { text: payload.text, textSha256: asjpTextSha256(payload.text), wordCount: payload.wordCount, binding, referenceDate: isoDay(raw.saved_at) ? dates[0] : null, creditedPositions, withdrawn: normalizeWithdrawn([...asjpGlobalWithdrawn(env), ...asjpWithdrawnOf(scored)]) };

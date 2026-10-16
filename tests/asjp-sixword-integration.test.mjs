@@ -260,6 +260,11 @@ test('review L5/L6: the validator refuses free-text reasons, duplicate holders a
   fs.copyFileSync(path.join(tokensDir, 'tokens.bin'), path.join(other, 'tokens.bin'));
   fs.writeFileSync(path.join(other, 'index.json'), '{}');
   await assert.rejects(openSixwordOverlapSession({ indexDir, reader, generationId: built.generationId, logicalManifestSha256: built.logicalManifestSha256, wordDf, laneTokensDir: other }), /INDEX_TOKEN_STORE_MISMATCH/);
+  // final review L-A: a byte-identical copy elsewhere is still refused — the index opens only the directory it was built
+  // from, and only when that is the caller's (validated) laneTokensDir
+  const copy = path.join(scratch, 'copy-tokens'); fs.mkdirSync(copy, { recursive: true });
+  for (const f of fs.readdirSync(tokensDir)) fs.copyFileSync(path.join(tokensDir, f), path.join(copy, f));
+  await assert.rejects(openSixwordOverlapSession({ indexDir, reader, generationId: built.generationId, logicalManifestSha256: built.logicalManifestSha256, wordDf, laneTokensDir: copy }), /INDEX_TOKEN_STORE_MISMATCH/);
   const ok = await openSixwordOverlapSession({ indexDir, reader, generationId: built.generationId, logicalManifestSha256: built.logicalManifestSha256, wordDf, laneTokensDir: tokensDir });
   assert.ok(ok.identities.length > 0); ok.index.close();
 });

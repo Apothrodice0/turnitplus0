@@ -428,7 +428,7 @@ export function asjpServiceConfigFromEnv(env: Record<string, string | undefined>
   };
   if (!env.ASJP_GENERATION_CONFIG) throw new Error("ASJP_GENERATION_CONFIG is required");
   // a leading BOM is ignored: Windows PowerShell 5.1 `Set-Content -Encoding utf8` (198-pc-preview-start.ps1) writes one
-  const generation = JSON.parse(readFileSync(env.ASJP_GENERATION_CONFIG, "utf8").replace(/^﻿/, "")) as AsjpWorkerConfig;
+  const generation = JSON.parse(readFileSync(env.ASJP_GENERATION_CONFIG, "utf8").replace(/^\uFEFF/, "")) as AsjpWorkerConfig;
   generation.features = {
     numericTables: env.ASJP_NUMERIC_TABLES_ENABLED === "true",
     shortSignal: env.ASJP_SHORT_SIGNAL_ENABLED === "true" && env.ASJP_WORD_DF_PATH ? { wordDfPath: env.ASJP_WORD_DF_PATH } : null,

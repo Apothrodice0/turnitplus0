@@ -286,6 +286,9 @@ const fstatBytes = (file: string) => { const f = openSync(file, "r"); try { retu
  * checkpoints are in memory: ~35 MB for the full corpus). Token text comes from the pinned token store.
  *   tombstones   docIds withdrawn after the build (takedown): their postings are dropped at lookup, before any result
  */
+/** The caller's validated token store is not the one the index was built from (final review L-A). */
+export class SixwordTokenDirMismatch extends Error { constructor() { super("the index was built from another token-store directory"); } }
+
 export class SixwordIndex {
   readonly docs: SixwordDocs;
   private readonly bases: Uint32Array;
@@ -308,12 +311,17 @@ export class SixwordIndex {
    * Opens an index; refuses one built under another format or tokenization, or whose token store changed (size, index
    * digest; `verifyTokensDigest` also re-hashes all of tokens.bin, ~1 s per GB).
    */
-  static open(dir: string, options: { verifyTokensDigest?: boolean; verifyFiles?: boolean } = {}): SixwordIndex {
+  static open(dir: string, options: { verifyTokensDigest?: boolean; verifyFiles?: boolean; tokensDir?: string } = {}): SixwordIndex {
     const identity = JSON.parse(readFileSync(path.join(dir, "identity.json"), "utf8")) as SixwordIdentity;
     if (identity.format !== ASJP_SIXWORD_INDEX_FORMAT || identity.n !== SIXWORD_N || identity.bucketBits !== SIXWORD_BUCKET_BITS || identity.checkpoint !== SIXWORD_CHECKPOINT || identity.hash !== HASH_ID) throw new Error(`six-word index ${dir} has another format or parameters`);
     const expected = laneTokensIdentity(2);
     if (identity.laneTokens.probeSha256 !== expected.probeSha256 || identity.laneTokens.engineProbeSha256 !== expected.engineProbeSha256) throw new Error(`six-word index ${dir} was built under another tokenization`);
-    const tokensDir = identity.laneTokens.dir;
+    // final review L-A: a caller that validated a token store (the service's generation laneTokensDir, inside its allowed
+    // roots) passes it as tokensDir; the index must have been built from exactly that directory, and only it is opened —
+    // never a path taken from identity.json alone (checked BEFORE any token-store file is opened)
+    const samePath = (a: string, b: string) => { const x = path.resolve(a), y = path.resolve(b); return process.platform === "win32" ? x.toLowerCase() === y.toLowerCase() : x === y; };
+    if (options.tokensDir !== undefined && !samePath(options.tokensDir, identity.laneTokens.dir)) throw new SixwordTokenDirMismatch();
+    const tokensDir = options.tokensDir ?? identity.laneTokens.dir;
     const tokensBin = path.join(tokensDir, "tokens.bin");
     const tokensFd = openSync(tokensBin, "r");
     if (fstatSync(tokensFd).size !== identity.laneTokens.tokensBinBytes) { closeSync(tokensFd); throw new Error("token store tokens.bin changed size since the build"); }

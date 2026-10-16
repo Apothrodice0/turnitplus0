@@ -62,7 +62,8 @@ export async function applySixwordMigration(client: Client): Promise<void> {
 async function requireStorage(client: Client, env: Record<string, string | undefined>): Promise<void> {
   const problem = await sixwordSchemaProblem(client);
   if (!problem) return;
-  if (problem === "TABLE_MISSING" && env.ASJP_SIXWORD_SELF_PROVISION === "true" && env.VERCEL_ENV === undefined) { await applySixwordMigration(client); return; }
+  // final review L-C: local experiments only — never on Vercel and never on a remote database (a local run pointed at Turso)
+  if (problem === "TABLE_MISSING" && env.ASJP_SIXWORD_SELF_PROVISION === "true" && env.VERCEL_ENV === undefined && client.protocol === "file") { await applySixwordMigration(client); return; }
   throw new SixwordStorageNotMigrated(problem);
 }
 

@@ -1,5 +1,5 @@
 import { SIXWORD_N, type SixwordIndex } from "./asjp-sixword-index";
-import type { SixwordFindResult, SixwordRun } from "./asjp-sixword-match";
+import { SixwordBudgetExceeded, type SixwordFindResult, type SixwordRun } from "./asjp-sixword-match";
 import { repetitionForm, structuralForm, legalForm, religiousForm } from "./asjp-academic-lane";
 
 /**
@@ -54,8 +54,11 @@ export type WordDf = { documents: number; df: Record<string, number> };
 
 /** All matches of one manuscript (sorted by s, then e). `original` / `spans` give the manuscript text for form tests. */
 export function sixwordMatches(index: SixwordIndex, tokens: readonly string[], found: SixwordFindResult, options: {
-  original: string; spans: ReadonlyArray<{ start: number; end: number }>; wordDf: WordDf;
+  original: string; spans: ReadonlyArray<{ start: number; end: number }>; wordDf: WordDf; deadlineAt?: number;
 }): SixwordMatch[] {
+  // final review L-B: with a deadline, stop between matches (checked every 32) with the finder's own budget error
+  let checked = 0;
+  const overDeadline = () => options.deadlineAt !== undefined && (checked++ & 31) === 0 && performance.now() > options.deadlineAt;
   const byOrd = new Map<number, SixwordRun[]>();
   for (const r of found.runs) { const l = byOrd.get(r.ord); if (l) l.push(r); else byOrd.set(r.ord, [r]); }
   const intervals = new Map<string, [number, number]>();
@@ -65,6 +68,7 @@ export function sixwordMatches(index: SixwordIndex, tokens: readonly string[], f
   const gap = (left: number, right: number) => options.original.slice(left >= 0 ? options.spans[left]?.end ?? 0 : 0, right < options.spans.length ? options.spans[right]?.start ?? options.original.length : options.original.length);
   const matches: SixwordMatch[] = [];
   for (const [s, e] of intervals.values()) {
+    if (overDeadline()) throw new SixwordBudgetExceeded("TIME_BUDGET", {});
     // candidates: the holders of the match's least-held gram (every holder of the sequence holds every gram of it)
     let g = s, best = Infinity;
     for (let i = s; i <= e - SIXWORD_N + 1; i += 1) if (found.gramDocs[i] && found.gramHolders[i] < best) { best = found.gramHolders[i]; g = i; }

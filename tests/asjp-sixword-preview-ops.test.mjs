@@ -41,6 +41,10 @@ test('no run-time schema: a write is refused until the migration is applied; sel
   await assert.rejects(writeSixwordRecord(client, { deviceKey: 'd', reportId: 'r' }, record, {}), (e) => e instanceof SixwordStorageNotMigrated && e.problem === 'TABLE_MISSING');
   await assert.rejects(writeSixwordRecord(client, { deviceKey: 'd', reportId: 'r' }, record, { ASJP_SIXWORD_SELF_PROVISION: 'true', VERCEL_ENV: 'preview' }), SixwordStorageNotMigrated);
   assert.equal(await sixwordSchemaProblem(client), 'TABLE_MISSING', 'nothing was created');
+  // final review L-C: never self-provision a remote database (a local run pointed at Turso)
+  const remoteLike = new Proxy(client, { get: (t, k) => (k === 'protocol' ? 'https' : typeof t[k] === 'function' ? t[k].bind(t) : t[k]) });
+  await assert.rejects(writeSixwordRecord(remoteLike, { deviceKey: 'd', reportId: 'r' }, record, { ASJP_SIXWORD_SELF_PROVISION: 'true' }), SixwordStorageNotMigrated);
+  assert.equal(await sixwordSchemaProblem(client), 'TABLE_MISSING', 'nothing was created remotely');
   await writeSixwordRecord(client, { deviceKey: 'd', reportId: 'r' }, record, { ASJP_SIXWORD_SELF_PROVISION: 'true' });
   assert.equal(await sixwordSchemaProblem(client), null, 'local self-provisioning creates exactly the migrated schema');
   await client.execute(`DROP TRIGGER trg_${ASJP_SIXWORD_TABLE}_report_deleted`);
@@ -111,6 +115,11 @@ test('preflight (read-only): Vercel listing rules V1–V4 offline; PC service ru
   fs.writeFileSync(path.join(scratch, 'generation-other.json'), JSON.stringify({ generationId: 'gen-other', logicalManifestSha256: 'f'.repeat(64), laneTokensDir: tokensDir }));
   assert.match(runPf(['--service-env', envFile({}), '--generation', path.join(scratch, 'generation-other.json')]).out, /FAIL  S2/);
   assert.match(runPf(['--service-env', envFile({ ASJP_ALLOWED_ROOTS: 'D:/nowhere' }), '--generation', genFile]).out, /FAIL  S4/);
+  // final review L-A: a byte-identical copy of the token store in another directory fails S3 (the service would refuse it)
+  const copyDir = path.join(scratch, 'tokens-copy'); fs.mkdirSync(copyDir, { recursive: true });
+  for (const f of fs.readdirSync(tokensDir)) fs.copyFileSync(path.join(tokensDir, f), path.join(copyDir, f));
+  fs.writeFileSync(path.join(scratch, 'generation-copy.json'), JSON.stringify({ generationId: 'gen-pf', logicalManifestSha256: 'f'.repeat(64), laneTokensDir: copyDir }));
+  assert.match(runPf(['--service-env', envFile({}), '--generation', path.join(scratch, 'generation-copy.json')]).out, /FAIL  S3/);
   // files written with a BOM (Windows PowerShell 5.1 `Set-Content -Encoding utf8`, as 198-pc-preview-start.ps1 does)
   const bom = (f) => { const b = path.join(scratch, `bom-${path.basename(f)}`); fs.writeFileSync(b, `\uFEFF${fs.readFileSync(f, 'utf8')}`); return b; };
   const bomRun = runPf(['--service-env', bom(envFile({})), '--generation', bom(genFile)]);

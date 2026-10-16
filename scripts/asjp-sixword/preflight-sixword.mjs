@@ -13,7 +13,7 @@
 // B) The PC service (where the index lives): --service-env <file> --generation <generation.json>
 //      S1 if ASJP_SIXWORD_OVERLAP_ENABLED=true: ASJP_SIXWORD_INDEX_DIR and ASJP_WORD_DF_PATH are set and exist
 //      S2 the index identity names the generation's generationId and logicalManifestSha256
-//      S3 the index was built from the generation's laneTokensDir (index.json digest and tokens.bin size)
+//      S3 the index was built from the generation's laneTokensDir: the same directory, index.json digest, tokens.bin size
 //      S4 every path lies inside ASJP_ALLOWED_ROOTS
 // usage: node scripts/asjp-sixword/preflight-sixword.mjs [A options] [B options]   (exit 1 on any FAIL)
 import { readFileSync, existsSync, statSync } from "node:fs";
@@ -56,7 +56,7 @@ if (entries) {
 const serviceEnvFile = arg("--service-env");
 if (serviceEnvFile) {
   // both files may start with a BOM (Windows PowerShell 5.1 `Set-Content -Encoding utf8`, as 198 writes them)
-  const text = (file) => readFileSync(file, "utf8").replace(/^﻿/, "");
+  const text = (file) => readFileSync(file, "utf8").replace(/^\uFEFF/, "");
   const env = Object.fromEntries(text(serviceEnvFile).split(/\r?\n/).filter((l) => /^[A-Z0-9_]+=/.test(l)).map((l) => [l.slice(0, l.indexOf("=")), l.slice(l.indexOf("=") + 1).trim()]));
   const generation = JSON.parse(text(arg("--generation") ?? env.ASJP_GENERATION_CONFIG ?? ""));
   const roots = (env.ASJP_ALLOWED_ROOTS ?? "").split(";").filter(Boolean);
@@ -69,7 +69,9 @@ if (serviceEnvFile) {
     check("S2 index pinned to the service generation", identity?.generation?.generationId === generation.generationId && identity?.generation?.logicalManifestSha256 === generation.logicalManifestSha256);
     let sameStore = false;
     try { sameStore = createHash("sha256").update(readFileSync(path.join(generation.laneTokensDir, "index.json"))).digest("hex") === identity?.laneTokens?.indexJsonSha256 && statSync(path.join(generation.laneTokensDir, "tokens.bin")).size === identity?.laneTokens?.tokensBinBytes; } catch { sameStore = false; }
-    check("S3 index built from the generation's lane token store", sameStore);
+    // final review L-A: the SAME directory (the service opens only that one), not just equal content
+    const samePath = !!identity?.laneTokens?.dir && path.resolve(identity.laneTokens.dir).toLowerCase() === path.resolve(generation.laneTokensDir ?? "").toLowerCase();
+    check("S3 index built from the generation's lane token store (same directory, same content)", sameStore && samePath);
     check("S4 every path inside ASJP_ALLOWED_ROOTS", inside(dir) && inside(df) && inside(identity?.laneTokens?.dir) && inside(generation.laneTokensDir));
   }
 }

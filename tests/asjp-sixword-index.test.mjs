@@ -143,6 +143,10 @@ test('evidence: an ineligible holder (gate) is never scored; an all-eligible gat
   const text = `${inventedText(4245, 30)} ${tokensForScoringNormalization(docs[9].text, 2).slice(40, 57).join(' ')} ${inventedText(4246, 30)}`;
   const words = tokensForScoringNormalization(text, 2);
   const make = () => sixwordMatches(idx, words, findSixwordRuns(idx, words), { original: text, spans: tokenSpans(text, 2), wordDf: { documents: 40, df: {} } });
+  // final review L-B: the evidence step honours the deadline with the finder's own budget error (never runs on)
+  const { SixwordBudgetExceeded } = await import('../lib/asjp-sixword-match.ts');
+  assert.throws(() => sixwordMatches(idx, words, findSixwordRuns(idx, words), { original: text, spans: tokenSpans(text, 2), wordDf: { documents: 40, df: {} }, deadlineAt: performance.now() - 1 }), (e) => e instanceof SixwordBudgetExceeded && e.code === 'TIME_BUDGET');
+  assert.ok(sixwordMatches(idx, words, findSixwordRuns(idx, words), { original: text, spans: tokenSpans(text, 2), wordDf: { documents: 40, df: {} }, deadlineAt: performance.now() + 60_000 }).length > 0);
   const open = applyHolderGates(make(), () => ({ eligible: true, reason: null }));
   const unique = open.find((m) => m.s === 30);
   assert.equal(shortEligibility(unique, P15_STRICT).eligible, true);
