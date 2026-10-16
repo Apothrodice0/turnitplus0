@@ -38,9 +38,22 @@ export type SixwordFindResult = {
 
 export const SIXWORD_DEFAULT_CHAIN_CAP = 200_000;
 const MARGIN = 12;
+// BigInt constants (the project targets below ES2020: no BigInt literals)
+const N21 = BigInt(21), N43 = BigInt(43), ONE = BigInt(1);
 
-export function findSixwordRuns(index: SixwordIndex, tokens: readonly string[], options: { chainCap?: number } = {}): SixwordFindResult {
+/**
+ * Raised when an optional budget is exceeded (integration only; without a budget nothing is ever cut short). The search
+ * stops whole: a partial answer is never presented as complete.
+ */
+export class SixwordBudgetExceeded extends Error {
+  constructor(readonly code: "PAIRS_BUDGET" | "TIME_BUDGET", readonly detail: { pairs?: number; elapsedMs?: number }) { super(code); }
+}
+export type SixwordBudget = { maxPairs?: number; deadlineAt?: number };
+
+export function findSixwordRuns(index: SixwordIndex, tokens: readonly string[], options: { chainCap?: number; budget?: SixwordBudget } = {}): SixwordFindResult {
   const t0 = performance.now();
+  const budget = options.budget;
+  const overTime = () => budget?.deadlineAt !== undefined && performance.now() > budget.deadlineAt;
   const chainCap = options.chainCap ?? SIXWORD_DEFAULT_CHAIN_CAP;
   const { h1, h2 } = gramKeysOf(tokens);
   const m = h1.length;
@@ -69,11 +82,13 @@ export function findSixwordRuns(index: SixwordIndex, tokens: readonly string[], 
     for (const i of list) { gramPostings[i] = hits.length; gramHolders[i] = docs.length; gramDocs[i] = over ? null : docs; if (over) capped[i] = 1; }
     if (over) continue;
     const need = np + hits.length * list.length;
+    if (budget?.maxPairs !== undefined && need > budget.maxPairs) throw new SixwordBudgetExceeded("PAIRS_BUDGET", { pairs: need });
+    if (overTime()) throw new SixwordBudgetExceeded("TIME_BUDGET", { elapsedMs: performance.now() - t0 });
     if (need > pairs.length) { let size = pairs.length; while (size < need) size *= 2; const grown = new BigUint64Array(size); grown.set(pairs.subarray(0, np)); pairs = grown; }
     for (const i of list) {
       for (let x = 0; x < hits.length; x += 1) {
         const diag = posOf[x] - i + 0x200000;
-        pairs[np++] = (BigInt(ordOf[x]) << 43n) | (BigInt(diag) << 21n) | BigInt(i);
+        pairs[np++] = (BigInt(ordOf[x]) << N43) | (BigInt(diag) << N21) | BigInt(i);
       }
     }
   }
@@ -83,10 +98,10 @@ export function findSixwordRuns(index: SixwordIndex, tokens: readonly string[], 
   type Chain = { ord: number; diag: number; i0: number; i1: number };
   const chains: Chain[] = [];
   let cur: Chain | null = null;
-  const MASK21 = (1n << 21n) - 1n, MASK22 = (1n << 22n) - 1n;
+  const MASK21 = (ONE << N21) - ONE, MASK22 = (ONE << BigInt(22)) - ONE;
   for (let x = 0; x < np; x += 1) {
     const v = sorted[x];
-    const ord = Number(v >> 43n), diag = Number((v >> 21n) & MASK22) - 0x200000, i = Number(v & MASK21);
+    const ord = Number(v >> N43), diag = Number((v >> N21) & MASK22) - 0x200000, i = Number(v & MASK21);
     if (cur && cur.ord === ord && cur.diag === diag) {
       if (i === cur.i1 + 1) { cur.i1 = i; continue; }
       let bridge = i > cur.i1 + 1;
@@ -102,7 +117,9 @@ export function findSixwordRuns(index: SixwordIndex, tokens: readonly string[], 
   const seen = new Set<string>();
   const runs: SixwordRun[] = [];
   let split = 0, extended = 0;
-  for (const c of chains) {
+  for (let ci = 0; ci < chains.length; ci += 1) {
+    const c = chains[ci];
+    if (budget && (ci & 1023) === 0 && overTime()) throw new SixwordBudgetExceeded("TIME_BUDGET", { elapsedMs: performance.now() - t0 });
     const s0 = c.i0, e0 = c.i1 + SIXWORD_N - 1, p0 = s0 + c.diag;
     const from = Math.max(0, p0 - MARGIN), to = p0 + (e0 - s0) + 1 + MARGIN;
     const src = index.readTokens(c.ord, from, to);

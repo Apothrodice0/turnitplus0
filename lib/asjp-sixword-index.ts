@@ -35,6 +35,7 @@ export const SIXWORD_BUCKET_BITS = 22;
 export const SIXWORD_CHECKPOINT = 32;
 const HASH_ID = "fnv1a32+fmix32 x2 per token; murmur3-body x6 + fmix32 per gram (seeds 0x9747b28c, 0x5bd1e995)";
 
+const N32 = BigInt(32), LOW32 = BigInt(0xffffffff);
 const fmix32 = (h: number) => {
   h ^= h >>> 16; h = Math.imul(h, 0x85ebca6b);
   h ^= h >>> 13; h = Math.imul(h, 0xc2b2ae35);
@@ -130,7 +131,7 @@ export async function buildSixwordIndex(options: {
     throw new Error("lane-token store was built under another tokenization than this code's normalization 2");
   }
   const indexJsonText = readFileSync(path.join(options.laneTokensDir, "index.json"));
-  const storeIndex = JSON.parse(indexJsonText.toString("utf8")) as Record<string, StoreEntry>;
+  const storeIndex = JSON.parse(indexJsonText.toString()) as Record<string, StoreEntry>;
   const entries = Object.entries(storeIndex).sort((x, y) => x[1][0] - y[1][0]);
   const tokensBin = path.join(options.laneTokensDir, "tokens.bin");
   const fd = openSync(tokensBin, "r");
@@ -208,9 +209,9 @@ export async function buildSixwordIndex(options: {
           for (let x = s + 1; x < e; x += 1) { const f = fp[x], g = pos[x]; let y = x - 1; while (y >= s && fp[y] > f) { fp[y + 1] = fp[y]; pos[y + 1] = pos[y]; y -= 1; } fp[y + 1] = f; pos[y + 1] = g; }
         } else {
           const keys = new BigUint64Array(e - s);
-          for (let x = s; x < e; x += 1) keys[x - s] = (BigInt(fp[x]) << 32n) | BigInt(pos[x]);
+          for (let x = s; x < e; x += 1) keys[x - s] = (BigInt(fp[x]) << N32) | BigInt(pos[x]);
           keys.sort();
-          for (let x = s; x < e; x += 1) { const v = keys[x - s]; fp[x] = Number(v >> 32n); pos[x] = Number(v & 0xffffffffn); }
+          for (let x = s; x < e; x += 1) { const v = keys[x - s]; fp[x] = Number(v >> N32); pos[x] = Number(v & LOW32); }
         }
       }
       // statistics per key (one key = one gram, barring a 54-bit collision)

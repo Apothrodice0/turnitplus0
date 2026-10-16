@@ -6,6 +6,9 @@ import { LocalDirectoryObjectStore } from "../../lib/corpus-engine/storage";
 import { asjpPublicationEvidenceOf, asjpSourceCards, openAsjpLaneSession, runAsjpAcademicLane, ASJP_ACADEMIC_LANE_VERSION, type AsjpLaneSource, type AsjpMatchingCorrections } from "../../lib/asjp-academic-lane";
 import { AsjpCatalogSource } from "../../lib/asjp-catalog-snapshot";
 import { asjpShortPassageSignal, loadWordDf, type WordDf } from "../../lib/asjp-short-passages";
+import { docIdFromDecimal } from "../../lib/corpus-engine/ids";
+import { computeSixwordOverlap, openSixwordOverlapSession, SixwordOverlapUnavailable, type SixwordOverlapSession } from "../../lib/asjp-sixword-overlap";
+import { unavailableSixwordOverlap } from "../../lib/asjp-sixword-contract";
 
 export type AsjpWorkerConfig = {
   root: string; generationId: string; logicalManifestSha256: string; catalogPath: string; catalogImmutable: boolean;
@@ -16,7 +19,7 @@ export type AsjpWorkerConfig = {
    *   shortSignal    the UNSCORED 25–59-word research signal (ASJP_SHORT_SIGNAL_ENABLED; needs the word-df table)
    * Both default off. The answer reports which were on, so a report pins them.
    */
-  features?: { numericTables?: boolean; shortSignal?: { wordDfPath: string } | null };
+  features?: { numericTables?: boolean; shortSignal?: { wordDfPath: string } | null; sixwordOverlap?: { indexDir: string; wordDfPath: string } | null };
 };
 
 /** The digest of an answer: what a golden query must reproduce exactly. */
@@ -37,11 +40,39 @@ async function main() {
   const catalog = await AsjpCatalogSource.open(config.catalogPath, { immutable: config.catalogImmutable });
   const wordDf: WordDf | null = shortSignal ? loadWordDf(config.features!.shortSignal!.wordDfPath) : null;
   const corrections: AsjpMatchingCorrections = { ...config.corrections, numericTables };
+  // six-word overlap (informational, contract asjp-sixword-overlap-contract-v1): only when the service configured it;
+  // a session that cannot open (missing index, other generation) leaves the lane untouched and answers UNAVAILABLE
+  const sixwordConfig = config.features?.sixwordOverlap ?? null;
+  let sixword: SixwordOverlapSession | null = null, sixwordUnavailable: string | null = null;
+  if (sixwordConfig) {
+    try { sixword = await openSixwordOverlapSession({ indexDir: sixwordConfig.indexDir, reader: session.reader, generationId: config.generationId, logicalManifestSha256: config.logicalManifestSha256, wordDf: wordDf && config.features?.shortSignal?.wordDfPath === sixwordConfig.wordDfPath ? wordDf : loadWordDf(sixwordConfig.wordDfPath) }); }
+    catch (error) { sixwordUnavailable = error instanceof SixwordOverlapUnavailable ? error.code : "SIXWORD_OPEN_FAILED"; }
+  }
   const features = { numericTables, shortSignal };
+  // reported apart from `features` so /match answers stay exactly as before whatever this feature's state
+  const sixwordStatus = sixwordConfig ? (sixword ? "READY" : sixwordUnavailable) : "DISABLED";
   const send = (m: unknown) => process.send?.(m);
-  send({ type: "ready", pid: process.pid, generationId: config.generationId, laneVersion: ASJP_ACADEMIC_LANE_VERSION, catalogEntries: catalog.current.entries.size, catalogLoadedAt: catalog.current.loadedAt, catalogDigest: catalog.current.digest, features });
+  send({ type: "ready", pid: process.pid, generationId: config.generationId, laneVersion: ASJP_ACADEMIC_LANE_VERSION, catalogEntries: catalog.current.entries.size, catalogLoadedAt: catalog.current.loadedAt, catalogDigest: catalog.current.digest, features, sixword: sixwordStatus });
   process.on("message", async (m: any) => {
     if (m?.type === "refresh-catalog") { const ok = await catalog.refresh(); send({ type: "refreshed", id: m.id, ok, error: catalog.lastRefreshError, loadedAt: catalog.current.loadedAt, catalogDigest: catalog.current.digest }); return; }
+    // INFORMATIONAL six-word overlap: only on an explicit /sixword request, never inside /match; the lane is not run,
+    // the caller supplies the scored lane's credited positions; withdrawn articles (B3) are gated exactly as in /match
+    if (m?.type === "sixword") {
+      const t0 = performance.now();
+      try {
+        const snapshot = catalog.current;
+        const excluded = new Set<string>(Array.isArray(m.excludeSourceIds) ? m.excludeSourceIds : []);
+        const lookup = (articleId: string) => { const e = snapshot.entries.get(articleId) ?? null; return e && excluded.has(`asjp:${articleId}`) ? { ...e, withdrawn: true } : e; };
+        const credited = Array.isArray(m.creditedPositions) ? m.creditedPositions.filter((q: unknown) => Number.isInteger(q) && (q as number) >= 0) : [];
+        const block = !sixword ? unavailableSixwordOverlap("UNAVAILABLE", sixwordConfig ? (sixwordUnavailable ?? "SIXWORD_NOT_READY") : "SIXWORD_DISABLED")
+          : await computeSixwordOverlap(sixword, { text: m.text, referenceDate: m.referenceDate ?? null, licencePolicy: config.licencePolicy, catalog: lookup, catalogDigest: snapshot.digest, creditedPositions: credited, fetchText: async (docId) => { const f = await session.reader.fetchText(docIdFromDecimal(docId)); return f.state === "OK" ? f.text : null; } });
+        send({ type: "result", id: m.id, ...block, workerMs: Math.round(performance.now() - t0), rssMb: Math.round(process.memoryUsage().rss / 1048576) });
+      } catch {
+        // no-leak: a code only
+        send({ type: "result", id: m.id, ...unavailableSixwordOverlap("UNAVAILABLE", "SIXWORD_EXCEPTION") });
+      }
+      return;
+    }
     if (m?.type !== "match") return;
     const t0 = performance.now();
     try {
