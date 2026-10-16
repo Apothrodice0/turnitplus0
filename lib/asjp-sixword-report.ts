@@ -10,7 +10,7 @@ import {
 import { ASJP_RESPONSE_MAX_BYTES, asjpRequestMac, asjpResponseMac, macEquals, sha256Hex } from "./asjp-service-protocol";
 import { ASJP_SIXWORD_CONTRACT_VERSION, ASJP_SIXWORD_OVERLAP_LABEL } from "./asjp-sixword-contract";
 import { asjpSixwordOverlapDisplayEnabled, retractSixwordRecord, signSixwordRecord, sixwordAdminView, sixwordRecordFromAnswer, trustedSixwordRecord, type AsjpSixwordRecord } from "./report-asjp-sixword-evidence";
-import { readSixwordRecord, writeSixwordRecord } from "./asjp-sixword-report-store";
+import { readSixwordRecord, SixwordStorageNotMigrated, writeSixwordRecord } from "./asjp-sixword-report-store";
 
 /**
  * Developer-only six-word overlap for a SAVED report (experiment; ASJP_SIXWORD_OVERLAP_DISPLAY_ENABLED, default off).
@@ -104,6 +104,12 @@ export async function requestSixwordOverlap(config: AsjpReportClientConfig, body
   } finally { clearTimeout(timer); }
 }
 
+/** A write that the storage refuses (the Preview migration not applied) becomes an outcome, never an error or a partial write. */
+async function storeOrRefuse(client: Client, key: SixwordReportKey, record: Parameters<typeof writeSixwordRecord>[2], env: Record<string, string | undefined>) {
+  try { await writeSixwordRecord(client, key, record, env); return null; }
+  catch (error) { if (error instanceof SixwordStorageNotMigrated) return { outcome: "STORAGE_NOT_MIGRATED" as const, reason: error.problem }; throw error; }
+}
+
 export type SixwordDeps = {
   config?: AsjpReportClientConfig | null;
   fetchSixword?: (config: AsjpReportClientConfig, body: { text: string; referenceDate: string | null; creditedPositions: number[]; excludeSourceIds: string[] }) => Promise<unknown>;
@@ -141,7 +147,8 @@ export async function runSixwordForReport(client: Client, key: SixwordReportKey,
     const previous = trustedSixwordRecord(await readSixwordRecord(client, key), loaded.binding, keys);
     if (previous && previous.status === "ACCEPTED") return { outcome: "NOT_STORED_PREVIOUS_KEPT" as const, reason: record.reason, attempt: viewOf(record, loaded, env, keys, config), view: viewOf(previous, loaded, env, keys, config) };
   }
-  await writeSixwordRecord(client, key, record);
+  const stored = await storeOrRefuse(client, key, record, env);
+  if (stored) return stored;
   return { outcome: "STORED" as const, view: viewOf(record, loaded, env, keys, config) };
 }
 
@@ -156,7 +163,8 @@ export async function retractSixwordForReport(client: Client, key: SixwordReport
   const current = trustedSixwordRecord(await readSixwordRecord(client, key), loaded.binding, keys);
   if (!current) return { outcome: "NO_RECORD" as const };
   const record = signSixwordRecord(retractSixwordRecord(current, reason.slice(0, 64)), loaded.binding, keys);
-  await writeSixwordRecord(client, key, record);
+  const stored = await storeOrRefuse(client, key, record, env);
+  if (stored) return stored;
   return { outcome: "RETRACTED" as const, view: viewOf(record, loaded, env, keys, config) };
 }
 

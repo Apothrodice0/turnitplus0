@@ -25,6 +25,9 @@ for (const s of ['', '-wal', '-shm']) { try { fs.unlinkSync(`${dbFile}${s}`); } 
 process.env.TURSO_DATABASE_URL = `file:${dbFile}`;
 const client = createClient({ url: `file:${dbFile}` });
 await applyMigrationsLibsql(client, path.join(repo, 'drizzle'));
+// the formal Preview-only migration (the app never creates schema at run time)
+const sixStore = await import('../lib/asjp-sixword-report-store.ts');
+await sixStore.applySixwordMigration(client);
 test.after(() => { client.close(); server.close(); if (process.env.KEEP_DB) return; for (const s of ['', '-wal', '-shm']) { try { fs.unlinkSync(`${dbFile}${s}`); } catch { /* none */ } } });
 
 const G1 = 'gen-p7-fixture-1', M1 = 'b'.repeat(64);
@@ -240,4 +243,56 @@ test('review I7/I9: a normalization-1 report is refused with a clear code; the e
   process.env.VERCEL_ENV = 'production';
   try { assert.equal((await call('GET', { id: 'rep-b', deviceKey: 'dev-b', token: admin.token })).status, 404); }
   finally { delete process.env.VERCEL_ENV; }
+});
+
+test('storage not migrated: Run stores nothing and says so; re-applying the migration restores it', async () => {
+  await sixStore.dropSixwordStorage(client);
+  try {
+    stub.mode = 'complete';
+    const r = (await call('POST', { id: 'rep-b', deviceKey: 'dev-b', token: admin.token })).body;
+    assert.deepEqual([r.outcome, r.reason], ['STORAGE_NOT_MIGRATED', 'TABLE_MISSING']);
+    assert.equal(await sixStore.sixwordSchemaProblem(client), 'TABLE_MISSING', 'nothing created at run time');
+  } finally { await sixStore.applySixwordMigration(client); }
+  assert.equal((await call('POST', { id: 'rep-b', deviceKey: 'dev-b', token: admin.token })).body.outcome, 'STORED');
+});
+
+test('key rotation: a record signed with the retired key still verifies via the verify-only keyring; without it, never shown', async () => {
+  stub.mode = 'complete';
+  await call('POST', { id: 'rep-b', deviceKey: 'dev-b', token: admin.token });
+  const NEW = 'b7c9d1e3f5a7b9c1d3e5f7a9b1c3d5e7f9a1b3c5';
+  process.env.ASJP_EVIDENCE_SIGNING_KEY = NEW; process.env.ASJP_EVIDENCE_SIGNING_KEY_ID = 'k2';
+  try {
+    process.env.ASJP_EVIDENCE_VERIFY_KEYS = JSON.stringify({ k1: KEY });
+    assert.equal((await call('GET', { id: 'rep-b', deviceKey: 'dev-b', token: admin.token })).body.view.outcome, 'COMPLETE', 'k1 is verify-only after the rotation');
+    delete process.env.ASJP_EVIDENCE_VERIFY_KEYS;
+    assert.equal((await call('GET', { id: 'rep-b', deviceKey: 'dev-b', token: admin.token })).body.view.outcome, 'UNTRUSTED_RECORD', 'the retired key is gone: never shown');
+    process.env.ASJP_EVIDENCE_VERIFY_KEYS = JSON.stringify({ k1: KEY });
+    await call('POST', { id: 'rep-b', deviceKey: 'dev-b', token: admin.token });
+    const stored = JSON.parse((await recordRow('dev-b', 'rep-b')).record_json);
+    assert.equal(stored.keyId, 'k2', 'new records are signed with the current key');
+  } finally { process.env.ASJP_EVIDENCE_SIGNING_KEY = KEY; delete process.env.ASJP_EVIDENCE_SIGNING_KEY_ID; delete process.env.ASJP_EVIDENCE_VERIFY_KEYS; }
+});
+
+test('signed-response security: with request signing on, an endpoint that cannot attest the key gets no manuscript; nothing replaces a good result', async () => {
+  stub.mode = 'complete';
+  await call('POST', { id: 'rep-b', deviceKey: 'dev-b', token: admin.token });
+  const before = stub.last;
+  process.env.ASJP_SERVICE_REQUEST_SIGNING_KEY = 'c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0';
+  try {
+    stub.last = null;
+    const r = (await call('POST', { id: 'rep-b', deviceKey: 'dev-b', token: admin.token })).body;
+    assert.equal(r.outcome, 'NOT_STORED_PREVIOUS_KEPT'); assert.equal(r.attempt.reason, 'UNAVAILABLE_SERVICE_NOT_AUTHENTICATED');
+    assert.equal(stub.last?.text, undefined, 'the manuscript was never sent (the stub only saw the /attest probe)');
+  } finally { delete process.env.ASJP_SERVICE_REQUEST_SIGNING_KEY; stub.last = before; }
+});
+
+test('withdrawn sources: the deployment takedown list is sent to the service and redacted from the stored view', async () => {
+  stub.mode = 'complete';
+  process.env.ASJP_WITHDRAWN_SOURCE_IDS = 'asjp:501';
+  try {
+    const view = (await call('POST', { id: 'rep-b', deviceKey: 'dev-b', token: admin.token })).body.view;
+    assert.deepEqual(stub.last.excludeSourceIds, ['asjp:501']);
+    assert.ok(!view.items.some((i) => i.holders.some((h) => h.sourceId === 'asjp:501')), 'never shown as a holder');
+    assert.equal(view.items.length, 1, 'the match whose only holder was withdrawn is removed');
+  } finally { delete process.env.ASJP_WITHDRAWN_SOURCE_IDS; }
 });
