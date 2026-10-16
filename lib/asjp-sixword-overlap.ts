@@ -1,4 +1,7 @@
+import { readFileSync, statSync } from "node:fs";
+import path from "node:path";
 import { tokenSpans, tokensForScoringNormalization } from "./similarity-core";
+import { sha256Hex } from "./asjp-service-protocol";
 import { docIdFromDecimal } from "./corpus-engine/ids";
 import type { CorpusGenerationReader } from "./corpus-engine/reader";
 import { ASJP_PROVIDER, publicationTimingOf, type AsjpCatalogEntry, type AsjpLicencePolicy } from "./asjp-academic-lane";
@@ -25,7 +28,7 @@ export type SixwordOverlapSession = {
   generationId: string; logicalManifestSha256: string; openMs: number;
 };
 
-export async function openSixwordOverlapSession(options: { indexDir: string; reader: CorpusGenerationReader; generationId: string; logicalManifestSha256: string; wordDf: WordDf }): Promise<SixwordOverlapSession> {
+export async function openSixwordOverlapSession(options: { indexDir: string; reader: CorpusGenerationReader; generationId: string; logicalManifestSha256: string; wordDf: WordDf; laneTokensDir?: string | null }): Promise<SixwordOverlapSession> {
   const t0 = performance.now();
   let index: SixwordIndex;
   try { index = SixwordIndex.open(options.indexDir); } catch { throw new SixwordOverlapUnavailable("INDEX_UNAVAILABLE"); }
@@ -33,11 +36,25 @@ export async function openSixwordOverlapSession(options: { indexDir: string; rea
   if (pin.generationId !== options.generationId || pin.logicalManifestSha256 !== options.logicalManifestSha256 || options.reader.identity().generationId !== options.generationId) {
     index.close(); throw new SixwordOverlapUnavailable("GENERATION_MISMATCH");
   }
+  // review L6: the index must be built from the SAME token store the lane serves (not a self-declared label): the
+  // store's index.json digest and tokens.bin size must equal the ones recorded at build time
+  if (options.laneTokensDir) {
+    let same = false;
+    try {
+      same = sha256Hex(readFileSync(path.join(options.laneTokensDir, "index.json"))) === index.identity.laneTokens.indexJsonSha256
+        && statSync(path.join(options.laneTokensDir, "tokens.bin")).size === index.identity.laneTokens.tokensBinBytes;
+    } catch { same = false; }
+    if (!same) { index.close(); throw new SixwordOverlapUnavailable("INDEX_TOKEN_STORE_MISMATCH"); }
+  }
   const identities: SixwordOverlapSession["identities"] = [];
+  let missing = 0;
   for (const docId of index.docs.docIds) {
     const md = await options.reader.fetchMetadata(docIdFromDecimal(docId));
+    if (md.state !== "OK") missing += 1;
     identities.push(md.state === "OK" ? asjpIdentityOfRecord(md.metadata as Record<string, unknown>, (md as { laterAliases?: unknown[] }).laterAliases ?? []) : null);
   }
+  // every indexed document must exist in the pinned generation (an index of another corpus never opens as READY)
+  if (missing > 0) { index.close(); throw new SixwordOverlapUnavailable("INDEX_NOT_OF_GENERATION"); }
   return { index, identities, wordDf: options.wordDf, generationId: options.generationId, logicalManifestSha256: options.logicalManifestSha256, openMs: Math.round(performance.now() - t0) };
 }
 

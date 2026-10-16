@@ -45,8 +45,12 @@ async function main() {
   const sixwordConfig = config.features?.sixwordOverlap ?? null;
   let sixword: SixwordOverlapSession | null = null, sixwordUnavailable: string | null = null;
   if (sixwordConfig) {
-    try { sixword = await openSixwordOverlapSession({ indexDir: sixwordConfig.indexDir, reader: session.reader, generationId: config.generationId, logicalManifestSha256: config.logicalManifestSha256, wordDf: wordDf && config.features?.shortSignal?.wordDfPath === sixwordConfig.wordDfPath ? wordDf : loadWordDf(sixwordConfig.wordDfPath) }); }
-    catch (error) { sixwordUnavailable = error instanceof SixwordOverlapUnavailable ? error.code : "SIXWORD_OPEN_FAILED"; }
+    // the index must be built from THIS lane's token store (review L6): without one configured the feature stays off
+    if (!config.laneTokensDir) sixwordUnavailable = "NO_LANE_TOKEN_STORE";
+    else {
+      try { sixword = await openSixwordOverlapSession({ indexDir: sixwordConfig.indexDir, reader: session.reader, generationId: config.generationId, logicalManifestSha256: config.logicalManifestSha256, laneTokensDir: config.laneTokensDir, wordDf: wordDf && config.features?.shortSignal?.wordDfPath === sixwordConfig.wordDfPath ? wordDf : loadWordDf(sixwordConfig.wordDfPath) }); }
+      catch (error) { sixwordUnavailable = error instanceof SixwordOverlapUnavailable ? error.code : "SIXWORD_OPEN_FAILED"; }
+    }
   }
   const features = { numericTables, shortSignal };
   // reported apart from `features` so /match answers stay exactly as before whatever this feature's state

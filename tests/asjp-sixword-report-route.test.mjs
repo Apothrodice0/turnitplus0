@@ -53,6 +53,7 @@ const server = http.createServer((req, res) => {
     if (stub.mode === 'budget') return send(200, { ...block(n), state: 'INCOMPLETE_BUDGET', reason: 'TIME_BUDGET', summary: null, matches: [], sources: {}, timings: null });
     if (stub.mode === 'busy') return send(503, { state: 'BUSY', failureCode: 'ASJP_BUSY' });
     if (stub.mode === 'forged') return send(200, { ...block(n), matches: block(n).matches.map((m) => ({ ...m, scored: true })) });
+    if (stub.mode === 'unlisted') return send(200, { ...block(n), matches: [], sources: {} });
     if (stub.mode === 'gen2') return send(200, { ...block(n), pins: { ...block(n).pins, generationId: 'gen-other' } });
     send(500, { error: 'internal error' });
   });
@@ -70,7 +71,7 @@ async function user(role) {
 }
 const WORDS = Array.from({ length: 400 }, (_, k) => `w${k.toString(36)}x`);
 const TEXT = WORDS.join(' ');
-async function seedReport({ deviceKey, reportId, owner, withAsjp = true }) {
+async function seedReport({ deviceKey, reportId, owner, withAsjp = true, createdAt = '2025-03-14T10:00:00.000Z' }) {
   const binding = { reportDeviceKey: deviceKey, reportId, accountId: owner };
   const card = { kind: 'asjp_publication', sourceId: 'asjp:777', title: 'Scored article', journal: 'J', publicationDate: '2020-01-01', doi: null, url: 'https://asjp.cerist.dz/en/article/777', authors: ['A'], license: 'CC BY 4.0', licenceStatus: 'PERMITTED', relationship: 'INDEPENDENT_PUBLICATION', attribution: 'PUBLISHED_SOURCE', scored: true, matchedWordCount: 61, admittedBy: 'VERIFIER', passages: [{ submittedWordStart: 100, submittedWordEnd: 160, sourceWordStart: 1, sourceWordEnd: 61, sourceCharStart: 10, sourceCharEnd: 500 }], labels: [] };
   const answer = { state: 'COMPLETE', failureCode: null, wordCount: 400, creditedPositions: [], asjpPublicationEvidence: [{ sourceId: 'asjp:777', matchedPassages: [{ submittedWordStart: 100, submittedWordEnd: 160, matchedWordCount: 61 }] }], cards: [card], generationId: G1, logicalManifestSha256: M1, laneVersion: 'asjp-academic-lane-v5', licencePolicy: 'local-research-all', normalization: 2, catalogDigest: 'e'.repeat(64), catalogLoadedAt: '2026-01-01T00:00:00Z', features: { numericTables: false, shortSignal: false } };
@@ -79,7 +80,7 @@ async function seedReport({ deviceKey, reportId, owner, withAsjp = true }) {
   const payload = { version: 11, id: 1, submissionId: `sub-${reportId}`, title: 't.pdf', text: TEXT, wordCount: 400, score: 15, archiveScore: 15, sources: [], repeats: [], ...(withAsjp ? { asjpEvidence: signAsjpRecord(record, binding, KEY) } : {}) };
   await client.execute({
     sql: `INSERT INTO saved_reports (id, device_key, submission_id, title, report_created_at, word_count, archive_score, score_band, payload_json, user_id) VALUES (?,?,?,?,?,?,?,?,?,?)`,
-    args: [reportId, deviceKey, `sub-${reportId}`, 't.pdf', '2025-03-14T10:00:00.000Z', 400, 15, 'Low', JSON.stringify(payload), owner],
+    args: [reportId, deviceKey, `sub-${reportId}`, 't.pdf', createdAt, 400, 15, 'Low', JSON.stringify(payload), owner],
   });
 }
 const rowOf = async (deviceKey, id) => (await client.execute({ sql: 'SELECT payload_json, archive_score, word_count, score_band, updated_at, user_id FROM saved_reports WHERE device_key = ? AND id = ?', args: [deviceKey, id] })).rows[0];
@@ -96,6 +97,10 @@ async function call(method, { id, deviceKey, token, origin = 'http://localhost',
 const admin = await user('admin'), owner = await user('user'), other = await user('user');
 await seedReport({ deviceKey: 'dev-a', reportId: 'rep-a', owner: owner.id });
 await seedReport({ deviceKey: 'dev-b', reportId: 'rep-b', owner: other.id });
+await seedReport({ deviceKey: 'dev-f', reportId: 'rep-f', owner: owner.id });
+await seedReport({ deviceKey: 'dev-g', reportId: 'rep-g', owner: owner.id, createdAt: '2031-01-01T00:00:00.000Z' });
+await seedReport({ deviceKey: 'dev-h', reportId: 'rep-h', owner: owner.id, createdAt: 'not a date' });
+await seedReport({ deviceKey: 'dev-m', reportId: 'rep-m', owner: owner.id });
 
 test('only an admin, same-origin, with the flag on; otherwise 404 and nothing written', async () => {
   assert.equal((await call('POST', { id: 'rep-a', deviceKey: 'dev-a' })).status, 404, 'no session');
@@ -135,13 +140,13 @@ test('a stopped, refused, unreachable, forged or other-generation search is neve
   const cases = { budget: ['SEARCH_STOPPED_AT_LIMIT', /INCOMPLETE_BUDGET/], busy: ['SEARCH_UNAVAILABLE', /ASJP_BUSY|BUSY/], forged: ['SEARCH_UNAVAILABLE', /MALFORMED/], gen2: ['SEARCH_UNAVAILABLE', /GENERATION_MISMATCH/] };
   for (const [mode, [outcome, reason]] of Object.entries(cases)) {
     stub.mode = mode;
-    const view = (await call('POST', { id: 'rep-a', deviceKey: 'dev-a', token: admin.token })).body.view;
+    const view = (await call('POST', { id: 'rep-f', deviceKey: 'dev-f', token: admin.token })).body.view;
     assert.equal(view.outcome, outcome, mode); assert.match(String(view.reason), reason, mode);
     assert.deepEqual(view.items, [], mode); assert.match(view.message, /does NOT mean zero matches/, mode);
   }
   const url = process.env.ASJP_SERVICE_URL; process.env.ASJP_SERVICE_URL = 'http://127.0.0.1:9';
   try {
-    const view = (await call('POST', { id: 'rep-a', deviceKey: 'dev-a', token: admin.token })).body.view;
+    const view = (await call('POST', { id: 'rep-f', deviceKey: 'dev-f', token: admin.token })).body.view;
     assert.equal(view.outcome, 'SEARCH_UNAVAILABLE'); assert.match(view.reason, /SERVICE_UNREACHABLE/);
   } finally { process.env.ASJP_SERVICE_URL = url; }
 });
@@ -179,4 +184,51 @@ test('retraction shows nothing; deleting the report deletes its record', async (
   await client.execute({ sql: 'DELETE FROM saved_reports WHERE device_key = ? AND id = ?', args: ['dev-a', 'rep-a'] });
   assert.equal(await recordRow('dev-a', 'rep-a'), undefined, 'removed with its report');
   assert.equal((await call('GET', { id: 'rep-a', deviceKey: 'dev-a', token: admin.token })).status, 404);
+});
+
+test('review M3: a browser GET (no Origin header) works for an admin; POST still needs same-origin', async () => {
+  const r = await call('GET', { id: 'rep-b', deviceKey: 'dev-b', token: admin.token, origin: null });
+  assert.equal(r.status, 200);
+  assert.equal((await call('POST', { id: 'rep-b', deviceKey: 'dev-b', token: admin.token, origin: null })).status, 404);
+  assert.equal((await call('GET', { id: 'rep-b', deviceKey: 'dev-b', token: owner.token, origin: null })).status, 404, 'a non-admin still gets nothing');
+});
+
+test('review M1: after the report text changes, the stored positions are never shown (STALE_TEXT)', async () => {
+  stub.mode = 'complete';
+  await call('POST', { id: 'rep-m', deviceKey: 'dev-m', token: admin.token });
+  const row = await rowOf('dev-m', 'rep-m');
+  const payload = JSON.parse(row.payload_json); payload.text = 'zz ' + payload.text; payload.wordCount += 1;
+  await client.execute({ sql: 'UPDATE saved_reports SET payload_json = ? WHERE device_key = ? AND id = ?', args: [JSON.stringify(payload), 'dev-m', 'rep-m'] });
+  const view = (await call('GET', { id: 'rep-m', deviceKey: 'dev-m', token: admin.token })).body.view;
+  assert.equal(view.outcome, 'STALE_TEXT'); assert.deepEqual(view.items, []);
+});
+
+test('review M2: with the C1 database pin refused, Run writes nothing (no table, trigger or record)', async () => {
+  process.env.ASJP_REQUIRED_DB_HOST = 'some-other-db.example';
+  try {
+    const r = await call('POST', { id: 'rep-g', deviceKey: 'dev-g', token: admin.token });
+    assert.deepEqual([r.body.outcome, r.body.reason], ['CLIENT_MISCONFIGURED', 'ASJP_REQUIRED_DB_HOST']);
+    assert.equal(await recordRow('dev-g', 'rep-g'), undefined);
+  } finally { delete process.env.ASJP_REQUIRED_DB_HOST; }
+});
+
+test('review L2: the date gate uses the server first-save day; a future or invalid client date never widens it', async () => {
+  stub.mode = 'complete';
+  const today = new Date().toISOString().slice(0, 10);
+  await call('POST', { id: 'rep-g', deviceKey: 'dev-g', token: admin.token });
+  assert.ok(stub.last.referenceDate <= today, 'a 2031 client date is capped by saved_at');
+  await call('POST', { id: 'rep-h', deviceKey: 'dev-h', token: admin.token });
+  assert.match(String(stub.last.referenceDate), /^\d{4}-\d{2}-\d{2}$/, 'an invalid client date never removes the gate');
+});
+
+test('review L3/L4: a failed re-run keeps the good result; matches found but not listable never read as zero', async () => {
+  stub.mode = 'complete';
+  await call('POST', { id: 'rep-b', deviceKey: 'dev-b', token: admin.token });
+  stub.mode = 'busy';
+  const r = (await call('POST', { id: 'rep-b', deviceKey: 'dev-b', token: admin.token })).body;
+  assert.equal(r.outcome, 'NOT_STORED_PREVIOUS_KEPT'); assert.equal(r.view.outcome, 'COMPLETE'); assert.equal(r.attempt.outcome, 'SEARCH_UNAVAILABLE');
+  assert.equal(JSON.parse((await recordRow('dev-b', 'rep-b')).record_json).status, 'ACCEPTED');
+  stub.mode = 'unlisted';
+  const v = (await call('POST', { id: 'rep-b', deviceKey: 'dev-b', token: admin.token })).body.view;
+  assert.equal(v.outcome, 'COMPLETE'); assert.deepEqual(v.items, []); assert.match(v.message, /does NOT mean zero matches/);
 });

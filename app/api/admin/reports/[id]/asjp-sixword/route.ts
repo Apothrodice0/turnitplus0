@@ -18,16 +18,18 @@ import { retractSixwordForReport, runSixwordForReport, sixwordViewForReport } fr
  */
 const KEY = /^[A-Za-z0-9_.:-]{1,200}$/;
 
-async function guard(request: Request) {
+// GET is read-only (like the other app/api/admin GET routes: rate limit + admin session; browsers send no Origin on a
+// same-origin GET). POST changes state and additionally requires a same-origin Origin (CSRF), as every admin POST does.
+async function guard(request: Request, method: 'GET' | 'POST') {
   const rate = await checkAdminRate(clientIpFrom(request));
   if (!rate.allowed) return { response: adminJsonResponse({ error: 'Too many requests' }, 429, { 'Retry-After': String(rate.retryAfter) }) };
-  if (!asjpSixwordOverlapDisplayEnabled() || !isSameOriginRequest(request)) return { response: adminJsonResponse(null, 404) };
+  if (!asjpSixwordOverlapDisplayEnabled() || (method === 'POST' && !isSameOriginRequest(request))) return { response: adminJsonResponse(null, 404) };
   return null;
 }
 
 export async function GET(request: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
-    const blocked = await guard(request);
+    const blocked = await guard(request, 'GET');
     if (blocked) return blocked.response;
     const { id } = await params;
     const deviceKey = new URL(request.url).searchParams.get('deviceKey') ?? '';
@@ -45,7 +47,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
 
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
-    const blocked = await guard(request);
+    const blocked = await guard(request, 'POST');
     if (blocked) return blocked.response;
     const { id } = await params;
     let body: { deviceKey?: unknown; action?: unknown; reason?: unknown };

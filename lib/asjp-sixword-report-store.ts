@@ -53,3 +53,14 @@ export async function readSixwordRecord(client: Client, key: { deviceKey: string
     throw error;
   }
 }
+
+/**
+ * Review L1: the ONLY supported way to remove this experiment's storage. The trigger is dropped FIRST: a trigger left
+ * behind on saved_reports after its table is gone would make every report / account deletion fail. (A rebuild of
+ * saved_reports by a future migration drops the trigger; the next writeSixwordRecord recreates it, and a record whose
+ * report no longer exists is never shown — reads always require the report and its owner.)
+ */
+export async function dropSixwordStorage(client: Client): Promise<void> {
+  await client.execute(`DROP TRIGGER IF EXISTS trg_${ASJP_SIXWORD_TABLE}_report_deleted`);
+  await client.execute(`DROP TABLE IF EXISTS ${ASJP_SIXWORD_TABLE}`);
+}

@@ -280,6 +280,7 @@ export async function startAsjpService(config: AsjpServiceConfig): Promise<{ ser
   const invalid = validGeneration(config, config.generation);
   if (invalid) throw new Error(`generation config refused: ${invalid}`);
   const startedAt = Date.now();
+  let sixwordInFlight = 0;
   const verifyRequest = config.requestSigningKey ? asjpRequestVerifier(config.requestSigningKey, config.requestMaxSkewMs ?? 120_000, startedAt) : null;
   let pool = new Pool(config, config.generation);
   try { await pool.start(); } catch (error) { pool.close(); throw error; }
@@ -361,11 +362,17 @@ export async function startAsjpService(config: AsjpServiceConfig): Promise<{ ser
         const credited = body.creditedPositions ?? [];
         if (!Array.isArray(credited) || credited.length > config.maxWords || !credited.every((q: unknown) => Number.isInteger(q) && (q as number) >= 0)) return reply(400, { error: "creditedPositions must be word positions" });
         if (body.text.split(/\s+/).length > config.maxWords) return reply(413, { state: "REJECTED", failureCode: "TOO_LONG" });
-        const t0 = Date.now();
-        const job = pool.submit({ type: "sixword", text: body.text, referenceDate: body.referenceDate ?? null, excludeSourceIds: exclude, creditedPositions: credited });
-        res.on("close", () => { if (!res.writableFinished) job.cancel(); });
-        const r = await job.promise;
-        return reply(r.state === "BUSY" || (r.state === "UNAVAILABLE" && !r.contract) ? 503 : r.state === "TIMEOUT" ? 504 : 200, { ...r, totalMs: Date.now() - t0 });
+        // review L7: at most ONE developer search at a time, so /sixword can never hold more than one worker that /match
+        // traffic needs; a second request is refused at once (never queued behind or ahead of report checks)
+        if (sixwordInFlight >= 1) return reply(503, { state: "BUSY", failureCode: "SIXWORD_BUSY" });
+        sixwordInFlight += 1;
+        try {
+          const t0 = Date.now();
+          const job = pool.submit({ type: "sixword", text: body.text, referenceDate: body.referenceDate ?? null, excludeSourceIds: exclude, creditedPositions: credited });
+          res.on("close", () => { if (!res.writableFinished) job.cancel(); });
+          const r = await job.promise;
+          return reply(r.state === "BUSY" || (r.state === "UNAVAILABLE" && !r.contract) ? 503 : r.state === "TIMEOUT" ? 504 : 200, { ...r, totalMs: Date.now() - t0 });
+        } finally { sixwordInFlight -= 1; }
       }
       if (req.method === "POST" && req.url === "/admin/refresh") return json(res, 200, { workers: await pool.refresh() });
       if (req.method === "POST" && req.url === "/admin/switch") {

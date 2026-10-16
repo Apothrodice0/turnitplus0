@@ -144,7 +144,12 @@ export function sixwordAdminView(record: unknown, binding: AsjpRecordBinding, en
     return { label: ASJP_SIXWORD_OVERLAP_LABEL, outcome, message, status: r.status, reason: r.reason ?? r.retractionReason ?? null, checkedAt: r.checkedAt, items: [] };
   }
   return {
-    label: ASJP_SIXWORD_OVERLAP_LABEL, outcome: "COMPLETE" as const, message: r.matches.length ? "Verified exact text overlap. Informational only: not included in the similarity score." : "The search completed and found no exact overlap of six or more words with an eligible indexed article.",
+    // L4: "no overlap" only when the search really found none; matches found but not listable say so
+    label: ASJP_SIXWORD_OVERLAP_LABEL, outcome: "COMPLETE" as const,
+    message: r.matches.length ? "Verified exact text overlap. Informational only: not included in the similarity score."
+      : (r.summary?.matches ?? 0) > 0 || r.truncation.recordTrimmedMatches > 0 || r.truncation.redactedMatches > 0 || r.truncation.matchesOmitted > 0
+        ? "Exact overlap was found, but no match can be listed here (no eligible holder, withdrawn after the search, or trimmed to fit the record). This does NOT mean zero matches."
+        : "The search completed and found no exact overlap of six or more words with any indexed article.",
     status: r.status, reason: null, checkedAt: r.checkedAt, pins: r.pins, summary: r.summary, truncation: r.truncation,
     items: r.matches.map((m) => ({
       scored: false as const, label: ASJP_SIXWORD_OVERLAP_LABEL, words: [m.submittedWordStart, m.submittedWordEnd] as [number, number], length: m.words, band: m.band,

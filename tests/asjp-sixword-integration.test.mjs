@@ -186,7 +186,7 @@ test('report persistence: signed for one report and owner; tamper, move or no ke
   // byte bound: a record larger than the cap is trimmed (COMMON first, then the shortest) and says so
   const m0 = r.matches[0];
   const bigMatches = Array.from({ length: 150 }, (_, k) => ({ ...m0, submittedWordStart: k, submittedWordEnd: k + m0.words - 1, holders: [{ ...m0.holders[0], sourceId: `asjp:${90000 + k}` }], eligibleHolders: 1, holdersOmitted: 0 })).filter((m) => m.submittedWordEnd < words.length);
-  const big = { ...r, matches: bigMatches, sources: Object.fromEntries(bigMatches.map((m) => [m.holders[0].sourceId, { sourceId: m.holders[0].sourceId, articleId: m.holders[0].sourceId.slice(5), title: 'x'.repeat(2000), journal: null, publicationDate: null, canonicalUrl: null }])) };
+  const big = { ...r, matches: bigMatches, sources: Object.fromEntries(bigMatches.map((m) => [m.holders[0].sourceId, { sourceId: m.holders[0].sourceId, articleId: m.holders[0].sourceId.slice(5), title: 'x'.repeat(1000), journal: 'y'.repeat(500), publicationDate: null, canonicalUrl: null }])) };
   assert.equal(sixwordOverlapProblem(big, words.length), null);
   const trimmed = sixwordRecordFromAnswer(big, expected);
   assert.ok(trimmed.truncation.recordTrimmedMatches > 0);
@@ -245,5 +245,36 @@ test('protocol v2 on /sixword: signed attest + signed answer accepted; a wrong k
     assert.deepEqual([tooLong.state, tooLong.failureCode], ['REJECTED', 'TOO_LONG']);
     const badDate = await requestSixwordOverlap(config, { text: 'a b c', referenceDate: '2025-1-1', creditedPositions: [], excludeSourceIds: [] });
     assert.equal(badDate.error, 'referenceDate must be YYYY-MM-DD');
+  } finally { svc.close(); }
+});
+
+test('review L5/L6: the validator refuses free-text reasons, duplicate holders and inconsistent fields; an index of another token store never opens', async () => {
+  const r = await overlap();
+  assert.equal(sixwordOverlapProblem({ ...r, reason: 'see https://evil' }, words.length), 'REASON');
+  const m0 = r.matches[0];
+  assert.equal(sixwordOverlapProblem({ ...r, matches: [{ ...m0, holders: [m0.holders[0], m0.holders[0]], eligibleHolders: 2, holdersInIndex: Math.max(2, m0.holdersInIndex), commonness: 'SHARED' }, ...r.matches.slice(1)] }, words.length), 'DUPLICATE_HOLDER');
+  assert.equal(sixwordOverlapProblem({ ...r, matches: [{ ...m0, band: '60+' }, ...r.matches.slice(1)] }, words.length), 'MATCH_BAND');
+  const sid = m0.holders[0].sourceId;
+  assert.equal(sixwordOverlapProblem({ ...r, sources: { ...r.sources, [sid]: { ...r.sources[sid], canonicalUrl: 'javascript:alert(1)' } } }, words.length), 'SOURCE_URL');
+  const other = path.join(scratch, 'other-tokens'); fs.mkdirSync(other, { recursive: true });
+  fs.copyFileSync(path.join(tokensDir, 'tokens.bin'), path.join(other, 'tokens.bin'));
+  fs.writeFileSync(path.join(other, 'index.json'), '{}');
+  await assert.rejects(openSixwordOverlapSession({ indexDir, reader, generationId: built.generationId, logicalManifestSha256: built.logicalManifestSha256, wordDf, laneTokensDir: other }), /INDEX_TOKEN_STORE_MISMATCH/);
+  const ok = await openSixwordOverlapSession({ indexDir, reader, generationId: built.generationId, logicalManifestSha256: built.logicalManifestSha256, wordDf, laneTokensDir: tokensDir });
+  assert.ok(ok.identities.length > 0); ok.index.close();
+});
+
+test('review L7: only one /sixword at a time; a second concurrent request is refused at once, /match unaffected', async () => {
+  process.env.ASJP_SERVICE_ENABLED = 'true';
+  const T1 = '0123456789abcdef'.repeat(3), A1 = 'fedcba9876543210'.repeat(3);
+  const generation = { root, generationId: built.generationId, logicalManifestSha256: built.logicalManifestSha256, catalogPath, catalogImmutable: false, licencePolicy: 'permitted-only', laneTokensDir: tokensDir, features: { numericTables: false, shortSignal: null, sixwordOverlap: { indexDir, wordDfPath } } };
+  const port = 47_695;
+  const svc = await startAsjpService({ token: T1, adminToken: A1, workers: 2, queueLimit: 8, deadlineMs: 30_000, maxWords: 60_000, allowedRoots: [scratch], port, generation });
+  try {
+    const post = (url) => fetch(`http://127.0.0.1:${port}${url}`, { method: 'POST', headers: { authorization: `Bearer ${T1}`, 'content-type': 'application/json' }, body: JSON.stringify({ text: manuscript }) }).then(async (x) => ({ status: x.status, body: await x.json() }));
+    const [a, b, m] = await Promise.all([post('/sixword'), post('/sixword'), post('/match')]);
+    const states = [a, b].map((x) => x.body.failureCode ?? x.body.state).sort();
+    assert.deepEqual(states, ['COMPLETE', 'SIXWORD_BUSY']);
+    assert.equal(m.body.state, 'COMPLETE');
   } finally { svc.close(); }
 });

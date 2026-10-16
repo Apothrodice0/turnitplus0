@@ -98,6 +98,10 @@ export function unavailableSixwordOverlap(state: "UNAVAILABLE" | "INCOMPLETE_BUD
 }
 
 const int = (v: unknown) => typeof v === "number" && Number.isInteger(v) && v >= 0;
+const CODE = /^[A-Z0-9_]{1,64}$/;
+const ASJP_URL = /^https:\/\/asjp\.cerist\.dz\/[A-Za-z0-9/_.\-]{1,200}$/;
+const boundedOrNull = (v: unknown, max: number) => v === null || (typeof v === "string" && v.length <= max);
+const bandOfWords = (w: number) => (w <= 9 ? "6-9" : w <= 14 ? "10-14" : w <= 19 ? "15-19" : w <= 24 ? "20-24" : w <= 39 ? "25-39" : w <= 59 ? "40-59" : "60+");
 /**
  * Strict shape check of an answer block (the report side accepts nothing else): contract and label exact, scored and
  * originEstablished false everywhere, spans inside the manuscript and consistent, holders within the shown bound,
@@ -109,18 +113,33 @@ export function sixwordOverlapProblem(r: unknown, wordCount: number): string | n
   if (x.contract !== ASJP_SIXWORD_CONTRACT_VERSION) return "CONTRACT_VERSION";
   if (x.scored !== false || x.label !== ASJP_SIXWORD_OVERLAP_LABEL) return "NOT_INFORMATIONAL";
   if (!["COMPLETE", "UNAVAILABLE", "INCOMPLETE_BUDGET"].includes(x.state)) return "STATE";
-  if (!Array.isArray(x.matches) || !x.sources || typeof x.sources !== "object") return "MATCHES";
+  // review L5: a reason is a code, never free text
+  if (x.reason !== null && (typeof x.reason !== "string" || !CODE.test(x.reason))) return "REASON";
+  if (!Array.isArray(x.matches) || !x.sources || typeof x.sources !== "object" || Array.isArray(x.sources)) return "MATCHES";
   if (x.state !== "COMPLETE") return x.matches.length || Object.keys(x.sources).length ? "MATCHES_WITHOUT_COMPLETE" : null;
   const referenced = new Set<string>();
   if (!x.pins || x.pins.normalization !== 2 || x.wordCount !== wordCount) return "PINS_OR_WORD_COUNT";
   if (x.matches.length > SIXWORD_LIMITS.maxMatchesShown) return "TOO_MANY_MATCHES";
+  if (Object.keys(x.sources).length > SIXWORD_LIMITS.maxMatchesShown * SIXWORD_LIMITS.maxHoldersShown) return "TOO_MANY_SOURCES";
+  for (const [id, src] of Object.entries(x.sources)) {
+    if (!src || typeof src !== "object" || src.sourceId !== id || !/^asjp:\d{1,12}$/.test(id) || id !== `asjp:${src.articleId}`) return "SOURCE";
+    if (!boundedOrNull(src.title, 1000) || !boundedOrNull(src.journal, 500) || !boundedOrNull(src.publicationDate, 40)) return "SOURCE_TEXT";
+    if (src.canonicalUrl !== null && (typeof src.canonicalUrl !== "string" || !ASJP_URL.test(src.canonicalUrl))) return "SOURCE_URL";
+  }
   for (const m of x.matches) {
     if (m.scored !== false || m.originEstablished !== false) return "MATCH_NOT_INFORMATIONAL";
     if (!int(m.submittedWordStart) || !int(m.submittedWordEnd) || m.submittedWordEnd >= wordCount || m.submittedWordEnd - m.submittedWordStart + 1 !== m.words || m.words < 6) return "MATCH_SPAN";
+    if (m.band !== bandOfWords(m.words)) return "MATCH_BAND";
+    if (!int(m.holdersInIndex) || !int(m.eligibleHolders) || !int(m.holdersOmitted) || !int(m.wordsAlreadyCreditedByLane) || m.wordsAlreadyCreditedByLane > m.words) return "MATCH_COUNTS";
+    if (m.commonness !== (m.holdersInIndex <= 1 ? "UNIQUE" : m.holdersInIndex <= 9 ? "SHARED" : "COMMON")) return "MATCH_COMMONNESS";
+    if (!m.ineligibleHolders || typeof m.ineligibleHolders !== "object" || Object.entries(m.ineligibleHolders).some(([k, v]) => !SIXWORD_GATE_REASONS.includes(k as SixwordGateReason) || !int(v))) return "MATCH_GATES";
+    if (!m.labels || !boundedOrNull(m.labels.form, 64) || typeof m.labels.legal !== "boolean" || typeof m.labels.religious !== "boolean") return "MATCH_LABELS";
     if (!Array.isArray(m.holders) || m.holders.length > SIXWORD_LIMITS.maxHoldersShown || m.holders.length === 0 || m.eligibleHolders !== m.holders.length + m.holdersOmitted || m.eligibleHolders > m.holdersInIndex) return "MATCH_HOLDERS";
+    if (new Set(m.holders.map((h) => h.sourceId)).size !== m.holders.length) return "DUPLICATE_HOLDER";
     for (const h of m.holders) {
       const source = x.sources[h.sourceId];
       if (!/^asjp:\d+$/.test(h.sourceId) || !source || source.sourceId !== h.sourceId || h.sourceId !== `asjp:${source.articleId}`) return "HOLDER_ID";
+      if (!int(h.occurrences) || h.occurrences < 1) return "HOLDER_OCCURRENCES";
       referenced.add(h.sourceId);
       if (!int(h.sourceWordStart) || h.sourceWordEnd - h.sourceWordStart !== m.submittedWordEnd - m.submittedWordStart) return "HOLDER_SPAN";
       const charsNull = h.sourceCharStart === null && h.sourceCharEnd === null;

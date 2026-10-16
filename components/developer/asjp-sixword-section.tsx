@@ -17,7 +17,7 @@ import { tokenSpans } from "@/lib/similarity-core";
 type Holder = { sourceId: string; title: string | null; journal: string | null; date: string | null; url: string | null; sourceWords: [number, number]; sourceChars: [number, number] | null };
 type Item = { words: [number, number]; length: number; band: string; held: string; multipleHolders: boolean; commonness: string; holdersInIndex: number; alreadyCountedThroughScoredLane: number; holders: Holder[]; holdersNotListed: number; notEligible: Record<string, number>; labels: { form: string | null; legal: boolean; religious: boolean } };
 type View = {
-  outcome: "NOT_RUN" | "COMPLETE" | "SEARCH_STOPPED_AT_LIMIT" | "SEARCH_UNAVAILABLE" | "RETRACTED" | "UNTRUSTED_RECORD";
+  outcome: "NOT_RUN" | "COMPLETE" | "SEARCH_STOPPED_AT_LIMIT" | "SEARCH_UNAVAILABLE" | "RETRACTED" | "UNTRUSTED_RECORD" | "STALE_TEXT";
   label?: string; message?: string; reason?: string | null; checkedAt?: string;
   pins?: { generationId: string; referenceDate: string | null; licencePolicy: string } | null;
   summary?: { matches: number; unique: number; shared: number; common: number; withoutEligibleHolder: number; wordsInEligibleMatch: number } | null;
@@ -49,7 +49,8 @@ export function AsjpSixwordSection({ reportId, deviceKey, text }: { reportId: st
     try {
       const r = await fetch(endpoint, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ deviceKey, action }) });
       if (r.status === 404) { setHidden(true); return; }
-      const j = (await r.json()) as { view?: View; outcome?: string; reason?: string };
+      const j = (await r.json()) as { view?: View; attempt?: View; outcome?: string; reason?: string };
+      if (j.outcome === "NOT_STORED_PREVIOUS_KEPT") setError(`This run did not complete (${j.attempt?.message ?? j.reason ?? "unavailable"}). The previous result below is kept unchanged.`);
       if (j.view) setView(j.view); else setError(`Not stored: ${String(j.outcome ?? "error")}${j.reason ? ` (${j.reason})` : ""}`);
     } catch { setError("The request failed. No result is available — this does NOT mean zero matches."); }
     finally { setBusy(false); }
@@ -71,7 +72,7 @@ export function AsjpSixwordSection({ reportId, deviceKey, text }: { reportId: st
       {error ? <p className="admin-status-badge admin-status-badge--warning">{error}</p> : null}
       {!view || view.outcome === "NOT_RUN" ? <p>Not run. The six-word search runs only when you request it.</p> : null}
       {view && view.outcome === "UNTRUSTED_RECORD" ? <p className="admin-status-badge admin-status-badge--negative">The stored result could not be verified for this report and is not shown.</p> : null}
-      {view && (view.outcome === "SEARCH_STOPPED_AT_LIMIT" || view.outcome === "SEARCH_UNAVAILABLE" || view.outcome === "RETRACTED") ? (
+      {view && (view.outcome === "SEARCH_STOPPED_AT_LIMIT" || view.outcome === "SEARCH_UNAVAILABLE" || view.outcome === "RETRACTED" || view.outcome === "STALE_TEXT") ? (
         <p className={`admin-status-badge admin-status-badge--${view.outcome === "RETRACTED" ? "neutral" : "warning"}`} data-testid="asjp-sixword-no-result">
           {view.message} {view.reason ? `(${view.reason})` : ""}
         </p>

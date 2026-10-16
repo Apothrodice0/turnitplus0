@@ -3,12 +3,12 @@ import { randomUUID } from "node:crypto";
 import { tryDecodeReportFromPersistence } from "./report-persistence";
 import type { SimilarityReport } from "./report-types";
 import {
-  asjpChannelFromCards, asjpGlobalWithdrawn, asjpKeyring, asjpReportClientConfig, asjpWithdrawnOf, normalizeWithdrawn, trustedAsjpRecord,
+  asjpChannelFromCards, asjpGlobalWithdrawn, asjpKeyring, asjpReportClientConfig, asjpReportClientConfigProblem, asjpTextSha256, asjpWithdrawnOf, normalizeWithdrawn, trustedAsjpRecord,
   type AsjpKeyMaterial, type AsjpRecordBinding, type AsjpReportClientConfig,
 } from "./asjp-report-evidence";
 import { ASJP_RESPONSE_MAX_BYTES, asjpRequestMac, asjpResponseMac, macEquals, sha256Hex } from "./asjp-service-protocol";
 import { ASJP_SIXWORD_CONTRACT_VERSION, ASJP_SIXWORD_OVERLAP_LABEL } from "./asjp-sixword-contract";
-import { asjpSixwordOverlapDisplayEnabled, retractSixwordRecord, signSixwordRecord, sixwordAdminView, sixwordRecordFromAnswer, trustedSixwordRecord } from "./report-asjp-sixword-evidence";
+import { asjpSixwordOverlapDisplayEnabled, retractSixwordRecord, signSixwordRecord, sixwordAdminView, sixwordRecordFromAnswer, trustedSixwordRecord, type AsjpSixwordRecord } from "./report-asjp-sixword-evidence";
 import { readSixwordRecord, writeSixwordRecord } from "./asjp-sixword-report-store";
 
 /**
@@ -17,7 +17,8 @@ import { readSixwordRecord, writeSixwordRecord } from "./asjp-sixword-report-sto
  * owner, creation date, its signed scored ASJP record) and WRITES only its own record (asjp-sixword-report-store);
  * the saved report row, its score and its highlights are never written.
  *
- *   referenceDate        the report's creation date: an article published later is never a holder
+ *   referenceDate        the EARLIER of the server-set first-save time (saved_at) and a valid client report date: an
+ *                        article published later is never a holder; no valid date -> the search is refused, never ungated
  *   creditedPositions    the scored ASJP lane's credited words, from the report's own VERIFIED record (reported per match;
  *                        those words count once, through the lane)
  *   excludeSourceIds     takedowns (Phase 7 B3): the deployment list ASJP_WITHDRAWN_SOURCE_IDS and the report's own
@@ -25,11 +26,12 @@ import { readSixwordRecord, writeSixwordRecord } from "./asjp-sixword-report-sto
  *   binding              the report's own owner (device key, report id, account), never the caller's claim
  */
 export type SixwordReportKey = { deviceKey: string; reportId: string };
-type Loaded = { text: string; wordCount: number; binding: AsjpRecordBinding; referenceDate: string | null; creditedPositions: number[]; withdrawn: string[] };
+type Loaded = { text: string; textSha256: string; wordCount: number; binding: AsjpRecordBinding; referenceDate: string | null; creditedPositions: number[]; withdrawn: string[] };
+const isoDay = (v: unknown) => { const d = String(v ?? "").trim().slice(0, 10); return /^\d{4}-\d{2}-\d{2}$/.test(d) && !Number.isNaN(Date.parse(`${d}T00:00:00Z`)) ? d : null; };
 
 async function loadReport(client: Client, key: SixwordReportKey, keys: AsjpKeyMaterial, env: Record<string, string | undefined>): Promise<Loaded | { failure: string }> {
-  const row = await client.execute({ sql: "SELECT payload_json, user_id, report_created_at FROM saved_reports WHERE device_key = ? AND id = ?", args: [key.deviceKey, key.reportId] });
-  const raw = row.rows[0] as unknown as { payload_json: string; user_id: string | null; report_created_at: string | null } | undefined;
+  const row = await client.execute({ sql: "SELECT payload_json, user_id, report_created_at, saved_at FROM saved_reports WHERE device_key = ? AND id = ?", args: [key.deviceKey, key.reportId] });
+  const raw = row.rows[0] as unknown as { payload_json: string; user_id: string | null; report_created_at: string | null; saved_at: string | null } | undefined;
   if (!raw) return { failure: "NO_REPORT" };
   const binding: AsjpRecordBinding = { reportDeviceKey: key.deviceKey, reportId: key.reportId, accountId: raw.user_id ?? null };
   let decoded;
@@ -40,8 +42,9 @@ async function loadReport(client: Client, key: SixwordReportKey, keys: AsjpKeyMa
   const scored = trustedAsjpRecord(payload.asjpEvidence, binding, keys);
   const creditedPositions: number[] = [];
   for (const source of scored && scored.status === "ACCEPTED" ? asjpChannelFromCards(scored.cards) : []) for (const p of source.matchedPassages) for (let q = p.submittedWordStart; q <= p.submittedWordEnd; q += 1) creditedPositions.push(q);
-  const created = String(raw.report_created_at ?? "").slice(0, 10);
-  return { text: payload.text, wordCount: payload.wordCount, binding, referenceDate: /^\d{4}-\d{2}-\d{2}$/.test(created) ? created : null, creditedPositions, withdrawn: normalizeWithdrawn([...asjpGlobalWithdrawn(env), ...asjpWithdrawnOf(scored)]) };
+  // L2: never later than the server's own first-save time (the client-supplied date can only make it earlier)
+  const dates = [isoDay(raw.saved_at), isoDay(raw.report_created_at)].filter((d): d is string => !!d).sort();
+  return { text: payload.text, textSha256: asjpTextSha256(payload.text), wordCount: payload.wordCount, binding, referenceDate: isoDay(raw.saved_at) ? dates[0] : null, creditedPositions, withdrawn: normalizeWithdrawn([...asjpGlobalWithdrawn(env), ...asjpWithdrawnOf(scored)]) };
 }
 
 async function readCapped(res: Response, cap: number): Promise<Buffer | null> {
@@ -89,8 +92,9 @@ export async function requestSixwordOverlap(config: AsjpReportClientConfig, body
     const res = await fetch(`${base}/sixword`, { method: "POST", headers: { ...config.accessHeaders, ...s.headers, "content-type": "application/json", authorization: `Bearer ${config.token}` }, body: raw, signal: controller.signal });
     const bytes = await readCapped(res, ASJP_RESPONSE_MAX_BYTES);
     if (!bytes) return { state: "UNAVAILABLE", failureCode: "RESPONSE_TOO_LARGE" };
-    if (res.status === 404) return { state: "UNAVAILABLE", failureCode: "SIXWORD_NOT_ENABLED_ON_SERVICE" };
+    // L3: the answer is authenticated BEFORE its status is interpreted (an unsigned 404 is untrusted, not "disabled")
     if (key && !verified(res, bytes, s.nonce, s.bodySha)) return { state: "UNAVAILABLE", failureCode: "UNAUTHENTICATED_ANSWER" };
+    if (res.status === 404) return { state: "UNAVAILABLE", failureCode: "SIXWORD_NOT_ENABLED_ON_SERVICE" };
     try { return JSON.parse(new TextDecoder("utf-8").decode(bytes)); } catch { return { state: "UNAVAILABLE", failureCode: "MALFORMED_ANSWER" }; }
   } catch (error) {
     return { state: "UNAVAILABLE", failureCode: (error as Error)?.name === "AbortError" ? "CLIENT_TIMEOUT" : "SERVICE_UNREACHABLE" };
@@ -105,37 +109,45 @@ export type SixwordDeps = {
 };
 const resolveDeps = (deps: SixwordDeps) => {
   const env = deps.env ?? process.env;
-  return { env, keys: deps.keys === undefined ? asjpKeyring(env) : deps.keys, config: deps.config === undefined ? asjpReportClientConfig(env) : deps.config };
+  // M2: the app's ASJP configuration (including the C1 database pin, ASJP_REQUIRED_DB_HOST) must be accepted before
+  // anything is written; a refused configuration writes nothing at all (no table, trigger or record)
+  const configProblem = deps.config === undefined ? asjpReportClientConfigProblem(env) ?? (asjpReportClientConfig(env) ? null : "ASJP_REPORT_EVIDENCE_ENABLED") : deps.config ? null : "CLIENT_MISCONFIGURED";
+  return { env, configProblem, keys: deps.keys === undefined ? asjpKeyring(env) : deps.keys, config: deps.config === undefined ? asjpReportClientConfig(env) : deps.config };
 };
 const hasSigningKey = (keys: AsjpKeyMaterial) => (typeof keys === "string" ? keys.length >= 32 : !!keys?.current);
 
 /** Run the search for a saved report, store the signed record, return the admin view. Never writes the report. */
 export async function runSixwordForReport(client: Client, key: SixwordReportKey, deps: SixwordDeps = {}) {
-  const { env, keys, config } = resolveDeps(deps);
+  const { env, keys, config, configProblem } = resolveDeps(deps);
   if (!asjpSixwordOverlapDisplayEnabled(env)) return { outcome: "DISABLED" as const };
   if (!hasSigningKey(keys)) return { outcome: "NO_SIGNING_KEY" as const };
+  if (configProblem || !config) return { outcome: "CLIENT_MISCONFIGURED" as const, reason: configProblem ?? "CLIENT_MISCONFIGURED" };
   const loaded = await loadReport(client, key, keys, env);
   if ("failure" in loaded) return { outcome: "NOT_ELIGIBLE" as const, reason: loaded.failure };
+  if (!loaded.referenceDate) return { outcome: "NOT_ELIGIBLE" as const, reason: "NO_REFERENCE_DATE" };
   const expected = { text: loaded.text, wordCount: loaded.wordCount, generationId: config?.generationId ?? "", logicalManifestSha256: config?.logicalManifestSha256 ?? "", allowLocalResearchPolicy: config?.allowLocalResearchPolicy ?? false };
   let answer: unknown;
-  if (!config) answer = { state: "UNAVAILABLE", failureCode: "CLIENT_MISCONFIGURED" };
-  else {
-    try { answer = await (deps.fetchSixword ?? requestSixwordOverlap)(config, { text: loaded.text, referenceDate: loaded.referenceDate, creditedPositions: loaded.creditedPositions, excludeSourceIds: loaded.withdrawn }); }
-    catch { answer = { state: "UNAVAILABLE", failureCode: "SERVICE_UNREACHABLE" }; }
-  }
+  try { answer = await (deps.fetchSixword ?? requestSixwordOverlap)(config, { text: loaded.text, referenceDate: loaded.referenceDate, creditedPositions: loaded.creditedPositions, excludeSourceIds: loaded.withdrawn }); }
+  catch { answer = { state: "UNAVAILABLE", failureCode: "SERVICE_UNREACHABLE" }; }
   // a service-level refusal (busy, timeout, disabled, unauthenticated, …) is not a contract block: UNAVAILABLE with its code
   const block = answer && typeof answer === "object" && (answer as { contract?: unknown }).contract === ASJP_SIXWORD_CONTRACT_VERSION ? answer
     : { contract: ASJP_SIXWORD_CONTRACT_VERSION, state: "UNAVAILABLE", reason: String((answer as { failureCode?: unknown })?.failureCode ?? (answer as { state?: unknown })?.state ?? "NO_ANSWER").replace(/[^A-Z0-9_]/gi, "").slice(0, 64), scored: false, label: ASJP_SIXWORD_OVERLAP_LABEL, pins: null, wordCount: null, summary: null, matches: [], sources: {}, truncation: { matchesOmitted: 0, commonOmitted: 0, matchesWithHoldersOmitted: 0, holdersWithoutCharOffsets: 0 }, timings: null };
   const record = signSixwordRecord(sixwordRecordFromAnswer(block, expected), loaded.binding, keys);
+  // L3: a failed or stopped run never replaces a good stored result; the failure is reported, the result kept
+  if (record.status !== "ACCEPTED") {
+    const previous = trustedSixwordRecord(await readSixwordRecord(client, key), loaded.binding, keys);
+    if (previous && previous.status === "ACCEPTED") return { outcome: "NOT_STORED_PREVIOUS_KEPT" as const, reason: record.reason, attempt: viewOf(record, loaded, env, keys, config), view: viewOf(previous, loaded, env, keys, config) };
+  }
   await writeSixwordRecord(client, key, record);
   return { outcome: "STORED" as const, view: viewOf(record, loaded, env, keys, config) };
 }
 
 /** Rollback: the stored record becomes RETRACTED (nothing shown). Never writes the report. */
 export async function retractSixwordForReport(client: Client, key: SixwordReportKey, reason: string, deps: SixwordDeps = {}) {
-  const { env, keys, config } = resolveDeps(deps);
+  const { env, keys, config, configProblem } = resolveDeps(deps);
   if (!asjpSixwordOverlapDisplayEnabled(env)) return { outcome: "DISABLED" as const };
   if (!hasSigningKey(keys)) return { outcome: "NO_SIGNING_KEY" as const };
+  if (configProblem) return { outcome: "CLIENT_MISCONFIGURED" as const, reason: configProblem };
   const loaded = await loadReport(client, key, keys, env);
   if ("failure" in loaded) return { outcome: "NOT_ELIGIBLE" as const, reason: loaded.failure };
   const current = trustedSixwordRecord(await readSixwordRecord(client, key), loaded.binding, keys);
@@ -159,6 +171,11 @@ export async function sixwordViewForReport(client: Client, key: SixwordReportKey
 function viewOf(record: unknown, loaded: Loaded, env: Record<string, string | undefined>, keys: AsjpKeyMaterial, config: AsjpReportClientConfig | null) {
   const view = sixwordAdminView(record, loaded.binding, env, keys, new Set(loaded.withdrawn));
   if (!view) return { outcome: "UNTRUSTED_RECORD" as const };
+  // M1: positions apply only to the exact text they were computed on (the signed text digest and word count)
+  const r = record as AsjpSixwordRecord;
+  if (r.textSha256 !== loaded.textSha256 || r.wordCount !== loaded.wordCount) {
+    return { label: view.label, outcome: "STALE_TEXT" as const, message: "The report text changed after this search; its positions no longer apply and nothing is shown. Run the search again.", status: r.status, reason: "TEXT_CHANGED", checkedAt: r.checkedAt, items: [], staleGeneration: false, currentGenerationId: config?.generationId ?? null };
+  }
   const pins = (view as { pins?: { generationId: string; logicalManifestSha256: string } | null }).pins ?? null;
   const stale = !!(config && pins && (pins.generationId !== config.generationId || pins.logicalManifestSha256 !== config.logicalManifestSha256));
   return { ...view, staleGeneration: stale, currentGenerationId: config?.generationId ?? null };
