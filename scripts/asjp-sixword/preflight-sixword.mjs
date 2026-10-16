@@ -55,8 +55,10 @@ if (entries) {
 
 const serviceEnvFile = arg("--service-env");
 if (serviceEnvFile) {
-  const env = Object.fromEntries(readFileSync(serviceEnvFile, "utf8").split(/\r?\n/).filter((l) => /^[A-Z0-9_]+=/.test(l)).map((l) => [l.slice(0, l.indexOf("=")), l.slice(l.indexOf("=") + 1).trim()]));
-  const generation = JSON.parse(readFileSync(arg("--generation") ?? env.ASJP_GENERATION_CONFIG ?? "", "utf8"));
+  // both files may start with a BOM (Windows PowerShell 5.1 `Set-Content -Encoding utf8`, as 198 writes them)
+  const text = (file) => readFileSync(file, "utf8").replace(/^﻿/, "");
+  const env = Object.fromEntries(text(serviceEnvFile).split(/\r?\n/).filter((l) => /^[A-Z0-9_]+=/.test(l)).map((l) => [l.slice(0, l.indexOf("=")), l.slice(l.indexOf("=") + 1).trim()]));
+  const generation = JSON.parse(text(arg("--generation") ?? env.ASJP_GENERATION_CONFIG ?? ""));
   const roots = (env.ASJP_ALLOWED_ROOTS ?? "").split(";").filter(Boolean);
   const inside = (p) => !!p && roots.some((r) => path.resolve(p).toLowerCase().startsWith(path.resolve(r).toLowerCase() + path.sep));
   if (env.ASJP_SIXWORD_OVERLAP_ENABLED !== "true") check("S0 six-word disabled on the service (nothing else to check)", true);

@@ -111,4 +111,16 @@ test('preflight (read-only): Vercel listing rules V1–V4 offline; PC service ru
   fs.writeFileSync(path.join(scratch, 'generation-other.json'), JSON.stringify({ generationId: 'gen-other', logicalManifestSha256: 'f'.repeat(64), laneTokensDir: tokensDir }));
   assert.match(runPf(['--service-env', envFile({}), '--generation', path.join(scratch, 'generation-other.json')]).out, /FAIL  S2/);
   assert.match(runPf(['--service-env', envFile({ ASJP_ALLOWED_ROOTS: 'D:/nowhere' }), '--generation', genFile]).out, /FAIL  S4/);
+  // files written with a BOM (Windows PowerShell 5.1 `Set-Content -Encoding utf8`, as 198-pc-preview-start.ps1 does)
+  const bom = (f) => { const b = path.join(scratch, `bom-${path.basename(f)}`); fs.writeFileSync(b, `\uFEFF${fs.readFileSync(f, 'utf8')}`); return b; };
+  const bomRun = runPf(['--service-env', bom(envFile({})), '--generation', bom(genFile)]);
+  assert.equal(bomRun.code, 0, bomRun.out);
+});
+
+test('the service reads a generation config written with a BOM (as the PC Preview start script writes it)', async () => {
+  const { asjpServiceConfigFromEnv } = await import('../services/asjp-matching/server.ts');
+  const file = path.join(scratch, 'generation-bom.json');
+  fs.writeFileSync(file, `\uFEFF${JSON.stringify({ root: 'D:/x', generationId: 'gen-bom', logicalManifestSha256: 'a'.repeat(64), catalogPath: 'D:/x/c.sqlite', licencePolicy: 'permitted-only' })}`);
+  const config = asjpServiceConfigFromEnv({ ASJP_GENERATION_CONFIG: file, ASJP_SERVICE_TOKEN: '0123456789abcdefghijklmnopqrstuv0123456789', ASJP_ADMIN_TOKEN: 'vutsrqponmlkjihgfedcba9876543210vutsrqponm' });
+  assert.equal(config.generation.generationId, 'gen-bom');
 });
