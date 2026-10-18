@@ -211,17 +211,20 @@ test("the room page's occupant state is only ever set to processing/ready/failed
   assert.match(retryBody, /const saved = await saveRetriedAiResult\([\s\S]*?!saved\s*\?\s*"Could not save the updated AI result/);
 });
 
-test("logout clears account-scoped report state immediately, purges the account's BROWSER-LOCAL copies, and never touches Turso", async () => {
+test("a confirmed logout clears account-scoped report state, purges the account's BROWSER-LOCAL copies, and never touches Turso", async () => {
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
 
-  // clearAccountDisplayState() (shared with the cross-tab storage listener
-  // — see the next test) must run before the (best-effort) network call, so
-  // the sidebar badge and report list can never keep showing the previous
-  // account's data during or after a failed logout.
+  // Truthful sign-out (security fix): clearAccountDisplayState() (shared with
+  // the cross-tab storage listener — see the next test) and the purge run in
+  // completeSignOutInThisTab, which lib/sign-out-client.ts calls only once the
+  // server confirmed the sign-out. Clearing BEFORE the request used to make a
+  // failed logout look like a successful one (tests/sign-out-client.test.mjs).
   assert.match(
     page,
-    /function signOutAccount\(\) \{\s*\n(?:\s*\/\/.*\r?\n)*\s*clearAccountDisplayState\(\);\s*\n(?:\s*\/\/.*\r?\n)*\s*void purgeLocalReportStateForSignedOut\(\);\s*\n\s*fetch\("\/api\/auth\/logout"/,
+    /function completeSignOutInThisTab\(\) \{\s*\n(?:\s*\/\/.*\r?\n)*\s*clearAccountDisplayState\(\);\s*\n(?:\s*\/\/.*\r?\n)*\s*void purgeLocalReportStateForSignedOut\(\);/,
   );
+  const signOutAccountBody = page.match(/async function signOutAccount\(\) \{[\s\S]*?\n {2}\}/)?.[0] ?? "";
+  assert.match(signOutAccountBody, /completeSignOut: completeSignOutInThisTab/);
 
   const displayStateBody = page.match(/function clearAccountDisplayState\(\) \{[\s\S]*?\n {2}\}/)?.[0] ?? "";
   assert.ok(displayStateBody.length > 0, "clearAccountDisplayState function body must be found");
@@ -240,8 +243,8 @@ test("logout clears account-scoped report state immediately, purges the account'
   // (that is "Clear history"'s own per-owner wipe, not the auth purge).
   // Extract just this function's body to check that in isolation, rather
   // than asserting on the whole file (clearHistory legitimately calls both).
-  const signOutBody = page.match(/function signOutAccount\(\) \{[\s\S]*?\n {2}\}/)?.[0] ?? "";
-  assert.ok(signOutBody.length > 0, "signOutAccount function body must be found");
+  const signOutBody = page.match(/function completeSignOutInThisTab\(\) \{[\s\S]*?\n {2}\}/)?.[0] ?? "";
+  assert.ok(signOutBody.length > 0, "completeSignOutInThisTab function body must be found");
   assert.match(signOutBody, /void purgeLocalReportStateForSignedOut\(\);/);
   assert.doesNotMatch(signOutBody, /clearStoredReports|deleteRemoteReport/);
   const sessionLib = await readFile(new URL("../lib/local-report-session.ts", import.meta.url), "utf8");
@@ -260,8 +263,9 @@ test("signing out broadcasts to other open tabs via a real storage-event listene
   // signOutAccount's write and this listener are the two required halves.
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
 
-  const signOutBody = page.match(/function signOutAccount\(\) \{[\s\S]*?\n {2}\}/)?.[0] ?? "";
-  assert.match(signOutBody, /window\.localStorage\.setItem\(SIGNED_OUT_BROADCAST_KEY, String\(Date\.now\(\)\)\);/, "signOutAccount must write the broadcast key so other tabs' storage listeners fire");
+  // Written only on the confirmed path (completeSignOutInThisTab), never before.
+  const signOutBody = page.match(/function completeSignOutInThisTab\(\) \{[\s\S]*?\n {2}\}/)?.[0] ?? "";
+  assert.match(signOutBody, /window\.localStorage\.setItem\(SIGNED_OUT_BROADCAST_KEY, String\(Date\.now\(\)\)\);/, "a confirmed sign-out must write the broadcast key so other tabs' storage listeners fire");
 
   const listenerMatch = page.match(/function handleStorage\(event: StorageEvent\) \{[\s\S]*?\n {4}\}/);
   assert.ok(listenerMatch, "a storage-event handler must be found");

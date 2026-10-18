@@ -48,6 +48,7 @@ import {
   purgeLocalReportStateForSignedOut,
   type AccountHydrationResult,
 } from "@/lib/local-report-session";
+import { createSignOutRunner, requestServerSignOut, SIGN_OUT_MESSAGES } from "@/lib/sign-out-client";
 import { ReportRoomsBrowser } from "@/components/reports/report-rooms";
 import { ReportHistoryRow } from "@/components/reports/report-history-row";
 import { DocumentUploadPanel } from "@/components/reports/document-upload-panel";
@@ -300,6 +301,8 @@ export default function Home() {
   const [legalTab, setLegalTab] = useState<LegalTab>("privacy");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const generationLockRef = useRef(false);
+  const signOutRunnerRef = useRef<ReturnType<typeof createSignOutRunner> | null>(null);
+  const [isSigningOut, setIsSigningOut] = useState(false);
   // USER-SUPPLIED REFERENCES V1 — optional reference files checked automatically
   // against the manuscript. Held here as transient client state only; the raw
   // extracted text rides along as the `userSuppliedReferences` save sibling and
@@ -413,11 +416,11 @@ export default function Home() {
 
   // Cross-tab sign-out (production audit fix): the "storage" event fires in
   // every OTHER same-origin tab (never the one that made the write) the
-  // moment signOutAccount() writes SIGNED_OUT_BROADCAST_KEY — this is the
+  // moment a confirmed sign-out writes SIGNED_OUT_BROADCAST_KEY — this is the
   // only way a tab that did NOT initiate the sign-out learns about it.
   // Deliberately does not repeat the /api/auth/logout network call (the
-  // initiating tab's own call already cleared the session cookie for real)
-  // and never touches Turso. It does repeat the browser-local purge
+  // initiating tab only broadcasts AFTER the server confirmed its sign-out —
+  // see lib/sign-out-client.ts) and never touches Turso. It does repeat the browser-local purge
   // (auth-report local-history isolation): idempotent, and it covers the
   // case where the initiating tab's own purge never completed.
   useEffect(() => {
@@ -851,7 +854,7 @@ export default function Home() {
     navigate("legal");
   }
 
-  // Shared by signOutAccount (this tab) and the cross-tab storage listener
+  // Shared by completeSignOutInThisTab (this tab) and the cross-tab storage listener
   // below (production audit fix) — only the in-memory display state, never
   // Turso (the account's remote reports stay exactly as they were). Both
   // callers ALSO run purgeLocalReportStateForSignedOut right after it: the
@@ -871,17 +874,17 @@ export default function Home() {
     setWelcomeMode(null);
   }
 
-  function signOutAccount() {
-    // Cleared immediately, before the network call even resolves, so the
-    // sidebar badge and report list never keep showing the previous
-    // account's data during (or after a failure of) the logout request.
+  // Runs only once the server confirmed the sign-out (lib/sign-out-client.ts's
+  // performSignOut), never before: the page used to clear itself and announce
+  // success before the logout request even resolved, so a failed request left
+  // a valid server session behind a signed-out-looking page.
+  function completeSignOutInThisTab() {
     clearAccountDisplayState();
     // Browser-local report copies and room caches of the account are purged
     // too (never Turso, never "Clear history"'s remote deletes).
     void purgeLocalReportStateForSignedOut();
-    fetch("/api/auth/logout", { method: "POST" }).catch(() => {});
     // A same-origin localStorage write fires the "storage" event in every
-    // OTHER open tab (never this one) — see the listener below. The value
+    // OTHER open tab (never this one) — see the listener above. The value
     // itself carries no meaning beyond "changed"; only the key and the
     // fact of the write matter.
     try {
@@ -892,7 +895,35 @@ export default function Home() {
     }
     window.history.replaceState({ turnitPlusView: "account" }, "", VIEW_HASH.account);
     setView("account");
-    notify("You have signed out.");
+  }
+
+  async function signOutAccount() {
+    if (!signOutRunnerRef.current) signOutRunnerRef.current = createSignOutRunner();
+    const runner = signOutRunnerRef.current;
+    if (runner.isRunning()) return;
+    setIsSigningOut(true);
+    try {
+      await runner.run({
+        request: () => requestServerSignOut(),
+        recheck: () => fetchAccountHydration(),
+        completeSignOut: completeSignOutInThisTab,
+        keepSignedIn: (state) => {
+          // Still signed in on the server. A different account (switched in
+          // another tab meanwhile) needs its own reports, not just its name.
+          if (state.user.email !== account?.email) {
+            void resolveAuthAndReports();
+            return;
+          }
+          setAccount(state.user);
+          setEmailVerification(state.emailVerification ?? null);
+        },
+        notify,
+      });
+    } catch {
+      notify(SIGN_OUT_MESSAGES.unconfirmed);
+    } finally {
+      setIsSigningOut(false);
+    }
   }
 
   function chooseFile(selected: File | undefined) {
@@ -1690,8 +1721,8 @@ export default function Home() {
                     <button className="button secondary" type="button" onClick={() => navigate("reports")}>
                       <FolderClock aria-hidden="true" /> View my reports
                     </button>
-                    <button className="button subtle account-signout" type="button" onClick={signOutAccount}>
-                      <LogOut aria-hidden="true" /> Sign out
+                    <button className="button subtle account-signout" type="button" disabled={isSigningOut} onClick={() => void signOutAccount()}>
+                      <LogOut aria-hidden="true" /> {isSigningOut ? "Signing out…" : "Sign out"}
                     </button>
                   </div>
                   <p className="auth-preview-note"><LockKeyhole aria-hidden="true" /> Documents are analyzed in your browser and never uploaded. Your report history is saved securely so you can reach it from any device you sign in on.</p>

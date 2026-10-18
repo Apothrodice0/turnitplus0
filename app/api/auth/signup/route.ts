@@ -5,7 +5,15 @@ import { getReportsDbClient } from '../../../../lib/reports-db';
 import { checkAuthRate } from '../../../../lib/rate-limit';
 import { clientIpFrom } from '../../../../lib/client-ip';
 import { hashPassword } from '../../../../lib/auth-crypto';
-import { newSession, setSessionCookie, claimAnonymousReports } from '../../../../lib/auth-session';
+import {
+  SESSION_COOKIE_NAME,
+  parseCookie,
+  isWellFormedSessionToken,
+  newSession,
+  sessionRevokeStatement,
+  setSessionCookie,
+  claimAnonymousReports,
+} from '../../../../lib/auth-session';
 import { isCrossOriginBrowserRequest, CROSS_ORIGIN_REJECTED } from '../../../../lib/same-origin';
 import { resolveSignupIdentity } from '../../../../lib/account-identity-signup';
 import { accountIdentityProfileUpsertStatement } from '../../../../lib/account-identity-repo';
@@ -115,7 +123,15 @@ export async function POST(request: Request) {
       // routes) any more — a brand-new unverified account can never gain the
       // admin role from its email string, and verifying that email later does
       // not change this (see lib/admin-role.ts).
+      //
+      // Account switch (security fix): a browser that is still signed into
+      // another account has THAT session revoked in this same batch (see
+      // app/api/auth/login/route.ts) — only the token it presents, never any
+      // other session. A rolled-back batch leaves it untouched, and no new
+      // cookie is issued.
+      const priorToken = parseCookie(request.headers.get('cookie'), SESSION_COOKIE_NAME);
       const statements: InStatement[] = [
+        ...(isWellFormedSessionToken(priorToken) ? [sessionRevokeStatement(priorToken)] : []),
         {
           sql: 'INSERT INTO users (id, email, username, password_hash) VALUES (?,?,?,?)',
           args: [userId, normalizedEmail, trimmedUsername, passwordHash],

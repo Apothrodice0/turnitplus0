@@ -3,7 +3,15 @@ import { getReportsDbClient } from '../../../../lib/reports-db';
 import { checkAuthRate } from '../../../../lib/rate-limit';
 import { clientIpFrom } from '../../../../lib/client-ip';
 import { verifyPassword, verifyAgainstDummy } from '../../../../lib/auth-crypto';
-import { createSession, setSessionCookie, claimAnonymousReports } from '../../../../lib/auth-session';
+import {
+  SESSION_COOKIE_NAME,
+  parseCookie,
+  isWellFormedSessionToken,
+  newSession,
+  sessionRevokeStatement,
+  setSessionCookie,
+  claimAnonymousReports,
+} from '../../../../lib/auth-session';
 
 const MAX_EMAIL_LENGTH = 254;
 const MAX_PASSWORD_LENGTH = 200;
@@ -54,7 +62,22 @@ export async function POST(request: Request) {
       // by a deliberate operator action — see lib/admin-role.ts. An account that
       // already holds it keeps it (getSessionUserByToken reads users.role fresh).
 
-      const token = await createSession(client, row.id);
+      // Account switch / re-login (security fix): a browser that already holds
+      // a session cookie gets that session revoked in the SAME write batch that
+      // inserts its replacement. Overwriting the cookie alone used to leave the
+      // old session valid for its full 30 days with nothing left in this
+      // browser able to revoke it. Only the token this browser itself presents
+      // is deleted — never another browser's or another account's sessions.
+      // If the batch fails, neither statement lands and the outer catch answers
+      // 500 with no new cookie: no switch is claimed and the old session stays
+      // exactly as it was.
+      const priorToken = parseCookie(request.headers.get('cookie'), SESSION_COOKIE_NAME);
+      const session = newSession(row.id);
+      await client.batch(
+        [...(isWellFormedSessionToken(priorToken) ? [sessionRevokeStatement(priorToken)] : []), session.statement],
+        'write',
+      );
+      const token = session.token;
       const response = new NextResponse(
         // Product decision: cross-account TurnitPlus corpus checking is
         // mandatory for every authenticated account — no account preference

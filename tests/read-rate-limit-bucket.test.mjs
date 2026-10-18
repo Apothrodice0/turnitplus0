@@ -10,6 +10,7 @@ import * as reportsRoute from '../app/api/reports/route.ts';
 import * as roomsRoute from '../app/api/reports/rooms/route.ts';
 import * as uploadLimitRoute from '../app/api/upload-limit/route.ts';
 import * as reportByIdRoute from '../app/api/reports/[id]/route.ts';
+import { checkRate as checkGeneralRate } from '../lib/rate-limit.ts';
 import * as logoutRoute from '../app/api/auth/logout/route.ts';
 import { withTestIdentity } from './helpers/test-signup.mjs';
 import {
@@ -150,6 +151,13 @@ function loginRequest(ip, email, password) {
   });
 }
 
+// The general/strict bucket, probed directly. Logout used to be the probe, but it now has
+// its own dedicated bucket (lib/rate-limit.ts checkLogoutRate) precisely so this budget
+// can never block sign-out.
+async function strictBucketProbe(ip) {
+  return { status: (await checkGeneralRate(ip)).allowed ? 200 : 429 };
+}
+
 function logoutRequest(ip) {
   return new Request('http://localhost/api/auth/logout', { method: 'POST', headers: { 'x-forwarded-for': ip } });
 }
@@ -225,12 +233,12 @@ test('normal room navigation cannot exhaust the strict write/auth bucket', async
 
   // The strict bucket, on the SAME IP, must still be fully intact — proven
   // by actually draining all 10 of its own tokens via a real strict-bucket
-  // action (logout; see lib/rate-limit.ts's checkRate) with zero shortfall.
+  // action (a direct checkRate call — see strictBucketProbe) with zero shortfall.
   for (let i = 0; i < 10; i++) {
-    const res = await logoutRoute.POST(logoutRequest(ip));
+    const res = await strictBucketProbe(ip);
     assert.equal(res.status, 200, `strict-bucket request ${i + 1}/10 must still succeed — untouched by the 20 read-bucket requests above`);
   }
-  const eleventh = await logoutRoute.POST(logoutRequest(ip));
+  const eleventh = await strictBucketProbe(ip);
   assert.equal(eleventh.status, 429, 'the strict bucket must still enforce its own real limit once genuinely exhausted by strict-bucket traffic itself');
 });
 
@@ -430,9 +438,9 @@ test('REPRODUCTION: My Reports -> Room 1 -> Back -> Room 4 -> Back -> Room 2 nev
   // The strict bucket must be completely untouched by all of the above —
   // proven by draining all 10 of its own tokens via a real strict action.
   for (let i = 0; i < 10; i++) {
-    const res = await logoutRoute.POST(logoutRequest(ip));
+    const res = await strictBucketProbe(ip);
     assert.equal(res.status, 200, `strict-bucket request ${i + 1}/10 must succeed after the full reproduction sequence above`);
   }
-  const eleventh = await logoutRoute.POST(logoutRequest(ip));
+  const eleventh = await strictBucketProbe(ip);
   assert.equal(eleventh.status, 429, 'the strict bucket still enforces its own real limit — this fix narrows what draws from it, not the limit itself');
 });

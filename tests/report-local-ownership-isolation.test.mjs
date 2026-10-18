@@ -287,7 +287,8 @@ test("9/10/11. sign-out, cross-tab sign-out and account deletion share one purge
   // The page wires that one purge into all three transitions.
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
   const body = (name) => page.match(new RegExp(`function ${name}\\([^)]*\\) \\{[\\s\\S]*?\\n {2}\\}`))?.[0] ?? "";
-  assert.match(body("signOutAccount"), /clearAccountDisplayState\(\);[\s\S]*?void purgeLocalReportStateForSignedOut\(\);[\s\S]*?fetch\("\/api\/auth\/logout"/, "10: explicit sign-out");
+  assert.match(body("completeSignOutInThisTab"), /clearAccountDisplayState\(\);[\s\S]*?void purgeLocalReportStateForSignedOut\(\);/, "10: explicit sign-out (once confirmed)");
+  assert.match(body("signOutAccount"), /completeSignOut: completeSignOutInThisTab/, "10: explicit sign-out wires the confirmed path");
   assert.match(body("completeAccountDeletion"), /void purgeLocalReportStateForSignedOut\(\);/, "9: account deletion");
   assert.match(page, /function handleStorage\(event: StorageEvent\) \{[\s\S]*?clearAccountDisplayState\(\);\s*\n\s*void purgeLocalReportStateForSignedOut\(\);/, "11: another tab's sign-out");
 });

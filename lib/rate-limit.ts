@@ -234,6 +234,25 @@ export async function resetPollRateForTest(clientId: string): Promise<void> {
   await resetBucketForTest(`poll:${clientId}`);
 }
 
+// Dedicated bucket for POST /api/auth/logout (security fix). Logout used to
+// draw from the general bucket, which every /api/developer/* dashboard call,
+// report upload and device-passport request also spends — 10 ordinary
+// requests in a minute were enough to make sign-out return 429, leaving the
+// session valid while the page said "You have signed out". Revoking one's
+// own session is never what a limit should block; this bucket only bounds a
+// runaway client (each call is at most one DELETE by primary key), and no
+// other traffic can spend it.
+const LOGOUT_MAX_TOKENS = 30;
+const LOGOUT_INTERVAL_MS = 60_000;
+
+export async function checkLogoutRate(clientId: string): Promise<RateCheckResult> {
+  return checkBucket(`logout:${clientId}`, LOGOUT_MAX_TOKENS, LOGOUT_INTERVAL_MS);
+}
+
+export async function resetLogoutRateForTest(clientId: string): Promise<void> {
+  await resetBucketForTest(`logout:${clientId}`);
+}
+
 // Separate, generous bucket for ordinary authenticated read/navigation
 // traffic — the room index, a single room's contents, a full report page
 // load, session/account checks, upload-quota display (production bug fix).

@@ -6,6 +6,7 @@ import { createClient } from '@libsql/client';
 import { applyMigrationsLibsql } from '../lib/ingest.js';
 import * as signupRoute from '../app/api/auth/signup/route.ts';
 import * as reportsRoute from '../app/api/reports/route.ts';
+import { checkRate as checkGeneralRate } from '../lib/rate-limit.ts';
 import * as logoutRoute from '../app/api/auth/logout/route.ts';
 import { resetAuthRateForTest, resetRateForTest, resetPollRateForTest, checkPollRate } from '../lib/rate-limit.ts';
 import { withTestIdentity } from './helpers/test-signup.mjs';
@@ -95,6 +96,13 @@ function roomPollRequest(cookie, ip, room) {
   });
 }
 
+// The general/strict bucket, probed directly. Logout used to be the probe, but it now has
+// its own dedicated bucket (lib/rate-limit.ts checkLogoutRate) precisely so this budget
+// can never block sign-out.
+async function strictBucketProbe(ip) {
+  return { status: (await checkGeneralRate(ip)).allowed ? 200 : 429 };
+}
+
 function logoutRequest(ip) {
   return new Request('http://localhost/api/auth/logout', {
     method: 'POST',
@@ -125,7 +133,7 @@ test('DIRECTION 1: repeated room-status polling (up to 30/min) never consumes th
   // a request that depends on it (here, logout — see this file's own
   // header comment for why it's the strict-bucket stand-in) must succeed,
   // proving the 15 poll requests drew from a different bucket entirely.
-  const logoutRes = await logoutRoute.POST(logoutRequest(ip));
+  const logoutRes = await strictBucketProbe(ip);
   assert.equal(logoutRes.status, 200, "the general/strict bucket must be untouched by polling — a write/auth action must never be blocked by it");
 });
 
@@ -138,12 +146,12 @@ test('DIRECTION 2: draining the general/strict (10/min) bucket never blocks room
   await resetRateForTest(ip);
   await resetPollRateForTest(ip);
 
-  // Fully exhaust the general/strict bucket via logout (checkRate).
+  // Fully exhaust the general/strict bucket (checkRate, via strictBucketProbe).
   for (let i = 0; i < 10; i++) {
-    const res = await logoutRoute.POST(logoutRequest(ip));
+    const res = await strictBucketProbe(ip);
     assert.equal(res.status, 200, `general/strict-bucket request ${i + 1} must succeed while under the limit`);
   }
-  const eleventh = await logoutRoute.POST(logoutRequest(ip));
+  const eleventh = await strictBucketProbe(ip);
   assert.equal(eleventh.status, 429, 'the general/strict bucket must now genuinely be exhausted — otherwise this test proves nothing');
 
   // Room-status polling, on the SAME now-exhausted IP, must be entirely

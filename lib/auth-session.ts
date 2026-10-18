@@ -105,8 +105,43 @@ function sessionInsertStatement(token: string, userId: string, now: number = Dat
   };
 }
 
-export async function destroySessionByToken(client: Client, token: string): Promise<void> {
-  await client.execute({ sql: "DELETE FROM sessions WHERE token_hash = ?", args: [hashToken(token)] });
+// createSession/newSession only ever issue 32 random bytes as lowercase hex,
+// so a cookie value of any other shape can never match a sessions row —
+// callers skip the database entirely for it instead of hashing junk.
+const SESSION_TOKEN_PATTERN = /^[0-9a-f]{64}$/;
+
+export function isWellFormedSessionToken(token: string | null | undefined): token is string {
+  return typeof token === "string" && SESSION_TOKEN_PATTERN.test(token);
+}
+
+/**
+ * The DELETE that revokes one session token. Exported so login/signup can put
+ * the revocation of the browser's PREVIOUS session in the same atomic batch
+ * that inserts its replacement (account switch / re-login): either both land
+ * or neither does, so a switch can never leave the old session live.
+ * RETURNING makes the deleted rows themselves the affected-row count.
+ */
+export function sessionRevokeStatement(token: string): InStatement {
+  return { sql: "DELETE FROM sessions WHERE token_hash = ? RETURNING expires_at", args: [hashToken(token)] };
+}
+
+/**
+ * `deleted`: rows actually removed (0 or 1 — token_hash is the primary key).
+ * `revokedActive`: one of them was a still-valid session. A row that had
+ * already expired is removed too (it was dead anyway), but is reported as
+ * nothing-to-revoke, never as a revoked active session.
+ */
+export type SessionRevocation = { deleted: number; revokedActive: boolean };
+
+/**
+ * Throws on any database failure (including a timed-out request whose outcome
+ * is unknown) — never swallowed here, so a caller can never mistake a failed
+ * or unresolved revocation for a completed one.
+ */
+export async function destroySessionByToken(client: Client, token: string, now: number = Date.now()): Promise<SessionRevocation> {
+  const result = await client.execute(sessionRevokeStatement(token));
+  const rows = result.rows as unknown as Array<{ expires_at: number | bigint }>;
+  return { deleted: rows.length, revokedActive: rows.some((row) => Number(row.expires_at) > now) };
 }
 
 // Split out from getSessionUser so Server Components (which read cookies via
