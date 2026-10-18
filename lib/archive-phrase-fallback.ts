@@ -280,8 +280,10 @@ export function wholeDocumentOrder(count: number): number[] {
 }
 
 /** One rare seed — discovery bookkeeping ONLY. `position` is where the exact
- *  5-gram starts in the submission; it is never a scored position. */
-export type RareSeedHit = { position: number; df: number; representationIds: string[] };
+ *  5-gram starts in the submission; it is never a scored position. `hash` is
+ *  the 5-gram's gramHash: a gram repeated in the submission yields one hit per
+ *  unmatched occurrence, and nomination counts each distinct gram once. */
+export type RareSeedHit = { position: number; df: number; representationIds: string[]; hash?: string };
 
 export type QueryGramDfResolution = {
   /** Map<gramHash, DF> exactly as resolveQueryGramDf returns it. */
@@ -334,6 +336,17 @@ export async function resolveQueryGramDfWithRareSeeds(
   let checks = 0;
   let queries = 0;
   const wc = queryWords.length;
+  // Every unmatched start of each 5-gram: a gram resolved once is a seed at all
+  // of them, so a passage the submission repeats is seeded where it is longest,
+  // not only where it first (perhaps briefly) appears. No extra queries.
+  const unmatchedStarts = new Map<string, number[]>();
+  for (let s = 0; s + S <= wc; s += 1) {
+    if (matched.has(s)) continue;
+    const hash = gramHash(queryWords.slice(s, s + S).join(" "));
+    const starts = unmatchedStarts.get(hash);
+    if (starts) starts.push(s);
+    else unmatchedStarts.set(hash, [s]);
+  }
 
   const pendingGram = (s: number): PendingGram | "skip" | "uninformative" => {
     const words = queryWords.slice(s, s + S);
@@ -347,7 +360,10 @@ export async function resolveQueryGramDfWithRareSeeds(
     const ids = await phraseSearch(client, gram.words, DF_OVERFLOW);
     queries += 1;
     if (ids.length >= 1 && ids.length <= rareSeedMaxDf) {
-      rareSeeds.push({ position: gram.position, df: ids.length, representationIds: [...ids].sort() });
+      const representationIds = [...ids].sort();
+      for (const position of unmatchedStarts.get(gram.hash) ?? [gram.position]) {
+        rareSeeds.push({ position, df: ids.length, representationIds, hash: gram.hash });
+      }
     }
     return ids.length;
   };
@@ -420,8 +436,9 @@ export async function resolveQueryGramDf(
  * Rare seeds -> NEW candidate representation IDs (discovery only). A document
  * not already in `existingCandidateIds` is nominated iff, for some window of
  * `window` tokens, at least `minSupport` of the rare seeds pointing at it
- * start inside the window and are pairwise non-overlapping (start positions
- * >= 5 apart; greedy over sorted positions, which maximises that count).
+ * start inside the window, are pairwise non-overlapping (start positions
+ * >= 5 apart; greedy over sorted positions) and are distinct 5-grams (a gram
+ * the submission repeats counts once per window).
  * Ranked by that support desc, then representation_id asc; at most
  * `maxCandidates` returned. Pure and deterministic; the nominated documents
  * are then retrieved and verified by the unchanged scorer like any other
@@ -436,24 +453,30 @@ export function nominateRareSeedCandidates(
   const window = opts.window ?? RARE_SEED_WINDOW;
   const maxCandidates = opts.maxCandidates ?? RARE_SEED_MAX_CANDIDATES;
   const existing = new Set(existingCandidateIds);
-  const positionsById = new Map<string, number[]>();
+  const seedsById = new Map<string, { position: number; key: string }[]>();
   for (const seed of rareSeeds) {
+    const key = seed.hash ?? `@${seed.position}`; // a seed without a hash is its own distinct gram
     for (const id of seed.representationIds) {
       if (existing.has(id)) continue;
-      const positions = positionsById.get(id);
-      if (positions) positions.push(seed.position);
-      else positionsById.set(id, [seed.position]);
+      const seeds = seedsById.get(id);
+      if (seeds) seeds.push({ position: seed.position, key });
+      else seedsById.set(id, [{ position: seed.position, key }]);
     }
   }
   const supported: { id: string; support: number }[] = [];
-  for (const [id, positions] of positionsById) {
-    positions.sort((a, b) => a - b);
+  for (const [id, seeds] of seedsById) {
+    seeds.sort((a, b) => a.position - b.position);
     let support = 0;
-    for (let first = 0; first < positions.length; first += 1) {
+    for (let first = 0; first < seeds.length; first += 1) {
       let inWindow = 0;
       let lastStart = Number.NEGATIVE_INFINITY;
-      for (let k = first; k < positions.length && positions[k] - positions[first] < window; k += 1) {
-        if (positions[k] - lastStart >= S) { inWindow += 1; lastStart = positions[k]; }
+      const counted = new Set<string>();
+      for (let k = first; k < seeds.length && seeds[k].position - seeds[first].position < window; k += 1) {
+        if (seeds[k].position - lastStart >= S && !counted.has(seeds[k].key)) {
+          inWindow += 1;
+          lastStart = seeds[k].position;
+          counted.add(seeds[k].key);
+        }
       }
       support = Math.max(support, inWindow);
     }
