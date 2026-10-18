@@ -124,8 +124,8 @@ test("uncertain language caps an otherwise-ACCEPT decision to REVIEW, never REJE
   assert.ok(result.reasonCodes.includes("LANGUAGE_UNCERTAIN"));
 });
 
-test("ACCEPT is impossible unless language is CONFIDENT_ENGLISH, across a matrix of otherwise-maximal inputs", () => {
-  for (const languageClass of ["CONFIDENT_ENGLISH", "CONFIDENT_NON_ENGLISH", "UNCERTAIN"]) {
+test("ACCEPT is impossible unless language is CONFIDENT_ENGLISH or CONFIDENT_ARABIC, across a matrix of otherwise-maximal inputs", () => {
+  for (const languageClass of ["CONFIDENT_ENGLISH", "CONFIDENT_ARABIC", "CONFIDENT_NON_ENGLISH", "UNCERTAIN"]) {
     const hardGate = languageClass === "CONFIDENT_NON_ENGLISH" ? failingHardGate(["NOT_ENGLISH"]) : passingHardGate(languageClass);
     const result = decideCorpusAdmission({
       hardGate,
@@ -135,8 +135,8 @@ test("ACCEPT is impossible unless language is CONFIDENT_ENGLISH, across a matrix
       featureVector: null,
       corpusValueScore: 100,
     });
-    if (languageClass === "CONFIDENT_ENGLISH") {
-      assert.equal(result.decision, "ACCEPT", "confident English with maximal other signals should ACCEPT");
+    if (languageClass === "CONFIDENT_ENGLISH" || languageClass === "CONFIDENT_ARABIC") {
+      assert.equal(result.decision, "ACCEPT", `${languageClass} with maximal other signals should ACCEPT`);
     } else {
       assert.notEqual(result.decision, "ACCEPT", `${languageClass} must never reach ACCEPT`);
     }

@@ -205,3 +205,27 @@ test("a promoted representation whose ONLY real reference is the current submitt
   assert.equal(result.status, "MATCHED", "before this fix, zero remaining ownership meant an unconditional drop for a signed-in account — that must no longer swallow an actively-promoted representation");
   assert.equal(result.matches[0].relationshipType, "TURNITPLUS_CORPUS_SOURCE");
 });
+
+// Arabic (corpus-hard-gates v2 admits Arabic): an admitted, promoted Arabic source is found in another account's Arabic
+// submission that copies part of it — the shingle matcher needs no language-specific code. Synthetic text.
+const TEXT_AR =
+  "تناولت هذه الدراسة الميدانية واقع الحماية القانونية للمعطيات ذات الطابع الشخصي في المؤسسات الجامعية الجزائرية، " +
+  "حيث اعتمد الباحثون على استبيان وزع على عينة من الأساتذة والموظفين الإداريين في ثلاث جامعات، وأظهرت النتائج أن " +
+  "أغلب المؤسسات لا تملك سياسة مكتوبة لمعالجة البيانات، وأن الوعي بحقوق الأشخاص المعنيين ما يزال محدودا رغم صدور " +
+  "النصوص التشريعية والتنظيمية المنظمة لهذا المجال، مما يستدعي تكثيف برامج التكوين وإنشاء خلايا متخصصة للمطابقة.";
+
+test("Arabic: a promoted Arabic source is reported as TURNITPLUS_CORPUS_SOURCE for another account's copying submission", async () => {
+  await seedActivePromotedSource(TEXT_AR);
+  await ensureUser("arabic-account-2");
+  const copied = TEXT_AR.split(" ").slice(12, 52).join(" ");
+  const submission =
+    "يهدف هذا البحث إلى دراسة تأثير التحول الرقمي على أداء الإدارة العمومية في الولايات الداخلية الجزائرية خلال العقد الأخير، " +
+    copied +
+    " وفي الختام يقترح البحث جملة من التوصيات العملية لتحسين جودة الخدمة العمومية الرقمية وتبسيط الإجراءات الإدارية للمواطنين.";
+  const result = await withEnv("CORPUS_SOURCE_MATCHING_ENABLED", "true", () =>
+    matchAgainstUserSubmissionCorpus(client, { accountId: "arabic-account-2", canonicalText: submission }));
+  assert.equal(result.status, "MATCHED");
+  assert.equal(result.matches[0].relationshipType, "TURNITPLUS_CORPUS_SOURCE");
+  assert.ok(result.matches[0].matchedWordCount >= 30, `copied Arabic passage must be verified word for word (got ${result.matches[0].matchedWordCount})`);
+  assert.ok(result.matches[0].passages.length >= 1);
+});

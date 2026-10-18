@@ -10,16 +10,24 @@ import type { CorpusExtractionResult } from "./corpus-text-extraction";
  * itself, does no I/O — exactly the discipline this codebase's other pure
  * policy/spec modules already established.
  *
- * The 3000-word minimum and the English-only gate here are
+ * The 3000-word minimum and the language gate here are
  * corpus-admission-only: this module is never imported by
  * app/api/reports/route.ts, app/page.tsx, or app/ai-detector-worker.ts, so
  * ordinary report checking keeps accepting any length/language exactly as
  * today. See tests/corpus-admission-privacy.test.mjs.
+ *
+ * v2: Arabic is admitted alongside English. The submission corpus is the
+ * only source lane that can hold Arabic text (the built-in archive and the
+ * selective corpus are English), so an English-only gate made Arabic
+ * cross-submission matching impossible. Every other confidently detected
+ * language still fails with NOT_ENGLISH (the reason-code string is kept for
+ * continuity with stored decisions and admin filters; it now means "not a
+ * supported admission language").
  */
 
-export const CORPUS_HARD_GATE_POLICY_VERSION = "corpus-hard-gates-v1";
+export const CORPUS_HARD_GATE_POLICY_VERSION = "corpus-hard-gates-v2";
 
-export type CorpusLanguageAdmissionClass = "CONFIDENT_ENGLISH" | "CONFIDENT_NON_ENGLISH" | "UNCERTAIN";
+export type CorpusLanguageAdmissionClass = "CONFIDENT_ENGLISH" | "CONFIDENT_ARABIC" | "CONFIDENT_NON_ENGLISH" | "UNCERTAIN";
 
 export type CorpusHardGateThresholds = {
   minimumWords: SpecifiedValue<number>;
@@ -55,7 +63,9 @@ export function classifyLanguageForAdmission(
   if (detectedLanguage === null || languageConfidence === null) return "UNCERTAIN";
   if (detectedLanguage === "Mixed") return "UNCERTAIN";
   if (languageConfidence < thresholds.languageConfidenceFloor.value) return "UNCERTAIN";
-  return detectedLanguage === "English" ? "CONFIDENT_ENGLISH" : "CONFIDENT_NON_ENGLISH";
+  if (detectedLanguage === "English") return "CONFIDENT_ENGLISH";
+  if (detectedLanguage === "Arabic") return "CONFIDENT_ARABIC";
+  return "CONFIDENT_NON_ENGLISH";
 }
 
 export type CorpusHardGateInput = {

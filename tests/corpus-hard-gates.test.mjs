@@ -84,9 +84,14 @@ test("classifyLanguageForAdmission: confident English", () => {
   assert.equal(classifyLanguageForAdmission("English", 0.9), "CONFIDENT_ENGLISH");
 });
 
-test("classifyLanguageForAdmission: confident non-English (Arabic, French)", () => {
-  assert.equal(classifyLanguageForAdmission("Arabic", 0.9), "CONFIDENT_NON_ENGLISH");
+test("classifyLanguageForAdmission: confident Arabic is its own admissible class (v2)", () => {
+  assert.equal(classifyLanguageForAdmission("Arabic", 0.9), "CONFIDENT_ARABIC");
+  assert.equal(classifyLanguageForAdmission("Arabic", 0.5), "UNCERTAIN", "the confidence floor applies to Arabic exactly as to English");
+});
+
+test("classifyLanguageForAdmission: other confident languages stay non-admissible (French, Spanish)", () => {
   assert.equal(classifyLanguageForAdmission("French", 0.9), "CONFIDENT_NON_ENGLISH");
+  assert.equal(classifyLanguageForAdmission("Spanish", 0.9), "CONFIDENT_NON_ENGLISH");
 });
 
 test("classifyLanguageForAdmission: Mixed always resolves UNCERTAIN regardless of confidence value passed in", () => {
@@ -104,11 +109,20 @@ test("classifyLanguageForAdmission: low-confidence English is UNCERTAIN, not CON
   assert.equal(classifyLanguageForAdmission("English", 0.1), "UNCERTAIN");
 });
 
-test("confident non-English fails the hard gate with NOT_ENGLISH", () => {
-  const result = evaluateCorpusHardGates(baseInput({ detectedLanguage: "Arabic", languageConfidence: 0.9 }));
+test("a confident unsupported language fails the hard gate with NOT_ENGLISH", () => {
+  const result = evaluateCorpusHardGates(baseInput({ detectedLanguage: "French", languageConfidence: 0.9 }));
   assert.equal(result.passed, false);
   assert.ok(result.failureCodes.includes("NOT_ENGLISH"));
   assert.equal(result.languageClass, "CONFIDENT_NON_ENGLISH");
+});
+
+test("confident Arabic passes the language gate; the word-count gate still applies to it", () => {
+  const result = evaluateCorpusHardGates(baseInput({ detectedLanguage: "Arabic", languageConfidence: 0.9 }));
+  assert.equal(result.passed, true);
+  assert.equal(result.languageClass, "CONFIDENT_ARABIC");
+  assert.ok(!result.failureCodes.includes("NOT_ENGLISH"));
+  const short = evaluateCorpusHardGates(baseInput({ detectedLanguage: "Arabic", languageConfidence: 0.9, wordCount: 100 }));
+  assert.ok(short.failureCodes.includes("WORD_COUNT_BELOW_MINIMUM"));
 });
 
 test("uncertain language does NOT fail the hard gate (it is a policy-level REVIEW cap, not a hard rejection) — the gate still passes", () => {
