@@ -4,6 +4,8 @@ export type PdfTextContent = {
 
 export type PdfTextPage = {
   getTextContent(): Promise<PdfTextContent>;
+  /** pdf.js's page operator list. Read only on pages holding right-to-left text (see RIGHT-TO-LEFT TEXT below). */
+  getOperatorList?(): Promise<{ fnArray: ArrayLike<number>; argsArray: ArrayLike<unknown> }>;
 };
 
 export type PdfTextDocument = {
@@ -14,7 +16,13 @@ export type PdfTextDocument = {
 export type PdfExtractionProgress = (pageNumber: number, pageCount: number) => void;
 
 /** Phase 5 addition — mirrors lib/html-text-extraction.ts's HTML_EXTRACTOR_VERSION convention, for callers (lib/http-content-retriever.ts) that record which extractor produced a given RetrievedSource.extractedText. */
-export const PDF_EXTRACTOR_VERSION = "pdf-text-extraction-v1";
+/**
+ * v1-rtl = v1 + the right-to-left repairs of RIGHT-TO-LEFT TEXT (below), ported from the local
+ * pdf-text-extraction-v3 candidate (22c8220) WITHOUT its v2 line-break dehyphenation: glyph order of
+ * multi-character RTL glyphs and right-to-left reading of mainly-RTL printed lines. Both act only on
+ * pages holding a right-to-left character, so a document without one extracts byte for byte as v1.
+ */
+export const PDF_EXTRACTOR_VERSION = "pdf-text-extraction-v1-rtl";
 
 type RawPdfTextItem = { str?: unknown; width?: unknown; transform?: unknown };
 
@@ -101,6 +109,10 @@ function itemGeometry(item: unknown): PdfItemGeometry | null {
  * not just the positive side.
  */
 const ADJACENT_RUN_TOLERANCE_RATIO = 0.15;
+/** Right-to-left printed lines only: how far (in em) a following run may overlap the previous one and still continue its word. */
+const RTL_ADJACENT_OVERLAP_RATIO = 0.5;
+/** Right-to-left printed lines only: the largest positive gap (in em) that still continues a word. */
+const RTL_ADJACENT_GAP_RATIO = 0.1;
 
 function glyphsAreAdjacent(before: unknown, after: unknown): boolean {
   const a = itemGeometry(before);
@@ -112,6 +124,15 @@ function glyphsAreAdjacent(before: unknown, after: unknown): boolean {
   // alone were ever ambiguous (it also catches superscripts/footnote marks,
   // which sit on a different baseline despite being horizontally adjacent).
   const onSameBaseline = Math.abs(b.baseline - a.baseline) < tolerance;
+  // A right-to-left printed line is emitted right to left, so the next item sits to the LEFT, and
+  // justified Arabic overlaps the runs of one word. Measured on 68,422 item pairs of 69 ASJP articles: a mirrored
+  // overlap of 0.2-0.5 em was word-internal 4,049 times and a word boundary 189 times; a positive gap of
+  // 0.10-0.15 em was a boundary 567 times and word-internal 43 times; a gap of 0.2 em or more was a boundary.
+  if (isRtlVisualLineItem(before) && isRtlVisualLineItem(after)) {
+    const gap = a.left - b.right;
+    const em = Math.max(a.emSize, b.emSize);
+    return onSameBaseline && gap >= -em * RTL_ADJACENT_OVERLAP_RATIO && gap < em * RTL_ADJACENT_GAP_RATIO;
+  }
   return onSameBaseline && Math.abs(b.left - a.right) < tolerance;
 }
 
@@ -162,6 +183,246 @@ function joinPageTextItems(items: unknown[]): string {
  * paths run the same `onProgress` → `getPage` → `getTextContent` →
  * `joinPageTextItems` sequence and `pages` is the identical array.
  */
+// =============================================================================
+// RIGHT-TO-LEFT TEXT (ported from the v3 candidate 22c8220)
+// =============================================================================
+
+/**
+ * Right-to-left text repair (pdf-text-extraction-v1-rtl; ported from the v3 candidate) for pdf.js getTextContent() items.
+ *
+ * Measured on 270 original ASJP (Algerian) journal PDFs, 2026-10-08: the v2 page assembly
+ * reproduced the typed abstract of a Word-produced Arabic article at 17-24% of its words.
+ * Two independent causes, both confined to right-to-left text:
+ *
+ * 1. GLYPH ORDER. pdf.js builds a text chunk from its glyphs' Unicode strings in DRAWING order
+ *    and then reorders the whole string character by character (pdf.worker `runBidiTransform`).
+ *    A glyph whose Unicode is several characters — an Arabic ligature (لم, لج, لا, في, تي ...)
+ *    mapped by the PDF's ToUnicode CMap in logical order, or expanded by pdf.js normalizeUnicode —
+ *    is therefore reversed inside itself: "الجمهورية" comes out as "اجلمهورية".
+ *    repairRtlGlyphOrder reads the glyph strings from the page's operator list, aligns them with
+ *    each RTL item by exact match and restores those glyphs. An item it cannot align is left as
+ *    pdf.js produced it.
+ *
+ * 2. LINE ORDER. Word splits one printed right-to-left line into several items and pdf.js emits
+ *    them left to right (other producers emit one item per word, left to right), so the v2 assembly
+ *    read the line from its end and put spaces or line breaks inside words split across items.
+ *    orderRtlVisualLines reads every printed line (consecutive items on one baseline) whose letters
+ *    are mainly right-to-left from right to left, and glyphsAreAdjacent (above) tests adjacency
+ *    mirrored for those items.
+ *
+ * Both repairs touch only items that hold a right-to-left character, and only lines whose letters
+ * are mainly right-to-left: a document without such characters is extracted byte for byte as v1.
+ */
+
+/** pdf.js OPS codes of the text-showing operators (pdf.js 6.2.108, the release the extractor pins). */
+const TEXT_SHOWING_OPS: ReadonlySet<number> = new Set([44, 45, 46, 47]);
+
+let normalizeRegex: RegExp | null = null;
+/** pdf.js 6.2.108 `normalizeUnicode`, verbatim: getTextContent applies it to every chunk, so the glyph stream must too. */
+function pdfjsNormalizeUnicode(value: string): string {
+  normalizeRegex ??= /([ µ;ຳ -  Ωﬀ-ﬄﬆﬠ-זּטּ-לּמּנּסּףּפּצּ-ﮡﮤ-ﮩﮮ-ﮱﯓ-ﯜﯞ-ﯧﯪ-ﯸﯼﯽﰀ-ﱝﱤ-ﳱﳵ-ﴽﶈﷴﷺﷻﹱﹷﹹﹻﹽ]+)|(ﬅ+)/gu;
+  return value.replaceAll(normalizeRegex, (_, p1: string | undefined, p2: string | undefined) => (p1 ? p1.normalize("NFKC") : "ſt".repeat(p2?.length ?? 0)));
+}
+
+/** Hebrew, Arabic, Syriac, Thaana, N'Ko, Samaritan, Mandaic, Arabic Extended, and their presentation forms. */
+const RTL_CHARACTER = /[֐-ࣿיִ-﷿ﹰ-﻿]/u;
+const RTL_CHARACTERS = /[֐-ࣿיִ-﷿ﹰ-﻿]/gu;
+/** Letters and digits outside the RTL ranges end an RTL run in pdf.js's reordering. */
+const ENDS_RTL_RUN = /[\p{L}\p{N}]/u;
+const LATIN_LETTERS = /\p{Script=Latin}/gu;
+
+type RawItem = { str?: unknown; dir?: unknown; hasEOL?: unknown; width?: unknown; transform?: unknown };
+type OperatorList = { fnArray: ArrayLike<number>; argsArray: ArrayLike<unknown> };
+
+export type PdfRtlRepairCounts = { rtlItems: number; alignedItems: number; unalignedItems: number; repairedGlyphs: number; rtlLines: number };
+
+export function emptyPdfRtlRepairCounts(): PdfRtlRepairCounts {
+  return { rtlItems: 0, alignedItems: 0, unalignedItems: 0, repairedGlyphs: 0, rtlLines: 0 };
+}
+
+const strOf = (item: unknown) => (item && typeof item === "object" && typeof (item as RawItem).str === "string" ? ((item as RawItem).str as string) : "");
+
+/** Whether any item holds a right-to-left character (the only pages either repair ever looks at). */
+export function hasRtlText(items: readonly unknown[]): boolean {
+  return items.some((item) => RTL_CHARACTER.test(strOf(item)));
+}
+
+type GlyphStream = { rtl: string; multiCharacterGlyphAt: Map<number, string> };
+
+/** The page's glyph Unicode strings in drawing order, reduced to RTL characters, with the start of every multi-character all-RTL glyph. */
+function rtlGlyphStream(operatorList: OperatorList): GlyphStream {
+  let rtl = "";
+  const multiCharacterGlyphAt = new Map<number, string>();
+  for (let index = 0; index < operatorList.fnArray.length; index += 1) {
+    if (!TEXT_SHOWING_OPS.has(operatorList.fnArray[index])) continue;
+    const args = operatorList.argsArray[index];
+    const glyphs = Array.isArray(args) ? args.find((arg) => Array.isArray(arg)) : null;
+    if (!Array.isArray(glyphs)) continue;
+    for (const glyph of glyphs) {
+      if (!glyph || typeof glyph !== "object") continue;
+      const raw = (glyph as { unicode?: unknown }).unicode;
+      if (typeof raw !== "string" || raw.length === 0) continue;
+      const unit = pdfjsNormalizeUnicode(raw);
+      const rtlPart = unit.match(RTL_CHARACTERS)?.join("") ?? "";
+      if (rtlPart.length === 0) continue;
+      if (unit.length >= 2 && rtlPart.length === unit.length) multiCharacterGlyphAt.set(rtl.length, unit);
+      rtl += rtlPart;
+    }
+  }
+  return { rtl, multiCharacterGlyphAt };
+}
+
+/**
+ * UTF-16 indices of the item's RTL characters in DRAWING order: each RTL run read right to left,
+ * the runs in reverse order for an "rtl" item (pdf.js base level 1) and in order otherwise (level 0).
+ */
+function rtlDrawingOrder(str: string, rtlItem: boolean): number[] {
+  const runs: number[][] = [];
+  let current: number[] | null = null;
+  for (let index = 0; index < str.length; index += 1) {
+    const character = str[index];
+    if (RTL_CHARACTER.test(character)) (current ??= []).push(index);
+    else if (ENDS_RTL_RUN.test(character)) {
+      if (current) runs.push(current);
+      current = null;
+    }
+  }
+  if (current) runs.push(current);
+  if (rtlItem) runs.reverse();
+  return runs.flatMap((run) => run.reverse());
+}
+
+/**
+ * Restores every multi-character RTL glyph that pdf.js reversed inside itself. Exact-match alignment
+ * only: the item's RTL characters, read in drawing order, must occur verbatim in the page's glyph
+ * stream (next in sequence, or once anywhere on the page). A restored glyph's characters must sit
+ * contiguous and reversed in the item; the result is a permutation inside those spans only.
+ */
+export function repairRtlGlyphOrder(items: readonly unknown[], operatorList: OperatorList, counts: PdfRtlRepairCounts): unknown[] {
+  const stream = rtlGlyphStream(operatorList);
+  let cursor = 0;
+  return items.map((item) => {
+    const str = strOf(item);
+    if (!RTL_CHARACTER.test(str)) return item;
+    counts.rtlItems += 1;
+    const order = rtlDrawingOrder(str, (item as RawItem).dir === "rtl");
+    const needle = order.map((index) => str[index]).join("");
+    let at = stream.rtl.startsWith(needle, cursor) ? cursor : stream.rtl.indexOf(needle, cursor);
+    if (at < 0) {
+      const first = stream.rtl.indexOf(needle);
+      at = first >= 0 && stream.rtl.indexOf(needle, first + 1) < 0 ? first : -1;
+    }
+    if (at < 0) {
+      counts.unalignedItems += 1;
+      return item;
+    }
+    counts.alignedItems += 1;
+    cursor = at + needle.length;
+    const characters = str.split("");
+    let changed = false;
+    for (let k = 0; k < needle.length; k += 1) {
+      const glyph = stream.multiCharacterGlyphAt.get(at + k);
+      if (!glyph || k + glyph.length > needle.length) continue;
+      let contiguous = true;
+      for (let j = 1; j < glyph.length; j += 1) if (order[k + j] !== order[k] - j) contiguous = false;
+      if (!contiguous) continue;
+      const end = order[k];
+      for (let j = 0; j < glyph.length; j += 1) characters[end - glyph.length + 1 + j] = glyph[j];
+      counts.repairedGlyphs += 1;
+      changed = true;
+    }
+    return changed ? { ...(item as object), str: characters.join("") } : item;
+  });
+}
+
+/** Marks an item copy that orderRtlVisualLines placed in right-to-left reading order. */
+export const RTL_VISUAL_LINE = Symbol.for("turnitplus.pdf.rtl-visual-line");
+
+function geometryOf(item: unknown): { left: number; right: number; baseline: number; em: number } | null {
+  const { transform, width } = (item ?? {}) as RawItem;
+  if (!Array.isArray(transform) || transform.length < 6) return null;
+  const left = Number(transform[4]);
+  const baseline = Number(transform[5]);
+  const w = Number(width);
+  const em = Math.abs(Number(transform[0])) || Math.abs(Number(transform[3]));
+  if (![left, baseline, w, em].every(Number.isFinite) || em <= 0) return null;
+  if (Math.abs(Number(transform[1])) > 1e-6 || Math.abs(Number(transform[2])) > 1e-6) return null; // rotated text: left as is
+  return { left, right: left + w, baseline, em };
+}
+
+/**
+ * Re-emits each printed line (a run of items closed by pdf.js's `hasEOL`) whose letters are mainly
+ * right-to-left in right-to-left visual order — right edge descending — so the line reads in logical
+ * order and a word split across items is rejoined by the mirrored adjacency test. A line is left
+ * exactly as emitted unless every item on it has upright geometry on one baseline.
+ */
+export function orderRtlVisualLines(items: readonly unknown[], counts: PdfRtlRepairCounts): unknown[] {
+  const out: unknown[] = [];
+  /** One printed line: consecutive items on one baseline. Re-emitted right to left when its letters are mainly RTL. */
+  const emitRun = (run: unknown[]) => {
+    const geometry = run.map(geometryOf);
+    const text = run.map(strOf).join("");
+    const rtlLetters = text.match(RTL_CHARACTERS)?.length ?? 0;
+    const latinLetters = text.match(LATIN_LETTERS)?.length ?? 0;
+    if (run.length < 2 || rtlLetters <= latinLetters || geometry.some((g) => g === null)) {
+      out.push(...run);
+      return;
+    }
+    const lastHadEol = Boolean((run[run.length - 1] as RawItem).hasEOL);
+    const ranked = run
+      .map((item, index) => ({ item, index, right: geometry[index]!.right }))
+      .sort((a, b) => b.right - a.right || a.index - b.index);
+    counts.rtlLines += 1;
+    out.push(...ranked.map(({ item }, position) => ({ ...(item as object), hasEOL: position === ranked.length - 1 ? lastHadEol : false, [RTL_VISUAL_LINE]: true })));
+  };
+  // pdf.js does not always set hasEOL between printed lines (measured: a presentation-form PDF emitting one item per
+  // word ran two lines into one EOL group), so lines are the runs of consecutive items sharing a baseline.
+  let run: unknown[] = [];
+  let runBaseline: number | null = null;
+  let runEm = 0;
+  for (const item of items) {
+    const g = geometryOf(item);
+    const sameLine = run.length > 0 && g !== null && runBaseline !== null && Math.abs(g.baseline - runBaseline) < Math.max(runEm, g.em) * 0.15;
+    if (run.length > 0 && !sameLine) {
+      emitRun(run);
+      run = [];
+    }
+    if (run.length === 0) {
+      runBaseline = g?.baseline ?? null;
+      runEm = g?.em ?? 0;
+    }
+    run.push(item);
+    if (g) runEm = Math.max(runEm, g.em);
+    if ((item as RawItem)?.hasEOL) {
+      emitRun(run);
+      run = [];
+    }
+  }
+  if (run.length) emitRun(run);
+  return out;
+}
+
+export function isRtlVisualLineItem(item: unknown): boolean {
+  return Boolean(item && typeof item === "object" && (item as Record<symbol, unknown>)[RTL_VISUAL_LINE]);
+}
+
+/** The right-to-left repairs (see RIGHT-TO-LEFT TEXT above); a page without a right-to-left character is returned untouched. */
+async function repairRightToLeftItems(page: PdfTextPage, items: unknown[]): Promise<unknown[]> {
+  if (!hasRtlText(items)) return items;
+  const counts = emptyPdfRtlRepairCounts();
+  let repaired = items;
+  if (typeof page.getOperatorList === "function") {
+    let operatorList: Awaited<ReturnType<NonNullable<PdfTextPage["getOperatorList"]>>> | null = null;
+    try {
+      operatorList = await page.getOperatorList();
+    } catch {
+      // The glyph-order repair is skipped for this page; its text is still read, in right-to-left line order.
+    }
+    if (operatorList) repaired = repairRtlGlyphOrder(items, operatorList, counts);
+  }
+  return orderRtlVisualLines(repaired, counts);
+}
+
 async function collectPdfPages(
   document: PdfTextDocument,
   onProgress: PdfExtractionProgress | undefined,
@@ -176,7 +437,7 @@ async function collectPdfPages(
     try {
       const page = await document.getPage(pageNumber);
       const content = await page.getTextContent();
-      const joined = joinPageTextItems(content.items);
+      const joined = joinPageTextItems(await repairRightToLeftItems(page, content.items));
       if (joined.trim().length === 0) emptyPageCount += 1;
       pages.push(joined);
     } catch (error) {
