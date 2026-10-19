@@ -38,7 +38,8 @@ test("display: Arabic reads 'Not available for Arabic' with no number; other lan
   assert.equal(ar.value, null);
   assert.equal(ar.label, "Not available for Arabic");
   assert.equal(ar.range, "No AI result");
-  assert.match(ar.detail, /validated for English only/);
+  assert.match(ar.detail, /experimental AI analysis supports English only/);
+  assert.doesNotMatch(ar.detail, /validated/i);
   assert.doesNotMatch(ar.detail, /\d+\s*%|Fewer than 300/);
   const fr = aiSignalDisplay(reportWith(unsupported({ unsupportedReason: "UNSUPPORTED_LANGUAGE", detectedLanguage: "French" })));
   assert.equal(fr.label, "Not available for this language");
@@ -54,7 +55,7 @@ test("Retry: never offered for a language decline; still offered for an ordinary
   assert.equal(isAiRetryOffered({ aiUnavailableReason: AI_UNAVAILABLE_REASON_UNSUPPORTED_LANGUAGE }), false);
   assert.equal(isAiRetryOffered({ aiUnavailableReason: AI_UNAVAILABLE_REASON_REPORT_SIZE }), false);
   assert.equal(isAiRetryOffered({}), true);
-  assert.match(unavailableAiRoomNote({ aiUnavailableReason: AI_UNAVAILABLE_REASON_UNSUPPORTED_LANGUAGE }), /validated for English only/);
+  assert.match(unavailableAiRoomNote({ aiUnavailableReason: AI_UNAVAILABLE_REASON_UNSUPPORTED_LANGUAGE }), /experimental English-only feature/);
   assert.doesNotMatch(unavailableAiRoomNote({ aiUnavailableReason: AI_UNAVAILABLE_REASON_REPORT_SIZE }), /English only/);
   const failed = { id: "1", aiStatus: "failed", aiScore: null, aiTone: "unavailable" };
   assert.equal(withLanguageUnavailableAi(failed, unsupported({ unsupportedReason: "UNSUPPORTED_LANGUAGE", detectedLanguage: "Arabic" })).aiUnavailableReason, AI_UNAVAILABLE_REASON_UNSUPPORTED_LANGUAGE);

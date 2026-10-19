@@ -181,7 +181,7 @@ export function AiReport({
       <ReportPageHeader report={report} page={1} label="AI Writing Report" />
       <div className="paper-content">
         <section className="ai-report-heading">
-          <p className="paper-kicker">ENGLISH AI WRITING ANALYSIS</p>
+          <p className="paper-kicker">EXPERIMENTAL ENGLISH AI WRITING ANALYSIS</p>
           {!isRunning && <h2>
             <span><AnimatedAiPercentage value={signal.value} animated={!printMode} /></span>
             {signal.value === null ? signal.label : "AI writing score"}

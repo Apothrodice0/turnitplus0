@@ -48,7 +48,7 @@ function aiRowDisplay(report: ReportSummary): { value: string; label: string; to
   const ai = resolveAiDisplayState({ aiStatus: report.aiStatus, aiScore: report.aiScore, aiTone: report.aiTone });
   if (ai.state === "complete" && ai.score !== null) {
     const label =
-      ai.tone === "low" ? "Low AI indicators" : ai.tone === "review" ? "Moderate AI indicators" : "Strong AI indicators";
+      `${ai.tone === "low" ? "Low AI indicators" : ai.tone === "review" ? "Moderate AI indicators" : "Strong AI indicators"} · experimental`;
     return { value: `${ai.score}/100`, label, toneClass: ai.tone };
   }
   if (ai.state === "failed") return { value: "—", label: "AI unavailable", toneClass: "unavailable" };

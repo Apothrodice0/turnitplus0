@@ -742,3 +742,21 @@ export function detectDominantLanguage(value: string): LanguageDetectionResult {
 export function detectLanguage(value: string): DetectedLanguage {
   return detectDominantLanguage(value).language;
 }
+
+/**
+ * The largest number of LANGUAGE_WINDOW_WORDS-word windows a "short embedded passage" occupies by this module's own design
+ * (see LANGUAGE_WINDOW_WORDS: a translated abstract of typically 100-300 words fills one or two windows). Not a new
+ * calibration — it names the tolerance the window size was chosen for.
+ */
+export const EMBEDDED_PASSAGE_MAX_WINDOWS = 2;
+
+/** How many LANGUAGE_WINDOW_WORDS-word windows of `value` classifyWindow labels Arabic or MixedScript. Classification unchanged. */
+export function arabicScriptWindowCount(value: string): number {
+  const words = value.split(/\s+/).filter(Boolean);
+  let count = 0;
+  for (let start = 0; start < words.length; start += LANGUAGE_WINDOW_WORDS) {
+    const label = classifyWindow(words.slice(start, start + LANGUAGE_WINDOW_WORDS).join(" "));
+    if (label === "Arabic" || label === "MixedScript") count += 1;
+  }
+  return count;
+}

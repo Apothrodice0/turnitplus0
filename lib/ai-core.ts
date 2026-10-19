@@ -1,6 +1,7 @@
 import calibration from "@/public/data/ai-calibration.json";
 import evaluation from "@/public/data/ai-evaluation.json";
 import { findReferenceSectionStart } from "./reference-section";
+import { arabicScriptWindowCount, detectLanguage, EMBEDDED_PASSAGE_MAX_WINDOWS } from "./similarity-core";
 
 export type AiChunk = {
   start: number;
@@ -308,6 +309,22 @@ export function eligibleAiText(text: string) {
 
 export function eligibleAiWordCount(text: string) {
   return [...eligibleAiText(text).matchAll(WORD_PATTERN)].length;
+}
+
+export type AiLanguageRoute = "ENGLISH" | "UNSUPPORTED_LANGUAGE" | "MIXED_LANGUAGE";
+
+/**
+ * Whether the (English-only) detector may give `text` a whole-document score. The report's `detectedLanguage` is decided on
+ * the full text, a Latin-script reference list included, while the detector scores eligibleAiText (references removed): a
+ * document is MIXED_LANGUAGE when the existing dominant-language rule, run on that scored text, is not English, or when the
+ * scored text holds more Arabic / mixed-script windows than one short embedded passage (EMBEDDED_PASSAGE_MAX_WINDOWS — a
+ * translated abstract stays scored, as before). Both use lib/similarity-core.ts's existing windows and thresholds.
+ */
+export function aiLanguageRoute(text: string, detectedLanguage: string): AiLanguageRoute {
+  if (detectedLanguage !== "English") return "UNSUPPORTED_LANGUAGE";
+  const scored = eligibleAiText(text);
+  if (detectLanguage(scored) !== "English" || arabicScriptWindowCount(scored) > EMBEDDED_PASSAGE_MAX_WINDOWS) return "MIXED_LANGUAGE";
+  return "ENGLISH";
 }
 
 export function buildAiTokenChunks(

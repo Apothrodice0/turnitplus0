@@ -823,7 +823,7 @@ export function aiSignalDisplay(
       return {
         value: null,
         tone: "unavailable",
-        label: unsupportedLanguage === "Arabic" ? "Not available for Arabic" : "Not available for this language",
+        label: unsupportedLanguage === "Arabic" ? "Not available for Arabic" : unsupportedLanguage === "Mixed" ? "Inconclusive: mixed languages" : "Not available for this language",
         detail: aiLanguageUnavailableMessage(unsupportedLanguage),
         range: "No AI result",
       };
@@ -832,7 +832,7 @@ export function aiSignalDisplay(
       value: null,
       tone: "unavailable",
       label: "Not enough text",
-      detail: "Fewer than 300 eligible English words were available, so no AI percentage was calculated.",
+      detail: "Fewer than 300 eligible English words were available, so no AI score was calculated.",
       range: "No AI result",
     };
   }
@@ -868,7 +868,7 @@ export function aiSignalDisplay(
   // state === "complete" — resolution.score is always a real number here.
   const value = resolution.score ?? 0;
   // What the number is — and is not (it is never a share of AI-authored words; see calibratedAiDisplaySignal in lib/ai-core.ts).
-  const scoreDetail = "A 0–100 machine-likeness score that compares the document's language patterns with verified human-written academic papers. It is not the percentage of the text written by AI; review the highlighted passages.";
+  const scoreDetail = "Experimental. A 0–100 machine-likeness score that compares the document's language patterns with verified human-written academic papers. The bands are indicators, not calibrated probabilities of AI authorship, and the score is not the percentage of the text written by AI; review the highlighted passages.";
   if (value < 20) {
     return {
       value,

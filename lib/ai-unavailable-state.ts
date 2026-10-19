@@ -40,27 +40,33 @@ export const AI_UNAVAILABLE_REASON_UNSUPPORTED_LANGUAGE = "UNSUPPORTED_LANGUAGE"
 export type AiUnavailableReason = typeof AI_UNAVAILABLE_REASON_REPORT_SIZE | typeof AI_UNAVAILABLE_REASON_UNSUPPORTED_LANGUAGE;
 
 /** Why the detector declined to score a document (AiAnalysis.unsupportedReason, written by app/ai-detector-worker.ts). */
-export type AiUnsupportedReason = "UNSUPPORTED_LANGUAGE" | "INSUFFICIENT_TEXT";
+export type AiUnsupportedReason = "UNSUPPORTED_LANGUAGE" | "MIXED_LANGUAGE" | "INSUFFICIENT_TEXT";
 
 /**
- * The detected language of an analysis the detector declined because of its language, else null. Reads the explicit
+ * The language reason of an analysis the detector declined because of its language, else null: the detected language
+ * ("Arabic", "French", …), or "Mixed" for a document whose languages are mixed (the detector's own "Mixed" label, or
+ * MIXED_LANGUAGE: English mixed with Arabic beyond an embedded passage — lib/ai-core.ts aiLanguageRoute). Reads the explicit
  * `unsupportedReason`, or — for results saved before that field existed — the `detectedLanguage` the worker has recorded on
  * every "unsupported" result since the reproducibility metadata (a non-English language there is the language gate).
  */
 export function languageUnsupportedAiAnalysis(analysis: unknown): string | null {
   if (!isPlainObject(analysis) || analysis.status !== "unsupported") return null;
   const language = typeof analysis.detectedLanguage === "string" ? analysis.detectedLanguage : null;
+  if (analysis.unsupportedReason === "MIXED_LANGUAGE") return "Mixed";
   if (analysis.unsupportedReason === "UNSUPPORTED_LANGUAGE") return language ?? "this language";
   if (analysis.unsupportedReason === undefined && language !== null && language !== "English") return language;
   return null;
 }
 
-/** Customer copy for a language without a validated detector. Never a percentage, never an English-calibrated estimate. */
+/** Customer copy for a language the experimental English-only analysis cannot score. Never a number, never an English-calibrated estimate. */
 export function aiLanguageUnavailableMessage(language: string): string {
-  const subject = language === "Mixed" || language === "this language" ? "this document's language" : language;
-  return `AI-writing analysis is not available for ${subject} yet: the detector and its calibration are validated for English only, so no AI percentage is shown.`;
+  if (language === "Mixed") {
+    return "This document mixes English with Arabic or another language, so the experimental English-only AI analysis cannot give a truthful whole-document result. No AI score is shown.";
+  }
+  const subject = language === "this language" ? "this document's language" : language;
+  return `AI-writing analysis is not available for ${subject}. The experimental AI analysis supports English only, so no AI score is shown.`;
 }
-export const AI_LANGUAGE_UNAVAILABLE_ROOM_NOTE = "AI-writing analysis is validated for English only, so no AI percentage is shown for this document. The similarity result above is complete and unaffected.";
+export const AI_LANGUAGE_UNAVAILABLE_ROOM_NOTE = "AI-writing analysis is an experimental English-only feature, so no AI score is shown for this document. The similarity result above is complete and unaffected.";
 
 /**
  * The outcome the AI-retry route reports when IT decided the real AI result cannot be stored and wrote the terminal state

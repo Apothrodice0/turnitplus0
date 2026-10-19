@@ -8,6 +8,7 @@ import {
   AI_PASSAGE_LOG_ODDS_THRESHOLD,
   AI_PASSAGE_THRESHOLD,
   AI_SCORING_VERSION,
+  aiLanguageRoute,
   buildAiTokenChunks,
   calculateAiLogOddsDiagnostics,
   calculateTopKMeanLogOdds,
@@ -128,12 +129,14 @@ function getClassifier() {
 
 async function analyze(request: WorkerRequest) {
   const eligibleWordCount = eligibleAiWordCount(request.text);
-  if (request.detectedLanguage !== "English" || eligibleWordCount < AI_MINIMUM_WORDS) {
+  // The model and its human-reference calibration are English-only: another language is UNSUPPORTED_LANGUAGE (never scored
+  // with English calibration); English mixed with Arabic beyond an embedded passage is MIXED_LANGUAGE (no truthful
+  // whole-document score); a short English document is INSUFFICIENT_TEXT.
+  const languageRoute = aiLanguageRoute(request.text, request.detectedLanguage);
+  if (languageRoute !== "ENGLISH" || eligibleWordCount < AI_MINIMUM_WORDS) {
     return {
       status: "unsupported" as const,
-      // Which gate declined it: the model and its human-reference calibration are English-only, so any other language is
-      // UNSUPPORTED_LANGUAGE (never scored with English calibration); a short English document is INSUFFICIENT_TEXT.
-      unsupportedReason: request.detectedLanguage !== "English" ? "UNSUPPORTED_LANGUAGE" as const : "INSUFFICIENT_TEXT" as const,
+      unsupportedReason: languageRoute === "ENGLISH" ? "INSUFFICIENT_TEXT" as const : languageRoute,
       scoringVersion: AI_SCORING_VERSION,
       score: null,
       model: AI_MODEL_VERSION,
