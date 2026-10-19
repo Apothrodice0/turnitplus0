@@ -317,7 +317,7 @@ function uiOf(host) {
     const text = textOf(el.props.children);
     if (cls === "room-page-status") ui.statusLine = text;
     if (typeof cls === "string" && /^room-metric( |$)/.test(cls)) {
-      if (ui.aiTile === null && text.startsWith("AI Detection")) ui.aiTile = text.slice("AI Detection".length);
+      if (ui.aiTile === null && text.startsWith("AI writing score")) ui.aiTile = text.slice("AI writing score".length);
       if (ui.similarityTile === null && text.startsWith("Similarity")) ui.similarityTile = text.slice("Similarity".length);
       if (ui.receiptTile === null && text.startsWith("Receipt")) { ui.receiptTile = text.slice("Receipt".length); ui.receiptEnabled = el.type === "button" && !el.props.disabled; }
     }

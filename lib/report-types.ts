@@ -867,7 +867,8 @@ export function aiSignalDisplay(
   }
   // state === "complete" — resolution.score is always a real number here.
   const value = resolution.score ?? 0;
-  const scoreDetail = "The score is calculated from the language patterns found across the document's analyzed passages.";
+  // What the number is — and is not (it is never a share of AI-authored words; see calibratedAiDisplaySignal in lib/ai-core.ts).
+  const scoreDetail = "A 0–100 machine-likeness score that compares the document's language patterns with verified human-written academic papers. It is not the percentage of the text written by AI; review the highlighted passages.";
   if (value < 20) {
     return {
       value,

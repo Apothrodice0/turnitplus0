@@ -993,7 +993,7 @@ test("G1 ROOM, DETAIL, RECEIPT: the size-unavailable report is fully usable — 
     assert.match(html, />Download</, "the receipt is available");
     assert.match(html, new RegExp(unavailable.AI_SIZE_UNAVAILABLE_ROOM_NOTE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/'/g, "(?:'|&#x27;)")));
     for (const banned of [/Retry analysis/, /Try again/, /Analyzing/, /Preparing/, /Checking/]) assert.doesNotMatch(html, banned);
-    assert.match(html, /<span class="room-metric-label">AI Detection<\/span><strong class="room-metric-value">—<\/strong><span class="room-metric-sub">Unavailable<\/span>/, "the AI tile is the non-numeric 'Unavailable' — never an AI 0%");
+    assert.match(html, /<span class="room-metric-label">AI writing score<\/span><strong class="room-metric-value">—<\/strong><span class="room-metric-sub">Unavailable<\/span>/, "the AI tile is the non-numeric 'Unavailable' — never an AI 0%");
     assert.equal((html.match(/\d+%/g) ?? []).length, 1, "the only percentage on the card is the similarity result");
     assert.doesNotMatch(html.replace(/<[^>]+>/g, " "), TECHNICAL, "no storage vocabulary reaches the customer");
 

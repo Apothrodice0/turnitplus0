@@ -1367,7 +1367,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
                   const ai = aiMetricDisplay(occupant.report);
                   return (
                     <Link href={`/reports/${occupant.report.id}?mode=ai&room=${room}`} className={`room-metric room-metric-${ai.toneClass}`}>
-                      <span className="room-metric-label">AI Detection</span>
+                      <span className="room-metric-label">AI writing score</span>
                       <strong className="room-metric-value">{ai.value}</strong>
                       <span className="room-metric-sub">{ai.label}</span>
                     </Link>
@@ -1375,13 +1375,13 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
                 })()
               ) : occupant.status === "failed" ? (
                 <div className="room-metric room-metric-unavailable">
-                  <span className="room-metric-label">AI Detection</span>
+                  <span className="room-metric-label">AI writing score</span>
                   <strong className="room-metric-value">—</strong>
                   <span className="room-metric-sub">Unavailable</span>
                 </div>
               ) : (
                 <div className="room-metric room-metric-pending">
-                  <span className="room-metric-label">AI Detection</span>
+                  <span className="room-metric-label">AI writing score</span>
                   <strong className="room-metric-value">···</strong>
                   <span className="room-metric-sub">Analyzing…</span>
                 </div>
@@ -1462,7 +1462,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
                 const ai = aiMetricDisplay(occupant.report);
                 return (
                   <Link href={`/reports/${occupant.report.id}?mode=ai&room=${room}`} className={`room-metric room-metric-${ai.toneClass}`}>
-                    <span className="room-metric-label">AI Detection</span>
+                    <span className="room-metric-label">AI writing score</span>
                     <strong className="room-metric-value">{ai.value}</strong>
                     <span className="room-metric-sub">{ai.label}</span>
                   </Link>
@@ -1499,7 +1499,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
 
             <div className="room-report-metrics">
               <div className="room-metric room-metric-unavailable">
-                <span className="room-metric-label">AI Detection</span>
+                <span className="room-metric-label">AI writing score</span>
                 <strong className="room-metric-value">—</strong>
                 <span className="room-metric-sub">Unavailable</span>
               </div>

@@ -293,7 +293,7 @@ function uiOf(host) {
   for (const el of walk(host.tree)) {
     const cls = el.props.className;
     if (cls === "room-page-status") statusLine = textOf(el.props.children);
-    if (aiTile === null && typeof cls === "string" && cls.startsWith("room-metric") && textOf(el.props.children).startsWith("AI Detection")) aiTile = textOf(el.props.children).slice("AI Detection".length);
+    if (aiTile === null && typeof cls === "string" && cls.startsWith("room-metric") && textOf(el.props.children).startsWith("AI writing score")) aiTile = textOf(el.props.children).slice("AI writing score".length);
     if (el.type === "p" && textOf(el.props.children) === "Analysis is taking longer than usual.") exhausted = true;
   }
   return { statusLine, aiTile, exhausted, retryOffered: retryButtonOf(host.tree) !== null, toast: toastOf(host.tree) };

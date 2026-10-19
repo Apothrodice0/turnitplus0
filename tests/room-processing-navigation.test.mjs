@@ -156,7 +156,7 @@ test('NOT REVEALED (report-lifecycle correctness fix — invariant B): AI Detect
   // The genuinely-processing AI sub-case (occupant.status === "processing")
   // still falls back to the original neutral, non-clickable placeholder —
   // there is truly nothing to reveal yet on that side.
-  const processingAiTile = branch.match(/<div className="room-metric room-metric-pending">\s*<span className="room-metric-label">AI Detection<\/span>[\s\S]*?<\/div>/)?.[0] ?? "";
+  const processingAiTile = branch.match(/<div className="room-metric room-metric-pending">\s*<span className="room-metric-label">AI writing score<\/span>[\s\S]*?<\/div>/)?.[0] ?? "";
   assert.ok(processingAiTile, "the genuinely-processing AI Detection placeholder must still exist for occupant.status === \"processing\"");
   assert.match(processingAiTile, /<strong className="room-metric-value">···<\/strong>/);
   assert.match(processingAiTile, /<span className="room-metric-sub">Analyzing…<\/span>/);
