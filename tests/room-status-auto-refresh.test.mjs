@@ -328,7 +328,7 @@ function uiOf(host) {
   ui.retry = retry ? `${textOf(retry.props.children)}${retry.props.disabled ? " (disabled)" : ""}` : null;
   return ui;
 }
-const isReadyUi = (ui) => /^Report ready · Last checked/.test(ui.statusLine ?? "") && /^\d+%/.test(ui.aiTile ?? "") && /^\d+%/.test(ui.similarityTile ?? "") && ui.receiptTile === "Download" && ui.receiptEnabled === true;
+const isReadyUi = (ui) => /^Report ready · Last checked/.test(ui.statusLine ?? "") && /^\d+\/100/.test(ui.aiTile ?? "") && /^\d+%/.test(ui.similarityTile ?? "") && ui.receiptTile === "Download" && ui.receiptEnabled === true;
 
 // --- the browser's network: real routes; the server can be made to report similarity as still being finalized --------------
 
@@ -402,7 +402,7 @@ async function mount(account, room) {
 /** Releases the held model run and waits until the automatic AI save has updated the room. */
 async function finishModel(host) {
   worker.held.shift()();
-  await waitFor(() => /^\d+%/.test(uiOf(host).aiTile ?? ""), "the automatic AI save to land");
+  await waitFor(() => /^\d+\/100/.test(uiOf(host).aiTile ?? ""), "the automatic AI save to land");
 }
 
 async function scenario(fn) {
@@ -491,7 +491,7 @@ test("AI FINISHES BEFORE SIMILARITY: AI shows at once; similarity stays Calculat
     await runTimers({ max: 3 });
     const mid = uiOf(host);
     capture(t, "ai-first", { mid });
-    assert.match(mid.aiTile, /^\d+%/);
+    assert.match(mid.aiTile, /^\d+\/100/);
     assert.equal(mid.similarityTile, "···Calculating…");
     assert.equal(mid.receiptTile, "Preparing…");
     assert.equal(mid.statusLine, "Analysis in progress");
@@ -705,7 +705,7 @@ test("NO-CLICK, SIMILARITY FINALIZED LATE: the server still finalizes similarity
     b.server.similarityPending = false;
     await advance(2 * MINUTE, () => isReadyUi(uiOf(host)));
     capture(t, "no-click/late-similarity", { mid, ui: uiOf(host) });
-    assert.match(mid.aiTile, /^\d+%/);
+    assert.match(mid.aiTile, /^\d+\/100/);
     assert.equal(mid.similarityTile, "···Calculating…");
     assert.ok(isReadyUi(uiOf(host)), `revealed with no click: ${JSON.stringify(uiOf(host))}`);
     host.unmount();

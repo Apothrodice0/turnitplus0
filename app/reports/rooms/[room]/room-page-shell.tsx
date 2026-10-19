@@ -322,7 +322,7 @@ function aiMetricDisplay(report: ReportSummary): { value: string; label: string;
   if (ai.state === "complete" && ai.score !== null) {
     const label =
       ai.tone === "low" ? "Low AI indicators" : ai.tone === "review" ? "Moderate AI indicators" : "Strong AI indicators";
-    return { value: `${ai.score}%`, label, toneClass: ai.tone, note: null };
+    return { value: `${ai.score}/100`, label, toneClass: ai.tone, note: null };
   }
   return { value: "—", label: AI_UNSCORED_LABEL, toneClass: "unavailable", note: AI_UNSCORED_NOTE };
 }

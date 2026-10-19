@@ -50,7 +50,8 @@ function AnimatedAiPercentage({
     return () => window.cancelAnimationFrame(frame);
   }, [animated, value]);
 
-  return <>{value === null ? "—" : `${animated ? displayValue : value}%`}</>;
+  // A 0–100 machine-likeness score, never a share of AI-written words: shown as N/100, not N%.
+  return <>{value === null ? "—" : `${animated ? displayValue : value}/100`}</>;
 }
 
 const AI_PREP_STAGE_ORDER: AiPrepStage[] = [
@@ -209,7 +210,7 @@ export function AiReport({
           </section>
         )}
         {!isSuppressed && signal.value !== null && <section className="ai-report-metrics">
-          <div><strong>{signal.value}%</strong><span>AI writing score</span></div>
+          <div><strong>{signal.value}/100</strong><span>AI writing score</span></div>
           <div><strong>{analysis?.analyzedWordCount.toLocaleString() ?? "—"}</strong><span>words analyzed</span></div>
           <div><strong>{analysis?.analyzedTokenCount?.toLocaleString() ?? "—"}</strong><span>tokens analyzed</span></div>
           <div><strong>{analysis && passages ? passages.length.toLocaleString() : "—"}</strong><span>passage windows</span></div>

@@ -654,11 +654,11 @@ for (const [label, lost] of [
 // =====================================================================================================================
 
 for (const [kind, expected, title] of [
-  ["readyScore", { derived: "ready", tile: /^\d+%/ }, "1. ready + numeric + complete -> ready with its number"],
+  ["readyScore", { derived: "ready", tile: /^\d+\/100/ }, "1. ready + numeric + complete -> ready with its number"],
   ["readyAbsentScore", { derived: "ready", tile: UNSCORED_TILE }, "3. ready + absent score (CONSTRUCTED; stored as NULL) + complete -> ready / Unscored"],
   ["processingComplete", { derived: "processing" }, "4. processing + NULL + complete (CONSTRUCTED) -> processing, unchanged"],
   ["failedComplete", { derived: "failed" }, "5. failed + NULL + complete (CONSTRUCTED) -> failed"],
-  ["legacyScore", { derived: "ready", tile: /^\d+%/ }, "6. legacy (no ai_status) + numeric -> ready with its number"],
+  ["legacyScore", { derived: "ready", tile: /^\d+\/100/ }, "6. legacy (no ai_status) + numeric -> ready with its number"],
   ["legacyNull", { derived: "processing" }, "6b. legacy (no ai_status) + NULL + complete -> processing, unchanged (no explicit ready)"],
 ]) {
   test(`K${title}`, async (t) => {

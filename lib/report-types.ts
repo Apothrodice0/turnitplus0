@@ -875,7 +875,7 @@ export function aiSignalDisplay(
       tone: "low",
       label: "Low AI indicators",
       detail: scoreDetail,
-      range: "Green · 0–19%",
+      range: "Green · score 0–19",
     };
   }
   if (value <= 50) {
@@ -884,7 +884,7 @@ export function aiSignalDisplay(
       tone: "review",
       label: "Moderate AI indicators",
       detail: scoreDetail,
-      range: "Blue · 20–50%",
+      range: "Blue · score 20–50",
     };
   }
   return {
@@ -892,7 +892,7 @@ export function aiSignalDisplay(
     tone: "high",
     label: "Strong AI indicators",
     detail: scoreDetail,
-    range: "Red · 51–100%",
+    range: "Red · score 51–100",
   };
 }
 
