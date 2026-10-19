@@ -28,6 +28,18 @@ type RegressionManifest = {
   }>;
 };
 
+// HISTORICAL, calibration v8 only. This evaluator scores the held-out originals with the v8 Archive
+// scorer (winner-take-all evidence, the source floor on that share, the source cap inside the score)
+// to decide the v8 parameter selection. Since risk-calibration v9 the shared aggregator admits a source
+// on its OWN verified evidence and the cap is display-only, so this file's evidence fed to it would give
+// numbers that are neither v8 nor v9 — whatever calibration file is present. Refuse before reading anything.
+if ("admittedSources" in aggregateSimilaritySources([], 1)) {
+  throw new Error(
+    "evaluate-similarity-regression is a historical calibration-v8 evaluator and lib/similarity-core.ts implements "
+    + "the calibration-v9 aggregation; its numbers would be neither. Re-run it only from a v8 tree (c0bfbe9 or older).",
+  );
+}
+
 const index = JSON.parse(gunzipSync(readFileSync("public/data/document-index.json.gz")).toString("utf8")) as SearchIndex;
 const calibration = JSON.parse(readFileSync("public/data/risk-calibration.json", "utf8")) as {
   schema: string; version: number; corpusVersion: string; matchingParameters: Parameters;
