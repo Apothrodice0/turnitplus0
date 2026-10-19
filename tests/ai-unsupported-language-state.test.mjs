@@ -7,7 +7,7 @@ import { applyMigrationsLibsql } from "../lib/ingest.js";
 import {
   AI_UNAVAILABLE_REASON_REPORT_SIZE,
   AI_UNAVAILABLE_REASON_UNSUPPORTED_LANGUAGE,
-  aiUnavailableRoomNote,
+  unavailableAiRoomNote,
   isAiRetryOffered,
   languageUnsupportedAiAnalysis,
   withLanguageUnavailableAi,
@@ -54,8 +54,8 @@ test("Retry: never offered for a language decline; still offered for an ordinary
   assert.equal(isAiRetryOffered({ aiUnavailableReason: AI_UNAVAILABLE_REASON_UNSUPPORTED_LANGUAGE }), false);
   assert.equal(isAiRetryOffered({ aiUnavailableReason: AI_UNAVAILABLE_REASON_REPORT_SIZE }), false);
   assert.equal(isAiRetryOffered({}), true);
-  assert.match(aiUnavailableRoomNote({ aiUnavailableReason: AI_UNAVAILABLE_REASON_UNSUPPORTED_LANGUAGE }), /validated for English only/);
-  assert.doesNotMatch(aiUnavailableRoomNote({ aiUnavailableReason: AI_UNAVAILABLE_REASON_REPORT_SIZE }), /English only/);
+  assert.match(unavailableAiRoomNote({ aiUnavailableReason: AI_UNAVAILABLE_REASON_UNSUPPORTED_LANGUAGE }), /validated for English only/);
+  assert.doesNotMatch(unavailableAiRoomNote({ aiUnavailableReason: AI_UNAVAILABLE_REASON_REPORT_SIZE }), /English only/);
   const failed = { id: "1", aiStatus: "failed", aiScore: null, aiTone: "unavailable" };
   assert.equal(withLanguageUnavailableAi(failed, unsupported({ unsupportedReason: "UNSUPPORTED_LANGUAGE", detectedLanguage: "Arabic" })).aiUnavailableReason, AI_UNAVAILABLE_REASON_UNSUPPORTED_LANGUAGE);
   assert.equal(withLanguageUnavailableAi(failed, unsupported({ unsupportedReason: "INSUFFICIENT_TEXT", detectedLanguage: "English" })).aiUnavailableReason, undefined);

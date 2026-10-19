@@ -147,7 +147,7 @@ export function isAiRetryOffered(report: { aiUnavailableReason?: unknown } | nul
 }
 
 /** The room's non-retryable note for a summary whose AI half cannot be produced. */
-export function aiUnavailableRoomNote(report: { aiUnavailableReason?: unknown } | null | undefined): string {
+export function unavailableAiRoomNote(report: { aiUnavailableReason?: unknown } | null | undefined): string {
   return report?.aiUnavailableReason === AI_UNAVAILABLE_REASON_UNSUPPORTED_LANGUAGE ? AI_LANGUAGE_UNAVAILABLE_ROOM_NOTE : AI_SIZE_UNAVAILABLE_ROOM_NOTE;
 }
 

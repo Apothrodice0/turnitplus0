@@ -8,7 +8,7 @@ import { invalidateRoomCache } from "@/lib/report-rooms-cache";
 import { ROOM_CYCLE_MS } from "@/lib/report-rooms";
 import { accountLocalReportOwner, storeReportBestEffort, getStoredReportById } from "@/lib/report-store";
 import { persistAiCompletion, persistAiRetryResult } from "@/lib/report-ai-completion";
-import { AI_SIZE_UNAVAILABLE_MESSAGE, aiUnavailableRoomNote, isAiRetryOffered, withLanguageUnavailableAi } from "@/lib/ai-unavailable-state";
+import { AI_SIZE_UNAVAILABLE_MESSAGE, unavailableAiRoomNote, isAiRetryOffered, withLanguageUnavailableAi } from "@/lib/ai-unavailable-state";
 import { buildReportSummary, type AiAnalysis, type ReportExtractionDiagnostic, type SimilarityReport } from "@/lib/report-types";
 import { resolveAiDisplayState } from "@/lib/ai-display-state";
 import { similarityScoreBand } from "@/lib/ai-core";
@@ -1523,7 +1523,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
                   </button>
                 </>
               ) : (
-                <p>{aiUnavailableRoomNote(occupant.report)}</p>
+                <p>{unavailableAiRoomNote(occupant.report)}</p>
               )}
             </div>
 
