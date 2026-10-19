@@ -74,7 +74,7 @@ export function loadArchiveMatchConfig(): ArchiveMatchConfig {
     risk.schema !== "turnitplus-risk-calibration"
     || !Number.isInteger(risk.version)
     || risk.version < 1
-    || risk.version > 8
+    || risk.version > 9
   ) {
     throw new Error("risk-calibration.json uses an unsupported schema.");
   }

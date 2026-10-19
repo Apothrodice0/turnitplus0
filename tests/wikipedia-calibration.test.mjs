@@ -16,7 +16,7 @@ test("records a complete Wikipedia phrase sample for every similarity calibratio
 });
 
 test("ships the combined score only when its held-out AUC improves", () => {
-  assert.equal(calibration.version, 8);
+  assert.equal(calibration.version, 9);
   const signal = calibration.wikipediaSignal;
   assert.equal(signal.sampleSize, 60);
   assert.equal(signal.archiveOnlySensitivity.sampleSize, 60);

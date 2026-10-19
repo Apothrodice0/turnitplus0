@@ -115,7 +115,7 @@ test("accepted spans remain continuous when adjacent words choose different sour
   assert.deepEqual(result.acceptedGlobalSpans, [[0, 7]]);
 });
 
-test("source aggregation can suppress trivial contributors and cap retained sources", () => {
+test("source aggregation suppresses trivial contributors and caps only the returned sources", () => {
   const evidence = [
     { sourceIndex: 0, positions: new Set([0, 1, 2, 3]), containment: 0.5 },
     { sourceIndex: 1, positions: new Set([4, 5]), containment: 0.25 },
@@ -126,7 +126,11 @@ test("source aggregation can suppress trivial contributors and cap retained sour
     maximumContributingSources: 1,
     sourceWeighting: "raw",
   });
-  assert.equal(result.score, 4);
+  // source 2 is under the 2% floor; source 1 passes it and still scores
+  // although the cap lists only source 0
+  assert.equal(result.score, 6);
+  assert.deepEqual([...result.acceptedPositions].sort((left, right) => left - right), [0, 1, 2, 3, 4, 5]);
+  assert.deepEqual(result.admittedSources.map((source) => source.sourceIndex), [0, 1]);
   assert.deepEqual(result.sourceContributions.map((source) => source.sourceIndex), [0]);
   const weighted = aggregateSimilaritySources(evidence.slice(0, 1), 100, {
     minimumSourceContribution: 0,

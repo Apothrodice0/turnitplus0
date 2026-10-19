@@ -15,7 +15,7 @@ test("duplicate clusters sit above a measured containment gap", () => {
 });
 
 test("cluster-aware calibration removes twin inflation and reports the naive comparison", () => {
-  assert.equal(calibration.version, 8);
+  assert.equal(calibration.version, 9);
   assert.equal(calibration.matchingParameters.minimumMatchedWords >= 5, true);
   assert.equal(calibration.matchingParameters.maximumDocumentFrequency <= 12, true);
   assert.equal(calibration.matchingParameters.minimumSourceContribution >= 0, true);
