@@ -30,7 +30,37 @@ import type { AiAnalysis } from "./report-types";
  */
 
 export const AI_UNAVAILABLE_REASON_REPORT_SIZE = "REPORT_SIZE" as const;
-export type AiUnavailableReason = typeof AI_UNAVAILABLE_REASON_REPORT_SIZE;
+/**
+ * The document's language has no validated AI detector (the model and its human-reference calibration are English-only).
+ * Unlike REPORT_SIZE it is not a persisted marker: the server derives it, read-only, from the stored analysis itself (an
+ * "unsupported" result whose reason is the language — see languageUnsupportedAiAnalysis) when it builds a room summary,
+ * and the room applies the same rule to its own fresh result. A re-run cannot change it, so Retry is not offered.
+ */
+export const AI_UNAVAILABLE_REASON_UNSUPPORTED_LANGUAGE = "UNSUPPORTED_LANGUAGE" as const;
+export type AiUnavailableReason = typeof AI_UNAVAILABLE_REASON_REPORT_SIZE | typeof AI_UNAVAILABLE_REASON_UNSUPPORTED_LANGUAGE;
+
+/** Why the detector declined to score a document (AiAnalysis.unsupportedReason, written by app/ai-detector-worker.ts). */
+export type AiUnsupportedReason = "UNSUPPORTED_LANGUAGE" | "INSUFFICIENT_TEXT";
+
+/**
+ * The detected language of an analysis the detector declined because of its language, else null. Reads the explicit
+ * `unsupportedReason`, or — for results saved before that field existed — the `detectedLanguage` the worker has recorded on
+ * every "unsupported" result since the reproducibility metadata (a non-English language there is the language gate).
+ */
+export function languageUnsupportedAiAnalysis(analysis: unknown): string | null {
+  if (!isPlainObject(analysis) || analysis.status !== "unsupported") return null;
+  const language = typeof analysis.detectedLanguage === "string" ? analysis.detectedLanguage : null;
+  if (analysis.unsupportedReason === "UNSUPPORTED_LANGUAGE") return language ?? "this language";
+  if (analysis.unsupportedReason === undefined && language !== null && language !== "English") return language;
+  return null;
+}
+
+/** Customer copy for a language without a validated detector. Never a percentage, never an English-calibrated estimate. */
+export function aiLanguageUnavailableMessage(language: string): string {
+  const subject = language === "Mixed" || language === "this language" ? "this document's language" : language;
+  return `AI-writing analysis is not available for ${subject} yet: the detector and its calibration are validated for English only, so no AI percentage is shown.`;
+}
+export const AI_LANGUAGE_UNAVAILABLE_ROOM_NOTE = "AI-writing analysis is validated for English only, so no AI percentage is shown for this document. The similarity result above is complete and unaffected.";
 
 /**
  * The outcome the AI-retry route reports when IT decided the real AI result cannot be stored and wrote the terminal state
@@ -111,9 +141,20 @@ export function withoutClientAiUnavailableReason<T>(aiAnalysis: T): T {
   return rest as T;
 }
 
-/** Whether the room should offer "Retry analysis" for this summary: never for a report the server marked size-unavailable. */
+/** Whether the room should offer "Retry analysis" for this summary: never when a re-run cannot change the outcome (size or language). */
 export function isAiRetryOffered(report: { aiUnavailableReason?: unknown } | null | undefined): boolean {
-  return report?.aiUnavailableReason !== AI_UNAVAILABLE_REASON_REPORT_SIZE;
+  return report?.aiUnavailableReason !== AI_UNAVAILABLE_REASON_REPORT_SIZE && report?.aiUnavailableReason !== AI_UNAVAILABLE_REASON_UNSUPPORTED_LANGUAGE;
+}
+
+/** The room's non-retryable note for a summary whose AI half cannot be produced. */
+export function aiUnavailableRoomNote(report: { aiUnavailableReason?: unknown } | null | undefined): string {
+  return report?.aiUnavailableReason === AI_UNAVAILABLE_REASON_UNSUPPORTED_LANGUAGE ? AI_LANGUAGE_UNAVAILABLE_ROOM_NOTE : AI_SIZE_UNAVAILABLE_ROOM_NOTE;
+}
+
+/** `summary` with the language reason when `analysis` was declined for its language (room display only; the server derives its own). */
+export function withLanguageUnavailableAi<S extends { aiStatus?: "processing" | "ready" | "failed" }>(summary: S, analysis: unknown): S {
+  if (summary.aiStatus !== "failed" || languageUnsupportedAiAnalysis(analysis) === null) return summary;
+  return { ...summary, aiUnavailableReason: AI_UNAVAILABLE_REASON_UNSUPPORTED_LANGUAGE };
 }
 
 /**

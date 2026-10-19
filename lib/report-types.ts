@@ -9,8 +9,11 @@ import { resolveAiDisplayState } from "@/lib/ai-display-state";
 import {
   AI_SIZE_UNAVAILABLE_MESSAGE,
   AI_SIZE_UNAVAILABLE_RANGE,
+  aiLanguageUnavailableMessage,
   isSizeUnavailableAiAnalysis,
+  languageUnsupportedAiAnalysis,
   type AiUnavailableReason,
+  type AiUnsupportedReason,
 } from "@/lib/ai-unavailable-state";
 import type { DetectedLanguage } from "@/lib/similarity-core";
 import type { CompactAiPassageTableV1 } from "@/lib/ai-passage-table";
@@ -119,6 +122,12 @@ export type AiAnalysis = {
    */
   detectedLanguage?: DetectedLanguage;
   languageDetectorVersion?: number;
+  /**
+   * On an "unsupported" result only: which gate declined it (app/ai-detector-worker.ts). UNSUPPORTED_LANGUAGE = no
+   * validated detector for the document's language (the model and calibration are English-only); INSUFFICIENT_TEXT =
+   * fewer than AI_MINIMUM_WORDS eligible English words. Additive; older results lack it (see languageUnsupportedAiAnalysis).
+   */
+  unsupportedReason?: AiUnsupportedReason;
   /**
    * G2 (lib/ai-unavailable-state.ts) — present ONLY on the terminal `error` result the SERVER persists when the real AI result
    * cannot be stored next to this report inside the persisted-report ceiling. Never sent or set by a browser (the AI-retry route
@@ -808,6 +817,17 @@ export function aiSignalDisplay(
     aiAnalysis: report.aiAnalysis ?? null,
   });
   if (resolution.state === "not_eligible") {
+    // Declined for its language (Arabic, French, mixed…): say so — "not enough text" would be false for a long Arabic paper.
+    const unsupportedLanguage = languageUnsupportedAiAnalysis(report.aiAnalysis);
+    if (unsupportedLanguage !== null) {
+      return {
+        value: null,
+        tone: "unavailable",
+        label: unsupportedLanguage === "Arabic" ? "Not available for Arabic" : "Not available for this language",
+        detail: aiLanguageUnavailableMessage(unsupportedLanguage),
+        range: "No AI result",
+      };
+    }
     return {
       value: null,
       tone: "unavailable",

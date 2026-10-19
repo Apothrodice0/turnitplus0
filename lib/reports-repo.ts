@@ -2,7 +2,7 @@ import type { Client } from "@libsql/client";
 import { deriveRoomStatus, isWithinActiveCycle, roomCycleEndsAt } from "./report-rooms";
 import { resolvePersistedSimilarityDisplay } from "./report-primary-similarity";
 import { isEvidenceInterpretationCustomerReadable } from "./report-persistence";
-import { AI_UNAVAILABLE_REASON_REPORT_SIZE } from "./ai-unavailable-state";
+import { AI_UNAVAILABLE_REASON_REPORT_SIZE, AI_UNAVAILABLE_REASON_UNSUPPORTED_LANGUAGE, languageUnsupportedAiAnalysis } from "./ai-unavailable-state";
 import type { ReportSummary } from "./reports-remote";
 
 // device_key added in Phase E8C, additively — every existing caller that
@@ -185,6 +185,9 @@ export async function findRoomOccupant(client: Client, userId: string, room: num
                  json_extract(payload_json, '$.unifiedSimilarityFailed') AS unified_failed,
                  json_extract(payload_json, '$.unifiedSimilarity.matchedPositions') IS NOT NULL AS has_position_evidence,
                  json_extract(payload_json, '$.aiAnalysis.unavailableReason') AS ai_unavailable_reason,
+                 json_extract(payload_json, '$.aiAnalysis.status') AS ai_analysis_status,
+                 json_extract(payload_json, '$.aiAnalysis.unsupportedReason') AS ai_unsupported_reason,
+                 json_extract(payload_json, '$.aiAnalysis.detectedLanguage') AS ai_detected_language,
                  json_extract(payload_json, '$.scoringNormalizationVersion') AS scoring_normalization_version,
                  ${INTERPRETATION_TO_VERIFY_SQL} AS interpretation_to_verify
           FROM saved_reports WHERE user_id = ? AND room_number = ?
@@ -197,6 +200,7 @@ export async function findRoomOccupant(client: Client, userId: string, room: num
       score_band: string; ai_score: number | null; ai_tone: string | null; ai_status: string | null; device_key: string;
       unified_score: number | bigint | null; has_unified: number | bigint; corpus_flag_at_computation: number | bigint | null;
       unified_failed: number | bigint | null; has_position_evidence: number | bigint; ai_unavailable_reason: string | null;
+      ai_analysis_status: string | null; ai_unsupported_reason: string | null; ai_detected_language: string | null;
       scoring_normalization_version: number | bigint | null;
       interpretation_to_verify: string | null;
     }
@@ -308,6 +312,16 @@ export async function findRoomOccupant(client: Client, userId: string, room: num
     // G2: the SERVER's own persisted marker (lib/ai-unavailable-state.ts) is what hides the room's Retry — surfaced only for a
     // terminal failed AI half, whose `aiAnalysis.unavailableReason` is the one closed value. Nothing else (no size, no ceiling).
     ...(status === "failed" && occupant.ai_unavailable_reason === AI_UNAVAILABLE_REASON_REPORT_SIZE ? { aiUnavailableReason: AI_UNAVAILABLE_REASON_REPORT_SIZE } : {}),
+    // Derived read-only from the stored analysis (never a stored marker): a failed AI half whose analysis the detector declined
+    // for its language (no validated detector for it) has no Retry — a re-run would decline again.
+    ...(status === "failed" && occupant.ai_unavailable_reason !== AI_UNAVAILABLE_REASON_REPORT_SIZE
+      && languageUnsupportedAiAnalysis({
+        status: occupant.ai_analysis_status,
+        ...(occupant.ai_unsupported_reason === null ? {} : { unsupportedReason: occupant.ai_unsupported_reason }),
+        ...(occupant.ai_detected_language === null ? {} : { detectedLanguage: occupant.ai_detected_language }),
+      }) !== null
+      ? { aiUnavailableReason: AI_UNAVAILABLE_REASON_UNSUPPORTED_LANGUAGE }
+      : {}),
   };
 
   return {

@@ -131,6 +131,9 @@ async function analyze(request: WorkerRequest) {
   if (request.detectedLanguage !== "English" || eligibleWordCount < AI_MINIMUM_WORDS) {
     return {
       status: "unsupported" as const,
+      // Which gate declined it: the model and its human-reference calibration are English-only, so any other language is
+      // UNSUPPORTED_LANGUAGE (never scored with English calibration); a short English document is INSUFFICIENT_TEXT.
+      unsupportedReason: request.detectedLanguage !== "English" ? "UNSUPPORTED_LANGUAGE" as const : "INSUFFICIENT_TEXT" as const,
       scoringVersion: AI_SCORING_VERSION,
       score: null,
       model: AI_MODEL_VERSION,

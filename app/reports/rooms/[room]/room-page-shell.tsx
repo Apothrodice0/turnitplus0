@@ -8,7 +8,7 @@ import { invalidateRoomCache } from "@/lib/report-rooms-cache";
 import { ROOM_CYCLE_MS } from "@/lib/report-rooms";
 import { accountLocalReportOwner, storeReportBestEffort, getStoredReportById } from "@/lib/report-store";
 import { persistAiCompletion, persistAiRetryResult } from "@/lib/report-ai-completion";
-import { AI_SIZE_UNAVAILABLE_MESSAGE, AI_SIZE_UNAVAILABLE_ROOM_NOTE, isAiRetryOffered } from "@/lib/ai-unavailable-state";
+import { AI_SIZE_UNAVAILABLE_MESSAGE, aiUnavailableRoomNote, isAiRetryOffered, withLanguageUnavailableAi } from "@/lib/ai-unavailable-state";
 import { buildReportSummary, type AiAnalysis, type ReportExtractionDiagnostic, type SimilarityReport } from "@/lib/report-types";
 import { resolveAiDisplayState } from "@/lib/ai-display-state";
 import { similarityScoreBand } from "@/lib/ai-core";
@@ -728,7 +728,8 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
     // G2: `savedSummary` is what the SERVER actually persisted — the browser's own summary, unless the server decided the real
     // AI result cannot be stored next to this report and wrote the terminal "AI unavailable for this document" state instead
     // (failed, no score, no Retry) — never the local, real-but-unsaved result. Also left in savedAiSummaryRef for retryAiCheck.
-    const savedSummary = enrichedSaveResult.summary;
+    // A result declined for its language carries the non-retryable language reason (the server derives the same on read).
+    const savedSummary = withLanguageUnavailableAi(enrichedSaveResult.summary, aiResult.aiAnalysis);
     savedAiSummaryRef.current = savedSummary;
     setOccupant({
       status: savedSummary.aiStatus === "ready" ? "ready" : "failed",
@@ -768,7 +769,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
     // G2: `savedSummary` is what the SERVER actually persisted — the browser's own summary, unless the server decided the real
     // AI result cannot be stored next to this report and wrote the terminal "AI unavailable for this document" state instead
     // (failed, no score, no Retry) — never the local, real-but-unsaved result. Also left in savedAiSummaryRef for retryAiCheck.
-    const savedSummary = retrySaveResult.summary;
+    const savedSummary = withLanguageUnavailableAi(retrySaveResult.summary, aiResult.aiAnalysis);
     savedAiSummaryRef.current = savedSummary;
     setOccupant({
       status: savedSummary.aiStatus === "ready" ? "ready" : "failed",
@@ -1522,7 +1523,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
                   </button>
                 </>
               ) : (
-                <p>{AI_SIZE_UNAVAILABLE_ROOM_NOTE}</p>
+                <p>{aiUnavailableRoomNote(occupant.report)}</p>
               )}
             </div>
 
