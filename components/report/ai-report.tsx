@@ -15,6 +15,7 @@ import {
   type AiPrepUpdate,
 } from "@/lib/ai-model-prep";
 import { aiSignalDisplay, type AiSignalDisplay, type SimilarityReport } from "@/lib/report-types";
+import { formatAiScore } from "@/lib/ai-display-state";
 import { isSizeUnavailableAiAnalysis } from "@/lib/ai-unavailable-state";
 import { ReportPageFooter, ReportPageHeader } from "./report-page-chrome";
 
@@ -50,8 +51,8 @@ function AnimatedAiPercentage({
     return () => window.cancelAnimationFrame(frame);
   }, [animated, value]);
 
-  // A 0–100 machine-likeness score, never a share of AI-written words: shown as N/100, not N%.
-  return <>{value === null ? "—" : `${animated ? displayValue : value}/100`}</>;
+  // A 0–100 machine-likeness score, never a share of AI-written words (the detail copy says so); no score is "—", never 0%.
+  return <>{value === null ? "—" : formatAiScore(animated ? displayValue : value)}</>;
 }
 
 const AI_PREP_STAGE_ORDER: AiPrepStage[] = [
@@ -210,7 +211,7 @@ export function AiReport({
           </section>
         )}
         {!isSuppressed && signal.value !== null && <section className="ai-report-metrics">
-          <div><strong>{signal.value}/100</strong><span>AI writing score</span></div>
+          <div><strong>{formatAiScore(signal.value)}</strong><span>AI writing score</span></div>
           <div><strong>{analysis?.analyzedWordCount.toLocaleString() ?? "—"}</strong><span>words analyzed</span></div>
           <div><strong>{analysis?.analyzedTokenCount?.toLocaleString() ?? "—"}</strong><span>tokens analyzed</span></div>
           <div><strong>{analysis && passages ? passages.length.toLocaleString() : "—"}</strong><span>passage windows</span></div>

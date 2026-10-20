@@ -74,6 +74,17 @@ export type AiDisplayInput = {
   aiAnalysis?: AiAnalysisForDisplay | null;
 };
 
+/**
+ * How a COMPLETE experimental AI score (0–100) is written: "35%". Only ever
+ * called with a real number — every unavailable / failed / pending / not-eligible
+ * state keeps its own "—" or wording and must never be passed here as 0. The
+ * score stays a machine-likeness indicator, not the share of AI-written text;
+ * the surrounding copy says so (aiSignalDisplay's detail).
+ */
+export function formatAiScore(score: number): string {
+  return `${score}%`;
+}
+
 /** Mirrors aiSignalDisplay's own value -> tone thresholds exactly. */
 export function aiToneFromScore(score: number): AiDisplayTone {
   if (score < 20) return "low";

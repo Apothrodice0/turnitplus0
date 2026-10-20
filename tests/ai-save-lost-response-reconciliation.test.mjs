@@ -298,7 +298,7 @@ function uiOf(host) {
   }
   return { statusLine, aiTile, exhausted, retryOffered: retryButtonOf(host.tree) !== null, toast: toastOf(host.tree) };
 }
-const isReadyUi = (ui) => /^Report ready · Last checked/.test(ui.statusLine ?? "") && /^\d+\/100/.test(ui.aiTile ?? "") && !ui.retryOffered;
+const isReadyUi = (ui) => /^Report ready · Last checked/.test(ui.statusLine ?? "") && /^\d+%/.test(ui.aiTile ?? "") && !ui.retryOffered;
 
 async function clickRetry(host) {
   const button = retryButtonOf(host.tree);
@@ -499,7 +499,7 @@ for (const mode of ["drop-after-commit", "502-after-commit"]) {
       assert.equal(serverRoom.status, "ready");
       assert.ok(isReadyUi(ui), `client final state: ready (${JSON.stringify(ui)})`);
       assert.equal(ui.retryOffered, false, "Retry is no longer offered");
-      assert.ok(ui.aiTile.startsWith(`${serverRoom.report.aiScore}/100`), "the AI tile shows the server's canonical score");
+      assert.ok(ui.aiTile.startsWith(`${serverRoom.report.aiScore}%`), "the AI tile shows the server's canonical score");
       assert.equal(ui.toast, RETRY_COMPLETE, "the customer is told what a successful save says");
       assert.ok(!host.toasts.includes(RETRY_SAVE_FAILED), "no false 'could not save'");
       assert.equal(await localAiStatus(id, b), "complete", "the local copy (written before the save, unchanged) agrees");
@@ -560,7 +560,7 @@ for (const variant of ["poll exhausted", "poll still running"]) {
       assert.deepEqual(server, fault.committed, "the reconciliation wrote nothing: the row (similarity included) is exactly as the lost save committed it");
       assert.equal(serverRoom.status, "ready");
       assert.ok(isReadyUi(ui), `client final state: ready (${JSON.stringify(ui)})`);
-      assert.ok(ui.aiTile.startsWith(`${serverRoom.report.aiScore}/100`), "the AI tile shows the server's canonical score");
+      assert.ok(ui.aiTile.startsWith(`${serverRoom.report.aiScore}%`), "the AI tile shows the server's canonical score");
       assert.ok(!host.toasts.includes(AUTO_SAVE_FAILED), "no false 'could not be saved'");
       assert.equal(await localAiStatus(id, b), "complete");
 
@@ -698,7 +698,7 @@ test("LOST RESPONSE + SERVER STILL PROCESSING, AUTOMATIC (the request never arri
     assert.equal(worker.runs.length, 2);
     assert.deepEqual(await writesFor(id), ["ready/complete"]);
     assert.equal((await serverState(id)).similarity, before.similarity);
-    assert.ok(isReadyUi(uiOf(host)) || uiOf(host).aiTile?.match(/^\d+\/100/), "Retry recovers the room");
+    assert.ok(isReadyUi(uiOf(host)) || uiOf(host).aiTile?.match(/^\d+%/), "Retry recovers the room");
     host.unmount();
   });
 });
@@ -811,14 +811,14 @@ test("NORMAL SUCCESS, AUTOMATIC COMPLETION: one run, one AI save, one write, the
     await env.client.execute("DELETE FROM test_ai_write_log");
     const mark = b.log.length;
     worker.held.shift()();
-    await waitFor(() => /^\d+\/100/.test(uiOf(host).aiTile ?? "") || host.toasts.includes(AUTO_SAVE_FAILED), "the automatic save to settle");
+    await waitFor(() => /^\d+%/.test(uiOf(host).aiTile ?? "") || host.toasts.includes(AUTO_SAVE_FAILED), "the automatic save to settle");
     const requests = requestsSince(b, mark);
     capture(t, "success/automatic", { AI_MODEL_EXECUTIONS: worker.runs.length, AI_SAVE_REQUESTS: requests.aiSaves, SUCCESSFUL_SERVER_WRITES: await writesFor(id), RECONCILIATION_READS: requests.roomReads, ui: uiOf(host) });
     assert.equal(worker.runs.length, 1);
     assert.deepEqual(requests.aiSaves, [200]);
     assert.deepEqual(await writesFor(id), ["ready/complete"]);
     assert.deepEqual(requests.roomReads, [], "no reconciliation read after a confirmed success");
-    assert.match(uiOf(host).aiTile, /^\d+\/100/);
+    assert.match(uiOf(host).aiTile, /^\d+%/);
     assert.ok(!host.toasts.includes(AUTO_SAVE_FAILED));
     assert.equal((await serverState(id)).aiStatus, "ready");
     // The existing poll then reveals the room from the server, exactly as before.

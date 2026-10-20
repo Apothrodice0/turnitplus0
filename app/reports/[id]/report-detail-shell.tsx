@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ArrowLeft, Download, FileText, GraduationCap, Globe2, Printer } from "lucide-react";
 import { similarityScoreBand } from "@/lib/ai-core";
+import { formatAiScore } from "@/lib/ai-display-state";
 import { deleteRemoteReportChecked, fetchRemoteReport } from "@/lib/reports-remote";
 import { ANONYMOUS_LOCAL_REPORT_OWNER, deleteStoredReport, getStoredReportById } from "@/lib/report-store";
 import { downloadReceipt } from "@/lib/document-check-pipeline";
@@ -530,7 +531,7 @@ export function ReportDetailShell({
             <strong className={`summary-chip summary-score-chip ${mode === "ai" ? `ai-summary-chip ai-summary-${aiSignal.tone}` : revealState.similarityUnavailable ? "summary-verdict-pending" : similarityVerdict ? `summary-verdict-${similarityVerdict.key}` : ""}`}>
               <span className={`score-dot ${mode === "ai" ? `ai-dot ai-dot-${aiSignal.tone}` : revealState.similarityUnavailable ? "score-dot-pending" : similarityVerdict ? `score-dot-${similarityVerdict.key}` : ""}`} />
               {mode === "ai"
-                ? `${aiSignal.value === null ? "" : `${aiSignal.value}/100 · `}${aiSignal.label}`
+                ? `${aiSignal.value === null ? "" : `${formatAiScore(aiSignal.value)} · `}${aiSignal.label}`
                 : revealState.similarityUnavailable ? "Unavailable" : `${formatSimilarityPercent(primaryScore, primaryMatchedWordCount(report))} ${primaryLabel}`}
             </strong>
             {mode === "similarity" && <span className="summary-chip">{report.sources.length} matched source{report.sources.length === 1 ? "" : "s"}</span>}
@@ -612,11 +613,11 @@ export function ReportDetailShell({
           <div
             className={`inspector-score ${mode === "ai" ? `ai-signal-card-${aiSignal.tone}` : revealState.similarityUnavailable ? "similarity-verdict-pending" : similarityVerdict ? `similarity-verdict-${similarityVerdict.key}` : ""}`}
             aria-label={mode === "ai"
-              ? `${aiSignal.value === null ? "no result" : `${aiSignal.value}/100`} AI writing score`
+              ? `${aiSignal.value === null ? "no result" : formatAiScore(aiSignal.value)} AI writing score`
               : revealState.similarityUnavailable ? "similarity unavailable" : `${primaryScore}% ${primaryLabel}${similarityVerdict ? `, ${PRIMARY_SIMILARITY_BAND_LABELS[similarityVerdict.key]}` : ""}`}
           >
             <span>{mode === "ai" ? "AI writing score" : revealState.similarityUnavailable ? "Similarity" : primaryLabel}</span>
-            <strong>{mode === "ai" ? (aiSignal.value === null ? "—" : `${aiSignal.value}/100`) : revealState.similarityUnavailable ? "—" : formatSimilarityPercent(primaryScore, primaryMatchedWordCount(report))}</strong>
+            <strong>{mode === "ai" ? (aiSignal.value === null ? "—" : formatAiScore(aiSignal.value)) : revealState.similarityUnavailable ? "—" : formatSimilarityPercent(primaryScore, primaryMatchedWordCount(report))}</strong>
             {mode === "ai" && <p className="inspector-writing-estimate">{aiSignal.label}</p>}
             {mode === "similarity" && revealState.similarityUnavailable && <p className="inspector-writing-estimate">Unavailable</p>}
             {mode === "similarity" && !revealState.similarityUnavailable && similarityVerdict && <em>{PRIMARY_SIMILARITY_BAND_LABELS[similarityVerdict.key]}</em>}
