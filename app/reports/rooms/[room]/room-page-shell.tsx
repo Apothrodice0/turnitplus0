@@ -3,7 +3,17 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { ChevronLeft, Download, FileText } from "lucide-react";
-import { fetchReportRoomContents, fetchRemoteReport, saveReportRemote, type ReportSummary, type RoomContents, type RoomContentsFetchResult } from "@/lib/reports-remote";
+import { fetchReportRoomContents, fetchRemoteReport, saveReportRemote, type ReportSummary, type RoomContents, type RoomContentsFetchResult, type SaveReportRemoteResult } from "@/lib/reports-remote";
+import {
+  CHECK_STAGE_LABELS,
+  SAVE_GIVE_UP_AFTER_MS,
+  SAVE_SLOW_AFTER_MS,
+  SLOW_SAVE_LABEL,
+  checkStagePercent,
+  isIndeterminateCheckStage,
+  roomHoldsReport,
+  type CheckStage,
+} from "@/lib/upload-progress";
 import { invalidateRoomCache } from "@/lib/report-rooms-cache";
 import { ROOM_CYCLE_MS } from "@/lib/report-rooms";
 import { accountLocalReportOwner, storeReportBestEffort, getStoredReportById } from "@/lib/report-store";
@@ -198,6 +208,21 @@ export function aiAnalysisErrorResult(error: unknown, stage: AiPrepStage | null)
     },
   };
 }
+
+/**
+ * UPLOAD PROGRESS: everything a save needs, kept after analysis so "Try saving again" re-sends the SAME report (same id — the
+ * server updates that one row, never a second report) without analysing the document again.
+ */
+type PendingCheckSave = {
+  report: SimilarityReport;
+  reportForRemote: SimilarityReport | (SimilarityReport & { userSuppliedReferences: SuppliedReferenceInput[] });
+  summary: ReportSummary;
+  academicSearchDiagnosticsId: number | null;
+  academicFailed: boolean;
+  aiAnalysisPromise: Parameters<typeof completeAiAnalysisWithRecovery>[0];
+};
+export const SAVE_FAILED_MESSAGE = "Your document was analyzed, but the report could not be saved. Nothing was lost: try saving again. This will not create a second report.";
+export const SAVE_UNCONFIRMED_MESSAGE = "Saving is taking much longer than expected, and we could not confirm your report was saved. Your analysis is kept on this page: try saving again. This will not create a second report.";
 
 /**
  * analyzeAiText, but never rejects — a worker crash/timeout becomes a real
@@ -565,6 +590,14 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
   const [progress, setProgress] = useState(0);
   const [processingLabel, setProcessingLabel] = useState("Reading document content");
   const [isGeneratingReport, setIsGeneratingReport] = useState(false);
+  // UPLOAD PROGRESS (lib/upload-progress.ts): saving/finalizing have no measurable progress (spinner, no number); 100 % only once
+  // the room read shows this check's report; a save that could not be confirmed offers to send the SAME report again.
+  const [progressIndeterminate, setProgressIndeterminate] = useState(false);
+  const [progressComplete, setProgressComplete] = useState(false);
+  const [saveFailure, setSaveFailure] = useState<string | null>(null);
+  const [retryingSave, setRetryingSave] = useState(false);
+  const pendingSaveRef = useRef<PendingCheckSave | null>(null);
+  const roomReadListenerRef = useRef<((read: RoomContentsFetchResult) => void) | null>(null);
   const [downloadingReceipt, setDownloadingReceipt] = useState(false);
   const [retryingAi, setRetryingAi] = useState(false);
   // G2: the summary the server last persisted for an AI result (saveEnrichedAiResult / saveRetriedAiResult) — the browser's own
@@ -613,10 +646,14 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
   // usable account identifier) means no local copy at all.
   const localOwner = accountLocalReportOwner(accountEmail);
 
+  // UPLOAD PROGRESS: one toast timer at a time (a newer message is no longer hidden early by an older timer), cleared on unmount.
+  const toastTimerRef = useRef(0);
   function notify(message: string) {
     setToast(message);
-    window.setTimeout(() => setToast(""), 3200);
+    window.clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = window.setTimeout(() => setToast(""), 3200);
   }
+  useEffect(() => () => window.clearTimeout(toastTimerRef.current), []);
 
   async function handleDownloadReceipt(reportId: string) {
     setDownloadingReceipt(true);
@@ -985,6 +1022,8 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
     async function reconcile() {
       const result = await fetchReportRoomContents(room);
       if (cancelled) return;
+      // UPLOAD PROGRESS: the same read tells an outstanding save that the room already holds its report (no extra polling).
+      roomReadListenerRef.current?.(result);
       const decision = evaluateReconciliation(result, currentCheckReportIdRef.current);
       if (decision.action === "adopt") {
         window.clearInterval(progressTimerRef.current);
@@ -992,6 +1031,9 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
         setIsGeneratingReport(false);
         setProgress(0);
         setProcessingLabel("Reading document content");
+        setProgressIndeterminate(false);
+        setProgressComplete(false);
+        pendingSaveRef.current = null;
         pollAttemptsRef.current = 0;
         setOccupant(decision.occupant);
         return;
@@ -1004,6 +1046,18 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
       window.clearTimeout(timer);
     };
   }, [isGeneratingReport, room]);
+
+  // UPLOAD PROGRESS: the analysis runs in this tab, so leaving mid-check (or with an unsaved report) would lose it and invite a
+  // second upload; the browser's own "Leave site?" prompt asks first. Nothing else changes about navigation.
+  useEffect(() => {
+    if ((!isGeneratingReport && !saveFailure) || typeof window.addEventListener !== "function") return;
+    const warn = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [isGeneratingReport, saveFailure]);
 
   function checkAgain() {
     // A genuinely new polling lifecycle for the SAME report — see
@@ -1060,6 +1114,14 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
     setReferenceRejections([]);
   }
 
+  // UPLOAD PROGRESS: one stage at a time; the bar only moves forward and only within the stage's own band (lib/upload-progress.ts).
+  function enterStage(stage: CheckStage, fraction = 0) {
+    setProcessingLabel(CHECK_STAGE_LABELS[stage]);
+    setProgress((current) => Math.max(current, checkStagePercent(stage, fraction)));
+    setProgressIndeterminate(isIndeterminateCheckStage(stage));
+    setProgressComplete(stage === "complete");
+  }
+
   async function runCheck() {
     if (generationLockRef.current) {
       notify("Your current document is still being analyzed.");
@@ -1077,19 +1139,17 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
     // reconciliation watchdog below — reset to null here, filled in once
     // analyzeText() below produces a real report object with a stable id.
     currentCheckReportIdRef.current = null;
-    setProgress(4);
-    setProcessingLabel("Reading document content");
-    const minimumProcessingMs = 8_000 + Math.floor(Math.random() * 7_001);
-    const animationStartedAt = Date.now();
-    progressTimerRef.current = window.setInterval(() => {
-      const elapsed = Date.now() - animationStartedAt;
-      setProgress(Math.min(95, 4 + Math.round((elapsed / minimumProcessingMs) * 91)));
-    }, 250);
+    // UPLOAD PROGRESS: no timer-driven percentage and no artificial minimum duration — the bar follows the real stages below.
+    pendingSaveRef.current = null;
+    setSaveFailure(null);
+    setProgress(0);
+    enterStage("reading");
 
     let text = "";
     let extractionDiagnostic: ReportExtractionDiagnostic | null = null;
     try {
-      const extracted = await extractFileTextWithDiagnostics(submittedFile, (_value, label) => setProcessingLabel(label));
+      // PDF extraction reports pages read as 8..28 (lib/document-check-pipeline.ts); DOCX reports 18 once.
+      const extracted = await extractFileTextWithDiagnostics(submittedFile, (value) => enterStage("reading", (value - 8) / 20));
       extractionDiagnostic = extracted.extraction;
       text = normalizeExtractedText(extracted.text);
     } catch (error) {
@@ -1145,8 +1205,10 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
     const academicEvidencePromise = analyzeAcademicEvidence(text);
 
     let report: SimilarityReport;
+    enterStage("analyzing");
     try {
-      report = await analyzeText(text, submittedFile.name, submittedFile.size, (_value, label) => setProcessingLabel(label), accountEmail);
+      // The Archive scorer reports 0..100 (lib/archive-analysis-runtime.ts).
+      report = await analyzeText(text, submittedFile.name, submittedFile.size, (value) => enterStage("analyzing", value / 100), accountEmail);
     } catch {
       notify("The private document corpus could not be loaded. Please try again.");
       window.clearInterval(progressTimerRef.current);
@@ -1162,7 +1224,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
 
     const aiAnalysisPromise = runAiAnalysis(text, report.features.detectedLanguage);
 
-    setProcessingLabel("Checking external academic sources");
+    enterStage("matching");
     const [webCheck, academicResult] = await Promise.all([wikipediaPromise, academicEvidencePromise]);
     if (webCheck) report = enrichReportWithWikipedia(report, webCheck);
     report = enrichReportWithAcademicEvidence(report, academicResult);
@@ -1172,11 +1234,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
     // sibling since only the client sees the uploaded bytes).
     report = attachEvidenceInterpretation(report, { extraction: extractionDiagnostic });
 
-    const remainingAnimationMs = Math.max(0, minimumProcessingMs - (Date.now() - animationStartedAt));
-    if (remainingAnimationMs > 0) await new Promise((resolve) => window.setTimeout(resolve, remainingAnimationMs));
-    window.clearInterval(progressTimerRef.current);
-    setProgress(100);
-    setProcessingLabel("Saving your report");
+    enterStage("finishing");
 
     try {
       // Explicitly "processing" (not left implicit as "no aiStatus yet") so
@@ -1201,12 +1259,69 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
       await storeReportBestEffort(report, localOwner);
       const reportForRemote =
         suppliedReferenceInputs.length > 0 ? { ...report, userSuppliedReferences: suppliedReferenceInputs } : report;
-      // The upload request always names its room explicitly — the server
-      // re-validates occupancy itself (409 if this room filled in the
-      // meantime) rather than trusting this client's own view of it.
-      const saveResult = await saveReportRemote(reportForRemote, summary, academicResult.academicSearchDiagnosticsId, room);
-      if (saveResult.ok) setReferenceEntries((current) => markReferencesChecked(current));
-      if (!saveResult.ok) {
+      pendingSaveRef.current = {
+        report,
+        reportForRemote,
+        summary,
+        academicSearchDiagnosticsId: academicResult.academicSearchDiagnosticsId,
+        academicFailed: academicResult.status === "FAILED",
+        aiAnalysisPromise,
+      };
+      await persistPendingCheck();
+    } finally {
+      generationLockRef.current = false;
+      setIsGeneratingReport(false);
+    }
+  }
+
+  /**
+   * UPLOAD PROGRESS: saves the analysed report (first attempt and "Try saving again" alike — the SAME report id each time, so
+   * the server updates one row and never creates a second report) and only then hands the room over to its report card.
+   * The save answer is not the only proof: while it is outstanding the reconciliation watchdog's room reads are watched, and a
+   * room that already holds this report counts as saved (Production showed "Saving your report" for minutes with no limit).
+   */
+  async function saveCheckUntilConfirmed(pending: PendingCheckSave): Promise<
+    { kind: "saved"; confirmed: boolean } | { kind: "rejected"; result: Extract<SaveReportRemoteResult, { ok: false }> } | { kind: "unconfirmed" }
+  > {
+    const controller = new AbortController();
+    let settled = false;
+    const slowTimer = window.setTimeout(() => { if (!settled) setProcessingLabel(SLOW_SAVE_LABEL); }, SAVE_SLOW_AFTER_MS);
+    const giveUpTimer = window.setTimeout(() => controller.abort(), SAVE_GIVE_UP_AFTER_MS);
+    // The upload request always names its room explicitly — the server
+    // re-validates occupancy itself (409 if this room filled in the
+    // meantime) rather than trusting this client's own view of it.
+    const answer = saveReportRemote(pending.reportForRemote, pending.summary, pending.academicSearchDiagnosticsId, room, { signal: controller.signal })
+      .then((result) => ({ kind: "answer" as const, result }));
+    // The reconciliation watchdog (below) already reads this room every POLL_INTERVAL_MS while a check runs; its reads are
+    // shared with this waiter instead of polling a second time.
+    const seenInRoom = new Promise<{ kind: "inRoom" }>((resolve) => {
+      roomReadListenerRef.current = (read) => { if (!settled && roomHoldsReport(read, pending.summary.id)) resolve({ kind: "inRoom" }); };
+    });
+    const first = await Promise.race([answer, seenInRoom]);
+    settled = true;
+    roomReadListenerRef.current = null;
+    window.clearTimeout(slowTimer);
+    window.clearTimeout(giveUpTimer);
+    if (first.kind === "inRoom") return { kind: "saved", confirmed: true };
+    if (first.result.ok) return { kind: "saved", confirmed: false };
+    if (first.result.status === 0) {
+      // No answer (network failure, or this page's own limit): the server may still have finished — the room decides.
+      if (roomHoldsReport(await fetchReportRoomContents(room), pending.summary.id)) return { kind: "saved", confirmed: true };
+      return { kind: "unconfirmed" };
+    }
+    return { kind: "rejected", result: first.result };
+  }
+
+  async function persistPendingCheck(): Promise<void> {
+    const pending = pendingSaveRef.current;
+    if (!pending) return;
+    const { report, summary } = pending;
+    enterStage("saving");
+    const outcome = await saveCheckUntilConfirmed(pending);
+    if (outcome.kind !== "saved") {
+      const saveResult = outcome.kind === "rejected" ? outcome.result : null;
+      setProgressIndeterminate(false);
+      if (saveResult) {
         if (saveResult.quotaExceeded) {
           const resetLabel = saveResult.resetsAt
             ? new Date(saveResult.resetsAt).toLocaleString(undefined, { hour: "numeric", minute: "2-digit", hour12: true })
@@ -1220,12 +1335,26 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
           // anywhere in this branch) so the user can simply try again in a
           // moment without re-choosing their document. No corpus/admission/
           // internal terminology surfaced to the customer.
-          notify(saveResult.error ?? "This room is finishing its previous check. Please try again shortly.");
+          setSaveFailure(saveResult.error ?? "This room is finishing its previous check. Please try saving again in a moment.");
+          return;
         } else {
-          notify("Your report was generated but could not be saved. Please try again.");
+          setSaveFailure(SAVE_FAILED_MESSAGE);
+          return;
         }
+        // Daily limit / room taken: sending the same report again cannot help — the chosen file stays selected.
+        pendingSaveRef.current = null;
         return;
       }
+      setSaveFailure(SAVE_UNCONFIRMED_MESSAGE);
+      return;
+    }
+
+    pendingSaveRef.current = null;
+    setSaveFailure(null);
+    setReferenceEntries((current) => markReferencesChecked(current));
+    // 100 % only once the room read shows this report (the save answer alone is not shown as complete).
+    enterStage("confirming");
+    if (outcome.confirmed || roomHoldsReport(await fetchReportRoomContents(room), summary.id)) enterStage("complete");
 
       invalidateRoomCache(accountEmail, room);
       // Defect #2: a new report/check generation has just started for this
@@ -1242,7 +1371,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
       // response is phrased.
       setOccupant({ status: "processing", report: summary, cycleEndsAt: new Date(Date.now() + ROOM_CYCLE_MS).toISOString() });
       notify(
-        academicResult.status === "FAILED"
+        pending.academicFailed
           ? "Your report is saved. External academic verification was unavailable this time; finishing AI analysis…"
           : "Your report is saved. Finishing AI analysis…",
       );
@@ -1278,12 +1407,24 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
       // racing the first. While this tab's own pass is in flight the button shows "Checking…" disabled, and retryAiCheck's
       // existing busy guard refuses; once the pass settles (saved or not) Retry is exactly what it was before.
       setRetryingAi(true);
-      void completeAiAnalysisWithRecovery(aiAnalysisPromise, (aiResult) => saveEnrichedAiResult(report, aiResult)).then((saved) => {
+      void completeAiAnalysisWithRecovery(pending.aiAnalysisPromise, (aiResult) => saveEnrichedAiResult(report, aiResult)).then((saved) => {
         if (!saved) notify("AI analysis finished but could not be saved. Retry analysis once it settles, or reopen this room.");
         setRetryingAi(false);
       });
+  }
+
+  /** UPLOAD PROGRESS: "Try saving again" — sends the already-analysed report (same id) again; nothing is re-analysed. */
+  async function retrySave() {
+    if (!pendingSaveRef.current || generationLockRef.current) return;
+    generationLockRef.current = true;
+    setRetryingSave(true);
+    setSaveFailure(null);
+    setIsGeneratingReport(true);
+    try {
+      await persistPendingCheck();
     } finally {
       generationLockRef.current = false;
+      setRetryingSave(false);
       setIsGeneratingReport(false);
     }
   }
@@ -1296,10 +1437,14 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
   // already-terminal "ready"/"failed" still waiting on similarity to
   // resolve — the tiles below stay uniformly neutral in that same window,
   // so this summary line must never claim more than they do.
+  // UPLOAD PROGRESS: an empty room whose check is still running in this tab (or whose save is awaiting a retry) is never shown
+  // as "Ready for a new check".
   const statusLine =
     isFullyRevealed(occupant) && occupant.status === "ready" && occupant.report ? `Report ready · Last checked ${formatDate(occupant.report.createdAt)}`
     : isFullyRevealed(occupant) && occupant.status === "failed" ? "Report ready · AI analysis unavailable"
     : occupant.report ? "Analysis in progress"
+    : isGeneratingReport ? "Check in progress"
+    : saveFailure ? "Report not saved yet"
     : "Ready for a new check";
 
   return (
@@ -1330,6 +1475,9 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
               fileInputRef={fileInputRef}
               onChooseFile={chooseFile}
               onGenerate={runCheck}
+              indeterminate={progressIndeterminate}
+              complete={progressComplete}
+              saveFailure={saveFailure && !isGeneratingReport ? { message: saveFailure, retrying: retryingSave, onRetry: () => void retrySave() } : undefined}
             />
           </div>
         )}

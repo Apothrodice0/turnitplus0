@@ -1,8 +1,9 @@
 "use client";
 
 import type { RefObject } from "react";
-import { Check, LockKeyhole, UploadCloud } from "lucide-react";
+import { Check, Loader2, LockKeyhole, UploadCloud } from "lucide-react";
 import { ReferenceFilesPanel } from "@/components/reports/reference-files-panel";
+import { displayedCheckPercent } from "@/lib/upload-progress";
 import type {
   ReferenceIntakeEntry,
   ReferenceRejection,
@@ -50,6 +51,12 @@ type Props = {
   onGenerate: () => void;
   /** USER-SUPPLIED REFERENCES V1 — omit to hide the reference-files section entirely. */
   references?: ReferencePanelProps;
+  /** UPLOAD PROGRESS (lib/upload-progress.ts): a step with no measurable progress (saving, finalizing) — spinner, no number. */
+  indeterminate?: boolean;
+  /** UPLOAD PROGRESS: true only once the server has confirmed the finished report; without it the panel never shows 100 %. */
+  complete?: boolean;
+  /** UPLOAD PROGRESS: the analysed report could not be saved; offers to send the SAME report again (never a second report). */
+  saveFailure?: { message: string; retrying: boolean; onRetry: () => void };
 };
 
 function ReferenceSection({ references, busy }: { references?: ReferencePanelProps; busy: boolean }) {
@@ -68,19 +75,43 @@ function ReferenceSection({ references, busy }: { references?: ReferencePanelPro
   );
 }
 
-export function DocumentUploadPanel({ file, isGeneratingReport, progress, processingLabel, fileInputRef, onChooseFile, onGenerate, references }: Props) {
-  if (isGeneratingReport) {
+export function DocumentUploadPanel({ file, isGeneratingReport, progress, processingLabel, fileInputRef, onChooseFile, onGenerate, references, indeterminate = false, complete = false, saveFailure }: Props) {
+  if (saveFailure) {
     return (
       <>
-        <div className="upload-locked-panel" role="status" aria-live="polite">
+        <div className="upload-locked-panel upload-save-failed" role="alert">
+          <span className="upload-locked-icon"><LockKeyhole aria-hidden="true" /></span>
+          <p className="section-label">REPORT NOT SAVED YET</p>
+          <h3>{file?.name ?? "Your document"}</h3>
+          <p>{saveFailure.message}</p>
+          <button className="button primary full" type="button" onClick={saveFailure.onRetry} disabled={saveFailure.retrying}>
+            {saveFailure.retrying ? "Saving…" : "Try saving again"}
+          </button>
+        </div>
+        <ReferenceSection references={references} busy />
+      </>
+    );
+  }
+  if (isGeneratingReport) {
+    const shown = displayedCheckPercent(progress, complete);
+    const waiting = indeterminate && !complete;
+    return (
+      <>
+        <div className="upload-locked-panel" role="status" aria-live="polite" aria-busy={!complete}>
           <span className="upload-locked-icon"><LockKeyhole aria-hidden="true" /></span>
           <p className="section-label">CHECK IN PROGRESS</p>
           <h3>{file?.name ?? "Your document"}</h3>
-          <p>{processingLabel}…</p>
-          <div className="progress-track" aria-label={`${progress}% complete`}>
-            <span style={{ width: `${progress}%` }} />
-          </div>
-          <strong>{progress}%</strong>
+          <p>{processingLabel}{complete ? "" : "…"}</p>
+          {waiting ? (
+            <div className="progress-track indeterminate" role="progressbar" aria-label={processingLabel}>
+              <span />
+            </div>
+          ) : (
+            <div className="progress-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={shown} aria-label={`${shown}% complete`}>
+              <span style={{ width: `${shown}%` }} />
+            </div>
+          )}
+          {waiting ? <Loader2 className="upload-progress-spinner" aria-hidden="true" /> : <strong>{shown}%</strong>}
         </div>
         <ReferenceSection references={references} busy />
       </>

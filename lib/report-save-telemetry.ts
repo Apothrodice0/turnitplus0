@@ -108,3 +108,26 @@ export function logReportSaveRejectedTelemetry(params: BuildReportSaveRejectedTe
     // Best-effort only — see the doc comment above. Never rethrow.
   }
 }
+
+/**
+ * UPLOAD PROGRESS (2026-10-20): customers saw "Saving your report" for several minutes on Production with no way to tell which
+ * part of POST /api/reports was slow. One line per ACCEPTED save, no content: how long the request took, how long the
+ * primary-similarity resolution took (the main synchronous work before the row is written), and the document size.
+ * Best-effort like the rejection line above — never throws, never changes the response.
+ */
+export type ReportSaveTimingTelemetryEvent = {
+  event: "report_save_timing";
+  firstSave: boolean;
+  totalMs: number;
+  similarityResolutionMs: number | null;
+  wordCount: number | null;
+};
+
+export function logReportSaveTimingTelemetry(params: Omit<ReportSaveTimingTelemetryEvent, "event">): void {
+  try {
+    const event: ReportSaveTimingTelemetryEvent = { event: "report_save_timing", ...params };
+    console.info(JSON.stringify(event));
+  } catch {
+    // Best-effort only. Never rethrow.
+  }
+}

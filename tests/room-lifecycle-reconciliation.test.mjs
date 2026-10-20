@@ -243,9 +243,11 @@ test("Defect #3 (structural): runCheck() tracks its own check's identity — cur
   const shell = await readRoomShell();
   const lockIndex = shell.indexOf("generationLockRef.current = true;");
   const resetIdIndex = shell.indexOf("currentCheckReportIdRef.current = null;");
-  const progressTimerSetupIndex = shell.indexOf("progressTimerRef.current = window.setInterval(");
+  // UPLOAD PROGRESS (2026-10-20): the timer-driven progress animation is gone (it reached 100 % before the save); the first real
+  // stage marks the start of the work instead.
+  const progressStartIndex = shell.indexOf('enterStage("reading");');
   assert.ok(lockIndex > -1 && resetIdIndex > lockIndex, "currentCheckReportIdRef must be reset to null after the generation lock is taken");
-  assert.ok(progressTimerSetupIndex > -1 && progressTimerSetupIndex > resetIdIndex, "REQUIRED: the ref must be initialized before any async work (extraction/analysis) begins");
+  assert.ok(progressStartIndex > -1 && progressStartIndex > resetIdIndex, "REQUIRED: the ref must be initialized before any async work (extraction/analysis) begins");
   assert.match(shell, /currentCheckReportIdRef\.current = String\(report\.id\);/, "REQUIRED: must normalize to the same String(id) shape ReportSummary.id already uses (buildReportSummary), so the watchdog's own === comparison is meaningful");
   // The id must be filled in strictly AFTER analyzeText() succeeds (report
   // exists) and BEFORE the academic-evidence/Promise.all step the earlier
@@ -253,7 +255,8 @@ test("Defect #3 (structural): runCheck() tracks its own check's identity — cur
   // watchdog would have no id to match against while a check is stuck there.
   const idAssignmentIndex = shell.indexOf("currentCheckReportIdRef.current = String(report.id);");
   const analyzeTextIndex = shell.indexOf("report = await analyzeText(text, submittedFile.name, submittedFile.size,");
-  const academicEvidenceAwaitIndex = shell.indexOf('setProcessingLabel("Checking external academic sources");');
+  // UPLOAD PROGRESS (2026-10-20): the academic/Wikipedia wait is now the "Checking for matching passages" stage.
+  const academicEvidenceAwaitIndex = shell.indexOf('enterStage("matching");');
   assert.ok(analyzeTextIndex > -1 && idAssignmentIndex > analyzeTextIndex, "id must be assigned after analyzeText() produces the report");
   assert.ok(academicEvidenceAwaitIndex > -1 && idAssignmentIndex < academicEvidenceAwaitIndex, "id must be assigned before the academic-evidence step, so the watchdog can already match on it if that step hangs");
 });
@@ -269,10 +272,12 @@ test("Room-number mapping: the raw, zero-based `room` value is used identically 
   // request only — never the long-lived `report` object, so an AI-completion
   // resave never re-sends reference text). The room argument — this test's
   // actual concern — is still the raw, zero-based `room` prop.
-  assert.match(shell, /saveReportRemote\((?:report|reportForRemote), summary, academicResult\.academicSearchDiagnosticsId, room\)/, "the save must pass the raw room prop");
+  // UPLOAD PROGRESS (2026-10-20): the first save is sent from saveCheckUntilConfirmed (shared by "Try saving again") with the
+  // fields captured after analysis, plus an abort signal for its time limit; the room argument is still the raw prop.
+  assert.match(shell, /saveReportRemote\(pending\.reportForRemote, pending\.summary, pending\.academicSearchDiagnosticsId, room, \{ signal: controller\.signal \}\)/, "the save must pass the raw room prop");
   assert.match(shell, /fetchReportRoomContents\(room\)/, "must appear for the completion poll, the reconciliation watchdog and the lost-response AI-save reconciliation");
   const fetchOccurrences = shell.match(/fetchReportRoomContents\(room\)/g) ?? [];
-  assert.equal(fetchOccurrences.length, 3, "expected exactly 3 call sites: the completion poll, the reconciliation watchdog, and reconcileAmbiguousAiSave (tests/ai-save-lost-response-reconciliation.test.mjs)");
+  assert.equal(fetchOccurrences.length, 5, "expected exactly 5 call sites: the completion poll, the reconciliation watchdog, reconcileAmbiguousAiSave (tests/ai-save-lost-response-reconciliation.test.mjs), and the two UPLOAD PROGRESS confirmations (a save with no answer; the save confirmed before 100 %)");
 
   // Every `room + 1` (or equivalent) occurrence must be inside literal
   // display text, never passed as an argument to a save/fetch/key.
@@ -356,6 +361,8 @@ test("Scope check: this fix adds no new import of any scoring/corpus-admission/r
     // admission, retention, or PDF extraction — so it does not violate this
     // scope check's actual boundary (the forbidden-substring list above).
     "@/lib/similarity-core",
+    // UPLOAD PROGRESS (2026-10-20): stage labels, percent bands and the "room holds this report" predicate — pure display logic.
+    "@/lib/upload-progress",
     "lucide-react",
     "next/link",
     "react",

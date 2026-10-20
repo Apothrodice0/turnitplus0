@@ -196,7 +196,15 @@ export function classifySaveReportRemoteResult(result: SaveReportRemoteResult): 
  * a declaration, not the stamp: the server checks the positions against it
  * and writes the persisted value itself (app/api/reports/route.ts).
  */
-export async function saveReportRemote<T>(report: T, summary: ReportSummary, academicSearchDiagnosticsId?: number | null, room?: number): Promise<SaveReportRemoteResult> {
+export async function saveReportRemote<T>(
+  report: T,
+  summary: ReportSummary,
+  academicSearchDiagnosticsId?: number | null,
+  room?: number,
+  // UPLOAD PROGRESS (lib/upload-progress.ts): lets the room page stop WAITING for a save answer after its own limit; an aborted
+  // request is the existing status-0 result. Aborting never undoes a save the server completed — the room read decides that.
+  options?: { signal?: AbortSignal },
+): Promise<SaveReportRemoteResult> {
   try {
     const deviceKey = getDeviceKey();
     // Device Passport (Phase 3): a cryptographic upload-provenance attestation.
@@ -226,6 +234,7 @@ export async function saveReportRemote<T>(report: T, summary: ReportSummary, aca
     // `maybeAttestReportUpload` above deliberately saw the original: it only reads `report.text`, which is unchanged.
     const response = await fetch("/api/reports", {
       method: "POST",
+      ...(options?.signal ? { signal: options.signal } : {}),
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         deviceKey,

@@ -52,6 +52,7 @@ import { createSignOutRunner, requestServerSignOut, SIGN_OUT_MESSAGES } from "@/
 import { ReportRoomsBrowser } from "@/components/reports/report-rooms";
 import { ReportHistoryRow } from "@/components/reports/report-history-row";
 import { DocumentUploadPanel } from "@/components/reports/document-upload-panel";
+import { CHECK_STAGE_LABELS, checkStagePercent } from "@/lib/upload-progress";
 import { IdentityFields, type IdentityFieldsHandle, type CollectedIdentity } from "@/components/auth/identity-fields";
 import { EmailVerificationStatus } from "@/components/account/email-verification-status";
 import { EmailVerificationModal, type EmailVerificationModalStage } from "@/components/account/email-verification-modal";
@@ -247,6 +248,7 @@ export default function Home() {
   const [progress, setProgress] = useState(0);
   const [processingLabel, setProcessingLabel] = useState("Reading document content");
   const [isGeneratingReport, setIsGeneratingReport] = useState(false);
+  const [progressIndeterminate, setProgressIndeterminate] = useState(false);
   const aiPrepStageRef = useRef<AiPrepStage | null>(null);
   const [currentReport, setCurrentReport] = useState<SimilarityReport | null>(null);
   // Anonymous (device-scoped) report list only, from here on — lightweight
@@ -1022,20 +1024,17 @@ export default function Home() {
     generationLockRef.current = true;
     setIsGeneratingReport(true);
     navigate("reports");
-    setProgress(4);
-    setProcessingLabel("Reading document content");
-    const minimumProcessingMs = 8_000 + Math.floor(Math.random() * 7_001);
-    const animationStartedAt = Date.now();
-    const progressTimer = window.setInterval(() => {
-      const elapsed = Date.now() - animationStartedAt;
-      setProgress(Math.min(95, 4 + Math.round((elapsed / minimumProcessingMs) * 91)));
-    }, 250);
+    // UPLOAD PROGRESS (lib/upload-progress.ts): no timer-driven percentage and no artificial minimum duration; never 100 %
+    // before the server has the report (the save itself is shown as indeterminate).
+    setProgressIndeterminate(false);
+    setProgress(checkStagePercent("reading"));
+    setProcessingLabel(CHECK_STAGE_LABELS.reading);
 
     let text = "";
     let extractionDiagnostic: ReportExtractionDiagnostic | null = null;
     try {
-      const extracted = await extractFileTextWithDiagnostics(submittedFile, (_value, label) => {
-        setProcessingLabel(label);
+      const extracted = await extractFileTextWithDiagnostics(submittedFile, (value) => {
+        setProgress((current) => Math.max(current, checkStagePercent("reading", (value - 8) / 20)));
       });
       extractionDiagnostic = extracted.extraction;
       text = normalizeExtractedText(extracted.text);
@@ -1050,7 +1049,6 @@ export default function Home() {
               ? "This PDF doesn't contain enough selectable text to analyze."
               : "I could not read that document. Try another file.",
       );
-      window.clearInterval(progressTimer);
       generationLockRef.current = false;
       setIsGeneratingReport(false);
       return;
@@ -1059,7 +1057,6 @@ export default function Home() {
     if (text.length < 80) {
       navigate("dashboard");
       notify("Add at least 80 characters to create a useful report.");
-      window.clearInterval(progressTimer);
       generationLockRef.current = false;
       setIsGeneratingReport(false);
       return;
@@ -1078,7 +1075,6 @@ export default function Home() {
     if (referenceEntries.length > 0) {
       suppliedReferenceInputs = await extractReferenceInputs(referenceEntries, (next) => setReferenceEntries(next));
       if (referenceTransportBudgetError(suppliedReferenceInputs, text) !== null) {
-        window.clearInterval(progressTimer);
         generationLockRef.current = false;
         setIsGeneratingReport(false);
         setReferenceEntries((current) => current.map((entry) => ({ ...entry, status: "ready" as const, note: null })));
@@ -1116,13 +1112,13 @@ export default function Home() {
 
     let report: SimilarityReport;
     try {
-      report = await analyzeText(text, submittedFile.name, submittedFile.size, (_value, label) => {
-        setProcessingLabel(label);
+      report = await analyzeText(text, submittedFile.name, submittedFile.size, (value) => {
+        setProcessingLabel(CHECK_STAGE_LABELS.analyzing);
+        setProgress((current) => Math.max(current, checkStagePercent("analyzing", value / 100)));
       }, account.email);
     } catch {
       navigate("dashboard");
       notify("The private document corpus could not be loaded. Please try again.");
-      window.clearInterval(progressTimer);
       generationLockRef.current = false;
       setIsGeneratingReport(false);
       return;
@@ -1160,7 +1156,9 @@ export default function Home() {
         },
       }));
 
-    setProcessingLabel("Checking external academic sources");
+    setProcessingLabel(CHECK_STAGE_LABELS.matching);
+    setProgressIndeterminate(true);
+    setProgress((current) => Math.max(current, checkStagePercent("matching")));
     const [webCheck, academicResult] = await Promise.all([wikipediaPromise, academicEvidencePromise]);
     if (webCheck) {
       console.debug("Wikipedia check completed.", {
@@ -1190,13 +1188,9 @@ export default function Home() {
     report = attachEvidenceInterpretation(report, { extraction: extractionDiagnostic });
 
     setCurrentReport(report);
-    const remainingAnimationMs = Math.max(0, minimumProcessingMs - (Date.now() - animationStartedAt));
-    if (remainingAnimationMs > 0) {
-      await new Promise((resolve) => window.setTimeout(resolve, remainingAnimationMs));
-    }
-    window.clearInterval(progressTimer);
-    setProgress(100);
-    setProcessingLabel("Saving your report");
+    setProgress((current) => Math.max(current, checkStagePercent("saving")));
+    setProcessingLabel(CHECK_STAGE_LABELS.saving);
+    setProgressIndeterminate(true);
     try {
       const saveResult = await saveReport(report, academicResult.academicSearchDiagnosticsId, suppliedReferenceInputs);
       if (saveResult.ok) setReferenceEntries((current) => markReferencesChecked(current));
@@ -1556,6 +1550,7 @@ export default function Home() {
                 <DocumentUploadPanel
                   file={file}
                   isGeneratingReport={isGeneratingReport}
+                  indeterminate={progressIndeterminate}
                   progress={progress}
                   processingLabel={processingLabel}
                   fileInputRef={fileInputRef}

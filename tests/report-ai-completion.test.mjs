@@ -178,9 +178,11 @@ test("similarity remaining available when AI fails: runCheck saves the similarit
   // USER-SUPPLIED REFERENCES V1: the first arg is now `reportForRemote` (the
   // report plus an optional `userSuppliedReferences` sibling for this one
   // request); the ordering guarantee this test checks is unchanged.
-  const firstSaveIndex = shell.indexOf("const saveResult = await saveReportRemote(reportForRemote, summary, academicResult.academicSearchDiagnosticsId, room);");
+  // UPLOAD PROGRESS (2026-10-20): the first save is sent from saveCheckUntilConfirmed (shared by "Try saving again"); the
+  // ordering guarantee is unchanged: save, then the room is marked processing, then the AI chain.
+  const firstSaveIndex = shell.indexOf("const answer = saveReportRemote(pending.reportForRemote, pending.summary, pending.academicSearchDiagnosticsId, room, { signal: controller.signal })");
   const setProcessingIndex = shell.indexOf('setOccupant({ status: "processing", report: summary, cycleEndsAt:');
-  const aiChainIndex = shell.indexOf("void completeAiAnalysisWithRecovery(aiAnalysisPromise");
+  const aiChainIndex = shell.indexOf("void completeAiAnalysisWithRecovery(pending.aiAnalysisPromise");
 
   assert.ok(firstSaveIndex > -1, "the similarity report's own save must be found");
   assert.ok(setProcessingIndex > -1, "the room must be marked processing immediately after the similarity save succeeds");

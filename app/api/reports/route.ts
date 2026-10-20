@@ -38,7 +38,7 @@ import { verifySuppliedReferences } from '../../../lib/user-supplied-references'
 import { sanitizeSuppliedReferenceInputs, admittedReferenceEvidenceForUnifiedSimilarity, resolveUserSuppliedReferenceEvidenceForSave } from '../../../lib/report-user-supplied-references';
 import { referenceTransportBudgetError } from '../../../lib/user-supplied-reference-constants';
 import { MAX_REPORT_SAVE_REQUEST_BYTES, persistedPayloadSize } from '../../../lib/report-transport-limits';
-import { logReportSaveRejectedTelemetry } from '../../../lib/report-save-telemetry';
+import { logReportSaveRejectedTelemetry, logReportSaveTimingTelemetry } from '../../../lib/report-save-telemetry';
 import { isCompactAiAnalysis, validateCompactAiAnalysis } from '../../../lib/ai-passage-table';
 import { encodeReportForPersistence, isEvidenceInterpretationCustomerReadable } from '../../../lib/report-persistence';
 import { scheduleReportShadowEvaluations } from '../../../lib/report-shadow-evaluations';
@@ -411,6 +411,12 @@ async function insertReportWithRoomCheck(params: {
 }
 
 export async function POST(request: Request) {
+  // UPLOAD PROGRESS: one timing line per accepted save (lib/report-save-telemetry.ts) — diagnosis only, no behaviour change.
+  const saveStartedAt = Date.now();
+  let timingFirstSave = false;
+  let timingSimilarityResolutionMs: number | null = null;
+  let timingWordCount: number | null = null;
+  const timingSince = (startedAt: number) => Date.now() - startedAt;
   try {
     const rate = await checkRate(clientIpFrom(request));
     if (!rate.allowed) {
@@ -634,6 +640,7 @@ export async function POST(request: Request) {
         args: [deviceKey, id],
       });
       const isFirstSaveOfThisReport = existingReportRow.rows.length === 0;
+      timingFirstSave = isFirstSaveOfThisReport;
 
       const parseJsonExtract = (v: unknown): unknown => {
         if (typeof v !== 'string' || v.length === 0) return null;
@@ -1259,6 +1266,7 @@ export async function POST(request: Request) {
         | null = null;
       if (isNonEmptyString(reportPayload?.text)) {
         try {
+          const similarityResolutionStartedAt = Date.now();
           const resolution = await resolvePrimarySimilaritySummary(client, {
             reportDeviceKey: deviceKey,
             reportId: id,
@@ -1286,6 +1294,8 @@ export async function POST(request: Request) {
             // persisted, immutable upload passport itself.
             verifiedDevicePassportId: isFirstSaveOfThisReport ? verifiedDevicePassportId : undefined,
           });
+          timingSimilarityResolutionMs = timingSince(similarityResolutionStartedAt);
+          timingWordCount = typeof reportPayload.wordCount === "number" ? reportPayload.wordCount : null;
           // Reused as-is by the deferred shadow evaluators below — the SAME
           // resolvePrimarySimilaritySummary output the GET route hands them,
           // populated on both the success and the
@@ -1671,6 +1681,7 @@ export async function POST(request: Request) {
       client.close();
     }
 
+    logReportSaveTimingTelemetry({ firstSave: timingFirstSave, totalMs: timingSince(saveStartedAt), similarityResolutionMs: timingSimilarityResolutionMs, wordCount: timingWordCount });
     return new NextResponse(JSON.stringify({ ok: true }), { status: 200, headers: { 'Content-Type': 'application/json' } });
   } catch (err) {
     // Security/privacy hardening: never echo an internal Error.message (driver/
