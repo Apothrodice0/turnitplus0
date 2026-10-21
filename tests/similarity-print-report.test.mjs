@@ -1,0 +1,302 @@
+/**
+ * SIMILARITY PRINT REPORT (2026-10-21) — the printed/PDF similarity report: three fixed introductory pages (cover,
+ * overview, sources), then the highlighted manuscript from page 4 (components/report/report-v2/similarity-print-report.tsx,
+ * lib/similarity-print-layout.ts).
+ *
+ * Pins: the same score / counts / evidence as the view model; the exact highlight spans of findHighlightRanges; the
+ * full manuscript text, unaltered; source numbering by rank, identical on page 3 and in the manuscript; page numbers
+ * that match the pages; no invented cover metadata (never the account email); pages that stay within their sheet.
+ */
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import test from "node:test";
+import React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+
+import { tokenSpans, tokens } from "../lib/similarity-core.ts";
+import { formatSimilarityPercent, primarySimilarityScore } from "../lib/report-types.ts";
+import { buildReportEvidenceInterpretation, resolveReportCompletion, unknownExtractionDiagnostic } from "../lib/evidence-interpretation/index.ts";
+import { buildReportV2ViewModel } from "../lib/report-v2-view.ts";
+import {
+  PRINT_MANUSCRIPT_LAYOUT,
+  SOURCES_PAGE_CAPACITY,
+  buildPrintCoverFields,
+  estimatePrintLines,
+  formatPrintSubmittedAt,
+  paginateManuscriptForPrint,
+  printDocumentTitle,
+  printSourceTone,
+  printSourcesPage,
+  rankForCharRange,
+  rankPrintSources,
+} from "../lib/similarity-print-layout.ts";
+import { SimilarityPrintReport } from "../components/report/report-v2/similarity-print-report.tsx";
+import { findHighlightRanges } from "../components/report/similarity-report-papers.tsx";
+
+// ── fixtures ─────────────────────────────────────────────────────────────
+function prose(words) {
+  const vocab = ["the", "framework", "governs", "general", "mobilization", "procedures", "during", "periods", "of", "declared", "national", "emergency", "across", "multiple", "sectors", "public", "administration"];
+  const out = [];
+  for (let i = 0; i < words; i += 1) out.push(vocab[(i * 7 + Math.floor(i / 13)) % vocab.length]);
+  // a paragraph break every ~120 words
+  return out.map((w, i) => (i > 0 && i % 120 === 0 ? `\n${w}` : w)).join(" ");
+}
+
+/** A V2 report built through the REAL evidence interpreter: `sourceCount` named sources over `text`. */
+function reportWithSources({ text, sourceCount, title = "thesis-final.docx" }) {
+  const spans = tokenSpans(text);
+  const wc = tokens(text).length;
+  const positions = new Set();
+  const evidence = [];
+  let cursor = 5;
+  for (let i = 0; i < sourceCount; i += 1) {
+    const len = Math.max(5, 40 - i);
+    const a = cursor;
+    const b = Math.min(wc - 1, a + len - 1);
+    cursor = b + 9;
+    if (a >= wc - 1) break;
+    for (let w = a; w <= b; w += 1) positions.add(w);
+    evidence.push({
+      provider: "fixture", providerId: `fx-${i}`, title: `Fixture publication ${i + 1}`, url: `https://journals.example.org/a/${i + 1}`,
+      doi: `10.5555/fx.${i + 1}`, publication: "Fixture Journal", year: 2020,
+      matchedPassages: [{ submittedWordStart: a, submittedWordEnd: b, matchedWordCount: b - a + 1, submittedText: text.slice(spans[a].start, spans[b].end) }],
+    });
+  }
+  const matched = [...positions].sort((x, y) => x - y);
+  const score = Math.round((matched.length / wc) * 100);
+  const report = {
+    version: 11, id: 42, submissionId: "4471902385", title, author: "owner@example.test", assignment: "",
+    created: "2026-10-21T09:42:00.000Z", score, archiveScore: score, wordCount: wc, characterCount: text.length, pageCount: 3,
+    fileSize: "214.6 KB", databaseSize: 230, corpusVersion: "fixture", scoreBand: "Low", riskStatus: "Lower", riskTarget: 0, riskCutoff: 0,
+    riskCalibration: { auc: 0, precision: 0, recall: 0, sampleSize: 0 },
+    features: { maxSourceContainment: 0, longestMatchedSpan: 0, quotationDensity: 0, referenceListRatio: 0, highFrequencyShingleCount: 0, repeatedThreeGramCount: 0, detectedLanguage: "English" },
+    excludedDocuments: 0, matchedWordCount: matched.length, sources: [], repeats: [], text, externalAcademicEvidence: evidence,
+    unifiedSimilarity: {
+      version: 1, wordCount: wc, unifiedScore: score, uniqueMatchedWords: matched.length, archiveOnlyWords: 0, liveAcademicOnlyWords: 0,
+      previousUploadOnlyWords: 0, overlapWords: 0, selfExcludedWords: 0, unknownExcludedWords: 0, deviceSelfExcludedWords: 0,
+      userSuppliedReferenceOnlyWords: 0, selectiveCorpusOnlyWords: 0, importedSimilarityEvidenceOnlyWords: 0, contributions: [],
+      matchedPositions: matched, previousUploadPositions: [], userSuppliedReferencePositions: [], selectiveCorpusPositions: [], importedSimilarityEvidencePositions: [],
+    },
+  };
+  const ei = buildReportEvidenceInterpretation(report, {});
+  const extractionDiagnostic = unknownExtractionDiagnostic();
+  const reportCompletion = resolveReportCompletion({ academicSearch: null, selectiveCorpus: null, extraction: extractionDiagnostic, unverifiedCandidateCount: 0, verifiedSimilarityPercent: score });
+  return { ...report, evidenceInterpretation: ei, reportCompletion, extractionDiagnostic };
+}
+
+const render = (report, submitter = { displayName: "Sample Student", institution: null }) =>
+  renderToStaticMarkup(React.createElement(SimilarityPrintReport, { report, submitter }));
+
+const decode = (s) => s.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#x27;/g, "'").replace(/&amp;/g, "&");
+
+function pagesOf(html) {
+  return [...html.matchAll(/<article class="report-paper spr-page ([^"]*)" data-print-page="(\d+)">([\s\S]*?)<\/article>/g)]
+    .map((m) => ({ cls: m[1], n: Number(m[2]), html: m[3] }));
+}
+
+/** The manuscript exactly as printed: page text blocks joined, source-number badges removed, tags stripped. */
+function printedManuscript(html) {
+  return pagesOf(html)
+    .filter((p) => p.cls.includes("spr-manuscript"))
+    .map((p) => /<div class="spr-manuscript-text"[^>]*>([\s\S]*)<\/div>/.exec(p.html)?.[1] ?? "")
+    .map((block) => decode(block.replace(/<sup class="spr-mark-n">[^<]*<\/sup>/g, "").replace(/<[^>]+>/g, "")))
+    .join("");
+}
+
+// ── pagination ───────────────────────────────────────────────────────────
+function assertPagination(text, ranges, label, { allowSplitWord = false } = {}) {
+  const pages = paginateManuscriptForPrint(text, ranges);
+  assert.equal(pages.map((p) => text.slice(p.start, p.end)).join(""), text, `${label}: pages reconstruct the text exactly`);
+  pages.forEach((p, i) => {
+    if (i > 0) assert.equal(p.start, pages[i - 1].end, `${label}: contiguous`);
+    const budget = (i === 0 ? PRINT_MANUSCRIPT_LAYOUT.firstPageLines : PRINT_MANUSCRIPT_LAYOUT.linesPerPage) + (i === pages.length - 1 ? PRINT_MANUSCRIPT_LAYOUT.tailLines : 0);
+    const lines = estimatePrintLines(text, p.start, p.end, ranges);
+    if (!allowSplitWord) assert.ok(lines <= budget, `${label}: page ${i + 1} uses ${lines} lines, budget ${budget}`);
+    if (i > 0 && !allowSplitWord) assert.ok(/\s/.test(text[p.start - 1]), `${label}: page ${i + 1} starts at a word boundary`);
+  });
+  return pages;
+}
+
+test("PAGINATION: prose, a reference list of short lines, Arabic and French — exact text, every page within its sheet budget, cuts only between words", () => {
+  assertPagination(prose(6000), [], "prose");
+  const refs = Array.from({ length: 700 }, (_, i) => `[${i + 1}] A. Author. Short reference ${i + 1}. Journal, ${1990 + (i % 30)}.`).join("\n");
+  const refPages = assertPagination(refs, [], "short lines");
+  assert.ok(refPages.length >= 15, "a page of short lines holds far fewer words than a page of prose");
+  const arabic = Array.from({ length: 400 }, () => "يهدف هذا القانون إلى تنظيم التعبئة العامة في أوقات الأزمات الوطنية.").join(" ");
+  assertPagination(arabic, [], "arabic");
+  const french = Array.from({ length: 120 }, (_, i) => `Paragraphe ${i + 1}. L’étude s’intéresse à l’évolution des systèmes d’information publics et à la qualité des données.`).join("\n\n");
+  assertPagination(french, [], "french");
+  assert.deepEqual(paginateManuscriptForPrint("", []), []);
+});
+
+test("PAGINATION: a highlight shorter than a page is never split across pages; one longer than a page continues, within budget", () => {
+  const text = prose(5000);
+  const spans = tokenSpans(text);
+  const ranges = [];
+  for (let w = 30; w + 25 < spans.length; w += 170) ranges.push({ start: spans[w].start, end: spans[w + 25].end });
+  const pages = assertPagination(text, ranges, "short highlights");
+  for (const b of pages.slice(1).map((p) => p.start)) {
+    assert.ok(!ranges.some((r) => b > r.start && b < r.end), `no page break inside a highlight (at ${b})`);
+  }
+  const whole = [{ start: 0, end: text.length }];
+  const longPages = assertPagination(text, whole, "one highlight covering everything");
+  assert.ok(longPages.length > 1, "a whole-document match still paginates");
+});
+
+test("PAGINATION: trailing whitespace and a final fragment of a line or two join the page before; a longer remainder gets its own page", () => {
+  const firstPage = PRINT_MANUSCRIPT_LAYOUT.firstPageLines;
+  const lines = (n) => Array.from({ length: n }, (_, i) => `Line ${i + 1}`).join("\n");
+  assert.equal(paginateManuscriptForPrint(`${lines(firstPage)}\n\n   \n`, []).length, 1, "whitespace never makes a blank page");
+  assert.equal(paginateManuscriptForPrint(lines(firstPage + 2), []).length, 1, "a two-line tail joins the page");
+  assert.equal(paginateManuscriptForPrint(lines(firstPage + 3), []).length, 2, "three lines start a new page");
+});
+
+test("PAGINATION: an unbroken run longer than a page is still split and fully kept", () => {
+  const run = "x".repeat(20000);
+  const pages = paginateManuscriptForPrint(run, []);
+  assert.ok(pages.length > 1);
+  assert.equal(pages.map((p) => run.slice(p.start, p.end)).join(""), run);
+});
+
+// ── ranking and identity ─────────────────────────────────────────────────
+test("SOURCES: ranked by matched words (ties by the interpreter's own src-N order, numerically), numbered from 1; page 3 shows the top entries and says how many", () => {
+  const vm = { sources: [
+    { id: "src-10", matchedWords: 10 }, { id: "src-2", matchedWords: 10 }, { id: "src-3", matchedWords: 30 },
+  ] };
+  const ranked = rankPrintSources(vm);
+  assert.deepEqual(ranked.map((s) => [s.id, s.rank]), [["src-3", 1], ["src-2", 2], ["src-10", 3]]);
+  assert.deepEqual(ranked[1].tone, printSourceTone(2));
+  const many = rankPrintSources({ sources: Array.from({ length: 40 }, (_, i) => ({ id: `src-${i + 1}`, matchedWords: 100 - i })) });
+  const page = printSourcesPage(many);
+  assert.equal(page.shown.length, SOURCES_PAGE_CAPACITY);
+  assert.equal(page.total, 40);
+  assert.equal(page.hidden, 40 - SOURCES_PAGE_CAPACITY);
+  // neighbouring ranks always differ in colour AND line pattern (grayscale-readable)
+  for (let r = 1; r < 12; r += 1) {
+    const a = printSourceTone(r), b = printSourceTone(r + 1);
+    assert.ok(a.color !== b.color && a.line !== b.line, `ranks ${r} and ${r + 1}`);
+  }
+});
+
+test("SOURCES: a highlight takes the best-ranked source of the evidence passage it overlaps most", () => {
+  const passages = [
+    { charStart: 0, charEnd: 50, sourceIds: ["src-10", "src-2"] },
+    { charStart: 60, charEnd: 80, sourceIds: ["src-7"] },
+  ];
+  const rankById = new Map([["src-2", 4], ["src-10", 9], ["src-7", 1]]);
+  assert.equal(rankForCharRange(10, 40, passages, rankById), 4);
+  assert.equal(rankForCharRange(55, 79, passages, rankById), 1);
+  assert.equal(rankForCharRange(90, 99, passages, rankById), null);
+});
+
+// ── cover ────────────────────────────────────────────────────────────────
+test("COVER: only real fields — the account name (never the email), filename, type, size, words, language, ID; unavailable fields are omitted", () => {
+  const report = { title: "مذكرة التخرج.docx", fileSize: "—", wordCount: 0, submissionId: "123", features: { detectedLanguage: "ar" }, author: "someone@example.test" };
+  const fields = buildPrintCoverFields(report, null);
+  assert.deepEqual(fields.map((f) => f.label), ["Original file", "File type", "Detected language", "Submission ID"]);
+  assert.equal(fields.find((f) => f.label === "File type").value, "Word document (DOCX)");
+  assert.equal(fields.find((f) => f.label === "Detected language").value, "Arabic");
+  assert.ok(!JSON.stringify(fields).includes("@"), "never the email address");
+  const named = buildPrintCoverFields({ ...report, fileSize: "2.1 MB", wordCount: 5085 }, { displayName: "Sample Student", institution: null });
+  assert.deepEqual(named.slice(0, 1), [{ label: "Submitted by", value: "Sample Student" }]);
+  assert.ok(!named.some((f) => f.label === "Institution"), "no unverified institution");
+  assert.equal(printDocumentTitle("thesis-final.v2.docx"), "thesis-final.v2");
+  assert.equal(formatPrintSubmittedAt("2026-10-21T09:42:00.000Z", "UTC"), "21 October 2026, 09:42 UTC");
+  assert.equal(formatPrintSubmittedAt("not a date"), null);
+});
+
+// ── the rendered report ──────────────────────────────────────────────────
+test("REPORT: exactly three introductory pages, the manuscript from page 4, and every footer reads 'Page n of N' for the real page count", () => {
+  const report = reportWithSources({ text: prose(4200), sourceCount: 24 });
+  const html = render(report);
+  const pages = pagesOf(html);
+  assert.deepEqual(pages.slice(0, 4).map((p) => p.cls.split(" ")[0]), ["spr-cover", "spr-overview", "spr-sources", "spr-manuscript"]);
+  assert.ok(pages.slice(3).every((p) => p.cls.startsWith("spr-manuscript")), "nothing else after page 3");
+  pages.forEach((p, i) => {
+    assert.equal(p.n, i + 1);
+    assert.match(p.html, new RegExp(`Page ${i + 1} of ${pages.length}<`));
+  });
+  assert.match(pages[0].html, /Highlighted manuscript<\/span><i aria-hidden="true"><\/i><b>4–\d+<\/b>/, "the cover's contents list the manuscript pages");
+});
+
+test("REPORT: the overview shows the authoritative score, counts and evidence of the view model — nothing recomputed", () => {
+  const report = reportWithSources({ text: prose(4200), sourceCount: 24 });
+  const vm = buildReportV2ViewModel(report);
+  const html = render(report);
+  const overview = pagesOf(html)[1].html;
+  const percent = formatSimilarityPercent(primarySimilarityScore(report), vm.summary.matchedWordCount);
+  assert.match(overview, new RegExp(`<div class="spr-score-figure"><strong>${percent}</strong>`));
+  for (const [label, value] of [["Matched words", vm.summary.matchedWordCount], ["Words analyzed", vm.summary.totalWordCount], ["Matching evidence entries", vm.summary.matchingEvidenceEntries], ["Highlighted passages", vm.filterCounts.all]]) {
+    assert.match(overview, new RegExp(`<dt>${label}</dt><dd>${value.toLocaleString("en-US")}</dd>`), label);
+  }
+  assert.match(overview, new RegExp(vm.summary.completion.scopeLine.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/’/g, ".")));
+});
+
+test("REPORT: page 3 lists the top entries in rank order and states how many of how many are shown", () => {
+  const report = reportWithSources({ text: prose(4200), sourceCount: 24 });
+  const vm = buildReportV2ViewModel(report);
+  const ranked = rankPrintSources(vm);
+  const sourcesPage = pagesOf(render(report))[2].html;
+  const rows = [...sourcesPage.matchAll(/<span class="spr-rank"[^>]*>(\d+)<\/span>[\s\S]*?<span class="spr-source-title" dir="auto">([^<]*)<\/span>/g)];
+  assert.equal(rows.length, Math.min(SOURCES_PAGE_CAPACITY, ranked.length));
+  rows.forEach((m, i) => {
+    assert.equal(Number(m[1]), i + 1);
+    assert.equal(decode(m[2]), ranked[i].label);
+  });
+  assert.ok(ranked.length > SOURCES_PAGE_CAPACITY, "fixture has more entries than fit");
+  assert.match(sourcesPage, new RegExp(`Showing the ${SOURCES_PAGE_CAPACITY} highest-ranked of ${ranked.length} matching evidence entries`));
+  assert.match(sourcesPage, /complete source inventory/);
+});
+
+test("REPORT: the manuscript prints the full text unaltered, with exactly the highlight spans of findHighlightRanges, numbered like page 3", () => {
+  const report = reportWithSources({ text: prose(4200), sourceCount: 24 });
+  const html = render(report);
+  assert.equal(printedManuscript(html), report.text, "every character, in order");
+  const expected = findHighlightRanges(report, { includeWikipedia: false }).map((r) => `${r.start}-${r.end}`);
+  const printed = [...new Set([...html.matchAll(/data-span="(\d+-\d+)"/g)].map((m) => m[1]))];
+  assert.deepEqual(printed, expected, "same spans, same order");
+  const vm = buildReportV2ViewModel(report);
+  const rankById = new Map(rankPrintSources(vm).map((s) => [s.id, s.rank]));
+  for (const m of html.matchAll(/data-span="(\d+)-(\d+)">[\s\S]*?<sup class="spr-mark-n">(\d+)<\/sup>/g)) {
+    assert.equal(Number(m[3]), rankForCharRange(Number(m[1]), Number(m[2]), vm.passages, rankById));
+  }
+});
+
+test("REPORT: no matches — still three introductory pages, an honest empty state, and the unhighlighted manuscript", () => {
+  const base = reportWithSources({ text: prose(900), sourceCount: 0 });
+  const html = render(base, null);
+  const pages = pagesOf(html);
+  assert.equal(pages[0].cls.split(" ")[0], "spr-cover");
+  assert.equal(pages[3].cls.split(" ")[0], "spr-manuscript");
+  assert.match(pages[2].html, /No matching sources/);
+  assert.match(pages[3].html, /No passages matched/);
+  assert.equal(printedManuscript(html), base.text);
+  assert.doesNotMatch(pages[0].html, /Submitted by/, "no name when none is known");
+});
+
+test("REPORT: the account email never appears anywhere in the printed report", () => {
+  const report = reportWithSources({ text: prose(1500), sourceCount: 5 });
+  assert.doesNotMatch(render(report), /owner@example\.test/);
+});
+
+// ── wiring and print CSS ─────────────────────────────────────────────────
+test("WIRING: the report page prints SimilarityPrintReport for a V2 report; AI and legacy print paths are unchanged; the owner's name comes from a SELECT-only read", async () => {
+  const shell = await readFile(new URL("../app/reports/[id]/report-detail-shell.tsx", import.meta.url), "utf8");
+  assert.match(shell, /<AiReport report=\{report\} signal=\{aiSignal\} printMode \/> : hasV2 \? \(/);
+  assert.match(shell, /<SimilarityPrintReport report=\{report\} submitter=\{submitter\} \/>/);
+  assert.match(shell, /<OverviewReport report=\{report\} similarityStatus=\{effectiveSimilarityStatus\} \/>\s*<SubmissionReport report=\{report\} \/>\s*<SourcesReport report=\{report\} \/>/);
+  const page = await readFile(new URL("../app/reports/[id]/page.tsx", import.meta.url), "utf8");
+  assert.match(page, /readAccountIdentityProfile\(client, sessionUser\.id\)/);
+  assert.doesNotMatch(page.slice(page.indexOf("async function readReportSubmitter")), /sessionUser\.email[\s\S]*?displayName/);
+});
+
+test("PRINT CSS: the three introductory pages are exactly one sheet each; the wrapper adds no box; the font warm-up never prints", async () => {
+  const css = (await readFile(new URL("../app/globals.css", import.meta.url), "utf8")).replace(/\r\n/g, "\n");
+  const block = css.slice(css.indexOf("SIMILARITY PRINT REPORT (2026-10-21)"));
+  const print = block.slice(block.indexOf("@media print {"));
+  assert.match(print, /\.spr-report \{\n\s*display: contents;/);
+  assert.match(print, /\.spr-font-warmup \{\n\s*display: none;/);
+  assert.match(print, /\.spr-page\.spr-cover,\n\s*\.print-report-bundle \.report-paper\.spr-page\.spr-overview,\n\s*\.print-report-bundle \.report-paper\.spr-page\.spr-sources \{\n\s*height: 11in;\n\s*overflow: hidden;/);
+  assert.match(block, /\.spr-mark \{[\s\S]*?print-color-adjust: exact;/, "highlight fill prints with Background graphics off");
+  assert.match(block, /unicode-bidi: plaintext;/, "each manuscript paragraph takes its own direction (Arabic RTL)");
+});

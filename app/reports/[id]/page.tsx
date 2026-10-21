@@ -14,6 +14,8 @@ import { archiveOverlapScore, hasUnifiedSimilarity, stripServerInternalReportFie
 import { refreshSelectiveCorpusCompletionSignal } from "@/lib/report-evidence-interpretation";
 import { tryDecodeReportFromPersistence } from "@/lib/report-persistence";
 import { ReportUnavailablePanel } from "@/components/report/report-unavailable-panel";
+import { readAccountIdentityProfile } from "@/lib/account-identity-repo";
+import type { ReportSubmitter } from "@/lib/similarity-print-layout";
 import { ReportDetailShell } from "./report-detail-shell";
 
 export const dynamic = "force-dynamic";
@@ -54,7 +56,10 @@ type OwnedReportResult =
   // exact "0% AI on the room card / AI report pending on this page" split
   // this closes), so ReportDetailShell resolves its AI state from these plus
   // aiAnalysis-as-refinement, not from aiAnalysis alone.
-  | { status: "found"; payload: SimilarityReport; aiStatus: "processing" | "ready" | "failed"; aiScore: number | null; aiTone: string | null; similarityStatus: "resolved" | "stale" | "pending" | "failed" }
+  // submitter: the cover page of the printed similarity report names the account that owns the report (the
+  // session's own account — findReportRowForUser only returns its own rows): its identity full name, else its
+  // username. Never the email address, never invented; null when neither can be read.
+  | { status: "found"; payload: SimilarityReport; aiStatus: "processing" | "ready" | "failed"; aiScore: number | null; aiTone: string | null; similarityStatus: "resolved" | "stale" | "pending" | "failed"; submitter: ReportSubmitter | null }
   | { status: "not-found-for-session" }
   // R2: the report exists and is this session's own, but its persisted explanation
   // (evidenceInterpretation) cannot be decoded safely — never rendered as a score
@@ -62,6 +67,23 @@ type OwnedReportResult =
   | { status: "report-unavailable" }
   | { status: "no-session" }
   | { status: "rate-limited"; retryAfterSeconds: number };
+
+/** SELECT-only; a failed or missing identity read leaves the cover without a name rather than failing the page. */
+async function readReportSubmitter(
+  client: Awaited<ReturnType<typeof getReportsDbClient>>,
+  sessionUser: { id: string; username: string },
+): Promise<ReportSubmitter | null> {
+  let fullName: string | null = null;
+  try {
+    fullName = (await readAccountIdentityProfile(client, sessionUser.id))?.fullName?.trim() || null;
+  } catch {
+    fullName = null;
+  }
+  const displayName = fullName ?? (sessionUser.username?.trim() || null);
+  // No institution: account identity records only a self-declared institution today (institutionVerifiedAt is
+  // never set), and the cover shows an institution only when it is verified.
+  return displayName ? { displayName, institution: null } : null;
+}
 
 // The report room is intentionally a fast saved-payload read. Expensive
 // historical/family enrichment belongs to the background client hydration
@@ -193,7 +215,8 @@ const loadOwnedReport = cache(async (id: string): Promise<OwnedReportResult> => 
       if (payload.unifiedSimilarity && sessionUser.role !== "admin") {
         payload.unifiedSimilarity = { ...payload.unifiedSimilarity, contributions: [] };
       }
-      return { status: "found", payload, aiStatus, aiScore: row.ai_score, aiTone: row.ai_tone, similarityStatus: display.status };
+      const submitter = await readReportSubmitter(client, sessionUser);
+      return { status: "found", payload, aiStatus, aiScore: row.ai_score, aiTone: row.ai_tone, similarityStatus: display.status, submitter };
     } catch {
       return { status: "not-found-for-session" };
     }
@@ -273,6 +296,7 @@ export default async function ReportDetailPage({
       initialAiScore={result.status === "found" ? result.aiScore : null}
       initialAiTone={result.status === "found" ? result.aiTone : null}
       initialSimilarityStatus={result.status === "found" ? result.similarityStatus : null}
+      submitter={result.status === "found" ? result.submitter : null}
       requiresClientResolution={result.status === "no-session"}
       backRoom={backRoom}
     />
