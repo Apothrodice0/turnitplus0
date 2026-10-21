@@ -10281,13 +10281,94 @@ button.admin-archive-feed-row:focus-visible { outline: 2px solid var(--blue); ou
   font-weight: 600;
 }
 
+/*
+ * FORMATTED MANUSCRIPT (2026-10-21) — pages 4+ drawn from the reader's re-attached original .docx
+ * (components/report/report-v2/formatted-manuscript.tsx). Sizes, indents, alignment and direction come inline from
+ * the document itself; these rules only set neutral defaults, Word-like table borders and the off-screen layer the
+ * pages are measured in.
+ */
+.fm-column {
+  margin: 0 auto;
+  color: var(--spr-ink);
+  font-family: var(--spr-serif);
+}
+
+.fm-p {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  tab-size: 4;
+}
+
+.fm-label {
+  display: inline-block;
+  min-width: 1.4em;
+  margin-inline-end: 0.35em;
+  text-indent: 0;
+}
+
+.fm-img {
+  display: inline-block;
+  max-width: 100%;
+  max-height: 820px;
+  height: auto;
+  object-fit: contain;
+  vertical-align: bottom;
+}
+
+.fm-missing {
+  color: var(--spr-muted);
+  font-style: italic;
+}
+
+.fm-table {
+  width: 100%;
+  margin: 6px 0;
+  border-collapse: collapse;
+}
+
+/* Word's default cell margins: none above or below, ~0.08in at the sides */
+.fm-table td {
+  padding: 0 7px;
+  vertical-align: top;
+}
+
+.fm-table-bordered td {
+  border: 1px solid var(--spr-ink);
+}
+
+.fm-textbox {
+  margin: 8px 0;
+  padding: 10px 14px;
+  border: 1px solid var(--spr-track);
+}
+
+.spr-manuscript-limits {
+  margin-top: 4px;
+}
+
+/* off screen, but laid out (visibility, not display), so fonts and images load and every line can be measured */
+.fm-measure {
+  position: absolute;
+  top: 0;
+  left: -20000px;
+  width: 8.5in;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.fm-probe-fill {
+  flex: 1;
+}
+
 @media print {
   .spr-report {
     display: contents;
   }
 
-  .spr-font-warmup {
-    display: none;
+  .spr-font-warmup,
+  .fm-measure {
+    display: none !important;
   }
 
   .print-report-bundle .report-paper.spr-page {

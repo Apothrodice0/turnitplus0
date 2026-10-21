@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useSyncExternalStore, type CSSProperties, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from "react";
 import { similarityScoreBand } from "@/lib/ai-core";
 import { PRIMARY_SIMILARITY_BAND_LABELS, formatSimilarityPercent, type SimilarityReport } from "@/lib/report-types";
 import { buildReportV2ViewModel, matchingEvidenceEntriesLabel, type ReportV2ViewModel } from "@/lib/report-v2-view";
@@ -16,13 +16,13 @@ import {
   printLanguageLabel,
   printSourceTone,
   printSourcesPage,
-  rankForCharRange,
   rankPrintSources,
   type PrintRankedSource,
   type PrintSourceTone,
   type ReportSubmitter,
 } from "@/lib/similarity-print-layout";
-import { findHighlightRanges } from "../similarity-report-papers";
+import { buildPrintHighlights, type PrintHighlight } from "./print-highlights";
+import { FormattedColumn, FormattedLayoutProbe, formattedHasHiddenText, type FormattedManuscriptSource, type FormattedPlan } from "./formatted-manuscript";
 
 /**
  * SIMILARITY PRINT REPORT (2026-10-21) — the printed/PDF similarity report for a report with the V2 evidence
@@ -460,8 +460,6 @@ function SourcesPage({ report, vm, ranked, total }: { report: SimilarityReport; 
 }
 
 // ── page 4+ — highlighted manuscript ─────────────────────────────────────
-type PrintHighlight = { start: number; end: number; rank: number | null; wikipedia: boolean; title: string };
-
 function renderManuscriptWindow(text: string, highlights: PrintHighlight[], from: number, to: number): ReactNode[] {
   const pieces: ReactNode[] = [];
   let cursor = from;
@@ -486,24 +484,36 @@ function renderManuscriptWindow(text: string, highlights: PrintHighlight[], from
   return pieces;
 }
 
+function ManuscriptOpener({ report, hasHighlights, formatted }: { report: SimilarityReport; hasHighlights: boolean; formatted?: FormattedManuscriptSource | null }) {
+  const appears = formatted ? "Shown with the original document’s formatting." : "The text appears as submitted.";
+  const warnings = formatted?.doc.warnings ?? [];
+  return (
+    <div className="spr-manuscript-opener">
+      <p className="spr-kicker">Highlighted manuscript</p>
+      <h2 className="spr-manuscript-title" dir="auto">{printDocumentTitle(report.title)}</h2>
+      {hasHighlights ? (
+        <p className="spr-manuscript-key">
+          <span className="spr-manuscript-key-sample"><span className="spr-mark spr-line-solid" style={{ "--spr-c": printSourceTone(1).color } as CSSProperties}>matched text<sup className="spr-mark-n">1</sup></span></span>
+          Matched passages are underlined and numbered by source (page 3). {appears}
+        </p>
+      ) : (
+        <p className="spr-manuscript-key">No passages matched. {appears}</p>
+      )}
+      {warnings.length > 0 && (
+        <p className="spr-manuscript-key spr-manuscript-limits">Not shown from the original file: {warnings.join(", ")}.</p>
+      )}
+      {formatted && formattedHasHiddenText(formatted.doc) && (
+        <p className="spr-manuscript-key spr-manuscript-limits">Text that is hidden in Word is shown dimmed, because it was part of the analysed text.</p>
+      )}
+    </div>
+  );
+}
+
 function ManuscriptPages({ report, highlights, pages, total, firstPage }: { report: SimilarityReport; highlights: PrintHighlight[]; pages: Array<{ start: number; end: number }>; total: number; firstPage: number }) {
   const text = report.text ?? "";
   const language = printLanguageLabel(report);
   const baseDir = language === "Arabic" ? "rtl" : "ltr";
-  const opener = (
-    <div className="spr-manuscript-opener">
-      <p className="spr-kicker">Highlighted manuscript</p>
-      <h2 className="spr-manuscript-title" dir="auto">{printDocumentTitle(report.title)}</h2>
-      {highlights.length > 0 ? (
-        <p className="spr-manuscript-key">
-          <span className="spr-manuscript-key-sample"><span className="spr-mark spr-line-solid" style={{ "--spr-c": printSourceTone(1).color } as CSSProperties}>matched text<sup className="spr-mark-n">1</sup></span></span>
-          Matched passages are underlined and numbered by source (page 3). The text appears as submitted.
-        </p>
-      ) : (
-        <p className="spr-manuscript-key">No passages matched. The text appears as submitted.</p>
-      )}
-    </div>
-  );
+  const opener = <ManuscriptOpener report={report} hasHighlights={highlights.length > 0} />;
   if (pages.length === 0) {
     return (
       <PrintPage report={report} page={firstPage} total={total} section={SECTION.manuscript} className="spr-manuscript">
@@ -526,6 +536,20 @@ function ManuscriptPages({ report, highlights, pages, total, firstPage }: { repo
   );
 }
 
+/** The manuscript drawn from the re-attached original .docx (formatted-manuscript.tsx), page by planned page. */
+function FormattedManuscriptPages({ report, source, plan, total, firstPage }: { report: SimilarityReport; source: FormattedManuscriptSource; plan: FormattedPlan; total: number; firstPage: number }) {
+  return (
+    <>
+      {plan.map((slices, index) => (
+        <PrintPage key={index} report={report} page={firstPage + index} total={total} section={SECTION.manuscript} className="spr-manuscript spr-formatted">
+          {index === 0 && <ManuscriptOpener report={report} hasHighlights={source.highlights.length > 0} formatted={source} />}
+          <FormattedColumn source={source} slices={slices} />
+        </PrintPage>
+      ))}
+    </>
+  );
+}
+
 // ── public components ────────────────────────────────────────────────────
 /**
  * Rendered on screen beside the hidden print bundle, so the report's serif (and, for a document that contains
@@ -540,35 +564,78 @@ export function SimilarityPrintFontWarmup({ report }: { report: SimilarityReport
   );
 }
 
-export function SimilarityPrintReport({ report, submitter = null }: { report: SimilarityReport; submitter?: ReportSubmitter | null }) {
+/** The highlights the printed manuscript draws — also what a re-attached .docx is mapped against. */
+export function similarityPrintHighlights(report: SimilarityReport): PrintHighlight[] {
+  const vm = buildReportV2ViewModel(report);
+  if (!vm) return [];
+  return buildPrintHighlights(report, vm, new Map(rankPrintSources(vm).map((s) => [s.id, s.rank])));
+}
+
+export function SimilarityPrintReport({
+  report,
+  submitter = null,
+  formatted = null,
+  onFormattedReady,
+}: {
+  report: SimilarityReport;
+  submitter?: ReportSubmitter | null;
+  /** a verified, mapped original .docx (prepareFormattedManuscript): pages 4+ are drawn from it */
+  formatted?: FormattedManuscriptSource | null;
+  /** called once the formatted manuscript is laid out and the whole report is ready to print */
+  onFormattedReady?: () => void;
+}) {
   const model = useMemo(() => {
     const vm = buildReportV2ViewModel(report);
     if (!vm) return null;
     const ranked = rankPrintSources(vm);
     const rankById = new Map(ranked.map((s) => [s.id, s.rank]));
-    const text = report.text ?? "";
-    // The same spans the previous print manuscript drew (Wikipedia only for an authorized viewer).
-    const ranges = findHighlightRanges(report, { includeWikipedia: Boolean(report.viewerIsAdmin) });
-    const highlights: PrintHighlight[] = ranges.map((r) => ({
-      start: r.start,
-      end: r.end,
-      wikipedia: r.kind === "wikipedia",
-      rank: r.kind === "wikipedia" ? null : rankForCharRange(r.start, r.end, vm.passages, rankById),
-      title: r.kind === "wikipedia" ? `Found on Wikipedia: ${r.label}` : r.kind === "source" || r.kind === "academic" ? `Matched passage: ${r.label}` : "Matched passage",
-    }));
-    const pages = paginateManuscriptForPrint(text, ranges.map((r) => ({ start: r.start, end: r.end })));
+    const highlights = buildPrintHighlights(report, vm, rankById);
+    const pages = paginateManuscriptForPrint(report.text ?? "", highlights.map((h) => ({ start: h.start, end: h.end })));
     return { vm, ranked, rankById, highlights, pages };
   }, [report]);
+  const [laidOut, setLaidOut] = useState<{ source: FormattedManuscriptSource; plan: FormattedPlan } | null>(null);
+  const plan = formatted && laidOut?.source === formatted ? laidOut.plan : null;
+  const handlePlan = useCallback((p: FormattedPlan) => {
+    if (formatted) setLaidOut({ source: formatted, plan: p });
+  }, [formatted]);
+  // announce each laid-out plan once (an effect may run twice in development)
+  const announced = useRef<FormattedPlan | null>(null);
+  useEffect(() => {
+    if (!formatted || !plan || announced.current === plan) return;
+    announced.current = plan;
+    onFormattedReady?.();
+  }, [formatted, plan, onFormattedReady]);
   if (!model) return null;
   const { vm, ranked, rankById, highlights, pages } = model;
   const manuscriptFirst = 4;
-  const total = manuscriptFirst - 1 + Math.max(1, pages.length);
+  const total = manuscriptFirst - 1 + (plan ? Math.max(1, plan.length) : Math.max(1, pages.length));
   return (
     <div className="spr-report">
       <CoverPage report={report} submitter={submitter} total={total} manuscriptFirst={manuscriptFirst} />
       <OverviewPage report={report} vm={vm} ranked={ranked} rankById={rankById} total={total} />
       <SourcesPage report={report} vm={vm} ranked={ranked} total={total} />
-      <ManuscriptPages report={report} highlights={highlights} pages={pages} total={total} firstPage={manuscriptFirst} />
+      {formatted && plan ? (
+        <FormattedManuscriptPages report={report} source={formatted} plan={plan} total={total} firstPage={manuscriptFirst} />
+      ) : (
+        <ManuscriptPages report={report} highlights={highlights} pages={pages} total={total} firstPage={manuscriptFirst} />
+      )}
+      {formatted && !plan && (
+        <FormattedLayoutProbe
+          source={formatted}
+          onPlan={handlePlan}
+          probeFirst={
+            <PrintPage report={report} page={manuscriptFirst} total={total} section={SECTION.manuscript} className="spr-manuscript spr-formatted">
+              <ManuscriptOpener report={report} hasHighlights={formatted.highlights.length > 0} formatted={formatted} />
+              <div className="fm-probe-fill" />
+            </PrintPage>
+          }
+          probeRest={
+            <PrintPage report={report} page={manuscriptFirst + 1} total={total} section={SECTION.manuscript} className="spr-manuscript spr-formatted">
+              <div className="fm-probe-fill" />
+            </PrintPage>
+          }
+        />
+      )}
     </div>
   );
 }

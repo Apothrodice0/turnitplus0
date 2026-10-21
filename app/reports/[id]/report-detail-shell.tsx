@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ArrowLeft, Download, FileText, GraduationCap, Globe2, Printer } from "lucide-react";
@@ -30,7 +30,13 @@ import {
 import { AiReport } from "@/components/report/ai-report";
 import { CategorySummary, OverviewReport, SourcesReport, SubmissionReport, dedupeExternalAcademicEvidence } from "@/components/report/similarity-report-papers";
 import { ReportV2View, ReportV2Workspace } from "@/components/report/report-v2/report-v2-view";
-import { SimilarityPrintFontWarmup, SimilarityPrintReport } from "@/components/report/report-v2/similarity-print-report";
+import { SimilarityPrintFontWarmup, SimilarityPrintReport, similarityPrintHighlights } from "@/components/report/report-v2/similarity-print-report";
+import {
+  FORMATTED_MESSAGES,
+  prepareFormattedManuscript,
+  releaseFormattedManuscript,
+  type FormattedManuscriptSource,
+} from "@/components/report/report-v2/formatted-manuscript";
 import type { ReportSubmitter } from "@/lib/similarity-print-layout";
 import { ReportNotFoundPanel } from "@/components/report/report-not-found-panel";
 
@@ -149,6 +155,24 @@ export function ReportDetailShell({
   const [showLegacyForAdmin, setShowLegacyForAdmin] = useState(false);
   const [isDownloadingReceipt, setIsDownloadingReceipt] = useState(false);
   const [receiptError, setReceiptError] = useState<string | null>(null);
+  // ORIGINAL FORMATTING (2026-10-21): the reader's own .docx, re-attached in this browser for one formatted download
+  // (formatted-manuscript.tsx). It is never uploaded or stored, and is released as soon as printing finishes; null
+  // means the standard text-based PDF.
+  const formattedInputRef = useRef<HTMLInputElement>(null);
+  const [formattedSource, setFormattedSource] = useState<FormattedManuscriptSource | null>(null);
+  const [isPreparingFormatted, setIsPreparingFormatted] = useState(false);
+  const [formattedError, setFormattedError] = useState<string | null>(null);
+  const printFormatted = useCallback(() => {
+    const done = () => {
+      window.removeEventListener("afterprint", done);
+      setFormattedSource((current) => {
+        releaseFormattedManuscript(current);
+        return null;
+      });
+    };
+    window.addEventListener("afterprint", done);
+    window.print();
+  }, []);
   // Release-hardening audit finding LIFECYCLE-06: true once the bounded
   // poll budget below is exhausted without either pipeline reaching a real
   // terminal state. This is purely a "stop asking automatically, offer a
@@ -340,6 +364,28 @@ export function ReportDetailShell({
     }
   }
 
+  function chooseOriginalDocx() {
+    setFormattedError(null);
+    formattedInputRef.current?.click();
+  }
+
+  /** Verifies, parses and maps the chosen file in this browser; prints once its pages are laid out. */
+  async function handleOriginalDocx(file: File | undefined) {
+    if (!file || !report || isPreparingFormatted) return;
+    setIsPreparingFormatted(true);
+    setFormattedError(null);
+    try {
+      const result = await prepareFormattedManuscript(report, file, similarityPrintHighlights(report));
+      if (result.ok) setFormattedSource(result.source);
+      else setFormattedError(result.message);
+    } catch {
+      setFormattedError(FORMATTED_MESSAGES.unreadable);
+    } finally {
+      setIsPreparingFormatted(false);
+      if (formattedInputRef.current) formattedInputRef.current.value = "";
+    }
+  }
+
   async function handleDelete() {
     if (!report || isDeleting) return;
     if (!window.confirm("Delete this report? This can't be undone.")) return;
@@ -496,6 +542,20 @@ export function ReportDetailShell({
         </div>
       )}
 
+      {formattedError && (
+        <div className="ai-analysis-message" role="alert">
+          <strong>—</strong>
+          <p>{formattedError}</p>
+        </div>
+      )}
+      <input
+        ref={formattedInputRef}
+        type="file"
+        accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        hidden
+        onChange={(event) => void handleOriginalDocx(event.target.files?.[0])}
+      />
+
       {/* Production bug fix: a report reached directly by URL (bookmark,
           typed link) whose AI check genuinely failed must say so plainly,
           regardless of which tab is open — a real, persisted ai_status
@@ -560,6 +620,8 @@ export function ReportDetailShell({
         <ReportV2Workspace
           report={report}
           onDownloadReport={() => window.print()}
+          onDownloadFormattedReport={/\.docx$/i.test(report.title) ? chooseOriginalDocx : undefined}
+          isPreparingFormatted={isPreparingFormatted}
           onDownloadReceipt={handleDownloadReceipt}
           isDownloadingReceipt={isDownloadingReceipt}
           onShowLegacy={canSeeSourceBreakdown ? () => setShowLegacyForAdmin(true) : undefined}
@@ -690,7 +752,7 @@ export function ReportDetailShell({
           // from page 4 — see similarity-print-report.tsx. It replaces the
           // overview → manuscript → source-appendix sequence; the full source
           // inventory stays in the interactive report on screen.
-          <SimilarityPrintReport report={report} submitter={submitter} />
+          <SimilarityPrintReport report={report} submitter={submitter} formatted={formattedSource} onFormattedReady={printFormatted} />
         ) : (
           <>
             <OverviewReport report={report} similarityStatus={effectiveSimilarityStatus} />

@@ -361,7 +361,7 @@ test("PALETTE: only blue, green and red plus white, dark text and light greys â€
 test("WIRING: the report page prints SimilarityPrintReport for a V2 report; AI and legacy print paths are unchanged; the owner's name comes from a SELECT-only read", async () => {
   const shell = await readFile(new URL("../app/reports/[id]/report-detail-shell.tsx", import.meta.url), "utf8");
   assert.match(shell, /<AiReport report=\{report\} signal=\{aiSignal\} printMode \/> : hasV2 \? \(/);
-  assert.match(shell, /<SimilarityPrintReport report=\{report\} submitter=\{submitter\} \/>/);
+  assert.match(shell, /<SimilarityPrintReport report=\{report\} submitter=\{submitter\} formatted=\{formattedSource\} onFormattedReady=\{printFormatted\} \/>/);
   assert.match(shell, /<OverviewReport report=\{report\} similarityStatus=\{effectiveSimilarityStatus\} \/>\s*<SubmissionReport report=\{report\} \/>\s*<SourcesReport report=\{report\} \/>/);
   const page = await readFile(new URL("../app/reports/[id]/page.tsx", import.meta.url), "utf8");
   assert.match(page, /readAccountIdentityProfile\(client, sessionUser\.id\)/);
@@ -373,7 +373,7 @@ test("PRINT CSS: the three introductory pages are exactly one sheet each; the wr
   const block = css.slice(css.indexOf("SIMILARITY PRINT REPORT (2026-10-21)"));
   const print = block.slice(block.indexOf("@media print {"));
   assert.match(print, /\.spr-report \{\n\s*display: contents;/);
-  assert.match(print, /\.spr-font-warmup \{\n\s*display: none;/);
+  assert.match(print, /\.spr-font-warmup,\n\s*\.fm-measure \{\n\s*display: none !important;/, "neither the font warm-up nor the formatted manuscript's measuring layer ever prints");
   assert.match(print, /\.spr-page\.spr-cover,\n\s*\.print-report-bundle \.report-paper\.spr-page\.spr-overview,\n\s*\.print-report-bundle \.report-paper\.spr-page\.spr-sources \{\n\s*height: 11in;\n\s*overflow: hidden;/);
   assert.match(block, /\.spr-mark \{[\s\S]*?print-color-adjust: exact;/, "highlight fill prints with Background graphics off");
   assert.match(block, /unicode-bidi: plaintext;/, "each manuscript paragraph takes its own direction (Arabic RTL)");
