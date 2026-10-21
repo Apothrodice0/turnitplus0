@@ -2806,31 +2806,20 @@ main.report-main {
   transition: width 230ms ease;
 }
 
-/* UPLOAD PROGRESS (lib/upload-progress.ts): a step with no measurable progress — a slow, calm sweep, never a number. */
-.progress-track.indeterminate span {
-  width: 30%;
-  animation: progress-indeterminate 2.4s ease-in-out infinite;
-}
-
-@keyframes progress-indeterminate {
-  0% { transform: translateX(-100%); }
-  100% { transform: translateX(340%); }
-}
-
-.upload-progress-spinner {
-  width: 16px;
-  height: 16px;
+/* UPLOAD PROGRESS (lib/upload-progress.ts): the calm encouragement line directly above the one continuous bar. */
+.upload-locked-panel .upload-progress-encouragement {
+  margin: 14px 0 0;
   color: var(--blue);
-  animation: upload-progress-spin 1.6s linear infinite;
+  font-size: 13px;
+  font-weight: 600;
 }
 
-@keyframes upload-progress-spin {
-  to { transform: rotate(360deg); }
+.upload-locked-panel .upload-progress-encouragement + .progress-track {
+  margin-top: 8px;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .progress-track.indeterminate span { width: 100%; opacity: 0.45; animation: none; }
-  .upload-progress-spinner { animation: none; }
+  .progress-track span { transition: none; }
 }
 
 .processing-card > strong {

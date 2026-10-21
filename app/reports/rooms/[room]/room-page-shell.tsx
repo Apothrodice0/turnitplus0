@@ -5,14 +5,16 @@ import Link from "next/link";
 import { ChevronLeft, Download, FileText } from "lucide-react";
 import { fetchReportRoomContents, fetchRemoteReport, saveReportRemote, type ReportSummary, type RoomContents, type RoomContentsFetchResult, type SaveReportRemoteResult } from "@/lib/reports-remote";
 import {
+  CHECK_STAGE_CEILING,
   CHECK_STAGE_LABELS,
+  COMPLETE_HOLD_MS,
   SAVE_GIVE_UP_AFTER_MS,
   SAVE_SLOW_AFTER_MS,
   SLOW_SAVE_LABEL,
   checkStagePercent,
-  isIndeterminateCheckStage,
   roomHoldsReport,
   type CheckStage,
+  useProgressCreep,
 } from "@/lib/upload-progress";
 import { invalidateRoomCache } from "@/lib/report-rooms-cache";
 import { ROOM_CYCLE_MS } from "@/lib/report-rooms";
@@ -590,9 +592,10 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
   const [progress, setProgress] = useState(0);
   const [processingLabel, setProcessingLabel] = useState("Reading document content");
   const [isGeneratingReport, setIsGeneratingReport] = useState(false);
-  // UPLOAD PROGRESS (lib/upload-progress.ts): saving/finalizing have no measurable progress (spinner, no number); 100 % only once
-  // the room read shows this check's report; a save that could not be confirmed offers to send the SAME report again.
-  const [progressIndeterminate, setProgressIndeterminate] = useState(false);
+  // UPLOAD PROGRESS (lib/upload-progress.ts): ONE continuous bar — measured events move it, and between them it eases toward the
+  // current stage's ceiling (never past 95 % before the save is confirmed); 100 % only once the room read shows this check's
+  // report; a save that could not be confirmed offers to send the SAME report again.
+  const [progressCeiling, setProgressCeiling] = useState(CHECK_STAGE_CEILING.reading);
   const [progressComplete, setProgressComplete] = useState(false);
   const [saveFailure, setSaveFailure] = useState<string | null>(null);
   const [retryingSave, setRetryingSave] = useState(false);
@@ -1031,7 +1034,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
         setIsGeneratingReport(false);
         setProgress(0);
         setProcessingLabel("Reading document content");
-        setProgressIndeterminate(false);
+        setProgressCeiling(CHECK_STAGE_CEILING.reading);
         setProgressComplete(false);
         pendingSaveRef.current = null;
         pollAttemptsRef.current = 0;
@@ -1114,13 +1117,15 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
     setReferenceRejections([]);
   }
 
-  // UPLOAD PROGRESS: one stage at a time; the bar only moves forward and only within the stage's own band (lib/upload-progress.ts).
+  // UPLOAD PROGRESS: one stage at a time; the bar only moves forward, by measured progress at once and otherwise by easing toward
+  // the stage's ceiling (lib/upload-progress.ts).
   function enterStage(stage: CheckStage, fraction = 0) {
     setProcessingLabel(CHECK_STAGE_LABELS[stage]);
     setProgress((current) => Math.max(current, checkStagePercent(stage, fraction)));
-    setProgressIndeterminate(isIndeterminateCheckStage(stage));
+    setProgressCeiling(CHECK_STAGE_CEILING[stage]);
     setProgressComplete(stage === "complete");
   }
+  useProgressCreep(isGeneratingReport && !progressComplete, progressCeiling, setProgress);
 
   async function runCheck() {
     if (generationLockRef.current) {
@@ -1320,7 +1325,6 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
     const outcome = await saveCheckUntilConfirmed(pending);
     if (outcome.kind !== "saved") {
       const saveResult = outcome.kind === "rejected" ? outcome.result : null;
-      setProgressIndeterminate(false);
       if (saveResult) {
         if (saveResult.quotaExceeded) {
           const resetLabel = saveResult.resetsAt
@@ -1354,7 +1358,11 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
     setReferenceEntries((current) => markReferencesChecked(current));
     // 100 % only once the room read shows this report (the save answer alone is not shown as complete).
     enterStage("confirming");
-    if (outcome.confirmed || roomHoldsReport(await fetchReportRoomContents(room), summary.id)) enterStage("complete");
+    if (outcome.confirmed || roomHoldsReport(await fetchReportRoomContents(room), summary.id)) {
+      // 100 % "Report ready" stays visible for a moment before the room shows the report card.
+      enterStage("complete");
+      await new Promise((resolve) => window.setTimeout(resolve, COMPLETE_HOLD_MS));
+    }
 
       invalidateRoomCache(accountEmail, room);
       // Defect #2: a new report/check generation has just started for this
@@ -1475,7 +1483,6 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
               fileInputRef={fileInputRef}
               onChooseFile={chooseFile}
               onGenerate={runCheck}
-              indeterminate={progressIndeterminate}
               complete={progressComplete}
               saveFailure={saveFailure && !isGeneratingReport ? { message: saveFailure, retrying: retryingSave, onRetry: () => void retrySave() } : undefined}
             />

@@ -1,9 +1,9 @@
 "use client";
 
 import type { RefObject } from "react";
-import { Check, Loader2, LockKeyhole, UploadCloud } from "lucide-react";
+import { Check, LockKeyhole, UploadCloud } from "lucide-react";
 import { ReferenceFilesPanel } from "@/components/reports/reference-files-panel";
-import { displayedCheckPercent } from "@/lib/upload-progress";
+import { displayedCheckPercent, progressEncouragement } from "@/lib/upload-progress";
 import type {
   ReferenceIntakeEntry,
   ReferenceRejection,
@@ -51,9 +51,7 @@ type Props = {
   onGenerate: () => void;
   /** USER-SUPPLIED REFERENCES V1 — omit to hide the reference-files section entirely. */
   references?: ReferencePanelProps;
-  /** UPLOAD PROGRESS (lib/upload-progress.ts): a step with no measurable progress (saving, finalizing) — spinner, no number. */
-  indeterminate?: boolean;
-  /** UPLOAD PROGRESS: true only once the server has confirmed the finished report; without it the panel never shows 100 %. */
+  /** UPLOAD PROGRESS (lib/upload-progress.ts): true only once the server has confirmed the finished report; without it the panel never shows 100 %. */
   complete?: boolean;
   /** UPLOAD PROGRESS: the analysed report could not be saved; offers to send the SAME report again (never a second report). */
   saveFailure?: { message: string; retrying: boolean; onRetry: () => void };
@@ -75,7 +73,7 @@ function ReferenceSection({ references, busy }: { references?: ReferencePanelPro
   );
 }
 
-export function DocumentUploadPanel({ file, isGeneratingReport, progress, processingLabel, fileInputRef, onChooseFile, onGenerate, references, indeterminate = false, complete = false, saveFailure }: Props) {
+export function DocumentUploadPanel({ file, isGeneratingReport, progress, processingLabel, fileInputRef, onChooseFile, onGenerate, references, complete = false, saveFailure }: Props) {
   if (saveFailure) {
     return (
       <>
@@ -93,8 +91,10 @@ export function DocumentUploadPanel({ file, isGeneratingReport, progress, proces
     );
   }
   if (isGeneratingReport) {
+    // ONE continuous bar (lib/upload-progress.ts): always the same track, always a number; the encouragement above it follows
+    // the percentage; 100 % only once the server has confirmed the report.
     const shown = displayedCheckPercent(progress, complete);
-    const waiting = indeterminate && !complete;
+    const width = complete ? 100 : Math.min(shown + 0.99, Math.max(0, Number.isFinite(progress) ? progress : 0));
     return (
       <>
         <div className="upload-locked-panel" role="status" aria-live="polite" aria-busy={!complete}>
@@ -102,16 +102,11 @@ export function DocumentUploadPanel({ file, isGeneratingReport, progress, proces
           <p className="section-label">CHECK IN PROGRESS</p>
           <h3>{file?.name ?? "Your document"}</h3>
           <p>{processingLabel}{complete ? "" : "…"}</p>
-          {waiting ? (
-            <div className="progress-track indeterminate" role="progressbar" aria-label={processingLabel}>
-              <span />
-            </div>
-          ) : (
-            <div className="progress-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={shown} aria-label={`${shown}% complete`}>
-              <span style={{ width: `${shown}%` }} />
-            </div>
-          )}
-          {waiting ? <Loader2 className="upload-progress-spinner" aria-hidden="true" /> : <strong>{shown}%</strong>}
+          <p className="upload-progress-encouragement">{progressEncouragement(shown, complete)}</p>
+          <div className="progress-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={shown} aria-label={`${shown}% complete`}>
+            <span style={{ width: `${width}%` }} />
+          </div>
+          <strong>{shown}%</strong>
         </div>
         <ReferenceSection references={references} busy />
       </>

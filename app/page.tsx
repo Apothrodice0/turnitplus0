@@ -52,7 +52,7 @@ import { createSignOutRunner, requestServerSignOut, SIGN_OUT_MESSAGES } from "@/
 import { ReportRoomsBrowser } from "@/components/reports/report-rooms";
 import { ReportHistoryRow } from "@/components/reports/report-history-row";
 import { DocumentUploadPanel } from "@/components/reports/document-upload-panel";
-import { CHECK_STAGE_LABELS, checkStagePercent } from "@/lib/upload-progress";
+import { CHECK_STAGE_CEILING, CHECK_STAGE_LABELS, checkStagePercent, useProgressCreep } from "@/lib/upload-progress";
 import { IdentityFields, type IdentityFieldsHandle, type CollectedIdentity } from "@/components/auth/identity-fields";
 import { EmailVerificationStatus } from "@/components/account/email-verification-status";
 import { EmailVerificationModal, type EmailVerificationModalStage } from "@/components/account/email-verification-modal";
@@ -248,7 +248,9 @@ export default function Home() {
   const [progress, setProgress] = useState(0);
   const [processingLabel, setProcessingLabel] = useState("Reading document content");
   const [isGeneratingReport, setIsGeneratingReport] = useState(false);
-  const [progressIndeterminate, setProgressIndeterminate] = useState(false);
+  // UPLOAD PROGRESS (lib/upload-progress.ts): ONE continuous bar easing toward the current stage's ceiling.
+  const [progressCeiling, setProgressCeiling] = useState(CHECK_STAGE_CEILING.reading);
+  useProgressCreep(isGeneratingReport, progressCeiling, setProgress);
   const aiPrepStageRef = useRef<AiPrepStage | null>(null);
   const [currentReport, setCurrentReport] = useState<SimilarityReport | null>(null);
   // Anonymous (device-scoped) report list only, from here on — lightweight
@@ -1024,9 +1026,9 @@ export default function Home() {
     generationLockRef.current = true;
     setIsGeneratingReport(true);
     navigate("reports");
-    // UPLOAD PROGRESS (lib/upload-progress.ts): no timer-driven percentage and no artificial minimum duration; never 100 %
-    // before the server has the report (the save itself is shown as indeterminate).
-    setProgressIndeterminate(false);
+    // UPLOAD PROGRESS (lib/upload-progress.ts): no artificial minimum duration; one continuous bar that eases toward each stage's
+    // ceiling and never passes 95 % before the server has the report.
+    setProgressCeiling(CHECK_STAGE_CEILING.reading);
     setProgress(checkStagePercent("reading"));
     setProcessingLabel(CHECK_STAGE_LABELS.reading);
 
@@ -1114,6 +1116,7 @@ export default function Home() {
     try {
       report = await analyzeText(text, submittedFile.name, submittedFile.size, (value) => {
         setProcessingLabel(CHECK_STAGE_LABELS.analyzing);
+        setProgressCeiling(CHECK_STAGE_CEILING.analyzing);
         setProgress((current) => Math.max(current, checkStagePercent("analyzing", value / 100)));
       }, account.email);
     } catch {
@@ -1157,7 +1160,7 @@ export default function Home() {
       }));
 
     setProcessingLabel(CHECK_STAGE_LABELS.matching);
-    setProgressIndeterminate(true);
+    setProgressCeiling(CHECK_STAGE_CEILING.matching);
     setProgress((current) => Math.max(current, checkStagePercent("matching")));
     const [webCheck, academicResult] = await Promise.all([wikipediaPromise, academicEvidencePromise]);
     if (webCheck) {
@@ -1190,7 +1193,7 @@ export default function Home() {
     setCurrentReport(report);
     setProgress((current) => Math.max(current, checkStagePercent("saving")));
     setProcessingLabel(CHECK_STAGE_LABELS.saving);
-    setProgressIndeterminate(true);
+    setProgressCeiling(CHECK_STAGE_CEILING.saving);
     try {
       const saveResult = await saveReport(report, academicResult.academicSearchDiagnosticsId, suppliedReferenceInputs);
       if (saveResult.ok) setReferenceEntries((current) => markReferencesChecked(current));
@@ -1550,7 +1553,6 @@ export default function Home() {
                 <DocumentUploadPanel
                   file={file}
                   isGeneratingReport={isGeneratingReport}
-                  indeterminate={progressIndeterminate}
                   progress={progress}
                   processingLabel={processingLabel}
                   fileInputRef={fileInputRef}

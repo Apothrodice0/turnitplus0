@@ -338,7 +338,7 @@ function snapshotOf(tree) {
     at: clock.now,
     status,
     panel: panel
-      ? { generating: panel.props.isGeneratingReport, progress: panel.props.progress, label: panel.props.processingLabel, indeterminate: !!panel.props.indeterminate, complete: !!panel.props.complete, failure: panel.props.saveFailure?.message ?? null }
+      ? { generating: panel.props.isGeneratingReport, progress: panel.props.progress, label: panel.props.processingLabel, complete: !!panel.props.complete, failure: panel.props.saveFailure?.message ?? null }
       : null,
   };
 }
@@ -402,11 +402,18 @@ async function startUpload(host, ai = "complete") {
   handle.done = uploadPanelOf(host.tree).props.onGenerate().then(() => { handle.finished = true; });
   return handle;
 }
+/** Real time for the in-process routes, plus small steps of virtual time so the short "Report ready" hold can elapse. */
+async function until(condition) {
+  for (let i = 0; i < 4000 && !condition(); i += 1) {
+    await realDelay(2);
+    if (i % 10 === 9) await advance(100, condition);
+  }
+}
 async function finish(handle) {
-  for (let i = 0; i < 4000 && !handle.finished; i += 1) await realDelay(2);
+  await until(() => handle.finished);
   await handle.done;
 }
-const savingNow = (host) => panelNow(host)?.generating === true && panelNow(host)?.indeterminate === true && /Saving your report|Still saving/.test(panelNow(host)?.label ?? "");
+const savingNow = (host) => panelNow(host)?.generating === true && /Saving your report|Still saving/.test(panelNow(host)?.label ?? "");
 
 async function mount(account, room) {
   return mountRoom({ room, accountEmail: account.email, initialOccupant: await findRoomOccupant(env.client, account.userId, room) });
@@ -440,34 +447,41 @@ function assertHonestProgress(host) {
 
 // =================================================================================================================================
 
-test("HELPERS: 100 % only for a confirmed check; only reading/analysis show a number; wording", () => {
+test("HELPERS: one continuous bar — eases toward each stage's ceiling, slows down, never passes 95 % before confirmation; 100 % only for a confirmed check; wording", () => {
   for (const stage of ["reading", "analyzing", "matching", "finishing", "saving", "confirming"]) {
-    for (const f of [0, 0.5, 1, 7]) assert.ok(up.checkStagePercent(stage, f) <= 99, `${stage} ${f}`);
+    for (const f of [0, 0.5, 1, 7]) assert.ok(up.checkStagePercent(stage, f) <= up.MAX_PERCENT_BEFORE_CONFIRMED, `${stage} ${f}`);
+    assert.ok(up.CHECK_STAGE_CEILING[stage] <= up.MAX_PERCENT_BEFORE_CONFIRMED, `${stage} ceiling`);
   }
+  assert.equal(up.MAX_PERCENT_BEFORE_CONFIRMED, 95);
   assert.equal(up.checkStagePercent("complete"), 100);
-  assert.equal(up.displayedCheckPercent(100, false), 99);
+  assert.equal(up.displayedCheckPercent(100, false), 95);
   assert.equal(up.displayedCheckPercent(100, true), 100);
-  assert.equal(up.isIndeterminateCheckStage("saving"), true);
-  assert.equal(up.isIndeterminateCheckStage("confirming"), true);
-  assert.equal(up.isIndeterminateCheckStage("matching"), true, "the external checks report no progress");
-  assert.equal(up.isIndeterminateCheckStage("reading"), false);
-  assert.equal(up.isIndeterminateCheckStage("analyzing"), false);
-  assert.deepEqual(Object.values(up.CHECK_STAGE_LABELS), ["Reading your document", "Analyzing your document", "Checking for matching passages", "Almost there", "Saving your report", "Finalizing your report", "Report saved"]);
+  // easing: always forward, never past the ceiling, and each step smaller than the one before (it slows down)
+  let p = 60, last = Infinity;
+  for (let i = 0; i < 400; i += 1) { const next = up.nextCreepValue(p, 95); assert.ok(next >= p && next <= 95); if (next - p > 0.02) { assert.ok(next - p <= last + 1e-9); last = next - p; } p = next; }
+  assert.ok(p > 90 && p <= 95, `after 100 s of easing the bar is close to, never past, 95 % (${p})`);
+  assert.equal(up.nextCreepValue(95, 95), 95);
+  assert.equal(up.nextCreepValue(50, 15), 50, "never backwards");
+  assert.deepEqual([10, 30, 70, 90, 95].map((v) => up.progressEncouragement(v, false)), ["Just getting started…", "Making good progress…", "Getting there…", "Almost there…", "Almost there…"]);
+  assert.equal(up.progressEncouragement(95, true), "Report ready");
+  assert.deepEqual(Object.values(up.CHECK_STAGE_LABELS), ["Reading your document", "Analyzing your document", "Checking for matching passages", "Preparing your report", "Saving your report", "Finalizing your report", "Report ready"]);
   assert.equal(up.roomHoldsReport({ ok: true, contents: { status: "processing", report: { id: "7" }, cycleEndsAt: "x" } }, "7"), true);
   assert.equal(up.roomHoldsReport({ ok: true, contents: { status: "empty", report: null, cycleEndsAt: null } }, "7"), false);
   assert.equal(up.roomHoldsReport({ ok: false, status: 500 }, "7"), false);
 });
 
-test("SUCCESS: real stages in order, the save shown as indeterminate, 100 % only once the room holds the report, then the report card; one report", async (t) => {
+test("SUCCESS: real stages in order on one bar, 100 % 'Report ready' only once the room holds the report, then the report card; one report", async (t) => {
   await scenario(async ({ account, b, room }) => {
     const host = await mount(account, room);
     await finish(await startUpload(host));
     const labels = [...new Set(host.renders.map((r) => r.panel?.label).filter(Boolean))];
     capture(t, "success", { labels, saves: b.saves().map((e) => e.outcome), roomReads: b.roomReads().length });
-    for (const l of ["Reading your document", "Analyzing your document", "Checking for matching passages", "Almost there", "Saving your report"]) assert.ok(labels.includes(l), `label ${l}: ${labels}`);
-    assert.ok(host.renders.some((r) => r.panel?.generating && r.panel.indeterminate && r.panel.label === "Saving your report"), "the save is indeterminate");
-    // Confirmation and the hand-over to the report card land in one update: the panel never shows 100 % before the room read.
-    assert.ok(host.renders.every((r) => !r.panel?.complete), "the panel hands over to the report card; no 100 % frame");
+    for (const l of ["Reading your document", "Analyzing your document", "Checking for matching passages", "Preparing your report", "Saving your report"]) assert.ok(labels.includes(l), `label ${l}: ${labels}`);
+    assert.ok(host.renders.some((r) => r.panel?.generating && !r.panel.complete && r.panel.label === "Saving your report" && r.panel.progress < 100), "the save is shown on the same bar, below 100 %");
+    const completeAt = host.renders.findIndex((r) => r.panel?.complete);
+    assert.ok(completeAt >= 0, "after the room read confirms the report, the bar shows 100 % 'Report ready'");
+    assert.equal(host.renders[completeAt].panel.label, "Report ready");
+    assert.ok(host.renders.slice(0, completeAt).every((r) => !r.panel?.generating || r.panel.progress <= up.MAX_PERCENT_BEFORE_CONFIRMED), "never above 95 % before");
     assert.ok(b.roomReads().length >= 1, "completion was confirmed by reading the room");
     assertHonestProgress(host);
     assert.equal(panelNow(host), null, "the empty-room upload panel is replaced by the report card");
@@ -477,7 +491,7 @@ test("SUCCESS: real stages in order, the save shown as indeterminate, 100 % only
   });
 });
 
-test("DELAYED SAVE: while the server has not saved, an active indeterminate save (never 100 %), one 'taking longer' message after 60 s, then completion when the save lands; one report", async (t) => {
+test("DELAYED SAVE: while the server has not saved, the same bar keeps showing the save (never 100 %), one 'taking longer' message after 60 s, then completion when the save lands; one report", async (t) => {
   await scenario(async ({ account, b, room }) => {
     const host = await mount(account, room);
     const hold = gate();
@@ -487,7 +501,7 @@ test("DELAYED SAVE: while the server has not saved, an active indeterminate save
     assert.equal(uiOf(host).statusLine, "Check in progress");
     await advance(up.SAVE_SLOW_AFTER_MS + 1);
     assert.equal(panelNow(host).label, up.SLOW_SAVE_LABEL, "one honest 'taking longer' message");
-    assert.equal(panelNow(host).indeterminate, true);
+    assert.ok(panelNow(host).progress <= up.MAX_PERCENT_BEFORE_CONFIRMED, "the bar is still below 100 %");
     assert.equal((await rowsOf(account)).length, 0, "nothing saved yet");
     const readsWhileWaiting = b.roomReads().length;
     assert.ok(readsWhileWaiting >= 15 && readsWhileWaiting <= 22, `the room was read only by the existing 3 s check (${readsWhileWaiting} reads in 60 s)`);
@@ -511,7 +525,7 @@ test("SERVER SAVED, ANSWER LATE: the room read shows the report while the save a
     for (let i = 0; i < 2000 && (await rowsOf(account)).length === 0; i += 1) await realDelay(2);
     assert.equal((await rowsOf(account)).length, 1, "the server has written the report; its answer is held");
     await advance(roomShell.POLL_INTERVAL_MS + 1, () => upload.finished);
-    for (let i = 0; i < 2000 && !upload.finished; i += 1) await realDelay(2);
+    await until(() => upload.finished);
     assert.equal(upload.finished, true, "the check finished without the save answer");
     assert.equal(b.saves()[0].outcome, "ANSWER_HELD:200");
     assert.equal(uiOf(host).statusLine, "Analysis in progress");
@@ -536,7 +550,8 @@ test("SAVE FAILURE + RETRY: a rejected save is said plainly (no spinner, no 100 
     assert.equal((await rowsOf(account)).length, 0);
     const modelRunsBefore = worker.runs.length;
     uploadPanelOf(host.tree).props.saveFailure.onRetry();
-    await waitFor(() => panelNow(host) === null, "the retried save to land");
+    await until(() => panelNow(host) === null);
+    assert.equal(panelNow(host), null, "the retried save landed");
     capture(t, "retry", { saves: b.saves().map((e) => `${e.outcome}:${e.reportId}`) });
     assertHonestProgress(host);
     const rows = await rowsOf(account);
@@ -555,7 +570,8 @@ test("NETWORK FAILURE: no answer and the room does not hold the report -> 'could
     await finish(await startUpload(host));
     assert.equal(panelNow(host).failure, roomShell.SAVE_UNCONFIRMED_MESSAGE);
     uploadPanelOf(host.tree).props.saveFailure.onRetry();
-    await waitFor(() => panelNow(host) === null, "the retried save to land");
+    await until(() => panelNow(host) === null);
+    assert.equal(panelNow(host), null, "the retried save landed");
     assertHonestProgress(host);
     assert.equal((await rowsOf(account)).length, 1);
     host.unmount();
@@ -569,13 +585,14 @@ test("NO ANSWER AT ALL: after the page's own limit the request is aborted, the r
     const upload = await startUpload(host);
     await waitFor(() => savingNow(host), "the saving stage");
     await advance(up.SAVE_GIVE_UP_AFTER_MS + 1, () => upload.finished);
-    for (let i = 0; i < 2000 && !upload.finished; i += 1) await realDelay(2);
+    await until(() => upload.finished);
     assert.equal(upload.finished, true);
     assert.equal(b.saves()[0].outcome, "ABORTED");
     assert.equal(panelNow(host).failure, roomShell.SAVE_UNCONFIRMED_MESSAGE);
     assert.equal(uiOf(host).statusLine, "Report not saved yet");
     uploadPanelOf(host.tree).props.saveFailure.onRetry();
-    await waitFor(() => panelNow(host) === null, "the retried save to land");
+    await until(() => panelNow(host) === null);
+    assert.equal(panelNow(host), null, "the retried save landed");
     capture(t, "give-up", { saves: b.saves().map((e) => e.outcome), roomReads: b.roomReads().length });
     assertHonestProgress(host);
     assert.equal((await rowsOf(account)).length, 1);
