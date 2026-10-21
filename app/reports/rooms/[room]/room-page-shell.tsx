@@ -220,7 +220,6 @@ type PendingCheckSave = {
   reportForRemote: SimilarityReport | (SimilarityReport & { userSuppliedReferences: SuppliedReferenceInput[] });
   summary: ReportSummary;
   academicSearchDiagnosticsId: number | null;
-  academicFailed: boolean;
   aiAnalysisPromise: Parameters<typeof completeAiAnalysisWithRecovery>[0];
 };
 export const SAVE_FAILED_MESSAGE = "Your document was analyzed, but the report could not be saved. Nothing was lost: try saving again. This will not create a second report.";
@@ -1269,7 +1268,6 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
         reportForRemote,
         summary,
         academicSearchDiagnosticsId: academicResult.academicSearchDiagnosticsId,
-        academicFailed: academicResult.status === "FAILED",
         aiAnalysisPromise,
       };
       await persistPendingCheck();
@@ -1377,12 +1375,9 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
       // genuinely not done yet (the promise below is still in flight), so
       // this is "processing", never "ready", regardless of how the save
       // response is phrased.
+      // No post-save banner: the room header and the report card's own "Analysis in progress" state already say so (a toast
+      // here flashed above the card for ~1 s on Preview, 2026-10-21).
       setOccupant({ status: "processing", report: summary, cycleEndsAt: new Date(Date.now() + ROOM_CYCLE_MS).toISOString() });
-      notify(
-        pending.academicFailed
-          ? "Your report is saved. External academic verification was unavailable this time; finishing AI analysis…"
-          : "Your report is saved. Finishing AI analysis…",
-      );
 
       // Deliberately not awaited, matching app/page.tsx's own generateReport()
       // — the generation lock releases as soon as the similarity result is

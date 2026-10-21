@@ -319,7 +319,7 @@ function uiOf(host) {
   ui.retry = retry ? `${textOf(retry.props.children)}${retry.props.disabled ? " (disabled)" : ""}` : null;
   return ui;
 }
-const isReadyUi = (ui) => /^Report ready · Last checked/.test(ui.statusLine ?? "") && /^\d+\/100/.test(ui.aiTile ?? "") && /^\d+%/.test(ui.similarityTile ?? "") && ui.receiptTile === "Download" && ui.receiptEnabled === true;
+const isReadyUi = (ui) => /^Report ready · Last checked/.test(ui.statusLine ?? "") && /^\d+%/.test(ui.aiTile ?? "") && /^\d+%/.test(ui.similarityTile ?? "") && ui.receiptTile === "Download" && ui.receiptEnabled === true;
 
 // --- the browser's network: real routes; the server can be made to report similarity as still being finalized --------------
 
@@ -609,6 +609,24 @@ test("REOPENING AN IN-PROGRESS ROOM: a second view of the room while AI is still
     assert.equal(uploadPanelOf(reopened.tree), null, "no upload form in an occupied room");
     assert.equal((await rowsOf(account)).length, 1);
     reopened.unmount();
+    host.unmount();
+  });
+});
+
+test("NO POST-SAVE BANNER: after saving, the page goes straight from the upload panel to the report card — no 'Your report is saved' banner and no message area above the card, ever; 'Analysis in progress' while AI runs; then the final report", async (t) => {
+  await scenario(async ({ account, room }) => {
+    const host = await mount(account, room);
+    await finish(await startUpload(host, "complete-held"));
+    assert.equal(panelNow(host), null, "the upload panel handed over to the report card");
+    assert.equal(uiOf(host).statusLine, "Analysis in progress");
+    worker.held.shift()();
+    await until(() => isReadyUi(uiOf(host)));
+    const ui = uiOf(host);
+    capture(t, "no-banner", { toasts: host.toasts, ui });
+    assert.ok(!host.toasts.some((m) => /Your report is saved|finishing AI analysis/i.test(m)), `no post-save banner was ever shown: ${JSON.stringify(host.toasts)}`);
+    assert.ok(isReadyUi(ui), `the final report appears: ${JSON.stringify(ui)}`);
+    assert.match(ui.aiTile, /^\d+%/, "AI score as a percentage");
+    assert.equal(toastOf(host.tree), null, "no message area above the finished report");
     host.unmount();
   });
 });
