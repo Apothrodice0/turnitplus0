@@ -19,6 +19,8 @@ import { buildReportEvidenceInterpretation, resolveReportCompletion, unknownExtr
 import { buildReportV2ViewModel } from "../lib/report-v2-view.ts";
 import {
   PRINT_MANUSCRIPT_LAYOUT,
+  PRINT_PALETTE,
+  printBandColor,
   SOURCES_PAGE_CAPACITY,
   buildPrintCoverFields,
   estimatePrintLines,
@@ -183,10 +185,11 @@ test("SOURCES: ranked by matched words (ties by the interpreter's own src-N orde
   assert.equal(page.shown.length, SOURCES_PAGE_CAPACITY);
   assert.equal(page.total, 40);
   assert.equal(page.hidden, 40 - SOURCES_PAGE_CAPACITY);
-  // neighbouring ranks always differ in colour AND line pattern (grayscale-readable)
+  // every source highlight is brand blue; neighbouring ranks differ in line pattern (and always carry their number)
   for (let r = 1; r < 12; r += 1) {
     const a = printSourceTone(r), b = printSourceTone(r + 1);
-    assert.ok(a.color !== b.color && a.line !== b.line, `ranks ${r} and ${r + 1}`);
+    assert.equal(a.color, PRINT_PALETTE.blue);
+    assert.notEqual(a.line, b.line, `ranks ${r} and ${r + 1}`);
   }
 });
 
@@ -333,6 +336,25 @@ test("CONSISTENCY: every highlight carries the same source number on screen and 
   assert.ok(compared >= 20, `compared ${compared} highlights`);
   assert.equal(screen.get(shared.charStart), 2);
   assert.equal(pdf.get(shared.charStart), 2);
+});
+
+// ── palette ──────────────────────────────────────────────────────────────
+test("PALETTE: only blue, green and red plus white, dark text and light greys — green for low/completed, red for high/attention", async () => {
+  assert.equal(printBandColor("low"), PRINT_PALETTE.green);
+  assert.equal(printBandColor("review"), PRINT_PALETTE.blue);
+  assert.equal(printBandColor("high"), PRINT_PALETTE.red);
+  const allowed = new Set(Object.values(PRINT_PALETTE).map((c) => c.toLowerCase()));
+  const css = (await readFile(new URL("../app/globals.css", import.meta.url), "utf8")).replace(/\r\n/g, "\n");
+  const block = css.slice(css.indexOf("SIMILARITY PRINT REPORT (2026-10-21)"));
+  const component = await readFile(new URL("../components/report/report-v2/similarity-print-report.tsx", import.meta.url), "utf8");
+  for (const [name, src] of [["print CSS", block], ["print component", component]]) {
+    const stray = (src.match(/#[0-9a-fA-F]{6}\b/g) ?? []).filter((h) => !allowed.has(h.toLowerCase()));
+    assert.deepEqual(stray, [], `${name} uses only palette colours`);
+  }
+  const lowReport = reportWithSources({ text: prose(4200), sourceCount: 3 });
+  const overview = pagesOf(render(lowReport))[1].html;
+  assert.match(overview, /class="spr-pill spr-pill-low">Low similarity</, "a low score shows a green state pill");
+  assert.match(overview, /class="spr-pill spr-pill-ok">Search completed</, "a completed search shows a green state pill");
 });
 
 // ── wiring and print CSS ─────────────────────────────────────────────────

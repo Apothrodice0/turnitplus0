@@ -9430,18 +9430,24 @@ button.admin-archive-feed-row:focus-visible { outline: 2px solid var(--blue); ou
 
 /*
  * SIMILARITY PRINT REPORT (2026-10-21) — components/report/report-v2/similarity-print-report.tsx.
- * TurnitPlus "modern academic editorial": serif display type over Geist, navy and blue accents, hairline rules.
+ * TurnitPlus "modern academic editorial": serif display type over Geist and hairline rules, in a restrained palette —
+ * blue for brand and structure, green only for completed / low-similarity states, red only for attention /
+ * high-similarity states, white, dark text and light greys for the rest (owner decision 2026-10-21; the same values
+ * are PRINT_PALETTE in lib/similarity-print-layout.ts).
  * Three fixed introductory pages (cover, overview, sources), then the manuscript from page 4. Decoration is borders,
  * text colour and inline SVG only, so the PDF reads the same with Chrome's "Background graphics" off; the manuscript
  * highlight fill is the one background, and it is forced with print-color-adjust: exact.
  * Only ever rendered inside .print-report-bundle (hidden on screen).
  */
 .spr-report {
-  --spr-navy: #0b2545;
-  --spr-ink: #172033;
-  --spr-muted: #5b6b7d;
-  --spr-hair: #d9e1e8;
   --spr-blue: #1d4ed8;
+  --spr-blue-deep: #1e3a8a;
+  --spr-green: #15803d;
+  --spr-red: #b91c1c;
+  --spr-ink: #1f2937;
+  --spr-muted: #6b7280;
+  --spr-hair: #e5e7eb;
+  --spr-track: #d1d5db;
   --spr-serif: var(--font-serif, "Source Serif 4"), var(--font-arabic, "Noto Naskh Arabic"), "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
   --spr-sans: var(--font-geist-sans), "Segoe UI", Arial, sans-serif;
   color: var(--spr-ink);
@@ -9476,7 +9482,7 @@ button.admin-archive-feed-row:focus-visible { outline: 2px solid var(--blue); ou
 
 .spr-head-section {
   justify-self: center;
-  color: var(--spr-navy);
+  color: var(--spr-blue-deep);
   font-weight: 600;
   letter-spacing: 0.14em;
   text-transform: uppercase;
@@ -9489,7 +9495,7 @@ button.admin-archive-feed-row:focus-visible { outline: 2px solid var(--blue); ou
 }
 
 .spr-wordmark {
-  color: var(--spr-navy);
+  color: var(--spr-blue-deep);
   font-size: 13px;
   font-weight: 700;
   letter-spacing: -0.02em;
@@ -9526,7 +9532,7 @@ button.admin-archive-feed-row:focus-visible { outline: 2px solid var(--blue); ou
 }
 
 .spr-foot-page {
-  color: var(--spr-navy);
+  color: var(--spr-blue-deep);
   font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
@@ -9553,7 +9559,7 @@ button.admin-archive-feed-row:focus-visible { outline: 2px solid var(--blue); ou
 
 .spr-h2 {
   margin: 6px 0 18px;
-  color: var(--spr-navy);
+  color: var(--spr-blue-deep);
   font-family: var(--spr-serif);
   font-size: 25px;
   font-weight: 600;
@@ -9563,7 +9569,7 @@ button.admin-archive-feed-row:focus-visible { outline: 2px solid var(--blue); ou
 
 .spr-h3 {
   margin-bottom: 9px;
-  color: var(--spr-navy);
+  color: var(--spr-blue-deep);
 }
 
 .spr-muted,
@@ -9587,7 +9593,7 @@ button.admin-archive-feed-row:focus-visible { outline: 2px solid var(--blue); ou
 
 /* ── page 1: cover ── */
 .spr-cover .spr-head {
-  border-bottom: 3px double var(--spr-navy);
+  border-bottom: 3px double var(--spr-blue-deep);
 }
 
 .spr-cover .spr-body {
@@ -9621,7 +9627,7 @@ button.admin-archive-feed-row:focus-visible { outline: 2px solid var(--blue); ou
   display: -webkit-box;
   margin: 0;
   overflow: hidden;
-  color: var(--spr-navy);
+  color: var(--spr-blue-deep);
   font-family: var(--spr-serif);
   font-size: 36px;
   font-weight: 600;
@@ -9726,11 +9732,11 @@ button.admin-archive-feed-row:focus-visible { outline: 2px solid var(--blue); ou
 .spr-cover-contents li i {
   flex: 1;
   margin: 0 10px;
-  border-bottom: 1px dotted #aab7c4;
+  border-bottom: 1px dotted var(--spr-track);
 }
 
 .spr-cover-contents li b {
-  color: var(--spr-navy);
+  color: var(--spr-blue-deep);
   font-family: var(--spr-serif);
   font-size: 13px;
   font-weight: 600;
@@ -9753,13 +9759,13 @@ button.admin-archive-feed-row:focus-visible { outline: 2px solid var(--blue); ou
   gap: 30px;
   align-items: center;
   padding: 16px 0 18px;
-  border-top: 2px solid var(--spr-navy);
+  border-top: 2px solid var(--spr-blue-deep);
   border-bottom: 1px solid var(--spr-hair);
 }
 
 .spr-score-figure strong {
   display: block;
-  color: var(--spr-navy);
+  color: var(--spr-blue-deep);
   font-family: var(--spr-serif);
   font-size: 74px;
   font-weight: 600;
@@ -9778,12 +9784,29 @@ button.admin-archive-feed-row:focus-visible { outline: 2px solid var(--blue); ou
   text-transform: uppercase;
 }
 
-.spr-score-band {
-  margin: 0 0 4px;
-  color: var(--spr-navy);
-  font-family: var(--spr-serif);
-  font-size: 19px;
+/* state pills: a coloured outline and text on white — green completed / low, blue moderate, red attention / high */
+.spr-pill {
+  display: inline-flex;
+  align-items: center;
+  margin: 0 0 8px;
+  padding: 3px 10px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  color: var(--spr-blue);
+  font-family: var(--spr-sans);
+  font-size: 11px;
   font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.spr-pill-low,
+.spr-pill-ok {
+  color: var(--spr-green);
+}
+
+.spr-pill-high,
+.spr-pill-attention {
+  color: var(--spr-red);
 }
 
 .spr-band-scale {
@@ -9791,19 +9814,14 @@ button.admin-archive-feed-row:focus-visible { outline: 2px solid var(--blue); ou
   max-width: 100%;
 }
 
+/* the tier label takes its colour from the SVG (band colour when active, grey otherwise) */
 .spr-band-text {
-  fill: #64748b;
   font-family: var(--spr-sans);
   font-size: 9.5px;
 }
 
-.spr-band-text-active {
-  fill: var(--spr-navy);
-  font-weight: 700;
-}
-
 .spr-band-range {
-  fill: #8592a3;
+  fill: var(--spr-muted);
   font-size: 8.5px;
 }
 
@@ -9841,7 +9859,7 @@ button.admin-archive-feed-row:focus-visible { outline: 2px solid var(--blue); ou
 
 .spr-figures dd {
   margin: 4px 0 0;
-  color: var(--spr-navy);
+  color: var(--spr-blue-deep);
   font-family: var(--spr-serif);
   font-size: 21px;
   font-weight: 600;
@@ -9902,7 +9920,7 @@ button.admin-archive-feed-row:focus-visible { outline: 2px solid var(--blue); ou
 }
 
 .spr-kind-figure {
-  color: var(--spr-navy);
+  color: var(--spr-blue-deep);
   font-family: var(--spr-serif);
   font-size: 13px;
   font-weight: 600;
@@ -9929,7 +9947,7 @@ button.admin-archive-feed-row:focus-visible { outline: 2px solid var(--blue); ou
 }
 
 .spr-categories b {
-  color: var(--spr-navy);
+  color: var(--spr-blue-deep);
   font-family: var(--spr-serif);
   font-size: 13px;
 }
@@ -9943,16 +9961,22 @@ button.admin-archive-feed-row:focus-visible { outline: 2px solid var(--blue); ou
   line-height: 1.5;
 }
 
+.spr-scope-ok {
+  border-left-color: var(--spr-green);
+}
+
 .spr-scope-attention {
-  border-left-color: #b45309;
+  border-left-color: var(--spr-red);
 }
 
 .spr-scope p {
   margin: 0 0 4px;
 }
 
-.spr-scope-state b {
-  color: var(--spr-navy);
+.spr-scope-state .spr-pill {
+  margin: 0 8px 0 0;
+  padding: 1px 8px;
+  font-size: 10px;
 }
 
 .spr-notice {
@@ -9963,7 +9987,7 @@ button.admin-archive-feed-row:focus-visible { outline: 2px solid var(--blue); ou
 }
 
 .spr-notice-heading {
-  color: var(--spr-navy);
+  color: var(--spr-blue-deep);
   font-weight: 700;
 }
 
@@ -10027,7 +10051,7 @@ button.admin-archive-feed-row:focus-visible { outline: 2px solid var(--blue); ou
   display: flex;
   justify-content: space-between;
   padding: 0 0 6px 50px;
-  border-bottom: 2px solid var(--spr-navy);
+  border-bottom: 2px solid var(--spr-blue-deep);
   color: var(--spr-muted);
   font-size: 9px;
   font-weight: 700;
@@ -10107,7 +10131,7 @@ button.admin-archive-feed-row:focus-visible { outline: 2px solid var(--blue); ou
 
 .spr-source-share b {
   display: block;
-  color: var(--spr-navy);
+  color: var(--spr-blue-deep);
   font-family: var(--spr-serif);
   font-size: 16px;
   font-weight: 600;
@@ -10133,7 +10157,7 @@ button.admin-archive-feed-row:focus-visible { outline: 2px solid var(--blue); ou
 
 .spr-empty {
   padding: 18px 0;
-  border-top: 2px solid var(--spr-navy);
+  border-top: 2px solid var(--spr-blue-deep);
 }
 
 .spr-empty-sources {
@@ -10146,7 +10170,7 @@ button.admin-archive-feed-row:focus-visible { outline: 2px solid var(--blue); ou
 }
 
 .spr-empty-heading {
-  color: var(--spr-navy);
+  color: var(--spr-blue-deep);
   font-family: var(--spr-serif);
   font-size: 19px;
   font-weight: 600;
@@ -10163,7 +10187,7 @@ button.admin-archive-feed-row:focus-visible { outline: 2px solid var(--blue); ou
   display: -webkit-box;
   margin: 5px 0 6px;
   overflow: hidden;
-  color: var(--spr-navy);
+  color: var(--spr-blue-deep);
   font-family: var(--spr-serif);
   font-size: 19px;
   font-weight: 600;
@@ -10189,7 +10213,7 @@ button.admin-archive-feed-row:focus-visible { outline: 2px solid var(--blue); ou
 .spr-manuscript-text {
   max-width: 688px;
   margin: 0 auto;
-  color: #1e293b;
+  color: var(--spr-ink);
   font-family: var(--spr-serif);
   font-size: 13px;
   line-height: 1.6;

@@ -15,20 +15,42 @@ import { compareReportSources, type ReportV2SourceCard, type ReportV2ViewModel, 
  *   - pagination only chooses where pages break; the pages always reconstruct the manuscript text exactly.
  */
 
+// ── palette ──────────────────────────────────────────────────────────────
+/**
+ * The printed report's whole palette (owner decision 2026-10-21): blue is the brand and carries structure, headings,
+ * labels and every highlight; green marks completed / low-similarity states; red marks attention / high-similarity
+ * states only; white, dark text and light greys do the rest. The same values are the --spr-* tokens in app/globals.css
+ * (inline SVG needs them as literals).
+ */
+export const PRINT_PALETTE = {
+  blue: "#1d4ed8",
+  blueDeep: "#1e3a8a",
+  green: "#15803d",
+  red: "#b91c1c",
+  ink: "#1f2937",
+  muted: "#6b7280",
+  rule: "#e5e7eb",
+  track: "#d1d5db",
+} as const;
+
+/** Colour of a result band: green for low, blue for moderate, red for high. */
+export function printBandColor(key: "low" | "review" | "high" | null | undefined): string {
+  return key === "low" ? PRINT_PALETTE.green : key === "high" ? PRINT_PALETTE.red : PRINT_PALETTE.blue;
+}
+
 // ── source identity ──────────────────────────────────────────────────────
-/** TurnitPlus print palette: navy-led, editorial, distinct in hue AND lightness so neighbours stay apart in grayscale. */
-export const PRINT_SOURCE_COLORS = ["#1d4ed8", "#0f766e", "#9d174d", "#b45309", "#5b21b6", "#3f6212"] as const;
-/** The underline pattern cycles on a different period from the colour, so ranks 1–12 never share both. */
+/** Every source highlight is brand blue; a source is told apart by its number and its underline pattern. */
+export const PRINT_SOURCE_COLOR = PRINT_PALETTE.blue;
 export const PRINT_SOURCE_LINES = ["solid", "dashed", "dotted", "double"] as const;
 export type PrintSourceLine = (typeof PRINT_SOURCE_LINES)[number];
 /** Highlight colour for a matched passage whose source could not be resolved to a ranked entry (never numbered). */
-export const PRINT_UNRANKED_COLOR = "#475569";
+export const PRINT_UNRANKED_COLOR = PRINT_PALETTE.muted;
 
 export type PrintSourceTone = { color: string; line: PrintSourceLine };
 
 export function printSourceTone(rank: number): PrintSourceTone {
   const i = Math.max(0, Math.floor(rank) - 1);
-  return { color: PRINT_SOURCE_COLORS[i % PRINT_SOURCE_COLORS.length], line: PRINT_SOURCE_LINES[i % PRINT_SOURCE_LINES.length] };
+  return { color: PRINT_SOURCE_COLOR, line: PRINT_SOURCE_LINES[i % PRINT_SOURCE_LINES.length] };
 }
 
 export type PrintRankedSource = ReportV2SourceCard & { rank: number; tone: PrintSourceTone };

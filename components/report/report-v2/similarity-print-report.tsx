@@ -5,10 +5,12 @@ import { similarityScoreBand } from "@/lib/ai-core";
 import { PRIMARY_SIMILARITY_BAND_LABELS, formatSimilarityPercent, type SimilarityReport } from "@/lib/report-types";
 import { buildReportV2ViewModel, matchingEvidenceEntriesLabel, type ReportV2ViewModel } from "@/lib/report-v2-view";
 import {
+  PRINT_PALETTE,
   PRINT_UNRANKED_COLOR,
   buildPrintCoverFields,
   buildPrintDocumentMap,
   formatPrintSubmittedAt,
+  printBandColor,
   paginateManuscriptForPrint,
   printDocumentTitle,
   printLanguageLabel,
@@ -31,8 +33,9 @@ import { findHighlightRanges } from "../similarity-report-papers";
  *   3  Matching sources      — the highest-ranked evidence entries on ONE fixed page, with "N of M shown"
  *   4+ Highlighted manuscript — the full text, the same highlight spans as before, numbered by source rank
  *
- * Design: TurnitPlus "modern academic editorial" — serif display type over the Geist UI face, navy and blue
- * accents, hairline rules. Every decoration is a border, text colour or inline SVG, so the PDF reads the same with
+ * Design: TurnitPlus "modern academic editorial" — serif display type over the Geist UI face, hairline rules, and a
+ * restrained palette (PRINT_PALETTE): blue for brand and structure, green only for completed / low-similarity states,
+ * red only for attention / high-similarity states, white and light greys elsewhere. Every decoration is a border, text colour or inline SVG, so the PDF reads the same with
  * Chrome's "Background graphics" turned off; sources are told apart by number AND underline pattern, so it also
  * reads in grayscale.
  *
@@ -127,16 +130,16 @@ function RankBadge({ source }: { source: Pick<PrintRankedSource, "rank" | "tone"
 
 // ── page 1 — submission cover ────────────────────────────────────────────
 function CoverMotif() {
-  // Abstract manuscript lines with a few marked spans: the TurnitPlus report, at a glance.
+  // Abstract manuscript lines with a few marked spans: the TurnitPlus report, at a glance (grey lines, brand-blue marks).
   const rows = [168, 150, 172, 126, 160, 144, 170, 98];
-  const marks: Record<number, [number, number, string]> = { 1: [54, 70, "#1d4ed8"], 3: [18, 52, "#0f766e"], 5: [86, 46, "#1d4ed8"], 6: [10, 36, "#9d174d"] };
+  const marks: Record<number, [number, number]> = { 1: [54, 70], 3: [18, 52], 6: [10, 36] };
   return (
     <svg className="spr-cover-motif" width="180" height="128" viewBox="0 0 180 128" aria-hidden="true">
       {rows.map((w, i) => (
         <g key={i}>
-          <line x1="4" x2={4 + w} y1={10 + i * 15} y2={10 + i * 15} stroke="#cbd5e1" strokeWidth="3" strokeLinecap="round" />
+          <line x1="4" x2={4 + w} y1={10 + i * 15} y2={10 + i * 15} stroke={PRINT_PALETTE.rule} strokeWidth="3" strokeLinecap="round" />
           {marks[i] && (
-            <line x1={4 + marks[i][0]} x2={4 + marks[i][0] + marks[i][1]} y1={10 + i * 15} y2={10 + i * 15} stroke={marks[i][2]} strokeWidth="3" strokeLinecap="round" />
+            <line x1={4 + marks[i][0]} x2={4 + marks[i][0] + marks[i][1]} y1={10 + i * 15} y2={10 + i * 15} stroke={PRINT_PALETTE.blue} strokeWidth="3" strokeLinecap="round" />
           )}
         </g>
       ))}
@@ -225,13 +228,13 @@ function BandScale({ score }: { score: number }) {
         const x1 = 6 + tier * i;
         return (
           <g key={s.key}>
-            <line x1={x1 + 2} x2={x1 + tier - 2} y1="20" y2="20" stroke={active ? "#0b2545" : "#cbd5e1"} strokeWidth={active ? 6 : 4} />
-            <text x={x1 + tier / 2} y="38" textAnchor="middle" className={active ? "spr-band-text spr-band-text-active" : "spr-band-text"}>{s.label}</text>
+            <line x1={x1 + 2} x2={x1 + tier - 2} y1="20" y2="20" stroke={active ? printBandColor(s.key) : PRINT_PALETTE.rule} strokeWidth={active ? 6 : 4} />
+            <text x={x1 + tier / 2} y="38" textAnchor="middle" className="spr-band-text" fill={active ? printBandColor(s.key) : PRINT_PALETTE.muted} fontWeight={active ? 700 : 400}>{s.label}</text>
             <text x={x1 + tier / 2} y="51" textAnchor="middle" className="spr-band-text spr-band-range">{s.range}</text>
           </g>
         );
       })}
-      <path d={`M ${markerX - 5} 6 L ${markerX + 5} 6 L ${markerX} 13 Z`} fill="#1d4ed8" />
+      <path d={`M ${markerX - 5} 6 L ${markerX + 5} 6 L ${markerX} 13 Z`} fill={printBandColor(band?.key)} />
     </svg>
   );
 }
@@ -244,17 +247,17 @@ function DocumentMap({ vm, totalWords, rankById }: { vm: ReportV2ViewModel; tota
   return (
     <figure className="spr-map">
       <svg width="100%" height="46" viewBox={`0 0 ${W} 46`} preserveAspectRatio="none" role="img" aria-label="Where matched words occur in the manuscript">
-        <line x1="0" x2={W} y1="23" y2="23" stroke="#e2e8f0" strokeWidth="1" />
+        <line x1="0" x2={W} y1="23" y2="23" stroke={PRINT_PALETTE.rule} strokeWidth="1" />
         {cells.map((cell, i) => {
-          if (cell.matchedShare <= 0) return <line key={i} x1={i * cw + cw / 2} x2={i * cw + cw / 2} y1="19" y2="27" stroke="#d5dde6" strokeWidth={Math.max(1, cw - 2.2)} />;
+          if (cell.matchedShare <= 0) return <line key={i} x1={i * cw + cw / 2} x2={i * cw + cw / 2} y1="20" y2="26" stroke={PRINT_PALETTE.rule} strokeWidth={Math.max(1, cw - 2.2)} />;
           const h = 10 + cell.matchedShare * 34;
-          const color = cell.rank !== null ? printSourceTone(cell.rank).color : PRINT_UNRANKED_COLOR;
+          const color = cell.rank !== null ? PRINT_PALETTE.blue : PRINT_UNRANKED_COLOR;
           return <line key={i} x1={i * cw + cw / 2} x2={i * cw + cw / 2} y1={23 - h / 2} y2={23 + h / 2} stroke={color} strokeWidth={Math.max(1, cw - 2.2)} />;
         })}
       </svg>
       <figcaption>
         <span>Beginning of manuscript</span>
-        <span className="spr-map-key">Each column ≈ {wordsPerCell.toLocaleString("en-US")} words · taller = more matched words · colour = leading source</span>
+        <span className="spr-map-key">Each column ≈ {wordsPerCell.toLocaleString("en-US")} words · taller = more matched words</span>
         <span>End</span>
       </figcaption>
     </figure>
@@ -285,7 +288,7 @@ function OverviewPage({ report, vm, ranked, rankById, total }: { report: Similar
           <span>overall similarity</span>
         </div>
         <div className="spr-score-side">
-          <p className="spr-score-band">{band ? PRIMARY_SIMILARITY_BAND_LABELS[band.key] : "Similarity"}</p>
+          <p className={`spr-pill spr-pill-${band?.key ?? "review"}`}>{band ? PRIMARY_SIMILARITY_BAND_LABELS[band.key] : "Similarity"}</p>
           <BandScale score={verifiedSimilarityPercent} />
           <p className="spr-score-explain">
             The share of analyzed words that match checked sources word for word. A word that matches several sources
@@ -318,8 +321,8 @@ function OverviewPage({ report, vm, ranked, rankById, total }: { report: Similar
                   <span className="spr-kind-label">{row.label}</span>
                   <span className="spr-kind-figure">{formatSimilarityPercent(row.percentOfDocument, row.matchedWords)}</span>
                   <svg className="spr-kind-bar" width="100%" height="5" viewBox="0 0 100 5" preserveAspectRatio="none" aria-hidden="true">
-                    <line x1="0" x2="100" y1="2.5" y2="2.5" stroke="#e2e8f0" strokeWidth="5" />
-                    <line x1="0" x2={Math.max(1.5, Math.min(100, row.shareOfOverlap))} y1="2.5" y2="2.5" stroke="#1d4ed8" strokeWidth="5" />
+                    <line x1="0" x2="100" y1="2.5" y2="2.5" stroke={PRINT_PALETTE.rule} strokeWidth="5" />
+                    <line x1="0" x2={Math.max(1.5, Math.min(100, row.shareOfOverlap))} y1="2.5" y2="2.5" stroke={PRINT_PALETTE.blue} strokeWidth="5" />
                   </svg>
                   <span className="spr-kind-words">{row.matchedWords.toLocaleString("en-US")} words · {row.shareOfOverlap}% of matched text</span>
                 </li>
@@ -344,9 +347,12 @@ function OverviewPage({ report, vm, ranked, rankById, total }: { report: Similar
         </section>
       </div>
 
-      <section className={`spr-scope${complete ? "" : " spr-scope-attention"}`}>
+      <section className={`spr-scope${complete ? " spr-scope-ok" : " spr-scope-attention"}`}>
         <h3 className="spr-h3">Scope and limitations</h3>
-        <p className="spr-scope-state"><b>{complete ? "Search completed" : "Needs attention"}</b> — {completion.headline}</p>
+        <p className="spr-scope-state">
+          <span className={`spr-pill ${complete ? "spr-pill-ok" : "spr-pill-attention"}`}>{complete ? "Search completed" : "Needs attention"}</span>
+          {completion.headline}
+        </p>
         {completion.detail && <p>{completion.detail}</p>}
         <p>{completion.scopeLine}</p>
         {notice && (
@@ -466,7 +472,7 @@ function renderManuscriptWindow(text: string, highlights: PrintHighlight[], from
     if (end <= start) continue;
     if (start > cursor) pieces.push(text.slice(cursor, start));
     const tone = h.rank !== null ? printSourceTone(h.rank) : null;
-    const color = h.wikipedia ? "#0784b4" : tone?.color ?? PRINT_UNRANKED_COLOR;
+    const color = h.wikipedia ? PRINT_PALETTE.blue : tone?.color ?? PRINT_UNRANKED_COLOR;
     const line = h.wikipedia ? "dotted" : tone?.line ?? "solid";
     pieces.push(
       <mark key={`${h.start}-${start}`} className={`spr-mark spr-line-${line}`} style={{ "--spr-c": color } as CSSProperties} title={h.title} data-span={`${h.start}-${h.end}`}>
