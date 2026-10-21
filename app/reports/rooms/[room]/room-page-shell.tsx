@@ -1359,7 +1359,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
     // 100 % only once the room read shows this report (the save answer alone is not shown as complete).
     enterStage("confirming");
     if (outcome.confirmed || roomHoldsReport(await fetchReportRoomContents(room), summary.id)) {
-      // 100 % "Report ready" stays visible for a moment before the room shows the report card.
+      // 100 % "Report saved" stays visible for a moment before the room shows the report card.
       enterStage("complete");
       await new Promise((resolve) => window.setTimeout(resolve, COMPLETE_HOLD_MS));
     }

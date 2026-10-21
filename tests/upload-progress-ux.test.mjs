@@ -463,14 +463,14 @@ test("HELPERS: one continuous bar — eases toward each stage's ceiling, slows d
   assert.equal(up.nextCreepValue(95, 95), 95);
   assert.equal(up.nextCreepValue(50, 15), 50, "never backwards");
   assert.deepEqual([10, 30, 70, 90, 95].map((v) => up.progressEncouragement(v, false)), ["Just getting started…", "Making good progress…", "Getting there…", "Almost there…", "Almost there…"]);
-  assert.equal(up.progressEncouragement(95, true), "Report ready");
-  assert.deepEqual(Object.values(up.CHECK_STAGE_LABELS), ["Reading your document", "Analyzing your document", "Checking for matching passages", "Preparing your report", "Saving your report", "Finalizing your report", "Report ready"]);
+  assert.equal(up.progressEncouragement(95, true), "Report saved");
+  assert.deepEqual(Object.values(up.CHECK_STAGE_LABELS), ["Reading your document", "Analyzing your document", "Checking for matching passages", "Preparing your report", "Saving your report", "Finalizing your report", "Report saved"]);
   assert.equal(up.roomHoldsReport({ ok: true, contents: { status: "processing", report: { id: "7" }, cycleEndsAt: "x" } }, "7"), true);
   assert.equal(up.roomHoldsReport({ ok: true, contents: { status: "empty", report: null, cycleEndsAt: null } }, "7"), false);
   assert.equal(up.roomHoldsReport({ ok: false, status: 500 }, "7"), false);
 });
 
-test("SUCCESS: real stages in order on one bar, 100 % 'Report ready' only once the room holds the report, then the report card; one report", async (t) => {
+test("SUCCESS: real stages in order on one bar, 100 % 'Report saved' only once the room holds the report, then the report card; one report", async (t) => {
   await scenario(async ({ account, b, room }) => {
     const host = await mount(account, room);
     await finish(await startUpload(host));
@@ -479,8 +479,8 @@ test("SUCCESS: real stages in order on one bar, 100 % 'Report ready' only once t
     for (const l of ["Reading your document", "Analyzing your document", "Checking for matching passages", "Preparing your report", "Saving your report"]) assert.ok(labels.includes(l), `label ${l}: ${labels}`);
     assert.ok(host.renders.some((r) => r.panel?.generating && !r.panel.complete && r.panel.label === "Saving your report" && r.panel.progress < 100), "the save is shown on the same bar, below 100 %");
     const completeAt = host.renders.findIndex((r) => r.panel?.complete);
-    assert.ok(completeAt >= 0, "after the room read confirms the report, the bar shows 100 % 'Report ready'");
-    assert.equal(host.renders[completeAt].panel.label, "Report ready");
+    assert.ok(completeAt >= 0, "after the room read confirms the report, the bar shows 100 % 'Report saved' (AI is still running)");
+    assert.equal(host.renders[completeAt].panel.label, "Report saved");
     assert.ok(host.renders.slice(0, completeAt).every((r) => !r.panel?.generating || r.panel.progress <= up.MAX_PERCENT_BEFORE_CONFIRMED), "never above 95 % before");
     assert.ok(b.roomReads().length >= 1, "completion was confirmed by reading the room");
     assertHonestProgress(host);

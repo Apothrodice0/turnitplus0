@@ -5,8 +5,8 @@
  * 8–15 s, then set to 100 % BEFORE the save request was even sent, so every second the server spent saving was displayed as
  * finished. Now there is ONE continuous bar (owner decision 2026-10-21): measured events (pages read, Archive scorer progress)
  * move it at once; between events it keeps easing toward the current stage's ceiling, slowing as it gets closer, so it never
- * freezes and never races ahead; it can never pass 95 % before the server has the report, and 100 % ("Report ready") is shown
- * only once the room read confirms the saved report.
+ * freezes and never races ahead; it can never pass 95 % before the server has the report, and 100 % is shown
+ * only once the room read confirms the saved report ("Report saved" — "Report ready" is the room header's word once AI is done too).
  *
  * Shared by the room page and the dashboard; tests/upload-progress-ux.test.mjs pins it.
  */
@@ -23,7 +23,9 @@ export const CHECK_STAGE_LABELS: Record<CheckStage, string> = {
   finishing: "Preparing your report",
   saving: "Saving your report",
   confirming: "Finalizing your report",
-  complete: "Report ready",
+  // 100 % = the report is saved; AI analysis is still running then (it starts after the save), so the room header says
+  // "Report ready" only later, once both AI and similarity are available.
+  complete: "Report saved",
 };
 
 /** Shown once (not rotated) when a save is still running after SAVE_SLOW_AFTER_MS. */
@@ -91,14 +93,14 @@ export function displayedCheckPercent(progress: number, complete: boolean): numb
 
 /** A short, calm encouragement shown directly above the bar, following the percentage. */
 export function progressEncouragement(percent: number, complete: boolean): string {
-  if (complete) return "Report ready";
+  if (complete) return "Report saved";
   if (percent >= 85) return "Almost there…";
   if (percent >= 60) return "Getting there…";
   if (percent >= 25) return "Making good progress…";
   return "Just getting started…";
 }
 
-/** How long "100 % · Report ready" stays visible before the room shows the report card. */
+/** How long "100 % · Report saved" stays visible before the room shows the report card. */
 export const COMPLETE_HOLD_MS = 900;
 
 /** After this long without a save answer the label says so, once. */
