@@ -1,5 +1,6 @@
 import type { Client } from "@libsql/client";
 import { buildReportAdmissionSourceRef } from "./corpus-admission-source-ref";
+import { deleteReportDocumentLayoutsForUser } from "./report-document-layout-repo";
 
 /**
  * Account deletion (production audit fix — no such endpoint existed).
@@ -188,6 +189,8 @@ export async function deleteAllReportDataForAccount(
   // 1c. The saved_reports rows themselves — one set-based statement,
   // replacing what was previously one DELETE per report.
   await client.execute({ sql: "DELETE FROM saved_reports WHERE user_id = ?", args: [accountId] });
+  // 1d. Their saved document formatting and images (best effort; nothing to do before migration 0055).
+  await deleteReportDocumentLayoutsForUser(client, accountId);
 
   // ---- Phase 2: document identities + orphaned, non-promoted
   // representations. Candidate representation ids are captured BEFORE the

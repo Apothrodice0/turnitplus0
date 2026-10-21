@@ -1518,7 +1518,7 @@ export default function Home() {
             <div className="landing-feature-grid">
               <article className="surface-card landing-feature-card"><span className="landing-feature-icon"><Search aria-hidden="true" /></span><h3>Find meaningful overlap</h3><p>Measure overlapping text and show the exact passages that matched.</p></article>
               <article className="surface-card landing-feature-card"><span className="landing-feature-icon"><GraduationCap aria-hidden="true" /></span><h3>Review AI-writing signals</h3><p>Surface experimental AI-writing signals and highlighted passages instead of pretending a score is proof of authorship.</p></article>
-              <article className="surface-card landing-feature-card"><span className="landing-feature-icon"><ShieldCheck aria-hidden="true" /></span><h3>Keep documents local</h3><p>Extraction and analysis happen in your browser. You stay in control of locally stored reports.</p></article>
+              <article className="surface-card landing-feature-card"><span className="landing-feature-icon"><ShieldCheck aria-hidden="true" /></span><h3>Analysis in your browser</h3><p>Extraction and analysis happen in your browser; the original file is never uploaded. Saved reports keep the document&apos;s text and layout so you can download them later.</p></article>
             </div>
 
             <div className="landing-how surface-card">
@@ -1588,7 +1588,7 @@ export default function Home() {
                   <ShieldCheck aria-hidden="true" />
                   <div>
                     <strong>Private by design</strong>
-                    <p>Documents are analyzed in your browser and never uploaded. Your report history is saved securely to your account.</p>
+                    <p>Documents are analyzed in your browser; the original file is never uploaded. Your reports, including each document&apos;s text, layout and images, are saved securely to your account.</p>
                   </div>
                 </article>
               </section>
@@ -1722,7 +1722,7 @@ export default function Home() {
                       <LogOut aria-hidden="true" /> {isSigningOut ? "Signing out…" : "Sign out"}
                     </button>
                   </div>
-                  <p className="auth-preview-note"><LockKeyhole aria-hidden="true" /> Documents are analyzed in your browser and never uploaded. Your report history is saved securely so you can reach it from any device you sign in on.</p>
+                  <p className="auth-preview-note"><LockKeyhole aria-hidden="true" /> Documents are analyzed in your browser; the original file is never uploaded. Your reports, including each document&apos;s text, layout and images, are saved securely so you can reach them from any device you sign in on.</p>
 
                   <div className="account-danger-zone">
                     <div className="account-danger-zone-header">
@@ -2119,7 +2119,7 @@ export default function Home() {
                 </section>
                 <section>
                   <span className="legal-section-number">02</span>
-                  <div><h3>Local processing and external requests</h3><p>Document extraction, AI analysis and archive comparison run in your browser; the original file itself is never uploaded during the check. Once a check finishes, the completed report is saved both on this device (IndexedDB) and to TurnitPlus's database, so it can still be retrieved if this device's local storage is cleared or evicted. As part of generating a report, up to 20 selected phrases may be sent to the English Wikipedia search service. Wikipedia receives those phrase queries—not the full document—and handles them under its own privacy practices. Ordinary network metadata may also be processed by the hosting infrastructure to deliver the site.</p></div>
+                  <div><h3>Local processing and external requests</h3><p>Document extraction, AI analysis and archive comparison run in your browser; the original file itself is never uploaded during the check. Once a check finishes, the completed report is saved both on this device (IndexedDB) and to TurnitPlus's database, so it can still be retrieved if this device's local storage is cleared or evicted. For Word (.docx) documents, the saved report also keeps the document's layout (paragraph formatting, lists and tables) and its embedded images, reduced in size, so the downloadable report can show the manuscript with its original formatting. They are derived in your browser from the file you checked, stored privately with the report, readable only through your signed-in account, and deleted together with the report or your account. As part of generating a report, up to 20 selected phrases may be sent to the English Wikipedia search service. Wikipedia receives those phrase queries—not the full document—and handles them under its own privacy practices. Ordinary network metadata may also be processed by the hosting infrastructure to deliver the site.</p></div>
                 </section>
                 <section>
                   <span className="legal-section-number">03</span>

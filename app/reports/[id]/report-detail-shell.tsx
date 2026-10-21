@@ -32,8 +32,7 @@ import { CategorySummary, OverviewReport, SourcesReport, SubmissionReport, dedup
 import { ReportV2View, ReportV2Workspace } from "@/components/report/report-v2/report-v2-view";
 import { SimilarityPrintFontWarmup, SimilarityPrintReport, similarityPrintHighlights } from "@/components/report/report-v2/similarity-print-report";
 import {
-  FORMATTED_MESSAGES,
-  prepareFormattedManuscript,
+  loadSavedFormattedManuscript,
   releaseFormattedManuscript,
   type FormattedManuscriptSource,
 } from "@/components/report/report-v2/formatted-manuscript";
@@ -155,24 +154,71 @@ export function ReportDetailShell({
   const [showLegacyForAdmin, setShowLegacyForAdmin] = useState(false);
   const [isDownloadingReceipt, setIsDownloadingReceipt] = useState(false);
   const [receiptError, setReceiptError] = useState<string | null>(null);
-  // ORIGINAL FORMATTING (2026-10-21): the reader's own .docx, re-attached in this browser for one formatted download
-  // (formatted-manuscript.tsx). It is never uploaded or stored, and is released as soon as printing finishes; null
-  // means the standard text-based PDF.
-  const formattedInputRef = useRef<HTMLInputElement>(null);
+  // SAVED FORMATTING (2026-10-21): the original document's layout, saved with the report during the upload, is
+  // loaded automatically for the printed manuscript (formatted-manuscript.tsx). Nothing is asked of the reader;
+  // without a usable saved layout the standard text manuscript prints, exactly as before.
   const [formattedSource, setFormattedSource] = useState<FormattedManuscriptSource | null>(null);
-  const [isPreparingFormatted, setIsPreparingFormatted] = useState(false);
-  const [formattedError, setFormattedError] = useState<string | null>(null);
-  const printFormatted = useCallback(() => {
-    const done = () => {
-      window.removeEventListener("afterprint", done);
+  const [formattedState, setFormattedState] = useState<"idle" | "loading" | "laying-out" | "ready" | "none">("idle");
+  const [isPreparingDownload, setIsPreparingDownload] = useState(false);
+  const printWhenReadyRef = useRef(false);
+  const printNow = useCallback(() => {
+    printWhenReadyRef.current = false;
+    setIsPreparingDownload(false);
+    window.print();
+  }, []);
+  const handleFormattedReady = useCallback(() => {
+    setFormattedState("ready");
+    if (printWhenReadyRef.current) printNow();
+  }, [printNow]);
+  const formattedReport = report && mode !== "ai" && !requiresClientResolution && report.evidenceInterpretation && /\.docx$/i.test(report.title) ? report : null;
+  const formattedReportRef = useRef(formattedReport);
+  formattedReportRef.current = formattedReport;
+  const formattedReportId = formattedReport ? String(formattedReport.id) : null;
+  useEffect(() => {
+    const target = formattedReportRef.current;
+    if (!formattedReportId || !target) return;
+    let cancelled = false;
+    let loaded: FormattedManuscriptSource | null = null;
+    setFormattedState("loading");
+    (async () => {
+      // a report saved moments ago may still be storing its layout in the uploading tab: look again a few times
+      const recent = Date.now() - Date.parse(target.created) < 3 * 60_000;
+      for (let attempt = 0; attempt < (recent ? 6 : 1) && !cancelled; attempt += 1) {
+        if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 5000));
+        loaded = await loadSavedFormattedManuscript(target, similarityPrintHighlights(target)).catch(() => null);
+        if (loaded) break;
+      }
+      if (cancelled) {
+        releaseFormattedManuscript(loaded);
+        return;
+      }
+      if (loaded) {
+        setFormattedSource(loaded);
+        setFormattedState("laying-out");
+      } else {
+        setFormattedState("none");
+        if (printWhenReadyRef.current) printNow();
+      }
+    })();
+    return () => {
+      cancelled = true;
       setFormattedSource((current) => {
         releaseFormattedManuscript(current);
         return null;
       });
     };
-    window.addEventListener("afterprint", done);
-    window.print();
-  }, []);
+  }, [formattedReportId, printNow]);
+  /** The one Download Report action: prints at once, or as soon as the saved formatting has been laid out. */
+  const handleDownloadReport = useCallback(() => {
+    if (formattedState === "loading" || formattedState === "laying-out") {
+      printWhenReadyRef.current = true;
+      setIsPreparingDownload(true);
+      // never leave the reader waiting: after a short while the report prints with whatever is ready
+      window.setTimeout(() => { if (printWhenReadyRef.current) printNow(); }, 20_000);
+      return;
+    }
+    printNow();
+  }, [formattedState, printNow]);
   // Release-hardening audit finding LIFECYCLE-06: true once the bounded
   // poll budget below is exhausted without either pipeline reaching a real
   // terminal state. This is purely a "stop asking automatically, offer a
@@ -364,28 +410,6 @@ export function ReportDetailShell({
     }
   }
 
-  function chooseOriginalDocx() {
-    setFormattedError(null);
-    formattedInputRef.current?.click();
-  }
-
-  /** Verifies, parses and maps the chosen file in this browser; prints once its pages are laid out. */
-  async function handleOriginalDocx(file: File | undefined) {
-    if (!file || !report || isPreparingFormatted) return;
-    setIsPreparingFormatted(true);
-    setFormattedError(null);
-    try {
-      const result = await prepareFormattedManuscript(report, file, similarityPrintHighlights(report));
-      if (result.ok) setFormattedSource(result.source);
-      else setFormattedError(result.message);
-    } catch {
-      setFormattedError(FORMATTED_MESSAGES.unreadable);
-    } finally {
-      setIsPreparingFormatted(false);
-      if (formattedInputRef.current) formattedInputRef.current.value = "";
-    }
-  }
-
   async function handleDelete() {
     if (!report || isDeleting) return;
     if (!window.confirm("Delete this report? This can't be undone.")) return;
@@ -542,19 +566,6 @@ export function ReportDetailShell({
         </div>
       )}
 
-      {formattedError && (
-        <div className="ai-analysis-message" role="alert">
-          <strong>—</strong>
-          <p>{formattedError}</p>
-        </div>
-      )}
-      <input
-        ref={formattedInputRef}
-        type="file"
-        accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        hidden
-        onChange={(event) => void handleOriginalDocx(event.target.files?.[0])}
-      />
 
       {/* Production bug fix: a report reached directly by URL (bookmark,
           typed link) whose AI check genuinely failed must say so plainly,
@@ -619,9 +630,8 @@ export function ReportDetailShell({
       {isOrdinaryV2Workspace ? (
         <ReportV2Workspace
           report={report}
-          onDownloadReport={() => window.print()}
-          onDownloadFormattedReport={/\.docx$/i.test(report.title) ? chooseOriginalDocx : undefined}
-          isPreparingFormatted={isPreparingFormatted}
+          onDownloadReport={handleDownloadReport}
+          isPreparingDownload={isPreparingDownload}
           onDownloadReceipt={handleDownloadReceipt}
           isDownloadingReceipt={isDownloadingReceipt}
           onShowLegacy={canSeeSourceBreakdown ? () => setShowLegacyForAdmin(true) : undefined}
@@ -752,7 +762,7 @@ export function ReportDetailShell({
           // from page 4 — see similarity-print-report.tsx. It replaces the
           // overview → manuscript → source-appendix sequence; the full source
           // inventory stays in the interactive report on screen.
-          <SimilarityPrintReport report={report} submitter={submitter} formatted={formattedSource} onFormattedReady={printFormatted} />
+          <SimilarityPrintReport report={report} submitter={submitter} formatted={formattedSource} onFormattedReady={handleFormattedReady} />
         ) : (
           <>
             <OverviewReport report={report} similarityStatus={effectiveSimilarityStatus} />
@@ -773,7 +783,7 @@ export function ReportDetailShell({
             <strong>Full report</strong>
             <span>Save a PDF copy</span>
           </div>
-          <button className="download-report-fab" type="button" onClick={() => window.print()}>
+          <button className="download-report-fab" type="button" onClick={handleDownloadReport}>
             <Printer aria-hidden="true" />
             Download
           </button>

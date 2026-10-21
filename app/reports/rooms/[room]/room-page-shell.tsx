@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { ChevronLeft, Download, FileText } from "lucide-react";
 import { fetchReportRoomContents, fetchRemoteReport, saveReportRemote, type ReportSummary, type RoomContents, type RoomContentsFetchResult, type SaveReportRemoteResult } from "@/lib/reports-remote";
+import { captureAndSaveDocumentLayout } from "@/lib/report-document-layout-client";
 import {
   CHECK_STAGE_CEILING,
   CHECK_STAGE_LABELS,
@@ -221,6 +222,8 @@ type PendingCheckSave = {
   summary: ReportSummary;
   academicSearchDiagnosticsId: number | null;
   aiAnalysisPromise: Parameters<typeof completeAiAnalysisWithRecovery>[0];
+  /** the uploaded file, still in this tab: its formatting is saved with the report once the report is (saved formatting, 2026-10-21) */
+  sourceFile: File;
 };
 export const SAVE_FAILED_MESSAGE = "Your document was analyzed, but the report could not be saved. Nothing was lost: try saving again. This will not create a second report.";
 export const SAVE_UNCONFIRMED_MESSAGE = "Saving is taking much longer than expected, and we could not confirm your report was saved. Your analysis is kept on this page: try saving again. This will not create a second report.";
@@ -1269,6 +1272,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
         summary,
         academicSearchDiagnosticsId: academicResult.academicSearchDiagnosticsId,
         aiAnalysisPromise,
+        sourceFile: submittedFile,
       };
       await persistPendingCheck();
     } finally {
@@ -1354,6 +1358,9 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
     pendingSaveRef.current = null;
     setSaveFailure(null);
     setReferenceEntries((current) => markReferencesChecked(current));
+    // SAVED FORMATTING (2026-10-21): the report is stored, so its original document's layout can be stored with
+    // it — in the background, never delaying or failing this check. The printed report uses it later on any device.
+    void captureAndSaveDocumentLayout(String(report.id), pending.sourceFile, report.text ?? "");
     // 100 % only once the room read shows this report (the save answer alone is not shown as complete).
     enterStage("confirming");
     if (outcome.confirmed || roomHoldsReport(await fetchReportRoomContents(room), summary.id)) {

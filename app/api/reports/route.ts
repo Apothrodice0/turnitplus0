@@ -31,6 +31,7 @@ import {
 } from '../../../lib/corpus-admission-report-integration';
 import { deleteHistoricalMatchSnapshot } from '../../../lib/report-historical-match';
 import { deleteReportDocumentData } from '../../../lib/report-deletion';
+import { deleteReportDocumentLayout } from '../../../lib/report-document-layout-repo';
 import { resolvePrimarySimilaritySummary } from '../../../lib/report-primary-similarity';
 import { withEvidenceInterpretation, stripClientEvidenceInterpretation } from '../../../lib/report-evidence-interpretation';
 import { sanitizeExtractionDiagnostic } from '../../../lib/evidence-interpretation';
@@ -265,6 +266,9 @@ async function insertReportWithRoomCheck(params: {
       // Legacy (tracking-version-0) passport only: recorded best-effort AFTER
       // this transaction commits — see the version check below.
       let legacyActorLedgerWrite: { devicePassportId: string; observation: ActorObservation } | null = null;
+      // Saved formatting of a replaced room occupant: removed after this transaction commits (best effort), so
+      // storage that is not yet migrated can never roll a replacement back.
+      let replacedReportId: string | null = null;
       const tx = await txClient.transaction('write');
       try {
         let conflict: { mostRecent: string } | null = null;
@@ -316,6 +320,7 @@ async function insertReportWithRoomCheck(params: {
               sql: 'DELETE FROM saved_reports WHERE device_key = ? AND id = ?',
               args: [occupantRow.device_key, occupantRow.id],
             });
+            replacedReportId = String(occupantRow.id);
             await deleteReportDocumentData(tx, occupantRow.document_identity_id, { preserveActivelyPromotedRepresentations: true });
             await deleteReportCorpusAdmissionData(tx, {
               accountId: params.roomOwnerId,
@@ -378,6 +383,7 @@ async function insertReportWithRoomCheck(params: {
           }
         }
         await tx.commit();
+        if (replacedReportId && params.roomOwnerId !== null) await deleteReportDocumentLayout(txClient, replacedReportId, params.roomOwnerId);
         if (legacyActorLedgerWrite) {
           try {
             await recordDevicePassportActorUsage(txClient, {

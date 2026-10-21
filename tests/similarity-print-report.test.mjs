@@ -361,7 +361,7 @@ test("PALETTE: only blue, green and red plus white, dark text and light greys â€
 test("WIRING: the report page prints SimilarityPrintReport for a V2 report; AI and legacy print paths are unchanged; the owner's name comes from a SELECT-only read", async () => {
   const shell = await readFile(new URL("../app/reports/[id]/report-detail-shell.tsx", import.meta.url), "utf8");
   assert.match(shell, /<AiReport report=\{report\} signal=\{aiSignal\} printMode \/> : hasV2 \? \(/);
-  assert.match(shell, /<SimilarityPrintReport report=\{report\} submitter=\{submitter\} formatted=\{formattedSource\} onFormattedReady=\{printFormatted\} \/>/);
+  assert.match(shell, /<SimilarityPrintReport report=\{report\} submitter=\{submitter\} formatted=\{formattedSource\} onFormattedReady=\{handleFormattedReady\} \/>/);
   assert.match(shell, /<OverviewReport report=\{report\} similarityStatus=\{effectiveSimilarityStatus\} \/>\s*<SubmissionReport report=\{report\} \/>\s*<SourcesReport report=\{report\} \/>/);
   const page = await readFile(new URL("../app/reports/[id]/page.tsx", import.meta.url), "utf8");
   assert.match(page, /readAccountIdentityProfile\(client, sessionUser\.id\)/);

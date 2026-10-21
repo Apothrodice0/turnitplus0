@@ -163,7 +163,7 @@ export function DocumentUploadPanel({ file, isGeneratingReport, progress, proces
         <UploadCloud aria-hidden="true" />
         Generate free report
       </button>
-      <p className="privacy-note"><LockKeyhole aria-hidden="true" /> Documents are processed in your browser.</p>
+      <p className="privacy-note"><LockKeyhole aria-hidden="true" /> Documents are processed in your browser. Your saved report keeps the text and formatting so you can download it later.</p>
     </>
   );
 }

@@ -184,16 +184,14 @@ test("RENDER: the formatted column keeps the document's direction, alignment, ta
 });
 
 // ── privacy and wiring ───────────────────────────────────────────────────
-test("PRIVACY + WIRING: the re-attached file is read only in the browser (no network call), offered only for .docx reports, verified before use; the standard download stays", async () => {
+test("PRIVACY + WIRING: parsing and rendering never call the network themselves; the saved layout is used only when every highlight is placed, otherwise the standard manuscript prints", async () => {
   const fm = await readFile(new URL("../components/report/report-v2/formatted-manuscript.tsx", import.meta.url), "utf8");
   const parser = await readFile(new URL("../lib/docx-document.ts", import.meta.url), "utf8");
   for (const [name, src] of [["formatted-manuscript", fm], ["docx-document", parser]]) {
     assert.doesNotMatch(src, /\bfetch\(|XMLHttpRequest|sendBeacon|navigator\.sendBeacon/, `${name} sends nothing anywhere`);
   }
-  assert.match(fm, /normalizeExtractedText\(extracted\.text\) !== \(report\.text \?\? ""\)/, "same-document check against the saved text");
+  assert.match(fm, /if \(!formattedManuscriptReady\(map\)\) \{[\s\S]*?return null;/, "an unplaceable highlight means the standard manuscript");
   const shell = await readFile(new URL("../app/reports/[id]/report-detail-shell.tsx", import.meta.url), "utf8");
-  assert.match(shell, /onDownloadReport=\{\(\) => window\.print\(\)\}/, "standard download unchanged");
-  assert.match(shell, /onDownloadFormattedReport=\{\/\\\.docx\$\/i\.test\(report\.title\) \? chooseOriginalDocx : undefined\}/);
-  assert.match(shell, /accept="\.docx,/);
-  assert.match(shell, /releaseFormattedManuscript\(current\)/, "image URLs released after printing");
+  assert.doesNotMatch(shell, /type="file"/, "the reader is never asked for a file");
+  assert.match(shell, /releaseFormattedManuscript\(current\)/, "image URLs released when the page goes away");
 });

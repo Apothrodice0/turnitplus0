@@ -9,7 +9,6 @@ import {
   CircleHelp,
   Download,
   ExternalLink,
-  FileText,
   Files,
   GitCompareArrows,
   LayoutTemplate,
@@ -1082,8 +1081,7 @@ function WorkspaceManuscript({
 export function ReportV2Workspace({
   report,
   onDownloadReport,
-  onDownloadFormattedReport,
-  isPreparingFormatted = false,
+  isPreparingDownload = false,
   onDownloadReceipt,
   isDownloadingReceipt = false,
   onShowLegacy,
@@ -1091,9 +1089,8 @@ export function ReportV2Workspace({
   report: SimilarityReport;
   /** Existing window.print() mechanism, unchanged — this redesign task explicitly does not touch PDF export; this only relocates the same action into the compact workspace toolbar. */
   onDownloadReport?: () => void;
-  /** Original formatting (2026-10-21): asks for the original .docx on this device and prints the manuscript with its layout. Only for .docx reports. */
-  onDownloadFormattedReport?: () => void;
-  isPreparingFormatted?: boolean;
+  /** True while the report's saved document formatting is still being laid out for the download (it then prints by itself). */
+  isPreparingDownload?: boolean;
   onDownloadReceipt?: () => void;
   isDownloadingReceipt?: boolean;
   onShowLegacy?: () => void;
@@ -1157,21 +1154,9 @@ export function ReportV2Workspace({
           <span className={`rv2ws-toolbar-status${vm.summary.completion.state === "COMPLETED" ? "" : " rv2ws-toolbar-status-attention"}`}>{toolbarStatus}</span>
           <span className="rv2ws-toolbar-actions">
             {onDownloadReport && (
-              <button type="button" className="button secondary" onClick={onDownloadReport}>
+              <button type="button" className="button secondary" onClick={onDownloadReport} disabled={isPreparingDownload}>
                 <Printer aria-hidden="true" />
-                Download report
-              </button>
-            )}
-            {onDownloadFormattedReport && (
-              <button
-                type="button"
-                className="button secondary"
-                onClick={onDownloadFormattedReport}
-                disabled={isPreparingFormatted}
-                title="Choose the original .docx on this device to print the manuscript with its own layout. The file stays on this device."
-              >
-                <FileText aria-hidden="true" />
-                {isPreparingFormatted ? "Preparing…" : "Download with original formatting"}
+                {isPreparingDownload ? "Preparing…" : "Download report"}
               </button>
             )}
             {onDownloadReceipt && (

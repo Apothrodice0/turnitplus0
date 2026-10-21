@@ -9,6 +9,7 @@ import { stripClientEvidenceInterpretation, refreshSelectiveCorpusCompletionSign
 import { sanitizeUnverifiedPublicationNotice } from '../../../../lib/academic-search/unverified-publication';
 import { sanitizeExtractionDiagnostic } from '../../../../lib/evidence-interpretation';
 import { deleteReportDocumentData } from '../../../../lib/report-deletion';
+import { deleteReportDocumentLayout } from '../../../../lib/report-document-layout-repo';
 import { deleteReportCorpusAdmissionData } from '../../../../lib/corpus-admission-report-integration';
 import { getSessionUser } from '../../../../lib/auth-session';
 import { stripServerInternalReportFields, type SimilarityReport } from '../../../../lib/report-types';
@@ -350,6 +351,7 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ i
           sql: 'DELETE FROM saved_reports WHERE id = ? AND user_id = ?',
           args: [id, sessionUser.id],
         });
+        await deleteReportDocumentLayout(client, id, sessionUser.id);
         if (documentIdentityId) await deleteReportDocumentData(client, String(documentIdentityId));
         // Corpus-admission cleanup: scoped directly to (account, deviceKey,
         // report id) — see lib/corpus-admission-report-integration.ts's own

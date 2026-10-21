@@ -15,12 +15,12 @@ import { PRINT_PALETTE, PRINT_UNRANKED_COLOR, printSourceTone } from "@/lib/simi
 import type { PrintHighlight } from "./print-highlights";
 
 /**
- * FORMATTED MANUSCRIPT (2026-10-21) — page 4 onward of the printed similarity report, drawn from the reader's
- * re-attached original .docx instead of the saved plain text: alignment, indentation, right-to-left paragraphs,
+ * FORMATTED MANUSCRIPT (2026-10-21) — page 4 onward of the printed similarity report, drawn from the layout of the
+ * original .docx saved with the report during the upload (no second file selection) instead of the saved plain text: alignment, indentation, right-to-left paragraphs,
  * headings and run styles, lists, tables (spans and merges) and images, with the report's highlights placed on the
  * exact words they cover (lib/docx-manuscript-map.ts).
  *
- * Everything happens in the reader's browser; the file is never uploaded or stored. Pages are planned by laying
+ * The layout is read through owner-only routes; the original file itself is never uploaded or stored. Pages are planned by laying
  * the blocks out once in an off-screen layer with the real fonts and images, then cutting only between lines or
  * table rows, so nothing is clipped and every sheet's "Page n of N" is exact.
  */
@@ -424,50 +424,22 @@ export function FormattedLayoutProbe({ source, probeFirst, probeRest, onPlan }: 
   );
 }
 
-// ── preparing a re-attached file (browser only) ──────────────────────────
-export type PrepareResult = { ok: true; source: FormattedManuscriptSource } | { ok: false; message: string };
-
-export const FORMATTED_MESSAGES = {
-  notDocx: "Choose the original Word file (.docx) that this report was made from.",
-  unreadable: "This file could not be read as a Word document. Use Download report for the standard PDF.",
-  mismatch: "This file is not the document this report was made from. Choose the same .docx you uploaded, unchanged, or use Download report for the standard PDF.",
-  unplaced: "The original formatting could not be matched safely to every highlighted passage, so it is not used. Use Download report for the standard PDF.",
-} as const;
-
+// ── the saved layout (browser only) ──────────────────────────────────────
 /**
- * Reads the chosen file in the browser, checks it is the analysed document (the upload's own extraction must
- * reproduce the saved text exactly), parses its structure and places every highlight. Nothing leaves the device.
+ * The report's formatted manuscript, from the layout saved with it during the original upload
+ * (lib/report-document-layout-client.ts) — or null when the report has none, it no longer describes the report's
+ * text, or any highlight cannot be placed on exactly its own words. Null always means the standard manuscript.
  */
-export async function prepareFormattedManuscript(report: SimilarityReport, file: File, highlights: PrintHighlight[]): Promise<PrepareResult> {
-  if (!/\.docx$/i.test(file.name)) return { ok: false, message: FORMATTED_MESSAGES.notDocx };
-  let bytes: ArrayBuffer;
-  try {
-    bytes = await file.arrayBuffer();
-  } catch {
-    return { ok: false, message: FORMATTED_MESSAGES.unreadable };
+export async function loadSavedFormattedManuscript(report: SimilarityReport, highlights: PrintHighlight[]): Promise<FormattedManuscriptSource | null> {
+  const { fetchDocumentLayout } = await import("@/lib/report-document-layout-client");
+  const loaded = await fetchDocumentLayout(String(report.id), report.text ?? "");
+  if (!loaded) return null;
+  const map = mapHighlightsOntoDocx(loaded.doc, report.text ?? "", highlights);
+  if (!formattedManuscriptReady(map)) {
+    for (const url of loaded.imageUrls.values()) URL.revokeObjectURL(url);
+    return null;
   }
-  const [{ extractDocxTextDocumentWithCompleteness }, { normalizeExtractedText }, mammoth, JSZip, { readDocxDocument }] = await Promise.all([
-    import("@/lib/docx-text-extraction"),
-    import("@/lib/extracted-text-normalization"),
-    import("mammoth/mammoth.browser"),
-    import("jszip").then((m) => m.default),
-    import("@/lib/docx-document"),
-  ]);
-  const extracted = await extractDocxTextDocumentWithCompleteness(mammoth.convertToHtml, { arrayBuffer: bytes }).catch(() => null);
-  if (!extracted || extracted.completeness === "FAILED") return { ok: false, message: FORMATTED_MESSAGES.unreadable };
-  if (normalizeExtractedText(extracted.text) !== (report.text ?? "")) return { ok: false, message: FORMATTED_MESSAGES.mismatch };
-  let doc: DocxDocument;
-  try {
-    const zip = await JSZip.loadAsync(bytes);
-    doc = await readDocxDocument(zip, (xml) => new DOMParser().parseFromString(xml, "application/xml"));
-  } catch {
-    return { ok: false, message: FORMATTED_MESSAGES.unreadable };
-  }
-  const map = mapHighlightsOntoDocx(doc, report.text ?? "", highlights);
-  if (!formattedManuscriptReady(map)) return { ok: false, message: FORMATTED_MESSAGES.unplaced };
-  const imageUrls = new Map<string, string>();
-  for (const [path, media] of doc.media) imageUrls.set(path, URL.createObjectURL(new Blob([media.bytes as BlobPart], { type: media.contentType })));
-  return { ok: true, source: { doc, imageUrls, map, highlights } };
+  return { doc: loaded.doc, imageUrls: loaded.imageUrls, map, highlights };
 }
 
 /** True when the document holds text Word hides (w:vanish) — shown dimmed in the manuscript, since it was analysed. */
