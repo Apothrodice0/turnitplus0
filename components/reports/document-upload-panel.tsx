@@ -1,6 +1,6 @@
 "use client";
 
-import type { RefObject } from "react";
+import type { CSSProperties, RefObject } from "react";
 import { Check, LockKeyhole, UploadCloud } from "lucide-react";
 import { ReferenceFilesPanel } from "@/components/reports/reference-files-panel";
 import { displayedCheckPercent, progressEncouragement } from "@/lib/upload-progress";
@@ -95,18 +95,27 @@ export function DocumentUploadPanel({ file, isGeneratingReport, progress, proces
     // the percentage; 100 % only once the server has confirmed the report.
     const shown = displayedCheckPercent(progress, complete);
     const width = complete ? 100 : Math.min(shown + 0.99, Math.max(0, Number.isFinite(progress) ? progress : 0));
+    const encouragement = progressEncouragement(shown, complete);
     return (
       <>
         <div className="upload-locked-panel" role="status" aria-live="polite" aria-busy={!complete}>
           <span className="upload-locked-icon"><LockKeyhole aria-hidden="true" /></span>
           <p className="section-label">CHECK IN PROGRESS</p>
           <h3>{file?.name ?? "Your document"}</h3>
-          <p>{processingLabel}{complete ? "" : "…"}</p>
-          <p className="upload-progress-encouragement">{progressEncouragement(shown, complete)}</p>
+          {/* Keyed so a new stage label fades in (CSS only); the dots keep a fixed width, so the text never shifts. */}
+          <p key={processingLabel} className="upload-progress-status">
+            {processingLabel}
+            {complete ? null : <span className="upload-progress-dots" aria-hidden="true"><span>.</span><span>.</span><span>.</span></span>}
+          </p>
+          <p key={encouragement} className="upload-progress-encouragement">{encouragement}</p>
           <div className="progress-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={shown} aria-label={`${shown}% complete`}>
             <span style={{ width: `${width}%` }} />
           </div>
-          <strong>{shown}%</strong>
+          {/* The visible number counts up to `shown` through a CSS-transitioned counter (globals.css): it only moves toward the
+              value supplied here, never past it, with no JavaScript timer. The real text stays in the DOM for assistive tech. */}
+          <strong className="upload-progress-percent" style={{ "--upload-progress-pct": shown } as CSSProperties}>
+            <span className="upload-progress-percent-text">{shown}%</span>
+          </strong>
         </div>
         <ReferenceSection references={references} busy />
       </>
