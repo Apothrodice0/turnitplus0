@@ -354,6 +354,23 @@ function passageCharRange(
   return { charStart: spans[wordStart].start, charEnd: spans[endIdx].end };
 }
 
+// ── source order ─────────────────────────────────────────────────────────
+function sourceIdNumber(id: string): number {
+  const n = Number(/(\d+)$/.exec(id)?.[1]);
+  return Number.isFinite(n) ? n : Number.MAX_SAFE_INTEGER;
+}
+
+/**
+ * THE source order for every report surface (2026-10-21): most matched words first, ties by the interpreter's own
+ * src-N number compared NUMERICALLY. A source's number is its position in this order, everywhere — the interactive
+ * workspace list and its manuscript badges, and the printed report's page 3 and manuscript highlights. The payload
+ * itself is sorted by id as a STRING (src-1, src-10, src-11, …, src-2), which numbered src-10 as "2" on screen while
+ * the PDF ranked it 10th.
+ */
+export function compareReportSources(a: { id: string; matchedWords: number }, b: { id: string; matchedWords: number }): number {
+  return b.matchedWords - a.matchedWords || sourceIdNumber(a.id) - sourceIdNumber(b.id) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+}
+
 // ── main builder ─────────────────────────────────────────────────────────
 export function buildReportV2ViewModel(report: SimilarityReport): ReportV2ViewModel | null {
   const ei: ReportEvidenceInterpretation | undefined = report.evidenceInterpretation;
@@ -379,7 +396,7 @@ export function buildReportV2ViewModel(report: SimilarityReport): ReportV2ViewMo
     .filter((row) => row.matchedWords > 0)
     .sort((a, b) => b.matchedWords - a.matchedWords || a.kind.localeCompare(b.kind));
 
-  // sources — already `src-N`, already sorted by id in the payload
+  // sources — `src-N` ids; the payload lists them by id as a string, re-ordered below (compareReportSources)
   const sources: ReportV2SourceCard[] = ei.sources.map((s) => {
     const generic = isGenericReferenceSource(s.sourceType);
     return {
@@ -410,9 +427,11 @@ export function buildReportV2ViewModel(report: SimilarityReport): ReportV2ViewMo
   ei.sources.forEach((s, i) => {
     if (s.namedSources && s.namedSources.length > 0) sources[i].namedSources = s.namedSources;
   });
+  // one numbering for every surface (see compareReportSources)
+  sources.sort(compareReportSources);
+  const sourcePosition = new Map(sources.map((s, i) => [s.id, i]));
 
   const topSources: ReportV2TopSource[] = [...sources]
-    .sort((a, b) => b.matchedWords - a.matchedWords || a.id.localeCompare(b.id))
     .slice(0, 4)
     .map((s) => ({
       id: s.id,
@@ -450,7 +469,9 @@ export function buildReportV2ViewModel(report: SimilarityReport): ReportV2ViewMo
         confidence: p.interpretation.confidence,
         confidenceLabel: CONFIDENCE_LABEL[p.interpretation.confidence],
         filter: filterOfKind(p.interpretation.kind),
-        sourceIds: [...p.sourceIds].sort(),
+        // in source order, so sourceIds[0] is the passage's best-numbered source on every surface
+        sourceIds: [...p.sourceIds].sort((a, b) =>
+          (sourcePosition.get(a) ?? Number.MAX_SAFE_INTEGER) - (sourcePosition.get(b) ?? Number.MAX_SAFE_INTEGER) || (a < b ? -1 : a > b ? 1 : 0)),
       };
     });
 

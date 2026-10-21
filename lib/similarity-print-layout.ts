@@ -1,5 +1,5 @@
 import type { SimilarityReport } from "@/lib/report-types";
-import type { ReportV2SourceCard, ReportV2ViewModel, ManuscriptPageRange } from "@/lib/report-v2-view";
+import { compareReportSources, type ReportV2SourceCard, type ReportV2ViewModel, type ManuscriptPageRange } from "@/lib/report-v2-view";
 
 /**
  * SIMILARITY PRINT REPORT (2026-10-21) — pure layout helpers for the printed/PDF similarity report
@@ -33,15 +33,13 @@ export function printSourceTone(rank: number): PrintSourceTone {
 
 export type PrintRankedSource = ReportV2SourceCard & { rank: number; tone: PrintSourceTone };
 
-function sourceIdNumber(id: string): number {
-  const n = Number(/(\d+)$/.exec(id)?.[1]);
-  return Number.isFinite(n) ? n : Number.MAX_SAFE_INTEGER;
-}
-
-/** Sources ranked by matched words (ties: the interpreter's own src-N order), numbered from 1. */
-export function rankPrintSources(vm: ReportV2ViewModel): PrintRankedSource[] {
+/**
+ * Sources numbered from 1 in THE report source order (compareReportSources — the same order and numbers the
+ * interactive workspace shows; vm.sources is already in it, the sort only guards a hand-built view model).
+ */
+export function rankPrintSources(vm: Pick<ReportV2ViewModel, "sources">): PrintRankedSource[] {
   return [...vm.sources]
-    .sort((a, b) => b.matchedWords - a.matchedWords || sourceIdNumber(a.id) - sourceIdNumber(b.id) || a.id.localeCompare(b.id))
+    .sort(compareReportSources)
     .map((source, index) => ({ ...source, rank: index + 1, tone: printSourceTone(index + 1) }));
 }
 

@@ -32,6 +32,7 @@ import {
 } from "../lib/similarity-print-layout.ts";
 import { SimilarityPrintReport } from "../components/report/report-v2/similarity-print-report.tsx";
 import { findHighlightRanges } from "../components/report/similarity-report-papers.tsx";
+import { ReportV2Workspace } from "../components/report/report-v2/report-v2-view.tsx";
 
 // ── fixtures ─────────────────────────────────────────────────────────────
 function prose(words) {
@@ -42,8 +43,14 @@ function prose(words) {
   return out.map((w, i) => (i > 0 && i % 120 === 0 ? `\n${w}` : w)).join(" ");
 }
 
+/** Prose whose wording never repeats, so each matched phrase occurs exactly once (no phrase-search ambiguity). */
+function uniqueProse(words) {
+  return Array.from({ length: words }, (_, i) => (i > 0 && i % 120 === 0 ? `
+term${i}` : `term${i}`)).join(" ");
+}
+
 /** A V2 report built through the REAL evidence interpreter: `sourceCount` named sources over `text`. */
-function reportWithSources({ text, sourceCount, title = "thesis-final.docx" }) {
+function reportWithSources({ text, sourceCount, title = "thesis-final.docx", sameSpanAs = {} }) {
   const spans = tokenSpans(text);
   const wc = tokens(text).length;
   const positions = new Set();
@@ -51,9 +58,14 @@ function reportWithSources({ text, sourceCount, title = "thesis-final.docx" }) {
   let cursor = 5;
   for (let i = 0; i < sourceCount; i += 1) {
     const len = Math.max(5, 40 - i);
-    const a = cursor;
-    const b = Math.min(wc - 1, a + len - 1);
-    cursor = b + 9;
+    let a = cursor;
+    let b = Math.min(wc - 1, a + len - 1);
+    // sameSpanAs[i] = j: source i also matches (part of) source j's passage — one passage, two sources
+    if (sameSpanAs[i] !== undefined) {
+      const shared = evidence[sameSpanAs[i]].matchedPassages[0];
+      a = shared.submittedWordStart;
+      b = Math.min(shared.submittedWordEnd, a + len - 1);
+    } else cursor = b + 9;
     if (a >= wc - 1) break;
     for (let w = a; w <= b; w += 1) positions.add(w);
     evidence.push({
@@ -277,6 +289,50 @@ test("REPORT: no matches — still three introductory pages, an honest empty sta
 test("REPORT: the account email never appears anywhere in the printed report", () => {
   const report = reportWithSources({ text: prose(1500), sourceCount: 5 });
   assert.doesNotMatch(render(report), /owner@example\.test/);
+});
+
+// ── one numbering on every surface ───────────────────────────────────────
+test("CONSISTENCY: 10+ sources — the interactive report and the PDF give every source the same number (src-2 is 2, src-10 is 10), in the same order", () => {
+  const report = reportWithSources({ text: prose(4200), sourceCount: 24 });
+  const vm = buildReportV2ViewModel(report);
+  const ids = vm.sources.map((s) => s.id);
+  assert.ok(ids.indexOf("src-2") < ids.indexOf("src-10"), "numeric, not string, id order");
+  assert.deepEqual(ids, rankPrintSources(vm).map((s) => s.id), "the view model is already in the PDF's order");
+  const workspace = renderToStaticMarkup(React.createElement(ReportV2Workspace, { report }));
+  const screenRows = [...workspace.matchAll(/<span class="rv2ws-source-number"[^>]*>(\d+)<\/span><span class="rv2ws-source-body"><span class="rv2ws-source-title">([^<]*)<\/span>/g)]
+    .map((m) => [Number(m[1]), decode(m[2])]);
+  const pdfRows = [...pagesOf(render(report))[2].html.matchAll(/<span class="spr-rank"[^>]*>(\d+)<\/span>[\s\S]*?<span class="spr-source-title" dir="auto">([^<]*)<\/span>/g)]
+    .map((m) => [Number(m[1]), decode(m[2])]);
+  assert.equal(screenRows.length, vm.sources.length);
+  assert.deepEqual(pdfRows, screenRows.slice(0, pdfRows.length), "page 3 = the top of the interactive list, number for number");
+  const label = (id) => vm.sources.find((s) => s.id === id).label;
+  for (const id of ["src-2", "src-10"]) {
+    const n = Number(id.slice(4));
+    assert.deepEqual(screenRows.find(([, t]) => t === label(id)), [n, label(id)], `${id} is number ${n} on screen`);
+    assert.deepEqual(pdfRows.find(([, t]) => t === label(id)), [n, label(id)], `${id} is number ${n} in the PDF`);
+  }
+});
+
+test("CONSISTENCY: every highlight carries the same source number on screen and in the PDF — including a passage shared by src-2 and src-10", () => {
+  const report = reportWithSources({ text: uniqueProse(4200), sourceCount: 24, sameSpanAs: { 9: 1 } });
+  const vm = buildReportV2ViewModel(report);
+  const shared = vm.passages.find((p) => p.sourceIds.includes("src-2") && p.sourceIds.includes("src-10"));
+  assert.ok(shared, "fixture has one passage matched by both src-2 and src-10");
+  assert.equal(shared.sourceIds[0], "src-2", "its best-numbered source comes first");
+  const workspace = renderToStaticMarkup(React.createElement(ReportV2Workspace, { report }));
+  const screen = new Map([...workspace.matchAll(/id="rv2ws-mark-(\d+)"[^>]*>[^<]*<sup class="rv2ws-mark-number"[^>]*>(\d+)<\/sup>/g)]
+    .map((m) => [vm.passages.find((p) => p.id === Number(m[1])).charStart, Number(m[2])]));
+  const pdf = new Map([...render(report).matchAll(/data-span="(\d+)-\d+">[^<]*<sup class="spr-mark-n">(\d+)<\/sup>/g)].map((m) => [Number(m[1]), Number(m[2])]));
+  assert.ok(screen.size >= 20 && pdf.size >= 20);
+  let compared = 0;
+  for (const [start, n] of screen) {
+    if (!pdf.has(start)) continue;
+    assert.equal(pdf.get(start), n, `highlight at ${start}`);
+    compared += 1;
+  }
+  assert.ok(compared >= 20, `compared ${compared} highlights`);
+  assert.equal(screen.get(shared.charStart), 2);
+  assert.equal(pdf.get(shared.charStart), 2);
 });
 
 // ── wiring and print CSS ─────────────────────────────────────────────────
