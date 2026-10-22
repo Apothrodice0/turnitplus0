@@ -196,11 +196,6 @@ function CoverPage({ report, submitter, total, manuscriptFirst }: { report: Simi
           ))}
         </ol>
       </nav>
-
-      <p className="spr-cover-note">
-        Similarity measures wording that matches checked sources. It is not, by itself, a judgement about the work —
-        matched passages may be properly quoted and cited.
-      </p>
     </PrintPage>
   );
 }

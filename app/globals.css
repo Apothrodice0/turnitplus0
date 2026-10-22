@@ -9736,15 +9736,6 @@ button.admin-archive-feed-row:focus-visible { outline: 2px solid var(--blue); ou
   font-variant-numeric: tabular-nums;
 }
 
-.spr-cover-note {
-  margin: 18px 0 0;
-  padding-top: 12px;
-  border-top: 1px solid var(--spr-hair);
-  color: var(--spr-muted);
-  font-size: 10px;
-  line-height: 1.5;
-}
-
 /* ── page 2: overview ── */
 .spr-score {
   display: grid;

@@ -237,6 +237,8 @@ test("REPORT: exactly three introductory pages, the manuscript from page 4, and 
     assert.match(p.html, new RegExp(`<footer class="spr-foot"><span>Submission ID ${report.submissionId}</span><span class="spr-foot-page">Page ${i + 1} of ${pages.length}</span></footer>`));
   });
   assert.match(pages[0].html, /Highlighted manuscript<\/span><i aria-hidden="true"><\/i><b>4–\d+<\/b>/, "the cover's contents list the manuscript pages");
+  assert.match(pages[0].html, /<\/nav><\/div><footer class="spr-foot">/, "nothing sits between the cover's contents and its footer");
+  assert.doesNotMatch(html, /spr-cover-note|Similarity measures wording/, "no explanatory footnote on the cover");
 });
 
 test("REPORT: the overview shows the authoritative score, counts and evidence of the view model — nothing recomputed", () => {
