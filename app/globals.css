@@ -9516,21 +9516,12 @@ button.admin-archive-feed-row:focus-visible { outline: 2px solid var(--blue); ou
   padding: 24px 64px 16px;
 }
 
+/* Submission ID on the left, page number on the right; the document title is on page 1 and above the manuscript. */
 .spr-foot {
+  grid-template-columns: 1fr auto;
   margin: 0 64px;
   padding: 10px 0 30px;
   border-top: 1px solid var(--spr-hair);
-}
-
-.spr-foot-title {
-  overflow: hidden;
-  justify-self: center;
-  max-width: 100%;
-  font-family: var(--spr-serif);
-  font-size: 10.5px;
-  font-style: italic;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .spr-foot-page {

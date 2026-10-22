@@ -233,6 +233,8 @@ test("REPORT: exactly three introductory pages, the manuscript from page 4, and 
   pages.forEach((p, i) => {
     assert.equal(p.n, i + 1);
     assert.match(p.html, new RegExp(`Page ${i + 1} of ${pages.length}<`));
+    // the footer is the Submission ID (left) and the page number (right) only — no repeated document title
+    assert.match(p.html, new RegExp(`<footer class="spr-foot"><span>Submission ID ${report.submissionId}</span><span class="spr-foot-page">Page ${i + 1} of ${pages.length}</span></footer>`));
   });
   assert.match(pages[0].html, /Highlighted manuscript<\/span><i aria-hidden="true"><\/i><b>4–\d+<\/b>/, "the cover's contents list the manuscript pages");
 });

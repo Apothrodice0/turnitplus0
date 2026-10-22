@@ -97,7 +97,6 @@ function PrintPage({
       <div className="spr-body">{children}</div>
       <footer className="spr-foot">
         <span>Submission ID {report.submissionId}</span>
-        <span className="spr-foot-title" dir="auto">{printDocumentTitle(report.title)}</span>
         <span className="spr-foot-page">Page {page} of {total}</span>
       </footer>
     </article>
