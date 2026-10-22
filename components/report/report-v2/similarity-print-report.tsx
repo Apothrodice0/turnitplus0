@@ -15,6 +15,7 @@ import {
   printDocumentTitle,
   printLanguageLabel,
   printSimilarityScale,
+  printSourceIdentity,
   printSourceTone,
   printSourcesPage,
   rankPrintSources,
@@ -373,25 +374,27 @@ function OverviewPage({ report, vm, ranked, rankById, total }: { report: Similar
 }
 
 // ── page 3 — matching sources ────────────────────────────────────────────
-function hostAndPath(url: string): string {
-  try {
-    const u = new URL(url);
-    return `${u.hostname}${u.pathname === "/" ? "" : u.pathname}`;
-  } catch {
-    return url;
-  }
-}
-
+// Each row: rank and line pattern, the entry's identity (printSourceIdentity — named only when verified), its
+// passages, matched words and share of the analyzed document, all from the saved view model.
 function SourcesPage({ report, vm, ranked, total }: { report: SimilarityReport; vm: ReportV2ViewModel; ranked: PrintRankedSource[]; total: number }) {
   const { shown, hidden } = printSourcesPage(ranked);
   const anyShared = ranked.some((s) => s.mixedKindLabels.length > 0);
+  const entryWords = ranked.reduce((sum, s) => sum + s.matchedWords, 0);
+  // A highlight carries the best-ranked source of its passage, so an entry whose every passage is shared with a
+  // better-ranked one has no number of its own in the manuscript: say which numbers mark its passages instead.
+  const rankOf = new Map(ranked.map((s) => [s.id, s.rank]));
+  const markedAs = (s: PrintRankedSource): number[] => {
+    const marks = new Set(vm.passages.filter((p) => p.sourceIds.includes(s.id)).map((p) => Math.min(...p.sourceIds.map((id) => rankOf.get(id) ?? Infinity))));
+    return marks.has(s.rank) ? [] : [...marks].filter(Number.isFinite).sort((a, b) => a - b).slice(0, 3);
+  };
+  const pad = (n: number) => String(n).padStart(Math.max(2, String(ranked.length).length), "0");
   return (
     <PrintPage report={report} page={3} total={total} section={SECTION.sources} className="spr-sources">
       <p className="spr-kicker">Matching sources</p>
       <h2 className="spr-h2">Sources behind the highlighted passages</h2>
       <p className="spr-intro">
-        Ranked by matched words. Each number and line pattern marks the same source&apos;s passages in the manuscript,
-        from page 4.
+        Ranked by matched words. Each entry is one piece of matching evidence, and several entries can come from the
+        same publication. An entry&apos;s number and line pattern mark its passages in the manuscript, from page 4.
       </p>
 
       {ranked.length === 0 ? (
@@ -405,28 +408,34 @@ function SourcesPage({ report, vm, ranked, total }: { report: SimilarityReport; 
       ) : (
         <>
           <div className="spr-source-cols" aria-hidden="true">
+            <span />
             <span>Source</span>
-            <span>Share</span>
+            <span>Passages</span>
+            <span>Matched words</span>
+            <span>Share of document</span>
           </div>
           <ol className="spr-source-list">
             {shown.map((s) => {
-              const where = s.link ? hostAndPath(s.link) : s.doi ? `doi:${s.doi}` : null;
-              const meta = [s.badge, s.primaryLabel, where, s.year ? String(s.year) : null,
-                s.passageRefs.length > 0 ? `${s.passageRefs.length} passage${s.passageRefs.length === 1 ? "" : "s"}` : null].filter(Boolean);
+              const identity = printSourceIdentity(s, ranked.length);
+              const others = markedAs(s);
               return (
-                <li key={s.id} className="spr-source-row">
+                <li key={s.id} className={identity.verified ? "spr-source-row" : "spr-source-row spr-source-row-unnamed"}>
                   <span className="spr-source-key">
                     <RankBadge source={s} />
                     <ToneSample tone={s.tone} />
                   </span>
                   <span className="spr-source-text">
-                    <span className="spr-source-title" dir="auto">{s.label}</span>
-                    <span className="spr-source-meta">{meta.join(" · ")}</span>
+                    <span className="spr-source-title" dir="auto">{identity.title}</span>
+                    <span className="spr-source-meta">
+                      {identity.details.join(" · ")}
+                      {identity.link && <> · <a className="spr-source-link" href={identity.link.href}>{identity.link.text}</a></>}
+                      {identity.year !== null && ` · ${identity.year}`}
+                      {others.length > 0 && ` · Passages marked ${others.map((n) => `#${pad(n)}`).join(", ")} in the manuscript`}
+                    </span>
                   </span>
-                  <span className="spr-source-share">
-                    <b>{formatSimilarityPercent(s.contributionPercent, s.matchedWords)}</b>
-                    <small>{s.matchedWords.toLocaleString("en-US")} words</small>
-                  </span>
+                  <span className="spr-source-num">{s.passageRefs.length.toLocaleString("en-US")}</span>
+                  <span className="spr-source-num">{s.matchedWords.toLocaleString("en-US")}</span>
+                  <span className="spr-source-share"><b>{formatSimilarityPercent(s.contributionPercent, s.matchedWords)}</b></span>
                 </li>
               );
             })}
@@ -439,11 +448,18 @@ function SourcesPage({ report, vm, ranked, total }: { report: SimilarityReport; 
           {ranked.length === 0
             ? "The interactive TurnitPlus report shows the full search scope for this submission."
             : hidden > 0
-              ? `Showing the ${shown.length} highest-ranked of ${matchingEvidenceEntriesLabel(ranked.length)}. The complete source inventory — every entry, with its links and matched passages — is in the interactive TurnitPlus report.`
-              : `All ${matchingEvidenceEntriesLabel(ranked.length)} are shown. Links and matched passages for each are in the interactive TurnitPlus report.`}
+              ? `Showing the ${shown.length} highest-ranked of ${matchingEvidenceEntriesLabel(ranked.length)}. The complete inventory — every entry, with its matched passages — is in the interactive TurnitPlus report.`
+              : `All ${matchingEvidenceEntriesLabel(ranked.length)} are shown. The matched passages of each are in the interactive TurnitPlus report.`}
         </p>
         {hidden > 0 && <p>Highlights numbered {shown.length + 1}–{ranked.length} in the manuscript belong to those further entries.</p>}
-        {anyShared && <p>Some words match more than one source; they count once in the {vm.summary.verifiedSimilarityPercent}% overall similarity.</p>}
+        {entryWords > vm.summary.matchedWordCount ? (
+          <p>
+            Entries can share words: the matched words of all {ranked.length.toLocaleString("en-US")} entries add up to {entryWords.toLocaleString("en-US")}, but each
+            word counts once in the {vm.summary.matchedWordCount.toLocaleString("en-US")} matched words behind the {formatSimilarityPercent(vm.summary.verifiedSimilarityPercent, vm.summary.matchedWordCount)} overall similarity.
+          </p>
+        ) : anyShared ? (
+          <p>Some words match more than one source; they count once in the {vm.summary.verifiedSimilarityPercent}% overall similarity.</p>
+        ) : null}
       </div>
     </PrintPage>
   );

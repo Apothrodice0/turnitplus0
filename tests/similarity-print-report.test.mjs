@@ -28,6 +28,7 @@ import {
   paginateManuscriptForPrint,
   printDocumentTitle,
   printSimilarityScale,
+  printSourceIdentity,
   printSourceTone,
   printSourcesPage,
   rankForCharRange,
@@ -268,7 +269,38 @@ test("REPORT: page 3 lists the top entries in rank order and states how many of 
   });
   assert.ok(ranked.length > SOURCES_PAGE_CAPACITY, "fixture has more entries than fit");
   assert.match(sourcesPage, new RegExp(`Showing the ${SOURCES_PAGE_CAPACITY} highest-ranked of ${ranked.length} matching evidence entries`));
-  assert.match(sourcesPage, /complete source inventory/);
+  assert.match(sourcesPage, /The complete inventory — every entry, with its matched passages — is in the interactive TurnitPlus report/);
+});
+
+test("SOURCES: an entry is named only from verified metadata; imported and collection entries get a neutral reference number", () => {
+  const base = { label: "Imported reference match", badge: "Imported reference match", isGeneric: true, sourceType: "imported-similarity-evidence", link: null, doi: null, year: null };
+  assert.deepEqual(printSourceIdentity({ ...base, rank: 1 }, 71), { verified: false, title: "Reference source #01", details: ["Imported evidence", "Source identity unavailable"], link: null, year: null });
+  assert.equal(printSourceIdentity({ ...base, rank: 7 }, 120).title, "Reference source #007");
+  // even a link or title on a generic entry is never shown as its identity
+  assert.deepEqual(printSourceIdentity({ ...base, rank: 2, sourceType: "reference-collection", label: "Some archived title", badge: "TurnitPlus reference collection", link: "https://x.example/a" }, 9),
+    { verified: false, title: "Reference source #02", details: ["TurnitPlus reference collection"], link: null, year: null });
+  const pub = { rank: 3, label: "A Real Article", badge: "Publication", isGeneric: false, sourceType: "publication", link: "https://journals.example.org/a/3", doi: "10.5555/x", year: 2021 };
+  assert.deepEqual(printSourceIdentity(pub, 9), { verified: true, title: "A Real Article", details: ["Publication"], link: { href: "https://journals.example.org/a/3", text: "journals.example.org/a/3" }, year: 2021 });
+  assert.deepEqual(printSourceIdentity({ ...pub, link: null }, 9).link, { href: "https://doi.org/10.5555/x", text: "doi:10.5555/x" });
+  assert.equal(printSourceIdentity({ ...pub, label: "Publication" }, 9).verified, false, "a title that is only the generic badge is not an identity");
+});
+
+test("SOURCES: page 3 rows give rank, identity, passages, matched words and share in aligned columns, from the saved entries", () => {
+  const report = reportWithSources({ text: prose(4200), sourceCount: 24, sameSpanAs: { 9: 1 } });
+  const ranked = rankPrintSources(buildReportV2ViewModel(report));
+  const page = pagesOf(render(report))[2].html;
+  assert.match(page, /<div class="spr-source-cols" aria-hidden="true"><span><\/span><span>Source<\/span><span>Passages<\/span><span>Matched words<\/span><span>Share of document<\/span><\/div>/);
+  const rows = [...page.matchAll(/<span class="spr-rank"[^>]*>(\d+)<\/span>[\s\S]*?<span class="spr-source-title" dir="auto">([^<]*)<\/span><span class="spr-source-meta">([\s\S]*?)<\/span><\/span><span class="spr-source-num">([\d,]+)<\/span><span class="spr-source-num">([\d,]+)<\/span><span class="spr-source-share"><b>([^<]*)<\/b>/g)];
+  assert.equal(rows.length, SOURCES_PAGE_CAPACITY);
+  rows.forEach((m, i) => {
+    const s = ranked[i];
+    assert.deepEqual([Number(m[1]), decode(m[2]), Number(m[4]), Number(m[5]), decode(m[6])],
+      [s.rank, s.label, s.passageRefs.length, s.matchedWords, formatSimilarityPercent(s.contributionPercent, s.matchedWords)], `row ${i + 1}`);
+    assert.match(m[3], new RegExp(`<a class="spr-source-link" href="https://journals\\.example\\.org/a/\\d+">journals\\.example\\.org/a/\\d+</a>`), "verified link");
+  });
+  const row10 = rows.find((m) => Number(m[1]) === 10);
+  assert.match(decode(row10[3].replace(/<[^>]+>/g, "")), /Passages marked #02 in the manuscript/, "its only passage is marked with the better-ranked #02");
+  assert.doesNotMatch(decode(rows[0][3].replace(/<[^>]+>/g, "")), /Passages marked/);
 });
 
 test("REPORT: the manuscript prints the full text unaltered, with exactly the highlight spans of findHighlightRanges, numbered like page 3", () => {

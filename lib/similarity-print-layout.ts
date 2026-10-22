@@ -113,6 +113,50 @@ export function rankPrintSources(vm: Pick<ReportV2ViewModel, "sources">): PrintR
 /** How many ranked sources fit on page 3 (each row has a fixed height — see .spr-source-row in app/globals.css). */
 export const SOURCES_PAGE_CAPACITY = 16;
 
+/**
+ * What page 3 may say about an evidence entry's identity. Only a verified source (internet, publication, supplied
+ * reference: isGeneric false, with its own title) is named, and only its own link or DOI is offered as a link. Every
+ * generic entry (imported evidence, the TurnitPlus reference collection, prior submissions) gets a neutral
+ * "Reference source #NN" and a line that says what kind of evidence it is — never a guessed title, URL or attribution.
+ */
+export type PrintSourceIdentity = {
+  verified: boolean;
+  title: string;
+  /** dark-grey details under the title; for a verified source the link (if any) follows them */
+  details: string[];
+  link: { href: string; text: string } | null;
+  year: number | null;
+};
+
+export function printSourceIdentity(source: Pick<PrintRankedSource, "rank" | "label" | "badge" | "isGeneric" | "sourceType" | "link" | "doi" | "year">, totalEntries: number): PrintSourceIdentity {
+  const verified = !source.isGeneric && source.label.trim().length > 0 && source.label.trim() !== source.badge;
+  if (!verified) {
+    const digits = Math.max(2, String(Math.max(totalEntries, source.rank)).length);
+    return {
+      verified: false,
+      title: `Reference source #${String(source.rank).padStart(digits, "0")}`,
+      details: source.sourceType === "imported-similarity-evidence" ? ["Imported evidence", "Source identity unavailable"] : [source.badge],
+      link: null,
+      year: null,
+    };
+  }
+  const link = source.link
+    ? { href: source.link, text: printLinkText(source.link) }
+    : source.doi
+      ? { href: `https://doi.org/${source.doi}`, text: `doi:${source.doi}` }
+      : null;
+  return { verified: true, title: source.label, details: [source.badge], link, year: source.year };
+}
+
+function printLinkText(url: string): string {
+  try {
+    const u = new URL(url);
+    return `${u.hostname}${u.pathname === "/" ? "" : u.pathname}`;
+  } catch {
+    return url;
+  }
+}
+
 export type PrintSourcesPage = { shown: PrintRankedSource[]; total: number; hidden: number };
 
 export function printSourcesPage(ranked: PrintRankedSource[], capacity: number = SOURCES_PAGE_CAPACITY): PrintSourcesPage {

@@ -10098,16 +10098,28 @@ button.admin-archive-feed-row:focus-visible { outline: 2px solid var(--blue); ou
   line-height: 1.5;
 }
 
+/* page 3 columns: rank | source | passages | matched words | share of the document — one grid for header and rows */
+.spr-source-cols,
+.spr-source-row {
+  display: grid;
+  grid-template-columns: 50px minmax(0, 1fr) 62px 72px 76px;
+  column-gap: 0;
+}
+
 .spr-source-cols {
-  display: flex;
-  justify-content: space-between;
-  padding: 0 0 6px 50px;
+  align-items: end;
+  padding: 0 0 6px;
   border-bottom: 2px solid var(--spr-blue-deep);
   color: var(--spr-muted);
-  font-size: 9px;
+  font-size: 8.5px;
   font-weight: 700;
-  letter-spacing: 0.15em;
+  letter-spacing: 0.12em;
+  line-height: 1.3;
   text-transform: uppercase;
+}
+
+.spr-source-cols > span:nth-child(n + 3) {
+  text-align: end;
 }
 
 .spr-source-list {
@@ -10117,8 +10129,6 @@ button.admin-archive-feed-row:focus-visible { outline: 2px solid var(--blue); ou
 }
 
 .spr-source-row {
-  display: grid;
-  grid-template-columns: 50px minmax(0, 1fr) 84px;
   align-items: center;
   height: 40px;
   border-bottom: 1px solid var(--spr-hair);
@@ -10176,6 +10186,19 @@ button.admin-archive-feed-row:focus-visible { outline: 2px solid var(--blue); ou
   font-size: 9.5px;
 }
 
+.spr-source-link {
+  color: var(--spr-blue);
+  text-decoration: none;
+}
+
+.spr-source-num {
+  color: var(--spr-ink);
+  font-size: 12px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  text-align: end;
+}
+
 .spr-source-share {
   text-align: end;
 }
@@ -10189,10 +10212,6 @@ button.admin-archive-feed-row:focus-visible { outline: 2px solid var(--blue); ou
   line-height: 1.1;
 }
 
-.spr-source-share small {
-  color: var(--spr-muted);
-  font-size: 9px;
-}
 
 .spr-sources-note {
   margin-top: auto;
