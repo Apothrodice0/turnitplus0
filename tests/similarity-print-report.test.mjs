@@ -261,26 +261,30 @@ test("REPORT: page 3 lists the top entries in rank order and states how many of 
   const vm = buildReportV2ViewModel(report);
   const ranked = rankPrintSources(vm);
   const sourcesPage = pagesOf(render(report))[2].html;
-  const rows = [...sourcesPage.matchAll(/<span class="spr-rank"[^>]*>(\d+)<\/span>[\s\S]*?<span class="spr-source-title" dir="auto">([^<]*)<\/span>/g)];
+  const rows = [...sourcesPage.matchAll(/<span class="spr-rank"[^>]*>(\d+)<\/span>[\s\S]*?<span class="spr-source-title" dir="auto">([^<]*)<\/span><span class="spr-source-meta" dir="auto">([^<]*?) · /g)];
   assert.equal(rows.length, Math.min(SOURCES_PAGE_CAPACITY, ranked.length));
   rows.forEach((m, i) => {
     assert.equal(Number(m[1]), i + 1);
-    assert.equal(decode(m[2]), ranked[i].label);
+    assert.equal(decode(m[2]), `Match found #${String(i + 1).padStart(2, "0")}`);
+    assert.equal(decode(m[3]), ranked[i].label, "a verified source keeps its own title on the details line");
   });
   assert.ok(ranked.length > SOURCES_PAGE_CAPACITY, "fixture has more entries than fit");
   assert.match(sourcesPage, new RegExp(`Showing the ${SOURCES_PAGE_CAPACITY} highest-ranked of ${ranked.length} matching evidence entries`));
   assert.match(sourcesPage, /The complete inventory — every entry, with its matched passages — is in the interactive TurnitPlus report/);
 });
 
-test("SOURCES: an entry is named only from verified metadata; imported and collection entries get a neutral reference number", () => {
+test("SOURCES: rows are 'Match found online #NN' for a verified internet source and 'Match found #NN' otherwise; only verified sources get details", () => {
   const base = { label: "Imported reference match", badge: "Imported reference match", isGeneric: true, sourceType: "imported-similarity-evidence", link: null, doi: null, year: null };
-  assert.deepEqual(printSourceIdentity({ ...base, rank: 1 }, 71), { verified: false, title: "Reference source #01", details: ["Imported evidence", "Source identity unavailable"], link: null, year: null });
-  assert.equal(printSourceIdentity({ ...base, rank: 7 }, 120).title, "Reference source #007");
-  // even a link or title on a generic entry is never shown as its identity
+  assert.deepEqual(printSourceIdentity({ ...base, rank: 1 }, 71), { verified: false, title: "Match found #01", details: [], link: null, year: null });
+  assert.equal(printSourceIdentity({ ...base, rank: 7 }, 120).title, "Match found #007");
+  // even a link or title on a generic entry is never shown
   assert.deepEqual(printSourceIdentity({ ...base, rank: 2, sourceType: "reference-collection", label: "Some archived title", badge: "TurnitPlus reference collection", link: "https://x.example/a" }, 9),
-    { verified: false, title: "Reference source #02", details: ["TurnitPlus reference collection"], link: null, year: null });
+    { verified: false, title: "Match found #02", details: [], link: null, year: null });
+  const web = { rank: 4, label: "Waste sorting guide", badge: "Internet source", isGeneric: false, sourceType: "internet", link: "https://www.example.org/guide", doi: null, year: null };
+  assert.deepEqual(printSourceIdentity(web, 9), { verified: true, title: "Match found online #04", details: ["Waste sorting guide"], link: { href: "https://www.example.org/guide", text: "www.example.org/guide" }, year: null });
+  assert.equal(printSourceIdentity({ ...web, label: "Internet source" }, 9).title, "Match found #04", "an internet entry without its own title is not a verified online match");
   const pub = { rank: 3, label: "A Real Article", badge: "Publication", isGeneric: false, sourceType: "publication", link: "https://journals.example.org/a/3", doi: "10.5555/x", year: 2021 };
-  assert.deepEqual(printSourceIdentity(pub, 9), { verified: true, title: "A Real Article", details: ["Publication"], link: { href: "https://journals.example.org/a/3", text: "journals.example.org/a/3" }, year: 2021 });
+  assert.deepEqual(printSourceIdentity(pub, 9), { verified: true, title: "Match found #03", details: ["A Real Article"], link: { href: "https://journals.example.org/a/3", text: "journals.example.org/a/3" }, year: 2021 });
   assert.deepEqual(printSourceIdentity({ ...pub, link: null }, 9).link, { href: "https://doi.org/10.5555/x", text: "doi:10.5555/x" });
   assert.equal(printSourceIdentity({ ...pub, label: "Publication" }, 9).verified, false, "a title that is only the generic badge is not an identity");
 });
@@ -290,12 +294,13 @@ test("SOURCES: page 3 rows give rank, identity, passages, matched words and shar
   const ranked = rankPrintSources(buildReportV2ViewModel(report));
   const page = pagesOf(render(report))[2].html;
   assert.match(page, /<div class="spr-source-cols" aria-hidden="true"><span><\/span><span>Source<\/span><span>Passages<\/span><span>Matched words<\/span><span>Share of document<\/span><\/div>/);
-  const rows = [...page.matchAll(/<span class="spr-rank"[^>]*>(\d+)<\/span>[\s\S]*?<span class="spr-source-title" dir="auto">([^<]*)<\/span><span class="spr-source-meta">([\s\S]*?)<\/span><\/span><span class="spr-source-num">([\d,]+)<\/span><span class="spr-source-num">([\d,]+)<\/span><span class="spr-source-share"><b>([^<]*)<\/b>/g)];
+  const rows = [...page.matchAll(/<span class="spr-rank"[^>]*>(\d+)<\/span>[\s\S]*?<span class="spr-source-title" dir="auto">([^<]*)<\/span><span class="spr-source-meta" dir="auto">([\s\S]*?)<\/span><\/span><span class="spr-source-num">([\d,]+)<\/span><span class="spr-source-num">([\d,]+)<\/span><span class="spr-source-share"><b>([^<]*)<\/b>/g)];
   assert.equal(rows.length, SOURCES_PAGE_CAPACITY);
   rows.forEach((m, i) => {
     const s = ranked[i];
     assert.deepEqual([Number(m[1]), decode(m[2]), Number(m[4]), Number(m[5]), decode(m[6])],
-      [s.rank, s.label, s.passageRefs.length, s.matchedWords, formatSimilarityPercent(s.contributionPercent, s.matchedWords)], `row ${i + 1}`);
+      [s.rank, `Match found #${String(s.rank).padStart(2, "0")}`, s.passageRefs.length, s.matchedWords, formatSimilarityPercent(s.contributionPercent, s.matchedWords)], `row ${i + 1}`);
+    assert.ok(decode(m[3]).startsWith(`${s.label} · `), "the verified title leads the details line");
     assert.match(m[3], new RegExp(`<a class="spr-source-link" href="https://journals\\.example\\.org/a/\\d+">journals\\.example\\.org/a/\\d+</a>`), "verified link");
   });
   const row10 = rows.find((m) => Number(m[1]) === 10);
@@ -344,8 +349,9 @@ test("CONSISTENCY: 10+ sources — the interactive report and the PDF give every
   const workspace = renderToStaticMarkup(React.createElement(ReportV2Workspace, { report }));
   const screenRows = [...workspace.matchAll(/<span class="rv2ws-source-number"[^>]*>(\d+)<\/span><span class="rv2ws-source-body"><span class="rv2ws-source-title">([^<]*)<\/span>/g)]
     .map((m) => [Number(m[1]), decode(m[2])]);
-  const pdfRows = [...pagesOf(render(report))[2].html.matchAll(/<span class="spr-rank"[^>]*>(\d+)<\/span>[\s\S]*?<span class="spr-source-title" dir="auto">([^<]*)<\/span>/g)]
-    .map((m) => [Number(m[1]), decode(m[2])]);
+  // page 3 titles are "Match found #NN"; a verified source's own title leads its details line
+  const pdfRows = [...pagesOf(render(report))[2].html.matchAll(/<span class="spr-rank"[^>]*>(\d+)<\/span>[\s\S]*?<span class="spr-source-title" dir="auto">Match found #(\d+)<\/span><span class="spr-source-meta" dir="auto">([^<]*?) · /g)]
+    .map((m) => { assert.equal(Number(m[2]), Number(m[1]), "the title number is the rank"); return [Number(m[1]), decode(m[3])]; });
   assert.equal(screenRows.length, vm.sources.length);
   assert.deepEqual(pdfRows, screenRows.slice(0, pdfRows.length), "page 3 = the top of the interactive list, number for number");
   const label = (id) => vm.sources.find((s) => s.id === id).label;

@@ -114,15 +114,16 @@ export function rankPrintSources(vm: Pick<ReportV2ViewModel, "sources">): PrintR
 export const SOURCES_PAGE_CAPACITY = 16;
 
 /**
- * What page 3 may say about an evidence entry's identity. Only a verified source (internet, publication, supplied
- * reference: isGeneric false, with its own title) is named, and only its own link or DOI is offered as a link. Every
- * generic entry (imported evidence, the TurnitPlus reference collection, prior submissions) gets a neutral
- * "Reference source #NN" and a line that says what kind of evidence it is — never a guessed title, URL or attribution.
+ * What page 3 says about an evidence entry (owner decision 2026-10-22): every row is numbered, "Match found online
+ * #NN" for a verified internet source and "Match found #NN" for everything else. Only a verified source (internet,
+ * publication, supplied reference: isGeneric false, with its own title) gets a details line: its own title, its own
+ * link or DOI, and year. Generic entries (imported evidence, the TurnitPlus reference collection, prior submissions)
+ * get no details line at all — never a guessed title, URL or attribution.
  */
 export type PrintSourceIdentity = {
   verified: boolean;
   title: string;
-  /** dark-grey details under the title; for a verified source the link (if any) follows them */
+  /** dark-grey details under the title (verified sources only); the link, if any, follows them */
   details: string[];
   link: { href: string; text: string } | null;
   year: number | null;
@@ -130,22 +131,15 @@ export type PrintSourceIdentity = {
 
 export function printSourceIdentity(source: Pick<PrintRankedSource, "rank" | "label" | "badge" | "isGeneric" | "sourceType" | "link" | "doi" | "year">, totalEntries: number): PrintSourceIdentity {
   const verified = !source.isGeneric && source.label.trim().length > 0 && source.label.trim() !== source.badge;
-  if (!verified) {
-    const digits = Math.max(2, String(Math.max(totalEntries, source.rank)).length);
-    return {
-      verified: false,
-      title: `Reference source #${String(source.rank).padStart(digits, "0")}`,
-      details: source.sourceType === "imported-similarity-evidence" ? ["Imported evidence", "Source identity unavailable"] : [source.badge],
-      link: null,
-      year: null,
-    };
-  }
+  const number = String(source.rank).padStart(Math.max(2, String(Math.max(totalEntries, source.rank)).length), "0");
+  const title = verified && source.sourceType === "internet" ? `Match found online #${number}` : `Match found #${number}`;
+  if (!verified) return { verified: false, title, details: [], link: null, year: null };
   const link = source.link
     ? { href: source.link, text: printLinkText(source.link) }
     : source.doi
       ? { href: `https://doi.org/${source.doi}`, text: `doi:${source.doi}` }
       : null;
-  return { verified: true, title: source.label, details: [source.badge], link, year: source.year };
+  return { verified: true, title, details: [source.label.trim()], link, year: source.year };
 }
 
 function printLinkText(url: string): string {

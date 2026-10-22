@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from "react";
 import { similarityScoreBand } from "@/lib/ai-core";
 import { PRIMARY_SIMILARITY_BAND_LABELS, formatSimilarityPercent, type SimilarityReport } from "@/lib/report-types";
 import { buildReportV2ViewModel, matchingEvidenceEntriesLabel, type ReportV2ViewModel } from "@/lib/report-v2-view";
@@ -418,6 +418,13 @@ function SourcesPage({ report, vm, ranked, total }: { report: SimilarityReport; 
             {shown.map((s) => {
               const identity = printSourceIdentity(s, ranked.length);
               const others = markedAs(s);
+              // only real details: a verified source's own title, link and year, and where its passages are marked
+              const meta: ReactNode[] = [
+                ...identity.details,
+                ...(identity.link ? [<a key="link" className="spr-source-link" href={identity.link.href}>{identity.link.text}</a>] : []),
+                ...(identity.year !== null ? [String(identity.year)] : []),
+                ...(others.length > 0 ? [`Passages marked ${others.map((n) => `#${pad(n)}`).join(", ")} in the manuscript`] : []),
+              ];
               return (
                 <li key={s.id} className={identity.verified ? "spr-source-row" : "spr-source-row spr-source-row-unnamed"}>
                   <span className="spr-source-key">
@@ -426,12 +433,11 @@ function SourcesPage({ report, vm, ranked, total }: { report: SimilarityReport; 
                   </span>
                   <span className="spr-source-text">
                     <span className="spr-source-title" dir="auto">{identity.title}</span>
-                    <span className="spr-source-meta">
-                      {identity.details.join(" · ")}
-                      {identity.link && <> · <a className="spr-source-link" href={identity.link.href}>{identity.link.text}</a></>}
-                      {identity.year !== null && ` · ${identity.year}`}
-                      {others.length > 0 && ` · Passages marked ${others.map((n) => `#${pad(n)}`).join(", ")} in the manuscript`}
-                    </span>
+                    {meta.length > 0 && (
+                      <span className="spr-source-meta" dir="auto">
+                        {meta.map((part, i) => <Fragment key={i}>{i > 0 && " · "}{part}</Fragment>)}
+                      </span>
+                    )}
                   </span>
                   <span className="spr-source-num">{s.passageRefs.length.toLocaleString("en-US")}</span>
                   <span className="spr-source-num">{s.matchedWords.toLocaleString("en-US")}</span>
