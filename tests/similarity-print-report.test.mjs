@@ -384,6 +384,10 @@ test("PRINT CSS: the three introductory pages are exactly one sheet each; the wr
   assert.match(print, /\.spr-page\.spr-cover,\n\s*\.print-report-bundle \.report-paper\.spr-page\.spr-overview,\n\s*\.print-report-bundle \.report-paper\.spr-page\.spr-sources \{\n\s*height: 11in;\n\s*overflow: hidden;/);
   assert.match(block, /\.spr-mark \{[\s\S]*?print-color-adjust: exact;/, "highlight fill prints with Background graphics off");
   assert.match(block, /--spr-match: #b42318;\n\s*--spr-match-fill: #fde8e8;/);
+  // cover rhythm: a moderate gap under the graphic, and the contents follow the details (not pinned to the footer)
+  assert.match(block, /\.spr-cover-title-block \{\n\s*margin-top: 42px;/);
+  assert.match(block, /\.spr-cover-dense \.spr-cover-title-block \{\n\s*margin-top: 20px;/);
+  assert.match(block, /\.spr-cover-contents \{\n\s*margin-top: 0;\n\s*padding-top: 22px;/);
   assert.match(block, /\.spr-mark \{[^}]*border-bottom: 1\.6px solid var\(--spr-c\);[^}]*background: var\(--spr-match-fill\);/, "every matched passage sits on the soft red fill, underlined in its source colour");
   assert.match(block, /unicode-bidi: plaintext;/, "each manuscript paragraph takes its own direction (Arabic RTL)");
 });

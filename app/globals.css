@@ -9611,7 +9611,7 @@ button.admin-archive-feed-row:focus-visible { outline: 2px solid var(--blue); ou
 }
 
 .spr-cover-title-block {
-  margin-top: 78px;
+  margin-top: 42px;
   padding-left: 22px;
   border-left: 3px solid var(--spr-blue);
 }
@@ -9647,7 +9647,7 @@ button.admin-archive-feed-row:focus-visible { outline: 2px solid var(--blue); ou
 
 /* long title or long name: the same composition with a tighter vertical rhythm */
 .spr-cover-dense .spr-cover-title-block {
-  margin-top: 34px;
+  margin-top: 20px;
 }
 
 .spr-cover-dense .spr-cover-meta {
@@ -9704,8 +9704,9 @@ button.admin-archive-feed-row:focus-visible { outline: 2px solid var(--blue); ou
   line-clamp: 2;
 }
 
+/* follows the details directly, so the cover's blocks stay together and any spare height sits above the footer */
 .spr-cover-contents {
-  margin-top: auto;
+  margin-top: 0;
   padding-top: 22px;
 }
 
