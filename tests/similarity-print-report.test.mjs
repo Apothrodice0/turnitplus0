@@ -185,10 +185,13 @@ test("SOURCES: ranked by matched words (ties by the interpreter's own src-N orde
   assert.equal(page.shown.length, SOURCES_PAGE_CAPACITY);
   assert.equal(page.total, 40);
   assert.equal(page.hidden, 40 - SOURCES_PAGE_CAPACITY);
-  // every source highlight is brand blue; neighbouring ranks differ in line pattern (and always carry their number)
+  // every source highlight is match red (#b42318 on #fde8e8); neighbouring ranks differ in line pattern (and always
+  // carry their number)
+  assert.equal(PRINT_PALETTE.match, "#b42318");
+  assert.equal(PRINT_PALETTE.matchFill, "#fde8e8");
   for (let r = 1; r < 12; r += 1) {
     const a = printSourceTone(r), b = printSourceTone(r + 1);
-    assert.equal(a.color, PRINT_PALETTE.blue);
+    assert.equal(a.color, PRINT_PALETTE.match);
     assert.notEqual(a.line, b.line, `ranks ${r} and ${r + 1}`);
   }
 });
@@ -376,5 +379,7 @@ test("PRINT CSS: the three introductory pages are exactly one sheet each; the wr
   assert.match(print, /\.spr-font-warmup,\n\s*\.fm-measure \{\n\s*display: none !important;/, "neither the font warm-up nor the formatted manuscript's measuring layer ever prints");
   assert.match(print, /\.spr-page\.spr-cover,\n\s*\.print-report-bundle \.report-paper\.spr-page\.spr-overview,\n\s*\.print-report-bundle \.report-paper\.spr-page\.spr-sources \{\n\s*height: 11in;\n\s*overflow: hidden;/);
   assert.match(block, /\.spr-mark \{[\s\S]*?print-color-adjust: exact;/, "highlight fill prints with Background graphics off");
+  assert.match(block, /--spr-match: #b42318;\n\s*--spr-match-fill: #fde8e8;/);
+  assert.match(block, /\.spr-mark \{[^}]*border-bottom: 1\.6px solid var\(--spr-c\);[^}]*background: var\(--spr-match-fill\);/, "every matched passage sits on the soft red fill, underlined in its source colour");
   assert.match(block, /unicode-bidi: plaintext;/, "each manuscript paragraph takes its own direction (Arabic RTL)");
 });

@@ -17,9 +17,10 @@ import { compareReportSources, type ReportV2SourceCard, type ReportV2ViewModel, 
 
 // ── palette ──────────────────────────────────────────────────────────────
 /**
- * The printed report's whole palette (owner decision 2026-10-21): blue is the brand and carries structure, headings,
- * labels and every highlight; green marks completed / low-similarity states; red marks attention / high-similarity
- * states only; white, dark text and light greys do the rest. The same values are the --spr-* tokens in app/globals.css
+ * The printed report's whole palette (owner decisions 2026-10-21/22): blue is the brand and carries structure, headings
+ * and labels; matched text and everything that points at it (highlights, source numbers, the match map) is dark red on
+ * a soft red fill; green marks completed / low-similarity states; red marks attention / high-similarity states; white,
+ * dark text and light greys do the rest. The same values are the --spr-* tokens in app/globals.css
  * (inline SVG needs them as literals).
  */
 export const PRINT_PALETTE = {
@@ -27,6 +28,8 @@ export const PRINT_PALETTE = {
   blueDeep: "#1e3a8a",
   green: "#15803d",
   red: "#b91c1c",
+  match: "#b42318",
+  matchFill: "#fde8e8",
   ink: "#1f2937",
   muted: "#6b7280",
   rule: "#e5e7eb",
@@ -39,8 +42,8 @@ export function printBandColor(key: "low" | "review" | "high" | null | undefined
 }
 
 // ── source identity ──────────────────────────────────────────────────────
-/** Every source highlight is brand blue; a source is told apart by its number and its underline pattern. */
-export const PRINT_SOURCE_COLOR = PRINT_PALETTE.blue;
+/** Every source highlight is match red; a source is told apart by its number and its underline pattern. */
+export const PRINT_SOURCE_COLOR = PRINT_PALETTE.match;
 export const PRINT_SOURCE_LINES = ["solid", "dashed", "dotted", "double"] as const;
 export type PrintSourceLine = (typeof PRINT_SOURCE_LINES)[number];
 /** Highlight colour for a matched passage whose source could not be resolved to a ranked entry (never numbered). */

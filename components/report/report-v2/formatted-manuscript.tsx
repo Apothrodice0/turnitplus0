@@ -123,7 +123,7 @@ function ParagraphView({ p, ctx, from = 0, to = Infinity, first = true, last = t
           if (!mark) { pieces.push(span); continue; }
           const h = ctx.source.highlights[mark.highlight];
           const tone = h.rank !== null ? printSourceTone(h.rank) : null;
-          const color = h.wikipedia ? PRINT_PALETTE.blue : tone?.color ?? PRINT_UNRANKED_COLOR;
+          const color = h.wikipedia ? PRINT_PALETTE.match : tone?.color ?? PRINT_UNRANKED_COLOR;
           const line = h.wikipedia ? "dotted" : tone?.line ?? "solid";
           pieces.push(
             <mark key={`m${ii}-${s}`} className={`spr-mark spr-line-${line}`} style={{ "--spr-c": color } as CSSProperties} title={h.title} data-span={`${h.start}-${h.end}`}>

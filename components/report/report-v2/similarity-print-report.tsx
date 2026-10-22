@@ -34,8 +34,9 @@ import { FormattedColumn, FormattedLayoutProbe, formattedHasHiddenText, type For
  *   4+ Highlighted manuscript — the full text, the same highlight spans as before, numbered by source rank
  *
  * Design: TurnitPlus "modern academic editorial" — serif display type over the Geist UI face, hairline rules, and a
- * restrained palette (PRINT_PALETTE): blue for brand and structure, green only for completed / low-similarity states,
- * red only for attention / high-similarity states, white and light greys elsewhere. Every decoration is a border, text colour or inline SVG, so the PDF reads the same with
+ * restrained palette (PRINT_PALETTE): blue for brand and structure, dark red on a soft red fill for matched text and its
+ * source numbers, green only for completed / low-similarity states, red for attention / high-similarity states, white
+ * and light greys elsewhere. Every decoration is a border, text colour or inline SVG, so the PDF reads the same with
  * Chrome's "Background graphics" turned off; sources are told apart by number AND underline pattern, so it also
  * reads in grayscale.
  *
@@ -130,7 +131,7 @@ function RankBadge({ source }: { source: Pick<PrintRankedSource, "rank" | "tone"
 
 // ── page 1 — submission cover ────────────────────────────────────────────
 function CoverMotif() {
-  // Abstract manuscript lines with a few marked spans: the TurnitPlus report, at a glance (grey lines, brand-blue marks).
+  // Abstract manuscript lines with a few marked spans: the TurnitPlus report, at a glance (grey lines, match-red marks).
   const rows = [168, 150, 172, 126, 160, 144, 170, 98];
   const marks: Record<number, [number, number]> = { 1: [54, 70], 3: [18, 52], 6: [10, 36] };
   return (
@@ -139,7 +140,7 @@ function CoverMotif() {
         <g key={i}>
           <line x1="4" x2={4 + w} y1={10 + i * 15} y2={10 + i * 15} stroke={PRINT_PALETTE.rule} strokeWidth="3" strokeLinecap="round" />
           {marks[i] && (
-            <line x1={4 + marks[i][0]} x2={4 + marks[i][0] + marks[i][1]} y1={10 + i * 15} y2={10 + i * 15} stroke={PRINT_PALETTE.blue} strokeWidth="3" strokeLinecap="round" />
+            <line x1={4 + marks[i][0]} x2={4 + marks[i][0] + marks[i][1]} y1={10 + i * 15} y2={10 + i * 15} stroke={PRINT_PALETTE.match} strokeWidth="3" strokeLinecap="round" />
           )}
         </g>
       ))}
@@ -251,7 +252,7 @@ function DocumentMap({ vm, totalWords, rankById }: { vm: ReportV2ViewModel; tota
         {cells.map((cell, i) => {
           if (cell.matchedShare <= 0) return <line key={i} x1={i * cw + cw / 2} x2={i * cw + cw / 2} y1="20" y2="26" stroke={PRINT_PALETTE.rule} strokeWidth={Math.max(1, cw - 2.2)} />;
           const h = 10 + cell.matchedShare * 34;
-          const color = cell.rank !== null ? PRINT_PALETTE.blue : PRINT_UNRANKED_COLOR;
+          const color = cell.rank !== null ? PRINT_PALETTE.match : PRINT_UNRANKED_COLOR;
           return <line key={i} x1={i * cw + cw / 2} x2={i * cw + cw / 2} y1={23 - h / 2} y2={23 + h / 2} stroke={color} strokeWidth={Math.max(1, cw - 2.2)} />;
         })}
       </svg>
@@ -470,7 +471,7 @@ function renderManuscriptWindow(text: string, highlights: PrintHighlight[], from
     if (end <= start) continue;
     if (start > cursor) pieces.push(text.slice(cursor, start));
     const tone = h.rank !== null ? printSourceTone(h.rank) : null;
-    const color = h.wikipedia ? PRINT_PALETTE.blue : tone?.color ?? PRINT_UNRANKED_COLOR;
+    const color = h.wikipedia ? PRINT_PALETTE.match : tone?.color ?? PRINT_UNRANKED_COLOR;
     const line = h.wikipedia ? "dotted" : tone?.line ?? "solid";
     pieces.push(
       <mark key={`${h.start}-${start}`} className={`spr-mark spr-line-${line}`} style={{ "--spr-c": color } as CSSProperties} title={h.title} data-span={`${h.start}-${h.end}`}>

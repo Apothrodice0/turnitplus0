@@ -9444,6 +9444,8 @@ button.admin-archive-feed-row:focus-visible { outline: 2px solid var(--blue); ou
   --spr-blue-deep: #1e3a8a;
   --spr-green: #15803d;
   --spr-red: #b91c1c;
+  --spr-match: #b42318;
+  --spr-match-fill: #fde8e8;
   --spr-ink: #1f2937;
   --spr-muted: #6b7280;
   --spr-hair: #e5e7eb;
@@ -10227,7 +10229,8 @@ button.admin-archive-feed-row:focus-visible { outline: 2px solid var(--blue); ou
 .spr-mark {
   padding: 0 1px;
   border-bottom: 1.6px solid var(--spr-c);
-  background: color-mix(in srgb, var(--spr-c) 11%, transparent);
+  /* every matched passage sits on the same soft red fill; the source's number and underline tell sources apart */
+  background: var(--spr-match-fill);
   color: inherit;
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
