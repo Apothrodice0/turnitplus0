@@ -9743,9 +9743,8 @@ button.admin-archive-feed-row:focus-visible { outline: 2px solid var(--blue); ou
   grid-template-columns: 210px 1fr;
   gap: 30px;
   align-items: center;
-  padding: 16px 0 18px;
+  padding: 16px 0 6px;
   border-top: 2px solid var(--spr-blue-deep);
-  border-bottom: 1px solid var(--spr-hair);
 }
 
 .spr-score-figure strong {
@@ -9794,20 +9793,87 @@ button.admin-archive-feed-row:focus-visible { outline: 2px solid var(--blue); ou
   color: var(--spr-red);
 }
 
-.spr-band-scale {
-  display: block;
-  max-width: 100%;
+/*
+ * Full-width similarity scale under the score (SimilarityScale): segments as wide as the ranges they cover, the
+ * score's band in its colour (--spr-c: green low, blue moderate, red high), a marker and value at the score. Borders
+ * and text only, so it prints with Background graphics off.
+ */
+.spr-scale {
+  padding: 4px 0 14px;
+  border-bottom: 1px solid var(--spr-hair);
 }
 
-/* the tier label takes its colour from the SVG (band colour when active, grey otherwise) */
-.spr-band-text {
+.spr-scale-bar {
+  position: relative;
+  display: flex;
+  padding-top: 27px;
+}
+
+.spr-scale-seg {
+  box-sizing: border-box;
+  border-top: 10px solid var(--spr-track);
+}
+
+.spr-scale-seg + .spr-scale-seg {
+  margin-left: 2px;
+}
+
+.spr-scale-seg-active {
+  border-top-color: var(--spr-c);
+}
+
+.spr-scale-value {
+  position: absolute;
+  top: 0;
+  color: var(--spr-c);
   font-family: var(--spr-sans);
-  font-size: 9.5px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 13px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 
-.spr-band-range {
-  fill: var(--spr-muted);
-  font-size: 8.5px;
+.spr-scale-value-center {
+  transform: translateX(-50%);
+}
+
+.spr-scale-value-end {
+  transform: translateX(-100%);
+}
+
+.spr-scale-pin {
+  position: absolute;
+  top: 15px;
+  width: 0;
+  height: 0;
+  border-top: 9px solid var(--spr-c);
+  border-right: 6px solid transparent;
+  border-left: 6px solid transparent;
+  transform: translateX(-50%);
+}
+
+.spr-scale-labels {
+  display: flex;
+  padding-top: 7px;
+}
+
+.spr-scale-label {
+  color: var(--spr-muted);
+  font-family: var(--spr-sans);
+  font-size: 10px;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.spr-scale-label b {
+  color: var(--spr-ink);
+  font-weight: 600;
+}
+
+.spr-scale-label-active b {
+  color: var(--spr-c);
+  font-weight: 700;
 }
 
 .spr-score-explain {

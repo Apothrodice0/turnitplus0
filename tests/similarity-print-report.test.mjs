@@ -27,6 +27,7 @@ import {
   formatPrintSubmittedAt,
   paginateManuscriptForPrint,
   printDocumentTitle,
+  printSimilarityScale,
   printSourceTone,
   printSourcesPage,
   rankForCharRange,
@@ -362,6 +363,28 @@ test("PALETTE: only blue, green and red plus white, dark text and light greys �
   const overview = pagesOf(render(lowReport))[1].html;
   assert.match(overview, /class="spr-pill spr-pill-low">Low similarity</, "a low score shows a green state pill");
   assert.match(overview, /class="spr-pill spr-pill-ok">Search completed</, "a completed search shows a green state pill");
+});
+
+test("SCALE: proportional bands on a 0–100 axis, the marker at the score itself, the score's own band active", () => {
+  for (const [score, key, align] of [[0, "low", "start"], [15, "low", "center"], [19, "low", "center"], [19.6, "low", "center"], [20, "review", "center"], [40, "review", "center"], [40.4, "high", "center"], [41, "high", "center"], [100, "high", "end"]]) {
+    const scale = printSimilarityScale(score);
+    assert.equal(scale.markerPercent, score, `marker at ${score}`);
+    assert.equal(scale.activeKey, key, `band at ${score}`);
+    assert.equal(scale.markerAlign, align, `label anchoring at ${score}`);
+    assert.deepEqual(scale.segments.filter((s) => s.active).map((s) => s.key), [key]);
+  }
+  assert.deepEqual(printSimilarityScale(15).segments.map((s) => [s.label, s.range, s.startPercent, s.widthPercent]), [["Low", "0–19%", 0, 20], ["Moderate", "20–40%", 20, 20], ["High", "41–100%", 40, 60]]);
+  assert.equal(printSimilarityScale(-3).markerPercent, 0);
+  assert.equal(printSimilarityScale(130).markerPercent, 100);
+});
+
+test("SCALE: page 2 draws the full-width scale between the score and the figures, replacing the small scale", () => {
+  const overview = pagesOf(render(reportWithSources({ text: prose(4200), sourceCount: 3 })))[1].html;
+  assert.match(overview, /<\/section><section class="spr-scale"[^>]*aria-label="Similarity [^"]+"><div class="spr-scale-bar">/, "right after the score block");
+  assert.ok(overview.indexOf('class="spr-scale"') < overview.indexOf('class="spr-figures"'), "above the statistics row");
+  assert.equal((overview.match(/class="spr-scale-seg/g) ?? []).length, 3);
+  assert.equal((overview.match(/class="spr-scale-pin"/g) ?? []).length, 1);
+  assert.doesNotMatch(overview, /spr-band-scale/);
 });
 
 // ── wiring and print CSS ─────────────────────────────────────────────────

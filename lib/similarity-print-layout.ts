@@ -1,3 +1,4 @@
+import { similarityScoreBand } from "@/lib/ai-core";
 import type { SimilarityReport } from "@/lib/report-types";
 import { compareReportSources, type ReportV2SourceCard, type ReportV2ViewModel, type ManuscriptPageRange } from "@/lib/report-v2-view";
 
@@ -39,6 +40,47 @@ export const PRINT_PALETTE = {
 /** Colour of a result band: green for low, blue for moderate, red for high. */
 export function printBandColor(key: "low" | "review" | "high" | null | undefined): string {
   return key === "low" ? PRINT_PALETTE.green : key === "high" ? PRINT_PALETTE.red : PRINT_PALETTE.blue;
+}
+
+// ── similarity scale (page 2) ────────────────────────────────────────────
+/**
+ * The three result bands of similarityScoreBand (lib/ai-core.ts) on a true 0–100 axis, so each segment is as wide as
+ * the range it covers: Low [0, 20), Moderate [20, 40], High (40, 100]. The labels are the bands' own whole-number
+ * ranges.
+ */
+export const PRINT_SIMILARITY_SCALE_BANDS = [
+  { key: "low", label: "Low", range: "0–19%", from: 0, to: 20 },
+  { key: "review", label: "Moderate", range: "20–40%", from: 20, to: 40 },
+  { key: "high", label: "High", range: "41–100%", from: 40, to: 100 },
+] as const;
+
+export type PrintSimilarityScaleKey = (typeof PRINT_SIMILARITY_SCALE_BANDS)[number]["key"];
+
+export type PrintSimilarityScale = {
+  segments: Array<{ key: PrintSimilarityScaleKey; label: string; range: string; startPercent: number; widthPercent: number; active: boolean }>;
+  /** Where the marker points, as a share of the bar (the score, held to 0–100). */
+  markerPercent: number;
+  /** How the value label above the marker is anchored, so it never runs past either end of the bar. */
+  markerAlign: "start" | "center" | "end";
+  activeKey: PrintSimilarityScaleKey | null;
+};
+
+export function printSimilarityScale(score: number): PrintSimilarityScale {
+  const value = Number.isFinite(score) ? Math.min(100, Math.max(0, score)) : 0;
+  const activeKey = similarityScoreBand(value)?.key ?? null;
+  return {
+    segments: PRINT_SIMILARITY_SCALE_BANDS.map((band) => ({
+      key: band.key,
+      label: band.label,
+      range: band.range,
+      startPercent: band.from,
+      widthPercent: band.to - band.from,
+      active: band.key === activeKey,
+    })),
+    markerPercent: value,
+    markerAlign: value < 4 ? "start" : value > 96 ? "end" : "center",
+    activeKey,
+  };
 }
 
 // ── source identity ──────────────────────────────────────────────────────

@@ -14,6 +14,7 @@ import {
   paginateManuscriptForPrint,
   printDocumentTitle,
   printLanguageLabel,
+  printSimilarityScale,
   printSourceTone,
   printSourcesPage,
   rankPrintSources,
@@ -201,36 +202,30 @@ function CoverPage({ report, submitter, total, manuscriptFirst }: { report: Simi
 }
 
 // ── page 2 — similarity overview ─────────────────────────────────────────
-// The three existing result bands (lib/ai-core.ts similarityScoreBand) drawn as equal tiers; the marker sits
-// within its tier in proportion to the score.
-const BAND_SEGMENTS = [
-  { key: "low", label: "Low", range: "0–19%", from: 0, to: 20 },
-  { key: "review", label: "Moderate", range: "20–40%", from: 20, to: 41 },
-  { key: "high", label: "High", range: "41–100%", from: 41, to: 101 },
-] as const;
-
-function BandScale({ score }: { score: number }) {
-  const band = similarityScoreBand(score);
-  const W = 330;
-  const tier = (W - 12) / BAND_SEGMENTS.length;
-  const index = Math.max(0, BAND_SEGMENTS.findIndex((s) => score >= s.from && score < s.to));
-  const seg = BAND_SEGMENTS[index];
-  const markerX = 6 + tier * index + tier * Math.min(1, Math.max(0, (score - seg.from) / (seg.to - seg.from)));
+// The full-width scale under the score: the three result bands (printSimilarityScale) as segments as wide as the
+// ranges they cover, and a marker at the score itself. Drawn with borders and text only, like the rest of the report.
+function SimilarityScale({ score, percent }: { score: number; percent: string }) {
+  const scale = printSimilarityScale(score);
+  const tone = { "--spr-c": printBandColor(scale.activeKey) } as CSSProperties;
+  const at = { left: `${scale.markerPercent}%` };
   return (
-    <svg className="spr-band-scale" width={W} height="58" viewBox={`0 0 ${W} 58`} role="img" aria-label={`Similarity ${score}%: ${band ? PRIMARY_SIMILARITY_BAND_LABELS[band.key] : "similarity"}`}>
-      {BAND_SEGMENTS.map((s, i) => {
-        const active = band?.key === s.key;
-        const x1 = 6 + tier * i;
-        return (
-          <g key={s.key}>
-            <line x1={x1 + 2} x2={x1 + tier - 2} y1="20" y2="20" stroke={active ? printBandColor(s.key) : PRINT_PALETTE.rule} strokeWidth={active ? 6 : 4} />
-            <text x={x1 + tier / 2} y="38" textAnchor="middle" className="spr-band-text" fill={active ? printBandColor(s.key) : PRINT_PALETTE.muted} fontWeight={active ? 700 : 400}>{s.label}</text>
-            <text x={x1 + tier / 2} y="51" textAnchor="middle" className="spr-band-text spr-band-range">{s.range}</text>
-          </g>
-        );
-      })}
-      <path d={`M ${markerX - 5} 6 L ${markerX + 5} 6 L ${markerX} 13 Z`} fill={printBandColor(band?.key)} />
-    </svg>
+    <section className="spr-scale" style={tone} aria-label={`Similarity ${percent}: ${scale.activeKey ? PRIMARY_SIMILARITY_BAND_LABELS[scale.activeKey] : "similarity"}`}>
+      <div className="spr-scale-bar">
+        <span className={`spr-scale-value spr-scale-value-${scale.markerAlign}`} style={at}>{percent}</span>
+        <span className="spr-scale-pin" style={at} aria-hidden="true" />
+        {scale.segments.map((s, i) => (
+          // a 2px gap after each boundary keeps the boundaries exactly at their percentages
+          <span key={s.key} className={s.active ? "spr-scale-seg spr-scale-seg-active" : "spr-scale-seg"} style={{ width: i === 0 ? `${s.widthPercent}%` : `calc(${s.widthPercent}% - 2px)` }} />
+        ))}
+      </div>
+      <div className="spr-scale-labels">
+        {scale.segments.map((s) => (
+          <span key={s.key} className={s.active ? "spr-scale-label spr-scale-label-active" : "spr-scale-label"} style={{ width: `${s.widthPercent}%` }}>
+            <b>{s.label}</b> {s.range}
+          </span>
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -284,13 +279,13 @@ function OverviewPage({ report, vm, ranked, rankById, total }: { report: Similar
         </div>
         <div className="spr-score-side">
           <p className={`spr-pill spr-pill-${band?.key ?? "review"}`}>{band ? PRIMARY_SIMILARITY_BAND_LABELS[band.key] : "Similarity"}</p>
-          <BandScale score={verifiedSimilarityPercent} />
           <p className="spr-score-explain">
             The share of analyzed words that match checked sources word for word. A word that matches several sources
             is counted once.
           </p>
         </div>
       </section>
+      <SimilarityScale score={verifiedSimilarityPercent} percent={percent} />
 
       <dl className="spr-figures">
         <div><dt>Matched words</dt><dd>{matchedWordCount.toLocaleString("en-US")}</dd></div>
