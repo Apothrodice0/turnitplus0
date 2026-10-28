@@ -1,3 +1,4 @@
+import { getVercelOidcToken } from "@vercel/oidc";
 import type { SessionUser } from "./auth-session";
 
 /**
@@ -15,7 +16,12 @@ import type { SessionUser } from "./auth-session";
  *   S2_RESEARCH_OWNER_EMAILS comma-separated allowlist of account emails (case-insensitive). Empty = nobody.
  *   S2_INFERENCE_URL         https URL of the private inference endpoint (…/api/analyze).
  *   S2_INFERENCE_KEY         bearer key the inference endpoint requires (>= 32 chars).
- *   S2_INFERENCE_BYPASS      optional Vercel "protection bypass for automation" secret of the protected backend.
+ *   S2_INFERENCE_BYPASS      optional fallback only (owner approval required): the backend's "protection bypass for
+ *                            automation" secret. Not needed when Trusted Sources is configured.
+ *
+ * Reaching the protected backend: Vercel Trusted Sources. The backend project lists this project as a trusted Vercel
+ * project (Preview → Preview only), and every call carries this deployment's short-lived Vercel OIDC token in the
+ * documented `x-vercel-trusted-oidc-idp-token` header. The backend's own bearer key is still required on top.
  *
  * The feature is ALWAYS off in the production environment (VERCEL_ENV=production): this research preview is
  * only for protected Preview deployments.
@@ -95,15 +101,38 @@ export function localSystem2Refusal(extension: string, byteLength: number, first
   return null;
 }
 
+export type OidcTokenProvider = () => Promise<string | null>;
+
+/**
+ * This deployment's Vercel OIDC token for Trusted Sources (Vercel docs: getVercelOidcToken from @vercel/oidc). Only
+ * requested when running on Vercel (VERCEL=1), where it comes from the function's request context; elsewhere (local
+ * tests, builds) it is never requested, so no token refresh is attempted. Never logged, stored or returned.
+ */
+export const vercelOidcTokenProvider: OidcTokenProvider = async () => {
+  if (process.env.VERCEL !== "1") return null;
+  try {
+    return (await getVercelOidcToken()) || null;
+  } catch {
+    return null;
+  }
+};
+
 /** Server-to-server call to the private inference backend. The document bytes are sent only here, only after consent. */
-export async function requestSystem2Inference(bytes: Uint8Array, config: System2Config = system2Config(), fetchImpl: typeof fetch = fetch): Promise<System2Result | null> {
+export async function requestSystem2Inference(
+  bytes: Uint8Array,
+  config: System2Config = system2Config(),
+  fetchImpl: typeof fetch = fetch,
+  oidcToken: OidcTokenProvider = vercelOidcTokenProvider,
+): Promise<System2Result | null> {
   if (!config.enabled || !config.inferenceUrl || !config.inferenceKey) return null;
   const headers: Record<string, string> = {
     Authorization: `Bearer ${config.inferenceKey}`,
     "X-File-Extension": ".docx",
     "Content-Type": "application/octet-stream",
   };
-  if (config.bypassSecret) headers["x-vercel-protection-bypass"] = config.bypassSecret;
+  const token = await oidcToken();
+  if (token) headers["x-vercel-trusted-oidc-idp-token"] = token; // Vercel Trusted Sources (Preview → Preview)
+  if (config.bypassSecret) headers["x-vercel-protection-bypass"] = config.bypassSecret; // optional, owner-approved fallback only
   try {
     const body = bytes.slice().buffer; // a plain ArrayBuffer copy (<= 4 MB) satisfies BodyInit for every typed-array backing
     const res = await fetchImpl(config.inferenceUrl, { method: "POST", headers, body, cache: "no-store", redirect: "error", signal: AbortSignal.timeout(INFERENCE_TIMEOUT_MS) });

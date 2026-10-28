@@ -36,7 +36,7 @@ const backend = http.createServer((req, res) => {
   const chunks = [];
   req.on("data", (c) => chunks.push(c));
   req.on("end", () => {
-    calls.push({ auth: req.headers.authorization, ext: req.headers["x-file-extension"], bypass: req.headers["x-vercel-protection-bypass"] ?? null, bytes: Buffer.concat(chunks).length });
+    calls.push({ auth: req.headers.authorization, ext: req.headers["x-file-extension"], bypass: req.headers["x-vercel-protection-bypass"] ?? null, oidc: req.headers["x-vercel-trusted-oidc-idp-token"] ?? null, bytes: Buffer.concat(chunks).length });
     if (backendMode === "fail") { res.writeHead(500); res.end("{}"); return; }
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({ service_id: "stub", label: "RESEARCH-ONLY", state: "CONSERVATIVE_WITHIN_RANGE", estimate_shown: true, research_only: true, conservative_estimate_percent: 8, final_text: "Conservative System 2 research estimate: about 8%.", warnings: ["English-only test."], diagnostics: { delta_pp: 4.5 }, internal_secret_field: "must-not-pass" }));
@@ -158,10 +158,25 @@ test("route: the owner's own report is estimated server-to-server, with only whi
   assert.equal(body.internal_secret_field, undefined); assert.equal(body.service_id, undefined);
   assert.equal(calls.length, 1);
   assert.equal(calls[0].auth, `Bearer ${KEY}`); assert.equal(calls[0].ext, ".docx"); assert.equal(calls[0].bypass, "bypass-secret-value"); assert.equal(calls[0].bytes, DOCX_BYTES.length);
+  assert.equal(calls[0].oidc, null, "outside Vercel (VERCEL unset) no OIDC token is requested or sent");
   backendMode = "fail";
   const failed = await call("s2-owner-report", { cookie: owner.cookie });
   assert.equal(failed.status, 502); assert.equal((await failed.json()).state, "UNAVAILABLE");
   backendMode = "ok";
+});
+
+test("Trusted Sources: the Vercel OIDC token is sent in x-vercel-trusted-oidc-idp-token, with the bearer key, and never returned", async () => {
+  configureEnv(); calls.length = 0; backendMode = "ok";
+  const config = S2.system2Config();
+  const withToken = await S2.requestSystem2Inference(DOCX_BYTES, config, fetch, async () => "test-oidc-token");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].oidc, "test-oidc-token"); assert.equal(calls[0].auth, `Bearer ${KEY}`); assert.equal(calls[0].bypass, null, "no bypass secret unless explicitly configured");
+  assert.ok(!JSON.stringify(withToken).includes("test-oidc-token"), "the token never appears in the result");
+  await S2.requestSystem2Inference(DOCX_BYTES, config, fetch, async () => null);
+  assert.equal(calls[1].oidc, null, "no token available: no header is invented");
+  const saved = process.env.VERCEL; delete process.env.VERCEL;
+  assert.equal(await S2.vercelOidcTokenProvider(), null, "never requests a token off Vercel");
+  if (saved !== undefined) process.env.VERCEL = saved;
 });
 
 test("wiring: both report pages resolve the flag server-side; shells default it off; the panel sends consent", async () => {
@@ -181,6 +196,10 @@ test("wiring: both report pages resolve the flag server-side; shells default it 
   assert.match(panel, /"x-s2-consent": "granted"/);
   assert.match(panel, /disabled=\{!file \|\| !consent \|\| running\}/);
   assert.doesNotMatch(panel, /S2_INFERENCE|S2_RESEARCH|process\.env/, "no server configuration in client code");
+  assert.doesNotMatch(panel, /oidc|trusted-oidc/i, "no token handling in client code");
+  const lib = await readFile(new URL("../lib/system2-research.ts", import.meta.url), "utf8");
+  assert.match(lib, /import \{ getVercelOidcToken \} from "@vercel\/oidc";/);
+  assert.match(lib, /headers\["x-vercel-trusted-oidc-idp-token"\] = token/);
 });
 
 test.after(() => {
