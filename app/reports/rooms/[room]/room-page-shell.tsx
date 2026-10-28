@@ -52,7 +52,7 @@ import { detectLanguage } from "@/lib/similarity-core";
 import { AI_MODEL_VERSION, AI_PASSAGE_LOG_ODDS_THRESHOLD, AI_PASSAGE_THRESHOLD } from "@/lib/ai-core";
 import { describeAiAnalysisError, type AiPrepStage } from "@/lib/ai-model-prep";
 import { DocumentUploadPanel } from "@/components/reports/document-upload-panel";
-import { System2ResearchPanel } from "@/components/report/system2-research-panel";
+import { System2ConsentOption, System2MetricTile, SYSTEM2_ROOM_NOTE, loadSystem2Consent, loadSystem2Estimate, requestSystem2Estimate, storeSystem2Consent, type System2View } from "@/components/report/system2-estimate";
 
 /**
  * The dedicated room page's client half: owns this ONE room's state, the
@@ -591,6 +591,22 @@ export function RoomPageShell({ room, accountEmail, initialOccupant, system2Enab
   const [occupant, setOccupant] = useState<RoomContents>(initialOccupant);
   const [pollExhausted, setPollExhausted] = useState(false);
   const [file, setFile] = useState<File | null>(null);
+  // Owner-only System 2 (research): consent given in the upload form, the submitted file + consent for the ONE automatic
+  // request made right after the save, and this room's estimate view. Never used for anyone without system2Enabled.
+  const [s2Consent, setS2Consent] = useState(false);
+  const [s2View, setS2View] = useState<{ reportId: string; view: System2View } | null>(null);
+  const s2PendingRef = useRef<{ file: File; consent: boolean } | null>(null);
+  useEffect(() => {
+    if (system2Enabled) setS2Consent(loadSystem2Consent());
+  }, [system2Enabled]);
+  const occupantReportId = occupant.report?.id ?? null;
+  useEffect(() => {
+    // A reopened room shows this device's stored estimate (read after hydration); a run already in progress is kept.
+    if (!system2Enabled || !occupantReportId) return;
+    const stored = loadSystem2Estimate(occupantReportId);
+    if (stored) setS2View((current) => (current?.reportId === occupantReportId ? current : { reportId: occupantReportId, view: { status: "done", result: stored } }));
+  }, [system2Enabled, occupantReportId]);
+  const s2ViewFor = (reportId: string): System2View => (s2View?.reportId === reportId ? s2View.view : null);
   const [progress, setProgress] = useState(0);
   const [processingLabel, setProcessingLabel] = useState("Reading document content");
   const [isGeneratingReport, setIsGeneratingReport] = useState(false);
@@ -1129,6 +1145,17 @@ export function RoomPageShell({ room, accountEmail, initialOccupant, system2Enab
   }
   useProgressCreep(isGeneratingReport && !progressComplete, progressCeiling, setProgress);
 
+  function startSystem2Estimate(reportId: string, pending: { file: File; consent: boolean }) {
+    if (!pending.consent) {
+      setS2View({ reportId, view: { status: "not-requested" } });
+      return;
+    }
+    setS2View({ reportId, view: { status: "running" } });
+    void requestSystem2Estimate(reportId, pending.file).then((result) =>
+      setS2View((current) => (current && current.reportId !== reportId ? current : { reportId, view: { status: "done", result } })),
+    );
+  }
+
   async function runCheck() {
     if (generationLockRef.current) {
       notify("Your current document is still being analyzed.");
@@ -1140,6 +1167,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant, system2Enab
     }
 
     const submittedFile = file;
+    s2PendingRef.current = system2Enabled ? { file: submittedFile, consent: s2Consent } : null;
     generationLockRef.current = true;
     setIsGeneratingReport(true);
     // Defect #3: marks the start of a new check generation for the
@@ -1382,6 +1410,12 @@ export function RoomPageShell({ room, accountEmail, initialOccupant, system2Enab
       // here flashed above the card for ~1 s on Preview, 2026-10-21).
       setOccupant({ status: "processing", report: summary, cycleEndsAt: new Date(Date.now() + ROOM_CYCLE_MS).toISOString() });
 
+      // Owner-only System 2: starts automatically now, beside the AI analysis below — never awaited, never blocking or
+      // changing the similarity or AI results. Sends the same uploaded file once, and only with the consent given above.
+      const s2Pending = s2PendingRef.current;
+      s2PendingRef.current = null;
+      if (s2Pending) startSystem2Estimate(summary.id, s2Pending);
+
       // Deliberately not awaited, matching app/page.tsx's own generateReport()
       // — the generation lock releases as soon as the similarity result is
       // saved, so the user isn't blocked on a possibly-slow AI model
@@ -1483,6 +1517,9 @@ export function RoomPageShell({ room, accountEmail, initialOccupant, system2Enab
               onGenerate={runCheck}
               complete={progressComplete}
               saveFailure={saveFailure && !isGeneratingReport ? { message: saveFailure, retrying: retryingSave, onRetry: () => void retrySave() } : undefined}
+              extraOption={system2Enabled ? (
+                <System2ConsentOption checked={s2Consent} disabled={isGeneratingReport} onChange={(granted) => { setS2Consent(granted); storeSystem2Consent(granted); }} />
+              ) : undefined}
             />
           </div>
         )}
@@ -1540,6 +1577,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant, system2Enab
                 </div>
               )}
               <SimilarityMetricTile report={occupant.report} room={room} />
+              {system2Enabled && <System2MetricTile view={s2ViewFor(occupant.report.id)} reportId={occupant.report.id} room={room} />}
               <button className="room-metric" type="button" disabled>
                 <span className="room-metric-label">Receipt</span>
                 <Download aria-hidden="true" className="room-metric-icon" />
@@ -1622,6 +1660,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant, system2Enab
                 );
               })()}
               <SimilarityMetricTile report={occupant.report} room={room} />
+              {system2Enabled && <System2MetricTile view={s2ViewFor(occupant.report.id)} reportId={occupant.report.id} room={room} />}
               <button className="room-metric" type="button" onClick={() => handleDownloadReceipt(occupant.report!.id)} disabled={downloadingReceipt}>
                 <span className="room-metric-label">Receipt</span>
                 <Download aria-hidden="true" className="room-metric-icon" />
@@ -1633,6 +1672,8 @@ export function RoomPageShell({ room, accountEmail, initialOccupant, system2Enab
               const note = aiMetricDisplay(occupant.report).note;
               return note ? <p className="room-cycle-note">{note}</p> : null;
             })()}
+
+            {system2Enabled && <p className="room-cycle-note">{SYSTEM2_ROOM_NOTE}</p>}
 
             <p className="room-cycle-note">
               This room becomes available again: {formatDateTime(occupant.cycleEndsAt)}.
@@ -1657,6 +1698,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant, system2Enab
                 <span className="room-metric-sub">Unavailable</span>
               </div>
               <SimilarityMetricTile report={occupant.report} room={room} />
+              {system2Enabled && <System2MetricTile view={s2ViewFor(occupant.report.id)} reportId={occupant.report.id} room={room} />}
               <button className="room-metric" type="button" onClick={() => handleDownloadReceipt(occupant.report!.id)} disabled={downloadingReceipt}>
                 <span className="room-metric-label">Receipt</span>
                 <Download aria-hidden="true" className="room-metric-icon" />
@@ -1680,13 +1722,10 @@ export function RoomPageShell({ room, accountEmail, initialOccupant, system2Enab
               )}
             </div>
 
+            {system2Enabled && <p className="room-cycle-note">{SYSTEM2_ROOM_NOTE}</p>}
+
             <Link href={`/reports/${occupant.report.id}?room=${room}`} className="button secondary room-open-full">Open full report</Link>
           </div>
-        )}
-
-        {/* Owner-only English System 2 research preview: a separate result beside similarity and AI, never changing them. */}
-        {system2Enabled && isFullyRevealed(occupant) && occupant.report && (
-          <System2ResearchPanel key={occupant.report.id} reportId={occupant.report.id} uploadedFile={file} />
         )}
       </div>
     </div>

@@ -179,24 +179,42 @@ test("Trusted Sources: the Vercel OIDC token is sent in x-vercel-trusted-oidc-id
   if (saved !== undefined) process.env.VERCEL = saved;
 });
 
-test("wiring: both report pages resolve the flag server-side; shells default it off; the panel sends consent", async () => {
+test("wiring: both report pages resolve the flag server-side; shells default it off; System 2 runs inside the ONE analyze action", async () => {
   const roomPage = await readFile(new URL("../app/reports/rooms/[room]/page.tsx", import.meta.url), "utf8");
   assert.match(roomPage, /system2Enabled: isSystem2ResearchUser\(sessionUser\)/);
   assert.match(roomPage, /system2Enabled=\{result\.system2Enabled\}/);
   const detailPage = await readFile(new URL("../app/reports/[id]/page.tsx", import.meta.url), "utf8");
   assert.match(detailPage, /system2Enabled: isSystem2ResearchUser\(sessionUser\)/);
   assert.match(detailPage, /system2Enabled=\{result\.status === "found" \? result\.system2Enabled : false\}/);
+
   const roomShell = await readFile(new URL("../app/reports/rooms/[room]/room-page-shell.tsx", import.meta.url), "utf8");
   assert.match(roomShell, /system2Enabled = false \}: Props/);
-  assert.match(roomShell, /\{system2Enabled && isFullyRevealed\(occupant\) && occupant\.report && \(/);
+  // consent is part of the existing upload form, owner only
+  assert.match(roomShell, /extraOption=\{system2Enabled \? \(\s*<System2ConsentOption checked=\{s2Consent\}/);
+  // the click captures the submitted file + consent; the save hands them to ONE automatic request, never awaited
+  assert.match(roomShell, /s2PendingRef\.current = system2Enabled \? \{ file: submittedFile, consent: s2Consent \} : null;/);
+  const afterSave = roomShell.indexOf('setOccupant({ status: "processing", report: summary');
+  const start = roomShell.indexOf("if (s2Pending) startSystem2Estimate(summary.id, s2Pending);");
+  assert.ok(afterSave > 0 && start > afterSave && start - afterSave < 600, "System 2 starts right after the report is saved");
+  assert.match(roomShell, /if \(!pending\.consent\) \{\s*setS2View\(\{ reportId, view: \{ status: "not-requested" \} \}\);\s*return;/, "no consent: nothing is sent");
+  assert.match(roomShell, /void requestSystem2Estimate\(reportId, pending\.file\)/);
+  // the estimate is its own tile beside Similarity, in each state of the existing summary card
+  const tiles = roomShell.match(/<SimilarityMetricTile report=\{occupant\.report\} room=\{room\} \/>\s*\{system2Enabled && <System2MetricTile /g) ?? [];
+  assert.equal(tiles.length, 3);
+  assert.doesNotMatch(roomShell, /System2ResearchPanel|Run System 2 estimate/, "no separate card or manual button");
+
   const detailShell = await readFile(new URL("../app/reports/[id]/report-detail-shell.tsx", import.meta.url), "utf8");
   assert.match(detailShell, /system2Enabled = false,/);
-  assert.match(detailShell, /\{system2Enabled && mode !== "ai" && <System2ResearchPanel reportId=\{id\} \/>\}/);
-  const panel = await readFile(new URL("../components/report/system2-research-panel.tsx", import.meta.url), "utf8");
-  assert.match(panel, /"x-s2-consent": "granted"/);
-  assert.match(panel, /disabled=\{!file \|\| !consent \|\| running\}/);
-  assert.doesNotMatch(panel, /S2_INFERENCE|S2_RESEARCH|process\.env/, "no server configuration in client code");
-  assert.doesNotMatch(panel, /oidc|trusted-oidc/i, "no token handling in client code");
+  assert.match(detailShell, /\{system2Enabled && mode !== "ai" && <System2EstimateDetail reportId=\{id\} \/>\}/);
+  await assert.rejects(readFile(new URL("../components/report/system2-research-panel.tsx", import.meta.url), "utf8"), "the manual panel is removed");
+
+  const client = await readFile(new URL("../components/report/system2-estimate.tsx", import.meta.url), "utf8");
+  assert.match(client, /"x-s2-consent": "granted"/);
+  assert.match(client, /extensionOf\(file\.name\) !== "\.docx"[\s\S]*?The document was not sent/, "non-Word files are never sent");
+  assert.doesNotMatch(client, /<button/, "no System 2 button");
+  assert.doesNotMatch(client, /S2_INFERENCE|S2_RESEARCH|process\.env/, "no server configuration in client code");
+  assert.doesNotMatch(client, /oidc|trusted-oidc/i, "no token handling in client code");
+  assert.doesNotMatch(client, /similarityPercent|overall|\+ ?conservative_estimate_percent/i, "never combined with the similarity score");
   const lib = await readFile(new URL("../lib/system2-research.ts", import.meta.url), "utf8");
   assert.match(lib, /import \{ getVercelOidcToken \} from "@vercel\/oidc";/);
   assert.match(lib, /headers\["x-vercel-trusted-oidc-idp-token"\] = token/);
@@ -205,4 +223,29 @@ test("wiring: both report pages resolve the flag server-side; shells default it 
 test.after(() => {
   backend.close();
   for (const suffix of ["", "-wal", "-shm"]) if (fs.existsSync(`${dbFile}${suffix}`)) try { fs.unlinkSync(`${dbFile}${suffix}`); } catch { /* still open */ }
+});
+
+test("client: the automatic request sends a Word file once with consent; other files are never sent; never throws", async () => {
+  const client = await import("../components/report/system2-estimate.tsx");
+  const store = new Map();
+  const savedFetch = globalThis.fetch; const savedStorage = globalThis.localStorage;
+  globalThis.localStorage = { getItem: (k) => store.get(k) ?? null, setItem: (k, v) => store.set(k, String(v)), removeItem: (k) => store.delete(k) };
+  const sent = [];
+  try {
+    globalThis.fetch = async (url, init) => { sent.push({ url, headers: init.headers, bytes: init.body.byteLength }); return new Response(JSON.stringify({ state: "CONSERVATIVE_WITHIN_RANGE", estimate_shown: true, conservative_estimate_percent: 8, final_text: "Estimated." }), { status: 200 }); };
+    const pdf = await client.requestSystem2Estimate("r-pdf", new File([new Uint8Array(10)], "paper.pdf"));
+    assert.equal(pdf.estimate_shown, false); assert.equal(pdf.state, "UNSUPPORTED_FILE_TYPE"); assert.equal(sent.length, 0);
+    const big = await client.requestSystem2Estimate("r-big", new File([new Uint8Array(4_000_001)], "big.docx"));
+    assert.equal(big.state, "TOO_LARGE"); assert.equal(sent.length, 0);
+    const ok = await client.requestSystem2Estimate("r-ok", new File([DOCX_BYTES], "paper.docx"));
+    assert.equal(ok.conservative_estimate_percent, 8); assert.equal(sent.length, 1);
+    assert.equal(sent[0].url, "/api/reports/r-ok/system2"); assert.equal(sent[0].headers["x-s2-consent"], "granted"); assert.equal(sent[0].bytes, DOCX_BYTES.length);
+    assert.deepEqual(client.loadSystem2Estimate("r-ok"), ok, "kept on this device for the report page");
+    globalThis.fetch = async () => { throw new Error("offline"); };
+    const down = await client.requestSystem2Estimate("r-down", new File([DOCX_BYTES], "paper.docx"));
+    assert.equal(down.estimate_shown, false); assert.match(down.final_text, /^Estimate unavailable/);
+    assert.equal(client.loadSystem2Consent(), false); client.storeSystem2Consent(true); assert.equal(client.loadSystem2Consent(), true);
+  } finally {
+    globalThis.fetch = savedFetch; if (savedStorage === undefined) delete globalThis.localStorage; else globalThis.localStorage = savedStorage;
+  }
 });

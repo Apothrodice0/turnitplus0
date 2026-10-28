@@ -1,6 +1,6 @@
 "use client";
 
-import type { CSSProperties, RefObject } from "react";
+import type { CSSProperties, ReactNode, RefObject } from "react";
 import { Check, LockKeyhole, UploadCloud } from "lucide-react";
 import { ReferenceFilesPanel } from "@/components/reports/reference-files-panel";
 import { displayedCheckPercent, progressEncouragement } from "@/lib/upload-progress";
@@ -55,6 +55,8 @@ type Props = {
   complete?: boolean;
   /** UPLOAD PROGRESS: the analysed report could not be saved; offers to send the SAME report again (never a second report). */
   saveFailure?: { message: string; retrying: boolean; onRetry: () => void };
+  /** Optional extra option shown just above the Generate button (owner-only System 2 consent in report rooms); omitted = unchanged form. */
+  extraOption?: ReactNode;
 };
 
 function ReferenceSection({ references, busy }: { references?: ReferencePanelProps; busy: boolean }) {
@@ -73,7 +75,7 @@ function ReferenceSection({ references, busy }: { references?: ReferencePanelPro
   );
 }
 
-export function DocumentUploadPanel({ file, isGeneratingReport, progress, processingLabel, fileInputRef, onChooseFile, onGenerate, references, complete = false, saveFailure }: Props) {
+export function DocumentUploadPanel({ file, isGeneratingReport, progress, processingLabel, fileInputRef, onChooseFile, onGenerate, references, complete = false, saveFailure, extraOption }: Props) {
   if (saveFailure) {
     return (
       <>
@@ -158,6 +160,8 @@ export function DocumentUploadPanel({ file, isGeneratingReport, progress, proces
       </label>
 
       <ReferenceSection references={references} busy={false} />
+
+      {extraOption}
 
       <button className="button primary full" type="button" onClick={onGenerate}>
         <UploadCloud aria-hidden="true" />

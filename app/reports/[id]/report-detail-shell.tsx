@@ -31,7 +31,7 @@ import { AiReport } from "@/components/report/ai-report";
 import { CategorySummary, OverviewReport, SourcesReport, SubmissionReport, dedupeExternalAcademicEvidence } from "@/components/report/similarity-report-papers";
 import { ReportV2View, ReportV2Workspace, ReportV2PrintOverview, ReportV2PrintManuscriptPages, ReportV2PrintSourceAppendix } from "@/components/report/report-v2/report-v2-view";
 import { ReportNotFoundPanel } from "@/components/report/report-not-found-panel";
-import { System2ResearchPanel } from "@/components/report/system2-research-panel";
+import { System2EstimateDetail } from "@/components/report/system2-estimate";
 
 type LoadStatus = "loading" | "found" | "not-found";
 
@@ -555,8 +555,8 @@ export function ReportDetailShell({
         </div>
       )}
 
-      {/* Owner-only English System 2 research preview: a separate result, never changing the similarity or AI views below. */}
-      {system2Enabled && mode !== "ai" && <System2ResearchPanel reportId={id} />}
+      {/* Owner-only "Estimated Turnitin-like similarity": a separate statistical estimate, never changing the similarity or AI views below. */}
+      {system2Enabled && mode !== "ai" && <System2EstimateDetail reportId={id} />}
 
       {isOrdinaryV2Workspace ? (
         <ReportV2Workspace

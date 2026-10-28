@@ -9428,16 +9428,16 @@ button.admin-archive-feed-row:focus-visible { outline: 2px solid var(--blue); ou
   .admin-archive-card-metrics dt { font-size: 11px; }
 }
 
-/* Owner-only English System 2 research preview (components/report/system2-research-panel.tsx). */
-.s2-research-panel { margin-top: 16px; }
-.s2-research-label { margin: 0; font-size: 0.85rem; font-weight: 700; letter-spacing: 0.02em; color: var(--muted); }
-.s2-research-form, .s2-research-result { display: grid; gap: 12px; }
-.s2-research-file, .s2-research-consent { display: grid; gap: 6px; font-size: 0.92rem; color: var(--ink); }
-.s2-research-consent { grid-template-columns: auto 1fr; align-items: start; }
-.s2-research-estimate { display: grid; gap: 2px; margin: 0; }
-.s2-research-estimate span { font-size: 0.85rem; color: var(--muted); }
-.s2-research-estimate strong { font-size: 2.4rem; line-height: 1.1; color: var(--blue-dark); }
-.s2-research-unavailable strong { color: var(--muted); }
-.s2-research-caveats { margin: 0; padding-left: 20px; display: grid; gap: 4px; font-size: 0.92rem; color: var(--ink); }
-.s2-research-diagnostics pre { white-space: pre-wrap; word-break: break-word; font-size: 0.8rem; }
-.s2-research-panel .button { justify-self: start; }
+/* Owner-only "Estimated Turnitin-like similarity" (components/report/system2-estimate.tsx). */
+.s2-consent-option { display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: start; margin: 4px 0 12px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; font-size: 0.88rem; line-height: 1.45; color: var(--muted); cursor: pointer; }
+.s2-consent-option input { margin-top: 3px; }
+.s2-consent-option strong { display: block; color: var(--ink); font-size: 0.92rem; }
+.s2-estimate-detail { margin-top: 16px; padding: 16px 18px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface, transparent); }
+.s2-estimate-detail-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px 14px; }
+.s2-estimate-detail-head strong { font-size: 1.8rem; line-height: 1.1; color: var(--blue-dark); }
+.s2-estimate-detail-kind { font-size: 0.85rem; color: var(--muted); }
+.s2-estimate-detail ul { margin: 12px 0 0; padding-left: 20px; display: grid; gap: 4px; font-size: 0.92rem; color: var(--ink); }
+.s2-estimate-detail p { margin: 12px 0 0; font-size: 0.92rem; color: var(--muted); }
+/* With the owner's fourth tile the summary row becomes a 2 × 2 grid (one column on phones, as before). */
+.room-report-metrics:has(.s2-metric) { grid-template-columns: repeat(2, 1fr); }
+@media (max-width: 640px) { .room-report-metrics:has(.s2-metric) { grid-template-columns: 1fr; } }
