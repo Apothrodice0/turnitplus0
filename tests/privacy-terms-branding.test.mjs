@@ -61,12 +61,15 @@ test("privacy copy accurately describes real account authentication (Phase 2A)",
   assert.doesNotMatch(page, /Password values are not stored by TurnitPlus/);
 });
 
-test("terms cover responsible use and the subscription preview", async () => {
+test("terms cover responsible use and manually activated plans", async () => {
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
 
   assert.match(page, /Terms of use/);
   assert.match(page, /Automated results should not be the sole basis for academic discipline/);
-  assert.match(page, /The displayed \$20 monthly Unlimited plan is a coming-soon preview/);
+  // Owner decision 2026-10-24 (manual account activation): the $20 monthly preview is obsolete.
+  assert.match(page, /TurnitPlus plans are activated manually by the TurnitPlus team for a set number of days and rooms\./);
+  assert.match(page, /There is no online checkout, automatic billing or recurring payment on this site/);
+  assert.doesNotMatch(page, /\$20/);
   assert.match(page, /no guarantee is made that every source, AI-written passage or similarity will be detected/);
   assert.match(page, /A dedicated privacy contact and legal operator details will be published before public commercial billing begins/);
 });

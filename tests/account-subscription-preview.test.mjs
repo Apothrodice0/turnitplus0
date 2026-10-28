@@ -15,14 +15,17 @@ test("account information can be edited through the real account API", async () 
   assert.match(page, /Save changes/);
 });
 
-test("the unlimited plan is an honest non-payment preview", async () => {
+// Owner decision 2026-10-24 (manual account activation): the "TurnitPlus Unlimited — $20/month, coming soon" preview
+// is obsolete and replaced by a plain manual activation / renewal message — no price, no payment, no contact details.
+test("the account page explains manual activation and renewal, with no price or payment", async () => {
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
 
-  assert.match(page, /TurnitPlus Unlimited/);
-  assert.match(page, /Unlimited similarity checks/);
-  assert.match(page, /Unlimited AI writing reports/);
-  assert.match(page, /<strong>\$20<\/strong><span>\/ month<\/span>/);
-  assert.match(page, /COMING SOON/);
-  assert.match(page, /Plan preview only · no payment will be collected\./);
-  assert.match(page, /No payment was taken\./);
+  assert.doesNotMatch(page, /TurnitPlus Unlimited/);
+  assert.doesNotMatch(page, /\$\d/);
+  assert.doesNotMatch(page, /Notify me at launch/);
+  assert.doesNotMatch(page, /COMING SOON/);
+  assert.match(page, /Activate or renew your plan/);
+  assert.match(page, /TurnitPlus plans are activated manually by the TurnitPlus team\./);
+  assert.match(page, /There is no online payment on this site\./);
+  assert.doesNotMatch(page, /mailto:|tel:|wa\.me|whatsapp\.com|facebook\.com/i, "no invented contact details");
 });

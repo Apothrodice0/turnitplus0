@@ -6,7 +6,7 @@ import {
   Check,
   ChevronRight,
   CircleHelp,
-  CreditCard,
+  KeyRound,
   Download,
   FileCheck2,
   FileText,
@@ -55,6 +55,7 @@ import { DocumentUploadPanel } from "@/components/reports/document-upload-panel"
 import { CHECK_STAGE_CEILING, CHECK_STAGE_LABELS, checkStagePercent, useProgressCreep } from "@/lib/upload-progress";
 import { IdentityFields, type IdentityFieldsHandle, type CollectedIdentity } from "@/components/auth/identity-fields";
 import { EmailVerificationStatus } from "@/components/account/email-verification-status";
+import { AccountPlanCard } from "@/components/account/account-plan-card";
 import { EmailVerificationModal, type EmailVerificationModalStage } from "@/components/account/email-verification-modal";
 import {
   analyzeAcademicEvidence,
@@ -1699,13 +1700,15 @@ export default function Home() {
                     </form>
                   )}
                   <div className="account-profile-status"><Check aria-hidden="true" /> Your account session is active on this device.</div>
-                  {uploadLimitStatus && uploadLimitStatus.authenticated && (
+                  {uploadLimitStatus && uploadLimitStatus.authenticated && !("plan" in uploadLimitStatus) && (
                     <div className="account-profile-status">
                       {uploadLimitStatus.unlimited
                         ? "Unlimited uploads (developer account)."
                         : `${uploadLimitStatus.uploadsToday}/${uploadLimitStatus.limit} uploads today.`}
                     </div>
                   )}
+                  {/* Manual account activation: renders nothing unless the feature is on for this account. */}
+                  <AccountPlanCard key={account.email} />
                   <div className="account-profile-actions">
                     {/* Room/slot architecture: a signed-in account's new check
                         always starts from inside a room — see
@@ -1779,29 +1782,22 @@ export default function Home() {
                   </div>
                 </div>
 
-                <section className="subscription-preview-card surface-card" aria-labelledby="unlimited-plan-title">
+                {/* Manual account activation (owner decision 2026-10-24): plans are activated by the TurnitPlus team, not
+                    bought online — this replaces the former monthly-membership preview card. No price, no payment, no
+                    contact details here. */}
+                <section className="account-activation-info surface-card" aria-labelledby="account-activation-info-title">
                   <div className="subscription-copy">
                     <div className="subscription-heading-row">
-                      <span className="subscription-icon"><CreditCard aria-hidden="true" /></span>
+                      <span className="subscription-icon"><KeyRound aria-hidden="true" /></span>
                       <div>
-                        <p className="section-label">MEMBERSHIP</p>
-                        <span className="subscription-coming-soon">COMING SOON</span>
+                        <p className="section-label">PLANS</p>
                       </div>
                     </div>
-                    <h2 id="unlimited-plan-title">TurnitPlus Unlimited</h2>
-                    <p>Unlock unlimited document checks for one simple monthly price.</p>
-                    <ul className="subscription-features">
-                      <li><Check aria-hidden="true" /> Unlimited similarity checks</li>
-                      <li><Check aria-hidden="true" /> Unlimited AI writing reports</li>
-                      <li><Check aria-hidden="true" /> Full report previews and downloads</li>
-                    </ul>
-                  </div>
-                  <div className="subscription-price-panel">
-                    <span className="subscription-plan-label">MONTHLY PLAN</span>
-                    <div className="subscription-price"><strong>$20</strong><span>/ month</span></div>
-                    <p>Cancel anytime once billing becomes available.</p>
-                    <button className="button primary full" type="button" onClick={() => notify("TurnitPlus Unlimited is coming soon. No payment was taken.")}>Notify me at launch</button>
-                    <small>Plan preview only · no payment will be collected.</small>
+                    <h2 id="account-activation-info-title">Activate or renew your plan</h2>
+                    <p>
+                      TurnitPlus plans are activated manually by the TurnitPlus team. To activate a plan or renew one, contact TurnitPlus
+                      and give the email address you use for this account. There is no online payment on this site.
+                    </p>
                   </div>
                 </section>
               </div>
@@ -2186,7 +2182,7 @@ export default function Home() {
                 </section>
                 <section>
                   <span className="legal-section-number">06</span>
-                  <div><h3>Subscriptions</h3><p>The displayed $20 monthly Unlimited plan is a coming-soon preview. No subscription, recurring payment or unlimited entitlement begins until a real checkout explicitly presents the price and you confirm payment.</p></div>
+                  <div><h3>Plans</h3><p>TurnitPlus plans are activated manually by the TurnitPlus team for a set number of days and rooms. There is no online checkout, automatic billing or recurring payment on this site, and nothing is charged through it.</p></div>
                 </section>
                 <section>
                   <span className="legal-section-number">07</span>

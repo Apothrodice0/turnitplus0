@@ -4,6 +4,8 @@ import { prepareReportForTransport } from "./ai-passage-table";
 import { reportScoringNormalizationVersion } from "./similarity-core";
 import { AI_SAVE_OUTCOME_SIZE_UNAVAILABLE, type AiSaveOutcome, type AiUnavailableReason } from "./ai-unavailable-state";
 import type { RoomIndexEntry } from "./report-rooms";
+import { isPlanBlockCode } from "./account-plan";
+import { canonicalizeText } from "./canonical-text";
 
 export type ReportSummary = {
   id: string;
@@ -125,6 +127,8 @@ export type SaveReportRemoteResult =
       quotaExceeded: boolean;
       roomOccupied: boolean;
       roomReuseNotReady: boolean;
+      /** Manual account activation: 403 with a lib/account-plan.ts PlanBlockCode — no active plan / room outside it. */
+      planBlocked?: boolean;
       error?: string;
       resetsAt?: string;
       cycleEndsAt?: string;
@@ -207,6 +211,11 @@ export async function saveReportRemote<T>(
 ): Promise<SaveReportRemoteResult> {
   try {
     const deviceKey = getDeviceKey();
+    // Manual account activation: the room page hands over this check's authorization (requestCheckAuthorization) on
+    // the report object it saves, like userSuppliedReferences. It is lifted out here and sent beside the payload,
+    // never inside it — so it is never persisted — and without one the request is exactly what it always was.
+    const checkAuthorization = (report as { checkAuthorization?: unknown } | null)?.checkAuthorization;
+    const transportReport: T = typeof checkAuthorization === "string" ? withoutCheckAuthorization(report) : report;
     // Device Passport (Phase 3): a cryptographic upload-provenance attestation.
     // maybeAttestReportUpload attaches one only while this report has NOT yet
     // been confirmed saved this browser session — so a first save that fails
@@ -239,13 +248,14 @@ export async function saveReportRemote<T>(
       body: JSON.stringify({
         deviceKey,
         ...summary,
-        payload: prepareReportForTransport(report),
+        payload: prepareReportForTransport(transportReport),
         scoringNormalization: reportScoringNormalizationVersion(report as { scoringNormalizationVersion?: unknown } | null),
         academicSearchDiagnosticsId: academicSearchDiagnosticsId ?? null,
         ...(room !== undefined ? { room } : {}),
         ...(devicePassport ? { devicePassport } : {}),
         ...(extractionCompleteness && typeof extractionCompleteness === "object" ? { extractionCompleteness } : {}),
         ...(Array.isArray(userSuppliedReferences) && userSuppliedReferences.length > 0 ? { userSuppliedReferences } : {}),
+        ...(typeof checkAuthorization === "string" ? { checkAuthorization } : {}),
       }),
     });
     if (!response.ok) {
@@ -266,6 +276,9 @@ export async function saveReportRemote<T>(
       // genuine unrelated 503 is never misclassified as this rare,
       // specifically-recoverable condition.
       const roomReuseNotReady = response.status === 503 && body?.code === "ROOM_REUSE_NOT_READY";
+      if (response.status === 403 && isPlanBlockCode(body?.code)) {
+        return { ok: false, status: response.status, quotaExceeded, roomOccupied, roomReuseNotReady, planBlocked: true, error: body?.error };
+      }
       return { ok: false, status: response.status, quotaExceeded, roomOccupied, roomReuseNotReady, error: body?.error, resetsAt: body?.resetsAt, cycleEndsAt: body?.cycleEndsAt };
     }
     // The report is now durably saved server-side: any later resave of this id
@@ -332,10 +345,50 @@ export async function saveAiRetryResultRemote(input: SaveAiRetryResultInput): Pr
   }
 }
 
+/**
+ * Manual account activation: asks the server for a CHECK AUTHORIZATION at the start of a check (see
+ * lib/account-entitlements.ts), bound to `room` and the SHA-256 of the manuscript's canonical text — computed here, so
+ * the text itself never leaves the browser for this request.
+ *  - { kind: "none" }                activation not enforced, or the request failed: proceed exactly as before (the
+ *                                    save itself still enforces every rule)
+ *  - { kind: "issued", id }          send `id` with the first save
+ *  - { kind: "refused", message }    no active plan / room outside the plan / room cooling down: do not start
+ */
+export type CheckAuthorizationResult = { kind: "none" } | { kind: "issued"; id: string } | { kind: "refused"; message: string };
+
+function withoutCheckAuthorization<T>(report: T): T {
+  const { checkAuthorization: _omitted, ...rest } = report as T & { checkAuthorization?: unknown };
+  void _omitted;
+  return rest as T;
+}
+
+export async function requestCheckAuthorization(room: number, text: string): Promise<CheckAuthorizationResult> {
+  try {
+    const bytes = new TextEncoder().encode(canonicalizeText(text));
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+    const textSha256 = Array.from(digest, (b) => b.toString(16).padStart(2, "0")).join("");
+    const response = await fetch("/api/reports/check-authorization", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ room, textSha256 }),
+    });
+    const body = (await response.json().catch(() => null)) as { required?: boolean; authorization?: string; error?: string; code?: string } | null;
+    if (response.ok && body?.required === true && typeof body.authorization === "string") return { kind: "issued", id: body.authorization };
+    if ((response.status === 403 && isPlanBlockCode(body?.code)) || (response.status === 409 && body?.code === "ROOM_COOLING_DOWN")) {
+      return { kind: "refused", message: body?.error ?? "This room cannot start a new check right now." };
+    }
+    return { kind: "none" };
+  } catch {
+    return { kind: "none" };
+  }
+}
+
 export type UploadLimitStatus =
   | { authenticated: false }
   | { authenticated: true; unlimited: true }
-  | { authenticated: true; unlimited: false; uploadsToday: number; limit: number };
+  | { authenticated: true; unlimited: false; uploadsToday: number; limit: number }
+  // Manual account activation (enforced): the account's plan, not the daily cap, governs its checks — see GET /api/account/plan.
+  | { authenticated: true; plan: true };
 
 /** Display-only — see app/api/upload-limit/route.ts's own header comment for why this is a separate endpoint from /api/auth/me. */
 export async function fetchUploadLimitStatus(): Promise<UploadLimitStatus> {
@@ -391,15 +444,17 @@ export async function listRemoteReportSummaries(): Promise<ReportSummary[]> {
  * signed-in UI intact.
  */
 export type RoomIndexFetchResult =
-  | { ok: true; rooms: RoomIndexEntry[] }
+  // `notice`: manual account activation only — why the account cannot start a new check right now.
+  | { ok: true; rooms: RoomIndexEntry[]; notice?: string }
   | { ok: false; status: number | null };
 
 export async function fetchReportRoomIndex(): Promise<RoomIndexFetchResult> {
   try {
     const response = await fetch("/api/reports/rooms");
     if (!response.ok) return { ok: false, status: response.status };
-    const data = (await response.json()) as { rooms?: RoomIndexEntry[] };
-    return { ok: true, rooms: Array.isArray(data.rooms) ? data.rooms : [] };
+    const data = (await response.json()) as { rooms?: RoomIndexEntry[]; notice?: unknown };
+    const rooms = Array.isArray(data.rooms) ? data.rooms : [];
+    return typeof data.notice === "string" ? { ok: true, rooms, notice: data.notice } : { ok: true, rooms };
   } catch (error) {
     console.debug("Report room index fetch failed.", {
       error: error instanceof Error ? error.message : String(error),

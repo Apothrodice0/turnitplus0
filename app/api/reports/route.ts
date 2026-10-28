@@ -18,7 +18,18 @@ import { captureDocumentIdentityAndFamily } from '../../../lib/document-family';
 import { linkAcademicSearchRunDiagnosticsToReport, resolveUnverifiedPublicationNotice, resolveVerifiedAcademicEvidence } from '../../../lib/academic-search-diagnostics-repo';
 import { canonicalSha256 } from '../../../lib/document-identity';
 import { checkUploadLimit } from '../../../lib/upload-limit';
-import { deriveRoomStatus, derivedAiReadySql, getRoomCountForRole, isWithinActiveCycle, roomCycleEndsAt } from '../../../lib/report-rooms';
+import { deriveRoomStatus, derivedAiReadySql, isWithinActiveCycle, roomCycleEndsAt } from '../../../lib/report-rooms';
+import {
+  checkPlanClaimInTransaction,
+  consumeCheckAuthorization,
+  newCheckRefusal,
+  parseCheckAuthorizationId,
+  policyWithCheckAuthorization,
+  recordRoomClaim,
+  resolveRoomPolicy,
+  type CheckAuthorizationRef,
+} from '../../../lib/account-entitlements';
+import type { PlanBlockCode } from '../../../lib/account-plan';
 import { TERMINAL_AI_RESERVE_CHARS, withoutClientAiUnavailableReason } from '../../../lib/ai-unavailable-state';
 import { findRoomOccupant, INTERPRETATION_TO_VERIFY_SQL, withholdUnexplainedSimilarity } from '../../../lib/reports-repo';
 import { runAfterResponse } from '../../../lib/run-after-response';
@@ -193,7 +204,12 @@ function isSqliteBusyError(err: unknown): boolean {
  * one synchronous recovery attempt. See insertReportWithRoomCheck's own
  * comment for the full sequencing.
  */
-type RoomClaimResult = { kind: 'inserted' } | { kind: 'conflict'; mostRecent: string } | { kind: 'notReady' };
+type RoomClaimResult =
+  | { kind: 'inserted' }
+  | { kind: 'conflict'; mostRecent: string }
+  | { kind: 'notReady' }
+  // Manual account activation: the in-transaction plan re-check refused this new check (nothing written).
+  | { kind: 'planBlocked'; code: PlanBlockCode; message: string };
 
 /**
  * The room-occupancy check and the insert as one atomic write transaction,
@@ -258,6 +274,13 @@ async function insertReportWithRoomCheck(params: {
    * written best-effort AFTER commit.
    */
   actorObservation: ActorObservation | null;
+  /**
+   * Manual account activation (lib/account-entitlements.ts): set only for a new check by an account whose plan is
+   * enforced. Re-checks the plan and the room's server-clock cooldown inside this transaction, before the occupant is
+   * read, and records the room's claim with the insert — so a suspension/expiry or a concurrent upload that lands after
+   * the request's first policy read is still seen, and a deleted or back-dated report can never free the room early.
+   */
+  planClaim: { userId: string; room: number; nowMs: number; authorization: CheckAuthorizationRef | null } | null;
 }): Promise<RoomClaimResult> {
   for (let attempt = 1; attempt <= MAX_ROOM_INSERT_BUSY_RETRIES; attempt++) {
     const txClient = await getReportsDbClient();
@@ -268,7 +291,18 @@ async function insertReportWithRoomCheck(params: {
       const tx = await txClient.transaction('write');
       try {
         let conflict: { mostRecent: string } | null = null;
-        if (params.roomNumberForInsert !== null && params.roomOwnerId !== null) {
+        let consumeAuthorization = false;
+        if (params.planClaim) {
+          const decision = await checkPlanClaimInTransaction(tx, params.planClaim.userId, params.planClaim.room, params.planClaim.nowMs, params.planClaim.authorization);
+          if (decision.kind === 'ok') consumeAuthorization = decision.consumeAuthorization;
+          if (decision.kind === 'blocked') {
+            await tx.rollback().catch(() => {});
+            return { kind: 'planBlocked', code: decision.code, message: decision.message };
+          }
+          // Still cooling down by the server clock: the same 409 as an occupied room, and the occupant is left alone.
+          if (decision.kind === 'cooldown') conflict = { mostRecent: new Date(decision.claimedAt).toISOString() };
+        }
+        if (!conflict && params.roomNumberForInsert !== null && params.roomOwnerId !== null) {
           const occupant = await tx.execute({
             sql: `SELECT id, device_key, document_identity_id, report_created_at FROM saved_reports WHERE user_id = ? AND room_number = ? ORDER BY report_created_at DESC LIMIT 1`,
             args: [params.roomOwnerId, params.roomNumberForInsert],
@@ -334,6 +368,10 @@ async function insertReportWithRoomCheck(params: {
               params.payloadJson, params.userId, params.roomNumberForInsert,
             ],
           });
+          if (params.planClaim) await recordRoomClaim(tx, params.planClaim.userId, params.planClaim.room, params.planClaim.nowMs);
+          if (params.planClaim?.authorization && consumeAuthorization) {
+            await consumeCheckAuthorization(tx, params.planClaim.authorization, params.id, params.planClaim.nowMs);
+          }
           if (params.verifiedDevicePassportId) {
             // Immutable upload-time device provenance — set once, in the same
             // transaction as the insert, never overwritten (the IS NULL
@@ -729,7 +767,35 @@ export async function POST(request: Request) {
       // saved_reports.saved_at is what "genuinely new" means). Anonymous
       // requests (sessionUser === null) are entirely unaffected — they have
       // no account to meter and remain governed only by checkRate above.
-      if (sessionUser && sessionUser.role !== 'admin' && isFirstSaveOfThisReport) {
+      //
+      // Manual account activation (lib/account-entitlements.ts): with ACCOUNT_ACTIVATION_ENFORCED off, roomPolicy is
+      // exactly the pre-feature answer (10/40 rooms, the cap for non-admins). With it on, a customer's NEW check needs
+      // an active plan and a room inside it, and the plan replaces the daily cap. A resave is never a new check, so the
+      // AI result, a background retry or a resave of an existing report always goes through — checks already started
+      // finish even if the plan has since expired or been suspended. A NEW check whose plan expired while the browser
+      // was analysing it may still save once, with the check authorization the room page obtained when it started
+      // (lib/account-entitlements.ts CHECK AUTHORIZATION): bound to this account, room and manuscript text.
+      const checkAuthorizationId = isFirstSaveOfThisReport ? parseCheckAuthorizationId((body as Record<string, unknown>).checkAuthorization) : null;
+      const checkAuthorizationText = (payload as { text?: unknown } | null)?.text;
+      const checkAuthorizationRef: CheckAuthorizationRef | null =
+        checkAuthorizationId && typeof checkAuthorizationText === 'string'
+          ? { id: checkAuthorizationId, textSha256: canonicalSha256(checkAuthorizationText) }
+          : null;
+      const basePolicy = isFirstSaveOfThisReport ? await resolveRoomPolicy(client, sessionUser) : null;
+      const roomPolicy = basePolicy && checkAuthorizationRef && Number.isInteger(room)
+        ? await policyWithCheckAuthorization(client, sessionUser.id, basePolicy, room as number, checkAuthorizationRef)
+        : basePolicy;
+      if (roomPolicy) {
+        const refusal = newCheckRefusal(roomPolicy, Number.isInteger(room) ? (room as number) : 0);
+        if (refusal) {
+          logReportSaveRejectedTelemetry({ reason: 'PLAN_REQUIRED', status: 403, authMode: 'authenticated' });
+          return new NextResponse(JSON.stringify({ error: refusal.message, code: refusal.code }), {
+            status: 403,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+      }
+      if (roomPolicy && roomPolicy.dailyCapApplies) {
         const limitCheck = await checkUploadLimit(client, sessionUser.id);
         if (!limitCheck.allowed) {
           logReportSaveRejectedTelemetry({ reason: 'DAILY_UPLOAD_QUOTA', status: 429, authMode: 'authenticated' });
@@ -757,8 +823,8 @@ export async function POST(request: Request) {
       // an anonymous save (rooms are an authenticated-account concept only).
       let roomNumberForInsert: number | null = null;
       let roomOwnerId: string | null = null;
-      if (sessionUser && isFirstSaveOfThisReport) {
-        const roomCount = getRoomCountForRole(sessionUser.role);
+      if (roomPolicy) {
+        const roomCount = roomPolicy.uploadRoomCount;
         if (!Number.isInteger(room) || (room as number) < 0 || (room as number) >= roomCount) {
           logReportSaveRejectedTelemetry({ reason: 'MALFORMED_REQUEST', status: 400, authMode: 'authenticated' });
           return new NextResponse(JSON.stringify({ error: `room must be an integer 0-${roomCount - 1}` }), { status: 400 });
@@ -1430,7 +1496,18 @@ export async function POST(request: Request) {
         payloadJson: payloadJsonToPersist, userId, roomNumberForInsert, roomOwnerId,
         verifiedDevicePassportId,
         actorObservation: actorObservationForLedger,
+        planClaim: roomPolicy?.usesRoomClaims && roomNumberForInsert !== null
+          ? { userId: sessionUser.id, room: roomNumberForInsert, nowMs: Date.now(), authorization: checkAuthorizationRef }
+          : null,
       });
+
+      if (roomClaim.kind === 'planBlocked') {
+        logReportSaveRejectedTelemetry({ reason: 'PLAN_REQUIRED', status: 403, authMode: 'authenticated' });
+        return new NextResponse(JSON.stringify({ error: roomClaim.message, code: roomClaim.code }), {
+          status: 403,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
 
       // One-current-report-per-room (Phase 2): a fresh, in-transaction
       // re-check found the expired occupant's admission job still not
@@ -1740,7 +1817,8 @@ export async function GET(request: Request) {
         const url = new URL(request.url);
         const roomParam = url.searchParams.get('room');
         if (roomParam !== null) {
-          const roomCount = getRoomCountForRole(sessionUser.role);
+          // Every room the account's room list shows (lib/account-entitlements.ts) — with activation off, its role's count.
+          const roomCount = (await resolveRoomPolicy(client, sessionUser)).visibleRoomCount;
           const room = Number(roomParam);
           if (!Number.isInteger(room) || room < 0 || room >= roomCount) {
             return new NextResponse(JSON.stringify({ error: `room must be an integer 0-${roomCount - 1}` }), { status: 400 });

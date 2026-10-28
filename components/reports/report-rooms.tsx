@@ -133,6 +133,22 @@ export function statusLabel(status: RoomStatus): string {
 }
 
 /**
+ * What manual account activation says about an EMPTY room instead of statusLabel's "Ready for a new check": a
+ * server-clock cooldown, a room outside the plan, or no plan at all. null otherwise — always null while that feature
+ * is off (the index then carries none of these signals), so the row shows exactly statusLabel.
+ */
+export function roomPlanLabel(entry: RoomIndexEntry, newChecksBlocked: boolean): string | null {
+  if (entry.status !== "empty") return null;
+  if (entry.availableAt) {
+    const at = new Date(entry.availableAt).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+    return `Cooling down · available again ${at}`;
+  }
+  if (entry.outsidePlan) return "Not part of your plan";
+  if (newChecksBlocked) return "New checks need an active plan";
+  return null;
+}
+
+/**
  * Stale-display fix: the room index is cached client-side for 24h
  * (lib/report-rooms-cache.ts), but that cache is NOT authoritative — a
  * report can be deleted with no local invalidate event to clear it:
@@ -187,6 +203,8 @@ export function ReportRoomsBrowser({ accountEmail, onTotalCountChange }: Props) 
   // parent (app/page.tsx) and this component never sees, let alone clears.
   const [indexError, setIndexError] = useState(false);
   const [retryToken, setRetryToken] = useState(0);
+  // Manual account activation: the server's reason this account cannot start a new check (never set while it is off).
+  const [planNotice, setPlanNotice] = useState<string | null>(null);
 
   // Recovery: fires on a genuine settle, whether that happens before or
   // after the 30s mark — "stuck" is not a dead end, only a label change,
@@ -269,6 +287,7 @@ export function ReportRoomsBrowser({ accountEmail, onTotalCountChange }: Props) 
       if (resolution.rooms) {
         setRoomIndex(resolution.rooms);
       }
+      setPlanNotice(result.ok ? result.notice ?? null : null);
       setIndexError(resolution.error);
       setIndexLoading(false);
     }
@@ -304,6 +323,12 @@ export function ReportRoomsBrowser({ accountEmail, onTotalCountChange }: Props) 
 
   return (
     <div className="report-rooms-list">
+      {planNotice && (
+        <section className="ai-analysis-message report-rooms-plan-notice" role="status">
+          <strong>—</strong>
+          <div><p>{planNotice}</p></div>
+        </section>
+      )}
       {/* prefetch=false: every room row renders at once (up to 40 for an
           admin account), and each is a force-dynamic page that does a real
           rate-limited DB read (see app/reports/rooms/[room]/page.tsx). Next's
@@ -319,6 +344,7 @@ export function ReportRoomsBrowser({ accountEmail, onTotalCountChange }: Props) 
         // and marked inert for assistive tech too rather than silently
         // ignoring the activation with no signal at all.
         const isBlocked = navState.phase !== "idle" && !isThisTarget;
+        const planLabel = roomPlanLabel(entry, planNotice !== null);
 
         if (isThisStuck) {
           return (
@@ -345,7 +371,7 @@ export function ReportRoomsBrowser({ accountEmail, onTotalCountChange }: Props) 
             <span className="report-room-row-label">
               <strong>Room {entry.room + 1}</strong>
               <span className="report-room-row-status" aria-live="polite">
-                {isThisTarget ? "Opening…" : statusLabel(entry.status)}
+                {!isThisTarget && planLabel !== null ? planLabel : <>{isThisTarget ? "Opening…" : statusLabel(entry.status)}</>}
                 {!isThisTarget && entry.mostRecentAt && ` · Last checked ${new Date(entry.mostRecentAt).toLocaleDateString("en-GB")}`}
               </span>
             </span>

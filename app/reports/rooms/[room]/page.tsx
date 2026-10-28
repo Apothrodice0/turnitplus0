@@ -3,13 +3,15 @@ import { cookies, headers } from "next/headers";
 import { notFound } from "next/navigation";
 import type { Metadata } from "next";
 import Link from "next/link";
-import { LogIn } from "lucide-react";
+import { ChevronLeft, FileText, LogIn } from "lucide-react";
 import { SESSION_COOKIE_NAME, getSessionUserByToken } from "@/lib/auth-session";
 import { checkReadRate } from "@/lib/rate-limit";
 import { clientIpFromHeaders } from "@/lib/client-ip";
 import { getReportsDbClient } from "@/lib/reports-db";
 import { findRoomOccupant, type RoomOccupantResult } from "@/lib/reports-repo";
-import { getRoomCountForRole } from "@/lib/report-rooms";
+import { ROOM_CYCLE_MS } from "@/lib/report-rooms";
+import { newCheckRefusal, readActiveRoomClaims, resolveRoomPolicy } from "@/lib/account-entitlements";
+import { formatPlanDateTime } from "@/lib/account-plan";
 import { RoomPageShell } from "./room-page-shell";
 
 export const dynamic = "force-dynamic";
@@ -27,7 +29,7 @@ export const dynamic = "force-dynamic";
  */
 
 type RoomPageResult =
-  | { status: "found"; room: number; accountEmail: string; occupant: RoomOccupantResult }
+  | { status: "found"; room: number; accountEmail: string; occupant: RoomOccupantResult; newCheckBlocked: string | null }
   | { status: "invalid-room" }
   | { status: "no-session" }
   | { status: "rate-limited"; retryAfterSeconds: number };
@@ -54,12 +56,29 @@ const loadRoom = cache(async (roomParam: string): Promise<RoomPageResult> => {
     // The selected room must never be guessed by the client — this
     // validates the URL param itself against the account's own role-based
     // room count (never exposing role, only accepting/rejecting a number).
-    const roomCount = getRoomCountForRole(sessionUser.role);
+    // Manual account activation (lib/account-entitlements.ts): the rooms the account's room list shows — with the
+    // feature off, exactly the role-based count.
+    const policy = await resolveRoomPolicy(client, sessionUser);
+    const roomCount = policy.visibleRoomCount;
     const room = Number(roomParam);
     if (!Number.isInteger(room) || room < 0 || room >= roomCount) return { status: "invalid-room" };
 
     const occupant = await findRoomOccupant(client, sessionUser.id, room);
-    return { status: "found", room, accountEmail: sessionUser.email, occupant };
+    // Said before the customer spends minutes on an analysis the save would refuse. The save itself still decides
+    // (app/api/reports/route.ts); this is only the early, honest notice. Always null with the feature off.
+    let newCheckBlocked: string | null = null;
+    if (policy.enforced && occupant.status === "empty") {
+      const refusal = newCheckRefusal(policy, room);
+      if (refusal) {
+        newCheckBlocked = refusal.message;
+      } else if (policy.usesRoomClaims) {
+        const claimedAt = (await readActiveRoomClaims(client, sessionUser.id, Date.now())).get(room);
+        if (claimedAt !== undefined) {
+          newCheckBlocked = `Room ${room + 1} is in its 24-hour cooldown. It accepts a new check again at ${formatPlanDateTime(claimedAt + ROOM_CYCLE_MS)}.`;
+        }
+      }
+    }
+    return { status: "found", room, accountEmail: sessionUser.email, occupant, newCheckBlocked };
   } finally {
     client.close();
   }
@@ -128,5 +147,37 @@ export default async function RoomPage({ params }: { params: Promise<{ room: str
   // else in this tree — using it as a key changes nothing about that
   // persisted semantics, it only tells React when a genuinely different
   // room warrants a fresh instance.
+  // Manual account activation: an EMPTY room that cannot take a new check right now (no active plan, room outside the
+  // plan, server-clock cooldown) says so instead of offering an upload the save would refuse. Never with the feature
+  // off (newCheckBlocked is then always null); the save itself still enforces (app/api/reports/route.ts).
+  if (result.newCheckBlocked) {
+    return (
+      <div className="room-page">
+        <div className="room-page-container">
+          <Link href="/#reports" className="back-button room-back-button">
+            <ChevronLeft aria-hidden="true" />
+            Back to My Reports
+          </Link>
+          <div className="room-page-heading">
+            <FileText aria-hidden="true" />
+            <div>
+              <h1>Room {result.room + 1}</h1>
+              <p className="room-page-status">No new check available</p>
+            </div>
+          </div>
+          <div className="room-empty-slot">
+            <section className="ai-analysis-message room-plan-notice" role="status">
+              <strong>—</strong>
+              <div>
+                <p>{result.newCheckBlocked}</p>
+                <Link href="/#account" className="button secondary">View my plan</Link>
+              </div>
+            </section>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return <RoomPageShell key={result.room} room={result.room} accountEmail={result.accountEmail} initialOccupant={result.occupant} />;
 }

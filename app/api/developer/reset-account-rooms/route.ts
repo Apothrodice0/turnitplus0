@@ -5,6 +5,7 @@ import { checkRate } from '../../../../lib/rate-limit';
 import { clientIpFrom } from '../../../../lib/client-ip';
 import { getAdminSessionUser } from '../../../../lib/auth-session';
 import { deleteAllReportDataForAccount } from '../../../../lib/account-deletion';
+import { entitlementTablesExist } from '../../../../lib/account-entitlements';
 
 /**
  * Debug workspace — "Clear account rooms". Lets an authenticated admin enter
@@ -198,6 +199,11 @@ export async function POST(request: Request) {
       const result = await deleteAllReportDataForAccount(client, accountId, {
         preserveActivelyPromotedRepresentations: true,
       });
+      // Manual account activation (drizzle/0056): an admin clearing these rooms means them to be free now, so their
+      // server-clock cooldowns go too. Only this admin tool does this — a customer deleting a report never does.
+      if (await entitlementTablesExist(client)) {
+        await client.execute({ sql: 'DELETE FROM account_room_claims WHERE user_id = ?', args: [accountId] });
+      }
 
       return jsonResponse(
         {

@@ -1,6 +1,6 @@
 import { notFound } from "next/navigation";
 import type { Metadata } from "next";
-import { Archive, Database, Radar, Wrench } from "lucide-react";
+import { Archive, Database, Radar, UserCheck, Wrench } from "lucide-react";
 import { loadAdminGate } from "@/lib/admin-gate";
 import { getReportsDbClient } from "@/lib/reports-db";
 import { getArchiveExplorerCardMetrics, type ArchiveExplorerCardMetrics } from "@/lib/corpus-admission-archive-explorer";
@@ -41,6 +41,13 @@ export default async function AdminHomePage() {
     <main className="developer-page admin-launcher-page">
       <p className="admin-launcher-intro">Internal diagnostics and controls for the detection pipeline — not visible to ordinary accounts.</p>
       <div className="admin-launcher-grid">
+        <AdminWorkspaceCard
+          href="/admin/account-activation"
+          icon={UserCheck}
+          title="Account Activation"
+          description="Activate, renew, adjust or pause a customer's plan — duration and number of rooms."
+          ctaLabel="Activate accounts"
+        />
         <AdminWorkspaceCard
           href="/admin/corpus"
           icon={Database}

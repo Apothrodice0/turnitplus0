@@ -7778,6 +7778,126 @@ main.report-main {
   .admin-link-card { flex-wrap: wrap; }
 }
 
+/* Manual account activation (2026-10-24) — Admin → Account Activation console (components/admin/account-activation),
+   the customer's "Your plan" card (components/account/account-plan-card.tsx) and the room plan notices. Built on the
+   existing admin tokens/classes (.admin-card, .admin-status-badge, .admin-metric-*, .admin-dialog-*). */
+.aa-console { display: flex; flex-direction: column; gap: 0; min-width: 0; }
+.aa-banner {
+  display: flex; gap: 10px; align-items: flex-start; margin: 0 0 18px; padding: 12px 14px;
+  border: 1px solid #f4d9b6; background: #fff8ee; border-radius: 10px; font-size: 13px; color: #6b4a1f; line-height: 1.5;
+}
+.aa-banner svg { flex-shrink: 0; width: 17px; height: 17px; margin-top: 1px; }
+.aa-banner code { font-size: 12px; background: rgba(0, 0, 0, .05); padding: 1px 5px; border-radius: 4px; }
+.aa-form { display: flex; flex-direction: column; gap: 18px; max-width: 620px; }
+.aa-field { display: flex; flex-direction: column; gap: 7px; border: 0; padding: 0; margin: 0; min-width: 0; }
+.aa-field > span, .aa-field > legend { font-size: 13px; font-weight: 600; color: var(--ink); padding: 0; margin-bottom: 0; }
+.aa-field small { font-size: 12px; color: var(--muted); line-height: 1.45; }
+.aa-field input {
+  padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; font-size: 14px; background: var(--surface);
+  min-width: 0; width: 100%; box-sizing: border-box; color: var(--ink);
+}
+.aa-field input:focus { outline: none; border-color: var(--blue); box-shadow: 0 0 0 3px var(--blue-soft); }
+.aa-email-row { display: flex; gap: 8px; min-width: 0; }
+.aa-email-row input { flex: 1; }
+.aa-rooms input { max-width: 180px; }
+.aa-segmented { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; max-width: 520px; }
+.aa-segment {
+  padding: 10px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink);
+  font-size: 14px; font-weight: 600; cursor: pointer; transition: border-color .12s ease, background .12s ease, box-shadow .12s ease;
+}
+.aa-segment:hover { border-color: var(--blue); }
+.aa-segment:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--blue-soft); border-color: var(--blue); }
+.aa-segment-selected { background: var(--blue); border-color: var(--blue); color: #fff; }
+.aa-form-actions { display: flex; gap: 10px; }
+.aa-button {
+  display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 10px 16px; border-radius: 8px;
+  font-size: 14px; font-weight: 600; cursor: pointer; border: 1px solid transparent; white-space: nowrap;
+}
+.aa-button svg { width: 16px; height: 16px; }
+.aa-button:disabled { opacity: .6; cursor: default; }
+.aa-button-primary { background: var(--blue); color: #fff; }
+.aa-button-primary:hover:not(:disabled) { background: var(--blue-dark); }
+.aa-button-secondary { background: var(--surface); color: var(--sidebar); border-color: var(--line); }
+.aa-button-secondary:hover:not(:disabled) { border-color: var(--blue); color: var(--blue-dark); }
+.aa-button-warning { background: var(--surface); color: #a15a1f; border-color: #f0c79f; }
+.aa-button-warning:hover:not(:disabled) { background: #fff6ec; }
+.aa-spin { animation: aa-spin 0.9s linear infinite; }
+@keyframes aa-spin { to { transform: rotate(360deg); } }
+.aa-success { display: flex; gap: 14px; align-items: flex-start; border-color: #bfe3d3; background: #f1faf6; }
+.aa-success > svg { flex-shrink: 0; width: 26px; height: 26px; color: var(--green); }
+.aa-success h2 { margin: 0 0 4px; color: #17614a; font-size: 16px; }
+.aa-success p { margin: 2px 0 0; font-size: 13.5px; color: #285b4a; overflow-wrap: anywhere; }
+.aa-not-found { display: flex; gap: 12px; align-items: flex-start; border-color: #f3c6cd; background: #fff5f6; }
+.aa-not-found > svg { flex-shrink: 0; width: 20px; height: 20px; color: var(--red); margin-top: 1px; }
+.aa-not-found p { margin: 0; font-size: 13.5px; color: #7a2633; overflow-wrap: anywhere; }
+.aa-account-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
+.aa-account-head h2 { margin: 0 0 3px; font-size: 16px; color: var(--sidebar); overflow-wrap: anywhere; }
+.aa-account-head p { margin: 0; font-size: 13px; color: var(--muted); }
+.aa-badges { display: flex; gap: 6px; flex-wrap: wrap; }
+.aa-note { display: flex; gap: 8px; align-items: flex-start; margin: 14px 0 0; font-size: 13px; color: var(--muted); line-height: 1.5; }
+.aa-note svg { flex-shrink: 0; width: 15px; height: 15px; margin-top: 2px; color: var(--blue); }
+.aa-empty { margin: 14px 0 0; font-size: 13.5px; color: var(--muted); }
+.aa-unverified-warning {
+  display: flex; gap: 10px; align-items: flex-start; margin: 14px 0 0; padding: 12px 14px;
+  border: 1px solid #f0c79f; border-left-width: 4px; border-radius: 10px; background: #fff6ec; color: #6b4a1f;
+  font-size: 13px; line-height: 1.5;
+}
+.aa-unverified-warning > svg { flex-shrink: 0; width: 18px; height: 18px; margin-top: 1px; color: #a15a1f; }
+.aa-unverified-warning strong { display: block; color: #8a4a10; font-size: 13.5px; }
+.aa-unverified-warning span { display: block; }
+.admin-dialog-backdrop [role="dialog"] .aa-unverified-warning { margin: 6px 0 4px; }
+.admin-dialog-backdrop [role="dialog"] label.aa-unverified-confirm {
+  display: flex; gap: 8px; align-items: flex-start; margin: 10px 0 0; font-weight: 600; color: #6b4a1f; cursor: pointer;
+}
+.aa-unverified-confirm input { margin-top: 3px; width: 16px; height: 16px; flex-shrink: 0; }
+/* Customer account page — manual activation message (replaces the former membership preview card). */
+.account-activation-info { padding: 0; overflow: hidden; }
+.aa-metrics .aa-date { font-size: 16px; }
+.aa-secondary-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.aa-history-list { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 8px; font-size: 13px; color: var(--ink); }
+.aa-history-list span { display: block; color: var(--muted); margin-top: 2px; overflow-wrap: anywhere; }
+.aa-list-toolbar input { min-width: 240px; }
+.aa-table { min-width: 900px; }
+.aa-email-cell { font-weight: 600; color: var(--sidebar); }
+.aa-link-button { background: none; border: 0; padding: 0; color: var(--blue); font-weight: 600; cursor: pointer; font-size: 13.5px; }
+.aa-link-button:hover { text-decoration: underline; }
+.aa-visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.admin-dialog-backdrop [role="dialog"].aa-dialog { max-width: 560px; }
+.aa-dialog .aa-button-primary { padding: 8px 16px; font-size: 13px; }
+.aa-summary { margin: 14px 0 6px; border: 1px solid var(--soft-line); border-radius: 10px; overflow: hidden; }
+.aa-summary > div { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 10px; padding: 9px 12px; font-size: 13.5px; }
+.aa-summary > div + div { border-top: 1px solid var(--soft-line); }
+.aa-summary dt { color: var(--muted); font-weight: 600; }
+.aa-summary dd { margin: 0; color: var(--ink); overflow-wrap: anywhere; }
+.admin-dialog-backdrop [role="dialog"] p.aa-summary-note { font-size: 12.5px; margin: 8px 0 0; display: flex; gap: 6px; align-items: flex-start; }
+.admin-dialog-backdrop [role="dialog"] p.aa-summary-warning { color: #a15a1f; }
+.aa-summary-warning svg { flex-shrink: 0; width: 15px; height: 15px; margin-top: 1px; }
+@media (max-width: 640px) {
+  .aa-email-row { flex-direction: column; }
+  .aa-segmented { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .aa-rooms input { max-width: none; }
+  .aa-form-actions .aa-button { width: 100%; }
+  .aa-list-toolbar input { min-width: 0; }
+  .aa-summary > div { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+}
+
+/* Customer account page — "Your plan" (renders only while activation is enforced for the account). */
+.account-plan-card { margin: 0 0 20px; padding: 16px 18px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+.account-plan-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
+.account-plan-head h3 { margin: 0; font-size: 15px; color: var(--sidebar); }
+.account-plan-status { padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 700; background: var(--soft-line); color: var(--muted); }
+.account-plan-status-active { background: rgba(8, 125, 85, .12); color: var(--green); }
+.account-plan-status-expired { background: rgba(232, 79, 99, .12); color: #b83246; }
+.account-plan-status-suspended { background: rgba(245, 138, 59, .16); color: #a15a1f; }
+.account-plan-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin: 0; }
+.account-plan-grid > div { background: var(--canvas); border-radius: 10px; padding: 10px 12px; min-width: 0; }
+.account-plan-grid dt { display: flex; align-items: center; gap: 5px; font-size: 11.5px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin-bottom: 4px; }
+.account-plan-grid dt svg { width: 13px; height: 13px; }
+.account-plan-grid dd { margin: 0; font-size: 15px; font-weight: 600; color: var(--ink); overflow-wrap: anywhere; }
+.account-plan-note, .account-plan-message { margin: 10px 0 0; font-size: 13px; color: var(--muted); line-height: 1.5; }
+.account-plan-message { color: var(--ink); }
+.report-rooms-plan-notice, .room-plan-notice { margin-bottom: 12px; }
+
 /* Admin Phase 2A — Corpus workspace polish. Reuses every token/class the
    Phase 1 admin console system already established (.admin-card,
    .admin-metric-grid, .admin-collapsible, etc.); nothing here is a new

@@ -4,6 +4,7 @@ import { checkReadRate } from '../../../lib/rate-limit';
 import { clientIpFrom } from '../../../lib/client-ip';
 import { getSessionUser } from '../../../lib/auth-session';
 import { getUploadLimitStatus } from '../../../lib/upload-limit';
+import { resolveRoomPolicy } from '../../../lib/account-entitlements';
 
 /**
  * Display-only status for the "N/10 uploads today" / "Unlimited" UI (see
@@ -33,6 +34,11 @@ export async function GET(request: Request) {
         return new NextResponse(JSON.stringify({ authenticated: false }), { status: 200, headers: { 'Content-Type': 'application/json' } });
       }
 
+      // Manual account activation: an enforced customer account is governed by its plan, not the daily cap
+      // (lib/account-entitlements.ts) — said as such, so the account page never shows a cap that does not apply.
+      if ((await resolveRoomPolicy(client, sessionUser)).enforced) {
+        return new NextResponse(JSON.stringify({ authenticated: true, plan: true }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
       const status = await getUploadLimitStatus(client, sessionUser.id, sessionUser.role === 'admin');
       return new NextResponse(JSON.stringify({ authenticated: true, ...status }), { status: 200, headers: { 'Content-Type': 'application/json' } });
     } finally {

@@ -40,6 +40,9 @@ export type ReportSaveRejectionReason =
   | "PERSISTED_PAYLOAD_TOO_LARGE"
   | "ROOM_OCCUPIED"
   | "ROOM_REUSE_NOT_READY"
+  // Manual account activation (lib/account-entitlements.ts): a new check refused because the account has no active
+  // plan, the plan expired or is suspended, or the room is outside the plan.
+  | "PLAN_REQUIRED"
   | "INTERNAL_ERROR";
 
 export type ReportSaveAuthMode = "anonymous" | "authenticated";

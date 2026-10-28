@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { ChevronLeft, Download, FileText } from "lucide-react";
-import { fetchReportRoomContents, fetchRemoteReport, saveReportRemote, type ReportSummary, type RoomContents, type RoomContentsFetchResult, type SaveReportRemoteResult } from "@/lib/reports-remote";
+import { fetchReportRoomContents, fetchRemoteReport, requestCheckAuthorization, saveReportRemote, type ReportSummary, type RoomContents, type RoomContentsFetchResult, type SaveReportRemoteResult } from "@/lib/reports-remote";
 import {
   CHECK_STAGE_CEILING,
   CHECK_STAGE_LABELS,
@@ -217,7 +217,9 @@ export function aiAnalysisErrorResult(error: unknown, stage: AiPrepStage | null)
  */
 type PendingCheckSave = {
   report: SimilarityReport;
-  reportForRemote: SimilarityReport | (SimilarityReport & { userSuppliedReferences: SuppliedReferenceInput[] });
+  // `checkAuthorization` (manual account activation): the authorization obtained when this check started — lifted out
+  // of the report by saveReportRemote and sent beside it, never persisted (lib/reports-remote.ts).
+  reportForRemote: (SimilarityReport | (SimilarityReport & { userSuppliedReferences: SuppliedReferenceInput[] })) & { checkAuthorization?: string };
   summary: ReportSummary;
   academicSearchDiagnosticsId: number | null;
   aiAnalysisPromise: Parameters<typeof completeAiAnalysisWithRecovery>[0];
@@ -1202,6 +1204,18 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
       }
     }
 
+    // Manual account activation: obtain this check's authorization BEFORE the analysis (lib/account-entitlements.ts),
+    // so a plan that expires during the analysis cannot strand a check that started while it was active. A refusal
+    // (no active plan, room cooling down) stops here, before minutes of analysis; "none" proceeds exactly as before.
+    const checkAuthorization = await requestCheckAuthorization(room, text);
+    if (checkAuthorization.kind === "refused") {
+      notify(checkAuthorization.message);
+      window.clearInterval(progressTimerRef.current);
+      generationLockRef.current = false;
+      setIsGeneratingReport(false);
+      return;
+    }
+
     const wikipediaPromise = analyzeWikipediaText(text, submittedFile.name, () => undefined).catch((error) => {
       console.debug("Wikipedia check failed.", { outcome: "failed", error: error instanceof Error ? error.message : String(error) });
       return null;
@@ -1265,7 +1279,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
         suppliedReferenceInputs.length > 0 ? { ...report, userSuppliedReferences: suppliedReferenceInputs } : report;
       pendingSaveRef.current = {
         report,
-        reportForRemote,
+        reportForRemote: checkAuthorization.kind === "issued" ? { ...reportForRemote, checkAuthorization: checkAuthorization.id } : reportForRemote,
         summary,
         academicSearchDiagnosticsId: academicResult.academicSearchDiagnosticsId,
         aiAnalysisPromise,
@@ -1329,6 +1343,9 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
             ? new Date(saveResult.resetsAt).toLocaleString(undefined, { hour: "numeric", minute: "2-digit", hour12: true })
             : "midnight UTC";
           notify(saveResult.error ?? `Daily upload limit reached. This report is saved on this device only until the limit resets at ${resetLabel}.`);
+        } else if (saveResult.planBlocked) {
+          // Manual account activation: no active plan / room outside it. Resending cannot help until the owner acts.
+          notify(saveResult.error ?? "New checks need an active plan. Contact TurnitPlus to activate your account.");
         } else if (saveResult.roomOccupied) {
           notify(saveResult.error ?? "This room already has an active check. Refresh to see it, or wait for it to reset.");
         } else if (saveResult.roomReuseNotReady) {

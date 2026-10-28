@@ -140,4 +140,11 @@ export type RoomIndexEntry = {
   mostRecentAt: string | null;
   /** When this room next becomes available for a new upload — present whenever status is not "empty" (occupancy, not AI completion, decides this). */
   cycleEndsAt: string | null;
+  /**
+   * Manual account activation only (lib/account-entitlements.ts; absent while it is off): an EMPTY room still inside
+   * its server-clock 24 h cooldown (its report was deleted) — when it accepts a new check again.
+   */
+  availableAt?: string;
+  /** Manual account activation only: an empty room beyond the account's plan, shown because it once held a report. */
+  outsidePlan?: true;
 };

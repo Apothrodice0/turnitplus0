@@ -3,7 +3,8 @@ import { getReportsDbClient } from '../../../../lib/reports-db';
 import { checkReadRate } from '../../../../lib/rate-limit';
 import { clientIpFrom } from '../../../../lib/client-ip';
 import { getSessionUser } from '../../../../lib/auth-session';
-import { deriveRoomStatus, getRoomCountForRole, isWithinActiveCycle, roomCycleEndsAt, type RoomIndexEntry } from '../../../../lib/report-rooms';
+import { deriveRoomStatus, isWithinActiveCycle, ROOM_CYCLE_MS, roomCycleEndsAt, type RoomIndexEntry } from '../../../../lib/report-rooms';
+import { readActiveRoomClaims, resolveRoomPolicy } from '../../../../lib/account-entitlements';
 
 /**
  * The room/slot architecture's index: ONE lightweight query returning each
@@ -46,7 +47,10 @@ export async function GET(request: Request) {
         return new NextResponse(JSON.stringify({ rooms: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
       }
 
-      const roomCount = getRoomCountForRole(sessionUser.role);
+      // Manual account activation (lib/account-entitlements.ts): with it off, exactly getRoomCountForRole's count and
+      // the same response as before; with it on, the plan's rooms (plus any room that still holds a report).
+      const policy = await resolveRoomPolicy(client, sessionUser);
+      const roomCount = policy.visibleRoomCount;
 
       // One row per room that has ever held a report, its single most
       // recent occupant's timestamp and ai_score — never the report content
@@ -71,16 +75,43 @@ export async function GET(request: Request) {
         occupantByRoom.set(Number(row.room_number), { mostRecent: row.most_recent, aiScore: row.ai_score, aiStatus: row.ai_status });
       }
 
+      if (!policy.enforced) {
+        const rooms: RoomIndexEntry[] = Array.from({ length: roomCount }, (_, room) => {
+          const occupant = occupantByRoom.get(room);
+          if (occupant && isWithinActiveCycle(occupant.mostRecent)) {
+            const status = deriveRoomStatus(occupant.aiScore === null ? null : Number(occupant.aiScore), occupant.aiStatus);
+            return { room, status, mostRecentAt: occupant.mostRecent, cycleEndsAt: roomCycleEndsAt(occupant.mostRecent) };
+          }
+          return { room, status: 'empty', mostRecentAt: null, cycleEndsAt: null };
+        });
+
+        return new NextResponse(JSON.stringify({ rooms }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+
+      // Enforced plan: a room is busy until the later of its report's 24 h cycle and its server-clock claim, so a
+      // deleted or back-dated report never shows its room as free before the server will accept a new check in it.
+      const now = Date.now();
+      const claims = policy.usesRoomClaims ? await readActiveRoomClaims(client, sessionUser.id, now) : new Map<number, number>();
       const rooms: RoomIndexEntry[] = Array.from({ length: roomCount }, (_, room) => {
         const occupant = occupantByRoom.get(room);
-        if (occupant && isWithinActiveCycle(occupant.mostRecent)) {
+        const claimedAt = claims.get(room);
+        const claimEndsAt = claimedAt === undefined ? null : new Date(claimedAt + ROOM_CYCLE_MS).toISOString();
+        if (occupant && (isWithinActiveCycle(occupant.mostRecent, now) || claimEndsAt)) {
           const status = deriveRoomStatus(occupant.aiScore === null ? null : Number(occupant.aiScore), occupant.aiStatus);
-          return { room, status, mostRecentAt: occupant.mostRecent, cycleEndsAt: roomCycleEndsAt(occupant.mostRecent) };
+          const cycleEndsAt = isWithinActiveCycle(occupant.mostRecent, now) ? roomCycleEndsAt(occupant.mostRecent) : null;
+          const endsAt = [cycleEndsAt, claimEndsAt].filter((v): v is string => v !== null).sort().pop() as string;
+          return { room, status, mostRecentAt: occupant.mostRecent, cycleEndsAt: endsAt };
         }
-        return { room, status: 'empty', mostRecentAt: null, cycleEndsAt: null };
+        const entry: RoomIndexEntry = { room, status: 'empty', mostRecentAt: null, cycleEndsAt: null };
+        if (claimEndsAt) entry.availableAt = claimEndsAt;
+        if (room >= policy.uploadRoomCount && policy.block === null) entry.outsidePlan = true;
+        return entry;
       });
 
-      return new NextResponse(JSON.stringify({ rooms }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      return new NextResponse(JSON.stringify({ rooms, ...(policy.block ? { notice: policy.block.message } : {}) }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
     } finally {
       client.close();
     }

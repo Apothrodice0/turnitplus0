@@ -1,5 +1,7 @@
 import type { Client } from "@libsql/client";
 import { buildReportAdmissionSourceRef } from "./corpus-admission-source-ref";
+import { randomUUID } from "node:crypto";
+import { entitlementTablesExist, readEntitlement } from "./account-entitlements";
 
 /**
  * Account deletion (production audit fix — no such endpoint existed).
@@ -284,9 +286,29 @@ export async function deleteAccountData(client: Client, accountId: string): Prom
  * that row is.
  */
 export async function invalidateSessionsAndDeleteUser(client: Client, accountId: string): Promise<void> {
+  // Manual account activation (drizzle/0056): the account's plan, room claims and check authorizations go with it.
+  // Checked before the transaction so a database without 0056 deletes accounts exactly as before. The admin audit trail
+  // (account_entitlement_events) is KEPT — it is the owner's record of what was granted — and, for an account that ever
+  // had a plan, ends with one minimal 'account_deleted' record: the account id, its email, the plan it held and when.
+  // Nothing else: no manuscript content, password hash, session or other authentication secret is ever written there.
+  const removePlan = await entitlementTablesExist(client);
   const tx = await client.transaction("write");
   try {
     await tx.execute({ sql: "DELETE FROM sessions WHERE user_id = ?", args: [accountId] });
+    if (removePlan) {
+      const plan = await readEntitlement(tx, accountId);
+      const history = await tx.execute({ sql: "SELECT COUNT(*) AS n FROM account_entitlement_events WHERE user_id = ?", args: [accountId] });
+      if (plan || Number((history.rows[0] as unknown as { n: number | bigint }).n) > 0) {
+        await tx.execute({
+          sql: `INSERT INTO account_entitlement_events (operation_id, user_id, target_email, admin_user_id, admin_email, action, previous_json, new_json, reason, target_email_verified, created_at)
+                SELECT ?, id, email, NULL, NULL, 'account_deleted', ?, NULL, NULL, NULL, ? FROM users WHERE id = ?`,
+          args: [randomUUID(), plan ? JSON.stringify(plan) : null, Date.now(), accountId],
+        });
+      }
+      await tx.execute({ sql: "DELETE FROM account_entitlements WHERE user_id = ?", args: [accountId] });
+      await tx.execute({ sql: "DELETE FROM account_room_claims WHERE user_id = ?", args: [accountId] });
+      await tx.execute({ sql: "DELETE FROM account_check_authorizations WHERE user_id = ?", args: [accountId] });
+    }
     await tx.execute({ sql: "DELETE FROM users WHERE id = ?", args: [accountId] });
     await tx.commit();
   } catch (err) {
