@@ -10,6 +10,7 @@ import { clientIpFromHeaders } from "@/lib/client-ip";
 import { getReportsDbClient } from "@/lib/reports-db";
 import { findRoomOccupant, type RoomOccupantResult } from "@/lib/reports-repo";
 import { getRoomCountForRole } from "@/lib/report-rooms";
+import { isSystem2ResearchUser } from "@/lib/system2-research";
 import { RoomPageShell } from "./room-page-shell";
 
 export const dynamic = "force-dynamic";
@@ -27,7 +28,7 @@ export const dynamic = "force-dynamic";
  */
 
 type RoomPageResult =
-  | { status: "found"; room: number; accountEmail: string; occupant: RoomOccupantResult }
+  | { status: "found"; room: number; accountEmail: string; occupant: RoomOccupantResult; system2Enabled: boolean }
   | { status: "invalid-room" }
   | { status: "no-session" }
   | { status: "rate-limited"; retryAfterSeconds: number };
@@ -59,7 +60,8 @@ const loadRoom = cache(async (roomParam: string): Promise<RoomPageResult> => {
     if (!Number.isInteger(room) || room < 0 || room >= roomCount) return { status: "invalid-room" };
 
     const occupant = await findRoomOccupant(client, sessionUser.id, room);
-    return { status: "found", room, accountEmail: sessionUser.email, occupant };
+    // Owner-only English System 2 research preview: resolved server-side (allowlist + feature switch, never in production).
+    return { status: "found", room, accountEmail: sessionUser.email, occupant, system2Enabled: isSystem2ResearchUser(sessionUser) };
   } finally {
     client.close();
   }
@@ -128,5 +130,5 @@ export default async function RoomPage({ params }: { params: Promise<{ room: str
   // else in this tree — using it as a key changes nothing about that
   // persisted semantics, it only tells React when a genuinely different
   // room warrants a fresh instance.
-  return <RoomPageShell key={result.room} room={result.room} accountEmail={result.accountEmail} initialOccupant={result.occupant} />;
+  return <RoomPageShell key={result.room} room={result.room} accountEmail={result.accountEmail} initialOccupant={result.occupant} system2Enabled={result.system2Enabled} />;
 }

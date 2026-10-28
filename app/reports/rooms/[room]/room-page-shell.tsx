@@ -52,6 +52,7 @@ import { detectLanguage } from "@/lib/similarity-core";
 import { AI_MODEL_VERSION, AI_PASSAGE_LOG_ODDS_THRESHOLD, AI_PASSAGE_THRESHOLD } from "@/lib/ai-core";
 import { describeAiAnalysisError, type AiPrepStage } from "@/lib/ai-model-prep";
 import { DocumentUploadPanel } from "@/components/reports/document-upload-panel";
+import { System2ResearchPanel } from "@/components/report/system2-research-panel";
 
 /**
  * The dedicated room page's client half: owns this ONE room's state, the
@@ -582,9 +583,11 @@ type Props = {
   room: number;
   accountEmail: string;
   initialOccupant: RoomContents;
+  /** Owner-only English System 2 research preview, resolved server-side (lib/system2-research.ts). Off for everyone else. */
+  system2Enabled?: boolean;
 };
 
-export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
+export function RoomPageShell({ room, accountEmail, initialOccupant, system2Enabled = false }: Props) {
   const [occupant, setOccupant] = useState<RoomContents>(initialOccupant);
   const [pollExhausted, setPollExhausted] = useState(false);
   const [file, setFile] = useState<File | null>(null);
@@ -1679,6 +1682,11 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
 
             <Link href={`/reports/${occupant.report.id}?room=${room}`} className="button secondary room-open-full">Open full report</Link>
           </div>
+        )}
+
+        {/* Owner-only English System 2 research preview: a separate result beside similarity and AI, never changing them. */}
+        {system2Enabled && isFullyRevealed(occupant) && occupant.report && (
+          <System2ResearchPanel key={occupant.report.id} reportId={occupant.report.id} uploadedFile={file} />
         )}
       </div>
     </div>

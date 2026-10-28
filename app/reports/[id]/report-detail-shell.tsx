@@ -31,6 +31,7 @@ import { AiReport } from "@/components/report/ai-report";
 import { CategorySummary, OverviewReport, SourcesReport, SubmissionReport, dedupeExternalAcademicEvidence } from "@/components/report/similarity-report-papers";
 import { ReportV2View, ReportV2Workspace, ReportV2PrintOverview, ReportV2PrintManuscriptPages, ReportV2PrintSourceAppendix } from "@/components/report/report-v2/report-v2-view";
 import { ReportNotFoundPanel } from "@/components/report/report-not-found-panel";
+import { System2ResearchPanel } from "@/components/report/system2-research-panel";
 
 type LoadStatus = "loading" | "found" | "not-found";
 
@@ -44,6 +45,7 @@ export function ReportDetailShell({
   requiresClientResolution,
   mode,
   backRoom,
+  system2Enabled = false,
 }: {
   id: string;
   initialReport: SimilarityReport | null;
@@ -97,6 +99,8 @@ export function ReportDetailShell({
   mode: ReportMode;
   /** The room this report was opened from (see app/reports/[id]/page.tsx's own comment) — null when opened any other way (the anonymous flat list, a bookmark, etc.), in which case the back button falls back to the generic My Reports directory. */
   backRoom: number | null;
+  /** Owner-only English System 2 research preview, resolved server-side (lib/system2-research.ts). Off for everyone else. */
+  system2Enabled?: boolean;
 }) {
   const backHref = backRoom !== null ? `/reports/rooms/${backRoom}` : "/#reports";
   const backLabel = backRoom !== null ? `Back to Room ${backRoom + 1}` : "Back to reports";
@@ -550,6 +554,9 @@ export function ReportDetailShell({
           </div>
         </div>
       )}
+
+      {/* Owner-only English System 2 research preview: a separate result, never changing the similarity or AI views below. */}
+      {system2Enabled && mode !== "ai" && <System2ResearchPanel reportId={id} />}
 
       {isOrdinaryV2Workspace ? (
         <ReportV2Workspace
