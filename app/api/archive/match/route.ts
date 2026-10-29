@@ -6,6 +6,9 @@ import { isArchiveServerSideEnabled } from "../../../../lib/archive-server-flag"
 import { analyzeArchiveOnServer } from "../../../../lib/archive-server-analysis";
 import { requestedScoringNormalizationVersion } from "../../../../lib/similarity-core";
 import { runWithScoringNormalization } from "../../../../lib/scoring-normalization-scope";
+import { getSessionUser } from "../../../../lib/auth-session";
+import { canonicalSha256 } from "../../../../lib/document-identity";
+import { accountActivationEnforced, checkWorkRefusal } from "../../../../lib/account-entitlements";
 
 /**
  * 100k-scale architecture, slice 2E — the one server endpoint the real
@@ -106,6 +109,14 @@ export async function POST(request: Request) {
 
     const client = await getReportsDbClient();
     try {
+      // Manual subscriptions (lib/account-entitlements.ts checkWorkRefusal): with enforcement on, only an administrator
+      // or an account allowed to start a check may run this check work. Off: skipped entirely, exactly as before.
+      if (accountActivationEnforced()) {
+        const refusal = await checkWorkRefusal(client, await getSessionUser(request, client), canonicalSha256(text));
+        if (refusal) {
+          return new NextResponse(JSON.stringify({ error: refusal.message, code: refusal.code }), { status: refusal.status, headers: { "Content-Type": "application/json" } });
+        }
+      }
       const { result } = await runWithScoringNormalization(scoringNormalizationVersion, async () => {
         return await analyzeArchiveOnServer(client, text);
       });

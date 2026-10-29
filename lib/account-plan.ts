@@ -28,11 +28,18 @@ export const PLAN_ROOM_PRESETS = [5, 10, 20, 40] as const;
 export const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
- * Legacy free access (owner decision 2026-10-28): accounts registered before enforcement first switched on keep
- * today's free limits (10 rooms, 10 uploads per UTC day) for this many days after that moment. The moment is stored
- * once, in account_activation_enforcement (drizzle/0057), and never changes.
+ * Legacy free access — RETIRED (owner decision 2026-10-29: no free checking for any customer account once
+ * enforcement is on). The logic is kept behind ACCOUNT_ACTIVATION_LEGACY_GRACE_ENABLED, which is OFF unless that
+ * variable is explicitly "1"/"true"; with it off, accounts registered before enforcement get no free access either.
+ * When enabled, accounts registered before enforcement first switched on would keep the free limits (10 rooms, 10
+ * uploads per UTC day) for this many days after that moment (account_activation_enforcement, drizzle/0057).
  */
 export const LEGACY_GRACE_DAYS = 30;
+
+/** The subscription-required wording (owner decision 2026-10-29), shown on the locked upload area and in refusals. */
+export const SUBSCRIPTION_REQUIRED_TITLE = "Subscription required";
+export const SUBSCRIPTION_REQUIRED_MESSAGE = "You need an active subscription before you can check documents.";
+export const SUBSCRIPTION_CONTACT_MESSAGE = "Please contact TurnitPlus to activate your plan.";
 
 export function isPlanDurationDays(value: unknown): value is PlanDurationDays {
   return typeof value === "number" && Number.isInteger(value) && value >= MIN_PLAN_DAYS && value <= MAX_PLAN_DAYS;
@@ -109,11 +116,11 @@ export function formatPlanDateTime(ms: number): string {
 export function planBlockMessage(code: PlanBlockCode, entitlement: Entitlement | null): string {
   switch (code) {
     case "ACTIVATION_REQUIRED":
-      return "Your account is not activated yet. Contact TurnitPlus to activate a plan, then start your check.";
+      return `${SUBSCRIPTION_REQUIRED_MESSAGE} ${SUBSCRIPTION_CONTACT_MESSAGE}`;
     case "PLAN_EXPIRED":
-      return `Your plan expired on ${entitlement ? formatPlanDate(entitlement.expiresAt) : "its end date"}. Contact TurnitPlus to renew it. Your existing reports stay available.`;
+      return `Your subscription expired on ${entitlement ? formatPlanDate(entitlement.expiresAt) : "its end date"}. ${SUBSCRIPTION_REQUIRED_MESSAGE} Please contact TurnitPlus to renew your plan. Your existing reports stay available.`;
     case "ACCOUNT_SUSPENDED":
-      return "Your plan is paused. Contact TurnitPlus to restore it. Your existing reports stay available.";
+      return `Your subscription is paused. ${SUBSCRIPTION_REQUIRED_MESSAGE} Please contact TurnitPlus to restore your plan. Your existing reports stay available.`;
     case "ROOM_NOT_IN_PLAN":
       return `This room is not part of your plan${entitlement ? ` (rooms 1–${entitlement.rooms})` : ""}. Choose one of your plan's rooms.`;
     case "ACTIVATION_UNAVAILABLE":
@@ -121,7 +128,81 @@ export function planBlockMessage(code: PlanBlockCode, entitlement: Entitlement |
   }
 }
 
-/** The customer-facing sentence while an existing account is in its legacy free-access period. */
+/** Whether a refusal is about the account's subscription (locked upload area) rather than one room (cooldown, outside the plan). */
+export function isSubscriptionBlock(code: PlanBlockCode): boolean {
+  return code === "ACTIVATION_REQUIRED" || code === "PLAN_EXPIRED" || code === "ACCOUNT_SUSPENDED" || code === "ACTIVATION_UNAVAILABLE";
+}
+
+/** What the locked upload area shows (components/reports/document-upload-panel.tsx `locked`). */
+export type UploadLock = {
+  title: string;
+  message: string;
+  /** A second line, e.g. "Please contact TurnitPlus to activate your plan." */
+  contact: string | null;
+  /** A short status line, e.g. when the subscription expired. */
+  detail: string | null;
+  /** The disabled action button's label. */
+  actionLabel: string;
+};
+
+/**
+ * The locked upload area for a refused new check — the same wording on the dashboard and in every room. `expiresAt`
+ * is the plan's end, for an expired plan's status line.
+ */
+export function uploadLockFor(code: PlanBlockCode, expiresAt: number | null, rooms: number | null = null): UploadLock {
+  switch (code) {
+    case "ACTIVATION_REQUIRED":
+      return { title: SUBSCRIPTION_REQUIRED_TITLE, message: SUBSCRIPTION_REQUIRED_MESSAGE, contact: SUBSCRIPTION_CONTACT_MESSAGE, detail: null, actionLabel: SUBSCRIPTION_REQUIRED_TITLE };
+    case "PLAN_EXPIRED":
+      return {
+        title: SUBSCRIPTION_REQUIRED_TITLE,
+        message: SUBSCRIPTION_REQUIRED_MESSAGE,
+        contact: "Please contact TurnitPlus to renew your plan.",
+        detail: `Your subscription expired on ${expiresAt !== null ? formatPlanDate(expiresAt) : "its end date"} · your reports stay available`,
+        actionLabel: SUBSCRIPTION_REQUIRED_TITLE,
+      };
+    case "ACCOUNT_SUSPENDED":
+      return {
+        title: SUBSCRIPTION_REQUIRED_TITLE,
+        message: SUBSCRIPTION_REQUIRED_MESSAGE,
+        contact: "Please contact TurnitPlus to restore your plan.",
+        detail: "Your subscription is paused · your reports stay available",
+        actionLabel: SUBSCRIPTION_REQUIRED_TITLE,
+      };
+    case "ACTIVATION_UNAVAILABLE":
+      return { title: "New checks unavailable", message: "New checks are temporarily unavailable.", contact: "Please try again later.", detail: null, actionLabel: "Unavailable" };
+    case "ROOM_NOT_IN_PLAN":
+      return {
+        title: "Room not in your plan",
+        message: `This room is not part of your plan${rooms !== null ? ` (rooms 1–${rooms})` : ""}.`,
+        contact: "Choose one of your plan's rooms from My Reports.",
+        detail: null,
+        actionLabel: "Room unavailable",
+      };
+  }
+}
+
+/** The locked upload area for an empty room still in its 24 h cooldown (server clock). */
+export function roomCooldownLock(roomNumber: number, availableAt: number): UploadLock {
+  return {
+    title: "Room cooling down",
+    message: `Room ${roomNumber} accepts a new check again at ${formatPlanDateTime(availableAt)}.`,
+    contact: "Each room takes one document every 24 hours.",
+    detail: null,
+    actionLabel: "Room unavailable",
+  };
+}
+
+/** The account's plan state, as GET /api/account/plan reports it, to the refusal code a new check would get. */
+export function planStateBlockCode(state: PlanState | "unavailable"): PlanBlockCode | null {
+  if (state === "active") return null;
+  if (state === "none") return "ACTIVATION_REQUIRED";
+  if (state === "expired") return "PLAN_EXPIRED";
+  if (state === "suspended") return "ACCOUNT_SUSPENDED";
+  return "ACTIVATION_UNAVAILABLE";
+}
+
+/** The customer-facing sentence while an existing account is in its legacy free-access period (only if re-enabled). */
 export function legacyGraceMessage(endsAt: number): string {
   return `Your free access (10 rooms, 10 uploads per day) continues until ${formatPlanDate(endsAt)}. Contact TurnitPlus to activate a plan before then.`;
 }

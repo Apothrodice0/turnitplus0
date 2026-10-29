@@ -19,6 +19,11 @@ import { canonicalSha256 } from '../lib/document-identity.ts';
 import { ensureEnforcementStart, readEnforcementStart, resetEntitlementTableCacheForTest, resolveRoomPolicy } from '../lib/account-entitlements.ts';
 import { withTestIdentity, grantTestAdmin } from './helpers/test-signup.mjs';
 
+// RETIRED BEHAVIOUR (owner decision 2026-10-29: no free checking for any customer once enforcement is on). The legacy
+// free-access logic is kept only behind ACCOUNT_ACTIVATION_LEGACY_GRACE_ENABLED, which is OFF by default; G3 first proves
+// that with the flag at its default a legacy account gets nothing, then this suite switches the flag ON to keep the
+// preserved logic correct in case it is ever re-enabled.
+//
 // Legacy free access (owner decision 2026-10-28, lib/account-entitlements.ts): when ACCOUNT_ACTIVATION_ENFORCED is
 // first switched on, the database records that moment once (account_activation_enforcement, drizzle/0057). Accounts
 // registered before it keep today's free limits — 10 rooms, 10 uploads per UTC day, not paid access — for 30 days;
@@ -185,8 +190,17 @@ let start;
   pass('G2 the first enforced request records the start once; restarts, off/on flips, later writers, UPDATE and DELETE cannot move it');
 }
 
-// ── G3. A legacy free account keeps today's free limits during grace — not paid access ─────────────────────────────
+// ── G3. Default (grace flag OFF): a legacy account gets NO free access; with the flag on it keeps the free limits ──────
 {
+  delete process.env.ACCOUNT_ACTIVATION_LEGACY_GRACE_ENABLED;
+  const refused = await postReport(legacy, 4100000000005, { room: 1 });
+  assert.equal(refused.status, 403, 'with the retired grace flag at its default, a legacy account cannot start a check');
+  assert.equal(refused.body.code, 'ACTIVATION_REQUIRED');
+  assert.equal((await planOf(legacy)).body.graceEndsAt, null);
+  assert.equal(typeof (await roomIndex(legacy)).body.notice, 'string', 'and its room list says so');
+  assert.equal(await claimCount(legacy), 0);
+  process.env.ACCOUNT_ACTIVATION_LEGACY_GRACE_ENABLED = '1';
+
   const idx = await roomIndex(legacy);
   assert.equal(idx.body.rooms.length, NORMAL_ROOM_COUNT, '10 rooms');
   assert.deepEqual(Object.keys(idx.body), ['rooms'], 'exactly the pre-feature response: no notice');
@@ -210,7 +224,7 @@ let start;
   assert.equal(eleventh.status, 429, 'the 11th upload of the UTC day is refused by the existing daily cap');
   assert.notEqual((await postReport(legacy, 4100000000098, { room: 10 })).status, 200, 'room 11 does not exist for a free account');
   assert.equal(await claimCount(legacy), 0, 'free access writes no plan room claims');
-  pass('G3 legacy free account during grace: 10 rooms, the 10-per-day cap (11th refused), no plan notices, no claims');
+  pass('G3 grace flag off (default): a legacy account is refused (403). Flag on: 10 rooms, the 10-per-day cap (11th refused), no claims');
 }
 
 // ── G4. An account registered after enforcement began gets no free access ──────────────────────────────────────────
@@ -269,7 +283,12 @@ let start;
   assert.equal(atEnd.enforced, true);
   assert.equal(atEnd.block?.code, 'ACTIVATION_REQUIRED');
   assert.equal(atEnd.grace, null);
-  pass('G8 free access applies until the last millisecond before grace_ends_at and not at it');
+  delete process.env.ACCOUNT_ACTIVATION_LEGACY_GRACE_ENABLED;
+  const flagOff = await resolveRoomPolicy(db, asSessionUser(legacy), start.graceEndsAt - 1);
+  assert.equal(flagOff.block?.code, 'ACTIVATION_REQUIRED', 'with the retired flag off, even inside the window there is no free access');
+  assert.equal(flagOff.grace, null);
+  process.env.ACCOUNT_ACTIVATION_LEGACY_GRACE_ENABLED = '1';
+  pass('G8 (flag on) free access applies until the last millisecond before grace_ends_at and not at it; (flag off) never');
 }
 
 // ── G9. After grace: no new checks without a plan; accounts, reports and running checks are kept ────────────────────
@@ -305,6 +324,7 @@ let start;
   pass('G10 grace and subscriptions never change account roles');
 }
 
+delete process.env.ACCOUNT_ACTIVATION_LEGACY_GRACE_ENABLED;
 enforce(false);
 db.close();
 console.log(`\n${results.length} account-subscription grace scenarios passed`);

@@ -15,6 +15,10 @@ import * as uploadLimitRoute from '../app/api/upload-limit/route.ts';
 import * as lookupRoute from '../app/api/admin/account-activation/lookup/route.ts';
 import * as applyRoute from '../app/api/admin/account-activation/apply/route.ts';
 import * as accountsRoute from '../app/api/admin/account-activation/accounts/route.ts';
+import * as academicEvidenceRoute from '../app/api/academic-evidence/route.ts';
+import * as archiveMatchRoute from '../app/api/archive/match/route.ts';
+import { checkWorkRefusal } from '../lib/account-entitlements.ts';
+import { planBlockMessage } from '../lib/account-plan.ts';
 import * as meRoute from '../app/api/auth/me/route.ts';
 import { resetAuthRateForTest, resetRateForTest, resetReadRateForTest, resetAdminRateForTest } from '../lib/rate-limit.js';
 import { ADMIN_ROOM_COUNT, NORMAL_ROOM_COUNT, ROOM_CYCLE_MS } from '../lib/report-rooms.ts';
@@ -26,8 +30,10 @@ import { withTestIdentity, grantTestAdmin } from './helpers/test-signup.mjs';
 // activates a registered, VERIFIED customer for any 1–3650 days (presets 30/60/90/180/360) with N rooms; with
 // ACCOUNT_ACTIVATION_ENFORCED on, the plan is what lets a customer start new checks (rooms 1..N, each on its own 24 h
 // cooldown, no daily cap), and with it off nothing changes. Every scenario below goes through the real route handlers
-// against a real migrated database. These scenarios cover the rules AFTER the legacy free-access period (the
-// enforcement start is pinned 31 days back below); that period has its own suite, account-subscription-grace.
+// against a real migrated database. Owner decision 2026-10-29: no free checking for ANY customer account once
+// enforcement is on — accounts registered before enforcement included (the retired legacy grace logic is off by
+// default and has its own suite, account-subscription-grace). The check-work routes (/api/academic-evidence,
+// /api/archive/match) refuse the same accounts.
 
 const repo = path.resolve('.');
 const dbFile = path.join(repo, 'test_account_activation.db');
@@ -350,16 +356,18 @@ for (const user of [gina, hank, ivan, leaver]) await markVerified(user.email);
   pass('22 feature off: 10 rooms, daily cap, unchanged responses, no claims, no enforcement start, accounts without a plan upload as before');
 }
 
-// The rest of this suite tests enforcement after the legacy free-access period: enforcement "began" 31 days ago, so
-// every account here is either registered after that moment or past its 30 days (account-subscription-grace covers it).
-await db.execute({ sql: 'INSERT INTO account_activation_enforcement (id, started_at, grace_ends_at) VALUES (1, ?, ?)', args: [Date.now() - 31 * DAY_MS, Date.now() - DAY_MS] });
+// Every account above was registered BEFORE enforcement is switched on here: with the retired legacy grace off
+// (its default — ACCOUNT_ACTIVATION_LEGACY_GRACE_ENABLED is not set), none of them gets any free checking.
+delete process.env.ACCOUNT_ACTIVATION_LEGACY_GRACE_ENABLED;
 enforce(true);
 
 // ── no plan / admin while enforced ──────────────────────────────────────────────────────────────────────────────
 {
   const r = await postReport(freeUser, 3100000000002, { room: 0 });
-  assert.equal(r.status, 403);
+  assert.equal(r.status, 403, 'an existing account (registered before enforcement) gets no free check');
   assert.equal(r.body.code, 'ACTIVATION_REQUIRED');
+  assert.equal(r.body.error, 'You need an active subscription before you can check documents. Please contact TurnitPlus to activate your plan.');
+  assert.equal((await planOf(freeUser)).body.graceEndsAt, null, 'no free-access period');
   const idx = await roomIndex(freeUser);
   assert.equal(typeof idx.body.notice, 'string');
   assert.equal(idx.body.rooms.length, 8, 'rooms up to the highest one holding a report stay visible (room 8 holds one)');
@@ -581,6 +589,77 @@ enforce(true);
   assert.equal(Number((await entitlementRow(erin.email)).expires_at), expiry, 'reactivation keeps the original expiry');
   assert.equal((await postReport(erin, 3500000000001, { room: 0 })).status, 200);
   pass('suspend blocks new checks (ACCOUNT_SUSPENDED); reactivate restores them with the original expiry');
+}
+
+// ── CHECK WORK: the routes that compute a check before its save refuse unsubscribed accounts too (no API bypass) ────
+{
+  const checkText = 'Subscription gate manuscript. Groundwater recharge estimates for semi-arid basins depend on careful seasonal accounting.';
+  async function checkWork(route, pathName, user, text = checkText) {
+    const addr = ip('work');
+    await resetRateForTest(addr);
+    const headers = { 'content-type': 'application/json', 'x-forwarded-for': addr, ...(user ? { cookie: `tp_session_v1=${user.cookie}` } : {}) };
+    const res = await route.POST(new Request(`http://localhost${pathName}`, { method: 'POST', headers, body: JSON.stringify({ text, scoringNormalization: 2 }) }));
+    const body = await res.text();
+    return { status: res.status, body: body ? JSON.parse(body) : null };
+  }
+  const archive = (user, text) => checkWork(archiveMatchRoute, '/api/archive/match', user, text);
+  const academic = (user, text) => checkWork(academicEvidenceRoute, '/api/academic-evidence', user, text);
+  process.env.ARCHIVE_SERVER_SIDE_ENABLED = 'true';
+  try {
+    // Expired and suspended fixtures for this section (restored at the end).
+    const hankId = await userIdOf(hank.email);
+    const hankExpiry = Number((await entitlementRow(hank.email)).expires_at);
+    await db.execute({ sql: 'UPDATE account_entitlements SET expires_at = ? WHERE user_id = ?', args: [Date.now() - 1000, hankId] });
+    await grant(admin.cookie, { email: gina.email, action: 'suspend', reason: 'Check-work gate test' });
+
+    for (const [label, user, status, code] of [
+      ['signed out', null, 401, 'SIGN_IN_REQUIRED'],
+      ['no subscription', freeUser, 403, 'ACTIVATION_REQUIRED'],
+      ['expired subscription', hank, 403, 'PLAN_EXPIRED'],
+      ['suspended subscription', gina, 403, 'ACCOUNT_SUSPENDED'],
+    ]) {
+      for (const [routeName, call] of [['archive/match', archive], ['academic-evidence', academic]]) {
+        const r = await call(user);
+        assert.equal(r.status, status, `${routeName}: ${label} -> ${status}`);
+        assert.equal(r.body.code, code, `${routeName}: ${label} -> ${code}`);
+      }
+    }
+    assert.equal((await archive(freeUser)).body.error, planBlockMessage('ACTIVATION_REQUIRED', null));
+    const allowed = await archive(alice);
+    assert.equal(allowed.status, 200, 'an active subscription runs its check work');
+    assert.ok(allowed.body.result, 'and gets the archive result');
+    assert.equal((await archive(admin)).status, 200, 'administrators are unaffected');
+    // academic-evidence's allowed path would query live academic providers, so its gate is checked directly.
+    const aliceSession = { id: await userIdOf(alice.email), email: alice.email, username: 'alice', role: 'user', corpusReuseConsented: true };
+    assert.equal(await checkWorkRefusal(db, aliceSession, canonicalSha256(checkText)), null, 'academic-evidence gate: active subscription passes');
+    pass('check work: signed-out 401; no / expired / suspended subscription 403 on /api/archive/match and /api/academic-evidence; active plan and admin pass');
+
+    // A check that started while the plan was active may finish its remaining check work after the plan expires:
+    // only for the exact manuscript its open authorization was issued for.
+    await grant(admin.cookie, { email: gina.email, action: 'reactivate' });
+    const auth = await issueAuthorization(gina, 0, checkText);
+    assert.equal(auth.status, 200);
+    const ginaId = await userIdOf(gina.email);
+    const issuedAt = Number((await db.execute({ sql: 'SELECT issued_at FROM account_check_authorizations WHERE id = ?', args: [auth.body.authorization] })).rows[0].issued_at);
+    const ginaExpiry = Number((await entitlementRow(gina.email)).expires_at);
+    await db.execute({ sql: 'UPDATE account_entitlements SET expires_at = ? WHERE user_id = ?', args: [issuedAt + 1, ginaId] });
+    assert.equal((await archive(gina)).status, 200, 'the authorized manuscript finishes its check work after expiry');
+    const other = await archive(gina, `${checkText} A different manuscript.`);
+    assert.equal(other.status, 403, 'any other manuscript is refused');
+    assert.equal(other.body.code, 'PLAN_EXPIRED');
+    pass('check work: a check authorized while the plan was active finishes after expiry, for its own manuscript only');
+
+    await db.execute({ sql: 'UPDATE account_entitlements SET expires_at = ? WHERE user_id = ?', args: [ginaExpiry, ginaId] });
+    await db.execute({ sql: 'UPDATE account_entitlements SET expires_at = ? WHERE user_id = ?', args: [hankExpiry, hankId] });
+    await db.execute({ sql: 'DELETE FROM account_check_authorizations WHERE user_id = ?', args: [ginaId] });
+
+    enforce(false);
+    assert.equal((await archive(null)).status, 200, 'enforcement off: the route behaves exactly as before (no sign-in needed)');
+    enforce(true);
+    pass('check work: with enforcement off, the check-work routes are unchanged');
+  } finally {
+    delete process.env.ARCHIVE_SERVER_SIDE_ENABLED;
+  }
 }
 
 // ── EXPIRY BOUNDARY: a check authorized before expiry may save once; nothing else may ──────────────────────────────

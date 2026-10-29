@@ -31,16 +31,25 @@ import {
  *    already-existing report (the AI result, a background retry, a resave) is never a new check and is never blocked —
  *    checks that already started always finish. Existing reports stay readable in every state.
  *
- * LEGACY FREE ACCESS (owner decision 2026-10-28): the first enforced request records, once and for good, when
- * enforcement began (account_activation_enforcement). An account registered BEFORE that moment, with no active or
- * suspended plan, keeps exactly the pre-feature policy (10 rooms, the daily cap) until LEGACY_GRACE_DAYS later; after
- * that it needs a plan like everyone else. An account registered at or after that moment gets no free access. A
- * suspended plan is never overridden by free access (the owner paused it on purpose); an expired one falls back to it
- * while the period lasts.
+ * NO FREE CHECKING (owner decision 2026-10-29): with the switch on, the ONLY way for a non-admin account to start a
+ * new check is an active plan — new and existing accounts alike. The check-work routes (/api/academic-evidence,
+ * /api/archive/match) refuse the same accounts through checkWorkRefusal, so nothing can be bypassed through the API.
+ *
+ * LEGACY FREE ACCESS — RETIRED, kept only behind ACCOUNT_ACTIVATION_LEGACY_GRACE_ENABLED (off unless explicitly set):
+ * the first enforced request records, once and for good, when enforcement began (account_activation_enforcement).
+ * With the grace flag on, an account registered BEFORE that moment, with no active or suspended plan, would keep the
+ * pre-feature policy (10 rooms, the daily cap) until LEGACY_GRACE_DAYS later. With it off (the intended behavior) the
+ * start is still recorded but grants nothing.
  */
 
 export function accountActivationEnforced(env: NodeJS.ProcessEnv = process.env): boolean {
   const raw = env.ACCOUNT_ACTIVATION_ENFORCED;
+  return raw === "1" || raw === "true";
+}
+
+/** The retired legacy free-access period — OFF unless ACCOUNT_ACTIVATION_LEGACY_GRACE_ENABLED is explicitly on. */
+export function legacyGraceEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = env.ACCOUNT_ACTIVATION_LEGACY_GRACE_ENABLED;
   return raw === "1" || raw === "true";
 }
 
@@ -114,9 +123,12 @@ export function registeredBeforeEnforcement(createdAt: string | null | undefined
   return createdMs !== null && createdMs < Math.floor(start.startedAt / 1000) * 1000;
 }
 
-/** When `userId`'s legacy free access ends, if the account is legacy (whether or not that moment has passed); else null. */
+/**
+ * When `userId`'s legacy free access ends, if the account is legacy (whether or not that moment has passed); else null.
+ * Always null while the retired grace period is switched off (legacyGraceEnabled), so no caller can grant it.
+ */
 export async function legacyGraceEndsAt(client: Executor, userId: string, start: EnforcementStart | null): Promise<number | null> {
-  if (!start) return null;
+  if (!start || !legacyGraceEnabled()) return null;
   const result = await client.execute({ sql: "SELECT created_at FROM users WHERE id = ?", args: [userId] });
   const createdAt = (result.rows[0] as unknown as { created_at: string } | undefined)?.created_at;
   return registeredBeforeEnforcement(createdAt, start) ? start.graceEndsAt : null;
@@ -336,6 +348,37 @@ export async function policyWithCheckAuthorization(
   if (!ref || policy.block?.code !== "PLAN_EXPIRED" || !policy.entitlement) return policy;
   if (!(await authorizationHonoured(client, userId, room, ref, policy.entitlement, nowMs))) return policy;
   return { ...policy, block: null, uploadRoomCount: policy.entitlement.rooms, usesRoomClaims: true, dailyCapApplies: false };
+}
+
+export type CheckWorkRefusal = { status: 401 | 403; code: PlanBlockCode | "SIGN_IN_REQUIRED"; message: string };
+
+/**
+ * The gate for the routes that do a check's server-side work before its save (/api/academic-evidence,
+ * /api/archive/match): with enforcement on, only a signed-in administrator or an account allowed to start a new
+ * check may use them, so an unsubscribed account cannot get similarity results through the API without saving a
+ * report either. A check that started while the plan was active still finishes: an open (unconsumed, unexpired)
+ * check authorization for this exact manuscript text, issued before the plan ended, lets its remaining work through.
+ * Returns null when the request may proceed; with enforcement off, always null (today's behaviour).
+ */
+export async function checkWorkRefusal(
+  client: Executor,
+  user: SessionUser | null,
+  textSha256: string,
+  nowMs: number = Date.now(),
+): Promise<CheckWorkRefusal | null> {
+  if (!accountActivationEnforced()) return null;
+  if (!user) return { status: 401, code: "SIGN_IN_REQUIRED", message: "Log in to check a document." };
+  const policy = await resolveRoomPolicy(client, user, nowMs);
+  if (!policy.block) return null;
+  if (policy.block.code === "PLAN_EXPIRED" && policy.entitlement) {
+    const open = await client.execute({
+      sql: `SELECT 1 FROM account_check_authorizations
+            WHERE user_id = ? AND text_sha256 = ? AND consumed_at IS NULL AND expires_at > ? AND issued_at < ? LIMIT 1`,
+      args: [user.id, textSha256, nowMs, policy.entitlement.expiresAt],
+    });
+    if (open.rows.length === 1) return null;
+  }
+  return { status: 403, code: policy.block.code, message: policy.block.message };
 }
 
 export type CheckAuthorizationIssue =

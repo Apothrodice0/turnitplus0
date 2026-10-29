@@ -4,6 +4,9 @@ import type { CSSProperties, RefObject } from "react";
 import { Check, LockKeyhole, UploadCloud } from "lucide-react";
 import { ReferenceFilesPanel } from "@/components/reports/reference-files-panel";
 import { displayedCheckPercent, progressEncouragement } from "@/lib/upload-progress";
+import type { UploadLock } from "@/lib/account-plan";
+
+export type { UploadLock };
 import type {
   ReferenceIntakeEntry,
   ReferenceRejection,
@@ -55,6 +58,14 @@ type Props = {
   complete?: boolean;
   /** UPLOAD PROGRESS: the analysed report could not be saved; offers to send the SAME report again (never a second report). */
   saveFailure?: { message: string; retrying: boolean; onRetry: () => void };
+  /**
+   * MANUAL SUBSCRIPTIONS (lib/account-entitlements.ts): set when this account may not start a new check here — no active
+   * subscription, or this room is cooling down / outside the plan. The upload area is then shown dimmed and locked: no
+   * file input, no drop target, no generate action. Display only — the server refuses the same checks on its own.
+   */
+  locked?: UploadLock | null;
+  /** The generate button's label; "Generate free report" unless the parent says otherwise (e.g. under a subscription). */
+  generateLabel?: string;
 };
 
 function ReferenceSection({ references, busy }: { references?: ReferencePanelProps; busy: boolean }) {
@@ -73,7 +84,37 @@ function ReferenceSection({ references, busy }: { references?: ReferencePanelPro
   );
 }
 
-export function DocumentUploadPanel({ file, isGeneratingReport, progress, processingLabel, fileInputRef, onChooseFile, onGenerate, references, complete = false, saveFailure }: Props) {
+export function DocumentUploadPanel({ file, isGeneratingReport, progress, processingLabel, fileInputRef, onChooseFile, onGenerate, references, complete = false, saveFailure, locked = null, generateLabel = "Generate free report" }: Props) {
+  if (locked && !isGeneratingReport && !saveFailure) {
+    // A check already running (or a save to retry) always finishes; only a NEW check is locked.
+    return (
+      <>
+        <div
+          className="drop-zone drop-zone-locked"
+          role="group"
+          aria-disabled="true"
+          aria-labelledby="upload-locked-title"
+          aria-describedby="upload-locked-message"
+          // Swallow drops so a file dragged onto the locked area is neither accepted nor opened by the browser.
+          onDragOver={(event) => event.preventDefault()}
+          onDrop={(event) => event.preventDefault()}
+        >
+          <span className="upload-icon drop-zone-locked-icon"><LockKeyhole aria-hidden="true" /></span>
+          <strong id="upload-locked-title">{locked.title}</strong>
+          <p id="upload-locked-message">
+            {locked.message}
+            {locked.contact ? <><br />{locked.contact}</> : null}
+          </p>
+          {locked.detail && <span className="drop-zone-locked-detail">{locked.detail}</span>}
+        </div>
+        <button className="button primary full upload-locked-action" type="button" disabled aria-disabled="true">
+          <LockKeyhole aria-hidden="true" />
+          {locked.actionLabel}
+        </button>
+        <p className="privacy-note"><LockKeyhole aria-hidden="true" /> Your account and existing reports remain available.</p>
+      </>
+    );
+  }
   if (saveFailure) {
     return (
       <>
@@ -161,7 +202,7 @@ export function DocumentUploadPanel({ file, isGeneratingReport, progress, proces
 
       <button className="button primary full" type="button" onClick={onGenerate}>
         <UploadCloud aria-hidden="true" />
-        Generate free report
+        {generateLabel}
       </button>
       <p className="privacy-note"><LockKeyhole aria-hidden="true" /> Documents are processed in your browser.</p>
     </>

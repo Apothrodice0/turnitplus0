@@ -93,7 +93,8 @@ test("Defect #1 (structural): RoomPageShell is rendered with an explicit room-de
   const page = await readRoomPage();
   assert.match(
     page,
-    /<RoomPageShell key=\{result\.room\} room=\{result\.room\} accountEmail=\{result\.accountEmail\} initialOccupant=\{result\.occupant\} \/>/,
+    // Manual subscriptions (2026-10-29) appends uploadLock/subscriptionEnforced props after these; the key is what matters.
+    /<RoomPageShell key=\{result\.room\} room=\{result\.room\} accountEmail=\{result\.accountEmail\} initialOccupant=\{result\.occupant\}[^>]* \/>/,
     "REQUIRED: key must be the same raw room number already threaded through save/read/poll — without it, React can reconcile consecutive renders at this JSX position as the SAME component instance across a room change, carrying over occupant/isGeneratingReport/progress/refs from whichever room was previously mounted here",
   );
 });

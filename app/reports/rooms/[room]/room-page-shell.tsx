@@ -51,7 +51,7 @@ import { normalizeExtractedText } from "@/lib/extracted-text-normalization";
 import { detectLanguage } from "@/lib/similarity-core";
 import { AI_MODEL_VERSION, AI_PASSAGE_LOG_ODDS_THRESHOLD, AI_PASSAGE_THRESHOLD } from "@/lib/ai-core";
 import { describeAiAnalysisError, type AiPrepStage } from "@/lib/ai-model-prep";
-import { DocumentUploadPanel } from "@/components/reports/document-upload-panel";
+import { DocumentUploadPanel, type UploadLock } from "@/components/reports/document-upload-panel";
 
 /**
  * The dedicated room page's client half: owns this ONE room's state, the
@@ -584,9 +584,13 @@ type Props = {
   room: number;
   accountEmail: string;
   initialOccupant: RoomContents;
+  /** Manual subscriptions: set server-side when this empty room cannot take a new check (app/reports/rooms/[room]/page.tsx). */
+  uploadLock?: UploadLock | null;
+  /** Whether subscription enforcement is on for this account (changes only the generate button's wording). */
+  subscriptionEnforced?: boolean;
 };
 
-export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
+export function RoomPageShell({ room, accountEmail, initialOccupant, uploadLock = null, subscriptionEnforced = false }: Props) {
   const [occupant, setOccupant] = useState<RoomContents>(initialOccupant);
   const [pollExhausted, setPollExhausted] = useState(false);
   const [file, setFile] = useState<File | null>(null);
@@ -1133,6 +1137,11 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
       notify("Your current document is still being analyzed.");
       return;
     }
+    // Manual subscriptions: the locked panel offers no action; this only guards against a stale handler.
+    if (uploadLock) {
+      notify(`${uploadLock.message}${uploadLock.contact ? ` ${uploadLock.contact}` : ""}`);
+      return;
+    }
     if (!file) {
       notify("Choose a document to generate the report.");
       return;
@@ -1344,8 +1353,8 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
             : "midnight UTC";
           notify(saveResult.error ?? `Daily upload limit reached. This report is saved on this device only until the limit resets at ${resetLabel}.`);
         } else if (saveResult.planBlocked) {
-          // Manual account activation: no active plan / room outside it. Resending cannot help until the owner acts.
-          notify(saveResult.error ?? "New checks need an active plan. Contact TurnitPlus to activate your account.");
+          // Manual subscriptions: no active subscription / room outside the plan. Resending cannot help until the owner acts.
+          notify(saveResult.error ?? "You need an active subscription before you can check documents. Please contact TurnitPlus to activate your plan.");
         } else if (saveResult.roomOccupied) {
           notify(saveResult.error ?? "This room already has an active check. Refresh to see it, or wait for it to reset.");
         } else if (saveResult.roomReuseNotReady) {
@@ -1465,6 +1474,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
     : occupant.report ? "Analysis in progress"
     : isGeneratingReport ? "Check in progress"
     : saveFailure ? "Report not saved yet"
+    : uploadLock ? "No new check available"
     : "Ready for a new check";
 
   return (
@@ -1497,6 +1507,8 @@ export function RoomPageShell({ room, accountEmail, initialOccupant }: Props) {
               onGenerate={runCheck}
               complete={progressComplete}
               saveFailure={saveFailure && !isGeneratingReport ? { message: saveFailure, retrying: retryingSave, onRetry: () => void retrySave() } : undefined}
+              locked={uploadLock}
+              generateLabel={subscriptionEnforced ? "Generate report" : undefined}
             />
           </div>
         )}

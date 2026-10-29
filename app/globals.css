@@ -1977,6 +1977,59 @@ main.report-main {
   cursor: wait;
 }
 
+.free-badge.free-badge-locked {
+  background: #e4ebee;
+  color: #4b636c;
+}
+
+/* MANUAL SUBSCRIPTIONS — the locked upload area (components/reports/document-upload-panel.tsx `locked`): the same drop
+   zone, dimmed and inert, with a lock badge and the subscription message. */
+.drop-zone.drop-zone-locked,
+.drop-zone.drop-zone-locked:hover {
+  border-style: solid;
+  border-color: #d3dee3;
+  background:
+    repeating-linear-gradient(135deg, rgba(99, 120, 129, 0.035) 0 10px, transparent 10px 20px),
+    #f3f6f7;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.drop-zone-locked-icon {
+  background: #e4ebee;
+  color: #5f7680;
+}
+
+.drop-zone.drop-zone-locked > strong {
+  color: #37515b;
+}
+
+.drop-zone.drop-zone-locked > p {
+  max-width: 420px;
+  margin-bottom: 0;
+  line-height: 1.55;
+}
+
+.drop-zone-locked-detail {
+  margin-top: 12px;
+  padding: 6px 11px;
+  border-radius: 999px;
+  background: #e9eff1;
+  color: #4b636c;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.button.primary.upload-locked-action,
+.button.primary.upload-locked-action:hover {
+  background: #c6d3d8;
+  border-color: #c6d3d8;
+  color: #f7fafb;
+  box-shadow: none;
+  cursor: not-allowed;
+  transform: none;
+}
+
 .upload-locked-panel {
   display: grid;
   margin-top: 20px;

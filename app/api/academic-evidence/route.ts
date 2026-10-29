@@ -7,6 +7,8 @@ import { recordAcademicSearchRunDiagnostics } from '../../../lib/academic-search
 import { canonicalSha256 } from '../../../lib/document-identity';
 import { requestedScoringNormalizationVersion } from '../../../lib/similarity-core';
 import { runWithScoringNormalization } from '../../../lib/scoring-normalization-scope';
+import { getSessionUser } from '../../../lib/auth-session';
+import { accountActivationEnforced, checkWorkRefusal } from '../../../lib/account-entitlements';
 
 /**
  * Phase 3: the one server endpoint the academic-search subsystem is reached
@@ -82,6 +84,20 @@ export async function POST(request: Request) {
     }
     if (text.length > MAX_TEXT_LENGTH) {
       return new NextResponse(JSON.stringify({ error: 'text is too long' }), { status: 413 });
+    }
+
+    // Manual subscriptions (lib/account-entitlements.ts checkWorkRefusal): with enforcement on, only an administrator
+    // or an account allowed to start a check may run this check work. Off: skipped entirely, exactly as before.
+    if (accountActivationEnforced()) {
+      const gateClient = await getReportsDbClient();
+      try {
+        const refusal = await checkWorkRefusal(gateClient, await getSessionUser(request, gateClient), canonicalSha256(text));
+        if (refusal) {
+          return new NextResponse(JSON.stringify({ error: refusal.message, code: refusal.code }), { status: refusal.status, headers: { 'Content-Type': 'application/json' } });
+        }
+      } finally {
+        gateClient.close();
+      }
     }
 
     const { evidence, stats, status, candidates, queries, retrievalDiagnostics } = await runWithScoringNormalization(

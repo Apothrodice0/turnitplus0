@@ -55,7 +55,8 @@ import { DocumentUploadPanel } from "@/components/reports/document-upload-panel"
 import { CHECK_STAGE_CEILING, CHECK_STAGE_LABELS, checkStagePercent, useProgressCreep } from "@/lib/upload-progress";
 import { IdentityFields, type IdentityFieldsHandle, type CollectedIdentity } from "@/components/auth/identity-fields";
 import { EmailVerificationStatus } from "@/components/account/email-verification-status";
-import { AccountPlanCard } from "@/components/account/account-plan-card";
+import { AccountPlanCard, fetchAccountPlan } from "@/components/account/account-plan-card";
+import { planStateBlockCode, uploadLockFor, type UploadLock } from "@/lib/account-plan";
 import { EmailVerificationModal, type EmailVerificationModalStage } from "@/components/account/email-verification-modal";
 import {
   analyzeAcademicEvidence,
@@ -273,6 +274,11 @@ export default function Home() {
   const [authMode, setAuthMode] = useState<AuthMode | null>(null);
   const [welcomeMode, setWelcomeMode] = useState<AuthMode | null>(null);
   const [account, setAccount] = useState<LocalAccount | null>(null);
+  // Manual subscriptions: the dashboard upload card's locked state for a signed-in account without an active
+  // subscription (GET /api/account/plan — display only; POST /api/reports and the check-work routes still refuse).
+  // null while enforcement is off, for administrators, and for an active plan.
+  const [checkLock, setCheckLock] = useState<UploadLock | null>(null);
+  const [subscriptionEnforced, setSubscriptionEnforced] = useState(false);
   const [emailVerification, setEmailVerification] = useState<EmailVerificationView | null>(null);
   const [emailVerifySending, setEmailVerifySending] = useState(false);
   const [emailVerifyNotice, setEmailVerifyNotice] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
@@ -418,6 +424,36 @@ export default function Home() {
     });
     void resolveAuthAndReports();
   }, []);
+
+  // Manual subscriptions: re-read this account's plan whenever the signed-in account changes.
+  const accountEmail = account?.email ?? null;
+  useEffect(() => {
+    let cancelled = false;
+    if (!accountEmail) {
+      queueMicrotask(() => {
+        if (cancelled) return;
+        setCheckLock(null);
+        setSubscriptionEnforced(false);
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
+    void fetchAccountPlan().then((plan) => {
+      if (cancelled || !plan || !plan.authenticated) return;
+      if (!plan.enforced || plan.exempt) {
+        setSubscriptionEnforced(plan.enforced);
+        setCheckLock(null);
+        return;
+      }
+      setSubscriptionEnforced(true);
+      const code = plan.graceEndsAt !== null ? null : planStateBlockCode(plan.state);
+      setCheckLock(code ? uploadLockFor(code, plan.expiresAt, plan.rooms?.allocated ?? null) : null);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [accountEmail]);
 
   // Cross-tab sign-out (production audit fix): the "storage" event fires in
   // every OTHER same-origin tab (never the one that made the write) the
@@ -1015,6 +1051,11 @@ export default function Home() {
       notify("Your current document is still being analyzed.");
       return;
     }
+    // Manual subscriptions: the locked card offers no action; this only guards against a stale handler.
+    if (checkLock) {
+      notify(`${checkLock.message}${checkLock.contact ? ` ${checkLock.contact}` : ""}`);
+      return;
+    }
     if (!file) {
       notify("Choose a document to generate the report.");
       return;
@@ -1548,7 +1589,9 @@ export default function Home() {
                     <h2>Upload your document</h2>
                     <span>PDF, DOCX, TXT, MD, HTML, or CSV · up to 10 MB</span>
                   </div>
-                  <span className="free-badge">FREE</span>
+                  {subscriptionEnforced
+                    ? checkLock && <span className="free-badge free-badge-locked">LOCKED</span>
+                    : <span className="free-badge">FREE</span>}
                 </div>
 
                 <DocumentUploadPanel
@@ -1559,6 +1602,8 @@ export default function Home() {
                   fileInputRef={fileInputRef}
                   onChooseFile={chooseFile}
                   onGenerate={generateReport}
+                  locked={checkLock}
+                  generateLabel={subscriptionEnforced ? "Generate report" : undefined}
                 />
               </section>
 
