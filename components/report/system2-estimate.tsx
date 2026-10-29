@@ -1,73 +1,88 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import Link from "next/link";
+import { LockKeyhole } from "lucide-react";
+import type { System2EstimateRecord } from "@/lib/system2-unified";
 
 /**
- * ENGLISH SYSTEM 2 — owner-only "Estimated Turnitin-like similarity" (research). Rendered ONLY when the server page
- * resolved `system2Enabled` for the signed-in owner (lib/system2-research.ts); ordinary customers never mount any of
- * this and never trigger a request.
+ * ENGLISH SYSTEM 2 — runs behind the scenes inside the normal analysis, owner-only (provisional, protected Preview).
+ * Everything here is mounted ONLY when the server page resolved `system2Enabled` for the signed-in owner
+ * (lib/system2-research.ts); ordinary customers never mount it and never trigger a request.
  *
- * Runs automatically as part of the room's normal analysis, right after the report is saved, using the SAME uploaded
- * Word file — but only if the owner ticked the consent option in the upload form before clicking Analyze. The document
- * is sent once, only to this report's owner-gated endpoint; the result (numbers and caveat text, never document content)
- * is kept on this device. It is a separate statistical estimate: it never changes, replaces or adds to the System 1
- * similarity score or the AI result.
+ * No separate System 2 feature is shown: the estimate only feeds the ONE similarity percentage
+ * (lib/system2-unified.ts). Because it is the one step that sends the document off the browser, it needs a one-time,
+ * informed authorization per account (asked once, at first use, in the room; withdrawable from the upload form's
+ * privacy line). Without it nothing is ever sent. The returned result (numbers and caveat text, never document
+ * content) is kept on this device, keyed by report.
  */
 
-export type System2Estimate = {
-  state: string;
-  estimate_shown: boolean;
-  final_text: string;
-  conservative_estimate_percent?: number;
-  warnings?: string[];
-};
-export type System2View = { status: "running" } | { status: "done"; result: System2Estimate } | { status: "not-requested" } | null;
-
 const resultKey = (reportId: string) => `tp:s2-estimate:${reportId}`;
-const CONSENT_KEY = "tp:s2-consent";
+const authorizationKey = (accountEmail: string) => `tp:s2-authorization:v1:${accountEmail.trim().toLowerCase()}`;
+const ESTIMATE_EVENT = "tp:s2-estimate";
 const MAX_BYTES = 4_000_000;
 const extensionOf = (name: string) => (name.match(/\.[^.]+$/)?.[0] ?? "").toLowerCase();
-const unavailable = (state: string, final_text: string): System2Estimate => ({ state, estimate_shown: false, final_text });
+const unavailable = (state: string, final_text: string): System2EstimateRecord => ({ state, estimate_shown: false, final_text });
 
-export function loadSystem2Estimate(reportId: string): System2Estimate | null {
+export type System2Authorization = "granted" | "declined" | null;
+
+export function loadSystem2Estimate(reportId: string): System2EstimateRecord | null {
   try {
     const raw = localStorage.getItem(resultKey(reportId));
-    return raw ? (JSON.parse(raw) as System2Estimate) : null;
+    return raw ? (JSON.parse(raw) as System2EstimateRecord) : null;
   } catch {
     return null;
   }
 }
-function storeSystem2Estimate(reportId: string, result: System2Estimate) {
+function storeSystem2Estimate(reportId: string, result: System2EstimateRecord) {
   try {
     localStorage.setItem(resultKey(reportId), JSON.stringify(result));
   } catch {
-    /* storage unavailable: the result is still shown for this session */
+    /* storage unavailable: the result still reaches open views through the event below */
+  }
+  if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent(ESTIMATE_EVENT, { detail: { reportId, result } }));
+}
+
+/** This report's stored estimate (read after hydration), kept current when the automatic request completes. */
+export function useSystem2Estimate(reportId: string | null | undefined, enabled: boolean): System2EstimateRecord | null {
+  const [state, setState] = useState<{ reportId: string; result: System2EstimateRecord | null } | null>(null);
+  useEffect(() => {
+    if (!enabled || !reportId) return;
+    setState({ reportId, result: loadSystem2Estimate(reportId) });
+    const onEstimate = (event: Event) => {
+      const detail = (event as CustomEvent<{ reportId: string; result: System2EstimateRecord }>).detail;
+      if (detail?.reportId === reportId) setState({ reportId, result: detail.result });
+    };
+    window.addEventListener(ESTIMATE_EVENT, onEstimate);
+    return () => window.removeEventListener(ESTIMATE_EVENT, onEstimate);
+  }, [reportId, enabled]);
+  return enabled && state && state.reportId === reportId ? state.result : null;
+}
+
+export function loadSystem2Authorization(accountEmail: string): System2Authorization {
+  try {
+    const raw = localStorage.getItem(authorizationKey(accountEmail));
+    const decision = raw ? (JSON.parse(raw) as { decision?: string }).decision : null;
+    return decision === "granted" || decision === "declined" ? decision : null;
+  } catch {
+    return null;
   }
 }
-export function loadSystem2Consent(): boolean {
+export function storeSystem2Authorization(accountEmail: string, decision: System2Authorization) {
   try {
-    return localStorage.getItem(CONSENT_KEY) === "granted";
+    if (decision) localStorage.setItem(authorizationKey(accountEmail), JSON.stringify({ decision, at: new Date().toISOString(), disclosure: "v1" }));
+    else localStorage.removeItem(authorizationKey(accountEmail));
   } catch {
-    return false;
-  }
-}
-export function storeSystem2Consent(granted: boolean) {
-  try {
-    if (granted) localStorage.setItem(CONSENT_KEY, "granted");
-    else localStorage.removeItem(CONSENT_KEY);
-  } catch {
-    /* ignore */
+    /* ignore: without stored authorization nothing is sent */
   }
 }
 
-/** The one automatic request, made by the room right after its report is saved. Never throws; never invents a score. */
-export async function requestSystem2Estimate(reportId: string, file: File): Promise<System2Estimate> {
-  let result: System2Estimate;
+/** The one automatic request, made by the room right after its report is saved — only for an authorized account. Never throws; never invents a score. */
+export async function requestSystem2Estimate(reportId: string, file: File): Promise<System2EstimateRecord> {
+  let result: System2EstimateRecord;
   if (extensionOf(file.name) !== ".docx") {
-    result = unavailable("UNSUPPORTED_FILE_TYPE", "Estimate unavailable: System 2 accepts English Word (.docx) manuscripts only. The document was not sent.");
+    result = unavailable("UNSUPPORTED_FILE_TYPE", "System 2 accepts English Word (.docx) manuscripts only. The document was not sent.");
   } else if (file.size > MAX_BYTES) {
-    result = unavailable("TOO_LARGE", "Estimate unavailable: the file is larger than 4 MB. The document was not sent.");
+    result = unavailable("TOO_LARGE", "The file is larger than 4 MB. The document was not sent.");
   } else {
     try {
       const res = await fetch(`/api/reports/${encodeURIComponent(reportId)}/system2`, {
@@ -77,84 +92,45 @@ export async function requestSystem2Estimate(reportId: string, file: File): Prom
         cache: "no-store",
         credentials: "same-origin",
       });
-      const body = (await res.json().catch(() => null)) as System2Estimate | null;
+      const body = (await res.json().catch(() => null)) as System2EstimateRecord | null;
       result = body && typeof body.final_text === "string" && typeof body.estimate_shown === "boolean"
         ? body
-        : unavailable("UNAVAILABLE", "Estimate unavailable: the System 2 service did not return a result.");
+        : unavailable("UNAVAILABLE", "The System 2 service did not return a result.");
     } catch {
-      result = unavailable("UNAVAILABLE", "Estimate unavailable: the System 2 service could not be reached.");
+      result = unavailable("UNAVAILABLE", "The System 2 service could not be reached.");
     }
   }
   storeSystem2Estimate(reportId, result);
   return result;
 }
 
-/** Consent + disclosure, shown inside the existing upload form (owner only), before the single Analyze click. */
-export function System2ConsentOption({ checked, onChange, disabled }: { checked: boolean; onChange: (checked: boolean) => void; disabled?: boolean }) {
+/** One-time onboarding disclosure + authorization, shown in the room until this account answers it. */
+export function System2AuthorizationNotice({ onDecide }: { onDecide: (decision: "granted" | "declined") => void }) {
   return (
-    <label className="s2-consent-option">
-      <input type="checkbox" checked={checked} disabled={disabled} onChange={(event) => onChange(event.target.checked)} />
-      <span>
-        <strong>Also estimate Turnitin-like similarity (System 2, research)</strong>
-        This sends the Word document once to TurnitPlus&apos;s private System 2 service, where it is processed in memory and not
-        stored. Similarity and AI analysis still run in your browser as usual.
-      </span>
-    </label>
-  );
-}
-
-/** The summary tile beside Similarity and AI in the existing room report card. */
-export function System2MetricTile({ view, reportId, room }: { view: System2View; reportId: string; room: number }) {
-  if (view?.status === "done" && view.result.estimate_shown) {
-    return (
-      <Link href={`/reports/${reportId}?room=${room}`} className="room-metric s2-estimate-tile s2-metric">
-        <span className="room-metric-label">Estimated Turnitin-like</span>
-        <strong className="room-metric-value">{view.result.conservative_estimate_percent}%</strong>
-        <span className="room-metric-sub">Statistical estimate</span>
-      </Link>
-    );
-  }
-  if (view?.status === "running") {
-    return (
-      <div className="room-metric room-metric-pending s2-metric">
-        <span className="room-metric-label">Estimated Turnitin-like</span>
-        <strong className="room-metric-value">···</strong>
-        <span className="room-metric-sub">Estimating…</span>
+    <section className="s2-auth-notice" aria-labelledby="s2-auth-title">
+      <h3 id="s2-auth-title">Server-assisted similarity (one-time authorization)</h3>
+      <p>
+        For English Word (.docx) documents, TurnitPlus can also send the document once, after your report is saved, to its
+        private estimation service. It is processed in memory and not stored, and its statistical estimate is used only
+        in your similarity percentage. Other files, AI analysis and source matching stay in your browser as usual.
+      </p>
+      <div className="s2-auth-actions">
+        <button type="button" className="button primary" onClick={() => onDecide("granted")}>Allow</button>
+        <button type="button" className="button secondary" onClick={() => onDecide("declined")}>Not now</button>
       </div>
-    );
-  }
-  return (
-    <div className="room-metric room-metric-unavailable s2-metric" title={view?.status === "done" ? view.result.final_text : undefined}>
-      <span className="room-metric-label">Estimated Turnitin-like</span>
-      <strong className="room-metric-value">—</strong>
-      <span className="room-metric-sub">{view?.status === "not-requested" ? "Not requested" : "Estimate unavailable"}</span>
-    </div>
-  );
-}
-
-export const SYSTEM2_ROOM_NOTE =
-  "Estimated Turnitin-like similarity is a research-only statistical estimate (0–20%), not a verified Turnitin result. It is shown separately and never added to the similarity score.";
-
-/** Read-only detail on the report page: the estimate and its caveats, from this device's stored result. */
-export function System2EstimateDetail({ reportId }: { reportId: string }) {
-  const [result, setResult] = useState<System2Estimate | null>(null);
-  useEffect(() => setResult(loadSystem2Estimate(reportId)), [reportId]); // device storage is read after hydration
-  const sentences = (result?.final_text ?? "").split(/(?<=\.)\s+(?=[A-Z])/).filter(Boolean);
-  return (
-    <section className="s2-estimate-detail" aria-label="Estimated Turnitin-like similarity">
-      <div className="s2-estimate-detail-head">
-        <span className="summary-chip">Estimated Turnitin-like similarity</span>
-        <strong>{result?.estimate_shown ? `${result.conservative_estimate_percent}%` : "Estimate unavailable"}</strong>
-        <span className="s2-estimate-detail-kind">Statistical estimate · research only · not added to the similarity score</span>
-      </div>
-      {result ? (
-        <ul>
-          {sentences.map((s, i) => <li key={i}>{s}</li>)}
-          {(result.warnings ?? []).map((w, i) => <li key={`w${i}`}>{w}</li>)}
-        </ul>
-      ) : (
-        <p>No System 2 estimate is stored for this report on this device.</p>
-      )}
     </section>
+  );
+}
+
+/** The upload form's privacy line for an account that decided — truthful about the transmission, with a way to change it. */
+export function System2PrivacyNote({ authorization, onChange }: { authorization: "granted" | "declined"; onChange: () => void }) {
+  return (
+    <p className="privacy-note">
+      <LockKeyhole aria-hidden="true" />{" "}
+      {authorization === "granted"
+        ? "Documents are processed in your browser; English Word documents are also sent once to TurnitPlus's private estimation service (not stored)."
+        : "Documents are processed in your browser."}{" "}
+      <button type="button" className="s2-privacy-change" onClick={onChange}>{authorization === "granted" ? "Withdraw" : "Review server-assisted similarity"}</button>
+    </p>
   );
 }

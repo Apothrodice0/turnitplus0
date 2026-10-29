@@ -55,8 +55,10 @@ type Props = {
   complete?: boolean;
   /** UPLOAD PROGRESS: the analysed report could not be saved; offers to send the SAME report again (never a second report). */
   saveFailure?: { message: string; retrying: boolean; onRetry: () => void };
-  /** Optional extra option shown just above the Generate button (owner-only System 2 consent in report rooms); omitted = unchanged form. */
+  /** Optional block shown just above the Generate button (the owner's one-time System 2 authorization in report rooms); omitted = unchanged form. */
   extraOption?: ReactNode;
+  /** Optional replacement for the privacy line (owner-only, when System 2 transmission is authorized); omitted = unchanged line. */
+  privacyNote?: ReactNode;
 };
 
 function ReferenceSection({ references, busy }: { references?: ReferencePanelProps; busy: boolean }) {
@@ -75,7 +77,7 @@ function ReferenceSection({ references, busy }: { references?: ReferencePanelPro
   );
 }
 
-export function DocumentUploadPanel({ file, isGeneratingReport, progress, processingLabel, fileInputRef, onChooseFile, onGenerate, references, complete = false, saveFailure, extraOption }: Props) {
+export function DocumentUploadPanel({ file, isGeneratingReport, progress, processingLabel, fileInputRef, onChooseFile, onGenerate, references, complete = false, saveFailure, extraOption, privacyNote }: Props) {
   if (saveFailure) {
     return (
       <>
@@ -167,7 +169,7 @@ export function DocumentUploadPanel({ file, isGeneratingReport, progress, proces
         <UploadCloud aria-hidden="true" />
         Generate free report
       </button>
-      <p className="privacy-note"><LockKeyhole aria-hidden="true" /> Documents are processed in your browser.</p>
+      {privacyNote ?? <p className="privacy-note"><LockKeyhole aria-hidden="true" /> Documents are processed in your browser.</p>}
     </>
   );
 }

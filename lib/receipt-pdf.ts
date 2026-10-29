@@ -24,6 +24,8 @@ export type ReceiptData = {
   matchedWordCount?: number;
   /** Visual-correction pass: the SAME "Completed" / "Needs attention" search-status text ReportV2Workspace's own toolbar already shows (vm.summary.completion.state), threaded through so the receipt's Final Result card never shows a second, independently-derived completion computation. Omitted (undefined) for a report with no V2 payload at all — there is no "search status" concept for it, so the row is left out entirely rather than guessed. */
   completionStatus?: string;
+  /** Owner-only provisional unified score: set only when a System 2 estimate raised the one similarity percentage above verified source coverage (lib/system2-unified.ts). */
+  statisticalEstimateNote?: string;
   unified?: {
     score: number;
     label: string;
@@ -291,6 +293,13 @@ export async function createReceiptPdf(report: ReceiptData, suppliedFonts?: Rece
   // recomputed here; omitted for a report with no V2 payload at all.
   if (report.completionStatus) {
     page.drawText(report.completionStatus, { x: detailX, y: detailY, size: 9.5, font: regular, color: colors.muted });
+    detailY -= 16;
+  }
+  if (report.statisticalEstimateNote) {
+    for (const line of wrapText(report.statisticalEstimateNote, regular, 8.5, CONTENT_RIGHT - detailX, 2)) {
+      page.drawText(line, { x: detailX, y: detailY, size: 8.5, font: regular, color: colors.muted });
+      detailY -= 11;
+    }
   }
 
   cursorY = cardBottom - 28;

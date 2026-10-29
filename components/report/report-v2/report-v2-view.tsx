@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import { similarityScoreBand } from "@/lib/ai-core";
 import { PRIMARY_SIMILARITY_BAND_LABELS, formatSimilarityPercent, type SimilarityReport } from "@/lib/report-types";
+import { UNIFIED_ESTIMATE_NOTE, unifiedPercentText, type UnifiedSimilarity } from "@/lib/system2-unified";
 import type { EvidenceInterpretationKind } from "@/lib/evidence-interpretation/kinds";
 import {
   buildReportV2ViewModel,
@@ -663,7 +664,7 @@ function PrintReportScope({ vm }: { vm: ReportV2ViewModel }) {
  * picks up the exact same `.print-report-bundle .report-paper` pagination
  * rules — one real page, real TurnitPlus branding, no "T+ integrity".
  */
-export function ReportV2PrintOverview({ report }: { report: SimilarityReport }) {
+export function ReportV2PrintOverview({ report, unified }: { report: SimilarityReport; unified?: UnifiedSimilarity }) {
   const vm = buildReportV2ViewModel(report);
   if (!vm) return null;
   // Summary-first pass: this page is now a standalone, self-contained
@@ -686,7 +687,7 @@ export function ReportV2PrintOverview({ report }: { report: SimilarityReport }) 
       <ReportPageHeader report={report} page={1} total={3} label="Similarity Overview" />
       <div className="paper-content">
         <div className="report-v2 report-v2-print">
-          <WorkspaceHero vm={vm} toolbarStatus={toolbarStatus} />
+          <WorkspaceHero vm={vm} toolbarStatus={toolbarStatus} unified={unified} />
           <div className="rv2-print-summary-grid">
             <PrintDocumentSummary report={report} vm={vm} />
             <PrintSourceSummary vm={vm} />
@@ -863,10 +864,12 @@ function rv2wsMatchTint(alpha: number): string {
  * values). Reads ONLY vm.summary — the identical authoritative numbers the
  * right-side inspector panel renders — so the two can never disagree.
  */
-function WorkspaceHero({ vm, toolbarStatus }: { vm: ReportV2ViewModel; toolbarStatus: string }) {
+function WorkspaceHero({ vm, toolbarStatus, unified }: { vm: ReportV2ViewModel; toolbarStatus: string; unified?: UnifiedSimilarity }) {
   const { verifiedSimilarityPercent, matchedWordCount, totalWordCount, matchingEvidenceEntries } = vm.summary;
-  const verdict = similarityScoreBand(verifiedSimilarityPercent);
-  const percentDisplay = formatSimilarityPercent(verifiedSimilarityPercent, matchedWordCount);
+  // `unified` (owner-only provisional, lib/system2-unified.ts) replaces only the ONE headline percentage and its band;
+  // matched words, sources and highlights below stay System 1's verified evidence.
+  const verdict = similarityScoreBand(unified ? unified.percent : verifiedSimilarityPercent);
+  const percentDisplay = unified ? unifiedPercentText(unified, matchedWordCount) : formatSimilarityPercent(verifiedSimilarityPercent, matchedWordCount);
   return (
     <section className="rv2ws-hero" aria-labelledby="rv2ws-hero-title">
       <p className="paper-kicker">SIMILARITY ANALYSIS</p>
@@ -876,6 +879,7 @@ function WorkspaceHero({ vm, toolbarStatus }: { vm: ReportV2ViewModel; toolbarSt
       <p className="rv2ws-hero-sub">
         The percentage of analyzed words that overlap matching evidence.
       </p>
+      {unified?.includesStatisticalEstimate && <p className="unified-estimate-note">{UNIFIED_ESTIMATE_NOTE}</p>}
 
       <div className={`rv2ws-hero-band${verdict ? ` rv2ws-hero-band-${verdict.key}` : ""}`}>
         <div className="rv2ws-hero-band-score">
@@ -1084,8 +1088,11 @@ export function ReportV2Workspace({
   onDownloadReceipt,
   isDownloadingReceipt = false,
   onShowLegacy,
+  unified,
 }: {
   report: SimilarityReport;
+  /** Owner-only provisional unified similarity (lib/system2-unified.ts); omitted = System 1's percentage, unchanged. */
+  unified?: UnifiedSimilarity;
   /** Existing window.print() mechanism, unchanged — this redesign task explicitly does not touch PDF export; this only relocates the same action into the compact workspace toolbar. */
   onDownloadReport?: () => void;
   onDownloadReceipt?: () => void;
@@ -1137,8 +1144,8 @@ export function ReportV2Workspace({
     setSelection((current) => stepWorkspaceSelection(current, sortedRefs.length, delta));
   }
 
-  const verdict = similarityScoreBand(vm.summary.verifiedSimilarityPercent);
-  const percentDisplay = formatSimilarityPercent(vm.summary.verifiedSimilarityPercent, vm.summary.matchedWordCount);
+  const verdict = similarityScoreBand(unified ? unified.percent : vm.summary.verifiedSimilarityPercent);
+  const percentDisplay = unified ? unifiedPercentText(unified, vm.summary.matchedWordCount) : formatSimilarityPercent(vm.summary.verifiedSimilarityPercent, vm.summary.matchedWordCount);
   const selectedSourceIndex = selectedSource ? vm.sources.findIndex((s) => s.id === selectedSource.id) : -1;
   // Concise version of the SAME state CompletionStrip renders in full below
   // — never a second, independently-derived completion computation.
@@ -1174,7 +1181,7 @@ export function ReportV2Workspace({
         <div className="rv2ws-manuscript-pane">
           <article className="rv2ws-page">
             <p className="rv2ws-page-number">Page 1</p>
-            <WorkspaceHero vm={vm} toolbarStatus={toolbarStatus} />
+            <WorkspaceHero vm={vm} toolbarStatus={toolbarStatus} unified={unified} />
           </article>
           <div className="rv2ws-match-review-heading">
             <p className="paper-kicker">MATCH REVIEW</p>
@@ -1189,6 +1196,7 @@ export function ReportV2Workspace({
               <span>Similarity</span>
               <strong>{percentDisplay}</strong>
               {verdict && <em>{PRIMARY_SIMILARITY_BAND_LABELS[verdict.key]}</em>}
+              {unified?.includesStatisticalEstimate && <p className="unified-estimate-note">{UNIFIED_ESTIMATE_NOTE}</p>}
               <div className="rv2ws-score-metrics">
                 <div><b>{vm.summary.matchedWordCount.toLocaleString()}</b><span>Matched words</span></div>
                 <div><b>{vm.summary.totalWordCount.toLocaleString()}</b><span>Analyzed</span></div>

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { unifySimilarity } from "../lib/system2-unified.ts";
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -52,6 +53,7 @@ test("System 2 product route reproduces the accepted local v2 tester exactly", {
     const expected = JSON.parse(v2.stdout);
     const KEYS = ["state", "estimate_shown", "conservative_estimate_percent", "final_text", "warnings", "language_check", "report_category", "report_signals", "analyzable_words"];
     let matched = 0;
+    let unifiedChecked = 0;
     for (const f of fixtures) {
       const body = fs.readFileSync(f);
       const r = await route.POST(new Request("http://localhost/api/reports/parity-report/system2", { method: "POST",
@@ -60,9 +62,15 @@ test("System 2 product route reproduces the accepted local v2 tester exactly", {
       for (const k of KEYS) assert.deepEqual(got[k], exp[k], `${path.basename(f)}: field ${k}`);
       const strip = (d) => { if (!d) return d; const { frozen_files_verified, ...rest } = d; return rest; };
       assert.deepEqual(strip(got.diagnostics), strip(exp.diagnostics), `${path.basename(f)}: diagnostics`);
+      // Provisional unified score on the REAL model output: max(System 1, System 2) when shown, else System 1 unchanged.
+      for (const s1 of [0, 10, 25]) {
+        const u = unifySimilarity(s1, got);
+        assert.equal(u.percent, exp.estimate_shown ? Math.max(s1, exp.conservative_estimate_percent) : s1, `${path.basename(f)}: unified @ S1=${s1}`);
+        if (exp.estimate_shown) unifiedChecked += 1;
+      }
       matched += 1;
     }
-    console.log(`parity: ${matched}/${fixtures.length} fixtures identical`);
+    console.log(`parity: ${matched}/${fixtures.length} fixtures identical; unified max-rule checks on real estimates: ${unifiedChecked}`);
     assert.equal(matched, fixtures.length);
   } finally {
     py.kill();

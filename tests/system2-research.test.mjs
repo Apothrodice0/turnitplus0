@@ -179,7 +179,7 @@ test("Trusted Sources: the Vercel OIDC token is sent in x-vercel-trusted-oidc-id
   if (saved !== undefined) process.env.VERCEL = saved;
 });
 
-test("wiring: both report pages resolve the flag server-side; shells default it off; System 2 runs inside the ONE analyze action", async () => {
+test("wiring: one analyze action, one similarity percentage; System 2 only behind the scenes, after one-time authorization", async () => {
   const roomPage = await readFile(new URL("../app/reports/rooms/[room]/page.tsx", import.meta.url), "utf8");
   assert.match(roomPage, /system2Enabled: isSystem2ResearchUser\(sessionUser\)/);
   assert.match(roomPage, /system2Enabled=\{result\.system2Enabled\}/);
@@ -189,32 +189,41 @@ test("wiring: both report pages resolve the flag server-side; shells default it 
 
   const roomShell = await readFile(new URL("../app/reports/rooms/[room]/room-page-shell.tsx", import.meta.url), "utf8");
   assert.match(roomShell, /system2Enabled = false \}: Props/);
-  // consent is part of the existing upload form, owner only
-  assert.match(roomShell, /extraOption=\{system2Enabled \? \(\s*<System2ConsentOption checked=\{s2Consent\}/);
-  // the click captures the submitted file + consent; the save hands them to ONE automatic request, never awaited
-  assert.match(roomShell, /s2PendingRef\.current = system2Enabled \? \{ file: submittedFile, consent: s2Consent \} : null;/);
+  // one-time account authorization (onboarding notice only while undecided), never a per-document checkbox
+  assert.match(roomShell, /extraOption=\{system2Enabled && s2Authorization === null \? <System2AuthorizationNotice onDecide=\{decideSystem2\} \/> : undefined\}/);
+  assert.doesNotMatch(roomShell, /System2ConsentOption|s2Consent|type="checkbox"/);
+  // the click hands the submitted file on ONLY when authorized; the save starts the ONE automatic request, never awaited
+  assert.match(roomShell, /s2PendingRef\.current = system2Enabled && s2Authorization === "granted" \? submittedFile : null;/);
   const afterSave = roomShell.indexOf('setOccupant({ status: "processing", report: summary');
-  const start = roomShell.indexOf("if (s2Pending) startSystem2Estimate(summary.id, s2Pending);");
-  assert.ok(afterSave > 0 && start > afterSave && start - afterSave < 600, "System 2 starts right after the report is saved");
-  assert.match(roomShell, /if \(!pending\.consent\) \{\s*setS2View\(\{ reportId, view: \{ status: "not-requested" \} \}\);\s*return;/, "no consent: nothing is sent");
-  assert.match(roomShell, /void requestSystem2Estimate\(reportId, pending\.file\)/);
-  // the estimate is its own tile beside Similarity, in each state of the existing summary card
-  const tiles = roomShell.match(/<SimilarityMetricTile report=\{occupant\.report\} room=\{room\} \/>\s*\{system2Enabled && <System2MetricTile /g) ?? [];
-  assert.equal(tiles.length, 3);
-  assert.doesNotMatch(roomShell, /System2ResearchPanel|Run System 2 estimate/, "no separate card or manual button");
+  const start = roomShell.indexOf("if (s2Pending) void requestSystem2Estimate(summary.id, s2Pending);");
+  assert.ok(afterSave > 0 && start > afterSave && start - afterSave < 800, "System 2 starts right after the report is saved");
+  // the original three tiles: AI, Similarity (now the one unified %), Receipt; no System 2 tile, card or button
+  // customers keep the exact original tile; only the owner's wrapper feeds it the stored System 2 estimate
+  assert.equal((roomShell.match(/\{system2Enabled \? <UnifiedSimilarityMetricTile report=\{occupant\.report\} room=\{room\} \/> : <SimilarityMetricTile report=\{occupant\.report\} room=\{room\} \/>\}/g) ?? []).length, 3);
+  assert.doesNotMatch(roomShell, /System2MetricTile|System2ResearchPanel|SYSTEM2_ROOM_NOTE|Estimated Turnitin-like|Run System 2 estimate/);
+  assert.match(roomShell, /const unified = unifySimilarity\(score, system2Estimate\);/);
+  assert.match(roomShell, /<strong className="room-metric-value">\{unified\.percent\}%<\/strong>/);
 
   const detailShell = await readFile(new URL("../app/reports/[id]/report-detail-shell.tsx", import.meta.url), "utf8");
   assert.match(detailShell, /system2Enabled = false,/);
-  assert.match(detailShell, /\{system2Enabled && mode !== "ai" && <System2EstimateDetail reportId=\{id\} \/>\}/);
+  assert.match(detailShell, /const unified = system2Enabled \? unifySimilarity\(primaryScore, system2Estimate\) : undefined;/, "customers: unified is undefined, every view unchanged");
+  assert.match(detailShell, /unified=\{unified\}\r?\n\s*\/>/, "the customer workspace shows the one unified percentage");
+  assert.equal((detailShell.match(/<OverviewReport report=\{report\} similarityStatus=\{effectiveSimilarityStatus\} \/>/g) ?? []).length, 3, "admin-only legacy diagnostic views keep System 1's verified figure");
+  assert.match(detailShell, /<ReportV2PrintOverview report=\{report\} unified=\{unified\} \/>/);
+  assert.match(detailShell, /await downloadReceipt\(report, system2Enabled \? system2Estimate : null\);/);
+  assert.doesNotMatch(detailShell, /System2EstimateDetail|System2ResearchPanel/);
   await assert.rejects(readFile(new URL("../components/report/system2-research-panel.tsx", import.meta.url), "utf8"), "the manual panel is removed");
+
+  // highlights and sources stay System 1's: the V2 view only swaps the headline percentage and band
+  const v2 = await readFile(new URL("../components/report/report-v2/report-v2-view.tsx", import.meta.url), "utf8");
+  assert.match(v2, /<SourceCard key=\{card\.id\} card=\{card\} verifiedPercent=\{vm\.summary\.verifiedSimilarityPercent\}/, "per-source percentages stay relative to verified evidence");
 
   const client = await readFile(new URL("../components/report/system2-estimate.tsx", import.meta.url), "utf8");
   assert.match(client, /"x-s2-consent": "granted"/);
   assert.match(client, /extensionOf\(file\.name\) !== "\.docx"[\s\S]*?The document was not sent/, "non-Word files are never sent");
-  assert.doesNotMatch(client, /<button/, "no System 2 button");
+  assert.doesNotMatch(client, /Run System 2|type="checkbox"/, "no System 2 button or per-document checkbox");
   assert.doesNotMatch(client, /S2_INFERENCE|S2_RESEARCH|process\.env/, "no server configuration in client code");
   assert.doesNotMatch(client, /oidc|trusted-oidc/i, "no token handling in client code");
-  assert.doesNotMatch(client, /similarityPercent|overall|\+ ?conservative_estimate_percent/i, "never combined with the similarity score");
   const lib = await readFile(new URL("../lib/system2-research.ts", import.meta.url), "utf8");
   assert.match(lib, /import \{ getVercelOidcToken \} from "@vercel\/oidc";/);
   assert.match(lib, /headers\["x-vercel-trusted-oidc-idp-token"\] = token/);
@@ -225,7 +234,7 @@ test.after(() => {
   for (const suffix of ["", "-wal", "-shm"]) if (fs.existsSync(`${dbFile}${suffix}`)) try { fs.unlinkSync(`${dbFile}${suffix}`); } catch { /* still open */ }
 });
 
-test("client: the automatic request sends a Word file once with consent; other files are never sent; never throws", async () => {
+test("client: the automatic request sends a Word file once; other files are never sent; never throws; authorization is per account", async () => {
   const client = await import("../components/report/system2-estimate.tsx");
   const store = new Map();
   const savedFetch = globalThis.fetch; const savedStorage = globalThis.localStorage;
@@ -240,11 +249,17 @@ test("client: the automatic request sends a Word file once with consent; other f
     const ok = await client.requestSystem2Estimate("r-ok", new File([DOCX_BYTES], "paper.docx"));
     assert.equal(ok.conservative_estimate_percent, 8); assert.equal(sent.length, 1);
     assert.equal(sent[0].url, "/api/reports/r-ok/system2"); assert.equal(sent[0].headers["x-s2-consent"], "granted"); assert.equal(sent[0].bytes, DOCX_BYTES.length);
-    assert.deepEqual(client.loadSystem2Estimate("r-ok"), ok, "kept on this device for the report page");
+    assert.deepEqual(client.loadSystem2Estimate("r-ok"), ok, "kept on this device for the report page and receipt");
     globalThis.fetch = async () => { throw new Error("offline"); };
     const down = await client.requestSystem2Estimate("r-down", new File([DOCX_BYTES], "paper.docx"));
-    assert.equal(down.estimate_shown, false); assert.match(down.final_text, /^Estimate unavailable/);
-    assert.equal(client.loadSystem2Consent(), false); client.storeSystem2Consent(true); assert.equal(client.loadSystem2Consent(), true);
+    assert.equal(down.estimate_shown, false); assert.equal(down.state, "UNAVAILABLE");
+    // one-time authorization, per account: undecided = null; decisions persist; withdrawal is recorded
+    assert.equal(client.loadSystem2Authorization("Owner@Example.test"), null);
+    client.storeSystem2Authorization("owner@example.test", "granted");
+    assert.equal(client.loadSystem2Authorization("OWNER@example.test"), "granted");
+    assert.equal(client.loadSystem2Authorization("someone-else@example.test"), null, "another account is not authorized");
+    client.storeSystem2Authorization("owner@example.test", "declined");
+    assert.equal(client.loadSystem2Authorization("owner@example.test"), "declined");
   } finally {
     globalThis.fetch = savedFetch; if (savedStorage === undefined) delete globalThis.localStorage; else globalThis.localStorage = savedStorage;
   }
