@@ -6,11 +6,13 @@ import { CheckCircle2, Info, Loader2, PauseCircle, PlayCircle, RefreshCw, Search
 import {
   formatPlanDate,
   formatPlanDateTime,
+  MAX_PLAN_DAYS,
   MAX_PLAN_ROOMS,
+  MIN_PLAN_DAYS,
   MIN_PLAN_ROOMS,
-  PLAN_DURATION_DAYS,
+  PLAN_DURATION_PRESETS,
+  PLAN_ROOM_PRESETS,
   type Entitlement,
-  type PlanDurationDays,
   type PlanState,
 } from "@/lib/account-plan";
 
@@ -20,14 +22,16 @@ import {
  * component only collects input and shows the server's answers. Dates are the server's (UTC).
  *
  * Flow: email + duration + rooms -> "Activate Account" -> exact account lookup -> server preview (dry run) ->
- * confirmation dialog -> commit with a per-confirmation operation id and the reviewed plan version. The confirm
+ * confirmation dialog -> commit with a per-confirmation operation id, the reviewed plan version and the reviewed
+ * account id (the plan is bound to that account, never re-targeted by email). Only a verified account can be given
+ * access; the server refuses an unverified one and this console says so before asking. The confirm
  * button is disabled while the request is in flight, and a retry after a lost answer re-sends the SAME operation id,
  * which the server answers from its record instead of applying the change twice.
  */
 
 type Action = "activate" | "renew" | "adjust_rooms" | "suspend" | "reactivate";
 
-type AccountSummary = { email: string; username: string; registeredAt: number | null; emailVerified: boolean | null; isAdmin: boolean };
+type AccountSummary = { userId: string; email: string; username: string; registeredAt: number | null; emailVerified: boolean | null; isAdmin: boolean };
 type ActivationEvent = {
   operationId: string;
   action: Action;
@@ -40,7 +44,17 @@ type ActivationEvent = {
 };
 type Lookup =
   | { found: false; email: string }
-  | { found: true; account: AccountSummary; entitlement: Entitlement | null; state: PlanState; roomsBusy: number; history: ActivationEvent[]; serverNow: number };
+  | {
+      found: true;
+      account: AccountSummary;
+      entitlement: Entitlement | null;
+      state: PlanState;
+      roomsBusy: number;
+      history: ActivationEvent[];
+      enforcementStartedAt: number | null;
+      legacyGraceEndsAt: number | null;
+      serverNow: number;
+    };
 type Preview = {
   action: Action;
   account: AccountSummary;
@@ -51,11 +65,11 @@ type Preview = {
   extensionStartsAt: number | null;
   reason: string | null;
   busyRoomsAboveNewCount: number;
-  requiresUnverifiedConfirmation: boolean;
   expectedVersion: number;
+  expectedUserId: string;
   serverNow: number;
 };
-type ListRow = { email: string; username: string; emailVerified: boolean | null; planDays: number; activatedAt: number; expiresAt: number; rooms: number; roomsAvailable: number; state: PlanState };
+type ListRow = { userId: string; email: string; username: string; emailVerified: boolean | null; planDays: number; activatedAt: number; expiresAt: number; rooms: number; roomsAvailable: number; state: PlanState };
 type ListData = { rows: ListRow[]; total: number; page: number; pageSize: number };
 
 const ACTION_TITLE: Record<Action, string> = {
@@ -95,6 +109,14 @@ function newOperationId(): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
+function parseDays(raw: string): number | null {
+  if (!/^\d{1,4}$/.test(raw.trim())) return null;
+  const value = Number(raw.trim());
+  return value >= MIN_PLAN_DAYS && value <= MAX_PLAN_DAYS ? value : null;
+}
+
+const UNVERIFIED_MESSAGE = "This customer has not verified their email address yet. Ask them to verify it from their TurnitPlus account, then look them up again.";
+
 function parseRooms(raw: string): number | null {
   if (!/^\d{1,4}$/.test(raw.trim())) return null;
   const value = Number(raw.trim());
@@ -115,7 +137,9 @@ function VerifiedBadge({ verified }: { verified: boolean | null }) {
 
 export function AccountActivationConsole({ enforcement }: { enforcement: boolean }) {
   const [email, setEmail] = useState("");
-  const [planDays, setPlanDays] = useState<PlanDurationDays | null>(null);
+  /** A preset (number) or "custom" (then daysInput holds the typed number of days). */
+  const [duration, setDuration] = useState<number | "custom" | null>(null);
+  const [daysInput, setDaysInput] = useState("");
   const [roomsInput, setRoomsInput] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
   const [busy, setBusy] = useState<null | "lookup" | "preview">(null);
@@ -127,8 +151,6 @@ export function AccountActivationConsole({ enforcement }: { enforcement: boolean
     preview: Preview;
     operationId: string;
     reason: string;
-    /** The admin ticked "I confirmed this customer's identity" for an unverified email (never pre-ticked). */
-    unverifiedConfirmed: boolean;
     submitting: boolean;
     error: string | null;
     input: { action: Action; planDays?: number; rooms?: number };
@@ -194,7 +216,7 @@ export function AccountActivationConsole({ enforcement }: { enforcement: boolean
       setFormError(result.error);
       return;
     }
-    setDialog({ preview: result.data.preview, operationId: newOperationId(), reason: "", unverifiedConfirmed: false, submitting: false, error: null, input });
+    setDialog({ preview: result.data.preview, operationId: newOperationId(), reason: "", submitting: false, error: null, input });
   }
 
   function validateEmail(): string | null {
@@ -219,7 +241,9 @@ export function AccountActivationConsole({ enforcement }: { enforcement: boolean
     setFormError(null);
     const target = validateEmail();
     if (!target) return;
-    if (planDays === null) return setFormError("Choose a plan duration: 30, 90, 180 or 360 days.");
+    if (duration === null) return setFormError(`Choose a plan duration: ${PLAN_DURATION_PRESETS.join(", ")} days, or a custom number of days.`);
+    const planDays = duration === "custom" ? parseDays(daysInput) : duration;
+    if (planDays === null) return setFormError(`Custom duration must be a whole number of days from ${MIN_PLAN_DAYS} to ${MAX_PLAN_DAYS}.`);
     const rooms = parseRooms(roomsInput);
     const current = lookup && lookup.found && lookup.account.email === target.toLowerCase() ? lookup : null;
     const renewing = current?.entitlement && (current.state === "active" || current.state === "suspended");
@@ -231,6 +255,7 @@ export function AccountActivationConsole({ enforcement }: { enforcement: boolean
     if (!found) return;
     if (!found.found) return;
     if (found.account.isAdmin) return setFormError("This is an administrator account. Administrators are never restricted and do not need activation.");
+    if (found.account.emailVerified !== true) return setFormError(UNVERIFIED_MESSAGE);
     if (!current && found.entitlement && (found.state === "active" || found.state === "suspended")) {
       // Never silently turn an activation into something else: show the existing plan first.
       accountCardRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
@@ -249,6 +274,7 @@ export function AccountActivationConsole({ enforcement }: { enforcement: boolean
       if (rooms === null) return setFormError(`Enter the corrected Number of Rooms (${MIN_PLAN_ROOMS}–${MAX_PLAN_ROOMS}), then choose Adjust rooms.`);
       return openPreview({ action, rooms }, lookup.account.email);
     }
+    if (action === "reactivate" && lookup.account.emailVerified !== true) return setFormError(UNVERIFIED_MESSAGE);
     return openPreview({ action }, lookup.account.email);
   }
 
@@ -257,10 +283,6 @@ export function AccountActivationConsole({ enforcement }: { enforcement: boolean
     const reasonRequired = dialog.preview.action === "adjust_rooms" || dialog.preview.action === "suspend";
     if (reasonRequired && dialog.reason.trim().length < 3) {
       setDialog({ ...dialog, error: "Please write a short reason for this change." });
-      return;
-    }
-    if (dialog.preview.requiresUnverifiedConfirmation && !dialog.unverifiedConfirmed) {
-      setDialog({ ...dialog, error: "Tick the box to confirm you checked this customer's identity yourself." });
       return;
     }
     const sent = dialog;
@@ -274,7 +296,7 @@ export function AccountActivationConsole({ enforcement }: { enforcement: boolean
         reason: sent.reason.trim() || undefined,
         operationId: sent.operationId,
         expectedVersion: sent.preview.expectedVersion,
-        ...(sent.preview.requiresUnverifiedConfirmation ? { confirmUnverifiedEmail: sent.unverifiedConfirmed } : {}),
+        expectedUserId: sent.preview.expectedUserId,
       },
     );
     if (!result.ok) {
@@ -313,7 +335,7 @@ export function AccountActivationConsole({ enforcement }: { enforcement: boolean
       )}
 
       <section className="admin-card aa-form-card" aria-labelledby="aa-form-title">
-        <h2 id="aa-form-title">Activate a customer</h2>
+        <h2 id="aa-form-title">Activate or renew a subscription</h2>
         <form className="aa-form" onSubmit={onFind} noValidate>
           <label className="aa-field">
             <span>Customer Email</span>
@@ -335,32 +357,67 @@ export function AccountActivationConsole({ enforcement }: { enforcement: boolean
                 {busy === "lookup" ? <Loader2 className="aa-spin" aria-hidden="true" /> : <Search aria-hidden="true" />} Find account
               </button>
             </div>
-            <small id="aa-email-hint">The email the customer registered with. The account must already exist.</small>
+            <small id="aa-email-hint">The email the customer registered with. The account must already exist and its email must be verified.</small>
           </label>
 
           <fieldset className="aa-field aa-durations">
             <legend>Plan Duration</legend>
             <div className="aa-segmented" role="radiogroup" aria-label="Plan Duration">
-              {PLAN_DURATION_DAYS.map((days) => (
+              {[...PLAN_DURATION_PRESETS, "custom" as const].map((option) => (
                 <button
-                  key={days}
+                  key={option}
                   type="button"
                   role="radio"
-                  aria-checked={planDays === days}
-                  className={`aa-segment${planDays === days ? " aa-segment-selected" : ""}`}
+                  aria-checked={duration === option}
+                  className={`aa-segment${duration === option ? " aa-segment-selected" : ""}`}
                   onClick={() => {
-                    setPlanDays(days);
+                    setDuration(option);
                     setFormError(null);
                   }}
                 >
-                  {days} days
+                  {option === "custom" ? "Custom" : `${option} days`}
                 </button>
               ))}
             </div>
+            {duration === "custom" && (
+              <label className="aa-custom-days">
+                <span>Number of days</span>
+                <input
+                  type="number"
+                  inputMode="numeric"
+                  min={MIN_PLAN_DAYS}
+                  max={MAX_PLAN_DAYS}
+                  step={1}
+                  placeholder="e.g. 45"
+                  value={daysInput}
+                  onChange={(event) => {
+                    setDaysInput(event.target.value);
+                    setFormError(null);
+                  }}
+                />
+                <small>Any whole number of days from {MIN_PLAN_DAYS} to {MAX_PLAN_DAYS}.</small>
+              </label>
+            )}
           </fieldset>
 
           <label className="aa-field aa-rooms">
             <span>Number of Rooms</span>
+            <div className="aa-segmented aa-room-presets" role="group" aria-label="Room presets">
+              {PLAN_ROOM_PRESETS.map((rooms) => (
+                <button
+                  key={rooms}
+                  type="button"
+                  aria-pressed={roomsInput.trim() === String(rooms)}
+                  className={`aa-segment${roomsInput.trim() === String(rooms) ? " aa-segment-selected" : ""}`}
+                  onClick={() => {
+                    setRoomsInput(String(rooms));
+                    setFormError(null);
+                  }}
+                >
+                  {rooms}
+                </button>
+              ))}
+            </div>
             <input
               type="number"
               inputMode="numeric"
@@ -374,7 +431,7 @@ export function AccountActivationConsole({ enforcement }: { enforcement: boolean
                 setFormError(null);
               }}
             />
-            <small>Each room takes one document and is free again 24 hours after its upload ({MIN_PLAN_ROOMS}–{MAX_PLAN_ROOMS}).{hasCurrentPlan ? " Leave empty to keep the current rooms when renewing." : ""}</small>
+            <small>Choose a preset or type any number ({MIN_PLAN_ROOMS}–{MAX_PLAN_ROOMS}). Each room takes one document and is free again 24 hours after its upload.{hasCurrentPlan ? " Leave empty to keep the current rooms when renewing." : ""}</small>
           </label>
 
           {formError && <p className="admin-form-error" role="alert">{formError}</p>}
@@ -422,17 +479,25 @@ export function AccountActivationConsole({ enforcement }: { enforcement: boolean
             </div>
           </div>
 
-          {found.account.emailVerified === false && (
+          {!found.account.isAdmin && found.account.emailVerified !== true && (
             <div className="aa-unverified-warning" role="note">
               <TriangleAlert aria-hidden="true" />
               <div>
-                <strong>Email not verified</strong>
+                <strong>Email not verified — cannot be activated yet</strong>
                 <span>
-                  The customer has not confirmed this address. You can still activate the account, but you will be asked to confirm
-                  that you checked the customer&apos;s identity yourself. The customer can verify it from their Account page (Verify email).
+                  The customer has not confirmed this address, so TurnitPlus will not activate, renew or reactivate a plan for it. Ask the
+                  customer to verify it from their Account page (Verify email), then look them up again.
                 </span>
               </div>
             </div>
+          )}
+          {!found.account.isAdmin && found.legacyGraceEndsAt !== null && (
+            <p className="aa-note">
+              <Info aria-hidden="true" />{" "}
+              {found.legacyGraceEndsAt > found.serverNow
+                ? `Existing account: free access (10 rooms, 10 uploads per day) continues until ${formatPlanDateTime(found.legacyGraceEndsAt)} unless a plan is active.`
+                : `Existing account: free access ended ${formatPlanDateTime(found.legacyGraceEndsAt)}.`}
+            </p>
           )}
           {found.account.isAdmin && <p className="aa-note"><Info aria-hidden="true" /> Administrator accounts are never restricted and do not need activation.</p>}
 
@@ -484,7 +549,7 @@ export function AccountActivationConsole({ enforcement }: { enforcement: boolean
                       <span>
                         {event.next.planDays} days · {event.previous && event.previous.rooms !== event.next.rooms ? `${event.previous.rooms} → ` : ""}{event.next.rooms} rooms ·
                         until {formatPlanDate(event.next.expiresAt)}{event.reason ? ` · “${event.reason}”` : ""}
-                        {event.targetEmailVerified === false ? " · email was unverified (confirmed by admin)" : ""}
+                        {event.targetEmailVerified === false ? " · email was unverified" : ""}
                       </span>
                     </li>
                   ))}
@@ -496,7 +561,7 @@ export function AccountActivationConsole({ enforcement }: { enforcement: boolean
       )}
 
       <section className="admin-card aa-list" aria-labelledby="aa-list-title">
-        <h2 id="aa-list-title">Activated customers</h2>
+        <h2 id="aa-list-title">Customer subscriptions</h2>
         <div className="admin-corpus-toolbar aa-list-toolbar">
           <label>
             Search by email
@@ -528,7 +593,7 @@ export function AccountActivationConsole({ enforcement }: { enforcement: boolean
         </div>
         {listError && <p className="admin-form-error" role="alert">{listError}</p>}
         {listLoading && !list && <p className="admin-corpus-loading">Loading…</p>}
-        {list && list.rows.length === 0 && !listLoading && <p className="admin-corpus-empty">No activated customers match.</p>}
+        {list && list.rows.length === 0 && !listLoading && <p className="admin-corpus-empty">No subscriptions match.</p>}
         {list && list.rows.length > 0 && (
           <>
             <div className="admin-table-scroll">
@@ -548,7 +613,7 @@ export function AccountActivationConsole({ enforcement }: { enforcement: boolean
                 </thead>
                 <tbody>
                   {list.rows.map((row) => (
-                    <tr key={row.email}>
+                    <tr key={row.userId}>
                       <td className="aa-email-cell">{row.email}</td>
                       <td><VerifiedBadge verified={row.emailVerified} /></td>
                       <td>{row.planDays} days</td>
@@ -577,27 +642,6 @@ export function AccountActivationConsole({ enforcement }: { enforcement: boolean
           <div role="dialog" aria-modal="true" aria-labelledby="aa-dialog-title" className="aa-dialog">
             <h2 id="aa-dialog-title">{ACTION_TITLE[dialog.preview.action]}?</h2>
             <p>Check the details. Nothing changes until you confirm.</p>
-            {dialog.preview.requiresUnverifiedConfirmation && (
-              <div className="aa-unverified-warning" role="alert">
-                <TriangleAlert aria-hidden="true" />
-                <div>
-                  <strong>This email address is not verified.</strong>
-                  <span>
-                    TurnitPlus has not confirmed that {dialog.preview.account.email} belongs to the person who paid. Only continue if you
-                    confirmed the customer&apos;s identity yourself (for example in your WhatsApp or Facebook conversation).
-                  </span>
-                  <label className="aa-unverified-confirm">
-                    <input
-                      type="checkbox"
-                      checked={dialog.unverifiedConfirmed}
-                      disabled={dialog.submitting}
-                      onChange={(event) => setDialog({ ...dialog, unverifiedConfirmed: event.target.checked, error: null })}
-                    />
-                    I confirmed this customer&apos;s identity and want to grant access to this unverified account.
-                  </label>
-                </div>
-              </div>
-            )}
             <ConfirmationSummary preview={dialog.preview} />
             <label>
               Reason {dialog.preview.action === "adjust_rooms" || dialog.preview.action === "suspend" ? "(required)" : "(optional)"}
@@ -616,7 +660,7 @@ export function AccountActivationConsole({ enforcement }: { enforcement: boolean
                 type="button"
                 className={dialog.preview.action === "suspend" ? "admin-dialog-danger" : "aa-button aa-button-primary"}
                 onClick={() => void onConfirm()}
-                disabled={dialog.submitting || (dialog.preview.requiresUnverifiedConfirmation && !dialog.unverifiedConfirmed)}
+                disabled={dialog.submitting}
               >
                 {dialog.submitting ? <><Loader2 className="aa-spin" aria-hidden="true" /> Saving…</> : `Confirm ${dialog.preview.action === "activate" ? "activation" : ACTION_TITLE[dialog.preview.action].toLowerCase()}`}
               </button>

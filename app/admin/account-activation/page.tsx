@@ -13,7 +13,7 @@ export const dynamic = "force-dynamic";
 export async function generateMetadata(): Promise<Metadata> {
   const admin = await loadAdminGate();
   if (!admin) return {};
-  return { title: "Account Activation · Admin · TurnitPlus", robots: { index: false, follow: false, nocache: true, googleBot: { index: false, follow: false } } };
+  return { title: "Subscriptions · Admin · TurnitPlus", robots: { index: false, follow: false, nocache: true, googleBot: { index: false, follow: false } } };
 }
 
 export default async function AccountActivationPage() {
@@ -24,8 +24,8 @@ export default async function AccountActivationPage() {
     <main className="developer-page admin-activation-page">
       <AdminHeader
         icon={UserCheck}
-        title="Account Activation"
-        description="Activate a registered customer after arranging payment with them directly. Choose the plan duration and how many rooms the account receives."
+        title="Accounts & Subscriptions"
+        description="Activate a registered, verified customer after arranging payment with them directly. Choose the plan duration and how many rooms the account receives; renew, adjust, suspend or reactivate it later."
       />
       <AccountActivationConsole enforcement={accountActivationEnforced()} />
     </main>

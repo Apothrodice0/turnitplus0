@@ -13,6 +13,7 @@ import {
   MAX_EMAIL_LENGTH,
   planActivationChange,
   resolveAccountId,
+  UNVERIFIED_EMAIL_ERROR,
 } from '../../../../../lib/account-activation-admin';
 import { planStateOf } from '../../../../../lib/account-plan';
 
@@ -24,8 +25,8 @@ import { planStateOf } from '../../../../../lib/account-plan';
  *
  *  - dryRun: true  -> the exact change the server would make right now (server clock), with the plan version to
  *                     confirm against. Zero writes.
- *  - dryRun: false -> requires operationId (a UUID the console generates once per confirmation) and expectedVersion
- *                     (from the preview). Answered 200 only after the plan and its audit row have committed; a repeat
+ *  - dryRun: false -> requires operationId (a UUID the console generates once per confirmation), expectedVersion and
+ *                     expectedUserId (both from the preview): the change applies only to the account that was reviewed. Answered 200 only after the plan and its audit row have committed; a repeat
  *                     of the same operationId is answered from the stored result ("replayed") and changes nothing.
  */
 export async function POST(request: Request) {
@@ -49,6 +50,9 @@ export async function POST(request: Request) {
         if ('conflict' in lookup) return adminJsonResponse({ error: 'More than one account has this email — refusing to guess.' }, 409);
         if (!lookup.found) return adminJsonResponse({ error: 'No account found for this email. Ask the customer to register first.', code: 'NOT_FOUND' }, 404);
         if (lookup.account.isAdmin) return adminJsonResponse({ error: 'Administrator accounts are never restricted and do not need activation.', code: 'ADMIN_ACCOUNT' }, 409);
+        if (actionGrantsAccess(body.action) && lookup.account.emailVerified !== true) {
+          return adminJsonResponse({ error: UNVERIFIED_EMAIL_ERROR, code: 'UNVERIFIED_EMAIL' }, 409);
+        }
         const planned = planActivationChange(lookup.entitlement, input, now);
         if (!planned.ok) return adminJsonResponse({ error: planned.error }, planned.status);
         let busyRoomsAboveNewCount = 0;
@@ -68,9 +72,8 @@ export async function POST(request: Request) {
               extensionStartsAt: planned.extensionStartsAt,
               reason: planned.reason,
               busyRoomsAboveNewCount,
-              // The console must show the unverified-email warning and collect an explicit confirmation.
-              requiresUnverifiedConfirmation: actionGrantsAccess(planned.action) && lookup.account.emailVerified === false,
               expectedVersion: lookup.entitlement?.version ?? 0,
+              expectedUserId: lookup.account.userId,
               serverNow: now,
             },
           },
@@ -82,12 +85,15 @@ export async function POST(request: Request) {
       if (typeof body.expectedVersion !== 'number' || !Number.isInteger(body.expectedVersion) || body.expectedVersion < 0) {
         return adminJsonResponse({ error: 'expectedVersion is required — review the change first.' }, 400);
       }
+      if (typeof body.expectedUserId !== 'string' || body.expectedUserId.length === 0 || body.expectedUserId.length > 64) {
+        return adminJsonResponse({ error: 'expectedUserId is required — review the change first.' }, 400);
+      }
       const result = await applyActivationAction(() => getReportsDbClient(), admin, {
         ...input,
         email,
+        expectedUserId: body.expectedUserId,
         operationId: body.operationId,
         expectedVersion: body.expectedVersion,
-        confirmUnverifiedEmail: body.confirmUnverifiedEmail === true,
       });
       if (result.outcome === 'rejected') {
         return adminJsonResponse({ error: result.error, ...(result.code ? { code: result.code } : {}) }, result.status);

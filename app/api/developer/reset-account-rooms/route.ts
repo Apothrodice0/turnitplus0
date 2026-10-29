@@ -199,7 +199,7 @@ export async function POST(request: Request) {
       const result = await deleteAllReportDataForAccount(client, accountId, {
         preserveActivelyPromotedRepresentations: true,
       });
-      // Manual account activation (drizzle/0056): an admin clearing these rooms means them to be free now, so their
+      // Manual account activation (drizzle/0057): an admin clearing these rooms means them to be free now, so their
       // server-clock cooldowns go too. Only this admin tool does this — a customer deleting a report never does.
       if (await entitlementTablesExist(client)) {
         await client.execute({ sql: 'DELETE FROM account_room_claims WHERE user_id = ?', args: [accountId] });

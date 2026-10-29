@@ -42,13 +42,6 @@ export default async function AdminHomePage() {
       <p className="admin-launcher-intro">Internal diagnostics and controls for the detection pipeline — not visible to ordinary accounts.</p>
       <div className="admin-launcher-grid">
         <AdminWorkspaceCard
-          href="/admin/account-activation"
-          icon={UserCheck}
-          title="Account Activation"
-          description="Activate, renew, adjust or pause a customer's plan — duration and number of rooms."
-          ctaLabel="Activate accounts"
-        />
-        <AdminWorkspaceCard
           href="/admin/corpus"
           icon={Database}
           title="Corpus"
@@ -75,6 +68,13 @@ export default async function AdminHomePage() {
         >
           <ArchiveCardMetrics metrics={archiveMetrics} />
         </AdminWorkspaceCard>
+        <AdminWorkspaceCard
+          href="/admin/account-activation"
+          icon={UserCheck}
+          title="Accounts & Subscriptions"
+          description="Find a verified customer by email, then activate, renew, adjust, suspend or reactivate their plan — duration and number of rooms."
+          ctaLabel="Manage subscriptions"
+        />
       </div>
     </main>
   );

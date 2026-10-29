@@ -9,18 +9,33 @@
  * customer upload into rooms 1..N, each on its own 24 h cooldown, until the plan expires. Rooms are not consumed.
  */
 
-/** The only durations the owner sells. Never a calendar month: a plan lasts exactly this many 24 h days. */
-export const PLAN_DURATION_DAYS = [30, 90, 180, 360] as const;
-export type PlanDurationDays = (typeof PLAN_DURATION_DAYS)[number];
+/**
+ * Plan duration (owner decision 2026-10-28): any whole number of days from MIN_PLAN_DAYS to MAX_PLAN_DAYS, with the
+ * console offering PLAN_DURATION_PRESETS. Never a calendar month: a plan lasts exactly this many 24 h days. The same
+ * bounds are a CHECK constraint on account_entitlements.plan_days (drizzle/0057).
+ */
+export const MIN_PLAN_DAYS = 1;
+export const MAX_PLAN_DAYS = 3650;
+export const PLAN_DURATION_PRESETS = [30, 60, 90, 180, 360] as const;
+export type PlanDurationDays = number;
 
 export const MIN_PLAN_ROOMS = 1;
 /** Upper bound the owner chose for a plan's room count (each room is a slot the room list renders). */
 export const MAX_PLAN_ROOMS = 100;
+/** Room counts the console offers as one-click presets; any whole number in range can be typed. */
+export const PLAN_ROOM_PRESETS = [5, 10, 20, 40] as const;
 
 export const DAY_MS = 24 * 60 * 60 * 1000;
 
+/**
+ * Legacy free access (owner decision 2026-10-28): accounts registered before enforcement first switched on keep
+ * today's free limits (10 rooms, 10 uploads per UTC day) for this many days after that moment. The moment is stored
+ * once, in account_activation_enforcement (drizzle/0057), and never changes.
+ */
+export const LEGACY_GRACE_DAYS = 30;
+
 export function isPlanDurationDays(value: unknown): value is PlanDurationDays {
-  return typeof value === "number" && (PLAN_DURATION_DAYS as readonly number[]).includes(value);
+  return typeof value === "number" && Number.isInteger(value) && value >= MIN_PLAN_DAYS && value <= MAX_PLAN_DAYS;
 }
 
 export function isValidPlanRooms(value: unknown): value is number {
@@ -104,4 +119,9 @@ export function planBlockMessage(code: PlanBlockCode, entitlement: Entitlement |
     case "ACTIVATION_UNAVAILABLE":
       return "New checks are temporarily unavailable. Please try again later.";
   }
+}
+
+/** The customer-facing sentence while an existing account is in its legacy free-access period. */
+export function legacyGraceMessage(endsAt: number): string {
+  return `Your free access (10 rooms, 10 uploads per day) continues until ${formatPlanDate(endsAt)}. Contact TurnitPlus to activate a plan before then.`;
 }

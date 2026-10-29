@@ -2,7 +2,10 @@ import type { Client, Transaction } from "@libsql/client";
 import type { SessionUser } from "./auth-session";
 import { getRoomCountForRole, isWithinActiveCycle, ROOM_CYCLE_MS } from "./report-rooms";
 import {
+  DAY_MS,
   isPlanDurationDays,
+  LEGACY_GRACE_DAYS,
+  legacyGraceMessage,
   planBlockMessage,
   planStateOf,
   type Entitlement,
@@ -11,7 +14,7 @@ import {
 } from "./account-plan";
 
 /**
- * Manual account activation — the server-side policy (drizzle/0056). The ONLY place that decides, for one signed-in
+ * Manual account activation — the server-side policy (drizzle/0057). The ONLY place that decides, for one signed-in
  * account, how many rooms it has, whether the daily upload cap applies, and whether it may start a new check.
  * app/api/reports/route.ts (POST + room GET), app/api/reports/rooms/route.ts, app/reports/rooms/[room]/page.tsx,
  * app/api/upload-limit/route.ts and app/api/account/plan/route.ts all ask resolveRoomPolicy; none of them decides on
@@ -20,13 +23,20 @@ import {
  * ACCOUNT_ACTIVATION_ENFORCED switch:
  *  - OFF (the default): every answer is exactly the pre-feature one — getRoomCountForRole's 10/40 rooms, the daily cap
  *    for non-admin accounts, nothing blocked — and no entitlement table is read at all, so an environment without
- *    drizzle/0056 behaves exactly as before.
+ *    drizzle/0057 behaves exactly as before.
  *  - ON: administrator accounts are unaffected (their 40 rooms, no cap). A customer account may start a new check only
  *    with an active plan (not expired, not suspended), only in rooms 1..plan.rooms, and without the daily cap. Every
  *    room keeps its own 24 h cooldown, measured from the SERVER's clock (account_room_claims) as well as from the
  *    report's own createdAt, so deleting a report or back-dating createdAt can never free a room early. A save of an
  *    already-existing report (the AI result, a background retry, a resave) is never a new check and is never blocked —
  *    checks that already started always finish. Existing reports stay readable in every state.
+ *
+ * LEGACY FREE ACCESS (owner decision 2026-10-28): the first enforced request records, once and for good, when
+ * enforcement began (account_activation_enforcement). An account registered BEFORE that moment, with no active or
+ * suspended plan, keeps exactly the pre-feature policy (10 rooms, the daily cap) until LEGACY_GRACE_DAYS later; after
+ * that it needs a plan like everyone else. An account registered at or after that moment gets no free access. A
+ * suspended plan is never overridden by free access (the owner paused it on purpose); an expired one falls back to it
+ * while the period lasts.
  */
 
 export function accountActivationEnforced(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -38,21 +48,78 @@ type Executor = Pick<Client, "execute"> | Pick<Transaction, "execute">;
 
 let tablesKnownPresent = false;
 
-/** Whether drizzle/0056 has been applied. A positive answer is remembered for the process; a negative one is re-checked. */
+/** Whether drizzle/0057 has been applied. A positive answer is remembered for the process; a negative one is re-checked. */
 export async function entitlementTablesExist(client: Executor): Promise<boolean> {
   if (tablesKnownPresent) return true;
   const result = await client.execute({
-    sql: "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name IN ('account_entitlements', 'account_entitlement_events', 'account_room_claims', 'account_check_authorizations')",
+    sql: "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name IN ('account_entitlements', 'account_entitlement_events', 'account_room_claims', 'account_check_authorizations', 'account_activation_enforcement')",
     args: [],
   });
-  const present = Number((result.rows[0] as unknown as { n: number | bigint }).n) === 4;
+  const present = Number((result.rows[0] as unknown as { n: number | bigint }).n) === 5;
   if (present) tablesKnownPresent = true;
   return present;
 }
 
-/** Tests only: forget the remembered table check (a test may drop or recreate its database). */
+/** Tests only: forget everything remembered for the process (a test may drop or recreate its database, or simulate a restart). */
 export function resetEntitlementTableCacheForTest(): void {
   tablesKnownPresent = false;
+  enforcementStartCache = null;
+}
+
+export type EnforcementStart = { startedAt: number; graceEndsAt: number };
+let enforcementStartCache: EnforcementStart | null = null;
+
+/** The recorded start of enforcement on this database, or null if it has never been switched on. Never writes. */
+export async function readEnforcementStart(client: Executor): Promise<EnforcementStart | null> {
+  if (enforcementStartCache) return enforcementStartCache;
+  const result = await client.execute({ sql: "SELECT started_at, grace_ends_at FROM account_activation_enforcement WHERE id = 1", args: [] });
+  const row = result.rows[0] as unknown as { started_at: number | bigint; grace_ends_at: number | bigint } | undefined;
+  if (!row) return null;
+  enforcementStartCache = { startedAt: Number(row.started_at), graceEndsAt: Number(row.grace_ends_at) };
+  return enforcementStartCache;
+}
+
+/**
+ * The start of enforcement, recording `nowMs` as that start if none exists yet. INSERT OR IGNORE plus the table's
+ * single-row key make the first writer win even under concurrent first requests, and its triggers make the row
+ * immutable, so the answer never changes for this database once given.
+ */
+export async function ensureEnforcementStart(client: Executor, nowMs: number): Promise<EnforcementStart> {
+  const existing = await readEnforcementStart(client);
+  if (existing) return existing;
+  await client.execute({
+    sql: "INSERT OR IGNORE INTO account_activation_enforcement (id, started_at, grace_ends_at) VALUES (1, ?, ?)",
+    args: [nowMs, nowMs + LEGACY_GRACE_DAYS * DAY_MS],
+  });
+  const recorded = await readEnforcementStart(client);
+  if (!recorded) throw new Error("account_activation_enforcement: start was not recorded");
+  return recorded;
+}
+
+/** "YYYY-MM-DD HH:MM:SS" (SQLite CURRENT_TIMESTAMP, UTC) or ISO -> epoch ms, or null. */
+export function sqliteTimestampMs(value: string | null | undefined): number | null {
+  if (!value) return null;
+  const iso = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value) ? `${value.replace(" ", "T")}Z` : value;
+  const ms = Date.parse(iso);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+/**
+ * Whether an account registered at `createdAt` (users.created_at) predates enforcement. users.created_at has one-second
+ * precision, so an account created within the second enforcement began is treated as new (never as legacy); an
+ * unreadable timestamp is treated as new too.
+ */
+export function registeredBeforeEnforcement(createdAt: string | null | undefined, start: EnforcementStart): boolean {
+  const createdMs = sqliteTimestampMs(createdAt);
+  return createdMs !== null && createdMs < Math.floor(start.startedAt / 1000) * 1000;
+}
+
+/** When `userId`'s legacy free access ends, if the account is legacy (whether or not that moment has passed); else null. */
+export async function legacyGraceEndsAt(client: Executor, userId: string, start: EnforcementStart | null): Promise<number | null> {
+  if (!start) return null;
+  const result = await client.execute({ sql: "SELECT created_at FROM users WHERE id = ?", args: [userId] });
+  const createdAt = (result.rows[0] as unknown as { created_at: string } | undefined)?.created_at;
+  return registeredBeforeEnforcement(createdAt, start) ? start.graceEndsAt : null;
 }
 
 type EntitlementRow = {
@@ -109,6 +176,8 @@ export type RoomPolicy = {
   usesRoomClaims: boolean;
   entitlement: Entitlement | null;
   state: PlanState | null;
+  /** Set while this account is in its legacy free-access period (it then gets exactly the pre-feature policy). */
+  grace: { endsAt: number } | null;
 };
 
 function baselinePolicy(user: SessionUser): RoomPolicy {
@@ -122,6 +191,7 @@ function baselinePolicy(user: SessionUser): RoomPolicy {
     usesRoomClaims: false,
     entitlement: null,
     state: null,
+    grace: null,
   };
 }
 
@@ -135,11 +205,16 @@ async function highestUsedRoomCount(client: Executor, userId: string): Promise<n
 }
 
 export async function resolveRoomPolicy(client: Executor, user: SessionUser, nowMs: number = Date.now()): Promise<RoomPolicy> {
-  if (!accountActivationEnforced() || user.role === "admin") return baselinePolicy(user);
+  if (!accountActivationEnforced()) return baselinePolicy(user);
+
+  const tablesPresent = await entitlementTablesExist(client);
+  // Any enforced request (an administrator's too) fixes the start of enforcement on this database, once.
+  const start = tablesPresent ? await ensureEnforcementStart(client, nowMs) : null;
+  if (user.role === "admin") return baselinePolicy(user);
 
   const usedRooms = await highestUsedRoomCount(client, user.id);
-  if (!(await entitlementTablesExist(client))) {
-    // Switched on without drizzle/0056: fail closed for new checks, keep every existing report reachable.
+  if (!tablesPresent) {
+    // Switched on without drizzle/0057: fail closed for new checks, keep every existing report reachable.
     const code: PlanBlockCode = "ACTIVATION_UNAVAILABLE";
     return {
       enforced: true,
@@ -150,6 +225,7 @@ export async function resolveRoomPolicy(client: Executor, user: SessionUser, now
       usesRoomClaims: false,
       entitlement: null,
       state: null,
+      grace: null,
     };
   }
 
@@ -165,7 +241,23 @@ export async function resolveRoomPolicy(client: Executor, user: SessionUser, now
       usesRoomClaims: true,
       entitlement,
       state,
+      grace: null,
     };
+  }
+  if (state !== "suspended") {
+    const graceEndsAt = await legacyGraceEndsAt(client, user.id, start);
+    if (graceEndsAt !== null && nowMs < graceEndsAt) {
+      // Legacy free access: exactly the pre-feature policy (10 rooms, the daily cap, no room claims), with every
+      // room that already holds a report (for instance under an expired plan) still listed.
+      const baseline = baselinePolicy(user);
+      return {
+        ...baseline,
+        visibleRoomCount: Math.max(baseline.visibleRoomCount, entitlement?.rooms ?? 0, usedRooms),
+        entitlement,
+        state,
+        grace: { endsAt: graceEndsAt },
+      };
+    }
   }
   const code: PlanBlockCode = state === "none" ? "ACTIVATION_REQUIRED" : state === "expired" ? "PLAN_EXPIRED" : "ACCOUNT_SUSPENDED";
   return {
@@ -177,6 +269,7 @@ export async function resolveRoomPolicy(client: Executor, user: SessionUser, now
     usesRoomClaims: true,
     entitlement,
     state,
+    grace: null,
   };
 }
 
@@ -386,6 +479,8 @@ export type CustomerPlanView =
       activatedAt: number | null;
       expiresAt: number | null;
       rooms: { allocated: number; available: number; cooling: number } | null;
+      /** While set, the account is in its legacy free-access period (pre-feature limits) until this moment. */
+      graceEndsAt: number | null;
       message: string | null;
     };
 
@@ -394,7 +489,7 @@ export async function buildCustomerPlanView(client: Executor, user: SessionUser,
   if (user.role === "admin") return { enforced: true, exempt: true };
   const policy = await resolveRoomPolicy(client, user, nowMs);
   if (policy.block?.code === "ACTIVATION_UNAVAILABLE") {
-    return { enforced: true, exempt: false, state: "unavailable", planDays: null, activatedAt: null, expiresAt: null, rooms: null, message: policy.block.message };
+    return { enforced: true, exempt: false, state: "unavailable", planDays: null, activatedAt: null, expiresAt: null, rooms: null, graceEndsAt: null, message: policy.block.message };
   }
   const entitlement = policy.entitlement;
   let rooms: { allocated: number; available: number; cooling: number } | null = null;
@@ -416,6 +511,7 @@ export async function buildCustomerPlanView(client: Executor, user: SessionUser,
     activatedAt: entitlement?.activatedAt ?? null,
     expiresAt: entitlement?.expiresAt ?? null,
     rooms,
-    message: policy.block?.message ?? null,
+    graceEndsAt: policy.grace?.endsAt ?? null,
+    message: policy.grace ? legacyGraceMessage(policy.grace.endsAt) : policy.block?.message ?? null,
   };
 }

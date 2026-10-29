@@ -47,11 +47,13 @@ export function AccountPlanCard() {
   if (!plan || !plan.authenticated || !plan.enforced || plan.exempt) return null;
 
   const state = plan.state;
+  // An existing account in its legacy free-access period keeps the old free limits; the message gives the end date.
+  const label = plan.graceEndsAt !== null ? "Free access" : STATE_LABEL[state] ?? state;
   return (
     <section className={`account-plan-card account-plan-${state}`} aria-labelledby="account-plan-title">
       <div className="account-plan-head">
         <h3 id="account-plan-title">Your plan</h3>
-        <span className={`account-plan-status account-plan-status-${state}`}>{STATE_LABEL[state] ?? state}</span>
+        <span className={`account-plan-status account-plan-status-${state}`}>{label}</span>
       </div>
       {plan.planDays !== null && plan.expiresAt !== null ? (
         <dl className="account-plan-grid">

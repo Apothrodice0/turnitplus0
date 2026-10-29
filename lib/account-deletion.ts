@@ -286,8 +286,8 @@ export async function deleteAccountData(client: Client, accountId: string): Prom
  * that row is.
  */
 export async function invalidateSessionsAndDeleteUser(client: Client, accountId: string): Promise<void> {
-  // Manual account activation (drizzle/0056): the account's plan, room claims and check authorizations go with it.
-  // Checked before the transaction so a database without 0056 deletes accounts exactly as before. The admin audit trail
+  // Manual account activation (drizzle/0057): the account's plan, room claims and check authorizations go with it.
+  // Checked before the transaction so a database without 0057 deletes accounts exactly as before. The admin audit trail
   // (account_entitlement_events) is KEPT — it is the owner's record of what was granted — and, for an account that ever
   // had a plan, ends with one minimal 'account_deleted' record: the account id, its email, the plan it held and when.
   // Nothing else: no manuscript content, password hash, session or other authentication secret is ever written there.

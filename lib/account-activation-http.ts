@@ -32,7 +32,7 @@ export async function openAccountActivationRequest(
     }
     if (!(await entitlementTablesExist(client))) {
       client.close();
-      return { response: adminJsonResponse({ error: "Account activation needs database migration 0056_account_entitlements before it can be used." }, 503) };
+      return { response: adminJsonResponse({ error: "Account activation needs database migration 0057_account_subscriptions before it can be used." }, 503) };
     }
     return { admin, client };
   } catch (err) {

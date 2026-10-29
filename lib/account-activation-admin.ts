@@ -5,13 +5,18 @@ import {
   ENTITLEMENT_COLUMNS,
   entitlementFromRow,
   entitlementTablesExist,
+  legacyGraceEndsAt,
   readBusyRooms,
+  readEnforcementStart,
   readEntitlement,
+  sqliteTimestampMs,
 } from "./account-entitlements";
 import {
   isPlanDurationDays,
   isValidPlanRooms,
+  MAX_PLAN_DAYS,
   MAX_PLAN_ROOMS,
+  MIN_PLAN_DAYS,
   MIN_PLAN_ROOMS,
   planEndsAt,
   planStateOf,
@@ -25,7 +30,13 @@ import {
 /**
  * Admin → Account Activation (app/admin/account-activation, app/api/admin/account-activation/*). Performs NO
  * authorization of its own: every caller resolves the admin from the session cookie first (getAdminSessionUser), and
- * the email in a request body is only ever a TARGET SELECTOR, matched exactly — never a source of authority.
+ * the email in a request body is only ever a TARGET SELECTOR, matched exactly — never a source of authority. The plan
+ * itself is bound to the account's stable users.id: a confirmation names the id the admin reviewed (expectedUserId),
+ * and is refused if that email now belongs to a different account.
+ *
+ * Only a VERIFIED account (users.email_verified_at set) can be given access — activate, renew and reactivate are
+ * refused for an unverified one (owner decision 2026-10-28), so an unverified email claim never earns a paid plan.
+ * Nothing here ever changes users.role, and administrator accounts are refused as targets.
  *
  * Every change is one write transaction that (1) answers a repeated operation id from its own audit row instead of
  * applying it again, (2) re-reads the target account and its plan, (3) refuses unless the plan is still the version the
@@ -88,15 +99,9 @@ async function findAccountByEmail(client: Executor, canonicalEmail: string): Pro
   return { kind: "found", row: result.rows[0] as unknown as AccountRow };
 }
 
-/** "YYYY-MM-DD HH:MM:SS" (SQLite CURRENT_TIMESTAMP, UTC) or ISO -> epoch ms, or null. */
-function sqliteTimestampMs(value: string | null | undefined): number | null {
-  if (!value) return null;
-  const iso = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value) ? `${value.replace(" ", "T")}Z` : value;
-  const ms = Date.parse(iso);
-  return Number.isFinite(ms) ? ms : null;
-}
-
 export type AccountSummary = {
+  /** The stable account id the plan is bound to (admin-only response). */
+  userId: string;
   email: string;
   username: string;
   registeredAt: number | null;
@@ -107,6 +112,7 @@ export type AccountSummary = {
 
 function accountSummary(row: AccountRow): AccountSummary {
   return {
+    userId: row.id,
     email: row.email,
     username: row.username,
     registeredAt: sqliteTimestampMs(row.created_at),
@@ -122,7 +128,7 @@ export type ActivationEvent = {
   previous: Entitlement | null;
   next: Entitlement;
   reason: string | null;
-  /** Whether the customer's email was verified when the admin acted (false only after an explicit confirmation); null = unknown. */
+  /** Whether the customer's email was verified when the admin acted (always true for a grant); null = unknown. */
   targetEmailVerified: boolean | null;
   createdAt: number;
 };
@@ -155,7 +161,7 @@ function eventFromRow(row: EventRow): ActivationEvent {
   };
 }
 
-/** Actions that give the customer access to new checks — the ones that need an explicit confirmation for an unverified email. */
+/** Actions that give the customer access to new checks — refused for an account whose email is not verified. */
 export function actionGrantsAccess(action: ActivationAction): boolean {
   return action === "activate" || action === "renew" || action === "reactivate";
 }
@@ -170,6 +176,9 @@ export type CustomerLookup =
       /** Plan rooms holding a report or cooling down right now. */
       roomsBusy: number;
       history: ActivationEvent[];
+      /** When enforcement first switched on for this database (null = never), and this account's legacy free-access end (null = not legacy). */
+      enforcementStartedAt: number | null;
+      legacyGraceEndsAt: number | null;
       serverNow: number;
     };
 
@@ -189,6 +198,7 @@ export async function lookupCustomerAccount(client: Executor, rawEmail: string, 
           FROM account_entitlement_events WHERE user_id = ? AND action != 'account_deleted' ORDER BY created_at DESC LIMIT 10`,
     args: [userId],
   });
+  const start = await readEnforcementStart(client);
   return {
     found: true,
     account: accountSummary(match.row),
@@ -196,6 +206,8 @@ export async function lookupCustomerAccount(client: Executor, rawEmail: string, 
     state: planStateOf(entitlement, nowMs),
     roomsBusy,
     history: (history.rows as unknown as EventRow[]).map(eventFromRow),
+    enforcementStartedAt: start?.startedAt ?? null,
+    legacyGraceEndsAt: await legacyGraceEndsAt(client, userId, start),
     serverNow: nowMs,
   };
 }
@@ -233,7 +245,7 @@ export function planActivationChange(current: Entitlement | null, input: Activat
   const reason = reasonRaw.length > 0 ? reasonRaw : null;
   const version = (current?.version ?? 0) + 1;
   const roomsError = `Number of Rooms must be a whole number from ${MIN_PLAN_ROOMS} to ${MAX_PLAN_ROOMS}.`;
-  const durationError = "Plan Duration must be 30, 90, 180 or 360 days.";
+  const durationError = `Plan Duration must be a whole number of days from ${MIN_PLAN_DAYS} to ${MAX_PLAN_DAYS}.`;
 
   switch (input.action) {
     case "activate": {
@@ -307,11 +319,11 @@ export function planActivationChange(current: Entitlement | null, input: Activat
 
 export type ApplyRequest = ActivationInput & {
   email: string;
+  /** The account id the admin reviewed: the change applies to that account only. */
+  expectedUserId: string;
   operationId: string;
   /** The plan version the admin reviewed (0 = no plan). */
   expectedVersion: number;
-  /** Required (true) to grant access to an account whose email is not verified — the admin confirmed it explicitly. */
-  confirmUnverifiedEmail?: boolean;
 };
 
 export type ApplyResult =
@@ -320,8 +332,11 @@ export type ApplyResult =
       outcome: "rejected";
       status: 400 | 404 | 409;
       error: string;
-      code?: "STALE" | "OPERATION_REUSED" | "NOT_FOUND" | "ADMIN_ACCOUNT" | "UNVERIFIED_EMAIL_CONFIRMATION_REQUIRED";
+      code?: "STALE" | "OPERATION_REUSED" | "NOT_FOUND" | "ADMIN_ACCOUNT" | "UNVERIFIED_EMAIL" | "ACCOUNT_CHANGED";
     };
+
+export const UNVERIFIED_EMAIL_ERROR =
+  "This customer has not verified their email address yet. Ask them to verify it from their TurnitPlus account, then look them up again.";
 
 const MAX_BUSY_RETRIES = 10;
 function isSqliteBusyError(err: unknown): boolean {
@@ -387,6 +402,14 @@ export async function applyActivationAction(
         throw new Refusal({ outcome: "rejected", status: 404, code: "NOT_FOUND", error: "No account found for this email. Ask the customer to register first." });
       }
       const target = match.row;
+      if (target.id !== request.expectedUserId) {
+        throw new Refusal({
+          outcome: "rejected",
+          status: 409,
+          code: "ACCOUNT_CHANGED",
+          error: "This email now belongs to a different account than the one you reviewed. Look the customer up again.",
+        });
+      }
 
       if (priorRow) {
         if (priorRow.user_id !== target.id || priorRow.action !== request.action || priorRow.admin_user_id !== admin.id) {
@@ -399,16 +422,10 @@ export async function applyActivationAction(
         throw new Refusal({ outcome: "rejected", status: 409, code: "ADMIN_ACCOUNT", error: "Administrator accounts are never restricted and do not need activation." });
       }
 
-      // An unverified email is never treated as verified: granting access to one needs the admin's explicit
-      // confirmation in THIS request (the console's checkbox), and the audit row records that it was unverified.
+      // Access is granted only to a verified account (an unknown verification state counts as unverified).
       const emailVerified = accountSummary(target).emailVerified;
-      if (actionGrantsAccess(request.action) && emailVerified === false && request.confirmUnverifiedEmail !== true) {
-        throw new Refusal({
-          outcome: "rejected",
-          status: 409,
-          code: "UNVERIFIED_EMAIL_CONFIRMATION_REQUIRED",
-          error: "This customer's email address is not verified. Confirm that you checked the customer's identity yourself before granting access.",
-        });
+      if (actionGrantsAccess(request.action) && emailVerified !== true) {
+        throw new Refusal({ outcome: "rejected", status: 409, code: "UNVERIFIED_EMAIL", error: UNVERIFIED_EMAIL_ERROR });
       }
 
       // (3) Optimistic concurrency: only the version the admin reviewed may be changed.
@@ -479,6 +496,7 @@ export const ACCOUNT_LIST_PAGE_SIZE = 20;
 export type AccountListFilter = "all" | "active" | "expired" | "suspended";
 
 export type AccountListRow = {
+  userId: string;
   email: string;
   username: string;
   emailVerified: boolean | null;
@@ -533,6 +551,7 @@ export async function listActivatedAccounts(
     let busy = 0;
     for (const room of (await readBusyRooms(client, String(raw.user_id), nowMs, true)).keys()) if (room < entitlement.rooms) busy += 1;
     rows.push({
+      userId: String(raw.user_id),
       email: String(raw.email),
       username: String(raw.username),
       emailVerified: verifiedColumn ? raw.email_verified_at !== null : null,

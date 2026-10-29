@@ -22,10 +22,12 @@ import { DAY_MS } from '../lib/account-plan.ts';
 import { ACCOUNT_DELETION_CONFIRMATION_PHRASE } from '../lib/account-deletion.ts';
 import { withTestIdentity, grantTestAdmin } from './helpers/test-signup.mjs';
 
-// Manual account activation (drizzle/0056, lib/account-entitlements.ts, lib/account-activation-admin.ts): the owner
-// activates a registered customer for 30/90/180/360 days with N rooms; with ACCOUNT_ACTIVATION_ENFORCED on, the plan is
-// what lets a customer start new checks (rooms 1..N, each on its own 24 h cooldown, no daily cap), and with it off
-// nothing changes. Every scenario below goes through the real route handlers against a real migrated database.
+// Manual subscriptions (drizzle/0057, lib/account-entitlements.ts, lib/account-activation-admin.ts): the owner
+// activates a registered, VERIFIED customer for any 1–3650 days (presets 30/60/90/180/360) with N rooms; with
+// ACCOUNT_ACTIVATION_ENFORCED on, the plan is what lets a customer start new checks (rooms 1..N, each on its own 24 h
+// cooldown, no daily cap), and with it off nothing changes. Every scenario below goes through the real route handlers
+// against a real migrated database. These scenarios cover the rules AFTER the legacy free-access period (the
+// enforcement start is pinned 31 days back below); that period has its own suite, account-subscription-grace.
 
 const repo = path.resolve('.');
 const dbFile = path.join(repo, 'test_account_activation.db');
@@ -99,7 +101,7 @@ async function grant(adminCookie, body) {
   const p = await preview(adminCookie, body);
   assert.equal(p.status, 200, `preview ${body.action} ${body.email}: ${JSON.stringify(p.body)}`);
   const operationId = crypto.randomUUID();
-  const c = await commit(adminCookie, { ...body, operationId, expectedVersion: p.body.preview.expectedVersion });
+  const c = await commit(adminCookie, { ...body, operationId, expectedVersion: p.body.preview.expectedVersion, expectedUserId: p.body.preview.expectedUserId });
   assert.equal(c.status, 200, `commit ${body.action} ${body.email}: ${JSON.stringify(c.body)}`);
   return { preview: p.body.preview, result: c.body, operationId };
 }
@@ -151,6 +153,11 @@ async function getJson(route, url, cookie, params) {
 const roomIndex = (user) => getJson(roomsRoute, 'http://localhost/api/reports/rooms', user.cookie);
 const planOf = (user) => getJson(planRoute, 'http://localhost/api/account/plan', user.cookie);
 
+async function userIdOf(email) {
+  const r = await db.execute({ sql: 'SELECT id FROM users WHERE email = ?', args: [email] });
+  return r.rows[0] ? String(r.rows[0].id) : null;
+}
+
 async function entitlementRow(email) {
   const r = await db.execute({ sql: 'SELECT e.* FROM account_entitlements e JOIN users u ON u.id = e.user_id WHERE u.email = ?', args: [email] });
   return r.rows[0] ?? null;
@@ -183,6 +190,11 @@ const frank = await signup('frank@example.com');
 await markVerified(frank.email);
 const unverified = await signup('unverified@example.com');
 const freeUser = await signup('free-user@example.com');
+const gina = await signup('gina@example.com');
+const hank = await signup('hank@example.com');
+const ivan = await signup('ivan@example.com');
+const leaver = await signup('leaver@example.com');
+for (const user of [gina, hank, ivan, leaver]) await markVerified(user.email);
 
 // ── 13. Non-admin and anonymous callers are denied (404, nothing revealed); cross-origin admin POST is refused ────
 {
@@ -206,7 +218,7 @@ const freeUser = await signup('free-user@example.com');
   const missingPreview = await preview(admin.cookie, { email: 'nobody@example.com', action: 'activate', planDays: 30, rooms: 5 });
   assert.equal(missingPreview.status, 404);
   assert.equal(missingPreview.body.error, 'No account found for this email. Ask the customer to register first.');
-  const missingCommit = await commit(admin.cookie, { email: 'nobody@example.com', action: 'activate', planDays: 30, rooms: 5, operationId: crypto.randomUUID(), expectedVersion: 0 });
+  const missingCommit = await commit(admin.cookie, { email: 'nobody@example.com', action: 'activate', planDays: 30, rooms: 5, operationId: crypto.randomUUID(), expectedVersion: 0, expectedUserId: 'no-such-id' });
   assert.equal(missingCommit.status, 404);
   const users = await db.execute({ sql: "SELECT COUNT(*) AS c FROM users WHERE email = 'nobody@example.com'", args: [] });
   assert.equal(Number(users.rows[0].c), 0, 'no account is ever created');
@@ -217,30 +229,31 @@ const freeUser = await signup('free-user@example.com');
   assert.equal(u.body.account.emailVerified, false);
   assert.equal(u.body.state, 'none');
   assert.equal(JSON.stringify(u.body).includes('password'), false, 'no password material in the lookup');
+  assert.equal(u.body.account.userId, await userIdOf(unverified.email), 'the lookup names the stable account id');
   const up = await preview(admin.cookie, { email: unverified.email, action: 'activate', planDays: 30, rooms: 2 });
-  assert.equal(up.body.preview.account.emailVerified, false, 'the confirmation shows the verification state');
-  assert.equal(up.body.preview.requiresUnverifiedConfirmation, true, 'the console must ask for an explicit confirmation');
-  const unconfirmed = await commit(admin.cookie, { email: unverified.email, action: 'activate', planDays: 30, rooms: 2, operationId: crypto.randomUUID(), expectedVersion: 0 });
-  assert.equal(unconfirmed.status, 409);
-  assert.equal(unconfirmed.body.code, 'UNVERIFIED_EMAIL_CONFIRMATION_REQUIRED', 'never activated without the confirmation');
-  const notTrue = await commit(admin.cookie, { email: unverified.email, action: 'activate', planDays: 30, rooms: 2, operationId: crypto.randomUUID(), expectedVersion: 0, confirmUnverifiedEmail: 'yes' });
-  assert.equal(notTrue.status, 409, 'only a literal true confirms');
-  assert.equal(await entitlementRow(unverified.email), null);
-  const g = await grant(admin.cookie, { email: unverified.email, action: 'activate', planDays: 30, rooms: 2, confirmUnverifiedEmail: true });
-  assert.equal(g.result.event.targetEmailVerified, false, 'the audit records that the email was unverified');
+  assert.equal(up.status, 409, 'an unverified account cannot even be previewed for activation');
+  assert.equal(up.body.code, 'UNVERIFIED_EMAIL');
+  const unverifiedId = await userIdOf(unverified.email);
+  for (const extra of [{}, { confirmUnverifiedEmail: true }]) {
+    const c = await commit(admin.cookie, { email: unverified.email, action: 'activate', planDays: 30, rooms: 2, operationId: crypto.randomUUID(), expectedVersion: 0, expectedUserId: unverifiedId, ...extra });
+    assert.equal(c.status, 409, 'refused, with or without any client-side "confirmation"');
+    assert.equal(c.body.code, 'UNVERIFIED_EMAIL');
+  }
+  assert.equal(await entitlementRow(unverified.email), null, 'no plan was written for the unverified account');
+  assert.equal(await eventCount(unverified.email), 0, 'and no audit row');
   const stillUnverified = await db.execute({ sql: "SELECT email_verified_at FROM users WHERE email = 'unverified@example.com'", args: [] });
-  assert.equal(stillUnverified.rows[0].email_verified_at, null, 'the email is never marked verified by activation');
+  assert.equal(stillUnverified.rows[0].email_verified_at, null, 'the email is never marked verified by the console');
   const verifiedEvent = (await grant(admin.cookie, { email: frank.email, action: 'activate', planDays: 30, rooms: 3 })).result.event;
-  assert.equal(verifiedEvent.targetEmailVerified, true, 'a verified account needs no confirmation and is recorded as verified');
+  assert.equal(verifiedEvent.targetEmailVerified, true, 'a verified account is activated and recorded as verified');
 
   const adminTarget = await preview(admin.cookie, { email: admin.email, action: 'activate', planDays: 30, rooms: 5 });
   assert.equal(adminTarget.status, 409, 'administrator accounts are never activated');
-  pass('14 nonexistent accounts are refused (no account created); unverified accounts are shown as such and are activated only after an explicit confirmation');
+  pass('14 nonexistent accounts are refused (no account created); unverified accounts are shown as such and can never be activated');
 }
 
 // ── validation ──────────────────────────────────────────────────────────────────────────────────────────────────
 {
-  for (const planDays of [7, 31, 60, 365, '30', null, 30.5]) {
+  for (const planDays of [0, -1, 3651, 30.5, '30', null, 1e9]) {
     const r = await preview(admin.cookie, { email: carol.email, action: 'activate', planDays, rooms: 5 });
     assert.equal(r.status, 400, `planDays ${planDays} refused`);
   }
@@ -250,9 +263,18 @@ const freeUser = await signup('free-user@example.com');
   }
   assert.equal((await commit(admin.cookie, { email: carol.email, action: 'activate', planDays: 30, rooms: 5, operationId: 'not-a-uuid', expectedVersion: 0 })).status, 400);
   assert.equal((await commit(admin.cookie, { email: carol.email, action: 'activate', planDays: 30, rooms: 5, operationId: crypto.randomUUID() })).status, 400, 'expectedVersion is required');
+  assert.equal((await commit(admin.cookie, { email: carol.email, action: 'activate', planDays: 30, rooms: 5, operationId: crypto.randomUUID(), expectedVersion: 0 })).status, 400, 'expectedUserId is required');
+  // The database enforces the same bounds as the server (drizzle/0057 CHECK constraints).
+  for (const [days, rooms] of [[0, 5], [3651, 5], [30, 0], [30, 101]]) {
+    await assert.rejects(
+      db.execute({ sql: "INSERT INTO account_entitlements (user_id, status, plan_days, rooms, activated_at, expires_at, version, created_at, updated_at) VALUES ('x-check', 'active', ?, ?, 0, 1, 1, 0, 0)", args: [days, rooms] }),
+      /CHECK/,
+      `the database refuses ${days} days / ${rooms} rooms`,
+    );
+  }
   assert.equal((await preview(admin.cookie, { email: carol.email, action: 'make_unlimited' })).status, 400);
   assert.equal(await entitlementRow(carol.email), null);
-  pass('server validation: only 30/90/180/360 days, whole rooms 1–100, UUID operation id, reviewed version');
+  pass('server + database validation: whole days 1–3650, whole rooms 1–100, UUID operation id, reviewed version and account id');
 }
 
 // ── 1 + 2 + 3. Activations store exact UTC expirations ──────────────────────────────────────────────────────────
@@ -292,6 +314,21 @@ const freeUser = await signup('free-user@example.com');
   assert.equal(Number(c.expires_at) - Number(c.activated_at), 180 * DAY_MS);
   assert.equal(Number(d.expires_at) - Number(d.activated_at), 360 * DAY_MS);
   pass('3 180-day and 360-day activations store exact expirations');
+
+  await grant(admin.cookie, { email: gina.email, action: 'activate', planDays: 60, rooms: 10 });
+  await grant(admin.cookie, { email: hank.email, action: 'activate', planDays: 45, rooms: 7 });
+  await grant(admin.cookie, { email: ivan.email, action: 'activate', planDays: 3650, rooms: 40 });
+  for (const [user, days, rooms] of [[gina, 60, 10], [hank, 45, 7], [ivan, 3650, 40]]) {
+    const row = await entitlementRow(user.email);
+    assert.equal(Number(row.plan_days), days);
+    assert.equal(Number(row.rooms), rooms);
+    assert.equal(Number(row.expires_at) - Number(row.activated_at), days * DAY_MS, `exactly ${days} × 24 h`);
+  }
+  const oneDay = await preview(admin.cookie, { email: leaver.email, action: 'activate', planDays: 1, rooms: 1 });
+  assert.equal(oneDay.status, 200, 'the 1-day minimum is accepted');
+  assert.equal(oneDay.body.preview.next.expiresAt - oneDay.body.preview.next.activatedAt, DAY_MS);
+  assert.equal(await entitlementRow(leaver.email), null, 'a preview writes nothing');
+  pass('3b the 60-day preset, a custom 45-day plan and the 3650-day maximum store exact expirations; 1 day is the minimum');
 }
 
 // ── 22 (feature off). Nothing changes for customers while the switch is off ─────────────────────────────────────
@@ -308,9 +345,14 @@ const freeUser = await signup('free-user@example.com');
   assert.equal(r.status, 200, 'an account without a plan uploads exactly as before');
   const claims = await db.execute({ sql: 'SELECT COUNT(*) AS c FROM account_room_claims', args: [] });
   assert.equal(Number(claims.rows[0].c), 0, 'no room claim is written while the switch is off');
-  pass('22 feature off: 10 rooms, daily cap, unchanged responses, no claims, accounts without a plan upload as before');
+  const start = await db.execute({ sql: 'SELECT COUNT(*) AS c FROM account_activation_enforcement', args: [] });
+  assert.equal(Number(start.rows[0].c), 0, 'no enforcement start is recorded while the switch is off');
+  pass('22 feature off: 10 rooms, daily cap, unchanged responses, no claims, no enforcement start, accounts without a plan upload as before');
 }
 
+// The rest of this suite tests enforcement after the legacy free-access period: enforcement "began" 31 days ago, so
+// every account here is either registered after that moment or past its 30 days (account-subscription-grace covers it).
+await db.execute({ sql: 'INSERT INTO account_activation_enforcement (id, started_at, grace_ends_at) VALUES (1, ?, ?)', args: [Date.now() - 31 * DAY_MS, Date.now() - DAY_MS] });
 enforce(true);
 
 // ── no plan / admin while enforced ──────────────────────────────────────────────────────────────────────────────
@@ -478,7 +520,7 @@ enforce(true);
 // ── 12. Double-click / retry never grants twice; stale reviews are refused ──────────────────────────────────────
 {
   const p = await preview(admin.cookie, { email: erin.email, action: 'activate', planDays: 30, rooms: 5 });
-  const body = { email: erin.email, action: 'activate', planDays: 30, rooms: 5, operationId: crypto.randomUUID(), expectedVersion: p.body.preview.expectedVersion };
+  const body = { email: erin.email, action: 'activate', planDays: 30, rooms: 5, operationId: crypto.randomUUID(), expectedVersion: p.body.preview.expectedVersion, expectedUserId: p.body.preview.expectedUserId };
   const both = await Promise.all([commit(admin.cookie, body), commit(admin.cookie, body)]);
   assert.deepEqual(both.map((r) => r.status), [200, 200]);
   assert.deepEqual(both.map((r) => r.body.outcome).sort(), ['applied', 'replayed']);
@@ -488,7 +530,7 @@ enforce(true);
   assert.equal(await eventCount(erin.email), 1, 'one audit row');
 
   const rp = await preview(admin.cookie, { email: erin.email, action: 'renew', planDays: 30 });
-  const renewBody = { email: erin.email, action: 'renew', planDays: 30, expectedVersion: rp.body.preview.expectedVersion };
+  const renewBody = { email: erin.email, action: 'renew', planDays: 30, expectedVersion: rp.body.preview.expectedVersion, expectedUserId: rp.body.preview.expectedUserId };
   const r1 = await commit(admin.cookie, { ...renewBody, operationId: crypto.randomUUID() });
   const r2 = await commit(admin.cookie, { ...renewBody, operationId: crypto.randomUUID() });
   assert.equal(r1.status, 200);
@@ -497,10 +539,33 @@ enforce(true);
   const erinRow = await entitlementRow(erin.email);
   assert.equal(Number(erinRow.expires_at) - Number(erinRow.activated_at), 60 * DAY_MS, 'extended once, not twice');
 
-  const reused = await commit(admin.cookie, { ...body, email: alice.email });
+  const reused = await commit(admin.cookie, { ...body, email: alice.email, expectedUserId: await userIdOf(alice.email) });
   assert.equal(reused.status, 409);
   assert.equal(reused.body.code, 'OPERATION_REUSED');
-  pass('12 double-click / retry is applied once; a stale second tab cannot extend twice; an operation id cannot be reused');
+  const retargeted = await commit(admin.cookie, { ...body, email: alice.email, operationId: crypto.randomUUID() });
+  assert.equal(retargeted.status, 409, 'a confirmation reviewed for one account never applies to another');
+  assert.equal(retargeted.body.code, 'ACCOUNT_CHANGED');
+  pass('12 double-click / retry is applied once; a stale second tab cannot extend twice; an operation id cannot be reused or re-targeted');
+}
+
+// ── 12b. The plan is bound to the reviewed account id, not to whoever holds the email at confirmation time ─────────
+{
+  const original = await signup('swap@example.com');
+  await markVerified(original.email);
+  const p = await preview(admin.cookie, { email: original.email, action: 'activate', planDays: 30, rooms: 3 });
+  assert.equal(p.status, 200);
+  const reviewedId = p.body.preview.expectedUserId;
+  assert.equal(reviewedId, await userIdOf(original.email));
+  // Between the review and the confirmation the address moves to a different account.
+  await db.execute({ sql: "UPDATE users SET email = 'swap-old@example.com' WHERE id = ?", args: [reviewedId] });
+  const newcomer = await signup('swap@example.com');
+  await markVerified(newcomer.email);
+  const c = await commit(admin.cookie, { email: 'swap@example.com', action: 'activate', planDays: 30, rooms: 3, operationId: crypto.randomUUID(), expectedVersion: 0, expectedUserId: reviewedId });
+  assert.equal(c.status, 409);
+  assert.equal(c.body.code, 'ACCOUNT_CHANGED');
+  const plans = await db.execute({ sql: 'SELECT COUNT(*) AS c FROM account_entitlements WHERE user_id IN (?, ?)', args: [reviewedId, await userIdOf('swap@example.com')] });
+  assert.equal(Number(plans.rows[0].c), 0, 'neither account received a plan');
+  pass('12b a confirmation applies only to the account id that was reviewed; an email that changed hands is refused (ACCOUNT_CHANGED)');
 }
 
 // ── suspend / reactivate ────────────────────────────────────────────────────────────────────────────────────────
@@ -648,9 +713,14 @@ enforce(true);
 {
   const all = await listAccounts(admin.cookie);
   assert.equal(all.status, 200);
-  assert.equal(all.body.total, 7, "unverified, alice, bob, carol, dave, erin, frank");
+  assert.equal(all.body.total, 9, 'alice, bob, carol, dave, erin, frank, gina, hank, ivan');
   const keys = Object.keys(all.body.rows[0]).sort();
-  assert.deepEqual(keys, ['activatedAt', 'email', 'emailVerified', 'expiresAt', 'planDays', 'rooms', 'roomsAvailable', 'state', 'username']);
+  assert.deepEqual(keys, ['activatedAt', 'email', 'emailVerified', 'expiresAt', 'planDays', 'rooms', 'roomsAvailable', 'state', 'userId', 'username']);
+  await db.execute({ sql: 'UPDATE account_entitlements SET expires_at = ? WHERE user_id = ?', args: [Date.now() - 1000, await userIdOf(hank.email)] });
+  const expired = await listAccounts(admin.cookie, 'filter=expired');
+  assert.deepEqual(expired.body.rows.map((r) => [r.email, r.state]), [['hank@example.com', 'expired']], 'an expired subscription is listed under its own filter');
+  const activeNow = await listAccounts(admin.cookie, 'filter=active');
+  assert.equal(activeNow.body.rows.some((r) => r.email === 'hank@example.com'), false, 'and no longer as active');
   const search = await listAccounts(admin.cookie, 'q=ALICE');
   assert.deepEqual(search.body.rows.map((r) => r.email), ['alice@example.com']);
   const wildcard = await listAccounts(admin.cookie, 'q=%25');
@@ -663,20 +733,21 @@ enforce(true);
   pass('admin list: search by email (wildcards literal), status filter, pagination, no secrets in rows');
 }
 
-// ── 0056 missing while enforced fails closed; account deletion removes the plan ─────────────────────────────────
+// ── 0057 missing while enforced fails closed; account deletion removes the plan ─────────────────────────────────
 {
+  await grant(admin.cookie, { email: leaver.email, action: 'activate', planDays: 30, rooms: 2 });
   const me = await meRoute.DELETE(new Request('http://localhost/api/auth/me', {
     method: 'DELETE',
-    headers: { 'content-type': 'application/json', 'x-forwarded-for': ip('me'), cookie: `tp_session_v1=${unverified.cookie}` },
+    headers: { 'content-type': 'application/json', 'x-forwarded-for': ip('me'), cookie: `tp_session_v1=${leaver.cookie}` },
     body: JSON.stringify({ password: 'correct-horse-1', confirm: ACCOUNT_DELETION_CONFIRMATION_PHRASE }),
   }));
   assert.equal(me.status, 200, 'account deletion still works');
-  assert.equal(await entitlementRow(unverified.email), null);
+  assert.equal(await entitlementRow(leaver.email), null);
   for (const table of ['account_entitlements', 'account_room_claims', 'account_check_authorizations']) {
     const leftovers = await db.execute({ sql: `SELECT COUNT(*) AS c FROM ${table} WHERE user_id NOT IN (SELECT id FROM users)`, args: [] });
     assert.equal(Number(leftovers.rows[0].c), 0, `${table} rows go with the account`);
   }
-  const audit = await db.execute({ sql: "SELECT * FROM account_entitlement_events WHERE target_email = 'unverified@example.com' ORDER BY created_at", args: [] });
+  const audit = await db.execute({ sql: "SELECT * FROM account_entitlement_events WHERE target_email = 'leaver@example.com' ORDER BY created_at", args: [] });
   assert.deepEqual(audit.rows.map((r) => r.action), ['activate', 'account_deleted'], 'the admin audit trail is kept and ends with the deletion');
   const deletion = audit.rows[1];
   assert.equal(deletion.admin_user_id, null);
@@ -688,7 +759,7 @@ enforce(true);
     'a minimal record: no other field exists',
   );
   const everything = JSON.stringify(audit.rows);
-  for (const forbidden of ['password', 'scrypt', 'token', 'sample extracted text', unverified.cookie]) {
+  for (const forbidden of ['password', 'scrypt', 'token', 'sample extracted text', leaver.cookie]) {
     assert.equal(everything.includes(forbidden), false, `no ${forbidden} in the retained audit`);
   }
   // An account that never had a plan leaves no audit record.
@@ -701,6 +772,15 @@ enforce(true);
   assert.equal(del2.status, 200);
   assert.equal(Number((await db.execute({ sql: "SELECT COUNT(*) AS c FROM account_entitlement_events WHERE target_email = 'never-activated@example.com'", args: [] })).rows[0].c), 0);
   pass('account deletion removes the plan, room claims and authorizations; a minimal admin audit record is kept, with no manuscript, password or secret');
+}
+
+// ── roles: no subscription action ever makes a customer an administrator ──────────────────────────────────────────
+{
+  const admins = await db.execute({ sql: "SELECT email FROM users WHERE role = 'admin'", args: [] });
+  assert.deepEqual(admins.rows.map((r) => r.email), [admin.email], 'the only administrator is the one the test granted');
+  const others = await db.execute({ sql: "SELECT COUNT(*) AS c FROM users WHERE role != 'user' AND role != 'admin'", args: [] });
+  assert.equal(Number(others.rows[0].c), 0);
+  pass('roles: after every activation, renewal, adjustment, suspension and reactivation, no customer became an administrator');
 }
 
 enforce(false);
