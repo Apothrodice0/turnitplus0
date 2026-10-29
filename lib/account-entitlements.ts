@@ -1,6 +1,7 @@
 import type { Client, Transaction } from "@libsql/client";
 import type { SessionUser } from "./auth-session";
 import { getRoomCountForRole, isWithinActiveCycle, ROOM_CYCLE_MS } from "./report-rooms";
+import { roomTimeSql } from "./report-history";
 import {
   DAY_MS,
   isPlanDurationDays,
@@ -492,11 +493,12 @@ export async function readActiveRoomClaims(client: Executor, userId: string, now
 
 /**
  * room -> the moment it becomes free again, for every room busy right now: the later of its current report's 24 h
- * cycle (report_created_at) and its server-clock claim.
+ * cycle (room time — the server's saved_at with report history retention on, lib/report-history.ts) and its
+ * server-clock claim.
  */
 export async function readBusyRooms(client: Executor, userId: string, nowMs: number, withClaims: boolean): Promise<Map<number, number>> {
   const result = await client.execute({
-    sql: `SELECT room_number, MAX(report_created_at) AS most_recent FROM saved_reports
+    sql: `SELECT room_number, MAX(${roomTimeSql()}) AS most_recent FROM saved_reports
           WHERE user_id = ? AND room_number IS NOT NULL GROUP BY room_number`,
     args: [userId],
   });

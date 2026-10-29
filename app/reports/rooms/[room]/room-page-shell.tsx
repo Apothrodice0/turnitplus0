@@ -590,9 +590,11 @@ type Props = {
   subscriptionEnforced?: boolean;
   /** Manual subscriptions: set when this room is shown for its earlier report only (the account may not start new checks). */
   historicalNote?: string | null;
+  /** Report history retention (lib/report-history.ts): this room's earlier reports, newest first (empty with it off). */
+  earlierReports?: { id: string; title: string; createdAt: string; savedAt: string; wordCount: number }[];
 };
 
-export function RoomPageShell({ room, accountEmail, initialOccupant, uploadLock = null, subscriptionEnforced = false, historicalNote = null }: Props) {
+export function RoomPageShell({ room, accountEmail, initialOccupant, uploadLock = null, subscriptionEnforced = false, historicalNote = null, earlierReports = [] }: Props) {
   const [occupant, setOccupant] = useState<RoomContents>(initialOccupant);
   const [pollExhausted, setPollExhausted] = useState(false);
   const [file, setFile] = useState<File | null>(null);
@@ -1710,6 +1712,27 @@ export function RoomPageShell({ room, accountEmail, initialOccupant, uploadLock 
 
             <Link href={`/reports/${occupant.report.id}?room=${room}`} className="button secondary room-open-full">Open full report</Link>
           </div>
+        )}
+
+        {/* Report history retention: this room's earlier reports stay readable — each opens its own full report page
+            (evidence, highlights, AI result, receipt). Never shown with retention off (the list is then empty). */}
+        {earlierReports.length > 0 && (
+          <section className="room-history" aria-labelledby="room-history-title">
+            <h2 id="room-history-title">Earlier reports in this room</h2>
+            <ul className="room-history-list">
+              {earlierReports
+                .filter((earlier) => earlier.id !== occupant.report?.id)
+                .map((earlier) => (
+                  <li key={earlier.id}>
+                    <Link href={`/reports/${earlier.id}?room=${room}`} className="room-history-row" prefetch={false}>
+                      <FileText aria-hidden="true" />
+                      <span className="room-history-title">{earlier.title}</span>
+                      <span className="room-history-meta">{formatDate(earlier.savedAt)} · {earlier.wordCount.toLocaleString()} words</span>
+                    </Link>
+                  </li>
+                ))}
+            </ul>
+          </section>
         )}
       </div>
     </div>

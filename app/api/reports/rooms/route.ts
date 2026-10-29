@@ -6,6 +6,7 @@ import { getSessionUser } from '../../../../lib/auth-session';
 import { deriveRoomStatus, isWithinActiveCycle, ROOM_CYCLE_MS, roomCycleEndsAt, type RoomIndexEntry } from '../../../../lib/report-rooms';
 import { readActiveRoomClaims, resolveRoomPolicy } from '../../../../lib/account-entitlements';
 import { subscriptionNoticeFor } from '../../../../lib/account-plan';
+import { roomTimeSql } from '../../../../lib/report-history';
 
 /**
  * The room/slot architecture's index: ONE lightweight query returning each
@@ -65,7 +66,9 @@ export async function GET(request: Request) {
       // takes it from the SAME row that produced the max, i.e. the current
       // occupant's own ai_score, not an arbitrary row in the group.
       const result = await client.execute({
-        sql: `SELECT room_number, MAX(report_created_at) as most_recent, ai_score, ai_status
+        // Room time (lib/report-history.ts): the server's saved_at with report history retention on, so a room's
+        // current report and its 24 h cycle never depend on a browser-supplied date; report_created_at otherwise.
+        sql: `SELECT room_number, MAX(${roomTimeSql()}) as most_recent, ai_score, ai_status
               FROM saved_reports WHERE user_id = ? AND room_number IS NOT NULL
               GROUP BY room_number`,
         args: [sessionUser.id],

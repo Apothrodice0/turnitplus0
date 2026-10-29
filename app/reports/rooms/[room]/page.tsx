@@ -8,7 +8,8 @@ import { SESSION_COOKIE_NAME, getSessionUserByToken } from "@/lib/auth-session";
 import { checkReadRate } from "@/lib/rate-limit";
 import { clientIpFromHeaders } from "@/lib/client-ip";
 import { getReportsDbClient } from "@/lib/reports-db";
-import { findRoomOccupant, type RoomOccupantResult } from "@/lib/reports-repo";
+import { findRoomOccupant, listEarlierRoomReports, type RoomOccupantResult } from "@/lib/reports-repo";
+import { reportHistoryRetentionEnabled, type EarlierRoomReport } from "@/lib/report-history";
 import { ROOM_CYCLE_MS } from "@/lib/report-rooms";
 import { newCheckRefusal, readActiveRoomClaims, resolveRoomPolicy } from "@/lib/account-entitlements";
 import { HISTORICAL_ROOM_NOTE, roomCooldownLock, uploadLockFor, type UploadLock } from "@/lib/account-plan";
@@ -29,7 +30,7 @@ export const dynamic = "force-dynamic";
  */
 
 type RoomPageResult =
-  | { status: "found"; room: number; accountEmail: string; occupant: RoomOccupantResult; uploadLock: UploadLock | null; subscriptionEnforced: boolean; historicalNote: string | null }
+  | { status: "found"; room: number; accountEmail: string; occupant: RoomOccupantResult; uploadLock: UploadLock | null; subscriptionEnforced: boolean; historicalNote: string | null; earlierReports: EarlierRoomReport[] }
   | { status: "invalid-room" }
   | { status: "no-session" }
   | { status: "rate-limited"; retryAfterSeconds: number };
@@ -88,7 +89,9 @@ const loadRoom = cache(async (roomParam: string): Promise<RoomPageResult> => {
         if (claimedAt !== undefined) uploadLock = roomCooldownLock(room + 1, claimedAt + ROOM_CYCLE_MS);
       }
     }
-    return { status: "found", room, accountEmail: sessionUser.email, occupant: shown, uploadLock, subscriptionEnforced: policy.enforced, historicalNote };
+    // Report history retention (lib/report-history.ts): the room's earlier reports, readable from the room. Off: none.
+    const earlierReports = reportHistoryRetentionEnabled() ? await listEarlierRoomReports(client, sessionUser.id, room, shown.report?.id ?? null) : [];
+    return { status: "found", room, accountEmail: sessionUser.email, occupant: shown, uploadLock, subscriptionEnforced: policy.enforced, historicalNote, earlierReports };
   } finally {
     client.close();
   }
@@ -159,5 +162,5 @@ export default async function RoomPage({ params }: { params: Promise<{ room: str
   // room warrants a fresh instance.
   // Manual subscriptions: an EMPTY room that cannot take a new check right now shows its usual upload area LOCKED
   // (dimmed, no file input, no drop target, no generate action) with the reason — never with the feature off.
-  return <RoomPageShell key={result.room} room={result.room} accountEmail={result.accountEmail} initialOccupant={result.occupant} uploadLock={result.uploadLock} subscriptionEnforced={result.subscriptionEnforced} historicalNote={result.historicalNote} />;
+  return <RoomPageShell key={result.room} room={result.room} accountEmail={result.accountEmail} initialOccupant={result.occupant} uploadLock={result.uploadLock} subscriptionEnforced={result.subscriptionEnforced} historicalNote={result.historicalNote} earlierReports={result.earlierReports} />;
 }

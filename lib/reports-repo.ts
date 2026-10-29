@@ -4,6 +4,7 @@ import { resolvePersistedSimilarityDisplay } from "./report-primary-similarity";
 import { isEvidenceInterpretationCustomerReadable } from "./report-persistence";
 import { AI_UNAVAILABLE_REASON_REPORT_SIZE, AI_UNAVAILABLE_REASON_UNSUPPORTED_LANGUAGE, languageUnsupportedAiAnalysis } from "./ai-unavailable-state";
 import type { ReportSummary } from "./reports-remote";
+import { roomTimeSql, type EarlierRoomReport } from "./report-history";
 
 // device_key added in Phase E8C, additively — every existing caller that
 // only read payload_json is unaffected; lib/report-historical-match.ts is
@@ -186,7 +187,9 @@ export async function findRoomOccupant(
   // below, so a corpus-maturity boundary can't be evaluated inconsistently
   // within one call.
   const result = await client.execute({
-    sql: `SELECT id, submission_id, title, report_created_at, word_count, archive_score, score_band, ai_score, ai_tone, ai_status, device_key,
+    // Report history retention (lib/report-history.ts): the room's current report and its 24 h cycle come from room_time —
+    // the server's saved_at with retention on, report_created_at (legacy) otherwise. createdAt stays display only.
+    sql: `SELECT id, submission_id, title, report_created_at, ${roomTimeSql()} AS room_time, word_count, archive_score, score_band, ai_score, ai_tone, ai_status, device_key,
                  json_extract(payload_json, '$.unifiedSimilarity.unifiedScore') AS unified_score,
                  json_extract(payload_json, '$.unifiedSimilarity') IS NOT NULL AS has_unified,
                  json_extract(payload_json, '$.corpusSourceMatchingEnabledAtComputation') AS corpus_flag_at_computation,
@@ -199,12 +202,12 @@ export async function findRoomOccupant(
                  json_extract(payload_json, '$.scoringNormalizationVersion') AS scoring_normalization_version,
                  ${INTERPRETATION_TO_VERIFY_SQL} AS interpretation_to_verify
           FROM saved_reports WHERE user_id = ? AND room_number = ?
-          ORDER BY report_created_at DESC LIMIT 1`,
+          ORDER BY room_time DESC, rowid DESC LIMIT 1`,
     args: [userId, room],
   });
   const occupant = result.rows[0] as unknown as
     | {
-      id: string | number; submission_id: string; title: string; report_created_at: string; word_count: number; archive_score: number;
+      id: string | number; submission_id: string; title: string; report_created_at: string; room_time: string; word_count: number; archive_score: number;
       score_band: string; ai_score: number | null; ai_tone: string | null; ai_status: string | null; device_key: string;
       unified_score: number | bigint | null; has_unified: number | bigint; corpus_flag_at_computation: number | bigint | null;
       unified_failed: number | bigint | null; has_position_evidence: number | bigint; ai_unavailable_reason: string | null;
@@ -213,7 +216,7 @@ export async function findRoomOccupant(
       interpretation_to_verify: string | null;
     }
     | undefined;
-  if (!occupant || (!options.includeHistorical && !isWithinActiveCycle(occupant.report_created_at))) {
+  if (!occupant || (!options.includeHistorical && !isWithinActiveCycle(occupant.room_time))) {
     return { status: "empty", report: null, cycleEndsAt: null };
   }
 
@@ -334,7 +337,28 @@ export async function findRoomOccupant(
 
   return {
     status,
-    cycleEndsAt: roomCycleEndsAt(occupant.report_created_at),
+    cycleEndsAt: roomCycleEndsAt(occupant.room_time),
     report: explained ? report : withholdUnexplainedSimilarity(report),
   };
+}
+
+/**
+ * Report history retention (lib/report-history.ts): the room's EARLIER reports, newest first — every report of this
+ * account in this room except `currentReportId`. Only ever non-empty when retention keeps them (with it off, a reused
+ * room's earlier report has been deleted). Display fields only; each report page re-checks ownership on its own.
+ */
+export async function listEarlierRoomReports(client: Client, userId: string, room: number, currentReportId: string | null, limit = 50): Promise<EarlierRoomReport[]> {
+  const result = await client.execute({
+    sql: `SELECT id, title, report_created_at, ${roomTimeSql()} AS room_time, word_count FROM saved_reports
+          WHERE user_id = ? AND room_number = ? AND id != ?
+          ORDER BY room_time DESC, rowid DESC LIMIT ?`,
+    args: [userId, room, currentReportId ?? "", limit],
+  });
+  return (result.rows as unknown as { id: string | number; title: string; report_created_at: string; room_time: string; word_count: number | bigint }[]).map((row) => ({
+    id: String(row.id),
+    title: String(row.title),
+    createdAt: String(row.report_created_at),
+    savedAt: String(row.room_time),
+    wordCount: Number(row.word_count),
+  }));
 }

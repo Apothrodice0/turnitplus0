@@ -19,6 +19,7 @@ import { linkAcademicSearchRunDiagnosticsToReport, resolveUnverifiedPublicationN
 import { canonicalSha256 } from '../../../lib/document-identity';
 import { checkUploadLimit } from '../../../lib/upload-limit';
 import { deriveRoomStatus, derivedAiReadySql, isWithinActiveCycle, roomCycleEndsAt } from '../../../lib/report-rooms';
+import { reportHistoryRetentionEnabled, roomTimeSql } from '../../../lib/report-history';
 import {
   checkPlanClaimInTransaction,
   consumeCheckAuthorization,
@@ -303,15 +304,19 @@ async function insertReportWithRoomCheck(params: {
           if (decision.kind === 'cooldown') conflict = { mostRecent: new Date(decision.claimedAt).toISOString() };
         }
         if (!conflict && params.roomNumberForInsert !== null && params.roomOwnerId !== null) {
+          // Room time (lib/report-history.ts): the server's saved_at with report history retention on.
           const occupant = await tx.execute({
-            sql: `SELECT id, device_key, document_identity_id, report_created_at FROM saved_reports WHERE user_id = ? AND room_number = ? ORDER BY report_created_at DESC LIMIT 1`,
+            sql: `SELECT id, device_key, document_identity_id, ${roomTimeSql()} AS room_time FROM saved_reports WHERE user_id = ? AND room_number = ? ORDER BY room_time DESC, rowid DESC LIMIT 1`,
             args: [params.roomOwnerId, params.roomNumberForInsert],
           });
           const occupantRow = occupant.rows[0] as unknown as
-            | { id: string; device_key: string; document_identity_id: string | null; report_created_at: string }
+            | { id: string; device_key: string; document_identity_id: string | null; room_time: string }
             | undefined;
-          if (occupantRow && isWithinActiveCycle(occupantRow.report_created_at)) {
-            conflict = { mostRecent: occupantRow.report_created_at };
+          if (occupantRow && isWithinActiveCycle(occupantRow.room_time)) {
+            conflict = { mostRecent: occupantRow.room_time };
+          } else if (occupantRow && reportHistoryRetentionEnabled()) {
+            // Report history retention: the room is reused, and its earlier report is KEPT — the new check simply becomes
+            // the room's newest report. Only an explicit customer deletion or account deletion removes a report.
           } else if (occupantRow) {
             // One-current-report-per-room (Phase 2): the prior occupant's
             // 24h cycle has ended, so this room is being reused — the old
@@ -843,11 +848,13 @@ export async function POST(request: Request) {
         // insert the replacement — happens later, atomically, inside
         // insertReportWithRoomCheck's own write transaction (see that
         // function's own comment), which never trusts this snapshot.
-        const outsideOccupant = await client.execute({
+        // Report history retention (lib/report-history.ts): a reused room deletes nothing, so there is no replacement
+        // to make safe — this gate is only needed when the earlier report would be deleted.
+        const outsideOccupant = reportHistoryRetentionEnabled() ? null : await client.execute({
           sql: `SELECT id, device_key, report_created_at FROM saved_reports WHERE user_id = ? AND room_number = ? ORDER BY report_created_at DESC LIMIT 1`,
           args: [roomOwnerId, roomNumberForInsert],
         });
-        const outsideOccupantRow = outsideOccupant.rows[0] as unknown as { id: string; device_key: string; report_created_at: string } | undefined;
+        const outsideOccupantRow = outsideOccupant?.rows[0] as unknown as { id: string; device_key: string; report_created_at: string } | undefined;
         if (outsideOccupantRow && !isWithinActiveCycle(outsideOccupantRow.report_created_at)) {
           const safety = await ensureRoomReuseAdmissionSafety(client, {
             accountId: roomOwnerId,
