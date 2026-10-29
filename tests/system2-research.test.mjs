@@ -189,11 +189,16 @@ test("wiring: one analyze action, one similarity percentage; System 2 only behin
 
   const roomShell = await readFile(new URL("../app/reports/rooms/[room]/room-page-shell.tsx", import.meta.url), "utf8");
   assert.match(roomShell, /system2Enabled = false \}: Props/);
-  // one-time account authorization (onboarding notice only while undecided), never a per-document checkbox
-  assert.match(roomShell, /extraOption=\{system2Enabled && s2Authorization === null \? <System2AuthorizationNotice onDecide=\{decideSystem2\} \/> : undefined\}/);
-  assert.doesNotMatch(roomShell, /System2ConsentOption|s2Consent|type="checkbox"/);
-  // the click hands the submitted file on ONLY when authorized; the save starts the ONE automatic request, never awaited
-  assert.match(roomShell, /s2PendingRef\.current = system2Enabled && s2Authorization === "granted" \? submittedFile : null;/);
+  // one-time account permission: no persistent card in the upload form — a small dialog opened by Generate report only
+  // when it is needed (a Word document and no recorded decision), never a per-document checkbox
+  assert.doesNotMatch(roomShell, /System2AuthorizationNotice|extraOption=|System2ConsentOption|s2Consent|type="checkbox"/);
+  assert.match(roomShell, /onGenerate=\{startCheck\}/);
+  assert.match(roomShell, /if \(system2Enabled && s2Authorization === null && file && !uploadLock && !generationLockRef\.current && \/\\\.docx\$\/i\.test\(file\.name\)\) \{\s*setS2Asking\(true\);/);
+  assert.match(roomShell, /\{s2Asking && <System2PermissionDialog onDecide=\{answerSystem2\} onCancel=\{\(\) => setS2Asking\(false\)\} \/>\}/);
+  // the recorded answer is what the check uses; the click hands the file on ONLY when allowed; the save starts the ONE
+  // automatic request, never awaited
+  assert.match(roomShell, /decideSystem2\(decision\);\s*setS2Asking\(false\);\s*void runCheck\(decision\);/);
+  assert.match(roomShell, /s2PendingRef\.current = system2Enabled && s2Choice === "granted" \? submittedFile : null;/);
   const afterSave = roomShell.indexOf('setOccupant({ status: "processing", report: summary');
   const start = roomShell.indexOf("if (s2Pending) void requestSystem2Estimate(summary.id, s2Pending);");
   assert.ok(afterSave > 0 && start > afterSave && start - afterSave < 800, "System 2 starts right after the report is saved");
@@ -262,5 +267,26 @@ test("client: the automatic request sends a Word file once; other files are neve
     assert.equal(client.loadSystem2Authorization("owner@example.test"), "declined");
   } finally {
     globalThis.fetch = savedFetch; if (savedStorage === undefined) delete globalThis.localStorage; else globalThis.localStorage = savedStorage;
+  }
+});
+
+test("permission dialog and privacy line: plain, accurate wording with no internal names or architecture", async () => {
+  const React = (await import("react")).default;
+  const { renderToStaticMarkup } = await import("react-dom/server");
+  const { System2PermissionDialog, System2PrivacyNote } = await import("../components/report/system2-estimate.tsx");
+  const dialog = renderToStaticMarkup(React.createElement(System2PermissionDialog, { onDecide() {}, onCancel() {} }));
+  assert.match(dialog, /role="dialog"/);
+  assert.match(dialog, />Allow additional analysis\?</);
+  assert.match(dialog, /securely analyse this Word document on its servers once your report is saved\. The document isn(&#x27;|')t stored\./);
+  assert.match(dialog, />Allow</);
+  assert.match(dialog, />Browser only</, "declining keeps the browser result alone");
+  const granted = renderToStaticMarkup(React.createElement(System2PrivacyNote, { authorization: "granted", onChange() {} }));
+  assert.match(granted, /Word documents are also analysed securely by TurnitPlus \(not stored\)\./, "never claims browser-only when documents are sent");
+  assert.match(granted, />Stop</);
+  const declined = renderToStaticMarkup(React.createElement(System2PrivacyNote, { authorization: "declined", onChange() {} }));
+  assert.match(declined, /Documents are processed in your browser\./);
+  assert.doesNotMatch(declined, /analysed securely/);
+  for (const html of [dialog, granted, declined]) {
+    assert.doesNotMatch(html, /System 2|System2|estimation service|model|research|Server-assisted|one-time authorization/i);
   }
 });

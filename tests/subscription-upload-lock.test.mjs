@@ -35,7 +35,7 @@ test("no subscription: the upload area is locked with the owner's exact message"
   assert.match(html, /You need an active subscription before you can check documents\./);
   assert.match(html, /Please contact TurnitPlus to activate your plan\./);
   assert.doesNotMatch(html, /type="file"/, "no file input to click or drop onto");
-  assert.doesNotMatch(html, /Generate free report|Choose file|Drop your document here/);
+  assert.doesNotMatch(html, /Generate (free )?report|Choose file|Drop your document here/);
   assert.match(html, /<button class="button primary full upload-locked-action" type="button" disabled="" aria-disabled="true">/, "the generate action is disabled");
   assert.match(html, /Your account and existing reports remain available\./);
 });
@@ -61,13 +61,13 @@ test("room-level locks use the same locked design", () => {
   assert.match(render({ locked: uploadLockFor("ROOM_NOT_IN_PLAN", null, 5) }), /This room is not part of your plan \(rooms 1–5\)\./);
 });
 
-test("unlocked: today's upload area is unchanged; under a subscription the button says Generate report", () => {
+test("unlocked: the normal upload area, and the one action reads Generate report (customers need a subscription — never 'free')", () => {
   const html = render();
   assert.match(html, /type="file"/);
   assert.match(html, /Drop your document here/);
-  assert.match(html, /Generate free report/);
+  assert.match(html, />Generate report</);
+  assert.doesNotMatch(html, /free report|FREE/i);
   assert.doesNotMatch(html, /drop-zone-locked|Subscription required/);
-  assert.match(render({ generateLabel: "Generate report" }), />Generate report</);
 });
 
 test("a check already running is never replaced by the lock", () => {

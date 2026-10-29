@@ -52,7 +52,7 @@ import { detectLanguage } from "@/lib/similarity-core";
 import { AI_MODEL_VERSION, AI_PASSAGE_LOG_ODDS_THRESHOLD, AI_PASSAGE_THRESHOLD } from "@/lib/ai-core";
 import { describeAiAnalysisError, type AiPrepStage } from "@/lib/ai-model-prep";
 import { DocumentUploadPanel, type UploadLock } from "@/components/reports/document-upload-panel";
-import { System2AuthorizationNotice, System2PrivacyNote, loadSystem2Authorization, loadSystem2Estimate, requestSystem2Estimate, storeSystem2Authorization, useSystem2Estimate, type System2Authorization } from "@/components/report/system2-estimate";
+import { System2PermissionDialog, System2PrivacyNote, loadSystem2Authorization, loadSystem2Estimate, requestSystem2Estimate, storeSystem2Authorization, useSystem2Estimate, type System2Authorization } from "@/components/report/system2-estimate";
 import { UNIFIED_ESTIMATE_NOTE, unifySimilarity, type System2EstimateRecord } from "@/lib/system2-unified";
 
 /**
@@ -591,7 +591,7 @@ type Props = {
   initialOccupant: RoomContents;
   /** Manual subscriptions: set server-side when this empty room cannot take a new check (app/reports/rooms/[room]/page.tsx). */
   uploadLock?: UploadLock | null;
-  /** Whether subscription enforcement is on for this account (changes only the generate button's wording). */
+  /** Whether subscription enforcement is on for this account (informational; the generate button always reads "Generate report"). */
   subscriptionEnforced?: boolean;
   /** Manual subscriptions: set when this room is shown for its earlier report only (the account may not start new checks). */
   historicalNote?: string | null;
@@ -607,7 +607,7 @@ function UnifiedSimilarityMetricTile({ report, room }: { report: ReportSummary; 
   return <SimilarityMetricTile report={report} room={room} system2Estimate={system2Estimate} />;
 }
 
-export function RoomPageShell({ room, accountEmail, initialOccupant, uploadLock = null, subscriptionEnforced = false, historicalNote = null, earlierReports = [], system2Enabled = false }: Props) {
+export function RoomPageShell({ room, accountEmail, initialOccupant, uploadLock = null, historicalNote = null, earlierReports = [], system2Enabled = false }: Props) {
   const [occupant, setOccupant] = useState<RoomContents>(initialOccupant);
   const [pollExhausted, setPollExhausted] = useState(false);
   const [file, setFile] = useState<File | null>(null);
@@ -623,6 +623,8 @@ export function RoomPageShell({ room, accountEmail, initialOccupant, uploadLock 
     storeSystem2Authorization(accountEmail, decision);
     setS2Authorization(decision);
   }
+  // The one-time permission dialog: opened by Generate report only when it is needed (startCheck below).
+  const [s2Asking, setS2Asking] = useState(false);
   const [progress, setProgress] = useState(0);
   const [processingLabel, setProcessingLabel] = useState("Reading document content");
   const [isGeneratingReport, setIsGeneratingReport] = useState(false);
@@ -1161,7 +1163,26 @@ export function RoomPageShell({ room, accountEmail, initialOccupant, uploadLock 
   }
   useProgressCreep(isGeneratingReport && !progressComplete, progressCeiling, setProgress);
 
-  async function runCheck() {
+  /**
+   * Generate report. Owner-only System 2 asks its one-time permission here, and only when it matters: a Word document
+   * and no recorded decision. Either answer is recorded and the check starts with it; everyone else (and every later
+   * check) goes straight to runCheck. Returns the check's promise, exactly as onGenerate={runCheck} did (resolved at
+   * once when the dialog opens instead).
+   */
+  function startCheck(): Promise<void> {
+    if (system2Enabled && s2Authorization === null && file && !uploadLock && !generationLockRef.current && /\.docx$/i.test(file.name)) {
+      setS2Asking(true);
+      return Promise.resolve();
+    }
+    return runCheck();
+  }
+  function answerSystem2(decision: "granted" | "declined") {
+    decideSystem2(decision);
+    setS2Asking(false);
+    void runCheck(decision);
+  }
+
+  async function runCheck(s2Choice: System2Authorization | "unknown" = s2Authorization) {
     if (generationLockRef.current) {
       notify("Your current document is still being analyzed.");
       return;
@@ -1177,7 +1198,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant, uploadLock 
     }
 
     const submittedFile = file;
-    s2PendingRef.current = system2Enabled && s2Authorization === "granted" ? submittedFile : null;
+    s2PendingRef.current = system2Enabled && s2Choice === "granted" ? submittedFile : null;
     generationLockRef.current = true;
     setIsGeneratingReport(true);
     // Defect #3: marks the start of a new check generation for the
@@ -1541,16 +1562,15 @@ export function RoomPageShell({ room, accountEmail, initialOccupant, uploadLock 
               processingLabel={processingLabel}
               fileInputRef={fileInputRef}
               onChooseFile={chooseFile}
-              onGenerate={runCheck}
+              onGenerate={startCheck}
               complete={progressComplete}
               saveFailure={saveFailure && !isGeneratingReport ? { message: saveFailure, retrying: retryingSave, onRetry: () => void retrySave() } : undefined}
               locked={uploadLock}
-              generateLabel={subscriptionEnforced ? "Generate report" : undefined}
-              extraOption={system2Enabled && s2Authorization === null ? <System2AuthorizationNotice onDecide={decideSystem2} /> : undefined}
               privacyNote={system2Enabled && (s2Authorization === "granted" || s2Authorization === "declined") ? (
                 <System2PrivacyNote authorization={s2Authorization} onChange={() => decideSystem2(s2Authorization === "granted" ? "declined" : null)} />
               ) : undefined}
             />
+            {s2Asking && <System2PermissionDialog onDecide={answerSystem2} onCancel={() => setS2Asking(false)} />}
           </div>
         )}
 

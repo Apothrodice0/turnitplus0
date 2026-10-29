@@ -13,7 +13,7 @@ import type {
 } from "@/lib/user-supplied-reference-constants";
 
 /**
- * The upload/check UI (drag-drop zone, file input, "Generate free report"
+ * The upload/check UI (drag-drop zone, file input, "Generate report"
  * button, and the locked/processing state shown while a check is running) —
  * shared between the anonymous Dashboard view (app/page.tsx) and an
  * authenticated account's empty room panel (components/reports/report-rooms.tsx).
@@ -64,7 +64,7 @@ type Props = {
    * file input, no drop target, no generate action. Display only — the server refuses the same checks on its own.
    */
   locked?: UploadLock | null;
-  /** The generate button's label; "Generate free report" unless the parent says otherwise (e.g. under a subscription). */
+  /** The generate button's label; "Generate report" unless the parent says otherwise. */
   generateLabel?: string;
   /** Optional block shown just above the Generate button (the owner's one-time System 2 authorization in report rooms); omitted = unchanged form. */
   extraOption?: ReactNode;
@@ -88,7 +88,7 @@ function ReferenceSection({ references, busy }: { references?: ReferencePanelPro
   );
 }
 
-export function DocumentUploadPanel({ file, isGeneratingReport, progress, processingLabel, fileInputRef, onChooseFile, onGenerate, references, complete = false, saveFailure, locked = null, generateLabel = "Generate free report", extraOption, privacyNote }: Props) {
+export function DocumentUploadPanel({ file, isGeneratingReport, progress, processingLabel, fileInputRef, onChooseFile, onGenerate, references, complete = false, saveFailure, locked = null, generateLabel = "Generate report", extraOption, privacyNote }: Props) {
   if (locked && !isGeneratingReport && !saveFailure) {
     // A check already running (or a save to retry) always finishes; only a NEW check is locked.
     return (

@@ -278,7 +278,6 @@ export default function Home() {
   // subscription (GET /api/account/plan — display only; POST /api/reports and the check-work routes still refuse).
   // null while enforcement is off, for administrators, and for an active plan.
   const [checkLock, setCheckLock] = useState<UploadLock | null>(null);
-  const [subscriptionEnforced, setSubscriptionEnforced] = useState(false);
   const [emailVerification, setEmailVerification] = useState<EmailVerificationView | null>(null);
   const [emailVerifySending, setEmailVerifySending] = useState(false);
   const [emailVerifyNotice, setEmailVerifyNotice] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
@@ -433,7 +432,6 @@ export default function Home() {
       queueMicrotask(() => {
         if (cancelled) return;
         setCheckLock(null);
-        setSubscriptionEnforced(false);
       });
       return () => {
         cancelled = true;
@@ -442,11 +440,9 @@ export default function Home() {
     void fetchAccountPlan().then((plan) => {
       if (cancelled || !plan || !plan.authenticated) return;
       if (!plan.enforced || plan.exempt) {
-        setSubscriptionEnforced(plan.enforced);
         setCheckLock(null);
         return;
       }
-      setSubscriptionEnforced(true);
       const code = plan.graceEndsAt !== null ? null : planStateBlockCode(plan.state);
       setCheckLock(code ? uploadLockFor(code, plan.expiresAt, plan.rooms?.allocated ?? null) : null);
     });
@@ -1589,9 +1585,7 @@ export default function Home() {
                     <h2>Upload your document</h2>
                     <span>PDF, DOCX, TXT, MD, HTML, or CSV · up to 10 MB</span>
                   </div>
-                  {subscriptionEnforced
-                    ? checkLock && <span className="free-badge free-badge-locked">LOCKED</span>
-                    : <span className="free-badge">FREE</span>}
+                  {checkLock && <span className="free-badge free-badge-locked">LOCKED</span>}
                 </div>
 
                 <DocumentUploadPanel
@@ -1603,7 +1597,6 @@ export default function Home() {
                   onChooseFile={chooseFile}
                   onGenerate={generateReport}
                   locked={checkLock}
-                  generateLabel={subscriptionEnforced ? "Generate report" : undefined}
                 />
               </section>
 

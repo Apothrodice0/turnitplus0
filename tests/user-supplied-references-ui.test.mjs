@@ -251,7 +251,7 @@ test("16: DocumentUploadPanel with no `references` prop renders no reference sec
     }),
   );
   assert.doesNotMatch(html, /Reference files/);
-  assert.match(html, /Generate free report/, "the manuscript upload UI is intact");
+  assert.match(html, /Generate report/, "the manuscript upload UI is intact");
 });
 
 // ── 16a — UX_CLEANUP: the component itself still has full capability; only
@@ -273,7 +273,7 @@ test("16a: DocumentUploadPanel still renders the Reference files UI when the `re
     }),
   );
   assert.match(html, /Reference files/, "a future internal surface can still wire this back in without any component change");
-  assert.match(html, /Generate free report/, "the manuscript upload UI renders alongside it");
+  assert.match(html, /Generate report/, "the manuscript upload UI renders alongside it");
 });
 
 test("16b: a report saved before this feature still builds a Report V2 view model (no reference fields required)", () => {
