@@ -144,7 +144,7 @@ export function roomPlanLabel(entry: RoomIndexEntry, newChecksBlocked: boolean):
     return `Cooling down · available again ${at}`;
   }
   if (entry.outsidePlan) return "Not part of your plan";
-  if (newChecksBlocked) return "New checks need an active plan";
+  if (newChecksBlocked) return "Subscription required";
   return null;
 }
 

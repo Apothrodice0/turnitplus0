@@ -230,7 +230,7 @@ export async function resolveRoomPolicy(client: Executor, user: SessionUser, now
     const code: PlanBlockCode = "ACTIVATION_UNAVAILABLE";
     return {
       enforced: true,
-      visibleRoomCount: usedRooms,
+      visibleRoomCount: Math.max(usedRooms, 1),
       uploadRoomCount: 0,
       dailyCapApplies: false,
       block: { code, message: planBlockMessage(code, null) },
@@ -274,7 +274,9 @@ export async function resolveRoomPolicy(client: Executor, user: SessionUser, now
   const code: PlanBlockCode = state === "none" ? "ACTIVATION_REQUIRED" : state === "expired" ? "PLAN_EXPIRED" : "ACCOUNT_SUSPENDED";
   return {
     enforced: true,
-    visibleRoomCount: Math.max(entitlement?.rooms ?? 0, usedRooms),
+    // Every room that holds a report (or belonged to the plan) stays listed; an account with none still sees one
+    // room, so the normal My Reports -> room flow shows the locked upload area instead of an empty list or a 404.
+    visibleRoomCount: Math.max(entitlement?.rooms ?? 0, usedRooms, 1),
     uploadRoomCount: 0,
     dailyCapApplies: false,
     block: { code, message: planBlockMessage(code, entitlement) },
