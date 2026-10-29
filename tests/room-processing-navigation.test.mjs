@@ -330,7 +330,8 @@ test("DIRECT REPORT URL: the report page derives its own real AI-lifecycle statu
   // authoritative AI headline signal (see lib/ai-display-state.ts) so the
   // detail page can never disagree with the room card that reads the same
   // columns.
-  assert.match(page, /return \{ status: "found", payload, aiStatus, aiScore: row\.ai_score, aiTone: row\.ai_tone, similarityStatus: display\.status \};/);
+  // The owner-only System 2 flag (feature/system2-real-product-20261028) is appended after these; the statuses are what matter.
+  assert.match(page, /return \{ status: "found", payload, aiStatus, aiScore: row\.ai_score, aiTone: row\.ai_tone, similarityStatus: display\.status(?:, [^}]+)? \};/);
   assert.match(page, /initialAiStatus=\{result\.status === "found" \? result\.aiStatus : null\}/);
   assert.match(page, /initialAiScore=\{result\.status === "found" \? result\.aiScore : null\}/);
   assert.match(page, /initialAiTone=\{result\.status === "found" \? result\.aiTone : null\}/);
