@@ -588,9 +588,11 @@ type Props = {
   uploadLock?: UploadLock | null;
   /** Whether subscription enforcement is on for this account (changes only the generate button's wording). */
   subscriptionEnforced?: boolean;
+  /** Manual subscriptions: set when this room is shown for its earlier report only (the account may not start new checks). */
+  historicalNote?: string | null;
 };
 
-export function RoomPageShell({ room, accountEmail, initialOccupant, uploadLock = null, subscriptionEnforced = false }: Props) {
+export function RoomPageShell({ room, accountEmail, initialOccupant, uploadLock = null, subscriptionEnforced = false, historicalNote = null }: Props) {
   const [occupant, setOccupant] = useState<RoomContents>(initialOccupant);
   const [pollExhausted, setPollExhausted] = useState(false);
   const [file, setFile] = useState<File | null>(null);
@@ -1661,7 +1663,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant, uploadLock 
             })()}
 
             <p className="room-cycle-note">
-              This room becomes available again: {formatDateTime(occupant.cycleEndsAt)}.
+              {historicalNote ?? <>This room becomes available again: {formatDateTime(occupant.cycleEndsAt)}.</>}
             </p>
           </div>
         )}

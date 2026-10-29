@@ -7949,6 +7949,50 @@ main.report-main {
 .account-plan-message { color: var(--ink); }
 .report-rooms-plan-notice, .room-plan-notice { margin-bottom: 12px; }
 
+/* MANUAL SUBSCRIPTIONS — My Reports subscription notice (components/reports/report-rooms.tsx): compact, readable, in the
+   locked upload area's visual language (grey surface, lock badge). */
+.subscription-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 16px 18px;
+  border: 1px solid #d3dee3;
+  border-radius: 14px;
+  background: linear-gradient(180deg, #f7fafb, #f3f6f7);
+}
+.subscription-notice-icon {
+  display: grid;
+  flex: 0 0 auto;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  border-radius: 11px;
+  background: #e4ebee;
+  color: #5f7680;
+}
+.subscription-notice-icon svg { width: 19px; height: 19px; }
+.subscription-notice-body { min-width: 0; }
+.subscription-notice h3 { margin: 1px 0 4px; color: #2c4650; font-size: 16px; font-weight: 700; line-height: 1.3; }
+.subscription-notice-message { margin: 0; color: #37515b; font-size: 14px; line-height: 1.5; }
+.subscription-notice-secondary { margin: 3px 0 0; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.subscription-notice-detail {
+  display: inline-block;
+  margin: 10px 0 0;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: #e9eff1;
+  color: #4b636c;
+  font-size: 12px;
+  font-weight: 650;
+}
+@media (max-width: 560px) {
+  .subscription-notice { gap: 12px; padding: 14px; }
+  .subscription-notice-icon { width: 34px; height: 34px; border-radius: 10px; }
+  .subscription-notice-icon svg { width: 16px; height: 16px; }
+  .subscription-notice h3 { font-size: 15px; }
+  .subscription-notice-message { font-size: 13.5px; }
+}
+
 /* Admin Phase 2A — Corpus workspace polish. Reuses every token/class the
    Phase 1 admin console system already established (.admin-card,
    .admin-metric-grid, .admin-collapsible, etc.); nothing here is a new

@@ -172,7 +172,15 @@ export function withholdUnexplainedSimilarity<T extends WithholdableSummary>(sum
  * subtree; every legacy row (and every report with no interpretation) still
  * returns only its scalars, exactly as before.
  */
-export async function findRoomOccupant(client: Client, userId: string, room: number, asOf: Date = new Date()): Promise<RoomOccupantResult> {
+export async function findRoomOccupant(
+  client: Client,
+  userId: string,
+  room: number,
+  asOf: Date = new Date(),
+  // Manual subscriptions: an account that may not start new checks is shown each room's latest report even after its
+  // 24 h cycle (the room is then history only — it could never take a new check anyway). Off: exactly as before.
+  options: { includeHistorical?: boolean } = {},
+): Promise<RoomOccupantResult> {
   // Phase A — one logical clock for this occupant resolution: the same
   // instant is used throughout the persisted-display currentness check
   // below, so a corpus-maturity boundary can't be evaluated inconsistently
@@ -205,7 +213,7 @@ export async function findRoomOccupant(client: Client, userId: string, room: num
       interpretation_to_verify: string | null;
     }
     | undefined;
-  if (!occupant || !isWithinActiveCycle(occupant.report_created_at)) {
+  if (!occupant || (!options.includeHistorical && !isWithinActiveCycle(occupant.report_created_at))) {
     return { status: "empty", report: null, cycleEndsAt: null };
   }
 

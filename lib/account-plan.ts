@@ -182,6 +182,30 @@ export function uploadLockFor(code: PlanBlockCode, expiresAt: number | null, roo
   }
 }
 
+/** The My Reports subscription notice (components/reports/report-rooms.tsx): a heading, the message, one secondary line. */
+export type SubscriptionNotice = { title: string; message: string; secondary: string; detail: string | null };
+
+export function subscriptionNoticeFor(code: PlanBlockCode, expiresAt: number | null): SubscriptionNotice {
+  switch (code) {
+    case "PLAN_EXPIRED":
+      return {
+        title: SUBSCRIPTION_REQUIRED_TITLE,
+        message: SUBSCRIPTION_REQUIRED_MESSAGE,
+        secondary: "Contact TurnitPlus to renew your plan.",
+        detail: `Your subscription expired on ${expiresAt !== null ? formatPlanDate(expiresAt) : "its end date"}. Your existing reports stay available.`,
+      };
+    case "ACCOUNT_SUSPENDED":
+      return { title: SUBSCRIPTION_REQUIRED_TITLE, message: SUBSCRIPTION_REQUIRED_MESSAGE, secondary: "Contact TurnitPlus to restore your plan.", detail: "Your subscription is paused. Your existing reports stay available." };
+    case "ACTIVATION_UNAVAILABLE":
+      return { title: "New checks unavailable", message: "New checks are temporarily unavailable.", secondary: "Please try again later.", detail: null };
+    default:
+      return { title: SUBSCRIPTION_REQUIRED_TITLE, message: SUBSCRIPTION_REQUIRED_MESSAGE, secondary: "Contact TurnitPlus to activate your plan.", detail: null };
+  }
+}
+
+/** Under a room's earlier report, for an account that may not start new checks (the room is shown for its history only). */
+export const HISTORICAL_ROOM_NOTE = "This report stays available. New checks need an active subscription.";
+
 /** The locked upload area for an empty room still in its 24 h cooldown (server clock). */
 export function roomCooldownLock(roomNumber: number, availableAt: number): UploadLock {
   return {

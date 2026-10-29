@@ -1818,10 +1818,19 @@ export async function GET(request: Request) {
         const roomParam = url.searchParams.get('room');
         if (roomParam !== null) {
           // Every room the account's room list shows (lib/account-entitlements.ts) — with activation off, its role's count.
-          const roomCount = (await resolveRoomPolicy(client, sessionUser)).visibleRoomCount;
+          const roomPolicyForRead = await resolveRoomPolicy(client, sessionUser);
+          const roomCount = roomPolicyForRead.visibleRoomCount;
           const room = Number(roomParam);
           if (!Number.isInteger(room) || room < 0 || room >= roomCount) {
             return new NextResponse(JSON.stringify({ error: `room must be an integer 0-${roomCount - 1}` }), { status: 400 });
+          }
+          // Manual subscriptions: where no new check can start (no active subscription, or a room beyond the plan) the room
+          // keeps showing its earlier report, however old — the same answer the room page gives (app/reports/rooms/[room]/
+          // page.tsx), so a poll never hides it.
+          if (roomPolicyForRead.enforced && (roomPolicyForRead.block !== null || room >= roomPolicyForRead.uploadRoomCount)) {
+            const current = await findRoomOccupant(client, sessionUser.id, room);
+            const shown = current.status === "empty" ? await findRoomOccupant(client, sessionUser.id, room, new Date(), { includeHistorical: true }) : current;
+            return new NextResponse(JSON.stringify(shown), { status: 200, headers: { 'Content-Type': 'application/json' } });
           }
           // A room whose only occupant's cycle has ended reports itself as
           // "empty" here too, exactly like the index (app/api/reports/rooms/

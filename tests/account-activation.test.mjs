@@ -370,7 +370,8 @@ enforce(true);
   assert.equal((await planOf(freeUser)).body.graceEndsAt, null, 'no free-access period');
   const idx = await roomIndex(freeUser);
   assert.equal(typeof idx.body.notice, 'string');
-  assert.equal(idx.body.rooms.length, 8, 'rooms up to the highest one holding a report stay visible (room 8 holds one)');
+  assert.deepEqual(idx.body.lock, { title: 'Subscription required', message: 'You need an active subscription before you can check documents.', secondary: 'Contact TurnitPlus to activate your plan.', detail: null }, 'the structured notice for My Reports');
+  assert.deepEqual(idx.body.rooms.map((r) => [r.room, r.status]), [[7, 'ready']], 'only the room holding a report is listed (room 8), with its report — no usable-looking empty rooms');
   const brandNew = await signup('brand-new@example.com');
   const newIdx = await roomIndex(brandNew);
   assert.equal(newIdx.body.rooms.length, 1, 'an account with no plan and no reports still sees one (locked) room, never an empty list');
@@ -388,6 +389,46 @@ enforce(true);
   assert.equal((await postReport(admin, 3100000000003, { room: 30 })).status, 200, 'administrators are never blocked');
   assert.deepEqual((await planOf(admin)).body, { authenticated: true, enforced: true, exempt: true });
   pass('enforced: no plan blocks new checks (403 ACTIVATION_REQUIRED) but keeps reports readable; admins unrestricted');
+}
+
+// ── HISTORY: old reports stay listed, readable and untouched; activation shows exactly the purchased rooms ───────────
+{
+  const historian = await signup('historian@example.com');
+  await markVerified(historian.email);
+  enforce(false);
+  assert.equal((await postReport(historian, 3150000000001, { room: 5 })).status, 200, 'a report saved before enforcement, in room 6');
+  enforce(true);
+  const historianId = await userIdOf(historian.email);
+  const monthAgo = new Date(Date.now() - 30 * DAY_MS).toISOString();
+  await db.execute({ sql: "UPDATE saved_reports SET report_created_at = ? WHERE id = '3150000000001'", args: [monthAgo] });
+  const reportRow = async () => (await db.execute({ sql: "SELECT id, room_number, report_created_at FROM saved_reports WHERE user_id = ?", args: [historianId] })).rows.map((r) => [String(r.id), Number(r.room_number), String(r.report_created_at)]);
+  const original = await reportRow();
+
+  const blocked = await roomIndex(historian);
+  assert.deepEqual(blocked.body.rooms.map((r) => [r.room, r.status, r.historical === true]), [[5, 'ready', true]], 'unsubscribed: only the history room, with its month-old report');
+  const blockedRoom = await getJson(reportsRoute, 'http://localhost/api/reports?room=5', historian.cookie);
+  assert.equal(blockedRoom.body.report?.id, '3150000000001', 'the room still opens on its earlier report');
+  const read = await getJson(reportByIdRoute, `http://localhost/api/reports/3150000000001?deviceKey=${encodeURIComponent(historian.deviceKey)}`, historian.cookie, { id: '3150000000001' });
+  assert.equal(read.status, 200, 'and the report itself is readable');
+  assert.equal((await postReport(historian, 3150000000002, { room: 5 })).status, 403, 'no new check in the history room');
+  assert.equal((await postReport(historian, 3150000000003, { room: 0 })).status, 403, 'nor anywhere else');
+
+  await grant(admin.cookie, { email: historian.email, action: 'activate', planDays: 30, rooms: 3 });
+  const active = await roomIndex(historian);
+  assert.deepEqual(
+    active.body.rooms.map((r) => [r.room, r.status, r.outsidePlan === true, r.historical === true]),
+    [[0, 'empty', false, false], [1, 'empty', false, false], [2, 'empty', false, false], [5, 'ready', true, true]],
+    'activated for 3 rooms: exactly rooms 1–3 usable, plus the history room (outside the plan, read-only)',
+  );
+  assert.equal('notice' in active.body, false);
+  assert.equal((await getJson(reportsRoute, 'http://localhost/api/reports?room=5', historian.cookie)).body.report?.id, '3150000000001', 'the history room still shows its report');
+  const outside = await postReport(historian, 3150000000004, { room: 5 });
+  assert.equal(outside.status, 403);
+  assert.equal(outside.body.code, 'ROOM_NOT_IN_PLAN', 'the history room never takes a new check');
+  assert.equal((await postReport(historian, 3150000000005, { room: 0 })).status, 200, 'a purchased room does');
+  const after = (await reportRow()).filter(([id]) => id === '3150000000001');
+  assert.deepEqual(after, original, 'the historical report is never deleted, renumbered or overwritten');
+  pass('history: unsubscribed accounts list only their report rooms (readable, locked); activation shows exactly the purchased rooms plus read-only history; old reports untouched');
 }
 
 // ── 4 + 5 + 6. Rooms appear, are used under the room rules, balance shown correctly ─────────────────────────────
@@ -490,7 +531,8 @@ enforce(true);
   const plan = (await planOf(bob)).body;
   assert.equal(plan.state, 'expired');
   assert.equal(plan.rooms.available, 0);
-  assert.equal((await roomIndex(bob)).body.rooms.length, 20, 'the plan rooms (and their reports) stay listed');
+  const bobRooms = (await db.execute({ sql: "SELECT DISTINCT room_number FROM saved_reports WHERE user_id = (SELECT id FROM users WHERE email = 'bob@example.com') ORDER BY room_number", args: [] })).rows.map((r) => Number(r.room_number));
+  assert.deepEqual((await roomIndex(bob)).body.rooms.map((r) => r.room), bobRooms, 'exactly the rooms that hold his reports stay listed');
   pass('10+15 expired plan: new checks 403 PLAN_EXPIRED, running checks finish, reports stay accessible');
 }
 
@@ -797,7 +839,7 @@ enforce(true);
 {
   const all = await listAccounts(admin.cookie);
   assert.equal(all.status, 200);
-  assert.equal(all.body.total, 9, 'alice, bob, carol, dave, erin, frank, gina, hank, ivan');
+  assert.equal(all.body.total, 10, 'alice, bob, carol, dave, erin, frank, gina, hank, ivan, historian');
   const keys = Object.keys(all.body.rows[0]).sort();
   assert.deepEqual(keys, ['activatedAt', 'email', 'emailVerified', 'expiresAt', 'planDays', 'rooms', 'roomsAvailable', 'state', 'userId', 'username']);
   await db.execute({ sql: 'UPDATE account_entitlements SET expires_at = ? WHERE user_id = ?', args: [Date.now() - 1000, await userIdOf(hank.email)] });

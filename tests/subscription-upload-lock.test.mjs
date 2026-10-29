@@ -95,3 +95,25 @@ test("the dashboard and every room wire the lock into the normal upload area", a
   const roomShell = await readFile(new URL("../app/reports/rooms/[room]/room-page-shell.tsx", import.meta.url), "utf8");
   assert.match(roomShell, /locked=\{uploadLock\}/);
 });
+
+test("My Reports subscription notice: heading, readable message, secondary line, lock icon, responsive styles", async () => {
+  const { subscriptionNoticeFor } = await import("../lib/account-plan.ts");
+  assert.deepEqual(subscriptionNoticeFor("ACTIVATION_REQUIRED", null), {
+    title: "Subscription required",
+    message: "You need an active subscription before you can check documents.",
+    secondary: "Contact TurnitPlus to activate your plan.",
+    detail: null,
+  });
+  assert.equal(subscriptionNoticeFor("PLAN_EXPIRED", Date.UTC(2026, 9, 1)).secondary, "Contact TurnitPlus to renew your plan.");
+  assert.match(subscriptionNoticeFor("PLAN_EXPIRED", Date.UTC(2026, 9, 1)).detail, /expired on 1 October 2026/);
+  assert.equal(subscriptionNoticeFor("ACCOUNT_SUSPENDED", null).secondary, "Contact TurnitPlus to restore your plan.");
+  const rooms = await readFile(new URL("../components/reports/report-rooms.tsx", import.meta.url), "utf8");
+  assert.match(rooms, /className="subscription-notice"/);
+  assert.match(rooms, /<LockKeyhole aria-hidden="true" \/>/);
+  assert.match(rooms, /<h3 id="subscription-notice-title">/);
+  assert.doesNotMatch(rooms, /ai-analysis-message report-rooms-plan-notice/, "the old oversized banner is gone");
+  const css = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(css, /\.subscription-notice h3 \{[^}]*font-size: 16px/);
+  assert.match(css, /\.subscription-notice-message \{[^}]*font-size: 14px/);
+  assert.match(css, /@media \(max-width: 560px\) \{\s*\.subscription-notice \{/);
+});

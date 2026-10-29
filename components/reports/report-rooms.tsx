@@ -4,8 +4,9 @@ import { useEffect, useReducer, useTransition, useState } from "react";
 import type { MouseEvent } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { ChevronRight } from "lucide-react";
+import { ChevronRight, LockKeyhole } from "lucide-react";
 import { fetchReportRoomIndex, type RoomIndexFetchResult } from "@/lib/reports-remote";
+import type { SubscriptionNotice } from "@/lib/account-plan";
 import { getCachedRoomIndex, setCachedRoomIndex } from "@/lib/report-rooms-cache";
 import type { RoomIndexEntry, RoomStatus } from "@/lib/report-rooms";
 
@@ -203,8 +204,10 @@ export function ReportRoomsBrowser({ accountEmail, onTotalCountChange }: Props) 
   // parent (app/page.tsx) and this component never sees, let alone clears.
   const [indexError, setIndexError] = useState(false);
   const [retryToken, setRetryToken] = useState(0);
-  // Manual account activation: the server's reason this account cannot start a new check (never set while it is off).
+  // Manual account activation: the server's reason this account cannot start a new check (never set while it is off),
+  // and the same reason as heading / message / secondary line for the subscription notice.
   const [planNotice, setPlanNotice] = useState<string | null>(null);
+  const [planLock, setPlanLock] = useState<SubscriptionNotice | null>(null);
 
   // Recovery: fires on a genuine settle, whether that happens before or
   // after the 30s mark — "stuck" is not a dead end, only a label change,
@@ -288,6 +291,7 @@ export function ReportRoomsBrowser({ accountEmail, onTotalCountChange }: Props) 
         setRoomIndex(resolution.rooms);
       }
       setPlanNotice(result.ok ? result.notice ?? null : null);
+      setPlanLock(result.ok ? result.lock ?? null : null);
       setIndexError(resolution.error);
       setIndexLoading(false);
     }
@@ -324,9 +328,15 @@ export function ReportRoomsBrowser({ accountEmail, onTotalCountChange }: Props) 
   return (
     <div className="report-rooms-list">
       {planNotice && (
-        <section className="ai-analysis-message report-rooms-plan-notice" role="status">
-          <strong>—</strong>
-          <div><p>{planNotice}</p></div>
+        // Manual subscriptions: the same visual language as the locked upload area (components/reports/document-upload-panel.tsx).
+        <section className="subscription-notice" role="status" aria-labelledby="subscription-notice-title">
+          <span className="subscription-notice-icon"><LockKeyhole aria-hidden="true" /></span>
+          <div className="subscription-notice-body">
+            <h3 id="subscription-notice-title">{planLock?.title ?? "Subscription required"}</h3>
+            <p className="subscription-notice-message">{planLock?.message ?? planNotice}</p>
+            {planLock && <p className="subscription-notice-secondary">{planLock.secondary}</p>}
+            {planLock?.detail && <p className="subscription-notice-detail">{planLock.detail}</p>}
+          </div>
         </section>
       )}
       {/* prefetch=false: every room row renders at once (up to 40 for an

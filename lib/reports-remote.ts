@@ -4,7 +4,7 @@ import { prepareReportForTransport } from "./ai-passage-table";
 import { reportScoringNormalizationVersion } from "./similarity-core";
 import { AI_SAVE_OUTCOME_SIZE_UNAVAILABLE, type AiSaveOutcome, type AiUnavailableReason } from "./ai-unavailable-state";
 import type { RoomIndexEntry } from "./report-rooms";
-import { isPlanBlockCode } from "./account-plan";
+import { isPlanBlockCode, type SubscriptionNotice } from "./account-plan";
 import { canonicalizeText } from "./canonical-text";
 
 export type ReportSummary = {
@@ -444,17 +444,24 @@ export async function listRemoteReportSummaries(): Promise<ReportSummary[]> {
  * signed-in UI intact.
  */
 export type RoomIndexFetchResult =
-  // `notice`: manual account activation only — why the account cannot start a new check right now.
-  | { ok: true; rooms: RoomIndexEntry[]; notice?: string }
+  // `notice`: manual account activation only — why the account cannot start a new check right now; `lock` is the same
+  // reason as a heading, message and secondary line for the My Reports subscription notice.
+  | { ok: true; rooms: RoomIndexEntry[]; notice?: string; lock?: SubscriptionNotice }
   | { ok: false; status: number | null };
+
+function isSubscriptionNotice(value: unknown): value is SubscriptionNotice {
+  const v = value as Partial<SubscriptionNotice> | null;
+  return Boolean(v) && typeof v?.title === "string" && typeof v?.message === "string" && typeof v?.secondary === "string";
+}
 
 export async function fetchReportRoomIndex(): Promise<RoomIndexFetchResult> {
   try {
     const response = await fetch("/api/reports/rooms");
     if (!response.ok) return { ok: false, status: response.status };
-    const data = (await response.json()) as { rooms?: RoomIndexEntry[]; notice?: unknown };
+    const data = (await response.json()) as { rooms?: RoomIndexEntry[]; notice?: unknown; lock?: unknown };
     const rooms = Array.isArray(data.rooms) ? data.rooms : [];
-    return typeof data.notice === "string" ? { ok: true, rooms, notice: data.notice } : { ok: true, rooms };
+    if (typeof data.notice !== "string") return { ok: true, rooms };
+    return isSubscriptionNotice(data.lock) ? { ok: true, rooms, notice: data.notice, lock: data.lock } : { ok: true, rooms, notice: data.notice };
   } catch (error) {
     console.debug("Report room index fetch failed.", {
       error: error instanceof Error ? error.message : String(error),

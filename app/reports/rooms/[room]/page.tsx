@@ -11,7 +11,7 @@ import { getReportsDbClient } from "@/lib/reports-db";
 import { findRoomOccupant, type RoomOccupantResult } from "@/lib/reports-repo";
 import { ROOM_CYCLE_MS } from "@/lib/report-rooms";
 import { newCheckRefusal, readActiveRoomClaims, resolveRoomPolicy } from "@/lib/account-entitlements";
-import { roomCooldownLock, uploadLockFor, type UploadLock } from "@/lib/account-plan";
+import { HISTORICAL_ROOM_NOTE, roomCooldownLock, uploadLockFor, type UploadLock } from "@/lib/account-plan";
 import { RoomPageShell } from "./room-page-shell";
 
 export const dynamic = "force-dynamic";
@@ -29,7 +29,7 @@ export const dynamic = "force-dynamic";
  */
 
 type RoomPageResult =
-  | { status: "found"; room: number; accountEmail: string; occupant: RoomOccupantResult; uploadLock: UploadLock | null; subscriptionEnforced: boolean }
+  | { status: "found"; room: number; accountEmail: string; occupant: RoomOccupantResult; uploadLock: UploadLock | null; subscriptionEnforced: boolean; historicalNote: string | null }
   | { status: "invalid-room" }
   | { status: "no-session" }
   | { status: "rate-limited"; retryAfterSeconds: number };
@@ -64,11 +64,22 @@ const loadRoom = cache(async (roomParam: string): Promise<RoomPageResult> => {
     if (!Number.isInteger(room) || room < 0 || room >= roomCount) return { status: "invalid-room" };
 
     const occupant = await findRoomOccupant(client, sessionUser.id, room);
+    // Manual subscriptions: where no new check can start (no active subscription, or a room beyond the plan) the customer
+    // still opens and reads this room's earlier report, however old. With the feature off this never applies.
+    let shown: RoomOccupantResult = occupant;
+    let historicalNote: string | null = null;
+    if (policy.enforced && (policy.block !== null || room >= policy.uploadRoomCount) && occupant.status === "empty") {
+      const earlier = await findRoomOccupant(client, sessionUser.id, room, new Date(), { includeHistorical: true });
+      if (earlier.report) {
+        shown = earlier;
+        historicalNote = HISTORICAL_ROOM_NOTE;
+      }
+    }
     // Said before the customer spends minutes on an analysis the save would refuse: the room's upload area is shown
     // locked (no active subscription, room outside the plan, server-clock cooldown). The save and the check-work routes
     // still decide on their own (app/api/reports/route.ts, lib/account-entitlements.ts). Always null with the feature off.
     let uploadLock: UploadLock | null = null;
-    if (policy.enforced && occupant.status === "empty") {
+    if (policy.enforced && shown.status === "empty") {
       const refusal = newCheckRefusal(policy, room);
       if (refusal) {
         uploadLock = uploadLockFor(refusal.code, policy.entitlement?.expiresAt ?? null, policy.entitlement?.rooms ?? null);
@@ -77,7 +88,7 @@ const loadRoom = cache(async (roomParam: string): Promise<RoomPageResult> => {
         if (claimedAt !== undefined) uploadLock = roomCooldownLock(room + 1, claimedAt + ROOM_CYCLE_MS);
       }
     }
-    return { status: "found", room, accountEmail: sessionUser.email, occupant, uploadLock, subscriptionEnforced: policy.enforced };
+    return { status: "found", room, accountEmail: sessionUser.email, occupant: shown, uploadLock, subscriptionEnforced: policy.enforced, historicalNote };
   } finally {
     client.close();
   }
@@ -148,5 +159,5 @@ export default async function RoomPage({ params }: { params: Promise<{ room: str
   // room warrants a fresh instance.
   // Manual subscriptions: an EMPTY room that cannot take a new check right now shows its usual upload area LOCKED
   // (dimmed, no file input, no drop target, no generate action) with the reason — never with the feature off.
-  return <RoomPageShell key={result.room} room={result.room} accountEmail={result.accountEmail} initialOccupant={result.occupant} uploadLock={result.uploadLock} subscriptionEnforced={result.subscriptionEnforced} />;
+  return <RoomPageShell key={result.room} room={result.room} accountEmail={result.accountEmail} initialOccupant={result.occupant} uploadLock={result.uploadLock} subscriptionEnforced={result.subscriptionEnforced} historicalNote={result.historicalNote} />;
 }

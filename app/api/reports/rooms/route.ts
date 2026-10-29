@@ -5,6 +5,7 @@ import { clientIpFrom } from '../../../../lib/client-ip';
 import { getSessionUser } from '../../../../lib/auth-session';
 import { deriveRoomStatus, isWithinActiveCycle, ROOM_CYCLE_MS, roomCycleEndsAt, type RoomIndexEntry } from '../../../../lib/report-rooms';
 import { readActiveRoomClaims, resolveRoomPolicy } from '../../../../lib/account-entitlements';
+import { subscriptionNoticeFor } from '../../../../lib/account-plan';
 
 /**
  * The room/slot architecture's index: ONE lightweight query returning each
@@ -88,9 +89,30 @@ export async function GET(request: Request) {
         return new NextResponse(JSON.stringify({ rooms }), { status: 200, headers: { 'Content-Type': 'application/json' } });
       }
 
+      const now = Date.now();
+      // No new check allowed (no subscription, expired, suspended): list only the rooms that hold a report — each with its
+      // latest report, however old, so the customer can still open and read it — and nothing that looks usable. An
+      // account with no reports at all gets one locked placeholder room. Room numbers are the reports' own.
+      if (policy.block) {
+        const historyRooms = [...occupantByRoom.keys()].filter((room) => room < roomCount).sort((a, b) => a - b);
+        const rooms: RoomIndexEntry[] = historyRooms.map((room) => {
+          const occupant = occupantByRoom.get(room)!;
+          const status = deriveRoomStatus(occupant.aiScore === null ? null : Number(occupant.aiScore), occupant.aiStatus);
+          const current = isWithinActiveCycle(occupant.mostRecent, now);
+          const entry: RoomIndexEntry = { room, status, mostRecentAt: occupant.mostRecent, cycleEndsAt: current ? roomCycleEndsAt(occupant.mostRecent) : null };
+          if (!current) entry.historical = true;
+          return entry;
+        });
+        if (rooms.length === 0) rooms.push({ room: 0, status: 'empty', mostRecentAt: null, cycleEndsAt: null });
+        const lock = subscriptionNoticeFor(policy.block.code, policy.entitlement?.expiresAt ?? null);
+        return new NextResponse(JSON.stringify({ rooms, notice: policy.block.message, lock }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
       // Enforced plan: a room is busy until the later of its report's 24 h cycle and its server-clock claim, so a
       // deleted or back-dated report never shows its room as free before the server will accept a new check in it.
-      const now = Date.now();
       const claims = policy.usesRoomClaims ? await readActiveRoomClaims(client, sessionUser.id, now) : new Map<number, number>();
       const rooms: RoomIndexEntry[] = Array.from({ length: roomCount }, (_, room) => {
         const occupant = occupantByRoom.get(room);
@@ -102,13 +124,19 @@ export async function GET(request: Request) {
           const endsAt = [cycleEndsAt, claimEndsAt].filter((v): v is string => v !== null).sort().pop() as string;
           return { room, status, mostRecentAt: occupant.mostRecent, cycleEndsAt: endsAt };
         }
+        if (room >= policy.uploadRoomCount) {
+          // Beyond the purchased rooms: listed only for an earlier report (readable, never a new check); otherwise hidden,
+          // so the list shows exactly the plan's room allowance.
+          if (!occupant) return null;
+          const status = deriveRoomStatus(occupant.aiScore === null ? null : Number(occupant.aiScore), occupant.aiStatus);
+          return { room, status, mostRecentAt: occupant.mostRecent, cycleEndsAt: null, outsidePlan: true, historical: true } satisfies RoomIndexEntry;
+        }
         const entry: RoomIndexEntry = { room, status: 'empty', mostRecentAt: null, cycleEndsAt: null };
         if (claimEndsAt) entry.availableAt = claimEndsAt;
-        if (room >= policy.uploadRoomCount && policy.block === null) entry.outsidePlan = true;
         return entry;
-      });
+      }).filter((entry): entry is RoomIndexEntry => entry !== null);
 
-      return new NextResponse(JSON.stringify({ rooms, ...(policy.block ? { notice: policy.block.message } : {}) }), {
+      return new NextResponse(JSON.stringify({ rooms }), {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
       });

@@ -147,4 +147,9 @@ export type RoomIndexEntry = {
   availableAt?: string;
   /** Manual account activation only: an empty room beyond the account's plan, shown because it once held a report. */
   outsidePlan?: true;
+  /**
+   * Manual subscriptions only: this room is listed for its earlier report (past its 24 h cycle) while the account may
+   * not start new checks — the report stays readable; the room takes no new check.
+   */
+  historical?: true;
 };
