@@ -52,7 +52,7 @@ import { detectLanguage } from "@/lib/similarity-core";
 import { AI_MODEL_VERSION, AI_PASSAGE_LOG_ODDS_THRESHOLD, AI_PASSAGE_THRESHOLD } from "@/lib/ai-core";
 import { describeAiAnalysisError, type AiPrepStage } from "@/lib/ai-model-prep";
 import { DocumentUploadPanel, type UploadLock } from "@/components/reports/document-upload-panel";
-import { System2PermissionDialog, System2PrivacyNote, loadSystem2Authorization, loadSystem2Estimate, requestSystem2Estimate, storeSystem2Authorization, useSystem2Estimate, type System2Authorization } from "@/components/report/system2-estimate";
+import { loadSystem2Estimate, requestSystem2Estimate, useSystem2Estimate } from "@/components/report/system2-estimate";
 import { UNIFIED_ESTIMATE_NOTE, unifySimilarity, type System2EstimateRecord } from "@/lib/system2-unified";
 
 /**
@@ -611,20 +611,9 @@ export function RoomPageShell({ room, accountEmail, initialOccupant, uploadLock 
   const [occupant, setOccupant] = useState<RoomContents>(initialOccupant);
   const [pollExhausted, setPollExhausted] = useState(false);
   const [file, setFile] = useState<File | null>(null);
-  // Owner-only System 2 (provisional, behind the scenes): this account's one-time authorization (read after hydration;
-  // "unknown" until then, so nothing is offered or sent early) and the submitted file for the ONE automatic request made
-  // right after the save. Never used for anyone without system2Enabled.
-  const [s2Authorization, setS2Authorization] = useState<System2Authorization | "unknown">("unknown");
+  // Owner-only System 2 (provisional, behind the scenes): the submitted file for the ONE automatic request made right
+  // after the save. Only ever set for the allowlisted owner (system2Enabled); every customer's check stays in the browser.
   const s2PendingRef = useRef<File | null>(null);
-  useEffect(() => {
-    if (system2Enabled) setS2Authorization(loadSystem2Authorization(accountEmail));
-  }, [system2Enabled, accountEmail]);
-  function decideSystem2(decision: System2Authorization) {
-    storeSystem2Authorization(accountEmail, decision);
-    setS2Authorization(decision);
-  }
-  // The one-time permission dialog: opened by Generate report only when it is needed (startCheck below).
-  const [s2Asking, setS2Asking] = useState(false);
   const [progress, setProgress] = useState(0);
   const [processingLabel, setProcessingLabel] = useState("Reading document content");
   const [isGeneratingReport, setIsGeneratingReport] = useState(false);
@@ -1163,26 +1152,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant, uploadLock 
   }
   useProgressCreep(isGeneratingReport && !progressComplete, progressCeiling, setProgress);
 
-  /**
-   * Generate report. Owner-only System 2 asks its one-time permission here, and only when it matters: a Word document
-   * and no recorded decision. Either answer is recorded and the check starts with it; everyone else (and every later
-   * check) goes straight to runCheck. Returns the check's promise, exactly as onGenerate={runCheck} did (resolved at
-   * once when the dialog opens instead).
-   */
-  function startCheck(): Promise<void> {
-    if (system2Enabled && s2Authorization === null && file && !uploadLock && !generationLockRef.current && /\.docx$/i.test(file.name)) {
-      setS2Asking(true);
-      return Promise.resolve();
-    }
-    return runCheck();
-  }
-  function answerSystem2(decision: "granted" | "declined") {
-    decideSystem2(decision);
-    setS2Asking(false);
-    void runCheck(decision);
-  }
-
-  async function runCheck(s2Choice: System2Authorization | "unknown" = s2Authorization) {
+  async function runCheck() {
     if (generationLockRef.current) {
       notify("Your current document is still being analyzed.");
       return;
@@ -1198,7 +1168,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant, uploadLock 
     }
 
     const submittedFile = file;
-    s2PendingRef.current = system2Enabled && s2Choice === "granted" ? submittedFile : null;
+    s2PendingRef.current = system2Enabled ? submittedFile : null;
     generationLockRef.current = true;
     setIsGeneratingReport(true);
     // Defect #3: marks the start of a new check generation for the
@@ -1562,15 +1532,11 @@ export function RoomPageShell({ room, accountEmail, initialOccupant, uploadLock 
               processingLabel={processingLabel}
               fileInputRef={fileInputRef}
               onChooseFile={chooseFile}
-              onGenerate={startCheck}
+              onGenerate={runCheck}
               complete={progressComplete}
               saveFailure={saveFailure && !isGeneratingReport ? { message: saveFailure, retrying: retryingSave, onRetry: () => void retrySave() } : undefined}
               locked={uploadLock}
-              privacyNote={system2Enabled && (s2Authorization === "granted" || s2Authorization === "declined") ? (
-                <System2PrivacyNote authorization={s2Authorization} onChange={() => decideSystem2(s2Authorization === "granted" ? "declined" : null)} />
-              ) : undefined}
             />
-            {s2Asking && <System2PermissionDialog onDecide={answerSystem2} onCancel={() => setS2Asking(false)} />}
           </div>
         )}
 

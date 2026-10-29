@@ -9670,11 +9670,4 @@ button.admin-archive-feed-row:focus-visible { outline: 2px solid var(--blue); ou
 
 /* Owner-only System 2 (components/report/system2-estimate.tsx, lib/system2-unified.ts): one-time authorization in the
    room, the privacy line's change link, and the concise note shown when an estimate raised the one similarity result. */
-/* Owner-only one-time permission (components/report/system2-estimate.tsx System2PermissionDialog): the email-verification
-   modal's overlay and card, with a compact heading and two actions. */
-.s2-permission { max-width: 420px; }
-.s2-permission h2 { margin: 0 0 8px; color: var(--ink); font-size: 18px; font-weight: 700; }
-.s2-permission-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
-.s2-permission-actions .button { flex: 1 1 140px; justify-content: center; }
-.s2-privacy-change { padding: 0; border: 0; background: none; font: inherit; color: var(--blue-dark); text-decoration: underline; cursor: pointer; }
 .unified-estimate-note { margin: 4px 0 0; font-size: 12px; font-style: italic; color: var(--muted); }
