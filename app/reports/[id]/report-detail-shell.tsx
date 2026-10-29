@@ -555,7 +555,7 @@ export function ReportDetailShell({
         </div>
       )}
 
-      {/* Owner-only "Estimated Turnitin-like similarity": a separate statistical estimate, never changing the similarity or AI views below. */}
+      {/* Owner-only System 2 estimate: a separate statistical estimate, never changing the similarity or AI views below. */}
       {system2Enabled && mode !== "ai" && <System2EstimateDetail reportId={id} />}
 
       {isOrdinaryV2Workspace ? (
