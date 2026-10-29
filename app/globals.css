@@ -9667,3 +9667,12 @@ button.admin-archive-feed-row:focus-visible { outline: 2px solid var(--blue); ou
   .admin-archive-card-metrics dd { font-size: 19px; }
   .admin-archive-card-metrics dt { font-size: 11px; }
 }
+
+/* Owner-only System 2 (components/report/system2-estimate.tsx, lib/system2-unified.ts): one-time authorization in the
+   room, the privacy line's change link, and the concise note shown when an estimate raised the one similarity result. */
+.s2-auth-notice { margin: 4px 0 12px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+.s2-auth-notice h3 { margin: 0 0 6px; font-size: 0.95rem; color: var(--ink); }
+.s2-auth-notice p { margin: 0; font-size: 0.88rem; line-height: 1.45; color: var(--muted); }
+.s2-auth-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.s2-privacy-change { padding: 0; border: 0; background: none; font: inherit; color: var(--blue-dark); text-decoration: underline; cursor: pointer; }
+.unified-estimate-note { margin: 4px 0 0; font-size: 12px; font-style: italic; color: var(--muted); }

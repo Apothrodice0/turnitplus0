@@ -52,6 +52,8 @@ import { detectLanguage } from "@/lib/similarity-core";
 import { AI_MODEL_VERSION, AI_PASSAGE_LOG_ODDS_THRESHOLD, AI_PASSAGE_THRESHOLD } from "@/lib/ai-core";
 import { describeAiAnalysisError, type AiPrepStage } from "@/lib/ai-model-prep";
 import { DocumentUploadPanel, type UploadLock } from "@/components/reports/document-upload-panel";
+import { System2AuthorizationNotice, System2PrivacyNote, loadSystem2Authorization, loadSystem2Estimate, requestSystem2Estimate, storeSystem2Authorization, useSystem2Estimate, type System2Authorization } from "@/components/report/system2-estimate";
+import { UNIFIED_ESTIMATE_NOTE, unifySimilarity, type System2EstimateRecord } from "@/lib/system2-unified";
 
 /**
  * The dedicated room page's client half: owns this ONE room's state, the
@@ -517,7 +519,7 @@ export function reconciledAiSaveOccupant(result: RoomContentsFetchResult, report
  * tile above already uses (see the JSX below) — same neutral visual
  * treatment, not a new style.
  */
-export function SimilarityMetricTile({ report: incoming, room }: { report: ReportSummary; room: number }) {
+export function SimilarityMetricTile({ report: incoming, room, system2Estimate = null }: { report: ReportSummary; room: number; system2Estimate?: System2EstimateRecord | null }) {
   // ROOM SIMILARITY TILE FLICKER (Preview Room 11, 2026-10-09): the moment AI lands, saveEnrichedAiResult /
   // saveRetriedAiResult hand the room a summary whose similarityStatus is forced back to "pending" (LIFECYCLE-06: only a
   // fresh server read may confirm it), so a tile already showing the server's 23 % flashed "Calculating…" for the one round
@@ -570,12 +572,15 @@ export function SimilarityMetricTile({ report: incoming, room }: { report: Repor
   // with similarityStatus "failed", handled above) — and this never renders a number that
   // is not there, whatever status arrives alongside a null.
   if (score === null) return unavailable;
-  const band = similarityScoreBand(score);
+  // ONE similarity percentage: System 1's verified result, or max(System 1, System 2) when the owner-only wrapper below
+  // supplies an authorized System 2 estimate (lib/system2-unified.ts). Without one (every customer) it is System 1's.
+  const unified = unifySimilarity(score, system2Estimate);
+  const band = similarityScoreBand(unified.percent);
   return (
-    <Link href={`/reports/${report.id}?room=${room}`} className={`room-metric room-metric-${band?.key ?? "low"}`}>
+    <Link href={`/reports/${report.id}?room=${room}`} className={`room-metric room-metric-${band?.key ?? "low"}`} title={unified.includesStatisticalEstimate ? UNIFIED_ESTIMATE_NOTE : undefined}>
       <span className="room-metric-label">Similarity</span>
-      <strong className="room-metric-value">{score}%</strong>
-      <span className="room-metric-sub">{band?.label ?? "Result"}</span>
+      <strong className="room-metric-value">{unified.percent}%</strong>
+      <span className="room-metric-sub">{band?.label ?? "Result"}{unified.includesStatisticalEstimate ? " · incl. estimate" : ""}</span>
     </Link>
   );
 }
@@ -592,12 +597,32 @@ type Props = {
   historicalNote?: string | null;
   /** Report history retention (lib/report-history.ts): this room's earlier reports, newest first (empty with it off). */
   earlierReports?: { id: string; title: string; createdAt: string; savedAt: string; wordCount: number }[];
+  /** Owner-only English System 2 research preview, resolved server-side (lib/system2-research.ts). Off for everyone else. */
+  system2Enabled?: boolean;
 };
 
-export function RoomPageShell({ room, accountEmail, initialOccupant, uploadLock = null, subscriptionEnforced = false, historicalNote = null, earlierReports = [] }: Props) {
+/** Owner-only: the same Similarity tile, fed this report's stored System 2 estimate (provisional unified score). */
+function UnifiedSimilarityMetricTile({ report, room }: { report: ReportSummary; room: number }) {
+  const system2Estimate = useSystem2Estimate(report.id, true);
+  return <SimilarityMetricTile report={report} room={room} system2Estimate={system2Estimate} />;
+}
+
+export function RoomPageShell({ room, accountEmail, initialOccupant, uploadLock = null, subscriptionEnforced = false, historicalNote = null, earlierReports = [], system2Enabled = false }: Props) {
   const [occupant, setOccupant] = useState<RoomContents>(initialOccupant);
   const [pollExhausted, setPollExhausted] = useState(false);
   const [file, setFile] = useState<File | null>(null);
+  // Owner-only System 2 (provisional, behind the scenes): this account's one-time authorization (read after hydration;
+  // "unknown" until then, so nothing is offered or sent early) and the submitted file for the ONE automatic request made
+  // right after the save. Never used for anyone without system2Enabled.
+  const [s2Authorization, setS2Authorization] = useState<System2Authorization | "unknown">("unknown");
+  const s2PendingRef = useRef<File | null>(null);
+  useEffect(() => {
+    if (system2Enabled) setS2Authorization(loadSystem2Authorization(accountEmail));
+  }, [system2Enabled, accountEmail]);
+  function decideSystem2(decision: System2Authorization) {
+    storeSystem2Authorization(accountEmail, decision);
+    setS2Authorization(decision);
+  }
   const [progress, setProgress] = useState(0);
   const [processingLabel, setProcessingLabel] = useState("Reading document content");
   const [isGeneratingReport, setIsGeneratingReport] = useState(false);
@@ -695,7 +720,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant, uploadLock 
       const remote = await fetchRemoteReport<SimilarityReport>(reportId);
       const full = remote ?? (localOwner ? await getStoredReportById<SimilarityReport>(reportId, localOwner).catch(() => null) : null);
       if (full) {
-        await downloadReceipt(full);
+        await downloadReceipt(full, system2Enabled ? loadSystem2Estimate(reportId) : null);
       } else {
         notify("Couldn't find this report to generate a receipt. Please try again.");
       }
@@ -1152,6 +1177,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant, uploadLock 
     }
 
     const submittedFile = file;
+    s2PendingRef.current = system2Enabled && s2Authorization === "granted" ? submittedFile : null;
     generationLockRef.current = true;
     setIsGeneratingReport(true);
     // Defect #3: marks the start of a new check generation for the
@@ -1409,6 +1435,13 @@ export function RoomPageShell({ room, accountEmail, initialOccupant, uploadLock 
       // here flashed above the card for ~1 s on Preview, 2026-10-21).
       setOccupant({ status: "processing", report: summary, cycleEndsAt: new Date(Date.now() + ROOM_CYCLE_MS).toISOString() });
 
+      // Owner-only System 2: starts automatically now, beside the AI analysis below — never awaited and never blocking
+      // either. Sends the same uploaded file once, only for an account that authorized it; its estimate feeds the one
+      // similarity percentage (lib/system2-unified.ts), and any failure simply leaves the System 1 result.
+      const s2Pending = s2PendingRef.current;
+      s2PendingRef.current = null;
+      if (s2Pending) void requestSystem2Estimate(summary.id, s2Pending);
+
       // Deliberately not awaited, matching app/page.tsx's own generateReport()
       // — the generation lock releases as soon as the similarity result is
       // saved, so the user isn't blocked on a possibly-slow AI model
@@ -1513,6 +1546,10 @@ export function RoomPageShell({ room, accountEmail, initialOccupant, uploadLock 
               saveFailure={saveFailure && !isGeneratingReport ? { message: saveFailure, retrying: retryingSave, onRetry: () => void retrySave() } : undefined}
               locked={uploadLock}
               generateLabel={subscriptionEnforced ? "Generate report" : undefined}
+              extraOption={system2Enabled && s2Authorization === null ? <System2AuthorizationNotice onDecide={decideSystem2} /> : undefined}
+              privacyNote={system2Enabled && (s2Authorization === "granted" || s2Authorization === "declined") ? (
+                <System2PrivacyNote authorization={s2Authorization} onChange={() => decideSystem2(s2Authorization === "granted" ? "declined" : null)} />
+              ) : undefined}
             />
           </div>
         )}
@@ -1569,7 +1606,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant, uploadLock 
                   <span className="room-metric-sub">Analyzing…</span>
                 </div>
               )}
-              <SimilarityMetricTile report={occupant.report} room={room} />
+              {system2Enabled ? <UnifiedSimilarityMetricTile report={occupant.report} room={room} /> : <SimilarityMetricTile report={occupant.report} room={room} />}
               <button className="room-metric" type="button" disabled>
                 <span className="room-metric-label">Receipt</span>
                 <Download aria-hidden="true" className="room-metric-icon" />
@@ -1651,7 +1688,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant, uploadLock 
                   </Link>
                 );
               })()}
-              <SimilarityMetricTile report={occupant.report} room={room} />
+              {system2Enabled ? <UnifiedSimilarityMetricTile report={occupant.report} room={room} /> : <SimilarityMetricTile report={occupant.report} room={room} />}
               <button className="room-metric" type="button" onClick={() => handleDownloadReceipt(occupant.report!.id)} disabled={downloadingReceipt}>
                 <span className="room-metric-label">Receipt</span>
                 <Download aria-hidden="true" className="room-metric-icon" />
@@ -1686,7 +1723,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant, uploadLock 
                 <strong className="room-metric-value">—</strong>
                 <span className="room-metric-sub">Unavailable</span>
               </div>
-              <SimilarityMetricTile report={occupant.report} room={room} />
+              {system2Enabled ? <UnifiedSimilarityMetricTile report={occupant.report} room={room} /> : <SimilarityMetricTile report={occupant.report} room={room} />}
               <button className="room-metric" type="button" onClick={() => handleDownloadReceipt(occupant.report!.id)} disabled={downloadingReceipt}>
                 <span className="room-metric-label">Receipt</span>
                 <Download aria-hidden="true" className="room-metric-icon" />

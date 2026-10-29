@@ -13,6 +13,7 @@ import { reportHistoryRetentionEnabled, type EarlierRoomReport } from "@/lib/rep
 import { ROOM_CYCLE_MS } from "@/lib/report-rooms";
 import { newCheckRefusal, readActiveRoomClaims, resolveRoomPolicy } from "@/lib/account-entitlements";
 import { HISTORICAL_ROOM_NOTE, roomCooldownLock, uploadLockFor, type UploadLock } from "@/lib/account-plan";
+import { isSystem2ResearchUser } from "@/lib/system2-research";
 import { RoomPageShell } from "./room-page-shell";
 
 export const dynamic = "force-dynamic";
@@ -30,7 +31,17 @@ export const dynamic = "force-dynamic";
  */
 
 type RoomPageResult =
-  | { status: "found"; room: number; accountEmail: string; occupant: RoomOccupantResult; uploadLock: UploadLock | null; subscriptionEnforced: boolean; historicalNote: string | null; earlierReports: EarlierRoomReport[] }
+  | {
+      status: "found";
+      room: number;
+      accountEmail: string;
+      occupant: RoomOccupantResult;
+      uploadLock: UploadLock | null;
+      subscriptionEnforced: boolean;
+      historicalNote: string | null;
+      earlierReports: EarlierRoomReport[];
+      system2Enabled: boolean;
+    }
   | { status: "invalid-room" }
   | { status: "no-session" }
   | { status: "rate-limited"; retryAfterSeconds: number };
@@ -91,7 +102,18 @@ const loadRoom = cache(async (roomParam: string): Promise<RoomPageResult> => {
     }
     // Report history retention (lib/report-history.ts): the room's earlier reports, readable from the room. Off: none.
     const earlierReports = reportHistoryRetentionEnabled() ? await listEarlierRoomReports(client, sessionUser.id, room, shown.report?.id ?? null) : [];
-    return { status: "found", room, accountEmail: sessionUser.email, occupant: shown, uploadLock, subscriptionEnforced: policy.enforced, historicalNote, earlierReports };
+    return {
+      status: "found",
+      room,
+      accountEmail: sessionUser.email,
+      occupant: shown,
+      uploadLock,
+      subscriptionEnforced: policy.enforced,
+      historicalNote,
+      earlierReports,
+      // Owner-only English System 2 research preview: resolved server-side (allowlist + feature switch, never in production).
+      system2Enabled: isSystem2ResearchUser(sessionUser),
+    };
   } finally {
     client.close();
   }
@@ -162,5 +184,5 @@ export default async function RoomPage({ params }: { params: Promise<{ room: str
   // room warrants a fresh instance.
   // Manual subscriptions: an EMPTY room that cannot take a new check right now shows its usual upload area LOCKED
   // (dimmed, no file input, no drop target, no generate action) with the reason — never with the feature off.
-  return <RoomPageShell key={result.room} room={result.room} accountEmail={result.accountEmail} initialOccupant={result.occupant} uploadLock={result.uploadLock} subscriptionEnforced={result.subscriptionEnforced} historicalNote={result.historicalNote} earlierReports={result.earlierReports} />;
+  return <RoomPageShell key={result.room} room={result.room} accountEmail={result.accountEmail} initialOccupant={result.occupant} uploadLock={result.uploadLock} subscriptionEnforced={result.subscriptionEnforced} historicalNote={result.historicalNote} earlierReports={result.earlierReports} system2Enabled={result.system2Enabled} />;
 }

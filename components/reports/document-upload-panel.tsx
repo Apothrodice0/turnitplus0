@@ -1,6 +1,6 @@
 "use client";
 
-import type { CSSProperties, RefObject } from "react";
+import type { CSSProperties, ReactNode, RefObject } from "react";
 import { Check, LockKeyhole, UploadCloud } from "lucide-react";
 import { ReferenceFilesPanel } from "@/components/reports/reference-files-panel";
 import { displayedCheckPercent, progressEncouragement } from "@/lib/upload-progress";
@@ -66,6 +66,10 @@ type Props = {
   locked?: UploadLock | null;
   /** The generate button's label; "Generate free report" unless the parent says otherwise (e.g. under a subscription). */
   generateLabel?: string;
+  /** Optional block shown just above the Generate button (the owner's one-time System 2 authorization in report rooms); omitted = unchanged form. */
+  extraOption?: ReactNode;
+  /** Optional replacement for the privacy line (owner-only, when System 2 transmission is authorized); omitted = unchanged line. */
+  privacyNote?: ReactNode;
 };
 
 function ReferenceSection({ references, busy }: { references?: ReferencePanelProps; busy: boolean }) {
@@ -84,7 +88,7 @@ function ReferenceSection({ references, busy }: { references?: ReferencePanelPro
   );
 }
 
-export function DocumentUploadPanel({ file, isGeneratingReport, progress, processingLabel, fileInputRef, onChooseFile, onGenerate, references, complete = false, saveFailure, locked = null, generateLabel = "Generate free report" }: Props) {
+export function DocumentUploadPanel({ file, isGeneratingReport, progress, processingLabel, fileInputRef, onChooseFile, onGenerate, references, complete = false, saveFailure, locked = null, generateLabel = "Generate free report", extraOption, privacyNote }: Props) {
   if (locked && !isGeneratingReport && !saveFailure) {
     // A check already running (or a save to retry) always finishes; only a NEW check is locked.
     return (
@@ -200,11 +204,13 @@ export function DocumentUploadPanel({ file, isGeneratingReport, progress, proces
 
       <ReferenceSection references={references} busy={false} />
 
+      {extraOption}
+
       <button className="button primary full" type="button" onClick={onGenerate}>
         <UploadCloud aria-hidden="true" />
         {generateLabel}
       </button>
-      <p className="privacy-note"><LockKeyhole aria-hidden="true" /> Documents are processed in your browser.</p>
+      {privacyNote ?? <p className="privacy-note"><LockKeyhole aria-hidden="true" /> Documents are processed in your browser.</p>}
     </>
   );
 }

@@ -330,6 +330,10 @@ test("Scope check: this fix adds no new import of any scoring/corpus-admission/r
   // just absent of the forbidden ones — proves nothing new was pulled in at
   // all, not merely that the specific forbidden names weren't chosen.
   assert.deepEqual(importedModules, [
+    // Owner-only System 2 (feature/system2-real-product-20261028, integrated 2026-10-29): the one-time authorization notice,
+    // the stored estimate and its single automatic request — behind isSystem2ResearchUser, off for every customer. No
+    // scoring of System 1, corpus admission, retention or PDF work, so it does not cross this scope check's boundary.
+    "@/components/report/system2-estimate",
     "@/components/reports/document-upload-panel",
     "@/lib/ai-core",
     "@/lib/ai-core",
@@ -362,6 +366,9 @@ test("Scope check: this fix adds no new import of any scoring/corpus-admission/r
     // admission, retention, or PDF extraction — so it does not violate this
     // scope check's actual boundary (the forbidden-substring list above).
     "@/lib/similarity-core",
+    // Owner-only System 2: the provisional fusion rule for the ONE displayed similarity percentage (max of System 1 and an
+    // authorized System 2 estimate) — pure display arithmetic, never applied without an owner's estimate.
+    "@/lib/system2-unified",
     // UPLOAD PROGRESS (2026-10-20): stage labels, percent bands and the "room holds this report" predicate — pure display logic.
     "@/lib/upload-progress",
     "lucide-react",

@@ -14,6 +14,7 @@ import { archiveOverlapScore, hasUnifiedSimilarity, stripServerInternalReportFie
 import { refreshSelectiveCorpusCompletionSignal } from "@/lib/report-evidence-interpretation";
 import { tryDecodeReportFromPersistence } from "@/lib/report-persistence";
 import { ReportUnavailablePanel } from "@/components/report/report-unavailable-panel";
+import { isSystem2ResearchUser } from "@/lib/system2-research";
 import { ReportDetailShell } from "./report-detail-shell";
 
 export const dynamic = "force-dynamic";
@@ -54,7 +55,7 @@ type OwnedReportResult =
   // exact "0% AI on the room card / AI report pending on this page" split
   // this closes), so ReportDetailShell resolves its AI state from these plus
   // aiAnalysis-as-refinement, not from aiAnalysis alone.
-  | { status: "found"; payload: SimilarityReport; aiStatus: "processing" | "ready" | "failed"; aiScore: number | null; aiTone: string | null; similarityStatus: "resolved" | "stale" | "pending" | "failed" }
+  | { status: "found"; payload: SimilarityReport; aiStatus: "processing" | "ready" | "failed"; aiScore: number | null; aiTone: string | null; similarityStatus: "resolved" | "stale" | "pending" | "failed"; system2Enabled: boolean }
   | { status: "not-found-for-session" }
   // R2: the report exists and is this session's own, but its persisted explanation
   // (evidenceInterpretation) cannot be decoded safely — never rendered as a score
@@ -193,7 +194,8 @@ const loadOwnedReport = cache(async (id: string): Promise<OwnedReportResult> => 
       if (payload.unifiedSimilarity && sessionUser.role !== "admin") {
         payload.unifiedSimilarity = { ...payload.unifiedSimilarity, contributions: [] };
       }
-      return { status: "found", payload, aiStatus, aiScore: row.ai_score, aiTone: row.ai_tone, similarityStatus: display.status };
+      // Owner-only English System 2 research preview, resolved server-side for this signed-in owner of this report.
+      return { status: "found", payload, aiStatus, aiScore: row.ai_score, aiTone: row.ai_tone, similarityStatus: display.status, system2Enabled: isSystem2ResearchUser(sessionUser) };
     } catch {
       return { status: "not-found-for-session" };
     }
@@ -275,6 +277,7 @@ export default async function ReportDetailPage({
       initialSimilarityStatus={result.status === "found" ? result.similarityStatus : null}
       requiresClientResolution={result.status === "no-session"}
       backRoom={backRoom}
+      system2Enabled={result.status === "found" ? result.system2Enabled : false}
     />
   );
 }

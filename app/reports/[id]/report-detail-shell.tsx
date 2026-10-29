@@ -31,6 +31,8 @@ import { AiReport } from "@/components/report/ai-report";
 import { CategorySummary, OverviewReport, SourcesReport, SubmissionReport, dedupeExternalAcademicEvidence } from "@/components/report/similarity-report-papers";
 import { ReportV2View, ReportV2Workspace, ReportV2PrintOverview, ReportV2PrintManuscriptPages, ReportV2PrintSourceAppendix } from "@/components/report/report-v2/report-v2-view";
 import { ReportNotFoundPanel } from "@/components/report/report-not-found-panel";
+import { useSystem2Estimate } from "@/components/report/system2-estimate";
+import { unifySimilarity } from "@/lib/system2-unified";
 
 type LoadStatus = "loading" | "found" | "not-found";
 
@@ -44,6 +46,7 @@ export function ReportDetailShell({
   requiresClientResolution,
   mode,
   backRoom,
+  system2Enabled = false,
 }: {
   id: string;
   initialReport: SimilarityReport | null;
@@ -97,6 +100,8 @@ export function ReportDetailShell({
   mode: ReportMode;
   /** The room this report was opened from (see app/reports/[id]/page.tsx's own comment) — null when opened any other way (the anonymous flat list, a bookmark, etc.), in which case the back button falls back to the generic My Reports directory. */
   backRoom: number | null;
+  /** Owner-only English System 2 research preview, resolved server-side (lib/system2-research.ts). Off for everyone else. */
+  system2Enabled?: boolean;
 }) {
   const backHref = backRoom !== null ? `/reports/rooms/${backRoom}` : "/#reports";
   const backLabel = backRoom !== null ? `Back to Room ${backRoom + 1}` : "Back to reports";
@@ -144,6 +149,8 @@ export function ReportDetailShell({
   const [showLegacyForAdmin, setShowLegacyForAdmin] = useState(false);
   const [isDownloadingReceipt, setIsDownloadingReceipt] = useState(false);
   const [receiptError, setReceiptError] = useState<string | null>(null);
+  // Owner-only provisional unified score (lib/system2-unified.ts): this report's stored System 2 estimate, if any.
+  const system2Estimate = useSystem2Estimate(id, system2Enabled);
   // Release-hardening audit finding LIFECYCLE-06: true once the bounded
   // poll budget below is exhausted without either pipeline reaching a real
   // terminal state. This is purely a "stop asking automatically, offer a
@@ -327,7 +334,7 @@ export function ReportDetailShell({
     setIsDownloadingReceipt(true);
     setReceiptError(null);
     try {
-      await downloadReceipt(report);
+      await downloadReceipt(report, system2Enabled ? system2Estimate : null);
     } catch {
       setReceiptError("Couldn't generate the receipt. Please try again.");
     } finally {
@@ -421,6 +428,10 @@ export function ReportDetailShell({
   }
 
   const primaryScore = primarySimilarityScore(report);
+  // ONE similarity percentage in the report workspace, its print overview and the receipt: System 1's verified result,
+  // or — for the authorized owner only — max(System 1, System 2's conservative estimate). Undefined for everyone else,
+  // so every view is unchanged for them. The admin-only legacy diagnostic views keep System 1's verified figure.
+  const unified = system2Enabled ? unifySimilarity(primaryScore, system2Estimate) : undefined;
   const isUnified = hasUnifiedSimilarity(report);
   // Report-source presentation correction, extended by Task A's final
   // report simplification and Task A's authorization correction: this
@@ -558,6 +569,7 @@ export function ReportDetailShell({
           onDownloadReceipt={handleDownloadReceipt}
           isDownloadingReceipt={isDownloadingReceipt}
           onShowLegacy={canSeeSourceBreakdown ? () => setShowLegacyForAdmin(true) : undefined}
+          unified={unified}
         />
       ) : (
       <>
@@ -691,7 +703,7 @@ export function ReportDetailShell({
           // flowing block; the appendix then flows naturally after the
           // last manuscript page.
           <div className="rv2-print-flow">
-            <ReportV2PrintOverview report={report} />
+            <ReportV2PrintOverview report={report} unified={unified} />
             <ReportV2PrintManuscriptPages report={report} />
             <ReportV2PrintSourceAppendix report={report} />
           </div>

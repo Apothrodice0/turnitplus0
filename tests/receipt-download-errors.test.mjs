@@ -33,6 +33,7 @@ test("app/reports/rooms/[room]/room-page-shell.tsx surfaces both failure modes v
   assert.ok(fnMatch, "handleDownloadReceipt must be found");
   const body = fnMatch[0];
 
-  assert.match(body, /if \(full\) \{\s*\n\s*await downloadReceipt\(full\);\s*\n\s*\} else \{\s*\n\s*notify\(/, "the report-not-found case must notify the user, not just silently do nothing");
+  // (the optional second argument is the owner-only System 2 estimate for the provisional unified score — null for customers)
+  assert.match(body, /if \(full\) \{\s*\n\s*await downloadReceipt\(full(?:, system2Enabled \? loadSystem2Estimate\(reportId\) : null)?\);\s*\n\s*\} else \{\s*\n\s*notify\(/, "the report-not-found case must notify the user, not just silently do nothing");
   assert.match(body, /\} catch \{\s*\n\s*notify\(/, "a thrown error from downloadReceipt must be caught and surfaced via the same toast mechanism the rest of this component already uses");
 });
