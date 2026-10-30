@@ -452,3 +452,59 @@ test("PRINT CSS: the three introductory pages are exactly one sheet each; the wr
   assert.match(block, /\.spr-mark \{[^}]*border-bottom: 1\.6px solid var\(--spr-c\);[^}]*background: var\(--spr-match-fill\);/, "every matched passage sits on the soft red fill, underlined in its source colour");
   assert.match(block, /unicode-bidi: plaintext;/, "each manuscript paragraph takes its own direction (Arabic RTL)");
 });
+
+// ── model-predicted highlights (owner-only prototype, lib/highlight-model.ts) ─────────────────────────────────────
+const PREDICTED = /<span class="predicted-highlight">([^<]*)<\/span>/g;
+const stripPredicted = (html) => html.replace(PREDICTED, "$1");
+const predictedText = (html) => [...html.matchAll(PREDICTED)].map((m) => decode(m[1])).join("");
+
+function reportWithPrediction() {
+  const report = reportWithSources({ text: uniqueProse(2400), sourceCount: 6 });
+  const verified = findHighlightRanges(report, { includeWikipedia: false });
+  const last = verified[verified.length - 1];
+  // one range in plain text, one that starts inside a verified match and runs past its end
+  const gap = { start: last.end + 40, end: last.end + 120 };
+  const overlap = { start: verified[0].start + 5, end: verified[0].end + 30 };
+  return { report, verified, gap, overlap, predicted: { ...report, predictedHighlights: [overlap, gap].sort((x, y) => x.start - y.start) } };
+}
+
+test("PREDICTED: apart from the dashed spans the printed report is byte-identical: same pages, numbers, counts, sources and page breaks", () => {
+  const { report, predicted } = reportWithPrediction();
+  const plain = render(report);
+  const withPrediction = render(predicted);
+  assert.notEqual(withPrediction, plain);
+  assert.equal(stripPredicted(withPrediction), plain);
+  assert.equal(pagesOf(withPrediction).length, pagesOf(plain).length);
+  assert.equal(printedManuscript(withPrediction), report.text);
+});
+
+test("PREDICTED: a prediction prints only the words outside verified matches, with no number, source, title or highlight span", () => {
+  const { report, verified, gap, overlap, predicted } = reportWithPrediction();
+  const html = render(predicted);
+  assert.equal(predictedText(html), report.text.slice(verified[0].end, overlap.end) + report.text.slice(gap.start, gap.end));
+  for (const m of html.matchAll(PREDICTED)) assert.doesNotMatch(m[0], /sup|title=|data-span/);
+  const spans = (h) => [...h.matchAll(/data-span="(\d+-\d+)"/g)].map((m) => m[1]);
+  assert.deepEqual(spans(html), spans(render(report)), "the verified highlights are untouched");
+});
+
+test("PREDICTED: zero verified matches — dashed words print, and the wording separates them from source-verified matches", () => {
+  const base = reportWithSources({ text: prose(900), sourceCount: 0 });
+  const html = render({ ...base, predictedHighlights: [{ start: 100, end: 160 }] });
+  assert.equal(predictedText(html), base.text.slice(100, 160));
+  assert.match(html, /No source-verified matches\. Dashed underlines mark unverified predicted passages\./);
+  assert.match(html, /with unverified predicted passages underlined/);
+  assert.match(html, /No matching sources/, "a prediction never becomes a source");
+  assert.doesNotMatch(html, /No passages matched|without highlights/, "nothing contradicts the underlines");
+  const plain = render(base);
+  assert.match(plain, /No passages matched\. The text appears as submitted\./, "without predictions the approved wording is unchanged");
+  assert.match(plain, /from page 4, without highlights\./);
+  assert.doesNotMatch(plain, /source-verified|predicted/);
+});
+
+test("PREDICTED: the same words are predicted on screen and in the PDF", () => {
+  const { predicted } = reportWithPrediction();
+  const screen = renderToStaticMarkup(React.createElement(ReportV2Workspace, { report: predicted }));
+  assert.ok(predictedText(screen).length > 0);
+  assert.equal(predictedText(render(predicted)).includes(predictedText(screen).slice(0, 40)), true);
+  assert.equal(predictedText(screen).replace(/\s+/g, " "), predictedText(render(predicted)).replace(/\s+/g, " "));
+});

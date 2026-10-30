@@ -64,8 +64,10 @@ export type PersistedSimilarityReport = Omit<SimilarityReport, "unifiedSimilarit
  */
 export function encodeReportForPersistence(report: SimilarityReport, options?: CompactPersistenceWriteOptions): PersistedSimilarityReport {
   const compactWrites = resolveCompactPersistenceWrites(options);
+  // Response-only (lib/highlight-model.ts): a copy sent back by a client is never stored.
+  const { predictedHighlights: _responseOnly, ...stored } = report;
   return {
-    ...report,
+    ...stored,
     ...(report.unifiedSimilarity ? { unifiedSimilarity: compactUnifiedSimilarityForPersistence(report.unifiedSimilarity, { compactWrites }) } : {}),
     ...(report.evidenceInterpretation
       ? { evidenceInterpretation: compactEvidenceInterpretationForPersistence(report.evidenceInterpretation, { compactWrites }) }

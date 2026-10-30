@@ -1,5 +1,6 @@
 "use client";
 
+import type { PredictedHighlightRange } from "@/lib/report-types";
 import { Fragment, useMemo, useSyncExternalStore, type CSSProperties, type ReactNode } from "react";
 import { similarityScoreBand } from "@/lib/ai-core";
 import { PRIMARY_SIMILARITY_BAND_LABELS, formatSimilarityPercent, type SimilarityReport } from "@/lib/report-types";
@@ -23,7 +24,7 @@ import {
   type PrintSourceTone,
   type ReportSubmitter,
 } from "@/lib/similarity-print-layout";
-import { buildPrintHighlights, type PrintHighlight } from "./print-highlights";
+import { buildPrintHighlights, buildPrintPredicted, type PrintHighlight } from "./print-highlights";
 import { unifiedPercentText, type UnifiedSimilarity } from "@/lib/system2-unified";
 
 /**
@@ -386,7 +387,7 @@ function OverviewPage({ report, vm, ranked, rankById, total, unified }: { report
 // ── page 3 — matching sources ────────────────────────────────────────────
 // Each row: rank and line pattern, the entry's identity (printSourceIdentity — named only when verified), its
 // passages, matched words and share of the analyzed document, all from the saved view model.
-function SourcesPage({ report, vm, ranked, total }: { report: SimilarityReport; vm: ReportV2ViewModel; ranked: PrintRankedSource[]; total: number }) {
+function SourcesPage({ report, vm, ranked, total, hasPredicted }: { report: SimilarityReport; vm: ReportV2ViewModel; ranked: PrintRankedSource[]; total: number; hasPredicted: boolean }) {
   const { shown, hidden } = printSourcesPage(ranked);
   const anyShared = ranked.some((s) => s.mixedKindLabels.length > 0);
   const entryWords = ranked.reduce((sum, s) => sum + s.matchedWords, 0);
@@ -412,7 +413,7 @@ function SourcesPage({ report, vm, ranked, total }: { report: SimilarityReport; 
           <p className="spr-empty-heading">No matching sources</p>
           <p>
             No wording in this document matched the TurnitPlus reference collection or the live academic sources that
-            were searched. The manuscript follows from page 4, without highlights.
+            were searched. The manuscript follows from page 4, {hasPredicted ? "with unverified predicted passages underlined" : "without highlights"}.
           </p>
         </div>
       ) : (
@@ -482,7 +483,23 @@ function SourcesPage({ report, vm, ranked, total }: { report: SimilarityReport; 
 }
 
 // ── page 4+ — highlighted manuscript ─────────────────────────────────────
-function renderManuscriptWindow(text: string, highlights: PrintHighlight[], from: number, to: number): ReactNode[] {
+/** Plain text between verified highlights; model-predicted ranges in it get the neutral dashed underline (prototype). */
+function plainWithPredicted(text: string, from: number, to: number, predicted: PredictedHighlightRange[]): ReactNode[] {
+  const pieces: ReactNode[] = [];
+  let cursor = from;
+  for (const p of predicted) {
+    const start = Math.max(cursor, p.start);
+    const end = Math.min(to, p.end);
+    if (end <= start) continue;
+    if (start > cursor) pieces.push(text.slice(cursor, start));
+    pieces.push(<span key={`p-${start}`} className="predicted-highlight">{text.slice(start, end)}</span>);
+    cursor = end;
+  }
+  if (cursor < to) pieces.push(text.slice(cursor, to));
+  return pieces;
+}
+
+function renderManuscriptWindow(text: string, highlights: PrintHighlight[], from: number, to: number, predicted: PredictedHighlightRange[] = []): ReactNode[] {
   const pieces: ReactNode[] = [];
   let cursor = from;
   for (const h of highlights) {
@@ -490,7 +507,7 @@ function renderManuscriptWindow(text: string, highlights: PrintHighlight[], from
     const start = Math.max(cursor, h.start, from);
     const end = Math.min(to, h.end);
     if (end <= start) continue;
-    if (start > cursor) pieces.push(text.slice(cursor, start));
+    if (start > cursor) pieces.push(...plainWithPredicted(text, cursor, start, predicted));
     const tone = h.rank !== null ? printSourceTone(h.rank) : null;
     const color = h.wikipedia ? PRINT_PALETTE.match : tone?.color ?? PRINT_UNRANKED_COLOR;
     const line = h.wikipedia ? "dotted" : tone?.line ?? "solid";
@@ -502,11 +519,11 @@ function renderManuscriptWindow(text: string, highlights: PrintHighlight[], from
     );
     cursor = end;
   }
-  if (cursor < to) pieces.push(text.slice(cursor, to));
+  if (cursor < to) pieces.push(...plainWithPredicted(text, cursor, to, predicted));
   return pieces;
 }
 
-function ManuscriptOpener({ report, hasHighlights }: { report: SimilarityReport; hasHighlights: boolean }) {
+function ManuscriptOpener({ report, hasHighlights, hasPredicted }: { report: SimilarityReport; hasHighlights: boolean; hasPredicted: boolean }) {
   const appears = "The text appears as submitted.";
   return (
     <div className="spr-manuscript-opener">
@@ -518,17 +535,19 @@ function ManuscriptOpener({ report, hasHighlights }: { report: SimilarityReport;
           Matched passages are underlined and numbered by source (page 3). {appears}
         </p>
       ) : (
-        <p className="spr-manuscript-key">No passages matched. {appears}</p>
+        <p className="spr-manuscript-key">
+          {hasPredicted ? "No source-verified matches. Dashed underlines mark unverified predicted passages." : "No passages matched."} {appears}
+        </p>
       )}
     </div>
   );
 }
 
-function ManuscriptPages({ report, highlights, pages, total, firstPage }: { report: SimilarityReport; highlights: PrintHighlight[]; pages: Array<{ start: number; end: number }>; total: number; firstPage: number }) {
+function ManuscriptPages({ report, highlights, predicted, pages, total, firstPage }: { report: SimilarityReport; highlights: PrintHighlight[]; predicted: PredictedHighlightRange[]; pages: Array<{ start: number; end: number }>; total: number; firstPage: number }) {
   const text = report.text ?? "";
   const language = printLanguageLabel(report);
   const baseDir = language === "Arabic" ? "rtl" : "ltr";
-  const opener = <ManuscriptOpener report={report} hasHighlights={highlights.length > 0} />;
+  const opener = <ManuscriptOpener report={report} hasHighlights={highlights.length > 0} hasPredicted={predicted.length > 0} />;
   if (pages.length === 0) {
     return (
       <PrintPage report={report} page={firstPage} total={total} section={SECTION.manuscript} className="spr-manuscript">
@@ -543,7 +562,7 @@ function ManuscriptPages({ report, highlights, pages, total, firstPage }: { repo
         <PrintPage key={`${range.start}-${range.end}`} report={report} page={firstPage + index} total={total} section={SECTION.manuscript} className="spr-manuscript">
           {index === 0 && opener}
           <div className="spr-manuscript-text" dir={baseDir} lang={language === "Arabic" ? "ar" : language === "French" ? "fr" : undefined}>
-            {renderManuscriptWindow(text, highlights, range.start, range.end)}
+            {renderManuscriptWindow(text, highlights, range.start, range.end, predicted)}
           </div>
         </PrintPage>
       ))}
@@ -588,19 +607,20 @@ export function SimilarityPrintReport({
     const ranked = rankPrintSources(vm);
     const rankById = new Map(ranked.map((s) => [s.id, s.rank]));
     const highlights = buildPrintHighlights(report, vm, rankById);
+    // Pagination sees verified highlights only, so a prediction can never move a page break.
     const pages = paginateManuscriptForPrint(report.text ?? "", highlights.map((h) => ({ start: h.start, end: h.end })));
-    return { vm, ranked, rankById, highlights, pages };
+    return { vm, ranked, rankById, highlights, predicted: buildPrintPredicted(report), pages };
   }, [report]);
   if (!model) return null;
-  const { vm, ranked, rankById, highlights, pages } = model;
+  const { vm, ranked, rankById, highlights, predicted, pages } = model;
   const manuscriptFirst = 4;
   const total = manuscriptFirst - 1 + Math.max(1, pages.length);
   return (
     <div className="spr-report">
       <CoverPage report={report} submitter={submitter} total={total} manuscriptFirst={manuscriptFirst} />
       <OverviewPage report={report} vm={vm} ranked={ranked} rankById={rankById} total={total} unified={unified} />
-      <SourcesPage report={report} vm={vm} ranked={ranked} total={total} />
-      <ManuscriptPages report={report} highlights={highlights} pages={pages} total={total} firstPage={manuscriptFirst} />
+      <SourcesPage report={report} vm={vm} ranked={ranked} total={total} hasPredicted={predicted.length > 0} />
+      <ManuscriptPages report={report} highlights={highlights} predicted={predicted} pages={pages} total={total} firstPage={manuscriptFirst} />
     </div>
   );
 }

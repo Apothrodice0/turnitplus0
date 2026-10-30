@@ -250,6 +250,8 @@ export type SimilarityReport = {
   version: 11;
   /** Server-written only (app/api/reports/[id]/system2; see lib/system2-estimate-record.ts): the accepted System 2 estimate. */
   system2Estimate?: StoredSystem2Estimate;
+  /** Response-only, for an allowed viewer (lib/highlight-model.ts). Never stored. */
+  predictedHighlights?: PredictedHighlightRange[];
   id: number;
   submissionId: string;
   title: string;
@@ -537,6 +539,9 @@ export type SimilarityReport = {
   text: string;
 };
 
+/** Character range in report.text. See lib/highlight-model.ts: response-only, no source, no effect on any percentage. */
+export type PredictedHighlightRange = { start: number; end: number };
+
 export type HighlightRange = {
   start: number;
   end: number;
@@ -554,7 +559,7 @@ export type HighlightRange = {
    * never highlighted these two evidence channels at all, even when they
    * were the majority (or entirety) of the unified similarity result.
    */
-  kind: "source" | "wikipedia" | "academic" | "reference-source" | "v2-evidence";
+  kind: "source" | "wikipedia" | "academic" | "reference-source" | "v2-evidence" | "predicted";
   url?: string;
   wikipediaSources?: Array<{ pageId: number; title: string; url: string }>;
   /**

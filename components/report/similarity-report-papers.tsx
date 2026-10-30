@@ -1226,6 +1226,25 @@ export function findHighlightRanges(report: SimilarityReport, options: { include
       if (!overlaps) accepted.push(candidate);
     });
 
+  // TURNITIN HIGHLIGHT MODEL prototype (lib/highlight-model.ts): predicted
+  // passages only ever fill the gaps left by every verified channel above, so
+  // a word is never drawn twice and a predicted span can never take a verified
+  // word's source. Clipped, not dropped: a span that partly overlaps a verified
+  // match still contributes its remaining words.
+  const verifiedRanges = [...accepted];
+  (report.predictedHighlights ?? []).forEach((predicted) => {
+    let cursor = predicted.start;
+    const blockers = verifiedRanges
+      .filter((range) => range.start < predicted.end && range.end > predicted.start)
+      .sort((left, right) => left.start - right.start);
+    [...blockers, { start: predicted.end, end: predicted.end }].forEach((blocker) => {
+      if (blocker.start > cursor) {
+        accepted.push({ start: cursor, end: blocker.start, sourceIndex: -1, color: MATCHED_PASSAGE_COLOR, label: "", kind: "predicted" });
+      }
+      cursor = Math.max(cursor, blocker.end);
+    });
+  });
+
   return accepted.sort((left, right) => left.start - right.start);
 }
 
@@ -1255,6 +1274,13 @@ export function buildHighlightedPieces(
     const end = Math.min(rangeEnd, range.end);
     if (start > cursor) {
       pieces.push(text.slice(cursor, start));
+    }
+    if (range.kind === "predicted") {
+      // TURNITIN HIGHLIGHT MODEL prototype: a prediction is not a match. Neutral dashed underline only: no fill, no
+      // badge, no title, no source (globals.css .predicted-highlight).
+      pieces.push(<span className="predicted-highlight" key={`${range.start}-${range.end}-${index}`}>{text.slice(start, end)}</span>);
+      cursor = end;
+      return;
     }
     const isWikipedia = range.kind === "wikipedia";
     // Ordinary-user simplification: every kind that feeds the authoritative

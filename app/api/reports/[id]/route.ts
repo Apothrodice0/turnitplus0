@@ -10,7 +10,8 @@ import { sanitizeUnverifiedPublicationNotice } from '../../../../lib/academic-se
 import { sanitizeExtractionDiagnostic } from '../../../../lib/evidence-interpretation';
 import { deleteReportDocumentData } from '../../../../lib/report-deletion';
 import { deleteReportCorpusAdmissionData } from '../../../../lib/corpus-admission-report-integration';
-import { getSessionUser } from '../../../../lib/auth-session';
+import { getSessionUser, type SessionUser } from '../../../../lib/auth-session';
+import { attachPredictedHighlights } from '../../../../lib/highlight-model';
 import { reportAccessRefusalFor } from '../../../../lib/account-entitlements';
 import { scheduleExpiryCleanupAfterRefusal } from '../../../../lib/subscription-expiry-cleanup';
 import { stripServerInternalReportFields, type SimilarityReport } from '../../../../lib/report-types';
@@ -52,8 +53,10 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
     const client = await getReportsDbClient();
     let row;
     let payload: SimilarityReport | undefined;
+    let viewer: SessionUser | null = null;
     try {
       const sessionUser = await getSessionUser(request, client);
+      viewer = sessionUser;
       const accountId = sessionUser ? sessionUser.id : null;
       // Manual subscriptions (lib/account-entitlements.ts REPORT ACCESS): an account without an active subscription
       // reads none of its reports — this GET also feeds the report page, its print view and the receipt. Refused before
@@ -317,6 +320,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
     if (payload) {
       refreshSelectiveCorpusCompletionSignal(payload);
       stripServerInternalReportFields(payload);
+      await attachPredictedHighlights(payload, viewer);
     }
 
     return new NextResponse(JSON.stringify({ payload }), { status: 200, headers: NO_STORE_JSON });

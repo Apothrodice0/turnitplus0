@@ -10713,3 +10713,19 @@ button.admin-archive-feed-row:focus-visible { outline: 2px solid var(--blue); ou
     overflow: hidden;
   }
 }
+
+/* TURNITIN HIGHLIGHT MODEL prototype (lib/highlight-model.ts, owner-only): a model-predicted passage, not a match.
+   A neutral dashed underline drawn as text decoration, so it takes no space: no fill, no number, no source colour,
+   and line wrapping and page breaks stay exactly as without it. Same look on screen and in print. */
+.predicted-highlight {
+  background: none;
+  color: inherit;
+  text-decoration-line: underline;
+  text-decoration-style: dashed;
+  text-decoration-color: #6b7280;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.2em;
+  text-decoration-skip-ink: none;
+  -webkit-print-color-adjust: exact;
+  print-color-adjust: exact;
+}

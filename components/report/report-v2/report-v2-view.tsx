@@ -18,7 +18,7 @@ import {
   TriangleAlert,
 } from "lucide-react";
 import { similarityScoreBand } from "@/lib/ai-core";
-import { PRIMARY_SIMILARITY_BAND_LABELS, formatSimilarityPercent, type SimilarityReport } from "@/lib/report-types";
+import { PRIMARY_SIMILARITY_BAND_LABELS, formatSimilarityPercent, type PredictedHighlightRange, type SimilarityReport } from "@/lib/report-types";
 import { unifiedPercentText, type UnifiedSimilarity } from "@/lib/system2-unified";
 import type { EvidenceInterpretationKind } from "@/lib/evidence-interpretation/kinds";
 import {
@@ -933,6 +933,27 @@ function submittedContextAround(text: string, charStart: number, charEnd: number
  * clickable mark (keyboard-reachable), a stable per-source number badge,
  * and a stronger visual state for the currently active match.
  */
+/**
+ * Plain text between verified runs. TURNITIN HIGHLIGHT MODEL prototype (lib/highlight-model.ts): predicted ranges are
+ * painted only here, so they can never cover or take over a verified match. A neutral dashed underline (globals.css
+ * .predicted-highlight) with no fill, badge, click target or source. With no predicted ranges the output is the single
+ * span it always was.
+ */
+export function renderPlainWithPredicted(text: string, start: number, end: number, predicted: PredictedHighlightRange[], key: string): ReactNode[] {
+  const pieces: ReactNode[] = [];
+  let cursor = start;
+  predicted.filter((range) => range.end > start && range.start < end).forEach((range, index) => {
+    const from = Math.max(cursor, range.start);
+    const to = Math.min(end, range.end);
+    if (from >= to) return;
+    if (from > cursor) pieces.push(<span key={`${key}-${index}`}>{text.slice(cursor, from)}</span>);
+    pieces.push(<span key={`${key}-p${index}`} className="predicted-highlight">{text.slice(from, to)}</span>);
+    cursor = to;
+  });
+  if (cursor < end) pieces.push(<span key={key}>{text.slice(cursor, end)}</span>);
+  return pieces;
+}
+
 function renderManuscriptWindow(
   text: string,
   runs: ReportV2Passage[],
@@ -941,6 +962,7 @@ function renderManuscriptWindow(
   sourceIndexById: Map<string, number>,
   activePassageId: number | null,
   onSelectPassage: (passageId: number) => void,
+  predicted: PredictedHighlightRange[] = [],
 ): ReactNode[] {
   const pieces: ReactNode[] = [];
   let cursor = rangeStart;
@@ -948,7 +970,7 @@ function renderManuscriptWindow(
   relevant.forEach((p, idx) => {
     const start = Math.max(cursor, p.charStart!);
     const end = Math.min(rangeEnd, Math.max(start, p.charEnd!));
-    if (start > cursor) pieces.push(<span key={`t-${idx}`}>{text.slice(cursor, start)}</span>);
+    if (start > cursor) pieces.push(...renderPlainWithPredicted(text, cursor, start, predicted, `t-${idx}`));
     const firstSourceId = p.sourceIds[0];
     const sourceIndex = firstSourceId !== undefined ? sourceIndexById.get(firstSourceId) : undefined;
     const isActive = p.id === activePassageId;
@@ -1001,7 +1023,7 @@ function renderManuscriptWindow(
     );
     cursor = end;
   });
-  if (cursor < rangeEnd) pieces.push(<span key="t-tail">{text.slice(cursor, rangeEnd)}</span>);
+  if (cursor < rangeEnd) pieces.push(...renderPlainWithPredicted(text, cursor, rangeEnd, predicted, "t-tail"));
   return pieces;
 }
 
@@ -1061,7 +1083,7 @@ function WorkspaceManuscript({
               explicit. */}
           <p className="rv2ws-page-number">Manuscript page {pageIndex + 1} of {pageRanges.length}</p>
           <div className="rv2-doc rv2ws-manuscript">
-            {renderManuscriptWindow(text, runs, range.start, range.end, sourceIndexById, activePassageId, onSelectPassage)}
+            {renderManuscriptWindow(text, runs, range.start, range.end, sourceIndexById, activePassageId, onSelectPassage, report.predictedHighlights)}
           </div>
         </article>
       ))}
