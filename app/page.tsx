@@ -1490,7 +1490,7 @@ export default function Home() {
           <ShieldCheck aria-hidden="true" />
           <div>
             <strong>Private by design</strong>
-            <span>Processing stays in your browser.</span>
+            <span>Your reports stay private to your account.</span>
           </div>
         </div>
       </aside>
@@ -1528,15 +1528,15 @@ export default function Home() {
               <div className="landing-hero-copy">
                 <span className="landing-badge"><ShieldCheck aria-hidden="true" /> Private by design</span>
                 <h2 id="landing-title">Understand what is in your document—without sending the document away.</h2>
-                <p className="landing-lede">TurnitPlus checks AI-writing signals and similarity in your browser — searching millions of scholarly records across major academic indexes — then gives you the passages and sources behind the result.</p>
+                <p className="landing-lede">TurnitPlus checks AI-writing signals and similarity — searching millions of scholarly records across major academic indexes — then gives you the passages and sources behind the result.</p>
                 <div className="landing-actions">
                   <button className="button primary landing-cta" type="button" onClick={goToNewCheck}><UploadCloud aria-hidden="true" /> Check a document free</button>
                   <button className="button secondary" type="button" onClick={() => navigate("about")}><BookOpen aria-hidden="true" /> See how it works</button>
                 </div>
                 <div className="landing-proof">
-                  <span><Check aria-hidden="true" /> No cloud upload</span>
+                  <span><Check aria-hidden="true" /> Private to your account</span>
                   <span><Check aria-hidden="true" /> PDF, DOCX, TXT & more</span>
-                  <span><Check aria-hidden="true" /> Reports stay on this device</span>
+                  <span><Check aria-hidden="true" /> Reports saved to your account</span>
                 </div>
               </div>
               <div className="landing-product-card surface-card">
@@ -1563,14 +1563,14 @@ export default function Home() {
             <div className="landing-feature-grid">
               <article className="surface-card landing-feature-card"><span className="landing-feature-icon"><Search aria-hidden="true" /></span><h3>Find meaningful overlap</h3><p>Measure overlapping text and show the exact passages that matched.</p></article>
               <article className="surface-card landing-feature-card"><span className="landing-feature-icon"><GraduationCap aria-hidden="true" /></span><h3>Review AI-writing signals</h3><p>Surface experimental AI-writing signals and highlighted passages instead of pretending a score is proof of authorship.</p></article>
-              <article className="surface-card landing-feature-card"><span className="landing-feature-icon"><ShieldCheck aria-hidden="true" /></span><h3>Keep documents local</h3><p>Extraction and analysis happen in your browser. You stay in control of locally stored reports.</p></article>
+              <article className="surface-card landing-feature-card"><span className="landing-feature-icon"><ShieldCheck aria-hidden="true" /></span><h3>Keep reports private</h3><p>Your document is sent securely for analysis, and your reports stay private to your account.</p></article>
             </div>
 
             <div className="landing-how surface-card">
               <div><p className="section-label">HOW IT WORKS</p><h2>From document to evidence in three steps.</h2><p>There is no complicated setup. Choose a file, let the browser analyze it, then inspect the report.</p></div>
               <div className="landing-step-list">
                 <div><span>01</span><strong>Choose a document</strong><p>Upload a supported file up to 10 MB.</p></div>
-                <div><span>02</span><strong>Analyze privately</strong><p>Workers extract, compare and score the text locally.</p></div>
+                <div><span>02</span><strong>Analyze privately</strong><p>TurnitPlus extracts, compares and scores the text.</p></div>
                 <div><span>03</span><strong>Inspect the evidence</strong><p>Review scores, passages, sources and a downloadable report.</p></div>
               </div>
             </div>
@@ -1634,7 +1634,7 @@ export default function Home() {
                   <ShieldCheck aria-hidden="true" />
                   <div>
                     <strong>Private by design</strong>
-                    <p>Documents are analyzed in your browser and never uploaded. Your report history is saved securely to your account.</p>
+                    <p>Documents are sent securely to TurnitPlus for analysis. Your report history is saved securely to your account.</p>
                   </div>
                 </article>
               </section>
@@ -1775,7 +1775,7 @@ export default function Home() {
                       <LogOut aria-hidden="true" /> {isSigningOut ? "Signing out…" : "Sign out"}
                     </button>
                   </div>
-                  <p className="auth-preview-note"><LockKeyhole aria-hidden="true" /> Documents are analyzed in your browser and never uploaded.{reportsBlocked ? "" : " Your report history is saved securely so you can reach it from any device you sign in on."}</p>
+                  <p className="auth-preview-note"><LockKeyhole aria-hidden="true" /> Documents are sent securely to TurnitPlus for analysis.{reportsBlocked ? "" : " Your report history is saved securely so you can reach it from any device you sign in on."}</p>
 
                   <div className="account-danger-zone">
                     <div className="account-danger-zone-header">
@@ -1948,7 +1948,7 @@ export default function Home() {
                   <h2>Everything stays organized</h2>
                   <div className="account-benefit-list">
                     <article><FolderClock aria-hidden="true" /><div><strong>Report history</strong><p>Return to your recent AI and similarity reports.</p></div></article>
-                    <article><ShieldCheck aria-hidden="true" /><div><strong>Private processing</strong><p>Documents continue to be analyzed inside your browser.</p></div></article>
+                    <article><ShieldCheck aria-hidden="true" /><div><strong>Private processing</strong><p>Documents are sent securely for analysis, and reports stay private to your account.</p></div></article>
                     <article><FileCheck2 aria-hidden="true" /><div><strong>Clear evidence</strong><p>Open either report from its own dedicated screen.</p></div></article>
                   </div>
                 </aside>
@@ -1969,7 +1969,7 @@ export default function Home() {
             </h2>
             <p className="welcome-intro">Your private review workspace is ready. Here’s the quickest way to get useful evidence from a document.</p>
             <div className="welcome-steps" aria-label="How TurnitPlus works">
-              <article><span>1</span><div className="welcome-step-icon"><UploadCloud aria-hidden="true" /></div><div><strong>Upload privately</strong><p>Choose a document. Processing stays inside this browser.</p></div></article>
+              <article><span>1</span><div className="welcome-step-icon"><UploadCloud aria-hidden="true" /></div><div><strong>Upload privately</strong><p>Choose a document. It is sent securely for analysis.</p></div></article>
               <article><span>2</span><div className="welcome-step-icon"><Search aria-hidden="true" /></div><div><strong>Review the evidence</strong><p>See the archive percentage and the exact passages behind it.</p></div></article>
               <article><span>3</span><div className="welcome-step-icon"><FolderClock aria-hidden="true" /></div><div><strong>Return anytime</strong><p>Your report history stays available on this device.</p></div></article>
             </div>
@@ -1977,7 +1977,7 @@ export default function Home() {
               {!checkLock && <button className="button primary" type="button" disabled={isGeneratingReport} onClick={() => navigate("reports")}><UploadCloud aria-hidden="true" /> Start a new check</button>}
               {!reportsBlocked && <button className="button secondary" type="button" onClick={() => navigate("reports")}><FolderClock aria-hidden="true" /> View my reports</button>}
             </div>
-            <p className="welcome-privacy"><LockKeyhole aria-hidden="true" /> No document is uploaded to an account or cloud workspace.</p>
+            <p className="welcome-privacy"><LockKeyhole aria-hidden="true" /> Your reports stay private to your account.</p>
           </section>
         )}
 
@@ -2125,7 +2125,7 @@ export default function Home() {
               Upload once, open either report, and review the highlighted passages behind the result.
             </p>
             <div className="about-steps">
-              <article><span>01</span><FileText aria-hidden="true" /><h3>Upload privately</h3><p>Your document is read and analyzed inside your browser.</p></article>
+              <article><span>01</span><FileText aria-hidden="true" /><h3>Upload privately</h3><p>Your document is read and sent securely for analysis.</p></article>
               <article><span>02</span><Search aria-hidden="true" /><h3>Measure</h3><p>Generate an AI-writing report and measure overlap against verified sources.</p></article>
               <article><span>03</span><FileCheck2 aria-hidden="true" /><h3>Review the evidence</h3><p>Open highlighted passages, sources and downloadable reports.</p></article>
             </div>
@@ -2166,7 +2166,7 @@ export default function Home() {
                 </section>
                 <section>
                   <span className="legal-section-number">02</span>
-                  <div><h3>Local processing and external requests</h3><p>Document extraction, AI analysis and archive comparison run in your browser; the original file itself is never uploaded during the check. Once a check finishes, the completed report is saved both on this device (IndexedDB) and to TurnitPlus's database, so it can still be retrieved if this device's local storage is cleared or evicted. As part of generating a report, up to 20 selected phrases may be sent to the English Wikipedia search service. Wikipedia receives those phrase queries—not the full document—and handles them under its own privacy practices. Ordinary network metadata may also be processed by the hosting infrastructure to deliver the site.</p></div>
+                  <div><h3>How your document is processed</h3><p>Document extraction and AI-writing analysis run in your browser. For similarity checks, the extracted text is sent to TurnitPlus's servers. For subscribers, the extracted text of English documents is also sent to a private model service that predicts passages likely to match, and Word files up to 4 MB are sent to a private estimation service. Once a check finishes, the completed report is saved both on this device (IndexedDB) and to TurnitPlus's database, so it can still be retrieved if this device's local storage is cleared or evicted. As part of generating a report, selected phrases may be sent to public scholarly search services and to English Wikipedia. They receive those phrase queries—not the full document—and handle them under their own privacy practices. Ordinary network metadata may also be processed by the hosting infrastructure to deliver the site.</p></div>
                 </section>
                 <section>
                   <span className="legal-section-number">03</span>
@@ -2184,7 +2184,7 @@ export default function Home() {
                     <p>Reports are kept both on your device and in TurnitPlus's database until you remove them. TurnitPlus does not apply a separate hidden retention period beyond what the table below describes.</p>
                     <div className="retention-table" role="table" aria-label="TurnitPlus retention rules">
                       <div className="retention-row retention-heading" role="row"><strong role="columnheader">Information</strong><strong role="columnheader">Where it stays</strong><strong role="columnheader">When it is removed</strong></div>
-                      <div className="retention-row" role="row"><span role="cell">Original uploaded file</span><span role="cell">Browser memory during the check</span><span role="cell">When replaced, the page closes or the session ends</span></div>
+                      <div className="retention-row" role="row"><span role="cell">Original uploaded file</span><span role="cell">Browser memory during the check; for subscribers, Word files up to 4 MB are also sent once for analysis</span><span role="cell">When replaced, the page closes or the session ends</span></div>
                       <div className="retention-row" role="row"><span role="cell">Extracted text and reports</span><span role="cell">IndexedDB on this device, and TurnitPlus's database (linked to this browser's random identifier, not your identity)</span><span role="cell">Clear history removes both copies. Clearing this site's browser data alone removes only the local copy and this browser's identifier — the saved copy remains until removed with Clear history</span></div>
                       <div className="retention-row" role="row"><span role="cell">Random report identifier</span><span role="cell">Local browser storage</span><span role="cell">When you clear this site's browser data (after this, reports saved from this browser can no longer be retrieved or deleted through the interface)</span></div>
                       <div className="retention-row" role="row"><span role="cell">Display name and email</span><span role="cell">TurnitPlus's account database</span><span role="cell">For as long as your account exists — self-service account deletion is not yet available</span></div>

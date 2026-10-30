@@ -532,7 +532,7 @@ function ManuscriptOpener({ report, hasHighlights, hasPredicted }: { report: Sim
       {hasHighlights ? (
         <p className="spr-manuscript-key">
           <span className="spr-manuscript-key-sample"><span className="spr-mark spr-line-solid" style={{ "--spr-c": printSourceTone(1).color } as CSSProperties}>matched text<sup className="spr-mark-n">1</sup></span></span>
-          Matched passages are underlined and numbered by source (page 3). {appears}
+          Matched passages are underlined and numbered by source (page 3).{hasPredicted ? " Dashed underlines mark unverified predicted passages." : ""} {appears}
         </p>
       ) : (
         <p className="spr-manuscript-key">

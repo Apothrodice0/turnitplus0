@@ -210,7 +210,7 @@ export function DocumentUploadPanel({ file, isGeneratingReport, progress, proces
         <UploadCloud aria-hidden="true" />
         {generateLabel}
       </button>
-      {privacyNote ?? <p className="privacy-note"><LockKeyhole aria-hidden="true" /> Documents are processed in your browser.</p>}
+      {privacyNote ?? <p className="privacy-note"><LockKeyhole aria-hidden="true" /> Documents are sent securely for analysis.</p>}
     </>
   );
 }

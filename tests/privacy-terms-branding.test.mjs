@@ -31,7 +31,7 @@ test("privacy and retention rules match the browser-local product", async () => 
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
 
   assert.match(page, /Privacy & retention/);
-  assert.match(page, /up to 20 selected phrases may be sent to the English Wikipedia search service/);
+  assert.match(page, /selected phrases may be sent to public scholarly search services and to English Wikipedia/);
   assert.match(page, /IndexedDB on this device/);
   assert.match(page, /A salted, irreversible hash is stored; the password itself is never stored or logged/);
   assert.match(page, /Clear history/);

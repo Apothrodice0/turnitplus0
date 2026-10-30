@@ -473,7 +473,7 @@ test("PREDICTED: apart from the dashed spans the printed report is byte-identica
   const plain = render(report);
   const withPrediction = render(predicted);
   assert.notEqual(withPrediction, plain);
-  assert.equal(stripPredicted(withPrediction), plain);
+  assert.equal(stripPredicted(withPrediction).replace(" Dashed underlines mark unverified predicted passages.", ""), plain);
   assert.equal(pagesOf(withPrediction).length, pagesOf(plain).length);
   assert.equal(printedManuscript(withPrediction), report.text);
 });
@@ -507,4 +507,11 @@ test("PREDICTED: the same words are predicted on screen and in the PDF", () => {
   assert.ok(predictedText(screen).length > 0);
   assert.equal(predictedText(render(predicted)).includes(predictedText(screen).slice(0, 40)), true);
   assert.equal(predictedText(screen).replace(/\s+/g, " "), predictedText(render(predicted)).replace(/\s+/g, " "));
+});
+
+test("PREDICTED KEY: one sentence explains dashed underlines beside verified matches; reports without predictions keep their wording", () => {
+  const { predicted, report } = reportWithPrediction();
+  const sentence = "Dashed underlines mark unverified predicted passages.";
+  assert.equal(render(predicted).split(sentence).length - 1, 1);
+  assert.ok(!render(report).includes(sentence));
 });
