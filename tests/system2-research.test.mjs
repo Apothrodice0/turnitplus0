@@ -265,7 +265,7 @@ test("wiring: one analyze action, one similarity percentage; System 2 only behin
   assert.match(detailShell, /const unified = system2Estimate \? unifySimilarity\(primaryScore, system2Estimate\) : undefined;/, "a report without a stored estimate (every customer report): unified is undefined, every view unchanged");
   assert.match(detailShell, /unified=\{unified\}\r?\n\s*\/>/, "the customer workspace shows the one unified percentage");
   assert.equal((detailShell.match(/<OverviewReport report=\{report\} similarityStatus=\{effectiveSimilarityStatus\} \/>/g) ?? []).length, 3, "admin-only legacy diagnostic views keep System 1's verified figure");
-  assert.match(detailShell, /<ReportV2PrintOverview report=\{report\} unified=\{unified\} \/>/);
+  assert.match(detailShell, /<SimilarityPrintReport report=\{report\} submitter=\{submitter\} unified=\{unified\} \/>/, "the printed report carries the same one percentage");
   assert.match(detailShell, /await downloadReceipt\(report\);/);
   assert.doesNotMatch(detailShell, /System2EstimateDetail|System2ResearchPanel/);
   await assert.rejects(readFile(new URL("../components/report/system2-research-panel.tsx", import.meta.url), "utf8"), "the manual panel is removed");

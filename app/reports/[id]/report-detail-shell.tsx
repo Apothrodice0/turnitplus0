@@ -29,7 +29,9 @@ import {
 } from "@/lib/report-detail-poll";
 import { AiReport } from "@/components/report/ai-report";
 import { CategorySummary, OverviewReport, SourcesReport, SubmissionReport, dedupeExternalAcademicEvidence } from "@/components/report/similarity-report-papers";
-import { LegacyPrintManuscript, ReportV2View, ReportV2Workspace, ReportV2PrintOverview, ReportV2PrintManuscriptPages, ReportV2PrintSourceAppendix } from "@/components/report/report-v2/report-v2-view";
+import { ReportV2View, ReportV2Workspace } from "@/components/report/report-v2/report-v2-view";
+import { SimilarityPrintFontWarmup, SimilarityPrintReport } from "@/components/report/report-v2/similarity-print-report";
+import type { ReportSubmitter } from "@/lib/similarity-print-layout";
 import { ReportNotFoundPanel } from "@/components/report/report-not-found-panel";
 import { storedSystem2Estimate } from "@/lib/system2-estimate-record";
 import { unifySimilarity } from "@/lib/system2-unified";
@@ -47,6 +49,7 @@ export function ReportDetailShell({
   mode,
   backRoom,
   system2Enabled = false,
+  submitter = null,
 }: {
   id: string;
   initialReport: SimilarityReport | null;
@@ -100,6 +103,8 @@ export function ReportDetailShell({
   mode: ReportMode;
   /** The room this report was opened from (see app/reports/[id]/page.tsx's own comment) — null when opened any other way (the anonymous flat list, a bookmark, etc.), in which case the back button falls back to the generic My Reports directory. */
   backRoom: number | null;
+  /** The report owner's display name for the printed report's cover (app/reports/[id]/page.tsx); null when unknown or on the anonymous path. */
+  submitter?: ReportSubmitter | null;
   /** Owner-only English System 2 research preview, resolved server-side (lib/system2-research.ts). Off for everyone else. */
   system2Enabled?: boolean;
 }) {
@@ -690,28 +695,17 @@ export function ReportDetailShell({
           so the manuscript is N real per-page .report-papers, never one
           continuously-flowing block relying on the browser's own print
           pagination alone. */}
+      {mode !== "ai" && hasV2 && <SimilarityPrintFontWarmup report={report} />}
       <div className="print-report-bundle">
         {mode === "ai" ? <AiReport report={report} signal={aiSignal} printMode /> : hasV2 ? (
-          // Pagination pass: wrapped so the shared .report-paper print
-          // rule's forced min-height:11in (built for the legacy one-
-          // section-per-physical-page layout, and still exactly what
-          // AiReport/legacy print use, unchanged) can be overridden ONLY
-          // for the V2 sequence — see the matching ".rv2-print-flow
-          // .report-paper" rule in app/globals.css. The overview page
-          // (.rv2-print-overview) forces a break after itself; each
-          // manuscript page (.rv2-print-manuscript-page) forces a break
-          // after itself too, so pages never silently re-merge into one
-          // flowing block; the appendix then flows naturally after the
-          // last manuscript page.
-          <div className="rv2-print-flow">
-            <ReportV2PrintOverview report={report} unified={unified} />
-            <ReportV2PrintManuscriptPages report={report} />
-            <ReportV2PrintSourceAppendix report={report} />
-          </div>
+          // SIMILARITY PRINT REPORT (2026-10-21, restored 2026-10-30): three fixed introductory
+          // pages (cover, overview, sources), then the highlighted manuscript from page 4 — see
+          // similarity-print-report.tsx. The full source inventory stays in the interactive report on screen.
+          <SimilarityPrintReport report={report} submitter={submitter} unified={unified} />
         ) : (
           <>
             <OverviewReport report={report} similarityStatus={effectiveSimilarityStatus} />
-            <LegacyPrintManuscript report={report} />
+            <SubmissionReport report={report} />
             <SourcesReport report={report} />
           </>
         )}

@@ -30,6 +30,7 @@ import {
 } from "../lib/report-evidence-interpretation.ts";
 import { buildReportV2ViewModel } from "../lib/report-v2-view.ts";
 import { ReportV2PrintOverview, ReportV2View, ReportV2Workspace } from "../components/report/report-v2/report-v2-view.tsx";
+import { SimilarityPrintReport } from "../components/report/report-v2/similarity-print-report.tsx";
 
 /**
  * FIX C — "Possible related publication — not verified".
@@ -512,6 +513,8 @@ test("10: the website (workspace + first screen) and the printed PDF overview sh
     workspace: renderToStaticMarkup(React.createElement(ReportV2Workspace, { report })),
     firstScreen: renderToStaticMarkup(React.createElement(ReportV2View, { report })),
     pdfOverview: renderToStaticMarkup(React.createElement(ReportV2PrintOverview, { report })),
+    // SIMILARITY PRINT REPORT (2026-10-21): the downloaded PDF now prints this report; its page 2 carries the notice
+    pdfPrintReport: renderToStaticMarkup(React.createElement(SimilarityPrintReport, { report })),
   };
   const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   for (const [name, html] of Object.entries(surfaces)) {
@@ -529,6 +532,7 @@ test("10: the website (workspace + first screen) and the printed PDF overview sh
   assert.ok(ws.indexOf(esc(U13_TITLE)) < sourcesStart, "rendered before, not inside, the source list");
   assert.ok(!ws.slice(sourcesStart).includes(esc(U13_TITLE)));
   assert.match(surfaces.pdfOverview, /Needs attention/);
+  assert.match(surfaces.pdfPrintReport, /Needs attention/);
   assert.match(surfaces.workspace, /Needs attention/);
 });
 
@@ -544,6 +548,8 @@ test("10b: two listed publications use the plural copy on every surface", () => 
   assert.match(vm.unverifiedPublications.body, /^Potentially related published articles were identified, but their text could not be retrieved for comparison\. These publications are not included in your similarity score\.$/);
   const pdf = renderToStaticMarkup(React.createElement(ReportV2PrintOverview, { report }));
   assert.ok(pdf.includes("Possible related publications — not verified") && pdf.includes("Indonesian Journal of Social Science Research"));
+  const printed = renderToStaticMarkup(React.createElement(SimilarityPrintReport, { report }));
+  assert.ok(printed.includes("Possible related publications — not verified") && printed.includes("Indonesian Journal of Social Science Research"), "the printed report (page 2) uses the plural copy too");
 });
 
 // ===========================================================================
