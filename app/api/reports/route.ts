@@ -35,6 +35,7 @@ import type { PlanBlockCode } from '../../../lib/account-plan';
 import { TERMINAL_AI_RESERVE_CHARS, withoutClientAiUnavailableReason } from '../../../lib/ai-unavailable-state';
 import { findRoomOccupant, INTERPRETATION_TO_VERIFY_SQL, withholdUnexplainedSimilarity } from '../../../lib/reports-repo';
 import { runAfterResponse } from '../../../lib/run-after-response';
+import { deleteHighlightPrediction, scheduleHighlightPrediction } from '../../../lib/highlight-predictions';
 import {
   createPendingReportAdmissionJob,
   processReportAdmissionJob,
@@ -183,6 +184,9 @@ const MERGED_PAYLOAD_SQL = `CASE
 // estimate is carried into the result, so a resave (the AI result landing, a retry, a replay) never loses it — and an
 // estimate stored a moment earlier survives a resave that started before it existed.
 const SYSTEM2_ESTIMATE_JSON_PATH = `'$.${SYSTEM2_ESTIMATE_PAYLOAD_KEY}'`;
+// The highlight prediction of a new report runs after this response (lib/highlight-predictions.ts).
+export const maxDuration = 300;
+
 export const SAVE_REPORT_SQL = `INSERT INTO saved_reports (id, device_key, submission_id, title, report_created_at, word_count, archive_score, score_band, ai_score, ai_tone, ai_status, payload_json, user_id, room_number, updated_at)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
       ON CONFLICT(device_key, id) DO UPDATE SET
@@ -364,6 +368,7 @@ async function insertReportWithRoomCheck(params: {
             // retained content / fingerprints are already durable by
             // deleteReportCorpusAdmissionData's own accepted-content guard.
             await deleteHistoricalMatchSnapshot(tx, { reportDeviceKey: occupantRow.device_key, reportId: occupantRow.id });
+            await deleteHighlightPrediction(tx, { deviceKey: occupantRow.device_key, reportId: occupantRow.id });
             await tx.execute({
               sql: 'DELETE FROM saved_reports WHERE device_key = ? AND id = ?',
               args: [occupantRow.device_key, occupantRow.id],
@@ -1641,6 +1646,13 @@ export async function POST(request: Request) {
           verifiedDevicePassportId,
         });
         pendingAdmissionJobId = created?.jobId ?? null;
+      }
+
+      // Highlight predictions (lib/highlight-predictions.ts): queued once, with the report's first save, and run after
+      // the response. The customer does nothing, and the report never waits for it or depends on it.
+      if (rawText && isFirstSaveOfThisReport && sessionUser) {
+        const detectedLanguage = ((payload as { features?: { detectedLanguage?: unknown } }).features)?.detectedLanguage;
+        await scheduleHighlightPrediction(client, sessionUser, { deviceKey, reportId: id, text: rawText, detectedLanguage });
       }
 
       // Phase E8F: gated on isFirstSaveOfThisReport (see above) — an update

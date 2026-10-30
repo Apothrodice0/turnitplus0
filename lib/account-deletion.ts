@@ -1,3 +1,4 @@
+import { deleteOrphanedHighlightPredictions } from "./highlight-predictions";
 import type { Client } from "@libsql/client";
 import { buildReportAdmissionSourceRef } from "./corpus-admission-source-ref";
 import { randomUUID } from "node:crypto";
@@ -225,6 +226,9 @@ export async function deleteAllReportDataForAccount(
       });
     }
   }
+
+  // Highlight predictions (drizzle/0058) go with their report rows, whichever of them were deleted just above.
+  await deleteOrphanedHighlightPredictions(client, accountId);
 
   // ---- Phase 2: document identities + orphaned, non-promoted
   // representations. Candidate representation ids are captured BEFORE the

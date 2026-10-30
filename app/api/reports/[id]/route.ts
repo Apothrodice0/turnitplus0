@@ -11,7 +11,7 @@ import { sanitizeExtractionDiagnostic } from '../../../../lib/evidence-interpret
 import { deleteReportDocumentData } from '../../../../lib/report-deletion';
 import { deleteReportCorpusAdmissionData } from '../../../../lib/corpus-admission-report-integration';
 import { getSessionUser, type SessionUser } from '../../../../lib/auth-session';
-import { attachPredictedHighlights } from '../../../../lib/highlight-model';
+import { attachStoredPredictedHighlights, deleteHighlightPrediction } from '../../../../lib/highlight-predictions';
 import { reportAccessRefusalFor } from '../../../../lib/account-entitlements';
 import { scheduleExpiryCleanupAfterRefusal } from '../../../../lib/subscription-expiry-cleanup';
 import { stripServerInternalReportFields, type SimilarityReport } from '../../../../lib/report-types';
@@ -23,6 +23,8 @@ import { reportScoringNormalizationVersion } from '../../../../lib/similarity-co
 // this file is Cache-Control: no-store; the route is force-dynamic so
 // Next/Vercel never attempts to cache the handler itself.
 export const dynamic = 'force-dynamic';
+// A due highlight prediction may run after this response (lib/highlight-predictions.ts).
+export const maxDuration = 300;
 
 const MAX_DEVICE_KEY_LENGTH = 200;
 const NO_STORE_JSON = { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } as const;
@@ -320,7 +322,15 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
     if (payload) {
       refreshSelectiveCorpusCompletionSignal(payload);
       stripServerInternalReportFields(payload);
-      await attachPredictedHighlights(payload, viewer);
+      // Reads the stored prediction only, for the report's signed-in owner; this read may let a due one run after the response.
+      if (viewer && row?.device_key) {
+        const predictionClient = await getReportsDbClient();
+        try {
+          await attachStoredPredictedHighlights(predictionClient, payload, { deviceKey: row.device_key, reportId: id }, { retry: true });
+        } finally {
+          predictionClient.close();
+        }
+      }
     }
 
     return new NextResponse(JSON.stringify({ payload }), { status: 200, headers: NO_STORE_JSON });
@@ -360,6 +370,7 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ i
         const deviceKey = owned.rows[0]?.device_key;
         const documentIdentityId = owned.rows[0]?.document_identity_id;
         if (deviceKey) await deleteHistoricalMatchSnapshot(client, { reportDeviceKey: String(deviceKey), reportId: id });
+        if (deviceKey) await deleteHighlightPrediction(client, { deviceKey: String(deviceKey), reportId: id });
         await client.execute({
           sql: 'DELETE FROM saved_reports WHERE id = ? AND user_id = ?',
           args: [id, sessionUser.id],

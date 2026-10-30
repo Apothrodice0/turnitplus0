@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { attachPredictedHighlights, canViewPredictedHighlights, highlightModelConfig, sanitizePredictedRanges } from "../lib/highlight-model.ts";
+import { HighlightModelError, highlightModelConfig, requestPredictedHighlights, sanitizePredictedRanges } from "../lib/highlight-model.ts";
 import { findHighlightRanges } from "../components/report/similarity-report-papers.tsx";
 import { encodeReportForPersistence } from "../lib/report-persistence.ts";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -8,11 +8,11 @@ import { createElement, Fragment } from "react";
 import { renderPlainWithPredicted } from "../components/report/report-v2/report-v2-view.tsx";
 
 /**
- * TURNITIN HIGHLIGHT MODEL prototype: off unless configured, never on production, admin/owner only, response-only, and
+ * TURNITIN HIGHLIGHT MODEL: off unless configured, not on production unless enabled there, stored outside the report, and
  * a predicted passage never gets a source, never takes a verified word and never changes a number.
  */
 const KEY = "k".repeat(32);
-const ENV = { HIGHLIGHT_MODEL_ENABLED: "1", HIGHLIGHT_MODEL_URL: "http://127.0.0.1:47600/predict", HIGHLIGHT_MODEL_KEY: KEY, HIGHLIGHT_MODEL_OWNER_EMAILS: "Owner@Example.com" };
+const ENV = { HIGHLIGHT_MODEL_ENABLED: "1", HIGHLIGHT_MODEL_URL: "http://127.0.0.1:47600/predict", HIGHLIGHT_MODEL_KEY: KEY, HIGHLIGHT_MODEL_VERSION: "v1-test", HIGHLIGHT_MODEL_OWNER_EMAILS: "Owner@Example.com" };
 const admin = { email: "a@example.com", role: "admin" };
 const owner = { email: "owner@example.com", role: "user" };
 const customer = { email: "c@example.com", role: "user" };
@@ -20,43 +20,25 @@ const TEXT = "The first sentence was verified against a real source. The second 
 const report = (extra = {}) => ({ text: TEXT, sources: [], score: 7, matchedWordCount: 9, wordCount: 23, ...extra });
 const ok = (ranges) => async () => new Response(JSON.stringify({ ranges }), { status: 200 });
 
-test("off by default, and never enabled on a production deployment", () => {
+test("off by default, and off on a production deployment unless enabled there", () => {
   assert.equal(highlightModelConfig({}).enabled, false);
   assert.equal(highlightModelConfig({ ...ENV, HIGHLIGHT_MODEL_ENABLED: "0" }).enabled, false);
   assert.equal(highlightModelConfig({ ...ENV, HIGHLIGHT_MODEL_KEY: "short" }).enabled, false);
   assert.equal(highlightModelConfig({ ...ENV, VERCEL_ENV: "production" }).enabled, false);
   assert.equal(highlightModelConfig({ ...ENV, VERCEL_ENV: "preview" }).enabled, true);
+  assert.equal(highlightModelConfig({ ...ENV, HIGHLIGHT_MODEL_VERSION: "" }).enabled, false, "a result must always name its model");
 });
 
-test("only an administrator or an allowlisted owner may see predictions", () => {
+test("a service failure says whether asking again can help", async () => {
   const config = highlightModelConfig(ENV);
-  assert.equal(canViewPredictedHighlights(admin, config), true);
-  assert.equal(canViewPredictedHighlights(owner, config), true);
-  assert.equal(canViewPredictedHighlights(customer, config), false);
-  assert.equal(canViewPredictedHighlights(null, config), false);
-  assert.equal(canViewPredictedHighlights(admin, highlightModelConfig({})), false);
-});
-
-test("a viewer who is not allowed never reaches the model", async () => {
-  const r = report();
-  let calls = 0;
-  await attachPredictedHighlights(r, customer, highlightModelConfig(ENV), async () => { calls += 1; throw new Error("no"); });
-  assert.equal(calls, 0);
-  assert.equal("predictedHighlights" in r, false);
-});
-
-test("a model failure leaves the report exactly as it was", async () => {
-  const r = report();
-  const before = JSON.stringify(r);
-  const error = console.error;
-  console.error = () => {};
-  try {
-    await attachPredictedHighlights(r, owner, highlightModelConfig(ENV), async () => { throw new Error("down"); });
-    await attachPredictedHighlights(r, owner, highlightModelConfig(ENV), async () => new Response("no", { status: 500 }));
-  } finally {
-    console.error = error;
-  }
-  assert.equal(JSON.stringify(r), before);
+  const failure = async (status) => requestPredictedHighlights(TEXT, config, async () => new Response("no", { status })).catch((err) => err);
+  for (const status of [429, 500, 503]) assert.equal((await failure(status)).retryable, true, String(status));
+  for (const status of [404, 413]) assert.equal((await failure(status)).retryable, false, String(status));
+  const other = await requestPredictedHighlights(TEXT, config, async () => new Response(JSON.stringify({ ranges: [], modelVersion: "other" }), { status: 200 })).catch((err) => err);
+  assert.ok(other instanceof HighlightModelError);
+  assert.equal(other.retryable, false, "a result from another model is never used");
+  const bad = await requestPredictedHighlights(TEXT, config, async () => new Response("{}", { status: 200 })).catch((err) => err);
+  assert.equal(bad.retryable, true, "a malformed answer is not an empty result");
 });
 
 test("the backend's ranges are never passed through unchecked", () => {
@@ -66,15 +48,17 @@ test("the backend's ranges are never passed through unchecked", () => {
 });
 
 test("only the text before the reference section is sent, and offsets stay valid for the full text", async () => {
-  const text = `${TEXT}\n\nReferences\n1. Someone. A title. Journal, 2020.`;
-  const r = report({ text });
+  const text = `${TEXT}
+
+References
+1. Someone. A title. Journal, 2020.`;
   let sent;
-  await attachPredictedHighlights(r, admin, highlightModelConfig(ENV), async (_url, init) => {
+  const ranges = await requestPredictedHighlights(text, highlightModelConfig(ENV), async (_url, init) => {
     sent = JSON.parse(init.body).text;
     return ok([{ start: 0, end: 3 }])();
   });
   assert.equal(text.startsWith(sent), true);
-  assert.equal(r.predictedHighlights.length, 1);
+  assert.equal(ranges.length, 1);
 });
 
 test("no predicted ranges: output is identical to the report without the field", () => {

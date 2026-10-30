@@ -36,6 +36,9 @@ import { ReportNotFoundPanel } from "@/components/report/report-not-found-panel"
 import { storedSystem2Estimate } from "@/lib/system2-estimate-record";
 import { unifySimilarity } from "@/lib/system2-unified";
 
+const PREDICTION_CHECK_INTERVAL_MS = 10_000;
+const PREDICTION_MAX_CHECKS = 30;
+
 type LoadStatus = "loading" | "found" | "not-found";
 
 export function ReportDetailShell({
@@ -174,6 +177,25 @@ export function ReportDetailShell({
   const effectiveSimilarityStatus: DetailSimilarityStatus = mode === "similarity" ? similarityStatus : "resolved";
   const revealState = computeDetailRevealState({ aiStatus, similarityStatus: effectiveSimilarityStatus, pollExhausted });
   const bothReady = revealState.screen === "revealed";
+  // A highlight prediction still running (lib/highlight-predictions.ts): its passages join the report when they arrive,
+  // on screen and in the printed report. Only those two fields are taken; the report is complete without them.
+  const predictionsPending = Boolean(report?.predictedHighlightsPending);
+  useEffect(() => {
+    if (!predictionsPending) return;
+    let checks = 0;
+    let cancelled = false;
+    const timer = window.setInterval(async () => {
+      checks += 1;
+      if (checks >= PREDICTION_MAX_CHECKS) window.clearInterval(timer);
+      const latest = await fetchRemoteReport<SimilarityReport>(id);
+      if (cancelled || !latest) return;
+      setReport((current) => (current ? { ...current, predictedHighlights: latest.predictedHighlights, predictedHighlightsPending: latest.predictedHighlightsPending } : current));
+    }, PREDICTION_CHECK_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [id, predictionsPending]);
 
   // The server now sends the saved payload without waiting for expensive
   // read-time historical/family enrichment. Render that payload immediately

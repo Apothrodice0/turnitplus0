@@ -252,6 +252,8 @@ export type SimilarityReport = {
   system2Estimate?: StoredSystem2Estimate;
   /** Response-only, for an allowed viewer (lib/highlight-model.ts). Never stored. */
   predictedHighlights?: PredictedHighlightRange[];
+  /** The report's prediction is still running; the report page checks again. Response-only, like predictedHighlights. */
+  predictedHighlightsPending?: boolean;
   id: number;
   submissionId: string;
   title: string;

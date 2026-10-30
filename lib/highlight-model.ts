@@ -1,41 +1,53 @@
-import type { SessionUser } from "./auth-session";
-import type { PredictedHighlightRange, SimilarityReport } from "./report-types";
+import type { PredictedHighlightRange } from "./report-types";
 import { comparisonText } from "./similarity-core";
 
 /**
- * TURNITIN HIGHLIGHT MODEL — protected prototype. A word-level model predicts which passages Turnitin would highlight;
- * those passages are drawn in the existing report body, in the gaps System 1's verified matches leave.
+ * TURNITIN HIGHLIGHT MODEL — the client of the private inference service. A word-level model predicts which passages
+ * Turnitin would highlight; lib/highlight-predictions.ts runs it once for a saved report and keeps the result. Those
+ * passages are drawn in the report body, in the gaps System 1's verified matches leave.
  *
- * What it never does: add a source, change a percentage or matched-word count, or get stored. Predicted ranges are
- * attached to one outgoing response for an allowed viewer and live nowhere else (encodeReportForPersistence drops them
- * if a client sends them back).
+ * What it never does: add a source, change a percentage or matched-word count, or change the report's own payload.
  *
- * Who sees it, decided on the server for every read: HIGHLIGHT_MODEL_ENABLED=1, a URL and a key of at least 32
- * characters, never on a production deployment, and only an administrator or an account on
- * HIGHLIGHT_MODEL_OWNER_EMAILS. Anything else, or any model failure, leaves the report exactly as it was.
+ * Off unless HIGHLIGHT_MODEL_ENABLED=1 with a URL, a key of at least 32 characters and a model version; on a production
+ * deployment it also needs HIGHLIGHT_MODEL_PRODUCTION_ENABLED=1. Who a prediction is made for is decided per report
+ * (lib/highlight-predictions.ts). Any failure leaves the report exactly as it was.
  */
-export type HighlightModelConfig = { enabled: boolean; url: string; key: string; ownerEmails: string[]; timeoutMs: number };
+export type HighlightModelConfig = {
+  enabled: boolean;
+  url: string;
+  key: string;
+  /** The one model this deployment serves; a stored result answers only for this version. */
+  modelVersion: string;
+  subscribersEnabled: boolean;
+  ownerEmails: string[];
+  timeoutMs: number;
+  maxWords: number;
+};
 
 const MIN_KEY_LENGTH = 32;
 const MAX_RANGES = 20_000;
-const DEFAULT_TIMEOUT_MS = 20_000;
+// Inside the 300 s the routes that run the job are given (maxDuration): a 60,000-word document takes about 130 s on
+// 4 vCPU, plus a cold start. Longer documents keep their verified report and get no predictions.
+const DEFAULT_TIMEOUT_MS = 240_000;
+const DEFAULT_MAX_WORDS = 60_000;
 
 export function highlightModelConfig(env: NodeJS.ProcessEnv = process.env): HighlightModelConfig {
   const url = (env.HIGHLIGHT_MODEL_URL ?? "").trim();
   const key = env.HIGHLIGHT_MODEL_KEY ?? "";
+  const modelVersion = (env.HIGHLIGHT_MODEL_VERSION ?? "").trim();
   const timeoutMs = Number(env.HIGHLIGHT_MODEL_TIMEOUT_MS);
+  const maxWords = Number(env.HIGHLIGHT_MODEL_MAX_WORDS);
+  const productionAllowed = env.VERCEL_ENV !== "production" || env.HIGHLIGHT_MODEL_PRODUCTION_ENABLED === "1";
   return {
-    enabled: env.HIGHLIGHT_MODEL_ENABLED === "1" && env.VERCEL_ENV !== "production" && url.length > 0 && key.length >= MIN_KEY_LENGTH,
+    enabled: env.HIGHLIGHT_MODEL_ENABLED === "1" && productionAllowed && url.length > 0 && key.length >= MIN_KEY_LENGTH && modelVersion.length > 0,
     url,
     key,
+    modelVersion,
+    subscribersEnabled: env.HIGHLIGHT_MODEL_SUBSCRIBERS_ENABLED === "1",
     ownerEmails: (env.HIGHLIGHT_MODEL_OWNER_EMAILS ?? "").split(",").map((email) => email.trim().toLowerCase()).filter(Boolean),
     timeoutMs: Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : DEFAULT_TIMEOUT_MS,
+    maxWords: Number.isFinite(maxWords) && maxWords > 0 ? maxWords : DEFAULT_MAX_WORDS,
   };
-}
-
-export function canViewPredictedHighlights(user: Pick<SessionUser, "email" | "role"> | null | undefined, config: HighlightModelConfig): boolean {
-  if (!config.enabled || !user) return false;
-  return user.role === "admin" || (typeof user.email === "string" && config.ownerEmails.includes(user.email.trim().toLowerCase()));
 }
 
 /** Only whole, in-bounds, non-overlapping character ranges survive; the backend's response is never passed through. */
@@ -55,6 +67,16 @@ export function sanitizePredictedRanges(raw: unknown, textLength: number): Predi
   return merged;
 }
 
+/** A failure of the service. Not retryable when asking again cannot help: wrong key or path, over the limit, another model. */
+export class HighlightModelError extends Error {
+  readonly retryable: boolean;
+  constructor(code: string, retryable: boolean) {
+    super(code);
+    this.name = "HighlightModelError";
+    this.retryable = retryable;
+  }
+}
+
 export async function requestPredictedHighlights(text: string, config: HighlightModelConfig, fetchImpl: typeof fetch = fetch): Promise<PredictedHighlightRange[]> {
   // comparisonText is a prefix of the report text (the product's reference cut), so the offsets stay valid; the model
   // was trained without the reference section.
@@ -65,22 +87,10 @@ export async function requestPredictedHighlights(text: string, config: Highlight
     body: JSON.stringify({ text: compared }),
     signal: AbortSignal.timeout(config.timeoutMs),
   });
-  if (!response.ok) throw new Error(`highlight model responded ${response.status}`);
-  const body = (await response.json()) as { ranges?: unknown };
+  if (!response.ok) throw new HighlightModelError(`HTTP_${response.status}`, response.status === 429 || response.status >= 500);
+  const body = (await response.json()) as { ranges?: unknown; modelVersion?: unknown };
+  // A local development sidecar names no version; a service that names one must be the model this deployment expects.
+  if (body.modelVersion !== undefined && body.modelVersion !== config.modelVersion) throw new HighlightModelError("MODEL_VERSION_MISMATCH", false);
+  if (!Array.isArray(body.ranges)) throw new HighlightModelError("BAD_RESPONSE", true);
   return sanitizePredictedRanges(body.ranges, compared.length);
-}
-
-/** Adds predictedHighlights to one outgoing report for an allowed viewer. Non-fatal: a failure logs a code, no document content. */
-export async function attachPredictedHighlights(
-  report: SimilarityReport,
-  viewer: Pick<SessionUser, "email" | "role"> | null | undefined,
-  config: HighlightModelConfig = highlightModelConfig(),
-  fetchImpl: typeof fetch = fetch,
-): Promise<void> {
-  if (!canViewPredictedHighlights(viewer, config) || !report.text) return;
-  try {
-    report.predictedHighlights = await requestPredictedHighlights(report.text, config, fetchImpl);
-  } catch (err) {
-    console.error("highlight model unavailable (non-fatal):", err instanceof Error ? err.name : "unknown");
-  }
 }
