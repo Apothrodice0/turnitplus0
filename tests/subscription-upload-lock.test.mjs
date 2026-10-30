@@ -96,7 +96,7 @@ test("the dashboard and every room wire the lock into the normal upload area", a
   assert.match(roomShell, /locked=\{uploadLock\}/);
 });
 
-test("My Reports subscription notice: heading, readable message, secondary line, lock icon, responsive styles", async () => {
+test("subscription-required screen: My Reports shows ONE centered card instead of any room; empty room URLs show it too", async () => {
   const { subscriptionNoticeFor } = await import("../lib/account-plan.ts");
   assert.deepEqual(subscriptionNoticeFor("ACTIVATION_REQUIRED", null), {
     title: "Subscription required",
@@ -107,13 +107,45 @@ test("My Reports subscription notice: heading, readable message, secondary line,
   assert.equal(subscriptionNoticeFor("PLAN_EXPIRED", Date.UTC(2026, 9, 1)).secondary, "Contact TurnitPlus to renew your plan.");
   assert.match(subscriptionNoticeFor("PLAN_EXPIRED", Date.UTC(2026, 9, 1)).detail, /expired on 1 October 2026/);
   assert.equal(subscriptionNoticeFor("ACCOUNT_SUSPENDED", null).secondary, "Contact TurnitPlus to restore your plan.");
+
+  // the one screen: centered card, lock badge, heading, message, secondary line; links only to rooms holding a report
+  const { SubscriptionRequiredState } = await import("../components/reports/subscription-required-state.tsx");
+  const { renderToStaticMarkup } = await import("react-dom/server");
+  const React = await import("react");
+  const html = renderToStaticMarkup(React.createElement(SubscriptionRequiredState, {
+    notice: subscriptionNoticeFor("PLAN_EXPIRED", Date.UTC(2026, 9, 1)),
+    earlierReports: [{ href: "/reports/rooms/2", label: "Report from 3 Sept 2026" }],
+  }));
+  assert.match(html, /class="subscription-required-stage"/);
+  assert.match(html, /class="subscription-required-card"/);
+  assert.match(html, /class="subscription-required-icon"><svg/);
+  assert.match(html, /<h2 id="subscription-required-title">Subscription required<\/h2>/);
+  assert.match(html, /expired on 1 October 2026/);
+  assert.match(html, /href="\/reports\/rooms\/2"/);
+  assert.doesNotMatch(html, /type="file"|drop-zone|Generate|report-room-row/, "no upload, no room list");
+  const bare = renderToStaticMarkup(React.createElement(SubscriptionRequiredState, { notice: subscriptionNoticeFor("ACTIVATION_REQUIRED", null) }));
+  assert.doesNotMatch(bare, /subscription-required-history|subscription-required-back/, "nothing extra without earlier reports or a back link");
+
+  // My Reports: the locked branch returns the screen BEFORE any room row is rendered, and lists only non-empty rooms
   const rooms = await readFile(new URL("../components/reports/report-rooms.tsx", import.meta.url), "utf8");
-  assert.match(rooms, /className="subscription-notice"/);
-  assert.match(rooms, /<LockKeyhole aria-hidden="true" \/>/);
-  assert.match(rooms, /<h3 id="subscription-notice-title">/);
-  assert.doesNotMatch(rooms, /ai-analysis-message report-rooms-plan-notice/, "the old oversized banner is gone");
+  const lockedAt = rooms.indexOf("if (planNotice !== null) {");
+  assert.ok(lockedAt > 0);
+  assert.ok(lockedAt < rooms.indexOf("{roomIndex.map((entry) => {"), "the screen replaces the room list");
+  assert.match(rooms.slice(lockedAt, rooms.indexOf("return <SubscriptionRequiredState", lockedAt)), /\.filter\(\(entry\) => entry\.status !== "empty"\)/);
+  assert.doesNotMatch(rooms, /className="subscription-notice"/, "the old banner is gone");
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  assert.match(page, /onPlanLockChange=\{setReportsPlanLocked\}/);
+  assert.match(page, /reports-card-locked/);
+
+  // a room URL: a blocked account's empty room is the same screen, rendered server-side (never the upload area)
+  const roomPage = await readFile(new URL("../app/reports/rooms/[room]/page.tsx", import.meta.url), "utf8");
+  assert.match(roomPage, /if \(planBlock && shown\.status === "empty"\) \{\s*return \{ status: "subscription-required"/);
+  assert.match(roomPage, /<SubscriptionRequiredState notice=\{result\.notice\} backHref="\/#reports" \/>/);
+
   const css = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
-  assert.match(css, /\.subscription-notice h3 \{[^}]*font-size: 16px/);
-  assert.match(css, /\.subscription-notice-message \{[^}]*font-size: 14px/);
-  assert.match(css, /@media \(max-width: 560px\) \{\s*\.subscription-notice \{/);
+  assert.match(css, /\.subscription-required-stage \{[^}]*place-items: center/);
+  assert.match(css, /@keyframes subscription-card-in/);
+  assert.match(css, /@keyframes subscription-lock-float/);
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\) \{\s*\.subscription-required-card,\s*\.subscription-required-halo \{ animation: none; \}/);
+  assert.doesNotMatch(css, /\.subscription-notice \{/, "the old banner styles are gone");
 });

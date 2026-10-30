@@ -4,9 +4,10 @@ import { useEffect, useReducer, useTransition, useState } from "react";
 import type { MouseEvent } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { ChevronRight, LockKeyhole } from "lucide-react";
+import { ChevronRight } from "lucide-react";
 import { fetchReportRoomIndex, type RoomIndexFetchResult } from "@/lib/reports-remote";
-import type { SubscriptionNotice } from "@/lib/account-plan";
+import { SUBSCRIPTION_REQUIRED_TITLE, type SubscriptionNotice } from "@/lib/account-plan";
+import { SubscriptionRequiredState } from "@/components/reports/subscription-required-state";
 import { getCachedRoomIndex, setCachedRoomIndex } from "@/lib/report-rooms-cache";
 import type { RoomIndexEntry, RoomStatus } from "@/lib/report-rooms";
 
@@ -124,6 +125,8 @@ const STUCK_NAVIGATION_TIMEOUT_MS = 30_000;
 type Props = {
   accountEmail: string;
   onTotalCountChange: (total: number) => void;
+  /** Manual subscriptions: told whether the account is shown the subscription-required screen instead of its rooms. */
+  onPlanLockChange?: (locked: boolean) => void;
 };
 
 export function statusLabel(status: RoomStatus): string {
@@ -190,7 +193,7 @@ function RoomRowSkeleton() {
   );
 }
 
-export function ReportRoomsBrowser({ accountEmail, onTotalCountChange }: Props) {
+export function ReportRoomsBrowser({ accountEmail, onTotalCountChange, onPlanLockChange }: Props) {
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
   const [navState, dispatch] = useReducer(roomNavReducer, IDLE_NAV_STATE);
@@ -305,6 +308,11 @@ export function ReportRoomsBrowser({ accountEmail, onTotalCountChange }: Props) 
     if (roomIndex) onTotalCountChange(roomIndex.filter((entry) => entry.status !== "empty").length);
   }, [roomIndex, onTotalCountChange]);
 
+  const planLocked = !indexLoading && !indexError && planNotice !== null;
+  useEffect(() => {
+    onPlanLockChange?.(planLocked);
+  }, [planLocked, onPlanLockChange]);
+
   if (indexError) {
     return (
       <section className="ai-analysis-message" role="status">
@@ -325,20 +333,22 @@ export function ReportRoomsBrowser({ accountEmail, onTotalCountChange }: Props) 
     );
   }
 
+  // Manual subscriptions: an account that cannot start a new check sees ONE centered subscription-required screen in
+  // place of the whole room list — no room rows, no empty or new-check room to open. Reports it already has stay
+  // readable from the screen (rooms holding a report only).
+  if (planNotice !== null) {
+    const notice: SubscriptionNotice = planLock ?? { title: SUBSCRIPTION_REQUIRED_TITLE, message: planNotice, secondary: "", detail: null };
+    const earlierReports = roomIndex
+      .filter((entry) => entry.status !== "empty")
+      .map((entry) => ({
+        href: `/reports/rooms/${entry.room}`,
+        label: entry.mostRecentAt ? `Report from ${new Date(entry.mostRecentAt).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}` : "Earlier report",
+      }));
+    return <SubscriptionRequiredState notice={notice} earlierReports={earlierReports} />;
+  }
+
   return (
     <div className="report-rooms-list">
-      {planNotice && (
-        // Manual subscriptions: the same visual language as the locked upload area (components/reports/document-upload-panel.tsx).
-        <section className="subscription-notice" role="status" aria-labelledby="subscription-notice-title">
-          <span className="subscription-notice-icon"><LockKeyhole aria-hidden="true" /></span>
-          <div className="subscription-notice-body">
-            <h3 id="subscription-notice-title">{planLock?.title ?? "Subscription required"}</h3>
-            <p className="subscription-notice-message">{planLock?.message ?? planNotice}</p>
-            {planLock && <p className="subscription-notice-secondary">{planLock.secondary}</p>}
-            {planLock?.detail && <p className="subscription-notice-detail">{planLock.detail}</p>}
-          </div>
-        </section>
-      )}
       {/* prefetch=false: every room row renders at once (up to 40 for an
           admin account), and each is a force-dynamic page that does a real
           rate-limited DB read (see app/reports/rooms/[room]/page.tsx). Next's
@@ -354,7 +364,7 @@ export function ReportRoomsBrowser({ accountEmail, onTotalCountChange }: Props) 
         // and marked inert for assistive tech too rather than silently
         // ignoring the activation with no signal at all.
         const isBlocked = navState.phase !== "idle" && !isThisTarget;
-        const planLabel = roomPlanLabel(entry, planNotice !== null);
+        const planLabel = roomPlanLabel(entry, false);
 
         if (isThisStuck) {
           return (

@@ -12,7 +12,8 @@ import { findRoomOccupant, listEarlierRoomReports, type RoomOccupantResult } fro
 import { reportHistoryRetentionEnabled, type EarlierRoomReport } from "@/lib/report-history";
 import { ROOM_CYCLE_MS } from "@/lib/report-rooms";
 import { newCheckRefusal, readActiveRoomClaims, resolveRoomPolicy } from "@/lib/account-entitlements";
-import { HISTORICAL_ROOM_NOTE, roomCooldownLock, uploadLockFor, type UploadLock } from "@/lib/account-plan";
+import { HISTORICAL_ROOM_NOTE, roomCooldownLock, subscriptionNoticeFor, uploadLockFor, type SubscriptionNotice, type UploadLock } from "@/lib/account-plan";
+import { SubscriptionRequiredState } from "@/components/reports/subscription-required-state";
 import { isSystem2ResearchUser } from "@/lib/system2-research";
 import { RoomPageShell } from "./room-page-shell";
 
@@ -42,9 +43,18 @@ type RoomPageResult =
       earlierReports: EarlierRoomReport[];
       system2Enabled: boolean;
     }
+  | { status: "subscription-required"; notice: SubscriptionNotice }
   | { status: "invalid-room" }
   | { status: "no-session" }
   | { status: "rate-limited"; retryAfterSeconds: number };
+
+/**
+ * Manual subscriptions: an account with no active subscription (none, expired, suspended — or new checks unavailable)
+ * never sees an empty / new-check room. Any such room URL it opens shows the same centered subscription-required screen
+ * as My Reports; within this bound that includes room numbers beyond its listed rooms, which would otherwise be a 404.
+ * Rooms holding one of its reports still open that report.
+ */
+const LOCKED_ROOM_URL_LIMIT = 100;
 
 const loadRoom = cache(async (roomParam: string): Promise<RoomPageResult> => {
   const token = (await cookies()).get(SESSION_COOKIE_NAME)?.value ?? null;
@@ -71,7 +81,10 @@ const loadRoom = cache(async (roomParam: string): Promise<RoomPageResult> => {
     // Manual account activation (lib/account-entitlements.ts): the rooms the account's room list shows — with the
     // feature off, exactly the role-based count.
     const policy = await resolveRoomPolicy(client, sessionUser);
-    const roomCount = policy.visibleRoomCount;
+    // Manual subscriptions: an account without an active subscription opens any room URL within LOCKED_ROOM_URL_LIMIT
+    // (the subscription-required screen below, or a room's earlier report) instead of a 404 past its listed rooms.
+    const planBlock = policy.enforced ? policy.block : null;
+    const roomCount = planBlock ? Math.max(policy.visibleRoomCount, LOCKED_ROOM_URL_LIMIT) : policy.visibleRoomCount;
     const room = Number(roomParam);
     if (!Number.isInteger(room) || room < 0 || room >= roomCount) return { status: "invalid-room" };
 
@@ -86,6 +99,9 @@ const loadRoom = cache(async (roomParam: string): Promise<RoomPageResult> => {
         shown = earlier;
         historicalNote = HISTORICAL_ROOM_NOTE;
       }
+    }
+    if (planBlock && shown.status === "empty") {
+      return { status: "subscription-required", notice: subscriptionNoticeFor(planBlock.code, policy.entitlement?.expiresAt ?? null) };
     }
     // Said before the customer spends minutes on an analysis the save would refuse: the room's upload area is shown
     // locked (no active subscription, room outside the plan, server-clock cooldown). The save and the check-work routes
@@ -134,6 +150,14 @@ export default async function RoomPage({ params }: { params: Promise<{ room: str
   const result = await loadRoom(roomParam);
 
   if (result.status === "invalid-room") notFound();
+
+  if (result.status === "subscription-required") {
+    return (
+      <section className="result-view report-detail-page">
+        <SubscriptionRequiredState notice={result.notice} backHref="/#reports" />
+      </section>
+    );
+  }
 
   if (result.status === "no-session") {
     return (

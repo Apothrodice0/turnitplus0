@@ -278,6 +278,8 @@ export default function Home() {
   // subscription (GET /api/account/plan — display only; POST /api/reports and the check-work routes still refuse).
   // null while enforcement is off, for administrators, and for an active plan.
   const [checkLock, setCheckLock] = useState<UploadLock | null>(null);
+  // Manual subscriptions: My Reports shows only the centered subscription-required screen (set by ReportRoomsBrowser).
+  const [reportsPlanLocked, setReportsPlanLocked] = useState(false);
   const [emailVerification, setEmailVerification] = useState<EmailVerificationView | null>(null);
   const [emailVerifySending, setEmailVerifySending] = useState(false);
   const [emailVerifyNotice, setEmailVerifyNotice] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
@@ -1997,8 +1999,8 @@ export default function Home() {
         )}
 
         {view === "reports" && (
-          <section className="reports-card surface-card">
-            <div className="card-heading">
+          <section className={`reports-card surface-card${account && reportsPlanLocked ? " reports-card-locked" : ""}`}>
+            {!(account && reportsPlanLocked) && <div className="card-heading">
               <div>
                 <p className="section-label">{account ? "YOUR ACCOUNT" : "ON THIS DEVICE"}</p>
                 <h2>Recent reports</h2>
@@ -2026,7 +2028,7 @@ export default function Home() {
                   <button className="button subtle" type="button" onClick={clearHistory}>Clear history</button>
                 )}
               </div>
-            </div>
+            </div>}
 
             {/* Anonymous/local history only — an authenticated account's
                 new-check flow (and its own processing state) lives entirely
@@ -2063,6 +2065,7 @@ export default function Home() {
                 key={roomsBrowserKey}
                 accountEmail={account.email}
                 onTotalCountChange={setAccountReportCount}
+                onPlanLockChange={setReportsPlanLocked}
               />
             ) : !accountLoaded ? (
               // reports.length === 0 is also true before the device report
