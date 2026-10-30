@@ -7,13 +7,20 @@ import { pseudoBpeTokenizer, rng } from "./real-ai-windows.mjs";
  * deterministic pseudo-BPE of ./real-ai-windows.mjs (encode/decode, plus the batch call the worker's classify() makes for
  * its 256-token guard); the model returns a deterministic logit pair per window text. Every signal handed back is recorded
  * in `stubState.signals`, in order, so a test can rebuild the expected result independently of the worker.
+ *
+ * `stubState.loads` records each model load's { device, dtype }. A "webgpu" session answers with `stubState.webgpuLogOdds`
+ * for EVERY text when that is a number (a GPU session that returns constant logits), and otherwise like the CPU model —
+ * except that the engine self-check sentence gets its CPU reference value, as a healthy GPU session does. Its outputs are
+ * never recorded in `stubState.signals`.
  */
 
-export const stubState = { signals: [], modelCalls: 0 };
+export const stubState = { signals: [], modelCalls: 0, loads: [], webgpuLogOdds: null };
 
 export function resetStub() {
   stubState.signals = [];
   stubState.modelCalls = 0;
+  stubState.loads = [];
+  stubState.webgpuLogOdds = null;
 }
 
 export const env = { cacheKey: "transformers-cache" };
@@ -50,7 +57,22 @@ export const AutoTokenizer = {
 };
 
 export const AutoModelForSequenceClassification = {
-  async from_pretrained() {
+  async from_pretrained(_modelId, options = {}) {
+    stubState.loads.push({ device: options.device, dtype: options.dtype });
+    if (options.device === "webgpu") {
+      const gpuModel = async (inputs) => {
+        const data = new Float64Array(inputs.texts.length * 2);
+        inputs.texts.forEach((text, index) => {
+          const logOdds = typeof stubState.webgpuLogOdds === "number"
+            ? stubState.webgpuLogOdds
+            : text === core.AI_ENGINE_PROBE_TEXT ? core.AI_ENGINE_PROBE_LOG_ODDS : windowLogOdds(text);
+          data[index * 2 + 1] = logOdds * core.AI_MODEL_TEMPERATURE;
+        });
+        return { logits: { data } };
+      };
+      gpuModel.dispose = async () => {};
+      return gpuModel;
+    }
     return async (inputs) => {
       stubState.modelCalls += 1;
       const data = new Float64Array(inputs.texts.length * 2);

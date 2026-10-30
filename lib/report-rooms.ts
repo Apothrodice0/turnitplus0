@@ -112,12 +112,39 @@ export type RoomStatus = "empty" | "processing" | "ready" | "failed";
  * score could be calibrated (ai_score NULL — lib/ai-display-state.ts);
  * otherwise (NULL: a legacy pre-0028 row or a report still mid-analysis;
  * 'processing') `aiScore` alone, the pre-existing signal, decides — a
- * recorded score is ready, none is "processing".
+ * recorded score is ready, none is "processing" — unless an explicit
+ * 'processing' row has been abandoned (isAiProcessingAbandoned), which reads
+ * as "failed".
  */
-export function deriveRoomStatus(aiScore: number | null, aiStatus: string | null): "processing" | "ready" | "failed" {
+export function deriveRoomStatus(
+  aiScore: number | null,
+  aiStatus: string | null,
+  lastWrittenAt: string | null = null,
+  now: number = Date.now(),
+): "processing" | "ready" | "failed" {
   if (aiStatus === "failed") return "failed";
   if (aiStatus === "ready") return "ready";
-  return aiScore === null ? "processing" : "ready";
+  if (aiScore !== null) return "ready";
+  return aiStatus === "processing" && isAiProcessingAbandoned(lastWrittenAt, now) ? "failed" : "processing";
+}
+
+/**
+ * ABANDONED AI ANALYSIS: the AI half runs only in the browser tab that uploaded the document. Reloading or closing that tab
+ * ends the run, and nothing else ever writes 'ready' or 'failed' — Preview report 1793371188236 (2026-10-30) was reloaded two
+ * minutes into its first model download and stayed "Analyzing…" with nothing running anywhere. A live tab settles well within
+ * this bound (its worker answers or hits the 120 s inactivity timeout; a first model download plus CPU inference of a
+ * 4,700-word document measured a few minutes), so a 'processing' row last written longer ago than this is read as the
+ * existing terminal "failed" state, with the existing Retry analysis. Read-time only: the stored row is unchanged, so a
+ * result that does arrive later is still saved and shown exactly as before. `lastWrittenAt` is the row's server-side
+ * updated_at (SQLite CURRENT_TIMESTAMP, UTC) — never a browser-supplied time.
+ */
+export const AI_PROCESSING_ABANDONED_AFTER_MS = 20 * 60 * 1000;
+
+export function isAiProcessingAbandoned(lastWrittenAt: string | null, now: number = Date.now()): boolean {
+  if (!lastWrittenAt) return false;
+  const iso = /[zZ]$|[+-]\d\d:?\d\d$/.test(lastWrittenAt) ? lastWrittenAt : `${lastWrittenAt.replace(" ", "T")}Z`;
+  const writtenAt = Date.parse(iso);
+  return Number.isFinite(writtenAt) && now - writtenAt > AI_PROCESSING_ABANDONED_AFTER_MS;
 }
 
 /**

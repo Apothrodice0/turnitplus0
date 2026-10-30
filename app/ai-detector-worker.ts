@@ -2,8 +2,10 @@ import { AutoModelForSequenceClassification, AutoTokenizer, env } from "@hugging
 import {
   AI_MINIMUM_WORDS,
   AI_MODEL_ID,
+  AI_ENGINE_PROBE_TEXT,
   AI_MODEL_DTYPE,
   AI_MODEL_MAX_TOKENS,
+  AI_MODEL_WEBGPU_DTYPE,
   AI_MODEL_VERSION,
   AI_PASSAGE_LOG_ODDS_THRESHOLD,
   AI_PASSAGE_THRESHOLD,
@@ -14,6 +16,7 @@ import {
   calculateTopKMeanLogOdds,
   calibratedHumanMedianPercentile,
   eligibleAiWordCount,
+  isAiEngineProbeConsistent,
   isAiPassageFlagged,
   machineLogOddsFromLogits,
   medianLogOdds,
@@ -64,7 +67,8 @@ async function loadClassifier(device: "webgpu" | "wasm", cached: boolean) {
   });
   const model = await AutoModelForSequenceClassification.from_pretrained(AI_MODEL_ID, {
     device,
-    dtype: AI_MODEL_DTYPE,
+    // See AI_MODEL_WEBGPU_DTYPE: the fp16 graph returns constant logits on WebGPU.
+    dtype: device === "webgpu" ? AI_MODEL_WEBGPU_DTYPE : AI_MODEL_DTYPE,
     progress_callback: handleModelProgress,
     // "start the two fixes now" TASK 4: the fp16 ONNX graph for this model
     // fails to initialize under onnxruntime-node's CPU backend with the
@@ -94,6 +98,13 @@ async function loadClassifier(device: "webgpu" | "wasm", cached: boolean) {
       return { logOdds, probability: probabilityFromLogOdds(logOdds) };
     });
   };
+  if (device === "webgpu") {
+    const [probe] = await classify([AI_ENGINE_PROBE_TEXT]);
+    if (!isAiEngineProbeConsistent(probe.logOdds)) {
+      await model.dispose();
+      throw new Error("The WebGPU engine failed its self-check.");
+    }
+  }
   return { classify, tokenizer };
 }
 

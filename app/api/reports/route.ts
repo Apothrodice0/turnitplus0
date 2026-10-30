@@ -1891,7 +1891,7 @@ export async function GET(request: Request) {
         // row in a form the decoder could reject transfers its one interpretation
         // subtree. (The anonymous device-key list below is deliberately untouched.)
         const result = await client.execute({
-          sql: `SELECT id, submission_id, title, report_created_at, word_count, archive_score, score_band, ai_score, ai_tone, ai_status,
+          sql: `SELECT id, submission_id, title, report_created_at, word_count, archive_score, score_band, ai_score, ai_tone, ai_status, updated_at,
                        ${INTERPRETATION_TO_VERIFY_SQL} AS interpretation_to_verify
                 FROM saved_reports WHERE user_id = ? ORDER BY report_created_at DESC LIMIT ?`,
           args: [sessionUser.id, MAX_LISTED_REPORTS],
@@ -1933,7 +1933,9 @@ export async function GET(request: Request) {
         // pending" forever for a report that had in fact finished. Only that one state needs the column: 'ready' is already
         // carried by the score and 'processing' by its absence, so every other row keeps its exact shape. Absent for the anonymous
         // list (it never selects the column). No reason is exposed — history only needs "this finished, without an AI score".
-        ...(row.ai_status === 'failed' ? { aiStatus: 'failed' as const } : {}),
+        // An abandoned 'processing' row reads as the same terminal state, exactly as the room's (deriveRoomStatus).
+        ...(deriveRoomStatus(row.ai_score === null ? null : Number(row.ai_score), row.ai_status == null ? null : String(row.ai_status), row.updated_at == null ? null : String(row.updated_at)) === 'failed'
+          ? { aiStatus: 'failed' as const } : {}),
       };
       // Only the authenticated query above selects interpretation_to_verify; a row
       // without it (the anonymous device-key list) has nothing to verify and is unchanged.

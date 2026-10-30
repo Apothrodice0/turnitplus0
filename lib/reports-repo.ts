@@ -31,7 +31,7 @@ type ReportRow = { payload_json: string; device_key: string };
  * ReportRow itself — findReportRowForDeviceKey's anonymous callers don't
  * need it and its own query doesn't select these columns.
  */
-type ReportRowWithAiStatus = ReportRow & { ai_score: number | null; ai_tone: string | null; ai_status: string | null };
+type ReportRowWithAiStatus = ReportRow & { ai_score: number | null; ai_tone: string | null; ai_status: string | null; updated_at: string | null };
 
 // id is only unique per device_key at the schema level (composite PK), not
 // globally, so an account with two devices could in theory produce the same
@@ -39,11 +39,11 @@ type ReportRowWithAiStatus = ReportRow & { ai_score: number | null; ai_tone: str
 // resolves that deterministically instead of returning an arbitrary row.
 export async function findReportRowForUser(client: Client, id: string, userId: string): Promise<ReportRowWithAiStatus | undefined> {
   const result = await client.execute({
-    sql: "SELECT payload_json, device_key, ai_score, ai_tone, ai_status FROM saved_reports WHERE id = ? AND user_id = ? ORDER BY updated_at DESC LIMIT 1",
+    sql: "SELECT payload_json, device_key, ai_score, ai_tone, ai_status, updated_at FROM saved_reports WHERE id = ? AND user_id = ? ORDER BY updated_at DESC LIMIT 1",
     args: [id, userId],
   });
   const row = result.rows[0] as unknown as
-    | { payload_json: string; device_key: string; ai_score: number | bigint | null; ai_tone: string | null; ai_status: string | null }
+    | { payload_json: string; device_key: string; ai_score: number | bigint | null; ai_tone: string | null; ai_status: string | null; updated_at: string | null }
     | undefined;
   if (!row) return undefined;
   return {
@@ -52,6 +52,7 @@ export async function findReportRowForUser(client: Client, id: string, userId: s
     ai_score: row.ai_score === null ? null : Number(row.ai_score),
     ai_tone: row.ai_tone,
     ai_status: row.ai_status,
+    updated_at: row.updated_at == null ? null : String(row.updated_at),
   };
 }
 
@@ -190,7 +191,7 @@ export async function findRoomOccupant(
   const result = await client.execute({
     // Report history retention (lib/report-history.ts): the room's current report and its 24 h cycle come from room_time —
     // the server's saved_at with retention on, report_created_at (legacy) otherwise. createdAt stays display only.
-    sql: `SELECT id, submission_id, title, report_created_at, ${roomTimeSql()} AS room_time, word_count, archive_score, score_band, ai_score, ai_tone, ai_status, device_key,
+    sql: `SELECT id, submission_id, title, report_created_at, ${roomTimeSql()} AS room_time, word_count, archive_score, score_band, ai_score, ai_tone, ai_status, updated_at, device_key,
                  json_extract(payload_json, '$.unifiedSimilarity.unifiedScore') AS unified_score,
                  json_extract(payload_json, '$.unifiedSimilarity') IS NOT NULL AS has_unified,
                  json_extract(payload_json, '$.corpusSourceMatchingEnabledAtComputation') AS corpus_flag_at_computation,
@@ -210,7 +211,7 @@ export async function findRoomOccupant(
   const occupant = result.rows[0] as unknown as
     | {
       id: string | number; submission_id: string; title: string; report_created_at: string; room_time: string; word_count: number; archive_score: number;
-      score_band: string; ai_score: number | null; ai_tone: string | null; ai_status: string | null; device_key: string;
+      score_band: string; ai_score: number | null; ai_tone: string | null; ai_status: string | null; updated_at: string | null; device_key: string;
       unified_score: number | bigint | null; has_unified: number | bigint; corpus_flag_at_computation: number | bigint | null;
       unified_failed: number | bigint | null; has_position_evidence: number | bigint; ai_unavailable_reason: string | null;
       ai_analysis_status: string | null; ai_unsupported_reason: string | null; ai_detected_language: string | null;
@@ -223,7 +224,12 @@ export async function findRoomOccupant(
     return { status: "empty", report: null, cycleEndsAt: null };
   }
 
-  const status = deriveRoomStatus(occupant.ai_score === null ? null : Number(occupant.ai_score), occupant.ai_status === null ? null : String(occupant.ai_status));
+  const status = deriveRoomStatus(
+    occupant.ai_score === null ? null : Number(occupant.ai_score),
+    occupant.ai_status === null ? null : String(occupant.ai_status),
+    occupant.updated_at == null ? null : String(occupant.updated_at),
+    asOf.getTime(),
+  );
   const archiveScore = Number(occupant.archive_score);
   let hasUnifiedSimilarity = Number(occupant.has_unified) === 1;
   let unifiedScore = occupant.unified_score === null ? null : Number(occupant.unified_score);

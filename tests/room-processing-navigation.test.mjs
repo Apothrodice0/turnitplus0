@@ -324,7 +324,8 @@ test('SIM-04/LIFECYCLE-05/report-lifecycle-correctness ROOM CARD (structural): t
 test("DIRECT REPORT URL: the report page derives its own real AI-lifecycle status and similarity status server-side, and the detail shell gates its entire render on both being terminal (via lib/report-detail-poll.ts's computeDetailRevealState) — never presenting the page as fully done while either is still partial", async () => {
   const page = await readFile(new URL("../app/reports/[id]/page.tsx", import.meta.url), "utf8");
   assert.match(page, /import \{ deriveRoomStatus \} from "@\/lib\/report-rooms";/);
-  assert.match(page, /const aiStatus = deriveRoomStatus\(row\.ai_score, row\.ai_status\);/);
+  // updated_at: an abandoned 'processing' row reads as failed here exactly as in the room (lib/report-rooms.ts).
+  assert.match(page, /const aiStatus = deriveRoomStatus\(row\.ai_score, row\.ai_status, row\.updated_at\);/);
   // The AI-lifecycle status still drives the reveal gate; the flat
   // ai_score/ai_tone columns are now ALSO passed through, verbatim, as the
   // authoritative AI headline signal (see lib/ai-display-state.ts) so the

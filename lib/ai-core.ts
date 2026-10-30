@@ -74,6 +74,28 @@ export const AI_MODEL_ID = "onnx-community/modernbert-ai-detection-raid-mage-ONN
  * is a real break, not a correctness improvement.
  */
 export const AI_MODEL_DTYPE = "fp16" as const;
+/**
+ * The WebGPU engine loads the fp32 weights (onnx/model.onnx, ~571MB), not AI_MODEL_DTYPE. Measured 2026-10-30 in Chrome 145
+ * (WebGPU, NVIDIA Ampere, shader-f16): the fp16 graph returns the same near-zero logit pair for EVERY window on WebGPU, with
+ * graph optimization disabled or enabled — document median log-odds 0.0000378, i.e. a 0 display score whatever the text
+ * (every WebGPU report stored on Preview carries exactly that median). The fp32 graph on WebGPU reproduces the onnxruntime-node
+ * fp32 reference to ~1e-5 log-odds per document, the dtype ai-calibration.json was measured with (its modelContract.dtype).
+ * The WASM/CPU engine keeps fp16, validated against fp32 above (tools/validate-ai-fp16.ts).
+ */
+export const AI_MODEL_WEBGPU_DTYPE = "fp32" as const;
+/**
+ * Engine self-check: one fixed, non-manuscript sentence scored right after a GPU session loads. A session whose answer is not
+ * within AI_ENGINE_PROBE_TOLERANCE of the onnxruntime-node fp32 CPU reference is discarded and the CPU engine is used instead,
+ * so a GPU/driver combination that silently returns wrong numbers can never produce a score.
+ */
+export const AI_ENGINE_PROBE_TEXT =
+  "In conclusion, this study highlights the importance of a comprehensive approach to sustainable development, emphasizing the crucial role of collaboration among stakeholders in fostering innovation and ensuring long-term success.";
+// onnxruntime-node CPU, fp32 3.3469 / fp16 3.3466; a constant-logit session answers ~0.
+export const AI_ENGINE_PROBE_LOG_ODDS = 3.3469;
+export const AI_ENGINE_PROBE_TOLERANCE = 0.25;
+export function isAiEngineProbeConsistent(logOdds: number) {
+  return Number.isFinite(logOdds) && Math.abs(logOdds - AI_ENGINE_PROBE_LOG_ODDS) <= AI_ENGINE_PROBE_TOLERANCE;
+}
 export const AI_MODEL_MAX_TOKENS = 256;
 export const AI_CONTENT_TOKENS = 240;
 export const AI_TOKEN_STRIDE = 120;

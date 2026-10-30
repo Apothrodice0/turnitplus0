@@ -80,22 +80,22 @@ export async function GET(request: Request) {
       const result = await client.execute({
         // Room time (lib/report-history.ts): the server's saved_at with report history retention on, so a room's
         // current report and its 24 h cycle never depend on a browser-supplied date; report_created_at otherwise.
-        sql: `SELECT room_number, MAX(${roomTimeSql()}) as most_recent, ai_score, ai_status
+        sql: `SELECT room_number, MAX(${roomTimeSql()}) as most_recent, ai_score, ai_status, updated_at
               FROM saved_reports WHERE user_id = ? AND room_number IS NOT NULL
               GROUP BY room_number`,
         args: [sessionUser.id],
       });
 
-      const occupantByRoom = new Map<number, { mostRecent: string; aiScore: number | bigint | null; aiStatus: string | null }>();
-      for (const row of result.rows as unknown as { room_number: number | bigint; most_recent: string; ai_score: number | bigint | null; ai_status: string | null }[]) {
-        occupantByRoom.set(Number(row.room_number), { mostRecent: row.most_recent, aiScore: row.ai_score, aiStatus: row.ai_status });
+      const occupantByRoom = new Map<number, { mostRecent: string; aiScore: number | bigint | null; aiStatus: string | null; updatedAt: string | null }>();
+      for (const row of result.rows as unknown as { room_number: number | bigint; most_recent: string; ai_score: number | bigint | null; ai_status: string | null; updated_at: string | null }[]) {
+        occupantByRoom.set(Number(row.room_number), { mostRecent: row.most_recent, aiScore: row.ai_score, aiStatus: row.ai_status, updatedAt: row.updated_at == null ? null : String(row.updated_at) });
       }
 
       if (!policy.enforced) {
         const rooms: RoomIndexEntry[] = Array.from({ length: roomCount }, (_, room) => {
           const occupant = occupantByRoom.get(room);
           if (occupant && isWithinActiveCycle(occupant.mostRecent)) {
-            const status = deriveRoomStatus(occupant.aiScore === null ? null : Number(occupant.aiScore), occupant.aiStatus);
+            const status = deriveRoomStatus(occupant.aiScore === null ? null : Number(occupant.aiScore), occupant.aiStatus, occupant.updatedAt);
             return { room, status, mostRecentAt: occupant.mostRecent, cycleEndsAt: roomCycleEndsAt(occupant.mostRecent) };
           }
           return { room, status: 'empty', mostRecentAt: null, cycleEndsAt: null };
@@ -112,7 +112,7 @@ export async function GET(request: Request) {
         const historyRooms = [...occupantByRoom.keys()].filter((room) => room < roomCount).sort((a, b) => a - b);
         const rooms: RoomIndexEntry[] = historyRooms.map((room) => {
           const occupant = occupantByRoom.get(room)!;
-          const status = deriveRoomStatus(occupant.aiScore === null ? null : Number(occupant.aiScore), occupant.aiStatus);
+          const status = deriveRoomStatus(occupant.aiScore === null ? null : Number(occupant.aiScore), occupant.aiStatus, occupant.updatedAt);
           const current = isWithinActiveCycle(occupant.mostRecent, now);
           const entry: RoomIndexEntry = { room, status, mostRecentAt: occupant.mostRecent, cycleEndsAt: current ? roomCycleEndsAt(occupant.mostRecent) : null };
           if (!current) entry.historical = true;
@@ -134,7 +134,7 @@ export async function GET(request: Request) {
         const claimedAt = claims.get(room);
         const claimEndsAt = claimedAt === undefined ? null : new Date(claimedAt + ROOM_CYCLE_MS).toISOString();
         if (occupant && (isWithinActiveCycle(occupant.mostRecent, now) || claimEndsAt)) {
-          const status = deriveRoomStatus(occupant.aiScore === null ? null : Number(occupant.aiScore), occupant.aiStatus);
+          const status = deriveRoomStatus(occupant.aiScore === null ? null : Number(occupant.aiScore), occupant.aiStatus, occupant.updatedAt);
           const cycleEndsAt = isWithinActiveCycle(occupant.mostRecent, now) ? roomCycleEndsAt(occupant.mostRecent) : null;
           const endsAt = [cycleEndsAt, claimEndsAt].filter((v): v is string => v !== null).sort().pop() as string;
           return { room, status, mostRecentAt: occupant.mostRecent, cycleEndsAt: endsAt };
@@ -143,7 +143,7 @@ export async function GET(request: Request) {
           // Beyond the purchased rooms: listed only for an earlier report (readable, never a new check); otherwise hidden,
           // so the list shows exactly the plan's room allowance.
           if (!occupant) return null;
-          const status = deriveRoomStatus(occupant.aiScore === null ? null : Number(occupant.aiScore), occupant.aiStatus);
+          const status = deriveRoomStatus(occupant.aiScore === null ? null : Number(occupant.aiScore), occupant.aiStatus, occupant.updatedAt);
           return { room, status, mostRecentAt: occupant.mostRecent, cycleEndsAt: null, outsidePlan: true, historical: true } satisfies RoomIndexEntry;
         }
         const entry: RoomIndexEntry = { room, status: 'empty', mostRecentAt: null, cycleEndsAt: null };

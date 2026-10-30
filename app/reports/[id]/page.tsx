@@ -163,7 +163,7 @@ const loadOwnedReport = cache(async (id: string): Promise<OwnedReportResult> => 
       // from every subsequent client re-render. See SimilarityReport's own
       // comment on this field.
       payload.viewerIsAdmin = sessionUser.role === "admin";
-      const aiStatus = deriveRoomStatus(row.ai_score, row.ai_status);
+      const aiStatus = deriveRoomStatus(row.ai_score, row.ai_status, row.updated_at);
       const display = await resolvePersistedSimilarityDisplay(client, {
         reportDeviceKey: row.device_key,
         reportId: id,
