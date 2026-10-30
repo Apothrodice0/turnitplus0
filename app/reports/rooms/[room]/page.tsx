@@ -8,8 +8,7 @@ import { SESSION_COOKIE_NAME, getSessionUserByToken } from "@/lib/auth-session";
 import { checkReadRate } from "@/lib/rate-limit";
 import { clientIpFromHeaders } from "@/lib/client-ip";
 import { getReportsDbClient } from "@/lib/reports-db";
-import { findRoomOccupant, listEarlierRoomReports, type RoomOccupantResult } from "@/lib/reports-repo";
-import { reportHistoryRetentionEnabled, type EarlierRoomReport } from "@/lib/report-history";
+import { findRoomOccupant, type RoomOccupantResult } from "@/lib/reports-repo";
 import { ROOM_CYCLE_MS } from "@/lib/report-rooms";
 import { newCheckRefusal, readActiveRoomClaims, reportAccessRefusal, resolveRoomPolicy } from "@/lib/account-entitlements";
 import { scheduleExpiryCleanupAfterRefusal } from "@/lib/subscription-expiry-cleanup";
@@ -41,7 +40,6 @@ type RoomPageResult =
       uploadLock: UploadLock | null;
       subscriptionEnforced: boolean;
       historicalNote: string | null;
-      earlierReports: EarlierRoomReport[];
       system2Enabled: boolean;
     }
   | { status: "subscription-required"; notice: SubscriptionNotice }
@@ -126,8 +124,6 @@ const loadRoom = cache(async (roomParam: string): Promise<RoomPageResult> => {
         if (claimedAt !== undefined) uploadLock = roomCooldownLock(room + 1, claimedAt + ROOM_CYCLE_MS);
       }
     }
-    // Report history retention (lib/report-history.ts): the room's earlier reports, readable from the room. Off: none.
-    const earlierReports = reportHistoryRetentionEnabled() ? await listEarlierRoomReports(client, sessionUser.id, room, shown.report?.id ?? null) : [];
     return {
       status: "found",
       room,
@@ -136,7 +132,6 @@ const loadRoom = cache(async (roomParam: string): Promise<RoomPageResult> => {
       uploadLock,
       subscriptionEnforced: policy.enforced,
       historicalNote,
-      earlierReports,
       // English System 2 for a check started in this room: resolved server-side (lib/system2-access.ts — administrators,
       // the owner allowlist, or a verified customer with an active subscription and this room in the plan).
       system2Enabled: (await resolveSystem2Access(client, sessionUser, { room, policy })).allowed,
@@ -219,5 +214,5 @@ export default async function RoomPage({ params }: { params: Promise<{ room: str
   // room warrants a fresh instance.
   // Manual subscriptions: an EMPTY room that cannot take a new check right now shows its usual upload area LOCKED
   // (dimmed, no file input, no drop target, no generate action) with the reason — never with the feature off.
-  return <RoomPageShell key={result.room} room={result.room} accountEmail={result.accountEmail} initialOccupant={result.occupant} uploadLock={result.uploadLock} subscriptionEnforced={result.subscriptionEnforced} historicalNote={result.historicalNote} earlierReports={result.earlierReports} system2Enabled={result.system2Enabled} />;
+  return <RoomPageShell key={result.room} room={result.room} accountEmail={result.accountEmail} initialOccupant={result.occupant} uploadLock={result.uploadLock} subscriptionEnforced={result.subscriptionEnforced} historicalNote={result.historicalNote} system2Enabled={result.system2Enabled} />;
 }

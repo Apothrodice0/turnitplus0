@@ -3796,31 +3796,6 @@ main.report-main {
   color: var(--muted);
 }
 
-/* REPORT HISTORY RETENTION — a room's earlier reports (app/reports/rooms/[room]/room-page-shell.tsx). */
-.room-history { margin-top: 22px; }
-.room-history h2 { margin: 0 0 10px; color: #37515b; font-size: 14px; font-weight: 700; }
-.room-history-list { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; list-style: none; }
-.room-history-row {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 10px;
-  padding: 11px 14px;
-  border: 1px solid #dbe6ea;
-  border-radius: 12px;
-  background: #fbfdfe;
-  color: var(--ink);
-  text-decoration: none;
-}
-.room-history-row:hover { border-color: var(--blue); background: #f5fbfd; }
-.room-history-row svg { width: 16px; height: 16px; color: #5f7680; }
-.room-history-title { overflow: hidden; font-size: 13.5px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
-.room-history-meta { color: var(--muted); font-size: 12px; white-space: nowrap; }
-@media (max-width: 560px) {
-  .room-history-row { grid-template-columns: auto minmax(0, 1fr); }
-  .room-history-meta { grid-column: 2; white-space: normal; }
-}
-
 @media (max-width: 640px) {
   .room-report-metrics {
     grid-template-columns: 1fr;
