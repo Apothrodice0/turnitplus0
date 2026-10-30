@@ -31,6 +31,7 @@ import type {
 import type { ReportCompletion } from "@/lib/evidence-interpretation/completion";
 import type { ReportExtractionDiagnostic } from "@/lib/evidence-interpretation/extraction";
 import type { EvidenceInterpretationKind, EvidenceInterpretationTone } from "@/lib/evidence-interpretation/kinds";
+import { system2EstimateField, type StoredSystem2Estimate } from "@/lib/system2-estimate-record";
 
 export type {
   ReportEvidenceInterpretation,
@@ -247,6 +248,8 @@ export type ExperimentalHistoricalMatchDisplay = {
 
 export type SimilarityReport = {
   version: 11;
+  /** Server-written only (app/api/reports/[id]/system2; see lib/system2-estimate-record.ts): the accepted System 2 estimate. */
+  system2Estimate?: StoredSystem2Estimate;
   id: number;
   submissionId: string;
   title: string;
@@ -930,5 +933,6 @@ export function buildReportSummary(report: SimilarityReport): ReportSummary {
     scoreBand: report.scoreBand,
     aiScore: aiSignal.value,
     aiTone: aiSignal.tone,
+    ...system2EstimateField(report.system2Estimate),
   };
 }

@@ -19,7 +19,7 @@ import {
 } from "lucide-react";
 import { similarityScoreBand } from "@/lib/ai-core";
 import { PRIMARY_SIMILARITY_BAND_LABELS, formatSimilarityPercent, type SimilarityReport } from "@/lib/report-types";
-import { UNIFIED_ESTIMATE_NOTE, unifiedPercentText, type UnifiedSimilarity } from "@/lib/system2-unified";
+import { unifiedPercentText, type UnifiedSimilarity } from "@/lib/system2-unified";
 import type { EvidenceInterpretationKind } from "@/lib/evidence-interpretation/kinds";
 import {
   buildReportV2ViewModel,
@@ -879,7 +879,6 @@ function WorkspaceHero({ vm, toolbarStatus, unified }: { vm: ReportV2ViewModel; 
       <p className="rv2ws-hero-sub">
         The percentage of analyzed words that overlap matching evidence.
       </p>
-      {unified?.includesStatisticalEstimate && <p className="unified-estimate-note">{UNIFIED_ESTIMATE_NOTE}</p>}
 
       <div className={`rv2ws-hero-band${verdict ? ` rv2ws-hero-band-${verdict.key}` : ""}`}>
         <div className="rv2ws-hero-band-score">
@@ -1196,7 +1195,6 @@ export function ReportV2Workspace({
               <span>Similarity</span>
               <strong>{percentDisplay}</strong>
               {verdict && <em>{PRIMARY_SIMILARITY_BAND_LABELS[verdict.key]}</em>}
-              {unified?.includesStatisticalEstimate && <p className="unified-estimate-note">{UNIFIED_ESTIMATE_NOTE}</p>}
               <div className="rv2ws-score-metrics">
                 <div><b>{vm.summary.matchedWordCount.toLocaleString()}</b><span>Matched words</span></div>
                 <div><b>{vm.summary.totalWordCount.toLocaleString()}</b><span>Analyzed</span></div>

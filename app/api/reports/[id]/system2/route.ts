@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getSessionUser } from "@/lib/auth-session";
 import { getReportsDbClient } from "@/lib/reports-db";
 import { findReportRowForUser } from "@/lib/reports-repo";
+import { PERSIST_SYSTEM2_ESTIMATE_SQL, acceptedSystem2Estimate, type System2EstimateRecord } from "@/lib/system2-estimate-record";
 import {
   SYSTEM2_CONSENT_HEADER,
   SYSTEM2_CONSENT_VALUE,
@@ -21,7 +22,12 @@ import {
  * format checks (refused locally, nothing transmitted) → the DOCX bytes are sent server-to-server to the private
  * inference backend → only whitelisted result fields are returned.
  *
- * Nothing is persisted, logged or cached: System 1 scores, AI results, the saved report and its history are untouched.
+ * An ACCEPTED estimate (shown, integer 0–20) is then stored with this report, in place, at `$.system2Estimate`
+ * (lib/system2-estimate-record.ts): one json_set on the row's current payload, so a concurrent AI-result save is never
+ * overwritten (and SAVE_REPORT_SQL carries the estimate across any later resave). `persisted` in the response says
+ * whether it was stored; the browser shows the unified percentage only then, so every view agrees with the server copy.
+ * A refusal or failure stores nothing and never replaces an earlier accepted estimate. The document is never stored or
+ * logged; System 1 scores, AI results and the report's history are untouched. `updated_at` is deliberately left as it is.
  */
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -40,12 +46,14 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
   const { id } = await context.params;
   if (typeof id !== "string" || id.length === 0 || id.length > 200) return notFound();
 
+  let owner: { userId: string; deviceKey: string };
   const client = await getReportsDbClient();
   try {
     const user = await getSessionUser(request, client);
     if (!user || !isSystem2ResearchUser(user, config)) return notFound();
     const row = await findReportRowForUser(client, id, user.id);
     if (!row) return notFound();
+    owner = { userId: user.id, deviceKey: row.device_key };
   } finally {
     client.close();
   }
@@ -66,5 +74,23 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
   if (!result) {
     return json({ state: "UNAVAILABLE", estimate_shown: false, research_only: true, final_text: "The System 2 research service is unavailable right now. No estimate." }, 502);
   }
-  return json(result, 200);
+  const accepted = acceptedSystem2Estimate(result as System2EstimateRecord, new Date().toISOString());
+  return json({ ...result, persisted: accepted ? await persistAcceptedEstimate(id, owner, accepted) : false }, 200);
+}
+
+/** Stores the accepted estimate on the owner's own report row, in place. False (System 1 stays the result) on any failure. */
+async function persistAcceptedEstimate(id: string, owner: { userId: string; deviceKey: string }, accepted: object): Promise<boolean> {
+  const client = await getReportsDbClient();
+  try {
+    const res = await client.execute({
+      sql: PERSIST_SYSTEM2_ESTIMATE_SQL,
+      args: [JSON.stringify(accepted), owner.deviceKey, id, owner.userId],
+    });
+    return res.rowsAffected === 1;
+  } catch (err) {
+    console.error("system2 estimate persist failed:", err instanceof Error ? err.name : "unknown");
+    return false;
+  } finally {
+    client.close();
+  }
 }

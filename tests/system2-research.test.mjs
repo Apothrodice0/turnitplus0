@@ -159,9 +159,17 @@ test("route: the owner's own report is estimated server-to-server, with only whi
   assert.equal(calls.length, 1);
   assert.equal(calls[0].auth, `Bearer ${KEY}`); assert.equal(calls[0].ext, ".docx"); assert.equal(calls[0].bypass, "bypass-secret-value"); assert.equal(calls[0].bytes, DOCX_BYTES.length);
   assert.equal(calls[0].oidc, null, "outside Vercel (VERCEL unset) no OIDC token is requested or sent");
+  // the accepted estimate is stored with the owner's own report (lib/system2-estimate-record.ts), and the browser is told so
+  assert.equal(body.persisted, true);
+  const db = createClient({ url: `file:${dbFile}` });
+  const storedOf = async (id) => JSON.parse(String((await db.execute({ sql: "SELECT payload_json FROM saved_reports WHERE id = ?", args: [id] })).rows[0].payload_json)).system2Estimate;
+  assert.equal((await storedOf("s2-owner-report")).conservative_estimate_percent, 8);
+  assert.equal(await storedOf("s2-other-report"), undefined, "no other report is touched");
   backendMode = "fail";
   const failed = await call("s2-owner-report", { cookie: owner.cookie });
   assert.equal(failed.status, 502); assert.equal((await failed.json()).state, "UNAVAILABLE");
+  assert.equal((await storedOf("s2-owner-report")).conservative_estimate_percent, 8, "a failure never replaces an accepted estimate");
+  db.close();
   backendMode = "ok";
 });
 
@@ -201,16 +209,16 @@ test("wiring: one analyze action, one similarity percentage; System 2 only behin
   // customers keep the exact original tile; only the owner's wrapper feeds it the stored System 2 estimate
   assert.equal((roomShell.match(/\{system2Enabled \? <UnifiedSimilarityMetricTile report=\{occupant\.report\} room=\{room\} \/> : <SimilarityMetricTile report=\{occupant\.report\} room=\{room\} \/>\}/g) ?? []).length, 3);
   assert.doesNotMatch(roomShell, /System2MetricTile|System2ResearchPanel|SYSTEM2_ROOM_NOTE|Estimated Turnitin-like|Run System 2 estimate/);
-  assert.match(roomShell, /const unified = unifySimilarity\(score, system2Estimate\);/);
+  assert.match(roomShell, /const unified = unifySimilarity\(score, system2Estimate \?\? storedEstimate\);/);
   assert.match(roomShell, /<strong className="room-metric-value">\{unified\.percent\}%<\/strong>/);
 
   const detailShell = await readFile(new URL("../app/reports/[id]/report-detail-shell.tsx", import.meta.url), "utf8");
   assert.match(detailShell, /system2Enabled = false,/);
-  assert.match(detailShell, /const unified = system2Enabled \? unifySimilarity\(primaryScore, system2Estimate\) : undefined;/, "customers: unified is undefined, every view unchanged");
+  assert.match(detailShell, /const unified = system2Estimate \? unifySimilarity\(primaryScore, system2Estimate\) : undefined;/, "a report without a stored estimate (every customer report): unified is undefined, every view unchanged");
   assert.match(detailShell, /unified=\{unified\}\r?\n\s*\/>/, "the customer workspace shows the one unified percentage");
   assert.equal((detailShell.match(/<OverviewReport report=\{report\} similarityStatus=\{effectiveSimilarityStatus\} \/>/g) ?? []).length, 3, "admin-only legacy diagnostic views keep System 1's verified figure");
   assert.match(detailShell, /<ReportV2PrintOverview report=\{report\} unified=\{unified\} \/>/);
-  assert.match(detailShell, /await downloadReceipt\(report, system2Enabled \? system2Estimate : null\);/);
+  assert.match(detailShell, /await downloadReceipt\(report\);/);
   assert.doesNotMatch(detailShell, /System2EstimateDetail|System2ResearchPanel/);
   await assert.rejects(readFile(new URL("../components/report/system2-research-panel.tsx", import.meta.url), "utf8"), "the manual panel is removed");
 
@@ -241,7 +249,10 @@ test("client: the automatic request sends a Word file once; other files are neve
   globalThis.localStorage = { getItem: (k) => store.get(k) ?? null, setItem: (k, v) => store.set(k, String(v)), removeItem: (k) => store.delete(k) };
   const sent = [];
   try {
-    globalThis.fetch = async (url, init) => { sent.push({ url, headers: init.headers, bytes: init.body.byteLength }); return new Response(JSON.stringify({ state: "CONSERVATIVE_WITHIN_RANGE", estimate_shown: true, conservative_estimate_percent: 8, final_text: "Estimated." }), { status: 200 }); };
+    globalThis.fetch = async (url, init) => { sent.push({ url, headers: init.headers, bytes: init.body.byteLength }); return new Response(JSON.stringify({ state: "CONSERVATIVE_WITHIN_RANGE", estimate_shown: true, conservative_estimate_percent: 8, final_text: "Estimated.", persisted: true }), { status: 200 }); };
+    const announced = [];
+    globalThis.window = { dispatchEvent: (e) => announced.push(e.detail) };
+    globalThis.CustomEvent ??= class { constructor(type, init) { this.type = type; this.detail = init?.detail; } };
     const pdf = await client.requestSystem2Estimate("r-pdf", new File([new Uint8Array(10)], "paper.pdf"));
     assert.equal(pdf.estimate_shown, false); assert.equal(pdf.state, "UNSUPPORTED_FILE_TYPE"); assert.equal(sent.length, 0);
     const big = await client.requestSystem2Estimate("r-big", new File([new Uint8Array(4_000_001)], "big.docx"));
@@ -249,12 +260,17 @@ test("client: the automatic request sends a Word file once; other files are neve
     const ok = await client.requestSystem2Estimate("r-ok", new File([DOCX_BYTES], "paper.docx"));
     assert.equal(ok.conservative_estimate_percent, 8); assert.equal(sent.length, 1);
     assert.equal(sent[0].url, "/api/reports/r-ok/system2"); assert.equal(sent[0].headers["x-s2-consent"], "granted"); assert.equal(sent[0].bytes, DOCX_BYTES.length);
-    assert.deepEqual(client.loadSystem2Estimate("r-ok"), ok, "kept on this device for the report page and receipt");
+    assert.equal(store.size, 0, "nothing is kept in the browser: the server stores the estimate with the report");
+    assert.deepEqual(announced, [{ reportId: "r-ok", result: ok }], "the open page is told only about a stored estimate");
+    globalThis.fetch = async () => new Response(JSON.stringify({ state: "CONSERVATIVE_WITHIN_RANGE", estimate_shown: true, conservative_estimate_percent: 8, final_text: "x", persisted: false }), { status: 200 });
+    await client.requestSystem2Estimate("r-unstored", new File([DOCX_BYTES], "paper.docx"));
+    assert.equal(announced.length, 1, "an estimate the server did not store is never shown (System 1 stays the result)");
     globalThis.fetch = async () => { throw new Error("offline"); };
     const down = await client.requestSystem2Estimate("r-down", new File([DOCX_BYTES], "paper.docx"));
     assert.equal(down.estimate_shown, false); assert.equal(down.state, "UNAVAILABLE");
   } finally {
     globalThis.fetch = savedFetch; if (savedStorage === undefined) delete globalThis.localStorage; else globalThis.localStorage = savedStorage;
+    delete globalThis.window;
   }
 });
 

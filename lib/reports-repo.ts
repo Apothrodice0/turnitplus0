@@ -5,6 +5,7 @@ import { isEvidenceInterpretationCustomerReadable } from "./report-persistence";
 import { AI_UNAVAILABLE_REASON_REPORT_SIZE, AI_UNAVAILABLE_REASON_UNSUPPORTED_LANGUAGE, languageUnsupportedAiAnalysis } from "./ai-unavailable-state";
 import type { ReportSummary } from "./reports-remote";
 import { roomTimeSql, type EarlierRoomReport } from "./report-history";
+import { system2EstimateField } from "./system2-estimate-record";
 
 // device_key added in Phase E8C, additively — every existing caller that
 // only read payload_json is unaffected; lib/report-historical-match.ts is
@@ -200,6 +201,7 @@ export async function findRoomOccupant(
                  json_extract(payload_json, '$.aiAnalysis.unsupportedReason') AS ai_unsupported_reason,
                  json_extract(payload_json, '$.aiAnalysis.detectedLanguage') AS ai_detected_language,
                  json_extract(payload_json, '$.scoringNormalizationVersion') AS scoring_normalization_version,
+                 json_extract(payload_json, '$.system2Estimate') AS system2_estimate,
                  ${INTERPRETATION_TO_VERIFY_SQL} AS interpretation_to_verify
           FROM saved_reports WHERE user_id = ? AND room_number = ?
           ORDER BY room_time DESC, rowid DESC LIMIT 1`,
@@ -213,6 +215,7 @@ export async function findRoomOccupant(
       unified_failed: number | bigint | null; has_position_evidence: number | bigint; ai_unavailable_reason: string | null;
       ai_analysis_status: string | null; ai_unsupported_reason: string | null; ai_detected_language: string | null;
       scoring_normalization_version: number | bigint | null;
+      system2_estimate: string | null;
       interpretation_to_verify: string | null;
     }
     | undefined;
@@ -317,6 +320,9 @@ export async function findRoomOccupant(
     primaryScore,
     isUnified,
     similarityStatus,
+    // System 2 (lib/system2-estimate-record.ts): the report's stored, accepted estimate, so the room shows the same one
+    // unified percentage as the report page and receipt on every device. Absent for every report without one.
+    ...system2EstimateField(occupant.system2_estimate),
     scoreBand: String(occupant.score_band),
     aiScore: occupant.ai_score === null ? null : Number(occupant.ai_score),
     aiTone: occupant.ai_tone === null ? null : String(occupant.ai_tone),

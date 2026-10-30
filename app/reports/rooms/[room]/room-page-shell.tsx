@@ -52,8 +52,8 @@ import { detectLanguage } from "@/lib/similarity-core";
 import { AI_MODEL_VERSION, AI_PASSAGE_LOG_ODDS_THRESHOLD, AI_PASSAGE_THRESHOLD } from "@/lib/ai-core";
 import { describeAiAnalysisError, type AiPrepStage } from "@/lib/ai-model-prep";
 import { DocumentUploadPanel, type UploadLock } from "@/components/reports/document-upload-panel";
-import { loadSystem2Estimate, requestSystem2Estimate, useSystem2Estimate } from "@/components/report/system2-estimate";
-import { UNIFIED_ESTIMATE_NOTE, unifySimilarity, type System2EstimateRecord } from "@/lib/system2-unified";
+import { requestSystem2Estimate, useSystem2Estimate } from "@/components/report/system2-estimate";
+import { unifySimilarity, type System2EstimateRecord } from "@/lib/system2-unified";
 
 /**
  * The dedicated room page's client half: owns this ONE room's state, the
@@ -533,7 +533,7 @@ export function SimilarityMetricTile({ report: incoming, room, system2Estimate =
   else if (lastConfirmedRef.current?.id !== incoming.id) lastConfirmedRef.current = null;
   else {
     const kept = lastConfirmedRef.current;
-    report = { ...incoming, archiveScore: kept.archiveScore, scoreBand: kept.scoreBand, primaryScore: kept.primaryScore, isUnified: kept.isUnified, similarityStatus: kept.similarityStatus };
+    report = { ...incoming, archiveScore: kept.archiveScore, scoreBand: kept.scoreBand, primaryScore: kept.primaryScore, isUnified: kept.isUnified, similarityStatus: kept.similarityStatus, system2EstimatePercent: incoming.system2EstimatePercent ?? kept.system2EstimatePercent };
   }
   const unavailable = (
     <div className="room-metric room-metric-unavailable">
@@ -572,15 +572,20 @@ export function SimilarityMetricTile({ report: incoming, room, system2Estimate =
   // with similarityStatus "failed", handled above) — and this never renders a number that
   // is not there, whatever status arrives alongside a null.
   if (score === null) return unavailable;
-  // ONE similarity percentage: System 1's verified result, or max(System 1, System 2) when the owner-only wrapper below
-  // supplies an authorized System 2 estimate (lib/system2-unified.ts). Without one (every customer) it is System 1's.
-  const unified = unifySimilarity(score, system2Estimate);
+  // ONE similarity percentage: System 1's verified result, or max(System 1, System 2) when the report carries a stored,
+  // accepted System 2 estimate (lib/system2-estimate-record.ts) — the same figure the report page and receipt show on any
+  // device. The owner-only wrapper below may hand it over the moment the server stores it. Without one (every customer
+  // report, any System 2 failure) it is System 1's. One clean percentage: no extra label.
+  const storedEstimate: System2EstimateRecord | null = report.system2EstimatePercent === undefined
+    ? null
+    : { state: "STORED", estimate_shown: true, final_text: "", conservative_estimate_percent: report.system2EstimatePercent };
+  const unified = unifySimilarity(score, system2Estimate ?? storedEstimate);
   const band = similarityScoreBand(unified.percent);
   return (
-    <Link href={`/reports/${report.id}?room=${room}`} className={`room-metric room-metric-${band?.key ?? "low"}`} title={unified.includesStatisticalEstimate ? UNIFIED_ESTIMATE_NOTE : undefined}>
+    <Link href={`/reports/${report.id}?room=${room}`} className={`room-metric room-metric-${band?.key ?? "low"}`}>
       <span className="room-metric-label">Similarity</span>
       <strong className="room-metric-value">{unified.percent}%</strong>
-      <span className="room-metric-sub">{band?.label ?? "Result"}{unified.includesStatisticalEstimate ? " · incl. estimate" : ""}</span>
+      <span className="room-metric-sub">{band?.label ?? "Result"}</span>
     </Link>
   );
 }
@@ -601,7 +606,7 @@ type Props = {
   system2Enabled?: boolean;
 };
 
-/** Owner-only: the same Similarity tile, fed this report's stored System 2 estimate (provisional unified score). */
+/** Owner-only: the same Similarity tile, handed this report's System 2 estimate the moment the server stores it (before the next room read). */
 function UnifiedSimilarityMetricTile({ report, room }: { report: ReportSummary; room: number }) {
   const system2Estimate = useSystem2Estimate(report.id, true);
   return <SimilarityMetricTile report={report} room={room} system2Estimate={system2Estimate} />;
@@ -711,7 +716,7 @@ export function RoomPageShell({ room, accountEmail, initialOccupant, uploadLock 
       const remote = await fetchRemoteReport<SimilarityReport>(reportId);
       const full = remote ?? (localOwner ? await getStoredReportById<SimilarityReport>(reportId, localOwner).catch(() => null) : null);
       if (full) {
-        await downloadReceipt(full, system2Enabled ? loadSystem2Estimate(reportId) : null);
+        await downloadReceipt(full);
       } else {
         notify("Couldn't find this report to generate a receipt. Please try again.");
       }

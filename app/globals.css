@@ -9670,4 +9670,3 @@ button.admin-archive-feed-row:focus-visible { outline: 2px solid var(--blue); ou
 
 /* Owner-only System 2 (components/report/system2-estimate.tsx, lib/system2-unified.ts): one-time authorization in the
    room, the privacy line's change link, and the concise note shown when an estimate raised the one similarity result. */
-.unified-estimate-note { margin: 4px 0 0; font-size: 12px; font-style: italic; color: var(--muted); }

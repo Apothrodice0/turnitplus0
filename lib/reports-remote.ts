@@ -88,6 +88,8 @@ export type ReportSummary = {
    * "Analyzing…" for that case regardless.
    */
   similarityStatus?: "resolved" | "stale" | "pending" | "failed";
+  /** The report's stored, accepted System 2 estimate (lib/system2-estimate-record.ts), for the one unified percentage. Absent without one. */
+  system2EstimatePercent?: number;
 };
 
 // Every function here is fail-soft by design: a network or database problem

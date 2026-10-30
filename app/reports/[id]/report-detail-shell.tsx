@@ -31,7 +31,7 @@ import { AiReport } from "@/components/report/ai-report";
 import { CategorySummary, OverviewReport, SourcesReport, SubmissionReport, dedupeExternalAcademicEvidence } from "@/components/report/similarity-report-papers";
 import { ReportV2View, ReportV2Workspace, ReportV2PrintOverview, ReportV2PrintManuscriptPages, ReportV2PrintSourceAppendix } from "@/components/report/report-v2/report-v2-view";
 import { ReportNotFoundPanel } from "@/components/report/report-not-found-panel";
-import { useSystem2Estimate } from "@/components/report/system2-estimate";
+import { storedSystem2Estimate } from "@/lib/system2-estimate-record";
 import { unifySimilarity } from "@/lib/system2-unified";
 
 type LoadStatus = "loading" | "found" | "not-found";
@@ -149,8 +149,6 @@ export function ReportDetailShell({
   const [showLegacyForAdmin, setShowLegacyForAdmin] = useState(false);
   const [isDownloadingReceipt, setIsDownloadingReceipt] = useState(false);
   const [receiptError, setReceiptError] = useState<string | null>(null);
-  // Owner-only provisional unified score (lib/system2-unified.ts): this report's stored System 2 estimate, if any.
-  const system2Estimate = useSystem2Estimate(id, system2Enabled);
   // Release-hardening audit finding LIFECYCLE-06: true once the bounded
   // poll budget below is exhausted without either pipeline reaching a real
   // terminal state. This is purely a "stop asking automatically, offer a
@@ -334,7 +332,7 @@ export function ReportDetailShell({
     setIsDownloadingReceipt(true);
     setReceiptError(null);
     try {
-      await downloadReceipt(report, system2Enabled ? system2Estimate : null);
+      await downloadReceipt(report);
     } catch {
       setReceiptError("Couldn't generate the receipt. Please try again.");
     } finally {
@@ -429,9 +427,12 @@ export function ReportDetailShell({
 
   const primaryScore = primarySimilarityScore(report);
   // ONE similarity percentage in the report workspace, its print overview and the receipt: System 1's verified result,
-  // or — for the authorized owner only — max(System 1, System 2's conservative estimate). Undefined for everyone else,
-  // so every view is unchanged for them. The admin-only legacy diagnostic views keep System 1's verified figure.
-  const unified = system2Enabled ? unifySimilarity(primaryScore, system2Estimate) : undefined;
+  // or max(System 1, System 2's conservative estimate) when the report carries a stored, accepted estimate (only ever
+  // written for the allowlisted owner; lib/system2-estimate-record.ts) — the same figure the room and the receipt show,
+  // on any device. Undefined for every other report, so every view is unchanged. The admin-only legacy diagnostic views
+  // keep System 1's verified figure.
+  const system2Estimate = storedSystem2Estimate(report);
+  const unified = system2Estimate ? unifySimilarity(primaryScore, system2Estimate) : undefined;
   const isUnified = hasUnifiedSimilarity(report);
   // Report-source presentation correction, extended by Task A's final
   // report simplification and Task A's authorization correction: this

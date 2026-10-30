@@ -41,8 +41,8 @@ test("display text: System 1's <1% rule when System 1 stands; plain unified % wh
   assert.equal(U.unifiedPercentText(U.unifySimilarity(0, null), 12), "<1%");
   assert.equal(U.unifiedPercentText(U.unifySimilarity(0, shown(6)), 12), "6%");
   assert.equal(U.unifiedPercentText(U.unifySimilarity(9, shown(6)), 120), "9%");
-  assert.match(U.UNIFIED_ESTIMATE_NOTE, /statistical estimation/);
-  assert.doesNotMatch(U.UNIFIED_ESTIMATE_NOTE, /\d/, "the indication never shows a second percentage");
+  // owner decision 2026-10-30: one clean percentage, no extra label or note anywhere
+  assert.equal("UNIFIED_ESTIMATE_NOTE" in U, false);
 });
 
 test("synthetic fixture: the accepted local-v2 expectation (length_301.docx = 8%) combines by the max rule", () => {

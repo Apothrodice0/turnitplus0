@@ -16,7 +16,8 @@ import {
 } from "@/lib/report-types";
 import { withEvidenceInterpretation } from "@/lib/report-evidence-interpretation";
 import { buildReportV2ViewModel } from "@/lib/report-v2-view";
-import { UNIFIED_ESTIMATE_NOTE, unifySimilarity, type System2EstimateRecord } from "@/lib/system2-unified";
+import { storedSystem2Estimate } from "@/lib/system2-estimate-record";
+import { unifySimilarity } from "@/lib/system2-unified";
 import {
   extractionDiagnosticFromCounts,
   plainTextExtractionDiagnostic,
@@ -526,12 +527,12 @@ export async function extractReferenceInputs(
   return inputs;
 }
 
-export async function downloadReceipt(report: SimilarityReport, system2Estimate: System2EstimateRecord | null = null) {
+export async function downloadReceipt(report: SimilarityReport) {
   const primaryScore = primarySimilarityScore(report);
-  // Owner-only provisional unified score (lib/system2-unified.ts): the receipt shows the SAME one percentage as the
-  // report — System 1's, or max(System 1, System 2) when an authorized System 2 estimate raised it (then marked).
-  // Without an estimate (every customer) combined.percent === primaryScore and nothing changes.
-  const combined = unifySimilarity(primaryScore, system2Estimate);
+  // The receipt shows the SAME one percentage as the room and the report: System 1's, or max(System 1, System 2) when
+  // the report carries a stored, accepted System 2 estimate (lib/system2-estimate-record.ts). Without one (every customer
+  // report) combined.percent === primaryScore and nothing changes. One clean percentage: no extra note.
+  const combined = unifySimilarity(primaryScore, storedSystem2Estimate(report));
   const verdict = similarityScoreBand(combined.percent);
   const unified = ((hasUnifiedSimilarity(report) && report.unifiedSimilarity) || combined.includesStatisticalEstimate) && verdict
     ? {
@@ -555,8 +556,7 @@ export async function downloadReceipt(report: SimilarityReport, system2Estimate:
   // concept exists for it) rather than guessed.
   const v2 = buildReportV2ViewModel(report);
   const completionStatus = v2 ? (v2.summary.completion.state === "COMPLETED" ? "Completed" : "Needs attention") : undefined;
-  const statisticalEstimateNote = combined.includesStatisticalEstimate ? UNIFIED_ESTIMATE_NOTE : undefined;
-  const blob = await createReceiptPdf({ ...report, unified, matchedWordCount: primaryMatchedWordCount(report), completionStatus, statisticalEstimateNote });
+  const blob = await createReceiptPdf({ ...report, unified, matchedWordCount: primaryMatchedWordCount(report), completionStatus });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   const baseName = report.title.replace(/\.[^.]+$/, "").replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "");

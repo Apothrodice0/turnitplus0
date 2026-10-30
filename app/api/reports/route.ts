@@ -60,6 +60,7 @@ import type { UnifiedSimilarityResult } from '../../../lib/unified-similarity';
 import type { ExternalAcademicEvidence } from '../../../lib/academic-search/types';
 import { requestedScoringNormalizationVersion, scoringNormalizationEvidence, type ScoringNormalizationVersion } from '../../../lib/similarity-core';
 import { runWithScoringNormalization } from '../../../lib/scoring-normalization-scope';
+import { SYSTEM2_ESTIMATE_PAYLOAD_KEY, withoutClientSystem2Estimate } from '../../../lib/system2-estimate-record';
 
 // Reports carry derived data (AI passages, matched phrases, extracted text)
 // on top of the ingest pipeline's raw text, so this cap is larger than
@@ -165,6 +166,21 @@ function isNonEmptyString(value: unknown): value is string {
 // complete AI result. Only an explicit 'ready' replaces a ready AI half (complete -> complete), and nothing but a ready
 // stored AI half is ever kept. (SQL: `excluded.ai_status IN (...)` alone is NULL, not true, for a NULL ai_status.)
 const KEEP_STORED_READY_AI_SQL = `(saved_reports.ai_status = 'ready' OR ${derivedAiReadySql('saved_reports')}) AND (excluded.ai_status IS NULL OR excluded.ai_status IN ('failed', 'processing'))`;
+const MERGED_PAYLOAD_SQL = `CASE
+          WHEN ${KEEP_STORED_READY_AI_SQL} THEN saved_reports.payload_json
+          WHEN COALESCE(json_extract(saved_reports.payload_json, '$.unifiedSimilarityGeneration'), -1) > COALESCE(json_extract(excluded.payload_json, '$.unifiedSimilarityGeneration'), -1)
+            THEN CASE
+              WHEN json_extract(excluded.payload_json, '$.aiAnalysis') IS NOT NULL
+                THEN json_set(saved_reports.payload_json, '$.aiAnalysis', json_extract(excluded.payload_json, '$.aiAnalysis'), '$.aiScore', json_extract(excluded.payload_json, '$.aiScore'))
+              ELSE saved_reports.payload_json
+            END
+          ELSE excluded.payload_json
+        END`;
+// System 2 (lib/system2-estimate-record.ts): the stored estimate is written only by app/api/reports/[id]/system2, in
+// place, and a client payload never carries one (POST strips it). Whatever the merge above keeps, the row's stored
+// estimate is carried into the result, so a resave (the AI result landing, a retry, a replay) never loses it — and an
+// estimate stored a moment earlier survives a resave that started before it existed.
+const SYSTEM2_ESTIMATE_JSON_PATH = `'$.${SYSTEM2_ESTIMATE_PAYLOAD_KEY}'`;
 export const SAVE_REPORT_SQL = `INSERT INTO saved_reports (id, device_key, submission_id, title, report_created_at, word_count, archive_score, score_band, ai_score, ai_tone, ai_status, payload_json, user_id, room_number, updated_at)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
       ON CONFLICT(device_key, id) DO UPDATE SET
@@ -178,14 +194,9 @@ export const SAVE_REPORT_SQL = `INSERT INTO saved_reports (id, device_key, submi
         ai_tone = CASE WHEN ${KEEP_STORED_READY_AI_SQL} THEN saved_reports.ai_tone ELSE excluded.ai_tone END,
         ai_status = CASE WHEN ${KEEP_STORED_READY_AI_SQL} THEN saved_reports.ai_status ELSE excluded.ai_status END,
         payload_json = CASE
-          WHEN ${KEEP_STORED_READY_AI_SQL} THEN saved_reports.payload_json
-          WHEN COALESCE(json_extract(saved_reports.payload_json, '$.unifiedSimilarityGeneration'), -1) > COALESCE(json_extract(excluded.payload_json, '$.unifiedSimilarityGeneration'), -1)
-            THEN CASE
-              WHEN json_extract(excluded.payload_json, '$.aiAnalysis') IS NOT NULL
-                THEN json_set(saved_reports.payload_json, '$.aiAnalysis', json_extract(excluded.payload_json, '$.aiAnalysis'), '$.aiScore', json_extract(excluded.payload_json, '$.aiScore'))
-              ELSE saved_reports.payload_json
-            END
-          ELSE excluded.payload_json
+          WHEN json_extract(saved_reports.payload_json, ${SYSTEM2_ESTIMATE_JSON_PATH}) IS NOT NULL
+            THEN json_set(${MERGED_PAYLOAD_SQL}, ${SYSTEM2_ESTIMATE_JSON_PATH}, json_extract(saved_reports.payload_json, ${SYSTEM2_ESTIMATE_JSON_PATH}))
+          ELSE ${MERGED_PAYLOAD_SQL}
         END,
         user_id = COALESCE(excluded.user_id, saved_reports.user_id),
         updated_at = CURRENT_TIMESTAMP`;
@@ -480,6 +491,9 @@ export async function POST(request: Request) {
     }
 
     const { deviceKey, id, submissionId, title, createdAt, wordCount, archiveScore, scoreBand, aiScore, aiTone, aiStatus, payload, academicSearchDiagnosticsId, room, devicePassport, extractionCompleteness, userSuppliedReferences, scoringNormalization } = body as Record<string, unknown>;
+    // System 2 (lib/system2-estimate-record.ts): the server is the only writer of a report's stored estimate; a client copy
+    // is dropped here, before anything reads the payload, and SAVE_REPORT_SQL carries the stored one across this save.
+    withoutClientSystem2Estimate(payload);
 
     // device_key is part of saved_reports' composite primary key, so it is
     // always required regardless of authentication state — unlike the list/
