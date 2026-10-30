@@ -382,3 +382,4 @@ globalThis.fetch = realFetch;
 db.close();
 for (const suffix of ['', '-wal', '-shm']) try { fs.unlinkSync(`${dbFile}${suffix}`); } catch { /* still open */ }
 console.log(`\n${results.length} highlight prediction scenarios passed`);
+process.exit(0); // the native database driver can crash during normal teardown, after everything above has passed

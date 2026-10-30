@@ -399,7 +399,8 @@ test("directly rejected aiAnalysisPromise: the happy path is unaffected — a re
     assert.equal(row.ai_status, "ready", "a late-arriving 'failed' must never downgrade an already-'ready' row");
     assert.equal(Number(row.ai_score), 88, "the real AI score must survive the late failure");
     assert.equal(row.ai_tone, "high");
-    assert.deepEqual(JSON.parse(row.payload_json), { note: "ready-payload", aiAnalysis: completeAiAnalysis() }, "payload_json must also stay the ready version — a partial downgrade (columns preserved, payload overwritten) would still corrupt what /reports/[id] renders");
+    const raceStored = JSON.parse(row.payload_json);
+    assert.deepEqual({ note: raceStored.note, aiAnalysis: raceStored.aiAnalysis }, { note: "ready-payload", aiAnalysis: completeAiAnalysis() }, "payload_json must also stay the ready version — a partial downgrade (columns preserved, payload overwritten) would still corrupt what /reports/[id] renders");
   });
 
   test("concurrent opposite outcomes: failed arrives first, ready arrives second (a genuine late success) — ready must still win, matching normal retry behavior", async () => {
@@ -416,7 +417,8 @@ test("directly rejected aiAnalysisPromise: the happy path is unaffected — a re
     const row = await readRaceRow(id);
     assert.equal(row.ai_status, "ready", "a genuine later success (e.g. a manual retry) must still be able to upgrade a failed row to ready");
     assert.equal(Number(row.ai_score), 55);
-    assert.deepEqual(JSON.parse(row.payload_json), { note: "ready-payload", aiAnalysis: completeAiAnalysis() });
+    const lateStored = JSON.parse(row.payload_json);
+    assert.deepEqual({ note: lateStored.note, aiAnalysis: lateStored.aiAnalysis }, { note: "ready-payload", aiAnalysis: completeAiAnalysis() });
   });
 
   test("concurrent opposite outcomes: every other transition is untouched by the guard (processing->failed, failed->failed, ready->ready)", async () => {

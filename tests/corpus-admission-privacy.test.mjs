@@ -9,7 +9,8 @@ function stripComments(source) {
   return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
 }
 function importLines(source) {
-  return source.split(/\r?\n/).filter((l) => /^\s*(?:import|export)\b.*\bfrom\b/.test(l)).join("\n");
+  // Whole statements, so a multi-line `import { … } from "…"` counts like a one-line import.
+  return (source.match(/^\s*(?:import|export)\b[^;]*?\bfrom\b[^;\n]*/gm) ?? []).join("\n");
 }
 
 const GATE_SOURCE = fs.readFileSync(path.join(repoRoot, "lib/corpus-admission-gate.ts"), "utf8");

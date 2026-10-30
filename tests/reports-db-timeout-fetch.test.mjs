@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import test from "node:test";
+import { mkdirSync } from "node:fs";
+import test, { after } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 
 import { createTimeoutFetch, getReportsDbClient } from "../lib/reports-db.ts";
@@ -21,6 +22,12 @@ import { createTimeoutFetch, getReportsDbClient } from "../lib/reports-db.ts";
 // ═══════════════════════════════════════════════════════════════════════
 // createTimeoutFetch — pure unit tests
 // ═══════════════════════════════════════════════════════════════════════
+
+// AbortSignal.timeout() timers are unref'd: without this, the loop can empty while a test is awaiting one.
+const keepEventLoopAlive = setInterval(() => {}, 1000);
+// The default local database lives here, and a fresh checkout has no such folder.
+mkdirSync("data", { recursive: true });
+after(() => clearInterval(keepEventLoopAlive));
 
 test("timeout-fetch A: successful fetch resolves normally, signal attached and not pre-aborted", async () => {
   const seenSignals = [];

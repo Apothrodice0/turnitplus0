@@ -1,7 +1,27 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import fs from "node:fs";
+import path from "node:path";
+import test, { after, before } from "node:test";
+import { createClient } from "@libsql/client";
 
 import * as reportsRoute from "../app/api/reports/route.ts";
+import { applyMigrationsLibsql } from "../lib/ingest.js";
+
+// The 413 tests reach the size guards through checkRate(), so they need a working database. The 500 tests below replace
+// this URL with a broken one and put it back.
+const dbFile = path.resolve("test_report_save_500_response.db");
+before(async () => {
+  for (const suffix of ["", "-wal", "-shm"]) fs.rmSync(`${dbFile}${suffix}`, { force: true });
+  process.env.TURSO_DATABASE_URL = `file:${dbFile}`;
+  delete process.env.TURSO_AUTH_TOKEN;
+  const db = createClient({ url: `file:${dbFile}` });
+  await applyMigrationsLibsql(db, path.resolve("drizzle"));
+  db.close();
+});
+after(() => {
+  // the route's own connections may still hold the file on Windows; *.db is git-ignored and the next run starts clean
+  for (const suffix of ["", "-wal", "-shm"]) try { fs.rmSync(`${dbFile}${suffix}`, { force: true }); } catch { /* still open */ }
+});
 
 /**
  * POST /api/reports outer-catch security/privacy hardening regression.

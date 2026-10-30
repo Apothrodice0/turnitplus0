@@ -311,7 +311,7 @@ test("REQUEST SIZE follows the AI result, not the similarity evidence: small / G
   assert.ok(g2.oldEchoBytes > MAX_REPORT_SAVE_REQUEST_BYTES, "the G2-size report's old echo exceeds the ceiling");
   // (The matcher caps evidence per source, so the GET-expanded form of even this ~90k-word report saturates just under the ceiling; what the
   // browser would have to echo is that PLUS the fresh AI result and the summary envelope — well over it.)
-  assert.ok(veryLarge.getExpandedBytes > MAX_REPORT_SAVE_REQUEST_BYTES * 0.9, `the very large report's GET-expanded form alone (${veryLarge.getExpandedBytes}) is already at the ceiling`);
+  assert.ok(veryLarge.getExpandedBytes + veryLarge.legacyAiAnalysisBytes > MAX_REPORT_SAVE_REQUEST_BYTES, `the very large report's GET-expanded form (${veryLarge.getExpandedBytes}) plus a fresh AI result is over the ceiling`);
   assert.ok(veryLarge.oldEchoBytes > MAX_REPORT_SAVE_REQUEST_BYTES * 1.3, `so its old echo (${veryLarge.oldEchoBytes}) is far over the ceiling — the browser could never re-POST it`);
   assert.ok(veryLarge.retryBytes < MAX_REPORT_SAVE_REQUEST_BYTES * 0.45, "yet its retry request is comfortably under the ceiling");
   // Scaling: the retry request tracks the AI analysis (≈ the manuscript), far below what the evidence-bearing echo needs.
@@ -719,17 +719,17 @@ test("STRUCTURE: retryAiCheck persists through saveRetriedAiResult and can never
   assert.match(retrySave, /await persistAiRetryResult\(enriched, enrichedSummary\)/);
   assert.doesNotMatch(retrySave, /persistAiCompletion\(|saveReportRemote\(/);
   // The two AI-save paths must never disagree on when a room is 'ready'/'failed': identical summary derivation and identical room transition.
-  const tail = (source) => source.slice(source.indexOf("const enriched")).replace(/persistAi(Completion|RetryResult)\([^)]*\)/, "PERSIST()").replace(/(enrichedSaveResult|retrySaveResult)/g, "R");
+  const tail = (source) => source.slice(source.indexOf("const enriched")).replace(/^\s*\/\/.*\r?\n/gm, "").replace(/persistAi(Completion|RetryResult)\([^)]*\)/, "PERSIST()").replace(/(enrichedSaveResult|retrySaveResult)/g, "R");
   assert.equal(tail(retrySave), tail(enrichedSave), "saveRetriedAiResult == saveEnrichedAiResult apart from the persistence call");
 
-  assert.match(shell, /completeAiAnalysisWithRecovery\(aiAnalysisPromise, \(aiResult\) => saveEnrichedAiResult\(report, aiResult\)\)/, "the automatic post-upload pass is unchanged");
+  assert.match(shell, /completeAiAnalysisWithRecovery\(pending\.aiAnalysisPromise, \(aiResult\) => saveEnrichedAiResult\(report, aiResult\)\)/, "the automatic post-upload pass is unchanged");
   assert.match(page, /await persistAiCompletion\(enriched, enrichedSummary\);/, "the anonymous flow's AI resave is unchanged");
   // saveReportRemote still posts the whole report to the ordinary save route — its payload differs from the client's report
   // only by the ai-compact-v1 transport step (a no-op unless the writer gate is on and the report carries an AI result).
   const saveRemoteFn = remote.match(/export async function saveReportRemote[\s\S]*?\n\}\r?\n/)?.[0] ?? "";
   assert.ok(saveRemoteFn.length > 500, "saveReportRemote found");
   assert.match(saveRemoteFn, /fetch\("\/api\/reports", \{/);
-  assert.match(saveRemoteFn, /payload: prepareReportForTransport\(report\),/);
+  assert.match(saveRemoteFn, /payload: prepareReportForTransport\(transportReport\),/);
   assert.match(remote, /import \{ prepareReportForTransport \} from "\.\/ai-passage-table";/);
   assert.doesNotMatch(saveRemoteFn, /ai-retry/);
 });

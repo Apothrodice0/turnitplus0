@@ -103,9 +103,10 @@ test("the room page's occupant state is only ever set to processing/ready/failed
   // room processing/ready/failed must never run unconditionally after a
   // save — only inside a check against that save's own result, and it must
   // return (never fall through to setOccupant) on failure.
-  const runCheckBody = shell.match(/async function runCheck\(\) \{[\s\S]*?\n {2}\}/)?.[0] ?? "";
-  assert.ok(runCheckBody.length > 0, "runCheck function body must be found");
-  assert.match(runCheckBody, /if \(!saveResult\.ok\) \{[\s\S]*?\n\s*return;\s*\n\s*\}/);
+  const runCheckBody = shell.match(/async function persistPendingCheck\(\): Promise<void> \{[\s\S]*?\n {2}\}/)?.[0] ?? "";
+  assert.ok(runCheckBody.length > 0, "persistPendingCheck function body must be found");
+  assert.match(runCheckBody, /if \(outcome\.kind !== "saved"\) \{[\s\S]*?\n\s*return;\s*\n\s{4}\}/);
+  assert.ok(runCheckBody.indexOf('outcome.kind !== "saved"') < runCheckBody.indexOf('setOccupant({ status: "processing"'), "the room shows a report only after its save is confirmed");
   assert.match(runCheckBody, /setOccupant\(\{ status: "processing", report: summary, cycleEndsAt:/);
 
   // The AI-enriched resave's setOccupant("ready"/"failed") now lives in the
@@ -119,7 +120,7 @@ test("the room page's occupant state is only ever set to processing/ready/failed
   // were to reject (a bare .catch() would skip saveEnrichedAiResult
   // entirely and leave the room stuck at "processing") — see
   // tests/report-ai-completion.test.mjs for the dynamic proof.
-  assert.match(runCheckBody, /void completeAiAnalysisWithRecovery\(aiAnalysisPromise, \(aiResult\) => saveEnrichedAiResult\(report, aiResult\)\)\.then\(\(saved\) => \{\s*\n\s*if \(!saved\) notify\(/);
+  assert.match(runCheckBody, /void completeAiAnalysisWithRecovery\(pending\.aiAnalysisPromise, \(aiResult\) => saveEnrichedAiResult\(report, aiResult\)\)\.then\(\(saved\) => \{\s*\n\s*if \(!saved\) notify\(/);
 
   const helperBody = shell.match(/async function saveEnrichedAiResult\([\s\S]*?\n {2}\}/)?.[0] ?? "";
   assert.ok(helperBody.length > 0, "saveEnrichedAiResult function body must be found");
@@ -157,7 +158,7 @@ test("the room page's occupant state is only ever set to processing/ready/failed
     // "AI unavailable for this document" state), never the browser's own
     // unsaved enrichedSummary.
     const successPath = body.slice(failureBranch.index + failureBranch[0].length);
-    const saved = (successPath.match(new RegExp(`const (\\w+) = ${saveResult}\\.summary;`))?.[1] ?? `${saveResult}.summary`).replaceAll(".", "\\.");
+    const saved = (successPath.match(new RegExp(`const (\\w+) = (?:withLanguageUnavailableAi\\()?${saveResult}\\.summary[,;]`))?.[1] ?? `${saveResult}.summary`).replaceAll(".", "\\.");
     assert.match(successPath, new RegExp(`setOccupant\\(\\{\\s*status: ${saved}\\.aiStatus === "ready" \\? "ready" : "failed",\\s*report: ${saved},`), `${helper}: a confirmed save sets ready/failed from the server-persisted summary`);
 
     // A failed save never reaches setOccupant itself: a definite failure is

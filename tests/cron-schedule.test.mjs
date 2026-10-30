@@ -32,7 +32,7 @@ test("CRON_SCHEDULES.promotion matches vercel.json's own corpus-admission-promot
   assert.equal(CRON_SCHEDULES.promotion.path, entry.path);
 });
 
-test("vercel.json defines exactly the 4 cron entries this app relies on — no unreviewed new/removed entry silently changing what the status strip should describe", () => {
+test("vercel.json defines exactly the 5 cron entries this app relies on — no unreviewed new/removed entry silently changing what the status strip should describe", () => {
   const vercelConfig = JSON.parse(fs.readFileSync(path.join(repoRoot, "vercel.json"), "utf8"));
   // AUTHORITATIVE PROMOTION: the 3rd entry, /api/internal/selective-corpus-
   // authoritative-sweep, is a pure internal durability backstop (see
@@ -41,7 +41,12 @@ test("vercel.json defines exactly the 4 cron entries this app relies on — no u
   // two drift-guard tests up top still cover the two entries that ARE.
   // SUBSCRIPTION EXPIRY (owner decision 2026-10-30): the 4th entry, /api/internal/subscription-expiry-sweep, deletes
   // expired plans' report data hourly (lib/subscription-expiry-cleanup.ts) — like the 3rd, no admin status-strip display.
-  assert.equal(vercelConfig.crons.length, 4, "expected exactly 4 cron entries in vercel.json");
+  // HIGHLIGHT PREDICTIONS: the 5th entry, /api/internal/highlight-prediction-sweep, finishes due predictions hourly
+  // (lib/highlight-predictions.ts) — likewise no admin status-strip display.
+  assert.equal(vercelConfig.crons.length, 5, "expected exactly 5 cron entries in vercel.json");
+  const predictionEntry = vercelConfig.crons.find((c) => c.path === "/api/internal/highlight-prediction-sweep");
+  assert.ok(predictionEntry, "expected the highlight prediction sweep's cron entry");
+  assert.equal(predictionEntry.schedule, "40 * * * *", "hourly");
   const expiryEntry = vercelConfig.crons.find((c) => c.path === "/api/internal/subscription-expiry-sweep");
   assert.ok(expiryEntry, "expected the subscription expiry cleanup sweep's cron entry");
   assert.equal(expiryEntry.schedule, "20 * * * *", "hourly");

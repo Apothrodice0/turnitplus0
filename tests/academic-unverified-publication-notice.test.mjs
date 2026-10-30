@@ -201,7 +201,7 @@ const RWC = tokens(MANUSCRIPT).length;
 const ARCHIVE_POSITIONS = Array.from({ length: 60 }, (_, i) => 300 + i);
 async function post(acc, id, { diagnosticsId, text = MANUSCRIPT, payloadExtra = {}, extra = {} } = {}) {
   await resetRateForTest(`${acc.tag}-post`);
-  const created = "2026-10-11T00:00:00.000Z";
+  const created = new Date().toISOString();
   const body = {
     deviceKey: acc.deviceKey, id, submissionId: `sub-${id}`, title: "upn fixture.docx", createdAt: created,
     wordCount: RWC, archiveScore: 1, scoreBand: "Low", aiScore: 2, aiTone: "low", aiStatus: "ready", room: 0,

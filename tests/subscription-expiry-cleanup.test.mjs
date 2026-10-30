@@ -427,3 +427,4 @@ const activate = (u, rooms = 3) => grant(admin.cookie, { email: u.email, action:
 db.close();
 for (const suffix of ['', '-wal', '-shm']) try { fs.unlinkSync(`${dbFile}${suffix}`); } catch { /* still open */ }
 console.log(`\n${results.length} subscription expiry cleanup scenarios passed`);
+process.exit(0); // the native database driver can crash during normal teardown, after everything above has passed
