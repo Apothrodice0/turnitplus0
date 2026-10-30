@@ -118,9 +118,9 @@ export function planBlockMessage(code: PlanBlockCode, entitlement: Entitlement |
     case "ACTIVATION_REQUIRED":
       return `${SUBSCRIPTION_REQUIRED_MESSAGE} ${SUBSCRIPTION_CONTACT_MESSAGE}`;
     case "PLAN_EXPIRED":
-      return `Your subscription expired on ${entitlement ? formatPlanDate(entitlement.expiresAt) : "its end date"}. ${SUBSCRIPTION_REQUIRED_MESSAGE} Please contact TurnitPlus to renew your plan. Your existing reports stay available.`;
+      return `Your subscription expired on ${entitlement ? formatPlanDate(entitlement.expiresAt) : "its end date"}. ${SUBSCRIPTION_REQUIRED_MESSAGE} Please contact TurnitPlus to renew your plan.`;
     case "ACCOUNT_SUSPENDED":
-      return `Your subscription is paused. ${SUBSCRIPTION_REQUIRED_MESSAGE} Please contact TurnitPlus to restore your plan. Your existing reports stay available.`;
+      return `Your subscription is paused. ${SUBSCRIPTION_REQUIRED_MESSAGE} Please contact TurnitPlus to restore your plan.`;
     case "ROOM_NOT_IN_PLAN":
       return `This room is not part of your plan${entitlement ? ` (rooms 1–${entitlement.rooms})` : ""}. Choose one of your plan's rooms.`;
     case "ACTIVATION_UNAVAILABLE":
@@ -158,7 +158,7 @@ export function uploadLockFor(code: PlanBlockCode, expiresAt: number | null, roo
         title: SUBSCRIPTION_REQUIRED_TITLE,
         message: SUBSCRIPTION_REQUIRED_MESSAGE,
         contact: "Please contact TurnitPlus to renew your plan.",
-        detail: `Your subscription expired on ${expiresAt !== null ? formatPlanDate(expiresAt) : "its end date"} · your reports stay available`,
+        detail: `Your subscription expired on ${expiresAt !== null ? formatPlanDate(expiresAt) : "its end date"}`,
         actionLabel: SUBSCRIPTION_REQUIRED_TITLE,
       };
     case "ACCOUNT_SUSPENDED":
@@ -166,7 +166,7 @@ export function uploadLockFor(code: PlanBlockCode, expiresAt: number | null, roo
         title: SUBSCRIPTION_REQUIRED_TITLE,
         message: SUBSCRIPTION_REQUIRED_MESSAGE,
         contact: "Please contact TurnitPlus to restore your plan.",
-        detail: "Your subscription is paused · your reports stay available",
+        detail: "Your subscription is paused",
         actionLabel: SUBSCRIPTION_REQUIRED_TITLE,
       };
     case "ACTIVATION_UNAVAILABLE":
@@ -192,10 +192,10 @@ export function subscriptionNoticeFor(code: PlanBlockCode, expiresAt: number | n
         title: SUBSCRIPTION_REQUIRED_TITLE,
         message: SUBSCRIPTION_REQUIRED_MESSAGE,
         secondary: "Contact TurnitPlus to renew your plan.",
-        detail: `Your subscription expired on ${expiresAt !== null ? formatPlanDate(expiresAt) : "its end date"}. Your existing reports stay available.`,
+        detail: `Your subscription expired on ${expiresAt !== null ? formatPlanDate(expiresAt) : "its end date"}.`,
       };
     case "ACCOUNT_SUSPENDED":
-      return { title: SUBSCRIPTION_REQUIRED_TITLE, message: SUBSCRIPTION_REQUIRED_MESSAGE, secondary: "Contact TurnitPlus to restore your plan.", detail: "Your subscription is paused. Your existing reports stay available." };
+      return { title: SUBSCRIPTION_REQUIRED_TITLE, message: SUBSCRIPTION_REQUIRED_MESSAGE, secondary: "Contact TurnitPlus to restore your plan.", detail: "Your subscription is paused." };
     case "ACTIVATION_UNAVAILABLE":
       return { title: "New checks unavailable", message: "New checks are temporarily unavailable.", secondary: "Please try again later.", detail: null };
     default:

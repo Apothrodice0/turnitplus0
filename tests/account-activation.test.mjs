@@ -371,27 +371,30 @@ enforce(true);
   const idx = await roomIndex(freeUser);
   assert.equal(typeof idx.body.notice, 'string');
   assert.deepEqual(idx.body.lock, { title: 'Subscription required', message: 'You need an active subscription before you can check documents.', secondary: 'Contact TurnitPlus to activate your plan.', detail: null }, 'the structured notice for My Reports');
-  assert.deepEqual(idx.body.rooms.map((r) => [r.room, r.status]), [[7, 'ready']], 'only the room holding a report is listed (room 8), with its report — no usable-looking empty rooms');
+  assert.deepEqual(idx.body.rooms, [], 'no room at all, even with a saved report: only the subscription-required notice');
   const brandNew = await signup('brand-new@example.com');
   const newIdx = await roomIndex(brandNew);
-  assert.equal(newIdx.body.rooms.length, 1, 'an account with no plan and no reports still sees one (locked) room, never an empty list');
+  assert.deepEqual(newIdx.body.rooms, [], 'an account with no plan sees no room either');
   assert.equal(typeof newIdx.body.notice, 'string');
   assert.equal((await postReport(brandNew, 3100000000004, { room: 0 })).status, 403, 'and cannot use it');
   const existing = await getJson(reportByIdRoute, `http://localhost/api/reports/3100000000001?deviceKey=${encodeURIComponent(freeUser.deviceKey)}`, freeUser.cookie, { id: '3100000000001' });
-  assert.equal(existing.status, 200, 'an existing report stays readable without a plan');
+  assert.equal(existing.status, 403, 'an existing report is refused without a plan');
+  assert.equal(existing.body.code, 'ACTIVATION_REQUIRED');
+  assert.equal(JSON.stringify(existing.body).includes('payload'), false, 'and nothing of it is returned');
   const room7 = await getJson(reportsRoute, 'http://localhost/api/reports?room=7', freeUser.cookie);
-  assert.equal(room7.status, 200);
-  assert.equal(room7.body.status, 'ready', 'and stays in its room');
+  assert.equal(room7.status, 403, 'nor does the room poll return it');
+  const list = await getJson(reportsRoute, 'http://localhost/api/reports', freeUser.cookie);
+  assert.equal(list.status, 403, 'nor the report list');
 
   const adminIdx = await roomIndex(admin);
   assert.equal(adminIdx.body.rooms.length, ADMIN_ROOM_COUNT, 'administrators keep their 40 rooms');
   assert.equal('notice' in adminIdx.body, false);
   assert.equal((await postReport(admin, 3100000000003, { room: 30 })).status, 200, 'administrators are never blocked');
   assert.deepEqual((await planOf(admin)).body, { authenticated: true, enforced: true, exempt: true });
-  pass('enforced: no plan blocks new checks (403 ACTIVATION_REQUIRED) but keeps reports readable; admins unrestricted');
+  pass('enforced: no plan blocks new checks (403 ACTIVATION_REQUIRED) and every report read; admins unrestricted');
 }
 
-// ── HISTORY: old reports stay listed, readable and untouched; activation shows exactly the purchased rooms ───────────
+// ── HISTORY: a never-activated account reads nothing; its data is untouched, and a first activation restores it ──
 {
   const historian = await signup('historian@example.com');
   await markVerified(historian.email);
@@ -405,11 +408,12 @@ enforce(true);
   const original = await reportRow();
 
   const blocked = await roomIndex(historian);
-  assert.deepEqual(blocked.body.rooms.map((r) => [r.room, r.status, r.historical === true]), [[5, 'ready', true]], 'unsubscribed: only the history room, with its month-old report');
+  assert.deepEqual(blocked.body.rooms, [], 'unsubscribed: no room listed, not even the one holding its month-old report');
   const blockedRoom = await getJson(reportsRoute, 'http://localhost/api/reports?room=5', historian.cookie);
-  assert.equal(blockedRoom.body.report?.id, '3150000000001', 'the room still opens on its earlier report');
+  assert.equal(blockedRoom.status, 403, 'the room refuses to open its earlier report');
   const read = await getJson(reportByIdRoute, `http://localhost/api/reports/3150000000001?deviceKey=${encodeURIComponent(historian.deviceKey)}`, historian.cookie, { id: '3150000000001' });
-  assert.equal(read.status, 200, 'and the report itself is readable');
+  assert.equal(read.status, 403, 'and so does the report itself');
+  assert.deepEqual(await reportRow(), original, 'refused, not deleted: nothing expired here');
   assert.equal((await postReport(historian, 3150000000002, { room: 5 })).status, 403, 'no new check in the history room');
   assert.equal((await postReport(historian, 3150000000003, { room: 0 })).status, 403, 'nor anywhere else');
 
@@ -428,7 +432,7 @@ enforce(true);
   assert.equal((await postReport(historian, 3150000000005, { room: 0 })).status, 200, 'a purchased room does');
   const after = (await reportRow()).filter(([id]) => id === '3150000000001');
   assert.deepEqual(after, original, 'the historical report is never deleted, renumbered or overwritten');
-  pass('history: unsubscribed accounts list only their report rooms (readable, locked); activation shows exactly the purchased rooms plus read-only history; old reports untouched');
+  pass('history: a never-activated account sees no room and reads no report; a first activation shows exactly the purchased rooms plus read-only history; old reports untouched');
 }
 
 // ── 4 + 5 + 6. Rooms appear, are used under the room rules, balance shown correctly ─────────────────────────────
@@ -519,21 +523,23 @@ enforce(true);
   pass('20 an activated customer makes 12 checks in one UTC day (the old cap of 10 does not apply)');
 }
 
-// ── 10 + 15. Expired plans block new checks; existing reports and resaves still work ────────────────────────────
+// ── 10 + 15. Expired plans block new checks, every report and every resave, from the moment they expire ─────────
 {
   await db.execute({ sql: "UPDATE account_entitlements SET expires_at = ? WHERE user_id = (SELECT id FROM users WHERE email = 'bob@example.com')", args: [Date.now() - 1000] });
   const r = await postReport(bob, 3300000000010, { room: 0 });
   assert.equal(r.status, 403);
   assert.equal(r.body.code, 'PLAN_EXPIRED');
-  assert.equal((await postReport(bob, 3300000000001, { room: 4, aiScore: 55 })).status, 200, 'a check that already started still finishes (resave)');
+  const resave = await postReport(bob, 3300000000001, { room: 4, aiScore: 55 });
+  assert.equal(resave.status, 403, 'a resave is refused too: a late save must never bring a report back');
+  assert.equal(resave.body.code, 'PLAN_EXPIRED');
   const read = await getJson(reportByIdRoute, `http://localhost/api/reports/3300000000001?deviceKey=${encodeURIComponent(bob.deviceKey)}`, bob.cookie, { id: '3300000000001' });
-  assert.equal(read.status, 200, 'saved reports stay accessible');
+  assert.equal(read.status, 403, 'saved reports are refused immediately, with cleanup off (this suite) as much as on');
+  assert.equal(read.body.code, 'PLAN_EXPIRED');
   const plan = (await planOf(bob)).body;
   assert.equal(plan.state, 'expired');
   assert.equal(plan.rooms.available, 0);
-  const bobRooms = (await db.execute({ sql: "SELECT DISTINCT room_number FROM saved_reports WHERE user_id = (SELECT id FROM users WHERE email = 'bob@example.com') ORDER BY room_number", args: [] })).rows.map((r) => Number(r.room_number));
-  assert.deepEqual((await roomIndex(bob)).body.rooms.map((r) => r.room), bobRooms, 'exactly the rooms that hold his reports stay listed');
-  pass('10+15 expired plan: new checks 403 PLAN_EXPIRED, running checks finish, reports stay accessible');
+  assert.deepEqual((await roomIndex(bob)).body.rooms, [], 'no room is listed');
+  pass('10+15 expired plan: new checks, resaves and every report read 403 PLAN_EXPIRED, whether or not cleanup has run');
 }
 
 // ── 11. Renewal, activation after expiry, room adjustment ───────────────────────────────────────────────────────
@@ -635,7 +641,15 @@ enforce(true);
   await grant(admin.cookie, { email: erin.email, action: 'reactivate' });
   assert.equal(Number((await entitlementRow(erin.email)).expires_at), expiry, 'reactivation keeps the original expiry');
   assert.equal((await postReport(erin, 3500000000001, { room: 0 })).status, 200);
-  pass('suspend blocks new checks (ACCOUNT_SUSPENDED); reactivate restores them with the original expiry');
+  await grant(admin.cookie, { email: erin.email, action: 'suspend', reason: 'Payment dispute again' });
+  const paused = await getJson(reportByIdRoute, `http://localhost/api/reports/3500000000001?deviceKey=${encodeURIComponent(erin.deviceKey)}`, erin.cookie, { id: '3500000000001' });
+  assert.equal(paused.status, 403, 'a suspended account reads none of its reports');
+  assert.equal(paused.body.code, 'ACCOUNT_SUSPENDED');
+  assert.deepEqual((await roomIndex(erin)).body.rooms, [], 'and lists no room');
+  await grant(admin.cookie, { email: erin.email, action: 'reactivate' });
+  const back = await getJson(reportByIdRoute, `http://localhost/api/reports/3500000000001?deviceKey=${encodeURIComponent(erin.deviceKey)}`, erin.cookie, { id: '3500000000001' });
+  assert.equal(back.status, 200, 'reactivation restores the same report: suspension deletes nothing');
+  pass('suspend blocks new checks and report access (ACCOUNT_SUSPENDED); reactivate restores both, the report intact, with the original expiry');
 }
 
 // ── CHECK WORK: the routes that compute a check before its save refuse unsubscribed accounts too (no API bypass) ────
@@ -681,8 +695,7 @@ enforce(true);
     assert.equal(await checkWorkRefusal(db, aliceSession, canonicalSha256(checkText)), null, 'academic-evidence gate: active subscription passes');
     pass('check work: signed-out 401; no / expired / suspended subscription 403 on /api/archive/match and /api/academic-evidence; active plan and admin pass');
 
-    // A check that started while the plan was active may finish its remaining check work after the plan expires:
-    // only for the exact manuscript its open authorization was issued for.
+    // Owner decision 2026-10-30: expiry stops a check at once — an open authorization no longer lets its work through.
     await grant(admin.cookie, { email: gina.email, action: 'reactivate' });
     const auth = await issueAuthorization(gina, 0, checkText);
     assert.equal(auth.status, 200);
@@ -690,11 +703,10 @@ enforce(true);
     const issuedAt = Number((await db.execute({ sql: 'SELECT issued_at FROM account_check_authorizations WHERE id = ?', args: [auth.body.authorization] })).rows[0].issued_at);
     const ginaExpiry = Number((await entitlementRow(gina.email)).expires_at);
     await db.execute({ sql: 'UPDATE account_entitlements SET expires_at = ? WHERE user_id = ?', args: [issuedAt + 1, ginaId] });
-    assert.equal((await archive(gina)).status, 200, 'the authorized manuscript finishes its check work after expiry');
-    const other = await archive(gina, `${checkText} A different manuscript.`);
-    assert.equal(other.status, 403, 'any other manuscript is refused');
-    assert.equal(other.body.code, 'PLAN_EXPIRED');
-    pass('check work: a check authorized while the plan was active finishes after expiry, for its own manuscript only');
+    const stopped = await archive(gina);
+    assert.equal(stopped.status, 403, 'the authorized manuscript is refused after expiry too');
+    assert.equal(stopped.body.code, 'PLAN_EXPIRED');
+    pass('check work: an authorization issued while the plan was active does not outlive the plan');
 
     await db.execute({ sql: 'UPDATE account_entitlements SET expires_at = ? WHERE user_id = ?', args: [ginaExpiry, ginaId] });
     await db.execute({ sql: 'UPDATE account_entitlements SET expires_at = ? WHERE user_id = ?', args: [hankExpiry, hankId] });
@@ -730,7 +742,8 @@ enforce(true);
   assert.equal(await browserTextSha256(T(1)), canonicalSha256(T(1)));
   assert.equal(await browserTextSha256(`  ${T(1)}\r\n`), canonicalSha256(T(1)));
 
-  // B1 — the normal path: issued while active, the plan expires during the analysis, the save is still accepted.
+  // B1 — owner decision 2026-10-30: expiry stops a check at once. An authorization issued while active does not rescue a
+  // check whose plan expires during the analysis; it stays unused and the check takes no room.
   const a1 = await issueAuthorization(frank, 0, T(1));
   assert.equal(a1.status, 200);
   assert.equal(a1.body.required, true);
@@ -738,68 +751,32 @@ enforce(true);
   assert.ok(Date.parse(a1.body.expiresAt) - Date.now() <= 60 * 60 * 1000 + 5000, 'bounded validity (60 min)');
   await expireAfter(a1.body.authorization);
   assert.equal((await postReport(frank, 3600000000001, { room: 0, text: T(9) })).status, 403, 'a NEW check after expiry without an authorization stays blocked');
-  const saved = await postReport(frank, 3600000000002, { room: 0, text: T(1), checkAuthorization: a1.body.authorization });
-  assert.equal(saved.status, 200, 'a check authorized before expiry saves after expiry');
-  const consumed = await authRow(a1.body.authorization);
-  assert.ok(Number(consumed.consumed_at) > 0);
-  assert.equal(consumed.report_id, '3600000000002');
-  assert.equal(await claimCount(), 1, 'it still takes its room (cooldown applies)');
-  pass('B1 a check authorized before expiry saves after the plan expires, takes its room once, and consumes its authorization');
+  const refused = await postReport(frank, 3600000000002, { room: 0, text: T(1), checkAuthorization: a1.body.authorization });
+  assert.equal(refused.status, 403, 'a check authorized before expiry is refused after expiry');
+  assert.equal(refused.body.code, 'PLAN_EXPIRED');
+  assert.equal((await authRow(a1.body.authorization)).consumed_at, null, 'nothing is consumed');
+  assert.equal(await claimCount(), 0, 'no room is taken');
+  pass('B1 an authorization never lets a check save after the plan expires');
 
-  // B2 — background retries / resaves of that report after expiry: allowed, never another room.
-  assert.equal((await postReport(frank, 3600000000002, { room: 0, text: T(1), aiScore: 44 })).status, 200);
-  assert.equal((await postReport(frank, 3600000000002, { room: 0, text: T(1), aiScore: 45, checkAuthorization: a1.body.authorization })).status, 200, 'a resave carrying the spent id is still just a resave');
-  assert.equal(await claimCount(), 1);
-  pass('B2 resaves and background retries of the authorized report succeed after expiry and take no extra room');
-
-  // B3 — the spent authorization can never start another check: other report, other room, other text.
-  for (const [id, room, text] of [[3600000000003, 0, T(1)], [3600000000004, 1, T(1)], [3600000000005, 1, T(2)]]) {
-    const r = await postReport(frank, id, { room, text, checkAuthorization: a1.body.authorization });
-    assert.ok(r.status === 403 || r.status === 409, `replay ${id} refused (${r.status})`);
-  }
-  assert.equal(await claimCount(), 1);
-  // And no new authorization can be obtained after expiry.
+  // B2 — no new authorization can be obtained after expiry.
   const late = await issueAuthorization(frank, 1, T(3));
   assert.equal(late.status, 403);
   assert.equal(late.body.code, 'PLAN_EXPIRED');
-  pass('B3 a used authorization cannot be replayed (same or other document/room), and none is issued after expiry');
+  pass('B2 none is issued after expiry');
 
-  // B4 — bound to the document, the room and the account.
-  await reactivate();
-  const a4 = await issueAuthorization(frank, 1, T(4));
-  await expireAfter(a4.body.authorization);
-  assert.equal((await postReport(frank, 3600000000010, { room: 1, text: T(5), checkAuthorization: a4.body.authorization })).status, 403, 'another document');
-  assert.equal((await postReport(frank, 3600000000011, { room: 2, text: T(4), checkAuthorization: a4.body.authorization })).status, 403, 'another room');
-  assert.equal((await postReport(alice, 3600000000012, { room: 1, text: T(4), checkAuthorization: a4.body.authorization })).status === 200 ? 'leak' : 'ok', 'ok', 'another account');
-  assert.equal((await authRow(a4.body.authorization)).consumed_at, null, 'refused attempts do not use it up');
-  assert.equal((await postReport(frank, 3600000000013, { room: 1, text: T(4), checkAuthorization: a4.body.authorization })).status, 200, 'the right document still saves');
-  pass('B4 an authorization only ever permits its own account, room and document');
-
-  // B5 — bounded in time; issued-after-expiry rows are never honoured; a suspension is never overridden.
-  await reactivate();
-  const a5 = await issueAuthorization(frank, 2, T(6));
-  await expireAfter(a5.body.authorization);
-  await db.execute({ sql: 'UPDATE account_check_authorizations SET expires_at = ? WHERE id = ?', args: [Date.now() - 1, a5.body.authorization] });
-  assert.equal((await postReport(frank, 3600000000020, { room: 2, text: T(6), checkAuthorization: a5.body.authorization })).status, 403, 'a timed-out authorization is not honoured');
-  await db.execute({ sql: 'UPDATE account_check_authorizations SET expires_at = ?, issued_at = ? WHERE id = ?', args: [Date.now() + 60000, Date.now(), a5.body.authorization] });
-  assert.equal((await postReport(frank, 3600000000021, { room: 2, text: T(6), checkAuthorization: a5.body.authorization })).status, 403, 'issued after the plan ended: not honoured');
+  // B3 — a suspension is never overridden, and an active plan saves normally.
   await reactivate();
   const a5b = await issueAuthorization(frank, 2, T(7));
   await setPlan({ expiresAt: Date.now() + DAY_MS, status: 'suspended' });
   const susp = await postReport(frank, 3600000000022, { room: 2, text: T(7), checkAuthorization: a5b.body.authorization });
   assert.equal(susp.status, 403);
   assert.equal(susp.body.code, 'ACCOUNT_SUSPENDED', 'a suspension is never overridden');
-  pass('B5 authorizations time out, are never honoured if issued after expiry, and never override a suspension');
-
-  // B6 — concurrency: one authorization, two saves at once → exactly one new report.
   await reactivate();
-  const a6 = await issueAuthorization(frank, 2, T(8));
-  await expireAfter(a6.body.authorization);
-  const race = await Promise.all([3600000000030, 3600000000031].map((id) => postReport(frank, id, { room: 2, text: T(8), checkAuthorization: a6.body.authorization })));
-  assert.deepEqual(race.map((r) => r.status === 200).filter(Boolean).length, 1, `exactly one wins (${race.map((r) => r.status)})`);
-  const reports = await db.execute({ sql: "SELECT COUNT(*) AS c FROM saved_reports WHERE id IN ('3600000000030', '3600000000031')", args: [] });
-  assert.equal(Number(reports.rows[0].c), 1);
-  pass('B6 two concurrent saves with one authorization create exactly one report');
+  const a6 = await issueAuthorization(frank, 0, T(8));
+  const saved = await postReport(frank, 3600000000002, { room: 0, text: T(8), checkAuthorization: a6.body.authorization });
+  assert.equal(saved.status, 200, 'an active plan saves normally');
+  assert.equal(await claimCount(), 1, 'and takes its room');
+  pass('B3 a suspension is never overridden; an active plan saves normally');
 
   // B7 — issuance itself follows the plan and the room rules.
   await reactivate();

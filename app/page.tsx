@@ -55,7 +55,7 @@ import { DocumentUploadPanel } from "@/components/reports/document-upload-panel"
 import { CHECK_STAGE_CEILING, CHECK_STAGE_LABELS, checkStagePercent, useProgressCreep } from "@/lib/upload-progress";
 import { IdentityFields, type IdentityFieldsHandle, type CollectedIdentity } from "@/components/auth/identity-fields";
 import { EmailVerificationStatus } from "@/components/account/email-verification-status";
-import { AccountPlanCard, fetchAccountPlan } from "@/components/account/account-plan-card";
+import { AccountPlanCard, fetchAccountPlan, planBlocksReports } from "@/components/account/account-plan-card";
 import { planStateBlockCode, uploadLockFor, type UploadLock } from "@/lib/account-plan";
 import { EmailVerificationModal, type EmailVerificationModalStage } from "@/components/account/email-verification-modal";
 import {
@@ -278,6 +278,9 @@ export default function Home() {
   // subscription (GET /api/account/plan — display only; POST /api/reports and the check-work routes still refuse).
   // null while enforcement is off, for administrators, and for an active plan.
   const [checkLock, setCheckLock] = useState<UploadLock | null>(null);
+  // Manual subscriptions (owner decision 2026-10-30): no subscription, expired or paused — the account has no report
+  // history to open, so the account and welcome pages offer neither "Start a new check" nor "View my reports".
+  const [reportsBlocked, setReportsBlocked] = useState(false);
   // Manual subscriptions: My Reports shows only the centered subscription-required screen (set by ReportRoomsBrowser).
   const [reportsPlanLocked, setReportsPlanLocked] = useState(false);
   const [emailVerification, setEmailVerification] = useState<EmailVerificationView | null>(null);
@@ -434,6 +437,7 @@ export default function Home() {
       queueMicrotask(() => {
         if (cancelled) return;
         setCheckLock(null);
+        setReportsBlocked(false);
       });
       return () => {
         cancelled = true;
@@ -441,6 +445,7 @@ export default function Home() {
     }
     void fetchAccountPlan().then((plan) => {
       if (cancelled || !plan || !plan.authenticated) return;
+      setReportsBlocked(planBlocksReports(plan));
       if (!plan.enforced || plan.exempt) {
         setCheckLock(null);
         return;
@@ -1749,23 +1754,28 @@ export default function Home() {
                   )}
                   {/* Manual account activation: renders nothing unless the feature is on for this account. */}
                   <AccountPlanCard key={account.email} />
-                  <div className="account-profile-actions">
+                  <div className={`account-profile-actions${checkLock || reportsBlocked ? " account-profile-actions-compact" : ""}`}>
                     {/* Room/slot architecture: a signed-in account's new check
                         always starts from inside a room — see
                         components/reports/report-rooms.tsx's own header
                         comment — so this routes to My Reports rather than
                         the standalone (room-less) Dashboard. */}
-                    <button className="button primary" type="button" disabled={isGeneratingReport} onClick={() => navigate("reports")}>
-                      <UploadCloud aria-hidden="true" /> Start a new check
-                    </button>
-                    <button className="button secondary" type="button" onClick={() => navigate("reports")}>
-                      <FolderClock aria-hidden="true" /> View my reports
-                    </button>
+                    {/* Manual subscriptions: offered only when a check can actually start / reports can be opened. */}
+                    {!checkLock && (
+                      <button className="button primary" type="button" disabled={isGeneratingReport} onClick={() => navigate("reports")}>
+                        <UploadCloud aria-hidden="true" /> Start a new check
+                      </button>
+                    )}
+                    {!reportsBlocked && (
+                      <button className="button secondary" type="button" onClick={() => navigate("reports")}>
+                        <FolderClock aria-hidden="true" /> View my reports
+                      </button>
+                    )}
                     <button className="button subtle account-signout" type="button" disabled={isSigningOut} onClick={() => void signOutAccount()}>
                       <LogOut aria-hidden="true" /> {isSigningOut ? "Signing out…" : "Sign out"}
                     </button>
                   </div>
-                  <p className="auth-preview-note"><LockKeyhole aria-hidden="true" /> Documents are analyzed in your browser and never uploaded. Your report history is saved securely so you can reach it from any device you sign in on.</p>
+                  <p className="auth-preview-note"><LockKeyhole aria-hidden="true" /> Documents are analyzed in your browser and never uploaded.{reportsBlocked ? "" : " Your report history is saved securely so you can reach it from any device you sign in on."}</p>
 
                   <div className="account-danger-zone">
                     <div className="account-danger-zone-header">
@@ -1964,8 +1974,8 @@ export default function Home() {
               <article><span>3</span><div className="welcome-step-icon"><FolderClock aria-hidden="true" /></div><div><strong>Return anytime</strong><p>Your report history stays available on this device.</p></div></article>
             </div>
             <div className="welcome-actions">
-              <button className="button primary" type="button" disabled={isGeneratingReport} onClick={() => navigate("reports")}><UploadCloud aria-hidden="true" /> Start a new check</button>
-              <button className="button secondary" type="button" onClick={() => navigate("reports")}><FolderClock aria-hidden="true" /> View my reports</button>
+              {!checkLock && <button className="button primary" type="button" disabled={isGeneratingReport} onClick={() => navigate("reports")}><UploadCloud aria-hidden="true" /> Start a new check</button>}
+              {!reportsBlocked && <button className="button secondary" type="button" onClick={() => navigate("reports")}><FolderClock aria-hidden="true" /> View my reports</button>}
             </div>
             <p className="welcome-privacy"><LockKeyhole aria-hidden="true" /> No document is uploaded to an account or cloud workspace.</p>
           </section>

@@ -7857,7 +7857,7 @@ main.report-main {
 }
 
 /* Manual account activation (2026-10-24) — Admin → Account Activation console (components/admin/account-activation),
-   the customer's "Your plan" card (components/account/account-plan-card.tsx) and the room plan notices. Built on the
+   the customer's Subscription panel (components/account/account-plan-card.tsx) and the room plan notices. Built on the
    existing admin tokens/classes (.admin-card, .admin-status-badge, .admin-metric-*, .admin-dialog-*). */
 .aa-console { display: flex; flex-direction: column; gap: 0; min-width: 0; }
 .aa-banner {
@@ -7957,21 +7957,58 @@ main.report-main {
   .aa-summary > div { grid-template-columns: minmax(0, 1fr); gap: 2px; }
 }
 
-/* Customer account page — "Your plan" (renders only while activation is enforced for the account). */
-.account-plan-card { margin: 0 0 20px; padding: 16px 18px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
-.account-plan-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
-.account-plan-head h3 { margin: 0; font-size: 15px; color: var(--sidebar); }
-.account-plan-status { padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 700; background: var(--soft-line); color: var(--muted); }
-.account-plan-status-active { background: rgba(8, 125, 85, .12); color: var(--green); }
-.account-plan-status-expired { background: rgba(232, 79, 99, .12); color: #b83246; }
-.account-plan-status-suspended { background: rgba(245, 138, 59, .16); color: #a15a1f; }
-.account-plan-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin: 0; }
-.account-plan-grid > div { background: var(--canvas); border-radius: 10px; padding: 10px 12px; min-width: 0; }
-.account-plan-grid dt { display: flex; align-items: center; gap: 5px; font-size: 11.5px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin-bottom: 4px; }
-.account-plan-grid dt svg { width: 13px; height: 13px; }
-.account-plan-grid dd { margin: 0; font-size: 15px; font-weight: 600; color: var(--ink); overflow-wrap: anywhere; }
-.account-plan-note, .account-plan-message { margin: 10px 0 0; font-size: 13px; color: var(--muted); line-height: 1.5; }
-.account-plan-message { color: var(--ink); }
+/* Customer account page — Subscription panel (renders only while activation is enforced for the account). */
+/* MANUAL SUBSCRIPTIONS — the account page's Subscription panel (components/account/account-plan-card.tsx) and the
+   account card's one type scale (owner decision 2026-10-30): titles 17px bold; every description, label, value and
+   status line at the same 15px body size, one line height, one font family. */
+.account-profile-layout {
+  --account-text-size: 15px;
+  --account-text-line: 1.6;
+}
+.account-subscription {
+  margin: 0 0 22px;
+  padding: 20px 22px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: linear-gradient(180deg, #ffffff 0%, #fafcfd 100%);
+  font-family: inherit;
+}
+.account-subscription-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.account-subscription-head h3 { margin: 0; color: var(--ink); font-size: 17px; font-weight: 700; line-height: 1.35; letter-spacing: -0.005em; }
+.account-subscription-status {
+  flex: 0 0 auto;
+  padding: 3px 12px;
+  border-radius: 999px;
+  background: var(--soft-line);
+  color: #4b636c;
+  font-size: var(--account-text-size);
+  font-weight: 600;
+  line-height: var(--account-text-line);
+}
+.account-subscription-status-active { background: rgba(8, 125, 85, 0.1); color: var(--green); }
+.account-subscription-status-expired { background: rgba(232, 79, 99, 0.1); color: #b83246; }
+.account-subscription-status-suspended { background: rgba(245, 138, 59, 0.14); color: #a15a1f; }
+.account-subscription-text { margin: 0; color: #37515b; font-size: var(--account-text-size); line-height: var(--account-text-line); }
+.account-subscription-text + .account-subscription-text { color: var(--muted); }
+.account-subscription-details { display: grid; margin: 0; }
+.account-subscription-details > div { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; padding: 10px 0; border-top: 1px solid var(--soft-line); }
+.account-subscription-details dt,
+.account-subscription-details dd { margin: 0; font-size: var(--account-text-size); line-height: var(--account-text-line); }
+.account-subscription-details dt { color: var(--muted); }
+.account-subscription-details dd { color: var(--ink); font-weight: 600; text-align: right; overflow-wrap: anywhere; }
+.account-subscription-details + .account-subscription-text { margin-top: 6px; color: var(--muted); }
+.account-profile-card .account-profile-status { font-size: var(--account-text-size); font-weight: 600; line-height: var(--account-text-line); }
+.account-profile-card .auth-preview-note { font-size: var(--account-text-size); line-height: var(--account-text-line); }
+.account-profile-card .auth-preview-note svg { width: 16px; height: 16px; margin-top: 4px; }
+.account-profile-card .email-verify-line { font-size: var(--account-text-size); line-height: var(--account-text-line); }
+.account-activation-info .subscription-copy > p:not(.section-label) { font-size: var(--account-text-size); line-height: var(--account-text-line); }
+/* An account that cannot check: the row holds fewer buttons, at their natural width. */
+.account-profile-actions.account-profile-actions-compact { display: flex; flex-wrap: wrap; }
+.account-profile-card .account-danger-zone-header strong { font-size: 17px; }
+.account-profile-card .account-danger-zone-header span { font-size: var(--account-text-size); line-height: var(--account-text-line); }
+@media (max-width: 560px) {
+  .account-subscription { padding: 18px; }
+}
 .report-rooms-plan-notice, .room-plan-notice { margin-bottom: 12px; }
 
 /* MANUAL SUBSCRIPTIONS — the subscription-required screen (components/reports/subscription-required-state.tsx): what an
@@ -8054,40 +8091,6 @@ main.report-main {
   font-size: 12.5px;
   font-weight: 650;
 }
-.subscription-required-history {
-  position: relative;
-  margin-top: 24px;
-  padding-top: 18px;
-  border-top: 1px solid var(--soft-line);
-  text-align: left;
-}
-.subscription-required-history-label {
-  display: block;
-  margin-bottom: 8px;
-  color: var(--muted);
-  font-size: 11.5px;
-  font-weight: 700;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-}
-.subscription-required-history ul { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
-.subscription-required-history a {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 10px 12px;
-  border-radius: 12px;
-  background: var(--canvas);
-  color: var(--ink);
-  font-size: 14px;
-  font-weight: 600;
-  text-decoration: none;
-  transition: background-color 0.18s ease, transform 0.18s ease;
-}
-.subscription-required-history a:hover,
-.subscription-required-history a:focus-visible { background: var(--blue-soft); transform: translateX(2px); }
-.subscription-required-history a svg { width: 16px; height: 16px; flex: 0 0 auto; color: var(--blue-dark); }
 .subscription-required-back {
   position: relative;
   display: inline-flex;
@@ -8126,7 +8129,6 @@ main.report-main {
 @media (prefers-reduced-motion: reduce) {
   .subscription-required-card,
   .subscription-required-halo { animation: none; }
-  .subscription-required-history a { transition: none; }
 }
 
 /* Admin Phase 2A — Corpus workspace polish. Reuses every token/class the

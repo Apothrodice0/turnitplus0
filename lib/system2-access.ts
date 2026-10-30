@@ -18,7 +18,8 @@ import { isSystem2ResearchUser, system2Config, type System2Config } from "./syst
  *     room is given — only for a room inside the purchased plan.
  *
  * Display is NOT gated here: a report's stored estimate is part of that report (lib/system2-estimate-record.ts), so it
- * stays the same on every view even after the subscription ends. This only decides who may START a new estimate.
+ * follows the report: the same on every view while the report can be opened, and refused or deleted with it when the
+ * subscription ends (lib/subscription-expiry-cleanup.ts). This only decides who may START a new estimate.
  */
 
 export type System2AccessReason =

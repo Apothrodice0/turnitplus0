@@ -29,8 +29,8 @@ import {
  *    with an active plan (not expired, not suspended), only in rooms 1..plan.rooms, and without the daily cap. Every
  *    room keeps its own 24 h cooldown, measured from the SERVER's clock (account_room_claims) as well as from the
  *    report's own createdAt, so deleting a report or back-dating createdAt can never free a room early. A save of an
- *    already-existing report (the AI result, a background retry, a resave) is never a new check and is never blocked —
- *    checks that already started always finish. Existing reports stay readable in every state.
+ *    already-existing report (the AI result, a background retry, a resave) is never a new check, so an active plan never
+ *    blocks it. Without an active subscription nothing is saved or readable (REPORT ACCESS below).
  *
  * NO FREE CHECKING (owner decision 2026-10-29): with the switch on, the ONLY way for a non-admin account to start a
  * new check is an active plan — new and existing accounts alike. The check-work routes (/api/academic-evidence,
@@ -301,7 +301,32 @@ export function newCheckRefusal(policy: RoomPolicy, room: number): { code: PlanB
 }
 
 /**
+ * REPORT ACCESS (owner decision 2026-10-30). With enforcement on, an account without an active subscription — never
+ * activated, expired or suspended — may neither start a check NOR open, print, re-save, retry or download a receipt for
+ * any report it saved. Decided here, server-side, from the same policy as a new check, never by hiding links. An expired
+ * plan's reports are also deleted (lib/subscription-expiry-cleanup.ts), but access is refused from the moment it expires
+ * whether or not that cleanup has run. A suspended plan's reports are kept and readable again on reactivation (if the
+ * plan is still valid). Administrators are never refused (their policy has no block). ACTIVATION_UNAVAILABLE (the
+ * subscription tables are missing) refuses only new checks: existing reports stay reachable, as before.
+ */
+export const REPORT_ACCESS_BLOCK_CODES: ReadonlySet<PlanBlockCode> = new Set<PlanBlockCode>(["ACTIVATION_REQUIRED", "PLAN_EXPIRED", "ACCOUNT_SUSPENDED"]);
+
+export function reportAccessRefusal(policy: RoomPolicy): { code: PlanBlockCode; message: string } | null {
+  return policy.enforced && policy.block && REPORT_ACCESS_BLOCK_CODES.has(policy.block.code) ? policy.block : null;
+}
+
+/** reportAccessRefusal for a signed-in session (null for no session, an administrator, or enforcement off). */
+export async function reportAccessRefusalFor(client: Executor, user: SessionUser | null, nowMs: number = Date.now()): Promise<{ code: PlanBlockCode; message: string } | null> {
+  if (!user || !accountActivationEnforced()) return null;
+  return reportAccessRefusal(await resolveRoomPolicy(client, user, nowMs));
+}
+
+/**
  * CHECK AUTHORIZATION — a check started while the plan was active may save after the plan expires.
+ *
+ * Owner decision 2026-10-30: this no longer lets a check finish after expiry — POST /api/reports refuses every save of an
+ * account without an active subscription first (reportAccessRefusal). What remains is only the instant between that
+ * refusal and the save's own write transaction, where the transaction's re-check would otherwise lose a racing save.
  *
  * The browser analyses a document for minutes before its first save; a plan can expire in between. So when the room
  * page starts a check it asks for a check authorization (issueCheckAuthorization, POST /api/reports/check-authorization)
@@ -359,28 +384,20 @@ export type CheckWorkRefusal = { status: 401 | 403; code: PlanBlockCode | "SIGN_
  * The gate for the routes that do a check's server-side work before its save (/api/academic-evidence,
  * /api/archive/match): with enforcement on, only a signed-in administrator or an account allowed to start a new
  * check may use them, so an unsubscribed account cannot get similarity results through the API without saving a
- * report either. A check that started while the plan was active still finishes: an open (unconsumed, unexpired)
- * check authorization for this exact manuscript text, issued before the plan ended, lets its remaining work through.
+ * report either. Owner decision 2026-10-30: an expired plan stops checks immediately, including one already under way —
+ * an open check authorization no longer lets its remaining work through (the save would be refused anyway).
  * Returns null when the request may proceed; with enforcement off, always null (today's behaviour).
  */
 export async function checkWorkRefusal(
   client: Executor,
   user: SessionUser | null,
-  textSha256: string,
+  _textSha256: string,
   nowMs: number = Date.now(),
 ): Promise<CheckWorkRefusal | null> {
   if (!accountActivationEnforced()) return null;
   if (!user) return { status: 401, code: "SIGN_IN_REQUIRED", message: "Log in to check a document." };
   const policy = await resolveRoomPolicy(client, user, nowMs);
   if (!policy.block) return null;
-  if (policy.block.code === "PLAN_EXPIRED" && policy.entitlement) {
-    const open = await client.execute({
-      sql: `SELECT 1 FROM account_check_authorizations
-            WHERE user_id = ? AND text_sha256 = ? AND consumed_at IS NULL AND expires_at > ? AND issued_at < ? LIMIT 1`,
-      args: [user.id, textSha256, nowMs, policy.entitlement.expiresAt],
-    });
-    if (open.rows.length === 1) return null;
-  }
   return { status: 403, code: policy.block.code, message: policy.block.message };
 }
 

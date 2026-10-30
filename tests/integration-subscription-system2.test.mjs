@@ -201,6 +201,9 @@ const pass = (name) => { results.push(name); console.log(`ok - ${name}`); };
   for (const [u, id, label] of [[expired, 7200000000001, 'expired'], [suspended, 7200000000002, 'suspended'], [unverified, 7200000000003, 'unverified']]) {
     assert.equal((await system2(u, id)).status, 404, `${label}: System 2 route is 404 on its own report`);
   }
+  process.env.S2_RESEARCH_OWNER_EMAILS = expired.email;
+  assert.equal((await system2(expired, 7200000000001)).status, 404, 'expired: the owner allowlist does not reopen a refused report');
+  process.env.S2_RESEARCH_OWNER_EMAILS = '';
   assert.equal(await postReport(unsubscribed, 7100000000003, 0), 403, 'no subscription: no check at all');
   assert.equal((await system2(null, 7100000000001)).status, 404, 'signed out: 404');
   assert.equal((await system2(subscriber2, 7100000000001)).status, 404, "another customer's report: 404");

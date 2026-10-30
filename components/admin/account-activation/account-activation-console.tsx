@@ -684,7 +684,7 @@ function ConfirmationSummary({ preview }: { preview: Preview }) {
         : preview.action === "adjust_rooms"
           ? "Room adjustment — dates unchanged"
           : preview.action === "suspend"
-            ? "Suspension — no new checks until reactivated; reports stay readable; the expiry date does not move"
+            ? "Suspension — no checks or report access until reactivated; reports are kept; the expiry date does not move"
             : "Reactivation — the original expiry date applies";
   const rows: Array<[string, string]> = [
     ["Customer email", preview.account.email],

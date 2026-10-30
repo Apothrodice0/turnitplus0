@@ -37,7 +37,18 @@ test("no subscription: the upload area is locked with the owner's exact message"
   assert.doesNotMatch(html, /type="file"/, "no file input to click or drop onto");
   assert.doesNotMatch(html, /Generate (free )?report|Choose file|Drop your document here/);
   assert.match(html, /<button class="button primary full upload-locked-action" type="button" disabled="" aria-disabled="true">/, "the generate action is disabled");
-  assert.match(html, /Your account and existing reports remain available\./);
+  assert.match(html, /Your account remains available\./);
+  assert.doesNotMatch(html, /existing reports/, "no promise about reports without a subscription");
+  assert.match(render({ locked: roomCooldownLock(3, Date.UTC(2026, 9, 30, 9, 5)) }), /Your account and existing reports remain available\./, "a room cooldown keeps its line");
+});
+
+test("no refusal promises that reports stay available (owner decision 2026-10-30: they are refused, and deleted on expiry)", async () => {
+  const { subscriptionNoticeFor } = await import("../lib/account-plan.ts");
+  const at = Date.UTC(2026, 9, 1);
+  for (const code of ["ACTIVATION_REQUIRED", "PLAN_EXPIRED", "ACCOUNT_SUSPENDED"]) {
+    const wording = JSON.stringify([planBlockMessage(code, null), uploadLockFor(code, at), subscriptionNoticeFor(code, at)]);
+    assert.doesNotMatch(wording, /reports? (stay|stays|remain|remains)/i, code);
+  }
 });
 
 test("expired and suspended subscriptions are locked too, with their status line", () => {
@@ -114,24 +125,22 @@ test("subscription-required screen: My Reports shows ONE centered card instead o
   const React = await import("react");
   const html = renderToStaticMarkup(React.createElement(SubscriptionRequiredState, {
     notice: subscriptionNoticeFor("PLAN_EXPIRED", Date.UTC(2026, 9, 1)),
-    earlierReports: [{ href: "/reports/rooms/2", label: "Report from 3 Sept 2026" }],
   }));
   assert.match(html, /class="subscription-required-stage"/);
   assert.match(html, /class="subscription-required-card"/);
   assert.match(html, /class="subscription-required-icon"><svg/);
   assert.match(html, /<h2 id="subscription-required-title">Subscription required<\/h2>/);
   assert.match(html, /expired on 1 October 2026/);
-  assert.match(html, /href="\/reports\/rooms\/2"/);
-  assert.doesNotMatch(html, /type="file"|drop-zone|Generate|report-room-row/, "no upload, no room list");
+  assert.doesNotMatch(html, /<a |type="file"|drop-zone|Generate|report-room-row/, "no link, no upload, no room list");
   const bare = renderToStaticMarkup(React.createElement(SubscriptionRequiredState, { notice: subscriptionNoticeFor("ACTIVATION_REQUIRED", null) }));
-  assert.doesNotMatch(bare, /subscription-required-history|subscription-required-back/, "nothing extra without earlier reports or a back link");
+  assert.doesNotMatch(bare, /subscription-required-back/, "nothing extra without a back link");
 
   // My Reports: the locked branch returns the screen BEFORE any room row is rendered, and lists only non-empty rooms
   const rooms = await readFile(new URL("../components/reports/report-rooms.tsx", import.meta.url), "utf8");
   const lockedAt = rooms.indexOf("if (planNotice !== null) {");
   assert.ok(lockedAt > 0);
   assert.ok(lockedAt < rooms.indexOf("{roomIndex.map((entry) => {"), "the screen replaces the room list");
-  assert.match(rooms.slice(lockedAt, rooms.indexOf("return <SubscriptionRequiredState", lockedAt)), /\.filter\(\(entry\) => entry\.status !== "empty"\)/);
+  assert.match(rooms, /return <SubscriptionRequiredState notice=\{notice\} \/>;/, "and carries no report link (owner decision 2026-10-30)");
   assert.doesNotMatch(rooms, /className="subscription-notice"/, "the old banner is gone");
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
   assert.match(page, /onPlanLockChange=\{setReportsPlanLocked\}/);
@@ -139,7 +148,7 @@ test("subscription-required screen: My Reports shows ONE centered card instead o
 
   // a room URL: a blocked account's empty room is the same screen, rendered server-side (never the upload area)
   const roomPage = await readFile(new URL("../app/reports/rooms/[room]/page.tsx", import.meta.url), "utf8");
-  assert.match(roomPage, /if \(planBlock && shown\.status === "empty"\) \{\s*return \{ status: "subscription-required"/);
+  assert.match(roomPage, /const accessRefusal = reportAccessRefusal\(policy\);[\s\S]{0,240}status: "subscription-required"/, "decided before any report is read");
   assert.match(roomPage, /<SubscriptionRequiredState notice=\{result\.notice\} backHref="\/#reports" \/>/);
 
   const css = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");

@@ -11,6 +11,10 @@
     {
       "path": "/api/internal/selective-corpus-authoritative-sweep",
       "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/internal/subscription-expiry-sweep",
+      "schedule": "20 * * * *"
     }
   ]
 }

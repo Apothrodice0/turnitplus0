@@ -1,14 +1,17 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { CalendarClock, DoorOpen } from "lucide-react";
 import type { CustomerPlanView } from "@/lib/account-entitlements";
 import { formatPlanDate } from "@/lib/account-plan";
 
 /**
- * The account page's "Your plan" card (manual account activation). Reads GET /api/account/plan — the server's view of
+ * The account page's "Subscription" panel (manual subscriptions). Reads GET /api/account/plan — the server's view of
  * THIS session's own plan — and renders nothing at all while the feature is off or for an exempt (administrator)
- * account, so the page is then exactly what it was before. Display only; POST /api/reports enforces.
+ * account, so the page is then exactly what it was before. Display only; the server enforces.
+ *
+ * Owner decision 2026-10-30: one simple status panel in the account page's own type scale — a title and a status pill,
+ * then plain text at the page's one body size (labels and values alike). Not active / expired / paused: two short
+ * lines (what it means, who to contact). Active: two detail rows (rooms, valid until).
  */
 
 type PlanResponse = ({ authenticated: true } & CustomerPlanView) | { authenticated: false };
@@ -23,13 +26,31 @@ export async function fetchAccountPlan(): Promise<PlanResponse | null> {
   }
 }
 
+/** True when this plan view means the account may open no report (no subscription, expired, paused). */
+export function planBlocksReports(plan: PlanResponse | null): boolean {
+  return !!plan && plan.authenticated && plan.enforced && !plan.exempt && plan.graceEndsAt === null && (plan.state === "none" || plan.state === "expired" || plan.state === "suspended");
+}
+
 const STATE_LABEL: Record<string, string> = {
   active: "Active",
   expired: "Expired",
   suspended: "Paused",
-  none: "Not activated",
+  none: "Not active",
   unavailable: "Unavailable",
 };
+
+function inactiveLines(state: string, expiresAt: number | null, message: string | null): [string, string] | [string] {
+  switch (state) {
+    case "none":
+      return ["An active subscription is required to check documents.", "Contact TurnitPlus to activate your plan."];
+    case "expired":
+      return [expiresAt !== null ? `Your subscription ended on ${formatPlanDate(expiresAt)}.` : "Your subscription has ended.", "Contact TurnitPlus to renew your plan."];
+    case "suspended":
+      return ["Your subscription is paused.", "Contact TurnitPlus to restore your plan."];
+    default:
+      return [message ?? "New checks are temporarily unavailable."];
+  }
+}
 
 export function AccountPlanCard() {
   const [plan, setPlan] = useState<PlanResponse | null>(null);
@@ -48,47 +69,39 @@ export function AccountPlanCard() {
 
   const state = plan.state;
   // An existing account in its legacy free-access period keeps the old free limits; the message gives the end date.
-  const label = plan.graceEndsAt !== null ? "Free access" : STATE_LABEL[state] ?? state;
+  const inGrace = plan.graceEndsAt !== null;
+  const label = inGrace ? "Free access" : STATE_LABEL[state] ?? state;
   return (
-    <section className={`account-plan-card account-plan-${state}`} aria-labelledby="account-plan-title">
-      <div className="account-plan-head">
-        <h3 id="account-plan-title">Your plan</h3>
-        <span className={`account-plan-status account-plan-status-${state}`}>{label}</span>
+    <section className={`account-subscription account-subscription-${inGrace ? "active" : state}`} aria-labelledby="account-subscription-title">
+      <div className="account-subscription-head">
+        <h3 id="account-subscription-title">Subscription</h3>
+        <span className={`account-subscription-status account-subscription-status-${inGrace ? "active" : state}`}>{label}</span>
       </div>
-      {plan.planDays !== null && plan.expiresAt !== null ? (
-        <dl className="account-plan-grid">
-          <div>
-            <dt>Plan</dt>
-            <dd>{plan.planDays} days</dd>
-          </div>
-          <div>
-            <dt><DoorOpen aria-hidden="true" /> Rooms</dt>
-            <dd>
-              {plan.rooms
-                ? state === "active"
-                  ? `${plan.rooms.available} available now of ${plan.rooms.allocated}`
-                  : `${plan.rooms.allocated} allocated`
-                : "—"}
-            </dd>
-          </div>
-          <div>
-            <dt><CalendarClock aria-hidden="true" /> {state === "expired" ? "Expired" : "Expires"}</dt>
-            <dd>{formatPlanDate(plan.expiresAt)}</dd>
-          </div>
-          {plan.activatedAt !== null && (
+      {state === "active" && !inGrace ? (
+        <>
+          <dl className="account-subscription-details">
             <div>
-              <dt>Activated</dt>
-              <dd>{formatPlanDate(plan.activatedAt)}</dd>
+              <dt>Rooms</dt>
+              <dd>{plan.rooms ? `${plan.rooms.available} of ${plan.rooms.allocated} available` : "—"}</dd>
             </div>
+            {plan.expiresAt !== null && (
+              <div>
+                <dt>Valid until</dt>
+                <dd>{formatPlanDate(plan.expiresAt)}</dd>
+              </div>
+            )}
+          </dl>
+          {plan.rooms && plan.rooms.cooling > 0 && (
+            <p className="account-subscription-text">Each room is available again 24 hours after its upload.</p>
           )}
-        </dl>
-      ) : null}
-      {state === "active" && plan.rooms && plan.rooms.cooling > 0 && (
-        <p className="account-plan-note">
-          Each room is available again 24 hours after its upload — {plan.rooms.cooling} of your rooms {plan.rooms.cooling === 1 ? "is" : "are"} in use right now.
-        </p>
+        </>
+      ) : inGrace ? (
+        plan.message && <p className="account-subscription-text">{plan.message}</p>
+      ) : (
+        inactiveLines(state, plan.expiresAt, plan.message).map((line) => (
+          <p key={line} className="account-subscription-text">{line}</p>
+        ))
       )}
-      {plan.message && <p className="account-plan-message">{plan.message}</p>}
     </section>
   );
 }

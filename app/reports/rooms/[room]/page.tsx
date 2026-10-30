@@ -11,7 +11,8 @@ import { getReportsDbClient } from "@/lib/reports-db";
 import { findRoomOccupant, listEarlierRoomReports, type RoomOccupantResult } from "@/lib/reports-repo";
 import { reportHistoryRetentionEnabled, type EarlierRoomReport } from "@/lib/report-history";
 import { ROOM_CYCLE_MS } from "@/lib/report-rooms";
-import { newCheckRefusal, readActiveRoomClaims, resolveRoomPolicy } from "@/lib/account-entitlements";
+import { newCheckRefusal, readActiveRoomClaims, reportAccessRefusal, resolveRoomPolicy } from "@/lib/account-entitlements";
+import { scheduleExpiryCleanupAfterRefusal } from "@/lib/subscription-expiry-cleanup";
 import { HISTORICAL_ROOM_NOTE, roomCooldownLock, subscriptionNoticeFor, uploadLockFor, type SubscriptionNotice, type UploadLock } from "@/lib/account-plan";
 import { SubscriptionRequiredState } from "@/components/reports/subscription-required-state";
 import { resolveSystem2Access } from "@/lib/system2-access";
@@ -87,6 +88,15 @@ const loadRoom = cache(async (roomParam: string): Promise<RoomPageResult> => {
     const roomCount = planBlock ? Math.max(policy.visibleRoomCount, LOCKED_ROOM_URL_LIMIT) : policy.visibleRoomCount;
     const room = Number(roomParam);
     if (!Number.isInteger(room) || room < 0 || room >= roomCount) return { status: "invalid-room" };
+
+    // Manual subscriptions (lib/account-entitlements.ts REPORT ACCESS, owner decision 2026-10-30): no subscription,
+    // expired or suspended — every room is the subscription-required screen, whatever it holds. Decided before any
+    // report is read; an expired plan's report data is deleted after the response.
+    const accessRefusal = reportAccessRefusal(policy);
+    if (accessRefusal) {
+      await scheduleExpiryCleanupAfterRefusal(accessRefusal.code, sessionUser);
+      return { status: "subscription-required", notice: subscriptionNoticeFor(accessRefusal.code, policy.entitlement?.expiresAt ?? null) };
+    }
 
     const occupant = await findRoomOccupant(client, sessionUser.id, room);
     // Manual subscriptions: where no new check can start (no active subscription, or a room beyond the plan) the customer

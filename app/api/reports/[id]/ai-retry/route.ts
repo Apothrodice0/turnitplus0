@@ -3,6 +3,7 @@ import { getReportsDbClient } from '../../../../../lib/reports-db';
 import { checkRate } from '../../../../../lib/rate-limit';
 import { clientIpFrom } from '../../../../../lib/client-ip';
 import { getSessionUser } from '../../../../../lib/auth-session';
+import { reportAccessRefusalFor } from '../../../../../lib/account-entitlements';
 import { INTERPRETATION_TO_VERIFY_SQL } from '../../../../../lib/reports-repo';
 import { isEvidenceInterpretationCustomerReadable } from '../../../../../lib/report-persistence';
 import { MAX_REPORT_SAVE_REQUEST_BYTES, persistedFitFromSqlBounds, persistedPayloadSize } from '../../../../../lib/report-transport-limits';
@@ -343,6 +344,9 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     try {
       const sessionUser = await getSessionUser(request, client);
       if (!sessionUser) return json(401, { error: 'Log in to continue.' });
+      // Manual subscriptions (lib/account-entitlements.ts REPORT ACCESS): no AI retry on a report the account may not read.
+      const accessRefusal = await reportAccessRefusalFor(client, sessionUser);
+      if (accessRefusal) return json(403, { error: accessRefusal.message, code: accessRefusal.code });
 
       // The write transaction runs on its OWN connection, a FRESH one per attempt (lib/reports-db.ts: busy_timeout does
       // not help with this driver — only a new connection recovers from a lost write-lock race). Bounded, with backoff +

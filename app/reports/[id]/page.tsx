@@ -8,6 +8,10 @@ import { checkReadRate } from "@/lib/rate-limit";
 import { clientIpFromHeaders } from "@/lib/client-ip";
 import { getReportsDbClient } from "@/lib/reports-db";
 import { findReportRowForUser } from "@/lib/reports-repo";
+import { accountActivationEnforced, reportAccessRefusal, resolveRoomPolicy } from "@/lib/account-entitlements";
+import { subscriptionNoticeFor, type SubscriptionNotice } from "@/lib/account-plan";
+import { scheduleExpiryCleanupAfterRefusal } from "@/lib/subscription-expiry-cleanup";
+import { SubscriptionRequiredState } from "@/components/reports/subscription-required-state";
 import { deriveRoomStatus } from "@/lib/report-rooms";
 import { resolvePersistedSimilarityDisplay } from "@/lib/report-primary-similarity";
 import { archiveOverlapScore, hasUnifiedSimilarity, stripServerInternalReportFields, type SimilarityReport } from "@/lib/report-types";
@@ -57,6 +61,7 @@ type OwnedReportResult =
   // aiAnalysis-as-refinement, not from aiAnalysis alone.
   | { status: "found"; payload: SimilarityReport; aiStatus: "processing" | "ready" | "failed"; aiScore: number | null; aiTone: string | null; similarityStatus: "resolved" | "stale" | "pending" | "failed"; system2Enabled: boolean }
   | { status: "not-found-for-session" }
+  | { status: "subscription-required"; notice: SubscriptionNotice }
   // R2: the report exists and is this session's own, but its persisted explanation
   // (evidenceInterpretation) cannot be decoded safely — never rendered as a score
   // without cards/highlights. See tryDecodeReportFromPersistence.
@@ -88,6 +93,15 @@ const loadOwnedReport = cache(async (id: string): Promise<OwnedReportResult> => 
   try {
     const sessionUser = await getSessionUserByToken(token, client);
     if (!sessionUser) return { status: "no-session" };
+    // Manual subscriptions (lib/account-entitlements.ts REPORT ACCESS): an account without an active subscription opens
+    // none of its reports — nor their print view, which is this page. Decided before the report is read; an expired
+    // plan's report data is deleted after the response.
+    const policy = accountActivationEnforced() ? await resolveRoomPolicy(client, sessionUser) : null;
+    const accessRefusal = policy ? reportAccessRefusal(policy) : null;
+    if (policy && accessRefusal) {
+      await scheduleExpiryCleanupAfterRefusal(accessRefusal.code, sessionUser);
+      return { status: "subscription-required", notice: subscriptionNoticeFor(accessRefusal.code, policy.entitlement?.expiresAt ?? null) };
+    }
     const row = await findReportRowForUser(client, id, sessionUser.id);
     if (!row) return { status: "not-found-for-session" };
     // A corrupt payload_json is, from the user's own perspective,
@@ -237,6 +251,14 @@ export default async function ReportDetailPage({
   const result = await loadOwnedReport(id);
 
   if (result.status === "not-found-for-session") notFound();
+
+  if (result.status === "subscription-required") {
+    return (
+      <section className="result-view report-detail-page">
+        <SubscriptionRequiredState notice={result.notice} backHref="/#reports" />
+      </section>
+    );
+  }
 
   if (result.status === "report-unavailable") {
     const backHref = backRoom !== null ? `/reports/rooms/${backRoom}` : "/#reports";

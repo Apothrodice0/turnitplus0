@@ -189,21 +189,21 @@ let sub;
   pass('R4 active subscriber: rooms 1–2 only, 24 h cooldown, reuse after 24 h keeps the earlier report');
 }
 
-// ── R5. Suspension and expiry: history stays readable, nothing new starts ────────────────────────────────────────────
+// ── R5. Suspension and expiry: no report access, nothing new starts, nothing deleted by access control alone ────────────────────────────────────────────
 {
   await grant(admin.cookie, { email: sub.email, action: 'suspend', reason: 'History retention test' });
   const suspended = await roomIndex(sub);
-  assert.deepEqual(suspended.body.rooms.map((r) => r.room), [0], 'suspended: the history room is listed');
-  assert.equal((await roomNow(sub, 0)).body.report.id, '5300000000004', 'it opens on its newest report');
-  assert.deepEqual((await listEarlierRoomReports(db, sub.id, 0, '5300000000004')).map((r) => r.id), ['5300000000001'], 'with the earlier one in its history');
-  assert.equal((await reportById(sub, '5300000000001')).status, 200, 'which still opens');
+  assert.deepEqual(suspended.body.rooms, [], 'suspended: no room is listed (owner decision 2026-10-30)');
+  assert.equal((await roomNow(sub, 0)).status, 403, 'the room poll refuses');
+  assert.equal((await reportById(sub, '5300000000001')).status, 403, 'and so does every report');
+  assert.deepEqual((await rowsOf(sub)).map(([id]) => id), ['5300000000001', '5300000000004'], 'both are kept while the suspension can be reversed');
   assert.equal((await postReport(sub, 5300000000005, { room: 1 })).status, 403, 'no new check while suspended');
   await db.execute({ sql: 'UPDATE account_entitlements SET status = ?, suspended_at = NULL, expires_at = ? WHERE user_id = ?', args: ['active', Date.now() - 1000, sub.id] });
-  assert.equal((await reportById(sub, '5300000000001')).status, 200, 'expired: the earlier report still opens');
-  assert.equal((await roomNow(sub, 0)).body.report.id, '5300000000004');
+  assert.equal((await reportById(sub, '5300000000001')).status, 403, 'expired: refused at once, with or without cleanup');
+  assert.equal((await roomNow(sub, 0)).status, 403);
   const expired = await postReport(sub, 5300000000006, { room: 1 });
   assert.equal(expired.body.code, 'PLAN_EXPIRED', 'no new check after expiry');
-  pass('R5 suspended or expired: history rooms listed, current and earlier reports readable, no new check');
+  pass('R5 suspended or expired: no room, no report, no new check; a suspended plan keeps its reports');
 }
 
 // ── R6. Administrators: unrestricted, and their history is kept too ──────────────────────────────────────────────────
@@ -219,10 +219,10 @@ let sub;
 {
   assert.equal(await deleteReport(u1, '5100000000002'), 200, 'the customer deletes one earlier report');
   assert.deepEqual((await rowsOf(u1)).map(([id]) => id), ['5100000000001', '5100000000003'], 'only that report is gone');
-  assert.equal((await reportById(u1, '5100000000002')).status, 404);
+  assert.equal((await reportById(u1, '5100000000002')).status, 403, 'this account has no subscription: every report id answers the same refusal');
   assert.deepEqual((await listEarlierRoomReports(db, u1.id, 2, '5100000000003')).map((r) => r.id), ['5100000000001']);
   assert.equal(await deleteReport(u1, '5100000000003'), 200, 'then the current one');
-  assert.equal((await roomNow(u1, 2)).body.report?.id, '5100000000001', 'the room (no subscription: history view) now opens on its remaining earlier report');
+  assert.equal((await roomNow(u1, 2)).status, 403, 'the room (no subscription) stays refused');
   assert.deepEqual((await rowsOf(u1)).map(([id]) => id), ['5100000000001'], 'the remaining earlier report is untouched');
   const identitiesBefore = Number((await db.execute({ sql: 'SELECT COUNT(*) AS c FROM document_identities WHERE account_id = ?', args: [u1.id] })).rows[0].c);
   const me = await meRoute.DELETE(new Request('http://localhost/api/auth/me', {

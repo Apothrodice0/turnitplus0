@@ -4,7 +4,7 @@ import type { CSSProperties, ReactNode, RefObject } from "react";
 import { Check, LockKeyhole, UploadCloud } from "lucide-react";
 import { ReferenceFilesPanel } from "@/components/reports/reference-files-panel";
 import { displayedCheckPercent, progressEncouragement } from "@/lib/upload-progress";
-import type { UploadLock } from "@/lib/account-plan";
+import { SUBSCRIPTION_REQUIRED_TITLE, type UploadLock } from "@/lib/account-plan";
 
 export type { UploadLock };
 import type {
@@ -115,7 +115,7 @@ export function DocumentUploadPanel({ file, isGeneratingReport, progress, proces
           <LockKeyhole aria-hidden="true" />
           {locked.actionLabel}
         </button>
-        <p className="privacy-note"><LockKeyhole aria-hidden="true" /> Your account and existing reports remain available.</p>
+        <p className="privacy-note"><LockKeyhole aria-hidden="true" /> {locked.title === SUBSCRIPTION_REQUIRED_TITLE ? "Your account remains available." : "Your account and existing reports remain available."}</p>
       </>
     );
   }

@@ -291,7 +291,7 @@ let start;
   pass('G8 (flag on) free access applies until the last millisecond before grace_ends_at and not at it; (flag off) never');
 }
 
-// ── G9. After grace: no new checks without a plan; accounts, reports and running checks are kept ────────────────────
+// ── G9. After grace: no checks and no report access without a plan; the account and its reports are kept ───────────
 {
   // Simulate the 30 days passing: the row is immutable by design, so the test lifts its guard to back-date it.
   await db.execute({ sql: 'DROP TRIGGER trg_account_activation_enforcement_no_update', args: [] });
@@ -302,8 +302,9 @@ let start;
   assert.equal(r.status, 403);
   assert.equal(r.body.code, 'ACTIVATION_REQUIRED');
   const read = await getJson(reportByIdRoute, `http://localhost/api/reports/4100000000011?deviceKey=${encodeURIComponent(legacy.deviceKey)}`, legacy.cookie, { id: '4100000000011' });
-  assert.equal(read.status, 200, 'existing reports stay readable');
-  assert.equal((await postReport(legacy, 4100000000011, { room: 1, aiScore: 61 })).status, 200, 'a check that already started still finishes (resave)');
+  assert.equal(read.status, 403, 'existing reports are refused without a plan (owner decision 2026-10-30)');
+  assert.equal((await postReport(legacy, 4100000000011, { room: 1, aiScore: 61 })).status, 403, 'and so is a resave');
+  assert.equal(Number((await db.execute({ sql: "SELECT COUNT(*) AS c FROM saved_reports WHERE id = '4100000000011'", args: [] })).rows[0].c), 1, 'refused, not deleted: this account never had an expired plan');
   const plan = (await planOf(legacy)).body;
   assert.equal(plan.graceEndsAt, null);
   assert.equal(plan.state, 'none');
@@ -314,7 +315,7 @@ let start;
   assert.equal((await postReport(legacy, 4100000000201, { room: 5 })).status, 409, 'room 6 is still in its 24 h cycle from today');
   await db.execute({ sql: 'UPDATE saved_reports SET report_created_at = ? WHERE user_id = ?', args: [new Date(Date.now() - 2 * DAY_MS).toISOString(), legacy.id] });
   assert.equal((await postReport(legacy, 4100000000202, { room: 5 })).status, 200, 'once activated, the customer checks again');
-  pass('G9 after grace: no plan → 403 for new checks; reports stay readable and running checks finish; activation restores access');
+  pass('G9 after grace: no plan → 403 for new checks, reports and resaves; nothing is deleted; activation restores access');
 }
 
 // ── G10. Roles are never touched ───────────────────────────────────────────────────────────────────────────────────

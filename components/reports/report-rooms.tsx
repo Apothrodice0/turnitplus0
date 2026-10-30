@@ -9,6 +9,7 @@ import { fetchReportRoomIndex, type RoomIndexFetchResult } from "@/lib/reports-r
 import { SUBSCRIPTION_REQUIRED_TITLE, type SubscriptionNotice } from "@/lib/account-plan";
 import { SubscriptionRequiredState } from "@/components/reports/subscription-required-state";
 import { getCachedRoomIndex, setCachedRoomIndex } from "@/lib/report-rooms-cache";
+import { accountLocalReportOwner, clearStoredReports } from "@/lib/report-store";
 import type { RoomIndexEntry, RoomStatus } from "@/lib/report-rooms";
 
 /**
@@ -290,6 +291,13 @@ export function ReportRoomsBrowser({ accountEmail, onTotalCountChange, onPlanLoc
       if (result.ok) {
         setCachedRoomIndex(accountEmail, result.rooms);
       }
+      // Manual subscriptions (owner decision 2026-10-30): an account without an active subscription keeps no report
+      // history on this device either — the browser's own copies of its reports are cleared (the server decides access
+      // and, for an expired plan, deletes the reports themselves).
+      if (result.ok && result.notice) {
+        const owner = accountLocalReportOwner(accountEmail);
+        if (owner) void clearStoredReports(owner).catch(() => undefined);
+      }
       if (resolution.rooms) {
         setRoomIndex(resolution.rooms);
       }
@@ -333,18 +341,12 @@ export function ReportRoomsBrowser({ accountEmail, onTotalCountChange, onPlanLoc
     );
   }
 
-  // Manual subscriptions: an account that cannot start a new check sees ONE centered subscription-required screen in
-  // place of the whole room list — no room rows, no empty or new-check room to open. Reports it already has stay
-  // readable from the screen (rooms holding a report only).
+  // Manual subscriptions (owner decision 2026-10-30): an account without an active subscription sees ONE centered
+  // subscription-required screen in place of the whole room list — no room rows, no report links, no upload control.
+  // The server returns no rooms for it at all (app/api/reports/rooms/route.ts) and refuses every report it holds.
   if (planNotice !== null) {
     const notice: SubscriptionNotice = planLock ?? { title: SUBSCRIPTION_REQUIRED_TITLE, message: planNotice, secondary: "", detail: null };
-    const earlierReports = roomIndex
-      .filter((entry) => entry.status !== "empty")
-      .map((entry) => ({
-        href: `/reports/rooms/${entry.room}`,
-        label: entry.mostRecentAt ? `Report from ${new Date(entry.mostRecentAt).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}` : "Earlier report",
-      }));
-    return <SubscriptionRequiredState notice={notice} earlierReports={earlierReports} />;
+    return <SubscriptionRequiredState notice={notice} />;
   }
 
   return (

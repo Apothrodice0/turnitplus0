@@ -1,6 +1,7 @@
 import type { Client, Transaction } from "@libsql/client";
 import type { SessionUser } from "./auth-session";
 import { usersHaveEmailVerifiedAtColumn } from "./email-verification";
+import { cleanupExpiredSubscriptionReports } from "./subscription-expiry-cleanup";
 import {
   ENTITLEMENT_COLUMNS,
   entitlementFromRow,
@@ -49,7 +50,7 @@ import {
  *                 is lost; the room count stays unless the admin enters a new one. A suspended plan stays suspended.
  *  - adjust_rooms any plan; a reason is required. Rooms are slots, not credits, so nothing "consumed" is affected: a
  *                 report in a room above the new count stays stored and reachable.
- *  - suspend      an active plan; a reason is required. New checks stop; reports stay readable; the end date does not
+ *  - suspend      an active plan; a reason is required. Checks and report access stop; reports are kept; the end date does not
  *                 move (suspended days are not refunded).
  *  - reactivate   a suspended plan; the original end date applies.
  */
@@ -332,7 +333,7 @@ export type ApplyResult =
       outcome: "rejected";
       status: 400 | 404 | 409;
       error: string;
-      code?: "STALE" | "OPERATION_REUSED" | "NOT_FOUND" | "ADMIN_ACCOUNT" | "UNVERIFIED_EMAIL" | "ACCOUNT_CHANGED";
+      code?: "STALE" | "OPERATION_REUSED" | "NOT_FOUND" | "ADMIN_ACCOUNT" | "UNVERIFIED_EMAIL" | "ACCOUNT_CHANGED" | "EXPIRY_CLEANUP_FAILED";
     };
 
 export const UNVERIFIED_EMAIL_ERROR =
@@ -379,6 +380,21 @@ class Refusal extends Error {
   }
 }
 
+async function cleanupBeforeActivatingExpiredPlan(openConnection: () => Client | Promise<Client>, email: string, expectedUserId: string, nowMs: number): Promise<Extract<ApplyResult, { outcome: "rejected" }> | null> {
+  const client = await openConnection();
+  try {
+    const match = await findAccountByEmail(client, email);
+    if (match.kind !== "found" || match.row.id !== expectedUserId) return null; // the transaction below refuses these itself
+    await cleanupExpiredSubscriptionReports(client, { id: match.row.id, email: match.row.email }, nowMs);
+    return null;
+  } catch (error) {
+    console.error("activation: expiry cleanup failed:", error instanceof Error ? error.name : "unknown");
+    return { outcome: "rejected", status: 409, code: "EXPIRY_CLEANUP_FAILED", error: "The expired plan's reports could not be cleared yet. Please try again." };
+  } finally {
+    client.close();
+  }
+}
+
 export async function applyActivationAction(
   openConnection: () => Client | Promise<Client>,
   admin: SessionUser,
@@ -386,6 +402,15 @@ export async function applyActivationAction(
   nowMs: number = Date.now(),
 ): Promise<ApplyResult> {
   const email = canonicalizeAccountEmail(request.email);
+  // Subscription expiry cleanup (lib/subscription-expiry-cleanup.ts, owner decision 2026-10-30): activating an EXPIRED
+  // account starts a new plan with an empty report history, so the expired plan's reports are deleted first — before
+  // the new plan exists, so nothing saved under it can be touched. Idempotent (an already-clean account is a no-op) and
+  // under SUBSCRIPTION_EXPIRY_CLEANUP like every other trigger. If it fails, the activation is refused so it can be
+  // retried rather than granting a plan on top of the old history.
+  if (request.action === "activate") {
+    const failed = await cleanupBeforeActivatingExpiredPlan(openConnection, email, request.expectedUserId, nowMs);
+    if (failed) return failed;
+  }
   try {
     return await runWriteTransaction(openConnection, async (tx) => {
       // (1) Idempotency: the same confirmation, sent again, is answered from what it already did.

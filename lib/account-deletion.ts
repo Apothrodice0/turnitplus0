@@ -134,8 +134,18 @@ function chunksOf<T>(items: readonly T[], size: number): T[][] {
 export async function deleteAllReportDataForAccount(
   client: Client,
   accountId: string,
-  options: { preserveActivelyPromotedRepresentations?: boolean } = {},
+  options: {
+    preserveActivelyPromotedRepresentations?: boolean;
+    /**
+     * Subscription expiry cleanup (lib/subscription-expiry-cleanup.ts): only reports saved, and document identities
+     * created, at or before this server time ('YYYY-MM-DD HH:MM:SS' UTC, the CURRENT_TIMESTAMP format of saved_at /
+     * created_at) — so a cleanup that loses a race with a renewal can never touch anything made after it. Unset: every
+     * row of the account, exactly as before.
+     */
+    savedAtOrBefore?: string;
+  } = {},
 ): Promise<DeleteAccountDataResult> {
+  const cutoff = options.savedAtOrBefore ?? null;
   // ---- Phase 1: reports — historical snapshots, corpus-admission
   // bookkeeping, then the saved_reports rows themselves. Order mirrors the
   // original (snapshot + admission cleanup before the report row goes) even
@@ -143,8 +153,8 @@ export async function deleteAllReportDataForAccount(
   // — each is keyed entirely by (device_key, report_id) / source_ref values
   // already captured below, never by a live lookup against saved_reports.
   const reportsResult = await client.execute({
-    sql: "SELECT device_key, id FROM saved_reports WHERE user_id = ?",
-    args: [accountId],
+    sql: cutoff === null ? "SELECT device_key, id FROM saved_reports WHERE user_id = ?" : "SELECT device_key, id FROM saved_reports WHERE user_id = ? AND saved_at <= ?",
+    args: cutoff === null ? [accountId] : [accountId, cutoff],
   });
   const reports = reportsResult.rows as unknown as { device_key: string; id: string }[];
 
@@ -156,6 +166,21 @@ export async function deleteAllReportDataForAccount(
       sql: `DELETE FROM report_historical_match_snapshots WHERE (report_device_key, report_id) IN (VALUES ${valuesPlaceholders})`,
       args: chunk.flatMap((r) => [r.device_key, r.id]),
     });
+  }
+  // Expiry cleanup only: a save the room rules then refused can leave a snapshot with no report behind it, which the pairs
+  // above never reach. Limited to this account's device keys and the cutoff; a snapshot with a report row is never touched,
+  // so another account on the same device loses nothing.
+  if (cutoff !== null) {
+    for (const chunk of chunksOf([...new Set(reports.map((r) => r.device_key))], RESET_BULK_CHUNK_SIZE)) {
+      await client.execute({
+        sql: `DELETE FROM report_historical_match_snapshots
+              WHERE report_device_key IN (${chunk.map(() => "?").join(",")}) AND created_at <= ?
+                AND NOT EXISTS (SELECT 1 FROM saved_reports r
+                                WHERE r.device_key = report_historical_match_snapshots.report_device_key
+                                  AND r.id = report_historical_match_snapshots.report_id)`,
+        args: [...chunk, cutoff],
+      });
+    }
   }
 
   // 1b. Corpus-admission bookkeeping — same source_ref format
@@ -189,7 +214,17 @@ export async function deleteAllReportDataForAccount(
 
   // 1c. The saved_reports rows themselves — one set-based statement,
   // replacing what was previously one DELETE per report.
-  await client.execute({ sql: "DELETE FROM saved_reports WHERE user_id = ?", args: [accountId] });
+  if (cutoff === null) {
+    await client.execute({ sql: "DELETE FROM saved_reports WHERE user_id = ?", args: [accountId] });
+  } else {
+    // exactly the reports selected above (a report saved after the cutoff is never in that list)
+    for (const chunk of chunksOf(reports, RESET_BULK_CHUNK_SIZE)) {
+      await client.execute({
+        sql: `DELETE FROM saved_reports WHERE user_id = ? AND (device_key, id) IN (VALUES ${chunk.map(() => "(?,?)").join(",")})`,
+        args: [accountId, ...chunk.flatMap((r) => [r.device_key, r.id])],
+      });
+    }
+  }
 
   // ---- Phase 2: document identities + orphaned, non-promoted
   // representations. Candidate representation ids are captured BEFORE the
@@ -197,7 +232,9 @@ export async function deleteAllReportDataForAccount(
   // away with them via PRAGMA foreign_keys), exactly mirroring the original
   // per-identity code's own "read representation_id, then delete the
   // identity, then check what's left" ordering — just batched.
-  const identitiesResult = await client.execute({ sql: "SELECT id FROM document_identities WHERE account_id = ?", args: [accountId] });
+  const identitiesResult = await client.execute(cutoff === null
+    ? { sql: "SELECT id FROM document_identities WHERE account_id = ?", args: [accountId] }
+    : { sql: "SELECT id FROM document_identities WHERE account_id = ? AND created_at <= ?", args: [accountId, cutoff] });
   const identityIds = (identitiesResult.rows as unknown as { id: string }[]).map((r) => r.id);
 
   const candidateRepresentationIds = new Set<string>();
@@ -215,7 +252,13 @@ export async function deleteAllReportDataForAccount(
   // document_identity_shingles, document_family_members, and
   // corpus_submission_references automatically, replacing what was
   // previously one DELETE per identity.
-  await client.execute({ sql: "DELETE FROM document_identities WHERE account_id = ?", args: [accountId] });
+  if (cutoff === null) {
+    await client.execute({ sql: "DELETE FROM document_identities WHERE account_id = ?", args: [accountId] });
+  } else {
+    for (const chunk of chunksOf(identityIds, RESET_BULK_CHUNK_SIZE)) {
+      await client.execute({ sql: `DELETE FROM document_identities WHERE account_id = ? AND id IN (${chunk.map(() => "?").join(",")})`, args: [accountId, ...chunk] });
+    }
+  }
 
   // Of the candidates, exclude any representation still referenced by
   // ANOTHER account's still-live report — the bulk form of the original's

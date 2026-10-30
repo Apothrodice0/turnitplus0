@@ -4,7 +4,8 @@ import { checkReadRate } from '../../../../lib/rate-limit';
 import { clientIpFrom } from '../../../../lib/client-ip';
 import { getSessionUser } from '../../../../lib/auth-session';
 import { deriveRoomStatus, isWithinActiveCycle, ROOM_CYCLE_MS, roomCycleEndsAt, type RoomIndexEntry } from '../../../../lib/report-rooms';
-import { readActiveRoomClaims, resolveRoomPolicy } from '../../../../lib/account-entitlements';
+import { readActiveRoomClaims, reportAccessRefusal, resolveRoomPolicy } from '../../../../lib/account-entitlements';
+import { scheduleExpiryCleanupAfterRefusal } from '../../../../lib/subscription-expiry-cleanup';
 import { subscriptionNoticeFor } from '../../../../lib/account-plan';
 import { roomTimeSql } from '../../../../lib/report-history';
 
@@ -54,6 +55,17 @@ export async function GET(request: Request) {
       const policy = await resolveRoomPolicy(client, sessionUser);
       const roomCount = policy.visibleRoomCount;
 
+      // Manual subscriptions (lib/account-entitlements.ts REPORT ACCESS, owner decision 2026-10-30): no subscription,
+      // expired or suspended — no room and no report at all, only the subscription-required screen's notice (My Reports
+      // and the account navigation show no history). Nothing about the account's reports is read; an expired plan's
+      // report data is deleted after the response.
+      const accessRefusal = reportAccessRefusal(policy);
+      if (accessRefusal) {
+        await scheduleExpiryCleanupAfterRefusal(accessRefusal.code, sessionUser);
+        const lock = subscriptionNoticeFor(accessRefusal.code, policy.entitlement?.expiresAt ?? null);
+        return new NextResponse(JSON.stringify({ rooms: [], notice: accessRefusal.message, lock }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+
       // One row per room that has ever held a report, its single most
       // recent occupant's timestamp and ai_score — never the report content
       // itself, and never more than roomCount rows matter (any legacy
@@ -93,7 +105,7 @@ export async function GET(request: Request) {
       }
 
       const now = Date.now();
-      // No new check allowed (no subscription, expired, suspended): list only the rooms that hold a report — each with its
+      // No new check allowed for another reason (new checks unavailable — the plan tables are missing): list only the rooms that hold a report — each with its
       // latest report, however old, so the customer can still open and read it — and nothing that looks usable. An
       // account with no reports at all gets one locked placeholder room. Room numbers are the reports' own.
       if (policy.block) {

@@ -11,6 +11,8 @@ import { sanitizeExtractionDiagnostic } from '../../../../lib/evidence-interpret
 import { deleteReportDocumentData } from '../../../../lib/report-deletion';
 import { deleteReportCorpusAdmissionData } from '../../../../lib/corpus-admission-report-integration';
 import { getSessionUser } from '../../../../lib/auth-session';
+import { reportAccessRefusalFor } from '../../../../lib/account-entitlements';
+import { scheduleExpiryCleanupAfterRefusal } from '../../../../lib/subscription-expiry-cleanup';
 import { stripServerInternalReportFields, type SimilarityReport } from '../../../../lib/report-types';
 import { tryDecodeReportFromPersistence } from '../../../../lib/report-persistence';
 import { reportScoringNormalizationVersion } from '../../../../lib/similarity-core';
@@ -53,6 +55,14 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
     try {
       const sessionUser = await getSessionUser(request, client);
       const accountId = sessionUser ? sessionUser.id : null;
+      // Manual subscriptions (lib/account-entitlements.ts REPORT ACCESS): an account without an active subscription
+      // reads none of its reports — this GET also feeds the report page, its print view and the receipt. Refused before
+      // any report row is read; an expired plan's report data is then deleted after the response.
+      const accessRefusal = await reportAccessRefusalFor(client, sessionUser);
+      if (sessionUser && accessRefusal) {
+        await scheduleExpiryCleanupAfterRefusal(accessRefusal.code, sessionUser);
+        return new NextResponse(JSON.stringify({ error: accessRefusal.message, code: accessRefusal.code }), { status: 403, headers: NO_STORE_JSON });
+      }
       if (sessionUser) {
         row = await findReportRowForUser(client, id, sessionUser.id);
       } else {

@@ -24,6 +24,7 @@ import {
   checkPlanClaimInTransaction,
   consumeCheckAuthorization,
   newCheckRefusal,
+  reportAccessRefusalFor,
   parseCheckAuthorizationId,
   policyWithCheckAuthorization,
   recordRoomClaim,
@@ -61,6 +62,7 @@ import type { ExternalAcademicEvidence } from '../../../lib/academic-search/type
 import { requestedScoringNormalizationVersion, scoringNormalizationEvidence, type ScoringNormalizationVersion } from '../../../lib/similarity-core';
 import { runWithScoringNormalization } from '../../../lib/scoring-normalization-scope';
 import { SYSTEM2_ESTIMATE_PAYLOAD_KEY, withoutClientSystem2Estimate } from '../../../lib/system2-estimate-record';
+import { scheduleExpiryCleanupAfterRefusal } from '../../../lib/subscription-expiry-cleanup';
 
 // Reports carry derived data (AI passages, matched phrases, extracted text)
 // on top of the ingest pipeline's raw text, so this cap is larger than
@@ -778,6 +780,19 @@ export async function POST(request: Request) {
         }
       }
 
+      // Manual subscriptions (lib/account-entitlements.ts REPORT ACCESS, owner decision 2026-10-30): an account without
+      // an active subscription saves NOTHING — no new check and no resave (AI result, retry, replay) of an existing
+      // report, not even a check that started before the plan ended. This replaces the earlier rule that let such a
+      // check finish: an expired plan's reports are deleted, and a late save must not bring one back.
+      const saveRefusal = await reportAccessRefusalFor(client, sessionUser);
+      if (saveRefusal) {
+        logReportSaveRejectedTelemetry({ reason: 'PLAN_REQUIRED', status: 403, authMode: 'authenticated' });
+        return new NextResponse(JSON.stringify({ error: saveRefusal.message, code: saveRefusal.code }), {
+          status: 403,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
       // Daily upload quota (separate abuse-control layer from the IP rate
       // limiter above): applies only to authenticated, non-admin accounts,
       // and only to a genuinely new upload — never a resave of an
@@ -789,11 +804,9 @@ export async function POST(request: Request) {
       //
       // Manual account activation (lib/account-entitlements.ts): with ACCOUNT_ACTIVATION_ENFORCED off, roomPolicy is
       // exactly the pre-feature answer (10/40 rooms, the cap for non-admins). With it on, a customer's NEW check needs
-      // an active plan and a room inside it, and the plan replaces the daily cap. A resave is never a new check, so the
-      // AI result, a background retry or a resave of an existing report always goes through — checks already started
-      // finish even if the plan has since expired or been suspended. A NEW check whose plan expired while the browser
-      // was analysing it may still save once, with the check authorization the room page obtained when it started
-      // (lib/account-entitlements.ts CHECK AUTHORIZATION): bound to this account, room and manuscript text.
+      // an active plan and a room inside it, and the plan replaces the daily cap. A resave is never a new check, so it
+      // takes no room. An account without an active subscription saves nothing at all (the refusal above); the check
+      // authorization only matters for the instant between that refusal and the insert transaction.
       const checkAuthorizationId = isFirstSaveOfThisReport ? parseCheckAuthorizationId((body as Record<string, unknown>).checkAuthorization) : null;
       const checkAuthorizationText = (payload as { text?: unknown } | null)?.text;
       const checkAuthorizationRef: CheckAuthorizationRef | null =
@@ -1835,6 +1848,13 @@ export async function GET(request: Request) {
         // scan — idx_saved_reports_user_room covers it directly. Absent
         // `room` preserves the original, pre-rooms behavior (top 50 across
         // the whole account) for any other existing caller.
+        // Manual subscriptions (lib/account-entitlements.ts REPORT ACCESS): an account without an active subscription
+        // gets neither a room's report (the room poll) nor its report list; an expired plan's data is deleted after this.
+        const listRefusal = await reportAccessRefusalFor(client, sessionUser);
+        if (listRefusal) {
+          await scheduleExpiryCleanupAfterRefusal(listRefusal.code, sessionUser);
+          return new NextResponse(JSON.stringify({ error: listRefusal.message, code: listRefusal.code }), { status: 403, headers: { 'Content-Type': 'application/json' } });
+        }
         const url = new URL(request.url);
         const roomParam = url.searchParams.get('room');
         if (roomParam !== null) {

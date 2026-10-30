@@ -3,7 +3,7 @@ import mammoth from "mammoth";
 import type { Client } from "@libsql/client";
 import { getSessionUser } from "@/lib/auth-session";
 import { getReportsDbClient } from "@/lib/reports-db";
-import { sqliteTimestampMs } from "@/lib/account-entitlements";
+import { reportAccessRefusalFor, sqliteTimestampMs } from "@/lib/account-entitlements";
 import { canonicalSha256 } from "@/lib/document-identity";
 import { extractDocxTextDocument } from "@/lib/docx-text-extraction";
 import { normalizeExtractedText } from "@/lib/extracted-text-normalization";
@@ -118,6 +118,8 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
   try {
     const user = await getSessionUser(request, client);
     if (!user) return notFound();
+    // Manual subscriptions (lib/account-entitlements.ts REPORT ACCESS): no report, so no estimate — an allowlisted account included.
+    if (await reportAccessRefusalFor(client, user)) return notFound();
     const row = await findTargetRow(client, id, user.id);
     if (!row) return notFound();
     const access = await resolveSystem2Access(client, user, { room: row.room, config });
