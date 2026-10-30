@@ -7221,6 +7221,13 @@ main.report-main {
     background: white !important;
   }
 
+  /* Only the bundle prints: whatever else a report page shows (a notice, a
+     banner, the toolbars below) is screen-only, and on the page above the
+     bundle it would push the report off its first sheet. */
+  .result-view.report-detail-page:has(.print-report-bundle) > :not(.print-report-bundle) {
+    display: none !important;
+  }
+
   .sidebar,
   .result-toolbar,
   .report-summary-strip,
@@ -7303,135 +7310,256 @@ main.report-main {
     height: auto;
   }
 
-  /* Visual-correction pass: the base .report-paper rule above forces every
-     print "page" to a fixed 11in min-height — built for (and still exactly
-     right for) the legacy one-section-per-physical-page layout AiReport/
-     OverviewReport/SourcesReport still use. For the V2 sequence
-     specifically (wrapped in .rv2-print-flow — see
-     app/reports/[id]/report-detail-shell.tsx's own print bundle), a fixed
-     11in reservation is still wrong: it would pad a short summary page
-     with dead space regardless of its own real content height. Reset to
-     natural flow here — a page is exactly as tall as its own content, and
-     breaks only where the physical page actually runs out, exactly like
-     AiReport's own passage list already relies on break-inside: avoid
-     rather than a forced full-page reservation per section. */
+  /* The V2 report prints one .report-paper per section (overview, manuscript,
+     source details). Each is a PrintSection table (report-v2-view.tsx) whose
+     header and footer the browser repeats on every sheet the section reaches,
+     so a section sizes itself and nothing here depends on how much text fits
+     a sheet. A section starts a new sheet; nothing forces a break after the
+     last one, which would print a blank sheet. */
   .rv2-print-flow .report-paper {
+    display: block;
     min-height: 0;
     break-after: auto;
     page-break-after: auto;
   }
 
-  /* Print-density fix — root cause of "small report inside a large blank
-     page": the reset above is right for a page that flows naturally onto
-     however many physical sheets it needs, but the overview, manuscript,
-     and source-appendix pages ALSO force `break-after: page` right below
-     (directly, or via the base .report-paper rule's own forced break for
-     .rv2-print-paper). A forced break after a `min-height: 0` box means
-     the box is exactly as tall as its own header+content+footer text — so
-     whenever that text doesn't fill the physical sheet, the REST of that
-     sheet prints blank before the break takes effect, not after. These are
-     the only V2 print pages with a forced break, so they're the only ones
-     that need to actually claim the full physical sheet: restoring
-     `min-height: 11in` (display/flex-direction now already come from the
-     base .print-report-bundle .report-paper rule above) gives
-     `.paper-content { flex: 1 }` a full sheet to distribute, so the footer
-     is pushed to the bottom of a real 11in sheet instead of sitting
-     wherever the content happened to end. rv2-print-paper covers both the
-     overview (already also matched by rv2-print-overview below) and the
-     source appendix (ReportV2PrintSourceAppendix — no page-specific class
-     of its own), which previously stayed at the natural-flow min-height:0
-     above and printed its footer right after its own short content. */
-  .rv2-print-flow .report-paper.rv2-print-paper,
-  .rv2-print-flow .report-paper.rv2-print-overview,
-  .rv2-print-flow .report-paper.rv2-print-manuscript-page {
-    min-height: 11in;
+  .rv2-print-flow .report-paper + .report-paper {
+    break-before: page;
+    page-break-before: always;
   }
 
-  /* Summary-first pass: the overview/summary page (ReportV2PrintOverview,
-     tagged with this class) must never share a physical page with the
-     manuscript that follows it. Three classes on one selector
-     (.report-paper.rv2-print-overview under .rv2-print-flow) so this wins
-     over the natural-flow rule immediately above regardless of source
-     order, without needing !important. */
-  .rv2-print-flow .report-paper.rv2-print-overview {
-    break-after: page;
-    page-break-after: always;
-  }
-
-  /* Manuscript-pagination pass: ReportV2PrintManuscriptPages now renders
-     the manuscript as N separate .report-paper pages (each with its own
-     header/footer) instead of one continuously-flowing block that relied
-     on the browser's own print pagination to spill across physical pages
-     — under that old approach, only the block's own first/last physical
-     page ever carried real header/footer chrome, every page in between
-     was bare overflow with no framing. Each manuscript page now forces its
-     own break-after, so pages never silently re-merge into flowing
-     overflow; ReportV2PrintSourceAppendix (NOT tagged with this class)
-     still flows naturally after the last one. */
-  .rv2-print-flow .report-paper.rv2-print-manuscript-page {
-    break-after: page;
-    page-break-after: always;
+  /* The overview is one sheet: its table fills the sheet, so its footer sits
+     at the bottom. Slightly under 11in, or rounding spills an empty sheet. */
+  .rv2-print-flow .rv2-print-overview .rv2-print-sheet {
+    height: 10.97in;
   }
 
   .rv2-print-flow .rv2ws-hero-band,
   .rv2-print-flow .rv2ws-hero-metrics,
-  .rv2-print-flow .rv2-source-card,
-  .rv2-print-flow .rv2-top-source-link,
-  .rv2-print-flow .submission-match {
+  .rv2-print-flow .rv2-print-doc-summary,
+  .rv2-print-flow .rv2-print-source-summary,
+  .rv2-print-flow .rv2-print-scope,
+  .rv2-print-flow .rv2-print-source-row {
     break-inside: avoid;
     page-break-inside: avoid;
   }
 
-  /* Print-density fix: .submission-copy's 11px/1.85 sizing (shared with
-     legacy print AND the legacy on-screen "submission" tab — both untouched
-     by this rule, since neither one is ever inside .rv2-print-flow) prints
-     at roughly 8.25pt once physically rendered (96 CSS px = 1in), visibly
-     too small for a document body and part of why manuscript pages read as
-     mostly empty even before the page-geometry fix above: fewer, tinier
-     lines fit per sheet. Scoped to .rv2-print-flow only.
-
-     Manuscript-overflow fix: a real submitted document can contain a run of
-     text with no natural break point at all for pre-wrap to wrap on — an
-     Arabic tatweel/separator line, a very long URL, a long no-space
-     identifier. .submission-rendered-text's white-space: pre-wrap (needed
-     to preserve the manuscript's own whitespace/newlines) only wraps at
-     existing break opportunities (spaces, hyphens); with no
-     overflow-wrap/word-break override, the CSS default
-     (overflow-wrap: normal) refuses to break inside such a run, so it
-     renders past .submission-copy's own 720px max-width instead of
-     wrapping — confirmed to inflate .report-paper's own scrollWidth well
-     past the physical 816px sheet, which is exactly what pushed Chromium's
-     print compositor to the 2.0833335 (instead of 3.125) inner PDF scale
-     this whole print-root investigation was chasing: the earlier ancestor-
-     width pinning fix could not, by itself, stop a descendant's own
-     unbroken content from visually overflowing past its box. overflow-wrap
-     inherits from this ancestor down through .submission-rendered-text and
-     any .submission-match highlight spans (neither overrides it), so one
-     declaration here is enough — the smallest rule that reproducibly fixed
-     the measured overflow; min-width/max-width/word-break were tested and
-     found unnecessary on top of it. */
-  .rv2-print-flow .submission-copy {
-    font-size: 14px;
-    line-height: 1.45;
+  /* An unbreakable run (an Arabic tatweel line, a long URL) wraps instead of
+     widening the sheet: a wider layout makes Chromium scale the whole PDF. */
+  .rv2-print-flow .rv2ws-manuscript {
+    font-size: 13px;
+    line-height: 1.7;
     overflow-wrap: anywhere;
   }
 
-  /* Print-density fix: .submission-title/.highlight-legend (shared with
-     legacy print/screen SubmissionReport — both untouched, neither is ever
-     inside .rv2-print-flow) are ONLY added on the manuscript's first print
-     page, on top of the same wordsPerPage text budget every other
-     manuscript page gets — trimming their own padding/margin here (instead
-     of giving page 1 a separate, smaller text budget) keeps every page's
-     text boundaries exactly what paginateManuscriptText() computed, so
-     screen and print still agree on the same page N. */
-  .rv2-print-flow .submission-title {
-    padding: 0 36px 14px;
+  /* Reports saved before the V2 interpretation print the legacy papers. Their
+     content and figures stay exactly as saved; only their presentation moves
+     to the report's design, in print only (on screen these are the same
+     components, untouched). Direct children of the bundle, so neither the V2
+     sequence nor the AI report is reachable from here. */
+  /* An overview that runs past one sheet keeps its margin on the next one. */
+  .print-report-bundle > .overview-paper .paper-content {
+    padding-top: 8px;
+    -webkit-box-decoration-break: clone;
+    box-decoration-break: clone;
   }
 
-  .rv2-print-flow .highlight-legend {
+  .print-report-bundle > .overview-paper .similarity-heading {
+    padding-bottom: 8px;
+    border-bottom: 0;
+  }
+
+  .print-report-bundle > .overview-paper .similarity-heading h2 {
+    align-items: center;
+    gap: 12px;
+    font-size: 28px;
+  }
+
+  .print-report-bundle > .overview-paper .similarity-heading h2 span {
+    font-size: 48px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .print-report-bundle > .overview-paper .similarity-heading h2 em {
+    padding: 7px 10px;
+    font-size: 9px;
+  }
+
+  .print-report-bundle > .overview-paper .archive-scope-note {
+    margin-top: 10px;
+    padding: 10px 14px;
+    border-color: #d8e5ea;
+    border-radius: 12px;
+    background: #f7fbfd;
+    color: #123f4f;
+    font-size: 12px;
+    font-weight: 600;
+  }
+
+  .print-report-bundle > .overview-paper .similarity-heading p {
+    font-size: 12px;
+  }
+
+  .print-report-bundle > .overview-paper .filtered-block,
+  .print-report-bundle > .overview-paper .academic-evidence-block,
+  .print-report-bundle > .overview-paper .overview-columns,
+  .print-report-bundle > .overview-paper .top-sources-section {
+    margin-top: 10px;
+    padding: 12px 16px;
+    border: 1px solid #d9dee0;
+    border-radius: 14px;
+  }
+
+  .print-report-bundle > .overview-paper .match-groups {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px 16px;
+    margin-top: 6px;
+  }
+
+  /* A report with one manuscript sheet per PrintSection: see .rv2-print-sheet. */
+  .print-report-bundle > .report-paper.rv2-print-paper {
+    display: block;
+    min-height: 0;
+  }
+
+  .print-report-bundle > .overview-paper .filtered-block h3,
+  .print-report-bundle > .overview-paper .overview-columns h3,
+  .print-report-bundle > .overview-paper .top-sources-section h3,
+  .print-report-bundle > .overview-paper .academic-evidence-block > h3,
+  .print-report-bundle > .sources-paper .source-detail-heading h2 {
+    margin: 0 0 6px;
+    color: var(--blue);
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+
+  .print-report-bundle > .sources-paper .source-detail-heading h2 {
+    color: var(--ink);
+    font-size: 22px;
+    font-weight: 600;
+    letter-spacing: normal;
+    text-transform: none;
+  }
+
+  .print-report-bundle > .overview-paper .top-sources-section > p,
+  .print-report-bundle > .overview-paper .filtered-block p {
+    font-size: 11px;
+  }
+
+  .print-report-bundle .ranked-sources {
+    margin-top: 6px;
+  }
+
+  .print-report-bundle .ranked-source {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    column-gap: 10px;
+    padding: 6px 0;
+    border-bottom: 1px solid #e3e9eb;
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  .print-report-bundle .ranked-source:last-child {
+    border-bottom: 0;
+  }
+
+  .print-report-bundle .source-tags {
+    display: contents;
+  }
+
+  /* The inline colours are per-source reds and pinks from the legacy palette. */
+  .print-report-bundle .source-number {
+    grid-row: 1 / span 3;
+    min-width: 22px;
+    height: 22px;
+    padding: 0;
+    background-color: #0f7ea8 !important;
+    font-size: 11px;
+    font-weight: 800;
+  }
+
+  .print-report-bundle .source-type {
+    grid-column: 3;
+    grid-row: 1;
+    align-self: start;
+    min-width: 0;
+    height: 18px;
+    padding: 0 7px;
+    background-color: #eef2f3 !important;
+    color: #47565d;
+    font-size: 9px;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+  }
+
+  .print-report-bundle .source-name-row {
+    grid-column: 2;
+    grid-row: 1;
+    margin-top: 0;
+  }
+
+  .print-report-bundle .source-name-row strong {
+    overflow: visible;
+    font-size: 13px;
+    text-overflow: clip;
+    white-space: normal;
+  }
+
+  .print-report-bundle .source-name-row b {
+    font-size: 12px;
+  }
+
+  .print-report-bundle .source-name-row p {
+    font-size: 11px;
+  }
+
+  .print-report-bundle .source-progress {
+    grid-column: 2;
+  }
+
+  .print-report-bundle > .submission-paper .submission-title {
+    display: block;
+    padding: 0 0 12px;
+    text-align: left;
+  }
+
+  .print-report-bundle > .submission-paper .submission-title h2 {
+    max-width: none;
+    font-family: inherit;
+    font-size: 22px;
+    font-weight: 600;
+  }
+
+  .print-report-bundle > .submission-paper .highlight-legend {
     margin: 0 0 14px;
-    padding: 10px 15px;
-    gap: 8px;
+    padding: 0 0 12px;
+    border: 0;
+    border-bottom: 1px solid #e3e9eb;
+    border-radius: 0;
+    background: none;
+  }
+
+  .print-report-bundle > .submission-paper .submission-copy {
+    max-width: none;
+    color: var(--ink);
+    font-family: inherit;
+    font-size: 13px;
+    line-height: 1.7;
+    overflow-wrap: anywhere;
+  }
+
+  /* The screen's mark: tint and underline, without the left bar and the dot.
+     The Wikipedia badge is the only one that carries a meaning. */
+  .print-report-bundle > .submission-paper .submission-match {
+    padding: 0 2px;
+    box-shadow: none !important;
+  }
+
+  .print-report-bundle > .submission-paper .submission-match:not(.submission-wikipedia-match) > span {
+    display: none;
   }
 
   .print-report-bundle .ai-report-print,
@@ -8586,107 +8714,77 @@ main.report-main {
 .rv2-provenance { display: flex; gap: 8px; align-items: flex-start; color: var(--muted); font-size: 11px; }
 .rv2-provenance svg { width: 14px; height: 14px; flex: 0 0 auto; margin-top: 1px; }
 
-/* ---- print summary page: document / source / scope sections ---- */
-/* Only ever rendered by ReportV2PrintOverview (print), never on screen —
-   no @media print scoping needed, these class names exist nowhere else. */
-.rv2-print-doc-grid { display: grid; gap: 8px; margin: 0; }
-.rv2-print-doc-grid > div {
-  display: flex; justify-content: space-between; align-items: baseline; gap: 12px;
-  padding-bottom: 6px; border-bottom: 1px dashed var(--soft-line);
-}
-.rv2-print-doc-grid > div:last-child { border-bottom: 0; padding-bottom: 0; }
-.rv2-print-doc-grid dt { margin: 0; color: var(--muted); font-weight: 600; }
-.rv2-print-doc-grid dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
+/* ---- printed report: the V2 sections ---- */
+/* Rendered only inside .print-report-bundle, which only exists in print, so
+   these need no @media print of their own. Values are the screen's: the
+   .rv2ws-page card, the .paper-kicker heading, the .rv2ws-source-* list. */
+.rv2-print-sheet { width: 100%; border-collapse: collapse; table-layout: fixed; }
+.rv2-print-sheet td { padding: 0; vertical-align: top; }
+.rv2-print-sheet thead .paper-header { padding-bottom: 14px; }
+.rv2-print-sheet tfoot .paper-footer { padding-top: 14px; }
+.rv2-print-sheet td.paper-content { padding: 6px 44px 10px; }
 
-.rv2-print-source-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
-.rv2-print-source-list > li {
-  display: flex; gap: 10px; align-items: flex-start;
-  padding-bottom: 10px; border-bottom: 1px solid var(--soft-line);
-}
-.rv2-print-source-list > li:last-child { border-bottom: 0; padding-bottom: 0; }
-.rv2-print-source-index {
-  display: inline-grid; flex: 0 0 auto; width: 20px; height: 20px; place-items: center;
-  border: 1px solid var(--line); border-radius: 50%; font-size: 11px; font-weight: 700;
-}
-.rv2-print-source-body { min-width: 0; }
-.rv2-print-source-title { margin: 0; font-weight: 600; overflow-wrap: anywhere; }
-.rv2-print-source-meta { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
-.rv2-print-source-link { display: inline-block; margin-top: 3px; color: var(--blue-dark); font-size: 12px; overflow-wrap: anywhere; }
-.rv2-print-source-more { margin: 10px 0 0; color: var(--muted); font-size: 12px; }
+.report-v2-print { gap: 12px; }
+.report-v2-print .rv2ws-hero-title { margin-top: 0; }
+.report-v2-print .rv2ws-hero-title span { font-size: 44px; }
+.report-v2-print .rv2ws-hero-sub { margin-top: 6px; }
+.report-v2-print .rv2ws-hero-band { margin-top: 14px; padding: 14px 18px; }
+.report-v2-print .rv2ws-hero-metrics { margin-top: 10px; }
+.report-v2-print .rv2ws-hero-metrics > div { min-height: 62px; padding: 11px 14px; }
 
-.rv2-print-scope-status {
-  display: inline-block; margin: 0 0 6px; padding: 2px 10px;
-  border: 1px solid var(--line); border-radius: 999px;
-  font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em;
-}
-.rv2-print-scope-status-attention { border-color: #e9c66b; color: #966200; }
-.rv2-print-scope-line { margin-top: 6px; color: var(--muted); font-size: 12px; }
-.rv2-print-scope p { margin: 4px 0 0; }
-.rv2-print-scope p:first-of-type { margin-top: 0; }
-
-/* Compact density for these three print-summary sections specifically
-   (same specificity as, and declared after, the shared .rv2-section rule
-   above — so it wins here without touching .rv2-section's own padding/gap,
-   which the screen "overlap" tab and the source-details appendix still
-   use unchanged). Page 1 has four stacked sections (hero + these three)
-   competing for one physical sheet; tightened here rather than by shrinking
-   the shared WorkspaceHero. */
-.rv2-print-doc-summary,
-.rv2-print-source-summary,
-.rv2-print-scope {
-  padding: 10px 16px 12px;
-}
-.rv2-print-doc-summary h3,
-.rv2-print-source-summary h3,
-.rv2-print-scope h3 {
-  margin: 0 0 8px;
-}
-.rv2-print-doc-grid { gap: 5px; }
-.rv2-print-doc-grid > div { padding-bottom: 4px; }
-.rv2-print-source-list { gap: 6px; }
-.rv2-print-source-list > li { padding-bottom: 6px; }
-.rv2-print-source-meta { margin: 2px 0 0; }
-
-/* Print-density fix (real-report follow-up): a report whose only verified
-   source has a short one-line title (so PrintDocumentSummary/
-   PrintSourceSummary/PrintReportScope are all shorter than the fixture this
-   slice was originally tuned against) left most of the trailing physical
-   sheet blank below REPORT SCOPE, before the footer — the fixed min-height:
-   11in sheet was still correct, but .report-v2.report-v2-print (a plain
-   block child of .paper-content, not itself stretched to the sheet's full
-   height) only ever took its own natural content height, so any leftover
-   room collected as one dead zone after the last section instead of being
-   used. .paper-content becomes a flex column here (page 1 only) so its one
-   child can stretch to fill it; that child already IS a flex column (see
-   the base .report-v2 rule) with a real `gap` between its 3 sections, so
-   justify-content: space-between now spreads any genuine leftover space
-   BETWEEN WorkspaceHero/the doc+source grid/REPORT SCOPE instead of leaving
-   it trail below all of them — REPORT SCOPE's own bottom edge lands flush
-   against the sheet's usable height, directly above the footer, with no
-   gap left over regardless of how short the source list is. `gap: 12px`
-   remains a floor: space-between only ever ADDS to it when there is
-   leftover room, so a report whose content already fills (or overflows)
-   the sheet renders exactly as it did before this rule (unaffected). */
-.rv2-print-overview .paper-content {
-  display: flex;
-  flex-direction: column;
-}
-.rv2-print-overview .report-v2.report-v2-print {
-  flex: 1;
-  gap: 12px;
-  justify-content: space-between;
-}
-
-/* Document + Similarity sources side by side (rather than stacked) on the
-   summary page — the biggest single space saving available without
-   shrinking the shared WorkspaceHero or making either section's own text
-   smaller: two ~350px columns instead of one column half again as tall. */
 .rv2-print-summary-grid {
   display: grid;
   grid-template-columns: 1fr 1.2fr;
-  gap: 16px;
+  gap: 12px;
   align-items: start;
 }
+
+.rv2-print-doc-summary,
+.rv2-print-source-summary {
+  padding: 14px 16px;
+  border-color: #d9dee0;
+  border-radius: 14px;
+  background: white;
+}
+
+.rv2-print-doc-summary h3,
+.rv2-print-source-summary h3 {
+  margin: 0 0 10px;
+  color: var(--blue);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+}
+
+.rv2-print-doc-grid { display: grid; gap: 7px; margin: 0; font-size: 12px; }
+.rv2-print-doc-grid > div { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+.rv2-print-doc-grid dt { margin: 0; color: var(--muted); }
+.rv2-print-doc-grid dd { margin: 0; color: var(--ink); font-weight: 600; text-align: right; overflow-wrap: anywhere; }
+
+.rv2-print-source-list { display: grid; gap: 9px; margin: 0; padding: 0; list-style: none; }
+.rv2-print-source-list > li,
+.rv2-print-source-item { display: flex; gap: 10px; align-items: flex-start; }
+.rv2-print-source-body { min-width: 0; flex: 1; }
+.rv2-print-source-title { margin: 0; color: var(--ink); font-size: 13px; font-weight: 700; overflow-wrap: anywhere; }
+.rv2-print-source-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 3px 0 0; color: var(--muted); font-size: 11px; }
+.rv2-print-source-link { display: block; margin: 3px 0 0; color: var(--blue-dark); font-size: 11px; overflow-wrap: anywhere; }
+.rv2-print-source-more { margin: 10px 0 0; color: var(--muted); font-size: 11px; }
+.rv2-print-source-note { margin: 4px 0 0; color: var(--muted); font-size: 11px; }
+
+.rv2-print-scope .rv2-completion { margin-top: 0; }
+.rv2-print-scope .rv2-completion-headline { font-size: 14px; }
+
+.rv2-print-heading { margin-bottom: 14px; padding-bottom: 12px; border-bottom: 1px solid #e3e9eb; }
+.rv2-print-heading h3 { margin: 0; font-size: 22px; font-weight: 600; }
+.rv2-print-heading p:not(.paper-kicker) { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
+.rv2-print-sheet td.rv2-print-sources-head { padding-bottom: 0; }
+.rv2-print-sheet td.rv2-print-sources-foot { padding-top: 8px; }
+.rv2-print-sources-head .rv2-print-heading { margin-bottom: 0; }
+
+.rv2-print-source-row > td { padding: 0 44px; }
+.rv2-print-source-item { padding: 9px 0; border-bottom: 1px solid #e3e9eb; }
+.rv2-print-named-sources { display: grid; gap: 3px; margin: 6px 0 0; padding: 0; color: var(--muted); font-size: 11px; list-style: none; }
+.rv2-print-named-sources li { display: flex; justify-content: space-between; gap: 12px; }
 
 @media (min-width: 900px) {
   .rv2-source-card-grid { grid-template-columns: repeat(2, 1fr); }
@@ -8702,7 +8800,7 @@ main.report-main {
 @media print {
   .report-v2-print .rv2-doc-wrap,
   .report-v2-print .rv2-filter-bar { display: none; }
-  .report-v2-print .rv2-section { border: 1px solid #ccc; break-inside: avoid; }
+  .report-v2-print .rv2-section { break-inside: avoid; }
 }
 
 /* ── Report redesign: canonical V2 screen workspace ──────────────────────

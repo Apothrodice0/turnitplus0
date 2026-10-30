@@ -29,7 +29,7 @@ import {
 } from "@/lib/report-detail-poll";
 import { AiReport } from "@/components/report/ai-report";
 import { CategorySummary, OverviewReport, SourcesReport, SubmissionReport, dedupeExternalAcademicEvidence } from "@/components/report/similarity-report-papers";
-import { ReportV2View, ReportV2Workspace, ReportV2PrintOverview, ReportV2PrintManuscriptPages, ReportV2PrintSourceAppendix } from "@/components/report/report-v2/report-v2-view";
+import { LegacyPrintManuscript, ReportV2View, ReportV2Workspace, ReportV2PrintOverview, ReportV2PrintManuscriptPages, ReportV2PrintSourceAppendix } from "@/components/report/report-v2/report-v2-view";
 import { ReportNotFoundPanel } from "@/components/report/report-not-found-panel";
 import { storedSystem2Estimate } from "@/lib/system2-estimate-record";
 import { unifySimilarity } from "@/lib/system2-unified";
@@ -711,7 +711,7 @@ export function ReportDetailShell({
         ) : (
           <>
             <OverviewReport report={report} similarityStatus={effectiveSimilarityStatus} />
-            <SubmissionReport report={report} />
+            <LegacyPrintManuscript report={report} />
             <SourcesReport report={report} />
           </>
         )}

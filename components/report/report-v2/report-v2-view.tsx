@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
 import {
   ChevronDown,
   ChevronLeft,
@@ -595,37 +595,40 @@ function PrintDocumentSummary({ report, vm }: { report: SimilarityReport; vm: Re
 }
 
 // Print-only richer replacement for TopSources — same bounded, authoritative
-// vm.summary.topSources subset, plus badge/link fields TopSources itself
-// doesn't render (TopSources stays untouched; it's still used by the
-// screen-side "overlap" tab via ReportV2View/FirstScreen above).
+// list, numbered by each source's place in vm.sources so a number means the
+// same source here, on the manuscript badges, in the appendix and on screen.
 function PrintSourceSummary({ vm }: { vm: ReportV2ViewModel }) {
   const { topSources, matchingEvidenceEntries } = vm.summary;
   if (topSources.length === 0) return null;
   const remaining = matchingEvidenceEntries - topSources.length;
   return (
     <section className="rv2-section rv2-print-source-summary" aria-labelledby="rv2-print-sources-title">
-      <h3 id="rv2-print-sources-title">Similarity sources</h3>
+      <h3 id="rv2-print-sources-title">Top sources</h3>
       <ol className="rv2-print-source-list">
-        {topSources.map((s, i) => (
-          <li key={s.id}>
-            <span className="rv2-print-source-index" aria-hidden="true">{i + 1}</span>
-            <div className="rv2-print-source-body">
-              <p className="rv2-print-source-title">{s.label}</p>
-              <p className="rv2-print-source-meta">
-                {s.badge} · {s.matchedWords.toLocaleString()} matched words · {s.contributionPercent}% contribution
-              </p>
-              {s.link && (
-                <a className="rv2-print-source-link" href={s.link} target="_blank" rel="noreferrer">
-                  {hostAndPath(s.link)}
-                </a>
-              )}
-            </div>
-          </li>
-        ))}
+        {topSources.map((s) => {
+          const index = vm.sources.findIndex((source) => source.id === s.id);
+          return (
+            <li key={s.id}>
+              <span className="rv2ws-source-number" style={{ background: workspaceSourceColor(index) }} aria-hidden="true">{index + 1}</span>
+              <div className="rv2-print-source-body">
+                <p className="rv2-print-source-title">{s.label}</p>
+                <p className="rv2-print-source-meta">
+                  {s.badge !== s.label ? `${s.badge} · ` : ""}
+                  {s.matchedWords.toLocaleString()} words · {formatSimilarityPercent(s.contributionPercent, s.matchedWords)}
+                </p>
+                {s.link && (
+                  <a className="rv2-print-source-link" href={s.link} target="_blank" rel="noreferrer">
+                    {hostAndPath(s.link)}
+                  </a>
+                )}
+              </div>
+            </li>
+          );
+        })}
       </ol>
       {remaining > 0 && (
         <p className="rv2-print-source-more">
-          +{remaining} more matching evidence entr{remaining === 1 ? "y" : "ies"} — see Source Details.
+          +{remaining} more matching evidence entr{remaining === 1 ? "y" : "ies"} — see Source details.
         </p>
       )}
     </section>
@@ -633,19 +636,36 @@ function PrintSourceSummary({ vm }: { vm: ReportV2ViewModel }) {
 }
 
 function PrintReportScope({ vm }: { vm: ReportV2ViewModel }) {
-  const c = vm.summary.completion;
-  const status = c.state === "COMPLETED" ? "Completed" : "Needs attention";
   return (
-    <section className="rv2-section rv2-print-scope" aria-labelledby="rv2-print-scope-title">
-      <h3 id="rv2-print-scope-title">Report scope</h3>
-      <p className={`rv2-print-scope-status${c.state === "COMPLETED" ? "" : " rv2-print-scope-status-attention"}`}>
-        {status}
-      </p>
-      <p>{c.headline}</p>
-      {c.detail && <p>{c.detail}</p>}
-      <p className="rv2-print-scope-line">{c.scopeLine}</p>
+    <section className="rv2-print-scope" aria-label="Report scope">
+      <CompletionStrip vm={vm} />
       <UnverifiedPublicationNotice vm={vm} variant="print" />
     </section>
+  );
+}
+
+/**
+ * One section of the printed report. A table only so the browser repeats its
+ * header and footer on every physical sheet the section reaches: a section
+ * longer than a sheet needs no page-size estimate, and a footer can never be
+ * pushed alone onto a sheet of its own. Each body row is one <tr>.
+ */
+function PrintSection({ report, section, total, label, className, children }: {
+  report: SimilarityReport;
+  section: number;
+  total: number;
+  label: string;
+  className?: string;
+  children: ReactNode;
+}) {
+  return (
+    <article className={`report-paper rv2-print-paper${className ? ` ${className}` : ""}`}>
+      <table className="rv2-print-sheet" role="presentation">
+        <thead><tr><td><ReportPageHeader report={report} page={section} total={total} label={label} /></td></tr></thead>
+        <tfoot><tr><td><ReportPageFooter report={report} page={section} total={total} label={label} /></td></tr></tfoot>
+        <tbody>{children}</tbody>
+      </table>
+    </article>
   );
 }
 
@@ -664,6 +684,8 @@ function PrintReportScope({ vm }: { vm: ReportV2ViewModel }) {
  * picks up the exact same `.print-report-bundle .report-paper` pagination
  * rules — one real page, real TurnitPlus branding, no "T+ integrity".
  */
+const printSectionCount = (vm: ReportV2ViewModel) => (vm.sources.length > 0 ? 3 : 2);
+
 export function ReportV2PrintOverview({ report, unified }: { report: SimilarityReport; unified?: UnifiedSimilarity }) {
   const vm = buildReportV2ViewModel(report);
   if (!vm) return null;
@@ -683,9 +705,8 @@ export function ReportV2PrintOverview({ report, unified }: { report: SimilarityR
   // authoritative vm fields, just more of them, never a new computation.
   const toolbarStatus = vm.summary.completion.state === "COMPLETED" ? "Completed" : "Needs attention";
   return (
-    <article className="report-paper rv2-print-paper rv2-print-overview">
-      <ReportPageHeader report={report} page={1} total={3} label="Similarity Overview" />
-      <div className="paper-content">
+    <PrintSection report={report} section={1} total={printSectionCount(vm)} label="Similarity Overview" className="rv2-print-overview">
+      <tr><td className="paper-content">
         <div className="report-v2 report-v2-print">
           <WorkspaceHero vm={vm} toolbarStatus={toolbarStatus} unified={unified} />
           <div className="rv2-print-summary-grid">
@@ -694,106 +715,134 @@ export function ReportV2PrintOverview({ report, unified }: { report: SimilarityR
           </div>
           <PrintReportScope vm={vm} />
         </div>
-      </div>
-      <ReportPageFooter report={report} page={1} total={3} label="Similarity Overview" />
-    </article>
+      </td></tr>
+    </PrintSection>
   );
 }
 
 /**
- * Pagination pass — the manuscript, split into N .report-paper pages
- * instead of one continuously-flowing block. Root cause this replaces: a
- * single tall .submission-paper relied on the BROWSER's own print
- * pagination to spill across physical pages, so only its first and last
- * physical page ever carried real TurnitPlus header/footer chrome — every
- * page in between was bare overflow with no framing at all. Each page here
- * is its own real .report-paper (own ReportPageHeader/ReportPageFooter,
- * own forced break-after so pages never silently re-merge into flowing
- * overflow), computed from the exact same authoritative ranges
- * (findHighlightRanges) and the exact same pagination function
- * (paginateManuscriptText) the screen workspace uses — same boundaries,
- * same red highlight treatment (buildHighlightedPieces, unchanged), same
- * "never split a match across a page" guarantee. The document title and
- * highlight legend appear once, on the first manuscript page only —
- * matching how a real multi-page document's section opener works; every
- * page still repeats the section header/footer via ReportPageHeader/
- * ReportPageFooter, exactly like the summary and appendix pages already do.
+ * The manuscript as printed: the screen's own renderer (renderManuscriptWindow)
+ * and passages, so the text, its highlights and its numbered source badges are
+ * the ones on screen. It flows as one block through a PrintSection, which
+ * carries the header and footer onto every sheet. Screen pages are not used
+ * here: their breaks are word counts, which would cut sentences in mid-line
+ * and leave a line or two on a sheet of their own whenever a document has many
+ * short lines.
  */
 export function ReportV2PrintManuscriptPages({ report }: { report: SimilarityReport }) {
+  const vm = buildReportV2ViewModel(report);
+  if (!vm) return null;
   const text = report.text ?? "";
-  const canSeeSourceBreakdown = Boolean(report.viewerIsAdmin);
-  const ranges = findHighlightRanges(report, { includeWikipedia: canSeeSourceBreakdown });
-  const pageRanges = paginateManuscriptText(
-    text,
-    ranges.map((r) => ({ start: r.start, end: r.end })),
-    undefined,
-    reportScoringNormalizationVersion(report),
-  );
-  if (pageRanges.length === 0) {
-    return (
-      <article className="report-paper submission-paper">
-        <ReportPageHeader report={report} page={2} total={3} label="Manuscript" />
-        <div className="paper-content">
-          <div className="submission-title">
-            <span>1</span>
-            <h2>{report.title.replace(/\.[^.]+$/, "")}</h2>
-          </div>
-          <div className="submission-rendered-text">Your submitted text is not available for inline highlighting.</div>
-        </div>
-        <ReportPageFooter report={report} page={2} total={3} label="Manuscript" />
-      </article>
-    );
-  }
+  const sourceIndexById = new Map(vm.sources.map((source, index) => [source.id, index]));
+  const runs = vm.passages.filter((p) => p.charStart !== null && p.charEnd !== null).sort((a, b) => a.charStart! - b.charStart!);
   return (
-    <>
-      {pageRanges.map((range, index) => (
-        <article key={`${range.start}-${range.end}`} className="report-paper submission-paper rv2-print-manuscript-page">
-          <ReportPageHeader report={report} page={2} total={3} label="Manuscript" />
-          <div className="paper-content">
-            {index === 0 && (
-              <div className="submission-title">
-                <span>1</span>
-                <h2>{report.title.replace(/\.[^.]+$/, "")}</h2>
-              </div>
-            )}
-            {index === 0 && <HighlightLegend report={report} />}
-            <div className="submission-copy">
-              <div className="submission-rendered-text">
-                {buildHighlightedPieces(text, ranges, range.start, range.end)}
-              </div>
-            </div>
+    <PrintSection report={report} section={2} total={printSectionCount(vm)} label="Manuscript" className="rv2-print-manuscript">
+      <tr><td className="paper-content">
+        <div className="rv2-print-heading">
+          <p className="paper-kicker">MATCH REVIEW</p>
+          <h3>Highlighted manuscript</h3>
+          <p>{report.title.replace(/\.[^.]+$/, "")}</p>
+          {text.length > 0 && runs.length > 0 && (
+            <p className="rv2-print-heading-note">Highlighted words contribute to the similarity result; each number is the matching source.</p>
+          )}
+        </div>
+        {text.length === 0 ? (
+          <p className="rv2-empty">Your submitted text is not available for inline highlighting.</p>
+        ) : (
+          <div className="rv2-doc rv2ws-manuscript">
+            {renderManuscriptWindow(text, runs, 0, text.length, sourceIndexById, null, null)}
           </div>
-          <ReportPageFooter report={report} page={2} total={3} label="Manuscript" />
-        </article>
-      ))}
-    </>
+        )}
+      </td></tr>
+    </PrintSection>
   );
 }
 
 /**
- * Report-redesign PDF fix — FINAL page(s): a compact per-source appendix
- * only (number, title, type, URL/DOI, matched words, match references) —
- * never the full similarity overview a second time. Placed after the
- * manuscript in the print bundle.
+ * The manuscript of a report saved before the V2 interpretation: the legacy
+ * papers' own title, legend and highlights, in a PrintSection so every sheet
+ * after the first keeps its header, footer and margins. Those reports have no
+ * passages or numbered sources for the renderer above to use.
+ */
+export function LegacyPrintManuscript({ report }: { report: SimilarityReport }) {
+  const ranges = findHighlightRanges(report, { includeWikipedia: Boolean(report.viewerIsAdmin) });
+  return (
+    <PrintSection report={report} section={2} total={3} label="Manuscript" className="submission-paper">
+      <tr><td className="paper-content">
+        <div className="submission-title">
+          <h2>{report.title.replace(/\.[^.]+$/, "")}</h2>
+        </div>
+        <HighlightLegend report={report} />
+        <div className="submission-copy">
+          <div className="submission-rendered-text">
+            {ranges.length > 0 ? buildHighlightedPieces(report.text, ranges, 0, report.text.length) : report.text}
+          </div>
+        </div>
+      </td></tr>
+    </PrintSection>
+  );
+}
+
+/**
+ * Source details, last in the printed report: every source once, in the
+ * screen's order and with its number, as the screen's source list reads — a
+ * collapsed disclosure cannot be opened on paper, so nothing here hides behind
+ * one. Zero sources renders nothing: the wrapping section would otherwise print
+ * a sheet with no content.
  */
 export function ReportV2PrintSourceAppendix({ report }: { report: SimilarityReport }) {
   const vm = buildReportV2ViewModel(report);
-  // Blank-page fix: SourceCards itself renders nothing for a zero-verified-
-  // source report (see its own vm.sources.length === 0 guard) — without this
-  // check the wrapping .report-paper chrome (header/footer, one physical
-  // page) would still print, leaving a near-empty final page for exactly the
-  // "0 matches" case this redesign's own test matrix calls out.
   if (!vm || vm.sources.length === 0) return null;
   return (
-    <article className="report-paper rv2-print-paper">
-      <ReportPageHeader report={report} page={3} total={3} label="Source Details" />
-      <div className="paper-content">
-        <div className="report-v2 report-v2-print">
-          <SourceCards vm={vm} expanded />
+    <PrintSection report={report} section={3} total={3} label="Source Details" className="rv2-print-sources">
+      <tr><td className="paper-content rv2-print-sources-head">
+        <div className="rv2-print-heading">
+          <p className="paper-kicker">SOURCE REVIEW</p>
+          <h3>Source details</h3>
         </div>
-      </div>
-      <ReportPageFooter report={report} page={3} total={3} label="Source Details" />
-    </article>
+      </td></tr>
+      {vm.sources.map((source, index) => (
+        <tr key={source.id} className="rv2-print-source-row"><td>
+          <div className="rv2-print-source-item">
+            <span className="rv2ws-source-number" style={{ background: workspaceSourceColor(index) }} aria-hidden="true">{index + 1}</span>
+            <div className="rv2-print-source-body">
+              <p className="rv2-print-source-title">{source.label}</p>
+              <p className="rv2-print-source-meta">
+                {source.badge !== source.label && <span className="rv2ws-source-badge">{source.badge}</span>}
+                {source.matchedWords.toLocaleString()} words · {formatSimilarityPercent(source.contributionPercent, source.matchedWords)}
+                {source.passageRefs.length > 0 ? ` · ${source.passageRefs.length} match${source.passageRefs.length === 1 ? "" : "es"}` : ""}
+                {source.year ? ` · ${source.year}` : ""}
+              </p>
+              {source.link ? (
+                <a className="rv2-print-source-link" href={source.link} target="_blank" rel="noreferrer">{hostAndPath(source.link)}</a>
+              ) : source.doi ? (
+                <p className="rv2-print-source-link">DOI: {source.doi}</p>
+              ) : null}
+              {source.namedSources.length > 0 && (
+                <ul className="rv2-print-named-sources">
+                  {source.namedSources.map((named, i) => (
+                    <li key={i}>
+                      <span>{named.label}</span>
+                      <span>{named.matchedWords.toLocaleString()} words · {formatSimilarityPercent(named.contributionPercent, named.matchedWords)}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {source.mixedKindLabels.length > 0 && (
+                <p className="rv2-print-source-note">
+                  Some of these words also matched another source and are counted once in the total.
+                </p>
+              )}
+            </div>
+          </div>
+        </td></tr>
+      ))}
+      {vm.sources.some((source) => source.isGeneric) && (
+        <tr><td className="paper-content rv2-print-sources-foot">
+          <p className="rv2-print-source-note">The TurnitPlus reference collection is shown without identifying any account, document, or person.</p>
+        </td></tr>
+      )}
+    </PrintSection>
   );
 }
 
@@ -924,14 +973,11 @@ function submittedContextAround(text: string, charStart: number, charEnd: number
 }
 
 /**
- * Builds the SAME char-range/tone/kind/red-highlight markup
- * HighlightedDocument (similarity-report-papers.tsx) uses for the print
- * manuscript, bounded to one [rangeStart, rangeEnd) page window — reused
- * per-page by WorkspaceManuscript below rather than one continuous pass
- * over the whole document, so RTL/mixed-direction/typography behavior
- * stays byte-identical to what already ships, just windowed. Adds only: a
- * clickable mark (keyboard-reachable), a stable per-source number badge,
- * and a stronger visual state for the currently active match.
+ * The manuscript's marks for one [rangeStart, rangeEnd) window, used by the
+ * screen (one page card at a time) and by print (the whole text). A stable
+ * per-source number badge on each mark; with onSelectPassage, also a
+ * clickable, keyboard-reachable mark and a stronger state for the active
+ * match. Without it (print) the marks are plain: nothing on paper can act.
  */
 function renderManuscriptWindow(
   text: string,
@@ -940,7 +986,7 @@ function renderManuscriptWindow(
   rangeEnd: number,
   sourceIndexById: Map<string, number>,
   activePassageId: number | null,
-  onSelectPassage: (passageId: number) => void,
+  onSelectPassage: ((passageId: number) => void) | null,
 ): ReactNode[] {
   const pieces: ReactNode[] = [];
   let cursor = rangeStart;
@@ -973,23 +1019,26 @@ function renderManuscriptWindow(
       background: rv2wsMatchTint(isActive ? 0.32 : 0.16),
       borderBottomColor: RV2WS_MATCH_COLOR,
     };
+    const interactive = onSelectPassage && {
+      id: `rv2ws-mark-${p.id}`,
+      role: "button",
+      tabIndex: 0,
+      "aria-pressed": isActive,
+      onClick: () => onSelectPassage(p.id),
+      onKeyDown: (event: KeyboardEvent<HTMLElement>) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onSelectPassage(p.id);
+        }
+      },
+    };
     pieces.push(
       <mark
         key={`m-${p.id}`}
-        id={`rv2ws-mark-${p.id}`}
         className={`rv2-mark rv2-tone-${p.tone} ${KIND_CLASS[p.kind]} rv2ws-mark${isActive ? " rv2ws-mark-active" : ""}`}
         style={markStyle}
-        role="button"
-        tabIndex={0}
-        aria-pressed={isActive}
         aria-label={`${p.label}${sourceIndex !== undefined ? `, source ${sourceIndex + 1}` : ""}`}
-        onClick={() => onSelectPassage(p.id)}
-        onKeyDown={(event) => {
-          if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault();
-            onSelectPassage(p.id);
-          }
-        }}
+        {...interactive}
       >
         {text.slice(start, end)}
         {sourceIndex !== undefined && (

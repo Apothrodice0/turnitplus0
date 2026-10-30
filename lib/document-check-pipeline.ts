@@ -9,13 +9,12 @@ import { ACTIVE_SCORING_NORMALIZATION_VERSION } from "@/lib/similarity-core";
 import {
   hasUnifiedSimilarity,
   PRIMARY_SIMILARITY_BAND_LABELS,
-  primaryMatchedWordCount,
   primarySimilarityScore,
   unifiedEvidenceSummary,
   type SimilarityReport,
 } from "@/lib/report-types";
 import { withEvidenceInterpretation } from "@/lib/report-evidence-interpretation";
-import { buildReportV2ViewModel } from "@/lib/report-v2-view";
+import { buildReportV2ViewModel, reportV2MatchedWordCount } from "@/lib/report-v2-view";
 import { storedSystem2Estimate } from "@/lib/system2-estimate-record";
 import { unifySimilarity } from "@/lib/system2-unified";
 import {
@@ -556,7 +555,7 @@ export async function downloadReceipt(report: SimilarityReport) {
   // concept exists for it) rather than guessed.
   const v2 = buildReportV2ViewModel(report);
   const completionStatus = v2 ? (v2.summary.completion.state === "COMPLETED" ? "Completed" : "Needs attention") : undefined;
-  const blob = await createReceiptPdf({ ...report, unified, matchedWordCount: primaryMatchedWordCount(report), completionStatus });
+  const blob = await createReceiptPdf({ ...report, unified, matchedWordCount: reportV2MatchedWordCount(report), completionStatus });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   const baseName = report.title.replace(/\.[^.]+$/, "").replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "");

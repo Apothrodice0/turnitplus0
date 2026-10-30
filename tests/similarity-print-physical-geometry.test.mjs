@@ -83,16 +83,12 @@ test("FOOTER ANCHOR: .paper-content still stretches to fill the flex column, so 
   assert.match(rule, /flex:\s*1;/);
 });
 
-test("SOURCE DETAILS: the V2 source-appendix page (rv2-print-paper, no page-specific class of its own) now shares the same restored 11in physical wrapper as the overview/manuscript pages, instead of collapsing to its own short content height", async () => {
+test("V2 SECTIONS: each is a block that sizes itself through its PrintSection table; only the one-sheet overview claims a physical sheet", async () => {
   const css = await readCss();
-  const selectorStart = ".rv2-print-flow .report-paper.rv2-print-paper,";
-  const idx = css.indexOf(selectorStart);
-  assert.ok(idx > -1, "rv2-print-paper must be included in the min-height restoration selector list");
-  const ruleEnd = css.indexOf("\n  }", idx);
-  const rule = css.slice(idx, ruleEnd);
-  assert.match(rule, /rv2-print-overview/, "must still cover the overview page");
-  assert.match(rule, /rv2-print-manuscript-page/, "must still cover manuscript pages");
-  assert.match(rule, /min-height:\s*11in;/);
+  const rule = block(css, ".rv2-print-flow .report-paper {");
+  assert.match(rule, /display:\s*block;/);
+  assert.match(rule, /min-height:\s*0;/);
+  assert.match(block(css, ".rv2-print-flow .rv2-print-overview .rv2-print-sheet {"), /height:\s*10\.97in;/);
 });
 
 test("AI REPORT NON-REGRESSION: AiReport's root still carries the shared report-paper class (so it inherits the flex-column physical-wrapper fix) alongside its own ai-paper class", async () => {
@@ -168,8 +164,8 @@ test("PRINT ROOT: .rv2-print-flow generates no box of its own in print (display:
 test("PRINT ROOT: every existing .rv2-print-flow <descendant> rule still targets real, still-matching selectors (display: contents preserves DOM ancestry, only suppresses the wrapper's own box)", async () => {
   const css = await readCss();
   assert.match(css, /\.rv2-print-flow \.report-paper \{/);
-  assert.match(css, /\.rv2-print-flow \.report-paper\.rv2-print-paper,/);
-  assert.match(css, /\.rv2-print-flow \.submission-copy \{/);
+  assert.match(css, /\.rv2-print-flow \.report-paper \+ \.report-paper \{/);
+  assert.match(css, /\.rv2-print-flow \.rv2ws-manuscript \{/);
 });
 
 test("PRINT ROOT: @page Letter sizing is untouched by the root-canvas fix", async () => {
@@ -222,21 +218,19 @@ test("PRINT ROOT: @page Letter sizing is untouched by the root-canvas fix", asyn
  * unrelated `.rv2-doc { white-space: pre-wrap; overflow-wrap: anywhere;
  * }` rule) — this fix brings print into parity with it, print-only.
  */
-test("MANUSCRIPT OVERFLOW: the print-scoped .submission-copy rule allows emergency wrapping (overflow-wrap: anywhere) so an unbreakable run cannot force the physical sheet wider than 8.5in", async () => {
+test("MANUSCRIPT OVERFLOW: the print-scoped manuscript rules allow emergency wrapping (overflow-wrap: anywhere) so an unbreakable run cannot force the physical sheet wider, V2 and legacy alike", async () => {
   const css = await readCss();
-  const rule = block(css, ".rv2-print-flow .submission-copy {");
-  assert.match(rule, /overflow-wrap:\s*anywhere;/);
-  // white-space: pre-wrap itself lives on .submission-rendered-text, not
-  // here — confirm that rule (manuscript whitespace/newline preservation)
-  // is untouched by this fix.
-  const renderedRule = block(css, ".submission-rendered-text {");
-  assert.match(renderedRule, /white-space:\s*pre-wrap;/);
+  assert.match(block(css, ".rv2-print-flow .rv2ws-manuscript {"), /overflow-wrap:\s*anywhere;/);
+  assert.match(block(css, ".print-report-bundle > .submission-paper .submission-copy {"), /overflow-wrap:\s*anywhere;/);
+  // white-space: pre-wrap itself lives on .submission-rendered-text and .rv2-doc, not here.
+  assert.match(block(css, ".submission-rendered-text {"), /white-space:\s*pre-wrap;/);
+  assert.match(css, /\.rv2-doc \{ white-space: pre-wrap;/);
 });
 
-test("MANUSCRIPT OVERFLOW: the fix does not clip content — no overflow:hidden was added to .submission-copy or .submission-rendered-text in print", async () => {
+test("MANUSCRIPT OVERFLOW: the fix does not clip content — no overflow:hidden on the printed manuscript", async () => {
   const css = await readCss();
-  const rule = block(css, ".rv2-print-flow .submission-copy {");
-  assert.doesNotMatch(rule, /overflow:\s*hidden/);
+  assert.doesNotMatch(block(css, ".rv2-print-flow .rv2ws-manuscript {"), /overflow:\s*hidden/);
+  assert.doesNotMatch(block(css, ".print-report-bundle > .submission-paper .submission-copy {"), /overflow:\s*hidden/);
 });
 
 test("MANUSCRIPT OVERFLOW: real paginateManuscriptText() still reconstructs exactly, byte-for-byte, when the text contains an unbroken Arabic tatweel run, a long URL, and a long no-space ASCII token — the same three shapes that reproduced the real defect", () => {
