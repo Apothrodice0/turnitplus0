@@ -3,12 +3,13 @@
  * can both use it without an import cycle).
  *
  * The ONE stored copy lives in the report's own payload at `$.system2Estimate`:
- *   - written only by app/api/reports/[id]/system2, after an accepted estimate (estimate shown, integer 0–20), for the
- *     report's own allowlisted owner — never from a browser: app/api/reports strips any client-sent copy;
+ *   - written only by app/api/reports/[id]/system2, after an accepted estimate (estimate shown, integer 0–20) of the
+ *     report's own document, for an eligible account (lib/system2-access.ts) — never from a browser: app/api/reports
+ *     strips any client-sent copy; at most once per report;
  *   - written in place with json_set, and carried across every resave by SAVE_REPORT_SQL, so the AI-result save and the
  *     estimate can land in either order without one overwriting the other;
  *   - read by every view of the report (room tile, report page, receipt), so the one similarity percentage is the same
- *     on any device or session. A report without it (every customer report, any failure) keeps System 1's result.
+ *     on any device or session. A report without it (an ineligible account or file, any failure) keeps System 1's result.
  */
 
 export const SYSTEM2_ESTIMATE_PAYLOAD_KEY = "system2Estimate";
@@ -74,7 +75,9 @@ export function system2EstimateField(raw: unknown): { system2EstimatePercent?: n
 
 /**
  * The ONE write of a stored estimate (app/api/reports/[id]/system2): in place on the owner's own row, args
- * [JSON.stringify(stored), deviceKey, id, userId]. Exported so tests run this exact text.
+ * [JSON.stringify(stored), deviceKey, id, userId], and only while the report has none — one estimate per report, so two
+ * concurrent requests can never both store, and an accepted estimate is never replaced. Exported so tests run this exact text.
  */
 export const PERSIST_SYSTEM2_ESTIMATE_SQL = `UPDATE saved_reports SET payload_json = json_set(payload_json, '$.${SYSTEM2_ESTIMATE_PAYLOAD_KEY}', json(?))
-            WHERE device_key = ? AND id = ? AND user_id = ? AND json_valid(payload_json)`;
+            WHERE device_key = ? AND id = ? AND user_id = ? AND json_valid(payload_json)
+              AND json_type(payload_json, '$.${SYSTEM2_ESTIMATE_PAYLOAD_KEY}') IS NULL`;

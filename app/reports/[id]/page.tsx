@@ -14,7 +14,7 @@ import { archiveOverlapScore, hasUnifiedSimilarity, stripServerInternalReportFie
 import { refreshSelectiveCorpusCompletionSignal } from "@/lib/report-evidence-interpretation";
 import { tryDecodeReportFromPersistence } from "@/lib/report-persistence";
 import { ReportUnavailablePanel } from "@/components/report/report-unavailable-panel";
-import { isSystem2ResearchUser } from "@/lib/system2-research";
+import { resolveSystem2Access } from "@/lib/system2-access";
 import { ReportDetailShell } from "./report-detail-shell";
 
 export const dynamic = "force-dynamic";
@@ -194,8 +194,10 @@ const loadOwnedReport = cache(async (id: string): Promise<OwnedReportResult> => 
       if (payload.unifiedSimilarity && sessionUser.role !== "admin") {
         payload.unifiedSimilarity = { ...payload.unifiedSimilarity, contributions: [] };
       }
-      // Owner-only English System 2 research preview, resolved server-side for this signed-in owner of this report.
-      return { status: "found", payload, aiStatus, aiScore: row.ai_score, aiTone: row.ai_tone, similarityStatus: display.status, system2Enabled: isSystem2ResearchUser(sessionUser) };
+      // English System 2 eligibility, resolved server-side for this signed-in owner of this report (lib/system2-access.ts).
+      // Display never depends on it: the report's stored estimate is read by the shell itself.
+      const system2Enabled = (await resolveSystem2Access(client, sessionUser)).allowed;
+      return { status: "found", payload, aiStatus, aiScore: row.ai_score, aiTone: row.ai_tone, similarityStatus: display.status, system2Enabled };
     } catch {
       return { status: "not-found-for-session" };
     }

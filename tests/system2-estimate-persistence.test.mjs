@@ -115,6 +115,9 @@ test("only the owner's own row is written; a refused or failed estimate stores n
   await persist(client, "own", stored(6));
   assert.equal(R.acceptedSystem2Estimate({ state: "UNAVAILABLE", estimate_shown: false, final_text: "" }, "t"), null, "the route writes only an accepted result");
   assert.equal((await readPayload("own")).system2Estimate.conservative_estimate_percent, 6);
+  const second = await persist(client, "own", stored(9));
+  assert.equal(second.rowsAffected, 0, "one estimate per report: a stored estimate is never replaced");
+  assert.equal((await readPayload("own")).system2Estimate.conservative_estimate_percent, 6);
 });
 
 test("every view reads the same stored value: room summary (server), client summary, report decode, unified max rule", async () => {

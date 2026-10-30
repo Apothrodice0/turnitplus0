@@ -8,12 +8,16 @@ import { createClient } from "@libsql/client";
 import { applyMigrationsLibsql } from "../lib/ingest.js";
 import { resetAuthRateForTest } from "../lib/rate-limit.js";
 import { withTestIdentity } from "./helpers/test-signup.mjs";
+import { reportTextOf } from "./helpers/minimal-docx.mjs";
 
 // OPT-IN parity check (skipped unless both paths are set; the private backend and its model are NOT in this repo):
 //   S2_PARITY_BACKEND_DIR = local copy of the protected inference service (folder containing api/analyze.py + s2_artifacts/)
 //   S2_PARITY_V2_DIR      = the accepted local System 2 v2 tester (folder containing s2_local_test.py + tests/fixtures/)
-// Every synthetic fixture is sent through THIS product route (owner session, consent) to the backend running on
-// 127.0.0.1, and the returned fields must equal the local v2 tester's output exactly.
+// Every synthetic fixture is saved as its own report (with the text the browser extracts from it) and sent through THIS
+// product route (owner session, consent) to the backend running on 127.0.0.1; the returned fields must equal the local
+// v2 tester's output exactly. A fixture no browser could turn into a report (unreadable Word file) is refused before the
+// backend (DOCUMENT_MISMATCH) and counted separately, as is a fixture that is not clearly English: the backend's output
+// is not used for it, so the report keeps System 1's result (NOT_CLEARLY_ENGLISH).
 
 const BACKEND_DIR = process.env.S2_PARITY_BACKEND_DIR;
 const V2_DIR = process.env.S2_PARITY_V2_DIR;
@@ -42,11 +46,17 @@ test("System 2 product route reproduces the accepted local v2 tester exactly", {
     const cookie = res.headers.get("set-cookie").match(/tp_session_v1=([^;]*)/)[1];
     const client = createClient({ url: `file:${dbFile}` });
     const userId = (await client.execute("SELECT id FROM users WHERE email = 'parity-owner@example.test'")).rows[0].id;
-    await client.execute({ sql: "INSERT INTO saved_reports (id, device_key, submission_id, title, report_created_at, word_count, archive_score, score_band, payload_json, user_id) VALUES ('parity-report', 'd', 's', 't', '2026-10-28', 500, 3, 'low', '{}', ?)", args: [userId] });
-    client.close();
-
     const fixtureDir = path.join(V2_DIR, "tests", "fixtures");
     const fixtures = [...fs.readdirSync(fixtureDir).filter((f) => f.endsWith(".docx")).map((f) => path.join(fixtureDir, f)), ...EXTRA_FIXTURES];
+    const reportIdOf = new Map();
+    const unreadable = new Set();
+    for (const [i, f] of fixtures.entries()) {
+      const text = await reportTextOf(fs.readFileSync(f)).catch(() => "");
+      if (!text) unreadable.add(f);
+      reportIdOf.set(f, `parity-report-${i}`);
+      await client.execute({ sql: "INSERT INTO saved_reports (id, device_key, submission_id, title, report_created_at, word_count, archive_score, score_band, payload_json, user_id, room_number) VALUES (?, 'd', 's', 't', '2026-10-28', 500, 3, 'low', ?, ?, 0)", args: [`parity-report-${i}`, JSON.stringify({ text }), userId] });
+    }
+    client.close();
     const expectedScript = `import sys, json, importlib.util\nsys.dont_write_bytecode = True\nspec = importlib.util.spec_from_file_location("h", sys.argv[1]); h = importlib.util.module_from_spec(spec); spec.loader.exec_module(h)\nsys.stdout.reconfigure(encoding="utf-8")\nprint(json.dumps({p: h.estimate(p) for p in sys.argv[2:]}, ensure_ascii=False))\n`;
     const v2 = spawnSync("python", ["-I", "-B", "-c", expectedScript, path.join(V2_DIR, "s2_local_test.py"), ...fixtures], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
     assert.equal(v2.status, 0, v2.stderr);
@@ -54,11 +64,23 @@ test("System 2 product route reproduces the accepted local v2 tester exactly", {
     const KEYS = ["state", "estimate_shown", "conservative_estimate_percent", "final_text", "warnings", "language_check", "report_category", "report_signals", "analyzable_words"];
     let matched = 0;
     let unifiedChecked = 0;
+    let notEnglish = 0;
     for (const f of fixtures) {
       const body = fs.readFileSync(f);
-      const r = await route.POST(new Request("http://localhost/api/reports/parity-report/system2", { method: "POST",
-        headers: { cookie: `tp_session_v1=${cookie}`, "x-s2-consent": "granted", "x-file-extension": path.extname(f), "content-type": "application/octet-stream" }, body }), { params: Promise.resolve({ id: "parity-report" }) });
+      const id = reportIdOf.get(f);
+      const r = await route.POST(new Request(`http://localhost/api/reports/${id}/system2`, { method: "POST",
+        headers: { cookie: `tp_session_v1=${cookie}`, "x-s2-consent": "granted", "x-file-extension": path.extname(f), "content-type": "application/octet-stream" }, body }), { params: Promise.resolve({ id }) });
       const got = await r.json(); const exp = expected[f];
+      if (unreadable.has(f)) {
+        assert.ok(r.status === 422 || r.status === 200, `${path.basename(f)}: unreadable Word file refused locally`);
+        assert.equal(got.estimate_shown, false);
+        continue;
+      }
+      if (exp.estimate_shown && exp.language_check?.clearly_english !== true) {
+        assert.equal(got.state, "NOT_CLEARLY_ENGLISH", path.basename(f)); assert.equal(got.estimate_shown, false); assert.equal(got.conservative_estimate_percent, undefined);
+        notEnglish += 1;
+        continue;
+      }
       for (const k of KEYS) assert.deepEqual(got[k], exp[k], `${path.basename(f)}: field ${k}`);
       const strip = (d) => { if (!d) return d; const { frozen_files_verified, ...rest } = d; return rest; };
       assert.deepEqual(strip(got.diagnostics), strip(exp.diagnostics), `${path.basename(f)}: diagnostics`);
@@ -70,8 +92,8 @@ test("System 2 product route reproduces the accepted local v2 tester exactly", {
       }
       matched += 1;
     }
-    console.log(`parity: ${matched}/${fixtures.length} fixtures identical; unified max-rule checks on real estimates: ${unifiedChecked}`);
-    assert.equal(matched, fixtures.length);
+    console.log(`parity: ${matched}/${fixtures.length - unreadable.size - notEnglish} fixtures identical (${unreadable.size} unreadable refused locally, ${notEnglish} not clearly English kept on System 1); unified max-rule checks on real estimates: ${unifiedChecked}`);
+    assert.equal(matched, fixtures.length - unreadable.size - notEnglish);
   } finally {
     py.kill();
     for (const s of ["", "-wal", "-shm"]) if (fs.existsSync(`${dbFile}${s}`)) try { fs.unlinkSync(`${dbFile}${s}`); } catch { /* still open */ }

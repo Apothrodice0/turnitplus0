@@ -4,15 +4,16 @@ import { useEffect, useState } from "react";
 import type { System2EstimateRecord } from "@/lib/system2-unified";
 
 /**
- * ENGLISH SYSTEM 2 — runs behind the scenes inside the normal analysis, owner-only (provisional, protected Preview).
- * Everything here is mounted ONLY when the server page resolved `system2Enabled` for the signed-in owner
- * (lib/system2-research.ts); ordinary customers never mount it and never trigger a request.
+ * ENGLISH SYSTEM 2 — runs behind the scenes inside the normal analysis. The request below is made ONLY when the room
+ * page resolved `system2Enabled` on the server (lib/system2-access.ts: administrators, the owner allowlist, verified
+ * customers with an active subscription in a room of their plan); every other account never triggers one, and the
+ * route refuses it anyway.
  *
  * No separate System 2 feature is shown: the estimate only feeds the ONE similarity percentage
- * (lib/system2-unified.ts). It runs automatically for the allowlisted owner's own Word documents (owner decision
- * 2026-10-30: no consent card or dialog — covered by the privacy policy); no customer account ever sends anything. The
- * server stores an accepted estimate with the report itself (lib/system2-estimate-record.ts); nothing is kept in the
- * browser. No internal name, model or research detail is shown.
+ * (lib/system2-unified.ts). It runs automatically for the eligible account's own Word documents (owner decision
+ * 2026-10-30: no consent card or dialog — covered by the privacy policy). The server stores an accepted estimate with
+ * the report itself (lib/system2-estimate-record.ts); nothing is kept in the browser. No internal name, model or
+ * research detail is shown.
  */
 
 const ESTIMATE_EVENT = "tp:s2-estimate";
@@ -44,13 +45,25 @@ export function useSystem2Estimate(reportId: string | null | undefined, enabled:
   return enabled && state && state.reportId === reportId ? state.result : null;
 }
 
-/** The one automatic request, made by the room right after its report is saved — only for the allowlisted owner. Never throws; never invents a score. */
+/** Tells the server that this check's file was kept in the browser (no document is sent), so it is recorded as ineligible. */
+function reportNotSent(reportId: string, state: "UNSUPPORTED_FILE_TYPE" | "TOO_LARGE") {
+  void fetch(`/api/reports/${encodeURIComponent(reportId)}/system2`, {
+    method: "POST",
+    headers: { "x-s2-consent": "granted", "x-s2-not-sent": state },
+    cache: "no-store",
+    credentials: "same-origin",
+  }).catch(() => undefined);
+}
+
+/** The one automatic request, made by the room right after its report is saved — only for an eligible account. Never throws; never invents a score. */
 export async function requestSystem2Estimate(reportId: string, file: File): Promise<System2EstimateRecord> {
   let result: System2EstimateRecord;
   if (extensionOf(file.name) !== ".docx") {
     result = unavailable("UNSUPPORTED_FILE_TYPE", "Additional analysis is available for Word (.docx) documents only. The document was not sent.");
+    reportNotSent(reportId, "UNSUPPORTED_FILE_TYPE");
   } else if (file.size > MAX_BYTES) {
     result = unavailable("TOO_LARGE", "The file is larger than 4 MB. The document was not sent.");
+    reportNotSent(reportId, "TOO_LARGE");
   } else {
     try {
       const res = await fetch(`/api/reports/${encodeURIComponent(reportId)}/system2`, {

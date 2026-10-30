@@ -14,7 +14,7 @@ import { ROOM_CYCLE_MS } from "@/lib/report-rooms";
 import { newCheckRefusal, readActiveRoomClaims, resolveRoomPolicy } from "@/lib/account-entitlements";
 import { HISTORICAL_ROOM_NOTE, roomCooldownLock, subscriptionNoticeFor, uploadLockFor, type SubscriptionNotice, type UploadLock } from "@/lib/account-plan";
 import { SubscriptionRequiredState } from "@/components/reports/subscription-required-state";
-import { isSystem2ResearchUser } from "@/lib/system2-research";
+import { resolveSystem2Access } from "@/lib/system2-access";
 import { RoomPageShell } from "./room-page-shell";
 
 export const dynamic = "force-dynamic";
@@ -127,8 +127,9 @@ const loadRoom = cache(async (roomParam: string): Promise<RoomPageResult> => {
       subscriptionEnforced: policy.enforced,
       historicalNote,
       earlierReports,
-      // Owner-only English System 2 research preview: resolved server-side (allowlist + feature switch, never in production).
-      system2Enabled: isSystem2ResearchUser(sessionUser),
+      // English System 2 for a check started in this room: resolved server-side (lib/system2-access.ts — administrators,
+      // the owner allowlist, or a verified customer with an active subscription and this room in the plan).
+      system2Enabled: (await resolveSystem2Access(client, sessionUser, { room, policy })).allowed,
     };
   } finally {
     client.close();

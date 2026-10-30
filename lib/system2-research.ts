@@ -2,38 +2,49 @@ import { getVercelOidcToken } from "@vercel/oidc";
 import type { SessionUser } from "./auth-session";
 
 /**
- * ENGLISH SYSTEM 2 — owner-only RESEARCH preview (server-side only).
+ * ENGLISH SYSTEM 2 — the server-side configuration and the server-to-server inference call.
  *
- * A research-only, conservative statistical estimate of Turnitin-like similarity (0–20%) produced by the frozen
- * Model A + the accepted fixed −4.5-point conservative postprocessor v1. It is NOT similarity evidence, never
- * changes System 1 scores, AI results, persisted reports or source attribution, and is never stored.
+ * A conservative statistical estimate of Turnitin-like similarity (0–20%) produced by the frozen Model A + the accepted
+ * fixed −4.5-point conservative postprocessor v1. It never changes System 1 scores, AI results or source attribution;
+ * an accepted estimate only feeds the ONE similarity percentage, max(System 1, System 2) (lib/system2-unified.ts).
+ * WHO may run it is decided per request by lib/system2-access.ts (administrators, the owner allowlist, and — behind
+ * their own switch — verified customers with an active subscription).
  *
  * The model artifacts are NOT part of this (public) repository or of this deployment: inference runs in a separate,
  * protected private backend reached server-to-server. Everything below is configured through server-only
  * environment variables — none of them is ever sent to the browser:
  *
  *   S2_RESEARCH_ENABLED      "1" to enable. Anything else (or unset) = feature off everywhere.
- *   S2_RESEARCH_OWNER_EMAILS comma-separated allowlist of account emails (case-insensitive). Empty = nobody.
+ *   S2_PRODUCTION_ENABLED    "1" is ALSO required in the production environment (VERCEL_ENV=production). Unset there =
+ *                            off for everyone, the owner included.
+ *   S2_SUBSCRIBERS_ENABLED   "1" opens it to verified customers with an active subscription (lib/system2-access.ts).
+ *                            Unset = administrators and the owner allowlist only.
+ *   S2_RESEARCH_OWNER_EMAILS optional comma-separated allowlist of account emails (case-insensitive).
  *   S2_INFERENCE_URL         https URL of the private inference endpoint (…/api/analyze).
  *   S2_INFERENCE_KEY         bearer key the inference endpoint requires (>= 32 chars).
  *   S2_INFERENCE_BYPASS      optional fallback only (owner approval required): the backend's "protection bypass for
  *                            automation" secret. Not needed when Trusted Sources is configured.
  *
  * Reaching the protected backend: Vercel Trusted Sources. The backend project lists this project as a trusted Vercel
- * project (Preview → Preview only), and every call carries this deployment's short-lived Vercel OIDC token in the
- * documented `x-vercel-trusted-oidc-idp-token` header. The backend's own bearer key is still required on top.
- *
- * The feature is ALWAYS off in the production environment (VERCEL_ENV=production): this research preview is
- * only for protected Preview deployments.
+ * project (Preview → Preview, and Production → Production once released), and every call carries this deployment's
+ * short-lived Vercel OIDC token in the documented `x-vercel-trusted-oidc-idp-token` header. The backend's own bearer
+ * key is still required on top.
  */
 
 export const SYSTEM2_MAX_UPLOAD_BYTES = 4_000_000; // below Vercel's 4.5 MB request-body limit
 export const SYSTEM2_CONSENT_HEADER = "x-s2-consent";
 export const SYSTEM2_CONSENT_VALUE = "granted";
+/** Sent by the browser, with no document, for a file it keeps (so the server records it as ineligible). */
+export const SYSTEM2_NOT_SENT_HEADER = "x-s2-not-sent";
+export const SYSTEM2_NOT_SENT_STATES = ["UNSUPPORTED_FILE_TYPE", "TOO_LARGE"] as const;
+/** An estimate may be requested only this soon after the report's first save (saved_at): it belongs to that check. */
+export const SYSTEM2_REQUEST_WINDOW_MS = 60 * 60 * 1000;
 const INFERENCE_TIMEOUT_MS = 30_000;
 
 export type System2Config = {
   enabled: boolean;
+  /** Verified customers with an active subscription may run it too (lib/system2-access.ts). */
+  subscribersEnabled: boolean;
   ownerEmails: string[];
   inferenceUrl: string | null;
   inferenceKey: string | null;
@@ -41,7 +52,7 @@ export type System2Config = {
 };
 
 export function system2Config(env: NodeJS.ProcessEnv = process.env): System2Config {
-  const enabledFlag = env.S2_RESEARCH_ENABLED === "1" && env.VERCEL_ENV !== "production";
+  const enabledFlag = env.S2_RESEARCH_ENABLED === "1" && (env.VERCEL_ENV !== "production" || env.S2_PRODUCTION_ENABLED === "1");
   const ownerEmails = (env.S2_RESEARCH_OWNER_EMAILS ?? "")
     .split(",")
     .map((e) => e.trim().toLowerCase())
@@ -51,7 +62,8 @@ export function system2Config(env: NodeJS.ProcessEnv = process.env): System2Conf
   const key = (env.S2_INFERENCE_KEY ?? "").trim();
   const bypass = (env.S2_INFERENCE_BYPASS ?? "").trim();
   return {
-    enabled: enabledFlag && ownerEmails.length > 0 && inferenceUrl !== null && key.length >= 32,
+    enabled: enabledFlag && inferenceUrl !== null && key.length >= 32,
+    subscribersEnabled: env.S2_SUBSCRIBERS_ENABLED === "1",
     ownerEmails,
     inferenceUrl,
     inferenceKey: key.length >= 32 ? key : null,
@@ -59,7 +71,7 @@ export function system2Config(env: NodeJS.ProcessEnv = process.env): System2Conf
   };
 }
 
-/** True only for an authenticated account on the explicit owner allowlist, with the feature fully configured. */
+/** True only for an authenticated account on the explicit owner allowlist, with the feature fully configured (lib/system2-access.ts decides the rest). */
 export function isSystem2ResearchUser(user: Pick<SessionUser, "email"> | null | undefined, config: System2Config = system2Config()): boolean {
   if (!config.enabled || !user || typeof user.email !== "string") return false;
   return config.ownerEmails.includes(user.email.trim().toLowerCase());
@@ -85,6 +97,16 @@ export function sanitizeSystem2Result(raw: unknown): System2Result | null {
   for (const k of RESULT_FIELDS) if (k in r) out[k] = r[k];
   out.research_only = true;
   return out as System2Result;
+}
+
+/**
+ * Only clearly English text may feed the one similarity percentage: the model is validated for English manuscripts. The
+ * backend estimates other Latin-script text too (its accepted tester shows a warning beside it), but the product shows no
+ * warning, so such a document keeps System 1's result. The model's output is never changed, only not used.
+ */
+export function isClearlyEnglishResult(result: System2Result): boolean {
+  const check = result.language_check;
+  return typeof check === "object" && check !== null && (check as { clearly_english?: unknown }).clearly_english === true;
 }
 
 /** Local refusals (identical wording to the accepted local tester) — the document is never transmitted for these. */
@@ -117,7 +139,7 @@ export const vercelOidcTokenProvider: OidcTokenProvider = async () => {
   }
 };
 
-/** Server-to-server call to the private inference backend. The document bytes are sent only here, only after consent. */
+/** Server-to-server call to the private inference backend. The document bytes are sent only here, only for an eligible account's own report. */
 export async function requestSystem2Inference(
   bytes: Uint8Array,
   config: System2Config = system2Config(),

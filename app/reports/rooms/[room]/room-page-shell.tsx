@@ -602,11 +602,11 @@ type Props = {
   historicalNote?: string | null;
   /** Report history retention (lib/report-history.ts): this room's earlier reports, newest first (empty with it off). */
   earlierReports?: { id: string; title: string; createdAt: string; savedAt: string; wordCount: number }[];
-  /** Owner-only English System 2 research preview, resolved server-side (lib/system2-research.ts). Off for everyone else. */
+  /** English System 2 for a check in this room, resolved server-side (lib/system2-access.ts). Off unless eligible. */
   system2Enabled?: boolean;
 };
 
-/** Owner-only: the same Similarity tile, handed this report's System 2 estimate the moment the server stores it (before the next room read). */
+/** Eligible accounts: the same Similarity tile, handed this report's System 2 estimate the moment the server stores it (before the next room read). */
 function UnifiedSimilarityMetricTile({ report, room }: { report: ReportSummary; room: number }) {
   const system2Estimate = useSystem2Estimate(report.id, true);
   return <SimilarityMetricTile report={report} room={room} system2Estimate={system2Estimate} />;
@@ -616,8 +616,8 @@ export function RoomPageShell({ room, accountEmail, initialOccupant, uploadLock 
   const [occupant, setOccupant] = useState<RoomContents>(initialOccupant);
   const [pollExhausted, setPollExhausted] = useState(false);
   const [file, setFile] = useState<File | null>(null);
-  // Owner-only System 2 (provisional, behind the scenes): the submitted file for the ONE automatic request made right
-  // after the save. Only ever set for the allowlisted owner (system2Enabled); every customer's check stays in the browser.
+  // System 2 (behind the scenes): the submitted file for the ONE automatic request made right after the save. Only ever
+  // set when the server resolved system2Enabled for this account and room (lib/system2-access.ts).
   const s2PendingRef = useRef<File | null>(null);
   const [progress, setProgress] = useState(0);
   const [processingLabel, setProcessingLabel] = useState("Reading document content");
