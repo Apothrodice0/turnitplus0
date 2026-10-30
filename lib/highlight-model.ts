@@ -1,3 +1,4 @@
+import { forgetServiceIdentityToken, serviceIdentityFromEnv, serviceIdentityToken, type ServiceIdentity } from "./highlight-model-auth";
 import type { PredictedHighlightRange } from "./report-types";
 import { comparisonText } from "./similarity-core";
 
@@ -9,8 +10,9 @@ import { comparisonText } from "./similarity-core";
  * What it never does: add a source, change a percentage or matched-word count, or change the report's own payload.
  *
  * Off unless HIGHLIGHT_MODEL_ENABLED=1 with a URL, a key of at least 32 characters and a model version; on a production
- * deployment it also needs HIGHLIGHT_MODEL_PRODUCTION_ENABLED=1. Who a prediction is made for is decided per report
- * (lib/highlight-predictions.ts). Any failure leaves the report exactly as it was.
+ * deployment it also needs HIGHLIGHT_MODEL_PRODUCTION_ENABLED=1. A private Cloud Run service also needs its Google
+ * identity (lib/highlight-model-auth.ts); an identity that is set but unusable keeps the model off. Who a prediction is
+ * made for is decided per report (lib/highlight-predictions.ts). Any failure leaves the report exactly as it was.
  */
 export type HighlightModelConfig = {
   enabled: boolean;
@@ -22,6 +24,8 @@ export type HighlightModelConfig = {
   ownerEmails: string[];
   timeoutMs: number;
   maxWords: number;
+  /** The Google identity a private Cloud Run service requires; null for a service that needs none. */
+  identity: ServiceIdentity | null;
 };
 
 const MIN_KEY_LENGTH = 32;
@@ -38,8 +42,9 @@ export function highlightModelConfig(env: NodeJS.ProcessEnv = process.env): High
   const timeoutMs = Number(env.HIGHLIGHT_MODEL_TIMEOUT_MS);
   const maxWords = Number(env.HIGHLIGHT_MODEL_MAX_WORDS);
   const productionAllowed = env.VERCEL_ENV !== "production" || env.HIGHLIGHT_MODEL_PRODUCTION_ENABLED === "1";
+  const identity = serviceIdentityFromEnv(env);
   return {
-    enabled: env.HIGHLIGHT_MODEL_ENABLED === "1" && productionAllowed && url.length > 0 && key.length >= MIN_KEY_LENGTH && modelVersion.length > 0,
+    enabled: env.HIGHLIGHT_MODEL_ENABLED === "1" && productionAllowed && url.length > 0 && key.length >= MIN_KEY_LENGTH && modelVersion.length > 0 && identity !== "INVALID",
     url,
     key,
     modelVersion,
@@ -47,6 +52,7 @@ export function highlightModelConfig(env: NodeJS.ProcessEnv = process.env): High
     ownerEmails: (env.HIGHLIGHT_MODEL_OWNER_EMAILS ?? "").split(",").map((email) => email.trim().toLowerCase()).filter(Boolean),
     timeoutMs: Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : DEFAULT_TIMEOUT_MS,
     maxWords: Number.isFinite(maxWords) && maxWords > 0 ? maxWords : DEFAULT_MAX_WORDS,
+    identity: identity === "INVALID" ? null : identity,
   };
 }
 
@@ -81,12 +87,21 @@ export async function requestPredictedHighlights(text: string, config: Highlight
   // comparisonText is a prefix of the report text (the product's reference cut), so the offsets stay valid; the model
   // was trained without the reference section.
   const compared = comparisonText(text);
+  const headers: Record<string, string> = { "Content-Type": "application/json", Authorization: `Bearer ${config.key}` };
+  if (config.identity) {
+    const token = await serviceIdentityToken(config.identity, fetchImpl).catch((error: { message?: string; retryable?: boolean }) => {
+      throw new HighlightModelError(error?.message ?? "ID_TOKEN_FAILED", error?.retryable !== false);
+    });
+    headers["X-Serverless-Authorization"] = `Bearer ${token}`;
+  }
   const response = await fetchImpl(config.url, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${config.key}` },
+    headers,
     body: JSON.stringify({ text: compared }),
     signal: AbortSignal.timeout(config.timeoutMs),
   });
+  // Google refused the token: drop it so the next attempt mints a fresh one.
+  if (response.status === 401 && config.identity) forgetServiceIdentityToken();
   if (!response.ok) throw new HighlightModelError(`HTTP_${response.status}`, response.status === 429 || response.status >= 500);
   const body = (await response.json()) as { ranges?: unknown; modelVersion?: unknown };
   // A local development sidecar names no version; a service that names one must be the model this deployment expects.
