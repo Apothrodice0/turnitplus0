@@ -1,8 +1,7 @@
 import { randomBytes } from 'node:crypto';
+import { checkCustomerRate } from '../../../../lib/customer-rate-limit';
 import { NextResponse } from 'next/server';
 import { getReportsDbClient } from '../../../../lib/reports-db';
-import { checkRate } from '../../../../lib/rate-limit';
-import { clientIpFrom } from '../../../../lib/client-ip';
 import { getSessionUser } from '../../../../lib/auth-session';
 import { isCrossOriginBrowserRequest, CROSS_ORIGIN_REJECTED } from '../../../../lib/same-origin';
 import { issueCheckAuthorization, isSha256Hex } from '../../../../lib/account-entitlements';
@@ -28,7 +27,7 @@ function json(body: unknown, status: number, extraHeaders?: Record<string, strin
 export async function POST(request: Request) {
   try {
     if (isCrossOriginBrowserRequest(request)) return json(CROSS_ORIGIN_REJECTED, 403);
-    const rate = await checkRate(clientIpFrom(request));
+    const rate = await checkCustomerRate(request, 'new-check'); // account-aware (verified session), IP for anonymous
     if (!rate.allowed) return json({ error: 'Too many requests' }, 429, { 'Retry-After': String(rate.retryAfter) });
 
     const body = (await request.json().catch(() => null)) as { room?: unknown; textSha256?: unknown } | null;

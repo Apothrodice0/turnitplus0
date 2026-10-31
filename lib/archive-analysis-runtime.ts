@@ -1,3 +1,4 @@
+import { fetchWithRateLimitRetry } from "./rate-limited-fetch";
 import type { ArchiveAnalysisResult } from "./archive-result-framing";
 import { ACTIVE_SCORING_NORMALIZATION_VERSION } from "./similarity-core";
 
@@ -69,7 +70,7 @@ function getBrowserRunner(): Promise<BrowserArchiveRunner> {
 // ── server engine (DB matcher via API) ─────────────────────────────────────
 async function runViaServer(text: string, onProgress: ArchiveProgress): Promise<ArchiveAnalysisResult> {
   onProgress(45, "Comparing against the archive");
-  const response = await fetch("/api/archive/match", {
+  const response = await fetchWithRateLimitRetry("/api/archive/match", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     // The contract this bundle computes a check under — the server matcher

@@ -1,3 +1,4 @@
+import { fetchWithRateLimitRetry } from "./rate-limited-fetch";
 /**
  * Device Passport — Phase 3 (browser client). Fully automatic, zero UI.
  *
@@ -351,7 +352,7 @@ async function ensureRegistered(publicKeySpki: string, force: boolean): Promise<
   if (featureUnavailableForSession) return;
   if (!force && registeredThisSession.has(publicKeySpki)) return;
   try {
-    const res = await fetch(REGISTER_ENDPOINT, {
+    const res = await fetchWithRateLimitRetry(REGISTER_ENDPOINT, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "same-origin",
@@ -453,7 +454,7 @@ export function ensureDevicePassport(): Promise<LoadedPassport | null> {
 
 async function requestChallenge(): Promise<{ challengeId: string; nonce: string } | null> {
   try {
-    const res = await fetch(CHALLENGE_ENDPOINT, {
+    const res = await fetchWithRateLimitRetry(CHALLENGE_ENDPOINT, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "same-origin",

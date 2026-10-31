@@ -728,7 +728,7 @@ test("STRUCTURE: retryAiCheck persists through saveRetriedAiResult and can never
   // only by the ai-compact-v1 transport step (a no-op unless the writer gate is on and the report carries an AI result).
   const saveRemoteFn = remote.match(/export async function saveReportRemote[\s\S]*?\n\}\r?\n/)?.[0] ?? "";
   assert.ok(saveRemoteFn.length > 500, "saveReportRemote found");
-  assert.match(saveRemoteFn, /fetch\("\/api\/reports", \{/);
+  assert.match(saveRemoteFn, /fetch(?:WithRateLimitRetry)?\("\/api\/reports", \{/);
   assert.match(saveRemoteFn, /payload: prepareReportForTransport\(transportReport\),/);
   assert.match(remote, /import \{ prepareReportForTransport \} from "\.\/ai-passage-table";/);
   assert.doesNotMatch(saveRemoteFn, /ai-retry/);

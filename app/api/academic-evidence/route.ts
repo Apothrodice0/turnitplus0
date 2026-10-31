@@ -1,6 +1,5 @@
 import { NextResponse } from 'next/server';
-import { checkRate } from '../../../lib/rate-limit';
-import { clientIpFrom } from '../../../lib/client-ip';
+import { checkCustomerRate } from '../../../lib/customer-rate-limit';
 import { getExternalAcademicEvidence } from '../../../lib/academic-evidence-integration';
 import { getReportsDbClient } from '../../../lib/reports-db';
 import { recordAcademicSearchRunDiagnostics } from '../../../lib/academic-search-diagnostics-repo';
@@ -55,7 +54,7 @@ function isNonEmptyString(value: unknown): value is string {
 
 export async function POST(request: Request) {
   try {
-    const rate = await checkRate(clientIpFrom(request));
+    const rate = await checkCustomerRate(request, 'processing'); // account-aware (verified session), IP for anonymous
     if (!rate.allowed) {
       return new NextResponse(JSON.stringify({ error: 'Too many requests' }), { status: 429, headers: { 'Retry-After': String(rate.retryAfter) } });
     }

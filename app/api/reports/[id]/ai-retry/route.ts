@@ -1,7 +1,6 @@
 import { NextResponse } from 'next/server';
+import { checkCustomerRate } from '../../../../../lib/customer-rate-limit';
 import { getReportsDbClient } from '../../../../../lib/reports-db';
-import { checkRate } from '../../../../../lib/rate-limit';
-import { clientIpFrom } from '../../../../../lib/client-ip';
 import { getSessionUser } from '../../../../../lib/auth-session';
 import { reportAccessRefusalFor } from '../../../../../lib/account-entitlements';
 import { INTERPRETATION_TO_VERIFY_SQL } from '../../../../../lib/reports-repo';
@@ -316,7 +315,7 @@ async function persistAiRetry(txClient: ReportsDbClient, sessionUser: SessionUse
 
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
-    const rate = await checkRate(clientIpFrom(request));
+    const rate = await checkCustomerRate(request, 'processing'); // account-aware (verified session), IP for anonymous
     if (!rate.allowed) {
       return json(429, { error: 'Too many requests' }, { 'Retry-After': String(rate.retryAfter) });
     }

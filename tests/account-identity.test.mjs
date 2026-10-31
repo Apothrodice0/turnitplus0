@@ -608,6 +608,7 @@ test("12: no scoring / matcher / owner-link / Device-Passport / authz module imp
   const ALLOWED_APP_IMPORTERS = new Set([
     "app/api/auth/signup/route.ts",
     "app/api/auth/me/route.ts",
+    "app/reports/[id]/page.tsx", // the signed-in owner's own name on their own PDF cover; nothing about any other account
     "app/api/identity/cities/route.ts",
     "app/api/identity/institutions/route.ts",
   ]);

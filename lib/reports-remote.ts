@@ -1,3 +1,4 @@
+import { fetchWithRateLimitRetry } from "./rate-limited-fetch";
 import { getDeviceKey } from "./device-key";
 import { maybeAttestReportUpload, markDevicePassportReportSaved } from "./device-passport";
 import { prepareReportForTransport } from "./ai-passage-table";
@@ -243,7 +244,7 @@ export async function saveReportRemote<T>(
     // table that points into the manuscript this payload already carries. The report is otherwise sent exactly as
     // given; with the gate off, or for a first save (no aiAnalysis yet), `report` is the very same object as before.
     // `maybeAttestReportUpload` above deliberately saw the original: it only reads `report.text`, which is unchanged.
-    const response = await fetch("/api/reports", {
+    const response = await fetchWithRateLimitRetry("/api/reports", {
       method: "POST",
       ...(options?.signal ? { signal: options.signal } : {}),
       headers: { "Content-Type": "application/json" },
@@ -320,7 +321,7 @@ export type SaveAiRetryResultInput = {
  */
 export async function saveAiRetryResultRemote(input: SaveAiRetryResultInput): Promise<SaveReportRemoteResult> {
   try {
-    const response = await fetch(`/api/reports/${encodeURIComponent(input.id)}/ai-retry`, {
+    const response = await fetchWithRateLimitRetry(`/api/reports/${encodeURIComponent(input.id)}/ai-retry`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -369,7 +370,7 @@ export async function requestCheckAuthorization(room: number, text: string): Pro
     const bytes = new TextEncoder().encode(canonicalizeText(text));
     const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
     const textSha256 = Array.from(digest, (b) => b.toString(16).padStart(2, "0")).join("");
-    const response = await fetch("/api/reports/check-authorization", {
+    const response = await fetchWithRateLimitRetry("/api/reports/check-authorization", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ room, textSha256 }),

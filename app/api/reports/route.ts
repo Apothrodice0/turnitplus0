@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
+import { checkCustomerRate } from '../../../lib/customer-rate-limit';
 import { getReportsDbClient } from '../../../lib/reports-db';
-import { checkRate, checkPollRate, checkReadRate } from '../../../lib/rate-limit';
+import { checkPollRate, checkReadRate } from '../../../lib/rate-limit';
 import { clientIpFrom } from '../../../lib/client-ip';
 import { getSessionUser, parseCookie, hashToken, SESSION_COOKIE_NAME } from '../../../lib/auth-session';
 import {
@@ -479,7 +480,7 @@ export async function POST(request: Request) {
   let timingWordCount: number | null = null;
   const timingSince = (startedAt: number) => Date.now() - startedAt;
   try {
-    const rate = await checkRate(clientIpFrom(request));
+    const rate = await checkCustomerRate(request, 'processing'); // account-aware (verified session), IP for anonymous
     if (!rate.allowed) {
       logReportSaveRejectedTelemetry({ reason: 'IP_RATE_LIMIT', status: 429 });
       return new NextResponse(JSON.stringify({ error: 'Too many requests' }), { status: 429, headers: { 'Retry-After': String(rate.retryAfter) } });

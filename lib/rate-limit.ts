@@ -375,3 +375,47 @@ export async function resetPasswordResetRatesForTest(clientId: string, emailDige
   await resetBucketForTest(`pwresetconfirm:${clientId}`);
   if (emailDigest) await resetBucketForTest(`pwresetemail:${emailDigest}`);
 }
+
+/**
+ * ACCOUNT-AWARE CUSTOMER LIMITS (owner-approved 2026-10-25). Many legitimate customers can share one public IP (a campus,
+ * library or university network); with the general bucket keyed by IP alone, one customer's document check exhausted the
+ * allowance of everyone behind the same address. For a SIGNED-IN customer (the account id comes ONLY from the server-verified
+ * session — see lib/customer-rate-limit.ts — never from the request body or a header) the pipeline now uses:
+ *   - `newcheck:<accountId>`  starting a NEW check (POST /api/reports/check-authorization — once per document);
+ *   - `acct:<accountId>`      ordinary processing of a check already started (report saves, AI-result updates, AI retry,
+ *                             academic evidence, archive match, document layout, Device Passport);
+ *   - `ipceiling:<ip>`        a broad anti-abuse ceiling for ALL signed-in pipeline traffic from one address (many accounts
+ *                             created to flood from one place still stop here).
+ * Anonymous requests keep `general:<ip>` exactly as before (10/min). Rooms, 24-hour cooldowns, plans, activation and one-time
+ * check authorizations are enforced elsewhere and are untouched. Same durable, atomic bucket table as every other limiter.
+ */
+const ACCOUNT_PROCESSING_MAX_TOKENS = 60;
+const ACCOUNT_PROCESSING_INTERVAL_MS = 60_000;
+const ACCOUNT_NEW_CHECK_MAX_TOKENS = 6;
+const ACCOUNT_NEW_CHECK_INTERVAL_MS = 60_000;
+const SHARED_IP_CEILING_MAX_TOKENS = 300;
+const SHARED_IP_CEILING_INTERVAL_MS = 60_000;
+
+export async function checkAccountProcessingRate(accountId: string): Promise<RateCheckResult> {
+  return checkBucket(`acct:${accountId}`, ACCOUNT_PROCESSING_MAX_TOKENS, ACCOUNT_PROCESSING_INTERVAL_MS);
+}
+export async function checkAccountNewCheckRate(accountId: string): Promise<RateCheckResult> {
+  return checkBucket(`newcheck:${accountId}`, ACCOUNT_NEW_CHECK_MAX_TOKENS, ACCOUNT_NEW_CHECK_INTERVAL_MS);
+}
+export async function checkSharedIpCeilingRate(clientIp: string): Promise<RateCheckResult> {
+  return checkBucket(`ipceiling:${clientIp}`, SHARED_IP_CEILING_MAX_TOKENS, SHARED_IP_CEILING_INTERVAL_MS);
+}
+export const CUSTOMER_RATE_LIMITS = {
+  accountProcessingPerMinute: ACCOUNT_PROCESSING_MAX_TOKENS,
+  accountNewChecksPerMinute: ACCOUNT_NEW_CHECK_MAX_TOKENS,
+  sharedIpCeilingPerMinute: SHARED_IP_CEILING_MAX_TOKENS,
+} as const;
+/** Test-only: one account's processing and new-check buckets. */
+export async function resetAccountRateForTest(accountId: string): Promise<void> {
+  await resetBucketForTest(`acct:${accountId}`);
+  await resetBucketForTest(`newcheck:${accountId}`);
+}
+/** Test-only: one address's signed-in ceiling. */
+export async function resetSharedIpCeilingForTest(clientIp: string): Promise<void> {
+  await resetBucketForTest(`ipceiling:${clientIp}`);
+}

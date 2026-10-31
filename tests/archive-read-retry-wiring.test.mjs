@@ -87,7 +87,7 @@ test("GET /api/archive/match stays DB-independent — the retry work did not tou
 test("POST /api/archive/match: checkRate runs directly (outside any retry layer); the matcher gets the raw client and wraps reads internally", () => {
   const src = read("app/api/archive/match/route.ts");
   const postBody = src.slice(src.indexOf("export async function POST"));
-  assert.match(postBody, /const rate = await checkRate\(clientIpFrom\(request\)\)/, "POST still rate-limits by client IP, directly");
+  assert.match(postBody, /const rate = await checkCustomerRate\(request, "processing"\)/, "POST still rate-limits directly (verified account when signed in, client IP otherwise)");
   assert.doesNotMatch(postBody, /createArchiveReadRetryClient/, "the route does not build the retry wrapper — analyzeArchiveOnServer does, for reads only");
   assert.match(postBody, /await analyzeArchiveOnServer\(client, text\)/, "POST hands analyzeArchiveOnServer the raw client");
   assert.match(postBody, /client\.close\(\)/, "POST still owns client.close()");

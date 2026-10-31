@@ -1,3 +1,4 @@
+import { fetchWithRateLimitRetry } from "@/lib/rate-limited-fetch";
 import { createReceiptPdf } from "@/lib/receipt-pdf";
 import { extractPdfTextDocument, extractPdfTextDocumentWithCompleteness, PDF_EXTRACTOR_VERSION, type PdfExtractionCompleteness } from "@/lib/pdf-text-extraction";
 import { extractDocxTextDocument, extractDocxTextDocumentWithCompleteness } from "@/lib/docx-text-extraction";
@@ -331,7 +332,7 @@ export type AcademicEvidenceCheckResult = {
 // like getExternalAcademicEvidence's own never-throws contract server-side.
 export async function analyzeAcademicEvidence(text: string): Promise<AcademicEvidenceCheckResult> {
   try {
-    const response = await fetch("/api/academic-evidence", {
+    const response = await fetchWithRateLimitRetry("/api/academic-evidence", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       // The contract this check is computed under — the same one analyzeText
