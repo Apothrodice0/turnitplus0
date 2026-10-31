@@ -20,7 +20,7 @@ import * as archiveMatchRoute from '../app/api/archive/match/route.ts';
 import { checkWorkRefusal } from '../lib/account-entitlements.ts';
 import { planBlockMessage } from '../lib/account-plan.ts';
 import * as meRoute from '../app/api/auth/me/route.ts';
-import { resetAuthRateForTest, resetRateForTest, resetReadRateForTest, resetAdminRateForTest } from '../lib/rate-limit.js';
+import { resetAuthRateForTest, resetRateForTest, resetReadRateForTest, resetAdminRateForTest, resetAccountRateForTest } from '../lib/rate-limit.js';
 import { ADMIN_ROOM_COUNT, NORMAL_ROOM_COUNT, ROOM_CYCLE_MS } from '../lib/report-rooms.ts';
 import { DAY_MS } from '../lib/account-plan.ts';
 import { ACCOUNT_DELETION_CONFIRMATION_PHRASE } from '../lib/account-deletion.ts';
@@ -112,9 +112,17 @@ async function grant(adminCookie, body) {
   return { preview: p.body.preview, result: c.body, operationId };
 }
 
+// Account-aware limits (2026-10-25): like the per-request IP reset, the signed-in account's own buckets are reset so rate
+// limiting never interferes with the entitlement rules these scenarios test (it has its own tests: customer-rate-limit).
+async function resetAccountLimits(user) {
+  const r = await db.execute({ sql: 'SELECT id FROM users WHERE email = ?', args: [user.email] });
+  if (r.rows[0]) await resetAccountRateForTest(String(r.rows[0].id));
+}
+
 async function postReport(user, id, { room, createdAt, aiScore = 12, text: manuscript, checkAuthorization } = {}) {
   const addr = ip('post');
   await resetRateForTest(addr);
+  await resetAccountLimits(user);
   const created = createdAt ?? new Date().toISOString();
   const res = await reportsRoute.POST(new Request('http://localhost/api/reports', {
     method: 'POST',
@@ -139,6 +147,7 @@ async function browserTextSha256(text) {
 async function issueAuthorization(user, room, text, { textSha256 } = {}) {
   const addr = ip('auth');
   await resetRateForTest(addr);
+  await resetAccountLimits(user);
   const res = await checkAuthorizationRoute.POST(new Request('http://localhost/api/reports/check-authorization', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-forwarded-for': addr, cookie: `tp_session_v1=${user.cookie}` },
