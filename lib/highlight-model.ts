@@ -62,12 +62,14 @@ export function highlightModelConfig(env: NodeJS.ProcessEnv = process.env): High
   };
 }
 
+const isWholeRange = (range: PredictedHighlightRange, textLength: number) =>
+  Boolean(range) && Number.isSafeInteger(range.start) && Number.isSafeInteger(range.end) && range.start >= 0 && range.end > range.start && range.end <= textLength;
+
 /** Only whole, in-bounds, non-overlapping character ranges survive; the backend's response is never passed through. */
 export function sanitizePredictedRanges(raw: unknown, textLength: number): PredictedHighlightRange[] {
   if (!Array.isArray(raw)) return [];
   const ranges = raw
-    .filter((range): range is PredictedHighlightRange =>
-      Boolean(range) && Number.isSafeInteger(range.start) && Number.isSafeInteger(range.end) && range.start >= 0 && range.end > range.start && range.end <= textLength)
+    .filter((range): range is PredictedHighlightRange => isWholeRange(range, textLength))
     .map(({ start, end }) => ({ start, end }))
     .sort((left, right) => left.start - right.start);
   const merged: PredictedHighlightRange[] = [];
@@ -89,6 +91,8 @@ export class HighlightModelError extends Error {
   }
 }
 
+const isLocalSidecar = (url: string) => /^http:\/\/(127\.0\.0\.1|localhost)[:/]/.test(url);
+
 export async function requestPredictedHighlights(text: string, config: HighlightModelConfig, fetchImpl: typeof fetch = fetch): Promise<PredictedHighlightRange[]> {
   // comparisonText is a prefix of the report text (the product's reference cut), so the offsets stay valid; the model
   // was trained without the reference section.
@@ -109,9 +113,14 @@ export async function requestPredictedHighlights(text: string, config: Highlight
   // Google refused the token: drop it so the next attempt mints a fresh one.
   if (response.status === 401 && config.identity) forgetServiceIdentityToken();
   if (!response.ok) throw new HighlightModelError(`HTTP_${response.status}`, response.status === 429 || response.status >= 500);
-  const body = (await response.json()) as { ranges?: unknown; modelVersion?: unknown };
+  const body = (await response.json()) as { ranges?: unknown; modelVersion?: unknown; words?: unknown };
   // A local development sidecar names no version; a service that names one must be the model this deployment expects.
   if (body.modelVersion !== undefined && body.modelVersion !== config.modelVersion) throw new HighlightModelError("MODEL_VERSION_MISMATCH", false);
   if (!Array.isArray(body.ranges)) throw new HighlightModelError("BAD_RESPONSE", true);
+  // An answer that lost or garbled its ranges is a failure, never a result with fewer passages.
+  if (!body.ranges.every((range) => isWholeRange(range, compared.length))) throw new HighlightModelError("BAD_RESPONSE", true);
+  // "No passages" is a finding only from a service that shows it read this document (the local sidecar reports neither).
+  const readTheDocument = body.modelVersion === config.modelVersion && typeof body.words === "number" && body.words > 0;
+  if (body.ranges.length === 0 && /[\p{L}\p{N}]/u.test(compared) && !readTheDocument && !isLocalSidecar(config.url)) throw new HighlightModelError("BAD_RESPONSE", true);
   return sanitizePredictedRanges(body.ranges, compared.length);
 }

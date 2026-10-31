@@ -20,9 +20,12 @@ import { comparisonText } from "./similarity-core";
  * A retryable failure waits (RETRY_DELAYS_MS); a further attempt starts from the sweep or from the owner's next read.
  *
  * NO REPORT LEFT WITHOUT A JOB. A report saved while the model was off or out of reach, or before the current model
- * version, has no current row; its owner's read queues one under the same rules as a first save. A finished failure is
- * reported as failed (never as a result with no passages), and the owner can start it again
- * (app/api/reports/[id]/highlight-prediction).
+ * version, has no current row; its owner opening the report page queues one under the same rules as a first save. There
+ * is no other backfill: nothing walks old reports, and the daily ceiling covers these calls like any other.
+ *
+ * THREE ANSWERS, NEVER CONFUSED. Pending (still coming), complete (a result, possibly with no passages) and failed. Only
+ * a stored result the service really gave is complete; a finished failure, or a row that holds no readable result, is
+ * reported as failed, and the owner can start it again (app/api/reports/[id]/highlight-prediction).
  *
  * DAILY CEILING. Every call first reserves its words against HIGHLIGHT_MODEL_DAILY_WORD_LIMIT for the UTC day
  * (highlight_model_usage_daily); one that does not fit waits for the next day without using up an attempt. This is the
@@ -160,11 +163,23 @@ async function closeExhaustedPredictions(client: Executor, nowMs: number): Promi
   });
 }
 
+// SQL for "this row holds a result": a JSON array. Anything else on a complete row is a failure, not an empty result.
+const HOLDS_RESULT_SQL = "CASE WHEN json_valid(ranges_json) THEN json_type(ranges_json) END = 'array'";
+
+function storedRanges(rangesJson: string | null, textLength: number): PredictedHighlightRange[] | null {
+  try {
+    const parsed: unknown = JSON.parse(rangesJson ?? "");
+    return Array.isArray(parsed) ? sanitizePredictedRanges(parsed, textLength) : null;
+  } catch {
+    return null;
+  }
+}
+
 /** A finished result of this account for this exact text and model, from another report. */
 async function reusableRanges(client: Executor, accountId: string, modelVersion: string, textSha256: string): Promise<string | null> {
   const result = await client.execute({
     sql: `SELECT ranges_json FROM report_highlight_predictions
-           WHERE account_id = ? AND model_version = ? AND text_sha256 = ? AND status = 'complete' LIMIT 1`,
+           WHERE account_id = ? AND model_version = ? AND text_sha256 = ? AND status = 'complete' AND ${HOLDS_RESULT_SQL} LIMIT 1`,
     args: [accountId, modelVersion, textSha256],
   });
   return (result.rows[0] as unknown as { ranges_json: string | null } | undefined)?.ranges_json ?? null;
@@ -242,9 +257,9 @@ export async function scheduleHighlightPrediction(
 
 /**
  * Adds the stored prediction to one outgoing report for its owner. The model is never called from the read itself. A
- * row for another model or another text answers nothing; given its owner as `owner`, a report with no current row is
- * queued instead (see NO REPORT LEFT WITHOUT A JOB). `retry` (the API read, not the page) also lets a due prediction run
- * after the response, which is what finishes one when no scheduled sweep exists, as on a Preview deployment.
+ * row for another model or another text answers nothing; `owner`, passed only by the report page, queues a report with
+ * no current row (see NO REPORT LEFT WITHOUT A JOB). `retry` (the API read, not the page) lets a due prediction run after
+ * the response, which is what finishes one when no scheduled sweep exists, as on a Preview deployment.
  */
 export async function attachStoredPredictedHighlights(
   client: Client,
@@ -273,7 +288,9 @@ export async function attachStoredPredictedHighlights(
       return;
     }
     if (row.status === "complete") {
-      report.predictedHighlights = sanitizePredictedRanges(JSON.parse(row.ranges_json ?? "[]"), comparisonText(report.text).length);
+      const ranges = storedRanges(row.ranges_json, comparisonText(report.text).length);
+      if (ranges) report.predictedHighlights = ranges;
+      else report.predictedHighlightsFailed = true;
       return;
     }
     const due = row.status === "pending" ? Number(row.next_attempt_at) <= now : row.lease_until !== null && Number(row.lease_until) <= now;
@@ -307,7 +324,8 @@ export async function retryFailedHighlightPrediction(
     sql: `UPDATE report_highlight_predictions
              SET status = 'pending', ranges_json = NULL, attempts = 0, lease_until = NULL, next_attempt_at = ?, updated_at = ?
            WHERE report_device_key = ? AND report_id = ? AND model_version = ?
-             AND (status = 'failed' OR (status = 'running' AND lease_until <= ? AND attempts >= ?))
+             AND (status = 'failed' OR (status = 'running' AND lease_until <= ? AND attempts >= ?)
+                  OR (status = 'complete' AND ${HOLDS_RESULT_SQL} IS NOT TRUE))
            RETURNING attempts`,
     args: [now, now, key.deviceKey, key.reportId, config.modelVersion, now, MAX_ATTEMPTS],
   });

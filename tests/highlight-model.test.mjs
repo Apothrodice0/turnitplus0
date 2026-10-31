@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFileSync } from "node:fs";
 import { HighlightModelError, highlightModelConfig, requestPredictedHighlights, sanitizePredictedRanges } from "../lib/highlight-model.ts";
 import { findHighlightRanges } from "../components/report/similarity-report-papers.tsx";
+import { usablePredictedFragment } from "../lib/predicted-highlight-fragments.ts";
 import { encodeReportForPersistence } from "../lib/report-persistence.ts";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createElement, Fragment } from "react";
@@ -75,12 +77,56 @@ test("a predicted span is clipped around a verified match, has no source, and no
   assert.equal(verified.length, 1);
   assert.equal(verified[0].start, 0);
   assert.equal(predicted.length, 1);
-  assert.equal(predicted[0].start, verified[0].end);
-  assert.equal(predicted[0].end, end);
+  assert.equal(predicted[0].start, TEXT.indexOf("The second"), "whole words only: no dash over the space after the match");
+  assert.equal(TEXT.slice(predicted[0].start, predicted[0].end), "The second sentence is only predicted by the model");
   assert.equal(predicted[0].sourceIndex, -1);
   assert.equal(predicted[0].label, "");
   assert.equal(predicted[0].url, undefined);
   ranges.slice(1).forEach((r, i) => assert.ok(r.start >= ranges[i].end));
+});
+
+test("a piece left beside a verified match is drawn only if it still reads as a passage", () => {
+  const text = "Alpha beta gamma delta. Cronbach's alpha was used to measure the scale, and so on to the very end of it.";
+  const piece = (from, to) => { const start = text.indexOf(from), end = to ? text.indexOf(to) + to.length : start + from.length; const found = usablePredictedFragment(text, start, end); return found && text.slice(found.start, found.end); };
+  assert.equal(usablePredictedFragment(text, text.indexOf(". Cron"), text.indexOf(". Cron") + 2), null, "punctuation and a space between two matches");
+  assert.equal(piece(" "), null, "whitespace alone");
+  assert.equal(piece("to"), null, "a stray word");
+  assert.equal(piece("alpha was used"), null, "three words");
+  assert.equal(piece("s alpha was used to"), "alpha was used to", "the tail of a word a match cut in two is dropped, and the rest stands");
+  assert.equal(piece("Cronbach's alpha was us"), "Cronbach's alpha was", "as is the head of one, counting words as the model does");
+  assert.equal(piece(" alpha was used to measure the scale, "), "alpha was used to measure the scale", "whole words, no dash over a space or a comma");
+  const found = usablePredictedFragment(text, text.indexOf(" alpha"), text.indexOf(" measure"));
+  assert.equal(found.start, text.indexOf("alpha was"), "offsets stay those of the report text");
+});
+
+test("a passage no match touches is drawn exactly as the model returned it, even when short", () => {
+  const start = TEXT.indexOf("The second"), end = start + 3;
+  const predicted = findHighlightRanges(report({ predictedHighlights: [{ start, end }] })).filter((r) => r.kind === "predicted");
+  assert.deepEqual(predicted.map((r) => [r.start, r.end]), [[start, end]]);
+});
+
+test("screen and PDF draw the one list of displayed predictions", () => {
+  const read = (file) => readFileSync(file, "utf8");
+  assert.match(read("components/report/report-v2/report-v2-view.tsx"), /buildDisplayedPredicted\(report\)/);
+  assert.match(read("components/report/report-v2/similarity-print-report.tsx"), /predicted: buildDisplayedPredicted\(report\)/);
+  assert.equal(read("components/report/report-v2/report-v2-view.tsx").includes("onSelectPassage, report.predictedHighlights"), false);
+  assert.match(read("components/report/report-v2/report-v2-view.tsx"), /mark unverified predicted passages\./);
+});
+
+test("no answer becomes a result with no passages unless the service shows it read the document", async () => {
+  const HOSTED = { ...ENV, HIGHLIGHT_MODEL_URL: "https://model.example.test/predict" };
+  const answer = (body) => async () => new Response(JSON.stringify(body), { status: 200 });
+  const refused = (body, env = HOSTED) => requestPredictedHighlights(TEXT, highlightModelConfig(env), answer(body)).then(() => null, (err) => err);
+  for (const body of [{ ranges: [] }, { ranges: [], modelVersion: "v1-test" }, { ranges: [], modelVersion: "v1-test", words: 0 }, { ranges: [], words: 23 }]) {
+    const err = await refused(body);
+    assert.equal(err?.retryable, true, JSON.stringify(body));
+  }
+  for (const ranges of [[{ start: -1, end: 3 }], [null], [{ start: 0, end: 5 }, { start: 3, end: TEXT.length + 9 }]]) {
+    const err = await refused({ ranges, modelVersion: "v1-test", words: 23 });
+    assert.equal(err?.message, "BAD_RESPONSE", "a garbled range fails the answer, it does not shrink it");
+  }
+  assert.deepEqual(await requestPredictedHighlights(TEXT, highlightModelConfig(HOSTED), answer({ ranges: [], modelVersion: "v1-test", words: 23 })), [], "a real empty result");
+  assert.deepEqual(await requestPredictedHighlights(TEXT, highlightModelConfig(ENV), answer({ ranges: [] })), [], "the local sidecar names neither");
 });
 
 test("predictions change no number and are never stored", () => {

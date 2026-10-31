@@ -323,11 +323,11 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
     if (payload) {
       refreshSelectiveCorpusCompletionSignal(payload);
       stripServerInternalReportFields(payload);
-      // The stored prediction, for the report's signed-in owner (a report that never got one is queued); a due one may run after the response.
+      // The stored prediction, for the report's signed-in owner; a due one may run after the response. Only opening the report page queues a new one.
       if (viewer && row?.device_key) {
         const predictionClient = await getReportsDbClient();
         try {
-          await attachStoredPredictedHighlights(predictionClient, payload, { deviceKey: row.device_key, reportId: id }, { owner: viewer, retry: true });
+          await attachStoredPredictedHighlights(predictionClient, payload, { deviceKey: row.device_key, reportId: id }, { retry: true });
         } finally {
           predictionClient.close();
         }

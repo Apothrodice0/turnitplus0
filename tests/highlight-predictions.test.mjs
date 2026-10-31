@@ -11,7 +11,8 @@ import * as sweepRoute from '../app/api/internal/highlight-prediction-sweep/rout
 import * as retryRoute from '../app/api/reports/[id]/highlight-prediction/route.ts';
 import { resetAuthRateForTest, resetRateForTest, resetReadRateForTest, resetAdminRateForTest } from '../lib/rate-limit.js';
 import { cleanupExpiredSubscriptionReports } from '../lib/subscription-expiry-cleanup.ts';
-import { processHighlightPrediction, resetHighlightPredictionTableCacheForTest, runHighlightPredictionSweep, highlightPredictionTextHash } from '../lib/highlight-predictions.ts';
+import { attachStoredPredictedHighlights, processHighlightPrediction, resetHighlightPredictionTableCacheForTest, runHighlightPredictionSweep, highlightPredictionTextHash } from '../lib/highlight-predictions.ts';
+import { getSessionUserByToken } from '../lib/auth-session.ts';
 import { highlightModelConfig } from '../lib/highlight-model.ts';
 import { deleteAllReportDataForAccount, deleteAccountData } from '../lib/account-deletion.ts';
 import { withTestIdentity, grantTestAdmin } from './helpers/test-signup.mjs';
@@ -92,6 +93,13 @@ async function getReport(user, id) {
   const res = await reportByIdRoute.GET(new Request(`http://localhost/api/reports/${id}`, { headers: { 'x-forwarded-for': addr, cookie: `tp_session_v1=${user.cookie}` } }), { params: Promise.resolve({ id: String(id) }) });
   const json = await res.json().catch(() => null);
   return { status: res.status, body: json?.payload ?? json };
+}
+// What app/reports/[id]/page.tsx does for the report's signed-in owner: the only caller that passes `owner`.
+async function openReportPage(user, id) {
+  const row = (await db.execute({ sql: 'SELECT device_key, payload_json FROM saved_reports WHERE id = ?', args: [id] })).rows[0];
+  const payload = JSON.parse(row.payload_json);
+  await attachStoredPredictedHighlights(db, payload, { deviceKey: row.device_key, reportId: id }, { owner: await getSessionUserByToken(user.cookie, db) });
+  return payload;
 }
 async function grant(adminCookie, body) {
   const call = async (b) => {
@@ -328,7 +336,7 @@ const subscriber = async (email, rooms = 4) => { const u = await signup(email); 
   pass('P7 predictions go with their report: single delete, expiry cleanup, a late result, a cutoff and account deletion');
 }
 
-// ── P8. A stored result answers only for its own model and text; a new model or text is queued anew; the switch hides everything
+// ── P8. A stored result answers only for its own model and text; opening the report queues a new model or text; the switch hides everything
 {
   const u = await subscriber('p8@example.com');
   modelAnswer = () => new Response(JSON.stringify({ ranges: [{ start: 0, end: 4 }], modelVersion: MODEL }), { status: 200 });
@@ -336,20 +344,24 @@ const subscriber = async (email, rooms = 4) => { const u = await signup(email); 
   modelCalls = 0;
   process.env.HIGHLIGHT_MODEL_VERSION = 'v2-later';
   modelAnswer = () => new Response(JSON.stringify({ ranges: [{ start: 1, end: 6 }], modelVersion: 'v2-later' }), { status: 200 });
-  const later = (await getReport(u, r.id)).body;
-  assert.equal(later.predictedHighlights, undefined, "the old model's result is never shown under the new one");
-  assert.equal(later.predictedHighlightsPending, true, "the owner's read queues the new model at once");
-  assert.equal(modelCalls, 1);
+  assert.equal((await getReport(u, r.id)).body.predictedHighlights, undefined, "the old model's result is never shown under the new one");
+  assert.equal(modelCalls, 0, 'an API read queues nothing');
+  const later = await openReportPage(u, r.id);
+  assert.equal(later.predictedHighlights, undefined);
+  assert.equal(later.predictedHighlightsPending, true, 'opening the report queues the new model');
   assert.equal((await rowOf(r.id)).model_version, 'v2-later');
-  assert.deepEqual((await getReport(u, r.id)).body.predictedHighlights, [{ start: 1, end: 6 }]);
+  assert.deepEqual((await getReport(u, r.id), (await getReport(u, r.id)).body.predictedHighlights), [{ start: 1, end: 6 }], 'the next API read runs it');
+  assert.equal(modelCalls, 1);
   process.env.HIGHLIGHT_MODEL_VERSION = MODEL;
   modelAnswer = () => new Response(JSON.stringify({ ranges: [{ start: 0, end: 4 }], modelVersion: MODEL }), { status: 200 });
+  await openReportPage(u, r.id);
   await getReport(u, r.id);
   await db.execute({ sql: "UPDATE report_highlight_predictions SET text_sha256 = 'other' WHERE report_id = ?", args: [r.id] });
   modelCalls = 0;
-  const otherText = (await getReport(u, r.id)).body;
+  const otherText = await openReportPage(u, r.id);
   assert.equal(otherText.predictedHighlights, undefined, 'a result for another text shows nothing');
   assert.equal(otherText.predictedHighlightsPending, true);
+  await getReport(u, r.id);
   assert.equal(modelCalls, 1, 'and the current text is predicted instead');
   assert.equal((await rowOf(r.id)).text_sha256, highlightPredictionTextHash(manuscript(r.id)));
   process.env.HIGHLIGHT_MODEL_ENABLED = '';
@@ -357,7 +369,7 @@ const subscriber = async (email, rooms = 4) => { const u = await signup(email); 
   process.env.HIGHLIGHT_MODEL_ENABLED = '1';
   assert.deepEqual((await getReport(u, r.id)).body.predictedHighlights, [{ start: 0, end: 4 }]);
   assert.equal(modelCalls, 1);
-  pass("P8 a result shows only for its own model and text; a new model or text is queued on the owner's read; the switch hides stored results");
+  pass("P8 a result shows only for its own model and text; opening the report queues a new model or text; the switch hides stored results");
 }
 
 // ── P9. The sweep finishes what no read will; it is protected like every internal sweep ────────────────────────────
@@ -435,36 +447,93 @@ const subscriber = async (email, rooms = 4) => { const u = await signup(email); 
   pass('P12 the daily word ceiling stops calls at once; a deferred prediction keeps its attempts and runs the next day');
 }
 
-// ── P13. A report saved while the model was off or out of reach gets its prediction when its owner opens it ────────
+// ── P13. Backfill: a report saved while the model was off gets its prediction when its owner opens it, and only then ──
 {
   const u = await subscriber('p13@example.com');
   const other = await subscriber('p13b@example.com');
   process.env.HIGHLIGHT_MODEL_ENABLED = '';
   const earlier = await postReport(u, { room: 0 });
   const french = await postReport(u, { room: 1, language: 'French' });
+  const untouched = await postReport(u, { room: 3 });
   process.env.HIGHLIGHT_MODEL_ENABLED = '1';
   assert.equal(await rowOf(earlier.id), undefined, 'saved with the model off: no job');
   modelAnswer = () => new Response(JSON.stringify({ ranges: [{ start: 2, end: 11 }], modelVersion: MODEL }), { status: 200 });
   modelCalls = 0;
   assert.equal((await getReport(other, earlier.id)).status, 404, 'another account cannot reach it, and queues nothing');
+  await getReport(u, earlier.id);
+  assert.deepEqual(await runHighlightPredictionSweep(db), { due: 0 }, 'neither an API read nor the sweep looks for old reports');
   assert.equal(await rowOf(earlier.id), undefined);
-  const opened = (await getReport(u, earlier.id)).body;
-  assert.equal(opened.predictedHighlightsPending, true, "the owner's first read queues it and the page checks again");
-  assert.equal(modelCalls, 1, 'it runs once, after the response');
+  assert.equal(modelCalls, 0);
+  const opened = await openReportPage(u, earlier.id);
+  assert.equal(opened.predictedHighlightsPending, true, 'opening the report queues it and the page checks again');
+  assert.equal(modelCalls, 0, 'the page itself never calls the model');
   assert.equal((await rowOf(earlier.id)).account_id, u.id);
+  await getReport(u, earlier.id);
+  assert.equal(modelCalls, 1, "the page's next check runs it, once");
+  assert.deepEqual((await openReportPage(u, earlier.id)).predictedHighlights, [{ start: 2, end: 11 }]);
   assert.deepEqual((await getReport(u, earlier.id)).body.predictedHighlights, [{ start: 2, end: 11 }]);
-  assert.equal(modelCalls, 1, 'later reads read the stored result');
-  assert.equal((await getReport(u, french.id)).body.predictedHighlightsPending, undefined, 'non-English is never queued');
+  assert.equal(modelCalls, 1, 'later opens read the cached result');
+  assert.equal(await rowOf(untouched.id), undefined, 'a report nobody opened stays as it was');
+  assert.equal((await openReportPage(u, french.id)).predictedHighlightsPending, undefined, 'non-English is never queued');
   assert.equal(await rowOf(french.id), undefined);
   process.env.HIGHLIGHT_MODEL_SUBSCRIBERS_ENABLED = '';
-  process.env.HIGHLIGHT_MODEL_ENABLED = '';
-  const ineligible = await postReport(u, { room: 2 });
-  process.env.HIGHLIGHT_MODEL_ENABLED = '1';
-  assert.equal((await getReport(u, ineligible.id)).body.predictedHighlightsPending, undefined, 'an account not eligible now is never queued');
-  assert.equal(await rowOf(ineligible.id), undefined);
+  assert.equal((await openReportPage(u, untouched.id)).predictedHighlightsPending, undefined, 'an account not eligible now is never queued');
+  assert.equal(await rowOf(untouched.id), undefined);
   process.env.HIGHLIGHT_MODEL_SUBSCRIBERS_ENABLED = '1';
-  assert.equal(modelCalls, 1);
-  pass("P13 a report saved while the model was off is queued on its owner's first read, once; other accounts, non-English and ineligible accounts queue nothing");
+  const today = new Date().toISOString().slice(0, 10);
+  const used = Number((await db.execute({ sql: 'SELECT COALESCE(SUM(words), 0) AS w FROM highlight_model_usage_daily WHERE day = ?', args: [today] })).rows[0].w);
+  process.env.HIGHLIGHT_MODEL_DAILY_WORD_LIMIT = String(used);
+  await openReportPage(u, untouched.id);
+  await quietly(() => getReport(u, untouched.id));
+  assert.equal(modelCalls, 1, 'backfill stops at the daily ceiling');
+  assert.equal((await rowOf(untouched.id)).status, 'pending');
+  assert.equal(Number((await rowOf(untouched.id)).attempts), 0);
+  delete process.env.HIGHLIGHT_MODEL_DAILY_WORD_LIMIT;
+  const read = (file) => fs.readFileSync(file, 'utf8');
+  assert.match(read('app/reports/[id]/page.tsx'), /attachStoredPredictedHighlights\(client, payload, .*\{ owner: sessionUser \}\)/);
+  assert.equal(/owner:/.test(read('app/api/reports/[id]/route.ts').match(/attachStoredPredictedHighlights\([^;]*;/)[0]), false, 'the API read passes no owner, so it can only run what a page open queued');
+  assert.equal(read('app/api/reports/route.ts').includes('attachStoredPredictedHighlights'), false, 'the report list never touches predictions');
+  pass("P13 backfill: queued only by the owner opening the report, run once and cached; API reads, the sweep, unopened reports, other accounts, non-English, ineligible accounts and the daily ceiling all hold");
+}
+
+// ── P15. Pending, failed and a genuine empty result are three different answers ─────────────────────────────────────
+{
+  const u = await subscriber('p15@example.com');
+  const answers = async (id) => { const { predictedHighlights: passages, predictedHighlightsPending: pending, predictedHighlightsFailed: failed } = (await quietly(() => getReport(u, id))).body; return { passages, pending, failed }; };
+  // A 200 that shows no sign of the service having read the document: never stored as a result.
+  modelAnswer = () => new Response(JSON.stringify({ ranges: [] }), { status: 200 });
+  const lost = await quietly(() => postReport(u, { room: 0 }));
+  assert.equal((await rowOf(lost.id)).status, 'pending');
+  assert.equal((await rowOf(lost.id)).ranges_json, null);
+  assert.deepEqual(await answers(lost.id), { passages: undefined, pending: true, failed: undefined });
+  // A service that cannot be reached at all.
+  modelAnswer = () => { throw new TypeError('fetch failed'); };
+  const down = await quietly(() => postReport(u, { room: 1 }));
+  assert.equal((await rowOf(down.id)).status, 'pending');
+  assert.deepEqual(await answers(down.id), { passages: undefined, pending: true, failed: undefined });
+  for (let i = 0; i < 5; i += 1) { await makeDue(down.id); await quietly(() => processHighlightPrediction(key(u, down.id))); }
+  assert.equal((await rowOf(down.id)).status, 'failed');
+  assert.deepEqual(await answers(down.id), { passages: undefined, pending: undefined, failed: true });
+  // A genuine result with no passages.
+  modelAnswer = () => new Response(JSON.stringify({ ranges: [], modelVersion: MODEL, words: 20 }), { status: 200 });
+  const empty = await postReport(u, { room: 2 });
+  assert.equal((await rowOf(empty.id)).status, 'complete');
+  assert.equal((await rowOf(empty.id)).ranges_json, '[]');
+  assert.deepEqual(await answers(empty.id), { passages: [], pending: undefined, failed: undefined });
+  // A row marked complete that holds no result is a failure, is never reused, and can be started again.
+  const damaged = await postReport(u, { room: 3, text: manuscript('shared p15') });
+  modelCalls = 0;
+  for (const bad of [null, 'null', '{"ranges":[]}', 'not json']) {
+    await db.execute({ sql: 'UPDATE report_highlight_predictions SET ranges_json = ? WHERE report_id = ?', args: [bad, damaged.id] });
+    assert.deepEqual(await answers(damaged.id), { passages: undefined, pending: undefined, failed: true }, String(bad));
+  }
+  const addr = ip('p15');
+  await resetRateForTest(addr);
+  const res = await retryRoute.POST(new Request(`http://localhost/api/reports/${damaged.id}/highlight-prediction`, { method: 'POST', headers: { 'x-forwarded-for': addr, cookie: `tp_session_v1=${u.cookie}` } }), { params: Promise.resolve({ id: damaged.id }) });
+  assert.equal(res.status, 202);
+  assert.equal(modelCalls, 1, 'the damaged row is not reused');
+  assert.deepEqual(await answers(damaged.id), { passages: [], pending: undefined, failed: undefined });
+  pass('P15 a lost answer stays pending, an unreachable service ends failed, a genuine empty result stays complete, and a damaged row is a failure that can be retried');
 }
 
 // ── P14. A finished failure can be started again by its owner, and only by its owner ────────────────────────────────
@@ -494,7 +563,7 @@ const subscriber = async (email, rooms = 4) => { const u = await signup(email); 
   assert.deepEqual(view.predictedHighlights, [{ start: 4, end: 10 }]);
   assert.equal(view.predictedHighlightsFailed, undefined);
   assert.equal(await retry(u, r.id), 409, 'nothing to retry once complete');
-  modelAnswer = () => new Response(JSON.stringify({ ranges: [], modelVersion: MODEL }), { status: 200 });
+  modelAnswer = () => new Response(JSON.stringify({ ranges: [], modelVersion: MODEL, words: 20 }), { status: 200 });
   const none = await postReport(u, { room: 2 });
   const noneView = (await getReport(u, none.id)).body;
   assert.equal((await rowOf(none.id)).status, 'complete');
