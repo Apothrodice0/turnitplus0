@@ -481,7 +481,9 @@ test("PREDICTED: apart from the dashed spans the printed report is byte-identica
 test("PREDICTED: a prediction prints only the words outside verified matches, with no number, source, title or highlight span", () => {
   const { report, verified, gap, overlap, predicted } = reportWithPrediction();
   const html = render(predicted);
-  assert.equal(predictedText(html), report.text.slice(verified[0].end, overlap.end) + report.text.slice(gap.start, gap.end));
+  // the clipped remainder starts on a whole word and loses the word its end cut in two; the untouched span prints as stored
+  const remainder = report.text.slice(verified[0].end, overlap.end).trim().replace(/\s+\S*$/, "");
+  assert.equal(predictedText(html), remainder + report.text.slice(gap.start, gap.end));
   for (const m of html.matchAll(PREDICTED)) assert.doesNotMatch(m[0], /sup|title=|data-span/);
   const spans = (h) => [...h.matchAll(/data-span="(\d+-\d+)"/g)].map((m) => m[1]);
   assert.deepEqual(spans(html), spans(render(report)), "the verified highlights are untouched");
@@ -503,7 +505,8 @@ test("PREDICTED: zero verified matches — dashed words print, and the wording s
 
 test("PREDICTED: the same words are predicted on screen and in the PDF", () => {
   const { predicted } = reportWithPrediction();
-  const screen = renderToStaticMarkup(React.createElement(ReportV2Workspace, { report: predicted }));
+  // the on-screen note shows a dashed sample of its own, which is not a predicted passage
+  const screen = renderToStaticMarkup(React.createElement(ReportV2Workspace, { report: predicted })).replace(/<p class="rv2ws-predicted-note">.*?<\/p>/, "");
   assert.ok(predictedText(screen).length > 0);
   assert.equal(predictedText(render(predicted)).includes(predictedText(screen).slice(0, 40)), true);
   assert.equal(predictedText(screen).replace(/\s+/g, " "), predictedText(render(predicted)).replace(/\s+/g, " "));
