@@ -17,7 +17,6 @@ import { approveVerification } from "../lib/provenance-verification-workflow.ts"
 import { extractTextFromHtml, HTML_EXTRACTOR_VERSION } from "../lib/html-text-extraction.ts";
 import { canonicalSha256 } from "../lib/document-identity.ts";
 import { createHash } from "node:crypto";
-process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 const repo = path.resolve(".");
 const drizzleDir = path.join(repo, "drizzle");

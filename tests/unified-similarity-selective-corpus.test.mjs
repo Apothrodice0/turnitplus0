@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { computeUnifiedSimilarity } from "../lib/unified-similarity.ts";
 import { unifiedEvidenceSummary, selectiveCorpusMatchedPositions, hasIncompleteSelectiveCorpusCheck } from "../lib/report-types.ts";
-process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 /**
  * AUTHORITATIVE PROMOTION — pure, DB-free unit tests for

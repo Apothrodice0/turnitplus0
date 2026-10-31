@@ -15,7 +15,6 @@ import {
 } from "../lib/user-submission-corpus.ts";
 import { matchAgainstUserSubmissionCorpus } from "../lib/user-submission-matching.ts";
 import { evaluateCorpusAdmissionCandidate } from "../lib/corpus-admission-gate.ts";
-process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 /**
  * Phase A hardening — 7-day corpus maturity must be SAFE BY DEFAULT.

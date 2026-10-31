@@ -19,7 +19,6 @@ import {
   EVIDENCE_INTERPRETATION_KINDS,
   EVIDENCE_INTERPRETATION_VERSION,
 } from "../lib/evidence-interpretation/index.ts";
-process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 // ── fixture helpers ──────────────────────────────────────────────────────
 // A submission whose text has predictable word indices. Words 0..N-1 are

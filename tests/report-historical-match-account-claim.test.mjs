@@ -13,7 +13,6 @@ import { resolvePrimarySimilaritySummary } from "../lib/report-primary-similarit
 import { claimAnonymousReports } from "../lib/auth-session.ts";
 import { getCurrentCorpusMatchGeneration } from "../lib/report-historical-match.ts";
 import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
-process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 /**
  * ANONYMOUS -> ACCOUNT CLAIM: a report's cached historical-match snapshot is

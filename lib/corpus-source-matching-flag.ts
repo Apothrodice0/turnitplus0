@@ -1,5 +1,3 @@
-import { customerCorpusRetentionAuthorized } from "./customer-corpus-policy";
-
 /**
  * Deliberately its own file, not exported from lib/user-submission-matching.ts
  * directly — that module is under a blanket structural guarantee
@@ -11,5 +9,5 @@ import { customerCorpusRetentionAuthorized } from "./customer-corpus-policy";
  * weakening that guarantee for the real matching logic.
  */
 export function isCorpusSourceMatchingEnabled(): boolean {
-  return process.env.CORPUS_SOURCE_MATCHING_ENABLED === "true" && customerCorpusRetentionAuthorized();
+  return process.env.CORPUS_SOURCE_MATCHING_ENABLED === "true";
 }

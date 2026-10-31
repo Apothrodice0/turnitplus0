@@ -17,7 +17,6 @@ import {
   corpusMaturityCutoff,
 } from "../lib/user-submission-corpus.ts";
 import { matchAgainstUserSubmissionCorpus } from "../lib/user-submission-matching.ts";
-process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 /**
  * Phase A — 7-day corpus maturity. Backing-level eligibility:

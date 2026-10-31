@@ -11,7 +11,6 @@ import { runCorpusAdmissionPromotionSweep } from "../lib/corpus-admission-promot
 import { deactivateAcceptedRepresentation, reactivateAcceptedRepresentation } from "../lib/corpus-admission-admin-actions.ts";
 import { getOrComputeHistoricalMatchSnapshot, getCurrentCorpusMatchGeneration } from "../lib/report-historical-match.ts";
 import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
-process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 /**
  * Cache correctness for report_historical_match_snapshots across every

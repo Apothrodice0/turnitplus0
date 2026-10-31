@@ -18,7 +18,6 @@ import {
 } from '../lib/corpus-admission-report-integration.ts';
 import { findCandidateCorpusRepresentations, corpusShingleHashes, CORPUS_FINGERPRINT_VERSION } from '../lib/user-submission-corpus.ts';
 import { matureCorpusBackings } from './helpers/corpus-maturity.mjs';
-process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 /**
  * One-current-report-per-room (Phases 1+2): an account+room holds AT MOST

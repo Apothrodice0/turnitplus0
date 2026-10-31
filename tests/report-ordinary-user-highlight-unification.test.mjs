@@ -6,7 +6,6 @@ import { computeUnifiedSimilarity } from "../lib/unified-similarity.ts";
 import { tokenSpans } from "../lib/similarity-core.ts";
 import { primaryMatchedWordCount, primarySimilarityScore, unifiedMatchedPositions } from "../lib/report-types.ts";
 import { SubmissionReport, SourcesReport, OverviewReport, AcademicEvidenceSection, findHighlightRanges } from "../components/report/similarity-report-papers.tsx";
-process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 /**
  * Task A, final ordinary-user report simplification: ordinary users must

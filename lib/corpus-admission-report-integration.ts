@@ -1,5 +1,5 @@
+import { CUSTOMER_UPLOAD_CORPUS_POLICY } from "./corpus-admission-types";
 import { randomUUID } from "node:crypto";
-import { customerCorpusRetentionAuthorized } from "./customer-corpus-policy";
 import type { Client, InStatement, Transaction } from "@libsql/client";
 import { evaluateCorpusAdmissionCandidate, type CorpusAdmissionConnectionFactory, type CorpusAdmissionDecisionRecord } from "./corpus-admission-gate";
 import { isCorpusPromotionEnabled, stageAndClaimCorpusAdmissionPromotionForDecision, processCorpusAdmissionPromotion } from "./corpus-admission-promotion";
@@ -45,12 +45,8 @@ export { buildReportAdmissionSourceRef };
  *    runReportAdmissionRetrySweep to find later. This function only ever
  *    ensures a row exists (INSERT ... ON CONFLICT DO NOTHING) — it never
  *    disturbs an existing job's status/decision_id/attempt_count.
- *  - OFF for customers (owner decision 2026-10-31): isCorpusAdmissionEnabled
- *    also needs lib/customer-corpus-policy.ts, which no hosted deployment can
- *    satisfy, so nothing below runs for a customer upload. The rest of this
- *    note describes the machinery, kept for a future corpus with explicit
- *    per-customer retention authorization. It used to be mandatory:
- *    cross-account eligibility applied to every authenticated
+  *  - Mandatory, not consent-gated: product decision — cross-account
+ *    TurnitPlus corpus-admission eligibility applies to every authenticated
  *    account, with no per-account preference able to block it.
  *    processReportAdmissionJob no longer reads or re-checks
  *    users.corpus_reuse_consented_at at all (that column is now a vestigial
@@ -98,7 +94,7 @@ export { buildReportAdmissionSourceRef };
  */
 
 export function isCorpusAdmissionEnabled(): boolean {
-  return process.env.CORPUS_ADMISSION_ENABLED === "true" && customerCorpusRetentionAuthorized();
+  return process.env.CORPUS_ADMISSION_ENABLED === "true";
 }
 
 type ReportAdmissionJobStatus = "pending" | "succeeded" | "failed" | "cancelled";
@@ -523,8 +519,8 @@ export async function processReportAdmissionJob(client: Client, params: ProcessR
       sourceRef: job.sourceRef,
       filename: "live-submission.txt",
       bytes: Buffer.from(rawText, "utf8"),
-      // Never assumed: without explicit authorization the gate cannot retain anything (lib/customer-corpus-policy.ts).
-      consent: { kind: "PER_USER_CONSENT", consented: customerCorpusRetentionAuthorized() },
+      // Retained under the product policy, recorded as exactly that: never as the customer's consent (lib/corpus-admission-types.ts).
+      consent: { kind: "SERVICE_POLICY", policy: CUSTOMER_UPLOAD_CORPUS_POLICY },
       dryRun: false,
       openConnection: params.openConnection,
     });

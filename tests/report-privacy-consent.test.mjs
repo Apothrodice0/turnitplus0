@@ -12,7 +12,6 @@ import * as meRoute from '../app/api/auth/me/route.ts';
 import { resetRateForTest, resetAuthRateForTest } from '../lib/rate-limit.js';
 import { withTestIdentity } from './helpers/test-signup.mjs';
 import { buildReportAdmissionSourceRef } from '../lib/corpus-admission-report-integration.ts';
-process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 /**
  * Privacy hardening (production audit fix, item 2) originally proved an

@@ -1,4 +1,3 @@
-import { customerCorpusRetentionAuthorized } from "./customer-corpus-policy";
 import { randomUUID } from "node:crypto";
 import type { Client, InStatement } from "@libsql/client";
 import { canonicalSha256 } from "./document-identity";
@@ -64,7 +63,7 @@ import { bumpCorpusMatchGeneration } from "./report-historical-match";
  */
 
 export function isCorpusPromotionEnabled(): boolean {
-  return process.env.CORPUS_PROMOTION_ENABLED === "true" && customerCorpusRetentionAuthorized();
+  return process.env.CORPUS_PROMOTION_ENABLED === "true";
 }
 
 export type CorpusAdmissionPromotionStatus = "staged" | "indexed" | "failed" | "skipped" | "dead_lettered";

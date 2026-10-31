@@ -35,7 +35,6 @@ import {
   resetImportedSimilarityEvidencePackageCacheForTest,
   resetImportedSimilarityEvidenceCandidateIndexCacheForTest,
 } from "../lib/imported-similarity-evidence/index.ts";
-process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 /**
  * C2 — LOSSLESS PERSISTED-REPORT COMPACTION + FAIL-CLOSED INVARIANT.

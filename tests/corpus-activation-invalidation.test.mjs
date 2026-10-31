@@ -20,7 +20,6 @@ import {
   persistRefreshedSimilarity,
 } from "../lib/report-primary-similarity.ts";
 import { findRoomOccupant } from "../lib/reports-repo.ts";
-process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 /**
  * Phase A — time-based snapshot invalidation. corpus_match_generation is bumped

@@ -10,7 +10,6 @@ import * as signupRoute from "../app/api/auth/signup/route.ts";
 import { resetRateForTest, resetAuthRateForTest } from "../lib/rate-limit.js";
 import { classifyReportMatches } from "../lib/report-classification.ts";
 import { withTestIdentity } from './helpers/test-signup.mjs';
-process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 // Phase D: connects the existing SELF/PRIOR_SUBMISSION classification
 // (lib/document-family.ts, lib/document-relationship.ts — Phases B/C) to the

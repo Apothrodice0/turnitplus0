@@ -16,7 +16,6 @@ import {
   PARTIAL_COPY_DOCUMENT,
   CALIBRATION_FIXTURES,
 } from "../lib/e8j-calibration-fixtures.ts";
-process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 /**
  * Phase E8J: calibration tests for the user-submission historical matcher.

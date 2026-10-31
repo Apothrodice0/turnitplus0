@@ -7,7 +7,6 @@ import { createClient } from '@libsql/client';
 import { applyMigrationsLibsql } from '../lib/ingest.js';
 import * as promotionSweepRoute from '../app/api/internal/corpus-admission-promotion-sweep/route.ts';
 import { resetAuthRateForTest } from '../lib/rate-limit.js';
-process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 /**
  * AUTHORIZATION coverage for app/api/internal/corpus-admission-promotion-sweep/route.ts

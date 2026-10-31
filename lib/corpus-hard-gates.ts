@@ -86,6 +86,7 @@ export type CorpusHardGateResult = {
 };
 
 function consentSatisfied(consent: CorpusConsentEvidence): boolean {
+  if (consent.kind === "SERVICE_POLICY") return consent.policy.length > 0;
   return consent.kind === "PER_USER_CONSENT" ? consent.consented === true : consent.provenance.retentionRightsResolved === true;
 }
 
@@ -111,7 +112,7 @@ export function evaluateCorpusHardGates(input: CorpusHardGateInput): CorpusHardG
   }
 
   if (!consentSatisfied(input.consent)) {
-    failureCodes.push(input.consent.kind === "PER_USER_CONSENT" ? "CONSENT_MISSING" : "RETENTION_REQUIREMENT_UNMET");
+    failureCodes.push(input.consent.kind === "BULK_IMPORT_PROVENANCE" || input.consent.kind === "SERVICE_POLICY" ? "RETENTION_REQUIREMENT_UNMET" : "CONSENT_MISSING");
   }
 
   return { passed: failureCodes.length === 0, failureCodes, languageClass };

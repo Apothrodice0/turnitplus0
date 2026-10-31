@@ -39,7 +39,6 @@ import { extractPdfTextDocument } from '../lib/pdf-text-extraction.ts';
 // function's behavior, not a parallel description of it.
 import { isFullyRevealed as isFullyRevealedReal } from '../app/reports/rooms/[room]/room-page-shell.tsx';
 import { withTestIdentity } from './helpers/test-signup.mjs';
-process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 /**
  * Release-hardening audit finding SIM-03: the required end-to-end

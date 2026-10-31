@@ -9,7 +9,6 @@ import { createSession, SESSION_COOKIE_NAME } from "../lib/auth-session.ts";
 import { resetAuthRateForTest } from "../lib/rate-limit.js";
 import * as sweepRoute from "../app/api/internal/corpus-admission-sweep/route.ts";
 import { runCorpusAdmissionRetentionSweep, isCorpusRetentionEnabled, CORPUS_RETENTION_DAYS } from "../lib/corpus-admission-retention-sweep.ts";
-process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 /**
  * Task B1B: lib/corpus-admission-retention-sweep.ts (the pure sweep logic)

@@ -8,7 +8,6 @@ import {
   evaluateVerificationEligibility,
 } from "../lib/provenance-verification-policy.ts";
 import { classifySubmitterRelationship } from "../lib/document-relationship.ts";
-process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 // This whole file is pure-function testing: no database, no network, no
 // filesystem beyond the test runner itself. Every fixture below assigns each

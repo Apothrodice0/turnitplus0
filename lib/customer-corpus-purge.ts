@@ -3,8 +3,10 @@ import { buildReportAdmissionAccountPrefix } from "./corpus-admission-source-ref
 import { bumpCorpusMatchGeneration } from "./corpus-match-generation";
 
 /**
- * Removes customer manuscript text retained by the corpus admission path (lib/customer-corpus-policy.ts turned that path
- * off) and every copy of it: the stored text, its accepted fingerprints, its promotion and the representation and shingles
+ * MANUAL TOOL ONLY: nothing in the product calls this. The customer comparison corpus is active (owner decision 2026-10-31)
+ * and its records outlive reports by design (lib/comparison-source-lifecycle.ts); removing any of them is an owner decision,
+ * run deliberately against a backed-up database. It removes customer manuscript text retained by the corpus admission path
+ * and every copy of it: the stored text, its accepted fingerprints, its promotion and the representation and shingles
  * that made it matchable. planRetainedCorpusPurge counts; it writes nothing. applyRetainedCorpusPurge does all of it in one
  * transaction, then bumps the corpus match generation so no other report keeps a match computed from the removed text.
  *

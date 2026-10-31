@@ -23,7 +23,6 @@ import {
 } from "../lib/device-provenance-shadow.ts";
 import { summarizeSubmissionProvenance } from "../lib/submission-provenance.ts";
 import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
-process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 const repoRoot = path.resolve(".");
 const drizzleDir = path.join(repoRoot, "drizzle");

@@ -192,10 +192,12 @@ function sharedHashCount(a: Set<string>, b: Set<string>): number {
 }
 
 function retentionResolvedFor(consent: CorpusConsentEvidence): boolean {
+  if (consent.kind === "SERVICE_POLICY") return consent.policy.length > 0;
   return consent.kind === "PER_USER_CONSENT" ? consent.consented === true : consent.provenance.retentionRightsResolved === true;
 }
 
 function retentionBasisFor(consent: CorpusConsentEvidence): string {
+  if (consent.kind === "SERVICE_POLICY") return "SERVICE_POLICY";
   if (consent.kind !== "PER_USER_CONSENT") return consent.provenance.retentionBasis;
   return consent.consented === true ? "CONSENT_GRANTED" : "UNRESOLVED";
 }

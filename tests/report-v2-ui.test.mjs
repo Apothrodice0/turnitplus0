@@ -17,7 +17,6 @@ import {
   KIND_PASSAGE_LABEL,
 } from "../lib/report-v2-view.ts";
 import { ReportV2View, ReportV2Print } from "../components/report/report-v2/report-v2-view.tsx";
-process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 // ── fixtures ─────────────────────────────────────────────────────────────
 function makeText(n, { quoteAt } = {}) {

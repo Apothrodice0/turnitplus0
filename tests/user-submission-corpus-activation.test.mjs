@@ -11,7 +11,6 @@ import { resetRateForTest, resetAuthRateForTest } from '../lib/rate-limit.js';
 import { canonicalSha256, createDocumentIdentity } from '../lib/document-identity.ts';
 import { indexDocumentSubmissionIntoCorpus } from '../lib/user-submission-corpus.ts';
 import { withTestIdentity } from './helpers/test-signup.mjs';
-process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 /**
  * Phase E8D originally activated indexDocumentSubmissionIntoCorpus from the

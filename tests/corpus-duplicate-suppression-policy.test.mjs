@@ -7,7 +7,6 @@ import {
   CORPUS_DUPLICATE_SUPPRESSION_POLICY_VERSION,
   DOCUMENT_LOCAL_CORPUS_DUPLICATE_EVIDENCE_LABEL,
 } from "../lib/corpus-duplicate-suppression-policy.ts";
-process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 /**
  * Phase B1 — tests for the PURE candidate policy. No DB, no env, no HTTP —

@@ -78,7 +78,12 @@ export const DEFAULT_CORPUS_ADMISSION_LIMITS: CorpusAdmissionLimits = {
 // ============================================================================
 
 export type CorpusAcquisitionMethod = "MANUAL_UPLOAD" | "BULK_IMPORT_DOWNLOAD" | "API_RETRIEVAL" | "OTHER";
-export type CorpusRetentionBasis = "LICENSED_REUSE" | "CONSENT_GRANTED" | "PUBLIC_DOMAIN" | "FAIR_USE_CLAIMED" | "UNRESOLVED";
+/**
+ * SERVICE_POLICY: a customer upload retained under TurnitPlus's published comparison-corpus policy (the policy version is in
+ * the decision's consent_metadata). It is not a record that the customer was asked. CONSENT_GRANTED is only for an explicit,
+ * recorded per-customer consent, which no current flow collects; rows labelled so before 2026-10-31 were not asked either.
+ */
+export type CorpusRetentionBasis = "LICENSED_REUSE" | "CONSENT_GRANTED" | "SERVICE_POLICY" | "PUBLIC_DOMAIN" | "FAIR_USE_CLAIMED" | "UNRESOLVED";
 
 /**
  * Per-candidate provenance/licensing record for a bulk-import candidate (the
@@ -99,16 +104,15 @@ export type CorpusProvenanceRecord = {
 };
 
 /**
- * Two distinct consent shapes for two distinct callers. A live, per-account
- * user upload carries `{ kind: "PER_USER_CONSENT", consented }`, and consented
- * is never assumed: customer retention is off (lib/customer-corpus-policy.ts),
- * so on any hosted deployment it is false and the gate retains nothing.
- * users.corpus_reuse_consented_at is a vestigial column, not an authorization.
- * An externally-sourced bulk-import
- * candidate has no per-account consent to check at all and instead carries
- * its own CorpusProvenanceRecord.
+ * Three evidence shapes. A live customer upload carries `{ kind: "SERVICE_POLICY", policy }`: it is retained because the
+ * product's comparison-corpus policy says customer uploads are (owner decision 2026-10-31), not because the customer
+ * agreed to anything, and it is recorded as exactly that (retention basis SERVICE_POLICY). PER_USER_CONSENT is for a
+ * future flow that actually asks and records consent; none does today, and users.corpus_reuse_consented_at is a
+ * vestigial column, not consent. An externally-sourced bulk-import candidate carries its own CorpusProvenanceRecord.
  */
+export const CUSTOMER_UPLOAD_CORPUS_POLICY = "turnitplus-customer-comparison-corpus-v1";
 export type CorpusConsentEvidence =
+  | { kind: "SERVICE_POLICY"; policy: string }
   | { kind: "PER_USER_CONSENT"; consented: boolean }
   | { kind: "BULK_IMPORT_PROVENANCE"; provenance: CorpusProvenanceRecord };
 

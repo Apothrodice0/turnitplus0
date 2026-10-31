@@ -11,7 +11,6 @@ import {
 import { ROBUST_CORRESPONDENCE_VERSION } from "../lib/e8m-robust-correspondence.ts";
 import { DISTINCTIVENESS_MODEL_V2 } from "../lib/e8l-distinctiveness-v2.ts";
 import { ACCEPTANCE_SCENARIOS, runAcceptanceMatrix, MULTI_BLOCK_LANDMARK_NEAR_MISS } from "../tools/e8o-acceptance-matrix.ts";
-process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 /**
  * Phase E8O: tests for the production historical-match acceptance

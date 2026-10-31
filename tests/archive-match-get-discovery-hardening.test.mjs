@@ -45,13 +45,15 @@ const postCode = stripComments(postBody);
 
 test("route.ts no longer imports or references the read-rate helper it used before", () => {
   assert.doesNotMatch(routeSrc, /checkReadRate/, "checkReadRate must be gone from the module entirely");
-  assert.match(routeSrc, /import \{ checkRate \} from "\.\.\/\.\.\/\.\.\/\.\.\/lib\/rate-limit"/,
-    "only checkRate (POST's limiter) should remain imported from lib/rate-limit");
+  // 2026-10-25 account-aware limits: POST's limiter is checkCustomerRate (verified account, else client IP)
+  assert.match(routeSrc, /import \{ checkCustomerRate \} from "\.\.\/\.\.\/\.\.\/\.\.\/lib\/customer-rate-limit"/,
+    "only checkCustomerRate (POST's limiter) should be imported");
+  assert.doesNotMatch(routeSrc, /from "\.\.\/\.\.\/\.\.\/\.\.\/lib\/rate-limit"/, "nothing else from lib/rate-limit");
 });
 
 test("the GET handler body touches no rate-limit / DB / IP machinery", () => {
   for (const forbidden of [
-    "checkReadRate", "checkRate", "checkBucket", "clientIpFrom",
+    "checkReadRate", "checkRate", "checkCustomerRate", "checkBucket", "clientIpFrom",
     "getReportsDbClient", "getRateLimitDbClient", "createClient",
     "rate_limit_buckets", "TURSO_", "await request", "request.",
   ]) {
@@ -63,7 +65,7 @@ test("the GET handler body touches no rate-limit / DB / IP machinery", () => {
 });
 
 test("the POST handler is untouched — still rate-limited and still DB-backed", () => {
-  assert.match(postCode, /checkRate\(clientIpFrom\(request\)\)/, "POST still rate-limits by client IP");
+  assert.match(postCode, /checkCustomerRate\(request, "processing"\)/, "POST still rate-limits (verified account when signed in, client IP otherwise)");
   assert.match(postCode, /isArchiveServerSideEnabled\(\)/, "POST still 404s when the flag is off");
   assert.match(postCode, /getReportsDbClient\(\)/, "POST still opens the reports DB client");
   assert.match(postCode, /analyzeArchiveOnServer\(client, text\)/, "POST still runs the server matcher");

@@ -14,7 +14,6 @@ import { getOrComputeHistoricalMatchSnapshot } from "../lib/report-historical-ma
 import { SNAPSHOT_MATCHER_VERSION } from "../lib/report-historical-match.ts";
 const USER_SUBMISSION_MATCHER_VERSION = SNAPSHOT_MATCHER_VERSION;
 import { CORPUS_FINGERPRINT_VERSION, CANONICALIZATION_VERSION } from "../lib/user-submission-corpus.ts";
-process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 /**
  * "Clearing the flag must immediately hide cached corpus matches" — proves

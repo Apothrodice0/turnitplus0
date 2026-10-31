@@ -7,7 +7,6 @@ import { applyMigrationsLibsql } from "../lib/ingest.js";
 import { createDocumentIdentity } from "../lib/document-identity.ts";
 import { recordDocumentIdentityShingles, createFamily, attachIdentityToFamily } from "../lib/document-family.ts";
 import { classifySubmitterRelationship, classifyFamilyRelationships } from "../lib/document-relationship.ts";
-process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 const repo = path.resolve(".");
 const drizzleDir = path.join(repo, "drizzle");

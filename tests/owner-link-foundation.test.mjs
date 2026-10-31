@@ -56,7 +56,6 @@ import {
   withdrawOwnerLinkEvidence,
   withdrawOwnerLink,
 } from '../lib/owner-link-repo.ts';
-process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 /**
  * Direct owner-link FOUNDATION — SCHEMA + STORAGE ONLY. No scoring change; the

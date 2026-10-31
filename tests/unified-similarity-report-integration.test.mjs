@@ -11,7 +11,6 @@ import { resetRateForTest, resetAuthRateForTest } from '../lib/rate-limit.ts';
 import { canonicalSha256 } from '../lib/document-identity.ts';
 import { recordAcademicSearchRunDiagnostics } from '../lib/academic-search-diagnostics-repo.ts';
 import { withTestIdentity } from './helpers/test-signup.mjs';
-process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 /**
  * Phase 6: proves computeUnifiedSimilarity() is actually wired into the real

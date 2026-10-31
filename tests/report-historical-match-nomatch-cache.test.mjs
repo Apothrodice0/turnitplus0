@@ -16,7 +16,6 @@ import {
   isHistoricalMatchSnapshotCurrent,
   SNAPSHOT_MATCHER_VERSION,
 } from "../lib/report-historical-match.ts";
-process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 /**
  * CACHE LEGITIMATE NO_HISTORICAL_MATCH RESULTS — dedicated coverage for

@@ -21,7 +21,6 @@ import {
   processReportAdmissionJob,
   buildReportAdmissionSourceRef,
 } from '../lib/corpus-admission-report-integration.ts';
-process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 /**
  * Device Passport — Phase 2. End-to-end coverage: the register + challenge

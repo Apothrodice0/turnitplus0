@@ -67,7 +67,7 @@ export async function cleanupExpiredSubscriptionReports(client: Client, account:
   if (!(await entitlementTablesExist(client))) return { ran: false, reason: "no-tables" };
   const entitlement = await readEntitlement(client, account.id);
   if (planStateOf(entitlement, nowMs) !== "expired") return { ran: false, reason: "not-expired" };
-  const result = await deleteAllReportDataForAccount(client, account.id, { preserveActivelyPromotedRepresentations: true, savedAtOrBefore: sqliteTimestamp(nowMs), purgeRetainedCorpusContent: true });
+  const result = await deleteAllReportDataForAccount(client, account.id, { preserveActivelyPromotedRepresentations: true, savedAtOrBefore: sqliteTimestamp(nowMs) });
   return { ran: true, ...result };
 }
 

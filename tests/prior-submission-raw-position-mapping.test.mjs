@@ -20,7 +20,6 @@ import { getOrComputeHistoricalMatchSnapshot, getCurrentCorpusMatchGeneration, S
 import { resolvePrimarySimilaritySummary } from "../lib/report-primary-similarity.ts";
 import { computeUnifiedSimilarity } from "../lib/unified-similarity.ts";
 import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
-process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 /**
  * Prior-submission canonical-to-raw position drift regression.

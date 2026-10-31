@@ -17,7 +17,6 @@ import { findRoomOccupant } from '../lib/reports-repo.ts';
 import { deriveRoomStatus } from '../lib/report-rooms.ts';
 import { resolveAiDisplayState } from '../lib/ai-display-state.ts';
 import { aiSignalDisplay } from '../lib/report-types.ts';
-process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 /**
  * Fresh-report aiAnalysis-loss regression (Room 5, "The Legal Framework

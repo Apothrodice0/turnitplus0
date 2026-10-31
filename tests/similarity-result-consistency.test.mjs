@@ -7,7 +7,6 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { OverviewReport } from '../components/report/similarity-report-papers.tsx';
 import { ReportHistoryRow } from '../components/reports/report-history-row.tsx';
 import { SimilarityMetricTile } from '../app/reports/rooms/[room]/room-page-shell.tsx';
-process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 /**
  * Release-hardening audit finding SIM-01: regression coverage for a real
