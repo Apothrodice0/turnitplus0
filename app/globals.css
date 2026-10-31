@@ -1224,6 +1224,14 @@ main.report-main {
   width: 100%;
 }
 
+/* Standalone password-recovery page (app/reset-password): the same card, centred on the page. */
+.reset-password-page {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px 16px;
+}
+
 .auth-page-card h2,
 .account-benefits h2,
 .account-profile-card h2,

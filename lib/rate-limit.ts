@@ -342,3 +342,36 @@ export async function checkEmailVerificationAttemptRate(userId: string): Promise
 export async function resetEmailVerificationAttemptRateForTest(userId: string): Promise<void> {
   await resetBucketForTest(`emailverifyattempt:${userId}`);
 }
+
+// Password recovery (app/api/auth/password-reset/*). Three separate buckets, never shared with sign-in:
+//   pwresetreq:<ip>      requesting reset links from one host — 5 per 15 minutes
+//   pwresetemail:<hash>  requesting links for one address, from anywhere — 3 per hour. Keyed by a SHA-256 of the
+//                        normalized address (the caller hashes it), so the table never holds an email address, and
+//                        applied identically to known and unknown addresses (no account enumeration).
+//   pwresetconfirm:<ip>  redeeming links from one host — 10 per 15 minutes (a 256-bit token cannot be guessed; this
+//                        only bounds a runaway client)
+// The per-ACCOUNT issuance cap (lib/password-reset.ts PASSWORD_RESET_MAX_PER_WINDOW) is checked against stored rows.
+const PASSWORD_RESET_REQUEST_MAX_TOKENS = 5;
+const PASSWORD_RESET_REQUEST_INTERVAL_MS = 15 * 60_000;
+const PASSWORD_RESET_EMAIL_MAX_TOKENS = 3;
+const PASSWORD_RESET_EMAIL_INTERVAL_MS = 60 * 60_000;
+const PASSWORD_RESET_CONFIRM_MAX_TOKENS = 10;
+const PASSWORD_RESET_CONFIRM_INTERVAL_MS = 15 * 60_000;
+
+export async function checkPasswordResetRequestRate(clientId: string): Promise<RateCheckResult> {
+  return checkBucket(`pwresetreq:${clientId}`, PASSWORD_RESET_REQUEST_MAX_TOKENS, PASSWORD_RESET_REQUEST_INTERVAL_MS);
+}
+
+export async function checkPasswordResetEmailRate(emailDigest: string): Promise<RateCheckResult> {
+  return checkBucket(`pwresetemail:${emailDigest}`, PASSWORD_RESET_EMAIL_MAX_TOKENS, PASSWORD_RESET_EMAIL_INTERVAL_MS);
+}
+
+export async function checkPasswordResetConfirmRate(clientId: string): Promise<RateCheckResult> {
+  return checkBucket(`pwresetconfirm:${clientId}`, PASSWORD_RESET_CONFIRM_MAX_TOKENS, PASSWORD_RESET_CONFIRM_INTERVAL_MS);
+}
+
+export async function resetPasswordResetRatesForTest(clientId: string, emailDigest?: string): Promise<void> {
+  await resetBucketForTest(`pwresetreq:${clientId}`);
+  await resetBucketForTest(`pwresetconfirm:${clientId}`);
+  if (emailDigest) await resetBucketForTest(`pwresetemail:${emailDigest}`);
+}

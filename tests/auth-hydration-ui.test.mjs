@@ -48,7 +48,8 @@ test("the account page's own content shows a pending panel, never the login/sign
   assert.ok(accountSectionMatch, "the account view must check !accountLoaded before branching on account, so the login form never renders before the session check resolves");
 
   assert.match(page, /\{view === "account" && \(!accountLoaded \|\| account \? "Your account" : "Log in or create your account"\)\}/);
-  assert.match(page, /view === "account" && accountLoaded && !account \? "OPTIONAL ACCOUNT"/);
+  // The signed-out label became "ACCOUNT REQUIRED TO CHECK" when report writes started requiring an account (0bfd2ff).
+  assert.match(page, /view === "account" && accountLoaded && !account \? "ACCOUNT REQUIRED TO CHECK"/);
 });
 
 test("existing account/report loading and authorization logic is unchanged — only what's shown while it resolves was fixed", async () => {

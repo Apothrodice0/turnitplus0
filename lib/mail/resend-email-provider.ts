@@ -1,4 +1,4 @@
-import type { EmailDeliveryProvider, EmailVerificationMessage } from "./email-delivery";
+import type { EmailDeliveryProvider, EmailVerificationMessage, PasswordResetMessage } from "./email-delivery";
 import { EmailDeliveryUnavailableError } from "./email-delivery";
 
 /**
@@ -65,35 +65,61 @@ function renderVerificationEmail(code: string, expiresAt: number): { subject: st
   return { subject, html, text };
 }
 
+/**
+ * Password recovery email: one link button, the expiry in minutes, and a plain "ignore if you didn't ask" line. The
+ * link is the only place the raw token appears (in its fragment, so it never reaches a server log or a Referer).
+ */
+function renderPasswordResetEmail(resetUrl: string, expiresAt: number): { subject: string; html: string; text: string } {
+  const minutes = Math.max(1, Math.round((expiresAt - Date.now()) / 60_000));
+  const safeUrl = escapeHtml(resetUrl).replace(/"/g, "&quot;");
+  const subject = "Reset your TurnitPlus password";
+  const text = `Someone asked to reset the password for your TurnitPlus account.\n\nReset your password: ${resetUrl}\n\nThis link expires in ${minutes} minutes and can be used once. If you didn't ask for this, you can ignore this email; your password stays the same.`;
+  const html = `<div style="font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;max-width:420px;margin:0 auto;padding:24px;color:#1c2a30;">
+<p style="font-weight:700;font-size:15px;margin:0 0 18px;">TurnitPlus</p>
+<p style="margin:0 0 16px;font-size:13px;">Someone asked to reset the password for your TurnitPlus account.</p>
+<p style="margin:0 0 16px;"><a href="${safeUrl}" style="display:inline-block;background:#1c2a30;color:#ffffff;text-decoration:none;font-weight:700;font-size:14px;padding:10px 18px;border-radius:6px;">Reset your password</a></p>
+<p style="margin:0;font-size:12px;color:#5b6b72;">This link expires in ${minutes} minutes and can be used once. If you didn't ask for this, you can ignore this email; your password stays the same.</p>
+</div>`;
+  return { subject, html, text };
+}
+
 export const resendEmailDeliveryProvider: EmailDeliveryProvider = {
   async sendEmailVerification(message: EmailVerificationMessage): Promise<void> {
-    const apiKey = process.env.RESEND_API_KEY;
-    const from = process.env.EMAIL_VERIFICATION_FROM_ADDRESS;
-    if (!apiKey || !from) throw new EmailDeliveryUnavailableError();
-
-    const { subject, html, text } = renderVerificationEmail(message.code, message.expiresAt);
-    const fetchImpl = fetchImplForTest ?? fetch;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
-    try {
-      const response = await fetchImpl(RESEND_API_URL, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ from, to: message.to, subject, html, text }),
-        signal: controller.signal,
-      });
-      if (!response.ok) {
-        console.error(`resend email delivery failed: HTTP ${response.status}`);
-        throw new EmailDeliveryUnavailableError();
-      }
-    } catch (err) {
-      if (err instanceof EmailDeliveryUnavailableError) throw err;
-      if (!isAbortError(err)) {
-        console.error("resend email delivery failed (non-fatal, translated):", err instanceof Error ? err.message : String(err));
-      }
-      throw new EmailDeliveryUnavailableError();
-    } finally {
-      clearTimeout(timer);
-    }
+    await deliverViaResend(message.to, renderVerificationEmail(message.code, message.expiresAt));
+  },
+  async sendPasswordReset(message: PasswordResetMessage): Promise<void> {
+    await deliverViaResend(message.to, renderPasswordResetEmail(message.resetUrl, message.expiresAt));
   },
 };
+
+/** The one Resend POST both messages share (unchanged behaviour: fail closed, never surface provider detail). */
+async function deliverViaResend(to: string, rendered: { subject: string; html: string; text: string }): Promise<void> {
+  const apiKey = process.env.RESEND_API_KEY;
+  const from = process.env.EMAIL_VERIFICATION_FROM_ADDRESS;
+  if (!apiKey || !from) throw new EmailDeliveryUnavailableError();
+
+  const { subject, html, text } = rendered;
+  const fetchImpl = fetchImplForTest ?? fetch;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+  try {
+    const response = await fetchImpl(RESEND_API_URL, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ from, to, subject, html, text }),
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      console.error(`resend email delivery failed: HTTP ${response.status}`);
+      throw new EmailDeliveryUnavailableError();
+    }
+  } catch (err) {
+    if (err instanceof EmailDeliveryUnavailableError) throw err;
+    if (!isAbortError(err)) {
+      console.error("resend email delivery failed (non-fatal, translated):", err instanceof Error ? err.message : String(err));
+    }
+    throw new EmailDeliveryUnavailableError();
+  } finally {
+    clearTimeout(timer);
+  }
+}

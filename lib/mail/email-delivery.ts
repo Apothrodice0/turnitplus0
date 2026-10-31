@@ -25,9 +25,23 @@ export type EmailVerificationMessage = {
   expiresAt: number;
 };
 
+/**
+ * Password recovery (lib/password-reset.ts). `resetUrl` carries the raw one-time token in its fragment and is a bearer
+ * credential exactly like the verification code: handed to the provider ONLY, never logged.
+ */
+export type PasswordResetMessage = {
+  /** The account's own current, lowercased users.email. */
+  to: string;
+  /** `${trusted origin}/reset-password#token=<raw>` — see lib/trusted-app-origin.ts. */
+  resetUrl: string;
+  /** When the link stops being valid (epoch-ms). */
+  expiresAt: number;
+};
+
 /** The narrow interface a real provider implements. */
 export interface EmailDeliveryProvider {
   sendEmailVerification(message: EmailVerificationMessage): Promise<void>;
+  sendPasswordReset(message: PasswordResetMessage): Promise<void>;
 }
 
 /**
@@ -50,6 +64,9 @@ export class EmailDeliveryUnavailableError extends Error {
  */
 const unconfiguredProvider: EmailDeliveryProvider = {
   async sendEmailVerification(): Promise<void> {
+    throw new EmailDeliveryUnavailableError();
+  },
+  async sendPasswordReset(): Promise<void> {
     throw new EmailDeliveryUnavailableError();
   },
 };
@@ -75,4 +92,9 @@ export function __setEmailDeliveryProviderForTest(provider: EmailDeliveryProvide
 export function getEmailDeliveryProvider(): EmailDeliveryProvider {
   if (testProvider) return testProvider;
   return isResendConfigured() ? resendEmailDeliveryProvider : unconfiguredProvider;
+}
+
+/** Whether ANY real (or injected test) provider is configured — lets a caller say "not available" instead of "sent". */
+export function isEmailDeliveryConfigured(): boolean {
+  return testProvider !== null || isResendConfigured();
 }
