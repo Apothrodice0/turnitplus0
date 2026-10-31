@@ -254,6 +254,8 @@ export type SimilarityReport = {
   predictedHighlights?: PredictedHighlightRange[];
   /** The report's prediction is still running; the report page checks again. Response-only, like predictedHighlights. */
   predictedHighlightsPending?: boolean;
+  /** The report's prediction finished without a result (the owner may start it again). Response-only, like predictedHighlights. */
+  predictedHighlightsFailed?: boolean;
   id: number;
   submissionId: string;
   title: string;

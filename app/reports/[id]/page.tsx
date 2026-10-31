@@ -234,7 +234,7 @@ const loadOwnedReport = cache(async (id: string): Promise<OwnedReportResult> => 
       // English System 2 eligibility, resolved server-side for this signed-in owner of this report (lib/system2-access.ts).
       // Display never depends on it: the report's stored estimate is read by the shell itself.
       const system2Enabled = (await resolveSystem2Access(client, sessionUser)).allowed;
-      await attachStoredPredictedHighlights(client, payload, { deviceKey: row.device_key, reportId: id });
+      await attachStoredPredictedHighlights(client, payload, { deviceKey: row.device_key, reportId: id }, { owner: sessionUser });
       const submitter = await readReportSubmitter(client, sessionUser);
       return { status: "found", payload, aiStatus, aiScore: row.ai_score, aiTone: row.ai_tone, similarityStatus: display.status, system2Enabled, submitter };
     } catch {

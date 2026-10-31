@@ -19,6 +19,11 @@ import { comparisonText } from "./similarity-core";
  * newer one, and completing only ever UPDATEs, so a result that arrives after the report was deleted writes nothing.
  * A retryable failure waits (RETRY_DELAYS_MS); a further attempt starts from the sweep or from the owner's next read.
  *
+ * NO REPORT LEFT WITHOUT A JOB. A report saved while the model was off or out of reach, or before the current model
+ * version, has no current row; its owner's read queues one under the same rules as a first save. A finished failure is
+ * reported as failed (never as a result with no passages), and the owner can start it again
+ * (app/api/reports/[id]/highlight-prediction).
+ *
  * DAILY CEILING. Every call first reserves its words against HIGHLIGHT_MODEL_DAILY_WORD_LIMIT for the UTC day
  * (highlight_model_usage_daily); one that does not fit waits for the next day without using up an attempt. This is the
  * exact, immediate spending stop; the cloud budget only reports after the fact.
@@ -68,6 +73,12 @@ export async function canReceiveHighlightPredictions(client: Client, user: Sessi
   if (!config.subscribersEnabled || !accountActivationEnforced()) return false;
   const policy = await resolveRoomPolicy(client, user);
   return policy.enforced && policy.state === "active" && policy.block === null && policy.grace === null;
+}
+
+/** Whether this report should get a prediction for this user: English, within the word limit, an eligible account. */
+async function predictionWanted(client: Client, user: SessionUser, text: string, detectedLanguage: unknown, config: HighlightModelConfig): Promise<boolean> {
+  if (!config.enabled || detectedLanguage !== "English" || wordCount(comparisonText(text)) > config.maxWords) return false;
+  return (await highlightPredictionTableExists(client)) && (await canReceiveHighlightPredictions(client, user, config));
 }
 
 /** Queues the report's prediction, once; a report whose text or model changed starts again. */
@@ -220,8 +231,7 @@ export async function scheduleHighlightPrediction(
 ): Promise<void> {
   try {
     const config = options.config ?? highlightModelConfig();
-    if (!config.enabled || report.detectedLanguage !== "English" || wordCount(comparisonText(report.text)) > config.maxWords) return;
-    if (!(await highlightPredictionTableExists(client)) || !(await canReceiveHighlightPredictions(client, user, config))) return;
+    if (!(await predictionWanted(client, user, report.text, report.detectedLanguage, config))) return;
     const key = { deviceKey: report.deviceKey, reportId: report.reportId };
     await enqueuePrediction(client, key, user.id, config.modelVersion, highlightPredictionTextHash(report.text), Date.now());
     await runAfterResponse(() => processHighlightPrediction(key, { config, fetchImpl: options.fetchImpl }));
@@ -231,15 +241,16 @@ export async function scheduleHighlightPrediction(
 }
 
 /**
- * Adds the stored prediction to one outgoing report for its owner. Reads only; the model is never called from here. A
- * row for another model or another text answers nothing. `retry` (the API read, not the page) also lets a due prediction
- * run after the response, which is what finishes one when no scheduled sweep exists, as on a Preview deployment.
+ * Adds the stored prediction to one outgoing report for its owner. The model is never called from the read itself. A
+ * row for another model or another text answers nothing; given its owner as `owner`, a report with no current row is
+ * queued instead (see NO REPORT LEFT WITHOUT A JOB). `retry` (the API read, not the page) also lets a due prediction run
+ * after the response, which is what finishes one when no scheduled sweep exists, as on a Preview deployment.
  */
 export async function attachStoredPredictedHighlights(
-  client: Executor,
+  client: Client,
   report: SimilarityReport,
   key: HighlightPredictionKey,
-  options: { retry?: boolean; config?: HighlightModelConfig; fetchImpl?: typeof fetch; nowMs?: number } = {},
+  options: { owner?: SessionUser | null; retry?: boolean; config?: HighlightModelConfig; fetchImpl?: typeof fetch; nowMs?: number } = {},
 ): Promise<void> {
   try {
     const config = options.config ?? highlightModelConfig();
@@ -251,22 +262,58 @@ export async function attachStoredPredictedHighlights(
     })).rows[0] as unknown as
       | { status: string; ranges_json: string | null; model_version: string; text_sha256: string; next_attempt_at: number | bigint; lease_until: number | bigint | null; attempts: number | bigint }
       | undefined;
-    if (!row || row.model_version !== config.modelVersion || row.text_sha256 !== highlightPredictionTextHash(report.text)) return;
+    const now = options.nowMs ?? Date.now();
+    const textSha256 = highlightPredictionTextHash(report.text);
+    if (!row || row.model_version !== config.modelVersion || row.text_sha256 !== textSha256) {
+      const owner = options.owner;
+      if (!owner || !(await predictionWanted(client, owner, report.text, report.features?.detectedLanguage, config))) return;
+      await enqueuePrediction(client, key, owner.id, config.modelVersion, textSha256, now);
+      report.predictedHighlightsPending = true;
+      if (options.retry) await runAfterResponse(() => processHighlightPrediction(key, { config, fetchImpl: options.fetchImpl }));
+      return;
+    }
     if (row.status === "complete") {
       report.predictedHighlights = sanitizePredictedRanges(JSON.parse(row.ranges_json ?? "[]"), comparisonText(report.text).length);
       return;
     }
-    if (row.status === "failed") return;
-    const now = options.nowMs ?? Date.now();
     const due = row.status === "pending" ? Number(row.next_attempt_at) <= now : row.lease_until !== null && Number(row.lease_until) <= now;
-    // A last attempt whose worker was stopped (its lease ran out) can never be claimed again: finished, not pending,
+    // A last attempt whose worker was stopped (its lease ran out) can never be claimed again: finished, like a failure,
     // even before a sweep closes it (Preview has no scheduled sweep).
-    if (row.status === "running" && due && Number(row.attempts) >= MAX_ATTEMPTS) return;
+    if (row.status === "failed" || (row.status === "running" && due && Number(row.attempts) >= MAX_ATTEMPTS)) {
+      report.predictedHighlightsFailed = true;
+      return;
+    }
     report.predictedHighlightsPending = true;
     if (options.retry && due) await runAfterResponse(() => processHighlightPrediction(key, { config, fetchImpl: options.fetchImpl }));
   } catch (err) {
     console.error("highlight prediction not read (non-fatal):", err instanceof Error ? err.name : "unknown");
   }
+}
+
+/**
+ * The owner's "Try again" on a finished failure: a fresh set of attempts for the current model, run after the response.
+ * False when there is nothing to start again (no row, another model, still pending or running, or complete). The daily
+ * word ceiling still applies to every call it leads to.
+ */
+export async function retryFailedHighlightPrediction(
+  client: Client,
+  key: HighlightPredictionKey,
+  options: { config?: HighlightModelConfig; fetchImpl?: typeof fetch; nowMs?: number } = {},
+): Promise<boolean> {
+  const config = options.config ?? highlightModelConfig();
+  if (!config.enabled || !(await highlightPredictionTableExists(client))) return false;
+  const now = options.nowMs ?? Date.now();
+  const result = await client.execute({
+    sql: `UPDATE report_highlight_predictions
+             SET status = 'pending', ranges_json = NULL, attempts = 0, lease_until = NULL, next_attempt_at = ?, updated_at = ?
+           WHERE report_device_key = ? AND report_id = ? AND model_version = ?
+             AND (status = 'failed' OR (status = 'running' AND lease_until <= ? AND attempts >= ?))
+           RETURNING attempts`,
+    args: [now, now, key.deviceKey, key.reportId, config.modelVersion, now, MAX_ATTEMPTS],
+  });
+  if (result.rows.length !== 1) return false;
+  await runAfterResponse(() => processHighlightPrediction(key, { config, fetchImpl: options.fetchImpl }));
+  return true;
 }
 
 /** Removes one report's stored prediction; part of deleting that report. A database without drizzle/0058 has nothing to remove. */

@@ -8,6 +8,7 @@ import * as reportsRoute from '../app/api/reports/route.ts';
 import * as reportByIdRoute from '../app/api/reports/[id]/route.ts';
 import * as applyRoute from '../app/api/admin/account-activation/apply/route.ts';
 import * as sweepRoute from '../app/api/internal/highlight-prediction-sweep/route.ts';
+import * as retryRoute from '../app/api/reports/[id]/highlight-prediction/route.ts';
 import { resetAuthRateForTest, resetRateForTest, resetReadRateForTest, resetAdminRateForTest } from '../lib/rate-limit.js';
 import { cleanupExpiredSubscriptionReports } from '../lib/subscription-expiry-cleanup.ts';
 import { processHighlightPrediction, resetHighlightPredictionTableCacheForTest, runHighlightPredictionSweep, highlightPredictionTextHash } from '../lib/highlight-predictions.ts';
@@ -218,7 +219,10 @@ const subscriber = async (email, rooms = 4) => { const u = await signup(email); 
   for (let i = 0; i < 10; i += 1) { await makeDue(flaky.id); await quietly(() => processHighlightPrediction(key(u, flaky.id))); }
   assert.equal(modelCalls, 5, 'five attempts in all');
   assert.equal((await rowOf(flaky.id)).status, 'failed');
-  assert.equal((await getReport(u, flaky.id)).body.predictedHighlightsPending, undefined, 'a finished failure stops the page checking');
+  const finished = (await getReport(u, flaky.id)).body;
+  assert.equal(finished.predictedHighlightsPending, undefined, 'a finished failure stops the page checking');
+  assert.equal(finished.predictedHighlightsFailed, true, 'and says it failed, never that there were no passages');
+  assert.equal(finished.predictedHighlights, undefined);
   pass('P4 404, 413 and a wrong model version stop at once; server errors stop after five attempts');
 }
 
@@ -324,22 +328,36 @@ const subscriber = async (email, rooms = 4) => { const u = await signup(email); 
   pass('P7 predictions go with their report: single delete, expiry cleanup, a late result, a cutoff and account deletion');
 }
 
-// ── P8. A stored result answers only for its own model and text; the switch hides everything ───────────────────────
+// ── P8. A stored result answers only for its own model and text; a new model or text is queued anew; the switch hides everything
 {
   const u = await subscriber('p8@example.com');
   modelAnswer = () => new Response(JSON.stringify({ ranges: [{ start: 0, end: 4 }], modelVersion: MODEL }), { status: 200 });
   const r = await postReport(u, { room: 0 });
+  modelCalls = 0;
   process.env.HIGHLIGHT_MODEL_VERSION = 'v2-later';
-  assert.equal((await getReport(u, r.id)).body.predictedHighlights, undefined, 'another model version shows nothing');
+  modelAnswer = () => new Response(JSON.stringify({ ranges: [{ start: 1, end: 6 }], modelVersion: 'v2-later' }), { status: 200 });
+  const later = (await getReport(u, r.id)).body;
+  assert.equal(later.predictedHighlights, undefined, "the old model's result is never shown under the new one");
+  assert.equal(later.predictedHighlightsPending, true, "the owner's read queues the new model at once");
+  assert.equal(modelCalls, 1);
+  assert.equal((await rowOf(r.id)).model_version, 'v2-later');
+  assert.deepEqual((await getReport(u, r.id)).body.predictedHighlights, [{ start: 1, end: 6 }]);
   process.env.HIGHLIGHT_MODEL_VERSION = MODEL;
+  modelAnswer = () => new Response(JSON.stringify({ ranges: [{ start: 0, end: 4 }], modelVersion: MODEL }), { status: 200 });
+  await getReport(u, r.id);
   await db.execute({ sql: "UPDATE report_highlight_predictions SET text_sha256 = 'other' WHERE report_id = ?", args: [r.id] });
-  assert.equal((await getReport(u, r.id)).body.predictedHighlights, undefined, 'another text shows nothing');
-  await db.execute({ sql: 'UPDATE report_highlight_predictions SET text_sha256 = ? WHERE report_id = ?', args: [highlightPredictionTextHash(manuscript(r.id)), r.id] });
+  modelCalls = 0;
+  const otherText = (await getReport(u, r.id)).body;
+  assert.equal(otherText.predictedHighlights, undefined, 'a result for another text shows nothing');
+  assert.equal(otherText.predictedHighlightsPending, true);
+  assert.equal(modelCalls, 1, 'and the current text is predicted instead');
+  assert.equal((await rowOf(r.id)).text_sha256, highlightPredictionTextHash(manuscript(r.id)));
   process.env.HIGHLIGHT_MODEL_ENABLED = '';
   assert.equal((await getReport(u, r.id)).body.predictedHighlights, undefined, 'turning the model off hides stored results at once');
   process.env.HIGHLIGHT_MODEL_ENABLED = '1';
   assert.deepEqual((await getReport(u, r.id)).body.predictedHighlights, [{ start: 0, end: 4 }]);
-  pass('P8 a result shows only for its own model and text, and the switch hides stored results at once');
+  assert.equal(modelCalls, 1);
+  pass("P8 a result shows only for its own model and text; a new model or text is queued on the owner's read; the switch hides stored results");
 }
 
 // ── P9. The sweep finishes what no read will; it is protected like every internal sweep ────────────────────────────
@@ -375,6 +393,7 @@ const subscriber = async (email, rooms = 4) => { const u = await signup(email); 
   modelCalls = 0;
   const lastView = await getReport(u, last.id);
   assert.equal(lastView.body.predictedHighlightsPending, undefined, 'a stopped last attempt is finished, not pending');
+  assert.equal(lastView.body.predictedHighlightsFailed, true, 'finished as a failure');
   assert.equal(lastView.body.predictedHighlights, undefined);
   assert.equal(modelCalls, 0, 'and it is never called again');
   const earlierView = await getReport(u, earlier.id);
@@ -414,6 +433,74 @@ const subscriber = async (email, rooms = 4) => { const u = await signup(email); 
   assert.equal((await rowOf(over.id)).status, 'complete');
   delete process.env.HIGHLIGHT_MODEL_DAILY_WORD_LIMIT;
   pass('P12 the daily word ceiling stops calls at once; a deferred prediction keeps its attempts and runs the next day');
+}
+
+// ── P13. A report saved while the model was off or out of reach gets its prediction when its owner opens it ────────
+{
+  const u = await subscriber('p13@example.com');
+  const other = await subscriber('p13b@example.com');
+  process.env.HIGHLIGHT_MODEL_ENABLED = '';
+  const earlier = await postReport(u, { room: 0 });
+  const french = await postReport(u, { room: 1, language: 'French' });
+  process.env.HIGHLIGHT_MODEL_ENABLED = '1';
+  assert.equal(await rowOf(earlier.id), undefined, 'saved with the model off: no job');
+  modelAnswer = () => new Response(JSON.stringify({ ranges: [{ start: 2, end: 11 }], modelVersion: MODEL }), { status: 200 });
+  modelCalls = 0;
+  assert.equal((await getReport(other, earlier.id)).status, 404, 'another account cannot reach it, and queues nothing');
+  assert.equal(await rowOf(earlier.id), undefined);
+  const opened = (await getReport(u, earlier.id)).body;
+  assert.equal(opened.predictedHighlightsPending, true, "the owner's first read queues it and the page checks again");
+  assert.equal(modelCalls, 1, 'it runs once, after the response');
+  assert.equal((await rowOf(earlier.id)).account_id, u.id);
+  assert.deepEqual((await getReport(u, earlier.id)).body.predictedHighlights, [{ start: 2, end: 11 }]);
+  assert.equal(modelCalls, 1, 'later reads read the stored result');
+  assert.equal((await getReport(u, french.id)).body.predictedHighlightsPending, undefined, 'non-English is never queued');
+  assert.equal(await rowOf(french.id), undefined);
+  process.env.HIGHLIGHT_MODEL_SUBSCRIBERS_ENABLED = '';
+  process.env.HIGHLIGHT_MODEL_ENABLED = '';
+  const ineligible = await postReport(u, { room: 2 });
+  process.env.HIGHLIGHT_MODEL_ENABLED = '1';
+  assert.equal((await getReport(u, ineligible.id)).body.predictedHighlightsPending, undefined, 'an account not eligible now is never queued');
+  assert.equal(await rowOf(ineligible.id), undefined);
+  process.env.HIGHLIGHT_MODEL_SUBSCRIBERS_ENABLED = '1';
+  assert.equal(modelCalls, 1);
+  pass("P13 a report saved while the model was off is queued on its owner's first read, once; other accounts, non-English and ineligible accounts queue nothing");
+}
+
+// ── P14. A finished failure can be started again by its owner, and only by its owner ────────────────────────────────
+{
+  const u = await subscriber('p14@example.com');
+  const other = await subscriber('p14b@example.com');
+  modelAnswer = () => new Response('', { status: 404 });
+  const r = await quietly(() => postReport(u, { room: 0 }));
+  assert.equal((await rowOf(r.id)).status, 'failed');
+  const retry = async (user, id) => {
+    const addr = ip('retry');
+    await resetRateForTest(addr);
+    const headers = { 'x-forwarded-for': addr, ...(user ? { cookie: `tp_session_v1=${user.cookie}` } : {}) };
+    const res = await retryRoute.POST(new Request(`http://localhost/api/reports/${id}/highlight-prediction`, { method: 'POST', headers }), { params: Promise.resolve({ id: String(id) }) });
+    return res.status;
+  };
+  modelAnswer = () => new Response(JSON.stringify({ ranges: [{ start: 4, end: 10 }], modelVersion: MODEL }), { status: 200 });
+  modelCalls = 0;
+  assert.equal(await retry(null, r.id), 401, 'signed out: refused');
+  assert.equal(await retry(other, r.id), 404, "another account's report: not found");
+  assert.equal((await rowOf(r.id)).status, 'failed');
+  assert.equal(modelCalls, 0);
+  assert.equal(await retry(u, r.id), 202, 'the owner starts it again');
+  assert.equal(modelCalls, 1);
+  assert.equal((await rowOf(r.id)).status, 'complete');
+  const view = (await getReport(u, r.id)).body;
+  assert.deepEqual(view.predictedHighlights, [{ start: 4, end: 10 }]);
+  assert.equal(view.predictedHighlightsFailed, undefined);
+  assert.equal(await retry(u, r.id), 409, 'nothing to retry once complete');
+  modelAnswer = () => new Response('', { status: 503 });
+  const waiting = await quietly(() => postReport(u, { room: 1 }));
+  assert.equal(await retry(u, waiting.id), 409, 'a pending prediction is not started early');
+  assert.equal(modelCalls, 2);
+  const stored = (await db.execute({ sql: 'SELECT payload_json FROM saved_reports WHERE id = ?', args: [r.id] })).rows[0].payload_json;
+  assert.equal(stored.includes('predictedHighlights'), false, 'the saved report is never written');
+  pass('P14 the owner can start a failed prediction again (202, then complete); signed-out 401, another account 404, nothing to retry 409');
 }
 
 // ── P10. A database without the table behaves exactly as before ─────────────────────────────────────────────────────

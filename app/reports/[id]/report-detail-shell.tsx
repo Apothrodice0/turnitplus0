@@ -189,13 +189,26 @@ export function ReportDetailShell({
       if (checks >= PREDICTION_MAX_CHECKS) window.clearInterval(timer);
       const latest = await fetchRemoteReport<SimilarityReport>(id);
       if (cancelled || !latest) return;
-      setReport((current) => (current ? { ...current, predictedHighlights: latest.predictedHighlights, predictedHighlightsPending: latest.predictedHighlightsPending } : current));
+      setReport((current) => (current ? { ...current, predictedHighlights: latest.predictedHighlights, predictedHighlightsPending: latest.predictedHighlightsPending, predictedHighlightsFailed: latest.predictedHighlightsFailed } : current));
     }, PREDICTION_CHECK_INTERVAL_MS);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
     };
   }, [id, predictionsPending]);
+  // A prediction that finished without a result says so, with a way to start it again; it never reads as "no passages".
+  const [predictionRetrySending, setPredictionRetrySending] = useState(false);
+  async function retryPredictions() {
+    setPredictionRetrySending(true);
+    try {
+      const response = await fetch(`/api/reports/${encodeURIComponent(id)}/highlight-prediction`, { method: "POST" });
+      if (response.status === 202) setReport((current) => (current ? { ...current, predictedHighlightsFailed: undefined, predictedHighlightsPending: true } : current));
+    } catch {
+      // Offline or refused: the notice stays, so the owner can try again.
+    } finally {
+      setPredictionRetrySending(false);
+    }
+  }
 
   // The server now sends the saved payload without waiting for expensive
   // read-time historical/family enrichment. Render that payload immediately
@@ -555,6 +568,18 @@ export function ReportDetailShell({
           <div>
             <p>Similarity analysis is currently unavailable for this document.{!revealState.aiUnavailable ? " The AI-writing result above is complete and unaffected." : ""}</p>
             <Link href={backHref} className="button secondary">{backLabel}</Link>
+          </div>
+        </section>
+      )}
+
+      {mode === "similarity" && report.predictedHighlightsFailed && (
+        <section className="ai-analysis-message" role="status">
+          <strong>—</strong>
+          <div>
+            <p>Predicted passages could not be prepared for this document. The verified similarity results are complete and unaffected.</p>
+            <button className="button subtle" type="button" onClick={retryPredictions} disabled={predictionRetrySending}>
+              {predictionRetrySending ? "Starting…" : "Try again"}
+            </button>
           </div>
         </section>
       )}
