@@ -203,8 +203,8 @@ export function subscriptionNoticeFor(code: PlanBlockCode, expiresAt: number | n
   }
 }
 
-/** Under a room's earlier report, for an account that may not start new checks (the room is shown for its history only). */
-export const HISTORICAL_ROOM_NOTE = "This report stays available. New checks need an active subscription.";
+/** Under a room's earlier report when the room takes no new checks, for an account whose reports can still be opened: an active plan with fewer rooms. */
+export const HISTORICAL_ROOM_NOTE = "You can open this report. This room does not take new checks on your current plan.";
 
 /** The locked upload area for an empty room still in its 24 h cooldown (server clock). */
 export function roomCooldownLock(roomNumber: number, availableAt: number): UploadLock {

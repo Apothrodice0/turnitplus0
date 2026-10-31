@@ -3,6 +3,7 @@
 import type { CSSProperties, ReactNode, RefObject } from "react";
 import { Check, LockKeyhole, UploadCloud } from "lucide-react";
 import { ReferenceFilesPanel } from "@/components/reports/reference-files-panel";
+import { ContactLink } from "./contact-link";
 import { displayedCheckPercent, progressEncouragement } from "@/lib/upload-progress";
 import { SUBSCRIPTION_REQUIRED_TITLE, type UploadLock } from "@/lib/account-plan";
 
@@ -107,7 +108,7 @@ export function DocumentUploadPanel({ file, isGeneratingReport, progress, proces
           <strong id="upload-locked-title">{locked.title}</strong>
           <p id="upload-locked-message">
             {locked.message}
-            {locked.contact ? <><br />{locked.contact}</> : null}
+            {locked.contact ? <><br />{locked.contact} <ContactLink /></> : null}
           </p>
           {locked.detail && <span className="drop-zone-locked-detail">{locked.detail}</span>}
         </div>

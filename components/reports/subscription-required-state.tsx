@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { LockKeyhole } from "lucide-react";
 import type { SubscriptionNotice } from "@/lib/account-plan";
+import { ContactLink } from "./contact-link";
 
 /**
  * Manual subscriptions — the ONE screen an account without an active subscription sees instead of its rooms: on My
@@ -27,7 +28,7 @@ export function SubscriptionRequiredState({
         </span>
         <h2 id="subscription-required-title">{notice.title}</h2>
         <p className="subscription-required-message">{notice.message}</p>
-        <p className="subscription-required-secondary">{notice.secondary}</p>
+        <p className="subscription-required-secondary">{notice.secondary} <ContactLink /></p>
         {notice.detail && <p className="subscription-required-detail">{notice.detail}</p>}
         {backHref && (
           <Link href={backHref} className="subscription-required-back">

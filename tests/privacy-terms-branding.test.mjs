@@ -36,15 +36,15 @@ test("privacy and retention rules match the browser-local product", async () => 
   assert.match(page, /A salted, irreversible hash is stored; the password itself is never stored or logged/);
   assert.match(page, /Clear history/);
   assert.match(page, /The interface displays up to 50 recent reports/);
-  assert.match(page, /Documents checked in the browser are not added to a TurnitPlus training database/);
+  assert.match(page, /Documents you check are not used to train TurnitPlus's models/);
 });
 
-test("privacy copy discloses remote report storage and the device-key soft-scoping mechanism", async () => {
+test("privacy copy discloses remote report storage and that reports belong to the account", async () => {
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
 
-  assert.match(page, /Report identification \(no account required\)/);
+  assert.match(page, /How reports are tied to your account/);
   assert.match(page, /is not a username or password and is not authentication/);
-  assert.match(page, /it behaves like an unlisted link/);
+  assert.doesNotMatch(page, /unlisted link|no account required/);
   assert.match(page, /saved both on this device \(IndexedDB\) and to TurnitPlus's database/);
   assert.match(page, /Clear history removes both copies/);
   assert.match(page, /Use Clear history to remove saved reports from both this browser and TurnitPlus's database/);
@@ -71,5 +71,6 @@ test("terms cover responsible use and manually activated plans", async () => {
   assert.match(page, /There is no online checkout, automatic billing or recurring payment on this site/);
   assert.doesNotMatch(page, /\$20/);
   assert.match(page, /no guarantee is made that every source, AI-written passage or similarity will be detected/);
-  assert.match(page, /A dedicated privacy contact and legal operator details will be published before public commercial billing begins/);
+  assert.match(page, /Operator and contact/);
+  assert.match(page, /For a plan, a privacy question or a request about your data, write to <ContactLink \/>/);
 });

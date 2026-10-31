@@ -7,7 +7,6 @@ import {
   ChevronRight,
   CircleHelp,
   KeyRound,
-  Download,
   FileCheck2,
   FileText,
   FolderClock,
@@ -82,6 +81,9 @@ import {
   type SuppliedReferenceInput,
 } from "@/lib/document-check-pipeline";
 import { normalizeExtractedText } from "@/lib/extracted-text-normalization";
+import { authErrorMessage } from "@/lib/auth-error-message";
+import { ContactLink } from "@/components/reports/contact-link";
+import { CONTACT_EMAIL, OPERATOR_NAME } from "@/lib/contact";
 import {
   AI_MODEL_VERSION,
   AI_PASSAGE_LOG_ODDS_THRESHOLD,
@@ -594,11 +596,11 @@ export default function Home() {
       return;
     }
 
-    const data = (await response.json().catch(() => null)) as { user?: LocalAccount; error?: string } | null;
+    const data = (await response.json().catch(() => null)) as { user?: LocalAccount; error?: string; fields?: unknown } | null;
     if (!response.ok || !data?.user) {
       stopAnimation();
       setIsAuthenticating(false);
-      setAuthError((data && typeof data.error === "string" && data.error) || "Something went wrong. Please try again.");
+      setAuthError(authErrorMessage(response.status, data, response.headers.get("Retry-After")));
       return;
     }
 
@@ -1926,7 +1928,7 @@ export default function Home() {
                     {(authMode ?? "login") === "login" && (
                       <div className="auth-form-row">
                         <label className="auth-checkbox"><input type="checkbox" name="remember" /><span>Remember me</span></label>
-                        <button type="button" onClick={() => notify("Password recovery will be added with the account service.")}>Forgot password?</button>
+                        <button type="button" onClick={() => { window.location.href = "/reset-password"; }}>Forgot password?</button>
                       </div>
                     )}
                     <button className="button primary full auth-submit" type="submit">
@@ -1971,7 +1973,7 @@ export default function Home() {
             <div className="welcome-steps" aria-label="How TurnitPlus works">
               <article><span>1</span><div className="welcome-step-icon"><UploadCloud aria-hidden="true" /></div><div><strong>Upload privately</strong><p>Choose a document. It is sent securely for analysis.</p></div></article>
               <article><span>2</span><div className="welcome-step-icon"><Search aria-hidden="true" /></div><div><strong>Review the evidence</strong><p>See the archive percentage and the exact passages behind it.</p></div></article>
-              <article><span>3</span><div className="welcome-step-icon"><FolderClock aria-hidden="true" /></div><div><strong>Return anytime</strong><p>Your report history stays available on this device.</p></div></article>
+              <article><span>3</span><div className="welcome-step-icon"><FolderClock aria-hidden="true" /></div><div><strong>Return to your reports</strong><p>Your saved reports are in My Reports while your subscription is active.</p></div></article>
             </div>
             <div className="welcome-actions">
               {!checkLock && <button className="button primary" type="button" disabled={isGeneratingReport} onClick={() => navigate("reports")}><UploadCloud aria-hidden="true" /> Start a new check</button>}
@@ -2131,12 +2133,9 @@ export default function Home() {
             </div>
             <section className="methodology-boundary">
               <div>
-                <p className="section-label">PUBLISHED CLAIM BOUNDARY</p>
-                <h3>Evidence-based results, not a forecast of any other product&apos;s score</h3>
-                <p>TurnitPlus reports only the text it can show you direct evidence for — identified overlapping passages and named, verifiable sources — rather than estimating what any other similarity-detection product might report.</p>
-                <a href="/data/similarity-boundary-evaluation.json" download>
-                  <Download aria-hidden="true" /> Download the evaluation summary
-                </a>
+                <p className="section-label">WHAT THE RESULT MEANS</p>
+                <h3>Verified matches, estimates and predictions are different things</h3>
+                <p>Highlighted passages with a named source are matches TurnitPlus can show you. For English Word documents, subscribers also get a statistical estimate of likely similarity, which has no passages behind it; the similarity percentage shows the higher of the two. Passages with a dashed underline are model predictions, not verified matches. No result is a guarantee of what another service would report.</p>
               </div>
             </section>
           </section>
@@ -2150,7 +2149,7 @@ export default function Home() {
                 <h2>Private analysis. Clear controls.</h2>
                 <p>TurnitPlus provides AI-writing and similarity detection with evidence you can review. This page explains what information is used, where it stays, when it is removed and the rules for using the service.</p>
               </div>
-              <div className="legal-effective-date"><ShieldCheck aria-hidden="true" /><span><strong>Effective 8 August 2026</strong><small>Current product policy</small></span></div>
+              <div className="legal-effective-date"><ShieldCheck aria-hidden="true" /><span><strong>Effective 31 October 2026</strong><small>Current product policy</small></span></div>
             </header>
 
             <nav className="legal-tabs" aria-label="Privacy and terms">
@@ -2170,25 +2169,26 @@ export default function Home() {
                 </section>
                 <section>
                   <span className="legal-section-number">03</span>
-                  <div><h3>Account information</h3><p>Creating an account stores your email address, a display name and a securely hashed password on TurnitPlus's servers. Your password itself is never stored — only a one-way cryptographic hash used to verify future sign-ins. Signing in issues a session, held in a browser cookie, that keeps you signed in until you sign out or it expires. Signing out ends that session immediately. Using TurnitPlus without an account keeps your report history device-local, as described in the next section.</p></div>
+                  <div><h3>Account information</h3><p>Creating an account stores your email address, a display name and a securely hashed password on TurnitPlus's servers. Your password itself is never stored — only a one-way cryptographic hash used to verify future sign-ins. Signing in issues a session, held in a browser cookie, that keeps you signed in until you sign out or it expires. Signing out ends that session immediately. You need an account to run a check and an active subscription to open saved reports.</p></div>
                 </section>
                 <section>
                   <span className="legal-section-number">04</span>
-                  <div><h3>Report identification (no account required)</h3><p>Saving and retrieving reports does not require creating an account or signing in. Each browser is assigned a random identifier, stored locally, that TurnitPlus uses only to show you your own previously saved reports. This identifier is not a username or password and is not authentication — it behaves like an unlisted link: anyone who obtained the identifier or a specific report's address could retrieve that data. A future update may introduce real sign-in to replace it.</p></div>
+                  <div><h3>How reports are tied to your account</h3><p>Reports you save belong to your account, and a report's address opens only when you are signed in to that account with an active subscription. Each browser also keeps a random identifier, stored locally, that keeps this device's copy in step with your account. This identifier is not a username or password and is not authentication; it does not open an account's reports by itself.</p></div>
                 </section>
 
                 <section className="legal-retention-section">
                   <span className="legal-section-number">05</span>
                   <div>
                     <h3>Retention rules</h3>
-                    <p>Reports are kept both on your device and in TurnitPlus's database until you remove them. TurnitPlus does not apply a separate hidden retention period beyond what the table below describes.</p>
+                    <p>While your subscription is active, reports are kept both on your device and in TurnitPlus's database until you remove them. When a subscription expires, its reports are deleted from TurnitPlus's database, and a renewal starts with an empty history. A suspended subscription's reports are kept, but cannot be opened until it is restored. TurnitPlus does not apply a separate hidden retention period beyond what this section describes.</p>
                     <div className="retention-table" role="table" aria-label="TurnitPlus retention rules">
                       <div className="retention-row retention-heading" role="row"><strong role="columnheader">Information</strong><strong role="columnheader">Where it stays</strong><strong role="columnheader">When it is removed</strong></div>
                       <div className="retention-row" role="row"><span role="cell">Original uploaded file</span><span role="cell">Browser memory during the check; for subscribers, Word files up to 4 MB are also sent once for analysis</span><span role="cell">When replaced, the page closes or the session ends</span></div>
-                      <div className="retention-row" role="row"><span role="cell">Extracted text and reports</span><span role="cell">IndexedDB on this device, and TurnitPlus's database (linked to this browser's random identifier, not your identity)</span><span role="cell">Clear history removes both copies. Clearing this site's browser data alone removes only the local copy and this browser's identifier — the saved copy remains until removed with Clear history</span></div>
-                      <div className="retention-row" role="row"><span role="cell">Random report identifier</span><span role="cell">Local browser storage</span><span role="cell">When you clear this site's browser data (after this, reports saved from this browser can no longer be retrieved or deleted through the interface)</span></div>
-                      <div className="retention-row" role="row"><span role="cell">Display name and email</span><span role="cell">TurnitPlus's account database</span><span role="cell">For as long as your account exists — self-service account deletion is not yet available</span></div>
-                      <div className="retention-row" role="row"><span role="cell">Password</span><span role="cell">A salted, irreversible hash is stored; the password itself is never stored or logged</span><span role="cell">For as long as your account exists</span></div>
+                      <div className="retention-row" role="row"><span role="cell">Extracted text and reports</span><span role="cell">IndexedDB on this device, and TurnitPlus's database, linked to your account</span><span role="cell">Clear history removes both copies. Clearing this site's browser data alone removes only the local copy and this browser's identifier — the saved copy remains until removed with Clear history, account deletion or the end of your subscription</span></div>
+                      <div className="retention-row" role="row"><span role="cell">Text accepted into the comparison collection</span><span role="cell">TurnitPlus's database, kept separately from your reports</span><span role="cell">Stays after the report, the subscription or the account is removed. On request, TurnitPlus can stop using it for matching</span></div>
+                      <div className="retention-row" role="row"><span role="cell">Random report identifier</span><span role="cell">Local browser storage</span><span role="cell">When you clear this site's browser data</span></div>
+                      <div className="retention-row" role="row"><span role="cell">Display name and email</span><span role="cell">TurnitPlus's account database</span><span role="cell">Until you delete your account</span></div>
+                      <div className="retention-row" role="row"><span role="cell">Password</span><span role="cell">A salted, irreversible hash is stored; the password itself is never stored or logged</span><span role="cell">Until you delete your account</span></div>
                       <div className="retention-row" role="row"><span role="cell">Session (sign-in cookie)</span><span role="cell">An httpOnly cookie on this browser, matched to a session record in TurnitPlus's database</span><span role="cell">When you sign out, or automatically after 30 days</span></div>
                       <div className="retention-row" role="row"><span role="cell">Sidebar preference</span><span role="cell">Local browser storage</span><span role="cell">When you clear this site's browser data</span></div>
                       <div className="retention-row" role="row"><span role="cell">Wikipedia phrase results</span><span role="cell">Saved locally and remotely with the report</span><span role="cell">When you clear report history or browser site data</span></div>
@@ -2198,22 +2198,22 @@ export default function Home() {
 
                 <section>
                   <span className="legal-section-number">06</span>
-                  <div><h3>Your controls</h3><p>Use Clear history to remove saved reports from both this browser and TurnitPlus's database. Use Sign out to end your active session on this device. You can also use your browser's site-data controls to remove all local TurnitPlus storage at once, though this does not reach reports already saved remotely — use Clear history first if you want both removed. The interface displays up to 50 recent reports.</p></div>
+                  <div><h3>Your controls</h3><p>Use Clear history to remove saved reports from both this browser and TurnitPlus's database. Use Delete account on your account page to remove your account and its saved reports. Use Sign out to end your active session on this device. You can also use your browser's site-data controls to remove all local TurnitPlus storage at once, though this does not reach reports already saved remotely — use Clear history first if you want both removed. The interface displays up to 50 recent reports.</p></div>
                 </section>
                 <section>
                   <span className="legal-section-number">07</span>
-                  <div><h3>Tracking, sale and training use</h3><p>TurnitPlus does not sell document content or account information. The product does not use advertising trackers. Documents checked in the browser are not added to a TurnitPlus training database.</p></div>
+                  <div><h3>Comparison collection, sale and training use</h3><p>TurnitPlus does not sell document content or account information. The product does not use advertising trackers. Documents you check are not used to train TurnitPlus's models. Text from documents checked by signed-in accounts may be added to TurnitPlus's comparison collection, and after 7 days it can be matched against other customers' documents. Those customers see only the matching words of their own document, never your name, your account or your document. This applies to every account, and deleting a report, a subscription or an account does not remove text already accepted into the collection.</p></div>
                 </section>
                 <section>
                   <span className="legal-section-number">08</span>
-                  <div><h3>Product stage and contact</h3><p>TurnitPlus is currently an independent university project. Paid subscriptions, server accounts and email verification are not active. A dedicated privacy contact and legal operator details will be published before public commercial billing begins.</p></div>
+                  <div><h3>Operator and contact</h3><p>TurnitPlus is {OPERATOR_NAME ? `operated by ${OPERATOR_NAME}` : "an independent service"}. Plans are arranged directly with the TurnitPlus team and activated manually. {CONTACT_EMAIL ? <>For a plan, a privacy question or a request about your data, write to <ContactLink />.</> : null}</p></div>
                 </section>
               </div>
             ) : (
               <div className="legal-document surface-card">
                 <section>
                   <span className="legal-section-number">01</span>
-                  <div><h3>The service</h3><p>TurnitPlus provides automated AI-writing detection, similarity measurement against identified overlapping passages and, when available, live academic sources and your own prior submissions, highlighted passage evidence, source information, downloadable reports and device-local report history. This similarity result is based on identified overlapping passages and verified academic sources, and is not an estimate of any other provider&apos;s result.</p></div>
+                  <div><h3>The service</h3><p>TurnitPlus provides automated AI-writing detection, similarity measurement against identified overlapping passages and, when available, live academic sources and your own prior submissions, highlighted passage evidence, source information, downloadable reports and a saved report history. The similarity result combines those matches with, where available, a statistical estimate that has no passages behind it. It is not a result from, or a guarantee of, any other provider.</p></div>
                 </section>
                 <section>
                   <span className="legal-section-number">02</span>
@@ -2229,7 +2229,7 @@ export default function Home() {
                 </section>
                 <section>
                   <span className="legal-section-number">05</span>
-                  <div><h3>Reports and availability</h3><p>Results depend on the submitted text, supported file extraction, available comparison sources and successful browser processing. The service may change, pause or become unavailable. Keep copies of any report you need; local browser history can be deleted by you or your browser.</p></div>
+                  <div><h3>Reports and availability</h3><p>Results depend on the submitted text, supported file extraction, available comparison sources and successful browser processing. The service may change, pause or become unavailable. Reports are deleted when a subscription expires, so keep copies of any report you need; local browser history can be deleted by you or your browser.</p></div>
                 </section>
                 <section>
                   <span className="legal-section-number">06</span>
@@ -2258,6 +2258,7 @@ export default function Home() {
             <nav aria-label="Legal information">
               <button type="button" onClick={() => openLegalPage("privacy")}>Privacy & retention</button>
               <button type="button" onClick={() => openLegalPage("terms")}>Terms of use</button>
+              <ContactLink />
             </nav>
           </footer>
         )}
